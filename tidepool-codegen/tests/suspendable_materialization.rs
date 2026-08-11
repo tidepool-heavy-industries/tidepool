@@ -25,7 +25,7 @@
 
 use tidepool_codegen::emit::ExternalEnv;
 use tidepool_codegen::heap_bridge;
-use tidepool_codegen::jit_machine::{JitEffectMachine, ResumeInput, SuspendableOutcome};
+use tidepool_codegen::jit_machine::{JitEffectMachine, ResumeInput, Suspendable};
 use tidepool_effect::dispatch::DispatchEffect;
 use tidepool_effect::dispatch::EffectContext;
 use tidepool_effect::error::EffectError;
@@ -297,27 +297,30 @@ fn session_with_fragment(
     (machine, func_id)
 }
 
-fn expect_suspended(outcome: SuspendableOutcome, expect_req: i64) {
+/// Assert the entry suspended, and that the bridged ask request reached the
+/// caller. Generic over the completion product: `Project` and `Render` each
+/// complete with what they actually produce, so there is no one `Value` type
+/// to write here.
+fn expect_suspended<T>(outcome: Suspendable<T>, expect_req: i64) {
     match outcome {
-        SuspendableOutcome::Suspended { request, .. } => {
+        Suspendable::Suspended { request, .. } => {
             assert_eq!(
                 expect_int(&request),
                 expect_req,
                 "the bridged ask request must reach the caller"
             );
         }
-        SuspendableOutcome::Completed(v) => {
-            panic!("the fragment should suspend at the ask, not complete with {v:?}")
+        Suspendable::Completed(_) => {
+            panic!("the fragment should suspend at the ask, not complete")
         }
     }
 }
 
-fn expect_completed(outcome: SuspendableOutcome) -> Value {
+/// Assert the entry completed, returning the policy's own product.
+fn expect_completed<T>(outcome: Suspendable<T>) -> T {
     match outcome {
-        SuspendableOutcome::Completed(v) => v,
-        SuspendableOutcome::Suspended { .. } => {
-            panic!("the resume should complete, not re-suspend")
-        }
+        Suspendable::Completed(t) => t,
+        Suspendable::Suspended { .. } => panic!("the resume should complete, not re-suspend"),
     }
 }
 
@@ -340,13 +343,11 @@ fn projected_turn_suspends_then_tenures_every_field_on_resume() {
             .expect("projected suspendable run");
         expect_suspended(outcome, 42);
         assert!(machine.is_suspended());
-        // A suspension tenures nothing — the fields do not exist yet.
-        assert!(
-            machine.take_last_bound_roots().is_none(),
-            "a suspended projected turn must not have tenured anything"
-        );
 
-        let value = expect_completed(
+        // The completion IS the products: one tenured root per field, in field
+        // order. There is no result value at all — a projection has none, and
+        // the outcome type no longer demands one.
+        let slots = expect_completed(
             machine
                 .resume_suspended_projected(
                     &table,
@@ -360,25 +361,10 @@ fn projected_turn_suspends_then_tenures_every_field_on_resume() {
         );
         assert!(!machine.is_suspended());
 
-        // The completion payload is the tuple's own constructor with fields
-        // ELIDED — documented, deliberate (bridging the bound fields would add
-        // a failure mode the non-suspendable sibling does not have).
-        match &value {
-            Value::Con(id, fields) => {
-                assert_eq!(id.0, PAIR_ID.0, "the result tuple's real constructor");
-                assert!(fields.is_empty(), "fields are deliberately not bridged");
-            }
-            other => panic!("expected the elided tuple Con, got {other:?}"),
-        }
-
-        // The products: one tenured root per field, in field order.
-        let slots = machine
-            .take_last_bound_roots()
-            .expect("a completed projected turn stashes its roots");
         assert_eq!(slots.len(), 2, "one root per projected field");
         assert!(
             machine.take_last_bound_root().is_none(),
-            "the single-root stash belongs to Bind/Render, not Project"
+            "the single-root stash belongs to Bind, not Project"
         );
         assert_ne!(
             slots[0].addr(),
@@ -441,7 +427,9 @@ fn render_turn_suspends_then_returns_render_and_field0_root() {
             "a suspended render turn must not have tenured field 0 yet"
         );
 
-        let rendered = expect_completed(
+        // The completion carries BOTH products: field 0's tenured root (`it`
+        // itself) and field 1's render, together.
+        let (slot, rendered) = expect_completed(
             machine
                 .resume_suspended_render(
                     &table,
@@ -455,19 +443,14 @@ fn render_turn_suspends_then_returns_render_and_field0_root() {
         );
         assert!(!machine.is_suspended());
 
-        // Completion value = field 1 (the render), built from the answer.
         assert_eq!(
             expect_int(&rendered),
             222,
-            "the completion value is the RENDERED field 1"
+            "the completion's rendered half is field 1"
         );
-        // Machine stash = field 0's tenured root (`it` itself).
-        let slot = machine
-            .take_last_bound_root()
-            .expect("a completed render turn stashes field 0's root");
         assert!(
-            machine.take_last_bound_roots().is_none(),
-            "the multi-root stash belongs to Project, not Render"
+            machine.take_last_bound_root().is_none(),
+            "Render returns its root inline — nothing is stashed on the machine"
         );
         let bound = unsafe { heap_bridge::heap_to_value(slot.current()) }.expect("bridge field 0");
         assert_eq!(
@@ -506,7 +489,7 @@ fn render_aliased_fields_survive_a_suspension() {
             .expect("aliased render suspendable run");
         expect_suspended(outcome, 5);
 
-        let rendered = expect_completed(
+        let (slot, rendered) = expect_completed(
             machine
                 .resume_suspended_render(
                     &table,
@@ -525,9 +508,6 @@ fn render_aliased_fields_survive_a_suspension() {
             "the aliased render must be intact after field 0's tenure"
         );
 
-        let slot = machine
-            .take_last_bound_root()
-            .expect("field 0's root, even when it aliases field 1");
         let bound =
             unsafe { heap_bridge::heap_to_value(slot.current()) }.expect("bridge the aliased root");
         assert_eq!(
@@ -578,25 +558,31 @@ fn projected_and_render_entries_refuse_an_already_suspended_machine() {
 
         for probe in ["projected", "render"] {
             let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                // Each arm maps to `()` separately: the two entries now have
+                // DIFFERENT completion types (roots vs root+render), which is
+                // the point — only the refusal is being probed here.
                 match probe {
-                    "projected" => machine.run_fragment_suspendable_projected(
-                        fid,
-                        &table,
-                        &mut NoDispatch,
-                        &(),
-                        ASK_TAG,
-                        2,
-                    ),
-                    _ => machine.run_fragment_suspendable_render(
-                        fid,
-                        &table,
-                        &mut NoDispatch,
-                        &(),
-                        ASK_TAG,
-                        true,
-                    ),
+                    "projected" => machine
+                        .run_fragment_suspendable_projected(
+                            fid,
+                            &table,
+                            &mut NoDispatch,
+                            &(),
+                            ASK_TAG,
+                            2,
+                        )
+                        .map(|_| ()),
+                    _ => machine
+                        .run_fragment_suspendable_render(
+                            fid,
+                            &table,
+                            &mut NoDispatch,
+                            &(),
+                            ASK_TAG,
+                            true,
+                        )
+                        .map(|_| ()),
                 }
-                .map(|_| ())
             }));
             let payload = caught.expect_err(&format!(
                 "the {probe} entry must refuse an already-suspended machine"

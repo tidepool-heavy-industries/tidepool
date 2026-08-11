@@ -47,11 +47,14 @@
 //!
 //! This engine drives the **oneshot** shape: `render = Json`, `retention = DropAfterDone`,
 //! an empty `ModuleEnv` (no declaration accumulation), one pool slot per turn.
-//! Only the stateless MCP eval server drives the engine today; the resident
-//! REPL server stays a direct consumer of the lower session substrate
-//! ([`super::SessionLib`] / [`super::compile_session_turn`]) with a parked
-//! worker thread — unifying its resident-machine model onto this engine is a
-//! separate step. The end-state registry entry the API is aimed at is
+//! Only the stateless MCP eval server drives the engine itself. The RESIDENT
+//! shape is [`super::resident::ResidentSession`] over the shared
+//! [`super::persistent::PersistentSession`] core, and both resident consumers —
+//! `tidepool-harness` and `tidepool-repl` — now drive that one core through the
+//! one threadless suspend mechanism this module's ask path uses. There is no
+//! second, parked-thread suspension left to unify; what the two shapes still
+//! keep apart is oneshot-vs-resident retention, not the suspend boundary. The
+//! end-state registry entry the API is aimed at is
 //! `{machine, ModuleEnv, render policy, retention, pool slot}`;
 //! [`RenderPolicy`] and [`Retention`] are carried on [`EngineConfig`] as that
 //! forward seam even though a oneshot turn pins them. Render policy is applied
@@ -1195,9 +1198,23 @@ fn describe_panic(payload: Box<dyn std::any::Any + Send>) -> (String, FailureCla
 /// driver (`ask_tag` → threadless suspension), so the ask never reaches this
 /// dispatcher. Every non-ask dispatch entry is a timeout-yield checkpoint:
 /// park while paused, error out on abort.
-struct GateDispatcher<H> {
+///
+/// Shared, not per-server: `tidepool-repl` wraps every resident turn's handler
+/// stack in this same dispatcher. It used to carry a near-identical copy that
+/// ALSO intercepted the ask tag to park its worker thread; with the repl on the
+/// threadless suspend path there is exactly one non-ask-intercepting gate
+/// wrapper, here.
+pub struct GateDispatcher<H> {
     inner: H,
     gate: Arc<PauseGate>,
+}
+
+impl<H> GateDispatcher<H> {
+    /// Wrap `inner` so every effect dispatch is a timeout-yield checkpoint on
+    /// `gate`.
+    pub fn new(inner: H, gate: Arc<PauseGate>) -> Self {
+        GateDispatcher { inner, gate }
+    }
 }
 
 impl<H: DispatchEffect<O>, O> DispatchEffect<O> for GateDispatcher<H> {
@@ -1228,7 +1245,11 @@ impl<H: DispatchEffect<O>, O> DispatchEffect<O> for GateDispatcher<H> {
 /// meta_val])` — both constructors share this exact field shape (`runLLMTurn`
 /// has its own effect/tag, separate from `Ask`, but the same wire shape),
 /// dispatched by constructor name.
-fn extract_ask_request(
+///
+/// `table` must be the table the suspending run was driven against: the request
+/// `Value` was bridged from the heap through it, so its `DataConId` is only
+/// meaningful there.
+pub fn extract_ask_request(
     request: &tidepool_eval::value::Value,
     table: &tidepool_repr::DataConTable,
 ) -> Result<(String, Option<serde_json::Value>), String> {

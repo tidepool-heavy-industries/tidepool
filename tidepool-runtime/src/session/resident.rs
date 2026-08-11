@@ -14,14 +14,14 @@
 //!
 //! # Why turns can run on a fresh thread each time
 //!
-//! `tidepool-repl` pins its machine to one parked worker thread because its
-//! ask-suspend mechanism parks a blocked thread. The threadless suspend
-//! mechanism removes that need at the ask boundary:
+//! Nothing about a suspended session is pinned to the thread that suspended it:
 //! [`JitEffectMachine::resume_suspended`] re-installs the machine's
 //! per-thread reach (`CURRENT_MACHINE`, stack-map/lambda registry, cancel
 //! flag) and re-points GC state at the RETAINED session heap on ANY thread.
 //! So a resident session drives each turn on a fresh eval thread and moves
-//! the machine back afterward — no parked worker, no pinning. The
+//! the machine back afterward — no parked worker, no pinning. `tidepool-repl`
+//! leans on the same property one level up: it moves the WHOLE session into a
+//! `spawn_blocking` turn and back out. The
 //! stowed-XOR-running discipline (`unsafe impl Send for JitEffectMachine`)
 //! holds because the machine is in exactly one place at a time: owned by the
 //! session slot when idle/suspended, moved onto the eval thread for the
@@ -66,7 +66,7 @@ use crate::render::EvalResult;
 use crate::{JitError, RuntimeError, EVAL_STACK_SIZE};
 
 use super::engine::OutputSink;
-use super::persistent::{PersistentSession, SuspensionMechanism, Threadless};
+use super::persistent::PersistentSession;
 use super::turn::{BoundBinder, ValueTier};
 use super::{SessionError, SessionLib};
 
@@ -159,12 +159,11 @@ pub enum ResidentError {
 /// `Slot<ResidentSession<H, O>>`.
 pub struct ResidentSession<H, O> {
     /// The shared persistent-session core (machine + accumulated table + the two
-    /// planes), driven through the threadless suspend mechanism. The harness does
-    /// not (yet) accumulate on the decl/value planes — they sit empty here until
-    /// enabled — but the machine lifecycle + table merge + fragment-run
-    /// primitives all live in the core, shared with the repl's parked-thread
-    /// session.
-    core: PersistentSession<Threadless>,
+    /// planes). The harness does not (yet) accumulate on the decl/value planes —
+    /// they sit empty here until enabled — but the machine lifecycle + table
+    /// merge + fragment-run primitives all live in the core, shared with the
+    /// repl's resident session.
+    core: PersistentSession,
     /// The effect handler stack, borrowed by each turn's eval thread.
     handlers: H,
     /// Effect names by tag (registry-entry metadata; exposed via
@@ -235,7 +234,7 @@ where
         nursery_size: usize,
         lib: Option<SessionLib>,
     ) -> Result<Self, JitError> {
-        let mut core = PersistentSession::<Threadless>::new(lib, ask_tag, nursery_size);
+        let mut core = PersistentSession::new(lib, ask_tag, nursery_size);
         core.bootstrap_if_needed(expr, &table)?;
         core.seed_session_table(table);
         Ok(ResidentSession {
@@ -268,7 +267,7 @@ where
         nursery_size: usize,
         lib: Option<SessionLib>,
     ) -> Self {
-        let core = PersistentSession::<Threadless>::new(lib, ask_tag, nursery_size);
+        let core = PersistentSession::new(lib, ask_tag, nursery_size);
         ResidentSession {
             core,
             handlers,
@@ -426,7 +425,7 @@ where
         let ask_tag = self.core.ask_tag();
         let run_exec_started = std::time::Instant::now();
         let outcome = self.on_eval_thread(move |machine, table, handlers, captured| {
-            Threadless::run_fragment(machine, func_id, table, handlers, captured, ask_tag)
+            machine.run_fragment_suspendable(func_id, table, handlers, captured, ask_tag)
         })?;
         super::record_turn_stage("run_exec", run_exec_started.elapsed(), 0);
         Ok(self.classify(outcome))
@@ -772,7 +771,7 @@ where
                 // spent and the session goes idle. If it is still suspended,
                 // this was a retryable rejection (e.g. A5's NF-force) — the
                 // same hole stays pending, untouched.
-                if !self.core.machine().is_some_and(|m| m.is_suspended()) {
+                if !self.core.is_suspended() {
                     self.pending = None;
                 }
                 return Err(e);

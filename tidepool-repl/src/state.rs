@@ -16,8 +16,6 @@ use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use tidepool_mcp::CapturedOutput;
 
-use crate::ask::{PauseGate, ResumeMsg, WorkerMessage};
-
 /// An in-turn `ask` continuation id (`scont_<n>`). A minted-once identity, not a
 /// free-form string: it is compared and routed as this newtype rather than a
 /// bare `String`. `#[serde(transparent)]` keeps the wire form a plain string, so
@@ -49,33 +47,43 @@ pub fn shared(state: SessionState) -> SharedState {
 
 /// The lifecycle state of one resident session.
 pub enum SessionState {
-    /// Worker parked on its command channel; ready for a turn.
+    /// No turn in flight; ready for a new one.
     Idle,
-    /// A turn is executing on the worker thread.
+    /// A turn is executing (the session is checked out of its manager slot and
+    /// owned by the turn's blocking task).
     Busy,
-    /// The turn hit an `ask`; the worker is parked on `response_rx`. The
-    /// suspension payload (incl. the live `response_tx`) lives HERE, so teardown
-    /// can't forget to release it.
+    /// The turn hit an `ask` and stowed its continuation as data. Nothing is
+    /// blocked — the session is sitting back in its manager slot holding the
+    /// stowed continuation. The suspension's caller-facing payload lives HERE
+    /// so a suspension can't exist untracked by state.
     Suspended(Box<Suspension>),
     /// A turn timed out; `request_abort` was sent so it unwinds at its next
     /// effect checkpoint (a pure computation with no effect dispatch is
     /// uninterruptible via the gate; the JIT cancel handles that case). A
-    /// follow-up op errors clearly; the reaper or `close` reclaims it.
+    /// follow-up op errors clearly; the reaper or `session_reset` reclaims it.
     Wedged { since: Instant },
     /// Teardown in progress — every op is rejected.
     Closing,
 }
 
-/// Everything needed to resume (or reclaim) a parked `ask`. Lives inside
-/// [`SessionState::Suspended`] so a suspension can't exist untracked by state.
+/// Everything the SERVER needs to answer (or reclaim) a suspended `ask`. Lives
+/// inside [`SessionState::Suspended`] so a suspension can't exist untracked by
+/// state.
+///
+/// The continuation itself is NOT here: it is stowed as data on the session's
+/// JIT machine, which sits in the manager's `Suspended { session, cont_id }`
+/// slot. This struct carries only what the request/response path needs — the
+/// identity to route a resume by, the schema to validate it against, the output
+/// buffer the resumed turn keeps appending to, and the reaper's clock.
 pub struct Suspension {
+    /// The minted id a `session_resume` must name (validate-before-consume:
+    /// a mismatch never touches the pending continuation).
     pub cont_id: ContinuationId,
-    pub response_tx: std::sync::mpsc::Sender<ResumeMsg>,
-    pub session_rx: tokio::sync::mpsc::UnboundedReceiver<WorkerMessage>,
-    pub gate: Arc<PauseGate>,
+    /// The console output captured so far, carried across the suspension so the
+    /// resumed turn's drain includes everything the pre-ask items printed.
     pub captured: CapturedOutput,
     /// The `ask`'s schema, used to validate + canonicalize the resume reply
-    /// before it reaches the worker. `None` ⇒ accept any JSON.
+    /// before the continuation is consumed. `None` ⇒ accept any JSON.
     pub expected_schema: Option<serde_json::Value>,
     /// When the session entered (or last refreshed) this suspension — the
     /// reaper's TTL clock.

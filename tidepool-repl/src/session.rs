@@ -4,23 +4,43 @@
 //! for the first turn, then `add_function` + `run_fragment` for each later turn
 //! on the SAME machine).
 //!
-//! The `Session<Open>` / `Session<Closed>` type-state is applied
-//! through [`SessionHandle`]: `close` consumes the open handle and returns a
-//! `Closed` one with no `run` method, so post-close turns don't typecheck.
-//!
 //! `run_block` drives a `session_run` block by classifying each item and
 //! reusing the per-item handlers: `run_def` (declaration → Lane-A decl log),
 //! `run_eval` (bind `x <- e` / `let x = e` → `BindingTable`, or a bare
 //! expression → value), and `run_meta` (`:commands`).
+//!
+//! # Suspension is data, not a blocked thread
+//!
+//! An in-item `ask` STOWS: the JIT continuation stays on the machine, the run
+//! entry returns [`SuspendableOutcome::Suspended`], and the whole `Session` (with
+//! everything it needs to finish) is handed back to the manager slot. Nothing
+//! blocks, so a `Session` outlives the turn that was running in it.
+//!
+//! Two levels of state therefore have to be plain DATA rather than native stack:
+//!
+//! * the per-item **tail** — the owned bookkeeping a `finish_*` needs after the
+//!   machine returns ([`PendingTail`], one variant per run path); and
+//! * the per-block **cursor** — where `run_block`'s item loop had got to
+//!   ([`BlockCursor`]).
+//!
+//! Both live on the `Session` across the suspension, and
+//! [`Session::resume_turn`] re-enters the machine and then calls the SAME
+//! `finish_*` the non-suspending path would have — the completion bookkeeping
+//! exists once, not once per arm.
+//!
+//! Only a SINGLE item can suspend: a decl batch never runs the machine, and a
+//! `:command` never does either. That is why the cursor needs one pending-item
+//! slot, not a stack.
 
-use std::marker::PhantomData;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use tidepool_codegen::binding_table::{BindingEntry, BoundValue};
 use tidepool_codegen::emit::ExternalEnv;
-use tidepool_codegen::jit_machine::SuspendableOutcome;
+use tidepool_codegen::jit_machine::{ResumeInput, Suspendable, SuspendableOutcome};
 use tidepool_codegen::old_space::RootSlot;
 use tidepool_effect::dispatch::DispatchEffect;
+use tidepool_effect::pause::PauseGate;
 use tidepool_eval::value::Value;
 use tidepool_mcp::{
     first_sentence, helper_sig, input_binding_source, library_vocab, template_haskell_show_default,
@@ -30,9 +50,9 @@ use tidepool_repr::{
     BindingName, DataConTable, Generation, SessionId, SessionModule, SessionVarId,
 };
 use tidepool_runtime::session::{
-    classify_block, compile_session_turn, subtract_import_list_names, BoundBinder, ModuleEnv,
-    ParkedThread, PersistentSession, SessionBind, SessionError, SessionLib, TurnClassification,
-    TurnKind, ValueTier,
+    classify_block, compile_session_turn, extract_ask_request, subtract_import_list_names,
+    BoundBinder, GateDispatcher, ModuleEnv, PersistentSession, SessionBind, SessionError,
+    SessionLib, TurnClassification, TurnKind, ValueTier,
 };
 use tidepool_runtime::{
     classify_compile, classify_session, compile_haskell_salted, value_to_json, CompileError,
@@ -47,16 +67,78 @@ use crate::command::{
 /// Default session nursery: 64 MiB (matches the eval runtime default).
 pub const DEFAULT_NURSERY_SIZE: usize = 1 << 26;
 
-/// The repl parks its worker thread on an `Ask` (serviced inline by
-/// [`crate::ask::ReplAskDispatcher`]), so a turn under the parked-thread
-/// mechanism never returns `Suspended` in-band — it always completes. Unwrap
-/// the always-`Completed` outcome the shared core returns.
-fn expect_completed(outcome: SuspendableOutcome) -> Value {
-    match outcome {
-        SuspendableOutcome::Completed(value) => value,
-        SuspendableOutcome::Suspended { .. } => unreachable!(
-            "parked-thread turn suspended in-band; the ask is serviced by ReplAskDispatcher"
-        ),
+/// The server's effect handler stack, type-erased so neither [`Session`] nor the
+/// manager is generic over it (the same shape `tidepool-harness` uses for its
+/// resident sessions).
+pub type BoxedStack = Box<dyn DispatchEffect<CapturedOutput> + Send>;
+
+/// Mints a FRESH handler stack per turn. The pre-cutover worker cloned the
+/// server's base stack for every job; this preserves that exactly — one factory
+/// per session (so `new_with_session_builder`'s per-session stack still holds),
+/// invoked once per turn.
+pub type StackFactory = Box<dyn Fn() -> BoxedStack + Send>;
+
+/// A bridged `ask` request the caller must answer: the prompt and the optional
+/// `AskWith` metadata (schema + friends) the server turns into a suspension
+/// envelope.
+pub struct AskRequest {
+    pub prompt: String,
+    pub meta: Option<serde_json::Value>,
+}
+
+/// What driving (or resuming) a turn produced: either the turn's finished
+/// [`TurnOutcome`], or an `ask` suspension whose continuation is stowed on the
+/// session's machine and whose tail/cursor are stowed on the [`Session`].
+pub enum TurnStep {
+    Completed(TurnOutcome),
+    Suspended(AskRequest),
+}
+
+/// One ITEM's outcome — the same shape as [`TurnStep`], named separately
+/// because a suspended item is resumed back INTO the block loop rather than
+/// returned to the caller.
+enum ItemStep {
+    Done(TurnOutcome),
+    Suspended(AskRequest),
+}
+
+impl From<ItemStep> for TurnStep {
+    fn from(step: ItemStep) -> TurnStep {
+        match step {
+            ItemStep::Done(outcome) => TurnStep::Completed(outcome),
+            ItemStep::Suspended(req) => TurnStep::Suspended(req),
+        }
+    }
+}
+
+/// What a re-entry feeds the stowed `ask`. Kept JSON-side because the bridge to
+/// a Core [`Value`] needs the table the SUSPENDING run used, which only the
+/// stowed [`PendingTail`] knows.
+enum ResumeAnswer {
+    Answer(serde_json::Value),
+    Abort(String),
+}
+
+impl ResumeAnswer {
+    /// Bridge into the machine's resume input against `table` — the table the
+    /// suspending run was driven with, so the answer's constructors land in the
+    /// same namespace the continuation expects.
+    ///
+    /// A bridge failure becomes an ABORT carrying the bridge error, which is
+    /// what the pre-cutover inline dispatcher did with the same failure: the
+    /// `ask` fails, the turn unwinds, and the continuation is consumed rather
+    /// than left stowed with nobody able to answer it.
+    fn into_input(self, table: &DataConTable) -> ResumeInput {
+        match self {
+            ResumeAnswer::Answer(json) => {
+                use tidepool_bridge::ToCore;
+                match json.to_value(table) {
+                    Ok(v) => ResumeInput::Answer(v),
+                    Err(e) => ResumeInput::Abort(format!("ask answer could not be bridged: {e}")),
+                }
+            }
+            ResumeAnswer::Abort(reason) => ResumeInput::Abort(reason),
+        }
     }
 }
 
@@ -83,27 +165,41 @@ pub struct SessionConfig {
 }
 
 /// The resident session — the value plane + the decl plane + a generation.
-/// Owned by the worker thread; reached only through a [`SessionHandle`].
+/// Lives in the [`crate::manager::SessionManager`] slot between turns and is
+/// MOVED into a turn's blocking task for its duration.
 pub struct Session {
     cfg: SessionConfig,
+    /// Mints this session's per-turn effect handler stack (wrapped in the shared
+    /// [`GateDispatcher`] timeout checkpoint before each run).
+    make_handlers: StackFactory,
     /// The shared persistent-session core: the resident [`JitEffectMachine`], the
     /// accumulated `DataConTable`, the [`SessionLib`] decl plane, the
-    /// `BindingTable` value plane, and the value-binding generation — driven
-    /// through the parked-thread suspend mechanism (an `Ask` blocks this worker
-    /// thread; see [`crate::ask::ReplAskDispatcher`]). The turn-run primitives
-    /// (bootstrap, add-fragment, run/bind, table merge, decl accumulation) live
-    /// in the core, shared with the harness's threadless session.
-    core: PersistentSession<ParkedThread>,
+    /// `BindingTable` value plane, and the value-binding generation. The
+    /// turn-run primitives (bootstrap, add-fragment, run/bind + their resume
+    /// siblings, table merge, decl accumulation) live in the core, shared with
+    /// the harness's resident session.
+    core: PersistentSession,
     /// Per-block `input` payload from the `session_run` request. Injected into
     /// the generated module so `input :: Aeson.Value` is in scope. CLONED (not
     /// taken) by every evaluated item so it is visible to all items in the block
-    /// (and after an in-block `ask`/resume); the worker resets it per job.
+    /// — INCLUDING items that run after an in-block `ask`/resume, which is why
+    /// the block cursor carries a copy across a suspension. The server resets it
+    /// at the start of each `session_run`.
     eval_input: Option<serde_json::Value>,
+    /// The stowed per-item tail of a SUSPENDED item: the owned bookkeeping its
+    /// `finish_*` needs once the machine comes back. `Some` exactly while the
+    /// session is suspended at an `ask`.
+    pending: Option<PendingTail>,
+    /// The stowed block loop of a SUSPENDED `session_run`: results so far, the
+    /// classify verdicts, the next index, the suspended item's index/kind, and
+    /// the `last_*` accumulators. `Some` exactly while a BLOCK is suspended (a
+    /// single-command `Eval` suspension stows only [`Self::pending`]).
+    cursor: Option<BlockCursor>,
     /// Shared slot the server reads to abort a runaway turn at a JIT safepoint.
-    /// `None` until the worker wires it via [`Session::set_cancel_slot`]; the
+    /// `None` until the manager wires it via [`Session::set_cancel_slot`]; the
     /// session publishes the machine's [`CancelHandle`] into it the moment the
     /// machine bootstraps, so even a session's FIRST turn is cancellable.
-    cancel_slot: Option<crate::worker::CancelSlot>,
+    cancel_slot: Option<crate::manager::CancelSlot>,
     /// Subtrees elided from the last truncated result, indexed by stub id
     /// (`stub_0` ⇒ index 0) — fetched via `:stub <n>`, REPLACED each time a
     /// new truncating result lands. See [`crate::truncate`].
@@ -139,12 +235,11 @@ struct ItemRun {
 // a `finish_*` method needs AFTER it, to do the post-run bookkeeping. Every
 // run path (`run_plain_eval`, `run_bind`, `run_multi_bind`,
 // `run_reference_fragment`, `run_bare_expr`) builds its tail right before the
-// machine call and hands it to `finish_*` once the call returns. Under the
-// parked-thread mechanism the machine call always completes inline, so a tail
-// is consumed on the very same stack frame it was built on — but every field
-// is owned data, borrowing nothing from `self`, so a future suspend-and-resume
-// cutover can stow a tail across the suspension instead of holding it on a
-// live native stack (see `plans/unpark/feasibility-map.md` §3).
+// machine call and hands it to `finish_*` once the call returns — whether that
+// is on the same stack frame (the run completed) or many seconds and one
+// `session_resume` later (the run suspended and the tail was stowed in
+// `Session::pending`). Every field is owned data borrowing nothing from `self`,
+// which is exactly what makes the second case possible.
 // ---------------------------------------------------------------------------
 
 /// [`Session::run_plain_eval`]'s tail: the turn's own [`DataConTable`] (needed
@@ -195,6 +290,163 @@ struct BareExprTail {
     defining_expr: String,
 }
 
+/// The tail of the ONE item currently suspended at an `ask`, stowed on the
+/// session for the duration. The variant selects BOTH which machine resume
+/// entry re-enters the continuation (the four materialization policies) and
+/// which `finish_*` closes the item out — the same `finish_*` the
+/// ran-to-completion path calls, so nothing about completion is duplicated
+/// across the two arms.
+// The plain-eval variant carries the turn's whole `DataConTable` and is much
+// the largest; there is at most ONE pending tail per session, so the size
+// asymmetry costs one enum-sized slot, not a per-item allocation.
+#[allow(clippy::large_enum_variant)]
+enum PendingTail {
+    /// [`Session::run_plain_eval`] — resumes against the turn's OWN table.
+    PlainEval(PlainEvalTail),
+    /// [`Session::run_bind`] — resumes through the `Bind{forced}` policy.
+    Bind(BindTail),
+    /// [`Session::run_multi_bind`] — resumes through `Project{n_fields}`.
+    MultiBind(MultiBindTail),
+    /// [`Session::run_reference_fragment`] — resumes against the accumulated
+    /// session table.
+    Reference(ReferenceTail),
+    /// [`Session::run_bare_expr`] — resumes through `Render{field0_forced}`.
+    BareExpr(BareExprTail),
+}
+
+impl PendingTail {
+    /// The [`DataConTable`] this tail's run was driven against. Everything that
+    /// crosses the machine boundary for this item — the bridged `ask` request,
+    /// the bridged answer, the completed value — is keyed on it, so a resume
+    /// must use the same one the run did. Only the plain-eval path carries its
+    /// own table (a standalone turn's metadata); the rest run against the
+    /// accumulated session table.
+    fn run_table<'a>(&'a self, session_table: &'a DataConTable) -> &'a DataConTable {
+        match self {
+            PendingTail::PlainEval(t) => &t.table,
+            PendingTail::Bind(_)
+            | PendingTail::MultiBind(_)
+            | PendingTail::Reference(_)
+            | PendingTail::BareExpr(_) => session_table,
+        }
+    }
+
+    /// The label a run failure on this path reports under (unchanged per path
+    /// from before the cutover, so error text is byte-identical).
+    fn error_label(&self) -> &'static str {
+        match self {
+            PendingTail::PlainEval(_) | PendingTail::Reference(_) | PendingTail::BareExpr(_) => {
+                "runtime error"
+            }
+            PendingTail::Bind(_) => "bind runtime error",
+            PendingTail::MultiBind(_) => "multi-bind runtime error",
+        }
+    }
+}
+
+/// `run_block`'s loop state, made re-enterable: everything the item loop had on
+/// the native stack when one of its items suspended.
+///
+/// The cursor is created per `session_run`, driven by
+/// [`Session::drive_block`], and stowed on the session only while an item is
+/// suspended. It owns its `items`/`verdicts` (rather than borrowing the
+/// request's) precisely because it must outlive the call that built it.
+struct BlockCursor {
+    /// The block's items, owned so the loop survives the suspension.
+    items: Vec<BlockItem>,
+    /// This block's ONE batch classify verdict per item (`None` for
+    /// `Decl`/`Meta`, or when the batch classify itself failed).
+    verdicts: Vec<Option<TurnClassification>>,
+    /// Per-item results accumulated so far.
+    results: Vec<BlockItemResult>,
+    /// The next item index to process. Already advanced PAST a suspended item,
+    /// which is tracked separately in [`Self::pending_item`].
+    next: usize,
+    /// The suspended item's position and classified kind, held so its result
+    /// lands at the right index with the right `kind` when the resume finishes
+    /// it. `None` while the loop is running normally.
+    pending_item: Option<(usize, ItemKind)>,
+    /// The block's `input` payload lane. Carried HERE (not merely left on the
+    /// session) so the do-block invariant — `input` in scope for EVERY item,
+    /// including items that run after an in-block `ask`/resume — is a property
+    /// of the cursor rather than of nothing having disturbed the session
+    /// meanwhile.
+    eval_input: Option<serde_json::Value>,
+    /// `verbose: true` ⇒ the full diagnostic response shape.
+    verbose: bool,
+    last_value: Option<serde_json::Value>,
+    last_type: Option<String>,
+    last_truncated: Option<String>,
+    /// The `results` INDEX of the item whose `TurnOutcome::Value` most recently
+    /// set `last_value` — recorded at the moment it is assigned, so the
+    /// finish step strips fields from exactly that item, never an unrelated
+    /// one re-derived by some other heuristic.
+    last_value_pos: Option<usize>,
+}
+
+impl BlockCursor {
+    fn new(
+        items: Vec<BlockItem>,
+        verdicts: Vec<Option<TurnClassification>>,
+        eval_input: Option<serde_json::Value>,
+        verbose: bool,
+    ) -> BlockCursor {
+        BlockCursor {
+            results: Vec::with_capacity(items.len()),
+            items,
+            verdicts,
+            next: 0,
+            pending_item: None,
+            eval_input,
+            verbose,
+            last_value: None,
+            last_type: None,
+            last_truncated: None,
+            last_value_pos: None,
+        }
+    }
+
+    /// Record one finished item. Returns `true` when the block must STOP here
+    /// (the stop-on-first-error contract).
+    ///
+    /// `ok` also reflects a meta command that reported an `error` in its payload
+    /// (e.g. `:i` on a missing name) — a `Meta` outcome, not an `Error` variant,
+    /// but still a failure for ok-scripting and the stop-on-first-error
+    /// contract. (#319)
+    fn absorb(&mut self, run: ItemRun) -> bool {
+        let ItemRun {
+            index,
+            kind,
+            outcome,
+        } = run;
+        let ok = !outcome.is_error()
+            && !matches!(&outcome, TurnOutcome::Meta(v) if v.get("error").is_some());
+
+        // Track the last value-producing expression result, and WHICH `results`
+        // slot it will land in.
+        if let TurnOutcome::Value {
+            ref value,
+            ref type_display,
+            ref truncated,
+        } = outcome
+        {
+            self.last_value = Some(value.clone());
+            self.last_type = type_display.clone();
+            self.last_truncated = truncated.clone();
+            self.last_value_pos = Some(self.results.len());
+        }
+
+        self.results.push(BlockItemResult {
+            index,
+            kind,
+            ok,
+            result: slim_item_result(&outcome),
+            result_full: outcome.render(),
+        });
+        !ok
+    }
+}
+
 /// Map a binder's [`ValueTier`] to the [`BoundValue`] wrapping its root slot —
 /// the single source of truth for the tier → bound-value expansion.
 fn bound_value(tier: ValueTier, slot: RootSlot) -> BoundValue {
@@ -215,8 +467,9 @@ fn block_item_text(item: &BlockItem) -> Option<&str> {
 }
 
 impl Session {
-    /// Open a fresh session rooted at `cfg.root`.
-    pub fn open(cfg: SessionConfig) -> std::io::Result<Session> {
+    /// Open a fresh session rooted at `cfg.root`. `make_handlers` mints this
+    /// session's per-turn effect handler stack.
+    pub fn open(cfg: SessionConfig, make_handlers: StackFactory) -> std::io::Result<Session> {
         let lib = SessionLib::open(cfg.id, cfg.root.clone(), cfg.module_env.clone())
             .map_err(|e| std::io::Error::other(e.to_string()))?
             // Decl validation must resolve the same imports eval does (notably
@@ -225,8 +478,11 @@ impl Session {
         let core = PersistentSession::new(Some(lib), cfg.ask_tag, cfg.nursery_size);
         Ok(Session {
             cfg,
+            make_handlers,
             core,
             eval_input: None,
+            pending: None,
+            cursor: None,
             cancel_slot: None,
             last_stubs: Vec::new(),
             pure_binds: std::collections::BTreeMap::new(),
@@ -332,46 +588,111 @@ impl Session {
         self.pure_binds.insert(name.to_string(), pb);
     }
 
-    /// Run one non-`Close` turn. Errors are folded into [`TurnOutcome::Error`]
-    /// (the worker maps that to an MCP error result); an in-turn `ask` suspends
-    /// through `handlers` (the [`crate::ask::ReplAskDispatcher`]), not here.
-    pub fn run_turn<H: DispatchEffect<CapturedOutput>>(
+    /// Run one turn to its first boundary: a finished [`TurnOutcome`], or an
+    /// `ask` suspension whose continuation is stowed on the machine and whose
+    /// tail/cursor are stowed on `self`. Errors are folded into
+    /// [`TurnOutcome::Error`] (the server maps that to an MCP error result).
+    ///
+    /// `gate` is the turn's abort latch: the shared [`GateDispatcher`] wrapping
+    /// makes every effect dispatch a checkpoint, so a server-side
+    /// `request_abort` unwinds the turn at the next effect. It does NOT
+    /// intercept the ask tag — the JIT's own suspend driver catches that, which
+    /// is exactly why the repl can share the engine's wrapper instead of keeping
+    /// a second, ask-parking copy.
+    pub fn run_turn(
         &mut self,
         cmd: &SessionCommand,
-        handlers: &mut H,
+        gate: Arc<PauseGate>,
         captured: &CapturedOutput,
-    ) -> TurnOutcome {
+    ) -> TurnStep {
         // Clear any cancellation left from a prior timed-out turn so this turn
         // starts clean (no-op until the machine bootstraps).
         self.reset_cancel();
+        self.heal_effects_module();
+        let mut handlers = GateDispatcher::new((self.make_handlers)(), gate);
         match cmd {
-            SessionCommand::Def(decl) => self.run_def(&decl.0),
+            SessionCommand::Def(decl) => ItemStep::Done(self.run_def(&decl.0)).into(),
             SessionCommand::Eval(expr) => {
                 // No block context here (single-command dispatch, not
                 // `run_block`'s batch path) — classify this one item with a
                 // one-item `classify_block` slice, exactly the pattern its doc
                 // names for a caller needing a single verdict.
-                match classify_block(&[expr.0.as_str()]) {
+                let step = match classify_block(&[expr.0.as_str()]) {
                     Ok(v) => {
                         let verdict = v.into_iter().next();
-                        self.run_eval(&expr.0, verdict.as_ref(), handlers, captured)
+                        self.run_eval(&expr.0, verdict.as_ref(), &mut handlers, captured)
                     }
                     // Version skew stops the turn with the real reason; any
                     // other failure keeps the resilient plain-eval path (see
                     // `run_block`'s batch classify for the same split).
-                    Err(CompileError::MalformedDiagnostics(msg)) => TurnOutcome::Error(msg),
-                    Err(_) => self.run_eval(&expr.0, None, handlers, captured),
-                }
+                    Err(CompileError::MalformedDiagnostics(msg)) => {
+                        ItemStep::Done(TurnOutcome::Error(msg))
+                    }
+                    Err(_) => self.run_eval(&expr.0, None, &mut handlers, captured),
+                };
+                step.into()
             }
-            SessionCommand::Cmd(meta) => self.run_meta(meta),
+            SessionCommand::Cmd(meta) => ItemStep::Done(self.run_meta(meta)).into(),
             SessionCommand::Block { items, verbose } => {
-                self.run_block(items, handlers, captured, *verbose)
+                self.run_block(items, &mut handlers, captured, *verbose)
             }
-            // Close is handled by SessionHandle::close (type-state); the worker
-            // never routes it here.
-            SessionCommand::Close => TurnOutcome::Error(
-                "internal: Close must be handled via SessionHandle::close".into(),
-            ),
+        }
+    }
+
+    /// Re-enter the suspended turn with a (already schema-validated,
+    /// canonicalized) JSON answer and drive it to its next boundary. The stowed
+    /// tail decides which machine resume entry re-enters the continuation and
+    /// which `finish_*` closes the item out; the stowed cursor, when there is
+    /// one, continues the rest of the block.
+    pub fn resume_turn(
+        &mut self,
+        answer: serde_json::Value,
+        gate: Arc<PauseGate>,
+        captured: &CapturedOutput,
+    ) -> TurnStep {
+        self.reenter(ResumeAnswer::Answer(answer), gate, captured)
+    }
+
+    /// Abort the suspended turn WITHOUT answering: the `ask` itself fails, the
+    /// turn unwinds, and the session comes back usable with everything it had
+    /// already accumulated intact. The reaper's reclaim of an abandoned
+    /// suspension — the threadless equivalent of dropping the answer channel a
+    /// parked worker was blocked on.
+    pub fn abort_turn(
+        &mut self,
+        reason: String,
+        gate: Arc<PauseGate>,
+        captured: &CapturedOutput,
+    ) -> TurnStep {
+        self.reenter(ResumeAnswer::Abort(reason), gate, captured)
+    }
+
+    fn reenter(
+        &mut self,
+        answer: ResumeAnswer,
+        gate: Arc<PauseGate>,
+        captured: &CapturedOutput,
+    ) -> TurnStep {
+        self.reset_cancel();
+        self.heal_effects_module();
+        let mut handlers = GateDispatcher::new((self.make_handlers)(), gate);
+        match self.cursor.take() {
+            Some(cursor) => self.resume_block(cursor, answer, &mut handlers, captured),
+            // A single-command (`SessionCommand::Eval`) suspension: no block
+            // loop to continue, so the resumed item's outcome IS the turn's.
+            None => self.resume_item(answer, &mut handlers, captured).into(),
+        }
+    }
+
+    /// Self-heal the generated Tidepool.Effects/Orchestrate staging dir before
+    /// every turn (two `exists()` stats when healthy): an external
+    /// `rm -rf ~/.cache/tidepool` mid-session would otherwise break every
+    /// subsequent compile with "Could not find module Tidepool.Effects" until a
+    /// server restart. Mirrors the oneshot eval server, which self-heals per
+    /// eval the same way.
+    fn heal_effects_module(&self) {
+        if let Err(e) = tidepool_mcp::ensure_effects_module(&self.cfg.decls) {
+            tracing::warn!("effects-module self-heal failed: {e}");
         }
     }
 
@@ -406,8 +727,10 @@ impl Session {
     ///
     /// Execution stops on the first error; the failing item is included in the
     /// `items` array with `ok = false`. An in-turn `ask` inside a `Stmt` or
-    /// `Auto` item just works: the worker thread blocks inside `run_eval`
-    /// (same stack), `session_resume` unblocks it, and the loop continues.
+    /// `Auto` item suspends the BLOCK: the item's tail and the loop's
+    /// [`BlockCursor`] are stowed on the session, the turn returns
+    /// [`TurnStep::Suspended`], and `session_resume` re-enters at
+    /// [`Self::resume_block`] and runs the remaining items.
     ///
     /// `Auto` items dispatch straight from this batch's classify verdict when
     /// one is present (`Decl` → `run_def`, `Bind`/`Expr` → `run_eval`), never
@@ -423,17 +746,7 @@ impl Session {
         handlers: &mut H,
         captured: &CapturedOutput,
         verbose: bool,
-    ) -> TurnOutcome {
-        let mut results: Vec<BlockItemResult> = Vec::with_capacity(items.len());
-        let mut last_value: Option<serde_json::Value> = None;
-        let mut last_type: Option<String> = None;
-        let mut last_truncated: Option<String> = None;
-        // The `results` INDEX of the item whose `TurnOutcome::Value` most
-        // recently set `last_value` — recorded at the moment it is assigned, so
-        // the post-loop step below strips fields from exactly that item, never
-        // an unrelated item re-derived by some other heuristic.
-        let mut last_value_pos: Option<usize> = None;
-
+    ) -> TurnStep {
         // Batch-classify every item whose kind `decl_shaped_text`/`run_eval`
         // would otherwise classify on its own (`Auto`/`Stmt`) in ONE extract
         // spawn, regardless of block length — `Decl`/`Meta` items need no
@@ -467,7 +780,9 @@ impl Session {
                 // user's Haskell, for a deployment problem they cannot see.
                 // `MalformedDiagnostics` is the boundary's version-skew
                 // reading, so it stops the block with the real reason.
-                Err(CompileError::MalformedDiagnostics(msg)) => return TurnOutcome::Error(msg),
+                Err(CompileError::MalformedDiagnostics(msg)) => {
+                    return TurnStep::Completed(TurnOutcome::Error(msg))
+                }
                 // Any other failure (the extractor genuinely unavailable) keeps
                 // the resilient path: verdicts stay `None`, decl-shaped items
                 // take the per-item route, and GHC re-reports any real error
@@ -476,166 +791,222 @@ impl Session {
             }
         }
 
-        // Process items, batching maximal runs of consecutive decl-shaped
-        // items (Decl/Auto) so a sig+binding pair or a mutual-recursion SCC
-        // split across items typecheck TOGETHER (whole-block decl elaboration).
-        // Optimistic: try `define_scoped` on the whole run; on success emit a
-        // per-source decl result, else fall back to processing each item
-        // individually (the exact prior behavior — a stmt-shaped Auto item, or
-        // a genuinely broken decl, lands here). Stmt/Meta items are singletons.
-        let mut index = 0;
-        'outer: while index < items.len() {
-            // Collect this segment's (index, kind, outcome) tuples. A DECL-shaped
-            // item (a keyword decl, or an `Auto` the GHC parser classifies as a
-            // top-level declaration) starts a batch run; a stmt/meta/expression
-            // is a singleton. The parse verdict — not the lexical `Auto` tag — is
-            // what keeps a trailing call (`sq 7` after `sq :: T` / `sq x = …`)
-            // OUT of the decl batch: it classifies as an expression, ends the run,
-            // and lands on the stmt path (the tool's "define then call in one
-            // block" idiom).
-            let segment: Vec<ItemRun> = if let Some(first) =
-                self.decl_shaped_text(&items[index], verdicts[index].as_ref())
-            {
-                // Carry the decl sources as we scan the maximal decl-shaped run,
-                // so the batch path never re-matches items to recover their text.
-                let start = index;
-                let mut texts: Vec<String> = vec![first.to_string()];
-                let mut end = index + 1;
-                while end < items.len() {
-                    match self.decl_shaped_text(&items[end], verdicts[end].as_ref()) {
-                        Some(t) => {
-                            // Within-block REDEFINITION ends the segment: if this
-                            // item defines a head an earlier item in the segment
-                            // also DEFINES (not a sig+binding pair — those must
-                            // batch), batching would hand GHC two equation groups
-                            // it merges as multi-clause (first wins). Splitting
-                            // starts a new generation, so replace-latest applies,
-                            // matching the cross-turn GHCi-parity rule. (#320)
-                            let h = decl_head(t);
-                            if !h.is_empty()
-                                && defines_head(t, h)
-                                && texts
-                                    .iter()
-                                    .any(|prev| decl_head(prev) == h && defines_head(prev, h))
-                            {
-                                break;
-                            }
-                            texts.push(t.to_string());
-                            end += 1;
+        // The cursor OWNS the items and verdicts: it has to outlive this call
+        // whenever an item suspends.
+        let cursor = BlockCursor::new(items.to_vec(), verdicts, self.eval_input.clone(), verbose);
+        self.drive_block(cursor, handlers, captured)
+    }
+
+    /// The block item loop, re-enterable from any `cursor.next`.
+    ///
+    /// Items are processed by batching maximal runs of consecutive decl-shaped
+    /// items (Decl/Auto) so a sig+binding pair or a mutual-recursion SCC split
+    /// across items typecheck TOGETHER (whole-block decl elaboration).
+    /// Optimistic: try `define_scoped` on the whole run; on success emit a
+    /// per-source decl result, else fall back to processing each item
+    /// individually (the exact prior behavior — a stmt-shaped Auto item, or a
+    /// genuinely broken decl, lands here). Stmt/Meta items are singletons.
+    ///
+    /// **Only the singleton arm can suspend.** Every item on the decl-batch arm
+    /// (including its per-item fallback) is parser-confirmed a declaration and
+    /// routes to `run_def`, which compiles and validates but never RUNS the
+    /// machine; a `:command` never runs it either. So a suspension always
+    /// originates in one singleton item, and the cursor needs one pending-item
+    /// slot rather than a stack of partially-consumed segments.
+    fn drive_block<H: DispatchEffect<CapturedOutput>>(
+        &mut self,
+        mut cursor: BlockCursor,
+        handlers: &mut H,
+        captured: &CapturedOutput,
+    ) -> TurnStep {
+        while cursor.next < cursor.items.len() {
+            let index = cursor.next;
+            // A DECL-shaped item (a keyword decl, or an `Auto` the GHC parser
+            // classifies as a top-level declaration) starts a batch run; a
+            // stmt/meta/expression is a singleton. The parse verdict — not the
+            // lexical `Auto` tag — is what keeps a trailing call (`sq 7` after
+            // `sq :: T` / `sq x = …`) OUT of the decl batch: it classifies as an
+            // expression, ends the run, and lands on the stmt path (the tool's
+            // "define then call in one block" idiom).
+            let decl_start =
+                self.decl_shaped_text(&cursor.items[index], cursor.verdicts[index].as_ref());
+            let Some(first) = decl_start else {
+                // Singleton — the ONE arm that can suspend.
+                let (kind, step) = self.run_one_item(
+                    &cursor.items[index],
+                    cursor.verdicts[index].as_ref(),
+                    handlers,
+                    captured,
+                );
+                cursor.next = index + 1;
+                match step {
+                    ItemStep::Suspended(req) => {
+                        cursor.pending_item = Some((index, kind));
+                        self.cursor = Some(cursor);
+                        return TurnStep::Suspended(req);
+                    }
+                    ItemStep::Done(outcome) => {
+                        let stop = cursor.absorb(ItemRun {
+                            index,
+                            kind,
+                            outcome,
+                        });
+                        if stop {
+                            break;
                         }
-                        None => break,
                     }
                 }
-
-                // Try to elaborate the whole run as one generation. Every item is
-                // parser-confirmed a declaration, so the batch is not poisoned by
-                // a stray expression; a failure here is a genuine type/scope error
-                // and falls to the per-item path for a precise, per-item message.
-                let batched = if texts.len() >= 2 {
-                    let refs: Vec<&str> = texts.iter().map(String::as_str).collect();
-                    self.define_scoped(&refs).ok()
-                } else {
-                    None
-                };
-
-                index = end;
-                match batched {
-                    Some(gen) => texts
-                        .iter()
-                        .enumerate()
-                        .map(|(k, t)| ItemRun {
-                            index: start + k,
-                            kind: ItemKind::Decl,
-                            outcome: self.defined_outcome(t, decl_head(t).to_string(), gen),
-                        })
-                        .collect(),
-                    None => {
-                        // Fallback: per-item, stopping the whole block on
-                        // the first error (matched by the outer break).
-                        let mut out = Vec::with_capacity(texts.len());
-                        for (k, it) in items[start..end].iter().enumerate() {
-                            let (kind, outcome) = self.run_one_item(
-                                it,
-                                verdicts[start + k].as_ref(),
-                                handlers,
-                                captured,
-                            );
-                            let err = outcome.is_error();
-                            out.push(ItemRun {
-                                index: start + k,
-                                kind,
-                                outcome,
-                            });
-                            if err {
-                                break;
-                            }
-                        }
-                        out
-                    }
-                }
-            } else {
-                let (kind, outcome) =
-                    self.run_one_item(&items[index], verdicts[index].as_ref(), handlers, captured);
-                index += 1;
-                vec![ItemRun {
-                    index: index - 1,
-                    kind,
-                    outcome,
-                }]
+                continue;
             };
 
-            for ItemRun {
-                index: idx,
-                kind,
-                outcome,
-            } in segment
-            {
-                // `ok` also reflects a meta command that reported an `error` in
-                // its payload (e.g. `:i` on a missing name) — a `Meta` outcome,
-                // not an `Error` variant, but still a failure for ok-scripting
-                // and the stop-on-first-error contract. (#319)
-                let ok = !outcome.is_error()
-                    && !matches!(&outcome, TurnOutcome::Meta(v) if v.get("error").is_some());
-
-                // Track the last value-producing expression result, and WHICH
-                // `results` slot it will land in.
-                if let TurnOutcome::Value {
-                    ref value,
-                    ref type_display,
-                    ref truncated,
-                } = outcome
-                {
-                    last_value = Some(value.clone());
-                    last_type = type_display.clone();
-                    last_truncated = truncated.clone();
-                    last_value_pos = Some(results.len());
+            // Carry the decl sources as we scan the maximal decl-shaped run, so
+            // the batch path never re-matches items to recover their text.
+            let start = index;
+            let mut texts: Vec<String> = vec![first.to_string()];
+            let mut end = index + 1;
+            while end < cursor.items.len() {
+                match self.decl_shaped_text(&cursor.items[end], cursor.verdicts[end].as_ref()) {
+                    Some(t) => {
+                        // Within-block REDEFINITION ends the segment: if this
+                        // item defines a head an earlier item in the segment
+                        // also DEFINES (not a sig+binding pair — those must
+                        // batch), batching would hand GHC two equation groups
+                        // it merges as multi-clause (first wins). Splitting
+                        // starts a new generation, so replace-latest applies,
+                        // matching the cross-turn GHCi-parity rule. (#320)
+                        let h = decl_head(t);
+                        if !h.is_empty()
+                            && defines_head(t, h)
+                            && texts
+                                .iter()
+                                .any(|prev| decl_head(prev) == h && defines_head(prev, h))
+                        {
+                            break;
+                        }
+                        texts.push(t.to_string());
+                        end += 1;
+                    }
+                    None => break,
                 }
+            }
 
-                results.push(BlockItemResult {
-                    index: idx,
-                    kind,
-                    ok,
-                    result: slim_item_result(&outcome),
-                    result_full: outcome.render(),
-                });
+            // Try to elaborate the whole run as one generation. Every item is
+            // parser-confirmed a declaration, so the batch is not poisoned by
+            // a stray expression; a failure here is a genuine type/scope error
+            // and falls to the per-item path for a precise, per-item message.
+            let batched = if texts.len() >= 2 {
+                let refs: Vec<&str> = texts.iter().map(String::as_str).collect();
+                self.define_scoped(&refs).ok()
+            } else {
+                None
+            };
+            cursor.next = end;
 
-                if !ok {
-                    break 'outer; // stop on first error
+            let mut stop = false;
+            match batched {
+                Some(gen) => {
+                    for (k, text) in texts.iter().enumerate() {
+                        let outcome = self.defined_outcome(text, decl_head(text).to_string(), gen);
+                        if cursor.absorb(ItemRun {
+                            index: start + k,
+                            kind: ItemKind::Decl,
+                            outcome,
+                        }) {
+                            stop = true;
+                            break;
+                        }
+                    }
                 }
+                None => {
+                    // Fallback: per-item, stopping the whole block on the first
+                    // error. Never suspends — see this fn's doc.
+                    for k in 0..(end - start) {
+                        let (kind, step) = self.run_one_item(
+                            &cursor.items[start + k],
+                            cursor.verdicts[start + k].as_ref(),
+                            handlers,
+                            captured,
+                        );
+                        let outcome = match step {
+                            ItemStep::Done(outcome) => outcome,
+                            // Unreachable by construction (a decl-shaped item
+                            // routes to `run_def`); surfaced as an error rather
+                            // than a panic if the classification ever drifts.
+                            ItemStep::Suspended(_) => TurnOutcome::Error(
+                                "internal: a declaration item suspended at an ask".into(),
+                            ),
+                        };
+                        if cursor.absorb(ItemRun {
+                            index: start + k,
+                            kind,
+                            outcome,
+                        }) {
+                            stop = true;
+                            break;
+                        }
+                    }
+                }
+            }
+            if stop {
+                break;
             }
         }
 
+        TurnStep::Completed(self.finish_block(cursor))
+    }
+
+    /// Re-enter a suspended block: finish the pending item with the answer, then
+    /// continue the loop at `cursor.next`.
+    fn resume_block<H: DispatchEffect<CapturedOutput>>(
+        &mut self,
+        mut cursor: BlockCursor,
+        answer: ResumeAnswer,
+        handlers: &mut H,
+        captured: &CapturedOutput,
+    ) -> TurnStep {
+        let Some((index, kind)) = cursor.pending_item.take() else {
+            self.pending = None;
+            return TurnStep::Completed(TurnOutcome::Error(
+                "internal: block cursor has no suspended item to resume".into(),
+            ));
+        };
+        // The payload lane is in scope for EVERY item in the block, including
+        // the ones after this resume — restore it from the cursor rather than
+        // trusting that nothing disturbed the session while it was suspended.
+        self.eval_input = cursor.eval_input.clone();
+        match self.resume_item(answer, handlers, captured) {
+            // The same item asked again: re-stow and hand the new ask up.
+            ItemStep::Suspended(req) => {
+                cursor.pending_item = Some((index, kind));
+                self.cursor = Some(cursor);
+                TurnStep::Suspended(req)
+            }
+            ItemStep::Done(outcome) => {
+                if cursor.absorb(ItemRun {
+                    index,
+                    kind,
+                    outcome,
+                }) {
+                    return TurnStep::Completed(self.finish_block(cursor));
+                }
+                self.drive_block(cursor, handlers, captured)
+            }
+        }
+    }
+
+    /// Assemble the block's response from a finished cursor.
+    fn finish_block(&self, mut cursor: BlockCursor) -> TurnOutcome {
         // The top-level `value` reflects the block's FINAL executed item ONLY —
         // a block ending in a bind/decl/meta (or one that errored after an
         // earlier expression ran) leaves it null, matching the documented
         // contract ("a block ending in a bind leaves `value` null") and GHCi
         // intuition. `last_value_pos` was recorded at assignment time, so this
         // is a direct index comparison, not a re-derived "last ok item" scan.
-        if last_value_pos != results.len().checked_sub(1) {
-            last_value = None;
-            last_type = None;
-            last_truncated = None;
-            last_value_pos = None;
+        if cursor.last_value_pos != cursor.results.len().checked_sub(1) {
+            cursor.last_value = None;
+            cursor.last_type = None;
+            cursor.last_truncated = None;
+            cursor.last_value_pos = None;
         }
 
         // Suppress `value` (and `truncated`) from the item that produced
@@ -645,8 +1016,8 @@ impl Session {
         // trailing `:stub` meta result that happens to carry its OWN `value`
         // key) — the bug this replaced re-scanned for "the last ok item of any
         // kind" and could strip the wrong one.
-        if let Some(pos) = last_value_pos {
-            if let Some(r) = results.get_mut(pos) {
+        if let Some(pos) = cursor.last_value_pos {
+            if let Some(r) = cursor.results.get_mut(pos) {
                 if let serde_json::Value::Object(ref mut obj) = r.result {
                     obj.remove("value");
                     obj.remove("truncated");
@@ -654,7 +1025,7 @@ impl Session {
             }
         }
 
-        let shape = if verbose {
+        let shape = if cursor.verbose {
             ResponseShape::Verbose {
                 generation: self.core.lib().generation().0,
                 val_gen: self.core.val_gen().0,
@@ -663,11 +1034,216 @@ impl Session {
             ResponseShape::Slim
         };
         TurnOutcome::Block {
-            items: results,
-            value: last_value,
-            last_type,
-            last_truncated,
+            items: cursor.results,
+            value: cursor.last_value,
+            last_type: cursor.last_type,
+            last_truncated: cursor.last_truncated,
             shape,
+        }
+    }
+
+    // -- the stowed-tail lifecycle ------------------------------------------
+
+    /// Re-enter the ONE stowed item tail: pick the machine resume entry its
+    /// materialization policy calls for, feed it the answer (bridged against the
+    /// table the suspending run used), and settle the result through the SAME
+    /// `finish_*` the non-suspending path uses.
+    fn resume_item<H: DispatchEffect<CapturedOutput>>(
+        &mut self,
+        answer: ResumeAnswer,
+        handlers: &mut H,
+        captured: &CapturedOutput,
+    ) -> ItemStep {
+        let Some(tail) = self.pending.take() else {
+            return ItemStep::Done(TurnOutcome::Error(
+                "internal: no suspended ask to resume".into(),
+            ));
+        };
+        let input = answer.into_input(tail.run_table(self.core.session_table()));
+        match tail {
+            PendingTail::PlainEval(t) => {
+                let outcome = self
+                    .core
+                    .resume_with_table(&t.table, handlers, captured, input);
+                self.settle(PendingTail::PlainEval(t), outcome, handlers, captured)
+            }
+            PendingTail::Reference(t) => {
+                let outcome = self.core.resume_session(handlers, captured, input);
+                self.settle(PendingTail::Reference(t), outcome, handlers, captured)
+            }
+            PendingTail::Bind(t) => {
+                let forced = matches!(t.tier, ValueTier::Tier0Data);
+                let outcome = self.core.resume_bind(handlers, captured, input, forced);
+                self.settle(PendingTail::Bind(t), outcome, handlers, captured)
+            }
+            PendingTail::MultiBind(t) => {
+                let n_fields = t.binders.len();
+                let outcome = self
+                    .core
+                    .resume_bind_projected(handlers, captured, input, n_fields);
+                self.settle_projected(t, outcome, handlers, captured)
+            }
+            PendingTail::BareExpr(t) => {
+                let forced = matches!(t.tier, ValueTier::Tier0Data);
+                let outcome = self
+                    .core
+                    .resume_bind_render(handlers, captured, input, forced);
+                self.settle_render(t, outcome, handlers, captured)
+            }
+        }
+    }
+
+    /// Feed an ABORT into the stowed continuation, discarding whatever comes
+    /// back. Used when the machine handed back a suspension nobody can answer:
+    /// the machine must not be left holding a continuation no `session_resume`
+    /// will ever reach.
+    fn abort_pending<H: DispatchEffect<CapturedOutput>>(
+        &mut self,
+        tail: &PendingTail,
+        reason: String,
+        handlers: &mut H,
+        captured: &CapturedOutput,
+    ) {
+        let input = ResumeInput::Abort(reason);
+        match tail {
+            PendingTail::PlainEval(t) => {
+                let _ = self
+                    .core
+                    .resume_with_table(&t.table, handlers, captured, input);
+            }
+            PendingTail::Reference(_) => {
+                let _ = self.core.resume_session(handlers, captured, input);
+            }
+            PendingTail::Bind(t) => {
+                let forced = matches!(t.tier, ValueTier::Tier0Data);
+                let _ = self.core.resume_bind(handlers, captured, input, forced);
+            }
+            PendingTail::MultiBind(t) => {
+                let n_fields = t.binders.len();
+                let _ = self
+                    .core
+                    .resume_bind_projected(handlers, captured, input, n_fields);
+            }
+            PendingTail::BareExpr(t) => {
+                let forced = matches!(t.tier, ValueTier::Tier0Data);
+                let _ = self
+                    .core
+                    .resume_bind_render(handlers, captured, input, forced);
+            }
+        }
+    }
+
+    /// The suspension arm shared by all three `settle_*`: bridge the ask request
+    /// and stow the tail, or — if the request itself is malformed, most
+    /// plausibly a prompt expression that crashed during evaluation — abort the
+    /// stowed continuation and surface the reason. That is exactly the outcome
+    /// the pre-cutover inline dispatcher produced by failing the ask.
+    fn stow_ask<H: DispatchEffect<CapturedOutput>>(
+        &mut self,
+        tail: PendingTail,
+        request: &Value,
+        handlers: &mut H,
+        captured: &CapturedOutput,
+    ) -> ItemStep {
+        let extracted = extract_ask_request(request, tail.run_table(self.core.session_table()));
+        match extracted {
+            Ok((prompt, meta)) => {
+                self.pending = Some(tail);
+                ItemStep::Suspended(AskRequest { prompt, meta })
+            }
+            Err(msg) => {
+                self.abort_pending(&tail, msg.clone(), handlers, captured);
+                ItemStep::Done(TurnOutcome::Error(tag_failure(
+                    FailureClass::UserHaskell,
+                    Phase::Run,
+                    msg,
+                )))
+            }
+        }
+    }
+
+    /// Close out a machine call whose policy completes with a bridged `Value`
+    /// (plain eval, session reference, single bind). Completion runs the tail's
+    /// own `finish_*` — the SINGLE copy of that item's completion bookkeeping,
+    /// reached identically whether the run completed inline or after N
+    /// suspensions.
+    fn settle<H: DispatchEffect<CapturedOutput>>(
+        &mut self,
+        tail: PendingTail,
+        outcome: Result<SuspendableOutcome, tidepool_runtime::JitError>,
+        handlers: &mut H,
+        captured: &CapturedOutput,
+    ) -> ItemStep {
+        match outcome {
+            Err(e) => ItemStep::Done(TurnOutcome::Error(run_fail(tail.error_label(), e))),
+            Ok(SuspendableOutcome::Completed(value)) => {
+                ItemStep::Done(self.finish_value_tail(tail, value))
+            }
+            Ok(SuspendableOutcome::Suspended { request, .. }) => {
+                self.stow_ask(tail, &request, handlers, captured)
+            }
+        }
+    }
+
+    /// [`Self::settle`] for the multi-bind (`Project`) policy, whose completion
+    /// IS the per-field tenured roots.
+    fn settle_projected<H: DispatchEffect<CapturedOutput>>(
+        &mut self,
+        tail: MultiBindTail,
+        outcome: Result<Suspendable<Vec<RootSlot>>, tidepool_runtime::JitError>,
+        handlers: &mut H,
+        captured: &CapturedOutput,
+    ) -> ItemStep {
+        match outcome {
+            Err(e) => ItemStep::Done(TurnOutcome::Error(run_fail("multi-bind runtime error", e))),
+            Ok(Suspendable::Completed(slots)) => {
+                ItemStep::Done(self.finish_multi_bind(tail, slots))
+            }
+            Ok(Suspendable::Suspended { request, .. }) => {
+                self.stow_ask(PendingTail::MultiBind(tail), &request, handlers, captured)
+            }
+        }
+    }
+
+    /// [`Self::settle`] for the bare-expression (`Render`) policy, whose
+    /// completion carries `it`'s tenured root AND the rendered value together.
+    fn settle_render<H: DispatchEffect<CapturedOutput>>(
+        &mut self,
+        tail: BareExprTail,
+        outcome: Result<Suspendable<(RootSlot, Value)>, tidepool_runtime::JitError>,
+        handlers: &mut H,
+        captured: &CapturedOutput,
+    ) -> ItemStep {
+        match outcome {
+            Err(e) => ItemStep::Done(TurnOutcome::Error(run_fail("runtime error", e))),
+            Ok(Suspendable::Completed((it_slot, rendered))) => {
+                ItemStep::Done(self.finish_bare_expr(tail, it_slot, rendered))
+            }
+            Ok(Suspendable::Suspended { request, .. }) => {
+                self.stow_ask(PendingTail::BareExpr(tail), &request, handlers, captured)
+            }
+        }
+    }
+
+    /// Run the completion bookkeeping for a finished `Value`-completing tail.
+    fn finish_value_tail(&mut self, tail: PendingTail, value: Value) -> TurnOutcome {
+        match tail {
+            PendingTail::PlainEval(t) => self.finish_plain_eval(t, value),
+            PendingTail::Reference(t) => self.finish_reference_fragment(t, value),
+            PendingTail::Bind(t) => match self.core.take_bound_root() {
+                Some(slot) => self.finish_bind(t, slot),
+                None => TurnOutcome::Error(tag_failure(
+                    FailureClass::Infra,
+                    Phase::Run,
+                    "bind completed but no tenured root was recorded".into(),
+                )),
+            },
+            // Their policies complete with their own products, so they are
+            // settled by `settle_projected`/`settle_render` and never arrive
+            // here.
+            PendingTail::MultiBind(_) | PendingTail::BareExpr(_) => {
+                unreachable!("the projected and render policies do not complete with a bare Value")
+            }
         }
     }
 
@@ -862,14 +1438,14 @@ impl Session {
         verdict: Option<&TurnClassification>,
         handlers: &mut H,
         captured: &CapturedOutput,
-    ) -> (ItemKind, TurnOutcome) {
+    ) -> (ItemKind, ItemStep) {
         match item {
-            BlockItem::Decl(decl) => (ItemKind::Decl, self.run_def(&decl.0)),
+            BlockItem::Decl(decl) => (ItemKind::Decl, ItemStep::Done(self.run_def(&decl.0))),
             BlockItem::Stmt(expr) => (
                 ItemKind::Stmt,
                 self.run_eval(&expr.0, verdict, handlers, captured),
             ),
-            BlockItem::Meta(meta) => (ItemKind::Meta, self.run_meta(meta)),
+            BlockItem::Meta(meta) => (ItemKind::Meta, ItemStep::Done(self.run_meta(meta))),
             // GHC's parser already classified this item (the block's batch
             // `classify_block` spawn) — when that verdict is present, dispatch
             // straight from it instead of paying for a doomed `run_def` probe
@@ -880,7 +1456,9 @@ impl Session {
             // (the batch classify itself failed) — there, GHC's parser is the
             // only way left to tell decl from stmt.
             BlockItem::Auto(expr) => match verdict {
-                Some(v) if v.kind == TurnKind::Decl => (ItemKind::Decl, self.run_def(&expr.0)),
+                Some(v) if v.kind == TurnKind::Decl => {
+                    (ItemKind::Decl, ItemStep::Done(self.run_def(&expr.0)))
+                }
                 Some(_) => (
                     ItemKind::Stmt,
                     self.run_eval(&expr.0, verdict, handlers, captured),
@@ -892,7 +1470,7 @@ impl Session {
                             ItemKind::Stmt,
                             self.run_eval(&expr.0, verdict, handlers, captured),
                         ),
-                        other => (ItemKind::Decl, other),
+                        other => (ItemKind::Decl, ItemStep::Done(other)),
                     }
                 }
             },
@@ -912,7 +1490,7 @@ impl Session {
         verdict: Option<&TurnClassification>,
         handlers: &mut H,
         captured: &CapturedOutput,
-    ) -> TurnOutcome {
+    ) -> ItemStep {
         // Bind-vs-expr + bound names come from GHC (parse-only, via the
         // block's batch classify). A missing verdict (batch classify failed —
         // e.g. extractor unavailable) falls back to the plain path, where GHC
@@ -946,8 +1524,10 @@ impl Session {
                     // PRIOR `n` and shadows, which is exactly what the materialize
                     // path does — so divert straight to it.
                     if !self_referential_monadic_pure_bind(expr_text, &name) {
+                        // The decl route compiles and validates but never runs
+                        // the machine, so it cannot suspend.
                         if let Some(outcome) = self.try_pure_bind_as_decl(expr_text, &name) {
-                            return outcome;
+                            return ItemStep::Done(outcome);
                         }
                     }
                     self.run_bind(expr_text, name, handlers, captured)
@@ -978,7 +1558,7 @@ impl Session {
         expr_text: &str,
         handlers: &mut H,
         captured: &CapturedOutput,
-    ) -> TurnOutcome {
+    ) -> ItemStep {
         let preamble = self.patched_preamble();
         let mut imports = self
             .core
@@ -1020,10 +1600,10 @@ impl Session {
             Ok(r) => r,
             // No `user_lines` computed here (this is the plain-eval path, not a
             // session-turn compile) — `None` is the correct default for this site.
-            Err(e) => return TurnOutcome::Error(compile_fail(&e, &source, None)),
+            Err(e) => return ItemStep::Done(TurnOutcome::Error(compile_fail(&e, &source, None))),
         };
         if warnings.has_io {
-            return io_type_fail();
+            return ItemStep::Done(io_type_fail());
         }
         table.populate_siblings_from_expr(&expr);
 
@@ -1045,27 +1625,23 @@ impl Session {
             ) {
                 Ok(fid) => self
                     .core
-                    .run_funcid_with_table(fid, &tail.table, handlers, captured)
-                    .map(expect_completed),
-                Err(e) => return TurnOutcome::Error(run_fail("JIT re-entry error", e)),
+                    .run_funcid_with_table(fid, &tail.table, handlers, captured),
+                Err(e) => {
+                    return ItemStep::Done(TurnOutcome::Error(run_fail("JIT re-entry error", e)))
+                }
             }
         } else {
             // First turn: bootstrap the machine from `expr` (the seed IS the
             // program) and publish the cancel handle BEFORE running, so a runaway
             // on this bare-expression path is cancellable from the start.
             if let Err(e) = self.core.bootstrap_if_needed(&expr, &tail.table) {
-                return TurnOutcome::Error(run_fail("JIT compile error", e));
+                return ItemStep::Done(TurnOutcome::Error(run_fail("JIT compile error", e)));
             }
             self.publish_cancel();
-            self.core
-                .run_entry(&tail.table, handlers, captured)
-                .map(expect_completed)
+            self.core.run_entry(&tail.table, handlers, captured)
         };
 
-        match run_result {
-            Ok(value) => self.finish_plain_eval(tail, value),
-            Err(e) => TurnOutcome::Error(run_fail("runtime error", e)),
-        }
+        self.settle(PendingTail::PlainEval(tail), run_result, handlers, captured)
     }
 
     /// Post-run bookkeeping for [`Self::run_plain_eval`]: render the value
@@ -1131,7 +1707,7 @@ impl Session {
         name: String,
         handlers: &mut H,
         captured: &CapturedOutput,
-    ) -> TurnOutcome {
+    ) -> ItemStep {
         let preamble = self.patched_preamble();
         let g = self.core.val_gen().next();
         let inject = self.live_val_modules();
@@ -1161,27 +1737,33 @@ impl Session {
             }),
         ) {
             Ok(t) => t,
-            Err(e) => return TurnOutcome::Error(compile_fail(&e, &wrapped, user_lines)),
+            Err(e) => {
+                return ItemStep::Done(TurnOutcome::Error(compile_fail(&e, &wrapped, user_lines)))
+            }
         };
         if turn.warnings.has_io {
-            return TurnOutcome::Error(tag_failure(
+            return ItemStep::Done(TurnOutcome::Error(tag_failure(
                 FailureClass::UserHaskell,
                 Phase::Compile,
                 "IO type detected in bound value. IO operations are not supported.".into(),
-            ));
+            )));
         }
         let binder = match turn.binders.into_iter().next() {
             Some(b) => b,
             None => {
-                return TurnOutcome::Error(tag_failure(
+                return ItemStep::Done(TurnOutcome::Error(tag_failure(
                     FailureClass::Infra,
                     Phase::Compile,
                     "bind turn produced no binder metadata".into(),
-                ))
+                )))
             }
         };
         if let Err(e) = self.merge_table(&turn.table) {
-            return TurnOutcome::Error(tag_failure(FailureClass::Runtime, Phase::Run, e));
+            return ItemStep::Done(TurnOutcome::Error(tag_failure(
+                FailureClass::Runtime,
+                Phase::Run,
+                e,
+            )));
         }
 
         // Bootstrap the resident machine on the first turn from THIS turn's table
@@ -1190,7 +1772,7 @@ impl Session {
         // machine.
         if !self.core.is_bootstrapped() {
             if let Err(e) = self.core.bootstrap_if_needed(&turn.expr, &turn.table) {
-                return TurnOutcome::Error(run_fail("JIT compile error", e));
+                return ItemStep::Done(TurnOutcome::Error(run_fail("JIT compile error", e)));
             }
             self.publish_cancel();
         }
@@ -1208,7 +1790,12 @@ impl Session {
             .add_fragment_session("repl_bind", &turn.expr, &env)
         {
             Ok(f) => f,
-            Err(e) => return TurnOutcome::Error(run_fail("JIT bind add_function error", e)),
+            Err(e) => {
+                return ItemStep::Done(TurnOutcome::Error(run_fail(
+                    "JIT bind add_function error",
+                    e,
+                )))
+            }
         };
 
         let tail = BindTail {
@@ -1220,15 +1807,13 @@ impl Session {
             defining_expr: turn_text.to_string(),
         };
 
-        match self.core.bind_funcid(
+        let outcome = self.core.bind_funcid(
             fid,
             handlers,
             captured,
             matches!(tail.tier, ValueTier::Tier0Data),
-        ) {
-            Ok(slot) => self.finish_bind(tail, slot),
-            Err(e) => TurnOutcome::Error(run_fail("bind runtime error", e)),
-        }
+        );
+        self.settle(PendingTail::Bind(tail), outcome, handlers, captured)
     }
 
     /// Post-run bookkeeping for [`Self::run_bind`]: advance the value
@@ -1266,7 +1851,7 @@ impl Session {
         turn_text: &str,
         handlers: &mut H,
         captured: &CapturedOutput,
-    ) -> TurnOutcome {
+    ) -> ItemStep {
         let preamble = self.patched_preamble();
         let inject = self.live_val_modules();
         let imports = self.turn_imports(turn_text);
@@ -1284,7 +1869,11 @@ impl Session {
         let turn =
             match compile_session_turn(&wrapped, &include, self.session_root(), &inject, None) {
                 Ok(t) => t,
-                Err(e) => return TurnOutcome::Error(compile_fail(&e, &wrapped, user_lines)),
+                Err(e) => {
+                    return ItemStep::Done(TurnOutcome::Error(compile_fail(
+                        &e, &wrapped, user_lines,
+                    )))
+                }
             };
         self.run_reference_fragment(turn, Some("()".to_string()), handlers, captured)
     }
@@ -1301,7 +1890,7 @@ impl Session {
         names: Vec<String>,
         handlers: &mut H,
         captured: &CapturedOutput,
-    ) -> TurnOutcome {
+    ) -> ItemStep {
         let preamble = self.patched_preamble();
         let g = self.core.val_gen().next();
         let inject = self.live_val_modules();
@@ -1330,17 +1919,19 @@ impl Session {
             }),
         ) {
             Ok(t) => t,
-            Err(e) => return TurnOutcome::Error(compile_fail(&e, &wrapped, user_lines)),
+            Err(e) => {
+                return ItemStep::Done(TurnOutcome::Error(compile_fail(&e, &wrapped, user_lines)))
+            }
         };
         if turn.warnings.has_io {
-            return TurnOutcome::Error(tag_failure(
+            return ItemStep::Done(TurnOutcome::Error(tag_failure(
                 FailureClass::UserHaskell,
                 Phase::Compile,
                 "IO type detected in bound value. IO operations are not supported.".into(),
-            ));
+            )));
         }
         if turn.binders.len() != names.len() {
-            return TurnOutcome::Error(tag_failure(
+            return ItemStep::Done(TurnOutcome::Error(tag_failure(
                 FailureClass::Infra,
                 Phase::Compile,
                 format!(
@@ -1348,15 +1939,19 @@ impl Session {
                     turn.binders.len(),
                     names.len()
                 ),
-            ));
+            )));
         }
         if let Err(e) = self.merge_table(&turn.table) {
-            return TurnOutcome::Error(tag_failure(FailureClass::Runtime, Phase::Run, e));
+            return ItemStep::Done(TurnOutcome::Error(tag_failure(
+                FailureClass::Runtime,
+                Phase::Run,
+                e,
+            )));
         }
 
         if !self.core.is_bootstrapped() {
             if let Err(e) = self.core.bootstrap_if_needed(&turn.expr, &turn.table) {
-                return TurnOutcome::Error(run_fail("JIT compile error", e));
+                return ItemStep::Done(TurnOutcome::Error(run_fail("JIT compile error", e)));
             }
             self.publish_cancel();
         }
@@ -1368,7 +1963,12 @@ impl Session {
             .add_fragment_session("repl_multi_bind", &turn.expr, &env)
         {
             Ok(f) => f,
-            Err(e) => return TurnOutcome::Error(run_fail("JIT multi-bind add_function error", e)),
+            Err(e) => {
+                return ItemStep::Done(TurnOutcome::Error(run_fail(
+                    "JIT multi-bind add_function error",
+                    e,
+                )))
+            }
         };
         let n_fields = names.len();
         let tail = MultiBindTail {
@@ -1379,14 +1979,12 @@ impl Session {
 
         // bind_funcid_projected deep-forces the whole tuple first (GC-safe:
         // registers all pending parents as Rust roots), then projects each field
-        // from the post-GC NF tuple and tenures each separately.
-        match self
+        // from the post-GC NF tuple and tenures each separately. Its completion
+        // IS the per-field roots — there is no tuple value on this path.
+        let outcome = self
             .core
-            .bind_funcid_projected(fid, handlers, captured, n_fields)
-        {
-            Ok(slots) => self.finish_multi_bind(tail, slots),
-            Err(e) => TurnOutcome::Error(run_fail("multi-bind runtime error", e)),
-        }
+            .bind_funcid_projected(fid, handlers, captured, n_fields);
+        self.settle_projected(tail, outcome, handlers, captured)
     }
 
     /// Post-run bookkeeping for [`Self::run_multi_bind`]: advance the value
@@ -1427,17 +2025,21 @@ impl Session {
         inner_type: Option<String>,
         handlers: &mut H,
         captured: &CapturedOutput,
-    ) -> TurnOutcome {
+    ) -> ItemStep {
         if turn.warnings.has_io {
-            return io_type_fail();
+            return ItemStep::Done(io_type_fail());
         }
         if let Err(e) = self.merge_table(&turn.table) {
-            return TurnOutcome::Error(tag_failure(FailureClass::Runtime, Phase::Run, e));
+            return ItemStep::Done(TurnOutcome::Error(tag_failure(
+                FailureClass::Runtime,
+                Phase::Run,
+                e,
+            )));
         }
         self.ensure_effect_machine();
         if !self.core.is_bootstrapped() {
             if let Err(e) = self.core.bootstrap_if_needed(&turn.expr, &turn.table) {
-                return TurnOutcome::Error(run_fail("JIT compile error", e));
+                return ItemStep::Done(TurnOutcome::Error(run_fail("JIT compile error", e)));
             }
             self.publish_cancel();
         }
@@ -1445,19 +2047,17 @@ impl Session {
         let env = self.core.seed_external_env(&referenced);
         let fid = match self.core.add_fragment_session("repl_ref", &turn.expr, &env) {
             Ok(f) => f,
-            Err(e) => return TurnOutcome::Error(run_fail("JIT reference add_function error", e)),
+            Err(e) => {
+                return ItemStep::Done(TurnOutcome::Error(run_fail(
+                    "JIT reference add_function error",
+                    e,
+                )))
+            }
         };
 
         let tail = ReferenceTail { inner_type };
-
-        match self
-            .core
-            .run_funcid_session(fid, handlers, captured)
-            .map(expect_completed)
-        {
-            Ok(value) => self.finish_reference_fragment(tail, value),
-            Err(e) => TurnOutcome::Error(run_fail("runtime error", e)),
-        }
+        let outcome = self.core.run_funcid_session(fid, handlers, captured);
+        self.settle(PendingTail::Reference(tail), outcome, handlers, captured)
     }
 
     /// Post-run bookkeeping for [`Self::run_reference_fragment`]: render the
@@ -1493,7 +2093,7 @@ impl Session {
         inject: &[String],
         handlers: &mut H,
         captured: &CapturedOutput,
-    ) -> TurnOutcome {
+    ) -> ItemStep {
         let preamble = self.patched_preamble();
         let g = self.core.val_gen().next();
         let eval_input = self.eval_input.clone();
@@ -1555,31 +2155,37 @@ impl Session {
                 ) {
                     Ok(t) => t,
                     Err(pure_err) => {
-                        return TurnOutcome::Error(compile_fail(&pure_err, &pure_src, user_lines))
+                        return ItemStep::Done(TurnOutcome::Error(compile_fail(
+                            &pure_err, &pure_src, user_lines,
+                        )))
                     }
                 }
             }
         };
 
         if turn.warnings.has_io {
-            return TurnOutcome::Error(tag_failure(
+            return ItemStep::Done(TurnOutcome::Error(tag_failure(
                 FailureClass::UserHaskell,
                 Phase::Compile,
                 "IO type detected in bound value. IO operations are not supported.".into(),
-            ));
+            )));
         }
         let it_binder = match turn.binders.into_iter().next() {
             Some(b) => b,
             None => {
-                return TurnOutcome::Error(tag_failure(
+                return ItemStep::Done(TurnOutcome::Error(tag_failure(
                     FailureClass::Infra,
                     Phase::Compile,
                     "bare-expression bind produced no binder metadata".into(),
-                ))
+                )))
             }
         };
         if let Err(e) = self.merge_table(&turn.table) {
-            return TurnOutcome::Error(tag_failure(FailureClass::Runtime, Phase::Run, e));
+            return ItemStep::Done(TurnOutcome::Error(tag_failure(
+                FailureClass::Runtime,
+                Phase::Run,
+                e,
+            )));
         }
 
         // Bootstrap the resident machine on the first turn from THIS turn's
@@ -1587,7 +2193,7 @@ impl Session {
         // `pure (it, toWire it)`).
         if !self.core.is_bootstrapped() {
             if let Err(e) = self.core.bootstrap_if_needed(&turn.expr, &turn.table) {
-                return TurnOutcome::Error(run_fail("JIT compile error", e));
+                return ItemStep::Done(TurnOutcome::Error(run_fail("JIT compile error", e)));
             }
             self.publish_cancel();
         }
@@ -1597,7 +2203,10 @@ impl Session {
         let fid = match self.core.add_fragment_session("repl_it", &turn.expr, &env) {
             Ok(f) => f,
             Err(e) => {
-                return TurnOutcome::Error(run_fail("JIT bare-expression add_function error", e))
+                return ItemStep::Done(TurnOutcome::Error(run_fail(
+                    "JIT bare-expression add_function error",
+                    e,
+                )))
             }
         };
 
@@ -1613,15 +2222,13 @@ impl Session {
         // completion here (field 0's bind), whichever wrap compiled. Field 1
         // (`toWire it`, pure) rides along in the SAME run — no second
         // compile, no second execution of `__user`'s effect.
-        match self.core.bind_funcid_render(
+        let outcome = self.core.bind_funcid_render(
             fid,
             handlers,
             captured,
             matches!(tail.tier, ValueTier::Tier0Data),
-        ) {
-            Ok((it_slot, rendered_value)) => self.finish_bare_expr(tail, it_slot, rendered_value),
-            Err(e) => TurnOutcome::Error(run_fail("runtime error", e)),
-        }
+        );
+        self.settle_render(tail, outcome, handlers, captured)
     }
 
     /// Post-run bookkeeping for [`Self::run_bare_expr`]: advance the value
@@ -2081,23 +2688,17 @@ impl Session {
             .join("\n")
     }
 
-    /// Drop the resident machine, freeing the session heap. Called from
-    /// [`SessionHandle::close`].
-    fn free(&mut self) {
-        // JitEffectMachine::drop calls free_session_heap for session machines.
-        self.core.drop_machine();
-    }
-
-    /// Store the per-turn input payload so `run_plain_eval` / `run_bind_discard`
-    /// can inject it into `template_haskell`. Called by the worker before each turn.
-    fn set_eval_input(&mut self, input: Option<serde_json::Value>) {
+    /// Store the per-block `input` payload so every evaluated item can inject it
+    /// into its generated module. Called by the server before each
+    /// `session_run`; a resume restores it from the block cursor instead.
+    pub fn set_eval_input(&mut self, input: Option<serde_json::Value>) {
         self.eval_input = input;
     }
 
     /// Wire the shared cancel slot the server reads on timeout. Called once by
-    /// the worker before the command loop. If the machine has already
-    /// bootstrapped, publish its handle immediately.
-    pub fn set_cancel_slot(&mut self, slot: crate::worker::CancelSlot) {
+    /// the manager at install. If the machine has already bootstrapped, publish
+    /// its handle immediately.
+    pub fn set_cancel_slot(&mut self, slot: crate::manager::CancelSlot) {
         self.cancel_slot = Some(slot);
         self.publish_cancel();
     }
@@ -2165,80 +2766,6 @@ impl Session {
         }
     }
 }
-
-// ---------------------------------------------------------------------------
-// Type-state: Open vs Closed
-// ---------------------------------------------------------------------------
-
-/// Phantom marker: the session is open and accepts turns.
-pub struct Open;
-/// Phantom marker: the session is closed; no turns can be run.
-pub struct Closed;
-
-/// A session handle parameterized by lifecycle state. Only `SessionHandle<Open>`
-/// has `run`; `close` consumes it and yields a `SessionHandle<Closed>`, so a
-/// post-close turn is a compile error (the kimi-r2 #11 type-state mandate).
-pub struct SessionHandle<S> {
-    inner: Session,
-    _state: PhantomData<S>,
-}
-
-impl SessionHandle<Open> {
-    /// Wrap a freshly-opened session as an open handle.
-    pub fn new(session: Session) -> SessionHandle<Open> {
-        SessionHandle {
-            inner: session,
-            _state: PhantomData,
-        }
-    }
-
-    /// Run one turn against the open session.
-    pub fn run<H: DispatchEffect<CapturedOutput>>(
-        &mut self,
-        cmd: &SessionCommand,
-        handlers: &mut H,
-        captured: &CapturedOutput,
-    ) -> TurnOutcome {
-        self.inner.run_turn(cmd, handlers, captured)
-    }
-
-    /// The server's effect decls — the worker re-ensures the generated
-    /// Tidepool.Effects staging dir from these before each turn (self-heal).
-    pub fn decls(&self) -> &[EffectDecl] {
-        &self.inner.cfg.decls
-    }
-
-    /// Store the `input` payload before a `session_run` block runs.
-    /// The worker calls this so `input :: Aeson.Value` is in scope during eval.
-    pub fn set_eval_input(&mut self, input: Option<serde_json::Value>) {
-        self.inner.set_eval_input(input);
-    }
-
-    /// The current declaration generation (0 until the first declaration item).
-    pub fn generation(&self) -> u64 {
-        self.inner.core.lib().generation().0
-    }
-
-    /// A read-only JSON snapshot of the live session bindings — the worker
-    /// republishes it after each turn for the `tidepool://session/bindings`
-    /// resource.
-    pub fn bindings_snapshot(&self) -> serde_json::Value {
-        self.inner.bindings_snapshot()
-    }
-
-    /// Consume the open handle: free the resident machine and transition to
-    /// `Closed`. The returned handle has no `run`.
-    pub fn close(mut self) -> SessionHandle<Closed> {
-        self.inner.free();
-        SessionHandle {
-            inner: self.inner,
-            _state: PhantomData,
-        }
-    }
-}
-
-// SessionHandle<Closed> deliberately has NO `run` — post-close turns don't
-// typecheck. (It is otherwise inert; the worker drops it after close.)
 
 // ---------------------------------------------------------------------------
 // Turn-wrapping helpers
@@ -3495,9 +4022,16 @@ mod hiding_tests {
 #[cfg(test)]
 mod reset_tests {
     use super::{
-        Generation, MetaCommand, ModuleEnv, PureBind, Session, SessionConfig, SessionId,
-        TurnOutcome, DEFAULT_NURSERY_SIZE,
+        BoxedStack, Generation, MetaCommand, ModuleEnv, PureBind, Session, SessionConfig,
+        SessionId, StackFactory, TurnOutcome, DEFAULT_NURSERY_SIZE,
     };
+
+    /// A handler-stack factory for a test session that never dispatches an
+    /// effect: these unit tests exercise decl-plane / cancel-slot bookkeeping,
+    /// not the effect path.
+    fn no_handlers() -> StackFactory {
+        Box::new(|| Box::new(frunk::HNil) as BoxedStack)
+    }
 
     fn minimal_config(root: std::path::PathBuf) -> SessionConfig {
         SessionConfig {
@@ -3521,7 +4055,7 @@ mod reset_tests {
     #[test]
     fn reset_leaves_state_untouched_when_reopen_fails() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let mut session = Session::open(minimal_config(dir.path().to_path_buf()))
+        let mut session = Session::open(minimal_config(dir.path().to_path_buf()), no_handlers())
             .expect("session opens on a fresh dir");
 
         // Poke markers into state that a failed reopen must NOT clear.
@@ -3593,9 +4127,9 @@ mod reset_tests {
             module_env,
             nursery_size: DEFAULT_NURSERY_SIZE,
         };
-        let mut session = Session::open(cfg).expect("session opens");
+        let mut session = Session::open(cfg, no_handlers()).expect("session opens");
 
-        let slot = crate::worker::empty_cancel_slot();
+        let slot = crate::manager::empty_cancel_slot();
         session.set_cancel_slot(slot.clone());
         session.ensure_effect_machine();
         assert!(

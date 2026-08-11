@@ -1,4 +1,4 @@
-//! `PersistentSession<S>` — the resident-JIT session core shared by
+//! `PersistentSession` — the resident-JIT session core shared by
 //! `tidepool-repl` and `tidepool-harness`.
 //!
 //! Both crates drive a long-lived [`JitEffectMachine`] turn-by-turn, accumulate
@@ -8,32 +8,32 @@
 //! planes, the accumulated table, and the fragment-run primitives — is identical
 //! between them and lives here.
 //!
-//! The ONE axis on which they differ is the **suspend boundary**, captured by
-//! [`SuspensionMechanism`]:
+//! There is ONE suspend mechanism, and it is **threadless**: an `Ask` stows the
+//! whole machine as DATA ([`JitEffectMachine`] is `Send` precisely because it is
+//! stowed-XOR-running), the eval thread exits, and a fresh thread re-enters via
+//! `resume_suspended`. No OS thread is parked per suspended session — neither in
+//! the harness (a TREE of many simultaneously-suspended nodes cannot pin N+1
+//! threads) nor in the repl (which used to park its resident worker on an answer
+//! channel and no longer does; see `plans/unpark/feasibility-map.md`).
 //!
-//! * [`ParkedThread`] (repl): an `Ask` parks the resident worker thread on an
-//!   answer channel with the native stack intact. The caller wraps the handler
-//!   stack (`ReplAskDispatcher`) so the `Ask` is serviced inline — from the
-//!   machine's view a fragment always runs to completion, and resume happens
-//!   out-of-band by waking the parked thread. Fine for ONE session pinned to one
-//!   OS thread.
-//! * [`Threadless`] (harness): an `Ask` stows the whole machine as DATA
-//!   ([`JitEffectMachine`] is `Send` precisely because it is stowed-XOR-running),
-//!   the eval thread exits, and a fresh thread re-enters via `resume_suspended`.
-//!   A TREE of many simultaneously-suspended nodes (a parent parked on a fork
-//!   while N children run) cannot pin N+1 threads, so threadless is load-bearing.
-//!
-//! The suspension MECHANISMS are deliberately NOT unified — only this
-//! accumulation + turn-run core is. See the module docstrings of
-//! [`super::resident`] (threadless) and `tidepool-repl`'s `ask.rs` (parked) for
-//! the two consumers' orchestration around this core.
+//! Every run entry here therefore reports either a completion or a suspension,
+//! and every one has a `resume_*` sibling that re-enters the stowed continuation
+//! with an answer or an abort. The four result-materialization policies the JIT
+//! supports — plain `Value`, single `Bind`, projected multi-bind, and
+//! bind+render — each appear as such a pair, each carrying what it actually
+//! produces ([`SuspendableOutcome`] for the two `Value`-completing policies,
+//! [`Suspendable`] over the roots for the other two). See the module docstrings
+//! of [`super::resident`] (the harness's single-node consumer) and
+//! `tidepool-repl`'s `session.rs` (the repl's block-cursor consumer) for the
+//! orchestration around this core.
 
-use std::marker::PhantomData;
 use std::path::Path;
 
 use tidepool_codegen::binding_table::{BindingEntry, BindingTable};
 use tidepool_codegen::emit::ExternalEnv;
-use tidepool_codegen::jit_machine::{FuncId, JitEffectMachine, ResumeInput, SuspendableOutcome};
+use tidepool_codegen::jit_machine::{
+    FuncId, JitEffectMachine, ResumeInput, Suspendable, SuspendableOutcome,
+};
 use tidepool_codegen::old_space::RootSlot;
 use tidepool_effect::dispatch::DispatchEffect;
 use tidepool_eval::value::Value;
@@ -44,195 +44,18 @@ use super::{SessionError, SessionLib};
 use crate::JitError;
 
 // ---------------------------------------------------------------------------
-// The suspend-boundary axis
-// ---------------------------------------------------------------------------
-
-/// How a persistent session drives a turn to its first boundary and re-enters a
-/// suspended one. The only behavior that differs between the parked-thread (repl)
-/// and threadless (harness) session models; everything else is shared in
-/// [`PersistentSession`].
-///
-/// The three methods correspond exactly to the three [`JitEffectMachine`] run
-/// entries a turn can take: the machine's original entry ([`Self::run_entry`]),
-/// an added fragment ([`Self::run_fragment`]), and re-entry of a stowed
-/// continuation ([`Self::resume`]). The bind / child-run primitives do NOT go
-/// through here — they are mechanism-agnostic (an `Ask` inside a bind parks the
-/// worker under `ParkedThread`, and threadless bind-suspension is out of scope).
-pub trait SuspensionMechanism {
-    /// Drive the machine's ORIGINAL entry to its first boundary. `ParkedThread`
-    /// runs it to completion (`Ask` serviced inline by the caller-wrapped
-    /// dispatcher); `Threadless` runs it through the suspend driver, yielding
-    /// `Suspended` with the continuation stowed on the machine.
-    fn run_entry<O, H>(
-        machine: &mut JitEffectMachine,
-        table: &DataConTable,
-        handlers: &mut H,
-        captured: &O,
-        ask_tag: u64,
-    ) -> Result<SuspendableOutcome, JitError>
-    where
-        O: OutputSink,
-        H: DispatchEffect<O>;
-
-    /// Drive a freshly-added fragment (`func_id`) to its first boundary — the
-    /// fragment sibling of [`Self::run_entry`].
-    fn run_fragment<O, H>(
-        machine: &mut JitEffectMachine,
-        func_id: FuncId,
-        table: &DataConTable,
-        handlers: &mut H,
-        captured: &O,
-        ask_tag: u64,
-    ) -> Result<SuspendableOutcome, JitError>
-    where
-        O: OutputSink,
-        H: DispatchEffect<O>;
-
-    /// Re-enter a suspended turn with an answer or abort. Only `Threadless`
-    /// supports in-band resume (the machine holds the stowed continuation);
-    /// `ParkedThread` resumes out-of-band by waking the parked worker, so a
-    /// [`PersistentSession<ParkedThread>`] never calls this.
-    fn resume<O, H>(
-        machine: &mut JitEffectMachine,
-        table: &DataConTable,
-        handlers: &mut H,
-        captured: &O,
-        ask_tag: u64,
-        input: ResumeInput,
-    ) -> Result<SuspendableOutcome, JitError>
-    where
-        O: OutputSink,
-        H: DispatchEffect<O>;
-}
-
-/// Repl mechanism: the resident worker thread parks on an `Ask` (native stack
-/// intact) and the machine stays pinned to it. The `Ask` is serviced inline by
-/// the caller-installed `ReplAskDispatcher`, so a fragment run always completes.
-pub struct ParkedThread;
-
-impl SuspensionMechanism for ParkedThread {
-    fn run_entry<O, H>(
-        machine: &mut JitEffectMachine,
-        table: &DataConTable,
-        handlers: &mut H,
-        captured: &O,
-        _ask_tag: u64,
-    ) -> Result<SuspendableOutcome, JitError>
-    where
-        O: OutputSink,
-        H: DispatchEffect<O>,
-    {
-        machine
-            .run(table, handlers, captured)
-            .map(SuspendableOutcome::Completed)
-    }
-
-    fn run_fragment<O, H>(
-        machine: &mut JitEffectMachine,
-        func_id: FuncId,
-        table: &DataConTable,
-        handlers: &mut H,
-        captured: &O,
-        _ask_tag: u64,
-    ) -> Result<SuspendableOutcome, JitError>
-    where
-        O: OutputSink,
-        H: DispatchEffect<O>,
-    {
-        machine
-            .run_fragment(func_id, table, handlers, captured)
-            .map(SuspendableOutcome::Completed)
-    }
-
-    fn resume<O, H>(
-        _machine: &mut JitEffectMachine,
-        _table: &DataConTable,
-        _handlers: &mut H,
-        _captured: &O,
-        _ask_tag: u64,
-        _input: ResumeInput,
-    ) -> Result<SuspendableOutcome, JitError>
-    where
-        O: OutputSink,
-        H: DispatchEffect<O>,
-    {
-        // The parked-thread mechanism resumes out-of-band: the server wakes the
-        // worker blocked in `ReplAskDispatcher`'s answer-channel `recv`. A
-        // `PersistentSession<ParkedThread>` never sees `Suspended`, so this is
-        // unreachable by construction.
-        unreachable!(
-            "ParkedThread resumes out-of-band by waking the parked worker; \
-             PersistentSession::resume is only reachable under Threadless"
-        )
-    }
-}
-
-/// Harness mechanism: an `Ask` stows the machine as DATA (no parked thread), the
-/// eval thread exits, and a fresh thread re-enters via `resume_suspended`.
-/// Load-bearing for a tree of many simultaneously-suspended nodes.
-pub struct Threadless;
-
-impl SuspensionMechanism for Threadless {
-    fn run_entry<O, H>(
-        machine: &mut JitEffectMachine,
-        table: &DataConTable,
-        handlers: &mut H,
-        captured: &O,
-        ask_tag: u64,
-    ) -> Result<SuspendableOutcome, JitError>
-    where
-        O: OutputSink,
-        H: DispatchEffect<O>,
-    {
-        machine.run_suspendable(table, handlers, captured, ask_tag)
-    }
-
-    fn run_fragment<O, H>(
-        machine: &mut JitEffectMachine,
-        func_id: FuncId,
-        table: &DataConTable,
-        handlers: &mut H,
-        captured: &O,
-        ask_tag: u64,
-    ) -> Result<SuspendableOutcome, JitError>
-    where
-        O: OutputSink,
-        H: DispatchEffect<O>,
-    {
-        machine.run_fragment_suspendable(func_id, table, handlers, captured, ask_tag)
-    }
-
-    fn resume<O, H>(
-        machine: &mut JitEffectMachine,
-        table: &DataConTable,
-        handlers: &mut H,
-        captured: &O,
-        ask_tag: u64,
-        input: ResumeInput,
-    ) -> Result<SuspendableOutcome, JitError>
-    where
-        O: OutputSink,
-        H: DispatchEffect<O>,
-    {
-        machine.resume_suspended(table, handlers, captured, ask_tag, input)
-    }
-}
-
-// ---------------------------------------------------------------------------
 // The shared session core
 // ---------------------------------------------------------------------------
 
 /// The resident-session substrate both servers own: one live [`JitEffectMachine`]
 /// (`None` until the first turn bootstraps it), the accumulated constructor
 /// [`DataConTable`], the [`SessionLib`] decl plane, the [`BindingTable`] value
-/// plane, and the value-binding generation. Parameterized over the
-/// [`SuspensionMechanism`] so `run_entry`/`run_fragment`/`resume` dispatch to the
-/// parked-thread or threadless machine calls without the caller branching.
+/// plane, and the value-binding generation.
 ///
 /// The consumers keep their own higher-level turn orchestration (source
 /// wrapping, decl/pure-bind routing, output draining, continuation-id minting)
 /// and delegate the machine + plane operations here.
-pub struct PersistentSession<S: SuspensionMechanism> {
+pub struct PersistentSession {
     /// The resident machine — `None` before the first turn bootstraps it,
     /// `Some` when idle/suspended, and moved out onto the eval thread for a
     /// turn's duration (stowed-XOR-running).
@@ -259,10 +82,9 @@ pub struct PersistentSession<S: SuspensionMechanism> {
     ask_tag: u64,
     /// JIT nursery size for the resident machine.
     nursery_size: usize,
-    _mech: PhantomData<S>,
 }
 
-impl<S: SuspensionMechanism> PersistentSession<S> {
+impl PersistentSession {
     /// Build an idle session core. `lib` is the decl plane (`Some` for the repl
     /// and the accumulating harness; `None` for a value-plane-only session). The
     /// machine is not bootstrapped until the first turn.
@@ -276,7 +98,6 @@ impl<S: SuspensionMechanism> PersistentSession<S> {
             turn_counter: 0,
             ask_tag,
             nursery_size,
-            _mech: PhantomData,
         }
     }
 
@@ -376,15 +197,17 @@ impl<S: SuspensionMechanism> PersistentSession<S> {
     // -- machine lifecycle -------------------------------------------------
     //
     // Threading note: [`BindingTable`] holds `RootSlot(*mut *mut u8)` and
-    // [`ExternalEnv`] holds raw slot addresses, so `PersistentSession` (and the
-    // env a fragment seeds) is `!Send` — only the [`JitEffectMachine`] is `Send`
-    // (stowed-XOR-running). The repl drives every turn on ITS pinned worker
-    // thread, so it runs in place ([`Self::run_fragment_session`] etc.). The
-    // harness must run the deep-recursion turn on a fresh big-stack thread, so it
-    // [`Self::take_machine`]s the machine (Send) over, calls the
-    // [`SuspensionMechanism`] trait methods on it there with the accumulated
-    // table (also Send), and [`Self::restore_machine`]s it. `add_function` (which
-    // needs the `!Send` env) therefore always happens on the CALLING thread.
+    // [`ExternalEnv`] holds raw slot addresses. Both the table and the
+    // [`JitEffectMachine`] carry an `unsafe impl Send` justified by the
+    // stowed-XOR-running discipline, so a whole `PersistentSession` can be moved
+    // to another thread as long as exactly one thread owns it at a time — which
+    // is what the repl does (the session is moved into a `spawn_blocking` turn
+    // and returned out of it). The harness instead runs the deep-recursion turn
+    // on a fresh big-stack thread while keeping the rest of the session on the
+    // caller's frame: it [`Self::take_machine`]s the machine over with the
+    // accumulated table and [`Self::restore_machine`]s it afterwards.
+    // `add_function` (which needs the raw-pointer env) therefore always happens
+    // on the thread that owns the session.
 
     /// Bootstrap the resident machine from `expr`/`table` if it is not already
     /// live (a session machine, so its heap is retained across turns). No-op when
@@ -493,12 +316,20 @@ impl<S: SuspensionMechanism> PersistentSession<S> {
         machine.add_function(&frag_name, expr, run_table, env)
     }
 
-    // -- same-thread runs (repl; machine in place, accumulated table) -------
+    // -- in-place suspendable runs (machine owned here) ---------------------
+    //
+    // Each of the four result-materialization policies gets a `run_*` entry and
+    // a `resume_*` sibling; both return a [`SuspendableOutcome`], so a caller
+    // handles completion and suspension with the SAME code whichever run it came
+    // from. A suspension leaves the continuation stowed on the machine — nothing
+    // is parked, nothing blocks — and the caller re-enters through the matching
+    // `resume_*`, which must be the sibling of the entry that suspended (the
+    // policy decides what the completing turn materializes).
 
     /// Run the resident machine's ORIGINAL entry (the seed compiled by
-    /// [`Self::bootstrap_if_needed`]) to the first boundary
-    /// ([`SuspensionMechanism::run_entry`]). The repl's first bare-expression
-    /// turn, where the seed IS the program. `run_table` is the seed's table.
+    /// [`Self::bootstrap_if_needed`]) to its first boundary. The repl's first
+    /// bare-expression turn, where the seed IS the program. `run_table` is the
+    /// seed's table; [`Self::resume_with_table`] re-enters with the same one.
     /// Requires the machine bootstrapped.
     pub fn run_entry<O, H>(
         &mut self,
@@ -510,16 +341,17 @@ impl<S: SuspensionMechanism> PersistentSession<S> {
         O: OutputSink,
         H: DispatchEffect<O>,
     {
+        let ask_tag = self.ask_tag;
         let machine = self
             .machine
             .as_mut()
             .expect("machine bootstrapped before run_entry");
-        S::run_entry(machine, run_table, handlers, captured, self.ask_tag)
+        machine.run_suspendable(run_table, handlers, captured, ask_tag)
     }
 
-    /// Drive a fragment (already added) to the first boundary against an EXTERNAL
-    /// table, on the calling thread ([`SuspensionMechanism::run_fragment`]). The
-    /// repl plain-expression path.
+    /// Drive a fragment (already added) to its first boundary against an
+    /// EXTERNAL table. The repl plain-expression path; resumed by
+    /// [`Self::resume_with_table`].
     pub fn run_funcid_with_table<O, H>(
         &mut self,
         func_id: FuncId,
@@ -531,24 +363,40 @@ impl<S: SuspensionMechanism> PersistentSession<S> {
         O: OutputSink,
         H: DispatchEffect<O>,
     {
+        let ask_tag = self.ask_tag;
         let machine = self
             .machine
             .as_mut()
             .expect("machine bootstrapped before run_funcid_with_table");
-        S::run_fragment(
-            machine,
-            func_id,
-            run_table,
-            handlers,
-            captured,
-            self.ask_tag,
-        )
+        machine.run_fragment_suspendable(func_id, run_table, handlers, captured, ask_tag)
     }
 
-    /// Drive a fragment (already added) to the first boundary against the
-    /// ACCUMULATED session table, on the calling thread
-    /// ([`SuspensionMechanism::run_fragment`]). The repl's effectful
-    /// session-reference path.
+    /// Re-enter a turn suspended by [`Self::run_entry`] or
+    /// [`Self::run_funcid_with_table`], against the SAME external `run_table`
+    /// the run used (the suspend request and the completed value are both
+    /// bridged against it).
+    pub fn resume_with_table<O, H>(
+        &mut self,
+        run_table: &DataConTable,
+        handlers: &mut H,
+        captured: &O,
+        input: ResumeInput,
+    ) -> Result<SuspendableOutcome, JitError>
+    where
+        O: OutputSink,
+        H: DispatchEffect<O>,
+    {
+        let ask_tag = self.ask_tag;
+        let machine = self
+            .machine
+            .as_mut()
+            .expect("machine present before resume_with_table");
+        machine.resume_suspended(run_table, handlers, captured, ask_tag, input)
+    }
+
+    /// Drive a fragment (already added) to its first boundary against the
+    /// ACCUMULATED session table. The repl's effectful session-reference path;
+    /// resumed by [`Self::resume_session`].
     pub fn run_funcid_session<O, H>(
         &mut self,
         func_id: FuncId,
@@ -568,18 +416,37 @@ impl<S: SuspensionMechanism> PersistentSession<S> {
         let machine = machine
             .as_mut()
             .expect("machine bootstrapped before run_funcid_session");
-        S::run_fragment(
+        machine.run_fragment_suspendable(func_id, session_table, handlers, captured, *ask_tag)
+    }
+
+    /// Re-enter a turn suspended by [`Self::run_funcid_session`], against the
+    /// accumulated session table.
+    pub fn resume_session<O, H>(
+        &mut self,
+        handlers: &mut H,
+        captured: &O,
+        input: ResumeInput,
+    ) -> Result<SuspendableOutcome, JitError>
+    where
+        O: OutputSink,
+        H: DispatchEffect<O>,
+    {
+        let PersistentSession {
             machine,
-            func_id,
             session_table,
-            handlers,
-            captured,
-            *ask_tag,
-        )
+            ask_tag,
+            ..
+        } = self;
+        let machine = machine
+            .as_mut()
+            .expect("machine present before resume_session");
+        machine.resume_suspended(session_table, handlers, captured, *ask_tag, input)
     }
 
     /// Run a PURE fragment (no effect tree) to a value against the accumulated
     /// table. The repl's pure session-reference path (`run_fragment_pure`).
+    /// Pure means no effects, hence no `Ask`, hence no suspension — this is the
+    /// one run entry with no `resume_*` sibling.
     pub fn run_funcid_pure(&mut self, func_id: FuncId) -> Result<Value, JitError> {
         let machine = self
             .machine
@@ -589,16 +456,18 @@ impl<S: SuspensionMechanism> PersistentSession<S> {
     }
 
     /// Drive a fragment (already added) as an effectful VALUE BIND against the
-    /// accumulated table, on the calling thread: run the effect tree, deep-force
-    /// (`forced` → Tier-0 data) or tenure-as-is (Tier-1 closure), register the
-    /// persistent root, return its stable [`RootSlot`]. The repl bind path.
+    /// accumulated table: run the effect tree and, on completion, deep-force
+    /// (`forced` → Tier-0 data) or tenure-as-is (Tier-1 closure) and register the
+    /// persistent root. Read the tenured root with [`Self::take_bound_root`]; a
+    /// suspension tenures NOTHING yet, and lands its value on
+    /// [`Self::resume_bind`] with the SAME `forced` flag.
     pub fn bind_funcid<O, H>(
         &mut self,
         func_id: FuncId,
         handlers: &mut H,
         captured: &O,
         forced: bool,
-    ) -> Result<RootSlot, JitError>
+    ) -> Result<SuspendableOutcome, JitError>
     where
         O: OutputSink,
         H: DispatchEffect<O>,
@@ -606,23 +475,61 @@ impl<S: SuspensionMechanism> PersistentSession<S> {
         let PersistentSession {
             machine,
             session_table,
+            ask_tag,
             ..
         } = self;
         let machine = machine
             .as_mut()
             .expect("machine bootstrapped before bind_funcid");
-        machine.run_fragment_and_bind(func_id, session_table, handlers, captured, forced)
+        machine.run_fragment_suspendable_binding(
+            func_id,
+            session_table,
+            handlers,
+            captured,
+            *ask_tag,
+            forced,
+        )
     }
 
-    /// Multi-binder sibling of [`Self::bind_funcid`]: project `n_fields` tuple
-    /// components, tenuring each as a separate root.
+    /// Re-enter a turn suspended by [`Self::bind_funcid`]. `forced` is the SAME
+    /// flag the run carried — the caller threads it across the suspension on the
+    /// binder metadata it is already holding.
+    pub fn resume_bind<O, H>(
+        &mut self,
+        handlers: &mut H,
+        captured: &O,
+        input: ResumeInput,
+        forced: bool,
+    ) -> Result<SuspendableOutcome, JitError>
+    where
+        O: OutputSink,
+        H: DispatchEffect<O>,
+    {
+        let PersistentSession {
+            machine,
+            session_table,
+            ask_tag,
+            ..
+        } = self;
+        let machine = machine
+            .as_mut()
+            .expect("machine present before resume_bind");
+        machine.resume_suspended_binding(session_table, handlers, captured, *ask_tag, input, forced)
+    }
+
+    /// Multi-binder sibling of [`Self::bind_funcid`]: on completion, project
+    /// `n_fields` tuple components and tenure each as a separate root.
+    ///
+    /// Completion IS those roots. A projection has no result value of its own,
+    /// and the outcome type says so — there is no bridged tuple to render and
+    /// none to accidentally render.
     pub fn bind_funcid_projected<O, H>(
         &mut self,
         func_id: FuncId,
         handlers: &mut H,
         captured: &O,
         n_fields: usize,
-    ) -> Result<Vec<RootSlot>, JitError>
+    ) -> Result<Suspendable<Vec<RootSlot>>, JitError>
     where
         O: OutputSink,
         H: DispatchEffect<O>,
@@ -630,31 +537,66 @@ impl<S: SuspensionMechanism> PersistentSession<S> {
         let PersistentSession {
             machine,
             session_table,
+            ask_tag,
             ..
         } = self;
         let machine = machine
             .as_mut()
             .expect("machine bootstrapped before bind_funcid_projected");
-        machine.run_fragment_and_bind_projected(
+        machine.run_fragment_suspendable_projected(
             func_id,
             session_table,
             handlers,
             captured,
+            *ask_tag,
+            n_fields,
+        )
+    }
+
+    /// Re-enter a turn suspended by [`Self::bind_funcid_projected`]. `n_fields`
+    /// is the SAME arity the run carried (the caller is holding the binder
+    /// vector across the suspension).
+    pub fn resume_bind_projected<O, H>(
+        &mut self,
+        handlers: &mut H,
+        captured: &O,
+        input: ResumeInput,
+        n_fields: usize,
+    ) -> Result<Suspendable<Vec<RootSlot>>, JitError>
+    where
+        O: OutputSink,
+        H: DispatchEffect<O>,
+    {
+        let PersistentSession {
+            machine,
+            session_table,
+            ask_tag,
+            ..
+        } = self;
+        let machine = machine
+            .as_mut()
+            .expect("machine present before resume_bind_projected");
+        machine.resume_suspended_projected(
+            session_table,
+            handlers,
+            captured,
+            *ask_tag,
+            input,
             n_fields,
         )
     }
 
     /// Bind-and-render sibling of [`Self::bind_funcid`]: run the fragment ONCE,
     /// binding field 0 (`field0_forced` → Tier-0 data) and rendering field 1 in
-    /// the same run. Returns the bound value's [`RootSlot`] and the rendered
-    /// value. The repl's bare-expression `it` path.
+    /// the same run. Completion carries BOTH — field 0's tenured root and field
+    /// 1's rendered value. The repl's bare-expression `it` path.
     pub fn bind_funcid_render<O, H>(
         &mut self,
         func_id: FuncId,
         handlers: &mut H,
         captured: &O,
         field0_forced: bool,
-    ) -> Result<(RootSlot, Value), JitError>
+    ) -> Result<Suspendable<(RootSlot, Value)>, JitError>
     where
         O: OutputSink,
         H: DispatchEffect<O>,
@@ -662,18 +604,73 @@ impl<S: SuspensionMechanism> PersistentSession<S> {
         let PersistentSession {
             machine,
             session_table,
+            ask_tag,
             ..
         } = self;
         let machine = machine
             .as_mut()
             .expect("machine bootstrapped before bind_funcid_render");
-        machine.run_fragment_and_bind_render(
+        machine.run_fragment_suspendable_render(
             func_id,
             session_table,
             handlers,
             captured,
+            *ask_tag,
             field0_forced,
         )
+    }
+
+    /// Re-enter a turn suspended by [`Self::bind_funcid_render`]. The
+    /// field1-before-field0-tenure ordering that keeps an aliased
+    /// `(it, toWire it)` intact lives in the machine's one `materialize`, so it
+    /// holds identically here and on the first run.
+    pub fn resume_bind_render<O, H>(
+        &mut self,
+        handlers: &mut H,
+        captured: &O,
+        input: ResumeInput,
+        field0_forced: bool,
+    ) -> Result<Suspendable<(RootSlot, Value)>, JitError>
+    where
+        O: OutputSink,
+        H: DispatchEffect<O>,
+    {
+        let PersistentSession {
+            machine,
+            session_table,
+            ask_tag,
+            ..
+        } = self;
+        let machine = machine
+            .as_mut()
+            .expect("machine present before resume_bind_render");
+        machine.resume_suspended_render(
+            session_table,
+            handlers,
+            captured,
+            *ask_tag,
+            input,
+            field0_forced,
+        )
+    }
+
+    /// Take the tenured root a completed [`Self::bind_funcid`] (or
+    /// [`Self::resume_bind`]) stashed on the machine. `None` when no bind
+    /// completed — the caller treats that as the infra error it is.
+    ///
+    /// Only the single-bind policy needs this: its outcome type
+    /// ([`SuspendableOutcome`]) predates the generic one and is fixed at
+    /// `Completed(Value)`, so the root cannot ride out inline. The projected and
+    /// render policies return their roots in the completion itself, and bind is
+    /// slated to follow once that outcome type is widened.
+    pub fn take_bound_root(&mut self) -> Option<RootSlot> {
+        self.machine.as_mut().and_then(|m| m.take_last_bound_root())
+    }
+
+    /// Whether the machine currently holds a stowed continuation (a turn
+    /// suspended at an `Ask` and has not been resumed or aborted).
+    pub fn is_suspended(&self) -> bool {
+        self.machine.as_ref().is_some_and(|m| m.is_suspended())
     }
 
     // -- value-plane bookkeeping (delegating over the two planes) ----------

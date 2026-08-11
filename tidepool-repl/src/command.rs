@@ -206,12 +206,11 @@ pub enum SessionCommand {
         items: Vec<BlockItem>,
         verbose: bool,
     },
-    /// `session_close`: drop the resident machine and free the session heap.
-    Close,
 }
 
-/// The result of running a non-`Close` turn. An in-turn `ask`
-/// suspends through the channel layer (see [`crate::ask`]), not here.
+/// The result of running a turn to COMPLETION. An in-turn `ask` never produces
+/// one of these: it stows and surfaces as `TurnStep::Suspended`
+/// (`crate::session`).
 #[derive(Clone, Debug)]
 pub enum TurnOutcome {
     /// An expression item produced this JSON-rendered value alongside its

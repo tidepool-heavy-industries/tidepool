@@ -29,7 +29,7 @@ there is no session name / no named-sessions map.
   JSON over LIVE session state: `{bindings: [{name, type, kind (decl|bind),
   generation}], generation, valGeneration}`. Decl-plane heads (`f x = …`,
   `data Foo`, `class C`) are `kind: "decl"`; value/pure binds are `kind: "bind"`.
-  Republished by the worker after every turn; read without driving a turn.
+  Republished after every completed turn; read without driving a turn.
 
 Typical flow: repeated `session_run` → `session_reset` when you want a clean
 slate. The `input` field on `session_run` is a payload lane: pass structured
@@ -170,43 +170,83 @@ block to log the mismatch and continue instead of refusing to start.
 ## Suspension (`ask`) — what it means for a caller
 
 Hitting the `Ask` effect mid-block suspends the turn: `session_run` returns a
-`continuation_id` instead of completing. The session is now blocked — no new
-`session_run` on it until you call `session_resume` (to answer and continue
-the rest of the block) or `session_reset` (to drop the pending ask and start
-fresh — abort folds into reset). A response that doesn't match the suspension's
+`continuation_id` instead of completing. Nothing is blocked in the OS sense —
+the continuation is stowed as data on the session's machine and the rest of the
+block is stowed alongside it — but the session accepts no new `session_run`
+until you call `session_resume` (to answer and continue the rest of the block)
+or `session_reset` (to drop the pending ask and start fresh — abort folds into
+reset). A response that doesn't match the suspension's
 schema is rejected without consuming the continuation, so a bad `session_resume`
 payload can be retried. `session_resume` distinguishes three failure causes
 rather than one generic "unknown or expired continuation_id": no session is
 running, the session is suspended on a DIFFERENT continuation (names the pending
 one), or the session isn't suspended at all.
 
-## Internals: session lifecycle (read if modifying `state.rs`/`server.rs`, skip otherwise)
+## Internals: session lifecycle (read if modifying `state.rs`/`manager.rs`/`server.rs`, skip otherwise)
 
-`state.rs`'s module docstring is the primary source — read it directly before
-changing this. The session lifecycle is one owned `SessionState` enum
-(Idle/Busy/Suspended/Wedged/Closing), transitioned atomically by the server at
-the dispatch boundary; the ask suspension payload lives INSIDE
-`SessionState::Suspended`, not a side map.
+**One engine.** The repl is a single-node client of the same threadless
+suspension core `tidepool-harness` drives:
+`tidepool_runtime::session::PersistentSession`. An `ask` STOWS — the JIT
+continuation stays on the machine as data, the run entry returns `Suspended`,
+and the whole `Session` goes back into its slot. No OS thread is parked per
+suspended session, and there is no repl-specific ask dispatcher.
+
+Three layers, each owning one thing:
+
+- **`session.rs` — what a turn is.** `run_turn` returns a `TurnStep`
+  (`Completed(TurnOutcome)` or `Suspended(AskRequest)`); `resume_turn` /
+  `abort_turn` re-enter. Because a suspension outlives the call that made it,
+  two things that used to sit on a native stack are plain data on the
+  `Session`: the suspended item's `PendingTail` (one variant per run path —
+  plain eval, bind, multi-bind, reference, bare-expr `it`) and the block loop's
+  `BlockCursor` (results so far, classify verdicts, next index, the pending
+  item's index/kind, the `last_*` accumulators, and the `input` payload lane).
+  A resume re-enters the machine through the `resume_*` sibling the tail's
+  materialization policy calls for and then runs the SAME `finish_*` the
+  non-suspending path would have — completion bookkeeping exists once, not
+  once per arm. Only a single item can suspend (a decl batch never runs the
+  machine, nor does a `:command`), which is why the cursor has one
+  pending-item slot rather than a stack.
+- **`manager.rs` — where the session is.** `Idle(session) | Running |
+  Suspended{session, cont_id}`, with atomic checkout/restore: lock, move the
+  session out, run with the lock RELEASED, restore under a second short lock.
+  That is `tidepool-harness`'s `SessionRegistry` discipline at N = 1 — itself
+  a port of this crate's own `state.rs` discipline. Every checkout carries an
+  epoch, so a `session_reset` mid-turn can replace the entry and the in-flight
+  turn's restore drops its session instead of clobbering the fresh one.
+- **`state.rs` — what the caller is told.** One owned `SessionState` enum
+  (Idle/Busy/Suspended/Wedged/Closing) transitioned atomically by the server at
+  the dispatch boundary; the ask suspension's caller-facing payload
+  (continuation id, expected schema, captured output, TTL clock) lives INSIDE
+  `SessionState::Suspended`, not a side map. Read its module docstring before
+  changing any of this.
 
 **Load-bearing invariant:** the `SharedState` `parking_lot::Mutex` is NEVER
 held across an `.await`. Every transition is lock → inspect/guard → move
 owned values out → unlock → then `.await`. Holding it across an await would
 deadlock the executor (`parking_lot` is not async-aware).
 
-`ask.rs`'s worker-thread-parking DISPATCHER (`ReplAskDispatcher`, sync `recv`,
-stack intact) deliberately duplicates `tidepool-mcp`'s per-eval `ask.rs`
-dispatcher against the resident worker instead of a spawned-per-eval one, rather
-than widening that crate's `pub(crate)` visibility (see its module docstring) —
-`tidepool-mcp` is left untouched by design. Only the DISPATCHER is duplicated:
-`PauseGate` — the timeout-as-yield-point latch that cancels a runaway turn at the
-next JIT safepoint rather than killing the thread — is now the ONE shared
-`tidepool_effect::pause::PauseGate` consumed by both dispatchers. The repl worker
-drives only its abort surface (`request_abort` on timeout, `is_in_effect` at the
-grace deadline); the gate's pause states + grace machinery go unused here.
+A turn runs on `tokio::task::spawn_blocking` with the `Session` moved IN and
+returned OUT (`Harness::run_checked_out`'s shape), on a big-stack thread inside
+that task for deep JIT recursion. One consequence is load-bearing: a runaway
+that outruns its abort grace holds the only copy of the session, so `Wedged`
+DROPS the whole manager entry rather than pretend it can restore a session it
+does not have. The next `session_run` auto-opens a fresh one, and
+`session_reset` — which replaces the entry wholesale — is unaffected.
+
+**Timeout/cancel is thread-agnostic and unchanged.** `PauseGate::request_abort`
+fires at the next effect dispatch and the JIT `CancelHandle` at the next
+GC/tail-call safepoint. The handler stack is wrapped per turn in
+`tidepool_runtime::session::GateDispatcher` — the SHARED wrapper, also used by
+the eval engine — which makes every effect dispatch a checkpoint and
+deliberately does NOT intercept the ask tag: the JIT's own suspend driver
+catches that first (`tag >= ask_tag`).
 
 **Effects are handled in `tidepool-handlers/src/lib.rs`**, not
 `tidepool-repl/src/main.rs` — main.rs only wires the handler stack via
 `build_base_stack` (see the `use tidepool_handlers::{build_base_stack,
 HandlerConfig}` import and the `build_base_stack(&hcfg)` call there). Live
-stack: Console, KV, Fs, Http, Exec, Lsp, Llm, Git, Time (Ask is interposed
-separately by the `AskDispatcher` wrapper; Meta is `--debug`-gated).
+stack: Console, KV, Fs, Http, Exec, Lsp, Llm, Git, Time (Ask never reaches a
+handler — the JIT suspends on its tag; Meta is `--debug`-gated). The stack is
+cloned twice over: once per session, and once more per turn, so per-turn
+handler state starts clean exactly as it did before the cutover.

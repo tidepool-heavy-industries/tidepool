@@ -69,19 +69,31 @@
 //! families, so a turn behaves identically whether it completed in its first
 //! run or after any number of ask suspensions:
 //!
-//! | policy | run entry | resume entry | products |
-//! |---|---|---|---|
-//! | `Value` | [`JitEffectMachine::run_fragment_suspendable`] | [`JitEffectMachine::resume_suspended`] | the bridged value |
-//! | `Bind { forced }` | [`JitEffectMachine::run_fragment_suspendable_binding`] | [`JitEffectMachine::resume_suspended_binding`] | bridged value + one tenured root ([`JitEffectMachine::take_last_bound_root`]) |
-//! | `Project { n_fields }` | [`JitEffectMachine::run_fragment_suspendable_projected`] | [`JitEffectMachine::resume_suspended_projected`] | N tenured roots ([`JitEffectMachine::take_last_bound_roots`]) |
-//! | `Render { field0_forced }` | [`JitEffectMachine::run_fragment_suspendable_render`] | [`JitEffectMachine::resume_suspended_render`] | rendered field 1 + field 0's tenured root |
+//! | policy | run entry | resume entry | completion type | products |
+//! |---|---|---|---|---|
+//! | `Value` | [`JitEffectMachine::run_fragment_suspendable`] | [`JitEffectMachine::resume_suspended`] | [`SuspendableOutcome`] | the bridged value |
+//! | `Bind { forced }` | [`JitEffectMachine::run_fragment_suspendable_binding`] | [`JitEffectMachine::resume_suspended_binding`] | [`SuspendableOutcome`] | bridged value, plus one tenured root stashed for [`JitEffectMachine::take_last_bound_root`] |
+//! | `Project { n_fields }` | [`JitEffectMachine::run_fragment_suspendable_projected`] | [`JitEffectMachine::resume_suspended_projected`] | `Suspendable<Vec<RootSlot>>` | the N tenured roots, IN the completion |
+//! | `Render { field0_forced }` | [`JitEffectMachine::run_fragment_suspendable_render`] | [`JitEffectMachine::resume_suspended_render`] | `Suspendable<(RootSlot, Value)>` | field 0's tenured root + field 1's render, IN the completion |
 //!
 //! All eight are thin wrappers over the one shared suspend body
 //! (`run_suspendable_shared` / `resume_applied` → `finish_suspendable`); the
-//! only thing that varies is which policy is handed to `materialize`. The
-//! PARKED (registry) path deliberately covers only the first two — [`ParkKind`]
-//! has no `Project`/`Render` spelling, since those are single-session repl
-//! paths with no realm counterpart.
+//! only thing that varies is which policy is handed to `materialize` and which
+//! completion type the entry projects onto. The PARKED (registry) path
+//! deliberately covers only the first two — [`ParkKind`] has no
+//! `Project`/`Render` spelling, since those are single-session repl paths with
+//! no realm counterpart.
+//!
+//! The two completion types are a TEMPORARY split. [`SuspendableOutcome`] is
+//! fixed as `Completed(Value)` and `tidepool-harness` matches on it, so `Bind`
+//! still stashes its root on the machine for `take_last_bound_root`. The
+//! `Project`/`Render` pair is newer and free of that, so each simply RETURNS
+//! what it produces: [`Suspendable`] is generic over the completion product,
+//! which is what lets `Project` stop fabricating a fields-elided constructor
+//! just to fill a `Value`-shaped hole it never had a value for. Widening
+//! [`SuspendableOutcome`] the same way — and deleting the stash — is a
+//! follow-up; the split exists to bound one cutover's blast radius, not because
+//! two shapes are wanted.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -326,14 +338,34 @@ enum ParkTarget {
     },
 }
 
+/// What a COMPLETING suspendable run produced, one variant per
+/// [`ResultMaterialization`] policy. Each public entry requests exactly one
+/// policy and projects exactly the matching variant onto its own return type;
+/// the others are unreachable for that call site by construction.
+enum CompletedProduct {
+    /// `Value` — the bridged result.
+    Value(tidepool_eval::value::Value),
+    /// `Bind { forced }` — the bridged TENURED value plus its persistent root.
+    Bind {
+        value: tidepool_eval::value::Value,
+        slot: crate::old_space::RootSlot,
+    },
+    /// `Project { n_fields }` — the tenured field roots, in field order. There
+    /// is no value: the products of a projection ARE the slots.
+    Project(Vec<crate::old_space::RootSlot>),
+    /// `Render { field0_forced }` — field 0's tenured root and field 1's
+    /// already-bridged render.
+    Render {
+        slot: crate::old_space::RootSlot,
+        rendered: tidepool_eval::value::Value,
+    },
+}
+
 /// Result of the shared suspendable body before it is projected into whichever
 /// public outcome type the caller's entry returns. `id` is `Some` exactly when
 /// the park target was [`ParkTarget::Registry`].
 enum ParkedRaw {
-    Completed {
-        value: tidepool_eval::value::Value,
-        bound_root: Option<crate::old_space::RootSlot>,
-    },
+    Completed(CompletedProduct),
     Suspended {
         request: tidepool_eval::value::Value,
         has_finalized_closure: bool,
@@ -342,16 +374,36 @@ enum ParkedRaw {
 }
 
 impl ParkedRaw {
-    /// Project onto the single-slot path's outcome type.
+    /// Split a suspension's payload out, asserting the slot-path invariant that
+    /// no continuation id was minted. Shared by every slot-path projection.
+    fn expect_slot_suspension(
+        request: tidepool_eval::value::Value,
+        has_finalized_closure: bool,
+        id: Option<ContinuationId>,
+    ) -> (tidepool_eval::value::Value, bool) {
+        debug_assert!(id.is_none(), "slot park target must not mint an id");
+        (request, has_finalized_closure)
+    }
+
+    /// Project onto the single-slot path's `Value`-completing outcome type
+    /// (the `Value` and `Bind` policies).
     fn into_suspendable(self) -> SuspendableOutcome {
         match self {
-            ParkedRaw::Completed { value, .. } => SuspendableOutcome::Completed(value),
+            ParkedRaw::Completed(CompletedProduct::Value(value))
+            | ParkedRaw::Completed(CompletedProduct::Bind { value, .. }) => {
+                SuspendableOutcome::Completed(value)
+            }
+            ParkedRaw::Completed(_) => unreachable!(
+                "into_suspendable is only reached by the Value/Bind entries, \
+                 whose policies produce CompletedProduct::Value/Bind"
+            ),
             ParkedRaw::Suspended {
                 request,
                 has_finalized_closure,
                 id,
             } => {
-                debug_assert!(id.is_none(), "slot park target must not mint an id");
+                let (request, has_finalized_closure) =
+                    Self::expect_slot_suspension(request, has_finalized_closure, id);
                 SuspendableOutcome::Suspended {
                     request,
                     has_finalized_closure,
@@ -360,12 +412,73 @@ impl ParkedRaw {
         }
     }
 
-    /// Project onto the registry path's outcome type.
+    /// Project onto the multi-binder entries' outcome: the tenured field roots.
+    fn into_projected(self) -> Suspendable<Vec<crate::old_space::RootSlot>> {
+        match self {
+            ParkedRaw::Completed(CompletedProduct::Project(slots)) => Suspendable::Completed(slots),
+            ParkedRaw::Completed(_) => unreachable!(
+                "into_projected is only reached by the Project entries, \
+                 whose policy produces CompletedProduct::Project"
+            ),
+            ParkedRaw::Suspended {
+                request,
+                has_finalized_closure,
+                id,
+            } => {
+                let (request, has_finalized_closure) =
+                    Self::expect_slot_suspension(request, has_finalized_closure, id);
+                Suspendable::Suspended {
+                    request,
+                    has_finalized_closure,
+                }
+            }
+        }
+    }
+
+    /// Project onto the bind-and-render entries' outcome: field 0's tenured
+    /// root paired with field 1's render.
+    fn into_render(self) -> Suspendable<(crate::old_space::RootSlot, tidepool_eval::value::Value)> {
+        match self {
+            ParkedRaw::Completed(CompletedProduct::Render { slot, rendered }) => {
+                Suspendable::Completed((slot, rendered))
+            }
+            ParkedRaw::Completed(_) => unreachable!(
+                "into_render is only reached by the Render entries, \
+                 whose policy produces CompletedProduct::Render"
+            ),
+            ParkedRaw::Suspended {
+                request,
+                has_finalized_closure,
+                id,
+            } => {
+                let (request, has_finalized_closure) =
+                    Self::expect_slot_suspension(request, has_finalized_closure, id);
+                Suspendable::Suspended {
+                    request,
+                    has_finalized_closure,
+                }
+            }
+        }
+    }
+
+    /// Project onto the registry path's outcome type. The registry only ever
+    /// requests `Value`/`Bind` ([`ParkKind`] has no other spelling).
     fn into_parked(self) -> ParkedOutcome {
         match self {
-            ParkedRaw::Completed { value, bound_root } => {
-                ParkedOutcome::Completed { value, bound_root }
+            ParkedRaw::Completed(CompletedProduct::Value(value)) => ParkedOutcome::Completed {
+                value,
+                bound_root: None,
+            },
+            ParkedRaw::Completed(CompletedProduct::Bind { value, slot }) => {
+                ParkedOutcome::Completed {
+                    value,
+                    bound_root: Some(slot),
+                }
             }
+            ParkedRaw::Completed(_) => unreachable!(
+                "the parked registry path requests only Value/Bind (ParkKind has \
+                 no Project/Render spelling)"
+            ),
             ParkedRaw::Suspended {
                 request,
                 has_finalized_closure,
@@ -442,15 +555,9 @@ enum ResultMaterialization {
 enum Materialized {
     Value(Value),
     Bind(crate::old_space::RootSlot),
-    Project {
-        /// The result tuple's own constructor, read off the NF tuple header
-        /// before its fields are tenured. The plain route ignores it (its
-        /// caller wants slots and nothing else); the SUSPENDABLE route needs
-        /// it because [`SuspendableOutcome::Completed`] must carry SOME
-        /// `Value` — see [`JitEffectMachine::run_fragment_suspendable_projected`].
-        con_id: tidepool_repr::DataConId,
-        slots: Vec<crate::old_space::RootSlot>,
-    },
+    /// The tenured field roots, in field order. Both routes want exactly these
+    /// — a projection has no result value of its own.
+    Project(Vec<crate::old_space::RootSlot>),
     Render(crate::old_space::RootSlot, Value),
 }
 
@@ -604,19 +711,6 @@ pub struct JitEffectMachine {
     /// instead, so a second realm's completion cannot overwrite a first
     /// realm's still-unread root (realm-checklist Item 3).
     last_bound_root: Option<crate::old_space::RootSlot>,
-    /// The MULTI-binder sibling of `last_bound_root`: the tenured roots a
-    /// `Project` turn (`(a, b) <- e`) produced on the suspendable path
-    /// (`run_fragment_suspendable_projected` / `resume_suspended_projected`),
-    /// in field order, read out via [`Self::take_last_bound_roots`]. Separate
-    /// from `last_bound_root` because the two policies are mutually exclusive
-    /// per turn and a `Vec<RootSlot>` does not fit
-    /// `ParkedRaw::Completed::bound_root`'s single-slot shape; same `!Send`
-    /// rationale for riding home inside the machine.
-    ///
-    /// SLOT PATH ONLY, structurally: [`ParkKind`] — the registry's spelling of
-    /// the completion policy — cannot express `Project`, so no parked entry
-    /// can write this.
-    last_bound_roots: Option<Vec<crate::old_space::RootSlot>>,
     /// W4 finalize-by-reference: the persistent root slot of a suspended
     /// `finalize @T closure`'s finalized VALUE (field 1 of the request Con),
     /// tenured at suspend time by [`Self::tenure_finalized_payload`]. `Some`
@@ -948,7 +1042,6 @@ impl JitEffectMachine {
             stowed_root_cell: None,
             nested_child_depth: 0,
             last_bound_root: None,
-            last_bound_roots: None,
             suspended_finalized_root: None,
             continuations: HashMap::new(),
             next_continuation_id: 0,
@@ -989,7 +1082,6 @@ impl JitEffectMachine {
             stowed_root_cell: None,
             nested_child_depth: 0,
             last_bound_root: None,
-            last_bound_roots: None,
             suspended_finalized_root: None,
             continuations: HashMap::new(),
             next_continuation_id: 0,
@@ -1393,13 +1485,6 @@ impl JitEffectMachine {
                         )),
                     )));
                 }
-                // The tuple's own constructor, read from the same (post-GC) NF
-                // object the arity came from, BEFORE any field is tenured —
-                // only the suspendable route consumes it (its `Completed` must
-                // carry a `Value`), the plain route drops it.
-                let con_id = tidepool_repr::DataConId(unsafe {
-                    *(nf_tuple.add(crate::layout::CON_TAG_OFFSET as usize) as *const u64)
-                });
                 // 3. Capture from_range AFTER deep_force (GC may have changed
                 //    the active region). tenure() is pure Rust — no JIT GC
                 //    fires — so this range stays valid for all field tenures.
@@ -1427,7 +1512,7 @@ impl JitEffectMachine {
                     };
                     slots.push(slot);
                 }
-                Ok(Materialized::Project { con_id, slots })
+                Ok(Materialized::Project(slots))
             }
             ResultMaterialization::Render { field0_forced } => {
                 if let Some(err) = crate::host_fns::take_runtime_error() {
@@ -1624,6 +1709,7 @@ impl JitEffectMachine {
             suspend_tag,
             ResultMaterialization::Value,
         )
+        .map(ParkedRaw::into_suspendable)
     }
 
     /// Suspend-capable sibling of [`Self::run_fragment`]: drive an
@@ -1655,6 +1741,7 @@ impl JitEffectMachine {
             suspend_tag,
             ResultMaterialization::Value,
         )
+        .map(ParkedRaw::into_suspendable)
     }
 
     /// Value-plane BIND sibling of [`Self::run_fragment_suspendable`]: drive a
@@ -1681,27 +1768,23 @@ impl JitEffectMachine {
             suspend_tag,
             ResultMaterialization::Bind { forced },
         )
+        .map(ParkedRaw::into_suspendable)
     }
 
     /// MULTI-binder sibling of [`Self::run_fragment_suspendable_binding`], and
     /// the suspendable sibling of [`Self::run_fragment_and_bind_projected`]:
     /// drive a multi-bind fragment (`(a, b) <- e`) through the threadless
     /// suspend path, and — on `Done` — deep-force the WHOLE result tuple and
-    /// tenure each of its `n_fields` fields into old-space. The tenured roots
-    /// land on the machine in field order, read out via
-    /// [`Self::take_last_bound_roots`] after it moves off the eval thread; the
-    /// caller zips them with its binder metadata. A turn that suspends at an
-    /// ask tenures NOTHING yet — its fields are bound on the eventual
-    /// [`Self::resume_suspended_projected`].
+    /// tenure each of its `n_fields` fields into old-space.
     ///
-    /// The `SuspendableOutcome::Completed` payload is the result tuple's real
-    /// constructor with its fields ELIDED (`Value::Con(con_id, vec![])`), NOT
-    /// a bridge of the bound values. Deliberate: the outcome type has to carry
-    /// some `Value`, and bridging the tenured fields would import the bridge's
-    /// depth/size failure modes into a path that cannot fail after a
-    /// successful tenure — a multi-bind that binds fine would start erroring
-    /// where its non-suspendable sibling (which never bridges) succeeds. The
-    /// PRODUCTS of this policy are the slots.
+    /// Completion IS the tenured roots, in field order: the caller zips them
+    /// with its binder metadata. A projection has no result value of its own —
+    /// no bridge of the bound fields (which would import the bridge's
+    /// depth/size failure modes into a path that cannot fail after a successful
+    /// tenure), and nothing invented to fill a `Value`-shaped hole either,
+    /// because [`Suspendable`] is generic over what the policy produces. A turn
+    /// that suspends at an ask tenures NOTHING yet — its fields are bound on the
+    /// eventual [`Self::resume_suspended_projected`].
     ///
     /// # Panics
     /// Panics on a non-session machine, on `n_fields == 0` (same precondition
@@ -1715,7 +1798,7 @@ impl JitEffectMachine {
         user: &U,
         suspend_tag: u64,
         n_fields: usize,
-    ) -> Result<SuspendableOutcome, JitError> {
+    ) -> Result<Suspendable<Vec<crate::old_space::RootSlot>>, JitError> {
         assert!(
             n_fields > 0,
             "run_fragment_suspendable_projected requires at least one field"
@@ -1728,18 +1811,16 @@ impl JitEffectMachine {
             suspend_tag,
             ResultMaterialization::Project { n_fields },
         )
+        .map(ParkedRaw::into_projected)
     }
 
     /// BIND-AND-RENDER sibling of [`Self::run_fragment_suspendable_binding`],
     /// and the suspendable sibling of [`Self::run_fragment_and_bind_render`]:
     /// drive the repl's bare-expression fragment — a wrapped
     /// `pure (it, toWire it)` — through the threadless suspend path, binding
-    /// field 0 and rendering field 1 in ONE run. On `Done` the
-    /// `SuspendableOutcome::Completed` payload is the RENDERED field 1, and
-    /// field 0's tenured root is stashed for [`Self::take_last_bound_root`] —
-    /// the same pair `run_fragment_and_bind_render` returns directly, split
-    /// across the outcome and the machine because a `RootSlot` is `!Send` and
-    /// cannot cross the eval-thread boundary as a bare value.
+    /// field 0 and rendering field 1 in ONE run. Completion carries BOTH
+    /// products together — field 0's tenured root and field 1's render — the
+    /// same pair `run_fragment_and_bind_render` returns directly.
     ///
     /// `field0_forced` mirrors the bind flag: `true` (Tier0 data) deep-forces
     /// field 0 to NF before tenuring, `false` (Tier1 closure) tenures as-is.
@@ -1762,7 +1843,7 @@ impl JitEffectMachine {
         user: &U,
         suspend_tag: u64,
         field0_forced: bool,
-    ) -> Result<SuspendableOutcome, JitError> {
+    ) -> Result<Suspendable<(crate::old_space::RootSlot, Value)>, JitError> {
         self.run_suspendable_with_entry(
             func_id,
             table,
@@ -1771,6 +1852,7 @@ impl JitEffectMachine {
             suspend_tag,
             ResultMaterialization::Render { field0_forced },
         )
+        .map(ParkedRaw::into_render)
     }
 
     /// Shared suspend-capable run body, parametrized by the entry `func_id`.
@@ -1787,7 +1869,7 @@ impl JitEffectMachine {
         user: &U,
         suspend_tag: u64,
         materialization: ResultMaterialization,
-    ) -> Result<SuspendableOutcome, JitError> {
+    ) -> Result<ParkedRaw, JitError> {
         self.run_suspendable_shared(
             func_id,
             table,
@@ -1797,7 +1879,6 @@ impl JitEffectMachine {
             materialization,
             ParkTarget::Slot,
         )
-        .map(ParkedRaw::into_suspendable)
     }
 
     /// Shared suspendable run body for BOTH suspension paths, parametrized by
@@ -1944,6 +2025,7 @@ impl JitEffectMachine {
             input,
             ResultMaterialization::Value,
         )
+        .map(ParkedRaw::into_suspendable)
     }
 
     /// Value-plane BIND sibling of [`Self::resume_suspended`]: re-enter a suspended
@@ -1968,17 +2050,17 @@ impl JitEffectMachine {
             input,
             ResultMaterialization::Bind { forced },
         )
+        .map(ParkedRaw::into_suspendable)
     }
 
     /// MULTI-binder sibling of [`Self::resume_suspended_binding`]: re-enter a
     /// suspended multi-bind turn (`(a, b) <- e` that stowed at an ask) and, on
     /// `Done`, deep-force the whole result tuple and tenure each of its
-    /// `n_fields` fields — the roots landing on the machine for
-    /// [`Self::take_last_bound_roots`]. `n_fields` is supplied by the caller
-    /// (which is holding the binder metadata across the suspension), exactly
-    /// as `forced` is on the binding resume. See
-    /// [`Self::run_fragment_suspendable_projected`] for what the `Completed`
-    /// payload carries, and why it is not a bridge of the bound fields.
+    /// `n_fields` fields — completing with those roots. `n_fields` is supplied
+    /// by the caller (which is holding the binder metadata across the
+    /// suspension), exactly as `forced` is on the binding resume. See
+    /// [`Self::run_fragment_suspendable_projected`] for why the completion
+    /// carries slots rather than a value.
     ///
     /// # Panics
     /// Panics on `n_fields == 0`. Errors (does not panic) if the machine is
@@ -1991,7 +2073,7 @@ impl JitEffectMachine {
         suspend_tag: u64,
         input: ResumeInput,
         n_fields: usize,
-    ) -> Result<SuspendableOutcome, JitError> {
+    ) -> Result<Suspendable<Vec<crate::old_space::RootSlot>>, JitError> {
         assert!(
             n_fields > 0,
             "resume_suspended_projected requires at least one field"
@@ -2004,15 +2086,15 @@ impl JitEffectMachine {
             input,
             ResultMaterialization::Project { n_fields },
         )
+        .map(ParkedRaw::into_projected)
     }
 
     /// BIND-AND-RENDER sibling of [`Self::resume_suspended_binding`]: re-enter
     /// a suspended bare-expression turn (`pure (it, toWire it)` that stowed at
-    /// an ask) and, on `Done`, bridge field 1 into the returned `Completed`
-    /// value and tenure field 0 for [`Self::take_last_bound_root`]. The
-    /// field1-before-field0-tenure ordering that makes an aliased
-    /// `(it, toWire it)` safe lives in [`Self::materialize`] and is therefore
-    /// identical on this path and on the non-suspending
+    /// an ask) and, on `Done`, complete with field 0's tenured root paired with
+    /// field 1's bridged render. The field1-before-field0-tenure ordering that
+    /// makes an aliased `(it, toWire it)` safe lives in [`Self::materialize`]
+    /// and is therefore identical on this path and on the non-suspending
     /// [`Self::run_fragment_and_bind_render`].
     pub fn resume_suspended_render<U, H: DispatchEffect<U>>(
         &mut self,
@@ -2022,7 +2104,7 @@ impl JitEffectMachine {
         suspend_tag: u64,
         input: ResumeInput,
         field0_forced: bool,
-    ) -> Result<SuspendableOutcome, JitError> {
+    ) -> Result<Suspendable<(crate::old_space::RootSlot, Value)>, JitError> {
         self.resume_suspended_inner(
             table,
             handlers,
@@ -2031,6 +2113,7 @@ impl JitEffectMachine {
             input,
             ResultMaterialization::Render { field0_forced },
         )
+        .map(ParkedRaw::into_render)
     }
 
     /// Shared body of every slot-path resume, parametrized by the
@@ -2044,7 +2127,7 @@ impl JitEffectMachine {
         suspend_tag: u64,
         input: ResumeInput,
         materialization: ResultMaterialization,
-    ) -> Result<SuspendableOutcome, JitError> {
+    ) -> Result<ParkedRaw, JitError> {
         // PEEK the continuation — do NOT consume it yet. The A5 NF-force
         // (segment 40) rejects a bottom-bearing answer WITHOUT consuming the
         // continuation, so the caller can retry with a corrected answer; only
@@ -2102,7 +2185,6 @@ impl JitEffectMachine {
             ParkTarget::Slot,
             flag,
         )
-        .map(ParkedRaw::into_suspendable)
     }
 
     /// Apply an already-acquired continuation to a resume `input` and drive to
@@ -2231,17 +2313,21 @@ impl JitEffectMachine {
     /// What stays HERE, because it is the suspendable path's own concern, in
     /// this order:
     ///
-    /// 1. the machine-level stash — on the SLOT path a tenured root goes to
-    ///    `self.last_bound_root` (`Bind`/`Render`) or `self.last_bound_roots`
-    ///    (`Project`), byte-identically to before; on the REGISTRY path it is
-    ///    returned INLINE via `ParkedRaw::Completed::bound_root` instead — A1,
-    ///    closing realm-checklist Item 3 (two realms' binds completing before
-    ///    either is drained would otherwise overwrite one machine-level slot);
+    /// 1. the machine-level stash — on the SLOT path a `Bind`'s tenured root
+    ///    goes to `self.last_bound_root`, byte-identically to before, because
+    ///    [`SuspendableOutcome::Completed`] is fixed at a bare `Value` and
+    ///    cannot carry it; on the REGISTRY path it is returned INLINE via
+    ///    `ParkedOutcome::Completed::bound_root` instead — A1, closing
+    ///    realm-checklist Item 3 (two realms' binds completing before either is
+    ///    drained would otherwise overwrite one machine-level slot).
+    ///    `Project`/`Render` never stash: they complete as `Suspendable<T>` and
+    ///    return their roots in the outcome. `Bind` is slated to join them once
+    ///    `SuspendableOutcome` is widened;
     /// 2. the bridge that turns a tenured root into the `Value` a
     ///    [`SuspendableOutcome::Completed`] must carry — for `Bind`, that is
     ///    the bridge of `slot.current()` (the TENURED, rooted pointer, not
-    ///    `done_ptr`); for `Render` it is the already-bridged field-1 render;
-    ///    for `Project` see [`Self::run_fragment_suspendable_projected`].
+    ///    `done_ptr`). `Render` needs no bridge here (field 1 was already
+    ///    bridged inside `materialize`) and `Project` needs none at all.
     ///
     /// ORDERING: [`Self::materialize`] touches `self.session` via `tenure`, so
     /// a caller MUST NOT have armed reclaim before this call — the guard's
@@ -2281,11 +2367,22 @@ impl JitEffectMachine {
                 // after this returns, because the tenure inside touches
                 // `self.session`.
                 match self.materialize(machine.vmctx_mut(), done_ptr, materialization)? {
-                    Materialized::Value(value) => Ok(ParkedRaw::Completed {
-                        value,
-                        bound_root: None,
-                    }),
+                    Materialized::Value(value) => {
+                        Ok(ParkedRaw::Completed(CompletedProduct::Value(value)))
+                    }
                     Materialized::Bind(slot) => {
+                        // SCHEDULED FOR REMOVAL, not a standing asymmetry.
+                        // `Bind` completes as a `SuspendableOutcome`, whose
+                        // `Completed` is fixed at a bare `Value`, so its root
+                        // cannot ride out inline and is stashed here for
+                        // `take_last_bound_root`. `Project`/`Render` complete as
+                        // `Suspendable<T>` and return their roots directly — no
+                        // stash, nothing to take, nothing to forget to take. The
+                        // stash is held open only to keep the repl-unpark
+                        // cutover's blast radius off `tidepool-harness`;
+                        // widening `SuspendableOutcome` the same way and deleting
+                        // `last_bound_root` is a follow-up commit once that
+                        // cutover is green.
                         if let ParkTarget::Slot = park {
                             self.last_bound_root = Some(slot);
                         }
@@ -2305,44 +2402,34 @@ impl JitEffectMachine {
                         let value = crate::host_fns::surface_error(
                             bridge_res.map_err(JitError::HeapBridge),
                         )?;
-                        Ok(ParkedRaw::Completed {
-                            value,
-                            bound_root: Some(slot),
-                        })
+                        Ok(ParkedRaw::Completed(CompletedProduct::Bind { value, slot }))
                     }
-                    Materialized::Project { con_id, slots } => {
+                    Materialized::Project(slots) => {
                         // Project is SLOT-PATH ONLY: `ParkKind` (the registry's
                         // spelling of the policy) has no Project variant, so no
-                        // parked entry can request it. The `if let` mirrors
-                        // Bind's discipline rather than assuming that.
+                        // parked entry can request it.
                         debug_assert!(
                             matches!(park, ParkTarget::Slot),
                             "Project materialization is slot-path only — ParkKind cannot request it"
                         );
-                        if let ParkTarget::Slot = park {
-                            self.last_bound_roots = Some(slots);
-                        }
-                        // The completion carries the result tuple's real
-                        // constructor with its fields ELIDED — see
-                        // `run_fragment_suspendable_projected`'s doc for why the
-                        // fields are deliberately not bridged. The products are
-                        // the slots, taken via `take_last_bound_roots`.
-                        Ok(ParkedRaw::Completed {
-                            value: Value::Con(con_id, Vec::new()),
-                            bound_root: None,
-                        })
+                        // The slots ARE the products; they ride out in the
+                        // completion, so nothing is stashed and nothing has to be
+                        // taken back off the machine.
+                        Ok(ParkedRaw::Completed(CompletedProduct::Project(slots)))
                     }
                     Materialized::Render(slot, rendered) => {
-                        if let ParkTarget::Slot = park {
-                            self.last_bound_root = Some(slot);
-                        }
+                        debug_assert!(
+                            matches!(park, ParkTarget::Slot),
+                            "Render materialization is slot-path only — ParkKind cannot request it"
+                        );
                         // No second bridge: `rendered` IS field 1, already
                         // bridged inside `materialize` BEFORE field 0 was
-                        // tenured (the aliasing-safe ordering).
-                        Ok(ParkedRaw::Completed {
-                            value: rendered,
-                            bound_root: Some(slot),
-                        })
+                        // tenured (the aliasing-safe ordering). Both products
+                        // ride out in the completion.
+                        Ok(ParkedRaw::Completed(CompletedProduct::Render {
+                            slot,
+                            rendered,
+                        }))
                     }
                 }
             }
@@ -2460,20 +2547,6 @@ impl JitEffectMachine {
     /// thread and records the `BindingEntry` against it.
     pub fn take_last_bound_root(&mut self) -> Option<crate::old_space::RootSlot> {
         self.last_bound_root.take()
-    }
-
-    /// Take the [`RootSlot`]s a MULTI-binder bind tenured on its last
-    /// suspendable completion
-    /// (`run_fragment_suspendable_projected`/`resume_suspended_projected`), in
-    /// field order, clearing them. `None` if the last run was not a projected
-    /// bind or has already been taken. The sibling of
-    /// [`Self::take_last_bound_root`], read at the same point in the caller's
-    /// lifecycle: after the machine moves back off the eval thread, zipped
-    /// with the turn's binder metadata.
-    ///
-    /// [`RootSlot`]: crate::old_space::RootSlot
-    pub fn take_last_bound_roots(&mut self) -> Option<Vec<crate::old_space::RootSlot>> {
-        self.last_bound_roots.take()
     }
 
     /// Take the persistent root slot of a suspended `finalize @T closure`'s
@@ -2871,7 +2944,7 @@ impl JitEffectMachine {
             "stepping effectful computation (multi-bind)",
             " (multi-bind)",
         )? {
-            Materialized::Project { slots, .. } => Ok(slots),
+            Materialized::Project(slots) => Ok(slots),
             _ => unreachable!("ResultMaterialization::Project always yields Materialized::Project"),
         }
     }
@@ -3755,6 +3828,27 @@ pub enum SuspendableOutcome {
         /// that field's place. `false` for an ordinary `Ask`/`RunLLMTurn`
         /// suspension (or a `finalize` of a plain DATA value, which bridges
         /// fully and needs no by-reference handoff).
+        has_finalized_closure: bool,
+    },
+}
+
+/// A suspendable turn's outcome, generic over what its
+/// result-materialization policy actually PRODUCES on completion.
+///
+/// [`SuspendableOutcome`] is the `T = Value` case, kept as its own type because
+/// it predates this one and has consumers matching on it. The newer
+/// projected/render entries use this instead, so each returns its real product
+/// — N tenured roots, or a root paired with a render — rather than inventing a
+/// `Value` to satisfy a fixed shape.
+pub enum Suspendable<T> {
+    /// The turn ran to completion, producing `T`.
+    Completed(T),
+    /// The turn suspended at the ask boundary; the machine holds the
+    /// continuation internally. Same payload as
+    /// [`SuspendableOutcome::Suspended`].
+    Suspended {
+        request: tidepool_eval::value::Value,
+        /// See [`SuspendableOutcome::Suspended::has_finalized_closure`].
         has_finalized_closure: bool,
     },
 }

@@ -1,7 +1,11 @@
 # tidepool-harness — typed-yield session harness (R0 build)
 
-A new frontend over the eval substrate — NOT a retrofit of tidepool-repl
-(which keeps its parked-thread mechanism unchanged). Plan + segment specs:
+A new frontend over the eval substrate — NOT a retrofit of tidepool-repl.
+The two are separate frontends that now share ONE suspension engine: the
+threadless stow-as-data mechanism in
+`tidepool_runtime::session::PersistentSession`. The repl's parked-thread
+mechanism is gone (`plans/unpark/`), so nothing here is contrasting against
+it. Plan + segment specs:
 `plans/harness-r0/`; cross-segment contracts:
 `plans/harness-r0/00-scaffold/contracts.md`; frozen shapes:
 `plans/harness-r0/FREEZES.md`.

@@ -22,11 +22,11 @@ pub mod render;
 pub mod resident;
 pub mod turn;
 
-pub use persistent::{ParkedThread, PersistentSession, SuspensionMechanism, Threadless};
+pub use persistent::PersistentSession;
 
 pub use engine::{
-    AbortOutcome, EngineConfig, OutputSink, RenderPolicy, ResumeOutcome, Retention, SessionEngine,
-    StartError, StartTurn, TurnOutcome,
+    extract_ask_request, AbortOutcome, EngineConfig, GateDispatcher, OutputSink, RenderPolicy,
+    ResumeOutcome, Retention, SessionEngine, StartError, StartTurn, TurnOutcome,
 };
 
 pub use resident::{ResidentError, ResidentOutcome, ResidentSession};
