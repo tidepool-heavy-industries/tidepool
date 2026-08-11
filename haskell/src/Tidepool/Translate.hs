@@ -3554,11 +3554,6 @@ showHex' w = "0x" ++ Numeric.showHex w ""
 -- expected I#, got Text). Conversion is always SAFE (a lambda+NApp is
 -- semantically a superset of a block+jump), so the predicate may be
 -- conservative.
--- #313: "lambda" must include CONVERSION-INDUCED lambdas, not just
--- source-level ones — Rec joinrecs always become LetRec lambdas (separate
--- Cranelift functions), and a NonRec join that itself converts becomes a
--- lambda too. A jump to an outer join from inside any such body crosses a
--- function boundary that did not exist in source Core.
 jumpCrossesLam :: Word64 -> CoreExpr -> Bool
 jumpCrossesLam vid = go False
   where
