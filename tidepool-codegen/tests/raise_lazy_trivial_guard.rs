@@ -1,5 +1,4 @@
-//! M2 (repo-review-2026-07-06/01-gc-memory-safety.md, Medium findings):
-//! `is_trivial_field` classified `PrimOp Raise` with a trivial arg (or no
+//! M2: `is_trivial_field` classified `PrimOp Raise` with a trivial arg (or no
 //! arg) as trivial, so a `LetNonRec` binding a `raise#` RHS evaluated it
 //! EAGERLY — right at the `let`, unconditionally — instead of only when the
 //! binder is actually forced. `let x = raise# e in if False then x else 0`

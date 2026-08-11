@@ -37,8 +37,8 @@
 //! GHC's unboxed-tuple primops (`timesInt2#`, `timesWord2#`, `quotRemWord#`,
 //! `addIntC#`, `subWordC#`, `addWordC#`) are lowered in this codebase to ONE
 //! `PrimOpKind` per tuple SLOT (`TimesInt2Hi` / `TimesInt2Lo` /
-//! `TimesInt2Overflow`, etc.). A slot-ordering bug (such as the recently-fixed
-//! `timesInt2#` hi/lo swap) manifests as a wrong value in exactly one slot. We
+//! `TimesInt2Overflow`, etc.). A slot-ordering bug (such as a `timesInt2#`
+//! hi/lo swap) manifests as a wrong value in exactly one slot. We
 //! probe each slot independently AND together (folded into a Pair/triple Con,
 //! whose fields `values_equal` compares element-wise) so a single swapped slot
 //! fails loudly with a pin-pointable repro.
@@ -670,8 +670,8 @@ fn prop_times_int2_slots() {
     let mut runner = TestRunner::new(cfg_int());
     runner
         .run(&(arb_edge_i64(), arb_edge_i64()), |(a, b)| {
-            // (hi, lo, overflow) — the timesInt2# triple. A hi/lo swap (the
-            // recently-shipped bug class) makes the Con fields disagree.
+            // (hi, lo, overflow) — the timesInt2# triple. A hi/lo swap makes
+            // the Con fields disagree.
             check(
                 prog_triple_slots_int(
                     PrimOpKind::TimesInt2Hi,
@@ -1155,9 +1155,9 @@ fn jitbug_int64_to_word64_result_tag() {
 // ===========================================================================
 // Configs.
 //
-// Two budgets per the lane spec: a larger "default" lane and a deterministic
-// re-run. The int/word lanes loop over MANY ops per case, so 350 cases is
-// thousands of compiled programs; the float lanes are lighter.
+// The int/word lanes loop over MANY ops per case, so 350 cases is thousands
+// of compiled programs; the float lanes are lighter per case, so cases are
+// raised to 400.
 // ===========================================================================
 fn cfg_int() -> Config {
     let mut c = Config::with_cases(350);

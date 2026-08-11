@@ -1,21 +1,17 @@
-//! Differential proptest for the JIT effect-dispatch loop (W5 jit-dispatch).
+//! Differential proptest for the JIT effect-dispatch loop.
 //!
 //! ## What is under test
 //!
 //! Two independent machines interpret the *same* freer-simple `Eff` program
-//! driven by the *same* deterministic response script:
-//!
-//!  * the **JIT machine** — `JitEffectMachine::run`, whose dispatch loop lives
-//!    in `tidepool-codegen/src/jit_machine.rs:259-430` (request out via
-//!    `heap_to_value_forcing`, response in via `value_to_heap` / stream
-//!    parking / huge-spine dismantle);
-//!  * the **eval machine** — `tidepool_effect::machine::EffectMachine`, the
-//!    tree-walking interpreter used here as a differential oracle.
+//! driven by the *same* deterministic response script: the **JIT machine**
+//! (`JitEffectMachine::run`, `src/jit_machine.rs`) and the **eval machine**
+//! (`tidepool_effect::machine::EffectMachine`, the tree-walking interpreter
+//! used here as a differential oracle).
 //!
 //! Both peel effect tags through the *same* real `DispatchEffect` HList impl
-//! (`tidepool-effect/src/dispatch.rs:266-280`, tag 0 → head, N → tail with
-//! N-1). Because routing is shared code, a routing off-by-one cannot surface
-//! as a JIT/eval divergence — so tag routing is probed directly instead
+//! (`tidepool-effect/src/dispatch.rs`, tag 0 → head, N → tail with N-1).
+//! Because routing is shared code, a routing off-by-one cannot surface as a
+//! JIT/eval divergence — so tag routing is probed directly instead
 //! (invalid-tag cases: clean `UnhandledEffect` with the same decremented tag
 //! on both sides, and never a fatal signal).
 //!
@@ -24,16 +20,14 @@
 //! The only `DispatchEffect` impls in the tree are for frunk's `HCons`/`HNil`,
 //! and there is no reachable re-export. Driving both machines through a
 //! hand-rolled dispatcher would test a *mirror* of the routing logic rather
-//! than the real thing. So `frunk` is added as a **dev-dependency only**
-//! (test-scoped; the production crate graph is untouched). This is the minimal
-//! change that makes the specified oracle faithful.
+//! than the real thing, so `frunk` is a **dev-dependency only** here
+//! (test-scoped; the production crate graph is untouched).
 //!
 //! ## Crash isolation
 //!
 //! A JIT (or eval) fault that escapes `with_signal_protection` lands in the
-//! process-wide SIGSEGV/SIGILL handler, which `SYS_exit`s the *thread* — to the
-//! embedder that reads as a silent hang, not a failure (see
-//! `signal_safety.rs:316-330` and `.tidepool/crash.log`). So every case runs in
+//! process-wide SIGSEGV/SIGILL handler, which exits the *thread* — to the
+//! embedder that reads as a silent hang, not a failure. So every case runs in
 //! a forked child that streams a verdict back over a pipe; the parent attributes
 //! faults by *verdict-byte presence*, not by `WIFSIGNALED` (the handler would
 //! mask the signal as a clean thread exit). The child runs the JIT phase first
@@ -229,8 +223,7 @@ fn fresh_rec() -> Rc<RefCell<Recorder>> {
 }
 
 // ---------------------------------------------------------------------------
-// Program builders — hand-built effect trees generalizing
-// proptest_effect_machine.rs's E(Union(tag, req), Leaf(\x -> ...)) constructors.
+// Program builders — hand-built effect trees: E(Union(tag, req), Leaf(\x -> ...)).
 // ---------------------------------------------------------------------------
 
 /// A single effect's coordinates: which handler tag fires and the integer
@@ -507,12 +500,9 @@ fn val_summary(v: &Value) -> (u8, i64) {
     }
 }
 
-/// Total: every `EffectError` variant is named, no wildcard arm. A variant
+/// Total: every `EffectError` variant is named, no wildcard arm — a variant
 /// added upstream breaks this match at compile time rather than silently
-/// falling into a catch-all — the same discipline
-/// `tidepool_testing::differential::classify_eval` uses for `EvalError`
-/// (a different type: this lane drives the effect machine, whose errors are
-/// `EffectError`, not the pure-eval `EvalError` that module classifies).
+/// falling into a catch-all.
 fn eval_err_class(e: &EffectError) -> (u8, i64) {
     match e {
         EffectError::UnhandledEffect { tag } => (errclass::UNHANDLED, *tag as i64),
@@ -525,9 +515,7 @@ fn eval_err_class(e: &EffectError) -> (u8, i64) {
     }
 }
 
-/// Total: every `RuntimeError` variant is named (mirrors
-/// `differential::classify_runtime`'s coverage, in this lane's own byte
-/// scheme).
+/// Total: every `RuntimeError` variant is named, no wildcard arm.
 fn runtime_err_class(e: &RuntimeError) -> (u8, i64) {
     match e {
         RuntimeError::CaseTrap => (errclass::CASE_TRAP, -1),
@@ -564,11 +552,9 @@ fn yield_err_class(e: &YieldError) -> (u8, i64) {
     }
 }
 
-/// Total: every `JitError` variant is named, no wildcard arm — the
-/// classified-not-wildcard discipline this lane's bespoke half must uphold
-/// even though it can't reuse `differential::classify_jit` directly (this
-/// lane needs the `UnhandledEffect` tag payload for tag-routing assertions,
-/// which `JitErrorClass::Effect` collapses away).
+/// Total: every `JitError` variant is named, no wildcard arm. Doesn't route
+/// through a pre-collapsed effect-error class: this lane needs the
+/// `UnhandledEffect` tag payload for tag-routing assertions.
 fn jit_err_class(e: &JitError) -> (u8, i64) {
     match e {
         JitError::Effect(eff) => eval_err_class(eff),
@@ -838,7 +824,7 @@ fn valid_tag() -> impl Strategy<Value = u64> {
 }
 
 fn invalid_tag() -> impl Strategy<Value = u64> {
-    // Includes 255 explicitly (cf. nested_mapm_tag255 off-by-one history).
+    // Includes 255 explicitly (u8-boundary tag value).
     prop_oneof![
         N_HANDLERS..256u64,
         Just(255u64),
@@ -925,31 +911,24 @@ fn shape_mismatch_strategy() -> impl Strategy<Value = (CoreExpr, Vec<Spec>)> {
 // ---------------------------------------------------------------------------
 // Properties.
 //
-// `full_differential` and `huge_complete_and_stream` are the two "success
-// path" properties (a valid-tag program is expected to reach a final-value
-// comparison), so each drives `TestRunner` directly (not the `proptest!`
-// macro) to own a local, in-process reach floor — the same discipline
-// `tidepool_testing::differential`'s lanes use, reimplemented here as
-// `ReachTally` because this lane's outcome type (`Outcome`/the byte
-// `Verdict`) is bespoke, not the pure-value runner's `differential::Verdict`.
+// `full_differential` and `huge_complete_and_stream` drive `TestRunner`
+// directly (not the `proptest!` macro) so each can own a local, in-process
+// reach floor (`ReachTally`) for its bespoke `Outcome`/`Verdict` type.
 // `err_at_k` / `invalid_tag_never_signals` / `shape_mismatch_resume` stay on
-// the `proptest!` macro: they deliberately probe error/edge paths where
-// "reached a value comparison" isn't the metric under test (invalid tags
-// never produce a comparable value at all, by design).
+// the `proptest!` macro: they probe error/edge paths where "reached a value
+// comparison" isn't the metric under test (invalid tags never produce a
+// comparable value at all, by design).
 //
-// Neither converted fn's NAME changed — this file's checked-in
-// `.proptest-regressions` seeds are irrelevant to test name (verified from
-// proptest 1.11's own source: `FileFailurePersistence::load_persisted_
-// failures2` resolves purely off `source_file`; `Config::test_name` exists
-// only for the opt-in process-`fork` feature, unused here) but renaming
-// anyway would violate the letter of the review guidance this lane was
-// flagged under, so names are preserved regardless.
+// A hand-built `Config` driven through `TestRunner` must set `source_file`
+// explicitly: `FileFailurePersistence::SourceParallel` (proptest's default)
+// resolves the `.proptest-regressions` path purely off `source_file` and
+// silently resolves to NO PATH without it — the `proptest!` macro sets this
+// implicitly from `file!()`, a bare `TestRunner` does not.
 // ---------------------------------------------------------------------------
 
-/// A local, in-process reach counter — `tidepool_testing::differential::
-/// ReachCounter`'s shape, reimplemented here for this lane's bespoke
-/// `Outcome` type. `Cell`, not an atomic: `TestRunner::run` drives the case
-/// closure through `Fn`, not `FnMut`, but each property runs single-threaded.
+/// A local, in-process reach counter for this lane's bespoke `Outcome` type.
+/// `Cell`, not an atomic: `TestRunner::run` drives the case closure through
+/// `Fn`, not `FnMut`, but each property runs single-threaded.
 struct ReachTally {
     label: &'static str,
     total: Cell<u64>,
@@ -1099,11 +1078,10 @@ proptest! {
     /// Shape-mismatched response (string into an integer continuation).
     ///
     /// CONTRACT: a clean error — never a fatal trap, never a silently-wrong
-    /// value. FIXED 2026-06-10: the unboxing loops now guard the Con-unwrap
-    /// step (boxing wrappers have exactly one field; see
-    /// emit_boxing_wrapper_guard), so a multi-field Con where a number was
-    /// expected traps cleanly instead of yielding pointer-derived garbage.
-    /// The full strict contract is asserted live.
+    /// value. The unboxing loops guard the Con-unwrap step (boxing wrappers
+    /// have exactly one field; see `emit_boxing_wrapper_guard`), so a
+    /// multi-field Con where a number was expected traps cleanly instead of
+    /// yielding pointer-derived garbage.
     #[test]
     fn shape_mismatch_resume((expr, script) in shape_mismatch_strategy()) {
         let outcome = run_case(expr, script);
@@ -1126,9 +1104,9 @@ proptest! {
 }
 
 // ---------------------------------------------------------------------------
-// Captured bugs — minimal, deterministic repros. `#[ignore]`d so the suite is
-// green; run with `--ignored` to observe the divergence. Seeds for the
-// generated forms live in proptest_jit_dispatch.proptest-regressions.
+// Captured bugs — minimal, deterministic repros, both fixed and now active
+// regression tests. Seeds for the generated forms live in
+// proptest_jit_dispatch.proptest-regressions.
 // ---------------------------------------------------------------------------
 
 /// BUG (B2 / silent-garbage): the JIT resume path performs `Int#` arithmetic on
@@ -1151,10 +1129,9 @@ proptest! {
 ///    with the continuation) — well-typed GHC output cannot reach it, so this
 ///    is a defensive-robustness gap, not a miscompile of valid programs.
 ///  * seed: proptest cc ee1877d8…84337f0 (shrinks to `Str("")`).
-// FIXED 2026-06-10 (emit_boxing_wrapper_guard in emit/primop.rs): the unbox
-// loops trap cleanly on a multi-field Con, so the string response yields a
-// clean error exactly like eval. Active regression test — the assertion below
-// is the desired contract and now passes.
+// FIXED (emit_boxing_wrapper_guard in emit/primop.rs): the unbox loops trap
+// cleanly on a multi-field Con, so the string response yields a clean error
+// exactly like eval. Active regression test.
 #[test]
 fn bug_shape_mismatch_jit_reads_string_as_int() {
     // Minimal shrunk form: E(Union(0, 0), Leaf(\x -> Val(x +# 7))) with the
@@ -1183,7 +1160,7 @@ fn bug_shape_mismatch_jit_reads_string_as_int() {
 }
 
 /// BUG (B2 / silent-garbage, FP residual): a handler returns a `Double` where
-/// the continuation does `Int#` arithmetic. The original `f137d34` guard only
+/// the continuation does `Int#` arithmetic. The original guard only
 /// rejected *pointer*-valued lits (STRING / arrays), so a `Double` lit slipped
 /// through `unbox_int` and its raw IEEE-754 bits were loaded as an `i64` — a
 /// silently-wrong number where the eval oracle's strict `expect_int` cleanly

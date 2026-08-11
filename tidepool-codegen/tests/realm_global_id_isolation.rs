@@ -1,6 +1,6 @@
-//! REALM GLOBAL-ID ISOLATION — pins the codex-review-2026-08-08.md item 3
-//! GLOBAL-ID invariant documented at its definition (`jit_machine.rs`,
-//! `add_function`'s `tags`/`json_con_ids`/`time_con_ids` accumulation): two
+//! REALM GLOBAL-ID ISOLATION — pins the GLOBAL-ID invariant documented at its
+//! definition (`jit_machine.rs`, `add_function`'s
+//! `tags`/`json_con_ids`/`time_con_ids` accumulation): two
 //! realms sharing ONE machine may each carry a DIFFERENT `DataConTable`, and
 //! nothing prevents those tables from assigning the SAME numeric
 //! `DataConId`/runtime tag to DIFFERENT domain constructors. This file proves

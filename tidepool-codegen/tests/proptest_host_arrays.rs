@@ -1,57 +1,28 @@
 //! Stateful op-sequence proptests for the ByteArray, boxed-array, and Double
-//! host functions in `tidepool_codegen::host_fns` (W7 host-arrays).
+//! host functions in `tidepool_codegen::host_fns`. Each performs raw pointer
+//! arithmetic through `unsafe` accessors, so a fencepost error is a SIGSEGV,
+//! not a wrong answer — this suite hunts both, one case per `libc::fork`
+//! child so a fatal signal fails only that case (see `run_forked`).
 //!
-//! These functions are virgin territory: only the TEXT host fns had proptests.
-//! Each one performs raw pointer arithmetic through `unsafe` accessors, so a
-//! fencepost error is a SIGSEGV, not a wrong answer. This suite hunts both.
+//! Drives the host fns directly rather than through a compiled CoreExpr
+//! PrimOp tree: threading `State# RealWorld` tokens and boxed
+//! `MutableByteArray#` Lit values through CoreExpr to reach these ops is
+//! impractical and would itself be a source of test bugs. Direct calls give
+//! exact control over offsets, lengths, fenceposts, and overlapping ranges.
 //!
-//! # Driver route (documented per the task boundary)
+//! `runtime_new_byte_array`/`runtime_new_boxed_array` allocate with
+//! `std::alloc`, NOT in the GC nursery, so a nursery GC cannot relocate a
+//! buffer mid-sequence; `bytearray_gc_run_twice` substitutes for that oracle
+//! by running the same sequence twice with allocator-churn (`GcPoint`)
+//! interleaved, catching use-after-free, allocator reuse, and
+//! uninitialised-memory reads instead.
 //!
-//! **Direct extern-C host-fn calls**, matching the existing
-//! `proptest_host_fns.rs` precedent — NOT hand-built CoreExpr PrimOp trees.
-//!
-//! The PrimOps *do* exist (`NewByteArray`, `CopyByteArray`, `ShrinkMutableByteArray`,
-//! `ResizeMutableByteArray`, `CompareByteArrays`, `NewArray`, `CloneArray`, …),
-//! but driving them through a CoreExpr requires threading `State# RealWorld`
-//! tokens, materialising boxed `MutableByteArray#` Lit values, and decoding
-//! unboxed result tuples — genuinely impractical and itself a source of test
-//! bugs. Direct calls give exact control over offsets, lengths, fenceposts, and
-//! overlapping ranges, which is the entire point of this suite.
-//!
-//! # Memory model
-//!
-//! `runtime_new_byte_array` / `runtime_new_boxed_array` allocate with
-//! `std::alloc` (a `[u64 len][payload…]` buffer), NOT in the GC nursery — there
-//! are zero references to these buffers in `gc.rs`. The model mirrors each
-//! buffer with a `Vec<u8>` (bytes) or `Vec<i64>` (boxed slots; the stored words
-//! are opaque tokens the host never dereferences).
-//!
-//! # B4 / GcPoint oracle (substitution, documented)
-//!
-//! Because these buffers are not GC-managed, a nursery GC physically cannot
-//! relocate a ByteArray mid-sequence — the "tiny-nursery 4KB A/B" oracle is
-//! N/A for the direct-call route. It is replaced by an equivalent that targets
-//! the *real* bug class for malloc'd buffers: **run-the-same-sequence-twice
-//! determinism** with `GcPoint` allocator-churn interleaved. This catches
-//! use-after-free / dealloc bugs (`resize` frees the old buffer), allocator
-//! reuse, and uninitialised-memory reads (e.g. a `resize` that failed to zero
-//! the grown tail would hand back nondeterministic allocator bytes — divergent
-//! across runs). `resize` currently uses `alloc_zeroed`, so this oracle should
-//! pass; it exists to catch a regression to `alloc`.
-//!
-//! # Fork everything (B3)
-//!
-//! Every executing case runs in a `libc::fork` child (the unsafe accessor work
-//! happens on an 8 MB child thread). A fatal signal (SIGSEGV/SIGILL/SIGBUS)
-//! kills the child; the parent's `waitpid` sees `WIFSIGNALED` and converts it
-//! into a shrinkable proptest failure (B3). Logical divergences (model mismatch
-//! B1/B5, unexpected error on a valid sequence B2, run-twice divergence B4) are
-//! reported by the child over a pipe and likewise shrink.
-//!
-//! NOT bugs: clean (flag-only) errors on documented-invalid inputs. The
-//! generators only ever build VALID sequences (size ≥ 0, in-bounds-or-silently-
-//! ignored offsets), so a set runtime-error flag on such a sequence IS a bug
-//! (B2). A crash on any input is always a bug (B3).
+//! Failure classes referenced throughout (assertion messages and comments
+//! below): B1 = result/model mismatch, B2 = runtime-error flag set on a
+//! valid sequence, B3 = fatal signal in the forked child, B4 =
+//! nondeterminism (same input, different output), B5 = post-op state
+//! mismatch. A clean error on a documented-invalid input is not a bug —
+//! only B1-B5 are.
 
 #![allow(clippy::too_many_arguments)]
 
@@ -69,21 +40,17 @@ use tidepool_codegen::host_fns::*;
 
 /// Outcome of running one case in a forked child.
 enum Outcome {
-    /// Child exited 0 and reported success over the pipe.
     Pass,
-    /// Child reported a logical failure (B1/B2/B4/B5) — the string is the
-    /// diagnostic written before a non-zero exit.
+    /// B1/B2/B4/B5 diagnostic written by the child before a non-zero exit.
     Logical(String),
-    /// Child died from a fatal signal (B3). Carries the signal number.
+    /// Fatal signal (B3) in the child; carries the signal number.
     Signal(i32),
 }
 
-/// Run `f` in a forked child, on an 8 MB-stack thread (hygiene: deep Value
-/// spines / recursion get headroom even though this suite's work is iterative).
-/// A fatal signal in the child is observed by the parent as `WIFSIGNALED`.
-///
-/// The child writes `[tag byte][utf-8 message…]` to a pipe then `_exit`s:
-///   tag 0 = pass, tag 1 = logical failure, tag 2 = panic.
+/// Run `f` in a forked child. The child writes `[tag byte][utf-8 message…]`
+/// to a pipe then `_exit`s: tag 0 = pass, tag 1 = logical failure, tag 2 =
+/// panic. A fatal signal in the child is observed by the parent as
+/// `WIFSIGNALED`.
 fn run_forked<F>(f: F) -> Outcome
 where
     F: FnOnce() -> Result<(), String> + Send + 'static,
@@ -320,15 +287,14 @@ fn arrop_strategy() -> impl Strategy<Value = ArrOp> {
     ]
 }
 
-/// A live byte array: raw pointer + the backing allocation size (needed to
-/// `dealloc` correctly — `shrink` updates only the logical length prefix, so
-/// the backing size and the logical length diverge).
+/// A live byte array: raw pointer + the backing allocation size at
+/// creation. `shrink` updates only the logical length prefix, so the
+/// backing size and the logical length can diverge.
 #[derive(Clone, Copy)]
 struct RealBa {
     ptr: i64,
-    /// True backing size at allocation. No longer needed for dealloc (the
-    /// capacity word below `ptr` is authoritative since the BUG-2 fix);
-    /// retained to document the model's view of the allocation.
+    /// Not used for dealloc (the capacity word below `ptr` is authoritative,
+    /// see `free_ba`); retained to document the model's view of the allocation.
     #[allow(dead_code)]
     backing: usize,
 }
@@ -345,10 +311,9 @@ unsafe fn ba_bytes(ptr: i64) -> Vec<u8> {
 }
 
 fn free_ba(b: RealBa) {
-    // BUG-2 FIXED 2026-06-10: runtime_new/resize now allocate with a hidden
-    // capacity word at ptr - 8 recording the TRUE allocation size, so the
-    // dealloc layout comes from the allocation itself (immune to logical
-    // shrinks). `b.backing` is kept for model assertions only.
+    // runtime_new/resize allocate with a hidden capacity word at ptr - 8
+    // recording the TRUE allocation size, so the dealloc layout comes from
+    // the allocation itself (immune to logical shrinks via `shrink`).
     // SAFETY: ptr was produced by runtime_new/resize_byte_array; the
     // allocation base and total size live one word below it.
     unsafe {
@@ -1147,27 +1112,17 @@ proptest! {
 }
 
 // ---------------------------------------------------------------------------
-// BUG-1: haskell_show_double drops the mantissa decimal point in scientific
-// notation. host_fns.rs `haskell_show_double` (~1893) formats |x| >= 1e7 (and
-// |x| < 0.1) via Rust `format!("{:e}", d)`, which renders e.g. 1e10 as "1e10".
-// Haskell's `show (1e10 :: Double)` is "1.0e10" — the mantissa always carries a
-// decimal point. The function's doc claims it matches Haskell's `show`.
-//
-// Class: B1 (model/contract mismatch). Host fn: runtime_show_double_addr /
-// haskell_show_double. Observed: "1e10". Expected: "1.0e10".
-//
-// This property ASSERTS the documented Haskell invariant and therefore FAILS;
-// it is #[ignore]d so the suite stays green, but its shrunk counterexample is
-// persisted in tests/proptest-regressions/proptest_host_arrays.txt (committed).
-// Remove the #[ignore] after the bug is fixed.
+// BUG-1 regression: haskell_show_double (host_fns/primops.rs) formats |x| >= 1e7 (and
+// |x| < 0.1) via Rust `format!("{:e}", d)`, which drops the mantissa decimal
+// point (e.g. "1e10"). Haskell's `show (1e10 :: Double)` is "1.0e10" — the
+// mantissa always carries a decimal point. Fixed by inserting ".0" before the
+// exponent when `{:e}` omits it; the shrunk counterexample (bits = 1) is
+// pinned in tests/proptest_host_arrays.proptest-regressions.
 // ---------------------------------------------------------------------------
 
 proptest! {
     #![proptest_config(ProptestConfig { cases: 500, ..ProptestConfig::default() })]
 
-    // BUG-1 FIXED 2026-06-10: haskell_show_double now inserts ".0" before the
-    // exponent when {:e} omits the mantissa decimal point. Active regression
-    // property (500 cases, fork-contained).
     #[test]
     #[serial]
     fn bug1_show_double_scientific_decimal(bits in double_bits_strategy()) {
@@ -1183,10 +1138,10 @@ proptest! {
 }
 
 /// Deterministic minimal repro for BUG-1 (no proptest). `bits = 1` (the
-/// smallest positive subnormal, 5e-324) is the shrunk proptest witness; 1e10 is
-/// the human-readable witness. Host renders "5e-324" / "1e10"; Haskell `show`
-/// renders "5.0e-324" / "1.0e10" — the mantissa always carries a decimal point.
-// BUG-1 FIXED 2026-06-10 — active regression test.
+/// smallest positive subnormal, 5e-324) is the shrunk proptest witness; 1e10
+/// is the human-readable witness. Pre-fix the host rendered "5e-324"/"1e10";
+/// Haskell `show` (and the fixed host) render "5.0e-324"/"1.0e10" — the
+/// mantissa always carries a decimal point.
 #[test]
 #[serial]
 fn bug1_repro_minimal() {

@@ -1,7 +1,7 @@
 //! Throwaway measurement scaffolding for the realm-lifetime spike, COST B
-//! (compiled-function lifetime). See
-//! `plans/post-restart/spike-notes/realm-lifetime.md` for the receipts this
-//! feeds and the static-analysis half of the finding (in particular: reading
+//! (compiled-function lifetime). See `plans/post-restart/realm-verdict.md`
+//! (§9 Receipts) for the receipts this feeds and the static-analysis half of
+//! the finding (in particular: reading
 //! `cranelift-jit` 0.129.1's own source shows `ArenaMemoryProvider::drop`
 //! deliberately LEAKS its arena once anything has been finalized, and
 //! nothing in this repo calls the escape-hatch `JITModule::free_memory`).
@@ -43,9 +43,8 @@ fn table_with_c1() -> DataConTable {
 }
 
 /// Process RSS in bytes, read from `/proc/self/status`'s `VmRSS:` line
-/// (Linux-only — this whole environment is Linux, see repo `CLAUDE.md`).
-/// See the module doc for why this is the fallback rather than a Cranelift-
-/// side byte accessor.
+/// (Linux-only). See the module doc for why this is the fallback rather than
+/// a Cranelift-side byte accessor.
 fn rss_bytes() -> usize {
     let status = std::fs::read_to_string("/proc/self/status").expect("read /proc/self/status");
     for line in status.lines() {
@@ -164,11 +163,8 @@ fn realm_module_growth_create_drop_32_machines() {
                  after_32_drops_bytes={after}"
             );
 
-            // Report only — no assertion on the direction of `after` relative
-            // to `baseline`/`peak`. Per the task's own DONE criteria: a
-            // NO-GO (RSS stays near peak, doesn't return toward baseline) is
-            // a valid, successful measurement, not a test failure. The
-            // findings doc interprets the printed numbers.
+            // Report only — see the fn doc: a NO-GO reading here (RSS stays
+            // near peak) is a valid measurement, not a test failure.
         })
         .unwrap()
         .join()

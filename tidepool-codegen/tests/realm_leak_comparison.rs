@@ -1,8 +1,8 @@
 //! Controlled two-arm measurement for the realm-spike leak-comparison lane.
-//! See `plans/post-restart/spike-notes/realm-leak-comparison.md` for the
-//! receipts this feeds. Builds on the sibling `realm-lifetime` finding
-//! (`plans/post-restart/spike-notes/realm-lifetime.md`): dropping a
-//! `JitEffectMachine` does not reclaim its compiled code, because
+//! See `plans/post-restart/realm-verdict.md` (§9 Receipts) for the receipts
+//! this feeds. Builds on the sibling realm-lifetime finding, also in that
+//! doc: dropping a `JitEffectMachine` does not reclaim its compiled code,
+//! because
 //! `cranelift-jit` 0.129.1's `ArenaMemoryProvider::drop` deliberately leaks
 //! once any segment has been finalized (true of every real machine).
 //!
@@ -26,7 +26,7 @@
 //!
 //! Also reports `VmSize` (virtual) alongside `VmRSS` (resident) in arm A, to
 //! characterize the 256 MiB `ArenaMemoryProvider` reservation
-//! (`tidepool-codegen/src/pipeline.rs:162-164`) as reserved-virtual vs
+//! (`ArenaMemoryProvider::new_with_size` in `src/pipeline.rs`) as reserved-virtual vs
 //! committed-physical — see the findings doc for the reading of these
 //! numbers against the vendored `cranelift-jit` source.
 
@@ -63,7 +63,7 @@ fn table_with_c1() -> DataConTable {
 }
 
 /// Process RSS in bytes, read from `/proc/self/status`'s `VmRSS:` line
-/// (Linux-only, matching `realm_module_growth.rs`'s existing helper).
+/// (Linux-only).
 fn rss_bytes() -> usize {
     proc_status_kb_field("VmRSS:") * 1024
 }
