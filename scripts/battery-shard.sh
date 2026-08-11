@@ -87,7 +87,7 @@ echo "==> shard: -p ${crate} (--ignore-default-filter, TIDEPOOL_EXPENSIVE_TESTS=
 # status. stderr is where nextest writes everything (PASS/FAIL/Summary lines
 # included; stdout is otherwise unused) — tee it through unchanged via a
 # process substitution so a caller piping/redirecting stderr still sees the
-# identical live stream this exec used to produce.
+# identical live stream.
 tmp_log="$(mktemp)"
 trap 'rm -f "$tmp_log"' EXIT
 set +e

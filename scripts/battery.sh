@@ -3,12 +3,11 @@
 #
 # nextest runs every test in its OWN process (never two tests sharing one),
 # which structurally de-races the JIT's process-global-ish state (signal
-# handlers, GC, fork-safety harnesses) that the old `-- --test-threads=1`
-# discipline serialized against by brute force. See .config/nextest.toml for
+# handlers, GC, fork-safety harnesses). See .config/nextest.toml for
 # the hazard-audit note and repo-root CLAUDE.md's Build & Test section.
 #
 # WARNING: this runs the ENTIRE workspace in one process and is HOURS long
-# here (every GHC-heavy crate's test forks a real GHC extract, capped at 1
+# here (every GHC-heavy crate's test forks a real GHC extract, capped at 2
 # concurrent per run via .config/nextest.toml's ghc-heavy test group) — this
 # environment hard-kills background processes at ~380s,
 # well short of that. Do not invoke this bare and walk away expecting it to
