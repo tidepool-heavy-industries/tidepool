@@ -801,8 +801,7 @@ impl EngineConfig {
             include.push(lib.clone());
         }
         include.push(effects_dir.clone());
-        let extract_bin =
-            std::env::var("TIDEPOOL_EXTRACT").unwrap_or_else(|_| "tidepool-extract".to_string());
+        let extract_bin = tidepool_runtime::toolchain::extract_command_name();
         Ok(EngineConfig {
             extract_bin,
             include,

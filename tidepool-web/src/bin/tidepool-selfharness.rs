@@ -73,7 +73,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
     let source = load_harness_source(&harness_source_path)?;
 
-    let prelude_dir = prelude_dir();
+    let prelude_dir = prelude_dir()?;
     let project_lib = project_lib_dir();
     // The nested answerer's SCOPED stack (gui + finalize, base effects dropped
     // — W1 effect-scoping), not the full Agent stack.
@@ -171,17 +171,23 @@ fn default_harness_source_path() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("examples/harness/Harness.hs"))
 }
 
-/// The stdlib include dir: `TIDEPOOL_PRELUDE_DIR`, else the in-repo
-/// `haskell/lib` relative to the manifest.
-fn prelude_dir() -> PathBuf {
-    if let Ok(dir) = std::env::var("TIDEPOOL_PRELUDE_DIR") {
-        return PathBuf::from(dir);
-    }
-    let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    manifest
-        .parent()
-        .map(|r| r.join("haskell/lib"))
-        .unwrap_or_else(|| PathBuf::from("haskell/lib"))
+/// The stdlib include dir, via the ONE locator
+/// ([`tidepool_runtime::toolchain::locate_stdlib`], whose module docs carry the
+/// precedence table). This driver embeds no stdlib, so it contributes only the
+/// build-tree tail step — the same shape as `tidepool-repl`.
+///
+/// # Errors
+/// [`tidepool_runtime::toolchain::ToolchainError`] when no step of the table
+/// finds a stdlib root. Previously an unconditional manifest-relative path,
+/// returned even when it did not exist.
+fn prelude_dir() -> Result<PathBuf, tidepool_runtime::toolchain::ToolchainError> {
+    let fallbacks = tidepool_runtime::toolchain::StdlibFallbacks {
+        bundle: None,
+        build_tree: PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .map(|r| r.join("haskell/lib")),
+    };
+    Ok(tidepool_runtime::toolchain::locate_stdlib(&fallbacks)?.dir)
 }
 
 fn project_lib_dir() -> Option<PathBuf> {

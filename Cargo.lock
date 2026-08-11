@@ -4143,6 +4143,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "tidepool-harness",
+ "tidepool-runtime",
  "tokio",
  "tokio-stream",
  "tracing",

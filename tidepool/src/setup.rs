@@ -4,17 +4,19 @@ use std::sync::Arc;
 
 use rmcp::{model::*, service::RequestContext, ErrorData as McpError, RoleServer, ServerHandler};
 
-/// Check if tidepool-extract is available.
+/// Check if tidepool-extract is available, via the ONE locator
+/// ([`tidepool_runtime::toolchain::locate_extract`], whose module docs carry
+/// the precedence table).
+///
+/// This used to fall back to `$PATH` when `$TIDEPOOL_EXTRACT` was set but
+/// pointed at nothing — silently serving a *different* extract than the
+/// operator asked for. A set-but-broken override now yields `None`, so the
+/// degraded setup server (whose instructions name `TIDEPOOL_EXTRACT`) is what
+/// the caller sees.
 pub(crate) fn find_tidepool_extract() -> Option<PathBuf> {
-    // 1. TIDEPOOL_EXTRACT env var
-    if let Ok(p) = std::env::var("TIDEPOOL_EXTRACT") {
-        let path = PathBuf::from(&p);
-        if path.exists() {
-            return Some(path);
-        }
-    }
-    // 2. On PATH
-    which::which("tidepool-extract").ok()
+    tidepool_runtime::toolchain::locate_extract()
+        .ok()
+        .map(|loc| loc.path)
 }
 
 // ---------------------------------------------------------------------------
