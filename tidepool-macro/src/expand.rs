@@ -15,8 +15,8 @@ type PathReadError = (PathBuf, std::io::Error);
 
 /// Expands the `haskell_eval!` macro.
 ///
-/// Accepts `.cbor` paths (embedded directly) or `.hs` paths (compiled via
-/// `nix run .#tidepool-extract` at proc-macro expansion time).
+/// Accepts `.cbor` paths (embedded directly) or `.hs` paths (compiled by
+/// `run_tidepool_extract` at proc-macro expansion time).
 pub fn expand(input: TokenStream) -> TokenStream {
     let path_lit = match syn::parse2::<LitStr>(input) {
         Ok(lit) => lit,

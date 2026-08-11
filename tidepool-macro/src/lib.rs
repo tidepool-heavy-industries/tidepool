@@ -6,17 +6,18 @@ mod expand;
 /// Embeds and evaluates a Haskell Core expression at runtime.
 ///
 /// Accepts either a `.cbor` path (pre-compiled CBOR) or a `.hs` path (Haskell
-/// source compiled on-demand via `nix run .#tidepool-extract`).
+/// source compiled on-demand).
 ///
 /// For `.cbor` paths, the file is embedded directly via `include_bytes!`. For
-/// `.hs` paths, the macro invokes GHC through nix at compile time, producing
-/// CBOR in `target/tidepool-cbor/`, then embeds the result. The `.hs` source
-/// file is tracked by cargo for automatic recompilation.
+/// `.hs` paths, the macro invokes `tidepool-extract`, producing CBOR in
+/// `target/tidepool-cbor/`, then embeds the result. The `.hs` source file is
+/// tracked by cargo for automatic recompilation.
 ///
 /// # Haskell Source Support
 ///
-/// When given a `.hs` path, the macro compiles it via `nix run .#tidepool-extract`.
-/// This requires `nix` to be available on `PATH`.
+/// When given a `.hs` path, the macro runs `$TIDEPOOL_EXTRACT`/`tidepool-extract`
+/// on `PATH` if available, falling back to `nix run .#tidepool-extract`
+/// (requires `nix` on `PATH`) only when no binary is found directly.
 ///
 /// **Path resolution:** `.hs` paths resolve relative to `CARGO_MANIFEST_DIR`
 /// (the crate root). `.cbor` paths resolve relative to the calling file (standard
@@ -63,7 +64,8 @@ pub fn haskell_eval(input: TokenStream) -> TokenStream {
 /// Embeds inline Haskell source as a Core expression with its DataConTable.
 ///
 /// Writes the Haskell source to a temporary file, compiles it via
-/// `nix run .#tidepool-extract`, and embeds the resulting CBOR.
+/// `tidepool-extract` (see [`haskell_eval`] for the resolution order), and
+/// embeds the resulting CBOR.
 ///
 /// Supports `include` paths for importing local Haskell modules.
 ///
