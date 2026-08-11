@@ -102,7 +102,7 @@ pub fn blake3_hex(bytes: &[u8]) -> String {
 /// (a) arg-order — a path glob passed as the (regex, glob) first arg; (b)
 /// under-escaping — regex metachars need double-escaping (JSON x Haskell).
 /// Loss-less: the real error is always shown, so a heuristic misfire can't hide
-/// it. Mirrors the `checked_pattern` diagnose-at-the-boundary precedent.
+/// it.
 fn grep_regex_error(regex_str: &str, e: &regex::Error) -> FsError {
     let mut msg = format!("invalid regex {:?}: {}", regex_str, e);
     // (a) Looks like a path glob in arg 1. Gate on path-shape so a regex
