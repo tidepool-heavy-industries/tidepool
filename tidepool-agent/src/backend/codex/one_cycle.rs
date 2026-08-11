@@ -662,59 +662,59 @@ mod tests {
 
     // --- payload projection -------------------------------------------------
 
+    /// Four terminal-message shapes: a JSON agent message projects
+    /// Structured, prose projects Unstructured, the LAST agent message wins
+    /// when several precede it (an earlier JSON one must not win), and no
+    /// agent message at all projects Absent.
     #[test]
-    fn json_terminal_message_projects_to_structured() {
-        let turn = turn_from_json(serde_json::json!({
-            "id": "turn_1",
-            "status": "completed",
-            "items": [{"type": "agentMessage", "id": "i1", "text": "{\"result\":\"cobalt\"}"}]
-        }));
-        assert_eq!(
-            project_payload(&turn),
-            CycleResultPayload::Structured(serde_json::json!({"result": "cobalt"}))
-        );
-    }
+    fn project_payload_matches_terminal_message_shape() {
+        let cases = vec![
+            (
+                "json_terminal_message",
+                serde_json::json!({
+                    "id": "turn_1",
+                    "status": "completed",
+                    "items": [{"type": "agentMessage", "id": "i1", "text": "{\"result\":\"cobalt\"}"}]
+                }),
+                CycleResultPayload::Structured(serde_json::json!({"result": "cobalt"})),
+            ),
+            (
+                "prose_terminal_message",
+                serde_json::json!({
+                    "id": "turn_1",
+                    "status": "completed",
+                    "items": [{"type": "agentMessage", "id": "i1", "text": "I wrote the word cobalt."}]
+                }),
+                CycleResultPayload::Unstructured("I wrote the word cobalt.".to_string()),
+            ),
+            (
+                "last_agent_message_wins",
+                serde_json::json!({
+                    "id": "turn_1",
+                    "status": "completed",
+                    "items": [
+                        {"type": "agentMessage", "id": "i1", "text": "{\"result\":\"first\"}"},
+                        {"type": "reasoning", "id": "i2"},
+                        {"type": "agentMessage", "id": "i3", "text": "{\"result\":\"final\"}"}
+                    ]
+                }),
+                CycleResultPayload::Structured(serde_json::json!({"result": "final"})),
+            ),
+            (
+                "no_agent_message",
+                serde_json::json!({
+                    "id": "turn_1",
+                    "status": "completed",
+                    "items": [{"type": "reasoning", "id": "i1"}]
+                }),
+                CycleResultPayload::Absent,
+            ),
+        ];
 
-    #[test]
-    fn prose_terminal_message_projects_to_unstructured() {
-        let turn = turn_from_json(serde_json::json!({
-            "id": "turn_1",
-            "status": "completed",
-            "items": [{"type": "agentMessage", "id": "i1", "text": "I wrote the word cobalt."}]
-        }));
-        assert_eq!(
-            project_payload(&turn),
-            CycleResultPayload::Unstructured("I wrote the word cobalt.".to_string())
-        );
-    }
-
-    /// The LAST agent message is the terminal one — an earlier one that
-    /// happened to be JSON must not win.
-    #[test]
-    fn the_last_agent_message_is_the_payload() {
-        let turn = turn_from_json(serde_json::json!({
-            "id": "turn_1",
-            "status": "completed",
-            "items": [
-                {"type": "agentMessage", "id": "i1", "text": "{\"result\":\"first\"}"},
-                {"type": "reasoning", "id": "i2"},
-                {"type": "agentMessage", "id": "i3", "text": "{\"result\":\"final\"}"}
-            ]
-        }));
-        assert_eq!(
-            project_payload(&turn),
-            CycleResultPayload::Structured(serde_json::json!({"result": "final"}))
-        );
-    }
-
-    #[test]
-    fn no_agent_message_projects_to_absent() {
-        let turn = turn_from_json(serde_json::json!({
-            "id": "turn_1",
-            "status": "completed",
-            "items": [{"type": "reasoning", "id": "i1"}]
-        }));
-        assert_eq!(project_payload(&turn), CycleResultPayload::Absent);
+        for (label, raw, expected) in cases {
+            let turn = turn_from_json(raw);
+            assert_eq!(project_payload(&turn), expected, "case: {label}");
+        }
     }
 
     // --- activity projection ------------------------------------------------
