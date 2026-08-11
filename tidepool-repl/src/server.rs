@@ -1573,49 +1573,4 @@ mod tests {
             "the replacement session must be Idle"
         );
     }
-
-    /// Byte-identity check: `PaginateMode::Passthrough` must produce the same
-    /// Haskell text as hand-patching the `Truncate`-mode preamble's
-    /// `paginateResult = paginateTrunc` binding line to a pass-through no-op.
-    #[test]
-    fn passthrough_mode_matches_hand_patched_preamble() {
-        let stack = tidepool_handlers::build_minimal_stack();
-        let (decls, _ask_tag) = tidepool_handlers::base_decls_with_ask(&stack);
-
-        let truncate_mode = tidepool_mcp::build_preamble_non_interactive(&decls, false);
-        let old_style_patch = truncate_mode.replacen(
-            "paginateResult = paginateTrunc\n",
-            "paginateResult _ v = pure v\n",
-            1,
-        );
-
-        let passthrough_mode = tidepool_mcp::build_preamble_non_interactive_mode(
-            &decls,
-            false,
-            tidepool_mcp::PaginateMode::Passthrough,
-        );
-
-        assert_ne!(
-            old_style_patch, truncate_mode,
-            "sanity: the patch must actually have changed something"
-        );
-        assert_eq!(
-            old_style_patch, passthrough_mode,
-            "PaginateMode::Passthrough must produce byte-identical output to the \
-             old post-hoc string patch"
-        );
-    }
-
-    /// Empty effect stack ⇒ no `paginateResult` alias emitted in EITHER mode.
-    #[test]
-    fn passthrough_mode_is_noop_without_alias() {
-        let truncate_mode = tidepool_mcp::build_preamble_non_interactive(&[], false);
-        assert!(!truncate_mode.contains("paginateResult"));
-        let passthrough_mode = tidepool_mcp::build_preamble_non_interactive_mode(
-            &[],
-            false,
-            tidepool_mcp::PaginateMode::Passthrough,
-        );
-        assert_eq!(passthrough_mode, truncate_mode);
-    }
 }

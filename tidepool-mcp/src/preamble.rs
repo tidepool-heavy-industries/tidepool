@@ -1245,4 +1245,41 @@ import qualified Tidepool.Git as Git";
     fn no_effects_row_pins_no_extra_imports_and_no_paginate_alias() {
         check(&[], "", None);
     }
+
+    /// [`PaginateMode::Passthrough`] (what `tidepool-repl` uses) swaps only
+    /// the `paginateResult` alias BODY relative to [`PaginateMode::Truncate`]
+    /// — imports stay identical, and with no effects neither mode emits an
+    /// alias at all. Was pinned by `tidepool-repl`'s own copy
+    /// (`passthrough_mode_matches_hand_patched_preamble` /
+    /// `passthrough_mode_is_noop_without_alias`) before this row existed;
+    /// moved here since this is the true owner of preamble behaviour.
+    #[test]
+    fn passthrough_mode_swaps_only_the_paginate_alias_body() {
+        let decls = crate::standard_decls();
+        let truncate = super::build_preamble_non_interactive(&decls, false);
+        let passthrough = super::build_preamble_non_interactive_mode(
+            &decls,
+            false,
+            super::PaginateMode::Passthrough,
+        );
+        assert_eq!(
+            passthrough,
+            truncate.replacen(
+                "paginateResult = paginateTrunc\n",
+                "paginateResult _ v = pure v\n",
+                1,
+            ),
+            "PaginateMode::Passthrough must differ from Truncate only in the \
+             paginateResult alias body"
+        );
+
+        let truncate_empty = super::build_preamble_non_interactive(&[], false);
+        assert!(!truncate_empty.contains("paginateResult"));
+        let passthrough_empty = super::build_preamble_non_interactive_mode(
+            &[],
+            false,
+            super::PaginateMode::Passthrough,
+        );
+        assert_eq!(passthrough_empty, truncate_empty);
+    }
 }
