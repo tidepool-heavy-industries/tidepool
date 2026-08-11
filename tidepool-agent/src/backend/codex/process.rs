@@ -79,6 +79,10 @@ pub enum SessionError {
     MissingField { method: String, field: &'static str },
     #[error("codex app-server process may be orphaned: still alive {timeout:?} after shutdown")]
     OrphanedProcess { timeout: Duration },
+    #[error("no item/tool/call is parked; {call_id} answers nothing")]
+    NoParkedCall { call_id: String },
+    #[error("reply answers call {answered} but {parked} is the parked call")]
+    WrongCall { answered: String, parked: String },
     #[error(transparent)]
     Transport(#[from] codex_codes::Error),
 }
@@ -92,6 +96,8 @@ pub struct Session {
     next_id: i64,
     frames: Vec<RecordedFrame>,
     pid: Option<u32>,
+    /// State of the turn currently being pumped, which now spans several calls.
+    turn: TurnState,
 }
 
 impl Session {
@@ -111,6 +117,7 @@ impl Session {
             next_id: 1,
             frames: Vec::new(),
             pid,
+            turn: TurnState::default(),
         };
 
         let init_params = InitializeParams {
@@ -274,49 +281,68 @@ pub struct LiveTurnOutcome {
     pub turn: codex_codes::Turn,
 }
 
+/// Where the turn pump stopped.
+///
+/// [`TurnStop::ToolCall`] means the child's request is PARKED: this session
+/// holds its JSON-RPC id and has written no response. Nothing on the wire moves
+/// again until [`Session::reply_and_pump`] answers it, so the parent may take
+/// as long as it needs — including running a whole Haskell handler with its own
+/// effects. That is what makes the driving loop expressible in Haskell rather
+/// than in a Rust callback.
+pub enum TurnStop {
+    ToolCall(codex_codes::DynamicToolCallParams),
+    Completed(codex_codes::Turn),
+}
+
+/// State the pump carries across one turn's stops.
+///
+/// A turn spans several `pump` calls now, so what used to be locals in a single
+/// loop have to live somewhere that survives between them.
+#[derive(Default)]
+pub(crate) struct TurnState {
+    /// The `turn/start` request id, until its response arrives.
+    start_id: Option<RequestId>,
+    turn_start_response: Option<codex_codes::TurnStartResponse>,
+    /// The parked call's JSON-RPC id and the moment it arrived.
+    parked: Option<(RequestId, String, Instant)>,
+    tool_calls: Vec<ObservedToolCall>,
+    /// The most recent `thread/tokenUsage/updated` totals. Cumulative per
+    /// thread, so the LAST one seen is the turn's total — not a sum of deltas.
+    usage: Option<codex_codes::ThreadTokenUsage>,
+}
+
 impl Session {
-    /// Send `turn/start`, answer every `item/tool/call` via `on_tool_call`
-    /// (replying immediately — no artificial delay), and return once the
-    /// terminal `turn/completed` notification arrives.
-    ///
-    /// A single continuous read loop rather than [`Session::request`]
-    /// followed by a separate wait: `item/tool/call` can arrive before the
-    /// `turn/start` response does, and [`Session::request`] would discard it
-    /// while waiting for its own id, stranding the call. Any server request
-    /// other than `item/tool/call` gets an immediate JSON-RPC error reply
-    /// rather than being left pending — this driver is scoped to exactly the
-    /// one tool the turn was set up with, not a general approval handler.
-    pub async fn drive_turn(
-        &mut self,
-        turn_start: &codex_codes::TurnStartParams,
-        mut on_tool_call: impl FnMut(
-            &codex_codes::DynamicToolCallParams,
-        ) -> codex_codes::DynamicToolCallResponse,
-        timeout: Duration,
-    ) -> Result<LiveTurnOutcome, SessionError> {
-        tokio::time::timeout(
-            timeout,
-            self.drive_turn_inner(turn_start, &mut on_tool_call),
-        )
-        .await
-        .map_err(|_| SessionError::Timeout {
-            method: codex_codes::methods::TURN_START.to_string(),
-            timeout,
-        })?
+    /// The tool calls observed on the current turn, in order.
+    pub fn observed_tool_calls(&self) -> &[ObservedToolCall] {
+        &self.turn.tool_calls
     }
 
-    async fn drive_turn_inner(
+    /// The latest token-usage totals the server reported for this thread.
+    pub fn token_usage(&self) -> Option<&codex_codes::ThreadTokenUsage> {
+        self.turn.usage.as_ref()
+    }
+
+    /// Send `turn/start` and pump until the turn parks on a tool call or
+    /// completes.
+    ///
+    /// A single continuous read loop rather than [`Session::request`] followed
+    /// by a separate wait: `item/tool/call` can arrive BEFORE the `turn/start`
+    /// response does, and [`Session::request`] would discard it while waiting
+    /// for its own id, stranding the call.
+    pub async fn start_turn(
         &mut self,
         turn_start: &codex_codes::TurnStartParams,
-        on_tool_call: &mut impl FnMut(
-            &codex_codes::DynamicToolCallParams,
-        ) -> codex_codes::DynamicToolCallResponse,
-    ) -> Result<LiveTurnOutcome, SessionError> {
+        timeout: Duration,
+    ) -> Result<TurnStop, SessionError> {
         let method = codex_codes::methods::TURN_START;
         let start_id = RequestId::Integer(self.next_id);
         self.next_id += 1;
+        self.turn = TurnState {
+            start_id: Some(start_id.clone()),
+            ..Default::default()
+        };
         let req = JsonRpcRequest {
-            id: start_id.clone(),
+            id: start_id,
             method: method.to_string(),
             params: Some(serde_json::to_value(turn_start).map_err(|source| {
                 SessionError::Encode {
@@ -326,10 +352,74 @@ impl Session {
             })?),
         };
         self.send(&req, method).await?;
+        self.pump(timeout).await
+    }
 
-        let mut turn_start_response = None;
-        let mut tool_calls = Vec::new();
+    /// Answer the parked `item/tool/call` and pump on to the next stop.
+    ///
+    /// `call_id` names the call being answered and is checked against the
+    /// parked one — answering the wrong call is the misroute the correlation
+    /// triple exists to make detectable, and it is refused here rather than
+    /// written to the wire.
+    pub async fn reply_and_pump(
+        &mut self,
+        call_id: &str,
+        response: &codex_codes::DynamicToolCallResponse,
+        timeout: Duration,
+    ) -> Result<TurnStop, SessionError> {
+        let Some((request_id, parked_call, received_at)) = self.turn.parked.take() else {
+            return Err(SessionError::NoParkedCall {
+                call_id: call_id.to_string(),
+            });
+        };
+        if parked_call != call_id {
+            // Put it back: refusing must not lose the call we are still
+            // obliged to answer.
+            self.turn.parked = Some((request_id, parked_call.clone(), received_at));
+            return Err(SessionError::WrongCall {
+                answered: call_id.to_string(),
+                parked: parked_call,
+            });
+        }
+        // Measured, never manufactured: the park interval is however long the
+        // parent actually took, which is now an unbounded Haskell computation
+        // rather than a synchronous Rust closure.
+        if let Some(observed) = self
+            .turn
+            .tool_calls
+            .iter_mut()
+            .find(|c| c.call_id == parked_call)
+        {
+            observed.park_duration_ms = received_at.elapsed().as_millis();
+        }
+        let resp = JsonRpcResponse {
+            id: request_id,
+            result: serde_json::to_value(response).map_err(|source| SessionError::Encode {
+                method: "item/tool/call".to_string(),
+                source,
+            })?,
+        };
+        self.send(&resp, "item/tool/call reply").await?;
+        self.pump(timeout).await
+    }
 
+    /// Read frames until the turn parks or completes.
+    ///
+    /// The `timeout` bounds THIS segment only. That is the right scope now that
+    /// a turn spans several segments: a parent thinking for ten minutes between
+    /// two pumps is not a hung backend, and charging its time against a backend
+    /// liveness budget would kill healthy turns.
+    async fn pump(&mut self, timeout: Duration) -> Result<TurnStop, SessionError> {
+        tokio::time::timeout(timeout, self.pump_inner())
+            .await
+            .map_err(|_| SessionError::Timeout {
+                method: codex_codes::methods::TURN_START.to_string(),
+                timeout,
+            })?
+    }
+
+    async fn pump_inner(&mut self) -> Result<TurnStop, SessionError> {
+        let method = codex_codes::methods::TURN_START;
         loop {
             let Some(line) = self.client.next_line().await? else {
                 return Err(SessionError::Closed {
@@ -345,8 +435,8 @@ impl Session {
                 serde_json::from_value(value).map_err(SessionError::MalformedLine)?;
 
             match msg {
-                JsonRpcMessage::Response(resp) if resp.id == start_id => {
-                    turn_start_response =
+                JsonRpcMessage::Response(resp) if Some(&resp.id) == self.turn.start_id.as_ref() => {
+                    self.turn.turn_start_response =
                         Some(serde_json::from_value(resp.result).map_err(|source| {
                             SessionError::Decode {
                                 method: method.to_string(),
@@ -354,7 +444,7 @@ impl Session {
                             }
                         })?);
                 }
-                JsonRpcMessage::Error(err) if err.id == start_id => {
+                JsonRpcMessage::Error(err) if Some(&err.id) == self.turn.start_id.as_ref() => {
                     return Err(SessionError::Rpc {
                         method: method.to_string(),
                         code: err.error.code,
@@ -362,7 +452,6 @@ impl Session {
                     });
                 }
                 JsonRpcMessage::Request(req) if req.method == "item/tool/call" => {
-                    let received_at = Instant::now();
                     let params: codex_codes::DynamicToolCallParams = req
                         .params
                         .ok_or_else(|| SessionError::MissingField {
@@ -375,26 +464,16 @@ impl Session {
                                 source,
                             })
                         })?;
-                    let response = on_tool_call(&params);
-                    let park_duration_ms = received_at.elapsed().as_millis();
-                    tool_calls.push(ObservedToolCall {
+                    self.turn.tool_calls.push(ObservedToolCall {
                         thread_id: params.thread_id.clone(),
                         turn_id: params.turn_id.clone(),
                         call_id: params.call_id.clone(),
                         tool: params.tool.clone(),
                         arguments: params.arguments.clone(),
-                        park_duration_ms,
+                        park_duration_ms: 0,
                     });
-                    let resp = JsonRpcResponse {
-                        id: req.id,
-                        result: serde_json::to_value(&response).map_err(|source| {
-                            SessionError::Encode {
-                                method: "item/tool/call".to_string(),
-                                source,
-                            }
-                        })?,
-                    };
-                    self.send(&resp, "item/tool/call reply").await?;
+                    self.turn.parked = Some((req.id, params.call_id.clone(), Instant::now()));
+                    return Ok(TurnStop::ToolCall(params));
                 }
                 JsonRpcMessage::Request(unexpected) => {
                     // Never leave a server request pending, even one this
@@ -404,13 +483,30 @@ impl Session {
                         error: codex_codes::JsonRpcErrorData {
                             code: -32601,
                             message: format!(
-                                "tidepool-agent phase 4 driver does not handle {}",
+                                "tidepool-agent does not handle {}",
                                 unexpected.method
                             ),
                             data: None,
                         },
                     };
                     self.send(&err_resp, "unhandled server request").await?;
+                }
+                JsonRpcMessage::Notification(notif)
+                    if notif.method == "thread/tokenUsage/updated" =>
+                {
+                    // Recorded rather than discarded: a lane that spends a real
+                    // budget has to be able to say what it spent, and this is
+                    // the only place the backend says so.
+                    if let Some(params) = notif.params {
+                        let updated: codex_codes::ThreadTokenUsageUpdatedNotification =
+                            serde_json::from_value(params).map_err(|source| {
+                                SessionError::Decode {
+                                    method: "thread/tokenUsage/updated".to_string(),
+                                    source,
+                                }
+                            })?;
+                        self.turn.usage = Some(updated.token_usage);
+                    }
                 }
                 JsonRpcMessage::Notification(notif) if notif.method == "turn/completed" => {
                     let params = notif.params.ok_or_else(|| SessionError::MissingField {
@@ -422,21 +518,55 @@ impl Session {
                             method: "turn/completed".to_string(),
                             source,
                         })?;
-                    let turn_start_response =
-                        turn_start_response.ok_or_else(|| SessionError::MissingField {
+                    if self.turn.turn_start_response.is_none() {
+                        return Err(SessionError::MissingField {
                             method: method.to_string(),
                             field: "response (turn/completed arrived first)",
-                        })?;
-                    return Ok(LiveTurnOutcome {
-                        turn_start_response,
-                        tool_calls,
-                        turn: completed.turn,
-                    });
+                        });
+                    }
+                    return Ok(TurnStop::Completed(completed.turn));
                 }
-                // Everything else (item/started, item/updated, deltas, usage
-                // updates, ...) is already recorded above; not needed to
-                // drive this vertical.
+                // Everything else (item/started, item/updated, deltas, ...) is
+                // already recorded above; not needed to drive this vertical.
                 _ => continue,
+            }
+        }
+    }
+
+    /// Drive one turn to completion, answering every call via `on_tool_call`.
+    ///
+    /// A COMBINATOR over the pump, kept because the committed live `#[ignore]`d
+    /// tests are existing evidence and should keep running unchanged. New code
+    /// uses [`Session::start_turn`]/[`Session::reply_and_pump`] — a callback
+    /// cannot run a Haskell handler.
+    pub async fn drive_turn(
+        &mut self,
+        turn_start: &codex_codes::TurnStartParams,
+        mut on_tool_call: impl FnMut(
+            &codex_codes::DynamicToolCallParams,
+        ) -> codex_codes::DynamicToolCallResponse,
+        timeout: Duration,
+    ) -> Result<LiveTurnOutcome, SessionError> {
+        let mut stop = self.start_turn(turn_start, timeout).await?;
+        loop {
+            match stop {
+                TurnStop::Completed(turn) => {
+                    return Ok(LiveTurnOutcome {
+                        turn_start_response: self
+                            .turn
+                            .turn_start_response
+                            .clone()
+                            .expect("pump refuses to complete without the turn/start response"),
+                        tool_calls: std::mem::take(&mut self.turn.tool_calls),
+                        turn,
+                    })
+                }
+                TurnStop::ToolCall(params) => {
+                    let response = on_tool_call(&params);
+                    stop = self
+                        .reply_and_pump(&params.call_id, &response, timeout)
+                        .await?;
+                }
             }
         }
     }

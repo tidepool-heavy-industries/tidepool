@@ -17,7 +17,7 @@
 //!    binding roots, all under one temp directory that is KEPT on disk so the
 //!    run is checkable after the fact.
 //! 3. Run one [`CoupledSpawner::spawn_one_cycle`] against the real
-//!    [`CodexOneCycleBackend`] with a tiny synthetic task and a
+//!    [`CodexAgentBackend`] with a tiny synthetic task and a
 //!    `{"result": string}` output schema — no dynamic tools (lane 1).
 //! 4. Print the receipt (worktree id, binding ref, thread id, EXACT resolved
 //!    model, turn id), the payload, and the binding's on-disk final state.
@@ -33,8 +33,8 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use tidepool_agent::backend::codex::isolation::{self, ConfigSnapshot};
-use tidepool_agent::backend::codex::CodexOneCycleBackend;
-use tidepool_agent::seam::CycleResultPayload;
+use tidepool_agent::backend::codex::CodexAgentBackend;
+use tidepool_agent::seam::{CycleResultPayload, ModelPolicy, ReasoningEffort};
 use tidepool_agent::{CoupledSpawner, SpawnRequest, SpawnWorkspace};
 use tidepool_worktree::{GitCli, WorktreeManager, WorktreeRegistry, WorktreeSpec};
 
@@ -89,7 +89,7 @@ fn run() -> Result<(), String> {
         .map_err(|e| format!("could not open the coupled spawner: {e}"))?;
 
     let mut backend =
-        CodexOneCycleBackend::new().map_err(|e| format!("could not build the backend: {e}"))?;
+        CodexAgentBackend::new().map_err(|e| format!("could not build the backend: {e}"))?;
     println!("turn timeout: {:?}", backend.turn_timeout());
 
     let request = SpawnRequest {
@@ -110,6 +110,11 @@ fn run() -> Result<(), String> {
             "required": ["result"],
             "additionalProperties": false
         })),
+        // Lane 1's shape: no tools, so the child has nothing to call and the
+        // no-tools combinator drives the turn straight through.
+        tools: Vec::new(),
+        model: ModelPolicy::CheapPlumbing,
+        effort: ReasoningEffort::Low,
     };
 
     // 3. The one spawn. Caught rather than unwinding, so step 5 still runs.

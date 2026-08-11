@@ -1,7 +1,9 @@
 use std::path::PathBuf;
 
-use tidepool_agent::backend::OneCycleBackend;
-use tidepool_agent::seam::{AgentBackendError, AgentId, BackendThreadId, CycleResultPayload};
+use tidepool_agent::backend::AgentBackend;
+use tidepool_agent::seam::{
+    AgentBackendError, AgentId, BackendThreadId, CycleResultPayload, ModelPolicy, ReasoningEffort,
+};
 use tidepool_agent::spawn::{
     CoupledSpawner, OneCycleRun, SpawnError as DomainSpawnError, SpawnReceipt, SpawnRequest,
     SpawnStage, SpawnWorkspace, WorkerRun,
@@ -46,7 +48,17 @@ tidepool_mcp::subagent_effect_def!(crate::effect_glue::effect_rust_projection);
 /// second owner.
 pub struct SubagentHandler {
     spawner: CoupledSpawner,
-    backend: Box<dyn OneCycleBackend + Send>,
+    backend: Box<dyn AgentBackend + Send>,
+    /// The model tier and effort every agent this handler spawns runs at.
+    ///
+    /// Handler configuration rather than an authored-surface field: a model
+    /// budget is granted to an OPERATOR, and the operator is who wires the
+    /// handler. An authored `spawnAgent` call choosing its own tier would let
+    /// any eval spend at any price — PRD 18 open decision 3 is where a
+    /// semantic tier vocabulary on the authored surface gets decided, and it
+    /// is still open.
+    model: ModelPolicy,
+    effort: ReasoningEffort,
 }
 
 impl SubagentHandler {
@@ -60,7 +72,7 @@ impl SubagentHandler {
         worktree_root: PathBuf,
         binding_root: PathBuf,
         source_repository: PathBuf,
-        backend: Box<dyn OneCycleBackend + Send>,
+        backend: Box<dyn AgentBackend + Send>,
     ) -> Result<Self, DomainWorktreeError> {
         let registry = WorktreeRegistry::open(&registry_root)?;
         let manager =
@@ -68,7 +80,20 @@ impl SubagentHandler {
         Ok(Self {
             spawner: CoupledSpawner::open(manager, binding_root)?,
             backend,
+            model: ModelPolicy::CheapPlumbing,
+            effort: ReasoningEffort::Low,
         })
+    }
+
+    /// Run every agent this handler spawns at `model`/`effort`.
+    ///
+    /// The live acceptance is the caller that needs this: its granted budget
+    /// names `gpt-5.6-luna` at low effort specifically.
+    #[must_use]
+    pub fn with_model_policy(mut self, model: ModelPolicy, effort: ReasoningEffort) -> Self {
+        self.model = model;
+        self.effort = effort;
+        self
     }
 
     /// The spawner, for post-run assertions in tests (binding state, registry
@@ -96,7 +121,7 @@ impl SubagentHandler {
         spec: AgSpawnSpec,
         schema: JsonArg,
     ) -> Result<AgSpawnOutcome, SpawnError> {
-        let request = request_from_wire(spec, schema)?;
+        let request = request_from_wire(spec, schema, Vec::new(), self.model, self.effort)?;
         let run = self
             .spawner
             .spawn_one_cycle(&mut *self.backend, &request)
@@ -128,7 +153,13 @@ impl SubagentHandler {
 /// `Value` argument is total, so the absence of a schema arrives as `Null`
 /// rather than as a missing argument, and `CycleSpec::output_schema` is
 /// `Option`. A literal `null` schema would constrain nothing anyway.
-fn request_from_wire(spec: AgSpawnSpec, schema: JsonArg) -> Result<SpawnRequest, SpawnError> {
+fn request_from_wire(
+    spec: AgSpawnSpec,
+    schema: JsonArg,
+    tools: Vec<tidepool_agent::seam::DynamicToolDeclaration>,
+    model: ModelPolicy,
+    effort: ReasoningEffort,
+) -> Result<SpawnRequest, SpawnError> {
     let workspace = match spec.spawn_workspace {
         AgSpawnWorkspace::SpawnNewWorktree(wire_spec) => {
             SpawnWorkspace::New(spec_from_wire(wire_spec).map_err(allocating_worktree_failure)?)
@@ -145,6 +176,9 @@ fn request_from_wire(spec: AgSpawnSpec, schema: JsonArg) -> Result<SpawnRequest,
             serde_json::Value::Null => None,
             v => Some(v),
         },
+        tools,
+        model,
+        effort,
     })
 }
 
@@ -239,14 +273,15 @@ fn outcome_to_wire(run: &OneCycleRun) -> AgSpawnOutcome {
 /// Haskell-side decoder when a `PayloadStructured` fails to decode against the
 /// caller's result type. Rust has no way to know that and must not guess it.
 fn spawn_error_to_wire(e: DomainSpawnError) -> SpawnError {
+    let stage = e.stage();
     match e {
-        DomainSpawnError::Worktree { stage, error } => {
+        DomainSpawnError::Worktree { error, .. } => {
             SpawnError::SpawnWorktreeFailed(stage_to_wire(stage), worktree_error_to_wire(error))
         }
-        DomainSpawnError::Binding { stage, error } => {
+        DomainSpawnError::Binding { error, .. } => {
             SpawnError::SpawnBindingFailed(stage_to_wire(stage), worktree_error_to_wire(error))
         }
-        DomainSpawnError::Backend { stage, error } => {
+        DomainSpawnError::Backend { error, .. } => {
             SpawnError::SpawnBackendFailed(stage_to_wire(stage), backend_failure_to_wire(error))
         }
         // Both failures are RENDERED (the wire ctor takes two `Text` fields):
@@ -255,13 +290,26 @@ fn spawn_error_to_wire(e: DomainSpawnError) -> SpawnError {
         // them structured would buy case-matchability nobody has asked for.
         // Losing either string is the thing that must not happen.
         DomainSpawnError::RollbackFailed {
-            stage,
-            original,
-            rollback,
+            original, rollback, ..
         } => SpawnError::SpawnRollbackFailed(
             stage_to_wire(stage),
             original.to_string(),
             rollback.to_string(),
+        ),
+        // Both are the DRIVER sequencing the loop wrongly, or the runtime's
+        // backstop catching a loop that never stopped. Neither folds onto the
+        // `Backend` arm: the backend did exactly what it was asked, and telling
+        // a caller their backend failed would point them at the wrong system.
+        DomainSpawnError::NotRunning { agent, detail } => SpawnError::SpawnDriveFailed(
+            stage_to_wire(stage),
+            format!("agent {}: {detail}", agent.0),
+        ),
+        DomainSpawnError::RoundBackstop { agent, limit } => SpawnError::SpawnDriveFailed(
+            stage_to_wire(stage),
+            format!(
+                "agent {} exceeded the runtime tool-round backstop of {limit}",
+                agent.0
+            ),
         ),
     }
 }
@@ -354,6 +402,21 @@ mod tests {
             spawn_agent_label: label.to_string(),
             spawn_task: task.to_string(),
         }
+    }
+
+    /// `request_from_wire` at this handler's defaults — the conversion tests
+    /// are about the SPEC lane, not about policy plumbing.
+    fn plain_request_from_wire(
+        spec: AgSpawnSpec,
+        schema: JsonArg,
+    ) -> Result<SpawnRequest, SpawnError> {
+        request_from_wire(
+            spec,
+            schema,
+            Vec::new(),
+            ModelPolicy::CheapPlumbing,
+            ReasoningEffort::Low,
+        )
     }
 
     fn sample_schema() -> serde_json::Value {
@@ -502,7 +565,7 @@ mod tests {
     /// is total, so absence cannot be a missing argument.
     #[test]
     fn handler_null_schema_becomes_none() {
-        let request = request_from_wire(
+        let request = plain_request_from_wire(
             new_worktree_spec("reviewer", "look around"),
             JsonArg(serde_json::Value::Null),
         )
@@ -510,7 +573,7 @@ mod tests {
         assert_eq!(request.output_schema, None);
 
         let schema = sample_schema();
-        let with_schema = request_from_wire(
+        let with_schema = plain_request_from_wire(
             new_worktree_spec("reviewer", "look around"),
             JsonArg(schema.clone()),
         )
@@ -520,7 +583,7 @@ mod tests {
 
     #[test]
     fn handler_request_from_wire_carries_label_task_and_workspace() {
-        let request = request_from_wire(
+        let request = plain_request_from_wire(
             new_worktree_spec("reviewer", "summarize the diff"),
             JsonArg(serde_json::Value::Null),
         )
@@ -546,7 +609,7 @@ mod tests {
 
     #[test]
     fn handler_request_from_wire_accepts_a_path_safe_existing_id() {
-        let request = request_from_wire(
+        let request = plain_request_from_wire(
             AgSpawnSpec {
                 spawn_workspace: AgSpawnWorkspace::SpawnExistingWorktree(WtWorktreeId {
                     raw: "wt-19c8-2a4d-0-deadbeef".to_string(),
@@ -601,6 +664,8 @@ mod tests {
                 thread: BackendThreadId("mock-thread-0".to_string()),
                 resolved_model: "gpt-5.4-mini".to_string(),
                 turn: TurnId("turn-1".to_string()),
+                rounds: 0,
+                usage: None,
             },
             activity: Vec::new(),
         }

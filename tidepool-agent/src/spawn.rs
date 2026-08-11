@@ -42,10 +42,11 @@ use tidepool_worktree::{
     WorktreeManager, WorktreeSpec,
 };
 
-use crate::backend::OneCycleBackend;
+use crate::backend::AgentBackend;
 use crate::seam::{
-    AgentBackendError, AgentId, BackendThreadId, CycleResultPayload, CycleSpec, ModelPolicy,
-    ThreadSpec, TurnId,
+    AgentBackendError, AgentId, BackendThreadId, CycleResultPayload, CycleSpec,
+    DynamicToolDeclaration, ModelPolicy, ReasoningEffort, ThreadSpec, TokenUsage, ToolCall,
+    ToolCallId, ToolOutcome, ToolReply, TurnEvent, TurnId,
 };
 
 /// Wall-clock milliseconds since the Unix epoch, for `bound_at_ms`.
@@ -167,6 +168,22 @@ pub enum SpawnError {
         original: Box<SpawnError>,
         rollback: WorktreeError,
     },
+
+    /// A tool reply named an agent that is not running — never begun, or
+    /// already finished. Not a saga STAGE (nothing was being allocated, bound,
+    /// or run); a caller-sequencing failure, which is why it has its own
+    /// variant rather than being folded onto `Backend`.
+    #[error("no running agent {agent:?} to answer: {detail}")]
+    NotRunning { agent: AgentId, detail: String },
+
+    /// The runtime's hard backstop on tool-call rounds fired
+    /// ([`MAX_TOOL_ROUNDS`]). This is NOT the authored round cap — that is
+    /// resident policy and lives in the Haskell driver loop, which refuses
+    /// politely and lets the child finish. Reaching THIS one means the policy
+    /// cap was absent or broken, so it fails loudly and rolls back rather than
+    /// letting a loop spend a budget nobody is watching.
+    #[error("agent {agent:?} exceeded the runtime tool-round backstop of {limit}")]
+    RoundBackstop { agent: AgentId, limit: u32 },
 }
 
 impl SpawnError {
@@ -178,9 +195,20 @@ impl SpawnError {
             | SpawnError::Binding { stage, .. }
             | SpawnError::Backend { stage, .. }
             | SpawnError::RollbackFailed { stage, .. } => *stage,
+            // Both of these can only happen with a turn in flight.
+            SpawnError::NotRunning { .. } | SpawnError::RoundBackstop { .. } => SpawnStage::Running,
         }
     }
 }
+
+/// The runtime's hard ceiling on tool-call rounds in one turn.
+///
+/// A backstop, not a policy: the authored cap lives in the Haskell driver loop
+/// (where it can refuse politely and let the child finish its turn), and this
+/// exists only so a missing or broken policy cap cannot spin against a live
+/// backend indefinitely. Set well above any plausible authored cap, because a
+/// backstop that fires during normal work is a bug generator.
+pub const MAX_TOOL_ROUNDS: u32 = 64;
 
 /// What workspace a spawn runs in — a new managed worktree, or an existing
 /// UNBOUND one by durable id (PRD 18 addendum decision 3: `spawnAgent`
@@ -191,8 +219,7 @@ pub enum SpawnWorkspace {
     Existing(WorktreeId),
 }
 
-/// Everything one coupled spawn needs. Lane 1: no dynamic tools on the
-/// authored surface, ephemeral thread, cheap-plumbing model tier.
+/// Everything one coupled spawn needs.
 #[derive(Debug, Clone)]
 pub struct SpawnRequest {
     pub workspace: SpawnWorkspace,
@@ -203,26 +230,48 @@ pub struct SpawnRequest {
     pub task: String,
     /// JSON Schema for the terminal result (from the caller's result type).
     pub output_schema: Option<serde_json::Value>,
+    /// The tools this agent may call, compiled from the caller's tools record.
+    /// Frozen for the agent's life — dynamic tools are thread-scoped.
+    pub tools: Vec<DynamicToolDeclaration>,
+    /// Which model tier, and how hard it should think. Supplied by the caller
+    /// rather than fixed here: the two are budget decisions, and a budget is
+    /// granted to an operator, not baked into a saga.
+    pub model: ModelPolicy,
+    pub effort: ReasoningEffort,
 }
 
 impl SpawnRequest {
-    /// The lane-1 thread shape: ephemeral, no dynamic tools.
+    /// The thread shape: ephemeral, carrying the declared tools.
     pub fn thread_spec(&self) -> ThreadSpec {
         ThreadSpec {
             ephemeral: true,
-            dynamic_tools: Vec::new(),
+            dynamic_tools: self.tools.clone(),
         }
     }
 
-    /// The lane-1 cycle shape for a resolved workspace.
+    /// The cycle shape for a resolved workspace.
     pub fn cycle_spec(&self, cwd: String) -> CycleSpec {
         CycleSpec {
             cwd,
             task: self.task.clone(),
             output_schema: self.output_schema.clone(),
-            model: ModelPolicy::CheapPlumbing,
+            model: self.model,
+            effort: self.effort,
         }
     }
+}
+
+/// Where a driven spawn stopped.
+///
+/// The authored loop alternates between these: a `ToolCall` is answered and
+/// driving continues; a `Done` is the end of the agent's life.
+#[derive(Debug, Clone)]
+pub enum SpawnStep {
+    /// The child called a tool. Its turn is PARKED until
+    /// [`CoupledSpawner::answer`].
+    ToolCall { agent: AgentId, call: ToolCall },
+    /// The cycle finished, the binding is settled, and the receipt is complete.
+    Done(Box<OneCycleRun>),
 }
 
 /// The coupled pair a successful spawn yields (PRD 19: `WorkerRun` as the
@@ -246,6 +295,12 @@ pub struct SpawnReceipt {
     /// The EXACT model the backend resolved — never the tier name.
     pub resolved_model: String,
     pub turn: TurnId,
+    /// How many tool-call rounds the child actually took. Checkable against the
+    /// backend's own transcript, and the number a budget conversation needs.
+    pub rounds: u32,
+    /// What the turn cost, when the backend reported it. `None` is "the backend
+    /// said nothing", never "it was free".
+    pub usage: Option<TokenUsage>,
 }
 
 /// A completed one-cycle run: the coupled pair, the terminal payload (decoded
@@ -267,6 +322,28 @@ pub struct CoupledSpawner {
     manager: WorktreeManager,
     bindings: BindingTable,
     next_agent: u64,
+    /// The agent currently mid-turn, if any.
+    ///
+    /// ONE at a time, deliberately: multi-agent concurrency is chartered later
+    /// work (README: "multi-agent correlation is wave-2 work"), and a spawner
+    /// that silently supported two would make the untested case reachable. A
+    /// second `begin` while one is running is a loud failure, not a queue.
+    running: Option<RunningAgent>,
+}
+
+/// A spawn that has begun and not yet finished: the coupled pair, the binding
+/// it holds, and the call it is parked on.
+#[derive(Debug, Clone)]
+struct RunningAgent {
+    agent: AgentId,
+    worktree: WorktreeHandle,
+    thread: BackendThreadId,
+    binding_ref: String,
+    /// The call awaiting an answer. `None` between a completed step and the
+    /// next — which cannot be observed by a caller, since every step either
+    /// parks or finishes.
+    parked: Option<ToolCallId>,
+    rounds: u32,
 }
 
 impl CoupledSpawner {
@@ -279,6 +356,7 @@ impl CoupledSpawner {
             manager,
             bindings: BindingTable::open(binding_root)?,
             next_agent: 0,
+            running: None,
         })
     }
 
@@ -298,15 +376,35 @@ impl CoupledSpawner {
         id
     }
 
-    /// Run the whole coupled-spawn saga: workspace, binding, thread, one
-    /// cycle, receipt — or ONE typed error, with the rollback already done.
+    /// The agent currently mid-turn, if any.
+    pub fn running_agent(&self) -> Option<AgentId> {
+        self.running.as_ref().map(|r| r.agent)
+    }
+
+    /// BEGIN the coupled-spawn saga and drive the turn to its first stop:
+    /// workspace, binding, thread (carrying the declared tools), turn start —
+    /// then either a parked tool call or a finished cycle.
     ///
-    /// See the module docs for the stage diagram and rollback semantics.
-    pub fn spawn_one_cycle(
+    /// See the module docs for the stage diagram and rollback semantics. Every
+    /// error returned here has already rolled back.
+    pub fn begin(
         &mut self,
-        backend: &mut dyn OneCycleBackend,
+        backend: &mut dyn AgentBackend,
         request: &SpawnRequest,
-    ) -> Result<OneCycleRun, SpawnError> {
+    ) -> Result<SpawnStep, SpawnError> {
+        if let Some(running) = &self.running {
+            // Refusing is the point: a spawner that queued or silently
+            // replaced would make multi-agent concurrency — which nothing has
+            // tested — reachable by accident.
+            return Err(SpawnError::NotRunning {
+                agent: running.agent,
+                detail: format!(
+                    "agent {} is still mid-turn; this spawner drives one agent at a time",
+                    running.agent.0
+                ),
+            });
+        }
+
         // 1. Allocating → WorktreeReady. Nothing is bound yet, so a failure
         //    here has nothing to compensate: no binding row is ever written.
         let worktree = self.resolve_workspace(&request.workspace)?;
@@ -351,8 +449,8 @@ impl CoupledSpawner {
         // 5. Running. `cwd` is supplied per-cycle, not at thread creation —
         //    see `CycleSpec`'s docs for why the seam splits it that way.
         let cwd = worktree.cwd().to_string_lossy().into_owned();
-        let outcome = match backend.run_cycle(&thread, &request.cycle_spec(cwd)) {
-            Ok(outcome) => outcome,
+        let event = match backend.start_turn(&thread, &request.cycle_spec(cwd)) {
+            Ok(event) => event,
             Err(error) => {
                 return Err(self.roll_back(
                     worktree.id(),
@@ -364,48 +462,188 @@ impl CoupledSpawner {
             }
         };
 
-        // 6. Success: the cycle IS the agent's whole life (lane 1), so the
-        //    binding settles `Terminal`.
-        //
-        //    A settle failure here is reported `RollbackFailed` rather than
-        //    `Binding`, deliberately: `RollbackFailed` is this type's ONLY
-        //    signal that an Active binding may still be on disk, and that is
-        //    exactly what a failed terminal settle leaves behind. Returning
-        //    `Binding` would satisfy the "no Active binding remains" promise
-        //    this enum's docs make for every other variant, and it would be a
-        //    lie. `original` and `rollback` carry the same failure because on
-        //    the success path the settle is both the operation and its own
-        //    compensation — there is no earlier failure to lose, and no second
-        //    write worth attempting against storage that just refused one.
-        if let Err(rollback) = self.bindings.settle(worktree.id(), BindingState::Terminal) {
-            return Err(SpawnError::RollbackFailed {
-                stage: SpawnStage::Running,
-                original: Box::new(SpawnError::Binding {
-                    stage: SpawnStage::Running,
-                    error: rollback.clone(),
-                }),
-                rollback,
+        self.running = Some(RunningAgent {
+            agent,
+            worktree,
+            thread,
+            binding_ref,
+            parked: None,
+            rounds: 0,
+        });
+        self.settle_step(event)
+    }
+
+    /// Answer the parked tool call and drive on to the next stop.
+    ///
+    /// `agent` is checked against the running agent before anything is sent:
+    /// answering the wrong agent is the misroute the correlation triple exists
+    /// to catch, and catching it here costs nothing.
+    pub fn answer(
+        &mut self,
+        backend: &mut dyn AgentBackend,
+        agent: AgentId,
+        call: ToolCallId,
+        outcome: ToolOutcome,
+    ) -> Result<SpawnStep, SpawnError> {
+        let Some(running) = &mut self.running else {
+            return Err(SpawnError::NotRunning {
+                agent,
+                detail: "no agent is mid-turn".to_string(),
+            });
+        };
+        if running.agent != agent {
+            return Err(SpawnError::NotRunning {
+                agent,
+                detail: format!("agent {} is the one mid-turn", running.agent.0),
             });
         }
+        match &running.parked {
+            Some(parked) if *parked == call => {}
+            Some(parked) => {
+                return Err(SpawnError::NotRunning {
+                    agent,
+                    detail: format!(
+                        "call {} is parked, not {} — refusing to answer the wrong call",
+                        parked.0, call.0
+                    ),
+                })
+            }
+            None => {
+                return Err(SpawnError::NotRunning {
+                    agent,
+                    detail: format!("no call is parked; {} answers nothing", call.0),
+                })
+            }
+        }
 
-        let receipt = SpawnReceipt {
-            agent,
-            worktree: worktree.id().clone(),
-            binding_ref,
-            thread: thread.clone(),
-            resolved_model: outcome.resolved_model,
-            turn: outcome.turn,
-        };
-        Ok(OneCycleRun {
-            run: WorkerRun {
+        running.rounds += 1;
+        if running.rounds > MAX_TOOL_ROUNDS {
+            let worktree = running.worktree.id().clone();
+            let error = SpawnError::RoundBackstop {
                 agent,
-                worktree,
-                thread,
-            },
-            payload: outcome.payload,
-            receipt,
-            activity: outcome.activity,
-        })
+                limit: MAX_TOOL_ROUNDS,
+            };
+            self.running = None;
+            return Err(self.roll_back(&worktree, error));
+        }
+        running.parked = None;
+
+        let event = match backend.resume(ToolReply { call, outcome }) {
+            Ok(event) => event,
+            Err(error) => {
+                let worktree = self
+                    .running
+                    .as_ref()
+                    .expect("running checked above")
+                    .worktree
+                    .id()
+                    .clone();
+                self.running = None;
+                return Err(self.roll_back(
+                    &worktree,
+                    SpawnError::Backend {
+                        stage: SpawnStage::Running,
+                        error,
+                    },
+                ));
+            }
+        };
+        self.settle_step(event)
+    }
+
+    /// Turn one backend event into a saga step, settling the binding when the
+    /// turn ends.
+    ///
+    /// Success settles `Terminal` — a cycle IS this agent's whole life, so
+    /// cycle completion is agent completion.
+    ///
+    /// A settle failure here is reported `RollbackFailed` rather than
+    /// `Binding`, deliberately: `RollbackFailed` is `SpawnError`'s ONLY signal
+    /// that an Active binding may still be on disk, and that is exactly what a
+    /// failed terminal settle leaves behind. Returning `Binding` would satisfy
+    /// the "no Active binding remains" promise this enum's docs make for every
+    /// other variant, and it would be a lie. `original` and `rollback` carry
+    /// the same failure because on the success path the settle is both the
+    /// operation and its own compensation — there is no earlier failure to
+    /// lose, and no second write worth attempting against storage that just
+    /// refused one.
+    fn settle_step(&mut self, event: TurnEvent) -> Result<SpawnStep, SpawnError> {
+        let running = self
+            .running
+            .as_mut()
+            .expect("settle_step is only reachable with an agent running");
+        match event {
+            TurnEvent::ToolCall(call) => {
+                running.parked = Some(call.call.clone());
+                Ok(SpawnStep::ToolCall {
+                    agent: running.agent,
+                    call,
+                })
+            }
+            TurnEvent::Completed(outcome) => {
+                let finished = self.running.take().expect("checked just above");
+                if let Err(rollback) = self
+                    .bindings
+                    .settle(finished.worktree.id(), BindingState::Terminal)
+                {
+                    return Err(SpawnError::RollbackFailed {
+                        stage: SpawnStage::Running,
+                        original: Box::new(SpawnError::Binding {
+                            stage: SpawnStage::Running,
+                            error: rollback.clone(),
+                        }),
+                        rollback,
+                    });
+                }
+                let receipt = SpawnReceipt {
+                    agent: finished.agent,
+                    worktree: finished.worktree.id().clone(),
+                    binding_ref: finished.binding_ref,
+                    thread: finished.thread.clone(),
+                    resolved_model: outcome.resolved_model,
+                    turn: outcome.turn,
+                    rounds: finished.rounds,
+                    usage: outcome.usage,
+                };
+                Ok(SpawnStep::Done(Box::new(OneCycleRun {
+                    run: WorkerRun {
+                        agent: finished.agent,
+                        worktree: finished.worktree,
+                        thread: finished.thread,
+                    },
+                    payload: outcome.payload,
+                    receipt,
+                    activity: outcome.activity,
+                })))
+            }
+        }
+    }
+
+    /// The whole saga behind ONE call, refusing every tool call the child
+    /// makes.
+    ///
+    /// A COMBINATOR over `begin`/`answer`, not a second primitive — PRD 18's
+    /// rule for synchronous delegation. This is the no-tools path: a request
+    /// carrying no declarations should produce no calls, and one that arrives
+    /// anyway is refused rather than left parked.
+    pub fn spawn_one_cycle(
+        &mut self,
+        backend: &mut dyn AgentBackend,
+        request: &SpawnRequest,
+    ) -> Result<OneCycleRun, SpawnError> {
+        let mut step = self.begin(backend, request)?;
+        loop {
+            match step {
+                SpawnStep::Done(run) => return Ok(*run),
+                SpawnStep::ToolCall { agent, call } => {
+                    let refusal = ToolOutcome::Refused(format!(
+                        "no such tool: {} — this agent was created with no dynamic tools",
+                        call.tool
+                    ));
+                    step = self.answer(backend, agent, call.call, refusal)?;
+                }
+            }
+        }
     }
 
     /// Stage 1: a new managed worktree, or an existing one by durable id.

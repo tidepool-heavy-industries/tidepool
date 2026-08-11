@@ -43,6 +43,94 @@ pub struct DynamicToolDeclaration {
     pub input_schema: serde_json::Value,
 }
 
+/// A backend's identity for one parked tool call. Opaque, as above — it is the
+/// correlation token a reply must carry back, and Tidepool only ever echoes it.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub struct ToolCallId(pub String);
+
+/// One tool call the child made, parked awaiting the parent's answer.
+///
+/// The correlation triple (`thread`, `turn`, `call`) rides every call because
+/// it is what makes a cross-agent misroute DETECTABLE rather than a silent
+/// wrong answer — the adapter bring-up confirmed all three are present on the
+/// wire.
+///
+/// While a call is parked the child's turn is stopped: nothing is spent, and
+/// nothing times out except by the backend's own clock. The parent is free to
+/// take as long as answering honestly requires.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ToolCall {
+    pub call: ToolCallId,
+    pub thread: BackendThreadId,
+    pub turn: TurnId,
+    /// The wire name the child invoked — one of the declared
+    /// [`DynamicToolDeclaration::name`]s, or something else entirely, which is
+    /// a fact the parent must be able to refuse rather than a fact to assume.
+    pub tool: String,
+    /// The child's arguments, as JSON. Named-field objects: the model is the
+    /// encoder here and it knows only the declared `input_schema`.
+    pub arguments: serde_json::Value,
+}
+
+/// What the parent answered a [`ToolCall`] with.
+///
+/// The two cases are the protocol's own (`success: true/false` plus content),
+/// NOT a JSON-RPC error — a failing tool is an ordinary conversational fact the
+/// child can react to, and sending a transport error instead would strand the
+/// call. Every parked call gets one of these; there is no third "ignore" case.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum ToolOutcome {
+    /// The handler ran and produced a value the child should read.
+    Answered(serde_json::Value),
+    /// The handler refused or failed. The text is what the child sees, so it
+    /// is written for the child, not for a log.
+    Refused(String),
+}
+
+/// A parent's answer bound to the call it answers.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ToolReply {
+    pub call: ToolCallId,
+    pub outcome: ToolOutcome,
+}
+
+/// Why the turn pump stopped.
+///
+/// A turn either parks on a tool call or ends. There is deliberately no
+/// "still running" variant: the pump blocks until one of these two is true, so
+/// a caller can never observe a turn mid-flight and has nothing to poll.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum TurnEvent {
+    /// The child called a tool. The request is PARKED — the backend has
+    /// written no response — until [`AgentBackend::resume`](crate::backend::AgentBackend::resume).
+    ToolCall(ToolCall),
+    /// The turn reached its terminal state.
+    Completed(CycleOutcome),
+}
+
+/// How hard the model should think. Distinct from [`ModelPolicy`]: the model
+/// is WHICH engine, this is HOW MUCH of it to spend, and the two move
+/// independently (the granted budget for this lane's live leg names both).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ReasoningEffort {
+    Low,
+    Medium,
+    High,
+}
+
+/// Tokens one turn actually consumed, as the backend reported them.
+///
+/// `Option`-free on purpose once present: a backend that reports usage reports
+/// all of it. Whether it reported any is [`CycleOutcome::usage`]'s `Option`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct TokenUsage {
+    pub input_tokens: i64,
+    pub cached_input_tokens: i64,
+    pub output_tokens: i64,
+    pub reasoning_output_tokens: i64,
+    pub total_tokens: i64,
+}
+
 /// Receipt-bearing observations. Model prose is never the source of any field
 /// here — PRD 18: "Runtime receipts are authoritative."
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -84,12 +172,26 @@ pub enum AgentBackendError {
 /// what it got — a receipt naming a tier rather than the model it actually ran
 /// is not checkable.
 ///
-/// Lane 1 needs only the cheap-plumbing tier (codex: prefer `gpt-5.4-mini`,
-/// else `gpt-5.6-luna`, NEVER `gpt-5.6-terra`). A richer semantic vocabulary
-/// (`Fast`/`Capable`/`Deep`) is PRD 18 open decision 3, not lane-1 scope.
+/// Each variant names an ALLOWLIST, in preference order. The allowlist is the
+/// mechanism by which a banned model is unreachable: resolution takes the first
+/// listed slug the backend actually offers and FAILS otherwise, so no slug
+/// outside the list can be selected however the catalogue changes. A denylist
+/// would have to anticipate every future name; this does not.
+///
+/// A richer semantic vocabulary (`Fast`/`Capable`/`Deep`) is PRD 18 open
+/// decision 3, still open.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ModelPolicy {
+    /// Cheap plumbing: prefer `gpt-5.4-mini`, else `gpt-5.6-luna`.
     CheapPlumbing,
+    /// The cheapest gpt-5.6 tier, pinned: `gpt-5.6-luna` and nothing else.
+    ///
+    /// Exists because the human's 2026-08-11 live-budget grant names that exact
+    /// tier at [`ReasoningEffort::Low`]. [`ModelPolicy::CheapPlumbing`] would
+    /// resolve to `gpt-5.4-mini` on the observed catalogue, which is a
+    /// different model than the one that was granted — so "just reuse
+    /// CheapPlumbing" would spend the budget on something nobody authorized.
+    CheapestGpt56,
 }
 
 /// What one thread is created with. Frozen for the thread's lifetime — dynamic
@@ -122,6 +224,7 @@ pub struct CycleSpec {
     /// Haskell writes one, same rule as [`DynamicToolDeclaration::input_schema`].
     pub output_schema: Option<serde_json::Value>,
     pub model: ModelPolicy,
+    pub effort: ReasoningEffort,
 }
 
 /// What the terminal message actually was. Typed rather than `Option<Value>`
@@ -154,4 +257,10 @@ pub struct CycleOutcome {
     /// The EXACT model the backend resolved and ran — recorded per the
     /// [`ModelPolicy`] rule, never the tier name.
     pub resolved_model: String,
+    /// What the turn actually cost, when the backend reported it. `None` means
+    /// the backend said nothing about usage — never "it was free". Lane 1 had
+    /// no way to fill this in (the `thread/tokenUsage/updated` notifications
+    /// were read off the wire and discarded); a lane that spends a real budget
+    /// has to report what it spent, so this is where that lands.
+    pub usage: Option<TokenUsage>,
 }

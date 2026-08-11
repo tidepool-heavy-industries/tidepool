@@ -19,10 +19,10 @@
 use std::path::{Path, PathBuf};
 
 use tidepool_agent::backend::mock::{MockBackend, MockFailure};
-use tidepool_agent::backend::OneCycleBackend;
+use tidepool_agent::backend::AgentBackend;
 use tidepool_agent::seam::{
     AgentBackendError, AgentId, BackendThreadId, CycleResultPayload, CycleSpec, ModelPolicy,
-    ThreadSpec, TurnId,
+    ReasoningEffort, ThreadSpec, ToolReply, TurnEvent, TurnId,
 };
 use tidepool_agent::spawn::{CoupledSpawner, SpawnError, SpawnRequest, SpawnStage, SpawnWorkspace};
 use tidepool_worktree::testing::TestRepo;
@@ -83,6 +83,9 @@ fn request(workspace: SpawnWorkspace, label: &str) -> SpawnRequest {
             "properties": { "summary": { "type": "string" } },
             "required": ["summary"],
         })),
+        tools: Vec::new(),
+        model: ModelPolicy::CheapPlumbing,
+        effort: ReasoningEffort::Low,
     }
 }
 
@@ -479,7 +482,7 @@ struct SabotageBindingStorage {
     binding_file: PathBuf,
 }
 
-impl OneCycleBackend for SabotageBindingStorage {
+impl AgentBackend for SabotageBindingStorage {
     fn start_thread(&mut self, _spec: &ThreadSpec) -> Result<BackendThreadId, AgentBackendError> {
         std::fs::remove_file(&self.binding_file).expect("the bind must have written this row");
         std::fs::create_dir(&self.binding_file).expect("obstruct the row path with a directory");
@@ -488,11 +491,15 @@ impl OneCycleBackend for SabotageBindingStorage {
         })
     }
 
-    fn run_cycle(
+    fn start_turn(
         &mut self,
         _thread: &BackendThreadId,
         _spec: &CycleSpec,
-    ) -> Result<tidepool_agent::seam::CycleOutcome, AgentBackendError> {
+    ) -> Result<TurnEvent, AgentBackendError> {
+        unreachable!("start_thread always fails")
+    }
+
+    fn resume(&mut self, _reply: ToolReply) -> Result<TurnEvent, AgentBackendError> {
         unreachable!("start_thread always fails")
     }
 }

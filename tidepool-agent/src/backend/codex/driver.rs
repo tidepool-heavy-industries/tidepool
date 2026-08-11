@@ -1,5 +1,5 @@
-//! [`CodexOneCycleBackend`] — the real backend behind the
-//! [`OneCycleBackend`](crate::backend::OneCycleBackend) seam.
+//! [`CodexAgentBackend`] — the real backend behind the
+//! [`AgentBackend`](crate::backend::AgentBackend) seam.
 //!
 //! One `codex app-server` process, connected lazily on the first call and
 //! reused for the backend's lifetime. Everything crossing back out is
@@ -15,29 +15,16 @@
 //!    convention — [`thread_start_omits_cwd`](tests::thread_start_omits_cwd)
 //!    pins it against a future field addition.
 //! 2. **The model is RESOLVED, never hardcoded** (Inanna, 2026-08-09).
-//!    [`ModelPolicy::CheapPlumbing`] queries `model/list` once and picks the
-//!    first entry of [`CHEAP_PLUMBING_PREFERENCE`] that is actually offered.
-//!    The preference list is an ALLOWLIST, so a model that is not on it can
-//!    never be selected however the server's catalogue changes — that is the
-//!    mechanism, not a denylist that a new slug could slip past.
+//!    Each [`ModelPolicy`] names an ALLOWLIST ([`preference_for`]); resolution
+//!    queries `model/list` once and takes the first listed slug actually
+//!    offered, failing otherwise. A model outside the list can never be
+//!    selected however the server's catalogue changes — that is the mechanism,
+//!    not a denylist a new slug could slip past.
 //!    [`CycleOutcome::resolved_model`] carries the exact slug that ran.
-//! 3. **No `item/tool/call` is ever left stranded.** Lane 1 declares no
-//!    dynamic tools, so every tool call is unexpected — and an unexpected call
-//!    still gets a `success: false` reply, because an unanswered one parks the
-//!    child's turn until the timeout kills it.
-//!
-//! # Activity projection is deliberately shallow (lane 1)
-//!
-//! [`project_activity`] reads `turn.items` from the terminal `turn/completed`
-//! frame and nothing else. Token usage arrives on
-//! `thread/tokenUsage/updated` notifications, which [`Session::drive_turn`]
-//! records into [`Session::frames`] but discards from
-//! [`LiveTurnOutcome`](crate::backend::codex::process::LiveTurnOutcome) —
-//! surfacing it needs an event-projection layer, which is a later lane's
-//! design, not a field to bolt on here. Lane 1 receipts need model + turn +
-//! payload; the gap is written down in
-//! `plans/post-restart/agent-lanes/lane1-live-leg.md` rather than silently
-//! left as an empty vector.
+//! 3. **No `item/tool/call` is ever left stranded.** A call is answered —
+//!    with the parent's value, or with a refusal — because an unanswered one
+//!    parks the child's turn until the timeout kills it. That holds for a
+//!    declared tool, an undeclared one, and a round-cap refusal alike.
 
 use std::time::Duration;
 
@@ -49,21 +36,58 @@ use codex_codes::{
 use crate::backend::codex::dynamic_tools::{
     DynamicToolFunctionSpec, DynamicToolSpec, ThreadStartWithDynamicTools,
 };
-use crate::backend::codex::process::{last_agent_message_text, Session, SessionError};
-use crate::backend::OneCycleBackend;
+use crate::backend::codex::process::{last_agent_message_text, Session, SessionError, TurnStop};
+use crate::backend::AgentBackend;
 use crate::seam::{
     AgentActivity, AgentBackendError, BackendThreadId, CycleOutcome, CycleResultPayload, CycleSpec,
-    DynamicToolDeclaration, ModelPolicy, ThreadSpec, TurnId,
+    DynamicToolDeclaration, ModelPolicy, ReasoningEffort, ThreadSpec, TokenUsage, ToolCall,
+    ToolCallId, ToolOutcome, ToolReply, TurnEvent, TurnId,
 };
 
 /// The cheap-plumbing tier, in preference order (Inanna, 2026-08-09).
 ///
-/// An ALLOWLIST: [`choose_cheap_plumbing_model`] returns the first entry that
+/// An ALLOWLIST: [`choose_model`] returns the first entry that
 /// `model/list` actually offers and fails otherwise, so no model outside this
 /// list is reachable — including `gpt-5.6-terra`, which overnight policy bans
 /// and which the phase-4 fixture happens to have been recorded on. That
 /// fixture is protocol truth, never a model choice.
 pub const CHEAP_PLUMBING_PREFERENCE: [&str; 2] = ["gpt-5.4-mini", "gpt-5.6-luna"];
+
+/// The cheapest gpt-5.6 tier, pinned to exactly one slug.
+///
+/// A one-entry allowlist is still an allowlist, and that is the point: the
+/// human's 2026-08-11 live-budget grant names `gpt-5.6-luna` specifically, so
+/// resolving to anything else — including the CHEAPER `gpt-5.4-mini` — would
+/// spend a budget on a model nobody authorized. Cheaper is not the same as
+/// granted.
+pub const CHEAPEST_GPT56_PREFERENCE: [&str; 1] = ["gpt-5.6-luna"];
+
+/// The allowlist a policy resolves against, in preference order.
+pub(crate) fn preference_for(policy: ModelPolicy) -> &'static [&'static str] {
+    match policy {
+        ModelPolicy::CheapPlumbing => &CHEAP_PLUMBING_PREFERENCE,
+        ModelPolicy::CheapestGpt56 => &CHEAPEST_GPT56_PREFERENCE,
+    }
+}
+
+/// Project the seam's effort onto the protocol's own vocabulary.
+///
+/// `codex_codes::ReasoningEffort` is a transparent newtype over `String` (the
+/// protocol calls it "a non-empty reasoning effort value advertised by the
+/// model"), so this is where the seam's closed enum meets an open wire
+/// vocabulary. Keeping the seam closed is deliberate: the caller chooses among
+/// efforts Tidepool has decided it supports, not among whatever strings a
+/// server might advertise.
+pub(crate) fn effort_to_wire(effort: ReasoningEffort) -> codex_codes::ReasoningEffort {
+    codex_codes::ReasoningEffort(
+        match effort {
+            ReasoningEffort::Low => "low",
+            ReasoningEffort::Medium => "medium",
+            ReasoningEffort::High => "high",
+        }
+        .to_string(),
+    )
+}
 
 /// Default ceiling on one cycle. A cycle is one model turn in a workspace, so
 /// this bounds a hung server or a runaway turn — it is not a latency budget.
@@ -75,22 +99,24 @@ pub const DEFAULT_TURN_TIMEOUT: Duration = Duration::from_secs(300);
 /// Owns its own tokio runtime (the `LlmHandler` precedent): the seam is sync
 /// because effect handlers are sync, and [`Session`] is async, so exactly one
 /// place blocks — here.
-pub struct CodexOneCycleBackend {
+pub struct CodexAgentBackend {
     runtime: tokio::runtime::Runtime,
     /// Connected on first use. `None` means "not connected yet", never
     /// "connection lost" — a lost connection surfaces as a
     /// [`AgentBackendError::BackendUnavailable`] from the call that noticed.
     session: Option<Session>,
-    /// Resolved once per backend and reused: `model/list` is a metadata
+    /// Fetched once per backend and reused: `model/list` is a metadata
     /// request, but re-asking per cycle would let one agent's turns silently
     /// run on two different models.
-    cheap_plumbing_model: Option<String>,
+    catalogue: Option<Vec<String>>,
+    /// The exact slug the last resolution picked.
+    resolved_model: Option<String>,
     turn_timeout: Duration,
 }
 
-impl CodexOneCycleBackend {
+impl CodexAgentBackend {
     /// Build a backend. Does NOT spawn the app-server — the process starts on
-    /// the first [`start_thread`](OneCycleBackend::start_thread), so
+    /// the first [`start_thread`](AgentBackend::start_thread), so
     /// constructing one is free and side-effect-free.
     pub fn new() -> Result<Self, AgentBackendError> {
         let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -102,7 +128,8 @@ impl CodexOneCycleBackend {
         Ok(Self {
             runtime,
             session: None,
-            cheap_plumbing_model: None,
+            catalogue: None,
+            resolved_model: None,
             turn_timeout: DEFAULT_TURN_TIMEOUT,
         })
     }
@@ -121,7 +148,7 @@ impl CodexOneCycleBackend {
     /// The exact model this backend resolved, once it has resolved one.
     /// `None` before the first cycle.
     pub fn resolved_model(&self) -> Option<&str> {
-        self.cheap_plumbing_model.as_deref()
+        self.resolved_model.as_deref()
     }
 
     /// Kill the app-server and confirm it was reaped. Best effort is not good
@@ -168,28 +195,31 @@ impl CodexOneCycleBackend {
 
     /// Resolve `policy` to an exact model slug, querying `model/list` at most
     /// once per backend.
-    fn resolve_model(&mut self, policy: ModelPolicy) -> Result<String, AgentBackendError> {
-        match policy {
-            ModelPolicy::CheapPlumbing => {
-                if let Some(model) = &self.cheap_plumbing_model {
-                    return Ok(model.clone());
-                }
-                let (runtime, session) = self.connected()?;
-                let response: ModelListResponse = runtime
-                    .block_on(session.request(
-                        codex_codes::methods::MODEL_LIST,
-                        &ModelListParams::default(),
-                    ))
-                    .map_err(map_session_error)?;
-                let model = choose_cheap_plumbing_model(&model_slugs(&response))?;
-                self.cheap_plumbing_model = Some(model.clone());
-                Ok(model)
-            }
+    ///
+    /// The catalogue is cached, not the CHOICE: two policies resolve against
+    /// the same fetched list but may legitimately pick different slugs.
+    pub(crate) fn resolve_model(
+        &mut self,
+        policy: ModelPolicy,
+    ) -> Result<String, AgentBackendError> {
+        if self.catalogue.is_none() {
+            let (runtime, session) = self.connected()?;
+            let response: ModelListResponse = runtime
+                .block_on(session.request(
+                    codex_codes::methods::MODEL_LIST,
+                    &ModelListParams::default(),
+                ))
+                .map_err(map_session_error)?;
+            self.catalogue = Some(model_slugs(&response));
         }
+        let available = self.catalogue.as_deref().expect("fetched just above");
+        let model = choose_model(policy, available)?;
+        self.resolved_model = Some(model.clone());
+        Ok(model)
     }
 }
 
-impl OneCycleBackend for CodexOneCycleBackend {
+impl AgentBackend for CodexAgentBackend {
     fn start_thread(&mut self, spec: &ThreadSpec) -> Result<BackendThreadId, AgentBackendError> {
         let params = thread_start_params(spec);
         let (runtime, session) = self.connected()?;
@@ -199,28 +229,106 @@ impl OneCycleBackend for CodexOneCycleBackend {
         Ok(BackendThreadId(response.thread.id))
     }
 
-    fn run_cycle(
+    fn start_turn(
         &mut self,
         thread: &BackendThreadId,
         spec: &CycleSpec,
-    ) -> Result<CycleOutcome, AgentBackendError> {
+    ) -> Result<TurnEvent, AgentBackendError> {
         let resolved_model = self.resolve_model(spec.model)?;
         let params = turn_start_params(thread, spec, &resolved_model);
         let timeout = self.turn_timeout;
         let (runtime, session) = self.connected()?;
-        let outcome = runtime
-            .block_on(session.drive_turn(&params, refuse_undeclared_tool_call, timeout))
+        let stop = runtime
+            .block_on(session.start_turn(&params, timeout))
             .map_err(map_session_error)?;
+        project_stop(stop, session, &resolved_model)
+    }
 
-        if let Some(error) = turn_failure(&outcome.turn) {
-            return Err(error);
+    fn resume(&mut self, reply: ToolReply) -> Result<TurnEvent, AgentBackendError> {
+        // The model was resolved when the turn started; re-resolving here could
+        // silently move an in-flight turn onto a different model.
+        let resolved_model =
+            self.resolved_model
+                .clone()
+                .ok_or_else(|| AgentBackendError::ProtocolRejected {
+                    detail: "resume with no turn in flight: no model has been resolved".to_string(),
+                })?;
+        let response = tool_outcome_to_response(&reply.outcome);
+        let timeout = self.turn_timeout;
+        let (runtime, session) = self.connected()?;
+        let stop = runtime
+            .block_on(session.reply_and_pump(&reply.call.0, &response, timeout))
+            .map_err(map_session_error)?;
+        project_stop(stop, session, &resolved_model)
+    }
+}
+
+/// Project a pump stop into the seam's [`TurnEvent`].
+///
+/// The `session` borrow is what supplies token usage: it rides
+/// `thread/tokenUsage/updated` notifications rather than the terminal frame, so
+/// it is session state by the time the turn completes, not something readable
+/// off the `Turn`.
+fn project_stop(
+    stop: TurnStop,
+    session: &Session,
+    resolved_model: &str,
+) -> Result<TurnEvent, AgentBackendError> {
+    match stop {
+        TurnStop::ToolCall(params) => Ok(TurnEvent::ToolCall(ToolCall {
+            call: ToolCallId(params.call_id),
+            thread: BackendThreadId(params.thread_id),
+            turn: TurnId(params.turn_id),
+            tool: params.tool,
+            arguments: params.arguments,
+        })),
+        TurnStop::Completed(turn) => {
+            if let Some(error) = turn_failure(&turn) {
+                return Err(error);
+            }
+            Ok(TurnEvent::Completed(CycleOutcome {
+                turn: TurnId(turn.id.clone()),
+                payload: project_payload(&turn),
+                activity: project_activity(&turn),
+                resolved_model: resolved_model.to_string(),
+                usage: session.token_usage().map(project_usage),
+            }))
         }
-        Ok(CycleOutcome {
-            turn: TurnId(outcome.turn.id.clone()),
-            payload: project_payload(&outcome.turn),
-            activity: project_activity(&outcome.turn),
-            resolved_model,
-        })
+    }
+}
+
+/// Project the backend's cumulative thread totals into the seam's usage.
+///
+/// `last` rather than `total`: the seam reports what THIS turn cost, and a
+/// thread's running total would double-count on any thread that ran more than
+/// one turn.
+pub(crate) fn project_usage(usage: &codex_codes::ThreadTokenUsage) -> TokenUsage {
+    let last = &usage.last;
+    TokenUsage {
+        input_tokens: last.input_tokens,
+        cached_input_tokens: last.cached_input_tokens,
+        output_tokens: last.output_tokens,
+        reasoning_output_tokens: last.reasoning_output_tokens,
+        total_tokens: last.total_tokens,
+    }
+}
+
+/// Project a seam [`ToolOutcome`] onto the protocol's own reply shape.
+///
+/// `success: false` with content is the protocol's failure shape, not a
+/// JSON-RPC error (PROTOCOL-NOTES.md §3) — so a refusal is an ordinary
+/// conversational fact the child reads and reacts to, and a stranded call is
+/// impossible by construction.
+pub(crate) fn tool_outcome_to_response(
+    outcome: &ToolOutcome,
+) -> codex_codes::DynamicToolCallResponse {
+    let (success, text) = match outcome {
+        ToolOutcome::Answered(value) => (true, value.to_string()),
+        ToolOutcome::Refused(detail) => (false, detail.clone()),
+    };
+    codex_codes::DynamicToolCallResponse {
+        success,
+        content_items: vec![codex_codes::DynamicToolCallOutputContentItem::InputText { text }],
     }
 }
 
@@ -269,39 +377,13 @@ fn turn_start_params(
             // merely asserted about it.
             writable_roots: Some(vec![codex_codes::AbsolutePathBuf(spec.cwd.clone())]),
         }),
+        effort: Some(effort_to_wire(spec.effort)),
         input: vec![UserInput::Text {
             text: spec.task.clone(),
             text_elements: None,
         }],
         output_schema: spec.output_schema.clone(),
         ..Default::default()
-    }
-}
-
-/// The reply to an `item/tool/call` lane 1 never declared.
-///
-/// `success: false` with `contentItems` is the protocol's own failure shape
-/// (PROTOCOL-NOTES.md §3), not a JSON-RPC error. Answering rather than
-/// ignoring is the point: an unanswered call parks the child's turn until the
-/// cycle timeout fires.
-fn refuse_undeclared_tool_call(
-    call: &codex_codes::DynamicToolCallParams,
-) -> codex_codes::DynamicToolCallResponse {
-    tracing::warn!(
-        thread_id = %call.thread_id,
-        turn_id = %call.turn_id,
-        call_id = %call.call_id,
-        tool = %call.tool,
-        "codex backend refused an undeclared dynamic tool call"
-    );
-    codex_codes::DynamicToolCallResponse {
-        success: false,
-        content_items: vec![codex_codes::DynamicToolCallOutputContentItem::InputText {
-            text: format!(
-                "no such tool: {} — this agent was created with no dynamic tools",
-                call.tool
-            ),
-        }],
     }
 }
 
@@ -325,25 +407,26 @@ fn model_slugs(response: &ModelListResponse) -> Vec<String> {
         .collect()
 }
 
-/// Pick the cheap-plumbing model from what the backend actually offers.
+/// Pick the model `policy` names from what the backend actually offers.
 ///
 /// Pure and allowlist-shaped: the first [`CHEAP_PLUMBING_PREFERENCE`] entry
 /// present wins, and nothing else is reachable. The failure names what WAS
 /// available — "no cheap model" with no catalogue is not a diagnosable
 /// receipt.
-pub(crate) fn choose_cheap_plumbing_model(
+pub(crate) fn choose_model(
+    policy: ModelPolicy,
     available: &[String],
 ) -> Result<String, AgentBackendError> {
-    for preferred in CHEAP_PLUMBING_PREFERENCE {
+    let preference = preference_for(policy);
+    for preferred in preference {
         if available.iter().any(|slug| slug == preferred) {
-            return Ok(preferred.to_string());
+            return Ok((*preferred).to_string());
         }
     }
     Err(AgentBackendError::ProtocolRejected {
         detail: format!(
-            "no cheap-plumbing model available: wanted one of {:?} (in that order); \
-             model/list offered {:?}",
-            CHEAP_PLUMBING_PREFERENCE, available
+            "no model available for {policy:?}: wanted one of {preference:?} (in that order); \
+             model/list offered {available:?}"
         ),
     })
 }
@@ -455,7 +538,12 @@ pub(crate) fn map_session_error(error: SessionError) -> AgentBackendError {
         | SessionError::Decode { .. }
         | SessionError::Encode { .. }
         | SessionError::MalformedLine(_)
-        | SessionError::MissingField { .. } => AgentBackendError::ProtocolRejected { detail },
+        | SessionError::MissingField { .. }
+        // A misrouted or unmatched tool reply is OUR bug, not the server's —
+        // same class as a request this crate could not encode, and reported
+        // the same way rather than being softened into a run failure.
+        | SessionError::NoParkedCall { .. }
+        | SessionError::WrongCall { .. } => AgentBackendError::ProtocolRejected { detail },
     }
 }
 
@@ -495,7 +583,7 @@ mod tests {
     fn mini_wins_when_present() {
         let available = slugs(&["gpt-5.6-sol", "gpt-5.6-luna", "gpt-5.4-mini", "gpt-5.4"]);
         assert_eq!(
-            choose_cheap_plumbing_model(&available).unwrap(),
+            choose_model(ModelPolicy::CheapPlumbing, &available).unwrap(),
             "gpt-5.4-mini"
         );
     }
@@ -504,7 +592,7 @@ mod tests {
     fn luna_is_the_fallback_when_mini_is_absent() {
         let available = slugs(&["gpt-5.6-sol", "gpt-5.6-luna", "gpt-5.5"]);
         assert_eq!(
-            choose_cheap_plumbing_model(&available).unwrap(),
+            choose_model(ModelPolicy::CheapPlumbing, &available).unwrap(),
             "gpt-5.6-luna"
         );
     }
@@ -516,7 +604,7 @@ mod tests {
     #[test]
     fn a_catalogue_without_a_sanctioned_model_is_refused() {
         let available = slugs(&["gpt-5.6-terra"]);
-        let error = choose_cheap_plumbing_model(&available).unwrap_err();
+        let error = choose_model(ModelPolicy::CheapPlumbing, &available).unwrap_err();
         assert!(
             matches!(error, AgentBackendError::ProtocolRejected { .. }),
             "expected ProtocolRejected, got {error:?}"
@@ -534,7 +622,7 @@ mod tests {
 
     #[test]
     fn an_empty_catalogue_is_refused() {
-        let error = choose_cheap_plumbing_model(&[]).unwrap_err();
+        let error = choose_model(ModelPolicy::CheapPlumbing, &[]).unwrap_err();
         assert!(matches!(error, AgentBackendError::ProtocolRejected { .. }));
     }
 
@@ -555,7 +643,7 @@ mod tests {
         .unwrap();
         assert_eq!(model_slugs(&response), slugs(&["gpt-5.4-mini"]));
         assert_eq!(
-            choose_cheap_plumbing_model(&model_slugs(&response)).unwrap(),
+            choose_model(ModelPolicy::CheapPlumbing, &model_slugs(&response)).unwrap(),
             "gpt-5.4-mini"
         );
     }
@@ -612,6 +700,7 @@ mod tests {
             task: "write the word cobalt".to_string(),
             output_schema: Some(serde_json::json!({"type": "object"})),
             model: ModelPolicy::CheapPlumbing,
+            effort: ReasoningEffort::Low,
         };
         let params = turn_start_params(
             &BackendThreadId("thread-1".to_string()),
@@ -639,6 +728,10 @@ mod tests {
 
     #[test]
     fn an_undeclared_tool_call_is_answered_with_a_failure_never_stranded() {
+        // The refusal text is built by the caller that knows WHY (the no-tools
+        // combinator); this pins the projection onto the protocol's own failure
+        // shape — `success: false` with content, never a JSON-RPC error, which
+        // is what keeps a refused call from stranding the child's turn.
         let params: codex_codes::DynamicToolCallParams =
             serde_json::from_value(serde_json::json!({
                 "threadId": "t1",
@@ -648,7 +741,10 @@ mod tests {
                 "arguments": {"question": "what is the passphrase?"}
             }))
             .expect("DynamicToolCallParams fixture must match the real wire shape");
-        let response = refuse_undeclared_tool_call(&params);
+        let response = tool_outcome_to_response(&ToolOutcome::Refused(format!(
+            "no such tool: {} — this agent was created with no dynamic tools",
+            params.tool
+        )));
         assert!(!response.success);
         let rendered = serde_json::to_value(&response).unwrap();
         assert!(
@@ -885,7 +981,7 @@ mod tests {
     /// tier it runs in) free of live processes.
     #[test]
     fn construction_spawns_no_process_and_resolves_no_model() {
-        let backend = CodexOneCycleBackend::new().expect("build the backend");
+        let backend = CodexAgentBackend::new().expect("build the backend");
         assert!(backend.session.is_none());
         assert_eq!(backend.resolved_model(), None);
         assert_eq!(backend.turn_timeout(), DEFAULT_TURN_TIMEOUT);

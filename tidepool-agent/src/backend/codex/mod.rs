@@ -35,17 +35,15 @@
 //! it at turn start — proving that is sufficient is the first thing this
 //! adapter does, before any run that spends a token.
 
+pub mod driver;
 pub mod dynamic_tools;
 pub mod isolation;
-pub mod one_cycle;
 pub mod process;
 
-pub use one_cycle::{CodexOneCycleBackend, CHEAP_PLUMBING_PREFERENCE, DEFAULT_TURN_TIMEOUT};
+pub use driver::{
+    CodexAgentBackend, CHEAPEST_GPT56_PREFERENCE, CHEAP_PLUMBING_PREFERENCE, DEFAULT_TURN_TIMEOUT,
+};
 
 /// The Codex CLI version this adapter is pinned to and its fixtures were
 /// recorded against.
 pub const PINNED_CLI_VERSION: &str = "0.146.0";
-
-// Bring-up lands here: process lifecycle, initialize handshake, thread/turn
-// requests, `item/tool/call` correlation, and the projection into
-// `crate::seam::RuntimeAgentEvent`.

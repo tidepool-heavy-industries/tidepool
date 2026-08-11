@@ -45,9 +45,10 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use tidepool_agent::backend::mock::{MockBackend, MockFailure};
-use tidepool_agent::backend::OneCycleBackend;
+use tidepool_agent::backend::AgentBackend;
 use tidepool_agent::seam::{
-    AgentBackendError, BackendThreadId, CycleOutcome, CycleResultPayload, CycleSpec, ThreadSpec,
+    AgentBackendError, BackendThreadId, CycleResultPayload, CycleSpec, ThreadSpec, ToolReply,
+    TurnEvent,
 };
 use tidepool_codegen::jit_machine::{JitEffectMachine, ParkedOutcome, RealmId};
 use tidepool_effect::dispatch::{EffectContext, EffectHandler};
@@ -113,18 +114,22 @@ struct RecordingBackend {
     log: Arc<Mutex<Vec<CycleSpec>>>,
 }
 
-impl OneCycleBackend for RecordingBackend {
+impl AgentBackend for RecordingBackend {
     fn start_thread(&mut self, spec: &ThreadSpec) -> Result<BackendThreadId, AgentBackendError> {
         self.inner.start_thread(spec)
     }
 
-    fn run_cycle(
+    fn start_turn(
         &mut self,
         thread: &BackendThreadId,
         spec: &CycleSpec,
-    ) -> Result<CycleOutcome, AgentBackendError> {
+    ) -> Result<TurnEvent, AgentBackendError> {
         self.log.lock().unwrap().push(spec.clone());
-        self.inner.run_cycle(thread, spec)
+        self.inner.start_turn(thread, spec)
+    }
+
+    fn resume(&mut self, reply: ToolReply) -> Result<TurnEvent, AgentBackendError> {
+        self.inner.resume(reply)
     }
 }
 
@@ -328,7 +333,7 @@ impl Fixture {
         self.roots.path().join("bindings")
     }
 
-    fn handler(&self, backend: Box<dyn OneCycleBackend + Send>) -> SubagentHandler {
+    fn handler(&self, backend: Box<dyn AgentBackend + Send>) -> SubagentHandler {
         SubagentHandler::new(
             self.registry_root(),
             self.worktree_root(),

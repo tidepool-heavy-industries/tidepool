@@ -1877,6 +1877,8 @@ macro_rules! subagent_effect_def {
                   doc "the rollback itself failed — both failures carried, rendered; never a silent swallow" },
                 { ctor SpawnResultMalformed, fields { malformedDetail: "Text" as String },
                   doc "the structured terminal payload did not decode to the requested result type — produced by the Haskell-side decoder, never sent by Rust" },
+                { ctor SpawnDriveFailed, fields { driveStage: "SpawnStage" as tidepool_bridge_effects::AgSpawnStage, driveDetail: "Text" as String },
+                  doc "the tool-dispatch loop was driven wrongly (a reply naming an agent or call that is not the parked one), or the runtime's hard round backstop fired — a caller-sequencing failure, not a backend one" },
             ],
             verbs [
                 { ctor SubagentSpawn, method subagent_spawn,
@@ -1910,7 +1912,8 @@ macro_rules! subagent_effect_def {
                        "renderSpawnError (SpawnBindingFailed st e) = \"spawn failed at \" <> show st <> \" (binding): \" <> renderWorktreeError e",
                        "renderSpawnError (SpawnBackendFailed st b) = \"spawn failed at \" <> show st <> \" (backend): \" <> renderBackendFailure b",
                        "renderSpawnError (SpawnRollbackFailed st orig rb) = \"spawn failed at \" <> show st <> \" AND rollback failed: \" <> orig <> \"; rollback: \" <> rb",
-                       "renderSpawnError (SpawnResultMalformed d) = \"spawn result malformed: \" <> d"] },
+                       "renderSpawnError (SpawnResultMalformed d) = \"spawn result malformed: \" <> d",
+                       "renderSpawnError (SpawnDriveFailed st d) = \"spawn drive failed at \" <> show st <> \": \" <> d"] },
             ],
         }
     };
