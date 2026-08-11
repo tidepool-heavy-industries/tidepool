@@ -1008,11 +1008,6 @@ data VarSite
   = BoundAt !Var !(Maybe Var)
   | ReferencedAt !Var
 
--- | The 'Var' a site is about, whichever kind of site it is.
-varSiteVar :: VarSite -> Var
-varSiteVar (BoundAt b _)   = b
-varSiteVar (ReferencedAt v) = v
-
 -- | THE VarId index over a closed bind graph: every binding site AND every
 -- reference site, keyed by 'varId'.
 --
