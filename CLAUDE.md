@@ -193,8 +193,10 @@ per-effect families) instead of adding a `#[test]` that forks another
 ~5-8s compile; per-variant one-liners join exhaustive tables. Standalone
 stays correct for: crash-class tests (a bundled crash destroys sibling
 diagnosis), compile-fail assertions, sanctioned reds, property tests, and
-distinct-fixture suites. Reviews should flag new per-test compiles in
-bundleable territory as regressions of this constraint.
+distinct-fixture suites. A new per-test compile is not a regression per se —
+but it has a real, permanent cost, so reviews should scrutinize each one:
+does this test need its own compile, or does its assertion belong in a
+family bundle?
 
 **Compile compiles are memoized, and test processes SHARE the memo.**
 `$TIDEPOOL_COMPILE_CACHE_DIR` (default: the cache dir) locates the
