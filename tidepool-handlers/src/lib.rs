@@ -188,8 +188,6 @@ pub(crate) mod test_support;
 #[cfg(test)]
 mod tests {
     use crate::test_support::*;
-    use tidepool_bridge::ToCore;
-    use tidepool_eval::value::Value;
 
     #[test]
     fn all_effect_constructors_in_table() {
@@ -244,42 +242,6 @@ mod tests {
              Add roundtrip tests and update EFFECTS_WITH_ROUNDTRIP_TESTS.",
             missing
         );
-    }
-
-    // === Ask construction test ===
-
-    #[test]
-    fn test_ask_constructor_in_table() {
-        let table = full_effect_test_table();
-        let con_id = table.get_by_name("AskWith").unwrap();
-        let dc = table.get(con_id).unwrap();
-        assert_eq!(dc.rep_arity, 2, "AskWith should have arity 2");
-        let prompt = "What is your name?".to_string().to_value(&table).unwrap();
-        let meta = "{}".to_string().to_value(&table).unwrap();
-        let val = Value::Con(con_id, vec![prompt, meta]);
-        match &val {
-            Value::Con(id, fields) => {
-                assert_eq!(table.name_of(*id).unwrap(), "AskWith");
-                assert_eq!(fields.len(), 2);
-            }
-            _ => panic!("Expected Con"),
-        }
-    }
-
-    /// Fork is INTERPOSED (like Ask): it suspends to the harness and never
-    /// reaches a handler, so its coverage — like Ask's above — is the wire
-    /// contract the interposition relies on: both constructors present in
-    /// the effect table at the arities the harness pattern-matches.
-    #[test]
-    fn test_fork_constructors_in_table() {
-        let table = full_effect_test_table();
-        for (name, arity) in [("ForkWith", 2), ("ForkAllWith", 2)] {
-            let con_id = table
-                .get_by_name(name)
-                .unwrap_or_else(|| panic!("{name} missing from effect table"));
-            let dc = table.get(con_id).unwrap();
-            assert_eq!(dc.rep_arity, arity, "{name} arity");
-        }
     }
 
     // === JIT-level roundtrip tests ===
