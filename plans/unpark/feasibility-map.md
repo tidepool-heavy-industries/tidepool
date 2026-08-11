@@ -402,3 +402,24 @@ with a stale epoch). Its load-bearing case is `restore_idle`: epoch, entry
 presence and slot state are IDENTICAL whether or not the stale session
 clobbered the fresh one, so session identity is the only observable that
 distinguishes them — every other assertion would pass against a broken guard.
+
+## Root addenda at fold (2026-08-10)
+
+**Runaway recovery ideal (Inanna).** The wedged path's end-state should
+retain earlier bindings and lose only the cancelled turn. Mechanism: the
+session heap is mutated only during a turn, so this is a PRE-TURN heap
+snapshot — the same Cheney-clone-the-live-set primitive the fork-snapshot
+feature (retired harness plan, W1b step 3) already wants. Build it there,
+with runaway recovery as its second consumer; do NOT build recovery-specific
+machinery.
+
+**RootSlot Send-ness (routed decision).** Step 2 (Bind's slot inline on the
+completion) was correctly DROPPED: `RootSlot` is a bare `*mut *mut u8` with
+no `Send` impl, and the inline form would need `unsafe impl Send for
+RootSlot` — a standalone soundness claim. Decision: NOT taken. The
+laundering-via-the-Send-blessed-machine pattern (`last_bound_root`, exactly
+as `suspended_finalized_root` does for W4) is the CORRECT design, not a
+workaround — the machine is the unit that owns the heap those slots point
+into, so Send-ness belongs to the machine, not the raw slot. The stash keeps
+its compatibility comment; revisit only if a future lane can argue the
+soundness claim properly.
