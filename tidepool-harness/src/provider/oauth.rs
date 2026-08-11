@@ -8,9 +8,10 @@
 //! `ModelProvider` impl (chat calls route through `genai`, see
 //! `super::http`).
 //!
-//! This is the PRIMARY Codex-auth flow (verified against
-//! `openai/codex`'s `codex-rs/login` source, Apache-2.0) — not the beta,
-//! undocumented device-code variant, which is out of R0 scope.
+//! This is the PRIMARY (loopback) Codex-auth flow (verified against
+//! `openai/codex`'s `codex-rs/login` source, Apache-2.0). The
+//! device-authorization variant for a headless/remote box is implemented
+//! further down in this file.
 //!
 //! **R0 CONSTRAINT (by design, not an oversight):** the OAuth callback
 //! listens on `127.0.0.1:<port>` (default 1455) on the box running the
@@ -107,8 +108,8 @@ const CHATGPT_BACKEND_URL: &str = "https://chatgpt.com/backend-api/codex/";
 /// gates model availability on this: it's sent both in the `User-Agent` and in
 /// a literal `version` header, and a value below a model's `minimal_client_version`
 /// makes the backend report that model "not supported" — which is exactly the
-/// 400 we hit at `0.45.0`. Tracks the latest `openai/codex` release tag
-/// (`rust-v0.145.0`, 2026-07-21); bump when models we want gate above it.
+/// 400 we hit at `0.45.0`. Tracks `openai/codex`'s `rust-v0.145.0` release
+/// tag; bump when models we want gate above it.
 const CODEX_CLIENT_VERSION: &str = "0.145.0";
 
 /// Appended to [`CHATGPT_BACKEND_URL`] (which carries the trailing slash) to
@@ -181,11 +182,9 @@ pub async fn start_login(cfg: &OauthConfig) -> Result<LoginStart, ProviderError>
 }
 
 /// The other step: run the loopback callback server until the browser
-/// round-trip completes, then persist the exchanged token (0600). Meant
-/// to be spawned in the background by the protocol server right after
-/// `start_login` returns — `auth/status` is a separate, cheap check
-/// ([`login_status`]) rather than this call's return value, so the
-/// protocol layer isn't blocked on it.
+/// round-trip completes, then persist the exchanged token (0600).
+/// `auth/status` ([`login_status`]) is a separate, cheap check rather than
+/// this call's return value.
 pub async fn complete_login(cfg: &OauthConfig, flow: &LoginStart) -> Result<(), ProviderError> {
     let client = cfg.client()?;
     let tokens = openai_auth::run_callback_server(
@@ -205,8 +204,10 @@ pub async fn complete_login(cfg: &OauthConfig, flow: &LoginStart) -> Result<(), 
 // loopback callback server, no port-forward. The operator opens a public URL
 // and types a short code; THIS process polls OpenAI directly. OpenAI's variant
 // is non-standard (two custom endpoints that hand back an authorization_code +
-// PKCE pair), which we then run through the SAME standard token exchange as the
-// loopback flow (openai-auth's `exchange_code`, with the device redirect_uri).
+// PKCE pair), which we then run through the SAME standard token-exchange
+// params as the loopback flow, hand-rolled rather than openai-auth's
+// `exchange_code` (see `complete_device_login` for why), against the device
+// redirect_uri.
 // Endpoints/fields verified against openai/codex's
 // `codex-rs/login/device_code_auth.rs` (Apache-2.0).
 // ---------------------------------------------------------------------------

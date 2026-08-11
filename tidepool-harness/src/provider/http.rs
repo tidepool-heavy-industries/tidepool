@@ -1,12 +1,13 @@
-//! Shared `genai`-client plumbing for both provider impls, rather than
-//! hand-rolling chat request/response JSON: `genai` is already a workspace
-//! dependency (it drives `LlmHandler` for the in-program `Llm` effect — a
-//! DIFFERENT consumer of the same library; this module and that one must
-//! stay independent so a calling-model turn and an in-program `Llm` call
-//! never share configuration). Both providers
-//! resolve a bearer token themselves (env/file for API-key, load-refresh
-//! for OAuth) and hand it here as a plain string — this module turns that
-//! into a `genai::Client` and maps its errors/responses to our types.
+//! `genai`-client plumbing for the API-key provider, rather than hand-rolling
+//! chat request/response JSON: `genai` is already a workspace dependency (it
+//! drives `LlmHandler` for the in-program `Llm` effect — a DIFFERENT consumer
+//! of the same library; this module and that one must stay independent so a
+//! calling-model turn and an in-program `Llm` call never share
+//! configuration). The OAuth provider does NOT use this module — it hand-rolls
+//! its own call (see `super::oauth`). The API-key provider resolves its bearer
+//! token itself (env/file) and hands it here as a plain string — this module
+//! turns that into a `genai::Client` and maps its errors/responses to our
+//! types.
 
 use genai::chat::{ChatMessage, ChatOptions, ChatRequest, ChatResponse};
 use genai::resolver::{AuthData, AuthResolver, Endpoint, ServiceTargetResolver};

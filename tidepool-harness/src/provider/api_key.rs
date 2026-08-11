@@ -1,9 +1,8 @@
 //! API-key `ModelProvider` impl — co-equal with the OAuth impl in
 //! [`super::oauth`]. Key resolution: env var first (an already-set var
-//! wins, matching `tidepool_runtime::paths::load_secrets`'s precedence),
-//! then the config-dir secrets file of the same name. The chat call itself
-//! is `genai`'s job (see `super::http`) — any provider genai supports, not
-//! just OpenAI, so `model`/`env_var` are the caller's choice.
+//! wins), then the config-dir secrets file of the same name. The chat call
+//! itself is `genai`'s job (see `super::http`) — any provider genai
+//! supports, not just OpenAI, so `model`/`env_var` are the caller's choice.
 
 use crate::provider::http::{
     build_client, chat_options, map_genai_err, to_chat_request, to_turn_response,
@@ -58,9 +57,7 @@ impl ApiKeyProvider {
 }
 
 impl ModelProvider for ApiKeyProvider {
-    // The API-key path is buffered (genai chat/completions); it doesn't stream
-    // to `sink`. Passing `None` from the harness yields the same result, so the
-    // observatory simply shows the turn on completion for this provider.
+    // The API-key path is buffered (genai chat/completions); it never uses `sink`.
     async fn complete(
         &self,
         req: TurnRequest,

@@ -1,8 +1,5 @@
-//! Config-dir resolution, mirroring `tidepool_runtime::paths::config_dir` /
-//! `global_secrets_dirs` (env overrides: `TIDEPOOL_CONFIG_DIR` →
-//! `XDG_CONFIG_HOME/tidepool` → `~/.config/tidepool` → a tmp fallback).
-//! Duplicated rather than imported from `tidepool_runtime::paths`, so this
-//! module's path resolution stays self-contained.
+//! Config-dir resolution for provider secrets — see [`config_dir`]/
+//! [`secrets_dir`] for the resolution order.
 
 use std::path::PathBuf;
 

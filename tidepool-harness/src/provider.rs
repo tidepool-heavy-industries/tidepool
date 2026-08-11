@@ -4,11 +4,11 @@
 //! NOT the in-program `Llm` effect
 //! (tidepool-handlers); different consumer, different budget accounting.
 //!
-//! Both impls (`oauth`, `api_key`) route chat calls through `genai` (`http`
-//! submodule) rather than hand-rolled request/response JSON, and OAuth's
-//! mechanics ride the `openai-auth` crate rather than a hand-rolled PKCE
-//! flow — see `oauth`'s module doc for what that crate covers and the R0
-//! callback-port constraint it implies.
+//! The API-key impl routes chat calls through `genai` (`http` submodule);
+//! the OAuth impl hand-rolls its own Responses-API call instead (see
+//! `oauth`'s module doc for why genai can't drive it), though its login
+//! mechanics still ride the `openai-auth` crate rather than a hand-rolled
+//! PKCE flow.
 
 pub mod api_key;
 pub(crate) mod http;
@@ -119,12 +119,11 @@ pub trait ModelProvider: Send + Sync {
 }
 
 /// Object-safe (`dyn`-compatible) face of [`ModelProvider`]. The `-> impl
-/// Future` in `ModelProvider` (RPITIT) is not dyn-compatible, so the harness —
-/// which stores its provider behind `Arc<dyn …>` so the engine and every forked
-/// answerer share ONE signed-in client — drives this trait instead. Blanket-
-/// impl'd for every `ModelProvider` by boxing the future. This is the standard
-/// "async trait object" bridge, kept local so the ergonomic `impl Future`
-/// surface stays the one providers implement.
+/// Future` in `ModelProvider` (RPITIT) is not dyn-compatible, so callers that
+/// need `Arc<dyn ModelProvider>` drive this trait instead. Blanket-impl'd for
+/// every `ModelProvider` by boxing the future — the standard "async trait
+/// object" bridge, kept local so the ergonomic `impl Future` surface stays the
+/// one providers implement.
 pub trait DynModelProvider: Send + Sync {
     fn complete_boxed<'a>(
         &'a self,
