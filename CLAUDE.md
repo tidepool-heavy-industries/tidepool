@@ -140,7 +140,7 @@ still works as a fallback (no `cargo-nextest` available) but is noticeably slowe
 
 **Every test run needs `TIDEPOOL_EXTRACT`** pointing at a built
 `tidepool-extract-bin`, or tests fail loud with `Metadata entry must be an
-array of exactly 7`:
+array of exactly 8`:
 ```bash
 export PATH=<nix-ghc-with-packages>/bin:$PATH   # lens on the GHC package DB
 cd haskell && cabal build tidepool-extract-bin

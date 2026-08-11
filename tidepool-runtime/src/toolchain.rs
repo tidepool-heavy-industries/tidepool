@@ -8,7 +8,7 @@
 //! `tidepool` binary's cwd-then-bundle search, and `tidepool-repl`'s
 //! build-time `CARGO_MANIFEST_DIR` path). They disagreed, and the disagreement
 //! surfaced as a *wrong answer at eval time* ("not in scope", "Metadata entry
-//! must be an array of exactly 7") rather than as a configuration error. Both
+//! must be an array of exactly 8") rather than as a configuration error. Both
 //! precedence orders now live here, once, and both are documented below.
 //!
 //! # Precedence: the extract binary
