@@ -1394,112 +1394,78 @@ mod ergonomics_tests {
         input_binding_source(Some(&normalized))
     }
 
-    /// THE #315 CASE: a double-encoded string (MCP client JSON.stringify'd the
-    /// payload) must unwrap so the generated binding contains the bare string,
-    /// not the surrounding quotes/escapes as literal characters.
+    /// Per-payload-shape cases: each row is a raw JSON input plus the
+    /// substring(s) its generated Haskell binding must contain.
     #[test]
-    fn test_input_source_gen_double_encoded_string() {
-        // raw: String whose chars are: " h e l l o "
+    fn test_input_source_gen_renders_expected_binding() {
+        let cases: Vec<(&str, serde_json::Value, Vec<&str>)> = vec![
+            // THE #315 CASE: a double-encoded string (MCP client
+            // JSON.stringify'd the payload) must unwrap so the generated
+            // binding contains the bare string, not the surrounding
+            // quotes/escapes as literal characters.
+            (
+                "double_encoded_string",
+                json!("\"hello\""),
+                vec![r#"Aeson.String "hello""#],
+            ),
+            // Multi-line double-encoded string (the bug-report shape): after
+            // unwrapping, the \n should be in the Haskell escape, not the
+            // outer quotes.
+            (
+                "double_encoded_multiline",
+                json!("\"line1\\nline2\""),
+                vec![r#"Aeson.String "line1\nline2""#],
+            ),
+            // Plain string (not double-encoded) passes through.
+            (
+                "plain_string",
+                json!("hello world"),
+                vec![r#"Aeson.String "hello world""#],
+            ),
+            // Number: binding emits `Aeson.Number (Aeson.scientific (42) (0))`.
+            (
+                "number",
+                json!(42),
+                vec!["Aeson.Number (Aeson.scientific (42) (0))"],
+            ),
+            // Bool true: binding emits `Aeson.Bool True`.
+            ("bool_true", json!(true), vec!["Aeson.Bool True"]),
+            // Bool false: binding emits `Aeson.Bool False`.
+            ("bool_false", json!(false), vec!["Aeson.Bool False"]),
+            // Object: binding emits `object [...]`.
+            (
+                "object",
+                json!({"key": "val"}),
+                vec!["object [", r#""key" .= Aeson.String "val""#],
+            ),
+            // Array: binding emits `toJSON [...]`.
+            (
+                "array",
+                json!(["x", "y"]),
+                vec!["toJSON [", r#"Aeson.String "x""#, r#"Aeson.String "y""#],
+            ),
+        ];
+
+        for (label, raw, expected_substrings) in cases {
+            let src = binding_for(&raw);
+            for expected in expected_substrings {
+                assert!(
+                    src.contains(expected),
+                    "case {label}: expected {expected:?} in: {src}"
+                );
+            }
+        }
+    }
+
+    /// THE #315 CASE, negative half: a double-encoded string must NOT leave
+    /// the literal outer quotes/escapes in the generated binding.
+    #[test]
+    fn test_input_source_gen_double_encoded_string_does_not_double_encode() {
         let raw = json!("\"hello\"");
         let src = binding_for(&raw);
-        // Must NOT contain the literal outer quotes
-        assert!(
-            src.contains(r#"Aeson.String "hello""#),
-            "expected Aeson.String \"hello\", got: {src}"
-        );
         assert!(
             !src.contains(r#"Aeson.String "\"hello\"""#),
             "double-encoding detected in: {src}"
-        );
-    }
-
-    /// Multi-line double-encoded string (the bug-report shape).
-    #[test]
-    fn test_input_source_gen_double_encoded_multiline() {
-        // The chars of the String value are: " l i n e 1 \ n l i n e 2 "
-        let raw = json!("\"line1\\nline2\"");
-        let src = binding_for(&raw);
-        // After unwrapping, the \n should be in the Haskell escape, not the outer quotes
-        assert!(
-            src.contains(r#"Aeson.String "line1\nline2""#),
-            "expected Aeson.String with \\n escape, got: {src}"
-        );
-    }
-
-    /// Plain string (not double-encoded) passes through — binding emits the
-    /// bare string value.
-    #[test]
-    fn test_input_source_gen_plain_string() {
-        let raw = json!("hello world");
-        let src = binding_for(&raw);
-        assert!(
-            src.contains(r#"Aeson.String "hello world""#),
-            "expected Aeson.String \"hello world\", got: {src}"
-        );
-    }
-
-    /// Number: binding emits `Aeson.Number (Aeson.scientific (42) (0))`.
-    #[test]
-    fn test_input_source_gen_number() {
-        let raw = json!(42);
-        let src = binding_for(&raw);
-        assert!(
-            src.contains("Aeson.Number (Aeson.scientific (42) (0))"),
-            "expected Scientific number binding, got: {src}"
-        );
-    }
-
-    /// Bool true: binding emits `Aeson.Bool True`.
-    #[test]
-    fn test_input_source_gen_bool_true() {
-        let src = binding_for(&json!(true));
-        assert!(
-            src.contains("Aeson.Bool True"),
-            "expected Bool True, got: {src}"
-        );
-    }
-
-    /// Bool false: binding emits `Aeson.Bool False`.
-    #[test]
-    fn test_input_source_gen_bool_false() {
-        let src = binding_for(&json!(false));
-        assert!(
-            src.contains("Aeson.Bool False"),
-            "expected Bool False, got: {src}"
-        );
-    }
-
-    /// Object: binding emits `object [...]`.
-    #[test]
-    fn test_input_source_gen_object() {
-        let raw = json!({"key": "val"});
-        let src = binding_for(&raw);
-        assert!(
-            src.contains("object ["),
-            "expected object literal, got: {src}"
-        );
-        assert!(
-            src.contains(r#""key" .= Aeson.String "val""#),
-            "expected key-value pair, got: {src}"
-        );
-    }
-
-    /// Array: binding emits `toJSON [...]`.
-    #[test]
-    fn test_input_source_gen_array() {
-        let raw = json!(["x", "y"]);
-        let src = binding_for(&raw);
-        assert!(
-            src.contains("toJSON ["),
-            "expected toJSON array, got: {src}"
-        );
-        assert!(
-            src.contains(r#"Aeson.String "x""#),
-            "expected first element, got: {src}"
-        );
-        assert!(
-            src.contains(r#"Aeson.String "y""#),
-            "expected second element, got: {src}"
         );
     }
 }
