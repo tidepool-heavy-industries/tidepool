@@ -269,6 +269,12 @@ couple it into the cutover.
    keep the comment, and report what it ripples into. That is a finding for the
    wave-B queue, not a blocker for the fold.
 
+Implementation note from the cutover (which built the projection machinery):
+step 2 folds `Bind` into `CompletedProduct`'s inline slot and deletes
+`ParkedRaw::into_suspendable`'s `Bind` arm. The per-entry projection is already
+in place, so the diff should be small — which is also the signal to watch: if
+it is NOT small, that is the ripple in condition 3 above.
+
 Standing principle this serves, restated by root: **prefer deleting a pathway
 over commenting it.** The stash is the one place that instinct is held back,
 and only for sequencing.
