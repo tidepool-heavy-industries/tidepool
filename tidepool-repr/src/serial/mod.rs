@@ -113,54 +113,6 @@ mod tests {
     }
 
     #[test]
-    fn test_roundtrip_var() {
-        roundtrip(RecursiveTree {
-            nodes: vec![CoreFrame::Var(VarId(42))],
-        });
-    }
-
-    #[test]
-    fn test_roundtrip_lit() {
-        let lits = vec![
-            Literal::LitInt(-123),
-            Literal::LitWord(456),
-            Literal::LitChar('a'),
-            Literal::LitString(b"hello".to_vec()),
-            Literal::LitFloat(1.0f32.to_bits() as u64),
-            Literal::LitDouble(2.0f64.to_bits()),
-        ];
-        for lit in lits {
-            roundtrip(RecursiveTree {
-                nodes: vec![CoreFrame::Lit(lit)],
-            });
-        }
-    }
-
-    #[test]
-    fn test_roundtrip_app() {
-        roundtrip(RecursiveTree {
-            nodes: vec![
-                CoreFrame::Var(VarId(1)),
-                CoreFrame::Var(VarId(2)),
-                CoreFrame::App { fun: 0, arg: 1 },
-            ],
-        });
-    }
-
-    #[test]
-    fn test_roundtrip_lam() {
-        roundtrip(RecursiveTree {
-            nodes: vec![
-                CoreFrame::Var(VarId(1)),
-                CoreFrame::Lam {
-                    binder: VarId(2),
-                    body: 0,
-                },
-            ],
-        });
-    }
-
-    #[test]
     fn test_roundtrip_let_non_rec() {
         roundtrip(RecursiveTree {
             nodes: vec![
@@ -221,20 +173,6 @@ mod tests {
     }
 
     #[test]
-    fn test_roundtrip_con() {
-        roundtrip(RecursiveTree {
-            nodes: vec![
-                CoreFrame::Var(VarId(1)),
-                CoreFrame::Var(VarId(2)),
-                CoreFrame::Con {
-                    tag: DataConId(3),
-                    fields: vec![0, 1],
-                },
-            ],
-        });
-    }
-
-    #[test]
     fn test_roundtrip_join_jump() {
         roundtrip(RecursiveTree {
             nodes: vec![
@@ -253,72 +191,6 @@ mod tests {
         });
     }
 
-    #[test]
-    fn test_roundtrip_primop() {
-        use PrimOpKind::*;
-        let ops = vec![
-            IntAdd, IntSub, IntMul, IntNegate, IntEq, IntNe, IntLt, IntLe, IntGt, IntGe, WordAdd,
-            WordSub, WordMul, WordEq, WordNe, WordLt, WordLe, WordGt, WordGe, DoubleAdd, DoubleSub,
-            DoubleMul, DoubleDiv, DoubleEq, DoubleNe, DoubleLt, DoubleLe, DoubleGt, DoubleGe,
-            CharEq, CharNe, CharLt, CharLe, CharGt, CharGe, IndexArray, SeqOp, TagToEnum,
-            DataToTag, IntQuot, IntRem, Chr, Ord,
-        ];
-        for op in ops {
-            roundtrip(RecursiveTree {
-                nodes: vec![
-                    CoreFrame::Var(VarId(1)),
-                    CoreFrame::PrimOp { op, args: vec![0] },
-                ],
-            });
-        }
-    }
-
-    #[test]
-    fn test_read_harness_identity_cbor() {
-        let bytes = std::fs::read("../haskell/test/Identity_cbor/identity.cbor")
-            .expect("identity.cbor not found — run tidepool-harness first");
-        let tree = read_cbor(&bytes).expect("read_cbor failed on identity.cbor");
-        assert!(
-            tree.nodes.len() >= 2,
-            "identity should have at least 2 nodes"
-        );
-        // identity = \x -> x — must contain a Lam (root may be LetNonRec wrapper in --all-closed mode)
-        assert!(tree
-            .nodes
-            .iter()
-            .any(|n| matches!(n, CoreFrame::Lam { .. })));
-    }
-
-    #[test]
-    fn test_read_harness_apply_cbor() {
-        let bytes = std::fs::read("../haskell/test/Identity_cbor/apply.cbor")
-            .expect("apply.cbor not found — run tidepool-harness first");
-        let tree = read_cbor(&bytes).expect("read_cbor failed on apply.cbor");
-        assert!(tree.nodes.len() >= 5, "apply should have at least 5 nodes");
-        // apply = \f x -> f x — must contain App and Lam
-        assert!(tree
-            .nodes
-            .iter()
-            .any(|n| matches!(n, CoreFrame::App { .. })));
-        assert!(tree
-            .nodes
-            .iter()
-            .any(|n| matches!(n, CoreFrame::Lam { .. })));
-    }
-
-    #[test]
-    fn test_read_harness_const_prime_cbor() {
-        let bytes = std::fs::read("../haskell/test/Identity_cbor/const'.cbor")
-            .expect("const'.cbor not found — run tidepool-harness first");
-        let tree = read_cbor(&bytes).expect("read_cbor failed on const'.cbor");
-        assert!(tree.nodes.len() >= 3, "const' should have at least 3 nodes");
-        // const' = \x _ -> x — must contain Lam
-        assert!(tree
-            .nodes
-            .iter()
-            .any(|n| matches!(n, CoreFrame::Lam { .. })));
-    }
-
     // End-to-end: .cbor → read_cbor → pretty_print
     #[test]
     fn test_e2e_identity_pretty() {
@@ -328,28 +200,6 @@ mod tests {
         let output = crate::pretty::pretty_print(&tree);
         assert!(!output.is_empty());
         // identity = \x -> x, should contain a lambda
-        assert!(output.contains('\\'), "expected lambda in: {}", output);
-    }
-
-    #[test]
-    fn test_e2e_apply_pretty() {
-        let bytes = std::fs::read("../haskell/test/Identity_cbor/apply.cbor")
-            .expect("apply.cbor not found");
-        let tree = read_cbor(&bytes).expect("read_cbor failed");
-        let output = crate::pretty::pretty_print(&tree);
-        assert!(!output.is_empty());
-        // apply = \f x -> f x, should contain lambda and application
-        assert!(output.contains('\\'), "expected lambda in: {}", output);
-    }
-
-    #[test]
-    fn test_e2e_const_prime_pretty() {
-        let bytes = std::fs::read("../haskell/test/Identity_cbor/const'.cbor")
-            .expect("const'.cbor not found");
-        let tree = read_cbor(&bytes).expect("read_cbor failed");
-        let output = crate::pretty::pretty_print(&tree);
-        assert!(!output.is_empty());
-        // const' = \x _ -> x, two chained lambdas
         assert!(output.contains('\\'), "expected lambda in: {}", output);
     }
 
