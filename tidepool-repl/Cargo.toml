@@ -26,7 +26,6 @@ tidepool-runtime.workspace = true
 tidepool-mcp.workspace = true
 tidepool-handlers.workspace = true
 tidepool-bridge.workspace = true
-tidepool-bridge-derive.workspace = true
 rmcp.workspace = true
 axum.workspace = true
 tokio = { workspace = true, features = ["io-util", "rt-multi-thread", "signal", "sync", "time"] }
@@ -34,14 +33,11 @@ tokio-util = "0.7"
 serde.workspace = true
 serde_json.workspace = true
 tracing.workspace = true
-tracing-subscriber = { workspace = true, features = ["env-filter"] }
 parking_lot.workspace = true
 frunk.workspace = true
 schemars.workspace = true
-dirs = "6"
 clap.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
-serial_test.workspace = true
 tidepool-testing.workspace = true
