@@ -12,14 +12,29 @@
 //! briefs, finalizes with the first child's answer), then child 0's turn,
 //! then child 1's turn — `Harness::answer_fanout` drives fanout children in
 //! declaration order.
+//!
+//! MERGED (test-diet, coverage-overlap census): formerly split across this
+//! file and `exact_context_fork.rs` — the two drove the byte-identical
+//! scenario (same reply script, same config, same `run_one_cycle` call) with
+//! disjoint assertion sets. The provider is wrapped in a [`CapturingProvider`]
+//! so ONE drive of the scenario now asserts both blocks: fork servicing +
+//! the finalized `Decision` reaching `State` (this file's original coverage),
+//! AND forked children inheriting the parent's byte-identical transcript
+//! prefix + render-derived framing (`exact_context_fork.rs`'s original
+//! coverage — the regression it guards is `Harness::force` resetting a
+//! forked child's framing to `None`, which made the child send the default
+//! `SYSTEM_FRAMING` instead of the inherited one).
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 mod support;
 
-use tidepool_harness::engine::EngineConfig;
+use tidepool_harness::engine::{EngineConfig, SYSTEM_FRAMING};
 use tidepool_harness::log::LogHeader;
-use tidepool_harness::provider::{DynModelProvider, Usage};
+use tidepool_harness::provider::{
+    DynModelProvider, ModelProvider, ProviderError, Role, StreamSink, TurnRequest, TurnResponse,
+    Usage,
+};
 use tidepool_harness::replay::{RecordedReply, ReplayProvider};
 use tidepool_harness::tree::NodeId;
 use tidepool_harness::{
@@ -62,12 +77,36 @@ fn reply(content: &str) -> RecordedReply {
     }
 }
 
+/// A provider that records every assembled [`TurnRequest`] (in call order)
+/// before delegating to an inner [`ReplayProvider`] — lets one drive of the
+/// scenario assert BOTH the fork-servicing/finalize outcome and the exact
+/// request prefix each forked child sent.
+struct CapturingProvider {
+    inner: ReplayProvider,
+    requests: Arc<Mutex<Vec<TurnRequest>>>,
+}
+
+impl ModelProvider for CapturingProvider {
+    async fn complete(
+        &self,
+        req: TurnRequest,
+        sink: Option<StreamSink>,
+    ) -> Result<TurnResponse, ProviderError> {
+        self.requests.lock().unwrap().push(req.clone());
+        self.inner.complete(req, sink).await
+    }
+}
+
 /// ONE render -> loop -> `runLLMTurn @Decision` -> the answerer `forkAll`s
 /// two briefs -> two child answerers each resume a typed `Decision` ->
 /// `[Decision]` resumes the parent -> the parent `finalize`s with the FIRST
 /// child's `Decision` -> the value flows back up through `loop` into `State`
 /// -> render. Proves the outer loop, the driver's fork-hole servicing, and
-/// the outer/nested-Agent State boundary all compose end to end.
+/// the outer/nested-Agent State boundary all compose end to end — AND that
+/// each forked child's provider request prefix (system framing + messages,
+/// in order) is byte-identical to the parent's through the fork checkpoint,
+/// which is what lets a forked child behave like the parent and gives the
+/// provider a stable prefix to cache on.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn selfharness_answerer_forks_to_two_children_then_finalizes() {
     support::require_extract();
@@ -112,7 +151,11 @@ async fn selfharness_answerer_forks_to_two_children_then_finalizes() {
              ```",
         ),
     ];
-    let provider: Arc<dyn DynModelProvider> = Arc::new(ReplayProvider::new(replies));
+    let requests = Arc::new(Mutex::new(Vec::<TurnRequest>::new()));
+    let provider: Arc<dyn DynModelProvider> = Arc::new(CapturingProvider {
+        inner: ReplayProvider::new(replies),
+        requests: Arc::clone(&requests),
+    });
     let writer = tidepool_harness::log::LogWriter::create(
         std::env::temp_dir().join(format!("acceptance-fork-{}.jsonl", std::process::id())),
         &header(),
@@ -128,6 +171,8 @@ async fn selfharness_answerer_forks_to_two_children_then_finalizes() {
         .run_one_cycle(&source, None)
         .await
         .expect("one full render->loop->runLLMTurn->forkAll(2 children)->finalize->render cycle");
+
+    // --- block 1: fork servicing + first-child Decision reaching State ---
 
     // The finalized Decision is the FIRST child's ("sub-brief A" / child 0),
     // per `L.head ds` — asserts declaration order is preserved through the
@@ -169,4 +214,70 @@ async fn selfharness_answerer_forks_to_two_children_then_finalizes() {
         "post-loop render should show the finalized decision's action, got:\n{}",
         outcome.prompt_after
     );
+
+    // --- block 2: children inherit the parent's byte-identical transcript
+    // --- prefix + render-derived framing (formerly exact_context_fork.rs) ---
+
+    let reqs = requests.lock().unwrap();
+    assert_eq!(
+        reqs.len(),
+        3,
+        "expected 3 model turns (parent + 2 children), got {}",
+        reqs.len()
+    );
+
+    // The parent answerer's request: a System message first (its render-derived
+    // framing), then the hole card as the first user message.
+    let parent = &reqs[0];
+    assert_eq!(
+        parent.messages.first().map(|m| &m.role),
+        Some(&Role::System),
+        "the parent request must open with a System framing message"
+    );
+    let parent_system = parent.messages[0].clone();
+    // The framing is the render output + answerer suffix — NOT the default
+    // full-surface SYSTEM_FRAMING. (If this ever equals SYSTEM_FRAMING the
+    // answerer never got its render framing at all.)
+    assert_ne!(
+        parent_system.content, SYSTEM_FRAMING,
+        "the answerer framing must be render-derived, not the default SYSTEM_FRAMING"
+    );
+
+    // Exact-context: each child's request BEGINS with the parent's entire
+    // request prefix (system framing + transcript through the fork checkpoint),
+    // byte-identical, then appends the child's own turns. The system message
+    // being inherited is the fix — Harness::force keeps the parent framing
+    // instead of resetting to None (which would send the default SYSTEM_FRAMING).
+    for (i, child) in reqs[1..].iter().enumerate() {
+        assert_eq!(
+            child.messages.first(),
+            Some(&parent_system),
+            "child {i} must inherit the parent's system framing verbatim (exact-context \
+             fork); a mismatch means force() reset the child framing to None"
+        );
+        assert_ne!(
+            child.messages[0].content, SYSTEM_FRAMING,
+            "child {i}'s system message must be the inherited answerer framing, not \
+             the default SYSTEM_FRAMING"
+        );
+        assert!(
+            child.messages.starts_with(&parent.messages),
+            "child {i}'s request must begin with the parent's full request prefix \
+             (system framing + transcript through the fork checkpoint), byte-identical.\n\
+             parent: {:?}\nchild:  {:?}",
+            parent.messages,
+            child.messages
+        );
+        // The child appends its own turns after the inherited prefix, the last
+        // being its own hole card (a User message).
+        assert!(
+            child.messages.len() > parent.messages.len(),
+            "child {i} must append its own hole card after the inherited prefix"
+        );
+        assert_eq!(
+            child.messages.last().map(|m| &m.role),
+            Some(&Role::User),
+            "child {i}'s last message is its own hole card"
+        );
+    }
 }
