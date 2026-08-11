@@ -26,6 +26,21 @@
 //! `gc_retry` helper) — so a nonzero delta here is specific evidence that a
 //! *host-side* retry-protected site on this path both exhausted on its first
 //! attempt and used the retry.
+//!
+//! WHAT THIS TEST DOES NOT PROVE — for the next investigator who sees an
+//! intermittent `Run(Jit(HeapBridge(NurseryExhausted)))` on
+//! `resident_session::nested_child_runs_while_parent_suspended_then_resumes`.
+//! Every allocation site reachable on the nested-child/stowed-continuation
+//! path was already retry-protected when this test was written, so that
+//! intermittent is very likely NOT a missing retry, and re-auditing retry
+//! coverage here is a dead end. The mutation this test actually proves
+//! load-bearing is the CLASS-LEVEL one: neutering the shared `gc_retry`
+//! helper reproduces the failure deterministically at the `CHAIN_DEPTH` /
+//! `NURSERY_BYTES` below. Hypotheses NOT eliminated: something live across a
+//! retry that is not registered as a GC root in the REAL resident-session
+//! shape (unlike this test's synthetic one); heap-cap exhaustion where even
+//! `perform_gc`'s doubling cannot satisfy the request; or a distinct failure
+//! upstream of response materialization presenting with the same signature.
 
 use tidepool_codegen::emit::ExternalEnv;
 use tidepool_codegen::jit_machine::{JitEffectMachine, SuspendableOutcome};
