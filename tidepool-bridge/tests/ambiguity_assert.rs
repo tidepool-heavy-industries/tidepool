@@ -7,10 +7,9 @@
 //! arity)`, which tries the arity-qualified `get_by_name_arity` first and
 //! only falls back to the first `get_all_by_name` match (with a
 //! `cfg(debug_assertions)` diagnostic) when arity resolution also fails to
-//! disambiguate. As of PR #293 (`45516fe8`, softening PR #291's over-strict
-//! debug_asserts), an ambiguous match no longer panics — it returns the
-//! fallback match deterministically. The fallback path still isn't module-
-//! qualified and should eventually migrate to a `get_by_qualified_name`.
+//! disambiguate. An ambiguous match does not panic — it returns the fallback
+//! match deterministically. The fallback path still isn't module-qualified
+//! and should eventually migrate to a `get_by_qualified_name`.
 //!
 //! Without this regression test the fallback behavior could be silently
 //! changed (e.g. picking a different match, or reintroducing a panic) and

@@ -6,12 +6,12 @@ use crate::traits::{
 use tidepool_eval::{shapes, Value};
 use tidepool_repr::{DataConId, DataConTable, Literal};
 
-/// Resilient lookup for hand-written bridge impls.
+/// Resilient lookup for hand-written bridge impls (shared by `ToCore`/`FromCore`
+/// impls in this file and effect-response list setup in `tidepool-effect`).
 ///
 /// Look up a DataCon by name and arity. If ambiguous, issues a diagnostic
-/// and returns the first match (preserving best-effort recovery).
-/// Resolve a constructor by name with qualified-name fallback (shared by
-/// ToCore impls and effect-response stream setup).
+/// and returns the first match (preserving best-effort recovery). No
+/// qualified-name fallback — name+arity is the whole resolution policy here.
 pub fn get_resilient(table: &DataConTable, name: &str, arity: u32) -> Option<DataConId> {
     let matches = table.get_all_by_name(name);
     if matches.is_empty() {
