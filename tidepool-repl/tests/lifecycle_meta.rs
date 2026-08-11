@@ -136,16 +136,16 @@ async fn reset_clears_both_planes_and_is_reusable() {
         Some(0),
         "post-reset decl generation should be 0: {meta}"
     );
-    // references gone: with no binding live these take the PLAIN path → clean
-    // scope errors (NOT the reference-path trap). `g`/`v` are both gone.
+    // reference gone: with no binding live this takes the PLAIN path → a clean
+    // scope error (NOT the reference-path trap). `g` is gone (decl plane);
+    // the value plane's equivalent clean-scope-error-after-reset is covered by
+    // reset_is_fresh, and reusability (fresh bind + read post-reset) is
+    // covered by reset_after_gc_rebuilds — not re-asserted here.
     repl.eval("pure (g 1)")
         .await
         .expect_err("g should be gone after reset (decl plane cleared)");
-    repl.eval("pure (v + 1)")
-        .await
-        .expect_err("v should be gone after reset (value plane cleared)");
 
-    // REUSABLE post-reset: a fresh decl + plain eval + bind + read all work.
+    // REUSABLE post-reset: a fresh decl + plain eval work.
     // `pure (h 5)` runs on the PLAIN path here (no binding live yet) → works.
     repl.def("h x = x * (2 :: Int)")
         .await
@@ -156,12 +156,6 @@ async fn reset_clears_both_planes_and_is_reusable() {
         "post-reset pure (h 5) should be 10: {}",
         t.text
     );
-    repl.eval("w <- pure (3 :: Int)")
-        .await
-        .expect_ok("bind w post-reset");
-    // read a bound VALUE back — the known-good reference path (slot-load).
-    let t = repl.eval("w").await;
-    assert!(t.contains("3"), "post-reset w should be 3: {}", t.text);
 }
 
 // ---------------------------------------------------------------------------

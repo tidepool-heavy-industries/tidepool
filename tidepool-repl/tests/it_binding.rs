@@ -12,7 +12,8 @@ mod common;
 use common::*;
 
 /// CASE 1 — a bare final expression binds `it`; usable next turn
-/// (`length it`, `take 2 it`), and shows up in `:bindings`.
+/// (`length it`, `take 2 it`), shows up in `:bindings`, and rebinds on every
+/// subsequent bare expression (latest-wins, GHCi parity).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn bare_expr_binds_it_and_is_usable_next_turn() {
     require_extract();
@@ -34,8 +35,17 @@ async fn bare_expr_binds_it_and_is_usable_next_turn() {
 
     // `length it` above is ITSELF a bare expression, so it rebound `it` to 5
     // (GHCi parity: `it` rebinds after every evaluated expression, including
-    // one that references the prior `it`) — re-establish the list before
-    // probing `take`, rather than chaining off the now-stale `it`.
+    // one that references the prior `it`). Assert the rebind directly
+    // (latest-wins): `it` now holds 5, not the prior list.
+    let t = repl.eval("it").await;
+    let out = t.expect_ok("it after rebind");
+    assert!(
+        out.contains('5') && !out.contains("[1,2,3,4,5]"),
+        "it should hold the LATEST bare expression's value (5), got: {out}"
+    );
+
+    // re-establish the list before probing `take`, rather than chaining off
+    // the now-stale `it`.
     repl.eval("[1,2,3,4,5] :: [Int]")
         .await
         .expect_ok("re-bind the list");
@@ -44,23 +54,6 @@ async fn bare_expr_binds_it_and_is_usable_next_turn() {
     assert!(
         out.contains('1') && out.contains('2'),
         "take 2 it should be [1,2], got: {out}"
-    );
-}
-
-/// CASE 2 — `it` rebinds on every bare expression (latest-wins, GHCi parity).
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn it_rebinds_on_next_bare_expression() {
-    require_extract();
-    let repl = Repl::new();
-
-    repl.eval("10 :: Int").await.expect_ok("first bare expr");
-    repl.eval("20 :: Int").await.expect_ok("second bare expr");
-
-    let t = repl.eval("it").await;
-    let out = t.expect_ok("it after two bare expressions");
-    assert!(
-        out.contains("20") && !out.contains("10"),
-        "it should hold the LATEST bare expression's value (20), got: {out}"
     );
 }
 

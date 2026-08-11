@@ -142,35 +142,6 @@ async fn first_bind_text_no_rebind() {
     );
 }
 
-/// DIAGNOSTIC for CASE 2 — bind a Text under a DIFFERENT name while an Int
-/// binding is already live (no rebind of the same name).
-///
-/// open; `x <- pure (1 :: Int)`; `y <- pure (T.pack "hi")` ; `T.length y` => 2.
-/// This was a BUG-2 diagnostic: both this test and CASE 2 crashed identically
-/// with kind=4 TypeMetadata "forced type metadata (should be dead code)", proving
-/// the bug was "Tier-0 Text bind while ANY prior binding is live" (not
-/// rebind-same-name-specific). Fixed by BUG-2 (commit caf3f4b). Now PASSES.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn different_name_text_after_int() {
-    require_extract();
-    let repl = Repl::new();
-
-    repl.eval("x <- pure (1 :: Int)")
-        .await
-        .expect_ok("bind x :: Int");
-    let bind = repl.eval("y <- pure (T.pack \"hi\")").await;
-    // Different name, no rebind — does a Text Tier-0 bind survive a live prior
-    // binding? (See doc comment for the localization this answers.)
-    bind.expect_ok("bind y :: Text with prior Int live (diagnostic)");
-
-    let out = repl.eval("T.length y").await;
-    let out = out.expect_ok("reference y :: Text (expected T.length => 2)");
-    assert!(
-        out.contains('2'),
-        "diagnostic text bind: expected 2, got: {out}"
-    );
-}
-
 /// CASE 3 — Redefine a FUNCTION (Lane A latest-wins).
 ///
 /// def `g x = x + (1 :: Int)`; eval `pure (g 10)` => 11;

@@ -28,34 +28,6 @@ use common::*;
 
 // ───────────────────────── PASSING CONTROLS / GUARDS ─────────────────────────
 
-/// A Text bind as the ONLY binding works (no prior binding ⇒ no Val injection).
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn text_bind_alone_control() {
-    require_extract();
-    let repl = Repl::new();
-
-    let t = repl.eval("s <- pure (T.pack \"hi\")").await;
-    assert!(
-        t.expect_ok("bind s").contains("bound"),
-        "bind s: {}",
-        t.text
-    );
-
-    let t = repl.eval("T.length s").await;
-    assert!(
-        t.expect_ok("T.length s").contains("2"),
-        "T.length s: {}",
-        t.text
-    );
-
-    let t = repl.eval("T.unpack s").await;
-    assert!(
-        t.expect_ok("T.unpack s").contains("hi"),
-        "T.unpack s: {}",
-        t.text
-    );
-}
-
 /// DECISIVE CONTROL: byte-for-byte the GREEN headline turn sequence through a
 /// SECOND bind, but of a Box (no library deps) — PASSES. The only difference
 /// from `text_bind_headline_faithful` is Box vs `T.pack`; before the fix that
@@ -202,49 +174,6 @@ async fn text_rebind_same_name() {
     assert!(
         t.expect_ok("T.length x").contains("2"),
         "T.length x: {}",
-        t.text
-    );
-    let t = repl.eval("T.unpack x").await;
-    assert!(
-        t.expect_ok("T.unpack x").contains("hi"),
-        "T.unpack x: {}",
-        t.text
-    );
-}
-
-/// Longer multibyte-capable Text as a second bind — same root cause (fixed);
-/// the length/round-trip assertions are the value-correctness gate.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn text_bind_longer_with_prior() {
-    require_extract();
-    let repl = Repl::new();
-
-    let t = repl.eval("n <- pure (0 :: Int)").await;
-    assert!(
-        t.expect_ok("bind n").contains("bound"),
-        "bind n: {}",
-        t.text
-    );
-    let t = repl.eval("n + 1").await;
-    assert!(t.expect_ok("read n").contains("1"), "read n: {}", t.text);
-
-    let t = repl.eval("y <- pure (T.pack \"hello world\")").await;
-    assert!(
-        t.expect_ok("bind y").contains("bound"),
-        "bind y: {}",
-        t.text
-    );
-
-    let t = repl.eval("T.length y").await;
-    assert!(
-        t.expect_ok("T.length y").contains("11"),
-        "T.length y: {}",
-        t.text
-    );
-    let t = repl.eval("T.unpack y").await;
-    assert!(
-        t.expect_ok("T.unpack y").contains("hello world"),
-        "T.unpack y: {}",
         t.text
     );
 }

@@ -34,9 +34,13 @@ async fn let_single_bind() {
     assert!(out.contains("6"), "let-single: expected 6, got: {out}");
 }
 
-/// CASE 2 — Tuple bind both components (the BUG-5 headline).
+/// CASE 2 — Tuple bind both components (the BUG-5 headline), including the
+/// GC-rooting guard.
 /// `(a, b) <- pure ((1 :: Int), (2 :: Int))` binds both `a` and `b`.
-/// Both are independently referenceable; `a + b == 3`.
+/// Both are independently referenceable; `a + b == 3`. Then a heavy foldl'
+/// (~6 MiB into the 2 MiB nursery) forces real minor collections, and both
+/// components must still resolve correctly afterward — a dangling slot would
+/// crash or produce garbage instead of 1/2.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn tuple_bind_both_components() {
     require_extract();
@@ -71,6 +75,26 @@ async fn tuple_bind_both_components() {
     let t = repl.eval("a + b").await;
     let out = t.expect_ok("a + b");
     assert!(out.contains("3"), "expected a + b == 3, got: {out}");
+
+    // GC-rooting guard: heavy allocation (foldl' over 200k elements, ~6 MiB into
+    // the 2 MiB nursery) forces real minor collections; both slots must still
+    // resolve correctly afterward — a dangling slot would crash or produce
+    // garbage instead of 1/2.
+    let _ = repl
+        .eval("foldl' (+) (0 :: Int) [1..200000]")
+        .await
+        .expect_ok("gc stressor");
+
+    let ta = repl.eval("a").await;
+    assert!(
+        ta.expect_ok("a post-GC").contains("1"),
+        "post-GC a should be 1"
+    );
+    let tb = repl.eval("b").await;
+    assert!(
+        tb.expect_ok("b post-GC").contains("2"),
+        "post-GC b should be 2"
+    );
 }
 
 /// CASE 3 — `let`-tuple works.
@@ -115,69 +139,7 @@ async fn three_tuple_works() {
     assert!(out.contains("6"), "expected p + q + r == 6, got: {out}");
 }
 
-/// CASE 5 — The original feature test (was #[ignore], now active).
-/// `(a, b) <- pure (1, 2)` then `a + b == 3`. Kept as an independent guard.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn tuple_bind_both_components_feature() {
-    require_extract();
-    let repl = Repl::new();
-
-    repl.eval("(a, b) <- pure ((1 :: Int), (2 :: Int))")
-        .await
-        .expect_ok("tuple bind (feature)");
-
-    let t = repl.eval("a + b").await;
-    let out = t.expect_ok("a + b (feature)");
-    assert!(
-        out.contains("3"),
-        "feature: expected a + b == 3, got: {out}"
-    );
-}
-
-/// CASE 6 — Tuple components survive an organic GC.
-/// Binds `(a, b)`, then runs a heavy foldl' that allocates ~6 MiB into the
-/// 2 MiB nursery (forcing real minor collections), then verifies `a + b` still
-/// yields 3. This is the GC-rooting guard: if either slot dangled after
-/// collection, `a + b` would crash or produce garbage instead of 3.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn tuple_bind_components_survive_gc() {
-    require_extract();
-    let repl = Repl::new();
-
-    // Bind the tuple.
-    repl.eval("(a, b) <- pure ((1 :: Int), (2 :: Int))")
-        .await
-        .expect_ok("tuple bind");
-
-    // Heavy allocation: foldl' over 200k elements allocates ~6 MiB of transient
-    // cons cells into the 2 MiB nursery → multiple real minor collections.
-    let _ = repl
-        .eval("foldl' (+) (0 :: Int) [1..200000]")
-        .await
-        .expect_ok("gc stressor");
-
-    // Both components must still resolve correctly post-GC.
-    let t = repl.eval("a + b").await;
-    let out = t.expect_ok("a + b post-GC");
-    assert!(
-        out.contains("3"),
-        "post-GC: expected a + b == 3, got: {out}"
-    );
-
-    // Individual components also survive.
-    let ta = repl.eval("a").await;
-    assert!(
-        ta.expect_ok("a post-GC").contains("1"),
-        "post-GC a should be 1"
-    );
-    let tb = repl.eval("b").await;
-    assert!(
-        tb.expect_ok("b post-GC").contains("2"),
-        "post-GC b should be 2"
-    );
-}
-
-/// CASE 7 — Type-mismatch multi-bind is LOUDLY REJECTED (GHC compile error).
+/// CASE 5 — Type-mismatch multi-bind is LOUDLY REJECTED (GHC compile error).
 /// `(a, b) <- pure (42 :: Int)` has 2 binders but the action returns a plain
 /// `Int`, not a 2-tuple. GHC reports a type error at compile time — a loud,
 /// clean rejection. The session must remain usable after the error.

@@ -25,16 +25,19 @@ async fn full_stack_effects_reachable_through_session() {
         text
     }
 
-    // Exec: `run` a shell command — the result is (exit, stdout, stderr).
-    let t = eval(&server, "run \"echo wave-b-ok\" >>= liftEither").await;
-    assert!(t.contains("wave-b-ok"), "Exec/run output: {t}");
-
-    // Fs: write then read a file in the cwd sandbox (round-trip).
+    // Exec + Fs fused into one item: `run` a shell command AND round-trip a
+    // file write/read, returned as a tuple — two independent assertions over
+    // one compile of the same full stack. (A plain bound-value reference under
+    // the full stack is covered by gc_field_replay.rs's `gitLog` binding.)
     let t = eval(
         &server,
-        "writeFile \"hello.txt\" \"from-fs\" >>= liftEither >> readFile \"hello.txt\" >>= liftEither",
+        "do { p <- run \"echo wave-b-ok\" >>= liftEither ; \
+              writeFile \"hello.txt\" \"from-fs\" >>= liftEither ; \
+              contents <- readFile \"hello.txt\" >>= liftEither ; \
+              pure (p.stdout, contents) }",
     )
     .await;
+    assert!(t.contains("wave-b-ok"), "Exec/run output: {t}");
     assert!(t.contains("from-fs"), "Fs read-back: {t}");
 
     // KV: set on one turn, get on a LATER turn — proves effect state persists
@@ -42,11 +45,6 @@ async fn full_stack_effects_reachable_through_session() {
     let _ = eval(&server, "kvSet \"wave-b\" (toJSON (42 :: Int))").await;
     let t = eval(&server, "kvGet \"wave-b\"").await;
     assert!(t.contains("42"), "KV get-after-set: {t}");
-
-    // The full stack didn't break a plain bound-value reference.
-    let _ = eval(&server, "x <- pure (7 :: Int)").await;
-    let t = eval(&server, "x + 1").await;
-    assert!(t.contains("8"), "bound-value ref under full stack: {t}");
 
     // Project `Library` is auto-imported (parity with eval): a `.tidepool/lib`
     // verb is in scope bare. `chunksOf` is a pure Schemes verb re-exported by

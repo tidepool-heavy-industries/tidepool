@@ -104,30 +104,6 @@ async fn mutual_reference_single_turn_works() {
     );
 }
 
-/// CASE 3 — Redefine a function: latest-wins via the `hiding` shadow.
-///
-/// def `k x = x + 1`; `k 5` => 6; def `k x = x + 100`; `k 5` => 105.
-/// `Lib.G2` imports `Lib.G1 hiding (k)` and re-declares `k`, so the newest body
-/// wins at the reference.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn redefine_function_latest_wins() {
-    require_extract();
-    let repl = Repl::new();
-
-    repl.def("k x = x + (1 :: Int)").await.expect_ok("def k v1");
-    let out = repl.eval_ok("pure (k 5)").await;
-    assert!(out.contains('6'), "k v1: expected 6, got: {out}");
-
-    repl.def("k x = x + (100 :: Int)")
-        .await
-        .expect_ok("def k v2");
-    let out2 = repl.eval_ok("pure (k 5)").await;
-    assert!(
-        out2.contains("105"),
-        "k v2: expected 105 (latest def wins via `hiding (k)`), got: {out2}"
-    );
-}
-
 /// CASE 4 — Multi-constructor ADT: define once, use as a STABLE type across turns.
 ///
 /// def `data Shape = Circle Int | Rect Int Int`; eval an immediate case => 5;
