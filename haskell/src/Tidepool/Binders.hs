@@ -11,10 +11,17 @@ module Tidepool.Binders
   , extractBindersNamed
   , exportItemName
     -- * Statement binders (session-eval bind-vs-expr classification)
+  , TurnKind(..)
+  , turnKindWireName
+  , parseTurnKind
   , StmtBinders(..)
   , extractStmtBinders
   , classifyBlock
   , renderVerdictsJson
+    -- * Turn-mode template selection (--turn)
+  , TemplateSelector(..)
+  , templateSelectorForVerdict
+  , templateSelectorWireName
     -- * Turn-mode rich result (--turn)
   , TurnOut(..)
   , BoundBinder(..)
@@ -165,15 +172,68 @@ getLibdir = do
 -- Statement binders — the session-eval bind-vs-expr signal (Lane VALUE)
 --------------------------------------------------------------------------------
 
--- | The result of classifying one session-eval turn. @sbKind@ is @"bind"@ when
--- the turn statement introduces binders (@x <- e@ / @let x = e@), @"expr"@ for
+-- | The three mutually-exclusive shapes a session-eval turn classifies to
+-- (GHC-sourced) — the verdict's wire contract. Mirrors Rust's own 'TurnKind'
+-- (@tidepool-runtime/src/session/turn.rs@) exactly; kept a plain 3-value type
+-- here (not a refinement of template selection — see 'TemplateSelector' for
+-- that) for the same reason Rust keeps them separate.
+data TurnKind = KDecl | KBind | KExpr
+  deriving (Eq, Show)
+
+-- | The wire-name string every JSON verdict's @kind@ field and the
+-- @--turn-verdict@ CLI argument both use. Mirrors Rust's
+-- @turn_kind_wire_name@ byte for byte.
+turnKindWireName :: TurnKind -> String
+turnKindWireName KDecl = "decl"
+turnKindWireName KBind = "bind"
+turnKindWireName KExpr = "expr"
+
+-- | Parse a wire-name string back into a 'TurnKind' — used by
+-- @--turn-verdict@, where the Rust caller forwards its own already-classified
+-- 'TurnKind' verbatim (via 'turnKindWireName'), so an unrecognized string
+-- here means version skew. Fails loudly rather than silently defaulting,
+-- mirroring Rust's own @parse_one_verdict@ read of the extract's classify
+-- JSON, which rejects an unrecognized @kind@ the same way.
+parseTurnKind :: String -> TurnKind
+parseTurnKind "decl" = KDecl
+parseTurnKind "bind" = KBind
+parseTurnKind "expr" = KExpr
+parseTurnKind s      = error ("unrecognized turn kind: " ++ s)
+
+-- | The result of classifying one session-eval turn. @sbKind@ is 'KBind' when
+-- the turn statement introduces binders (@x <- e@ / @let x = e@), 'KExpr' for
 -- a bare expression (@BodyStmt@). @sbBinders@ are the bound names (GHC-sourced),
 -- empty for an expr turn. The Rust runtime picks the wrap template + the bind
 -- path from this signal — it never parses Haskell itself.
 data StmtBinders = StmtBinders
-  { sbKind    :: String
+  { sbKind    :: TurnKind
   , sbBinders :: [String]
   } deriving (Eq, Show)
+
+-- | Which wrapper template a verdict selects — a refinement of 'TurnKind': a
+-- 'KBind' verdict maps to one of two distinct template shapes depending on
+-- whether it actually binds a name (a discarding bind, @_ <- e@, runs for
+-- effect and discards, so it needs its own wrapper). Mirrors Rust's own
+-- 'TemplateSelector' (@tidepool-runtime/src/session/turn.rs@).
+data TemplateSelector = SDecl | SBind | SBindDiscard | SExpr
+  deriving (Eq, Show)
+
+-- | Compute the selector a verdict maps to — total over every 'TurnKind',
+-- mirroring Rust's @TemplateSelector::for_verdict@.
+templateSelectorForVerdict :: TurnKind -> [String] -> TemplateSelector
+templateSelectorForVerdict KDecl _       = SDecl
+templateSelectorForVerdict KBind []      = SBindDiscard
+templateSelectorForVerdict KBind (_ : _) = SBind
+templateSelectorForVerdict KExpr _       = SExpr
+
+-- | The wire-name string the extract's @--turn-template <kind>=<file>@ keys
+-- its template lookup on. Mirrors Rust's @TemplateSelector::wire_name@ byte
+-- for byte.
+templateSelectorWireName :: TemplateSelector -> String
+templateSelectorWireName SDecl        = "decl"
+templateSelectorWireName SBind        = "bind"
+templateSelectorWireName SBindDiscard = "binddiscard"
+templateSelectorWireName SExpr        = "expr"
 
 -- | Classify @src@ against an already-obtained 'DynFlags' with GHC's own
 -- parser (parse-only, no typecheck), letting GHC be the single authority for
@@ -272,7 +332,7 @@ classifyTurn
   -> StmtBinders
 classifyTurn declRes stmtRes modRes
   | POk _ lstmt <- stmtRes, isBindStmt lstmt =
-      StmtBinders "bind" (map occStr (collectLStmtBinders CollNoDictBinders lstmt))
+      StmtBinders KBind (map occStr (collectLStmtBinders CollNoDictBinders lstmt))
   | POk _ ldecl <- declRes, Just sb <- declNameVerdict ldecl = sb
   -- MULTI-DECLARATION items (a sig + its equation, mutually-referencing
   -- equations — one turn, several top-level decls). `parseDeclaration` and
@@ -290,10 +350,10 @@ classifyTurn declRes stmtRes modRes
   , length decls >= 2
   , verdicts <- map declNameVerdict decls
   , all isJust verdicts =
-      StmtBinders "decl" (nub (concatMap sbBinders (catMaybes verdicts)))
-  | POk _ _ <- stmtRes = StmtBinders "expr" []
-  | POk _ _ <- declRes = StmtBinders "decl" []
-  | otherwise = StmtBinders "expr" []
+      StmtBinders KDecl (nub (concatMap sbBinders (catMaybes verdicts)))
+  | POk _ _ <- stmtRes = StmtBinders KExpr []
+  | POk _ _ <- declRes = StmtBinders KDecl []
+  | otherwise = StmtBinders KExpr []
 
 -- | Whether a parsed statement introduces binders (@BindStmt@/@LetStmt@) rather
 -- than being a bare expression (@BodyStmt@).
@@ -309,10 +369,10 @@ isBindStmt lstmt = case unLoc lstmt of
 -- precedence.
 declNameVerdict :: LHsDecl GhcPs -> Maybe StmtBinders
 declNameVerdict ldecl = case unLoc ldecl of
-  SigD _ sig  -> Just (StmtBinders "decl" (sigBinders sig))
+  SigD _ sig  -> Just (StmtBinders KDecl (sigBinders sig))
   ValD _ bind -> case map occStr (collectHsBindBinders CollNoDictBinders bind) of
     []    -> Nothing
-    names -> Just (StmtBinders "decl" names)
+    names -> Just (StmtBinders KDecl names)
   _           -> Nothing
 
 -- | The names a signature declares (@f, g :: T@ → @["f","g"]@). Only the
@@ -351,7 +411,7 @@ renderVerdictsJson sbs =
   "{\"verdicts\":[" ++ intercalate "," (map renderVerdict sbs) ++ "]}"
   where
     renderVerdict (StmtBinders kind binders) =
-      "{\"kind\":" ++ jsonString kind
+      "{\"kind\":" ++ jsonString (turnKindWireName kind)
         ++ ",\"binders\":[" ++ intercalate "," (map jsonString binders) ++ "]}"
 
 --------------------------------------------------------------------------------

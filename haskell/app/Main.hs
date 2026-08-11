@@ -33,6 +33,8 @@ import qualified Data.Text as T
 import Tidepool.Binders
   ( extractBindersNamed
   , extractStmtBinders, classifyBlock, exportItemName
+  , TurnKind(..), parseTurnKind
+  , TemplateSelector(..), templateSelectorForVerdict, templateSelectorWireName
   , StmtBinders(..), TurnOut(..), BoundBinder(..)
   , renderTurnOutJson, renderBoundBinderJson, renderAskJson, renderVerdictsJson )
 import Tidepool.GhcPipeline
@@ -854,8 +856,8 @@ runTurnMode args path = do
           writeFile modulePath spliced
           return (spliced, modName, modulePath)
     turnOut <- case sbKind sb of
-      "decl" -> do
-        tmplFile <- case lookup "decl" templates of
+      KDecl -> do
+        tmplFile <- case lookup (templateSelectorWireName SDecl) templates of
           Just f  -> return f
           Nothing -> error "--turn: no --turn-template for kind decl"
         (_spliced, modName, modulePath) <- spliceInto tmplFile
@@ -867,12 +869,13 @@ runTurnMode args path = do
       kind -> do
         -- Four-shape selection (protocol note, "the verdict space has four
         -- shapes, not three"): a bind that binds no name selects its own
-        -- template kind and skips the session-bind artifacts entirely,
-        -- mirroring Rust's 'TemplateSelector::for_verdict'.
-        let selector = if kind == "bind" && null (sbBinders sb) then "binddiscard" else kind
-        tmplFile <- case lookup selector templates of
+        -- template kind and skips the session-bind artifacts entirely —
+        -- 'templateSelectorForVerdict' mirrors Rust's
+        -- 'TemplateSelector::for_verdict' exactly.
+        let selector = templateSelectorForVerdict kind (sbBinders sb)
+        tmplFile <- case lookup (templateSelectorWireName selector) templates of
           Just f  -> return f
-          Nothing -> error ("--turn: no --turn-template for kind " ++ selector)
+          Nothing -> error ("--turn: no --turn-template for kind " ++ templateSelectorWireName selector)
         (spliced, _modName, modulePath) <- spliceInto tmplFile
         let scope = SessionScope
               { ssRoot      = fromMaybe "" (argSessionRoot args)
@@ -892,14 +895,14 @@ runTurnMode args path = do
         asksSites <- writeWholeModuleClosed timing outDir hscEnv binds tycons mCapturedTy warnTexts targetName "result"
         let wrapped = T.pack spliced
         case selector of
-          "bind" -> do
+          SBind -> do
             g    <- requireArg "--bind-gen"     (argBindGen args)
             root <- requireArg "--session-root" (argSessionRoot args)
             bbs  <- mkBoundBinders (sbBinders sb) g root result
             return (TBind (map T.pack (sbBinders sb)) 0 bbs asksSites wrapped)
-          "binddiscard" -> return (TBind [] 0 [] asksSites wrapped)
-          "expr" -> return (TExpr 0 asksSites wrapped)
-          other  -> error ("--turn: unexpected verdict kind: " ++ other)
+          SBindDiscard -> return (TBind [] 0 [] asksSites wrapped)
+          SExpr -> return (TExpr 0 asksSites wrapped)
+          SDecl -> error ("--turn: unexpected verdict kind: " ++ templateSelectorWireName selector)
     outFile <- requireArg "--turn-out" (argTurnOut args)
     let cbor = encodeTurnOut turnOut
     BS.writeFile outFile cbor
@@ -939,10 +942,13 @@ parseTurnTemplate kv = case break (== '=') kv of
 -- | Parse one raw @--turn-verdict kind[:name,name…]@ argument into the same
 -- 'StmtBinders' shape 'extractStmtBinders' would have produced, so the rest of
 -- 'runTurnMode' never has to distinguish a supplied verdict from a parsed one.
+-- @kind@ goes through 'parseTurnKind', which fails loudly (caught by this
+-- mode's surrounding @try@, same as any other extraction failure) on
+-- anything but the three wire-name strings the Rust caller ever forwards.
 parseTurnVerdictArg :: String -> IO StmtBinders
 parseTurnVerdictArg s = case break (== ':') s of
-  (kind, "")      -> return (StmtBinders kind [])
-  (kind, ':' : ns) -> return (StmtBinders kind (splitComma ns))
+  (kind, "")      -> return (StmtBinders (parseTurnKind kind) [])
+  (kind, ':' : ns) -> return (StmtBinders (parseTurnKind kind) (splitComma ns))
   _               -> error ("--turn: malformed --turn-verdict: " ++ s)
 
 splitComma :: String -> [String]
