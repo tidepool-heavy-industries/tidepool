@@ -87,21 +87,16 @@ if go == Just True then expensiveAnalysis data else pure "skipped"
 **Census**: one eval replaces N tool calls — `fsGlob` + `mapM fsMetadata` +
 filtering gives a codebase overview in a single round-trip.
 
-**Editing — `update` is the common-case core verb** (always available in any repo;
-in `fs_decl` helpers, not project-lib): `update path old new :: M UpdateOneOutcome`
-is exact str-replace, exactly-once, the MCP Edit-tool shape. Like
-`updateAll`/`insertAfter`, it NEVER throws: an empty `old`, a missing file, an
-absent pattern, or an ambiguous anchor comes back as a typed `UpdateOneOutcome`
-DATA value (`UpdateOneApplied` on the single-match success, `UpdateOneRejected
-reason mCount` otherwise) — mirroring `UpdateAllOutcome`/`InsertAfterOutcome`
-(`{ok,count}`/`{ok}` on success, `{ok:false,reason,...}` on rejection), so a batch
-over many files can't half-apply mid-loop; `planUpdate ::
-M UpdateOutcome` is the dry-run that returns `{changed,diff}` as DATA (never throws — the
-branch-before-commit path, `UpdateDiff`/`UpdateNoChange`/`UpdateRejected`);
-`updateJ` rides the input lane; `writeChecked` also lives here.
-The tiers below (`Edit` DSL, `[patch|]`/Diff, ast-grep) are power tools for
-batch / diff-shaped / syntax-aware work; `tidepool://edits` documents all four,
-common-case first.
+**Editing — `update` is the common-case core verb** (always available in any
+repo; in `fs_decl` helpers, not project-lib): exact str-replace, exactly-once,
+the MCP Edit-tool shape. `tidepool://edits` is the live reference for all four
+tiers (`update` family, the `Edit` DSL, `[patch|]`/Diff, ast-grep) — signatures
+are not restated here. **The invariant behind them all: no editing verb ever
+throws.** An empty `old`, a missing file, an absent pattern, an ambiguous
+anchor, a conflicting hunk — every one comes back as a typed DATA outcome, so a
+batch over many files cannot half-apply mid-loop, and `plan*` dry-runs
+(`planUpdate`/`planEdits`) return their diff as data too. The tiers below are
+power tools for batch / diff-shaped / syntax-aware work.
 
 **Diff-on-the-input-lane** (`[patch|]`/Diff verbs): multi-line `[patch|...|]`
 literals in `code` are corrupted by template indentation — ride the `input`
@@ -117,19 +112,16 @@ new body on the `input` lane and generate-then-apply in one eval. `genPatch path
 old new :: Either Text FilePatch` is the pure core; `diffFiles a b` diffs two
 existing files.
 
-**Declarative small edits — the `Edit` verbs.** When a change is awkward as a diff
-(replace lines 10–15, insert after an anchor), name it with an `Edit` and let the
-engine lower it to a CONTEXT-anchored patch on the same atomic apply: `applyEdits
-:: Text -> [Edit] -> M Value` (in-eval) / `editsJ :: Value -> M Value` (input
-lane). `Edit` = `ReplaceLines lo hi [Text]` / `InsertAt n [Text]` / `ReplaceAnchor
-a [Text]` / `InsertAfterAnchor a [Text]` / `InsertBeforeAnchor a [Text]` (1-based;
-anchors are substring tests that must hit exactly one line). `planEdits`/
-`planEditsJ` is a dry run returning the rendered review `diff`; `applyEdits` is
-all-or-nothing; problems come back as DATA (`anchor-missing`/`anchor-ambiguous`/
-`range-out-of-bounds`/`edits-overlap`). **Line-number safety:** numbers resolve
-against the file read in the SAME eval and bake into a context-anchored patch — an
-in-eval read+edit is safe; numbers captured in a PRIOR eval go stale (use
-the anchor ops cross-eval — they're content-addressed and self-checking).
+**Declarative small edits — the `Edit` verbs.** When a change is awkward as a
+diff (replace lines 10–15, insert after an anchor), name it with an `Edit`
+(`applyEdits`/`editsJ`, `planEdits`/`planEditsJ` to dry-run) and let the engine
+lower it to a CONTEXT-anchored patch on the same atomic apply. Constructors,
+JSON ops, and the conflict strings are in `tidepool://edits`. **What is NOT
+there, and is the hazard: line numbers are only valid within one eval.** They
+resolve against the file read in the SAME eval and bake into a context-anchored
+patch, so an in-eval read+edit is safe — but numbers captured in a PRIOR eval
+go stale silently. Use the anchor ops cross-eval; they are content-addressed
+and self-checking.
 
 **checkDiff-first when a `[patch|]` pattern silently fails to match.** A no-match
 is ambiguous (input doesn't parse vs. parses but shape differs). `checkDiff
