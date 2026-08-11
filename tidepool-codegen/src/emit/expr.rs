@@ -1,17 +1,8 @@
 //! Cranelift IR emission for Core expressions.
 //!
-//! Entry point: `compile_expr` (bottom of the file). Emission is a stack-safe
+//! Entry point: `compile_expr`. Emission is a stack-safe
 //! hylomorphism over `EmitFrame` so deeply-nested Core can't overflow the host
-//! stack. The file reads top-to-bottom in these sections:
-//!
-//! - **EmitFrame** — the hylomorphism frame: which child positions are processed
-//!   stack-safely vs. via bounded recursion (block/pattern setup needs top-down
-//!   context).
-//! - **hylomorphism** — the expand/collapse driver.
-//! - **LetRec deferred state** — the multi-phase binding fill (see the LetRec
-//!   phase-ordering notes in the repo Core-translation gotchas).
-//! - **closure capture** — free-var capture analysis for lambdas/thunks.
-//! - **lambda / thunk emission** — closure allocation + code-pointer wiring.
+//! stack.
 //!
 //! Tail-ness is owned by the `emit_node` spine, NOT carried through the hylo
 //! (the #313 invariant): the hylo is hard-NonTail.
@@ -359,7 +350,6 @@ fn expand_node(
     }
 }
 
-/// Collapse: assemble Cranelift IR from child results.
 /// Emit-coverage key for an `EmitFrame` variant (see `crate::coverage`).
 fn emit_frame_cov_key(frame: &EmitFrame<SsaVal>) -> &'static str {
     match frame {
@@ -414,16 +404,14 @@ fn collapse_frame(args: EmitArgs, frame: EmitFrame<SsaVal>) -> Result<SsaVal, Em
             Some(v) => Ok(v),
             None => {
                 // Session re-entry: a Var that misses the local env but is
-                // seeded in the ExternalEnv resolves to the value held in its
-                // stable, GC-updated root slot — the GHCi-style "reference a
-                // value bound in a prior fragment" path. Checked FIRST, before
-                // the error-sentinel / unresolved-var-trap handling: a session
-                // binder reaches codegen as an external `NVar(stableVarId)`
-                // (0xFE-tagged), but the override is keyed on ExternalEnv
-                // MEMBERSHIP, not on the tag — the tag is incidental.
-                // Resolution emits a fresh LOAD from the slot per fragment
-                // (never a baked pointer snapshot — the GC moves the value and
-                // rewrites *slot; see `SsaVal::from_external_slot`).
+                // seeded in the ExternalEnv resolves via its stable root slot
+                // (see `SsaVal::from_external_slot`) — the GHCi-style
+                // "reference a value bound in a prior fragment" path. Checked
+                // FIRST, before the error-sentinel / unresolved-var-trap
+                // handling: a session binder reaches codegen as an external
+                // `NVar(stableVarId)` (0xFE-tagged), but the override is keyed
+                // on ExternalEnv MEMBERSHIP, not on the tag — the tag is
+                // incidental.
                 if let Some(slot) = args.ctx.external_env.get(vid) {
                     crate::coverage::hit("var:external_env");
                     return Ok(SsaVal::from_external_slot(args.builder, slot));
@@ -542,8 +530,6 @@ fn collapse_frame(args: EmitArgs, frame: EmitFrame<SsaVal>) -> Result<SsaVal, Em
             Ok(SsaVal::HeapPtr(ptr))
         }
         EmitFrame::ThunkCon { tag, field_indices } => {
-            // Con with non-trivial fields: evaluate trivial fields eagerly,
-            // compile non-trivial fields as thunks.
             let num_fields = field_indices.len();
             let size = 24 + 8 * num_fields as u64;
             let ptr = emit_alloc_zeroed(
@@ -571,7 +557,6 @@ fn collapse_frame(args: EmitArgs, frame: EmitFrame<SsaVal>) -> Result<SsaVal, Em
 
             for (i, &f_idx) in field_indices.iter().enumerate() {
                 let field_val = if is_trivial_field(f_idx, args.sess.tree) {
-                    // Trivial: evaluate eagerly (existing path)
                     let val = EmitContext::emit_node(
                         EmitArgs {
                             ctx: args.ctx,
@@ -589,7 +574,6 @@ fn collapse_frame(args: EmitArgs, frame: EmitFrame<SsaVal>) -> Result<SsaVal, Em
                         val,
                     )
                 } else {
-                    // Non-trivial: compile as thunk
                     let thunk_val = emit_thunk(
                         EmitArgs {
                             ctx: args.ctx,
@@ -739,9 +723,9 @@ fn collapse_frame(args: EmitArgs, frame: EmitFrame<SsaVal>) -> Result<SsaVal, Em
         EmitFrame::RaiseLazy { kind, msg } => {
             // Constant pointer to a pre-allocated lazy poison closure. The error
             // flag is set only when the closure is forced (called / pattern
-            // matched), so a statically-dead arg slot never raises. Mirrors the
-            // sentinel-Var lazy poison path above, but preserves the static
-            // message via the message-carrying poison variant when known.
+            // matched), so a statically-dead arg slot never raises. Preserves
+            // the static message via the message-carrying poison variant when
+            // known.
             let poison_addr = match &msg {
                 Some(bytes) => crate::host_fns::error_poison_ptr_lazy_msg(kind, bytes) as i64,
                 None => crate::host_fns::error_poison_ptr_lazy(kind) as i64,
@@ -762,7 +746,6 @@ fn collapse_frame(args: EmitArgs, frame: EmitFrame<SsaVal>) -> Result<SsaVal, Em
                 )?;
                 let msg_ptr = msg_val.value();
 
-                // Extract data_ptr and len from LitString heap object
                 let raw_ptr = args.builder.ins().load(
                     types::I64,
                     MemFlags::trusted(),
@@ -1090,11 +1073,10 @@ fn compute_captures_promised(
     label: &str,
     promised: Option<&FxHashSet<VarId>>,
 ) -> (CoreExpr, Vec<VarId>) {
-    // `free_vars_idx` is built from `tree` (the caller's EmitSession
-    // invariant — see `EmitSession::free_vars_idx`'s doc), so querying it at
-    // `body_idx` BEFORE extracting is equivalent to the old
-    // `free_vars(&body_tree)` but skips the second walk over the copy.
-    // `extract_subtree` still runs: `body_tree` becomes the nested
+    // `free_vars_idx` is built from `tree` (see `EmitSession::free_vars_idx`'s
+    // doc), so querying it at `body_idx` is equivalent to computing free vars
+    // on the extracted `body_tree` directly, without a second walk.
+    // `extract_subtree` still runs regardless: `body_tree` becomes the nested
     // Lam/Thunk's own EmitSession tree, not just a free-vars scratch value.
     let body_tree = tree.extract_subtree(body_idx);
     let fvs = free_vars_idx.free_vars_at(body_idx);
@@ -1254,7 +1236,6 @@ fn emit_lam(args: EmitArgs, binder: VarId, body_idx: usize) -> Result<SsaVal, Em
 
     args.ctx.lambda_counter = inner_emit.lambda_counter;
 
-    // Debug: dump Cranelift IR for each lambda when TIDEPOOL_DUMP_CLIF=1
     if std::env::var("TIDEPOOL_DUMP_CLIF").is_ok() {
         eprintln!("=== CLIF {} ({} captures) ===", lambda_name, captures.len());
         for (i, (var_id, ssaval)) in captures.iter().enumerate() {
@@ -1353,7 +1334,6 @@ fn emit_thunk_promised(
     body_idx: usize,
     promised: Option<&FxHashSet<VarId>>,
 ) -> Result<(SsaVal, Vec<(VarId, i32)>), EmitError> {
-    // Extract the sub-expression and compute free variables
     let (body_tree, sorted_fvs) = compute_captures_promised(
         args.ctx,
         args.sess.tree,
@@ -1379,7 +1359,6 @@ fn emit_thunk_promised(
         })
         .collect::<Result<Vec<_>, EmitError>>()?;
 
-    // Declare the thunk entry function: (vmctx, thunk_ptr) -> result
     let thunk_name = args.ctx.next_thunk_name();
     let mut thunk_sig = Signature::new(args.sess.pipeline.isa.default_call_conv());
     thunk_sig.params.push(AbiParam::new(types::I64)); // vmctx
@@ -1396,7 +1375,6 @@ fn emit_thunk_promised(
         .pipeline
         .register_lambda(thunk_func_id, thunk_name.clone());
 
-    // Build the inner function
     let mut inner_ctx = Context::new();
     inner_ctx.func.signature = thunk_sig;
     inner_ctx.func.name = UserFuncName::default();
@@ -1433,12 +1411,10 @@ fn emit_thunk_promised(
     };
 
     let mut inner_emit = EmitContext::new(args.ctx.prefix.clone());
-    // See the lambda case: propagate session bindings into the thunk's context.
     inner_emit.external_env = args.ctx.external_env.clone();
     inner_emit.lambda_counter = args.ctx.lambda_counter;
     inner_emit.current_fn = thunk_name.clone();
 
-    // Load captures from thunk object: thunk_ptr + THUNK_CAPTURED_OFFSET + 8*i
     for (i, (var_id, _)) in captures.iter().enumerate() {
         let offset = THUNK_CAPTURED_OFFSET + 8 * i as i32;
         let val = inner_builder
@@ -1449,7 +1425,6 @@ fn emit_thunk_promised(
         inner_emit.env.insert(*var_id, SsaVal::HeapPtr(val));
     }
 
-    // Emit the deferred expression body
     let body_root = body_tree.nodes.len() - 1;
     let mut inner_sess = EmitSession {
         pipeline: args.sess.pipeline,
@@ -1483,7 +1458,6 @@ fn emit_thunk_promised(
 
     args.ctx.lambda_counter = inner_emit.lambda_counter;
 
-    // Debug: dump Cranelift IR for thunk when TIDEPOOL_DUMP_CLIF=1
     if std::env::var("TIDEPOOL_DUMP_CLIF").is_ok() {
         eprintln!("=== CLIF {} ({} captures) ===", thunk_name, captures.len());
         for (i, (var_id, ssaval)) in captures.iter().enumerate() {
@@ -1502,7 +1476,6 @@ fn emit_thunk_promised(
         .pipeline
         .define_function(thunk_func_id, &mut inner_ctx)?;
 
-    // Get code pointer in the parent function
     let func_ref = args
         .sess
         .pipeline
@@ -1546,8 +1519,6 @@ fn emit_thunk_promised(
         THUNK_CODE_PTR_OFFSET,
     );
 
-    // Store captures; promised (knot) slots get a null placeholder and are
-    // reported back for pending_capture_updates patching.
     let mut pending_slots: Vec<(VarId, i32)> = Vec::new();
     for (i, (var_id, maybe_val)) in captures.iter().enumerate() {
         let offset = THUNK_CAPTURED_OFFSET + 8 * i as i32;
@@ -2176,7 +2147,6 @@ impl EmitContext {
             other => unreachable!("emit_tail_app dispatched on non-App node: {other:?}"),
         };
 
-        // Evaluate fun and arg in NON-tail position
         let fun_val = emit_subtree(
             EmitArgs {
                 ctx: args.ctx,
@@ -2207,8 +2177,8 @@ impl EmitContext {
         crate::emit::apply::runtime_tail_apply(args.sess, args.builder, raw_fun_ptr, arg_ptr)
     }
 
-    /// Execute LetRec phases 1-3a inline, then push deferred-simple evals
-    /// and finish onto the work stack.
+    /// Execute LetRec phases 1-3b inline, then push deferred-simple evals
+    /// (phase 3c) and finish (3a'/3d) onto the work stack.
     fn emit_letrec_phases(
         args: EmitArgs,
         bindings: &[(VarId, usize)],
@@ -2545,7 +2515,6 @@ impl EmitContext {
             };
 
             let mut inner_emit = EmitContext::new(args.ctx.prefix.clone());
-            // See the lambda case above: propagate session bindings.
             inner_emit.external_env = args.ctx.external_env.clone();
             inner_emit.lambda_counter = args.ctx.lambda_counter;
             inner_emit.current_fn = lambda_name.clone();
@@ -2558,7 +2527,6 @@ impl EmitContext {
                 .env
                 .insert(lam_binder, SsaVal::HeapPtr(inner_arg));
 
-            // Load captures by position
             for (i, var_id) in sorted_fvs.iter().enumerate() {
                 let offset = CLOSURE_CAPTURED_OFFSET + 8 * i as i32;
                 let val =
@@ -2622,7 +2590,6 @@ impl EmitContext {
             // Capture slots were already zeroed at pre-alloc time (Phase 1,
             // via emit_alloc_zeroed) — that's what makes them GC-safe across
             // the gap between this pre-alloc and this fill.
-            // Fill captures already in env. Defer those referencing deferred simple bindings.
             for (i, var_id) in sorted_fvs.iter().enumerate() {
                 let offset = CLOSURE_CAPTURED_OFFSET + 8 * i as i32;
                 if let Some(ssaval) = args.ctx.env.get(var_id) {
@@ -2735,7 +2702,6 @@ impl EmitContext {
         let deferred_simple =
             topo_sort_deferred_simple(deferred_simple, bindings, &args.sess.free_vars_idx);
 
-        // Build deferred Con deps tracking
         let mut deferred_con_deps: Vec<DeferredConDep> = Vec::with_capacity(deferred_cons.len());
         for (_, ptr, field_indices) in &deferred_cons {
             let deps: FxHashSet<VarId> = field_indices
@@ -3069,7 +3035,6 @@ pub(crate) struct ClosureCaptureSlot {
 /// simple-binding dependencies are satisfied.
 struct DeferredConDep {
     ptr: cranelift_codegen::ir::Value,
-    /// Field indices to fill (the tree node indices of the Con's fields).
     field_indices: Vec<usize>,
     /// Simple bindings this Con depends on. Entries removed as deps are satisfied.
     remaining_deps: FxHashSet<VarId>,
@@ -3257,11 +3222,9 @@ fn emit_lit_string(
         .define_data(data_id, &data_desc)
         .map_err(|e| EmitError::CraneliftError(e.to_string()))?;
 
-    // Get function-local reference to the data
     let local_data = pipeline.module.declare_data_in_func(data_id, builder.func);
     let data_ptr = builder.ins().symbol_value(types::I64, local_data);
 
-    // Allocate 24-byte Lit heap object
     let ptr = emit_alloc_fast_path(builder, vmctx, LIT_TOTAL_SIZE, gc_sig, oom_func);
 
     let tag = builder.ins().iconst(types::I8, layout::TAG_LIT as i64);

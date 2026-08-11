@@ -1,8 +1,6 @@
-//! Function-application protocol: `runtime_apply` (non-tail, used by
-//! `emit/expr.rs`'s `EmitFrame::App` arm) and `runtime_tail_apply` (tail,
-//! used by `emit_tail_app`), sharing the per-function [`FunctionImports`]
-//! cache and the `force_and_check_callee` prefix helper (force-thunk +
-//! `debug_app_check`, identical between the two call sites).
+//! Function-application protocol: `runtime_apply` (non-tail) and
+//! `runtime_tail_apply` (tail), sharing the per-function [`FunctionImports`]
+//! cache and the `force_and_check_callee` prefix helper.
 
 use crate::emit::{
     heap_force_sig, EmitError, EmitSession, SsaVal, CLOSURE_CODE_PTR_OFFSET, VMCTX_TAIL_ARG_OFFSET,
@@ -143,12 +141,8 @@ impl FunctionImports {
 
 /// Shared prefix of both `runtime_apply` and `runtime_tail_apply`: force a
 /// thunked function value to WHNF, then validate it via `debug_app_check`.
-///
-/// Returns `(fun_ptr, check_result)`: `fun_ptr` is the (possibly forced)
-/// function pointer, declared stack-map-live; `check_result` is `debug_app_check`'s
-/// raw `I64` result (`0` = ok, non-zero = poison — callers branch on it
-/// themselves, since the non-tail and tail paths do different things with a
-/// poison result).
+/// Returns `(fun_ptr, check_result)` — `check_result` is `0` for ok, non-zero
+/// for poison; callers branch on it themselves.
 fn force_and_check_callee(
     sess: &mut EmitSession,
     builder: &mut FunctionBuilder,
@@ -191,8 +185,6 @@ fn force_and_check_callee(
     let fun_ptr = builder.block_params(fun_ready_block)[0];
     builder.declare_value_needs_stack_map(fun_ptr);
 
-    // Debug: call host fn to validate fun_ptr tag before call_indirect.
-    // Returns 0 (null) if ok, or a poison pointer if call should be skipped.
     let check_ref = sess
         .function_imports
         .debug_app_check(sess.pipeline, builder)?;
@@ -333,10 +325,9 @@ pub(crate) fn runtime_apply(
     Ok(SsaVal::HeapPtr(merged_val))
 }
 
-/// Tail function application: force the callee, validate it, then hand off to
-/// the trampoline — store callee+arg into `VMContext` and return null — rather
-/// than calling directly (no `call_indirect`, no TCO null-check/merge). Same
-/// mark-at-creation coverage argument as `runtime_apply` above applies here.
+/// Tail function application: hand off to the trampoline rather than calling
+/// directly. Same mark-at-creation coverage argument as `runtime_apply` above
+/// applies here.
 pub(crate) fn runtime_tail_apply(
     sess: &mut EmitSession,
     builder: &mut FunctionBuilder,
@@ -363,14 +354,12 @@ pub(crate) fn runtime_tail_apply(
     builder.switch_to_block(store_block);
     builder.seal_block(store_block);
 
-    // Store fun_ptr (closure) to VMContext.tail_callee (offset 24)
     builder.ins().store(
         MemFlags::trusted(),
         fun_ptr,
         sess.vmctx,
         VMCTX_TAIL_CALLEE_OFFSET,
     );
-    // Store arg_ptr to VMContext.tail_arg (offset 32)
     builder.ins().store(
         MemFlags::trusted(),
         arg_ptr,
@@ -378,11 +367,9 @@ pub(crate) fn runtime_tail_apply(
         VMCTX_TAIL_ARG_OFFSET,
     );
 
-    // Return null to signal tail call
     let null_val = builder.ins().iconst(types::I64, 0);
     builder.ins().return_(&[null_val]);
 
-    // Dead block for subsequent code
     let dead_block = builder.create_block();
     builder.switch_to_block(dead_block);
     builder.seal_block(dead_block);

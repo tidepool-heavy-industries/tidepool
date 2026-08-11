@@ -1,17 +1,11 @@
 //! Cranelift IR for primitive operations.
 //!
-//! `emit_primop` is one large `match` on `PrimOpKind`. The arms unbox `HeapPtr`
-//! args, perform the op, and return a `Raw` SSA value. Arms are grouped by GHC
-//! primop family, in this order (follow the `// ---`/`// family` markers):
-//! Int (arith / bitwise / shifts / comparison) → Word → Double → Char →
-//! Conversions → Narrowing → Special → Double-math (libm) → Float (native f32) →
-//! sized Int64/Word64/Word8/Int8/Int32/Word32 → carry/overflow widening.
-//!
-//! Every `PrimOpKind` variant is implemented (the `_ =>` catch-alls are local to
-//! sub-dispatches, not a global fallback — an unhandled top-level primop is a
-//! bug). This must stay in lockstep with the eval oracle in
-//! `tidepool-eval/src/eval.rs` and the `define_primops!` table in
-//! `tidepool-repr/src/types.rs`.
+//! `emit_primop` is one large `match` on `PrimOpKind` (the `_ =>` catch-alls
+//! are local to sub-dispatches, not a global fallback — an unhandled
+//! top-level variant is a compile error). `TagToEnum`/`SeqOp` deliberately
+//! return `NotYetImplemented`; every other variant is implemented. This must
+//! stay in lockstep with the eval oracle in `tidepool-eval/src/eval.rs` and
+//! the `define_primops!` table in `tidepool-repr/src/types.rs`.
 
 use super::*;
 use crate::alloc::emit_alloc_fast_path;
@@ -27,15 +21,11 @@ use cranelift_module::Module;
 use tidepool_heap::layout;
 use tidepool_repr::PrimOpKind;
 
-/// Zero-divisor guard. If `divisor == 0`, raise a clean `DivisionByZero`
-/// runtime error (poison + pending-error flag, surfaced by the effect machine)
-/// and substitute `1` so the hardware divide that follows is well-defined; its
-/// result is never observed. Returns the divisor to actually divide by.
-///
-/// This is a runtime *domain* error, routed through the same `runtime_error`
-/// machinery as a Haskell `error` call — NOT a bare Cranelift `trap` (`ud2` →
-/// SIGILL), which would crash the whole process on a divide by zero instead
-/// of yielding a catchable error.
+/// Zero-divisor guard: substitutes `1` for a zero divisor (never observed —
+/// `runtime_error` raises first) so the hardware divide is well-defined.
+/// Routed through `runtime_error`, NOT a bare Cranelift `trap` (`ud2` →
+/// SIGILL), which would crash the whole process instead of yielding a
+/// catchable error.
 fn emit_div_zero_check(
     sess: &mut EmitSession,
     builder: &mut FunctionBuilder,
@@ -76,11 +66,9 @@ fn emit_div_zero_check(
     Ok(builder.block_params(cont_block)[0])
 }
 
-/// Raise a clean `array index out of range` domain error (poison + pending-error
-/// flag, surfaced by the effect machine) for an out-of-bounds boxed-array
-/// access, and return the GC-safe poison heap pointer. Mirrors the div-by-zero /
-/// `chr` guards — routed through `runtime_error_with_msg`, never a bare
-/// Cranelift `trap`.
+/// Raise a clean `array index out of range` domain error for an out-of-bounds
+/// boxed-array access, and return the GC-safe poison heap pointer. Routed
+/// through `runtime_error_with_msg`, never a bare Cranelift `trap`.
 fn emit_array_oob_error(
     sess: &mut EmitSession,
     builder: &mut FunctionBuilder,
@@ -106,7 +94,6 @@ fn emit_array_oob_error(
     )
 }
 
-/// Emit a primitive operation. Unboxes HeapPtr args, performs the op, returns Raw.
 /// `n` i64 ABI params, for the uniform-i64 host-fn signatures of the bignum
 /// (`__gmpn_*` / `integer_gmp_*`) intercepts.
 fn i64_params(n: usize) -> Vec<AbiParam> {
@@ -533,9 +520,8 @@ pub fn emit_primop(
             check_arity(op, 1, args.len())?;
             let v = unbox_int(sess.pipeline, builder, sess.vmctx, args[0]);
 
-            // Validate codepoint range (match interpreter behavior in eval.rs)
-            // Valid: 0..=0xD7FF or 0xE000..=0x10FFFF
-            // Invalid: negative, > 0x10FFFF, or surrogate 0xD800..=0xDFFF
+            // Codepoint range must match the interpreter (tidepool-eval/src/eval.rs)
+            // or JIT and eval diverge on which chr calls error.
             let zero = builder.ins().iconst(types::I64, 0);
             let max_valid = builder.ins().iconst(types::I64, 0x10FFFF);
             let is_negative = builder.ins().icmp(IntCC::SignedLessThan, v, zero);
@@ -552,17 +538,11 @@ pub fn emit_primop(
             let out_of_range = builder.ins().bor(is_negative, is_too_large);
             let is_invalid = builder.ins().bor(out_of_range, is_surrogate);
 
-            // Invalid codepoint: raise a clean error (matching GHC's
-            // `Prelude.chr: bad argument`) via the runtime_error machinery, then
-            // substitute 0 so the returned Char is well-formed. The placeholder
-            // is never observed — the effect machine surfaces the pending error
-            // first. (Was a bare `trapnz` → `ud2` → SIGILL, crashing the process
-            // instead of yielding a catchable error.)
+            // Raised via runtime_error_with_msg, NOT a bare `trapnz` (→ `ud2` →
+            // SIGILL, which would crash the process instead of erroring cleanly).
             let bad_block = builder.create_block();
             let merge_block = builder.create_block();
             builder.append_block_param(merge_block, types::I64);
-            // Valid codepoint: fall through to merge carrying `v`. Invalid: raise
-            // in bad_block, then merge carrying a 0 placeholder.
             builder.ins().brif(
                 is_invalid,
                 bad_block,
@@ -700,11 +680,9 @@ pub fn emit_primop(
             Ok(SsaVal::Raw(result, LIT_TAG_ADDR))
         }
         PrimOpKind::JsonDecode => {
-            // eitherDecodeValue :: Text -> Either Text Value. Force the Text arg to a heap
-            // pointer (`Text ByteArray# Int# Int#` Con) and hand it + vmctx to
-            // the host fn, which parses via serde_json and builds the aeson
-            // `Maybe Value` on the nursery heap (same builder the tree-walker
-            // uses in `tidepool-eval::json`, so JIT == eval by construction).
+            // eitherDecodeValue :: Text -> Either Text Value. The host fn builds
+            // the result using the same builder as the tree-walker in
+            // `tidepool-eval::json`, so JIT and eval output match by construction.
             check_arity(op, 1, args.len())?;
             let text_ptr = crate::emit::expr::ensure_heap_ptr(
                 builder,
@@ -728,11 +706,9 @@ pub fn emit_primop(
             Ok(SsaVal::HeapPtr(result))
         }
         PrimOpKind::ParseISO8601 => {
-            // parseISO8601 :: Text -> Either Text UTCTime. Force the Text arg to
-            // a heap pointer and hand it + vmctx to the host fn, which parses via
-            // chrono and builds the `Either Text UTCTime` ADT on the nursery heap
-            // (same builder the tree-walker uses in `tidepool-eval::json`, so
-            // JIT == eval by construction).
+            // parseISO8601 :: Text -> Either Text UTCTime. The host fn builds
+            // the result using the same builder as the tree-walker in
+            // `tidepool-eval::json`, so JIT and eval output match by construction.
             check_arity(op, 1, args.len())?;
             let text_ptr = crate::emit::expr::ensure_heap_ptr(
                 builder,
@@ -865,8 +841,7 @@ pub fn emit_primop(
         }
         PrimOpKind::FfiRintDouble => {
             // ghc-internal:rintDouble (C rint): round to nearest, ties to even.
-            // Cranelift's `nearest` has exactly these semantics — pure codegen,
-            // no host call. Unblocks GHC's specialized round @Double @Int.
+            // Cranelift's `nearest` has exactly these semantics.
             check_arity(op, 1, args.len())?;
             let a = unbox_double(sess.pipeline, builder, sess.vmctx, args[0]);
             Ok(SsaVal::Raw(builder.ins().nearest(a), LIT_TAG_DOUBLE))
@@ -1106,9 +1081,6 @@ pub fn emit_primop(
             Ok(SsaVal::Raw(v, LIT_TAG_INT))
         }
         PrimOpKind::Int64ToWord64 => {
-            // int64ToWord64# :: Int64# -> Word64# — same bit pattern as the
-            // arm above, but the result type is Word64#, so it must carry
-            // LIT_TAG_WORD, not LIT_TAG_INT.
             check_arity(op, 1, args.len())?;
             let v = unbox_int(sess.pipeline, builder, sess.vmctx, args[0]);
             Ok(SsaVal::Raw(v, LIT_TAG_WORD))
@@ -1131,7 +1103,6 @@ pub fn emit_primop(
         }
         PrimOpKind::WordToWord8 => {
             // wordToWord8# :: Word# -> Word8#
-            // Narrow to 8 bits
             check_arity(op, 1, args.len())?;
             let v = unbox_int(sess.pipeline, builder, sess.vmctx, args[0]);
             let mask = builder.ins().iconst(types::I64, 0xFF);
@@ -1346,14 +1317,12 @@ pub fn emit_primop(
             let a = unbox_int(sess.pipeline, builder, sess.vmctx, args[0]);
             let b = unbox_int(sess.pipeline, builder, sess.vmctx, args[1]);
             let sum = builder.ins().iadd(a, b);
-            // Signed overflow: (a > 0 && b > 0 && sum < 0) || (a < 0 && b < 0 && sum >= 0)
-            // Simplified: overflow if sign(a) == sign(b) && sign(sum) != sign(a)
+            // Signed-add overflow: sign(a) == sign(b) && sign(sum) != sign(a),
+            // i.e. bit 63 of ~(a^b) & (a^sum).
             let xor_ab = builder.ins().bxor(a, b);
             let xor_as = builder.ins().bxor(a, sum);
-            // If signs of a,b are same (xor_ab bit 63 = 0) AND sign of sum differs from a (xor_as bit 63 = 1)
             let not_xor_ab = builder.ins().bnot(xor_ab);
             let overflow_bits = builder.ins().band(not_xor_ab, xor_as);
-            // Shift bit 63 to bit 0
             let shifted = builder.ins().ushr_imm(overflow_bits, 63);
             Ok(SsaVal::Raw(shifted, LIT_TAG_INT))
         }
@@ -1516,7 +1485,6 @@ pub fn emit_primop(
                 &[AbiParam::new(types::I64)],
                 &[size],
             )?;
-            // Wrap in a Lit on the managed heap
             Ok(emit_lit_bytearray(
                 builder,
                 sess.vmctx,
@@ -1535,7 +1503,6 @@ pub fn emit_primop(
         PrimOpKind::SizeofByteArray | PrimOpKind::SizeofMutableByteArray => {
             // sizeofByteArray# :: ByteArray# -> Int#
             let ba_ptr = unbox_bytearray(sess.pipeline, builder, args[0]);
-            // Read u64 length from offset 0
             let len = builder.ins().load(types::I64, MemFlags::new(), ba_ptr, 0);
             Ok(SsaVal::Raw(len, LIT_TAG_INT))
         }
@@ -1544,7 +1511,6 @@ pub fn emit_primop(
             // readWord8Array# :: MutableByteArray# s -> Int# -> State# s -> (# State# s, Word# #)
             let ba_ptr = unbox_bytearray(sess.pipeline, builder, args[0]);
             let idx = unbox_int(sess.pipeline, builder, sess.vmctx, args[1]);
-            // Data starts at offset 8
             let base = builder.ins().iadd_imm(ba_ptr, 8);
             let effective = builder.ins().iadd(base, idx);
             let byte = builder.ins().load(types::I8, MemFlags::new(), effective, 0);
@@ -1561,7 +1527,6 @@ pub fn emit_primop(
             let effective = builder.ins().iadd(base, idx);
             let byte = builder.ins().ireduce(types::I8, val);
             builder.ins().store(MemFlags::new(), byte, effective, 0);
-            // Return dummy state token
             Ok(SsaVal::Raw(
                 builder.ins().iconst(types::I64, 0),
                 LIT_TAG_INT,
@@ -3206,9 +3171,9 @@ fn unbox_numeric(
             //     WORD lit — all legitimate, so they must pass);
             //   * F64 double unbox → DOUBLE only;
             //   * F32 float  unbox → FLOAT only.
-            // Anything else is rejected: a pointer-valued STRING / BYTEARRAY /
-            // SMALLARRAY / ARRAY lit (whose payload is an ADDRESS, e.g.
-            // `Str("")`), a non-Lit object, OR a numeric lit of the wrong
+            // Anything else is rejected: a pointer-valued STRING / ADDR /
+            // BYTEARRAY / SMALLARRAY / ARRAY lit (whose payload is an ADDRESS,
+            // e.g. `Str("")`), a non-Lit object, OR a numeric lit of the wrong
             // float/integer class (e.g. a DOUBLE response forced by an Int#
             // continuation — `Double(3.5)`, whose IEEE-754 bits would
             // otherwise load as a garbage i64). Trap cleanly via
@@ -3237,8 +3202,8 @@ fn unbox_numeric(
                     .icmp_imm(IntCC::NotEqual, lit_tag, LIT_TAG_FLOAT as i64)
             } else {
                 // Integer-width unbox: reject any lit-tag above CHAR — i.e.
-                // FLOAT(3) / DOUBLE(4) / STRING(5) / BYTEARRAY(7) / SMALLARRAY(8)
-                // / ARRAY(9). INT(0) / WORD(1) / CHAR(2) pass.
+                // FLOAT(3) / DOUBLE(4) / STRING(5) / ADDR(6) / BYTEARRAY(7) /
+                // SMALLARRAY(8) / ARRAY(9). INT(0) / WORD(1) / CHAR(2) pass.
                 builder
                     .ins()
                     .icmp_imm(IntCC::UnsignedGreaterThan, lit_tag, LIT_TAG_CHAR as i64)
@@ -3319,7 +3284,6 @@ pub fn unbox_float(
     unbox_numeric(pipeline, builder, vmctx, val, types::F32)
 }
 
-/// Allocate a Lit heap object with LIT_TAG_BYTEARRAY, storing a raw pointer.
 fn emit_lit_bytearray(
     builder: &mut FunctionBuilder,
     vmctx: Value,
@@ -3343,7 +3307,6 @@ fn emit_lit_bytearray(
     SsaVal::HeapPtr(ptr)
 }
 
-/// Allocate a Lit heap object for a boxed array (SmallArray# or Array#).
 fn emit_lit_boxed_array(
     builder: &mut FunctionBuilder,
     vmctx: Value,

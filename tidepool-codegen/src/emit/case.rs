@@ -31,7 +31,6 @@ pub fn emit_case(
         .collect();
     let default_alt = alts.iter().find(|alt| matches!(alt.con, AltCon::Default));
 
-    // Emit-path coverage: dispatch shape (n-alts, default, payload kind).
     crate::coverage::hit(match alts.len() {
         0 | 1 => "case:1alt",
         2 => "case:2alt",
@@ -77,7 +76,6 @@ pub fn emit_case(
             merge_block,
         )?;
     } else if let Some(alt) = default_alt {
-        // Default only
         let result = EmitContext::emit_node(
             EmitArgs {
                 ctx: args.ctx,
@@ -98,13 +96,9 @@ pub fn emit_case(
             .ins()
             .jump(merge_block, &[BlockArg::Value(result_ptr)]);
     } else {
-        // No alts? Call runtime_shape_trap to handle pending errors gracefully.
-        // `runtime_shape_trap` dereferences `scrut_ptr` before its own
-        // null/validity check (M5) — only pass an actual heap pointer; an
-        // unboxed `Raw` scrutinee (no data/lit/default alt at all means we
-        // don't know its shape here) is not a pointer, so pass 0 instead of
-        // `scrut_ptr` (which for `Raw` is the unboxed bit pattern, not an
-        // address).
+        // No data/lit/default alt at all, so the scrutinee's shape is
+        // unknown here — see `trap_scrut_ptr` for why it can't just pass
+        // `scrut_ptr`.
         let trap_ptr = trap_scrut_ptr(args.builder, scrut);
         emit_case_trap(
             args.sess,
@@ -116,10 +110,8 @@ pub fn emit_case(
         )?;
     }
 
-    // Seal merge block
     args.builder.seal_block(merge_block);
 
-    // Switch to merge block
     args.builder.switch_to_block(merge_block);
     let result = args.builder.block_params(merge_block)[0];
     args.builder.declare_value_needs_stack_map(result);
@@ -155,7 +147,6 @@ fn emit_data_dispatch(
         &[BlockArg::Value(initial_scrut_ptr)],
     );
 
-    // Force block: call host_fns::heap_force
     args.builder.switch_to_block(force_block);
     args.builder.seal_block(force_block);
 
@@ -185,30 +176,28 @@ fn emit_data_dispatch(
         .ins()
         .jump(dispatch_block, &[BlockArg::Value(force_result)]);
 
-    // Dispatch block: actual pattern matching starts here
     args.builder.switch_to_block(dispatch_block);
     args.builder.seal_block(dispatch_block);
     let scrut_ptr = args.builder.block_params(dispatch_block)[0];
     args.builder.declare_value_needs_stack_map(scrut_ptr);
 
-    // Load con_tag as u64 from offset 8
     let con_tag =
         args.builder
             .ins()
             .load(types::I64, MemFlags::trusted(), scrut_ptr, CON_TAG_OFFSET);
 
-    // Runtime Lit-tolerance: a literal materialized on the Rust side (e.g. the
-    // vendored aeson `Number`'s raw LitDouble field, see
-    // tidepool-bridge/src/json.rs) reaches a data case on a boxed-literal
-    // wrapper constructor (I#/W#/C#/F#/D#) as a *bare* Lit heap object, not a
-    // boxed Con. Its (garbage) con_tag matches no alt, so the chain below would
-    // fall through to the trap. Detect the (at most one) wrapper alt at emit
-    // time \u2014 zero cost for ordinary ADT cases \u2014 and, when the scrutinee is a
-    // Lit at runtime, route to that alt. The wrapper alt's single binder ends up
-    // bound to a pointer-to-Lit in BOTH paths (the con path loads field0, which
-    // is itself a pointer to a Lit; the Lit path uses the whole scrutinee), so
-    // the body's downstream unboxing sees an identical representation. The alt
-    // block is given a binder parameter so both paths share one emitted body.
+    // Runtime Lit-tolerance: a literal materialized on the Rust side can
+    // reach a data case on a boxed-literal wrapper constructor (I#/W#/C#/F#/
+    // D#) as a *bare* Lit heap object, not a boxed Con. Its (garbage) con_tag
+    // matches no alt, so the chain below would fall through to the trap.
+    // Detect the (at most one) wrapper alt at emit time \u2014 zero cost for
+    // ordinary ADT cases \u2014 and, when the scrutinee is a Lit at runtime, route
+    // to that alt. The wrapper alt's single binder ends up bound to a
+    // pointer-to-Lit in BOTH paths (the con path loads field0, which is
+    // itself a pointer to a Lit; the Lit path uses the whole scrutinee), so
+    // the body's downstream unboxing sees an identical representation. The
+    // alt block is given a binder parameter so both paths share one emitted
+    // body.
     let wrapper_pos = data_alts.iter().position(
         |alt| matches!(&alt.con, AltCon::DataAlt(tag) if args.sess.lit_wrappers.is_wrapper(*tag)),
     );
@@ -281,7 +270,6 @@ fn emit_data_dispatch(
                 .brif(eq, alt_block, &[], next_check_block, &[]);
         }
 
-        // Emit alt body
         args.builder.switch_to_block(alt_block);
         // For a wrapper alt block both predecessors (the Lit branch above and
         // the con-tag branch just emitted) are now wired, so sealing is safe.
@@ -347,15 +335,12 @@ fn emit_data_dispatch(
             .ins()
             .jump(merge_block, &[BlockArg::Value(result_ptr)]);
 
-        // Restore pattern variable bindings
         args.ctx.env.restore_scope(scope);
 
-        // Continue to next check
         args.builder.switch_to_block(next_check_block);
         args.builder.seal_block(next_check_block);
     }
 
-    // Default or trap
     if let Some(alt) = default_alt {
         let result = EmitContext::emit_node(
             EmitArgs {
@@ -422,7 +407,6 @@ fn emit_case_trap(
     let (name_ptr_raw, name_len_raw) = sess.pipeline.intern_name(fn_name);
     let name_ptr = builder.ins().iconst(types::I64, name_ptr_raw as i64);
     let name_len = builder.ins().iconst(types::I64, name_len_raw as i64);
-    // Collect expected tags
     let tags: Vec<u64> = data_alts
         .iter()
         .filter_map(|alt| {
@@ -434,7 +418,6 @@ fn emit_case_trap(
         })
         .collect();
 
-    // Store tags on stack
     let num_alts = tags.len();
     let ss = builder.create_sized_stack_slot(ir::StackSlotData::new(
         ir::StackSlotKind::ExplicitSlot,
@@ -484,7 +467,6 @@ fn emit_lit_dispatch(
     // ThunkCon fields extracted by data alt matching may still be thunks.
     let scrut = force_thunk_ssaval(args.sess.pipeline, args.builder, args.sess.vmctx, scrut)?;
 
-    // Unbox scrutinee: Raw values are already unboxed, HeapPtr needs LIT_VALUE_OFFSET load
     let scrut_value = match scrut {
         SsaVal::Raw(v, _) => v,
         SsaVal::HeapPtr(ptr) => {
@@ -557,7 +539,6 @@ fn emit_lit_dispatch(
             }
         }
 
-        // Emit alt body
         args.builder.switch_to_block(alt_block);
         args.builder.seal_block(alt_block);
         let result = EmitContext::emit_node(
@@ -580,12 +561,10 @@ fn emit_lit_dispatch(
             .ins()
             .jump(merge_block, &[BlockArg::Value(result_ptr)]);
 
-        // Continue to next check
         args.builder.switch_to_block(next_check_block);
         args.builder.seal_block(next_check_block);
     }
 
-    // Default or trap
     if let Some(alt) = default_alt {
         let result = EmitContext::emit_node(
             EmitArgs {
@@ -607,13 +586,9 @@ fn emit_lit_dispatch(
             .ins()
             .jump(merge_block, &[BlockArg::Value(result_ptr)]);
     } else {
-        // No alts matched.
-        // We pass empty data_alts since these are lit alts.
         // `scrut_value` is the UNBOXED literal (int/float bits), not a
-        // pointer — `runtime_shape_trap` dereferences its `scrut_ptr` arg
-        // before checking it (M5), so passing `scrut_value` here segfaults
-        // inside the very diagnostic meant to prevent that. Pass the real
-        // heap pointer only if the (post-force) scrutinee still is one.
+        // pointer, so pass `scrut` (not `scrut_value`) through
+        // `trap_scrut_ptr` to get a real pointer or a safe 0.
         let trap_ptr = trap_scrut_ptr(args.builder, scrut);
         emit_case_trap(
             args.sess,

@@ -13,37 +13,20 @@
 //! i, ...)` at every whole-tree walk in `tree.rs` and `free_vars.rs` — is that
 //! every child index is strictly less than its parent's index. A single
 //! forward pass over `0..nodes.len()` therefore visits every node's children
-//! before the node itself, with no need for the explicit-stack Enter/Exit
-//! walk `free_vars` uses for its single-root memo (that walk exists to reach
-//! only the nodes on the path to one root; here every node is a root of
-//! interest, so a linear scan is both simpler and sufficient).
-//!
-//! # Representation
-//!
-//! Each node's free-variable set is stored as `Rc<FxHashSet<VarId>>`, shared
-//! rather than cloned whenever a node's set is identical to a child's (no
-//! binder introduced, or a removed binder wasn't actually free) — the common
-//! case for App/Con/PrimOp chains and dead lambda/let/case binders. A single
-//! canonical empty set is shared by every node with no free variables. Only
-//! nodes that merge two-or-more non-empty children, or remove a binder that
-//! WAS free, allocate a fresh `HashSet`. This keeps peak memory close to
-//! O(distinct sets) rather than O(nodes), while `free_vars_at` still returns
-//! the exact same sorted `Vec<VarId>` the reference `free_vars` does, so
-//! every existing call site's contract (`binary_search`, sortedness) holds.
+//! before the node itself; this module's whole one-pass approach depends on
+//! that invariant holding.
 
 use rustc_hash::FxHashSet;
 use std::rc::Rc;
 use tidepool_repr::{CoreExpr, CoreFrame, VarId};
 
-/// Free-variable sets for every node index of one `CoreExpr`, computed once.
 pub struct FreeVarsIndex {
     sets: Vec<Rc<FxHashSet<VarId>>>,
 }
 
 impl FreeVarsIndex {
-    /// Compute the free-variable set of the subtree rooted at every node
-    /// index of `tree`, in one forward pass. See the module doc for why a
-    /// forward pass suffices and how sets are shared.
+    /// See the module doc ("Traversal order") for why a single forward pass
+    /// suffices.
     pub fn compute(tree: &CoreExpr) -> Self {
         let empty: Rc<FxHashSet<VarId>> = Rc::new(FxHashSet::default());
         let mut sets: Vec<Rc<FxHashSet<VarId>>> = Vec::with_capacity(tree.nodes.len());
@@ -63,9 +46,6 @@ impl FreeVarsIndex {
         v
     }
 
-    /// Borrow the raw (unsorted) set for `idx` — for callers that only need
-    /// membership tests / set intersection and would otherwise immediately
-    /// re-collect `free_vars_at`'s sorted `Vec` back into a `HashSet`.
     pub fn free_vars_set_at(&self, idx: usize) -> &FxHashSet<VarId> {
         &self.sets[idx]
     }
@@ -75,9 +55,6 @@ fn child(sets: &[Rc<FxHashSet<VarId>>], idx: usize) -> &Rc<FxHashSet<VarId>> {
     &sets[idx]
 }
 
-/// Union of `children`'s free-var sets, sharing a child's `Rc` directly when
-/// it is the only non-empty contributor (the common case) instead of
-/// allocating a new set.
 fn union_children(
     children: &[&Rc<FxHashSet<VarId>>],
     empty: &Rc<FxHashSet<VarId>>,
@@ -97,9 +74,6 @@ fn union_children(
     }
 }
 
-/// `set` with `binders` removed. Shares `set`'s `Rc` unchanged when none of
-/// `binders` actually occur in it (a dead binder — cheap to detect via a
-/// linear scan over the, usually tiny, binder list) instead of cloning.
 fn remove_binders(
     set: &Rc<FxHashSet<VarId>>,
     binders: &[VarId],
@@ -119,9 +93,7 @@ fn remove_binders(
     }
 }
 
-/// Compute one node's free-variable set from its already-computed children's
-/// sets (`sets`, indices `< ` this node's own — see the module doc). Scoping
-/// is identical to `tidepool_repr::free_vars::node_free_vars`.
+/// Scoping must stay identical to `tidepool_repr::free_vars::node_free_vars`.
 fn node_free_vars(
     frame: &CoreFrame<usize>,
     sets: &[Rc<FxHashSet<VarId>>],

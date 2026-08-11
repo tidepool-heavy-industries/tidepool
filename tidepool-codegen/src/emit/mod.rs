@@ -16,8 +16,8 @@ pub use crate::layout::*;
 /// ABI signature of the `runtime_shape_trap` host fn: 6 boxed (`I64`) arguments
 /// (kind, scrut_ptr, num_alts, alt_tags, fn-name ptr, fn-name len) returning the
 /// poison pointer (`I64`). Centralized so the trap's calling convention is
-/// defined ONCE — it is declared identically at three sites (primop.rs ×2,
-/// case.rs). `kind` is a `ShapeTrapKind` discriminant selecting the breadcrumb.
+/// defined ONCE across its many call sites in `primop.rs` and `case.rs`.
+/// `kind` is a `ShapeTrapKind` discriminant selecting the breadcrumb.
 pub(crate) fn runtime_shape_trap_sig(
     call_conv: cranelift_codegen::isa::CallConv,
 ) -> cranelift_codegen::ir::Signature {
@@ -48,8 +48,8 @@ pub(crate) fn runtime_cancel_check_sig(
 }
 
 /// ABI signature of the `heap_force` host fn: `(vmctx, obj)` (both `I64`)
-/// returning the forced WHNF pointer (`I64`). Centralized — it was hand-declared
-/// identically at five emit sites (case.rs, expr.rs ×3, primop.rs).
+/// returning the forced WHNF pointer (`I64`). Centralized so every call site
+/// declares the same signature.
 pub(crate) fn heap_force_sig(
     call_conv: cranelift_codegen::isa::CallConv,
 ) -> cranelift_codegen::ir::Signature {
@@ -65,11 +65,10 @@ pub(crate) fn heap_force_sig(
 /// `F#`, `D#`), resolved once per compile from the [`DataConTable`].
 ///
 /// Used by `emit_data_dispatch` to give data cases runtime tolerance for *bare*
-/// Lit scrutinees: a literal materialized on the Rust side (e.g. the vendored
-/// aeson `Number`'s raw `LitDouble` field, see `tidepool-bridge/src/json.rs`)
-/// reaches `case x of { D# ds -> .. }` as a Lit heap object, not a boxed `D#`
-/// Con. Such a Lit has no constructor tag, so the con-tag comparison chain
-/// would fall through to the trap.
+/// Lit scrutinees: a literal materialized on the Rust side can reach
+/// `case x of { D# ds -> .. }` as a Lit heap object, not a boxed `D#` Con.
+/// Such a Lit has no constructor tag, so the con-tag comparison chain would
+/// fall through to the trap.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct LitWrapperIds {
     int: Option<DataConId>,
@@ -80,7 +79,6 @@ pub struct LitWrapperIds {
 }
 
 impl LitWrapperIds {
-    /// Resolve the five wrapper constructors from the table (each is arity 1).
     pub fn from_table(table: &DataConTable) -> Self {
         Self {
             int: table.get_by_name_arity("I#", 1),
@@ -91,9 +89,8 @@ impl LitWrapperIds {
         }
     }
 
-    /// True if `id` is one of the boxed-literal wrapper constructors. A
-    /// well-typed data case has at most one such alt, since `I#`/`W#`/`C#`/`F#`/
-    /// `D#` each belong to a distinct primitive type.
+    /// A well-typed data case has at most one wrapper-constructor alt, since
+    /// `I#`/`W#`/`C#`/`F#`/`D#` each belong to a distinct primitive type.
     pub fn is_wrapper(&self, id: DataConId) -> bool {
         Some(id) == self.int
             || Some(id) == self.word
@@ -122,19 +119,12 @@ pub struct EmitSession<'a> {
     /// the four `EmitSession` construction sites in `emit/expr.rs` builds
     /// this from its own `tree` right there, so the two can never drift.
     pub free_vars_idx: crate::emit::free_vars_index::FreeVarsIndex,
-    /// Per-function cache of the `FuncRef`s the application protocol imports
-    /// (`heap_force`/`debug_app_check`/`trampoline_resolve`/`debug_app_return`;
-    /// see `apply::FunctionImports`). A `FuncRef` from `declare_func_in_func`
-    /// is only valid inside the specific Cranelift `Function` it was declared
-    /// into, so this cache lives here rather than anywhere longer-lived: like
-    /// `free_vars_idx`, it is fresh at every one of the four `EmitSession`
-    /// construction sites (one per Cranelift `Function` built) and is dropped
-    /// with the session at the end of that function's emission, never reused
-    /// across functions.
+    /// Per-function cache of the application protocol's imported `FuncRef`s;
+    /// see `apply::FunctionImports` for the FuncRef-scoping invariant this
+    /// field's per-session lifetime exists to satisfy.
     pub(crate) function_imports: FunctionImports,
 }
 
-/// SSA value with boxed/unboxed tracking.
 #[derive(Debug, Clone, Copy)]
 pub enum SsaVal {
     /// Unboxed raw value (i64 or f64 bits) with its literal tag. The tag is a
@@ -152,26 +142,11 @@ impl SsaVal {
         }
     }
 
-    /// Resolve a seeded session binding (from [`ExternalEnv`]) to a `HeapPtr` at
-    /// the current Var-miss site by **loading the live heap pointer from its
-    /// stable root slot** (GHCi-style session re-entry).
-    ///
-    /// A session binding is carried in [`ExternalEnv`] as a stable
-    /// `root_slot: *mut *mut u8` — the GC-updated persistent root the binding
-    /// table registers, NOT a snapshotted heap pointer. The copying GC rewrites
-    /// `*root_slot` in place when a major old-space compaction relocates the
-    /// value, so a baked `iconst` of the pointer *value* would go stale and a
-    /// previously-compiled fragment would dereference freed memory. Instead we
-    /// emit a load from the slot each fragment, reading the current pointer at
-    /// run time. Each Var-miss site materializes its own load (a fresh SSA value
-    /// in the current function) — never cache or share the returned `SsaVal`
-    /// across fragments (SSA `Value`s are per-function).
-    ///
-    /// The result is declared stack-map-live like any other `HeapPtr`. This
-    /// `iconst`s the **stable slot ADDRESS** (which never moves — the binding
-    /// table owns it for the session's lifetime) and **loads through it** to get
-    /// the current heap pointer, so the copying GC's in-place rewrite of
-    /// `*root_slot` is observed live by every already-compiled fragment.
+    /// Resolve a seeded session binding (from [`ExternalEnv`]) to a `HeapPtr`
+    /// at the current Var-miss site by loading the live heap pointer from its
+    /// stable root slot, fresh each fragment — never cache or share the
+    /// returned `SsaVal` across fragments (SSA `Value`s are per-function). See
+    /// [`ExternalEnv`]'s doc for why a baked pointer *value* would go stale.
     pub fn from_external_slot(
         builder: &mut cranelift_frontend::FunctionBuilder,
         slot: *mut *mut u8,
@@ -228,14 +203,12 @@ impl TailCtx {
 pub struct ExternalEnv(FxHashMap<VarId, *mut *mut u8>);
 
 impl ExternalEnv {
-    /// Create an empty external environment.
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// Resolve a session `VarId` to its seeded **root slot address**, if bound.
-    /// The Var-miss site consults this and emits a `load` through the slot (per
-    /// fragment) to read the GC-current heap pointer — see the invariant above.
+    /// Callers must load through the returned slot each fragment rather than
+    /// cache the heap pointer — see the invariant above.
     pub fn get(&self, var: VarId) -> Option<*mut *mut u8> {
         self.0.get(&var).copied()
     }
@@ -251,18 +224,15 @@ impl ExternalEnv {
         self.0.insert(var, slot)
     }
 
-    /// Number of seeded bindings.
     pub fn len(&self) -> usize {
         self.0.len()
     }
 
-    /// Whether no bindings are seeded.
     pub fn is_empty(&self) -> bool {
         self.0.is_empty()
     }
 }
 
-/// A scoped environment mapping variables to SSA values.
 pub struct ScopedEnv {
     inner: FxHashMap<VarId, SsaVal>,
 }
@@ -283,12 +253,10 @@ impl ScopedEnv {
         self.inner.contains_key(var)
     }
 
-    /// Insert a binding, returning the old value (if any) for later restore.
     pub fn insert(&mut self, var: VarId, val: SsaVal) -> Option<SsaVal> {
         self.inner.insert(var, val)
     }
 
-    /// Undo a binding: restore the old value, or remove if there was none.
     pub fn restore(&mut self, var: VarId, old: Option<SsaVal>) {
         match old {
             Some(v) => {
@@ -300,7 +268,6 @@ impl ScopedEnv {
         }
     }
 
-    /// Iterate over all entries (for compute_captures etc.)
     pub fn iter(&self) -> impl Iterator<Item = (&VarId, &SsaVal)> {
         self.inner.iter()
     }
@@ -317,13 +284,11 @@ impl ScopedEnv {
         self.inner.is_empty()
     }
 
-    /// Inserts a variable into the environment and records the old value in the scope.
     pub fn insert_scoped(&mut self, scope: &mut EnvScope, var: VarId, val: SsaVal) {
         let old = self.insert(var, val);
         scope.saved.push((var, old));
     }
 
-    /// Restores all variables saved in the scope in reverse order.
     pub fn restore_scope(&mut self, scope: EnvScope) {
         for (var, old) in scope.saved.into_iter().rev() {
             self.restore(var, old);
@@ -331,7 +296,6 @@ impl ScopedEnv {
     }
 }
 
-/// A set of saved environment bindings to be restored.
 pub struct EnvScope {
     pub(crate) saved: Vec<(VarId, Option<SsaVal>)>,
 }
@@ -351,14 +315,10 @@ impl Default for EnvScope {
 /// Emission context — bundles state during IR generation for one function.
 pub struct EmitContext {
     pub env: ScopedEnv,
-    /// Session-scoped external bindings (`VarId` → seeded **root slot
-    /// address**, NOT a heap pointer directly — see [`ExternalEnv`]'s doc for
-    /// why that distinction is the GC-staleness invariant), consulted at
-    /// Var-miss sites (`expr.rs`'s Var-miss arm) to resolve a reference to a
-    /// value bound in a *prior* JIT fragment (the ghci-session re-entry path).
-    /// `compile_expr` seeds it from its `external_env` argument and clones it
-    /// into nested function contexts. Empty for the one-shot eval path and
-    /// all current one-shot callers.
+    /// Session-scoped external bindings (`VarId` → seeded root slot address,
+    /// NOT a heap pointer directly — see [`ExternalEnv`]'s doc for the
+    /// GC-staleness invariant that distinction protects). Empty for the
+    /// one-shot eval path.
     pub external_env: ExternalEnv,
     pub(crate) join_blocks: JoinPointRegistry,
     pub lambda_counter: u32,
@@ -370,8 +330,6 @@ pub struct EmitContext {
     pub(crate) letrec_states: Vec<crate::emit::expr::LetRecDeferredState>,
 }
 
-/// Bundles the three most common parameters for emission functions to reduce
-/// argument count and satisfy clippy::too_many_arguments.
 pub struct EmitArgs<'a, 'b, 'c> {
     pub ctx: &'a mut EmitContext,
     pub sess: &'a mut EmitSession<'b>,
@@ -413,17 +371,13 @@ impl JoinPointRegistry {
     }
 }
 
-/// Placeholder for join point info (used by case/join leaf later).
 pub struct JoinInfo {
     pub block: cranelift_codegen::ir::Block,
     pub param_types: Vec<SsaVal>,
     /// True when this join is a **loop** — i.e. its `rhs` contains a `Jump`
     /// back to its own label (a GHC-loopified join-recursion; recursive joins
     /// that do NOT cross a lambda boundary survive as `Join`/`Jump`, per
-    /// Translate.hs's `tsRecJoinIds`/`jumpCrossesLam`). `emit_jump` emits an
-    /// external-cancellation safepoint before back-edges to a recursive join
-    /// (#325); forward (non-recursive) joins run once and get no per-jump
-    /// overhead.
+    /// Translate.hs's `tsRecJoinIds`/`jumpCrossesLam`).
     pub recursive: bool,
 }
 
@@ -440,10 +394,8 @@ pub enum EmitError {
     Pipeline(#[from] crate::pipeline::PipelineError),
     #[error("invalid arity for {0:?}: expected {1}, got {2}")]
     InvalidArity(PrimOpKind, usize, usize),
-    /// A variable needed for closure capture was not found in the environment.
     #[error("missing capture variable VarId({id:#x}): {ctx}", id = .0.0, ctx = .1)]
     MissingCaptureVar(VarId, String),
-    /// Internal invariant violation (should never happen).
     #[error("internal error: {0}")]
     InternalError(String),
 }

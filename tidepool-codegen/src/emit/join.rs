@@ -9,10 +9,11 @@ use tidepool_repr::*;
 ///
 /// That signals a **recursive** join — a loop whose back-edge is a Cranelift
 /// `jump` that touches none of the JIT's other cancel safepoints. Detected
-/// structurally because neither `CoreFrame::Join` nor `JoinInfo` carries a
-/// recursion flag (the Core loses GHC's `joinrec` distinction — see #325).
-/// Explicit-stack walk (no host recursion) with a visited set so shared
-/// subtrees in the flat DAG can't blow up the scan.
+/// structurally because `CoreFrame::Join` itself carries no recursion flag
+/// (the Core loses GHC's `joinrec` distinction — see #325); this function's
+/// result populates `JoinInfo::recursive`. Explicit-stack walk (no host
+/// recursion) with a visited set so shared subtrees in the flat DAG can't
+/// blow up the scan.
 fn rhs_contains_backedge(tree: &CoreExpr, rhs_idx: usize, label: JoinId) -> bool {
     let mut stack = vec![rhs_idx];
     let mut visited = rustc_hash::FxHashSet::default();
@@ -34,15 +35,11 @@ fn rhs_contains_backedge(tree: &CoreExpr, rhs_idx: usize, label: JoinId) -> bool
 }
 
 /// Emit the external-cancellation safepoint that guards a **recursive** join
-/// back-edge (#325). A recursive join is a loop whose back-edge is a Cranelift
-/// `jump` reaching none of the JIT's other three cancel safepoints (trampoline,
-/// `gc_trigger`, effect dispatch). Immediately before the back-edge `jump`, call
-/// `runtime_cancel_check(vmctx)`: it returns null to continue, or the error
-/// poison pointer (with `RuntimeError::Cancelled` recorded) when a cancel is
-/// pending. On poison we RETURN it from the current function, unwinding to the
-/// run loop which surfaces `Cancelled` — mirroring `trampoline_resolve` one
-/// layer down. No-op when `recursive` is false, so forward joins (which run
-/// once) keep zero per-jump overhead.
+/// back-edge (#325): immediately before the back-edge `jump`, call
+/// `runtime_cancel_check(vmctx)`, which returns null to continue or the error
+/// poison pointer (`RuntimeError::Cancelled`) when a cancel is pending; on
+/// poison we RETURN it from the current function. No-op when `recursive` is
+/// false, so forward joins keep zero per-jump overhead.
 ///
 /// Must be called while positioned at the block that ends in the back-edge
 /// `jump`, AFTER the jump arguments are materialized and BEFORE the `jump`
@@ -77,22 +74,17 @@ pub(crate) fn emit_join_cancel_safepoint(
         .ins()
         .brif(cancelled, cancel_block, &[], continue_block, &[]);
 
-    // cancel_block: return the poison pointer from the current function.
     // `poison` is defined in the predecessor (which dominates here), so it is
     // usable directly without a block param.
     builder.switch_to_block(cancel_block);
     builder.seal_block(cancel_block);
     builder.ins().return_(&[poison]);
 
-    // continue_block: fall through to the normal loop back-edge.
     builder.switch_to_block(continue_block);
     builder.seal_block(continue_block);
     Ok(())
 }
 
-/// Emits a Join expression.
-/// Join { label, params, rhs, body } creates a join point (a parameterized block)
-/// that can be jumped to from within the body.
 pub fn emit_join(
     args: EmitArgs,
     label: &JoinId,
@@ -111,9 +103,6 @@ pub fn emit_join(
     // param_types only needs to record that each param is a heap pointer, so
     // a dummy Value(0) stands in for each one — Jump never reads it back.
     let dummy_val = Value::from_u32(0);
-    // A join is a loop iff its rhs jumps back to its own label. Recursive
-    // back-edges get a cancel safepoint in `emit_jump` (#325); forward joins
-    // stay overhead-free.
     let recursive = rhs_contains_backedge(args.sess.tree, rhs_idx, *label);
     args.ctx.join_blocks.register(
         *label,
@@ -194,8 +183,6 @@ pub fn emit_join(
     Ok(SsaVal::HeapPtr(result))
 }
 
-/// Emits a Jump expression.
-/// Jump { label, args } transfers control to the join point block.
 pub fn emit_jump(
     args: EmitArgs,
     label: &JoinId,
@@ -228,7 +215,6 @@ pub fn emit_jump(
         )));
     }
 
-    // External-cancellation safepoint for recursive join back-edges (#325).
     emit_join_cancel_safepoint(args.sess.pipeline, args.builder, args.sess.vmctx, recursive)?;
 
     args.builder.ins().jump(join_block, &arg_values);
