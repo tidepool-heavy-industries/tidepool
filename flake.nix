@@ -154,7 +154,17 @@
             witherable
             safe
           ]);
-          harness = hsPkgs.callCabal2nix "tidepool-extract" ./haskell {};
+          # The fidelity checks that exercise the extract BINARY (TurnBatch,
+          # D1Defense) resolve it via $TIDEPOOL_EXTRACT before falling back to
+          # `cabal list-bin`; the build sandbox has no cabal, so point them at
+          # the exe this same build just produced.
+          harness = pkgs.haskell.lib.overrideCabal
+            (hsPkgs.callCabal2nix "tidepool-extract" ./haskell {})
+            (old: {
+              preCheck = (old.preCheck or "") + ''
+                export TIDEPOOL_EXTRACT="$PWD/dist/build/tidepool-extract-bin/tidepool-extract-bin"
+              '';
+            });
         in pkgs.writeShellScriptBin "tidepool-extract" ''
           export PATH="${ghcEnv}/bin:$PATH"
           exec ${harness}/bin/tidepool-extract-bin "$@"
