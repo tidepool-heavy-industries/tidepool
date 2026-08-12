@@ -73,17 +73,21 @@ pub enum PriceClass {
 #[derive(Debug)]
 pub enum Slot<M> {
     Idle(M),
-    Running,
+    /// The machine is out on a turn — a fresh run, a resume, or a child run
+    /// over parked frames (one-session plan, Phase 2: with the continuation
+    /// registry there is no special "child window"; a machine with N parked
+    /// holes running one more fragment is the NORMAL state). `holes` are the
+    /// parked holes the session had when it left, carried so reads and
+    /// errors stay truthful while the machine is out, and so the
+    /// panic-safety `Drop` can restore them instead of losing them.
+    Running {
+        holes: Vec<HoleId>,
+    },
+    /// The machine is present with one or more parked holes, each resumable
+    /// by identity in any order (the machine's continuation registry imposes
+    /// none). Newest last.
     Suspended {
         machine: M,
-        hole: HoleId,
-    },
-    /// The machine is out on a NESTED CHILD run against a suspended parent —
-    /// the parent is still suspended on `hole`, and the child restores the
-    /// slot back to `Suspended { hole }` on completion. A parent
-    /// resume/abort or a new top-level run is rejected while in this state
-    /// (sequential-isolated: exactly one computation on the heap at a time).
-    RunningChild {
-        hole: HoleId,
+        holes: Vec<HoleId>,
     },
 }

@@ -98,12 +98,11 @@ pub enum HarnessError {
     #[error("node {0:?} already has a turn in flight")]
     TurnInFlight(NodeId),
     /// A registry checkout landed on a state mismatch that is neither "no
-    /// session" nor "busy" — a resume/child checkout aimed at the wrong hole,
-    /// or a new top-level turn attempted on an already-suspended session (see
-    /// [`CheckoutError::Suspended`]/[`CheckoutError::NotSuspended`]/
-    /// [`CheckoutError::WrongHole`]). Kept distinct from both so a caller
-    /// never mistakes a hole/state mismatch for "never forced" or "busy,
-    /// retry".
+    /// session" nor "busy" — a resume aimed at a non-member hole, or a child
+    /// checkout on a holeless session (see
+    /// [`CheckoutError::NotSuspended`]/[`CheckoutError::WrongHole`]). Kept
+    /// distinct from both so a caller never mistakes a hole/state mismatch
+    /// for "never forced" or "busy, retry".
     #[error("node {node:?}: {detail}")]
     SessionMismatch { node: NodeId, detail: String },
 }
@@ -117,15 +116,13 @@ impl HarnessError {
     fn from_checkout(node: NodeId, err: CheckoutError) -> Self {
         match err {
             CheckoutError::Unknown(_) => HarnessError::NoSession(node),
-            CheckoutError::Running(_) | CheckoutError::RunningChild { .. } => {
-                HarnessError::TurnInFlight(node)
+            CheckoutError::Running(_) => HarnessError::TurnInFlight(node),
+            other @ (CheckoutError::NotSuspended(_) | CheckoutError::WrongHole { .. }) => {
+                HarnessError::SessionMismatch {
+                    node,
+                    detail: other.to_string(),
+                }
             }
-            other @ (CheckoutError::Suspended { .. }
-            | CheckoutError::NotSuspended(_)
-            | CheckoutError::WrongHole { .. }) => HarnessError::SessionMismatch {
-                node,
-                detail: other.to_string(),
-            },
         }
     }
 }
@@ -1744,11 +1741,17 @@ impl Harness {
         let _ = co
             .machine()
             .abort(&hole.0, "finalize consumed (answerer reused)".to_string());
-        debug_assert!(
-            co.machine().is_idle(),
-            "session must be idle after aborting the finalize continuation"
-        );
-        co.restore_idle();
+        // Restore with the session's OWN reported hole set — the aborted
+        // finalize hole is gone, but any OTHER parked holes (multi-hole,
+        // one-session plan) must survive; a bare restore_idle would desync
+        // the slot from the machine's still-rooted frames.
+        let holes: Vec<HoleId> = co
+            .machine()
+            .parked_holes()
+            .into_iter()
+            .map(|h| HoleId(h.to_string()))
+            .collect();
+        co.restore_suspended(holes);
 
         // Tree state: Suspended → Running, so the reused node accepts a new turn.
         self.tree.hole_consumed(node, hole)?;
@@ -2955,12 +2958,13 @@ impl Harness {
     }
 
     /// Run `f` against `checkout`'s machine on the blocking pool, then
-    /// restore it based on the machine's OWN post-call state
-    /// (`is_idle`/`pending_continuation`) rather than guessing from `f`'s
+    /// restore it based on the machine's OWN post-call state — the session's
+    /// full reported hole SET (`parked_holes()`), never a guess from `f`'s
     /// domain result — correct whether the resident call completed,
-    /// suspended, or errored (an errored `run`/`resume` still leaves the
-    /// session in a well-defined idle/suspended state; `run_child` never
-    /// changes the target's pending hole either way).
+    /// suspended, parked additional holes, or errored (an errored
+    /// `run`/`resume` still leaves the session in a well-defined parked
+    /// state; `run_child` never changes the target's parked holes either
+    /// way).
     ///
     /// On a `JoinError` (the blocking task panicked — the machine went with
     /// it), the checkout has nothing left to restore: retire the node via
@@ -2979,14 +2983,14 @@ impl Harness {
         let machine = checkout.take();
         match tokio::task::spawn_blocking(move || f(machine)).await {
             Ok((session, result)) => {
-                let hole = session
-                    .pending_continuation()
-                    .map(|h| HoleId(h.to_string()));
+                let holes: Vec<HoleId> = session
+                    .parked_holes()
+                    .into_iter()
+                    .map(|h| HoleId(h.to_string()))
+                    .collect();
                 checkout.put(session);
-                match hole {
-                    Some(h) => checkout.restore_suspended(h),
-                    None => checkout.restore_idle(),
-                }
+                // One restore, two spellings: an empty set IS Idle.
+                checkout.restore_suspended(holes);
                 Ok(result)
             }
             Err(join_err) => {

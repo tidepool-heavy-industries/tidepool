@@ -1,12 +1,20 @@
 //! Session registry — the resident-machine lifecycle guardian.
 //!
 //! A `HashMap<SessionId, Slot<M>>` where `Slot` (defined in [`crate::tree`]) is
-//! `Idle(M) | Running | RunningChild { hole } | Suspended { machine, hole }`.
-//! Every machine access goes
-//! through this map — the stowed-XOR-running discipline that justifies
-//! `unsafe impl Send for JitEffectMachine` maps directly onto the slot variants:
-//! a machine is in EXACTLY one slot, and `Running` means it is out on a turn (no
-//! side-channel access while running).
+//! `Idle(M) | Running { holes } | Suspended { machine, holes }`. Every machine
+//! access goes through this map — the stowed-XOR-running discipline that
+//! justifies `unsafe impl Send for JitEffectMachine` maps directly onto the
+//! slot variants: a machine is in EXACTLY one slot, and `Running` means it is
+//! out on a turn (no side-channel access while running).
+//!
+//! MULTI-HOLE (one-session plan, Phase 2): a suspended session carries a SET
+//! of parked holes, each resumable by identity in ANY order (the machine's
+//! continuation registry imposes none — locked decision 2), and a NEW
+//! top-level run over parked frames is an ordinary checkout, not a refusal.
+//! The SESSION (`M`) is the ground truth for its own hole set; the slot
+//! mirrors it at restore time — a caller restores with the hole set the
+//! session actually reports (`read the machine, don't guess`), never a guess
+//! from the turn's domain result.
 //!
 //! Generic over the machine handle `M` so this crate stays free of the JIT
 //! dependency — `tidepool-runtime::session::ResidentSession` is the `M` the
@@ -23,14 +31,9 @@
 //! A [`Checkout`] is the RAII proof that a machine is out on a turn: it owns the
 //! machine and, on restore, moves it back under the lock. Dropping a `Checkout`
 //! without restoring is a bug (the session is left `Running` forever) — the
-//! `#[must_use]` and the [`Checkout::abandon`] escape hatch make that explicit.
-//!
-//! # Segment boundary
-//!
-//! A `Suspended` session REJECTS a new-turn checkout ([`CheckoutError::Suspended`])
-//! — nested child runs on a stowed continuation are handled elsewhere
-//! ([`SessionRegistry::checkout_child`]). Here a
-//! suspended session accepts only a resume/abort checkout keyed by its hole.
+//! `#[must_use]`, the panic-safety `Drop` (which restores the CARRIED hole set,
+//! not a bare `Idle`), and the [`Checkout::abandon`] escape hatch make the
+//! exits explicit.
 
 use std::collections::HashMap;
 
@@ -46,38 +49,26 @@ pub enum CheckoutError {
     #[error("no session {0}")]
     Unknown(SessionId),
     /// A turn is already executing on this session (its machine is out —
-    /// `Slot::Running` or `Slot::RunningChild`). Turns on one session are
-    /// strictly sequential.
+    /// `Slot::Running`). Turns on one session are strictly sequential,
+    /// whatever kind of turn it is.
     #[error("session {0} is already running a turn")]
     Running(SessionId),
-    /// A resume/abort or new-turn checkout was attempted while a nested CHILD
-    /// run is executing against the suspended parent (`Slot::RunningChild`).
-    /// The parent stays suspended on `hole`; retry after the child completes.
-    #[error("session {session} is running a nested child against hole {hole:?}; wait for it")]
-    RunningChild { session: SessionId, hole: HoleId },
-    /// A child-run checkout was attempted on a session that is NOT suspended
-    /// (a child requires a suspended parent by construction).
-    #[error("session {0} is not suspended; a nested child requires a suspended parent")]
+    /// A child-run checkout was attempted on a session with no parked hole
+    /// (a child reads a suspended parent's world by construction).
+    #[error("session {0} has no parked hole; a child run requires a suspended parent")]
     NotSuspended(SessionId),
-    /// A new TOP-LEVEL turn was attempted on a suspended session. A suspended
-    /// session accepts only a resume/abort of its pending hole
-    /// (`checkout_resume`) or a nested child run against it (`checkout_child`,
-    /// [`SessionRegistry::checkout_child`]) — never a fresh top-level turn while
-    /// suspended.
-    #[error("session {session} is suspended on {hole:?}; resume or abort it first")]
-    Suspended { session: SessionId, hole: HoleId },
-    /// A resume/abort referenced a hole that is not the one this session is
-    /// suspended on (or the session is idle, not suspended). The pending
-    /// continuation is NOT consumed — the caller can retry with the right hole
-    /// (the engine's validate-before-consume semantics, at the registry layer).
-    #[error("session {session}: no pending hole {attempted:?}{}", match .pending {
-        Some(h) => format!(" (suspended on {h:?})"),
-        None => " (session is idle)".to_string(),
+    /// A resume/abort referenced a hole that is not among this session's
+    /// parked holes. Nothing is consumed — the caller can retry with a
+    /// member hole (validate-before-consume, at the registry layer).
+    #[error("session {session}: no parked hole {attempted:?}{}", if .parked.is_empty() {
+        " (session has no parked holes)".to_string()
+    } else {
+        format!(" (parked: {:?})", .parked)
     })]
     WrongHole {
         session: SessionId,
         attempted: HoleId,
-        pending: Option<HoleId>,
+        parked: Vec<HoleId>,
     },
 }
 
@@ -114,18 +105,17 @@ impl<M> SessionRegistry<M> {
         self.slots.lock().remove(&id)
     }
 
-    /// Whether a session exists and is idle (ready for a new turn).
+    /// Whether a session exists and is idle (present, no parked holes).
     pub fn is_idle(&self, id: SessionId) -> bool {
         matches!(self.slots.lock().get(&id), Some(Slot::Idle(_)))
     }
 
     /// Read-only access to the machine WITHOUT checking it out — only
     /// succeeds when the machine is actually present in its slot (`Idle` or
-    /// `Suspended`; a `Running`/`RunningChild` machine is out on a turn, so
-    /// there is nothing here to borrow). Used for cheap metadata reads (decl-
-    /// plane context, heap stats) that must not disturb the checkout
-    /// discipline or race a real checkout — the lock is held only for the
-    /// duration of `f`.
+    /// `Suspended`; a `Running` machine is out on a turn, so there is nothing
+    /// here to borrow). Used for cheap metadata reads (decl-plane context,
+    /// heap stats) that must not disturb the checkout discipline or race a
+    /// real checkout — the lock is held only for the duration of `f`.
     pub fn peek<R>(&self, id: SessionId, f: impl FnOnce(&M) -> R) -> Option<R> {
         match self.slots.lock().get(&id) {
             Some(Slot::Idle(m)) => Some(f(m)),
@@ -134,52 +124,57 @@ impl<M> SessionRegistry<M> {
         }
     }
 
-    /// The hole a session is suspended on, if any. A session with a nested
-    /// child mid-run (`RunningChild`) is still suspended on its hole.
+    /// The MOST RECENT parked hole (newest last — the single-hole
+    /// compatibility view), if any. A session whose machine is out on a turn
+    /// is still parked on the holes it carried out.
     pub fn pending_hole(&self, id: SessionId) -> Option<HoleId> {
         match self.slots.lock().get(&id) {
-            Some(Slot::Suspended { hole, .. }) => Some(hole.clone()),
-            Some(Slot::RunningChild { hole }) => Some(hole.clone()),
+            Some(Slot::Suspended { holes, .. }) | Some(Slot::Running { holes }) => {
+                holes.last().cloned()
+            }
             _ => None,
         }
     }
 
-    /// Check a machine OUT for a new turn: `Idle → Running`, moving the machine
-    /// onto the returned [`Checkout`]. Refuses a running or suspended session
-    /// (the latter is [`SessionRegistry::checkout_child`]'s job). The lock is
-    /// released with the slot
-    /// left `Running`; the caller runs the turn, then restores via the
-    /// `Checkout`.
+    /// Every parked hole, oldest first. Empty for idle/unknown sessions.
+    pub fn pending_holes(&self, id: SessionId) -> Vec<HoleId> {
+        match self.slots.lock().get(&id) {
+            Some(Slot::Suspended { holes, .. }) | Some(Slot::Running { holes }) => holes.clone(),
+            _ => Vec::new(),
+        }
+    }
+
+    /// Check a machine OUT for a new turn: `Idle | Suspended → Running`,
+    /// moving the machine onto the returned [`Checkout`]. A new turn over
+    /// PARKED frames is ordinary (the machine's continuation registry keeps
+    /// every parked frame rooted while unrelated fragments run) — the old
+    /// reject-while-suspended refusal is gone with the slot path. Refuses
+    /// only a session whose machine is already out.
     pub fn checkout_run(&self, id: SessionId) -> Result<Checkout<'_, M>, CheckoutError> {
         let mut slots = self.slots.lock();
         match slots.get_mut(&id) {
             None => Err(CheckoutError::Unknown(id)),
-            Some(Slot::Running) => Err(CheckoutError::Running(id)),
-            Some(Slot::RunningChild { hole }) => Err(CheckoutError::RunningChild {
-                session: id,
-                hole: hole.clone(),
-            }),
-            Some(Slot::Suspended { hole, .. }) => Err(CheckoutError::Suspended {
-                session: id,
-                hole: hole.clone(),
-            }),
-            Some(slot @ Slot::Idle(_)) => {
-                let Slot::Idle(machine) = std::mem::replace(slot, Slot::Running) else {
-                    unreachable!("matched Idle above")
-                };
+            Some(Slot::Running { .. }) => Err(CheckoutError::Running(id)),
+            Some(slot) => {
+                let holes = slot_holes(slot);
+                let machine = take_machine(slot, holes.clone());
                 Ok(Checkout {
                     registry: self,
                     id,
                     machine: Some(machine),
+                    holes,
                 })
             }
         }
     }
 
-    /// Check a machine OUT to resume/abort its pending hole: `Suspended{hole} →
-    /// Running`, validating `hole` matches. A mismatch leaves the slot untouched
-    /// ([`CheckoutError::WrongHole`]) — validate-before-consume. The lock is
-    /// released `Running`; the caller drives the resume, then restores.
+    /// Check a machine OUT to resume/abort one of its parked holes:
+    /// `Suspended → Running`, validating `hole` is a MEMBER of the parked
+    /// set (any order — the machine resumes by identity). A mismatch leaves
+    /// the slot untouched ([`CheckoutError::WrongHole`]) —
+    /// validate-before-consume. The lock is released `Running`; the caller
+    /// drives the resume, then restores with the session's OWN post-turn
+    /// hole set.
     pub fn checkout_resume(
         &self,
         id: SessionId,
@@ -188,87 +183,93 @@ impl<M> SessionRegistry<M> {
         let mut slots = self.slots.lock();
         match slots.get_mut(&id) {
             None => Err(CheckoutError::Unknown(id)),
-            Some(Slot::Running) => Err(CheckoutError::Running(id)),
-            Some(Slot::RunningChild { hole: pending }) => Err(CheckoutError::RunningChild {
-                session: id,
-                hole: pending.clone(),
-            }),
+            Some(Slot::Running { .. }) => Err(CheckoutError::Running(id)),
             Some(Slot::Idle(_)) => Err(CheckoutError::WrongHole {
                 session: id,
                 attempted: hole.clone(),
-                pending: None,
+                parked: Vec::new(),
             }),
-            Some(Slot::Suspended {
-                hole: pending_hole, ..
-            }) if pending_hole != hole => Err(CheckoutError::WrongHole {
-                session: id,
-                attempted: hole.clone(),
-                pending: Some(pending_hole.clone()),
-            }),
+            Some(Slot::Suspended { holes, .. }) if !holes.contains(hole) => {
+                Err(CheckoutError::WrongHole {
+                    session: id,
+                    attempted: hole.clone(),
+                    parked: holes.clone(),
+                })
+            }
             Some(slot) => {
-                // Matched Suspended with the right hole.
-                let Slot::Suspended { machine, .. } = std::mem::replace(slot, Slot::Running) else {
-                    unreachable!("matched Suspended above")
-                };
+                // Matched Suspended with a member hole.
+                let holes = slot_holes(slot);
+                let machine = take_machine(slot, holes.clone());
                 Ok(Checkout {
                     registry: self,
                     id,
                     machine: Some(machine),
+                    holes,
                 })
             }
         }
     }
 
-    /// Check a machine OUT for a NESTED CHILD run against its suspended parent
-    /// `Suspended{hole} → RunningChild{hole}`, keeping the hole so
-    /// the parent stays suspended. The child restores via
-    /// [`Checkout::restore_suspended`] with the SAME hole. Refuses a session
-    /// that is not suspended, already running, or running another child.
-    ///
-    /// The `hole` need not be validated here the way `checkout_resume` does —
-    /// a child run does not consume the parent's continuation (the parent's
-    /// stowed continuation is GC-rooted, not fed) — but the caller passes it so
-    /// the slot can carry it through `RunningChild` back to `Suspended`.
+    /// Check a machine OUT for a CHILD run over its parked frames:
+    /// `Suspended → Running`, requiring at least one parked hole (a child
+    /// reads a suspended parent's world by construction — the semantic
+    /// distinction [`CheckoutError::NotSuspended`] preserves). Otherwise
+    /// identical to [`Self::checkout_run`]: with the continuation registry
+    /// there is no special child window, and the parked holes ride the
+    /// checkout like any other turn's.
     pub fn checkout_child(&self, id: SessionId) -> Result<Checkout<'_, M>, CheckoutError> {
         let mut slots = self.slots.lock();
         match slots.get_mut(&id) {
             None => Err(CheckoutError::Unknown(id)),
-            Some(Slot::Running) => Err(CheckoutError::Running(id)),
-            Some(Slot::RunningChild { hole }) => Err(CheckoutError::RunningChild {
-                session: id,
-                hole: hole.clone(),
-            }),
+            Some(Slot::Running { .. }) => Err(CheckoutError::Running(id)),
             Some(Slot::Idle(_)) => Err(CheckoutError::NotSuspended(id)),
-            Some(slot @ Slot::Suspended { .. }) => {
-                let hole = match slot {
-                    Slot::Suspended { hole, .. } => hole.clone(),
-                    _ => unreachable!("matched Suspended above"),
-                };
-                let Slot::Suspended { machine, .. } =
-                    std::mem::replace(slot, Slot::RunningChild { hole })
-                else {
-                    unreachable!("matched Suspended above")
-                };
+            Some(slot) => {
+                let holes = slot_holes(slot);
+                let machine = take_machine(slot, holes.clone());
                 Ok(Checkout {
                     registry: self,
                     id,
                     machine: Some(machine),
+                    holes,
                 })
             }
         }
     }
 
-    /// Restore a checked-out machine as `Idle` (turn completed) under the lock.
+    /// Restore a checked-out machine as `Idle` (no parked holes) under the lock.
     fn restore_idle(&self, id: SessionId, machine: M) {
         self.slots.lock().insert(id, Slot::Idle(machine));
     }
 
-    /// Restore a checked-out machine as `Suspended{hole}` (turn suspended at an
-    /// ask) under the lock.
-    fn restore_suspended(&self, id: SessionId, machine: M, hole: HoleId) {
-        self.slots
-            .lock()
-            .insert(id, Slot::Suspended { machine, hole });
+    /// Restore a checked-out machine with its post-turn parked hole set under
+    /// the lock. An empty set restores `Idle` (the two restores are one
+    /// operation with two spellings, so a caller passing the session's own
+    /// reported holes cannot desync the slot from the machine).
+    fn restore_suspended(&self, id: SessionId, machine: M, holes: Vec<HoleId>) {
+        let slot = if holes.is_empty() {
+            Slot::Idle(machine)
+        } else {
+            Slot::Suspended { machine, holes }
+        };
+        self.slots.lock().insert(id, slot);
+    }
+}
+
+/// The parked holes a present-machine slot carries (`Idle` → none).
+fn slot_holes<M>(slot: &Slot<M>) -> Vec<HoleId> {
+    match slot {
+        Slot::Idle(_) => Vec::new(),
+        Slot::Suspended { holes, .. } => holes.clone(),
+        Slot::Running { .. } => unreachable!("caller matched a present-machine slot"),
+    }
+}
+
+/// Move the machine out of a present-machine slot, leaving `Running{holes}`.
+fn take_machine<M>(slot: &mut Slot<M>, holes: Vec<HoleId>) -> M {
+    match std::mem::replace(slot, Slot::Running { holes }) {
+        Slot::Idle(machine) => machine,
+        Slot::Suspended { machine, .. } => machine,
+        Slot::Running { .. } => unreachable!("caller matched a present-machine slot"),
     }
 }
 
@@ -284,6 +285,10 @@ pub struct Checkout<'r, M> {
     registry: &'r SessionRegistry<M>,
     id: SessionId,
     machine: Option<M>,
+    /// The parked holes carried OUT with the machine — what the panic-safety
+    /// `Drop` restores (an unwound turn must not lose the session's parked
+    /// frames; they are still rooted in the machine's continuation registry).
+    holes: Vec<HoleId>,
 }
 
 impl<M> Checkout<'_, M> {
@@ -313,7 +318,7 @@ impl<M> Checkout<'_, M> {
         self.machine = Some(machine);
     }
 
-    /// Restore the machine as `Idle` (the turn completed): `Running → Idle`.
+    /// Restore the machine as `Idle` — the session reports NO parked holes.
     pub fn restore_idle(mut self) {
         let machine = self
             .machine
@@ -322,14 +327,15 @@ impl<M> Checkout<'_, M> {
         self.registry.restore_idle(self.id, machine);
     }
 
-    /// Restore the machine as `Suspended{hole}` (the turn suspended at an ask):
-    /// `Running → Suspended`.
-    pub fn restore_suspended(mut self, hole: HoleId) {
+    /// Restore the machine with its post-turn parked hole set — pass the
+    /// session's OWN reported holes (`parked_holes()`), never a guess from
+    /// the turn's domain result. An empty set restores `Idle`.
+    pub fn restore_suspended(mut self, holes: Vec<HoleId>) {
         let machine = self
             .machine
             .take()
             .expect("machine present until restore/abandon");
-        self.registry.restore_suspended(self.id, machine, hole);
+        self.registry.restore_suspended(self.id, machine, holes);
     }
 
     /// The turn faulted irrecoverably: drop the session outright (`Running →
@@ -343,10 +349,11 @@ impl<M> Checkout<'_, M> {
 /// Panic safety net: if a `Checkout` is dropped while it still owns the
 /// machine (an explicit `restore_idle`/`restore_suspended`/`abandon` never
 /// ran — e.g. a panic unwound through the turn between checkout and
-/// restore), restore it as `Idle` rather than leaving the slot `Running`
-/// forever. `restore_idle`/`restore_suspended`/`abandon` all `take()` the
-/// machine first, so `Drop` sees `None` and does nothing on every explicit
-/// exit path — this only fires on the unwound case.
+/// restore), restore it with the hole set it CARRIED OUT rather than leaving
+/// the slot `Running` forever — or silently dropping parked frames to a bare
+/// `Idle` (they are still rooted in the machine; the slot must keep saying
+/// so). `restore_idle`/`restore_suspended`/`abandon` all `take()` the machine
+/// first, so `Drop` sees `None` and does nothing on every explicit exit path.
 ///
 /// This does NOT cover [`Checkout::take`]: once the machine has been moved
 /// off the checkout (e.g. onto a blocking thread), `Drop` has nothing to
@@ -355,7 +362,8 @@ impl<M> Checkout<'_, M> {
 impl<M> Drop for Checkout<'_, M> {
     fn drop(&mut self) {
         if let Some(machine) = self.machine.take() {
-            self.registry.restore_idle(self.id, machine);
+            self.registry
+                .restore_suspended(self.id, machine, std::mem::take(&mut self.holes));
         }
     }
 }
@@ -406,56 +414,80 @@ mod tests {
         co.restore_idle();
     }
 
+    /// MULTI-HOLE: a session parks two holes across two runs; both are
+    /// visible; either resumes FIRST (any-order); a new run over the parked
+    /// frames is ordinary; each resume retires only its own hole.
     #[test]
-    fn suspend_rejects_new_run_then_resumes_on_matching_hole() {
+    fn multi_hole_any_order_resume_and_run_over_parked() {
         let reg = SessionRegistry::new();
         let id = SessionId(2);
         reg.insert_idle(id, FakeMachine { turns: 0 });
 
-        // Run → suspend.
+        // Run → park hole 1.
         let co = reg.checkout_run(id).expect("idle → run");
-        co.restore_suspended(hole("scont_1"));
+        co.restore_suspended(vec![hole("scont_1")]);
         assert_eq!(reg.pending_hole(id), Some(hole("scont_1")));
 
-        // A NEW run is rejected while suspended.
+        // A NEW run over the parked frame is an ordinary checkout — it
+        // carries the holes out, and while running they still read.
+        let co = reg.checkout_run(id).expect("run over parked frame");
         assert_eq!(
-            err(reg.checkout_run(id)),
-            CheckoutError::Suspended {
-                session: id,
-                hole: hole("scont_1")
-            }
+            reg.pending_holes(id),
+            vec![hole("scont_1")],
+            "parked holes stay visible while the machine is out"
+        );
+        // …this second run parks another hole.
+        co.restore_suspended(vec![hole("scont_1"), hole("scont_2")]);
+        assert_eq!(
+            reg.pending_holes(id),
+            vec![hole("scont_1"), hole("scont_2")]
+        );
+        assert_eq!(
+            reg.pending_hole(id),
+            Some(hole("scont_2")),
+            "the single-hole view is the newest"
         );
 
-        // Resume on the WRONG hole is rejected WITHOUT consuming (retryable).
+        // Resume the OLDER hole first (any-order — the machine imposes none).
+        let co = reg
+            .checkout_resume(id, &hole("scont_1"))
+            .expect("older hole is a member");
+        co.restore_suspended(vec![hole("scont_2")]);
+        assert_eq!(reg.pending_holes(id), vec![hole("scont_2")]);
+
+        // Then the newer; the session goes idle via the unified restore.
+        let co = reg.checkout_resume(id, &hole("scont_2")).expect("newer");
+        co.restore_suspended(Vec::new());
+        assert!(reg.is_idle(id));
+    }
+
+    #[test]
+    fn resume_on_non_member_hole_is_wrong_hole_and_consumes_nothing() {
+        let reg = SessionRegistry::new();
+        let id = SessionId(3);
+        reg.insert_idle(id, FakeMachine { turns: 0 });
+        let co = reg.checkout_run(id).expect("idle → run");
+        co.restore_suspended(vec![hole("scont_1")]);
+
         assert_eq!(
             err(reg.checkout_resume(id, &hole("scont_9"))),
             CheckoutError::WrongHole {
                 session: id,
                 attempted: hole("scont_9"),
-                pending: Some(hole("scont_1")),
+                parked: vec![hole("scont_1")],
             }
         );
-        assert_eq!(reg.pending_hole(id), Some(hole("scont_1")));
+        assert_eq!(reg.pending_holes(id), vec![hole("scont_1")]);
 
-        // Resume on the RIGHT hole checks the machine out and completes.
-        let co = reg
-            .checkout_resume(id, &hole("scont_1"))
-            .expect("right hole");
-        co.restore_idle();
-        assert!(reg.is_idle(id));
-    }
-
-    #[test]
-    fn resume_on_idle_session_is_wrong_hole_not_running() {
-        let reg = SessionRegistry::new();
-        let id = SessionId(3);
-        reg.insert_idle(id, FakeMachine { turns: 0 });
+        // Idle session: WrongHole with an empty parked set, not Running.
+        let co = reg.checkout_resume(id, &hole("scont_1")).expect("member");
+        co.restore_suspended(Vec::new());
         assert_eq!(
             err(reg.checkout_resume(id, &hole("scont_1"))),
             CheckoutError::WrongHole {
                 session: id,
                 attempted: hole("scont_1"),
-                pending: None,
+                parked: Vec::new(),
             }
         );
     }
@@ -469,58 +501,41 @@ mod tests {
         );
     }
 
-    /// A suspended session hosts a nested child run
-    /// (`Suspended → RunningChild → Suspended`), and while the child is mid-run
-    /// the parent's resume/abort and a new top-level run are all rejected
-    /// cleanly (sequential-isolated). After the child restores, the parent is
-    /// suspended on the SAME hole and resumes normally.
+    /// A child checkout requires a parked hole, carries the holes through the
+    /// run, and while the machine is out EVERY other checkout is rejected
+    /// (one machine, one computation at a time).
     #[test]
-    fn nested_child_run_keeps_parent_suspended_and_blocks_resume() {
+    fn child_checkout_over_parked_frames_and_exclusivity() {
         let reg = SessionRegistry::new();
         let id = SessionId(5);
         reg.insert_idle(id, FakeMachine { turns: 0 });
 
-        // Run → suspend.
         let co = reg.checkout_run(id).expect("idle → run");
-        co.restore_suspended(hole("scont_1"));
-        assert_eq!(reg.pending_hole(id), Some(hole("scont_1")));
+        co.restore_suspended(vec![hole("scont_1")]);
 
-        // Check a child out: Suspended → RunningChild, parent still suspended.
-        let mut child = reg.checkout_child(id).expect("suspended → child");
+        let mut child = reg.checkout_child(id).expect("child over parked frame");
         assert_eq!(
             reg.pending_hole(id),
             Some(hole("scont_1")),
-            "parent stays suspended on its hole while a child runs"
+            "parent's hole stays visible while a child runs"
         );
 
         // While the child runs, EVERYTHING else is rejected.
-        assert_eq!(
-            err(reg.checkout_run(id)),
-            CheckoutError::RunningChild {
-                session: id,
-                hole: hole("scont_1")
-            }
-        );
+        assert_eq!(err(reg.checkout_run(id)), CheckoutError::Running(id));
         assert_eq!(
             err(reg.checkout_resume(id, &hole("scont_1"))),
-            CheckoutError::RunningChild {
-                session: id,
-                hole: hole("scont_1")
-            },
+            CheckoutError::Running(id),
             "parent resume must be rejected while a child is mid-run"
         );
         assert_eq!(
             err(reg.checkout_child(id)),
-            CheckoutError::RunningChild {
-                session: id,
-                hole: hole("scont_1")
-            },
+            CheckoutError::Running(id),
             "a second concurrent child must be rejected"
         );
 
-        // The child ran a turn on the machine; restore back to Suspended.
+        // The child ran a turn on the machine; restore with the same holes.
         child.machine().turns += 1;
-        child.restore_suspended(hole("scont_1"));
+        child.restore_suspended(vec![hole("scont_1")]);
         assert_eq!(reg.pending_hole(id), Some(hole("scont_1")));
 
         // The parent now resumes on its (untouched) hole; the child's turn count
@@ -533,8 +548,8 @@ mod tests {
         assert!(reg.is_idle(id));
     }
 
-    /// A nested child requires a suspended parent — checking a child out on an
-    /// idle session is `NotSuspended`, not a silent mis-transition.
+    /// A child requires a parked hole — checking a child out on an idle
+    /// session is `NotSuspended`, not a silent mis-transition.
     #[test]
     fn child_checkout_on_idle_is_not_suspended() {
         let reg = SessionRegistry::new();
@@ -556,7 +571,7 @@ mod tests {
             None,
             "a checked-out (Running) machine has nothing to peek"
         );
-        co.restore_suspended(hole("scont_peek"));
+        co.restore_suspended(vec![hole("scont_peek")]);
         assert_eq!(
             reg.peek(id, |m| m.turns),
             Some(3),
@@ -566,30 +581,45 @@ mod tests {
         assert_eq!(reg.peek(SessionId(999), |m: &FakeMachine| m.turns), None);
     }
 
-    /// Closes step 5: a `Checkout` dropped WITHOUT an explicit restore (a
-    /// panic unwinding between checkout and restore) must not leave the slot
-    /// `Running` forever — `Drop` restores it `Idle`, with the machine's
-    /// mutations from before the panic intact.
+    /// A `Checkout` dropped WITHOUT an explicit restore (a panic unwinding
+    /// between checkout and restore) must not leave the slot `Running`
+    /// forever — AND must not lose the parked holes it carried out: `Drop`
+    /// restores `Suspended` with the carried set (the frames are still
+    /// rooted in the machine), `Idle` only when there were none.
     #[test]
-    fn dropping_a_checkout_without_restoring_recovers_idle() {
+    fn dropping_a_checkout_restores_the_carried_hole_set() {
         let reg = SessionRegistry::new();
         let id = SessionId(11);
         reg.insert_idle(id, FakeMachine { turns: 0 });
 
+        // No holes: unwound turn restores Idle (the original pin).
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let mut co = reg.checkout_run(id).expect("idle -> run");
             co.machine().turns += 1;
             panic!("simulated turn panic between checkout and restore");
         }));
         assert!(result.is_err(), "the closure must have panicked");
-
         assert!(
             reg.is_idle(id),
-            "a Checkout dropped by an unwinding panic must restore Idle, not leave the slot wedged"
+            "a holeless Checkout dropped by a panic must restore Idle"
+        );
+
+        // With a parked hole: the unwound turn restores Suspended{holes}.
+        let co = reg.checkout_run(id).expect("run");
+        co.restore_suspended(vec![hole("scont_1")]);
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _co = reg.checkout_run(id).expect("run over parked");
+            panic!("simulated panic with a parked hole carried out");
+        }));
+        assert!(result.is_err());
+        assert_eq!(
+            reg.pending_holes(id),
+            vec![hole("scont_1")],
+            "the carried hole set survives an unwound turn"
         );
         let mut co = reg
-            .checkout_run(id)
-            .expect("the session must be usable again after the panic");
+            .checkout_resume(id, &hole("scont_1"))
+            .expect("the parked hole is still resumable after the panic");
         assert_eq!(
             co.machine().turns,
             1,
