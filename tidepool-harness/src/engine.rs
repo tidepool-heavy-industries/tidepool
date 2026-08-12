@@ -539,7 +539,12 @@ pub fn answerer_hole_card(
          labels are the only question text the operator sees; `chooseMany` for \
          a subset; `askUser @T` renders a form from a record type's own fields \
          (field names become the labels) or a primitive (`Text`/`Int`/`Bool`). \
-         Bind the result, then `finalize`.)"
+         Your block is a PROGRAM, not a single question: sequence several \
+         consultations in one `do` block and branch on earlier answers with \
+         ordinary `case`/`if` — each runs without another model round. Plan \
+         the whole consultation up front when the branches are predictable; \
+         end the turn without finalizing only when an answer genuinely needs \
+         fresh judgment. Bind results, then `finalize`.)"
     )
 }
 
