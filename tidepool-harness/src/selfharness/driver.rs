@@ -1384,6 +1384,13 @@ impl SelfHarnessDriver {
                         round: rounds,
                         error: None,
                     });
+                    // Show the operator what the answerer actually ran —
+                    // once per COMPILED round (a failed compile has no
+                    // executed source to show; `post_turn_source` is a
+                    // default-no-op on headless gates).
+                    if let Some(src) = self.agent.last_turn_source(node) {
+                        self.gate.post_turn_source(&src);
+                    }
                 }
                 Err(HarnessError::Compile(msg)) => {
                     self.emit(Event::AnswererRound {

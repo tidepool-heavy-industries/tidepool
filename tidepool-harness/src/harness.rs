@@ -202,6 +202,10 @@ struct NodeConvo {
     /// the model here rather than left observational. `None` for an
     /// ordinary Agent node (the default full-surface framing).
     framing: Option<String>,
+    /// The most recently compiled turn's extracted Haskell block (overwritten
+    /// per compiled turn) — read by [`Harness::last_turn_source`] so the
+    /// operator GUI can show what the answerer actually ran.
+    last_turn_source: Option<String>,
     /// Set while a turn-owning operation (`drive_turn`/`summarize_turn`/an
     /// `answer_*` method) holds this node's [`TurnLease`] — guards the
     /// snapshot → provider await → log append → resident run → outcome
@@ -821,6 +825,7 @@ impl Harness {
                 usage: Usage::default(),
                 last_input_tokens: 0,
                 framing,
+                last_turn_source: None,
                 turn_lease: false,
             },
         );
@@ -1026,6 +1031,9 @@ impl Harness {
         // full text, never truncated (a pathologically large source is
         // itself signal worth seeing).
         tracing::info!(node = node.0, source = %block, "compiled turn source");
+        if let Some(convo) = self.convos.lock().get_mut(&node) {
+            convo.last_turn_source = Some(block.clone());
+        }
 
         // Compile + run the block synchronously (spawn_blocking off the reactor).
         let (imports, body) = engine::split_imports(&block);
@@ -1839,6 +1847,18 @@ impl Harness {
     /// it drives per loop. `None` if `node` has no live session.
     pub fn node_usage(&self, node: NodeId) -> Option<Usage> {
         self.convos.lock().get(&node).map(|c| c.usage)
+    }
+
+    /// The most recently compiled turn's extracted Haskell on `node`
+    /// (overwritten per compiled turn) — what the self-iterating harness
+    /// driver posts to the operator GUI's last-turn-source pane
+    /// (`OperatorGate::post_turn_source`). `None` before the node's first
+    /// compiled turn or if `node` has no live session.
+    pub fn last_turn_source(&self, node: NodeId) -> Option<String> {
+        self.convos
+            .lock()
+            .get(&node)
+            .and_then(|c| c.last_turn_source.clone())
     }
 
     /// The MOST RECENT turn's `input_tokens` on `node` — the node's real
@@ -3351,6 +3371,7 @@ mod tests {
                 usage: Usage::default(),
                 last_input_tokens: 0,
                 framing: None,
+                last_turn_source: None,
                 turn_lease: false,
             },
         );
