@@ -30,8 +30,10 @@ import Tidepool.QQ (fmt)
 -- the accumulated state, then the operator says where to push — the harness
 -- owns steering, the agent owns cognition), THEN the answerer advances the
 -- brainstorm one step under that steer (a typed 'Contribution'), folded into
--- the next 'State'. The prompt spells out the 'Contribution' constructor so
--- the model builds a real one rather than prose.
+-- the next 'State'. The 'Contribution' declaration itself is never spelled
+-- out here — the answerer's hole card renders it from the compiled
+-- 'DataConTable' (@tidepool_harness::synopsis::type_document@), so this
+-- prompt only narrates the reply shape.
 loop :: State -> Harness State
 loop st = do
   note
@@ -44,12 +46,7 @@ Where do you want to steer this loop? (Free text — it goes to the model verbat
     runLLMTurn @Contribution
       [fmt|OPERATOR STEERING for this loop (verbatim, follow it over your own framing): {steer}
 
-Advance the brainstorm one step for the current phase. Consult the operator with askUser forms for direction and taste, then finalize a Contribution. When you present `choose` options, ALWAYS include an escape option — e.g. ("None of these — I'll say it in my own words", Nothing) with the others Just-wrapped — and on that branch gather free text with `askUser @Text` instead of forcing a canned pick. Contribution's type is:
-  data Contribution = Contribution
-    {{ addedIdeas :: [Text]   -- new idea bullets surfaced this loop
-    , draftDelta :: Text     -- text to append to the running draft
-    , advance    :: Bool }}   -- move to the next phase?
-Reply with exactly:
+Advance the brainstorm one step for the current phase. Consult the operator with askUser forms for direction and taste, then finalize a Contribution — its declaration is shown below, provided by the harness. When you present `choose` options, ALWAYS include an escape option — e.g. ("None of these — I'll say it in my own words", Nothing) with the others Just-wrapped — and on that branch gather free text with `askUser @Text` instead of forcing a canned pick. Reply with exactly:
   finalize @Contribution (Contribution {{ addedIdeas = ["..."], draftDelta = "...", advance = False }})
 with your own values filled in.|]
   pure
