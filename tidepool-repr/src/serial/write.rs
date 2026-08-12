@@ -59,6 +59,13 @@ fn field_labels_value(labels: &[String]) -> Value {
     Value::Array(labels.iter().map(|l| Value::Text(l.clone())).collect())
 }
 
+/// Encode a slice of rendered field types as a CBOR array of text. Same shape
+/// as [`field_labels_value`]; kept distinct so a future divergence in either
+/// encoding does not have to un-share a helper.
+fn field_types_value(types: &[String]) -> Value {
+    Value::Array(types.iter().map(|t| Value::Text(t.clone())).collect())
+}
+
 /// Writes a DataConTable to CBOR-encoded metadata bytes (new format with warnings).
 pub fn write_metadata(
     table: &crate::datacon_table::DataConTable,
@@ -93,10 +100,11 @@ pub fn write_metadata(
                 .collect(),
         );
 
-        // Always the full 8-element shape (matching
+        // Always the full 9-element shape (matching
         // `Tidepool.CborEncode.encodeMetaEntry`): an absent qualified name is
-        // the empty string, absent field labels the empty array. The parent
-        // type name (8th element) is always present.
+        // the empty string, absent field labels/types the empty array. The
+        // parent type name (8th element) is always present; the field types
+        // (9th element) are always present, empty for a nullary constructor.
         let entry = vec![
             Value::Integer(dcid.into()),
             Value::Text(name.clone()),
@@ -106,6 +114,7 @@ pub fn write_metadata(
             Value::Text(dc.qualified_name.clone().unwrap_or_default()),
             field_labels_value(table.field_labels_of(dc.id).unwrap_or(&[])),
             Value::Text(dc.type_name.clone()),
+            field_types_value(table.field_types_of(dc.id).unwrap_or(&[])),
         ];
         entries.push(Value::Array(entry));
     }

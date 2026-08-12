@@ -94,6 +94,13 @@ pub struct DataConTable {
     /// constructors have no entry. Kept as a side-table (not on `DataCon`) so it
     /// is pure render metadata and does not affect constructor identity/equality.
     field_labels: HashMap<DataConId, Vec<String>>,
+    /// Rendered field types per constructor, in field (declaration) order
+    /// (from GHC's `dataConOrigArgTys`, same `ppr` convention as
+    /// `DataCon::type_name`). Present whenever the constructor has fields —
+    /// including positional constructors, unlike `field_labels`. A side-table
+    /// for the same reason as `field_labels`: pure render metadata, no effect
+    /// on constructor identity/equality.
+    field_types: HashMap<DataConId, Vec<String>>,
 }
 
 impl DataConTable {
@@ -338,6 +345,28 @@ impl DataConTable {
     /// Iterate over all `(DataConId, labels)` field-label entries (for serialization).
     pub fn field_labels_iter(&self) -> impl Iterator<Item = (DataConId, &[String])> {
         self.field_labels.iter().map(|(&id, v)| (id, v.as_slice()))
+    }
+
+    /// Rendered field types for a constructor, in field order. `None` for a
+    /// nullary constructor (no fields at all). Used by
+    /// `tidepool_harness::synopsis::type_document` to render a full
+    /// GHC-style `data` declaration instead of a names-only synopsis.
+    pub fn field_types_of(&self, id: DataConId) -> Option<&[String]> {
+        self.field_types.get(&id).map(Vec::as_slice)
+    }
+
+    /// Attach rendered field types to a constructor id. Empty type lists are
+    /// ignored (nullary constructors carry no entry) — mirrors
+    /// `set_field_labels`.
+    pub fn set_field_types(&mut self, id: DataConId, types: Vec<String>) {
+        if !types.is_empty() {
+            self.field_types.insert(id, types);
+        }
+    }
+
+    /// Iterate over all `(DataConId, types)` field-type entries (for serialization).
+    pub fn field_types_iter(&self) -> impl Iterator<Item = (DataConId, &[String])> {
+        self.field_types.iter().map(|(&id, v)| (id, v.as_slice()))
     }
 
     /// Look up by name, returning the DataConId.

@@ -74,14 +74,16 @@ cross-language hashing algorithm to keep in sync, by construction.
 ## CBOR wire format (`serial/mod.rs`) — ONE current format, no tolerance
 
 8-byte header: 4-byte magic `TPLR` + `VERSION_MAJOR`/`VERSION_MINOR` (currently
-`2.1`) as two big-endian `u16`s. **The header is MANDATORY** — a payload
+`3.0`) as two big-endian `u16`s. **The header is MANDATORY** — a payload
 without it is rejected loudly (`ReadError::MissingHeader`); stale fixtures or
 caches get regenerated, never tolerated. Version rejection is also loud
 (`ReadError::UnsupportedVersion`): a `major` mismatch, or a `minor` newer than
 this build supports; an older `minor` within the same `major` is accepted.
 Metadata has exactly one accepted shape: `[entries_array, warnings_map]` with
-strictly 8-element entries — the shape `Tidepool.CborEncode.encodeMetadata`
-emits. The Rust writer mirrors the Haskell encoder byte-for-byte (always-8
+strictly 9-element entries — the shape `Tidepool.CborEncode.encodeMetadata`
+emits (the 9th being rendered field types, in field order — added in `3.0`
+alongside the 8th element's parent-type-name from an earlier bump). The Rust
+writer mirrors the Haskell encoder byte-for-byte (always-9
 entries in ascending-`DataConId` order, same warnings-key emission rules);
 `tidepool-repr/tests/golden_wire_contract.rs` pins the byte identity for both
 trees and metadata over the committed corpus. Bump `VERSION_MAJOR` on any

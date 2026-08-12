@@ -75,16 +75,16 @@ pub const HEADER_MAGIC: [u8; 4] = [0x54, 0x50, 0x4C, 0x52];
 /// this build's is rejected (`ReadError::UnsupportedVersion`) — bump this
 /// only on a breaking shape change, in the same commit as the Haskell
 /// serializer and the regenerated fixture corpora.
-pub const VERSION_MAJOR: u16 = 2;
+///
+/// `3.0` changed every metadata entry from 8 to 9 REQUIRED elements (added
+/// rendered field types, in field order — `Tidepool.Translate.dcFieldTypes`),
+/// so a `2.x` payload is a hard `UnsupportedVersion` reject, not a tolerated
+/// short form; committed fixture corpora were regenerated in the same commit.
+pub const VERSION_MAJOR: u16 = 3;
 /// Wire format minor version. An older minor within the same major is
 /// accepted (forward-compatible read); a newer minor than this build
 /// supports is rejected.
-///
-/// `2.1` added the OPTIONAL `poisoned` warnings key (slot → qualified name of
-/// the external each `0x45`-kind-4 sentinel replaced). A `2.0` payload simply
-/// omits it, which decodes to an empty table — so the committed 2.0 fixture
-/// corpora stay readable and are NOT regenerated.
-pub const VERSION_MINOR: u16 = 1;
+pub const VERSION_MINOR: u16 = 0;
 /// Total header length in bytes.
 pub const HEADER_LEN: usize = 8;
 
@@ -322,7 +322,7 @@ mod tests {
         use crate::datacon_table::DataConTable;
 
         let mut table = DataConTable::new();
-        // Record con WITH a qualified name and field labels.
+        // Record con WITH a qualified name, field labels, and field types.
         table.insert(DataCon {
             id: DataConId(10),
             name: "Hit".to_string(),
@@ -336,8 +336,15 @@ mod tests {
             DataConId(10),
             vec!["path".to_string(), "line".to_string(), "text".to_string()],
         );
+        table.set_field_types(
+            DataConId(10),
+            vec!["Text".to_string(), "Int".to_string(), "Text".to_string()],
+        );
         // Record con WITHOUT a qualified name but WITH field labels — exercises
         // the empty-string qn placeholder path (writer emits "" → reader None).
+        // Deliberately no field TYPES set here — the present/absent split
+        // between the two side-tables is independent (a table missing types
+        // for a con that has labels degrades gracefully, never invents one).
         table.insert(DataCon {
             id: DataConId(20),
             name: "Loc".to_string(),
@@ -348,7 +355,7 @@ mod tests {
             type_name: "Loc".to_string(),
         });
         table.set_field_labels(DataConId(20), vec!["ln".to_string()]);
-        // Positional con: no labels at all.
+        // Positional con: no labels, no types.
         table.insert(DataCon {
             id: DataConId(30),
             name: "Plain".to_string(),
@@ -366,6 +373,10 @@ mod tests {
             recovered.field_labels_of(DataConId(10)),
             Some(["path".to_string(), "line".to_string(), "text".to_string()].as_slice())
         );
+        assert_eq!(
+            recovered.field_types_of(DataConId(10)),
+            Some(["Text".to_string(), "Int".to_string(), "Text".to_string()].as_slice())
+        );
         // qn preserved for the labeled-with-qn con
         assert_eq!(
             recovered.get(DataConId(10)).unwrap().qualified_name,
@@ -376,9 +387,13 @@ mod tests {
             recovered.field_labels_of(DataConId(20)),
             Some(["ln".to_string()].as_slice())
         );
+        // absent field types (present labels, absent types) decode to None,
+        // not an invented/empty-but-present entry
+        assert_eq!(recovered.field_types_of(DataConId(20)), None);
         assert_eq!(recovered.get(DataConId(20)).unwrap().qualified_name, None);
-        // positional con has no labels
+        // positional con has no labels, no types
         assert_eq!(recovered.field_labels_of(DataConId(30)), None);
+        assert_eq!(recovered.field_types_of(DataConId(30)), None);
     }
 
     #[test]

@@ -116,8 +116,9 @@ pub struct MetaWarnings {
 /// Reads a DataConTable and warnings from CBOR-encoded metadata bytes (meta.cbor format).
 ///
 /// The one accepted shape: 2-element array `[entries_array, warnings_map]`,
-/// every entry an 8-element array (id, name, tag, arity, bangs, qualified-name,
-/// field-labels, parent-type-name) — the shape `Tidepool.CborEncode.encodeMetadata` emits.
+/// every entry a 9-element array (id, name, tag, arity, bangs, qualified-name,
+/// field-labels, parent-type-name, field-types) — the shape
+/// `Tidepool.CborEncode.encodeMetadata` emits.
 pub fn read_metadata(bytes: &[u8]) -> Result<(crate::DataConTable, MetaWarnings), ReadError> {
     use crate::datacon::{DataCon, SrcBang};
     use crate::datacon_table::DataConTable;
@@ -149,10 +150,10 @@ pub fn read_metadata(bytes: &[u8]) -> Result<(crate::DataConTable, MetaWarnings)
     let mut table = DataConTable::new();
     for entry in &entries {
         let arr = match entry {
-            Value::Array(a) if a.len() == 8 => a,
+            Value::Array(a) if a.len() == 9 => a,
             _ => {
                 return Err(ReadError::InvalidStructure(
-                    "Metadata entry must be an array of exactly 8".to_string(),
+                    "Metadata entry must be an array of exactly 9".to_string(),
                 ))
             }
         };
@@ -244,6 +245,28 @@ pub fn read_metadata(bytes: &[u8]) -> Result<(crate::DataConTable, MetaWarnings)
             }
         };
 
+        // 9th element: rendered field types, in field order (empty array for
+        // a nullary constructor). Must be an array; a non-array value is
+        // malformed.
+        let field_types: Vec<String> = match &arr[8] {
+            Value::Array(types) => types
+                .iter()
+                .map(|t| match t {
+                    Value::Text(s) => Ok(s.clone()),
+                    _ => Err(ReadError::MalformedMetadataField {
+                        field: "field_types",
+                        detail: "each type must be text".to_string(),
+                    }),
+                })
+                .collect::<Result<Vec<_>, ReadError>>()?,
+            _ => {
+                return Err(ReadError::MalformedMetadataField {
+                    field: "field_types",
+                    detail: "expected an array".to_string(),
+                })
+            }
+        };
+
         let id = DataConId(dcid);
         table.insert_checked(DataCon {
             id,
@@ -255,6 +278,7 @@ pub fn read_metadata(bytes: &[u8]) -> Result<(crate::DataConTable, MetaWarnings)
             type_name,
         })?;
         table.set_field_labels(id, field_labels);
+        table.set_field_types(id, field_types);
     }
 
     Ok((table, warnings))
@@ -792,6 +816,7 @@ mod tests {
             Cbor::Text(qn.to_string()),
             Cbor::Array(vec![]),
             Cbor::Text(String::new()),
+            Cbor::Array(vec![]),
         ])
     }
 
@@ -855,6 +880,7 @@ mod tests {
             Cbor::Text(String::new()),
             Cbor::Array(vec![]),
             Cbor::Text(String::new()),
+            Cbor::Array(vec![]),
         ]);
         let bytes = meta_bytes(vec![entry]);
         match read_metadata(&bytes) {
@@ -876,6 +902,7 @@ mod tests {
             Cbor::Text(String::new()),
             Cbor::Array(vec![]),
             Cbor::Text(String::new()),
+            Cbor::Array(vec![]),
         ]);
         let bytes = meta_bytes(vec![entry]);
         match read_metadata(&bytes) {
@@ -980,41 +1007,6 @@ mod tests {
         ciborium::ser::into_writer(&root, &mut bytes).unwrap();
         let (_, warnings) = read_metadata(&bytes).expect("poisoned meta loads");
         assert_eq!(warnings.poisoned, vec![(1u64, "Dep.helper".to_string())]);
-    }
-
-    /// D-D's backward-compatibility claim, pinned: a metadata payload stamped
-    /// with the PREVIOUS minor (2.0) and carrying no `poisoned` key still
-    /// reads clean, and the table decodes to empty. This is why the committed
-    /// 2.0 fixture corpora need no regeneration for the 2.1 bump.
-    #[test]
-    fn read_metadata_accepts_previous_minor_without_poisoned_key() {
-        use ciborium::value::Value as Cbor;
-        const { assert!(super::super::VERSION_MINOR >= 1) } // pins the 2.0 → 2.1 bump
-        let root = Cbor::Array(vec![
-            Cbor::Array(vec![]),
-            Cbor::Map(vec![
-                (Cbor::Text("has_io".into()), Cbor::Bool(true)),
-                (
-                    Cbor::Text("var_names".into()),
-                    Cbor::Array(vec![Cbor::Array(vec![
-                        Cbor::Integer(0xfe00_0000_0000_0001_u64.into()),
-                        Cbor::Text("Dep.helper".into()),
-                    ])]),
-                ),
-            ]),
-        ]);
-        let mut bytes: Vec<u8> = Vec::new();
-        bytes.extend_from_slice(&super::super::HEADER_MAGIC);
-        bytes.extend_from_slice(&super::super::VERSION_MAJOR.to_be_bytes());
-        bytes.extend_from_slice(&(super::super::VERSION_MINOR - 1).to_be_bytes());
-        ciborium::ser::into_writer(&root, &mut bytes).unwrap();
-        let (_, warnings) = read_metadata(&bytes).expect("a 2.0 metadata payload must still read");
-        assert!(warnings.has_io);
-        assert_eq!(warnings.var_names.len(), 1);
-        assert!(
-            warnings.poisoned.is_empty(),
-            "an older-minor payload carries no poisoned table"
-        );
     }
 
     // ---- type capture: the warnings map carries the eval's captured type ----

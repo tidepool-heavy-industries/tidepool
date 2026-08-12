@@ -16,9 +16,10 @@ fn header() -> Vec<u8> {
     bytes
 }
 
-/// A writer-conforming 8-element metadata entry: id, name, tag 1, arity 0,
+/// A writer-conforming 9-element metadata entry: id, name, tag 1, arity 0,
 /// no bangs, and the given (possibly corrupted) qualified-name/field-labels
-/// elements — the two fields these tests target.
+/// elements — the two fields these tests target. Field types (9th element)
+/// is always the empty array here — not one of this file's targets.
 fn entry(dcid: u64, name: &str, qualified_name: Cbor, field_labels: Cbor) -> Cbor {
     Cbor::Array(vec![
         Cbor::Integer(dcid.into()),
@@ -29,6 +30,7 @@ fn entry(dcid: u64, name: &str, qualified_name: Cbor, field_labels: Cbor) -> Cbo
         qualified_name,
         field_labels,
         Cbor::Text(name.to_string()),
+        Cbor::Array(vec![]),
     ])
 }
 
@@ -97,6 +99,59 @@ fn non_text_field_label_element_is_malformed() {
     );
     let bytes = meta_bytes(vec![e], vec![has_io_false()]);
     assert_malformed(read_metadata(&bytes), "field_labels");
+}
+
+// ---- entry-level: field types (9th element) ----
+
+/// A 9-element entry whose 9th (field-types) element is corrupted; the first
+/// 8 elements are the plain-entry shape.
+fn entry_with_field_types(dcid: u64, name: &str, field_types: Cbor) -> Cbor {
+    Cbor::Array(vec![
+        Cbor::Integer(dcid.into()),
+        Cbor::Text(name.to_string()),
+        Cbor::Integer(1u64.into()),
+        Cbor::Integer(0u64.into()),
+        Cbor::Array(vec![]),
+        Cbor::Text(String::new()),
+        Cbor::Array(vec![]),
+        Cbor::Text(name.to_string()),
+        field_types,
+    ])
+}
+
+#[test]
+fn non_array_field_types_is_malformed() {
+    let e = entry_with_field_types(1, "Foo", Cbor::Text("not-an-array".to_string()));
+    let bytes = meta_bytes(vec![e], vec![has_io_false()]);
+    assert_malformed(read_metadata(&bytes), "field_types");
+}
+
+#[test]
+fn non_text_field_type_element_is_malformed() {
+    let e = entry_with_field_types(1, "Foo", Cbor::Array(vec![Cbor::Integer(3.into())]));
+    let bytes = meta_bytes(vec![e], vec![has_io_false()]);
+    assert_malformed(read_metadata(&bytes), "field_types");
+}
+
+#[test]
+fn eight_element_entry_is_rejected() {
+    // The pre-3.0 shape (8 elements, no field-types) must be a hard reject —
+    // no tolerated short form.
+    let e = Cbor::Array(vec![
+        Cbor::Integer(1u64.into()),
+        Cbor::Text("Foo".to_string()),
+        Cbor::Integer(1u64.into()),
+        Cbor::Integer(0u64.into()),
+        Cbor::Array(vec![]),
+        Cbor::Text(String::new()),
+        Cbor::Array(vec![]),
+        Cbor::Text("Foo".to_string()),
+    ]);
+    let bytes = meta_bytes(vec![e], vec![has_io_false()]);
+    match read_metadata(&bytes) {
+        Err(ReadError::InvalidStructure(_)) => {}
+        other => panic!("expected InvalidStructure for an 8-element entry, got {other:?}"),
+    }
 }
 
 // ---- warnings-level: has_io ----
@@ -294,7 +349,7 @@ fn writer_conforming_payload_round_trips_through_strict_reader() {
         qualified_name: None,
         type_name: "Maybe".to_string(),
     });
-    // With a qualified name and field labels.
+    // With a qualified name, field labels, and field types.
     table.insert(DataCon {
         id: DataConId(2),
         name: "Hit".to_string(),
@@ -305,6 +360,7 @@ fn writer_conforming_payload_round_trips_through_strict_reader() {
         type_name: "Hit".to_string(),
     });
     table.set_field_labels(DataConId(2), vec!["path".to_string(), "line".to_string()]);
+    table.set_field_types(DataConId(2), vec!["Text".to_string(), "Int".to_string()]);
 
     let warnings = MetaWarnings {
         has_io: true,

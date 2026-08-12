@@ -9,7 +9,7 @@
 //! contract.
 //!
 //! There is ONE format: the TPLR-headed current version. Headerless or
-//! non-8-element-meta payloads are rejected loudly (pinned below); a format
+//! non-9-element-meta payloads are rejected loudly (pinned below); a format
 //! change bumps the version and regenerates the corpus in the same commit.
 
 use std::collections::BTreeSet;
@@ -89,7 +89,7 @@ fn tree_fixtures_roundtrip_byte_identically() {
 }
 
 /// Meta roundtrips BYTE-identically: the Rust writer mirrors
-/// `Tidepool.CborEncode.encodeMetadata` exactly (always-8 entries, same
+/// `Tidepool.CborEncode.encodeMetadata` exactly (always-9 entries, same
 /// warnings-key emission rules), so decode → re-encode reproduces the
 /// Haskell-produced bytes.
 #[test]
