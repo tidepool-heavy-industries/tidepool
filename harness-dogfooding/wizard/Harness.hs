@@ -21,19 +21,29 @@ module Harness
 import HarnessTypes (Contribution (..), Phase (..), State (..), initialState,
                      render)
 import Tidepool.Prelude hiding (render)
+import Tidepool.Form (askUser)
 import Tidepool.Harness (Harness, runLLMTurn)
 
--- | One window of work: ask the answerer to advance the brainstorm one step (a
--- typed 'Contribution', operator taste already folded in via @askUser@), then
--- fold it into the next 'State'. The prompt spells out the 'Contribution'
--- constructor so the model builds a real one rather than prose.
+-- | One window of work: FIRST a harness-level steering ask (the operator reads
+-- the rendered state above the form and says where to push — the harness owns
+-- steering, the agent owns cognition), THEN the answerer advances the
+-- brainstorm one step under that steer (a typed 'Contribution'), folded into
+-- the next 'State'. The prompt spells out the 'Contribution' constructor so
+-- the model builds a real one rather than prose.
 loop :: State -> Harness State
 loop st = do
+  steer <- askUser @Text
   c <-
     runLLMTurn @Contribution
-      "Advance the brainstorm one step for the current phase. Consult the \
+      ("OPERATOR STEERING for this loop (verbatim, follow it over your own \
+      \framing): " <> steer <> "\n\n\
+      \Advance the brainstorm one step for the current phase. Consult the \
       \operator with askUser forms for direction and taste, then finalize a \
-      \Contribution. Its type is:\n\
+      \Contribution. When you present `choose` options, ALWAYS include an \
+      \escape option — e.g. (\"None of these — I'll say it in my own words\", \
+      \Nothing) with the others Just-wrapped — and on that branch gather free \
+      \text with `askUser @Text` instead of forcing a canned pick. \
+      \Contribution's type is:\n\
       \  data Contribution = Contribution\n\
       \    { addedIdeas :: [Text]   -- new idea bullets surfaced this loop\n\
       \    , draftDelta :: Text     -- text to append to the running draft\n\
@@ -41,7 +51,7 @@ loop st = do
       \Reply with exactly:\n\
       \  finalize @Contribution (Contribution { addedIdeas = [\"...\"], \
       \draftDelta = \"...\", advance = False })\n\
-      \with your own values filled in."
+      \with your own values filled in.")
   pure
     st
       { ideas = ideas st ++ addedIdeas c
