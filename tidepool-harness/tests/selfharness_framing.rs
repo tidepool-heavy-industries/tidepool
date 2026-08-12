@@ -136,4 +136,23 @@ async fn render_output_is_the_answerer_system_message() {
         answerer_system.contains("finalize @T"),
         "the narrow answerer instruction must be appended after render's output, got:\n{answerer_system}"
     );
+
+    // The answerer's System message advertises exactly its OWN row's
+    // effects (AskUser/Fork/Finalize), never the OUTER loop's row
+    // (RunLLMTurn/AskUser) — the outer loop's `RunLLMTurn` card must not
+    // leak into the nested answerer's framing.
+    let runllmturn_card = format!("**{}**", tidepool_mcp::runllmturn_decl().type_name);
+    assert!(
+        !answerer_system.contains(&runllmturn_card),
+        "the answerer's System message must NOT advertise the outer row's \
+         RunLLMTurn card, got:\n{answerer_system}"
+    );
+    for decl in answerer_decls() {
+        let card = format!("**{}**", decl.type_name);
+        assert!(
+            answerer_system.contains(&card),
+            "the answerer's System message must advertise its own row's {} card, got:\n{answerer_system}",
+            decl.type_name
+        );
+    }
 }

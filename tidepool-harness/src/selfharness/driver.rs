@@ -1889,13 +1889,12 @@ impl SelfHarnessDriver {
     /// Evaluate `render(state)` against the outer session, then compose the
     /// full system message the answerer works under — author output first,
     /// then the prior compaction summary (if any), then the loop-iteration
-    /// count, then the OUTER loop's own Available-effects section (folded
-    /// over [`outer_decls`] — `RunLLMTurn`/`AskUser`, the `loop`/`render`
-    /// author's own surface, distinct from the nested answerer's
-    /// [`answerer_decls`]). (Capability/finalization instructions for the
-    /// NESTED answerer are appended by the caller that builds
-    /// `self.answerer_framing`, via [`answerer_framing_suffix`].) `render`
-    /// itself takes only `State`
+    /// count. This composed text becomes `prompt_before`/`prompt_after`; it
+    /// carries NO effects section of its own — the OUTER loop's own
+    /// Available-effects section (folded over [`outer_decls`]) is never
+    /// shown to the nested answerer, which sees only its own row's section
+    /// (appended by the caller that builds `self.answerer_framing`, via
+    /// [`answerer_framing_suffix`]). `render` itself takes only `State`
     /// (`plans/self-iterating-harness/15-generic-surface-wave.md`, "Runtime
     /// context is the runtime's job") — the compaction summary and the
     /// iteration count are runtime facts the AUTHOR no longer states.
@@ -1958,8 +1957,6 @@ impl SelfHarnessDriver {
             framing.push_str(summary);
         }
         framing.push_str(&format!("\n\nLoop count so far: {}.", self.iteration));
-        framing.push_str("\n\n");
-        framing.push_str(&engine::available_effects_section(&outer_decls()));
         Ok(framing)
     }
 
