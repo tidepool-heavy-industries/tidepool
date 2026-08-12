@@ -434,6 +434,14 @@ pub struct TurnTemplate<'a> {
     /// block by its FIRST occurrence, and there is only ever one user block)
     /// — an extra entry's code is never treated as user-authored input.
     pub extra_entries: &'a [(&'a str, &'a str)],
+    /// When `true`, entry bodies render `toJSON _r`/`toWire _r` with NO
+    /// `paginateResult` wrapper. Pagination is DISPLAY semantics — a stub
+    /// replaces oversize structure — so any caller that round-trips an
+    /// entry's JSON back into a typed value (the self-harness state crossing)
+    /// must opt out or watch its state decode fail once it outgrows the page
+    /// bound (an `ideas` array stubbed to a string was the live failure).
+    /// Default `false`: every pre-existing caller's bytes are unchanged.
+    pub unpaginated: bool,
 }
 
 impl TurnTemplate<'_> {
@@ -582,7 +590,9 @@ impl TurnTemplate<'_> {
             out.push_str("  kvSet \"__sayChars\" (toJSON (0 :: Int))\n");
         }
         out.push_str(&format!("  _r <- {binder}\n"));
-        if let Some(b) = self.budget {
+        if self.unpaginated {
+            out.push_str(&format!("  pure ({render_call} {rendered})\n"));
+        } else if let Some(b) = self.budget {
             out.push_str("  _scV <- kvGet \"__sayChars\"\n");
             out.push_str("  let _sayC = case _scV of { Just b -> case b ^? _Int of { Just n -> n; _ -> 0 }; Nothing -> 0 }\n");
             out.push_str(&format!(

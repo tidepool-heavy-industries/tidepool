@@ -973,6 +973,12 @@ pub fn template_turn_for_fused(
         helpers,
         anchor_result: finalize_pin_active(stack),
         extra_entries,
+        // The fused entries' JSON is DRIVER-CONSUMED, not displayed: the loop
+        // entry's output round-trips back in as the next cycle's State, and
+        // the render entry feeds the operator page whole. Pagination here
+        // stubbed the state's `ideas` array to a string once it outgrew 4096
+        // bytes, killing the next cycle's decode.
+        unpaginated: true,
         ..Default::default()
     }
     .render()
