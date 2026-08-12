@@ -129,7 +129,7 @@ pub struct CycleOutcome {
 /// right for data), or a machine-side handle whose payload is DELIVERED
 /// verbatim on the shared heap — the closure path (pillar B; the reason the
 /// collapse exists).
-pub(crate) enum FinalAnswer {
+pub enum FinalAnswer {
     Value(Value),
     Handle(tidepool_codegen::jit_machine::ValueHandle),
 }
