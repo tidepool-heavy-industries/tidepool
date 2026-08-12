@@ -97,13 +97,26 @@ every intermediate commit builds.
    `bound_root` (the slot path already returns Project/Render roots inline —
    same `!Send` discipline; see `plans/unpark/suspendable-materialization.md`
    §6.2).
-2. `ResumeInput` gains an in-heap variant (resume a parked frame with an
-   already-tenured heap value by RootSlot, bypassing response
-   materialization) — this is how a finalized CLOSURE is delivered into the
-   loop's parked continuation on the same heap. Data answers keep the existing
-   materialization path.
-3. Extend the realm adversarial suite: Project/Render parks under poison/verify;
-   heap-value resume of a closure into a sibling frame.
+2. **Atomic cross-frame delivery**: `resume_parked_with_finalized(target:
+   ContinuationId, source: ContinuationId, ...)` — resume frame `target` with
+   the finalized closure payload of frame `source`, entirely machine-internal
+   (no `RootSlot` — which is `!Send` — ever crosses into upper layers). The op
+   consumes `source` (frame removed, stowed root deregistered, finalized root
+   ownership transferred for exactly the resume's duration), and the required
+   GC ordering (root stays registered until the value is installed in the
+   resumed continuation) is a machine invariant, not a caller convention.
+   Data answers keep the existing `ResumeInput::Answer` materialization path.
+3. **`drain_realm(realm: RealmId)`** — atomic realm retirement: every frame
+   owned by the realm removed, its stowed roots deregistered, untaken
+   finalized roots dropped (their persistent-root registrations handled per
+   the existing `take_finalized_root` doc), sibling realms untouched, and the
+   rooting receipt (`stowed_roots_count() == parked_count()`) true before and
+   after. Per-frame `resume_parked(id, Abort)` exists but a loop over ids in
+   upper layers is exactly the ownership protocol that gets violated.
+4. Extend the realm adversarial suite: Project/Render parks under
+   poison/verify; `resume_parked_with_finalized` delivering a closure into a
+   sibling frame with forced GC between take and install; `drain_realm` with
+   parked finalize frames + untaken roots; receipts throughout.
 
 ### Phase 1 — runtime session conversion (tidepool-runtime)
 
@@ -155,8 +168,19 @@ codegen CLAUDE.md + the parking contract's §3 internal list.
 - Outer session moves INTO the registry (driver holds its SessionId); it gains
   a `SessionLib` decl plane with the pure-decls env + define-time guards
   (above). Answerer nodes map `session_of` → the outer SessionId;
-  `terminate_node` becomes realm-scoped for such nodes (cancel realm, drop its
-  parked frames, NEVER remove the shared session).
+  `terminate_node` becomes realm-scoped for such nodes (Phase 0's
+  `drain_realm`, NEVER removing the shared session).
+- **Namespace visibility rules (origin-scoped source visibility over one
+  heap).** Every session binding/decl carries its ORIGIN (outer-author vs
+  answerer/model). Model-authored bindings are importable by later ANSWERER
+  fragments (that is the living structure) but are NEVER auto-imported into
+  outer render/loop compiles — the authored harness must not silently depend
+  on model-authored names (an outer compile that wants one names it
+  explicitly, which is a visible act in the authored file). Collision inside
+  the model namespace keeps the existing generational shadowing (newest gen
+  wins); a model binding colliding with an outer-author name is REJECTED at
+  define time, not shadowed. Model bindings survive answerer-node retirement
+  by design (they belong to the session, not the node).
 - Answerer turns compile exactly as today (`turn_target(Some((ty, imports)))`,
   per-type effects dir, anchored template) but RUN as parked fragments on the
   outer machine under the node's RealmId. askUser/note/fork suspensions park
@@ -168,21 +192,49 @@ codegen CLAUDE.md + the parking contract's §3 internal list.
 - Extract: `checkRunLLMTurnType` admits pure arrows (still rejects `M`/`Eff`
   occurrences and polymorphism); `mkBoundBinders` row-mention guard; decl-plane
   import guard. The R0 comment rewritten to state the new rule.
-- Fork children: UNCHANGED (own sessions, parallel fanout, source-crossed
-  answers). The collapse is self-harness-scoped; multi-trust-domain harnesses
-  keep per-node isolation.
+- Fork children: UNCHANGED (own conversations, parallel fanout, answers
+  compiled as source against the suspended target session). **A
+  function-valued contract row EXCLUDES `Fork` in v1**: the row builder drops
+  the Fork decl when the contract type contains an arrow, so an answerer for a
+  higher-order hole structurally cannot invoke a verb whose delivery path
+  can't carry its result. (The crossing itself is not the blocker — a child's
+  `resume expr` compiles against the shared session, so a child-authored
+  lambda is born in the right heap; what breaks is `run_child`'s result
+  plumbing round-tripping through a bridged Rust `Value`, where a closure
+  becomes `CLOSURE_SENTINEL`. Generalizing heap-direct delivery to fork
+  answers is Phase 6, plumbing not architecture.)
 - Acceptance: the promoted fn-finalize spike (two cycles,
   `finalize @(State -> State)` composing across loops); living-structure test
   (helper/value bound in loop N referenced in loop N+2); guard tests (M-typed
   decl and M-nested bind rejected loudly, attributed to the model's turn).
 
-### Phase 5 — companion + docs
+### Phase 5 — companion + docs + the lifetime boundary
 
 Companion loop moves to `runLLMTurn @(State -> State)`; render gains the
 legible-loss line for restart (living structure is not durable). CLAUDE.md
 rewrites (harness, codegen, runtime session, repl if touched); retire
-`ChildSuspended` prose everywhere; memory instrumentation (fragment count,
-machine VSZ/RSS at loop boundaries) feeding the rebirth policy decision.
+`ChildSuspended` prose everywhere.
+
+**Machine lifetime (resolves the contract conflict — see Locked decision 2 as
+amended).** The parking contract's §2(c) ("an immortal unified machine is
+out") is KNOWINGLY SUPERSEDED for the self-harness consumer, because living
+structure across loops requires the machine to outlive loops — that is the
+feature. The same commit that lands the consumer amends the contract:
+"cycle" for this consumer = one loop for answerer realms (drained at loop
+end, complying as written); the machine itself is bounded not by cycles but
+by an ENFORCED CEILING — a hard fragment-count/RSS bound at which the driver
+refuses the next loop with a legible "machine at capacity: bounce or rebirth
+required" error instead of growing silently. Instrumentation (fragment count,
+machine VSZ/RSS at loop boundaries) tunes the bound and informs a future
+rebirth policy; it does not substitute for the bound existing from day one.
+
+### Phase 6 — higher-order-compatible delegation
+
+Generalize heap-direct answer delivery to fork children (`run_child` result
+plumbing stops round-tripping closures through bridged `Value`), then restore
+`Fork` to function-valued contract rows. Separate from the collapse landing
+by design (codex review 2026-08-13): the no-fork spike proves the
+architecture without coupling it to fanout plumbing.
 
 ## Locked decisions (interviewed 2026-08-13; do not re-derive)
 
@@ -190,9 +242,12 @@ machine VSZ/RSS at loop boundaries) feeding the rebirth policy decision.
    resume for any parked hole by id, matching the machine contract. The driver
    behaves LIFO today as a matter of flow, not enforcement. This keeps N
    concurrently-open operator forms / interleaved holes representable later.
-2. **Machine lifetime: instrument now, decide later.** Phase 5 logs fragment
-   count + machine RSS/VSZ at loop boundaries; operator bounce remains the only
-   rebirth until dogfood evidence picks a policy. No speculative K-loop or
+2. **Machine lifetime: enforced ceiling now, policy from evidence.** (Amended
+   after codex review 2026-08-13 — instrumentation alone does not discharge
+   the parking contract's §2(c).) A hard fragment-count/RSS ceiling with a
+   legible refusal exists from the first collapsed build; instrumentation
+   tunes it and informs a future rebirth policy. The contract is amended in
+   the consumer-landing commit (see Phase 5). No speculative K-loop or
    compaction-coupled rebirth.
 3. **Outer session ownership: registry slot.** The outer session moves into
    `SessionRegistry`; the driver holds its SessionId. Uniform checkout/restore
