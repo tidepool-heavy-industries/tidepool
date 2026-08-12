@@ -265,6 +265,12 @@ fn try_park_fragment(
         ParkKind::Plain,
         handled_prefix,
     )? {
+        ParkedOutcome::CompletedProject { .. } | ParkedOutcome::CompletedRender { .. } => {
+            unreachable!(
+                "this test parks only Plain/Binding turns - Project/Render \
+                 completions cannot be produced for them"
+            )
+        }
         ParkedOutcome::Suspended { id, request, .. } => {
             assert_eq!(expect_int(&request), req, "fragment ask payload");
             Ok(id)
@@ -304,6 +310,12 @@ fn resume_and_verify(
     {
         ParkedOutcome::Completed { value, .. } => {
             assert_pair_result(&value, expect_captured, answer)
+        }
+        ParkedOutcome::CompletedProject { .. } | ParkedOutcome::CompletedRender { .. } => {
+            unreachable!(
+                "this test parks only Plain/Binding turns - Project/Render \
+                 completions cannot be produced for them"
+            )
         }
         ParkedOutcome::Suspended { .. } => panic!("resume should complete, not re-suspend"),
     }
@@ -852,6 +864,12 @@ fn establishment_on_completion_then_refuses_disagreeing() {
             .expect("a non-suspending turn with a non-empty prefix must be allowed to complete")
         {
             ParkedOutcome::Completed { value, .. } => assert_eq!(expect_int(&value), 42),
+            ParkedOutcome::CompletedProject { .. } | ParkedOutcome::CompletedRender { .. } => {
+                unreachable!(
+                    "this test parks only Plain/Binding turns - Project/Render \
+                     completions cannot be produced for them"
+                )
+            }
             ParkedOutcome::Suspended { .. } => panic!("build_completing_value never suspends"),
         }
         // Nothing was parked — a completing turn leaves no frame — but the

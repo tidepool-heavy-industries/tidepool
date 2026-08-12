@@ -534,6 +534,12 @@ impl Session {
                 self.assert_rooting_receipt();
                 Ok(Step::Completed)
             }
+            Ok(ParkedOutcome::CompletedProject { .. } | ParkedOutcome::CompletedRender { .. }) => {
+                unreachable!(
+                    "this harness parks only ParkKind::Plain turns — Project/Render \
+                     completions cannot be produced for them"
+                )
+            }
             Err(e) => {
                 self.parked = None;
                 // A failed turn is a quiescent point too — the receipt has to

@@ -4,9 +4,39 @@ Written for the typed-subagent wave (PRD 18), whose `Agent` effect consumes this
 machinery, so it reads this API from a written contract instead of reverse-engineering
 `jit_machine.rs` internals. Sequenced to spawn after the realm landing.
 
-STATUS: FROZEN. Invariants and the internal/public split settled at step 2; the
-signature table (§4) filled at fold, once step 3 had settled the parked entries'
-signature. This is the contract that ships.
+STATUS: FROZEN, with one deliberate ADDITIVE amendment (below). Invariants and
+the internal/public split settled at step 2; the signature table (§4) filled at
+fold, once step 3 had settled the parked entries' signature. This is the
+contract that ships.
+
+## Amendment 2026-08-14 (one-session plan, Phase 0) — additive
+
+The one-session consumer (`plans/one-session.md`) extended the API. Everything
+below in §1-§4 remains true; these are additions:
+
+- **`ParkKind` covers all four materialization policies** — `Project {
+  n_fields }` and `Render { field0_forced }` joined `Plain`/`Binding`.
+  `ParkedOutcome` gained the matching INLINE completions
+  (`CompletedProject { roots }`, `CompletedRender { root, rendered }`);
+  `Completed { value, bound_root }` is unchanged for `Plain`/`Binding`.
+- **`ValueHandle`** — an opaque, `Send` id over a machine-side persistent
+  root: mint via `handle_from_finalized(id)` (the frame stays parked; the
+  payload mints exactly one handle), observe via `observe_handle(h)` (the ONE
+  serialization seam — a closure payload observes as `CLOSURE_SENTINEL`),
+  deliver via `ResumeInput::Handle(h)` (the payload pointer feeds the resumed
+  continuation VERBATIM, no materialization — this is how a closure crosses
+  between sibling frames on one heap). Handles are SCOPE-OWNED BORROWS: not
+  consumed by observe or deliver; released by `close_realm` of the owning
+  realm; a released/unknown handle is a clean typed error.
+- **`close_realm(realm) -> (frames_dropped, handles_released)`** — scope
+  exit: the realm's parked frames (stowed roots deregistered, untaken
+  finalized payload roots released), its handles, and its cancel-flag entry
+  go together; sibling realms untouched; the §1 rooting receipt holds before
+  and after; idempotent (an unknown/empty realm is `(0, 0)`).
+
+Gates: `tidepool-codegen/tests/realm_handles.rs` (H1 closure-delivery under
+GC, H2 scope-exit isolation, H3 Project/Render inline completions), alongside
+the pre-existing realm suites.
 
 ---
 

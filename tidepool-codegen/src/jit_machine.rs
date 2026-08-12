@@ -199,13 +199,35 @@ pub struct ContinuationId(pub u64);
 /// Identity of a realm — the ownership scope a parked continuation belongs to
 /// (an outer loop turn, one answerer subtree, …). Carried on the frame so a
 /// caller can group, cancel, or drain a realm's parks without tracking ids
-/// externally. The machine itself attaches no semantics to it.
+/// externally. The machine itself attaches no semantics to it beyond
+/// ownership: [`JitEffectMachine::close_realm`] is scope exit — every frame
+/// and [`ValueHandle`] the realm owns is released together, structured-
+/// concurrency style.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct RealmId(pub u64);
 
+/// Opaque, `Send`-able identity of a machine-side rooted heap value (one-
+/// session plan, pillar B — the embedder handle). Minted by
+/// [`JitEffectMachine::handle_from_finalized`] (more sources in later
+/// phases), observed via [`JitEffectMachine::observe_handle`], delivered via
+/// [`ResumeInput::Handle`], released by [`JitEffectMachine::close_realm`] of
+/// the owning realm. The `!Send` [`crate::old_space::RootSlot`] underneath
+/// never crosses an API layer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct ValueHandle(pub u64);
+
+/// One live [`ValueHandle`]'s machine-side entry: the persistent-rooted slot
+/// and the realm that owns (and will release) it.
+struct HandleEntry {
+    slot: crate::old_space::RootSlot,
+    realm: RealmId,
+}
+
 /// What kind of turn parked a continuation — the registry's spelling of the
-/// completion policy, covering the two of the single-slot path's four
-/// [`ResultMaterialization`] policies that a realm can request.
+/// completion policy, covering ALL FOUR of the [`ResultMaterialization`]
+/// policies (one-session plan, Phase 0: `Project`/`Render` joined
+/// `Plain`/`Binding` so the registry path can serve every session lane and
+/// the slot path can eventually retire).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ParkKind {
     /// A plain suspendable turn: on completion the `Done` pointer is bridged
@@ -216,17 +238,26 @@ pub enum ParkKind {
     /// (`ResultMaterialization::Bind`). `forced` deep-forces to NF before
     /// tenuring (Tier0 data) vs tenuring a Tier1 closure as-is.
     Binding { forced: bool },
+    /// A multi-binder BIND turn: on completion the `Done` tuple is
+    /// deep-forced and each of `n_fields` fields is tenured in order, the
+    /// roots returned inline (`ResultMaterialization::Project`).
+    Project { n_fields: usize },
+    /// The single-compile `it`-binding epilogue: field 1 is bridged FIRST
+    /// (aliasing-safe ordering, see [`ResultMaterialization::Render`]), then
+    /// field 0 optionally forced + tenured; both products returned inline.
+    Render { field0_forced: bool },
 }
 
 impl ParkKind {
     /// Project to the [`ResultMaterialization`] the shared suspendable
-    /// epilogue takes. The registry deliberately spells only two of the four
-    /// policies: `Project`/`Render` are single-session repl paths with no
-    /// realm counterpart, so they stay slot-path only.
+    /// epilogue takes — a one-to-one spelling since Phase 0 of the
+    /// one-session plan.
     fn materialization(self) -> ResultMaterialization {
         match self {
             ParkKind::Plain => ResultMaterialization::Value,
             ParkKind::Binding { forced } => ResultMaterialization::Bind { forced },
+            ParkKind::Project { n_fields } => ResultMaterialization::Project { n_fields },
+            ParkKind::Render { field0_forced } => ResultMaterialization::Render { field0_forced },
         }
     }
 }
@@ -290,6 +321,21 @@ pub enum ParkedOutcome {
         /// window for a second realm's completion to overwrite it before the
         /// caller reads it.
         bound_root: Option<crate::old_space::RootSlot>,
+    },
+    /// A [`ParkKind::Project`] park ran to completion: the tenured field
+    /// roots, in field order, returned INLINE (same no-machine-stash argument
+    /// as `bound_root`).
+    CompletedProject {
+        /// The tenured roots of each projected field, in field order.
+        roots: Vec<crate::old_space::RootSlot>,
+    },
+    /// A [`ParkKind::Render`] park ran to completion: field 0's tenured root
+    /// plus field 1's already-bridged render, returned INLINE.
+    CompletedRender {
+        /// Field 0's tenured root.
+        root: crate::old_space::RootSlot,
+        /// Field 1's bridged render.
+        rendered: tidepool_eval::value::Value,
     },
     /// The turn suspended and its continuation was PARKED in the registry as a
     /// registered GC root. Resume it with [`JitEffectMachine::resume_parked`].
@@ -443,8 +489,9 @@ impl ParkedRaw {
         }
     }
 
-    /// Project onto the registry path's outcome type. The registry only ever
-    /// requests `Value`/`Bind` ([`ParkKind`] has no other spelling).
+    /// Project onto the registry path's outcome type — all four
+    /// [`ParkKind`]/[`CompletedProduct`] spellings since Phase 0 of the
+    /// one-session plan.
     fn into_parked(self) -> ParkedOutcome {
         match self {
             ParkedRaw::Completed(CompletedProduct::Value(value)) => ParkedOutcome::Completed {
@@ -457,10 +504,15 @@ impl ParkedRaw {
                     bound_root: Some(slot),
                 }
             }
-            ParkedRaw::Completed(_) => unreachable!(
-                "the parked registry path requests only Value/Bind (ParkKind has \
-                 no Project/Render spelling)"
-            ),
+            ParkedRaw::Completed(CompletedProduct::Project(roots)) => {
+                ParkedOutcome::CompletedProject { roots }
+            }
+            ParkedRaw::Completed(CompletedProduct::Render { slot, rendered }) => {
+                ParkedOutcome::CompletedRender {
+                    root: slot,
+                    rendered,
+                }
+            }
             ParkedRaw::Suspended {
                 request,
                 has_finalized_closure,
@@ -731,10 +783,25 @@ pub struct JitEffectMachine {
     /// `cancel_flag`, so cancelling one realm cannot abort a sibling realm's
     /// run — cancellation is realm-scoped, not machine-scoped, because a
     /// realm's continuation ids change on every re-suspension and cannot live
-    /// only on the frame. Never shrinks: a cancelled realm's flag is not
-    /// removed, only cleared (see [`Self::realm_cancel_handle`]'s doc for
-    /// whether a completed run clears it).
+    /// only on the frame. Never shrinks during a realm's life: a cancelled
+    /// realm's flag is not removed, only cleared (see
+    /// [`Self::realm_cancel_handle`]'s doc for whether a completed run clears
+    /// it); [`Self::close_realm`] removes the closed realm's entry.
     realm_cancel_flags: HashMap<RealmId, Arc<AtomicBool>>,
+    /// The VALUE-HANDLE registry (one-session plan, pillar B): opaque,
+    /// Send-able ids over machine-side persistent roots, so upper layers pass
+    /// heap values — closures included — WITHOUT eagerly bridging them into a
+    /// Rust [`Value`] (the eager bridge substitutes `CLOSURE_SENTINEL` and is
+    /// the closure-killer on delivery paths; it remains only in
+    /// [`Self::observe_handle`], where an opaque view of an opaque value is
+    /// honest). Handles are SCOPE-OWNED BORROWS: minting does not consume the
+    /// underlying root, observing and delivering do not consume the handle,
+    /// and [`Self::close_realm`] releases every handle its realm minted.
+    value_handles: HashMap<u64, HandleEntry>,
+    /// Monotonic source of [`ValueHandle`] ids — same never-rewound
+    /// discipline as `next_continuation_id` (a released handle's id is a
+    /// clean "unknown handle" error, never a silent alias).
+    next_value_handle: u64,
     /// The machine's ESTABLISHED handled-effect prefix: the machine cannot
     /// introspect its own handler stack (`H` is a compile-time monomorphized
     /// type parameter, not runtime data), so this is the machine's runtime
@@ -1020,6 +1087,8 @@ impl JitEffectMachine {
             continuations: HashMap::new(),
             next_continuation_id: 0,
             realm_cancel_flags: HashMap::new(),
+            value_handles: HashMap::new(),
+            next_value_handle: 0,
             established_prefix: None,
         })
     }
@@ -1060,6 +1129,8 @@ impl JitEffectMachine {
             continuations: HashMap::new(),
             next_continuation_id: 0,
             realm_cancel_flags: HashMap::new(),
+            value_handles: HashMap::new(),
+            next_value_handle: 0,
             established_prefix: None,
         })
     }
@@ -2199,8 +2270,31 @@ impl JitEffectMachine {
         // self.session would alias it. The abort branch arms explicitly before
         // it returns (it never reaches the tail arm below).
 
-        let answer = match input {
-            ResumeInput::Answer(val) => val,
+        let payload = match input {
+            ResumeInput::Answer(val) => {
+                ResumePayload::Response(tidepool_effect::Response::Complete(val))
+            }
+            ResumeInput::Handle(h) => match self.value_handles.get(&h.0) {
+                // SAFETY: the slot is persistent-rooted until released, and a
+                // released handle is absent from the map — so `current()`
+                // reads the GC-current pointer of a still-rooted value.
+                Some(entry) => ResumePayload::HeapPtr(unsafe { entry.slot.current() }),
+                None => {
+                    // Same discipline as the Abort arm: nothing has run, but
+                    // the guard must still be armed so the session buffer is
+                    // restored on this early return.
+                    unsafe {
+                        _guard.arm_reclaim(
+                            &mut self.session as *mut _,
+                            machine.vmctx_mut() as *const _,
+                        );
+                    }
+                    return Err(JitError::Effect(EffectError::Handler(format!(
+                        "resume: unknown or released ValueHandle({})",
+                        h.0
+                    ))));
+                }
+            },
             ResumeInput::Abort(reason) => {
                 // A stowed machine has no thread. We do NOT run the
                 // continuation — the ask itself fails, returning
@@ -2230,7 +2324,7 @@ impl JitEffectMachine {
         let finished = match materialize_response_and_resume(
             &mut machine,
             continuation,
-            tidepool_effect::Response::Complete(answer),
+            payload,
             suspend_tag,
             "",
         ) {
@@ -2363,27 +2457,18 @@ impl JitEffectMachine {
                         Ok(ParkedRaw::Completed(CompletedProduct::Bind { value, slot }))
                     }
                     Materialized::Project(slots) => {
-                        // Project is SLOT-PATH ONLY: `ParkKind` (the registry's
-                        // spelling of the policy) has no Project variant, so no
-                        // parked entry can request it.
-                        debug_assert!(
-                            matches!(park, ParkTarget::Slot),
-                            "Project materialization is slot-path only — ParkKind cannot request it"
-                        );
                         // The slots ARE the products; they ride out in the
-                        // completion, so nothing is stashed and nothing has to be
-                        // taken back off the machine.
+                        // completion on BOTH paths (slot: `Suspendable<T>`;
+                        // registry: `ParkedOutcome::CompletedProject`), so
+                        // nothing is stashed and nothing has to be taken back
+                        // off the machine.
                         Ok(ParkedRaw::Completed(CompletedProduct::Project(slots)))
                     }
                     Materialized::Render(slot, rendered) => {
-                        debug_assert!(
-                            matches!(park, ParkTarget::Slot),
-                            "Render materialization is slot-path only — ParkKind cannot request it"
-                        );
                         // No second bridge: `rendered` IS field 1, already
                         // bridged inside `materialize` BEFORE field 0 was
                         // tenured (the aliasing-safe ordering). Both products
-                        // ride out in the completion.
+                        // ride out in the completion on both paths.
                         Ok(ParkedRaw::Completed(CompletedProduct::Render {
                             slot,
                             rendered,
@@ -3592,6 +3677,158 @@ impl JitEffectMachine {
     pub fn parked_realm(&self, id: ContinuationId) -> Option<RealmId> {
         self.continuations.get(&id).map(|f| f.realm)
     }
+
+    // --- value handles + scope exit (one-session plan, pillars A/B) --------
+
+    /// Mint a [`ValueHandle`] over the closure-valued `finalize` payload of
+    /// the frame parked under `id` (tenured + persistent-rooted at park time).
+    /// The frame STAYS parked and rooted; only its own stash of the slot is
+    /// moved into the handle registry, owned by the frame's realm — so
+    /// [`Self::close_realm`] of that realm releases the payload exactly once,
+    /// whether or not the handle was ever observed or delivered. `None`
+    /// unless `id` names a parked frame holding an untaken finalized payload.
+    ///
+    /// Supersedes [`Self::take_parked_finalized_root`] for new callers: a
+    /// handle is `Send`, releasable, and deliverable via
+    /// [`ResumeInput::Handle`]; a raw `RootSlot` is none of those.
+    pub fn handle_from_finalized(&mut self, id: ContinuationId) -> Option<ValueHandle> {
+        let frame = self.continuations.get_mut(&id)?;
+        let realm = frame.realm;
+        let slot = frame.finalized_root.take()?;
+        let h = ValueHandle(self.next_value_handle);
+        self.next_value_handle += 1;
+        self.value_handles.insert(h.0, HandleEntry { slot, realm });
+        Some(h)
+    }
+
+    /// The realm owning `handle`, if it is live (minted and not yet released
+    /// by [`Self::close_realm`]).
+    pub fn handle_realm(&self, handle: ValueHandle) -> Option<RealmId> {
+        self.value_handles.get(&handle.0).map(|e| e.realm)
+    }
+
+    /// Number of live value handles (test/diagnostic accessor).
+    pub fn value_handle_count(&self) -> usize {
+        self.value_handles.len()
+    }
+
+    /// OBSERVE a handle's payload: bridge its GC-current heap value through
+    /// the TOLERANT bridge into an owned [`tidepool_eval::value::Value`] —
+    /// data bridges fully (forcing thunks as needed), a closure field renders
+    /// as the `CLOSURE_SENTINEL` stub. This is the ONE place a handle's
+    /// payload is ever serialized (pillar B: observation by serialization),
+    /// and it is honest — an opaque view of an opaque value — never a lossy
+    /// delivery. The handle is not consumed.
+    ///
+    /// Forcing executes JIT code, so this installs the same run shell a
+    /// resume does (signal safety, registries, a `CompiledEffectMachine`) and
+    /// re-arms session-buffer reclaim on exit; a forced thunk may allocate
+    /// and collect, which is safe because the handle's slot is a persistent
+    /// root and every parked frame is a stowed root.
+    ///
+    /// # Panics
+    /// Panics on a non-session machine (same constraint as every parked
+    /// entry — heap retention requires [`Self::compile_session`]).
+    pub fn observe_handle(
+        &mut self,
+        handle: ValueHandle,
+    ) -> Result<tidepool_eval::value::Value, JitError> {
+        let entry = match self.value_handles.get(&handle.0) {
+            Some(e) => e,
+            None => {
+                return Err(JitError::Effect(EffectError::Handler(format!(
+                    "observe: unknown or released ValueHandle({})",
+                    handle.0
+                ))))
+            }
+        };
+        let slot = entry.slot;
+        let tags = self.tags.map_err(JitError::MissingConTags)?;
+        crate::signal_safety::install();
+        let mut _guard = self.install_registries_with_cancel_flag(self.cancel_flag.clone());
+        // SAFETY: finalized JIT code pointer; the entry func is never called
+        // here (no drive), but `CompiledEffectMachine` needs one for its own
+        // tail-call resolution if a forced thunk trampolines.
+        let func_ptr: unsafe extern "C" fn(*mut VMContext) -> *mut u8 =
+            unsafe { std::mem::transmute(self.pipeline.get_function_ptr(self.func_id)) };
+        let vmctx = self.make_session_vmctx();
+        let mut machine = CompiledEffectMachine::new(func_ptr, vmctx, tags);
+        // SAFETY: machine_state outlives this observation (owned by self).
+        machine.vmctx_mut().machine_state = &mut self.machine_state as *mut MachineState;
+        let vmctx_ptr = machine.vmctx_mut() as *mut VMContext;
+        // SAFETY: the slot is persistent-rooted until release; `current()` is
+        // the GC-current pointer, re-read AFTER the registries are installed.
+        let bridge_res = unsafe {
+            let live = slot.current();
+            crate::signal_safety::with_signal_protection(|| {
+                heap_bridge::heap_to_value_forcing_tolerant(live, vmctx_ptr)
+            })
+        }
+        .map_err(JitError::Signal);
+        // SAFETY: as in `resume_applied` — the guard's reclaim reads the
+        // post-run buffer/cursor (forcing may have allocated) into
+        // self.session.
+        unsafe {
+            _guard.arm_reclaim(&mut self.session as *mut _, machine.vmctx_mut() as *const _);
+        }
+        let value = bridge_res?.map_err(JitError::HeapBridge)?;
+        Ok(value)
+    }
+
+    /// SCOPE EXIT (pillar A — structured concurrency): close `realm`,
+    /// releasing everything it owns, atomically from the caller's view:
+    ///
+    /// - every parked frame owned by the realm is removed and its stowed
+    ///   continuation root deregistered;
+    /// - each such frame's untaken finalized payload root, and every
+    ///   [`ValueHandle`] the realm owns, has its persistent-root registration
+    ///   deregistered (the 8-byte slot cell stays with `OldSpace` for the
+    ///   machine's life; the VALUE it pinned becomes collectable once nothing
+    ///   else reaches it);
+    /// - the realm's cancel flag entry is dropped;
+    /// - sibling realms and their frames/handles are untouched;
+    /// - the rooting receipt (`stowed_roots_count() == parked_count()`) holds
+    ///   before and after.
+    ///
+    /// Returns `(frames_dropped, handles_released)`. Closing a realm that
+    /// owns nothing is a no-op `(0, 0)` — idempotent by construction, so a
+    /// retirement path that can race a wholesale teardown stays safe.
+    pub fn close_realm(&mut self, realm: RealmId) -> (usize, usize) {
+        let ids: Vec<ContinuationId> = self
+            .continuations
+            .iter()
+            .filter(|(_, f)| f.realm == realm)
+            .map(|(&id, _)| id)
+            .collect();
+        for id in &ids {
+            let mut frame = self
+                .continuations
+                .remove(id)
+                .expect("id collected from the map above; &mut self held throughout");
+            let slot: *mut *mut u8 = &mut *frame.cell;
+            self.machine_state.deregister_stowed_root(slot);
+            if let Some(root) = frame.finalized_root.take() {
+                self.machine_state.deregister_persistent_root(root.addr());
+            }
+        }
+        let hids: Vec<u64> = self
+            .value_handles
+            .iter()
+            .filter(|(_, e)| e.realm == realm)
+            .map(|(&k, _)| k)
+            .collect();
+        for k in &hids {
+            let entry = self
+                .value_handles
+                .remove(k)
+                .expect("key collected from the map above; &mut self held throughout");
+            self.machine_state
+                .deregister_persistent_root(entry.slot.addr());
+        }
+        self.realm_cancel_flags.remove(&realm);
+        self.assert_rooting_receipt();
+        (ids.len(), hids.len())
+    }
 }
 
 /// RAII proof that a nested child is running against a suspended parent.
@@ -3805,6 +4042,18 @@ pub enum ResumeInput {
     /// Feed the (already-validated, bridged) answer value into the suspended
     /// ask and continue driving.
     Answer(tidepool_eval::value::Value),
+    /// Feed a machine-side rooted heap value — a [`ValueHandle`] minted on
+    /// THIS machine — as the answer, WITHOUT materializing a bridged
+    /// [`tidepool_eval::value::Value`] into the heap: the handle's GC-current
+    /// pointer is the response, verbatim. This is how a closure (or any
+    /// opaque value) is DELIVERED into a sibling continuation on the same
+    /// heap (one-session plan, pillar B). No A5 NF-force applies: the payload
+    /// is already a real heap value whose thunks are ordinary lazy structure,
+    /// not a bridged answer that could smuggle a bottom past validation. The
+    /// handle is NOT consumed (scope-owned borrow; released by
+    /// [`JitEffectMachine::close_realm`]). An unknown/released handle is a
+    /// clean typed error before anything runs.
+    Handle(ValueHandle),
     /// Abort the suspended ask WITHOUT running the continuation (a stowed
     /// machine has no thread) — returns `JitError::Effect(EffectError::
     /// Handler("ask aborted by caller: {reason}"))` directly, the same
@@ -4021,7 +4270,7 @@ fn drive_effect_loop<U, H: DispatchEffect<U>>(
                 yield_result = materialize_response_and_resume(
                     machine,
                     continuation,
-                    response,
+                    ResumePayload::Response(response),
                     tag,
                     resume_suffix,
                 )?;
@@ -4031,13 +4280,24 @@ fn drive_effect_loop<U, H: DispatchEffect<U>>(
     }
 }
 
-/// Materialize a handler [`tidepool_effect::Response`] into a heap pointer and
-/// resume the machine's `continuation` with it, returning the next [`Yield`].
+/// What a resume feeds the continuation: a bridged handler
+/// [`tidepool_effect::Response`] to MATERIALIZE into the heap, or an
+/// already-in-heap pointer (a [`ValueHandle`]'s persistent-rooted payload)
+/// used VERBATIM — the delivery half of pillar B's "delivery by handle,
+/// observation by serialization".
+enum ResumePayload {
+    Response(tidepool_effect::Response),
+    HeapPtr(*mut u8),
+}
+
+/// Materialize a resume payload into a heap pointer and resume the machine's
+/// `continuation` with it, returning the next [`Yield`].
 ///
 /// Shared so [`JitEffectMachine::resume_suspended`] re-enters a stowed turn
 /// through the EXACT same materialization path (lazy `Stream` park,
 /// long-spine re-park, eager `value_to_heap`) — one body, no drift-prone
-/// second copy.
+/// second copy. A [`ResumePayload::HeapPtr`] skips materialization entirely
+/// (the pointer is already a rooted heap object).
 ///
 /// `continuation` is GC-rooted here for the duration: response materialization
 /// (`value_to_heap` / `materialize_cons_list`) can
@@ -4048,7 +4308,7 @@ fn drive_effect_loop<U, H: DispatchEffect<U>>(
 fn materialize_response_and_resume(
     machine: &mut CompiledEffectMachine,
     mut continuation: *mut u8,
-    response: tidepool_effect::Response,
+    response: ResumePayload,
     tag: u64,
     resume_suffix: &str,
 ) -> Result<Yield, JitError> {
@@ -4072,11 +4332,17 @@ fn materialize_response_and_resume(
     const MAX_EFFECT_RESPONSE_NODES: usize = 100_000;
 
     let plan = match response {
-        tidepool_effect::Response::List {
+        // A ValueHandle's payload: already a real (old-space, persistent-
+        // rooted) heap object — no materialization, no size caps, the pointer
+        // IS the response. This is pillar B's delivery path: a closure
+        // crosses into the continuation verbatim, where the eager bridge
+        // would have substituted CLOSURE_SENTINEL.
+        ResumePayload::HeapPtr(p) => ResponsePlan::Ready(p),
+        ResumePayload::Response(tidepool_effect::Response::List {
             items,
             cons_id,
             nil_id,
-        } => {
+        }) => {
             let nodes = 3 * items.len() + items.iter().map(|v| v.node_count()).sum::<usize>();
             if nodes > MAX_EFFECT_RESPONSE_NODES {
                 return Err(JitError::EffectResponseTooLarge {
@@ -4100,7 +4366,7 @@ fn materialize_response_and_resume(
             }
             ResponsePlan::Ready(p)
         }
-        tidepool_effect::Response::Complete(resp_val) => {
+        ResumePayload::Response(tidepool_effect::Response::Complete(resp_val)) => {
             let spine =
                 probe_list_spine(&resp_val).filter(|&(_, _, len)| len > LONG_SPINE_THRESHOLD_NODES);
             match spine {

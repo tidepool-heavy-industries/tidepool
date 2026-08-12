@@ -287,6 +287,12 @@ fn two_realms_with_colliding_domain_ids_do_not_shadow_each_other() {
             )
             .expect("realm A run_fragment_suspendable_parked")
         {
+            ParkedOutcome::CompletedProject { .. } | ParkedOutcome::CompletedRender { .. } => {
+                unreachable!(
+                    "this test parks only Plain/Binding turns - Project/Render \
+                     completions cannot be produced for them"
+                )
+            }
             ParkedOutcome::Suspended { id, request, .. } => {
                 assert_eq!(expect_int(&request), 1);
                 id
@@ -320,6 +326,12 @@ fn two_realms_with_colliding_domain_ids_do_not_shadow_each_other() {
             )
             .expect("realm B run_fragment_suspendable_parked")
         {
+            ParkedOutcome::CompletedProject { .. } | ParkedOutcome::CompletedRender { .. } => {
+                unreachable!(
+                    "this test parks only Plain/Binding turns - Project/Render \
+                     completions cannot be produced for them"
+                )
+            }
             ParkedOutcome::Suspended { id, request, .. } => {
                 assert_eq!(expect_int(&request), 2);
                 id
@@ -355,6 +367,12 @@ fn two_realms_with_colliding_domain_ids_do_not_shadow_each_other() {
                 }
                 other => panic!("expected Pair(Banana, C1 answer), got {other:?}"),
             },
+            ParkedOutcome::CompletedProject { .. } | ParkedOutcome::CompletedRender { .. } => {
+                unreachable!(
+                    "this test parks only Plain/Binding turns - Project/Render \
+                     completions cannot be produced for them"
+                )
+            }
             ParkedOutcome::Suspended { .. } => panic!("resume should complete, not re-suspend"),
         }
         assert_eq!(machine.parked_count(), 1);
@@ -383,6 +401,12 @@ fn two_realms_with_colliding_domain_ids_do_not_shadow_each_other() {
                 }
                 other => panic!("expected Pair(Apple, C1 answer), got {other:?}"),
             },
+            ParkedOutcome::CompletedProject { .. } | ParkedOutcome::CompletedRender { .. } => {
+                unreachable!(
+                    "this test parks only Plain/Binding turns - Project/Render \
+                     completions cannot be produced for them"
+                )
+            }
             ParkedOutcome::Suspended { .. } => panic!("resume should complete, not re-suspend"),
         }
         assert_eq!(machine.parked_count(), 0);

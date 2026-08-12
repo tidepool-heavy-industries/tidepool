@@ -265,6 +265,12 @@ impl Session {
             &self.handled_prefix,
         );
         match outcome {
+            Ok(ParkedOutcome::CompletedProject { .. } | ParkedOutcome::CompletedRender { .. }) => {
+                unreachable!(
+                    "this harness parks only ParkKind::Plain turns - Project/Render \
+                     completions cannot be produced for them"
+                )
+            }
             Ok(ParkedOutcome::Completed { value, .. }) => {
                 tidepool_runtime::value_to_json(&value, &self.table, 0)
             }

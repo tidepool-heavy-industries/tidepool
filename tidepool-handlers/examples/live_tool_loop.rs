@@ -435,6 +435,12 @@ fn run() -> i32 {
     println!("\n--- result ---");
     println!("wall clock: {elapsed:?}");
     let program_ok = match outcome {
+        Ok(ParkedOutcome::CompletedProject { .. } | ParkedOutcome::CompletedRender { .. }) => {
+            unreachable!(
+                "this harness parks only ParkKind::Plain turns - Project/Render \
+                     completions cannot be produced for them"
+            )
+        }
         Ok(ParkedOutcome::Completed { value, .. }) => {
             let json = tidepool_runtime::value_to_json(&value, &table, 0);
             println!(

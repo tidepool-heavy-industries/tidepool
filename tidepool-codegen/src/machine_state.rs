@@ -437,6 +437,22 @@ impl MachineState {
         self.persistent_roots.borrow().len()
     }
 
+    /// Deregister ONE persistent root by its slot address — the persistent
+    /// sibling of [`Self::deregister_stowed_root`], with the same
+    /// remove-by-position semantics (a slot registered once is removed once;
+    /// an already-removed slot is a no-op, so release paths that can race a
+    /// wholesale teardown stay idempotent). Added for realm-scoped release
+    /// (`JitEffectMachine::close_realm`): a released value's slot cell stays
+    /// allocated (owned by `OldSpace::slots` for the machine's life — 8 bytes),
+    /// but the GC stops tracing and rewriting it, so the value it pinned can
+    /// be collected once nothing else reaches it.
+    pub(crate) fn deregister_persistent_root(&self, slot: *mut *mut u8) {
+        let mut roots = self.persistent_roots.borrow_mut();
+        if let Some(pos) = roots.iter().position(|&s| s == slot) {
+            roots.remove(pos);
+        }
+    }
+
     pub(crate) fn clear_persistent_roots(&self) {
         self.persistent_roots.borrow_mut().clear();
     }

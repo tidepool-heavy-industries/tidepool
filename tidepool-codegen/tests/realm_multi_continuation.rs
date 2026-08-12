@@ -607,6 +607,12 @@ fn park_entry(
         .run_suspendable_parked(table, &mut NoDispatch, &(), ASK_TAG, realm, &[])
         .expect("entry run_suspendable_parked")
     {
+        ParkedOutcome::CompletedProject { .. } | ParkedOutcome::CompletedRender { .. } => {
+            unreachable!(
+                "this test parks only Plain/Binding turns - Project/Render \
+                 completions cannot be produced for them"
+            )
+        }
         ParkedOutcome::Suspended { id, request, .. } => {
             assert_eq!(
                 expect_int(&request),
@@ -654,6 +660,12 @@ fn park_fragment(
         )
         .expect("fragment run_fragment_suspendable_parked")
     {
+        ParkedOutcome::CompletedProject { .. } | ParkedOutcome::CompletedRender { .. } => {
+            unreachable!(
+                "this test parks only Plain/Binding turns - Project/Render \
+                 completions cannot be produced for them"
+            )
+        }
         ParkedOutcome::Suspended { id, request, .. } => {
             assert_eq!(expect_int(&request), req, "fragment ask payload");
             id
@@ -680,6 +692,12 @@ fn resume_and_verify(
     {
         ParkedOutcome::Completed { value, .. } => {
             assert_pair_result(&value, expect_captured, answer)
+        }
+        ParkedOutcome::CompletedProject { .. } | ParkedOutcome::CompletedRender { .. } => {
+            unreachable!(
+                "this test parks only Plain/Binding turns - Project/Render \
+                 completions cannot be produced for them"
+            )
         }
         ParkedOutcome::Suspended { .. } => panic!("resume should complete, not re-suspend"),
     }
@@ -1139,6 +1157,12 @@ fn w1_nested_mid_effect_continuation_parks_across_gc() {
             )
             .expect("w1 entry run_suspendable_parked")
         {
+            ParkedOutcome::CompletedProject { .. } | ParkedOutcome::CompletedRender { .. } => {
+                unreachable!(
+                    "this test parks only Plain/Binding turns - Project/Render \
+                     completions cannot be produced for them"
+                )
+            }
             ParkedOutcome::Suspended { id, request, .. } => {
                 assert_eq!(expect_int(&request), 9, "the suspending ask's own payload");
                 id
@@ -1170,6 +1194,12 @@ fn w1_nested_mid_effect_continuation_parks_across_gc() {
         {
             ParkedOutcome::Completed { value, .. } => {
                 assert_triple_captured_and_answer(&value, 4004, 77);
+            }
+            ParkedOutcome::CompletedProject { .. } | ParkedOutcome::CompletedRender { .. } => {
+                unreachable!(
+                    "this test parks only Plain/Binding turns - Project/Render \
+                     completions cannot be produced for them"
+                )
             }
             ParkedOutcome::Suspended { .. } => panic!("resume should complete, not re-suspend"),
         }
@@ -1213,6 +1243,12 @@ fn w2_streamed_response_tail_parks_across_gc() {
             )
             .expect("w2 entry run_suspendable_parked")
         {
+            ParkedOutcome::CompletedProject { .. } | ParkedOutcome::CompletedRender { .. } => {
+                unreachable!(
+                    "this test parks only Plain/Binding turns - Project/Render \
+                     completions cannot be produced for them"
+                )
+            }
             ParkedOutcome::Suspended { id, request, .. } => {
                 assert_eq!(expect_int(&request), 10, "the suspending ask's own payload");
                 id
@@ -1243,6 +1279,12 @@ fn w2_streamed_response_tail_parks_across_gc() {
             ParkedOutcome::Completed { value, .. } => {
                 let streamed = assert_triple_captured_and_answer(&value, 5005, 88);
                 assert_int_list(&streamed, &[10, 20, 30]);
+            }
+            ParkedOutcome::CompletedProject { .. } | ParkedOutcome::CompletedRender { .. } => {
+                unreachable!(
+                    "this test parks only Plain/Binding turns - Project/Render \
+                     completions cannot be produced for them"
+                )
             }
             ParkedOutcome::Suspended { .. } => panic!("resume should complete, not re-suspend"),
         }
@@ -1278,6 +1320,12 @@ fn w3_finalized_closure_park_survives_gc_and_resume() {
             .run_suspendable_parked(&table, &mut NoDispatch, &(), ASK_TAG, RealmId(0), &[])
             .expect("w3 entry run_suspendable_parked")
         {
+            ParkedOutcome::CompletedProject { .. } | ParkedOutcome::CompletedRender { .. } => {
+                unreachable!(
+                    "this test parks only Plain/Binding turns - Project/Render \
+                     completions cannot be produced for them"
+                )
+            }
             ParkedOutcome::Suspended {
                 id,
                 has_finalized_closure,
@@ -1329,6 +1377,12 @@ fn w3_finalized_closure_park_survives_gc_and_resume() {
             .expect("resume w3")
         {
             ParkedOutcome::Completed { value, .. } => assert_pair_result(&value, 6006, 42),
+            ParkedOutcome::CompletedProject { .. } | ParkedOutcome::CompletedRender { .. } => {
+                unreachable!(
+                    "this test parks only Plain/Binding turns - Project/Render \
+                     completions cannot be produced for them"
+                )
+            }
             ParkedOutcome::Suspended { .. } => panic!("resume should complete, not re-suspend"),
         }
         assert_rooting_receipt(&machine, 0);
@@ -1374,6 +1428,12 @@ fn w4_binding_park_case(forced: bool, captured_n: i64, req: i64, answer: i64) {
             )
             .expect("w4 fragment run_fragment_suspendable_parked")
         {
+            ParkedOutcome::CompletedProject { .. } | ParkedOutcome::CompletedRender { .. } => {
+                unreachable!(
+                    "this test parks only Plain/Binding turns - Project/Render \
+                     completions cannot be produced for them"
+                )
+            }
             ParkedOutcome::Suspended { id, request, .. } => {
                 assert_eq!(expect_int(&request), req);
                 id
@@ -1406,6 +1466,12 @@ fn w4_binding_park_case(forced: bool, captured_n: i64, req: i64, answer: i64) {
                 let bridged =
                     unsafe { heap_bridge::heap_to_value(root.current()) }.expect("bridge w4 root");
                 assert_pair_result(&bridged, captured_n, answer);
+            }
+            ParkedOutcome::CompletedProject { .. } | ParkedOutcome::CompletedRender { .. } => {
+                unreachable!(
+                    "this test parks only Plain/Binding turns - Project/Render \
+                     completions cannot be produced for them"
+                )
             }
             ParkedOutcome::Suspended { .. } => panic!("resume should complete, not re-suspend"),
         }

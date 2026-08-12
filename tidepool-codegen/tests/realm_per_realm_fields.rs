@@ -339,6 +339,12 @@ fn park_entry(
         .run_suspendable_parked(table, &mut NoDispatch, &(), ASK_TAG, realm, &[])
         .expect("entry run_suspendable_parked")
     {
+        ParkedOutcome::CompletedProject { .. } | ParkedOutcome::CompletedRender { .. } => {
+            unreachable!(
+                "this test parks only Plain/Binding turns - Project/Render \
+                 completions cannot be produced for them"
+            )
+        }
         ParkedOutcome::Suspended { id, request, .. } => {
             assert_eq!(expect_int(&request), expect_req);
             id
@@ -376,6 +382,12 @@ fn park_fragment(
         )
         .expect("fragment run_fragment_suspendable_parked")
     {
+        ParkedOutcome::CompletedProject { .. } | ParkedOutcome::CompletedRender { .. } => {
+            unreachable!(
+                "this test parks only Plain/Binding turns - Project/Render \
+                 completions cannot be produced for them"
+            )
+        }
         ParkedOutcome::Suspended { id, request, .. } => {
             assert_eq!(expect_int(&request), req);
             id
@@ -404,6 +416,12 @@ fn resume_and_verify(
     {
         ParkedOutcome::Completed { value, .. } => {
             assert_pair_result(&value, expect_captured, answer)
+        }
+        ParkedOutcome::CompletedProject { .. } | ParkedOutcome::CompletedRender { .. } => {
+            unreachable!(
+                "this test parks only Plain/Binding turns - Project/Render \
+                 completions cannot be produced for them"
+            )
         }
         ParkedOutcome::Suspended { .. } => panic!("resume should complete, not re-suspend"),
     }
@@ -473,6 +491,12 @@ fn a1_bound_root_returns_inline_never_touches_the_machine_level_field() {
                 value,
                 bound_root.expect("a Binding park kind must return Some(bound_root)"),
             ),
+            ParkedOutcome::CompletedProject { .. } | ParkedOutcome::CompletedRender { .. } => {
+                unreachable!(
+                    "this test parks only Plain/Binding turns - Project/Render \
+                     completions cannot be produced for them"
+                )
+            }
             ParkedOutcome::Suspended { .. } => panic!("realm A's bind fragment never asks"),
         };
         assert_eq!(expect_int(&value_a), 111);
@@ -505,6 +529,12 @@ fn a1_bound_root_returns_inline_never_touches_the_machine_level_field() {
                 value,
                 bound_root.expect("a Binding park kind must return Some(bound_root)"),
             ),
+            ParkedOutcome::CompletedProject { .. } | ParkedOutcome::CompletedRender { .. } => {
+                unreachable!(
+                    "this test parks only Plain/Binding turns - Project/Render \
+                     completions cannot be produced for them"
+                )
+            }
             ParkedOutcome::Suspended { .. } => panic!("realm B's bind fragment never asks"),
         };
         assert_eq!(expect_int(&value_b), 222);
@@ -555,6 +585,12 @@ fn a2_finalized_root_is_per_frame_not_per_machine() {
             .run_suspendable_parked(&table, &mut NoDispatch, &(), ASK_TAG, RealmId(0), &[])
             .expect("realm A parks on its closure-valued finalize")
         {
+            ParkedOutcome::CompletedProject { .. } | ParkedOutcome::CompletedRender { .. } => {
+                unreachable!(
+                    "this test parks only Plain/Binding turns - Project/Render \
+                     completions cannot be produced for them"
+                )
+            }
             ParkedOutcome::Suspended {
                 id,
                 has_finalized_closure,
@@ -591,6 +627,12 @@ fn a2_finalized_root_is_per_frame_not_per_machine() {
             )
             .expect("realm B parks on its OWN closure-valued finalize")
         {
+            ParkedOutcome::CompletedProject { .. } | ParkedOutcome::CompletedRender { .. } => {
+                unreachable!(
+                    "this test parks only Plain/Binding turns - Project/Render \
+                     completions cannot be produced for them"
+                )
+            }
             ParkedOutcome::Suspended {
                 id,
                 has_finalized_closure,

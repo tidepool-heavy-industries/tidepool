@@ -234,6 +234,12 @@ fn one_cycle(table: &DataConTable, resume_one: bool) -> (usize, usize) {
         .run_suspendable_parked(table, &mut NoDispatch, &(), ASK_TAG, RealmId(0), &[])
         .expect("park entry")
     {
+        ParkedOutcome::CompletedProject { .. } | ParkedOutcome::CompletedRender { .. } => {
+            unreachable!(
+                "this test parks only Plain/Binding turns - Project/Render \
+                 completions cannot be produced for them"
+            )
+        }
         ParkedOutcome::Suspended { id, .. } => id,
         ParkedOutcome::Completed { .. } => panic!("entry should suspend"),
     };
@@ -261,6 +267,12 @@ fn one_cycle(table: &DataConTable, resume_one: bool) -> (usize, usize) {
             )
             .expect("park fragment")
         {
+            ParkedOutcome::CompletedProject { .. } | ParkedOutcome::CompletedRender { .. } => {
+                unreachable!(
+                    "this test parks only Plain/Binding turns - Project/Render \
+                     completions cannot be produced for them"
+                )
+            }
             ParkedOutcome::Suspended { .. } => {}
             ParkedOutcome::Completed { .. } => panic!("fragment should suspend"),
         }
@@ -486,6 +498,12 @@ fn dropping_with_live_parks_is_clean_and_the_next_machine_is_unaffected() {
                 .run_suspendable_parked(&table, &mut NoDispatch, &(), ASK_TAG, RealmId(0), &[])
                 .expect("park")
             {
+                ParkedOutcome::CompletedProject { .. } | ParkedOutcome::CompletedRender { .. } => {
+                    unreachable!(
+                        "this test parks only Plain/Binding turns - Project/Render \
+                         completions cannot be produced for them"
+                    )
+                }
                 ParkedOutcome::Suspended { id, .. } => id,
                 ParkedOutcome::Completed { .. } => panic!("should suspend"),
             };
@@ -505,6 +523,12 @@ fn dropping_with_live_parks_is_clean_and_the_next_machine_is_unaffected() {
                     }
                     other => panic!("expected Pair, got {other:?}"),
                 },
+                ParkedOutcome::CompletedProject { .. } | ParkedOutcome::CompletedRender { .. } => {
+                    unreachable!(
+                        "this test parks only Plain/Binding turns - Project/Render \
+                         completions cannot be produced for them"
+                    )
+                }
                 ParkedOutcome::Suspended { .. } => panic!("should complete"),
             }
 

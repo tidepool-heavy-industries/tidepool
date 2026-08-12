@@ -322,6 +322,12 @@ impl Session {
             Ok(ParkedOutcome::Completed { value, .. }) => {
                 tidepool_runtime::value_to_json(&value, &self.table, 0)
             }
+            Ok(ParkedOutcome::CompletedProject { .. } | ParkedOutcome::CompletedRender { .. }) => {
+                unreachable!(
+                    "this harness parks only ParkKind::Plain turns — Project/Render \
+                     completions cannot be produced for them"
+                )
+            }
             Ok(ParkedOutcome::Suspended { request, .. }) => panic!(
                 "the acceptance program suspended unexpectedly on {:?} — no program in this \
                  file should ever suspend",
