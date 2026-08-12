@@ -6,6 +6,18 @@ map and locked decisions.
 
 ## Nested child runs on a suspended machine
 
+**This section describes the single-slot suspension path.** As of the
+one-session collapse (`plans/one-session.md`), the PARKED continuation
+registry (below) is the primary suspension mechanism for the harness
+(resident-session) lane — a suspended session there can carry many parked
+holes at once, resumed in any order, and a "child" run is just an ordinary
+fragment run over the parked frames (`JitEffectMachine::run_fragment_suspendable_parked`
+et al.). The single-slot mechanism this section documents remains the live
+path for the repl and one-shot eval lanes; on the harness lane it is legacy,
+and its deletion is gated on the parked path's production soak
+(`plans/one-session.md` Phase 6). The two paths never mix on one machine
+(asserted both directions).
+
 A parent turn suspended at a typed yield (`runLLMTurn`/`Ask`) can host
 SEQUENTIAL child fragment runs on the SAME machine — reading the parent's
 bindings zero-copy — while its stowed continuation is a REGISTERED GC ROOT. The
@@ -55,6 +67,19 @@ compatibility is exact equality enforced at entry, and the single-slot path
 above and the parked registry NEVER mix on one machine. Downstream consumers
 read `plans/post-restart/realm-lanes/continuation-parking-contract.md` —
 everything else in the registry is internal and free to churn.
+
+**`ValueHandle` + `close_realm`** (contract amendment, one-session Phase 0) are
+what let a value — including a closure — move between parked frames on the
+same heap without ever materializing to JSON: `ValueHandle` is an opaque
+`Send` id over a machine-side persistent root (mint via
+`handle_from_finalized`, observe via `observe_handle` — the one seam where a
+closure renders as `CLOSURE_SENTINEL` — deliver via `ResumeInput::Handle`,
+which feeds the payload into a resumed continuation verbatim). Handles are
+scope-owned borrows: using one doesn't consume it, and `close_realm(realm) ->
+(frames_dropped, handles_released)` is the scope-exit op that reclaims a
+realm's parked frames and its outstanding handles together, leaving sibling
+realms untouched. See the contract doc's amendment for the full signature
+table and gates (`tests/realm_handles.rs`).
 
 The adversarial suite (`tests/nested_child_gc_rooting.rs`, run with
 `TIDEPOOL_GC_POISON`/`TIDEPOOL_HEAP_VERIFY` on) is the memory-safety gate: child

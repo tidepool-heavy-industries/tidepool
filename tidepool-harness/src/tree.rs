@@ -69,7 +69,9 @@ pub enum PriceClass {
 /// crate stays free of the JIT dependency — a caller instantiates `M` with
 /// its concrete resident-session type. The stowed-XOR-running discipline
 /// (jit_machine.rs Send rationale) maps onto these variants: a machine is
-/// in exactly one slot, and `Running`/`RunningChild` means it is out on a turn.
+/// in exactly one slot, and `Running{holes}` means it is out on a turn
+/// (whatever kind — a fresh run, a resume, or a child run over parked
+/// frames), carrying its parked holes with it.
 #[derive(Debug)]
 pub enum Slot<M> {
     Idle(M),

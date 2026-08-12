@@ -927,11 +927,14 @@ macro_rules! runllmturn_effect_def {
                 // The Int arg is the site id extract substitutes at the call site (the
                 // literal `0` above is a placeholder, never the value that actually
                 // runs). `unsafeCoerce` is safe here ONLY because extract has already
-                // checked (Translate.hs's checkRunLLMTurnType) that the site's
-                // answer type is monomorphic and function-free — the harness resumes
-                // this suspension with a value the caller validated against that exact
-                // type, so the coercion is a same-representation relabeling, not a
-                // genuine type change.
+                // checked (Translate.hs's checkRunLLMTurnType) that the site's answer
+                // type is monomorphic; a PURE function type is allowed (the model may
+                // finalize a `State -> State`), but a type mentioning the effect monad
+                // is rejected (typeMentionsEffectMonad — the generated `M`/row is
+                // fragment-nominal, so an effectful answer cannot unify across
+                // surfaces) — the harness resumes this suspension with a value the
+                // caller validated against that exact type, so the coercion is a
+                // same-representation relabeling, not a genuine type change.
                 { raw ["{-# OPAQUE runLLMTurnSited #-}",
                        "runLLMTurnSited :: forall a effs. Member RunLLMTurn effs => Int -> Text -> Eff effs a",
                        "runLLMTurnSited sid p = unsafeCoerce <$> send (RunLLMTurnWith p (object [\"typedSite\" .= sid]))"] },
@@ -1102,8 +1105,10 @@ macro_rules! fork_effect_def {
                 // placeholder). `unsafeCoerce` relabels the same runtime bytes
                 // back to the caller's answer type — safe because extract has
                 // checked (Translate.hs's checkRunLLMTurnType) the site's
-                // answer type is monomorphic and function-free, so the harness
-                // resumes with a value the caller validated against that type.
+                // answer type is monomorphic; a pure function type is allowed,
+                // an effect-monad-mentioning type is rejected
+                // (typeMentionsEffectMonad) — so the harness resumes with a
+                // value the caller validated against that type.
                 { raw ["{-# OPAQUE forkSited #-}",
                        "forkSited :: forall a effs. Member Fork effs => Int -> Text -> Eff effs a",
                        "forkSited sid brief = unsafeCoerce <$> send (ForkWith sid brief)"] },

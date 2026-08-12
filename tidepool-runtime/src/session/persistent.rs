@@ -8,12 +8,29 @@
 //! planes, the accumulated table, and the fragment-run primitives — is identical
 //! between them and lives here.
 //!
-//! There is ONE suspend mechanism, and it is **threadless**: an `Ask` stows the
-//! whole machine as DATA ([`JitEffectMachine`] is `Send` precisely because it is
-//! stowed-XOR-running), the eval thread exits, and a fresh thread re-enters via
-//! `resume_suspended`. No OS thread is parked per suspended session — neither in
-//! the harness (a TREE of many simultaneously-suspended nodes cannot pin N+1
-//! threads) nor in the repl (see `plans/unpark/feasibility-map.md`).
+//! Suspension is **threadless** everywhere: an `Ask` stows the machine (or, on
+//! the parked lane below, one continuation of many) as DATA — the eval thread
+//! exits, and a fresh thread re-enters to resume. No OS thread is parked per
+//! suspended session — neither in the harness (a TREE of many
+//! simultaneously-suspended nodes cannot pin N+1 threads) nor in the repl (see
+//! `plans/unpark/feasibility-map.md`).
+//!
+//! There are TWO suspend mechanisms, one per lane (one-session plan; do not
+//! conflate them — a machine never mixes both, asserted both directions):
+//!
+//! - **The SLOT path — implemented in this file.** [`JitEffectMachine`] is
+//!   `Send` precisely because it is stowed-XOR-running: the whole machine
+//!   stows as one `suspended_continuation` slot, and `resume_suspended`
+//!   re-enters it. This is the pair-per-policy family below. It remains the
+//!   live mechanism for the repl and one-shot eval lanes; on the harness lane
+//!   it is legacy, superseded by the parked path, and its deletion is gated
+//!   on the parked path's production soak (`plans/one-session.md` Phase 6).
+//! - **The PARKED path — `super::resident::ResidentSession`.** A machine's
+//!   continuation REGISTRY holds many independently parked frames at once,
+//!   each a registered GC root, resumable by identity in any order. This is
+//!   the primary suspension mechanism for the harness (resident-session)
+//!   lane as of the one-session collapse; see that module's docstring for
+//!   the fragment × suspend shape.
 //!
 //! Every run entry here therefore reports either a completion or a suspension,
 //! and every one has a `resume_*` sibling that re-enters the stowed continuation
@@ -22,9 +39,10 @@
 //! bind+render — each appear as such a pair, each carrying what it actually
 //! produces ([`SuspendableOutcome`] for the two `Value`-completing policies,
 //! [`Suspendable`] over the roots for the other two). See the module docstrings
-//! of [`super::resident`] (the harness's single-node consumer) and
-//! `tidepool-repl`'s `session.rs` (the repl's block-cursor consumer) for the
-//! orchestration around this core.
+//! of [`super::resident`] (the parked path built on this same core, and the
+//! harness's single-node consumer) and `tidepool-repl`'s `session.rs` (the
+//! repl's block-cursor consumer, still on the slot path) for the orchestration
+//! around this core.
 
 use std::path::Path;
 

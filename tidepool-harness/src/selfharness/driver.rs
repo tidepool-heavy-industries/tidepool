@@ -1,17 +1,32 @@
 //! The runtime driver spine — the outer `render`/`loop` alternation over the
 //! OUTER Harness-monad resident session, servicing each `runLLMTurn` hole by
-//! driving a NESTED
-//! [`crate::harness::Harness`] (an ordinary Agent node, reusing
-//! `run_to_hole_or_done`) to a `finalize` and `run_child`-ing the result
-//! back in-heap to resume `loop`.
+//! driving a per-loop answerer [`crate::harness::Harness`] node (an ordinary
+//! Agent node, reusing `run_to_hole_or_done`) to a `finalize` and delivering
+//! the result back in-heap to resume `loop`.
 //!
-//! The outer session is an ordinary resident session on the one threadless
-//! (stow-as-data) suspension engine, the same mechanism `Harness`'s own nodes
-//! use. Heaps are never
-//! copied — the nested Agent's `finalize` value crosses via
-//! [`Harness::take_finalized_value`] (deep-forced out of its own heap, never
-//! JSON) and is fed straight into [`ResidentSession::resume`] to resume the
-//! OUTER session's parked `runLLMTurn` continuation.
+//! ONE SESSION (the one-session collapse, `plans/one-session.md`): the outer
+//! session and every loop's answerer node share the SAME resident machine,
+//! not two separate sessions bridged by value. The outer session is
+//! node-less and registry-owned ([`Harness::adopt_session`]); each answerer
+//! node ATTACHES to it ([`Harness::force_attached`]) instead of getting a
+//! session of its own, running its turns as a per-loop REALM on the shared
+//! machine ([`Harness::set_node_realm`], applied at every checkout by
+//! `Harness::run_checked_out`). Heaps are never copied and a `finalize`d
+//! value never round-trips through JSON to cross: a data answer crosses via
+//! [`Harness::take_finalized_value_keep_open`] (bridged, as before); a
+//! `finalize`d CLOSURE crosses via
+//! [`Harness::take_finalized_handle_keep_open`] — a
+//! [`tidepool_codegen::jit_machine::ValueHandle`] over the payload's own
+//! machine-side root, never deep-forced or serialized — delivered straight
+//! into the OUTER session's parked `runLLMTurn` continuation via
+//! [`ResidentSession::resume`] (data) or [`ResidentSession::resume_handle`]
+//! (handle). This is what makes `runLLMTurn @(State -> State)` work
+//! end-to-end: the closure is born in, and never leaves, the loop's own heap.
+//! Retiring an answerer node at loop end is realm SCOPE EXIT
+//! ([`Harness::terminate_node`] → `close_realm`), never session removal —
+//! the outer session outlives every answerer it hosts, its own lifetime
+//! bounded only by periodic machine ROTATION at a fragment ceiling
+//! ([`Self::machine_maintenance`]), not by any one loop's answerer.
 //!
 //! # Async turn loop, sync-blocking operator gate
 //!

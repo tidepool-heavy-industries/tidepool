@@ -1,7 +1,9 @@
 //! The self-iterating harness (`plans/self-iterating-harness/`): the outer
-//! `render`/`loop` driver over the `Harness`/`Agent` monad split. The nested
-//! Agent session that answers a `runLLMTurn` hole IS a
-//! [`crate::harness::Harness`] node.
+//! `render`/`loop` driver over the `Harness`/`Agent` monad split. The Agent
+//! node that answers a `runLLMTurn` hole IS a [`crate::harness::Harness`]
+//! node — attached to the shared outer session as a per-loop realm rather
+//! than owning a session of its own (the one-session collapse; see
+//! `driver`'s module doc).
 //!
 //! # Modules
 //!

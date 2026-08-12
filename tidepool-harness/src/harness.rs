@@ -3086,11 +3086,11 @@ impl Harness {
             .map_err(|e| HarnessError::from_checkout(node, e))
     }
 
-    /// Check `node`'s machine out for a NESTED CHILD run against its
-    /// suspended continuation (`Suspended{hole} -> RunningChild{hole}`) — the
-    /// `run_child` discipline: an answer value crosses via a child run
-    /// against the suspended TARGET's own session, never consuming its
-    /// continuation.
+    /// Check `node`'s machine out for a CHILD run over its parked frames
+    /// (`Suspended{holes} -> Running{holes}`) — the `run_child` discipline:
+    /// an answer value crosses via a child run against the suspended
+    /// TARGET's own session, never consuming its parked continuations
+    /// (which stay rooted in the machine's registry throughout).
     fn checkout_child(&self, node: NodeId) -> Result<Checkout<'_, Session>, HarnessError> {
         let sid = self
             .tree

@@ -225,8 +225,9 @@ pub fn effects_module_source_with_vocab(
     out.push_str("import Control.Monad.Freer.Internal (Eff(..), qApp, tsingleton)\n");
     // runLLMTurn/runLLMTurnFork's hidden *Sited siblings (#R0) coerce the
     // ask reply back to the caller's answer type after extract has statically
-    // checked it's monomorphic and function-free — see ask_effect_def!'s helper
-    // text (effect_defs.rs) for why that's safe.
+    // checked it's monomorphic; a pure function type is allowed (an
+    // effect-monad-mentioning type is rejected) — see ask_effect_def!'s
+    // helper text (effect_defs.rs) for why that's safe.
     out.push_str("import Unsafe.Coerce (unsafeCoerce)\n");
     out.push_str("import qualified Prelude as P\n");
     // Author modules defining the types this row is applied to (e.g. the

@@ -11,9 +11,11 @@ Module map:
   and `NodeTree<M>`: parent/child structure + per-node lifecycle state,
   backed by the durable event log. Generic over a machine handle `M` and
   backed internally by a `SessionRegistry<M>` (see Machine lifecycle below).
-- `registry` — `SessionRegistry<M>`: the `Idle | Running | RunningChild |
-  Suspended` slot machine + atomic checkout/restore, including nested-child
-  checkout (`checkout_child`/`RunningChild`).
+- `registry` — `SessionRegistry<M>`: the `Idle | Running{holes} |
+  Suspended{machine, holes}` slot machine (MULTI-HOLE: a suspended session
+  carries a SET of parked holes, each resumable by identity in any order) +
+  atomic checkout/restore, including a child-run checkout over parked frames
+  (`checkout_child`).
 - `harness` — `Harness`: the orchestrator. Owns a `NodeTree<Session>` whose
   `SessionRegistry<Session>` is the one place a resident session lives (see
   Machine lifecycle below); a separate `convos` map holds everything ELSE
@@ -90,19 +92,35 @@ checks a node's machine OUT via `Harness::checkout_run`/`checkout_resume`/
 `checkout_resume`/`checkout_child` that resolve the node's `SessionId` via
 `NodeTree::session_of` and map a refusal through `HarnessError::from_checkout`
 — the one place a `CheckoutError` becomes a node-scoped error), runs the turn
-on the blocking pool via `Harness::run_checked_out`, and restores it
-`Idle`/`Suspended{hole}` based on the machine's OWN post-call state
-(`Session::is_idle`/`pending_continuation`) — not a guess from the turn's
-domain result, so an errored `run`/`resume` still restores correctly. A
-`checkout_child` (nested child run against a suspended continuation — the
-`run_child` discipline: an answer value crosses via a non-consuming child run
-against the TARGET's own suspended session) keeps that session `Suspended` on
-the SAME hole throughout, whether the child run succeeds or fails.
+on the blocking pool via `Harness::run_checked_out`, and restores it with the
+session's OWN post-call reported hole SET (`Session::parked_holes()`) through
+one unified `Checkout::restore_suspended` call — an empty set IS `Idle`, so
+there is no separate idle/suspended restore to desync — not a guess from the
+turn's domain result, so an errored `run`/`resume` still restores correctly.
+`run_checked_out` also applies the node's realm to the machine before the turn
+(`Session::set_realm`) at this one site, so an ATTACHED answerer node's parks
+are always owned by its own realm on a shared machine (see Self-iterating
+harness below).
+
+MULTI-HOLE (one-session plan, Phase 2): a suspended session carries a SET of
+parked holes, each resumable by identity in any order (the machine's
+continuation registry imposes none) — a NEW top-level run over parked frames
+is an ordinary `checkout_run`, not a refusal; the old reject-while-suspended
+behavior and the separate `RunningChild` slot variant are both gone
+(`Slot::Running{holes}` covers a fresh run, a resume, and a child run over
+parked frames alike). A `checkout_child` (a CHILD run over a suspended
+session's parked frames — the discipline an answer value crosses by: a
+non-consuming child run against the TARGET's own session) requires at least
+one parked hole and is otherwise an ordinary checkout: with the continuation
+registry there is no special child window, and the parked holes ride the
+checkout like any other turn's.
 
 `Checkout` is panic-safe: if a checkout is dropped without an explicit
 restore (a panic unwinding between checkout and restore, before the machine
-was ever moved off the checkout via `take()`), `Drop` restores it `Idle`
-rather than leaving the registry slot wedged `Running` forever. The one case
+was ever moved off the checkout via `take()`), `Drop` restores it with the
+hole SET it carried out — `Suspended{holes}`, or `Idle` only when that set is
+empty — rather than leaving the registry slot wedged `Running` forever, and
+without losing frames that are still rooted in the machine. The one case
 `Drop` cannot cover is a machine already moved onto the blocking pool via
 `take()`: if that task panics (`JoinError`), the machine is genuinely gone —
 `run_checked_out` calls `Harness::terminate_node` instead of trying to
@@ -110,12 +128,18 @@ restore a machine it does not have.
 
 `Harness::terminate_node` is the ONE retirement path: idempotently
 terminalize the tree entry (`NodeTree::node_cancelled`, skipped if already
-`Done`/`Cancelled`), remove the session from the registry
-(`SessionRegistry::remove`, dropping the machine), and remove the node's
-`convos` entry. `cancel`, a failed fork/fanout child's cleanup, the
-`JoinError` path above, and the self-iterating harness's `retire_answerer`
-all retire a node through it — there is no second way to retire one. A busy
-node (`CheckoutError::Running`/`RunningChild`) surfaces as
+`Done`/`Cancelled`), then retire the SESSION according to who owns it. An
+OWNING node (the ordinary case) has its session removed from the registry
+(`SessionRegistry::remove`, dropping the machine); an ATTACHED node (the
+one-session collapse's per-loop answerer — see Self-iterating harness below)
+never owns the shared session, so its retirement is realm SCOPE EXIT
+(`close_realm` on the shared machine: the realm's parked frames and any
+outstanding `ValueHandle`s are released together, sibling realms untouched) —
+the outer session outlives every answerer node it hosts. Either way the
+node's `convos` entry is removed. `cancel`, a failed fork/fanout child's
+cleanup, the `JoinError` path above, and the self-iterating harness's
+`retire_answerer` all retire a node through it — there is no second way to
+retire one. A busy node (`CheckoutError::Running`) surfaces as
 `HarnessError::TurnInFlight`, never `NoSession` — that variant is reserved
 for a node that genuinely has no session (never forced, or already
 terminated).
@@ -176,7 +200,7 @@ harness-generated only (`forcing.rs::derive_teaser`).
 ## Self-iterating harness — the answerer row + the `AskUser` operator gate
 
 The self-iterating harness's answerer Agent (`selfharness::driver::answerer_decls`)
-compiles against `Eff '[AskUser, Finalize]` — two decl-only effects, disjoint
+compiles against `Eff '[AskUser, Fork, Finalize]` — decl-only effects, disjoint
 from the general Agent stack's `standard_decls()` (which keeps `Ask`,
 `RunLLMTurn`, and every base effect untouched; `AskUser` never appears
 there). `AskUser` (`tidepool_mcp::askuser_decl`) is a brand-new effect, not a
@@ -335,6 +359,63 @@ AskUser]`, so an AUTHORED `loop` that `import`s `Tidepool.Form` and evaluates
 `Tidepool.Harness`/`HarnessEff` (whose row stays `'[RunLLMTurn]`,
 stale-but-unused): `Harness = M` and `askUser`'s `Member AskUser` constraint
 unifies against the wider generated row.
+
+### One session: attached realms, closure delivery, machine rotation
+
+Pre-collapse, the outer `render`/`loop` session and each loop's answerer
+Agent were separate resident sessions, and a finalized answer crossed between
+them by BRIDGING to a JSON-shaped `Value` — a closure could not survive that
+crossing. The one-session collapse (`plans/one-session.md`) removes the
+boundary: the outer session is the tree's one node-less, registry-owned
+session (`SelfHarnessDriver::bootstrap` calls `Harness::adopt_session`, which
+is `NodeTree::adopt_session` — the driver holds only the `SessionId`), and
+every per-loop answerer node ATTACHES to that same session instead of getting
+its own (`Harness::force_attached`, not `Harness::force`). An attached node
+never OWNS its session (`NodeTree::node_owns_session` is false for it); its
+turns run as a REALM on the shared machine, minted per loop
+(`SelfHarnessDriver::set_node_realm`) and applied to the machine by
+`run_checked_out` before every turn (see Machine lifecycle above), so an
+answerer's parked frames and any values it produces are born directly in the
+loop's own heap. Retiring the answerer at loop end
+(`SelfHarnessDriver::retire_answerer` → `Harness::terminate_node`) is that
+realm's SCOPE EXIT (`close_realm`), never session/slot removal — the shared
+outer session outlives every answerer node it hosts. Outer `render`/`loop`
+fragments and every answerer turn go through the one checkout discipline via
+`Harness::with_session` (a thin `checkout_run` + restore-with-reported-holes
+wrapper for the node-less shared session).
+
+**Finalize delivery is by HANDLE, not by bridge, when the payload is a
+closure.** A data answer still crosses as a bridged `Value`
+(`Harness::take_finalized_value_keep_open`); a closure (or any value that
+would sentinel under the eager bridge) is taken as a `ValueHandle`
+(`Harness::take_finalized_handle_keep_open`, gated by
+`Harness::finalize_is_closure`) and delivered into the loop's parked
+`runLLMTurn` continuation via `ResidentSession::resume_handle` — the payload
+pointer feeds the resumed continuation verbatim, on the same heap, no
+materialization. This is the mechanism behind `runLLMTurn @(State -> State)`
+working end to end: the answerer finalizes a closure captured over session
+bindings, the loop applies it directly, and helpers/values a turn binds in
+loop N are still live for an answerer fragment in loop N+40. Standing
+acceptance: `tests/selfharness_fn_finalize_spike.rs` (un-ignored, passing).
+The scoped-stack caveat in Replay above still holds unchanged: the answerer
+row is all-suspending, so it produces no `Event::Effect` regardless of
+whether its session is owned or attached.
+
+**Machine lifetime is bounded by rotation, not immortality.** Because
+cross-loop closures are now the point, the shared machine is not rebuilt
+every loop — it is measured every loop boundary
+(`SelfHarnessDriver::machine_maintenance` emits `Event::MachineStats`,
+carrying `HeapStats::fragments`) and ROTATED at a quiescent boundary once
+`stats.fragments` reaches `TIDEPOOL_MACHINE_FRAGMENT_CEILING` (default 4096):
+a fresh machine is adopted under the SAME `SessionId`
+(`Harness::replace_session`), durable `State` flows through the checkpoint
+exactly as every loop already threads it, and whatever cannot reconstruct
+(session-plane bindings, including closures) is enumerated into
+`Event::MachineRotated` and the next render's legible-loss note — never
+silently dropped. A non-quiescent machine (parked holes outstanding) at the
+ceiling refuses the loop with a legible error rather than rotating under a
+live suspension. CI oracle:
+`machine_rotation_between_cycles_preserves_durable_state`.
 
 ## Tailing the durable log
 
