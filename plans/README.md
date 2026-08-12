@@ -6,6 +6,14 @@ in git history rather than here.
 
 ## Active work
 
+- [One session](one-session.md): **the current line of work.** Collapse the
+  self-harness onto a single resident session (answerer turns run as parked
+  fragments on the outer machine, via the already-landed continuation-parking
+  registry) and fully remove the legacy single-slot suspension path. Endgame:
+  function-valued answers (`runLLMTurn @(State -> State)`) — the finalized
+  closure is born in the loop's own heap. Five phases, decisions locked in the
+  doc; the machine-level substrate is
+  [the parking contract](post-restart/realm-lanes/continuation-parking-contract.md).
 - [One-spawn turn protocol](one-spawn-turn-protocol.md) + [Phase B
   contract](one-spawn-turn-protocol-phase-b.md): LANDED, both phases. One
   extract spawn per turn on every caller; `--emit-stmt-binders` and
