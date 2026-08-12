@@ -39,7 +39,7 @@ import GHC.Types.Var (isTyVar, isCoVar, varUnique, varName, setVarUnique)
 import GHC.Types.Unique (getKey)
 import GHC.Types.Unique.Supply (UniqSupply, mkSplitUniqSupply, takeUniqFromSupply)
 import GHC.Types.Var.Env (VarEnv, emptyVarEnv, extendVarEnv, lookupVarEnv)
-import GHC.Core.DataCon (DataCon, dataConRepArity, dataConRepArgTys, dataConFullSig, dataConTag, dataConWorkId, dataConName, dataConSrcBangs, dataConOrigArgTys, dataConFieldLabels, dataConTyCon, isUnboxedTupleDataCon, HsSrcBang(..), HsBang(..), SrcUnpackedness(..), SrcStrictness(..))
+import GHC.Core.DataCon (DataCon, dataConRepArity, dataConRepArgTys, dataConFullSig, dataConTag, dataConWorkId, dataConName, dataConSrcBangs, dataConOrigArgTys, dataConFieldLabels, dataConTyCon, isUnboxedTupleDataCon, isVanillaDataCon, HsSrcBang(..), HsBang(..), SrcUnpackedness(..), SrcStrictness(..))
 import GHC.Types.FieldLabel (flLabel)
 import Language.Haskell.Syntax.Basic (FieldLabelString(..))
 import Language.Haskell.Syntax.Basic (Boxity(..))
@@ -1257,10 +1257,24 @@ dcFieldLabels dc =
 -- convention as 'dcParentTypeName' / the asks.json sidecar
 -- ('Tidepool.GhcPipeline.renderType': @renderWithContext defaultSDocContext
 -- . ppr@).
+--
+-- Emitted ONLY for a VANILLA constructor ('isVanillaDataCon': no
+-- existentials, no GADT equalities, no context) — @[]@ otherwise. A
+-- non-vanilla constructor's "field types" can carry a constructor-scoped
+-- existential tyvar that is NOT a parameter of the parent type, which the
+-- Rust renderer's tyvar-header pass (@synopsis.rs@'s @tyvar_header@, which
+-- treats every lowercase token in a field type as a PARENT type parameter)
+-- would present as an invented `data T a = ...` parameter. Omitting field
+-- types for these constructors makes the Rust side degrade the whole type
+-- honestly (absent types + nonzero rep arity -> unrenderable, per
+-- @synopsis.rs@'s @render_constructor@) instead of rendering a shape that
+-- looks parametric but isn't.
 dcFieldTypes :: DataCon -> [Text]
-dcFieldTypes dc =
-  [ T.pack (renderWithContext defaultSDocContext (ppr ft))
-  | Scaled _ ft <- dataConOrigArgTys dc ]
+dcFieldTypes dc
+  | not (isVanillaDataCon dc) = []
+  | otherwise =
+      [ T.pack (renderWithContext defaultSDocContext (ppr ft))
+      | Scaled _ ft <- dataConOrigArgTys dc ]
 
 -- | Rendered name of a DataCon's parent TyCon (e.g. "Verdict" for a
 -- constructor of @data Verdict = GO | PARTIAL | NOGO@), unqualified — same
