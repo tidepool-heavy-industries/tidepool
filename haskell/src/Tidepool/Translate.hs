@@ -1147,6 +1147,13 @@ data DCMeta = DCMeta
   -- unqualified — lets Rust resolve a rendered type name to its constructor
   -- set ('DataConTable::constructors_of_type').
   , dcmTypeName   :: !Text
+  -- | Rendered field types, in field (declaration) order — same @ppr@
+  -- convention as 'dcParentTypeName' / the asks.json sidecar. Sourced from
+  -- 'dataConOrigArgTys' (source-level types), so its length always matches
+  -- 'dcmFieldLabels' for a record constructor. Lets Rust render a full
+  -- GHC-style @data@ declaration ('tidepool_harness::synopsis::type_document')
+  -- instead of a names-only synopsis.
+  , dcmFieldTypes :: ![Text]
   }
 
 -- | Collect all DataCons encountered during translation of Core bindings.
@@ -1244,6 +1251,17 @@ dcFieldLabels :: DataCon -> [Text]
 dcFieldLabels dc =
   map (T.pack . unpackFS . field_label . flLabel) (dataConFieldLabels dc)
 
+-- | Rendered field types, in field (declaration) order, from
+-- @dataConOrigArgTys@ (source-level types — matches 'dcFieldLabels'\' arity,
+-- NOT the runtime/rep arity 'dataConRepArgTys' would give). Same pretty-print
+-- convention as 'dcParentTypeName' / the asks.json sidecar
+-- ('Tidepool.GhcPipeline.renderType': @renderWithContext defaultSDocContext
+-- . ppr@).
+dcFieldTypes :: DataCon -> [Text]
+dcFieldTypes dc =
+  [ T.pack (renderWithContext defaultSDocContext (ppr ft))
+  | Scaled _ ft <- dataConOrigArgTys dc ]
+
 -- | Rendered name of a DataCon's parent TyCon (e.g. "Verdict" for a
 -- constructor of @data Verdict = GO | PARTIAL | NOGO@), unqualified — same
 -- pretty-print convention as the asks.json sidecar
@@ -1263,6 +1281,7 @@ dcToMeta dc = DCMeta
   , dcmQualName    = qualifiedName (dataConName dc)
   , dcmFieldLabels = dcFieldLabels dc
   , dcmTypeName    = dcParentTypeName dc
+  , dcmFieldTypes  = dcFieldTypes dc
   }
 
 -- | Combine the metadata sources (HIGHEST priority FIRST, e.g.

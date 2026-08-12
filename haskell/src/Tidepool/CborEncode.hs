@@ -12,15 +12,20 @@ import qualified Data.Sequence as Seq
 import Tidepool.Translate (FlatNode(..), LitEnc(..), FlatAlt(..), FlatAltCon(..), DCMeta(..))
 import Tidepool.Binders (TurnOut(..), BoundBinder(..), ExportItem(..))
 
--- | 8-byte version header: magic 'TPLR' + version 2.1.
+-- | 8-byte version header: magic 'TPLR' + version 3.0.
+--
+-- Must be kept byte-identical to the Rust reader's own
+-- @VERSION_MAJOR@/@VERSION_MINOR@ (tidepool-repr/src/serial/mod.rs) — there
+-- is no shared formatter across the language boundary, so a version bump
+-- needs a matching change on both sides.
 --
 -- 2.0 (from 1.1) was the breaking metadata-entry shape change: 7 -> 8
--- elements, parent-type-name channel. 2.1 is a MINOR bump: the OPTIONAL
--- @poisoned@ warnings key (sentinel slot -> qualified name). The Rust reader
--- accepts an older minor within the same major, so committed 2.0 payloads
--- stay readable — they simply omit @poisoned@, which decodes to empty.
+-- elements, parent-type-name channel. 2.1 was a MINOR bump: the OPTIONAL
+-- @poisoned@ warnings key (sentinel slot -> qualified name). 3.0 is another
+-- breaking metadata-entry shape change: 8 -> 9 elements, rendered field
+-- types (in declaration order) as the 9th element.
 tplrHeader :: ByteString
-tplrHeader = BS.pack [0x54, 0x50, 0x4C, 0x52, 0x00, 0x02, 0x00, 0x01]
+tplrHeader = BS.pack [0x54, 0x50, 0x4C, 0x52, 0x00, 0x03, 0x00, 0x00]
 
 -- | Encodes the flattened node tree into a CBOR payload prepended with the TPLR version header.
 encodeTree :: Seq FlatNode -> ByteString
@@ -144,7 +149,7 @@ encodeIdNamePairs pairs =
   <> foldMap (\(k, v) -> encodeListLen 2 <> encodeWord64 k <> encodeString v) pairs
 
 encodeMetaEntry :: DCMeta -> Encoding
-encodeMetaEntry DCMeta{dcmId, dcmName, dcmTag, dcmArity, dcmBangs, dcmQualName, dcmFieldLabels, dcmTypeName} =
+encodeMetaEntry DCMeta{dcmId, dcmName, dcmTag, dcmArity, dcmBangs, dcmQualName, dcmFieldLabels, dcmTypeName, dcmFieldTypes} =
   let
     tagWord :: Word
     tagWord =
@@ -152,13 +157,16 @@ encodeMetaEntry DCMeta{dcmId, dcmName, dcmTag, dcmArity, dcmBangs, dcmQualName, 
         then error "encodeMetaEntry: negative constructor tag"
         else fromIntegral dcmTag
   in
-  -- 8-element entry: the Rust reader (tidepool-repr/src/serial/read.rs)
-  -- requires EXACTLY 8 elements — a shorter entry (e.g. the legacy 7-element
+  -- 9-element entry: the Rust reader (tidepool-repr/src/serial/read.rs)
+  -- requires EXACTLY 9 elements — a shorter entry (e.g. the legacy 8-element
   -- shape) is a hard InvalidStructure error, not a backward-compatible short
   -- form. Positional constructors carry an empty labels array. The 8th
   -- element is the rendered name of the constructor's parent TyCon (e.g.
-  -- "Verdict"), always present — every DataCon has a parent type.
-  encodeListLen 8
+  -- "Verdict"), always present — every DataCon has a parent type. The 9th
+  -- element is the constructor's field types, rendered in declaration order
+  -- (same @ppr@ convention as the 8th element and asks.json), always present
+  -- (empty array for a nullary constructor).
+  encodeListLen 9
   <> encodeWord64 dcmId
   <> encodeString dcmName
   <> encodeWord tagWord
@@ -169,6 +177,8 @@ encodeMetaEntry DCMeta{dcmId, dcmName, dcmTag, dcmArity, dcmBangs, dcmQualName, 
   <> encodeListLen (fromIntegral (length dcmFieldLabels))
   <> foldMap encodeString dcmFieldLabels
   <> encodeString dcmTypeName
+  <> encodeListLen (fromIntegral (length dcmFieldTypes))
+  <> foldMap encodeString dcmFieldTypes
 
 --------------------------------------------------------------------------------
 -- Turn-mode rich result (--turn) — independent of the frozen tree format
