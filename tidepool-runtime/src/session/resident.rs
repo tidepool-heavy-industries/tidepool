@@ -27,36 +27,44 @@
 //! session slot when idle/suspended, moved onto the eval thread for the
 //! duration of a turn.
 //!
-//! # Fragment × suspend
+//! # Fragment × suspend — the PARKED path (one-session plan, Phase 1)
 //!
 //! Each turn is compiled into the live machine as a fragment
 //! ([`JitEffectMachine::add_function`]) and driven through
-//! [`JitEffectMachine::run_fragment_suspendable`] — the composition of the
-//! fragment plane's session re-entry with threadless suspension. An `Ask`
-//! mid-fragment stows the continuation on the machine and yields
-//! `Suspended`; [`ResidentSession::resume`] re-enters and drives the fragment
-//! to completion.
+//! [`JitEffectMachine::run_fragment_suspendable_parked`] — the continuation
+//! REGISTRY, not the legacy single slot: a suspension parks a frame as a
+//! registered GC root, and the machine stays fully usable while it waits
+//! (further turns, further parks, resumes of other frames). The session
+//! tracks its parked holes as an insertion-ordered `(hole, ContinuationId)`
+//! list; [`ResidentSession::resume`] resumes ANY member hole by identity
+//! (the machine imposes no order). The realm every park is owned by is
+//! [`ResidentSession::set_realm`]-scoped (per-node realms arrive with the
+//! collapse); the handled prefix is DERIVED from the session's own
+//! `effect_names[..ask_tag]` — one source of truth, per the parking
+//! contract's "derive, don't declare" guidance.
 //!
-//! # Nested child runs
+//! # Child runs
 //!
-//! A suspended session REJECTS a new TOP-LEVEL turn (see
-//! [`ResidentError::Suspended`]) but ACCEPTS a nested CHILD run
-//! ([`ResidentSession::run_child`]): a fragment driven against the suspended
-//! parent's SAME heap — reading the parent's bindings zero-copy — while the
-//! parent's stowed continuation is registered as a GC root
-//! ([`JitEffectMachine::run_child_fragment`]). The child does not consume the
-//! parent's continuation; the session stays suspended on its hole across the
-//! child run. The `suspended_continuation.is_none()` asserts in
-//! `jit_machine.rs` stay intact for the plain entries; the child entry moves the
-//! continuation into a registered stowed root for its duration (so those asserts
-//! still pass) — see the jit_machine module docstring for the full invariant.
+//! With the registry, a "child" is just an ordinary fragment run while
+//! frames are parked — the machine is never slot-suspended, so nothing is
+//! special about it. [`ResidentSession::run_child`] keeps its value-shaped
+//! signature (a fork answer IS a value): a child that suspends is aborted
+//! wholesale (its throwaway realm closed) rather than parked, because this
+//! API cannot carry a hole; suspension-capable turns go through
+//! [`ResidentSession::run`]. `!Send` `RootSlot`s never cross the eval-thread
+//! boundary: parked completions are projected in-thread to `Send` data, a
+//! bind's tenured root riding out as a [`ValueHandle`] (pillar B's
+//! laundering).
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use tidepool_codegen::binding_table::{BindingEntry, BoundValue};
 use tidepool_codegen::emit::ExternalEnv;
-use tidepool_codegen::jit_machine::{FuncId, JitEffectMachine, ResumeInput, SuspendableOutcome};
+use tidepool_codegen::jit_machine::{
+    ContinuationId, FuncId, JitEffectMachine, ParkKind, ParkedOutcome, RealmId, ResumeInput,
+    ValueHandle,
+};
 use tidepool_effect::dispatch::DispatchEffect;
 use tidepool_effect::error::EffectError;
 use tidepool_eval::value::Value;
@@ -104,30 +112,36 @@ pub enum ResidentOutcome {
 /// Why a resident-session operation was refused or failed.
 #[derive(thiserror::Error, Debug)]
 pub enum ResidentError {
-    /// A new top-level `run` was attempted while the session is suspended on an
-    /// `Ask`. A suspended session accepts `resume`/`abort` (parent) or
-    /// `run_child` (nested child) — never a fresh top-level turn.
+    /// LEGACY (parked path): retained for callers that still match on it; the
+    /// parked path never raises it — a new top-level `run` while frames are
+    /// parked is the POINT of the registry.
     #[error("session is suspended on continuation {0}; resume, abort, or run a child before a new top-level run")]
     Suspended(String),
-    /// A `run_child` was attempted on an idle (not-suspended) session — a
-    /// nested child requires a suspended parent by construction.
-    #[error("session is not suspended; a nested child run requires a suspended parent")]
+    /// A `run_child`/`apply_finalized` was attempted with no parked frame — a
+    /// child run reads a suspended parent's world by construction.
+    #[error("session has no parked continuation; a child run requires a suspended parent")]
     NotSuspended,
-    /// A nested child fragment itself suspended at an `Ask`. Nesting is
-    /// single-level and sequential-isolated — the machine holds exactly one
-    /// stowed continuation, so a child cannot suspend while the parent already is.
-    #[error("nested child suspended at an ask; R0 supports single-level nesting only")]
+    /// A VALUE-SHAPED child run ([`ResidentSession::run_child`]) suspended:
+    /// its signature cannot carry a hole, so the child was ABORTED (its
+    /// throwaway realm closed) rather than parked. Not a machine limitation
+    /// anymore (the registry parks children fine) — a policy of this one
+    /// API; drive suspension-capable turns through [`ResidentSession::run`].
+    #[error(
+        "child run suspended; the value-shaped run_child aborts a suspending child — \
+         drive suspension-capable turns through run()"
+    )]
     ChildSuspended,
-    /// A `resume`/`abort` referenced a continuation id that is not the one this
-    /// session is currently suspended on (or the session is not suspended).
-    /// Atomic validate-before-consume: the pending continuation is NOT touched.
-    #[error("no continuation {attempted} pending{}", match .pending {
-        Some(p) => format!(" (session is suspended on {p})"),
-        None => " (session is not suspended)".to_string(),
+    /// A `resume`/`abort` referenced a continuation id that is not among this
+    /// session's parked holes. Atomic validate-before-consume: no parked
+    /// frame is touched.
+    #[error("no continuation {attempted} parked{}", if .pending.is_empty() {
+        " (session has no parked continuations)".to_string()
+    } else {
+        format!(" (parked: {})", .pending.join(", "))
     })]
     WrongContinuation {
         attempted: String,
-        pending: Option<String>,
+        pending: Vec<String>,
     },
     /// The turn's fragment failed to add to the live machine.
     #[error("fragment compile failed: {0}")]
@@ -179,11 +193,15 @@ pub struct ResidentSession<H, O> {
     include: Vec<PathBuf>,
     /// Monotonic continuation-id counter.
     next_id: AtomicU64,
-    /// The continuation id this session is suspended on, or `None` when idle.
-    /// The machine's `suspended_continuation` is the ground truth; this is the
-    /// string identity the caller resumes/aborts against (atomic
-    /// validate-before-consume, mirroring `engine.rs`:684–698).
-    pending: Option<String>,
+    /// The parked holes, insertion-ordered: `(hole string, machine
+    /// ContinuationId)` per live parked frame. The machine's continuation
+    /// registry is the ground truth; these are the string identities callers
+    /// resume/abort against (atomic validate-before-consume). Top = last.
+    parked: Vec<(String, ContinuationId)>,
+    /// The realm every park this session initiates is owned by. `RealmId(0)`
+    /// until [`ResidentSession::set_realm`] — per-node realms arrive with the
+    /// collapse (one-session plan, Phase 3).
+    realm: RealmId,
     /// Continuation-id prefix (`scont` for the resident surface).
     cont_prefix: String,
 }
@@ -242,7 +260,8 @@ where
             captured,
             include,
             next_id: AtomicU64::new(1),
-            pending: None,
+            parked: Vec::new(),
+            realm: RealmId(0),
             cont_prefix: "scont".to_string(),
         })
     }
@@ -273,7 +292,8 @@ where
             captured,
             include,
             next_id: AtomicU64::new(1),
-            pending: None,
+            parked: Vec::new(),
+            realm: RealmId(0),
             cont_prefix: "scont".to_string(),
         }
     }
@@ -323,14 +343,36 @@ where
         self.core.current_val_modules()
     }
 
-    /// The continuation id this session is suspended on, if any.
+    /// The MOST RECENT parked hole (top of the stack), if any — the
+    /// single-hole compatibility view; multi-hole callers use
+    /// [`Self::parked_holes`].
     pub fn pending_continuation(&self) -> Option<&str> {
-        self.pending.as_deref()
+        self.parked.last().map(|(h, _)| h.as_str())
     }
 
-    /// Whether the session is idle (ready for a new turn).
+    /// Every parked hole, insertion-ordered (oldest first).
+    pub fn parked_holes(&self) -> Vec<&str> {
+        self.parked.iter().map(|(h, _)| h.as_str()).collect()
+    }
+
+    /// Whether the session has no parked frames (ready and quiescent).
     pub fn is_idle(&self) -> bool {
-        self.pending.is_none()
+        self.parked.is_empty()
+    }
+
+    /// Scope every subsequent park under `realm` (one-session plan: the
+    /// driver assigns per-answerer-node realms; scope exit is the machine's
+    /// `close_realm`).
+    pub fn set_realm(&mut self, realm: RealmId) {
+        self.realm = realm;
+    }
+
+    /// This session's handled-effect prefix, DERIVED from its own
+    /// `effect_names` and ask tag (the names below the suspend threshold, in
+    /// position order) — the parking contract's "derive, don't declare".
+    fn handled_prefix(&self) -> Vec<String> {
+        let n = (self.core.ask_tag() as usize).min(self.effect_names.len());
+        self.effect_names[..n].to_vec()
     }
 
     /// Whether the resident machine has been bootstrapped yet. `false` from
@@ -393,9 +435,8 @@ where
         expr: &CoreExpr,
         table: &DataConTable,
     ) -> Result<ResidentOutcome, ResidentError> {
-        if let Some(p) = &self.pending {
-            return Err(ResidentError::Suspended(p.clone()));
-        }
+        // No reject-while-suspended: on the parked path, a new turn over
+        // parked frames is ordinary (the machine is never slot-suspended).
         // Merge this turn's table into the accumulated session table (later turns
         // are a subset; the merge is monotone). `add_fragment_session` mints the
         // fragment against that table on THIS (calling) thread — the env is
@@ -427,9 +468,22 @@ where
         );
 
         let ask_tag = self.core.ask_tag();
+        let realm = self.realm;
+        let prefix = self.handled_prefix();
         let run_exec_started = std::time::Instant::now();
         let outcome = self.on_eval_thread(move |machine, table, handlers, captured| {
-            machine.run_fragment_suspendable(func_id, table, handlers, captured, ask_tag)
+            machine
+                .run_fragment_suspendable_parked(
+                    func_id,
+                    table,
+                    handlers,
+                    captured,
+                    ask_tag,
+                    realm,
+                    ParkKind::Plain,
+                    &prefix,
+                )
+                .map(|o| project_parked(machine, o, realm))
         })?;
         timing::record_stage(
             timing::NO_NODE,
@@ -438,7 +492,7 @@ where
             run_exec_started.elapsed(),
             0,
         );
-        Ok(self.classify(outcome))
+        Ok(self.classify_parked(outcome, None))
     }
 
     /// Run a value-plane BIND turn (`x <- e`): seed the env from prior bindings,
@@ -456,9 +510,6 @@ where
         binder: &BoundBinder,
         gen: Generation,
     ) -> Result<ResidentOutcome, ResidentError> {
-        if let Some(p) = &self.pending {
-            return Err(ResidentError::Suspended(p.clone()));
-        }
         self.core
             .merge_table(table)
             .map_err(ResidentError::TableCollision)?;
@@ -485,11 +536,22 @@ where
         // Tier0 data is deep-forced to NF before tenuring; a Tier1 closure is
         // tenured as-is.
         let forced = matches!(binder.tier, ValueTier::Tier0Data);
+        let realm = self.realm;
+        let prefix = self.handled_prefix();
         let run_exec_started = std::time::Instant::now();
         let outcome = self.on_eval_thread(move |machine, table, handlers, captured| {
-            machine.run_fragment_suspendable_binding(
-                func_id, table, handlers, captured, ask_tag, forced,
-            )
+            machine
+                .run_fragment_suspendable_parked(
+                    func_id,
+                    table,
+                    handlers,
+                    captured,
+                    ask_tag,
+                    realm,
+                    ParkKind::Binding { forced },
+                    &prefix,
+                )
+                .map(|o| project_parked(machine, o, realm))
         })?;
         timing::record_stage(
             timing::NO_NODE,
@@ -498,12 +560,18 @@ where
             run_exec_started.elapsed(),
             0,
         );
-        // A completion (no suspension) tenured the result — bind it now. A
-        // suspension defers the bind to `resume_bind`.
-        if matches!(outcome, SuspendableOutcome::Completed(_)) {
-            self.materialize_binder(binder, gen)?;
+        // A completion (no suspension) tenured the result — bind it now (the
+        // root rode out as a handle). A suspension defers to `resume_bind`.
+        let bound = match &outcome {
+            ParkedRun::Completed { bound, .. } => *bound,
+            ParkedRun::Suspended { .. } => None,
+        };
+        let completed = matches!(outcome, ParkedRun::Completed { .. });
+        let resident_outcome = self.classify_parked(outcome, None);
+        if completed {
+            self.materialize_binder(binder, gen, bound)?;
         }
-        Ok(self.classify(outcome))
+        Ok(resident_outcome)
     }
 
     /// Run a NESTED CHILD turn against this SUSPENDED session (segment 40): add
@@ -527,18 +595,50 @@ where
         external_env: &ExternalEnv,
     ) -> Result<EvalResult, ResidentError> {
         let func_id = self.prepare_child_fragment(name_hint, expr, table, external_env)?;
-        // `pending` is untouched throughout — the parent stays suspended on the
-        // same hole across the child run.
+        // `parked` is untouched throughout — the parent's frames stay parked
+        // and rooted across the child run (that is the registry's whole
+        // point; nothing here is a special "child window" anymore).
+        //
+        // A THROWAWAY realm: this API's value-shaped signature cannot carry a
+        // hole, so a child that suspends is ABORTED wholesale (its realm
+        // closed) rather than parked. Suspension-capable turns are `run`'s
+        // job. High-bit-tagged so it can never collide with a caller realm.
+        let child_realm = RealmId((1 << 63) | self.next_id.fetch_add(1, Ordering::Relaxed));
+        let ask_tag = self.core.ask_tag();
+        let prefix = self.handled_prefix();
         let outcome = self.on_eval_thread(move |machine, table, handlers, captured| {
             machine
-                .run_child_fragment(func_id, table, handlers, captured)
-                // A child run returns a plain `Value` (not a SuspendableOutcome);
-                // wrap it as Completed so `on_eval_thread`'s shared plumbing
-                // applies. A child fragment does not go through the suspend
-                // driver, so it either completes or errors — it never suspends.
-                .map(SuspendableOutcome::Completed)
+                .run_fragment_suspendable_parked(
+                    func_id,
+                    table,
+                    handlers,
+                    captured,
+                    ask_tag,
+                    child_realm,
+                    ParkKind::Plain,
+                    &prefix,
+                )
+                .map(|o| project_parked(machine, o, child_realm))
         })?;
-        self.finish_child_outcome(outcome)
+        match outcome {
+            ParkedRun::Completed { value, .. } => {
+                let _ = self.captured.drain();
+                Ok(EvalResult::new(
+                    value,
+                    self.core.session_table().clone(),
+                    Vec::new(),
+                ))
+            }
+            ParkedRun::Suspended { .. } => {
+                // Scope exit for the throwaway realm — the child's park (and
+                // any finalized payload it tenured) must not outlive this
+                // call.
+                if let Some(m) = self.core.machine_mut() {
+                    let _ = m.close_realm(child_realm);
+                }
+                Err(ResidentError::ChildSuspended)
+            }
+        }
     }
 
     /// PURE sibling of [`Self::run_child`]: drives `expr` through
@@ -563,12 +663,19 @@ where
         external_env: &ExternalEnv,
     ) -> Result<EvalResult, ResidentError> {
         let func_id = self.prepare_child_fragment(name_hint, expr, table, external_env)?;
-        let outcome = self.on_eval_thread(move |machine, _table, _handlers, _captured| {
-            machine
-                .run_child_fragment_pure(func_id)
-                .map(SuspendableOutcome::Completed)
+        let value = self.on_eval_thread(move |machine, _table, _handlers, _captured| {
+            // Plain pure entry: on the parked path the machine is never
+            // slot-suspended, so the L7-guarded plain entries serve child
+            // fragments directly (the realm suites run fragments over parked
+            // frames the same way).
+            machine.run_fragment_pure(func_id)
         })?;
-        self.finish_child_outcome(outcome)
+        let _ = self.captured.drain();
+        Ok(EvalResult::new(
+            value,
+            self.core.session_table().clone(),
+            Vec::new(),
+        ))
     }
 
     /// Shared child-run prelude: requires a suspended parent, merges `table`
@@ -583,13 +690,13 @@ where
         table: &DataConTable,
         external_env: &ExternalEnv,
     ) -> Result<FuncId, ResidentError> {
-        if self.pending.is_none() {
+        if self.parked.is_empty() {
             return Err(ResidentError::NotSuspended);
         }
         self.core
             .merge_table(table)
             .map_err(ResidentError::TableCollision)?;
-        // Lazy boot (see `run`'s comment). A child run requires a suspended
+        // Lazy boot (see `run`'s comment). A child run requires a parked
         // parent, so in practice the machine is always already live by the
         // time this is reachable — kept for symmetry with `run`/`run_bind`
         // and because `bootstrap_if_needed` is a no-op once live.
@@ -599,29 +706,6 @@ where
         self.core
             .add_child_fragment_session(name_hint, expr, external_env)
             .map_err(ResidentError::AddFunction)
-    }
-
-    /// Shared child-run epilogue: drain the child's debug output (so it does
-    /// not leak into a later parent-turn snapshot/drain — the child's RESULT
-    /// is the deliverable, its console output is debug-only here) and wrap a
-    /// completed outcome as an [`EvalResult`]. A child fragment does not go
-    /// through the suspend driver, so `Suspended` is unreachable by
-    /// construction; kept a typed error rather than a panic.
-    fn finish_child_outcome(
-        &mut self,
-        outcome: SuspendableOutcome,
-    ) -> Result<EvalResult, ResidentError> {
-        match outcome {
-            SuspendableOutcome::Completed(value) => {
-                let _ = self.captured.drain();
-                Ok(EvalResult::new(
-                    value,
-                    self.core.session_table().clone(),
-                    Vec::new(),
-                ))
-            }
-            SuspendableOutcome::Suspended { .. } => Err(ResidentError::ChildSuspended),
-        }
     }
 
     /// Apply a `finalize`d closure BY REFERENCE (self-iterating-harness W4) to a
@@ -654,18 +738,20 @@ where
         arg: i64,
         run_table: Option<&DataConTable>,
     ) -> Result<EvalResult, ResidentError> {
-        // A child (this apply is one) requires a suspended parent.
-        if self.pending.is_none() {
+        // A child (this apply is one) requires a parked parent — the
+        // finalize suspension's own frame (top of the stack: apply follows
+        // the suspension that stashed the payload).
+        let Some(&(_, frame_id)) = self.parked.last() else {
             return Err(ResidentError::NotSuspended);
-        }
-        // Take the finalized closure's persistent root slot off the machine. It
-        // stays a registered GC root for the machine's life (taking only removes
-        // the machine's own handle), so referencing it by slot address below is
-        // GC-safe across the child run.
+        };
+        // Take the finalized closure's persistent root slot off the parked
+        // frame. It stays a registered GC root (release is the owning realm's
+        // scope exit), so referencing it by slot address below is GC-safe
+        // across the child run.
         let slot = self
             .core
             .machine_mut()
-            .and_then(|m| m.take_finalized_root())
+            .and_then(|m| m.take_parked_finalized_root(frame_id))
             .ok_or_else(|| {
                 ResidentError::Run(RuntimeError::Jit(JitError::Effect(EffectError::Handler(
                     "no finalized closure to apply (session is not suspended on a \
@@ -757,56 +843,62 @@ where
         input: ResumeInput,
         bind: Option<(&BoundBinder, Generation)>,
     ) -> Result<ResidentOutcome, ResidentError> {
-        // Validate BEFORE consuming the pending continuation. A mismatch leaves
-        // `self.pending` intact — the caller can retry with the right id.
-        match &self.pending {
-            Some(p) if p == cont_id => {}
-            other => {
-                return Err(ResidentError::WrongContinuation {
-                    attempted: cont_id.to_string(),
-                    pending: other.clone(),
-                })
-            }
-        }
-        let ask_tag = self.core.ask_tag();
-        // The machine is authoritative on whether the stowed continuation was
-        // actually consumed: `resume_suspended{,_binding}` NF-force a
-        // data-kinded answer BEFORE taking the continuation (A5), and on a
-        // retryable rejection (a bottom in the answer) leave it stowed so the
-        // caller can retry — `pending` must NOT be cleared here, or a
-        // retryable failure wedges the session (`is_idle()` lies `true` while
-        // the machine is still suspended). `classify` (below, on `Ok`) is the
-        // sole owner of `pending` on a real outcome.
-        let forced = bind.map(|(b, _)| matches!(b.tier, ValueTier::Tier0Data));
-        let outcome = self.on_eval_thread(move |machine, table, handlers, captured| match forced {
-            Some(forced) => {
-                machine.resume_suspended_binding(table, handlers, captured, ask_tag, input, forced)
-            }
-            None => machine.resume_suspended(table, handlers, captured, ask_tag, input),
+        // Validate BEFORE consuming: `cont_id` must be a MEMBER of the parked
+        // set (any-order resume — the machine imposes no order and neither do
+        // we). A mismatch leaves every parked frame intact.
+        let Some(&(_, frame_id)) = self.parked.iter().find(|(h, _)| h == cont_id) else {
+            return Err(ResidentError::WrongContinuation {
+                attempted: cont_id.to_string(),
+                pending: self.parked.iter().map(|(h, _)| h.clone()).collect(),
+            });
+        };
+        // The machine is authoritative on whether the frame was actually
+        // consumed: `resume_parked` NF-forces a data-kinded answer BEFORE
+        // removing the frame (A5), and on a retryable rejection leaves it
+        // parked and rooted — this hole must NOT be cleared here, or a
+        // retryable failure wedges the session. `classify_parked` (on `Ok`)
+        // is the sole owner of the parked set on a real outcome. The frame
+        // replays its own kind/table/tag, so bind-vs-plain needs no
+        // re-declaration here (`bind` is only used for materialization
+        // below).
+        let realm = self.realm;
+        let outcome = self.on_eval_thread(move |machine, _table, handlers, captured| {
+            machine
+                .resume_parked(frame_id, handlers, captured, input)
+                .map(|o| project_parked(machine, o, realm))
         });
         let outcome = match outcome {
             Ok(outcome) => outcome,
             Err(e) => {
-                // Reconcile against the machine's ground truth: if it is no
-                // longer suspended, the continuation WAS consumed before this
-                // run failed (a genuine mid-run error) — the old hole is
-                // spent and the session goes idle. If it is still suspended,
-                // this was a retryable rejection (e.g. A5's NF-force) — the
-                // same hole stays pending, untouched.
-                if !self.core.is_suspended() {
-                    self.pending = None;
+                // Reconcile against the machine's ground truth BY IDENTITY:
+                // if the frame is gone from the registry, it WAS consumed
+                // before this run failed (a genuine mid-run error, or an
+                // abort) — the hole is spent. If it is still parked, this was
+                // a retryable rejection (e.g. A5's NF-force) — the hole stays,
+                // untouched. A boolean "is the machine suspended" cannot
+                // answer this with N frames parked; membership can.
+                let still_parked = self
+                    .core
+                    .machine_mut()
+                    .map(|m| m.parked_ids().contains(&frame_id))
+                    .unwrap_or(false);
+                if !still_parked {
+                    self.parked.retain(|(h, _)| h != cont_id);
                 }
                 return Err(e);
             }
         };
-        // A completed bind materializes AFTER `classify` has already retired
-        // `pending` for this hole, so a materialize failure here — a second,
-        // different door onto the same wedge class — cannot leave `pending`
-        // stuck on a hole the machine no longer recognizes as suspended.
-        let completed = matches!(outcome, SuspendableOutcome::Completed(_));
-        let resident_outcome = self.classify(outcome);
+        // A completed bind materializes AFTER `classify_parked` has already
+        // retired this hole, so a materialize failure cannot leave the hole
+        // stuck on a frame the machine no longer holds.
+        let bound = match &outcome {
+            ParkedRun::Completed { bound, .. } => *bound,
+            ParkedRun::Suspended { .. } => None,
+        };
+        let completed = matches!(outcome, ParkedRun::Completed { .. });
+        let resident_outcome = self.classify_parked(outcome, Some(cont_id));
         if let (Some((binder, gen)), true) = (bind, completed) {
-            self.materialize_binder(binder, gen)?;
+            self.materialize_binder(binder, gen, bound)?;
         }
         Ok(resident_outcome)
     }
@@ -820,14 +912,30 @@ where
         &mut self,
         binder: &BoundBinder,
         gen: Generation,
+        bound: Option<ValueHandle>,
     ) -> Result<(), ResidentError> {
+        // The tenured root rode out of the eval thread as a `Send` handle
+        // (pillar-B laundering); resolve it back to its slot HERE, on the
+        // session thread where the `BindingTable` lives, and release the
+        // handle — ownership transfers to the value plane (the persistent
+        // root registration is untouched; a realm scope-exit no longer sees
+        // it).
+        let handle = bound.ok_or_else(|| {
+            ResidentError::Run(RuntimeError::Jit(JitError::Effect(EffectError::Handler(
+                "value-plane bind completed but no tenured root was recorded".into(),
+            ))))
+        })?;
         let slot = self
             .core
             .machine_mut()
-            .and_then(|m| m.take_last_bound_root())
+            .and_then(|m| {
+                let slot = m.handle_slot(handle);
+                m.release_handle(handle);
+                slot
+            })
             .ok_or_else(|| {
                 ResidentError::Run(RuntimeError::Jit(JitError::Effect(EffectError::Handler(
-                    "value-plane bind completed but no tenured root was recorded".into(),
+                    "value-plane bind completed but its handle was unknown to the machine".into(),
                 ))))
             })?;
         let value = match binder.tier {
@@ -854,15 +962,10 @@ where
     /// reach and re-point GC state at the retained heap. Only the machine (and
     /// the accumulated table) crosses to the thread; the rest of the session
     /// core is `!Send` (raw-pointer roots) and stays here.
-    fn on_eval_thread<F>(&mut self, body: F) -> Result<SuspendableOutcome, ResidentError>
+    fn on_eval_thread<F, T>(&mut self, body: F) -> Result<T, ResidentError>
     where
-        F: FnOnce(
-                &mut JitEffectMachine,
-                &DataConTable,
-                &mut H,
-                &O,
-            ) -> Result<SuspendableOutcome, JitError>
-            + Send,
+        T: Send,
+        F: FnOnce(&mut JitEffectMachine, &DataConTable, &mut H, &O) -> Result<T, JitError> + Send,
     {
         let mut machine = self.core.take_machine();
         let table = self.core.session_table();
@@ -901,30 +1004,32 @@ where
         }
     }
 
-    /// Classify a raw [`SuspendableOutcome`] into a [`ResidentOutcome`], minting
-    /// and arming a continuation id on suspension and draining/snapshotting
-    /// output the same way the engine does (drain on completion, snapshot on
-    /// suspend).
-    fn classify(&mut self, outcome: SuspendableOutcome) -> ResidentOutcome {
+    /// Classify a projected parked outcome into a [`ResidentOutcome`]:
+    /// completion retires `resumed` (the hole this outcome answered — `None`
+    /// for a fresh run, which retires nothing), suspension mints a hole and
+    /// pushes `(hole, id)` onto the parked set. Output is drained on
+    /// completion and snapshotted on suspension, same as the engine.
+    fn classify_parked(&mut self, outcome: ParkedRun, resumed: Option<&str>) -> ResidentOutcome {
         match outcome {
-            SuspendableOutcome::Completed(value) => {
-                self.pending = None;
+            ParkedRun::Completed { value, .. } => {
+                if let Some(hole) = resumed {
+                    self.parked.retain(|(h, _)| h != hole);
+                }
                 let output = self.captured.drain();
                 ResidentOutcome::Completed {
                     output,
                     result: EvalResult::new(value, self.core.session_table().clone(), Vec::new()),
                 }
             }
-            SuspendableOutcome::Suspended {
-                request,
-                // W4: the finalized closure's root is stashed on the machine
-                // (read out at apply time via `apply_finalized`); the harness
-                // detects the by-reference case from the `CLOSURE_SENTINEL` in
-                // `request`, so nothing extra needs to ride out through here.
-                has_finalized_closure: _,
-            } => {
+            ParkedRun::Suspended { id, request } => {
+                // A resume that re-suspended: the OLD hole is spent (the
+                // frame was consumed; a fresh frame parked under a FRESH id —
+                // ids are never reused) and the new one replaces it.
+                if let Some(hole) = resumed {
+                    self.parked.retain(|(h, _)| h != hole);
+                }
                 let hole = self.next_cont_id();
-                self.pending = Some(hole.clone());
+                self.parked.push((hole.clone(), id));
                 let output = self.captured.snapshot();
                 ResidentOutcome::Suspended {
                     output,
@@ -933,6 +1038,44 @@ where
                 }
             }
         }
+    }
+}
+
+/// The `Send` projection of a [`ParkedOutcome`] that crosses the eval-thread
+/// boundary: a bind's tenured `!Send` `RootSlot` is minted into a
+/// [`ValueHandle`] IN-THREAD (`realm`-owned) and the id crosses instead —
+/// resolved back to its slot by `materialize_binder` on the session thread.
+/// `CompletedProject`/`CompletedRender` are unreachable on this lane (the
+/// resident session parks only `Plain`/`Binding`); the finalized-closure flag
+/// is dropped (the harness detects that case from the `CLOSURE_SENTINEL` in
+/// the request, and the payload itself is read per-frame at apply time).
+enum ParkedRun {
+    Completed {
+        value: Value,
+        bound: Option<ValueHandle>,
+    },
+    Suspended {
+        id: ContinuationId,
+        request: Value,
+    },
+}
+
+/// Project a [`ParkedOutcome`] to [`ParkedRun`] on the eval thread (see
+/// [`ParkedRun`]'s doc).
+fn project_parked(
+    machine: &mut JitEffectMachine,
+    outcome: ParkedOutcome,
+    realm: tidepool_codegen::jit_machine::RealmId,
+) -> ParkedRun {
+    match outcome {
+        ParkedOutcome::Completed { value, bound_root } => ParkedRun::Completed {
+            value,
+            bound: bound_root.map(|slot| machine.mint_handle_from_root(slot, realm)),
+        },
+        ParkedOutcome::CompletedProject { .. } | ParkedOutcome::CompletedRender { .. } => {
+            unreachable!("the resident lane parks only Plain/Binding turns")
+        }
+        ParkedOutcome::Suspended { id, request, .. } => ParkedRun::Suspended { id, request },
     }
 }
 

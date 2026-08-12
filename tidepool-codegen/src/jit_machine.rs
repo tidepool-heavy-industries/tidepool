@@ -3707,6 +3707,41 @@ impl JitEffectMachine {
         self.value_handles.get(&handle.0).map(|e| e.realm)
     }
 
+    /// Mint a [`ValueHandle`] over an ALREADY-ROOTED slot (a tenured bind
+    /// root returned inline by a parked completion). Exists because the
+    /// `!Send` [`crate::old_space::RootSlot`] cannot ride an outcome across
+    /// the session layer's eval-thread boundary — the eval-thread closure
+    /// mints the handle machine-side and the `Send` id crosses instead
+    /// (`ResidentSession`'s laundering, pillar-B flavored). The slot's
+    /// persistent-root registration is unchanged; the handle just records
+    /// realm ownership over it.
+    pub fn mint_handle_from_root(
+        &mut self,
+        slot: crate::old_space::RootSlot,
+        realm: RealmId,
+    ) -> ValueHandle {
+        let h = ValueHandle(self.next_value_handle);
+        self.next_value_handle += 1;
+        self.value_handles.insert(h.0, HandleEntry { slot, realm });
+        h
+    }
+
+    /// The rooted slot behind a live handle — for the session layer's OWN
+    /// bookkeeping (a value-plane `BindingTable` stores `RootSlot`s on the
+    /// session thread, same as it always has). The handle stays live; pairing
+    /// this with [`Self::release_handle`] transfers ownership to the caller.
+    pub fn handle_slot(&self, handle: ValueHandle) -> Option<crate::old_space::RootSlot> {
+        self.value_handles.get(&handle.0).map(|e| e.slot)
+    }
+
+    /// Release ONE handle without closing its realm — for a caller that
+    /// consumed the underlying slot into its own lifetime discipline (the
+    /// value plane). Does NOT deregister the persistent root (ownership
+    /// transferred, not dropped); a later `close_realm` no longer sees it.
+    pub fn release_handle(&mut self, handle: ValueHandle) -> bool {
+        self.value_handles.remove(&handle.0).is_some()
+    }
+
     /// Number of live value handles (test/diagnostic accessor).
     pub fn value_handle_count(&self) -> usize {
         self.value_handles.len()

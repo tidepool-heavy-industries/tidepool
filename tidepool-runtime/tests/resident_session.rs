@@ -182,19 +182,29 @@ fn multi_turn_accumulates_across_suspend_resume() {
 
     // The session is now suspended — no OS thread is parked (E2). A NEW run is
     // rejected cleanly until the ask is resolved.
+    // PARKED PATH (one-session plan, Phase 1): a new top-level run over a
+    // parked frame is ORDINARY — it completes while the frame stays parked
+    // and rooted. (This inverts the old reject-while-suspended pin.)
     let (intrude_expr, intrude_table) =
         compile_turn(&harness, "result :: M Int\nresult = pure (9 :: Int)");
     match session.run("intrude", &intrude_expr, &intrude_table) {
-        Err(ResidentError::Suspended(h)) => assert_eq!(h, hole),
-        other => panic!("a suspended session must reject a new run; got {other:?}"),
+        Ok(ResidentOutcome::Completed { result, .. }) => {
+            assert_eq!(result.to_json(), serde_json::json!(9));
+        }
+        other => panic!("a run over a parked frame must complete; got {other:?}"),
     }
+    assert_eq!(
+        session.pending_continuation(),
+        Some(hole.as_str()),
+        "the parked hole survives an unrelated run"
+    );
 
-    // Resume on the WRONG continuation id: rejected WITHOUT consuming the pending
-    // one (atomic validate-before-consume).
+    // Resume on the WRONG continuation id: rejected WITHOUT consuming any
+    // parked frame (atomic validate-before-consume).
     match session.resume("scont_does_not_exist", int(7)) {
         Err(ResidentError::WrongContinuation { attempted, pending }) => {
             assert_eq!(attempted, "scont_does_not_exist");
-            assert_eq!(pending.as_deref(), Some(hole.as_str()));
+            assert_eq!(pending, vec![hole.clone()]);
         }
         other => panic!("wrong-id resume must not consume the continuation; got {other:?}"),
     }
@@ -322,13 +332,22 @@ fn nested_child_runs_while_parent_suspended_then_resumes() {
         );
     }
 
-    // A new TOP-LEVEL run is still rejected while suspended.
+    // PARKED PATH: a new TOP-LEVEL run over the parked parent is ordinary —
+    // it completes, and the parent's hole survives (the frame is a registered
+    // root, not a fragile slot).
     let (intrude_expr, intrude_table) =
         compile_turn(&harness, "result :: M Int\nresult = pure (1 :: Int)");
     match session.run("intrude", &intrude_expr, &intrude_table) {
-        Err(ResidentError::Suspended(h)) => assert_eq!(h, hole),
-        other => panic!("a suspended session must reject a new top-level run; got {other:?}"),
+        Ok(ResidentOutcome::Completed { result, .. }) => {
+            assert_eq!(result.to_json(), serde_json::json!(1));
+        }
+        other => panic!("a run over a parked frame must complete; got {other:?}"),
     }
+    assert_eq!(
+        session.pending_continuation(),
+        Some(hole.as_str()),
+        "the parked hole survives an unrelated top-level run"
+    );
 
     // Resume the parent with 42: the continuation (stowed across all the child
     // GCs) drives to completion correctly.

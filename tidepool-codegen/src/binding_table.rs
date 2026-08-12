@@ -123,7 +123,21 @@ impl BindingTable {
     /// upheld at the bind site and the Var-miss load site.
     pub fn bind(&mut self, entry: BindingEntry) -> SessionVarId {
         let id = entry.id;
-        self.current.insert(entry.name.clone(), id);
+        // NEWEST GEN WINS BY COMPARISON, not by insertion order: with
+        // any-order resume (one-session plan), a bind minted at gen 6 can
+        // MATERIALIZE after a same-name bind minted at gen 7 — arrival order
+        // no longer implies gen order. `current` must track the highest-gen
+        // binding for the name; an out-of-order older materialization stays
+        // `live` (fragments compiled against it still resolve) but never
+        // shadows a newer one.
+        let newer_current_exists = self
+            .current
+            .get(&entry.name)
+            .and_then(|cur_id| self.live.get(cur_id))
+            .is_some_and(|cur| cur.module.gen().0 > entry.module.gen().0);
+        if !newer_current_exists {
+            self.current.insert(entry.name.clone(), id);
+        }
         self.live.insert(id, entry);
         id
     }
@@ -295,6 +309,35 @@ mod tests {
         assert_eq!(env.len(), 1);
         assert!(env.get(x_var).is_some());
         assert!(env.get(y_var).is_none());
+    }
+
+    /// OUT-OF-ORDER MATERIALIZATION (one-session plan, Phase 1 audit pin):
+    /// with any-order resume, a bind minted at gen 6 can materialize AFTER a
+    /// same-name bind minted at gen 7. `current` must shadow by GEN
+    /// COMPARISON, not insertion order — the late older bind stays `live`
+    /// (old-gen fragments still resolve it by id) but never clobbers the
+    /// newer name.
+    #[test]
+    fn out_of_order_older_gen_does_not_clobber_newer_current() {
+        let mut a: *mut u8 = std::ptr::null_mut();
+        let mut b: *mut u8 = std::ptr::null_mut();
+        let (sa, sb) = (fake_slot(&mut a), fake_slot(&mut b));
+        let mut t = BindingTable::new();
+
+        // Gen 7 materializes FIRST (its turn completed first)...
+        let newer = t.bind(entry("x", 7, (0xFE << 56) | 7, sa));
+        // ...then the STALLED gen-6 bind of the same name lands late.
+        let older = t.bind(entry("x", 6, (0xFE << 56) | 6, sb));
+
+        let cur = t.resolve("x").expect("x is bound");
+        assert_eq!(cur.id, newer, "current must stay on the NEWER gen");
+        assert!(t.get(older).is_some(), "the older bind stays live by id");
+
+        // And the ordinary in-order case still repoints as always.
+        let mut c: *mut u8 = std::ptr::null_mut();
+        let sc = fake_slot(&mut c);
+        let newest = t.bind(entry("x", 8, (0xFE << 56) | 8, sc));
+        assert_eq!(t.resolve("x").expect("x").id, newest);
     }
 
     /// A referenced `VarId` that isn't a live session binding at all (an

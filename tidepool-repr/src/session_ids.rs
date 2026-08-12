@@ -94,6 +94,15 @@ impl SessionModule {
         }
     }
 
+    /// The generation this module was minted at — the shadowing comparator
+    /// (`BindingTable::bind`'s newest-gen-wins is a GEN comparison, not
+    /// insertion order, because materialization can arrive out of mint order
+    /// under any-order resume).
+    #[must_use]
+    pub fn gen(&self) -> Generation {
+        self.gen
+    }
+
     /// The fully-qualified module name, e.g. `"Tidepool.Session.Lib.G3"`.
     #[must_use]
     pub fn module_name(&self) -> String {

@@ -136,7 +136,16 @@ impl PersistentSession {
     /// Set the value-binding generation (a consumer advances it when a bind
     /// materializes at a freshly-minted `Val.G<g>`).
     pub fn set_val_gen(&mut self, g: Generation) {
-        self.val_gen = g;
+        // MONOTONIC MAX, not assignment: with any-order resume (one-session
+        // plan), two in-flight bind turns can materialize out of mint order —
+        // gen 7 completing before gen 6. A plain assignment would REWIND the
+        // counter on the late gen-6 materialization, and the next mint would
+        // re-issue 7, colliding with the live Val.G7. Generations are only
+        // ever bumped, never reused (`Generation::next`'s contract) — this
+        // enforces it at the one write site.
+        if g.0 > self.val_gen.0 {
+            self.val_gen = g;
+        }
     }
     /// The `Ask` union tag this session suspends on.
     pub fn ask_tag(&self) -> u64 {
