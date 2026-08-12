@@ -32,70 +32,45 @@
 //! process rather than raise a clean `Result` — see `tests/battery.sh`'s
 //! tier rules on when a standalone compile is warranted.
 //!
-//! # Verdict: NOT FEASIBLE AS-IS
+//! # Verdict (as originally written): NOT FEASIBLE AS-IS
 //!
 //! Blocked much earlier than the finalize/resume crossing this spike set out
 //! to probe — at `tidepool-extract` COMPILE time, on the very first fused
 //! `render`+`loop` compile of the OUTER session
 //! (`SelfHarnessDriver::compile_cycle_entry`), before any answerer turn ever
-//! runs. `loop`'s own `runLLMTurn @(State -> State)` call site fails to
-//! compile at all:
+//! runs. `loop`'s own `runLLMTurn @(State -> State)` call site failed to
+//! compile at all, with:
 //!
 //! ```text
 //! Error: function-typed answers not supported in R0 (site in loop): State -> State
 //! ```
 //!
-//! (verbatim, `tidepool-extract`'s diagnostics JSON — see the assertion
-//! below for the exact `DriverError::Session` text this test observed).
+//! **This specific gate is GONE (one-session plan Phase 3e).**
+//! `checkRunLLMTurnType` (`haskell/src/Tidepool/Translate.hs`) no longer
+//! rejects every function arrow — it admits a PURE function-typed answer
+//! like `State -> State` and rejects only an answer type that itself
+//! mentions the effect monad (`typeMentionsEffectMonad`: the `Eff` tycon, or
+//! any tycon defined in the generated `Tidepool.Effects` module), with a
+//! different error text ("effectful function answers not supported (the row
+//! is fragment-nominal): ..."). `loop`'s `runLLMTurn @(State -> State)` site
+//! is exactly the class of type this now admits, so the specific verbatim
+//! error and reasoning quoted above no longer describe current behavior.
 //!
-//! Code site: `haskell/src/Tidepool/Translate.hs:3411-3419`,
-//! `checkRunLLMTurnType`:
-//!
-//! ```haskell
-//! checkRunLLMTurnType :: Type -> TransM ()
-//! checkRunLLMTurnType ty = do
-//!   checkMonomorphicSite "runLLMTurn" ty
-//!   ...
-//!   when (typeHasFunctionArrow ty) $
-//!     error $ "function-typed answers not supported in R0 (site in "
-//!           ++ siteDesc ++ "): " ++ typeStr
-//! ```
-//!
-//! This is DELIBERATE, DOCUMENTED extract policy, not an oversight —
-//! `checkRunLLMTurnType`'s own doc comment (Translate.hs:3405-3410) says why:
-//! "R0 has no way to serialize a function-typed answer across the suspend
-//! boundary — the answer crosses as JSON." `finalize` gets a genuinely
-//! DIFFERENT, narrower check (`checkFinalizeType`, Translate.hs:3421-3427,
-//! `checkMonomorphicSite` only — deliberately NOT `typeHasFunctionArrow`),
-//! and its own doc comment explains the asymmetry: "`finalize`'s value
-//! crosses in-heap via `run_child` (no JSON round-trip, no `unsafeCoerce`
-//! relabeling), so — unlike `runLLMTurn` — it may carry a closure or other
-//! non-serializable value." In other words: the extract already encodes the
-//! exact fact this spike was sent to (re)confirm — `finalize` can carry a
-//! function, `runLLMTurn` categorically cannot — as a hand-checked, hard
-//! compile-time rule, for `runLLMTurn` sites specifically because ITS answer
-//! is understood to cross via a JSON-shaped path, not `finalize`'s in-heap
-//! one. The loop shape the spec asks this spike to test —
-//! `loop st = do { f <- runLLMTurn @(State -> State) ...; pure (f st) }` —
-//! puts the function type on the `runLLMTurn` SITE (the thing `loop` awaits),
-//! not on the answerer's `finalize` call, so it trips exactly this gate
-//! before the answerer's `finalize @(State -> State)` (which WOULD compile —
-//! see `acceptance_finalize.rs`'s already-passing
-//! `finalize_accepts_function_typed_site_where_runllmturn_rejects_it`) ever
-//! gets a chance to run.
-//!
-//! This is squarely the boundary this spike must not cross: "No wire-format
-//! or extract changes ... the extract is expected to be untouched; if you
-//! believe it needs a change, that is a report-back, not an edit." Lifting
-//! `checkRunLLMTurnType`'s function-arrow guard is exactly such a change —
-//! and, per its own doc comment, would additionally require deciding how
-//! `runLLMTurn`'s answer-decode path (which the doc says assumes a
-//! JSON-shaped answer) would even represent a function value, which is a
-//! DIFFERENT, harder question than `finalize`'s (already-proven, in-heap)
-//! closure crossing.
+//! What this file does NOT establish: whether this spike's fixture now runs
+//! end to end. The extract gate was only the FIRST seam this spike hit —
+//! the "further, UNREACHED concern" below (the driver's finalize-value
+//! extraction path having no closure-aware branch, and no existing
+//! mechanism applying a closure live in one session's heap against a value
+//! from a DIFFERENT session's heap) is exactly the cross-session delivery
+//! problem the one-session plan's later phases (registry collapse, parked
+//! fragments on one shared machine) are the intended fix for. Left
+//! `#[ignore]`d pending that work landing and this spike being re-run
+//! against it — un-ignoring it is a separate, deliberate step for whoever
+//! verifies the new behavior end to end, not implied by the extract gate
+//! alone being lifted.
 //!
 //! **A further, UNREACHED concern, noted for whoever picks this up:** even
-//! setting the extract gate aside, the driver's OWN finalize-value
+//! setting the (now-lifted) extract gate aside, the driver's OWN finalize-value
 //! extraction path (`Harness::take_finalized_value_keep_open` ->
 //! `take_finalized_value_core`, `harness.rs`) unconditionally reads
 //! `fields[1]` of the `FinalizeWith(site, value)` request as "the finalized
@@ -112,27 +87,30 @@
 //! DIFFERENT session's heap (the only closure-application mechanism that
 //! exists, `ResidentSession::apply_finalized`, runs same-session only, and
 //! even that has its own known gap — `acceptance_finalize.rs`'s ignored
-//! `finalize_closure_full_round_trip`). This test never reaches that path
-//! (the extract gate above stops it first), so this paragraph is informed
-//! prediction from reading the code, not an observed result — flagged
-//! explicitly as such rather than asserted as this spike's finding.
+//! `finalize_closure_full_round_trip`). At the time this spike was written
+//! the test never reached that path (the since-lifted extract gate stopped
+//! it first), so this paragraph was, and remains, informed prediction from
+//! reading the code rather than an observed result — this file has not been
+//! re-run against the lifted gate to confirm whether it now reaches this
+//! path, or what happens if it does.
 //!
-//! Seams from the spec's checklist:
+//! Seams from the spec's checklist (as observed AT THE TIME, against the
+//! now-superseded extract gate — not re-verified against current behavior):
 //! 1. ROW SPLICE SYNTAX — NOT hit. `EngineConfig::turn_target`'s
 //!    `tidepool_mcp::RowArgs::at("Finalize", [ty])` already parenthesizes a
 //!    compound answer type correctly (`acceptance_finalize.rs`'s
 //!    `finalize_accepts_function_typed_site_where_runllmturn_rejects_it` /
 //!    `finalize_closure_crosses_by_reference` already exercise `Finalize
-//!    (Int -> Int)` through the identical `set_answer_contract` path). Never
-//!    reached here anyway — the failure is on the OUTER `runLLMTurn` site,
+//!    (Int -> Int)` through the identical `set_answer_contract` path). Not
+//!    reached at the time — the failure was on the OUTER `runLLMTurn` site,
 //!    which uses no `Finalize`-row splice at all.
-//! 2. TRANSCRIPT RENDER — not reached; no answerer turn ever runs.
-//! 3. DEEP-FORCE OF CLOSURES — not reached.
-//! 4. JITMODULE LIFETIME — not reached.
-//! 5. asks.json TYPE RENDER — this is the closest match, but stronger than
-//!    anticipated: not a type-STRING mismatch, but `tidepool-extract`
-//!    refusing to translate the `runLLMTurn` site at all, by deliberate,
-//!    documented design (see above).
+//! 2. TRANSCRIPT RENDER — not reached at the time; no answerer turn ever ran.
+//! 3. DEEP-FORCE OF CLOSURES — not reached at the time.
+//! 4. JITMODULE LIFETIME — not reached at the time.
+//! 5. asks.json TYPE RENDER — the closest match at the time, but stronger
+//!    than anticipated: not a type-STRING mismatch, but `tidepool-extract`
+//!    refusing to translate the `runLLMTurn` site at all — the gate that
+//!    fired is the one described above, now lifted for pure arrows.
 
 mod support;
 
@@ -211,22 +189,28 @@ impl Observer for CapturingObserver {
 
 /// Drive two full cycles of the fn-finalize-spike fixture through the
 /// production entry point. See this file's module doc for the verdict this
-/// test's outcome pins: NOT FEASIBLE AS-IS. Cycle 1 never even reaches the
-/// answerer — `loop`'s own `runLLMTurn @(State -> State)` call site fails
-/// `tidepool-extract`'s compile outright. Ignored: see the module doc's
-/// Verdict section for the precise failing seam, the verbatim error below,
-/// and the code site.
-#[ignore = "spike verdict: NOT FEASIBLE AS-IS — see module doc. `loop`'s own \
-            `runLLMTurn @(State -> State)` site fails tidepool-extract's \
-            compile outright: `checkRunLLMTurnType` \
-            (haskell/src/Tidepool/Translate.hs:3411-3419) hard-rejects any \
-            function-typed runLLMTurn answer by deliberate design (\"R0 has \
-            no way to serialize a function-typed answer across the suspend \
-            boundary — the answer crosses as JSON\"), unlike finalize's \
-            deliberately-relaxed checkFinalizeType. Blocked before any \
-            answerer turn runs, let alone a second cycle. Left ignored \
-            rather than deleted so the exact failure text/site stays pinned \
-            for whoever picks this up."]
+/// test originally pinned (NOT FEASIBLE AS-IS, at the extract's compile-time
+/// gate) — that specific gate is now lifted (one-session plan Phase 3e:
+/// `checkRunLLMTurnType` admits a pure function-typed answer like
+/// `State -> State`), but this test's disposition against the current code
+/// is UNVERIFIED (a deeper, still-open seam — cross-session closure
+/// delivery — is documented in the module doc's "further, UNREACHED
+/// concern"). Left ignored pending that work landing and this spike being
+/// deliberately re-run and re-verified, not un-ignored as a side effect of
+/// the extract gate alone changing.
+#[ignore = "spike verdict pinned NOT FEASIBLE AS-IS against the extract's \
+            prior compile-time gate — see module doc. That gate \
+            (`checkRunLLMTurnType`, haskell/src/Tidepool/Translate.hs) no \
+            longer hard-rejects a pure function-typed runLLMTurn answer \
+            (one-session plan Phase 3e); it now rejects only an answer type \
+            that itself mentions the effect monad. This test's outcome \
+            against the lifted gate is UNVERIFIED — a deeper, still-open \
+            seam (cross-session closure delivery on the finalize/resume \
+            path) is documented in the module doc and is the real reason \
+            this stays ignored rather than the now-superseded compile \
+            rejection. Left ignored rather than deleted so the history and \
+            the still-open seam stay pinned for whoever picks this up and \
+            re-verifies end to end."]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn fn_finalize_crosses_two_cycles_and_composes() {
     support::require_extract();

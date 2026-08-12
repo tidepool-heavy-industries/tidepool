@@ -367,6 +367,51 @@ where
         self.realm = realm;
     }
 
+    /// SCOPE EXIT for `realm` (one-session plan, pillar A): close the realm
+    /// on the machine (frames dropped, roots deregistered, handles released)
+    /// and RECONCILE this session's parked-hole list against the machine's
+    /// surviving frame ids — the machine is the ground truth, so holes whose
+    /// frames the close dropped disappear here too, and sibling realms'
+    /// holes are untouched. Returns `(frames_dropped, handles_released)`;
+    /// `(0, 0)` when the machine is not yet booted or the realm owns
+    /// nothing (idempotent).
+    pub fn close_realm(&mut self, realm: RealmId) -> (usize, usize) {
+        let Some(machine) = self.core.machine_mut() else {
+            return (0, 0);
+        };
+        let counts = machine.close_realm(realm);
+        let survivors = machine.parked_ids();
+        self.parked.retain(|(_, id)| survivors.contains(id));
+        counts
+    }
+
+    /// Mint a [`ValueHandle`] over the closure-valued `finalize` payload of
+    /// the frame parked on `hole` (pillar B: the payload never bridges to a
+    /// data `Value`; the `Send` handle is how it is passed around and
+    /// eventually DELIVERED into a sibling hole via [`Self::resume_handle`]).
+    /// The frame stays parked (consume/abort it separately, as the finalize
+    /// flow always has); the handle is owned by the frame's realm. `None`
+    /// when `hole` is not parked or its frame holds no (untaken) finalized
+    /// payload.
+    pub fn finalized_handle(&mut self, hole: &str) -> Option<ValueHandle> {
+        let &(_, id) = self.parked.iter().find(|(h, _)| h == hole)?;
+        self.core.machine_mut()?.handle_from_finalized(id)
+    }
+
+    /// Resume the turn parked on `cont_id` by DELIVERING a machine-side
+    /// rooted value — the handle's payload feeds the continuation verbatim,
+    /// no materialization, closures included (pillar B's delivery half; the
+    /// one-session loop receives its `State -> State` this way). Same
+    /// validate-before-consume and ground-truth reconciliation as
+    /// [`Self::resume`].
+    pub fn resume_handle(
+        &mut self,
+        cont_id: &str,
+        handle: ValueHandle,
+    ) -> Result<ResidentOutcome, ResidentError> {
+        self.reenter(cont_id, ResumeInput::Handle(handle), None)
+    }
+
     /// This session's handled-effect prefix, DERIVED from its own
     /// `effect_names` and ask tag (the names below the suspend threshold, in
     /// position order) — the parking contract's "derive, don't declare".

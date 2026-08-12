@@ -124,8 +124,23 @@ pub struct CycleOutcome {
 /// fragment compile needs the same `extract_bin`/`include`/decls) and the
 /// harness module's name (every later fragment's `qualified ... as Loaded`
 /// import, see [`SelfHarnessDriver::compile_outer`]).
+/// How a serviced `runLLMTurn` hole's answer travels back into the loop's
+/// parked continuation: a bridged data value (the pre-collapse path, still
+/// right for data), or a machine-side handle whose payload is DELIVERED
+/// verbatim on the shared heap — the closure path (pillar B; the reason the
+/// collapse exists).
+enum FinalAnswer {
+    Value(Value),
+    Handle(tidepool_codegen::jit_machine::ValueHandle),
+}
+
 struct OuterSession {
-    session: crate::harness::Session,
+    /// The SHARED session's registry id (one-session collapse): the outer
+    /// render/loop fragments AND every answerer node's turns run on this one
+    /// machine — the driver holds the id, the registry holds the machine,
+    /// every access goes through the checkout discipline
+    /// ([`crate::harness::Harness::with_session`]).
+    sid: tidepool_repr::SessionId,
     cfg: EngineConfig,
     module_name: String,
     /// The author modules every answerer turn imports
@@ -285,6 +300,10 @@ fn turn_outcome_tag(o: &TurnOutcome) -> &'static str {
 pub struct SelfHarnessDriver {
     /// The Harness-monad resident session. `None` before bootstrap.
     outer: Option<OuterSession>,
+    /// Monotonic per-loop realm counter: each loop's answerer node gets its
+    /// own realm on the SHARED machine (structured-concurrency scope; closed
+    /// at retirement). Distinct from `iteration` (which restarts restore).
+    iteration_realm: u64,
     /// The nested multi-node orchestrator that answers a `runLLMTurn` hole
     /// by driving an Agent turn loop (`run_to_hole_or_done`) to a
     /// `finalize`. Shared, not owned exclusively, so a future GUI/inspector
@@ -389,6 +408,7 @@ impl SelfHarnessDriver {
     pub fn new(agent: Arc<Harness>, observer: Arc<dyn Observer>) -> Self {
         SelfHarnessDriver {
             outer: None,
+            iteration_realm: 0,
             agent,
             lifecycle: SelfHarnessState::Idle,
             observer,
@@ -596,13 +616,25 @@ impl SelfHarnessDriver {
             None,
         );
 
+        // The one-session collapse: the outer session lives in the tree's
+        // registry (uniform checkout discipline, panic-safety Drop), the
+        // driver holds only its id. Answerer nodes attach to it as realms.
+        let sid = self.agent.adopt_session(session);
         self.outer = Some(OuterSession {
-            session,
+            sid,
             cfg: outer_cfg,
             module_name: source.module_name.clone(),
             answerer_imports: source.answerer_imports.clone(),
         });
         Ok(())
+    }
+
+    /// The shared session's registry id, or the not-bootstrapped error.
+    fn outer_sid(&self) -> Result<tidepool_repr::SessionId, DriverError> {
+        self.outer
+            .as_ref()
+            .map(|o| o.sid)
+            .ok_or_else(not_bootstrapped)
     }
 
     /// Compile `code` (with `helpers`) against the outer session, importing
@@ -1108,7 +1140,17 @@ impl SelfHarnessDriver {
         let answerer =
             self.agent
                 .create_root_framed("loop answerer", "", self.answerer_framing.clone())?;
-        self.agent.force(answerer, Actor::Operator)?;
+        // ONE SESSION: the answerer node runs as a REALM on the shared outer
+        // machine (its turns park beside the loop's own frame; its values —
+        // closures included — are born in the loop's heap). Realm minted per
+        // loop; retirement is that realm's scope exit via terminate_node.
+        let sid = self.outer_sid()?;
+        self.agent.force_attached(answerer, Actor::Operator, sid)?;
+        self.iteration_realm = self.iteration_realm.wrapping_add(1);
+        self.agent.set_node_realm(
+            answerer,
+            tidepool_codegen::jit_machine::RealmId(self.iteration_realm),
+        );
         self.answerer = Some(answerer);
 
         let result = self.run_loop_fragment_inner(prior_state, precompiled).await;
@@ -1154,10 +1196,10 @@ impl SelfHarnessDriver {
         };
 
         let mut outcome = {
-            let outer = self.outer.as_mut().ok_or_else(not_bootstrapped)?;
-            outer
-                .session
-                .run("loop", &compiled.expr, &compiled.table)
+            let sid = self.outer_sid()?;
+            self.agent
+                .with_session(sid, |s| s.run("loop", &compiled.expr, &compiled.table))
+                .map_err(|e| DriverError::Session(e.to_string()))?
                 .map_err(|e| map_run_error("loop run failed", e.to_string()))?
         };
         loop {
@@ -1194,10 +1236,20 @@ impl SelfHarnessDriver {
                             // answer is taken would compact a mid-finalize session —
                             // do not.
                             self.maybe_compact_answerer().await?;
-                            let outer = self.outer.as_mut().ok_or_else(not_bootstrapped)?;
-                            outcome = outer.session.resume(&hole, answer).map_err(|e| {
-                                DriverError::Session(format!("loop resume failed: {e}"))
-                            })?;
+                            let sid = self.outer_sid()?;
+                            outcome = self
+                                .agent
+                                .with_session(sid, |s| match answer {
+                                    FinalAnswer::Value(v) => s.resume(&hole, v),
+                                    // Pillar B: the closure payload is
+                                    // DELIVERED by handle — same heap, no
+                                    // bridge, no sentinel.
+                                    FinalAnswer::Handle(h) => s.resume_handle(&hole, h),
+                                })
+                                .map_err(|e| DriverError::Session(e.to_string()))?
+                                .map_err(|e| {
+                                    DriverError::Session(format!("loop resume failed: {e}"))
+                                })?;
                         }
                         // The AUTHORED loop itself evaluated `askUser`/`note`
                         // (`Tidepool.Form`, auto-imported because `AskUser` is in
@@ -1252,7 +1304,7 @@ impl SelfHarnessDriver {
         ty: Option<&str>,
         prompt: &str,
         table: &DataConTable,
-    ) -> Result<Value, DriverError> {
+    ) -> Result<FinalAnswer, DriverError> {
         self.lifecycle = SelfHarnessState::SuspendedOnHole;
         self.emit(Event::RunLLMTurnHole {
             site,
@@ -1299,21 +1351,34 @@ impl SelfHarnessDriver {
             )));
         }
 
-        // Take the finalized value AND keep the node live (consume the
+        // Take the finalized answer AND keep the node live (consume the
         // finalize hole, Suspended→Running) so the NEXT hole can push onto the
         // same accumulating session — not `take_finalized_value`, which cancels.
-        let (value, rendered) = self.agent.take_finalized_value_keep_open(node)?;
-        self.emit(Event::Finalize {
-            node,
-            value: rendered,
-        });
+        // A CLOSURE payload is taken as a HANDLE (pillar B: it never bridges,
+        // it is delivered verbatim into the loop's parked continuation on the
+        // shared heap); data keeps the bridged-value path.
+        let answer = if self.agent.finalize_is_closure(node) {
+            let handle = self.agent.take_finalized_handle_keep_open(node)?;
+            self.emit(Event::Finalize {
+                node,
+                value: "\"<closure>\"".to_string(),
+            });
+            FinalAnswer::Handle(handle)
+        } else {
+            let (value, rendered) = self.agent.take_finalized_value_keep_open(node)?;
+            self.emit(Event::Finalize {
+                node,
+                value: rendered,
+            });
+            FinalAnswer::Value(value)
+        };
         // The answerer node is REUSED across the loop's holes, so
         // `node_usage` returns the node's CUMULATIVE context size. The
         // MID-LOOP compaction check (`maybe_compact_answerer`) reads it BETWEEN
         // holes, once per hole, right after this returns — never summed per-hole
         // (that would double-count the reused node's running total).
         self.lifecycle = SelfHarnessState::RunningLoop;
-        Ok(value)
+        Ok(answer)
     }
 
     /// Drive `node` (the per-loop answerer, already seeded with this hole's
@@ -1661,10 +1726,13 @@ impl SelfHarnessDriver {
                         .map_err(|e| {
                             DriverError::Session(format!("outer askUser submission decode: {e}"))
                         })?;
-                    let outer = self.outer.as_mut().ok_or_else(not_bootstrapped)?;
-                    outer.session.resume(&hole, answer).map_err(|e| {
-                        DriverError::Session(format!("outer askUser resume failed: {e}"))
-                    })?
+                    let sid = self.outer_sid()?;
+                    self.agent
+                        .with_session(sid, |s| s.resume(&hole, answer))
+                        .map_err(|e| DriverError::Session(e.to_string()))?
+                        .map_err(|e| {
+                            DriverError::Session(format!("outer askUser resume failed: {e}"))
+                        })?
                 }
                 HoleRouting::Note { text } => {
                     self.announce_note(FormSource::OuterLoop, &text);
@@ -1672,10 +1740,13 @@ impl SelfHarnessDriver {
                     let answer = ().to_value(&compiled.table).map_err(|e| {
                         DriverError::Session(format!("bridge unit note-answer to Value: {e}"))
                     })?;
-                    let outer = self.outer.as_mut().ok_or_else(not_bootstrapped)?;
-                    outer.session.resume(&hole, answer).map_err(|e| {
-                        DriverError::Session(format!("outer note resume failed: {e}"))
-                    })?
+                    let sid = self.outer_sid()?;
+                    self.agent
+                        .with_session(sid, |s| s.resume(&hole, answer))
+                        .map_err(|e| DriverError::Session(e.to_string()))?
+                        .map_err(|e| {
+                            DriverError::Session(format!("outer note resume failed: {e}"))
+                        })?
                 }
                 other => {
                     return Err(DriverError::Session(format!(
@@ -1930,10 +2001,11 @@ impl SelfHarnessDriver {
         compiled: &CompiledTurn,
         last_compaction: Option<&str>,
     ) -> Result<String, DriverError> {
-        let outer = self.outer.as_mut().ok_or_else(not_bootstrapped)?;
-        let outcome = outer
-            .session
-            .run("render", &compiled.expr, &compiled.table)
+        let sid = self.outer_sid()?;
+        let outcome = self
+            .agent
+            .with_session(sid, |s| s.run("render", &compiled.expr, &compiled.table))
+            .map_err(|e| DriverError::Session(e.to_string()))?
             .map_err(|e| map_run_error("render run failed", e.to_string()))?;
         let author_text = match outcome {
             ResidentOutcome::Completed { result, .. } => match result.to_json() {

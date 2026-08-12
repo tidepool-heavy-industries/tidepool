@@ -10,8 +10,13 @@
 //! taken branch's site fires once, the untaken branch's site never fires, and
 //! the loop's single static site fires 3x with the SAME id every time.
 //!
-//! Negative: a polymorphic site and a function-typed site each fail extract,
-//! asserting the exact error text named in the spec.
+//! Negative: a polymorphic site fails extract (exact error text asserted).
+//! A function-typed site is no longer categorically rejected (one-session
+//! plan Phase 3e): a PURE function-typed answer (e.g. `Int -> Int`) now
+//! compiles past `checkRunLLMTurnType`, and only an answer type that itself
+//! mentions the effect monad (`M`/`Eff`, or a generated `Tidepool.Effects`
+//! tycon) — e.g. `Int -> M Int` — is rejected, with the new
+//! fragment-nominal-row error text.
 //!
 //! Run with the worktree extract binary, e.g.:
 //!   TIDEPOOL_EXTRACT=<worktree>/haskell/dist-newstyle/.../tidepool-extract-bin \
@@ -359,12 +364,35 @@ fn runllmturn_rejects_polymorphic_site() {
 }
 
 #[test]
-fn runllmturn_rejects_function_typed_site() {
-    let err = try_compile_runllmturn("runLLMTurn @(Int -> Int) \"fn\"", "")
-        .expect_err("a function-typed runLLMTurn site must fail extract");
+fn runllmturn_accepts_pure_function_typed_site() {
+    // One-session plan Phase 3e (TASK 1): `checkRunLLMTurnType` no longer
+    // hard-rejects every function arrow — a PURE function-typed answer now
+    // compiles past the gate (it may still fail LATER for unrelated
+    // reasons; this only asserts the old blanket rejection is gone).
+    let src_result = try_compile_runllmturn("runLLMTurn @(Int -> Int) \"fn\"", "");
     assert!(
-        err.contains("function-typed answers not supported in R0"),
-        "expected the function-typed-site error text, got:\n{err}"
+        src_result.is_ok(),
+        "a pure function-typed runLLMTurn site should compile past the \
+         function-arrow gate now, got error: {:?}",
+        src_result.err()
+    );
+}
+
+#[test]
+fn runllmturn_rejects_effectful_function_typed_site() {
+    // The narrower TASK 1 rejection: an answer type that itself mentions the
+    // effect monad (here `M Int` inside the arrow's result) is still a hard
+    // compile-time error — the generated `M`/`Eff` is nominal PER FRAGMENT
+    // and cannot unify across a suspend boundary.
+    let err = try_compile_runllmturn("runLLMTurn @(Int -> M Int) \"fn\"", "")
+        .expect_err("an effectful function-typed runLLMTurn site must fail extract");
+    assert!(
+        err.contains("effectful function answers not supported (the row is fragment-nominal)"),
+        "expected the new effectful-function-typed-site error text, got:\n{err}"
+    );
+    assert!(
+        err.contains("the M inside cannot unify across surfaces"),
+        "expected the new error text's explanation clause, got:\n{err}"
     );
 }
 

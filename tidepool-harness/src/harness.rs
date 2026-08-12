@@ -163,6 +163,11 @@ struct NodeConvo {
     effect_trace: EffectTrace,
     /// Monotonic per-node effect sequence number for the logged `Event::Effect`s.
     effect_seq: u64,
+    /// The realm this node's turns park under on its session (one-session
+    /// collapse: attached answerer nodes each get their own realm on the
+    /// SHARED machine; retirement is that realm's scope exit). `None` = the
+    /// session's default realm.
+    realm: Option<tidepool_codegen::jit_machine::RealmId>,
     pending: Option<PendingHole>,
     /// The typed hole this node is currently answering, when it answers by
     /// `finalize` (the self-iterating harness's answerer). Set per hole by
@@ -756,6 +761,38 @@ impl Harness {
         // inserts the machine as Idle — `NodeTree::force`'s one job).
         self.tree.force(node, actor, session)?;
 
+        self.seed_convo(node, effect_trace)?;
+        Ok(())
+    }
+
+    /// Force `node` ONTO the shared session `sid` (one-session collapse): the
+    /// same consent line and transcript/convo seeding as [`Self::force`], but
+    /// no machine is built — the node's turns run as a realm on the shared
+    /// machine (assign one via [`Self::set_node_realm`]), and its retirement
+    /// is realm scope-exit ([`Self::terminate_node`] on a non-owning node).
+    /// The convo's effect trace is fresh and never fed (the scoped answerer
+    /// rows are all-suspending; nothing dispatches — the absence IS the
+    /// capability boundary, unchanged by sharing the machine).
+    pub fn force_attached(
+        &self,
+        node: NodeId,
+        actor: Actor,
+        sid: tidepool_repr::SessionId,
+    ) -> Result<(), HarnessError> {
+        self.tree.force_attached(node, actor, sid)?;
+        self.seed_convo(node, EffectTrace::default())?;
+        Ok(())
+    }
+
+    /// Adopt a node-less session into the tree's registry (the one-session
+    /// OUTER session) — the caller owns its retirement.
+    pub fn adopt_session(&self, session: Session) -> tidepool_repr::SessionId {
+        self.tree.adopt_session(session)
+    }
+
+    /// Seed a freshly-forced node's transcript + convo entry (shared tail of
+    /// [`Self::force`] and [`Self::force_attached`]).
+    fn seed_convo(&self, node: NodeId, effect_trace: EffectTrace) -> Result<(), HarnessError> {
         // Seed the transcript: a fork/fanout answerer inherits its parent's
         // transcript (staged by `register_fork_child`); a plain root gets its
         // opening prompt (staged by `create_root_framed`). Mutually exclusive
@@ -814,6 +851,7 @@ impl Harness {
                 turn_seq: 0,
                 effect_trace,
                 effect_seq: 0,
+                realm: None,
                 pending: None,
                 answer_contract: None,
                 suspend_table: None,
@@ -827,6 +865,32 @@ impl Harness {
             },
         );
         Ok(())
+    }
+
+    /// Run a closure against the shared (node-less) session `sid` under the
+    /// full checkout discipline — the one-session driver's outer render/loop
+    /// runs and resumes go through here, restoring with the session's OWN
+    /// reported hole set. Synchronous by design (the driver's outer calls
+    /// always were); the machine mutation happens on the caller's thread.
+    pub fn with_session<T>(
+        &self,
+        sid: tidepool_repr::SessionId,
+        f: impl FnOnce(&mut Session) -> T,
+    ) -> Result<T, HarnessError> {
+        let mut co = self
+            .tree
+            .registry()
+            .checkout_run(sid)
+            .map_err(|e| HarnessError::Resident(format!("outer session checkout: {e}")))?;
+        let r = f(co.machine());
+        let holes: Vec<HoleId> = co
+            .machine()
+            .parked_holes()
+            .into_iter()
+            .map(|h| HoleId(h.to_string()))
+            .collect();
+        co.restore_suspended(holes);
+        Ok(r)
     }
 
     /// Build the concrete handler stack (rooted at the process CWD sandbox),
@@ -1756,6 +1820,72 @@ impl Harness {
         // Tree state: Suspended → Running, so the reused node accepts a new turn.
         self.tree.hole_consumed(node, hole)?;
         Ok((value, rendered))
+    }
+
+    /// CLOSURE sibling of [`Self::take_finalized_value_keep_open`] (pillar B,
+    /// the one-session collapse): the finalize payload is a live closure, so
+    /// instead of bridging a data `Value` (which would sentinel it), MINT a
+    /// [`ValueHandle`] over the parked frame's payload, then consume the
+    /// finalize hole exactly like the value path (abort the frame — the
+    /// handle owns the payload root now — restore with the surviving hole
+    /// set, `hole_consumed` the tree). The caller delivers the handle into
+    /// the awaiting hole via `ResidentSession::resume_handle`. The node and
+    /// its session stay live and reusable.
+    pub(crate) fn take_finalized_handle_keep_open(
+        &self,
+        node: NodeId,
+    ) -> Result<tidepool_codegen::jit_machine::ValueHandle, HarnessError> {
+        let hole = {
+            let convos = self.convos.lock();
+            let convo = convos.get(&node).ok_or(HarnessError::NoSession(node))?;
+            let pending = convo
+                .pending
+                .as_ref()
+                .ok_or(HarnessError::NotSuspended(node))?;
+            if !matches!(pending.classified.routing, HoleRouting::Finalize { .. }) {
+                return Err(HarnessError::RoutingMismatch {
+                    node,
+                    routing: "Finalize",
+                    actual: format!("{:?}", pending.classified.routing),
+                });
+            }
+            pending.hole.clone()
+        };
+        let mut co = self.checkout_resume(node, &hole)?;
+        let handle = co.machine().finalized_handle(&hole.0);
+        let handle = match handle {
+            Some(h) => h,
+            None => {
+                // Restore before erroring — the frame is untouched.
+                let holes: Vec<HoleId> = co
+                    .machine()
+                    .parked_holes()
+                    .into_iter()
+                    .map(|h| HoleId(h.to_string()))
+                    .collect();
+                co.restore_suspended(holes);
+                return Err(HarnessError::Resident(
+                    "finalize hole carries no untaken closure payload".into(),
+                ));
+            }
+        };
+        let _ = co
+            .machine()
+            .abort(&hole.0, "finalize consumed (answerer reused)".to_string());
+        let holes: Vec<HoleId> = co
+            .machine()
+            .parked_holes()
+            .into_iter()
+            .map(|h| HoleId(h.to_string()))
+            .collect();
+        co.restore_suspended(holes);
+        // Clear the consumed pending hole (the value path's
+        // take_finalized_value_core does this; the handle path must too).
+        if let Some(convo) = self.convos.lock().get_mut(&node) {
+            convo.pending = None;
+        }
+        self.tree.hole_consumed(node, hole)?;
+        Ok(handle)
     }
 
     /// Whether `node`'s pending finalize hole carries a CLOSURE value: the
@@ -2980,8 +3110,20 @@ impl Harness {
         F: FnOnce(Session) -> (Session, T) + Send + 'static,
         T: Send + 'static,
     {
+        // Apply the node's realm to the session before the turn — ONE site
+        // covering every run/resume/child path, so an attached answerer
+        // node's parks are always owned by ITS realm on the shared machine.
+        let realm = self.convos.lock().get(&node).and_then(|c| c.realm);
         let machine = checkout.take();
-        match tokio::task::spawn_blocking(move || f(machine)).await {
+        match tokio::task::spawn_blocking(move || {
+            let mut machine = machine;
+            if let Some(r) = realm {
+                machine.set_realm(r);
+            }
+            f(machine)
+        })
+        .await
+        {
             Ok((session, result)) => {
                 let holes: Vec<HoleId> = session
                     .parked_holes()
@@ -3021,10 +3163,49 @@ impl Harness {
             }
         }
         if let Some(sid) = self.tree.session_of(node) {
-            self.tree.registry().remove(sid);
+            if self.tree.node_owns_session(node) {
+                self.tree.registry().remove(sid);
+            } else {
+                // An ATTACHED node (one-session collapse): its retirement is
+                // realm SCOPE EXIT on the shared machine, never slot removal
+                // — the outer session outlives every answerer node it hosts.
+                // Best-effort: if the machine is out on a turn right now the
+                // realm's frames stay parked (still rooted, releasable by a
+                // later close); a wedged shared session is terminated by its
+                // OWNER, not here.
+                let realm = self.convos.lock().get(&node).and_then(|c| c.realm);
+                if let Some(realm) = realm {
+                    if let Ok(mut co) = self.tree.registry().checkout_run(sid) {
+                        let (frames, handles) = co.machine().close_realm(realm);
+                        if frames + handles > 0 && std::env::var("HARNESS_DEBUG").is_ok() {
+                            eprintln!(
+                                "[harness] realm scope-exit for {node:?}: {frames} frame(s), \
+                                 {handles} handle(s) released"
+                            );
+                        }
+                        let holes: Vec<HoleId> = co
+                            .machine()
+                            .parked_holes()
+                            .into_iter()
+                            .map(|h| HoleId(h.to_string()))
+                            .collect();
+                        co.restore_suspended(holes);
+                    }
+                }
+            }
         }
         self.convos.lock().remove(&node);
         Ok(())
+    }
+
+    /// Assign `node`'s realm — every subsequent turn this node runs on its
+    /// session parks under it (set into the session at run time, inside the
+    /// checkout). The one-session driver mints one realm per answerer node.
+    pub fn set_node_realm(&self, node: NodeId, realm: tidepool_codegen::jit_machine::RealmId) {
+        let mut convos = self.convos.lock();
+        if let Some(convo) = convos.get_mut(&node) {
+            convo.realm = Some(realm);
+        }
     }
 
     fn set_pending(&self, node: NodeId, pending: PendingHole) {
@@ -3367,6 +3548,7 @@ mod tests {
                 turn_seq: 0,
                 effect_trace,
                 effect_seq: 0,
+                realm: None,
                 pending: None,
                 answer_contract: None,
                 suspend_table: None,

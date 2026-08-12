@@ -122,6 +122,13 @@ struct NodeEntry {
     children: Vec<NodeId>,
     state: NodeState,
     session: Option<SessionId>,
+    /// Whether this node OWNS its session's registry slot (true for a
+    /// session minted by [`NodeTree::force`]) or merely runs ON a shared one
+    /// (false — [`NodeTree::force_attached`], the one-session collapse:
+    /// answerer nodes execute as realms on the outer session). Retirement
+    /// removes the registry slot only for owners; a non-owner's retirement
+    /// is realm scope-exit, done by the caller against the shared machine.
+    owns_session: bool,
 }
 
 struct Inner {
@@ -181,6 +188,19 @@ impl<M> NodeTree<M> {
         &self.registry
     }
 
+    /// Register a NODE-LESS session (the one-session collapse's OUTER
+    /// session): mints a `SessionId` from the same counter `force` uses and
+    /// inserts the machine as `Idle`. The caller owns retirement (there is
+    /// no node whose termination would remove it); attached nodes
+    /// ([`Self::force_attached`]) run on it as realms.
+    pub fn adopt_session(&self, machine: M) -> SessionId {
+        let mut inner = self.inner.lock();
+        let session = SessionId(inner.next_session_id);
+        inner.next_session_id += 1;
+        self.registry.insert_idle(session, machine);
+        session
+    }
+
     /// Mint a new node as [`NodeState::Thunk`] under `parent` (root if
     /// `None`), deriving its badges purely from `effect_row`/`fork_shape`/
     /// `spawns_frontier_children` and emitting `Event::NodeCreated`. Never
@@ -222,6 +242,7 @@ impl<M> NodeTree<M> {
                 children: Vec::new(),
                 state: NodeState::Thunk,
                 session: None,
+                owns_session: false,
             },
         );
         if let Some(p) = parent {
@@ -257,7 +278,46 @@ impl<M> NodeTree<M> {
         let entry = inner.nodes.get_mut(&node).expect("checked present above");
         entry.state = NodeState::Running;
         entry.session = Some(session);
+        entry.owns_session = true;
         Ok(session)
+    }
+
+    /// Force `node` ONTO AN EXISTING session (the one-session collapse):
+    /// same `Thunk → Running` transition and `Event::Forced` consent line as
+    /// [`Self::force`], but no machine is minted — the node's turns run as a
+    /// realm on `session`'s machine, and the node does NOT own the registry
+    /// slot (retirement is realm scope-exit, not slot removal). Refuses a
+    /// non-`Thunk` node and an unknown/absent `session` (attaching to a
+    /// session that was never registered would wedge every later checkout
+    /// with `Unknown`, attributed to the wrong place).
+    pub fn force_attached(
+        &self,
+        node: NodeId,
+        actor: Actor,
+        session: SessionId,
+    ) -> Result<(), TreeError> {
+        let mut inner = self.inner.lock();
+        match &inner.entry(node)?.state {
+            NodeState::Thunk => {}
+            other => return Err(TreeError::NotThunk(node, other.clone())),
+        }
+        inner.writer.append(Event::Forced { node, actor })?;
+        let entry = inner.nodes.get_mut(&node).expect("checked present above");
+        entry.state = NodeState::Running;
+        entry.session = Some(session);
+        entry.owns_session = false;
+        Ok(())
+    }
+
+    /// Whether `node` owns its session's registry slot (see
+    /// [`NodeEntry::owns_session`]). `false` for attached nodes and for
+    /// nodes with no session at all.
+    pub fn node_owns_session(&self, node: NodeId) -> bool {
+        self.inner
+            .lock()
+            .nodes
+            .get(&node)
+            .is_some_and(|e| e.session.is_some() && e.owns_session)
     }
 
     /// Log the start of a turn on `node`. Requires `Running`.
