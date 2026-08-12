@@ -87,7 +87,10 @@ writer mirrors the Haskell encoder byte-for-byte (always-9
 entries in ascending-`DataConId` order, same warnings-key emission rules);
 `tidepool-repr/tests/golden_wire_contract.rs` pins the byte identity for both
 trees and metadata over the committed corpus. Bump `VERSION_MAJOR` on any
-breaking shape change, bump `haskell/`'s serializer in the same commit, and
+breaking shape change, bump `haskell/`'s serializer in the same commit — the
+version bytes are hardcoded in TWO places with no shared formatter:
+`VERSION_MAJOR`/`VERSION_MINOR` here AND `Tidepool.CborEncode.tplrHeader`'s
+byte literal (the `3.0` bump missed the latter on first pass) — and
 regenerate the fixture corpora (`haskell/regen-corpus.sh` + the extract
 invocations in `haskell/CLAUDE.md`) — the Haskell and Rust sides are one
 format with two implementations, and the regenerated corpus diff is the
