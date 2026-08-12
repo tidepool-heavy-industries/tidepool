@@ -127,6 +127,24 @@ class FormRoot a where
 instance {-# OVERLAPPING #-} FormRoot () where
   rootShape = UnitShape
 
+-- Primitive roots present their primitive widget, mirroring the 'FormField'
+-- special-cases. Deriving these through @Generic@ would render a widget whose
+-- submission the PRIMITIVE 'FromJSON' instance can never read back — @Bool@'s
+-- generic form is a "True"/"False" constructor chooser, but its decode wants
+-- JSON @true@ — an un-decodable form that re-presents forever. (@Text@ has no
+-- @Generic@ instance at all, so its root previously failed to compile.)
+instance {-# OVERLAPPING #-} FormRoot Bool where
+  rootShape = BoolShape
+
+instance {-# OVERLAPPING #-} FormRoot Text where
+  rootShape = StringShape
+
+instance {-# OVERLAPPING #-} FormRoot Int where
+  rootShape = IntShape
+
+instance {-# OVERLAPPING #-} FormRoot Double where
+  rootShape = NumberShape
+
 instance {-# OVERLAPPABLE #-} (Generic a, GForm '[a] (Rep a)) => FormRoot a where
   rootShape = gShape @'[a] @(Rep a) Proxy
 

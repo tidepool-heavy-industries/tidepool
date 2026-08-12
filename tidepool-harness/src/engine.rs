@@ -534,8 +534,12 @@ pub fn answerer_hole_card(
          {prompt}\n\n\
          {shape}Answer by evaluating `finalize @{ty} value` in a single \
          ```haskell block — this ends your turn and hands the value back to the \
-         loop.{scope} (To gather operator input first, evaluate `askUser @T` for \
-         a type in scope; bind its result, then `finalize`.)"
+         loop.{scope} (To gather operator input first: `choose [(label, value), \
+         ...]` presents labeled options — ALWAYS prefer it for a decision, the \
+         labels are the only question text the operator sees; `chooseMany` for \
+         a subset; `askUser @T` renders a form from a record type's own fields \
+         (field names become the labels) or a primitive (`Text`/`Int`/`Bool`). \
+         Bind the result, then `finalize`.)"
     )
 }
 

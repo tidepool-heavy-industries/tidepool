@@ -111,8 +111,12 @@ fn continue_prompt() -> Markup {
 #[must_use]
 pub fn generic_shape(path: &str, shape: &FormShape) -> Markup {
     match shape {
+        // Placeholder because a ROOT primitive renders with no field label
+        // above it (nothing in the shape carries question text yet) — without
+        // it the form reads as a blank page until the input is focused.
         FormShape::String => html! {
-            input type="text" class="input" data-bind=(path) data-kind="string";
+            input type="text" class="input" data-bind=(path) data-kind="string"
+                placeholder="Type your answer…";
         },
         FormShape::Int => html! {
             input type="number" class="input" data-bind=(path) data-kind="int";
