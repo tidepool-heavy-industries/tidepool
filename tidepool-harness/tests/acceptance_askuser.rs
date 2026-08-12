@@ -128,6 +128,9 @@ struct ScriptedGate {
     /// back" after a malformed submission.
     seen: Mutex<Vec<FormShape>>,
     decision_presentations: AtomicUsize,
+    /// Every `note` text posted, in order — a `note` never blocks, so this
+    /// is populated with no matching "answer" the way `seen` has one.
+    notes: Mutex<Vec<String>>,
 }
 
 impl ScriptedGate {
@@ -135,11 +138,16 @@ impl ScriptedGate {
         ScriptedGate {
             seen: Mutex::new(Vec::new()),
             decision_presentations: AtomicUsize::new(0),
+            notes: Mutex::new(Vec::new()),
         }
     }
 }
 
 impl OperatorGate for ScriptedGate {
+    fn post_note(&self, text: &str) {
+        self.notes.lock().unwrap().push(text.to_string());
+    }
+
     fn present_form(&self, shape: &FormShape) -> serde_json::Value {
         let shape = shape.clone();
         self.seen.lock().unwrap().push(shape.clone());
@@ -186,6 +194,13 @@ enum CapturedForm {
         answerer: bool,
         submission: serde_json::Value,
     },
+    /// `note text` — riding the same `AskUser` GADT, but display-only: no
+    /// matching `Submitted` ever follows it (the driver resumes with `()`
+    /// immediately, never blocking on the operator).
+    Noted {
+        answerer: bool,
+        text: String,
+    },
 }
 
 #[derive(Default)]
@@ -204,33 +219,46 @@ impl Observer for CaptureObserver {
                 answerer: matches!(source, FormSource::Answerer { .. }),
                 submission: submission.clone(),
             },
+            Event::NotePosted { source, text } => CapturedForm::Noted {
+                answerer: matches!(source, FormSource::Answerer { .. }),
+                text: text.clone(),
+            },
             _ => return,
         };
         self.forms.lock().unwrap().push(captured);
     }
 }
 
-/// The ONE recorded answerer reply: a fenced Haskell `do`-block that asks the
-/// operator for a whole `Decision` with `askUser @Decision`, then picks among
-/// two RUNTIME values with `chooseMany`, then `finalize`s. Both suspensions
-/// happen WITHIN this one block execution (a form resume is not a new model
+/// The narration `note` posts before the `Decision` form — asserted against
+/// verbatim below, both at the gate ([`ScriptedGate::notes`]) and the driver's
+/// own event stream ([`CapturedForm::Noted`]).
+const NOTE_TEXT: &str = "About to gather a decision from the operator.";
+
+/// The ONE recorded answerer reply: a fenced Haskell `do`-block that first
+/// posts non-blocking narration with `note`, then asks the operator for a
+/// whole `Decision` with `askUser @Decision`, then picks among two RUNTIME
+/// values with `chooseMany`, then `finalize`s. All three suspensions happen
+/// WITHIN this one block execution (a note/form resume is not a new model
 /// turn), so one reply covers the whole exchange.
 ///
 /// Nothing is imported but the answer types themselves: no form builder, no
 /// codec, no `Tidepool.Form` import (it is auto-imported whenever `AskUser` is
 /// in the compiling row).
 fn askuser_reply() -> RecordedReply {
-    let content = "```haskell\n\
+    let content = format!(
+        "```haskell\n\
          import HarnessTypes (Decision (..), Confidence (..))\n\n\
          (do\n\
+         \x20  note \"{NOTE_TEXT}\"\n\
          \x20  d <- askUser @Decision\n\
          \x20  picks <- chooseMany [(\"keep\", \"kept\"), (\"drop\", \"dropped\")]\n\
-         \x20  finalize @Decision (d { rationale = T.intercalate \"+\" picks })) :: M ()\n\
-         ```";
+         \x20  finalize @Decision (d {{ rationale = T.intercalate \"+\" picks }})) :: M ()\n\
+         ```"
+    );
     RecordedReply {
         node: NodeId(0),
         turn: 0,
-        content: content.to_string(),
+        content,
         usage: Usage {
             input_tokens: 50,
             output_tokens: 10,
@@ -270,7 +298,16 @@ async fn askuser_operator_form_round_trip_and_ws4_log() {
     let outcome = driver
         .run_one_cycle(&source, None)
         .await
-        .expect("one full render->loop->runLLMTurn->askUser->finalize->render cycle");
+        .expect("one full render->loop->runLLMTurn->note->askUser->finalize->render cycle");
+
+    // `note` posted to the gate WITHOUT blocking — the block's very next
+    // statement (`askUser @Decision`) still ran in the SAME turn, and the
+    // gate saw the note text verbatim.
+    assert_eq!(
+        gate.notes.lock().unwrap().as_slice(),
+        &[NOTE_TEXT.to_string()],
+        "note must post to the gate exactly once, verbatim"
+    );
 
     // The form the operator saw IS the type's own structure, derived with no
     // `Decision` value in existence: exact selector keys, exact constructor
@@ -318,12 +355,17 @@ async fn askuser_operator_form_round_trip_and_ws4_log() {
     );
 
     // The driver's own emitted event stream — not just what the gate saw —
-    // is the same PRESENTED/SUBMITTED pairing in order, all from the nested
-    // answerer (`FormSource::Answerer`), never `OuterLoop`.
+    // is the same NOTED/PRESENTED/SUBMITTED pairing in order, all from the
+    // nested answerer (`FormSource::Answerer`), never `OuterLoop`. `note`
+    // fires FIRST, with no matching `Submitted` (it never blocks).
     let forms = observer.forms.lock().unwrap().clone();
     assert_eq!(
         forms,
         vec![
+            CapturedForm::Noted {
+                answerer: true,
+                text: NOTE_TEXT.to_string(),
+            },
             CapturedForm::Presented {
                 answerer: true,
                 shape: expected_decision_shape(),

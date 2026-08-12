@@ -80,6 +80,15 @@ pub enum HoleRouting {
     AskUser {
         shape: crate::selfharness::operator::FormShape,
     },
+    /// `noteRaw text` (`Tidepool.Form.note`) — a NON-BLOCKING display
+    /// channel riding the SAME `AskUser` GADT as `AskUserWith`, routed by
+    /// CONSTRUCTOR NAME (`NoteWith`), not JSON-key probing. The driver
+    /// services this by posting `text` to the operator's accumulating feed
+    /// and resuming immediately with `()` — it never presents anything via
+    /// `OperatorGate::present_form`, and does not count against
+    /// `ASKUSER_MAX_REPROMPTS` (that budget is scoped to `askUser`
+    /// re-presentations, a genuinely different failure mode).
+    Note { text: String },
     /// `finalize @T x` — an Agent turn hands a
     /// typed value UP to the parent `runLLMTurn` hole and TERMINATES its own
     /// turn loop, rather than resuming in context like [`HoleRouting::RunLLMTurn`]
@@ -131,6 +140,9 @@ pub struct ClassifiedHole {
 ///   A malformed shape (the decode fails) falls through to the plain-Ask
 ///   fallback below instead of hanging, so a bad payload surfaces loudly at
 ///   the driver.
+/// - `NoteWith` (text) — a real constructor arm on the SAME `AskUser` GADT,
+///   routed by CONSTRUCTOR NAME → [`HoleRouting::Note`]. The sole field is a
+///   bare `Text`, decoded directly (no shape/schema involved).
 /// - `AskWith` (prompt, payload) — plain [`HoleRouting::Ask`] (a structured
 ///   `ask schema prompt`).
 /// - anything else (an unrecognized Con) — treated as a bare Ask with an empty
@@ -190,6 +202,13 @@ pub fn classify_hole(request: &Value, table: &DataConTable, asks: &AsksSidecar) 
                 }
             }
         },
+        Some("NoteWith") => {
+            let text = decode_note_text(request, table);
+            ClassifiedHole {
+                routing: HoleRouting::Note { text },
+                prompt: String::new(),
+            }
+        }
         _ => {
             let (prompt, payload) = decode_askwith(request, table);
             ClassifiedHole {
@@ -200,6 +219,19 @@ pub fn classify_hole(request: &Value, table: &DataConTable, asks: &AsksSidecar) 
     };
     tracing::info!(routing = ?hole.routing, prompt = %hole.prompt, "suspension classified");
     hole
+}
+
+/// Pull `text` out of a `NoteWith`-shaped request (`Con(_, [text :: Text])`)
+/// — a bare `Text` field, no shape/schema involved (unlike `AskUserWith`).
+fn decode_note_text(request: &Value, table: &DataConTable) -> String {
+    let Value::Con(_, fields) = request else {
+        return String::new();
+    };
+    fields
+        .first()
+        .map(|p| tidepool_runtime::value_to_json(p, table, 0))
+        .and_then(|j| j.as_str().map(str::to_string))
+        .unwrap_or_default()
 }
 
 /// Decode an `AskUserWith`-shaped request (`Con(_, [shape])`) into a
@@ -544,7 +576,9 @@ pub fn answerer_hole_card(
          ordinary `case`/`if` — each runs without another model round. Plan \
          the whole consultation up front when the branches are predictable; \
          end the turn without finalizing only when an answer genuinely needs \
-         fresh judgment. Bind results, then `finalize`.)"
+         fresh judgment. Bind results, then `finalize`. Use `note \"...\"` to \
+         explain what you are about to ask and why, BEFORE presenting a form \
+         — it does not block, so it never costs a turn.)"
     )
 }
 

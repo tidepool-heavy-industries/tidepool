@@ -2197,6 +2197,48 @@ impl Harness {
         Ok(())
     }
 
+    /// Resume a `note` hole ([`HoleRouting::Note`]) immediately with `()` —
+    /// no operator interaction. Mirrors [`Self::answer_dialog`]'s shape
+    /// (lease, routing check, `resume_parent`) — the same audited resume
+    /// path a mechanical dialog answer uses — but the resumed value is the
+    /// REAL Core `()` ([`tidepool_bridge::ToCore`] for `()`), not the
+    /// aeson-wire `Value` `answer_dialog`'s submission bridges to:
+    /// `NoteWith`'s continuation is `() -> M ()`, not `Value -> M Value`, so
+    /// routing it through `json_answer_to_value`'s aeson-`Null` bridge would
+    /// hand the continuation the wrong constructor.
+    pub async fn answer_note(&self, node: NodeId) -> Result<(), HarnessError> {
+        let _lease = self.acquire_turn_lease(node)?;
+        let pending = self
+            .convos
+            .lock()
+            .get(&node)
+            .and_then(|c| c.pending.clone())
+            .ok_or(HarnessError::NotSuspended(node))?;
+        match &pending.classified.routing {
+            HoleRouting::Note { .. } => {}
+            other => {
+                return Err(HarnessError::RoutingMismatch {
+                    node,
+                    routing: "note",
+                    actual: format!("{other:?}"),
+                })
+            }
+        }
+
+        let table = self
+            .convos
+            .lock()
+            .get(&node)
+            .and_then(|c| c.suspend_table.clone())
+            .unwrap_or_default();
+        use tidepool_bridge::ToCore;
+        let value = ()
+            .to_value(&table)
+            .map_err(|e| EngineError::Run(format!("bridge unit answer to Value: {e}")))?;
+        self.resume_parent(node, &pending.hole, value).await?;
+        Ok(())
+    }
+
     /// Drive `answerer`'s turn loop until it emits an answering block, then run
     /// that block via `run_child` against `target`'s suspended session to
     /// produce a Value. On a compile failure (the GHC-verbatim retry), feed the

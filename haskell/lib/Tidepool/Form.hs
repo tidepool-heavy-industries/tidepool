@@ -42,6 +42,7 @@ module Tidepool.Form
   ( askUser
   , choose
   , chooseMany
+  , note
   ) where
 
 import Prelude
@@ -50,7 +51,7 @@ import qualified Data.Map.Strict as Map
 
 import Tidepool.Aeson.FromJSON (Result (..), fromJSON)
 import Tidepool.Aeson.Value (Value (..))
-import Tidepool.Effects (M, askUserRaw)
+import Tidepool.Effects (M, askUserRaw, noteRaw)
 import Tidepool.Form.GForm (DerivedForm, formShape)
 import Tidepool.Form.Shape
   ( FieldShape (..)
@@ -79,6 +80,18 @@ askUser = do
   case fromJSON submitted of
     Success value -> pure value
     Error _ -> askUser @a
+
+-- | Post markdown-ish narration to the operator's accumulating feed. Does
+-- NOT block: the driver services this by displaying the text and resuming
+-- immediately, so a turn can freely interleave narration with forms —
+-- @note "why I'm asking this" >> choose [...]@ — without waiting on the
+-- operator between the two.
+--
+-- Use this to say what you are about to ask and why, before presenting a
+-- form via 'askUser'\/'choose'\/'chooseMany' — the operator otherwise sees
+-- only the form itself, with no stated intent behind it.
+note :: Text -> M ()
+note = noteRaw
 
 -- | Ask the operator to pick one of a list of runtime alternatives. The
 -- 'Text' is what they see; the value they picked is what comes back.

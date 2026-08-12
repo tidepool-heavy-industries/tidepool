@@ -40,7 +40,7 @@ use tidepool_repr::DataConTable;
 use tidepool_runtime::session::ResidentOutcome;
 
 use crate::compile::{self, CompiledTurn};
-use crate::engine::{self, EngineConfig, HoleRouting, TurnOutcome};
+use crate::engine::{self, ClassifiedHole, EngineConfig, HoleRouting, TurnOutcome};
 use crate::harness::{AnswerContract, Harness, HarnessError};
 use crate::log::Actor;
 use crate::selfharness::harness_source::HarnessSource;
@@ -1196,24 +1196,30 @@ impl SelfHarnessDriver {
                                 DriverError::Session(format!("loop resume failed: {e}"))
                             })?;
                         }
-                        // The AUTHORED loop itself evaluated `askUser` (`Tidepool.Form`,
-                        // auto-imported because `AskUser` is in `outer_decls`) — a form
-                        // presented DIRECTLY by the loop, distinct from an answerer's
-                        // form (`service_askuser_hole`). Present it via the same
-                        // operator gate and resume the OUTER session; the helper loops
-                        // over `askUser`'s Haskell-side decode-retry (a bad submission
-                        // re-suspends on a fresh `AskUserWith`) and returns the first
-                        // outcome that ISN'T another operator form — a `runLLMTurn`
+                        // The AUTHORED loop itself evaluated `askUser`/`note`
+                        // (`Tidepool.Form`, auto-imported because `AskUser` is in
+                        // `outer_decls`) — a form or narration raised DIRECTLY by
+                        // the loop, distinct from an answerer's own
+                        // (`service_askuser_hole`). Service it via the same
+                        // operator gate and resume the OUTER session; the helper
+                        // loops over `askUser`'s Haskell-side decode-retry (a bad
+                        // submission re-suspends on a fresh `AskUserWith`) and any
+                        // interleaved `note`, returning the first outcome that
+                        // ISN'T another operator form/note — a `runLLMTurn`
                         // suspension the main loop then services, or a completion.
-                        HoleRouting::AskUser { shape } => {
+                        HoleRouting::AskUser { .. } | HoleRouting::Note { .. } => {
                             outcome = self
-                                .service_outer_askuser_hole(hole.clone(), shape.clone(), &compiled)
+                                .service_outer_askuser_hole(
+                                    hole.clone(),
+                                    classified.routing.clone(),
+                                    &compiled,
+                                )
                                 .await?;
                         }
                         other => {
                             return Err(DriverError::Session(format!(
                                 "outer loop suspended on an unserviceable hole ({other:?}) — \
-                                 the Harness monad exposes runLLMTurn and askUser only"
+                                 the Harness monad exposes runLLMTurn, askUser, and note only"
                             )))
                         }
                     }
@@ -1397,14 +1403,40 @@ impl SelfHarnessDriver {
                     // decode-failure re-prompt). A Fork suspension (`forkAll`/
                     // `fork` delegation) is serviced via the EXISTING fanout/fork
                     // machinery (`drain_answerer_fork`, REUSED not reimplemented).
-                    // Any OTHER suspension is a hard error: the scoped answerer
-                    // stack (`[AskUser, RunLLMTurn, Finalize]`) can reach nothing
-                    // else, and this driver has no operator for it.
-                    let TurnOutcome::Suspended { classified, .. } = &out else {
+                    // A Note suspension (`note text`, display-only) is drained
+                    // FIRST, purely via resumes (no model round): the block may
+                    // read `note "..." >> choose [...]`, so the FIRST classified
+                    // hole here is routinely `Note`, not the thing that follows
+                    // it. Any OTHER suspension is a hard error: the scoped
+                    // answerer stack (`[AskUser, Fork, Finalize]`) can reach
+                    // nothing else, and this driver has no operator for it.
+                    let TurnOutcome::Suspended { hole, classified } = out else {
                         unreachable!("matched TurnOutcome::Suspended above");
                     };
+                    let (hole, classified) =
+                        match self.drain_note_holes(node, hole, classified).await? {
+                            Some(pair) => pair,
+                            None => {
+                                // The note chain resolved (the answerer's block
+                                // completed) WITHOUT finalize — same corrective
+                                // retry as a plain Completed turn below. A note
+                                // resume is NOT a model round: `rounds` stays
+                                // untouched, only this outer loop repeats.
+                                self.agent.reopen_node(node)?;
+                                self.agent.push_user_turn(
+                                    node,
+                                    &format!(
+                                        "That did not resolve the request. Answer by \
+                                         evaluating `(finalize @{ty_label} value :: M \
+                                         {ty_label})` — the whole expression must carry \
+                                         the type annotation, not just the argument."
+                                    ),
+                                )?;
+                                continue;
+                            }
+                        };
                     if matches!(classified.routing, HoleRouting::Finalize { .. }) {
-                        return Ok(out);
+                        return Ok(TurnOutcome::Suspended { hole, classified });
                     }
                     if let HoleRouting::AskUser { shape } = &classified.routing {
                         match self.service_askuser_hole(node, shape).await? {
@@ -1546,11 +1578,16 @@ impl SelfHarnessDriver {
                 // The resume completed the node with no further suspension.
                 return Ok(None);
             };
+            // A submission (or a `note` resume below) may land on a `note`
+            // hole next — e.g. `askUser @T >>= \t -> note (explain t) >>
+            // finalize @T t` — drain it purely via resumes before checking
+            // Finalize/AskUser.
+            let Some((hole, classified)) = self.drain_note_holes(node, hole.0, classified).await?
+            else {
+                return Ok(None);
+            };
             if matches!(classified.routing, HoleRouting::Finalize { .. }) {
-                return Ok(Some(TurnOutcome::Suspended {
-                    hole: hole.0,
-                    classified,
-                }));
+                return Ok(Some(TurnOutcome::Suspended { hole, classified }));
             }
             if let HoleRouting::AskUser { shape: next_shape } = classified.routing {
                 shape = next_shape;
@@ -1589,28 +1626,53 @@ impl SelfHarnessDriver {
     /// re-prompt into a hot loop no model-round cap catches (a form resume is
     /// not a model round). The between-loops human gate bounds loop ITERATIONS,
     /// not re-prompts WITHIN one loop's `askUser` — this counter does.
+    /// `routing` is the FIRST hole's already-classified routing — either
+    /// `HoleRouting::AskUser` (a typed form) or `HoleRouting::Note`
+    /// (display-only narration, e.g. `note "..." >> askUser @T ...` at the
+    /// outer level): each iteration dispatches on whichever of the two the
+    /// CURRENT hole is, so a chain freely interleaving `note` and `askUser`
+    /// (in either order) drives to completion without a model round.
     async fn service_outer_askuser_hole(
         &mut self,
         hole: String,
-        shape: FormShape,
+        routing: HoleRouting,
         compiled: &CompiledTurn,
     ) -> Result<ResidentOutcome, DriverError> {
         let mut hole = hole;
-        let mut shape = shape;
+        let mut routing = routing;
         let mut reprompts: u32 = 0;
         loop {
-            let submission = self
-                .present_askuser_form(&mut reprompts, FormSource::OuterLoop, &shape)
-                .await?;
-            let answer =
-                engine::json_answer_to_value(&submission, &compiled.table).map_err(|e| {
-                    DriverError::Session(format!("outer askUser submission decode: {e}"))
-                })?;
-            let outcome = {
-                let outer = self.outer.as_mut().ok_or_else(not_bootstrapped)?;
-                outer.session.resume(&hole, answer).map_err(|e| {
-                    DriverError::Session(format!("outer askUser resume failed: {e}"))
-                })?
+            let outcome = match routing {
+                HoleRouting::AskUser { shape } => {
+                    let submission = self
+                        .present_askuser_form(&mut reprompts, FormSource::OuterLoop, &shape)
+                        .await?;
+                    let answer = engine::json_answer_to_value(&submission, &compiled.table)
+                        .map_err(|e| {
+                            DriverError::Session(format!("outer askUser submission decode: {e}"))
+                        })?;
+                    let outer = self.outer.as_mut().ok_or_else(not_bootstrapped)?;
+                    outer.session.resume(&hole, answer).map_err(|e| {
+                        DriverError::Session(format!("outer askUser resume failed: {e}"))
+                    })?
+                }
+                HoleRouting::Note { text } => {
+                    self.announce_note(FormSource::OuterLoop, &text);
+                    use tidepool_bridge::ToCore;
+                    let answer = ().to_value(&compiled.table).map_err(|e| {
+                        DriverError::Session(format!("bridge unit note-answer to Value: {e}"))
+                    })?;
+                    let outer = self.outer.as_mut().ok_or_else(not_bootstrapped)?;
+                    outer.session.resume(&hole, answer).map_err(|e| {
+                        DriverError::Session(format!("outer note resume failed: {e}"))
+                    })?
+                }
+                other => {
+                    return Err(DriverError::Session(format!(
+                        "service_outer_askuser_hole: expected an AskUser or Note routing, \
+                         got {other:?}"
+                    )))
+                }
             };
 
             match &outcome {
@@ -1621,11 +1683,15 @@ impl SelfHarnessDriver {
                 } => {
                     let classified =
                         engine::classify_hole(request, &compiled.table, &compiled.asks);
-                    if let HoleRouting::AskUser { shape: next_shape } = classified.routing {
+                    if matches!(
+                        classified.routing,
+                        HoleRouting::AskUser { .. } | HoleRouting::Note { .. }
+                    ) {
                         // askUser's Haskell-side decode-retry re-suspended on a
-                        // fresh form: re-present it (does NOT count as progress).
+                        // fresh form, or the chain's next `note`/`askUser` step
+                        // — re-drive it (does NOT count as progress).
                         hole = next_hole.clone();
-                        shape = next_shape;
+                        routing = classified.routing;
                         continue;
                     }
                     // A runLLMTurn suspension (or anything else) — hand it back
@@ -1635,6 +1701,62 @@ impl SelfHarnessDriver {
                 ResidentOutcome::Completed { .. } => return Ok(outcome),
             }
         }
+    }
+
+    /// Post `text` to the operator gate and emit [`Event::NotePosted`] — the
+    /// shared, non-blocking half of servicing a `note` hole. `source`
+    /// distinguishes a nested answerer's own note from one the AUTHORED
+    /// OUTER loop raised directly, same as [`FormSource`] does for a form.
+    /// Unlike [`Self::present_askuser_form`], there is nothing to wait for:
+    /// the caller resumes immediately after this returns.
+    fn announce_note(&self, source: FormSource, text: &str) {
+        self.emit(Event::NotePosted {
+            source,
+            text: text.to_string(),
+        });
+        let gate = Arc::clone(&self.gate);
+        let posted = text.to_string();
+        tokio::task::block_in_place(move || gate.post_note(&posted));
+    }
+
+    /// Post `text` to the operator gate and resume `node`'s `note` hole
+    /// immediately with `()` via [`Harness::answer_note`] — no operator
+    /// interaction, no model round. Unlike `askUser`'s reprompt cap, this has
+    /// no bound of its own: a `note` resume always makes progress (the next
+    /// pending hole, or none at all), so nothing here can spin.
+    async fn service_note_hole(&mut self, node: NodeId, text: &str) -> Result<(), DriverError> {
+        self.announce_note(FormSource::Answerer { node }, text);
+        self.agent.answer_note(node).await?;
+        Ok(())
+    }
+
+    /// Drain a leading run of `note` holes on `node`, starting from
+    /// `classified` (which may or may not already be `HoleRouting::Note` —
+    /// a no-op passthrough when it isn't): post each via
+    /// [`Self::service_note_hole`] and resume immediately with `()`,
+    /// repeating while the resume keeps landing on ANOTHER note. Returns the
+    /// first NON-note pending hole once the chain stops — the caller (already
+    /// prepared to dispatch on `Finalize`/`AskUser`/`Fork`) proceeds from
+    /// there — or `None` if the chain completed the node with NO further
+    /// suspension (the caller's existing corrective-retry path, same as a
+    /// plain `Completed` round outcome).
+    async fn drain_note_holes(
+        &mut self,
+        node: NodeId,
+        mut hole: String,
+        mut classified: ClassifiedHole,
+    ) -> Result<Option<(String, ClassifiedHole)>, DriverError> {
+        while let HoleRouting::Note { text } = classified.routing.clone() {
+            self.service_note_hole(node, &text).await?;
+            match self.agent.pending_hole_full(node) {
+                Some((next_hole, next_classified, _table)) => {
+                    hole = next_hole.0;
+                    classified = next_classified;
+                }
+                None => return Ok(None),
+            }
+        }
+        Ok(Some((hole, classified)))
     }
 
     /// Present `shape` via the operator gate and return the operator's raw

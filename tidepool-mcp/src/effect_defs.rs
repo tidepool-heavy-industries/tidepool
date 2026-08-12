@@ -732,6 +732,15 @@ macro_rules! ask_effect_def {
 /// derives the form from `T`'s own `Generic` representation); `askUserRaw ::
 /// Value -> M Value` here is the raw escape hatch it is built on — the ONE
 /// frozen cross-agent contract name this definition exists to provide.
+///
+/// `NoteWith` is a SECOND constructor riding this same GADT (not a new effect
+/// / union tag): a display-only channel for the answerer to post narration
+/// ("here's what I'm asking and why") to the operator GUI's accumulating
+/// feed, distinct from `AskUserWith`'s blocking form. It does NOT block — the
+/// harness driver services it by posting the text and resuming immediately
+/// with `()`, never presenting anything to the operator gate's
+/// `present_form`. `noteRaw :: Text -> M ()` is the raw escape hatch;
+/// `Tidepool.Form.note` is the surface an answerer turn actually calls.
 #[macro_export]
 macro_rules! askuser_effect_def {
     ($project:path) => {
@@ -757,17 +766,24 @@ macro_rules! askuser_effect_def {
                 "exist only as runtime values, `choose :: [(Text, a)] -> M a` and ",
                 "`chooseMany :: [(Text, a)] -> M [a]` take (label, value) pairs. ",
                 "`askUserRaw :: Value -> M Value` is the raw escape hatch these are ",
-                "built on, carrying the form spec as JSON directly.",
+                "built on, carrying the form spec as JSON directly. `note :: Text -> M ()` ",
+                "posts markdown-ish text to the operator's feed WITHOUT blocking — use it to ",
+                "explain what you are about to ask and why, before presenting a form.",
             ],
             type_defs [],
             verbs [
                 { ctor AskUserWith, method ask_user_with,
                   args { spec: "Value" as tidepool_eval::value::Value },
                   ret "Value" },
+                { ctor NoteWith, method note_with,
+                  args { text: "Text" as String },
+                  ret "()" },
             ],
             helpers [
                 { raw ["askUserRaw :: Value -> M Value",
                        "askUserRaw spec = send (AskUserWith spec)"] },
+                { raw ["noteRaw :: Text -> M ()",
+                       "noteRaw text = send (NoteWith text)"] },
             ],
         }
     };

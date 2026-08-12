@@ -95,6 +95,15 @@ struct Slot {
     /// never mistakes "the operator submitted, and a new form/gate replaced
     /// it" for "the same form re-rendered".
     rev: u64,
+    /// The current loop's `note` feed, in post order — pushed by
+    /// [`AppState::push_note`] (`WebGate::post_note`), cleared at the next
+    /// loop boundary ([`AppState::clear_notes`], called from
+    /// `WebGate::await_continue`). Rendered ABOVE the pending form.
+    notes: Vec<String>,
+    /// The most recently compiled answerer round's Haskell source
+    /// (`WebGate::post_turn_source`) — ONLY the most recent, not a history.
+    /// Rendered as a collapsed pane below the form/notes.
+    last_turn_source: Option<String>,
 }
 
 /// Shared server state: the pending operator interaction + the re-render tick.
@@ -119,6 +128,8 @@ impl AppState {
             slot: Arc::new(Mutex::new(Slot {
                 pending: Pending::Idle,
                 rev: 0,
+                notes: Vec::new(),
+                last_turn_source: None,
             })),
             tick,
         }
@@ -131,7 +142,51 @@ impl AppState {
     /// Render the current panel fragment.
     fn panel_html(&self) -> String {
         let slot = self.slot.lock().unwrap();
-        panel(&slot.pending.view(), slot.rev).into_string()
+        panel(
+            &slot.pending.view(),
+            &slot.notes,
+            slot.last_turn_source.as_deref(),
+            slot.rev,
+        )
+        .into_string()
+    }
+
+    /// Push a `note` onto the current loop's feed, bump the revision, and
+    /// ping — [`WebGate::post_note`]'s whole job.
+    fn push_note(&self, text: String) {
+        let mut slot = self.slot.lock().unwrap();
+        slot.notes.push(text);
+        slot.rev += 1;
+        drop(slot);
+        self.ping();
+    }
+
+    /// Clear the note feed at a loop boundary (called from
+    /// `WebGate::await_continue`, before parking on the between-loops gate —
+    /// the next loop's notes start from an empty feed). A no-op ping when the
+    /// feed was already empty would still be harmless, but skip it so a
+    /// between-loops gate on an already-quiet feed doesn't force a redundant
+    /// re-render.
+    fn clear_notes(&self) {
+        let mut slot = self.slot.lock().unwrap();
+        if slot.notes.is_empty() {
+            return;
+        }
+        slot.notes.clear();
+        slot.rev += 1;
+        drop(slot);
+        self.ping();
+    }
+
+    /// Replace the last-turn-source pane, bump the revision, and ping —
+    /// [`WebGate::post_turn_source`]'s whole job. Only the most recent source
+    /// is kept, never a history.
+    fn set_turn_source(&self, source: String) {
+        let mut slot = self.slot.lock().unwrap();
+        slot.last_turn_source = Some(source);
+        slot.rev += 1;
+        drop(slot);
+        self.ping();
     }
 
     /// Publish a pending interaction, replacing whatever was there, bump the
@@ -224,9 +279,19 @@ impl OperatorGate for WebGate {
     }
 
     fn await_continue(&self) {
+        // A loop boundary: the next loop's notes start from an empty feed.
+        self.state.clear_notes();
         let (resolve, wait) = oneshot::channel();
         self.state.publish(Pending::Continue { resolve });
         let _ = wait.blocking_recv();
+    }
+
+    fn post_note(&self, text: &str) {
+        self.state.push_note(text.to_string());
+    }
+
+    fn post_turn_source(&self, source: &str) {
+        self.state.set_turn_source(source.to_string());
     }
 }
 
@@ -250,7 +315,14 @@ pub fn router_with_form_api(state: AppState, form_api: FormApiConfig) -> Router 
 
 async fn page(State(st): State<AppState>) -> Html<String> {
     let slot = st.slot.lock().unwrap();
-    Html(shell::page(panel(&slot.pending.view(), slot.rev)).into_string())
+    let rendered = panel(
+        &slot.pending.view(),
+        &slot.notes,
+        slot.last_turn_source.as_deref(),
+        slot.rev,
+    );
+    drop(slot);
+    Html(shell::page(rendered).into_string())
 }
 
 /// The SSE stream: one Datastar `patch-elements` frame per tick, each carrying
@@ -627,7 +699,8 @@ mod tests {
     #[test]
     fn root_bind_path_renders_and_collects_a_root_sum() {
         let shape = destination_shape();
-        let html = crate::render::panel(&crate::render::View::Form(&shape), 1).into_string();
+        let html =
+            crate::render::panel(&crate::render::View::Form(&shape), &[], None, 1).into_string();
         assert!(
             html.contains(&format!("name=\"{ROOT_BIND_PATH}\"")),
             "a root sum's radio group must be named at the non-empty root bind path, got:\n{html}"

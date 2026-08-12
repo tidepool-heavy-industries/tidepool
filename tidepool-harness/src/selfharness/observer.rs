@@ -66,6 +66,14 @@ pub enum Event {
         round: u32,
         error: Option<String>,
     },
+    /// The answerer (or the AUTHORED OUTER loop) posted display-only
+    /// narration via `note` (`NoteWith`, riding the same `AskUser` GADT as
+    /// `askUser`) — text pushed to the operator's accumulating feed. `source`
+    /// distinguishes a nested answerer's own note from one the AUTHORED
+    /// OUTER loop raised directly, same as [`Event::FormPresented`]. Unlike
+    /// `FormPresented`, there is no matching submission event: the driver
+    /// resumes immediately with `()`, never blocking on the operator.
+    NotePosted { source: FormSource, text: String },
     /// A typed operator form (`askUser`) was presented — either a nested
     /// answerer's own form, or one the authored OUTER loop evaluated
     /// directly (see [`FormSource`]).

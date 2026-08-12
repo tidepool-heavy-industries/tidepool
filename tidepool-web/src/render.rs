@@ -52,14 +52,53 @@ pub enum View<'a> {
 /// tell a genuinely NEW pending interaction (always replace `#panel`) apart
 /// from a same-interaction re-render (skip while the operator has focus
 /// inside it).
-pub fn panel(view: &View, rev: u64) -> Markup {
+///
+/// `notes` is the current loop's accumulated `note` feed (empty renders
+/// nothing), shown ABOVE the form/idle/continue view — narration explaining
+/// what is about to be asked and why belongs before the thing it explains.
+/// `last_turn_source` is the most recently compiled answerer round's
+/// Haskell, shown BELOW as a collapsed `<details>` pane so it never crowds
+/// the form.
+pub fn panel(view: &View, notes: &[String], last_turn_source: Option<&str>, rev: u64) -> Markup {
     html! {
         div id="panel" data-rev=(rev) {
+            @if !notes.is_empty() {
+                (notes_feed(notes))
+            }
             @match view {
                 View::Idle => (idle()),
                 View::Form(shape) => (form(shape)),
                 View::Continue => (continue_prompt()),
             }
+            @if let Some(source) = last_turn_source {
+                (turn_source_pane(source))
+            }
+        }
+    }
+}
+
+/// The accumulated `note` feed: one paragraph per posted note, in post
+/// order, plain text (no markdown — `white-space: pre-wrap` alone carries
+/// blank-line paragraph breaks the author wrote). maud escapes `note` as an
+/// ordinary text node.
+fn notes_feed(notes: &[String]) -> Markup {
+    html! {
+        div class="notes" data-node="notes" {
+            @for note in notes {
+                p class="note" style="white-space: pre-wrap" { (note) }
+            }
+        }
+    }
+}
+
+/// The last-turn-source pane: collapsed by default so it never crowds the
+/// form/notes above it. Plain `<pre>` v1, no syntax highlighting; `source` is
+/// interpolated as an ordinary maud text node (escaped), never `PreEscaped`.
+fn turn_source_pane(source: &str) -> Markup {
+    html! {
+        details class="turn-source" data-node="turn-source" {
+            summary { "Last turn's Haskell" }
+            pre { (source) }
         }
     }
 }
@@ -253,13 +292,13 @@ mod tests {
 
     #[test]
     fn panel_continue_renders_button() {
-        let html = panel(&View::Continue, 0).into_string();
+        let html = panel(&View::Continue, &[], None, 0).into_string();
         assert!(html.contains("@post('/continue')"));
     }
 
     #[test]
     fn panel_idle_is_quiet() {
-        let html = panel(&View::Idle, 0).into_string();
+        let html = panel(&View::Idle, &[], None, 0).into_string();
         assert!(html.starts_with("<div id=\"panel\""));
         assert!(!html.contains("@post"));
     }
@@ -270,12 +309,64 @@ mod tests {
     /// skip-on-focus rule off.
     #[test]
     fn panel_stamps_data_rev_from_the_argument() {
-        let a = panel(&View::Idle, 7).into_string();
+        let a = panel(&View::Idle, &[], None, 7).into_string();
         assert!(a.contains("id=\"panel\" data-rev=\"7\""), "{a}");
 
-        let b = panel(&View::Idle, 8).into_string();
+        let b = panel(&View::Idle, &[], None, 8).into_string();
         assert!(b.contains("id=\"panel\" data-rev=\"8\""), "{b}");
         assert_ne!(a, b);
+    }
+
+    /// Notes render ABOVE the form, in post order, escaped as ordinary text.
+    #[test]
+    fn panel_renders_notes_above_the_form() {
+        let notes = vec!["first note".to_string(), "<b>second</b> note".to_string()];
+        let html = panel(&View::Idle, &notes, None, 0).into_string();
+        let notes_pos = html.find("first note").expect("first note rendered");
+        let second_pos = html.find("second").expect("second note rendered");
+        let idle_pos = html.find("Standby").expect("idle view still rendered");
+        assert!(
+            notes_pos < idle_pos && second_pos < idle_pos,
+            "notes must render above the form/idle view:\n{html}"
+        );
+        assert!(
+            html.contains("&lt;b&gt;second&lt;/b&gt; note"),
+            "a note must be escaped as an ordinary text node: {html}"
+        );
+    }
+
+    /// An empty note feed adds no notes markup at all.
+    #[test]
+    fn panel_with_no_notes_renders_no_notes_node() {
+        let html = panel(&View::Idle, &[], None, 0).into_string();
+        assert!(!html.contains("data-node=\"notes\""), "{html}");
+    }
+
+    /// The last-turn-source pane is a COLLAPSED `<details>` below the
+    /// form/idle view, with its source escaped as an ordinary text node
+    /// (never `PreEscaped`) — a source containing `<script>` must not survive
+    /// as live markup.
+    #[test]
+    fn panel_renders_last_turn_source_collapsed_and_escaped() {
+        let source = "resume (Approve :: Decision) -- <script>alert(1)</script>";
+        let html = panel(&View::Idle, &[], Some(source), 0).into_string();
+        assert!(html.contains("<details"), "{html}");
+        assert!(html.contains("Last turn's Haskell"), "{html}");
+        assert!(!html.contains("<script>alert"), "{html}");
+        assert!(html.contains("&lt;script&gt;"), "{html}");
+        let idle_pos = html.find("Standby").expect("idle view still rendered");
+        let details_pos = html.find("<details").expect("details rendered");
+        assert!(
+            idle_pos < details_pos,
+            "the turn-source pane must render BELOW the form/idle view:\n{html}"
+        );
+    }
+
+    /// `None` adds no turn-source markup at all.
+    #[test]
+    fn panel_with_no_turn_source_renders_no_details() {
+        let html = panel(&View::Idle, &[], None, 0).into_string();
+        assert!(!html.contains("<details"), "{html}");
     }
 
     // ---- generic_shape ------------------------------------------------------

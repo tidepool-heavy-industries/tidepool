@@ -57,6 +57,22 @@ pub trait OperatorGate: Send + Sync {
     /// BLOCK until the operator advances to the next loop iteration (the
     /// human button-click gate that replaces the stdin between-loops gate).
     fn await_continue(&self);
+
+    /// Post display-only narration (`note`, riding `AskUser`'s `NoteWith`
+    /// constructor) to the operator's accumulating feed. Does NOT block —
+    /// the driver resumes the session immediately after calling this, with
+    /// no submission to wait for. Default no-op so every existing
+    /// [`OperatorGate`] impl (in particular [`StdinGate`], and any test
+    /// gate) stays valid without change; a web/GUI gate overrides it to
+    /// actually display the text.
+    fn post_note(&self, _text: &str) {}
+
+    /// Post the LAST answerer round's compiled Haskell source — the same
+    /// text a `TurnStart{source}` log line carries — so the operator can see
+    /// what actually ran. Called once per compiled round, not accumulated:
+    /// implementations keep only the most recent source, not a history.
+    /// Default no-op, same reasoning as [`Self::post_note`].
+    fn post_turn_source(&self, _source: &str) {}
 }
 
 /// Headless default: `await_continue` reads a line from stdin (the current

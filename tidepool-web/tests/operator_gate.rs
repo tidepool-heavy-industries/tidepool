@@ -233,6 +233,118 @@ async fn mismatched_verb_preserves_pending_interaction() {
     assert_eq!(got, json!({"mood": "calm", "count": 1}));
 }
 
+/// `post_note` does not block (unlike `present_form`/`await_continue`), so a
+/// driver can post narration and then immediately present the form it
+/// explains. This proves the ordering survives the real HTTP round trip:
+/// notes render in POST order, and ABOVE the pending form — never after it.
+#[tokio::test(flavor = "multi_thread")]
+async fn post_note_appears_above_the_pending_form_in_post_order() {
+    let (addr, state) = boot().await;
+    let base = format!("http://{addr}");
+    let client = Client::new();
+
+    let gate = Arc::new(WebGate::new(state));
+    gate.post_note("first note");
+    gate.post_note("second note");
+
+    let driver_gate = gate.clone();
+    let handle = tokio::task::spawn_blocking(move || driver_gate.present_form(&sample_spec()));
+
+    let html = wait_for(&client, &format!("{base}/"), |b| {
+        b.contains("data-bind=\"answer.mood\"")
+    })
+    .await;
+
+    let first_pos = html.find("first note").expect("first note rendered");
+    let second_pos = html.find("second note").expect("second note rendered");
+    let form_pos = html
+        .find("data-bind=\"answer.mood\"")
+        .expect("form rendered");
+    assert!(
+        first_pos < second_pos,
+        "notes must render in post order:\n{html}"
+    );
+    assert!(
+        second_pos < form_pos,
+        "notes must render ABOVE the pending form:\n{html}"
+    );
+
+    // Resolve the form so the spawned blocking task doesn't leak.
+    let body = json!({"answer.mood": "calm", "answer.count": 0});
+    client
+        .post(format!("{base}/submit"))
+        .json(&body)
+        .send()
+        .await
+        .unwrap();
+    handle.await.unwrap();
+}
+
+/// The note feed clears at a loop boundary (`await_continue`), so the next
+/// loop's page doesn't still show the prior loop's narration.
+#[tokio::test(flavor = "multi_thread")]
+async fn await_continue_clears_the_note_feed() {
+    let (addr, state) = boot().await;
+    let base = format!("http://{addr}");
+    let client = Client::new();
+
+    let gate = Arc::new(WebGate::new(state));
+    gate.post_note("prior loop's note");
+
+    let driver_gate = gate.clone();
+    let handle = tokio::task::spawn_blocking(move || driver_gate.await_continue());
+    wait_for(&client, &format!("{base}/"), |b| {
+        b.contains("@post('/continue')")
+    })
+    .await;
+
+    let resp = client
+        .post(format!("{base}/continue"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    handle.await.unwrap();
+
+    let html = client
+        .get(format!("{base}/"))
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    assert!(
+        !html.contains("prior loop's note"),
+        "the note feed must clear at the loop boundary:\n{html}"
+    );
+}
+
+/// `post_turn_source` keeps only the MOST RECENT source, rendered as a
+/// collapsed pane the page shows regardless of what else is pending.
+#[tokio::test(flavor = "multi_thread")]
+async fn post_turn_source_replaces_rather_than_accumulates() {
+    let (addr, state) = boot().await;
+    let base = format!("http://{addr}");
+    let client = Client::new();
+
+    let gate = WebGate::new(state);
+    gate.post_turn_source("finalize @Decision Approve");
+    gate.post_turn_source("finalize @Decision Reject");
+
+    let html = client
+        .get(format!("{base}/"))
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    assert!(html.contains("finalize @Decision Reject"), "{html}");
+    assert!(!html.contains("finalize @Decision Approve"), "{html}");
+    assert!(html.contains("<details"), "{html}");
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn sse_first_frame_patches_panel() {
     let (addr, _state) = boot().await;

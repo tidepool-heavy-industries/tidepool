@@ -201,6 +201,18 @@ decl list (`tidepool-mcp`'s `pragmas_and_imports`/`session_decl_module_env`);
 it depends on `askUserRaw`, so it is REACHABLE ONLY on the answerer stack, not
 the general eval/Agent surface.
 
+`Tidepool.Form.note :: Text -> M ()` is a SIBLING, non-blocking display
+channel riding the SAME `AskUser` GADT as a second constructor (`NoteWith`,
+`noteRaw`) — `note "why I'm about to ask this"` posts text to the operator
+GUI's accumulating feed and the driver resumes with `()` IMMEDIATELY, never
+presenting anything via `OperatorGate::present_form`. Routed by constructor
+name into [`crate::engine::HoleRouting::Note`], serviced by
+`Harness::answer_note` (the audited resume path, minus the operator wait) and
+`SelfHarnessDriver`'s note-draining helpers wherever an `askUser` chain can
+appear (the nested answerer, the AUTHORED outer loop, and interleaved
+mid-chain in either) — never counted against `ASKUSER_MAX_REPROMPTS`, since
+nothing here waits on a human to spin.
+
 ### The answer contract — `finalize` is pinned by the ROW
 
 An answerer turn does not compile against a polymorphic `finalize`. While a

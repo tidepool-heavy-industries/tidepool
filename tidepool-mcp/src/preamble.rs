@@ -56,9 +56,22 @@ pub fn decl_pragmas() -> String {
 /// scaffolding, not imports). `user_library` inserts `import Library` — eval
 /// only; the session has no user `Library` module, it accumulates its own
 /// `Tidepool.Session.Lib.G<g>` chain instead.
-pub fn eval_import_lines(user_library: bool) -> Vec<&'static str> {
+///
+/// `hide_note`: also hide Prelude's `note` (`Control.Error.Util`'s `a ->
+/// Maybe b -> Either a b`) from the unqualified surface — set exactly when
+/// `AskUser` is in the compiling row, since `Tidepool.Form.note :: Text -> M
+/// ()` (the display-channel helper, auto-imported alongside `askUser`/
+/// `choose` whenever `AskUser` is present — see `extra_imports_for!`)
+/// otherwise collides with it (`Ambiguous occurrence`). `false` everywhere
+/// else keeps `note` reachable on the general eval/Agent surface, which never
+/// imports `Tidepool.Form` at all.
+pub fn eval_import_lines(user_library: bool, hide_note: bool) -> Vec<&'static str> {
     let mut v = vec![
-        "import Tidepool.Prelude hiding (error)",
+        if hide_note {
+            "import Tidepool.Prelude hiding (error, note)"
+        } else {
+            "import Tidepool.Prelude hiding (error)"
+        },
         // Effect GADTs, `M`, the `error` shadow, and the send-wrapper helpers
         // live in the generated Tidepool.Effects module so library AND session
         // decl modules can import the SAME types and define effectful verbs.
@@ -131,7 +144,8 @@ pub fn eval_import_lines(user_library: bool) -> Vec<&'static str> {
 /// re-exports, would collide).
 #[must_use]
 pub fn session_decl_module_env(effects: &[EffectDecl], user_library: bool) -> ModuleEnv {
-    let mut imports: Vec<String> = eval_import_lines(user_library)
+    let hide_note = effects.iter().any(|e| e.type_name == "AskUser");
+    let mut imports: Vec<String> = eval_import_lines(user_library, hide_note)
         .into_iter()
         .map(String::from)
         .collect();
@@ -173,7 +187,8 @@ fn pragmas_and_imports(out: &mut String, effects: &[EffectDecl], user_library: b
     out.push_str(EVAL_PRAGMAS);
     out.push('\n');
     out.push_str("module Expr where\n");
-    for imp in eval_import_lines(user_library) {
+    let hide_note = effects.iter().any(|e| e.type_name == "AskUser");
+    for imp in eval_import_lines(user_library, hide_note) {
         out.push_str(imp);
         out.push('\n');
     }
@@ -1174,7 +1189,30 @@ import qualified Tidepool.Git as Git";
 
     const ASKUSER_IMPORT: &str = "import Tidepool.Form";
 
-    fn expected_preamble(extra_imports: &str, paginate_target: Option<&str>) -> String {
+    /// A row carrying `AskUser` additionally hides Prelude's `note` (it
+    /// collides with `Tidepool.Form.note`, auto-imported alongside it) —
+    /// this is [`FIXED_IMPORTS`] with only its first line changed.
+    const FIXED_IMPORTS_HIDE_NOTE: &str = "\
+import Tidepool.Prelude hiding (error, note)
+import Tidepool.Effects
+import qualified Tidepool.Data.Text as T
+import qualified Data.Map.Strict as Map
+import qualified Data.Map.Merge.Strict as MM
+import qualified Data.Set as Set
+import qualified Tidepool.Aeson as Aeson
+import qualified Tidepool.Aeson.KeyMap as KM
+import qualified Data.List as L
+import qualified Tidepool.TextFormat as TF
+import qualified Tidepool.Table as Tab
+import qualified Tidepool.Patch as Patch
+import Control.Monad.Freer hiding (run)
+import qualified Prelude as P";
+
+    fn expected_preamble(
+        fixed_imports: &str,
+        extra_imports: &str,
+        paginate_target: Option<&str>,
+    ) -> String {
         let extra = if extra_imports.is_empty() {
             String::new()
         } else {
@@ -1191,17 +1229,17 @@ import qualified Tidepool.Git as Git";
             None => String::new(),
         };
         format!(
-            "{PRAGMAS}\nmodule Expr where\n{FIXED_IMPORTS}\n{extra}import Tidepool.Orchestrate\ndefault (Int, Double, Text)\n\n{tail}"
+            "{PRAGMAS}\nmodule Expr where\n{fixed_imports}\n{extra}import Tidepool.Orchestrate\ndefault (Int, Double, Text)\n\n{tail}"
         )
     }
 
-    fn expected_decl_env(extra_imports: &str) -> String {
+    fn expected_decl_env(fixed_imports: &str, extra_imports: &str) -> String {
         let extra = if extra_imports.is_empty() {
             String::new()
         } else {
             format!("{extra_imports}\n")
         };
-        format!("{DECL_PRAGMAS}\n{FIXED_IMPORTS}\n{extra}import Tidepool.Orchestrate")
+        format!("{DECL_PRAGMAS}\n{fixed_imports}\n{extra}import Tidepool.Orchestrate")
     }
 
     fn env_text(env: &tidepool_runtime::session::ModuleEnv) -> String {
@@ -1209,14 +1247,19 @@ import qualified Tidepool.Git as Git";
     }
 
     fn check(effects: &[EffectDecl], extra_imports: &str, paginate_target: Option<&str>) {
+        let fixed_imports = if effects.iter().any(|e| e.type_name == "AskUser") {
+            FIXED_IMPORTS_HIDE_NOTE
+        } else {
+            FIXED_IMPORTS
+        };
         assert_eq!(
             super::build_preamble(effects, false),
-            expected_preamble(extra_imports, paginate_target),
+            expected_preamble(fixed_imports, extra_imports, paginate_target),
             "build_preamble output changed — this is a compile-cache key, see ensure_effects_module_at"
         );
         assert_eq!(
             env_text(&super::session_decl_module_env(effects, false)),
-            expected_decl_env(extra_imports),
+            expected_decl_env(fixed_imports, extra_imports),
             "session_decl_module_env output changed — decl and stmt/eval planes must stay identical on imports"
         );
     }
