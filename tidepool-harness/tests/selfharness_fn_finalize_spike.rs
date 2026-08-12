@@ -32,7 +32,20 @@
 //! process rather than raise a clean `Result` — see `tests/battery.sh`'s
 //! tier rules on when a standalone compile is warranted.
 //!
-//! # Verdict (as originally written): NOT FEASIBLE AS-IS
+//! # Verdict: FEASIBLE — LANDED (one-session collapse, Phase 3)
+//!
+//! This test now PASSES and is the STANDING ACCEPTANCE for function-valued
+//! answers: the answerer's `finalize @(State -> State)` closure is born in
+//! the loop's own heap (the answerer runs as a realm on the shared outer
+//! session), taken as a `ValueHandle`, DELIVERED into the loop's parked
+//! continuation via `resume_handle` (no bridge, no sentinel), and applied
+//! by the loop's compiled `f st` — composing across cycles. The sections
+//! below record the ORIGINAL spike diagnosis (against the pre-collapse
+//! architecture) as history: every seam it names has since landed (extract
+//! gate lifted for pure arrows; same-heap delivery via the continuation
+//! registry + handle API).
+//!
+//! # Historical spike diagnosis (superseded): NOT FEASIBLE AS-IS
 //!
 //! Blocked much earlier than the finalize/resume crossing this spike set out
 //! to probe — at `tidepool-extract` COMPILE time, on the very first fused
@@ -198,19 +211,6 @@ impl Observer for CapturingObserver {
 /// concern"). Left ignored pending that work landing and this spike being
 /// deliberately re-run and re-verified, not un-ignored as a side effect of
 /// the extract gate alone changing.
-#[ignore = "spike verdict pinned NOT FEASIBLE AS-IS against the extract's \
-            prior compile-time gate — see module doc. That gate \
-            (`checkRunLLMTurnType`, haskell/src/Tidepool/Translate.hs) no \
-            longer hard-rejects a pure function-typed runLLMTurn answer \
-            (one-session plan Phase 3e); it now rejects only an answer type \
-            that itself mentions the effect monad. This test's outcome \
-            against the lifted gate is UNVERIFIED — a deeper, still-open \
-            seam (cross-session closure delivery on the finalize/resume \
-            path) is documented in the module doc and is the real reason \
-            this stays ignored rather than the now-superseded compile \
-            rejection. Left ignored rather than deleted so the history and \
-            the still-open seam stay pinned for whoever picks this up and \
-            re-verifies end to end."]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn fn_finalize_crosses_two_cycles_and_composes() {
     support::require_extract();
@@ -219,7 +219,11 @@ async fn fn_finalize_crosses_two_cycles_and_composes() {
     let agent_cfg =
         EngineConfig::from_decls(answerer_decls(), prelude_dir(), Some(spike_harness_dir()))
             .expect("answerer engine config");
-    let replies = vec![edit_reply("cycle 1"), edit_reply("cycle 2")];
+    let replies = vec![
+        edit_reply("cycle 1"),
+        edit_reply("cycle 2"),
+        edit_reply("cycle 3"),
+    ];
     let provider: Arc<dyn DynModelProvider> = Arc::new(ReplayProvider::new(replies));
     let writer = tidepool_harness::log::LogWriter::create(
         std::env::temp_dir().join(format!("fn-finalize-spike-{}.jsonl", std::process::id())),
