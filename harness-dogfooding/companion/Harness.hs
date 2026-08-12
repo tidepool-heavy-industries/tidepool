@@ -22,13 +22,19 @@ import Tidepool.Harness (Harness, runLLMTurn)
 import Tidepool.Prelude hiding (render)
 
 loop :: State -> Harness State
-loop _ =
-  runLLMTurn @State
-    "Continue inhabiting this playground. Observe what the operator and the \
-    \conversation offer; orient using the durable state and world facts above; \
-    \decide what genuinely seems worth attending to; then act naturally. You \
-    \may share, ask, explore, reflect, fork another perspective, or leave a \
-    \thread resting. Do not force an interaction merely to exercise a verb. \
-    \Before this cognition window ends, finalize a compact revised State. \
-    \Keep only what should shape a future version of you; rewrite freely \
-    \instead of treating memory as an append-only log."
+loop st = do
+  edit <-
+    runLLMTurn @(State -> State)
+      "Continue inhabiting this playground. Observe what the operator and the \
+      \conversation offer; orient using the durable state and world facts above; \
+      \decide what genuinely seems worth attending to; then act naturally. You \
+      \may share, ask, explore, reflect, fork another perspective, or leave a \
+      \thread resting. Do not force an interaction merely to exercise a verb. \
+      \Before this cognition window ends, finalize an EDIT of your state — a \
+      \pure function `State -> State` (record-update syntax reads well: \
+      \\\st -> st { memories = memories st <> [...] }). Untouched fields flow \
+      \through unchanged by construction, so nothing you leave alone can be \
+      \lost; touch only what this window genuinely changed. A standing habit \
+      \you want future windows to keep belongs in a NAMED helper, not a \
+      \one-off lambda."
+  pure (edit st)
