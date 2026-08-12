@@ -20,8 +20,8 @@ module Harness
 
 import HarnessTypes (Contribution (..), Phase (..), State (..), initialState,
                      render)
-import Tidepool.Prelude hiding (render)
-import Tidepool.Form (askUser)
+import Tidepool.Prelude hiding (note, render)
+import Tidepool.Form (askUser, note)
 import Tidepool.Harness (Harness, runLLMTurn)
 
 -- | One window of work: FIRST a harness-level steering ask (the operator reads
@@ -32,6 +32,14 @@ import Tidepool.Harness (Harness, runLLMTurn)
 -- the model builds a real one rather than prose.
 loop :: State -> Harness State
 loop st = do
+  note
+    ("STEERING — phase: " <> show (phase st)
+      <> ", ideas so far: " <> show (length (ideas st))
+      <> (if draft st == ""
+            then ". Fresh draft."
+            else ".\n\nDraft so far:\n" <> draft st)
+      <> "\n\nWhere do you want to steer this loop? (Free text — it goes to \
+         \the model verbatim, above its own framing.)")
   steer <- askUser @Text
   c <-
     runLLMTurn @Contribution
