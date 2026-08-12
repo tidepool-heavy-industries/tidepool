@@ -187,6 +187,12 @@ pub struct HeapStats {
     pub live_bytes: usize,
     /// Number of collections this machine has run ([`MachineState::gc_generation`]).
     pub gc_count: u64,
+    /// Number of fragments ever compiled into this machine's JITModule
+    /// ([`JitEffectMachine::add_function`]) — MONOTONIC, never reclaimed
+    /// (cranelift leaks finalized code by design), so this is the
+    /// bounded-lifetime ceiling's primary signal (one-session plan, Phase 4:
+    /// rotation, not immortality).
+    pub fragments: u64,
 }
 
 /// Identity of one continuation parked in a machine's continuation registry.
@@ -798,6 +804,9 @@ pub struct JitEffectMachine {
     /// underlying root, observing and delivering do not consume the handle,
     /// and [`Self::close_realm`] releases every handle its realm minted.
     value_handles: HashMap<u64, HandleEntry>,
+    /// Monotonic count of fragments compiled into the JITModule (its
+    /// executable memory is never reclaimed) — [`HeapStats::fragments`].
+    fragments_added: u64,
     /// Monotonic source of [`ValueHandle`] ids — same never-rewound
     /// discipline as `next_continuation_id` (a released handle's id is a
     /// clean "unknown handle" error, never a silent alias).
@@ -1089,6 +1098,7 @@ impl JitEffectMachine {
             realm_cancel_flags: HashMap::new(),
             value_handles: HashMap::new(),
             next_value_handle: 0,
+            fragments_added: 0,
             established_prefix: None,
         })
     }
@@ -1131,6 +1141,7 @@ impl JitEffectMachine {
             realm_cancel_flags: HashMap::new(),
             value_handles: HashMap::new(),
             next_value_handle: 0,
+            fragments_added: 0,
             established_prefix: None,
         })
     }
@@ -2657,6 +2668,7 @@ impl JitEffectMachine {
         table: &DataConTable,
         external_env: &crate::emit::ExternalEnv,
     ) -> Result<FuncId, JitError> {
+        self.fragments_added += 1;
         let shape_start = std::time::Instant::now();
         // Mirror compile_inner's tree shaping so the fragment is emitted exactly
         // like the original entry; only the JITModule destination differs (it is
@@ -3124,6 +3136,7 @@ impl JitEffectMachine {
             nursery_bytes: self.nursery.size(),
             live_bytes,
             gc_count: self.machine_state.gc_generation(),
+            fragments: self.fragments_added,
         }
     }
 

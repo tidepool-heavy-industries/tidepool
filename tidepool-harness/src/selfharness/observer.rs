@@ -116,6 +116,24 @@ pub enum Event {
         pre_input_tokens: u64,
         post_input_tokens: u64,
     },
+    /// Per-loop-boundary machine instrumentation for the SHARED outer
+    /// machine (one-session plan, Phase 4): compiled-fragment count
+    /// (monotonic — executable memory is never reclaimed), live session-heap
+    /// bytes, and collections run. The rotation-cadence evidence base.
+    MachineStats {
+        fragments: u64,
+        live_bytes: u64,
+        gc_count: u64,
+    },
+    /// The shared machine hit its fragment ceiling and was ROTATED at a
+    /// quiescent loop boundary: a fresh machine adopted under the same
+    /// session id, durable state flowing through the checkpoint as ever;
+    /// `bindings_lost` enumerates the living session values that did NOT
+    /// survive (legible loss — also surfaced in the next render).
+    MachineRotated {
+        fragments: u64,
+        bindings_lost: Vec<String>,
+    },
     /// A restored checkpoint's harness-source fingerprint does not match the
     /// fingerprint of the harness file this process just loaded — expected
     /// during self-iteration (the harness file is the thing being edited),

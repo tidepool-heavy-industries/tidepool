@@ -443,6 +443,17 @@ where
         self.core.machine().map(|m| m.heap_stats())
     }
 
+    /// The CURRENT value-plane binding names (newest gen per name) — what a
+    /// machine rotation would lose (one-session plan, Phase 4: enumerated,
+    /// legible loss, never silent).
+    pub fn binding_names(&self) -> Vec<String> {
+        self.core
+            .bindings()
+            .iter_current()
+            .map(|(name, _)| name.0.clone())
+            .collect()
+    }
+
     /// The `ExternalEnv` a fragment compiling `expr` is seeded with: the
     /// session's live value bindings that `expr` actually references, so
     /// the fragment can resolve an earlier `x <- e` at a Var-miss. Empty until

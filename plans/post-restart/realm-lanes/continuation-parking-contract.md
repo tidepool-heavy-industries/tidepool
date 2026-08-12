@@ -135,7 +135,20 @@ addition for any caller lifting a "child may not suspend" restriction: you canno
 park only the child. The parent is in the slot, and resuming the child would
 unroot it. Both move to the registry together.
 
-**(c) Cycle-scoped lifetime.** A realm must not outlive its cycle. Dropping a
+**(c) Cycle-scoped lifetime — amended 2026-08-14 (one-session plan, Phase 4).**
+The one-session consumer satisfies this invariant's INTENT (bounded machine
+memory) by a different mechanism than machine death: answerer realms remain
+cycle-scoped exactly as written ("cycle" = one loop; `close_realm` at
+retirement), and the shared machine itself is bounded by an ENFORCED
+fragment ceiling with ROTATION at a quiescent loop boundary — a fresh
+machine under the same session id, durable state through the checkpoint,
+losses enumerated (`Event::MachineRotated` + the next render's
+legible-loss note), the reconstruction path exercised in CI
+(`acceptance_selfharness::machine_rotation_between_cycles_preserves_durable_state`).
+"An immortal unified machine is out" therefore stands: the machine is
+ceiling-bounded and rotating, not immortal. The original text follows.
+
+A realm must not outlive its cycle. Dropping a
 machine reclaims the session heap, the old-space arenas and all three root
 registries; it does NOT reclaim the JITModule's executable memory, because
 cranelift-jit deliberately leaks a finalized arena on drop and nothing calls

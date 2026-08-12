@@ -190,3 +190,90 @@ async fn selfharness_multi_cycle_state_accumulates_across_loop_boundaries() {
         prior_state = Some(outcome.state_json);
     }
 }
+
+/// A capturing observer for event-stream assertions (rotation).
+#[derive(Default)]
+struct CapturingObserver {
+    events: std::sync::Mutex<Vec<tidepool_harness::Event>>,
+}
+
+impl tidepool_harness::Observer for CapturingObserver {
+    fn on_event(&self, event: &tidepool_harness::Event) {
+        self.events.lock().unwrap().push(event.clone());
+    }
+}
+
+/// MACHINE ROTATION (one-session plan, Phase 4): with the fragment ceiling
+/// forced to 1, the second cycle's loop-boundary maintenance finds the
+/// shared machine over the ceiling and quiescent, ROTATES it (fresh machine
+/// under the same session id), and the cycle then runs to completion with
+/// durable state flowing through the checkpoint exactly as it always has —
+/// the CI-exercised reconstruction path (a recovery path that only runs in
+/// emergencies is a broken recovery path). Asserts both cycles complete,
+/// state accumulates ACROSS the rotation, and the event stream records
+/// `MachineStats` + `MachineRotated`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn machine_rotation_between_cycles_preserves_durable_state() {
+    support::require_extract();
+    let _cache_guard = support::isolate_cache();
+    // Process-isolated under nextest: forcing the ceiling to 1 makes the
+    // SECOND cycle's maintenance rotate (the first cycle boots the machine).
+    std::env::set_var("TIDEPOOL_MACHINE_FRAGMENT_CEILING", "1");
+
+    let agent_cfg = EngineConfig::from_decls(
+        answerer_decls(),
+        prelude_dir(),
+        Some(examples_harness_dir()),
+    )
+    .expect("answerer engine config");
+    let replies = vec![
+        decision_reply("observe", "first loop", "Medium"),
+        decision_reply("decide", "second loop", "High"),
+    ];
+    let provider: Arc<dyn DynModelProvider> = Arc::new(ReplayProvider::new(replies));
+    let writer = tidepool_harness::log::LogWriter::create(
+        std::env::temp_dir().join(format!(
+            "acceptance-selfharness-rotation-{}.jsonl",
+            std::process::id()
+        )),
+        &header(),
+    )
+    .expect("log writer");
+    let agent = Arc::new(Harness::new(writer, agent_cfg, provider).expect("agent harness boots"));
+
+    let observer = Arc::new(CapturingObserver::default());
+    let mut driver = SelfHarnessDriver::new(agent, observer.clone());
+    let source = load_harness_source(&examples_harness_dir().join("Harness.hs"))
+        .expect("reference harness source loads");
+
+    let outcome1 = driver
+        .run_one_cycle(&source, None)
+        .await
+        .expect("cycle 1 (boots the machine)");
+    let outcome2 = driver
+        .run_one_cycle(&source, Some(&outcome1.state_json))
+        .await
+        .expect("cycle 2 (rotates at the boundary, then completes)");
+
+    // Durable state accumulated ACROSS the rotation.
+    assert_eq!(
+        outcome2.state_json.get("mode").and_then(|v| v.as_str()),
+        Some("Acting"),
+        "state must keep accumulating across a machine rotation, got {:?}",
+        outcome2.state_json
+    );
+
+    let events = observer.events.lock().unwrap();
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, tidepool_harness::Event::MachineStats { .. })),
+        "loop-boundary maintenance must emit MachineStats"
+    );
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, tidepool_harness::Event::MachineRotated { .. })),
+        "the ceiling-of-1 run must record a MachineRotated event"
+    );
+}

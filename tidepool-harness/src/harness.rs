@@ -790,6 +790,21 @@ impl Harness {
         self.tree.adopt_session(session)
     }
 
+    /// Replace the machine under `sid` with a fresh one (machine ROTATION —
+    /// one-session plan, Phase 4). The caller guarantees quiescence (no
+    /// parked holes, no turn in flight): this is the driver's own
+    /// loop-boundary maintenance on a session it owns, and the old machine
+    /// drops here (heap + roots reclaimed; the leaked code arena is the
+    /// bounded cost rotation exists to bound).
+    pub fn replace_session(
+        &self,
+        sid: tidepool_repr::SessionId,
+        session: Session,
+    ) -> Result<(), HarnessError> {
+        self.tree.registry().insert_idle(sid, session);
+        Ok(())
+    }
+
     /// Seed a freshly-forced node's transcript + convo entry (shared tail of
     /// [`Self::force`] and [`Self::force_attached`]).
     fn seed_convo(&self, node: NodeId, effect_trace: EffectTrace) -> Result<(), HarnessError> {

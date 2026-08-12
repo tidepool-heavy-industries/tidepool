@@ -297,6 +297,13 @@ fn turn_outcome_tag(o: &TurnOutcome) -> &'static str {
 /// nested [`Harness`] used ONLY to answer `runLLMTurn` holes by driving an
 /// Agent turn loop to `finalize`. One driver per running self-harness
 /// process (`tidepool-selfharness`).
+/// Default fragment ceiling for the shared machine before rotation
+/// (`TIDEPOOL_MACHINE_FRAGMENT_CEILING` overrides): each answerer round
+/// compiles ~1 fragment, so this is hundreds of loops of headroom while
+/// still bounding the never-reclaimed executable memory. Tuned from
+/// [`Event::MachineStats`] evidence, per the plan's locked decision.
+const DEFAULT_FRAGMENT_CEILING: u64 = 4096;
+
 pub struct SelfHarnessDriver {
     /// The Harness-monad resident session. `None` before bootstrap.
     outer: Option<OuterSession>,
@@ -304,6 +311,10 @@ pub struct SelfHarnessDriver {
     /// own realm on the SHARED machine (structured-concurrency scope; closed
     /// at retirement). Distinct from `iteration` (which restarts restore).
     iteration_realm: u64,
+    /// The living session values the LAST machine rotation lost — surfaced
+    /// once in the next render (legible loss, one-session plan Phase 4),
+    /// then cleared.
+    last_rotation_losses: Option<Vec<String>>,
     /// The nested multi-node orchestrator that answers a `runLLMTurn` hole
     /// by driving an Agent turn loop (`run_to_hole_or_done`) to a
     /// `finalize`. Shared, not owned exclusively, so a future GUI/inspector
@@ -409,6 +420,7 @@ impl SelfHarnessDriver {
         SelfHarnessDriver {
             outer: None,
             iteration_realm: 0,
+            last_rotation_losses: None,
             agent,
             lifecycle: SelfHarnessState::Idle,
             observer,
@@ -594,27 +606,7 @@ impl SelfHarnessDriver {
         .map_err(|e| DriverError::Session(format!("outer engine config: {e}")))?;
         outer_cfg.include.push(source.source_dir.clone());
 
-        let handler_cfg = tidepool_handlers::HandlerConfig {
-            cwd: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
-            kv_path: tidepool_runtime::paths::cache_dir().join("selfharness-kv.json"),
-            llm_model: std::env::var("TIDEPOOL_LLM_MODEL")
-                .unwrap_or_else(|_| "gpt-4o-mini".to_string()),
-        };
-        // Never actually dispatched to: `outer_cfg.suspend_tag == 0` means the
-        // ONE declared effect (RunLLMTurn) always suspends before reaching a
-        // handler.
-        let stack: crate::harness::BoxedStack =
-            Box::new(tidepool_handlers::build_base_stack(&handler_cfg));
-
-        let session = crate::harness::Session::unbootstrapped(
-            stack,
-            outer_cfg.suspend_tag,
-            outer_cfg.effect_names.clone(),
-            tidepool_mcp::CapturedOutput::new(),
-            outer_cfg.include.clone(),
-            tidepool_runtime::DEFAULT_NURSERY_SIZE,
-            None,
-        );
+        let session = Self::build_outer_session(&outer_cfg);
 
         // The one-session collapse: the outer session lives in the tree's
         // registry (uniform checkout discipline, panic-safety Drop), the
@@ -626,6 +618,86 @@ impl SelfHarnessDriver {
             module_name: source.module_name.clone(),
             answerer_imports: source.answerer_imports.clone(),
         });
+        Ok(())
+    }
+
+    /// Construct a fresh outer-session machine handle from `cfg` — shared by
+    /// [`Self::bootstrap`] and machine ROTATION ([`Self::machine_maintenance`]):
+    /// one construction, so a rotated machine cannot differ from a booted one.
+    fn build_outer_session(cfg: &EngineConfig) -> crate::harness::Session {
+        let handler_cfg = tidepool_handlers::HandlerConfig {
+            cwd: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+            kv_path: tidepool_runtime::paths::cache_dir().join("selfharness-kv.json"),
+            llm_model: std::env::var("TIDEPOOL_LLM_MODEL")
+                .unwrap_or_else(|_| "gpt-4o-mini".to_string()),
+        };
+        // Never actually dispatched to: `cfg.suspend_tag == 0` means every
+        // declared effect suspends before reaching a handler.
+        let stack: crate::harness::BoxedStack =
+            Box::new(tidepool_handlers::build_base_stack(&handler_cfg));
+        crate::harness::Session::unbootstrapped(
+            stack,
+            cfg.suspend_tag,
+            cfg.effect_names.clone(),
+            tidepool_mcp::CapturedOutput::new(),
+            cfg.include.clone(),
+            tidepool_runtime::DEFAULT_NURSERY_SIZE,
+            None,
+        )
+    }
+
+    /// LOOP-BOUNDARY MACHINE MAINTENANCE (one-session plan, Phase 4 —
+    /// bounded lifetime, not immortality): emit the machine's
+    /// instrumentation ([`Event::MachineStats`] — the rotation-cadence
+    /// evidence base), and at the fragment CEILING rotate: a fresh machine
+    /// adopted under the SAME session id at a quiescent boundary. Durable
+    /// state flows through the checkpoint exactly as every loop always has;
+    /// decl-plane source (when present) is machine-independent; living
+    /// session VALUES are lost — ENUMERATED into [`Event::MachineRotated`]
+    /// and the next render's legible-loss note, never silently. A
+    /// non-quiescent machine at the ceiling refuses the loop with a legible
+    /// error instead of growing silently (the enforced bound the parking
+    /// contract's §2(c) amendment names).
+    fn machine_maintenance(&mut self) -> Result<(), DriverError> {
+        let sid = self.outer_sid()?;
+        let (stats, hole_count, bindings) = self
+            .agent
+            .with_session(sid, |s| {
+                (s.heap_stats(), s.parked_holes().len(), s.binding_names())
+            })
+            .map_err(|e| DriverError::Session(e.to_string()))?;
+        let Some(stats) = stats else {
+            // Machine not booted yet (first cycle) — nothing to measure.
+            return Ok(());
+        };
+        self.emit(Event::MachineStats {
+            fragments: stats.fragments,
+            live_bytes: stats.live_bytes as u64,
+            gc_count: stats.gc_count,
+        });
+        let ceiling = std::env::var("TIDEPOOL_MACHINE_FRAGMENT_CEILING")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(DEFAULT_FRAGMENT_CEILING);
+        if stats.fragments < ceiling {
+            return Ok(());
+        }
+        if hole_count > 0 {
+            return Err(DriverError::Session(format!(
+                "machine at fragment ceiling ({} >= {ceiling}) but not quiescent                  ({hole_count} parked hole(s)) — cannot rotate mid-suspension; raise                  TIDEPOOL_MACHINE_FRAGMENT_CEILING or bounce the harness",
+                stats.fragments
+            )));
+        }
+        let cfg = &self.outer.as_ref().ok_or_else(not_bootstrapped)?.cfg;
+        let fresh = Self::build_outer_session(cfg);
+        self.agent
+            .replace_session(sid, fresh)
+            .map_err(|e| DriverError::Session(e.to_string()))?;
+        self.emit(Event::MachineRotated {
+            fragments: stats.fragments,
+            bindings_lost: bindings.clone(),
+        });
+        self.last_rotation_losses = Some(bindings);
         Ok(())
     }
 
@@ -822,6 +894,9 @@ impl SelfHarnessDriver {
             };
             return Err(e);
         }
+        // Loop-boundary machine maintenance: instrumentation + the enforced
+        // fragment ceiling (rotation at quiescence) — one-session plan, Phase 4.
+        self.machine_maintenance()?;
         self.emit(Event::LoopBoundary);
 
         // Compile the pre-loop `render` and this cycle's `loop` fragment
@@ -2029,6 +2104,18 @@ impl SelfHarnessDriver {
             framing.push_str(summary);
         }
         framing.push_str(&format!("\n\nLoop count so far: {}.", self.iteration));
+        if let Some(lost) = self.last_rotation_losses.take() {
+            framing.push_str(
+                "\n\nNOTE: the resident machine was rotated (bounded-lifetime \
+                 maintenance). Durable state survived via the checkpoint; living \
+                 session values did NOT: ",
+            );
+            framing.push_str(&if lost.is_empty() {
+                "(none were held)".to_string()
+            } else {
+                lost.join(", ")
+            });
+        }
         Ok(framing)
     }
 
