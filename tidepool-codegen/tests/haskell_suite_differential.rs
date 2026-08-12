@@ -59,7 +59,7 @@ const EXPECTED_EVAL_JIT_DIVERGE: &[(&str, &str)] = &[
          gate-hardening change).",
     ),
     (
-        "xs_u8286623314361937397",
+        "xs_u8286623314361975231",
         "GHC-lifted local helper bound to a self-referential, effectively \
          unbounded list; standalone execution forces it outside the call site \
          that would bound it. eval's deep_force walks it fully and hits its own \
@@ -68,11 +68,14 @@ const EXPECTED_EVAL_JIT_DIVERGE: &[(&str, &str)] = &[
          (1000) instead of erroring — an asymmetry between the two forcing \
          strategies on an out-of-context fixture, not a real engine divergence. \
          Named individually rather than excluded as a class: this suite's other \
-         lifted locals compare cleanly and are real coverage.",
+         lifted locals compare cleanly and are real coverage. (Name carries a \
+         GHC-minted content hash suffix that shifts on every corpus \
+         regeneration — the shape and cause are what's pinned, not the exact \
+         name.)",
     ),
     (
-        "xs'_u8286623314361937461",
-        "Same shape and cause as xs_u8286623314361937397 — lifted-local \
+        "xs'_u8286623314361975295",
+        "Same shape and cause as xs_u8286623314361975231 — lifted-local \
          unbounded list, deep_force DepthLimit vs heap_to_value's silent \
          MAX_HEAP_DEPTH truncation.",
     ),

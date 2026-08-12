@@ -963,7 +963,7 @@ qq_fmt_multi = [fmt|hello {T.toUpper greeting}, score {score}|]
     score    = T.pack "42"   :: T.Text
 
 qq_fmt_escape :: T.Text
-qq_fmt_escape = [fmt|use \{braces} for holes and }} is literal|]
+qq_fmt_escape = [fmt|use \{braces}} for holes and }} is literal|]
 
 qq_fmt_multiline :: T.Text
 qq_fmt_multiline = [fmt|line one
@@ -1074,7 +1074,7 @@ qq_fmt_spec_colon = [fmt|{T.pack "a:b"}|]
 
 -- {{ / }} doubling and the existing \{ escape, together.
 qq_fmt_spec_escapes :: T.Text         -- -> "{x} and {y} done"
-qq_fmt_spec_escapes = [fmt|{{x}} and \{y} done|]
+qq_fmt_spec_escapes = [fmt|{{x}} and \{y}} done|]
 
 -- K canary: a GADT whose sibling case alts call `show` at two refined types
 -- (Int / Double).  Guards the DataConTable / stableVarId-collision class that
