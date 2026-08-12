@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Launch the self-iterating harness dogfood against an authored harness.
-#   ./harness-dogfooding/run.sh                         # the feature-brainstorm wizard
+#   ./harness-dogfooding/run.sh                         # the open-ended companion
 #   ./harness-dogfooding/run.sh path/to/Harness.hs      # any authored harness
 # Rebuilds the extract + bin so it always runs the current tree. Model defaults
 # to the OAuth (Codex) default baked into the bin; override with TIDEPOOL_LLM_MODEL.
@@ -28,7 +28,7 @@ else
   cargo build -q -p tidepool-web --bin tidepool-selfharness
 fi
 
-HARNESS="${1:-harness-dogfooding/wizard/Harness.hs}"
+HARNESS="${1:-harness-dogfooding/companion/Harness.hs}"
 echo "==> launching: $HARNESS  ($PROFILE)  (open the printed 127.0.0.1 URL)"
 export RUST_LOG="${RUST_LOG:-warn,tidepool_harness=debug,tidepool_web=debug}"
 # Private dogfood cache (2026-08-08): 12 of 13 harness test files write the

@@ -20,7 +20,7 @@ two-file layout:
 Point the driver at a subdir's `Harness.hs`; its directory becomes the include
 root so the sibling `HarnessTypes` resolves.
 
-**Minimal effect surfaces, on purpose:** the wizard's answerer row is exactly
+**Minimal effect surfaces, on purpose:** the companion's answerer row is exactly
 `Eff '[AskUser, Fork, Finalize]` (spelled out in `Tidepool.Agent`) — typed
 forms, depth-one parallel sub-answerers, and the typed yield. The development
 tree instead gives headless workers their native coding tools while Haskell
@@ -29,11 +29,16 @@ roadmap* for the next harness helpers.
 
 ## Harnesses
 
-- [`wizard/`](wizard/Harness.hs) — **feature-brainstorm / PRD-construction
-  thought-partner**, pointed at tidepool itself. A frame → diverge → converge →
-  draft wizard: the agent supplies per-step cognition, the operator supplies
-  taste through forms, and the accumulating `draft` *is* a stream of change
-  requests. Deliberately rough — the roughness is iteration fuel.
+- [`companion/`](companion/Harness.hs) — **an open-ended, persistent companion
+  and harness co-designer**. It uses OODA as an internal typed control-loop
+  shape rather than a user-facing workflow: durable state is deterministically
+  oriented into a cognition window; the companion converses, wonders, explores,
+  or consults the operator; then it returns the compact orientation its next
+  iteration should inherit. It is explicitly invited to critique and redesign
+  the harness shaping it. [`INSPIRATION.md`](companion/INSPIRATION.md) sketches
+  the larger playground: the typed resident REPL, capability rows, executable
+  harness self-design, and ephemeral non-serializable values such as closures
+  and records of functions alongside durable state.
 - [`dev-tree/`](dev-tree/Harness.hs) — **forward dogfood for typed subagents,
   retained worktrees, and lexical event handlers**. It unfolds an ordinary
   recursive `DevPlan` depth-first into coding agents — parent worker first, so

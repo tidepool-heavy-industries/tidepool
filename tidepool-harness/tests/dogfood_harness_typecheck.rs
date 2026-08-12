@@ -62,13 +62,15 @@ fn typecheck(harness_dir: &str, decls: Vec<tidepool_mcp::EffectDecl>) {
     }
 }
 
-/// The wizard's row is the driver's own outer session: `[RunLLMTurn,
-/// AskUser]` (mirrors `selfharness::driver::outer_decls`) — the harness-level
-/// steering ask uses `askUser` directly from `loop`.
+/// The companion's row is the driver's own outer session: `[RunLLMTurn,
+/// AskUser]` (mirrors `selfharness::driver::outer_decls`). Its `loop` calls
+/// only `runLLMTurn` — conversation happens through the answerer's own
+/// `askUser` forms — but the probe compiles against the full outer row the
+/// driver actually serves.
 #[test]
-fn wizard_typechecks() {
+fn companion_typechecks() {
     typecheck(
-        "harness-dogfooding/wizard",
+        "harness-dogfooding/companion",
         vec![
             tidepool_mcp::runllmturn_decl(),
             tidepool_mcp::askuser_decl(),
