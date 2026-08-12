@@ -87,28 +87,46 @@ fn parenthesize_positional(t: &str) -> String {
     }
 }
 
-/// Render one constructor's fragment of a `data` declaration body:
-/// - nullary (`rep_arity == 0`) -> the bare constructor name.
-/// - record (field labels present, arity-matched) -> `Name { l1 :: T1, ... }`.
-/// - positional (no field labels) -> `Name T1 T2 ...`, parenthesizing
-///   positionally where required.
+/// Render one constructor's fragment of a `data` declaration body, from
+/// SOURCE field types (`field_types_of`) alone when present — those are the
+/// source-level declaration (`dataConOrigArgTys`), which can legitimately
+/// disagree in count with the RUNTIME `rep_arity` (`dataConRepArgTys`, e.g.
+/// an UNPACK'd or evidence-carrying constructor); `rep_arity` is consulted
+/// ONLY as the no-source-types fallback, never to validate source types
+/// against it:
+/// - source types present, empty -> the bare constructor name.
+/// - source types present, non-empty, field labels present and
+///   arity-matched -> `Name { l1 :: T1, ... }`.
+/// - source types present, non-empty, no field labels -> `Name T1 T2 ...`,
+///   parenthesizing positionally where required.
+/// - source types present, non-empty, field labels present but
+///   arity-mismatched -> `None` (degrade).
+/// - source types ABSENT, `rep_arity == 0` -> the bare constructor name
+///   (a nullary constructor need not carry source types to be known
+///   nullary).
+/// - source types ABSENT, `rep_arity > 0` -> `None` (degrade) — a
+///   non-nullary constructor with no source types (e.g. a non-vanilla
+///   existential/GADT constructor, which never gets emitted field types)
+///   has no honest shape to render.
 ///
-/// `None` on ANY unusable shape for this constructor (missing field types,
-/// a field-type/rep-arity mismatch, or field labels present but
-/// arity-mismatched) — the caller degrades the WHOLE type to its bare name
-/// rather than rendering a partial/invented shape.
+/// `None` on any unusable shape for this constructor — the caller degrades
+/// the WHOLE type to its bare name rather than rendering a partial/invented
+/// shape.
 fn render_constructor(table: &DataConTable, id: DataConId) -> Option<String> {
     let dc = table.get(id)?;
     let name = table.name_of(id)?;
-    if dc.rep_arity == 0 {
+    let Some(types) = table.field_types_of(id) else {
+        return if dc.rep_arity == 0 {
+            Some(name.to_string())
+        } else {
+            None
+        };
+    };
+    if types.is_empty() {
         return Some(name.to_string());
     }
-    let types = table.field_types_of(id)?;
-    if types.len() != dc.rep_arity as usize {
-        return None;
-    }
     match table.field_labels_of(id) {
-        Some(labels) if labels.len() == dc.rep_arity as usize => {
+        Some(labels) if labels.len() == types.len() => {
             let fields: Vec<String> = labels
                 .iter()
                 .zip(types)
@@ -176,12 +194,33 @@ fn tyvar_header(table: &DataConTable, ty: &str) -> Vec<String> {
     out
 }
 
+/// UPPERCASE identifier tokens found directly in a rendered type STRING that
+/// name a user type reachable for transitive expansion: not a
+/// [`BUILTIN_TYPES`] entry, and `table` actually carries constructors for
+/// it. Order is first-appearance, deduplicated within this call. The shared
+/// filter [`referenced_type_names`] applies per field type, and
+/// [`type_document`]'s root-lookup fallback applies directly to the root
+/// type string.
+fn type_names_in_string(table: &DataConTable, s: &str) -> Vec<String> {
+    let mut seen = HashSet::new();
+    let mut out = Vec::new();
+    for tok in identifier_tokens(s) {
+        if is_uppercase_start(&tok)
+            && !is_builtin(&tok)
+            && seen.insert(tok.clone())
+            && !table.constructors_of_type(&tok).is_empty()
+        {
+            out.push(tok);
+        }
+    }
+    out
+}
+
 /// UPPERCASE identifier tokens across `ty`'s own field types that name a
-/// user type reachable for transitive expansion: not a [`BUILTIN_TYPES`]
-/// entry, and `table` actually carries constructors for it. Order is
-/// first-appearance (constructor-tag, then field, then token-in-string);
-/// deduplicated within this call (the caller's global `visited` set
-/// dedups across the whole document).
+/// user type reachable for transitive expansion (see
+/// [`type_names_in_string`]). Order is first-appearance (constructor-tag,
+/// then field, then token-in-string); deduplicated within this call (the
+/// caller's global `visited` set dedups across the whole document).
 fn referenced_type_names(table: &DataConTable, ty: &str) -> Vec<String> {
     let mut seen = HashSet::new();
     let mut out = Vec::new();
@@ -190,12 +229,8 @@ fn referenced_type_names(table: &DataConTable, ty: &str) -> Vec<String> {
             continue;
         };
         for t in types {
-            for tok in identifier_tokens(t) {
-                if is_uppercase_start(&tok)
-                    && !is_builtin(&tok)
-                    && seen.insert(tok.clone())
-                    && !table.constructors_of_type(&tok).is_empty()
-                {
+            for tok in type_names_in_string(table, t) {
+                if seen.insert(tok.clone()) {
                     out.push(tok);
                 }
             }
@@ -219,34 +254,54 @@ fn render_data_decl(table: &DataConTable, ty: &str, body: &str) -> String {
 /// unreasonably long expansion CHAIN through many distinct types.
 const MAX_EXPANSION_DEPTH: usize = 8;
 
-/// Render a full GHC-style multi-type `data` DOCUMENT for `ty`: `ty`'s own
-/// declaration first, then every user type transitively reachable through
-/// its (and each subsequently-added type's) field types — a type-name token
-/// occurring in a field type, resolved against `table`, not already visited,
-/// not a builtin, within [`MAX_EXPANSION_DEPTH`] hops of the root. One line
-/// per type, in BFS discovery order, each `data <Ty>[ <tyvars>] = <body>`.
+/// Render a full GHC-style multi-type `data` DOCUMENT for `ty`: when `ty`
+/// names a type in `table` VERBATIM, its own declaration first, then every
+/// user type transitively reachable through its (and each
+/// subsequently-added type's) field types — a type-name token occurring in
+/// a field type, resolved against `table`, not already visited, not a
+/// builtin, within [`MAX_EXPANSION_DEPTH`] hops of the root. One line per
+/// type, in BFS discovery order, each `data <Ty>[ <tyvars>] = <body>`.
+///
+/// When the verbatim lookup MISSES — `ty` is an APPLIED type (`Maybe
+/// Decision`, `[Decision]`, `Box Decision`) rather than a bare type name —
+/// the transitive expansion is instead seeded directly from the reachable
+/// user-type tokens found IN the root string itself (the same filter as
+/// [`referenced_type_names`], applied to the string via
+/// [`type_names_in_string`]). No root line is emitted in this case (there is
+/// no single `data <ty> = ...` for an applied type), but every reachable
+/// user decl still is — e.g. `Maybe Decision` and `[Decision]` both yield
+/// `Decision`'s declaration with no invented `data Maybe Decision` line.
 ///
 /// A type that fails to render (see [`render_type_body`]) is simply not
 /// expanded into — no line is added for it, and no further tokens are
 /// scanned from it (its shape is unknown, so nothing further can be found
-/// honestly). This applies to `ty` itself too: when `ty`'s OWN body can't
-/// render, [`type_document`] degrades to the bare type name, exactly like
-/// [`type_synopsis`] — never a document containing only broken transitive
-/// entries with no root.
+/// honestly). If NOTHING ends up rendered (verbatim miss with no reachable
+/// tokens, e.g. `Maybe Int`; or `ty`'s own body can't render and no
+/// transitive expansion resolves either), [`type_document`] degrades to the
+/// bare `ty` string, exactly like [`type_synopsis`] — never a document
+/// containing only broken transitive entries with no root.
 #[must_use]
 pub fn type_document(table: &DataConTable, ty: &str) -> String {
-    let Some(root_body) = render_type_body(table, ty) else {
-        return ty.to_string();
-    };
-
     let mut visited: HashSet<String> = HashSet::new();
-    visited.insert(ty.to_string());
-    let mut lines = vec![render_data_decl(table, ty, &root_body)];
-
+    let mut lines: Vec<String> = Vec::new();
     let mut queue: VecDeque<(String, usize)> = VecDeque::new();
-    for candidate in referenced_type_names(table, ty) {
-        if visited.insert(candidate.clone()) {
-            queue.push_back((candidate, 1));
+
+    match render_type_body(table, ty) {
+        Some(root_body) => {
+            visited.insert(ty.to_string());
+            lines.push(render_data_decl(table, ty, &root_body));
+            for candidate in referenced_type_names(table, ty) {
+                if visited.insert(candidate.clone()) {
+                    queue.push_back((candidate, 1));
+                }
+            }
+        }
+        None => {
+            for candidate in type_names_in_string(table, ty) {
+                if visited.insert(candidate.clone()) {
+                    queue.push_back((candidate, 1));
+                }
+            }
         }
     }
 
@@ -264,7 +319,11 @@ pub fn type_document(table: &DataConTable, ty: &str) -> String {
         }
     }
 
-    lines.join("\n")
+    if lines.is_empty() {
+        ty.to_string()
+    } else {
+        lines.join("\n")
+    }
 }
 
 #[cfg(test)]
@@ -470,26 +529,104 @@ mod tests {
         assert_eq!(doc, "data A = A B\ndata B = B A");
     }
 
+    // ---- applied root type expansion (fix 3: token-scan fallback) ----
+
+    fn decision_table() -> DataConTable {
+        let mut table = DataConTable::new();
+        table.insert(nullary(1, "Approve", 1, "Decision"));
+        table.insert(nullary(2, "Reject", 2, "Decision"));
+        table
+    }
+
+    /// A hole type applying a builtin (`Maybe Decision`) has no verbatim
+    /// table entry — the fallback seeds expansion from the tokens in the
+    /// root string itself, reaching `Decision`'s own declaration with no
+    /// invented `data Maybe Decision` line.
+    #[test]
+    fn applied_maybe_root_expands_via_token_scan() {
+        let table = decision_table();
+        assert_eq!(
+            type_document(&table, "Maybe Decision"),
+            "data Decision = Approve | Reject"
+        );
+    }
+
+    /// Same fallback for a list-applied root (`[Decision]` is never a single
+    /// UPPERCASE identifier token, so it never has a verbatim entry either).
+    #[test]
+    fn applied_list_root_expands_via_token_scan() {
+        let table = decision_table();
+        assert_eq!(
+            type_document(&table, "[Decision]"),
+            "data Decision = Approve | Reject"
+        );
+    }
+
+    /// A user-defined applied type constructor (`Box Decision`) yields BOTH
+    /// reachable declarations, root-string token order first.
+    #[test]
+    fn applied_user_type_root_expands_to_both_reachable_decls() {
+        let mut table = decision_table();
+        let mk_box = with_fields(3, "MkBox", 1, 1, "Box");
+        table.insert(mk_box.clone());
+        table.set_field_types(mk_box.id, vec!["a".to_string()]);
+
+        assert_eq!(
+            type_document(&table, "Box Decision"),
+            "data Box a = MkBox a\ndata Decision = Approve | Reject"
+        );
+    }
+
+    /// An applied root whose tokens are ALL builtins (`Maybe Int`) has
+    /// nothing reachable to expand into — degrades to the bare root string,
+    /// same as any other unresolvable type.
+    #[test]
+    fn applied_root_with_only_builtin_tokens_yields_no_document() {
+        let table = decision_table();
+        assert_eq!(type_document(&table, "Maybe Int"), "Maybe Int");
+    }
+
     // ---- degrade paths: missing types, arity mismatch, unknown type ----
 
+    /// Also the (2)+(4) composition pin: a non-vanilla (existential/GADT)
+    /// constructor emits NO field types at all
+    /// (`Tidepool.Translate.dcFieldTypes`'s `isVanillaDataCon` guard), which
+    /// is exactly this shape at the table level — rep_arity > 0, field types
+    /// absent. The two fixes compose into one honest degrade: absent types
+    /// on a non-nullary constructor is unrenderable, so the whole type
+    /// degrades to its bare name rather than an invented parametric shape.
     #[test]
     fn degrades_to_bare_name_when_field_types_missing() {
         let mut table = DataConTable::new();
-        // rep_arity 2 but no field types ever set — extract omitted them (or
-        // an older wire payload).
+        // rep_arity 2 but no field types ever set — extract omitted them (a
+        // non-vanilla constructor, or an older wire payload).
         table.insert(with_fields(1, "Pair", 1, 2, "Pair"));
         assert_eq!(type_synopsis(&table, "Pair"), "Pair");
         assert_eq!(type_document(&table, "Pair"), "Pair");
     }
 
+    /// UNPACK'd/evidence-carrying constructor: `rep_arity` (2) disagrees with
+    /// the SOURCE field type count (1). The source types are the truth —
+    /// this renders positionally from them rather than degrading on the
+    /// rep_arity mismatch.
     #[test]
-    fn degrades_to_bare_name_on_field_type_arity_mismatch() {
+    fn renders_positionally_from_source_types_despite_rep_arity_mismatch() {
         let mut table = DataConTable::new();
         let dc = with_fields(1, "Pair", 1, 2, "Pair");
         table.insert(dc.clone());
-        // Only one type for two fields.
+        // Only one SOURCE type though rep_arity says 2.
         table.set_field_types(dc.id, vec!["Int".to_string()]);
-        assert_eq!(type_synopsis(&table, "Pair"), "Pair");
+        assert_eq!(type_synopsis(&table, "Pair"), "Pair Int");
+    }
+
+    /// A nullary constructor (`rep_arity == 0`) with field types never set
+    /// (absent, not merely empty) still renders bare — `rep_arity` is
+    /// consulted only as the no-source-types fallback.
+    #[test]
+    fn nullary_with_absent_field_types_still_renders_bare() {
+        let mut table = DataConTable::new();
+        table.insert(nullary(1, "Nil", 1, "Nil"));
+        assert_eq!(type_synopsis(&table, "Nil"), "Nil");
     }
 
     #[test]
