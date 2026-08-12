@@ -483,16 +483,17 @@ pub fn assemble_request(
     }
 }
 
-/// A names-only type-shape line to append to a hole card, or an empty string
-/// when there is nothing to show: no table (the caller couldn't reach one —
-/// see call sites), or [`crate::synopsis::type_synopsis`] degraded all the
-/// way to the bare type name (already stated elsewhere in the card, so
-/// repeating it here would add nothing). See
-/// `plans/post-restart/dev/hole-card-type-synopsis.md`: names only, never an
-/// invented/partial shape.
+/// A fenced GHC-style `data`-declaration block to append to a hole card, or
+/// an empty string when there is nothing to show: no table (the caller
+/// couldn't reach one — see call sites), or
+/// [`crate::synopsis::type_document`] degraded all the way to the bare type
+/// name (already stated elsewhere in the card, so repeating it here would
+/// add nothing). Never an invented/partial shape — a type document renders
+/// only when every constructor's field types are known; a harness author
+/// never hand-embeds an answer type's declaration in a prompt.
 fn type_shape_line(ty: &str, table: Option<&DataConTable>) -> String {
-    match table.map(|t| crate::synopsis::type_synopsis(t, ty)) {
-        Some(synopsis) if synopsis != ty => format!("Its shape: `{synopsis}`\n\n"),
+    match table.map(|t| crate::synopsis::type_document(t, ty)) {
+        Some(doc) if doc != ty => format!("Its shape:\n\n```haskell\n{doc}\n```\n\n"),
         _ => String::new(),
     }
 }
@@ -1550,6 +1551,10 @@ mod tests {
                 "advance".to_string(),
             ],
         );
+        table.set_field_types(
+            dc.id,
+            vec!["[Text]".to_string(), "Text".to_string(), "Bool".to_string()],
+        );
         table
     }
 
@@ -1562,11 +1567,13 @@ mod tests {
     }
 
     #[test]
-    fn hole_card_renders_record_selector_names() {
+    fn hole_card_renders_record_selector_names_and_types() {
         let table = record_table();
         let card = hole_card("answer this", Some("Contribution"), Some(&table));
         assert!(
-            card.contains("Contribution { addedIdeas, draftDelta, advance }"),
+            card.contains(
+                "Contribution { addedIdeas :: [Text], draftDelta :: Text, advance :: Bool }"
+            ),
             "{card}"
         );
     }
@@ -1576,6 +1583,44 @@ mod tests {
         let table = nullary_sum_table();
         let card = answerer_hole_card("decide", Some("Verdict"), &[], Some(&table));
         assert!(card.contains("Advance | Hold | Abort"), "{card}");
+    }
+
+    /// A positional-sum answer type — no field labels at all — previously
+    /// had no shape a names-only synopsis could render (it degraded to the
+    /// bare type name); with field types on the table it now renders as a
+    /// fenced `data` document instead.
+    #[test]
+    fn hole_card_renders_positional_sum_instead_of_degrading() {
+        let mut table = DataConTable::new();
+        let circle = DataCon {
+            id: DataConId(1),
+            name: "Circle".to_string(),
+            tag: 1,
+            rep_arity: 1,
+            field_bangs: vec![],
+            qualified_name: Some("Shape.Circle".to_string()),
+            type_name: "Shape".to_string(),
+        };
+        table.insert(circle.clone());
+        table.set_field_types(circle.id, vec!["Double".to_string()]);
+        let rect = DataCon {
+            id: DataConId(2),
+            name: "Rect".to_string(),
+            tag: 2,
+            rep_arity: 2,
+            field_bangs: vec![],
+            qualified_name: Some("Shape.Rect".to_string()),
+            type_name: "Shape".to_string(),
+        };
+        table.insert(rect.clone());
+        table.set_field_types(rect.id, vec!["Double".to_string(), "Double".to_string()]);
+
+        let card = hole_card("answer this", Some("Shape"), Some(&table));
+        assert!(card.contains("Its shape:"), "{card}");
+        assert!(
+            card.contains("Circle Double | Rect Double Double"),
+            "{card}"
+        );
     }
 
     /// The per-hole card carries no verb documentation at all — the generated
@@ -1685,6 +1730,10 @@ mod tests {
                 "deltaDraft".to_string(),
                 "advance".to_string(),
             ],
+        );
+        renamed.set_field_types(
+            dc.id,
+            vec!["[Text]".to_string(), "Text".to_string(), "Bool".to_string()],
         );
         let renamed_card = hole_card("answer this", Some("Contribution"), Some(&renamed));
         assert!(renamed_card.contains("ideasAdded"), "{renamed_card}");
