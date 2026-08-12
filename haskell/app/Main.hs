@@ -49,7 +49,7 @@ import Tidepool.Session
   , sessionModuleString, parseSessionModule, sessionBinderName
   , mkThinSessionIface, writeSessionIface
   , scaffoldTargetName, scaffoldOutputBase )
-import Tidepool.Translate (translateBinds, translateModuleClosed, ClosedModule(..), DCMeta(..), FlatNode, collectDataCons, collectUsedDataCons, collectTransitiveDCons, siblingCloseDCons, emittedConIds, collectReachableConDCs, collectReachableConDCsRaw, wiredInDataCons, mergeMetaPreserving, UnresolvedVar(..), dcToMeta, valueRepArity, mapBang, targetBindingHasIO, stableVarId)
+import Tidepool.Translate (translateBinds, translateModuleClosed, ClosedModule(..), DCMeta(..), FlatNode, collectDataCons, collectUsedDataCons, collectTransitiveDCons, siblingCloseDCons, emittedConIds, collectReachableConDCs, collectReachableConDCsRaw, wiredInDataCons, mergeMetaPreserving, UnresolvedVar(..), dcToMeta, valueRepArity, mapBang, targetBindingHasIO, stableVarId, typeMentionsEffectMonad)
 import Tidepool.CborEncode (encodeTree, encodeMetadata, encodeTurnOut)
 import Tidepool.Timing (readTimingEnabled, timePhase, timeSection, emitPhase)
 
@@ -1475,6 +1475,19 @@ mkBoundBinders bindNames g root result = do
           then error $ "multi-binder: " ++ show (length bindNames) ++ " binders but "
                      ++ "type is a " ++ show (length tys) ++ "-tuple: " ++ renderType t
           else return tys
+  -- Cross-row bind guard (one-session plan Phase 3e, TASK 2): a session bind
+  -- whose captured type mentions the effect monad — the 'Eff' tycon or any
+  -- tycon defined in the generated per-session @Tidepool.Effects@ module —
+  -- cannot mean anything once it crosses into a LATER turn's compile, which
+  -- gets its OWN, differently-numbered @Tidepool.Effects@ (the row is
+  -- fragment-nominal, same reasoning as 'Tidepool.Translate.checkRunLLMTurnType').
+  -- Reject loudly here rather than let it silently reach a later turn as an
+  -- unresolvable/wrongly-resolved reference.
+  forM_ (zip bindNames componentTypes) $ \(name, cty) ->
+    when (typeMentionsEffectMonad cty) $
+      error $ "session bind '" ++ name ++ "' captures the effect row in its type ("
+            ++ renderType cty ++ "); row-typed values cannot cross fragments — "
+            ++ "bind a pure value or inline the effectful part"
   let mkEntry name cty =
         let occ    = mkVarOcc name
             varid  = stableVarId (sessionBinderName hsc sm occ)

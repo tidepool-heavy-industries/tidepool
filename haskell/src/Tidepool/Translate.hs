@@ -30,6 +30,7 @@ module Tidepool.Translate
   , normalizeMod
   , binderQualName
   , checkedKeyToIdx
+  , typeMentionsEffectMonad
   ) where
 
 import GHC
@@ -3404,42 +3405,74 @@ checkMonomorphicSite what ty = do
 
 -- | The two extract-time rejections for a runLLMTurn/runLLMTurnFork
 -- site's answer type (spec step 4): a leftover type variable (the site isn't
--- monomorphic, via 'checkMonomorphicSite') or a function arrow anywhere in
--- the type's structure (R0 has no way to serialize a function-typed answer
--- across the suspend boundary — the answer crosses as JSON). Both raise via
--- plain 'error'.
+-- monomorphic, via 'checkMonomorphicSite') or the answer type mentioning the
+-- effect monad anywhere in its structure ('typeMentionsEffectMonad' — the
+-- 'Eff' tycon itself or any tycon defined in the generated
+-- @Tidepool.Effects@ module). A function arrow is otherwise fine: on the
+-- one-session path a function-typed answer is delivered IN-HEAP by handle
+-- (the same mechanism 'finalize' has always used), so there is no longer a
+-- serialization boundary to fail against. What's still rejected is narrower:
+-- the generated @M@/@Eff@ is nominal PER FRAGMENT (each turn compiles its
+-- own effects module, its own row), so a value that mentions it cannot be
+-- meaningfully applied once it crosses into a different fragment's world.
+-- Both raise via plain 'error'.
 checkRunLLMTurnType :: Type -> TransM ()
 checkRunLLMTurnType ty = do
   checkMonomorphicSite "runLLMTurn" ty
-  binder <- gets tsCurrentBinder
-  let siteDesc = maybe "<top level>" T.unpack binder
-      typeStr = Tidepool.GhcPipeline.renderType ty
-  when (typeHasFunctionArrow ty) $
-    error $ "function-typed answers not supported in R0 (site in "
-          ++ siteDesc ++ "): " ++ typeStr
+  let typeStr = Tidepool.GhcPipeline.renderType ty
+  when (typeMentionsEffectMonad ty) $
+    error $ "effectful function answers not supported (the row is fragment-nominal): "
+          ++ typeStr
+          ++ " — answer with a PURE function; the M inside cannot unify across surfaces"
 
 -- | 'finalize's extract-time rejection (self-iterating-harness WS-B): ONLY
 -- the monomorphism check ('checkMonomorphicSite') — deliberately NOT
--- 'typeHasFunctionArrow'. 'finalize's value crosses in-heap via 'run_child'
--- (no JSON round-trip, no 'unsafeCoerce' relabeling), so — unlike
--- 'runLLMTurn' — it may carry a closure or other non-serializable value.
+-- 'typeMentionsEffectMonad'. 'finalize's value crosses in-heap via
+-- 'run_child'/the one-session resume path (no JSON round-trip, no
+-- 'unsafeCoerce' relabeling), so — unlike 'runLLMTurn' — it may carry a
+-- closure or other non-serializable value, including one containing a
+-- function arrow.
 checkFinalizeType :: Type -> TransM ()
 checkFinalizeType = checkMonomorphicSite "finalize"
 
--- | Does @ty@ contain a function arrow anywhere in its structure — either
--- directly, in a type-application argument, or nested inside a field of some
--- ADT/newtype the type transitively refers to? Mirrors 'closeTyCons's
--- newtype/field walk (visited-set keyed on TyCon, so a recursive type like
--- @data Rec = Rec (Int -> Int) Rec@ terminates instead of looping).
-typeHasFunctionArrow :: Type -> Bool
-typeHasFunctionArrow = goT emptyUniqSet
+-- | Does @ty@ mention the effect monad anywhere in its structure — the
+-- 'Eff' tycon itself (freer-simple's @Control.Monad.Freer.Internal.Eff@), or
+-- any tycon whose ORIGINAL defining module is exactly @Tidepool.Effects@
+-- (the per-session generated module: the row's own effect ADTs — @AskUser@,
+-- @Fork@, @Finalize@, @RunLLMTurn@, any custom effect type a session
+-- declares — plus the @M@ synonym, which unwraps to an @Eff@ application
+-- before this ever runs since 'splitTyConApp_maybe' looks through type
+-- synonyms). Checked directly, in a type-application argument, under a
+-- function arrow (both sides), or nested inside a field of some ADT/newtype
+-- the type transitively refers to. Mirrors 'closeTyCons's newtype/field walk
+-- (visited-set keyed on TyCon, so a recursive type like
+-- @data Rec = Rec (M Int) Rec@ terminates instead of looping).
+--
+-- Used by 'checkRunLLMTurnType' (TASK 1: a function-typed answer may now
+-- cross, but the generated @M@ is nominal PER FRAGMENT — each turn compiles
+-- its own effects module, its own row — so a value naming it cannot cross)
+-- and by @tidepool-extract-bin@'s @Main.mkBoundBinders@ (TASK 2: same
+-- reasoning, applied to a session BIND's captured type).
+typeMentionsEffectMonad :: Type -> Bool
+typeMentionsEffectMonad = goT emptyUniqSet
   where
     goT :: UniqSet TyCon -> Type -> Bool
     goT visited ty
-      | Just _ <- splitFunTy_maybe ty = True
+      | Just (_ftf, _mult, argTy, resTy) <- splitFunTy_maybe ty = goT visited argTy || goT visited resTy
       | Just (tc, tyArgs) <- splitTyConApp_maybe ty =
-          any (goT visited) tyArgs || goTc visited tc
+          isEffectTyCon tc || any (goT visited) tyArgs || goTc visited tc
       | otherwise = False
+
+    isEffectTyCon :: TyCon -> Bool
+    isEffectTyCon tc =
+      (occNameString (nameOccName (tyConName tc)) == "Eff"
+        && definedInModule "Control.Monad.Freer.Internal" tc)
+      || definedInModule "Tidepool.Effects" tc
+
+    definedInModule :: String -> TyCon -> Bool
+    definedInModule modStr tc =
+      maybe False ((== modStr) . moduleNameString . moduleName)
+            (nameModule_maybe (tyConName tc))
 
     goTc :: UniqSet TyCon -> TyCon -> Bool
     goTc visited tc
