@@ -234,37 +234,40 @@ const LOOP_INFERENCE_CALL_CAP: u32 = 1024;
 /// belt-and-braces, not the enforcement mechanism: the scoped stack
 /// ([`answerer_decls`]) is what makes any verb this framing omits fail to
 /// compile.
-const ANSWERER_FRAMING_SUFFIX: &str = "\
----\n\
-You are the answering agent for a self-iterating harness loop. The system \
-context above is your working brief (it is re-rendered from the loop's durable \
-State each loop). Each request below asks you for ONE typed value.\n\
-\n\
-Your ONLY runnable output is a single fenced ```haskell block containing one \
-expression of type `M a`. To gather operator input across turns, evaluate \
-`askUser @T` — it presents a human form and returns `T`. `T` is an ordinary \
-type in scope that derives `Generic` and `FromJSON`: constructors are choices, record fields \
-are named inputs, and `Maybe a` is optional. It BLOCKS for a human operator \
-and returns the typed value directly (a bad submission re-prompts internally; \
-there is no `Either` to unwrap):\n\
-  plan <- askUser @DeployPlan   -- data DeployPlan = DeployPlan { service :: Text, urgent :: Bool } deriving (Generic, FromJSON)\n\
-When the alternatives exist only as runtime VALUES rather than as a type's \
-constructors, pass them as (label, value) pairs instead: \
-`choose :: [(Text, a)] -> M a` picks one, `chooseMany :: [(Text, a)] -> M [a]` \
-picks any number. A value you \
-bind with `x <- …` persists into your NEXT turn like GHCi, so you can branch \
-on it.\n\
-\n\
-To answer by delegating to parallel sub-answerers, evaluate `forkAll @T \
-[brief1, brief2, ...] :: M [T]` (or `fork @T brief :: M T` for a single \
-delegate; `import Tidepool.Fork`). Each sub-answerer independently answers \
-one brief and cannot itself fork or gather operator input — it must resolve \
-its own brief directly. Combine the results and `finalize` as usual.\n\
-\n\
-When you have the answer, COMMIT it by evaluating `finalize @T value`. This \
-ends your turn and hands the typed value back to the loop. `T` is the type \
-named in the request. Do not call any other effect to answer; `finalize` is \
-how you resolve the request.";
+///
+/// The per-verb signatures/examples are NOT hand-narrated here: they fold
+/// over [`answerer_decls`] via [`engine::available_effects_section`] — the
+/// same [`tidepool_mcp::EffectDecl::prompt_card`]/`description` single
+/// source the eval tool description is assembled from — so a row with a
+/// different effect set gets a correspondingly different cheatsheet, sent
+/// ONCE per loop in the system framing rather than re-narrated every hole.
+fn answerer_framing_suffix() -> String {
+    format!(
+        "---\n\
+         You are the answering agent for a self-iterating harness loop. The system \
+         context above is your working brief (it is re-rendered from the loop's durable \
+         State each loop). Each request below asks you for ONE typed value.\n\
+         \n\
+         Your ONLY runnable output is a single fenced ```haskell block containing one \
+         expression of type `M a`. A value you bind with `x <- …` persists into your \
+         NEXT turn like GHCi, so you can branch on it.\n\
+         \n\
+         {}\n\
+         \n\
+         Your block is a PROGRAM, not a single question: sequence several \
+         consultations in one `do` block and branch on earlier answers with \
+         ordinary `case`/`if` — each runs without another model round. Plan \
+         the whole consultation up front when the branches are predictable; \
+         end the turn without finalizing only when an answer genuinely needs \
+         fresh judgment. Bind results, then `finalize`.\n\
+         \n\
+         When you have the answer, COMMIT it by evaluating `finalize @T value`. This \
+         ends your turn and hands the typed value back to the loop. `T` is the type \
+         named in the request. Do not call any other effect to answer; `finalize` is \
+         how you resolve the request.",
+        engine::available_effects_section(&answerer_decls())
+    )
+}
 
 fn turn_outcome_tag(o: &TurnOutcome) -> &'static str {
     match o {
@@ -312,7 +315,7 @@ pub struct SelfHarnessDriver {
     /// not against `max_tokens` after the loop.
     compaction_threshold_percent: u64,
     /// The CURRENT loop's answerer system framing: `render`'s pre-loop output
-    /// followed by [`ANSWERER_FRAMING_SUFFIX`]. Set in
+    /// followed by [`answerer_framing_suffix`]. Set in
     /// [`Self::run_one_cycle`] right after the pre-loop `render`, read when the
     /// answerer session is created. `None` before the first loop's render.
     answerer_framing: Option<String>,
@@ -843,7 +846,7 @@ impl SelfHarnessDriver {
         // The pre-loop render IS the answerer session's system message.
         // Compose it with the narrow answerer instruction and stash it for
         // `run_loop_fragment` to seed the per-loop answerer node.
-        self.answerer_framing = Some(format!("{prompt_before}\n\n{ANSWERER_FRAMING_SUFFIX}"));
+        self.answerer_framing = Some(format!("{prompt_before}\n\n{}", answerer_framing_suffix()));
 
         self.lifecycle = SelfHarnessState::RunningLoop;
         // The driver must not strand the lifecycle in `RunningLoop`/`Compacting`
@@ -1886,9 +1889,13 @@ impl SelfHarnessDriver {
     /// Evaluate `render(state)` against the outer session, then compose the
     /// full system message the answerer works under — author output first,
     /// then the prior compaction summary (if any), then the loop-iteration
-    /// count. (Capability/finalization instructions are appended by the
-    /// caller that builds `self.answerer_framing`, via
-    /// [`ANSWERER_FRAMING_SUFFIX`].) `render` itself takes only `State`
+    /// count, then the OUTER loop's own Available-effects section (folded
+    /// over [`outer_decls`] — `RunLLMTurn`/`AskUser`, the `loop`/`render`
+    /// author's own surface, distinct from the nested answerer's
+    /// [`answerer_decls`]). (Capability/finalization instructions for the
+    /// NESTED answerer are appended by the caller that builds
+    /// `self.answerer_framing`, via [`answerer_framing_suffix`].) `render`
+    /// itself takes only `State`
     /// (`plans/self-iterating-harness/15-generic-surface-wave.md`, "Runtime
     /// context is the runtime's job") — the compaction summary and the
     /// iteration count are runtime facts the AUTHOR no longer states.
@@ -1951,6 +1958,8 @@ impl SelfHarnessDriver {
             framing.push_str(summary);
         }
         framing.push_str(&format!("\n\nLoop count so far: {}.", self.iteration));
+        framing.push_str("\n\n");
+        framing.push_str(&engine::available_effects_section(&outer_decls()));
         Ok(framing)
     }
 
@@ -2110,5 +2119,42 @@ mod tests {
             !src.contains("dialogAsk"),
             "dialogAsk is deleted and must not appear anywhere, got:\n{src}"
         );
+    }
+
+    /// The answerer's system framing names every verb of its ACTUAL
+    /// compiling row (`answerer_decls()` — `AskUser`/`Fork`/`Finalize`) via
+    /// the decl-driven fold (`engine::available_effects_section`), not a
+    /// hand-written parenthetical. Pure string check, no GHC needed.
+    #[test]
+    fn answerer_framing_suffix_names_every_verb_of_the_answerer_row() {
+        let framing = super::answerer_framing_suffix();
+        for decl in answerer_decls() {
+            assert!(
+                framing.contains(decl.type_name),
+                "answerer framing missing {} — got:\n{framing}",
+                decl.type_name
+            );
+        }
+        assert!(
+            framing.contains("Available effects"),
+            "expected the generated section marker, got:\n{framing}"
+        );
+    }
+
+    /// The outer loop's own decl row (`outer_decls()` — `RunLLMTurn`/
+    /// `AskUser`) is a DIFFERENT row from the answerer's
+    /// (`AskUser`/`Fork`/`Finalize`), so the two surfaces' generated
+    /// sections must differ — each folds over its own compiling row, not a
+    /// shared hand-written table.
+    #[test]
+    fn outer_and_answerer_available_effects_sections_differ_by_row() {
+        let outer_section = crate::engine::available_effects_section(&super::outer_decls());
+        let answerer_section = crate::engine::available_effects_section(&answerer_decls());
+
+        assert!(outer_section.contains("**RunLLMTurn**"));
+        assert!(!answerer_section.contains("**RunLLMTurn**"));
+        assert!(!outer_section.contains("**Fork**"));
+        assert!(answerer_section.contains("**Fork**"));
+        assert_ne!(outer_section, answerer_section);
     }
 }

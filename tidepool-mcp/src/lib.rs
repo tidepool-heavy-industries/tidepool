@@ -566,6 +566,7 @@ mod tests {
                 helpers: &[],
                 type_params: &[],
                 default_row_args: &[],
+                prompt_card: None,
                 helpers_row_polymorphic: false,
             },
             EffectDecl {
@@ -580,6 +581,7 @@ mod tests {
                 helpers: &[],
                 type_params: &[],
                 default_row_args: &[],
+                prompt_card: None,
                 helpers_row_polymorphic: false,
             },
         ];
@@ -633,6 +635,7 @@ mod tests {
             helpers: &[],
             type_params: &[],
             default_row_args: &[],
+            prompt_card: None,
             helpers_row_polymorphic: false,
         }];
         let preamble = build_preamble(&effects, false);
@@ -664,6 +667,7 @@ mod tests {
             helpers: &[],
             type_params: &[],
             default_row_args: &[],
+            prompt_card: None,
             helpers_row_polymorphic: false,
         }];
         let preamble = build_preamble(&effects, false);
@@ -694,6 +698,7 @@ mod tests {
             helpers: &["putStrLn :: Text -> M ()\nputStrLn = send . Print"],
             type_params: &[],
             default_row_args: &[],
+            prompt_card: None,
             helpers_row_polymorphic: false,
         }];
         let desc = build_eval_tool_description(&effects);
@@ -1145,6 +1150,7 @@ data Console a where
             helpers: &[],
             type_params: &[],
             default_row_args: &[],
+            prompt_card: None,
             helpers_row_polymorphic: false,
         }];
         let preamble = build_preamble(&effects, false);
@@ -1172,6 +1178,7 @@ data Console a where
             helpers: &[],
             type_params: &[],
             default_row_args: &[],
+            prompt_card: None,
             helpers_row_polymorphic: false,
         }];
         let preamble = build_preamble(&effects, false);

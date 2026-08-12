@@ -18,8 +18,19 @@
 pub struct EffectDecl {
     /// Haskell GADT type name, e.g. `"Console"`.
     pub type_name: &'static str,
-    /// Human-readable description of what this effect does.
+    /// Human-readable description of what this effect does — the long-form
+    /// text the eval tool description is assembled from.
     pub description: &'static str,
+    /// A COMPACT per-turn variant of `description` — signatures plus one or
+    /// two examples, not the full eval-tool essay — for callers that fold
+    /// over a decl list to build a verb cheatsheet re-sent every round/turn
+    /// (a system-prompt "Available effects" section). `None` falls back to
+    /// `description` at the fold site: most effects don't need a distinct
+    /// compact form, only ones whose `description` carries multi-line
+    /// worked examples (e.g. `AskUser`) set this. This is the ONE place a
+    /// per-effect card's text lives — never a second hand-authored table at
+    /// a call site.
+    pub prompt_card: Option<&'static str>,
     /// Haskell GADT constructor declarations (one per line inside `data T a where`).
     pub constructors: &'static [&'static str],
     /// Extra Haskell type/function definitions emitted before the GADT.

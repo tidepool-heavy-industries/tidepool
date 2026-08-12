@@ -181,6 +181,20 @@ macro_rules! opt_bool_or_false {
 }
 pub(crate) use opt_bool_or_false;
 
+/// Render an optional `prompt_card [...]` grammar token to
+/// [`crate::EffectDecl::prompt_card`]'s `Option<&'static str>`, defaulting to
+/// `None` when the definition omits the clause (every effect whose
+/// `description` is already compact enough to re-send every turn).
+macro_rules! opt_prompt_card_or_none {
+    () => {
+        None
+    };
+    ([$($pc:literal),* $(,)?]) => {
+        Some(concat!($($pc),*))
+    };
+}
+pub(crate) use opt_prompt_card_or_none;
+
 /// The [`crate::EffectDecl::extra_imports`] table: companion `import` lines a
 /// generated effect's helpers need beyond the fixed eval surface
 /// (`preamble::eval_import_lines`) — `Exec`'s helpers build on `runArgv`
@@ -285,6 +299,7 @@ macro_rules! effect_decl_projection {
         handler $handler:ident,
         req $req:ident,
         decl_fn $decl_fn:ident,
+        $(prompt_card $pc:tt,)?
         $(helpers_row_polymorphic $hrp:tt,)?
         description $desc:tt,
         type_defs $td:tt,
@@ -298,6 +313,7 @@ macro_rules! effect_decl_projection {
             req $req,
             decl_fn $decl_fn,
             type_params [] default_row_args [],
+            $(prompt_card $pc,)?
             $(helpers_row_polymorphic $hrp,)?
             description $desc,
             type_defs $td,
@@ -312,6 +328,7 @@ macro_rules! effect_decl_projection {
         req $req:ident,
         decl_fn $decl_fn:ident,
         type_params $tps:tt default_row_args [$($dra:literal),* $(,)?],
+        $(prompt_card $pc:tt,)?
         $(helpers_row_polymorphic $hrp:tt,)?
         description [$($desc:literal),* $(,)?],
         type_defs [$($td:literal),* $(,)?],
@@ -333,6 +350,7 @@ macro_rules! effect_decl_projection {
             $crate::EffectDecl {
                 type_name: stringify!($eff),
                 description: concat!($($desc),*),
+                prompt_card: crate::effect_defs::opt_prompt_card_or_none!($($pc)?),
                 constructors: &[
                     $( crate::effect_defs::ctor_sig!(
                         { $eff, $tps, $ctor, [ $($ah),* ], $ret $(, errors $everr)? }
@@ -749,6 +767,17 @@ macro_rules! askuser_effect_def {
             handler AskUserHandler,
             req AskUserReq,
             decl_fn askuser_decl,
+            prompt_card [
+                "`choose :: [(Text, a)] -> M a` — labeled decision from (label, value) pairs; ",
+                "ALWAYS prefer it for a decision, the label is the only text the operator sees. ",
+                "`chooseMany :: [(Text, a)] -> M [a]` — pick a subset.\n",
+                "`askUser @T :: M T` — form from a record type's own fields (field names become ",
+                "labels) or a primitive (`Text`/`Int`/`Bool`); a bad submission re-prompts ",
+                "internally, no `Either` to unwrap: `d <- askUser @Deploy`.\n",
+                "`note \"...\" :: M ()` — non-blocking narration to the operator's feed; call it ",
+                "BEFORE presenting a form to explain what you're about to ask and why (it never ",
+                "costs a turn).",
+            ],
             description [
                 "Present a typed form to a HUMAN OPERATOR and block until they submit. ",
                 "`askUser @T` presents a human form and returns `T`. Define `T` using ordinary ",
@@ -952,6 +981,10 @@ macro_rules! finalize_effect_def {
             // that is not answering a typed hole — uninhabited, so such a turn
             // simply has no finalize capability, which is the true statement.
             type_params [v] default_row_args ["NoAnswer"],
+            prompt_card [
+                "`finalize @T value` — commit the typed answer and end this turn; ",
+                "`value` crosses in-heap to the parent `runLLMTurn` hole.",
+            ],
             description [
                 "Terminate the current Agent turn loop and hand a typed value UP to ",
                 "the parent `runLLMTurn` hole, in-heap (no JSON round-trip — the value ",
@@ -1040,6 +1073,13 @@ macro_rules! fork_effect_def {
             handler ForkHandler,
             req ForkReq,
             decl_fn fork_decl,
+            prompt_card [
+                "`fork @T brief :: M T` — delegate to one sub-answerer that answers `brief` ",
+                "on its own.\n",
+                "`forkAll @T briefs :: M [T]` — delegate to one sub-answerer per brief, ",
+                "answered together as a batch `[T]` (`import Tidepool.Fork`). A forked child ",
+                "cannot itself fork.",
+            ],
             description [
                 "Spawn parallel sub-answerers and gather their typed answers. ",
                 "`fork \\@T brief` forks ONE child that answers a single `T`; ",

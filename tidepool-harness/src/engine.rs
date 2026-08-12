@@ -566,20 +566,34 @@ pub fn answerer_hole_card(
          {prompt}\n\n\
          {shape}Answer by evaluating `finalize @{ty} value` in a single \
          ```haskell block — this ends your turn and hands the value back to the \
-         loop.{scope} (To gather operator input first: `choose [(label, value), \
-         ...]` presents labeled options — ALWAYS prefer it for a decision, the \
-         labels are the only question text the operator sees; `chooseMany` for \
-         a subset; `askUser @T` renders a form from a record type's own fields \
-         (field names become the labels) or a primitive (`Text`/`Int`/`Bool`). \
-         Your block is a PROGRAM, not a single question: sequence several \
-         consultations in one `do` block and branch on earlier answers with \
-         ordinary `case`/`if` — each runs without another model round. Plan \
-         the whole consultation up front when the branches are predictable; \
-         end the turn without finalizing only when an answer genuinely needs \
-         fresh judgment. Bind results, then `finalize`. Use `note \"...\"` to \
-         explain what you are about to ask and why, BEFORE presenting a form \
-         — it does not block, so it never costs a turn.)"
+         loop.{scope}"
     )
+}
+
+/// Render the "Available effects" cheatsheet a SYSTEM-level framing folds
+/// over its ACTUAL compiling decl list — the single source for a self-
+/// iterating-harness surface's verb docs, so a row with a different effect
+/// set (more effects, fewer) gets a correspondingly different section with
+/// no separate hand-authored verb table. Each decl contributes its
+/// [`tidepool_mcp::EffectDecl::prompt_card`] (a compact per-turn card:
+/// signatures plus one or two examples) when set, falling back to the full
+/// `description` for a decl that hasn't defined one.
+///
+/// Sent ONCE per node's system framing (not re-derived per hole/round), so
+/// this is the right place for the compact-but-not-terse grain — unlike a
+/// per-hole card, which is re-sent every model round.
+pub fn available_effects_section(decls: &[tidepool_mcp::EffectDecl]) -> String {
+    let cards: Vec<String> = decls
+        .iter()
+        .map(|d| {
+            format!(
+                "- **{}**: {}",
+                d.type_name,
+                d.prompt_card.unwrap_or(d.description)
+            )
+        })
+        .collect();
+    format!("Available effects this turn:\n{}", cards.join("\n"))
 }
 
 // ---------------------------------------------------------------------------
@@ -1562,6 +1576,67 @@ mod tests {
         let table = nullary_sum_table();
         let card = answerer_hole_card("decide", Some("Verdict"), &[], Some(&table));
         assert!(card.contains("Advance | Hold | Abort"), "{card}");
+    }
+
+    /// The per-hole card carries no verb documentation at all — the generated
+    /// Available-effects section moved to SYSTEM-level framing
+    /// ([`crate::selfharness::driver::answerer_framing_suffix`]), sent once
+    /// per loop instead of re-narrated on every hole.
+    #[test]
+    fn answerer_hole_card_carries_no_hand_written_verb_docs() {
+        let table = nullary_sum_table();
+        let card = answerer_hole_card("decide", Some("Verdict"), &[], Some(&table));
+        assert!(
+            !card.contains("choose [(label"),
+            "the per-hole card must not hand-narrate `choose`: {card}"
+        );
+        assert!(
+            !card.contains("Available effects"),
+            "the per-hole card must not carry the generated section: {card}"
+        );
+    }
+
+    /// [`available_effects_section`] folds over the ACTUAL decl list passed
+    /// in — a row with a different effect set yields a correspondingly
+    /// different section, and every decl's `type_name` appears.
+    #[test]
+    fn available_effects_section_reflects_the_actual_decl_row() {
+        let narrow = [tidepool_mcp::askuser_decl()];
+        let wide = [
+            tidepool_mcp::askuser_decl(),
+            tidepool_mcp::fork_decl(),
+            tidepool_mcp::finalize_decl(),
+        ];
+
+        let narrow_section = available_effects_section(&narrow);
+        let wide_section = available_effects_section(&wide);
+
+        assert!(narrow_section.contains("AskUser"));
+        assert!(!narrow_section.contains("Fork"));
+        assert!(!narrow_section.contains("Finalize"));
+        for decl in &wide {
+            assert!(
+                wide_section.contains(decl.type_name),
+                "missing {} in: {wide_section}",
+                decl.type_name
+            );
+        }
+        assert_ne!(
+            narrow_section, wide_section,
+            "a different row must yield a different section"
+        );
+    }
+
+    /// A decl with a `prompt_card` set uses it (not the full `description`
+    /// essay) — the compact-per-turn grain the fold is meant to produce.
+    #[test]
+    fn available_effects_section_prefers_prompt_card_over_description() {
+        let decl = tidepool_mcp::finalize_decl();
+        let card = decl
+            .prompt_card
+            .expect("finalize_decl must set a compact prompt_card");
+        let section = available_effects_section(&[decl]);
+        assert!(section.contains(card), "{section}");
     }
 
     /// Mutation-close the degrade path at the hole-card level: an unsupported

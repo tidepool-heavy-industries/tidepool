@@ -1010,6 +1010,7 @@ mod tests {
                 helpers: &[],
                 type_params: &[],
                 default_row_args: &[],
+                prompt_card: None,
                 helpers_row_polymorphic: false,
             },
             EffectDecl {
@@ -1021,6 +1022,7 @@ mod tests {
                 helpers: &[],
                 type_params: &[],
                 default_row_args: &[],
+                prompt_card: None,
                 helpers_row_polymorphic: false,
             },
             EffectDecl {
@@ -1032,6 +1034,7 @@ mod tests {
                 helpers: &[],
                 type_params: &[],
                 default_row_args: &[],
+                prompt_card: None,
                 helpers_row_polymorphic: false,
             },
         ];

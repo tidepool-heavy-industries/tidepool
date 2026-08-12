@@ -3663,6 +3663,7 @@ mod slim_tests {
                 ],
                 type_params: &[],
                 default_row_args: &[],
+                prompt_card: None,
                 helpers_row_polymorphic: false,
             },
             EffectDecl {
@@ -3674,6 +3675,7 @@ mod slim_tests {
                 helpers: &["kvSet :: Text -> Value -> M ()\nkvSet k v = undefined"],
                 type_params: &[],
                 default_row_args: &[],
+                prompt_card: None,
                 helpers_row_polymorphic: false,
             },
         ]
