@@ -6,13 +6,15 @@ in git history rather than here.
 
 ## Active work
 
-- [One session](one-session.md): **the current line of work.** Collapse the
-  self-harness onto a single resident session (answerer turns run as parked
-  fragments on the outer machine, via the already-landed continuation-parking
-  registry) and fully remove the legacy single-slot suspension path. Endgame:
-  function-valued answers (`runLLMTurn @(State -> State)`) — the finalized
-  closure is born in the loop's own heap. Five phases, decisions locked in the
-  doc; the machine-level substrate is
+- [One session](one-session.md): **Phases 0–5 LANDED (2026-08-14)**; Phase 6
+  (repl/one-shot conversion + slot deletion) is deliberately parked behind
+  the production-soak gate. The self-harness runs collapsed on one resident
+  session: answerer nodes are realms on the outer machine, finalize closures
+  are delivered by `ValueHandle` into the loop's parked continuation, and
+  `runLLMTurn @(State -> State)` works end to end (standing acceptance:
+  `tidepool-harness/tests/selfharness_fn_finalize_spike.rs`; the companion
+  dogfood finalizes edits). Machine lifetime is ceiling-bounded with
+  CI-exercised rotation. Substrate contract (amended):
   [the parking contract](post-restart/realm-lanes/continuation-parking-contract.md).
 - [One-spawn turn protocol](one-spawn-turn-protocol.md) + [Phase B
   contract](one-spawn-turn-protocol-phase-b.md): LANDED, both phases. One

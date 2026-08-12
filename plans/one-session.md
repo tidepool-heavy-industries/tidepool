@@ -1,5 +1,18 @@
 # One session: the self-harness as a single VM
 
+**STATUS (2026-08-14): Phases 0–5 LANDED** — commits 153c955f (P0 machine),
+89cf6da3 (P1 session lane), 11167061 (P2 multi-hole registry), 90b50724 (P3
+the collapse), ab6b1b63 (fn-finalize standing acceptance), c2268375 (P4
+rotation), plus the companion promotion and doc rewrites. **Phase 6
+(repl/one-shot conversion + slot deletion) is PARKED behind the
+production-soak gate** (locked decision 6): the registry path must run the
+live harness before the repl surface converts. Deferred capability work,
+explicitly NOT lost: the outer session's decl plane (`SessionLib`) is still
+`None` — cross-loop LIVING STRUCTURE (helpers/values persisting between
+loops) is designed here but needs that plane installed with the pure-decls
+guards before its acceptance can exist; higher-order FORK answers likewise
+await their test. Both are natural next programs on this substrate.
+
 ## Executive summary
 
 Today, the model that answers the harness's questions runs in a separate
