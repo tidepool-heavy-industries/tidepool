@@ -116,6 +116,10 @@ pub enum Event {
         pre_input_tokens: u64,
         post_input_tokens: u64,
     },
+    /// The operator attached a message to a between-loops continue
+    /// ([`ContinueSignal::ContinueWithInput`]) — their one initiating
+    /// channel; the driver threads it into the next window's framing.
+    OperatorMessage { text: String },
     /// Per-loop-boundary machine instrumentation for the SHARED outer
     /// machine (one-session plan, Phase 4): compiled-fragment count
     /// (monotonic — executable memory is never reclaimed), live session-heap

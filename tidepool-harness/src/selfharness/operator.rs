@@ -56,7 +56,11 @@ pub trait OperatorGate: Send + Sync {
 
     /// BLOCK until the operator advances to the next loop iteration (the
     /// human button-click gate that replaces the stdin between-loops gate).
-    fn await_continue(&self);
+    /// The operator may attach a message — their ONE channel for initiating
+    /// (the model otherwise only hears them through forms it opens itself):
+    /// [`ContinueSignal::ContinueWithInput`] is threaded by the driver into
+    /// the next cognition window's framing as the operator's utterance.
+    fn await_continue(&self) -> ContinueSignal;
 
     /// Post display-only narration (`note`, riding `AskUser`'s `NoteWith`
     /// constructor) to the operator's accumulating feed. Does NOT block —
@@ -79,6 +83,17 @@ pub trait OperatorGate: Send + Sync {
 /// between-loops behavior); `present_form` reads one JSON value per line, so
 /// non-web/CLI drives and tests still work. Used as the
 /// default when no web gate is configured.
+/// How the operator advanced past the between-loops gate: a bare continue,
+/// or a continue CARRYING a message for the next cognition window.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ContinueSignal {
+    /// Advance with nothing to say.
+    Continue,
+    /// Advance AND speak: the text reaches the next window's framing as the
+    /// operator's between-loops utterance.
+    ContinueWithInput(String),
+}
+
 #[derive(Debug, Default)]
 pub struct StdinGate;
 
@@ -93,9 +108,15 @@ impl OperatorGate for StdinGate {
         serde_json::from_str(line.trim()).unwrap_or_else(|_| serde_json::json!({}))
     }
 
-    fn await_continue(&self) {
+    fn await_continue(&self) -> ContinueSignal {
         let mut line = String::new();
         let _ = std::io::stdin().read_line(&mut line);
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            ContinueSignal::Continue
+        } else {
+            ContinueSignal::ContinueWithInput(trimmed.to_string())
+        }
     }
 }
 

@@ -82,6 +82,18 @@ pub const CSS: &str = r#"
 /* Last turn's Haskell — a readable code sheet: preserved line structure,
    soft-wrapped long strings (prompts/notes inside the code would otherwise
    run far off-canvas), hairline frame in the page's print idiom. */
+.continue-input {
+  display: block;
+  width: 100%;
+  margin: var(--unit) 0;
+  padding: var(--unit);
+  border: var(--hair-faint);
+  background: transparent;
+  font: inherit;
+  font-size: var(--text-body);
+  resize: vertical;
+}
+
 .turn-source { margin-top: calc(var(--unit) * 2); }
 .turn-source summary {
   font-size: var(--text-micro);

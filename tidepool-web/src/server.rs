@@ -49,7 +49,7 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde_json::{json, Map, Value as Jv};
 use tidepool_harness::selfharness::operator::{
-    child_path, FormShape, OperatorGate, ROOT_BIND_PATH,
+    child_path, ContinueSignal, FormShape, OperatorGate, ROOT_BIND_PATH,
 };
 use tokio::sync::{broadcast, oneshot};
 
@@ -69,8 +69,12 @@ enum Pending {
         shape: FormShape,
         resolve: oneshot::Sender<Jv>,
     },
-    /// The between-loops gate; `resolve` unparks `await_continue`.
-    Continue { resolve: oneshot::Sender<()> },
+    /// The between-loops gate; `resolve` unparks `await_continue` with the
+    /// operator's [`ContinueSignal`] — a bare advance, or an advance carrying
+    /// their message for the next cognition window.
+    Continue {
+        resolve: oneshot::Sender<ContinueSignal>,
+    },
 }
 
 impl Pending {
@@ -278,12 +282,14 @@ impl OperatorGate for WebGate {
         wait.blocking_recv().unwrap_or_else(|_| json!({}))
     }
 
-    fn await_continue(&self) {
+    fn await_continue(&self) -> ContinueSignal {
         // A loop boundary: the next loop's notes start from an empty feed.
         self.state.clear_notes();
         let (resolve, wait) = oneshot::channel();
         self.state.publish(Pending::Continue { resolve });
-        let _ = wait.blocking_recv();
+        // A dropped sender (superseded interaction) degrades to a bare
+        // continue rather than deadlocking the driver.
+        wait.blocking_recv().unwrap_or(ContinueSignal::Continue)
     }
 
     fn post_note(&self, text: &str) {
@@ -368,11 +374,21 @@ async fn submit(State(st): State<AppState>, body: Option<Json<Jv>>) -> Response 
     }
 }
 
-/// Resolve the between-loops gate. No body — a plain click.
-async fn continue_loop(State(st): State<AppState>) -> Response {
+/// Resolve the between-loops gate. Body optional: `{"input": "..."}` carries
+/// the operator's message into the next cognition window; absent/empty input
+/// is a bare continue (the original no-body click still works).
+async fn continue_loop(State(st): State<AppState>, body: Option<Json<Jv>>) -> Response {
+    let signal = body
+        .and_then(|Json(v)| {
+            v.get("input")
+                .and_then(|i| i.as_str())
+                .map(|t| t.trim().to_string())
+        })
+        .filter(|t| !t.is_empty())
+        .map_or(ContinueSignal::Continue, ContinueSignal::ContinueWithInput);
     match st.take() {
         Pending::Continue { resolve } => {
-            let _ = resolve.send(());
+            let _ = resolve.send(signal);
             Json(json!({"ok": true})).into_response()
         }
         other => {
@@ -572,7 +588,7 @@ mod tests {
             std::thread::yield_now();
         }
         match st.take() {
-            Pending::Continue { resolve } => resolve.send(()).unwrap(),
+            Pending::Continue { resolve } => resolve.send(ContinueSignal::Continue).unwrap(),
             _ => panic!("expected a pending continue"),
         }
         handle.join().unwrap();

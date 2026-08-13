@@ -177,7 +177,9 @@ impl OperatorGate for ScriptedGate {
         }
     }
 
-    fn await_continue(&self) {}
+    fn await_continue(&self) -> tidepool_harness::ContinueSignal {
+        tidepool_harness::ContinueSignal::Continue
+    }
 }
 
 /// A driver-emitted form event, reduced to what this test needs to compare:

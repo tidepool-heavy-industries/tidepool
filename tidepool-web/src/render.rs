@@ -128,14 +128,23 @@ fn form(shape: &FormShape) -> Markup {
     }
 }
 
-/// The between-loops continue gate: a single button POSTing `/continue`.
+/// The between-loops continue gate: an OPTIONAL message plus the advance —
+/// the operator's one channel for initiating (`ContinueSignal`). An empty
+/// box submits as a bare continue; text rides as `{"input": ...}` and
+/// reaches the next cognition window's framing. Rendered as a
+/// `data-on-submit` form so the shared collector gathers the field.
 fn continue_prompt() -> Markup {
     html! {
-        div class="continue" {
+        form class="continue" data-on-submit="@post('/continue')" {
             p class="eyebrow" { "Loop complete — awaiting operator" }
-            button class="btn btn-primary" data-on-click="@post('/continue')" {
-                "Continue"
-            }
+            textarea
+                class="continue-input"
+                data-bind="input"
+                data-kind="string"
+                rows="3"
+                placeholder="Say something to the companion (optional) — it arrives with the next window"
+            {}
+            button type="submit" class="btn btn-primary" { "Continue" }
         }
     }
 }

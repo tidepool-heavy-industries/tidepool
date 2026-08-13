@@ -282,6 +282,19 @@ fn answerer_framing_suffix() -> String {
          expression of type `M a`. A value you bind with `x <- …` persists into your \
          NEXT turn like GHCi, so you can branch on it.\n\
          \n\
+         YOUR WINDOW'S MECHANICS: you have up to {} model rounds in this cognition \
+         window before you must finalize (a reminder arrives at round {}). Rounds \
+         accumulate: bindings and `let` helpers from earlier rounds stay in scope. \
+         A block that is ONLY top-level declarations (type signatures, function \
+         definitions, data types) is a DEFINE round — those declarations go onto \
+         your session's decl plane and persist BEYOND this window, across every \
+         future one: your growing library. Define what you will want again.\n\
+         \n\
+         THE OPERATOR CANNOT INITIATE: they see your notes and the forms you \
+         present, and between windows they may attach a message that arrives in \
+         your framing. If you want their input NOW, present a form (`askUser`/\
+         `choose`); silence from them mid-window is structural, not meaningful.\n\
+         \n\
          {}\n\
          \n\
          Your block is a PROGRAM, not a single question: sequence several \
@@ -295,6 +308,8 @@ fn answerer_framing_suffix() -> String {
          ends your turn and hands the typed value back to the loop. `T` is the type \
          named in the request. Do not call any other effect to answer; `finalize` is \
          how you resolve the request.",
+        ANSWERER_MAX_ROUNDS,
+        ANSWERER_NUDGE_ROUNDS,
         engine::available_effects_section(&answerer_decls())
     )
 }
@@ -330,6 +345,10 @@ pub struct SelfHarnessDriver {
     /// once in the next render (legible loss, one-session plan Phase 4),
     /// then cleared.
     last_rotation_losses: Option<Vec<String>>,
+    /// The operator's between-loops message ([`ContinueSignal::ContinueWithInput`]),
+    /// threaded into the NEXT cognition window's framing as their utterance,
+    /// then cleared. Their one channel for initiating.
+    pending_operator_input: Option<String>,
     /// The nested multi-node orchestrator that answers a `runLLMTurn` hole
     /// by driving an Agent turn loop (`run_to_hole_or_done`) to a
     /// `finalize`. Shared, not owned exclusively, so a future GUI/inspector
@@ -436,6 +455,7 @@ impl SelfHarnessDriver {
             outer: None,
             iteration_realm: 0,
             last_rotation_losses: None,
+            pending_operator_input: None,
             agent,
             lifecycle: SelfHarnessState::Idle,
             observer,
@@ -1235,7 +1255,11 @@ impl SelfHarnessDriver {
         // park under `block_in_place` so that blocking wait yields the tokio
         // worker to other tasks instead of stalling it.
         let gate = Arc::clone(&self.gate);
-        tokio::task::block_in_place(move || gate.await_continue());
+        let signal = tokio::task::block_in_place(move || gate.await_continue());
+        if let crate::selfharness::operator::ContinueSignal::ContinueWithInput(text) = signal {
+            self.emit(Event::OperatorMessage { text: text.clone() });
+            self.pending_operator_input = Some(text);
+        }
         Ok(())
     }
 
@@ -2163,6 +2187,10 @@ impl SelfHarnessDriver {
             framing.push_str(summary);
         }
         framing.push_str(&format!("\n\nLoop count so far: {}.", self.iteration));
+        if let Some(msg) = self.pending_operator_input.take() {
+            framing.push_str("\n\nTHE OPERATOR SAID (between loops, addressed to you): ");
+            framing.push_str(&msg);
+        }
         if let Some(lost) = self.last_rotation_losses.take() {
             framing.push_str(
                 "\n\nNOTE: the resident machine was rotated (bounded-lifetime \

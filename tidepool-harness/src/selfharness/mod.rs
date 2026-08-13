@@ -42,6 +42,6 @@ pub use driver::{answerer_decls, DriverError, SelfHarnessDriver};
 pub use harness_source::{load_harness_source, HarnessSource, HarnessSourceError};
 pub use lifecycle::SelfHarnessState;
 pub use observer::{Event, LogObserver, Observer};
-pub use operator::{OperatorGate, StdinGate};
+pub use operator::{ContinueSignal, OperatorGate, StdinGate};
 pub use persistence::{Checkpoint, JsonlObserver, PersistenceError};
 pub use state_cross::{state_in, state_out};
