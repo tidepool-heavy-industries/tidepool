@@ -67,6 +67,28 @@ pub fn state_out(value: &Value, table: &DataConTable) -> Json {
     tidepool_runtime::value_to_json(value, table, 0)
 }
 
+/// Inbound sibling of [`state_in`] for the operator's between-loops message
+/// (companion State v2): splice `__operatorMsg :: Maybe Text` so the AUTHORED
+/// loop can ingest the message as durable, provenance-tagged memory —
+/// neither hidden harness machinery nor model transcription; the ingestion
+/// is a reviewable line in the harness source. A harness whose loop ignores
+/// `__operatorMsg` compiles with an unused-binding warning at most (the
+/// message still reaches the model via the framing line either way).
+pub fn operator_msg_in(msg: Option<&str>) -> String {
+    match msg {
+        None => "__operatorMsg :: Maybe Text
+__operatorMsg = Nothing
+"
+        .to_string(),
+        Some(text) => format!(
+            "__operatorMsg :: Maybe Text
+__operatorMsg = Just {}
+",
+            haskell_string_literal(text)
+        ),
+    }
+}
+
 /// Inbound: splice the prior loop's `State` JSON as a Haskell source
 /// fragment declaring `__selfHarnessState :: Loaded.State`, decoded via
 /// `Aeson.eitherDecode` against the author's `FromJSON State` instance — the

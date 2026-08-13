@@ -1,6 +1,6 @@
 //! Structural proof of the harness/agent effect-stack split: the OUTER
 //! self-iterating-harness session compiles against `Eff '[RunLLMTurn, AskUser]`
-//! and the nested ANSWERER turn compiles against `Eff '[AskUser, Fork,
+//! and the nested ANSWERER turn compiles against `Eff '[AskUser, Fork, ReadState,
 //! Finalize]` ([`answerer_decls`]) — disjoint ROWS (`Fork`/`AskUser` are
 //! answerer-only; `RunLLMTurn`/`Ask` are not in the answerer's row), not a
 //! single shared stack pinned by convention. `type M` is built from a
@@ -95,7 +95,7 @@ fn compile_pinned(
 }
 
 /// THE answerer-side structural guarantee (extract-wave item 0b): `runLLMTurn
-/// @T` does NOT typecheck against the answerer's `Eff '[AskUser, Fork,
+/// @T` does NOT typecheck against the answerer's `Eff '[AskUser, Fork, ReadState,
 /// Finalize]` ROW — `RunLLMTurn` is not in it. But `RunLLMTurn` IS in the
 /// answerer compile's VOCABULARY now (nameable everywhere), so the failure
 /// mode changed: it is no longer "not in scope" (undeclared) but a `Member`
@@ -112,7 +112,7 @@ fn run_llm_turn_is_a_member_error_not_a_scope_error_in_the_answerer_stack() {
     let result = compile_against(answerer_decls(), "(runLLMTurn @Int \"go\" :: M Int)", "");
     let err = match result {
         Ok(_) => panic!(
-            "runLLMTurn compiled against the answerer stack '[AskUser, Fork, Finalize] \
+            "runLLMTurn compiled against the answerer stack '[AskUser, Fork, ReadState, Finalize] \
              — RunLLMTurn must not be IN THE ROW there (the answerer forks, it does not \
              suspend an in-context model turn)"
         ),
@@ -228,7 +228,7 @@ fn askuser_raw_compiles_in_the_answerer_stack() {
     assert!(
         result.is_ok(),
         "askUserRaw (an AskUser verb) must compile against the answerer stack \
-         '[AskUser, Fork, Finalize] (AskUser is in the row), got:\n{:?}",
+         '[AskUser, Fork, ReadState, Finalize] (AskUser is in the row), got:\n{:?}",
         result.err()
     );
 }
@@ -256,7 +256,7 @@ fn fork_all_compiles_in_the_answerer_stack() {
 }
 
 /// The general Agent's `Ask` effect verb — `ask` — does NOT typecheck against
-/// the answerer's `Eff '[AskUser, Fork, Finalize]` stack: `Ask` is a
+/// the answerer's `Eff '[AskUser, Fork, ReadState, Finalize]` stack: `Ask` is a
 /// DIFFERENT effect (still present on the general Agent stack, suspending to
 /// the calling LLM agent) and is not declared in this narrower compile at all.
 /// A base effect (`Fs`/`Exec`/…) is rejected the same way — none are in the
@@ -268,7 +268,7 @@ fn ask_is_a_compile_error_in_the_answerer_stack() {
     let result = compile_against(answerer_decls(), "(ask SStr \"x\" :: M Value)", "");
     let err = match result {
         Ok(_) => panic!(
-            "ask compiled against the answerer stack '[AskUser, Fork, Finalize] \
+            "ask compiled against the answerer stack '[AskUser, Fork, ReadState, Finalize] \
              — the structural scoping is BROKEN (Ask must be undeclared there)"
         ),
         Err(e) => e.to_string(),
@@ -282,7 +282,7 @@ fn ask_is_a_compile_error_in_the_answerer_stack() {
 /// The capability boundary proper: a BASE effect verb (`httpGet`, the `Http`
 /// effect — representative of the nine base effects the answerer row drops:
 /// `Console`/`KV`/`Fs`/`Lsp`/`Http`/`Exec`/`Git`/`Time`/`Llm`) does NOT
-/// typecheck against `Eff '[AskUser, Fork, Finalize]`. This is the whole
+/// typecheck against `Eff '[AskUser, Fork, ReadState, Finalize]`. This is the whole
 /// point of the scoped stack — the answerer structurally cannot hit the
 /// network, run a shell command, or read files, because those verbs are
 /// UNDECLARED in its compile, not merely unreachable.
@@ -294,7 +294,7 @@ fn base_effect_is_a_compile_error_in_the_answerer_stack() {
     let err = match result {
         Ok(_) => panic!(
             "httpGet (a base Http effect) compiled against the answerer stack \
-             '[AskUser, Fork, Finalize] — the capability boundary is BROKEN \
+             '[AskUser, Fork, ReadState, Finalize] — the capability boundary is BROKEN \
              (base effects must be undeclared there)"
         ),
         Err(e) => e.to_string(),

@@ -63,7 +63,7 @@ pub struct HarnessSource {
     /// modules `path` itself imports (see [`answerer_imports`]).
     ///
     /// Never [`Self::module_name`] itself: the harness module defines `loop`,
-    /// whose `runLLMTurn` does not exist on the answerer's `[AskUser, Fork,
+    /// whose `runLLMTurn` does not exist on the answerer's `[AskUser, Fork, ReadState,
     /// Finalize]` row, and GHC compiles an imported module whole — importing it
     /// would fail the answerer's turn outright. The harness/agent split exists
     /// precisely so the author's TYPES carry no `runLLMTurn` dependency and can

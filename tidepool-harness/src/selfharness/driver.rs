@@ -185,7 +185,7 @@ fn outer_decls() -> Vec<tidepool_mcp::EffectDecl> {
     ]
 }
 
-/// The nested answerer Agent's scoped decl row: `[AskUser, Fork, Finalize]`.
+/// The nested answerer Agent's scoped decl row: `[AskUser, Fork, ReadState, Finalize]`.
 /// It declares no base effects (`Console`/`KV`/`Fs`/`Lsp`/`Http`/`Exec`/`Git`/
 /// `Time`/`Meta`) and no `RunLLMTurn`/`Ask`, so an answerer turn compiles
 /// against a `Tidepool.Effects` that never defines those verbs — the answerer
@@ -204,6 +204,7 @@ pub fn answerer_decls() -> Vec<tidepool_mcp::EffectDecl> {
     vec![
         tidepool_mcp::askuser_decl(),
         tidepool_mcp::fork_decl(),
+        tidepool_mcp::readstate_decl(),
         tidepool_mcp::finalize_decl(),
     ]
 }
@@ -360,6 +361,12 @@ pub struct SelfHarnessDriver {
     /// threaded into the NEXT cognition window's framing as their utterance,
     /// then cleared. Their one channel for initiating.
     pending_operator_input: Option<String>,
+    /// The current cycle's ENTRY state (what `getStateJson` serves): durable
+    /// state as of the window's start — this window's edit and operator
+    /// ingestion are deliberately not in it (documented semantics of the
+    /// ReadState effect). `None` on the very first cycle (initialState —
+    /// served as JSON `null`, which the authored `getStateJson` docs cover).
+    cycle_state_json: Option<Json>,
     /// The nested multi-node orchestrator that answers a `runLLMTurn` hole
     /// by driving an Agent turn loop (`run_to_hole_or_done`) to a
     /// `finalize`. Shared, not owned exclusively, so a future GUI/inspector
@@ -467,6 +474,7 @@ impl SelfHarnessDriver {
             iteration_realm: 0,
             last_rotation_losses: None,
             pending_operator_input: None,
+            cycle_state_json: None,
             agent,
             lifecycle: SelfHarnessState::Idle,
             observer,
@@ -896,7 +904,11 @@ impl SelfHarnessDriver {
         let extract_bin = outer.cfg.extract_bin.clone();
         let include = outer.cfg.include.clone();
 
-        let helpers = state_cross::state_in(prior_state);
+        let helpers = format!(
+            "{}{}",
+            state_cross::state_in(prior_state),
+            state_cross::operator_msg_in(self.pending_operator_input.as_deref())
+        );
         let render_code = format!(
             "pure ({q}.render __selfHarnessState)",
             q = state_cross::LOADED_QUALIFIER
@@ -1301,6 +1313,7 @@ impl SelfHarnessDriver {
     ) -> Result<(Value, DataConTable), DriverError> {
         self.loop_inference_calls = 0;
         self.cycle_compaction = None;
+        self.cycle_state_json = prior_state.cloned();
 
         // Create the ONE render-seeded answerer session for this whole
         // loop, up front — every `runLLMTurn` hole pushes onto it, so hole #2
@@ -1358,7 +1371,11 @@ impl SelfHarnessDriver {
         let compiled = match precompiled {
             Some(compiled) => compiled,
             None => {
-                let helpers = state_cross::state_in(prior_state);
+                let helpers = format!(
+                    "{}{}",
+                    state_cross::state_in(prior_state),
+                    state_cross::operator_msg_in(self.pending_operator_input.as_deref())
+                );
                 let code = format!("{}.loop __selfHarnessState", state_cross::LOADED_QUALIFIER);
                 self.compile_outer(&code, &helpers, "loop")?
             }
@@ -1652,7 +1669,7 @@ impl SelfHarnessDriver {
                     // read `note "..." >> choose [...]`, so the FIRST classified
                     // hole here is routinely `Note`, not the thing that follows
                     // it. Any OTHER suspension is a hard error: the scoped
-                    // answerer stack (`[AskUser, Fork, Finalize]`) can reach
+                    // answerer stack (`[AskUser, Fork, ReadState, Finalize]`) can reach
                     // nothing else, and this driver has no operator for it.
                     let TurnOutcome::Suspended { hole, classified } = out else {
                         unreachable!("matched TurnOutcome::Suspended above");
@@ -2015,8 +2032,19 @@ impl SelfHarnessDriver {
         mut hole: String,
         mut classified: ClassifiedHole,
     ) -> Result<Option<(String, ClassifiedHole)>, DriverError> {
-        while let HoleRouting::Note { text } = classified.routing.clone() {
-            self.service_note_hole(node, &text).await?;
+        loop {
+            match classified.routing.clone() {
+                HoleRouting::Note { text } => {
+                    self.service_note_hole(node, &text).await?;
+                }
+                HoleRouting::ReadState => {
+                    // Immediate resume with the cycle's entry state — no
+                    // operator, no model round (note's service shape).
+                    let state = self.cycle_state_json.clone().unwrap_or(Json::Null);
+                    self.agent.answer_dialog(node, state).await?;
+                }
+                _ => break,
+            }
             match self.agent.pending_hole_full(node) {
                 Some((next_hole, next_classified, _table)) => {
                     hole = next_hole.0;

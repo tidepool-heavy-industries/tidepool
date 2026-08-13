@@ -318,7 +318,7 @@ enum NodeSeed {
 /// (`Fork`/`RunLLMTurn`). A child keeps everything else it needs to compute its
 /// answer (base effects, `AskUser`, `Finalize`) but literally cannot name
 /// `fork`/`forkAll`/`runLLMTurn` — depth-one is structural, not a runtime
-/// guard. For the answerer (`[AskUser, Fork, Finalize]`) this yields the leaf
+/// guard. For the answerer (`[AskUser, Fork, ReadState, Finalize]`) this yields the leaf
 /// `[AskUser, Finalize]`.
 fn fork_child_decls(parent: &[tidepool_mcp::EffectDecl]) -> Vec<tidepool_mcp::EffectDecl> {
     parent
@@ -496,7 +496,7 @@ pub struct Harness {
     /// row minus the fork-spawning effects (`Fork`/`RunLLMTurn`), so a child
     /// structurally cannot fork — a `forkAll` in a child block is a GHC
     /// "not in scope" error, not a runtime `ChildSuspended`. For the answerer
-    /// (`[AskUser, Fork, Finalize]`) this is the leaf `[AskUser, Finalize]`.
+    /// (`[AskUser, Fork, ReadState, Finalize]`) this is the leaf `[AskUser, Finalize]`.
     /// The child's answer still runs via `run_child` against the PARENT's
     /// session (a pure `resume expr` value crossing), so the leaf row only
     /// scopes what the child can NAME, not where its value lands.
@@ -2409,7 +2409,7 @@ impl Harness {
             .and_then(|c| c.pending.clone())
             .ok_or(HarnessError::NotSuspended(node))?;
         match &pending.classified.routing {
-            HoleRouting::Ask { .. } | HoleRouting::AskUser { .. } => {}
+            HoleRouting::Ask { .. } | HoleRouting::AskUser { .. } | HoleRouting::ReadState => {}
             other => {
                 return Err(HarnessError::RoutingMismatch {
                     node,

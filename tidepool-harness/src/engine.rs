@@ -89,6 +89,12 @@ pub enum HoleRouting {
     /// `ASKUSER_MAX_REPROMPTS` (that budget is scoped to `askUser`
     /// re-presentations, a genuinely different failure mode).
     Note { text: String },
+
+    /// A `getStateJson` suspension (`ReadStateWith`) — the answerer reading
+    /// the loop's durable state. Serviced IMMEDIATELY by the driver with the
+    /// cycle's entry state as JSON (note's service shape: no operator, no
+    /// model round).
+    ReadState,
     /// `finalize @T x` — an Agent turn hands a
     /// typed value UP to the parent `runLLMTurn` hole and TERMINATES its own
     /// turn loop, rather than resuming in context like [`HoleRouting::RunLLMTurn`]
@@ -201,6 +207,10 @@ pub fn classify_hole(request: &Value, table: &DataConTable, asks: &AsksSidecar) 
                     prompt,
                 }
             }
+        },
+        Some("ReadStateWith") => ClassifiedHole {
+            routing: HoleRouting::ReadState,
+            prompt: String::new(),
         },
         Some("NoteWith") => {
             let text = decode_note_text(request, table);
@@ -776,7 +786,7 @@ fn agent_decls() -> Vec<tidepool_mcp::EffectDecl> {
 /// (`EffectDecl::helpers_row_polymorphic`), so this only ever makes
 /// `runLLMTurn`/`RunLLMTurn` NAMEABLE — never adds it to `type M` — and
 /// `Member RunLLMTurn effs` still fails loudly at any call site whose actual
-/// row (`decls`) doesn't carry it, e.g. the answerer's `[AskUser, Fork,
+/// row (`decls`) doesn't carry it, e.g. the answerer's `[AskUser, Fork, ReadState,
 /// Finalize]`.
 ///
 /// A no-op, returning `decls` unchanged, whenever `RunLLMTurn` is already in

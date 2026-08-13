@@ -200,7 +200,7 @@ harness-generated only (`forcing.rs::derive_teaser`).
 ## Self-iterating harness — the answerer row + the `AskUser` operator gate
 
 The self-iterating harness's answerer Agent (`selfharness::driver::answerer_decls`)
-compiles against `Eff '[AskUser, Fork, Finalize]` — decl-only effects, disjoint
+compiles against `Eff '[AskUser, Fork, ReadState, Finalize]` — decl-only effects, disjoint
 from the general Agent stack's `standard_decls()` (which keeps `Ask`,
 `RunLLMTurn`, and every base effect untouched; `AskUser` never appears
 there). `AskUser` (`tidepool_mcp::askuser_decl`) is a brand-new effect, not a
@@ -237,6 +237,17 @@ appear (the nested answerer, the AUTHORED outer loop, and interleaved
 mid-chain in either) — never counted against `ASKUSER_MAX_REPROMPTS`, since
 nothing here waits on a human to spin.
 
+`ReadState` (`tidepool_mcp::readstate_decl`, answerer row only) is the
+agent-computes-over-its-own-state effect from `plans/companion-state-v2.md`:
+`getStateJson :: M Value` suspends on `ReadStateWith`, routed by constructor
+name into `HoleRouting::ReadState` and serviced note-style — the driver
+resumes IMMEDIATELY with the loop's current state JSON
+(`SelfHarnessDriver.cycle_state_json`, the same JSON the checkpoint holds; no
+operator, no model round, never counted against any cap). Freshness is
+trivially correct because state changes only at loop boundaries — every
+window in a loop reads the state that loop started with. A driver context
+with no cycle state (the general Agent path) resumes with JSON `null`.
+
 ### The answer contract — `finalize` is pinned by the ROW
 
 An answerer turn does not compile against a polymorphic `finalize`. While a
@@ -248,10 +259,10 @@ is reused across holes whose types differ), and its turns compile with:
   type-indexed — `data Finalize v a where FinalizeWith :: Int -> v -> Finalize
   v a`, `finalize :: forall v a effs. Member (Finalize v) effs => v -> Eff effs
   a` — so a turn answering a `Decision` hole compiles against `'[AskUser, Fork,
-  Finalize Decision]` and `Member (Finalize Decision)` IS the pin. Canonical
+  ReadState, Finalize Decision]` and `Member (Finalize Decision)` IS the pin. Canonical
   freer-simple, the same shape as `State s`. A wrong-typed answer is an
   ordinary GHC error naming the row (`'Finalize Text' is not a member of the
-  type-level list '[AskUser, Fork, Finalize Decision]'`), which the
+  type-level list '[AskUser, Fork, ReadState, Finalize Decision]'`), which the
   corrective-retry loop feeds back. Nothing is shimmed, hidden, or
   qualified-aliased: the turn uses the ordinary `build_preamble`.
 

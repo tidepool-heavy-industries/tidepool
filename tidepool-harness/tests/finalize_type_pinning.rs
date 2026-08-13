@@ -45,7 +45,7 @@ fn repo_root() -> std::path::PathBuf {
         .to_path_buf()
 }
 
-/// The answerer's real compile setup: its scoped `[AskUser, Fork, Finalize]`
+/// The answerer's real compile setup: its scoped `[AskUser, Fork, ReadState, Finalize]`
 /// row plus `examples/harness` on the include path, so `HarnessTypes` (and its
 /// `Decision`) resolves — exactly what `tidepool-selfharness` wires.
 fn answerer_cfg() -> EngineConfig {

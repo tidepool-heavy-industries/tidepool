@@ -285,6 +285,10 @@ crate::ask_effect_def!(crate::effect_defs::effect_decl_projection);
 // is generated from the single-source definition (`effect_defs.rs`).
 crate::askuser_effect_def!(crate::effect_defs::effect_decl_projection);
 
+// ReadState effect (companion State v2, answerer-only): `readstate_decl()` —
+// the driver-serviced read of the loop's durable state.
+crate::readstate_effect_def!(crate::effect_defs::effect_decl_projection);
+
 // RunLLMTurn effect (self-iterating-harness WS-B, split out of Ask):
 // `runllmturn_decl()` is generated from the single-source definition
 // (`effect_defs.rs`).

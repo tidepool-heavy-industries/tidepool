@@ -818,6 +818,52 @@ macro_rules! askuser_effect_def {
     };
 }
 
+/// ReadState effect — single definition. Decl-only (no `tidepool-handlers`
+/// handler, same convention as `askuser_effect_def!`): the self-iterating
+/// harness DRIVER services it — classify by constructor name, resume
+/// IMMEDIATELY with the loop's durable state as JSON (`note`'s service
+/// shape: no operator, no model round). Companion State v2
+/// (`plans/companion-state-v2.md`): the agent computes over its own state —
+/// filtering, archive search, counting — instead of reading only `render`'s
+/// prose projection.
+#[macro_export]
+macro_rules! readstate_effect_def {
+    ($project:path) => {
+        $project! {
+            effect ReadState,
+            handler ReadStateHandler,
+            req ReadStateReq,
+            decl_fn readstate_decl,
+            prompt_card [
+                "`getStateJson :: M Value` — the loop's durable State as JSON, ",
+                "immediately (no operator, no model round), as of this window's START ",
+                "(this window's edit and any operator message being ingested are not in ",
+                "it yet). Query with optics (`v ^? key \"memories\" . _Array`) or decode ",
+                "the typed spine: `Aeson.fromJSON v :: Aeson.Result State`.",
+            ],
+            description [
+                "Read the loop's durable State — the same value the framing renders a ",
+                "SELECTION of — as JSON, immediately. `getStateJson :: M Value` returns ",
+                "the state as of this cognition window's start; the current window's ",
+                "edit (and any operator message being ingested this window) are not yet ",
+                "in it. Use optics for ad-hoc queries, or decode the typed spine with ",
+                "`Aeson.fromJSON` and compute over memories, threads, and scratch with ",
+                "ordinary Haskell — filter the archive, search, count, join.",
+            ],
+            type_defs [],
+            verbs [
+                { ctor ReadStateWith, method read_state_with,
+                  args { },
+                  ret "Value" },
+            ],
+            helpers [
+                { raw ["getStateJson :: M Value",
+                       "getStateJson = send ReadStateWith"] },
+            ],
+        }
+    };
+}
+
 /// RunLLMTurn effect — single definition.
 ///
 /// Separate from [`ask_effect_def!`]: `runLLMTurn`/`runLLMTurnFork`/

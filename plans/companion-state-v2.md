@@ -126,9 +126,14 @@ loop st = do
 ```
 
 - `__operatorMsg :: Maybe Text` — a driver splice beside `__selfHarnessState`
-  (small driver change): the operator's between-loops message enters memory as
-  a provenance-tagged `Quote`, written by authored code — neither hidden
-  harness machinery nor model transcription.
+  (small driver change). **v2.0 DEVIATION (implementation finding):** the
+  splice lands in the turn wrapper module, which the authored `loop` cannot
+  see without changing the shared `loop_code` for every harness — so
+  authored-loop ingestion is deferred. v2.0 ingestion is MODEL-side, now that
+  it is one combinator call (`remember FromOperator (Quote FromOperator
+  ...)`) rather than prose transcription; the prompt teaches it. The splice
+  ships anyway (harmless, available); a follow-up may add an optional
+  harness-exported ingestion hook the driver detects.
 - `tick` bumps `loopN`.
 - `retention` hard-drops `Retired` entries older than K loops (the state JSON
   re-splices into every loop compile; growth must be bounded). K authored,
