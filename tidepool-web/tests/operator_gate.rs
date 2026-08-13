@@ -123,7 +123,51 @@ async fn continue_resolves_await_continue() {
     let v: Value = resp.json().await.unwrap();
     assert_eq!(v, json!({"ok": true}));
 
-    handle.await.unwrap();
+    assert_eq!(
+        handle.await.unwrap(),
+        tidepool_harness::ContinueSignal::Continue,
+        "a bodiless click is a bare continue"
+    );
+}
+
+/// The continue gate is the `ContinueSignal` SUM rendered through the
+/// generic machinery: the page carries both variants' radio options and the
+/// payload branch's text field; a flat tagged submission reassembles into
+/// `ContinueWithInput` and reaches `await_continue`.
+#[tokio::test(flavor = "multi_thread")]
+async fn continue_with_input_carries_the_operator_message() {
+    let (addr, state) = boot().await;
+    let base = format!("http://{addr}");
+    let client = Client::new();
+
+    let gate = Arc::new(WebGate::new(state));
+    let driver_gate = gate.clone();
+    let handle = tokio::task::spawn_blocking(move || driver_gate.await_continue());
+
+    let html = wait_for(&client, &format!("{base}/"), |b| {
+        b.contains("@post('/continue')")
+    })
+    .await;
+    // Both variants render (the sum form, not a bespoke pane).
+    assert!(html.contains(r#"value="Continue""#));
+    assert!(html.contains(r#"value="ContinueWithInput""#));
+
+    let resp = client
+        .post(format!("{base}/continue"))
+        .json(&json!({
+            "answer": "ContinueWithInput",
+            "answer.ContinueWithInput.input": "hello companion",
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    assert_eq!(
+        handle.await.unwrap(),
+        tidepool_harness::ContinueSignal::ContinueWithInput("hello companion".to_string()),
+        "the chosen payload variant's field reaches await_continue"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]

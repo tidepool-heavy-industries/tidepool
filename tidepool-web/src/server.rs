@@ -374,18 +374,34 @@ async fn submit(State(st): State<AppState>, body: Option<Json<Jv>>) -> Response 
     }
 }
 
-/// Resolve the between-loops gate. Body optional: `{"input": "..."}` carries
-/// the operator's message into the next cognition window; absent/empty input
-/// is a bare continue (the original no-body click still works).
+/// Resolve the between-loops gate. The body is the [`render::continue_shape`]
+/// sum's flat submission, reassembled by the SAME machinery as `/submit`
+/// (one presentation algebra end to end): `{"tag": "Continue"}` or
+/// `{"tag": "ContinueWithInput", "input": ...}`. An absent/empty/unshaped
+/// body degrades to a bare continue — the no-body click (and every existing
+/// test/curl) still works, and a chosen-but-empty message is a bare
+/// continue too.
 async fn continue_loop(State(st): State<AppState>, body: Option<Json<Jv>>) -> Response {
     let signal = body
-        .and_then(|Json(v)| {
-            v.get("input")
-                .and_then(|i| i.as_str())
-                .map(|t| t.trim().to_string())
+        .and_then(|Json(v)| match v {
+            Jv::Object(submission) => {
+                Some(answer_value(&crate::render::continue_shape(), submission))
+            }
+            _ => None,
         })
-        .filter(|t| !t.is_empty())
-        .map_or(ContinueSignal::Continue, ContinueSignal::ContinueWithInput);
+        .and_then(|answer| {
+            let tag = answer.get("tag")?.as_str()?.to_string();
+            match tag.as_str() {
+                "ContinueWithInput" => answer
+                    .get("input")
+                    .and_then(|i| i.as_str())
+                    .map(|t| t.trim().to_string())
+                    .filter(|t| !t.is_empty())
+                    .map(ContinueSignal::ContinueWithInput),
+                _ => Some(ContinueSignal::Continue),
+            }
+        })
+        .unwrap_or(ContinueSignal::Continue);
     match st.take() {
         Pending::Continue { resolve } => {
             let _ = resolve.send(signal);

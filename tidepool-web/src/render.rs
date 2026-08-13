@@ -128,22 +128,47 @@ fn form(shape: &FormShape) -> Markup {
     }
 }
 
-/// The between-loops continue gate: an OPTIONAL message plus the advance —
-/// the operator's one channel for initiating (`ContinueSignal`). An empty
-/// box submits as a bare continue; text rides as `{"input": ...}` and
-/// reaches the next cognition window's framing. Rendered as a
-/// `data-on-submit` form so the shared collector gathers the field.
+/// The [`ContinueSignal`] sum's own [`FormShape`] — the between-loops gate
+/// rendered and reassembled through the SAME generic sum machinery as every
+/// `askUser` form (one presentation algebra, no bespoke pane): two variants
+/// with different subfields, radio-picked, the payload branch revealing its
+/// text field. Shared with `server::continue_loop`'s reassembly so render
+/// and decode cannot drift. Adding a variant here (and an arm to the
+/// server's mapping) is the WHOLE cost of a new between-loops action.
+pub fn continue_shape() -> FormShape {
+    FormShape::Sum {
+        type_key: "ContinueSignal".to_string(),
+        variants: vec![
+            VariantShape {
+                constructor: "Continue".to_string(),
+                shape: FormShape::Product {
+                    type_key: "ContinueSignal".to_string(),
+                    constructor: "Continue".to_string(),
+                    fields: vec![],
+                },
+            },
+            VariantShape {
+                constructor: "ContinueWithInput".to_string(),
+                shape: FormShape::Product {
+                    type_key: "ContinueSignal".to_string(),
+                    constructor: "ContinueWithInput".to_string(),
+                    fields: vec![FieldShape {
+                        key: "input".to_string(),
+                        shape: FormShape::String,
+                    }],
+                },
+            },
+        ],
+    }
+}
+
+/// The between-loops continue gate: the [`continue_shape`] sum rendered by
+/// the generic machinery, POSTing to `/continue` instead of `/submit`.
 fn continue_prompt() -> Markup {
     html! {
         form class="continue" data-on-submit="@post('/continue')" {
             p class="eyebrow" { "Loop complete — awaiting operator" }
-            textarea
-                class="continue-input"
-                data-bind="input"
-                data-kind="string"
-                rows="3"
-                placeholder="Say something to the companion (optional) — it arrives with the next window"
-            {}
+            (generic_shape(ROOT_BIND_PATH, &continue_shape()))
             button type="submit" class="btn btn-primary" { "Continue" }
         }
     }
