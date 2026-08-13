@@ -314,6 +314,17 @@ fn answerer_framing_suffix() -> String {
     )
 }
 
+/// A compound answer type, parenthesized for splicing after `@` in prompt
+/// text — `finalize @State -> State` is ill-typed ADVICE; `finalize
+/// @(State -> State)` is what compiles.
+fn display_ty(ty_label: &str) -> String {
+    if ty_label.contains(' ') {
+        format!("({ty_label})")
+    } else {
+        ty_label.to_string()
+    }
+}
+
 fn turn_outcome_tag(o: &TurnOutcome) -> &'static str {
     match o {
         TurnOutcome::Completed { .. } => "Completed",
@@ -1586,9 +1597,9 @@ impl SelfHarnessDriver {
                 self.agent.push_user_turn(
                     node,
                     &format!(
-                        "You are approaching the maximum number of tool calls for this \
-                         request. Finalize now: evaluate `finalize @{ty_label} (value :: \
-                         {ty_label})` with your best answer."
+                        "You are approaching this window's round limit. Finalize now: \
+                         evaluate `finalize @{} value` with your best answer.",
+                        display_ty(ty_label)
                     ),
                 )?;
                 nudged = true;
@@ -1724,25 +1735,34 @@ impl SelfHarnessDriver {
                 // same accumulating node keeps driving toward `finalize` (a
                 // wasted round, already counted).
                 Ok(TurnOutcome::Completed { .. }) => {
+                    // A completed non-finalize round is a VALID explore/define
+                    // round, not a failure — the window is multi-round by
+                    // design, and scolding here taught the model that only
+                    // `finalize` is admitted (companion dogfood, 2026-08-13:
+                    // it reported exactly that, accurately). Acknowledge and
+                    // keep the request standing.
                     self.agent.reopen_node(node)?;
+                    let ty_disp = display_ty(ty_label);
                     self.agent.push_user_turn(
                         node,
                         &format!(
-                            "That did not resolve the request. Answer by evaluating \
-                             `(finalize @{ty_label} value :: M {ty_label})` — the whole \
-                             expression must carry the type annotation, not just the \
-                             argument."
+                            "Round complete — your window continues, and that round's \
+                             definitions/bindings persist. The request still awaits its \
+                             answer: when ready, evaluate `finalize @{ty_disp} value` \
+                             (that ends the window)."
                         ),
                     )?;
                 }
                 // An empty turn (no haskell block): the node is still `Running`
                 // (no block ran), so no reopen — just re-prompt.
                 Ok(TurnOutcome::NoBlock { .. }) => {
+                    let ty_disp = display_ty(ty_label);
                     self.agent.push_user_turn(
                         node,
                         &format!(
-                            "Reply with a single ```haskell block that evaluates \
-                             `finalize @{ty_label} (value :: {ty_label})`."
+                            "Your reply had no ```haskell block, so nothing ran. Reply \
+                             with one block — an explore/define round is fine, or \
+                             `finalize @{ty_disp} value` when ready."
                         ),
                     )?;
                 }
@@ -1760,11 +1780,7 @@ impl SelfHarnessDriver {
                     // define/explore round, with `finalize` whenever ready
                     // (the companion learned "declarations are forbidden"
                     // from the old wording — dogfood, 2026-08-13).
-                    let ty_disp = if ty_label.contains(' ') {
-                        format!("({ty_label})")
-                    } else {
-                        ty_label.to_string()
-                    };
+                    let ty_disp = display_ty(ty_label);
                     self.agent.push_user_turn(
                         node,
                         &format!(
