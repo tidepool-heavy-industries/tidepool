@@ -1343,6 +1343,26 @@ impl Harness {
             }
         };
 
+        // The DECL path needs the turn's import lines back: `drive_turn`
+        // split them off the block, but a declaration's imports (author
+        // types it mentions) must ride INTO the decl plane, where
+        // `extract_user_imports` hoists them into the generated module —
+        // without this a decl naming an author type fails validation with
+        // "not in scope". ONLY the define input gets them re-glued: the turn
+        // COMPILE below must keep the import-stripped block (the templates
+        // splice imports separately; re-gluing them into the expression
+        // placeholder is a parse error in every template).
+        let decl_source = if imports.is_empty() {
+            block.to_string()
+        } else {
+            let rebuilt: String = imports
+                .lines()
+                .map(str::trim)
+                .filter(|l| !l.is_empty())
+                .map(|l| format!("import {l}\n"))
+                .collect();
+            format!("{rebuilt}\n{block}")
+        };
         let block_owned = block.to_string();
         let req_block = block_owned.clone();
         let outcome = tokio::task::spawn_blocking(move || {
@@ -1370,7 +1390,7 @@ impl Harness {
                 let checkout = self.checkout_run(node)?;
                 let res = self
                     .run_checked_out(node, checkout, move |mut session| {
-                        let r = session.define_scoped(&[&block_owned]);
+                        let r = session.define_scoped(&[&decl_source]);
                         (session, r)
                     })
                     .await?;

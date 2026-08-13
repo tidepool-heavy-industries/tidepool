@@ -621,7 +621,7 @@ impl SelfHarnessDriver {
         .map_err(|e| DriverError::Session(format!("outer engine config: {e}")))?;
         outer_cfg.include.push(source.source_dir.clone());
 
-        let session = Self::build_outer_session(&outer_cfg);
+        let session = Self::build_outer_session(&outer_cfg, Self::open_outer_plane(&outer_cfg));
 
         // The one-session collapse: the outer session lives in the tree's
         // registry (uniform checkout discipline, panic-safety Drop), the
@@ -639,7 +639,41 @@ impl SelfHarnessDriver {
     /// Construct a fresh outer-session machine handle from `cfg` — shared by
     /// [`Self::bootstrap`] and machine ROTATION ([`Self::machine_maintenance`]):
     /// one construction, so a rotated machine cannot differ from a booted one.
-    fn build_outer_session(cfg: &EngineConfig) -> crate::harness::Session {
+    /// The shared session's decl-plane root — STABLE across rotations
+    /// within a process (the plane transfers), wiped at bootstrap (restart
+    /// persistence of the plane is future work: the decl log has no disk
+    /// reload yet, so a fresh process starts a fresh library — the legible
+    /// restart-loss line covers it).
+    fn outer_plane_root() -> PathBuf {
+        tidepool_runtime::paths::cache_dir().join("selfharness/outer-plane")
+    }
+
+    /// Open the shared session's decl plane (one-session LIVING STRUCTURE):
+    /// model-authored declarations accumulate here as SOURCE, in scope for
+    /// every later answerer turn — across loops, and across machine
+    /// rotations (the plane transfers; it is source-side state). Validated
+    /// against [`EngineConfig::validation_include`] — the include set MINUS
+    /// the effects dir — so an effectful declaration fails at define time
+    /// with an ordinary GHC error (the structural pure-decls guard). The
+    /// OUTER render/loop compiles never see this plane (their include never
+    /// carries it): the authored harness cannot silently depend on
+    /// model-authored names (pillar D).
+    fn open_outer_plane(cfg: &EngineConfig) -> Option<tidepool_runtime::session::SessionLib> {
+        let root = Self::outer_plane_root();
+        let _ = std::fs::remove_dir_all(&root);
+        tidepool_runtime::session::SessionLib::open(
+            tidepool_repr::SessionId(0),
+            &root,
+            tidepool_runtime::session::ModuleEnv::standalone_default(),
+        )
+        .map(|lib| lib.with_validation_include(cfg.validation_include()))
+        .ok()
+    }
+
+    fn build_outer_session(
+        cfg: &EngineConfig,
+        lib: Option<tidepool_runtime::session::SessionLib>,
+    ) -> crate::harness::Session {
         let handler_cfg = tidepool_handlers::HandlerConfig {
             cwd: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
             kv_path: tidepool_runtime::paths::cache_dir().join("selfharness-kv.json"),
@@ -657,7 +691,7 @@ impl SelfHarnessDriver {
             tidepool_mcp::CapturedOutput::new(),
             cfg.include.clone(),
             tidepool_runtime::DEFAULT_NURSERY_SIZE,
-            None,
+            lib,
         )
     }
 
@@ -705,8 +739,16 @@ impl SelfHarnessDriver {
                 stats.fragments
             )));
         }
+        // The decl plane is SOURCE-side state and SURVIVES rotation: take it
+        // off the old machine and install it into the fresh one (living
+        // structure defined by name persists; only heap VALUES die, and
+        // those are the enumerated losses below).
+        let lib = self
+            .agent
+            .with_session(sid, |s| s.take_lib())
+            .map_err(|e| DriverError::Session(e.to_string()))?;
         let cfg = &self.outer.as_ref().ok_or_else(not_bootstrapped)?.cfg;
-        let fresh = Self::build_outer_session(cfg);
+        let fresh = Self::build_outer_session(cfg, lib);
         self.agent
             .replace_session(sid, fresh)
             .map_err(|e| DriverError::Session(e.to_string()))?;

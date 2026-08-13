@@ -439,6 +439,12 @@ where
     /// [`Self::unbootstrapped`]/[`Self::is_bootstrapped`]) or during the
     /// transient window a turn is running on its own eval thread (the machine
     /// moved out; see [`Self::on_eval_thread`]).
+    /// Move the decl plane out for a machine rotation — see
+    /// [`super::persistent::PersistentSession::take_lib`].
+    pub fn take_lib(&mut self) -> Option<crate::session::SessionLib> {
+        self.core.take_lib()
+    }
+
     pub fn heap_stats(&self) -> Option<tidepool_codegen::jit_machine::HeapStats> {
         self.core.machine().map(|m| m.heap_stats())
     }

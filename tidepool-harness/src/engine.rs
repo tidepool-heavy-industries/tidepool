@@ -905,6 +905,20 @@ impl EngineConfig {
     /// `None` keeps the config's own default row (`Finalize NoAnswer`) and
     /// `include` unchanged — the shape every turn that isn't answering a
     /// typed hole compiles against.
+    /// The include set MINUS the generated effects-module dir — the shared
+    /// decl plane's VALIDATION context (one-session living structure): a
+    /// model-authored declaration that names the effect surface (imports
+    /// `Tidepool.Effects`/`Tidepool.Form`/... or uses `M`) fails validation
+    /// with an ordinary GHC error instead of poisoning later turns of a
+    /// different row. Structural pure-decls guard — no import scanner.
+    pub fn validation_include(&self) -> Vec<PathBuf> {
+        self.include
+            .iter()
+            .filter(|p| **p != self.effects_dir)
+            .cloned()
+            .collect()
+    }
+
     pub fn turn_target(
         &self,
         finalize: Option<(&str, &[String])>,

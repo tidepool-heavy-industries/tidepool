@@ -174,6 +174,37 @@ fn record_edit_reply(note: &str) -> RecordedReply {
     }
 }
 
+/// A DECL reply: defines a named helper on the shared session's decl plane
+/// (living structure). The driver treats the non-finalize turn as a wasted
+/// round and nudges; the scripted follow-up then finalizes USING the helper.
+fn decl_reply(src: &str) -> RecordedReply {
+    RecordedReply {
+        node: NodeId(0),
+        turn: 0,
+        content: format!("```haskell\n{src}\n```"),
+        usage: Usage {
+            input_tokens: 50,
+            output_tokens: 10,
+        },
+    }
+}
+
+/// A reply finalizing an edit built from a NAMED decl-plane helper.
+fn helper_edit_reply(expr: &str) -> RecordedReply {
+    RecordedReply {
+        node: NodeId(0),
+        turn: 0,
+        content: format!(
+            "```haskell\nimport HarnessTypes (State (..))\n\n\
+             (finalize @(State -> State) ({expr}) :: M ())\n```"
+        ),
+        usage: Usage {
+            input_tokens: 50,
+            output_tokens: 10,
+        },
+    }
+}
+
 fn header() -> LogHeader {
     LogHeader {
         prelude_hash: "fn-finalize-spike".into(),
@@ -401,5 +432,79 @@ async fn record_of_functions_crosses_and_both_fields_apply() {
         Some(2),
         "cycle 2: both cycles' notes present, got {:?}",
         outcome2.state_json
+    );
+}
+
+/// LIVING STRUCTURE, THROUGH A ROTATION (the decl-plane program's flagship):
+/// cycle 1's answerer DEFINES a named helper (`bumpBy`) on the shared
+/// session's decl plane, then finalizes an edit built from it; the fragment
+/// ceiling is forced to 1 so the cycle-2 boundary ROTATES the machine; cycle
+/// 2's answerer — a NEW node, a NEW machine — finalizes `bumpBy 7` and it
+/// RESOLVES: the helper survived both the loop boundary and the rotation,
+/// because the plane is source-side state that transfers. The authored
+/// outer `render`/`loop` never see the helper (their include never carries
+/// the plane).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn living_helper_survives_loop_boundary_and_rotation() {
+    support::require_extract();
+    let _cache_guard = support::isolate_cache();
+    std::env::set_var("TIDEPOOL_MACHINE_FRAGMENT_CEILING", "1");
+
+    let agent_cfg =
+        EngineConfig::from_decls(answerer_decls(), prelude_dir(), Some(spike_harness_dir()))
+            .expect("answerer engine config");
+    let replies = vec![
+        decl_reply(
+            "import HarnessTypes (State (..))\n\n\
+             bumpBy :: Int -> State -> State\n\
+             bumpBy n st = st { counter = counter st + n }",
+        ),
+        helper_edit_reply("bumpBy 5"),
+        helper_edit_reply("bumpBy 7"),
+    ];
+    let provider: Arc<dyn DynModelProvider> = Arc::new(ReplayProvider::new(replies));
+    let writer = tidepool_harness::log::LogWriter::create(
+        std::env::temp_dir().join(format!("living-helper-{}.jsonl", std::process::id())),
+        &header(),
+    )
+    .expect("log writer");
+    let agent = Arc::new(Harness::new(writer, agent_cfg, provider).expect("agent harness boots"));
+
+    let observer = Arc::new(CapturingObserver::default());
+    let mut driver = SelfHarnessDriver::new(agent, observer.clone());
+    let source = load_harness_source(&spike_harness_dir().join("Harness.hs"))
+        .expect("spike harness source loads");
+
+    let outcome1 = driver
+        .run_one_cycle(&source, None)
+        .await
+        .expect("cycle 1: define helper on the plane, finalize with it");
+    assert_eq!(
+        outcome1.state_json.get("counter").and_then(|v| v.as_i64()),
+        Some(5),
+        "cycle 1: bumpBy 5 applied, got {:?}",
+        outcome1.state_json
+    );
+
+    let outcome2 = driver
+        .run_one_cycle(&source, Some(&outcome1.state_json))
+        .await
+        .expect("cycle 2: the helper resolves after the loop boundary AND the rotation");
+    assert_eq!(
+        outcome2.state_json.get("counter").and_then(|v| v.as_i64()),
+        Some(12),
+        "cycle 2: bumpBy 7 composed onto the rotated-through state, got {:?}",
+        outcome2.state_json
+    );
+
+    // The rotation genuinely happened between the cycles.
+    assert!(
+        observer
+            .events
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|e| matches!(e, Event::MachineRotated { .. })),
+        "the ceiling-of-1 run must have rotated the machine between cycles"
     );
 }

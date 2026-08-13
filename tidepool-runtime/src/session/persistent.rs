@@ -760,6 +760,18 @@ impl PersistentSession {
     /// The decl-plane include directory (where `Lib.G<g>.hs` modules live), for
     /// a later turn's compile search path. `None` when the session has no decl
     /// plane.
+    /// Move the decl plane OUT (machine rotation, one-session living
+    /// structure): the plane is SOURCE-side state (gen modules on disk +
+    /// the in-memory decl log), independent of any machine's heap, so it
+    /// transfers wholesale into a freshly-built session while the old
+    /// machine (and its value plane, whose roots die with its heap) drops.
+    /// KNOWN EDGE: a gen module that imports `Val.G<g>` (a decl rendered
+    /// while value binds were live) will fail its next recompile after the
+    /// transfer with an ordinary module-not-found — legible, not silent.
+    pub fn take_lib(&mut self) -> Option<SessionLib> {
+        self.lib.take()
+    }
+
     pub fn lib_include_dir(&self) -> Option<&Path> {
         self.lib.as_ref().map(|l| l.include_dir())
     }
