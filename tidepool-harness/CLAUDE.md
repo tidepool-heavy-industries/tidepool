@@ -395,13 +395,18 @@ pointer feeds the resumed continuation verbatim, on the same heap, no
 materialization. This is the mechanism behind `runLLMTurn @(State -> State)`
 working end to end — including closures NESTED in a product (a record of
 functions), routed by a DEEP sentinel scan: the answerer finalizes it, the
-loop applies it directly. Standing acceptances:
-`tests/selfharness_fn_finalize_spike.rs` (both the `State -> State` edit and
-the record-of-functions cases, un-ignored, passing). Cross-LOOP persistence
-of model-defined helpers/values BY NAME is NOT yet landed — the shared
-session's decl plane is still `None` (the deferred living-structure program,
-`plans/one-session.md` status banner); what persists across loops today is
-the durable `State`, composed through per-loop edits.
+loop applies it directly. And the shared session carries the LIVING DECL
+PLANE (`SelfHarnessDriver::open_outer_plane`): pure top-level declarations a
+model defines persist BY NAME across loops AND across machine rotations
+(the plane is source-side state; `take_lib` transfers it into the rotated
+machine), validated against the effects-dir-free include so an effectful
+decl fails at define time (the structural pure-decls guard), and NEVER on
+the authored render/loop compiles' include path (pillar D). Standing
+acceptances, all in `tests/selfharness_fn_finalize_spike.rs`: the
+`State -> State` edit, the record-of-functions delivery, and
+`living_helper_survives_loop_boundary_and_rotation`. Restart persistence of
+the plane (decl-log disk reload) is future work; heap VALUES still die at
+rotation, enumerated.
 The scoped-stack caveat in Replay above still holds unchanged: the answerer
 row is all-suspending, so it produces no `Event::Effect` regardless of
 whether its session is owned or attached.

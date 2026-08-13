@@ -6,12 +6,14 @@ the collapse), ab6b1b63 (fn-finalize standing acceptance), c2268375 (P4
 rotation), plus the companion promotion and doc rewrites. **Phase 6
 (repl/one-shot conversion + slot deletion) is PARKED behind the
 production-soak gate** (locked decision 6): the registry path must run the
-live harness before the repl surface converts. Deferred capability work,
-explicitly NOT lost: the outer session's decl plane (`SessionLib`) is still
-`None` — cross-loop LIVING STRUCTURE (helpers/values persisting between
-loops) is designed here but needs that plane installed with the pure-decls
-guards before its acceptance can exist; higher-order FORK answers likewise
-await their test. Both are natural next programs on this substrate.
+live harness before the repl surface converts. **LIVING STRUCTURE LANDED
+(6e755ac3, post-review):** the shared session's decl plane is installed —
+model-defined pure helpers persist by name across loops and rotations
+(structural pure-decls guard via the effects-dir-free validation include;
+plane transfers through rotation via `take_lib`; flagship acceptance
+`living_helper_survives_loop_boundary_and_rotation`). Remaining deferred:
+restart persistence of the plane (decl-log disk reload), higher-order FORK
+answers' own test, and the review's realm-ownership matrix acceptance.
 
 ## Executive summary
 
@@ -22,10 +24,9 @@ be an answer, and anything the model builds up while thinking is thrown away
 at the end of every loop. This plan removes that boundary. The loop and the
 model's cognition run on ONE resident virtual machine with one heap: the model
 can finalize `State -> State` — or a record of functions, capturing anything
-it has in scope — and the loop applies it directly. (Helpers and values
-persisting BY NAME across loops — the living library — is the deferred
-follow-up program in the status banner: it needs the outer decl plane, which
-is not yet installed.) What does NOT change is
+it has in scope — and the loop applies it directly; and pure helpers the
+model DEFINES persist by name across loops and machine rotations (the
+living library, on the shared session's decl plane). What does NOT change is
 the safety story: what the model is *allowed to do* was never enforced by the
 separate world — it is enforced by the typed effect row each turn compiles
 against, and that stays exactly as strong.
