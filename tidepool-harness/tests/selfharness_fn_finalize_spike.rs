@@ -455,7 +455,15 @@ async fn living_helper_survives_loop_boundary_and_rotation() {
             .expect("answerer engine config");
     let replies = vec![
         decl_reply(
+            // A MIXED decl block — a `data` type among value decls — pins the
+            // classifier's TyClD arm (a data-bearing block must classify as a
+            // DEFINE round, not fall through to the expression path; the
+            // companion's typed-memory proposal died on exactly that).
             "import HarnessTypes (State (..))\n\n\
+             data Pace = Steady | Bursty\n\n\
+             paceOf :: Pace -> Int\n\
+             paceOf Steady = 1\n\
+             paceOf Bursty = 2\n\n\
              bumpBy :: Int -> State -> State\n\
              bumpBy n st = st { counter = counter st + n }",
         ),

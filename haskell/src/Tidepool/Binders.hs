@@ -355,11 +355,18 @@ isBindStmt lstmt = case unLoc lstmt of
 -- | A NAME-DECLARING declaration's verdict, or 'Nothing' if this parsed
 -- \"declaration\" declares no name (a zero-binder @ValD@ — a bare application
 -- @parseDeclaration@ over-accepts as an implicit splice). A signature (@SigD@)
--- always qualifies. Everything else defers to the caller's expr/other-decl
--- precedence.
+-- always qualifies, as does a TYPE/CLASS declaration (@TyClD@ — @data@/
+-- @newtype@/@type@/@class@): it declares a TYPE name, contributing no VALUE
+-- binders (the define path re-derives real exports GHC-side), but it is
+-- unambiguously a declaration — without this arm, a model turn defining a
+-- block of @data@ types classified as an EXPRESSION and died on a parse
+-- error, with the retry prompt then teaching the model that declarations
+-- are forbidden (companion dogfood, 2026-08-13). Everything else defers to
+-- the caller's expr/other-decl precedence.
 declNameVerdict :: LHsDecl GhcPs -> Maybe StmtBinders
 declNameVerdict ldecl = case unLoc ldecl of
   SigD _ sig  -> Just (StmtBinders KDecl (sigBinders sig))
+  TyClD _ _   -> Just (StmtBinders KDecl [])
   ValD _ bind -> case map occStr (collectHsBindBinders CollNoDictBinders bind) of
     []    -> Nothing
     names -> Just (StmtBinders KDecl names)

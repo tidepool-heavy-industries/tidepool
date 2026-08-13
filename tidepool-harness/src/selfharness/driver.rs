@@ -1753,12 +1753,26 @@ impl SelfHarnessDriver {
                 // to the hole's type buys.
                 Err(HarnessError::Compile(msg)) => {
                     let hint = self.types_in_scope_hint(ty_label, &msg).unwrap_or_default();
+                    // Parenthesize a compound answer type in the prompt — an
+                    // unparenthesized `finalize @State -> State` is itself
+                    // ill-typed advice. And do NOT teach single-shot: the
+                    // window stays multi-round; a fixed block may be another
+                    // define/explore round, with `finalize` whenever ready
+                    // (the companion learned "declarations are forbidden"
+                    // from the old wording — dogfood, 2026-08-13).
+                    let ty_disp = if ty_label.contains(' ') {
+                        format!("({ty_label})")
+                    } else {
+                        ty_label.to_string()
+                    };
                     self.agent.push_user_turn(
                         node,
                         &format!(
-                            "That Haskell did not compile. Fix it and reply with a corrected \
-                             single ```haskell block that evaluates `finalize @{ty_label} \
-                             (value :: {ty_label})`.\n\nGHC error:\n{msg}{hint}"
+                            "That block did not compile — your window continues; nothing \
+                             was lost. Reply with a corrected single ```haskell block. It \
+                             may be another define/explore round (top-level declarations \
+                             are welcome and persist); when you are ready to answer, \
+                             evaluate `finalize @{ty_disp} value`.\n\nGHC error:\n{msg}{hint}"
                         ),
                     )?;
                 }
