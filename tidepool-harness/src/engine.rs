@@ -550,24 +550,35 @@ pub fn answerer_hole_card(
     table: Option<&DataConTable>,
 ) -> String {
     let ty = ty.unwrap_or("A");
+    // Parenthesize a compound answer type wherever it follows `@` — the card
+    // is executable advice, and `finalize @State -> State` is ill-typed.
+    let ty_at = if ty.contains(' ') {
+        format!("({ty})")
+    } else {
+        ty.to_string()
+    };
     let shape = type_shape_line(ty, table);
     let scope = if imports.is_empty() {
         String::new()
     } else {
         format!(
-            " `{ty}` is already in scope (this turn imports {}) — and this turn's \
-             row only admits `finalize @{ty}`, so a wrong-typed value is a compile \
-             error naming the row, not a value that silently crosses. Construct a \
-             real `{ty}`, do not substitute a tuple or `Text`.",
+            " `{ty}` is already in scope (this turn imports {}) — and `finalize` \
+             is PINNED to `{ty}` in your row, so a wrong-typed answer is a \
+             compile error naming the row, not a value that silently crosses. \
+             Construct a real `{ty}`, do not substitute a tuple or `Text`. (The \
+             pin constrains `finalize`'s type only — your row's other effects, \
+             and define/explore rounds, remain available as your system framing \
+             says.)",
             imports.join(", ")
         )
     };
     format!(
         "The loop needs a typed answer of type `{ty}`.\n\n\
          {prompt}\n\n\
-         {shape}Answer by evaluating `finalize @{ty} value` in a single \
-         ```haskell block — this ends your turn and hands the value back to the \
-         loop.{scope}"
+         {shape}This request holds your window open: take the rounds you need \
+         (each a single ```haskell block — explore, define, `note`, `askUser`), \
+         then answer by evaluating `finalize @{ty_at} value` — THAT ends the \
+         window and hands the value back to the loop.{scope}"
     )
 }
 
