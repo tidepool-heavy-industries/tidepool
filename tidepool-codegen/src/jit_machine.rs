@@ -4030,13 +4030,22 @@ enum DriveOutcome {
 /// 1 of `FinalizeWith`, and no other suspend request (`Ask`/`RunLLMTurn`) can
 /// legally contain a closure, so a nested sentinel would itself be a bug.
 fn request_carries_closure_sentinel(request: &tidepool_eval::value::Value) -> bool {
+    // DEEP scan (codex review 2026-08-12, finding 3): a closure NESTED inside
+    // a finalized product — a record of functions, a pair of lenses — must
+    // trigger by-reference tenure exactly like a top-level closure, or the
+    // payload takes the lossy bridge path and its nested closures arrive as
+    // sentinels. The request's own Con head is skipped (only its FIELDS can
+    // carry the payload); everything below is walked.
+    fn any_sentinel(v: &tidepool_eval::value::Value) -> bool {
+        match v {
+            tidepool_eval::value::Value::Con(id, fields) => {
+                *id == heap_bridge::CLOSURE_SENTINEL || fields.iter().any(any_sentinel)
+            }
+            _ => false,
+        }
+    }
     match request {
-        tidepool_eval::value::Value::Con(_, fields) => fields.iter().any(|f| {
-            matches!(
-                f,
-                tidepool_eval::value::Value::Con(id, _) if *id == heap_bridge::CLOSURE_SENTINEL
-            )
-        }),
+        tidepool_eval::value::Value::Con(_, fields) => fields.iter().any(any_sentinel),
         _ => false,
     }
 }

@@ -6,7 +6,7 @@ in git history rather than here.
 
 ## Active work
 
-- [One session](one-session.md): **Phases 0–5 LANDED (2026-08-14)**; Phase 6
+- [One session](one-session.md): **Phases 0–5 LANDED (2026-08-12)**; Phase 6
   (repl/one-shot conversion + slot deletion) is deliberately parked behind
   the production-soak gate. The self-harness runs collapsed on one resident
   session: answerer nodes are realms on the outer machine, finalize closures

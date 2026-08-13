@@ -166,7 +166,7 @@ struct NodeConvo {
     /// The realm this node's turns park under on its session (one-session
     /// collapse: attached answerer nodes each get their own realm on the
     /// SHARED machine; retirement is that realm's scope exit). `None` = the
-    /// session's default realm.
+    /// session's default realm ([`OUTER_REALM`]).
     realm: Option<tidepool_codegen::jit_machine::RealmId>,
     pending: Option<PendingHole>,
     /// The typed hole this node is currently answering, when it answers by
@@ -473,6 +473,14 @@ fn pick_render_opts<'a>(
 
 /// The orchestrator. Cloneable-cheap? No — it owns the tree + sessions, so it
 /// is shared behind an `Arc`.
+/// The reserved realm every NODE-LESS outer-surface park is owned by —
+/// `with_session` resets the session's ambient realm to this before every
+/// outer run/resume, so an outer frame parked by a re-suspension can never
+/// be owned by (and accidentally closed with) whichever answerer realm ran
+/// last. Attached answerer realms are minted per loop from 1 upward.
+pub const OUTER_REALM: tidepool_codegen::jit_machine::RealmId =
+    tidepool_codegen::jit_machine::RealmId(0);
+
 pub struct Harness {
     tree: NodeTree<Session>,
     cfg: EngineConfig,
@@ -495,6 +503,16 @@ pub struct Harness {
     child_cfg: EngineConfig,
     provider: Arc<dyn DynModelProvider>,
     convos: Mutex<HashMap<NodeId, NodeConvo>>,
+    /// Realm closes QUEUED because the attached node's retirement found the
+    /// shared machine out on a turn — drained by the next path holding the
+    /// machine (`run_checked_out`/`with_session`). Scope exit as an eventual
+    /// postcondition; the realm identity lives here until close is confirmed.
+    pending_realm_closes: Mutex<
+        Vec<(
+            tidepool_repr::SessionId,
+            tidepool_codegen::jit_machine::RealmId,
+        )>,
+    >,
     /// A just-created node's staged [`NodeSeed`] — a root's opening prompt or
     /// a fork child's inherited transcript, either way paired with its
     /// framing — between node creation and `force` (a thunk node has no live
@@ -543,6 +561,7 @@ impl Harness {
             child_cfg,
             provider,
             convos: Mutex::new(HashMap::new()),
+            pending_realm_closes: Mutex::new(Vec::new()),
             pending: Mutex::new(HashMap::new()),
             escalations: Mutex::new(HashMap::new()),
         })
@@ -887,6 +906,14 @@ impl Harness {
     /// runs and resumes go through here, restoring with the session's OWN
     /// reported hole set. Synchronous by design (the driver's outer calls
     /// always were); the machine mutation happens on the caller's thread.
+    ///
+    /// Two realm disciplines live here (codex review 2026-08-12, both Highs):
+    /// the session's ambient realm is RESET to the reserved outer realm
+    /// before `f` (an outer frame parked by a re-suspension must never be
+    /// owned by whichever answerer realm ran last — ambient stickiness would
+    /// let an answerer's retirement close an OUTER frame), and any QUEUED
+    /// realm closes for this session are drained while the machine is in
+    /// hand (the eventual-postcondition half of attached-node retirement).
     pub fn with_session<T>(
         &self,
         sid: tidepool_repr::SessionId,
@@ -897,6 +924,8 @@ impl Harness {
             .registry()
             .checkout_run(sid)
             .map_err(|e| HarnessError::Resident(format!("outer session checkout: {e}")))?;
+        self.drain_pending_realm_closes(sid, co.machine());
+        co.machine().set_realm(OUTER_REALM);
         let r = f(co.machine());
         let holes: Vec<HoleId> = co
             .machine()
@@ -906,6 +935,22 @@ impl Harness {
             .collect();
         co.restore_suspended(holes);
         Ok(r)
+    }
+
+    /// Apply every queued realm close for `sid` (attached-node retirements
+    /// that found the machine out on a turn). Called by each path that has
+    /// the machine in hand, so scope exit converges even when retirement
+    /// raced a running turn.
+    fn drain_pending_realm_closes(&self, sid: tidepool_repr::SessionId, session: &mut Session) {
+        let pending: Vec<_> = {
+            let mut q = self.pending_realm_closes.lock();
+            let (mine, rest): (Vec<_>, Vec<_>) = q.drain(..).partition(|(s, _)| *s == sid);
+            *q = rest;
+            mine
+        };
+        for (_, realm) in pending {
+            let _ = session.close_realm(realm);
+        }
     }
 
     /// Build the concrete handler stack (rooted at the process CWD sandbox),
@@ -1919,14 +1964,21 @@ impl Harness {
         if !matches!(pending.classified.routing, HoleRouting::Finalize { .. }) {
             return false;
         }
+        // DEEP scan, mirroring the machine's request_carries_closure_sentinel
+        // (codex review 2026-08-12, finding 3): a closure nested inside the
+        // finalized product — a record of functions — must route through the
+        // handle-delivery path exactly like a top-level closure.
+        fn any_sentinel(v: &Value) -> bool {
+            match v {
+                Value::Con(id, fields) => {
+                    (id.0 == u64::MAX && fields.is_empty()) || fields.iter().any(any_sentinel)
+                }
+                _ => false,
+            }
+        }
         matches!(
             &pending.raw_request,
-            Value::Con(_, fields)
-                if fields.get(1).is_some_and(|f| matches!(
-                    f,
-                    Value::Con(id, cf)
-                        if id.0 == u64::MAX && cf.is_empty()
-                ))
+            Value::Con(_, fields) if fields.get(1).is_some_and(any_sentinel)
         )
     }
 
@@ -3127,14 +3179,23 @@ impl Harness {
     {
         // Apply the node's realm to the session before the turn — ONE site
         // covering every run/resume/child path, so an attached answerer
-        // node's parks are always owned by ITS realm on the shared machine.
-        let realm = self.convos.lock().get(&node).and_then(|c| c.realm);
-        let machine = checkout.take();
+        // node's parks are always owned by ITS realm on the shared machine,
+        // and a node WITHOUT a realm parks under the reserved outer realm
+        // (never whatever ambient realm the last turn left behind — codex
+        // review 2026-08-12, High 2). Queued realm closes for this session
+        // drain first, while the machine is in hand.
+        let realm = self
+            .convos
+            .lock()
+            .get(&node)
+            .and_then(|c| c.realm)
+            .unwrap_or(OUTER_REALM);
+        let sid = checkout.session_id();
+        let mut machine = checkout.take();
+        self.drain_pending_realm_closes(sid, &mut machine);
         match tokio::task::spawn_blocking(move || {
             let mut machine = machine;
-            if let Some(r) = realm {
-                machine.set_realm(r);
-            }
+            machine.set_realm(realm);
             f(machine)
         })
         .await
@@ -3184,27 +3245,35 @@ impl Harness {
                 // An ATTACHED node (one-session collapse): its retirement is
                 // realm SCOPE EXIT on the shared machine, never slot removal
                 // — the outer session outlives every answerer node it hosts.
-                // Best-effort: if the machine is out on a turn right now the
-                // realm's frames stay parked (still rooted, releasable by a
-                // later close); a wedged shared session is terminated by its
-                // OWNER, not here.
+                // Scope exit is an EVENTUAL POSTCONDITION, not a best-effort
+                // side effect: if the machine is out on a turn right now, the
+                // close is queued (`pending_realm_closes`) and applied by the
+                // next code path that has the machine in hand
+                // (`run_checked_out`/`with_session` drain the queue before
+                // restoring) — the realm identity is retained until the close
+                // is CONFIRMED, never dropped with the convo.
                 let realm = self.convos.lock().get(&node).and_then(|c| c.realm);
                 if let Some(realm) = realm {
-                    if let Ok(mut co) = self.tree.registry().checkout_run(sid) {
-                        let (frames, handles) = co.machine().close_realm(realm);
-                        if frames + handles > 0 && std::env::var("HARNESS_DEBUG").is_ok() {
-                            eprintln!(
-                                "[harness] realm scope-exit for {node:?}: {frames} frame(s), \
-                                 {handles} handle(s) released"
-                            );
+                    match self.tree.registry().checkout_run(sid) {
+                        Ok(mut co) => {
+                            let (frames, handles) = co.machine().close_realm(realm);
+                            if frames + handles > 0 && std::env::var("HARNESS_DEBUG").is_ok() {
+                                eprintln!(
+                                    "[harness] realm scope-exit for {node:?}: {frames} frame(s), \
+                                     {handles} handle(s) released"
+                                );
+                            }
+                            let holes: Vec<HoleId> = co
+                                .machine()
+                                .parked_holes()
+                                .into_iter()
+                                .map(|h| HoleId(h.to_string()))
+                                .collect();
+                            co.restore_suspended(holes);
                         }
-                        let holes: Vec<HoleId> = co
-                            .machine()
-                            .parked_holes()
-                            .into_iter()
-                            .map(|h| HoleId(h.to_string()))
-                            .collect();
-                        co.restore_suspended(holes);
+                        Err(_) => {
+                            self.pending_realm_closes.lock().push((sid, realm));
+                        }
                     }
                 }
             }
@@ -3497,6 +3566,7 @@ mod tests {
             child_cfg: test_engine_cfg(),
             provider,
             convos: Mutex::new(HashMap::new()),
+            pending_realm_closes: Mutex::new(Vec::new()),
             pending: Mutex::new(HashMap::new()),
             escalations: Mutex::new(HashMap::new()),
         }
@@ -3529,6 +3599,7 @@ mod tests {
             child_cfg: test_engine_cfg(),
             provider,
             convos: Mutex::new(HashMap::new()),
+            pending_realm_closes: Mutex::new(Vec::new()),
             pending: Mutex::new(HashMap::new()),
             escalations: Mutex::new(HashMap::new()),
         };

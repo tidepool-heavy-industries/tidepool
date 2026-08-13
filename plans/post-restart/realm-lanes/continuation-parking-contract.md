@@ -9,7 +9,7 @@ the internal/public split settled at step 2; the signature table (§4) filled at
 fold, once step 3 had settled the parked entries' signature. This is the
 contract that ships.
 
-## Amendment 2026-08-14 (one-session plan, Phase 0) — additive
+## Amendment 2026-08-12 (one-session plan, Phase 0) — additive
 
 The one-session consumer (`plans/one-session.md`) extended the API. Everything
 below in §1-§4 remains true; these are additions:
@@ -135,7 +135,7 @@ addition for any caller lifting a "child may not suspend" restriction: you canno
 park only the child. The parent is in the slot, and resuming the child would
 unroot it. Both move to the registry together.
 
-**(c) Cycle-scoped lifetime — amended 2026-08-14 (one-session plan, Phase 4).**
+**(c) Cycle-scoped lifetime — amended 2026-08-12 (one-session plan, Phase 4).**
 The one-session consumer satisfies this invariant's INTENT (bounded machine
 memory) by a different mechanism than machine death: answerer realms remain
 cycle-scoped exactly as written ("cycle" = one loop; `close_realm` at

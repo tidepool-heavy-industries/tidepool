@@ -393,10 +393,15 @@ would sentinel under the eager bridge) is taken as a `ValueHandle`
 `runLLMTurn` continuation via `ResidentSession::resume_handle` — the payload
 pointer feeds the resumed continuation verbatim, on the same heap, no
 materialization. This is the mechanism behind `runLLMTurn @(State -> State)`
-working end to end: the answerer finalizes a closure captured over session
-bindings, the loop applies it directly, and helpers/values a turn binds in
-loop N are still live for an answerer fragment in loop N+40. Standing
-acceptance: `tests/selfharness_fn_finalize_spike.rs` (un-ignored, passing).
+working end to end — including closures NESTED in a product (a record of
+functions), routed by a DEEP sentinel scan: the answerer finalizes it, the
+loop applies it directly. Standing acceptances:
+`tests/selfharness_fn_finalize_spike.rs` (both the `State -> State` edit and
+the record-of-functions cases, un-ignored, passing). Cross-LOOP persistence
+of model-defined helpers/values BY NAME is NOT yet landed — the shared
+session's decl plane is still `None` (the deferred living-structure program,
+`plans/one-session.md` status banner); what persists across loops today is
+the durable `State`, composed through per-loop edits.
 The scoped-stack caveat in Replay above still holds unchanged: the answerer
 row is all-suspending, so it produces no `Event::Effect` regardless of
 whether its session is owned or attached.

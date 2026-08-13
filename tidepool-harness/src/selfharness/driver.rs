@@ -699,7 +699,9 @@ impl SelfHarnessDriver {
         }
         if hole_count > 0 {
             return Err(DriverError::Session(format!(
-                "machine at fragment ceiling ({} >= {ceiling}) but not quiescent                  ({hole_count} parked hole(s)) — cannot rotate mid-suspension; raise                  TIDEPOOL_MACHINE_FRAGMENT_CEILING or bounce the harness",
+                "machine at fragment ceiling ({} >= {ceiling}) but not quiescent \
+                 ({hole_count} parked hole(s)) — cannot rotate mid-suspension; raise \
+                 TIDEPOOL_MACHINE_FRAGMENT_CEILING or bounce the harness",
                 stats.fragments
             )));
         }

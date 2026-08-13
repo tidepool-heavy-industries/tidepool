@@ -34,7 +34,10 @@ loop st = do
       \pure function `State -> State` (record-update syntax reads well: \
       \\\st -> st { memories = memories st <> [...] }). Untouched fields flow \
       \through unchanged by construction, so nothing you leave alone can be \
-      \lost; touch only what this window genuinely changed. A standing habit \
-      \you want future windows to keep belongs in a NAMED helper, not a \
-      \one-off lambda."
+      \lost; touch only what this window genuinely changed. Helpers you \
+      \define live only within this cognition window for now — when you \
+      \notice something you wish you could RETAIN or RESHAPE across windows \
+      \(a habit, a policy, a vocabulary), say so: proposing what durable \
+      \structure should exist is exactly the co-design this playground is \
+      \for."
   pure (edit st)

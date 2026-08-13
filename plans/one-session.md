@@ -1,6 +1,6 @@
 # One session: the self-harness as a single VM
 
-**STATUS (2026-08-14): Phases 0–5 LANDED** — commits 153c955f (P0 machine),
+**STATUS (2026-08-12): Phases 0–5 LANDED** — commits 153c955f (P0 machine),
 89cf6da3 (P1 session lane), 11167061 (P2 multi-hole registry), 90b50724 (P3
 the collapse), ab6b1b63 (fn-finalize standing acceptance), c2268375 (P4
 rotation), plus the companion promotion and doc rewrites. **Phase 6
@@ -21,9 +21,11 @@ only carry data, so a function — an *edit*, a *policy*, a *strategy* — canno
 be an answer, and anything the model builds up while thinking is thrown away
 at the end of every loop. This plan removes that boundary. The loop and the
 model's cognition run on ONE resident virtual machine with one heap: the model
-can finalize `State -> State` (or any function, capturing anything it has in
-scope), the loop applies it directly, and helpers, values, and policies the
-model defines in loop N are still alive in loop N+40. What does NOT change is
+can finalize `State -> State` — or a record of functions, capturing anything
+it has in scope — and the loop applies it directly. (Helpers and values
+persisting BY NAME across loops — the living library — is the deferred
+follow-up program in the status banner: it needs the outer decl plane, which
+is not yet installed.) What does NOT change is
 the safety story: what the model is *allowed to do* was never enforced by the
 separate world — it is enforced by the typed effect row each turn compiles
 against, and that stays exactly as strong.
@@ -70,7 +72,7 @@ live in the session plane, not the checkpoint. Collapsing the general tree —
 fork/Agent nodes outside the self-harness keep their own sessions (trust
 isolation, parallel fanout).
 
-## Ground truth (mapped 2026-08-13; anchors are file:line at that date)
+## Ground truth (mapped 2026-08-12; anchors are file:line at that date)
 
 Layer status:
 
@@ -233,7 +235,7 @@ compile SURFACE composes its own preamble:
   shadowing within itself (newest gen wins, existing machinery); it cannot
   shadow the authored module (imported qualified as `Loaded.*`).
 
-## Locked decisions (2026-08-13/14; do not re-derive)
+## Locked decisions (2026-08-12; do not re-derive)
 
 1. **Full feature, no transport restrictions.** Closures capture arbitrary
    in-scope values; no source-crossing/self-containment fallback anywhere on

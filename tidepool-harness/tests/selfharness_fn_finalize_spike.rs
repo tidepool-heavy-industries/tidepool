@@ -69,20 +69,16 @@
 //! is exactly the class of type this now admits, so the specific verbatim
 //! error and reasoning quoted above no longer describe current behavior.
 //!
-//! What this file does NOT establish: whether this spike's fixture now runs
-//! end to end. The extract gate was only the FIRST seam this spike hit —
-//! the "further, UNREACHED concern" below (the driver's finalize-value
-//! extraction path having no closure-aware branch, and no existing
-//! mechanism applying a closure live in one session's heap against a value
-//! from a DIFFERENT session's heap) is exactly the cross-session delivery
-//! problem the one-session plan's later phases (registry collapse, parked
-//! fragments on one shared machine) are the intended fix for. Left
-//! `#[ignore]`d pending that work landing and this spike being re-run
-//! against it — un-ignoring it is a separate, deliberate step for whoever
-//! verifies the new behavior end to end, not implied by the extract gate
-//! alone being lifted.
+//! (HISTORICAL, since resolved:) at the time of the original spike, the
+//! extract gate was only the FIRST seam — the "further, UNREACHED concern"
+//! below (no closure-aware finalize branch, no cross-session closure
+//! application) was the deeper one. BOTH have since landed: the collapse
+//! put the answerer and loop on ONE machine, `take_finalized_handle_keep_open`
+//! is the closure-aware branch (deep sentinel scan — nested closures
+//! included), and `resume_handle` delivers on the shared heap. This test is
+//! UN-IGNORED and passing; see the Verdict section above.
 //!
-//! **A further, UNREACHED concern, noted for whoever picks this up:** even
+//! **(HISTORICAL) A further, UNREACHED concern, as noted at spike time:** even
 //! setting the (now-lifted) extract gate aside, the driver's OWN finalize-value
 //! extraction path (`Harness::take_finalized_value_keep_open` ->
 //! `take_finalized_value_core`, `harness.rs`) unconditionally reads
@@ -103,9 +99,9 @@
 //! `finalize_closure_full_round_trip`). At the time this spike was written
 //! the test never reached that path (the since-lifted extract gate stopped
 //! it first), so this paragraph was, and remains, informed prediction from
-//! reading the code rather than an observed result — this file has not been
-//! re-run against the lifted gate to confirm whether it now reaches this
-//! path, or what happens if it does.
+//! reading the code rather than an observed result. (Since resolved: the
+//! one-session collapse removed the cross-session boundary entirely, and
+//! this test now exercises the delivery path end to end, green.)
 //!
 //! Seams from the spec's checklist (as observed AT THE TIME, against the
 //! now-superseded extract gate — not re-verified against current behavior):
@@ -151,6 +147,31 @@ fn prelude_dir() -> std::path::PathBuf {
 
 fn spike_harness_dir() -> std::path::PathBuf {
     repo_root().join("examples/harness/fn-finalize-spike")
+}
+
+fn record_spike_harness_dir() -> std::path::PathBuf {
+    repo_root().join("examples/harness/fn-record-spike")
+}
+
+/// A reply finalizing an `Edits` RECORD OF FUNCTIONS — closures NESTED in a
+/// product, the shape the deep sentinel scan exists for.
+fn record_edit_reply(note: &str) -> RecordedReply {
+    let content = format!(
+        "```haskell\nimport HarnessTypes (Edits (..), State (..))\n\n\
+         (finalize @Edits (Edits \
+         {{ bump = \\st -> st {{ counter = counter st + 1 }}, \
+         note = \\st -> st {{ history = history st <> [\"{note}\"] }} }}) \
+         :: M ())\n```"
+    );
+    RecordedReply {
+        node: NodeId(0),
+        turn: 0,
+        content,
+        usage: Usage {
+            input_tokens: 50,
+            output_tokens: 10,
+        },
+    }
 }
 
 fn header() -> LogHeader {
@@ -201,16 +222,13 @@ impl Observer for CapturingObserver {
 }
 
 /// Drive two full cycles of the fn-finalize-spike fixture through the
-/// production entry point. See this file's module doc for the verdict this
-/// test originally pinned (NOT FEASIBLE AS-IS, at the extract's compile-time
-/// gate) — that specific gate is now lifted (one-session plan Phase 3e:
-/// `checkRunLLMTurnType` admits a pure function-typed answer like
-/// `State -> State`), but this test's disposition against the current code
-/// is UNVERIFIED (a deeper, still-open seam — cross-session closure
-/// delivery — is documented in the module doc's "further, UNREACHED
-/// concern"). Left ignored pending that work landing and this spike being
-/// deliberately re-run and re-verified, not un-ignored as a side effect of
-/// the extract gate alone changing.
+/// production entry point — the STANDING ACCEPTANCE for `runLLMTurn
+/// @(State -> State)` (see the Verdict section in the module doc): the
+/// answerer's finalized closure is delivered by handle into the loop's
+/// parked continuation on the shared heap, applied, and COMPOSES across
+/// cycles; a third scripted cycle pins driver survival across repeated
+/// realm retirements. (Originally the NOT-FEASIBLE spike, kept with its
+/// historical diagnosis above.)
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn fn_finalize_crosses_two_cycles_and_composes() {
     support::require_extract();
@@ -259,8 +277,10 @@ async fn fn_finalize_crosses_two_cycles_and_composes() {
         "cycle 1: history must carry the applied edit's note, got {state1:?}"
     );
 
-    // The transcript recorded a Finalize event for the answerer node, even
-    // though the value it carries is the closure sentinel, not real data.
+    // The transcript recorded a Finalize event for the answerer node; for a
+    // closure-valued finalize its rendered value is the INTENTIONAL opaque
+    // "<closure>" stub (observation seam) — the delivery itself went by
+    // handle, which is exactly what the state assertions above prove.
     let saw_finalize = observer
         .events
         .lock()
@@ -307,5 +327,79 @@ async fn fn_finalize_crosses_two_cycles_and_composes() {
             .is_ok(),
         "driver must survive both prior cycles' answerer retirements and \
          still be able to run a further cycle"
+    );
+}
+
+/// RECORD-OF-FUNCTIONS acceptance (codex review 2026-08-12, finding 3): the
+/// finalized answer is `Edits { bump :: State -> State, note :: State ->
+/// State }` — closures NESTED inside a product. The deep sentinel scan must
+/// route the whole record through HANDLE delivery (the lossy bridge would
+/// sentinel the nested closures and the loop's `note e (bump e st)` would
+/// case-trap); both fields must apply, and compose across two cycles.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn record_of_functions_crosses_and_both_fields_apply() {
+    support::require_extract();
+    let _cache_guard = support::isolate_cache();
+
+    let agent_cfg = EngineConfig::from_decls(
+        answerer_decls(),
+        prelude_dir(),
+        Some(record_spike_harness_dir()),
+    )
+    .expect("answerer engine config");
+    let replies = vec![record_edit_reply("cycle 1"), record_edit_reply("cycle 2")];
+    let provider: Arc<dyn DynModelProvider> = Arc::new(ReplayProvider::new(replies));
+    let writer = tidepool_harness::log::LogWriter::create(
+        std::env::temp_dir().join(format!("fn-record-spike-{}.jsonl", std::process::id())),
+        &header(),
+    )
+    .expect("log writer");
+    let agent = Arc::new(Harness::new(writer, agent_cfg, provider).expect("agent harness boots"));
+
+    let observer = Arc::new(CapturingObserver::default());
+    let mut driver = SelfHarnessDriver::new(agent, observer);
+    let source = load_harness_source(&record_spike_harness_dir().join("Harness.hs"))
+        .expect("record spike harness source loads");
+
+    let outcome1 = driver
+        .run_one_cycle(&source, None)
+        .await
+        .expect("cycle 1: finalize @Edits (record of functions) crosses and applies");
+    assert_eq!(
+        outcome1.state_json.get("counter").and_then(|v| v.as_i64()),
+        Some(1),
+        "cycle 1: bump field applied, got {:?}",
+        outcome1.state_json
+    );
+    assert_eq!(
+        outcome1
+            .state_json
+            .get("history")
+            .and_then(|v| v.as_array())
+            .map(|a| a.len()),
+        Some(1),
+        "cycle 1: note field applied, got {:?}",
+        outcome1.state_json
+    );
+
+    let outcome2 = driver
+        .run_one_cycle(&source, Some(&outcome1.state_json))
+        .await
+        .expect("cycle 2: the record composes with the edited state");
+    assert_eq!(
+        outcome2.state_json.get("counter").and_then(|v| v.as_i64()),
+        Some(2),
+        "cycle 2: counter accumulates through nested-closure delivery, got {:?}",
+        outcome2.state_json
+    );
+    assert_eq!(
+        outcome2
+            .state_json
+            .get("history")
+            .and_then(|v| v.as_array())
+            .map(|a| a.len()),
+        Some(2),
+        "cycle 2: both cycles' notes present, got {:?}",
+        outcome2.state_json
     );
 }
