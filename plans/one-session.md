@@ -10,7 +10,7 @@ live harness before the repl surface converts. **LIVING STRUCTURE LANDED
 (6e755ac3, post-review):** the shared session's decl plane is installed —
 model-defined pure helpers persist by name across loops and rotations
 (structural pure-decls guard via the effects-dir-free validation include;
-plane transfers through rotation via `take_lib`; flagship acceptance
+plane transfers through rotation via `take_lib`; end-to-end acceptance
 `living_helper_survives_loop_boundary_and_rotation`). Remaining deferred:
 restart persistence of the plane (decl-log disk reload), higher-order FORK
 answers' own test, and the review's realm-ownership matrix acceptance.

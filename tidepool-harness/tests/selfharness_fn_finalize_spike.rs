@@ -435,7 +435,7 @@ async fn record_of_functions_crosses_and_both_fields_apply() {
     );
 }
 
-/// LIVING STRUCTURE, THROUGH A ROTATION (the decl-plane program's flagship):
+/// LIVING STRUCTURE, THROUGH A ROTATION (the decl plane's end-to-end acceptance):
 /// cycle 1's answerer DEFINES a named helper (`bumpBy`) on the shared
 /// session's decl plane, then finalizes an edit built from it; the fragment
 /// ceiling is forced to 1 so the cycle-2 boundary ROTATES the machine; cycle
