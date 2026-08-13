@@ -78,6 +78,32 @@ pub const CSS: &str = r#"
 }
 
 * { box-sizing: border-box; }
+
+/* Last turn's Haskell — a readable code sheet: preserved line structure,
+   soft-wrapped long strings (prompts/notes inside the code would otherwise
+   run far off-canvas), hairline frame in the page's print idiom. */
+.turn-source { margin-top: calc(var(--unit) * 2); }
+.turn-source summary {
+  font-size: var(--text-micro);
+  letter-spacing: var(--tracking-wide);
+  text-transform: uppercase;
+  color: var(--muted);
+  cursor: pointer;
+}
+.turn-source pre {
+  margin: var(--unit) 0 0 0;
+  padding: calc(var(--unit) * 1.5);
+  border: var(--hair-faint);
+  background: rgba(22, 21, 15, 0.03);
+  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  font-size: 0.8125rem;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  overflow-x: auto;
+  max-height: 24rem;
+  overflow-y: auto;
+}
 html, body { margin: 0; background: var(--paper); }
 body {
   color: var(--ink);
