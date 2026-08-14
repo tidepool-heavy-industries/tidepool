@@ -49,6 +49,10 @@ in git history rather than here.
   the current typed interaction surface.
 - [Typed subagent spawning PRD](self-iterating-harness/18-typed-subagent-spawning-prd.md):
   the next substrate/product direction.
+- [Companion memory](companion-memory.md): agent-curated memory store (a git
+  repo of markdown the PRD 18 curator agent edits) + the `[Directive]`
+  finalize contract — the first LIVE subagent exercise, and the outer-row
+  work dev-tree is blocked on.
 
 The post-restart directory contains the operational source of truth for work
 in flight. The numbered self-iterating-harness documents above are the current
