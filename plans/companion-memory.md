@@ -1,7 +1,14 @@
 # Companion memory: agent-curated store + directive finalize
 
-**Status: ACTIVE (planned 2026-08-14 with the operator; decisions below are
-settled unless marked open).**
+**Status: LANDED THROUGH PHASE 2 (2026-08-14). Phase 1 (outer-row Subagent,
+suspension-serviced; work items 1-9) and Phase 2 (store bootstrap script,
+binary wiring behind TIDEPOOL_MEMORY_REPO, companion HarnessTypes v3 +
+loop v4 with the Turn contract and per-loop curator batching, migration
+seeded as initialState.pendingMemOps) are committed and green. AWAITING:
+the operator's bounce — the v3 checkpoint is a WIRE BREAK with the live v2
+checkpoint (StateDecode fails on restore; reset the dogfood checkpoint and
+restart via run.sh, which auto-seeds the store). Phase 3 remains
+friction-driven.**
 
 One epic, two products: (1) the companion's memory leaves its serialized
 `State` and becomes an agent-curated git repo of markdown files; (2) the

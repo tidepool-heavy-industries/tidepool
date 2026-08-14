@@ -4,13 +4,14 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE TypeApplications #-}
 
--- | Companion loop v3 — OODA-shaped (designed with the operator,
--- 2026-08-14, from Boyd's real diagram + GTD's clarify flowchart): each loop
--- is up to THREE typed windows sharing one accumulating context. Observe is
--- the render itself; orient always runs; decide runs only when orientation
--- is genuinely open ('Deliberate'); act runs unless the loop is 'Quiet'.
--- The authored loop owns the mechanical bookkeeping ('tick', 'retention',
--- 'stampExpectation' — Boyd's feedback wire).
+-- | Companion loop v4 — the OODA windows of v3 (orient always; decide only
+-- when orientation is genuinely open; act unless 'Quiet') with the
+-- companion-memory answer contract (plans\/companion-memory.md): the act
+-- window finalizes a 'Turn' — memory 'Directive's beside the @State ->
+-- State@ edit — and the authored loop BATCHES the directives (plus any
+-- carried from a failed run) into ONE curator-agent spawn per loop. The
+-- receipt carries the store's fresh digest back into 'State'; a failed run
+-- is non-fatal (directives carry over, rendered as unfiled).
 module Harness
   ( State (..)
   , initialState
@@ -18,7 +19,17 @@ module Harness
   , loop
   ) where
 
+import qualified Data.Text as T
 import HarnessTypes
+import Tidepool.Agent.Spawn (spawnAgent)
+import Tidepool.Effects
+  ( SpawnOutcome (..)
+  , SpawnReceipt (..)
+  , WorktreeId (..)
+  , fromCurrentRepository
+  , spawnSpec
+  , spawnSpecIn
+  )
 import Tidepool.Prelude hiding (render)
 
 import Tidepool.Harness (Harness, runLLMTurn)
@@ -31,24 +42,62 @@ loop st = do
     Familiar m -> pure (Just m)
     Deliberate _ -> Just <$> runLLMTurn @Move decidePrompt
   case mv of
-    Nothing -> pure (finish Nothing st)
+    Nothing -> finish Nothing [] st
     Just m -> do
-      edit <- runLLMTurn @(State -> State) actPrompt
-      pure (finish (Just m) (edit st))
+      t <- runLLMTurn @Turn actPrompt
+      finish (Just m) t.directives (t.edit st)
 
--- | Mechanical loop bookkeeping, applied uniformly: the clock ticks on every
--- loop (lived loops, not edits), retention bounds the serialized state, and
--- the feedback wire is stamped from the chosen move.
-finish :: Maybe Move -> State -> State
-finish mv = retention . tick . stampExpectation mv
+-- | Mechanical loop close, applied uniformly: the clock ticks on every loop,
+-- the feedback wire is stamped from the chosen move, and this loop's
+-- directives (plus any carried unfiled ones) run through the curator.
+finish :: Maybe Move -> [Directive] -> State -> Harness State
+finish mv ds st0 = do
+  let st1 = (tick . stampExpectation mv) st0
+      ops = st1.pendingMemOps <> ds
+  if null ops
+    then pure st1
+    else runCurator ops st1 {pendingMemOps = []}
+
+-- | ONE curator spawn for the loop's whole directive batch. First run
+-- allocates the store's managed worktree; later runs REBIND the retained one
+-- ('spawnSpecIn'). Success carries the fresh digest home and remembers the
+-- worktree; failure is non-fatal — the batch carries over (capped) and the
+-- render shows it as unfiled.
+runCurator :: [Directive] -> State -> Harness State
+runCurator ops st = do
+  let spec = case st.memWorktree of
+        Just wt -> spawnSpecIn (WorktreeId wt) "memory-curator" (curatorBrief ops)
+        Nothing -> spawnSpec (fromCurrentRepository "memory-curator") "memory-curator" (curatorBrief ops)
+  r <- spawnAgent @MemReceipt spec
+  pure
+    ( case r of
+        Right (outcome, receipt) ->
+          st
+            { memoryDigest = receipt.digest
+            , memWorktree =
+                Just (case outcome.outcomeReceipt.receiptWorktree of WorktreeId t -> t)
+            }
+        Left _ -> st {pendingMemOps = take 12 ops}
+    )
+
+-- | The curator's task text: the ruleset lives in the store (AGENTS.md), the
+-- intentions are this batch, the typed result is the receipt.
+curatorBrief :: [Directive] -> Text
+curatorBrief ops =
+  "You are this companion's memory curator. Read AGENTS.md at the repository \
+  \root and apply these intentions to the store, then regenerate MEMORY.md \
+  \and commit once with a one-line summary of what changed:\n\n"
+    <> T.intercalate "\n" (map (("- " <>) . renderDirective) ops)
+    <> "\n\nFinalize a result with: digest = the full fresh MEMORY.md contents, \
+       \touched = the file paths you changed, summary = your commit message."
 
 orientPrompt :: Text
 orientPrompt =
   "ORIENT. Your rendered state above is this loop's observation — including \
-  \anything the operator said, and (when present) what you expected last \
-  \loop: confirm or break your own hypothesis first. This loop is up to \
-  \three windows — orient, maybe decide, maybe act — all sharing this one \
-  \context, so later windows see everything this one does.\n\
+  \anything the operator said, your memory store's digest, and (when present) \
+  \what you expected last loop: confirm or break your own hypothesis first. \
+  \This loop is up to three windows — orient, maybe decide, maybe act — all \
+  \sharing this one context, so later windows see everything this one does.\n\
   \\n\
   \This window's job is orientation only: what does this moment add up to, \
   \and how should the loop move? Finalize an Orientation { reading, tempo }: \
@@ -86,25 +135,30 @@ actPrompt :: Text
 actPrompt =
   "ACT. Your move is above, in your own words — carry it out in this window. \
   \An `AskFirst` move presents its question now (`askUser @T` on a sum you \
-  \define, or `choose` for runtime alternatives) and folds the answer into \
-  \the edit; an `Engage` move does the thing and records what happened.\n\
+  \define — declare the type in one ```haskell block and use it in the next \
+  \block of the same reply) and folds the answer into your Turn; an `Engage` \
+  \move does the thing and records what happened.\n\
   \\n\
-  \Close the window with the durable edit (compose with `.`): `remember \
-  \FromAgent (Fact ...)` / `(Event ...)` / `(Quote FromOperator ...)` mints \
-  \a memory with provenance; `revise mid entry` makes a memory say it \
-  \better; `setStanding Archived mid` (or Retired) manages attention; \
-  \`openThread q` / `updateThread tid f` manage questions — mark a thread \
-  \`WaitingOnOperator` instead of re-asking; `noteOperator entry` grows your \
-  \durable model of your operator; `propose \"...\"` asks them for a harness \
-  \change; `onScratch f` edits your schemaless sandbox with aeson-lens.\n\
+  \Close the window with a Turn { directives, edit }:\n\
   \\n\
-  \WHEN THE OPERATOR SPEAKS: if their words matter beyond this loop, keep \
-  \them verbatim — `remember FromOperator (Quote FromOperator \"...\")` — \
-  \and grow `noteOperator` facts about who they are as you learn them. BE \
-  \CURIOUS: you know little about your operator — their days, their taste, \
-  \why they built this place — and curiosity is how a companion becomes \
-  \one; let your interests accumulate as threads and structure, not \
-  \meta-commentary.\n\
+  \`directives` are your MEMORY verbs, executed by your curator agent against \
+  \your git store after this loop: `Remember \"...\"` files a new fact, \
+  \`Modify \"...\"` revises what the store already holds (name the slug from \
+  \your digest when you can), `Forget \"...\"` removes it. Prose payloads — \
+  \the curator interprets them under the store's own rules. What deserves \
+  \remembering: durable facts about your operator, lessons, commitments — \
+  \not session ephemera.\n\
   \\n\
-  \A move that turned out to need no durable trace finalizes `id`. \
-  \Finalize: `finalize @(State -> State) (...)`."
+  \`edit` is your typed-bag edit (compose with `.`): `openThread q` / \
+  \`updateThread tid f` manage questions — mark a thread `WaitingOnOperator` \
+  \instead of re-asking; `propose \"...\"` asks the operator for a harness \
+  \change; `onScratch f` edits your schemaless sandbox with aeson-lens. \
+  \`Turn [] id` is the honest no-change answer.\n\
+  \\n\
+  \WHEN THE OPERATOR SPEAKS: if their words matter beyond this loop, \
+  \`Remember` them (verbatim quotes are fine payloads), and grow the store's \
+  \operator model as you learn who they are. BE CURIOUS: you know little \
+  \about your operator — their days, their taste, why they built this place — \
+  \and curiosity is how a companion becomes one.\n\
+  \\n\
+  \Finalize: `finalize @Turn (Turn { directives = [...], edit = ... })`."

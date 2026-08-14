@@ -38,4 +38,9 @@ export RUST_LOG="${RUST_LOG:-warn,tidepool_harness=debug,tidepool_web=debug}"
 # unreachable from tests regardless of what the box is running.
 export XDG_CACHE_HOME="${TIDEPOOL_DOGFOOD_CACHE:-$HOME/.cache/tidepool-dogfood}"
 echo "==> dogfood cache: $XDG_CACHE_HOME/tidepool/selfharness"
+# Companion memory store (plans/companion-memory.md): the curator agent's git
+# repo, auto-seeded on first run. Durable data, NOT under the dogfood cache.
+export TIDEPOOL_MEMORY_REPO="${TIDEPOOL_MEMORY_REPO:-$HOME/.local/share/tidepool/companion-memory}"
+[ -e "$TIDEPOOL_MEMORY_REPO/.git" ] || "$REPO/scripts/companion-memory-init.sh" "$TIDEPOOL_MEMORY_REPO"
+echo "==> memory store: $TIDEPOOL_MEMORY_REPO"
 exec "./target/$PROFILE/tidepool-selfharness" --harness "$HARNESS"
