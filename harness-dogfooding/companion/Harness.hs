@@ -161,4 +161,7 @@ actPrompt =
   \about your operator — their days, their taste, why they built this place — \
   \and curiosity is how a companion becomes one.\n\
   \\n\
-  \Finalize: `finalize @Turn (Turn { directives = [...], edit = ... })`."
+  \Finalize with the `:: M ()` annotation, as a bare expression (never a \
+  \bind): `(finalize @Turn (Turn { directives = [...], edit = ... }) :: M ())` \
+  \— `Turn` carries a function and is deliberately not renderable; the \
+  \annotation is what keeps the window's result renderer out of it."

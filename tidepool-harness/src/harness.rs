@@ -1355,17 +1355,25 @@ impl Harness {
                 .map(|c| (c.ty.as_str(), c.imports.as_slice())),
         )?;
 
-        // The BIND/BINDDISCARD templates' imports: user imports + the decl
-        // module + current Val modules — just the user imports when the node
-        // has no decl plane.
-        let bind_imports = match &bind_ctx {
-            Some((session_imports, ..)) => match (imports.is_empty(), session_imports.is_empty()) {
-                (_, true) => imports.to_string(),
-                (true, false) => session_imports.clone(),
-                (false, false) => format!("{imports}\n{session_imports}"),
-            },
-            None => imports.to_string(),
-        };
+        // The BIND/BINDDISCARD templates' imports: the CONTRACT's author
+        // imports (so a bind-classified statement can name the answer type
+        // and its siblings — without these, `x <- askUser @AuthorType …`
+        // failed "not in scope" and the corrective hint told the author a
+        // false story about module layout; companion dogfood 2026-08-14),
+        // plus user imports + the decl module + current Val modules.
+        let mut bind_import_lines: Vec<String> = contract
+            .iter()
+            .flat_map(|c| c.imports.iter().cloned())
+            .collect();
+        if !imports.is_empty() {
+            bind_import_lines.push(imports.to_string());
+        }
+        if let Some((session_imports, ..)) = &bind_ctx {
+            if !session_imports.is_empty() {
+                bind_import_lines.push(session_imports.clone());
+            }
+        }
+        let bind_imports = bind_import_lines.join("\n");
 
         // Build every template `run_turn` might select — the verdict, and so
         // which one applies, isn't known until it returns. Resolved BEFORE
