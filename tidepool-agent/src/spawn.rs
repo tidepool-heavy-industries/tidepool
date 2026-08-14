@@ -232,13 +232,14 @@ impl SpawnRequest {
     }
 
     /// The cycle shape for a resolved workspace.
-    pub fn cycle_spec(&self, cwd: String) -> CycleSpec {
+    pub fn cycle_spec(&self, cwd: String, extra_writable_roots: Vec<String>) -> CycleSpec {
         CycleSpec {
             cwd,
             task: self.task.clone(),
             output_schema: self.output_schema.clone(),
             model: self.model,
             effort: self.effort,
+            extra_writable_roots,
         }
     }
 }
@@ -427,7 +428,15 @@ impl CoupledSpawner {
         // 5. Running. `cwd` is supplied per-cycle, not at thread creation —
         //    see `CycleSpec`'s docs for why the seam splits it that way.
         let cwd = worktree.cwd().to_string_lossy().into_owned();
-        let event = match backend.start_turn(&thread, &request.cycle_spec(cwd)) {
+        // The linked worktree's git metadata lives in the SOURCE repo's
+        // `.git`; the sandbox must admit it or no worker can ever commit.
+        let git_dir = self
+            .manager
+            .source_repository()
+            .join(".git")
+            .to_string_lossy()
+            .into_owned();
+        let event = match backend.start_turn(&thread, &request.cycle_spec(cwd, vec![git_dir])) {
             Ok(event) => event,
             Err(error) => {
                 return Err(self.roll_back(

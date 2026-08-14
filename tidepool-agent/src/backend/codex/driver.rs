@@ -385,10 +385,17 @@ fn turn_start_params(
             exclude_slash_tmp: Some(false),
             exclude_tmpdir_env_var: Some(false),
             network_access: Some(false),
-            // The worker's bound worktree is the ONLY writable root — the
-            // sandbox is where that one-worktree-per-agent coupling is
-            // enforced against the process, not merely asserted about it.
-            writable_roots: Some(vec![codex_codes::AbsolutePathBuf(spec.cwd.clone())]),
+            // The worker's bound worktree, plus the seam's extra roots (the
+            // source repo's `.git` — a linked worktree's git metadata lives
+            // there, so committing is impossible without it). The sandbox is
+            // where the one-worktree-per-agent coupling is enforced against
+            // the process, not merely asserted about it.
+            writable_roots: Some(
+                std::iter::once(spec.cwd.clone())
+                    .chain(spec.extra_writable_roots.iter().cloned())
+                    .map(codex_codes::AbsolutePathBuf)
+                    .collect(),
+            ),
         }),
         // Never ASK: containment is the SANDBOX's job (above), not a
         // conversational consent layer — there is no human on this seam to
@@ -722,6 +729,7 @@ mod tests {
             output_schema: Some(serde_json::json!({"type": "object"})),
             model: ModelPolicy::CheapPlumbing,
             effort: ReasoningEffort::Low,
+            extra_writable_roots: Vec::new(),
         };
         let params = turn_start_params(
             &BackendThreadId("thread-1".to_string()),

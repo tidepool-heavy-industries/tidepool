@@ -210,6 +210,15 @@ pub struct CycleSpec {
     pub output_schema: Option<serde_json::Value>,
     pub model: ModelPolicy,
     pub effort: ReasoningEffort,
+    /// Extra directories the backend's write sandbox must admit beyond
+    /// `cwd`. In practice: the source repository's `.git` — a LINKED
+    /// worktree's git metadata (objects, refs, `worktrees/<id>/`) lives
+    /// there, so without it every `git commit` inside the worktree is
+    /// blocked by the sandbox (the curator's first committed run failed
+    /// exactly this way; dogfood 2026-08-14). `serde(default)` keeps
+    /// recorded fixtures decodable.
+    #[serde(default)]
+    pub extra_writable_roots: Vec<String>,
 }
 
 /// What the terminal message actually was. Typed rather than `Option<Value>`

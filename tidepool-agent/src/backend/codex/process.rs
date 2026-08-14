@@ -539,10 +539,7 @@ impl<T: Transport> Session<T> {
                         method: req.method.clone(),
                         source,
                     })?;
-                    let resp = JsonRpcResponse {
-                        id: req.id,
-                        result,
-                    };
+                    let resp = JsonRpcResponse { id: req.id, result };
                     self.send(&resp, "approval decline").await?;
                 }
                 JsonRpcMessage::Request(unexpected) => {

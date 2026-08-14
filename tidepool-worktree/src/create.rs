@@ -176,6 +176,14 @@ impl WorktreeManager {
         }
     }
 
+    /// The source repository every `SourceCurrentRepository` worktree is
+    /// created from — the path handed to [`Self::new`]. A spawner needs it
+    /// to grant a worker's write sandbox the repo's `.git` (a linked
+    /// worktree's git metadata lives there, not under the worktree).
+    pub fn source_repository(&self) -> &Path {
+        &self.source_repository
+    }
+
     pub fn git(&self) -> &GitCli {
         &self.git
     }
