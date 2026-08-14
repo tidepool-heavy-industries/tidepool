@@ -149,7 +149,7 @@ fn turn_delta_log_line_is_byte_identical_regardless_of_reasoning_items() {
         },
         reasoning: Some("checking both verdicts agree".to_string()),
         reasoning_items: Vec::new(),
-        block: None,
+        blocks: Vec::new(),
     };
     let with_reasoning = DrivenTurn {
         reply: "```haskell\nresume Approve\n```".to_string(),
@@ -163,7 +163,7 @@ fn turn_delta_log_line_is_byte_identical_regardless_of_reasoning_items() {
             "id": "rs_1",
             "encrypted_content": "opaque-blob",
         }))],
-        block: None,
+        blocks: Vec::new(),
     };
 
     let dir = tempfile::tempdir().unwrap();

@@ -5,7 +5,9 @@
 //!
 //! Drives that through the REAL turn path (`drive_turn` → `run_block`) via
 //! the record-replay provider: turn 1 declares `steps`, turn 2 (a follow-up)
-//! computes from `steps`.
+//! computes from `steps`. The multi-block test packs the same story into ONE
+//! reply (every ```haskell block runs, in order) and pins the
+//! failure-mid-sequence contract.
 //!
 //! GHC-heavy tier: needs `TIDEPOOL_EXTRACT` + the with-packages GHC on PATH
 //! (`--ignore-default-filter` to run).
@@ -16,7 +18,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use tidepool_harness::engine::EngineConfig;
-use tidepool_harness::log::{Actor, LogHeader, LogWriter};
+use tidepool_harness::log::{Actor, Event, LogHeader, LogReader, LogWriter};
 use tidepool_harness::provider::{DynModelProvider, Usage};
 use tidepool_harness::replay::{RecordedReply, ReplayProvider};
 use tidepool_harness::tree::{NodeId, NodeState};
@@ -113,6 +115,107 @@ async fn a_declaration_persists_into_the_next_turn() {
         ),
     }
     assert_eq!(harness.tree().state(root), Some(NodeState::Done));
+}
+
+/// The multi-block contract on the REAL turn path: every ```haskell block in
+/// one reply runs, in order, as one sequence (decl block feeding the expr
+/// block — the packing that previously cost a model round per block); a
+/// failure mid-sequence keeps the blocks that ran (the failed reply's OWN
+/// decl block persists into the corrective retry) and feeds back a
+/// sequence-context corrective naming the failed block and the resume point.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn multi_block_reply_runs_in_order_and_fails_with_resume_point() {
+    support::require_extract();
+
+    let dir = tempfile::tempdir().unwrap();
+    let log_path = dir.path().join("multi_block.jsonl");
+    let writer = LogWriter::create(&log_path, &header()).unwrap();
+
+    let cfg = EngineConfig::standard(prelude_dir(), None).expect("engine config");
+    let replies = vec![
+        // Reply 1: TWO blocks — a declaration block, then an expression block
+        // using it. One model round, both run.
+        reply(
+            "Declare, then use:\n\n```haskell\nnums = [1, 2, 3] :: [Int]\n\
+             double x = x * (2 :: Int)\n```\n\n\
+             ```haskell\npure (toJSON (sum (map double nums)))\n```",
+        ),
+        // Reply 2 (follow-up): block 1 declares; block 2 fails to compile.
+        // Block 1 must persist despite block 2's failure.
+        reply(
+            "```haskell\ntripled = [3, 6, 9] :: [Int]\n```\n\n\
+             ```haskell\npure (toJSON (thisNameDoesNotExist))\n```",
+        ),
+        // Reply 3: the corrective retry — references reply 2's SURVIVING
+        // block-1 declaration. Only resolves if the failed sequence kept it.
+        reply("```haskell\npure (toJSON (sum tripled))\n```"),
+    ];
+    let provider: Arc<dyn DynModelProvider> = Arc::new(ReplayProvider::new(replies));
+    let harness = Arc::new(Harness::new(writer, cfg, provider).expect("harness boots"));
+
+    let root = harness
+        .create_root(
+            "multi-block root",
+            "Pack a decl and its use into one reply.",
+        )
+        .unwrap();
+    harness.force(root, Actor::Operator).unwrap();
+
+    // Reply 1: both blocks run in one drive — the sequence completes with the
+    // LAST block's value, computed through the FIRST block's declarations.
+    let turn1 = harness
+        .run_to_hole_or_done(root)
+        .await
+        .expect("multi-block turn drives to completion");
+    match &turn1 {
+        TurnOutcome::Completed { rendered } => {
+            assert!(
+                rendered.contains("12"),
+                "sum (map double nums) = 12 must come from the same reply's decl block, got: {rendered}"
+            );
+        }
+        other => panic!("expected Completed, got {}", outcome_tag(other)),
+    }
+    assert_eq!(harness.tree().state(root), Some(NodeState::Done));
+
+    // Replies 2+3: block 2 of reply 2 fails; the corrective retry (reply 3)
+    // computes from reply 2's surviving block-1 declaration.
+    let turn2 = harness
+        .follow_up(root, "Now triple them.")
+        .await
+        .expect("corrective retry drives to completion");
+    match &turn2 {
+        TurnOutcome::Completed { rendered } => {
+            assert!(
+                rendered.contains("18"),
+                "sum tripled = 18 must come from the FAILED reply's surviving decl block, got: {rendered}"
+            );
+        }
+        other => panic!("expected Completed, got {}", outcome_tag(other)),
+    }
+
+    // The corrective user turn carried the sequence context: which block
+    // failed, what ran and persists, and where to resume.
+    let (_hdr, events) = LogReader::open(&log_path).unwrap();
+    let corrective = events
+        .filter_map(|e| match e.expect("readable log record").event {
+            Event::TurnDelta {
+                role: tidepool_harness::provider::Role::User,
+                content,
+                ..
+            } => Some(content),
+            _ => None,
+        })
+        .find(|c| c.contains("Block 2 of 2 failed"))
+        .expect("a corrective user turn carries the sequence-failure context");
+    assert!(
+        corrective.contains("block 1 (tripled = [3, 6, 9] :: [Int])"),
+        "the corrective names the surviving block: {corrective}"
+    );
+    assert!(
+        corrective.contains("Continue from block 2"),
+        "the corrective states the resume point: {corrective}"
+    );
 }
 
 fn outcome_tag(o: &TurnOutcome) -> &'static str {

@@ -1136,7 +1136,8 @@ impl Harness {
             convo.last_input_tokens = driven.usage.input_tokens;
         }
 
-        let Some(block) = driven.block else {
+        let blocks = driven.blocks;
+        if blocks.is_empty() {
             // A prose-only turn ran no Haskell, but
             // still record a `TurnStart` whose `source` is the reply text — so a
             // node's durable log always shows one `TurnStart` per model turn
@@ -1146,26 +1147,98 @@ impl Harness {
             return Ok(engine::TurnOutcome::NoBlock {
                 reply: driven.reply,
             });
-        };
+        }
 
         // Record the EXTRACTED executed Haskell as this turn's
-        // `TurnStart.source` — so `tail -f <log>` shows the exact block the
-        // turn ran, not a coarse "model" provenance tag. Emitted before the
-        // block runs, so it precedes this turn's Effect / HolePublished
-        // events in the durable log.
-        self.tree.turn_start(node, block.clone(), None)?;
+        // `TurnStart.source` — so `tail -f <log>` shows the exact source the
+        // turn ran, not a coarse "model" provenance tag. ONE `TurnStart` per
+        // model turn (the durable-log invariant), carrying the whole runnable
+        // sequence; emitted before any block runs, so it precedes this turn's
+        // Effect / HolePublished events in the durable log.
+        let joined = blocks.join("\n\n");
+        self.tree.turn_start(node, joined.clone(), None)?;
         // INFO, not DEBUG: a person watching the console must see the exact
         // source every compile ran (dogfood-observability deliverable 1) —
         // full text, never truncated (a pathologically large source is
         // itself signal worth seeing).
-        tracing::info!(node = node.0, source = %block, "compiled turn source");
+        tracing::info!(node = node.0, source = %joined, "compiled turn source");
         if let Some(convo) = self.convos.lock().get_mut(&node) {
-            convo.last_turn_source = Some(block.clone());
+            convo.last_turn_source = Some(joined);
         }
 
-        // Compile + run the block synchronously (spawn_blocking off the reactor).
-        let (imports, body) = engine::split_imports(&block);
-        self.run_block(node, &body, &imports, "").await
+        // Run the blocks in order as ONE sequence (the multi-block contract:
+        // every ```haskell block runs; later blocks see earlier blocks'
+        // declarations and bindings). Stop at the first failure — a later
+        // block's compile can depend on an earlier bind's LIVE value (the
+        // Val-module mechanism), so pre-compiling the whole sequence is not
+        // possible, and stop-at-first-error with an explicit resume point is
+        // the honest contract. A suspension parks the sequence: unrun blocks
+        // are dropped, with a transcript note so the model resends them when
+        // the window continues (a `finalize` ends the window — the model
+        // never sees another turn, so that case is observer-only).
+        let total = blocks.len();
+        let mut receipts: Vec<String> = Vec::new();
+        let mut last_rendered = String::new();
+        for (ix, block) in blocks.iter().enumerate() {
+            let n = ix + 1;
+            if ix > 0 {
+                // The previous block's completion left the node `Done`.
+                self.reopen_node(node)?;
+            }
+            let (imports, body) = engine::split_imports(block);
+            match self.run_block(node, &body, &imports, "").await {
+                Ok(engine::TurnOutcome::Completed { rendered }) => {
+                    receipts.push(engine::block_receipt(n, block, &rendered));
+                    last_rendered = rendered;
+                }
+                Ok(out @ engine::TurnOutcome::Suspended { .. }) => {
+                    if n < total {
+                        let is_finalize = matches!(
+                            &out,
+                            engine::TurnOutcome::Suspended { classified, .. }
+                                if matches!(
+                                    classified.routing,
+                                    engine::HoleRouting::Finalize { .. }
+                                )
+                        );
+                        if is_finalize {
+                            tracing::warn!(
+                                node = node.0,
+                                unrun = total - n,
+                                "finalize in block {n} of {total} — later blocks never run"
+                            );
+                        } else {
+                            self.push_user_turn(
+                                node,
+                                &format!(
+                                    "Note: block {n} of {total} suspended awaiting an \
+                                     answer, so the blocks after it did not run. Blocks \
+                                     1–{n} ran and persist — when your window continues, \
+                                     pick up from block {}.",
+                                    n + 1
+                                ),
+                            )?;
+                        }
+                    }
+                    return Ok(out);
+                }
+                // `run_block` never yields `NoBlock`; pass it through if it ever does.
+                Ok(out @ engine::TurnOutcome::NoBlock { .. }) => return Ok(out),
+                // A compile-class failure mid-sequence: wrap the GHC error in
+                // the sequence context (what ran, what didn't, where to resume)
+                // so every corrective wrapper carries it verbatim. A
+                // single-block turn keeps the bare error — today's shape.
+                Err(HarnessError::Compile(msg)) if total > 1 => {
+                    return Err(HarnessError::Compile(engine::sequence_failure_context(
+                        &receipts, n, total, &msg,
+                    )));
+                }
+                Err(e) => return Err(e),
+            }
+        }
+        Ok(engine::TurnOutcome::Completed {
+            rendered: last_rendered,
+        })
     }
 
     /// Drive ONE plain model turn on `node`: push `prompt` as a User message,
@@ -1647,7 +1720,7 @@ impl Harness {
                 Ok(engine::TurnOutcome::NoBlock { .. }) => {
                     self.push_user_turn(
                         node,
-                        "Reply with a single ```haskell block to run (or to answer the \
+                        "Reply with ```haskell blocks to run (or answer the \
                          hole with `resume expr`).",
                     )?;
                 }
@@ -1667,8 +1740,8 @@ impl Harness {
                     self.push_user_turn(
                         node,
                         &format!(
-                            "That Haskell did not compile. Fix it and reply with a \
-                             corrected single ```haskell block. Common causes: a verb \
+                            "That Haskell did not compile. Fix it and reply with \
+                             corrected ```haskell blocks. Common causes: a verb \
                              needs more arguments (e.g. `grepGlob pat path`), or you \
                              passed `Text` where a different type is expected.\n\n\
                              GHC error:\n{ghc}"
@@ -2577,10 +2650,11 @@ impl Harness {
                 convo.turn_seq += 1;
             }
 
-            let Some(block) = driven.block else {
+            let mut blocks = driven.blocks;
+            let Some(block) = blocks.pop() else {
                 self.push_user_turn(
                     answerer,
-                    "Reply with a single ```haskell block: `resume expr` where the value \
+                    "Reply with a ```haskell block: `resume expr` where the value \
                      matches the hole type.",
                 )?;
                 continue;
@@ -2594,6 +2668,17 @@ impl Harness {
             let helpers = match ty {
                 Some(t) => format!("resume :: {t} -> M {t}\nresume = pure"),
                 None => RESUME_HELPER.to_string(),
+            };
+            // Blocks before the answer block are top-level declarations by the
+            // multi-block contract (later blocks see them). This path's turn is
+            // a one-shot compile against the TARGET's suspended session — no
+            // decl plane to land them on — so they ride into the answer turn as
+            // module-level helpers. A non-decl leading block fails the compile
+            // with a GHC error naming it, feeding the ordinary retry below.
+            let helpers = if blocks.is_empty() {
+                helpers
+            } else {
+                format!("{}\n\n{helpers}", blocks.join("\n\n"))
             };
             let (imports, body) = engine::split_imports(&block);
             let src = engine::template_answer_turn(compile_cfg, &body, &imports, &helpers);

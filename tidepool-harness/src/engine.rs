@@ -424,11 +424,17 @@ fn decode_askwith(request: &Value, table: &DataConTable) -> (String, Json) {
 /// The framing that teaches the model its ONE tool (an eval block) and how to
 /// answer a hole. Deliberately terse — the API is the prompt.
 pub const SYSTEM_FRAMING: &str = "\
-You drive a resident Haskell (tidepool) session. Your ONLY output that runs is a \
-single fenced ```haskell code block containing ONE expression of type `M a` — the \
-same effect-monad surface as tidepool eval (verbs like `run`, `grepGlob`, `readGlob`, \
-`llm`, `runLLMTurn`, `runLLMTurnFork`). The LAST such block in your \
-reply is compiled and run against the session; prose around it is ignored by the runtime.\n\
+You drive a resident Haskell (tidepool) session. Your runnable output is fenced \
+```haskell code blocks: EVERY such block in your reply runs, in order, as one \
+sequence — consecutive GHCi entries, so later blocks see earlier blocks' \
+declarations and bindings. A block is one unit: a group of top-level declarations, \
+a bind (`x <- expr`), or ONE expression of type `M a` — the same effect-monad \
+surface as tidepool eval (verbs like `run`, `grepGlob`, `readGlob`, \
+`llm`, `runLLMTurn`, `runLLMTurnFork`). Sequence effectful steps inside a single \
+`do` block; declare the types and helpers they use in a separate block before it. \
+If a block fails, everything before it has still run and persists — you'll be told \
+which block failed and why; continue from that block. Prose outside the blocks is \
+ignored by the runtime.\n\
 \n\
 Verbs return typed DATA you unwrap — failures are `Either`, NOT exceptions. PREFER a typed \
 verb over shelling out with `run` (there is a verb for files, http, git, kv):\n\
@@ -457,7 +463,7 @@ exactly that: bind a choice, then next turn pick the follow-up from it. E.g. tur
 `lane <- runLLMTurn @Text \"which lane — alpha or beta?\"`; turn 2 reads `lane` and \
 presents the form for that branch. Bind what you'll need later instead of re-asking.\n\
 \n\
-When you are answering a HOLE, your block's value IS the answer: write `resume expr` \
+When you are answering a HOLE, your LAST block's value IS the answer: write `resume expr` \
 where `expr :: T` matches the hole's declared type. `resume` is the identity here — \
 `resume Approve` just yields `Approve`.";
 
@@ -586,7 +592,7 @@ pub fn answerer_hole_card(
         "The loop needs a typed answer of type `{ty}`.\n\n\
          {prompt}\n\n\
          {shape}This request holds your window open: take the rounds you need \
-         (each a single ```haskell block — explore, define, `note`, `askUser`), \
+         (```haskell blocks, run in order — explore, define, `note`, `askUser`), \
          then answer by evaluating `finalize @{ty_at} value` — THAT ends the \
          window and hands the value back to the loop.{scope}"
     )
@@ -622,15 +628,15 @@ pub fn available_effects_section(decls: &[tidepool_mcp::EffectDecl]) -> String {
 // Eval-block extraction
 // ---------------------------------------------------------------------------
 
-/// Extract the LAST fenced ```haskell block from a model reply. Returns `None`
-/// when the reply has no fenced haskell block (a pure-prose turn — the engine
-/// treats that as "no eval to run", loops or completes per policy).
+/// Extract EVERY fenced ```haskell block from a model reply, in order.
+/// Empty when the reply has no fenced haskell block (a pure-prose turn — the
+/// engine treats that as "no eval to run", loops or completes per policy).
 ///
 /// Matches ```haskell / ```hs (case-insensitive) opening fences; a bare ```
-/// fence is NOT treated as haskell (avoids grabbing a shell/text block). The
-/// LAST block wins so a model can think in earlier blocks and commit in the
-/// final one.
-pub fn extract_last_haskell_block(reply: &str) -> Option<String> {
+/// fence is NOT treated as haskell (avoids grabbing a shell/text block).
+/// Every block is `trim_end()`ed — the turn templates' `{{TURN}}` splice
+/// relies on turn text never carrying a trailing newline.
+pub fn extract_haskell_blocks(reply: &str) -> Vec<String> {
     let mut blocks = Vec::new();
     let mut lines = reply.lines().peekable();
     while let Some(line) = lines.next() {
@@ -654,7 +660,58 @@ pub fn extract_last_haskell_block(reply: &str) -> Option<String> {
             }
         }
     }
-    blocks.pop()
+    blocks
+}
+
+// ---------------------------------------------------------------------------
+// Multi-block sequences
+// ---------------------------------------------------------------------------
+
+/// One line of a sequence receipt: which block ran and what it produced. The
+/// block is identified by its first source line (the model wrote it this
+/// turn — it needs a pointer, not a re-print), the outcome by `rendered`'s
+/// first line.
+pub fn block_receipt(n: usize, source: &str, rendered: &str) -> String {
+    let head = truncate_chars(source.lines().next().unwrap_or("").trim(), 72);
+    let out = truncate_chars(rendered.lines().next().unwrap_or("").trim(), 96);
+    format!("block {n} ({head}) — {out}")
+}
+
+fn truncate_chars(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        s.to_string()
+    } else {
+        format!("{}…", s.chars().take(max).collect::<String>())
+    }
+}
+
+/// The corrective payload for a failure at block `n` of a multi-block
+/// sequence: which blocks already ran (and persist), which never ran, where
+/// to resume, then the GHC error. Slotted where a single-block turn carries
+/// the bare GHC error, so every corrective wrapper (the driver's window
+/// loop, [`crate::Harness::run_to_hole_or_done`]) forwards it without
+/// knowing about sequences.
+pub fn sequence_failure_context(receipts: &[String], n: usize, total: usize, ghc: &str) -> String {
+    let ran = if receipts.is_empty() {
+        "(none — the first block failed)".to_string()
+    } else {
+        receipts.join("\n")
+    };
+    let unrun = if n < total {
+        if n + 1 == total {
+            format!("Block {total} did not run.\n")
+        } else {
+            format!("Blocks {}–{total} did not run.\n", n + 1)
+        }
+    } else {
+        String::new()
+    };
+    format!(
+        "Block {n} of {total} failed. Blocks that already ran persist (their \
+         declarations, bindings, and effects):\n{ran}\n{unrun}\
+         Continue from block {n}: your next reply starts at a corrected \
+         block {n} — everything before it already ran.\n\n{ghc}"
+    )
 }
 
 /// Split a model-written block into (imports, expression). A model sometimes
@@ -1244,7 +1301,7 @@ fn push_braced_stmt(out: &mut String, turn_text: &str) {
 /// (baked in once, at build time, from the one-line placeholder) being the
 /// SAME padding a trailing-newline-free `block` needs; a `block` that already
 /// ended in `\n` would double up. `run_block`'s only source of turn text,
-/// `extract_last_haskell_block`, always `trim_end()`s what it extracts, so
+/// `extract_haskell_blocks`, always `trim_end()`s each block it extracts, so
 /// this holds for every real caller.
 pub fn expr_turn_template(
     cfg: &EngineConfig,
@@ -1427,7 +1484,8 @@ pub enum TurnOutcome {
     NoBlock { reply: String },
 }
 
-/// One assistant turn's provider result plus its extracted block (if any).
+/// One assistant turn's provider result plus its extracted blocks (empty for
+/// a pure-prose reply).
 pub struct DrivenTurn {
     pub reply: String,
     pub usage: Usage,
@@ -1436,7 +1494,9 @@ pub struct DrivenTurn {
     /// The encrypted reasoning items the provider surfaced for this turn (see
     /// [`ReasoningItem`]) — distinct from `reasoning` above.
     pub reasoning_items: Vec<ReasoningItem>,
-    pub block: Option<String>,
+    /// Every fenced ```haskell block in the reply, in order — the runnable
+    /// sequence ([`extract_haskell_blocks`]).
+    pub blocks: Vec<String>,
 }
 
 /// Call the provider once with the assembled transcript and extract the block.
@@ -1456,7 +1516,7 @@ pub async fn drive_model_turn(
         reasoning,
         reasoning_items,
     } = provider.complete_boxed(req, sink).await?;
-    let block = extract_last_haskell_block(&text);
+    let blocks = extract_haskell_blocks(&text);
     if let Some(r) = reasoning.as_deref().filter(|r| !r.is_empty()) {
         tracing::info!("model reasoning:\n{r}");
     }
@@ -1465,7 +1525,7 @@ pub async fn drive_model_turn(
         usage,
         reasoning,
         reasoning_items,
-        block,
+        blocks,
     })
 }
 
@@ -1548,6 +1608,69 @@ mod tests {
         let req = assemble_request(&[user("hi")], Some(2048), None);
         assert_eq!(req.messages[0].role, Role::System);
         assert_eq!(req.messages[0].content, SYSTEM_FRAMING);
+    }
+
+    // -- multi-block extraction ---------------------------------------------
+
+    /// Every ```haskell block is extracted, in reply order — the multi-block
+    /// contract's parsing half. Each block is trim_end()ed (the `{{TURN}}`
+    /// splice invariant).
+    #[test]
+    fn extract_haskell_blocks_returns_all_in_order() {
+        let reply = "First declare:\n```haskell\ndata Mood = Rested | Wired\n```\n\
+                     then use it:\n```hs\nmood <- askUser @Mood \"how?\"\n```\n\
+                     done.";
+        let blocks = extract_haskell_blocks(reply);
+        assert_eq!(
+            blocks,
+            vec![
+                "data Mood = Rested | Wired".to_string(),
+                "mood <- askUser @Mood \"how?\"".to_string(),
+            ]
+        );
+    }
+
+    /// Bare ``` and non-haskell fences are not runnable blocks; a reply of
+    /// only those extracts to empty (the NoBlock path). Case-insensitive
+    /// ```HASKELL still matches; an empty haskell fence is skipped.
+    #[test]
+    fn extract_haskell_blocks_ignores_non_haskell_fences() {
+        let reply = "```\nplain fence\n```\n```text\nquoted code\n```\n\
+                     ```HASKELL\npure ()\n```\n```haskell\n\n```";
+        let blocks = extract_haskell_blocks(reply);
+        assert_eq!(blocks, vec!["pure ()".to_string()]);
+
+        assert!(extract_haskell_blocks("no code here at all").is_empty());
+    }
+
+    /// The sequence-failure payload names the failed block, lists what ran
+    /// (receipts) and what never ran, and states the resume point — the
+    /// contract taught by the framing ("continue from that block").
+    #[test]
+    fn sequence_failure_context_names_ran_failed_and_unrun() {
+        let receipts = vec![
+            block_receipt(1, "data Mood = Rested | Wired", "declared (gen 3)"),
+            block_receipt(2, "mood <- askUser @Mood \"how?\"", "bound"),
+        ];
+        let msg = sequence_failure_context(&receipts, 3, 4, "GHC says no");
+        assert!(msg.contains("Block 3 of 4 failed"), "{msg}");
+        assert!(
+            msg.contains("block 1 (data Mood = Rested | Wired)"),
+            "{msg}"
+        );
+        assert!(msg.contains("Block 4 did not run."), "{msg}");
+        assert!(msg.contains("Continue from block 3"), "{msg}");
+        assert!(msg.ends_with("GHC says no"), "{msg}");
+
+        // First block failing: no receipts, an explicit (none) line, and a
+        // multi-block unrun range.
+        let msg = sequence_failure_context(&[], 1, 3, "boom");
+        assert!(msg.contains("(none — the first block failed)"), "{msg}");
+        assert!(msg.contains("Blocks 2–3 did not run."), "{msg}");
+
+        // Last block failing: nothing unrun, no unrun line at all.
+        let msg = sequence_failure_context(&receipts, 4, 4, "boom");
+        assert!(!msg.contains("did not run"), "{msg}");
     }
 
     // -- hole card type synopsis --------------------------------------------
@@ -1803,8 +1926,8 @@ mod tests {
     // wrong error-line mapping or a stray placeholder reaching GHC.
     //
     // Every fixture below deliberately does NOT end in `\n`: `run_block`'s
-    // only source of turn text, `extract_last_haskell_block`, always
-    // `trim_end()`s the fenced block it extracts, so a turn's raw text never
+    // only source of turn text, `extract_haskell_blocks`, always
+    // `trim_end()`s each fenced block it extracts, so a turn's raw text never
     // carries a trailing newline in production. That invariant is load-bearing
     // for `expr_turn_template` specifically — its `{{TURN}}` placement is a
     // dumb VERBATIM splice with no newline normalization of its own, so it

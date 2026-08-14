@@ -279,15 +279,18 @@ fn answerer_framing_suffix() -> String {
          context above is your working brief (it is re-rendered from the loop's durable \
          State each loop). Each request below asks you for ONE typed value.\n\
          \n\
-         Your ONLY runnable output is a single fenced ```haskell block containing one \
-         expression of type `M a`. A value you bind with `x <- …` persists into your \
-         NEXT turn like GHCi, so you can branch on it.\n\
+         Your runnable output is fenced ```haskell blocks: every block in your reply \
+         runs, in order, as one sequence — later blocks see earlier blocks' \
+         declarations and bindings, so a `data` type declared in one block is usable \
+         by `askUser`/`finalize` in the next block of the SAME reply. A value you \
+         bind with `x <- …` persists into your NEXT turn like GHCi, so you can \
+         branch on it.\n\
          \n\
          YOUR WINDOW'S MECHANICS: you have up to {} model rounds in this cognition \
          window before you must finalize (a reminder arrives at round {}). Rounds \
          accumulate: bindings and `let` helpers from earlier rounds stay in scope. \
          A block that is ONLY top-level declarations (type signatures, function \
-         definitions, data types) is a DEFINE round — those declarations go onto \
+         definitions, data types) is a DEFINE block — those declarations go onto \
          your session's decl plane and persist BEYOND this window, across every \
          future one: your growing library. Define what you will want again.\n\
          \n\
@@ -1782,8 +1785,8 @@ impl SelfHarnessDriver {
                         node,
                         &format!(
                             "Your reply had no ```haskell block, so nothing ran. Reply \
-                             with one block — an explore/define round is fine, or \
-                             `finalize @{ty_disp} value` when ready."
+                             with ```haskell blocks — an explore/define round is fine, \
+                             or `finalize @{ty_disp} value` when ready."
                         ),
                     )?;
                 }
@@ -1800,16 +1803,20 @@ impl SelfHarnessDriver {
                     // window stays multi-round; a fixed block may be another
                     // define/explore round, with `finalize` whenever ready
                     // (the companion learned "declarations are forbidden"
-                    // from the old wording — dogfood, 2026-08-13).
+                    // from the old wording — dogfood, 2026-08-13). For a
+                    // multi-block reply, `msg` already leads with the sequence
+                    // context (which blocks ran/persist, where to resume —
+                    // `engine::sequence_failure_context`).
                     let ty_disp = display_ty(ty_label);
                     self.agent.push_user_turn(
                         node,
                         &format!(
-                            "That block did not compile — your window continues; nothing \
-                             was lost. Reply with a corrected single ```haskell block. It \
-                             may be another define/explore round (top-level declarations \
-                             are welcome and persist); when you are ready to answer, \
-                             evaluate `finalize @{ty_disp} value`.\n\nGHC error:\n{msg}{hint}"
+                            "A block did not compile — your window continues; everything \
+                             that already ran persists. Reply with corrected ```haskell \
+                             blocks. Another define/explore round is fine (top-level \
+                             declarations are welcome and persist); when you are ready to \
+                             answer, evaluate \
+                             `finalize @{ty_disp} value`.\n\nGHC error:\n{msg}{hint}"
                         ),
                     )?;
                 }
