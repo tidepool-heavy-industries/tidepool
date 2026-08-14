@@ -56,6 +56,33 @@ fn recursive_wire_shape_is_tagged_objects() {
     );
 }
 
+/// POSITIONAL payload constructors (aeson's non-record TaggedObject form):
+/// one substrate, many assertions — a mixed sum with nullary, arity-1,
+/// arity-1-list (the `Deliberate [Text]` shape), arity-2, and RECORD
+/// constructors all coexisting. Wire pins + roundtrips in one compile.
+#[test]
+fn positional_payloads_wire_and_roundtrip() {
+    let src = "{-# LANGUAGE NoImplicitPrelude, OverloadedStrings, DeriveGeneric, DeriveAnyClass #-}\n\
+        module Expr where\n\
+        import Tidepool.Prelude hiding (error)\n\n\
+        data Mix = Quiet | Other Text | Deliberate [Text] | Pair Text Int | Named { label :: Text } deriving (Generic, ToJSON, FromJSON, Eq)\n\n\
+        rt :: Mix -> Bool\n\
+        rt m = case fromJSON (toJSON m) of { Success v -> v == m; Error _ -> False }\n\n\
+        result :: Value\n\
+        result = object [ (\"wireOther\", toJSON (Other \"hi\")), (\"wireDeliberate\", toJSON (Deliberate [\"a\", \"b\"])), (\"wirePair\", toJSON (Pair \"x\" 3)), (\"wireQuiet\", toJSON Quiet), (\"wireNamed\", toJSON (Named \"n\")), (\"roundTrips\", toJSON (all rt [Quiet, Other \"o\", Deliberate [], Deliberate [\"d\"], Pair \"p\" 9, Named \"m\"])) ]\n";
+    assert_eq!(
+        run(src, "result"),
+        json!({
+            "wireOther": {"tag": "Other", "contents": "hi"},
+            "wireDeliberate": {"tag": "Deliberate", "contents": ["a", "b"]},
+            "wirePair": {"tag": "Pair", "contents": ["x", 3]},
+            "wireQuiet": {"tag": "Quiet"},
+            "wireNamed": {"tag": "Named", "label": "n"},
+            "roundTrips": true
+        })
+    );
+}
+
 /// `tag` is the discriminator in a payload sum, so allowing a record field
 /// with the same key would make `Map.fromList` silently discard one meaning.
 /// Reject the type at derivation instead.

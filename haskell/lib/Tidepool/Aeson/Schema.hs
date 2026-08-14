@@ -83,7 +83,8 @@ import qualified Data.Map.Strict as Map
 import Data.Kind (Type)
 import Data.Proxy (Proxy (..))
 import GHC.Generics
-import Tidepool.Aeson.Value (Value (..), object, GAllFieldsNamed, IsNullarySum)
+import Tidepool.Aeson.Value (Value (..), object, GAllFieldsNamed, IsNullarySum, IsRecordCon)
+import Tidepool.Aeson.Scientific (scientific)
 
 -- ---------------------------------------------------------------------------
 -- The class
@@ -235,15 +236,47 @@ class GTaggedSchemas (f :: Type -> Type) where
 instance (GTaggedSchemas a, GTaggedSchemas b) => GTaggedSchemas (a :+: b) where
   gTaggedSchemas _ = gTaggedSchemas (Proxy :: Proxy a) ++ gTaggedSchemas (Proxy :: Proxy b)
 
--- | 'GAllFieldsNamed' is imported, not restated: a payload constructor with
--- positional fields, or with a field named @tag@, fails HERE with the same
--- 'GHC.TypeLits.TypeError' the encoder and decoder raise. That is what makes
--- "if it has a schema, it encodes and decodes" a type-level fact rather than
--- a convention.
-instance (Constructor c, GSchemaRecord f, GAllFieldsNamed f) => GTaggedSchemas (M1 C c f) where
-  gTaggedSchemas _ = [objectSchema (Just tag) (gSchemaFields (Proxy :: Proxy f))]
+-- | Dispatched on 'IsRecordCon' exactly as the encoder and decoder are, so
+-- "if it has a schema, it encodes and decodes" stays a type-level fact: a
+-- record constructor's named fields sit beside @tag@ (with the reserved-@tag@
+-- check via 'GAllFieldsNamed'); a positional constructor schedules one
+-- required @"contents"@ property — the field's own schema for one field, a
+-- fixed-length @prefixItems@ array for several.
+instance (Constructor c, GTaggedConSchema (IsRecordCon f) f) => GTaggedSchemas (M1 C c f) where
+  gTaggedSchemas _ =
+    [gTaggedConSchema (Proxy :: Proxy (IsRecordCon f)) (Proxy :: Proxy f) tag]
     where
       tag = T.pack (conName (M1 Proxy :: M1 C c Proxy ()))
+
+class GTaggedConSchema (isRecord :: Bool) (f :: Type -> Type) where
+  gTaggedConSchema :: Proxy isRecord -> Proxy f -> Text -> Value
+
+instance (GSchemaRecord f, GAllFieldsNamed f) => GTaggedConSchema 'True f where
+  gTaggedConSchema _ p tag = objectSchema (Just tag) (gSchemaFields p)
+
+instance GPositionalSchemas f => GTaggedConSchema 'False f where
+  gTaggedConSchema _ p tag =
+    objectSchema (Just tag) [(T.pack "contents", contentsSchema, True)]
+    where
+      contentsSchema = case gPositionalSchemas p of
+        [s] -> s
+        ss ->
+          object
+            [ ("type", String "array")
+            , ("prefixItems", Array ss)
+            , ("minItems", Number (scientific (fromIntegral (length ss)) 0))
+            , ("maxItems", Number (scientific (fromIntegral (length ss)) 0))
+            ]
+
+-- | A positional payload's per-field schemas, in declaration order.
+class GPositionalSchemas (f :: Type -> Type) where
+  gPositionalSchemas :: Proxy f -> [Value]
+
+instance (GPositionalSchemas a, GPositionalSchemas b) => GPositionalSchemas (a :*: b) where
+  gPositionalSchemas _ = gPositionalSchemas (Proxy :: Proxy a) ++ gPositionalSchemas (Proxy :: Proxy b)
+
+instance JsonSchema c => GPositionalSchemas (M1 S s (K1 R c)) where
+  gPositionalSchemas _ = [jsonSchema (Proxy :: Proxy c)]
 
 -- | Per field: (name, schema, required?). The name is the VERBATIM selector
 -- name, matching @GToRecord@\/@GFromRecord@. A 'Maybe' field reports

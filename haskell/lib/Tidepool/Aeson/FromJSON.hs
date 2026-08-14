@@ -42,7 +42,7 @@ import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 import Tidepool.Aeson.Value
   ( Value(..), Object, Array, fromText, toText, eitherDecodeValue
-  , GAllFieldsNamed, IsNullarySum
+  , GAllFieldsNamed, IsNullarySum, IsRecordCon
   )
 import Tidepool.Aeson.Scientific (toRealFloat, toBoundedInteger, truncateScientific, floatingOrInteger)
 import Data.Proxy (Proxy(..))
@@ -155,17 +155,15 @@ instance GSumNullaryFromJSON f => GFromJSONSum 'True f where
   gParseJSONSum _ = gSumNullaryFromJSON
 
 -- | aeson's default `TaggedObject` shape: a JSON object with a `"tag"` field
--- naming the constructor. A nullary constructor needs nothing else; a
--- constructor with fields must be a RECORD (named selectors), whose fields
--- are decoded from the SAME object alongside `"tag"` — matching upstream's
--- "records are unpacked in the tagged object" TaggedObject behavior (aeson
--- `parseNonAllNullarySum`/`FromTaggedObject'`'s `True` (record) instance —
+-- naming the constructor. A nullary constructor needs nothing else; a RECORD
+-- constructor's fields are decoded from the SAME object alongside `"tag"` —
+-- matching upstream's "records are unpacked in the tagged object"
+-- TaggedObject behavior (aeson `parseNonAllNullarySum`/`FromTaggedObject'` —
 -- https://hackage.haskell.org/package/aeson/docs/src/Data.Aeson.Types.FromJSON.html).
--- A non-record (positional-field) constructor is not supported: this
--- module's product decoder is selector-name-keyed throughout (see
--- 'GFromRecord'), so a positional field (whose GHC.Generics selector name is
--- empty) fails cleanly with a "key not present" 'Error' rather than upstream's
--- `"contents"`-nested form.
+-- A POSITIONAL constructor decodes its fields from the `"contents"` key —
+-- the bare value for one field, an array of exactly-arity length for
+-- several — matching upstream's non-record TaggedObject form. 'IsRecordCon'
+-- (shared with the encoder) picks the branch per constructor.
 instance GFromJSONTaggedSum f => GFromJSONSum 'False f where
   gParseJSONSum _ = withObject "tagged sum" $ \o -> case Map.lookup tagKey o of
     Just (String tag) -> case gFromJSONTaggedSum tag o of
@@ -193,15 +191,60 @@ instance (GFromJSONTaggedSum a, GFromJSONTaggedSum b) => GFromJSONTaggedSum (a :
       Nothing -> Nothing
   gTaggedSumConNames _ = gTaggedSumConNames (Proxy :: Proxy a) ++ gTaggedSumConNames (Proxy :: Proxy b)
 
--- | A single constructor leaf: decode its fields (via 'GFromRecord', so a
--- nullary constructor succeeds trivially and a record's named fields are
--- read out of the same tagged object) once its name matches `tag`.
-instance (Constructor c, GFromRecord f, GAllFieldsNamed f) => GFromJSONTaggedSum (M1 C c f) where
+-- | A single constructor leaf: once its name matches `tag`, decode its
+-- payload via the 'IsRecordCon'-dispatched branch — record fields from the
+-- same tagged object (nullary succeeds trivially), positional fields from
+-- `"contents"`.
+instance (Constructor c, GFromTaggedCon (IsRecordCon f) f) => GFromJSONTaggedSum (M1 C c f) where
   gFromJSONTaggedSum tag o
-    | tag == T.pack name = Just (M1 <$> gParseRecord o)
+    | tag == T.pack name = Just (M1 <$> gParseTaggedCon (Proxy :: Proxy (IsRecordCon f)) o)
     | otherwise           = Nothing
     where name = conName (M1 Proxy :: M1 C c Proxy ())
   gTaggedSumConNames _ = [conName (M1 Proxy :: M1 C c Proxy ())]
+
+-- | One constructor's payload from a tagged object, dispatched on
+-- 'IsRecordCon' — the decode mirror of the encoder's @GToJSONTaggedCon@.
+class GFromTaggedCon (isRecord :: Bool) f where
+  gParseTaggedCon :: Proxy isRecord -> Object -> Result (f a)
+
+instance (GFromRecord f, GAllFieldsNamed f) => GFromTaggedCon 'True f where
+  gParseTaggedCon _ = gParseRecord
+
+instance GFromPositional f => GFromTaggedCon 'False f where
+  gParseTaggedCon _ o = case Map.lookup (T.pack "contents") o of
+    Nothing -> Error "key \"contents\" not present (positional payload constructor)"
+    Just v
+      | n == 1 -> fst <$> gParsePositional [v]
+      | otherwise -> case v of
+          Array xs
+            | length xs == n -> fst <$> gParsePositional xs
+            | otherwise ->
+                Error ("contents: expected an array of " ++ show n
+                         ++ " elements, got " ++ show (length xs))
+          _ -> Error ("contents: expected an array of " ++ show n ++ " elements")
+      where n = gPositionalArity (Proxy :: Proxy f)
+
+-- | Decode a positional payload's fields, in declaration order, consuming a
+-- prefix of the supplied values.
+class GFromPositional f where
+  gPositionalArity :: Proxy f -> Int
+  gParsePositional :: [Value] -> Result (f a, [Value])
+
+instance (GFromPositional a, GFromPositional b) => GFromPositional (a :*: b) where
+  gPositionalArity _ = gPositionalArity (Proxy :: Proxy a) + gPositionalArity (Proxy :: Proxy b)
+  gParsePositional vs = case gParsePositional vs of
+    Error e -> Error e
+    Success (a, rest) -> case gParsePositional rest of
+      Error e -> Error e
+      Success (b, rest') -> Success (a :*: b, rest')
+
+instance FromJSON c => GFromPositional (M1 S s (K1 R c)) where
+  gPositionalArity _ = 1
+  gParsePositional vs = case vs of
+    (v : rest) -> case parseJSON v of
+      Success c -> Success (M1 (K1 c), rest)
+      Error e -> Error e
+    [] -> Error "contents: not enough elements for the constructor's fields"
 
 -- | Decode a nullary-constructors-only sum leaf/branch by matching a JSON
 -- string against each constructor's name. Only reachable once

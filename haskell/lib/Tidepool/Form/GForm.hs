@@ -206,6 +206,23 @@ instance GBody seen U1 where
 instance GFields seen (M1 S s x) => GBody seen (M1 S s x) where
   gBodyShape ty con = ProductShape ty con (gFieldShapes @seen @(M1 S s x))
 
+-- | A constructor with ONE positional field (the @Other Text@ escape-hatch
+-- shape): its input is keyed @"contents"@, matching the generic JSON
+-- boundary's TaggedObject form for positional payloads, so the submitted
+-- object decodes through the same generic 'FromJSON' with no form-only
+-- convention. Multiple positional fields still reject below ('GFields') —
+-- several inputs want names.
+instance
+  {-# OVERLAPPING #-}
+  FormField (FieldKind t) "contents" seen t =>
+  GBody seen (M1 S ('MetaSel 'Nothing su ss ds) (K1 R t))
+  where
+  gBodyShape ty con =
+    ProductShape
+      ty
+      con
+      [FieldShape (T.pack "contents") (fieldShape @(FieldKind t) @"contents" @seen @t Proxy)]
+
 instance GFields seen (a :*: b) => GBody seen (a :*: b) where
   gBodyShape ty con = ProductShape ty con (gFieldShapes @seen @(a :*: b))
 
@@ -233,14 +250,15 @@ instance
   gFieldShapes =
     [FieldShape (fieldKeyFor @s) (fieldShape @(FieldKind t) @(SelKey s) @seen @t Proxy)]
 
--- | A positional (non-record) payload field has no selector to key a control
--- or a JSON field by. Rejected where the type is defined, matching the JSON
--- boundary's rule, instead of the old form-only numeric-position keys.
+-- | MULTIPLE positional payload fields have no selector names to key their
+-- controls by (a SINGLE positional field is fine — it presents as
+-- @"contents"@, see 'GBody' above). Rejected where the type is defined.
 instance
   {-# OVERLAPPING #-}
   TypeError
-    ( 'Text "askUser cannot present a positional constructor field."
-        ':$$: 'Text "Give the constructor record syntax (named fields) so each input has a key."
+    ( 'Text "askUser cannot present a constructor with several positional fields."
+        ':$$: 'Text "Give the constructor record syntax (named fields) so each input has a key"
+        ':$$: 'Text "(a constructor with exactly ONE positional field presents as its `contents`)."
     ) =>
   GFields seen (M1 S ('MetaSel 'Nothing su ss ds) (K1 R t))
   where

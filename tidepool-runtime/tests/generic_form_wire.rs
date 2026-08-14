@@ -238,6 +238,45 @@ fn derived_shape_crosses_the_wire_as_documented_json() {
     )
 }
 
+/// A sum with a single POSITIONAL payload constructor (the `Other Text`
+/// escape-hatch shape): its one input derives keyed `"contents"`, matching
+/// the generic JSON boundary's TaggedObject form for positional payloads, so
+/// the submitted object decodes through the same generic `FromJSON` with no
+/// form-only convention. The submission decode is asserted in the same
+/// compile: `{"tag":"Escape","contents":"free text"}` rebuilds the typed
+/// value.
+#[test]
+fn single_positional_payload_derives_contents_field_and_decodes() {
+    let Some(v) = eval_result(
+        "data Curiosity = YourDay | Origin | Escape Text deriving (Generic, Eq, Show, FromJSON)\n\n\
+         decodesBack :: Bool\n\
+         decodesBack = case fromJSON (wire \"{\\\"tag\\\":\\\"Escape\\\",\\\"contents\\\":\\\"free text\\\"}\") of { Success c -> c == Escape \"free text\"; Error _ -> False }\n\n\
+         result :: Value\n\
+         result = object [(\"shape\", encodeShape (formShape @Curiosity)), (\"decodesBack\", toJSON decodesBack)]\n",
+    ) else {
+        return;
+    };
+    assert_eq!(
+        v,
+        json!({
+            "shape": {"sum": {
+                "type_key": "Curiosity",
+                "variants": [
+                    {"constructor": "YourDay", "shape": {"product": {"type_key": "Curiosity", "constructor": "YourDay", "fields": []}}},
+                    {"constructor": "Origin", "shape": {"product": {"type_key": "Curiosity", "constructor": "Origin", "fields": []}}},
+                    {"constructor": "Escape", "shape": {"product": {
+                        "type_key": "Curiosity",
+                        "constructor": "Escape",
+                        "fields": [{"key": "contents", "shape": "string"}]
+                    }}}
+                ]
+            }},
+            "decodesBack": true
+        }),
+        "a single positional payload field must derive as one `contents` input and decode back"
+    )
+}
+
 /// The submitted answer is ORDINARY JSON, decoded by the fixture types' own
 /// generic `FromJSON` — exactly the JSON `tidepool-web`'s collector builds.
 /// One pin per collector rule: record object, enum bare string, tagged

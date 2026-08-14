@@ -45,6 +45,7 @@ module Tidepool.Aeson.Value
   , GToJSON(..)
   , GAllFieldsNamed
   , IsNullarySum
+  , IsRecordCon
   , genericToJSON
   ) where
 
@@ -147,10 +148,10 @@ eitherDecodeValue _ = Left T.empty
 -- encodes each constructor as its bare name string. A sum with payload
 -- constructors encodes as aeson's default @TaggedObject@ shape — a JSON
 -- object with a @"tag"@ field naming the constructor and the constructor's
--- RECORD fields alongside it — SYMMETRIC with what
--- 'Tidepool.Aeson.FromJSON.FromJSON'\'s default decodes. A positional
--- (non-record) payload constructor has no field names to key and is
--- rejected at compile time.
+-- RECORD fields alongside it (a POSITIONAL payload constructor nests its
+-- fields under @"contents"@ instead — bare for one field, an array for
+-- several, aeson's default) — SYMMETRIC with what
+-- 'Tidepool.Aeson.FromJSON.FromJSON'\'s default decodes.
 class ToJSON a where
   toJSON :: a -> Value
   default toJSON :: (Generic a, GToJSON (Rep a)) => a -> Value
@@ -207,6 +208,18 @@ type family IsNullarySumAnd (a :: Bool) (b :: Bool) :: Bool where
   IsNullarySumAnd 'True 'True = 'True
   IsNullarySumAnd a b = 'False
 
+-- | Does this constructor's payload use RECORD syntax (named selectors)?
+-- Haskell guarantees all-or-nothing per constructor, so inspecting the first
+-- field suffices. A nullary constructor counts as a (trivially empty) record
+-- — its encoding is the tag-only object either way. Shared by the encode
+-- ("Tidepool.Aeson.Value"), decode ("Tidepool.Aeson.FromJSON"), and schema
+-- ("Tidepool.Aeson.Schema") sides so all three take the same branch.
+type family IsRecordCon (f :: Type -> Type) :: Bool where
+  IsRecordCon U1 = 'True
+  IsRecordCon (a :*: b) = IsRecordCon a
+  IsRecordCon (M1 S ('MetaSel ('Just n) su ss ds) f) = 'True
+  IsRecordCon (M1 S ('MetaSel 'Nothing su ss ds) f) = 'False
+
 -- | Dispatch on whether a sum is all-nullary: 'True' routes to the
 -- constructor-name encoder, 'False' to the tagged-object encoder.
 class GToJSONSum (allNullary :: Bool) f where
@@ -219,14 +232,15 @@ instance GToJSONTaggedSum f => GToJSONSum 'False f where
   gToJSONSum _ = gToJSONTaggedSum
 
 -- | aeson's default @TaggedObject@ shape, encode side: one JSON object per
--- value carrying @"tag": <constructor name>@ plus the constructor's record
--- fields — the exact shape "Tidepool.Aeson.FromJSON"\'s
--- @GFromJSONTaggedSum@ decodes, so a payload sum round-trips through the two
--- defaults. A nullary constructor in a mixed sum is an object carrying only
--- @tag@. A POSITIONAL payload constructor has no selector names to key its
--- fields and is rejected at compile time (the decode side fails the same
--- shape at runtime with "key not present" — encode can afford the earlier,
--- better error because the offending type is right here).
+-- value carrying @"tag": <constructor name>@ plus the constructor's payload —
+-- the exact shape "Tidepool.Aeson.FromJSON"\'s @GFromJSONTaggedSum@ decodes,
+-- so a payload sum round-trips through the two defaults. A nullary
+-- constructor in a mixed sum is an object carrying only @tag@. A RECORD
+-- constructor's named fields sit alongside @tag@ (upstream's "records are
+-- unpacked in the tagged object"); a POSITIONAL constructor's fields nest
+-- under @"contents"@ — the single value bare for one field, an array for
+-- several — matching upstream's non-record TaggedObject encoding.
+-- 'IsRecordCon' picks the branch per constructor.
 class GToJSONTaggedSum f where
   gToJSONTaggedSum :: f a -> Value
 
@@ -234,14 +248,43 @@ instance (GToJSONTaggedSum a, GToJSONTaggedSum b) => GToJSONTaggedSum (a :+: b) 
   gToJSONTaggedSum (L1 x) = gToJSONTaggedSum x
   gToJSONTaggedSum (R1 x) = gToJSONTaggedSum x
 
-instance (Constructor c, GToRecord f, GAllFieldsNamed f) => GToJSONTaggedSum (M1 C c f) where
+instance (Constructor c, GToJSONTaggedCon (IsRecordCon f) f) => GToJSONTaggedSum (M1 C c f) where
   gToJSONTaggedSum m@(M1 x) =
-    object ((T.pack "tag", String (T.pack (conName m))) : gToRecord x)
+    object
+      ((T.pack "tag", String (T.pack (conName m)))
+         : gTaggedConPairs (Proxy :: Proxy (IsRecordCon f)) x)
 
--- | Compile-time proof that every field of a payload constructor has a
--- selector name (is a record field). A positional field'''s GHC.Generics
--- selector symbol is empty, which would key an unfindable @""@ pair — reject
--- it where the type is defined instead.
+-- | One constructor's payload as tagged-object pairs, dispatched on
+-- 'IsRecordCon': record fields inline beside @tag@, positional fields under
+-- one @"contents"@ key.
+class GToJSONTaggedCon (isRecord :: Bool) f where
+  gTaggedConPairs :: Proxy isRecord -> f a -> [Pair]
+
+instance (GToRecord f, GAllFieldsNamed f) => GToJSONTaggedCon 'True f where
+  gTaggedConPairs _ = gToRecord
+
+instance GToPositional f => GToJSONTaggedCon 'False f where
+  gTaggedConPairs _ x = [(T.pack "contents", wrap (gToPositional x))]
+    where
+      wrap [v] = v
+      wrap vs = Array vs
+
+-- | A positional payload's field values, in declaration order.
+class GToPositional f where
+  gToPositional :: f a -> [Value]
+
+instance (GToPositional a, GToPositional b) => GToPositional (a :*: b) where
+  gToPositional (a :*: b) = gToPositional a ++ gToPositional b
+
+instance ToJSON c => GToPositional (M1 S s (K1 R c)) where
+  gToPositional (M1 (K1 c)) = [toJSON c]
+
+-- | For RECORD payload constructors only (the 'IsRecordCon' @'True@ branch):
+-- proof that no field is named @tag@ (reserved for the discriminator). The
+-- positional-field instance below is unreachable for a well-formed type —
+-- Haskell constructors are all-record or all-positional, and positional
+-- constructors take the @"contents"@ branch — and is kept as a defensive
+-- backstop.
 class GAllFieldsNamed (f :: Type -> Type)
 instance GAllFieldsNamed U1
 instance (GAllFieldsNamed a, GAllFieldsNamed b) => GAllFieldsNamed (a :*: b)
