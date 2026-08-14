@@ -4081,6 +4081,8 @@ dependencies = [
  "reqwest 0.13.4",
  "serde_json",
  "tempfile",
+ "tidepool-agent",
+ "tidepool-handlers",
  "tidepool-harness",
  "tidepool-runtime",
  "tokio",

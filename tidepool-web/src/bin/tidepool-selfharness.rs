@@ -147,9 +147,58 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         driver.set_gate(gate);
     }
 
+    // The subagent seam (plans/companion-memory.md): when TIDEPOOL_MEMORY_REPO
+    // names the companion's memory store, wire a driver-owned SubagentHandler
+    // over it so the authored loop's `spawnAgent` (the memory curator) is
+    // serviced. Absent env → absent handler → a Subagent suspension fails
+    // with the legible wiring error, exactly as before.
+    if let Some(repo) = std::env::var_os("TIDEPOOL_MEMORY_REPO").map(PathBuf::from) {
+        let handler = build_subagent_handler(&repo)?;
+        driver.set_subagent_handler(handler);
+        tracing::info!(
+            target: "tidepool_web",
+            repo = %repo.display(),
+            "subagent seam wired (memory curator; Codex backend, operator credentials)"
+        );
+    }
+
     driver.run_loop(&source, auto).await?;
 
     Ok(())
+}
+
+/// Build the memory curator's [`tidepool_handlers::SubagentHandler`]: source
+/// repository = the memory store; registry/worktree/binding roots under the
+/// durable data dir (NOT the regenerable cache — worktree state must survive
+/// cache clears — and outside any git work tree, which the registry refuses).
+/// Backend: the live Codex adapter over the operator's own `~/.codex`
+/// credentials, at the default cheap-plumbing model policy.
+fn build_subagent_handler(
+    repo: &std::path::Path,
+) -> Result<tidepool_handlers::SubagentHandler, Box<dyn std::error::Error>> {
+    if !repo.join(".git").exists() {
+        return Err(format!(
+            "TIDEPOOL_MEMORY_REPO={} is not a git repository (no .git). Bootstrap the \
+             memory store first: scripts/companion-memory-init.sh {}",
+            repo.display(),
+            repo.display()
+        )
+        .into());
+    }
+    let data_root = std::env::var_os("XDG_DATA_HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/share")))
+        .ok_or("neither XDG_DATA_HOME nor HOME is set")?
+        .join("tidepool/subagent");
+    let backend = tidepool_agent::backend::codex::CodexAgentBackend::new()?;
+    let handler = tidepool_handlers::SubagentHandler::new(
+        data_root.join("registry"),
+        data_root.join("worktrees"),
+        data_root.join("bindings"),
+        repo.to_path_buf(),
+        Box::new(backend),
+    )?;
+    Ok(handler)
 }
 
 fn arg_value(args: &[String], flag: &str) -> Option<PathBuf> {

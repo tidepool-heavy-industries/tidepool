@@ -12,6 +12,10 @@ rust-version.workspace = true
 [dependencies]
 tidepool-harness.workspace = true
 tidepool-runtime.workspace = true
+# The tidepool-selfharness binary's subagent seam (TIDEPOOL_MEMORY_REPO):
+# the driver-owned SubagentHandler + the live Codex backend.
+tidepool-handlers.workspace = true
+tidepool-agent.workspace = true
 serde_json.workspace = true
 maud = "0.27"
 datastar = { version = "0.3", features = ["axum"] }
