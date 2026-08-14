@@ -636,30 +636,47 @@ pub fn available_effects_section(decls: &[tidepool_mcp::EffectDecl]) -> String {
 /// fence is NOT treated as haskell (avoids grabbing a shell/text block).
 /// Every block is `trim_end()`ed — the turn templates' `{{TURN}}` splice
 /// relies on turn text never carrying a trailing newline.
+///
+/// FUSED FENCES: a closing fence and the next block's opener on ONE line
+/// (` ``````haskell `, no newline between them) closes the current block and
+/// opens the next. Models emit this shape routinely (every organic
+/// multi-block reply in the dogfood corpus fused its fences); under the old
+/// per-line parse the opener was consumed as part of the closer and the
+/// SECOND BLOCK SILENTLY VANISHED — the companion's first live packed
+/// `askUser` lost its ask block exactly this way (dogfood, 2026-08-14).
 pub fn extract_haskell_blocks(reply: &str) -> Vec<String> {
-    let mut blocks = Vec::new();
-    let mut lines = reply.lines().peekable();
-    while let Some(line) = lines.next() {
-        let trimmed = line.trim_start();
-        let lang = trimmed
-            .strip_prefix("```")
-            .map(|l| l.trim().to_ascii_lowercase());
-        let is_haskell_open = matches!(lang.as_deref(), Some("haskell") | Some("hs"));
-        if is_haskell_open {
-            let mut body = String::new();
-            for inner in lines.by_ref() {
-                if inner.trim_start().starts_with("```") {
-                    break;
-                }
-                body.push_str(inner);
-                body.push('\n');
-            }
-            let body = body.trim_end().to_string();
-            if !body.is_empty() {
-                blocks.push(body);
+    fn opens_haskell(s: &str) -> bool {
+        let lang = s.strip_prefix("```").map(|l| l.trim().to_ascii_lowercase());
+        matches!(lang.as_deref(), Some("haskell") | Some("hs"))
+    }
+    fn close(blocks: &mut Vec<String>, body: &mut Option<String>) {
+        if let Some(b) = body.take() {
+            let b = b.trim_end().to_string();
+            if !b.is_empty() {
+                blocks.push(b);
             }
         }
     }
+    let mut blocks = Vec::new();
+    let mut body: Option<String> = None;
+    for line in reply.lines() {
+        let trimmed = line.trim_start();
+        if body.is_some() {
+            if let Some(rest) = trimmed.strip_prefix("```") {
+                close(&mut blocks, &mut body);
+                if opens_haskell(rest.trim_start()) {
+                    body = Some(String::new());
+                }
+            } else if let Some(b) = body.as_mut() {
+                b.push_str(line);
+                b.push('\n');
+            }
+        } else if opens_haskell(trimmed) {
+            body = Some(String::new());
+        }
+    }
+    // An unterminated final block still counts (same as the old parse).
+    close(&mut blocks, &mut body);
     blocks
 }
 
@@ -1628,6 +1645,27 @@ mod tests {
                 "mood <- askUser @Mood \"how?\"".to_string(),
             ]
         );
+    }
+
+    /// FUSED FENCES — the live-caught shape (companion dogfood, 2026-08-14):
+    /// the model closes one block and opens the next on a single line
+    /// (` ``````haskell `). Both blocks must extract; under the per-line
+    /// parse the second silently vanished, which is exactly how the
+    /// companion's first packed `askUser` lost its ask block (the `signal`
+    /// not-in-scope failure).
+    #[test]
+    fn extract_haskell_blocks_handles_fused_fences() {
+        let reply = "```haskell\ndata HarnessSignal = FormWorked\n  deriving (Generic)\n\
+                     ``````haskell\ndo\n  signal <- askUser @HarnessSignal\n  pure ()\n```";
+        let blocks = extract_haskell_blocks(reply);
+        assert_eq!(blocks.len(), 2, "{blocks:?}");
+        assert!(blocks[0].starts_with("data HarnessSignal"), "{blocks:?}");
+        assert!(blocks[1].starts_with("do"), "{blocks:?}");
+
+        // Fused close+bare-open (` `````` `) just closes — a bare fence is
+        // still not haskell.
+        let reply = "```haskell\npure ()\n``````\nprose\n```";
+        assert_eq!(extract_haskell_blocks(reply), vec!["pure ()".to_string()]);
     }
 
     /// Bare ``` and non-haskell fences are not runnable blocks; a reply of
