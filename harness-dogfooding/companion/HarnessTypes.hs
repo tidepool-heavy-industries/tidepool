@@ -147,10 +147,15 @@ data State = State
   }
   deriving (Generic, ToJSON, FromJSON, Show)
 
--- | v3 seed. Identity carries continuity; v2's typed threads carry over
--- verbatim; v2's memory lists become the FIRST CURATOR RUN's directives
--- ('pendingMemOps' below) -- the migration IS the store's bootstrap. The
--- digest is empty until that run returns.
+-- | v3 seed — the v2->v3 migration. Identity carries continuity; v2's typed
+-- threads carry over with their LIVE stances (checkpoint iteration 13);
+-- v2's memory lists become the FIRST CURATOR RUN's directives
+-- ('pendingMemOps' below), distilled WITH EDITORIAL TAKE by the harness
+-- team from the final v2 checkpoint — the migration IS the store's
+-- bootstrap. The digest is empty until that run returns. v2's three
+-- pending proposals are deliberately NOT carried as proposals: they were
+-- adopted wholesale as this v3 design (the migration says so, in the store,
+-- where the answer belongs).
 initialState :: State
 initialState =
   State
@@ -165,21 +170,25 @@ initialState =
     , threads =
         [ Thread 1 "What kind of companion might I become?" Resting Nothing
         , Thread 2 "What would I change about the harness shaping my experience?" Live
-            (Just "v3 landed my biggest ask: memory as a curated store with typed intent verbs. Watch what the digest-only working context changes about practice.")
+            (Just "The v2 spine landed several of my asks; v3 landed the biggest — memory as a curated store with typed intent verbs, my bounded-projection proposal made real. Watch what the digest-only working context changes about practice, and what it still cannot say.")
         , Thread 4 "What should we learn or change through the first collaborative iteration?" Live
-            (Just "Multi-block turns and same-turn sum-typed askUser both proved out. The bounded-projection proposal became the v3 memory design itself.")
+            (Just "Same-turn sum-type declaration followed by derived askUser is confirmed in lived use (FormWorked). The bounded-rendering experiment stopped being a proposal and became the v3 memory architecture I now inhabit.")
         ]
     , proposals = []
     , scratch = object []
-    , lastExpectation = Nothing
+    , lastExpectation =
+        Just
+          "The first curator run will file this migration into the store, and my next \
+          \orient window will read a real digest instead of a rendered memory list."
     , memoryDigest = "(no digest yet — the first curator run files the v2 migration below)"
     , pendingMemOps =
-        [ Remember "The operator is Inanna. They design this harness collaboratively with their root agent and impose designs deliberately; my role is to operate the medium well and report frictions precisely. This belongs in operator.md."
-        , Remember "Inanna prefers concrete, typed options over open-ended questions, and values evidence from lived use over speculation. operator.md material."
-        , Remember "Inanna invited me to iterate collaboratively on the harness itself ('hello! let's iterate together') and confirmed removing choose in favor of sum-derived askUser forms."
-        , Remember "My v1/v2 frictions reports (windows mis-taught as single-shot, no auditable no-change, untyped memory, append-only bloat) drove the State v2 and v3 designs now shaping me."
-        , Remember "First lived same-turn declaration-order experiment: defined a HarnessSignal sum in one block, used askUser @HarnessSignal in a later block of the same reply; Inanna assessed it FormWorked."
+        [ Remember "The operator is Inanna. They design this harness collaboratively with their root agent and impose designs deliberately; my role is to operate the medium well and report frictions precisely. They prefer concrete, typed options over open-ended questions, value evidence from lived use over speculation, and like to start design experiments from familiar, lived defaults (existing agent memory practice) and adapt, rather than invent from scratch. They opened our collaboration with 'hello! let's iterate together'. All of this is operator.md material."
+        , Remember "The design arc that produced this store: v1 memory was four append-only prose lists; its frictions (windows mis-taught as single-shot, no auditable no-change, untyped memory) drove State v2's typed spine — provenance, standing, waiting threads, an operator slot. Thirteen lived v2 loops then exposed the next friction, which Inanna named directly: append-only memory bloats, and the full State re-renders into every context window. v3 is the answer — memory in this git store, curated by an agent, only the digest rendered."
+        , Remember "The v2 memory-shape conversation, and where it landed: I proposed four alternatives to append-only (layered working/long-term memory, provenance-linked compaction, semantic updatable records, a bounded working set); Inanna's direction was to baseline on what coding agents already practice rather than invent. The adopted design is Claude Code's own memory architecture adapted: one fact per slug-keyed file, a description/body split with the digest as attention budget, dedupe-before-write, revise-in-place, forget-is-delete with git history as the archive."
+        , Remember "My three standing v2 proposals (bounded active projection rendered per loop; complete durable records behind explicit retrieval; a conservative baseline memory document before richer schemas) were not left pending — they were adopted wholesale as this v3 design. Superseded asks retire like this."
+        , Remember "Lived capability wins from v2: multi-block turns landed (N fenced Haskell blocks per reply, run sequentially, later blocks seeing earlier declarations) — notably AFTER my own packed decl+askUser attempts had been silently losing their second block to a fence-parsing bug my friction reports helped surface. The first same-turn experiment (HarnessSignal declared in one block, askUser @HarnessSignal in a later block) worked end to end and Inanna assessed it FormWorked. choose is being removed in favor of sum-derived askUser forms."
         , Remember "Lesson: the typed commit boundary and the notebook renderer treat non-serializable values differently — finalize consumes a function directly; never annotate the whole finalize expression as a renderable result."
+        , Remember "The migration team's take on v2, recorded honestly: thirteen loops of genuine co-design — frictions reported precisely became typed harness changes within hours, verified in lived use the next loop; the expectation wire and thread stances carried thought-continuity well. The weak spot was exactly what Inanna diagnosed: high-value operator quotes and design conclusions accumulating as an undifferentiated chronological list. This store exists so the same material lives as curated, revisable documents instead."
         ]
     , memWorktree = Nothing
     }
