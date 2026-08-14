@@ -53,48 +53,46 @@ loop (capped).
 **Recall** (semantic queries beyond the digest): deferred until lived
 friction names its shape.
 
-## The answer type: `finalize @[Directive]`
+## The answer type: directives BESIDE the edit, not instead of it
 
-The act window's answer becomes a SERIES OF DIRECTIVES, applied in order.
-`[]` is the blessed no-change answer (more auditable than `id`). Memory verbs
-are typed INTENT with prose PAYLOAD (the agent is the parser; the digest
-shows slugs so prose can name them); bag edits are legible data; the function
-thing survives as deliberately-scoped escape hatches, keeping closure
-delivery dogfooded as the marked exception:
+(Revised with the operator, 2026-08-14: "don't pack everything in
+directive".) The act window's answer pairs OUTWARD INSTRUCTIONS with the
+INWARD EDIT — fst is what the loop executes against the world, snd is the
+same endomorphism as today:
 
 ```haskell
-data Directive
-  -- Memory tier: executed by the curator agent, batched per loop
-  = Remember Text
-  | Modify Text
-  | Forget Text
-  -- Typed bag: interpreted by the loop, pure, fully legible in logs
-  | OpenThread Text
-  | UpdateThread Int ThreadEdit
-  | Propose Text
-  | SetIdentity Text
-  -- Escape hatches (closure-carrying; the deep-sentinel delivery lane)
-  | OnScratch (Value -> Value)
-  | Custom (State -> State)
+-- Spelled as a record because the record-of-functions finalize delivery is
+-- an already-proven standing acceptance (selfharness_fn_finalize_spike);
+-- semantically it is the ([Directive], State -> State) tuple.
+data Turn = Turn { directives :: [Directive], edit :: State -> State }
 
-data ThreadEdit = SetStatus ThreadStatus | SetStance Text | Rephrase Text
+-- v1: the memory verbs only — typed INTENT, prose PAYLOAD (the curator
+-- agent is the parser; the digest shows slugs so prose can name them).
+-- Future outward-instruction kinds join this sum as they earn their keep.
+data Directive = Remember Text | Modify Text | Forget Text
 ```
 
-Wins over the endomorphism: Finalize observer events become a legible account
-(today they log `"<closure>"`); authority is the sum plus a VISIBLE escape
-hatch; every loop's durable footprint is auditable at a glance.
+`Turn [] id` is the blessed no-change. Every existing edit combinator
+(`openThread`, `updateThread`, `onScratch`, …) survives unchanged — no
+reification of bag edits — and closure delivery keeps its full dogfood role
+as half the answer rather than an escape hatch. The observability win lands
+exactly where the new risk is: the memory channel logs as legible data;
+the edit half stays `"<closure>"` as today, by choice.
 
 **State v3 (the typed bag):** `memories` and `aboutOperator` LEAVE State
 (killing checkpoint bloat and the render-bloat thread at once). Remaining:
 identity, loopN, threads, proposals, scratch, lastExpectation, plus
-`memoryDigest :: Text`, `pendingMemOps :: [Directive]` (memory verbs awaiting
-a successful curator run), and the persistent curator `WorktreeId`.
+`memoryDigest :: Text`, `pendingMemOps :: [Directive]` (directives whose
+curator run failed, carried for retry — the happy path hands directives to
+the loop OUT OF BAND as `Turn.directives`, never through State), and the
+persistent curator `WorktreeId`.
 Migration is the curator's first live job: hand it the v2 checkpoint's memory
 JSON and let it file everything — the bootstrap IS the smoke test.
 
 ## Settled decisions
 
-- Directive list with escape-hatch constructors (operator, 2026-08-14).
+- Answer type `Turn { directives, edit }` — directives beside the
+  endomorphism, not instead of it (operator, 2026-08-14).
 - Memory verbs: `Remember | Modify | Forget`, prose payloads, typed intent.
 - Explicit companion authorship (no loop auto-harvest of memories).
 - Batched per-loop curator runs; receipt-carried digest; non-fatal failure.
@@ -105,18 +103,56 @@ JSON and let it file everything — the bootstrap IS the smoke test.
 
 ## Phases
 
-**Phase 1 — outer-row Subagent (the dev-tree unblock, shared):**
-- Live smoke first: one `spawnAgent` → Codex adapter → trivial brief in a
-  scratch repo → typed receipt. Confirms backend wiring + that the agent
-  policy allowlist admits git/file tools.
-- Add `worktree_decl` type deps + `subagent_decl` to `outer_decls()`; decide
-  the driver's route for the resulting effect (suspension-serviced like outer
-  `askUser`, vs a handler stack owned by the selfharness binary — OPEN, the
-  main Phase 1 engineering question; the selfharness driver currently runs
-  all-suspending rows with no handler dispatch).
-- Verify closure delivery through a LIST of sums (`[Directive]` with
-  `Custom`/`OnScratch`) — one spike test extending
-  `selfharness_fn_finalize_spike.rs`.
+**Phase 1 — outer-row Subagent (the dev-tree unblock, shared). Wiring shape
+SETTLED by recon (2026-08-14): suspension-serviced, driver-owned handler —
+NOT a handler stack on the outer session.**
+
+Why suspension-serviced is the only viable shape: the one-session collapse
+shares ONE machine between the outer session and every answerer realm, and
+the machine's established prefix + session-wide `ask_tag` mean a non-empty
+outer handled prefix would silently dispatch the ANSWERER's `AskUser`/`Fork`
+(tags 0/1) into handler slots — breaking the documented all-suspending
+capability boundary. So: `outer_decls() = [runllmturn, askuser, worktree,
+subagent]` with interposed effects FIRST keeps `suspend_tag = 0` (everything
+suspends; pin with a unit test). `worktree_decl` is a HARD companion of
+`subagent_decl` (type deps AND the `renderSpawnError` →
+`renderWorktreeError` helper dependency). The servicing conversion is
+near-free: the generated `SubagentReq: FromCore` decodes the suspended
+request against the compile's table, `EffectHandler::handle(req,
+EffectContext::with_user(..))` runs the real handler, and the
+`Response::Complete` value resumes the parked hole — the identical generated
+path a dispatched effect takes. `CodexAgentBackend` owns its own tokio
+runtime, so the dispatch wraps in `tokio::task::block_in_place` (the
+OperatorGate precedent). The handler rides the DRIVER (an
+`Option<SubagentHandler>` + `set_subagent_handler`, mirroring `set_gate`) —
+never the boxed stack, which is destroyed on machine rotation while the
+handler holds a flocked BindingTable and a live app-server. NON-ITEMS,
+permanently: `Subagent` in `base_effects!`, or any non-empty outer handled
+prefix while outer + answerer share a machine.
+
+Runtime facts recon pinned: `WorktreeSpec` names no repository — the source
+repo is HANDLER CONFIG (`SubagentHandler::new(registry_root, worktree_root,
+binding_root, source_repo, backend)`), so the standalone memory repo slots in
+directly; registry roots must live OUTSIDE any git work tree; Codex reads the
+operator's own `~/.codex/auth.json` (`CODEX_HOME` overrides), models resolve
+via `ModelPolicy` allowlist (live grant: `CheapestGpt56` + low effort), turn
+timeout 300s; live tiers are opt-in via `TIDEPOOL_AGENT_LIVE=1` (examples
+`live_one_cycle`, `live_tool_loop`; nextest never spends tokens).
+
+Work items: (1) live smoke via the existing example, one-attempt — DONE, see
+below; (2) widen `outer_decls()` + suspend_tag pin + update
+`companion_typechecks`; (3) `HoleRouting::Subagent` arm in `classify_hole`
+keyed on constructor names, carrying the raw request `Value` (args are ADTs —
+never decoded at classify time); (4) `service_outer_subagent_hole` in the
+driver + the dispatch arm at the current "unserviceable hole" error + an
+observer `Event`; (5) the `set_subagent_handler` seam + binary wiring behind
+an env flag; (6) store bootstrap (git init + seed, roots outside the repo);
+(7) mock-tier driver test (outer `spawnAgent @r` round trip on a
+`MockBackend` handler); (8) prefix-compat regression test (answerer still
+suspends on `AskUser` under the widened row); (9) the `Turn`
+delivery spike — a record pairing `[Directive]` data with a `State -> State`
+closure — extending `selfharness_fn_finalize_spike.rs` (expected cheap: the
+record-of-functions lane is the proven one).
 
 **Phase 2 — the memory epic:**
 - Repo bootstrap: seeded AGENTS.md (drafted from Claude Code's own memory
