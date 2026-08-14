@@ -506,6 +506,45 @@ impl<T: Transport> Session<T> {
                     self.turn.parked = Some((req.id, params.call_id.clone(), Instant::now()));
                     return Ok(TurnStop::ToolCall(params));
                 }
+                // Approval requests SHOULD never arrive: turns run at
+                // `approval_policy: Never` with containment enforced by the
+                // sandbox policy (see `turn_start_params`). If one arrives
+                // anyway (policy/protocol drift), DECLINE it in-protocol —
+                // the child reads a clean refusal it can react to, instead
+                // of the method-not-found error Codex surfaced as a
+                // transport failure (the curator's first live run filed its
+                // memories and then could not commit — dogfood 2026-08-14,
+                // before `Never` was set). Never auto-accept here: a request
+                // reaching this arm means policy said "ask", and this
+                // headless seam has no one to ask.
+                JsonRpcMessage::Request(req)
+                    if req.method == codex_codes::methods::CMD_EXEC_APPROVAL
+                        || req.method == codex_codes::methods::FILE_CHANGE_APPROVAL =>
+                {
+                    eprintln!(
+                        "[tidepool-agent] approval request {} arrived under \
+                         approval_policy=never — declining",
+                        req.method
+                    );
+                    let result = if req.method == codex_codes::methods::CMD_EXEC_APPROVAL {
+                        serde_json::to_value(
+                            codex_codes::CommandExecutionRequestApprovalResponse::decline(),
+                        )
+                    } else {
+                        serde_json::to_value(
+                            codex_codes::FileChangeRequestApprovalResponse::decline(),
+                        )
+                    }
+                    .map_err(|source| SessionError::Encode {
+                        method: req.method.clone(),
+                        source,
+                    })?;
+                    let resp = JsonRpcResponse {
+                        id: req.id,
+                        result,
+                    };
+                    self.send(&resp, "approval decline").await?;
+                }
                 JsonRpcMessage::Request(unexpected) => {
                     // Never leave a server request pending, even one this
                     // driver has no handler for.

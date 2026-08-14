@@ -390,6 +390,14 @@ fn turn_start_params(
             // enforced against the process, not merely asserted about it.
             writable_roots: Some(vec![codex_codes::AbsolutePathBuf(spec.cwd.clone())]),
         }),
+        // Never ASK: containment is the SANDBOX's job (above), not a
+        // conversational consent layer — there is no human on this seam to
+        // answer. Left unset, the default policy sent
+        // `item/commandExecution/requestApproval` for an in-worktree
+        // `git commit`, which the session pump answered method-not-found and
+        // Codex read as a rejection — the curator's first live run filed
+        // every memory and then could not commit (dogfood, 2026-08-14).
+        approval_policy: Some(codex_codes::AskForApproval::Never),
         effort: Some(effort_to_wire(spec.effort)),
         input: vec![UserInput::Text {
             text: spec.task.clone(),
