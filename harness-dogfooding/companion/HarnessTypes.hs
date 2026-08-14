@@ -282,18 +282,18 @@ Proposals awaiting the operator:
 -- sum exists for.
 entryLine :: Memory -> Text
 entryLine m = case m.entry of
-  Fact t -> [fmt|#{show m.mid} (fact, loop {show m.born}) {t}|]
-  Event t -> [fmt|#{show m.mid} (event, loop {show m.born}) {t}|]
-  Quote who t -> [fmt|#{show m.mid} ({sayer who} said, loop {show m.born}) "{t}"|]
-  Structured v -> [fmt|#{show m.mid} (structured, loop {show m.born}) {T.take 200 (show v)}|]
-  Note t -> [fmt|#{show m.mid} (note, loop {show m.born}) {t}|]
+  Fact t -> [fmt|id {show m.mid} (fact, loop {show m.born}) {t}|]
+  Event t -> [fmt|id {show m.mid} (event, loop {show m.born}) {t}|]
+  Quote who t -> [fmt|id {show m.mid} ({sayer who} said, loop {show m.born}) "{t}"|]
+  Structured v -> [fmt|id {show m.mid} (structured, loop {show m.born}) {T.take 200 (show v)}|]
+  Note t -> [fmt|id {show m.mid} (note, loop {show m.born}) {t}|]
   where
     sayer FromOperator = "operator" :: Text
     sayer FromAgent = "you"
 
 threadLine :: Thread -> Text
 threadLine t =
-  [fmt|T{show t.tid} {statusTag} {t.question}{stanceLine}|]
+  [fmt|thread {show t.tid} {statusTag} {t.question}{stanceLine}|]
   where
     statusTag :: Text
     statusTag = case t.status of
