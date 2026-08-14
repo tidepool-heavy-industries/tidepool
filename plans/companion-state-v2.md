@@ -1,9 +1,45 @@
 # Companion State v2 — typed structure bottoming out in Value
 
-STATUS: DESIGN, awaiting final review before implementation. Designed
-collaboratively (operator + root, 2026-08-13) from live dogfood evidence;
-imposed on the companion rather than co-designed with it — the agent operates
-this medium well but does not yet design it.
+STATUS: LANDED (2026-08-14), extended the same day by the **v3 OODA loop**
+below. Designed collaboratively (operator + root, 2026-08-13) from live
+dogfood evidence; imposed on the companion rather than co-designed with it —
+the agent operates this medium well but does not yet design it.
+
+## v3 — the OODA loop (landed 2026-08-14)
+
+Approved follow-on (operator direction: "3-4 distinct typed phases per loop",
+grounded per their ask in Boyd's real OODA diagram and GTD's clarify
+flowchart): each loop is up to THREE typed `runLLMTurn` windows sharing the
+one accumulating per-loop answerer context — no runtime change, purely
+authored.
+
+- **Observe** is the render itself (no model window).
+- **Orient** (always): `Orientation { reading, tempo }`. `Tempo` is Boyd's
+  hinge — `Familiar Move` goes straight to act (implicit guidance & control,
+  the Orient→Act shortcut in Boyd's diagram), `Deliberate [candidates]`
+  inserts a decide window, `Quiet` ends the loop with no act (rest is a
+  complete loop; kills the finalize-forces-churn friction).
+- **Decide** (only when `Deliberate`): `Move` — the GTD triage sum:
+  `Engage { intent, expecting }` / `AskFirst { question }` /
+  `Shelve { what, revisit }` / `LetGo { what }`.
+- **Act** (unless `Quiet`): the `State -> State` edit window, carrying the
+  v2 edit vocabulary; `id` stays blessed.
+- **Feedback wire** (Boyd: an act tests a hypothesis): `Engage.expecting` is
+  stamped into `State.lastExpectation` (a `Maybe Text` — old checkpoints
+  decode it as `Nothing` for free) and rendered to the NEXT loop's orient
+  window, then cleared unless renewed — an expectation lives one loop.
+
+`Orientation`/`Tempo`/`Move` carry POSITIONAL payloads (`Familiar Move`,
+`Deliberate [Text]`) — deliberately: the same pass extended the vendored
+generic JSON/Schema/GForm to aeson's TaggedObject `contents` form for
+positional sum payloads ("make all sum types work", operator directive), so
+the natural spellings derive. Acceptance:
+`selfharness_fn_finalize_spike::ooda_pipeline_conditional_phases` (three
+cycles covering all three tempos, conditional window counts, the positional
+payload through the typed crossing, and wire stamping/clearing);
+`generic_recursive_sums::positional_payloads_wire_and_roundtrip` and
+`generic_form_wire::single_positional_payload_derives_contents_field_and_decodes`
+pin the JSON + form sides. Fixture: `examples/harness/ooda-spike/`.
 
 ## Evidence this answers (from the soak)
 

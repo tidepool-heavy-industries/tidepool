@@ -526,3 +526,150 @@ async fn living_helper_survives_loop_boundary_and_rotation() {
         "the ceiling-of-1 run must have rotated the machine between cycles"
     );
 }
+
+fn ooda_harness_dir() -> std::path::PathBuf {
+    repo_root().join("examples/harness/ooda-spike")
+}
+
+/// A reply finalizing a typed DATA answer (an `Orientation` or `Move`) — the
+/// bridged-value crossing, as opposed to the closure-by-handle crossing the
+/// edit replies exercise.
+fn typed_reply(block: &str) -> RecordedReply {
+    RecordedReply {
+        node: NodeId(0),
+        turn: 0,
+        content: format!("```haskell\nimport HarnessTypes\n\n{block}\n```"),
+        usage: Usage {
+            input_tokens: 50,
+            output_tokens: 10,
+        },
+    }
+}
+
+/// THE OODA-PIPELINE ACCEPTANCE: a loop of up to three SEQUENTIAL typed
+/// `runLLMTurn` windows in ONE loop fragment, whose shape is decided by the
+/// model's own typed answers. Three cycles cover the three tempos:
+///
+/// 1. `Deliberate` — orient, decide, act (3 windows): the act edit applies
+///    AND `Engage.expecting` is stamped into the feedback wire.
+/// 2. `Quiet` — orient only (1 window): no edit, and the previous cycle's
+///    expectation is CLEARED (an expectation lives exactly one loop).
+/// 3. `Familiar` — orient straight to act (2 windows, Boyd's implicit
+///    guidance skipping decide): the `Familiar Move` POSITIONAL payload
+///    crosses the typed finalize boundary — the generic-JSON TaggedObject
+///    `contents` form, end to end through the bridge.
+///
+/// The reply script is consumed strictly in window order — a driver that
+/// serviced the wrong number of windows per cycle fails on script skew.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn ooda_pipeline_conditional_phases() {
+    support::require_extract();
+    let _cache_guard = support::isolate_cache();
+
+    let agent_cfg =
+        EngineConfig::from_decls(answerer_decls(), prelude_dir(), Some(ooda_harness_dir()))
+            .expect("answerer engine config");
+    let replies = vec![
+        // Cycle 1: Deliberate -> Engage -> edit.
+        typed_reply(
+            "(finalize @Orientation (Orientation { reading = \"fresh state\", \
+             tempo = Deliberate [\"bump the counter\", \"do nothing\"] }) :: M ())",
+        ),
+        typed_reply(
+            "(finalize @Move (Engage { intent = \"bump the counter\", \
+             expecting = \"counter becomes 7\" }) :: M ())",
+        ),
+        typed_reply(
+            "(finalize @(State -> State) (\\st -> st { counter = counter st + 7 }) :: M ())",
+        ),
+        // Cycle 2: Quiet — one window, no act.
+        typed_reply(
+            "(finalize @Orientation (Orientation { reading = \"expectation held\", \
+             tempo = Quiet }) :: M ())",
+        ),
+        // Cycle 3: Familiar — orient straight to act.
+        typed_reply(
+            "(finalize @Orientation (Orientation { reading = \"familiar moment\", \
+             tempo = Familiar (Engage { intent = \"bump again\", \
+             expecting = \"counter becomes 12\" }) }) :: M ())",
+        ),
+        typed_reply(
+            "(finalize @(State -> State) (\\st -> st { counter = counter st + 5 }) :: M ())",
+        ),
+    ];
+    let provider: Arc<dyn DynModelProvider> = Arc::new(ReplayProvider::new(replies));
+    let writer = tidepool_harness::log::LogWriter::create(
+        std::env::temp_dir().join(format!("ooda-spike-{}.jsonl", std::process::id())),
+        &header(),
+    )
+    .expect("log writer");
+    let agent = Arc::new(Harness::new(writer, agent_cfg, provider).expect("agent harness boots"));
+
+    let observer = Arc::new(CapturingObserver::default());
+    let mut driver = SelfHarnessDriver::new(agent, observer.clone());
+    let source = load_harness_source(&ooda_harness_dir().join("Harness.hs"))
+        .expect("ooda harness source loads");
+
+    // --- Cycle 1: Deliberate (3 windows) ---
+    let outcome1 = driver
+        .run_one_cycle(&source, None)
+        .await
+        .expect("cycle 1: orient -> decide -> act");
+    assert_eq!(
+        outcome1.state_json.get("counter").and_then(|v| v.as_i64()),
+        Some(7),
+        "cycle 1: the act edit must apply, got {:?}",
+        outcome1.state_json
+    );
+    assert_eq!(
+        outcome1
+            .state_json
+            .get("lastExpectation")
+            .and_then(|v| v.as_str()),
+        Some("counter becomes 7"),
+        "cycle 1: Engage.expecting must be stamped into the feedback wire, got {:?}",
+        outcome1.state_json
+    );
+
+    // --- Cycle 2: Quiet (1 window; expectation cleared) ---
+    let outcome2 = driver
+        .run_one_cycle(&source, Some(&outcome1.state_json))
+        .await
+        .expect("cycle 2: orient only (Quiet)");
+    assert_eq!(
+        outcome2.state_json.get("counter").and_then(|v| v.as_i64()),
+        Some(7),
+        "cycle 2: a Quiet loop must not edit state, got {:?}",
+        outcome2.state_json
+    );
+    assert!(
+        outcome2
+            .state_json
+            .get("lastExpectation")
+            .map(serde_json::Value::is_null)
+            .unwrap_or(true),
+        "cycle 2: an expectation lives exactly one loop — must be cleared, got {:?}",
+        outcome2.state_json
+    );
+
+    // --- Cycle 3: Familiar (2 windows; positional payload crossed) ---
+    let outcome3 = driver
+        .run_one_cycle(&source, Some(&outcome2.state_json))
+        .await
+        .expect("cycle 3: orient straight to act (Familiar)");
+    assert_eq!(
+        outcome3.state_json.get("counter").and_then(|v| v.as_i64()),
+        Some(12),
+        "cycle 3: the Familiar move's act edit must compose, got {:?}",
+        outcome3.state_json
+    );
+    assert_eq!(
+        outcome3
+            .state_json
+            .get("lastExpectation")
+            .and_then(|v| v.as_str()),
+        Some("counter becomes 12"),
+        "cycle 3: Familiar's Engage must stamp the feedback wire too, got {:?}",
+        outcome3.state_json
+    );
+}

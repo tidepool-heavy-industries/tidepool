@@ -25,6 +25,9 @@ module HarnessTypes
   , Memory (..)
   , ThreadStatus (..)
   , Thread (..)
+  , Orientation (..)
+  , Tempo (..)
+  , Move (..)
   , State (..)
   , initialState
     -- * Edit combinators (the vocabulary edits compose)
@@ -39,6 +42,7 @@ module HarnessTypes
     -- * Loop bookkeeping (authored-loop only)
   , tick
   , retention
+  , stampExpectation
     -- * Rendering
   , render
   ) where
@@ -86,6 +90,40 @@ data Thread = Thread
   }
   deriving (Generic, ToJSON, FromJSON, Show)
 
+-- ---------------------------------------------------------------------------
+-- The OODA phase vocabulary (v3): each loop is up to three typed windows --
+-- orient (always), decide (only when orientation says 'Deliberate'), act
+-- (unless orientation says 'Quiet') -- sharing one accumulating context.
+-- ---------------------------------------------------------------------------
+
+-- | Boyd's hinge, not a mandatory pipeline stage: 'Familiar' recognizes the
+-- moment and goes STRAIGHT to the act window (implicit guidance and
+-- control); 'Deliberate' inserts a decide window over named candidates;
+-- 'Quiet' ends the loop with no act at all -- rest is a complete loop.
+data Tempo
+  = Familiar Move
+  | Deliberate [Text]
+  | Quiet
+  deriving (Generic, ToJSON, FromJSON, Show)
+
+-- | The orient window's answer: what this moment adds up to, and how the
+-- loop should move.
+data Orientation = Orientation
+  { reading :: Text
+  , tempo :: Tempo
+  }
+  deriving (Generic, ToJSON, FromJSON, Show)
+
+-- | The GTD-triage sum: each constructor is a typed gate out of the clarify
+-- flowchart. 'Engage'\'s @expecting@ is Boyd's feedback wire -- an act
+-- tests a hypothesis, and the NEXT loop's orient window is shown it.
+data Move
+  = Engage {intent :: Text, expecting :: Text}
+  | AskFirst {question :: Text}
+  | Shelve {what :: Text, revisit :: Text}
+  | LetGo {what :: Text}
+  deriving (Generic, ToJSON, FromJSON, Show)
+
 data State = State
   { identity :: Text
   -- ^ One prose paragraph; wholesale, deliberate rewrites.
@@ -102,6 +140,10 @@ data State = State
   -- ^ Harness-change asks, aimed at the operator.
   , scratch :: Value
   -- ^ The sandbox: agent-owned, lens-edited, no schema, no review.
+  , lastExpectation :: Maybe Text
+  -- ^ Boyd's feedback wire: 'Engage'\'s hypothesis, stamped by the authored
+  -- loop ('stampExpectation') and rendered to the NEXT loop's orient
+  -- window, then cleared unless renewed -- an expectation lives one loop.
   }
   deriving (Generic, ToJSON, FromJSON, Show)
 
@@ -143,6 +185,7 @@ initialState =
         ]
     , proposals = []
     , scratch = object []
+    , lastExpectation = Nothing
     }
 
 -- ---------------------------------------------------------------------------
@@ -215,6 +258,16 @@ onScratch f st = st { scratch = f st.scratch }
 tick :: State -> State
 tick st = st { loopN = st.loopN + 1 }
 
+-- | Stamp (or clear) the feedback wire from the loop's chosen 'Move'.
+-- Authored-loop only -- an 'Engage' hypothesis survives exactly one loop.
+stampExpectation :: Maybe Move -> State -> State
+stampExpectation mv st =
+  st
+    { lastExpectation = case mv of
+        Just (Engage {expecting = e}) -> Just e
+        _ -> Nothing
+    }
+
 -- | Hard-drop Retired entries older than 'retentionLoops' — the state JSON
 -- re-splices into every loop compile, so growth must be bounded. Retire is
 -- still never-delete WITHIN the horizon (audit trail); beyond it, gone.
@@ -242,7 +295,7 @@ retentionLoops = 40
 render :: State -> Text
 render st =
   [fmt|{st.identity}
-
+{expectationLine}
 About your operator:
 {bullets (map entryLine (filter isActive st.aboutOperator))}
 
@@ -255,6 +308,10 @@ Threads:
 Scratch: {scratchLine}|]
   where
     isActive m = m.standing == Active
+    expectationLine :: Text
+    expectationLine = case st.lastExpectation of
+      Nothing -> ""
+      Just e -> "\nLast loop you expected: " <> e <> " -- check it against what happened.\n"
     activeMems = filter isActive st.memories
     shownMemories = take 12 activeMems
     shownCount = length shownMemories
