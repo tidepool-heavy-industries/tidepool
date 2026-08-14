@@ -63,10 +63,11 @@ fn typecheck(harness_dir: &str, decls: Vec<tidepool_mcp::EffectDecl>) {
 }
 
 /// The companion's row is the driver's own outer session: `[RunLLMTurn,
-/// AskUser]` (mirrors `selfharness::driver::outer_decls`). Its `loop` calls
-/// only `runLLMTurn` — conversation happens through the answerer's own
-/// `askUser` forms — but the probe compiles against the full outer row the
-/// driver actually serves.
+/// AskUser, Worktree, Subagent]` (mirrors `selfharness::driver::outer_decls`
+/// — interposed effects FIRST so the suspend threshold stays 0; Worktree is
+/// Subagent's hard companion). Its `loop` calls only `runLLMTurn` today —
+/// conversation happens through the answerer's own `askUser` forms — but the
+/// probe compiles against the full outer row the driver actually serves.
 #[test]
 fn companion_typechecks() {
     typecheck(
@@ -74,6 +75,8 @@ fn companion_typechecks() {
         vec![
             tidepool_mcp::runllmturn_decl(),
             tidepool_mcp::askuser_decl(),
+            tidepool_mcp::worktree_decl(),
+            tidepool_mcp::subagent_decl(),
         ],
     );
 }

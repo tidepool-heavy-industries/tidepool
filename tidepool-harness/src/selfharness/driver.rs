@@ -178,10 +178,26 @@ struct OuterSession {
 /// Harness State` uses only `runLLMTurn`, and a loop that wants a form imports
 /// `Tidepool.Form` and relies on `askUser`'s `Member AskUser` constraint
 /// unifying against this wider row.
+/// INTERPOSED EFFECTS FIRST — this ordering is load-bearing, not stylistic.
+/// `EngineConfig::from_decls` takes the index of the FIRST interposed decl as
+/// the suspend threshold, so with `RunLLMTurn` at index 0 the outer session's
+/// handled prefix is EMPTY and every effect (including `Subagent`) SUSPENDS
+/// to the driver. Putting a handled effect before `RunLLMTurn` would give the
+/// SHARED machine a non-empty established prefix, silently dispatching the
+/// answerer realms' `AskUser`/`Fork` (tags 0/1) into handler slots — a
+/// capability-boundary break. Pinned by `outer_row_suspends_everything`.
+///
+/// `worktree_decl` is a HARD companion of `subagent_decl`: Subagent's
+/// type_defs reference `WorktreeSpec`/`WorktreeId`/`WorktreeHandle`, and its
+/// `renderSpawnError` helper calls Worktree's `renderWorktreeError` — helper
+/// emission is row-membership-gated, so Worktree must be IN the row, not just
+/// in vocab.
 fn outer_decls() -> Vec<tidepool_mcp::EffectDecl> {
     vec![
         tidepool_mcp::runllmturn_decl(),
         tidepool_mcp::askuser_decl(),
+        tidepool_mcp::worktree_decl(),
+        tidepool_mcp::subagent_decl(),
     ]
 }
 
@@ -463,6 +479,16 @@ pub struct SelfHarnessDriver {
     /// Default [`StdinGate`] (headless behavior); override via
     /// [`Self::set_gate`] (a web/GUI implementation, or a scripted test gate).
     gate: Arc<dyn OperatorGate>,
+    /// The PRD 18 subagent seam for the AUTHORED loop: services a `Subagent`
+    /// suspension (`spawnAgent`/`spawnAgentRaw` raised by outer `loop` code)
+    /// by dispatching the decoded request into this handler — DRIVER-owned,
+    /// never a handler stack on the outer session, whose handled prefix must
+    /// stay empty on the shared machine (see [`outer_decls`]). The handler
+    /// holds a flocked binding table and (live) a running app-server, so it
+    /// rides the driver's process lifetime, surviving machine rotation.
+    /// `None` (default) fails a Subagent suspension with a legible error;
+    /// wire one via [`Self::set_subagent_handler`].
+    subagent: Option<tidepool_handlers::SubagentHandler>,
 }
 
 impl SelfHarnessDriver {
@@ -494,6 +520,7 @@ impl SelfHarnessDriver {
             checkpoint_generation: 0,
             iteration: 0,
             gate: Arc::new(StdinGate),
+            subagent: None,
         }
     }
 
@@ -576,6 +603,15 @@ impl SelfHarnessDriver {
     /// stdin.
     pub fn set_gate(&mut self, gate: Arc<dyn OperatorGate>) {
         self.gate = gate;
+    }
+
+    /// Wire the subagent seam: the handler a `Subagent` suspension from the
+    /// AUTHORED loop dispatches into ([`Self::service_outer_subagent`]).
+    /// Construct it with the target repo as its source repository and its
+    /// registry/worktree/binding roots OUTSIDE any git work tree; back it
+    /// with `MockBackend` in tests and `CodexAgentBackend` live.
+    pub fn set_subagent_handler(&mut self, handler: tidepool_handlers::SubagentHandler) {
+        self.subagent = Some(handler);
     }
 
     /// Override the emergency-compaction threshold (default
@@ -1464,10 +1500,27 @@ impl SelfHarnessDriver {
                                 )
                                 .await?;
                         }
+                        // The AUTHORED loop called a Subagent verb
+                        // (`spawnAgent`/`spawnAgentRaw`) — dispatch the
+                        // ORIGINAL request into the driver-owned handler
+                        // (suspension-serviced; the outer handled prefix
+                        // stays empty) and resume with its typed response.
+                        HoleRouting::Subagent => {
+                            let value = self.service_outer_subagent(&request, &compiled.table)?;
+                            let sid = self.outer_sid()?;
+                            outcome = self
+                                .agent
+                                .with_session(sid, |s| s.resume(&hole, value))
+                                .map_err(|e| DriverError::Session(e.to_string()))?
+                                .map_err(|e| {
+                                    DriverError::Session(format!("subagent resume failed: {e}"))
+                                })?;
+                        }
                         other => {
                             return Err(DriverError::Session(format!(
                                 "outer loop suspended on an unserviceable hole ({other:?}) — \
-                                 the Harness monad exposes runLLMTurn, askUser, and note only"
+                                 the Harness monad exposes runLLMTurn, askUser, note, and \
+                                 spawnAgent only"
                             )))
                         }
                     }
@@ -1923,6 +1976,70 @@ impl SelfHarnessDriver {
     /// outer level): each iteration dispatches on whichever of the two the
     /// CURRENT hole is, so a chain freely interleaving `note` and `askUser`
     /// (in either order) drives to completion without a model round.
+    /// Service ONE `Subagent` suspension raised by the AUTHORED outer loop:
+    /// decode the ORIGINAL suspended request through the generated
+    /// `SubagentReq: FromCore` (against the loop compile's own table — the
+    /// args are bridged ADTs, never JSON-probed), dispatch it into the
+    /// driver-owned [`tidepool_handlers::SubagentHandler`], and return the
+    /// `Response::Complete` value the caller resumes the hole with — the
+    /// IDENTICAL generated conversion path a dispatched effect takes, minus
+    /// the dispatch (the outer row's handled prefix must stay empty on the
+    /// shared machine; see [`outer_decls`]).
+    ///
+    /// `block_in_place`: `CodexAgentBackend` owns its own runtime and
+    /// `block_on`s it — the same discipline every `OperatorGate` call uses.
+    /// A lane-1 coupled spawn blocks this loop turn for the agent's whole
+    /// cycle (~30–120s live), by design (`plans/companion-memory.md`).
+    fn service_outer_subagent(
+        &mut self,
+        request: &Value,
+        table: &DataConTable,
+    ) -> Result<Value, DriverError> {
+        use tidepool_bridge::FromCore;
+        use tidepool_effect::dispatch::{EffectContext, EffectHandler};
+        let handler = self.subagent.as_mut().ok_or_else(|| {
+            DriverError::Session(
+                "the authored loop called a Subagent verb (spawnAgent/spawnAgentRaw) but no \
+                 subagent handler is configured — wire one with \
+                 SelfHarnessDriver::set_subagent_handler (the tidepool-selfharness binary \
+                 does this when TIDEPOOL_MEMORY_REPO is set)"
+                    .into(),
+            )
+        })?;
+        let req = tidepool_handlers::SubagentReq::from_value(request, table)
+            .map_err(|e| DriverError::Session(format!("subagent request decode: {e}")))?;
+        let captured = tidepool_mcp::CapturedOutput::new();
+        let started = std::time::Instant::now();
+        let resp = tokio::task::block_in_place(|| {
+            let cx = EffectContext::with_user(table, &captured);
+            handler.handle(req, &cx)
+        })
+        .map_err(|e| DriverError::Session(format!("subagent dispatch: {e}")))?;
+        let root = match &resp {
+            tidepool_effect::Response::Complete(Value::Con(id, fields)) => {
+                let inner = fields.first().and_then(|f| match f {
+                    Value::Con(iid, _) => table.name_of(*iid),
+                    _ => None,
+                });
+                format!("{:?}({:?})", table.name_of(*id), inner)
+            }
+            other => format!("{other:?}"),
+        };
+        tracing::info!(
+            elapsed_ms = started.elapsed().as_millis() as u64,
+            resp_root = %root,
+            "outer subagent suspension serviced"
+        );
+        match resp {
+            tidepool_effect::Response::Complete(v) => Ok(v),
+            // Subagent verbs never return a list; a `Response::List` here is
+            // a wiring bug, surfaced loudly rather than resumed wrong-shaped.
+            other => Err(DriverError::Session(format!(
+                "subagent dispatch returned a non-Complete response ({other:?})"
+            ))),
+        }
+    }
+
     async fn service_outer_askuser_hole(
         &mut self,
         hole: String,
@@ -2405,7 +2522,36 @@ impl SelfHarnessDriver {
 
 #[cfg(test)]
 mod tests {
-    use super::answerer_decls;
+    use super::{answerer_decls, outer_decls};
+
+    /// The outer row's handled prefix must be EMPTY — every effect (including
+    /// `Subagent`/`Worktree`) SUSPENDS to the driver. A reorder that puts a
+    /// handled effect before `RunLLMTurn` would give the SHARED machine a
+    /// non-empty established prefix and silently dispatch the answerer
+    /// realms' `AskUser`/`Fork` into handler slots (see [`outer_decls`]).
+    /// Decl-name-position is the whole mechanism, so this pin is pure.
+    #[test]
+    fn outer_row_suspends_everything() {
+        let decls = outer_decls();
+        assert_eq!(decls[0].type_name, "RunLLMTurn", "interposed first");
+        let first_interposed = decls
+            .iter()
+            .position(|d| {
+                matches!(
+                    d.type_name,
+                    "Ask" | "AskUser" | "RunLLMTurn" | "Fork" | "Finalize"
+                )
+            })
+            .expect("outer row has an interposed effect");
+        assert_eq!(
+            first_interposed, 0,
+            "the suspend threshold must be 0 — a non-empty handled prefix on the outer \
+             session breaks the shared machine's answerer realms"
+        );
+        // The Subagent lane's hard companion rides along.
+        assert!(decls.iter().any(|d| d.type_name == "Worktree"));
+        assert!(decls.iter().any(|d| d.type_name == "Subagent"));
+    }
 
     /// The answerer's generated `Tidepool.Effects` module declares the
     /// `AskUser` GADT + `askUserRaw` helper

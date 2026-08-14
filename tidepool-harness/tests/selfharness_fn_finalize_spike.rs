@@ -361,6 +361,77 @@ async fn fn_finalize_crosses_two_cycles_and_composes() {
     );
 }
 
+/// The companion-memory answer contract (`plans/companion-memory.md`): the
+/// finalized answer is `Turn { directives :: [Directive], edit :: State ->
+/// State }` — a PURE-DATA LIST beside a closure in one product. The deep
+/// sentinel scan must route the whole record through handle delivery, and
+/// the loop must be able to READ the data half in-heap (it renders the
+/// directives into state — the real loop renders them into the curator
+/// brief) while APPLYING the closure half.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn turn_record_delivers_directive_list_beside_closure() {
+    support::require_extract();
+    let _cache_guard = support::isolate_cache();
+
+    let turn_dir = repo_root().join("examples/harness/turn-spike");
+    let agent_cfg =
+        EngineConfig::from_decls(answerer_decls(), prelude_dir(), Some(turn_dir.clone()))
+            .expect("answerer engine config");
+    let reply = RecordedReply {
+        node: NodeId(0),
+        turn: 0,
+        content: "```haskell\nimport HarnessTypes (Directive (..), State (..), Turn (..))\n\n\
+                  (finalize @Turn (Turn { directives = [Remember \"typed options beat prose\", \
+                  Forget \"the stale note\"], edit = \\st -> st { counter = counter st + 1 } }) \
+                  :: M ())\n```"
+            .to_string(),
+        usage: Usage {
+            input_tokens: 50,
+            output_tokens: 10,
+        },
+    };
+    let provider: Arc<dyn DynModelProvider> = Arc::new(ReplayProvider::new(vec![reply]));
+    let writer = tidepool_harness::log::LogWriter::create(
+        std::env::temp_dir().join(format!("turn-spike-{}.jsonl", std::process::id())),
+        &header(),
+    )
+    .expect("log writer");
+    let agent = Arc::new(Harness::new(writer, agent_cfg, provider).expect("agent harness boots"));
+    let mut driver = SelfHarnessDriver::new(agent, Arc::new(CapturingObserver::default()));
+    let source =
+        load_harness_source(&turn_dir.join("Harness.hs")).expect("turn spike harness loads");
+
+    let outcome = driver
+        .run_one_cycle(&source, None)
+        .await
+        .expect("finalize @Turn (data list beside closure) crosses and applies");
+    assert_eq!(
+        outcome.state_json.get("counter").and_then(|v| v.as_i64()),
+        Some(1),
+        "the edit closure applied, got {:?}",
+        outcome.state_json
+    );
+    let dlog: Vec<String> = outcome
+        .state_json
+        .get("dlog")
+        .and_then(|v| v.as_array())
+        .map(|a| {
+            a.iter()
+                .filter_map(|x| x.as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default();
+    assert_eq!(
+        dlog,
+        vec![
+            "remember: typed options beat prose".to_string(),
+            "forget: the stale note".to_string()
+        ],
+        "the directive list was readable in-heap, in order, got {:?}",
+        outcome.state_json
+    );
+}
+
 /// RECORD-OF-FUNCTIONS acceptance (codex review 2026-08-12, finding 3): the
 /// finalized answer is `Edits { bump :: State -> State, note :: State ->
 /// State }` — closures NESTED inside a product. The deep sentinel scan must

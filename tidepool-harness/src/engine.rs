@@ -95,6 +95,15 @@ pub enum HoleRouting {
     /// cycle's entry state as JSON (note's service shape: no operator, no
     /// model round).
     ReadState,
+    /// A Subagent verb (`SubagentSpawn`/`SubagentBegin`/`SubagentResume` —
+    /// `spawnAgentRaw`/`agentBeginRaw`/`agentResumeRaw`) raised by the
+    /// AUTHORED outer loop. Routed by CONSTRUCTOR NAME only; the payload is
+    /// NEVER decoded here (its args are bridged ADTs, not JSON — the
+    /// servicing site decodes the ORIGINAL request `Value` via the generated
+    /// `SubagentReq: FromCore` and dispatches it to the driver-owned
+    /// `SubagentHandler`, suspension-serviced because the outer row's
+    /// handled prefix must stay EMPTY on the shared machine).
+    Subagent,
     /// `finalize @T x` — an Agent turn hands a
     /// typed value UP to the parent `runLLMTurn` hole and TERMINATES its own
     /// turn loop, rather than resuming in context like [`HoleRouting::RunLLMTurn`]
@@ -210,6 +219,10 @@ pub fn classify_hole(request: &Value, table: &DataConTable, asks: &AsksSidecar) 
         },
         Some("ReadStateWith") => ClassifiedHole {
             routing: HoleRouting::ReadState,
+            prompt: String::new(),
+        },
+        Some("SubagentSpawn") | Some("SubagentBegin") | Some("SubagentResume") => ClassifiedHole {
+            routing: HoleRouting::Subagent,
             prompt: String::new(),
         },
         Some("NoteWith") => {

@@ -2982,29 +2982,45 @@ isAppendVar v = occNameString (nameOccName (idName v)) == "++"
 isErrorVar :: Id -> Bool
 isErrorVar v =
   let name = occNameString (nameOccName (idName v))
+      -- The base-library bottoming WORKERS below are recognized by occ name
+      -- only when their DEFINING MODULE is GHC-internal ("GHC." prefix —
+      -- GHC.List, GHC.Internal.*, GHC.Internal.Control.Exception.Base, …).
+      -- These are ordinary identifier spellings a user can also write — a
+      -- record selector named `lastError` was tagged as GHC.List's `last []`
+      -- worker, which compiled every reference into a lazy raise, so a
+      -- record UPDATE touching that field raised UserError at runtime
+      -- (found live 2026-08-14; pinned by the outer-subagent acceptance
+      -- fixture, whose State keeps a `lastError` field on purpose).
+      -- `error`/`errorWithoutStackTrace` stay name-only: shadowing those is
+      -- already a Prelude collision, and the eval surface's own
+      -- `Tidepool.Prelude.error` path relies on the loose match.
+      fromGhcBase = case nameModule_maybe (idName v) of
+        Just m  -> take 4 (moduleNameString (moduleName m)) == "GHC."
+        Nothing -> False
   in name == "error" || name == "errorWithoutStackTrace"
-     || name == "patError" || name == "noMethodBindingError"
-     || name == "recSelError" || name == "recConError"
-     -- Base-library error workers (2026-06-11). These reach us through .hi
-     -- unfoldings as floated bindings like `maximum14 = errorEmptyList
-     -- "maximum"`; without the sentinel tag the eager Let spine evaluates the
-     -- error RHS at SETUP, so e.g. `maximum (enumFromTo 1 10)` died with
-     -- "empty list" before its case ever ran (literal lists worked only
-     -- because GHC constant-folds them away). errorEmptyList covers the whole
-     -- GHC.List family: maximum/minimum/foldr1/foldl1/last/init/cycle.
-     || name == "errorEmptyList"
-     -- `lastError`/`initError` are GHC.List's bottoming workers for `last []`
-     -- and `init []`. With -O2 + cross-module specialization, an `INLINE _Snoc`
-     -- lens (`xs ^? _last`) compiles to a specialized worker that passes
-     -- `lastError "last"` into a demand-analysis-DEAD fallback arg slot. Without
-     -- the sentinel tag the Var is untagged, so the eager App-argument
-     -- evaluation forces the bottoming thunk and raises spuriously. Tagging it
-     -- lets the codegen route it through a lazy poison (see EmitFrame::RaiseLazy).
-     || name == "lastError" || name == "initError"
-     || name == "irrefutPatError" || name == "nonExhaustiveGuardsError"
-     || name == "assertError" || name == "absentError"
-     || name == "divZeroError" || name == "overflowError"
-     || name == "underflowError" || name == "ratioZeroDenominatorError"
+     || (fromGhcBase &&
+          (  name == "patError" || name == "noMethodBindingError"
+          || name == "recSelError" || name == "recConError"
+          -- Base-library error workers (2026-06-11). These reach us through .hi
+          -- unfoldings as floated bindings like `maximum14 = errorEmptyList
+          -- "maximum"`; without the sentinel tag the eager Let spine evaluates the
+          -- error RHS at SETUP, so e.g. `maximum (enumFromTo 1 10)` died with
+          -- "empty list" before its case ever ran (literal lists worked only
+          -- because GHC constant-folds them away). errorEmptyList covers the whole
+          -- GHC.List family: maximum/minimum/foldr1/foldl1/last/init/cycle.
+          || name == "errorEmptyList"
+          -- `lastError`/`initError` are GHC.List's bottoming workers for `last []`
+          -- and `init []`. With -O2 + cross-module specialization, an `INLINE _Snoc`
+          -- lens (`xs ^? _last`) compiles to a specialized worker that passes
+          -- `lastError "last"` into a demand-analysis-DEAD fallback arg slot. Without
+          -- the sentinel tag the Var is untagged, so the eager App-argument
+          -- evaluation forces the bottoming thunk and raises spuriously. Tagging it
+          -- lets the codegen route it through a lazy poison (see EmitFrame::RaiseLazy).
+          || name == "lastError" || name == "initError"
+          || name == "irrefutPatError" || name == "nonExhaustiveGuardsError"
+          || name == "assertError" || name == "absentError"
+          || name == "divZeroError" || name == "overflowError"
+          || name == "underflowError" || name == "ratioZeroDenominatorError"))
 
 isUndefinedVar :: Id -> Bool
 isUndefinedVar v = occNameString (nameOccName (idName v)) == "undefined"
