@@ -43,9 +43,8 @@ use tidepool_eval::value::Value;
 use tidepool_mcp::CapturedOutput;
 use tidepool_repr::{DataConTable, Generation, SessionId};
 use tidepool_runtime::session::{
-    run_turn, BoundBinder, CompiledTurn, ModuleEnv, ResidentError, ResidentOutcome,
-    ResidentSession, SessionLib, TemplateSelector, TurnRequest, TurnResult, TurnTemplate,
-    DECL_TEMPLATE_SOURCE,
+    run_turn, BoundBinder, CompiledTurn, ResidentError, ResidentOutcome, ResidentSession,
+    SessionLib, TemplateSelector, TurnRequest, TurnResult, TurnTemplate, DECL_TEMPLATE_SOURCE,
 };
 use tidepool_runtime::DEFAULT_NURSERY_SIZE;
 use tokio::sync::{mpsc, oneshot};
@@ -982,9 +981,17 @@ impl Harness {
         // instance at this node id. Scoped under `run_id`, so this can never
         // reach into another live Harness's node dir.
         let _ = std::fs::remove_dir_all(&root);
-        SessionLib::open(SessionId(node.0), &root, ModuleEnv::standalone_default())
-            .map(|lib| lib.with_validation_include(self.cfg.include.clone()))
-            .ok()
+        // The faithful decl env for this node's ACTUAL effect set (the full
+        // include keeps the effects dir, so `Tidepool.Effects`/companions
+        // resolve here) — `standalone_default` has no Prelude, so a decl
+        // naming ambient turn vocabulary (`Text`, `object`) failed validation.
+        SessionLib::open(
+            SessionId(node.0),
+            &root,
+            tidepool_mcp::session_decl_module_env(&self.cfg.decls, false),
+        )
+        .map(|lib| lib.with_validation_include(self.cfg.include.clone()))
+        .ok()
     }
 }
 
@@ -1401,11 +1408,12 @@ impl Harness {
                         self.tree.node_done(node, rendered.clone())?;
                         Ok(engine::TurnOutcome::Completed { rendered })
                     }
-                    Err(e) => {
-                        let msg = format!("The declaration failed: {e}");
-                        self.push_user_turn(node, &msg)?;
-                        Err(HarnessError::Resident(e.to_string()))
-                    }
+                    // A failed decl validation is a COMPILE-class error — the
+                    // caller's corrective-retry loop feeds it back as another
+                    // round, exactly like a failed turn compile. Surfacing it
+                    // as `Resident` killed the whole driver on the model's
+                    // first bad decl (companion dogfood, 2026-08-14).
+                    Err(e) => Err(HarnessError::Compile(e.to_string())),
                 }
             }
             // A value-plane BIND turn (`x <- e`) materializes its result into

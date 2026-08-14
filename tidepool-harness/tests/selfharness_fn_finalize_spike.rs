@@ -458,12 +458,22 @@ async fn living_helper_survives_loop_boundary_and_rotation() {
             // A MIXED decl block — a `data` type among value decls — pins the
             // classifier's TyClD arm (a data-bearing block must classify as a
             // DEFINE round, not fall through to the expression path; the
-            // companion's typed-memory proposal died on exactly that).
+            // companion's typed-memory proposal died on exactly that). The
+            // `Text` payload + `paceLabel` pin the plane's PURE ambient env
+            // (`pure_decl_module_env`): unqualified `Text` must be in scope
+            // exactly as it is in a turn module — under the old minimal env
+            // this decl failed validation and (pre-retry-fix) killed the
+            // driver (companion dogfood, 2026-08-14).
             "import HarnessTypes (State (..))\n\n\
-             data Pace = Steady | Bursty\n\n\
+             data Pace = Steady | Bursty | Named Text\n\n\
              paceOf :: Pace -> Int\n\
              paceOf Steady = 1\n\
-             paceOf Bursty = 2\n\n\
+             paceOf Bursty = 2\n\
+             paceOf (Named _) = 3\n\n\
+             paceLabel :: Pace -> Text\n\
+             paceLabel Steady = \"steady\"\n\
+             paceLabel Bursty = \"bursty\"\n\
+             paceLabel (Named t) = t\n\n\
              bumpBy :: Int -> State -> State\n\
              bumpBy n st = st { counter = counter st + n }",
         ),

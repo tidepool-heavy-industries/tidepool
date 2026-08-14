@@ -700,10 +700,14 @@ impl SelfHarnessDriver {
     fn open_outer_plane(cfg: &EngineConfig) -> Option<tidepool_runtime::session::SessionLib> {
         let root = Self::outer_plane_root();
         let _ = std::fs::remove_dir_all(&root);
+        // The PURE decl env, not `standalone_default`: the plane validates
+        // under the same ambient pure names a turn has (`Text`, `object`, the
+        // Prelude), minus the effects-dir modules its include excludes. The
+        // minimal env failed `data X = X Text` — companion dogfood 2026-08-14.
         tidepool_runtime::session::SessionLib::open(
             tidepool_repr::SessionId(0),
             &root,
-            tidepool_runtime::session::ModuleEnv::standalone_default(),
+            tidepool_mcp::pure_decl_module_env(),
         )
         .map(|lib| lib.with_validation_include(cfg.validation_include()))
         .ok()

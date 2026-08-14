@@ -163,6 +163,35 @@ pub fn session_decl_module_env(effects: &[EffectDecl], user_library: bool) -> Mo
     }
 }
 
+/// The [`ModuleEnv`] for a PURE declaration plane — the self-iterating
+/// harness's living decl plane, whose validation include deliberately drops
+/// the generated effects dir (the structural pure-decls guard: an effectful
+/// decl fails at define time because `Tidepool.Effects` does not resolve).
+///
+/// This is [`session_decl_module_env`]'s import surface MINUS everything that
+/// lives in that excluded dir (`Tidepool.Effects`, `Tidepool.Orchestrate`)
+/// and minus effect companion imports (`Tidepool.Form` etc. depend on the
+/// effects module). Everything else — `Tidepool.Prelude` (unqualified `Text`,
+/// `object`, the pure vocabulary every turn has ambient), the qualified
+/// namespaces, Aeson — stays, so a decl a model authors in turn-module scope
+/// validates under the SAME pure names. The lens-free
+/// [`ModuleEnv::standalone_default`] is NOT a substitute: it has no Prelude,
+/// so `data X = X Text` failed to validate even though `Text` is ambient in
+/// every turn (companion dogfood, 2026-08-14 — a fatal boot-class bug before
+/// the retry fix that landed with this env).
+#[must_use]
+pub fn pure_decl_module_env() -> ModuleEnv {
+    let imports: Vec<String> = eval_import_lines(false, false)
+        .into_iter()
+        .filter(|l| *l != "import Tidepool.Effects")
+        .map(String::from)
+        .collect();
+    ModuleEnv {
+        pragmas: decl_pragmas(),
+        imports,
+    }
+}
+
 /// Emit the LANGUAGE pragma block, the `module Expr` header, and the fixed
 /// import set (plus the conditional `import Library`).
 ///
