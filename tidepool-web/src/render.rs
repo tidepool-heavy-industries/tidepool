@@ -56,10 +56,10 @@ pub enum View<'a> {
 /// `notes` is the current loop's accumulated `note` feed (empty renders
 /// nothing), shown ABOVE the form/idle/continue view — narration explaining
 /// what is about to be asked and why belongs before the thing it explains.
-/// `last_turn_source` is the most recently compiled answerer round's
-/// Haskell, shown BELOW as a collapsed `<details>` pane so it never crowds
-/// the form.
-pub fn panel(view: &View, notes: &[String], last_turn_source: Option<&str>, rev: u64) -> Markup {
+/// `turn_history` is every compiled answerer round's Haskell in post order
+/// (oldest first, empty renders nothing), shown BELOW the view as the
+/// scrollable turn-history pane.
+pub fn panel(view: &View, notes: &[String], turn_history: &[String], rev: u64) -> Markup {
     html! {
         div id="panel" data-rev=(rev) {
             @if !notes.is_empty() {
@@ -70,8 +70,8 @@ pub fn panel(view: &View, notes: &[String], last_turn_source: Option<&str>, rev:
                 View::Form(shape) => (form(shape)),
                 View::Continue => (continue_prompt()),
             }
-            @if let Some(source) = last_turn_source {
-                (turn_source_pane(source))
+            @if !turn_history.is_empty() {
+                (turn_history_pane(turn_history))
             }
         }
     }
@@ -91,16 +91,40 @@ fn notes_feed(notes: &[String]) -> Markup {
     }
 }
 
-/// The last-turn-source pane: collapsed by default so it never crowds the
-/// form/notes above it. Plain `<pre>` v1, no syntax highlighting; `source` is
-/// interpolated as an ordinary maud text node (escaped), never `PreEscaped`.
-fn turn_source_pane(source: &str) -> Markup {
+/// The turn-history pane, below the form/notes: one nested `<details>` per
+/// compiled turn, NEWEST FIRST with only the newest open — the operator
+/// scrolls back through past turns inside a bounded-height container
+/// (`.turn-history` CSS), so an open pane never crowds the form. Entries are
+/// numbered in post order (turn 1 = oldest still retained; the server caps
+/// the history, so numbering restarts only across process restarts). Plain
+/// `<pre>`, no syntax highlighting; every source string is interpolated as
+/// an ordinary maud text node (escaped), never `PreEscaped`.
+fn turn_history_pane(history: &[String]) -> Markup {
+    let n = history.len();
     html! {
-        details class="turn-source" data-node="turn-source" {
-            summary { "Last turn's Haskell" }
-            pre { (source) }
+        details class="turn-source" data-node="turn-source" open {
+            summary { "Haskell turns (" (n) ")" }
+            div class="turn-history" {
+                @for (i, source) in history.iter().enumerate().rev() {
+                    details class="turn-entry" data-node="turn-entry" open[i + 1 == n] {
+                        summary { "turn " (i + 1) " — " (snippet(source)) }
+                        pre { (source) }
+                    }
+                }
+            }
         }
     }
+}
+
+/// A one-line teaser for a turn entry's summary: the source's first line,
+/// truncated. Rendered as a text node like everything else.
+fn snippet(source: &str) -> String {
+    let head = source.lines().next().unwrap_or("").trim();
+    let mut s: String = head.chars().take(64).collect();
+    if head.chars().count() > 64 {
+        s.push('…');
+    }
+    s
 }
 
 /// Idle placeholder — nothing needs the operator right now. A large, quiet
@@ -326,13 +350,13 @@ mod tests {
 
     #[test]
     fn panel_continue_renders_button() {
-        let html = panel(&View::Continue, &[], None, 0).into_string();
+        let html = panel(&View::Continue, &[], &[], 0).into_string();
         assert!(html.contains("@post('/continue')"));
     }
 
     #[test]
     fn panel_idle_is_quiet() {
-        let html = panel(&View::Idle, &[], None, 0).into_string();
+        let html = panel(&View::Idle, &[], &[], 0).into_string();
         assert!(html.starts_with("<div id=\"panel\""));
         assert!(!html.contains("@post"));
     }
@@ -343,10 +367,10 @@ mod tests {
     /// skip-on-focus rule off.
     #[test]
     fn panel_stamps_data_rev_from_the_argument() {
-        let a = panel(&View::Idle, &[], None, 7).into_string();
+        let a = panel(&View::Idle, &[], &[], 7).into_string();
         assert!(a.contains("id=\"panel\" data-rev=\"7\""), "{a}");
 
-        let b = panel(&View::Idle, &[], None, 8).into_string();
+        let b = panel(&View::Idle, &[], &[], 8).into_string();
         assert!(b.contains("id=\"panel\" data-rev=\"8\""), "{b}");
         assert_ne!(a, b);
     }
@@ -355,7 +379,7 @@ mod tests {
     #[test]
     fn panel_renders_notes_above_the_form() {
         let notes = vec!["first note".to_string(), "<b>second</b> note".to_string()];
-        let html = panel(&View::Idle, &notes, None, 0).into_string();
+        let html = panel(&View::Idle, &notes, &[], 0).into_string();
         let notes_pos = html.find("first note").expect("first note rendered");
         let second_pos = html.find("second").expect("second note rendered");
         let idle_pos = html.find("Standby").expect("idle view still rendered");
@@ -372,34 +396,53 @@ mod tests {
     /// An empty note feed adds no notes markup at all.
     #[test]
     fn panel_with_no_notes_renders_no_notes_node() {
-        let html = panel(&View::Idle, &[], None, 0).into_string();
+        let html = panel(&View::Idle, &[], &[], 0).into_string();
         assert!(!html.contains("data-node=\"notes\""), "{html}");
     }
 
-    /// The last-turn-source pane is a COLLAPSED `<details>` below the
-    /// form/idle view, with its source escaped as an ordinary text node
-    /// (never `PreEscaped`) — a source containing `<script>` must not survive
-    /// as live markup.
+    /// The turn-history pane renders BELOW the form/idle view with every
+    /// source escaped as an ordinary text node (never `PreEscaped`) — a
+    /// source containing `<script>` must not survive as live markup.
     #[test]
-    fn panel_renders_last_turn_source_collapsed_and_escaped() {
-        let source = "resume (Approve :: Decision) -- <script>alert(1)</script>";
-        let html = panel(&View::Idle, &[], Some(source), 0).into_string();
+    fn panel_renders_turn_history_below_view_and_escaped() {
+        let history = vec!["resume (Approve :: Decision) -- <script>alert(1)</script>".to_string()];
+        let html = panel(&View::Idle, &[], &history, 0).into_string();
         assert!(html.contains("<details"), "{html}");
-        assert!(html.contains("Last turn's Haskell"), "{html}");
+        assert!(html.contains("Haskell turns (1)"), "{html}");
         assert!(!html.contains("<script>alert"), "{html}");
         assert!(html.contains("&lt;script&gt;"), "{html}");
         let idle_pos = html.find("Standby").expect("idle view still rendered");
         let details_pos = html.find("<details").expect("details rendered");
         assert!(
             idle_pos < details_pos,
-            "the turn-source pane must render BELOW the form/idle view:\n{html}"
+            "the turn-history pane must render BELOW the form/idle view:\n{html}"
         );
     }
 
-    /// `None` adds no turn-source markup at all.
+    /// Every retained turn renders as its own entry, newest first, with only
+    /// the NEWEST entry open — the operator scrolls back through the rest.
     #[test]
-    fn panel_with_no_turn_source_renders_no_details() {
-        let html = panel(&View::Idle, &[], None, 0).into_string();
+    fn panel_turn_history_lists_all_turns_newest_first_newest_open() {
+        let history = vec![
+            "pure (toJSON 1) -- oldest".to_string(),
+            "pure (toJSON 2) -- middle".to_string(),
+            "pure (toJSON 3) -- newest".to_string(),
+        ];
+        let html = panel(&View::Idle, &[], &history, 0).into_string();
+        assert!(html.contains("Haskell turns (3)"), "{html}");
+        let p1 = html.find("turn 1 —").expect("oldest entry rendered");
+        let p3 = html.find("turn 3 —").expect("newest entry rendered");
+        assert!(p3 < p1, "newest must render first:\n{html}");
+        let open_entries = html.matches("data-node=\"turn-entry\" open").count();
+        assert_eq!(open_entries, 1, "only the newest entry is open: {html}");
+        let open_pos = html.find("data-node=\"turn-entry\" open").unwrap();
+        assert!(open_pos < p1, "the open entry is the newest:\n{html}");
+    }
+
+    /// An empty history adds no turn-source markup at all.
+    #[test]
+    fn panel_with_no_turn_history_renders_no_details() {
+        let html = panel(&View::Idle, &[], &[], 0).into_string();
         assert!(!html.contains("<details"), "{html}");
     }
 

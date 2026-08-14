@@ -87,6 +87,11 @@ impl Pending {
     }
 }
 
+/// How many compiled turn sources the history pane retains — enough to
+/// scroll back through a working session's recent loops without letting a
+/// long-lived process grow the page without bound.
+const TURN_HISTORY_CAP: usize = 50;
+
 /// The pending interaction plus a revision counter, both behind ONE lock
 /// (F10) — `rev` must never be read/bumped out of step with `pending`, or a
 /// client could observe a `data-rev` that doesn't actually correspond to the
@@ -104,10 +109,12 @@ struct Slot {
     /// loop boundary ([`AppState::clear_notes`], called from
     /// `WebGate::await_continue`). Rendered ABOVE the pending form.
     notes: Vec<String>,
-    /// The most recently compiled answerer round's Haskell source
-    /// (`WebGate::post_turn_source`) — ONLY the most recent, not a history.
-    /// Rendered as a collapsed pane below the form/notes.
-    last_turn_source: Option<String>,
+    /// Every compiled answerer round's Haskell source in post order
+    /// (`WebGate::post_turn_source` appends), capped at [`TURN_HISTORY_CAP`]
+    /// (oldest dropped) so a long-lived session's page stays bounded.
+    /// Rendered as the turn-history pane below the form/notes; NOT cleared
+    /// at loop boundaries — scrolling back across loops is the point.
+    turn_history: Vec<String>,
 }
 
 /// Shared server state: the pending operator interaction + the re-render tick.
@@ -133,7 +140,7 @@ impl AppState {
                 pending: Pending::Idle,
                 rev: 0,
                 notes: Vec::new(),
-                last_turn_source: None,
+                turn_history: Vec::new(),
             })),
             tick,
         }
@@ -149,7 +156,7 @@ impl AppState {
         panel(
             &slot.pending.view(),
             &slot.notes,
-            slot.last_turn_source.as_deref(),
+            &slot.turn_history,
             slot.rev,
         )
         .into_string()
@@ -182,12 +189,15 @@ impl AppState {
         self.ping();
     }
 
-    /// Replace the last-turn-source pane, bump the revision, and ping —
-    /// [`WebGate::post_turn_source`]'s whole job. Only the most recent source
-    /// is kept, never a history.
-    fn set_turn_source(&self, source: String) {
+    /// Append to the turn history (dropping the oldest entry past
+    /// [`TURN_HISTORY_CAP`]), bump the revision, and ping —
+    /// [`WebGate::post_turn_source`]'s whole job.
+    fn push_turn_source(&self, source: String) {
         let mut slot = self.slot.lock().unwrap();
-        slot.last_turn_source = Some(source);
+        slot.turn_history.push(source);
+        if slot.turn_history.len() > TURN_HISTORY_CAP {
+            slot.turn_history.remove(0);
+        }
         slot.rev += 1;
         drop(slot);
         self.ping();
@@ -297,7 +307,7 @@ impl OperatorGate for WebGate {
     }
 
     fn post_turn_source(&self, source: &str) {
-        self.state.set_turn_source(source.to_string());
+        self.state.push_turn_source(source.to_string());
     }
 }
 
@@ -324,7 +334,7 @@ async fn page(State(st): State<AppState>) -> Html<String> {
     let rendered = panel(
         &slot.pending.view(),
         &slot.notes,
-        slot.last_turn_source.as_deref(),
+        &slot.turn_history,
         slot.rev,
     );
     drop(slot);
@@ -732,7 +742,7 @@ mod tests {
     fn root_bind_path_renders_and_collects_a_root_sum() {
         let shape = destination_shape();
         let html =
-            crate::render::panel(&crate::render::View::Form(&shape), &[], None, 1).into_string();
+            crate::render::panel(&crate::render::View::Form(&shape), &[], &[], 1).into_string();
         assert!(
             html.contains(&format!("name=\"{ROOT_BIND_PATH}\"")),
             "a root sum's radio group must be named at the non-empty root bind path, got:\n{html}"

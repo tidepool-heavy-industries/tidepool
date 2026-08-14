@@ -116,6 +116,21 @@ pub const CSS: &str = r#"
   max-height: 24rem;
   overflow-y: auto;
 }
+.turn-history {
+  margin-top: var(--unit);
+  max-height: 40vh;
+  overflow-y: auto;
+}
+.turn-entry { margin-top: var(--unit); }
+.turn-entry summary {
+  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  font-size: 0.75rem;
+  color: var(--muted);
+  cursor: pointer;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
 html, body { margin: 0; background: var(--paper); }
 body {
   color: var(--ink);

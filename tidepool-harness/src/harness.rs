@@ -1154,8 +1154,20 @@ impl Harness {
         // turn ran, not a coarse "model" provenance tag. ONE `TurnStart` per
         // model turn (the durable-log invariant), carrying the whole runnable
         // sequence; emitted before any block runs, so it precedes this turn's
-        // Effect / HolePublished events in the durable log.
-        let joined = blocks.join("\n\n");
+        // Effect / HolePublished events in the durable log. A multi-block
+        // sequence gets comment separators so the log (and the operator GUI's
+        // turn pane, fed from `last_turn_source`) shows where each separately
+        // compiled block began; a single block stays byte-exact.
+        let joined = if blocks.len() == 1 {
+            blocks[0].clone()
+        } else {
+            blocks
+                .iter()
+                .enumerate()
+                .map(|(i, b)| format!("-- ── block {} of {} ──\n{b}", i + 1, blocks.len()))
+                .collect::<Vec<_>>()
+                .join("\n\n")
+        };
         self.tree.turn_start(node, joined.clone(), None)?;
         // INFO, not DEBUG: a person watching the console must see the exact
         // source every compile ran (dogfood-observability deliverable 1) —

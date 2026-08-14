@@ -364,10 +364,11 @@ async fn await_continue_clears_the_note_feed() {
     );
 }
 
-/// `post_turn_source` keeps only the MOST RECENT source, rendered as a
-/// collapsed pane the page shows regardless of what else is pending.
+/// `post_turn_source` ACCUMULATES a turn history: every posted source stays
+/// on the page (newest first in the pane), rendered regardless of what else
+/// is pending — the operator scrolls back through past turns.
 #[tokio::test(flavor = "multi_thread")]
-async fn post_turn_source_replaces_rather_than_accumulates() {
+async fn post_turn_source_accumulates_a_history() {
     let (addr, state) = boot().await;
     let base = format!("http://{addr}");
     let client = Client::new();
@@ -385,8 +386,12 @@ async fn post_turn_source_replaces_rather_than_accumulates() {
         .await
         .unwrap();
     assert!(html.contains("finalize @Decision Reject"), "{html}");
-    assert!(!html.contains("finalize @Decision Approve"), "{html}");
-    assert!(html.contains("<details"), "{html}");
+    assert!(html.contains("finalize @Decision Approve"), "{html}");
+    assert!(html.contains("Haskell turns (2)"), "{html}");
+    // Newest first in the pane.
+    let reject = html.find("finalize @Decision Reject").unwrap();
+    let approve = html.find("finalize @Decision Approve").unwrap();
+    assert!(reject < approve, "newest turn renders first:\n{html}");
 }
 
 #[tokio::test(flavor = "multi_thread")]
