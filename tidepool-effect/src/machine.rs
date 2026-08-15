@@ -113,6 +113,33 @@ impl<'a> EffectMachine<'a> {
                             let tag = match &ufields[0] {
                                 Value::Lit(tidepool_repr::Literal::LitWord(w)) => *w,
                                 Value::Lit(tidepool_repr::Literal::LitInt(i)) => *i as u64,
+                                // Boxed `W# 0##` / `I# 0#`, mirroring the JIT sibling
+                                // (`tidepool-codegen` effect_machine.rs, "fallback for
+                                // boxed W# to handle cross-module variables that
+                                // normalization cannot safely unbox").
+                                //
+                                // The locked decision — unboxed Word# tags — still
+                                // describes the shape normalization AIMS for, and the
+                                // unboxed arms above stay first. But normalization
+                                // cannot unbox a tag it cannot see, and it cannot see
+                                // one when the effect's GADT lives in a different
+                                // module from the program that sends to it. Such a
+                                // program ran on the JIT and was rejected by this
+                                // oracle, so the two disagreed on the exact shape the
+                                // differential harness exists to compare — and no
+                                // in-repo fixture used a separate effect module, so
+                                // nothing caught it. See the regression test
+                                // `effect_machine_accepts_boxed_word_union_tag`.
+                                Value::Con(_, boxed) if boxed.len() == 1 => match &boxed[0] {
+                                    Value::Lit(tidepool_repr::Literal::LitWord(w)) => *w,
+                                    Value::Lit(tidepool_repr::Literal::LitInt(i)) => *i as u64,
+                                    other => {
+                                        return Err(EffectError::UnexpectedValue {
+                                            context: "Union tag (boxed W#/I# payload)",
+                                            got: format!("{:?}", other),
+                                        })
+                                    }
+                                },
                                 other => {
                                     return Err(EffectError::UnexpectedValue {
                                         context: "Union tag (Word#/Int#)",
@@ -361,6 +388,17 @@ mod tests {
             field_bangs: vec![],
             qualified_name: None,
         });
+        // GHC's boxed-Word wrapper. Present so a fixture can build the *boxed*
+        // union tag a cross-module send produces, not only the unboxed one
+        // normalization emits when it can see the whole program.
+        table.insert(DataCon {
+            id: DataConId(6),
+            name: "W#".to_string(),
+            tag: 1,
+            rep_arity: 1,
+            field_bangs: vec![],
+            qualified_name: Some("GHC.Types.W#".to_string()),
+        });
         table
     }
 
@@ -562,6 +600,115 @@ mod tests {
         let mut handlers = frunk::hlist![TestHandler];
         let mut machine = EffectMachine::new(&table, &mut heap).unwrap();
         let result = machine.run(&expr, &mut handlers).unwrap();
+
+        match result {
+            Value::Lit(Literal::LitInt(n)) => assert_eq!(n, 100),
+            other => panic!("Expected Lit(100), got {:?}", other),
+        }
+    }
+
+    /// The boxed twin of `test_effect_machine_single_effect`: identical program
+    /// except the union tag is `W# 0##` rather than a bare `0##`.
+    ///
+    /// WHY THIS SHAPE OCCURS
+    ///   The locked decision is that union tags are unboxed `Word#` constants,
+    ///   and normalization delivers that whenever it can see the send site and
+    ///   the effect's declaration together. It cannot when they are in different
+    ///   modules — the tag is then a cross-module variable, and it stays boxed.
+    ///   `tidepool-codegen`'s effect machine documents exactly this case and
+    ///   carries a fallback for it; this oracle did not, so the two machines
+    ///   disagreed on a shape real programs produce.
+    ///
+    /// WHY NOTHING CAUGHT IT
+    ///   Every in-repo fixture declares its effects in the same module it sends
+    ///   from, so every fixture normalizes to an unboxed tag. The differential
+    ///   harness compares the two machines faithfully — on programs that cannot
+    ///   exhibit the divergence. A downstream consumer whose GADT lives in its
+    ///   own module hit it immediately.
+    #[test]
+    fn effect_machine_accepts_boxed_word_union_tag() {
+        let table = make_test_table();
+        let mut heap = VecHeap::new();
+
+        let expr: CoreExpr = RecursiveTree {
+            nodes: vec![
+                // 0: Var(x)
+                CoreFrame::Var(VarId(100)),
+                // 1: Con(Val, [Var(x)])
+                CoreFrame::Con {
+                    tag: DataConId(1),
+                    fields: vec![0],
+                },
+                // 2: Lam(x, Val(x))
+                CoreFrame::Lam {
+                    binder: VarId(100),
+                    body: 1,
+                },
+                // 3: Con(Leaf, [lam])
+                CoreFrame::Con {
+                    tag: DataConId(3),
+                    fields: vec![2],
+                },
+                // 4: Lit(99) — the request
+                CoreFrame::Lit(Literal::LitInt(99)),
+                // 5: Lit(Word 0) — the raw tag word
+                CoreFrame::Lit(Literal::LitWord(0)),
+                // 6: Con(W#, [Lit(Word 0)]) — the tag, BOXED. This is the only
+                //    difference from the unboxed sibling test.
+                CoreFrame::Con {
+                    tag: DataConId(6),
+                    fields: vec![5],
+                },
+                // 7: Con(Union, [boxed tag, req])
+                CoreFrame::Con {
+                    tag: DataConId(5),
+                    fields: vec![6, 4],
+                },
+                // 8: Con(E, [union, k])
+                CoreFrame::Con {
+                    tag: DataConId(2),
+                    fields: vec![7, 3],
+                },
+            ],
+        };
+
+        use crate::dispatch::{EffectContext, EffectHandler};
+        use tidepool_bridge::FromCore;
+
+        struct TestReq(i64);
+        impl tidepool_bridge::sealed::FromCoreSealed for TestReq {}
+        impl FromCore for TestReq {
+            fn from_value(
+                value: &Value,
+                _table: &DataConTable,
+            ) -> Result<Self, tidepool_bridge::BridgeError> {
+                match value {
+                    Value::Lit(Literal::LitInt(n)) => Ok(TestReq(*n)),
+                    _ => Err(tidepool_bridge::BridgeError::TypeMismatch {
+                        expected: "LitInt".into(),
+                        got: format!("{:?}", value),
+                    }),
+                }
+            }
+        }
+
+        struct TestHandler;
+        impl EffectHandler for TestHandler {
+            type Request = TestReq;
+            fn handle(
+                &mut self,
+                req: TestReq,
+                _cx: &EffectContext,
+            ) -> Result<Response, EffectError> {
+                Ok(Value::Lit(Literal::LitInt(req.0 + 1)).into())
+            }
+        }
+
+        let mut handlers = frunk::hlist![TestHandler];
+        let mut machine = EffectMachine::new(&table, &mut heap).unwrap();
+        let result = machine
+            .run(&expr, &mut handlers)
+            .expect("a boxed W# union tag must dispatch, as it does on the JIT");
 
         match result {
             Value::Lit(Literal::LitInt(n)) => assert_eq!(n, 100),
