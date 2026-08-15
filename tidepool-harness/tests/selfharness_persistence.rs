@@ -526,18 +526,20 @@ impl Observer for FingerprintChangeObserver {
     }
 }
 
-/// Addendum (stale-checkpoint boot crash): a checkpoint committed by a
-/// DIFFERENT harness source is DISCARDED on `restore`, never decoded — this
-/// is the live-dogfood defect. The old behavior detected the mismatch
-/// (`Event::HarnessSourceChanged` fired) and restored the stale state
-/// anyway; decoding it against the new `State` type crashed the process on
-/// boot. `restore` must return `Ok(None)`, drop any carried-forward
-/// compaction summary (it describes the discarded harness's loop), still
-/// emit the event as the durable record, and still adopt the checkpoint's
-/// generation so the sequence stays monotonic across the restart — proven
-/// here by driving one real cycle afterward and checking what it commits.
+/// Addendum (stale-checkpoint boot crash), REVISED to carry-forward
+/// (2026-08-15, with the operator): a checkpoint committed by a DIFFERENT
+/// harness source is now CARRIED into the first cycle rather than
+/// discarded — the original crash this branch once guarded against (a
+/// shape-incompatible decode killing the process on boot) is absorbed by
+/// `run_loop`'s `DriverError::StateDecode` retry instead, so a
+/// shape-COMPATIBLE harness edit (a prompt tweak) keeps its accumulated
+/// state. Pinned here with the original incident's real fixture: `restore`
+/// returns the stale state, the cycle against it fails as `StateDecode`
+/// (not a crash), the fallback cycle from `initialState` succeeds, the
+/// event still fires as the durable record, the compaction summary still
+/// drops, and the generation still continues monotonically.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn stale_fingerprint_checkpoint_is_discarded_not_restored() {
+async fn stale_fingerprint_state_carries_forward_and_falls_back_on_decode_failure() {
     support::require_extract();
     let _cache_guard = support::isolate_cache();
 
@@ -569,14 +571,15 @@ async fn stale_fingerprint_checkpoint_is_discarded_not_restored() {
         .restore(&current_source)
         .await
         .expect("restore must not error on a mismatched fingerprint");
-    assert_eq!(
-        restored, None,
-        "a fingerprint-mismatched checkpoint's state must be discarded, not returned for decode"
+    assert!(
+        restored.is_some(),
+        "a fingerprint-mismatched checkpoint's state must CARRY FORWARD for the decode \
+         attempt, not be discarded"
     );
     assert_eq!(
         driver.last_compaction(),
         None,
-        "a discarded checkpoint's compaction summary must not carry over — it \
+        "a source-changed checkpoint's compaction summary must not carry over — it \
          describes a different harness's loop"
     );
     assert_eq!(
@@ -586,31 +589,31 @@ async fn stale_fingerprint_checkpoint_is_discarded_not_restored() {
             current_source.fingerprint.clone()
         )],
         "HarnessSourceChanged must still fire, carrying both fingerprints, as the \
-         durable record of the discard"
+         durable record of the carry-forward"
     );
 
-    // The generation counter must still have adopted the fixture's `1`: the
-    // next successful cycle (starting fresh, since `restored` is `None`)
-    // commits generation 2, not 1.
+    // The fixture's state is SHAPE-COMPATIBLE with the reference harness
+    // (the original incident predated shape drift), so the carried state
+    // must simply WORK: the cycle runs on it — this is the whole point of
+    // carry-forward, a compatible harness edit keeps accumulated state.
+    // (The incompatible-shape path is pinned by the decode-retry test
+    // below, which plants a state that cannot decode.)
     let _outcome = driver
         .run_one_cycle(&current_source, restored.as_ref())
         .await
-        .expect("a cycle from fresh initialState after a discarded checkpoint must succeed");
-    // Iteration lives in the checkpoint ENVELOPE, never in authored State.
-    // A fresh-start cycle after the discard runs as loop iteration 1 — the
-    // fixture's iteration is part of the discarded state and must NOT carry.
+        .expect("a shape-compatible carried state must run, not be discarded");
     assert_eq!(
         driver.iteration(),
-        1,
-        "starting fresh from initialState, the cycle must be loop iteration 1, not a \
-         continuation of the discarded checkpoint's count"
+        2,
+        "the carried state's loop history continues (fixture iteration 1 + this \
+         cycle), rather than restarting at 1 as a discard would"
     );
     let committed = persistence::load_checkpoint(&checkpoint_path)
         .expect("load_checkpoint after the fresh cycle")
         .expect("the fresh cycle committed its own checkpoint");
     assert_eq!(
         committed.generation, 2,
-        "generation must continue from the discarded checkpoint's generation (1), not \
+        "generation must continue from the carried checkpoint's generation (1), not \
          reset to 1"
     );
 }
@@ -685,8 +688,9 @@ async fn state_decode_failure_retries_once_from_fresh_state_instead_of_killing_r
     // retry started from fresh initialState is the committed STATE: a real
     // `State` (its `mode` key present), not an echo of the planted garbage.
     assert_eq!(
-        committed.iteration, 2,
-        "the same-fingerprint retry continues the envelope's cycle count"
+        committed.iteration, 1,
+        "the fallback cycle runs as iteration 1 — the discarded state's loop \
+         history goes with it (run_loop's retry arm zeroes the count)"
     );
     assert!(
         committed.state.get("mode").is_some(),

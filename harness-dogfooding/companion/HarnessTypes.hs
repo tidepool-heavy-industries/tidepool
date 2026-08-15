@@ -144,6 +144,10 @@ data State = State
   , memWorktree :: Maybe Text
   -- ^ The curator's retained managed-worktree id: first run allocates,
   -- later runs rebind it ('spawnSpecIn').
+  , lastCurator :: Maybe Text
+  -- ^ The last curator run's own account (receipt summary + touched files,
+  -- or the failure) — the per-run feedback the companion asked for
+  -- (its first v3 friction report, twice). One run's worth; overwritten.
   }
   deriving (Generic, ToJSON, FromJSON, Show)
 
@@ -191,6 +195,7 @@ initialState =
         , Remember "The migration team's take on v2, recorded honestly: thirteen loops of genuine co-design — frictions reported precisely became typed harness changes within hours, verified in lived use the next loop; the expectation wire and thread stances carried thought-continuity well. The weak spot was exactly what Inanna diagnosed: high-value operator quotes and design conclusions accumulating as an undifferentiated chronological list. This store exists so the same material lives as curated, revisable documents instead."
         ]
     , memWorktree = Nothing
+    , lastCurator = Nothing
     }
 
 -- ---------------------------------------------------------------------------
@@ -257,7 +262,7 @@ render st =
 {expectationLine}
 Your memory store's digest (curator-maintained; direct changes with remember/modify/forget directives):
 {st.memoryDigest}
-
+{curatorLine}
 Threads:
 {bullets (map threadLine liveThreads)}
 {proposalsSection}{unfiledSection}Scratch: {scratchLine}|]
@@ -266,6 +271,10 @@ Threads:
     expectationLine = case st.lastExpectation of
       Nothing -> ""
       Just e -> "\nLast loop you expected: " <> e <> " -- check it against what happened.\n"
+    curatorLine :: Text
+    curatorLine = case st.lastCurator of
+      Nothing -> ""
+      Just c -> "\nYour curator's last run: " <> c <> "\n"
     liveThreads =
       [t | t <- st.threads, t.status == Live || t.status == WaitingOnOperator]
     bullets [] = "- (none)" :: Text

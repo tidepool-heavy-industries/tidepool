@@ -1212,6 +1212,10 @@ impl SelfHarnessDriver {
                          fresh initialState instead of taking the process down"
                     );
                     state_json = None;
+                    // The carried state's loop history goes with it (same
+                    // reasoning as restore's compaction drop).
+                    self.iteration = 0;
+                    self.discard_resident_state();
                     self.run_one_cycle(source, state_json.as_ref()).await?
                 }
                 Err(e) => return Err(e),
@@ -1258,25 +1262,34 @@ impl SelfHarnessDriver {
         self.checkpoint_generation = checkpoint.generation;
         self.iteration = checkpoint.iteration;
         if checkpoint.harness_source != source.fingerprint {
+            // CARRY the state forward anyway (revised 2026-08-15, with the
+            // operator). History matters here: restore once returned the
+            // stale state unconditionally and a shape-incompatible decode
+            // CRASHED the process on boot (the live-dogfood defect the
+            // discard branch was added for). The discard fixed the crash by
+            // making EVERY harness edit lossy — a prompt tweak wiped
+            // threads/scratch. What makes carry-forward safe NOW is
+            // [`Self::run_loop`]'s `DriverError::StateDecode` retry (added
+            // after the discard): a genuinely incompatible state fails the
+            // first cycle's decode LEGIBLY and the loop retries once from
+            // `initialState` — the crash cannot recur, and a
+            // shape-compatible edit keeps its accumulated state.
+            // `last_compaction` still drops (it narrates the old source's
+            // loop); iteration carries with the state and is zeroed by the
+            // retry arm if the state falls back.
             tracing::info!(
                 restored_fingerprint = %checkpoint.harness_source,
                 current_fingerprint = %source.fingerprint,
-                "checkpoint harness_source disagrees with the current source fingerprint — \
-                 discarding the persisted state and starting fresh from initialState"
+                "harness source changed since the checkpoint — carrying the persisted \
+                 state forward (a shape-incompatible state falls back to initialState \
+                 via the StateDecode retry)"
             );
             self.emit(Event::HarnessSourceChanged {
                 restored_fingerprint: checkpoint.harness_source,
                 current_fingerprint: source.fingerprint.clone(),
             });
             self.last_compaction = None;
-            // The iteration count is the discarded harness's loop history —
-            // same reasoning as the compaction summary above. GENERATION
-            // deliberately still carries (adopted before this branch): it is
-            // storage lineage for the checkpoint FILE, not loop state, and
-            // the next commit must supersede the discarded row, not restart
-            // a parallel numbering at 1.
-            self.iteration = 0;
-            return Ok(None);
+            return Ok(Some(checkpoint.state));
         }
         self.last_compaction = checkpoint.compaction;
         Ok(Some(checkpoint.state))
@@ -1654,8 +1667,16 @@ impl SelfHarnessDriver {
         let ty_label = ty.unwrap_or("A");
         let max_rounds = self.answerer_max_rounds;
         let nudge_rounds = self.answerer_nudge_rounds;
+        // The glide: at `max_rounds`, ONE explicit ultimatum ("your next
+        // reply must be the minimal honest finalize") and two grace rounds
+        // before the hard fail — a window that wedges on an expressible
+        // answer (the live 2026-08-14 incident burned 32 rounds on a
+        // spelling it was never told) gets a direct instruction first, and
+        // only a window that cannot even comply takes the loop down.
+        let hard_rounds = max_rounds.saturating_add(2);
         let mut rounds: u32 = 0;
         let mut nudged = false;
+        let mut ultimatum = false;
         loop {
             let cap = self.loop_inference_call_cap;
             if self.loop_inference_calls >= cap {
@@ -1664,11 +1685,24 @@ impl SelfHarnessDriver {
                      hard-stopping the loop (a runaway harness)"
                 )));
             }
-            if rounds >= max_rounds {
+            if rounds >= hard_rounds {
                 return Err(DriverError::Session(format!(
-                    "runLLMTurn answerer exceeded {max_rounds} rounds without \
-                     finalizing — hard-failing the hole"
+                    "runLLMTurn answerer exceeded {hard_rounds} rounds (cap {max_rounds} \
+                     + ultimatum grace) without finalizing — hard-failing the hole"
                 )));
+            }
+            if rounds >= max_rounds && !ultimatum {
+                self.agent.push_user_turn(
+                    node,
+                    &format!(
+                        "ROUND CAP REACHED. Your NEXT reply must be a single ```haskell \
+                         block that ONLY finalizes — the minimal honest answer of type \
+                         `{}` (a no-change/empty answer is acceptable and preferred over \
+                         anything elaborate). Nothing else will be accepted.",
+                        display_ty(ty_label)
+                    ),
+                )?;
+                ultimatum = true;
             }
             if rounds == nudge_rounds && !nudged {
                 self.agent.push_user_turn(

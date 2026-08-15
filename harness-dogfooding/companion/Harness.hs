@@ -23,10 +23,12 @@ import qualified Data.Text as T
 import HarnessTypes
 import Tidepool.Agent.Spawn (spawnAgent)
 import Tidepool.Effects
-  ( SpawnOutcome (..)
+  ( SpawnError
+  , SpawnOutcome (..)
   , SpawnReceipt (..)
   , WorktreeId (..)
   , fromCurrentRepository
+  , renderSpawnError
   , spawnSpec
   , spawnSpecIn
   )
@@ -76,8 +78,14 @@ runCurator ops st = do
             { memoryDigest = receipt.digest
             , memWorktree =
                 Just (case outcome.outcomeReceipt.receiptWorktree of WorktreeId t -> t)
+            , lastCurator =
+                Just (receipt.summary <> " [touched: " <> T.intercalate ", " receipt.touched <> "]")
             }
-        Left _ -> st {pendingMemOps = take 12 ops}
+        Left e ->
+          st
+            { pendingMemOps = take 12 ops
+            , lastCurator = Just ("run FAILED (" <> renderSpawnError e <> "); directives carried for retry")
+            }
     )
 
 -- | The curator's task text: the ruleset lives in the store (AGENTS.md), the
