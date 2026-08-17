@@ -24,7 +24,7 @@ use tidepool_agent::seam::{
     ReasoningEffort, ThreadSpec, ToolCall, ToolCallId, ToolOutcome, ToolReply, TurnEvent, TurnId,
 };
 use tidepool_agent::spawn::{
-    CoupledSpawner, SpawnError, SpawnRequest, SpawnStage, SpawnStep, SpawnWorkspace,
+    CoupledSpawner, CycleSaga, SpawnError, SpawnRequest, SpawnStage, SpawnStep, SpawnWorkspace,
     MAX_TOOL_ROUNDS,
 };
 use tidepool_worktree::testing::TestRepo;
@@ -616,7 +616,7 @@ fn parked_turn_completes_and_settles_binding_terminal_once() {
     );
     let (agent, call) = expect_parked(spawner.begin(&mut backend, &req).expect("begin parks"));
     assert_eq!(agent, AgentId(0));
-    assert_eq!(spawner.running_agent(), Some(AgentId(0)));
+    assert_eq!(spawner.running_agents(), vec![AgentId(0)]);
     assert_eq!(call.tool, "ask_parent");
     assert_eq!(call.arguments, serde_json::json!({ "q": "which file?" }));
 
@@ -649,7 +649,10 @@ fn parked_turn_completes_and_settles_binding_terminal_once() {
         run.receipt.rounds, 1,
         "one answered call is one round, and the receipt is where that is checkable"
     );
-    assert_eq!(spawner.running_agent(), None, "the agent's life is over");
+    assert!(
+        spawner.running_agents().is_empty(),
+        "the agent's life is over"
+    );
     // The parent's answer reached the backend, correlated to the parked call.
     assert_eq!(backend.replies.len(), 1);
     assert_eq!(backend.replies[0].call, call.call);
@@ -715,8 +718,8 @@ fn resume_backend_failure_rolls_back_binding_and_retains_worktree() {
         other => panic!("expected Backend at running, got {other:?}"),
     }
     assert_eq!(
-        spawner.running_agent(),
-        None,
+        spawner.running_agents(),
+        Vec::new(),
         "a failed resume ends the agent — it must not stay half-running"
     );
 
@@ -777,8 +780,8 @@ fn answering_the_wrong_agent_is_refused_and_the_agent_stays_running() {
         "a misrouted reply must never reach the backend"
     );
     assert_eq!(
-        spawner.running_agent(),
-        Some(agent),
+        spawner.running_agents(),
+        vec![agent],
         "the refusal costs the running agent nothing"
     );
 
@@ -837,7 +840,7 @@ fn answering_the_wrong_call_is_refused_and_the_agent_stays_running() {
         other => panic!("expected NotRunning, got {other:?}"),
     }
     assert!(backend.replies.is_empty());
-    assert_eq!(spawner.running_agent(), Some(agent));
+    assert_eq!(spawner.running_agents(), vec![agent]);
 
     let step = spawner
         .answer(
@@ -907,7 +910,7 @@ fn round_backstop_fires_and_rolls_back() {
         MAX_TOOL_ROUNDS as usize,
         "the refused round never reached the backend"
     );
-    assert_eq!(spawner.running_agent(), None);
+    assert!(spawner.running_agents().is_empty());
 
     let worktree = only_worktree(&fixture);
     drop(spawner);
@@ -923,66 +926,615 @@ fn round_backstop_fires_and_rolls_back() {
     assert_retained_and_unbound(&fixture, &worktree);
 }
 
-/// One agent at a time. A second `begin` is refused LOUDLY rather than queued
-/// or silently substituted — queuing would make multi-agent concurrency, which
-/// nothing has tested, reachable by accident.
+// ============================================================================
+// N CYCLES AT A TIME. One spawner, many sagas.
+//
+// This section replaces the old "a second `begin` is refused" gate, which
+// asserted a constraint that no longer exists. Its successor is its opposite:
+// two `begin`s under one spawner both succeed. The MISROUTE gates above are
+// untouched and matter more now, not less — with N cycles in flight, "which
+// agent is this reply for" stops being rhetorical.
+// ============================================================================
+
+/// Two `begin`s under ONE spawner both succeed, both agents are running, and
+/// answering one drives ONLY that one.
+///
+/// Each cycle gets its own backend, because an `AgentBackend` is a step
+/// function over one live thread — two cycles sharing one would interleave
+/// their `resume`s onto the same session.
 #[test]
-fn second_begin_while_one_agent_is_running_is_refused() {
+fn two_concurrent_begins_both_run_and_answers_route_by_agent() {
     let fixture = Fixture::init();
     let mut spawner = fixture.spawner();
-    let mut backend = MockBackend::scripted([
+    let mut first_backend = MockBackend::scripted([
+        MockStep::Calls {
+            tool: "ask_parent".to_string(),
+            arguments: serde_json::json!({ "who": "first" }),
+        },
+        MockStep::Completes(CycleResultPayload::Structured(
+            serde_json::json!({ "summary": "first" }),
+        )),
+    ]);
+    let mut second_backend = MockBackend::scripted([
+        MockStep::Calls {
+            tool: "ask_parent".to_string(),
+            arguments: serde_json::json!({ "who": "second" }),
+        },
+        MockStep::Completes(CycleResultPayload::Structured(
+            serde_json::json!({ "summary": "second" }),
+        )),
+    ]);
+
+    let first = request(
+        SpawnWorkspace::New(WorktreeSpec::from_current_repository("first")),
+        "first",
+    );
+    let (agent_a, call_a) = expect_parked(
+        spawner
+            .begin(&mut first_backend, &first)
+            .expect("first begin parks"),
+    );
+
+    let second = request(
+        SpawnWorkspace::New(WorktreeSpec::from_current_repository("second")),
+        "second",
+    );
+    let (agent_b, call_b) = expect_parked(
+        spawner
+            .begin(&mut second_backend, &second)
+            .expect("a second begin is an ordinary spawn, not a refusal"),
+    );
+
+    assert_ne!(agent_a, agent_b, "each cycle mints its own agent id");
+    assert_eq!(
+        spawner.running_agents(),
+        vec![agent_a, agent_b],
+        "both cycles are in flight, sorted"
+    );
+
+    // Two worktrees, two binding files — each cycle allocated its own.
+    let mut worktrees: Vec<WorktreeId> = fixture
+        .manager()
+        .list()
+        .expect("list")
+        .into_iter()
+        .map(|s| s.receipt.worktree_id)
+        .collect();
+    worktrees.sort_by(|a, b| a.as_str().cmp(b.as_str()));
+    assert_eq!(worktrees.len(), 2, "one worktree per cycle: {worktrees:?}");
+    assert_eq!(binding_files(&fixture.binding_root()).len(), 2);
+
+    // Answering A drives A alone: B's backend saw no reply at all.
+    let step = spawner
+        .answer(
+            &mut first_backend,
+            agent_a,
+            call_a.call.clone(),
+            ToolOutcome::Answered(serde_json::json!({ "for": "a" })),
+        )
+        .expect("A's parked call is answerable");
+    match step {
+        SpawnStep::Done(run) => assert_eq!(
+            run.payload,
+            CycleResultPayload::Structured(serde_json::json!({ "summary": "first" }))
+        ),
+        other => panic!("A's script completes here, got {other:?}"),
+    }
+    assert_eq!(first_backend.replies.len(), 1);
+    assert!(
+        second_backend.replies.is_empty(),
+        "answering A must not touch B's backend"
+    );
+    assert_eq!(
+        spawner.running_agents(),
+        vec![agent_b],
+        "A finished; B is untouched and still running"
+    );
+
+    // B is still parked on its OWN call and finishes independently.
+    let step = spawner
+        .answer(
+            &mut second_backend,
+            agent_b,
+            call_b.call,
+            ToolOutcome::Answered(serde_json::json!({ "for": "b" })),
+        )
+        .expect("B's parked call is still answerable after A finished");
+    match step {
+        SpawnStep::Done(run) => assert_eq!(
+            run.payload,
+            CycleResultPayload::Structured(serde_json::json!({ "summary": "second" }))
+        ),
+        other => panic!("B's script completes here, got {other:?}"),
+    }
+    assert!(spawner.running_agents().is_empty());
+
+    drop(spawner);
+
+    // Both cycles settled their OWN binding Terminal.
+    for worktree in &worktrees {
+        let rows = rows_on_disk(&fixture.binding_root(), worktree);
+        assert_eq!(rows.len(), 1, "one lease row per worktree: {rows:?}");
+        assert_eq!(rows[0].state, BindingState::Terminal);
+    }
+}
+
+/// A misroute across CONCURRENT cycles: answering agent A's call while
+/// addressing agent B reaches neither backend, and costs neither cycle its
+/// parked call.
+///
+/// The single-agent misroute rows above prove the check exists; this proves it
+/// still discriminates when there is more than one right answer to "who is
+/// running".
+#[test]
+fn answering_a_concurrent_sibling_is_refused_and_reaches_no_backend() {
+    let fixture = Fixture::init();
+    let mut spawner = fixture.spawner();
+    let script = || {
+        MockBackend::scripted([
+            MockStep::Calls {
+                tool: "ask_parent".to_string(),
+                arguments: serde_json::json!({}),
+            },
+            MockStep::Completes(CycleResultPayload::Absent),
+        ])
+    };
+    let mut backend_a = script();
+    let mut backend_b = script();
+
+    let (agent_a, call_a) = expect_parked(
+        spawner
+            .begin(
+                &mut backend_a,
+                &request(
+                    SpawnWorkspace::New(WorktreeSpec::from_current_repository("a")),
+                    "a",
+                ),
+            )
+            .expect("A begins"),
+    );
+    let (agent_b, call_b) = expect_parked(
+        spawner
+            .begin(
+                &mut backend_b,
+                &request(
+                    SpawnWorkspace::New(WorktreeSpec::from_current_repository("b")),
+                    "b",
+                ),
+            )
+            .expect("B begins"),
+    );
+
+    // A call id that is nobody's, offered under B's agent id. Deliberately a
+    // SYNTHETIC id rather than A's: a backend mints call ids per SESSION, so
+    // two concurrent backends both name their first call `mock-call-0` and A's
+    // id is literally equal to B's. That collision is why routing across
+    // concurrent cycles is by AGENT — a call id alone does not identify a
+    // cycle, which is exactly what the second half of this test pins down.
+    assert_eq!(
+        call_a.call, call_b.call,
+        "per-session call ids collide across concurrent cycles — the agent is the router"
+    );
+    let stray = ToolCallId("some-other-call".to_string());
+    let err = spawner
+        .answer(
+            &mut backend_b,
+            agent_b,
+            stray.clone(),
+            ToolOutcome::Answered(serde_json::json!({})),
+        )
+        .expect_err("that is not B's parked call");
+    match &err {
+        SpawnError::NotRunning { agent, detail } => {
+            assert_eq!(*agent, agent_b);
+            assert!(
+                detail.contains(&call_b.call.0) && detail.contains(&stray.0),
+                "the detail must name both the parked call and the one offered: {detail}"
+            );
+        }
+        other => panic!("expected NotRunning, got {other:?}"),
+    }
+
+    // An agent nobody is running names WHO is, so a caller can act on it.
+    let err = spawner
+        .answer(
+            &mut backend_a,
+            AgentId(99),
+            call_a.call.clone(),
+            ToolOutcome::Answered(serde_json::json!({})),
+        )
+        .expect_err("agent 99 is not running");
+    match &err {
+        SpawnError::NotRunning { agent, detail } => {
+            assert_eq!(*agent, AgentId(99));
+            assert!(
+                detail.contains(&format!("agent {}", agent_a.0))
+                    && detail.contains(&format!("agent {}", agent_b.0)),
+                "with N running the refusal must name them all: {detail}"
+            );
+        }
+        other => panic!("expected NotRunning, got {other:?}"),
+    }
+
+    assert!(backend_a.replies.is_empty(), "no misroute reached A");
+    assert!(backend_b.replies.is_empty(), "no misroute reached B");
+    assert_eq!(spawner.running_agents(), vec![agent_a, agent_b]);
+
+    // Both refusals cost nothing: each cycle's own call still answers.
+    for (backend, agent, call) in [
+        (&mut backend_a, agent_a, call_a.call),
+        (&mut backend_b, agent_b, call_b.call),
+    ] {
+        let step = spawner
+            .answer(
+                backend,
+                agent,
+                call,
+                ToolOutcome::Answered(serde_json::json!({})),
+            )
+            .expect("the correctly-addressed answer still works");
+        assert!(matches!(step, SpawnStep::Done(_)));
+    }
+}
+
+/// The gated script every concurrency row below drives: park on one tool call
+/// (so `begin` returns and the test can observe the cycle mid-flight), then
+/// BLOCK inside `resume` until the test releases the gate, then complete.
+///
+/// `MockStep::Blocks` is seam-level SCHEDULING, not protocol — it is how the
+/// order below is pinned by a rendezvous instead of by a sleep.
+fn gated_script(summary: &str) -> MockBackend {
+    MockBackend::scripted([
+        MockStep::Calls {
+            tool: "gate".to_string(),
+            arguments: serde_json::json!({}),
+        },
+        MockStep::Blocks,
+        MockStep::Completes(CycleResultPayload::Structured(
+            serde_json::json!({ "summary": summary }),
+        )),
+    ])
+}
+
+/// Three detached sagas, three threads, three backends, ONE shared substrate —
+/// completing in an order the test PINS with `MockControl` rather than by
+/// sleeping.
+///
+/// This is the row that proves the substrate lock is never held across a
+/// backend call. Every cycle is bound AND blocked inside `resume` at the same
+/// time; if a saga held the mutex across a backend call, the second cycle could
+/// not even allocate its worktree, and this test would deadlock rather than
+/// fail. The three-Active-bindings assertion below is that fact stated
+/// directly.
+#[test]
+fn three_detached_sagas_complete_out_of_spawn_order_on_three_threads() {
+    let fixture = Fixture::init();
+    let spawner = fixture.spawner();
+    // The handle a cycle thread carries — a clone of the shared substrate, not
+    // a second one (a second `BindingTable` over this root would fail at the
+    // flock).
+    let substrate = spawner.substrate();
+
+    let labels = ["alpha", "bravo", "charlie"];
+    let mut controls = Vec::new();
+    let mut handles = Vec::new();
+    let (bound_tx, bound_rx) = std::sync::mpsc::channel::<(usize, WorktreeId)>();
+    let (done_tx, done_rx) = std::sync::mpsc::channel::<usize>();
+
+    for (index, label) in labels.iter().enumerate() {
+        let mut backend = gated_script(label);
+        controls.push(backend.control());
+
+        let substrate = substrate.clone();
+        let bound_tx = bound_tx.clone();
+        let done_tx = done_tx.clone();
+        let request = request(
+            SpawnWorkspace::New(WorktreeSpec::from_current_repository(*label)),
+            label,
+        );
+        handles.push(std::thread::spawn(move || {
+            // The WHOLE saga runs on this thread: allocate, bind, start the
+            // thread, run the turn.
+            let (mut saga, step) = CycleSaga::begin(&substrate, &mut backend, &request)
+                .expect("each cycle begins independently");
+            assert!(!saga.is_finished(), "the script parks before it completes");
+            bound_tx
+                .send((index, saga.worktree().id().clone()))
+                .expect("report the binding");
+
+            // Refuses the gate call, then blocks inside `resume` until this
+            // cycle's own control is released.
+            let run = saga
+                .run_to_completion(&mut backend, step)
+                .expect("the released cycle completes");
+            done_tx.send(index).expect("report completion");
+            run
+        }));
+    }
+    drop(bound_tx);
+    drop(done_tx);
+
+    // Wait for all three to be BOUND before releasing any of them. Three
+    // simultaneous Active bindings is precisely what one-agent-at-a-time made
+    // impossible.
+    let mut worktrees: Vec<Option<WorktreeId>> = vec![None; labels.len()];
+    for _ in 0..labels.len() {
+        let (index, worktree) = bound_rx.recv().expect("every cycle binds");
+        worktrees[index] = Some(worktree);
+    }
+    let worktrees: Vec<WorktreeId> = worktrees.into_iter().map(|w| w.expect("bound")).collect();
+    {
+        let bindings = spawner.bindings();
+        for worktree in &worktrees {
+            let binding = bindings
+                .current(worktree)
+                .unwrap_or_else(|| panic!("{worktree} must be Active while its cycle runs"));
+            assert_eq!(binding.state, BindingState::Active);
+        }
+    }
+    let mut distinct: Vec<&str> = worktrees.iter().map(|w| w.as_str()).collect();
+    distinct.sort_unstable();
+    distinct.dedup();
+    assert_eq!(distinct.len(), 3, "one worktree per cycle: {worktrees:?}");
+
+    // Release in an order DIFFERENT from the spawn order and read completions
+    // back off the channel: the order is pinned by the gate, never by timing.
+    let release_order = [2usize, 0, 1];
+    let mut completion_order = Vec::new();
+    for index in release_order {
+        controls[index].release();
+        completion_order.push(done_rx.recv().expect("a released cycle completes"));
+    }
+    assert_eq!(
+        completion_order, release_order,
+        "completion order follows RELEASE order, not spawn order"
+    );
+
+    let runs: Vec<_> = handles
+        .into_iter()
+        .map(|h| h.join().expect("cycle thread"))
+        .collect();
+
+    // Three distinct agents and three distinct binding refs — nothing was
+    // shared or reused across the cycles.
+    let mut agents: Vec<AgentId> = runs.iter().map(|r| r.run.agent).collect();
+    agents.sort_unstable();
+    agents.dedup();
+    assert_eq!(agents.len(), 3, "three distinct agent ids");
+
+    let mut refs: Vec<String> = runs.iter().map(|r| r.receipt.binding_ref.clone()).collect();
+    refs.sort();
+    refs.dedup();
+    assert_eq!(refs.len(), 3, "three distinct binding refs");
+
+    // Each cycle got ITS OWN payload and its own worktree — completion order is
+    // not an input to any result.
+    for (index, label) in labels.iter().enumerate() {
+        let run = runs
+            .iter()
+            .find(|r| r.receipt.binding_ref.ends_with(label))
+            .unwrap_or_else(|| panic!("a run for {label}"));
+        assert_eq!(
+            run.payload,
+            CycleResultPayload::Structured(serde_json::json!({ "summary": label }))
+        );
+        assert_eq!(
+            run.receipt.worktree, worktrees[index],
+            "{label} completed in the worktree it bound"
+        );
+    }
+
+    drop(runs);
+    drop(spawner);
+    drop(substrate);
+
+    for worktree in &worktrees {
+        let rows = rows_on_disk(&fixture.binding_root(), worktree);
+        assert_eq!(rows.len(), 1, "one lease row per cycle: {rows:?}");
+        assert_eq!(
+            rows[0].state,
+            BindingState::Terminal,
+            "every completed cycle settles its OWN binding Terminal"
+        );
+    }
+}
+
+/// A saga blocked inside a backend call is reaped from ANOTHER thread by the
+/// backend's canceller, and the cycle then settles `Released` with the worktree
+/// still registered.
+///
+/// Retain-first is locked: cancellation SETTLES, it deletes nothing. Killing
+/// alone would leave a binding row Active against an agent that will never run
+/// again — the exact orphan the saga's rollback semantics exist to prevent — so
+/// the assertion here is about the binding STATE, not merely that the call
+/// returned.
+#[test]
+fn a_blocked_saga_is_cancelled_from_another_thread_and_settles_released() {
+    let fixture = Fixture::init();
+    let spawner = fixture.spawner();
+
+    let mut backend = gated_script("never-reached");
+    // Taken BEFORE the cycle runs: once the cycle thread holds `&mut backend`
+    // nothing else can reach it, which is exactly why a canceller is a separate
+    // `Send + Sync` object rather than a `&mut self` method.
+    let canceller = backend.canceller();
+
+    let (mut saga, step) = spawner
+        .begin_detached(
+            &mut backend,
+            &request(
+                SpawnWorkspace::New(WorktreeSpec::from_current_repository("blocked")),
+                "blocked",
+            ),
+        )
+        .expect("begin_detached parks on the gate call");
+    let worktree = saga.worktree().id().clone();
+
+    // Active while the cycle is live — a blocked turn is not a finished one.
+    let active = rows_on_disk(&fixture.binding_root(), &worktree);
+    assert_eq!(active.len(), 1, "one lease row: {active:?}");
+    assert_eq!(active[0].state, BindingState::Active);
+
+    let (started_tx, started_rx) = std::sync::mpsc::channel::<()>();
+    let handle = std::thread::spawn(move || {
+        started_tx.send(()).expect("announce the drive");
+        let err = saga
+            .run_to_completion(&mut backend, step)
+            .expect_err("a cancelled cycle cannot complete");
+        (saga, err)
+    });
+    started_rx.recv().expect("the cycle thread started");
+
+    // Reap from THIS thread while the cycle thread is inside the seam call.
+    // `cancel` is a latch, so it is correct whether the cycle has reached its
+    // gate yet or not — no sleep, no ordering assumption.
+    canceller.cancel();
+
+    let (mut saga, err) = handle.join().expect("cycle thread");
+    match &err {
+        SpawnError::Backend { stage, error } => {
+            assert_eq!(*stage, SpawnStage::Running);
+            assert_eq!(
+                error,
+                &AgentBackendError::RunFailed {
+                    detail: "cancelled".to_string()
+                }
+            );
+        }
+        other => panic!("expected Backend at running, got {other:?}"),
+    }
+
+    // The reap already settled the binding through the saga's own rollback, and
+    // `abandon` on a settled saga is a no-op — it must not write a second row.
+    assert!(saga.is_finished());
+    saga.abandon().expect("abandon is idempotent");
+    saga.abandon().expect("abandon twice is still a no-op");
+
+    // Assert BEFORE dropping: the binding must not be Active even while the
+    // table is still open.
+    assert!(
+        spawner.bindings().current(&worktree).is_none(),
+        "a cancelled cycle must leave NO Active binding"
+    );
+
+    drop(saga);
+    drop(spawner);
+
+    let rows = rows_on_disk(&fixture.binding_root(), &worktree);
+    assert_eq!(
+        rows.len(),
+        1,
+        "cancellation settles ONE lease, never two: {rows:?}"
+    );
+    assert_eq!(
+        rows[0].state,
+        BindingState::Released,
+        "cancel SETTLES: a killed cycle's binding is Released, not left Active"
+    );
+    assert_eq!(rows[0].agent.as_str(), "agent-0-blocked");
+    assert_retained_and_unbound(&fixture, &worktree);
+}
+
+/// `abandon()` on a live saga settles `Released` exactly once, and on a saga
+/// that already settled — completed or rolled back — it is `Ok(())` writing
+/// nothing.
+///
+/// Idempotence is not tidiness: a cancel racing a completion is a real
+/// sequence, and a second settle would record two lease rows for a life that
+/// ended once.
+#[test]
+fn abandon_settles_released_once_and_is_a_no_op_on_a_settled_saga() {
+    let fixture = Fixture::init();
+    let spawner = fixture.spawner();
+
+    // --- 1. A live, parked saga: abandon settles Released. ---
+    let mut parked_backend = MockBackend::scripted([
         MockStep::Calls {
             tool: "ask_parent".to_string(),
             arguments: serde_json::json!({}),
         },
         MockStep::Completes(CycleResultPayload::Absent),
     ]);
-
-    let first = request(
-        SpawnWorkspace::New(WorktreeSpec::from_current_repository("incumbent")),
-        "incumbent",
-    );
-    let (agent, call) = expect_parked(spawner.begin(&mut backend, &first).expect("begin parks"));
-
-    let second = request(
-        SpawnWorkspace::New(WorktreeSpec::from_current_repository("interloper")),
-        "interloper",
-    );
-    let err = spawner
-        .begin(&mut backend, &second)
-        .expect_err("one spawner drives one agent at a time");
-
-    match &err {
-        SpawnError::NotRunning {
-            agent: named,
-            detail,
-        } => {
-            assert_eq!(*named, agent, "the refusal names the INCUMBENT");
-            assert!(detail.contains("one agent at a time"), "{detail}");
-        }
-        other => panic!("expected NotRunning, got {other:?}"),
-    }
-    // The refusal is total: nothing was allocated, bound, or started for the
-    // second request. `only_worktree` fails loudly on a second one.
-    let worktree = only_worktree(&fixture);
-    assert_eq!(
-        binding_files(&fixture.binding_root()),
-        vec![fixture
-            .binding_root()
-            .join(format!("{}.json", worktree.as_str()))],
-        "only the incumbent's lease exists"
-    );
-    assert_eq!(backend.started.len(), 1, "no second thread was started");
-    assert_eq!(spawner.running_agent(), Some(agent));
-
-    // The incumbent is untouched and still finishes.
-    let step = spawner
-        .answer(
-            &mut backend,
-            agent,
-            call.call,
-            ToolOutcome::Answered(serde_json::json!({})),
+    let (mut parked, _step) = spawner
+        .begin_detached(
+            &mut parked_backend,
+            &request(
+                SpawnWorkspace::New(WorktreeSpec::from_current_repository("abandoned")),
+                "abandoned",
+            ),
         )
-        .expect("the incumbent's parked call is still answerable");
+        .expect("begin_detached");
+    let abandoned = parked.worktree().id().clone();
+    assert!(!parked.is_finished());
+
+    parked.abandon().expect("abandon a live cycle");
+    assert!(parked.is_finished(), "an abandoned saga is finished");
+    parked.abandon().expect("a second abandon is a no-op");
+    parked.abandon().expect("and a third");
+
+    // --- 2. A COMPLETED saga: abandon must not settle a second time. ---
+    let mut completed_backend = MockBackend::completing(CycleResultPayload::Absent);
+    let (mut completed, step) = spawner
+        .begin_detached(
+            &mut completed_backend,
+            &request(
+                SpawnWorkspace::New(WorktreeSpec::from_current_repository("completed")),
+                "completed",
+            ),
+        )
+        .expect("begin_detached");
+    let finished = completed.worktree().id().clone();
+    assert!(
+        completed.is_finished(),
+        "a script that completes at the first stop is finished at begin"
+    );
     assert!(matches!(step, SpawnStep::Done(_)));
+    completed
+        .abandon()
+        .expect("abandon on a completed cycle is a no-op");
+
+    // --- 3. A ROLLED-BACK saga: same rule, reached through a failure. ---
+    let mut failed_backend =
+        MockBackend::failing(MockFailure::AtCycle(AgentBackendError::RunFailed {
+            detail: "model refused".to_string(),
+        }));
+    let err = spawner
+        .begin_detached(
+            &mut failed_backend,
+            &request(
+                SpawnWorkspace::New(WorktreeSpec::from_current_repository("rolled-back")),
+                "rolled-back",
+            ),
+        )
+        .expect_err("the cycle was injected to fail");
+    assert!(matches!(err, SpawnError::Backend { .. }));
+    let rolled_back = fixture
+        .manager()
+        .list()
+        .expect("list")
+        .into_iter()
+        .map(|s| s.receipt.worktree_id)
+        .find(|id| *id != abandoned && *id != finished)
+        .expect("the failed spawn still created a worktree");
+
+    drop(parked);
+    drop(completed);
+    drop(spawner);
+
+    // One row each, in the state that cycle's ending earned — never two.
+    for (worktree, state) in [
+        (&abandoned, BindingState::Released),
+        (&finished, BindingState::Terminal),
+        (&rolled_back, BindingState::Released),
+    ] {
+        let rows = rows_on_disk(&fixture.binding_root(), worktree);
+        assert_eq!(
+            rows.len(),
+            1,
+            "exactly one lease row for {worktree}: {rows:?}"
+        );
+        assert_eq!(rows[0].state, state, "for {worktree}");
+    }
+    assert_retained_and_unbound(&fixture, &abandoned);
+    assert_retained_and_unbound(&fixture, &rolled_back);
 }

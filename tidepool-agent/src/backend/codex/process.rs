@@ -641,7 +641,7 @@ impl<T: Transport> Session<T> {
 
 /// Whether a pid still names a live (or not-yet-reaped) process, via
 /// `/proc` — Linux only, matching this environment.
-fn process_exists(pid: u32) -> bool {
+pub(crate) fn process_exists(pid: u32) -> bool {
     Path::new(&format!("/proc/{pid}")).exists()
 }
 

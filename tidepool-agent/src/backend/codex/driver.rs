@@ -26,6 +26,8 @@
 //!    parks the child's turn until the timeout kills it. That holds for a
 //!    declared tool, an undeclared one, and a round-cap refusal alike.
 
+use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 use codex_codes::{
@@ -36,8 +38,10 @@ use codex_codes::{
 use crate::backend::codex::dynamic_tools::{
     DynamicToolFunctionSpec, DynamicToolSpec, ThreadStartWithDynamicTools,
 };
-use crate::backend::codex::process::{last_agent_message_text, Session, SessionError, TurnStop};
-use crate::backend::AgentBackend;
+use crate::backend::codex::process::{
+    last_agent_message_text, process_exists, Session, SessionError, TurnStop,
+};
+use crate::backend::{AgentBackend, AgentBackendFactory, BackendCanceller};
 use crate::seam::{
     AgentActivity, AgentBackendError, BackendThreadId, CycleOutcome, CycleResultPayload, CycleSpec,
     DynamicToolDeclaration, ModelPolicy, ReasoningEffort, ThreadSpec, TokenUsage, ToolCall,
@@ -103,6 +107,14 @@ pub struct CodexAgentBackend {
     /// "connection lost" — a lost connection surfaces as a
     /// [`AgentBackendError::BackendUnavailable`] from the call that noticed.
     session: Option<Session>,
+    /// The app-server child's pid, published the moment the session connects,
+    /// so a [`CodexCanceller`] taken BEFORE the cycle started can still reach
+    /// it. `0` means "no process yet".
+    ///
+    /// Shared rather than read off `session` because a cycle thread inside
+    /// `start_turn` holds `&mut self`, and the canceller's whole job is to be
+    /// reachable while that borrow is outstanding.
+    pid: Arc<AtomicU32>,
     /// Fetched once per backend and reused: `model/list` is a metadata
     /// request, but re-asking per cycle would let one agent's turns silently
     /// run on two different models.
@@ -126,6 +138,7 @@ impl CodexAgentBackend {
         Ok(Self {
             runtime,
             session: None,
+            pid: Arc::new(AtomicU32::new(0)),
             catalogue: None,
             resolved_model: None,
             turn_timeout: DEFAULT_TURN_TIMEOUT,
@@ -189,6 +202,9 @@ impl CodexAgentBackend {
                 .runtime
                 .block_on(Session::connect(capabilities))
                 .map_err(map_session_error)?;
+            // Publish the pid BEFORE handing the session back: from here on a
+            // canceller taken at any time can reap this process.
+            self.pid.store(session.pid().unwrap_or(0), Ordering::SeqCst);
             self.session = Some(session);
         }
         let Self {
@@ -261,6 +277,19 @@ impl AgentBackend for CodexAgentBackend {
             .collect()
     }
 
+    /// A handle that SIGKILLs the app-server child from another thread.
+    ///
+    /// Real reaping, not a flag: a cycle thread blocked in
+    /// [`start_turn`](AgentBackend::start_turn) is blocked on a read from the
+    /// child's stdout, so killing the child closes the pipe and the blocked
+    /// read returns — the seam call comes back
+    /// [`AgentBackendError::BackendUnavailable`] instead of hanging.
+    fn canceller(&self) -> Box<dyn BackendCanceller> {
+        Box::new(CodexCanceller {
+            pid: Arc::clone(&self.pid),
+        })
+    }
+
     fn resume(&mut self, reply: ToolReply) -> Result<TurnEvent, AgentBackendError> {
         // The model was resolved when the turn started; re-resolving here could
         // silently move an in-flight turn onto a different model.
@@ -277,6 +306,118 @@ impl AgentBackend for CodexAgentBackend {
             .block_on(session.reply_and_pump(&reply.call.0, &response, timeout))
             .map_err(map_session_error)?;
         project_stop(stop, session, &resolved_model)
+    }
+}
+
+/// How long [`CodexCanceller::cancel`] waits for the killed child to actually
+/// leave the process table before giving up. SIGKILL is unblockable, so this is
+/// a bound on the kernel reaping it, not on the process deciding to comply.
+const CANCEL_CONFIRM_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Reaps one [`CodexAgentBackend`]'s app-server child from another thread.
+///
+/// # What it actually does, and what it cannot do
+///
+/// It sends `SIGKILL` to the recorded pid and then CONFIRMS the process left
+/// `/proc` before returning — the same "never trust that the signal was sent"
+/// rule [`Session::shutdown`] follows. It does not, and cannot, go through
+/// `Session::shutdown`: that method consumes `self` and needs the backend's
+/// tokio runtime, both of which the cycle thread is holding `&mut` on for the
+/// whole duration of the seam call this exists to interrupt. Signalling the
+/// child by pid is the reachable mechanism, and it is a real one — the blocked
+/// read on the child's stdout returns as soon as the pipe closes.
+///
+/// A pid of `0` means the session has not connected yet, so there is no
+/// process to reap; the cycle thread is inside process spawn + handshake,
+/// which is bounded by the OS rather than by a model. That case is a genuine
+/// no-op, not a silent failure to reap something that exists.
+///
+/// The killed child is left for its owning `tokio::process::Child` to reap
+/// when the backend is dropped; `cancel` deliberately does not wait on it,
+/// because the `Child` belongs to the blocked thread.
+pub struct CodexCanceller {
+    pid: Arc<AtomicU32>,
+}
+
+impl BackendCanceller for CodexCanceller {
+    fn cancel(&self) {
+        let pid = self.pid.load(Ordering::SeqCst);
+        if pid == 0 {
+            return;
+        }
+        // SAFETY: `kill(2)` with a pid we spawned ourselves. A pid that has
+        // already been reaped yields ESRCH, which is the outcome cancellation
+        // wanted and is therefore ignored rather than reported.
+        unsafe {
+            libc::kill(pid as libc::pid_t, libc::SIGKILL);
+        }
+        let deadline = std::time::Instant::now() + CANCEL_CONFIRM_TIMEOUT;
+        while process_exists(pid) && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+}
+
+/// Makes one [`CodexAgentBackend`] per cycle.
+///
+/// # Config isolation holds for N instances exactly as for one — verified
+///
+/// PRD 18 acceptance criterion 11 (no normal worker run mutates the operator's
+/// `~/.codex`) is upheld by the REQUEST SHAPE, not by any per-process guard, so
+/// N instances cannot race past it:
+///
+/// - `cwd` rides [`CycleSpec`], i.e. `turn/start`. The thread-start params type
+///   ([`ThreadStartWithDynamicTools`]) has no `cwd` field AT ALL, so the
+///   project-trust write into `config.toml` is structurally unreachable from
+///   every instance independently. Nothing about that is shared state.
+/// - [`CodexAgentBackend::new`] allocates a fresh tokio runtime and sets
+///   `session`/`catalogue`/`resolved_model` to `None`. There are no statics, no
+///   shared caches, and no cross-instance handles — the model catalogue is
+///   cached PER BACKEND, which is what keeps one agent's turns on one model.
+/// - Each instance spawns its OWN `codex app-server` child on first use.
+///
+/// **What N instances do share, stated rather than papered over:** the
+/// operator's real Codex home. In the normal path that is read-only —
+/// `config.toml`, `auth.json` and `installation_id` are read at app-server
+/// startup and not written, which is exactly what
+/// [`ConfigSnapshot`](super::isolation::ConfigSnapshot) checks per run and what
+/// makes a mutation a FAILURE rather than a tolerated side effect. The one
+/// writable case is a credential refresh (`auth.json`), which N concurrent
+/// servers could in principle race on; that is a property of running `codex` at
+/// all and not something this factory introduces, and it already fails the
+/// isolation check loudly rather than silently, on one instance or on eight.
+/// Anything beyond that — the live sqlite logs the operator's own sessions
+/// write continuously — is outside the checked surface by design.
+pub struct CodexBackendFactory {
+    turn_timeout: Duration,
+}
+
+impl CodexBackendFactory {
+    pub fn new() -> Self {
+        Self {
+            turn_timeout: DEFAULT_TURN_TIMEOUT,
+        }
+    }
+
+    /// Give every backend this factory makes the same non-default turn timeout.
+    #[must_use]
+    pub fn with_turn_timeout(mut self, timeout: Duration) -> Self {
+        self.turn_timeout = timeout;
+        self
+    }
+}
+
+impl Default for CodexBackendFactory {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl AgentBackendFactory for CodexBackendFactory {
+    fn create(&mut self) -> Result<Box<dyn AgentBackend + Send>, AgentBackendError> {
+        Ok(Box::new(
+            CodexAgentBackend::new()?.with_turn_timeout(self.turn_timeout),
+        ))
     }
 }
 

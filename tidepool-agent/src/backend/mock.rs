@@ -17,7 +17,9 @@
 //! X" — not a simulation of a model. Realistic backend behavior comes from
 //! recordings, never from hand-written guesses about what a model would do.
 
-use crate::backend::AgentBackend;
+use std::sync::{Arc, Condvar, Mutex};
+
+use crate::backend::{AgentBackend, BackendCanceller};
 use crate::seam::{
     AgentActivity, AgentBackendError, BackendThreadId, CycleOutcome, CycleResultPayload, CycleSpec,
     ThreadSpec, ToolCall, ToolCallId, ToolReply, TurnEvent, TurnId,
@@ -35,6 +37,99 @@ pub enum MockStep {
     Completes(CycleResultPayload),
     /// The step fails.
     Fails(AgentBackendError),
+    /// Block until [`MockControl::release`], then continue to the NEXT step.
+    /// A [`MockControl::cancel`] while blocked returns
+    /// `RunFailed { detail: "cancelled" }`.
+    ///
+    /// SCHEDULING, not protocol — see [`MockControl`].
+    Blocks,
+}
+
+/// A test-controlled gate: a scripted turn can BLOCK at a stop until the test
+/// releases it, or until the backend is cancelled.
+///
+/// # This is seam-level SCHEDULING, not protocol behavior
+///
+/// The standing rule for this module (see the module docs) is that the mock
+/// implements the SEAM and never the protocol: no JSON-RPC, no frame ordering,
+/// no session lifecycle, no error shapes. This gate does not bend that rule,
+/// because WHEN a seam call returns is a property of the seam itself — the
+/// trait's own docs say an implementation must survive an arbitrary gap while
+/// a call is parked, and a real backend's `start_turn` blocks for as long as
+/// the model takes. `Blocks` lets a test choose that duration explicitly
+/// instead of guessing at it.
+///
+/// It exists because concurrency tests must pin completion ORDER without
+/// sleeping. A sleep-based ordering assertion is a race that usually passes;
+/// this is a rendezvous that always does.
+///
+/// It teaches the mock nothing about what a model would do, and no assertion
+/// about protocol behavior can be written with it.
+pub struct MockControl {
+    state: Mutex<ControlState>,
+    changed: Condvar,
+}
+
+#[derive(Debug, Default)]
+struct ControlState {
+    /// Releases granted but not yet consumed. Counted rather than a boolean so
+    /// a test may release BEFORE the backend reaches its gate — a rendezvous
+    /// that depended on which side arrived first would be the race this type
+    /// exists to remove.
+    releases: usize,
+    cancelled: bool,
+}
+
+impl MockControl {
+    fn new() -> Self {
+        Self {
+            state: Mutex::new(ControlState::default()),
+            changed: Condvar::new(),
+        }
+    }
+
+    /// Let one blocked (or one future) step through.
+    pub fn release(&self) {
+        let mut state = self.state.lock().expect("mock control mutex");
+        state.releases += 1;
+        self.changed.notify_all();
+    }
+
+    /// Fail every blocked and future step. Total and idempotent, like every
+    /// [`BackendCanceller`].
+    pub fn cancel(&self) {
+        let mut state = self.state.lock().expect("mock control mutex");
+        state.cancelled = true;
+        self.changed.notify_all();
+    }
+
+    /// Whether [`cancel`](Self::cancel) has been called.
+    pub fn is_cancelled(&self) -> bool {
+        self.state.lock().expect("mock control mutex").cancelled
+    }
+
+    /// Block until released or cancelled. `Err` is the cancellation.
+    fn wait(&self) -> Result<(), AgentBackendError> {
+        let mut state = self.state.lock().expect("mock control mutex");
+        loop {
+            if state.cancelled {
+                return Err(AgentBackendError::RunFailed {
+                    detail: "cancelled".to_string(),
+                });
+            }
+            if state.releases > 0 {
+                state.releases -= 1;
+                return Ok(());
+            }
+            state = self.changed.wait(state).expect("mock control mutex");
+        }
+    }
+}
+
+impl BackendCanceller for Arc<MockControl> {
+    fn cancel(&self) {
+        MockControl::cancel(self);
+    }
 }
 
 /// Where an injected failure fires, for the saga's rollback rows.
@@ -75,6 +170,10 @@ pub struct MockBackend {
     /// Every reply the parent sent, in order — what a test asserts the parent's
     /// handlers actually answered.
     pub replies: Vec<ToolReply>,
+    /// The gate [`MockStep::Blocks`] waits on, and the thing
+    /// [`MockBackend::canceller`] hands out. Always present so a canceller can
+    /// be taken from any backend, scripted with `Blocks` or not.
+    control: Arc<MockControl>,
 }
 
 impl MockBackend {
@@ -95,6 +194,7 @@ impl MockBackend {
             started: Vec::new(),
             cycles: Vec::new(),
             replies: Vec::new(),
+            control: Arc::new(MockControl::new()),
         }
     }
 
@@ -122,16 +222,38 @@ impl MockBackend {
         self
     }
 
+    /// This backend's scheduling gate — how a test releases a
+    /// [`MockStep::Blocks`] stop, or cancels a blocked one.
+    pub fn control(&self) -> Arc<MockControl> {
+        Arc::clone(&self.control)
+    }
+
     /// Take the next scripted stop and project it into a seam event.
+    ///
+    /// A [`MockStep::Blocks`] stop is not a stop the SAGA sees: it blocks and
+    /// then continues to the next scripted step, so the gate changes when a
+    /// seam call returns and never what it returns.
     fn step(&mut self) -> Result<TurnEvent, AgentBackendError> {
-        let Some(step) = self.script.pop_front() else {
-            return Err(AgentBackendError::RunFailed {
-                detail: "mock backend script exhausted: the turn was driven further than the \
-                         test scripted it"
-                    .to_string(),
-            });
-        };
+        loop {
+            let Some(step) = self.script.pop_front() else {
+                return Err(AgentBackendError::RunFailed {
+                    detail: "mock backend script exhausted: the turn was driven further than the \
+                             test scripted it"
+                        .to_string(),
+                });
+            };
+            if matches!(step, MockStep::Blocks) {
+                self.control.wait()?;
+                continue;
+            }
+            return self.project(step);
+        }
+    }
+
+    /// Project one non-blocking scripted stop into a seam event.
+    fn project(&mut self, step: MockStep) -> Result<TurnEvent, AgentBackendError> {
         match step {
+            MockStep::Blocks => unreachable!("`step` handles the gate before projecting"),
             MockStep::Fails(e) => Err(e),
             MockStep::Completes(payload) => {
                 self.parked = None;
@@ -209,5 +331,16 @@ impl AgentBackend for MockBackend {
         self.replies.push(reply);
         self.parked = None;
         self.step()
+    }
+
+    /// The scheduling gate, as a canceller.
+    ///
+    /// Reaping a mock means failing whatever it is blocked on — there is no
+    /// process — so this is the honest analogue of killing the app-server
+    /// child, not a stand-in for it: a cycle thread parked on
+    /// [`MockStep::Blocks`] really does return from its seam call when another
+    /// thread calls this.
+    fn canceller(&self) -> Box<dyn BackendCanceller> {
+        Box::new(self.control())
     }
 }
