@@ -63,6 +63,12 @@ Generated from it:
 Hand-written forever: handler method bodies, Haskell library behavior, the
 harness's tree policy, domain types' OS/backend concerns.
 
+Generator requirement (operator's type-level review, 2026-08-17): wire-side
+integers and identifiers generate as NEWTYPES (`SiteId`, `FanCount`, …) with
+fallible boundary constructors — decode once at the edge, typed everywhere
+after. Do not hand-write these ahead of the generator; specify them here so
+phase 2+ emits them.
+
 ## Hard rules
 
 - **No raw-Haskell escape hatches in the schema.** Arbitrary embedded source
