@@ -1362,6 +1362,21 @@ impl Harness {
             expr_import_lines.push(imports.to_string());
         }
         expr_import_lines.extend(session_module.clone());
+        // Value-plane bindings (mounted names included — PRD 21 lane C1's
+        // mount seam) are visible to a plain EXPRESSION turn, not just a
+        // `x <- e` BIND: without this, `mounted.applyMounted 41` (a bare
+        // expression) failed "not in scope" even though the SAME name
+        // resolved fine as the right-hand side of a bind. GHCi does not
+        // distinguish these two shapes' name scope, and neither should this.
+        // Reuses `bind_ctx`'s already-computed import line (decl module +
+        // CURRENT `Val.G<g>` per live name — never a shadowed gen, which
+        // would be an ambiguous occurrence): a harmless duplicate of the decl
+        // import already in `session_module` when both are present.
+        if let Some((session_imports, ..)) = &bind_ctx {
+            if !session_imports.is_empty() {
+                expr_import_lines.push(session_imports.clone());
+            }
+        }
         let expr_imports = expr_import_lines.join("\n");
         let target = self.cfg.turn_target(
             contract

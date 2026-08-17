@@ -2453,12 +2453,26 @@ impl JitEffectMachine {
                         // turn's rendered result — never `done_ptr`, which
                         // tenure has just forwarded. SAFETY: slot.current() is
                         // the live old-space pointer; forcing is a no-op on the
-                        // already-NF Tier0 case.
+                        // already-NF Tier0 case. TOLERANT, not strict: a Tier1
+                        // bind (tenured as-is, never forced — a bare closure,
+                        // OR any Tier0-shaped type that merely CONTAINS one,
+                        // e.g. a record with a function field, PRD 21 lane
+                        // C1's mounted-value shape) has a real `TAG_CLOSURE`
+                        // reachable here, which the strict bridge rejects. The
+                        // same substitution `finalize`'s closure path already
+                        // uses for its rendered value: the REAL value stays
+                        // live at `slot` regardless (that root is what
+                        // `Materialized::Bind`'s caller actually resolves a
+                        // later reference through), this bridge only needs to
+                        // produce SOMETHING renderable. Strictly a superset of
+                        // the old behavior — a Tier0 value never reaches a
+                        // `TAG_CLOSURE` (nothing left to substitute), so this
+                        // is a no-op there.
                         let vmctx_ptr = machine.vmctx_mut() as *mut VMContext;
                         let bridge_res = unsafe {
                             let live = slot.current();
                             crate::signal_safety::with_signal_protection(|| {
-                                heap_bridge::heap_to_value_forcing(live, vmctx_ptr)
+                                heap_bridge::heap_to_value_forcing_tolerant(live, vmctx_ptr)
                             })
                         }
                         .map_err(JitError::Signal)?;

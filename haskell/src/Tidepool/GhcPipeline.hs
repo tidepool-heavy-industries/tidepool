@@ -37,8 +37,11 @@ import qualified Data.Map.Strict as Map
 import GHC.Platform (genericPlatform)
 import GHC.Utils.Outputable (renderWithContext, defaultSDocContext, ppr)
 import GHC.Types.Id (idName, idType)
-import GHC.Core.Type (Type, splitAppTy_maybe, splitTyConApp_maybe, isFunTy)
-import GHC.Core.TyCon (isTupleTyCon)
+import GHC.Core.Type (splitAppTy_maybe, splitTyConApp_maybe, splitFunTy_maybe)
+import GHC.Core.TyCon (isTupleTyCon, tyConDataCons_maybe, unwrapNewTyCon_maybe)
+import GHC.Core.DataCon (dataConOrigArgTys)
+import GHC.Core.TyCo.Rep (Scaled(..))
+import GHC.Types.Unique.Set (UniqSet, emptyUniqSet, addOneToUniqSet, elementOfUniqSet)
 import GHC.Tc.Utils.TcType (tcSplitSigmaTy)
 import GHC.Types.TypeEnv (typeEnvIds)
 import GHC.Tc.Types (TcGblEnv, tcg_type_env)
@@ -1073,11 +1076,41 @@ stripMonadHead ty =
        Nothing       -> body
 
 -- | Is the bound value a CLOSURE (Tier1) rather than first-order data (Tier0)?
--- True iff @T@ is a function type after stripping its own foralls/context — the
--- distinction the bind path uses to decide strict-force (Tier0) vs store-as-is
--- (Tier1).
+-- True iff @T@ (after stripping its own foralls/context) IS a function type,
+-- OR MENTIONS one anywhere in its structure — a type application argument, a
+-- newtype's representation, or a data constructor field, walked transitively
+-- (visited-set keyed on 'TyCon', so a recursive type terminates instead of
+-- looping; mirrors 'Tidepool.Translate.typeMentionsEffectMonad's walk). The
+-- wider check matters because Tier0 forces the bound value to normal form
+-- before tenuring: a record with a function FIELD (e.g. a companion "mounted
+-- value" carrying an applied handler, PRD 21 lane C1) is not itself a
+-- function type, but deep-forcing it would try to force through the
+-- function field and crash — it needs the SAME store-as-is treatment a bare
+-- function gets.
 isClosureType :: Type -> Bool
-isClosureType ty = let (_, _, body) = tcSplitSigmaTy ty in isFunTy body
+isClosureType ty0 =
+  let (_, _, body) = tcSplitSigmaTy ty0
+  in goT emptyUniqSet body
+  where
+    goT :: UniqSet TyCon -> Type -> Bool
+    goT visited ty
+      | Just{} <- splitFunTy_maybe ty = True
+      | Just (tc, tyArgs) <- splitTyConApp_maybe ty = any (goT visited) tyArgs || goTc visited tc
+      | otherwise = False
+
+    goTc :: UniqSet TyCon -> TyCon -> Bool
+    goTc visited tc
+      | tc `elementOfUniqSet` visited = False
+      | otherwise =
+          let visited' = addOneToUniqSet visited tc
+              newtypeHit = case unwrapNewTyCon_maybe tc of
+                Just (_tvs, reprTy, _coax) -> goT visited' reprTy
+                Nothing -> False
+              fieldHit = case tyConDataCons_maybe tc of
+                Just dcs -> any (\dc -> any (\(Scaled _ ft) -> goT visited' ft)
+                                             (dataConOrigArgTys dc)) dcs
+                Nothing -> False
+          in newtypeHit || fieldHit
 
 -- | Split a tuple type into its component types. @(T1, T2, ..., Tn)@ → @Just
 -- [T1, T2, ..., Tn]@. Returns @Nothing@ for non-tuple types (constructors,

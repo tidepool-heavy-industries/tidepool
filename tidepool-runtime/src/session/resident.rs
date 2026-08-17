@@ -412,6 +412,78 @@ where
         self.reenter(cont_id, ResumeInput::Handle(handle), None)
     }
 
+    /// The current value-plane binding for `name` — `(SessionVarId, module,
+    /// tier, type display)` — if one is live. The mount seam (PRD 21 lane
+    /// C1) reads this off a THROWAWAY same-type placeholder bind (any
+    /// ordinary `x <- e` turn of the target type) to recover the already-
+    /// minted `Val.G<g>` iface identity that [`Self::mount_handle`] then
+    /// redirects to a value that arrived by a different path (a cross-node
+    /// finalize handle) — no second iface is ever minted for the same name.
+    pub fn current_binding(
+        &self,
+        name: &str,
+    ) -> Option<(SessionVarId, SessionModule, ValueTier, Option<String>)> {
+        let entry = self.core.bindings().resolve(name)?;
+        let tier = match entry.value {
+            BoundValue::Tier0Forced(_) => ValueTier::Tier0Data,
+            BoundValue::Tier1Closure(_) => ValueTier::Tier1Closure,
+        };
+        Some((entry.id, entry.module, tier, entry.type_display.clone()))
+    }
+
+    /// Redirect an ALREADY-MINTED value-plane binding (`id`/`module`, read
+    /// via [`Self::current_binding`]) to resolve through `handle`'s tenured
+    /// payload instead of whatever it was bound to before — the mount seam
+    /// (PRD 21 lane C1): "a handle installed under a name in a window's
+    /// declaration scope", the closure-tenure-then-handle delivery path
+    /// (pillar B) pointed the OTHER direction. `handle` is consumed exactly
+    /// like an ordinary bind completion ([`Self::materialize_binder`]): its
+    /// slot is read, the handle released from the machine's handle registry
+    /// (ownership transfers to the value plane — a live [`BindingTable`]
+    /// entry, ended only by the session machine dropping, never by a realm
+    /// scope exit), and re-registered under the SAME `SessionVarId`/module a
+    /// turn compiled against `name` already resolves through. No new
+    /// `Val.G<g>` iface is minted here and the GHC-side type binding is
+    /// unchanged — only WHICH heap object it points at moves. Errors if
+    /// `handle` is not live (already released, or never minted).
+    pub fn mount_handle(
+        &mut self,
+        name: &str,
+        id: SessionVarId,
+        module: SessionModule,
+        tier: ValueTier,
+        type_display: Option<String>,
+        handle: ValueHandle,
+    ) -> Result<(), ResidentError> {
+        let slot = self
+            .core
+            .machine_mut()
+            .and_then(|m| {
+                let slot = m.handle_slot(handle);
+                m.release_handle(handle);
+                slot
+            })
+            .ok_or_else(|| {
+                ResidentError::Run(RuntimeError::Jit(JitError::Effect(EffectError::Handler(
+                    "mount: handle is unknown to the machine (already released or never minted)"
+                        .into(),
+                ))))
+            })?;
+        let value = match tier {
+            ValueTier::Tier0Data => BoundValue::Tier0Forced(slot),
+            ValueTier::Tier1Closure => BoundValue::Tier1Closure(slot),
+        };
+        self.core.bind(BindingEntry {
+            name: BindingName(name.to_string()),
+            id,
+            module,
+            value,
+            type_display,
+            defining_expr: None,
+        });
+        Ok(())
+    }
+
     /// This session's handled-effect prefix, DERIVED from its own
     /// `effect_names` and ask tag (the names below the suspend threshold, in
     /// position order) — the parking contract's "derive, don't declare".
@@ -443,6 +515,15 @@ where
     /// [`super::persistent::PersistentSession::take_lib`].
     pub fn take_lib(&mut self) -> Option<crate::session::SessionLib> {
         self.core.take_lib()
+    }
+
+    /// Number of live [`ValueHandle`]s outstanding on this session's machine
+    /// (0 before the machine is bootstrapped) — the mount seam's ownership-
+    /// accounting read: a handle minted over a finalize payload
+    /// ([`Self::finalized_handle`]) counts here until [`Self::mount_handle`]
+    /// (or an ordinary bind completion / realm close) releases it.
+    pub fn value_handle_count(&self) -> usize {
+        self.core.machine().map_or(0, |m| m.value_handle_count())
     }
 
     pub fn heap_stats(&self) -> Option<tidepool_codegen::jit_machine::HeapStats> {
