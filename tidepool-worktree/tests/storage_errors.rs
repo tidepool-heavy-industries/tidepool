@@ -19,9 +19,9 @@ use std::path::{Path, PathBuf};
 
 use tidepool_worktree::testing::TestRepo;
 use tidepool_worktree::{
-    AgentRef, BindingState, BindingTable, BranchName, EventId, EventJournal, GitCli, GitOid,
-    HeadChangeKind, HeadChangeReceipt, RepositoryEvent, WorktreeError, WorktreeId, WorktreeManager,
-    WorktreeOrigin, WorktreeReceipt, WorktreeRecordStatus, WorktreeRegistry, WorktreeSpec,
+    AgentRef, BindingTable, BranchName, EventId, EventJournal, GitCli, GitOid, HeadChangeKind,
+    HeadChangeReceipt, RepositoryEvent, WorktreeError, WorktreeId, WorktreeManager, WorktreeOrigin,
+    WorktreeReceipt, WorktreeRecordStatus, WorktreeRegistry, WorktreeSpec,
 };
 
 /// Make `dir` unwritable (`r-xr-xr-x`) so a create/write inside it fails.
@@ -212,7 +212,7 @@ fn binding_bind_reports_typed_failure_when_the_root_is_read_only() {
             );
             assert!(!detail.is_empty());
         }
-        Ok(()) => {
+        Ok(_) => {
             eprintln!(
                 "SKIPPED: binding_bind_reports_typed_failure_when_the_root_is_read_only — \
                  the write succeeded despite chmod 0o555, so permission bits are not enforced \
@@ -458,9 +458,9 @@ fn binding_failed_bind_persist_rolls_back_in_memory_state() {
             table
                 .bind(&worktree, &agent, 2000)
                 .expect("bind succeeds once the write can land");
-            assert_eq!(table.current(&worktree).expect("bound").agent, agent);
+            assert_eq!(table.current(&worktree).expect("bound").agent(), &agent);
         }
-        Ok(()) => eprintln!(
+        Ok(_) => eprintln!(
             "SKIPPED: binding_failed_bind_persist_rolls_back_in_memory_state — the write \
              succeeded despite chmod 0o555, so permission bits are not enforced here \
              (likely running as root); the rollback path cannot be exercised."
@@ -480,10 +480,10 @@ fn binding_failed_settle_persist_rolls_back_in_memory_state() {
 
     let worktree = WorktreeId::from_raw("wt-settle-rollback");
     let agent = AgentRef::from_raw("agent-a");
-    table.bind(&worktree, &agent, 1000).expect("initial bind");
+    let lease = table.bind(&worktree, &agent, 1000).expect("initial bind");
 
     make_read_only(&root);
-    let result = table.settle(&worktree, BindingState::Released);
+    let result = lease.release(&mut table);
     make_writable(&root);
 
     match result {
@@ -491,7 +491,7 @@ fn binding_failed_settle_persist_rolls_back_in_memory_state() {
             let current = table
                 .current(&worktree)
                 .expect("a failed settle must leave the binding ACTIVE in memory");
-            assert_eq!(current.agent, agent);
+            assert_eq!(current.agent(), &agent);
         }
         Ok(()) => eprintln!(
             "SKIPPED: binding_failed_settle_persist_rolls_back_in_memory_state — the write \

@@ -652,16 +652,16 @@ async fn run_scenario(
 
     persistence::save_checkpoint(
         &checkpoint_path,
-        &persistence::Checkpoint {
-            generation: 1,
-            iteration: 0,
+        &persistence::Checkpoint::committed(
+            None,
             state,
-            compaction: None,
+            None,
             // The CURRENT source's fingerprint: this checkpoint is seeding a
             // scenario config, not simulating a since-edited harness, so the
             // carry-forward path must not fire.
-            harness_source: source.fingerprint.clone(),
-        },
+            source.fingerprint.clone(),
+            persistence::LoopIteration::new(0),
+        ),
     )
     .expect("seed the scenario's durable checkpoint");
 

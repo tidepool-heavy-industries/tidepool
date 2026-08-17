@@ -20,9 +20,27 @@
 
 use std::path::{Path, PathBuf};
 
+use crate::binding::{AgentRef, Binding, BindingState};
 use crate::error::WorktreeError;
 use crate::git::GitCli;
-use crate::id::{BranchName, GitOid};
+use crate::id::{BranchName, GitOid, WorktreeId};
+
+/// Construct an arbitrary [`Binding`] row directly, bypassing every
+/// transition rule [`crate::binding::BindingTable`] enforces. `Binding`'s own
+/// construction is `pub(crate)`-only (see its docs) precisely so nothing
+/// outside this crate can manufacture an impossible row — this is the one
+/// deliberate exception, for durable-format golden tests that must pin the
+/// wire shape of every state a row COULD hold on disk, not only the ones a
+/// live table's own API would produce. Never a runtime construction path —
+/// see the module docs above.
+pub fn binding_row(
+    worktree: WorktreeId,
+    agent: AgentRef,
+    state: BindingState,
+    bound_at_ms: i64,
+) -> Binding {
+    Binding::new(worktree, agent, state, bound_at_ms)
+}
 
 /// A real git repository in a temporary directory, deleted when dropped.
 #[derive(Debug)]

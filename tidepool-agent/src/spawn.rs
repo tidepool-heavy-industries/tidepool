@@ -63,8 +63,8 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use tidepool_worktree::{
-    AgentLabel, AgentRef, BindingState, BindingTable, WorktreeError, WorktreeHandle, WorktreeId,
-    WorktreeManager, WorktreeSpec,
+    ActiveBinding, AgentLabel, AgentRef, BindingTable, BindingTerminal, WorktreeError,
+    WorktreeHandle, WorktreeId, WorktreeManager, WorktreeSpec,
 };
 
 use crate::backend::AgentBackend;
@@ -366,12 +366,19 @@ impl SpawnSubstrate {
         }
     }
 
-    /// Take the binding for `worktree` under `binding_ref`.
+    /// Take the binding for `worktree` under `binding_ref`, returning the
+    /// [`ActiveBinding`] custody receipt — the only thing that can later
+    /// settle this exact row (see the type's docs: a stale or reused receipt
+    /// can never settle a NEWER occupant after a rebind).
     ///
     /// `WorktreeBusy` (one worktree, one agent) and a persist failure are both
     /// binding failures; `BindingTable::bind` already rolled its own memory
     /// back on the latter, so there is nothing here to compensate.
-    pub fn bind(&mut self, worktree: &WorktreeId, binding_ref: &str) -> Result<(), SpawnError> {
+    pub fn bind(
+        &mut self,
+        worktree: &WorktreeId,
+        binding_ref: &str,
+    ) -> Result<ActiveBinding, SpawnError> {
         self.bindings
             .bind(
                 worktree,
@@ -384,23 +391,26 @@ impl SpawnSubstrate {
             })
     }
 
-    /// Settle the current binding for `worktree`.
+    /// Settle `lease` to `to`'s terminal state, consuming the receipt.
     pub fn settle(
         &mut self,
-        worktree: &WorktreeId,
-        state: BindingState,
+        lease: ActiveBinding,
+        to: BindingTerminal,
     ) -> Result<(), WorktreeError> {
-        self.bindings.settle(worktree, state)
+        match to {
+            BindingTerminal::Completed => lease.complete(&mut self.bindings),
+            BindingTerminal::Released => lease.release(&mut self.bindings),
+        }
     }
 
-    /// Compensate a post-`Bound` failure: settle the binding `Released` so the
+    /// Compensate a post-`Bound` failure: settle `lease` `Released` so the
     /// retained worktree is left UNBOUND and rebindable, and return the error
     /// the caller should see. A rollback that itself fails is escalated to
     /// [`SpawnError::RollbackFailed`] carrying BOTH — swallowing either hides
     /// the one a fix needs.
-    pub fn roll_back(&mut self, worktree: &WorktreeId, original: SpawnError) -> SpawnError {
+    pub fn roll_back(&mut self, lease: ActiveBinding, original: SpawnError) -> SpawnError {
         let stage = original.stage();
-        match self.bindings.settle(worktree, BindingState::Released) {
+        match lease.release(&mut self.bindings) {
             Ok(()) => original,
             Err(rollback) => SpawnError::RollbackFailed {
                 stage,
@@ -462,15 +472,16 @@ fn lock_substrate(
 /// and having a backend thread id to build the saga around.
 ///
 /// A SHORT critical section, entered only after the backend call that failed
-/// has already returned.
+/// has already returned. Consumes `lease` — the receipt `bind` handed out for
+/// the row this failure rolls back.
 fn roll_back_detached(
     substrate: &Arc<Mutex<SpawnSubstrate>>,
-    worktree: &WorktreeId,
+    lease: ActiveBinding,
     original: SpawnError,
 ) -> SpawnError {
     let stage = original.stage();
     match substrate.lock() {
-        Ok(mut sub) => sub.roll_back(worktree, original),
+        Ok(mut sub) => sub.roll_back(lease, original),
         Err(_) => SpawnError::RollbackFailed {
             stage,
             original: Box::new(original),
@@ -497,6 +508,14 @@ pub struct CycleSaga {
     worktree: WorktreeHandle,
     thread: BackendThreadId,
     binding_ref: String,
+    /// The custody receipt `bind` handed out for this saga's worktree.
+    /// `Some` for exactly as long as `!self.settled` — the only two places
+    /// that ever take it (`roll_back`, `abandon`) also flip `settled` to
+    /// `true` in the same step, and `settle_step`'s `Completed` arm relies on
+    /// that pairing to `.expect()` it rather than re-checking. Consumed by
+    /// [`ActiveBinding::complete`]/[`release`](ActiveBinding::release) — never
+    /// dropped un-settled by this saga.
+    active_binding: Option<ActiveBinding>,
     /// The call awaiting an answer. `None` between a completed step and the
     /// next — which cannot be observed by a caller, since every step either
     /// parks or finishes.
@@ -544,7 +563,7 @@ impl CycleSaga {
         request: &SpawnRequest,
     ) -> Result<(Self, SpawnStep), SpawnError> {
         // --- critical section: allocate, mint, bind. No backend call here. ---
-        let (worktree, agent, binding_ref, git_dir) = {
+        let (worktree, agent, binding_ref, git_dir, lease) = {
             let mut sub = lock_substrate(substrate, SpawnStage::Allocating)?;
 
             // 1. Allocating → WorktreeReady. Nothing is bound yet, so a failure
@@ -561,7 +580,7 @@ impl CycleSaga {
             );
 
             // 3. Bound.
-            sub.bind(worktree.id(), &binding_ref)?;
+            let lease = sub.bind(worktree.id(), &binding_ref)?;
 
             // The linked worktree's git metadata lives in the SOURCE repo's
             // `.git`; the sandbox must admit it or no worker can ever commit.
@@ -570,7 +589,7 @@ impl CycleSaga {
                 .join(".git")
                 .to_string_lossy()
                 .into_owned();
-            (worktree, agent, binding_ref, git_dir)
+            (worktree, agent, binding_ref, git_dir, lease)
         };
         // --- lock released. Everything below may block for a whole turn. ---
 
@@ -585,7 +604,7 @@ impl CycleSaga {
             Err(error) => {
                 return Err(roll_back_detached(
                     substrate,
-                    worktree.id(),
+                    lease,
                     SpawnError::Backend {
                         stage: SpawnStage::ThreadAccepted,
                         error,
@@ -602,7 +621,7 @@ impl CycleSaga {
             Err(error) => {
                 return Err(roll_back_detached(
                     substrate,
-                    worktree.id(),
+                    lease,
                     SpawnError::Backend {
                         stage: SpawnStage::Running,
                         error,
@@ -617,6 +636,7 @@ impl CycleSaga {
             worktree,
             thread,
             binding_ref,
+            active_binding: Some(lease),
             parked: None,
             rounds: 0,
             settled: false,
@@ -768,10 +788,18 @@ impl CycleSaga {
         if self.settled {
             return Ok(());
         }
-        let mut sub = self.substrate.lock().map_err(|_| poisoned_storage())?;
-        sub.settle(self.worktree.id(), BindingState::Released)?;
+        // `settled` is false, so the invariant on `active_binding` (`Some`
+        // iff `!settled`) says this is always `Some` here — taken and
+        // consumed exactly once, whether or not the settle below succeeds:
+        // there is no second receipt to retry with, so `settled` flips to
+        // `true` unconditionally once a settle attempt has been made.
+        let lease = self
+            .active_binding
+            .take()
+            .expect("an unsettled saga always holds its lease");
         self.settled = true;
-        Ok(())
+        let mut sub = self.substrate.lock().map_err(|_| poisoned_storage())?;
+        sub.settle(lease, BindingTerminal::Released)
     }
 
     /// Turn one backend event into a saga step, settling the binding when the
@@ -800,10 +828,18 @@ impl CycleSaga {
                 })
             }
             TurnEvent::Completed(outcome) => {
+                // `settle_step` is only ever reached while `!self.settled`
+                // (`answer` refuses before calling it otherwise), and that is
+                // exactly the invariant that keeps `active_binding` `Some`
+                // here.
+                let lease = self.active_binding.take().expect(
+                    "settle_step only runs on an unsettled saga, which always holds its lease",
+                );
+                self.settled = true;
                 // --- critical section: one settle. No backend call here. ---
                 {
                     let mut sub = lock_substrate(&self.substrate, SpawnStage::Running)?;
-                    if let Err(rollback) = sub.settle(self.worktree.id(), BindingState::Terminal) {
+                    if let Err(rollback) = sub.settle(lease, BindingTerminal::Completed) {
                         return Err(SpawnError::RollbackFailed {
                             stage: SpawnStage::Running,
                             original: Box::new(SpawnError::Binding {
@@ -814,7 +850,6 @@ impl CycleSaga {
                         });
                     }
                 }
-                self.settled = true;
                 let receipt = SpawnReceipt {
                     agent: self.agent,
                     worktree: self.worktree.id().clone(),
@@ -851,21 +886,27 @@ impl CycleSaga {
         if self.settled {
             return original;
         }
+        let Some(lease) = self.active_binding.take() else {
+            // The receipt was already consumed by an earlier settle attempt
+            // that itself failed — there is no second one to retry with.
+            self.settled = true;
+            return original;
+        };
         let mut sub = match self.substrate.lock() {
             Ok(sub) => sub,
             Err(_) => {
+                self.settled = true;
                 return SpawnError::RollbackFailed {
                     stage,
                     original: Box::new(original),
                     rollback: poisoned_storage(),
-                }
+                };
             }
         };
-        let out = sub.roll_back(self.worktree.id(), original);
-        // The binding was settled unless the settle itself failed, which
-        // `RollbackFailed` is the loud signal for.
-        self.settled = !matches!(out, SpawnError::RollbackFailed { .. });
-        out
+        // The lease is consumed either way — a failed settle leaves nothing
+        // to retry with, so `settled` flips unconditionally.
+        self.settled = true;
+        sub.roll_back(lease, original)
     }
 }
 
@@ -1102,16 +1143,16 @@ impl CoupledSpawner {
         saga.run_to_completion(backend, step)
     }
 
-    /// Settle the current binding for `worktree` (rollback / completion
+    /// Settle `lease` to `to`'s terminal state (rollback / completion
     /// helper). Exposed so tests can drive edge cases directly.
     pub fn settle(
         &mut self,
-        worktree: &WorktreeId,
-        state: BindingState,
+        lease: ActiveBinding,
+        to: BindingTerminal,
     ) -> Result<(), WorktreeError> {
         self.substrate
             .lock()
             .map_err(|_| poisoned_storage())?
-            .settle(worktree, state)
+            .settle(lease, to)
     }
 }

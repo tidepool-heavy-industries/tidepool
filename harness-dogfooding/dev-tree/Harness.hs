@@ -145,20 +145,41 @@ data NodeSeed = NodeSeed
 -- | What the coalgebra decided, handed to the algebra unchanged.  The hylo's
 -- @t@.
 --
+-- A plain sum of the three mutually-exclusive things a coalgebra step can
+-- decide — ordinary work, a pre-algebra refusal, or a resumed/adopted
+-- terminal outcome — rather than three 'Maybe' fields on one product whose
+-- precedence 'integrate' had to establish by nested inspection.  Every
+-- construction site below (this module's four smart constructors:
+-- 'splitWork', 'refusalWork', 'replayedWork', 'adoptedWork') names, by its own
+-- constructor choice, whether children may exist — 'WorkReady' is the only
+-- one that carries any.  This type is module-private; only those four sites
+-- (plus their two match sites, 'integrate' and 'stampFold') construct or take
+-- one apart.
+--
 -- @workKids@ is the parent's own record of the seeds it unfolded, in plan
 -- order.  It is what lets the algebra zip its @[Outcome]@ back against the
 -- worktrees those outcomes came from — @traverse@ preserves order, and plan
 -- order is the ONLY order any policy here reads.
-data NodeWork = NodeWork
-  { workSeed     :: NodeSeed
-  , workScaffold :: Maybe WorkerResult
-  , workKids     :: [NodeSeed]
-  , workDenied   :: [Text]
-  , workRefusal  :: Maybe Failure
-  , -- | An outcome a RESUMED run already has in hand, so this node is not
+data NodeWork
+  = WorkReady
+      { workSeed     :: NodeSeed
+      , workScaffold :: Maybe WorkerResult
+      , workKids     :: [NodeSeed]
+      , workDenied   :: [Text]
+      }
+  | -- | A veto before any work happened — a coalgebra cannot produce an
+    -- outcome directly (its result type is @PlanF@), so every refusal in
+    -- this file expresses itself this way instead.
+    WorkRefused
+      { workSeed    :: NodeSeed
+      , workFailure :: Failure
+      }
+  | -- | An outcome a RESUMED run already has in hand, so this node is not
     -- worked at all.  'integrate' returns it verbatim.
-    workResumed  :: Maybe ResumedFold
-  }
+    WorkResumed
+      { workSeed    :: NodeSeed
+      , workOutcome :: ResumedFold
+      }
 
 -- | Where a resumed node's outcome came from — and therefore whether it still
 -- needs to be journaled.
@@ -381,20 +402,18 @@ emitSplit seed scaffold scaffoldHead = do
 
 splitWork :: NodeSeed -> Maybe WorkerResult -> [NodeSeed] -> [Text] -> NodeWork
 splitWork seed scaffold childSeeds denied =
-  NodeWork
+  WorkReady
     { workSeed = seed
     , workScaffold = scaffold
     , workKids = childSeeds
     , workDenied = denied
-    , workRefusal = Nothing
-    , workResumed = Nothing
     }
 
 -- | The task a truncated node carries.  A coalgebra cannot produce an
 -- outcome — its result type is @PlanF@ — so every veto in this file expresses
--- itself by handing the algebra a childless node whose task says why.
+-- itself by handing the algebra a childless, refused node instead.
 refusalWork :: NodeSeed -> Failure -> NodeWork
-refusalWork seed f = (splitWork seed Nothing [] []) {workRefusal = Just f}
+refusalWork seed f = WorkRefused {workSeed = seed, workFailure = f}
 
 -- ---------------------------------------------------------------------------
 -- The coalgebra's policy slots
@@ -564,18 +583,16 @@ childAllowance parent n =
 -- this node's line and its children's trails in hand, and therefore the one
 -- place a leaf fold and an interior fold cannot drift apart.
 integrate :: Swarm.PlanF NodeWork Outcome -> Harness Outcome
-integrate (Swarm.PlanF w kids) = case w.workResumed of
+integrate (Swarm.PlanF w kids) = case w of
   -- A subtree the journal already accounts for is not re-entered: the recorded
   -- (or adopted-and-verified) receipt IS this fold's input.
-  Just (ReplayedOutcome o) -> pure o
-  Just (AdoptedOutcome o) -> pure o
-  Nothing -> case w.workRefusal of
-    Just f -> pure Skipped {outcomeNode = name, outcomeTrail = [], skipReason = renderFailure f}
-    Nothing -> case kids of
-      [] -> leafFold w
-      _ -> interiorFold w kids
-  where
-    name = nodeName w.workSeed.seedPlan
+  WorkResumed {workOutcome = ReplayedOutcome o} -> pure o
+  WorkResumed {workOutcome = AdoptedOutcome o} -> pure o
+  WorkRefused {workSeed = seed, workFailure = f} ->
+    pure Skipped {outcomeNode = nodeName seed.seedPlan, outcomeTrail = [], skipReason = renderFailure f}
+  WorkReady {workSeed = seed, workKids = wkids, workDenied = denied} -> case kids of
+    [] -> leafFold seed
+    _ -> interiorFold seed wkids denied kids
 
 -- | 'Swarm.receipted''s slot, and the whole trust ladder in one place.
 --
@@ -590,12 +607,12 @@ integrate (Swarm.PlanF w kids) = case w.workResumed of
 -- rather than trusting a verdict it did not compute.
 stampFold :: Swarm.PlanF NodeWork Outcome -> Outcome -> Harness Outcome
 stampFold node folded = do
-  case (Swarm.task node).workResumed of
+  case Swarm.task node of
     -- Already in the journal.  The log is append-only, so re-appending an
     -- outcome a prior process recorded would be duplicate noise on every
     -- resume — and idempotence is the point: resuming a finished run does
     -- nothing at all.
-    Just (ReplayedOutcome _) -> pure ()
+    WorkResumed {workOutcome = ReplayedOutcome _} -> pure ()
     -- ADOPTION APPENDS.  The crashed process never got to record this one, so
     -- writing it now is what makes the next resume skip the subtree.
     _ -> journalOutcome folded
@@ -644,8 +661,8 @@ foldLadder o = case o of
 -- 'withHandler' scope is observation of the same fact as it happens; the pair
 -- of 'worktreeHead' reads is what closes the window a subscription
 -- deliberately will not (no replay, cycle-scoped lifetime).
-leafFold :: NodeWork -> Harness Outcome
-leafFold w = do
+leafFold :: NodeSeed -> Harness Outcome
+leafFold seed = do
   before <- worktreeHead tree
   runWorker tree name (workerPrompt p) >>= \case
     Left err ->
@@ -653,10 +670,10 @@ leafFold w = do
     Right wr -> do
       after <- worktreeHead tree
       checks <- runChecks tree p
-      finishFold w wr (before, after) [] [] 1 True checks
+      finishFold seed wr (before, after) [] [] 1 True checks
   where
-    tree = w.workSeed.seedTree
-    p = w.workSeed.seedPlan
+    tree = seed.seedTree
+    p = seed.seedPlan
     name = nodeName p
 
 -- | An interior node: the eager rebase cascade, the merges, then the ladder.
@@ -665,10 +682,10 @@ leafFold w = do
 -- integration tier, so the fast-forward question dissolves into it.  The
 -- integration agent is spawned only when the mechanical tier left something
 -- for it: an escalation, or a check that fails at the merged head.
-interiorFold :: NodeWork -> [Outcome] -> Harness Outcome
-interiorFold w kids = do
+interiorFold :: NodeSeed -> [NodeSeed] -> [Text] -> [Outcome] -> Harness Outcome
+interiorFold seed workKids denied kids = do
   before <- worktreeHead tree
-  acc <- foldChildren tree p (zip w.workKids kids) emptyAcc {accEsc = deniedEsc}
+  acc <- foldChildren tree p (zip workKids kids) emptyAcc {accEsc = deniedEsc}
   checks0 <- runChecks tree p
   let needsAgent = not (null acc.accEsc) || any checkFailed checks0
   (wr, agentCycles, agentRan) <-
@@ -688,7 +705,7 @@ interiorFold w kids = do
   after <- worktreeHead tree
   folded <-
     finishFold
-      w
+      seed
       wr
       (before, after)
       acc.accNotes
@@ -704,9 +721,9 @@ interiorFold w kids = do
       failedOutcome (nodeName p) (Failure ChildrenFailed why []) (Just r)
     _ -> folded
   where
-    tree = w.workSeed.seedTree
-    p = w.workSeed.seedPlan
-    deniedEsc = map ("child worktree denied — " <>) w.workDenied
+    tree = seed.seedTree
+    p = seed.seedPlan
+    deniedEsc = map ("child worktree denied — " <>) denied
 
 -- | Walk the children in PLAN order: merge the ones that are done, cascade the
 -- new parent tip to every sibling still ahead of us, and carry everything else
@@ -955,7 +972,7 @@ mergeChild tree p s =
 -- 'foldLadder''s, applied uniformly by the 'Swarm.receipted' middleware — so
 -- there is no path on which a fold judges its own receipt.
 finishFold
-  :: NodeWork
+  :: NodeSeed
   -> WorkerResult
   -> (GitOid, GitOid)
   -> [RebaseNote]
@@ -964,7 +981,7 @@ finishFold
   -> Bool
   -> [CheckResult]
   -> Harness Outcome
-finishFold w wr (before, after) notes escalations cycles agentRan checks = do
+finishFold seed wr (before, after) notes escalations cycles agentRan checks = do
   outside <- boundaryViolations tree (nodeBoundary p)
   pure
     ( Done
@@ -987,8 +1004,8 @@ finishFold w wr (before, after) notes escalations cycles agentRan checks = do
           }
     )
   where
-    tree = w.workSeed.seedTree
-    p = w.workSeed.seedPlan
+    tree = seed.seedTree
+    p = seed.seedPlan
     name = nodeName p
 
 runChecks :: WorktreeHandle -> DevPlan -> Harness [CheckResult]
@@ -1399,10 +1416,10 @@ rootBranchOf fold node =
         `orElse` (e.resumePayload ?. "receiptNode" >>= asText)
 
 replayedWork :: NodeSeed -> Outcome -> NodeWork
-replayedWork seed o = (splitWork seed Nothing [] []) {workResumed = Just (ReplayedOutcome o)}
+replayedWork seed o = WorkResumed {workSeed = seed, workOutcome = ReplayedOutcome o}
 
 adoptedWork :: NodeSeed -> Outcome -> NodeWork
-adoptedWork seed o = (splitWork seed Nothing [] []) {workResumed = Just (AdoptedOutcome o)}
+adoptedWork seed o = WorkResumed {workSeed = seed, workOutcome = AdoptedOutcome o}
 
 -- ---------------------------------------------------------------------------
 -- Reading journal payloads back

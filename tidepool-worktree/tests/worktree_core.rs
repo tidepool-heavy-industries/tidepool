@@ -11,8 +11,8 @@ use std::path::Path;
 use tidepool_worktree::git::inspect;
 use tidepool_worktree::testing::{fingerprint, TestRepo};
 use tidepool_worktree::{
-    AgentRef, BindingState, BindingTable, DirtySummary, GitCli, GitRef, InProgressKind,
-    WorktreeError, WorktreeId, WorktreeManager, WorktreeOrigin, WorktreeRegistry, WorktreeSpec,
+    AgentRef, BindingTable, DirtySummary, GitCli, GitRef, InProgressKind, WorktreeError,
+    WorktreeId, WorktreeManager, WorktreeOrigin, WorktreeRegistry, WorktreeSpec,
 };
 
 fn manager_over(repo: &TestRepo, base: &Path) -> WorktreeManager {
@@ -413,7 +413,7 @@ fn binding_refuses_second_agent_and_permits_rebind_after_settle() {
     let agent_a = AgentRef::from_raw("agent-a");
     let agent_b = AgentRef::from_raw("agent-b");
 
-    table
+    let lease = table
         .bind(&worktree, &agent_a, 1000)
         .expect("first bind succeeds");
 
@@ -431,21 +431,19 @@ fn binding_refuses_second_agent_and_permits_rebind_after_settle() {
         other => panic!("expected WorktreeBusy, got {other:?}"),
     }
 
-    table
-        .settle(&worktree, BindingState::Terminal)
-        .expect("settle");
+    lease.complete(&mut table).expect("settle");
     table
         .bind(&worktree, &agent_b, 3000)
         .expect("rebind succeeds once the previous binding is settled");
 
-    assert_eq!(table.current(&worktree).expect("current").agent, agent_b);
+    assert_eq!(table.current(&worktree).expect("current").agent(), &agent_b);
 
     // Durability: a fresh table over the same root sees the current binding.
     // The first owner must be gone first — the table is SINGLE-OWNER (a live
     // second owner is refused), so a restart is drop-then-reopen.
     drop(table);
     let fresh = BindingTable::open(base.path().join("bindings")).expect("reopen bindings");
-    assert_eq!(fresh.current(&worktree).expect("current").agent, agent_b);
+    assert_eq!(fresh.current(&worktree).expect("current").agent(), &agent_b);
 }
 
 #[test]
@@ -457,14 +455,12 @@ fn settling_a_released_binding_also_permits_rebind() {
     let agent_a = AgentRef::from_raw("agent-a");
     let agent_b = AgentRef::from_raw("agent-b");
 
-    table.bind(&worktree, &agent_a, 1000).expect("bind");
-    table
-        .settle(&worktree, BindingState::Released)
-        .expect("release");
+    let lease = table.bind(&worktree, &agent_a, 1000).expect("bind");
+    lease.release(&mut table).expect("release");
     table
         .bind(&worktree, &agent_b, 2000)
         .expect("rebind after release succeeds");
-    assert_eq!(table.current(&worktree).expect("current").agent, agent_b);
+    assert_eq!(table.current(&worktree).expect("current").agent(), &agent_b);
 }
 
 /// The never-dirty-the-source invariant, caught at the one moment it can still

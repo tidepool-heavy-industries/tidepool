@@ -84,6 +84,7 @@
 
 use std::path::{Path, PathBuf};
 
+use tidepool_worktree::testing::binding_row;
 use tidepool_worktree::{
     AgentRef, Binding, BindingState, BranchName, CommitReceipt, EventId, GitOid, GitRef,
     HeadChangeKind, HeadChangeReceipt, JournalEntry, RepositoryEvent, WorktreeError, WorktreeId,
@@ -200,24 +201,24 @@ fn receipt_finalized_worktree_origin() -> WorktreeReceipt {
 
 fn binding_rows() -> Vec<Binding> {
     vec![
-        Binding {
-            worktree: WorktreeId::from_raw("wt-provisional-0001"),
-            agent: AgentRef::from_raw("agent-alpha"),
-            state: BindingState::Terminal,
-            bound_at_ms: 1_700_000_000_000,
-        },
-        Binding {
-            worktree: WorktreeId::from_raw("wt-provisional-0001"),
-            agent: AgentRef::from_raw("agent-beta"),
-            state: BindingState::Released,
-            bound_at_ms: 1_700_000_001_000,
-        },
-        Binding {
-            worktree: WorktreeId::from_raw("wt-provisional-0001"),
-            agent: AgentRef::from_raw("agent-gamma"),
-            state: BindingState::Active,
-            bound_at_ms: 1_700_000_002_000,
-        },
+        binding_row(
+            WorktreeId::from_raw("wt-provisional-0001"),
+            AgentRef::from_raw("agent-alpha"),
+            BindingState::Terminal,
+            1_700_000_000_000,
+        ),
+        binding_row(
+            WorktreeId::from_raw("wt-provisional-0001"),
+            AgentRef::from_raw("agent-beta"),
+            BindingState::Released,
+            1_700_000_001_000,
+        ),
+        binding_row(
+            WorktreeId::from_raw("wt-provisional-0001"),
+            AgentRef::from_raw("agent-gamma"),
+            BindingState::Active,
+            1_700_000_002_000,
+        ),
     ]
 }
 
@@ -462,12 +463,12 @@ fn worktree_receipt_field_shape_is_pinned_inline() {
 
 #[test]
 fn binding_field_shape_is_pinned_inline() {
-    let sample = Binding {
-        worktree: WorktreeId::from_raw("wt-pin"),
-        agent: AgentRef::from_raw("agent-pin"),
-        state: BindingState::Active,
-        bound_at_ms: 1,
-    };
+    let sample = binding_row(
+        WorktreeId::from_raw("wt-pin"),
+        AgentRef::from_raw("agent-pin"),
+        BindingState::Active,
+        1,
+    );
     let json = serde_json::to_string(&sample)
         .unwrap_or_else(|e| panic!("failed to serialize the inline Binding pin: {e}"));
     assert_eq!(

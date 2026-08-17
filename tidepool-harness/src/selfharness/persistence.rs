@@ -26,6 +26,7 @@
 //! explicit save/restore path.
 
 use std::io::Write;
+use std::num::NonZeroU64;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
@@ -33,6 +34,60 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value as Json;
 
 use super::observer::{Event, Observer};
+
+/// A checkpoint's monotonic generation. `0` never appears on disk — the first
+/// commit is generation `1` — so this wraps [`NonZeroU64`] rather than a plain
+/// `u64`: a `0` in a checkpoint file is a typed [`PersistenceError::Json`] at
+/// [`load_checkpoint`] (serde's own `NonZeroU64` support rejects it), never a
+/// silently-accepted invariant breach. `#[serde(transparent)]` keeps the wire
+/// byte for byte identical to the plain `u64` this replaces.
+///
+/// Distinct from [`LoopIteration`] on purpose: the two used to be
+/// interchangeable public `u64` fields on [`Checkpoint`], which meant nothing
+/// stopped a restore/commit edit from swapping them (both compile, both
+/// serialize, and the wrong one is only wrong at replay time).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct CheckpointGeneration(NonZeroU64);
+
+impl CheckpointGeneration {
+    /// The generation of the very first checkpoint a fresh table ever commits.
+    pub const FIRST: CheckpointGeneration = CheckpointGeneration(NonZeroU64::MIN);
+
+    pub fn get(self) -> u64 {
+        self.0.get()
+    }
+
+    /// The checked successor. Private: the only place a generation ever
+    /// advances is [`Checkpoint::committed`], so there is exactly one call
+    /// site that can get this wrong.
+    fn next(self) -> Self {
+        CheckpointGeneration(self.0.checked_add(1).expect(
+            "checkpoint generation overflowed u64 — this would take billions of committed cycles",
+        ))
+    }
+}
+
+/// The loop-iteration count carried in the checkpoint envelope — a runtime
+/// fact, never part of the authored `State`
+/// (`plans/self-iterating-harness/15-generic-surface-wave.md`, "Runtime
+/// context is the runtime's job"). `#[serde(transparent)]` keeps the wire byte
+/// for byte identical to the plain `u64` this replaces. See
+/// [`CheckpointGeneration`]'s docs for why this is a distinct type rather than
+/// a second `u64` field with a different persistence law.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct LoopIteration(u64);
+
+impl LoopIteration {
+    pub fn new(n: u64) -> Self {
+        LoopIteration(n)
+    }
+
+    pub fn get(self) -> u64 {
+        self.0
+    }
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum PersistenceError {
@@ -54,11 +109,21 @@ pub enum PersistenceError {
 /// it, and the loop-iteration count. Written as a whole at one commit
 /// boundary — never assembled from two separately-timed writes — so a state
 /// and a summary read back together are always from the same generation.
+///
+/// `generation` and `iteration` are private, readable only through
+/// [`Self::generation`]/[`Self::iteration`]: the two used to be plain,
+/// interchangeable `u64` fields that a construction site could swap (both
+/// compile, both serialize, and only replay ever notices). The only normal
+/// write path is [`Self::committed`], which DERIVES the generation from the
+/// previous one rather than accepting it as an argument — so it can be
+/// skipped, repeated, or confused with `iteration` by nothing this crate
+/// writes. `state`/`compaction`/`harness_source` stay plain public fields:
+/// nothing about them is interchangeable with a counter.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Checkpoint {
     /// Monotonic, incremented by one per committed cycle. `0` never appears
     /// on disk — the first commit is generation `1`.
-    pub generation: u64,
+    generation: CheckpointGeneration,
     /// The loop-boundary `State` json this generation's cycle produced
     /// ([`crate::selfharness::state_cross::state_out`]).
     pub state: Json,
@@ -74,7 +139,38 @@ pub struct Checkpoint {
     /// `plans/self-iterating-harness/15-generic-surface-wave.md`, "Runtime
     /// context is the runtime's job"). `0` before any cycle has completed;
     /// incremented by one per completed cycle, alongside `generation`.
-    pub iteration: u64,
+    iteration: LoopIteration,
+}
+
+impl Checkpoint {
+    pub fn generation(&self) -> CheckpointGeneration {
+        self.generation
+    }
+
+    pub fn iteration(&self) -> LoopIteration {
+        self.iteration
+    }
+
+    /// Commit the generation AFTER `previous` (or [`CheckpointGeneration::FIRST`]
+    /// when there is none yet — the very first checkpoint) — the only normal
+    /// write path. A caller never supplies a generation directly, which is
+    /// what makes "advances exactly once, from what came before" true by
+    /// construction rather than by convention at each call site.
+    pub fn committed(
+        previous: Option<CheckpointGeneration>,
+        state: Json,
+        compaction: Option<String>,
+        harness_source: String,
+        iteration: LoopIteration,
+    ) -> Self {
+        Checkpoint {
+            generation: previous.map_or(CheckpointGeneration::FIRST, CheckpointGeneration::next),
+            state,
+            compaction,
+            harness_source,
+            iteration,
+        }
+    }
 }
 
 /// Default checkpoint path: `<cache_dir>/selfharness/checkpoint.json`. A
@@ -227,12 +323,51 @@ mod tests {
 
     fn checkpoint(generation: u64) -> Checkpoint {
         Checkpoint {
-            generation,
+            generation: CheckpointGeneration(
+                NonZeroU64::new(generation).expect("nonzero in tests"),
+            ),
             state: serde_json::json!({"mode": "Deciding"}),
             compaction: Some("a summary".to_string()),
             harness_source: "fingerprint-abc".to_string(),
-            iteration: generation,
+            iteration: LoopIteration(generation),
         }
+    }
+
+    /// The wire-bytes golden item 3 promises: `CheckpointGeneration`/
+    /// `LoopIteration` must serialize EXACTLY as the plain `u64` fields they
+    /// replaced. Pinned literally — this is what
+    /// `Checkpoint { generation: u64, ..., iteration: u64 }` produced before
+    /// either newtype existed; if `#[serde(transparent)]` ever stops being
+    /// transparent, this is the test that notices.
+    #[test]
+    fn wire_bytes_are_unchanged_by_the_typed_generation_and_iteration() {
+        let cp = checkpoint(3);
+        let json = serde_json::to_string(&cp).expect("serialize");
+        assert_eq!(
+            json,
+            r#"{"generation":3,"state":{"mode":"Deciding"},"compaction":"a summary","harness_source":"fingerprint-abc","iteration":3}"#,
+            "Checkpoint's wire shape drifted from the plain-u64 version — field \
+             names, field order, or the numeric encoding of generation/iteration \
+             changed"
+        );
+    }
+
+    /// Deserializing a `0` generation must be a typed [`PersistenceError::Json`],
+    /// never a silent invariant breach — `0` cannot even construct a
+    /// [`CheckpointGeneration`] (it wraps `NonZeroU64`), so serde's own
+    /// `NonZeroU64` support rejects it before this crate ever sees the value.
+    #[test]
+    fn a_zero_generation_on_disk_is_a_typed_deserialization_error() {
+        let dir = tempfile_dir();
+        let path = dir.join("checkpoint.json");
+        std::fs::write(
+            &path,
+            r#"{"generation":0,"state":{"mode":"Deciding"},"compaction":null,"harness_source":"fp","iteration":0}"#,
+        )
+        .expect("write a checkpoint with generation 0");
+        let err = load_checkpoint(&path)
+            .expect_err("generation 0 must not deserialize into a CheckpointGeneration");
+        assert!(matches!(err, PersistenceError::Json { .. }));
     }
 
     #[test]
@@ -273,7 +408,7 @@ mod tests {
 
         // "Cycle 1" commits generation 1 with iteration advanced to 1.
         let cp1 = checkpoint(1);
-        assert_eq!(cp1.iteration, 1);
+        assert_eq!(cp1.iteration().get(), 1);
         save_checkpoint(&path, &cp1).expect("save cycle 1");
 
         // THE point: a bare reload — no cycle run in between — must yield the
@@ -285,7 +420,8 @@ mod tests {
             .expect("load after cycle 1")
             .expect("cycle 1's checkpoint is on disk");
         assert_eq!(
-            restored.iteration, 1,
+            restored.iteration().get(),
+            1,
             "a restore with no cycle run must resume at the persisted iteration, not reset to 0"
         );
 
@@ -293,8 +429,8 @@ mod tests {
         // was just restored (mirrors `run_one_cycle`'s `self.iteration += 1`
         // after a successful loop, then `commit_checkpoint` persisting it).
         let cp2 = Checkpoint {
-            generation: 2,
-            iteration: restored.iteration + 1,
+            generation: CheckpointGeneration(NonZeroU64::new(2).expect("nonzero in tests")),
+            iteration: LoopIteration(restored.iteration().get() + 1),
             ..checkpoint(2)
         };
         save_checkpoint(&path, &cp2).expect("save cycle 2");
@@ -302,7 +438,8 @@ mod tests {
             .expect("load after cycle 2")
             .expect("cycle 2's checkpoint is on disk");
         assert_eq!(
-            restored2.iteration, 2,
+            restored2.iteration().get(),
+            2,
             "iteration must continue from the restored value across a second commit, not reset"
         );
     }
