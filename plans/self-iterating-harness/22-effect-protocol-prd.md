@@ -112,6 +112,11 @@ phase 2+ emits them.
    envelopes at boundaries; `tidepool-testing` split by dependency
    direction; resident-session host consolidation (deferred until S1/C-lane
    work settles — it is the highest-risk cut and those files are active).
+   Design principle locked for the host consolidation (operator, 2026-08-17):
+   machine checkout becomes a non-`Clone` linear token consumed by check-in,
+   with RAII restore as the panic path (the `MachineGuard` pattern) — the
+   double-checkin/forgotten-checkin classes go unrepresentable when the
+   unified store is built, not retrofitted after.
 
 ## Acceptance
 
