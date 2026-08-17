@@ -1,35 +1,47 @@
-//! Multi-target `tidepool-extract` compilation: the mechanics shared by
-//! [`crate::compile_haskell`] (one target, no sidecar) and [`compile_targets`]
-//! (N targets sharing one GHC session, with the `asks.json` typed-yield
-//! sidecar) — spawning the extractor, reading its output directory, and
-//! deserializing into typed artifacts.
+//! The ONE policy-bearing `tidepool-extract` compile front door:
+//! [`CompileInvocation`] + [`compile_invocation`]. [`crate::compile_haskell`]
+//! (one target, eval/session lane) and [`compile_targets`] (N targets sharing
+//! one GHC session, harness turn lane) are now both thin projections that
+//! build a [`CompileInvocation`] and hand it to [`compile_invocation`] —
+//! spawning the extractor, reading its output directory, and deserializing
+//! into typed artifacts happens in exactly one place.
 //!
-//! Moved here from `tidepool_harness::compile` (architecture review finding
-//! 3, 2026-08-17): that module was a second compiler frontend duplicating
-//! this crate's temp-file setup, `ExtractCmd` construction, output-presence
-//! checking, and CBOR reads, with its own parallel `CompileError` family.
-//! This module is now the ONE place that does that work; the harness maps
-//! [`CompiledArtifacts`] onto its own turn/node vocabulary
-//! (`tidepool_harness::engine::compile_turn`/`compile_turns`) and attributes
-//! timing to its own (node, round) pairs via the `on_stage` hook below,
+//! Originally moved here from `tidepool_harness::compile` (architecture
+//! review finding 3, 2026-08-17), which was a second compiler frontend
+//! duplicating this crate's temp-file setup, `ExtractCmd` construction,
+//! output-presence checking, and CBOR reads, with its own parallel
+//! `CompileError` family. A later pass (codex-quality-paths-2026-08-19,
+//! finding P1.1) finished that consolidation by folding
+//! [`crate::compile_haskell`]'s OWN parallel spawn/temp-layout/cache-hit
+//! logic into this same front door, so a new extract flag, sidecar, or
+//! cache-validity condition added here reaches both lanes by construction.
+//! The harness still maps [`CompiledArtifacts`] onto its own turn/node
+//! vocabulary (`tidepool_harness::engine::compile_turn`/`compile_turns`) and
+//! attributes timing to its own (node, round) pairs via the `on_stage` hook,
 //! rather than duplicating the spawn+read+deserialize sequence.
 //!
-//! # Two independent callers, two independent caches
+//! # One front door, two DELIBERATELY separate cache schemes
 //!
-//! [`crate::compile_haskell`] and [`compile_targets`] share this module's
-//! spawn/read/deserialize mechanics but keep their OWN, pre-existing cache
-//! schemes: [`crate::compile_haskell`] still keys through
-//! [`crate::cache::cache_key_salted`] / [`crate::cache::cache_load`] /
-//! [`crate::cache::cache_store`] (a single `(expr, meta)` pair, unsalted by
-//! default); [`compile_targets`] keys through
-//! [`crate::cache::invocation_key`] / [`crate::cache::artifacts_load`] /
-//! [`crate::cache::artifacts_store`] (a named artifact SET, which is what
-//! lets the asks sidecar and multiple targets share one memo entry). Merging
-//! those two key spaces was explicitly out of scope for the move: a key
-//! change would cold every existing on-disk memo (including the harness test
-//! suite's shared one), so each caller's cache wrapper is untouched — only
-//! the code BETWEEN "cache miss" and "cache store" (the actual compiling) is
-//! now shared.
+//! [`CompileInvocation::cache`] ([`CacheStrategy`]) is the one remaining
+//! policy delta between the lanes, and it is deliberate, not leftover: the
+//! eval lane ([`crate::compile_haskell`]/[`crate::compile_haskell_salted`])
+//! keys through [`crate::cache::cache_key_salted`] / [`crate::cache::cache_load`]
+//! / [`crate::cache::cache_store`] (a single `(expr, meta)` pair, optionally
+//! salted per session/generation); the turn lane ([`compile_targets`]) keys
+//! through [`crate::cache::invocation_key`] / [`crate::cache::artifacts_load`]
+//! / [`crate::cache::artifacts_store`] (a named artifact SET, which is what
+//! lets the asks sidecar and multiple targets share one memo entry, but has
+//! no salt concept). Merging those two key spaces is explicitly OUT OF SCOPE
+//! here too: a key change would cold every existing on-disk memo (including
+//! the harness test suite's shared one and every deployed eval cache) for
+//! whichever lane's scheme lost — see `plans/compile-memo.md` and root
+//! CLAUDE.md's "THE MEMO IS THE HAZARD" note. [`compile_invocation`] computes
+//! and consults EACH lane's pre-existing key exactly as its old standalone
+//! code did, so every on-disk entry from before this change still hits.
+//! Nothing about either key's inputs changed, so there is nothing to
+//! cold-start and nothing to measure a before/after delta on: the two
+//! `cache_key_determinism`/`invocation_key_*` test families below and in
+//! `cache.rs` are the receipt that both schemes are byte-for-byte unchanged.
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
@@ -115,15 +127,51 @@ pub struct CompiledArtifacts {
 }
 
 // ---------------------------------------------------------------------------
-// Public entry point
+// The one front door
 // ---------------------------------------------------------------------------
 
-/// Compile `source` against MULTIPLE named targets in ONE `tidepool-extract`
-/// spawn: `targets.len()` `<target>.cbor` trees over a SINGLE shared merged
+/// How a [`CompileInvocation`]'s result is memoized — the one deliberate
+/// policy delta between the two lanes; see the module doc.
+pub(crate) enum CacheStrategy<'a> {
+    /// [`crate::compile_haskell`]/[`crate::compile_haskell_salted`]'s scheme:
+    /// a single `(expr, meta)` pair keyed by [`cache::cache_key_salted`].
+    Eval { salt: Option<&'a str> },
+    /// [`compile_targets`]'s scheme: a whole artifact SET keyed by
+    /// [`cache::invocation_key`] over the built argv.
+    Invocation,
+}
+
+/// One `tidepool-extract` invocation, as built by either production front
+/// door. [`crate::compile_haskell_salted`] builds one with a single-element
+/// `targets` and [`CacheStrategy::Eval`]; [`compile_targets`] builds one with
+/// N targets and [`CacheStrategy::Invocation`] — single-target compilation is
+/// a PROJECTION of the same [`compile_invocation`] this drives for the batch
+/// case, not a separate spawn/read/deserialize path.
+pub(crate) struct CompileInvocation<'a> {
+    pub source: &'a str,
+    pub targets: &'a [&'a str],
+    pub include: &'a [PathBuf],
+    /// `None` resolves fresh via `$TIDEPOOL_EXTRACT`/`PATH`
+    /// (`ExtractCmd::new`); `Some` is for a caller that resolved once at
+    /// construction and threads the binary through many calls
+    /// (`tidepool_harness::engine::EngineConfig`).
+    pub bin: Option<&'a ResolvedExtractBin>,
+    /// Fallback module name (sans `.hs`) when `source` has no `module`
+    /// header — GHC derives the module name from the filename
+    /// (`capitalize(basename)`), and the two lanes' templated preambles
+    /// disagree on what that name must be: the turn lane's wrapper declares
+    /// `module Expr`, the eval lane's historical default is `Input`.
+    pub fallback_module_name: &'a str,
+    pub cache: CacheStrategy<'a>,
+}
+
+/// Compile a [`CompileInvocation`] against ONE `tidepool-extract` spawn:
+/// `targets.len()` `<target>.cbor` trees over a SINGLE shared merged
 /// `meta.cbor` / [`DataConTable`], returning one [`TargetArtifact`] per
 /// target inside a shared [`CompiledArtifacts`]. Drives the extract's
-/// `--targets a,b` mode (`haskell/app/Main.hs`'s `runMultiTargetClosed`) —
-/// see `plans/post-restart/extract-wave/boot/03-targets-prereq.md`.
+/// `--targets a,b` mode (`haskell/app/Main.hs`'s `runMultiTargetClosed`,
+/// which handles a single-element list identically to the legacy `--target`
+/// flag) — see `plans/post-restart/extract-wave/boot/03-targets-prereq.md`.
 ///
 /// A REQUESTED target is a contract: a nonzero exit fails the WHOLE spawn if
 /// ANY target can't translate, rather than silently emitting the targets
@@ -134,14 +182,8 @@ pub struct CompiledArtifacts {
 /// so two targets' different `runLLMTurn`/`runLLMTurnFork` sites never
 /// collapse into one ambiguous file.
 ///
-/// `bin`: the resolved extract binary. `None` resolves fresh via
-/// `$TIDEPOOL_EXTRACT`/`PATH` (`ExtractCmd::new`, [`crate::compile_haskell`]'s
-/// behavior); `Some` is for a caller that resolves once at construction and
-/// threads the binary through many calls rather than re-reading the env
-/// every time (`tidepool_harness::engine::EngineConfig`).
-///
-/// **MEMOIZED** through [`cache::invocation_key`] — see the module doc for
-/// why this is a separate scheme from [`crate::compile_haskell`]'s.
+/// **MEMOIZED** per [`CompileInvocation::cache`] — see the module doc for why
+/// the two `CacheStrategy` variants stay separate schemes.
 ///
 /// `on_stage(name, elapsed, bytes)` fires once per measured stage —
 /// [`timing::STAGE_EXTRACT_SPAWN`], each forwarded `extract.<phase>` row
@@ -151,79 +193,114 @@ pub struct CompiledArtifacts {
 /// through its own collector without this crate needing to know what a
 /// "node" or "round" is. A caller with no use for timing passes `|_, _, _|
 /// {}`.
-pub fn compile_targets(
-    source: &str,
-    targets: &[&str],
-    include: &[PathBuf],
-    bin: Option<&ResolvedExtractBin>,
+pub(crate) fn compile_invocation(
+    inv: &CompileInvocation<'_>,
     mut on_stage: impl FnMut(&str, Duration, u64),
 ) -> Result<CompiledArtifacts, CompileError> {
     assert!(
-        !targets.is_empty(),
-        "compile_targets: at least one target is required"
+        !inv.targets.is_empty(),
+        "compile_invocation: at least one target is required"
     );
+    let multi = inv.targets.len() > 1;
+
+    // The eval key needs no built argv (unlike invocation keying, it never
+    // looks at what gets spawned), so it is computed and checked up front —
+    // the same ordering `compile_haskell` always used, and it is reused
+    // below for the cache-store call after a real compile.
+    let eval_key = if let CacheStrategy::Eval { salt } = &inv.cache {
+        let include_refs: Vec<&Path> = inv.include.iter().map(PathBuf::as_path).collect();
+        let key = cache::cache_key_salted(inv.source, inv.targets[0], &include_refs, *salt);
+        if let Some((expr_bytes, meta_bytes)) = cache::cache_load(&key) {
+            // Attempt to deserialize cached data. If this fails, treat it as
+            // a cache miss and fall through to recompilation instead of
+            // propagating the error.
+            let raw = vec![RawTargetOutput {
+                target: inv.targets[0].to_string(),
+                expr_bytes,
+                asks_bytes: None,
+            }];
+            if let Ok(artifacts) = assemble(&meta_bytes, &raw, &mut on_stage) {
+                return Ok(artifacts);
+            }
+        }
+        Some(key)
+    } else {
+        None
+    };
+
     let temp_dir = TempDir::new()?;
     // GHC derives the module name from the filename (capitalize(basename));
-    // the templated preamble declares `module Expr`, so the file must be
-    // `Expr.hs` when the source has no explicit `module` header of its own.
-    let module = extract_module_name(source).unwrap_or_else(|| "Expr".to_string());
+    // see `CompileInvocation::fallback_module_name`'s doc for why this
+    // differs per lane.
+    let module =
+        extract_module_name(inv.source).unwrap_or_else(|| inv.fallback_module_name.to_string());
     let input_path = temp_dir.path().join(format!("{module}.hs"));
-    std::fs::write(&input_path, source)?;
+    std::fs::write(&input_path, inv.source)?;
 
-    // A single requested target reads the plain `asks.json`; more than one
-    // reads `<target>.asks.json` per target — see this fn's doc comment.
-    let multi = targets.len() > 1;
-
-    let mut cmd = match bin {
+    let mut cmd = match inv.bin {
         Some(b) => ExtractCmd::with_bin(b.clone()),
         None => ExtractCmd::new().map_err(|e| CompileError::Io(e.into()))?,
     };
     cmd.input(&input_path)
         .output_dir(temp_dir.path())
-        .targets(targets)
-        .includes(include);
+        .targets(inv.targets)
+        .includes(inv.include);
+
+    let names = artifact_names(inv.targets, multi);
+    let name_refs: Vec<&str> = names.iter().map(String::as_str).collect();
 
     // Keyed on the invocation that is about to run — the built argv itself,
     // so a flag this site grows cannot ride along unkeyed (the allowlist
     // walk in `invocation_key` makes an unclassified flag uncacheable rather
     // than silently unkeyed). `None` means "compile cold", never "compile
     // wrong".
-    let argv = cmd.argv();
-    let bin_path: PathBuf = match bin {
-        Some(b) => b.as_path().to_path_buf(),
-        None => PathBuf::from(tidepool_extract_cmd::DEFAULT_BIN),
-    };
-    let key = cache::invocation_key(&cache::Invocation {
-        source,
-        argv: &argv,
-        input_path: &input_path,
-        include,
-        bin: &bin_path,
-    });
-    let names = artifact_names(targets, multi);
-    let name_refs: Vec<&str> = names.iter().map(String::as_str).collect();
-
-    if let Some(key) = &key {
-        let load_start = Instant::now();
-        if let Some((meta_bytes, raw)) = load_memo(key, &name_refs, targets) {
-            let bytes = total_bytes(&meta_bytes, &raw);
-            on_stage(timing::STAGE_CBOR_READ, load_start.elapsed(), bytes);
-            return assemble(&meta_bytes, &raw, on_stage);
+    let inv_key = if matches!(inv.cache, CacheStrategy::Invocation) {
+        let argv = cmd.argv();
+        let bin_path: PathBuf = match inv.bin {
+            Some(b) => b.as_path().to_path_buf(),
+            None => PathBuf::from(tidepool_extract_cmd::DEFAULT_BIN),
+        };
+        let key = cache::invocation_key(&cache::Invocation {
+            source: inv.source,
+            argv: &argv,
+            input_path: &input_path,
+            include: inv.include,
+            bin: &bin_path,
+        });
+        if let Some(key) = &key {
+            let load_start = Instant::now();
+            if let Some((meta_bytes, raw)) = load_memo(key, &name_refs, inv.targets) {
+                let bytes = total_bytes(&meta_bytes, &raw);
+                on_stage(timing::STAGE_CBOR_READ, load_start.elapsed(), bytes);
+                return assemble(&meta_bytes, &raw, on_stage);
+            }
         }
-    }
+        key
+    } else {
+        None
+    };
 
+    let is_invocation_lane = matches!(inv.cache, CacheStrategy::Invocation);
     let (meta_bytes, raw) = extract_and_read(
         &cmd,
         temp_dir.path(),
-        targets,
+        inv.targets,
         multi,
         &mut on_stage,
         |stderr, success| {
-            if !success && !stderr.is_empty() {
-                tracing::warn!(
-                    targets = %targets.join(","),
-                    "extract failed:\n{stderr}"
-                );
+            // The invocation (turn) lane only warns on failure; the eval
+            // lane always echoes stderr as a human debug channel — the same
+            // per-lane logging policy each standalone function used before
+            // this front door existed.
+            if is_invocation_lane {
+                if !success && !stderr.is_empty() {
+                    tracing::warn!(
+                        targets = %inv.targets.join(","),
+                        "extract failed:\n{stderr}"
+                    );
+                }
+            } else if !stderr.is_empty() {
+                eprintln!("[tidepool-extract stderr]\n{stderr}");
             }
         },
     )?;
@@ -232,10 +309,38 @@ pub fn compile_targets(
     // memoized into a permanently-failing entry. Best-effort: an unwritable
     // memo costs a recompile, it never fails a compile.
     let artifacts = assemble(&meta_bytes, &raw, &mut on_stage)?;
-    if let Some(key) = &key {
+    if let Some(key) = &eval_key {
+        cache::cache_store(key, &raw[0].expr_bytes, &meta_bytes);
+    }
+    if let Some(key) = &inv_key {
         store_memo(key, &name_refs, &meta_bytes, &raw);
     }
     Ok(artifacts)
+}
+
+/// Compile `source` against MULTIPLE named targets — the harness turn lane's
+/// projection of [`compile_invocation`]. See its doc for the full contract
+/// (target semantics, asks sidecar shape, memoization, timing hook).
+pub fn compile_targets(
+    source: &str,
+    targets: &[&str],
+    include: &[PathBuf],
+    bin: Option<&ResolvedExtractBin>,
+    on_stage: impl FnMut(&str, Duration, u64),
+) -> Result<CompiledArtifacts, CompileError> {
+    assert!(
+        !targets.is_empty(),
+        "compile_targets: at least one target is required"
+    );
+    let inv = CompileInvocation {
+        source,
+        targets,
+        include,
+        bin,
+        fallback_module_name: "Expr",
+        cache: CacheStrategy::Invocation,
+    };
+    compile_invocation(&inv, on_stage)
 }
 
 // ---------------------------------------------------------------------------
