@@ -106,8 +106,10 @@ pub enum HoleRouting {
     /// cycle's entry state as JSON (note's service shape: no operator, no
     /// model round).
     ReadState,
-    /// A Subagent verb (`SubagentSpawn`/`SubagentBegin`/`SubagentResume` —
-    /// `spawnAgentRaw`/`agentBeginRaw`/`agentResumeRaw`) raised by the
+    /// A Subagent verb (`SubagentSpawn`/`SubagentBegin`/`SubagentResume`/
+    /// `SubagentSpawnAsync`/`SubagentAwait`/`SubagentCancel` —
+    /// `spawnAgentRaw`/`agentBeginRaw`/`agentResumeRaw`/`agentSpawnAsyncRaw`/
+    /// `agentAwaitRaw`/`agentCancelRaw`) raised by the
     /// AUTHORED outer loop. Routed by CONSTRUCTOR NAME only; the payload is
     /// NEVER decoded here (its args are bridged ADTs, not JSON — the
     /// servicing site decodes the ORIGINAL request `Value` via the generated
@@ -249,7 +251,12 @@ pub fn classify_hole(request: &Value, table: &DataConTable, asks: &AsksSidecar) 
             routing: HoleRouting::ReadState,
             prompt: String::new(),
         },
-        Some("SubagentSpawn") | Some("SubagentBegin") | Some("SubagentResume") => ClassifiedHole {
+        Some("SubagentSpawn")
+        | Some("SubagentBegin")
+        | Some("SubagentResume")
+        | Some("SubagentSpawnAsync")
+        | Some("SubagentAwait")
+        | Some("SubagentCancel") => ClassifiedHole {
             routing: HoleRouting::Subagent,
             prompt: String::new(),
         },

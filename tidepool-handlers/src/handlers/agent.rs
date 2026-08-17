@@ -20,9 +20,9 @@ use crate::handlers::worktree::{
     worktree_id_to_wire, WorktreeError as WireWorktreeError,
 };
 use tidepool_bridge_effects::{
-    AgAgentActivity, AgAgentId, AgAgentStep, AgBackendFailure, AgBackendThreadId, AgCyclePayload,
-    AgSpawnOutcome, AgSpawnReceipt, AgSpawnSpec, AgSpawnStage, AgSpawnWorkspace, AgTokenUsage,
-    AgWorkerRun,
+    AgAgentActivity, AgAgentId, AgAgentStep, AgBackendFailure, AgBackendThreadId, AgCycleId,
+    AgCyclePayload, AgSpawnOutcome, AgSpawnReceipt, AgSpawnSpec, AgSpawnStage, AgSpawnWorkspace,
+    AgTokenUsage, AgWorkerRun,
 };
 
 // ============================================================================
@@ -197,6 +197,39 @@ impl SubagentHandler {
             .answer(&mut *self.backend, agent, ToolCallId(call), outcome)
             .map_err(spawn_error_to_wire)?;
         Ok(step_to_wire(&step))
+    }
+
+    /// Serves `SubagentSpawnAsync`. STUB — the cycle table that runs a saga on
+    /// its own thread is PRD 20 S1-L2 lane C's; this lane lands the wire only.
+    fn subagent_spawn_async(
+        &mut self,
+        _spec: AgSpawnSpec,
+        _schema: JsonArg,
+    ) -> Result<AgCycleId, SpawnError> {
+        Err(SpawnError::SpawnDriveFailed(
+            AgSpawnStage::StageAllocating,
+            "async spawn is not wired yet (PRD 20 S1-L2 lane C: the cycle table)".to_string(),
+        ))
+    }
+
+    /// Serves `SubagentAwait`. STUB — see [`Self::subagent_spawn_async`]; lane
+    /// C fills this in.
+    fn subagent_await(&mut self, _cycle: AgCycleId) -> Result<AgSpawnOutcome, SpawnError> {
+        Err(SpawnError::SpawnDriveFailed(
+            AgSpawnStage::StageAllocating,
+            "async await is not wired yet (PRD 20 S1-L2 lane C: the cycle table)".to_string(),
+        ))
+    }
+
+    /// Serves `SubagentCancel`. STUB — see [`Self::subagent_spawn_async`]; lane
+    /// C fills this in. Total by contract, so the stub is a no-op rather than a
+    /// failure: there is no error channel to report "not wired yet" on.
+    fn subagent_cancel(
+        &mut self,
+        cx: &tidepool_effect::dispatch::EffectContext<'_, tidepool_mcp::CapturedOutput>,
+        _cycle: AgCycleId,
+    ) -> Result<tidepool_effect::Response, tidepool_effect::error::EffectError> {
+        cx.respond(())
     }
 }
 

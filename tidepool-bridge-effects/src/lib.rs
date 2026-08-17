@@ -368,6 +368,15 @@ pub struct AgAgentId {
     pub raw: i64,
 }
 
+/// Haskell `CycleId` — the handler-scoped identity of one running cycle.
+/// Opaque: Tidepool mints it, echoes it, and never parses it. Cycle-scoped
+/// like every PRD 19 handle — it never crosses a resident-cycle boundary.
+#[derive(ToCore, FromCore, Clone, Copy, Debug, PartialEq, Eq)]
+#[core(name = "CycleId")]
+pub struct AgCycleId {
+    pub raw: i64,
+}
+
 /// Haskell `BackendThreadId` — a backend's identity for the hosting thread.
 /// Opaque: stored, compared, echoed, never parsed.
 #[derive(ToCore, FromCore, Clone, Debug, PartialEq, Eq)]
