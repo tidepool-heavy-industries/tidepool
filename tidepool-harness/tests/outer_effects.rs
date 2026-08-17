@@ -28,8 +28,8 @@ mod support;
 
 use tidepool_bridge_effects::{EvRepositoryEvent, WtWorktreeId};
 use tidepool_handlers::{
-    load_journal, ConsoleHandler, EventConfig, EventError, ExecHandler, JournalHandler,
-    ObservationSource, RepoEventHandler, WorktreeHandler,
+    load_journal, ConsoleHandler, EventConfig, EventError, ExecHandler, JournalEntry,
+    JournalHandler, ObservationSource, RepoEventHandler, WorktreeHandler,
 };
 use tidepool_harness::engine::EngineConfig;
 use tidepool_harness::log::LogHeader;
@@ -308,22 +308,35 @@ fn text_array<'a>(state: &'a serde_json::Value, field: &str) -> Vec<&'a str> {
         .collect()
 }
 
-/// Acceptance for PRD 20 S1-L5 wave 1 (`plans/self-iterating-harness/
-/// 20-s1-l5-resume.md`): the driver-side boot fold. `ResumeHarness.hs`
-/// declares BOTH `loop` (walks the first two of three steps — a run a crash
-/// caught with one step still to go) and `resumeLoop` (walks every step
-/// against the injected fold, skipping what is already recorded) so entry
-/// SELECTION is what each assertion below actually exercises.
+/// Every entry a run id owns, across every segment it has ever written, in
+/// segment order — the run's TRUE PHYSICAL WRITE ORDER.
+fn load_run_entries(log_dir: &std::path::Path, run_id: &str) -> Vec<JournalEntry> {
+    let mut entries = Vec::new();
+    for segment in tidepool_harness::list_segments(log_dir, run_id).expect("list segments") {
+        entries.extend(load_journal(&segment).expect("segment loads"));
+    }
+    entries
+}
+
+/// Acceptance for PRD 20 S1-L5 wave 1/3 (`plans/self-iterating-harness/
+/// 20-s1-l5-resume.md`): the driver-side boot fold, across a run's journal
+/// SEGMENTS. `ResumeHarness.hs` declares BOTH `loop` (walks the first two of
+/// three steps — a run a crash caught with one step still to go) and
+/// `resumeLoop` (walks every step against the injected fold, skipping what is
+/// already recorded) so entry SELECTION is what each assertion below actually
+/// exercises.
 ///
-/// (a) FRESH: `acquire_lease` mints, the (nonexistent) journal folds to
-/// nothing, one cycle compiles the ordinary `loop` entry and records two
-/// steps.
+/// (a) FRESH: `acquire_lease` mints and allocates segment 0, which folds to
+/// nothing (it doesn't exist yet), one cycle compiles the ordinary `loop`
+/// entry and records two steps into it.
 /// (b) RESUMED: a SECOND driver over the SAME log dir. `acquire_lease`
-/// reports the same run id/journal; folding it now returns 2; one cycle
-/// compiles `resumeLoop`, skips the two already-recorded steps, and appends
-/// exactly one new entry (`gamma`, `seq` 2 — continuing past the fresh run's
-/// seq numbers rather than restarting at 0, proving `JournalHandler::resuming`
-/// seeded the counter from the fold).
+/// reports the same run id but a DIFFERENT, freshly allocated segment — never
+/// the fresh boot's own; folding every segment for the run now returns 2; one
+/// cycle compiles `resumeLoop`, skips the two already-recorded steps, and
+/// appends exactly one new entry (`gamma`, `seq` 2 — continuing past the
+/// fresh run's seq numbers rather than restarting at 0, proving
+/// `JournalHandler::resuming` seeded the counter from the fold) into its OWN
+/// segment.
 /// (c) REFUSED: a non-empty fold against `OuterEffectsHarness.hs` (declares
 /// no `resumeLoop`) fails `run_one_cycle` with `DriverError::ResumeEntryMissing`
 /// before any cycle runs — no extract compile paid for this leg.
@@ -365,7 +378,7 @@ async fn resume_boot_fold_fresh_then_resumed_appends_only_the_delta() {
         "no lease on disk yet — this boot must mint one"
     );
     let fresh_folded = fresh_driver
-        .open_run_journal(&fresh_lease.lease)
+        .open_run_journal(log_dir.path(), &fresh_lease)
         .expect("open the (nonexistent) journal");
     assert_eq!(fresh_folded, 0, "a fresh journal folds nothing");
 
@@ -390,8 +403,7 @@ async fn resume_boot_fold_fresh_then_resumed_appends_only_the_delta() {
         "a fresh boot enters through loop, not resumeLoop, got {fresh_state:?}"
     );
 
-    let fresh_entries =
-        load_journal(&fresh_lease.lease.journal).expect("the fresh run's journal loads");
+    let fresh_entries = load_journal(&fresh_lease.segment).expect("the fresh run's segment loads");
     assert_eq!(
         fresh_entries.len(),
         2,
@@ -425,10 +437,13 @@ async fn resume_boot_fold_fresh_then_resumed_appends_only_the_delta() {
         "a lease is already on disk — this boot must resume it"
     );
     assert_eq!(resumed_lease.lease.run_id, fresh_lease.lease.run_id);
-    assert_eq!(resumed_lease.lease.journal, fresh_lease.lease.journal);
+    assert_ne!(
+        resumed_lease.segment, fresh_lease.segment,
+        "the resumed boot must own a FRESH segment, never the fresh boot's own"
+    );
 
     let resumed_folded = resumed_driver
-        .open_run_journal(&resumed_lease.lease)
+        .open_run_journal(log_dir.path(), &resumed_lease)
         .expect("fold the fresh boot's journal");
     assert_eq!(
         resumed_folded, 2,
@@ -456,12 +471,12 @@ async fn resume_boot_fold_fresh_then_resumed_appends_only_the_delta() {
         "the resumed boot must have entered through resumeLoop, got {resumed_state:?}"
     );
 
-    let resumed_entries =
-        load_journal(&resumed_lease.lease.journal).expect("the resumed run's journal loads");
+    let resumed_entries = load_run_entries(log_dir.path(), &resumed_lease.lease.run_id);
     assert_eq!(
         resumed_entries.len(),
         3,
-        "appended only the delta — nothing rewritten, got {resumed_entries:?}"
+        "appended only the delta, into its OWN segment — nothing rewritten, \
+         got {resumed_entries:?}"
     );
     assert_eq!(resumed_entries[2].key, "gamma");
     assert_eq!(
@@ -476,7 +491,7 @@ async fn resume_boot_fold_fresh_then_resumed_appends_only_the_delta() {
     let refused_log_dir = tempfile::TempDir::new().expect("log dir");
     let refused_lease = acquire_lease(refused_log_dir.path()).expect("mint the lease");
     std::fs::write(
-        &refused_lease.lease.journal,
+        &refused_lease.segment,
         "{\"seq\":0,\"kind\":\"step\",\"key\":\"alpha\",\"payload\":{}}\n",
     )
     .expect("hand-seed a non-empty journal");
@@ -500,7 +515,7 @@ async fn resume_boot_fold_fresh_then_resumed_appends_only_the_delta() {
     let mut refused_driver = SelfHarnessDriver::new(refused_agent, Arc::new(LogObserver));
 
     let refused_folded = refused_driver
-        .open_run_journal(&refused_lease.lease)
+        .open_run_journal(refused_log_dir.path(), &refused_lease)
         .expect("fold the hand-seeded journal");
     assert_eq!(refused_folded, 1);
 
@@ -520,7 +535,7 @@ async fn resume_boot_fold_fresh_then_resumed_appends_only_the_delta() {
         "the refusal must name the harness file, got: {msg}"
     );
     assert!(
-        msg.contains(&refused_lease.lease.journal.display().to_string()),
-        "the refusal must name the journal file, got: {msg}"
+        msg.contains(&refused_log_dir.path().display().to_string()),
+        "the refusal must name where the run's segments live, got: {msg}"
     );
 }

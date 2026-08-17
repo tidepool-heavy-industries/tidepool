@@ -26,8 +26,9 @@
 //!   source fingerprint, one generation-tagged record) persist/restore +
 //!   transcript-jsonl [`Observer`] impl + the durable-log path helpers.
 //! - [`resume`] — the READ half of the durable run journal (PRD 20 S1-L5): the
-//!   run lease (identity that outlives a process) and the boot-time
-//!   `(kind, key)` fold the driver injects through `resumeLoop`.
+//!   run lease (identity that outlives a process), the per-process journal
+//!   SEGMENTS a run id owns, and the boot-time `(kind, key)` fold across all
+//!   of them the driver injects through `resumeLoop`.
 //!
 //! `crate::engine::HoleRouting::Finalize` is the other half of the
 //! synchronous hole-routing contract (routing for the `finalize` effect);
@@ -48,5 +49,8 @@ pub use lifecycle::SelfHarnessState;
 pub use observer::{Event, LogObserver, Observer};
 pub use operator::{ContinueSignal, OperatorGate, StdinGate};
 pub use persistence::{Checkpoint, JsonlObserver, PersistenceError};
-pub use resume::{acquire_lease, retire_lease, AcquiredLease, ResumeFold, RunLease};
+pub use resume::{
+    acquire_lease, fold_run_journal, list_segments, retire_lease, segment_path, AcquiredLease,
+    ResumeFold, RunJournalError, RunLease,
+};
 pub use state_cross::{resume_in, state_in, state_out};

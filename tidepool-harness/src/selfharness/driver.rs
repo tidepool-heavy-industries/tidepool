@@ -50,9 +50,11 @@
 //!
 //! A run's durable journal is READ here, and only here: `record`
 //! (`Tidepool.Journal`) stays write-only on the authored surface.
-//! [`SelfHarnessDriver::open_run_journal`] loads a run's journal, folds it to
-//! the last entry per `(kind, key)`, and builds the appending handler seeded
-//! past what is already on disk — one seam, one path, so the fold and the
+//! [`SelfHarnessDriver::open_run_journal`] loads and folds every SEGMENT a
+//! run id owns (see [`crate::selfharness::resume`]'s module doc) to the last
+//! entry per `(kind, key)`, and builds the appending handler over this
+//! process's own freshly allocated segment, seeded past what every existing
+//! segment already holds — one seam, one `AcquiredLease`, so the fold and the
 //! appends cannot desync. The FIRST cycle after boot then consumes that fold
 //! ([`SelfHarnessDriver::take_loop_entry`]): a non-empty one compiles the
 //! wider `Loaded.resumeLoop __selfHarnessResume __selfHarnessState` entry
@@ -112,8 +114,9 @@ pub enum DriverError {
     /// The boot fold ([`Self::open_run_journal`](SelfHarnessDriver::open_run_journal))
     /// found recorded steps, but the harness declares no `resumeLoop` entry to
     /// inject them through — so a run would silently REDO finished work. Refused
-    /// at boot, before any cycle runs, naming both files: the harness that needs
-    /// the entry and the journal that has the entries.
+    /// at boot, before any cycle runs, naming both: the harness that needs
+    /// the entry and where the run's segments (see [`crate::selfharness::resume`])
+    /// that carry the entries live.
     ///
     /// This refusal IS the PRD's "resume should not be able to forget to look"
     /// property, realized as a boot failure rather than as a type.
@@ -129,6 +132,12 @@ pub enum DriverError {
         run_id: String,
         entries: usize,
     },
+    /// Loading a run's journal segments failed — either enumerating them
+    /// ([`PersistenceError`], an I/O failure against the log dir itself) or
+    /// loading one ([`tidepool_handlers::JournalLoadError`] — real corruption,
+    /// a torn line that isn't a segment's own final one).
+    #[error("self-harness run journal: {0}")]
+    RunJournal(#[from] crate::selfharness::resume::RunJournalError),
     /// The boot fold's JSON failed `Tidepool.Resume`'s `FromJSON ResumeFold`
     /// when re-spliced — distinct from [`DriverError::StateDecode`], which is
     /// the AUTHOR's instance rejecting their own state. This one means the
@@ -655,12 +664,13 @@ pub struct SelfHarnessDriver {
     resume: Option<PendingResume>,
 }
 
-/// A boot fold and the journal it came from, held together so the
-/// [`DriverError::ResumeEntryMissing`] refusal can name the file and the two
-/// can never desync.
+/// A boot fold and where its segments live, held together so the
+/// [`DriverError::ResumeEntryMissing`] refusal can name them and the two can
+/// never desync.
 struct PendingResume {
     fold: crate::selfharness::resume::ResumeFold,
-    journal: PathBuf,
+    log_dir: PathBuf,
+    segment_count: usize,
 }
 
 /// See [`SelfHarnessDriver::handlers`]'s doc.
@@ -848,29 +858,40 @@ impl SelfHarnessDriver {
         self.resume = None;
     }
 
-    /// Open a RUN's journal: load it, fold it, and build the appending handler
-    /// — all three from the SAME path, in one call, so a resumed run cannot end
-    /// up folding one file while appending to another.
+    /// Open a RUN's journal: load and fold EVERY segment the run id owns, and
+    /// build the appending handler over the segment THIS process was
+    /// allocated (`acquired.segment`) — all from `acquired`, in one call, so a
+    /// resumed run cannot end up folding one set of segments while appending
+    /// to a path that disagrees with them.
     ///
     /// That non-desyncability is the whole reason this is one seam rather than
-    /// three calls. Three separate steps could each be given a different path,
-    /// and the failure would be silent: a run that folds an old journal and
+    /// separate calls. A caller that resolved the segment set once and the
+    /// append target separately could give the two a different `log_dir`, and
+    /// the failure would be silent: a run that folds an old location and
     /// appends to a new one looks like it is working right up until it redoes
     /// finished work.
     ///
     /// Three things happen together here:
     ///
-    /// 1. [`tidepool_handlers::load_journal`] reads `lease.journal` — a MISSING
-    ///    file is an empty journal (the "lease present, journal missing" boot
-    ///    case), a torn FINAL line is skipped with a warning, and a torn line
-    ///    anywhere earlier fails loudly. That contract is unchanged here.
-    /// 2. The entries fold to a [`crate::selfharness::resume::ResumeFold`] keyed
-    ///    on `(kind, key)`, held until the first cycle consumes it.
+    /// 1. [`crate::selfharness::resume::fold_run_journal`] enumerates every
+    ///    segment `acquired.lease.run_id` owns in `log_dir`
+    ///    ([`crate::selfharness::resume::list_segments`], numeric segment
+    ///    order) and loads each with [`tidepool_handlers::load_journal`] — a
+    ///    MISSING file is an empty journal, a torn FINAL line in a segment is
+    ///    skipped with a warning, and a torn line anywhere earlier in a
+    ///    segment fails loudly. That per-segment contract is unchanged; what
+    ///    changes is that no segment but the crashed one can ever carry a
+    ///    torn tail, because no other process ever appends into it.
+    /// 2. The concatenated entries — segment order, then each segment's own
+    ///    append order, the run's TRUE PHYSICAL WRITE ORDER — fold to a
+    ///    [`crate::selfharness::resume::ResumeFold`] keyed on `(kind, key)`,
+    ///    held until the first cycle consumes it.
     /// 3. The handler is built with
-    ///    [`tidepool_handlers::JournalHandler::resuming`] at the fold's
-    ///    `next_seq` — so a resumed run's appends CONTINUE past what is already
-    ///    on disk instead of restarting at 0 and becoming indistinguishable
-    ///    from the prior process's entries under a max-seq fold.
+    ///    [`tidepool_handlers::JournalHandler::resuming`], targeting
+    ///    `acquired.segment` (this process's OWN, freshly allocated segment —
+    ///    never a segment a prior process wrote to) and seeded at the fold's
+    ///    `next_seq` — so a resumed run's appends CONTINUE past what is
+    ///    already on disk instead of restarting at 0.
     ///
     /// Returns how many `(kind, key)` pairs folded — `0` for a fresh run, which
     /// is also when the ordinary `loop` entry is compiled unchanged.
@@ -881,19 +902,21 @@ impl SelfHarnessDriver {
     /// the harness.
     pub fn open_run_journal(
         &mut self,
-        lease: &crate::selfharness::resume::RunLease,
+        log_dir: &Path,
+        acquired: &crate::selfharness::resume::AcquiredLease,
     ) -> Result<usize, DriverError> {
-        let entries = tidepool_handlers::load_journal(&lease.journal)
-            .map_err(|e| DriverError::Session(format!("run journal {:?}: {e}", lease.journal)))?;
-        let fold = crate::selfharness::resume::ResumeFold::fold(&lease.run_id, &entries);
+        let run_id = &acquired.lease.run_id;
+        let fold = crate::selfharness::resume::fold_run_journal(log_dir, run_id)?;
         let folded = fold.len();
+        let segment_count = crate::selfharness::resume::list_segments(log_dir, run_id)?.len();
         self.handlers.journal = Some(tidepool_handlers::JournalHandler::resuming(
-            lease.journal.clone(),
+            acquired.segment.clone(),
             fold.next_seq(),
         ));
         self.resume = Some(PendingResume {
             fold,
-            journal: lease.journal.clone(),
+            log_dir: log_dir.to_path_buf(),
+            segment_count,
         });
         Ok(folded)
     }
@@ -989,7 +1012,11 @@ impl SelfHarnessDriver {
             if !pending.fold.is_empty() && !source.declares_resume_entry {
                 return Err(DriverError::ResumeEntryMissing {
                     harness: source.path.display().to_string(),
-                    journal: pending.journal.display().to_string(),
+                    journal: format!(
+                        "{} segment(s) under {}",
+                        pending.segment_count,
+                        pending.log_dir.display()
+                    ),
                     run_id: pending.fold.run_id().to_string(),
                     entries: pending.fold.len(),
                 });

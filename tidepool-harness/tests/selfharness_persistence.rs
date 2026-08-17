@@ -7,19 +7,22 @@
 //! `SelfHarnessDriver::run_one_cycle`'s success path, so a restart always
 //! reads a state and a summary from the SAME generation.
 //!
-//! Lease/journal half (wave 2b, `plans/self-iterating-harness/
+//! Lease/journal half (wave 2b/3, `plans/self-iterating-harness/
 //! 20-s1-l5-resume.md`): a run that ends ABNORMALLY does not retire its lease,
 //! so the next boot resumes it and does only the delta; a run that ends
-//! normally does retire, so the next boot mints a fresh run. Plus what a kill
-//! mid-append leaves — a torn final line — and how far that tolerance reaches.
+//! normally does retire, so the next boot mints a fresh run. A resumed
+//! process always owns its OWN freshly-allocated journal SEGMENT — never one
+//! a prior process wrote to (wave 3) — which is what makes a kill mid-append
+//! (a torn final line) survivable across arbitrarily many further boots
+//! rather than one.
 //!
 //! Every cycle runs through the production entry point
 //! (`SelfHarnessDriver::run_one_cycle`), and a "restarted process" is always a
 //! FRESH `SelfHarnessDriver` over a FRESH `Harness`, carrying nothing but what
 //! is on disk. The GHC-heavy tests need `TIDEPOOL_EXTRACT` and the
 //! with-packages GHC on PATH — run inside `nix develop` (see
-//! `haskell/CLAUDE.md`). The lease/journal tests that fold a hand-written
-//! journal compile no Haskell at all and are plain `#[test]`s.
+//! `haskell/CLAUDE.md`). The lease/journal tests that fold hand-written
+//! segments compile no Haskell at all and are plain `#[test]`s.
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -770,6 +773,18 @@ fn keys(entries: &[JournalEntry]) -> Vec<&str> {
     entries.iter().map(|e| e.key.as_str()).collect()
 }
 
+/// Every entry a run id owns, across every segment it has ever written, in
+/// segment order — the run's TRUE PHYSICAL WRITE ORDER (see
+/// `selfharness::resume`'s module doc). What a test reaches for whenever it
+/// wants "the whole run's journal", now that no single file holds it.
+fn load_run_entries(log_dir: &std::path::Path, run_id: &str) -> Vec<JournalEntry> {
+    let mut entries = Vec::new();
+    for segment in tidepool_harness::list_segments(log_dir, run_id).expect("list segments") {
+        entries.extend(load_journal(&segment).expect("segment loads"));
+    }
+    entries
+}
+
 fn seqs(entries: &[JournalEntry]) -> Vec<u64> {
     entries.iter().map(|e| e.seq).collect()
 }
@@ -816,8 +831,8 @@ fn torn_prefix_of(full_line: &str) -> &str {
 /// `delta` still to do. **Why that is equivalent to a kill at the durability
 /// boundary:** durability is decided entirely by what is on disk when the
 /// process stops, and the three things on disk are identical either way —
-/// two flushed journal lines (`record` flushes before returning), NO committed
-/// checkpoint (only a successful cycle commits), and an ACTIVE run lease
+/// two durably fsynced journal lines (`record` fsyncs before returning), NO
+/// committed checkpoint (only a successful cycle commits), and an ACTIVE run lease
 /// (retirement happens on a normal `run_loop` return, which never happens
 /// here). Nothing about the boot path reads a pid, an exit status, or a "was
 /// this clean" flag — `acquire_lease` resumes on the mere presence of the lease
@@ -835,9 +850,9 @@ fn torn_prefix_of(full_line: &str) -> &str {
 /// 4. That cycle finishes normally, commits its checkpoint, and its lease
 ///    retires — RETAINED on disk (renamed, readable, naming the crashed run's
 ///    id), never deleted.
-/// 5. The boot after that MINTS: a new run id, a new journal file that does not
-///    exist yet and folds to nothing, while the finished run's journal still
-///    holds all four entries. Retire-on-normal-exit and resume-on-crash are
+/// 5. The boot after that MINTS: a new run id, a fresh segment that does not
+///    exist yet and folds to nothing, while the finished run's segments still
+///    hold all four entries. Retire-on-normal-exit and resume-on-crash are
 ///    the two directions of one mechanism, so both are pinned here.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn crashed_cycle_keeps_its_lease_and_the_resumed_run_does_only_the_delta() {
@@ -856,7 +871,7 @@ async fn crashed_cycle_keeps_its_lease_and_the_resumed_run_does_only_the_delta()
     assert!(!first.resumed, "no lease on disk yet — this boot mints one");
     assert_eq!(
         crashed
-            .open_run_journal(&first.lease)
+            .open_run_journal(&log_dir, &first)
             .expect("open the (nonexistent) journal"),
         0,
         "a fresh run folds nothing"
@@ -873,8 +888,7 @@ async fn crashed_cycle_keeps_its_lease_and_the_resumed_run_does_only_the_delta()
     );
     drop(crashed);
 
-    let crashed_entries =
-        load_journal(&first.lease.journal).expect("the crashed run's journal loads");
+    let crashed_entries = load_journal(&first.segment).expect("the crashed run's segment loads");
     assert_eq!(
         keys(&crashed_entries),
         vec!["alpha", "beta"],
@@ -897,10 +911,11 @@ async fn crashed_cycle_keeps_its_lease_and_the_resumed_run_does_only_the_delta()
          must resume it rather than start a new run"
     );
     assert_eq!(second.lease.run_id, first.lease.run_id);
-    assert_eq!(
-        second.lease.journal, first.lease.journal,
-        "one journal file per RUN, appended across however many processes the \
-         run takes"
+    assert_ne!(
+        second.segment, first.segment,
+        "the resumed process must own a FRESH segment — never append into the \
+         segment the crashed process left, which is exactly what closes the \
+         torn-tail hazard"
     );
 
     let mut resumed = fixture_driver("crash-delta-2");
@@ -910,8 +925,8 @@ async fn crashed_cycle_keeps_its_lease_and_the_resumed_run_does_only_the_delta()
     resumed.set_console_handler(ConsoleHandler);
     assert_eq!(
         resumed
-            .open_run_journal(&second.lease)
-            .expect("fold the crashed run's journal"),
+            .open_run_journal(&log_dir, &second)
+            .expect("fold the crashed run's segments"),
         2
     );
 
@@ -938,13 +953,13 @@ async fn crashed_cycle_keeps_its_lease_and_the_resumed_run_does_only_the_delta()
          finished steps, nothing dropped, got {state:?}"
     );
 
-    let resumed_entries =
-        load_journal(&second.lease.journal).expect("the resumed run's journal loads");
+    let resumed_entries = load_run_entries(&log_dir, &second.lease.run_id);
     assert_eq!(
         keys(&resumed_entries),
         vec!["alpha", "beta", "gamma", "delta"],
-        "the journal is append-only: the crashed process's lines are still \
-         there, in place, with the delta after them — got {resumed_entries:?}"
+        "every segment is append-only and every segment is folded: the crashed \
+         process's entries are still there, in its own segment, with the delta \
+         in the resumed process's — got {resumed_entries:?}"
     );
     assert_eq!(
         seqs(&resumed_entries),
@@ -967,7 +982,7 @@ async fn crashed_cycle_keeps_its_lease_and_the_resumed_run_does_only_the_delta()
         .expect("there is an active lease to retire");
     assert!(
         retired.exists(),
-        "a retired lease is RETAINED — renamed beside its journal, never deleted"
+        "a retired lease is RETAINED — renamed beside its segments, never deleted"
     );
     let retained: RunLease = serde_json::from_slice(&std::fs::read(&retired).expect("read"))
         .expect("a retired lease stays readable, not just present");
@@ -984,27 +999,26 @@ async fn crashed_cycle_keeps_its_lease_and_the_resumed_run_does_only_the_delta()
     );
     assert_ne!(third.lease.run_id, first.lease.run_id);
     assert_ne!(
-        third.lease.journal, first.lease.journal,
-        "a fresh run must get its OWN journal file, never adopt the finished \
-         run's"
+        third.segment, first.segment,
+        "a fresh run must get its OWN segment, never adopt the finished run's"
     );
     assert!(
-        !third.lease.journal.exists(),
-        "the fresh run's journal appears on its first append, not before"
+        !third.segment.exists(),
+        "the fresh run's segment appears on its first append, not before"
     );
     let mut after = fixture_driver("crash-delta-3");
     assert_eq!(
         after
-            .open_run_journal(&third.lease)
+            .open_run_journal(&log_dir, &third)
             .expect("open the fresh run's journal"),
         0,
         "the fresh run folds nothing — the finished run's entries are not its own"
     );
     assert_eq!(
-        keys(&load_journal(&first.lease.journal).expect("the finished run's journal still loads")),
+        keys(&load_run_entries(&log_dir, &first.lease.run_id)),
         vec!["alpha", "beta", "gamma", "delta"],
-        "and the finished run's journal is untouched by any of this — nothing \
-         rewrites, compacts, or deletes it"
+        "and the finished run's segments are untouched by any of this — nothing \
+         rewrites, compacts, or deletes them"
     );
 }
 
@@ -1025,20 +1039,20 @@ async fn crashed_cycle_keeps_its_lease_and_the_resumed_run_does_only_the_delta()
 fn torn_final_line_folds_to_its_complete_entries_and_leaves_its_step_undone() {
     let _cache_guard = support::isolate_cache();
     let dir = scratch("torn-tail");
-    let lease = acquire_lease(&dir).expect("mint the lease").lease;
+    let acquired = acquire_lease(&dir).expect("mint the lease");
 
     let gamma = line(2, "gamma", 30);
     let mut file = line(0, "alpha", 10) + &line(1, "beta", 20);
     file.push_str(torn_prefix_of(&gamma));
-    std::fs::write(&lease.journal, &file).expect("plant a torn-tail journal");
+    std::fs::write(&acquired.segment, &file).expect("plant a torn-tail segment");
 
-    let entries = load_journal(&lease.journal).expect(
+    let entries = load_journal(&acquired.segment).expect(
         "a torn FINAL line is skipped, never fatal — that \
              tolerance is the whole reason a crash mid-append is recoverable",
     );
     assert_eq!(keys(&entries), vec!["alpha", "beta"]);
 
-    let fold = ResumeFold::fold(&lease.run_id, &entries);
+    let fold = ResumeFold::fold(&acquired.lease.run_id, &entries);
     assert_eq!(
         folded_keys(&fold),
         vec!["alpha".to_string(), "beta".to_string()],
@@ -1052,12 +1066,12 @@ fn torn_final_line_folds_to_its_complete_entries_and_leaves_its_step_undone() {
          durable entry ever claimed it"
     );
 
-    // The driver's boot seam agrees with the fold read directly — one journal,
+    // The driver's boot seam agrees with the fold read directly — one segment,
     // one loaded-and-folded result, whichever way it is reached.
     let mut driver = fixture_driver("torn-tail");
     assert_eq!(
         driver
-            .open_run_journal(&lease)
+            .open_run_journal(&dir, &acquired)
             .expect("the boot fold tolerates a torn tail"),
         2
     );
@@ -1074,160 +1088,152 @@ fn torn_final_line_folds_to_its_complete_entries_and_leaves_its_step_undone() {
 fn torn_line_before_the_last_fails_the_boot_loudly() {
     let _cache_guard = support::isolate_cache();
     let dir = scratch("torn-mid");
-    let lease = acquire_lease(&dir).expect("mint the lease").lease;
+    let acquired = acquire_lease(&dir).expect("mint the lease");
 
     let beta = line(1, "beta", 20);
     let mut file = line(0, "alpha", 10);
     file.push_str(torn_prefix_of(&beta));
     file.push('\n'); // a COMPLETE line that does not parse — not a torn tail
     file.push_str(&line(2, "gamma", 30));
-    std::fs::write(&lease.journal, &file).expect("plant a mid-file corrupted journal");
+    std::fs::write(&acquired.segment, &file).expect("plant a mid-file corrupted segment");
 
     assert!(
         matches!(
-            load_journal(&lease.journal),
+            load_journal(&acquired.segment),
             Err(JournalLoadError::TornMidFile { line_no: 1, .. })
         ),
         "expected TornMidFile at line 1, got {:?}",
-        load_journal(&lease.journal)
+        load_journal(&acquired.segment)
     );
 
     let mut driver = fixture_driver("torn-mid");
     let err = driver
-        .open_run_journal(&lease)
-        .expect_err("the boot must refuse a corrupted journal, not fold around it");
+        .open_run_journal(&dir, &acquired)
+        .expect_err("the boot must refuse a corrupted segment, not fold around it");
     let msg = err.to_string();
     assert!(
-        msg.contains(&lease.journal.display().to_string()) && msg.contains("line 1"),
-        "the refusal must name the journal and the offending line, got: {msg}"
+        msg.contains(&acquired.segment.display().to_string()) && msg.contains("line 1"),
+        "the refusal must name the segment and the offending line, got: {msg}"
     );
 }
 
-/// How far the torn-tail tolerance reaches — pinned because it is a real limit,
-/// not a wish.
+/// THE regression this whole lane exists to close. Under the old single-file
+/// design, a torn tail was survivable exactly once — the boot that folds it
+/// was fine, but the boot after that either failed loudly (two or more
+/// appends after the tear) or silently lost a durable record (exactly one
+/// append), because the resumed run's first append landed on the SAME
+/// physical line as the torn bytes and the two merged into one unparseable
+/// line.
 ///
-/// A torn tail has no trailing newline, and the journal is append-only forever
-/// (nothing truncates or rewrites it — LOCKED). So the resumed run's first
-/// append lands on the SAME line as the torn bytes, and the two facts merge
-/// into one unparseable line. A torn tail is therefore survivable exactly
-/// ONCE — by the boot that folds it, not by the boot after that:
+/// With segments, a resumed process never appends into a segment a prior
+/// process left — it always gets a fresh, freshly-allocated one — so neither
+/// failure mode is reachable, no matter how many further boots happen. This
+/// walks several, through the REAL driver seam (`acquire_lease` +
+/// `SelfHarnessDriver::open_run_journal`), and every one folds cleanly.
 ///
-/// - Two or more appends ⇒ the merged line is no longer last ⇒ the next boot
-///   fails LOUDLY (`TornMidFile`), which is the safe direction: a human sees
-///   the file rather than a run silently mis-folding it.
-/// - Exactly one append ⇒ the merged line IS last ⇒ it is skipped as a torn
-///   tail, and that one durable append is silently absent from the fold. The
-///   consequence is bounded to redoing that step (never a wrong result, which
-///   is the property adopt-and-verify rests on), but it is silent.
-///
-/// This is two locked decisions meeting (append-only forever, and a strict
-/// mid-file tear), so it is pinned here rather than papered over: softening
-/// `load_journal` to tolerate the merged line would weaken exactly the
-/// contract the test above exists to hold. If the lane later decides the
-/// appender should do something about a file that does not end in a newline,
-/// this test is where that decision changes shape.
-///
-/// Folds hand-written journals — no Haskell compiled.
+/// Folds hand-written segments — no Haskell compiled.
 #[test]
-fn appending_after_a_torn_tail_is_survivable_exactly_once() {
+fn a_torn_tail_never_poisons_a_later_boot_through_the_driver_seam() {
     let _cache_guard = support::isolate_cache();
+    let dir = scratch("torn-tail-many-boots");
 
-    // Two appends after the tear: loud on the next boot.
-    let torn_tail = || {
-        let gamma = line(2, "gamma", 30);
-        let mut file = line(0, "alpha", 10) + &line(1, "beta", 20);
-        file.push_str(torn_prefix_of(&gamma));
-        file
-    };
+    // Boot 1: mints the run, writes two complete records, then crashes
+    // mid-append on a third — its segment's torn tail, sealed forever.
+    let first = acquire_lease(&dir).expect("mint the lease");
+    let gamma = line(2, "gamma", 30);
+    let mut file = line(0, "alpha", 10) + &line(1, "beta", 20);
+    file.push_str(torn_prefix_of(&gamma));
+    std::fs::write(&first.segment, &file).expect("plant a torn-tail segment");
 
-    let loud_dir = scratch("torn-then-two");
-    let loud = acquire_lease(&loud_dir).expect("mint the lease").lease;
-    std::fs::write(&loud.journal, torn_tail()).expect("plant a torn-tail journal");
-    // What the resumed run does next: append the delta, seeded at the fold's
-    // next_seq (2) — the ordinary append path, nothing special.
-    std::fs::write(
-        &loud.journal,
-        format!(
-            "{}{}{}",
-            std::fs::read_to_string(&loud.journal).expect("read"),
-            line(2, "gamma", 30),
-            line(3, "delta", 40)
-        ),
-    )
-    .expect("append the delta after the torn bytes");
-    assert!(
-        matches!(
-            load_journal(&loud.journal),
-            Err(JournalLoadError::TornMidFile { line_no: 2, .. })
-        ),
-        "the torn bytes merged with the first append, and are no longer last, so \
-         the next boot must fail loudly rather than fold around them: {:?}",
-        load_journal(&loud.journal)
-    );
-
-    // Exactly one append after the tear: the merged line is last, so it is
-    // skipped as a torn tail — and that append is silently gone from the fold.
-    let quiet_dir = scratch("torn-then-one");
-    let quiet = acquire_lease(&quiet_dir).expect("mint the lease").lease;
-    std::fs::write(
-        &quiet.journal,
-        format!("{}{}", torn_tail(), line(2, "gamma", 30)),
-    )
-    .expect("plant a torn tail with exactly one append after it");
-    let entries = load_journal(&quiet.journal).expect("the merged line reads as a torn tail");
+    let mut driver = fixture_driver("torn-tail-many-boots-1");
     assert_eq!(
-        keys(&entries),
-        vec!["alpha", "beta"],
-        "the appended record is absorbed into the torn line and lost from the \
-         fold — bounded to redoing that step, but silent, got {entries:?}"
+        driver
+            .open_run_journal(&dir, &first)
+            .expect("boot 1 folds around the torn tail"),
+        2,
+        "alpha and beta; the torn gamma never landed durably"
     );
+
+    // Boots 2 through 6: each is a FRESH process over the same run — never
+    // touching a byte any prior process wrote. Every single one must stay
+    // parseable, not just the first — "one boot deep" was exactly the old
+    // design's limit, and this is the case that closes it.
+    for boot in 2..=6u64 {
+        let acquired = acquire_lease(&dir).expect("resume");
+        assert_eq!(acquired.lease.run_id, first.lease.run_id);
+        assert!(
+            !acquired.segment.exists(),
+            "boot {boot} must be allocated a segment no one has written yet"
+        );
+
+        let mut driver = fixture_driver(&format!("torn-tail-many-boots-{boot}"));
+        let folded = driver
+            .open_run_journal(&dir, &acquired)
+            .unwrap_or_else(|e| {
+                panic!("boot {boot} must stay parseable this many boots past the torn tail: {e}")
+            });
+        assert_eq!(folded, boot as usize, "boot {boot}'s fold");
+
+        // This boot records its own step, into its OWN segment — the next
+        // boot must see it only as a prior, sealed segment, never merge
+        // anything into its bytes.
+        std::fs::write(&acquired.segment, line(boot, &format!("step-{boot}"), 0))
+            .expect("this boot's own segment write");
+    }
+
+    // Segment 0's torn tail is untouched, byte for byte, after five further
+    // boots — nothing downstream of it was ever rewritten into.
+    let seg0 = std::fs::read_to_string(&first.segment).expect("segment 0 read");
+    assert!(seg0.ends_with(torn_prefix_of(&gamma)));
 }
 
-/// Idempotence and order-insensitivity as properties of the FILE and of the
-/// driver's boot seam, not just of the pure fold over a vector (which
-/// `selfharness::resume`'s own unit tests already pin, rotations and wire bytes
-/// included).
+/// Idempotence as a property of the driver's boot seam, not just of the pure
+/// fold over a vector (`selfharness::resume`'s own unit tests already pin
+/// that). Folding the same segment TWICE through `open_run_journal` — the
+/// operation a resumed boot performs on segments a prior process wrote — is
+/// the same fold both times.
 ///
-/// Two things this adds: folding the same journal TWICE through
-/// `open_run_journal` — the operation a resumed boot performs on a file a prior
-/// process appended to — is the same fold both times; and a journal whose LINE
-/// order disagrees with its seq order folds identically to the canonical one,
-/// down to the wire bytes the splice carries. The second is only reachable from
-/// a hand-written file, which is the point: the winner is max seq, so file
-/// position cannot decide anything.
+/// Also pins the flip side of what used to be "order-insensitive": a segment
+/// whose LINE order disagrees with its `seq` order now folds DIFFERENTLY
+/// from the canonical one — physical order, not `seq`, decides the winner
+/// (see `tidepool_handlers::last_by_kind_key`'s doc). Any reordering of the
+/// same entries folding identically was exactly the property a positional
+/// fold gives up: a foreign or mis-seeded segment can no longer invert the
+/// result by carrying a `seq` that contradicts the bytes it was actually
+/// written in.
 ///
-/// Folds hand-written journals — no Haskell compiled.
+/// Folds hand-written segments — no Haskell compiled.
 #[test]
-fn boot_fold_is_idempotent_and_indifferent_to_the_files_line_order() {
+fn boot_fold_is_idempotent_and_sensitive_to_the_segments_physical_order() {
     let _cache_guard = support::isolate_cache();
     let dir = scratch("fold-idempotent");
-    let lease = acquire_lease(&dir).expect("mint the lease").lease;
+    let acquired = acquire_lease(&dir).expect("mint the lease");
 
-    // `alpha` recorded twice — the later seq must win, so the fold is doing
-    // real work rather than trivially keeping everything.
+    // `alpha` recorded twice — the LAST one in the file must win, so the
+    // fold is doing real work rather than trivially keeping everything.
     let lines = [
         line(0, "alpha", 10),
         line(1, "beta", 20),
         line(2, "alpha", 11),
         line(3, "gamma", 30),
     ];
-    std::fs::write(&lease.journal, lines.concat()).expect("plant a journal");
+    std::fs::write(&acquired.segment, lines.concat()).expect("plant a segment");
 
     let mut driver = fixture_driver("fold-idempotent");
-    let once = driver.open_run_journal(&lease).expect("fold once");
+    let once = driver.open_run_journal(&dir, &acquired).expect("fold once");
     let twice = driver
-        .open_run_journal(&lease)
-        .expect("fold the same file again");
+        .open_run_journal(&dir, &acquired)
+        .expect("fold the same segment again");
     assert_eq!(
         (once, twice),
         (3, 3),
-        "folding the same journal again must yield the same fold — the operation \
-         a resumed boot performs on a file a prior process appended to"
+        "folding the same segment again must yield the same fold — the operation \
+         a resumed boot performs on segments a prior process wrote"
     );
 
     let canonical = ResumeFold::fold(
-        &lease.run_id,
-        &load_journal(&lease.journal).expect("canonical journal loads"),
+        &acquired.lease.run_id,
+        &load_journal(&acquired.segment).expect("canonical segment loads"),
     );
     assert_eq!(canonical.next_seq(), 4);
     assert_eq!(
@@ -1238,30 +1244,36 @@ fn boot_fold_is_idempotent_and_indifferent_to_the_files_line_order() {
             .find(|e| e["key"] == "alpha")
             .expect("alpha survived the fold")["payload"],
         serde_json::json!(11),
-        "the newest record per (kind, key) wins, by seq"
+        "the LAST record per (kind, key) in the file wins"
     );
 
-    // The same entries, written in an order the file's own lines contradict.
+    // The same entries, written in an order the file's own lines contradict —
+    // a DIFFERENT physical order, which must fold DIFFERENTLY.
     let shuffled_dir = scratch("fold-shuffled");
-    let shuffled = acquire_lease(&shuffled_dir).expect("mint the lease").lease;
+    let shuffled = acquire_lease(&shuffled_dir).expect("mint the lease");
     let mut reversed = lines.clone();
     reversed.reverse();
-    std::fs::write(&shuffled.journal, reversed.concat()).expect("plant a shuffled journal");
+    std::fs::write(&shuffled.segment, reversed.concat()).expect("plant a reversed segment");
     let shuffled_fold = ResumeFold::fold(
         // The same run id: a fold carries the run it came from, and only the
         // ENTRY order is under test here.
-        &lease.run_id,
-        &load_journal(&shuffled.journal).expect("shuffled journal loads"),
+        &acquired.lease.run_id,
+        &load_journal(&shuffled.segment).expect("reversed segment loads"),
     );
-    assert_eq!(
+    assert_ne!(
         shuffled_fold, canonical,
-        "line order must not change the fold — the winner is max seq, not file \
-         position"
+        "reversing the physical order must change the fold — position, not \
+         seq, decides the winner now"
     );
     assert_eq!(
-        shuffled_fold.to_json().to_string(),
-        canonical.to_json().to_string(),
-        "…nor the wire bytes it splices, or an equivalent fold would miss the \
-         compile memo"
+        shuffled_fold.to_json()["entries"]
+            .as_array()
+            .expect("entries")
+            .iter()
+            .find(|e| e["key"] == "alpha")
+            .expect("alpha survived the fold")["payload"],
+        serde_json::json!(10),
+        "in the REVERSED file, entry(0, alpha, 10) is now LAST, so it wins — \
+         even though its seq (0) is lower than the other alpha's (2)"
     );
 }

@@ -178,19 +178,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // The run journal (PRD 20 S1-L5): identity comes from the RUN LEASE, not
     // from this process. `acquire_lease` resumes the run a prior process left
     // behind (a crash leaves the lease on disk) or mints a fresh one — either
-    // way one journal file per RUN, appended across however many processes the
-    // run takes. Per-process naming would fold nothing and orphan the prior
-    // file, which is exactly what resume exists to avoid.
+    // way this process is handed its OWN, freshly allocated journal SEGMENT
+    // (never one a prior process wrote to; see `tidepool_harness::selfharness::resume`'s
+    // module doc), so a crash mid-append can never poison a later boot.
     //
-    // `open_run_journal` is the ONE seam: it loads that journal, folds it, and
-    // builds the appending handler seeded past what is already on disk — all
-    // from the lease's single path, so the fold and the appends cannot desync.
+    // `open_run_journal` is the ONE seam: it loads and folds every segment the
+    // run id owns, and builds the appending handler over this process's own
+    // segment — both from the same `AcquiredLease`, so the fold and the
+    // appends cannot desync.
     let acquired = tidepool_harness::acquire_lease(&log_dir)?;
-    let folded = driver.open_run_journal(&acquired.lease)?;
+    let folded = driver.open_run_journal(&log_dir, &acquired)?;
     tracing::info!(
         target: "tidepool_web",
         repo = %source_repo.display(),
-        journal = %acquired.lease.journal.display(),
+        segment = %acquired.segment.display(),
         run_id = %acquired.lease.run_id,
         resumed = acquired.resumed,
         folded_entries = folded,

@@ -8,40 +8,96 @@
 //! rewrites, truncates, or compacts a journal: the only file this module ever
 //! WRITES is the run lease.
 //!
-//! # The run lease — which journal a resumed run folds, and appends to
+//! # Segments — one journal file per PROCESS, all retained, all folded
+//!
+//! A run id owns an ORDERED SET of journal segments, one per process that run
+//! survives, rather than one file appended to by every process in turn. A
+//! resumed process never appends to a segment a prior process left — it opens
+//! a fresh one. This is what closes the torn-tail hazard the single-file
+//! design had: a crash mid-append leaves its segment's final line torn, and
+//! that segment is then SEALED forever — no later process ever writes into it
+//! — so `load_journal`'s "a torn FINAL line is the crash point, skip it with a
+//! warning" contract is unconditionally true per segment, rather than true
+//! only until the next process's first append lands on the same physical
+//! line and merges with the torn bytes.
+//!
+//! **Naming**: [`segment_path`] — `journal-<runId>.<seg>.jsonl`, `seg` a plain
+//! decimal ordinal, unpadded. Ordering across segments is by the PARSED
+//! ordinal ([`list_segments`]), never by string/lexicographic comparison — a
+//! run's 10th segment must sort after its 9th, not between its 1st and 2nd.
+//!
+//! **Allocation**: [`acquire_lease`] picks the next unused segment for THIS
+//! process — one past the highest segment index already on disk for the run
+//! id, or `0` when the run id owns none yet (a fresh run's first process, or
+//! a resumed run whose prior process crashed before ever appending). The
+//! allocated path is carried on [`AcquiredLease`], not on [`RunLease`] — see
+//! "The run lease" below for why that split is deliberate.
+//!
+//! **The boot fold** ([`crate::selfharness::driver::SelfHarnessDriver::open_run_journal`])
+//! loads every segment for the run id, in segment order, and concatenates
+//! their entries — each segment's own entries already in that segment's
+//! append order ([`tidepool_handlers::load_journal`]'s contract, unchanged).
+//! That concatenation is the run's TRUE PHYSICAL WRITE ORDER, the exact
+//! sequence of bytes a crash leaves behind, and it is what
+//! [`tidepool_handlers::last_by_kind_key`] folds on — see that function's doc
+//! for why the winner is POSITION in this order, not `seq`. `seq` stays
+//! run-global monotonic in practice (a resumed segment's handler is seeded at
+//! [`ResumeFold::next_seq`], past everything already folded), but is written
+//! purely as provenance and is never what decides a fold.
+//!
+//! **Retention**: every segment is kept forever. Nothing here deletes,
+//! merges, truncates, or compacts one — the crashed segment with its genuine
+//! torn tail stays on disk exactly as `load_journal` describes it, beside
+//! every segment written after it.
+//!
+//! # The run lease — which run a process resumes, and which segment it owns
 //!
 //! A run must be identifiable BEFORE its first `record` (a crash in cycle 1
 //! leaves no checkpoint, so the checkpoint cannot carry the run id) and must
 //! outlive the process (a resumed run is a different process, so per-process
-//! naming would fold nothing and orphan the prior file). The lease is one file,
-//! `<log_dir>/run-current.json`, written at boot before any handler is wired:
+//! naming would fold nothing and orphan the prior file). The lease is one
+//! file, `<log_dir>/run-current.json`, written at boot before any handler is
+//! wired:
 //!
 //! ```json
-//! {"runId": "20260817-101112-48213",
-//!  "journal": "…/journal-20260817-101112-48213.jsonl",
-//!  "pid": 48213, "startedAt": "…"}
+//! {"runId": "20260817-101112-48213", "pid": 48213, "startedAt": "…"}
 //! ```
+//!
+//! Deliberately absent from that file: which segment the writing process
+//! owns. [`RunLease`] is a statement about the RUN — the identity a crash
+//! must survive — and a segment index is a fact about one PROCESS within
+//! that run. Recording it in the persisted lease would make the lease a
+//! statement about whichever process last wrote it, which is exactly the
+//! property that did NOT survive the crash in the single-file design (the
+//! lease named a file; the next process inherited that name and appended
+//! into it). Instead, [`acquire_lease`] ENUMERATES the segments already on
+//! disk for the run id every time — fresh boot or resume alike — and hands
+//! the freshly allocated path back on [`AcquiredLease::segment`], which is
+//! never itself persisted. So the durable lease answers only "which run",
+//! and the directory listing answers "which segments" — two questions, two
+//! places, neither able to go stale relative to the other because the second
+//! is never cached.
 //!
 //! | boot condition | behaviour |
 //! |---|---|
-//! | no lease | mint a `runId`, write the lease, fresh journal file, empty fold |
-//! | a lease, journal present | RESUME: same `runId`, append to the same file, fold it |
-//! | a lease, journal missing | resume with an EMPTY fold, keep the `runId` (the file appears on first append) |
+//! | no lease | mint a `runId`, write the lease, allocate segment 0, empty fold |
+//! | a lease | RESUME: same `runId`, allocate the next unused segment, fold every existing segment |
 //! | `run_loop` returns normally | [`retire_lease`]: rename to `run-<runId>.json`, RETAINED — so the next boot mints a fresh run |
 //! | the process crashes | the lease survives → the next boot resumes |
 //!
-//! One journal file per run id, appended across however many processes that run
-//! takes. Nothing is ever rewritten and nothing is ever deleted — a retired
-//! lease is renamed, not removed.
+//! Every segment a run ever writes is retained under that run's id, appended
+//! to by exactly one process each. Nothing is ever rewritten and nothing is
+//! ever deleted — a retired lease is renamed, not removed.
 //!
 //! # The fold
 //!
 //! [`ResumeFold`] keys on the `(kind, key)` PAIR, not the key alone: a harness
 //! records several kinds of fact about one branch (dev-tree writes a `"split"`
 //! and an `"outcome"` under the same branch name), and keying on the key alone
-//! would collapse them. The winner is MAX `seq`
-//! ([`tidepool_handlers::last_by_kind_key`]), which makes the fold idempotent
-//! and order-insensitive rather than merely last-line-wins.
+//! would collapse them. The winner is the entry LAST in physical write order
+//! ([`tidepool_handlers::last_by_kind_key`]) — see that function's doc for why
+//! this is positional rather than `seq`-based, and for what "physical order"
+//! means once a run spans several segments.
 //!
 //! The fold is GENERIC over `(kind, key, payload)`. Payloads are opaque
 //! [`serde_json::Value`]s end to end — dev-tree's
@@ -57,7 +113,7 @@ use tidepool_handlers::{last_by_kind_key, JournalEntry};
 
 use super::persistence::PersistenceError;
 
-/// Everything the driver folded out of one run's journal at boot: the last
+/// Everything the driver folded out of one run's segments at boot: the last
 /// entry recorded under each `(kind, key)` pair, plus the run id those entries
 /// came from.
 ///
@@ -69,21 +125,31 @@ use super::persistence::PersistenceError;
 pub struct ResumeFold {
     run_id: String,
     entries: BTreeMap<(String, String), JournalEntry>,
+    /// The highest `seq` across every entry FOLDED FROM (not just the
+    /// entries that survived the fold) — see [`Self::max_seq`]'s doc for why
+    /// this must be tracked separately from the surviving entries rather than
+    /// recomputed from them now that the winner is positional, not max-seq.
+    max_seq: Option<u64>,
 }
 
 impl ResumeFold {
-    /// Fold `entries` (as [`tidepool_handlers::load_journal`] returned them)
-    /// down to the last record per `(kind, key)`.
+    /// Fold `entries` — already concatenated in the run's TRUE PHYSICAL WRITE
+    /// ORDER (segment order, then each segment's own append order; see this
+    /// module's doc) — down to the last record per `(kind, key)`.
     ///
-    /// IDEMPOTENT and ORDER-INSENSITIVE by construction: the result is a pure
-    /// function of the SET of entries, because the winner is max `seq` rather
-    /// than file position. Folding the same file twice, folding it again after
-    /// a resumed process appended to it, or folding an interleaved append order
-    /// all yield the same map (plus whatever is genuinely new).
+    /// IDEMPOTENT: folding an already-folded set (at most one entry per
+    /// `(kind, key)`, so there is nothing left for position to disambiguate)
+    /// is a no-op, regardless of what order that set is handed back in.
+    /// Folding the identical byte sequence twice — the operation a resumed
+    /// boot performs on a run whose segments have not changed since the last
+    /// boot — always yields the same map: the fold is a pure function of the
+    /// ORDERED sequence of entries, not of a set (see [`last_by_kind_key`]'s
+    /// doc for why order now matters).
     pub fn fold(run_id: impl Into<String>, entries: &[JournalEntry]) -> Self {
         ResumeFold {
             run_id: run_id.into(),
             entries: last_by_kind_key(entries).into_iter().collect(),
+            max_seq: entries.iter().map(|e| e.seq).max(),
         }
     }
 
@@ -92,6 +158,7 @@ impl ResumeFold {
         ResumeFold {
             run_id: run_id.into(),
             entries: BTreeMap::new(),
+            max_seq: None,
         }
     }
 
@@ -114,13 +181,20 @@ impl ResumeFold {
         self.entries.len()
     }
 
-    /// The highest `seq` in the fold, or `None` for an empty one. Equal to the
-    /// highest `seq` across ALL loaded entries (the globally-newest entry is by
-    /// definition the winner for its own `(kind, key)`), which is what makes
-    /// `max_seq() + 1` the right seed for
-    /// [`tidepool_handlers::JournalHandler::resuming`].
+    /// The highest `seq` written across the WHOLE folded input, or `None` for
+    /// an empty one.
+    ///
+    /// Computed from ALL entries [`Self::fold`] was given, not from the
+    /// surviving fold entries: the fold's winner is now POSITIONAL (see
+    /// [`last_by_kind_key`]), so an overwritten entry can in principle carry
+    /// a higher `seq` than the entry that overwrote it (a foreign, hand-
+    /// edited, or mis-seeded segment). Deriving `max_seq` from the survivors
+    /// alone would then under-count, and a resumed segment seeded from that
+    /// undercount could allocate a `seq` some earlier, dropped entry already
+    /// used. Scanning every input entry keeps this correct regardless of
+    /// what the fold kept.
     pub fn max_seq(&self) -> Option<u64> {
-        self.entries.values().map(|e| e.seq).max()
+        self.max_seq
     }
 
     /// The seq a RESUMED run's first append must carry: `max_seq() + 1`, or `0`
@@ -161,15 +235,16 @@ const CURRENT_LEASE: &str = "run-current.json";
 /// One run's identity, durable across the processes the run takes. Written at
 /// boot, before any handler is wired; renamed (never deleted) at a normal
 /// `run_loop` return.
+///
+/// Carries no segment path — see this module's doc for why that is a
+/// deliberate omission, not a gap: a segment is a fact about one process,
+/// this file is a statement about the run.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RunLease {
-    /// Stable across every process this run survives — what the journal file is
-    /// named after and what a [`ResumeFold`] reports.
+    /// Stable across every process this run survives — what every segment
+    /// filename is derived from and what a [`ResumeFold`] reports.
     #[serde(rename = "runId")]
     pub run_id: String,
-    /// The run's journal file. Held here rather than re-derived at each use so
-    /// the id and the path cannot desync.
-    pub journal: PathBuf,
     /// The process that most recently took the lease — diagnostic only; a stale
     /// pid is exactly the crash case this file exists to survive, so nothing
     /// checks it.
@@ -186,53 +261,129 @@ pub fn lease_path(log_dir: &Path) -> PathBuf {
 }
 
 /// Where a RETIRED lease is kept — retained like a worktree, never deleted, so
-/// a finished run's identity stays readable beside its journal.
+/// a finished run's identity stays readable beside its segments.
 pub fn retired_lease_path(log_dir: &Path, run_id: &str) -> PathBuf {
     log_dir.join(format!("run-{run_id}.json"))
 }
 
-/// The journal file a run id owns: `<log_dir>/journal-<runId>.jsonl`. One file
-/// per RUN, not per process — that is the whole point of the lease.
-pub fn journal_path_for(log_dir: &Path, run_id: &str) -> PathBuf {
-    log_dir.join(format!("journal-{run_id}.jsonl"))
+/// The basename prefix every one of `run_id`'s segments shares —
+/// `journal-<runId>.`, so a segment's own suffix (`<seg>.jsonl`) is
+/// unambiguous to strip back off in [`list_segments`].
+fn segment_prefix(run_id: &str) -> String {
+    format!("journal-{run_id}.")
 }
 
-/// Mint a run id that no run in `log_dir` already owns.
+/// One segment's path: `<log_dir>/journal-<runId>.<seg>.jsonl`. `seg` is a
+/// plain decimal ordinal, deliberately unpadded — nothing here or in
+/// [`list_segments`] ever compares segment order as strings, only as the
+/// parsed integer, so an unpadded name can never silently mis-sort (padding
+/// would only paper over a comparison bug, not prevent one).
+pub fn segment_path(log_dir: &Path, run_id: &str, seg: u64) -> PathBuf {
+    log_dir.join(format!("{}{seg}.jsonl", segment_prefix(run_id)))
+}
+
+/// Parse a directory entry's filename back to its segment ordinal, if it is
+/// one of `run_id`'s segments. Anything else in the log dir — the lease,
+/// retired leases, a checkpoint, another run's segments — simply does not
+/// match and is skipped by [`list_segments`], never an error.
+fn parse_segment_ordinal(run_id: &str, file_name: &str) -> Option<u64> {
+    file_name
+        .strip_prefix(&segment_prefix(run_id))?
+        .strip_suffix(".jsonl")?
+        .parse::<u64>()
+        .ok()
+}
+
+/// Every segment `run_id` owns, on disk right now, in NUMERIC segment order —
+/// PARSED-integer order, never lexicographic, so a run's 10th segment sorts
+/// after its 9th rather than between its 1st and 2nd.
 ///
-/// The base is `{epoch-seconds}-{pid}` — both halves, not the timestamp alone,
-/// since two processes launched within one wall-clock second would otherwise
-/// collide. But that base is NOT sufficient on its own: one process retiring a
-/// run and starting another inside the same second mints the same id twice, and
-/// the "fresh" run would then adopt the finished run's journal — appending into
-/// it and, on a later boot, folding its entries as though they were its own.
-///
-/// So the mint checks the artifacts rather than trusting the clock: a base
-/// whose journal file or whose retired lease already exists gets a `-<n>`
-/// suffix until neither does. That makes "a fresh run never adopts an existing
-/// run's journal" a property of the directory, not of how fast the clock ticks.
-pub fn mint_run_id_in(log_dir: &Path) -> String {
-    let secs = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-    let base = format!("{secs}-{}", std::process::id());
-    let mut candidate = base.clone();
-    let mut n = 1u32;
-    while journal_path_for(log_dir, &candidate).exists()
-        || retired_lease_path(log_dir, &candidate).exists()
-    {
-        candidate = format!("{base}-{n}");
-        n += 1;
+/// A `log_dir` that does not exist yet owns no segments (`Ok(vec![])`), the
+/// same "nothing recorded yet" reading [`load_journal`] gives a missing file
+/// — a run that has not been booted in this directory before has nothing to
+/// enumerate, which is not an error.
+pub fn list_segments(log_dir: &Path, run_id: &str) -> Result<Vec<PathBuf>, PersistenceError> {
+    let read_dir = match std::fs::read_dir(log_dir) {
+        Ok(rd) => rd,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(source) => {
+            return Err(PersistenceError::Io {
+                path: log_dir.to_path_buf(),
+                source,
+            })
+        }
+    };
+    let mut segments = Vec::new();
+    for entry in read_dir {
+        let entry = entry.map_err(|source| PersistenceError::Io {
+            path: log_dir.to_path_buf(),
+            source,
+        })?;
+        let Some(name) = entry.file_name().to_str().map(str::to_string) else {
+            continue;
+        };
+        if let Some(seg) = parse_segment_ordinal(run_id, &name) {
+            segments.push((seg, entry.path()));
+        }
     }
-    candidate
+    segments.sort_by_key(|(seg, _)| *seg);
+    Ok(segments.into_iter().map(|(_, path)| path).collect())
 }
 
-/// What [`acquire_lease`] found: the run this process is now part of, and
-/// whether it INHERITED that identity from a prior process (a crash) or minted
-/// it.
+/// The segment index the NEXT process to boot in `log_dir` under `run_id`
+/// should allocate: one past the highest segment already on disk, or `0`
+/// when `run_id` owns none yet (a fresh run's first process, or a resumed
+/// run whose prior process crashed before its first `record`).
+fn next_segment_ordinal(log_dir: &Path, run_id: &str) -> Result<u64, PersistenceError> {
+    let existing = list_segments(log_dir, run_id)?;
+    Ok(existing
+        .iter()
+        .filter_map(|p| {
+            p.file_name()
+                .and_then(|n| n.to_str())
+                .and_then(|n| parse_segment_ordinal(run_id, n))
+        })
+        .max()
+        .map_or(0, |m| m + 1))
+}
+
+/// Load and fold every segment `run_id` owns in `log_dir`, in true physical
+/// write order (segment order, then each segment's own append order) — the
+/// order [`ResumeFold::fold`]/[`last_by_kind_key`] fold on. `Ok(empty fold)`
+/// when the run owns no segments yet.
+pub fn fold_run_journal(log_dir: &Path, run_id: &str) -> Result<ResumeFold, RunJournalError> {
+    let segments = list_segments(log_dir, run_id)?;
+    let mut entries = Vec::new();
+    for segment in &segments {
+        entries.extend(tidepool_handlers::load_journal(segment)?);
+    }
+    Ok(ResumeFold::fold(run_id, &entries))
+}
+
+/// Everything that can go wrong loading a run's journal: enumerating its
+/// segments ([`PersistenceError`], an I/O failure against `log_dir` itself),
+/// or loading one of them ([`tidepool_handlers::JournalLoadError`] — a torn
+/// line anywhere but a segment's own final line, which is real corruption
+/// per [`tidepool_handlers::load_journal`]'s unchanged contract).
+#[derive(Debug, thiserror::Error)]
+pub enum RunJournalError {
+    #[error(transparent)]
+    Enumerate(#[from] PersistenceError),
+    #[error(transparent)]
+    Load(#[from] tidepool_handlers::JournalLoadError),
+}
+
+/// What [`acquire_lease`] found: the run this process is now part of, the
+/// segment THIS process owns (freshly allocated every boot — never read back
+/// off the lease; see this module's doc), and whether the run was INHERITED
+/// from a prior process (a crash) or minted.
 #[derive(Debug, Clone, PartialEq)]
 pub struct AcquiredLease {
     pub lease: RunLease,
+    /// This process's own segment — allocated by [`next_segment_ordinal`] at
+    /// acquisition time, guaranteed not to already exist (no process ever
+    /// appends into a segment another process owns).
+    pub segment: PathBuf,
     /// `true` when a lease was already on disk — this boot continues a run a
     /// prior process started, whether or not that run had journaled anything
     /// yet.
@@ -277,11 +428,36 @@ pub fn write_lease(log_dir: &Path, lease: &RunLease) -> Result<(), PersistenceEr
     std::fs::rename(&tmp, &path).map_err(|source| PersistenceError::Io { path, source })
 }
 
+/// Mint a run id that no run in `log_dir` already owns: neither a retired
+/// lease nor any segment file names it. `{epoch-seconds}-{pid}` is the base
+/// (both halves, not the timestamp alone, since two processes launched
+/// within one wall-clock second would otherwise collide), suffixed with
+/// `-<n>` until neither artifact exists for the candidate — a property of
+/// the directory, not of how fast the clock ticks.
+fn mint_run_id_in(log_dir: &Path) -> Result<String, PersistenceError> {
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let base = format!("{secs}-{}", std::process::id());
+    let mut candidate = base.clone();
+    let mut n = 1u32;
+    loop {
+        let taken = retired_lease_path(log_dir, &candidate).exists()
+            || !list_segments(log_dir, &candidate)?.is_empty();
+        if !taken {
+            return Ok(candidate);
+        }
+        candidate = format!("{base}-{n}");
+        n += 1;
+    }
+}
+
 /// The boot-time lease step: RESUME the run a prior process left behind, or
-/// mint a fresh one. See this module's doc for the four cases — note that all
-/// three non-retired ones end here with a `RunLease` in hand, and only the FOLD
-/// differs between them (a missing journal file loads as an empty journal, so
-/// "a lease, journal missing" needs no branch of its own).
+/// mint a fresh one, and ALLOCATE the segment this process will append to —
+/// the next unused ordinal for that run id, every time, fresh boot or resume
+/// alike (see this module's doc for why that allocation is never read back
+/// off the persisted lease).
 ///
 /// Writing the lease on the resume path too is deliberate: it re-stamps `pid`
 /// and `startedAt` with the process that now holds the run, which is what a
@@ -295,12 +471,10 @@ pub fn acquire_lease(log_dir: &Path) -> Result<AcquiredLease, PersistenceError> 
     let (mut lease, resumed) = match load_lease(log_dir)? {
         Some(lease) => (lease, true),
         None => {
-            let run_id = mint_run_id_in(log_dir);
-            let journal = journal_path_for(log_dir, &run_id);
+            let run_id = mint_run_id_in(log_dir)?;
             (
                 RunLease {
                     run_id,
-                    journal,
                     pid: std::process::id(),
                     started_at: now.clone(),
                 },
@@ -311,7 +485,13 @@ pub fn acquire_lease(log_dir: &Path) -> Result<AcquiredLease, PersistenceError> 
     lease.pid = std::process::id();
     lease.started_at = now;
     write_lease(log_dir, &lease)?;
-    Ok(AcquiredLease { lease, resumed })
+    let seg = next_segment_ordinal(log_dir, &lease.run_id)?;
+    let segment = segment_path(log_dir, &lease.run_id, seg);
+    Ok(AcquiredLease {
+        lease,
+        segment,
+        resumed,
+    })
 }
 
 /// Retire the ACTIVE lease at a normal run completion: RENAME it to
@@ -359,8 +539,8 @@ mod tests {
     static NEXT_TEST_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
     /// Folding a fold's own entries again yields the same map — the property
-    /// that makes it safe to fold a file a resumed process has since appended
-    /// to.
+    /// that makes it safe to fold a run whose segments have not changed since
+    /// the last boot.
     #[test]
     fn fold_is_idempotent() {
         let entries = vec![
@@ -374,36 +554,43 @@ mod tests {
         assert_eq!(once.to_json(), twice.to_json());
     }
 
-    /// Order-insensitivity is the reason the winner is max seq and not file
-    /// position: an interleaved append order must fold identically, down to
-    /// the emitted wire bytes.
+    /// The winner is POSITION in the given order, not `seq` — a later entry in
+    /// the slice always wins its `(kind, key)` even when an earlier entry
+    /// carries a higher `seq`. This is the property that makes a fold over the
+    /// real physical byte order correct even against a foreign, hand-edited,
+    /// or mis-seeded segment (a wrong `seq` can no longer invert the result).
     #[test]
-    fn fold_is_order_insensitive_including_its_wire_bytes() {
-        let canonical = vec![
-            entry(0, "split", "a", 1),
-            entry(1, "outcome", "a", 2),
-            entry(2, "split", "b", 3),
-            entry(3, "split", "a", 4),
+    fn fold_winner_is_last_in_physical_order_regardless_of_seq() {
+        let entries = vec![
+            entry(99, "split", "a", 1), // high seq, but written FIRST
+            entry(0, "split", "a", 2),  // low seq, but written LAST
         ];
-        let expected = ResumeFold::fold("run-1", &canonical);
+        let folded = ResumeFold::fold("run-1", &entries);
         assert_eq!(
-            expected.max_seq(),
-            Some(3),
-            "the newest entry must survive the fold"
+            folded.to_json()["entries"][0]["payload"],
+            serde_json::json!(2),
+            "the physically-last entry must win even though its seq is lower"
         );
+    }
 
-        for shift in 1..canonical.len() {
-            let mut shuffled = canonical[shift..].to_vec();
-            shuffled.extend_from_slice(&canonical[..shift]);
-            let folded = ResumeFold::fold("run-1", &shuffled);
-            assert_eq!(folded, expected, "rotation by {shift} folded differently");
-            assert_eq!(
-                folded.to_json().to_string(),
-                expected.to_json().to_string(),
-                "rotation by {shift} emitted different wire bytes — the compile \
-                 memo would miss on an equivalent fold"
-            );
-        }
+    /// `max_seq`/`next_seq` scan every folded-from entry, not just the
+    /// survivors — an overwritten entry's `seq` still has to be accounted for
+    /// so a resumed segment's handler never allocates a `seq` an earlier,
+    /// dropped entry already used.
+    #[test]
+    fn max_seq_accounts_for_overwritten_entries_too() {
+        let entries = vec![
+            entry(99, "split", "a", 1), // overwritten below, but still the max seq
+            entry(0, "split", "a", 2),
+        ];
+        let folded = ResumeFold::fold("run-1", &entries);
+        assert_eq!(folded.len(), 1, "only one (kind, key) survives");
+        assert_eq!(
+            folded.max_seq(),
+            Some(99),
+            "max_seq must be the true max over everything folded, not just what survived"
+        );
+        assert_eq!(folded.next_seq(), 100);
     }
 
     #[test]
@@ -456,7 +643,91 @@ mod tests {
         assert_eq!(entries[0]["payload"], serde_json::json!(2));
     }
 
-    /// Mint → resume (same run id, same journal path) → retire (the lease is
+    /// Segment naming/ordering: numeric, not lexicographic — segment 10 must
+    /// sort after segment 9, never between segment 1 and segment 2.
+    #[test]
+    fn list_segments_orders_numerically_past_nine() {
+        let dir = temp_dir("segment-order");
+        // Written out of numeric order, and in a range where lexicographic
+        // comparison ("10" < "2") would misorder them.
+        for seg in [2u64, 10, 1, 9, 0] {
+            std::fs::write(segment_path(&dir, "run-x", seg), "").expect("plant segment");
+        }
+        // A different run id's segment must never be picked up.
+        std::fs::write(segment_path(&dir, "run-y", 5), "").expect("plant other run's segment");
+
+        let listed = list_segments(&dir, "run-x").expect("list segments");
+        let ordinals: Vec<u64> = listed
+            .iter()
+            .map(|p| {
+                parse_segment_ordinal("run-x", p.file_name().unwrap().to_str().unwrap()).unwrap()
+            })
+            .collect();
+        assert_eq!(ordinals, vec![0, 1, 2, 9, 10]);
+    }
+
+    /// A fresh run allocates segment 0.
+    #[test]
+    fn fresh_run_allocates_segment_zero() {
+        let dir = temp_dir("fresh-segment-zero");
+        let acquired = acquire_lease(&dir).expect("mint");
+        assert!(!acquired.resumed);
+        assert_eq!(
+            acquired.segment,
+            segment_path(&dir, &acquired.lease.run_id, 0)
+        );
+    }
+
+    /// Every process that resumes a run allocates the NEXT unused segment —
+    /// never the same one a prior process owned, so a crash mid-append can
+    /// never be written into by a later process.
+    #[test]
+    fn each_resume_allocates_a_fresh_unused_segment() {
+        let dir = temp_dir("resume-fresh-segment");
+
+        let first = acquire_lease(&dir).expect("mint");
+        assert_eq!(first.segment, segment_path(&dir, &first.lease.run_id, 0));
+        std::fs::write(&first.segment, "").expect("simulate process 1 writing its segment");
+
+        let second = acquire_lease(&dir).expect("resume 1");
+        assert!(second.resumed);
+        assert_eq!(second.lease.run_id, first.lease.run_id);
+        assert_eq!(
+            second.segment,
+            segment_path(&dir, &first.lease.run_id, 1),
+            "process 2 must never adopt process 1's segment"
+        );
+        assert_ne!(second.segment, first.segment);
+        std::fs::write(&second.segment, "").expect("simulate process 2 writing its segment");
+
+        let third = acquire_lease(&dir).expect("resume 2");
+        assert_eq!(third.segment, segment_path(&dir, &first.lease.run_id, 2));
+
+        // Every prior segment is still there — nothing here ever removes one.
+        assert!(first.segment.exists());
+        assert!(second.segment.exists());
+    }
+
+    /// A resumed process whose predecessor crashed before ever appending
+    /// (segment 0 was allocated but never written) still allocates its OWN
+    /// next segment rather than reusing the empty/never-created one — segment
+    /// allocation is driven by the directory listing, not by whether the
+    /// prior segment happened to get written.
+    #[test]
+    fn resume_after_a_predecessor_that_never_wrote_still_advances() {
+        let dir = temp_dir("resume-no-write");
+        let first = acquire_lease(&dir).expect("mint");
+        assert!(!first.segment.exists(), "nothing has been written yet");
+
+        let second = acquire_lease(&dir).expect("resume");
+        assert_eq!(second.lease.run_id, first.lease.run_id);
+        assert_eq!(
+            second.segment, first.segment,
+            "with nothing on disk for this run yet, ordinal 0 is still the next unused one"
+        );
+    }
+
+    /// Mint → resume (same run id, a NEW segment) → retire (the lease is
     /// RENAMED, not deleted) → the next boot mints a FRESH run.
     #[test]
     fn lease_mint_resume_retire_round_trip() {
@@ -464,16 +735,11 @@ mod tests {
 
         let first = acquire_lease(&dir).expect("mint");
         assert!(!first.resumed, "no lease on disk means a fresh run");
-        assert_eq!(
-            first.lease.journal,
-            journal_path_for(&dir, &first.lease.run_id)
-        );
 
         // A second process over the same log dir inherits the run.
         let second = acquire_lease(&dir).expect("resume");
         assert!(second.resumed, "an existing lease means this boot resumes");
         assert_eq!(second.lease.run_id, first.lease.run_id);
-        assert_eq!(second.lease.journal, first.lease.journal);
 
         let retired = retire_lease(&dir)
             .expect("retire")
@@ -489,41 +755,14 @@ mod tests {
         // Now the next boot is a FRESH run again — and NOT the retired one
         // wearing its name. Minting inside the same wall-clock second as the
         // retirement is the case that catches this: `{secs}-{pid}` alone
-        // repeats, and the "fresh" run would append into the finished run's
-        // journal and later fold its entries as its own.
+        // repeats, and the "fresh" run would otherwise be handed a run id a
+        // finished run already owns.
         let third = acquire_lease(&dir).expect("mint after retirement");
         assert!(!third.resumed);
         assert_ne!(
             third.lease.run_id, first.lease.run_id,
             "a retired run's id must not be minted again"
         );
-        assert_ne!(
-            third.lease.journal, first.lease.journal,
-            "a fresh run must never adopt a retired run's journal file"
-        );
-    }
-
-    /// "A lease, journal missing": keep the run id, fold nothing. The journal
-    /// file appears on the first append — a run that crashed before recording
-    /// anything must still be the SAME run.
-    #[test]
-    fn lease_present_but_journal_missing_resumes_with_an_empty_fold() {
-        let dir = temp_dir("lease-no-journal");
-        let first = acquire_lease(&dir).expect("mint");
-        assert!(
-            !first.lease.journal.exists(),
-            "nothing has recorded yet, so no journal file exists"
-        );
-
-        let resumed = acquire_lease(&dir).expect("resume");
-        assert!(resumed.resumed);
-        assert_eq!(resumed.lease.run_id, first.lease.run_id);
-
-        let entries = tidepool_handlers::load_journal(&resumed.lease.journal)
-            .expect("a missing journal loads as empty, never an error");
-        let fold = ResumeFold::fold(&resumed.lease.run_id, &entries);
-        assert!(fold.is_empty());
-        assert_eq!(fold.run_id(), first.lease.run_id);
     }
 
     /// A lease that exists but does not parse is loud, never a silent reset to
@@ -534,5 +773,90 @@ mod tests {
         std::fs::write(lease_path(&dir), b"{not json").expect("write a torn lease");
         let err = load_lease(&dir).expect_err("a malformed lease must not read as absent");
         assert!(matches!(err, PersistenceError::Json { .. }), "got {err:?}");
+    }
+
+    /// The regression this whole lane exists for: a segment with a torn tail
+    /// (a crash mid-append) folds correctly on the boot that finds it, and —
+    /// unlike the single-file design — every FURTHER boot stays parseable,
+    /// because each one opens its own fresh segment rather than appending
+    /// into the torn one. Walks several boots past the torn tail, not just
+    /// one, since "one boot deep" was exactly the old design's limit.
+    #[test]
+    fn a_segment_with_a_torn_tail_never_poisons_a_later_boot() {
+        let dir = temp_dir("torn-tail-segments");
+        let run_id = "run-torn";
+
+        // Segment 0: two complete lines, then a torn (no-trailing-newline)
+        // final line — exactly what a kill mid-`write_all` leaves.
+        let complete = format!(
+            "{}\n{}\n",
+            serde_json::json!({"seq": 0, "kind": "step", "key": "alpha", "payload": 1}),
+            serde_json::json!({"seq": 1, "kind": "step", "key": "beta", "payload": 2}),
+        );
+        let torn_full =
+            serde_json::json!({"seq": 2, "kind": "step", "key": "gamma", "payload": 3}).to_string();
+        let torn_prefix = &torn_full[..torn_full.len() / 2];
+        std::fs::write(
+            segment_path(&dir, run_id, 0),
+            format!("{complete}{torn_prefix}"),
+        )
+        .expect("plant a torn-tail segment 0");
+
+        // Boot 2 folds segment 0 (torn tail skipped) and writes its OWN
+        // segment 1 — never touching segment 0's bytes.
+        let fold1 = fold_run_journal(&dir, run_id).expect("fold across segment 0 alone");
+        assert_eq!(
+            fold1.len(),
+            2,
+            "alpha and beta survive; the torn gamma does not"
+        );
+        assert_eq!(fold1.next_seq(), 2, "gamma's seq was never durably claimed");
+        std::fs::write(
+            segment_path(&dir, run_id, 1),
+            format!(
+                "{}\n",
+                serde_json::json!({"seq": 2, "kind": "step", "key": "gamma", "payload": 3})
+            ),
+        )
+        .expect("boot 2 redoes gamma into its OWN segment");
+
+        // Boot 3, 4, 5: every further boot still folds cleanly. Under the old
+        // single-file design this is exactly where a second append onto the
+        // merged torn line would start failing loudly.
+        for boot in [2u64, 3, 4] {
+            let seg = segment_path(&dir, run_id, boot);
+            std::fs::write(&seg, "").expect("a later boot's own (empty) segment");
+            let folded = fold_run_journal(&dir, run_id)
+                .unwrap_or_else(|e| panic!("boot past the torn tail must stay parseable: {e}"));
+            assert_eq!(
+                folded.len(),
+                3,
+                "alpha, beta, and the redone gamma must all still be present at boot {boot}"
+            );
+        }
+
+        // Segment 0's torn tail is still there, byte for byte — nothing ever
+        // rewrites, truncates, or deletes it.
+        let seg0 = std::fs::read_to_string(segment_path(&dir, run_id, 0)).expect("segment 0 read");
+        assert!(
+            seg0.ends_with(torn_prefix),
+            "segment 0's torn tail is untouched"
+        );
+    }
+
+    /// Every segment survives a resume on disk — retention is a property of
+    /// the whole run, not just the segments folded from.
+    #[test]
+    fn every_segment_is_retained_after_a_resume() {
+        let dir = temp_dir("retain-all-segments");
+        let first = acquire_lease(&dir).expect("mint");
+        std::fs::write(&first.segment, "").expect("process 1 writes");
+        let second = acquire_lease(&dir).expect("resume");
+        std::fs::write(&second.segment, "").expect("process 2 writes");
+        let third = acquire_lease(&dir).expect("resume again");
+        std::fs::write(&third.segment, "").expect("process 3 writes");
+
+        let listed = list_segments(&dir, &first.lease.run_id).expect("list");
+        assert_eq!(listed, vec![first.segment, second.segment, third.segment]);
     }
 }

@@ -1,9 +1,9 @@
 //! Journal effect handler: a durable append-only run journal (PRD 20, S1-L5).
 //!
 //! One JSON line per `record` call — `{seq, kind, key, payload}` — appended
-//! and flushed immediately. No rewrite or compaction code path exists. The
-//! fold API below (`load_journal`/`last_by_key`/`last_by_kind_key`) is for the
-//! swarm driver's boot-time resume; nothing here wires it in
+//! and `fsync`ed before the call returns. No rewrite or compaction code path
+//! exists. The fold API below (`load_journal`/`last_by_key`/`last_by_kind_key`)
+//! is for the swarm driver's boot-time resume; nothing here wires it in
 //! (`tidepool_harness::selfharness::resume` is what does).
 
 use std::collections::HashMap;
@@ -12,7 +12,7 @@ use std::fs::OpenOptions;
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use tidepool_effect::dispatch::EffectContext;
 use tidepool_effect::error::EffectError;
@@ -183,29 +183,27 @@ pub fn last_by_key(entries: &[JournalEntry]) -> HashMap<String, JournalEntry> {
 /// the same branch name; [`last_by_key`] would collapse the split under the
 /// outcome and lose the recorded plan).
 ///
-/// The winner is MAX `seq`, not file position. That is strictly stronger than
-/// "last line wins": it makes the fold ORDER-INSENSITIVE by construction, so
-/// an interleaved append order — or a file a resumed process appended to after
-/// the fact — folds to the same map. A TIE on `seq` (impossible from one
-/// seq-stamped writer; reachable from a hand-written fixture) breaks on FILE
-/// ORDER: the later entry in `entries` wins, so the fold stays total rather
-/// than depending on which duplicate the iteration happened to see first.
+/// The winner is the LAST entry in `entries` — POSITION, never `seq`. Correct
+/// only when the caller supplies `entries` in the run's TRUE PHYSICAL WRITE
+/// ORDER: for a segmented journal (`tidepool_harness::selfharness::resume`),
+/// that means every segment's entries concatenated in segment order, each
+/// segment's own entries already in this function's append order. That
+/// physical order is exactly the durable byte sequence a crash leaves behind,
+/// so folding on it is folding over the real evidence.
+///
+/// `seq` is written to every entry as PROVENANCE and stays run-global
+/// monotonic in practice (a resumed segment's handler is seeded past
+/// everything already folded — see
+/// `tidepool_harness::selfharness::resume::ResumeFold::next_seq`), but it is
+/// deliberately NOT what this fold sorts on. Folding on `seq` instead would
+/// let a foreign, hand-edited, or mis-seeded segment carrying a `seq` that
+/// contradicts physical order silently INVERT the result — not merely lose an
+/// entry, but pick the wrong one as the winner. Position can't be inverted
+/// that way: the caller's supplied order IS the order folded on.
 pub fn last_by_kind_key(entries: &[JournalEntry]) -> HashMap<(String, String), JournalEntry> {
     let mut out: HashMap<(String, String), JournalEntry> = HashMap::new();
     for entry in entries {
-        let slot = out.entry((entry.kind.clone(), entry.key.clone()));
-        match slot {
-            std::collections::hash_map::Entry::Vacant(v) => {
-                v.insert(entry.clone());
-            }
-            std::collections::hash_map::Entry::Occupied(mut o) => {
-                // `>=`, not `>`: a tie breaks on file order (the later line
-                // wins), which is what makes this total on hand-written input.
-                if entry.seq >= o.get().seq {
-                    o.insert(entry.clone());
-                }
-            }
-        }
+        out.insert((entry.kind.clone(), entry.key.clone()), entry.clone());
     }
     out
 }
@@ -222,21 +220,31 @@ pub struct JournalHandler {
     // type, which does not read journals. A resumed run's continuity ACROSS
     // handler instances is a fold-API/driver concern, and
     // [`JournalHandler::resuming`] is where the driver honors it: it has just
-    // folded the file, so it knows `max(seq) + 1`.
+    // folded the file, so it knows `max(seq) + 1`. Allocated under the SAME
+    // lock as the write itself (see [`Self::append`]), so seq order and
+    // physical (on-disk) order coincide within one segment instead of racing.
     seq: Arc<AtomicU64>,
+    // Serializes an entire append — seq allocation, open, write, fsync —
+    // across every clone of this handler sharing `path`. See [`Self::append`]
+    // for why durability rests on this rather than on syscall atomicity.
+    lock: Arc<Mutex<()>>,
 }
 
 impl JournalHandler {
-    /// One journal file per run — the caller picks the path. Appends start at
-    /// seq `0`, which is right for a FRESH run. A run continuing a journal a
-    /// prior process already wrote must use [`Self::resuming`] instead: two
-    /// instances both starting at 0 over one file would make the second
-    /// process's first entries indistinguishable from the first process's
-    /// under a max-seq fold.
+    /// One journal file — the caller picks the path (typically one process's
+    /// own SEGMENT of a run; see `tidepool_harness::selfharness::resume`,
+    /// which is what decides that path, never this type). Appends start at
+    /// seq `0`, which is right for a FRESH run's first process. A process
+    /// continuing a run a prior process already wrote to must use
+    /// [`Self::resuming`] instead: two processes' segments both starting
+    /// their entries at seq `0` would make them indistinguishable by
+    /// provenance alone, even though the fold that reads them back no longer
+    /// depends on `seq` to tell them apart.
     pub fn new(path: PathBuf) -> Self {
         Self {
             path,
             seq: Arc::new(AtomicU64::new(0)),
+            lock: Arc::new(Mutex::new(())),
         }
     }
 
@@ -249,12 +257,35 @@ impl JournalHandler {
         Self {
             path,
             seq: Arc::new(AtomicU64::new(next_seq)),
+            lock: Arc::new(Mutex::new(())),
         }
     }
 
-    /// Append one entry, flushed before returning. Parent directories are
+    /// Append one entry, DURABLY, before returning. Parent directories are
     /// created as needed. No rewrite, truncate, or compaction path exists —
     /// this always opens in append mode.
+    ///
+    /// The whole append — allocating `seq`, opening the file, writing the
+    /// line, and forcing it to storage — runs under one lock shared by every
+    /// clone of this handler. That lock, not syscall-level atomicity, is what
+    /// makes a concurrent burst of appends never tear a line: `write_all`
+    /// issues exactly one `write()` call only on a FULL write: on a short
+    /// write it loops internally, and a later loop iteration's `write()` is
+    /// no longer atomic against a concurrent `O_APPEND` writer. Mutual
+    /// exclusion holds regardless of how many `write()` calls one append
+    /// takes.
+    ///
+    /// `sync_data()`, not `flush()`, is what makes this durable: `flush()` on
+    /// a `File` is a no-op (there is no userspace buffer to flush — the bytes
+    /// already reached the kernel via `write_all`), so it only ever proved the
+    /// write reached the page cache. Without an explicit fsync, a `record`
+    /// call can return `Ok` and then the entry can still vanish on power
+    /// loss — exactly the gap an acceptance test asserting "crash, resume,
+    /// only the delta" is silently trusting not to exist. One entry per
+    /// COMPLETED step (never per token), so paying one `sync_data()` per
+    /// append is the right trade, and its failure is treated as a write
+    /// failure: a journal write failure already aborts the run, and "the disk
+    /// did not durably take it" is exactly that.
     fn append(
         &self,
         kind: String,
@@ -271,6 +302,10 @@ impl JournalHandler {
                 })?;
             }
         }
+        let _guard = self
+            .lock
+            .lock()
+            .map_err(|e| EffectError::Handler(format!("journal: lock poisoned: {e}")))?;
         let seq = self.seq.fetch_add(1, Ordering::SeqCst);
         let entry = JournalEntry {
             seq,
@@ -288,16 +323,10 @@ impl JournalHandler {
             .map_err(|e| {
                 EffectError::Handler(format!("journal: failed to open {:?}: {}", self.path, e))
             })?;
-        // ONE `write_all` for the whole line (content + newline), not
-        // `writeln!`/`write_fmt` — those can split into several `write_all`
-        // calls on the underlying fd, and each individual `write()` syscall is
-        // the unit POSIX guarantees is atomic against a concurrent O_APPEND
-        // writer. Two calls sharing one line is exactly how a concurrent
-        // recorder tears it.
         file.write_all(line.as_bytes())
             .map_err(|e| EffectError::Handler(format!("journal: write failed: {}", e)))?;
-        file.flush()
-            .map_err(|e| EffectError::Handler(format!("journal: flush failed: {}", e)))?;
+        file.sync_data()
+            .map_err(|e| EffectError::Handler(format!("journal: fsync failed: {}", e)))?;
         Ok(())
     }
 
@@ -496,40 +525,42 @@ mod tests {
         assert_eq!(by_key["branch/a"].kind, "outcome");
     }
 
-    /// MAX SEQ wins, not file position — which is what makes the fold
-    /// order-insensitive: the same entries in any order fold identically.
+    /// POSITION wins, never `seq`: the entry LAST in `entries` always wins its
+    /// `(kind, key)`, even when an earlier entry carries a strictly higher
+    /// `seq`. A foreign, hand-edited, or mis-seeded segment can therefore
+    /// never invert the result the way a max-seq fold could.
     #[test]
-    fn by_kind_key_takes_max_seq_regardless_of_input_order() {
-        let canonical = vec![
-            entry(0, "split", "a", 10),
-            entry(5, "split", "a", 50),
+    fn by_kind_key_takes_the_last_entry_regardless_of_seq() {
+        let entries = vec![
+            entry(5, "split", "a", 50), // highest seq, but NOT last in order
             entry(3, "split", "a", 30),
+            entry(0, "split", "a", 10), // lowest seq, but LAST in order — wins
             entry(2, "outcome", "a", 20),
         ];
-        let expected = last_by_kind_key(&canonical);
+        let folded = last_by_kind_key(&entries);
         assert_eq!(
-            expected[&("split".into(), "a".into())].payload,
-            serde_json::json!(50),
-            "seq 5 must win over the later-in-file seq 3"
+            folded[&("split".into(), "a".into())].payload,
+            serde_json::json!(10),
+            "the physically-last entry must win even though its seq (0) is the lowest"
         );
 
-        // Every rotation of the same set folds to the same map.
-        for shift in 1..canonical.len() {
-            let mut shuffled = canonical[shift..].to_vec();
-            shuffled.extend_from_slice(&canonical[..shift]);
-            assert_eq!(
-                last_by_kind_key(&shuffled),
-                expected,
-                "rotation by {shift} folded differently"
-            );
-        }
+        // A rotation is a DIFFERENT physical order and is expected to fold
+        // differently now — order is exactly what this fold answers over.
+        let mut rotated = entries[1..].to_vec();
+        rotated.push(entries[0].clone());
+        let rotated_folded = last_by_kind_key(&rotated);
+        assert_eq!(
+            rotated_folded[&("split".into(), "a".into())].payload,
+            serde_json::json!(50),
+            "with entry(5,...) now last, IT must win"
+        );
     }
 
-    /// A tie on `seq` cannot come from one seq-stamped writer, but a
-    /// hand-written fixture can produce it — the fold must stay total, and
-    /// resolve it on FILE ORDER (the later line wins).
+    /// Two entries at the same `(kind, key)` fold to whichever is LAST in
+    /// `entries` — plain position, no tie-breaking logic needed, since `seq`
+    /// never enters the decision.
     #[test]
-    fn by_kind_key_breaks_seq_ties_on_file_order() {
+    fn by_kind_key_takes_the_last_entry_at_a_repeated_key() {
         let entries = vec![entry(7, "split", "a", 1), entry(7, "split", "a", 2)];
         let folded = last_by_kind_key(&entries);
         assert_eq!(
@@ -577,6 +608,64 @@ mod tests {
         let _ = std::fs::remove_file(&path);
     }
 
+    /// `seq` is written run-GLOBAL monotonic in practice — a resumed
+    /// segment's handler is seeded past everything already folded — but the
+    /// fold sorts on PHYSICAL order, never on `seq` (see `last_by_kind_key`'s
+    /// doc). This pins that the two orders AGREE on a normally-seeded run:
+    /// two segments (two `JournalHandler`s, the second `resuming` past the
+    /// first's `max(seq) + 1`, exactly as `selfharness::resume` seeds a
+    /// resumed process), concatenated in segment order, have `seq` strictly
+    /// ascending — the same order the concatenation itself is already in. A
+    /// future change that breaks the seeding (so the two orders disagree)
+    /// must fail here, not surface later as a mysterious fold result.
+    #[test]
+    fn resuming_across_two_segments_keeps_seq_ascending_in_physical_order() {
+        let seg0 = tmp_file("seq-order-seg0");
+        let seg1 = tmp_file("seq-order-seg1");
+        let _ = std::fs::remove_file(&seg0);
+        let _ = std::fs::remove_file(&seg1);
+
+        let first = JournalHandler::new(seg0.clone());
+        for i in 0..3 {
+            first
+                .append("step".into(), format!("k{i}"), serde_json::json!(i))
+                .unwrap();
+        }
+        let seg0_entries = load_journal(&seg0).unwrap();
+        let next_seq = seg0_entries
+            .iter()
+            .map(|e| e.seq)
+            .max()
+            .map_or(0, |m| m + 1);
+
+        let second = JournalHandler::resuming(seg1.clone(), next_seq);
+        for i in 3..6 {
+            second
+                .append("step".into(), format!("k{i}"), serde_json::json!(i))
+                .unwrap();
+        }
+        let seg1_entries = load_journal(&seg1).unwrap();
+
+        // The concatenation IS the physical order — segment order, then each
+        // segment's own append order.
+        let physical_order: Vec<u64> = seg0_entries
+            .iter()
+            .chain(seg1_entries.iter())
+            .map(|e| e.seq)
+            .collect();
+        assert_eq!(physical_order, vec![0, 1, 2, 3, 4, 5]);
+
+        let mut by_seq = physical_order.clone();
+        by_seq.sort_unstable();
+        assert_eq!(
+            physical_order, by_seq,
+            "seq order and physical order must agree on a normally-seeded run"
+        );
+
+        let _ = std::fs::remove_file(&seg0);
+        let _ = std::fs::remove_file(&seg1);
+    }
+
     #[test]
     fn parent_dir_creation_works() {
         let base = tmp_dir("parentdir");
@@ -602,9 +691,13 @@ mod tests {
     }
 
     /// A multi-threaded burst of records through CLONED handlers (sharing the
-    /// same seq counter and the same path) must never tear a line: every
-    /// append is one `write_all`, and POSIX guarantees one `write()` against
-    /// an O_APPEND fd is atomic regardless of how many writers share it.
+    /// same seq counter, the same append lock, and the same path) must never
+    /// tear a line. This does NOT rest on `write_all`/`O_APPEND` syscall
+    /// atomicity (a short write makes `write_all` loop into several `write()`
+    /// calls, and a later one is not atomic against a concurrent writer) —
+    /// it rests on `JournalHandler::append`'s lock serializing the whole
+    /// open+write+fsync across every clone, so no two appends are ever
+    /// in flight at once regardless of how many `write()` calls either takes.
     #[test]
     fn concurrent_burst_through_cloned_handlers_yields_no_torn_lines() {
         let path = tmp_file("concurrent_burst");

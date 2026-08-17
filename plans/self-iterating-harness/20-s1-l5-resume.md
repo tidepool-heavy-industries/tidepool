@@ -101,40 +101,67 @@ trivial: there is exactly one moment a fold can be consumed.
 
 ---
 
-## 2. Run identity: which journal a resumed run folds, and appends to
+## 2. Run identity: which segments a resumed run folds, and which one it
+   appends to
 
-Today `tidepool-web/src/bin/tidepool-selfharness.rs` mints
-`journal-{ts}-{pid}.jsonl` per PROCESS. A resumed run is a different process,
-so per-process naming would fold nothing and orphan the prior file. Run
-identity has to outlive the process, and it has to exist BEFORE the first
-`record` (a crash in cycle 1 leaves no checkpoint, so the checkpoint cannot
-carry it).
+A resumed run is a different process from the one that crashed, so
+per-process naming (`journal-{ts}-{pid}.jsonl`) would fold nothing and orphan
+the prior file. Run identity has to outlive the process, and it has to exist
+BEFORE the first `record` (a crash in cycle 1 leaves no checkpoint, so the
+checkpoint cannot carry it).
+
+**One journal file per PROCESS, not per run.** A run id owns an ORDERED SET
+of journal segments (`journal-<runId>.<seg>.jsonl`, `seg` a plain decimal
+ordinal — numeric order, never lexicographic, so segment 10 sorts after
+segment 9), one per process that run survives. A resumed process never
+appends to a segment a prior process left; it always opens a fresh one. This
+closes the torn-tail hazard §3 used to carry as an open question: the
+crashed process's segment is sealed forever with its torn tail as its
+genuine last line, so `load_journal`'s "a torn FINAL line is the crash
+point, skip it with a warning" contract is unconditionally true per segment,
+never merely true until the next process's first append lands on the same
+physical line.
 
 **The run lease** — `<log_dir>/run-current.json`, written at boot, before any
 handler is wired:
 
 ```json
-{"runId": "20260817-101112-48213", "journal": "…/journal-20260817-101112-48213.jsonl", "pid": 48213, "startedAt": "…"}
+{"runId": "20260817-101112-48213", "pid": 48213, "startedAt": "…"}
 ```
+
+Deliberately absent: a segment path. The lease is a statement about the
+RUN — the identity a crash must survive — and a segment index is a fact
+about one PROCESS within that run. Recording a segment in the persisted
+lease would make the lease a statement about whichever process last wrote
+it, which is exactly the property that did NOT survive the crash in the
+single-file design. Instead, segment allocation ENUMERATES the directory
+every time — fresh boot or resume alike — rather than trusting a cached
+answer: one past the highest segment ordinal already on disk for the run
+id, or `0` when the run id owns none yet. The durable lease answers "which
+run"; the directory listing answers "which segments" — two questions, two
+places, neither able to go stale relative to the other because the second
+is never cached.
 
 | boot condition | behaviour |
 |---|---|
-| no lease | mint `runId` from `{ts}-{pid}`, write the lease, fresh journal file, empty fold |
-| a lease, journal present | **resume**: same `runId`, APPEND to the same file, fold it |
-| a lease, journal missing | resume with an empty fold, keep the `runId` (the file is created on first append) |
+| no lease | mint `runId` from `{ts}-{pid}`, write the lease, allocate segment 0, empty fold |
+| a lease | **resume**: same `runId`, allocate the next unused segment ordinal, fold every existing segment |
 | `run_loop` returns normally | retire the lease: rename to `run-{runId}.json` (retained, never deleted — PRD sub-question (iii)'s "retained like worktrees"), so the next boot mints a fresh run |
 | the process crashes | the lease survives → the next boot resumes |
 
-One file per run id, appended across however many processes that run takes.
-Nothing is ever rewritten, and nothing is ever deleted.
+Every segment a run ever writes is retained, appended to by exactly one
+process each. Nothing is ever rewritten, and nothing is ever deleted.
 
 **Seq continuity across handler instances.** `JournalHandler`'s counter starts
 at 0 per instance and deliberately does not read the disk. A resumed run whose
 appends restarted at 0 would be indistinguishable from the prior process's
-first entries under a max-seq fold, so the driver — which HAS just folded the
-file — seeds it: `JournalHandler::resuming(path, next_seq)` where `next_seq`
-is `max(seq) + 1` over the loaded entries. The handler's documented "continuity
-is a fold-API/driver concern" is honored, not contradicted.
+first entries under a same-seq fold, so the driver — which HAS just folded
+every existing segment — seeds it: `JournalHandler::resuming(path, next_seq)`
+where `next_seq` is `max(seq) + 1` over every loaded entry (not just the
+entries that survive the fold — see §3). The handler's documented
+"continuity is a fold-API/driver concern" is honored, not contradicted. `seq`
+is written run-global monotonic in practice by this seeding, but — per §3 —
+is provenance, not what the fold sorts on.
 
 ---
 
@@ -145,6 +172,7 @@ is a fold-API/driver concern" is honored, not contradicted.
 pub struct ResumeFold {
     run_id: String,
     entries: BTreeMap<(String, String), JournalEntry>,   // (kind, key) → last
+    max_seq: Option<u64>,   // over every FOLDED-FROM entry, not just survivors
 }
 ```
 
@@ -154,34 +182,59 @@ pub struct ResumeFold {
   recorded plan. `tidepool-handlers`' fold API gains `last_by_kind_key`
   alongside the existing `last_by_key` (which stays — it is the honest answer
   to a different question).
-- **Winner is MAX SEQ, not file position.** Strictly stronger than "last in
-  the file": folding is then order-insensitive by construction, so an
-  interleaved append order folds identically. Ties (impossible from one
-  seq-stamped writer, possible from a hand-written fixture) break on file
-  order, documented, so the fold is total.
-- **Idempotent.** `fold(fold(entries)) == fold(entries)` — a pure function of a
-  set of entries. Folding twice, or folding a file a resumed process has since
-  appended to, is the same map plus whatever is genuinely new.
-- **Torn-tail handling is `load_journal`'s, unchanged.** A torn FINAL line is
-  skipped with a warning (the crash-mid-append case this lane exists for); a
-  torn line anywhere earlier is `TornMidFile` and fails the boot loudly. Resume
-  does not soften either.
+- **Winner is the last entry in PHYSICAL WRITE ORDER, never `seq`.** Once a
+  run spans several segments, "physical order" means the concatenation of
+  every segment's entries in segment order, each segment's own entries
+  already in that segment's append order — the exact durable byte sequence a
+  crash leaves behind. `seq` is written to every entry as PROVENANCE and
+  stays run-global monotonic in practice (§2's seeding), but is deliberately
+  NOT what the fold sorts on: folding on `seq` would let a foreign,
+  hand-edited, or mis-seeded segment carrying a `seq` that contradicts
+  physical order silently INVERT the result — not merely lose an entry, but
+  pick the wrong one as the winner. Position can't be inverted that way. A
+  practical consequence: two entries at the same `(kind, key)` no longer need
+  tie-breaking logic — the physically-last one always wins, `seq` or no
+  `seq`.
+- **Idempotent.** `fold(fold(entries)) == fold(entries)` — folding an
+  already-folded set (at most one entry per `(kind, key)`, so there is
+  nothing left for position to disambiguate) is a no-op. Folding the
+  identical durable bytes twice — the operation a resumed boot performs on a
+  run whose segments have not changed since the last boot — always yields the
+  same map.
+- **`max_seq`/`next_seq` scan every entry folded FROM, not just the
+  survivors.** The fold's winner is positional, so an overwritten entry can in
+  principle carry a higher `seq` than the entry that overwrote it (the same
+  foreign/mis-seeded case above). Deriving `max_seq` from the survivors alone
+  would then under-count, and a resumed segment seeded from that undercount
+  could allocate a `seq` some earlier, dropped entry already used.
+- **Torn-tail handling is `load_journal`'s, unchanged, and now
+  UNCONDITIONALLY true per segment.** A torn FINAL line is skipped with a
+  warning (the crash-mid-append case this lane exists for); a torn line
+  anywhere earlier is `TornMidFile` and fails the boot loudly. Resume does not
+  soften either — see §2's segmentation for why no segment but the crashed
+  one can ever carry a torn tail.
 
-**Open question — the torn-tail tolerance is one boot deep.** A torn tail has
-no trailing newline (the handler hands `write_all` one buffer ending in `\n`,
-so a partial write is a prefix of it), and the journal is append-only forever,
-so the resumed run's first append lands on the SAME line as the torn bytes and
-the two merge into one unparseable line. The boot that FOLDS a torn tail is
-fine — that is the case this lane needs, and it redoes the torn step. The boot
-after it is not: two or more appends leave the merged line mid-file, so it
-fails loudly (`TornMidFile`); exactly one append leaves it last, so it is
-skipped as a torn tail and that one durable record is silently absent from the
-fold (bounded to redoing that step — never a wrong result — but silent). Every
-fix touches a locked decision (truncating the tail, or softening
-`load_journal`), so this is a decision for the lane rather than a defect to
-patch. Pinned meanwhile by
-`selfharness_persistence::appending_after_a_torn_tail_is_survivable_exactly_once`,
-which is where the decision changes shape.
+**Resolved — the torn-tail hazard, closed by segmentation (was: "the torn-tail
+tolerance is one boot deep").** The single-file design's hazard: a torn tail
+has no trailing newline, and the journal was append-only-forever onto ONE
+file, so a resumed run's first append landed on the SAME line as the torn
+bytes and the two merged into one unparseable line. The boot that folds a
+torn tail was fine; the boot after that was not — two or more appends left
+the merge mid-file (`TornMidFile`, refusing the boot), and exactly one append
+left it last (silently absorbed as a torn tail, quietly dropping a durable
+record). Every fix touched a locked decision (truncating the tail, or
+softening `load_journal`) — until the file boundary itself moved: a resumed
+process now always opens a FRESH segment (§2) rather than appending into the
+crashed process's file, so the merge this hazard depended on can never
+happen, at any boot depth. `load_journal`'s torn-tail contract is untouched;
+it is simply true unconditionally now instead of true-until-the-next-append.
+Pinned by `selfharness::resume::tests::a_segment_with_a_torn_tail_never_poisons_a_later_boot`
+(pure fold, several boots) and
+`selfharness_persistence::a_torn_tail_never_poisons_a_later_boot_through_the_driver_seam`
+(the same property through the real `open_run_journal` seam) —
+`appending_after_a_torn_tail_is_survivable_exactly_once`, which pinned the old
+one-boot-deep limit, no longer describes a property this design has and was
+replaced rather than kept as a stale acceptance.
 
 **Wire shape** (Rust `to_json` → the `__selfHarnessResume` splice →
 `Tidepool.Resume`'s decode). Entries emit sorted by `(kind, key)` so the
@@ -299,4 +352,25 @@ while the finished run's stays intact). Plus the torn-tail legs above, folded
 from hand-written journals with no compile. All in
 `tidepool-harness/tests/selfharness_persistence.rs`.
 
-**Wave 3 — rebase onto trunk, full verify, submit.**
+**Wave 3 — journal segmentation, closing the torn-tail hazard (Rust).**
+Resolves this document's former "the torn-tail tolerance is one boot deep"
+open question (§3) by moving the file boundary: a run id owns an ORDERED SET
+of segments, one per process, instead of one file every process appends to.
+`selfharness::resume` gains segment naming/allocation/enumeration
+(`segment_path`, `list_segments`, `next_segment_ordinal`, `fold_run_journal`);
+`RunLease` drops its segment field (a statement about the run, not a
+process — §2) and `AcquiredLease` gains one (this process's own, freshly
+allocated every boot); `open_run_journal` folds every segment for the run id
+and appends only to the one this process was allocated. Plus two adjacent
+fixes an external review surfaced in the same file this wave already had
+open: `JournalHandler::append` now serializes the whole open+write+fsync
+under a lock shared by every clone (the old "one `write_all` is one atomic
+`write()`" argument doesn't hold on a short write) and calls `sync_data()`
+instead of the no-op `File::flush()`, so a `record` that returns `Ok` is
+actually durable; and the fold now sorts on PHYSICAL WRITE ORDER
+(segment order, then in-segment append order) rather than `seq`, since a
+foreign or mis-seeded segment could otherwise invert the result under a
+max-seq fold — `seq` stays on the wire as provenance only. Replaces
+`appending_after_a_torn_tail_is_survivable_exactly_once` with tests pinning
+the new, stronger property (several boots past a torn tail, both at the pure
+`selfharness::resume` layer and through the real `open_run_journal` seam).
