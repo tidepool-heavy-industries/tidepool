@@ -384,11 +384,17 @@ says the same thing in plain language).
   Open sub-questions, deliberately listed: (i) is `SwarmStep` a
   stdlib-fixed shape or harness-extensible (fixed is simpler; extensible
   lets a harness journal domain facts — lean fixed with one opaque payload
-  field); (ii) is the folded map injected into the harness at boot or read
-  through an effect (lean inject — resume should not be able to forget to
-  look); (iii) journal lifecycle — one file per run id, compacted or
-  deleted after the run's terminal fold (lean per-run file, retained like
-  worktrees).
+  field); (ii) SETTLED (S1-L5): injected at boot through an opt-in second
+  entry point (`resumeLoop`), selected by the driver when the boot fold is
+  non-empty; `record` stays write-only, and a harness that journals without
+  declaring `resumeLoop` is refused at boot — resume structurally cannot
+  forget to look; (iii) SETTLED (S1-L5): a run id owns a SEQUENCE of
+  segments, one per process — a resumed process opens a fresh segment,
+  never appending to a file a crashed process left (appending into a torn
+  tail merges bytes and poisons a later boot), and the fold spans all
+  segments in segment order. Every segment retained, like worktrees; no
+  truncate, rewrite, or compaction — strictly more append-only than the
+  original one-file lean.
 - **Adopt and verify, never redo blind.** The crash window between "agent
   committed" and "step journaled" is detectable deterministically: a
   worktree whose branch moved past its seed with no recorded outcome holds
