@@ -27,14 +27,19 @@ for BEHAVIOR, IDENTITY, AUTHORITY, and COMPOSITION.
   and this is exactly the cache-friendly shape (enormous shared prefix, tiny
   divergent suffix).
 - **Up** (child → parent): typed `NodeResult` values. Closures, lenses, and
-  handles ride up as live heap values held by the RUNTIME, never re-expressed
-  as prose.
+  explicitly escape-safe handles/capabilities ride up as live heap values
+  held by the RUNTIME, never re-expressed as prose (agent, node, and
+  worktree handles keep their own lexical lifetime rules and do not escape
+  by default).
 - **Into the algebra's model window**: a rendered view of the realized layer
   by default (summaries, tensions, artifact ids + intents, caller-computed
   edit previews); the ACTUAL live value mounted as an invocation-local
   binding when higher-order access buys something — calling a child-supplied
-  function, composing two children's lenses, exhaustively matching a rich
-  child-local sum.
+  function, composing two children's lenses, exhaustively matching an
+  ancestor-declared rich sum. (A genuinely child-LOCAL type cannot be
+  matched by the parent — its constructors are not in the parent's scope;
+  child-local detail escapes only behind an ancestor-known type or
+  eliminator. Type vocabulary flows down; values flow up.)
 
 ## Product boundary
 
@@ -90,9 +95,11 @@ experiment (v1 descendants always fork).
    deadline, cost. At a hard cap the driver runs a forced local finish; a
    model-proposed `Strategy` is transformed EXPLICITLY (shown transformed in
    the UI) and the transformation stamped in the receipt.
-10. **Codex is an effect, not the architecture.** Repository evidence and
-    implementation are subagent work inside a branch; recursive reasoning
-    stays in the companion.
+10. **Codex is an effect, not the architecture.** A branch CAN delegate
+    repository evidence and implementation to a coding subagent; recursive
+    reasoning stays in the companion. Whether that delegation is a direct
+    answer-window effect or a parent-mediated capability is C5's decision,
+    not assumed here.
 
 ## Core types (starting point — expected to be edited through dogfood)
 
@@ -109,20 +116,38 @@ data Branch a = Branch { brief :: ForkBrief, value :: a }
 
 data ForkBrief = ForkBrief { title :: Text, role :: BranchRole, instruction :: Text }
 
-data NodeResult s = NodeResult
-  { view      :: NodeView          -- what the algebra's prompt renders
-  , artifacts :: [Artifact s]      -- live values, held by the runtime
-  , receipt   :: NodeReceipt       -- runtime-stamped, never model-attested
+-- What the MODEL finalizes: no ids, no receipts — it cannot attest to
+-- runtime facts. (finalize goes through the JIT-typed row, so this is not
+-- subject to the subagent-schema single-constructor rule.)
+data ModelContribution s = ModelContribution
+  { view     :: NodeView
+  , proposed :: [ProposedArtifact s]
   }
+
+-- What the RUNTIME constructs around it: ids assigned, previews computed,
+-- receipt stamped — and failure representable, per locked decision 6.
+data NodeResult s
+  = NodeSucceeded
+      { contribution :: ModelContribution s
+      , artifacts    :: [Artifact s]      -- id-stamped, held live by the runtime
+      , receipt      :: NodeReceipt
+      }
+  | NodeFailed
+      { failure :: NodeFailure
+      , receipt :: NodeReceipt
+      }
 
 data Artifact s
   = EditArtifact     ArtifactId EditIntent (s -> Either EditFailure s)
   | EvidenceArtifact ArtifactId Evidence
 
-data FoldDecision = FoldDecision
+-- The algebra selects and composes child artifacts by id AND may author new
+-- ones of its own; the runtime resolves, applies, and stamps as ever.
+data FoldDecision s = FoldDecision
   { synthesis   :: ContributionText
   , selected    :: [ArtifactId]
   , composition :: CompositionOrder
+  , proposed    :: [ProposedArtifact s]
   }
 ```
 
@@ -167,11 +192,18 @@ worktrees and repository events; caller-side receipts everywhere.
   branch-order recursive driver as pure code over the existing hylo
   patterns; property tests: layer-at-a-time discovery, completion-order
   permutation invariance, failure accumulation, caps forcing local finish.
-- **C1 — the mount spike (THE de-risk).** Prove a realized layer CONTAINING
-  FUNCTIONS mounts into a window as a named binding and is called directly;
-  closure survives the child window's end; realm stays alive by
-  reachability. Everything else is composition; this is the load-bearing
-  unknown.
+- **C1 — the mount spike (THE de-risk).** Prove a function-bearing value
+  mounts into a window as a named binding, using a minimal record
+  independent of C0 (`data Mounted = Mounted { applyMounted :: Int -> Int }`).
+  The acceptance sequence exercises the whole lifetime: producer window
+  finalizes `Mounted`; producer invocation ends; consumer window receives it
+  as named `mounted`; consumer SUSPENDS on a parking effect; consumer
+  resumes and evaluates `mounted.applyMounted 41`; optionally returns a
+  closure capturing `mounted`; all handles/closures drop and root accounting
+  returns to baseline. Mounted bindings are a new ownership class: either
+  represent them through an existing counted handle class or extend the
+  invariant with a mounted-root count — never quietly preserve
+  `stowed_roots_count == parked_count` while adding non-parked roots.
 - **C2 — context/scope trees.** Frozen post-coalgebra snapshots as explicit
   harness operations; persistent declaration environments; sibling prefix
   cache alignment (receipts record snapshot digest, shared-prefix and
@@ -191,9 +223,12 @@ worktrees and repository events; caller-side receipts everywhere.
   single window). Promote surface changes only from real runs; baseline is
   the existing single-context companion at similar spend.
 
-C0 and C1 start immediately and in parallel; C2 needs C1's mechanism; C3 is
-the first product milestone; C4/C5 are independent after C3; dogfood begins
-as each lands.
+C0 and C1 start immediately and in parallel. C2 does not semantically depend
+on C1 — they share lifetime machinery, and C1 establishing the generalized
+root-ownership primitive first is efficient, not required. The real joins:
+C3 needs C0 plus C2's context trees; higher-order mounted algebra input
+needs C1; a prompt-rendered vertical slice could run without C1. C4/C5 are
+independent after C3; dogfood begins as each lands.
 
 ## Persistence (v1)
 
@@ -218,5 +253,6 @@ stability.
    type shrinks freely until persistence depends on it.
 3. When live mounting (C1) is worth it per fold — the tripwires are: calling
    a child-supplied function on new values, passing one child's function
-   into another's, exhaustive matching on a rich child-local sum. Rendered
-   views otherwise.
+   into another's, exhaustively matching an ancestor-declared rich sum, or
+   consuming child-local detail through an ancestor-known eliminator.
+   Rendered views otherwise.
