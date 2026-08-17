@@ -78,7 +78,7 @@ module Harness
 import qualified Data.List.NonEmpty as NE
 import qualified Data.Text as T
 import HarnessTypes
-import Tidepool.Aeson (object, toJSON, (.=))
+import Tidepool.Aeson (Value, object, toJSON, (.=))
 import Tidepool.Effects
   ( ContextRef
   , InvocationExit
@@ -241,12 +241,14 @@ loop st = do
     cfg = st.config
     rootKey = renderPath (NodePath [])
     coalg =
-      gatedLayer
-        cfg
-        ( fanOutCapped
-            seedDepth
-            cfg.maxFanOut
-            (depthCapped seedDepth cfg.maxDepth (allowanceCapped (discover cfg)))
+      journaled
+        ( gatedLayer
+            cfg
+            ( fanOutCapped
+                seedDepth
+                cfg.maxFanOut
+                (depthCapped seedDepth cfg.maxDepth (allowanceCapped (discover cfg)))
+            )
         )
 
 -- | The root's own seed.  Its brief IS the operator's question, so the root
@@ -364,17 +366,31 @@ foldWindow prompt = runLLMTurnFork @FoldProposal prompt
 discover :: Config -> NodeSeed -> Companion (ThoughtF NodeSeed)
 discover _cfg seed = do
   outcome <- layerWindow seed.seedRef (coalgebraPrompt seed)
-  let layer = case outcome of
-        -- A window that exited without an answer decided no layer, so this
-        -- node becomes a leaf whose ORIGIN says why (PRD 21 locked decision 6:
-        -- folded as data at its branch position, never an exception that
-        -- erases siblings).  It also minted no context of its own — which is
-        -- exactly why the verb wraps the whole pair, and why nothing here
-        -- needs a ref it does not have: a 'Th.Finish' has no children to seed.
-        Left e -> invocationFailed seed (renderInvocationExit e)
-        Right (proposal, myRef) -> layerFromProposal seed {seedRef = myRef} proposal
-  journalLayer seed layer
-  pure layer
+  -- What the WINDOW said, before any policy could refuse or amend it. Kind
+  -- 'proposed', never 'split' — see 'journaled' for why the two are different
+  -- entries rather than one.
+  record "proposed" (renderPath seed.seedPath) (proposedPayload outcome)
+  pure $ case outcome of
+    -- A window that exited without an answer decided no layer, so this node
+    -- becomes a leaf whose ORIGIN says why (PRD 21 locked decision 6: folded
+    -- as data at its branch position, never an exception that erases
+    -- siblings).  It also minted no context of its own — which is exactly why
+    -- the verb wraps the whole pair, and why nothing here needs a ref it does
+    -- not have: a 'Th.Finish' has no children to seed.
+    Left e -> invocationFailed seed (renderInvocationExit e)
+    Right (proposal, myRef) -> layerFromProposal seed {seedRef = myRef} proposal
+
+proposedPayload :: Either InvocationExit (LayerProposal, ContextRef) -> Value
+proposedPayload outcome = case outcome of
+  Left e -> object ["exit" .= renderInvocationExit e]
+  Right (ProposeFinish {finishDraft = t}, _) -> object ["finish" .= t]
+  Right (p@ProposeSplit {}, _) ->
+    object
+      [ "posture" .= show p.splitPosture
+      , "focus" .= p.splitFocus
+      , "strategy" .= show p.splitStrategy
+      , "branches" .= map (.branchTitle) p.splitBranches
+      ]
 
 -- | The seed-carried node-count cap.
 --
@@ -744,6 +760,29 @@ originBadges layer = case layer of
 -- them by the harness would be a receipt about text the harness composed
 -- rather than about the fork that actually happened.
 -- ---------------------------------------------------------------------------
+
+-- | THE OUTERMOST middleware: record the layer the driver will actually
+-- descend through, after every policy has had its say.
+--
+-- Why this is a wrapper and not a line inside 'discover': `discover` runs
+-- INNERMOST, so a layer it journaled could still be discarded by the fan-out
+-- cap or reshaped by the gate.  Journaling there made kind @split@ name
+-- children that never ran (a fan-out-capped node) and miss children the
+-- operator added (a gated one) — and §10.1 promises that a @split@ entry's
+-- child paths ARE the durable record of the tree's shape.  A resume fold
+-- reading it would have rebuilt a tree the run never had.
+--
+-- So the two facts get two kinds, and neither is a summary of the other:
+-- @proposed@ is what the WINDOW said (written by 'discover', the friction
+-- log's raw material — a model's refused 7-branch layer is exactly what C6
+-- wants to see), and @split@\/@finish@ is what the DRIVER did.  A capped node
+-- honestly carries both: a @proposed@ naming seven branches and a @finish@
+-- stamped @BudgetForced ForcedFanOut@.
+journaled :: Coalg Companion NodeSeed -> Coalg Companion NodeSeed
+journaled inner seed = do
+  layer <- inner seed
+  journalLayer seed layer
+  pure layer
 
 journalLayer :: NodeSeed -> ThoughtF NodeSeed -> Companion ()
 journalLayer seed layer = case layer of

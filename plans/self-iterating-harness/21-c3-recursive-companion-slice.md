@@ -32,10 +32,11 @@ never removed: the authored loop.
 loop :: State -> Companion State
 loop st = do
   let cfg  = st.config
-      coalg = gatedLayer cfg
-                (fanOutCapped seedDepth cfg.maxFanOut
-                  (depthCapped seedDepth cfg.maxDepth
-                    (allowanceCapped (discover cfg))))
+      coalg = journaled                       -- records what the DRIVER did (§10.1)
+                (gatedLayer cfg
+                  (fanOutCapped seedDepth cfg.maxFanOut
+                    (depthCapped seedDepth cfg.maxDepth
+                      (allowanceCapped (discover cfg)))))
   rootRef <- freezeContext          -- the root's own ref; see §4
   f <- thoughtHylo (foldNode cfg) coalg (rootSeed st rootRef)
   answer <- f (NodePath [])
@@ -220,19 +221,24 @@ data NodeSeed = NodeSeed
 Two verbs and one rule:
 
 ```haskell
-freezeContext    :: M ContextRef                            -- freezes the CALLING window's prefix
-runLLMTurnBranch :: ContextRef -> Text -> M (a, ContextRef) -- forks a child off it; returns its answer AND its own ref
+freezeContext    :: M ContextRef   -- freezes the CALLING window's prefix; not a window, never an Either
+runLLMTurnBranch :: ContextRef -> Text -> M (Either InvocationExit (a, ContextRef))
 ```
+
+The `Either` wraps the WHOLE pair, and §8 gap 3 has the reason: a window that
+never finalized minted no context of its own to hand on, so a shape that could
+represent "failed, but here is a ref" would be a lie waiting to be believed.
 
 `loop` mints the root's ref with `freezeContext` before `thoughtHylo` — that
 ref is the companion loop's own accumulated context, which is exactly what the
 root's coalgebra should fork from — so `discover` is UNIFORM: every seed that
 reaches it holds a ref, and there is no root special case to get wrong.
-`discover` is one line of substance,
-`(proposal, myRef) <- runLLMTurnBranch @LayerProposal seed.seedRef
-(coalgebraPrompt seed)`, and it re-stamps the seed with `myRef` before
+`discover` opens that one window, records what it said under `proposed`
+(§10.1), and on a `Right` re-stamps the seed with `myRef` before
 `layerFromProposal` builds the layer — so `childSeed`'s `parent.seedRef` is the
-parent's POST-coalgebra ref, the decision it just made included.
+parent's POST-coalgebra ref, the decision it just made included. On a `Left` the
+node becomes a leaf whose `FinishOrigin` is `InvocationFailed`, and no ref is
+wanted because a `Finish` has no children to seed.
 
 Consequences, all of them real:
 
@@ -284,8 +290,8 @@ retired at finalize.
 
 | # | Invocation | Window's opening context | Row it compiles against | Answer contract | Per node |
 |---|---|---|---|---|---|
-| 1 | coalgebra `runLLMTurnBranch @LayerProposal seed.seedRef` | the parent's FROZEN post-coalgebra prefix (§4) | `[AskUser, Fork, ReadState, Finalize LayerProposal]` | `(LayerProposal, ContextRef)` | exactly 1 |
-| 2 | algebra `runLLMTurnFork @FoldProposal` | an empty root, plus a RENDERED view of the realized layer in the prompt | `[AskUser, Fork, ReadState, Finalize FoldProposal]` | `FoldProposal` | exactly 1 |
+| 1 | coalgebra `runLLMTurnBranch @LayerProposal seed.seedRef` | the parent's FROZEN post-coalgebra prefix (§4) | `[AskUser, Fork, ReadState, Finalize LayerProposal]` | `Either InvocationExit (LayerProposal, ContextRef)` | exactly 1 |
+| 2 | algebra `runLLMTurnFork @FoldProposal` | an empty root, plus a RENDERED view of the realized layer in the prompt | `[AskUser, Fork, ReadState, Finalize FoldProposal]` | `Either InvocationExit FoldProposal` | exactly 1 |
 | 3 | gate `askUser @LayerApproval` | — (the OUTER row, no window) | the OUTER row | `LayerApproval` | 0..N per split (§6) |
 
 Never plain `runLLMTurn`: it lands on the driver's ONE reused per-loop answerer
@@ -459,9 +465,13 @@ built the effect-surface primitive the escalation asked for, in the shape the
 sketch named:
 
 ```haskell
-freezeContext    :: M ContextRef                            -- freezes the CALLING window's prefix
-runLLMTurnBranch :: ContextRef -> Text -> M (a, ContextRef) -- forks a child off it; returns its answer AND its own ref
+freezeContext    :: M ContextRef   -- freezes the CALLING window's prefix; not a window, never an Either
+runLLMTurnBranch :: ContextRef -> Text -> M (Either InvocationExit (a, ContextRef))
 ```
+
+The `Either` wraps the WHOLE pair, and §8 gap 3 has the reason: a window that
+never finalized minted no context of its own to hand on, so a shape that could
+represent "failed, but here is a ref" would be a lie waiting to be believed.
 
 serviced by `SelfHarnessDriver::service_outer_branch` over the existing
 `freeze_snapshot`/`fork_from_snapshot` pair — so a branched child is a REAL
@@ -650,20 +660,32 @@ cold.
 `record :: Text -> Text -> Value -> M ()` (kind, key, payload). **Key is always
 `renderPath` of the node the entry is about.** Kinds:
 
+**What the WINDOW said and what the DRIVER did are two kinds, not one.**
+`discover` runs innermost, so a layer journaled there can still be discarded by
+the fan-out cap or reshaped by the gate. Recording the proposal as `split` made
+that kind name children that never ran, and miss children an operator added —
+while `split`'s whole job below is to be the durable record of the tree's shape.
+So `discover` writes `proposed`, and the outermost `journaled` middleware writes
+`split`/`finish` after every policy has had its say. A capped node honestly
+carries both: a `proposed` naming seven branches and a `finish` stamped
+`BudgetForced ForcedFanOut`.
+
 | kind | when | payload |
 |---|---|---|
 | `turn` | once, at the start and once at the end of the root turn | `{root, config}` / `{answer, nodes, windows}` |
-| `split` | a coalgebra produced a layer with branches | `{posture, focus, strategyProposed, strategyExecuted, branches:[{path,title,role}]}` — no ref, no digest, no byte count: the branch receipts are the RUNTIME's (`SnapshotFrozen`/`BranchInvocation`, §4), re-derived by it, and a second weaker claim minted here beside them would be worse than none |
-| `finish` | a coalgebra produced `Finish` | `{origin, draft}` — `origin` is the rendered `FinishOrigin`, so budget-forced and model-chosen are distinguishable without a second kind |
+| `proposed` | a coalgebra WINDOW returned (or exited) — written by `discover`, before any policy | `{posture, focus, strategy, branches:[title]}` / `{finish}` / `{exit}`. The friction log's raw material: a model's refused seven-branch layer is exactly what C6 wants to see, and no cap may erase it |
+| `split` | the driver DESCENDED through a layer with branches | `{posture, focus, strategyProposed, strategyExecuted, branches:[{path,title,role}]}` — no ref, no digest, no byte count: the branch receipts are the RUNTIME's (`SnapshotFrozen`/`BranchInvocation`, §4), re-derived by it, and a second weaker claim minted here beside them would be worse than none |
+| `finish` | the driver ended the node locally — model-chosen, budget-forced, or a failed window | `{origin, draft}` — `origin` is the rendered `FinishOrigin`, so all three are distinguishable without a second kind |
 | `gate` | the gate was presented | `{verdict, target, note, rounds}` |
 | `fold` | an algebra folded a node | `{synthesis, tensions, children:[path], depth}` |
-| `failed` | a node folded as a failure | `{reason}` |
+| `failed` | a window exited | `{reason, window}` — `window` is `coalgebra` or `algebra`, because the two fold differently (§8 gap 3) and a node can carry both |
 
 `record` is write-only here; resume is not built (PRD 20 S1-L5 is a different
 lane, and PRD 21's persistence section explicitly defers durable branch resume).
 The kinds above are chosen so a future resume fold has what it needs — a `split`
 entry names its children's paths, which is the only durable record of the tree's
-shape — without this lane reading anything back.
+shape, and it is trustworthy for that precisely because a refused or reshaped
+layer never produces one.
 
 ### 10.2 Render — the folded answer is primary
 

@@ -1234,6 +1234,18 @@ async fn companion_tree_recurses_folds_and_contains_its_node_ids() {
         &[
             ("turn", "root"),
             ("turn", "root"),
+            // `proposed` is what each WINDOW said; `split`/`finish` is what
+            // the driver did with it. Every node that reaches `discover`
+            // emits one, so a policy that later refuses or reshapes a layer
+            // cannot erase the model's own work from the record.
+            ("proposed", "root"),
+            ("proposed", "root/1-alpha"),
+            ("proposed", &alpha_one),
+            ("proposed", &alpha_two),
+            ("proposed", &beta),
+            ("proposed", &gamma),
+            ("proposed", &delta),
+            ("proposed", &epsilon),
             ("split", "root"),
             ("split", "root/1-alpha"),
             ("finish", &alpha_one),
@@ -1341,15 +1353,35 @@ async fn companion_depth_cap_forces_a_stamped_finish() {
         "three nodes spent two windows each (coalgebra + algebra) and four spent only \
          their algebra — the cap is never itself the reason a window is spent"
     );
-    // A budget-refused node never reaches `discover`, so it journals no
-    // `split`/`finish` of its own — only the `fold` every node gets.
+    // A budget-refused node never reaches `discover`, so it has no window to
+    // have SAID anything — no `proposed` entry. But the driver still decided
+    // something for it, so it does journal a `finish`: that is exactly the
+    // split the two kinds exist to make. Reading `proposed` tells you which
+    // nodes cost a model call; reading `finish` tells you how each node ended.
+    let mut proposed_keys: Vec<&str> = run
+        .journal_kind("proposed")
+        .iter()
+        .map(|e| e.key.as_str())
+        .collect();
+    proposed_keys.sort_unstable();
+    for path in capped {
+        assert!(
+            !proposed_keys.contains(&path.as_ref()),
+            "a node refused before its coalgebra ran must journal no proposal: {path}"
+        );
+    }
+    let mut finish_keys: Vec<&str> = run
+        .journal_kind("finish")
+        .iter()
+        .map(|e| e.key.as_str())
+        .collect();
+    finish_keys.sort_unstable();
+    let mut expected_finishes: Vec<&str> = capped.to_vec();
+    expected_finishes.sort_unstable();
     assert_eq!(
-        run.journal_kind("finish")
-            .iter()
-            .map(|e| e.key.as_str())
-            .collect::<Vec<_>>(),
-        Vec::<&str>::new(),
-        "no node in this scenario finished through its own coalgebra"
+        finish_keys, expected_finishes,
+        "every budget-forced finish is journaled as what the driver did, and only \
+         the capped nodes finished at all"
     );
     for path in capped {
         assert!(
@@ -1454,16 +1486,35 @@ async fn companion_fanout_cap_refuses_the_descent() {
         2,
         "the coalgebra HAD run before the cap decided, so this node spent both windows"
     );
-    // The journal records what the coalgebra actually produced (a split naming
-    // three branches) even though the descent was then refused — the two are
-    // different facts, and the receipt keeps them apart rather than
-    // retroactively rewriting the window's own work.
+    // Two different facts, two different kinds, and the split between them is
+    // what makes the journal safe to read back. `proposed` keeps the window's
+    // own work — a layer naming three branches — because a refused proposal is
+    // exactly what the friction log wants. `split` records what the driver
+    // actually descended through, and a capped node descended through nothing,
+    // so it emits `finish` instead. §10.1 promises a `split` entry's child
+    // paths ARE the durable record of the tree's shape; emitting one here
+    // would name three children that never ran and hand a future resume fold
+    // a tree the run never had.
     assert_eq!(
-        run.journal_kind("split")
+        run.journal_kind("proposed")
             .iter()
             .map(|e| e.key.as_str())
             .collect::<Vec<_>>(),
-        vec!["root"]
+        vec!["root"],
+        "the refused proposal is still recorded as what the window said"
+    );
+    assert!(
+        run.journal_kind("split").is_empty(),
+        "a layer the fan-out cap refused was never descended through, so nothing \
+         may be journaled as a split naming children that never ran"
+    );
+    assert_eq!(
+        run.journal_kind("finish")
+            .iter()
+            .map(|e| e.key.as_str())
+            .collect::<Vec<_>>(),
+        vec!["root"],
+        "what the driver actually did is a forced finish"
     );
 }
 
