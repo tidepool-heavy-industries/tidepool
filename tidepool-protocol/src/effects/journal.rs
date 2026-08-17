@@ -74,7 +74,7 @@ pub fn journal() -> Effect {
         }],
         helpers: vec![Helper {
             name: "record",
-            ctor: "RecordStep",
+            ctor: Some("RecordStep"),
             doc: &[
                 "Append one durable journal entry. `kind` and `key` are",
                 "caller-chosen labels; `payload` is an opaque JSON value. Flushed",

@@ -103,10 +103,10 @@ fn worktree_constructor_signatures_are_pinned() {
     );
 }
 
-/// The three helpers representable as thin wrappers over one verb —
-/// `createWorktree`, `lookupWorktree`, `listWorktrees` — copied verbatim from
-/// the macro's `raw` lines, newline-joined exactly as `helper_text!` joins
-/// them.
+/// The four representable helpers — the three thin wrappers over one verb
+/// (`createWorktree`, `lookupWorktree`, `listWorktrees`) plus the one pure
+/// projection (`worktreeId`) — copied verbatim from the macro's `raw` lines,
+/// newline-joined exactly as `helper_text!` joins them.
 #[test]
 fn worktree_helper_texts_are_pinned() {
     let wt = worktree();
@@ -134,34 +134,46 @@ fn worktree_helper_texts_are_pinned() {
                 "listWorktrees :: M [WorktreeSummary]\n",
                 "listWorktrees = send WorktreeList >>= liftEither",
             ),
+            concat!(
+                "-- | The durable identity of a managed worktree. Pure: the handle\n",
+                "-- already carries its receipt, so this reads no git state.\n",
+                "worktreeId :: WorktreeHandle -> WorktreeId\n",
+                "worktreeId h = h.handleReceipt.treeId",
+            ),
         ]
     );
 }
 
-/// The honest record of the gap: eleven of the macro's fourteen helpers are
-/// NOT thin wrappers over one verb, so they are not in the schema at all —
-/// excluded rather than smuggled in as raw strings, per PRD 22's first hard
-/// rule. This is a SEPARATE test from the pinned three above because it
-/// asserts an absence, not a rendering.
+/// The honest record of the gap: ten of the macro's fourteen helpers are NOT
+/// representable, so they are not in the schema at all — excluded rather than
+/// smuggled in as raw strings, per PRD 22's first hard rule. They are
+/// DEFINITIONS in `haskell/lib/Tidepool/Worktree.hs`, reached from an eval
+/// through this effect's `extra_imports` row. This is a SEPARATE test from the
+/// pinned four above because it asserts an absence, not a rendering.
 ///
-/// Why each of the eleven is unrepresentable:
+/// Why each of the ten is unrepresentable:
 /// - `fromCurrentRepository`, `fromRef`, `fromWorktree`, `allowDirtySnapshot`
 ///   — four build (or update) a `WorktreeSpec` purely; three of those
 ///   construct one from scratch and the fourth (`allowDirtySnapshot`) is a
 ///   record update, none of which is a call to `send`.
-/// - `worktreeId` — a field-projection chain (`h.handleReceipt.treeId`), not
-///   a verb call at all.
 /// - `worktreeBranch`, `worktreeHead` — each adapts its argument through
 ///   `worktreeId h` before sending, so the wrapper is not thin over the verb's
 ///   own argument.
 /// - `renderWorktreeId`, `renderGitOid`, `renderBranchName` — each unwraps an
 ///   identity newtype; no `send` involved.
 /// - `renderWorktreeError` — a ten-arm string-formatting program over
-///   `WorktreeError`'s variants, the largest of the eleven.
+///   `WorktreeError`'s variants, the largest of the ten.
 ///
-/// 3 representable + 11 unrepresentable = 14, the macro's total helper count.
+/// `worktreeId` is NOT here, and its absence from this list is the finding
+/// §11.9 did not have: it is a field-projection chain rather than a verb call,
+/// so the census put it among the relocations — but the generated module's own
+/// RepoEvent helpers call it, and that module cannot import
+/// `Tidepool.Worktree`. It is represented as
+/// `HelperBody::Projection` instead, which is why the count here is ten.
+///
+/// 4 representable + 10 unrepresentable = 14, the macro's total helper count.
 #[test]
-fn worktree_eleven_helpers_are_not_schema_representable() {
+fn worktree_ten_helpers_are_not_schema_representable() {
     const NOT_REPRESENTABLE: &[&str] = &[
         "fromCurrentRepository",
         "fromRef",
@@ -169,19 +181,19 @@ fn worktree_eleven_helpers_are_not_schema_representable() {
         "allowDirtySnapshot",
         "worktreeBranch",
         "worktreeHead",
-        "worktreeId",
         "renderWorktreeId",
         "renderGitOid",
         "renderBranchName",
         "renderWorktreeError",
     ];
-    assert_eq!(NOT_REPRESENTABLE.len(), 11);
+    assert_eq!(NOT_REPRESENTABLE.len(), 10);
+    assert_eq!(NOT_REPRESENTABLE.len() + worktree().helpers.len(), 14);
 
     let wt = worktree();
     for name in NOT_REPRESENTABLE {
         assert!(
             !wt.helpers.iter().any(|h| h.name == *name),
-            "{name} is one of the eleven non-representable helpers and must NOT \
+            "{name} is one of the ten non-representable helpers and must NOT \
              appear in the schema's helper list"
         );
     }
@@ -207,9 +219,13 @@ fn worktree_remaining_decl_fields_are_pinned() {
         )
     );
 
-    // The macro's `extra_imports_for!` has no `(Worktree)` arm, so it falls
-    // through to the catch-all `&[]` arm.
-    assert!(wt.extra_imports.is_empty());
+    // The one row that carries the ten relocated helpers back onto the eval
+    // surface: they are now DEFINED in `haskell/lib/Tidepool/Worktree.hs`, and
+    // a row containing Worktree imports that module. Matches
+    // `extra_imports_for!(Worktree)` in `tidepool-mcp/src/effect_defs.rs`
+    // exactly — that agreement is what `worktree_decl_matches_the_schema_exactly`
+    // proves against the live macro.
+    assert_eq!(wt.extra_imports.to_vec(), vec!["import Tidepool.Worktree"]);
     assert!(wt.prompt_card.is_none());
     assert!(wt.type_params.is_empty());
     assert!(wt.default_row_args.is_empty());

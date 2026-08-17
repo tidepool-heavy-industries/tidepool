@@ -221,6 +221,17 @@ macro_rules! extra_imports_for {
     (AskUser) => {
         &["import Tidepool.Form"]
     };
+    // Eleven of Worktree's fourteen authored names are not representable as
+    // contract helpers (scaffold doc §11.9) and are DEFINED in
+    // `haskell/lib/Tidepool/Worktree.hs`. This row is what keeps the eval
+    // surface identical anyway: a row carrying Worktree imports that module,
+    // so all fourteen names resolve with nothing authored differently. The
+    // three that stayed in the contract are re-exported by the same module,
+    // resolving to the one `Tidepool.Effects` Name — a re-export, not a
+    // second definition, so there is no ambiguous occurrence.
+    (Worktree) => {
+        &["import Tidepool.Worktree"]
+    };
     // Journal was migrated to the `tidepool-protocol` schema (PRD 22 phase 2);
     // its `extra_imports` (`import qualified Tidepool.Resume as Resume` — the
     // READ half of the run journal, PRD 20 S1-L5) is schema data now, emitted
@@ -1861,24 +1872,25 @@ macro_rules! worktree_effect_def {
                   args { treeId: "WorktreeId" as tidepool_bridge_effects::WtWorktreeId },
                   ret "GitOid", errors WorktreeError },
             ],
+            // Four helpers live in the contract: the three thin one-verb
+            // wrappers, plus `worktreeId`. The other ten authored names
+            // (`fromCurrentRepository`, `fromRef`, `fromWorktree`,
+            // `allowDirtySnapshot`, `worktreeBranch`, `worktreeHead`,
+            // `renderWorktreeId`, `renderGitOid`, `renderBranchName`,
+            // `renderWorktreeError`) are DEFINITIONS in
+            // `haskell/lib/Tidepool/Worktree.hs` — library code, not contract —
+            // and reach an eval through this effect's
+            // `extra_imports_for!(Worktree)` row. See the scaffold doc §11.9.
+            //
+            // `worktreeId` stays HERE and the reason is structural, not
+            // aesthetic: `event_effect_def!`'s `commit` and `headChanged`
+            // helpers call it, and they are emitted into this same generated
+            // module — which cannot import `Tidepool.Worktree`, because that
+            // module imports IT. Relocating it breaks the generated module's own
+            // compile for every row carrying RepoEvent, and defining it in both
+            // places gives an eval an ambiguous occurrence. It is represented in
+            // the schema as `HelperBody::Projection`.
             helpers [
-                { raw ["-- | Seed a managed worktree from the repository Tidepool is running",
-                       "-- against. Clean-by-default: a dirty source is REFUSED unless the spec",
-                       "-- is passed through 'allowDirtySnapshot'.",
-                       "fromCurrentRepository :: Text -> WorktreeSpec",
-                       "fromCurrentRepository lbl = WorktreeSpec SourceCurrentRepository lbl RequireClean"] },
-                { raw ["-- | Seed from an explicit ref (branch, tag, remote ref, or raw OID).",
-                       "fromRef :: GitRef -> Text -> WorktreeSpec",
-                       "fromRef r lbl = WorktreeSpec (SourceRef r) lbl RequireClean"] },
-                { raw ["-- | Seed from another managed worktree's current HEAD. This is how a",
-                       "-- reviewer gets its own isolated tree off the branch it is reviewing.",
-                       "fromWorktree :: WorktreeHandle -> Text -> WorktreeSpec",
-                       "fromWorktree h lbl = WorktreeSpec (SourceWorktree (worktreeId h)) lbl RequireClean"] },
-                { raw ["-- | Opt IN to snapshotting a dirty source. Spelled at the call site so a",
-                       "-- reader of the resident can see that a synthetic commit was taken; it",
-                       "-- never alters the source branch, HEAD, index, or working-tree bytes.",
-                       "allowDirtySnapshot :: WorktreeSpec -> WorktreeSpec",
-                       "allowDirtySnapshot s = s { specDirtyPolicy = AllowDirtySnapshot }"] },
                 { raw ["-- | Create a managed worktree. `Left (SourceDirty summary)` when the",
                        "-- source is dirty and the spec did not opt in; case-match the error",
                        "-- rather than unwrapping if you mean to handle it.",
@@ -1893,56 +1905,10 @@ macro_rules! worktree_effect_def {
                        "-- with `present = False` rather than failing the whole listing.",
                        "listWorktrees :: M [WorktreeSummary]",
                        "listWorktrees = send WorktreeList >>= liftEither"] },
-                { raw ["-- | The managed branch this worktree is on, read fresh from git.",
-                       "worktreeBranch :: WorktreeHandle -> M BranchName",
-                       "worktreeBranch h = send (WorktreeBranchOf (worktreeId h)) >>= liftEither"] },
-                { raw ["-- | This worktree's CURRENT @HEAD@, read fresh from git right now.",
-                       "--",
-                       "-- Deliberately none of the three things it could be confused with: it",
-                       "-- is not the handle's recorded @sourceHead@ (the commit the managed",
-                       "-- branch was rooted at), and it is not the event monitor's",
-                       "-- last-observed baseline.  The whole purpose is to see what the",
-                       "-- monitor did NOT.",
-                       "--",
-                       "-- It exists for the gap a resident spanning cycles has to close",
-                       "-- itself.  A subscription never replays, and it lives only for its",
-                       "-- cycle, so @HEAD@ can move after one cycle unregisters and before the",
-                       "-- next one registers.  A resident closes that window in ORDINARY",
-                       "-- AUTHORED CODE: compare @worktreeHead tree@ against the head it",
-                       "-- checkpointed, act on any difference, and only then register live",
-                       "-- reactions with 'withHandler'.",
-                       "--",
-                       "-- That is a reinforcement of no-replay, not a loophole in it.  The",
-                       "-- journal stays diagnostic rather than quietly becoming a callback",
-                       "-- replay mechanism, because the resident — which knows what it already",
-                       "-- acted on — decides what the gap meant, rather than the runtime",
-                       "-- guessing on its behalf.",
-                       "worktreeHead :: WorktreeHandle -> M GitOid",
-                       "worktreeHead h = send (WorktreeHeadOf (worktreeId h)) >>= liftEither"] },
                 { raw ["-- | The durable identity of a managed worktree. Pure: the handle",
                        "-- already carries its receipt, so this reads no git state.",
                        "worktreeId :: WorktreeHandle -> WorktreeId",
                        "worktreeId h = h.handleReceipt.treeId"] },
-                { raw ["renderWorktreeId :: WorktreeId -> Text",
-                       "renderWorktreeId (WorktreeId t) = t"] },
-                { raw ["renderGitOid :: GitOid -> Text",
-                       "renderGitOid (GitOid t) = t"] },
-                { raw ["renderBranchName :: BranchName -> Text",
-                       "renderBranchName (BranchName t) = t"] },
-                { raw ["-- | A one-line, operator-readable rendering of a worktree failure.",
-                       "-- Case-match the constructor when you mean to BRANCH on the failure;",
-                       "-- this is for receipts and logs.",
-                       "renderWorktreeError :: WorktreeError -> Text",
-                       "renderWorktreeError (SourceDirty d) = \"source repository is dirty: \" <> show (length d.staged) <> \" staged, \" <> show (length d.unstaged) <> \" unstaged, \" <> show (length d.untracked) <> \" untracked\"",
-                       "renderWorktreeError (NotARepository p) = \"not a git repository: \" <> p",
-                       "renderWorktreeError (WorktreeLost i) = \"managed worktree \" <> renderWorktreeId i <> \" is registered but missing on disk\"",
-                       "renderWorktreeError (DirtySubmoduleUnsupported p) = \"dirty submodule is unsupported in v1: \" <> p",
-                       "renderWorktreeError (SourceOperationInProgress k) = \"source repository has an operation in progress: \" <> show k",
-                       "renderWorktreeError (WorktreeBusy i holder) = \"worktree \" <> renderWorktreeId i <> \" is already bound to agent \" <> holder",
-                       "renderWorktreeError (GitFailure r) = \"git \" <> T.intercalate \" \" r.gitArgs <> \" failed: \" <> T.strip r.gitStderr",
-                       "renderWorktreeError (WorktreeNotRegistered i) = \"no managed worktree registered with id \" <> renderWorktreeId i",
-                       "renderWorktreeError (InvalidRegistryRoot root inside) = \"registry root \" <> root <> \" resolves inside the git working tree at \" <> inside <> \" — the registry must live outside every source repository\"",
-                       "renderWorktreeError (StorageFailure p d) = \"tidepool storage failure at \" <> p <> \": \" <> d"] },
             ],
         }
     };

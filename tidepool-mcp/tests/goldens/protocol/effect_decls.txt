@@ -1623,132 +1623,43 @@ instance ToJSON WorktreeError where
 
 -- end type_defs --
 
--- extra_imports (0 items) --
+-- extra_imports (1 items) --
+-- extra_imports[0] (24 bytes) --
+import Tidepool.Worktree
+-- end extra_imports[0] --
+
 -- end extra_imports --
 
--- helpers (14 items) --
--- helpers[0] (311 bytes) --
--- | Seed a managed worktree from the repository Tidepool is running
--- against. Clean-by-default: a dirty source is REFUSED unless the spec
--- is passed through 'allowDirtySnapshot'.
-fromCurrentRepository :: Text -> WorktreeSpec
-fromCurrentRepository lbl = WorktreeSpec SourceCurrentRepository lbl RequireClean
--- end helpers[0] --
-
--- helpers[1] (171 bytes) --
--- | Seed from an explicit ref (branch, tag, remote ref, or raw OID).
-fromRef :: GitRef -> Text -> WorktreeSpec
-fromRef r lbl = WorktreeSpec (SourceRef r) lbl RequireClean
--- end helpers[1] --
-
--- helpers[2] (278 bytes) --
--- | Seed from another managed worktree's current HEAD. This is how a
--- reviewer gets its own isolated tree off the branch it is reviewing.
-fromWorktree :: WorktreeHandle -> Text -> WorktreeSpec
-fromWorktree h lbl = WorktreeSpec (SourceWorktree (worktreeId h)) lbl RequireClean
--- end helpers[2] --
-
--- helpers[3] (333 bytes) --
--- | Opt IN to snapshotting a dirty source. Spelled at the call site so a
--- reader of the resident can see that a synthetic commit was taken; it
--- never alters the source branch, HEAD, index, or working-tree bytes.
-allowDirtySnapshot :: WorktreeSpec -> WorktreeSpec
-allowDirtySnapshot s = s { specDirtyPolicy = AllowDirtySnapshot }
--- end helpers[3] --
-
--- helpers[4] (303 bytes) --
+-- helpers (4 items) --
+-- helpers[0] (303 bytes) --
 -- | Create a managed worktree. `Left (SourceDirty summary)` when the
 -- source is dirty and the spec did not opt in; case-match the error
 -- rather than unwrapping if you mean to handle it.
 createWorktree :: WorktreeSpec -> M (Either WorktreeError WorktreeHandle)
 createWorktree = send . WorktreeCreate
--- end helpers[4] --
+-- end helpers[0] --
 
--- helpers[5] (309 bytes) --
+-- helpers[1] (309 bytes) --
 -- | Look a retained worktree up by durable id. Survives restart:
 -- resolution reads on-disk registry state, not process memory.
 -- `Left (WorktreeLost i)` when it is registered but gone from disk.
 lookupWorktree :: WorktreeId -> M (Either WorktreeError WorktreeHandle)
 lookupWorktree = send . WorktreeLookup
--- end helpers[5] --
+-- end helpers[1] --
 
--- helpers[6] (221 bytes) --
+-- helpers[2] (221 bytes) --
 -- | Every registered worktree, present or lost. A lost tree is listed
 -- with `present = False` rather than failing the whole listing.
 listWorktrees :: M [WorktreeSummary]
 listWorktrees = send WorktreeList >>= liftEither
--- end helpers[6] --
+-- end helpers[2] --
 
--- helpers[7] (187 bytes) --
--- | The managed branch this worktree is on, read fresh from git.
-worktreeBranch :: WorktreeHandle -> M BranchName
-worktreeBranch h = send (WorktreeBranchOf (worktreeId h)) >>= liftEither
--- end helpers[7] --
-
--- helpers[8] (1216 bytes) --
--- | This worktree's CURRENT @HEAD@, read fresh from git right now.
---
--- Deliberately none of the three things it could be confused with: it
--- is not the handle's recorded @sourceHead@ (the commit the managed
--- branch was rooted at), and it is not the event monitor's
--- last-observed baseline.  The whole purpose is to see what the
--- monitor did NOT.
---
--- It exists for the gap a resident spanning cycles has to close
--- itself.  A subscription never replays, and it lives only for its
--- cycle, so @HEAD@ can move after one cycle unregisters and before the
--- next one registers.  A resident closes that window in ORDINARY
--- AUTHORED CODE: compare @worktreeHead tree@ against the head it
--- checkpointed, act on any difference, and only then register live
--- reactions with 'withHandler'.
---
--- That is a reinforcement of no-replay, not a loophole in it.  The
--- journal stays diagnostic rather than quietly becoming a callback
--- replay mechanism, because the resident — which knows what it already
--- acted on — decides what the gap meant, rather than the runtime
--- guessing on its behalf.
-worktreeHead :: WorktreeHandle -> M GitOid
-worktreeHead h = send (WorktreeHeadOf (worktreeId h)) >>= liftEither
--- end helpers[8] --
-
--- helpers[9] (206 bytes) --
+-- helpers[3] (206 bytes) --
 -- | The durable identity of a managed worktree. Pure: the handle
 -- already carries its receipt, so this reads no git state.
 worktreeId :: WorktreeHandle -> WorktreeId
 worktreeId h = h.handleReceipt.treeId
--- end helpers[9] --
-
--- helpers[10] (74 bytes) --
-renderWorktreeId :: WorktreeId -> Text
-renderWorktreeId (WorktreeId t) = t
--- end helpers[10] --
-
--- helpers[11] (58 bytes) --
-renderGitOid :: GitOid -> Text
-renderGitOid (GitOid t) = t
--- end helpers[11] --
-
--- helpers[12] (74 bytes) --
-renderBranchName :: BranchName -> Text
-renderBranchName (BranchName t) = t
--- end helpers[12] --
-
--- helpers[13] (1462 bytes) --
--- | A one-line, operator-readable rendering of a worktree failure.
--- Case-match the constructor when you mean to BRANCH on the failure;
--- this is for receipts and logs.
-renderWorktreeError :: WorktreeError -> Text
-renderWorktreeError (SourceDirty d) = "source repository is dirty: " <> show (length d.staged) <> " staged, " <> show (length d.unstaged) <> " unstaged, " <> show (length d.untracked) <> " untracked"
-renderWorktreeError (NotARepository p) = "not a git repository: " <> p
-renderWorktreeError (WorktreeLost i) = "managed worktree " <> renderWorktreeId i <> " is registered but missing on disk"
-renderWorktreeError (DirtySubmoduleUnsupported p) = "dirty submodule is unsupported in v1: " <> p
-renderWorktreeError (SourceOperationInProgress k) = "source repository has an operation in progress: " <> show k
-renderWorktreeError (WorktreeBusy i holder) = "worktree " <> renderWorktreeId i <> " is already bound to agent " <> holder
-renderWorktreeError (GitFailure r) = "git " <> T.intercalate " " r.gitArgs <> " failed: " <> T.strip r.gitStderr
-renderWorktreeError (WorktreeNotRegistered i) = "no managed worktree registered with id " <> renderWorktreeId i
-renderWorktreeError (InvalidRegistryRoot root inside) = "registry root " <> root <> " resolves inside the git working tree at " <> inside <> " — the registry must live outside every source repository"
-renderWorktreeError (StorageFailure p d) = "tidepool storage failure at " <> p <> ": " <> d
--- end helpers[13] --
+-- end helpers[3] --
 
 -- end helpers --
 

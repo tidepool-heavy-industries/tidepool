@@ -27,12 +27,12 @@ import Tidepool.Effects
   , SpawnOutcome (..)
   , SpawnReceipt (..)
   , WorktreeId (..)
-  , fromCurrentRepository
   , renderSpawnError
   , spawnSpec
   , spawnSpecIn
   )
 import Tidepool.Prelude hiding (render)
+import Tidepool.Worktree (fromCurrentRepository)
 
 import Tidepool.Harness (Harness, runLLMTurn)
 

@@ -13,13 +13,15 @@
 //! flip is a separate, later branch; this branch builds and PROVES the
 //! capability without touching a consuming crate. See the scaffold doc §11.8.
 //!
-//! **Helper representability.** Fourteen helpers live in the hand-written
-//! registry, all fourteen using the `raw` escape hatch. Three are thin wrappers
-//! over one verb and are described here. Eleven are not, and are NOT smuggled in
-//! as strings — §11 of the scaffold doc records the per-helper verdict and what
-//! the flip lane has to do about them. That gap is a real finding, not a
-//! shortfall of effort: the alternative was embedding a Haskell expression
-//! language in the schema, which is the hatch under a different name.
+//! **Helper representability.** Fourteen helpers lived in the hand-written
+//! registry, all fourteen using the `raw` escape hatch. FOUR are described here:
+//! three thin wrappers over one verb, plus `worktreeId`, the one pure projection
+//! ([`crate::schema::HelperBody::Projection`]). The other ten are NOT smuggled
+//! in as strings — they are DEFINITIONS in `haskell/lib/Tidepool/Worktree.hs`,
+//! reachable from an eval through this effect's `extra_imports` row, and §11.9
+//! of the scaffold doc records the per-helper verdict. That gap is a real
+//! finding, not a shortfall of effort: the alternative was embedding a Haskell
+//! expression language in the schema, which is the hatch under a different name.
 
 use crate::hs::HsType;
 use crate::schema::{
@@ -98,7 +100,15 @@ pub fn worktree() -> Effect {
         type_params: &[],
         default_row_args: &[],
         helpers_row_polymorphic: false,
-        extra_imports: &[],
+        // Eleven of the fourteen authored names are not schema-representable
+        // (see the module doc and §11.9) and are DEFINED in
+        // `haskell/lib/Tidepool/Worktree.hs`. This row is what makes that
+        // relocation invisible to an eval author: a row carrying Worktree
+        // imports that module, so all fourteen names resolve exactly as they
+        // did when the generated `Tidepool.Effects` defined them. The three
+        // helpers below are re-exported by the same module, so they resolve to
+        // one Name and cannot be an ambiguous occurrence.
+        extra_imports: &["import Tidepool.Worktree"],
         type_defs: type_defs(),
         // Typed per-verb failure (#335): a dirty source, a lost tree, or a busy
         // worktree is DATA an author cases on, not an eval abort. These are PRD
@@ -737,20 +747,24 @@ fn tree_id_arg() -> Arg {
     }
 }
 
-/// The THREE representable helpers.
+/// The FOUR representable helpers: three thin one-verb wrappers, plus the one
+/// pure projection.
 ///
-/// Eleven more live in the hand-written registry and are not thin wrappers over
-/// one verb. They are excluded rather than smuggled in as strings — the
-/// per-helper verdict and what a later lane would need to add is the table in
-/// the scaffold doc §11. Because the Haskell surface
-/// (`haskell/lib/Tidepool/Worktree.hs`) re-exports all fourteen names, that
-/// exclusion BLOCKS the flip until the eleven have a home; §11 records the
-/// recommendation.
+/// Ten more live in `haskell/lib/Tidepool/Worktree.hs` as DEFINITIONS. They are
+/// excluded rather than smuggled in as strings — the per-helper verdict is the
+/// table in the scaffold doc §11.9, and the `extra_imports` row above is what
+/// keeps them on the eval surface.
+///
+/// `worktreeId` is the one §11.9 listed among the relocations that could not
+/// go, and the reason is structural: the RepoEvent helpers `commit` and
+/// `headChanged` CALL it from inside the same generated `Tidepool.Effects`
+/// module, which cannot import `Tidepool.Worktree` (that module imports IT).
+/// See [`HelperBody::Projection`], where the whole argument lives.
 fn helpers() -> Vec<Helper> {
     vec![
         Helper {
             name: "createWorktree",
-            ctor: "WorktreeCreate",
+            ctor: Some("WorktreeCreate"),
             doc: &[
                 "Create a managed worktree. `Left (SourceDirty summary)` when the",
                 "source is dirty and the spec did not opt in; case-match the error",
@@ -760,7 +774,7 @@ fn helpers() -> Vec<Helper> {
         },
         Helper {
             name: "lookupWorktree",
-            ctor: "WorktreeLookup",
+            ctor: Some("WorktreeLookup"),
             doc: &[
                 "Look a retained worktree up by durable id. Survives restart:",
                 "resolution reads on-disk registry state, not process memory.",
@@ -770,12 +784,26 @@ fn helpers() -> Vec<Helper> {
         },
         Helper {
             name: "listWorktrees",
-            ctor: "WorktreeList",
+            ctor: Some("WorktreeList"),
             doc: &[
                 "Every registered worktree, present or lost. A lost tree is listed",
                 "with `present = False` rather than failing the whole listing.",
             ],
             body: HelperBody::NullaryLiftEither,
+        },
+        Helper {
+            name: "worktreeId",
+            ctor: None,
+            doc: &[
+                "The durable identity of a managed worktree. Pure: the handle",
+                "already carries its receipt, so this reads no git state.",
+            ],
+            body: HelperBody::Projection {
+                binder: "h",
+                fields: &["handleReceipt", "treeId"],
+                arg: HsType::Named("WorktreeHandle"),
+                ret: HsType::Named("WorktreeId"),
+            },
         },
     ]
 }

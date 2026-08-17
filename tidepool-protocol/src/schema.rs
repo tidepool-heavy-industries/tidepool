@@ -247,10 +247,36 @@ impl Effect {
         }
 
         for h in &self.helpers {
-            let Some(v) = self.verb(h.ctor) else {
+            // The pure shape: no verb to check against, but its own two
+            // invariants — a projection with no fields is not a projection, and
+            // a helper that names a verb it does not use is a misleading schema.
+            if let HelperBody::Projection { fields, .. } = &h.body {
+                if fields.is_empty() {
+                    errs.push(format!(
+                        "{}: helper {} projects no fields, so it is not a projection",
+                        self.name, h.name
+                    ));
+                }
+                if h.ctor.is_some() {
+                    errs.push(format!(
+                        "{}: helper {} is a pure projection but names a verb; \
+                         a projection wraps none",
+                        self.name, h.name
+                    ));
+                }
+                continue;
+            }
+            let Some(ctor) = h.ctor else {
                 errs.push(format!(
-                    "{}: helper {} wraps `{}`, which is not a verb of this effect",
-                    self.name, h.name, h.ctor
+                    "{}: helper {} names no verb, but only a pure projection may",
+                    self.name, h.name
+                ));
+                continue;
+            };
+            let Some(v) = self.verb(ctor) else {
+                errs.push(format!(
+                    "{}: helper {} wraps `{ctor}`, which is not a verb of this effect",
+                    self.name, h.name
                 ));
                 continue;
             };
@@ -512,15 +538,21 @@ impl ErrorAdt {
 /// helper restates a signature the constructor already implies, and the two can
 /// disagree with nothing noticing; here the constructor is the only source.
 ///
-/// A helper that is not a thin wrapper over one verb is not representable, and
-/// stays hand-written OUTSIDE the contract until its lane makes it a deliberate
+/// [`HelperBody::Projection`] is the one shape that wraps NO verb, and it
+/// therefore declares its own two types — see that variant for why it exists
+/// and why it is not the thin end of an expression language.
+///
+/// A helper that is neither of those is not representable, and stays
+/// hand-written OUTSIDE the contract until its lane makes it a deliberate
 /// schema feature. That exclusion is the no-raw-hatch rule applied honestly.
 #[derive(Clone, Debug)]
 pub struct Helper {
     /// The Haskell function name: `"run"`.
     pub name: &'static str,
-    /// The verb it wraps.
-    pub ctor: &'static str,
+    /// The verb it wraps, or `None` for a [`HelperBody::Projection`] — a pure
+    /// helper wraps nothing, and a sentinel constructor name here would be a
+    /// lie the validator could not catch.
+    pub ctor: Option<&'static str>,
     /// Haddock lines, WITHOUT their `-- |` / `-- ` prefixes. EMPTY is allowed
     /// and means no comment block at all — which is why Exec's `runIn` and
     /// `runArgv` needed the raw escape hatch under the old grammar, and is the
@@ -555,6 +587,40 @@ pub enum HelperBody {
     /// argument through a pure projection, so they would stay unrepresentable
     /// even with those variants. Adding them now would be speculation.
     NullaryLiftEither,
+    /// `v h = h.f1.f2` — a PURE record-field projection over the helper's one
+    /// argument. No verb, no `send`, no effect: the argument already carries the
+    /// value, so the helper reads no state. Declares both its types, because
+    /// there is no constructor to derive them from.
+    ///
+    /// **Why this exists, since §11.9's census ruled it out.** `worktreeId` was
+    /// listed among the eleven Worktree helpers to relocate into
+    /// `haskell/lib/Tidepool/Worktree.hs`, and it is the one that cannot go:
+    /// the RepoEvent helpers `commit` and `headChanged` CALL it, and they are
+    /// emitted into the same generated `Tidepool.Effects` module — which cannot
+    /// import `Tidepool.Worktree`, because that module imports IT. Relocating
+    /// `worktreeId` breaks the generated module's own compile, for every row
+    /// carrying RepoEvent. Defining it in both places instead would give an eval
+    /// (which imports both modules unqualified) an ambiguous occurrence, i.e.
+    /// exactly the duplication this migration exists to delete. So the choice
+    /// was to represent it or to block the lane, and §9 step 2 sanctions the
+    /// former: a deliberate schema feature, documented where it is added.
+    ///
+    /// **It is a shape and stays one.** A binder, an ordered list of field
+    /// names, and the two types the projection connects. No application, no
+    /// nesting, no constructors, no operators — the closed Haskell EXPRESSION
+    /// AST §11.9 rejected is still rejected, and the other ten helpers stay
+    /// unrepresentable under this variant exactly as they were.
+    Projection {
+        /// The bound parameter: `"h"`.
+        binder: &'static str,
+        /// The field names to project, outermost first: `["handleReceipt",
+        /// "treeId"]` renders `h.handleReceipt.treeId`. Must be non-empty.
+        fields: &'static [&'static str],
+        /// The argument's Haskell type.
+        arg: HsType,
+        /// The projected result's Haskell type.
+        ret: HsType,
+    },
 }
 
 impl Helper {
@@ -565,18 +631,41 @@ impl Helper {
     /// [`Effect::validate`] reports that as a schema error first.
     #[must_use]
     pub fn render(&self, eff: &Effect) -> String {
-        let verb = eff.verb(self.ctor).unwrap_or_else(|| {
-            panic!(
-                "{}: helper {} wraps unknown {}",
-                eff.name, self.name, self.ctor
-            )
-        });
         let mut out = String::new();
         for (i, line) in self.doc.iter().enumerate() {
             out.push_str(if i == 0 { "-- | " } else { "-- " });
             out.push_str(line);
             out.push('\n');
         }
+        // The one shape that wraps no verb: both types are declared, and the
+        // body is a field chain rather than a `send`.
+        if let HelperBody::Projection {
+            binder,
+            fields,
+            arg,
+            ret,
+        } = &self.body
+        {
+            out.push_str(&format!(
+                "{} :: {} -> {}\n{} {} = {}",
+                self.name,
+                arg.render(),
+                ret.render(),
+                self.name,
+                binder,
+                std::iter::once((*binder).to_string())
+                    .chain(fields.iter().map(|f| (*f).to_string()))
+                    .collect::<Vec<_>>()
+                    .join(".")
+            ));
+            return out;
+        }
+        let ctor = self
+            .ctor
+            .unwrap_or_else(|| panic!("{}: helper {} declares no verb", eff.name, self.name));
+        let verb = eff
+            .verb(ctor)
+            .unwrap_or_else(|| panic!("{}: helper {} wraps unknown {ctor}", eff.name, self.name));
         let args: Vec<HsType> = verb.args.iter().map(|a| a.ty.clone()).collect();
         // `liftEither` consumes the `Either`, so the helper's result is the
         // verb's SUCCESS type. Every other shape forwards the verb's result as
@@ -592,16 +681,13 @@ impl Helper {
         ));
         match &self.body {
             HelperBody::Nullary => {
-                out.push_str(&format!("{} = send {}", self.name, self.ctor));
+                out.push_str(&format!("{} = send {ctor}", self.name));
             }
             HelperBody::NullaryLiftEither => {
-                out.push_str(&format!(
-                    "{} = send {} >>= liftEither",
-                    self.name, self.ctor
-                ));
+                out.push_str(&format!("{} = send {ctor} >>= liftEither", self.name));
             }
             HelperBody::Pointfree => {
-                out.push_str(&format!("{} = send . {}", self.name, self.ctor));
+                out.push_str(&format!("{} = send . {ctor}", self.name));
             }
             HelperBody::Applied(params) => {
                 out.push_str(self.name);
@@ -610,13 +696,15 @@ impl Helper {
                     out.push_str(p);
                 }
                 out.push_str(" = send (");
-                out.push_str(self.ctor);
+                out.push_str(ctor);
                 for p in *params {
                     out.push(' ');
                     out.push_str(p);
                 }
                 out.push(')');
             }
+            // Returned above, before the verb lookup.
+            HelperBody::Projection { .. } => unreachable!(),
         }
         out
     }
