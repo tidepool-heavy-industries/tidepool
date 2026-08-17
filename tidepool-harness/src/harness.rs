@@ -58,6 +58,7 @@ use crate::forcing::{ForkShape, NodeTree, TreeError};
 use crate::log::{Actor, AnswerOutcome, LogWriter};
 use crate::provider::{DynModelProvider, Message, Role, StreamDelta, Usage};
 use crate::registry::{Checkout, CheckoutError};
+use crate::snapshot::{ContextSnapshot, SnapshotDigest};
 use crate::timing;
 use crate::tree::{FanBadge, HoleId, NodeId};
 
@@ -106,6 +107,13 @@ pub enum HarnessError {
     /// for "never forced" or "busy, retry".
     #[error("node {node:?}: {detail}")]
     SessionMismatch { node: NodeId, detail: String },
+    /// A [`Harness::fork_from_snapshot`] naming a digest this harness has
+    /// never interned. Distinct from every node-scoped variant because the
+    /// caller's mistake is about a CACHE ROOT, not a node — a snapshot digest
+    /// is only ever minted by [`Harness::freeze_snapshot`] and is never
+    /// evicted, so this means "wrong digest", never "expired".
+    #[error("no frozen context snapshot with digest {0}")]
+    UnknownSnapshot(SnapshotDigest),
 }
 
 impl HarnessError {
@@ -544,6 +552,42 @@ pub struct Harness {
     /// the sender and fires it — the pair is inserted together and removed
     /// together, never independently.
     escalations: Mutex<HashMap<NodeId, (Escalation, oneshot::Sender<OperatorDecision>)>>,
+    /// Interned frozen context prefixes, keyed by digest — the cache roots
+    /// [`Self::freeze_snapshot`] mints and [`Self::fork_from_snapshot`]
+    /// branches from. Append-only for this harness's life: an entry is never
+    /// mutated (PRD 21 locked decision 2) and never evicted, so a digest a
+    /// child was minted from always resolves for as long as the child can.
+    snapshots: Mutex<HashMap<SnapshotDigest, InternedSnapshot>>,
+    /// Which frozen cache root a snapshot-forked child branched from, and
+    /// whether its one-shot `BranchInvocation` receipt has been written yet.
+    /// Keyed by the CHILD node; only nodes minted by
+    /// [`Self::fork_from_snapshot`] appear here, so an ordinary fork/root node
+    /// costs nothing and emits nothing.
+    branch_origins: Mutex<HashMap<NodeId, BranchOrigin>>,
+}
+
+/// A [`ContextSnapshot`] plus the node whose transcript it was frozen from —
+/// which is what [`Harness::fork_from_snapshot`] parents a child under and
+/// what `TurnForked` references. Kept beside the snapshot in ONE map rather
+/// than in a parallel origin map that could desync; [`ContextSnapshot`] itself
+/// stays purely about the context, with no node identity baked in.
+///
+/// Two different nodes whose transcript AND framing are byte-identical freeze
+/// to the same digest and therefore share this entry — correctly, since they
+/// are the same cache root; `origin` is then whichever node froze it FIRST.
+struct InternedSnapshot {
+    origin: NodeId,
+    snapshot: Arc<ContextSnapshot>,
+}
+
+/// See [`Harness::branch_origins`].
+struct BranchOrigin {
+    snapshot: SnapshotDigest,
+    /// Set once the branch's first turn has written its `BranchInvocation`.
+    /// The entry itself outlives that (so [`Harness::branch_snapshot`] keeps
+    /// answering for the node's whole life) — this flag is what makes the
+    /// receipt one-shot.
+    invocation_logged: bool,
 }
 
 impl Harness {
@@ -578,6 +622,8 @@ impl Harness {
             pending_realm_closes: Mutex::new(Vec::new()),
             pending: Mutex::new(HashMap::new()),
             escalations: Mutex::new(HashMap::new()),
+            snapshots: Mutex::new(HashMap::new()),
+            branch_origins: Mutex::new(HashMap::new()),
         })
     }
 
@@ -1133,6 +1179,11 @@ impl Harness {
             Some(driven.usage),
             driven.reasoning.clone(),
         )?;
+        // A snapshot-forked branch's FIRST turn is where the shared-prefix /
+        // branch-suffix / provider-token receipt belongs: `transcript` above
+        // is precisely the request this turn sent. A no-op for every other
+        // node, and for this one on every later turn.
+        self.log_branch_invocation(node, &transcript, &driven.usage)?;
         {
             let mut convos = self.convos.lock();
             let convo = convos.get_mut(&node).ok_or(HarnessError::NoSession(node))?;
@@ -3100,17 +3151,228 @@ impl Harness {
         }
     }
 
+    // -----------------------------------------------------------------
+    // Frozen context snapshots (PRD 21 C2 §4)
+    // -----------------------------------------------------------------
+
+    /// FREEZE `node`'s current context prefix as a named cache root, returning
+    /// its [`SnapshotDigest`] — the explicit harness operation PRD 21 locked
+    /// decision 2 asks for.
+    ///
+    /// The frozen prefix is `[system(framing)] ++ transcript`, exactly what
+    /// [`engine::assemble_request`] re-emits for this node's next turn, and
+    /// exactly what a child forked from this digest carries verbatim. So a
+    /// child's own assembled prefix re-digests to this same value — that is
+    /// what "share the frozen prefix byte-stably" MEANS here, and it is
+    /// asserted (`tests/companion_snapshots.rs`), not inspected.
+    ///
+    /// **Idempotent.** An unchanged transcript freezes to the same digest, the
+    /// interned entry is not duplicated or replaced, and no second
+    /// `SnapshotFrozen` receipt is written — re-freezing is a lookup. A
+    /// CHANGED transcript (another turn, a compaction) yields a DIFFERENT
+    /// digest and a new interned entry; the old one, and every child already
+    /// forked from it, are untouched. Nothing is ever evicted.
+    ///
+    /// The digest is OUR identity for a prefix. It is not a provider cache
+    /// key and equality does not prove any provider reused anything — see
+    /// this crate's `CLAUDE.md`, "The provider cache-metric gap".
+    pub fn freeze_snapshot(&self, node: NodeId) -> Result<SnapshotDigest, HarnessError> {
+        let (transcript, framing, turn_seq) = {
+            let convos = self.convos.lock();
+            let convo = convos.get(&node).ok_or(HarnessError::NoSession(node))?;
+            (
+                convo.transcript.clone(),
+                convo.framing.clone(),
+                convo.turn_seq,
+            )
+        };
+        let snapshot = ContextSnapshot::freeze(framing, transcript, turn_seq);
+        let digest = snapshot.digest.clone();
+        let messages = snapshot.messages.len() as u64;
+        let prefix_bytes = snapshot.prefix_bytes();
+
+        // Intern under the lock, and decide THERE whether this freeze is new
+        // — so two concurrent freezes of the same prefix cannot both decide
+        // they are the first and write two receipts for one cache root.
+        let is_new = {
+            let mut snapshots = self.snapshots.lock();
+            match snapshots.entry(digest.clone()) {
+                std::collections::hash_map::Entry::Occupied(_) => false,
+                std::collections::hash_map::Entry::Vacant(slot) => {
+                    slot.insert(InternedSnapshot {
+                        origin: node,
+                        snapshot: Arc::new(snapshot),
+                    });
+                    true
+                }
+            }
+        };
+        if is_new {
+            self.tree
+                .snapshot_frozen(node, digest.clone(), messages, prefix_bytes)?;
+            tracing::info!(
+                node = node.0,
+                digest = %digest,
+                messages,
+                prefix_bytes,
+                "froze context snapshot"
+            );
+        }
+        Ok(digest)
+    }
+
+    /// Resolve a frozen snapshot by digest. `None` only for a digest this
+    /// harness never minted — an interned snapshot is never evicted.
+    pub fn snapshot(&self, digest: &SnapshotDigest) -> Option<Arc<ContextSnapshot>> {
+        self.snapshots
+            .lock()
+            .get(digest)
+            .map(|i| i.snapshot.clone())
+    }
+
+    /// Mint a child branch off the frozen cache root `digest`: its transcript
+    /// is the frozen prefix, verbatim and unmodified, plus `brief` as its own
+    /// first user turn. The child is a THUNK — the caller forces it.
+    ///
+    /// Goes through [`Self::seed_forked_child`], the same path an ordinary
+    /// fork child takes, so forcing, seeding, framing inheritance, and the
+    /// `TurnForked` checkpoint reference are literally the same code. The only
+    /// difference is WHERE the prefix comes from: a frozen, shared,
+    /// digest-identified snapshot rather than the parent's live transcript.
+    ///
+    /// Every sibling minted from one digest reports that same parent digest
+    /// via [`Self::branch_snapshot`], and each writes one `BranchInvocation`
+    /// receipt naming it at its first turn.
+    pub fn fork_from_snapshot(
+        &self,
+        digest: &SnapshotDigest,
+        brief: &str,
+    ) -> Result<NodeId, HarnessError> {
+        let (origin, snapshot) = {
+            let snapshots = self.snapshots.lock();
+            let interned = snapshots
+                .get(digest)
+                .ok_or_else(|| HarnessError::UnknownSnapshot(digest.clone()))?;
+            (interned.origin, interned.snapshot.clone())
+        };
+        let child = self.seed_forked_child(
+            origin,
+            "snapshot branch",
+            snapshot.messages.to_vec(),
+            snapshot.framing.clone(),
+            brief.to_string(),
+        )?;
+        self.branch_origins.lock().insert(
+            child,
+            BranchOrigin {
+                snapshot: digest.clone(),
+                invocation_logged: false,
+            },
+        );
+        Ok(child)
+    }
+
+    /// The frozen cache root `node` was branched from, for a node minted by
+    /// [`Self::fork_from_snapshot`]; `None` for every other node. Answers for
+    /// the node's whole life, not just until its receipt is written.
+    pub fn branch_snapshot(&self, node: NodeId) -> Option<SnapshotDigest> {
+        self.branch_origins
+            .lock()
+            .get(&node)
+            .map(|b| b.snapshot.clone())
+    }
+
+    /// `node`'s live transcript and framing — exactly the pair
+    /// [`Self::drive_turn`] snapshots before it assembles a request, so a
+    /// caller can feed them to [`engine::assemble_request`] and re-derive the
+    /// bytes that go to the provider. `None` for a node with no live convo (a
+    /// thunk, or a terminated node).
+    pub fn node_context(&self, node: NodeId) -> Option<(Vec<Message>, Option<String>)> {
+        self.convos
+            .lock()
+            .get(&node)
+            .map(|c| (c.transcript.clone(), c.framing.clone()))
+    }
+
+    /// Write the one-shot `BranchInvocation` receipt for a snapshot-forked
+    /// branch's FIRST turn: what it shares with the frozen root, what it
+    /// added, and what the provider itself reported.
+    ///
+    /// `transcript` is the request this turn actually sent (drive_turn's own
+    /// pre-call snapshot), so the suffix is measured against what crossed the
+    /// wire, not against a later mutation. A node with no branch origin, or
+    /// one whose receipt is already written, is a no-op.
+    ///
+    /// `cached_input_tokens` rides through UNCHANGED from the provider: `None`
+    /// here means the provider reported nothing, and is recorded as an absent
+    /// field, never as `0`. The byte counts are exact and locally
+    /// recomputable; there is no local tokenizer, so no token-level split of
+    /// the prefix is claimed — see this crate's `CLAUDE.md`.
+    fn log_branch_invocation(
+        &self,
+        node: NodeId,
+        transcript: &[Message],
+        usage: &Usage,
+    ) -> Result<(), HarnessError> {
+        let digest = {
+            let mut origins = self.branch_origins.lock();
+            match origins.get_mut(&node) {
+                Some(origin) if !origin.invocation_logged => {
+                    origin.invocation_logged = true;
+                    origin.snapshot.clone()
+                }
+                _ => return Ok(()),
+            }
+        };
+        // The digest was interned before the child was minted and is never
+        // evicted, so this resolves; a missing entry would mean the intern map
+        // was mutated, which nothing does.
+        let Some(snapshot) = self.snapshot(&digest) else {
+            return Ok(());
+        };
+        // VERIFY the sharing before claiming it. A receipt that says "these N
+        // bytes are shared with root D" is worth nothing if nobody checked, so
+        // re-digest what this turn is ACTUALLY sending, through the same
+        // assembly path, and compare. Once per branch, so the cost is a
+        // rounding error; a mismatch (something rewrote the branch's inherited
+        // prefix before its first turn — nothing does today) writes NO receipt
+        // and says why, because no receipt beats a false one.
+        let split = snapshot.messages.len();
+        let framing = self.node_context(node).and_then(|(_, f)| f);
+        let sent = engine::assemble_request(transcript, None, framing.as_deref()).messages;
+        if transcript.len() < split
+            || crate::snapshot::digest_messages(&sent[..split + 1]) != digest
+        {
+            tracing::warn!(
+                node = node.0,
+                digest = %digest,
+                "branch's first request does not re-digest to its frozen root — \
+                 no BranchInvocation receipt written"
+            );
+            return Ok(());
+        }
+        // The shared part is the whole assembled frozen prefix (system message
+        // included); the suffix is whatever this branch appended past it.
+        let shared_prefix_bytes = snapshot.prefix_bytes();
+        let branch_suffix_bytes = crate::snapshot::content_bytes(&transcript[split..]);
+        self.tree.branch_invocation(
+            node,
+            digest,
+            shared_prefix_bytes,
+            branch_suffix_bytes,
+            usage.input_tokens,
+            usage.cached_input_tokens,
+        )?;
+        Ok(())
+    }
+
     /// Register a fork/fanout child under `parent`, inheriting the parent's
     /// transcript prefix through the fork checkpoint plus the hole card, and
     /// the parent's framing (its system message). Emits `TurnForked`
     /// referencing the checkpoint. The child is a THUNK — the caller forces it.
     /// `title` distinguishes a plain fork's single child ("fork answerer") from
-    /// one of a fanout's N children ("fanout answerer <i>").
-    ///
-    /// The checkpoint is the parent transcript's PREFIX LENGTH at fork time (a
-    /// durable transcript position), not the assistant-only `turn_seq` counter
-    /// — the child clones exactly that prefix, so the two agree by
-    /// construction.
+    /// one of a fanout's N children ("fanout answerer <i>"). The checkpoint
+    /// contract is [`Self::seed_forked_child`]'s.
     fn register_fork_child(
         &self,
         parent: NodeId,
@@ -3130,7 +3392,41 @@ impl Harness {
                 convo.suspend_table.clone(),
             )
         };
-        let checkpoint = parent_transcript.len() as u64;
+        // The child's transcript = parent prefix + the hole card as a fresh user
+        // task. The fork IS the calling agent (inherits scope + framing), so the
+        // parent conversation is genuine context.
+        self.seed_forked_child(
+            parent,
+            title,
+            parent_transcript,
+            parent_framing,
+            engine::hole_card(prompt, ty, table.as_ref()),
+        )
+    }
+
+    /// Mint a THUNK child under `parent` seeded with `prefix` (its inherited
+    /// context) + `opening` (its own first user turn), and emit `TurnForked`
+    /// at the checkpoint `prefix` ends at.
+    ///
+    /// The ONE place a [`NodeSeed::Forked`] is staged, shared by
+    /// [`Self::register_fork_child`] (whose opening is a hole card) and
+    /// [`Self::fork_from_snapshot`] (whose opening is a rendered brief) — so
+    /// nothing about how a forked child is created, referenced, or later
+    /// seeded at force time can diverge between the two.
+    ///
+    /// The checkpoint is the inherited prefix's LENGTH (a durable transcript
+    /// position), not the assistant-only `turn_seq` counter — the child
+    /// carries exactly that prefix, so the two agree by construction, and the
+    /// child's assembled request is byte-identical to the parent's through it.
+    fn seed_forked_child(
+        &self,
+        parent: NodeId,
+        title: &str,
+        prefix: Vec<Message>,
+        framing: Option<String>,
+        opening: String,
+    ) -> Result<NodeId, HarnessError> {
+        let checkpoint = prefix.len() as u64;
         let child = self.tree.create_node(
             Some(parent),
             title,
@@ -3139,21 +3435,17 @@ impl Harness {
             false,
         )?;
         self.tree.turn_forked(child, parent, checkpoint)?;
-
-        // The child's transcript = parent prefix + the hole card as a fresh user
-        // task. The fork IS the calling agent (inherits scope + framing), so the
-        // parent conversation is genuine context.
-        let mut transcript = parent_transcript;
+        let mut transcript = prefix;
         transcript.push(Message {
             role: Role::User,
-            content: engine::hole_card(prompt, ty, table.as_ref()),
+            content: opening,
             reasoning_items: Vec::new(),
         });
         self.pending.lock().insert(
             child,
             NodeSeed::Forked {
                 transcript,
-                framing: parent_framing,
+                framing,
             },
         );
         Ok(child)
@@ -3540,7 +3832,26 @@ impl Harness {
     /// (`node_usage` now reflects only the small compacted window, so the
     /// driver's threshold check does not immediately re-fire). The next hole
     /// (or the current hole's next round) drives on under the smaller context.
-    pub(crate) fn replace_transcript_with_summary(
+    ///
+    /// # Compaction MINTS A NEW CACHE ROOT
+    ///
+    /// This replacement is destructive to the node's LIVE transcript — that is
+    /// unchanged and deliberate. What it must never do is reach a FROZEN
+    /// prefix (PRD 21 locked decision 2: a `ContextSnapshot` is immutable, and
+    /// once it has children its prefix is never rewritten). It cannot: an
+    /// interned snapshot owns its own `Arc<[Message]>` and every existing
+    /// child owns its own copy of that prefix, so neither is reachable from
+    /// here. So instead of rewriting the old root, a compaction of a node that
+    /// HAS one freezes a NEW snapshot — a new digest, a new cache root, a
+    /// second `SnapshotFrozen` receipt — while the old entry keeps resolving
+    /// for every child already forked from it. Pinned by
+    /// `tests/companion_snapshots.rs`.
+    ///
+    /// `pub` (rather than the `pub(crate)` its one driver caller would need)
+    /// because that snapshot-immutability contract is a property of THIS
+    /// operation and is asserted directly against it, not through the
+    /// driver's whole compaction ladder.
+    pub fn replace_transcript_with_summary(
         &self,
         node: NodeId,
         summary: &str,
@@ -3570,7 +3881,26 @@ impl Harness {
         drop(convos);
         self.tree
             .turn_delta(node, turn, Role::User, content, None)?;
+        // Mint the new cache root, if this node had one at all. Only for a
+        // node that has ALREADY frozen a snapshot: freezing is an explicit
+        // operation, and compacting a node nobody ever froze must not start
+        // minting roots nobody asked for.
+        if self.has_frozen_snapshot(node) {
+            let digest = self.freeze_snapshot(node)?;
+            tracing::info!(
+                node = node.0,
+                digest = %digest,
+                "compaction minted a new cache root; existing snapshots and their children are untouched"
+            );
+        }
         Ok(())
+    }
+
+    /// Whether `node` has ever frozen a context snapshot. A scan rather than a
+    /// node→digests index: a node freezes a handful of roots at most, and one
+    /// map that cannot desync beats two that can.
+    fn has_frozen_snapshot(&self, node: NodeId) -> bool {
+        self.snapshots.lock().values().any(|i| i.origin == node)
     }
 
     /// Append a User-role message to `node`'s transcript (and log it), without
@@ -3800,6 +4130,8 @@ mod tests {
             pending_realm_closes: Mutex::new(Vec::new()),
             pending: Mutex::new(HashMap::new()),
             escalations: Mutex::new(HashMap::new()),
+            snapshots: Mutex::new(HashMap::new()),
+            branch_origins: Mutex::new(HashMap::new()),
         }
     }
 
@@ -3833,6 +4165,8 @@ mod tests {
             pending_realm_closes: Mutex::new(Vec::new()),
             pending: Mutex::new(HashMap::new()),
             escalations: Mutex::new(HashMap::new()),
+            snapshots: Mutex::new(HashMap::new()),
+            branch_origins: Mutex::new(HashMap::new()),
         };
         (harness, path, dir)
     }

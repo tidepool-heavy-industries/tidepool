@@ -38,6 +38,7 @@ fn usage() -> Usage {
     Usage {
         input_tokens: 12,
         output_tokens: 4,
+        cached_input_tokens: None,
     }
 }
 

@@ -66,6 +66,7 @@ fn decision_reply(action: &str, rationale: &str, confidence: &str) -> RecordedRe
         usage: Usage {
             input_tokens: 50,
             output_tokens: 10,
+            cached_input_tokens: None,
         },
     }
 }

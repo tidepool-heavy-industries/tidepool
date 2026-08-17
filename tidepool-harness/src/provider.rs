@@ -79,6 +79,22 @@ pub struct TurnResponse {
 pub struct Usage {
     pub input_tokens: u64,
     pub output_tokens: u64,
+    /// How many of `input_tokens` the provider says it served from ITS OWN
+    /// prompt cache, when the response actually carries that number.
+    ///
+    /// `None` means NOT REPORTED, and must never be rendered as `0` — a
+    /// provider that says nothing about caching has not told us there were
+    /// zero cache hits. A provider populates this only from a field the
+    /// response genuinely has (the Responses-API SSE usage object's
+    /// `input_tokens_details.cached_tokens`; genai's
+    /// `usage.prompt_tokens_details.cached_tokens`); it is never synthesized,
+    /// inferred from prefix identity, or defaulted to a number.
+    ///
+    /// Additive + `serde(default)` — the precedent is `Event::TurnDelta`'s
+    /// `reasoning` field — so `log.jsonl` files written before this field
+    /// existed still deserialize, as `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cached_input_tokens: Option<u64>,
 }
 
 /// One incremental piece of a streaming turn, pushed to a [`StreamSink`] as the

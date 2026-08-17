@@ -98,6 +98,7 @@ impl ModelProvider for NeverFinalizeProvider {
             usage: Usage {
                 input_tokens: 10,
                 output_tokens: 2,
+                cached_input_tokens: None,
             },
             reasoning: None,
             reasoning_items: Vec::new(),

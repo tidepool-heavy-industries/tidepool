@@ -41,6 +41,9 @@ Module map:
   effect) + `provider/{api_key,http,oauth,paths}` impls.
 - `replay` — `ReplayProvider` (turn substitution) + `fold_tree_state`
   (crash-replay tree reconstruction) — see Replay below.
+- `snapshot` — frozen post-coalgebra context prefixes: `SnapshotDigest`
+  (blake3 over the exact prefix `engine::assemble_request` re-emits) and the
+  immutable `ContextSnapshot` the harness interns — see Context snapshots below.
 - `synopsis` — the names-only `type_synopsis` a hole card's shape line reads,
   derived from a compiled `DataConTable` (constructor/selector NAMES only —
   the table has no field TYPES, so this is honestly shallow, never a form).
@@ -193,6 +196,80 @@ effect). A general Agent node (full base-effect row) does produce them.
 **The reserved gap:** nothing READS those records back. Recorded responses are
 never substituted into a resumed session, so a node that suspended after
 running handled effects, then restarted and resumed, RE-EXECUTES them live.
+
+## Context snapshots — one frozen prefix, many branches (PRD 21 C2 §4)
+
+The boundary already existed and was never named: `register_fork_child`
+computes `checkpoint = parent_transcript.len()` and seeds the child with the
+parent's transcript AND framing, and `engine::assemble_request` is
+`[system(framing ?? SYSTEM_FRAMING)] ++ transcript` verbatim — so a fork
+child's assembled request prefix has always been byte-identical to its
+parent's through the checkpoint. `snapshot.rs` gives that prefix an identity
+and receipts; it does not invent it.
+
+- **`Harness::freeze_snapshot(node) -> SnapshotDigest`** — the explicit
+  operation. Interns an immutable `Arc<ContextSnapshot>`. IDEMPOTENT: an
+  unchanged transcript freezes to the same digest, does not duplicate the
+  entry, and writes no second `SnapshotFrozen` receipt. Nothing is ever
+  evicted, so a digest a child was minted from always resolves.
+- **The digest runs over the ASSEMBLED prefix**, via `assemble_request`
+  itself (`snapshot::digest_prefix` calls it) — one assembly path, so the
+  digest cannot drift from what a provider is actually sent. Domain-separated
+  (`b"tidepool-context-snapshot-v1"`) and length-framed, mirroring
+  `tidepool_runtime::cache`'s idiom; `frame` is private there, so the same
+  three lines are reimplemented rather than a second scheme invented.
+- **`Harness::fork_from_snapshot(digest, brief)`** goes through the same
+  `seed_forked_child` an ordinary fork does — the ONE place a
+  `NodeSeed::Forked` is staged — so forcing, seeding, framing inheritance, and
+  the `TurnForked` checkpoint cannot diverge between the two. Every sibling
+  reports one parent digest (`Harness::branch_snapshot`).
+- **Immutability is locked decision 2, and it is pinned.** A `ContextSnapshot`
+  is never mutated; an interned snapshot and each child own their own copies,
+  so there is no `&mut` path to a frozen prefix. Compaction
+  (`replace_transcript_with_summary`, destructive to the node's LIVE
+  transcript by design) therefore cannot reach one: a node that HAS a frozen
+  snapshot gets a NEW one minted at compaction — a new digest, a new cache
+  root, a second receipt — while the old entry and every existing child stay
+  exactly as they were. `tests/companion_snapshots.rs` asserts this by
+  re-digesting the children's own assembled prefixes AFTER the parent is
+  compacted.
+
+### The provider cache-metric gap (read this before claiming a cache win)
+
+**No provider impl in this tree emits `cache_control` breakpoints, and until
+C2 none parsed a cache metric. Measured cache REUSE is therefore not
+verifiable from our side.** Stated plainly so C6's dogfood does not go looking
+for a number that isn't there:
+
+- `TurnRequest` has no metadata slot at all, and nothing anywhere emits
+  `cache_control`. We do not *cause* provider-side cache hits; at most we make
+  a stable prefix available for a provider to cache on its own terms.
+- `Usage` now carries `cached_input_tokens: Option<u64>`, populated ONLY from
+  a field the response genuinely has — the Responses-API SSE usage object's
+  `input_tokens_details.cached_tokens` (`provider/oauth.rs`) and genai's
+  `usage.prompt_tokens_details.cached_tokens` (`provider/http.rs`). A provider
+  that reports nothing leaves it `None`. **`None` means NOT REPORTED and is
+  serialized as an absent field — never `0`.** Nothing synthesizes it, and
+  prefix identity is never treated as evidence of a cache hit.
+- There is no local tokenizer here, so a token-level split of a shared prefix
+  is not claimed. What IS verifiable, and what the receipts carry:
+  - the **digest** — the frozen prefix's identity, recomputable by anyone;
+  - the **byte counts** — `shared_prefix_bytes` / `branch_suffix_bytes`, exact
+    UTF-8 content bytes of the assembled prefix and of what a branch added;
+  - the provider's **own `input_tokens`** for the branch's first turn.
+- Two prefix-stability hazards a future cache-breakpoint lane inherits: the
+  self-iterating outer loop recomposes its SYSTEM message per iteration
+  (iteration count, operator input, rotation losses), so message 0 is not
+  stable across loops; and compaction rewrites the framing carried into the
+  next render. Neither blocks digest identity — the digest covers framing
+  explicitly — but both cap what a cache claim could cover.
+
+Receipts: `Event::SnapshotFrozen{node,digest,messages,prefix_bytes}` at the
+freeze, `Event::BranchInvocation{node,snapshot,shared_prefix_bytes,
+branch_suffix_bytes,input_tokens,cached_input_tokens}` at a snapshot-forked
+branch's FIRST turn (one-shot). The `Usage` widening is additive +
+`serde(default)` — the precedent is `Event::TurnDelta`'s `reasoning` — so
+`log.jsonl` files written before it still deserialize.
 
 ## Invariants
 

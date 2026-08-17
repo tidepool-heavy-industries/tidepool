@@ -1,7 +1,8 @@
 //! tidepool-harness — typed-yield session tree over the eval substrate: the
 //! turn engine ([`engine`]), the node tree + forcing gates ([`forcing`]/
 //! [`tree`]), the orchestrator ([`harness`]), the durable event log
-//! ([`log`]) + replay ([`replay`]), calling-model providers ([`provider`]),
+//! ([`log`]) + replay ([`replay`]), frozen context snapshots ([`snapshot`]),
+//! calling-model providers ([`provider`]),
 //! and the self-iterating harness's `render`/`loop` driver
 //! ([`selfharness`]). See this crate's `CLAUDE.md` for the full module map
 //! and the machine-lifecycle/replay-scope notes that don't fit here.
@@ -15,6 +16,7 @@ pub mod provider;
 pub mod registry;
 pub mod replay;
 pub mod selfharness;
+pub mod snapshot;
 pub mod synopsis;
 pub mod timing;
 pub mod tree;
@@ -33,6 +35,7 @@ pub use selfharness::{
     HarnessSourceError, JsonlObserver, LogObserver, Observer, OperatorGate, PersistenceError,
     ResumeFold, RunJournalError, RunLease, SelfHarnessDriver, SelfHarnessState, StdinGate,
 };
+pub use snapshot::{ContextSnapshot, SnapshotDigest};
 pub use tidepool_runtime::AsksSidecar;
 pub use timing::{record_stage, ExtractTiming};
 pub use tree::{FanBadge, HoleId, NodeId, NodeState, PriceClass, SiteId, Slot};

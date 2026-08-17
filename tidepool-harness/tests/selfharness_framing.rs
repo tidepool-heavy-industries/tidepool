@@ -67,6 +67,7 @@ impl ModelProvider for CapturingProvider {
             usage: Usage {
                 input_tokens: 50,
                 output_tokens: 10,
+                cached_input_tokens: None,
             },
             reasoning: None,
             reasoning_items: Vec::new(),

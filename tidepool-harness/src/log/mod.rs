@@ -21,6 +21,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::provider::{Role, Usage};
+use crate::snapshot::SnapshotDigest;
 use crate::tree::{FanBadge, HoleId, NodeId, PriceClass, SiteId};
 
 mod reader;
@@ -167,6 +168,45 @@ pub enum Event {
         turn: u64,
         role: Role,
         content: String,
+    },
+    /// `node`'s context prefix was FROZEN as a named cache root
+    /// ([`crate::harness::Harness::freeze_snapshot`]). `digest` is the blake3
+    /// identity of the exact prefix `engine::assemble_request` re-emits;
+    /// `messages` is the frozen TRANSCRIPT length (the assembled prefix is one
+    /// longer — the system framing message); `prefix_bytes` is the assembled
+    /// prefix's total UTF-8 content bytes, framing included.
+    ///
+    /// Emitted once per DISTINCT snapshot: freezing an unchanged transcript
+    /// again is idempotent and writes no second line. A node that is compacted
+    /// after a freeze gets a SECOND `SnapshotFrozen` with a different digest —
+    /// a new cache root, the old one still interned and still resolving for
+    /// its existing children.
+    SnapshotFrozen {
+        node: NodeId,
+        digest: SnapshotDigest,
+        messages: u64,
+        prefix_bytes: u64,
+    },
+    /// A branch minted by [`crate::harness::Harness::fork_from_snapshot`] ran
+    /// its FIRST turn: what it shares with the frozen root and what it added.
+    ///
+    /// The byte counts are exact and locally recomputable. They are NOT a
+    /// token split — there is no local tokenizer here, so `input_tokens` (the
+    /// provider's own count for this turn's whole request) is carried
+    /// alongside them rather than a derived estimate.
+    ///
+    /// `cached_input_tokens` is `Some` only when the provider's response
+    /// actually reported a cache-read count. `None` means NOT REPORTED and is
+    /// serialized as absent, never as `0` — see [`Usage::cached_input_tokens`]
+    /// and `tidepool-harness/CLAUDE.md`'s "The provider cache-metric gap".
+    BranchInvocation {
+        node: NodeId,
+        snapshot: SnapshotDigest,
+        shared_prefix_bytes: u64,
+        branch_suffix_bytes: u64,
+        input_tokens: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cached_input_tokens: Option<u64>,
     },
 }
 

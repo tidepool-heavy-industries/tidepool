@@ -78,10 +78,7 @@ impl ReplayProvider {
                     node,
                     turn,
                     content,
-                    usage: usage.unwrap_or(Usage {
-                        input_tokens: 0,
-                        output_tokens: 0,
-                    }),
+                    usage: usage.unwrap_or_default(),
                 });
             }
         }
@@ -249,11 +246,16 @@ pub fn apply_event(folded: &mut FoldedTree, event: Event) {
         }
         // TurnStart / Effect / HoleAnswerAttempt / TurnExtracted do not change
         // tree STATE (they are within-turn detail the replayer substitutes
-        // against, not folded into node lifecycle here).
+        // against, not folded into node lifecycle here). SnapshotFrozen /
+        // BranchInvocation are RECEIPTS about a context prefix — the fork
+        // structure they describe is already folded from `TurnForked`, and a
+        // snapshot is not a node lifecycle state.
         Event::TurnStart { .. }
         | Event::Effect { .. }
         | Event::HoleAnswerAttempt { .. }
-        | Event::TurnExtracted { .. } => {}
+        | Event::TurnExtracted { .. }
+        | Event::SnapshotFrozen { .. }
+        | Event::BranchInvocation { .. } => {}
     }
 }
 
@@ -352,6 +354,7 @@ mod tests {
             usage: Some(Usage {
                 input_tokens: 10,
                 output_tokens: 20,
+                cached_input_tokens: None,
             }),
         })
         .unwrap();

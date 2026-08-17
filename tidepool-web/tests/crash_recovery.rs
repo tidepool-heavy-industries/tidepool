@@ -109,6 +109,7 @@ fn build_replay_log(path: &Path, replies: u64) {
                 usage: Some(Usage {
                     input_tokens: 50,
                     output_tokens: 10,
+                    cached_input_tokens: None,
                 }),
                 reasoning: None,
             })

@@ -100,6 +100,7 @@ fn reply(block: &str) -> RecordedReply {
         usage: Usage {
             input_tokens: 50,
             output_tokens: 10,
+            cached_input_tokens: None,
         },
     }
 }

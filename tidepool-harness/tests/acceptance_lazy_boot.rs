@@ -57,6 +57,7 @@ fn usage() -> Usage {
     Usage {
         input_tokens: 100,
         output_tokens: 20,
+        cached_input_tokens: None,
     }
 }
 
@@ -151,6 +152,7 @@ impl tidepool_harness::provider::ModelProvider for AlwaysReply {
             usage: Usage {
                 input_tokens: 50,
                 output_tokens: 10,
+                cached_input_tokens: None,
             },
             reasoning: None,
             reasoning_items: Vec::new(),
