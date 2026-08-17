@@ -328,3 +328,216 @@ fn two_green_threads_pend_simultaneously_and_resume_order_is_free() {
     assert_eq!(a_first, 999);
     assert_eq!(b_first, 888);
 }
+
+// ─── Nested fork — what is sound, and what the open bug is NOT ──────────
+//
+// A green thread whose body itself forks another thread. Not an edge case:
+// PRD 20's node residency IS this shape ("an interior node is a green thread
+// whose body, after forking children, is a select loop"), so `forkNode` on an
+// interior node depends on it.
+//
+// Through the full GHC pipeline this reports as GC-forwarding corruption
+// ("tag=255 Forwarded"), bisection-confirmed by removing the nesting. The
+// test below reproduces the nesting's STRUCTURE without GHC and PASSES,
+// including under `TIDEPOOL_GC_POISON=1 TIDEPOOL_HEAP_VERIFY=1`. That is a
+// narrowing result, not a contradiction:
+//
+//   RULED OUT — the fork crossing itself. Tenuring a closure off a frame that
+//   `run_forked` created, while that frame is still parked, and forking it
+//   under a second realm is sound. So `run_forked`, the sentinel-tenure step,
+//   `finalized_handle` on a thread's own frame, and multi-level realm nesting
+//   are all fine.
+//
+//   STILL SUSPECT — a collection RUNNING while nested frames are parked. The
+//   bodies here are hand-built and allocate almost nothing, so no GC occurs;
+//   the failing pipeline case (`mapConcurrently` over recursive sums)
+//   allocates heavily. Injecting a collection at the suspicious point needs a
+//   force-GC entry the machine does not expose publicly, which is
+//   `tidepool-codegen`'s territory, not this lane's.
+//
+// So this test is a standing pin on the crossing's structure — it would catch
+// a regression there — and is explicitly NOT a reproducer for the open bug.
+
+/// Like [`build_wrap_suspend`], but the thread body's own effect is ANOTHER
+/// wrap-suspend carrying `innerClosure` at field 1 — the nested-fork shape.
+fn build_nested_wrap_suspend(
+    outer_wrap_tag: u64,
+    outer_dummy: i64,
+    inner_wrap_tag: u64,
+    inner_dummy: i64,
+    leaf_tag: u64,
+    leaf_lit: i64,
+) -> CoreExpr {
+    let mut b = TreeBuilder::new();
+
+    // innerClosure = `\_ -> E (Union leaf_tag leaf_lit) (Leaf (\v -> Val (ThreadResult v)))`
+    const INNER_ARG: VarId = VarId(11);
+    const INNER_CONT: VarId = VarId(12);
+    let leaf_tag_lit = b.push(CoreFrame::Lit(Literal::LitWord(leaf_tag)));
+    let leaf_req_lit = b.push(CoreFrame::Lit(Literal::LitInt(leaf_lit)));
+    let leaf_union = b.push(CoreFrame::Con {
+        tag: UNION_ID,
+        fields: vec![leaf_tag_lit, leaf_req_lit],
+    });
+    let ic_v = b.push(CoreFrame::Var(INNER_CONT));
+    let ic_res = b.push(CoreFrame::Con {
+        tag: RESULT_ID,
+        fields: vec![ic_v],
+    });
+    let ic_val = b.push(CoreFrame::Con {
+        tag: VAL_ID,
+        fields: vec![ic_res],
+    });
+    let ic_lam = b.push(CoreFrame::Lam {
+        binder: INNER_CONT,
+        body: ic_val,
+    });
+    let ic_leaf = b.push(CoreFrame::Con {
+        tag: LEAF_ID,
+        fields: vec![ic_lam],
+    });
+    let inner_e = b.push(CoreFrame::Con {
+        tag: E_ID,
+        fields: vec![leaf_union, ic_leaf],
+    });
+    let inner_closure = b.push(CoreFrame::Lam {
+        binder: INNER_ARG,
+        body: inner_e,
+    });
+
+    // bodyClosure = `\_ -> E (Union inner_wrap_tag (SpawnWrap inner_dummy innerClosure))
+    //                        (Leaf (\v -> Val (ThreadResult v)))`
+    const BODY_ARG: VarId = VarId(13);
+    const BODY_CONT: VarId = VarId(14);
+    let inner_dummy_lit = b.push(CoreFrame::Lit(Literal::LitInt(inner_dummy)));
+    let inner_wrap_con = b.push(CoreFrame::Con {
+        tag: WRAP_ID,
+        fields: vec![inner_dummy_lit, inner_closure],
+    });
+    let inner_wrap_tag_lit = b.push(CoreFrame::Lit(Literal::LitWord(inner_wrap_tag)));
+    let inner_wrap_union = b.push(CoreFrame::Con {
+        tag: UNION_ID,
+        fields: vec![inner_wrap_tag_lit, inner_wrap_con],
+    });
+    let bc_v = b.push(CoreFrame::Var(BODY_CONT));
+    let bc_res = b.push(CoreFrame::Con {
+        tag: RESULT_ID,
+        fields: vec![bc_v],
+    });
+    let bc_val = b.push(CoreFrame::Con {
+        tag: VAL_ID,
+        fields: vec![bc_res],
+    });
+    let bc_lam = b.push(CoreFrame::Lam {
+        binder: BODY_CONT,
+        body: bc_val,
+    });
+    let bc_leaf = b.push(CoreFrame::Con {
+        tag: LEAF_ID,
+        fields: vec![bc_lam],
+    });
+    let body_e = b.push(CoreFrame::Con {
+        tag: E_ID,
+        fields: vec![inner_wrap_union, bc_leaf],
+    });
+    let body_closure = b.push(CoreFrame::Lam {
+        binder: BODY_ARG,
+        body: body_e,
+    });
+
+    // The scratch outer wrapper, exactly as `build_wrap_suspend`'s.
+    const OUTER_CONT: VarId = VarId(15);
+    let dummy_lit = b.push(CoreFrame::Lit(Literal::LitInt(outer_dummy)));
+    let wrap_con = b.push(CoreFrame::Con {
+        tag: WRAP_ID,
+        fields: vec![dummy_lit, body_closure],
+    });
+    let wrap_tag_lit = b.push(CoreFrame::Lit(Literal::LitWord(outer_wrap_tag)));
+    let wrap_union = b.push(CoreFrame::Con {
+        tag: UNION_ID,
+        fields: vec![wrap_tag_lit, wrap_con],
+    });
+    let oc_v = b.push(CoreFrame::Var(OUTER_CONT));
+    let oc_res = b.push(CoreFrame::Con {
+        tag: OUTER_ID,
+        fields: vec![oc_v],
+    });
+    let oc_val = b.push(CoreFrame::Con {
+        tag: VAL_ID,
+        fields: vec![oc_res],
+    });
+    let oc_lam = b.push(CoreFrame::Lam {
+        binder: OUTER_CONT,
+        body: oc_val,
+    });
+    let oc_leaf = b.push(CoreFrame::Con {
+        tag: LEAF_ID,
+        fields: vec![oc_lam],
+    });
+    b.push(CoreFrame::Con {
+        tag: E_ID,
+        fields: vec![wrap_union, oc_leaf],
+    });
+    b.build()
+}
+
+/// A green thread forks a SECOND green thread from inside its own body — the
+/// nested-fork STRUCTURE, with no GC pressure. Passes; see the section
+/// comment above for what that does and does not establish.
+///
+/// Runs under `--ignore-default-filter -p tidepool-runtime`; pair with
+/// `TIDEPOOL_GC_POISON=1 TIDEPOOL_HEAP_VERIFY=1` (also green today).
+#[test]
+fn a_green_thread_can_fork_another_green_thread() {
+    let table = table();
+    let mut session = fresh_session();
+
+    // Level 0: the scratch spawner, exactly as the flat case.
+    let expr = build_nested_wrap_suspend(100, 1, 101, 2, 200, 77);
+    let outcome = session
+        .run("nested", &expr, &table)
+        .expect("wrap suspend runs");
+    let wrap_hole = match outcome {
+        ResidentOutcome::Suspended { hole, .. } => hole,
+        other => panic!("wrap suspend must suspend, got {other:?}"),
+    };
+    let outer_body = session
+        .finalized_handle(&wrap_hole)
+        .expect("wrap frame carries the outer thread body");
+    session
+        .resume(&wrap_hole, Value::Lit(Literal::LitInt(0)))
+        .expect("scratch spawner resumes");
+
+    // Level 1: the outer thread. Its own body suspends carrying ANOTHER
+    // closure at field 1 — the nested `async`.
+    let outer_hole = match session
+        .run_forked("outer_thread", outer_body, RealmId(1), Some(&table))
+        .expect("outer thread forks")
+    {
+        ResidentOutcome::Suspended { hole, .. } => hole,
+        other => panic!("outer thread must suspend on its nested spawn, got {other:?}"),
+    };
+
+    // Level 2: THE STEP UNDER TEST — tenure the inner body off a frame that
+    // `run_forked` itself created, while that frame is still parked, and fork
+    // it under its own realm.
+    let inner_body = session
+        .finalized_handle(&outer_hole)
+        .expect("the outer THREAD's frame must carry its nested spawn's closure");
+    session
+        .resume(&outer_hole, Value::Lit(Literal::LitInt(0)))
+        .expect("outer thread resumes past its spawn");
+    let inner_hole = match session
+        .run_forked("inner_thread", inner_body, RealmId(2), Some(&table))
+        .expect("inner thread forks from inside the outer thread")
+    {
+        ResidentOutcome::Suspended { hole, .. } => hole,
+        other => panic!("inner thread must suspend on its own effect, got {other:?}"),
+    };
+
+    let answer = complete_thread(&mut session, &inner_hole, 77);
+    assert_eq!(
+        answer, 77,
+        "the nested thread's result must survive delivery"
+    );
+}
