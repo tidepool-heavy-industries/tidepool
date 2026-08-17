@@ -174,9 +174,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     driver.set_event_handler(event_handler);
     driver.set_exec_handler(exec_handler);
     // The run journal (PRD 20): append-only `record` sink, one file per run
-    // beside the run log (same timestamp). Fold-on-resume is dev-tree v2's
-    // job — this process only ever appends.
-    let run_journal_path = log_dir.join(format!("journal-{ts}.jsonl"));
+    // beside the run log. Fold-on-resume is dev-tree v2's job — this process
+    // only ever appends. Minted with `ts` AND this process's pid, not `ts`
+    // alone: `JournalHandler` opens with `OpenOptions::append(true)` and
+    // never refuses an existing path the way `LogWriter::create` does, so two
+    // runs launched within the same wall-clock second would otherwise
+    // silently interleave their records into ONE file instead of each
+    // getting its own.
+    let pid = std::process::id();
+    let run_journal_path = log_dir.join(format!("journal-{ts}-{pid}.jsonl"));
     driver.set_journal_handler(JournalHandler::new(run_journal_path.clone()));
     tracing::info!(
         target: "tidepool_web",

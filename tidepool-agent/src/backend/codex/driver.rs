@@ -26,7 +26,7 @@
 //!    parks the child's turn until the timeout kills it. That holds for a
 //!    declared tool, an undeclared one, and a round-cap refusal alike.
 
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -115,6 +115,15 @@ pub struct CodexAgentBackend {
     /// `start_turn` holds `&mut self`, and the canceller's whole job is to be
     /// reachable while that borrow is outstanding.
     pid: Arc<AtomicU32>,
+    /// Set the moment [`CodexCanceller::cancel`] is called, independent of
+    /// whether `pid` was known yet. A cancel that arrives while still
+    /// connecting (`pid == 0`) has nothing to SIGKILL — the process spawn and
+    /// handshake are not interruptible that way — so this flag is what
+    /// [`start_turn`](AgentBackend::start_turn) checks right after connecting
+    /// and before it pays for the actual (arbitrarily long) model turn.
+    /// Without it, a cancel during the connect window would silently do
+    /// nothing and the cycle would run the full turn anyway.
+    cancel_requested: Arc<AtomicBool>,
     /// Fetched once per backend and reused: `model/list` is a metadata
     /// request, but re-asking per cycle would let one agent's turns silently
     /// run on two different models.
@@ -139,6 +148,7 @@ impl CodexAgentBackend {
             runtime,
             session: None,
             pid: Arc::new(AtomicU32::new(0)),
+            cancel_requested: Arc::new(AtomicBool::new(false)),
             catalogue: None,
             resolved_model: None,
             turn_timeout: DEFAULT_TURN_TIMEOUT,
@@ -270,7 +280,20 @@ impl AgentBackend for CodexAgentBackend {
         let resolved_model = self.resolve_model(spec.model)?;
         let params = turn_start_params(thread, spec, &resolved_model);
         let timeout = self.turn_timeout;
+        // Cloned BEFORE `connected()` borrows `self` mutably for the rest of
+        // this call.
+        let cancel_requested = Arc::clone(&self.cancel_requested);
         let (runtime, session) = self.connected()?;
+        // Post-handshake, pre-turn: a cancel that arrived while `pid` was
+        // still 0 had nothing to SIGKILL, so it could only set
+        // `cancel_requested`. Checked HERE — connected, but before paying for
+        // the actual (arbitrarily long) model turn — so that cancel is not
+        // silently lost; see `cancel_requested`'s field docs.
+        if cancel_requested.load(Ordering::SeqCst) {
+            return Err(AgentBackendError::BackendUnavailable {
+                detail: "cycle was cancelled during connect: it never reached its turn".to_string(),
+            });
+        }
         let stop = runtime
             .block_on(session.start_turn(&params, timeout))
             .map_err(map_session_error)?;
@@ -297,6 +320,7 @@ impl AgentBackend for CodexAgentBackend {
     fn canceller(&self) -> Box<dyn BackendCanceller> {
         Box::new(CodexCanceller {
             pid: Arc::clone(&self.pid),
+            cancel_requested: Arc::clone(&self.cancel_requested),
         })
     }
 
@@ -371,8 +395,19 @@ const CANCEL_CONFIRM_TIMEOUT: Duration = Duration::from_secs(5);
 /// The killed child is left for its owning `tokio::process::Child` to reap;
 /// `cancel` deliberately does not wait on it, because the `Child` belongs to
 /// the blocked thread.
+///
+/// # The connect window
+///
+/// A cancel that arrives before `pid` is published (`0` — still spawning or
+/// handshaking) has nothing to SIGKILL. `cancel_requested` is what survives
+/// that window: it is set unconditionally, and
+/// [`start_turn`](AgentBackend::start_turn) checks it right after connecting
+/// and before the actual (arbitrarily long) model turn, so a cancel that
+/// missed the pid still stops the cycle promptly instead of silently doing
+/// nothing.
 pub struct CodexCanceller {
     pid: Arc<AtomicU32>,
+    cancel_requested: Arc<AtomicBool>,
 }
 
 impl CodexCanceller {
@@ -385,6 +420,10 @@ impl CodexCanceller {
 
 impl BackendCanceller for CodexCanceller {
     fn cancel(&self) {
+        // Set unconditionally, BEFORE the pid check below: this is the only
+        // record of the cancel that survives a connect window where `pid` is
+        // still 0, and `start_turn` reads it once connected.
+        self.cancel_requested.store(true, Ordering::SeqCst);
         let pid = self.pid.load(Ordering::SeqCst);
         if pid == 0 {
             // Never connected, or the backend has begun dropping.
@@ -1314,6 +1353,7 @@ mod tests {
         let canceller = backend.canceller();
         let armed = CodexCanceller {
             pid: Arc::clone(&backend.pid),
+            cancel_requested: Arc::clone(&backend.cancel_requested),
         };
         assert_eq!(
             armed.armed_pid(),
@@ -1332,6 +1372,25 @@ mod tests {
         assert!(
             bystander.survives_a_grace_window(),
             "an inert canceller must signal nothing at all"
+        );
+    }
+
+    /// A cancel with `pid == 0` (still connecting — spawn or handshake in
+    /// flight) has nothing to SIGKILL, but it must still be RECORDED: this is
+    /// what `start_turn` checks after connecting to avoid running the full
+    /// turn anyway. No process is spawned here — `CodexAgentBackend::new`
+    /// never connects — so this stays in the fast tier.
+    #[test]
+    fn cancel_before_connect_sets_the_flag_without_a_pid_to_signal() {
+        let backend = CodexAgentBackend::new().expect("build the backend");
+        assert_eq!(backend.pid.load(Ordering::SeqCst), 0, "never connected");
+        assert!(!backend.cancel_requested.load(Ordering::SeqCst));
+
+        backend.canceller().cancel();
+
+        assert!(
+            backend.cancel_requested.load(Ordering::SeqCst),
+            "a cancel that arrives before connect must still be recorded, or it is lost"
         );
     }
 
@@ -1360,6 +1419,7 @@ mod tests {
         assert_eq!(
             CodexCanceller {
                 pid: Arc::clone(&backend.pid),
+                cancel_requested: Arc::clone(&backend.cancel_requested),
             }
             .armed_pid(),
             bystander.pid(),

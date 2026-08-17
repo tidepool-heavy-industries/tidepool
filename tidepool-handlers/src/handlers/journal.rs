@@ -213,8 +213,9 @@ impl JournalHandler {
             key,
             payload,
         };
-        let line = serde_json::to_string(&entry.to_json())
+        let mut line = serde_json::to_string(&entry.to_json())
             .map_err(|e| EffectError::Handler(format!("journal: serialize failed: {}", e)))?;
+        line.push('\n');
         let mut file = OpenOptions::new()
             .create(true)
             .append(true)
@@ -222,7 +223,13 @@ impl JournalHandler {
             .map_err(|e| {
                 EffectError::Handler(format!("journal: failed to open {:?}: {}", self.path, e))
             })?;
-        writeln!(file, "{}", line)
+        // ONE `write_all` for the whole line (content + newline), not
+        // `writeln!`/`write_fmt` — those can split into several `write_all`
+        // calls on the underlying fd, and each individual `write()` syscall is
+        // the unit POSIX guarantees is atomic against a concurrent O_APPEND
+        // writer. Two calls sharing one line is exactly how a concurrent
+        // recorder tears it.
+        file.write_all(line.as_bytes())
             .map_err(|e| EffectError::Handler(format!("journal: write failed: {}", e)))?;
         file.flush()
             .map_err(|e| EffectError::Handler(format!("journal: flush failed: {}", e)))?;
@@ -407,5 +414,53 @@ mod tests {
         let path = tmp_file("missing");
         let _ = std::fs::remove_file(&path);
         assert_eq!(load_journal(&path).unwrap(), vec![]);
+    }
+
+    /// A multi-threaded burst of records through CLONED handlers (sharing the
+    /// same seq counter and the same path) must never tear a line: every
+    /// append is one `write_all`, and POSIX guarantees one `write()` against
+    /// an O_APPEND fd is atomic regardless of how many writers share it.
+    #[test]
+    fn concurrent_burst_through_cloned_handlers_yields_no_torn_lines() {
+        let path = tmp_file("concurrent_burst");
+        let _ = std::fs::remove_file(&path);
+        let handler = JournalHandler::new(path.clone());
+
+        const THREADS: usize = 8;
+        const PER_THREAD: usize = 50;
+        std::thread::scope(|scope| {
+            for t in 0..THREADS {
+                let h = handler.clone();
+                scope.spawn(move || {
+                    for i in 0..PER_THREAD {
+                        h.append(
+                            "burst".into(),
+                            format!("t{t}-{i}"),
+                            serde_json::json!({"t": t, "i": i}),
+                        )
+                        .unwrap();
+                    }
+                });
+            }
+        });
+
+        let entries =
+            load_journal(&path).expect("a torn line must never happen, so this must never error");
+        assert_eq!(
+            entries.len(),
+            THREADS * PER_THREAD,
+            "every append from every thread must survive as a complete, parseable line"
+        );
+
+        let mut seqs: Vec<u64> = entries.iter().map(|e| e.seq).collect();
+        seqs.sort_unstable();
+        seqs.dedup();
+        assert_eq!(
+            seqs.len(),
+            THREADS * PER_THREAD,
+            "the shared seq counter must not be raced past — no seq reused across threads"
+        );
+
+        let _ = std::fs::remove_file(&path);
     }
 }
