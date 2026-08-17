@@ -2,14 +2,19 @@
 //! modules.
 //!
 //! The whole module source is a **pure function of the decl log**: given the
-//! ordered turns (each carrying the raw declaration source text and the
-//! GHC-sourced [`ExportItem`]s it introduces), [`render_module`] produces the
-//! source of any one generation's module. Each generation imports the prior
-//! generation **selectively** — `import …G<g-1> hiding (<names redefined this
-//! turn>)` — and re-exports it plus this turn's items. That selective re-export
-//! is what lets a redefined `data` type coexist with its older shape without
-//! GHC's conflicting-export error: the two `Foo`s live in distinct
-//! gen-versioned modules and only the newest is in scope unqualified.
+//! ordered turns (each carrying the raw declaration source text, the
+//! GHC-sourced [`ExportItem`]s it introduces, and the generation it chains
+//! from — [`DeclTurn::parent`]), [`render_module`] produces the source of any
+//! one generation's module. Each generation imports its **parent** generation
+//! **selectively** — `import …G<parent> hiding (<names redefined this
+//! turn>)` — and re-exports it plus this turn's items. `parent` is `g - 1` for
+//! a flat (ROOT-only) session, but need not be — a sibling turn's parent can
+//! be any earlier generation, which is what turns the flat generation chain
+//! into a tree of independent, mutually invisible branches (PRD 21 lane C2).
+//! That selective re-export is what lets a redefined `data` type coexist with
+//! its older shape without GHC's conflicting-export error: the two `Foo`s
+//! live in distinct gen-versioned modules and only the newest is in scope
+//! unqualified.
 //!
 //! Binder names come from GHC (see `super::binders`), never a Rust-side Haskell
 //! parser — this module only *renders* the structured items.
@@ -106,6 +111,15 @@ pub struct DeclTurn {
     /// `render_module`) so all decl-plane views stay consistent; a later
     /// `define` of the same name naturally un-retracts it (latest-wins).
     pub retracts: Vec<String>,
+    /// The generation this turn chains from — `None` only for the very first
+    /// turn ever pushed to the log. `Generation` stays a single globally
+    /// monotone counter (`turns.len()`) so module names never collide across
+    /// branches; this field is what turns the flat generation sequence into a
+    /// tree — a scope's turns chain from that scope's own tip, which may be
+    /// any earlier generation, not necessarily `g - 1`. Flat (ROOT-only) usage
+    /// always has `parent == Some(g - 1)` (or `None` for `g == 1`), which is
+    /// the back-compat degeneracy every fold below must preserve.
+    pub parent: Option<Generation>,
 }
 
 /// The ordered declaration log. `turns[i]` is generation `i + 1`
@@ -130,26 +144,55 @@ impl DeclLog {
         Generation(self.turns.len() as u64)
     }
 
-    /// Append a turn, returning the new (current) generation.
+    /// Append a turn (its `parent` must already be set by the caller —
+    /// `DeclLog` has no notion of scope and cannot infer it), returning the
+    /// new (current) generation.
     pub fn push(&mut self, turn: DeclTurn) -> Generation {
         self.turns.push(turn);
         self.generation()
+    }
+
+    /// `tip`'s parent chain, oldest first, INCLUSIVE of `tip` itself — the
+    /// walk order every scoping fold below applies turns in (a later turn's
+    /// hide/retract must be applied after the earlier turn it shadows).
+    /// Empty for `Generation(0)`. `pub(crate)` so `SessionLib` (a sibling
+    /// module) can build its own scope-keyed folds (e.g. `decl_value_names_in`)
+    /// on the same walk.
+    pub(crate) fn chain_from_root(&self, tip: Generation) -> Vec<Generation> {
+        let mut chain = Vec::new();
+        let mut cur = (tip.0 > 0).then_some(tip);
+        while let Some(g) = cur {
+            chain.push(g);
+            cur = self.turns[(g.0 - 1) as usize].parent;
+        }
+        chain.reverse();
+        chain
     }
 
     /// The currently in-scope declaration heads (value/type/class names) paired
     /// with the generation of their LATEST defining turn (latest-wins across
     /// turns, mirroring the eval-time module scoping). Backs the decl-plane half
     /// of the `tidepool://session/bindings` live-state snapshot.
+    ///
+    /// `current_heads() == current_heads_at(self.generation())`.
     #[must_use]
     pub fn current_heads(&self) -> Vec<(String, u64)> {
+        self.current_heads_at(self.generation())
+    }
+
+    /// [`Self::current_heads`], but as seen from `tip` — walks `tip`'s parent
+    /// chain rather than assuming the log is one flat history. Lets a caller
+    /// with several tips in flight (one per scope) query each independently.
+    #[must_use]
+    pub fn current_heads_at(&self, tip: Generation) -> Vec<(String, u64)> {
         let mut map: std::collections::BTreeMap<String, u64> = std::collections::BTreeMap::new();
-        for (i, turn) in self.turns.iter().enumerate() {
-            let gen = (i + 1) as u64;
+        for g in self.chain_from_root(tip) {
+            let turn = &self.turns[(g.0 - 1) as usize];
             for r in &turn.retracts {
                 map.remove(r);
             }
             for item in &turn.items {
-                map.insert(item.head_name().to_string(), gen);
+                map.insert(item.head_name().to_string(), g.0);
             }
         }
         map.into_iter().collect()
@@ -184,15 +227,19 @@ impl DeclLog {
     /// documented norm) never hit this.
     #[must_use]
     pub fn replayable_sources(&self) -> Vec<&str> {
+        let chain = self.chain_from_root(self.generation());
         let mut out: Vec<&str> = Vec::new();
-        for (i, turn) in self.turns.iter().enumerate() {
+        for (pos, &g) in chain.iter().enumerate() {
+            let turn = &self.turns[(g.0 - 1) as usize];
             let heads: Vec<&str> = turn.items.iter().map(ExportItem::head_name).collect();
             // A turn's source is dropped once every head it introduced is later
-            // redefined OR retracted — the migrated/superseded decl must not
-            // reappear in a flat `:program` replay.
+            // redefined OR retracted (later IN THIS CHAIN) — the
+            // migrated/superseded decl must not reappear in a flat `:program`
+            // replay.
             let fully_superseded = !heads.is_empty()
                 && heads.iter().all(|h| {
-                    self.turns[i + 1..].iter().any(|later| {
+                    chain[pos + 1..].iter().any(|&later_g| {
+                        let later = &self.turns[(later_g.0 - 1) as usize];
                         later.items.iter().any(|it| it.head_name() == *h)
                             || later.retracts.iter().any(|r| r == h)
                     })
@@ -476,8 +523,23 @@ fn split_top_level_commas(s: &str) -> Vec<&str> {
 /// attempt to disambiguate it. Reshape-coexistence of a redefined type lives
 /// in the gen-versioned module split, not here.
 fn cumulative_exports_before(log: &DeclLog, gen_one_based: usize) -> Vec<ExportItem> {
+    // The generation whose exports we're folding forward from: `gen_one_based`'s
+    // own `parent` link when it already exists in the log; otherwise (a
+    // one-past-the-end query, e.g. "what would the next flat turn inherit")
+    // fall back to the log's current tip — the pre-tree, positional meaning of
+    // "everything defined so far".
+    let parent = if gen_one_based >= 1 && gen_one_based <= log.turns.len() {
+        log.turns[gen_one_based - 1].parent
+    } else {
+        (log.generation().0 > 0).then_some(log.generation())
+    };
+    let chain = match parent {
+        Some(p) => log.chain_from_root(p),
+        None => Vec::new(),
+    };
     let mut acc: Vec<ExportItem> = Vec::new();
-    for turn in log.turns.iter().take(gen_one_based.saturating_sub(1)) {
+    for g in chain {
+        let turn = &log.turns[(g.0 - 1) as usize];
         let new_heads: Vec<&str> = turn.items.iter().map(ExportItem::head_name).collect();
         // A turn removes prior exports it either redefines OR retracts; then
         // re-adds its own. (A retraction adds nothing.)
@@ -592,11 +654,7 @@ pub fn render_module_with_vals(
     // genuine — a pure-bind-promoted decl shadows exactly like a real one.
     let all_session_heads: Vec<&ExportItem> = prior.iter().chain(this.items.iter()).collect();
 
-    let prev_module = if g >= 2 {
-        Some(SessionModule::lib(Generation((g - 1) as u64)))
-    } else {
-        None
-    };
+    let prev_module = this.parent.map(SessionModule::lib);
 
     let mut out = String::new();
     out.push_str(&merged_pragmas);
@@ -696,11 +754,14 @@ mod tests {
             cons: cons.iter().map(|s| (*s).into()).collect(),
         }
     }
+    /// `parent` is filled in by [`push_chained`] at push time — building it
+    /// here would need the log this turn hasn't been pushed to yet.
     fn turn(src: &str, items: Vec<ExportItem>) -> DeclTurn {
         DeclTurn {
             sources: vec![src.into()],
             items,
             retracts: Vec::new(),
+            parent: None,
         }
     }
     /// A pure-retraction turn: removes `names` from the decl plane, no source.
@@ -709,7 +770,18 @@ mod tests {
             sources: Vec::new(),
             items: Vec::new(),
             retracts: names.iter().map(|s| (*s).into()).collect(),
+            parent: None,
         }
+    }
+
+    /// Push `turn` as the next turn in the log's FLAT chain — sets `parent` to
+    /// the log's current tip (or `None` for the very first turn), mirroring
+    /// the pre-tree positional behavior every existing test below assumes.
+    /// The tree tests further down set `parent` explicitly instead and call
+    /// `log.push` directly.
+    fn push_chained(log: &mut DeclLog, mut t: DeclTurn) -> Generation {
+        t.parent = (log.generation().0 > 0).then_some(log.generation());
+        log.push(t)
     }
 
     #[test]
@@ -777,7 +849,7 @@ mod tests {
         // A session_def'd operator like `(.+)` must export as `(.+)`, not a bare
         // `.+` (which is a GHC parse error in an export list).
         let mut log = DeclLog::new();
-        log.push(turn("a .+ b = a + b", vec![val(".+")]));
+        push_chained(&mut log, turn("a .+ b = a + b", vec![val(".+")]));
         let r = render_module(&log, Generation(1), &ModuleEnv::standalone_default());
         assert!(
             r.source.contains("(.+)"),
@@ -790,7 +862,7 @@ mod tests {
             r.source
         );
         // And the prior-gen `hiding` clause must parenthesize too (redefine `.+`).
-        log.push(turn("a .+ b = a - b", vec![val(".+")]));
+        push_chained(&mut log, turn("a .+ b = a - b", vec![val(".+")]));
         let r2 = render_module(&log, Generation(2), &ModuleEnv::standalone_default());
         assert!(
             r2.source.contains("hiding ((.+))"),
@@ -802,7 +874,7 @@ mod tests {
     #[test]
     fn first_gen_has_no_prior_import() {
         let mut log = DeclLog::new();
-        log.push(turn("slug t = T.toLower t", vec![val("slug")]));
+        push_chained(&mut log, turn("slug t = T.toLower t", vec![val("slug")]));
         let r = render_module(&log, Generation(1), &ModuleEnv::standalone_default());
         assert_eq!(r.module.module_name(), "Tidepool.Session.Lib.G1");
         assert!(r.source.contains("module Tidepool.Session.Lib.G1 ("));
@@ -814,8 +886,8 @@ mod tests {
     #[test]
     fn second_gen_reexports_prior_when_no_redef() {
         let mut log = DeclLog::new();
-        log.push(turn("slug t = t", vec![val("slug")]));
-        log.push(turn("shout t = T.toUpper t", vec![val("shout")]));
+        push_chained(&mut log, turn("slug t = t", vec![val("slug")]));
+        push_chained(&mut log, turn("shout t = T.toUpper t", vec![val("shout")]));
         let r = render_module(&log, Generation(2), &ModuleEnv::standalone_default());
         // No redefinition → plain import + module re-export.
         assert!(r.source.contains("import Tidepool.Session.Lib.G1\n"));
@@ -828,9 +900,12 @@ mod tests {
     #[test]
     fn redefined_function_is_hidden_from_prior_import() {
         let mut log = DeclLog::new();
-        log.push(turn("slug t = t", vec![val("slug")]));
-        log.push(turn("other t = t", vec![val("other")]));
-        log.push(turn("slug t = T.replace \" \" \"-\" t", vec![val("slug")]));
+        push_chained(&mut log, turn("slug t = t", vec![val("slug")]));
+        push_chained(&mut log, turn("other t = t", vec![val("other")]));
+        push_chained(
+            &mut log,
+            turn("slug t = T.replace \" \" \"-\" t", vec![val("slug")]),
+        );
         let r = render_module(&log, Generation(3), &ModuleEnv::standalone_default());
         // G3 redefines slug → hide it from G2's re-export (latest-wins).
         assert!(r
@@ -844,11 +919,14 @@ mod tests {
     #[test]
     fn redefined_data_type_hides_with_dotdot_no_conflict() {
         let mut log = DeclLog::new();
-        log.push(turn("data Foo = A | B", vec![ty("Foo", &["A", "B"])]));
-        log.push(turn(
-            "data Foo = X | A | B",
-            vec![ty("Foo", &["X", "A", "B"])],
-        ));
+        push_chained(
+            &mut log,
+            turn("data Foo = A | B", vec![ty("Foo", &["A", "B"])]),
+        );
+        push_chained(
+            &mut log,
+            turn("data Foo = X | A | B", vec![ty("Foo", &["X", "A", "B"])]),
+        );
         let r2 = render_module(&log, Generation(2), &ModuleEnv::standalone_default());
         // The reshape hides the OLD Foo and its constructors, avoiding GHC's
         // conflicting-export error, and re-declares + exports the new shape.
@@ -869,8 +947,14 @@ mod tests {
         // type's CONSTRUCTOR name in a *different* type must NOT hide the prior
         // type — that would silently drop `Foo` and its sibling `B`.
         let mut log = DeclLog::new();
-        log.push(turn("data Foo = A | B", vec![ty("Foo", &["A", "B"])]));
-        log.push(turn("data Bar = A | C", vec![ty("Bar", &["A", "C"])]));
+        push_chained(
+            &mut log,
+            turn("data Foo = A | B", vec![ty("Foo", &["A", "B"])]),
+        );
+        push_chained(
+            &mut log,
+            turn("data Bar = A | C", vec![ty("Bar", &["A", "C"])]),
+        );
         let r = render_module(&log, Generation(2), &ModuleEnv::standalone_default());
         // Foo is NOT redefined → no `hiding (Foo(..))`; it stays re-exported.
         assert!(!r.source.contains("hiding (Foo(..))"));
@@ -884,11 +968,14 @@ mod tests {
         // A turn that both redefines `slug` and adds a fresh `Greeter` type:
         // only `slug` is hidden from the prior import; the new type is added.
         let mut log = DeclLog::new();
-        log.push(turn("slug t = t", vec![val("slug")]));
-        log.push(turn(
-            "slug t = T.toUpper t\ndata Greeter = Hi | Yo",
-            vec![val("slug"), ty("Greeter", &["Hi", "Yo"])],
-        ));
+        push_chained(&mut log, turn("slug t = t", vec![val("slug")]));
+        push_chained(
+            &mut log,
+            turn(
+                "slug t = T.toUpper t\ndata Greeter = Hi | Yo",
+                vec![val("slug"), ty("Greeter", &["Hi", "Yo"])],
+            ),
+        );
         let r = render_module(&log, Generation(2), &ModuleEnv::standalone_default());
         assert!(r
             .source
@@ -903,8 +990,8 @@ mod tests {
         // `:program` replay must emit ONLY the latest `rf`, not both (the two
         // equations would be an overlapping-clause pair GHC rejects).
         let mut log = DeclLog::new();
-        log.push(turn("rf x = x + 1", vec![val("rf")]));
-        log.push(turn("rf x = x + 2", vec![val("rf")]));
+        push_chained(&mut log, turn("rf x = x + 1", vec![val("rf")]));
+        push_chained(&mut log, turn("rf x = x + 2", vec![val("rf")]));
         let srcs = log.replayable_sources();
         assert_eq!(
             srcs,
@@ -919,11 +1006,14 @@ mod tests {
         // head). It must survive verbatim — both clauses — never treated as a
         // self-redefinition.
         let mut log = DeclLog::new();
-        log.push(turn("f 0 = 0\nf n = n * f (n - 1)", vec![val("f")]));
+        push_chained(
+            &mut log,
+            turn("f 0 = 0\nf n = n * f (n - 1)", vec![val("f")]),
+        );
         let srcs = log.replayable_sources();
         assert_eq!(srcs, vec!["f 0 = 0\nf n = n * f (n - 1)"]);
         // And it still stands when an unrelated later turn is added.
-        log.push(turn("g y = y", vec![val("g")]));
+        push_chained(&mut log, turn("g y = y", vec![val("g")]));
         assert_eq!(
             log.replayable_sources(),
             vec!["f 0 = 0\nf n = n * f (n - 1)", "g y = y"],
@@ -935,9 +1025,9 @@ mod tests {
         // Interleaved: define a, define b, redefine a. Latest `a` and the sole
         // `b` survive, in log order; the stale first `a` is dropped.
         let mut log = DeclLog::new();
-        log.push(turn("a = 1", vec![val("a")]));
-        log.push(turn("b = 2", vec![val("b")]));
-        log.push(turn("a = 3", vec![val("a")]));
+        push_chained(&mut log, turn("a = 1", vec![val("a")]));
+        push_chained(&mut log, turn("b = 2", vec![val("b")]));
+        push_chained(&mut log, turn("a = 3", vec![val("a")]));
         assert_eq!(log.replayable_sources(), vec!["b = 2", "a = 3"]);
     }
 
@@ -945,7 +1035,10 @@ mod tests {
     fn replayable_sources_keeps_headless_turn() {
         // A turn with no exportable head (e.g. a bare instance) is always kept.
         let mut log = DeclLog::new();
-        log.push(turn("instance Show Foo where show _ = \"foo\"", vec![]));
+        push_chained(
+            &mut log,
+            turn("instance Show Foo where show _ = \"foo\"", vec![]),
+        );
         assert_eq!(
             log.replayable_sources(),
             vec!["instance Show Foo where show _ = \"foo\""],
@@ -955,7 +1048,7 @@ mod tests {
     #[test]
     fn type_synonym_renders_bare_not_dotdot() {
         let mut log = DeclLog::new();
-        log.push(turn("type Name = T.Text", vec![ty("Name", &[])]));
+        push_chained(&mut log, turn("type Name = T.Text", vec![ty("Name", &[])]));
         let r = render_module(&log, Generation(1), &ModuleEnv::standalone_default());
         assert!(r.source.contains("    Name\n"));
         assert!(!r.source.contains("Name(..)"));
@@ -964,10 +1057,13 @@ mod tests {
     #[test]
     fn user_language_pragma_hoisted_above_module_header() {
         let mut log = DeclLog::new();
-        log.push(turn(
-            "{-# LANGUAGE DeriveAnyClass #-}\ndata Foo = Foo deriving (Eq, Show)",
-            vec![ty("Foo", &["Foo"])],
-        ));
+        push_chained(
+            &mut log,
+            turn(
+                "{-# LANGUAGE DeriveAnyClass #-}\ndata Foo = Foo deriving (Eq, Show)",
+                vec![ty("Foo", &["Foo"])],
+            ),
+        );
         let r = render_module(&log, Generation(1), &ModuleEnv::standalone_default());
         let pragma_pos = r.source.find("{-# LANGUAGE").expect("pragma block present");
         let module_pos = r
@@ -997,7 +1093,7 @@ mod tests {
     fn multiple_user_language_pragmas_deduplicated() {
         let mut log = DeclLog::new();
         // OverloadedStrings already in standalone_default — must not appear twice.
-        log.push(turn(
+        push_chained(&mut log, turn(
             "{-# LANGUAGE DeriveGeneric #-}\n{-# LANGUAGE OverloadedStrings #-}\ndata Bar = Bar",
             vec![ty("Bar", &["Bar"])],
         ));
@@ -1019,10 +1115,13 @@ mod tests {
         // header (import section), not left in the declaration body — a
         // body-position import is a GHC parse error.
         let mut log = DeclLog::new();
-        log.push(turn(
-            "import Data.Char (toUpper)\ntoUpper' c = toUpper c",
-            vec![val("toUpper'")],
-        ));
+        push_chained(
+            &mut log,
+            turn(
+                "import Data.Char (toUpper)\ntoUpper' c = toUpper c",
+                vec![val("toUpper'")],
+            ),
+        );
         let r = render_module(&log, Generation(1), &ModuleEnv::standalone_default());
         let module_pos = r
             .source
@@ -1064,15 +1163,15 @@ mod tests {
     #[test]
     fn retraction_removes_name_from_every_scoping_view() {
         let mut log = DeclLog::new();
-        log.push(turn("findings = []", vec![val("findings")]));
-        log.push(turn("keep t = t", vec![val("keep")]));
+        push_chained(&mut log, turn("findings = []", vec![val("findings")]));
+        push_chained(&mut log, turn("keep t = t", vec![val("keep")]));
         // Before retraction: both are live in every view.
         assert_eq!(heads(&log), vec!["findings", "keep"]);
         let before = cumulative_exports_before(&log, log.turns.len() + 1);
         assert!(before.iter().any(|e| e.head_name() == "findings"));
 
         // findings migrates to the value plane → retract it.
-        log.push(retract_turn(&["findings"]));
+        push_chained(&mut log, retract_turn(&["findings"]));
 
         // current_heads, cumulative exports, and decl replay all drop it;
         // `keep` is untouched.
@@ -1089,9 +1188,9 @@ mod tests {
     #[test]
     fn retraction_turn_hides_name_from_rendered_module() {
         let mut log = DeclLog::new();
-        log.push(turn("findings = []", vec![val("findings")]));
-        log.push(turn("keep t = t", vec![val("keep")]));
-        log.push(retract_turn(&["findings"]));
+        push_chained(&mut log, turn("findings = []", vec![val("findings")]));
+        push_chained(&mut log, turn("keep t = t", vec![val("keep")]));
+        push_chained(&mut log, retract_turn(&["findings"]));
         let r = render_module(&log, Generation(3), &ModuleEnv::standalone_default());
         // The retraction shell hides `findings` from the prior-gen import (so
         // `module Prev` no longer re-exports it) and adds no new decl for it.
@@ -1110,11 +1209,11 @@ mod tests {
     #[test]
     fn define_after_retraction_unretracts_latest_wins() {
         let mut log = DeclLog::new();
-        log.push(turn("findings = []", vec![val("findings")]));
-        log.push(retract_turn(&["findings"]));
+        push_chained(&mut log, turn("findings = []", vec![val("findings")]));
+        push_chained(&mut log, retract_turn(&["findings"]));
         assert!(!heads(&log).contains(&"findings".to_string()));
         // Re-defining the name brings it back (a later value→decl rebind).
-        log.push(turn("findings = [1]", vec![val("findings")]));
+        push_chained(&mut log, turn("findings = [1]", vec![val("findings")]));
         assert!(heads(&log).contains(&"findings".to_string()));
         let exports = cumulative_exports_before(&log, log.turns.len() + 1);
         assert!(exports.iter().any(|e| e.head_name() == "findings"));
@@ -1127,10 +1226,101 @@ mod tests {
     #[test]
     fn retracting_absent_name_leaves_exports_unchanged() {
         let mut log = DeclLog::new();
-        log.push(turn("keep t = t", vec![val("keep")]));
+        push_chained(&mut log, turn("keep t = t", vec![val("keep")]));
         let before = cumulative_exports_before(&log, log.turns.len() + 1);
-        log.push(retract_turn(&["never_defined"]));
+        push_chained(&mut log, retract_turn(&["never_defined"]));
         let after = cumulative_exports_before(&log, log.turns.len() + 1);
         assert_eq!(before, after, "retracting an absent name is a no-op fold");
+    }
+
+    // --- Scope trees (PRD 21 lane C2): `parent` as a tree edge, not a position ---
+
+    #[test]
+    fn root_only_chain_has_parent_equal_to_g_minus_1() {
+        // Flat-chain proof (design doc "flat degeneracy is the back-compat
+        // proof"): every ROOT-only turn's parent is exactly `g - 1` (`None`
+        // for g == 1), and the rendered import/re-export names that same
+        // generation — today's `Lib.G<g-1>` rendering, unchanged.
+        let mut log = DeclLog::new();
+        push_chained(&mut log, turn("a = 1", vec![val("a")]));
+        push_chained(&mut log, turn("b = 2", vec![val("b")]));
+        push_chained(&mut log, turn("c = 3", vec![val("c")]));
+        assert_eq!(log.turns[0].parent, None);
+        assert_eq!(log.turns[1].parent, Some(Generation(1)));
+        assert_eq!(log.turns[2].parent, Some(Generation(2)));
+
+        let r = render_module(&log, Generation(3), &ModuleEnv::standalone_default());
+        assert!(r.source.contains("import Tidepool.Session.Lib.G2\n"));
+        assert!(r.source.contains("module Tidepool.Session.Lib.G2,"));
+    }
+
+    #[test]
+    fn branch_turn_names_its_actual_parent_not_positional_g_minus_1() {
+        let mut log = DeclLog::new();
+        push_chained(&mut log, turn("a = 1", vec![val("a")])); // gen 1
+        push_chained(&mut log, turn("b = 2", vec![val("b")])); // gen 2
+                                                               // A turn at position 3, chained from gen 1 (NOT gen 2) — a child
+                                                               // scope that forked off before `b` was defined.
+        log.push(DeclTurn {
+            sources: vec!["a = 99".into()],
+            items: vec![val("a")],
+            retracts: Vec::new(),
+            parent: Some(Generation(1)),
+        }); // gen 3, parent = 1
+
+        let r = render_module(&log, Generation(3), &ModuleEnv::standalone_default());
+        // Names its ACTUAL parent (gen 1) in both the hiding import and the
+        // re-export, not the positional `g - 1` (gen 2).
+        assert!(r
+            .source
+            .contains("import Tidepool.Session.Lib.G1 hiding (a)"));
+        assert!(r.source.contains("module Tidepool.Session.Lib.G1,"));
+        assert!(
+            !r.source.contains("Lib.G2"),
+            "must not reference the positional but non-parent gen 2:\n{}",
+            r.source
+        );
+        // `b`, defined off the OTHER branch (gen 2), is invisible here — the
+        // parent link is a tree edge, not a position.
+        assert!(!r.source.contains("    b"));
+    }
+
+    #[test]
+    fn sibling_turns_off_one_parent_each_shadow_independently() {
+        // The design doc's worked example ("gens 5 and 6 both with parent
+        // 4"), scaled down: two sibling turns off gen 1 each redefine
+        // `helper`; neither's body leaks into the other's rendered module,
+        // and both correctly hide the shared parent's `helper`.
+        let mut log = DeclLog::new();
+        push_chained(&mut log, turn("helper x = x", vec![val("helper")])); // gen 1
+        log.push(DeclTurn {
+            sources: vec!["helper x = x + 1".into()],
+            items: vec![val("helper")],
+            retracts: Vec::new(),
+            parent: Some(Generation(1)),
+        }); // gen 2 (left sibling)
+        log.push(DeclTurn {
+            sources: vec!["helper x = x * 2".into()],
+            items: vec![val("helper")],
+            retracts: Vec::new(),
+            parent: Some(Generation(1)),
+        }); // gen 3 (right sibling)
+
+        let left = render_module(&log, Generation(2), &ModuleEnv::standalone_default());
+        let right = render_module(&log, Generation(3), &ModuleEnv::standalone_default());
+
+        for r in [&left, &right] {
+            assert!(r
+                .source
+                .contains("import Tidepool.Session.Lib.G1 hiding (helper)"));
+            assert!(r.source.contains("    helper"));
+        }
+        assert!(left.source.contains("helper x = x + 1"));
+        assert!(right.source.contains("helper x = x * 2"));
+        assert!(!left.source.contains("x * 2"), "sibling body must not leak");
+        assert!(
+            !right.source.contains("x + 1"),
+            "sibling body must not leak"
+        );
     }
 }
