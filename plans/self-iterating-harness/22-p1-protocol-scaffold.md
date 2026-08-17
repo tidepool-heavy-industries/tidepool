@@ -845,6 +845,35 @@ not prove the migration is safe, they prove the migration did not touch what it
 claimed not to touch. Same discipline as §5's Class A, applied to disk instead
 of to the wire.
 
+*Captured, and the surface turned out to be narrower than "receipts and registry
+entries" suggested.* `tidepool-worktree/tests/durable_formats.rs` establishes by
+grep of every `serde_json::to_*`/`from_*` call site — not by assumption — that
+there are exactly THREE durable roots:
+
+| Root | On disk as |
+|---|---|
+| `WorktreeReceipt` | one JSON file per id, `<registry_root>/records/<id>.json` |
+| `Vec<Binding>` | one JSON file per id, the worktree's full lease history |
+| `JournalEntry` | JSONL, one object per line, appended to the event journal |
+
+Seven other serde-deriving types in the crate are reachable by a reader's
+intuition but never by a write site (`WorktreeSummary`, `Observed<T>`,
+`SubscriptionId`, and — the one worth naming — `WorktreeError` and its three
+payload types). `WorktreeError` crosses to Haskell through `ToCore`, never to
+disk. It is pinned inline anyway, because it is the type this lane's error ADT
+regenerates and a cheap pin on a non-durable type costs nothing; but the
+distinction is recorded so a later lane does not mistake the pin for a durable
+contract it must preserve.
+
+> **A finding the Event lane needs, and Worktree did not have.** `JournalEntry`
+> embeds the DOMAIN `RepositoryEvent` / `HeadChangeReceipt` / `CommitReceipt`
+> as durable JSONL. So the Event mirror retirement carries a durable-format
+> lock that the Worktree one does not: its domain types are on disk, with serde
+> names and variant tags that are a persisted contract. Worktree's wire types
+> touch no durable byte and that is why this lane's Class D goldens are a
+> non-regression check; for Event they will be a genuine constraint on what the
+> generator may emit. Capture them before that lane starts, not during it.
+
 **Class E — wire-struct identity (NEW).** Type-level assertions that the
 generated wire types are the same types the hand-written ones were: for each,
 the field/variant NAMES and ORDER, the Rust types, the derive set, and the
