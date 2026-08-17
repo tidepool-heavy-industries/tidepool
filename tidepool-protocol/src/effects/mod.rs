@@ -9,11 +9,12 @@
 //! Adding one: see `plans/self-iterating-harness/22-p1-protocol-scaffold.md` §9.
 
 pub mod exec;
+pub mod journal;
 
 use crate::schema::Effect;
 
 /// Every effect whose contract this crate owns.
 #[must_use]
 pub fn all() -> Vec<Effect> {
-    vec![exec::exec()]
+    vec![exec::exec(), journal::journal()]
 }

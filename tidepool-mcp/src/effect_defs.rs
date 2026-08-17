@@ -221,18 +221,10 @@ macro_rules! extra_imports_for {
     (AskUser) => {
         &["import Tidepool.Form"]
     };
-    // The READ half of the run journal (PRD 20 S1-L5). `record` stays
-    // write-only — `Tidepool.Resume` reads nothing; it is the type of the
-    // already-folded value the DRIVER injects at boot
-    // (`__selfHarnessResume :: Resume.ResumeFold`, spliced by
-    // `tidepool_harness::selfharness::state_cross::resume_in`). Gated on
-    // `Journal` because that is the row a journaling harness compiles under,
-    // and it is unconditional WITHIN that row: the self-harness outer row
-    // always carries `Journal`, so the qualifier is in scope on every outer
-    // compile whether or not that particular cycle splices a fold.
-    (Journal) => {
-        &["import qualified Tidepool.Resume as Resume"]
-    };
+    // Journal was migrated to the `tidepool-protocol` schema (PRD 22 phase 2);
+    // its `extra_imports` (`import qualified Tidepool.Resume as Resume` — the
+    // READ half of the run journal, PRD 20 S1-L5) is schema data now, emitted
+    // straight into its generated decl. See `tidepool-protocol/src/effects/journal.rs`.
     ($other:ident) => {
         &[]
     };
@@ -2218,54 +2210,9 @@ macro_rules! subagent_effect_def {
     };
 }
 
-/// Journal effect — single definition (PRD 20, S1-L5 substrate slice).
-///
-/// A durable append-only run journal: a resident harness records completed
-/// steps as it happens, mid-loop, so a crash loses only in-flight work —
-/// never the record of what already finished. One verb, `record kind key
-/// payload`: `kind`/`key` are caller-chosen labels, `payload` an opaque JSON
-/// value (the PRD's locked lean — a fixed step shape, not a
-/// harness-extensible one). Like Worktree/RepoEvent/Subagent, this is NOT in
-/// `build_base_stack`'s row: which file a run journals to, and folding it
-/// into boot-time resume, is the swarm driver's job, wired at merge.
-// See `http_effect_def!` on why `crate::` (not `$crate`) is correct for
-// `crate::effect_glue::JsonArg` here — it resolves at the EXPANSION site
-// (tidepool-handlers' `effect_rust_projection!`), the only consumer of the
-// Rust arg types.
-#[allow(clippy::crate_in_macro_def)]
-#[macro_export]
-macro_rules! journal_effect_def {
-    ($project:path) => {
-        $project! {
-            effect Journal,
-            handler JournalHandler,
-            req JournalReq,
-            decl_fn journal_decl,
-            description [
-                "Durable append-only run journal: a resident harness records completed ",
-                "steps as it happens, mid-loop, so progress survives a crash and resume ",
-                "can fold the journal instead of redoing finished work. `record kind key ",
-                "payload` appends ONE entry — `kind` and `key` are caller-chosen labels ",
-                "(e.g. a step kind and the branch or task it concerns), `payload` is an ",
-                "opaque JSON value. Every append is flushed immediately; the journal is ",
-                "append-only forever — there is no rewrite or compaction verb.",
-            ],
-            type_defs [],
-            verbs [
-                { ctor RecordStep, method record_step,
-                  args { kind: "Text" as String, key: "Text" as String, payload: "Value" as crate::effect_glue::JsonArg },
-                  ret "()" },
-            ],
-            helpers [
-                { raw ["-- | Append one durable journal entry. `kind` and `key` are",
-                       "-- caller-chosen labels; `payload` is an opaque JSON value. Flushed",
-                       "-- immediately; append-only — never rewritten or compacted.",
-                       "record :: Text -> Text -> Value -> M ()",
-                       "record kind key payload = send (RecordStep kind key payload)"] },
-            ],
-        }
-    };
-}
+// Journal effect: MIGRATED to the `tidepool-protocol` schema (PRD 22 phase 2).
+// `journal_decl()` now comes from `tidepool-mcp/src/generated/journal.rs`; see
+// `tidepool-protocol/src/effects/journal.rs` for the single-source definition.
 
 #[cfg(test)]
 mod tests {

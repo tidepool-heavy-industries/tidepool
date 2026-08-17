@@ -18,10 +18,11 @@ use tidepool_effect::dispatch::EffectContext;
 use tidepool_effect::error::EffectError;
 use tidepool_mcp::CapturedOutput;
 
-// JournalReq + DescribeEffect + EffectHandler dispatch are generated from the
-// single-source definition; only the handler struct and the per-verb method
-// body below are hand-written.
-tidepool_mcp::journal_effect_def!(crate::effect_glue::effect_rust_projection);
+// JournalReq, DescribeEffect and the EffectHandler dispatch are GENERATED from
+// the `tidepool-protocol` schema (PRD 22 phase 2) — re-exported here so the
+// public path (`tidepool_handlers::JournalReq`) is unchanged. Only the handler
+// struct and the per-verb method body below are hand-written.
+pub use crate::generated::journal::JournalReq;
 
 // ============================================================================
 // Entries + the fold API (for the swarm driver's boot-time resume — not
@@ -399,7 +400,10 @@ impl JournalHandler {
         Ok(())
     }
 
-    fn record_step(
+    // `pub(crate)` rather than private: the generated dispatch arm lives in a
+    // sibling module (`crate::generated::journal`) now, not expanded inline
+    // here.
+    pub(crate) fn record_step(
         &mut self,
         cx: &EffectContext<'_, CapturedOutput>,
         kind: String,

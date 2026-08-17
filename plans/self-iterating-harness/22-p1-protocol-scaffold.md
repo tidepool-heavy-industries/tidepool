@@ -517,3 +517,48 @@ Subagent row.
    diff. If you cannot explain a difference, it is a bug, not a nuance.
 8. Verify: `cargo fmt --all -- --check` (generated `.rs` must be a rustfmt fixed
    point), `cargo nextest run`, and the batteries that touch the effect.
+
+---
+
+## 10. The second flip — Journal (lane 2, confirms §9 repeats)
+
+Journal was chosen as the first repeat of §9 specifically because it is small
+and **not** Exec: one verb (`RecordStep`), no error ADT, opt-in row placement
+(not in `build_base_stack`), and it is the first migrated effect whose only
+`args`/`ret` involve `Value`/`()`.
+
+**The procedure reproduced cleanly — no new diff class.** All six of §7's
+accounted-for differences apply to Journal verbatim (sibling-module glue makes
+`record_step` `pub(crate)`; derive macros imported by name; `#[must_use]` on
+the decl builder; `extra_imports` as a literal array instead of an
+`extra_imports_for!` table arm; public paths unchanged). Difference #3 (error
+variant docs finding a home as Rust doc comments) does not apply — Journal
+declares no `errors` block, so `tidepool-handlers/src/generated/journal.rs`
+takes `handler_rs.rs`'s other branch (`use tidepool_bridge_derive::FromCore;`
+only, no error enum emitted) for the first time on a *migrated* effect. That
+branch already existed in the generator (written generically in phase 1, never
+exercised by Exec since Exec has typed errors); Journal is what exercises it,
+and it produced the byte-identical dispatch arm
+(`JournalReq::RecordStep(kind, key, payload) => self.record_step(cx, kind, key, payload)`)
+with no generator change needed.
+
+**No schema extension needed either.** `HsType::Value`, `HsType::Unit`,
+`RustBinding::JsonValue`, and `OuterEffect::Journal` were all already declared
+in phase 1 (§3.3, §3.5) but unused by Exec's schema entry — `payload: "Value"
+as crate::effect_glue::JsonArg` (Journal's arg) is the first migrated verb to
+actually render `RustBinding::JsonValue`, and it rendered correctly on the
+first try. Nothing in `tidepool-protocol/src/{hs,schema}.rs` changed.
+
+**Byte-compat result.** `journal_decl_matches_the_schema_exactly`
+(`tidepool-mcp/tests/protocol_schema_equivalence.rs`) proved the schema against
+the still-live `journal_effect_def!` macro before the flip. After the flip, the
+Class A `effect_decls.txt` golden (which already carried `journal_decl()` in
+its pinned list — captured that way in phase 1 because Journal was known to be
+next) was re-asserted **without regenerating it** and stayed byte-identical,
+which is the migration's whole proof.
+
+**Deleted:** `journal_effect_def!` from `effect_defs.rs`, its invocation in
+`effect_decls.rs`, its invocation in `handlers/journal.rs`, and the `(Journal)`
+arm of `extra_imports_for!`. The macro grammar and the remaining definitions
+(now eighteen) are untouched. Event/Subagent/Exec rows were not read, written,
+or depended on.

@@ -10,3 +10,4 @@
 //! `TIDEPOOL_REGEN_PROTOCOL=1`.
 
 pub mod exec;
+pub mod journal;

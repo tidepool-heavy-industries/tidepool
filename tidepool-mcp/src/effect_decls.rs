@@ -319,9 +319,9 @@ crate::event_effect_def!(crate::effect_defs::effect_decl_projection);
 // reference WorktreeSpec/WorktreeHandle/WorktreeError).
 crate::subagent_effect_def!(crate::effect_defs::effect_decl_projection);
 
-// Journal (PRD 20, S1-L5 substrate slice): `journal_decl()`. Like
-// Worktree/RepoEvent/Subagent, NOT in `build_base_stack`'s row — the durable
-// append-only run journal a resident harness records progress to; which
-// file a run journals to, and folding it on boot, is the swarm driver's
-// wiring, done at merge.
-crate::journal_effect_def!(crate::effect_defs::effect_decl_projection);
+// Journal (PRD 20, S1-L5 substrate slice): MIGRATED to the `tidepool-protocol`
+// schema (PRD 22 phase 2). `journal_decl()` now comes from
+// `src/generated/journal.rs`, not from a macro here. Like Worktree/RepoEvent/
+// Subagent, NOT in `build_base_stack`'s row — the durable append-only run
+// journal a resident harness records progress to; which file a run journals
+// to, and folding it on boot, is the swarm driver's wiring, done at merge.

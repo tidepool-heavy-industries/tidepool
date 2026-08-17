@@ -140,3 +140,46 @@ fn exec_contract_text_is_pinned() {
     assert!(exec.default_row_args.is_empty());
     assert!(!exec.helpers_row_polymorphic);
 }
+
+/// The same independent pin as [`exec_contract_text_is_pinned`], for Journal.
+#[test]
+fn journal_contract_text_is_pinned() {
+    let journal = tidepool_protocol::effects::journal::journal();
+
+    assert_eq!(
+        journal.constructor_signatures(),
+        vec!["RecordStep :: Text -> Text -> Value -> Journal ()"]
+    );
+
+    assert!(journal.type_def_texts().is_empty());
+
+    assert_eq!(
+        journal.helper_texts(),
+        vec![concat!(
+            "-- | Append one durable journal entry. `kind` and `key` are\n",
+            "-- caller-chosen labels; `payload` is an opaque JSON value. Flushed\n",
+            "-- immediately; append-only — never rewritten or compacted.\n",
+            "record :: Text -> Text -> Value -> M ()\n",
+            "record kind key payload = send (RecordStep kind key payload)",
+        )]
+    );
+
+    assert_eq!(
+        journal.description_text(),
+        "Durable append-only run journal: a resident harness records completed \
+         steps as it happens, mid-loop, so progress survives a crash and resume \
+         can fold the journal instead of redoing finished work. `record kind key \
+         payload` appends ONE entry — `kind` and `key` are caller-chosen labels \
+         (e.g. a step kind and the branch or task it concerns), `payload` is an \
+         opaque JSON value. Every append is flushed immediately; the journal is \
+         append-only forever — there is no rewrite or compaction verb."
+    );
+    assert_eq!(
+        journal.extra_imports,
+        &["import qualified Tidepool.Resume as Resume"]
+    );
+    assert!(journal.prompt_card.is_none());
+    assert!(journal.type_params.is_empty());
+    assert!(journal.default_row_args.is_empty());
+    assert!(!journal.helpers_row_polymorphic);
+}

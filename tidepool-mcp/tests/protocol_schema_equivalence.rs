@@ -81,6 +81,18 @@ fn exec_decl_matches_the_schema_exactly() {
     );
 }
 
+/// Written to run BEFORE the flip, against the still-hand-written
+/// `journal_effect_def!` macro — see the module doc: green here is what makes
+/// this a proof rather than a tautology, and it is the go-ahead the flip
+/// waits on.
+#[test]
+fn journal_decl_matches_the_schema_exactly() {
+    assert_decl_matches_schema(
+        &tidepool_mcp::journal_decl(),
+        &tidepool_protocol::effects::journal::journal(),
+    );
+}
+
 /// Every effect the schema claims to own must actually be wired into
 /// `tidepool-mcp` — a schema entry with no live decl would prove nothing while
 /// looking like coverage.
@@ -92,7 +104,7 @@ fn every_schema_effect_is_reachable() {
         .collect();
     assert_eq!(
         names,
-        vec!["Exec"],
+        vec!["Exec", "Journal"],
         "the migrated set changed — add the new effect's equivalence assertion above"
     );
 }
