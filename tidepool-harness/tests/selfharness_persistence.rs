@@ -30,7 +30,9 @@ use std::sync::{Arc, Mutex};
 
 mod support;
 
-use tidepool_handlers::{load_journal, ConsoleHandler, JournalEntry, JournalLoadError};
+use tidepool_handlers::{
+    compose_journal_seq, load_journal, ConsoleHandler, JournalEntry, JournalLoadError,
+};
 use tidepool_harness::engine::EngineConfig;
 use tidepool_harness::log::LogHeader;
 use tidepool_harness::provider::{
@@ -972,10 +974,18 @@ async fn crashed_cycle_keeps_its_lease_and_the_resumed_run_does_only_the_delta()
     );
     assert_eq!(
         seqs(&resumed_entries),
-        vec![0, 1, 2, 3],
-        "the resumed run's seqs must continue PAST the crashed run's rather than \
-         restarting at 0 (which would make the two processes' entries \
-         indistinguishable under a max-seq fold)"
+        vec![
+            compose_journal_seq(first.segment_ordinal, 0),
+            compose_journal_seq(first.segment_ordinal, 1),
+            compose_journal_seq(second.segment_ordinal, 0),
+            compose_journal_seq(second.segment_ordinal, 1),
+        ],
+        "the resumed run's seqs must be composed from ITS OWN segment ordinal \
+         — structurally disjoint from the crashed run's, never continued from \
+         a folded max — which is also why they still sort strictly after the \
+         crashed run's for this well-behaved sequential resume (which would \
+         make the two processes' entries indistinguishable under a max-seq \
+         fold otherwise)"
     );
     let committed = persistence::load_checkpoint(&checkpoint_path)
         .expect("load_checkpoint after the resumed cycle")
@@ -1110,9 +1120,10 @@ fn torn_line_before_the_last_fails_the_boot_loudly() {
     assert!(
         matches!(
             load_journal(&acquired.segment),
-            Err(JournalLoadError::TornMidFile { line_no: 1, .. })
+            Err(JournalLoadError::TornMidFile { line_no: 2, .. })
         ),
-        "expected TornMidFile at line 1, got {:?}",
+        "expected TornMidFile at ONE-based line 2 (the corrupted `beta` line is \
+         the SECOND line in the file), got {:?}",
         load_journal(&acquired.segment)
     );
 
@@ -1122,7 +1133,7 @@ fn torn_line_before_the_last_fails_the_boot_loudly() {
         .expect_err("the boot must refuse a corrupted segment, not fold around it");
     let msg = err.to_string();
     assert!(
-        msg.contains(&acquired.segment.display().to_string()) && msg.contains("line 1"),
+        msg.contains(&acquired.segment.display().to_string()) && msg.contains("line 2"),
         "the refusal must name the segment and the offending line, got: {msg}"
     );
 }

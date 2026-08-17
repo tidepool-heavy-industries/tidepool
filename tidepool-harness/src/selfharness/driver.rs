@@ -938,9 +938,17 @@ impl SelfHarnessDriver {
     /// 3. The handler is built with
     ///    [`tidepool_handlers::JournalHandler::resuming`], targeting
     ///    `acquired.segment` (this process's OWN, freshly allocated segment —
-    ///    never a segment a prior process wrote to) and seeded at the fold's
-    ///    `next_seq` — so a resumed run's appends CONTINUE past what is
-    ///    already on disk instead of restarting at 0.
+    ///    never a segment a prior process wrote to) and seeded at
+    ///    `acquired.segment_ordinal` — the ordinal THIS process's segment
+    ///    claim landed on, never the fold's `next_seq`. Composing that
+    ///    ordinal into every `seq` this handler writes
+    ///    ([`tidepool_handlers::compose_journal_seq`]) is what makes `seq`
+    ///    structurally unique even when two processes resume the SAME
+    ///    extant lease at once and therefore fold the identical prior
+    ///    state: seeding both from that identical fold's `next_seq` is
+    ///    exactly how two concurrent resumes used to collide, and no
+    ///    coordination beyond each process's own exclusively-claimed
+    ///    segment ordinal is needed to prevent it.
     ///
     /// Returns how many `(kind, key)` pairs folded — `0` for a fresh run, which
     /// is also when the ordinary `loop` entry is compiled unchanged.
@@ -960,7 +968,7 @@ impl SelfHarnessDriver {
         let segment_count = crate::selfharness::resume::list_segments(log_dir, run_id)?.len();
         self.handlers.journal = Some(tidepool_handlers::JournalHandler::resuming(
             acquired.segment.clone(),
-            fold.next_seq(),
+            acquired.segment_ordinal,
         ));
         self.resume = Some(PendingResume {
             fold,

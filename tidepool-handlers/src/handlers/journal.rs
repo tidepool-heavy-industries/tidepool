@@ -135,6 +135,9 @@ pub enum JournalLoadError {
     /// absorbed the way a torn final line is.
     TornMidFile {
         path: PathBuf,
+        /// ONE-based file line number (the first line is `1`), matching what
+        /// an operator sees in a text editor or `sed -n '<n>p'` — not the
+        /// zero-based array index [`load_journal`] iterates with.
         line_no: usize,
         detail: JournalParseError,
     },
@@ -205,7 +208,7 @@ pub fn load_journal(path: &Path) -> Result<Vec<JournalEntry>, JournalLoadError> 
             Err(detail) => {
                 return Err(JournalLoadError::TornMidFile {
                     path: path.to_path_buf(),
-                    line_no: i,
+                    line_no: i + 1,
                     detail,
                 });
             }
@@ -247,15 +250,15 @@ pub fn last_by_key(entries: &[JournalEntry]) -> HashMap<String, JournalEntry> {
 /// physical order is exactly the durable byte sequence a crash leaves behind,
 /// so folding on it is folding over the real evidence.
 ///
-/// `seq` is written to every entry as PROVENANCE and stays run-global
-/// monotonic in practice (a resumed segment's handler is seeded past
-/// everything already folded — see
-/// `tidepool_harness::selfharness::resume::ResumeFold::next_seq`), but it is
-/// deliberately NOT what this fold sorts on. Folding on `seq` instead would
-/// let a foreign, hand-edited, or mis-seeded segment carrying a `seq` that
-/// contradicts physical order silently INVERT the result — not merely lose an
-/// entry, but pick the wrong one as the winner. Position can't be inverted
-/// that way: the caller's supplied order IS the order folded on.
+/// `seq` is written to every entry as PROVENANCE — composed from each
+/// process's own exclusively-claimed segment ordinal ([`compose_journal_seq`]),
+/// which makes it run-GLOBALLY UNIQUE by construction, with no cross-process
+/// coordination beyond the segment claim itself (see that function's doc) —
+/// but it is deliberately NOT what this fold sorts on. Folding on `seq`
+/// instead would let a foreign, hand-edited, or mis-seeded segment carrying a
+/// `seq` that contradicts physical order silently INVERT the result — not
+/// merely lose an entry, but pick the wrong one as the winner. Position can't
+/// be inverted that way: the caller's supplied order IS the order folded on.
 pub fn last_by_kind_key(entries: &[JournalEntry]) -> HashMap<(String, String), JournalEntry> {
     let mut out: HashMap<(String, String), JournalEntry> = HashMap::new();
     for entry in entries {
@@ -354,18 +357,61 @@ impl PartialEq<SegmentPath> for PathBuf {
 // The handler
 // ============================================================================
 
+/// Bits of a composed `seq` ([`compose_journal_seq`]) reserved for the
+/// segment-LOCAL counter; the remaining high bits are the segment ordinal.
+/// 32 bits of local counter is far past any run's real per-segment append
+/// count (one entry per completed step, never per token — see
+/// [`JournalHandler::append`]'s doc), so this is not a practical ceiling.
+const LOCAL_SEQ_BITS: u32 = 32;
+
+/// Compose a journal entry's full `seq` from the segment it was written into
+/// and its position within that segment: the segment ordinal in the high
+/// bits, a per-segment-local counter (starting at `0`) in the low bits.
+///
+/// This is what makes `seq` run-GLOBALLY UNIQUE by construction, with NO
+/// cross-process coordination beyond the segment claim itself: two processes
+/// racing to resume the same lease at once (`tidepool_harness::selfharness
+/// ::resume::acquire_lease`'s warn-never-refuse alive-pid policy — a wedged
+/// pid must never block a resume, so this cannot lean on refusing the race)
+/// always land on DISTINCT segment ordinals, because
+/// [`SegmentPath::create_exclusive`] is what claims one — so their composed
+/// `seq` ranges can never collide even though both folded the identical prior
+/// state and would otherwise seed an identical local counter. This replaces
+/// continuing a resumed handler's counter from a folded `max_seq`, which is
+/// exactly the mechanism that collided under a concurrent resume: two
+/// handlers seeded from the same fold started their own local counters at
+/// the same value.
+///
+/// For a WELL-BEHAVED sequential run (one process at a time, never two
+/// resuming at once), segment ordinals are allocated strictly increasing
+/// across time, so the composed `seq` is still strictly ascending in the
+/// run's true physical write order (segment order, then each segment's own
+/// append order) — see `resuming_across_two_segments_keeps_seq_ascending_in_
+/// physical_order` for the pinned property, and this module's `seq` docs on
+/// [`last_by_kind_key`] for why the fold never depends on that ordering
+/// anyway.
+pub fn compose_journal_seq(segment_ordinal: u64, local_seq: u64) -> u64 {
+    debug_assert!(
+        local_seq < (1u64 << LOCAL_SEQ_BITS),
+        "local_seq overflowed into the segment-ordinal bits of a composed journal seq"
+    );
+    (segment_ordinal << LOCAL_SEQ_BITS) | local_seq
+}
+
 #[derive(Clone)]
 pub struct JournalHandler {
     path: PathBuf,
-    // Monotonic for the lifetime of THIS handler instance, starting wherever
-    // the constructor seeded it — never derived from what is on disk by this
-    // type, which does not read journals. A resumed run's continuity ACROSS
-    // handler instances is a fold-API/driver concern, and
-    // [`JournalHandler::resuming`] is where the driver honors it: it has just
-    // folded the file, so it knows `max(seq) + 1`. Allocated under the SAME
-    // lock as the write itself (see [`Self::append`]), so seq order and
+    // The segment ordinal every seq this handler writes is composed against
+    // (see [`compose_journal_seq`]) — fixed for the handler's lifetime, one
+    // per process's own exclusively-claimed segment.
+    segment_ordinal: u64,
+    // The segment-LOCAL counter: monotonic for the lifetime of THIS handler
+    // instance, always starting at `0` regardless of fresh or resumed —
+    // uniqueness across handler instances comes from `segment_ordinal`
+    // differing, not from where this counter starts. Allocated under the
+    // SAME lock as the write itself (see [`Self::append`]), so seq order and
     // physical (on-disk) order coincide within one segment instead of racing.
-    seq: Arc<AtomicU64>,
+    local_seq: Arc<AtomicU64>,
     // Serializes an entire append — seq allocation, open, write, fsync —
     // across every clone of this handler sharing `path`. See [`Self::append`]
     // for why durability rests on this rather than on syscall atomicity.
@@ -376,34 +422,35 @@ impl JournalHandler {
     /// One journal file over an already-claimed [`SegmentPath`] (typically
     /// one process's own SEGMENT of a run; see
     /// `tidepool_harness::selfharness::resume`, which is what decides that
-    /// path and claims it, never this type). Appends start at seq `0`,
-    /// which is right for a FRESH run's first process. A process continuing
-    /// a run a prior process already wrote to must use [`Self::resuming`]
-    /// instead: two processes' segments both starting their entries at seq
-    /// `0` would make them indistinguishable by provenance alone, even
-    /// though the fold that reads them back no longer depends on `seq` to
-    /// tell them apart.
+    /// path and claims it, never this type). Composes `seq` at segment
+    /// ordinal `0` — right for a FRESH run's first process, whose segment
+    /// always IS ordinal 0. A process continuing a run a prior process
+    /// already wrote to must use [`Self::resuming`] instead, naming its OWN
+    /// (necessarily different) segment ordinal.
     pub fn new(path: SegmentPath) -> Self {
         Self {
             path: path.0,
-            seq: Arc::new(AtomicU64::new(0)),
+            segment_ordinal: 0,
+            local_seq: Arc::new(AtomicU64::new(0)),
             lock: Arc::new(Mutex::new(())),
         }
     }
 
-    /// The RESUMED-run constructor: append to an existing journal continuing
-    /// from `next_seq` (the driver's `max(seq) + 1` over the entries it just
-    /// folded — `0` when the file was empty or absent, which is exactly
-    /// [`Self::new`]). Opening in append mode is unchanged; nothing here reads
-    /// or rewrites the file. `next_seq` stays a plain `u64` rather than its
-    /// own newtype: `SelfHarnessDriver::open_run_journal` — the sole caller
-    /// in the harness — already seeds it from `ResumeFold::next_seq()`
-    /// (never a literal), so the misuse this would wall off has no live call
-    /// site to protect against.
-    pub fn resuming(path: SegmentPath, next_seq: u64) -> Self {
+    /// The RESUMED-run constructor: append to an existing journal, composing
+    /// every `seq` against THIS process's own `segment_ordinal` (see
+    /// [`compose_journal_seq`]) rather than continuing a counter seeded from
+    /// a folded `max_seq` — the latter is what let two concurrent resumes,
+    /// which fold the identical prior state, seed an identical counter and
+    /// collide. `segment_ordinal` is exactly what
+    /// `tidepool_harness::selfharness::resume::AcquiredLease::segment_ordinal`
+    /// carries — the ordinal [`SegmentPath::create_exclusive`] claimed for
+    /// this process's segment, never computed here. Opening in append mode
+    /// is unchanged; nothing here reads or rewrites the file.
+    pub fn resuming(path: SegmentPath, segment_ordinal: u64) -> Self {
         Self {
             path: path.0,
-            seq: Arc::new(AtomicU64::new(next_seq)),
+            segment_ordinal,
+            local_seq: Arc::new(AtomicU64::new(0)),
             lock: Arc::new(Mutex::new(())),
         }
     }
@@ -456,7 +503,8 @@ impl JournalHandler {
                 path: self.path.clone(),
                 detail: e.to_string(),
             })?;
-        let seq = self.seq.fetch_add(1, Ordering::SeqCst);
+        let local = self.local_seq.fetch_add(1, Ordering::SeqCst);
+        let seq = compose_journal_seq(self.segment_ordinal, local);
         let entry = JournalEntry {
             seq,
             kind,
@@ -679,9 +727,10 @@ mod tests {
         assert!(
             matches!(
                 result,
-                Err(JournalLoadError::TornMidFile { line_no: 0, .. })
+                Err(JournalLoadError::TornMidFile { line_no: 1, .. })
             ),
-            "expected TornMidFile at line 0, got {:?}",
+            "expected TornMidFile at ONE-based line 1 (the first line in the \
+             file, an operator's \"line 1\"), got {:?}",
             result
         );
 
@@ -794,13 +843,19 @@ mod tests {
         );
     }
 
-    /// A resumed run's appends must continue PAST what a prior process left on
-    /// disk. Two handler instances over one file, the second built with
-    /// `resuming(max_seq + 1)`: every seq in the file is distinct and
-    /// increasing, so the max-seq fold can tell the two processes' entries
-    /// apart. (A second `new` would restart at 0 and make them ambiguous.)
+    /// A resumed run's appends must be distinguishable from what a prior
+    /// process left on disk. Two handler instances over one file, the second
+    /// `resuming` at segment ordinal `1` (a DIFFERENT ordinal from the
+    /// first's implicit `0` — exactly what two distinct, exclusively-claimed
+    /// segments give two real processes): every seq in the file is distinct,
+    /// and every one of the second handler's seqs sorts strictly after every
+    /// one of the first's, so the fold can tell the two processes' entries
+    /// apart. (A second `new`, or `resuming` at the SAME ordinal, would
+    /// collide with the first handler's seqs — see
+    /// `concurrent_resumes_never_collide_on_seq` for exactly that hazard,
+    /// closed by two DIFFERENT ordinals rather than by continuing a count.)
     #[test]
-    fn resuming_continues_seq_across_two_handler_instances() {
+    fn resuming_at_a_distinct_ordinal_keeps_seq_disjoint_from_the_prior_handler() {
         let path = tmp_file("resuming");
         let _ = std::fs::remove_file(&path);
 
@@ -811,11 +866,7 @@ mod tests {
                 .unwrap();
         }
 
-        let loaded = load_journal(&path).unwrap();
-        let next_seq = loaded.iter().map(|e| e.seq).max().map_or(0, |m| m + 1);
-        assert_eq!(next_seq, 3);
-
-        let second = JournalHandler::resuming(SegmentPath::for_test(path.clone()), next_seq);
+        let second = JournalHandler::resuming(SegmentPath::for_test(path.clone()), 1);
         for i in 3..6 {
             second
                 .append("split".into(), format!("k{i}"), serde_json::json!(i))
@@ -826,23 +877,32 @@ mod tests {
         let seqs: Vec<u64> = entries.iter().map(|e| e.seq).collect();
         assert_eq!(
             seqs,
-            vec![0, 1, 2, 3, 4, 5],
-            "the resumed handler must continue the sequence, not restart it"
+            vec![
+                compose_journal_seq(0, 0),
+                compose_journal_seq(0, 1),
+                compose_journal_seq(0, 2),
+                compose_journal_seq(1, 0),
+                compose_journal_seq(1, 1),
+                compose_journal_seq(1, 2),
+            ],
+            "every seq must be distinct, and the resumed handler's must all sort \
+             after the prior handler's"
         );
 
         let _ = std::fs::remove_file(&path);
     }
 
-    /// `seq` is written run-GLOBAL monotonic in practice — a resumed
-    /// segment's handler is seeded past everything already folded — but the
-    /// fold sorts on PHYSICAL order, never on `seq` (see `last_by_kind_key`'s
-    /// doc). This pins that the two orders AGREE on a normally-seeded run:
-    /// two segments (two `JournalHandler`s, the second `resuming` past the
-    /// first's `max(seq) + 1`, exactly as `selfharness::resume` seeds a
-    /// resumed process), concatenated in segment order, have `seq` strictly
-    /// ascending — the same order the concatenation itself is already in. A
-    /// future change that breaks the seeding (so the two orders disagree)
-    /// must fail here, not surface later as a mysterious fold result.
+    /// `seq` is run-GLOBALLY UNIQUE by construction (segment ordinal composed
+    /// into the high bits — see [`compose_journal_seq`]'s doc), but the fold
+    /// sorts on PHYSICAL order, never on `seq` (see `last_by_kind_key`'s
+    /// doc). This pins that the two orders still AGREE for a WELL-BEHAVED
+    /// sequential run: two segments (two `JournalHandler`s, the second
+    /// `resuming` at the NEXT ordinal, exactly as `selfharness::resume`
+    /// allocates a resumed process's segment), concatenated in segment
+    /// order, have `seq` strictly ascending — the same order the
+    /// concatenation itself is already in. A future change that breaks that
+    /// agreement must fail here, not surface later as a mysterious fold
+    /// result.
     #[test]
     fn resuming_across_two_segments_keeps_seq_ascending_in_physical_order() {
         let seg0 = tmp_file("seq-order-seg0");
@@ -857,13 +917,8 @@ mod tests {
                 .unwrap();
         }
         let seg0_entries = load_journal(&seg0).unwrap();
-        let next_seq = seg0_entries
-            .iter()
-            .map(|e| e.seq)
-            .max()
-            .map_or(0, |m| m + 1);
 
-        let second = JournalHandler::resuming(SegmentPath::for_test(seg1.clone()), next_seq);
+        let second = JournalHandler::resuming(SegmentPath::for_test(seg1.clone()), 1);
         for i in 3..6 {
             second
                 .append("step".into(), format!("k{i}"), serde_json::json!(i))
@@ -878,17 +933,90 @@ mod tests {
             .chain(seg1_entries.iter())
             .map(|e| e.seq)
             .collect();
-        assert_eq!(physical_order, vec![0, 1, 2, 3, 4, 5]);
+        assert_eq!(
+            physical_order,
+            vec![
+                compose_journal_seq(0, 0),
+                compose_journal_seq(0, 1),
+                compose_journal_seq(0, 2),
+                compose_journal_seq(1, 0),
+                compose_journal_seq(1, 1),
+                compose_journal_seq(1, 2),
+            ]
+        );
 
         let mut by_seq = physical_order.clone();
         by_seq.sort_unstable();
         assert_eq!(
             physical_order, by_seq,
-            "seq order and physical order must agree on a normally-seeded run"
+            "seq order and physical order must agree on a well-behaved sequential run"
         );
 
         let _ = std::fs::remove_file(&seg0);
         let _ = std::fs::remove_file(&seg1);
+    }
+
+    /// The concurrent-resume hazard this whole scheme exists to close: two
+    /// handlers RESUMING THE SAME PRIOR STATE at once (both folded the
+    /// identical entries, both would compute the identical `max_seq + 1`
+    /// under the old seeding) must still never collide, because each is
+    /// `resuming` at its OWN, DISTINCT segment ordinal — exactly what two
+    /// real processes get from `SegmentPath::create_exclusive` racing the
+    /// same lease. No coordination between the two handlers is needed or
+    /// used here; disjointness is structural.
+    #[test]
+    fn concurrent_resumes_never_collide_on_seq() {
+        let seg_a = tmp_file("concurrent-resume-a");
+        let seg_b = tmp_file("concurrent-resume-b");
+        let _ = std::fs::remove_file(&seg_a);
+        let _ = std::fs::remove_file(&seg_b);
+
+        // Both handlers resume from the SAME prior fold — the exact
+        // condition (two resumes of one extant lease) the bug reproduced
+        // under, seeded here by each simply starting its own local counter
+        // at 0, which `resuming` always does regardless of what came before.
+        let handler_a = JournalHandler::resuming(SegmentPath::for_test(seg_a.clone()), 5);
+        let handler_b = JournalHandler::resuming(SegmentPath::for_test(seg_b.clone()), 6);
+
+        for i in 0..4 {
+            handler_a
+                .append("step".into(), format!("a{i}"), serde_json::json!(i))
+                .unwrap();
+            handler_b
+                .append("step".into(), format!("b{i}"), serde_json::json!(i))
+                .unwrap();
+        }
+
+        let entries_a = load_journal(&seg_a).unwrap();
+        let entries_b = load_journal(&seg_b).unwrap();
+
+        let mut seqs_a: Vec<u64> = entries_a.iter().map(|e| e.seq).collect();
+        let seqs_b: Vec<u64> = entries_b.iter().map(|e| e.seq).collect();
+        let collisions: Vec<u64> = seqs_a
+            .iter()
+            .filter(|s| seqs_b.contains(s))
+            .copied()
+            .collect();
+        assert!(
+            collisions.is_empty(),
+            "two concurrent resumes of one extant lease must never produce a \
+             shared seq value, got collisions {collisions:?} (a: {seqs_a:?}, \
+             b: {seqs_b:?})"
+        );
+
+        seqs_a.extend(seqs_b);
+        let mut all = seqs_a;
+        let before = all.len();
+        all.sort_unstable();
+        all.dedup();
+        assert_eq!(
+            all.len(),
+            before,
+            "every seq across both concurrently-resumed handlers must be distinct"
+        );
+
+        let _ = std::fs::remove_file(&seg_a);
+        let _ = std::fs::remove_file(&seg_b);
     }
 
     #[test]

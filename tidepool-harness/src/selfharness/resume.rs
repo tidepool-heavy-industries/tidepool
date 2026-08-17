@@ -51,10 +51,20 @@
 //! That concatenation is the run's TRUE PHYSICAL WRITE ORDER, the exact
 //! sequence of bytes a crash leaves behind, and it is what
 //! [`tidepool_handlers::last_by_kind_key`] folds on — see that function's doc
-//! for why the winner is POSITION in this order, not `seq`. `seq` stays
-//! run-global monotonic in practice (a resumed segment's handler is seeded at
-//! [`ResumeFold::next_seq`], past everything already folded), but is written
-//! purely as provenance and is never what decides a fold.
+//! for why the winner is POSITION in this order, not `seq`. `seq` is run-
+//! GLOBALLY UNIQUE by construction: a resumed segment's handler is seeded at
+//! [`AcquiredLease::segment_ordinal`] — THIS process's own exclusively-claimed
+//! segment ordinal, composed into `seq`'s high bits
+//! ([`tidepool_handlers::compose_journal_seq`]) — never at a count continued
+//! from the fold. Two processes resuming the SAME extant lease at once (the
+//! warn-never-refuse alive-pid policy in [`acquire_lease`] means this is not
+//! merely hypothetical) fold the identical prior state and would seed an
+//! identical counter under a fold-derived scheme; seeding from each one's own
+//! DISTINCT segment ordinal instead means their `seq` ranges can never
+//! collide, with no coordination between them beyond the segment claim
+//! itself. `seq` is written purely as provenance and is never what decides a
+//! fold; for a well-behaved sequential run it also stays ascending in
+//! physical order, but that ordering is not what makes it safe to write.
 //!
 //! **Retention**: every segment is kept forever. Nothing here deletes,
 //! merges, truncates, or compacts one — the crashed segment with its genuine
@@ -91,7 +101,7 @@
 //!
 //! | boot condition | behaviour |
 //! |---|---|
-//! | no lease | mint a `runId`, write the lease, allocate segment 0, empty fold |
+//! | no lease | mint a `runId`, claim the lease file EXCLUSIVELY (an OS-enforced atomic create — never a blind overwrite); on collision with another racer's simultaneous fresh claim, restart from `load_lease` and take the RESUME row below instead of orphaning a second run; the winner allocates segment 0, empty fold |
 //! | a lease | RESUME: same `runId`, allocate the next unused segment, fold every existing segment |
 //! | `run_loop` returns normally | [`retire_lease`]: rename to `run-<runId>.json`, RETAINED — so the next boot mints a fresh run |
 //! | the process crashes | the lease survives → the next boot resumes |
@@ -117,6 +127,7 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value as Json;
@@ -372,12 +383,17 @@ fn next_segment_ordinal(log_dir: &Path, run_id: &str) -> Result<u64, Persistence
 /// exactly where an uncontended call would have put it anyway, one ordinal
 /// later. This is the crate's ONE legitimate non-test caller of
 /// `create_exclusive` — see that method's doc.
-fn allocate_segment(log_dir: &Path, run_id: &str) -> Result<SegmentPath, PersistenceError> {
+///
+/// Returns the claimed path together with the ordinal it landed on — the
+/// caller (only [`acquire_lease`]) needs the ordinal itself to seed
+/// [`tidepool_handlers::JournalHandler::resuming`]'s structurally-unique
+/// `seq` composition; see [`AcquiredLease::segment_ordinal`].
+fn allocate_segment(log_dir: &Path, run_id: &str) -> Result<(SegmentPath, u64), PersistenceError> {
     let mut seg = next_segment_ordinal(log_dir, run_id)?;
     loop {
         let path = segment_path(log_dir, run_id, seg);
         match SegmentPath::create_exclusive(path.clone()) {
-            Ok(claimed) => return Ok(claimed),
+            Ok(claimed) => return Ok((claimed, seg)),
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => seg += 1,
             Err(source) => return Err(PersistenceError::Io { path, source }),
         }
@@ -434,6 +450,15 @@ pub struct AcquiredLease {
     /// segment another process owns, and now that can't even be constructed
     /// by accident.
     pub segment: SegmentPath,
+    /// The ordinal [`Self::segment`] landed on. Exclusively claimed per
+    /// process ([`SegmentPath::create_exclusive`]), so two processes —
+    /// including two racing to RESUME the same lease at once — can never
+    /// share one. This is what [`tidepool_handlers::compose_journal_seq`]
+    /// mixes into the high bits of every `seq` this process's
+    /// [`tidepool_handlers::JournalHandler`] writes, making `seq`
+    /// structurally unique across a run without any cross-process
+    /// coordination beyond the segment claim itself.
+    pub segment_ordinal: u64,
     /// `true` when a lease was already on disk — this boot continues a run a
     /// prior process started, whether or not that run had journaled anything
     /// yet.
@@ -460,6 +485,16 @@ pub fn load_lease(log_dir: &Path) -> Result<Option<RunLease>, PersistenceError> 
 /// `.tmp` sibling, then a rename over the target) for the same reason
 /// `save_checkpoint` is: a kill mid-write must never leave a torn lease for the
 /// next boot to read.
+///
+/// The `.tmp` sibling's name is per-CALL unique ([`lease_tmp_path`]), not a
+/// fixed `<lease>.tmp` — the RESUME row of [`acquire_lease`] can legitimately
+/// be entered by several processes/threads at once (every racer that lost the
+/// fresh claim lands here together), and a shared tmp name would let one
+/// caller's `rename` consume a sibling ITS write never produced, surfacing as
+/// a spurious `NotFound` on the SECOND renamer even though nothing was ever
+/// torn on disk — a race in this function's own bookkeeping, not a durability
+/// hazard. Overwriting the ACTIVE lease itself is still the intended
+/// end state either way: last writer wins, same as before.
 pub fn write_lease(log_dir: &Path, lease: &RunLease) -> Result<(), PersistenceError> {
     std::fs::create_dir_all(log_dir).map_err(|source| PersistenceError::Io {
         path: log_dir.to_path_buf(),
@@ -470,12 +505,73 @@ pub fn write_lease(log_dir: &Path, lease: &RunLease) -> Result<(), PersistenceEr
         path: path.clone(),
         source,
     })?;
-    let tmp = PathBuf::from(format!("{}.tmp", path.display()));
+    let tmp = lease_tmp_path(&path);
     std::fs::write(&tmp, &bytes).map_err(|source| PersistenceError::Io {
         path: tmp.clone(),
         source,
     })?;
     std::fs::rename(&tmp, &path).map_err(|source| PersistenceError::Io { path, source })
+}
+
+/// A per-CALL unique `.tmp` sibling of `path` — see [`write_lease`]'s doc for
+/// why a fixed name is unsafe under concurrent callers. Shares
+/// [`CLAIM_ATTEMPT_ID`] with [`try_claim_lease_exclusive`]'s tmp naming
+/// (same disambiguation need, same counter — no reason for two).
+fn lease_tmp_path(path: &Path) -> PathBuf {
+    let attempt = CLAIM_ATTEMPT_ID.fetch_add(1, Ordering::Relaxed);
+    PathBuf::from(format!(
+        "{}.write-{}-{attempt}.tmp",
+        path.display(),
+        std::process::id()
+    ))
+}
+
+/// Disambiguates concurrent [`lease_tmp_path`] callers' temp filenames within
+/// one process (`std::process::id()` alone is shared by every racing thread
+/// in a test) — never itself the source of exclusivity, which for
+/// [`try_claim_lease_exclusive`] is [`std::fs::hard_link`]'s atomic "the
+/// target did not exist and now it does".
+static CLAIM_ATTEMPT_ID: AtomicU64 = AtomicU64::new(0);
+
+/// Claim the ACTIVE lease slot EXCLUSIVELY for a FRESH run: write `lease`
+/// fully to a private temp file — so the claim itself can never land torn —
+/// then [`std::fs::hard_link`] it into place, the same "did not exist and now
+/// it does, and I'm the one who made it so" idiom [`allocate_segment`] uses
+/// via `create_new` for segments (a hard link is used here, rather than
+/// `create_new` directly, so the full serialized content is already durable
+/// on disk before the exclusive claim step — a `create_new`-then-`write_all`
+/// sequence would let a crash between those two steps leave a lease that
+/// EXISTS but is torn, unlike every other lease write in this module).
+///
+/// `Ok(false)` — never an `Err` — on collision: another racer's fresh claim
+/// landed first. That is a normal branch for [`acquire_lease`], not a fault:
+/// the caller's next step is `load_lease`, which now finds the winner's
+/// lease and takes the RESUME row instead.
+fn try_claim_lease_exclusive(log_dir: &Path, lease: &RunLease) -> Result<bool, PersistenceError> {
+    std::fs::create_dir_all(log_dir).map_err(|source| PersistenceError::Io {
+        path: log_dir.to_path_buf(),
+        source,
+    })?;
+    let path = lease_path(log_dir);
+    let bytes = serde_json::to_vec_pretty(lease).map_err(|source| PersistenceError::Json {
+        path: path.clone(),
+        source,
+    })?;
+    let tmp = lease_tmp_path(&path);
+    std::fs::write(&tmp, &bytes).map_err(|source| PersistenceError::Io {
+        path: tmp.clone(),
+        source,
+    })?;
+    let claimed = match std::fs::hard_link(&tmp, &path) {
+        Ok(()) => Ok(true),
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Ok(false),
+        Err(source) => Err(PersistenceError::Io {
+            path: path.clone(),
+            source,
+        }),
+    };
+    let _ = std::fs::remove_file(&tmp);
+    claimed
 }
 
 /// Mint a run id that no run in `log_dir` already owns: neither a retired
@@ -503,59 +599,84 @@ fn mint_run_id_in(log_dir: &Path) -> Result<String, PersistenceError> {
     }
 }
 
+fn now_secs_string() -> String {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+        .to_string()
+}
+
 /// The boot-time lease step: RESUME the run a prior process left behind, or
 /// mint a fresh one, and ALLOCATE the segment this process will append to —
 /// the next unused ordinal for that run id, every time, fresh boot or resume
 /// alike (see this module's doc for why that allocation is never read back
 /// off the persisted lease).
 ///
-/// Writing the lease on the resume path too is deliberate: it re-stamps `pid`
-/// and `startedAt` with the process that now holds the run, which is what a
-/// human reading the file wants, and it is the same atomic write either way.
+/// The no-lease (fresh) row loops: [`try_claim_lease_exclusive`] either wins —
+/// this process IS the run's first process — or loses to a racer whose claim
+/// landed first, in which case this reloads the lease and falls into the
+/// SAME iteration's `Some` arm, taking the resume row for the winner's run.
+/// Two processes booting into an empty `log_dir` at once can therefore never
+/// both mint: exactly one becomes the fresh run, and every other one resumes
+/// it — never a silently orphaned second run each believing itself fresh.
+///
+/// Writing the lease on the resume path is deliberate: it re-stamps `pid` and
+/// `startedAt` with the process that now holds the run, which is what a human
+/// reading the file wants. That path keeps the ordinary replace-rename
+/// (`write_lease`) — overwriting an EXISTING lease is the intent there, unlike
+/// the fresh row, which must never blindly overwrite a lease that turns out
+/// to already exist.
 pub fn acquire_lease(log_dir: &Path) -> Result<AcquiredLease, PersistenceError> {
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
-        .to_string();
-    let (mut lease, resumed) = match load_lease(log_dir)? {
-        Some(lease) => (lease, true),
-        None => {
-            let run_id = mint_run_id_in(log_dir)?;
-            (
-                RunLease {
-                    run_id,
-                    pid: std::process::id(),
-                    started_at: now.clone(),
-                },
-                false,
-            )
+    loop {
+        if let Some(mut lease) = load_lease(log_dir)? {
+            // Observability, not a gate: segments already make coexistence
+            // file-safe (this boot allocates its own, below), so a live
+            // prior pid is never refused — only named loudly, before it's
+            // overwritten, so a human can tell a genuine double-work
+            // situation from an ordinary crash resume.
+            if pid_is_alive(lease.pid) {
+                tracing::warn!(
+                    run_id = %lease.run_id,
+                    prior_pid = lease.pid,
+                    resuming_pid = std::process::id(),
+                    "resuming a run whose lease still names a LIVE prior process — \
+                     segments keep this file-safe, but the run is now being worked \
+                     by two processes at once"
+                );
+            }
+            lease.pid = std::process::id();
+            lease.started_at = now_secs_string();
+            write_lease(log_dir, &lease)?;
+            let (segment, segment_ordinal) = allocate_segment(log_dir, &lease.run_id)?;
+            return Ok(AcquiredLease {
+                lease,
+                segment,
+                segment_ordinal,
+                resumed: true,
+            });
         }
-    };
-    // Observability, not a gate: segments already make coexistence
-    // file-safe (this boot allocates its own, below), so a live prior pid is
-    // never refused — only named loudly, before it's overwritten, so a
-    // human can tell a genuine double-work situation from an ordinary crash
-    // resume.
-    if resumed && pid_is_alive(lease.pid) {
-        tracing::warn!(
-            run_id = %lease.run_id,
-            prior_pid = lease.pid,
-            resuming_pid = std::process::id(),
-            "resuming a run whose lease still names a LIVE prior process — \
-             segments keep this file-safe, but the run is now being worked \
-             by two processes at once"
-        );
+
+        // No lease on disk (yet). Mint a candidate and try to claim the slot
+        // EXCLUSIVELY — losing the race (`Ok(false)`) means some other
+        // process's fresh claim landed between our `load_lease` above and
+        // here, so we loop back and resume THEIR run rather than overwrite
+        // it with ours.
+        let candidate = RunLease {
+            run_id: mint_run_id_in(log_dir)?,
+            pid: std::process::id(),
+            started_at: now_secs_string(),
+        };
+        if try_claim_lease_exclusive(log_dir, &candidate)? {
+            let (segment, segment_ordinal) = allocate_segment(log_dir, &candidate.run_id)?;
+            return Ok(AcquiredLease {
+                lease: candidate,
+                segment,
+                segment_ordinal,
+                resumed: false,
+            });
+        }
     }
-    lease.pid = std::process::id();
-    lease.started_at = now;
-    write_lease(log_dir, &lease)?;
-    let segment = allocate_segment(log_dir, &lease.run_id)?;
-    Ok(AcquiredLease {
-        lease,
-        segment,
-        resumed,
-    })
 }
 
 /// Retire the ACTIVE lease at a normal run completion: RENAME it to
@@ -823,7 +944,7 @@ mod tests {
             .collect();
         let mut paths: Vec<SegmentPath> = handles
             .into_iter()
-            .map(|h| h.join().expect("allocator thread must not panic"))
+            .map(|h| h.join().expect("allocator thread must not panic").0)
             .collect();
         paths.sort();
         paths.dedup();
@@ -833,6 +954,75 @@ mod tests {
             "every concurrently racing allocator must land on a distinct segment path, \
              and each SegmentPath must be a genuinely distinct claim, not just a distinct string"
         );
+    }
+
+    /// The race [`try_claim_lease_exclusive`] exists to close: several
+    /// processes booting into the SAME EMPTY `log_dir` simultaneously, via a
+    /// barrier so every thread's claim genuinely contends. Exactly ONE must
+    /// win the fresh claim (`resumed == false`); every other racer must land
+    /// on the winner's RESUME path (`resumed == true`, same `run_id`) rather
+    /// than each minting its own — the orphaned-journal hazard this whole fix
+    /// closes. Every racer, winner or loser, still gets its own distinct
+    /// segment (unaffected by this fix — [`allocate_segment`]'s own
+    /// exclusivity), and the lease left on disk afterward is intact, never a
+    /// torn write from the contended claim.
+    #[test]
+    fn racing_fresh_acquirers_produce_one_winner_and_resumed_losers() {
+        use std::sync::{Arc, Barrier};
+
+        let dir = Arc::new(temp_dir("racing-fresh-acquire"));
+        const N: usize = 8;
+        let barrier = Arc::new(Barrier::new(N));
+        let handles: Vec<_> = (0..N)
+            .map(|_| {
+                let dir = Arc::clone(&dir);
+                let barrier = Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    acquire_lease(&dir).expect("acquire")
+                })
+            })
+            .collect();
+        let results: Vec<AcquiredLease> = handles
+            .into_iter()
+            .map(|h| h.join().expect("racing acquirer thread must not panic"))
+            .collect();
+
+        let winners: Vec<&AcquiredLease> = results.iter().filter(|r| !r.resumed).collect();
+        assert_eq!(
+            winners.len(),
+            1,
+            "exactly one racer must win the fresh claim, every other racer must \
+             land on ITS resume path; got winners {winners:?}"
+        );
+        let winner_run_id = winners[0].lease.run_id.clone();
+
+        for r in &results {
+            assert_eq!(
+                r.lease.run_id, winner_run_id,
+                "every racer — winner or loser — must end up on the SAME run; a \
+                 loser minting and keeping its own run id is exactly the \
+                 orphaned-journal hazard this test guards against"
+            );
+        }
+
+        // Every racer, even a loser, still claims its own distinct segment —
+        // segment exclusivity was never the broken half of this race.
+        let mut segments: Vec<SegmentPath> = results.iter().map(|r| r.segment.clone()).collect();
+        segments.sort();
+        segments.dedup();
+        assert_eq!(
+            segments.len(),
+            N,
+            "every racer must still land on a distinct segment"
+        );
+
+        // The lease left on disk is genuinely readable — no torn write
+        // survived the contended claim.
+        let on_disk = load_lease(&dir)
+            .expect("load lease")
+            .expect("a lease must exist after the race settles");
+        assert_eq!(on_disk.run_id, winner_run_id);
     }
 
     /// [`acquire_lease`]'s resume path warns, naming both pids, when the
