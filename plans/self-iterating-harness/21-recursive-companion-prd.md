@@ -240,7 +240,11 @@ real turns make restart cost painful.
 
 ## Deferred
 
-Resumable child continuations as values; durable context-tree checkpointing;
+Messages to live branches (operator amends a branch's instruction or cancels
+a dead-end subtree mid-turn, over the swarm's mailbox substrate — nudges as
+reconciliation hints, never rollbacks; wants green-threads select loops;
+operator-endorsed for later, after C3 dogfood). Resumable child
+continuations as values; durable context-tree checkpointing;
 fresh-vs-forked descendant policies; any universal reasoning ontology;
 model-authored drivers; distributed execution; public extraction before N=1
 stability.
