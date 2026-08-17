@@ -28,6 +28,7 @@ schemars.workspace = true
 serde_json = { workspace = true, features = ["arbitrary_precision"] }
 
 [dev-dependencies]
+tidepool-protocol.workspace = true
 # For the effectful integration tests: a capturing Console handler decoded the
 # same way the production handler is (`tidepool/src/main.rs`).
 tidepool-bridge.workspace = true

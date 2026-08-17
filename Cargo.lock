@@ -3932,6 +3932,7 @@ dependencies = [
  "tidepool-codegen",
  "tidepool-effect",
  "tidepool-eval",
+ "tidepool-protocol",
  "tidepool-repr",
  "tidepool-runtime",
  "tidepool-testing",
@@ -3952,6 +3953,10 @@ dependencies = [
  "tidepool-repr",
  "tidepool-testing",
 ]
+
+[[package]]
+name = "tidepool-protocol"
+version = "0.1.0"
 
 [[package]]
 name = "tidepool-repl"

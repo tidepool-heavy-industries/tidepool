@@ -1,0 +1,159 @@
+//! Generator: the Rust request enum, error ADT, and dispatch glue, emitted
+//! into `tidepool-handlers`.
+//!
+//! Replaces what `effect_rust_projection!` / `error_enum!` / `dispatch_body!`
+//! expand today. What stays hand-written in the effect's own module is
+//! unchanged: the handler struct (its fields are configuration, not contract)
+//! and one inherent method per verb.
+//!
+//! The two method shapes are the reason `dispatch_body!` has two arms, and the
+//! reason they differ is real. An errors-tagged verb's method returns
+//! `Result<T, <Err>>` and takes NO `cx`, so the arm wraps it with `cx.respond`
+//! (`Ok`→`Right`, `Err`→`Left`) and the handler is total by construction. A
+//! plain verb's method takes `cx` and returns `Result<Response, EffectError>`,
+//! and the arm forwards it.
+
+use super::{header, index_body, module_name, GeneratedFile};
+use crate::schema::Effect;
+
+/// Where this effect's generated glue lives, relative to the workspace root.
+#[must_use]
+pub fn path(e: &Effect) -> String {
+    format!("tidepool-handlers/src/generated/{}.rs", module_name(e))
+}
+
+/// The `mod`-index for the generated glue modules.
+#[must_use]
+pub fn module_index(effects: &[Effect]) -> GeneratedFile {
+    GeneratedFile {
+        path: "tidepool-handlers/src/generated/mod.rs".to_string(),
+        contents: index_body("Generated effect request types and dispatch glue", effects),
+    }
+}
+
+/// The whole generated glue file for one effect.
+#[must_use]
+pub fn file(e: &Effect) -> GeneratedFile {
+    GeneratedFile {
+        path: path(e),
+        contents: body(e),
+    }
+}
+
+fn body(e: &Effect) -> String {
+    let mut out = header(
+        "//! ",
+        &format!("`{}` request types and dispatch glue", e.name),
+    );
+    out.push('\n');
+    out.push_str(&format!(
+        "use crate::handlers::{}::{};\n\n",
+        module_name(e),
+        e.handler
+    ));
+
+    // --- the typed failure ADT -------------------------------------------
+    if let Some(adt) = &e.errors {
+        out.push_str(&format!(
+            "/// The `{}` effect's typed per-verb failure (#335).\n",
+            e.name
+        ));
+        out.push_str("///\n");
+        out.push_str(
+            "/// `FromCore` is for test-side decoding of a `Left err`; the error is only\n",
+        );
+        out.push_str("/// ever SENT (`ToCore`) in production. `Debug` backs the `Display` path.\n");
+        out.push_str(
+            "#[derive(tidepool_bridge_derive::ToCore, tidepool_bridge_derive::FromCore, Debug, PartialEq, Eq)]\n",
+        );
+        out.push_str(&format!("pub enum {} {{\n", adt.name));
+        for v in &adt.variants {
+            out.push_str(&format!("    /// {}\n", v.doc));
+            let fields: Vec<String> = v
+                .fields
+                .iter()
+                .map(|f| {
+                    f.rust
+                        .rust_type(&f.ty, &format!("{}::{}::{}", e.name, adt.name, v.ctor))
+                })
+                .collect();
+            if fields.is_empty() {
+                out.push_str(&format!("    {},\n", v.ctor));
+            } else {
+                out.push_str(&format!("    {}({}),\n", v.ctor, fields.join(", ")));
+            }
+        }
+        out.push_str("}\n\n");
+    }
+
+    // --- the request enum -------------------------------------------------
+    out.push_str(&format!(
+        "/// One variant per `{}` GADT constructor, named EXACTLY as in Haskell.\n",
+        e.name
+    ));
+    out.push_str("#[derive(tidepool_bridge_derive::FromCore)]\n");
+    out.push_str(&format!("pub enum {} {{\n", e.req_enum));
+    for v in &e.verbs {
+        let tys: Vec<String> = v
+            .args
+            .iter()
+            .map(|a| {
+                a.rust
+                    .rust_type(&a.ty, &format!("{}::{}::{}", e.name, v.ctor, a.name))
+            })
+            .collect();
+        if tys.is_empty() {
+            out.push_str(&format!("    {},\n", v.ctor));
+        } else {
+            out.push_str(&format!("    {}({}),\n", v.ctor, tys.join(", ")));
+        }
+    }
+    out.push_str("}\n\n");
+
+    // --- DescribeEffect ---------------------------------------------------
+    out.push_str(&format!(
+        "impl tidepool_mcp::DescribeEffect for {} {{\n",
+        e.handler
+    ));
+    out.push_str("    fn effect_decl() -> tidepool_mcp::EffectDecl {\n");
+    out.push_str(&format!("        tidepool_mcp::{}()\n", e.decl_fn));
+    out.push_str("    }\n}\n\n");
+
+    // --- the dispatch -----------------------------------------------------
+    out.push_str(&format!(
+        "impl tidepool_effect::dispatch::EffectHandler<tidepool_mcp::CapturedOutput> for {} {{\n",
+        e.handler
+    ));
+    out.push_str(&format!("    type Request = {};\n\n", e.req_enum));
+    out.push_str("    fn handle(\n");
+    out.push_str("        &mut self,\n");
+    out.push_str(&format!("        req: {},\n", e.req_enum));
+    out.push_str(
+        "        cx: &tidepool_effect::dispatch::EffectContext<'_, tidepool_mcp::CapturedOutput>,\n",
+    );
+    out.push_str(
+        "    ) -> Result<tidepool_effect::Response, tidepool_effect::error::EffectError> {\n",
+    );
+    out.push_str("        match req {\n");
+    for v in &e.verbs {
+        let names: Vec<&str> = v.args.iter().map(|a| a.name).collect();
+        let pat = if names.is_empty() {
+            format!("{}::{}", e.req_enum, v.ctor)
+        } else {
+            format!("{}::{}({})", e.req_enum, v.ctor, names.join(", "))
+        };
+        // An errors-tagged method takes no `cx` and is total in the error ADT;
+        // a plain method takes `cx` and returns the Response itself.
+        let call = if v.errors.is_some() {
+            format!("cx.respond(self.{}({}))", v.method, names.join(", "))
+        } else {
+            let mut a = vec!["cx".to_string()];
+            a.extend(names.iter().map(|n| (*n).to_string()));
+            format!("self.{}({})", v.method, a.join(", "))
+        };
+        out.push_str(&format!("            {pat} => {call},\n"));
+    }
+    out.push_str("        }\n");
+    out.push_str("    }\n}\n");
+    out
+}
