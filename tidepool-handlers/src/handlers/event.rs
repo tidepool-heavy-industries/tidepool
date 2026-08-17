@@ -55,6 +55,37 @@
 //! JOURNAL (the observer's business — see [`MonitorObservations`]), and the
 //! queue is per-subscription (this registry's business).
 //!
+//! ## Blocking await, and deadlines (PRD 20, S1-L3)
+//!
+//! [`RepoEventHandler::repo_event_await`] is [`RepoEventHandler::repo_event_drain`]
+//! plus a timeout: it loops \[reconcile pass, check the queue, sleep bounded
+//! by [`EventConfig::poll_interval`]\] until the subscription has queued at
+//! least one observation or the timeout elapses. An elapsed timeout returns
+//! an EMPTY batch — typed data distinguishable from a real (non-empty) one,
+//! never an [`EventError`] — and every rule above still holds: no replay, no
+//! recovery from poison, the same bound. `withHandler`'s Haskell
+//! (`haskell/lib/Tidepool/Event.hs`'s `nextEvent`) is this verb's ONE caller
+//! that matters; nothing here understands `Event`'s projection, only raw
+//! batches.
+//!
+//! Deadlines ride the SAME [`SubscriptionRegistry`] as repository watches so
+//! one await covers both. [`EvWatch::WatchDeadline`] carries a RELATIVE
+//! millisecond duration — Haskell's `after` performs no effect of its own
+//! (deliberately: `RepoEvent` already ships in rows with no `Time` handler,
+//! and a new mandatory dependency on one would break them), so THIS registry
+//! is what reads "now" and fixes the absolute deadline, at `subscribe()`
+//! time. [`SubscriptionRegistry::fire_due_deadlines`] then checks every live
+//! subscription's pending deadlines — on every reconcile pass AND every
+//! await-loop iteration, never rate-limited by `poll_interval` the way git
+//! reads are, since it costs no I/O — and queues exactly one
+//! [`EvRepositoryEvent::ObservedTick`] the first time a deadline is found
+//! due, then forgets it: a deadline fires ONCE, never again, even under
+//! repeated reconcile passes. Firing is per-subscription and never broadcast
+//! through [`SubscriptionRegistry::publish`] — a `WatchDeadline` an agent
+//! armed for itself cannot wake anyone else. The same bound and
+//! poison-on-overflow rule applies to a fired tick as to any other queued
+//! observation.
+//!
 //! ## Cycle-scoped, and re-registered every cycle
 //!
 //! A subscription never crosses a resident cycle boundary. The registry is
@@ -79,12 +110,25 @@
 //! looked healthy is worse than one that fails.
 
 use std::collections::VecDeque;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use tidepool_bridge_effects::{
     EvCommitReceipt, EvEventId, EvHeadChangeKind, EvHeadChangeReceipt, EvRepositoryEvent,
-    EvSubscriptionId, EvWatch, WtBranchName, WtGitOid, WtWorktreeId,
+    EvSubscriptionId, EvTickReceipt, EvWatch, WtBranchName, WtGitOid, WtWorktreeId,
 };
+
+/// Wall-clock epoch milliseconds — an observability stamp only (`Tick`'s
+/// `firedAtMs`); internal deadline SCHEDULING uses the monotonic `Instant`
+/// clock instead, immune to a system-clock jump. `pub(crate)`-per-module is
+/// this crate's existing convention for this exact helper
+/// (`tidepool-worktree`'s `journal.rs`/`registry.rs` each carry their own
+/// copy too); not worth a shared crate for one line.
+fn now_ms() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
+}
 
 // `EventError` + `RepoEventReq` + `DescribeEffect` + the `EffectHandler`
 // dispatch match are generated from the single-source definition in
@@ -141,6 +185,12 @@ struct Subscription {
     /// Observations this subscription lost to the bound. Nonzero means
     /// POISONED: it never queues or drains again, it only reports.
     dropped: i64,
+    /// Absolute deadlines from this subscription's `WatchDeadline` entries,
+    /// still armed — computed from `now + ms` at `subscribe()` time, since
+    /// the wire value is a RELATIVE duration. A fired deadline is removed
+    /// here (fire-once) — separate from `watches`, which stays the immutable
+    /// record of what was registered.
+    pending_deadlines: Vec<Instant>,
 }
 
 impl Subscription {
@@ -157,6 +207,11 @@ pub struct SubscriptionRegistry {
     /// Monotonic. An id is NEVER reused, so a spent id is a lookup miss rather
     /// than an alias of some later subscription.
     next_id: i64,
+    /// Separate id space from `next_id` (subscription ids) and from the ids
+    /// [`MonitorObservations`] mints for git-observed facts — this registry
+    /// is the only minter of a `Tick`'s [`EvEventId`], since no monitor pass
+    /// produces one.
+    next_event_id: i64,
     subs: Vec<(i64, Subscription)>,
     bound: usize,
 }
@@ -169,6 +224,7 @@ impl SubscriptionRegistry {
         );
         Self {
             next_id: 1,
+            next_event_id: 1,
             subs: Vec::new(),
             bound,
         }
@@ -180,8 +236,21 @@ impl SubscriptionRegistry {
 
     /// Register `watches` and return a fresh id. The queue starts EMPTY: this
     /// call is the subscription's start point, and nothing observed before it
-    /// is ever visible through it.
+    /// is ever visible through it. A `WatchDeadline` entry carries a RELATIVE
+    /// millisecond duration — Haskell's `after` performs no effect of its
+    /// own, so THIS call is where "now" is read and the absolute deadline is
+    /// fixed.
     pub fn subscribe(&mut self, watches: Vec<EvWatch>) -> EvSubscriptionId {
+        let now = Instant::now();
+        let pending_deadlines = watches
+            .iter()
+            .filter_map(|w| match w {
+                EvWatch::WatchDeadline(ms) => {
+                    Some(now + Duration::from_millis((*ms).max(0) as u64))
+                }
+                _ => None,
+            })
+            .collect();
         let raw = self.next_id;
         self.next_id += 1;
         self.subs.push((
@@ -190,9 +259,49 @@ impl SubscriptionRegistry {
                 watches,
                 queue: VecDeque::new(),
                 dropped: 0,
+                pending_deadlines,
             },
         ));
         EvSubscriptionId { raw }
+    }
+
+    /// Queue exactly one `Tick` for every pending deadline that has passed
+    /// `now`, per subscription, then forget it — a deadline fires ONCE.
+    /// Same bound and poison-on-overflow rule as [`Self::publish`]; a fired
+    /// tick that overflows still counts toward `dropped`, so an await on a
+    /// poisoned subscription still fails loudly rather than quietly losing
+    /// the tick. Never broadcast: a subscription's deadlines only ever queue
+    /// into that same subscription.
+    pub fn fire_due_deadlines(&mut self, now: Instant) {
+        // One wall-clock stamp for the whole pass — purely an observability
+        // field on the `Tick`, never compared against `now` (the internal
+        // scheduling clock is monotonic `Instant`, immune to a system-clock
+        // jump).
+        let wall_now_ms = now_ms();
+        for (_, sub) in self.subs.iter_mut() {
+            if sub.pending_deadlines.is_empty() {
+                continue;
+            }
+            let due = sub.pending_deadlines.iter().filter(|&&d| d <= now).count();
+            if due == 0 {
+                continue;
+            }
+            sub.pending_deadlines.retain(|&d| d > now);
+            for _ in 0..due {
+                self.next_event_id += 1;
+                let id = self.next_event_id;
+                if sub.poisoned() || sub.queue.len() >= self.bound {
+                    sub.dropped += 1;
+                } else {
+                    sub.queue.push_back(EvRepositoryEvent::ObservedTick(
+                        EvEventId { raw: id },
+                        EvTickReceipt {
+                            fired_at_ms: wall_now_ms,
+                        },
+                    ));
+                }
+            }
+        }
     }
 
     /// Append `event` to EVERY subscription whose watch set selects it.
@@ -250,13 +359,16 @@ impl SubscriptionRegistry {
     }
 
     /// The union of every live subscription's watched worktrees — what a
-    /// reconciliation pass has to look at.
+    /// reconciliation pass has to look at. `WatchDeadline` names no
+    /// worktree, so it contributes nothing here — deadlines are checked by
+    /// [`Self::fire_due_deadlines`], never through a git-observing pass.
     pub fn watched_worktrees(&self) -> Vec<WtWorktreeId> {
         let mut out: Vec<WtWorktreeId> = Vec::new();
         for (_, sub) in &self.subs {
             for w in &sub.watches {
                 let id = match w {
                     EvWatch::WatchCommit(id) | EvWatch::WatchHead(id) => id,
+                    EvWatch::WatchDeadline(_) => continue,
                 };
                 if !out.contains(id) {
                     out.push(id.clone());
@@ -521,6 +633,10 @@ impl RepoEventHandler {
     /// to the observer's durable baseline, so a skipped pass is a delayed
     /// report, not a dropped one.
     fn reconcile(&mut self) -> Result<(), EventError> {
+        // Deadlines cost no I/O, so they are checked on EVERY pass —
+        // unconditionally, ahead of the git-read rate limit below, and even
+        // when nothing is watched for commits/heads at all.
+        self.registry.fire_due_deadlines(Instant::now());
         if let Some(last) = self.last_pass {
             if last.elapsed() < self.poll_interval {
                 return Ok(());
@@ -566,6 +682,51 @@ impl RepoEventHandler {
 
     fn repo_event_unsubscribe(&mut self, subscription: EvSubscriptionId) -> Result<(), EventError> {
         self.registry.unsubscribe(subscription)
+    }
+
+    /// Block until `subscription` has queued at least one observation, or
+    /// `timeout_ms` elapses (negative == no deadline — block until a match).
+    /// Loop: reconcile pass (deadlines every time, git reads still bounded by
+    /// `poll_interval`), check the queue, sleep bounded by both
+    /// `poll_interval` and the remaining time to the deadline. An elapsed
+    /// deadline returns an EMPTY batch — typed data, never an `EventError` —
+    /// so it is distinguishable from a real (non-empty) observation without
+    /// a second signal. Poison/overflow still fail loudly via `drain`'s own
+    /// `Err`, exactly as `repo_event_drain` does.
+    fn repo_event_await(
+        &mut self,
+        subscription: EvSubscriptionId,
+        timeout_ms: i64,
+    ) -> Result<Vec<EvRepositoryEvent>, EventError> {
+        let deadline = if timeout_ms < 0 {
+            None
+        } else {
+            // `checked_add` rather than a bare `+`: an absurdly large
+            // timeout must not PANIC the handler — falling back to "no
+            // deadline" is the same failure mode as "block until a match".
+            Instant::now().checked_add(Duration::from_millis(timeout_ms as u64))
+        };
+        loop {
+            self.reconcile()?;
+            let batch = self.registry.drain(subscription)?;
+            if !batch.is_empty() {
+                return Ok(batch);
+            }
+            if let Some(dl) = deadline {
+                if Instant::now() >= dl {
+                    return Ok(Vec::new());
+                }
+            }
+            // Bound the sleep by the poll interval (so a deadline that fires
+            // between passes is still noticed promptly) and by the
+            // remaining time to the deadline (so we never sleep past it); a
+            // zero poll interval still yields instead of busy-spinning.
+            let mut step = self.poll_interval.max(Duration::from_millis(1));
+            if let Some(dl) = deadline {
+                step = step.min(dl.saturating_duration_since(Instant::now()));
+            }
+            std::thread::sleep(step);
+        }
     }
 }
 
@@ -617,6 +778,7 @@ mod tests {
             .map(|e| match e {
                 EvRepositoryEvent::ObservedCommit(_, r) => r.oid.raw.clone(),
                 EvRepositoryEvent::ObservedHeadChange(_, r) => r.new_head.raw.clone(),
+                EvRepositoryEvent::ObservedTick(_, t) => format!("tick@{}", t.fired_at_ms),
             })
             .collect()
     }
@@ -915,5 +1077,91 @@ mod tests {
             Err(EventError::EventUnknownSubscription(sub.raw))
         );
         assert_eq!(passes_run(&calls), before);
+    }
+
+    // ── await / deadlines (PRD 20, S1-L3) ──
+
+    #[test]
+    fn await_returns_as_soon_as_a_pass_produces_an_observation() {
+        // A large poll interval would rate-limit every LATER pass, but the
+        // very first one always runs (no `last_pass` yet) — so a match
+        // already sitting in the first scripted pass must come back well
+        // before the generous timeout elapses.
+        let (mut h, _calls) = handler_with(
+            vec![vec![commit_event(1, "a", "c1")]],
+            Duration::from_secs(3600),
+        );
+        let sub = h
+            .repo_event_subscribe(vec![EvWatch::WatchCommit(wt("a"))])
+            .unwrap();
+        let start = Instant::now();
+        let batch = h.repo_event_await(sub, 5_000).unwrap();
+        assert_eq!(oids(&batch), vec!["c1"]);
+        assert!(
+            start.elapsed() < Duration::from_millis(500),
+            "must not wait out most of a generous timeout when the match is already there"
+        );
+    }
+
+    #[test]
+    fn await_times_out_with_an_empty_batch() {
+        let (mut h, _calls) = handler_with(vec![], Duration::from_millis(5));
+        let sub = h
+            .repo_event_subscribe(vec![EvWatch::WatchCommit(wt("a"))])
+            .unwrap();
+        assert_eq!(
+            h.repo_event_await(sub, 30).unwrap(),
+            vec![],
+            "an elapsed timeout is an empty batch, not an error"
+        );
+        // The subscription itself is unharmed — an ordinary drain still works.
+        assert_eq!(h.repo_event_drain(sub).unwrap(), vec![]);
+    }
+
+    #[test]
+    fn a_deadline_watch_fires_exactly_once() {
+        let (mut h, _calls) = handler_with(vec![], Duration::from_millis(5));
+        let sub = h
+            .repo_event_subscribe(vec![EvWatch::WatchDeadline(0)])
+            .unwrap();
+        let first = h.repo_event_await(sub, 200).unwrap();
+        assert_eq!(first.len(), 1);
+        assert!(
+            matches!(first[0], EvRepositoryEvent::ObservedTick(_, _)),
+            "a due WatchDeadline must fire a Tick"
+        );
+        // No second tick — it fired exactly once, so a later await on the
+        // SAME subscription times out empty rather than re-delivering it.
+        assert_eq!(h.repo_event_await(sub, 30).unwrap(), vec![]);
+    }
+
+    #[test]
+    fn an_overflowed_subscription_poisons_awaits() {
+        let (mut h, _calls) = handler_with(vec![], Duration::ZERO);
+        // `handler_with` fixes queue_bound at 8 — nine deadlines due at once
+        // overflow the ninth.
+        let watches: Vec<EvWatch> = (0..9).map(|_| EvWatch::WatchDeadline(0)).collect();
+        let sub = h.repo_event_subscribe(watches).unwrap();
+        assert_eq!(
+            h.repo_event_await(sub, 200),
+            Err(EventError::EventQueueOverflow(sub.raw, 1))
+        );
+        // No recovery: a later await on the same subscription still fails,
+        // loudly, rather than quietly answering empty.
+        assert!(h.repo_event_await(sub, 30).is_err());
+    }
+
+    #[test]
+    fn the_poll_interval_rate_limit_still_bounds_git_reads_inside_the_await_loop() {
+        let (mut h, calls) = handler_with(vec![], Duration::from_secs(3600));
+        let sub = h
+            .repo_event_subscribe(vec![EvWatch::WatchCommit(wt("a"))])
+            .unwrap();
+        assert_eq!(h.repo_event_await(sub, 50).unwrap(), vec![]);
+        assert_eq!(
+            passes_run(&calls),
+            1,
+            "the await loop's repeated iterations must not re-read git faster than poll_interval"
+        );
     }
 }

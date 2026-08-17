@@ -39,6 +39,29 @@
 -- * Queue overflow, source loss, or an inability to drain fails LOUDLY.
 --   Commits are never silently dropped.
 --
+-- == Blocking wait — 'nextEvent' and 'after'
+--
+-- 'nextEvent' is the ONE-SHOT, blocking sibling of 'withHandler': it
+-- subscribes, blocks at the runtime until the first matching observation
+-- arrives, then unsubscribes — sharing the same registry, no-replay rule,
+-- queue bound, and loud-overflow semantics, but with no handler callback and
+-- no caller-supplied timeout of its own. It never spins or polls at the
+-- Haskell level; the block happens at the handler.
+--
+-- 'after' names a deadline as an 'Event': @after ms@ describes a deadline
+-- @ms@ milliseconds from the moment it is SUBSCRIBED (not from this call —
+-- 'after' performs no effect of its own, it is pure data construction) and
+-- fires exactly one 'Tick' the first time it is found due, through the SAME
+-- subscription registry as repository watches. Composing it with '<|>' is
+-- how a bounded wait reads:
+--
+-- @
+-- deadline <- 'after' 30000
+-- 'nextEvent' (fmap Left ('commit' tree) '<|>' fmap Right deadline) >>= \\case
+--   Observed _ (Left c)  -> ...   -- a commit landed first
+--   Observed _ (Right _) -> ...   -- the deadline won
+-- @
+--
 -- == Coalesced deltas
 --
 -- Observations are state deltas, not a complete movement log.  An observer
@@ -60,6 +83,7 @@ module Tidepool.Event
     Event
   , commit
   , headChanged
+  , after
   , (<|>)
 
     -- * Observations
@@ -67,10 +91,14 @@ module Tidepool.Event
   , CommitReceipt (..)
   , HeadChangeReceipt (..)
   , HeadChangeKind (..)
+  , Tick (..)
   , EventId
 
     -- * Registration
   , withHandler
+
+    -- * Blocking wait
+  , nextEvent
   ) where
 
 import Tidepool.Effects
@@ -80,8 +108,11 @@ import Tidepool.Effects
   , HeadChangeKind (..)
   , HeadChangeReceipt (..)
   , Observed (..)
+  , Tick (..)
+  , after
   , commit
   , headChanged
+  , nextEvent
   , withHandler
   , (<|>)
   )

@@ -243,13 +243,20 @@ pub struct EvSubscriptionId {
     pub raw: i64,
 }
 
-/// Haskell `Watch` — one (worktree, kind) pair a subscription observes. `<|>`
-/// concatenates watches, so a merged `Event` is ONE subscription over several
-/// watches rather than several subscriptions.
+/// Haskell `Watch` — one (worktree, kind) pair a subscription observes, or a
+/// one-shot deadline. `<|>` concatenates watches, so a merged `Event` is ONE
+/// subscription over several watches rather than several subscriptions.
+///
+/// `WatchDeadline` carries a RELATIVE millisecond duration: the runtime
+/// (`tidepool-handlers`) fixes the absolute deadline at `subscribe()` time,
+/// `now + ms`. `after` itself is therefore pure data construction — no Time
+/// effect, no row dependency — which matters because `RepoEvent` already
+/// ships with rows that carry no `Time` handler.
 #[derive(ToCore, FromCore, Clone, Debug, PartialEq, Eq)]
 pub enum EvWatch {
     WatchCommit(WtWorktreeId),
     WatchHead(WtWorktreeId),
+    WatchDeadline(i64),
 }
 
 /// Haskell `HeadChangeKind`. `UnknownChange` is a correct answer, not a
@@ -292,27 +299,43 @@ pub struct EvCommitReceipt {
     pub files: Vec<String>,
 }
 
+/// Haskell `Tick` — the payload a fired deadline watch delivers. Carries the
+/// wall-clock moment the runtime observed it as due, for observability; the
+/// deadline the caller asked for lives only in the `WatchDeadline` that fired.
+#[derive(ToCore, FromCore, Clone, Copy, Debug, PartialEq, Eq)]
+#[core(name = "Tick")]
+pub struct EvTickReceipt {
+    pub fired_at_ms: i64,
+}
+
 /// Haskell `RepositoryEvent` — one reconciled fact as it crosses the boundary.
 /// The `EvEventId` rides on the wire rather than being minted per view,
-/// because the SHARING is the information.
+/// because the SHARING is the information. `ObservedTick` is the one variant
+/// the registry (`tidepool-handlers`) never broadcasts — a fired deadline is
+/// queued directly onto the ONE subscription that armed it.
 #[derive(ToCore, FromCore, Clone, Debug, PartialEq, Eq)]
 pub enum EvRepositoryEvent {
     ObservedCommit(EvEventId, EvCommitReceipt),
     ObservedHeadChange(EvEventId, EvHeadChangeReceipt),
+    ObservedTick(EvEventId, EvTickReceipt),
 }
 
 impl EvRepositoryEvent {
-    /// The worktree this fact is about — what a subscription's watches match on.
-    pub fn worktree(&self) -> &WtWorktreeId {
+    /// The worktree this fact is about — what a subscription's watches match
+    /// on. `None` for a `Tick`: a fired deadline is not about any worktree.
+    pub fn worktree(&self) -> Option<&WtWorktreeId> {
         match self {
-            EvRepositoryEvent::ObservedCommit(_, r) => &r.commit_worktree,
-            EvRepositoryEvent::ObservedHeadChange(_, r) => &r.head_worktree,
+            EvRepositoryEvent::ObservedCommit(_, r) => Some(&r.commit_worktree),
+            EvRepositoryEvent::ObservedHeadChange(_, r) => Some(&r.head_worktree),
+            EvRepositoryEvent::ObservedTick(_, _) => None,
         }
     }
 
     /// Does `watch` select this fact? Kind AND worktree must both match: a
     /// `commit` subscription on tree A must not be woken by a head movement,
-    /// nor by tree B's commit.
+    /// nor by tree B's commit. `Tick`/`WatchDeadline` never match here — they
+    /// are queued directly by [`SubscriptionRegistry::fire_due_deadlines`],
+    /// never through [`SubscriptionRegistry::publish`]'s broadcast.
     pub fn matches(&self, watch: &EvWatch) -> bool {
         match (self, watch) {
             (EvRepositoryEvent::ObservedCommit(_, r), EvWatch::WatchCommit(w)) => {
