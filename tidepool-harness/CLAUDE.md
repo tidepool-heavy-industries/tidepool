@@ -197,6 +197,89 @@ effect). A general Agent node (full base-effect row) does produce them.
 never substituted into a resumed session, so a node that suspended after
 running handled effects, then restarted and resumed, RE-EXECUTES them live.
 
+## Scope trees — a window's names retire with its heap (PRD 21 C2 §1–3)
+
+A node already carried a `RealmId`: the HEAP-side lifetime of its window
+(parked frames, outstanding `ValueHandle`s), exited by `close_realm`. C2 gives
+it the NAME-side one alongside — a `ScopeId` (`tidepool_codegen::scope`), the
+frame both session planes hang their per-window declarations and bindings off.
+One window, two halves, **one** retirement step.
+
+**How a window gets a scope.** Mint it off the session
+(`with_session(sid, |s| s.mint_scope(parent))` — `PersistentSession` owns the
+one `ScopeTree`, and minting is also where the DECL plane seeds the child's tip
+from its PARENT's, so a sibling that defines in between cannot leak in), then
+`Harness::set_node_scope(node, scope)`. `Harness::run_checked_out` applies it
+to the session (`ResidentSession::set_scope`) at the SAME one site it applies
+the realm, so every run/resume/child path is covered and a node WITHOUT a scope
+runs at `ScopeId::ROOT` — never at whatever scope the last turn on a shared
+machine left behind (the ambient-stickiness hazard the realm reset already
+answers). `with_session`'s own runs reset to ROOT for the same reason.
+
+**What a scoped turn actually compiles against.** `session_bind_context` and
+`session_decl_context` resolve the turn's decl-tip import module and its
+visible `Val.G<g>` set FROM THE NODE'S SCOPE (`session_import_module_in`,
+`current_val_modules_in`), and a decl turn appends to that scope's own tip
+(`define_scoped_in`). That is the whole of locked decision 4 on the real
+compile path: a child's tip module already re-exports its parent's chain, so
+parent declarations are callable in every child; the visible-binding walk is
+upward-only with child frames shadowing parent ones, so a sibling's names are
+not even *nameable*; and nothing ever walks downward, so the parent gains
+neither. A value bind lands in the turn's own scope, and the cross-plane rule
+(a name lives in at most one plane) is scoped with it — `materialize_binder`
+retracts the decl head in the BINDING's scope, so a child binding `helper`
+never retracts the parent's. At ROOT every one of these is the pre-C2 path
+verbatim; `tests/companion_mount_spike.rs` passing unmodified is the gate.
+
+**What retirement releases.** `Harness::terminate_node` is still the ONE
+retirement path. For an ATTACHED node it now exits both halves in
+`exit_window`: `close_realm(realm)` first (parked frames + handles), then
+`retire_scope(scope)`. That order is load-bearing — scope retirement's
+sole-ownership rule reads the handle registry, so a handle the realm still
+owned would wrongly pin a root. The immediate path and the QUEUED path
+(`pending_window_exits`, drained by whichever code path next holds the machine)
+go through that one function, so they cannot diverge; both halves of the
+window's identity are retained in the queue until the exit is CONFIRMED. An
+OWNING node is unaffected: its whole session is dropped.
+
+The receipt outlives the node. `retire_scope` returns
+`ScopeRetirement { scopes_retired, bindings_retired, roots_released }`, and
+`terminate_node` records it under the node id for `Harness::scope_retirement`
+— by the time a caller checks the ledger the `convos` entry is gone, and
+`roots_released` is the only thing the ledger's movement can be checked
+against.
+
+**The four counted classes, and their harness-visible reads.** Never folded
+together — the full table and the reasoning live in `tidepool-codegen/CLAUDE.md`
+§ root accounting; what a caller here needs is which read to take:
+
+| # | Class | Read (through `with_session`) | Scope retirement |
+|---|-------|-------------------------------|------------------|
+| 1 | parked continuations | `s.stowed_roots_count() == s.parked_count()` | UNCHANGED |
+| 2 | handle registry | `s.value_handle_count()` | UNCHANGED (a mount already transferred out) |
+| 3 | value-plane bindings | `s.binding_names()` (ROOT) / `s.scope_binding_count(scope)` | the retired scope's frame goes to 0 |
+| 4 | GC root ledger | `s.persistent_roots_count()` | drops by EXACTLY the receipt's `roots_released` |
+
+Classes 1 and 2 staying put is an assertion, not an expectation: a parked
+frame's root belongs to a REALM, and a mounted root left the handle registry at
+the mount. Class 4 is the witness — without it class 3 can return to baseline
+while every root stays traced.
+
+**Deregistered is not reclaimed.** Retirement removes a root from the GC TRACE
+LIST; it does not free `OldSpace` bytes (no major or compacting pass exists).
+A long-resident session's OldSpace grows monotonically with the total number of
+mounts ever made and is reclaimed at machine drop or rotation. Written here,
+in `tidepool-codegen/CLAUDE.md`, and in the design doc so nobody re-derives it
+while hunting a leak.
+
+**Escaped closures stay alive by REACHABILITY, not by exemption.** A closure
+finalized in a child scope is mounted into a PARENT-scope binding
+(`mount_handle_in(parent, …)`, the C1 mount seam pointed across a scope
+boundary). That parent binding owns its own `RootSlot`, so retiring the child
+leaves it registered while the child's own bindings' roots go, and the captured
+child-heap objects stay traced transitively through it. Gate:
+`tests/companion_scope_trees.rs`.
+
 ## Context snapshots — one frozen prefix, many branches (PRD 21 C2 §4)
 
 The boundary already existed and was never named: `register_fork_child`
