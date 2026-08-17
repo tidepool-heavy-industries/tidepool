@@ -316,3 +316,69 @@ The throwaway-bind-then-swap iface minting stays the accepted workaround. It
 costs a GHC compile per mount; scope trees do not make a direct `Val.G<g>`
 iface-minting primitive unavoidable, so that extract-facing primitive stays
 deferred.
+
+---
+
+## 7. What shipped
+
+Decisions and mechanism only — where the sections above turned out to be
+complete, and where they were not.
+
+**Shipped as designed, no amendment.** The value plane's per-scope frames over
+`BindingTable` (§1.1); the decl plane's explicit parent link with the folds
+walking the chain instead of slicing (§1.2); scoped cross-plane retraction —
+`materialize_binder` retracts in the BINDING's scope (§1.3); genuine removal
+plus `retire_scope_root` over sentinel rebinding, and the sole-ownership rule
+as the thing that makes the escaped closure true (§2); the four counted classes
+(§3); frozen snapshots with digest identity and byte-stable branches (§4). The
+throwaway-bind-then-swap iface mint stayed the accepted workaround: scope trees
+never made a direct `Val.G<g>` iface-minting primitive unavoidable, so that
+extract-facing primitive stays deferred exactly as §6 predicted.
+
+**§1.2 left the moment of seeding implicit, and it is load-bearing.** The
+worked example silently assumed a sibling's tip is fixed when the scope is
+MINTED. It has to be: a scope absent from `SessionLib::tips` resolves to
+`Generation(0)` — the EMPTY environment — and never to the decl log's global
+tip. Falling back to the global tip would hand a scope whatever turn was pushed
+last in ANY scope, so a sibling defining between a scope's mint and its first
+use would leak in, and a child defining before its parent's next turn would leak
+UPWARD. `PersistentSession::mint_scope` seeds the child from its parent's tip at
+mint time, and it is therefore the ONLY supported way to mint a usable scope: a
+`ScopeTree::mint_child` called directly gets a live tree node with an empty decl
+environment. Pinned end to end by `session_decl_scope_tree.rs`.
+
+**A window's scope had no owner in the design, and now has one.** §1–§3 describe
+the planes but not what gives an invocation its `ScopeId`. Shipped: a node
+carries a scope beside the `RealmId` it already had — the NAME-side lifetime
+next to the HEAP-side one. `Harness::run_checked_out` applies both at the one
+site it already applied the realm (so a node without a scope runs at ROOT, never
+at whatever the last turn on a shared machine left behind), and
+`Harness::terminate_node` stays the ONE retirement path, exiting both halves in
+one `exit_window`: **`close_realm` first, then `retire_scope`.** That order is
+not cosmetic — the sole-ownership rule reads the handle registry, so a handle the
+realm still owned would wrongly pin a root and under-report `roots_released`.
+The queued-exit path (retirement racing a running turn) carries both halves and
+goes through the same function, so immediate and deferred cannot diverge.
+
+**Class 4's receipt must outlive the node that produced it.** `retire_scope`
+returns the counts, but by the time a caller compares them against the GC root
+ledger the node's `convos` entry is gone. `Harness::scope_retirement(node)`
+records the `ScopeRetirement` at retirement and hands it back afterward — without
+it there is nothing checkable to compare the ledger's movement against, which is
+the false-receipt failure §2 rejects. §3's class-1 read (`stowed_roots_count()
+== parked_count()`) also did not exist above the machine; it is now a
+`ResidentSession` passthrough, because a harness-level acceptance cannot assert
+"unchanged" about a counter it cannot reach.
+
+**§6's fixture prediction held, including the uncertain half.** `Toolkit` — a
+record MIXING several function-bearing fields with an ordinary `Int` field —
+does classify as a closure payload, and every field survives the crossing
+individually (each is called separately, so a sentinel substituted for any one
+would case-trap at THAT call rather than at the crossing). The lens shape
+(`Focus`, function-typed at top level) worked unchanged, as predicted. No
+fixture reshaping was needed.
+
+**One consequence for anyone writing against this.**
+`Harness::take_finalized_value_with_table` terminates its node, and a node's
+termination now retires its scope. A probe that must leave its scope alive is
+an ordinary expression turn, not a finalize.
