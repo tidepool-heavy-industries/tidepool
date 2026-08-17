@@ -1,0 +1,20 @@
+[
+  {
+    "worktree": "wt-provisional-0001",
+    "agent": "agent-alpha",
+    "state": "Terminal",
+    "bound_at_ms": 1700000000000
+  },
+  {
+    "worktree": "wt-provisional-0001",
+    "agent": "agent-beta",
+    "state": "Released",
+    "bound_at_ms": 1700000001000
+  },
+  {
+    "worktree": "wt-provisional-0001",
+    "agent": "agent-gamma",
+    "state": "Active",
+    "bound_at_ms": 1700000002000
+  }
+]

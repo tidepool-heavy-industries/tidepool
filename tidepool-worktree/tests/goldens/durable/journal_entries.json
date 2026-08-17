@@ -1,0 +1,151 @@
+[
+  {
+    "cursor": 1,
+    "event_id": 1,
+    "event": {
+      "HeadChanged": {
+        "worktree": "wt-finalized-0002",
+        "old_head": "1111111111111111111111111111111111111111",
+        "new_head": "2222222222222222222222222222222222222222",
+        "kind": {
+          "Advanced": [
+            "3333333333333333333333333333333333333333",
+            "4444444444444444444444444444444444444444"
+          ]
+        },
+        "branch": "tidepool/worktree/sample-wt-finalized-0002",
+        "observed_at_ms": 1700000010000
+      }
+    },
+    "recorded_at_ms": 1700000010001
+  },
+  {
+    "cursor": 2,
+    "event_id": 2,
+    "event": {
+      "HeadChanged": {
+        "worktree": "wt-finalized-0002",
+        "old_head": "2222222222222222222222222222222222222222",
+        "new_head": "5555555555555555555555555555555555555555",
+        "kind": {
+          "Amended": [
+            "2222222222222222222222222222222222222222",
+            "5555555555555555555555555555555555555555"
+          ]
+        },
+        "branch": null,
+        "observed_at_ms": 1700000020000
+      }
+    },
+    "recorded_at_ms": 1700000020001
+  },
+  {
+    "cursor": 3,
+    "event_id": 3,
+    "event": {
+      "HeadChanged": {
+        "worktree": "wt-finalized-0002",
+        "old_head": "5555555555555555555555555555555555555555",
+        "new_head": "6666666666666666666666666666666666666666",
+        "kind": {
+          "Rewritten": [
+            [
+              "7777777777777777777777777777777777777777",
+              "8888888888888888888888888888888888888888"
+            ],
+            [
+              "9999999999999999999999999999999999999999",
+              "0000000000000000000000000000000000000000"
+            ]
+          ]
+        },
+        "branch": "tidepool/worktree/sample-wt-finalized-0002",
+        "observed_at_ms": 1700000030000
+      }
+    },
+    "recorded_at_ms": 1700000030001
+  },
+  {
+    "cursor": 4,
+    "event_id": 4,
+    "event": {
+      "HeadChanged": {
+        "worktree": "wt-finalized-0002",
+        "old_head": null,
+        "new_head": "6666666666666666666666666666666666666666",
+        "kind": "Rewound",
+        "branch": "tidepool/worktree/sample-wt-finalized-0002",
+        "observed_at_ms": 1700000040000
+      }
+    },
+    "recorded_at_ms": 1700000040001
+  },
+  {
+    "cursor": 5,
+    "event_id": 5,
+    "event": {
+      "HeadChanged": {
+        "worktree": "wt-finalized-0002",
+        "old_head": "6666666666666666666666666666666666666666",
+        "new_head": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "kind": "Switched",
+        "branch": "tidepool/worktree/other-branch",
+        "observed_at_ms": 1700000050000
+      }
+    },
+    "recorded_at_ms": 1700000050001
+  },
+  {
+    "cursor": 6,
+    "event_id": 6,
+    "event": {
+      "HeadChanged": {
+        "worktree": "wt-finalized-0002",
+        "old_head": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "new_head": "cccccccccccccccccccccccccccccccccccccccc",
+        "kind": "UnknownChange",
+        "branch": null,
+        "observed_at_ms": 1700000060000
+      }
+    },
+    "recorded_at_ms": 1700000060001
+  },
+  {
+    "cursor": 7,
+    "event_id": 7,
+    "event": {
+      "Commit": {
+        "worktree": "wt-finalized-0002",
+        "oid": "dddddddddddddddddddddddddddddddddddddddd",
+        "parents": [],
+        "subject": "root commit",
+        "author": "Scripted Writer <writer@example.test>",
+        "committed_at_ms": 1700000070000,
+        "files": []
+      }
+    },
+    "recorded_at_ms": 1700000070001
+  },
+  {
+    "cursor": 8,
+    "event_id": 8,
+    "event": {
+      "Commit": {
+        "worktree": "wt-finalized-0002",
+        "oid": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+        "parents": [
+          "dddddddddddddddddddddddddddddddddddddddd",
+          "ffffffffffffffffffffffffffffffffffffffff"
+        ],
+        "subject": "merge branch",
+        "author": "Scripted Writer <writer@example.test>",
+        "committed_at_ms": 1700000080000,
+        "files": [
+          "a.rs",
+          "b.rs"
+        ]
+      }
+    },
+    "recorded_at_ms": 1700000080001
+  }
+]

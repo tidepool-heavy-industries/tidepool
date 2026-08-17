@@ -1,0 +1,11 @@
+{
+  "worktree_id": "wt-provisional-0001",
+  "cwd": "/var/tidepool/worktrees/wt-provisional-0001",
+  "branch": "tidepool/worktree/sample-wt-provisional-0001",
+  "source_head": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "snapshot_ref": null,
+  "origin": "CurrentRepository",
+  "source_repository": "/home/dev/repo",
+  "created_at_ms": 1700000000000,
+  "status": "Provisional"
+}
