@@ -8,9 +8,9 @@
 
 -- | The recursive companion (PRD 21 lane C3): one root turn in which a
 -- coalgebra window finalizes a 'ThoughtF' layer (or a local finish), each
--- branch descends recursively from inherited context, an algebra window folds
--- typed results in declared branch order, and the operator gets a folded
--- answer with the tree inspectable but not primary.
+-- branch descends recursively from its parent's FROZEN context, an algebra
+-- window folds typed results in declared branch order, and the operator gets
+-- a folded answer with the tree inspectable but not primary.
 --
 -- __The recursion lives HERE, in the authored outer loop, and that is
 -- forced.__  @Harness::new@ builds a window's @child_cfg@ as
@@ -21,8 +21,9 @@
 -- authored loop.
 --
 -- __The two seams.__  Cognition enters at exactly two typed windows —
--- 'discover' (ONE @runLLMTurnFork \@LayerProposal@ per node) and 'foldNode'
--- (ONE @runLLMTurnFork \@FoldProposal@ per node).  Everything else in this
+-- 'discover' (ONE @runLLMTurnBranch \@LayerProposal@ per node, forked off the
+-- parent's frozen post-coalgebra context) and 'foldNode' (ONE
+-- @runLLMTurnFork \@FoldProposal@ per node).  Everything else in this
 -- file is compiled coordination and costs zero tokens.  The algebra runs at
 -- EVERY node (PRD 21 locked decision 8): a leaf's algebra sees a realized
 -- layer with no children, and that is the uniform place a fold becomes
@@ -48,7 +49,6 @@ module Harness
   , Folded
   , NodeSeed (..)
   , NodePath (..)
-  , InheritedContext (..)
   , NodeAnswer (..)
   , traverseLayer
 
@@ -71,13 +71,15 @@ module Harness
   , renderPath
   , childPath
   , slug
+  , childSeed
   , childAllowance
   ) where
 
+import qualified Data.List.NonEmpty as NE
 import qualified Data.Text as T
 import HarnessTypes
 import Tidepool.Aeson (object, toJSON, (.=))
-import Tidepool.Effects (runLLMTurnFork, say)
+import Tidepool.Effects (ContextRef, freezeContext, runLLMTurnBranch, runLLMTurnFork, say)
 import Tidepool.Form (askUser)
 import Tidepool.Harness (Harness)
 import Tidepool.Journal (record)
@@ -99,6 +101,83 @@ type Companion = Harness
 -- verbatim rather than forked into a second recursion engine that carries a
 -- seed alongside.
 type Folded = NodePath -> Companion NodeAnswer
+
+-- ---------------------------------------------------------------------------
+-- The seed — and why it lives HERE rather than in "HarnessTypes"
+--
+-- A 'ContextRef' is declared by @RunLLMTurn@'s own decl, so it EXISTS only in
+-- a row containing that effect.  The answerer's row does not
+-- (@[AskUser, Fork, ReadState, Finalize T]@), and "HarnessTypes" has to stay
+-- compilable there or the window types it defines become unnameable by the
+-- windows asked to finalize them.  So the seed and every pure decision over
+-- it live beside 'loop', exactly as @dev-tree@ keeps its own @NodeSeed@
+-- (which carries a @WorktreeHandle@) beside its own.  They are still PURE and
+-- still EXPORTED — @dev-tree@'s @resumePlanFor@\/@childAllowance@ are the
+-- precedent — so a test drives them directly with no model and no operator.
+-- ---------------------------------------------------------------------------
+
+-- | What a node needs in order to be unfolded.  The hylo's @a@.
+data NodeSeed = NodeSeed
+  { seedPath      :: NodePath
+  , seedBrief     :: Th.ForkBrief
+  , seedDepth     :: Int
+  , -- | Node allowance for THIS SUBTREE, including this node.  Spent
+    -- STRUCTURALLY: a node reserves one unit for itself and divides the
+    -- remainder among its children ('childAllowance'), so the run's total is
+    -- bounded with no mutable counter and completion order cannot reach it.
+    --
+    -- 'Tidepool.Thought.nodeCapped' is the pure-fixture spelling of the same
+    -- cap, but it is @MonadState Int m@ and the outer row is not a
+    -- @MonadState@ stack — hence the seed-carried form, exactly as
+    -- @dev-tree@'s @childAllowance@ carries agent cycles.
+    seedAllowance :: Int
+  , -- | The frozen context this node's coalgebra window is BRANCHED FROM
+    -- ('discover') — PRD 21 locked decision 2, made real: a child forks its
+    -- parent's frozen post-coalgebra window rather than reading a rendered
+    -- summary of it, so the shared prefix is the ancestor's actual transcript
+    -- and only the divergent suffix is new.
+    --
+    -- __It is a CAPABILITY, threaded as a value only.__  It never enters
+    -- 'State' (which is checkpointed JSON), is never interpolated into a
+    -- prompt, and is never reconstructed from text — possession is
+    -- permission, and a ref only ever comes from @freezeContext@ or from a
+    -- @runLLMTurnBranch@'s own return.  @ContextRef@ has 'Show' and 'Eq', so
+    -- the seed's deriving clause is unaffected — but 'Show' is not a channel:
+    -- nothing renders a seed into a prompt, a journal payload, or the receipt,
+    -- and nothing should start.
+    seedRef       :: ContextRef
+  }
+  deriving (Show, Eq)
+
+-- | Divide what is left after this node's own reservation among its children.
+--
+-- Conservative on purpose (a subtree finishing under its share does not
+-- return the remainder to its siblings) and NEVER clamped upward: a share
+-- that floors to zero stays zero, so a node that cannot fund every child
+-- hands the underfunded ones nothing rather than minting nodes the parent
+-- does not have.  'allowanceCapped' turns that zero into a typed
+-- @BudgetForced ForcedNodeCount@ finish for the child.
+childAllowance :: NodeSeed -> Int -> Int
+childAllowance parent n
+  | n <= 0 = 0
+  | otherwise = max 0 (parent.seedAllowance - 1) `div` n
+
+-- | THE inheritance seam — the ONE function that decides what a child knows
+-- from above, and the answer is now: its parent's own frozen window.
+--
+-- @parent.seedRef@ read here is NOT the ref the parent branched from.
+-- 'discover' re-stamps the seed with the ref its OWN coalgebra window froze
+-- before building this layer, so what a child forks is its parent's
+-- POST-coalgebra context — the decision it just made included.
+childSeed :: NodeSeed -> Int -> Int -> Th.ForkBrief -> NodeSeed
+childSeed parent allowance i b =
+  NodeSeed
+    { seedPath = childPath parent.seedPath i b.title
+    , seedBrief = b
+    , seedDepth = parent.seedDepth + 1
+    , seedAllowance = allowance
+    , seedRef = parent.seedRef
+    }
 
 -- ---------------------------------------------------------------------------
 -- The resident cycle
@@ -128,10 +207,17 @@ type Folded = NodePath -> Companion NodeAnswer
 -- in declared branch order (@traverse@ preserves it) and folds happen in
 -- declared branch order bottom-up ('traverseLayer' preserves it).  Completion
 -- order is not an input to anything here.
+--
+-- THE ROOT'S REF IS MINTED HERE, and that is what makes 'discover' uniform.
+-- @freezeContext@ freezes the CALLING window — this loop's own accumulated
+-- context, which is precisely what the root's coalgebra should fork from —
+-- so the root enters the hylo holding a ref exactly like every descendant
+-- does, and 'discover' has no root special case to get wrong.
 loop :: State -> Companion State
 loop st = do
   record "turn" rootKey (object ["root" .= st.question, "config" .= toJSON cfg])
-  f <- thoughtHylo (foldNode cfg) coalg (rootSeed st)
+  rootRef <- freezeContext
+  f <- thoughtHylo (foldNode cfg) coalg (rootSeed st rootRef)
   answer <- f (NodePath [])
   record
     "turn"
@@ -156,15 +242,17 @@ loop st = do
         )
 
 -- | The root's own seed.  Its brief IS the operator's question, so the root
--- window is asked the same shape of thing every descendant is.
-rootSeed :: State -> NodeSeed
-rootSeed st =
+-- window is asked the same shape of thing every descendant is — and it holds
+-- a real 'ContextRef' (the loop's own frozen prefix, minted in 'loop') for
+-- the same reason: the root is not a special case anywhere below it.
+rootSeed :: State -> ContextRef -> NodeSeed
+rootSeed st ref =
   NodeSeed
     { seedPath = NodePath []
     , seedBrief = Th.ForkBrief "root" Th.Primary st.question
     , seedDepth = 0
     , seedAllowance = st.config.maxNodes
-    , seedContext = InheritedContext {inheritedAncestry = [], inheritedDecision = ""}
+    , seedRef = ref
     }
 
 summarize :: NodeAnswer -> RunSummary
@@ -193,22 +281,50 @@ summarize a =
 -- >   Left exit -> ... Finish (Draft (renderInvocationExit exit)
 -- >                            (InvocationFailed (NodeFailure ...)) depth)
 --
+-- 'layerWindow' now branches rather than forks, so whatever that lane does to
+-- @runLLMTurnFork@ it will do to @runLLMTurnBranch@ around the WHOLE returned
+-- pair (@M (Either InvocationExit (T, ContextRef))@) — a window that never
+-- finalized minted no context of its own to hand on either.  Still one edit
+-- each, still these two functions.
+--
 -- TWO functions rather than one @runWindow :: Text -> Companion a@, and the
 -- reason is mechanical: extract's typed-yield site pass rejects a
 -- @runLLMTurnFork \@a@ call at a bare type VARIABLE ("polymorphic runLLMTurn
 -- site"), so a polymorphic wrapper cannot exist.  They stay adjacent, and
 -- they are the only two call sites.
 --
--- @runLLMTurnFork@, never plain @runLLMTurn@: the plain form lands on the
--- driver's ONE reused per-loop answerer node, which accumulates every hole's
--- exchange into a single flat context — that would put every sibling's output
--- into every later node's window, exactly what locked decision 2 forbids.
--- The fork form mints a fresh answerer node per window.
+-- Neither is plain @runLLMTurn@: the plain form lands on the driver's ONE
+-- reused per-loop answerer node, which accumulates every hole's exchange into
+-- a single flat context — that would put every sibling's output into every
+-- later node's window, exactly what locked decision 2 forbids.  Both forms
+-- below mint a fresh answerer node per window.
 -- ---------------------------------------------------------------------------
 
-layerWindow :: Text -> Companion LayerProposal
-layerWindow prompt = runLLMTurnFork @LayerProposal prompt
+-- | The COALGEBRA's window, BRANCHED off @ref@ — a fresh child window whose
+-- shared prefix is the frozen context that ref names, never an empty root.
+-- It returns its answer AND its own post-finalize ref, which is what lets the
+-- next layer down branch off THIS node ('childSeed').
+layerWindow :: ContextRef -> Text -> Companion (LayerProposal, ContextRef)
+layerWindow ref prompt = runLLMTurnBranch @LayerProposal ref prompt
 
+-- | The ALGEBRA's window, FORKED — deliberately NOT branched, for two
+-- reasons, and both are load-bearing.
+--
+-- (1) POLICY.  PRD 21 says the algebra's model window gets a RENDERED view of
+-- the realized layer by default ('algebraPrompt' builds it).  Mounting the
+-- live value into the window instead is the escalation PRD open question 3
+-- gates, explicitly out of v1.
+--
+-- (2) MECHANISM — it could not branch even if the policy said to.  A branch
+-- needs a 'ContextRef', and the only ref a node ever mints is the one
+-- 'discover' gets back from ITS OWN coalgebra window.  @ThoughtF@ has no task
+-- slot (@Tidepool.Swarm@'s @PlanF@ does), so nothing carries a per-node value
+-- from a node's coalgebra to its own algebra: 'foldNode' only ever sees
+-- @ThoughtF Folded@.  This is the same wall the gate-count receipt hit (see
+-- @HarnessTypes.render@) — the only relay is stamping the ref into every
+-- child's seed and reading it back off a child's answer, which would be a
+-- capability laundered through the fold and would still be wrong for a leaf,
+-- whose layer has no children to read it off at all.
 foldWindow :: Text -> Companion FoldProposal
 foldWindow prompt = runLLMTurnFork @FoldProposal prompt
 
@@ -219,10 +335,21 @@ foldWindow prompt = runLLMTurnFork @FoldProposal prompt
 -- | Unfold one node: ONE window, then the pure conversion, then the journal.
 -- Every policy that could refuse this is middleware wrapped around it at the
 -- 'loop' call site, so what is left here is only what splitting MEANS.
+--
+-- UNIFORM ACROSS ROOT AND DESCENDANTS, with no special case: every seed
+-- reaching here holds a ref (the root's from @freezeContext@ in 'loop', a
+-- child's from its parent's own window), so every coalgebra window is a
+-- genuine fork off a frozen prefix.
+--
+-- @myRef@ is this node's OWN post-coalgebra context, and re-stamping the seed
+-- with it before 'layerFromProposal' is what makes every child seed carry it
+-- ('childSeed' reads @parent.seedRef@).  That is locked decision 2 exactly:
+-- a child forks the frozen context of its parent's window as of the moment
+-- that parent decided this layer.
 discover :: Config -> NodeSeed -> Companion (ThoughtF NodeSeed)
 discover _cfg seed = do
-  proposal <- layerWindow (coalgebraPrompt seed)
-  let layer = layerFromProposal seed proposal
+  (proposal, myRef) <- layerWindow seed.seedRef (coalgebraPrompt seed)
+  let layer = layerFromProposal seed {seedRef = myRef} proposal
   journalLayer seed layer
   pure layer
 
@@ -308,6 +435,131 @@ gateRounds cfg seed done layer
         , "note" .= (a.gateNote <> " (" <> outcome <> ")")
         , "rounds" .= rounds
         ]
+
+-- ---------------------------------------------------------------------------
+-- The pure decisions — no model, no operator, no capability USED
+--
+-- Both are total functions a test calls directly.  They live here rather than
+-- in "HarnessTypes" only because they mention 'NodeSeed', which carries a
+-- 'ContextRef' (see the seed's own section above); they THREAD that ref and
+-- never read it.
+-- ---------------------------------------------------------------------------
+
+-- | Turn what a coalgebra window finalized into the layer the driver descends
+-- through.  Total, pure, and the whole shape-validation story: a test calls
+-- it directly with no model anywhere in the path.
+--
+-- Three outcomes:
+--
+-- * 'ProposeFinish' → a 'Th.Finish' the model chose;
+-- * a well-formed 'ProposeSplit' → the matching posture, branch seeds built
+--   by 'childSeed', in declared order;
+-- * an EMPTY branch list, or a branch with a blank title or instruction →
+--   @Finish (Draft why (InvocationFailed …))@.  A split that declares no
+--   branches is not a finish the model chose; it is a window that failed to
+--   produce a usable layer, and @FinishOrigin@ is where that distinction
+--   already lives.  The algebra folds it as ordinary data.
+--
+-- The seed it is handed is the one 'discover' re-stamped with this node's own
+-- post-coalgebra ref, so the child seeds it builds fork the window that just
+-- produced this very proposal.
+--
+-- Note what the layer CARRIES: the model's PROPOSED strategy, unmodified.
+-- The transformation to 'Th.Sequential' happens at the descent
+-- ('traverseLayer'), which is the one place that can also stamp it.
+layerFromProposal :: NodeSeed -> LayerProposal -> ThoughtF NodeSeed
+layerFromProposal seed proposal = case proposal of
+  ProposeFinish {finishDraft = t} -> Th.Finish (Th.Draft t Th.ModelFinished seed.seedDepth)
+  ProposeSplit
+    { splitPosture = po
+    , splitFocus = f
+    , splitStrategy = ps
+    , splitBranches = pbs
+    } -> splitLayer seed po f ps pbs
+
+splitLayer :: NodeSeed -> Posture -> Text -> ProposedStrategy -> [ProposedBranch] -> ThoughtF NodeSeed
+splitLayer seed po f ps pbs
+  | null pbs = invocationFailed seed "the window proposed a split with no branches"
+  | any blank pbs = invocationFailed seed "the window proposed a branch with a blank title or instruction"
+  | otherwise = postureLayer po f (NE.fromList (imap child pbs)) (strategyOfWire ps)
+  where
+    blank pb = strip pb.branchTitle == "" || strip pb.branchInstruction == ""
+    allowance = childAllowance seed (length pbs)
+    child i pb =
+      let b = Th.ForkBrief pb.branchTitle (roleOf pb.branchRole) pb.branchInstruction
+       in Th.Branch b (childSeed seed allowance i b)
+
+invocationFailed :: NodeSeed -> Text -> ThoughtF NodeSeed
+invocationFailed seed why =
+  Th.Finish (Th.Draft why (Th.InvocationFailed (Th.NodeFailure why)) seed.seedDepth)
+
+-- | Apply one operator verdict to a proposed layer.  PURE and TOTAL, so a
+-- test drives every verdict with no operator and no model.
+--
+-- * 'Approve' — identity.
+-- * 'Prune' — drop the branch whose title matches 'gateTarget'.  Pruning the
+--   LAST branch is REFUSED: every @FinishOrigin@ names either the model's
+--   choice, a budget, or an invocation failure, and an operator emptying a
+--   layer is none of those.  The harness does not invent a fourth or borrow a
+--   wrong one — the operator who wants the subtree gone prunes to one branch,
+--   or ends the turn.
+-- * 'Amend' — replace the matching branch's instruction.
+-- * 'Add' — append a branch built from the form's title\/role\/text.
+--
+-- A verdict naming a title no branch has is 'Left', and the caller
+-- re-presents the form.  Every accepted verdict re-derives the surviving
+-- branches' paths from their NEW positions ('childPath'), so ids stay dense
+-- and ordered and still agree with what the algebra will compute from the
+-- same branch list.
+--
+-- A 'Th.Finish' is returned unchanged: the gate is only ever presented for a
+-- split ('gateApplies'), and being total about it is cheaper than being
+-- partial.
+applyGate :: LayerApproval -> ThoughtF NodeSeed -> Either Text (ThoughtF NodeSeed)
+applyGate approval layer = case layer of
+  Th.Finish _ -> Right layer
+  _ -> case approval.gateVerdict of
+    Approve -> Right layer
+    Prune
+      | not (any titled brs) -> Left (noSuchBranch approval.gateTarget)
+      | length brs <= 1 -> Left "pruning the last branch would leave the layer empty"
+      | otherwise -> Right (reindexed (filter (not . titled) brs))
+    Amend
+      | not (any titled brs) -> Left (noSuchBranch approval.gateTarget)
+      | otherwise -> Right (reindexed (map amend brs))
+    Add
+      | strip approval.gateTitle == "" -> Left "an added branch needs a title"
+      | otherwise -> case brs of
+          [] -> Left "a layer with no branches cannot take an added one"
+          (template : _) -> Right (reindexed (brs <> [addedFrom template]))
+  where
+    brs = layerBranches layer
+    titled br = br.brief.title == approval.gateTarget
+    noSuchBranch t = [fmt|no branch in this layer is titled "{t}"|]
+    amend br = if titled br then withBrief (amendedBrief br.brief) br else br
+    amendedBrief b = b {Th.instruction = approval.gateText}
+    -- An added branch inherits its siblings' depth, allowance and context
+    -- ref: it is a peer at the same position in the tree, so it forks the
+    -- same frozen parent window they do, and the operator adding it changes
+    -- neither that nor how much of the node budget the parent divided out.
+    addedFrom template =
+      withBrief (Th.ForkBrief approval.gateTitle (roleOf approval.gateRole) approval.gateText) template
+    reindexed kept = rebuildLayer layer (imap repath kept)
+    repath i (Th.Branch b s) =
+      Th.Branch b s {seedPath = childPath (parentPath s.seedPath) i b.title}
+
+-- | Set a branch's brief on BOTH halves that carry it.
+--
+-- A branch holds its 'Th.ForkBrief' twice: once on the 'Th.Branch' (what the
+-- fold's rendered layer and every receipt read) and once inside the seed
+-- ('seedBrief', what the CHILD'S OWN WINDOW is prompted with, since a
+-- coalgebra receives only the seed).  Writing one and not the other is
+-- silently wrong in the worst direction — an operator's amended instruction
+-- would render correctly in the tree while the model kept working the
+-- original one.  Every gate verdict that changes a brief goes through here so
+-- the two cannot drift.
+withBrief :: Th.ForkBrief -> Th.Branch NodeSeed -> Th.Branch NodeSeed
+withBrief b (Th.Branch _ s) = Th.Branch b s {seedBrief = b}
 
 -- ---------------------------------------------------------------------------
 -- The algebra — how to combine
@@ -436,6 +688,14 @@ originBadges layer = case layer of
 -- has what it needs — a @split@ entry names its children's PATHS, which is
 -- the only durable record of the tree's shape — without this lane reading
 -- anything back.
+--
+-- NO PAYLOAD HERE CARRIES A 'ContextRef', and none should.  It is a
+-- capability, and the branch receipts belong to the RUNTIME
+-- (@Event::SnapshotFrozen@ at a freeze, @Event::BranchInvocation@ at a
+-- branched window's first turn, carrying the digest and the shared-prefix
+-- byte count it re-derived itself).  A second, weaker claim minted beside
+-- them by the harness would be a receipt about text the harness composed
+-- rather than about the fork that actually happened.
 -- ---------------------------------------------------------------------------
 
 journalLayer :: NodeSeed -> ThoughtF NodeSeed -> Companion ()
@@ -452,10 +712,6 @@ journalLayer seed layer = case layer of
           , "strategyProposed" .= show proposed
           , "strategyExecuted" .= show (executedStrategy proposed)
           , "branches" .= map branchEntry (layerBranches layer)
-          , -- NOT a digest and NOT a cache claim: the exact byte length of the
-            -- prompt-rendered inheritance this node's children receive.  There
-            -- is no snapshot to name (see 'InheritedContext').
-            "inheritedBytes" .= utf8Bytes (renderInherited seed.seedContext)
           ]
       )
   where
@@ -482,13 +738,16 @@ postureAndFocus layer = case layer of
 -- Each window's prompt embeds its node's 'NodePath', which is what makes a
 -- scripted needle-matched provider able to serve a whole deterministic tree
 -- from a table of (path, reply) pairs.
+--
+-- A coalgebra prompt says NOTHING about what this node knows from above, and
+-- that absence is the point: the window it is sent to was branched off the
+-- parent's frozen context ('discover'), so the ancestry is the window's own
+-- shared prefix rather than a summary of it rendered into a suffix.
 -- ---------------------------------------------------------------------------
 
 coalgebraPrompt :: NodeSeed -> Text
 coalgebraPrompt seed =
   [fmt|NODE {renderPath seed.seedPath} — DISCOVER (depth {seed.seedDepth}, node allowance {seed.seedAllowance}).
-
-{renderInherited seed.seedContext}
 
 {renderBrief seed.seedBrief}
 

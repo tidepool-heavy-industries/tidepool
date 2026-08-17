@@ -3,10 +3,10 @@
 The C3 vertical slice of [PRD 21](../../plans/self-iterating-harness/21-recursive-companion-prd.md):
 one root turn in which a **coalgebra** window finalizes a single `ThoughtF`
 layer — a split into branches, or a local `Finish` — and, for a split, each
-branch **descends recursively** from the context it inherited, all the way
-down. As branches finish, an **algebra** window folds their typed results
-back up, in branch order, at every node the recursion visited (leaves
-included). The operator gets one folded answer, with the whole tree
+branch **descends recursively** from its parent's frozen post-coalgebra
+context, all the way down. As branches finish, an **algebra** window folds
+their typed results back up, in branch order, at every node the recursion
+visited (leaves included). The operator gets one folded answer, with the whole tree
 inspectable underneath it — subordinate to the answer, not beside it.
 
 Full design and locked decisions:
@@ -14,16 +14,20 @@ Full design and locked decisions:
 
 ## The shape
 
-- **Coalgebra** (`discover`, one `runLLMTurnFork @LayerProposal` per node):
-  proposes either `ProposeFinish` (this node is a leaf; done) or
+- **Coalgebra** (`discover`, one `runLLMTurnBranch @LayerProposal` per node,
+  forked off the parent's `ContextRef`): proposes either `ProposeFinish`
+  (this node is a leaf; done) or
   `ProposeSplit` (a posture — Explore, Compare, or Challenge — plus a list of
   child branches, each with a title, role, and instruction). The root is
   structurally incapable of describing anything deeper than its own layer:
   `LayerProposal` has no recursive arm, so this is a type-level guarantee, not
   a prompt convention.
-- **Descent**: each proposed branch becomes a fresh child node, seeded with
-  context inherited from its ancestors (see "What this slice does NOT
-  demonstrate" below), and recurses through the same coalgebra/algebra pair.
+- **Descent**: each proposed branch becomes a fresh child window BRANCHED off
+  the frozen context of its parent's own window — the ancestor's actual
+  transcript as its shared prefix, not a summary rendered into the prompt —
+  and recurses through the same coalgebra/algebra pair. The root is no special
+  case: `loop` freezes its own context first, so the root's coalgebra branches
+  exactly like every descendant's.
 - **Algebra** (`fold`, one `runLLMTurnFork @FoldProposal` per node): runs at
   *every* node, leaves included, and folds a synthesis plus any open tensions
   from that node's children (or, for a leaf, from its own finish). This is
@@ -83,15 +87,18 @@ credentials.
 
 ## What this slice does NOT demonstrate
 
-- **Inherited context is a rendered prompt, not a frozen snapshot.** Locked
-  decision 2 wants every child to fork the exact post-coalgebra context. The
-  authored surface has no way to do that today (`Harness::freeze_snapshot`/
-  `fork_from_snapshot` have no production caller — see design doc §8 gap 1),
-  so a child's prompt is instead built from a rendered summary of its
-  ancestry plus the parent's rendered decision. This holds sibling isolation
-  (each child is still a fresh node) but it means there is no cache-relevant
-  shared verbatim prefix here — **this slice makes no cache-win claim**; no
-  provider implementation in this tree parses or reports a cache metric.
+- **A cache WIN.** Children now genuinely fork their parent's frozen prefix
+  (locked decision 2, design doc §4), so the shared-prefix shape is real — but
+  no provider implementation in this tree emits `cache_control` breakpoints,
+  and `cached_input_tokens` stays `None` unless a provider volunteers it.
+  **This slice makes no cache-win claim**; what it can show is the digest and
+  the exact shared/suffix byte counts the runtime's own `SnapshotFrozen`/
+  `BranchInvocation` receipts carry.
+- **A live layer value in the algebra's window.** The fold window is still a
+  `runLLMTurnFork` over a RENDERED view of the realized layer. Mounting the
+  live value is the escalation PRD 21 open question 3 gates, and `ThoughtF`
+  has no task slot to carry a node's own ref from its coalgebra to its algebra
+  anyway — design doc §5.
 - **Siblings execute sequentially**, always, regardless of what a layer's
   `ProposedStrategy` requests. `thoughtHylo` descends through `traverse`,
   which is sequential; a model that proposes `WantConcurrent` gets

@@ -9,7 +9,8 @@ archaeology.
 
 The deliverable is `harness-dogfooding/recursive-companion/`: one root turn in
 which a coalgebra window finalizes a `ThoughtF` layer (or a local `Finish`),
-each branch descends recursively from inherited context, the algebra window
+each branch descends recursively from its parent's FROZEN post-coalgebra
+context (§4), the algebra window
 folds typed results in branch order, and the operator gets a folded answer with
 the tree inspectable but not primary.
 
@@ -35,7 +36,8 @@ loop st = do
                 (fanOutCapped seedDepth cfg.maxFanOut
                   (depthCapped seedDepth cfg.maxDepth
                     (allowanceCapped (discover cfg))))
-  f <- thoughtHylo (foldNode cfg) coalg (rootSeed st)
+  rootRef <- freezeContext          -- the root's own ref; see §4
+  f <- thoughtHylo (foldNode cfg) coalg (rootSeed st rootRef)
   answer <- f (NodePath [])
   pure (recordAnswer answer st)
 ```
@@ -61,9 +63,12 @@ data NodeSeed = NodeSeed
   , seedBrief   :: ForkBrief         -- title/role/instruction (Tidepool.Thought)
   , seedDepth     :: Int
   , seedAllowance :: Int             -- node budget REMAINING for this subtree, incl. this node
-  , seedContext   :: InheritedContext  -- what this node knows from above (§4)
+  , seedRef       :: ContextRef      -- the frozen context this node's window branches off (§4)
   }
 ```
+
+It lives in `Harness.hs`, not `HarnessTypes.hs`, and that placement is forced
+by `seedRef` — see §4.
 
 `seedAllowance` holds what is LEFT, not what was spent: a node reserves one
 unit for itself and divides the remainder among its children (§7), and a
@@ -78,7 +83,7 @@ the render's tree line, the scripted provider's needle. One name, one derivation
 
 | Seam | Type | What enters |
 |---|---|---|
-| coalgebra | `discover :: Config -> NodeSeed -> Companion (ThoughtF NodeSeed)` | ONE window: `runLLMTurnFork @LayerProposal` |
+| coalgebra | `discover :: Config -> NodeSeed -> Companion (ThoughtF NodeSeed)` | ONE window: `runLLMTurnBranch @LayerProposal` off the parent's ref (§4) |
 | algebra | `fold :: Config -> ThoughtF NodeAnswer -> Companion NodeAnswer` | ONE window: `runLLMTurnFork @FoldProposal` |
 
 Everything else in the file is compiled coordination and costs zero tokens.
@@ -195,57 +200,112 @@ asserted directly (§9) rather than left to the renderer's escaping.
 
 ---
 
-## 4. Inherited context — what v1 actually sends down
+## 4. Inherited context — freeze, then branch
 
-Locked decision 2 wants every child to fork the frozen post-coalgebra context.
-**That is not reachable from the authored surface today; see §8, gap 1.** What
-v1 does instead is stated plainly here so no receipt overclaims it:
+Locked decision 2 is what this slice implements: **every child forks the frozen
+post-coalgebra context of its parent's own window.** Gap 1 closed on trunk
+(§8), so this section is the mechanism rather than a description of what v1
+sends instead:
 
 ```haskell
-data InheritedContext = InheritedContext
-  { inheritedAncestry :: [Text]   -- one rendered line per ancestor: posture, focus, this branch's brief
-  , inheritedDecision :: Text     -- the PARENT's coalgebra decision, rendered
+data NodeSeed = NodeSeed
+  { seedPath      :: NodePath
+  , seedBrief     :: ForkBrief
+  , seedDepth     :: Int
+  , seedAllowance :: Int
+  , seedRef       :: ContextRef   -- the frozen context THIS node's window branches off
   }
 ```
 
-A child's window prompt is `renderInherited ctx <> renderBrief seedBrief <>
-<the coalgebra instruction>`. This is prompt-rendered inheritance: the shared
-prefix is text the driver composes, not a frozen transcript prefix the harness
-branches from. Consequences, all of them real:
+Two verbs and one rule:
 
-- there is no `SnapshotDigest` to put in a receipt, so the journal records
-  `inheritedBytes` (the exact byte length of the rendered inheritance) and
-  nothing that resembles a digest or a cache claim;
-- sibling isolation holds anyway — each child window is a fresh node
-  (`drive_fanout_child` → `create_root_framed(…, "", …)`), so no sibling's
-  output can reach another by construction;
-- ancestor context is a summary, not the ancestor's verbatim exchange, so the
-  "enormous shared prefix, tiny divergent suffix" cache shape PRD 21 is built
-  around is NOT demonstrated by this slice.
+```haskell
+freezeContext    :: M ContextRef                            -- freezes the CALLING window's prefix
+runLLMTurnBranch :: ContextRef -> Text -> M (a, ContextRef) -- forks a child off it; returns its answer AND its own ref
+```
 
-The seam is named at exactly one place in the harness — `childSeed` — so the
-swap to `fork_from_snapshot` when gap 1 closes touches one function.
+`loop` mints the root's ref with `freezeContext` before `thoughtHylo` — that
+ref is the companion loop's own accumulated context, which is exactly what the
+root's coalgebra should fork from — so `discover` is UNIFORM: every seed that
+reaches it holds a ref, and there is no root special case to get wrong.
+`discover` is one line of substance,
+`(proposal, myRef) <- runLLMTurnBranch @LayerProposal seed.seedRef
+(coalgebraPrompt seed)`, and it re-stamps the seed with `myRef` before
+`layerFromProposal` builds the layer — so `childSeed`'s `parent.seedRef` is the
+parent's POST-coalgebra ref, the decision it just made included.
+
+Consequences, all of them real:
+
+- the shared prefix is the ancestor's ACTUAL transcript, byte-identical
+  through the freeze point, not a summary of it composed by the driver — so a
+  grandchild's window genuinely contains its grandparent's exchange rather
+  than a rendered line about it;
+- the receipts are the RUNTIME's and are re-derived by it, never minted by the
+  harness: `Event::SnapshotFrozen{digest,prefix_bytes}` at each freeze, and
+  `Event::BranchInvocation{snapshot,shared_prefix_bytes,branch_suffix_bytes}`
+  at a branched window's first turn — written ONLY for a node minted through
+  `fork_from_snapshot`, and only after the harness's own re-digest-and-compare
+  check passes. The harness's own journal carries no ref and no byte count
+  beside them (§10.1);
+- declaration inheritance rides along: a branched child's decl scope is minted
+  as a real CHILD of the origin window's scope, so locked decision 4 holds
+  through the branch path rather than trivially at `ScopeId::ROOT`;
+- the "enormous shared prefix, tiny divergent suffix" SHAPE is now what this
+  slice actually produces. It is still **not** a cache-win claim: no provider
+  impl in this tree emits `cache_control` breakpoints, and `cached_input_tokens`
+  is `None` unless a provider volunteers it.
+
+**The ref is a CAPABILITY, threaded as a value only.** It never enters `State`
+(checkpointed JSON), is never interpolated into a prompt, and is never
+reconstructed from text — possession is permission, and a ref only ever comes
+from `freezeContext` or from a `runLLMTurnBranch`'s own return. `ContextRef`
+has `Show`/`Eq` so `NodeSeed` still derives them; nothing renders a seed into a
+prompt, a payload, or a receipt, and nothing should start.
+
+**The seed had to move, and that is forced.** `ContextRef` is declared by
+`RunLLMTurn`'s own decl, so it exists only in a row containing that effect —
+and `HarnessTypes.hs` must stay compilable in the ANSWERER's row (`[AskUser,
+Fork, ReadState, Finalize T]`, no `RunLLMTurn`) or the window types it defines
+become unnameable by the windows asked to finalize them (§2). So `NodeSeed`,
+`childSeed`, `layerFromProposal` and `applyGate` live beside `loop` in
+`Harness.hs`, still pure and still exported — exactly as dev-tree keeps its own
+`NodeSeed` (which carries a `WorktreeHandle`) beside its `loop`, and exactly as
+dev-tree's `resumePlanFor`/`childAllowance` are pure decisions living there.
 
 ---
 
 ## 5. Window rows and the invocation table
 
-Both windows are OUTER-loop `runLLMTurnFork @T`, serviced by
-`SelfHarnessDriver::service_outer_fanout` → `drive_fanout_child`. Each gets its
-own freshly-minted answerer realm on the shared outer machine and its own scope
-(C2), and is retired at finalize.
+Both windows are OUTER-loop invocations serviced by the self-harness driver
+(`service_outer_fanout` → `drive_fanout_child` for the fork form,
+`service_outer_branch` for the branch form). Each gets its own freshly-minted
+answerer realm on the shared outer machine and its own scope (C2), and is
+retired at finalize.
 
-| # | Invocation | Row it compiles against | Answer contract | Per node |
-|---|---|---|---|---|
-| 1 | coalgebra `runLLMTurnFork @LayerProposal` | `[AskUser, Fork, ReadState, Finalize LayerProposal]` | `LayerProposal` | exactly 1 |
-| 2 | algebra `runLLMTurnFork @FoldProposal` | `[AskUser, Fork, ReadState, Finalize FoldProposal]` | `FoldProposal` | exactly 1 |
-| 3 | gate `askUser @LayerApproval` | the OUTER row | `LayerApproval` | 0..N per split (§6) |
+| # | Invocation | Window's opening context | Row it compiles against | Answer contract | Per node |
+|---|---|---|---|---|---|
+| 1 | coalgebra `runLLMTurnBranch @LayerProposal seed.seedRef` | the parent's FROZEN post-coalgebra prefix (§4) | `[AskUser, Fork, ReadState, Finalize LayerProposal]` | `(LayerProposal, ContextRef)` | exactly 1 |
+| 2 | algebra `runLLMTurnFork @FoldProposal` | an empty root, plus a RENDERED view of the realized layer in the prompt | `[AskUser, Fork, ReadState, Finalize FoldProposal]` | `FoldProposal` | exactly 1 |
+| 3 | gate `askUser @LayerApproval` | — (the OUTER row, no window) | the OUTER row | `LayerApproval` | 0..N per split (§6) |
 
-`runLLMTurnFork`, not `runLLMTurn`: the plain form lands on the driver's ONE
-reused per-loop answerer node, which accumulates every hole's exchange into a
-single flat context. That would put every sibling's output into every later
-node's window — precisely what locked decision 2 forbids. The fork form mints a
-fresh node per window, which is the isolation the design needs.
+Never plain `runLLMTurn`: it lands on the driver's ONE reused per-loop answerer
+node, which accumulates every hole's exchange into a single flat context. That
+would put every sibling's output into every later node's window — precisely what
+locked decision 2 forbids. Both forms above mint a fresh node per window, which
+is the isolation the design needs.
+
+**The algebra does not branch, and could not.** Two reasons, both recorded at
+`foldWindow` in the code. (1) POLICY: PRD 21 gives the algebra's model window a
+RENDERED view of the realized layer by default; mounting the live value is the
+escalation PRD open question 3 gates, explicitly out of v1. (2) MECHANISM: a
+branch needs a `ContextRef`, and the only ref a node ever mints is the one
+`discover` gets back from its OWN coalgebra window — `ThoughtF` has no task slot
+(`Swarm`'s `PlanF` does), so nothing carries a per-node value from a node's
+coalgebra to its own algebra, which only ever sees `ThoughtF Folded`. This is
+the same wall the gate-count receipt hits (§10.2), and the only relay (stamp it
+into every child's seed, read it back off a child's answer) launders a
+capability through the fold and still fails for a leaf, whose layer has no
+children to read it off.
 
 **The gate cannot live inside a window.** `drive_fanout_child_inner` supports
 `finalize` only; a nested `askUser`/`note`/`fork` from a fanout child gets a
@@ -373,37 +433,49 @@ concurrency that is reachable at one of the two descents, not both.
 ## 8. Substrate gaps — escalated, then ruled on
 
 Three, found by building against the real surface, escalated before any runtime
-change, and ruled on: **gap 1 is a parallel lane** (context-ref: Haskell-visible
-window identity plus branch-from-frozen-prefix), **gap 2's v1 mitigation is
-accepted** and Haskell-nameable node registration is queued for C5's typed-UI
-scope, and **gap 3 is closed inside this lane** at the verb level. Each is stated
-below as found, with its ruling.
+change, and ruled on: **gap 1 is CLOSED on trunk** (the context-ref lane
+landed; this slice consumes it), **gap 2's v1 mitigation is accepted** and
+Haskell-nameable node registration is queued for C5's typed-UI scope, and
+**gap 3 is closed inside this lane** at the verb level. Each is stated below as
+found, with its ruling.
 
-### Gap 1 — the frozen-snapshot seam has no authored-surface reach
+### Gap 1 — the frozen-snapshot seam has no authored-surface reach (CLOSED)
 
-`Harness::freeze_snapshot`/`fork_from_snapshot` (C2 §4) have **no production
-caller** — `grep` finds only `tests/companion_snapshots.rs`. The authored loop's
-window primitives (`runLLMTurnFork`/`runLLMTurnFanout`) mint every child through
-`SelfHarnessDriver::drive_fanout_child`, which calls
+As escalated: `Harness::freeze_snapshot`/`fork_from_snapshot` (C2 §4) had **no
+production caller** — `grep` found only `tests/companion_snapshots.rs`. The
+authored loop's window primitives (`runLLMTurnFork`/`runLLMTurnFanout`) mint
+every child through `SelfHarnessDriver::drive_fanout_child`, which calls
 `Harness::create_root_framed(title, "", answerer_framing)` — a fresh root with
-an EMPTY opening. Two things are missing, and the second is the deeper one:
+an EMPTY opening. Two things were missing, and the second was the deeper one:
 
-1. the driver never branches a window from a frozen prefix, and
-2. a window has no Haskell-visible IDENTITY at all — the loop receives a typed
-   value, never a handle — so the authored driver cannot even name the window it
-   wants to branch from.
+1. the driver never branched a window from a frozen prefix, and
+2. a window had no Haskell-visible IDENTITY at all — the loop received a typed
+   value, never a handle — so the authored driver could not even name the
+   window it wanted to branch from.
 
-Consequence for this lane: locked decision 2 is not demonstrated. §4 states what
-v1 sends instead and refuses to call it a snapshot.
+**Ruling: CLOSED on trunk, and this slice consumes it.** Commit `5080be91`
+built the effect-surface primitive the escalation asked for, in the shape the
+sketch named:
 
-**Ruling: a parallel lane owns this.** The context-ref lane builds the
-effect-surface primitive — Haskell-visible window identity plus
-branch-from-a-frozen-prefix, starting from the sketch of a window's own digest
-returned alongside its answer and accepted as an optional branch-of parameter
-(`runLLMTurnBranch @T :: ContextRef -> Text -> M (T, ContextRef)`). C3 does not
-wait on it: the slice proves the driver, gate, journal, and GUI mechanics either
-way, and §4's single named swap point is what makes adopting it a fast
-follow-up.
+```haskell
+freezeContext    :: M ContextRef                            -- freezes the CALLING window's prefix
+runLLMTurnBranch :: ContextRef -> Text -> M (a, ContextRef) -- forks a child off it; returns its answer AND its own ref
+```
+
+serviced by `SelfHarnessDriver::service_outer_branch` over the existing
+`freeze_snapshot`/`fork_from_snapshot` pair — so a branched child is a REAL
+`fork_from_snapshot` child (which is why it writes an `Event::BranchInvocation`
+receipt at all; an empty-root child cannot) rather than
+`create_root_framed(…, "", …)`. It also mints each branched child's decl scope
+as a real CHILD of the origin's scope, so locked decision 4's declaration
+inheritance now holds through the BRANCH path rather than trivially at
+`ScopeId::ROOT`. `tidepool-harness/tests/companion_context_ref.rs` is its
+acceptance.
+
+§4 is therefore the mechanism, not a description of an interim: locked decision
+2 is demonstrated. The one thing that did NOT arrive with it is a live-value
+mount into a window — the algebra still folds a rendered layer, per §5 and PRD
+open question 3.
 
 ### Gap 2 — the multi-node GUI registry is not reachable from an authored harness
 
@@ -479,7 +551,7 @@ imports/decls beyond the universal contract).
 | # | PRD 21 C3 acceptance line | Scenario | Assertion |
 |---|---|---|---|
 | 1 | the root is never asked for descendant shape | root splits 2; each child splits again | the root's window served exactly ONE reply, and `LayerProposal` has no recursive arm (a compile-level fact, asserted by the type's own shape test) |
-| 2 | grandchild recursion from inherited context | depth-3 tree | the depth-2 window's prompt contains its parent's rendered decision AND its grandparent's ancestry line |
+| 2 | grandchild recursion from inherited context | depth-3 tree | a grandchild's window is genuinely FORKED from its parent's frozen prefix, never an empty root: one `Event::BranchInvocation` per coalgebra window (they exist only for `fork_from_snapshot` children — see `companion_context_ref.rs`), the depth-2 branch naming the digest its PARENT's window froze, with `shared_prefix_bytes` equal to that frozen prefix's own byte count and a non-zero `branch_suffix_bytes`. Sibling branches at one node name ONE shared digest |
 | 3 | branch-order delivery, never completion order | 3 siblings, the FIRST delayed longest | the algebra's rendered layer lists branches in declared order |
 | 4 | failure accumulates as data — unusable layer | branch 2 finalizes an empty `ProposeSplit` | branch 2 folds as `InvocationFailed`; branches 1 and 3 still fold their real answers |
 | 4b | failure accumulates as data — abnormal exit | branch 2's window never finalizes (round exhaustion) | branch 2 folds as `InvocationFailed` carrying the rendered `InvocationExit`; siblings' answers all arrive |
@@ -513,7 +585,7 @@ one is `scripts/battery.sh -p tidepool-harness -E 'binary(dogfood_harness_typech
 | kind | when | payload |
 |---|---|---|
 | `turn` | once, at the start and once at the end of the root turn | `{root, config}` / `{answer, nodes, windows}` |
-| `split` | a coalgebra produced a layer with branches | `{posture, focus, strategyProposed, strategyExecuted, branches:[{path,title,role}], inheritedBytes}` |
+| `split` | a coalgebra produced a layer with branches | `{posture, focus, strategyProposed, strategyExecuted, branches:[{path,title,role}]}` — no ref, no digest, no byte count: the branch receipts are the RUNTIME's (`SnapshotFrozen`/`BranchInvocation`, §4), re-derived by it, and a second weaker claim minted here beside them would be worse than none |
 | `finish` | a coalgebra produced `Finish` | `{origin, draft}` — `origin` is the rendered `FinishOrigin`, so budget-forced and model-chosen are distinguishable without a second kind |
 | `gate` | the gate was presented | `{verdict, target, note, rounds}` |
 | `fold` | an algebra folded a node | `{synthesis, tensions, children:[path], depth}` |
