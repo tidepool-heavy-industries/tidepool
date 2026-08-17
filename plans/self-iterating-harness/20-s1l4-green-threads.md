@@ -236,16 +236,34 @@ fork and handed to exactly the parties entitled to use it; the runtime's
 mailbox table is an implementation detail of the effect, not an address space.
 
 ```haskell
-data NodeHandle down r        -- parent's end: send down, await the fold
+data NodeHandle up down r     -- parent's end: send down, receive up, await the fold
 data Uplink up                -- child's end: send up
 data NodeCtx up down = NodeCtx { uplink :: Uplink up, inbox :: Event down }
 
-forkNode :: (NodeCtx up down -> M r) -> M (NodeHandle down r)
-sendDown :: ToJSON down => NodeHandle down r -> down -> M ()
-sendUp   :: ToJSON up   => Uplink up -> up -> M ()
+forkNode :: (FromJSON up, FromJSON down) => (NodeCtx up down -> M r) -> M (NodeHandle up down r)
+sendDown :: ToJSON down  => NodeHandle up down r -> down -> M ()
+sendUp   :: ToJSON up    => Uplink up -> up -> M ()
 inbox    :: FromJSON down => NodeCtx up down -> Event down
-folded   :: NodeHandle down r -> Event r       -- `waitEvent` on the underlying thread
+received :: FromJSON up   => NodeHandle up down r -> Event up
+folded   :: NodeHandle up down r -> Event (Async r)  -- `waitEvent` on the underlying thread
 ```
+
+`up`/`down` are ABSOLUTE tree directions, not relative to whoever holds the
+value: a parent sends down and receives up, a child receives down and sends
+up, and both ends name the two type parameters the same way.
+
+**Corrected 2026-08-17, in flight** (the child implementing this wave found
+both gaps by trying to write the acceptance below): the sketch above
+originally read `NodeHandle down r` with no typed way for the PARENT to
+observe an up message, even though `sendUp`'s whole point (escalation, per
+this PRD's `Up = Escalate Failure | Progress Text`) is for the parent to read
+it — a hole in the sketch, not a one-directional design. `NodeHandle` widens
+to carry `up` too, with `received` as `inbox`'s parent-side sibling. `folded`
+likewise was typed `Event r` while described as "`waitEvent` on the
+underlying thread" — `waitEvent` carries the HANDLE, never the value (by
+design: the projection is pure and cannot itself perform the effectful
+`wait`), so `folded`'s type now matches its own description instead of
+disagreeing with it.
 
 - **Sends never block.** `sendDown`/`sendUp` append and return.
 - **Bursts coalesce.** The Haskell helper derives a coalesce KEY from the
@@ -258,25 +276,31 @@ folded   :: NodeHandle down r -> Event r       -- `waitEvent` on the underlying 
   never a correctness hole — every instruction is re-derivable from git plus
   the run journal. No durable mailbox machinery exists or is wanted.
 
-**Receive is an Event source, not a second blocking primitive.** The inbox
-plugs into the existing `Tidepool.Event` algebra alongside `WatchAsync`, so
-`nextEvent (fmap Left inbox <|> fmap Right deadline)` is an ordinary select.
-**Do not add a blocking mailbox receive.** Payloads stay BARE (like `Tick`).
+**Receive is an Event source, not a second blocking primitive.** `inbox` and
+`received` both plug into the existing `Tidepool.Event` algebra alongside
+`WatchAsync`, so `nextEvent (fmap Left (received h) <|> fmap Right deadline)`
+is an ordinary select. **Do not add a blocking mailbox receive.** Payloads
+stay BARE (like `Tick`).
 
-Mailbox verbs join the same `Green` effect (one row widening, one wiring site):
+Mailbox verbs join `RepoEvent`, not `Green` — a mailbox IS an event source,
+and `RepoEvent` is already handler-dispatched and already wired into the
+driver, so these three verbs needed nothing else:
 
 ```
-MailboxNew  :: Green Int
-MailboxSend :: Int -> Text -> Value -> Green ()   -- (mailbox, coalesce key, payload)
-MailboxDrop :: Int -> Green ()
+MailboxNew  :: RepoEvent Int
+MailboxSend :: Int -> Text -> Value -> RepoEvent ()   -- (mailbox, coalesce key, payload)
+MailboxDrop :: Int -> RepoEvent ()
 ```
 
 ### Wave 2 acceptance
 
 A parent select-loops over `{message, deadline}`: it forks a child, the child
-`sendUp`s, the parent's `nextEvent (inbox <|> after ms)` observes the message
-before the deadline, and a second iteration with a silent child observes the
-`Tick`. A burst of same-tag sends is observed once, carrying the LAST payload.
+`sendUp`s, the parent's `nextEvent (fmap Left (received h) <|> fmap Right (after ms))`
+observes the message before the deadline, and a second iteration with a
+silent child observes the `Tick`. A burst of same-tag sends is observed once,
+carrying the LAST payload — proven deterministically (`folded`+`wait` on the
+sending child first, so the whole burst has already coalesced before the
+select runs, rather than racing the scheduler's own interleaving).
 
 ## Out of scope for this lane
 
