@@ -800,9 +800,12 @@ fn helpers() -> Vec<Helper> {
             ],
             body: HelperBody::Projection {
                 binder: "h",
-                fields: &["handleReceipt", "treeId"],
                 arg: HsType::Named("WorktreeHandle"),
-                ret: HsType::Named("WorktreeId"),
+                // `WorktreeId` is DERIVED from here — `WorktreeHandle`'s
+                // `handleReceipt` is a `WorktreeReceipt`, whose `treeId` is a
+                // `WorktreeId`. Retyping either field moves this signature with
+                // it instead of letting the two disagree.
+                fields: &["handleReceipt", "treeId"],
             },
         },
     ]

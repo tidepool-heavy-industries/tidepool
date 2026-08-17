@@ -93,7 +93,7 @@ module Tidepool.Worktree
 
     -- * Handles
   , WorktreeHandle
-  , WorktreeId
+  , WorktreeId (..)
   , BranchName
   , GitRef
   , GitOid
@@ -140,28 +140,30 @@ import Tidepool.Prelude hiding (error)
 
 default (Int, Double, Text)
 
--- The ten definitions below are LIBRARY code, not contract. The effect
--- contract in `tidepool-protocol` can represent a helper that is a thin
--- wrapper over exactly one verb — which is what 'createWorktree',
--- 'lookupWorktree' and 'listWorktrees' are — plus one pure field projection,
--- which is what 'worktreeId' is; those four are still re-exported from the
--- generated "Tidepool.Effects" above. The rest are constructor application, a
--- record update, an argument-adapting send, an identity unwrap, or ten arms of
--- string formatting: programs, not shapes, and a schema that could express
--- them would be a raw Haskell hatch with extra steps. So they live here, where
--- library code belongs, and the Worktree contract carries
--- `import Tidepool.Worktree` as an `extra_imports` row so an eval whose row
--- includes Worktree still sees all fourteen names with nothing authored
--- differently. See the scaffold doc
+-- The ten definitions below are LIBRARY code, not contract. Each is
+-- constructor application, a record update, an argument-adapting send, or an
+-- identity unwrap: none is a thin wrapper over one verb, so the effect
+-- contract in `tidepool-protocol` cannot describe them without becoming a raw
+-- Haskell hatch with extra steps. They live here, where library code belongs,
+-- and the Worktree contract carries `import Tidepool.Worktree` as an
+-- `extra_imports` row so an eval whose row includes Worktree still sees all
+-- fourteen names with nothing authored differently. See the scaffold doc
 -- (`plans/self-iterating-harness/22-p1-protocol-scaffold.md`) §11.9.
 --
--- 'worktreeId' could NOT move with them, and the reason is worth knowing
--- before anyone tries again: "Tidepool.Event"'s @commit@ and @headChanged@
--- helpers call it, and they are emitted into the same generated
--- "Tidepool.Effects" — which cannot import this module, because this module
--- imports IT. Defining it in both places instead would make @worktreeId@ an
--- ambiguous occurrence in any eval, which is the duplication the migration
--- exists to delete.
+-- FOUR names are re-exported from the generated "Tidepool.Effects" above
+-- rather than defined here, and it is worth knowing WHY before anyone tries to
+-- move them:
+--
+--   * 'createWorktree', 'lookupWorktree', 'listWorktrees' are thin wrappers
+--     over one verb, so the contract represents them.
+--   * 'worktreeId' is a pure field projection, which the contract represents
+--     as one shape — but the reason it HAD to be represented rather than
+--     relocated is that "Tidepool.Event"'s @commit@ and @headChanged@ helpers
+--     CALL it, and a helper spliced into the generated "Tidepool.Effects" may
+--     not reference a name that lives out here. That module cannot import this
+--     one — this module imports IT — and defining a name in both places makes
+--     it an ambiguous occurrence in any eval, which is the duplication this
+--     migration exists to delete.
 --
 -- The pragma block at the top of this file is the generated
 -- "Tidepool.Effects" module's own pragma set, verbatim: these bodies used to
@@ -217,14 +219,14 @@ worktreeBranch h = send (WorktreeBranchOf (worktreeId h)) >>= liftEither
 worktreeHead :: WorktreeHandle -> M GitOid
 worktreeHead h = send (WorktreeHeadOf (worktreeId h)) >>= liftEither
 
-renderWorktreeId :: WorktreeId -> Text
-renderWorktreeId (WorktreeId t) = t
-
 renderGitOid :: GitOid -> Text
 renderGitOid (GitOid t) = t
 
 renderBranchName :: BranchName -> Text
 renderBranchName (BranchName t) = t
+
+renderWorktreeId :: WorktreeId -> Text
+renderWorktreeId (WorktreeId t) = t
 
 -- | A one-line, operator-readable rendering of a worktree failure.
 -- Case-match the constructor when you mean to BRANCH on the failure;

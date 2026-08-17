@@ -17,6 +17,7 @@
 //! exactly why the expectations have to be hardcoded rather than imported.
 
 use tidepool_protocol::effects::worktree::worktree;
+use tidepool_protocol::hs::HsType;
 
 /// The schema must validate before any of its renderings can be trusted.
 #[test]
@@ -246,4 +247,102 @@ fn exec_and_journal_type_def_emission_order_is_unchanged() {
 
     let journal = tidepool_protocol::effects::journal::journal();
     assert!(journal.type_def_texts().is_empty());
+}
+
+// ---------------------------------------------------------------------------
+// `HelperBody::Projection` — the one shape lane 3 added, and its validator.
+// ---------------------------------------------------------------------------
+
+/// The result type is DERIVED by walking the field chain through `type_defs`,
+/// never declared. `WorktreeHandle.handleReceipt : WorktreeReceipt` and
+/// `WorktreeReceipt.treeId : WorktreeId`, so the signature reads
+/// `WorktreeHandle -> WorktreeId` without anyone restating it — retyping either
+/// field moves the signature with it instead of letting the two disagree.
+/// That is §3.4's principle (a restated signature is a drift class) applied to
+/// the one helper shape that has no verb to derive from.
+#[test]
+fn worktree_id_projection_derives_its_result_type_from_the_field_chain() {
+    let wt = worktree();
+    assert_eq!(
+        wt.project(
+            &HsType::Named("WorktreeHandle"),
+            &["handleReceipt", "treeId"]
+        ),
+        Ok(HsType::Named("WorktreeId"))
+    );
+    let rendered = wt
+        .helper_texts()
+        .into_iter()
+        .find(|t| t.contains("worktreeId ::"))
+        .expect("worktreeId is a schema helper");
+    assert!(rendered.contains("worktreeId :: WorktreeHandle -> WorktreeId\n"));
+}
+
+/// A field the declaring `TypeDef` does not have is a GENERATION failure, not a
+/// GHC error in emitted source. That is the second thing deriving the result
+/// buys, and it is why the walk runs inside `validate` too.
+#[test]
+fn a_projection_naming_an_absent_field_is_a_generation_failure() {
+    let wt = worktree();
+    let err = wt
+        .project(
+            &HsType::Named("WorktreeHandle"),
+            &["handleReceipt", "noSuchField"],
+        )
+        .expect_err("noSuchField is not a WorktreeReceipt field");
+    assert!(err.contains("no field `noSuchField`"), "got: {err}");
+
+    let err = wt
+        .project(&HsType::Named("DirtySummary"), &["staged", "anything"])
+        .expect_err("`[Text]` is not a named type to project out of");
+    assert!(err.contains("not a named type"), "got: {err}");
+
+    let err = wt
+        .project(&HsType::Named("NotDeclared"), &["x"])
+        .expect_err("NotDeclared is not a type_defs entry");
+    assert!(err.contains("does not declare"), "got: {err}");
+}
+
+/// `Helper::ctor` is an `Option` and BOTH directions are enforced: `Some`
+/// exactly for the verb-derived bodies, `None` exactly for a projection. An
+/// `Option` only one side checks is how a sentinel constructor name comes back
+/// in through the side door.
+#[test]
+fn the_helper_ctor_pairing_is_enforced_in_both_directions() {
+    use tidepool_protocol::schema::{Helper, HelperBody};
+
+    let mut eff = worktree();
+    eff.helpers = vec![Helper {
+        name: "worktreeId",
+        ctor: Some("WorktreeLookup"),
+        doc: &[],
+        body: HelperBody::Projection {
+            binder: "h",
+            arg: HsType::Named("WorktreeHandle"),
+            fields: &["handleReceipt", "treeId"],
+        },
+    }];
+    let errs = eff
+        .validate()
+        .expect_err("a projection may not name a verb");
+    assert!(
+        errs.iter().any(|e| e.contains("a projection wraps none")),
+        "got: {errs:?}"
+    );
+
+    let mut eff = worktree();
+    eff.helpers = vec![Helper {
+        name: "createWorktree",
+        ctor: None,
+        doc: &[],
+        body: HelperBody::Pointfree,
+    }];
+    let errs = eff
+        .validate()
+        .expect_err("a send-wrapper must name the verb it wraps");
+    assert!(
+        errs.iter()
+            .any(|e| e.contains("names no verb, but only a pure projection may")),
+        "got: {errs:?}"
+    );
 }

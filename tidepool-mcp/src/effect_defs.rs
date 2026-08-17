@@ -232,6 +232,19 @@ macro_rules! extra_imports_for {
     (Worktree) => {
         &["import Tidepool.Worktree"]
     };
+    // `renderSpawnError` is DEFINED in `haskell/lib/Tidepool/Agent/Spawn.hs`
+    // rather than emitted into the generated module, because it calls
+    // `renderWorktreeError` — authored library code in `Tidepool.Worktree`,
+    // which the generated `Tidepool.Effects` cannot import (that module imports
+    // IT). A forced cross-row edit; see the scaffold doc §11.12.
+    //
+    // NARROW on purpose. The module's other exports (`spawnAgent`,
+    // `spawnAsync`, `awaitAgent`, …) are reached by an explicit import today
+    // and must keep being, or this row would silently WIDEN the eval surface
+    // this migration promised to leave byte-identical.
+    (Subagent) => {
+        &["import Tidepool.Agent.Spawn (renderSpawnError)"]
+    };
     // Journal was migrated to the `tidepool-protocol` schema (PRD 22 phase 2);
     // its `extra_imports` (`import qualified Tidepool.Resume as Resume` — the
     // READ half of the run journal, PRD 20 S1-L5) is schema data now, emitted
@@ -2370,15 +2383,6 @@ macro_rules! subagent_effect_def {
                        "renderBackendFailure (BackendUnavailable t) = \"backend unavailable: \" <> t",
                        "renderBackendFailure (ProtocolRejected t) = \"backend rejected request: \" <> t",
                        "renderBackendFailure (RunFailed t) = \"agent run failed: \" <> t"] },
-                { raw ["renderSpawnError :: SpawnError -> Text",
-                       "renderSpawnError (SpawnWorktreeFailed st e) = \"spawn failed at \" <> show st <> \" (worktree): \" <> renderWorktreeError e",
-                       "renderSpawnError (SpawnBindingFailed st e) = \"spawn failed at \" <> show st <> \" (binding): \" <> renderWorktreeError e",
-                       "renderSpawnError (SpawnBackendFailed st b) = \"spawn failed at \" <> show st <> \" (backend): \" <> renderBackendFailure b",
-                       "renderSpawnError (SpawnRollbackFailed st orig rb) = \"spawn failed at \" <> show st <> \" AND rollback failed: \" <> orig <> \"; rollback: \" <> rb",
-                       "renderSpawnError (SpawnResultMalformed d) = \"spawn result malformed: \" <> d",
-                       "renderSpawnError (SpawnDriveFailed st d) = \"spawn drive failed at \" <> show st <> \": \" <> d",
-                       "renderSpawnError (SpawnCapacityExhausted n) = \"spawn refused: cycle table full (\" <> show n <> \" running)\"",
-                       "renderSpawnError (SpawnCancelled c) = \"spawn cancelled before it produced a result: \" <> show c"] },
                 { raw ["-- | RAW async spawn: everything `spawnAgentRaw` does, except that the",
                        "-- cycle runs on its OWN thread and this call returns as soon as it is",
                        "-- admitted — a `CycleId` naming the running cycle, not its outcome.",

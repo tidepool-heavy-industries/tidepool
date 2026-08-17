@@ -32,9 +32,10 @@ module SubagentHarness
 import GHC.Generics (Generic)
 import Tidepool.Aeson (FromJSON, ToJSON)
 import Tidepool.Aeson.Schema (JsonSchema)
-import Tidepool.Agent.Spawn (spawnAgent)
-import Tidepool.Effects (fromCurrentRepository, renderSpawnError, spawnSpec)
+import Tidepool.Agent.Spawn (renderSpawnError, spawnAgent)
+import Tidepool.Effects (spawnSpec)
 import Tidepool.Prelude hiding (render)
+import Tidepool.Worktree (fromCurrentRepository)
 import Tidepool.QQ (fmt)
 
 import Tidepool.Harness (Harness)

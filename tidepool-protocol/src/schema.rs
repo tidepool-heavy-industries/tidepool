@@ -135,6 +135,56 @@ impl Effect {
             .wire_name()
     }
 
+    /// Walk a field chain through this effect's `type_defs` and return the type
+    /// it lands on — the derivation behind [`HelperBody::Projection`].
+    ///
+    /// Same resolution `wire_rust_of` performs for a `Named` field's Rust
+    /// spelling (§11.10 item 1), one step further: the declaration that DECLARES
+    /// a type is the only thing asked what its fields are typed. Nothing is
+    /// restated, so nothing can drift.
+    ///
+    /// # Errors
+    /// Returns a message naming the exact step that failed — a non-record in the
+    /// middle of the chain, a type this effect does not declare, or a field the
+    /// declaring `TypeDef` does not have.
+    pub fn project(&self, start: &HsType, fields: &[&str]) -> Result<HsType, String> {
+        let mut cur = start.clone();
+        for (i, f) in fields.iter().enumerate() {
+            let HsType::Named(owner) = cur else {
+                return Err(format!(
+                    "{}: field `{f}` (step {}) projects out of `{}`, which is not a named type",
+                    self.name,
+                    i + 1,
+                    cur.render()
+                ));
+            };
+            let Some(td) = self.type_def(owner) else {
+                return Err(format!(
+                    "{}: field `{f}` (step {}) projects out of `{owner}`, which this effect \
+                     does not declare",
+                    self.name,
+                    i + 1
+                ));
+            };
+            let TypeShape::Record { fields: rec } = &td.shape else {
+                return Err(format!(
+                    "{}: field `{f}` (step {}) projects out of `{owner}`, which is not a record",
+                    self.name,
+                    i + 1
+                ));
+            };
+            let Some(rf) = rec.iter().find(|rf| rf.hs_name == *f) else {
+                return Err(format!(
+                    "{}: `{owner}` has no field `{f}` (step {})",
+                    self.name,
+                    i + 1
+                ));
+            };
+            cur = rf.ty.clone();
+        }
+        Ok(cur)
+    }
+
     /// Every rendered `type_defs` entry, in emission order: every shape
     /// declaration in schema order, then every `ToJSON` instance in schema
     /// order, then the derived error ADT.
@@ -250,19 +300,42 @@ impl Effect {
             // The pure shape: no verb to check against, but its own two
             // invariants — a projection with no fields is not a projection, and
             // a helper that names a verb it does not use is a misleading schema.
-            if let HelperBody::Projection { fields, .. } = &h.body {
+            if let HelperBody::Projection { arg, fields, .. } = &h.body {
                 if fields.is_empty() {
                     errs.push(format!(
                         "{}: helper {} projects no fields, so it is not a projection",
                         self.name, h.name
                     ));
                 }
+                // Both directions of the ctor pairing are checked — `None`
+                // exactly for a projection here, `Some` exactly for every
+                // verb-derived body below. An `Option` only one side checks is
+                // how the sentinel comes back in through the side door.
                 if h.ctor.is_some() {
                     errs.push(format!(
                         "{}: helper {} is a pure projection but names a verb; \
                          a projection wraps none",
                         self.name, h.name
                     ));
+                }
+                // `arg` is the one declared type, so it is the one that can
+                // name something this effect does not own.
+                match arg {
+                    HsType::Named(n) if self.type_def(n).is_some() => {}
+                    other => errs.push(format!(
+                        "{}: helper {} projects from `{}`, which is not a type_defs entry \
+                         of this effect",
+                        self.name,
+                        h.name,
+                        other.render()
+                    )),
+                }
+                // Walking the chain here is what turns a mistyped field into a
+                // generation failure rather than a GHC error in emitted source.
+                if !fields.is_empty() {
+                    if let Err(e) = self.project(arg, fields) {
+                        errs.push(format!("helper {}: {e}", h.name));
+                    }
                 }
                 continue;
             }
@@ -613,13 +686,22 @@ pub enum HelperBody {
     Projection {
         /// The bound parameter: `"h"`.
         binder: &'static str,
+        /// The argument's Haskell type. DECLARED, because there is no verb to
+        /// derive a starting type from — but [`Effect::validate`] requires it to
+        /// name a `type_defs` entry of this effect, so it cannot name a type the
+        /// projection could not walk.
+        arg: HsType,
         /// The field names to project, outermost first: `["handleReceipt",
         /// "treeId"]` renders `h.handleReceipt.treeId`. Must be non-empty.
+        ///
+        /// The RESULT type is DERIVED by walking this chain through the
+        /// `type_defs` table ([`Effect::project`]), never declared. §3.4's
+        /// principle is that a restated signature is a drift class: declaring
+        /// `WorktreeId` here and later retyping `WorktreeReceipt.treeId` would
+        /// let the two disagree with nothing noticing. Deriving also turns a
+        /// field the declaring `TypeDef` does not have into a GENERATION
+        /// failure instead of a GHC error.
         fields: &'static [&'static str],
-        /// The argument's Haskell type.
-        arg: HsType,
-        /// The projected result's Haskell type.
-        ret: HsType,
     },
 }
 
@@ -641,11 +723,14 @@ impl Helper {
         // body is a field chain rather than a `send`.
         if let HelperBody::Projection {
             binder,
-            fields,
             arg,
-            ret,
+            fields,
         } = &self.body
         {
+            // DERIVED, never declared — `Effect::validate` reports the same
+            // failure as a schema error first, so this panic is unreachable
+            // through a validated effect.
+            let ret = eff.project(arg, fields).unwrap_or_else(|e| panic!("{e}"));
             out.push_str(&format!(
                 "{} :: {} -> {}\n{} {} = {}",
                 self.name,

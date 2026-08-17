@@ -32,15 +32,15 @@ import Tidepool.Effects
   , Tick (..)
   , after
   , createWorktree
-  , fromCurrentRepository
   , headChanged
   , nextEvent
   , record
-  , renderWorktreeError
   , run
   , say
   , withHandler
   )
+import Tidepool.Worktree (fromCurrentRepository, renderWorktreeError)
+
 import Tidepool.Harness (Harness)
 
 data State = State

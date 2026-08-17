@@ -21,13 +21,12 @@ module Harness
 
 import qualified Data.Text as T
 import HarnessTypes
-import Tidepool.Agent.Spawn (spawnAgent)
+import Tidepool.Agent.Spawn (renderSpawnError, spawnAgent)
 import Tidepool.Effects
   ( SpawnError
   , SpawnOutcome (..)
   , SpawnReceipt (..)
   , WorktreeId (..)
-  , renderSpawnError
   , spawnSpec
   , spawnSpecIn
   )

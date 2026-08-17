@@ -74,17 +74,26 @@ module Harness
 import qualified Data.Text as T
 import HarnessTypes
 import Tidepool.Aeson (Value, object, toJSON, (.=))
-import Tidepool.Agent.Spawn (AgentHandle, awaitAgent, cancelAgent, spawnAgent, spawnAsync)
--- `SpawnError`/`spawnSpecIn`/`renderSpawnError`, the Console `say`, the Exec
--- verbs, and the worktree receipt's own fields are generated into
--- `Tidepool.Effects`; the curated modules re-export only their own vocabulary.
+import Tidepool.Agent.Spawn
+  ( AgentHandle
+  , awaitAgent
+  , cancelAgent
+  , renderSpawnError
+  , spawnAgent
+  , spawnAsync
+  )
+-- `SpawnError`/`spawnSpecIn`, the Console `say`, the Exec verbs, and the
+-- worktree receipt's own fields are generated into `Tidepool.Effects`; the
+-- curated modules re-export only their own vocabulary. `renderSpawnError`
+-- moved to `Tidepool.Agent.Spawn` above (PRD 22 lane 3): it calls
+-- `renderWorktreeError`, which is authored library code the generated module
+-- cannot reach.
 import Tidepool.Effects
   ( ExecError (..)
   , SpawnError
   , WorktreeHandle (..)
   , WorktreeReceipt (..)
   , WorktreeSummary (..)
-  , renderSpawnError
   , runIn
   , say
   , spawnSpecIn

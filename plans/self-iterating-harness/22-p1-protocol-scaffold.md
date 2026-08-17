@@ -1025,6 +1025,107 @@ larger lane and buys nothing this one needs. If a future lane wants it, the four
 spec builders and the three `render*` unwraps are the closed subset worth
 starting from; `renderWorktreeError` never belongs in a schema.
 
+### 11.9a Two helpers could not move — the coupling §11.9 could not see
+
+The flip lane executed §11.9's recommendation and GHC refused it twice. The
+finding is recorded here rather than as a footnote because it is the one place
+§11 was wrong about a MECHANISM rather than about a count.
+
+**The mechanism.** A helper emitted into the generated `Tidepool.Effects` is in
+scope for every OTHER effect's helpers in that module. That module cannot import
+`Tidepool.Worktree` — `Tidepool.Worktree` imports IT, which is the
+library-consumes-contract direction §3.6 rules — so a companion import in the
+other direction is a module cycle.
+
+§11.9's confirmation item was "nothing else imports these names from
+`Tidepool.Effects` directly", and that check PASSES: no other module imports
+them. The coupling is INSIDE the generated module, where no import statement
+appears at all, and nothing but GHC checks it. That is why the check as worded
+could not have caught this.
+
+`extra_imports` does not rescue it either, and this was verified rather than
+assumed: an assertion that `effects_module_source(…)` contains
+`import Tidepool.Worktree` FAILS. `EffectDecl::extra_imports` is folded into the
+eval preamble (`build_preamble`) and the decl plane
+(`session_decl_module_env`) — the AUTHOR-facing planes — never into the
+generated module. `worktree_decl_imports_the_module_that_defines_the_relocated_helpers`
+(`tidepool-mcp/tests/prd19_emit.rs`) now pins both planes so the next lane reads
+the fact instead of rediscovering it.
+
+Two helpers are coupled that way, found by exhausting every `*_effect_def!`
+block rather than by spot-check:
+
+| Helper | Called by | From |
+|---|---|---|
+| `worktreeId` | `commit`, `headChanged` | `event_effect_def!` |
+| `renderWorktreeError` | `renderSpawnError` | `subagent_effect_def!` |
+
+plus one INTRA-effect edge the same walk turned up: `renderWorktreeError` calls
+`renderWorktreeId`, so the set closes at three names rather than two.
+
+Relocating any of them stops the generated module compiling for every row
+carrying that effect — four `Variable not in scope: worktreeId` errors on the
+first attempt, then a cascade of `attempting to use module … which is not
+loaded` on the second, with every `dogfood_harness_typecheck` and
+`outer_effects` test red and neither dogfood harness at fault. Defining a name
+in BOTH places is not the escape: an eval imports `Tidepool.Effects` and
+`Tidepool.Worktree` unqualified, so two definitions make it an ambiguous
+occurrence at every use site — the same duplication this migration exists to
+delete, relocated into the author's face.
+
+**They were resolved in two DIFFERENT ways, and the difference is the point.**
+`worktreeId` was made representable (§11.9b), so it stays in the contract
+legitimately. `renderWorktreeError` was not — ten arms of string formatting is a
+program, and §11.9's own ruling stands — so the CALLER moved instead (§11.12).
+Representability decided which lever was available; it did not decide the
+outcome by itself.
+
+### 11.9b `HelperBody::Projection` — the one shape added, and why it is not a hatch
+
+§9 step 2 offers two honest answers to an unrepresentable helper: leave it
+hand-written outside the contract, or *add a deliberate schema feature and
+document it here*. For `worktreeId` the first was unavailable — the generated
+module needs it — so the second was taken, under a ruling from root.
+
+```
+Projection { binder, arg, fields }
+```
+
+renders `worktreeId h = h.handleReceipt.treeId`. A binder, one declared
+starting type, and an ordered list of field names. No application, no nesting,
+no constructors, no operators.
+
+**The result type is DERIVED, never declared.** `Effect::project` walks the
+chain through the `type_defs` table: `WorktreeHandle`'s `handleReceipt` is a
+`WorktreeReceipt`, whose `treeId` is a `WorktreeId`, so the signature reads
+`WorktreeHandle -> WorktreeId` with nobody restating it. This is the same
+resolution `Effect::wire_rust_of` performs for a `Named` field's Rust spelling
+(§11.10 item 1), one step further. Declaring the result would have reintroduced
+exactly the drift class §3.4 exists to close — retype `WorktreeReceipt.treeId`
+later and the two disagree with nothing noticing — and it buys a second thing:
+a projection naming a field the declaring `TypeDef` does not have is a
+GENERATION failure, not a GHC error in emitted source.
+
+**`Helper::ctor` becomes `Option<&'static str>`**, `None` for the one shape that
+wraps no verb. A sentinel constructor name would be a lie the validator could
+not catch. `validate` enforces the pairing in BOTH directions — `Some` exactly
+for the verb-derived bodies, `None` exactly for a projection — because an
+`Option` only one side checks is how the sentinel returns through the side door.
+
+**Why this is a feature and an expression AST would not be.** The test is what
+the vocabulary CANNOT say. A projection cannot express constructor application
+(`fromRef`), a record update (`allowDirtySnapshot`), an argument-adapting send
+(`worktreeBranch`), a pattern match (`renderGitOid`), or ten arms of formatting
+(`renderWorktreeError`) — all ten relocated helpers stay unrepresentable under
+it, unchanged. An `App`/`Var`/`Con`/`FieldAccess`/`RecordUpdate` AST would
+express nine of the ten and still not reach `renderWorktreeError`: that is the
+raw hatch with an intermediate representation, and it is still rejected.
+
+Gates: `worktree_id_projection_derives_its_result_type_from_the_field_chain`,
+`a_projection_naming_an_absent_field_is_a_generation_failure`, and
+`the_helper_ctor_pairing_is_enforced_in_both_directions`
+(`tidepool-protocol/tests/worktree_haskell_contract.rs`).
+
 ### 11.10 As built — where §11 was wrong, and what was added beyond it
 
 Everything §11.2–11.6 specified was implementable as written except where noted.
@@ -1195,3 +1296,66 @@ deriving the answer rather than an author remembering it:
 Both are computable from the schema, which means both can fail GENERATION rather
 than a GHC battery. That is the same move as the handling-class requirement, and
 it is worth making at the same time.
+
+### 11.12a Rule 2 as executed — the whole-registry check, and its receipt
+
+§11.12's Rule 2 is what this lane walked into. What follows is how it was
+discharged, so the next lane runs the check rather than re-deriving the rule.
+
+**The check is over EMITTED strings, in every `*_effect_def!`, not a grep of
+the file.** A Rust `//` comment mentioning a helper is not spliced anywhere;
+scoring one as a hit sends you looking for a coupling that does not exist.
+Running it over all twenty rows found THREE hits, one of them noise:
+
+| Caller | Name | Real? |
+|---|---|---|
+| `event_effect_def!` — `commit`, `headChanged` | `worktreeId` | yes |
+| `subagent_effect_def!` — `renderSpawnError` | `renderWorktreeError` | yes |
+| `fs_effect_def!` | `worktreeId` | no — doc comment |
+
+plus one INTRA-effect edge the same walk turned up: `renderWorktreeError` calls
+`renderWorktreeId`. §11.12 anticipated one coupled helper; there were two, and
+the difference matters because **they were resolved by different levers.**
+
+- `worktreeId` was made REPRESENTABLE (§11.9b), so it stays in the contract
+  legitimately and Event is untouched.
+- `renderWorktreeError` could not be — ten arms of formatting is a program —
+  so §11.12's symmetric fix applied: the CALLER moved.
+
+Representability decides which levers are available; it does not decide the
+outcome. A future coupling has both to choose from, and the cheaper one is
+worth checking first.
+
+**The cross-row edit's receipt.** Root's condition for approving the Subagent
+edit was byte evidence rather than a claim: a before/after diff of
+`render_effect_decl(subagent_decl())` — the lossless length-prefixed renderer
+the Class A goldens use — bracketing exactly that commit. It shows `helpers`
+10 → 9 losing exactly `renderSpawnError`, `extra_imports` 0 → 1 gaining
+`import Tidepool.Agent.Spawn (renderSpawnError)`, no surviving helper changing
+by a byte, everything else renumbering. No Class A golden carries Subagent
+bytes: `subagent_decl()` is deliberately absent from `pinned_decls()`, and
+`standard_decls()`'s row contains no Subagent. It is a one-off measurement, not
+a new committed golden — do not add `subagent_decl()` to `pinned_decls()`,
+whose exclusion is deliberate and documented there.
+
+**The `extra_imports` row is NARROW** — `import Tidepool.Agent.Spawn
+(renderSpawnError)`, not the whole module. Its other exports (`spawnAgent`,
+`spawnAsync`, `awaitAgent`, …) are reached by an explicit import today and must
+keep being, or the row silently WIDENS the eval surface a byte-compatibility
+migration promised to leave alone. Same for Worktree's row while it existed:
+whole-module there, because `Tidepool.Worktree` exports exactly the fourteen
+names the generated module used to define — no more.
+
+**Closure check, re-run AFTER the moves rather than only before:** zero
+references from any emitted `Tidepool.Effects` text to any of the eleven names
+that now live in the authored library layer. Rule 2 is satisfied, not merely
+understood. Re-run it after any future relocation; it is the cheap half of what
+GHC would otherwise tell you at battery time.
+
+**Final arithmetic.** FOUR Worktree helpers are schema-representable and stay in
+the contract (`createWorktree`, `lookupWorktree`, `listWorktrees`,
+`worktreeId`); TEN are definitions in `haskell/lib/Tidepool/Worktree.hs`; one
+Subagent helper (`renderSpawnError`) is a definition in
+`haskell/lib/Tidepool/Agent/Spawn.hs`. Every module's export list keeps every
+name it had, and the `extra_imports` rows put them back on the eval surface —
+the authored surface is unchanged in every case.
