@@ -1,15 +1,21 @@
 //! Runaway-cap acceptance: a `runLLMTurn` answerer that never finalizes is
-//! NUDGED at the soft cap and HARD-FAILS at the hard cap.
+//! NUDGED at the soft cap and HARD-FAILS two rounds past the hard cap.
 //!
 //! 08-wave1-correctness.md LOCKED the per-hole budget: up to 16 tool-call
 //! rounds accumulating context; at 16 the runtime nudges ("approaching max
-//! tool calls, finalize now"); at 32 it hard-fails the `runLLMTurn` effect.
-//! This drives a hole with a provider that NEVER finalizes (always emits a
-//! compiling non-finalize block) and asserts (a) the cycle ultimately errors
-//! at the hard cap and (b) a nudge was delivered at the soft cap. The caps are
-//! lowered to 3/6 here (`set_answerer_round_caps`) so the SAME mechanism is
-//! exercised with a few scripted turns rather than 16/32 real GHC compiles;
-//! the 16/32 defaults live in the driver's constants.
+//! tool calls, finalize now"). Commit 46cb30d8 ("the feedback bundle — carry
+//! state, glide the cap, show the curator") added a GLIDE at the hard cap: one
+//! explicit ultimatum round (the minimal-honest-finalize instruction) plus one
+//! grace round before hard-failing — `drive_answerer_to_finalize`'s
+//! `hard_rounds = max_rounds.saturating_add(2)` — so the default 32-round cap
+//! actually hard-fails at round 34. This drives a hole with a provider that
+//! NEVER finalizes (always emits a compiling non-finalize block) and asserts
+//! (a) the cycle ultimately errors at `max_rounds + 2` and (b) a nudge was
+//! delivered at the soft cap. The caps are lowered to 3/6 here
+//! (`set_answerer_round_caps`) so the SAME mechanism is exercised with a few
+//! scripted turns rather than 16/34 real GHC compiles — hard-fail lands at
+//! `6 + 2 = 8` rounds; the 16/32 defaults (hard-failing at 34) live in the
+//! driver's constants.
 //!
 //! Needs `TIDEPOOL_EXTRACT` and the with-packages GHC on PATH — run inside
 //! `nix develop` (see `haskell/CLAUDE.md`).
@@ -53,8 +59,11 @@ fn header() -> LogHeader {
 
 /// A provider that NEVER finalizes: it emits a compiling but non-finalizing
 /// block (`pure ()`) every turn, and records how many times it was called plus
-/// whether it was ever handed a nudge ("approaching the maximum" appears in
-/// the latest user turn).
+/// whether it was ever handed a nudge ("approaching this window's round
+/// limit" appears in the latest user turn — the wording commit bd2a950e
+/// ("round-outcome prompts tell the truth about the multi-round window")
+/// gave the nudge; this pins the CURRENT text, not the "approaching the
+/// maximum number of tool calls" wording it replaced).
 struct NeverFinalizeProvider {
     calls: Arc<Mutex<u32>>,
     nudge_seen_at: Arc<Mutex<Option<u32>>>,
@@ -78,7 +87,7 @@ impl ModelProvider for NeverFinalizeProvider {
             .find(|m| matches!(m.role, Role::User))
             .map(|m| m.content.clone())
             .unwrap_or_default();
-        if latest_user.contains("approaching the maximum") {
+        if latest_user.contains("approaching this window's round limit") {
             let mut slot = self.nudge_seen_at.lock().unwrap();
             if slot.is_none() {
                 *slot = Some(n);
@@ -132,20 +141,24 @@ async fn answerer_nudged_at_16_and_hard_fails_at_32() {
 
     let result = driver.run_one_cycle(&source, None).await;
 
-    // The hole hard-fails the runLLMTurn effect at the configured hard cap (6).
+    // The hole hard-fails the runLLMTurn effect two rounds past the
+    // configured hard cap (6 + 2 = 8) — the 46cb30d8 glide: an ultimatum
+    // round at the cap plus one grace round before hard-failing.
     let err = result.expect_err("a never-finalizing answerer must hard-fail the cycle");
     let msg = err.to_string();
     assert!(
-        msg.contains("6") && msg.contains("without finalizing"),
-        "the failure must be the per-hole hard cap, got: {msg}"
+        msg.contains("8") && msg.contains("cap 6") && msg.contains("without finalizing"),
+        "the failure must be the per-hole hard cap plus the ultimatum grace, got: {msg}"
     );
 
-    // The answerer was driven exactly 6 rounds (the nudge is a push, not a
-    // model round), so the provider saw 6 calls.
+    // The answerer was driven exactly 8 rounds — max_rounds (6) plus the
+    // 46cb30d8 glide's ultimatum + grace rounds (2) — before the hard cap
+    // fires, so the provider saw 8 calls.
     let total_calls = *calls.lock().unwrap();
     assert_eq!(
-        total_calls, 6,
-        "the answerer must be driven exactly max-rounds (6) times before the hard cap fires"
+        total_calls, 8,
+        "the answerer must be driven exactly max-rounds + ultimatum grace (6 + 2 = 8) \
+         times before the hard cap fires"
     );
 
     // The nudge fired: the model saw the "approaching the maximum" message,

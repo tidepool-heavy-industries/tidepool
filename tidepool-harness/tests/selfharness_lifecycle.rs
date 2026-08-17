@@ -253,13 +253,22 @@ async fn poisoned_driver_refuses_entry_points() {
     ));
 
     // Recovery re-bootstraps from scratch (the prior cycle discarded `outer`)
-    // — point it at an extract binary that cannot possibly exist, so THIS
-    // bootstrap attempt fails deterministically, without depending on GHC.
+    // — point it at an extract "binary" that can never compile anything, so
+    // THIS bootstrap attempt fails deterministically, without depending on
+    // GHC. NOT a nonexistent path: `toolchain::extract_command_name()`
+    // degrades a SET-but-unreadable `$TIDEPOOL_EXTRACT` to a bare
+    // `tidepool-extract` PATH lookup, which silently RESCUES a nonexistent
+    // override on any machine that happens to have a real `tidepool-extract`
+    // on `$PATH` (e.g. a `~/.nix-profile` install unrelated to this repo) —
+    // that rescue is exactly what let `poisoned_driver_refuses_entry_points`
+    // pass on such a machine without ever exercising the Poisoned escalation
+    // this test exists to pin. A real, readable, executable file with
+    // garbage content (`support::poisoned_extract_bin`) defeats the PATH
+    // fallback (the override resolves, so there's nothing to fall back to)
+    // and fails at spawn/exec time instead — un-rescuably, on every machine.
     let original_extract = std::env::var("TIDEPOOL_EXTRACT").ok();
-    std::env::set_var(
-        "TIDEPOOL_EXTRACT",
-        "/nonexistent/tidepool-extract-bin-poisoned-test",
-    );
+    let (_poison_dir, poison_path) = support::poisoned_extract_bin();
+    std::env::set_var("TIDEPOOL_EXTRACT", &poison_path);
     let recovery = driver.run_one_cycle(&harness_source, None).await;
     match original_extract {
         Some(v) => std::env::set_var("TIDEPOOL_EXTRACT", v),
@@ -267,7 +276,7 @@ async fn poisoned_driver_refuses_entry_points() {
     }
     assert!(
         recovery.is_err(),
-        "a re-bootstrap against a nonexistent extract binary must fail"
+        "a re-bootstrap against a poisoned extract binary must fail"
     );
     assert!(
         matches!(driver.lifecycle(), SelfHarnessState::Poisoned { .. }),

@@ -85,6 +85,39 @@ pub fn isolate_compile_memo() -> TempDir {
     scratch
 }
 
+/// A `$TIDEPOOL_EXTRACT` override that fails UN-RESCUABLY, on any machine —
+/// a real, executable, readable file whose content is garbage, rather than a
+/// nonexistent path.
+///
+/// `tidepool_extract_cmd::resolve_bin()` only checks `path.is_file()`; a
+/// NONEXISTENT path is the one case `tidepool_runtime::toolchain::
+/// extract_command_name()` (what builds `EngineConfig::extract_bin`)
+/// silently degrades to a bare `tidepool-extract` PATH lookup, on the
+/// documented assumption that a bad override "fails loudly downstream" —
+/// which does not hold when a real `tidepool-extract` happens to sit on
+/// `$PATH` (e.g. a `~/.nix-profile/bin/tidepool-extract` from an unrelated
+/// install): the fallback silently compiles against THAT binary instead of
+/// failing. A file that EXISTS and is readable defeats the fallback
+/// (`resolve_bin` returns `Ok(BinSource::Env)` unconditionally), so the
+/// garbage content fails at spawn/exec time instead (`ENOEXEC` or similar) —
+/// deterministic on every machine, independent of `$PATH` contents. Keep the
+/// returned `TempDir` alive for as long as the path must stay valid.
+pub fn poisoned_extract_bin() -> (TempDir, std::path::PathBuf) {
+    let dir = tempfile::tempdir().expect("scratch tempdir for a poisoned extract binary");
+    let path = dir.path().join("tidepool-extract-poisoned");
+    std::fs::write(&path, b"not a real executable\n").expect("write poisoned extract binary");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = std::fs::metadata(&path)
+            .expect("stat poisoned extract binary")
+            .permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&path, perms).expect("chmod +x poisoned extract binary");
+    }
+    (dir, path)
+}
+
 /// True iff `TIDEPOOL_EXTRACT` is set or a `tidepool-extract` binary is on
 /// `PATH`.
 fn extract_available() -> bool {
