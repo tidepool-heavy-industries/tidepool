@@ -19,6 +19,6 @@
   Ask: Suspend execution and ask the calling agent a STRUCTURED question.
       verbs: ask, isOpt, innerSchema, schemaToValue
   RunLLMTurn: Suspend for a TYPED answer.
-      verbs: runLLMTurn, runLLMTurnFork, runLLMTurnFanout, runLLMTurnSited, runLLMTurnForkSited, runLLMTurnFanoutSited
+      verbs: runLLMTurn, runLLMTurnFork, runLLMTurnFanout, renderInvocationExit, runLLMTurnSited, runLLMTurnForkSited, runLLMTurnFanoutSited, freezeContext, runLLMTurnBranch, runLLMTurnBranchSited
   Fork: Spawn parallel sub-answerers and gather their typed answers.
       verbs: forkSited, forkAllSited

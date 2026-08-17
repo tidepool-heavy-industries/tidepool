@@ -33,18 +33,6 @@ data KV a where
   KvInfo :: KV Value
   KvCas :: Text -> Maybe Value -> Value -> KV (Either Value ())
 
-data FileRead = FileRead { path :: Text, contents :: Either FsError Text } deriving (Show, Eq)
-instance ToJSON FileRead where
-  toJSON (FileRead p c) = object ["path" .= p, "contents" .= c]
-data FsError = FsNotFound Text | FsNotUtf8 Text | FsSandbox Text | FsBadRegex Text | FsIo Text deriving (Show, Eq)
-instance ToJSON FsError where
-  toJSON e = case e of
-    FsNotFound path -> object ["tag" .= ("FsNotFound" :: Text), "path" .= path]
-    FsNotUtf8 path -> object ["tag" .= ("FsNotUtf8" :: Text), "path" .= path]
-    FsSandbox detail -> object ["tag" .= ("FsSandbox" :: Text), "detail" .= detail]
-    FsBadRegex detail -> object ["tag" .= ("FsBadRegex" :: Text), "detail" .= detail]
-    FsIo detail -> object ["tag" .= ("FsIo" :: Text), "detail" .= detail]
-
 data Fs a where
   FsRead :: Text -> Fs (Either FsError Text)
   FsWrite :: Text -> Text -> Fs (Either FsError ())
@@ -136,8 +124,27 @@ data Schema = SObj [(Text, Schema)] | SArr Schema | SStr | SNum | SBool | SEnum 
 data Ask a where
   AskWith :: Text -> Value -> Ask Value
 
+data ContextRef = ContextRef Text deriving (Show, Eq)
+-- | Why a forked cognition window ended WITHOUT a typed answer.
+-- Folded as data at the failing branch's own position (PRD 21
+-- locked decision 6) — never an exception that erases the results
+-- its siblings already produced. Each constructor carries the
+-- runtime's own detail text.
+data InvocationExit
+  = ExitRoundsExhausted Text
+  | ExitNotFinalized Text
+  | ExitCancelled Text
+  | ExitRuntimeFailure Text
+  deriving (Show, Eq)
+instance ToJSON InvocationExit where
+  toJSON e = case e of
+    ExitRoundsExhausted detail -> object ["tag" .= ("ExitRoundsExhausted" :: Text), "detail" .= detail]
+    ExitNotFinalized detail -> object ["tag" .= ("ExitNotFinalized" :: Text), "detail" .= detail]
+    ExitCancelled detail -> object ["tag" .= ("ExitCancelled" :: Text), "detail" .= detail]
+    ExitRuntimeFailure detail -> object ["tag" .= ("ExitRuntimeFailure" :: Text), "detail" .= detail]
 data RunLLMTurn a where
   RunLLMTurnWith :: Text -> Value -> RunLLMTurn Value
+  RunLLMTurnFreezeWith :: RunLLMTurn ContextRef
 
 data Fork a where
   ForkWith :: Int -> Text -> Fork Value
@@ -452,20 +459,41 @@ schemaToValue (SObj fields) = object ["type" .= ("object" :: Text), "properties"
 runLLMTurn :: forall a effs. Member RunLLMTurn effs => Text -> Eff effs a
 runLLMTurn prompt = runLLMTurnSited 0 prompt
 {-# OPAQUE runLLMTurnFork #-}
-runLLMTurnFork :: forall a effs. Member RunLLMTurn effs => Text -> Eff effs a
+runLLMTurnFork :: forall a effs. Member RunLLMTurn effs => Text -> Eff effs (Either InvocationExit a)
 runLLMTurnFork prompt = runLLMTurnForkSited 0 prompt
 {-# OPAQUE runLLMTurnFanout #-}
-runLLMTurnFanout :: forall a effs. Member RunLLMTurn effs => [Text] -> Eff effs [a]
+runLLMTurnFanout :: forall a effs. Member RunLLMTurn effs => [Text] -> Eff effs [Either InvocationExit a]
 runLLMTurnFanout prompts = runLLMTurnFanoutSited 0 prompts
+renderInvocationExit :: InvocationExit -> Text
+renderInvocationExit (ExitRoundsExhausted d) = "round exhaustion: " <> d
+renderInvocationExit (ExitNotFinalized d) = "non-finalization: " <> d
+renderInvocationExit (ExitCancelled d) = "cancelled: " <> d
+renderInvocationExit (ExitRuntimeFailure d) = "runtime failure: " <> d
 {-# OPAQUE runLLMTurnSited #-}
 runLLMTurnSited :: forall a effs. Member RunLLMTurn effs => Int -> Text -> Eff effs a
 runLLMTurnSited sid p = unsafeCoerce <$> send (RunLLMTurnWith p (object ["typedSite" .= sid]))
 {-# OPAQUE runLLMTurnForkSited #-}
-runLLMTurnForkSited :: forall a effs. Member RunLLMTurn effs => Int -> Text -> Eff effs a
+runLLMTurnForkSited :: forall a effs. Member RunLLMTurn effs => Int -> Text -> Eff effs (Either InvocationExit a)
 runLLMTurnForkSited sid p = unsafeCoerce <$> send (RunLLMTurnWith p (object ["typedSite" .= sid, "fork" .= True]))
 {-# OPAQUE runLLMTurnFanoutSited #-}
-runLLMTurnFanoutSited :: forall a effs. Member RunLLMTurn effs => Int -> [Text] -> Eff effs [a]
+runLLMTurnFanoutSited :: forall a effs. Member RunLLMTurn effs => Int -> [Text] -> Eff effs [Either InvocationExit a]
 runLLMTurnFanoutSited sid prompts = unsafeCoerce <$> send (RunLLMTurnWith (intercalate "\n" prompts) (object ["typedSite" .= sid, "fork" .= True, "fan" .= length prompts, "prompts" .= prompts]))
+-- | Mint a capability naming THIS window's current frozen
+-- prefix (PRD 21 locked decision 2: children fork the frozen
+-- post-coalgebra context). Immediate — no operator, no model
+-- round (ReadState's service shape). Possession is permission:
+-- a ContextRef only ever comes from here or from
+-- runLLMTurnBranch's own return; an unrecognized one is refused
+-- by the driver as a typed error, never a silent fresh-root
+-- fallback.
+freezeContext :: forall effs. Member RunLLMTurn effs => Eff effs ContextRef
+freezeContext = send RunLLMTurnFreezeWith
+{-# OPAQUE runLLMTurnBranch #-}
+runLLMTurnBranch :: forall a effs. Member RunLLMTurn effs => ContextRef -> Text -> Eff effs (Either InvocationExit (a, ContextRef))
+runLLMTurnBranch ref p = runLLMTurnBranchSited 0 ref p
+{-# OPAQUE runLLMTurnBranchSited #-}
+runLLMTurnBranchSited :: forall a effs. Member RunLLMTurn effs => Int -> ContextRef -> Text -> Eff effs (Either InvocationExit (a, ContextRef))
+runLLMTurnBranchSited sid (ContextRef ref) p = unsafeCoerce <$> send (RunLLMTurnWith p (object ["typedSite" .= sid, "branch" .= True, "ref" .= ref]))
 {-# OPAQUE forkSited #-}
 forkSited :: forall a effs. Member Fork effs => Int -> Text -> Eff effs a
 forkSited sid brief = unsafeCoerce <$> send (ForkWith sid brief)
