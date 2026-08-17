@@ -527,7 +527,7 @@ fn manager_level_dirty_create_captures_through_a_nonexistent_index_dir() {
 }
 
 /// Pins the currently-unpinned tolerance flagged by an external type review on
-/// 2026-08-17 (see §11.9 of `plans/self-iterating-harness/22-p1-protocol-scaffold.md`):
+/// 2026-08-17 (see §11.11 of `plans/self-iterating-harness/22-p1-protocol-scaffold.md`):
 /// `WorktreeSource::Ref` resolves a named ref via `rev-parse` and never
 /// consults `spec.dirty_policy` at all. This is correct as far as it goes — a
 /// named ref is already-committed content, so there is nothing uncommitted to
