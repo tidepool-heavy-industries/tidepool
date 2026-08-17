@@ -545,10 +545,9 @@ just reached from the algebra side. Neither exit aborts and neither is silent:
 both journal under kind `failed`, tagged with which window produced them.
 
 The harness funnels both invocations through `layerWindow`/`foldWindow`, two
-adjacent one-line functions under a single comment block, so the rewire is one
-edit each. Today both simply `>>= liftEither` — the pre-verb behaviour, kept
-deliberately: what a failed ALGEBRA window folds to is a decision this lane
-still owes, and neither seam was rewired on its behalf. TWO rather than one polymorphic `runWindow :: Text -> Companion a`,
+adjacent one-line functions under a single comment block, so the rewire was one
+edit each: both now pass the `Either` through unwrapped and their two callers
+fold it, per the paragraph above. TWO rather than one polymorphic `runWindow :: Text -> Companion a`,
 for a mechanical reason worth recording: extract's typed-yield site pass
 rejects a `runLLMTurnFork @a` call at a bare type VARIABLE ("polymorphic
 runLLMTurn site"), which is the same constraint that makes `Tidepool.Harness`
@@ -565,33 +564,70 @@ but do not bind one by name across turns; project at the bind instead.
 
 ## 9. Acceptance — the scripted tier
 
-Runs on `KeyedProvider` (the needle-matched provider `tests/outer_fanout.rs`
-already defines for exactly this reason: concurrent/ordered windows cannot be
-served by `ReplayProvider`'s strict FIFO). Each window's prompt embeds its
-`NodePath`, so a scenario is a table of `(path-needle, finalize reply)` and the
-whole tree is deterministic and unattended.
+**Built: `tidepool-harness/tests/companion_recursive_slice.rs`.** It drives the
+SHIPPED `harness-dogfooding/recursive-companion/` harness through
+`SelfHarnessDriver::run_one_cycle` — not a fixture copy, which would keep
+passing while the deliverable rotted. Additionally:
+`harness-dogfooding/recursive-companion/` joins `dogfood_harness_typecheck.rs`
+as its third probe (the outer row, no extra imports/decls beyond the universal
+contract).
 
-New file `tidepool-harness/tests/companion_recursive_slice.rs`, one fixture
-harness, family-bundle discipline (one compile shape, many assertions).
-Additionally: `harness-dogfooding/recursive-companion/` joins
-`dogfood_harness_typecheck.rs` as its third probe (the outer row, no extra
-imports/decls beyond the universal contract).
+Two knobs script a scenario, and between them they cover the matrix below:
+
+- **The provider table.** Runs on `KeyedProvider` (the needle-matched provider
+  `tests/outer_fanout.rs` already defines for exactly this reason:
+  concurrent/ordered windows cannot be served by `ReplayProvider`'s strict
+  FIFO), adapted in two ways the shipped harness forces. An entry carries a
+  needle SET rather than one needle, so a scenario names a branch by POSITION
+  and phase (`["NODE root/2-", "— DISCOVER"]`) instead of hardcoding a slug the
+  harness derives from a model-produced title (§3, row 11). And a request is
+  matched against the last message carrying a prompt HEADER rather than simply
+  the last message — a branch child's request opens with its parent's frozen
+  transcript (§4), and a starved window is re-prompted with the driver's
+  round-cap ultimatum, which carries no header at all.
+- **A seeded checkpoint.** Scenario config (`maxDepth`/`maxNodes`/`maxFanOut`/
+  `gatePolicy`) varies per scenario and `initialState` is fixed, so each
+  scenario writes a durable `persistence::Checkpoint` carrying its own `State`
+  JSON and boots through `SelfHarnessDriver::restore` — the production restart
+  path, not a test-only argument.
+
+**What one compile actually costs, and how the file is bundled.** The driver
+splices the restored `State` JSON into the fused `render`+`loop` compile, so ONE
+CONFIG IS ONE COMPILE SHAPE: runs sharing a config share it, and runs differing
+only in their provider table or gate script cost nothing extra. So the rows
+below are grouped into FOUR configs — the depth cap, the node cap and the
+fan-out cap are three different `Config` values and no run can hold two without
+confounding which cap fired, while everything a `GateOff`, generously-budgeted
+config can carry rides in one tree, and rows 8/8b share one `GateEveryLayer`
+config between two runs. Answerer-side compiles are keyed by the reply block's
+source, so one shared `ProposeFinish`, one shared `FoldProposal`, one shared
+two-branch and one shared three-branch split serve the whole file.
+
+Every row below is BUILT, and the table names the check that carries it. `A`
+is the tree scenario (`GateOff`, `maxDepth 3`/`maxNodes 40`/`maxFanOut 5`:
+`companion_tree_recurses_folds_and_contains_its_node_ids`), `B`/`C`/`D` the
+three cap scenarios, `E` the shared gate config's two runs.
 
 | # | PRD 21 C3 acceptance line | Scenario | Assertion |
 |---|---|---|---|
-| 1 | the root is never asked for descendant shape | root splits 2; each child splits again | the root's window served exactly ONE reply, and `LayerProposal` has no recursive arm (a compile-level fact, asserted by the type's own shape test) |
-| 2 | grandchild recursion from inherited context | depth-3 tree | a grandchild's window is genuinely FORKED from its parent's frozen prefix, never an empty root: one `Event::BranchInvocation` per coalgebra window (they exist only for `fork_from_snapshot` children — see `companion_context_ref.rs`), the depth-2 branch naming the digest its PARENT's window froze, with `shared_prefix_bytes` equal to that frozen prefix's own byte count and a non-zero `branch_suffix_bytes`. Sibling branches at one node name ONE shared digest |
-| 3 | branch-order delivery, never completion order | 3 siblings, the FIRST delayed longest | the algebra's rendered layer lists branches in declared order |
-| 4 | failure accumulates as data — unusable layer | branch 2 finalizes an empty `ProposeSplit` | branch 2 folds as `InvocationFailed`; branches 1 and 3 still fold their real answers |
-| 4b | failure accumulates as data — abnormal exit | branch 2's window never finalizes (round exhaustion) | branch 2 folds as `InvocationFailed` carrying the rendered `InvocationExit`; siblings' answers all arrive |
-| 5 | budget-forced finish | `maxDepth 2` against a tree that wants 4 | the depth-2 nodes carry `BudgetForced ForcedDepth`, stamped in the receipt and the render |
-| 6 | node-count cap | `maxNodes` smaller than the proposed tree | the overflow branches carry `BudgetForced ForcedNodeCount`; the total window count is exactly the cap |
-| 7 | fan-out cap | a layer proposing more branches than `maxFanOut` | that node finishes with `BudgetForced ForcedFanOut` and NO child window runs |
-| 8 | the gate is exercised through the form API | `GateEveryLayer` + a scripted gate answering `Prune`, then `Approve` | the pruned branch's window never runs; the survivor's does |
-| 8b | an amended branch is WORKED as amended | `Amend` on branch 1, then `Approve` | branch 1's own coalgebra prompt carries the amended instruction — not just the rendered tree. A branch holds its `ForkBrief` twice (on the `Branch`, and inside the seed the child's window is prompted from); writing one and not the other renders right and works wrong, so this asserts the prompt, not the render |
-| 9 | gate policy auto-approves unattended | `GateOff` | no `askUser` suspension is raised at all |
-| 10 | the turn is journaled per node event | any scenario | one journal entry per `split`/`fold`/`forced`/`failed`, keyed by `NodePath` (§10) |
-| 11 | node ids are containment-safe | a branch titled with punctuation/markup | every emitted node id matches `^[0-9]+-[a-z0-9-]{1,32}$` per segment |
+| 1 | the root is never asked for descendant shape | A: root splits 5; one child splits again | the root's window was served exactly ONE reply, and `LayerProposal` has no recursive arm — asserted off the hole card's rendered shape DOCUMENT (`synopsis::type_document` over the turn's real compiled `DataConTable`, expanding through field types): `LayerProposal` occurs exactly ONCE in it, as its own `data` head, never as a field type of itself or of anything it reaches |
+| 2 | grandchild recursion from inherited context | A: depth-3 tree | a grandchild's window is genuinely FORKED from its parent's frozen prefix, never an empty root: one `Event::BranchInvocation` per coalgebra window and NONE for the algebra's (empty-root) fork windows — they exist only for `fork_from_snapshot` children, see `companion_context_ref.rs` — the depth-2 branch naming the digest its PARENT's window froze, with `shared_prefix_bytes` equal to that frozen prefix's own byte count and a non-zero `branch_suffix_bytes`. Sibling branches at one node name ONE shared digest. Receipts are attributed to nodes by the driver's own `RunLLMTurnHole{prompt}`→`TurnStart{node}` emission, never by event order, and nothing here reads prompt TEXT |
+| 3 | branch-order delivery, never completion order | A: 5 siblings | the algebra's rendered layer lists branches in DECLARED order (read off the root's fold prompt). No artificial per-sibling delay: the descent is sequential by construction today (`traverseLayer` is an order-preserving traversal that ignores its `Strategy`), so a delay would prove nothing — what this pins is the property that must survive when green threads make the descent concurrent (§7) |
+| 4 | failure accumulates as data — unusable layer | A: branch 2 finalizes an empty `ProposeSplit` | branch 2 folds as `InvocationFailed`, and reaches its parent's realized layer as ordinary data with that origin; its siblings' own answers still arrive in that same layer |
+| 4b | failure accumulates as data — abnormal exit | A: branch 5's window never finalizes (starved: prose, no block, round caps lowered to 1/2 so it costs four instant provider calls and no compiles); AND one interior node's ALGEBRA window starved the same way | the turn COMPLETES. The coalgebra exit makes branch 5 a leaf whose `FinishOrigin` is `InvocationFailed` carrying the rendered `InvocationExit` (`round exhaustion: …`), at its own branch position. The algebra exit replaces only that node's own synthesis (its line says `fold failed`) while its children's answers, tree lines and accounting roll up UNTOUCHED — the half that matters, since discarding them would erase completed sibling work one level up. Both journal under `failed`, tagged `coalgebra`/`algebra` |
+| 5 | budget-forced finish | B: `maxDepth 2` against a tree that wants 3 | the depth-2 nodes carry `BudgetForced ForcedDepth`, stamped in the render; no coalgebra window ran for any of them (the cap is never itself the reason a window is spent), and a budget-refused node journals no `split`/`finish` of its own — only the `fold` every node gets |
+| 6 | node-count cap | C: `maxNodes 4` against a tree that wants 6 | the overflow branches carry `BudgetForced ForcedNodeCount`, and the number of nodes that RUN a coalgebra window is exactly the cap. Not "the total window count": the cap is carried STRUCTURALLY on the seed (`seedAllowance`/`childAllowance`, §7) because `nodeCapped` is `MonadState Int` and the outer row is not, so what it bounds is the nodes that run — a refused node still exists, still folds, and still costs its own algebra window |
+| 7 | fan-out cap | D: a layer proposing more branches than `maxFanOut` | that node finishes with `BudgetForced ForcedFanOut` and NO child window runs — but it spent BOTH its own windows, because fan-out is a property of the produced layer and the coalgebra had already run. The journal still records the `split` the coalgebra genuinely produced beside the render's forced finish: two different facts, kept apart rather than one retroactively rewriting the other |
+| 8 | the gate is exercised through the form API | E: `GateEveryLayer` + a scripted gate answering `Prune`, then `Approve` | the pruned branch's window never runs; both survivors' do — and the survivor that was branch 3 is now `root/2-…`, since every accepted verdict re-derives the surviving branches' paths from their NEW positions. Two presentations and two submissions crossed the real form API, journaled under `gate` at the node they gated |
+| 8b | an amended branch is WORKED as amended | E: `Amend` on branch 1, then `Approve` | branch 1's own coalgebra prompt carries the amended instruction and NOT the one it replaced — not just the rendered tree. A branch holds its `ForkBrief` twice (on the `Branch`, and inside the seed the child's window is prompted from); writing one and not the other renders right and works wrong, so this asserts the prompt, not the render |
+| 9 | gate policy auto-approves unattended | A: `GateOff` | no form is presented at all, and nothing is journaled as a gate that never happened |
+| 10 | the turn is journaled per node event | A | the exact multiset of `(kind, key)` the tree implies — `turn`/`split`/`finish`/`fold`/`failed`, every key a `renderPath` of the node its entry is about |
+| 11 | node ids are containment-safe | A: a branch titled with punctuation, markup and non-ASCII | every id the run EMITTED (the journal's keys) is root-relative and every segment matches `<index>-<slug>` with the slug drawn from `[a-z0-9-]` and at most 32 characters; none of the title's punctuation/markup/unicode appears in any of them |
+
+Also asserted off scenario A, though not one of the rows above: the explicit
+`Strategy` transformation (§7, locked decision 9) — a root proposing
+`WantConcurrent` carries `strategy: proposed Concurrent, executed Sequential`
+on its own line, shown transformed rather than silently downgraded.
 
 Pure-function tests (no model, no driver) for `layerFromProposal`, `applyGate`,
 `slug`/`renderPath`, and the child allowance live beside the harness as ordinary
@@ -600,7 +636,10 @@ dev-tree's `resumePlanFor`/`childAllowance` precedent.
 
 Verification commands for the lane are the task's own list; the harness-side
 one is `scripts/battery.sh -p tidepool-harness -E 'binary(dogfood_harness_typecheck)
-+ binary(companion_recursive_slice)'`.
+or binary(companion_recursive_slice)'`. Budget the wall time: the slice binary's
+six scenarios run ~7 minutes with a WARM compile memo (the residual is
+per-window JIT compilation, which nothing memoizes), and meaningfully longer
+cold.
 
 ---
 

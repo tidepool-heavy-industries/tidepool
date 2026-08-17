@@ -52,18 +52,11 @@
 //! and the fan-out cap are three DIFFERENT `Config` values, and a run cannot
 //! hold two of them without confounding which cap fired.
 //!
-//! # Not covered here, deliberately
-//!
-//! §9 row 4b (a window that never finalizes — round exhaustion — folding as a
-//! typed `InvocationExit` at its branch position) is ABSENT. It depends on the
-//! sibling lane's typed-exit verb (`21-c3-exit-verb.md`: `runLLMTurnFork @T ::
-//! Text -> M (Either InvocationExit T)`), which has not folded — today a
-//! branch child that never finalizes returns `Err(DriverError::Session)` and
-//! fails the whole outer turn, which is the defect that lane closes. §9 marks
-//! the row outstanding for the same reason.
-//!
 //! GHC-heavy: needs `TIDEPOOL_EXTRACT` + the with-packages GHC on PATH
-//! (`--ignore-default-filter` to run).
+//! (`--ignore-default-filter` to run). Budget the wall time — the six
+//! scenarios run ~7 minutes with a WARM compile memo, and meaningfully longer
+//! cold. What remains warm is per-window JIT compilation, which nothing
+//! memoizes.
 
 mod support;
 
@@ -157,10 +150,30 @@ fn script(needles: &[&'static str], reply: String) -> Script {
 /// has to fail the run rather than be quietly served.
 struct KeyedProvider {
     scripted: Vec<Script>,
-    /// Every request's last message, in the order the provider saw them — the
-    /// record several assertions below read (which windows ran at all, and
-    /// what a window was actually prompted with).
+    /// The prompt of every window the provider was asked to answer, in order
+    /// — the record several assertions below read (which windows ran at all,
+    /// and what a window was actually prompted with).
     seen: Mutex<Vec<String>>,
+}
+
+/// The message a request is MATCHED against: the last one carrying a window
+/// prompt header, not simply the last message.
+///
+/// Two things make "the last message" wrong here, and both are real:
+/// a branch child's request opens with its PARENT's frozen transcript (which
+/// contains the parent's own prompt header), so matching must look at the
+/// LAST such header, not the first; and a window that burns its round budget
+/// is re-prompted with the driver's round-cap ultimatum, which carries no
+/// header at all — a starved window (row 4b) would otherwise stop matching
+/// its own scripted entry halfway through being starved.
+fn window_message(req: &TurnRequest) -> String {
+    req.messages
+        .iter()
+        .rev()
+        .find(|m| m.content.contains(" — DISCOVER") || m.content.contains(" — FOLD"))
+        .or_else(|| req.messages.last())
+        .map(|m| m.content.clone())
+        .unwrap_or_default()
 }
 
 impl KeyedProvider {
@@ -178,11 +191,7 @@ impl ModelProvider for KeyedProvider {
         req: TurnRequest,
         _sink: Option<StreamSink>,
     ) -> Result<TurnResponse, ProviderError> {
-        let last = req
-            .messages
-            .last()
-            .map(|m| m.content.clone())
-            .unwrap_or_default();
+        let last = window_message(&req);
         self.seen.lock().unwrap().push(last.clone());
 
         let reply = self
@@ -412,7 +421,11 @@ impl Run {
                 Phase::Fold => "FOLD",
             }
         );
-        let hits: Vec<&String> = self.requests.iter().filter(|r| r.contains(&needle)).collect();
+        let hits: Vec<&String> = self
+            .requests
+            .iter()
+            .filter(|r| r.contains(&needle))
+            .collect();
         assert_eq!(
             hits.len(),
             1,
@@ -528,6 +541,29 @@ impl Run {
         hits[0].clone()
     }
 
+    /// One branch's block out of an algebra prompt's rendered layer —
+    /// `--- branch <path>: <title> (<role>) [<posture>]` and the synthesis
+    /// under it, up to the next branch.
+    ///
+    /// This is the channel a child's ANSWER actually reaches its parent by
+    /// (the render's tree line carries identity and badges, never the
+    /// synthesis), so it is what "the sibling's answer still arrived" has to
+    /// be read off.
+    fn branch_summary(&self, parent: &str, path: &str) -> String {
+        let prompt = self.window_prompt(parent, Phase::Fold);
+        let head = format!("--- branch {path}:");
+        let start = prompt
+            .find(&head)
+            .unwrap_or_else(|| panic!("{parent}'s fold saw no branch {path}:\n{prompt}"));
+        let rest = &prompt[start..];
+        let end = ["--- branch ", "\n\nFold this realized layer"]
+            .iter()
+            .filter_map(|marker| rest[head.len()..].find(marker).map(|i| i + head.len()))
+            .min()
+            .unwrap_or(rest.len());
+        rest[..end].to_string()
+    }
+
     /// Every `(kind, key)` the authored journal recorded, in order.
     fn journal_pairs(&self) -> Vec<(String, String)> {
         self.journal
@@ -601,6 +637,12 @@ async fn run_scenario(
     driver.set_console_handler(ConsoleHandler);
     driver.set_journal_handler(JournalHandler::new(journal_path.clone()));
     driver.set_gate(gate.clone());
+    // Every scripted window finalizes on its FIRST round, so lowering the
+    // round caps changes nothing for them — and it makes a deliberately
+    // STARVED window (row 4b) cost four instant provider calls with no
+    // compiles instead of thirty-four. Same lever `outer_fanout.rs`'s
+    // round-exhaustion check pulls, for the same reason.
+    driver.set_answerer_round_caps(1, 2);
 
     let source = load_harness_source(&companion_dir().join("Harness.hs"))
         .expect("the SHIPPED recursive-companion harness loads");
@@ -685,6 +727,56 @@ fn split_reply(
     ))
 }
 
+/// The instruction `split_two`'s first branch carries — named, because §9 row
+/// 8b turns on whether an operator's `Amend` replaced it in the SEED the
+/// child's own window is prompted from.
+const ALPHA_INSTRUCTION: &str = "the instruction the model proposed for alpha";
+
+/// The TWO-branch split every scenario that needs one reuses, verbatim.
+///
+/// Reused rather than re-worded per scenario for a reason that is the whole
+/// point of the family bundle: an answerer compile is keyed by the block's
+/// SOURCE, so one shared reply text is one compile for the entire file, while
+/// six near-identical ones would be six. The needle table is what varies per
+/// scenario; the reply does not have to.
+fn split_two() -> String {
+    split_reply(
+        "Explore",
+        "WantSequential",
+        "which reading of this node holds",
+        &[
+            ("Alpha", "Primary", ALPHA_INSTRUCTION),
+            (
+                "Beta",
+                "Alternative",
+                "the instruction the model proposed for beta",
+            ),
+        ],
+    )
+}
+
+/// The THREE-branch split, reused the same way.
+fn split_three() -> String {
+    split_reply(
+        "Explore",
+        "WantSequential",
+        "which reading of this node holds",
+        &[
+            ("Alpha", "Primary", ALPHA_INSTRUCTION),
+            (
+                "Beta",
+                "Alternative",
+                "the instruction the model proposed for beta",
+            ),
+            (
+                "Gamma",
+                "Critic",
+                "the instruction the model proposed for gamma",
+            ),
+        ],
+    )
+}
+
 /// The ONE leaf reply every scenario's leaves share — one answerer compile for
 /// the whole file.
 fn finish_reply() -> String {
@@ -713,6 +805,14 @@ fn fold_script() -> Script {
     script(&["— FOLD"], fold_reply())
 }
 
+/// A window that never answers: prose with no fenced block, so every one of
+/// its rounds is a `NoBlock` re-prompt and its round budget is spent without
+/// it ever running anything. The cheapest honest way to reach
+/// `InvocationExit::RoundsExhausted` — no compiles at all on this branch.
+fn starved_reply() -> String {
+    "Still weighing this branch; nothing to run yet.".to_string()
+}
+
 // ---------------------------------------------------------------------------
 // Shared named checks
 // ---------------------------------------------------------------------------
@@ -730,7 +830,9 @@ fn is_node_segment(segment: &str) -> bool {
         && index.chars().all(|c| c.is_ascii_digit())
         && !slug.is_empty()
         && slug.len() <= 32
-        && slug.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+        && slug
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
 }
 
 /// §9 row 11 — node ids are containment-safe.
@@ -805,25 +907,28 @@ const HOSTILE_TITLE: &str = "Beta!! <b>risk</b> ünïcode";
 /// The fragments of [`HOSTILE_TITLE`] that must never reach a node id.
 const HOSTILE_FRAGMENTS: [&str; 5] = ["!", "<", ">", "/b", "ü"];
 
-/// §9 rows 1, 2, 3, 4, 9, 10 and 11, off ONE compile shape.
+/// §9 rows 1, 2, 3, 4, 4b, 9, 10 and 11, off ONE compile shape.
 ///
-/// The tree (four branches at the root, one of them splitting again, one of
-/// them finalizing an unusable layer) is chosen so a single run carries every
-/// row a `GateOff`, generously-budgeted config can carry — family-bundle
-/// discipline: the scenarios that follow each exist only because they need a
-/// DIFFERENT `Config`, which is a different compile.
+/// The tree (five branches at the root, one of them splitting again, one
+/// finalizing an unusable layer, one whose coalgebra window never answers,
+/// and one interior node whose ALGEBRA window never answers) is chosen so a
+/// single run carries every row a `GateOff`, generously-budgeted config can
+/// carry — family-bundle discipline: the scenarios that follow each exist
+/// only because they need a DIFFERENT `Config`, which is a different compile.
+/// Three of §8's four failure shapes therefore sit side by side in ONE tree,
+/// which is also the strongest form of the claim: none of them erases another.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn companion_tree_recurses_folds_and_contains_its_node_ids() {
     let _cache_guard = support::isolate_cache();
 
     let run = run_scenario(
         "tree",
-        state_json(3, 40, 4, json!({"tag": "GateOff"})),
+        state_json(3, 40, 5, json!({"tag": "GateOff"})),
         vec![
             script(
                 &["NODE root — DISCOVER"],
                 split_reply(
-                    "Explore",
+                    "Compare",
                     "WantConcurrent",
                     "what the slice must show",
                     &[
@@ -831,21 +936,11 @@ async fn companion_tree_recurses_folds_and_contains_its_node_ids() {
                         (HOSTILE_TITLE, "Critic", "attack the beta claim"),
                         ("Gamma", "Alternative", "the gamma alternative"),
                         ("Delta", "Primary", "the delta option"),
+                        ("Epsilon", "Critic", "the branch whose window never answers"),
                     ],
                 ),
             ),
-            script(
-                &["NODE root/1-alpha — DISCOVER"],
-                split_reply(
-                    "Compare",
-                    "WantSequential",
-                    "which alpha reading holds",
-                    &[
-                        ("Alpha One", "Primary", "the first alpha reading"),
-                        ("Alpha Two", "Alternative", "the second alpha reading"),
-                    ],
-                ),
-            ),
+            script(&["NODE root/1-alpha — DISCOVER"], split_two()),
             script(&["NODE root/1-alpha/1-", "— DISCOVER"], finish_reply()),
             script(&["NODE root/1-alpha/2-", "— DISCOVER"], finish_reply()),
             // The hostile-titled branch is ALSO the unusable-layer branch
@@ -854,6 +949,14 @@ async fn companion_tree_recurses_folds_and_contains_its_node_ids() {
             script(&["NODE root/2-", "— DISCOVER"], empty_split_reply()),
             script(&["NODE root/3-", "— DISCOVER"], finish_reply()),
             script(&["NODE root/4-", "— DISCOVER"], finish_reply()),
+            // Row 4b: this window is STARVED — it burns its round budget
+            // without ever running a block, so its coalgebra comes back as a
+            // typed `Left InvocationExit`.
+            script(&["NODE root/5-", "— DISCOVER"], starved_reply()),
+            // The ALGEBRA side of the same contract: this node's own FOLD
+            // window is starved, so the exit replaces what that node owed and
+            // must leave its two children's finished answers alone.
+            script(&["NODE root/1-alpha — FOLD"], starved_reply()),
             fold_script(),
         ],
         Arc::new(ScriptedGate::default()),
@@ -865,6 +968,7 @@ async fn companion_tree_recurses_folds_and_contains_its_node_ids() {
     let alpha_two = run.discovered_under("root/1-alpha/2-");
     let gamma = run.discovered_under("root/3-");
     let delta = run.discovered_under("root/4-");
+    let epsilon = run.discovered_under("root/5-");
 
     // --- row 1: the root is never asked for descendant shape ---------------
     let root_discoveries: Vec<&String> = run
@@ -944,7 +1048,10 @@ async fn companion_tree_recurses_folds_and_contains_its_node_ids() {
     }
     let sibling_digests: Vec<String> = [&alpha_one, &alpha_two]
         .iter()
-        .map(|p| run.branch_invocation_of(run.window_node(p, Phase::Discover)).0)
+        .map(|p| {
+            run.branch_invocation_of(run.window_node(p, Phase::Discover))
+                .0
+        })
         .collect();
     assert_eq!(
         sibling_digests[0], sibling_digests[1],
@@ -963,7 +1070,7 @@ async fn companion_tree_recurses_folds_and_contains_its_node_ids() {
     // asserts is the DECLARED order reaching the algebra — the property that
     // must survive when green threads make the descent concurrent.
     let root_fold = run.window_prompt("root", Phase::Fold);
-    let positions: Vec<usize> = ["root/1-alpha", &beta, &gamma, &delta]
+    let positions: Vec<usize> = ["root/1-alpha", &beta, &gamma, &delta, &epsilon]
         .iter()
         .map(|path| {
             root_fold
@@ -985,28 +1092,129 @@ async fn companion_tree_recurses_folds_and_contains_its_node_ids() {
          InvocationFailed finish, got: {beta_line}"
     );
     assert_eq!(
-        run.counter("runFailed"),
-        1,
-        "exactly one node folded as a failure"
-    );
-    assert_eq!(
         run.counter("runNodes"),
-        7,
-        "the failed branch is still a node, and its siblings still folded"
+        8,
+        "the failed branches are still nodes, and their siblings still folded"
+    );
+    assert!(
+        run.branch_summary("root", &beta)
+            .contains("[finish(failed: the window proposed a split with no branches)]"),
+        "the failure is ordinary DATA in the parent's realized layer, at its own \
+         branch position: {}",
+        run.branch_summary("root", &beta)
     );
     for sibling in [&gamma, &delta] {
         assert!(
             !run.tree_line(sibling).contains("failed"),
-            "branch {sibling} must still fold its real answer beside the failed one"
+            "branch {sibling} must still fold its real answer beside the failed ones"
+        );
+        assert!(
+            run.branch_summary("root", sibling).contains("FOLDED"),
+            "branch {sibling}'s own answer must still reach its parent's fold: {}",
+            run.branch_summary("root", sibling)
+        );
+    }
+
+    // --- row 4b: failure accumulates as data (an abnormal exit) ------------
+    // A window that burns its round budget without finalizing comes back as
+    // `Left InvocationExit`, and `discover` makes that node a leaf whose
+    // ORIGIN says why. The turn COMPLETED (this test is reading its state),
+    // which is the headline: before the typed-exit verb, one branch's
+    // exhausted window failed the whole outer turn and erased every sibling
+    // result already produced.
+    let epsilon_line = run.tree_line(&epsilon);
+    assert!(
+        epsilon_line.contains("failed: round exhaustion:"),
+        "a window that never finalized must arrive as a TYPED exit at its own \
+         branch position, rendered by `renderInvocationExit`: {epsilon_line}"
+    );
+    assert!(
+        run.branch_summary("root", &epsilon)
+            .contains("[finish(failed: round exhaustion:"),
+        "and it reaches its parent's fold as ordinary data in the realized layer: {}",
+        run.branch_summary("root", &epsilon)
+    );
+    assert_eq!(
+        run.counter("runFailed"),
+        3,
+        "three failures — an unusable layer, a starved coalgebra, and a starved \
+         ALGEBRA — and none of them aborted anything"
+    );
+
+    // The ALGEBRA side of the same decision, and the half that matters most:
+    // `root/1-alpha`'s own FOLD window exited, so its synthesis is replaced —
+    // but its two children ALREADY ran and ALREADY folded, and discarding
+    // their answers, their tree lines or their accounting here would erase
+    // completed sibling work one level up.
+    let alpha_line = run.tree_line("root/1-alpha");
+    assert!(
+        alpha_line.contains("fold failed"),
+        "a node whose fold window exited must say so on its own line: {alpha_line}"
+    );
+    for child in [&alpha_one, &alpha_two] {
+        assert!(
+            run.branch_summary("root/1-alpha", child).contains("FOLDED"),
+            "the children HAD answered when their parent's fold window died: {}",
+            run.branch_summary("root/1-alpha", child)
+        );
+        assert!(
+            run.tree_line(child).contains("finish(model)"),
+            "and their tree lines roll up UNTOUCHED past the failed fold: {}",
+            run.tree_line(child)
         );
     }
     assert_eq!(
-        run.journal_kind("failed")
+        run.counter("runWindows"),
+        16,
+        "and their accounting too: eight nodes, two windows each — a failed window \
+         still SPENT one, and a failed fold discards neither its children's nodes nor \
+         what they cost"
+    );
+    let failures: Vec<(&str, &str, &str)> = run
+        .journal_kind("failed")
+        .iter()
+        .map(|e| {
+            (
+                e.key.as_str(),
+                e.payload
+                    .get("window")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("<none>"),
+                e.payload
+                    .get("reason")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("<none>"),
+            )
+        })
+        .collect();
+    assert_eq!(
+        failures.len(),
+        3,
+        "each failure is recorded at ITS OWN branch position, got {failures:?}"
+    );
+    assert!(
+        failures
             .iter()
-            .map(|e| e.key.as_str())
-            .collect::<Vec<_>>(),
-        vec![beta.as_str()],
-        "the failure is recorded at ITS OWN branch position"
+            .any(|(key, window, reason)| *key == "root/1-alpha"
+                && *window == "algebra"
+                && reason.starts_with("round exhaustion:")),
+        "a failed FOLD is journaled distinctly from a failed coalgebra — a node can \
+         carry both, and which window failed is the difference between 'this node \
+         decided nothing' and 'this node could not fold what its children decided': \
+         {failures:?}"
+    );
+    assert!(
+        failures.iter().any(|(key, window, reason)| *key == beta
+            && *window == "coalgebra"
+            && reason.contains("no branches")),
+        "the unusable-layer failure, tagged with the window that produced it: {failures:?}"
+    );
+    assert!(
+        failures.iter().any(|(key, window, reason)| *key == epsilon
+            && *window == "coalgebra"
+            && reason.starts_with("round exhaustion:")
+            && reason.contains("without finalizing")),
+        "the abnormal-exit failure, tagged with the window that produced it: {failures:?}"
     );
 
     // --- row 9: GateOff raises no askUser suspension at all -----------------
@@ -1033,6 +1241,7 @@ async fn companion_tree_recurses_folds_and_contains_its_node_ids() {
             ("finish", &beta),
             ("finish", &gamma),
             ("finish", &delta),
+            ("finish", &epsilon),
             ("fold", "root"),
             ("fold", "root/1-alpha"),
             ("fold", &alpha_one),
@@ -1040,7 +1249,10 @@ async fn companion_tree_recurses_folds_and_contains_its_node_ids() {
             ("fold", &beta),
             ("fold", &gamma),
             ("fold", &delta),
+            ("fold", &epsilon),
             ("failed", &beta),
+            ("failed", &epsilon),
+            ("failed", "root/1-alpha"),
         ],
     );
 
@@ -1085,42 +1297,11 @@ async fn companion_depth_cap_forces_a_stamped_finish() {
         "depth",
         state_json(2, 40, 4, json!({"tag": "GateOff"})),
         vec![
-            script(
-                &["NODE root — DISCOVER"],
-                split_reply(
-                    "Explore",
-                    "WantSequential",
-                    "a tree that wants to go deeper than the cap",
-                    &[
-                        ("Alpha", "Primary", "the alpha angle"),
-                        ("Beta", "Alternative", "the beta angle"),
-                    ],
-                ),
-            ),
-            script(
-                &["NODE root/1-alpha — DISCOVER"],
-                split_reply(
-                    "Explore",
-                    "WantSequential",
-                    "deeper still",
-                    &[
-                        ("Alpha One", "Primary", "deeper alpha"),
-                        ("Alpha Two", "Alternative", "deeper alpha again"),
-                    ],
-                ),
-            ),
-            script(
-                &["NODE root/2-beta — DISCOVER"],
-                split_reply(
-                    "Explore",
-                    "WantSequential",
-                    "deeper still",
-                    &[
-                        ("Beta One", "Primary", "deeper beta"),
-                        ("Beta Two", "Alternative", "deeper beta again"),
-                    ],
-                ),
-            ),
+            // The SAME two-branch reply at all three nodes that split — one
+            // answerer compile, three windows.
+            script(&["NODE root — DISCOVER"], split_two()),
+            script(&["NODE root/1-alpha — DISCOVER"], split_two()),
+            script(&["NODE root/2-beta — DISCOVER"], split_two()),
             fold_script(),
         ],
         Arc::new(ScriptedGate::default()),
@@ -1128,10 +1309,10 @@ async fn companion_depth_cap_forces_a_stamped_finish() {
     .await;
 
     let capped = [
-        "root/1-alpha/1-alpha-one",
-        "root/1-alpha/2-alpha-two",
-        "root/2-beta/1-beta-one",
-        "root/2-beta/2-beta-two",
+        "root/1-alpha/1-alpha",
+        "root/1-alpha/2-beta",
+        "root/2-beta/1-alpha",
+        "root/2-beta/2-beta",
     ];
     let discovered = run.paths_in(Phase::Discover);
     assert_eq!(
@@ -1199,31 +1380,8 @@ async fn companion_node_cap_bounds_the_windows_that_run() {
         "nodes",
         state_json(5, 4, 4, json!({"tag": "GateOff"})),
         vec![
-            script(
-                &["NODE root — DISCOVER"],
-                split_reply(
-                    "Explore",
-                    "WantSequential",
-                    "a tree wider than the node budget",
-                    &[
-                        ("Alpha", "Primary", "the alpha angle"),
-                        ("Beta", "Alternative", "the beta angle"),
-                        ("Gamma", "Critic", "the gamma angle"),
-                    ],
-                ),
-            ),
-            script(
-                &["NODE root/1-alpha — DISCOVER"],
-                split_reply(
-                    "Explore",
-                    "WantSequential",
-                    "children this subtree cannot fund",
-                    &[
-                        ("Alpha One", "Primary", "unfunded"),
-                        ("Alpha Two", "Alternative", "also unfunded"),
-                    ],
-                ),
-            ),
+            script(&["NODE root — DISCOVER"], split_three()),
+            script(&["NODE root/1-alpha — DISCOVER"], split_two()),
             script(&["NODE root/2-beta — DISCOVER"], finish_reply()),
             script(&["NODE root/3-gamma — DISCOVER"], finish_reply()),
             fold_script(),
@@ -1238,7 +1396,7 @@ async fn companion_node_cap_bounds_the_windows_that_run() {
         vec!["root", "root/1-alpha", "root/2-beta", "root/3-gamma"],
         "exactly `maxNodes` (4) nodes may run a coalgebra window"
     );
-    for path in ["root/1-alpha/1-alpha-one", "root/1-alpha/2-alpha-two"] {
+    for path in ["root/1-alpha/1-alpha", "root/1-alpha/2-beta"] {
         let line = run.tree_line(path);
         assert!(
             line.contains("forced ForcedNodeCount"),
@@ -1272,19 +1430,7 @@ async fn companion_fanout_cap_refuses_the_descent() {
         "fanout",
         state_json(5, 40, 2, json!({"tag": "GateOff"})),
         vec![
-            script(
-                &["NODE root — DISCOVER"],
-                split_reply(
-                    "Explore",
-                    "WantSequential",
-                    "a layer wider than the fan-out cap",
-                    &[
-                        ("Alpha", "Primary", "the alpha angle"),
-                        ("Beta", "Alternative", "the beta angle"),
-                        ("Gamma", "Critic", "the gamma angle"),
-                    ],
-                ),
-            ),
+            script(&["NODE root — DISCOVER"], split_three()),
             fold_script(),
         ],
         Arc::new(ScriptedGate::default()),
@@ -1343,19 +1489,7 @@ async fn companion_gate_prune_then_approve_never_runs_the_pruned_branch() {
         "gate-prune",
         gate_every_layer_state(),
         vec![
-            script(
-                &["NODE root — DISCOVER"],
-                split_reply(
-                    "Explore",
-                    "WantSequential",
-                    "a layer the operator edits",
-                    &[
-                        ("Alpha", "Primary", "the alpha angle"),
-                        ("Beta", "Alternative", "the branch the operator prunes"),
-                        ("Gamma", "Critic", "the gamma angle"),
-                    ],
-                ),
-            ),
+            script(&["NODE root — DISCOVER"], split_three()),
             script(&["NODE root/1-alpha — DISCOVER"], finish_reply()),
             script(&["NODE root/2-gamma — DISCOVER"], finish_reply()),
             fold_script(),
@@ -1383,8 +1517,10 @@ async fn companion_gate_prune_then_approve_never_runs_the_pruned_branch() {
          stay dense and ordered"
     );
     assert!(
-        !run.requests.iter().any(|r| r.contains("prunes")),
-        "no window may be prompted with the pruned branch's instruction"
+        !run.requests
+            .iter()
+            .any(|r| r.contains("Your branch: Beta (")),
+        "no window may be prompted as the pruned branch"
     );
     assert_eq!(
         run.journal_kind("gate")
@@ -1409,7 +1545,6 @@ async fn companion_gate_prune_then_approve_never_runs_the_pruned_branch() {
 async fn companion_gate_amend_reaches_the_branches_own_prompt() {
     let _cache_guard = support::isolate_cache();
 
-    const ORIGINAL: &str = "the instruction the model proposed";
     const AMENDED: &str = "the instruction the operator substituted";
 
     let gate = Arc::new(ScriptedGate::new(vec![
@@ -1420,18 +1555,7 @@ async fn companion_gate_amend_reaches_the_branches_own_prompt() {
         "gate-amend",
         gate_every_layer_state(),
         vec![
-            script(
-                &["NODE root — DISCOVER"],
-                split_reply(
-                    "Explore",
-                    "WantSequential",
-                    "a layer the operator amends",
-                    &[
-                        ("Alpha", "Primary", ORIGINAL),
-                        ("Beta", "Alternative", "the untouched branch"),
-                    ],
-                ),
-            ),
+            script(&["NODE root — DISCOVER"], split_two()),
             script(&["NODE root/1-alpha — DISCOVER"], finish_reply()),
             script(&["NODE root/2-beta — DISCOVER"], finish_reply()),
             fold_script(),
@@ -1448,13 +1572,13 @@ async fn companion_gate_amend_reaches_the_branches_own_prompt() {
          instruction, got:\n{amended_prompt}"
     );
     assert!(
-        !amended_prompt.contains(ORIGINAL),
+        !amended_prompt.contains(ALPHA_INSTRUCTION),
         "and never with the one it replaced — a brief written on the Branch but not \
          in the seed renders right and works wrong:\n{amended_prompt}"
     );
     let untouched = run.window_prompt("root/2-beta", Phase::Discover);
     assert!(
-        untouched.contains("the untouched branch"),
+        untouched.contains("the instruction the model proposed for beta"),
         "a sibling the verdict did not name keeps its own brief: {untouched}"
     );
 }
