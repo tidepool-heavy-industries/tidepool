@@ -684,6 +684,26 @@ where
         self.core.persistent_roots_count()
     }
 
+    /// Accounting class 1 — the PARKED-CONTINUATION roots, as the pair that
+    /// must always agree (`stowed_roots_count() == parked_count()`, the
+    /// machine's own quiescence invariant). 0 before the machine bootstraps.
+    /// A scope retirement must leave both UNCHANGED: a parked frame's root is
+    /// a realm's, not a scope's, and folding the two classes together is how a
+    /// leak becomes invisible.
+    pub fn stowed_roots_count(&self) -> usize {
+        self.core
+            .machine()
+            .map_or(0, JitEffectMachine::stowed_roots_count)
+    }
+
+    /// The parked-frame half of accounting class 1 — see
+    /// [`Self::stowed_roots_count`].
+    pub fn parked_count(&self) -> usize {
+        self.core
+            .machine()
+            .map_or(0, JitEffectMachine::parked_count)
+    }
+
     /// Retire `scope` and its subtree: drop their value-plane frames and
     /// release the GC roots those bindings solely owned. See
     /// [`PersistentSession::retire_scope`] for the sole-ownership rule and the
