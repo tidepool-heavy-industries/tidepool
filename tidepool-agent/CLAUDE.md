@@ -103,10 +103,32 @@ reaps the backend FROM ANOTHER THREAD. Take it BEFORE the cycle runs: a cycle
 thread inside `start_turn` holds `&mut` on the backend, so nothing else can
 reach it. A flag the blocked thread would have to check is not cancellation.
 
-- `CodexCanceller` SIGKILLs the app-server child by pid and confirms it left
-  `/proc`. It cannot go through `Session::shutdown` (that consumes `self` and
-  needs the runtime the blocked thread is holding), so the pid is published into
-  a shared `Arc<AtomicU32>` the moment the session connects.
+- `CodexCanceller` SIGKILLs the app-server child by pid. It cannot go through
+  `Session::shutdown` (that consumes `self` and needs the runtime the blocked
+  thread is holding), so the pid is published into a shared `Arc<AtomicU32>`
+  the moment the session connects.
+
+  **A pid is not a durable name for a process, and "we spawned it" is not what
+  makes it safe to signal.** Once the child is reaped — by its owning `Child`
+  on drop, or by tokio's SIGCHLD reaper while the backend is still alive — the
+  kernel is free to hand the number to anyone, and on this box "anyone" is
+  plausibly the operator's own Codex session. `ESRCH` protects an unreaped pid,
+  not a REUSED one. Two independent mechanisms gate every signal:
+
+  1. `Drop for CodexAgentBackend` stores `0` into the slot. A `Drop` body runs
+     before the struct's fields drop, so the slot clears strictly before the
+     `Child` is reaped: once a backend begins dropping, every canceller cloned
+     from it is inert. This is what keeps the safety a property of the TYPE
+     rather than of a handler in another crate remembering to mark a cycle
+     terminal first.
+  2. `pid_is_our_app_server` re-reads `/proc/<pid>/cmdline` immediately before
+     `kill`, closing the window where the child exited on its own — which no
+     drop discipline can reach. The confirm loop polls the same check, because
+     waiting for a stranger to leave `/proc` and returning as if something had
+     been reaped is worse than not waiting.
+
+  Both are pinned by named rows in `driver.rs`'s `mod tests`, each verified to
+  FAIL when its mechanism is defeated.
 - The default is a no-op canceller, correct for a backend with no process
   (`replay`, any in-process one). It is NOT a placeholder for an unimplemented
   one on a backend that owns a process — a canceller that returns without
