@@ -30,9 +30,9 @@
 
 mod support;
 
-use tidepool_harness::compile;
-use tidepool_harness::engine::{template_turn_for, EngineConfig};
+use tidepool_harness::engine::{self, template_turn_for, CompiledTurn, EngineConfig};
 use tidepool_harness::selfharness::answerer_decls;
+use tidepool_runtime::CompileError;
 
 fn prelude_dir() -> std::path::PathBuf {
     let manifest = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -55,11 +55,11 @@ fn compile_against(
     decls: Vec<tidepool_mcp::EffectDecl>,
     code: &str,
     imports: &str,
-) -> Result<compile::CompiledTurn, compile::CompileError> {
+) -> Result<CompiledTurn, CompileError> {
     let cfg = EngineConfig::from_decls(decls, prelude_dir(), None).expect("engine config");
     let target = cfg.turn_target(None).expect("turn target");
     let source = template_turn_for(&cfg.decls, &target.stack, code, imports, "");
-    compile::compile_turn(
+    engine::compile_turn(
         &cfg.extract_bin,
         &source,
         "result",
@@ -78,13 +78,13 @@ fn compile_pinned(
     code: &str,
     imports: &str,
     finalize_ty: &str,
-) -> Result<compile::CompiledTurn, compile::CompileError> {
+) -> Result<CompiledTurn, CompileError> {
     let cfg = EngineConfig::from_decls(decls, prelude_dir(), None).expect("engine config");
     let target = cfg
         .turn_target(Some((finalize_ty, &[])))
         .expect("turn target");
     let source = template_turn_for(&cfg.decls, &target.stack, code, imports, "");
-    compile::compile_turn(
+    engine::compile_turn(
         &cfg.extract_bin,
         &source,
         "result",

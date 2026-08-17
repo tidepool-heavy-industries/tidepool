@@ -1,4 +1,4 @@
-//! Explicit multi-target extraction (`compile::compile_turns`, extract's
+//! Explicit multi-target extraction (`engine::compile_turns`, extract's
 //! `--targets` mode — `haskell/app/Main.hs`'s `runMultiTargetClosed`; see
 //! `plans/post-restart/extract-wave/boot/03-targets-prereq.md`). These pin
 //! the two requirements that distinguish this mode from `--all-closed`
@@ -9,14 +9,14 @@
 //!     good one.
 //!   - `multi_target_asks_stay_distinct`: two targets with DIFFERENT
 //!     `runLLMTurn` call sites keep their sites separate end-to-end through
-//!     the Rust reader (`compile::compile_turns`), never merged into one
+//!     the Rust reader (`engine::compile_turns`), never merged into one
 //!     ambiguous sidecar.
 //!
 //! Needs `TIDEPOOL_EXTRACT` and the with-packages GHC on PATH (run inside
 //! `nix develop`; see `haskell/CLAUDE.md`).
 
-use tidepool_harness::compile;
-use tidepool_harness::engine::EngineConfig;
+use tidepool_harness::engine::{self, EngineConfig};
+use tidepool_runtime::CompileError;
 
 fn extract_available() -> bool {
     tidepool_testing::eval_harness::extract_available()
@@ -76,7 +76,7 @@ fn multi_target_fails_on_any_bad_target() {
 
     // Control: targetA alone compiles cleanly against this exact source —
     // establishes the bogus name below is what causes the failure.
-    let good = compile::compile_turns(
+    let good = engine::compile_turns(
         &cfg.extract_bin,
         &source,
         &["targetA"],
@@ -91,7 +91,7 @@ fn multi_target_fails_on_any_bad_target() {
         panic!("control: targetA alone should compile cleanly, got {e:?}");
     }
 
-    let result = compile::compile_turns(
+    let result = engine::compile_turns(
         &cfg.extract_bin,
         &source,
         &["targetA", "nonexistentTarget"],
@@ -100,8 +100,15 @@ fn multi_target_fails_on_any_bad_target() {
         tidepool_harness::timing::NO_ROUND,
     );
     match result {
-        Err(compile::CompileError::Extract(_)) => {}
-        Err(other) => panic!("expected CompileError::Extract for a bogus target, got {other:?}"),
+        // A bogus `--targets` name is a GHC "not in scope" error, read
+        // through the same structured diagnostics contract as any other
+        // extract failure (architecture review finding 3: the harness's
+        // former opaque `CompileError::Extract(String)` is gone — this is
+        // strictly better fidelity, real spans instead of a raw dump).
+        Err(CompileError::Diagnostics(_)) => {}
+        Err(other) => {
+            panic!("expected CompileError::Diagnostics for a bogus target, got {other:?}")
+        }
         Ok(turns) => panic!(
             "a two-target request with one bogus target must FAIL the whole \
              extraction, not silently emit the good one — got Ok({:?})",
@@ -113,7 +120,7 @@ fn multi_target_fails_on_any_bad_target() {
 /// **per-target asks stay distinct.** `targetA`'s `runLLMTurn @Int` site and
 /// `targetB`'s `runLLMTurn @Text` site must NOT collapse into one shared
 /// sidecar: each target's own `CompiledTurn::asks` records only its own site,
-/// at its own type, end-to-end through `compile::compile_turns`. Both targets'
+/// at its own type, end-to-end through `engine::compile_turns`. Both targets'
 /// site counters independently start at 0 (a fresh `TransState` per
 /// `translateModuleClosed` call, `Translate.hs`), so this also proves the two
 /// targets' `asks.json` sidecars are read from genuinely SEPARATE files/maps
@@ -129,7 +136,7 @@ fn multi_target_asks_stay_distinct() {
     let (cfg, source) = two_target_source();
     let target = cfg.turn_target(None).expect("turn target");
 
-    let turns = compile::compile_turns(
+    let turns = engine::compile_turns(
         &cfg.extract_bin,
         &source,
         &["targetA", "targetB"],

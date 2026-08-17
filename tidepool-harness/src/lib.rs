@@ -6,7 +6,6 @@
 //! ([`selfharness`]). See this crate's `CLAUDE.md` for the full module map
 //! and the machine-lifecycle/replay-scope notes that don't fit here.
 
-pub mod compile;
 pub mod effect_trace;
 pub mod engine;
 pub mod forcing;
@@ -20,9 +19,9 @@ pub mod synopsis;
 pub mod timing;
 pub mod tree;
 
-pub use compile::{AsksSidecar, CompiledTurn};
 pub use engine::{
-    classify_hole, ClassifiedHole, ClassifyError, EngineConfig, EngineError, HoleRouting,
+    classify_hole, compile_turn, compile_turns, extract_spawn_count, reset_extract_spawn_count,
+    ClassifiedHole, ClassifyError, CompiledTurn, EngineConfig, EngineError, HoleRouting,
     TurnOutcome,
 };
 pub use forcing::{derive_teaser, fan_badge, price_class, ForkShape, NodeTree, TreeError};
@@ -34,5 +33,6 @@ pub use selfharness::{
     HarnessSourceError, JsonlObserver, LogObserver, Observer, OperatorGate, PersistenceError,
     ResumeFold, RunJournalError, RunLease, SelfHarnessDriver, SelfHarnessState, StdinGate,
 };
+pub use tidepool_runtime::AsksSidecar;
 pub use timing::{record_stage, ExtractTiming};
 pub use tree::{FanBadge, HoleId, NodeId, NodeState, PriceClass, SiteId, Slot};

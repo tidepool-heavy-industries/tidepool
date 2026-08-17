@@ -49,10 +49,10 @@ use tidepool_runtime::session::{
 use tidepool_runtime::DEFAULT_NURSERY_SIZE;
 use tokio::sync::{mpsc, oneshot};
 
-use crate::compile::{self, AsksSidecar};
 use crate::effect_trace::{EffectRecord, EffectTrace, TracingDispatcher};
 use crate::engine::{
-    self, ClassifiedHole, EngineConfig, EngineError, HoleRouting, TurnOutcome, RESUME_HELPER,
+    self, AsksSidecar, ClassifiedHole, EngineConfig, EngineError, HoleRouting, TurnOutcome,
+    RESUME_HELPER,
 };
 use crate::forcing::{ForkShape, NodeTree, TreeError};
 use crate::log::{Actor, AnswerOutcome, LogWriter};
@@ -2737,7 +2737,7 @@ impl Harness {
             let include = compile_cfg.include.clone();
             let answerer_id = answerer.0;
             let compiled = tokio::task::spawn_blocking(move || {
-                compile::compile_turn(
+                engine::compile_turn(
                     &cfg_bin,
                     &src,
                     "result",

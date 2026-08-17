@@ -25,10 +25,12 @@ Module map:
 - `engine` — the turn engine: prompt assembly, provider call, extract+compile
   the last fenced Haskell block, classify a suspension (`AskWith`/
   `AskUserWith`/`RunLLMTurnWith`/`FinalizeWith`) by its request's constructor
-  name.
-- `compile` — turn compilation (Haskell source → `CoreExpr` + `DataConTable`
-  + `asks.json` sidecar) via `tidepool-extract`, MEMOIZED through
-  `tidepool_runtime::cache` (see Compile memo below).
+  name. `compile_turn`/`compile_turns` (`CompiledTurn`: `CoreExpr` +
+  `DataConTable` + `asks.json` sidecar) are thin wrappers over
+  `tidepool_runtime::artifacts::compile_targets` — the actual
+  spawn/read/deserialize/diagnostics/memo mechanics moved to that crate
+  (architecture review finding 3, 2026-08-17: this crate no longer owns a
+  second compiler frontend). See Compile memo below.
 - `log` — event-log wire schema (header pins prelude+extract fingerprints).
   `Event::TurnStart{source}` carries the EXTRACTED executed Haskell block, not
   a "model" tag; `Event::Effect{req,resp}` is written by the live
@@ -45,10 +47,12 @@ Module map:
 
 ## Compile memo — one content-addressed cache, no cache-free path
 
-`compile.rs` memoizes every turn compile. There is no cache-free path, no
-bypass flag, and no second mechanism. The full keying spec, the correctness
-hazards it answers, and the safety argument for sharing one memo across test
-processes are in `plans/compile-memo.md`; what a reader here needs:
+Every turn compile (`engine::compile_turn`/`compile_turns`, wrapping
+`tidepool_runtime::artifacts::compile_targets`) is memoized. There is no
+cache-free path, no bypass flag, and no second mechanism. The full keying
+spec, the correctness hazards it answers, and the safety argument for
+sharing one memo across test processes are in `plans/compile-memo.md`; what
+a reader here needs:
 
 - **The mechanism is `tidepool_runtime::cache`, not a fork of it.**
   `invocation_key` keys the COMPLETE invocation — source CONTENT, the built
@@ -62,10 +66,10 @@ processes are in `plans/compile-memo.md`; what a reader here needs:
 - **A hit stores and restores the FULL artifact set** this module reads —
   `meta.cbor`, every `<target>.cbor`, and the asks sidecar in whichever shape
   the target count selects, with ABSENT distinct from empty. Hit and miss
-  rejoin at `compile::assemble`, so observational identity is a property of
-  the code shape. The one deliberate difference: a hit records no
-  `extract_spawn` timing stage and no `extract.*` phases, because nothing was
-  spawned.
+  rejoin at `tidepool_runtime::artifacts::assemble`, so observational
+  identity is a property of the code shape. The one deliberate difference: a
+  hit records no `extract_spawn` timing stage and no `extract.*` phases,
+  because nothing was spawned.
 - **Tests share the memo, not their state.** `tests/support::isolate_cache`
   still isolates `XDG_CACHE_HOME` per test (checkpoints, transcripts,
   `log.jsonl`, KV, the generated effects module) but points

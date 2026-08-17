@@ -74,8 +74,7 @@ use tidepool_eval::value::Value;
 use tidepool_repr::DataConTable;
 use tidepool_runtime::session::ResidentOutcome;
 
-use crate::compile::{self, CompiledTurn};
-use crate::engine::{self, ClassifiedHole, EngineConfig, HoleRouting, TurnOutcome};
+use crate::engine::{self, ClassifiedHole, CompiledTurn, EngineConfig, HoleRouting, TurnOutcome};
 use crate::harness::{AnswerContract, Harness, HarnessError};
 use crate::log::Actor;
 use crate::selfharness::harness_source::HarnessSource;
@@ -1226,7 +1225,7 @@ impl SelfHarnessDriver {
             label: label.to_string(),
             source: src.clone(),
         });
-        compile::compile_turn(
+        engine::compile_turn(
             &extract_bin,
             &src,
             "result",
@@ -1277,7 +1276,7 @@ impl SelfHarnessDriver {
 
     /// Compile the PRE-loop `render` and this cycle's `loop` fragment as TWO
     /// entries of ONE module, in a SINGLE `tidepool-extract` spawn
-    /// ([`compile::compile_turns`]) — the pre-model boot-path fusion this
+    /// ([`compile_turns`]) — the pre-model boot-path fusion this
     /// driver exists to land (`plans/post-restart/extract-wave/spawn-latency/
     /// 04-turn-latency-plan.md` §2). Both entries splice
     /// `state_cross::state_in(prior_state)` with the SAME `prior_state`, so
@@ -1288,7 +1287,7 @@ impl SelfHarnessDriver {
     /// hand-copied second shape.
     ///
     /// The merged table this spawn returns is a FEATURE, not an artifact: both
-    /// targets share ONE `meta.cbor` (`compile::compile_turns`'s whole point),
+    /// targets share ONE `meta.cbor` (`compile_turns`'s whole point),
     /// so the render entry's [`CompiledTurn::table`] already carries the loop
     /// entry's constructors — including the `RunLLMTurn` ConTags the machine
     /// needs once `loop` starts suspending on holes.
@@ -1342,7 +1341,7 @@ impl SelfHarnessDriver {
             label: "render+loop".to_string(),
             source: src.clone(),
         });
-        let mut turns = compile::compile_turns(
+        let mut turns = engine::compile_turns(
             &extract_bin,
             &src,
             &["result", Self::LOOP_ENTRY_TARGET],

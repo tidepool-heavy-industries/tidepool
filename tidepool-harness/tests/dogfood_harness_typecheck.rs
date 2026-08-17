@@ -24,7 +24,7 @@
 mod support;
 
 use std::path::PathBuf;
-use tidepool_harness::compile::compile_turn;
+use tidepool_harness::engine::compile_turn;
 use tidepool_harness::engine::EngineConfig;
 use tidepool_runtime::compile_and_run_pure;
 

@@ -117,6 +117,10 @@ fn compile_error_to_session_error(e: crate::CompileError) -> SessionError {
             path.display()
         )),
         CompileError::ReadError(err) => SessionError::BinderExtraction(err.to_string()),
+        // This lane never requests the asks sidecar (it never reaches
+        // `compile_targets`), but the variant must still map somewhere:
+        // treat it the same as any other wire artifact this reader rejected.
+        CompileError::Asks(msg) => SessionError::BinderExtraction(msg),
         CompileError::IOTypeDetected => {
             SessionError::BinderExtraction("IO type detected in decl turn".to_string())
         }

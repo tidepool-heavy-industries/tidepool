@@ -199,7 +199,7 @@ async fn narration_and_transcript_fold_both_hold_for_one_retry_cycle() {
     );
 
     // Deliverable 2: extracted types (the asks.json site -> type table names
-    // `Decision`, surfaced by the existing `compile::compile_turn` INFO log
+    // `Decision`, surfaced by the existing `engine::compile_turn` INFO log
     // and/or the new `log_turn_extracted` line).
     assert!(
         console.contains("Decision"),

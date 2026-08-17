@@ -28,24 +28,107 @@
 //! # What this module does NOT own
 //!
 //! The event log, node tree, and registry lifecycle live in [`crate::forcing`]
-//! / [`crate::registry`]; the engine calls them. Compilation lives in
-//! [`crate::compile`]. The provider boundary is [`crate::provider`]. The web
-//! protocol / SSE is `tidepool-web`. This module is the glue that sequences
-//! them into a turn loop.
+//! / [`crate::registry`]; the engine calls them. The actual compile mechanics
+//! (spawn `tidepool-extract`, read its output directory, deserialize,
+//! diagnostics, the invocation-keyed memo) live in
+//! `tidepool_runtime::artifacts` — this module's [`compile_turn`]/
+//! [`compile_turns`] are thin wrappers mapping a
+//! [`tidepool_runtime::CompiledArtifacts`] onto this crate's own turn/node
+//! vocabulary ([`CompiledTurn`]) and attributing timing to a (node, round)
+//! pair (architecture review finding 3, 2026-08-17 — this module absorbed
+//! the former `tidepool_harness::compile`). The provider boundary is
+//! [`crate::provider`]. The web protocol / SSE is `tidepool-web`. This
+//! module is the glue that sequences them into a turn loop.
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
 use serde_json::Value as Json;
 use tidepool_eval::value::Value;
-use tidepool_repr::DataConTable;
+use tidepool_extract_cmd::ResolvedExtractBin;
+pub use tidepool_extract_cmd::{extract_spawn_count, reset_extract_spawn_count};
+use tidepool_repr::{CoreExpr, DataConTable};
+pub use tidepool_runtime::AsksSidecar;
+use tidepool_runtime::{compile_targets, CompileError, CompiledArtifacts};
 
-use crate::compile::AsksSidecar;
 use crate::provider::{
     DynModelProvider, Message, ProviderError, ReasoningItem, Role, StreamSink, TurnRequest,
     TurnResponse, Usage,
 };
+use crate::timing;
 use crate::tree::FanBadge;
+
+/// A compiled turn: the Core expression, its constructor table, and the
+/// typed-yield sidecar. A thin per-target mapping over
+/// [`tidepool_runtime::CompiledArtifacts`] onto this crate's own turn
+/// vocabulary — the actual compile mechanics live in
+/// `tidepool_runtime::artifacts`, see this module's doc.
+pub struct CompiledTurn {
+    pub expr: CoreExpr,
+    pub table: DataConTable,
+    pub asks: AsksSidecar,
+}
+
+/// Compile `source` with entry binder `target`, searching `include` for
+/// modules, into a [`CompiledTurn`]. `node`/`round` attribute this compile's
+/// timing stages (pass [`timing::NO_NODE`]/[`timing::NO_ROUND`] when the
+/// caller has no answerer-round context). A thin wrapper over
+/// [`compile_turns`] (a one-element target slice).
+pub fn compile_turn(
+    extract_bin: &ResolvedExtractBin,
+    source: &str,
+    target: &str,
+    include: &[PathBuf],
+    node: u64,
+    round: u64,
+) -> Result<CompiledTurn, CompileError> {
+    let mut turns = compile_turns(extract_bin, source, &[target], include, node, round)?;
+    turns
+        .remove(target)
+        .ok_or_else(|| CompileError::MissingOutput(PathBuf::from(format!("{target}.cbor"))))
+}
+
+/// As [`compile_turn`], but compiles `targets` in ONE `tidepool-extract`
+/// spawn against a SHARED merged `meta.cbor` / [`DataConTable`], returning
+/// one [`CompiledTurn`] per target — [`tidepool_runtime::compile_targets`]
+/// with this crate's timing attributed via `on_stage` and the shared table
+/// distributed onto each per-target [`CompiledTurn`].
+pub fn compile_turns(
+    extract_bin: &ResolvedExtractBin,
+    source: &str,
+    targets: &[&str],
+    include: &[PathBuf],
+    node: u64,
+    round: u64,
+) -> Result<HashMap<String, CompiledTurn>, CompileError> {
+    let CompiledArtifacts {
+        table,
+        targets: artifacts,
+        ..
+    } = compile_targets(
+        source,
+        targets,
+        include,
+        Some(extract_bin),
+        |stage, elapsed, bytes| {
+            timing::record_stage(node, round, stage, elapsed, bytes);
+        },
+    )?;
+    Ok(artifacts
+        .into_iter()
+        .map(|(name, a)| {
+            (
+                name,
+                CompiledTurn {
+                    expr: a.expr,
+                    table: table.clone(),
+                    asks: a.asks,
+                },
+            )
+        })
+        .collect())
+}
 
 /// Which outer-row effect a [`HoleRouting::OuterEffect`] suspension names —
 /// see that variant's doc.
@@ -1309,7 +1392,7 @@ pub fn template_turn_for(
 /// path `result` itself uses
 /// ([`tidepool_mcp::TurnTemplate::extra_entries`]), so a caller compiling
 /// `result` and an extra entry as two `--targets` of ONE `tidepool-extract`
-/// spawn (`crate::compile::compile_turns`) gets entries that are identical by
+/// spawn ([`compile_turns`]) gets entries that are identical by
 /// construction rather than a hand-copied second `result`-shaped binder — the
 /// self-iterating harness driver's render+loop fusion is the first caller
 /// (`SelfHarnessDriver::compile_cycle_entry`). Routes through the SAME
