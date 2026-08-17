@@ -30,6 +30,13 @@
 -- "the current state of that key" — e.g. keeping only the LAST one — is a
 -- reader's job, not this module's.
 --
+-- == A write failure aborts the run, deliberately
+--
+-- 'record' returns unit, not @Either@: a journal write failure (disk full,
+-- unwritable path) is not an error the authored program handles — the driver
+-- fails the whole cycle. A run that cannot journal cannot honestly resume,
+-- so continuing would trade durability for the appearance of progress.
+--
 -- == What this module does NOT do
 --
 -- Reading the journal back, folding it into a map, and injecting that map at
