@@ -654,19 +654,30 @@ applyGate approval layer = case layer of
     brs = layerBranches layer
     titled br = br.brief.title == approval.gateTarget
     noSuchBranch t = [fmt|no branch in this layer is titled "{t}"|]
-    amend br = if titled br then Th.Branch (amendedBrief br.brief) br.value else br
+    amend br = if titled br then withBrief (amendedBrief br.brief) br else br
     amendedBrief b = b {Th.instruction = approval.gateText}
     -- An added branch inherits its siblings' depth, allowance and inherited
     -- context: it is a peer at the same position in the tree, and the
     -- operator adding it changes neither what this layer knows nor how much
     -- of the node budget the parent divided out.
     addedFrom template =
-      Th.Branch
-        (Th.ForkBrief approval.gateTitle (roleOf approval.gateRole) approval.gateText)
-        template.value
+      withBrief (Th.ForkBrief approval.gateTitle (roleOf approval.gateRole) approval.gateText) template
     reindexed kept = rebuildLayer layer (imap repath kept)
     repath i (Th.Branch b s) =
       Th.Branch b s {seedPath = childPath (parentPath s.seedPath) i b.title}
+
+-- | Set a branch's brief on BOTH halves that carry it.
+--
+-- A branch holds its 'ForkBrief' twice: once on the 'Th.Branch' (what the
+-- fold's rendered layer and every receipt read) and once inside the seed
+-- ('seedBrief', what the CHILD'S OWN WINDOW is prompted with, since a
+-- coalgebra receives only the seed).  Writing one and not the other is
+-- silently wrong in the worst direction — an operator's amended instruction
+-- would render correctly in the tree while the model kept working the
+-- original one.  Every gate verdict that changes a brief goes through here so
+-- the two cannot drift.
+withBrief :: ForkBrief -> Th.Branch NodeSeed -> Th.Branch NodeSeed
+withBrief b (Th.Branch _ s) = Th.Branch b s {seedBrief = b}
 
 -- ---------------------------------------------------------------------------
 -- What a node folds to

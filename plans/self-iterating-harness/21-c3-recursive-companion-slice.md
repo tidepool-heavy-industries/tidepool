@@ -31,14 +31,22 @@ never removed: the authored loop.
 loop :: State -> Companion State
 loop st = do
   let cfg  = st.config
-      seed = rootSeed st
-      coalg = fanOutCapped seedDepth cfg.maxFanOut
-                (depthCapped  seedDepth cfg.maxDepth
-                  (gatedLayer cfg (discover cfg)))
-      alg   = fold cfg
-  answer <- thoughtHylo alg coalg seed
+      coalg = gatedLayer cfg
+                (fanOutCapped seedDepth cfg.maxFanOut
+                  (depthCapped seedDepth cfg.maxDepth
+                    (allowanceCapped (discover cfg))))
+  f <- thoughtHylo (foldNode cfg) coalg (rootSeed st)
+  answer <- f (NodePath [])
   pure (recordAnswer answer st)
 ```
+
+**The gate is the OUTERMOST wrapper, and the order is load-bearing.**
+`fanOutCapped` decides AFTER its inner coalgebra has run — fan-out is a
+property of the produced layer, not of the seed — so a gate nested beneath it
+would present the operator a layer the fan-out cap then discards, which is
+exactly what §6 forbids. Read outside-in and that is also the order the
+policies fire: gate last, fan-out cap on the produced layer, depth and
+allowance caps before the window runs at all.
 
 `thoughtHylo` is used **verbatim** from `Tidepool.Thought` — no second
 recursion engine, no forked copy. Budget middleware is `Tidepool.Thought`'s own
@@ -51,11 +59,16 @@ recursion engine, no forked copy. Budget middleware is `Tidepool.Thought`'s own
 data NodeSeed = NodeSeed
   { seedPath    :: NodePath          -- root-relative branch slugs; the node id
   , seedBrief   :: ForkBrief         -- title/role/instruction (Tidepool.Thought)
-  , seedDepth   :: Int
-  , seedSpent   :: Int               -- nodes already spent in THIS subtree's allowance
-  , seedContext :: InheritedContext  -- what this node knows from above (§4)
+  , seedDepth     :: Int
+  , seedAllowance :: Int             -- node budget REMAINING for this subtree, incl. this node
+  , seedContext   :: InheritedContext  -- what this node knows from above (§4)
   }
 ```
+
+`seedAllowance` holds what is LEFT, not what was spent: a node reserves one
+unit for itself and divides the remainder among its children (§7), and a
+spent-counter cannot be divided. Naming it for the remainder is what keeps the
+next reader out of an off-by-a-whole-subtree hazard.
 
 `seedPath` is the node's identity everywhere — the journal key, the GUI node id,
 the render's tree line, the scripted provider's needle. One name, one derivation
@@ -96,7 +109,7 @@ data LayerProposal
   | ProposeSplit
       { splitPosture     :: Posture           -- Explore | Compare | Challenge
       , splitFocus       :: Text              -- focus / decision / claim, per posture
-      , splitStrategy    :: ProposedStrategy  -- WantSequential | WantConcurrent | WantPooled Int
+      , splitStrategy    :: ProposedStrategy  -- WantSequential | WantConcurrent | WantPooled {pooledWidth}
       , splitBranches    :: [ProposedBranch]
       }
   deriving (Generic, FromJSON, JsonSchema)
@@ -137,6 +150,13 @@ layerFromProposal :: NodeSeed -> LayerProposal -> ThoughtF NodeSeed
 
 Pure and total, so the whole shape-validation story is one function a test
 calls directly with no model anywhere.
+
+**Every payload-carrying sum arm takes a NAMED field.** `WantPooled
+{pooledWidth :: Int}`, not `WantPooled Int`. The vendored generic JSON has no
+key to put a positional field under and rejects it with a compile-time
+`TypeError` (`GAllFieldsNamed`) — so a positional arm is not a style question,
+it does not compile. Same for `GatePolicy`'s `GateWiderThan {gateWidth}` in §6.
+Constructor names, and therefore wire tags, are unaffected.
 
 `ProposedStrategy` is recorded and rendered but **not scheduled** in v1 —
 see §7.
@@ -247,8 +267,8 @@ operator).
 
 ```haskell
 data GatePolicy
-  = GateOff              -- unattended: every layer auto-approved
-  | GateWiderThan Int    -- ask only when a layer proposes more than N branches
+  = GateOff                          -- unattended: every layer auto-approved
+  | GateWiderThan {gateWidth :: Int} -- ask only past N branches (named field — see §2)
   | GateEveryLayer
   deriving (Generic, FromJSON, JsonSchema)
 ```
@@ -342,6 +362,12 @@ ignores its `Strategy` argument except to record the transformation. That is the
 single function green threads replaces, and branch order is preserved by
 construction either way.
 
+It covers the FOLD descent. The DISCOVERY descent is `thoughtHylo`'s own
+`traverse`, inside `Tidepool.Thought`, which this lane consumes verbatim — so
+making discovery concurrent is that module's edit, not this harness's. Worth
+knowing before C6 reads a receipt: the stamped transformation stands in for
+concurrency that is reachable at one of the two descents, not both.
+
 ---
 
 ## 8. Substrate gaps — escalated, then ruled on
@@ -424,9 +450,15 @@ IS the design, so the type hands it to them. Specified in
 
 Two classes then fold as data, and both are exercised (§9): a window that
 finalizes a structurally unusable layer (§2 — an empty split, a blank branch),
-and a window that exits abnormally. The harness reaches both through ONE
-function (`runWindow`), which is also what makes the rewire onto the new verb a
-single edit.
+and a window that exits abnormally.
+
+The harness funnels both invocations through `layerWindow`/`foldWindow`, two
+adjacent one-line functions under a single comment block, so the rewire is one
+edit each. TWO rather than one polymorphic `runWindow :: Text -> Companion a`,
+for a mechanical reason worth recording: extract's typed-yield site pass
+rejects a `runLLMTurnFork @a` call at a bare type VARIABLE ("polymorphic
+runLLMTurn site"), which is the same constraint that makes `Tidepool.Harness`
+re-export `runLLMTurn` rather than wrap it.
 
 ---
 
@@ -455,6 +487,7 @@ imports/decls beyond the universal contract).
 | 6 | node-count cap | `maxNodes` smaller than the proposed tree | the overflow branches carry `BudgetForced ForcedNodeCount`; the total window count is exactly the cap |
 | 7 | fan-out cap | a layer proposing more branches than `maxFanOut` | that node finishes with `BudgetForced ForcedFanOut` and NO child window runs |
 | 8 | the gate is exercised through the form API | `GateEveryLayer` + a scripted gate answering `Prune`, then `Approve` | the pruned branch's window never runs; the survivor's does |
+| 8b | an amended branch is WORKED as amended | `Amend` on branch 1, then `Approve` | branch 1's own coalgebra prompt carries the amended instruction — not just the rendered tree. A branch holds its `ForkBrief` twice (on the `Branch`, and inside the seed the child's window is prompted from); writing one and not the other renders right and works wrong, so this asserts the prompt, not the render |
 | 9 | gate policy auto-approves unattended | `GateOff` | no `askUser` suspension is raised at all |
 | 10 | the turn is journaled per node event | any scenario | one journal entry per `split`/`fold`/`forced`/`failed`, keyed by `NodePath` (§10) |
 | 11 | node ids are containment-safe | a branch titled with punctuation/markup | every emitted node id matches `^[0-9]+-[a-z0-9-]{1,32}$` per segment |
@@ -500,8 +533,19 @@ shape — without this lane reading anything back.
 2. the tensions the root fold surfaced;
 3. `--- tree ---` and then one indented line per node:
    `<path>  <posture/finish>  <title>  [origin/strategy badges]`;
-4. a one-line receipt: nodes, windows, forced finishes, failures, gate
-   interventions.
+4. a one-line receipt: nodes, windows, forced finishes, failures.
+
+**Gate interventions are journaled, not counted in that line, and the reason is
+structural.** A gate happens in a node's COALGEBRA; `ThoughtF` has no task slot,
+so that node's algebra never sees its own seed, and with `thoughtHylo` verbatim
+and no state slot in the outer row there is no channel carrying a count from a
+node's coalgebra to its own fold. (One relay does exist — stamp the count into
+each child's seed, return it on each child's answer, read it off any child —
+and it is deliberately not taken: it works only because gates happen solely on
+splits, which is a coupling that would break silently the day the gate moves,
+in exchange for one number that kind `gate` already records per node with
+verdict, target, note, and rounds.) A counted receipt wants a state slot in the
+outer row or a wider fold reader; both are edits outside this lane.
 
 The tree is inspectable and subordinate, which is the C3 lane's own wording
 ("tree inspectable in the GUI without being the primary answer surface"). It is
