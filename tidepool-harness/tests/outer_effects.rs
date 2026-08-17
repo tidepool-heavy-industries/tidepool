@@ -2,9 +2,11 @@
 //! (`plans/self-iterating-harness/20-exomonad-v3-prd.md`): the AUTHORED loop
 //! calls `say` (Console), `createWorktree` (Worktree), `run` (Exec), a
 //! `withHandler`/`headChanged` subscribe-drain-unsubscribe cycle (RepoEvent),
-//! and `record` (Journal), and the driver services each resulting suspension
-//! through its driver-owned handler set — suspension-serviced, the outer
-//! session's handled prefix staying EMPTY on the shared machine.
+//! an `after`/`nextEvent` blocking deadline wait (RepoEvent's `RepoEventAwait`
+//! suspension — the headline verb `nextEvent`/`after`/`awaitSubscription` all
+//! send), and `record` (Journal), and the driver services each resulting
+//! suspension through its driver-owned handler set — suspension-serviced, the
+//! outer session's handled prefix staying EMPTY on the shared machine.
 //!
 //! ONE fixture, ONE compile, every assertion off the single resulting
 //! `State` (family-bundle discipline — a new suspension kind joins this
@@ -73,8 +75,8 @@ impl ObservationSource for NoOpSource {
 }
 
 /// The full round trip: authored `loop` → `say`/`createWorktree`/`run`/
-/// `withHandler` → four suspensions → driver-owned handlers → resumed
-/// continuation → durable `State`.
+/// `withHandler`/(`after`+`nextEvent`) → five suspensions → driver-owned
+/// handlers → resumed continuation → durable `State`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn outer_loop_effects_round_trip_through_the_driver() {
     support::require_extract();
@@ -155,6 +157,12 @@ async fn outer_loop_effects_round_trip_through_the_driver() {
             .map(str::trim),
         Some("outer-effects-probe"),
         "exec's stdout must cross into durable state, got {state:?}"
+    );
+    assert_eq!(
+        state.get("tickObserved").and_then(|v| v.as_bool()),
+        Some(true),
+        "`after 50 >>= nextEvent` must round-trip a Tick through the driver \
+         (RepoEventAwait), got {state:?}"
     );
 
     // Journal: the loop's `record "outer-effects" "probe" ...` call must have

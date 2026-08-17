@@ -185,9 +185,10 @@ pub struct ClassifiedHole {
 ///   bare `Text`, decoded directly (no shape/schema involved).
 /// - `Print` (Console) / `WorktreeCreate`/`WorktreeLookup`/`WorktreeList`/
 ///   `WorktreeBranchOf`/`WorktreeHeadOf` (Worktree) / `RepoEventSubscribe`/
-///   `RepoEventDrain`/`RepoEventUnsubscribe` (RepoEvent) / `Run`/`RunIn`/
-///   `RunArgv` (Exec) / `RecordStep` (Journal) — routed by CONSTRUCTOR NAME
-///   to [`HoleRouting::OuterEffect`], same discipline as `Subagent` below.
+///   `RepoEventDrain`/`RepoEventAwait`/`RepoEventUnsubscribe` (RepoEvent) /
+///   `Run`/`RunIn`/`RunArgv` (Exec) / `RecordStep` (Journal) — routed by
+///   CONSTRUCTOR NAME to [`HoleRouting::OuterEffect`], same discipline as
+///   `Subagent` below.
 /// - `AskWith` (prompt, payload) — plain [`HoleRouting::Ask`] (a structured
 ///   `ask schema prompt`).
 /// - anything else (an unrecognized Con) — treated as a bare Ask with an empty
@@ -272,12 +273,13 @@ pub fn classify_hole(request: &Value, table: &DataConTable, asks: &AsksSidecar) 
             routing: HoleRouting::OuterEffect(OuterEffectKind::Worktree),
             prompt: String::new(),
         },
-        Some("RepoEventSubscribe") | Some("RepoEventDrain") | Some("RepoEventUnsubscribe") => {
-            ClassifiedHole {
-                routing: HoleRouting::OuterEffect(OuterEffectKind::RepoEvent),
-                prompt: String::new(),
-            }
-        }
+        Some("RepoEventSubscribe")
+        | Some("RepoEventDrain")
+        | Some("RepoEventAwait")
+        | Some("RepoEventUnsubscribe") => ClassifiedHole {
+            routing: HoleRouting::OuterEffect(OuterEffectKind::RepoEvent),
+            prompt: String::new(),
+        },
         Some("Run") | Some("RunIn") | Some("RunArgv") => ClassifiedHole {
             routing: HoleRouting::OuterEffect(OuterEffectKind::Exec),
             prompt: String::new(),

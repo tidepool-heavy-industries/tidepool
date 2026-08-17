@@ -3272,10 +3272,13 @@ impl Harness {
     /// attempts while contested by a sibling realm.
     const CONTENTION_RETRY_BACKOFF: std::time::Duration = std::time::Duration::from_millis(3);
 
-    /// Bound on contention retries (a couple of minutes of backoff at
-    /// [`Self::CONTENTION_RETRY_BACKOFF`]) — a genuinely wedged machine
-    /// fails loud instead of spinning forever.
-    const CONTENTION_RETRY_MAX_ATTEMPTS: u32 = 20_000;
+    /// Bound on contention retries, as an ELAPSED-TIME budget (~2 minutes)
+    /// rather than an iteration count — a fanout child contending behind
+    /// several siblings' multi-second JIT turns across rounds can
+    /// legitimately need to wait longer than a fixed attempt count assuming
+    /// zero-cost checkouts would allow — so a genuinely wedged machine still
+    /// fails loud, just bounded by wall-clock time instead.
+    const CONTENTION_RETRY_BUDGET: std::time::Duration = std::time::Duration::from_secs(120);
 
     /// [`Self::checkout_run`], but — ONLY when `node` opted in via
     /// [`Self::set_retry_checkout_on_contention`] — retries with a short
@@ -3307,15 +3310,15 @@ impl Harness {
         if !retry {
             return self.checkout_run(node);
         }
-        for _ in 0..Self::CONTENTION_RETRY_MAX_ATTEMPTS {
+        let deadline = tokio::time::Instant::now() + Self::CONTENTION_RETRY_BUDGET;
+        loop {
             match self.checkout_run(node) {
-                Err(HarnessError::TurnInFlight(_)) => {
+                Err(HarnessError::TurnInFlight(_)) if tokio::time::Instant::now() < deadline => {
                     tokio::time::sleep(Self::CONTENTION_RETRY_BACKOFF).await;
                 }
                 other => return other,
             }
         }
-        self.checkout_run(node)
     }
 
     /// Check `node`'s machine out to resume/abort its pending `hole`
