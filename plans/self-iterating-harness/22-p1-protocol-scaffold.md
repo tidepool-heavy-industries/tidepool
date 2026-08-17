@@ -208,11 +208,19 @@ has nine variants: `RunLLMTurn`, `Fork`, `Finalize`, `AskUser`, `Note`,
 (RunLLMTurn vs Fork-with-join), *suspend-to-operator* is three (blocking
 `AskUser` form, non-blocking `Note`, raw `Ask`), *outer-dispatch* is two
 (`Subagent` and `OuterEffect`×5) plus the driver-immediate `ReadState`, and
-there is no `ordinary` class at all — an unrecognized constructor falls through
-to `Ask`, which is precisely why the `RepoEventAwait` omission was silent rather
-than loud. The schema encodes the **code's** vocabulary; the PRD's five names
-are an under-approximation and adopting them would lose information. Exec's
-three verbs are all `OuterDispatch(Exec)`.
+there is no `ordinary` class at all. The schema encodes the **code's**
+vocabulary; the PRD's five names were compression, and adopting them would lose
+information. Exec's three verbs are all `OuterDispatch(Exec)`.
+
+> **The phase-3 requirement, stated once so no lane loses it.** `classify_hole`'s
+> final arm is `_ => HoleRouting::Ask`. An unrecognized constructor is therefore
+> indistinguishable from a genuine `AskWith` — *that* is why the `RepoEventAwait`
+> omission was silent rather than loud. It did not fail; it misrouted. The
+> generated classifier must close this on both ends: **a verb with no handling
+> class fails GENERATION**, and **an unrecognized constructor at runtime fails
+> LOUD** — never falls through to `Ask`. Exhaustiveness on both ends is the whole
+> point of generating the classifier; a generated classifier that kept the
+> catch-all would reproduce the bug class it was built to make unrepresentable.
 
 **`ExtractPolicy`** — from R3's eight `sitedVerbs` rows. The only degrees of
 freedom exercised today are: `reject_polymorphic` (always true),
@@ -268,19 +276,33 @@ could not have known.
 - There is no build.rs precedent for source generation here. `tidepool/build.rs`
   embeds a tree; it generates nothing reviewable.
 
-*Against a check script — the refinement:* `scripts/gen-workspace-deps.py`
-supports `--check` and **nothing in the repo invokes it**. There is no CI
-workflow directory. A check that nothing runs is not a check. The guard must
-therefore be a test, which the test runner executes by construction.
+*Against a check script, and the placement rule that follows:*
 
-*And where that test lives is load-bearing:* `bridged_records` sits in
-`tidepool-handlers`, which `.config/nextest.toml`'s `default-filter` excludes
-wholesale — **the existing precedent's guard does not run on the inner loop.**
-It is pure string comparison needing no GHC; it is collateral damage from
-package-level exclusion. So: **the generated-files check test lives in
-`tidepool-protocol` itself** — a leaf, GHC-free, quick-tier crate. `cargo nextest
-run` runs it. This is an evidence-backed improvement on the PRD's leaning, not a
-deviation from it.
+> **A check nothing runs is not a check.** This is the standing placement rule
+> for every generated-files guard in this program, not an observation about one
+> script. Two live instances motivate it. `scripts/gen-workspace-deps.py`
+> supports `--check` and **nothing in the repo invokes it** — there is no CI
+> workflow directory. And `bridged_records`, the workspace's one real instance
+> of the generated-artifact idiom, sits in `tidepool-handlers`, which
+> `.config/nextest.toml`'s `default-filter` excludes wholesale — so **that guard
+> never runs on the inner loop**, despite being pure string comparison needing
+> no GHC. It is collateral damage from package-level exclusion.
+>
+> Therefore: a generated-files guard is (a) a **test**, so the runner executes it
+> by construction, and (b) placed in a crate **outside** the default-filter
+> exclusion set, so `cargo nextest run` actually reaches it. Both, or the guard
+> is decorative.
+
+So the generated-files check test lives in `tidepool-protocol` itself — a leaf,
+GHC-free, quick-tier crate. This is an evidence-backed improvement on the PRD's
+leaning, not a deviation from it.
+
+*The one place the rule cannot be satisfied, stated honestly:* the Class A
+whole-registry goldens (§5) need `standard_decls()`, and every crate that can see
+it is default-filter-excluded. Those are a **battery-tier** gate
+(`scripts/battery.sh -p tidepool-mcp`), not an inner-loop one. That is a real
+limitation of the split, not an oversight — the inner-loop guard is the
+generated-files check; the goldens are the pre-merge one.
 
 **Mechanism**
 
