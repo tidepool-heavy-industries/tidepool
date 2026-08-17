@@ -19,6 +19,13 @@
 //! subscribe/drain/unsubscribe SUSPENSION-SERVICING path without depending on
 //! `WorktreeMonitor::register` (a separate concern from S1-L1).
 //!
+//! PRD 20 S1-L4 wave 2 (`plans/self-iterating-harness/20-s1l4-green-threads.md`)
+//! widens the same fixture/compile with `Tidepool.Async.waitEvent` and
+//! `Tidepool.Node`'s capability-handle mailboxes — proving the driver's
+//! NON-BLOCKING `RepoEventAwait` servicing (a parent parked in a select does
+//! not stall a sibling green thread's mailbox sends) and the mailbox
+//! coalesce contract, without paying for a second extract compile.
+//!
 //! GHC-heavy: needs `TIDEPOOL_EXTRACT` + the with-packages GHC on PATH
 //! (`--ignore-default-filter` to run).
 
@@ -202,6 +209,37 @@ async fn outer_loop_effects_round_trip_through_the_driver() {
         Some(&serde_json::json!([60, 10, 30])),
         "mapConcurrently must return results in ORIGINAL list order ([3,1,2], each a \
          differing-length recursive sum), regardless of completion order, got {state:?}"
+    );
+
+    // Tidepool.Async.waitEvent (PRD 20 S1-L4 wave 2) — a select over
+    // {thread completion, deadline} that takes the completion branch and
+    // reads the typed result with one immediate `wait`.
+    assert_eq!(
+        state.get("waitEventResult").and_then(|v| v.as_i64()),
+        Some(55),
+        "waitEvent must compose into nextEvent's select and, once resumed with the \
+         handle, `wait` must return the thread's own value, got {state:?}"
+    );
+
+    // Tidepool.Node (PRD 20 S1-L4 wave 2) — capability-handle mailboxes over
+    // one green thread, one level only.
+    assert_eq!(
+        state.get("nodeMessage").and_then(|v| v.as_i64()),
+        Some(777),
+        "the parent's select must observe the child's sendUp before the deadline, \
+         got {state:?}"
+    );
+    assert_eq!(
+        state.get("nodeSilentTick").and_then(|v| v.as_bool()),
+        Some(true),
+        "a silent child never sends, so the parent's select must observe the Tick \
+         once the deadline elapses, got {state:?}"
+    );
+    assert_eq!(
+        state.get("nodeBurstPayload").and_then(|v| v.as_i64()),
+        Some(3),
+        "a burst of same-key sends must be observed ONCE, carrying the LAST payload, \
+         got {state:?}"
     );
 
     // Journal: the loop's `record "outer-effects" "probe" ...` call must have

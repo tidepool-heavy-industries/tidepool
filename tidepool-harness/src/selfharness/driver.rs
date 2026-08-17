@@ -2177,6 +2177,25 @@ impl SelfHarnessDriver {
                             {
                                 match self.poll_repo_event_await(&request, &compiled.table)? {
                                     None => {
+                                        // Nothing else ready to interleave
+                                        // with right now — a real sibling
+                                        // wakes this up on the very next
+                                        // iteration regardless (it's already
+                                        // ahead in the queue), so this only
+                                        // ever fires while genuinely waiting
+                                        // on external progress (a deadline
+                                        // elapsing, another chain not yet
+                                        // scheduled). Bounds the poll to a
+                                        // cooperative cadence instead of a
+                                        // tight CPU spin; `tokio::time::sleep`
+                                        // yields this task rather than
+                                        // blocking the runtime.
+                                        if ready.is_empty() {
+                                            tokio::time::sleep(std::time::Duration::from_millis(
+                                                5,
+                                            ))
+                                            .await;
+                                        }
                                         ready.push_back(GreenReady {
                                             chain,
                                             outcome: ResidentOutcome::Suspended {

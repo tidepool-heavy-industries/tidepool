@@ -86,6 +86,9 @@ module Tidepool.Async
   , waitBoth
   , waitAny
 
+    -- * Event-algebra select
+  , waitEvent
+
     -- * Derived combinators
   , race
   , concurrently
@@ -97,8 +100,10 @@ import Prelude
 
 import Tidepool.Effects
   ( AsyncStatus (..)
+  , Event
   , M
   , asyncCancel
+  , asyncDone
   , asyncJoinAny
   , asyncResult
   , asyncSpawn
@@ -190,6 +195,28 @@ waitAny hs = do
       a <- wait h
       pure (h, a)
     [] -> error "Tidepool.Async.waitAny: joined a thread that was not waited on"
+
+-- | The Event-algebra sibling of the package's @waitSTM@: fires once when
+-- the thread reaches a terminal state (settled OR cancelled), so a select
+-- over threads, timers, and mailboxes composes as one ordinary 'nextEvent'
+-- (@Tidepool.Event@) instead of needing a separate blocking primitive.
+--
+-- Carries the HANDLE back, never the value: the typed result stays on the
+-- heap and is one immediate 'wait' (or 'waitCatch', to observe a cancel) away
+-- — the same reason 'poll'/'waitCatch' never take the value off this thread's
+-- own settle path directly.
+--
+-- Built on 'asyncDone' — the raw @Int@-carrying watch this module's own
+-- 'async'/'wait' machinery does not otherwise need — so this is the ONE
+-- place @Tidepool.Async@ reaches into @Tidepool.Event@'s algebra. That
+-- makes @RepoEvent@ a REQUIRED row member alongside @Green@ wherever
+-- 'waitEvent' is actually called (a row with @Green@ but no @RepoEvent@
+-- fails to resolve 'asyncDone'/'Event' — both are declared under
+-- @RepoEvent@, never @Green@, so their watch vocabulary stands alone in a
+-- row that has @RepoEvent@ without @Green@; the coupling runs the other way
+-- only where @waitEvent@ itself is used).
+waitEvent :: Async a -> Event (Async a)
+waitEvent h = fmap (const h) (asyncDone (asyncThreadId h))
 
 -- | Run two computations concurrently and return the first to finish,
 -- cancelling the loser.

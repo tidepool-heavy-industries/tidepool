@@ -28,6 +28,14 @@
 -- bundle's assertions about the SCHEDULER (parking, waking, ordering) free
 -- of an unrelated packed-`Text`-literal JIT construction path this lane does
 -- not own.
+--
+-- PRD 20 S1-L4 wave 2 widens this bundle with 'Tidepool.Async.waitEvent'
+-- (a select over {thread completion, deadline}) and 'Tidepool.Node'
+-- (@forkNode@\/@sendUp@\/@received@\/@folded@) — proving the driver's
+-- NON-BLOCKING @RepoEventAwait@ servicing (a parked select does not stall a
+-- sibling green thread's mailbox sends) and the mailbox coalesce contract,
+-- one level only: no node body here forks a node of its own (nested
+-- @async@ is a known, separately chartered gap — see 'mapWork's doc above).
 module OuterEffectsHarness
   ( State (..)
   , initialState
@@ -45,7 +53,9 @@ import Tidepool.Async
   , wait
   , waitCatch
   , waitEither
+  , waitEvent
   )
+import Tidepool.Node (forkNode, received, sendUp, uplink)
 import Tidepool.Prelude hiding (render)
 import Tidepool.QQ (fmt)
 
@@ -60,6 +70,7 @@ import Tidepool.Effects
   , run
   , say
   , withHandler
+  , (<|>)
   )
 import Tidepool.Worktree (fromCurrentRepository, renderWorktreeError)
 
@@ -75,6 +86,10 @@ data State = State
   , asyncCancelled :: Bool
   , asyncMapResults :: [Int]
   , tickObserved :: Bool
+  , waitEventResult :: Int
+  , nodeMessage :: Int
+  , nodeSilentTick :: Bool
+  , nodeBurstPayload :: Int
   }
   deriving (Generic, ToJSON, FromJSON, Show)
 
@@ -90,6 +105,10 @@ initialState =
     , asyncCancelled = False
     , asyncMapResults = []
     , tickObserved = False
+    , waitEventResult = 0
+    , nodeMessage = 0
+    , nodeSilentTick = False
+    , nodeBurstPayload = 0
     }
 
 render :: State -> Text
@@ -155,6 +174,64 @@ loop st = do
       -- results come back in ORIGINAL list order regardless.
       mapResults <- mapConcurrently mapWork [3, 1, 2]
 
+      -- `waitEvent` (PRD 20 S1-L4 wave 2): a select over {thread completion,
+      -- deadline} that takes the completion branch (a generous deadline
+      -- against an already-fast thread), then reads the typed result with
+      -- one immediate `wait` — proving `waitEvent` composes into `nextEvent`
+      -- and carries the HANDLE, not the value.
+      hWaitEvent <- async (pure (55 :: Int))
+      weDeadline <- after 5000
+      Observed _ weOutcome <-
+        nextEvent (fmap Left (waitEvent hWaitEvent) <|> fmap Right weDeadline)
+      weResult <- case weOutcome of
+        Left h -> wait h
+        Right _ -> pure (-1)
+
+      -- Tidepool.Node (PRD 20 S1-L4 wave 2), one level only (a node body
+      -- never itself forks a node — the nested-`async` case above is a
+      -- known gap this lane does not exercise).
+      --
+      -- (1) A child `sendUp`s once; the parent's select over {message,
+      -- deadline} observes the message before the (generous) deadline.
+      nodeMsg <- forkNode @Int @Int (\ctx -> do
+        sendUp (uplink ctx) (777 :: Int)
+        pure (0 :: Int))
+      msgDeadline <- after 5000
+      Observed _ msgOutcome <-
+        nextEvent (fmap Left (received nodeMsg) <|> fmap Right msgDeadline)
+      nodeMsgVal <- case msgOutcome of
+        Left v -> pure v
+        Right _ -> pure (-1)
+
+      -- (2) A SILENT child sends nothing; a short deadline elapses and the
+      -- parent's select observes the Tick instead.
+      nodeSilent <- forkNode @Int @Int (\_ctx -> pure (0 :: Int))
+      silentDeadline <- after 30
+      Observed _ silentOutcome <-
+        nextEvent (fmap Left (received nodeSilent) <|> fmap Right silentDeadline)
+      silentTick <- case silentOutcome of
+        Left _ -> pure False
+        Right _ -> pure True
+
+      -- (3) A burst of same-tag (bare `Int`, one shared coalesce key) sends
+      -- is observed ONCE, carrying the LAST payload. `folded`+`wait` first
+      -- so the whole burst has already landed (and coalesced) before the
+      -- select runs — deterministic, not a race against however many of the
+      -- three sends the scheduler has serviced by the time the parent polls.
+      nodeBurst <- forkNode @Int @Int (\ctx -> do
+        sendUp (uplink ctx) (1 :: Int)
+        sendUp (uplink ctx) (2 :: Int)
+        sendUp (uplink ctx) (3 :: Int)
+        pure (0 :: Int))
+      Observed _ burstThread <- nextEvent (folded nodeBurst)
+      _ <- wait burstThread
+      burstDeadline <- after 5000
+      Observed _ burstOutcome <-
+        nextEvent (fmap Left (received nodeBurst) <|> fmap Right burstDeadline)
+      burstVal <- case burstOutcome of
+        Left v -> pure v
+        Right _ -> pure (-1)
+
       pure
         st
           { runs = st.runs + 1
@@ -167,4 +244,8 @@ loop st = do
               _ -> False
           , asyncMapResults = mapResults
           , tickObserved = tick.firedAtMs > 0
+          , waitEventResult = weResult
+          , nodeMessage = nodeMsgVal
+          , nodeSilentTick = silentTick
+          , nodeBurstPayload = burstVal
           }
