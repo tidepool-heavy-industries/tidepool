@@ -2148,20 +2148,79 @@ impl SelfHarnessDriver {
                         // `OuterEffectKind`.
                         HoleRouting::OuterEffect(kind) => {
                             let kind = *kind;
-                            let value =
-                                self.service_outer_effect(kind, &request, &compiled.table)?;
-                            let sid = self.outer_sid()?;
-                            let next = self
-                                .agent
-                                .with_session(sid, |s| s.resume(&hole, value))
-                                .map_err(|e| DriverError::Session(e.to_string()))?
-                                .map_err(|e| {
-                                    DriverError::Session(format!("outer effect resume failed: {e}"))
-                                })?;
-                            ready.push_back(GreenReady {
-                                chain,
-                                outcome: next,
-                            });
+                            // `RepoEventAwait` (PRD 20 S1-L4 wave 2) is the
+                            // ONE outer-row suspension whose handler-side
+                            // implementation can BLOCK indefinitely
+                            // (`repo_event_await`'s own reconcile/check/sleep
+                            // loop). Routing it through the ordinary
+                            // dispatch-then-resume path below would stall
+                            // THIS WHOLE ready-queue loop — every other
+                            // chain's already-ready work, including a
+                            // sibling green thread's — until it happens to
+                            // match. Service it non-blockingly instead: poll
+                            // with the SAME handler's plain (non-sleeping)
+                            // drain; a match resumes the hole immediately,
+                            // exactly as if `RepoEventAwait` itself had
+                            // returned it; an EMPTY batch leaves the hole
+                            // genuinely parked, reinserted at the BACK of
+                            // `ready` so every other already-ready chain runs
+                            // first, revisited by this same arm on a later
+                            // iteration. The caller-observable contract
+                            // (block until a match) is unchanged — only who
+                            // does the waiting is. `repo_event_await`'s own
+                            // implementation, and every other RepoEvent verb,
+                            // are untouched: this is a DRIVER SERVICING
+                            // CHOICE, made only for this one constructor.
+                            if kind == engine::OuterEffectKind::RepoEvent
+                                && engine::con_name(&request, &compiled.table)
+                                    == Some("RepoEventAwait")
+                            {
+                                match self.poll_repo_event_await(&request, &compiled.table)? {
+                                    None => {
+                                        ready.push_back(GreenReady {
+                                            chain,
+                                            outcome: ResidentOutcome::Suspended {
+                                                output: Vec::new(),
+                                                hole,
+                                                request,
+                                            },
+                                        });
+                                    }
+                                    Some(value) => {
+                                        let sid = self.outer_sid()?;
+                                        let next = self
+                                            .agent
+                                            .with_session(sid, |s| s.resume(&hole, value))
+                                            .map_err(|e| DriverError::Session(e.to_string()))?
+                                            .map_err(|e| {
+                                                DriverError::Session(format!(
+                                                    "RepoEventAwait resume failed: {e}"
+                                                ))
+                                            })?;
+                                        ready.push_back(GreenReady {
+                                            chain,
+                                            outcome: next,
+                                        });
+                                    }
+                                }
+                            } else {
+                                let value =
+                                    self.service_outer_effect(kind, &request, &compiled.table)?;
+                                let sid = self.outer_sid()?;
+                                let next = self
+                                    .agent
+                                    .with_session(sid, |s| s.resume(&hole, value))
+                                    .map_err(|e| DriverError::Session(e.to_string()))?
+                                    .map_err(|e| {
+                                        DriverError::Session(format!(
+                                            "outer effect resume failed: {e}"
+                                        ))
+                                    })?;
+                                ready.push_back(GreenReady {
+                                    chain,
+                                    outcome: next,
+                                });
+                            }
                         }
                         // `Tidepool.Async`'s substrate (PRD 20 S1-L4) — raised
                         // either by the loop itself or by a green thread's own
@@ -3886,6 +3945,56 @@ impl SelfHarnessDriver {
             }
         }
         .map_err(|e| DriverError::Session(format!("{kind:?} dispatch: {e}")))
+    }
+
+    /// Non-blocking companion to the `RepoEventAwait` interception inside the
+    /// `HoleRouting::OuterEffect` servicing arm (PRD 20 S1-L4 wave 2): decode
+    /// the original suspended request's `subscription`, poll the event
+    /// handler's plain (non-sleeping) drain, and report `None` on an empty
+    /// batch — still parked, nothing to resume with — or `Some(value)`
+    /// already encoded exactly as `RepoEventAwait`'s own dispatch would
+    /// encode it (`Either EventError [RepositoryEvent]`), ready to resume the
+    /// hole with directly. Never calls `repo_event_await` — that verb's own
+    /// blocking loop is exactly what this exists to avoid running inline in
+    /// the scheduler.
+    fn poll_repo_event_await(
+        &mut self,
+        request: &Value,
+        table: &DataConTable,
+    ) -> Result<Option<Value>, DriverError> {
+        use tidepool_bridge::FromCore;
+        let handler = self.handlers.event.as_mut().ok_or_else(|| {
+            Self::unwired_outer_effect_error(
+                "RepoEvent",
+                "withHandler (repository events)",
+                "set_event_handler",
+            )
+        })?;
+        let req = tidepool_handlers::RepoEventReq::from_value(request, table)
+            .map_err(|e| DriverError::Session(format!("RepoEventAwait decode: {e}")))?;
+        let tidepool_handlers::RepoEventReq::RepoEventAwait(subscription, _timeout_ms) = req
+        else {
+            return Err(DriverError::Session(
+                "poll_repo_event_await: decoded request was not RepoEventAwait (scheduler bug)"
+                    .into(),
+            ));
+        };
+        // `_timeout_ms` is deliberately unread: `nextEvent`'s own calling
+        // convention (`awaitFirst`) always passes -1 (no deadline) — a
+        // bounded wait is expressed by merging an `after ms` deadline into
+        // the SAME subscription instead, which arrives as an ordinary `Tick`
+        // through this same drain. No caller in the authored stdlib surface
+        // passes a non-negative timeout to this verb.
+        let result = handler.repo_event_drain(subscription);
+        if let Ok(batch) = &result {
+            if batch.is_empty() {
+                return Ok(None);
+            }
+        }
+        let value = result
+            .to_value(table)
+            .map_err(|e| DriverError::Session(format!("RepoEventAwait encode: {e}")))?;
+        Ok(Some(value))
     }
 
     /// The legible "no handler wired" error every [`Self::service_outer_effect`]
