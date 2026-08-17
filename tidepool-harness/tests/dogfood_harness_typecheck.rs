@@ -332,3 +332,95 @@ fn dev_tree_resume_decisions_execute() {
         "expected 12 resume-decision checks, got:\n{report}"
     );
 }
+
+/// The overspend regression the external review flagged
+/// (`harness-dogfooding/dev-tree/Harness.hs:420-429`): `childAllowance`'s old
+/// `max 1 ((parent.seedCycles - 2) \`div\` n)` minted a cycle from nothing
+/// whenever the floor share rounded to zero. A non-leaf root with
+/// `seedCycles = 2` and two leaf children passes `cycleRefusal` itself (its
+/// own reservation is exactly met), but the OLD formula then handed each
+/// child 1 cycle anyway — 2 (parent) + 1 + 1 = 4, double the parent's own
+/// cap of 2.
+///
+/// The fix removes the upward clamp (`max 0` instead of `max 1`), so the same
+/// scenario floors each child's share to 0; `requiredCycles` (1 for a leaf)
+/// then exceeds that share, which is exactly the typed budget refusal
+/// `cycleRefusal` already provides — no child spends anything. This pins
+/// total spend at <= the parent's cap using ONLY `childAllowance` and
+/// `requiredCycles` (both pure, no agent, no git), mirroring how
+/// `cycleRefusal`/`allocateChildren` actually combine them in `decompose`.
+const OVERSPEND_REGRESSION_SOURCE: &str = concat!(
+    "{-# LANGUAGE NoImplicitPrelude, OverloadedStrings, DataKinds, TypeOperators, ",
+    "FlexibleContexts, GADTs, ScopedTypeVariables, TypeApplications, LambdaCase, ",
+    "RecordWildCards, OverloadedRecordDot, QuasiQuotes, DeriveGeneric, DeriveAnyClass #-}\n",
+    "module OverspendProbe where\n",
+    "import Tidepool.Prelude hiding (render)\n",
+    "import Tidepool.Effects\n",
+    "import Harness\n",
+    "import HarnessTypes (OnFailure (..))\n",
+    "import Tidepool.QQ (fmt)\n",
+    "import qualified Data.Text as T\n",
+    "\n",
+    "leafPlan :: DevPlan\n",
+    "leafPlan = DevPlan { nodeName = \"leaf\", nodeTask = \"t\", nodeChecks = [], nodeBoundary = [], nodeOnFailure = Retry, childPlans = [] }\n",
+    "\n",
+    "rootPlan :: DevPlan\n",
+    "rootPlan = DevPlan { nodeName = \"root\", nodeTask = \"t\", nodeChecks = [], nodeBoundary = [], nodeOnFailure = Retry, childPlans = [leafPlan, leafPlan] }\n",
+    "\n",
+    "-- Never forced: 'childAllowance'/'requiredCycles' only read 'seedPlan' and\n",
+    "-- 'seedCycles', so a live 'WorktreeHandle' is not needed for this pin.\n",
+    "rootSeed :: NodeSeed\n",
+    "rootSeed = NodeSeed { seedPlan = rootPlan, seedTree = undefined, seedDepth = 0, seedCycles = 2, seedAdopted = Nothing }\n",
+    "\n",
+    "nChildren :: Int\n",
+    "nChildren = length (childPlans rootPlan)\n",
+    "\n",
+    "childShare :: Int\n",
+    "childShare = childAllowance rootSeed nChildren\n",
+    "\n",
+    "-- A child only spends its share if it clears 'cycleRefusal' (the same test\n",
+    "-- that function runs: seedCycles >= requiredCycles seedPlan). Below that\n",
+    "-- threshold the child is refused and spends 0 — never the share itself.\n",
+    "childSpend :: Int\n",
+    "childSpend = if childShare >= requiredCycles leafPlan then childShare else 0\n",
+    "\n",
+    "totalSpend :: Int\n",
+    "totalSpend = requiredCycles rootPlan + nChildren * childSpend\n",
+    "\n",
+    "__overspendReport :: Text\n",
+    "__overspendReport =\n",
+    "  T.intercalate \"\\n\"\n",
+    "    [ [fmt|childShare={childShare}|]\n",
+    "    , [fmt|totalSpend={totalSpend}|]\n",
+    "    , [fmt|withinCap={totalSpend <= rootSeed.seedCycles}|]\n",
+    "    ]\n",
+);
+
+/// Runs [`OVERSPEND_REGRESSION_SOURCE`] on the real JIT (pure, no agent, no
+/// git) and asserts the exact numbers the review's scenario names: a floored
+/// share of 0 per child, and total spend pinned at the parent's own
+/// reservation (2) — never 4, which is what the pre-fix `max 1` formula
+/// would have produced.
+#[test]
+fn dev_tree_child_allowance_never_overspends_parent_cap() {
+    support::require_extract();
+    let _cache_guard = support::isolate_cache();
+    let cfg = EngineConfig::from_decls(
+        dev_tree_decls(),
+        repo_root().join("haskell/lib"),
+        Some(repo_root().join("harness-dogfooding/dev-tree")),
+    )
+    .expect("engine config for the dogfood row");
+    let include: Vec<_> = cfg.include.iter().map(|p| p.as_path()).collect();
+    let json =
+        match compile_and_run_pure(OVERSPEND_REGRESSION_SOURCE, "__overspendReport", &include) {
+            Ok(result) => result.to_json(),
+            Err(e) => panic!("overspend regression probe did not run cleanly:\n{e}"),
+        };
+    let report = json
+        .as_str()
+        .expect("__overspendReport :: Text renders as a JSON string");
+    assert!(report.contains("childShare=0"), "{report}");
+    assert!(report.contains("totalSpend=2"), "{report}");
+    assert!(report.contains("withinCap=True"), "{report}");
+}

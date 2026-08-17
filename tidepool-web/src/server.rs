@@ -51,7 +51,7 @@
 //!
 //! Both browser and form-API submissions use this one conversion.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::convert::Infallible;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -118,7 +118,7 @@ struct NodeSlot {
     asks: Vec<AskEntry>,
     next_ask_id: u64,
     notes: Vec<String>,
-    turn_history: Vec<String>,
+    turn_history: VecDeque<String>,
     rev: u64,
 }
 
@@ -251,9 +251,9 @@ impl AppState {
     fn push_turn_source(&self, node_id: &str, source: String) {
         let mut reg = self.registry.lock().unwrap();
         let slot = reg.nodes.get_mut(node_id).expect("registered node");
-        slot.turn_history.push(source);
+        slot.turn_history.push_back(source);
         if slot.turn_history.len() > TURN_HISTORY_CAP {
-            slot.turn_history.remove(0);
+            slot.turn_history.pop_front();
         }
         slot.rev += 1;
         drop(reg);
@@ -1020,7 +1020,7 @@ mod tests {
     fn root_bind_path_renders_and_collects_a_root_sum() {
         let shape = destination_shape();
         let asks = vec![(0u64, Ask::Form(&shape))];
-        let html = crate::render::node_panel("n1", &asks, &[], &[], 1).into_string();
+        let html = crate::render::node_panel("n1", &asks, &[], &VecDeque::new(), 1).into_string();
         assert!(
             html.contains(&format!("name=\"{ROOT_BIND_PATH}\"")),
             "a root sum's radio group must be named at the non-empty root bind path, got:\n{html}"

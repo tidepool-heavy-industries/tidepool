@@ -22,7 +22,8 @@ pub mod tree;
 
 pub use compile::{AsksSidecar, CompiledTurn};
 pub use engine::{
-    classify_hole, ClassifiedHole, EngineConfig, EngineError, HoleRouting, TurnOutcome,
+    classify_hole, ClassifiedHole, ClassifyError, EngineConfig, EngineError, HoleRouting,
+    TurnOutcome,
 };
 pub use forcing::{derive_teaser, fan_badge, price_class, ForkShape, NodeTree, TreeError};
 pub use harness::{Escalation, Harness, HarnessError, OperatorDecision};

@@ -93,6 +93,8 @@ pub enum DriverError {
     Session(String),
     #[error(transparent)]
     Agent(#[from] HarnessError),
+    #[error(transparent)]
+    Classify(#[from] engine::ClassifyError),
     /// The prior loop's `State` JSON failed the author's `FromJSON State`
     /// instance when re-spliced — a distinct, actionable failure (the
     /// author's `ToJSON`/`FromJSON State` are not inverse) rather than an
@@ -1832,7 +1834,7 @@ impl SelfHarnessDriver {
                 }
                 ResidentOutcome::Suspended { hole, request, .. } => {
                     let classified =
-                        engine::classify_hole(&request, &compiled.table, &compiled.asks);
+                        engine::classify_hole(&request, &compiled.table, &compiled.asks)?;
                     match &classified.routing {
                         HoleRouting::RunLLMTurn { site, ty } => {
                             let answer = self
@@ -2993,7 +2995,7 @@ impl SelfHarnessDriver {
                     ..
                 } => {
                     let classified =
-                        engine::classify_hole(request, &compiled.table, &compiled.asks);
+                        engine::classify_hole(request, &compiled.table, &compiled.asks)?;
                     if matches!(
                         classified.routing,
                         HoleRouting::AskUser { .. } | HoleRouting::Note { .. }

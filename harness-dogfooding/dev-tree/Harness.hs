@@ -65,6 +65,10 @@ module Harness
   , resumePlanFor
   , amendmentIsNewest
   , amendPlan
+    -- * Agent-cycle budget (pure — exercised directly by the overspend pin)
+  , NodeSeed (..)
+  , requiredCycles
+  , childAllowance
   ) where
 
 import qualified Data.Text as T
@@ -393,6 +397,14 @@ refusalWork seed f = (splitWork seed Nothing [] []) {workRefusal = Just f}
 -- slot is a slot a test can call directly.
 -- ---------------------------------------------------------------------------
 
+-- | The agent-cycle cost a node's own work requires: one for a leaf's
+-- implementation, two for a node that splits (its own scaffold plus one
+-- integration cycle).  Shared with 'childAllowance', which reserves the same
+-- amount before dividing what remains among children — so the two can never
+-- disagree about what "this node's own reservation" means.
+requiredCycles :: DevPlan -> Int
+requiredCycles p = if null (childPlans p) then 1 else 2
+
 -- | 'Swarm.budgeted''s slot.  A node reserves its own scaffold plus one
 -- integration cycle; a leaf reserves its implementation.  Resolution agents
 -- are drawn from the children's shares, which is where the conflicts are.
@@ -412,7 +424,7 @@ cycleRefusal seed
             )
         )
   where
-    required = if null (childPlans seed.seedPlan) then 1 else 2
+    required = requiredCycles seed.seedPlan
 
 -- | 'Swarm.capped''s slot.  A leaf at the depth limit is not capped — there
 -- was nothing to unfold — which is exactly why the slot returns a 'Maybe'
@@ -508,11 +520,15 @@ retainedChild parent trees k = case lookup (nodeName k) trees of
 -- Conservative on purpose: a subtree that finishes under its share does not
 -- return the remainder to its siblings.  That is the honest cost of enforcing
 -- a budget with no shared mutable state in the row — and the division is
--- deterministic, so no scheduling order can change it.
+-- deterministic, so no scheduling order can change it.  NEVER clamped
+-- upward: a share that floors to zero stays zero, so a node that cannot fund
+-- every child hands the underfunded ones nothing rather than minting cycles
+-- the parent doesn't have — 'cycleRefusal' turns that zero into a typed
+-- budget refusal for that child instead of an overspend.
 childAllowance :: NodeSeed -> Int -> Int
 childAllowance parent n
   | n <= 0 = 0
-  | otherwise = max 1 ((parent.seedCycles - 2) `div` n)
+  | otherwise = max 0 (parent.seedCycles - requiredCycles parent.seedPlan) `div` n
 
 -- ---------------------------------------------------------------------------
 -- The algebra — how to combine

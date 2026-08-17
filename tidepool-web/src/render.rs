@@ -37,6 +37,8 @@
 //! visually hides every non-chosen branch so the operator only sees the one
 //! they picked, without needing `shell.rs`'s JS to know anything about it.
 
+use std::collections::VecDeque;
+
 use maud::{html, Markup, PreEscaped};
 use tidepool_harness::selfharness::operator::{
     child_path, humanize_key, FieldShape, FormShape, VariantShape, ROOT_BIND_PATH,
@@ -72,7 +74,7 @@ pub fn node_panel(
     node_id: &str,
     asks: &[(u64, Ask)],
     notes: &[String],
-    turn_history: &[String],
+    turn_history: &VecDeque<String>,
     rev: u64,
 ) -> Markup {
     html! {
@@ -124,7 +126,7 @@ fn notes_feed(notes: &[String]) -> Markup {
 /// the history, so numbering restarts only across process restarts). Plain
 /// `<pre>`, no syntax highlighting; every source string is interpolated as
 /// an ordinary maud text node (escaped), never `PreEscaped`.
-fn turn_history_pane(history: &[String]) -> Markup {
+fn turn_history_pane(history: &VecDeque<String>) -> Markup {
     let n = history.len();
     html! {
         details class="turn-source" data-node="turn-source" open {
@@ -401,13 +403,13 @@ mod tests {
     #[test]
     fn node_panel_continue_renders_button() {
         let asks = vec![(0u64, Ask::Continue)];
-        let html = node_panel("n1", &asks, &[], &[], 0).into_string();
+        let html = node_panel("n1", &asks, &[], &VecDeque::new(), 0).into_string();
         assert!(html.contains("@post('/node/n1/continue/0')"));
     }
 
     #[test]
     fn node_panel_idle_is_quiet() {
-        let html = node_panel("n1", &[], &[], &[], 0).into_string();
+        let html = node_panel("n1", &[], &[], &VecDeque::new(), 0).into_string();
         assert!(html.starts_with("<div id=\"panel-n1\""));
         assert!(!html.contains("@post"));
     }
@@ -417,10 +419,10 @@ mod tests {
     /// different attribute value.
     #[test]
     fn node_panel_stamps_data_rev_from_the_argument() {
-        let a = node_panel("n1", &[], &[], &[], 7).into_string();
+        let a = node_panel("n1", &[], &[], &VecDeque::new(), 7).into_string();
         assert!(a.contains("id=\"panel-n1\" data-rev=\"7\""), "{a}");
 
-        let b = node_panel("n1", &[], &[], &[], 8).into_string();
+        let b = node_panel("n1", &[], &[], &VecDeque::new(), 8).into_string();
         assert!(b.contains("id=\"panel-n1\" data-rev=\"8\""), "{b}");
         assert_ne!(a, b);
     }
@@ -428,8 +430,8 @@ mod tests {
     /// The panel id is node-scoped, distinguishing tabs.
     #[test]
     fn node_panel_id_is_scoped_per_node() {
-        let a = node_panel("alpha", &[], &[], &[], 0).into_string();
-        let b = node_panel("beta", &[], &[], &[], 0).into_string();
+        let a = node_panel("alpha", &[], &[], &VecDeque::new(), 0).into_string();
+        let b = node_panel("beta", &[], &[], &VecDeque::new(), 0).into_string();
         assert!(a.starts_with("<div id=\"panel-alpha\""));
         assert!(b.starts_with("<div id=\"panel-beta\""));
     }
@@ -441,7 +443,7 @@ mod tests {
     fn node_panel_stacks_every_pending_ask_with_its_own_rev() {
         let shape = FormShape::String;
         let asks = vec![(3u64, Ask::Form(&shape)), (7u64, Ask::Continue)];
-        let html = node_panel("n1", &asks, &[], &[], 42).into_string();
+        let html = node_panel("n1", &asks, &[], &VecDeque::new(), 42).into_string();
 
         assert!(html.contains("id=\"ask-n1-3\" data-rev=\"3\""), "{html}");
         assert!(html.contains("id=\"ask-n1-7\" data-rev=\"7\""), "{html}");
@@ -456,7 +458,7 @@ mod tests {
     #[test]
     fn node_panel_renders_notes_above_the_asks() {
         let notes = vec!["first note".to_string(), "<b>second</b> note".to_string()];
-        let html = node_panel("n1", &[], &notes, &[], 0).into_string();
+        let html = node_panel("n1", &[], &notes, &VecDeque::new(), 0).into_string();
         let notes_pos = html.find("first note").expect("first note rendered");
         let second_pos = html.find("second").expect("second note rendered");
         let idle_pos = html.find("Standby").expect("idle view still rendered");
@@ -473,7 +475,7 @@ mod tests {
     /// An empty note feed adds no notes markup at all.
     #[test]
     fn node_panel_with_no_notes_renders_no_notes_node() {
-        let html = node_panel("n1", &[], &[], &[], 0).into_string();
+        let html = node_panel("n1", &[], &[], &VecDeque::new(), 0).into_string();
         assert!(!html.contains("data-node=\"notes\""), "{html}");
     }
 
@@ -482,7 +484,9 @@ mod tests {
     /// source containing `<script>` must not survive as live markup.
     #[test]
     fn node_panel_renders_turn_history_below_view_and_escaped() {
-        let history = vec!["resume (Approve :: Decision) -- <script>alert(1)</script>".to_string()];
+        let history = VecDeque::from([
+            "resume (Approve :: Decision) -- <script>alert(1)</script>".to_string()
+        ]);
         let html = node_panel("n1", &[], &[], &history, 0).into_string();
         assert!(html.contains("<details"), "{html}");
         assert!(html.contains("Haskell turns (1)"), "{html}");
@@ -500,11 +504,11 @@ mod tests {
     /// the NEWEST entry open — the operator scrolls back through the rest.
     #[test]
     fn node_panel_turn_history_lists_all_turns_newest_first_newest_open() {
-        let history = vec![
+        let history = VecDeque::from([
             "pure (toJSON 1) -- oldest".to_string(),
             "pure (toJSON 2) -- middle".to_string(),
             "pure (toJSON 3) -- newest".to_string(),
-        ];
+        ]);
         let html = node_panel("n1", &[], &[], &history, 0).into_string();
         assert!(html.contains("Haskell turns (3)"), "{html}");
         let p1 = html.find("turn 1 —").expect("oldest entry rendered");
@@ -519,7 +523,7 @@ mod tests {
     /// An empty history adds no turn-source markup at all.
     #[test]
     fn node_panel_with_no_turn_history_renders_no_details() {
-        let html = node_panel("n1", &[], &[], &[], 0).into_string();
+        let html = node_panel("n1", &[], &[], &VecDeque::new(), 0).into_string();
         assert!(!html.contains("<details"), "{html}");
     }
 

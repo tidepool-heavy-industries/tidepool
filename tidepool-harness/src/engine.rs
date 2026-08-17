@@ -152,6 +152,80 @@ pub struct ClassifiedHole {
     pub prompt: String,
 }
 
+/// A malformed decode of a continuation-ROUTING field (a site id, a fan
+/// count, a fan/prompt-cardinality pair) inside [`classify_hole`]. These
+/// fields select which suspended typed continuation a reply resumes — a
+/// plausible default (site 0, a truncated prompt list) can resume the WRONG
+/// site rather than surface the corruption, so every routing field is
+/// validated rather than defaulted. Display/prompt-text fields (a fork's
+/// `brief`, `AskWith`'s payload) are unaffected — only fields that pick a
+/// continuation.
+#[derive(Debug, Clone, thiserror::Error)]
+pub enum ClassifyError {
+    #[error("{constructor}: missing or non-numeric `{field}`")]
+    MissingField {
+        constructor: &'static str,
+        field: &'static str,
+    },
+    #[error("{constructor}: `{field}` {value} does not fit in a u32")]
+    OutOfRange {
+        constructor: &'static str,
+        field: &'static str,
+        value: u64,
+    },
+    #[error(
+        "{constructor}: fan declares {declared} prompt(s) but the wire carries {actual} — \
+         refusing to silently drop the difference"
+    )]
+    FanMismatch {
+        constructor: &'static str,
+        declared: usize,
+        actual: usize,
+    },
+    #[error("{constructor}: request is not a constructor application")]
+    Malformed { constructor: &'static str },
+}
+
+/// Pull a JSON payload's `field` as a `u32` — `Err` on missing/non-numeric or
+/// a value that doesn't fit (see [`ClassifyError`]'s doc).
+fn require_u32_field(
+    payload: &Json,
+    constructor: &'static str,
+    field: &'static str,
+) -> Result<u32, ClassifyError> {
+    let raw = payload
+        .get(field)
+        .and_then(Json::as_u64)
+        .ok_or(ClassifyError::MissingField { constructor, field })?;
+    u32::try_from(raw).map_err(|_| ClassifyError::OutOfRange {
+        constructor,
+        field,
+        value: raw,
+    })
+}
+
+/// Pull a `Con`'s positional field `idx`, decoded to JSON, as a `u32` — the
+/// [`Value::Con`] counterpart to [`require_u32_field`] for constructors whose
+/// site is a positional field rather than a JSON payload key.
+fn require_con_u32(
+    fields: &[Value],
+    idx: usize,
+    table: &DataConTable,
+    constructor: &'static str,
+    field: &'static str,
+) -> Result<u32, ClassifyError> {
+    let raw = fields
+        .get(idx)
+        .map(|p| tidepool_runtime::value_to_json(p, table, 0))
+        .and_then(|j| j.as_u64())
+        .ok_or(ClassifyError::MissingField { constructor, field })?;
+    u32::try_from(raw).map_err(|_| ClassifyError::OutOfRange {
+        constructor,
+        field,
+        value: raw,
+    })
+}
+
 /// Decode a suspended request `Value` into a [`ClassifiedHole`] — the ONE
 /// shared classify path `Ask`, `RunLLMTurn`, and `Finalize` all go through.
 /// Each is its own GADT/union-tag, so this
@@ -193,24 +267,34 @@ pub struct ClassifiedHole {
 ///   `ask schema prompt`).
 /// - anything else (an unrecognized Con) — treated as a bare Ask with an empty
 ///   prompt/`Null` payload, same fallback `decode_askwith` always had.
-pub fn classify_hole(request: &Value, table: &DataConTable, asks: &AsksSidecar) -> ClassifiedHole {
+///
+/// The routing-selecting fields above (`typedSite`, a fork's site, a fan's
+/// declared count against its prompt list) are VALIDATED, not defaulted —
+/// see [`ClassifyError`]'s doc. A malformed value there stops the turn with a
+/// diagnostic instead of silently resuming/finalizing a different typed
+/// continuation.
+pub fn classify_hole(
+    request: &Value,
+    table: &DataConTable,
+    asks: &AsksSidecar,
+) -> Result<ClassifiedHole, ClassifyError> {
     let hole = match con_name(request, table) {
         Some("RunLLMTurnWith") => {
             let (prompt, payload) = decode_prompt_payload(request, table);
             ClassifiedHole {
-                routing: classify_runllmturn_payload(&payload, asks),
+                routing: classify_runllmturn_payload(&payload, asks)?,
                 prompt,
             }
         }
         Some("FinalizeWith") => {
-            let (site, ty) = decode_finalize_site(request, table, asks);
+            let (site, ty) = decode_finalize_site(request, table, asks)?;
             ClassifiedHole {
                 routing: HoleRouting::Finalize { site, ty },
                 prompt: String::new(),
             }
         }
         Some("ForkWith") => {
-            let (site, brief) = decode_fork_one(request, table);
+            let (site, brief) = decode_fork_one(request, table)?;
             ClassifiedHole {
                 routing: HoleRouting::Fork {
                     site,
@@ -222,7 +306,7 @@ pub fn classify_hole(request: &Value, table: &DataConTable, asks: &AsksSidecar) 
             }
         }
         Some("ForkAllWith") => {
-            let (site, prompts) = decode_fork_all(request, table);
+            let (site, prompts) = decode_fork_all(request, table)?;
             ClassifiedHole {
                 prompt: prompts.join("\n"),
                 routing: HoleRouting::Fork {
@@ -304,7 +388,7 @@ pub fn classify_hole(request: &Value, table: &DataConTable, asks: &AsksSidecar) 
         }
     };
     tracing::info!(routing = ?hole.routing, prompt = %hole.prompt, "suspension classified");
-    hole
+    Ok(hole)
 }
 
 /// Pull `text` out of a `NoteWith`-shaped request (`Con(_, [text :: Text])`)
@@ -343,31 +427,64 @@ fn decode_askuser_spec(
 /// The `typedSite`/`fork`/`fan`/`prompts` payload classification a
 /// `RunLLMTurnWith` request carries — factored out of [`classify_hole`] so
 /// this shape is documented once rather than at every call site.
-fn classify_runllmturn_payload(payload: &Json, asks: &AsksSidecar) -> HoleRouting {
-    let site = payload.get("typedSite").and_then(Json::as_u64).unwrap_or(0) as u32;
+///
+/// `typedSite` and, when present, `fan` are validated ROUTING fields (see
+/// [`ClassifyError`]'s doc): missing/non-numeric/out-of-range is an `Err`,
+/// never a `0`/truncated default. A non-`Text` element in `prompts` is
+/// likewise rejected rather than silently dropped — filtering it out would
+/// under-report the fan's true cardinality; and when `fan` is present, it
+/// must agree with the (validated) prompt count.
+fn classify_runllmturn_payload(
+    payload: &Json,
+    asks: &AsksSidecar,
+) -> Result<HoleRouting, ClassifyError> {
+    let site = require_u32_field(payload, "RunLLMTurnWith", "typedSite")?;
     let ty = asks.type_of(site).map(str::to_string);
     if payload.get("fork").and_then(Json::as_bool).unwrap_or(false) {
         let fan = payload
             .get("fan")
             .and_then(Json::as_u64)
-            .map(|n| FanBadge::Exact { n: n as u32 });
-        let prompts = payload
+            .map(|n| {
+                u32::try_from(n).map_err(|_| ClassifyError::OutOfRange {
+                    constructor: "RunLLMTurnWith",
+                    field: "fan",
+                    value: n,
+                })
+            })
+            .transpose()?;
+        let raw_prompts = payload
             .get("prompts")
             .and_then(Json::as_array)
-            .map(|arr| {
-                arr.iter()
-                    .filter_map(|v| v.as_str().map(str::to_string))
-                    .collect()
-            })
+            .cloned()
             .unwrap_or_default();
-        HoleRouting::Fork {
+        let prompts: Vec<String> = raw_prompts
+            .iter()
+            .filter_map(|v| v.as_str().map(str::to_string))
+            .collect();
+        if prompts.len() != raw_prompts.len() {
+            return Err(ClassifyError::FanMismatch {
+                constructor: "RunLLMTurnWith",
+                declared: raw_prompts.len(),
+                actual: prompts.len(),
+            });
+        }
+        if let Some(n) = fan {
+            if n as usize != prompts.len() {
+                return Err(ClassifyError::FanMismatch {
+                    constructor: "RunLLMTurnWith",
+                    declared: n as usize,
+                    actual: prompts.len(),
+                });
+            }
+        }
+        Ok(HoleRouting::Fork {
             site,
             ty,
-            fan,
+            fan: fan.map(|n| FanBadge::Exact { n }),
             prompts,
-        }
+        })
     } else {
-        HoleRouting::RunLLMTurn { site, ty }
+        Ok(HoleRouting::RunLLMTurn { site, ty })
     }
 }
 
@@ -416,69 +533,76 @@ fn decode_prompt_payload(request: &Value, table: &DataConTable) -> (String, Json
 /// Int, value])`). Only the leading `Int` site id is JSON-decoded — the
 /// value field crosses in-heap and is deliberately left untouched here (see
 /// [`classify_hole`]'s doc); `asks` resolves the site to its rendered type
-/// the same way [`classify_runllmturn_payload`] does.
+/// the same way [`classify_runllmturn_payload`] does. `site` is a ROUTING
+/// field (see [`ClassifyError`]'s doc) — missing/non-numeric/out-of-range is
+/// an `Err`, never a `0` default.
 fn decode_finalize_site(
     request: &Value,
     table: &DataConTable,
     asks: &AsksSidecar,
-) -> (u32, Option<String>) {
+) -> Result<(u32, Option<String>), ClassifyError> {
     let Value::Con(_, fields) = request else {
-        return (0, None);
+        return Err(ClassifyError::Malformed {
+            constructor: "FinalizeWith",
+        });
     };
-    let site = fields
-        .first()
-        .map(|p| tidepool_runtime::value_to_json(p, table, 0))
-        .and_then(|j| j.as_u64())
-        .unwrap_or(0) as u32;
+    let site = require_con_u32(fields, 0, table, "FinalizeWith", "site")?;
     let ty = asks.type_of(site).map(str::to_string);
-    (site, ty)
+    Ok((site, ty))
 }
 
 /// Pull `(site, brief)` out of a `ForkWith`-shaped request (`Con(_, [site ::
 /// Int, brief :: Text])`) — a single `fork @T brief` suspension. The site id
-/// selects the recorded answer type; the brief is the child's task text.
-fn decode_fork_one(request: &Value, table: &DataConTable) -> (u32, String) {
+/// selects the recorded answer type (a ROUTING field, validated — see
+/// [`ClassifyError`]'s doc); the brief is display text, decoded as before.
+fn decode_fork_one(request: &Value, table: &DataConTable) -> Result<(u32, String), ClassifyError> {
     let Value::Con(_, fields) = request else {
-        return (0, String::new());
+        return Err(ClassifyError::Malformed {
+            constructor: "ForkWith",
+        });
     };
-    let site = fields
-        .first()
-        .map(|p| tidepool_runtime::value_to_json(p, table, 0))
-        .and_then(|j| j.as_u64())
-        .unwrap_or(0) as u32;
+    let site = require_con_u32(fields, 0, table, "ForkWith", "site")?;
     let brief = fields
         .get(1)
         .map(|p| tidepool_runtime::value_to_json(p, table, 0))
         .and_then(|j| j.as_str().map(str::to_string))
         .unwrap_or_default();
-    (site, brief)
+    Ok((site, brief))
 }
 
 /// Pull `(site, prompts)` out of a `ForkAllWith`-shaped request (`Con(_, [site
-/// :: Int, prompts :: [Text]])`) — a `forkAll @T briefs` suspension. `prompts`
-/// is the per-child brief list in declaration order; a non-`Text` element is
-/// silently dropped, so a shorter result than the `fan` count is a cardinality
-/// error the caller catches (`Harness::answer_fanout`).
-fn decode_fork_all(request: &Value, table: &DataConTable) -> (u32, Vec<String>) {
+/// :: Int, prompts :: [Text]])`) — a `forkAll @T briefs` suspension. `site` is
+/// a ROUTING field, validated (see [`ClassifyError`]'s doc). `prompts` is the
+/// per-child brief list in declaration order; a non-`Text` element is
+/// rejected rather than silently dropped — dropping it would under-report the
+/// fan's true cardinality to the caller (`Harness::answer_fanout`).
+fn decode_fork_all(
+    request: &Value,
+    table: &DataConTable,
+) -> Result<(u32, Vec<String>), ClassifyError> {
     let Value::Con(_, fields) = request else {
-        return (0, Vec::new());
+        return Err(ClassifyError::Malformed {
+            constructor: "ForkAllWith",
+        });
     };
-    let site = fields
-        .first()
-        .map(|p| tidepool_runtime::value_to_json(p, table, 0))
-        .and_then(|j| j.as_u64())
-        .unwrap_or(0) as u32;
-    let prompts = fields
+    let site = require_con_u32(fields, 0, table, "ForkAllWith", "site")?;
+    let raw_prompts = fields
         .get(1)
         .map(|p| tidepool_runtime::value_to_json(p, table, 0))
         .and_then(|j| j.as_array().cloned())
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|v| v.as_str().map(str::to_string))
-                .collect()
-        })
         .unwrap_or_default();
-    (site, prompts)
+    let prompts: Vec<String> = raw_prompts
+        .iter()
+        .filter_map(|v| v.as_str().map(str::to_string))
+        .collect();
+    if prompts.len() != raw_prompts.len() {
+        return Err(ClassifyError::FanMismatch {
+            constructor: "ForkAllWith",
+            declared: raw_prompts.len(),
+            actual: prompts.len(),
+        });
+    }
+    Ok((site, prompts))
 }
 
 /// Pull the prompt (Text) and payload (JSON object) out of an `AskWith` Con.
@@ -2139,5 +2263,379 @@ mod tests {
         assert_eq!(content_line_count("a\n"), 1);
         assert_eq!(content_line_count("a\nb"), 2);
         assert_eq!(content_line_count("a\nb\n"), 2);
+    }
+
+    // -- classify_hole: routing-field validation -----------------------------
+    //
+    // These are continuation-ROUTING inputs (which suspended typed site a
+    // reply resumes) — a malformed value must stop the turn with a
+    // diagnostic, never resume/finalize a plausible-but-wrong site. See
+    // `ClassifyError`'s doc.
+
+    #[test]
+    fn classify_runllmturn_payload_rejects_missing_site() {
+        let asks = AsksSidecar::from_pairs(vec![]);
+        let payload = serde_json::json!({});
+        let err = classify_runllmturn_payload(&payload, &asks).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                ClassifyError::MissingField {
+                    constructor: "RunLLMTurnWith",
+                    field: "typedSite"
+                }
+            ),
+            "{err:?}"
+        );
+    }
+
+    #[test]
+    fn classify_runllmturn_payload_rejects_non_numeric_site() {
+        let asks = AsksSidecar::from_pairs(vec![]);
+        let payload = serde_json::json!({ "typedSite": "not-a-number" });
+        let err = classify_runllmturn_payload(&payload, &asks).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                ClassifyError::MissingField {
+                    constructor: "RunLLMTurnWith",
+                    field: "typedSite"
+                }
+            ),
+            "{err:?}"
+        );
+    }
+
+    /// `2^32` must not alias site `0` via an `as u32` truncation.
+    #[test]
+    fn classify_runllmturn_payload_rejects_out_of_range_site() {
+        let asks = AsksSidecar::from_pairs(vec![]);
+        let huge = (u32::MAX as u64) + 1;
+        let payload = serde_json::json!({ "typedSite": huge });
+        let err = classify_runllmturn_payload(&payload, &asks).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                ClassifyError::OutOfRange {
+                    constructor: "RunLLMTurnWith",
+                    field: "typedSite",
+                    value
+                } if value == huge
+            ),
+            "{err:?}"
+        );
+    }
+
+    #[test]
+    fn classify_runllmturn_payload_rejects_fan_out_of_range() {
+        let asks = AsksSidecar::from_pairs(vec![(0, "Text".to_string())]);
+        let huge = (u32::MAX as u64) + 1;
+        let payload = serde_json::json!({
+            "typedSite": 0,
+            "fork": true,
+            "fan": huge,
+            "prompts": []
+        });
+        let err = classify_runllmturn_payload(&payload, &asks).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                ClassifyError::OutOfRange {
+                    constructor: "RunLLMTurnWith",
+                    field: "fan",
+                    value
+                } if value == huge
+            ),
+            "{err:?}"
+        );
+    }
+
+    #[test]
+    fn classify_runllmturn_payload_rejects_declared_fan_prompt_mismatch() {
+        let asks = AsksSidecar::from_pairs(vec![(0, "Text".to_string())]);
+        let payload = serde_json::json!({
+            "typedSite": 0,
+            "fork": true,
+            "fan": 2,
+            "prompts": ["only one"]
+        });
+        let err = classify_runllmturn_payload(&payload, &asks).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                ClassifyError::FanMismatch {
+                    constructor: "RunLLMTurnWith",
+                    declared: 2,
+                    actual: 1
+                }
+            ),
+            "{err:?}"
+        );
+    }
+
+    /// A non-Text element in `prompts` must not be silently dropped: the raw
+    /// array length and the filtered length disagree, which is exactly the
+    /// corruption this now rejects instead of under-reporting the fan's true
+    /// cardinality.
+    #[test]
+    fn classify_runllmturn_payload_rejects_non_text_prompt_element() {
+        let asks = AsksSidecar::from_pairs(vec![(0, "Text".to_string())]);
+        let payload = serde_json::json!({
+            "typedSite": 0,
+            "fork": true,
+            "prompts": ["fine", 42, "also fine"]
+        });
+        let err = classify_runllmturn_payload(&payload, &asks).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                ClassifyError::FanMismatch {
+                    constructor: "RunLLMTurnWith",
+                    declared: 3,
+                    actual: 2
+                }
+            ),
+            "{err:?}"
+        );
+    }
+
+    /// The happy path still classifies exactly as before — the regression pin
+    /// that the added validation doesn't reject well-formed wire data.
+    #[test]
+    fn classify_runllmturn_payload_accepts_well_formed_fanout() {
+        let asks = AsksSidecar::from_pairs(vec![(3, "[Text]".to_string())]);
+        let payload = serde_json::json!({
+            "typedSite": 3,
+            "fork": true,
+            "fan": 2,
+            "prompts": ["first", "second"]
+        });
+        let routing =
+            classify_runllmturn_payload(&payload, &asks).expect("well-formed payload classifies");
+        match routing {
+            HoleRouting::Fork {
+                site, fan, prompts, ..
+            } => {
+                assert_eq!(site, 3);
+                assert_eq!(fan, Some(FanBadge::Exact { n: 2 }));
+                assert_eq!(prompts, vec!["first".to_string(), "second".to_string()]);
+            }
+            other => panic!("expected Fork routing, got {other:?}"),
+        }
+    }
+
+    /// A bare (non-fork) `runLLMTurn` with a missing site is rejected the
+    /// same way — the validation is not fork-only.
+    #[test]
+    fn classify_runllmturn_payload_rejects_missing_site_on_plain_turn() {
+        let asks = AsksSidecar::from_pairs(vec![]);
+        let payload = serde_json::json!({ "fork": false });
+        assert!(classify_runllmturn_payload(&payload, &asks).is_err());
+    }
+
+    #[test]
+    fn decode_finalize_site_rejects_missing_site() {
+        let table = DataConTable::new();
+        let asks = AsksSidecar::from_pairs(vec![]);
+        let request = Value::Con(DataConId(1), vec![]);
+        let err = decode_finalize_site(&request, &table, &asks).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                ClassifyError::MissingField {
+                    constructor: "FinalizeWith",
+                    field: "site"
+                }
+            ),
+            "{err:?}"
+        );
+    }
+
+    #[test]
+    fn decode_finalize_site_rejects_out_of_range_site() {
+        let table = DataConTable::new();
+        let asks = AsksSidecar::from_pairs(vec![]);
+        let huge = (u32::MAX as u64) + 1;
+        let request = Value::Con(
+            DataConId(1),
+            vec![Value::Lit(tidepool_repr::Literal::LitWord(huge))],
+        );
+        let err = decode_finalize_site(&request, &table, &asks).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                ClassifyError::OutOfRange {
+                    constructor: "FinalizeWith",
+                    field: "site",
+                    value
+                } if value == huge
+            ),
+            "{err:?}"
+        );
+    }
+
+    #[test]
+    fn decode_fork_one_rejects_missing_site() {
+        let table = DataConTable::new();
+        let request = Value::Con(DataConId(1), vec![]);
+        let err = decode_fork_one(&request, &table).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                ClassifyError::MissingField {
+                    constructor: "ForkWith",
+                    field: "site"
+                }
+            ),
+            "{err:?}"
+        );
+    }
+
+    #[test]
+    fn decode_fork_one_rejects_out_of_range_site() {
+        let table = DataConTable::new();
+        let huge = (u32::MAX as u64) + 1;
+        let request = Value::Con(
+            DataConId(1),
+            vec![Value::Lit(tidepool_repr::Literal::LitWord(huge))],
+        );
+        let err = decode_fork_one(&request, &table).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                ClassifyError::OutOfRange {
+                    constructor: "ForkWith",
+                    field: "site",
+                    value
+                } if value == huge
+            ),
+            "{err:?}"
+        );
+    }
+
+    #[test]
+    fn decode_fork_all_rejects_missing_site() {
+        let table = DataConTable::new();
+        let request = Value::Con(DataConId(1), vec![]);
+        let err = decode_fork_all(&request, &table).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                ClassifyError::MissingField {
+                    constructor: "ForkAllWith",
+                    field: "site"
+                }
+            ),
+            "{err:?}"
+        );
+    }
+
+    #[test]
+    fn decode_fork_all_rejects_out_of_range_site() {
+        let table = DataConTable::new();
+        let huge = (u32::MAX as u64) + 1;
+        let request = Value::Con(
+            DataConId(1),
+            vec![
+                Value::Lit(tidepool_repr::Literal::LitWord(huge)),
+                Value::Con(DataConId(2), vec![]),
+            ],
+        );
+        let err = decode_fork_all(&request, &table).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                ClassifyError::OutOfRange {
+                    constructor: "ForkAllWith",
+                    field: "site",
+                    value
+                } if value == huge
+            ),
+            "{err:?}"
+        );
+    }
+
+    /// A non-`Text` element among the prompts must not be silently filtered
+    /// out: that would under-report the fan's true cardinality to
+    /// `Harness::answer_fanout`. Builds a real `[]`/`:` cons list (the shape
+    /// `value_to_json` actually renders as a JSON array) with a stray `Int`
+    /// in the middle.
+    #[test]
+    fn decode_fork_all_rejects_non_text_prompt_element() {
+        use tidepool_repr::Literal;
+        let mut table = DataConTable::new();
+        table.insert(dc(10, "[]", 0, 0));
+        table.insert(dc(11, ":", 1, 2));
+        let nil = Value::Con(DataConId(10), vec![]);
+        let list = Value::Con(
+            DataConId(11),
+            vec![
+                Value::Lit(Literal::LitString(b"fine".to_vec())),
+                Value::Con(
+                    DataConId(11),
+                    vec![
+                        Value::Lit(Literal::LitInt(42)),
+                        Value::Con(
+                            DataConId(11),
+                            vec![Value::Lit(Literal::LitString(b"also fine".to_vec())), nil],
+                        ),
+                    ],
+                ),
+            ],
+        );
+        let request = Value::Con(DataConId(1), vec![Value::Lit(Literal::LitWord(0)), list]);
+        let err = decode_fork_all(&request, &table).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                ClassifyError::FanMismatch {
+                    constructor: "ForkAllWith",
+                    declared: 3,
+                    actual: 2
+                }
+            ),
+            "{err:?}"
+        );
+    }
+
+    /// The exact scenario the review's suggested rewrite checks: a fork's
+    /// declared `fan` must equal its `prompts` cardinality, not silently
+    /// drift when a non-Text element is present.
+    #[test]
+    fn classify_hole_end_to_end_rejects_malformed_site() {
+        let mut table = DataConTable::new();
+        table.insert(dc(1, "FinalizeWith", 1, 2));
+        let asks = AsksSidecar::from_pairs(vec![]);
+        // `FinalizeWith`'s leading field is a non-numeric site.
+        let request = Value::Con(
+            DataConId(1),
+            vec![
+                Value::Lit(tidepool_repr::Literal::LitString(b"not-a-site".to_vec())),
+                Value::Con(DataConId(99), vec![]),
+            ],
+        );
+        let err = classify_hole(&request, &table, &asks).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                ClassifyError::MissingField {
+                    constructor: "FinalizeWith",
+                    field: "site"
+                }
+            ),
+            "{err:?}"
+        );
+    }
+
+    fn dc(id: u64, name: &str, tag: u32, rep_arity: u32) -> DataCon {
+        DataCon {
+            id: DataConId(id),
+            name: name.to_string(),
+            tag,
+            rep_arity,
+            field_bangs: vec![],
+            qualified_name: Some(format!("Effects.{name}")),
+            type_name: "Effects".to_string(),
+        }
     }
 }

@@ -76,6 +76,8 @@ pub enum HarnessError {
     Tree(#[from] TreeError),
     #[error(transparent)]
     Engine(#[from] EngineError),
+    #[error(transparent)]
+    Classify(#[from] engine::ClassifyError),
     #[error("compile failed:\n{0}")]
     Compile(String),
     #[error("resident session error: {0}")]
@@ -1630,7 +1632,7 @@ impl Harness {
                 Ok(engine::TurnOutcome::Completed { rendered })
             }
             Ok(ResidentOutcome::Suspended { hole, request, .. }) => {
-                let classified = engine::classify_hole(&request, &table, &asks);
+                let classified = engine::classify_hole(&request, &table, &asks)?;
                 let fork = matches!(classified.routing, HoleRouting::Fork { .. });
                 let ty = match &classified.routing {
                     HoleRouting::Fork { ty, .. }
@@ -3063,7 +3065,7 @@ impl Harness {
                 // table snapshotted above (the compile the still-executing
                 // fragment was built with) and re-publish with its REAL
                 // site + type, same as a first-suspend `run_block` hole.
-                let classified = engine::classify_hole(&request, &table, &asks);
+                let classified = engine::classify_hole(&request, &table, &asks)?;
                 let fork = matches!(classified.routing, HoleRouting::Fork { .. });
                 let ty = match &classified.routing {
                     HoleRouting::Fork { ty, .. }
