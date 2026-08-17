@@ -401,6 +401,18 @@ spawnAgent spec = spawnAsync @r spec >>= either (pure . Left) (awaitAgent @r)
 ```
 
 - `spawnAgent`'s type signature is UNCHANGED, character for character.
+- **The rederivation is lane C's, not lane B's.** Lane B's handler methods are
+  stubs, so a `spawnAgent` routed through `SubagentSpawnAsync` would return
+  `Left (SpawnDriveFailed …)` and turn
+  `tidepool-handlers/tests/subagent_one_cycle.rs` — which drives
+  `spawnAgent @WorkerResult` through the real extract/JIT — red from lane B's
+  fold until lane C lands. So lane B lands the async surface with `spawnAgent`
+  still bodied as `spawnAgentWithTools @NoTools @r (ToolRounds 0) NoTools`,
+  and lane C flips that one line together with the bodies that make it true.
+  A lane that hands up a knowingly-red file spends the fold's attention on a
+  failure everyone already understands, and buries the next lane's real
+  regressions in the noise. There is still exactly ONE spawn implementation at
+  every moment — just the tool-loop one until C lands.
 - `awaitAgent` reuses the existing `decodeOutcome` — `SpawnResultMalformed` is
   still produced in exactly one place.
 - `spawnAgentWithTools` is UNTOUCHED: a child that calls back must be driven
@@ -512,6 +524,15 @@ carrying `SpawnCancelled`, not dropped — dropping it would make a subsequent
 await indistinguishable from a typo'd handle, which is the one thing the
 `SpawnDriveFailed` spelling is supposed to mean. Entries are reclaimed when
 the handler is dropped.
+- **Flip `spawnAgent`.** With the bodies real, rewrite
+  `haskell/lib/Tidepool/Agent/Spawn.hs`'s `spawnAgent` to
+  `spawnAsync @r spec >>= either (pure . Left) (awaitAgent @r)`, delete lane
+  B's one-line comment marking the pending rederivation, and add the sentence
+  to the module docs that `spawnAgent` IS `spawnAsync` + `awaitAgent` —
+  mirroring how it is already the zero-tools case of the tool loop. This is
+  the ONE Haskell edit lane C makes; the rest of that file is lane B's and is
+  already correct. `tidepool-handlers/tests/subagent_one_cycle.rs` is the gate
+  that this flip preserved behavior — it must be green before and after.
 - `subagent_spawn` / `subagent_begin` / `subagent_resume` keep their EXACT
   current behavior. `subagent_begin` now inserts a `Stepped` entry;
   `subagent_resume` looks the saga up by agent id. Every existing assertion in
