@@ -427,11 +427,17 @@ fn works_map_family() {
 ///
 /// Absorbed: works_from_json, works_either_decode, works_decode,
 /// works_from_json_int_exact, works_from_json_int_rejects_fraction,
-/// works_from_json_int_rejects_out_of_range, works_lens_int_truncates_toward_zero,
-/// works_lens_int_out_of_range_is_nothing, works_lens_integer_truncates_and_is_unbounded,
+/// works_from_json_int_rejects_out_of_range, works_lens_int_floors,
+/// works_lens_int_out_of_range_is_nothing, works_lens_integer_floors_and_is_unbounded,
 /// works_from_json_string_overlapping_spike, works_from_json_char,
 /// works_from_json_integer, works_from_json_word, works_from_json_unit,
 /// works_from_json_tuples, works_from_json_either, works_to_json_string_overlapping.
+///
+/// `lens_int_floors`/`lens_integer_floors` were repinned (sibling audit for
+/// `stdlib_regressions_02_medium::works_int_prism_floors_not_truncates`):
+/// `_Int`/`_Integer` FLOOR a fractional Double toward negative infinity
+/// (`"-3.7"` -> `-4`), matching upstream lens-aeson, not truncate toward
+/// zero (`-3`) as these checks previously (incorrectly) pinned.
 #[test]
 fn works_aeson_family() {
     works(
@@ -446,10 +452,10 @@ fn works_aeson_family() {
             , check "from_json_int_rejects_fraction.neg" (either (const True) (const False) (eitherDecode "-3.7" :: Either Text Int))
             , check "from_json_int_rejects_fraction.pos" (either (const True) (const False) (eitherDecode "3.7" :: Either Text Int))
             , check "from_json_int_rejects_out_of_range" (either (const True) (const False) (eitherDecode "99999999999999999999999999" :: Either Text Int))
-            , check "lens_int_truncates_toward_zero.neg" ((fromMaybe (-999) ((decode "-3.7" :: Maybe Value) >>= (^? _Int))) == (-3))
-            , check "lens_int_truncates_toward_zero.pos" ((fromMaybe (-999) ((decode "10.5" :: Maybe Value) >>= (^? _Int))) == 10)
+            , check "lens_int_floors.neg" ((fromMaybe (-999) ((decode "-3.7" :: Maybe Value) >>= (^? _Int))) == (-4))
+            , check "lens_int_floors.pos" ((fromMaybe (-999) ((decode "10.5" :: Maybe Value) >>= (^? _Int))) == 10)
             , check "lens_int_out_of_range_is_nothing" (not (isJust ((decode "99999999999999999999999999" :: Maybe Value) >>= (^? _Int))))
-            , check "lens_integer_truncates.neg" ((fromMaybe (-999) ((decode "-3.7" :: Maybe Value) >>= (^? _Integer))) == (-3))
+            , check "lens_integer_floors.neg" ((fromMaybe (-999) ((decode "-3.7" :: Maybe Value) >>= (^? _Integer))) == (-4))
             , check "lens_integer_unbounded" ((fromMaybe "MISSING" (show <$> ((decode "123456789012345678901234567890" :: Maybe Value) >>= (^? _Integer)))) == "123456789012345678901234567890")
             , check "from_json_string_overlapping_spike.s" ((either (const "ERR") id (eitherDecode "\"hi\"" :: Either Text String)) == "hi")
             , check "from_json_string_overlapping_spike.xs" ((either (const []) id (eitherDecode "[1,2,3]" :: Either Text [Int])) == [1,2,3])

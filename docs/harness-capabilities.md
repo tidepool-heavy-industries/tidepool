@@ -205,10 +205,15 @@ Full text: `plans/self-iterating-harness/20-exomonad-v3-prd.md`.
   must be a bare expression with the annotation:
   `(finalize @Turn (Turn { … }) :: M ())` — never a bind
   (`_ <- finalize …`), never bare.
-- **Sum types crossing JSON need record syntax on payload constructors**
-  (`Blocked { blockedReason :: Text }`, not `Blocked Text`) — generic
-  encoding has no key for a positional field; it fails when the derive is
-  demanded, not at declaration.
+- **A positional payload constructor (`Blocked Text`, not
+  `Blocked { blockedReason :: Text }`) now crosses JSON fine** — it encodes
+  as aeson's `TaggedObject` `"contents"` form (`{"tag":"Blocked","contents":"..."}`,
+  an array for 2+ fields), the same shape models already know. What still
+  rejects at compile time: a payload field literally named `tag` (collides
+  with the discriminator, either syntax), and — on the `askUser`-derived
+  form surface only, not JSON — a constructor with SEVERAL positional
+  fields (one positional field is fine there too, presenting as its
+  `contents` control; multiple need record syntax so each input has a key).
 - **Agent result types must be single-constructor records.** A sum renders
   `oneOf` at the schema root and the backend refuses the turn whole. Model
   an alternative as a field, never a constructor.

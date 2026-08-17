@@ -33,8 +33,8 @@ module Tidepool.Aeson.Scientific
   , fromFloatDigits
   , toRealFloat
   , toBoundedInteger
-  , truncateScientific
-  , truncateBoundedInteger
+  , floorScientific
+  , floorBoundedInteger
   , floatingOrInteger
   , isFiniteDouble
   ) where
@@ -228,11 +228,13 @@ isInteger (Scientific c e)
   | e >= 0    = True
   | otherwise = c `rem` pow10 (negate e) == 0
 
--- The integer value (only meaningful when 'isInteger' holds).
+-- The integer value: exact when 'isInteger' holds; for a fractional negative-
+-- exponent value, FLOORS toward negative infinity (@div@, not @quot@ — see
+-- 'floorScientific').
 integerValue :: Scientific -> Integer
 integerValue (Scientific c e)
   | e >= 0    = c * pow10 e
-  | otherwise = c `quot` pow10 (negate e)
+  | otherwise = c `div` pow10 (negate e)
 
 -- @10 ^ n@ (n >= 0) by simple linear recursion. Deliberately NOT base's @(^)@:
 -- its Integer unfolding is a mutually-recursive squaring loop with inlined
@@ -246,23 +248,25 @@ pow10 = go 1
       | n <= 0    = acc
       | otherwise = go (acc * 10) (n - 1)
 
--- | Truncate toward zero to an 'Integer' via pure Integer arithmetic — NO
--- 'Double'. This is the JIT-safe integer projection: 'Double'-routed extraction
--- (@'toRealFloat' = fromRational . toRational@) drags GHC's rational→double
--- machinery into codegen and explodes it (the same GMP-adjacent path that made
--- Scientific→Double untenable on the JIT). Integer-typed decoders and the
--- @_Int@/@_Integer@ prisms use this instead of @floatingOrInteger@'s 'Double'
--- fallback, so an integer decodes without ever compiling that fallback.
-truncateScientific :: Scientific -> Integer
-truncateScientific = integerValue
+-- | Floor toward negative infinity to an 'Integer' via pure Integer
+-- arithmetic — NO 'Double'. This is the JIT-safe integer projection:
+-- 'Double'-routed extraction (@'toRealFloat' = fromRational . toRational@)
+-- drags GHC's rational→double machinery into codegen and explodes it (the
+-- same GMP-adjacent path that made Scientific→Double untenable on the JIT).
+-- Integer-typed decoders and the @_Int@/@_Integer@ prisms use this instead of
+-- @floatingOrInteger@'s 'Double' fallback, so an integer decodes without ever
+-- compiling that fallback. Matches upstream lens-aeson's @_Int@/@_Integer@
+-- (@"-3.7"@ -> @-4@, not @-3@ — floor, not truncation toward zero).
+floorScientific :: Scientific -> Integer
+floorScientific = integerValue
 
--- | 'truncateScientific', bounds-checked against a 'Bounded' 'Integral' type —
--- @Nothing@ if the truncated value doesn't fit @[minBound, maxBound]@. Unlike
--- 'toBoundedInteger', this truncates fractional inputs instead of requiring an
+-- | 'floorScientific', bounds-checked against a 'Bounded' 'Integral' type —
+-- @Nothing@ if the floored value doesn't fit @[minBound, maxBound]@. Unlike
+-- 'toBoundedInteger', this floors fractional inputs instead of requiring an
 -- exact integer (the @_Int@ prism's lens-aeson semantics).
-truncateBoundedInteger :: forall i. (Integral i, Bounded i) => Scientific -> Maybe i
-truncateBoundedInteger s =
-  let i  = truncateScientific s
+floorBoundedInteger :: forall i. (Integral i, Bounded i) => Scientific -> Maybe i
+floorBoundedInteger s =
+  let i  = floorScientific s
       lo = toInteger (minBound :: i)
       hi = toInteger (maxBound :: i)
   in if i >= lo && i <= hi then Just (fromInteger i) else Nothing

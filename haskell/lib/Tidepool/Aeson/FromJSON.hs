@@ -44,7 +44,7 @@ import Tidepool.Aeson.Value
   ( Value(..), Object, Array, fromText, toText, eitherDecodeValue
   , GAllFieldsNamed, IsNullarySum, IsRecordCon
   )
-import Tidepool.Aeson.Scientific (toRealFloat, toBoundedInteger, truncateScientific, floatingOrInteger)
+import Tidepool.Aeson.Scientific (toRealFloat, toBoundedInteger, floorScientific, floatingOrInteger)
 import Data.Proxy (Proxy(..))
 import GHC.Generics
 
@@ -325,7 +325,7 @@ instance FromJSON Int where
   parseJSON (Number s) = case toBoundedInteger s of
     Just i  -> Success i
     Nothing
-      | s == fromInteger (truncateScientific s) ->
+      | s == fromInteger (floorScientific s) ->
           Error ("Int out of range: " ++ show s)
       | otherwise -> Error ("Int: not an integral value: " ++ show s)
   parseJSON v = mismatch "number" v
@@ -368,7 +368,7 @@ instance FromJSON Word where
   parseJSON (Number s) = case toBoundedInteger s of
     Just w  -> Success w
     Nothing
-      | s == fromInteger (truncateScientific s) ->
+      | s == fromInteger (floorScientific s) ->
           Error ("Word out of range: " ++ show s)
       | otherwise -> Error ("Word: not an integral value: " ++ show s)
   parseJSON v = mismatch "number" v

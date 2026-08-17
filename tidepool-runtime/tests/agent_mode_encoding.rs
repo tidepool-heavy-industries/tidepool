@@ -391,28 +391,50 @@ fn payload_sum_tool_input_schema_is_oneof_tagged_objects() {
     );
 }
 
-/// The surviving compile-time rejection on this boundary: a payload
-/// constructor whose fields are positional has no JSON key to name them. The
-/// `TypeError` comes from `Tidepool.Aeson.Value`'s `GAllFieldsNamed`, which
-/// `JsonSchema` imports rather than restates — so a type the tool surface
-/// accepts is a type the encoder and decoder accept.
+/// REPIN (citing 334d794a, "feat(aeson): positional sum payloads — aeson
+/// TaggedObject contents form"): this test used to pin that a positional
+/// payload constructor as a `Call` input must not compile. 334d794a
+/// deliberately lifted that rejection for the encoder/decoder/schema triple
+/// (`Tidepool.Aeson.Value`/`FromJSON`/`Schema`'s shared `IsRecordCon`
+/// dispatch) — a positional constructor now schedules a required
+/// `"contents"` property instead of a `GAllFieldsNamed` `TypeError`. The
+/// tool surface's `JsonSchema` constraint imports that same dispatch, so a
+/// type the encoder/decoder accept is a type `compileTools` accepts too:
+/// this now compiles and its `input_schema` is the `"contents"`-property
+/// shape `Schema.hs`'s `GTaggedConSchema 'False` instance builds.
+/// (`compile_fail_payload_field_named_tag` below is the compile-time
+/// rejection 334d794a did NOT touch — a payload field literally named
+/// `tag` still collides with the discriminator on every branch.)
 #[test]
-fn compile_fail_positional_payload_call_input() {
-    require_extract();
+fn positional_payload_call_input_schema_is_a_contents_property() {
     let src = input_schema_module(
         "data Verdict = Yes | Because Text deriving (Generic, FromJSON, JsonSchema)\n",
         "Verdict",
     );
-    match EvalHarness::new().with_stdlib().compile(&src, "result") {
-        Ok(_) => panic!("a positional payload constructor must not compile"),
-        Err(e) => {
-            let msg = tidepool_runtime::classify_compile(&e).message;
-            assert!(
-                msg.contains("must use record syntax"),
-                "expected the positional-payload TypeError, got:\n{msg}"
-            );
-        }
-    }
+    assert_eq!(
+        run_pure(&src, "result"),
+        json!({
+            "oneOf": [
+                {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": { "tag": { "type": "string", "enum": ["Yes"] } },
+                    "required": ["tag"]
+                },
+                {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": {
+                        "tag": { "type": "string", "enum": ["Because"] },
+                        "contents": { "type": "string" }
+                    },
+                    "required": ["tag", "contents"]
+                }
+            ]
+        }),
+        "a single positional field schedules one required \"contents\" property \
+         keyed by the field's own schema, not a compile-time rejection"
+    );
 }
 
 // ---------------------------------------------------------------------------
