@@ -1,124 +1,145 @@
 # S1-L4 scaffold — green threads (`Tidepool.Async`) + capability mailboxes
 
-**Status:** scaffold (2026-08-16) — the contract waves 1 and 2 implement.
+**Status:** scaffold (2026-08-17) — the contract the implementation waves build.
 **Parent:** [PRD 20](20-exomonad-v3-prd.md) §"Green threads (the scheduler)",
 §"Node residency and messaging".
 
-## What a green thread IS here
+## What a green thread IS
 
-**A green thread is an `M a` value — the residual computation — plus a runtime
-thread identity.** Not a parked frame the driver holds, not a second machine.
+**A green thread is a continuation parked in the session's multi-hole
+registry, under its own realm.** Forking one starts a NEW suspension-capable
+top-level run on the shared machine; that run parks independently of its
+spawner, so two threads blocked on two different effects have BOTH holes
+pending at once, resumable by identity in either order. This is PRD 20's
+locked substrate (lines 255–267), and it is what makes the properties below
+true rather than approximated:
 
-The mechanism already exists and is already exercised in production. Every
-outer-row effect suspends (the row's handled prefix is empty — `ask_tag == 0`,
-pinned by `outer_row_suspends_everything`), and freer-simple's `Eff` is
-inspectable from authored Haskell: the eval preamble imports
-`Control.Monad.Freer.Internal (Eff(..), qApp, tsingleton)`, and
-`event_decl`'s own `pumpEff` already deconstructs `E u q` and reconstructs
-`E u (tsingleton …)` across a real suspension — that is what `withHandler`
-is built from, and `tests/outer_effects.rs` drives it end to end today.
+- **Threads blocked on effects progress independently.** `race blockingX
+  blockingY` genuinely overlaps. Mirroring `Control.Concurrent.Async`'s names
+  is only honest if the semantics travel with them.
+- **Concurrent cognition windows are reachable.** N `runLLMTurn` holes pending
+  simultaneously — each its own answerer realm — is exactly "several threads
+  parked at once". Nothing needs a begin/await split to overlap, so no
+  blocking verb has to warp its shape.
+- **Cooperative, no preemption.** A thread runs until it performs an effect,
+  then parks. The driver services whichever pending hole is ready and resumes
+  that thread until it parks again. FIFO ready queue.
+- **Order-insensitivity is the correctness contract.** Two pending holes
+  resumed in either order must produce identical results.
 
-So one step of a thread is:
+## The mechanism, and how little of it is new
 
-```haskell
-data Step a = Finished a | Blocked (M a)
+The load-bearing discovery: **the closure-payload tenure path is already
+effect-agnostic.** In `tidepool-codegen/src/jit_machine.rs`,
+`request_carries_closure_sentinel` deep-scans a suspended request's FIELDS for
+`CLOSURE_SENTINEL` — it keys on the sentinel, never on the effect or
+constructor name — and `tenure_finalized_payload` evacuates **field index 1**
+of the request Con into old-space, registering it as a persistent GC root, and
+lands the slot on the parked `ContinuationFrame`. `ResidentSession::
+finalized_handle(hole)` then mints a `ValueHandle` over it.
 
-stepM :: M a -> M (Step a)
-stepM (Val a)  = pure (Finished a)
-stepM (E u q)  = E u (tsingleton Val) >>= \x -> pure (Blocked (qApp q x))
-```
-
-`E u (tsingleton Val)` performs *exactly that one effect* — one suspension,
-serviced by the one driver loop, resumed — and hands back the residual. A
-scheduler is then an ordinary round-robin over residuals. Consequences, all of
-them the locked semantics rather than approximations of them:
-
-- **Cooperative at effect boundaries only.** A thread advances exactly one
-  effect per turn of the scheduler. No preemption, no time slicing —
-  structurally, not by discipline.
-- **Effects interleave through the one driver loop.** Every step is an
-  ordinary outer suspension the driver services exactly as it services a
-  single-threaded loop's. Nothing about `service_outer_effect` changes.
-- **Data races unrepresentable.** A thread is a value; threads share nothing.
-  No `IORef`/`MVar`/shared-cell effect is added to the row (PRD 20, locked).
-- **`forConcurrently` and friends are stdlib derivations,** not primitives
-  (PRD 20, locked).
-
-### The one honest limitation, stated up front
-
-There is no background execution. A thread makes progress only while a
-scheduling point is driving it, and a scheduling point can only drive the
-threads it was handed. `async` therefore performs no effect of its own, and
+So a spawn request shaped
 
 ```haskell
-a <- async bodyA
-b <- async bodyB
-x <- wait a          -- bodyA runs to completion here…
-y <- wait b          -- …only then does bodyB start
+AsyncSpawnWith :: Int -> (Int -> M a) -> Green Int
 ```
 
-is sequential. Concurrency is expressed by the multi-thread scheduling points —
-`waitBoth`, `waitAny`, `waitEither`, `concurrently`, `mapConcurrently`,
-`race` — which round-robin over every thread they hold. This is faithful to
-the substrate (a single machine, a single driver loop) and is the same
-constraint the PRD already accepts under "a forked computation that never
-performs a parking effect starves its siblings". Do not paper over it with a
-`async`-steps-once hack: stepping at creation makes `async` perform an
-arbitrary effect at an arbitrary point, which is worse.
+— a dummy `Int` at field 0, the thread body as a FUNCTION at field 1 — gets
+its body tenured and handle-able with **zero `tidepool-codegen` changes**. The
+body is a lambda rather than a bare `M a` on purpose: the sentinel scan needs a
+closure to fire, and `async (pure 5)` (a body with no closures anywhere) would
+otherwise take the lossy data bridge. A lambda always fires.
 
-External concurrency is unaffected and is where the real overlap comes from: a
-`spawnAsync` starts a backend process and returns, so N cycles genuinely run
-at once while the scheduler round-robins the awaits.
+### The one new entry
 
-### Why not park each thread as its own registry hole
+`tidepool-runtime` gains ONE `ResidentSession` method, alongside — never
+replacing — `run_child`/`run_child_pure`. Their refusal of a suspending child
+(`ResidentError::ChildSuspended`) protects existing callers and stays exactly
+as it is; this is a third entry with a different contract:
 
-That design — `async` suspends carrying its body as a closure, the driver mints
-a `ValueHandle` over it and starts a *new suspension-capable top-level run* on
-the shared machine — is the shape PRD 20 sketches, and the multi-hole registry
-would hold each thread's parks by identity. It needs a new
-`ResidentSession` entry (`run_child`/`run_child_pure` both refuse a child that
-suspends; `apply_finalized` is the pure, non-`Eff` sibling), i.e. a
-**tidepool-runtime** change, which is outside this lane's boundary. It also
-buys nothing the value representation does not already give: the cooperative
-semantics, the interleaving, and the race-freedom are identical, and the value
-representation is typed end to end with no `unsafeCoerce` and no existential
-thread table. Revisit only if a genuine background-progress requirement
-appears; `Async` is abstract, so the representation can move.
+> **run a handle-rooted body as a NEW suspension-capable top-level run**,
+> under a caller-chosen `RealmId`, materializing its result as a tenured root.
 
-## The `Green` effect — the only Rust surface wave 1 needs
+Its body is `apply_finalized`'s expression synthesis — `App(Var(BODY), Lit 0)`
+with `BODY` bound through an `ExternalEnv` to the handle's slot address —
+driven through `run_fragment_suspendable_parked` (the registry-parking,
+suspension-capable entry) instead of `run_fragment_pure`. It returns a
+`ResidentOutcome`: `Completed` with the result's tenured root, or `Suspended`
+with the hole the thread parked on.
 
-Thread identity and cancellation status cannot live in a Haskell value (`cancel
-a` must be observable to a later `wait a`), so they live in a runtime table
-behind a new opt-in effect, wired exactly the way the Journal lane wired
-`Journal` (`journal_effect_def!` + `JournalHandler` + `set_journal_handler` +
-`OuterEffectKind::Journal`) — that lane is the template for every wiring step.
+### GC rooting — verified, not assumed
+
+PRD 20 claims parked continuations are GC roots "exactly as parked holes are
+today". That is true and machine-enforced: each `ContinuationFrame` is a
+registered stowed root, and `stowed_roots_count() == parked_count()` is
+`debug_assert`ed at **every** registry mutation
+(`tidepool-codegen/CLAUDE.md`, the realm machinery). The multi-hole registry
+with several realms parked at once is already the production harness path, not
+a new capability. The thread body's own slot is a persistent root from the
+moment it is tenured. Nothing here extends the rooting model.
+
+If this turns out to be wrong under N threads — a rooting receipt that fails
+to hold at quiescence — **stop and report**; do not restructure the rooting
+model to accommodate green threads.
+
+### Realms are the unit of cancellation
+
+**One `RealmId` per green thread.** `cancel` is then `close_realm(realm)`,
+which drops that thread's parked frames, releases its outstanding handles,
+leaves sibling realms untouched, and reconciles the session's parked-hole list
+against the machine's surviving frames. "Cancel discards the thread's pending
+suspensions" is therefore a mechanism, not bookkeeping to keep in sync.
+
+In-flight EXTERNAL work (a running agent turn) is not this lane's to stop: it
+settles through the Subagent cycle's own typed terminal states. `cancel` drops
+the thread that was awaiting it.
+
+### Result delivery is by handle, never by bridge
+
+A thread's result crosses to its waiter the way finalize-by-reference already
+delivers closures: the completing run tenures its result, `mint_handle_from_root`
+mints a handle, and the waiter's parked continuation is resumed through
+`ResidentSession::resume_handle` — the payload feeds the continuation verbatim,
+on the same heap, closures included. No JSON round-trip, so a thread may return
+a function or a record of functions.
+
+## The `Green` effect
 
 ```
-GreenNew       :: Green Int          -- mint a fresh thread id
-GreenCancel    :: Int -> Green ()    -- mark cancelled; idempotent
-GreenCancelled :: Int -> Green Bool  -- has this id been cancelled?
-GreenSettle    :: Int -> Green ()    -- mark settled (poll + observability)
+AsyncSpawnWith :: Int -> (Int -> M a) -> Green Int   -- body at field 1 (tenured)
+AsyncAwaitWith :: Int -> Green a                     -- park until that thread settles
+AsyncCancel    :: Int -> Green ()                    -- close_realm; idempotent
+AsyncPoll      :: Int -> Green Bool                  -- settled yet? never blocks
 ```
 
-Return types stay primitive (`Int`/`Bool`/`()`), so nothing is added to
-`tidepool-bridge-effects`. The effect goes at the **END** of `outer_decls()` —
-`RunLLMTurn` must stay at index 0 (`outer_row_suspends_everything`).
+`AsyncAwaitWith`'s free `a` is the same shape `finalize`'s free `a` already
+has, and `Async a`'s phantom carries the type — the same posture as
+agent-cycles' phantom-typed `AgentHandle`. `Green` goes at the **END** of
+`outer_decls()`; `RunLLMTurn` must stay at index 0
+(`outer_row_suspends_everything`).
 
-Cancellation is checked at scheduling-point ENTRY and at each round-robin
-iteration of a multi-thread wait, not per step. A cancel therefore takes effect
-at the next scheduling point that observes the handle — which is also how real
-`cancel` behaves (asynchronous), and is what "cancel discards the thread's
-pending suspensions" means here: the residual is dropped and never resumed, so
-the suspensions it would have raised never reach the driver.
+## The driver scheduler
 
-## Wave 1 — the authored surface (`haskell/lib/Tidepool/Async.hs`)
+The driver owns a thread table (`tid → realm, state`) where state is
+`Ready | Parked(hole) | Settled(handle) | Cancelled`, plus a waiter map
+(`tid → [waiting hole]`), and a FIFO ready queue. Its loop is unchanged in
+character — service a pending hole, resume its continuation — with the routing
+extended: a hole belongs to a thread, a settled thread resumes its waiters by
+handle, and a cancelled thread's holes vanish with its realm.
 
-Names and semantics track `Control.Concurrent.Async`. The API is the prompt;
-every deviation is a fluency tax, and the deviations below are the minimum the
-substrate forces.
+Servicing `AsyncSpawnWith`: take the body handle off the spawner's parked
+frame, resume the spawner with the fresh `tid`, and enqueue the new thread as
+READY. Which of those two runs first is the ready queue's business, not the
+author's.
+
+## The authored surface (`haskell/lib/Tidepool/Async.hs`)
+
+Names AND semantics track `Control.Concurrent.Async`. Under the registry form
+each verb is one suspending send, so the module is thin — there is no scheduler
+in Haskell.
 
 ```haskell
-data Async a                                   -- opaque: thread id + residual
+data Async a                                   -- opaque: phantom-typed thread id
 asyncThreadId   :: Async a -> Int
 
 async           :: M a -> M (Async a)
@@ -136,45 +157,46 @@ concurrently    :: M a -> M b -> M (a, b)
 mapConcurrently :: (a -> M b) -> [a] -> M [b]
 forConcurrently :: [a] -> (a -> M b) -> M [b]
 
+-- The Event-algebra sibling of the package's `waitSTM`: fires when the thread
+-- settles, so a select over threads, agents, timers, and mailboxes is one
+-- ordinary `nextEvent`.
+waitEvent       :: Async a -> Event (Async a)
+
 data AsyncCancelled = AsyncCancelled deriving (Show, Eq)
 ```
 
-Deviations, each documented at its definition:
+`waitEvent` carries the HANDLE, not the value — the typed result is then one
+immediate `wait` away. That keeps results on the heap (closures survive) and
+keeps the event payload BARE like `Tick`, so `nextEvent` yields
+`Observed (Async a)` with no double wrap. It needs a `WatchAsync Int` watch and
+an `ObservedAsyncDone EventId Int` observation in `event_decl`, published
+through the same `SubscriptionRegistry` the repository watches use. The `Int`
+is raw rather than a newtype because `event_decl`'s type_defs must stand alone
+in a row with `RepoEvent` but not `Green`.
 
-- **`waitEither` discards the loser's residual** (there is no detached
-  execution to leave it running in) — i.e. it has `waitEitherCancel`'s
-  semantics under `waitEither`'s signature. `waitAny` likewise.
-- **`poll`** answers `Nothing` for anything not already settled; it cannot
-  reflect background progress, because there is none.
-- **`waitCatch`** ranges over `AsyncCancelled` only. A thread's own failure is
-  an ordinary `Either` in its result type (the row's discipline), not an
-  exception.
+`Tidepool.Async` is a stdlib module like `Tidepool.Fork`, auto-imported
+whenever `Green` is in the row.
 
-`Tidepool.Async` is a stdlib module like `Tidepool.Fork` — it imports
-`Tidepool.Effects (M)` and `Control.Monad.Freer.Internal (Eff(..), qApp,
-tsingleton)`, needs no build-time registration, and is reachable only in rows
-containing `Green`.
-
-> Name collision to avoid: `Tidepool.Fork` is the ANSWERER's fanout-to-
-> sub-answerers surface (`fork`/`forkAll`/`forkMap`), an unrelated effect. The
-> green-thread module is `Tidepool.Async`, and nothing in it is called `fork`.
+> Name collision to avoid: `Tidepool.Fork` is the ANSWERER's unrelated
+> fanout-to-sub-answerers surface (`fork`/`forkAll`/`forkMap`). Nothing in the
+> green-thread module is called `fork`.
 
 ### Wave 1 acceptance
 
-Joins `tests/outer_effects.rs` (family bundle — one fixture, one compile, every
-assertion off the resulting `State`; a new suspension kind joins the bundle
-rather than paying its own extract compile). The fixture loop must show:
+The test that pins the representation: **two green threads blocked on two
+DIFFERENT effects have BOTH holes pending in the registry simultaneously, and
+resuming them in either order produces identical results.** Assert on the
+registry's pending set, not on a completion count — a count passes under a
+representation that serializes.
 
-1. N threads whose effects genuinely interleave through the one driver loop —
-   assert on an ORDER trace (e.g. each thread `record`s or `say`s a tagged
-   step; the durable trace must show A,B,A,B…, not A,A,B,B).
-2. `wait` joins and returns the thread's value.
-3. `waitEither` picks the winner and the loser never runs again.
-4. `cancel` then `waitCatch` yields `Left AsyncCancelled`, and the cancelled
-   thread's remaining effects never appear in the trace.
-
-Plus `dogfood_harness_typecheck.rs`'s dev-tree row gains `green_decl()` (row
-widening), and `outer_row_suspends_everything` must keep passing unchanged.
+Then, in the `tests/outer_effects.rs` family bundle (one fixture, one compile,
+many named assertions — a new suspension kind joins it rather than paying its
+own extract compile): `wait` joins, `waitEither` races with the loser still
+live afterward, `cancel` discards the thread's pending suspensions and
+`waitCatch` reports `Left AsyncCancelled`, and `mapConcurrently` returns
+results in the ORIGINAL list order with threads of differing lengths. Plus
+`green_decl()` in the dev-tree typecheck row, and
+`outer_row_suspends_everything` passing unedited.
 
 ## Wave 2 — capability handles and mailboxes
 
@@ -192,7 +214,7 @@ forkNode :: (NodeCtx up down -> M r) -> M (NodeHandle down r)
 sendDown :: ToJSON down => NodeHandle down r -> down -> M ()
 sendUp   :: ToJSON up   => Uplink up -> up -> M ()
 inbox    :: FromJSON down => NodeCtx up down -> Event down
-folded   :: NodeHandle down r -> Event r         -- or `wait` on the underlying Async
+folded   :: NodeHandle down r -> Event r       -- `waitEvent` on the underlying thread
 ```
 
 - **Sends never block.** `sendDown`/`sendUp` append and return.
@@ -207,19 +229,9 @@ folded   :: NodeHandle down r -> Event r         -- or `wait` on the underlying 
   the run journal. No durable mailbox machinery exists or is wanted.
 
 **Receive is an Event source, not a second blocking primitive.** The inbox
-plugs into the existing `Tidepool.Event` algebra: `event_decl` gains a
-`WatchMailbox Int` watch and an `ObservedMessage EventId Int Value`
-observation, published through the same `SubscriptionRegistry` the repository
-watches use, so `nextEvent (fmap Left inbox <|> fmap Right deadline)` is an
-ordinary select. **Do not add a blocking mailbox receive.**
-
-Payloads stay BARE (like `Tick`, unlike `commit`/`headChanged`): `inbox ::
-Event down`, so `nextEvent` yields `Observed down` with no double wrap.
-
-The `Watch`/`RepositoryEvent` constructors carry a raw `Int` mailbox id rather
-than a `MailboxId` newtype, because `event_decl`'s type_defs must stand alone
-in a row that has `RepoEvent` but not `Green`. The newtype lives on the `Green`
-side.
+plugs into the existing `Tidepool.Event` algebra alongside `WatchAsync`, so
+`nextEvent (fmap Left inbox <|> fmap Right deadline)` is an ordinary select.
+**Do not add a blocking mailbox receive.** Payloads stay BARE (like `Tick`).
 
 Mailbox verbs join the same `Green` effect (one row widening, one wiring site):
 
@@ -239,11 +251,11 @@ before the deadline, and a second iteration with a silent child observes the
 ## Out of scope for this lane
 
 The wake journal (per-wake source/continuation/payload digest) and the seeded
-order-insensitivity permutation property test are S1-L4 items the PRD lists but
-this lane's DONE criteria do not; they belong with `Tidepool.Swarm`'s folds,
-which consume child outcomes in plan order. Noted, not built here.
+order-insensitivity permutation property test over whole outcome TREES belong
+with `Tidepool.Swarm`'s folds, which consume child outcomes in plan order.
+Wave 1's either-order acceptance covers the substrate's half of that contract.
 
-Cancel of IN-FLIGHT EXTERNAL work (a running agent turn) settles through the
-Subagent cycle's typed terminal states — the agent-cycles lane owns that
-contract. This lane defines the seam only: `cancel` drops the residual, and
-whatever the residual was awaiting settles by its own terminal states.
+`agentDone` joining the Event algebra is deliberately NOT taken here (declined
+to root, 2026-08-17): it is the twin of `waitEvent` and should reuse the
+`WatchAsync`/`ObservedAsyncDone` shape this lane introduces, but it belongs to
+whoever owns the agent-cycle surface.
