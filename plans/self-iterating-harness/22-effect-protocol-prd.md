@@ -51,10 +51,14 @@ Generated from it:
   owns the list of product verbs; per-verb type-shape rules come from a
   CLOSED, enumerated policy set (a new policy is added deliberately in
   Haskell, never serialized through the schema);
-- harness hole classification: every verb annotated with a handling class
-  (`ordinary` / `suspend-to-model` / `suspend-to-operator` / `outer-dispatch`
-  / `terminal`), the classifier generated — the `RepoEventAwait` bug class
-  becomes unrepresentable.
+- harness hole classification: every verb annotated with a handling class,
+  the classifier generated — the `RepoEventAwait` bug class becomes
+  unrepresentable. The class VOCABULARY is the code's real nine-way
+  distinction, not this PRD's earlier five-name sketch; the phase-1 scaffold
+  doc (`22-p1-protocol-scaffold.md`) is authoritative for it. Two
+  generation-time rules: a verb without a class fails GENERATION, and an
+  unrecognized constructor at runtime fails LOUD — today's silent
+  fall-through-to-Ask is exactly how the `RepoEventAwait` omission hid.
 
 Hand-written forever: handler method bodies, Haskell library behavior, the
 harness's tree policy, domain types' OS/backend concerns.
@@ -123,3 +127,11 @@ harness's tree policy, domain types' OS/backend concerns.
    crates (leaning: generated into each consuming crate, schema stays leaf).
 3. The closed policy-enum vocabulary for extractor type-shape rules — sized
    by surveying today's `sitedVerbs` rows before designing.
+4. `Translate.hs`'s `vsMisShapeIsError` is declared, documented, and set on
+   `forkMap`/`forkCata`, but NOTHING READS IT (found during phase 1). The
+   phase touching `Translate.hs` must resolve it — enforce it or delete it —
+   before assuming the generated form preserves behavior.
+5. Checks must be TESTS in quick-tier crates (phase-1 finding: an orphaned
+   `--check` script nothing invokes, and a generated-files guard living in a
+   default-filter-excluded crate, are both non-checks). Placement rule for
+   every future generated-files guard.
