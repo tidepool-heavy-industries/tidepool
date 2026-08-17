@@ -812,8 +812,22 @@ impl PersistentSession {
     /// Mint a fresh child scope of `parent`. `None` if `parent` is not live
     /// (never minted, or already retired) — a scope is never born under a dead
     /// ancestor.
+    ///
+    /// This is also where the DECL plane learns the new scope's inherited
+    /// environment: `PersistentSession` owns the one [`ScopeTree`], so it is
+    /// the only place that knows a scope's parent, and `SessionLib` keys its
+    /// tips by [`ScopeId`] without owning the tree. Seeding the child from its
+    /// parent's tip HERE is what makes "children read parent declarations"
+    /// (locked decision 4) true at the moment of minting rather than at first
+    /// use — the difference matters exactly when a sibling pushes a turn in
+    /// between, which would otherwise leak into this scope.
     pub fn mint_scope(&mut self, parent: ScopeId) -> Option<ScopeId> {
-        self.scopes.mint_child(parent)
+        let child = self.scopes.mint_child(parent)?;
+        if let Some(lib) = self.lib.as_mut() {
+            let inherited = lib.scope_tip(parent);
+            lib.seed_scope(child, inherited);
+        }
+        Some(child)
     }
 
     /// The session's one scope tree — read by both planes for their lookup

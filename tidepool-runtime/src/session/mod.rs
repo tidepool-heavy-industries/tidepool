@@ -152,13 +152,19 @@ pub struct SessionLib {
     /// `plans/self-iterating-harness/21-c2-scope-trees.md` §1.2). `SessionLib`
     /// does not own the [`tidepool_codegen::scope::ScopeTree`] itself (that
     /// lives on `PersistentSession`) — it only keys this map by whatever
-    /// [`ScopeId`] a caller passes to an `_in` method. A scope absent from
-    /// this map has never had a turn pushed in it; [`Self::scope_tip`] then
-    /// falls back to the log's current tip, which is correct for a scope used
-    /// for the first time right after it was minted (the sibling-scope case
-    /// the design doc works through) — general re-parenting across
-    /// intervening turns in OTHER scopes is out of this wave's scope, per the
-    /// design doc.
+    /// [`ScopeId`] a caller passes to an `_in` method.
+    ///
+    /// ROOT is seeded at [`Self::open`] and every other scope is seeded from
+    /// its PARENT's tip at mint time ([`Self::seed_scope`], called by
+    /// `PersistentSession::mint_scope`, which owns the tree). That seeding is
+    /// load-bearing, not bookkeeping: a scope absent from this map resolves to
+    /// `Generation(0)` — the empty environment — and NEVER to the log's global
+    /// tip. Falling back to the global tip would hand a scope whatever turn
+    /// happened to be pushed last in ANY scope, so a sibling defining between
+    /// a scope's mint and its first use would leak into it, and a child
+    /// defining before its parent's next turn would leak UPWARD. Both are
+    /// direct violations of PRD 21 locked decision 4; the regression is pinned
+    /// by `session_decl_scope_tree.rs`.
     tips: HashMap<ScopeId, Generation>,
 }
 
@@ -179,7 +185,10 @@ impl SessionLib {
             log: DeclLog::new(),
             env,
             extra_include: Vec::new(),
-            tips: HashMap::new(),
+            // ROOT starts at the empty environment. Seeding it explicitly is
+            // what keeps `scope_tip`'s miss case meaning "empty" rather than
+            // "whatever was pushed last anywhere" — see the field docs.
+            tips: HashMap::from([(ScopeId::ROOT, Generation(0))]),
         })
     }
 
@@ -213,10 +222,19 @@ impl SessionLib {
     /// first-use fallback.
     #[must_use]
     pub fn scope_tip(&self, scope: ScopeId) -> Generation {
-        self.tips
-            .get(&scope)
-            .copied()
-            .unwrap_or_else(|| self.log.generation())
+        self.tips.get(&scope).copied().unwrap_or(Generation(0))
+    }
+
+    /// Seed `scope`'s decl tip with the generation it INHERITS — its parent's
+    /// tip at mint time. Called by `PersistentSession::mint_scope`, which owns
+    /// the [`ScopeTree`](tidepool_codegen::scope::ScopeTree) and is therefore
+    /// the only place that knows a scope's parent.
+    ///
+    /// A no-op once `scope` has a tip of its own: seeding must never rewind a
+    /// scope that has already pushed turns, and re-seeding a live scope would
+    /// silently drop its declarations.
+    pub fn seed_scope(&mut self, scope: ScopeId, inherited: Generation) {
+        self.tips.entry(scope).or_insert(inherited);
     }
 
     /// The current session-library module, or `None` before any declaration.
@@ -747,6 +765,50 @@ mod tests {
         assert_eq!(lib.generation(), Generation(0));
         assert!(lib.current_module().is_none());
         assert!(lib.import_line().is_none());
+    }
+
+    /// An unseeded scope resolves to the EMPTY environment, never to the
+    /// log's global tip. The global-tip fallback is the leak PRD 21 locked
+    /// decision 4 forbids in both directions: a sibling pushing a turn
+    /// between a scope's mint and its first use would leak into that scope,
+    /// and a child defining before its parent's next turn would leak upward
+    /// into the parent. (The GHC-validated end-to-end form of this lives in
+    /// `tests/session_decl_scope_tree.rs`; this pins the pure tip algebra.)
+    #[test]
+    fn an_unseeded_scope_is_empty_not_the_global_tip() {
+        let dir = tempfile::tempdir().unwrap();
+        let lib =
+            SessionLib::open(SessionId(1), dir.path(), ModuleEnv::standalone_default()).unwrap();
+        assert_eq!(lib.scope_tip(ScopeId::ROOT), Generation(0));
+        assert_eq!(
+            lib.scope_tip(ScopeId(42)),
+            Generation(0),
+            "a scope nobody seeded sees nothing, not the last turn pushed anywhere"
+        );
+    }
+
+    /// Seeding carries the PARENT's environment down and is idempotent — it
+    /// must never rewind a scope that has already pushed turns, which would
+    /// silently drop that scope's own declarations.
+    #[test]
+    fn seed_scope_inherits_once_and_never_rewinds() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut lib =
+            SessionLib::open(SessionId(1), dir.path(), ModuleEnv::standalone_default()).unwrap();
+
+        lib.seed_scope(ScopeId(1), Generation(3));
+        assert_eq!(lib.scope_tip(ScopeId(1)), Generation(3));
+
+        lib.seed_scope(ScopeId(1), Generation(9));
+        assert_eq!(
+            lib.scope_tip(ScopeId(1)),
+            Generation(3),
+            "re-seeding a live scope is a no-op, not a rewind"
+        );
+
+        // Siblings seeded from one parent tip start identical and independent.
+        lib.seed_scope(ScopeId(2), Generation(3));
+        assert_eq!(lib.scope_tip(ScopeId(2)), lib.scope_tip(ScopeId(1)));
     }
 
     #[test]
