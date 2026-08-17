@@ -21,6 +21,7 @@ pub mod machine_state;
 pub mod nursery;
 pub mod old_space;
 pub mod pipeline;
+pub mod scope;
 pub mod signal_safety;
 pub mod stack_map;
 pub mod yield_type;

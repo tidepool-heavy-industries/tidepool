@@ -243,7 +243,17 @@ real turns make restart cost painful.
 Messages to live branches (operator amends a branch's instruction or cancels
 a dead-end subtree mid-turn, over the swarm's mailbox substrate — nudges as
 reconciliation hints, never rollbacks; wants green-threads select loops;
-operator-endorsed for later, after C3 dogfood). Resumable child
+operator-endorsed for later, after C3 dogfood). A major/compacting OldSpace pass: C2's scope
+retirement deregisters a retired binding's GC root but reclaims no tenured
+bytes (no such pass exists), so a long-resident session's OldSpace grows
+monotonically with total mounts ever made, bounded per turn and reclaimed
+only at machine drop — see
+[21-c2-scope-trees.md](21-c2-scope-trees.md) §2.2. Emitting
+`cache_control` breakpoints (causing provider prefix-cache hits rather than
+merely digesting the prefix); no provider impl parses cached-token metrics
+today, so measured cache reuse is not verifiable from our side — C2 records
+digests and byte counts instead, and C6's friction log should not claim
+otherwise. Resumable child
 continuations as values; durable context-tree checkpointing;
 fresh-vs-forked descendant policies; any universal reasoning ontology;
 model-authored drivers; distributed execution; public extraction before N=1
