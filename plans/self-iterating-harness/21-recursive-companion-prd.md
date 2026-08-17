@@ -270,7 +270,17 @@ stability.
    into another's, exhaustively matching an ancestor-declared rich sum, or
    consuming child-local detail through an ancestor-known eliminator.
    Rendered views otherwise.
-4. Precondition discovered in C3 (mechanism and policy agreeing from
+4. C4 preconditions (path review, 2026-08-19): introduce the
+   authority-bearing stage as a DISTINCT sum before implementing it —
+   `FoldProduct = Narrative FoldProposal | ProposedEdits (NonEmpty EditPlan)`
+   with a consuming `ApprovedEdits` capability from the operator/receipt
+   path required before `apply`, so a textual algebra answer can never be
+   treated as authorization to mutate. And when persistence expands beyond
+   run summaries: the live/durable seed split — a `ContextRef`-carrying
+   seed must be untypeable as checkpoint data (`DurableNodeSeed` without
+   the capability), so a stale context capability cannot be serialized and
+   replayed as durable state.
+5. Precondition discovered in C3 (mechanism and policy agreeing from
    independent directions): a node's ALGEBRA cannot receive a value its own
    COALGEBRA minted — `ThoughtF` has no task slot to carry it (Swarm's
    `PlanF` does), relaying through child seeds would launder a capability
