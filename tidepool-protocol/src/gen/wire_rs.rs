@@ -275,6 +275,7 @@ fn emit_identity_impl(t: &TypeDef, out: &mut String) {
                         "    /// An untrusted raw value becomes a wire id here — infallibly:\n",
                     );
                     out.push_str("    /// this identity carries no string policy.\n");
+                    out.push_str("    #[must_use]\n");
                     out.push_str(&format!(
                         "    pub fn new({rust_field}: impl Into<String>) -> Self {{\n"
                     ));
@@ -288,6 +289,9 @@ fn emit_identity_impl(t: &TypeDef, out: &mut String) {
                         "    /// The trust boundary: an untrusted raw value becomes a wire id here or\n",
                     );
                     out.push_str("    /// not at all.\n");
+                    out.push_str("    ///\n");
+                    out.push_str("    /// # Errors\n");
+                    out.push_str("    /// [`WireError::Empty`] when the raw value is empty.\n");
                     out.push_str(&format!(
                         "    pub fn new({rust_field}: impl Into<String>) -> Result<Self, WireError> {{\n"
                     ));
@@ -314,6 +318,13 @@ fn emit_identity_impl(t: &TypeDef, out: &mut String) {
                         "    /// The trust boundary: an untrusted raw value becomes a wire id here or\n",
                     );
                     out.push_str("    /// not at all.\n");
+                    out.push_str("    ///\n");
+                    out.push_str("    /// # Errors\n");
+                    out.push_str(&format!(
+                        "    /// [`WireError::InvalidSegment`] unless the raw value is a safe single\n\
+                         \x20   /// path component: non-empty, at most {max_len} bytes, every byte\n\
+                         \x20   /// ascii-alphanumeric or one of `{extra_allowed}`.\n"
+                    ));
                     out.push_str(&format!(
                         "    pub fn new({rust_field}: impl Into<String>) -> Result<Self, WireError> {{\n"
                     ));
@@ -338,6 +349,8 @@ fn emit_identity_impl(t: &TypeDef, out: &mut String) {
                 }
             }
             out.push('\n');
+            out.push_str("    /// The validated payload.\n");
+            out.push_str("    #[must_use]\n");
             out.push_str("    pub fn as_str(&self) -> &str {\n");
             out.push_str(&format!("        &self.{rust_field}\n"));
             out.push_str("    }\n");
@@ -347,10 +360,17 @@ fn emit_identity_impl(t: &TypeDef, out: &mut String) {
                 matches!(validation, Validation::None),
                 "{wire_name}: an Int identity cannot carry a string validation policy"
             );
+            out.push_str(
+                "    /// An untrusted raw value becomes a wire id here — infallibly: an\n",
+            );
+            out.push_str("    /// integer identity carries no policy.\n");
+            out.push_str("    #[must_use]\n");
             out.push_str(&format!("    pub fn new({rust_field}: i64) -> Self {{\n"));
             out.push_str(&format!("        Self {{ {rust_field} }}\n"));
             out.push_str("    }\n");
             out.push('\n');
+            out.push_str("    /// The payload.\n");
+            out.push_str("    #[must_use]\n");
             out.push_str("    pub fn as_i64(&self) -> i64 {\n");
             out.push_str(&format!("        self.{rust_field}\n"));
             out.push_str("    }\n");

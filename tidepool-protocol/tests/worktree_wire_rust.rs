@@ -187,6 +187,11 @@ pub struct WtWorktreeSummary {
 impl WtWorktreeId {
     /// The trust boundary: an untrusted raw value becomes a wire id here or
     /// not at all.
+    ///
+    /// # Errors
+    /// [`WireError::InvalidSegment`] unless the raw value is a safe single
+    /// path component: non-empty, at most 128 bytes, every byte
+    /// ascii-alphanumeric or one of `-_`.
     pub fn new(raw: impl Into<String>) -> Result<Self, WireError> {
         let raw = raw.into();
         if raw.is_empty()
@@ -202,6 +207,8 @@ impl WtWorktreeId {
         Ok(Self { raw })
     }
 
+    /// The validated payload.
+    #[must_use]
     pub fn as_str(&self) -> &str {
         &self.raw
     }
@@ -210,6 +217,9 @@ impl WtWorktreeId {
 impl WtGitOid {
     /// The trust boundary: an untrusted raw value becomes a wire id here or
     /// not at all.
+    ///
+    /// # Errors
+    /// [`WireError::Empty`] when the raw value is empty.
     pub fn new(raw: impl Into<String>) -> Result<Self, WireError> {
         let raw = raw.into();
         if raw.is_empty() {
@@ -220,6 +230,8 @@ impl WtGitOid {
         Ok(Self { raw })
     }
 
+    /// The validated payload.
+    #[must_use]
     pub fn as_str(&self) -> &str {
         &self.raw
     }
@@ -228,6 +240,9 @@ impl WtGitOid {
 impl WtGitRef {
     /// The trust boundary: an untrusted raw value becomes a wire id here or
     /// not at all.
+    ///
+    /// # Errors
+    /// [`WireError::Empty`] when the raw value is empty.
     pub fn new(raw: impl Into<String>) -> Result<Self, WireError> {
         let raw = raw.into();
         if raw.is_empty() {
@@ -238,6 +253,8 @@ impl WtGitRef {
         Ok(Self { raw })
     }
 
+    /// The validated payload.
+    #[must_use]
     pub fn as_str(&self) -> &str {
         &self.raw
     }
@@ -246,6 +263,9 @@ impl WtGitRef {
 impl WtBranchName {
     /// The trust boundary: an untrusted raw value becomes a wire id here or
     /// not at all.
+    ///
+    /// # Errors
+    /// [`WireError::Empty`] when the raw value is empty.
     pub fn new(raw: impl Into<String>) -> Result<Self, WireError> {
         let raw = raw.into();
         if raw.is_empty() {
@@ -256,6 +276,8 @@ impl WtBranchName {
         Ok(Self { raw })
     }
 
+    /// The validated payload.
+    #[must_use]
     pub fn as_str(&self) -> &str {
         &self.raw
     }
