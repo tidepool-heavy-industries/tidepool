@@ -1,0 +1,155 @@
+//! THE FAILING HALF of the nested-`async` reproducer (PRD 20 S1-L4).
+//!
+//! `#[ignore]`d and fully documented, NOT a sanctioned red: it should be one
+//! attribute removal from being the fix's acceptance test. Its control — the
+//! passing structural half — is
+//! `tidepool-runtime/tests/green_thread_representation.rs`'s
+//! `a_green_thread_can_fork_another_green_thread`. Read the two together;
+//! neither means much alone.
+//!
+//! # What fails
+//!
+//! A green thread whose body itself calls `async` reports GC-forwarding
+//! corruption, surfacing as an application-of-non-closure / case trap rather
+//! than a clean error. Bisection-confirmed: removing the nesting from this
+//! shape makes it pass, restoring it reproduces. Observed output, verbatim:
+//!
+//! ```text
+//! [JIT] App: fun_ptr=0x… has tag 255 (UNKNOWN) — expected Closure!
+//! [CASE TRAP] in compiled fn: loop_2_lambda_399
+//!
+//! panicked at resident.rs: RootCustody dropped without being consumed —
+//! ValueHandle(3)'s custody was lost (never delivered via resume_handle,
+//! never mounted).
+//! ```
+//!
+//! **The custody panic is a CASCADE, not the bug.** It is the servicing path
+//! unwinding past a delivery after the case trap has already fired, and the
+//! token correctly reporting that a value never arrived. Chase the `tag 255`
+//! line; the custody message is downstream of it. (It is still worth having:
+//! without the token the lost delivery would have been silent.)
+//!
+//! The trap fires in `loop_2_lambda_399` — the OUTER authored loop's lambda,
+//! not the nested thread body — so whatever is stale is being applied on the
+//! resumption path, not inside the newly forked thread.
+//!
+//! # Ruled out — the fork crossing itself
+//!
+//! The structural control builds the SAME nesting by hand
+//! (no GHC, no extract) and PASSES, including under
+//! `TIDEPOOL_GC_POISON=1 TIDEPOOL_HEAP_VERIFY=1`. So these are all sound:
+//! `ResidentSession::run_forked`; the sentinel-tenure of a closure at field 1
+//! of a suspended request; `finalized_handle` called on a frame that
+//! `run_forked` ITSELF created, while that frame is still parked; and
+//! multi-level realm nesting. The bug is not in how a nested fork is
+//! STRUCTURED.
+//!
+//! # Still suspect — a collection running while nested frames are parked
+//!
+//! The one variable the control does not reproduce is ALLOCATION. Its bodies
+//! are hand-built and allocate almost nothing, so no collection ever runs;
+//! this fixture's `mapConcurrently` over recursive sums allocates heavily.
+//! Isolating that variable further needs a force-GC injection point the
+//! machine does not expose publicly — deliberately not added here, since it
+//! belongs with whoever owns the rooting discipline.
+//!
+//! # The family, and the first experiment
+//!
+//! This is plausibly one of three members of a single family — **values
+//! crossing machine-lifecycle boundaries while a collection can move them**:
+//!
+//! 1. the tag255-canary bug (allocation during continuation composition
+//!    without retry, fixed by extending the rooting discipline with
+//!    `RootedLocal`/`RootedStack` spans — prior art AND mechanism template);
+//! 2. the settle-boundary thunk bug (an unforced non-closure result crossing
+//!    settle→delivery corrupted on delivery; fixed in-lane by forcing to WHNF
+//!    at the settle site, documented on `Tidepool.Async`);
+//! 3. this one.
+//!
+//! Hunt the family, not the instance. **The pointed first experiment: what
+//! roots a nested thread's not-yet-forced body while a collection runs?**
+//! That is the one span the structural control never puts under pressure.
+//!
+//! GHC-heavy: needs `TIDEPOOL_EXTRACT` + the with-packages GHC on PATH.
+
+use std::sync::Arc;
+
+mod support;
+
+use tidepool_handlers::ConsoleHandler;
+use tidepool_harness::engine::EngineConfig;
+use tidepool_harness::log::LogHeader;
+use tidepool_harness::provider::DynModelProvider;
+use tidepool_harness::replay::ReplayProvider;
+use tidepool_harness::{
+    answerer_decls, load_harness_source, Harness, LogObserver, SelfHarnessDriver,
+};
+
+fn repo_root() -> std::path::PathBuf {
+    std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("tidepool-harness has a parent (the repo root)")
+        .to_path_buf()
+}
+
+fn fixtures_dir() -> std::path::PathBuf {
+    repo_root().join("tidepool-harness/tests/fixtures")
+}
+
+/// A green thread's body forks another green thread.
+///
+/// Remove `#[ignore]` to turn this into the fix's acceptance test — that is
+/// the intended lifecycle, and the reason it is ignored-with-documentation
+/// rather than deleted or left red.
+#[ignore = "chartered gap: nested async corrupts under GC — see this file's module doc for \
+            the ruled-out/still-suspect split and the first experiment"]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_green_thread_body_can_fork_another_green_thread() {
+    support::require_extract();
+    let _cache_guard = support::isolate_cache();
+
+    let agent_cfg = EngineConfig::from_decls(
+        answerer_decls(),
+        repo_root().join("haskell/lib"),
+        Some(fixtures_dir()),
+    )
+    .expect("answerer engine config");
+    let provider: Arc<dyn DynModelProvider> = Arc::new(ReplayProvider::new(Vec::new()));
+    let writer = tidepool_harness::log::LogWriter::create(
+        std::env::temp_dir().join(format!("nested-async-{}.jsonl", std::process::id())),
+        &LogHeader {
+            prelude_hash: "nested-async".into(),
+            extract_fingerprint: "nested-async".into(),
+            harness_version: "test".into(),
+        },
+    )
+    .expect("log writer");
+    let agent = Arc::new(Harness::new(writer, agent_cfg, provider).expect("agent harness boots"));
+    let mut driver = SelfHarnessDriver::new(agent, Arc::new(LogObserver));
+    driver.set_console_handler(ConsoleHandler);
+
+    let source = load_harness_source(&fixtures_dir().join("NestedAsyncHarness.hs"))
+        .expect("fixture harness loads");
+    let outcome = driver
+        .run_one_cycle(&source, None)
+        .await
+        .expect("a green thread's body must be able to fork another green thread");
+
+    let state = &outcome.state_json;
+    assert_eq!(
+        state.get("runs").and_then(|v| v.as_i64()),
+        Some(1),
+        "the loop completed exactly once, got {state:?}"
+    );
+    // `nestedWork n = (sumTo n * 10) + 1` over `[3, 1, 2]`, in ORIGINAL order.
+    let results: Vec<i64> = state
+        .get("nestedResults")
+        .and_then(|v| v.as_array())
+        .map(|a| a.iter().filter_map(serde_json::Value::as_i64).collect())
+        .unwrap_or_default();
+    assert_eq!(
+        results,
+        vec![61, 11, 31],
+        "nested threads' results must come back in the ORIGINAL list order, got {state:?}"
+    );
+}
