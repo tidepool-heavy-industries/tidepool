@@ -1783,6 +1783,28 @@ macro_rules! worktree_effect_def {
 /// ordering is Haskell's own sequencing over a FIFO drain; a handler that
 /// suspends is an ordinary suspension of the resident; a handler that fails
 /// fails the enclosing scope by ordinary means.
+///
+/// ## `nextEvent` / `after` (PRD 20, S1-L3) — the blocking sibling
+///
+/// `RepoEventAwait` is `RepoEventDrain` plus a timeout: it BLOCKS at the
+/// handler (loop of reconcile-pass / check-queue / bounded sleep) until the
+/// subscription has queued something or the deadline elapses, and an elapsed
+/// deadline is an EMPTY batch — typed data, not an `EventError`. `nextEvent`
+/// is subscribe → block-await → unsubscribe, the one-shot sibling of
+/// `withHandler` sharing its registry, no-replay rule, queue bound, and
+/// loud-overflow semantics, but with no handler callback and no
+/// caller-supplied timeout of its own.
+///
+/// Deadlines ride the SAME registry as repository watches: `WatchDeadline`
+/// carries a RELATIVE millisecond duration, fixed to an absolute deadline by
+/// the RUNTIME at `subscribe()` time — `after` itself is pure data
+/// construction, no effect, no row dependency (unlike
+/// `subagent_effect_def!`'s genuine `Worktree` requirement, `RepoEvent`
+/// already ships in rows with no `Time` handler, and `after` must not break
+/// them) — and fires exactly one `Tick`, queued directly onto the one
+/// subscription that armed it, never broadcast, so
+/// `nextEvent (someEvent <|> after ms)` is an ordinary select with a timeout
+/// branch.
 #[macro_export]
 macro_rules! event_effect_def {
     ($project:path) => {
@@ -1802,7 +1824,14 @@ macro_rules! event_effect_def {
                 "suspend), runs one handler at a time per subscription with later ",
                 "observations queued in observation order, and on exit closes intake, ",
                 "drains, then unregisters. Handler failure fails the enclosing scope. ",
-                "Queue overflow fails loudly — commits are never silently dropped.",
+                "Queue overflow fails loudly — commits are never silently dropped. ",
+                "`nextEvent event` blocks until the FIRST matching observation (or ",
+                "forever): subscribe, block-await, unsubscribe — the one-shot sibling ",
+                "of `withHandler`, no caller-supplied timeout. `after ms` is a ",
+                "one-shot deadline event, `ms` milliseconds from the moment it is ",
+                "SUBSCRIBED (not from the `after` call itself), that fires exactly one ",
+                "`Tick`, so `nextEvent (someEvent <|> after ms)` reads as an ordinary ",
+                "select with a timeout branch.",
             ],
             type_defs [
                 "data EventId = EventId Int deriving (Show, Eq)",
@@ -1810,15 +1839,23 @@ macro_rules! event_effect_def {
                 // What the runtime watches. One entry per (worktree, kind) pair;
                 // `<|>` concatenates, so a merged Event is ONE subscription over
                 // several watches rather than several subscriptions.
-                "data Watch = WatchCommit WorktreeId | WatchHead WorktreeId deriving (Show, Eq)",
+                // `WatchDeadline` carries a RELATIVE millisecond duration: the
+                // runtime fixes the absolute deadline at `subscribe()` time
+                // (`now + ms`), so `after` itself needs no effect of its own.
+                "data Watch = WatchCommit WorktreeId | WatchHead WorktreeId | WatchDeadline Int deriving (Show, Eq)",
                 "data HeadChangeKind = Advanced [GitOid] | Amended GitOid GitOid | Rewritten [(GitOid, GitOid)] | Rewound | Switched | UnknownChange deriving (Show, Eq)",
                 "data HeadChangeReceipt = HeadChangeReceipt { headWorktree :: WorktreeId, oldHead :: Maybe GitOid, newHead :: GitOid, kind :: HeadChangeKind, headBranch :: Maybe BranchName, observedAtMs :: Int } deriving (Show, Eq)",
                 "data CommitReceipt = CommitReceipt { commitWorktree :: WorktreeId, oid :: GitOid, parents :: [GitOid], subject :: Text, author :: Text, committedAtMs :: Int, files :: [Text] } deriving (Show, Eq)",
+                // The payload a fired deadline watch delivers. `firedAtMs` is the
+                // wall-clock moment the runtime observed it as due.
+                "data Tick = Tick { firedAtMs :: Int } deriving (Show, Eq)",
                 // The wire shape one reconciled fact crosses as. A normal commit
                 // produces one of each SHARING an EventId — that sharing is how a
                 // consumer tells "two views of one change" from "two changes", so
                 // the id rides on the wire rather than being minted per view.
-                "data RepositoryEvent = ObservedCommit EventId CommitReceipt | ObservedHeadChange EventId HeadChangeReceipt deriving (Show, Eq)",
+                // `ObservedTick` is never broadcast — it is queued directly onto
+                // the one subscription that armed the deadline.
+                "data RepositoryEvent = ObservedCommit EventId CommitReceipt | ObservedHeadChange EventId HeadChangeReceipt | ObservedTick EventId Tick deriving (Show, Eq)",
                 "data Observed a = Observed { eventId :: EventId, value :: a } deriving (Show, Eq)",
                 // An Event is a DESCRIPTION: what to watch, plus how to project a
                 // raw observation into the author's type. Keeping the projection
@@ -1843,6 +1880,15 @@ macro_rules! event_effect_def {
                   ret "SubscriptionId", errors EventError },
                 { ctor RepoEventDrain, method repo_event_drain,
                   args { subscription: "SubscriptionId" as tidepool_bridge_effects::EvSubscriptionId },
+                  ret "[RepositoryEvent]", errors EventError },
+                // BLOCKS at the handler until the subscription has >= 1
+                // observation or `timeoutMs` elapses (negative == no
+                // deadline). An elapsed timeout is an EMPTY batch, never an
+                // error — the same typed distinction `RepoEventDrain` already
+                // makes between "nothing yet" and a real failure, just with a
+                // deadline attached. Poison/overflow semantics are unchanged.
+                { ctor RepoEventAwait, method repo_event_await,
+                  args { subscription: "SubscriptionId" as tidepool_bridge_effects::EvSubscriptionId, timeoutMs: "Int" as i64 },
                   ret "[RepositoryEvent]", errors EventError },
                 { ctor RepoEventUnsubscribe, method repo_event_unsubscribe,
                   args { subscription: "SubscriptionId" as tidepool_bridge_effects::EvSubscriptionId },
@@ -1904,6 +1950,55 @@ macro_rules! event_effect_def {
                        "  drainSubscription ev handler sub",
                        "  send (RepoEventUnsubscribe sub) >>= liftEither",
                        "  pure r"] },
+                { raw ["-- | Block until `sub` has queued at least one observation, or",
+                       "-- `timeoutMs` elapses (negative blocks with no deadline). An elapsed",
+                       "-- timeout is an EMPTY list — distinguishable from a real batch, never",
+                       "-- an error; poison/source-loss still fail via the `Either`.",
+                       "awaitSubscriptionRaw :: SubscriptionId -> Int -> M (Either EventError [RepositoryEvent])",
+                       "awaitSubscriptionRaw sub timeoutMs = send (RepoEventAwait sub timeoutMs)"] },
+                { raw ["eventIdOf :: RepositoryEvent -> EventId",
+                       "eventIdOf (ObservedCommit eid _) = eid",
+                       "eventIdOf (ObservedHeadChange eid _) = eid",
+                       "eventIdOf (ObservedTick eid _) = eid"] },
+                { raw ["-- | The first batch entry `ev` projects, paired with its own EventId,",
+                       "-- in observation order.",
+                       "firstMatch :: Event a -> [RepositoryEvent] -> Maybe (Observed a)",
+                       "firstMatch _ [] = Nothing",
+                       "firstMatch ev (o:os) = case ev.eventProject o of",
+                       "  Just a -> Just (Observed (eventIdOf o) a)",
+                       "  Nothing -> firstMatch ev os"] },
+                { raw ["-- | Block until `ev` produces its first matching observation:",
+                       "-- subscribe, block-await, then ALWAYS unsubscribe. The one-shot",
+                       "-- sibling of `withHandler` — same registry, no-replay rule, queue",
+                       "-- bound, and loud-overflow semantics — with no caller timeout: compose",
+                       "-- a bound wait with `after` and `<|>`. The await itself blocks at the",
+                       "-- HANDLER; the retry here only ever re-loops when a batch produced by",
+                       "-- a merged, multi-source Event happens to carry no entry `ev` itself",
+                       "-- projects, which is not spin-polling — each iteration is still one",
+                       "-- genuine blocking round trip.",
+                       "nextEvent :: Event a -> M (Observed a)",
+                       "nextEvent ev = do",
+                       "  sub <- send (RepoEventSubscribe ev.eventWatches) >>= liftEither",
+                       "  r <- awaitFirst ev sub",
+                       "  send (RepoEventUnsubscribe sub) >>= liftEither",
+                       "  pure r"] },
+                { raw ["awaitFirst :: Event a -> SubscriptionId -> M (Observed a)",
+                       "awaitFirst ev sub = do",
+                       "  batch <- awaitSubscriptionRaw sub (-1) >>= liftEither",
+                       "  case firstMatch ev batch of",
+                       "    Just observed -> pure observed",
+                       "    Nothing -> awaitFirst ev sub"] },
+                { raw ["-- | A deadline `ms` milliseconds from the moment it is SUBSCRIBED (not",
+                       "-- from this call — `after` is pure data construction, no effect of its",
+                       "-- own, so it needs no `Time` handler in the row), as a one-shot Event:",
+                       "-- it fires exactly one Tick through the SAME subscription registry as",
+                       "-- repository watches, so `nextEvent (someEvent <|> after ms)` reads as",
+                       "-- an ordinary select with a timeout branch.",
+                       "after :: Int -> M (Event Tick)",
+                       "after ms = pure (Event [WatchDeadline ms] projectTick)"] },
+                { raw ["projectTick :: RepositoryEvent -> Maybe Tick",
+                       "projectTick (ObservedTick _ t) = Just t",
+                       "projectTick _ = Nothing"] },
             ],
         }
     };
