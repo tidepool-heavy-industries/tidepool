@@ -11,6 +11,10 @@
 //! generator reads them. See the scaffold doc §3.5.
 
 use crate::hs::{render_signature, HsType};
+pub use crate::types::{
+    AdapterKind, DomainMap, IdentityPayload, JsonInstance, RecordField, SumVariant, TypeDef,
+    TypeShape, Validation, WireDerive, WireDerives,
+};
 
 // ---------------------------------------------------------------------------
 // Effect
@@ -100,12 +104,49 @@ impl Effect {
             .collect()
     }
 
-    /// Every rendered `type_defs` entry, in emission order: the authored
-    /// supporting declarations first, then the derived error ADT — matching the
-    /// order the hand-written projection emits them.
+    /// Look up a supporting type declaration by its HASKELL name.
+    #[must_use]
+    pub fn type_def(&self, name: &str) -> Option<&TypeDef> {
+        self.type_defs.iter().find(|t| t.name == name)
+    }
+
+    /// The Rust wire spelling of a Haskell type appearing in this effect's own
+    /// `type_defs`.
+    ///
+    /// This is the ONLY place a `Named` field type acquires a Rust name: the
+    /// declaration that defines it is asked. There is no second string to keep
+    /// in step, which is the same property [`RecordField`] gives a field name.
+    ///
+    /// # Panics
+    /// Panics when `name` is not declared by this effect. That is a
+    /// generation-time failure by design — an under-specified schema must not
+    /// produce output.
+    #[must_use]
+    pub fn wire_rust_of(&self, name: &str) -> &'static str {
+        self.type_def(name)
+            .unwrap_or_else(|| {
+                panic!(
+                    "{}: no type_defs entry declares `{name}`, so it has no wire Rust \
+                     spelling. A type from another mechanism (a `CoreRecord` bridged \
+                     record) cannot appear in a generated wire struct.",
+                    self.name
+                )
+            })
+            .wire_name()
+    }
+
+    /// Every rendered `type_defs` entry, in emission order: every shape
+    /// declaration in schema order, then every `ToJSON` instance in schema
+    /// order, then the derived error ADT.
+    ///
+    /// That order is not a preference — it is the order the hand-written
+    /// projection already emits, and the Class A `effect_decls.txt` golden is
+    /// what proves it. An effect with empty `type_defs` (Exec, Journal) renders
+    /// exactly as before: the error ADT alone, or nothing.
     #[must_use]
     pub fn type_def_texts(&self) -> Vec<String> {
-        let mut out: Vec<String> = self.type_defs.iter().map(TypeDef::render).collect();
+        let mut out: Vec<String> = self.type_defs.iter().map(TypeDef::render_decl).collect();
+        out.extend(self.type_defs.iter().filter_map(TypeDef::render_json));
         if let Some(e) = &self.errors {
             out.push(e.render());
         }
@@ -133,6 +174,50 @@ impl Effect {
                 self.default_row_args.len(),
                 self.type_params.len()
             ));
+        }
+
+        // --- supporting type declarations ---------------------------------
+        let mut td_seen: Vec<&str> = Vec::new();
+        let mut wire_seen: Vec<&str> = Vec::new();
+        for t in &self.type_defs {
+            if td_seen.contains(&t.name) {
+                errs.push(format!("{}: two type_defs named `{}`", self.name, t.name));
+            }
+            if wire_seen.contains(&t.wire_name()) {
+                errs.push(format!(
+                    "{}: two type_defs claim the wire Rust name `{}`",
+                    self.name,
+                    t.wire_name()
+                ));
+            }
+            td_seen.push(t.name);
+            wire_seen.push(t.wire_name());
+            errs.extend(
+                t.validate()
+                    .into_iter()
+                    .map(|e| format!("{}: {e}", self.name)),
+            );
+        }
+        // Every `Named` type a declaration REFERENCES must itself be declared
+        // here — otherwise the wire emitter has no Rust spelling for it and
+        // would panic mid-generation. Catching it as a validation error names
+        // every offender at once instead of the first.
+        for t in &self.type_defs {
+            let referenced: Vec<&HsType> = match &t.shape {
+                TypeShape::Record { fields } => fields.iter().map(|f| &f.ty).collect(),
+                TypeShape::Sum { variants } => variants.iter().flat_map(|v| &v.fields).collect(),
+                TypeShape::Identity { .. } => Vec::new(),
+            };
+            for ty in referenced {
+                for n in named_types(ty) {
+                    if !td_seen.contains(&n) {
+                        errs.push(format!(
+                            "{}: {} references `{n}`, which this effect does not declare",
+                            self.name, t.name
+                        ));
+                    }
+                }
+            }
         }
 
         for v in &self.verbs {
@@ -171,8 +256,14 @@ impl Effect {
             };
             let arity = v.args.len();
             match &h.body {
-                HelperBody::Nullary if arity != 0 => errs.push(format!(
-                    "{}: helper {} is nullary but {} takes {arity} argument(s)",
+                HelperBody::Nullary | HelperBody::NullaryLiftEither if arity != 0 => {
+                    errs.push(format!(
+                        "{}: helper {} is nullary but {} takes {arity} argument(s)",
+                        self.name, h.name, v.ctor
+                    ));
+                }
+                HelperBody::NullaryLiftEither if v.errors.is_none() => errs.push(format!(
+                    "{}: helper {} lifts an Either out of {}, which is not errors-tagged",
                     self.name, h.name, v.ctor
                 )),
                 HelperBody::Pointfree if arity != 1 => errs.push(format!(
@@ -301,6 +392,21 @@ impl RustBinding {
     }
 }
 
+/// Every [`HsType::Named`] appearing anywhere inside `ty`.
+fn named_types(ty: &HsType) -> Vec<&'static str> {
+    match ty {
+        HsType::Named(n) => vec![n],
+        HsType::List(t) | HsType::Maybe(t) => named_types(t),
+        HsType::Either(a, b) => {
+            let mut v = named_types(a);
+            v.extend(named_types(b));
+            v
+        }
+        HsType::Tuple(ts) => ts.iter().flat_map(named_types).collect(),
+        _ => Vec::new(),
+    }
+}
+
 /// The mechanical Haskell→Rust type map, or `None` when the type needs an
 /// explicit binding.
 fn derive_rust_type(ty: &HsType) -> Option<String> {
@@ -397,54 +503,6 @@ impl ErrorAdt {
 }
 
 // ---------------------------------------------------------------------------
-// Supporting type declarations
-// ---------------------------------------------------------------------------
-
-/// A supporting Haskell declaration emitted before the GADT.
-///
-/// Phase 1 needs none (Exec's only `type_defs` entry is its derived error ADT),
-/// but the slot is structured from the start so a later lane adds a record
-/// rather than a string.
-#[derive(Clone, Debug)]
-pub enum TypeDef {
-    /// `data R = R { f :: T, … } deriving (Show, Eq)`.
-    Record {
-        /// The type and constructor name.
-        name: &'static str,
-        /// Its fields, in wire order — the order IS the wire contract.
-        fields: Vec<RecordField>,
-    },
-}
-
-/// One field of a record `TypeDef`.
-#[derive(Clone, Debug)]
-pub struct RecordField {
-    /// The Haskell field name.
-    pub name: &'static str,
-    /// Its type.
-    pub ty: HsType,
-}
-
-impl TypeDef {
-    /// The Haskell declaration.
-    #[must_use]
-    pub fn render(&self) -> String {
-        match self {
-            TypeDef::Record { name, fields } => {
-                let fs: Vec<String> = fields
-                    .iter()
-                    .map(|f| format!("{} :: {}", f.name, f.ty.render()))
-                    .collect();
-                format!(
-                    "data {name} = {name} {{ {} }} deriving (Show, Eq)",
-                    fs.join(", ")
-                )
-            }
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
@@ -472,7 +530,7 @@ pub struct Helper {
     pub body: HelperBody,
 }
 
-/// The three thin-wrapper shapes.
+/// The thin-wrapper shapes.
 #[derive(Clone, Debug)]
 pub enum HelperBody {
     /// `v = send Ctor` — a nullary constructor.
@@ -482,6 +540,21 @@ pub enum HelperBody {
     /// `v a b = send (Ctor a b)` — parameters named explicitly, because the
     /// current registry's helpers do not always reuse the argument names.
     Applied(&'static [&'static str]),
+    /// `v = send Ctor >>= liftEither` — a nullary, errors-tagged constructor
+    /// whose helper UNWRAPS the `Either` into the effect monad's failure. The
+    /// derived signature therefore carries the verb's success type bare
+    /// (`listWorktrees :: M [WorktreeSummary]`, not `M (Either …)`).
+    ///
+    /// A shape, not a body: `liftEither` is named once here, in Rust, and there
+    /// is no Haskell source in the schema. Added deliberately in lane 3 — see
+    /// the scaffold doc §11's helper table.
+    ///
+    /// The point-free and applied `liftEither` forms are NOT added, because no
+    /// migrated effect needs them: Worktree's other two `>>= liftEither`
+    /// helpers (`worktreeBranch`, `worktreeHead`) additionally adapt their
+    /// argument through a pure projection, so they would stay unrepresentable
+    /// even with those variants. Adding them now would be speculation.
+    NullaryLiftEither,
 }
 
 impl Helper {
@@ -505,14 +578,27 @@ impl Helper {
             out.push('\n');
         }
         let args: Vec<HsType> = verb.args.iter().map(|a| a.ty.clone()).collect();
+        // `liftEither` consumes the `Either`, so the helper's result is the
+        // verb's SUCCESS type. Every other shape forwards the verb's result as
+        // the verb declares it.
+        let result = match &self.body {
+            HelperBody::NullaryLiftEither => verb.ret.clone(),
+            _ => verb.result_type(),
+        };
         out.push_str(&format!(
             "{} :: {}\n",
             self.name,
-            render_signature(&args, "M", &verb.result_type())
+            render_signature(&args, "M", &result)
         ));
         match &self.body {
             HelperBody::Nullary => {
                 out.push_str(&format!("{} = send {}", self.name, self.ctor));
+            }
+            HelperBody::NullaryLiftEither => {
+                out.push_str(&format!(
+                    "{} = send {} >>= liftEither",
+                    self.name, self.ctor
+                ));
             }
             HelperBody::Pointfree => {
                 out.push_str(&format!("{} = send . {}", self.name, self.ctor));

@@ -10,8 +10,10 @@
 //! That is an acceptance property, not a nicety: if it drifts, the format gate
 //! and the golden gate fight each other.
 
+pub mod adapter_rs;
 pub mod decl_rs;
 pub mod handler_rs;
+pub mod wire_rs;
 
 use crate::schema::Effect;
 
@@ -78,15 +80,30 @@ pub fn header(prefix: &str, what: &str) -> String {
 }
 
 /// Every file generated for `effects`, in a stable order.
+///
+/// The wire and adapter files are emitted only for an effect that actually has
+/// something to put in them — a `type_defs` vocabulary, and a `DomainMap` on at
+/// least one entry. That is not a special case for one effect: Exec and Journal
+/// have empty `type_defs`, so they get no wire module and no adapter module, and
+/// an empty generated file would be worse than none.
 #[must_use]
 pub fn all_files(effects: &[Effect]) -> Vec<GeneratedFile> {
     let mut out = Vec::new();
     for e in effects {
         out.push(decl_rs::file(e));
         out.push(handler_rs::file(e));
+        if wire_rs::has_wire_types(e) {
+            out.push(wire_rs::file(e));
+        }
+        if adapter_rs::has_adapters(e) {
+            out.push(adapter_rs::file(e));
+        }
     }
     out.push(decl_rs::module_index(effects));
     out.push(handler_rs::module_index(effects));
+    if effects.iter().any(wire_rs::has_wire_types) {
+        out.push(wire_rs::module_index(effects));
+    }
     out
 }
 
@@ -113,10 +130,10 @@ pub fn module_name(e: &Effect) -> String {
 /// crate root does `pub use generated::*`, so `tidepool_mcp::exec_decl` keeps
 /// its path); the handler side does not (each effect's own module re-exports
 /// its types, so a second glob here would just be an unused import).
-fn index_body(prefix_what: &str, effects: &[Effect], flatten: bool) -> String {
+fn index_body(prefix_what: &str, modules: &[String], flatten: bool) -> String {
     let mut out = header("//! ", prefix_what);
     out.push('\n');
-    let mut names: Vec<String> = effects.iter().map(module_name).collect();
+    let mut names: Vec<String> = modules.to_vec();
     names.sort();
     for n in &names {
         out.push_str(&format!("pub mod {n};\n"));

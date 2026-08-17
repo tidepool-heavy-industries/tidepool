@@ -23,13 +23,24 @@ pub fn path(e: &Effect) -> String {
 }
 
 /// The `mod`-index for the generated glue modules.
+///
+/// Also lists the generated ADAPTER modules, because they land in the same
+/// directory and a directory has exactly one index. Two generators cannot each
+/// own `generated/mod.rs`, so the one that owns the effect's primary module owns
+/// the index too.
 #[must_use]
 pub fn module_index(effects: &[Effect]) -> GeneratedFile {
+    let mut modules: Vec<String> = effects.iter().map(module_name).collect();
+    for e in effects {
+        if super::adapter_rs::has_adapters(e) {
+            modules.push(super::adapter_rs::module_name(e));
+        }
+    }
     GeneratedFile {
         path: "tidepool-handlers/src/generated/mod.rs".to_string(),
         contents: index_body(
-            "Generated effect request types and dispatch glue",
-            effects,
+            "Generated effect request types, dispatch glue, and domain↔wire adapters",
+            &modules,
             false,
         ),
     }

@@ -41,6 +41,7 @@ pub mod effects;
 pub mod gen;
 pub mod hs;
 pub mod schema;
+pub mod types;
 
 pub use gen::{all_files, GeneratedFile};
 pub use hs::HsType;
