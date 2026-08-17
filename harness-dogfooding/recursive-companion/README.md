@@ -50,13 +50,14 @@ strategy badges), then a one-line receipt (node count, window count, forced
 finishes, failures, gate interventions). The tree is there to inspect, not to
 read as the primary answer.
 
-This slice registers the recursion's root node (`"root"`) through
-`tidepool-web`'s existing multi-node operator GUI
-(`tidepool-selfharness.rs` now calls `spawn_operator_server_multi` instead of
-`spawn_operator_server`) so the surface the driver already renders is what
-the operator opens in a browser when the gate is on. The recursion tree's
-*individual* branch nodes are not yet independently addressable tabs — see
-gap 2 in the design doc.
+`tidepool-selfharness.rs` now calls `spawn_operator_server_multi` instead of
+`spawn_operator_server`, and registers the recursion's root node (`"root"`)
+through `tidepool-web`'s existing multi-node operator GUI — **only when this
+harness is the one loaded**, since until the tree's own node ids can cross from
+Haskell there is nothing routed to that tab, and a single registered node
+rendering no tab strip at all is a property `tidepool-web` deliberately has.
+The recursion tree's *individual* branch nodes are not yet independently
+addressable tabs — see gap 2 in the design doc.
 
 ## Running it
 
