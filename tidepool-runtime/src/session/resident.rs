@@ -860,6 +860,119 @@ where
         self.run_child_pure("apply_finalized", &expr, &table, &env)
     }
 
+    /// Run a handle-rooted BODY as a NEW suspension-capable top-level run under
+    /// `realm` — the green-thread fork entry (PRD 20 S1-L4,
+    /// `plans/self-iterating-harness/20-s1l4-green-threads.md`).
+    ///
+    /// This is a THIRD entry beside [`Self::run_child`]/[`Self::run_child_pure`],
+    /// not a change to either: their refusal of a suspending child
+    /// ([`ResidentError::ChildSuspended`]) is a policy that protects their
+    /// value-shaped signatures and stays exactly as it is. What is new here is
+    /// a run that MAY park, whose parked frame joins the registry beside every
+    /// other, resumable by identity in any order — which is what makes two
+    /// green threads blocked on two different effects genuinely concurrent.
+    ///
+    /// `body` is a `ValueHandle` over a tenured `Int -> M ()` closure — in
+    /// practice the one an `AsyncSpawnWith` suspension left on its parked frame
+    /// (field 1, tenured by the machine's sentinel-keyed scan and minted via
+    /// [`Self::finalized_handle`]). It is applied through the same
+    /// `App(Var, Lit)` synthesis [`Self::apply_finalized`] uses — see that
+    /// method for why the argument crosses as a bare unboxed `Lit` and needs no
+    /// wrapper-constructor id to match. The difference is the DRIVER: this goes
+    /// through `run_fragment_suspendable_parked` (suspension-capable, registry-
+    /// parking) rather than the pure entry, because a green thread's whole
+    /// purpose is to park.
+    ///
+    /// **`realm` is the thread's, and it propagates.** `resume_parked` replays
+    /// a frame's OWN realm, so every later suspension of this thread parks under
+    /// `realm` too — which is what makes `close_realm(realm)` a complete
+    /// cancellation rather than a first-frame one.
+    ///
+    /// The body must END by suspending on `AsyncDoneWith` carrying its result,
+    /// so a thread's value comes back through the same field-1 crossing it went
+    /// out by. Nothing here reads that result: the caller takes it off the
+    /// resulting hole exactly as it takes a `finalize` payload.
+    pub fn run_forked(
+        &mut self,
+        name_hint: &str,
+        body: ValueHandle,
+        realm: RealmId,
+        run_table: Option<&DataConTable>,
+    ) -> Result<ResidentOutcome, ResidentError> {
+        let slot = self
+            .core
+            .machine_mut()
+            .and_then(|m| m.handle_slot(body))
+            .ok_or_else(|| {
+                ResidentError::Run(RuntimeError::Jit(JitError::Effect(EffectError::Handler(
+                    format!(
+                        "run_forked: handle {body:?} is not live (never minted, or its \
+                         realm was already closed)"
+                    ),
+                ))))
+            })?;
+
+        // `App(Var(FORKED_BODY_VAR), 0)`. Same shape and same reasoning as
+        // `apply_finalized`: the Var-miss arm keys the external override on
+        // ExternalEnv MEMBERSHIP, and the argument rides as a bare `Lit` whose
+        // plain `TAG_LIT` object the closure's own Lit-tolerant `I#` alt
+        // accepts. Distinct id from `apply_finalized`'s so the two can never be
+        // confused in a trace.
+        const FORKED_BODY_VAR: tidepool_repr::VarId = tidepool_repr::VarId(0xF4_0000_0002);
+        let mut b = tidepool_repr::TreeBuilder::new();
+        let f = b.push(tidepool_repr::CoreFrame::Var(FORKED_BODY_VAR));
+        let arg = b.push(tidepool_repr::CoreFrame::Lit(
+            tidepool_repr::Literal::LitInt(0),
+        ));
+        let _app = b.push(tidepool_repr::CoreFrame::App { fun: f, arg });
+        let expr = b.build();
+
+        let mut env = ExternalEnv::new();
+        env.insert(FORKED_BODY_VAR, slot.addr());
+
+        let table = run_table
+            .cloned()
+            .unwrap_or_else(|| self.core.session_table().clone());
+        self.core
+            .merge_table(&table)
+            .map_err(ResidentError::TableCollision)?;
+        // A fork requires a live machine by construction (the handle came off a
+        // parked frame on it), so this is a no-op — kept for symmetry with
+        // `run`/`run_bind`.
+        self.core
+            .bootstrap_if_needed(&expr, &table)
+            .map_err(ResidentError::Bootstrap)?;
+        // TOP-LEVEL, not `add_child_fragment_session`: a green thread is not a
+        // child run over a suspended parent's world, it is a peer.
+        let func_id = self
+            .core
+            .add_fragment_session(name_hint, &expr, &env)
+            .map_err(ResidentError::AddFunction)?;
+
+        let ask_tag = self.core.ask_tag();
+        let prefix = self.handled_prefix();
+        // Handle ownership on completion is the SESSION's realm, deliberately:
+        // a result must outlive the thread realm that produced it, since
+        // cancelling or retiring a thread closes that realm while a waiter may
+        // still be holding the value.
+        let owning_realm = self.realm;
+        let outcome = self.on_eval_thread(move |machine, table, handlers, captured| {
+            machine
+                .run_fragment_suspendable_parked(
+                    func_id,
+                    table,
+                    handlers,
+                    captured,
+                    ask_tag,
+                    realm,
+                    ParkKind::Plain,
+                    &prefix,
+                )
+                .map(|o| project_parked(machine, o, owning_realm))
+        })?;
+        Ok(self.classify_parked(outcome, None))
+    }
+
     /// Resume the suspended turn with `answer`, driving the fragment to its next
     /// suspension or completion. Atomic validate-before-consume: `cont_id` must
     /// match the pending continuation or the pending one is untouched

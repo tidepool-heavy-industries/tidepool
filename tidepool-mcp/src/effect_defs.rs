@@ -2299,8 +2299,16 @@ macro_rules! green_effect_def {
                 // see this macro's doc comment. Field 0 is an unused site slot
                 // that keeps the body at index 1.
                 { ctor AsyncSpawnWith, method async_spawn_with,
-                  args { site: "Int" as i64, body: "(Int -> M a)" as tidepool_eval::value::Value },
+                  args { site: "Int" as i64, body: "(Int -> M ())" as tidepool_eval::value::Value },
                   ret "Int" },
+                // How a thread ENDS: its last act is to suspend carrying its
+                // own result at field 1, so the result crosses back by exactly
+                // the mechanism the body crossed out by. A closure result
+                // tenures and rides as a handle; a data result bridges — the
+                // same dichotomy `finalize` already has.
+                { ctor AsyncDoneWith, method async_done_with,
+                  args { site: "Int" as i64, value: "a" as tidepool_eval::value::Value },
+                  ret "()" },
                 // PARKS until any listed thread reaches a terminal state
                 // (settled or cancelled); resumes with the winner's id.
                 { ctor AsyncJoinAnyWith, method async_join_any_with,
@@ -2324,8 +2332,11 @@ macro_rules! green_effect_def {
                 { raw ["-- | Fork a green thread; substrate for 'Tidepool.Async.async'.",
                        "-- The body rides as a lambda so the closure-sentinel scan fires",
                        "-- and the runtime tenures it (see the effect's Rust definition).",
+                       "-- The body is wrapped so its last act is an AsyncDoneWith",
+                       "-- suspension carrying the result — the return trip uses the",
+                       "-- same field-1 crossing as the outbound one.",
                        "asyncSpawn :: M a -> M Int",
-                       "asyncSpawn body = send (AsyncSpawnWith 0 (\\_ -> body))"] },
+                       "asyncSpawn body = send (AsyncSpawnWith 0 (\\_ -> body >>= \\v -> send (AsyncDoneWith 0 v)))"] },
                 { raw ["-- | Park until ANY of these threads reaches a terminal state;",
                        "-- resumes with the id of the one that did.",
                        "asyncJoinAny :: [Int] -> M Int",

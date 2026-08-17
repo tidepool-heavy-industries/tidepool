@@ -39,13 +39,20 @@
 -- A thread's value reaches its waiter by handle, never through JSON, so a
 -- thread may return a closure or a record of functions.
 --
--- == Where this differs from @Control.Concurrent.Async@
+-- == The ONE divergence from @Control.Concurrent.Async@
 --
--- Only in what the row's discipline forces: a thread's own failure is an
--- ordinary 'Either' in its result type rather than an exception, so
--- 'waitCatch' ranges over 'AsyncCancelled' alone and 'wait' fails loudly on a
--- cancelled thread instead of rethrowing.  Every other name means what the
--- package means.
+-- __A thread's own failure is not an exception.__  The row has none: failure
+-- is data (PRD 20's failure-as-data lock), so a thread that can fail says so
+-- in its result type — @'Async' ('Either' MyError r)@ — and you get that
+-- 'Either' back from 'wait' like any other value.
+--
+-- Consequently 'waitCatch' ranges over 'AsyncCancelled' ALONE, rather than
+-- over @SomeException@: cancellation is the only thing that can stop a thread
+-- from behind the author's back.  'wait' on a cancelled thread fails loudly
+-- instead of rethrowing.
+--
+-- That is the whole list.  Every other name here means exactly what the
+-- package means it to mean.
 --
 -- This module is reachable only in rows containing @Green@, and is
 -- auto-imported whenever @Green@ is in the row.  It has nothing to do with

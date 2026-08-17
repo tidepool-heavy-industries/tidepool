@@ -50,22 +50,42 @@ body is a lambda rather than a bare `M a` on purpose: the sentinel scan needs a
 closure to fire, and `async (pure 5)` (a body with no closures anywhere) would
 otherwise take the lossy data bridge. A lambda always fires.
 
-### The one new entry
+### The one new entry — `ResidentSession::run_forked` (landed)
 
-`tidepool-runtime` gains ONE `ResidentSession` method, alongside — never
-replacing — `run_child`/`run_child_pure`. Their refusal of a suspending child
-(`ResidentError::ChildSuspended`) protects existing callers and stays exactly
-as it is; this is a third entry with a different contract:
+`tidepool-runtime` gains ONE method, alongside — never replacing —
+`run_child`/`run_child_pure`. Their refusal of a suspending child
+(`ResidentError::ChildSuspended`) is a policy protecting their value-shaped
+signatures and stays exactly as it is; this is a third entry with a different
+contract:
 
 > **run a handle-rooted body as a NEW suspension-capable top-level run**,
-> under a caller-chosen `RealmId`, materializing its result as a tenured root.
+> under a caller-chosen `RealmId`.
 
 Its body is `apply_finalized`'s expression synthesis — `App(Var(BODY), Lit 0)`
 with `BODY` bound through an `ExternalEnv` to the handle's slot address —
 driven through `run_fragment_suspendable_parked` (the registry-parking,
-suspension-capable entry) instead of `run_fragment_pure`. It returns a
-`ResidentOutcome`: `Completed` with the result's tenured root, or `Suspended`
-with the hole the thread parked on.
+suspension-capable entry) instead of `run_fragment_pure`, and registered as a
+TOP-LEVEL fragment rather than a child (a green thread is a peer, not a run
+over a suspended parent's world). It returns the ordinary `ResidentOutcome`.
+
+**The realm propagates.** `resume_parked` replays a frame's OWN realm, so every
+later suspension of a thread parks under the realm it was forked with. That is
+what makes `close_realm` a complete cancellation rather than a first-frame one,
+and it is a property of the machine, not something the driver maintains.
+
+**Handle ownership on completion is the SESSION's realm, deliberately** — a
+result must outlive the thread realm that produced it, because cancelling or
+retiring a thread closes that realm while a waiter may still hold the value.
+
+### The return trip reuses the outbound mechanism
+
+A thread's last act is to SUSPEND on `AsyncDoneWith` carrying its own result at
+field 1. So the result crosses back by exactly the crossing the body crossed
+out by: a closure result tenures and rides as a `ValueHandle`, a data result
+bridges to a `Value` — the same dichotomy `finalize` already has, serviced by
+the same `finalize_is_closure` / take-handle-or-take-value pair the harness
+already implements. Nothing needs a new outcome type, a result stash, or a
+`ParkKind::Binding` path.
 
 ### GC rooting — verified, not assumed
 
@@ -106,17 +126,27 @@ a function or a record of functions.
 ## The `Green` effect
 
 ```
-AsyncSpawnWith :: Int -> (Int -> M a) -> Green Int   -- body at field 1 (tenured)
-AsyncAwaitWith :: Int -> Green a                     -- park until that thread settles
-AsyncCancel    :: Int -> Green ()                    -- close_realm; idempotent
-AsyncPoll      :: Int -> Green Bool                  -- settled yet? never blocks
+AsyncSpawnWith   :: Int -> (Int -> M ()) -> Green Int  -- body at field 1 (tenured)
+AsyncDoneWith    :: Int -> a -> Green ()               -- a thread's last act; result at field 1
+AsyncJoinAnyWith :: [Int] -> Green Int                 -- park until ANY is terminal; the winner's id
+AsyncStatusWith  :: Int -> Green Int                   -- 0 running, 1 settled, 2 cancelled; never parks
+AsyncResultWith  :: Int -> Green a                     -- a settled thread's result, by handle
+AsyncCancelWith  :: Int -> Green ()                    -- close_realm; idempotent
 ```
 
-`AsyncAwaitWith`'s free `a` is the same shape `finalize`'s free `a` already
+`AsyncResultWith`'s free `a` is the same shape `finalize`'s free `a` already
 has, and `Async a`'s phantom carries the type — the same posture as
-agent-cycles' phantom-typed `AgentHandle`. `Green` goes at the **END** of
-`outer_decls()`; `RunLLMTurn` must stay at index 0
-(`outer_row_suspends_everything`).
+agent-cycles' phantom-typed `AgentHandle`.
+
+Splitting the join into **park-until-terminal** (`AsyncJoinAnyWith`) then
+**read-state** (`AsyncStatusWith`) then **read-value** (`AsyncResultWith`) is
+what makes `waitCatch` race-free: a `cancel` landing while a waiter is parked
+is observed by the state read that follows the wake, never missed. It also
+means the driver only ever constructs primitives (an `Int` id, an `Int` state)
+— the one typed value it moves is the result, and that moves by handle.
+
+`Green` goes at the **END** of `outer_decls()`; `RunLLMTurn` must stay at
+index 0 (`outer_row_suspends_everything`).
 
 ## The driver scheduler
 
