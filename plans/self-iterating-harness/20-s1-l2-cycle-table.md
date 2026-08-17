@@ -533,6 +533,15 @@ the handler is dropped.
   the ONE Haskell edit lane C makes; the rest of that file is lane B's and is
   already correct. `tidepool-handlers/tests/subagent_one_cycle.rs` is the gate
   that this flip preserved behavior — it must be green before and after.
+- **Rewrite `tidepool-handlers/CLAUDE.md`'s "three verbs, one saga, one
+  running agent" section.** Its "One agent at a time" bullet documents the
+  constraint this lane deletes, and its heading counts verbs that are now six.
+  Lane B deliberately left it alone rather than half-updating it — it
+  describes behavior lane C changes, so lane C owns it. State the new shape:
+  the cycle table, per-cycle backends, the capacity bound, and what cancel
+  settles. Keep the two consequences that are still true (model tier is
+  handler configuration; the handler owns the backend and dropping it is what
+  bounds a parked child).
 - `subagent_spawn` / `subagent_begin` / `subagent_resume` keep their EXACT
   current behavior. `subagent_begin` now inserts a `Stepped` entry;
   `subagent_resume` looks the saga up by agent id. Every existing assertion in
@@ -600,7 +609,16 @@ thread scheduling order beyond what `MockControl` pins.
 ```
 cargo check --workspace
 cargo nextest run
-scripts/battery.sh -p tidepool-handlers -E 'test(subagent)'
+scripts/battery.sh -p tidepool-handlers \
+  -E 'binary(subagent_one_cycle) + binary(subagent_tool_loop) + test(handler_)'
 cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --all -- --check
 ```
+
+**`-E 'test(subagent)'` selects ZERO tests** — `subagent_one_cycle` and
+`subagent_tool_loop` are BINARY names, not test names, and the handler's own
+rows are named `handler_*`. `battery.sh` refuses a zero-test run rather than
+reporting a false pass, which is the only reason this was caught rather than
+banked as a green tier. Use the filter above, and check the reported test
+COUNT against what you expected to run — a filter that silently matches
+nothing is the failure mode this line exists to prevent.
