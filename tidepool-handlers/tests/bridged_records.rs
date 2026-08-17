@@ -12,6 +12,11 @@
 //!      friction #25's field-level gap without an LSP daemon / extract run);
 //!   3. golden-checks the generated `Tidepool.Records.Bridged` module against
 //!      the committed stdlib file (regen with `TIDEPOOL_REGEN_BRIDGED=1`).
+//!
+//! A fourth, separate guard (bottom of this file) covers `Tidepool.Records.
+//! Stable` — the stable home for `FsError`/`FileRead`, which can't go
+//! through the `CoreRecord` pipeline above (see `tidepool-mcp/src/
+//! fs_stable.rs`) but needs the exact same drift protection.
 
 use tidepool_bridge::CoreRecord;
 use tidepool_handlers::{
@@ -112,6 +117,68 @@ fn bridged_path() -> std::path::PathBuf {
 fn bridged_records_module_matches_committed_file() {
     let generated = bridged_records_module();
     let path = bridged_path();
+    let regen = std::env::var_os("TIDEPOOL_REGEN_BRIDGED").is_some();
+    let current = std::fs::read_to_string(&path).ok();
+    if regen || current.is_none() {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        std::fs::write(&path, &generated).unwrap();
+        if current.as_deref() != Some(generated.as_str()) && !regen {
+            panic!("wrote missing/updated {} — re-run the test", path.display());
+        }
+        return;
+    }
+    assert_eq!(
+        current.unwrap(),
+        generated,
+        "committed {} is stale vs the generated module — regenerate with \
+         TIDEPOOL_REGEN_BRIDGED=1 cargo test -p tidepool-handlers bridged_records",
+        path.display()
+    );
+}
+
+// --- 4. `Tidepool.Records.Stable` — FsError/FileRead's stable home. --------
+//
+// Not `CoreRecord`-derived (see `tidepool-mcp/src/fs_stable.rs` for why:
+// `FsError`'s Rust enum is codegenerated inside THIS crate, so
+// `tidepool-bridge-effects`, a LOW crate, has no path back to it). The two
+// constants there hand-carry the SAME variant list `fs_effect_def!`'s
+// `errors FsError [...]` block declares (effect_defs.rs) — this test is what
+// catches the two drifting apart.
+
+fn stable_path() -> std::path::PathBuf {
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../haskell/lib/Tidepool/Records/Stable.hs")
+}
+
+#[test]
+fn stable_records_decl_matches_fs_effect_def() {
+    // `FS_ERROR_STABLE_DECL` hand-carries the SAME 5 variants as
+    // `fs_effect_def!`'s `errors FsError [...]` block (effect_defs.rs) — a
+    // renamed/added/removed variant on either side must show up here.
+    // (The Rust `FsError` enum, generated from that SAME block via
+    // `effect_rust_projection!`, is checked independently by every
+    // `FsError::<Ctor>(...)` construction already in `handlers/fs.rs` —
+    // rename a variant there and the crate fails to compile.)
+    for ctor in ["FsNotFound", "FsNotUtf8", "FsSandbox", "FsBadRegex", "FsIo"] {
+        assert!(
+            tidepool_mcp::FS_ERROR_STABLE_DECL.contains(ctor),
+            "stable FsError decl is missing constructor `{ctor}`"
+        );
+    }
+    assert!(tidepool_mcp::FS_ERROR_STABLE_DECL.starts_with("data FsError = "));
+    assert!(tidepool_mcp::FILE_READ_STABLE_DECL.starts_with("data FileRead = "));
+    // `fs_decl()`'s own `type_defs` no longer carries either decl inline —
+    // that's the whole point (a session bind of `[FileRead]` must not see a
+    // fragment-nominal `FsError`/`FileRead`).
+    assert!(tidepool_mcp::fs_decl().type_defs.is_empty());
+}
+
+#[test]
+fn stable_records_module_matches_committed_file() {
+    let generated = tidepool_mcp::stable_records_module();
+    let path = stable_path();
     let regen = std::env::var_os("TIDEPOOL_REGEN_BRIDGED").is_some();
     let current = std::fs::read_to_string(&path).ok();
     if regen || current.is_none() {

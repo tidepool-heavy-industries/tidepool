@@ -17,6 +17,9 @@ pub use effect_decls::*;
 
 mod effect_defs;
 
+mod fs_stable;
+pub use fs_stable::*;
+
 // Effect declarations generated from the `tidepool-protocol` schema. An
 // effect appears here once its whole vertical has migrated; the rest are
 // still expanded from `effect_defs`'s macros (PRD 22: effect at a time).

@@ -26,6 +26,24 @@ handler struct (using `cx.respond`/`respond_list`, or an errors-tagged method
 returning `Result<T, ErrEnum>` for typed failure). A wholly new effect type
 needs a new definition + handler module + a positional union-tag slot.
 
+**Trap: a bridged data record belongs in `Tidepool.Records.Bridged` (or, when
+it embeds an `errors` ADT as a FIELD, `Tidepool.Records.Stable` —
+`fs_effect_def!`'s `stable_errors true`), never inline in a `type_defs`
+literal.** Any `type_defs`/`errors` text a definition emits lands in the
+per-session generated `Tidepool.Effects` module, which is fragment-nominal (a
+fresh one per turn) — the cross-row session-bind guard
+(haskell/src/Tidepool/Translate.hs's `typeMentionsEffectMonad`) rejects ANY
+value whose type mentions a tycon declared there, so an inline record cannot
+survive a session bind (`x <- someVerb ...` reused in a later turn). `FileRead`
+(readGlob's per-file record) shipped this way for a long time harmlessly,
+until a later-landed guard turned the gap into a hard failure the moment
+someone bound it — see `tidepool-mcp/src/fs_stable.rs` for the fix and the
+full story. An `errors` ADT referenced by a bridged record's FIELD (like
+`FileRead.contents :: Either FsError Text`) needs the SAME stable home as the
+record itself — `stable_errors true` is how a definition opts an `errors`
+block out of the inline per-session text without losing its Rust-enum
+generation or per-verb `Either <Err> T` tagging.
+
 the `tidepool` binary only wires the handler stack (`build_base_stack`, called
 from `tidepool/src/stack.rs`); the
 `tidepool-bridge` marshals `Value` ↔ `serde_json::Value`.

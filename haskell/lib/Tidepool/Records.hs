@@ -23,6 +23,8 @@ module Tidepool.Records
   , Commit(..)
   , StatusEntry(..)
   , FileDelta(..)
+  , FsError(..)
+  , FileRead(..)
   ) where
 
 import Prelude (Int, Bool(..), Eq, Show, Maybe(..), (==))
@@ -31,6 +33,15 @@ import Tidepool.Aeson.Value (ToJSON(..), object, (.=))
 -- Wire records: GENERATED from the Rust structs (single source of truth).
 -- Re-exported below so `Tidepool.Prelude` (→ user evals) sees them unchanged.
 import Tidepool.Records.Bridged (Commit(..), StatusEntry(..), FileDelta(..), Proc(..), Hit(..), FileMeta(..))
+-- `FsError`/`FileRead`: single-sourced from Rust the SAME way (see
+-- Tidepool.Records.Stable's own header), just not via the CoreRecord
+-- pipeline — `FileRead.contents` embeds `FsError`, so both need this
+-- stable, always-in-scope home rather than the per-session generated
+-- `Tidepool.Effects` module (a record meant to cross a session bind cannot
+-- mention a fragment-nominal type). Both carry their own `ToJSON` instance
+-- already (unlike the six above, whose instances are hand-written here as
+-- orphans), so nothing further is needed to re-export them.
+import Tidepool.Records.Stable (FsError(..), FileRead(..))
 
 -- | Did the process exit successfully (exit code 0)?
 ok :: Proc -> Bool

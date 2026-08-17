@@ -289,6 +289,103 @@ pub(crate) use error_decl_text;
 /// [`helper_text!`]. The `handler`/`req`/`method` facts (and the reserved
 /// `errors` slot) are Rust-side and ignored here.
 macro_rules! effect_decl_projection {
+    // `stable_errors true` variant of the unparameterized-effect wrapper arm
+    // below — ONLY matched when a definition carries the extra
+    // `stable_errors true,` marker (today: just `fs_effect_def!`). Forwards
+    // to the `stable_errors` main arm instead of the normal one, so every
+    // OTHER effect's invocation (no `stable_errors` token) still matches the
+    // ORIGINAL arms further down, byte-for-byte unchanged.
+    (
+        effect $eff:ident,
+        handler $handler:ident,
+        req $req:ident,
+        decl_fn $decl_fn:ident,
+        $(prompt_card $pc:tt,)?
+        $(helpers_row_polymorphic $hrp:tt,)?
+        description $desc:tt,
+        type_defs $td:tt,
+        errors $errname:ident $evariants:tt,
+        stable_errors true,
+        verbs $verbs:tt,
+        helpers $helpers:tt $(,)?
+    ) => {
+        crate::effect_defs::effect_decl_projection! {
+            effect $eff,
+            handler $handler,
+            req $req,
+            decl_fn $decl_fn,
+            type_params [] default_row_args [],
+            $(prompt_card $pc,)?
+            $(helpers_row_polymorphic $hrp,)?
+            description $desc,
+            type_defs $td,
+            errors $errname $evariants,
+            stable_errors true,
+            verbs $verbs,
+            helpers $helpers,
+        }
+    };
+    // `stable_errors true` main arm: identical to the normal main arm below,
+    // except `type_defs` OMITS the `errors` block's inline `data`/`ToJSON`
+    // text — that text needs a STABLE home instead (some other type meant to
+    // cross session-bind fragments embeds this errors ADT as a FIELD, e.g.
+    // `Fs`'s `FileRead.contents :: Either FsError Text`; a type inlined into
+    // the per-session `Tidepool.Effects` module is fragment-nominal, so a
+    // record meant to survive a session bind cannot mention one — see
+    // haskell/src/Tidepool/Translate.hs's `typeMentionsEffectMonad` and
+    // `tidepool-mcp/src/fs_stable.rs`, which carries this SAME `errname`
+    // block's text into `haskell/lib/Tidepool/Records/Stable.hs` instead).
+    // The Rust-side projection (`effect_rust_projection!`) is unaffected —
+    // it still generates the error enum from the same `errors` block exactly
+    // as before; only where the HASKELL decl text lands changes.
+    (
+        effect $eff:ident,
+        handler $handler:ident,
+        req $req:ident,
+        decl_fn $decl_fn:ident,
+        type_params $tps:tt default_row_args [$($dra:literal),* $(,)?],
+        $(prompt_card $pc:tt,)?
+        $(helpers_row_polymorphic $hrp:tt,)?
+        description [$($desc:literal),* $(,)?],
+        type_defs [$($td:literal),* $(,)?],
+        errors $errname:ident [
+            $($evariant:tt),* $(,)?
+        ],
+        stable_errors true,
+        verbs [
+            $({ ctor $ctor:ident,
+                method $method:ident,
+                args { $($an:ident : $ah:literal as $ar:ty),* $(,)? },
+                ret $ret:literal
+                $(, errors $everr:ident)?
+                $(,)?
+            }),* $(,)?
+        ],
+        helpers [ $($helper:tt),* $(,)? ] $(,)?
+    ) => {
+        pub fn $decl_fn() -> $crate::EffectDecl {
+            $crate::EffectDecl {
+                type_name: stringify!($eff),
+                description: concat!($($desc),*),
+                prompt_card: crate::effect_defs::opt_prompt_card_or_none!($($pc)?),
+                constructors: &[
+                    $( crate::effect_defs::ctor_sig!(
+                        { $eff, $tps, $ctor, [ $($ah),* ], $ret $(, errors $everr)? }
+                    ) ),*
+                ],
+                // `errors $errname`'s decl text is deliberately NOT appended
+                // here — it lives in the stable module instead (see the arm
+                // doc comment above). Any OTHER literal `$td` entries still
+                // ride along normally.
+                type_defs: &[ $($td,)* ],
+                extra_imports: crate::effect_defs::extra_imports_for!($eff),
+                helpers: &[ $( crate::effect_defs::helper_text!($helper) ),* ],
+                type_params: crate::effect_defs::ty_param_names!($tps),
+                default_row_args: &[ $($dra),* ],
+                helpers_row_polymorphic: crate::effect_defs::opt_bool_or_false!($($hrp)?),
+            }
+        }
+    };
     // An unparameterized effect (all but `Finalize`): forward to the arm below
     // with an empty type-parameter list. Two arms rather than one optional
     // slot because the parameters are consumed INSIDE the per-constructor
@@ -1538,13 +1635,17 @@ macro_rules! fs_effect_def {
             req FsReq,
             decl_fn fs_decl,
             description ["Read and write files (sandboxed to server working directory)."],
-            // `FileRead` is the per-file result record `readGlob` yields (records
-            // over tuples). It references `FsError` from the errors block below;
-            // top-level decls in the generated module are order-independent.
-            type_defs [
-                "data FileRead = FileRead { path :: Text, contents :: Either FsError Text } deriving (Show, Eq)",
-                "instance ToJSON FileRead where\n  toJSON (FileRead p c) = object [\"path\" .= p, \"contents\" .= c]",
-            ],
+            // `FileRead` (readGlob's per-file result record) and `FsError`
+            // (below) both live in the STABLE `Tidepool.Records.Stable`
+            // module instead of here (`stable_errors true`, at the bottom of
+            // this block) — NOT inline `type_defs` — because `FileRead`
+            // embeds `FsError` as a FIELD (`contents :: Either FsError
+            // Text`), and a record meant to survive a session bind cannot
+            // mention a type inline in the per-session `Tidepool.Effects`
+            // module (fragment-nominal — see haskell/src/Tidepool/
+            // Translate.hs's `typeMentionsEffectMonad`). See
+            // `tidepool-mcp/src/fs_stable.rs` for both decls' single source.
+            type_defs [],
             // #335 typed-failure ADT. Coarse: `FsNotFound`/`FsNotUtf8` carry the
             // path so callers can dispatch (`Left (FsNotFound _)`); the rest carry
             // a message. `FsSandbox` covers sandbox escapes and the glob boundary
@@ -1557,6 +1658,7 @@ macro_rules! fs_effect_def {
                 { ctor FsBadRegex, fields { detail: "Text" as String }, doc "grep regex failed to compile" },
                 { ctor FsIo,       fields { detail: "Text" as String }, doc "other I/O failure" },
             ],
+            stable_errors true,
             verbs [
                 { ctor FsRead, method fs_read,
                   args { path: "Text" as String },

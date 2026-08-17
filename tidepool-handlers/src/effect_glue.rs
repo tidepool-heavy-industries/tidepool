@@ -31,6 +31,13 @@ macro_rules! effect_rust_projection {
         $(errors $errname:ident [
             $($evariant:tt),* $(,)?
         ],)?
+        // Accepted and ignored here: the Haskell decl projection may route
+        // this errors ADT's `data`/`ToJSON` text to a stable committed
+        // module instead of inline `Tidepool.Effects` (tidepool-mcp/src/
+        // effect_defs.rs's `stable_errors true` arm) — the Rust enum is
+        // generated from the SAME `errors` block above either way, so this
+        // side is unaffected by the flag.
+        $(stable_errors $se:tt,)?
         verbs [
             $({ ctor $ctor:ident,
                 method $method:ident,
