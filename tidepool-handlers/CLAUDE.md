@@ -74,37 +74,69 @@ locked decision on union tags).
   lazy/streaming response channel; if an unbounded source ever needs
   exposure, add explicit pagination at the verb level.
 
-## Subagent handler: three verbs, one saga, one running agent
+## Subagent handler: six verbs, one saga, a bounded cycle table
 
-`SubagentHandler` (`src/handlers/agent.rs`) serves `SubagentSpawn`,
-`SubagentBegin`, and `SubagentResume`. All three drive the SAME saga in
-`tidepool_agent::spawn` — `SubagentSpawn` is the no-tools combinator over
-`begin`/`answer`, not a second implementation.
+`SubagentHandler` (`src/handlers/agent.rs`) serves six verbs over ONE saga
+(`tidepool_agent::spawn`), in three shapes:
 
-The shape worth knowing before you touch it: a child's tool call comes back to
-the parent as a RESULT (`StepToolCall`), the parent's authored Haskell handler
-runs between two effect calls, and `agentResumeRaw` answers it. The Rust
-handler never runs a parent handler and never re-enters the JIT — it cannot
-(`EffectHandler::handle` has no machine handle). See
+- `SubagentSpawn` — the whole saga behind one blocking call.
+- `SubagentBegin`/`SubagentResume` — the same saga driven one stop at a time,
+  for an agent that holds dynamic tools.
+- `SubagentSpawnAsync`/`SubagentAwait`/`SubagentCancel` — the same saga
+  detached onto its own thread.
+
+None of them is a second implementation: all three are combinators over
+`CycleSaga`, and Haskell's `spawnAgent` is itself `spawnAsync` + `awaitAgent`.
+
+**The cycle table.** The handler holds one entry per admitted cycle, keyed by a
+`CycleId` it mints monotonically (what an authored `AgentHandle` wraps).
+An entry is either `Stepped` (a saga + its backend, driven inline by
+`SubagentResume`) or `Async` (its own thread, a result receiver, and the
+canceller taken from its backend *before* the thread started). Backends are
+PER-CYCLE, from a `Box<dyn AgentBackendFactory>`: an `AgentBackend` is a step
+function over one live thread, so two cycles sharing one would interleave their
+replies. `SubagentHandler::new` still takes a single pre-built backend and
+wraps it in a ONE-SHOT factory — its second cycle fails `BackendUnavailable`
+naming the wiring, which is a fact about that wiring and not a policy refusal.
+`with_backends(..)` is the N-cycle constructor.
+
+**The capacity bound.** `with_cycle_capacity(n)` (default 8) counts
+NON-TERMINAL entries. A spawn past it is `SpawnCapacityExhausted { capacityLimit }`,
+refused immediately with nothing allocated behind it — a BOUND, not a backlog,
+so an operator sees the ceiling instead of an invisible queue. Terminal entries
+are RETAINED (an await on a finished cycle must stay distinguishable from an
+await on a typo'd id) but occupy no slot.
+
+**Cancel settles; it does not merely kill.** `SubagentCancel` reaps the
+backend, joins the thread, and THEN takes the substrate mutex briefly to settle
+the binding `Released` — that order, because settling first would hold the lock
+across a reap of unknown duration. Retain-first is locked: nothing is deleted.
+The verb is total (an unknown, already-awaited, or already-cancelled handle is
+a no-op), and a cancelled cycle stays in the table as a terminal entry carrying
+`SpawnCancelled`. Cancel and await race in either order without hanging or
+panicking; the matrix is pinned by `handler_cancel_await_races_reach_typed_terminals`.
+
+The shape worth knowing before you touch the stepped path: a child's tool call
+comes back to the parent as a RESULT (`StepToolCall`), the parent's authored
+Haskell handler runs between two effect calls, and `agentResumeRaw` answers it.
+The Rust handler never runs a parent handler and never re-enters the JIT — it
+cannot (`EffectHandler::handle` has no machine handle). See
 `tidepool-agent/CLAUDE.md` for the seam and
 `plans/post-restart/agent-lanes/lane-codex-live-plan.md` §2 for why.
 
-Two consequences for handler work here:
+Two consequences that survive the cycle table unchanged:
 
 - **Model tier and effort are HANDLER CONFIGURATION** (`with_model_policy`),
   not an authored-surface field. A model budget is granted to an operator, and
   the operator is who wires the handler; an authored call choosing its own tier
   would let any eval spend at any price. (A semantic tier vocabulary on the
   authored surface is PRD 18 open decision 3, still open.)
-- **One agent at a time.** A second `begin` while one is mid-turn is a loud
-  typed failure, not a queue — multi-agent concurrency is chartered later work
-  and a handler that silently supported it would make the untested case
-  reachable by accident.
-
-Cycle-scoped and not `Clone` (the `RepoEventHandler` precedent): it owns a
-boxed backend and a flocked binding table. Dropping it kills the backend
-process, which is the ONLY thing bounding a child parked on an unanswered tool
-call — so a durable mailbox or a cross-cycle agent cannot live in this handler.
+- **The handler owning the backends is what bounds a parked child.** Cycle-scoped
+  and not `Clone` (the `RepoEventHandler` precedent): it owns the cycle table
+  and a flocked binding table. Dropping it kills the backend processes — which
+  is the ONLY thing bounding a child parked on an unanswered tool call — so its
+  `Drop` reaps every live async cycle rather than orphaning threads, and a
+  durable mailbox or a cross-cycle agent still cannot live here.
 
 ## Sandboxing
 

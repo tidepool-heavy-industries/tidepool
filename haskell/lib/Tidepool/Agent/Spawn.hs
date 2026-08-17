@@ -62,7 +62,9 @@
 --
 -- __Scope.__ Two shapes, one saga. 'spawnAgent' and 'spawnAgentWithTools' are
 -- the SYNCHRONOUS form: one call in, one typed outcome or one typed error out,
--- run to completion, with the parent serving tool calls inside it.
+-- run to completion, with the parent serving tool calls inside it. 'spawnAgent'
+-- IS 'spawnAsync' followed by 'awaitAgent' — one implementation, not two, the
+-- same way it was already the zero-tools case of the tool loop.
 -- 'spawnAsync' \/ 'awaitAgent' \/ 'cancelAgent' are the same cycle DETACHED —
 -- spawn hands back an opaque 'AgentHandle' as soon as the cycle is admitted,
 -- await blocks for that one cycle's result, cancel reaps it. Running N children
@@ -162,12 +164,11 @@ data ToolAnswer
     ToolRefused Text
   deriving (Show)
 
--- | The empty tools record: what 'spawnAgent' declares.
---
--- 'spawnAgent' IS 'spawnAgentWithTools' at zero tools, so the no-tools path is
--- the same driver loop rather than a second implementation that could drift
--- from it. Every call a child makes against this record names a tool that was
--- never declared, and is refused.
+-- | The empty tools record: 'spawnAgentWithTools' at ZERO tools, which is how a
+-- child that should call nothing is spawned through the tool loop rather than
+-- through a second implementation that could drift from it. Every call a child
+-- makes against this record names a tool that was never declared, and is
+-- refused.
 data NoTools mode = NoTools
   deriving (Generic)
 
@@ -201,9 +202,7 @@ spawnAgent ::
   (FromJSON r, JsonSchema r) =>
   SpawnSpec ->
   M (Either SpawnError (SpawnOutcome, r))
--- PENDING: this body becomes `spawnAsync @r spec >>= either (pure . Left)
--- (awaitAgent @r)` once the handler's cycle table exists (PRD 20 S1-L2 lane C).
-spawnAgent = spawnAgentWithTools @NoTools @r (ToolRounds 0) NoTools
+spawnAgent spec = spawnAsync @r spec >>= either (pure . Left) (awaitAgent @r)
 
 -- | An opaque, cycle-scoped handle to a running agent, phantom-typed by the
 -- result the agent was spawned to produce.
