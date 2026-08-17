@@ -156,7 +156,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let port: u16 = arg_str(&args, "--port")
             .and_then(|s| s.parse().ok())
             .unwrap_or(4600);
-        let gate = tidepool_web::spawn_operator_server(port).await?;
+        let (state, gate) = tidepool_web::spawn_operator_server_multi(port).await?;
+        // PRD 21 C3 §10.3: register the recursive-companion harness's root
+        // node alongside the default so the multi-node surface can grow a
+        // tab for it. `register_node` is idempotent (re-registering an
+        // existing id reuses its state), so this composes cleanly with C5
+        // (the GUI/typed-UI lane), which is what has to carry a node id from
+        // Haskell so the recursion tree's OWN branch nodes — not just this
+        // literal "root" — can be registered and named from the harness
+        // itself; see PRD 21 C3 §8 gap 2.
+        state.register_node("root");
         driver.set_gate(gate);
     }
 

@@ -57,3 +57,17 @@ roadmap* for the next harness helpers.
   `tidepool-harness/tests/dogfood_harness_typecheck.rs` compiles it against
   exactly that row. Node residency (resident select loops) is S1-L4; the seam
   where it lands is named at the `hyloM` call site and built nowhere.
+- [`recursive-companion/`](recursive-companion/README.md) — **the C3 vertical
+  slice of the recursive companion**
+  ([PRD 21](../plans/self-iterating-harness/21-recursive-companion-prd.md),
+  [C3 design doc](../plans/self-iterating-harness/21-c3-recursive-companion-slice.md)).
+  One root turn as a monadic hylomorphism over `Tidepool.Thought`'s `ThoughtF`:
+  a coalgebra window finalizes a layer (a split into branches, or a local
+  finish), each branch descends recursively from inherited context, and an
+  algebra window folds typed results back up in branch order at every node,
+  leaves included. The operator gets one folded answer with the tree
+  inspectable but subordinate underneath it. Budgets (`maxDepth`/`maxNodes`/
+  `maxFanOut`) and an operator gate (`gatePolicy`) bound the recursion; the
+  scripted acceptance tier runs unattended under `GateOff`, and the live
+  attended/gated scenario is documented but not run — see that harness's own
+  README for the exact launch line.
