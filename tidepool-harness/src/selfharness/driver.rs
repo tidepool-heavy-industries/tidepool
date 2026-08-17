@@ -2491,6 +2491,16 @@ impl SelfHarnessDriver {
                         // the rest of the session realm's life.
                         FinalAnswer::Handle(custody) => GreenResult::Root(custody.into_handle()),
                     });
+                    // Wake any `WatchAsync tid` subscriber exactly once — the
+                    // `Tidepool.Async.waitEvent`/`Tidepool.Event` completion
+                    // watch (PRD 20 S1-L4 wave 2). `records_result` above
+                    // already established this is a genuine Running→Settled
+                    // transition, so this always fires exactly once per
+                    // settle. No-op if `RepoEvent` was never wired —
+                    // `WatchAsync` is unusable without it anyway.
+                    if let Some(h) = self.handlers.event.as_mut() {
+                        h.registry_mut().publish_async_done(tid);
+                    }
                 }
                 self.wake_green_waiters(tid, table, sid, waiters, ready)
             }
@@ -2600,6 +2610,13 @@ impl SelfHarnessDriver {
                                 s.close_realm(realm);
                             })
                             .map_err(|e| DriverError::Session(e.to_string()))?;
+                        // A cancel is a terminal-state transition exactly like
+                        // a settle — `waitEvent` must fire for either, so it
+                        // shares the same publish (see the `AsyncDoneWith` arm
+                        // above).
+                        if let Some(h) = self.handlers.event.as_mut() {
+                            h.registry_mut().publish_async_done(tid);
+                        }
                         self.wake_green_waiters(tid, table, sid, waiters, ready)?;
                     }
                     // Idempotent: a terminal thread's cancel is a no-op.

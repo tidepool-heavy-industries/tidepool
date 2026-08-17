@@ -308,6 +308,23 @@ impl SubscriptionRegistry {
         }
     }
 
+    /// Mint a fresh [`EvEventId`] and broadcast `ObservedAsyncDone` for a
+    /// green thread that just reached a terminal state (settle OR cancel —
+    /// PRD 20 S1-L4 wave 2's completion watch, `WatchAsync`/
+    /// `Tidepool.Async.waitEvent`). Called by the DRIVER's own scheduler
+    /// bookkeeping, never by an authored `RepoEvent` verb — a thread
+    /// settling is not a request/response the Haskell side ever sends, so
+    /// there is no `RepoEventReq` variant for this; the driver reaches
+    /// straight into the registry the moment it decides a thread is
+    /// terminal. Shares `publish`'s broadcast/bound/poison rule.
+    pub fn publish_async_done(&mut self, tid: i64) {
+        self.next_event_id += 1;
+        let id = EvEventId {
+            raw: self.next_event_id,
+        };
+        self.publish(&EvRepositoryEvent::ObservedAsyncDone(id, tid));
+    }
+
     /// Append `event` to EVERY subscription whose watch set selects it.
     ///
     /// BROADCAST, not consumption: an event is not taken by the first observer,
@@ -776,7 +793,14 @@ impl RepoEventHandler {
         Ok(self.registry.subscribe(watches))
     }
 
-    fn repo_event_drain(
+    // `pub` (not `fn`, unlike this module's other tagged-verb methods):
+    // PRD 20 S1-L4 wave 2's driver-side non-blocking await-hole servicing
+    // calls this DIRECTLY, from `tidepool-harness`, as its own poll step —
+    // never `repo_event_await`, whose internal sleep loop would stall the
+    // whole green-thread scheduler. Identical to the `RepoEventDrain` verb
+    // dispatch (same reconcile-then-drain, same bound/poison rule); this is
+    // a visibility widening only, not a second implementation.
+    pub fn repo_event_drain(
         &mut self,
         subscription: EvSubscriptionId,
     ) -> Result<Vec<EvRepositoryEvent>, EventError> {
