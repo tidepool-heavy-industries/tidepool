@@ -174,6 +174,38 @@ test-suite spike-batch
 -- Reaches the extractor through `tidepool-extract-internal` rather than
 -- re-listing src/ modules on its own hs-source-dirs — the whole point of the
 -- internal library is that the extractor compiles ONCE per configuration.
+-- PRD 21 lane C0 — the recursive companion's pure semantic fixture: ThoughtF
+-- (haskell/lib/Tidepool/Thought.hs) and its hyloM-shaped driver, property
+-- tested with QuickCheck. Deliberately independent of
+-- tidepool-extract-internal — this is plain-GHC business logic, not the
+-- extractor pipeline, so it costs no extract compile. QuickCheck itself is
+-- not in the nix with-packages GHC env and resolves from Hackage at the
+-- project's pinned index-state (cabal.project's index-state) — the same
+-- pattern cborg/half already use (see haskell/CLAUDE.md's toolchain
+-- section); cabal.project.freeze grows the matching constraint entries the
+-- first time this stanza is built.
+-- Run: cabal test thought-driver-test  (needs the nix with-packages GHC on
+-- PATH for `text`/`mtl`/`containers`).
+test-suite thought-driver-test
+  type:             exitcode-stdio-1.0
+  main-is:          ThoughtDriverTest.hs
+  hs-source-dirs:   lib, test-thought
+  other-modules:    Tidepool.Thought
+  build-depends:
+    base       >= 4.20 && < 5,
+    text,
+    mtl,
+    containers,
+    QuickCheck >= 2.14 && < 2.16
+  default-language: GHC2024
+  default-extensions:
+    OverloadedStrings
+    LambdaCase
+    DeriveFunctor
+    DeriveFoldable
+    DeriveTraversable
+  ghc-options:      -Wall
+
 test-suite extract-fidelity-test
   type:             exitcode-stdio-1.0
   main-is:          Main.hs
