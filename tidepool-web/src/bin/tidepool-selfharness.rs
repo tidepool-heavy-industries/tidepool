@@ -22,7 +22,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use tidepool_handlers::{
-    ConsoleHandler, EventConfig, ExecHandler, JournalHandler, RepoEventHandler, WorktreeHandler,
+    ConsoleHandler, EventConfig, ExecHandler, RepoEventHandler, WorktreeHandler,
 };
 use tidepool_harness::engine::EngineConfig;
 use tidepool_harness::log::{LogHeader, LogWriter};
@@ -175,21 +175,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     driver.set_worktree_handler(worktree_handler);
     driver.set_event_handler(event_handler);
     driver.set_exec_handler(exec_handler);
-    // The run journal (PRD 20): append-only `record` sink, one file per run
-    // beside the run log. Fold-on-resume is dev-tree v2's job — this process
-    // only ever appends. Minted with `ts` AND this process's pid, not `ts`
-    // alone: `JournalHandler` opens with `OpenOptions::append(true)` and
-    // never refuses an existing path the way `LogWriter::create` does, so two
-    // runs launched within the same wall-clock second would otherwise
-    // silently interleave their records into ONE file instead of each
-    // getting its own.
-    let pid = std::process::id();
-    let run_journal_path = log_dir.join(format!("journal-{ts}-{pid}.jsonl"));
-    driver.set_journal_handler(JournalHandler::new(run_journal_path.clone()));
+    // The run journal (PRD 20 S1-L5): identity comes from the RUN LEASE, not
+    // from this process. `acquire_lease` resumes the run a prior process left
+    // behind (a crash leaves the lease on disk) or mints a fresh one — either
+    // way one journal file per RUN, appended across however many processes the
+    // run takes. Per-process naming would fold nothing and orphan the prior
+    // file, which is exactly what resume exists to avoid.
+    //
+    // `open_run_journal` is the ONE seam: it loads that journal, folds it, and
+    // builds the appending handler seeded past what is already on disk — all
+    // from the lease's single path, so the fold and the appends cannot desync.
+    let acquired = tidepool_harness::acquire_lease(&log_dir)?;
+    let folded = driver.open_run_journal(&acquired.lease)?;
     tracing::info!(
         target: "tidepool_web",
         repo = %source_repo.display(),
-        journal = %run_journal_path.display(),
+        journal = %acquired.lease.journal.display(),
+        run_id = %acquired.lease.run_id,
+        resumed = acquired.resumed,
+        folded_entries = folded,
         "outer effect seam wired (Console/Worktree/RepoEvent/Exec/Journal)"
     );
 
@@ -209,6 +213,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     driver.run_loop(&source, auto).await?;
+
+    // A NORMAL return retires the lease — renamed to `run-<runId>.json`, kept
+    // beside the journal, never deleted — so the next boot mints a fresh run
+    // instead of resuming a finished one. A crash skips this by construction,
+    // which is precisely how the next boot knows to resume.
+    if let Some(retired) = tidepool_harness::retire_lease(&log_dir)? {
+        tracing::info!(
+            target: "tidepool_web",
+            lease = %retired.display(),
+            "run completed; lease retired"
+        );
+    }
 
     Ok(())
 }

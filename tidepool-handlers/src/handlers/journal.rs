@@ -2,8 +2,9 @@
 //!
 //! One JSON line per `record` call — `{seq, kind, key, payload}` — appended
 //! and flushed immediately. No rewrite or compaction code path exists. The
-//! fold API below (`load_journal`/`last_by_key`) is for the swarm driver's
-//! boot-time resume; nothing here wires it in.
+//! fold API below (`load_journal`/`last_by_key`/`last_by_kind_key`) is for the
+//! swarm driver's boot-time resume; nothing here wires it in
+//! (`tidepool_harness::selfharness::resume` is what does).
 
 use std::collections::HashMap;
 use std::fmt;
@@ -37,7 +38,12 @@ pub struct JournalEntry {
 }
 
 impl JournalEntry {
-    fn to_json(&self) -> serde_json::Value {
+    /// The entry's wire shape — the SAME object a journal line carries and
+    /// the same one a boot-time fold ships to the authored side
+    /// (`Tidepool.Resume`'s `ResumeEntry` decodes exactly these four names).
+    /// Public so the fold's encoder reuses this one spelling instead of
+    /// re-deriving it in another crate, where the two could drift apart.
+    pub fn to_json(&self) -> serde_json::Value {
         serde_json::json!({
             "seq": self.seq,
             "kind": self.kind,
@@ -156,10 +162,50 @@ pub fn load_journal(path: &Path) -> Result<Vec<JournalEntry>, JournalLoadError> 
 /// shape a boot-time resume wants: "what do I already know about this
 /// branch/task". Not wired into anything here; the swarm driver injects this
 /// at boot per PRD 20's "Persistence and resume" lean.
+///
+/// Answers a NARROWER question than [`last_by_kind_key`], and both are kept:
+/// this one is "the latest thing recorded about `key`, whatever kind it was",
+/// which is the right answer when a caller's keys carry one kind of fact each.
+/// A caller recording SEVERAL kinds under one key (a `"split"` and an
+/// `"outcome"` for the same branch) wants [`last_by_kind_key`] — this one
+/// collapses them.
 pub fn last_by_key(entries: &[JournalEntry]) -> HashMap<String, JournalEntry> {
     let mut out = HashMap::new();
     for entry in entries {
         out.insert(entry.key.clone(), entry.clone());
+    }
+    out
+}
+
+/// Fold entries down to the last record per `(kind, key)` PAIR — the shape
+/// boot-time resume wants when one key carries several kinds of fact (dev-tree
+/// records a `"split"`, an `"outcome"`, a `"replan"` and a `"rebase"` all under
+/// the same branch name; [`last_by_key`] would collapse the split under the
+/// outcome and lose the recorded plan).
+///
+/// The winner is MAX `seq`, not file position. That is strictly stronger than
+/// "last line wins": it makes the fold ORDER-INSENSITIVE by construction, so
+/// an interleaved append order — or a file a resumed process appended to after
+/// the fact — folds to the same map. A TIE on `seq` (impossible from one
+/// seq-stamped writer; reachable from a hand-written fixture) breaks on FILE
+/// ORDER: the later entry in `entries` wins, so the fold stays total rather
+/// than depending on which duplicate the iteration happened to see first.
+pub fn last_by_kind_key(entries: &[JournalEntry]) -> HashMap<(String, String), JournalEntry> {
+    let mut out: HashMap<(String, String), JournalEntry> = HashMap::new();
+    for entry in entries {
+        let slot = out.entry((entry.kind.clone(), entry.key.clone()));
+        match slot {
+            std::collections::hash_map::Entry::Vacant(v) => {
+                v.insert(entry.clone());
+            }
+            std::collections::hash_map::Entry::Occupied(mut o) => {
+                // `>=`, not `>`: a tie breaks on file order (the later line
+                // wins), which is what makes this total on hand-written input.
+                if entry.seq >= o.get().seq {
+                    o.insert(entry.clone());
+                }
+            }
+        }
     }
     out
 }
@@ -171,19 +217,38 @@ pub fn last_by_key(entries: &[JournalEntry]) -> HashMap<String, JournalEntry> {
 #[derive(Clone)]
 pub struct JournalHandler {
     path: PathBuf,
-    // Monotonic for the lifetime of THIS handler instance, starting at 0 —
-    // not derived from what is already on disk. A resumed run's continuity
-    // across handler instances is a fold-API/driver concern, not a promise
-    // this counter makes.
+    // Monotonic for the lifetime of THIS handler instance, starting wherever
+    // the constructor seeded it — never derived from what is on disk by this
+    // type, which does not read journals. A resumed run's continuity ACROSS
+    // handler instances is a fold-API/driver concern, and
+    // [`JournalHandler::resuming`] is where the driver honors it: it has just
+    // folded the file, so it knows `max(seq) + 1`.
     seq: Arc<AtomicU64>,
 }
 
 impl JournalHandler {
-    /// One journal file per run — the caller picks the path.
+    /// One journal file per run — the caller picks the path. Appends start at
+    /// seq `0`, which is right for a FRESH run. A run continuing a journal a
+    /// prior process already wrote must use [`Self::resuming`] instead: two
+    /// instances both starting at 0 over one file would make the second
+    /// process's first entries indistinguishable from the first process's
+    /// under a max-seq fold.
     pub fn new(path: PathBuf) -> Self {
         Self {
             path,
             seq: Arc::new(AtomicU64::new(0)),
+        }
+    }
+
+    /// The RESUMED-run constructor: append to an existing journal continuing
+    /// from `next_seq` (the driver's `max(seq) + 1` over the entries it just
+    /// folded — `0` when the file was empty or absent, which is exactly
+    /// [`Self::new`]). Opening in append mode is unchanged; nothing here reads
+    /// or rewrites the file.
+    pub fn resuming(path: PathBuf, next_seq: u64) -> Self {
+        Self {
+            path,
+            seq: Arc::new(AtomicU64::new(next_seq)),
         }
     }
 
@@ -388,6 +453,126 @@ mod tests {
         assert_eq!(by_key["branch/a"].kind, "outcome");
         assert_eq!(by_key["branch/a"].payload, serde_json::json!(2));
         assert_eq!(by_key["branch/b"].kind, "split");
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    fn entry(seq: u64, kind: &str, key: &str, payload: i64) -> JournalEntry {
+        JournalEntry {
+            seq,
+            kind: kind.to_string(),
+            key: key.to_string(),
+            payload: serde_json::json!(payload),
+        }
+    }
+
+    /// The whole reason `last_by_kind_key` exists next to `last_by_key`: one
+    /// branch carrying BOTH a recorded split and a recorded outcome keeps
+    /// both facts, where keying on the branch name alone loses the split.
+    #[test]
+    fn by_kind_key_keeps_both_kinds_recorded_under_one_key() {
+        let entries = vec![
+            entry(0, "split", "branch/a", 1),
+            entry(1, "outcome", "branch/a", 2),
+            entry(2, "split", "branch/b", 3),
+        ];
+
+        let folded = last_by_kind_key(&entries);
+        assert_eq!(folded.len(), 3, "got {folded:?}");
+        assert_eq!(
+            folded[&("split".into(), "branch/a".into())].payload,
+            serde_json::json!(1),
+            "the split must survive the outcome recorded under the same key"
+        );
+        assert_eq!(
+            folded[&("outcome".into(), "branch/a".into())].payload,
+            serde_json::json!(2)
+        );
+
+        // The narrower fold is still the honest answer to its own question —
+        // and demonstrably collapses what the pair-keyed one keeps.
+        let by_key = last_by_key(&entries);
+        assert_eq!(by_key.len(), 2);
+        assert_eq!(by_key["branch/a"].kind, "outcome");
+    }
+
+    /// MAX SEQ wins, not file position — which is what makes the fold
+    /// order-insensitive: the same entries in any order fold identically.
+    #[test]
+    fn by_kind_key_takes_max_seq_regardless_of_input_order() {
+        let canonical = vec![
+            entry(0, "split", "a", 10),
+            entry(5, "split", "a", 50),
+            entry(3, "split", "a", 30),
+            entry(2, "outcome", "a", 20),
+        ];
+        let expected = last_by_kind_key(&canonical);
+        assert_eq!(
+            expected[&("split".into(), "a".into())].payload,
+            serde_json::json!(50),
+            "seq 5 must win over the later-in-file seq 3"
+        );
+
+        // Every rotation of the same set folds to the same map.
+        for shift in 1..canonical.len() {
+            let mut shuffled = canonical[shift..].to_vec();
+            shuffled.extend_from_slice(&canonical[..shift]);
+            assert_eq!(
+                last_by_kind_key(&shuffled),
+                expected,
+                "rotation by {shift} folded differently"
+            );
+        }
+    }
+
+    /// A tie on `seq` cannot come from one seq-stamped writer, but a
+    /// hand-written fixture can produce it — the fold must stay total, and
+    /// resolve it on FILE ORDER (the later line wins).
+    #[test]
+    fn by_kind_key_breaks_seq_ties_on_file_order() {
+        let entries = vec![entry(7, "split", "a", 1), entry(7, "split", "a", 2)];
+        let folded = last_by_kind_key(&entries);
+        assert_eq!(
+            folded[&("split".into(), "a".into())].payload,
+            serde_json::json!(2)
+        );
+    }
+
+    /// A resumed run's appends must continue PAST what a prior process left on
+    /// disk. Two handler instances over one file, the second built with
+    /// `resuming(max_seq + 1)`: every seq in the file is distinct and
+    /// increasing, so the max-seq fold can tell the two processes' entries
+    /// apart. (A second `new` would restart at 0 and make them ambiguous.)
+    #[test]
+    fn resuming_continues_seq_across_two_handler_instances() {
+        let path = tmp_file("resuming");
+        let _ = std::fs::remove_file(&path);
+
+        let first = JournalHandler::new(path.clone());
+        for i in 0..3 {
+            first
+                .append("split".into(), format!("k{i}"), serde_json::json!(i))
+                .unwrap();
+        }
+
+        let loaded = load_journal(&path).unwrap();
+        let next_seq = loaded.iter().map(|e| e.seq).max().map_or(0, |m| m + 1);
+        assert_eq!(next_seq, 3);
+
+        let second = JournalHandler::resuming(path.clone(), next_seq);
+        for i in 3..6 {
+            second
+                .append("split".into(), format!("k{i}"), serde_json::json!(i))
+                .unwrap();
+        }
+
+        let entries = load_journal(&path).unwrap();
+        let seqs: Vec<u64> = entries.iter().map(|e| e.seq).collect();
+        assert_eq!(
+            seqs,
+            vec![0, 1, 2, 3, 4, 5],
+            "the resumed handler must continue the sequence, not restart it"
+        );
 
         let _ = std::fs::remove_file(&path);
     }

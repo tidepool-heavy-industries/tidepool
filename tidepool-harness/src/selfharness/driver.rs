@@ -45,6 +45,22 @@
 //! fn`s unchanged (they already blocked a tokio worker before this
 //! conversion); see [`Self::drive_answerer_to_finalize`]'s doc for why they
 //! are not `spawn_blocking`'d.
+//!
+//! # Boot fold and entry selection (PRD 20 S1-L5)
+//!
+//! A run's durable journal is READ here, and only here: `record`
+//! (`Tidepool.Journal`) stays write-only on the authored surface.
+//! [`SelfHarnessDriver::open_run_journal`] loads a run's journal, folds it to
+//! the last entry per `(kind, key)`, and builds the appending handler seeded
+//! past what is already on disk — one seam, one path, so the fold and the
+//! appends cannot desync. The FIRST cycle after boot then consumes that fold
+//! ([`SelfHarnessDriver::take_loop_entry`]): a non-empty one compiles the
+//! wider `Loaded.resumeLoop __selfHarnessResume __selfHarnessState` entry
+//! against a harness that declares it, and an empty one compiles exactly the
+//! `Loaded.loop __selfHarnessState` entry every harness has always compiled.
+//! A non-empty fold against a harness with NO `resumeLoop` is refused at
+//! bootstrap ([`DriverError::ResumeEntryMissing`]) rather than silently
+//! redoing finished work.
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
@@ -93,16 +109,53 @@ pub enum DriverError {
     /// point returns this instead of running.
     #[error("self-harness driver poisoned, recovery failed: {0}")]
     Poisoned(String),
+    /// The boot fold ([`Self::open_run_journal`](SelfHarnessDriver::open_run_journal))
+    /// found recorded steps, but the harness declares no `resumeLoop` entry to
+    /// inject them through — so a run would silently REDO finished work. Refused
+    /// at boot, before any cycle runs, naming both files: the harness that needs
+    /// the entry and the journal that has the entries.
+    ///
+    /// This refusal IS the PRD's "resume should not be able to forget to look"
+    /// property, realized as a boot failure rather than as a type.
+    #[error(
+        "self-harness resume: {journal} has {entries} recorded step(s) for run {run_id}, but \
+         {harness} declares no `resumeLoop :: ResumeFold -> State -> Harness State` to inject \
+         them through — refusing to redo finished work. Add the entry (`resumeLoop _ = loop` is \
+         the honest opt-out), or retire the run's lease to start a fresh one."
+    )]
+    ResumeEntryMissing {
+        harness: String,
+        journal: String,
+        run_id: String,
+        entries: usize,
+    },
+    /// The boot fold's JSON failed `Tidepool.Resume`'s `FromJSON ResumeFold`
+    /// when re-spliced — distinct from [`DriverError::StateDecode`], which is
+    /// the AUTHOR's instance rejecting their own state. This one means the
+    /// driver's encoder
+    /// ([`crate::selfharness::resume::ResumeFold::to_json`]) and the stdlib's
+    /// hand-written decoder disagree on the wire contract: a Tidepool bug, not
+    /// an authoring one. Detected via
+    /// [`state_cross::RESUME_DECODE_SENTINEL`].
+    #[error("self-harness resume fold decode failed (driver/Tidepool.Resume wire mismatch): {0}")]
+    ResumeDecode(String),
 }
 
 /// Map an outer-session run error string to a typed [`DriverError`]: a message
 /// carrying [`state_cross::STATE_DECODE_SENTINEL`] becomes
 /// [`DriverError::StateDecode`], everything else a generic
 /// [`DriverError::Session`] with `ctx` for locus.
+/// A message carrying [`state_cross::RESUME_DECODE_SENTINEL`] likewise becomes
+/// [`DriverError::ResumeDecode`] — the two sentinels are distinct prefixes
+/// precisely so the two failures stay distinguishable (see
+/// [`state_cross::RESUME_DECODE_SENTINEL`]'s doc).
 fn map_run_error(ctx: &str, msg: String) -> DriverError {
     if let Some(idx) = msg.find(state_cross::STATE_DECODE_SENTINEL) {
         let detail = &msg[idx + state_cross::STATE_DECODE_SENTINEL.len()..];
         DriverError::StateDecode(detail.trim().to_string())
+    } else if let Some(idx) = msg.find(state_cross::RESUME_DECODE_SENTINEL) {
+        let detail = &msg[idx + state_cross::RESUME_DECODE_SENTINEL.len()..];
+        DriverError::ResumeDecode(detail.trim().to_string())
     } else {
         DriverError::Session(format!("{ctx}: {msg}"))
     }
@@ -209,6 +262,16 @@ struct OuterSession {
 /// `base_effects!`/`handler_for!` row (opt-in, like `Worktree`/`RepoEvent`/
 /// `Subagent`) — which journal file a run appends to, and folding it at
 /// boot, is a driver/binary wiring concern, not a base-stack default.
+///
+/// The READ half is wired now (S1-L5 wave 1): [`SelfHarnessDriver::open_run_journal`]
+/// loads and folds a run's journal at boot and the first cycle after boot
+/// injects it through the harness's `resumeLoop`. `record` is untouched by
+/// that and stays WRITE-ONLY on the authored surface — nothing in this row
+/// reads a journal.
+///
+/// `Journal`'s membership here also carries `Tidepool.Resume` onto every outer
+/// compile's import list (its `EffectDecl::extra_imports`), which is what puts
+/// `Resume.ResumeFold` in scope for the `__selfHarnessResume` splice.
 fn outer_decls() -> Vec<tidepool_mcp::EffectDecl> {
     vec![
         tidepool_mcp::runllmturn_decl(),
@@ -579,6 +642,25 @@ pub struct SelfHarnessDriver {
     /// [`Self::set_event_handler`]/[`Self::set_exec_handler`]/
     /// [`Self::set_subagent_handler`]/[`Self::set_journal_handler`].
     handlers: OuterHandlers,
+    /// This boot's run-journal fold, waiting to be injected — set by
+    /// [`Self::open_run_journal`], `None` when no journal was opened (or when
+    /// only the append sink was wired via [`Self::set_journal_handler`]).
+    ///
+    /// ONE-SHOT: the FIRST cycle after boot `take()`s it
+    /// ([`Self::take_loop_entry`]); every later cycle compiles the ordinary
+    /// `loop` entry. The fold describes what a CRASHED process had already
+    /// done, so re-handing it to a later cycle would be handing it stale news
+    /// — and having exactly one moment it can be consumed is what makes the
+    /// injection trivially idempotent.
+    resume: Option<PendingResume>,
+}
+
+/// A boot fold and the journal it came from, held together so the
+/// [`DriverError::ResumeEntryMissing`] refusal can name the file and the two
+/// can never desync.
+struct PendingResume {
+    fold: crate::selfharness::resume::ResumeFold,
+    journal: PathBuf,
 }
 
 /// See [`SelfHarnessDriver::handlers`]'s doc.
@@ -623,6 +705,7 @@ impl SelfHarnessDriver {
             iteration: 0,
             gate: Arc::new(StdinGate),
             handlers: OuterHandlers::default(),
+            resume: None,
         }
     }
 
@@ -747,11 +830,72 @@ impl SelfHarnessDriver {
         self.handlers.exec = Some(handler);
     }
 
-    /// Wire the Journal seam: the handler a `record` suspension from the
-    /// AUTHORED loop dispatches into ([`Self::service_outer_effect`]) — each
-    /// call durably appends one step to the handler's run journal file.
+    /// Wire the Journal seam's WRITE half only: the handler a `record`
+    /// suspension from the AUTHORED loop dispatches into
+    /// ([`Self::service_outer_effect`]) — each call durably appends one step to
+    /// the handler's run journal file.
+    ///
+    /// This wires an EMPTY fold: nothing is loaded, nothing is injected, and
+    /// the next cycle compiles exactly the `loop` entry it always did. That is
+    /// the right seam for a caller that only ever appends (an acceptance test
+    /// exercising `record`, a run deliberately starting clean). A caller that
+    /// wants a RESUMED run — folded entries injected through `resumeLoop`, and
+    /// appends continuing past the prior process's `seq` — uses
+    /// [`Self::open_run_journal`] instead, which wires both halves from one
+    /// path so they cannot desync.
     pub fn set_journal_handler(&mut self, handler: tidepool_handlers::JournalHandler) {
         self.handlers.journal = Some(handler);
+        self.resume = None;
+    }
+
+    /// Open a RUN's journal: load it, fold it, and build the appending handler
+    /// — all three from the SAME path, in one call, so a resumed run cannot end
+    /// up folding one file while appending to another.
+    ///
+    /// That non-desyncability is the whole reason this is one seam rather than
+    /// three calls. Three separate steps could each be given a different path,
+    /// and the failure would be silent: a run that folds an old journal and
+    /// appends to a new one looks like it is working right up until it redoes
+    /// finished work.
+    ///
+    /// Three things happen together here:
+    ///
+    /// 1. [`tidepool_handlers::load_journal`] reads `lease.journal` — a MISSING
+    ///    file is an empty journal (the "lease present, journal missing" boot
+    ///    case), a torn FINAL line is skipped with a warning, and a torn line
+    ///    anywhere earlier fails loudly. That contract is unchanged here.
+    /// 2. The entries fold to a [`crate::selfharness::resume::ResumeFold`] keyed
+    ///    on `(kind, key)`, held until the first cycle consumes it.
+    /// 3. The handler is built with
+    ///    [`tidepool_handlers::JournalHandler::resuming`] at the fold's
+    ///    `next_seq` — so a resumed run's appends CONTINUE past what is already
+    ///    on disk instead of restarting at 0 and becoming indistinguishable
+    ///    from the prior process's entries under a max-seq fold.
+    ///
+    /// Returns how many `(kind, key)` pairs folded — `0` for a fresh run, which
+    /// is also when the ordinary `loop` entry is compiled unchanged.
+    ///
+    /// The [`DriverError::ResumeEntryMissing`] refusal for a non-empty fold
+    /// against a harness with no `resumeLoop` is raised at BOOTSTRAP (the first
+    /// point a [`HarnessSource`] is in hand), not here — this seam never sees
+    /// the harness.
+    pub fn open_run_journal(
+        &mut self,
+        lease: &crate::selfharness::resume::RunLease,
+    ) -> Result<usize, DriverError> {
+        let entries = tidepool_handlers::load_journal(&lease.journal)
+            .map_err(|e| DriverError::Session(format!("run journal {:?}: {e}", lease.journal)))?;
+        let fold = crate::selfharness::resume::ResumeFold::fold(&lease.run_id, &entries);
+        let folded = fold.len();
+        self.handlers.journal = Some(tidepool_handlers::JournalHandler::resuming(
+            lease.journal.clone(),
+            fold.next_seq(),
+        ));
+        self.resume = Some(PendingResume {
+            fold,
+            journal: lease.journal.clone(),
+        });
+        Ok(folded)
     }
 
     /// Override the emergency-compaction threshold (default
@@ -837,6 +981,20 @@ impl SelfHarnessDriver {
     /// pre-loop `render`) — see [`crate::harness::ResidentSession::unbootstrapped`]
     /// — so this pays no GHC extract compile of its own.
     fn bootstrap(&mut self, source: &HarnessSource) -> Result<(), DriverError> {
+        // BEFORE anything else, including the early return: a run whose journal
+        // has entries against a harness with no `resumeLoop` is refused here,
+        // so the refusal lands before a single cycle runs rather than after a
+        // run has already redone finished work.
+        if let Some(pending) = &self.resume {
+            if !pending.fold.is_empty() && !source.declares_resume_entry {
+                return Err(DriverError::ResumeEntryMissing {
+                    harness: source.path.display().to_string(),
+                    journal: pending.journal.display().to_string(),
+                    run_id: pending.fold.run_id().to_string(),
+                    entries: pending.fold.len(),
+                });
+            }
+        }
         if self.outer.is_some() {
             return Ok(());
         }
@@ -1057,6 +1215,37 @@ impl SelfHarnessDriver {
     /// in this driver.
     const LOOP_ENTRY_TARGET: &'static str = "__selfHarnessLoopEntry";
 
+    /// Which loop entry THIS cycle compiles, and the extra helper text it
+    /// needs: `(code, extra_helpers)`.
+    ///
+    /// - A fresh boot, or any cycle after the first, or an EMPTY fold →
+    ///   `Loaded.loop __selfHarnessState` with no extra helpers: byte for byte
+    ///   the entry every harness has always compiled, which is what keeps the
+    ///   twelve `loop`-only harnesses and their tests untouched.
+    /// - A non-empty boot fold → `Loaded.resumeLoop __selfHarnessResume
+    ///   __selfHarnessState`, with [`state_cross::resume_in`]'s decode splice
+    ///   in the helpers.
+    ///
+    /// `take()`s the fold: the injection is ONE-SHOT at boot (see
+    /// [`Self::resume`]'s doc). Both compile sites call this — the fused
+    /// [`Self::compile_cycle_entry`] and the unfused
+    /// [`Self::run_loop_fragment_inner`] — but only one of them compiles per
+    /// cycle (the second runs a precompiled turn), so the fold is consumed
+    /// exactly once regardless of which path a caller drives.
+    ///
+    /// A non-empty fold against a harness with no `resumeLoop` never reaches
+    /// here: `bootstrap` refused it.
+    fn take_loop_entry(&mut self) -> (String, String) {
+        let q = state_cross::LOADED_QUALIFIER;
+        match self.resume.take() {
+            Some(pending) if !pending.fold.is_empty() => (
+                format!("{q}.resumeLoop __selfHarnessResume __selfHarnessState"),
+                state_cross::resume_in(&pending.fold),
+            ),
+            _ => (format!("{q}.loop __selfHarnessState"), String::new()),
+        }
+    }
+
     /// Compile the PRE-loop `render` and this cycle's `loop` fragment as TWO
     /// entries of ONE module, in a SINGLE `tidepool-extract` spawn
     /// ([`compile::compile_turns`]) — the pre-model boot-path fusion this
@@ -1097,16 +1286,21 @@ impl SelfHarnessDriver {
         let extract_bin = outer.cfg.extract_bin.clone();
         let include = outer.cfg.include.clone();
 
+        // Entry selection happens HERE, where the loop entry's code string is
+        // composed — the boot fold (if any) is consumed once and its decode
+        // splice joins the shared helpers, so both fused entries see identical
+        // helper text exactly as they did before.
+        let (loop_code, resume_helpers) = self.take_loop_entry();
         let helpers = format!(
-            "{}{}",
+            "{}{}{}",
             state_cross::state_in(prior_state),
-            state_cross::operator_msg_in(self.pending_operator_input.as_deref())
+            state_cross::operator_msg_in(self.pending_operator_input.as_deref()),
+            resume_helpers,
         );
         let render_code = format!(
             "pure ({q}.render __selfHarnessState)",
             q = state_cross::LOADED_QUALIFIER
         );
-        let loop_code = format!("{}.loop __selfHarnessState", state_cross::LOADED_QUALIFIER);
         let src = engine::template_turn_for_fused(
             &outer_decls(),
             &stack,
@@ -1583,12 +1777,16 @@ impl SelfHarnessDriver {
         let compiled = match precompiled {
             Some(compiled) => compiled,
             None => {
+                // The unfused path composes the loop entry itself, so entry
+                // selection lives here too — same helper
+                // ([`Self::take_loop_entry`]), same one-shot `take`.
+                let (code, resume_helpers) = self.take_loop_entry();
                 let helpers = format!(
-                    "{}{}",
+                    "{}{}{}",
                     state_cross::state_in(prior_state),
-                    state_cross::operator_msg_in(self.pending_operator_input.as_deref())
+                    state_cross::operator_msg_in(self.pending_operator_input.as_deref()),
+                    resume_helpers,
                 );
-                let code = format!("{}.loop __selfHarnessState", state_cross::LOADED_QUALIFIER);
                 self.compile_outer(&code, &helpers, "loop")?
             }
         };

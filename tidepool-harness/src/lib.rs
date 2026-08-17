@@ -28,9 +28,10 @@ pub use forcing::{derive_teaser, fan_badge, price_class, ForkShape, NodeTree, Tr
 pub use harness::{Escalation, Harness, HarnessError, OperatorDecision};
 pub use registry::{Checkout, CheckoutError, SessionRegistry};
 pub use selfharness::{
-    answerer_decls, load_harness_source, ContinueSignal, DriverError, Event, HarnessSource,
-    HarnessSourceError, JsonlObserver, LogObserver, Observer, OperatorGate, PersistenceError,
-    SelfHarnessDriver, SelfHarnessState, StdinGate,
+    acquire_lease, answerer_decls, load_harness_source, retire_lease, AcquiredLease,
+    ContinueSignal, DriverError, Event, HarnessSource, HarnessSourceError, JsonlObserver,
+    LogObserver, Observer, OperatorGate, PersistenceError, ResumeFold, RunLease, SelfHarnessDriver,
+    SelfHarnessState, StdinGate,
 };
 pub use timing::{record_stage, ExtractTiming};
 pub use tree::{FanBadge, HoleId, NodeId, NodeState, PriceClass, SiteId, Slot};

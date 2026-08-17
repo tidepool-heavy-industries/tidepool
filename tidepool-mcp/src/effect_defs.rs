@@ -225,6 +225,18 @@ macro_rules! extra_imports_for {
     (AskUser) => {
         &["import Tidepool.Form"]
     };
+    // The READ half of the run journal (PRD 20 S1-L5). `record` stays
+    // write-only — `Tidepool.Resume` reads nothing; it is the type of the
+    // already-folded value the DRIVER injects at boot
+    // (`__selfHarnessResume :: Resume.ResumeFold`, spliced by
+    // `tidepool_harness::selfharness::state_cross::resume_in`). Gated on
+    // `Journal` because that is the row a journaling harness compiles under,
+    // and it is unconditional WITHIN that row: the self-harness outer row
+    // always carries `Journal`, so the qualifier is in scope on every outer
+    // compile whether or not that particular cycle splices a fold.
+    (Journal) => {
+        &["import qualified Tidepool.Resume as Resume"]
+    };
     ($other:ident) => {
         &[]
     };

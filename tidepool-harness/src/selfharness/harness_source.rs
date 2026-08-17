@@ -76,6 +76,23 @@ pub struct HarnessSource {
     /// scope and the driver tells the author to split them out
     /// (`SelfHarnessDriver::types_in_scope_hint`).
     pub answerer_imports: Vec<String>,
+    /// Whether the harness declares the OPT-IN resume entry point
+    /// `resumeLoop :: ResumeFold -> State -> Harness State` (PRD 20 S1-L5).
+    ///
+    /// The universal entry (`loop :: State -> Harness State`) is unchanged and
+    /// every harness keeps it; this flag only tells the driver whether the
+    /// WIDER entry exists to inject a boot-time journal fold through. A
+    /// non-empty fold against a harness where this is `false` is refused at
+    /// boot (`DriverError::ResumeEntryMissing`) rather than quietly redoing
+    /// finished work — that refusal is the "resume cannot forget to look"
+    /// property, and this flag is what makes it decidable before a cycle runs.
+    ///
+    /// Derived by the same class of structural source scan as
+    /// [`Self::answerer_imports`] (see [`declares_resume_entry`]): the scan
+    /// SELECTS the entry, it does not validate it. GHC remains the real check —
+    /// a `resumeLoop` of the wrong type fails its compile the ordinary way, and
+    /// nothing here parses a GHC error.
+    pub declares_resume_entry: bool,
     /// A content fingerprint of the loaded source text — not a manifest, just
     /// a hash, so a checkpoint restored against a since-edited harness file
     /// can be told apart from one restored against the same file (a harness
@@ -118,13 +135,37 @@ pub fn load_harness_source(path: &Path) -> Result<HarnessSource, HarnessSourceEr
             path: path.display().to_string(),
         })?;
     let answerer_imports = answerer_imports(path, &source_dir);
+    let declares_resume_entry = declares_resume_entry(path);
     let fingerprint = fingerprint_source(path)?;
     Ok(HarnessSource {
         path: path.to_path_buf(),
         source_dir,
         module_name,
         answerer_imports,
+        declares_resume_entry,
         fingerprint,
+    })
+}
+
+/// Whether `path` declares a TOP-LEVEL `resumeLoop` binding — a line beginning
+/// at column 0 with `resumeLoop` followed by a non-identifier character (its
+/// type signature or its first equation; either is enough, and a nested
+/// `where`-bound one is indented and so correctly not seen).
+///
+/// Structural, in the same family as [`answerer_imports`], and subject to the
+/// same rule this module's doc sets out: nothing here is typechecked, resolved,
+/// or classified. The scan only SELECTS which entry the driver compiles. GHC is
+/// the real check — a `resumeLoop` with the wrong type, or one this scan
+/// mis-reads, fails its compile as an ordinary GHC error, and no driver code
+/// parses that error.
+fn declares_resume_entry(path: &Path) -> bool {
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return false;
+    };
+    text.lines().any(|line| {
+        line.strip_prefix("resumeLoop").is_some_and(|rest| {
+            !rest.starts_with(|c: char| c.is_alphanumeric() || c == '_' || c == '\'')
+        })
     })
 }
 
@@ -235,6 +276,57 @@ mod tests {
                 source.answerer_imports
             );
         }
+    }
+
+    /// The scan SELECTS the entry: a harness declaring `resumeLoop` opts into
+    /// the boot fold, one that doesn't stays on the universal `loop` (and a
+    /// non-empty fold against it is refused at boot rather than silently
+    /// redone).
+    #[test]
+    fn resume_entry_is_detected_only_where_it_is_declared() {
+        let fixtures = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
+        let with_resume =
+            load_harness_source(&fixtures.join("ResumeHarness.hs")).expect("fixture resolves");
+        assert!(
+            with_resume.declares_resume_entry,
+            "ResumeHarness.hs declares a top-level resumeLoop"
+        );
+        for name in ["OuterEffectsHarness.hs", "TwoHoleHarness.hs"] {
+            let source = load_harness_source(&fixtures.join(name)).expect("fixture resolves");
+            assert!(
+                !source.declares_resume_entry,
+                "{name} declares no resumeLoop and must not be offered as a resume entry"
+            );
+        }
+    }
+
+    /// Only a TOP-LEVEL binding counts: an indented (`where`-bound) definition
+    /// is not the entry the driver can call, and a longer name that merely
+    /// starts with `resumeLoop` is a different binding entirely.
+    #[test]
+    fn resume_entry_scan_requires_column_zero_and_a_whole_name() {
+        let dir =
+            std::env::temp_dir().join(format!("harness-source-resume-scan-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+
+        let cases = [
+            ("resumeLoop :: ResumeFold -> State -> Harness State\n", true),
+            ("resumeLoop fold st = loop st\n", true),
+            ("  resumeLoop fold st = loop st\n", false),
+            ("resumeLoopHelper :: Int\n", false),
+            ("resumeLoop' :: Int\n", false),
+            ("loop :: State -> Harness State\n", false),
+        ];
+        for (i, (body, expected)) in cases.iter().enumerate() {
+            let path = dir.join(format!("Case{i}.hs"));
+            std::fs::write(&path, format!("module Case{i} where\n{body}")).expect("write case");
+            assert_eq!(
+                declares_resume_entry(&path),
+                *expected,
+                "case {i} ({body:?})"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
