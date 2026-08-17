@@ -1482,6 +1482,30 @@ fn dispatch_primop(
             let (_, exp) = eval_decode_double_int64(d);
             Ok(Value::Lit(Literal::LitInt(exp)))
         }
+        PrimOpKind::DecodeFloatMantissa => {
+            if args.len() != 1 {
+                return Err(EvalError::ArityMismatch {
+                    context: ArityContext::Arguments,
+                    expected: 1,
+                    got: args.len(),
+                });
+            }
+            let f = expect_float(&args[0], heap)?;
+            let (man, _) = eval_decode_float_int(f);
+            Ok(Value::Lit(Literal::LitInt(man)))
+        }
+        PrimOpKind::DecodeFloatExponent => {
+            if args.len() != 1 {
+                return Err(EvalError::ArityMismatch {
+                    context: ArityContext::Arguments,
+                    expected: 1,
+                    got: args.len(),
+                });
+            }
+            let f = expect_float(&args[0], heap)?;
+            let (_, exp) = eval_decode_float_int(f);
+            Ok(Value::Lit(Literal::LitInt(exp)))
+        }
         PrimOpKind::ShowDoubleAddr => {
             // Handled in eval_at PrimOp arm (needs heap for deep forcing)
             unreachable!("ShowDoubleAddr should be intercepted in eval_at")
@@ -2959,6 +2983,35 @@ fn eval_decode_double_int64(d: f64) -> (i64, i64) {
         (raw_man, 1 - 1023 - 52)
     } else {
         (raw_man | (1i64 << 52), raw_exp - 1023 - 52)
+    };
+    let man = sign * man;
+    if man != 0 {
+        let tz = man.unsigned_abs().trailing_zeros();
+        (man >> tz, (exp + tz as i32) as i64)
+    } else {
+        (0, 0)
+    }
+}
+
+/// Same shape as `eval_decode_double_int64`, but over Float's own IEEE754
+/// single layout (8-bit exponent field / 23-bit explicit mantissa, bias
+/// 127). NOT reusable via widening to Double first: that would decode into
+/// Double's wider mantissa/exponent and give a wrong answer for Float.
+fn eval_decode_float_int(f: f32) -> (i64, i64) {
+    if f == 0.0 || f.is_nan() {
+        return (0, 0);
+    }
+    if f.is_infinite() {
+        return (if f > 0.0 { 1 } else { -1 }, 0);
+    }
+    let bits = f.to_bits();
+    let sign: i64 = if bits >> 31 == 0 { 1 } else { -1 };
+    let raw_exp = ((bits >> 23) & 0xff) as i32;
+    let raw_man = (bits & 0x007f_ffff) as i64;
+    let (man, exp) = if raw_exp == 0 {
+        (raw_man, 1 - 127 - 23)
+    } else {
+        (raw_man | (1i64 << 23), raw_exp - 127 - 23)
     };
     let man = sign * man;
     if man != 0 {

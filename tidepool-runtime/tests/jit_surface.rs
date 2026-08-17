@@ -52,12 +52,15 @@
 //!
 //!   (a) SANCTIONED-RED — currently fails by design, must keep failing
 //!       individually, never inside a green bundle (see
-//!       `plans/post-restart/gate-runbook.md`'s never-green list):
-//!       `works_from_json_float`. (`qq_fmt_brace_inside_hole_non_string_expr_still_works`
-//!       was in this class until `Tidepool.QQ.HsMeta.Translate.toExp` grew a
-//!       `let`-in-hole case — it is a plain WORKS probe now, kept standalone
-//!       as class (d) DISTINCT-MECHANISM, pinning the quoter's bracket-depth
-//!       tracking rather than a stdlib function's JIT-safety.)
+//!       `plans/post-restart/gate-runbook.md`'s never-green list). No probe
+//!       is in this class today: both former members —
+//!       `qq_fmt_brace_inside_hole_non_string_expr_still_works` (fixed by
+//!       giving `Tidepool.QQ.HsMeta.Translate.toExp` a `let`-in-hole case)
+//!       and `works_from_json_float` (fixed by giving the extract translator
+//!       a `decodeFloat_Int#` 2-result split mirroring the already-working
+//!       `decodeDouble_Int64#` path) — are plain WORKS probes now, kept
+//!       standalone under classes (d) and (g) respectively, not because
+//!       they're still expected to fail.
 //!   (b) COMPILE-FAIL probes — anything asserting a compile-time ERROR.
 //!   (c) EFFECTS/DISPATCH probes — anything exercising a real dispatcher
 //!       (not `NullDispatcher`); bundling would change dispatch
@@ -739,16 +742,30 @@ fn works_filepath_family() {
 // below is annotated with which class it belongs to.
 // =========================================================================
 
-// --- (a) SANCTIONED-RED — must keep failing individually, never absorbed. ---
+// --- (g) RENDER-FIDELITY: outer-JSON rendering of a decoded Float, not
+// anything a Haskell-side `==` can observe — kept standalone the same way
+// works_exact_int_json is, not absorbed into works_aeson_family. ---
 
 /// `FromJSON Float`, same shape as the already-pinned `FromJSON Double`
 /// (aeson `FromJSON Float` routes through `parseRealFloat` —
 /// https://hackage.haskell.org/package/aeson/docs/src/Data.Aeson.Types.FromJSON.html).
 ///
-/// SANCTIONED-RED (`plans/post-restart/gate-runbook.md`): the extract
-/// translator lacks a dedicated `decodeFloat_Int#` 2-result split
-/// (Translate.hs ~2070) — this probe has never passed. Do not absorb into a
-/// bundle; do not re-triage as a new regression.
+/// Formerly SANCTIONED-RED (`plans/post-restart/gate-runbook.md`): the
+/// extract translator had no `decodeFloat_Int#` 2-result split — any Core
+/// invoking it hit `splitUnaryMultiReturnPrimOp`'s generic-fallback loud
+/// failure. Fixed structurally mirroring the already-working
+/// `decodeDouble_Int64#`/`DecodeDoubleMantissa`/`DecodeDoubleExponent` path
+/// at all four sites it touches: `splitUnaryMultiReturnPrimOp`
+/// (`haskell/src/Tidepool/Translate.hs`), the `PrimOpKind::DecodeFloatMantissa`/
+/// `DecodeFloatExponent` wire entries (`tidepool-repr/src/types.rs`), the
+/// eval oracle (`tidepool-eval/src/eval.rs`), and the Cranelift lowering
+/// (`tidepool-codegen/src/emit/primop.rs` + `host_fns/primops.rs`) — each
+/// over Float's own IEEE754 single layout (8-bit exponent / 23-bit
+/// mantissa, bias 127), NOT reusable via `float2Double#` widening first
+/// (that decodes into Double's wider mantissa/exponent and gives a wrong
+/// answer for Float). JIT/oracle agreement is pinned by
+/// `tidepool-codegen/tests/proptest_primops_differential.rs`'s
+/// `prop_decode_float`, mirroring `prop_decode_double`.
 #[test]
 fn works_from_json_float() {
     works(

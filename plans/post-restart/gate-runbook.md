@@ -16,15 +16,6 @@ ONCE here, not per-fold (test-economy policy). Run detached under
   `resident_session::nested_child_runs_while_parent_suspended_then_resumes`
   (NurseryExhausted class reopened, load-correlated). Anything else red is
   NEW.
-- **Never-green WORKS probes (triaged 2026-08-08, jit-chain-2; fixes are
-  haskell/-side, queued to the phase-b lane after its core lands):**
-  `jit_surface::works_from_json_float` (extract translator lacks a
-  dedicated `decodeFloat_Int#` 2-result split — Translate.hs ~2070, loud
-  landmine working as designed) and
-  `jit_surface::qq_fmt_brace_inside_hole_non_string_expr_still_works`
-  (`Tidepool.QQ.HsMeta.Translate.toExp` lacks let-in). Both were committed
-  with unexecuted "green" claims (the deferred-gate window let them
-  through); neither ever passed. Not regressions; do not re-triage.
 - **Contention produces watchdog timeouts, not wrong values** — a timeout
   under load re-run in isolation is diagnosis, not noise-tolerance. The
   converse: a SUB-100ms assertion failure is never contention — do not

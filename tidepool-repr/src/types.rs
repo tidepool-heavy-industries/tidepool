@@ -195,6 +195,8 @@ define_primops! {
     IntRem => "IntRem", "remInt#";
     DecodeDoubleMantissa => "DecodeDoubleMantissa", "decodeDouble_Int64#[mantissa]";
     DecodeDoubleExponent => "DecodeDoubleExponent", "decodeDouble_Int64#[exponent]";
+    DecodeFloatMantissa => "DecodeFloatMantissa", "decodeFloat_Int#[mantissa]";
+    DecodeFloatExponent => "DecodeFloatExponent", "decodeFloat_Int#[exponent]";
     Chr => "Chr", "chr#";
     Ord => "Ord", "ord#";
     IntAnd => "IntAnd", "andI#";

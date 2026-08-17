@@ -3567,6 +3567,7 @@ splitTripleReturnPrimOp = \case
 splitUnaryMultiReturnPrimOp :: PrimOp -> Maybe (Text, Text)
 splitUnaryMultiReturnPrimOp = \case
   DoubleDecode_Int64Op -> Just (T.pack "DecodeDoubleMantissa", T.pack "DecodeDoubleExponent")
+  FloatDecode_IntOp    -> Just (T.pack "DecodeFloatMantissa", T.pack "DecodeFloatExponent")
   _                    -> Nothing
 
 -- | Extract error message from an expression.

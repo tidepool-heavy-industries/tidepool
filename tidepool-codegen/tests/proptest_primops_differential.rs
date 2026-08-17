@@ -990,6 +990,34 @@ fn prop_decode_double() {
     reach.assert_floor(0.85);
 }
 
+// decodeFloat_Int# mantissa/exponent slots (each its own primop). Same shape
+// as prop_decode_double, over Float's own IEEE754 single layout.
+#[test]
+#[serial]
+fn prop_decode_float() {
+    let reach = ReachCounter::new("primops/decode_float");
+    let mut runner = TestRunner::new(cfg_float());
+    runner
+        .run(&arb_float(), |a| {
+            for op in [
+                PrimOpKind::DecodeFloatMantissa,
+                PrimOpKind::DecodeFloatExponent,
+            ] {
+                check(
+                    prog_op(op, |b_| {
+                        let x = lit_float(b_, a);
+                        vec![x]
+                    }),
+                    &dcfg(),
+                    &reach,
+                )?;
+            }
+            Ok(())
+        })
+        .unwrap();
+    reach.assert_floor(0.85);
+}
+
 // ===========================================================================
 // Char comparison + Chr/Ord round-trips.
 // ===========================================================================

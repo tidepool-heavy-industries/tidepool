@@ -647,6 +647,41 @@ pub fn emit_primop(
             )?;
             Ok(SsaVal::Raw(result, LIT_TAG_INT))
         }
+        // Float's own IEEE754 single layout (8-bit exponent / 23-bit mantissa,
+        // bias 127) — NOT reusable via float2Double# widening first, which
+        // would decode into Double's wider mantissa/exponent and give a wrong
+        // answer for Float. Bits travel to the host fn widened to i64 (the
+        // Double path's ABI shape), matching Float's `LitFloat(u64)` storage.
+        PrimOpKind::DecodeFloatMantissa => {
+            check_arity(op, 1, args.len())?;
+            let f = unbox_float(sess.pipeline, builder, sess.vmctx, args[0]);
+            let bits32 = builder.ins().bitcast(types::I32, MemFlags::new(), f);
+            let bits = builder.ins().uextend(types::I64, bits32);
+            let result = emit_runtime_call(
+                sess.pipeline,
+                builder,
+                "runtime_decode_float_mantissa",
+                &[AbiParam::new(types::I64)],
+                &[AbiParam::new(types::I64)],
+                &[bits],
+            )?;
+            Ok(SsaVal::Raw(result, LIT_TAG_INT))
+        }
+        PrimOpKind::DecodeFloatExponent => {
+            check_arity(op, 1, args.len())?;
+            let f = unbox_float(sess.pipeline, builder, sess.vmctx, args[0]);
+            let bits32 = builder.ins().bitcast(types::I32, MemFlags::new(), f);
+            let bits = builder.ins().uextend(types::I64, bits32);
+            let result = emit_runtime_call(
+                sess.pipeline,
+                builder,
+                "runtime_decode_float_exponent",
+                &[AbiParam::new(types::I64)],
+                &[AbiParam::new(types::I64)],
+                &[bits],
+            )?;
+            Ok(SsaVal::Raw(result, LIT_TAG_INT))
+        }
         PrimOpKind::ShowDoubleAddr => {
             check_arity(op, 1, args.len())?;
             let d = unbox_double(sess.pipeline, builder, sess.vmctx, args[0]);

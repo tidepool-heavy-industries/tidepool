@@ -498,6 +498,51 @@ fn decode_double_int64(d: f64) -> (i64, i64) {
     }
 }
 
+/// Decode a Float into its Int mantissa (significand).
+/// GHC's `decodeFloat_Int#` returns (# mantissa, exponent #).
+pub extern "C" fn runtime_decode_float_mantissa(bits: i64) -> i64 {
+    let (man, _) = decode_float_int(f32::from_bits(bits as u32));
+    man
+}
+
+/// Decode a Float into its Int exponent.
+pub extern "C" fn runtime_decode_float_exponent(bits: i64) -> i64 {
+    let (_, exp) = decode_float_int(f32::from_bits(bits as u32));
+    exp
+}
+
+/// Shared implementation matching GHC's `decodeFloat_Int#` semantics. Same
+/// shape as `decode_double_int64`, but over Float's own IEEE754 single
+/// layout (8-bit exponent field / 23-bit explicit mantissa, bias 127) — NOT
+/// reusable via widening to Double first, which would decode into Double's
+/// wider mantissa/exponent and give a wrong answer for Float.
+fn decode_float_int(f: f32) -> (i64, i64) {
+    if f == 0.0 || f.is_nan() {
+        return (0, 0);
+    }
+    if f.is_infinite() {
+        return (if f > 0.0 { 1 } else { -1 }, 0);
+    }
+    let bits = f.to_bits();
+    let sign: i64 = if bits >> 31 == 0 { 1 } else { -1 };
+    let raw_exp = ((bits >> 23) & 0xff) as i32;
+    let raw_man = (bits & 0x007f_ffff) as i64;
+    let (man, exp) = if raw_exp == 0 {
+        // subnormal
+        (raw_man, 1 - 127 - 23)
+    } else {
+        // normal: implicit leading 1
+        (raw_man | (1i64 << 23), raw_exp - 127 - 23)
+    };
+    let man = sign * man;
+    if man != 0 {
+        let tz = man.unsigned_abs().trailing_zeros();
+        (man >> tz, (exp + tz as i32) as i64)
+    } else {
+        (0, 0)
+    }
+}
+
 /// strlen: count bytes until null terminator.
 pub extern "C" fn runtime_strlen(addr: i64) -> i64 {
     if check_ptr_invalid(addr as *const u8, "runtime_strlen") {

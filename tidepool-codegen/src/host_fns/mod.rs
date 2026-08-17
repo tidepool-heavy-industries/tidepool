@@ -52,17 +52,17 @@ pub use force::{deep_force, heap_force, trampoline_resolve};
 pub use primops::{
     runtime_cas_boxed_array, runtime_clone_boxed_array, runtime_compare_byte_arrays,
     runtime_copy_addr_to_byte_array, runtime_copy_boxed_array, runtime_copy_byte_array,
-    runtime_decode_double_exponent, runtime_decode_double_mantissa, runtime_double_acos,
-    runtime_double_acosh, runtime_double_asin, runtime_double_asinh, runtime_double_atan,
-    runtime_double_atanh, runtime_double_cos, runtime_double_cosh, runtime_double_exp,
-    runtime_double_expm1, runtime_double_log, runtime_double_log1p, runtime_double_power,
-    runtime_double_sin, runtime_double_sinh, runtime_double_tan, runtime_double_tanh,
-    runtime_int_encode_double, runtime_json_decode, runtime_new_boxed_array,
-    runtime_new_byte_array, runtime_parse_iso8601, runtime_resize_byte_array,
-    runtime_set_byte_array, runtime_show_double_addr, runtime_show_signed_double_addr,
-    runtime_shrink_boxed_array, runtime_shrink_byte_array, runtime_strlen,
-    runtime_text_measure_off, runtime_text_memchr, runtime_text_reverse, runtime_word2_quot,
-    runtime_word2_rem, runtime_word_encode_double,
+    runtime_decode_double_exponent, runtime_decode_double_mantissa, runtime_decode_float_exponent,
+    runtime_decode_float_mantissa, runtime_double_acos, runtime_double_acosh, runtime_double_asin,
+    runtime_double_asinh, runtime_double_atan, runtime_double_atanh, runtime_double_cos,
+    runtime_double_cosh, runtime_double_exp, runtime_double_expm1, runtime_double_log,
+    runtime_double_log1p, runtime_double_power, runtime_double_sin, runtime_double_sinh,
+    runtime_double_tan, runtime_double_tanh, runtime_int_encode_double, runtime_json_decode,
+    runtime_new_boxed_array, runtime_new_byte_array, runtime_parse_iso8601,
+    runtime_resize_byte_array, runtime_set_byte_array, runtime_show_double_addr,
+    runtime_show_signed_double_addr, runtime_shrink_boxed_array, runtime_shrink_byte_array,
+    runtime_strlen, runtime_text_measure_off, runtime_text_memchr, runtime_text_reverse,
+    runtime_word2_quot, runtime_word2_rem, runtime_word_encode_double,
 };
 
 pub(crate) use list_materialize::materialize_cons_list;
@@ -133,6 +133,14 @@ pub fn host_fn_symbols() -> Vec<(&'static str, *const u8)> {
         (
             "runtime_decode_double_exponent",
             runtime_decode_double_exponent as *const u8,
+        ),
+        (
+            "runtime_decode_float_mantissa",
+            runtime_decode_float_mantissa as *const u8,
+        ),
+        (
+            "runtime_decode_float_exponent",
+            runtime_decode_float_exponent as *const u8,
         ),
         (
             "runtime_text_measure_off",
