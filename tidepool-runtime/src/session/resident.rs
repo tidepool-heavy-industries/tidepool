@@ -154,6 +154,12 @@ pub enum ResidentError {
     /// ask-protocol error).
     #[error("turn run failed: {0}")]
     Run(RuntimeError),
+    /// The resident eval thread could not be spawned (a transient OS
+    /// resource failure — thread-limit exhaustion, out of memory). The
+    /// session's machine is restored before this is returned; a retry is
+    /// safe.
+    #[error("failed to spawn resident eval thread: {0}")]
+    EvalThread(std::io::Error),
     /// Merging this turn's constructor metadata into the session table hit a
     /// collision (a Haskell-side DataCon-scheme regression, mirroring the repl's
     /// `merge_table`).
@@ -1105,45 +1111,78 @@ where
     /// reach and re-point GC state at the retained heap. Only the machine (and
     /// the accumulated table) crosses to the thread; the rest of the session
     /// core is `!Send` (raw-pointer roots) and stays here.
+    ///
+    /// The machine is taken via [`MachineGuard`], whose `Drop` restores it into
+    /// `self.core` on EVERY exit from this function — success, a `JitError`, a
+    /// caught panic, or a failed thread spawn (a transient OS resource
+    /// failure, not a bug) — so no path can leave the session permanently
+    /// machineless.
     fn on_eval_thread<F, T>(&mut self, body: F) -> Result<T, ResidentError>
     where
         T: Send,
         F: FnOnce(&mut JitEffectMachine, &DataConTable, &mut H, &O) -> Result<T, JitError> + Send,
     {
-        let mut machine = self.core.take_machine();
-        let table = self.core.session_table();
+        self.on_eval_thread_with_stack(EVAL_STACK_SIZE, body)
+    }
+
+    /// [`Self::on_eval_thread`], with the eval thread's stack size as a
+    /// parameter rather than the hardcoded [`EVAL_STACK_SIZE`] — split out
+    /// so a test can force `spawn_scoped` to fail deterministically (an
+    /// absurd stack size) without changing production eval-thread semantics,
+    /// which always go through [`Self::on_eval_thread`]'s fixed constant.
+    fn on_eval_thread_with_stack<F, T>(
+        &mut self,
+        stack_size: usize,
+        body: F,
+    ) -> Result<T, ResidentError>
+    where
+        T: Send,
+        F: FnOnce(&mut JitEffectMachine, &DataConTable, &mut H, &O) -> Result<T, JitError> + Send,
+    {
+        let mut guard = MachineGuard::take(&mut self.core);
+        let table = guard.core.session_table();
+        let machine_ref = guard
+            .machine
+            .as_mut()
+            .expect("machine present while guard is alive");
         let handlers = &mut self.handlers;
         // The sink is Arc-backed (`OutputSink: Clone + Send`) and shares its
         // buffer; move a clone onto the thread rather than requiring `O: Sync`
         // for a borrow — matches the oneshot engine's `captured.clone()`.
         let captured = self.captured.clone();
 
-        // A scoped thread borrows `machine`/`handlers`/`table`/`captured` from
-        // this frame — the machine is moved back into the core after the scope
-        // joins, so it stays resident. `EVAL_STACK_SIZE` matches the oneshot
-        // eval thread (deep JIT recursion needs it), so `Builder::spawn_scoped`
-        // (the stack-sized form of `scope.spawn`) is used.
-        let result = std::thread::scope(|scope| {
-            let handle = std::thread::Builder::new()
+        // A scoped thread borrows `machine_ref`/`handlers`/`table`/`captured`
+        // from this frame. `EVAL_STACK_SIZE` matches the oneshot eval thread
+        // (deep JIT recursion needs it), so `Builder::spawn_scoped` (the
+        // stack-sized form of `scope.spawn`) is used. Unlike the oneshot form,
+        // a failed spawn here is reported through `outcome`, not `.expect()` —
+        // `guard` is still alive and restores the machine either way.
+        let outcome = std::thread::scope(|scope| {
+            match std::thread::Builder::new()
                 .name("tidepool-resident-eval".into())
-                .stack_size(EVAL_STACK_SIZE)
+                .stack_size(stack_size)
                 .spawn_scoped(scope, || {
                     tidepool_codegen::signal_safety::install();
                     std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        body(&mut machine, table, handlers, &captured)
+                        body(machine_ref, table, handlers, &captured)
                     }))
-                })
-                .expect("failed to spawn resident eval thread");
-            handle.join()
+                }) {
+                Ok(handle) => match handle.join() {
+                    Ok(Ok(body_result)) => EvalThreadOutcome::Ran(body_result),
+                    Ok(Err(panic)) => EvalThreadOutcome::Panicked(panic),
+                    Err(join_panic) => EvalThreadOutcome::Panicked(join_panic),
+                },
+                Err(spawn_err) => EvalThreadOutcome::SpawnFailed(spawn_err),
+            }
         });
 
-        // The machine is resident again regardless of the turn's fate.
-        self.core.restore_machine(machine);
-
-        match result {
-            Ok(Ok(outcome)) => outcome.map_err(|e| ResidentError::Run(RuntimeError::Jit(e))),
-            Ok(Err(panic)) => Err(panic_to_run_error(panic)),
-            Err(join_panic) => Err(panic_to_run_error(join_panic)),
+        // `guard` drops here (function-end, on every path above), restoring
+        // the machine into `self.core` regardless of how `outcome` resolved.
+        match outcome {
+            EvalThreadOutcome::Ran(Ok(t)) => Ok(t),
+            EvalThreadOutcome::Ran(Err(e)) => Err(ResidentError::Run(RuntimeError::Jit(e))),
+            EvalThreadOutcome::Panicked(payload) => Err(panic_to_run_error(payload)),
+            EvalThreadOutcome::SpawnFailed(e) => Err(ResidentError::EvalThread(e)),
         }
     }
 
@@ -1222,6 +1261,48 @@ fn project_parked(
     }
 }
 
+/// RAII restore guard for [`ResidentSession::on_eval_thread`]: holds the
+/// session's machine, taken via [`PersistentSession::take_machine`], and
+/// restores it into `core` on `Drop` — on EVERY exit from the borrowing
+/// function, including an early return between the take and the point the
+/// turn's outcome is known (a failed thread spawn, a caught panic). This is
+/// what closes the gap the external review flagged: `spawn_scoped(...).expect(...)`
+/// used to panic AFTER the machine was taken and BEFORE it was restored,
+/// permanently leaving the session machineless past that unwind.
+struct MachineGuard<'a> {
+    core: &'a mut PersistentSession,
+    machine: Option<JitEffectMachine>,
+}
+
+impl<'a> MachineGuard<'a> {
+    fn take(core: &'a mut PersistentSession) -> Self {
+        let machine = core.take_machine();
+        MachineGuard {
+            core,
+            machine: Some(machine),
+        }
+    }
+}
+
+impl Drop for MachineGuard<'_> {
+    fn drop(&mut self) {
+        if let Some(machine) = self.machine.take() {
+            self.core.restore_machine(machine);
+        }
+    }
+}
+
+/// The three ways a resident eval thread's lifecycle can resolve — spawn
+/// failure, a caught panic, or a completed run of `body` (itself carrying its
+/// own `Result`). Distinct from `SpawnError`/join-panic being conflated into
+/// one `.expect()`, which is exactly what let a spawn failure escape as an
+/// unguarded panic before this fix.
+enum EvalThreadOutcome<T> {
+    Ran(Result<T, JitError>),
+    Panicked(Box<dyn std::any::Any + Send>),
+    SpawnFailed(std::io::Error),
+}
+
 /// Map a caught panic payload (a Rust-level fault that unwound past the JIT's
 /// own `with_signal_protection` — a genuine bug, not a language-level error) to
 /// a run error carrying the payload string.
@@ -1236,4 +1317,89 @@ fn panic_to_run_error(payload: Box<dyn std::any::Any + Send>) -> ResidentError {
     ResidentError::Run(RuntimeError::Jit(JitError::Effect(EffectError::Handler(
         format!("resident turn panicked: {detail}"),
     ))))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tidepool_repr::{CoreFrame, Literal, TreeBuilder};
+
+    /// A no-op sink — these tests never suspend or produce output.
+    #[derive(Clone, Default)]
+    struct NullSink;
+
+    impl OutputSink for NullSink {
+        fn drain(&self) -> Vec<String> {
+            Vec::new()
+        }
+        fn snapshot(&self) -> Vec<String> {
+            Vec::new()
+        }
+    }
+
+    /// A trivial, hand-built `Lit` expression over an empty table — no GHC
+    /// extract needed. `ConTags` resolution (`Val`/`E`/`Union`/`Leaf`/`Node`)
+    /// is LAZY on a compiled [`JitEffectMachine`] (its `tags` field is a
+    /// `Result`, not resolved eagerly), so an empty table compiles fine as
+    /// long as nothing ever dispatches an effect — true in every test below,
+    /// since the eval thread never actually runs `body`.
+    fn trivial_expr_and_table() -> (CoreExpr, DataConTable) {
+        let mut b = TreeBuilder::new();
+        b.push(CoreFrame::Lit(Literal::LitInt(42)));
+        (b.build(), DataConTable::new())
+    }
+
+    fn bootstrap_trivial_session() -> ResidentSession<frunk::HNil, NullSink> {
+        let (expr, table) = trivial_expr_and_table();
+        ResidentSession::bootstrap(
+            &expr,
+            table,
+            frunk::HNil,
+            0,
+            Vec::new(),
+            NullSink,
+            Vec::new(),
+            crate::DEFAULT_NURSERY_SIZE,
+            None,
+        )
+        .expect("a trivial Lit expression over an empty table compiles")
+    }
+
+    /// The exact regression the external review flagged
+    /// (`tidepool-runtime/src/session/resident.rs:1113-1141` in the review):
+    /// `spawn_scoped(...).expect(...)` used to run AFTER `take_machine()` and
+    /// panic BEFORE `restore_machine()`, permanently leaving the session
+    /// machineless past that unwind. This forces the spawn to fail
+    /// deterministically — a stack size that vastly exceeds any real address
+    /// space, so `pthread_create` rejects it outright, no actual thread-limit
+    /// exhaustion needed — and asserts: no panic, a typed
+    /// `ResidentError::EvalThread`, and the machine is back in the session's
+    /// slot afterward, still genuinely usable.
+    #[test]
+    fn a_forced_eval_thread_spawn_failure_restores_the_machine_and_returns_a_typed_error() {
+        let mut session = bootstrap_trivial_session();
+
+        let result = session.on_eval_thread_with_stack(
+            1_usize << 56,
+            |_, _, _, _| -> Result<(), JitError> {
+                unreachable!("the spawn itself must fail before body ever runs")
+            },
+        );
+
+        assert!(
+            matches!(result, Err(ResidentError::EvalThread(_))),
+            "expected ResidentError::EvalThread, got {result:?}"
+        );
+        assert!(
+            session.heap_stats().is_some(),
+            "the machine must be restored into the session's slot after a failed spawn, \
+             not left permanently machineless"
+        );
+
+        // The restored machine is genuinely usable, not just present: an
+        // ordinary call through the normal (production) stack size succeeds
+        // right after.
+        let ok = session.on_eval_thread(|_, _, _, _| -> Result<i32, JitError> { Ok(7) });
+        assert_eq!(ok.unwrap(), 7);
+    }
 }

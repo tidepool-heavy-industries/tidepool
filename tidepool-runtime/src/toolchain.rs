@@ -64,6 +64,7 @@
 //! so a running server pays it at most once per extract version per machine)
 //! plus one walk of ~40 small `.hs` files. Never per-eval.
 
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 /// Env var naming the extract binary (step 1 of the extract precedence).
@@ -511,26 +512,46 @@ pub fn stamp_path() -> PathBuf {
     crate::paths::cache_dir().join("toolchain-stamp.json")
 }
 
-/// Read the stamp. `Ok(None)` when there is none, or when it is unreadable /
-/// written by a different [`STAMP_SCHEMA`] — both mean "nothing to compare
-/// against", never "fail".
+/// Read the stamp. `Ok(None)` when the file is absent (or unreadable at the
+/// filesystem level, e.g. a permission error — nothing to compare against,
+/// same as absent), or when it parses cleanly but was written by a different
+/// [`STAMP_SCHEMA`] (an old/future stamp must never brick a server).
+///
+/// A stamp file that EXISTS, was read, and fails to parse as valid JSON in
+/// the current schema's shape is CORRUPT, not absent, and is no longer
+/// indistinguishable from it: this returns [`ToolchainError::Stamp`], and
+/// [`enforce_handshake`] applies the severity policy (fail closed in `Error`,
+/// log-and-continue in `Warn`) on top.
 ///
 /// # Errors
-/// Never returns `Err` today; the signature is `Result` so a future strict
-/// mode can distinguish "absent" from "corrupt" without a breaking change.
+/// [`ToolchainError::Stamp`] when the stamp file exists but its content does
+/// not parse as JSON in the [`ToolchainStamp`] shape — a truncated/partial
+/// write that somehow survived [`write_stamp`]'s atomic rename, or
+/// hand-corrupted content.
 pub fn read_stamp(path: &Path) -> Result<Option<ToolchainStamp>, ToolchainError> {
     let Ok(text) = std::fs::read_to_string(path) else {
         return Ok(None);
     };
     match serde_json::from_str::<ToolchainStamp>(&text) {
         Ok(s) if s.schema == STAMP_SCHEMA => Ok(Some(s)),
-        _ => Ok(None),
+        Ok(_) => Ok(None),
+        Err(source) => Err(ToolchainError::Stamp {
+            path: path.to_path_buf(),
+            source: std::io::Error::new(std::io::ErrorKind::InvalidData, source),
+        }),
     }
 }
 
 /// Fingerprint `extract` + `stdlib` and write the stamp to [`stamp_path`].
 /// Called by `scripts/redeploy.sh` via `tidepool --write-toolchain-stamp`, so
 /// the writer and the checker share one implementation and cannot drift.
+///
+/// Written ATOMICALLY: the content lands in a uniquely-named temp file in the
+/// stamp's own directory (so the rename below stays on one filesystem),
+/// `sync_all`'d to disk, then renamed over the live stamp in one syscall —
+/// a reader (this process's own next startup, or a concurrent one) can never
+/// observe a short/partial write. The directory entry is synced afterward so
+/// the rename itself, not just the temp file's bytes, survives a crash.
 ///
 /// # Errors
 /// [`ToolchainError::Stamp`] if the stamp cannot be created or written.
@@ -545,12 +566,21 @@ pub fn write_stamp(extract: &Path, stdlib: &Path) -> Result<ToolchainStamp, Tool
     };
     let path = stamp_path();
     let write = || -> std::io::Result<()> {
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
+        let parent = path
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        std::fs::create_dir_all(parent)?;
         let json = serde_json::to_string_pretty(&stamp)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-        std::fs::write(&path, json)
+
+        let mut tmp = tempfile::NamedTempFile::new_in(parent)?;
+        tmp.write_all(json.as_bytes())?;
+        tmp.as_file().sync_all()?;
+        tmp.persist(&path).map_err(|e| e.error)?;
+
+        std::fs::File::open(parent)?.sync_all()?;
+        Ok(())
     };
     write().map_err(|source| ToolchainError::Stamp {
         path: path.clone(),
@@ -643,8 +673,8 @@ pub enum HandshakeOutcome {
 /// [`enforce_handshake`] applies the severity policy.
 ///
 /// # Errors
-/// [`ToolchainError::Stamp`] only if the stamp becomes unreadable in a way
-/// [`read_stamp`] cannot degrade past (currently unreachable).
+/// [`ToolchainError::Stamp`] when the stamp file exists but its content is
+/// corrupt ([`read_stamp`] fails closed rather than treating it as absent).
 pub fn check_handshake(extract: &Path, stdlib: &Path) -> Result<HandshakeOutcome, ToolchainError> {
     let path = stamp_path();
     let Some(stamp) = read_stamp(&path)? else {
@@ -702,11 +732,18 @@ impl HandshakeSeverity {
 /// server startup, after the toolchain is located — never per-eval.
 ///
 /// Returns the outcome so the caller can log the non-fatal cases with its own
-/// subscriber (this crate stays quiet by default).
+/// subscriber (this crate stays quiet by default) — EXCEPT a corrupt stamp
+/// under [`HandshakeSeverity::Warn`], which this function logs directly via
+/// `tracing::warn!` before degrading to [`HandshakeOutcome::NoStamp`]: the
+/// corrupt-vs-genuinely-absent distinction has no home in that variant (it
+/// carries only a path), and widening [`HandshakeOutcome`] with a new arm
+/// would break every existing exhaustive match on it outside this crate.
 ///
 /// # Errors
 /// [`ToolchainError::Skew`] when a skew is detected and severity is
-/// [`HandshakeSeverity::Error`].
+/// [`HandshakeSeverity::Error`]. [`ToolchainError::Stamp`] when the stamp is
+/// corrupt (fails to parse) and severity is [`HandshakeSeverity::Error`] —
+/// fail closed rather than silently treat corruption as no stamp.
 pub fn enforce_handshake(
     extract: &Path,
     stdlib: &Path,
@@ -715,7 +752,19 @@ pub fn enforce_handshake(
     if severity == HandshakeSeverity::Off {
         return Ok(HandshakeOutcome::NoStamp { path: stamp_path() });
     }
-    let outcome = check_handshake(extract, stdlib)?;
+    let outcome = match check_handshake(extract, stdlib) {
+        Ok(outcome) => outcome,
+        // The only error `check_handshake` can produce is a corrupt stamp
+        // (`read_stamp` fails closed on a parse failure). `Error` severity
+        // propagates it as-is below (fail closed); `Warn` logs it here and
+        // degrades to the same no-stamp-detected outcome rather than
+        // aborting startup.
+        Err(e) if severity == HandshakeSeverity::Warn => {
+            tracing::warn!("toolchain stamp is corrupt, treating as absent: {e}");
+            HandshakeOutcome::NoStamp { path: stamp_path() }
+        }
+        Err(e) => return Err(e),
+    };
     match (&outcome, severity) {
         (HandshakeOutcome::Skew(report), HandshakeSeverity::Error) => {
             Err(ToolchainError::Skew(report.clone()))
@@ -974,5 +1023,85 @@ mod tests {
         )
         .unwrap();
         assert!(read_stamp(&path).unwrap().is_none());
+    }
+
+    /// Simulates a crash between `NamedTempFile` creation and `persist`'s
+    /// rename: a leftover temp file sits next to a real, already-written
+    /// stamp. The real stamp must read back intact (the leftover is a
+    /// different path entirely — atomic rename means a torn write can never
+    /// land ON the stamp's own path), and a later, ordinary write must still
+    /// succeed (its own uniquely-named temp file never collides with the
+    /// leftover).
+    #[test]
+    fn write_stamp_is_atomic_against_an_interrupted_write() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        isolate_cache(tmp.path());
+        let stdlib = tmp.path().join("lib");
+        write_stdlib(&stdlib, "module Tidepool.Prelude where\n");
+        let extract = tmp.path().join("tidepool-extract");
+        std::fs::write(&extract, b"deployed extract v1").unwrap();
+
+        let deployed = write_stamp(&extract, &stdlib).unwrap();
+
+        let path = stamp_path();
+        let leftover = path.parent().unwrap().join(".toolchain-stamp.tmp-leftover");
+        std::fs::write(&leftover, b"{ garbage, not json, never persisted").unwrap();
+
+        let read_back = read_stamp(&path).unwrap().expect("stamp intact");
+        assert_eq!(read_back.extract, deployed.extract);
+        assert_eq!(read_back.stdlib, deployed.stdlib);
+
+        // A fresh write is unaffected by the stray leftover and still lands
+        // cleanly.
+        write_stamp(&extract, &stdlib).unwrap();
+        assert!(
+            read_stamp(&path).unwrap().is_some(),
+            "a later write must still succeed with a leftover temp file present"
+        );
+        assert!(
+            leftover.exists(),
+            "a fresh write must not touch an unrelated leftover file"
+        );
+    }
+
+    /// The stamp protocol's other half: content-level corruption (not a
+    /// partial write, but e.g. a hand-edited or truncated-and-then-appended
+    /// file) must fail closed under the default `Error` severity, and be
+    /// reported — not silently swallowed as "no stamp" — under `Warn`.
+    #[test]
+    fn corrupt_stamp_fails_closed_in_error_and_warns_in_warn() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        isolate_cache(tmp.path());
+        let stdlib = tmp.path().join("lib");
+        write_stdlib(&stdlib, "module Tidepool.Prelude where\n");
+        let extract = tmp.path().join("tidepool-extract");
+        std::fs::write(&extract, b"deployed extract v1").unwrap();
+
+        let path = stamp_path();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, b"{ not valid json at all").unwrap();
+
+        // `read_stamp` itself distinguishes corrupt from absent.
+        let err = read_stamp(&path).unwrap_err();
+        assert!(matches!(err, ToolchainError::Stamp { .. }), "got {err:?}");
+
+        // Default severity fails closed rather than proceeding as if
+        // nothing were deployed.
+        std::env::remove_var(ENV_HANDSHAKE);
+        let err = enforce_handshake(&extract, &stdlib).unwrap_err();
+        assert!(matches!(err, ToolchainError::Stamp { .. }), "got {err:?}");
+
+        // `warn` degrades gracefully (logs and continues) instead of
+        // aborting — observably, it must not error, and must not be
+        // mistaken for a genuine deploy (it degrades to the same
+        // no-stamp-detected outcome `check_handshake` would report for an
+        // absent file).
+        std::env::set_var(ENV_HANDSHAKE, "warn");
+        let outcome = enforce_handshake(&extract, &stdlib).unwrap();
+        assert!(
+            matches!(outcome, HandshakeOutcome::NoStamp { .. }),
+            "got {outcome:?}"
+        );
+        std::env::remove_var(ENV_HANDSHAKE);
     }
 }

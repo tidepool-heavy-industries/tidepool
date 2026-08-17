@@ -220,6 +220,39 @@ impl From<BinError> for std::io::Error {
     }
 }
 
+/// On Unix, verify `path` names a regular file this process can actually
+/// READ, with at least one EXECUTE permission bit set — the two properties
+/// [`BinError`]'s "not a readable file" message (and this module's "readable
+/// file" precedence-table language) promise but `is_file` alone never
+/// checked, so a `TIDEPOOL_EXTRACT=/some/chmod-000-file` used to resolve
+/// successfully here and only fail later, as an opaque OS error, at spawn.
+///
+/// `File::open` is the real read-access check (it honors the same
+/// permission/ACL evaluation a later spawn's read of the binary would hit);
+/// the execute-bit check on `mode()` is the accessible without-`libc`
+/// approximation of "executable" this std-only crate can perform (see the
+/// crate doc's D-A note) — the same thing a later spawn ultimately depends
+/// on to succeed.
+#[cfg(unix)]
+fn is_readable_executable_file(path: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    if !path.is_file() || std::fs::File::open(path).is_err() {
+        return false;
+    }
+    std::fs::metadata(path)
+        .map(|meta| meta.permissions().mode() & 0o111 != 0)
+        .unwrap_or(false)
+}
+
+/// Off Unix, there is no portable, dependency-free access check this
+/// std-only crate can perform (see the crate doc's D-A note); `is_file` is
+/// what this precedence step has always checked here, and a genuinely
+/// unusable binary still fails loudly at spawn time.
+#[cfg(not(unix))]
+fn is_readable_executable_file(path: &Path) -> bool {
+    path.is_file()
+}
+
 /// Resolve the `tidepool-extract` binary, STRICTLY.
 ///
 /// `$TIDEPOOL_EXTRACT` (the same override every test tier honors) wins over
@@ -234,7 +267,7 @@ pub fn resolve_bin() -> Result<ResolvedBin, BinError> {
     match std::env::var_os("TIDEPOOL_EXTRACT") {
         Some(v) => {
             let path = PathBuf::from(v);
-            if !path.is_file() {
+            if !is_readable_executable_file(&path) {
                 return Err(BinError { path });
             }
             Ok(ResolvedBin {
@@ -844,10 +877,11 @@ mod tests {
         }
     }
 
-    /// One test owns `$TIDEPOOL_EXTRACT` for this binary (both cases in
+    /// One test owns `$TIDEPOOL_EXTRACT` for this binary (all cases in
     /// sequence) so no two tests race on the same process-global env var.
     #[test]
     fn bin_resolution_is_strict() {
+        use std::os::unix::fs::PermissionsExt;
         let dir = std::env::temp_dir().join(format!(
             "tidepool-extract-cmd-resolve-{}",
             std::process::id()
@@ -868,9 +902,36 @@ mod tests {
         let io: std::io::Error = err.into();
         assert_eq!(io.kind(), std::io::ErrorKind::NotFound);
 
-        // Set-and-readable wins over PATH.
+        // A file that EXISTS but has no permission bits at all (`chmod 000`)
+        // must be rejected AT RESOLUTION, with the same "not a readable
+        // file" error — not accepted here and left to fail later, as an
+        // opaque OS error, at spawn.
+        let unreadable = dir.join("chmod-000-extract");
+        std::fs::write(&unreadable, b"#!/bin/sh\nexit 0\n").unwrap();
+        std::fs::set_permissions(&unreadable, std::fs::Permissions::from_mode(0o000)).unwrap();
+        std::env::set_var("TIDEPOOL_EXTRACT", &unreadable);
+        let err = resolve_bin().unwrap_err();
+        assert_eq!(err.path(), unreadable.as_path());
+        assert!(
+            err.to_string().contains("not a readable file"),
+            "unexpected message: {err}"
+        );
+        std::fs::set_permissions(&unreadable, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::remove_file(&unreadable).ok();
+
+        // A readable file with no EXECUTE bit set is rejected the same way —
+        // `is_file` alone would have accepted it.
+        let not_executable = dir.join("not-executable-extract");
+        std::fs::write(&not_executable, b"#!/bin/sh\nexit 0\n").unwrap();
+        std::fs::set_permissions(&not_executable, std::fs::Permissions::from_mode(0o644)).unwrap();
+        std::env::set_var("TIDEPOOL_EXTRACT", &not_executable);
+        let err = resolve_bin().unwrap_err();
+        assert_eq!(err.path(), not_executable.as_path());
+
+        // Set-and-readable-and-executable wins over PATH.
         let real = dir.join("tidepool-extract");
         std::fs::write(&real, b"#!/bin/sh\nexit 0\n").unwrap();
+        std::fs::set_permissions(&real, std::fs::Permissions::from_mode(0o755)).unwrap();
         std::env::set_var("TIDEPOOL_EXTRACT", &real);
         let resolved = resolve_bin().unwrap();
         assert_eq!(resolved.path, real);
