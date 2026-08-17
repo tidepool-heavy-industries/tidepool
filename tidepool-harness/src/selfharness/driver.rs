@@ -207,6 +207,22 @@ struct OuterSession {
 /// `base_effects!`/`handler_for!` row (opt-in, like `Worktree`/`RepoEvent`/
 /// `Subagent`) — which journal file a run appends to, and folding it at
 /// boot, is a driver/binary wiring concern, not a base-stack default.
+///
+/// The green-threads lane (PRD 20 S1-L4,
+/// `plans/self-iterating-harness/20-s1l4-green-threads.md`) widens it once
+/// more with `Green`, placed LAST so `RunLLMTurn` keeps index 0. Under the
+/// registry representation (threads park as new continuations in the
+/// session's multi-hole registry, PRD 20 lines 255-267), `Green` is NOT
+/// serviced through [`SelfHarnessDriver::service_outer_effect`]'s mechanical
+/// decode-dispatch-convert shape the way `Console`/`Worktree`/`RepoEvent`/
+/// `Exec`/`Journal` are: an `async` suspension needs the spawned thread
+/// body's `ValueHandle` taken off the spawner's parked frame and a NEW
+/// suspension-capable top-level run started under its own realm — driver
+/// machinery in the `RunLLMTurn`/`AskUser` class ([`engine::classify_hole`]/
+/// [`HoleRouting`]), not the `OuterEffectKind`/`dispatch_outer_effect` class.
+/// That servicing, and `green_decl()`'s own verb shapes (a spawn will carry
+/// the thread body as a closure), are future work; this row widening — with
+/// no authored call site compiling against it yet — is this lane's receipt.
 fn outer_decls() -> Vec<tidepool_mcp::EffectDecl> {
     vec![
         tidepool_mcp::runllmturn_decl(),
@@ -217,6 +233,7 @@ fn outer_decls() -> Vec<tidepool_mcp::EffectDecl> {
         tidepool_mcp::exec_decl(),
         tidepool_mcp::subagent_decl(),
         tidepool_mcp::journal_decl(),
+        tidepool_mcp::green_decl(),
     ]
 }
 

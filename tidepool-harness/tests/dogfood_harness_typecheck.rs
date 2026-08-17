@@ -83,11 +83,14 @@ fn companion_typechecks() {
 
 /// dev-tree is the executable design target of S1-L1: its row now IS the
 /// driver's widened outer session (`[RunLLMTurn, AskUser, Console, Worktree,
-/// RepoEvent, Exec, Subagent, Journal]` — mirrors
+/// RepoEvent, Exec, Subagent, Journal, Green]` — mirrors
 /// `selfharness::driver::outer_decls`, interposed effects FIRST so the
 /// suspend threshold stays 0). Typechecking against that exact row is what
 /// turns this from "the file names only landed API" into "this compiles
-/// against what the driver actually serves".
+/// against what the driver actually serves". dev-tree itself calls no Green
+/// verb — `Green` in the row with no authored call site is still a real
+/// receipt: it proves `green_decl()` (and its `Tidepool.Async` auto-import)
+/// compile clean alongside every other outer-row effect.
 #[test]
 fn dev_tree_typechecks() {
     typecheck(
@@ -101,6 +104,7 @@ fn dev_tree_typechecks() {
             tidepool_mcp::exec_decl(),
             tidepool_mcp::subagent_decl(),
             tidepool_mcp::journal_decl(),
+            tidepool_mcp::green_decl(),
         ],
     );
 }
