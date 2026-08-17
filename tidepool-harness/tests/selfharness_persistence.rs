@@ -1,14 +1,25 @@
-//! Targeted coverage for the ONE generation-tagged checkpoint: a completed
-//! cycle commits its own state and its own compaction summary together, at
-//! the end of `SelfHarnessDriver::run_one_cycle`'s success path, so a
-//! restart always reads a state and a summary from the SAME generation.
+//! Durability across a restart, in the two things a killed run leaves behind:
+//! the ONE generation-tagged CHECKPOINT, and — since PRD 20 S1-L5 — the run
+//! LEASE plus its append-only JOURNAL.
 //!
-//! Drives cycles through the production entry point
-//! (`SelfHarnessDriver::run_one_cycle`), then constructs a FRESH
-//! `SelfHarnessDriver` over a FRESH `Harness` — simulating a killed and
-//! restarted process — and confirms what it restores. Needs
-//! `TIDEPOOL_EXTRACT` and the with-packages GHC on PATH — run inside `nix
-//! develop` (see `haskell/CLAUDE.md`).
+//! Checkpoint half: a completed cycle commits its own state and its own
+//! compaction summary together, at the end of
+//! `SelfHarnessDriver::run_one_cycle`'s success path, so a restart always
+//! reads a state and a summary from the SAME generation.
+//!
+//! Lease/journal half (wave 2b, `plans/self-iterating-harness/
+//! 20-s1-l5-resume.md`): a run that ends ABNORMALLY does not retire its lease,
+//! so the next boot resumes it and does only the delta; a run that ends
+//! normally does retire, so the next boot mints a fresh run. Plus what a kill
+//! mid-append leaves — a torn final line — and how far that tolerance reaches.
+//!
+//! Every cycle runs through the production entry point
+//! (`SelfHarnessDriver::run_one_cycle`), and a "restarted process" is always a
+//! FRESH `SelfHarnessDriver` over a FRESH `Harness`, carrying nothing but what
+//! is on disk. The GHC-heavy tests need `TIDEPOOL_EXTRACT` and the
+//! with-packages GHC on PATH — run inside `nix develop` (see
+//! `haskell/CLAUDE.md`). The lease/journal tests that fold a hand-written
+//! journal compile no Haskell at all and are plain `#[test]`s.
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -16,6 +27,7 @@ use std::sync::{Arc, Mutex};
 
 mod support;
 
+use tidepool_handlers::{load_journal, ConsoleHandler, JournalEntry, JournalLoadError};
 use tidepool_harness::engine::EngineConfig;
 use tidepool_harness::log::LogHeader;
 use tidepool_harness::provider::{
@@ -26,8 +38,8 @@ use tidepool_harness::replay::{RecordedReply, ReplayProvider};
 use tidepool_harness::selfharness::persistence;
 use tidepool_harness::tree::NodeId;
 use tidepool_harness::{
-    answerer_decls, load_harness_source, DriverError, Event, Harness, HarnessSource, LogObserver,
-    Observer, SelfHarnessDriver,
+    acquire_lease, answerer_decls, load_harness_source, retire_lease, DriverError, Event, Harness,
+    HarnessSource, LogObserver, Observer, ResumeFold, RunLease, SelfHarnessDriver,
 };
 
 fn repo_root() -> PathBuf {
@@ -698,4 +710,558 @@ async fn state_decode_failure_retries_once_from_fresh_state_instead_of_killing_r
         committed.state
     );
     assert_eq!(committed.state.get("totally"), None);
+}
+
+// ============================================================================
+// PRD 20 S1-L5 wave 2b — the run lease and its journal under ABNORMAL
+// termination
+//
+// Wave 1's acceptance (`tests/outer_effects.rs::
+// resume_boot_fold_fresh_then_resumed_appends_only_the_delta`) proves ENTRY
+// SELECTION over a clean journal: a fresh boot compiles `loop`, a boot with a
+// non-empty fold compiles `resumeLoop` and appends only the delta, and a
+// non-empty fold against a harness with no `resumeLoop` is refused. It gets its
+// "prior process" by running a `loop` that deliberately covers less work than
+// `resumeLoop` does, and its refusal leg from a hand-staged journal — no run in
+// it ever terminates abnormally.
+//
+// What follows is the crash path itself: that an abnormally-terminated cycle
+// leaves its lease unretired (and a normally-finished one does not), that its
+// half-written journal folds correctly, and that the resumed run's work is
+// exactly the remainder.
+// ============================================================================
+
+/// A fresh [`SelfHarnessDriver`] over `tests/fixtures` — one per simulated
+/// PROCESS below. No scripted replies: `CrashResumeHarness.hs`'s loop is
+/// authored orchestration and opens no model holes, so the provider exists only
+/// because the constructor takes one.
+fn fixture_driver(log_tag: &str) -> SelfHarnessDriver {
+    let agent_cfg = EngineConfig::from_decls(answerer_decls(), prelude_dir(), Some(fixtures_dir()))
+        .expect("answerer engine config");
+    let provider: Arc<dyn DynModelProvider> = Arc::new(ReplayProvider::new(Vec::new()));
+    let writer = tidepool_harness::log::LogWriter::create(
+        std::env::temp_dir().join(format!(
+            "selfharness-persistence-{log_tag}-{}.jsonl",
+            std::process::id()
+        )),
+        &header(),
+    )
+    .expect("log writer");
+    let agent = Arc::new(Harness::new(writer, agent_cfg, provider).expect("agent harness boots"));
+    SelfHarnessDriver::new(agent, Arc::new(LogObserver))
+}
+
+/// A `state_json` array field as `Vec<&str>`, for a plain assertion against
+/// `vec!["alpha", "beta"]`-shaped expectations.
+fn text_array<'a>(state: &'a serde_json::Value, field: &str) -> Vec<&'a str> {
+    state
+        .get(field)
+        .and_then(|v| v.as_array())
+        .unwrap_or_else(|| panic!("{field} must be an array, got {state:?}"))
+        .iter()
+        .map(|v| {
+            v.as_str()
+                .unwrap_or_else(|| panic!("{field} entry must be a string"))
+        })
+        .collect()
+}
+
+fn keys(entries: &[JournalEntry]) -> Vec<&str> {
+    entries.iter().map(|e| e.key.as_str()).collect()
+}
+
+fn seqs(entries: &[JournalEntry]) -> Vec<u64> {
+    entries.iter().map(|e| e.seq).collect()
+}
+
+/// The keys a fold kept, read back off the WIRE shape the splice carries — so
+/// the assertion is about what the authored side would actually see.
+fn folded_keys(fold: &ResumeFold) -> Vec<String> {
+    fold.to_json()["entries"]
+        .as_array()
+        .expect("entries is a list")
+        .iter()
+        .map(|e| e["key"].as_str().expect("key").to_string())
+        .collect()
+}
+
+/// One journal line exactly as [`tidepool_handlers::JournalHandler`] writes it,
+/// newline included. Hand-written rather than recorded through the handler
+/// because `JournalHandler::append` is private to its crate — and because the
+/// tests below need to plant torn bytes, which no handler can produce on
+/// purpose.
+fn line(seq: u64, key: &str, payload: i64) -> String {
+    let mut s =
+        serde_json::json!({"seq": seq, "kind": "step", "key": key, "payload": payload}).to_string();
+    s.push('\n');
+    s
+}
+
+/// A kill landing mid-`write_all`: the kernel took a PREFIX of the line's bytes
+/// and, therefore, no newline. That is the only shape a torn line can have —
+/// the handler hands `write_all` ONE buffer that ends in `\n`, so a partial
+/// write is always a prefix of it.
+fn torn_prefix_of(full_line: &str) -> &str {
+    &full_line[..full_line.len() / 2]
+}
+
+/// THE crash-resume acceptance test: a run killed mid-flight, resumed, doing
+/// only the delta — and the retire/resume asymmetry that decides which of those
+/// two things the next boot does.
+///
+/// **The crash mechanism, stated plainly.** No process is killed. The first
+/// cycle dies at `CrashResumeHarness.hs`'s crash seam: after recording
+/// `alpha` and `beta`, the loop calls `say`, and this driver has no Console
+/// handler wired, so `run_one_cycle` returns `Err` mid-cycle with `gamma` and
+/// `delta` still to do. **Why that is equivalent to a kill at the durability
+/// boundary:** durability is decided entirely by what is on disk when the
+/// process stops, and the three things on disk are identical either way —
+/// two flushed journal lines (`record` flushes before returning), NO committed
+/// checkpoint (only a successful cycle commits), and an ACTIVE run lease
+/// (retirement happens on a normal `run_loop` return, which never happens
+/// here). Nothing about the boot path reads a pid, an exit status, or a "was
+/// this clean" flag — `acquire_lease` resumes on the mere presence of the lease
+/// file — so a real `kill -9` between two appends reaches the same next boot
+/// through the same state. What this does NOT simulate is a kill DURING an
+/// append; that leaves a torn final line, covered by the three tests below.
+///
+/// Asserted, in order:
+/// 1. The crashed cycle's durable residue: two journal entries at seq 0/1, no
+///    checkpoint.
+/// 2. The next boot RESUMES (the lease was never retired), with the same run id
+///    and the same journal file, folding both entries.
+/// 3. `resumeLoop` skips exactly `alpha`/`beta` and records exactly
+///    `gamma`/`delta`, whose seqs continue at 2/3 rather than restarting at 0.
+/// 4. That cycle finishes normally, commits its checkpoint, and its lease
+///    retires — RETAINED on disk (renamed, readable, naming the crashed run's
+///    id), never deleted.
+/// 5. The boot after that MINTS: a new run id, a new journal file that does not
+///    exist yet and folds to nothing, while the finished run's journal still
+///    holds all four entries. Retire-on-normal-exit and resume-on-crash are
+///    the two directions of one mechanism, so both are pinned here.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn crashed_cycle_keeps_its_lease_and_the_resumed_run_does_only_the_delta() {
+    support::require_extract();
+    let _cache_guard = support::isolate_cache();
+
+    let log_dir = scratch("crash-delta");
+    let checkpoint_path = log_dir.join("checkpoint.json");
+    let source = load_harness_source(&fixtures_dir().join("CrashResumeHarness.hs"))
+        .expect("crash-resume fixture harness loads");
+
+    // --- process 1: dies at the crash seam, two records already flushed -----
+    let mut crashed = fixture_driver("crash-delta-1");
+    crashed.set_checkpoint_path(checkpoint_path.clone());
+    let first = acquire_lease(&log_dir).expect("mint the lease");
+    assert!(!first.resumed, "no lease on disk yet — this boot mints one");
+    assert_eq!(
+        crashed
+            .open_run_journal(&first.lease)
+            .expect("open the (nonexistent) journal"),
+        0,
+        "a fresh run folds nothing"
+    );
+    // Console deliberately left unwired: that IS the crash seam.
+    let err = crashed
+        .run_one_cycle(&source, None)
+        .await
+        .expect_err("the cycle must die at the crash seam, mid-flight");
+    assert!(
+        err.to_string().contains("set_console_handler"),
+        "the crash must be the intended one (the Console seam), not some other \
+         failure that happens to abort the cycle: {err}"
+    );
+    drop(crashed);
+
+    let crashed_entries =
+        load_journal(&first.lease.journal).expect("the crashed run's journal loads");
+    assert_eq!(
+        keys(&crashed_entries),
+        vec!["alpha", "beta"],
+        "the steps recorded before the crash must be durable, and no others, \
+         got {crashed_entries:?}"
+    );
+    assert_eq!(seqs(&crashed_entries), vec![0, 1]);
+    assert_eq!(
+        persistence::load_checkpoint(&checkpoint_path).expect("load_checkpoint after the crash"),
+        None,
+        "a cycle that dies mid-flight commits no checkpoint — the journal is the \
+         ONLY record that those two steps happened, which is why resume folds it"
+    );
+
+    // --- process 2: the next boot resumes the run the crash left open -------
+    let second = acquire_lease(&log_dir).expect("the boot after the crash");
+    assert!(
+        second.resumed,
+        "an abnormally-terminated run never retires its lease, so the next boot \
+         must resume it rather than start a new run"
+    );
+    assert_eq!(second.lease.run_id, first.lease.run_id);
+    assert_eq!(
+        second.lease.journal, first.lease.journal,
+        "one journal file per RUN, appended across however many processes the \
+         run takes"
+    );
+
+    let mut resumed = fixture_driver("crash-delta-2");
+    resumed.set_checkpoint_path(checkpoint_path.clone());
+    // The seam the crashed process lacked — this process walks past the point
+    // its predecessor died at.
+    resumed.set_console_handler(ConsoleHandler);
+    assert_eq!(
+        resumed
+            .open_run_journal(&second.lease)
+            .expect("fold the crashed run's journal"),
+        2
+    );
+
+    let outcome = resumed
+        .run_one_cycle(&source, None)
+        .await
+        .expect("the resumed cycle completes: resumeLoop walks every step against the fold");
+    let state = &outcome.state_json;
+    assert_eq!(
+        state.get("sawResume").and_then(|v| v.as_bool()),
+        Some(true),
+        "the resumed boot must have entered through resumeLoop, got {state:?}"
+    );
+    assert_eq!(
+        text_array(state, "skipped"),
+        vec!["alpha", "beta"],
+        "exactly the steps the crashed process durably recorded must be skipped, \
+         got {state:?}"
+    );
+    assert_eq!(
+        text_array(state, "recorded"),
+        vec!["gamma", "delta"],
+        "the resumed run's work must be exactly the remainder — no redo of \
+         finished steps, nothing dropped, got {state:?}"
+    );
+
+    let resumed_entries =
+        load_journal(&second.lease.journal).expect("the resumed run's journal loads");
+    assert_eq!(
+        keys(&resumed_entries),
+        vec!["alpha", "beta", "gamma", "delta"],
+        "the journal is append-only: the crashed process's lines are still \
+         there, in place, with the delta after them — got {resumed_entries:?}"
+    );
+    assert_eq!(
+        seqs(&resumed_entries),
+        vec![0, 1, 2, 3],
+        "the resumed run's seqs must continue PAST the crashed run's rather than \
+         restarting at 0 (which would make the two processes' entries \
+         indistinguishable under a max-seq fold)"
+    );
+    let committed = persistence::load_checkpoint(&checkpoint_path)
+        .expect("load_checkpoint after the resumed cycle")
+        .expect("the resumed cycle committed");
+    assert_eq!(committed.generation, 1);
+
+    // --- normal completion retires; the boot after that MINTS ---------------
+    // What `tidepool-selfharness`'s `run_loop` return path does, and the other
+    // direction of the same mechanism: a crash skips this call, which is
+    // precisely how the boot above knew to resume.
+    let retired = retire_lease(&log_dir)
+        .expect("retire the lease")
+        .expect("there is an active lease to retire");
+    assert!(
+        retired.exists(),
+        "a retired lease is RETAINED — renamed beside its journal, never deleted"
+    );
+    let retained: RunLease = serde_json::from_slice(&std::fs::read(&retired).expect("read"))
+        .expect("a retired lease stays readable, not just present");
+    assert_eq!(
+        retained.run_id, first.lease.run_id,
+        "the retained lease must name the run it belonged to"
+    );
+
+    let third = acquire_lease(&log_dir).expect("the boot after a normal completion");
+    assert!(
+        !third.resumed,
+        "a retired lease must not be resumed — a finished run's work would be \
+         re-entered on every subsequent boot"
+    );
+    assert_ne!(third.lease.run_id, first.lease.run_id);
+    assert_ne!(
+        third.lease.journal, first.lease.journal,
+        "a fresh run must get its OWN journal file, never adopt the finished \
+         run's"
+    );
+    assert!(
+        !third.lease.journal.exists(),
+        "the fresh run's journal appears on its first append, not before"
+    );
+    let mut after = fixture_driver("crash-delta-3");
+    assert_eq!(
+        after
+            .open_run_journal(&third.lease)
+            .expect("open the fresh run's journal"),
+        0,
+        "the fresh run folds nothing — the finished run's entries are not its own"
+    );
+    assert_eq!(
+        keys(&load_journal(&first.lease.journal).expect("the finished run's journal still loads")),
+        vec!["alpha", "beta", "gamma", "delta"],
+        "and the finished run's journal is untouched by any of this — nothing \
+         rewrites, compacts, or deletes it"
+    );
+}
+
+/// A kill landing DURING an append, rather than between two: the journal's
+/// final line is a byte prefix with no newline.
+///
+/// `load_journal` skips it with a warning and returns the complete entries, so
+/// the boot fold survives — and the torn record is ABSENT from the fold, which
+/// is what makes the resumed run redo exactly that one step (a step whose
+/// record never landed durably is a step still to do; the harness's skip
+/// decision is a pure function of the fold, as
+/// `crashed_cycle_keeps_its_lease_and_the_resumed_run_does_only_the_delta`
+/// exercises end to end). The resumed run's first append even REUSES the torn
+/// record's seq, since nothing durable ever claimed it.
+///
+/// Folds a hand-written journal — no Haskell compiled.
+#[test]
+fn torn_final_line_folds_to_its_complete_entries_and_leaves_its_step_undone() {
+    let _cache_guard = support::isolate_cache();
+    let dir = scratch("torn-tail");
+    let lease = acquire_lease(&dir).expect("mint the lease").lease;
+
+    let gamma = line(2, "gamma", 30);
+    let mut file = line(0, "alpha", 10) + &line(1, "beta", 20);
+    file.push_str(torn_prefix_of(&gamma));
+    std::fs::write(&lease.journal, &file).expect("plant a torn-tail journal");
+
+    let entries = load_journal(&lease.journal).expect(
+        "a torn FINAL line is skipped, never fatal — that \
+             tolerance is the whole reason a crash mid-append is recoverable",
+    );
+    assert_eq!(keys(&entries), vec!["alpha", "beta"]);
+
+    let fold = ResumeFold::fold(&lease.run_id, &entries);
+    assert_eq!(
+        folded_keys(&fold),
+        vec!["alpha".to_string(), "beta".to_string()],
+        "the torn record must not reach the authored side — it would make a step \
+         that never durably completed look finished"
+    );
+    assert_eq!(
+        fold.next_seq(),
+        2,
+        "the resumed run's first append reuses the torn record's own seq: no \
+         durable entry ever claimed it"
+    );
+
+    // The driver's boot seam agrees with the fold read directly — one journal,
+    // one loaded-and-folded result, whichever way it is reached.
+    let mut driver = fixture_driver("torn-tail");
+    assert_eq!(
+        driver
+            .open_run_journal(&lease)
+            .expect("the boot fold tolerates a torn tail"),
+        2
+    );
+}
+
+/// A line that fails to parse ANYWHERE but the end cannot come from a crash: an
+/// append-only file's every write except the last completed, so this is real
+/// corruption. It fails the boot loudly, naming the file and the line — never
+/// absorbed the way a torn tail is, because absorbing it would silently drop
+/// facts a run genuinely recorded and then redo that work blind.
+///
+/// Folds a hand-written journal — no Haskell compiled.
+#[test]
+fn torn_line_before_the_last_fails_the_boot_loudly() {
+    let _cache_guard = support::isolate_cache();
+    let dir = scratch("torn-mid");
+    let lease = acquire_lease(&dir).expect("mint the lease").lease;
+
+    let beta = line(1, "beta", 20);
+    let mut file = line(0, "alpha", 10);
+    file.push_str(torn_prefix_of(&beta));
+    file.push('\n'); // a COMPLETE line that does not parse — not a torn tail
+    file.push_str(&line(2, "gamma", 30));
+    std::fs::write(&lease.journal, &file).expect("plant a mid-file corrupted journal");
+
+    assert!(
+        matches!(
+            load_journal(&lease.journal),
+            Err(JournalLoadError::TornMidFile { line_no: 1, .. })
+        ),
+        "expected TornMidFile at line 1, got {:?}",
+        load_journal(&lease.journal)
+    );
+
+    let mut driver = fixture_driver("torn-mid");
+    let err = driver
+        .open_run_journal(&lease)
+        .expect_err("the boot must refuse a corrupted journal, not fold around it");
+    let msg = err.to_string();
+    assert!(
+        msg.contains(&lease.journal.display().to_string()) && msg.contains("line 1"),
+        "the refusal must name the journal and the offending line, got: {msg}"
+    );
+}
+
+/// How far the torn-tail tolerance reaches — pinned because it is a real limit,
+/// not a wish.
+///
+/// A torn tail has no trailing newline, and the journal is append-only forever
+/// (nothing truncates or rewrites it — LOCKED). So the resumed run's first
+/// append lands on the SAME line as the torn bytes, and the two facts merge
+/// into one unparseable line. A torn tail is therefore survivable exactly
+/// ONCE — by the boot that folds it, not by the boot after that:
+///
+/// - Two or more appends ⇒ the merged line is no longer last ⇒ the next boot
+///   fails LOUDLY (`TornMidFile`), which is the safe direction: a human sees
+///   the file rather than a run silently mis-folding it.
+/// - Exactly one append ⇒ the merged line IS last ⇒ it is skipped as a torn
+///   tail, and that one durable append is silently absent from the fold. The
+///   consequence is bounded to redoing that step (never a wrong result, which
+///   is the property adopt-and-verify rests on), but it is silent.
+///
+/// This is two locked decisions meeting (append-only forever, and a strict
+/// mid-file tear), so it is pinned here rather than papered over: softening
+/// `load_journal` to tolerate the merged line would weaken exactly the
+/// contract the test above exists to hold. If the lane later decides the
+/// appender should do something about a file that does not end in a newline,
+/// this test is where that decision changes shape.
+///
+/// Folds hand-written journals — no Haskell compiled.
+#[test]
+fn appending_after_a_torn_tail_is_survivable_exactly_once() {
+    let _cache_guard = support::isolate_cache();
+
+    // Two appends after the tear: loud on the next boot.
+    let torn_tail = || {
+        let gamma = line(2, "gamma", 30);
+        let mut file = line(0, "alpha", 10) + &line(1, "beta", 20);
+        file.push_str(torn_prefix_of(&gamma));
+        file
+    };
+
+    let loud_dir = scratch("torn-then-two");
+    let loud = acquire_lease(&loud_dir).expect("mint the lease").lease;
+    std::fs::write(&loud.journal, torn_tail()).expect("plant a torn-tail journal");
+    // What the resumed run does next: append the delta, seeded at the fold's
+    // next_seq (2) — the ordinary append path, nothing special.
+    std::fs::write(
+        &loud.journal,
+        format!(
+            "{}{}{}",
+            std::fs::read_to_string(&loud.journal).expect("read"),
+            line(2, "gamma", 30),
+            line(3, "delta", 40)
+        ),
+    )
+    .expect("append the delta after the torn bytes");
+    assert!(
+        matches!(
+            load_journal(&loud.journal),
+            Err(JournalLoadError::TornMidFile { line_no: 2, .. })
+        ),
+        "the torn bytes merged with the first append, and are no longer last, so \
+         the next boot must fail loudly rather than fold around them: {:?}",
+        load_journal(&loud.journal)
+    );
+
+    // Exactly one append after the tear: the merged line is last, so it is
+    // skipped as a torn tail — and that append is silently gone from the fold.
+    let quiet_dir = scratch("torn-then-one");
+    let quiet = acquire_lease(&quiet_dir).expect("mint the lease").lease;
+    std::fs::write(
+        &quiet.journal,
+        format!("{}{}", torn_tail(), line(2, "gamma", 30)),
+    )
+    .expect("plant a torn tail with exactly one append after it");
+    let entries = load_journal(&quiet.journal).expect("the merged line reads as a torn tail");
+    assert_eq!(
+        keys(&entries),
+        vec!["alpha", "beta"],
+        "the appended record is absorbed into the torn line and lost from the \
+         fold — bounded to redoing that step, but silent, got {entries:?}"
+    );
+}
+
+/// Idempotence and order-insensitivity as properties of the FILE and of the
+/// driver's boot seam, not just of the pure fold over a vector (which
+/// `selfharness::resume`'s own unit tests already pin, rotations and wire bytes
+/// included).
+///
+/// Two things this adds: folding the same journal TWICE through
+/// `open_run_journal` — the operation a resumed boot performs on a file a prior
+/// process appended to — is the same fold both times; and a journal whose LINE
+/// order disagrees with its seq order folds identically to the canonical one,
+/// down to the wire bytes the splice carries. The second is only reachable from
+/// a hand-written file, which is the point: the winner is max seq, so file
+/// position cannot decide anything.
+///
+/// Folds hand-written journals — no Haskell compiled.
+#[test]
+fn boot_fold_is_idempotent_and_indifferent_to_the_files_line_order() {
+    let _cache_guard = support::isolate_cache();
+    let dir = scratch("fold-idempotent");
+    let lease = acquire_lease(&dir).expect("mint the lease").lease;
+
+    // `alpha` recorded twice — the later seq must win, so the fold is doing
+    // real work rather than trivially keeping everything.
+    let lines = [
+        line(0, "alpha", 10),
+        line(1, "beta", 20),
+        line(2, "alpha", 11),
+        line(3, "gamma", 30),
+    ];
+    std::fs::write(&lease.journal, lines.concat()).expect("plant a journal");
+
+    let mut driver = fixture_driver("fold-idempotent");
+    let once = driver.open_run_journal(&lease).expect("fold once");
+    let twice = driver
+        .open_run_journal(&lease)
+        .expect("fold the same file again");
+    assert_eq!(
+        (once, twice),
+        (3, 3),
+        "folding the same journal again must yield the same fold — the operation \
+         a resumed boot performs on a file a prior process appended to"
+    );
+
+    let canonical = ResumeFold::fold(
+        &lease.run_id,
+        &load_journal(&lease.journal).expect("canonical journal loads"),
+    );
+    assert_eq!(canonical.next_seq(), 4);
+    assert_eq!(
+        canonical.to_json()["entries"]
+            .as_array()
+            .expect("entries")
+            .iter()
+            .find(|e| e["key"] == "alpha")
+            .expect("alpha survived the fold")["payload"],
+        serde_json::json!(11),
+        "the newest record per (kind, key) wins, by seq"
+    );
+
+    // The same entries, written in an order the file's own lines contradict.
+    let shuffled_dir = scratch("fold-shuffled");
+    let shuffled = acquire_lease(&shuffled_dir).expect("mint the lease").lease;
+    let mut reversed = lines.clone();
+    reversed.reverse();
+    std::fs::write(&shuffled.journal, reversed.concat()).expect("plant a shuffled journal");
+    let shuffled_fold = ResumeFold::fold(
+        // The same run id: a fold carries the run it came from, and only the
+        // ENTRY order is under test here.
+        &lease.run_id,
+        &load_journal(&shuffled.journal).expect("shuffled journal loads"),
+    );
+    assert_eq!(
+        shuffled_fold, canonical,
+        "line order must not change the fold — the winner is max seq, not file \
+         position"
+    );
+    assert_eq!(
+        shuffled_fold.to_json().to_string(),
+        canonical.to_json().to_string(),
+        "…nor the wire bytes it splices, or an equivalent fold would miss the \
+         compile memo"
+    );
 }

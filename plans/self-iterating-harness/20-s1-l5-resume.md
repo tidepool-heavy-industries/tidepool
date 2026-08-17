@@ -167,6 +167,22 @@ pub struct ResumeFold {
   torn line anywhere earlier is `TornMidFile` and fails the boot loudly. Resume
   does not soften either.
 
+**Open question — the torn-tail tolerance is one boot deep.** A torn tail has
+no trailing newline (the handler hands `write_all` one buffer ending in `\n`,
+so a partial write is a prefix of it), and the journal is append-only forever,
+so the resumed run's first append lands on the SAME line as the torn bytes and
+the two merge into one unparseable line. The boot that FOLDS a torn tail is
+fine — that is the case this lane needs, and it redoes the torn step. The boot
+after it is not: two or more appends leave the merged line mid-file, so it
+fails loudly (`TornMidFile`); exactly one append leaves it last, so it is
+skipped as a torn tail and that one durable record is silently absent from the
+fold (bounded to redoing that step — never a wrong result — but silent). Every
+fix touches a locked decision (truncating the tail, or softening
+`load_journal`), so this is a decision for the lane rather than a defect to
+patch. Pinned meanwhile by
+`selfharness_persistence::appending_after_a_torn_tail_is_survivable_exactly_once`,
+which is where the decision changes shape.
+
 **Wire shape** (Rust `to_json` → the `__selfHarnessResume` splice →
 `Tidepool.Resume`'s decode). Entries emit sorted by `(kind, key)` so the
 splice is byte-deterministic and the compile memo hits:
@@ -256,7 +272,15 @@ and an acceptance test over a `resumeLoop`-declaring fixture.
 **Wave 2a — dev-tree v2 consumes it (Haskell).** `resumeLoop`, skip-recorded
 split/outcome, replan amendments at re-unfold, adopt-and-verify.
 
-**Wave 2b — the crash-resume acceptance test (Rust).** Scripted agents, killed
-between steps; the resumed run appends only the delta.
+**Wave 2b — the crash-resume acceptance test (Rust).** A cycle that dies
+mid-flight after k of n recorded steps (`tests/fixtures/CrashResumeHarness.hs`
+reaches a Console verb the crashed driver has no handler for — the same durable
+residue a kill between two appends leaves: flushed journal lines, no committed
+checkpoint, an unretired lease), resumed, doing exactly the n-k remainder with
+seqs continuing past the crashed run's; then the retire/mint direction (a normal
+completion retires, and the next boot mints a run whose journal folds nothing
+while the finished run's stays intact). Plus the torn-tail legs above, folded
+from hand-written journals with no compile. All in
+`tidepool-harness/tests/selfharness_persistence.rs`.
 
 **Wave 3 — rebase onto trunk, full verify, submit.**
