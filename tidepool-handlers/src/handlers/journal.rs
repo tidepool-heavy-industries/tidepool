@@ -52,22 +52,34 @@ impl JournalEntry {
         })
     }
 
-    fn from_json(v: &serde_json::Value) -> Result<Self, String> {
-        let seq = v
-            .get("seq")
-            .and_then(serde_json::Value::as_u64)
-            .ok_or("missing or non-integer \"seq\"")?;
+    fn from_json(v: &serde_json::Value) -> Result<Self, JournalParseError> {
+        let seq =
+            v.get("seq")
+                .and_then(serde_json::Value::as_u64)
+                .ok_or(JournalParseError::Field {
+                    field: "seq",
+                    reason: "missing or non-integer",
+                })?;
         let kind = v
             .get("kind")
             .and_then(serde_json::Value::as_str)
-            .ok_or("missing or non-string \"kind\"")?
+            .ok_or(JournalParseError::Field {
+                field: "kind",
+                reason: "missing or non-string",
+            })?
             .to_string();
         let key = v
             .get("key")
             .and_then(serde_json::Value::as_str)
-            .ok_or("missing or non-string \"key\"")?
+            .ok_or(JournalParseError::Field {
+                field: "key",
+                reason: "missing or non-string",
+            })?
             .to_string();
-        let payload = v.get("payload").cloned().ok_or("missing \"payload\"")?;
+        let payload = v.get("payload").cloned().ok_or(JournalParseError::Field {
+            field: "payload",
+            reason: "missing",
+        })?;
         Ok(JournalEntry {
             seq,
             kind,
@@ -77,12 +89,45 @@ impl JournalEntry {
     }
 }
 
+/// Why one journal line failed to parse into a [`JournalEntry`] — the
+/// line/field context [`JournalLoadError::TornMidFile`] carries, and the same
+/// detail a torn FINAL line's `tracing::warn!` reports (that one is never an
+/// error — see [`load_journal`]).
+#[derive(Debug)]
+pub enum JournalParseError {
+    /// The line was not valid JSON at all.
+    NotJson(serde_json::Error),
+    /// The line parsed as JSON but a required field was missing or had the
+    /// wrong type.
+    Field {
+        field: &'static str,
+        reason: &'static str,
+    },
+}
+
+impl fmt::Display for JournalParseError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            JournalParseError::NotJson(e) => write!(f, "{e}"),
+            JournalParseError::Field { field, reason } => write!(f, "{reason} \"{field}\""),
+        }
+    }
+}
+
+impl std::error::Error for JournalParseError {}
+
 /// Why [`load_journal`] refused to load a journal file. A torn FINAL line
 /// (the crash-mid-append case) is not one of these — it is skipped with a
 /// `tracing::warn!` and left out of the returned entries, never an error.
 #[derive(Debug)]
 pub enum JournalLoadError {
-    Io(std::io::Error),
+    /// Opening or reading the file itself failed. Never a missing file (that
+    /// is `Ok(vec![])`, per this function's doc) — a real I/O failure:
+    /// permissions, a bad fd, disk trouble.
+    Io {
+        path: PathBuf,
+        source: std::io::Error,
+    },
     /// A line before the last one failed to parse. The journal is
     /// append-only and every write but the last is complete by
     /// construction, so this means real corruption — never silently
@@ -90,14 +135,16 @@ pub enum JournalLoadError {
     TornMidFile {
         path: PathBuf,
         line_no: usize,
-        detail: String,
+        detail: JournalParseError,
     },
 }
 
 impl fmt::Display for JournalLoadError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            JournalLoadError::Io(e) => write!(f, "journal I/O error: {e}"),
+            JournalLoadError::Io { path, source } => {
+                write!(f, "journal I/O error on {path:?}: {source}")
+            }
             JournalLoadError::TornMidFile {
                 path,
                 line_no,
@@ -122,12 +169,20 @@ pub fn load_journal(path: &Path) -> Result<Vec<JournalEntry>, JournalLoadError> 
     let file = match std::fs::File::open(path) {
         Ok(f) => f,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(e) => return Err(JournalLoadError::Io(e)),
+        Err(e) => {
+            return Err(JournalLoadError::Io {
+                path: path.to_path_buf(),
+                source: e,
+            })
+        }
     };
     let lines: Vec<String> = BufReader::new(file)
         .lines()
         .collect::<std::io::Result<_>>()
-        .map_err(JournalLoadError::Io)?;
+        .map_err(|source| JournalLoadError::Io {
+            path: path.to_path_buf(),
+            source,
+        })?;
     let last_idx = lines.len().saturating_sub(1);
     let mut entries = Vec::with_capacity(lines.len());
     for (i, line) in lines.iter().enumerate() {
@@ -135,7 +190,7 @@ pub fn load_journal(path: &Path) -> Result<Vec<JournalEntry>, JournalLoadError> 
             continue;
         }
         let parsed = serde_json::from_str::<serde_json::Value>(line)
-            .map_err(|e| e.to_string())
+            .map_err(JournalParseError::NotJson)
             .and_then(|v| JournalEntry::from_json(&v));
         match parsed {
             Ok(entry) => entries.push(entry),
@@ -291,21 +346,24 @@ impl JournalHandler {
         kind: String,
         key: String,
         payload: serde_json::Value,
-    ) -> Result<(), EffectError> {
+    ) -> Result<(), JournalAppendError> {
         if let Some(parent) = self.path.parent() {
             if !parent.as_os_str().is_empty() {
-                std::fs::create_dir_all(parent).map_err(|e| {
-                    EffectError::Handler(format!(
-                        "journal: failed to create dir {:?}: {}",
-                        parent, e
-                    ))
+                std::fs::create_dir_all(parent).map_err(|source| {
+                    JournalAppendError::CreateDir {
+                        path: parent.to_path_buf(),
+                        source,
+                    }
                 })?;
             }
         }
         let _guard = self
             .lock
             .lock()
-            .map_err(|e| EffectError::Handler(format!("journal: lock poisoned: {e}")))?;
+            .map_err(|e| JournalAppendError::LockPoisoned {
+                path: self.path.clone(),
+                detail: e.to_string(),
+            })?;
         let seq = self.seq.fetch_add(1, Ordering::SeqCst);
         let entry = JournalEntry {
             seq,
@@ -313,20 +371,31 @@ impl JournalHandler {
             key,
             payload,
         };
-        let mut line = serde_json::to_string(&entry.to_json())
-            .map_err(|e| EffectError::Handler(format!("journal: serialize failed: {}", e)))?;
+        let mut line = serde_json::to_string(&entry.to_json()).map_err(|source| {
+            JournalAppendError::Serialize {
+                path: self.path.clone(),
+                source,
+            }
+        })?;
         line.push('\n');
         let mut file = OpenOptions::new()
             .create(true)
             .append(true)
             .open(&self.path)
-            .map_err(|e| {
-                EffectError::Handler(format!("journal: failed to open {:?}: {}", self.path, e))
+            .map_err(|source| JournalAppendError::Open {
+                path: self.path.clone(),
+                source,
             })?;
         file.write_all(line.as_bytes())
-            .map_err(|e| EffectError::Handler(format!("journal: write failed: {}", e)))?;
+            .map_err(|source| JournalAppendError::Write {
+                path: self.path.clone(),
+                source,
+            })?;
         file.sync_data()
-            .map_err(|e| EffectError::Handler(format!("journal: fsync failed: {}", e)))?;
+            .map_err(|source| JournalAppendError::Sync {
+                path: self.path.clone(),
+                source,
+            })?;
         Ok(())
     }
 
@@ -337,10 +406,71 @@ impl JournalHandler {
         key: String,
         payload: crate::effect_glue::JsonArg,
     ) -> Result<tidepool_effect::Response, EffectError> {
-        self.append(kind, key, payload.0)?;
+        self.append(kind, key, payload.0)
+            .map_err(|e| EffectError::Handler(e.to_string()))?;
         cx.respond(())
     }
 }
+
+/// Why a journal `append` failed to durably record an entry — the operation
+/// that failed, plus the path it was operating on. Converted to
+/// [`EffectError::Handler`] at the effect boundary (a journal write failure
+/// already aborts the run, locked, and this only makes WHY it aborted
+/// legible instead of a hand-formatted string).
+#[derive(Debug)]
+pub enum JournalAppendError {
+    CreateDir {
+        path: PathBuf,
+        source: std::io::Error,
+    },
+    LockPoisoned {
+        path: PathBuf,
+        detail: String,
+    },
+    Serialize {
+        path: PathBuf,
+        source: serde_json::Error,
+    },
+    Open {
+        path: PathBuf,
+        source: std::io::Error,
+    },
+    Write {
+        path: PathBuf,
+        source: std::io::Error,
+    },
+    Sync {
+        path: PathBuf,
+        source: std::io::Error,
+    },
+}
+
+impl fmt::Display for JournalAppendError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            JournalAppendError::CreateDir { path, source } => {
+                write!(f, "journal: failed to create dir {path:?}: {source}")
+            }
+            JournalAppendError::LockPoisoned { path, detail } => {
+                write!(f, "journal: lock poisoned: {detail} (path {path:?})")
+            }
+            JournalAppendError::Serialize { path, source } => {
+                write!(f, "journal: serialize failed: {source} (path {path:?})")
+            }
+            JournalAppendError::Open { path, source } => {
+                write!(f, "journal: failed to open {path:?}: {source}")
+            }
+            JournalAppendError::Write { path, source } => {
+                write!(f, "journal: write failed: {source} (path {path:?})")
+            }
+            JournalAppendError::Sync { path, source } => {
+                write!(f, "journal: fsync failed: {source} (path {path:?})")
+            }
+        }
+    }
+}
+
+impl std::error::Error for JournalAppendError {}
 
 #[cfg(test)]
 mod tests {
@@ -679,6 +809,38 @@ mod tests {
         assert!(path.exists());
         let entries = load_journal(&path).unwrap();
         assert_eq!(entries.len(), 1);
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// A parent-directory creation failure surfaces as a structured
+    /// [`JournalAppendError::CreateDir`] naming the path, not a bare string —
+    /// `append`'s type is now the append boundary's contract.
+    #[test]
+    fn create_dir_failure_is_a_structured_error() {
+        let base = tmp_dir("createdir_conflict");
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        // A regular FILE where the journal's parent directory needs to be —
+        // `create_dir_all` must fail on it, since it exists but is not a
+        // directory.
+        let blocker = base.join("blocker");
+        std::fs::write(&blocker, b"not a directory").unwrap();
+        let path = blocker.join("journal.jsonl");
+        let h = JournalHandler::new(path);
+
+        let err = h
+            .append("k".into(), "a".into(), serde_json::json!(1))
+            .expect_err("a file in place of the parent directory must fail create_dir_all");
+
+        assert!(
+            matches!(err, JournalAppendError::CreateDir { path: ref p, .. } if p == &blocker),
+            "expected CreateDir naming {blocker:?}, got {err:?}"
+        );
+        assert!(
+            err.to_string().contains("failed to create dir"),
+            "message content must survive: {err}"
+        );
 
         let _ = std::fs::remove_dir_all(&base);
     }

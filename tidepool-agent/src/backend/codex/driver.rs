@@ -26,8 +26,9 @@
 //!    parks the child's turn until the timeout kills it. That holds for a
 //!    declared tool, an undeclared one, and a round-cap refusal alike.
 
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
-use std::sync::Arc;
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use codex_codes::{
@@ -38,9 +39,7 @@ use codex_codes::{
 use crate::backend::codex::dynamic_tools::{
     DynamicToolFunctionSpec, DynamicToolSpec, ThreadStartWithDynamicTools,
 };
-use crate::backend::codex::process::{
-    last_agent_message_text, pid_is_our_app_server, Session, SessionError, TurnStop,
-};
+use crate::backend::codex::process::{last_agent_message_text, Session, SessionError, TurnStop};
 use crate::backend::{AgentBackend, AgentBackendFactory, BackendCanceller};
 use crate::seam::{
     AgentActivity, AgentBackendError, BackendThreadId, CycleOutcome, CycleResultPayload, CycleSpec,
@@ -107,18 +106,22 @@ pub struct CodexAgentBackend {
     /// "connection lost" — a lost connection surfaces as a
     /// [`AgentBackendError::BackendUnavailable`] from the call that noticed.
     session: Option<Session>,
-    /// The app-server child's pid, published the moment the session connects,
-    /// so a [`CodexCanceller`] taken BEFORE the cycle started can still reach
-    /// it. `0` means "no process yet".
+    /// The app-server child's pidfd, acquired the moment the session
+    /// connects, so a [`CodexCanceller`] taken BEFORE the cycle started can
+    /// still reach it. See [`PidFdSlot`] for what each state means and why
+    /// this is a pidfd rather than a bare pid.
     ///
     /// Shared rather than read off `session` because a cycle thread inside
     /// `start_turn` holds `&mut self`, and the canceller's whole job is to be
-    /// reachable while that borrow is outstanding.
-    pid: Arc<AtomicU32>,
+    /// reachable while that borrow is outstanding. A `Mutex`, not an atomic:
+    /// the slot owns an fd, so replacing or clearing it has to be one
+    /// indivisible swap (and, for the old value, close).
+    pidfd: Arc<Mutex<PidFdSlot>>,
     /// Set the moment [`CodexCanceller::cancel`] is called, independent of
-    /// whether `pid` was known yet. A cancel that arrives while still
-    /// connecting (`pid == 0`) has nothing to SIGKILL — the process spawn and
-    /// handshake are not interruptible that way — so this flag is what
+    /// whether a pidfd was acquired yet. A cancel that arrives while still
+    /// connecting (`pidfd` slot still [`PidFdSlot::Empty`]) has nothing to
+    /// SIGKILL — the process spawn and handshake are not interruptible that
+    /// way — so this flag is what
     /// [`start_turn`](AgentBackend::start_turn) checks right after connecting
     /// and before it pays for the actual (arbitrarily long) model turn.
     /// Without it, a cancel during the connect window would silently do
@@ -147,7 +150,7 @@ impl CodexAgentBackend {
         Ok(Self {
             runtime,
             session: None,
-            pid: Arc::new(AtomicU32::new(0)),
+            pidfd: Arc::new(Mutex::new(PidFdSlot::Empty)),
             cancel_requested: Arc::new(AtomicBool::new(false)),
             catalogue: None,
             resolved_model: None,
@@ -172,14 +175,20 @@ impl CodexAgentBackend {
         self.resolved_model.as_deref()
     }
 
-    /// Arm the canceller slot without connecting a session.
+    /// Arm the canceller slot without connecting a session, via the SAME
+    /// `pidfd_open` call [`connected`](Self::connected) makes — so a test
+    /// arming an already-reaped pid observes the real
+    /// [`PidFdSlot::IdentityUnprovable`] failure mode rather than a simulated
+    /// one.
     ///
     /// Test-only: the cancellation gates need a canceller pointing at a REAL
-    /// process to prove what it does and does not signal, and spawning an
-    /// actual app-server for that would be a live-model test.
+    /// process (or a real, already-reaped one) to prove what it does and does
+    /// not signal, and spawning an actual app-server for that would be a
+    /// live-model test.
     #[cfg(test)]
-    pub(crate) fn arm_pid_for_test(&self, pid: u32) {
-        self.pid.store(pid, Ordering::SeqCst);
+    pub(crate) fn arm_pidfd_for_test(&self, pid: u32) {
+        let mut slot = self.pidfd.lock().unwrap_or_else(|e| e.into_inner());
+        *slot = pidfd_slot_for(pid);
     }
 
     /// Every JSONL frame exchanged so far, in wire order.
@@ -222,9 +231,15 @@ impl CodexAgentBackend {
                 .runtime
                 .block_on(Session::connect(capabilities))
                 .map_err(map_session_error)?;
-            // Publish the pid BEFORE handing the session back: from here on a
-            // canceller taken at any time can reap this process.
-            self.pid.store(session.pid().unwrap_or(0), Ordering::SeqCst);
+            // Acquire the pidfd BEFORE handing the session back: from here on
+            // a canceller taken at any time can reap this process. Opening it
+            // NOW, bound to this exact process instance, is what closes the
+            // check-then-kill gap a numeric pid has — see [`PidFdSlot`].
+            let identity = match session.pid() {
+                Some(pid) => pidfd_slot_for(pid),
+                None => PidFdSlot::IdentityUnprovable,
+            };
+            *self.pidfd.lock().unwrap_or_else(|e| e.into_inner()) = identity;
             self.session = Some(session);
         }
         let Self {
@@ -319,7 +334,7 @@ impl AgentBackend for CodexAgentBackend {
     /// [`AgentBackendError::BackendUnavailable`] instead of hanging.
     fn canceller(&self) -> Box<dyn BackendCanceller> {
         Box::new(CodexCanceller {
-            pid: Arc::clone(&self.pid),
+            pidfd: Arc::clone(&self.pidfd),
             cancel_requested: Arc::clone(&self.cancel_requested),
         })
     }
@@ -348,122 +363,195 @@ impl AgentBackend for CodexAgentBackend {
 /// a bound on the kernel reaping it, not on the process deciding to comply.
 const CANCEL_CONFIRM_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// One process this backend's canceller may signal, or why it cannot — the
+/// shared state behind [`CodexAgentBackend::pidfd`] and every
+/// [`CodexCanceller`] cloned from it.
+///
+/// Never a bare numeric pid. The old design signalled by pid and re-read
+/// `/proc/<pid>/cmdline` immediately before `kill` to catch a reused number —
+/// but "immediately before" is still two syscalls, not one, so a reuse landing
+/// in that gap could SIGKILL an unrelated process (plausibly the operator's
+/// own Codex session, on the machine this adapter targets). A pidfd removes
+/// the gap rather than narrowing it: `pidfd_open` binds the fd to the exact
+/// process INSTANCE at that moment, not to its pid number, and the kernel
+/// only ever reuses pid numbers, never a pidfd's referent. Once that instance
+/// is reaped, `pidfd_send_signal` against the fd fails `ESRCH` forever after —
+/// including if the kernel later hands the same pid number to a brand-new,
+/// perfectly live process — because the fd was never pointing at the number
+/// to begin with.
+enum PidFdSlot {
+    /// Never connected, or the backend has begun dropping.
+    Empty,
+    /// A live pidfd, opened the moment the session's pid became known.
+    Armed(OwnedFd),
+    /// The process was spawned, but its pidfd could not be acquired (an old
+    /// kernel, `EMFILE`, the process already reaped by the time we tried).
+    /// Cancellation against this backend FAILS CLOSED from here on: there is
+    /// no numeric-pid fallback to signal with instead, because that fallback
+    /// is exactly the hazard this type exists to remove.
+    IdentityUnprovable,
+}
+
+/// Open a pidfd for `pid` via the `pidfd_open(2)` syscall, or report why not.
+///
+/// `libc` ships the syscall NUMBER (`SYS_pidfd_open`) but no typed wrapper —
+/// `pidfd_open` postdates the crate's last hand-written binding for this
+/// family of calls — so this goes through `libc::syscall` directly.
+fn pidfd_open(pid: u32) -> std::io::Result<OwnedFd> {
+    // SAFETY: `pidfd_open(2)` takes a pid and a flags word, both plain
+    // integers with no aliasing or lifetime requirement; a negative return is
+    // `-1` with `errno` set, exactly what `std::io::Error::last_os_error`
+    // reads.
+    let raw = unsafe { libc::syscall(libc::SYS_pidfd_open, pid as libc::pid_t, 0) };
+    if raw < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    // SAFETY: `raw` is a valid fd `pidfd_open` just opened and handed to no
+    // one else; `OwnedFd` closing it on drop is the correct ownership
+    // discipline for a fd nothing else holds a reference to.
+    Ok(unsafe { OwnedFd::from_raw_fd(raw as std::os::fd::RawFd) })
+}
+
+/// What [`CodexAgentBackend::pidfd`] (or a test) should hold for `pid`: a
+/// live pidfd, or [`PidFdSlot::IdentityUnprovable`] when one could not be
+/// acquired — the exact classification [`connected`](CodexAgentBackend::connected)
+/// performs, factored out so the test-only arming path exercises it too.
+fn pidfd_slot_for(pid: u32) -> PidFdSlot {
+    match pidfd_open(pid) {
+        Ok(fd) => PidFdSlot::Armed(fd),
+        Err(_) => PidFdSlot::IdentityUnprovable,
+    }
+}
+
 /// Reaps one [`CodexAgentBackend`]'s app-server child from another thread.
 ///
 /// # What it actually does, and what it cannot do
 ///
-/// It sends `SIGKILL` to the recorded pid and then CONFIRMS the process is gone
-/// before returning — the same "never trust that the signal was sent" rule
-/// [`Session::shutdown`] follows. It does not, and cannot, go through
-/// `Session::shutdown`: that method consumes `self` and needs the backend's
-/// tokio runtime, both of which the cycle thread is holding `&mut` on for the
-/// whole duration of the seam call this exists to interrupt. Signalling the
-/// child by pid is the reachable mechanism, and it is a real one — the blocked
-/// read on the child's stdout returns as soon as the pipe closes.
+/// It sends `SIGKILL` through the recorded pidfd and then CONFIRMS the
+/// process is gone before returning — the same "never trust that the signal
+/// was sent" rule [`Session::shutdown`] follows. It does not, and cannot, go
+/// through `Session::shutdown`: that method consumes `self` and needs the
+/// backend's tokio runtime, both of which the cycle thread is holding `&mut`
+/// on for the whole duration of the seam call this exists to interrupt.
+/// Signalling through the pidfd is the reachable mechanism, and it is a real
+/// one — the blocked read on the child's stdout returns as soon as the pipe
+/// closes.
 ///
-/// # What makes the pid safe to signal
+/// # What makes the signal safe
 ///
-/// Not "we spawned it" — that was the load-bearing claim, and it was WRONG. A
-/// pid stops naming our process the moment the child is reaped, by its owning
-/// `Child` on drop or by tokio's SIGCHLD reaper while the backend is still
-/// alive, and the kernel is then free to hand the number to anyone. On the
-/// machine this adapter targets, "anyone" plausibly means the operator's own
-/// Codex session. `ESRCH` does not help: it protects an unreaped pid, not a
-/// REUSED one.
-///
-/// Two independent things make a signal safe here, and both must hold:
-///
-/// 1. **Disarmed on drop.** [`CodexAgentBackend`]'s `Drop` stores `0` into the
-///    shared slot, and a `Drop` body runs BEFORE the struct's fields drop —
-///    so the slot is cleared strictly before the `Child` that owns the process
-///    is reaped. Once a backend begins dropping, every canceller cloned from it
-///    is inert. This closes the window a completed-then-cancelled cycle opens.
-/// 2. **Identity-checked at the signal.** [`pid_is_our_app_server`] re-reads
-///    `/proc/<pid>/cmdline` immediately before `kill`, so a pid freed by a
-///    child that exited on its own — no drop involved, which no drop discipline
-///    can reach — is not signalled either.
-///
-/// The confirm loop polls the same identity check rather than bare existence:
-/// waiting for a stranger to leave `/proc` and then returning as if something
-/// had been reaped is worse than not waiting at all.
-///
-/// A pid of `0` means either that the session has not connected yet — the cycle
-/// thread is inside process spawn + handshake, bounded by the OS rather than by
-/// a model — or that the backend has begun dropping. Both are genuine no-ops,
-/// not silent failures to reap something that exists.
+/// Not "we spawned it" — that was the load-bearing claim under the old
+/// numeric-pid design, and it was WRONG: a pid stops naming our process the
+/// moment the child is reaped, by its owning `Child` on drop or by tokio's
+/// SIGCHLD reaper while the backend is still alive, and the kernel is then
+/// free to hand the number to anyone. [`PidFdSlot`] removes that hazard
+/// structurally — see its docs — so cancellation here has exactly one
+/// question to answer: is there a pidfd armed at all. [`PidFdSlot::Empty`]
+/// (never connected, or the backend has begun dropping — see the `Drop` impl
+/// below) and [`PidFdSlot::IdentityUnprovable`] (a pidfd could not be
+/// acquired for the process this backend spawned) both answer no, and both
+/// leave `cancel` a genuine no-op — never a fallback to signalling by number,
+/// because that fallback is the exact hazard removed here.
 ///
 /// The killed child is left for its owning `tokio::process::Child` to reap;
 /// `cancel` deliberately does not wait on it, because the `Child` belongs to
-/// the blocked thread.
+/// the blocked thread — it waits on the PIDFD instead, which reports the
+/// reap without needing that ownership.
 ///
 /// # The connect window
 ///
-/// A cancel that arrives before `pid` is published (`0` — still spawning or
+/// A cancel that arrives before a pidfd is acquired (still spawning or
 /// handshaking) has nothing to SIGKILL. `cancel_requested` is what survives
 /// that window: it is set unconditionally, and
 /// [`start_turn`](AgentBackend::start_turn) checks it right after connecting
 /// and before the actual (arbitrarily long) model turn, so a cancel that
-/// missed the pid still stops the cycle promptly instead of silently doing
+/// missed the pidfd still stops the cycle promptly instead of silently doing
 /// nothing.
 pub struct CodexCanceller {
-    pid: Arc<AtomicU32>,
+    pidfd: Arc<Mutex<PidFdSlot>>,
     cancel_requested: Arc<AtomicBool>,
 }
 
 impl CodexCanceller {
-    /// The pid this canceller would signal; `0` when it is inert.
+    /// Whether this canceller currently has a live pidfd to signal.
     #[cfg(test)]
-    pub(crate) fn armed_pid(&self) -> u32 {
-        self.pid.load(Ordering::SeqCst)
+    pub(crate) fn is_armed_for_test(&self) -> bool {
+        matches!(
+            &*self.pidfd.lock().unwrap_or_else(|e| e.into_inner()),
+            PidFdSlot::Armed(_)
+        )
     }
 }
 
 impl BackendCanceller for CodexCanceller {
     fn cancel(&self) {
-        // Set unconditionally, BEFORE the pid check below: this is the only
-        // record of the cancel that survives a connect window where `pid` is
-        // still 0, and `start_turn` reads it once connected.
+        // Set unconditionally, BEFORE the pidfd check below: this is the only
+        // record of the cancel that survives a connect window where no pidfd
+        // is armed yet, and `start_turn` reads it once connected.
         self.cancel_requested.store(true, Ordering::SeqCst);
-        let pid = self.pid.load(Ordering::SeqCst);
-        if pid == 0 {
-            // Never connected, or the backend has begun dropping.
+        let slot = self.pidfd.lock().unwrap_or_else(|e| e.into_inner());
+        let PidFdSlot::Armed(fd) = &*slot else {
+            // Empty: never connected, or the backend has begun dropping.
+            // IdentityUnprovable: a pidfd could not be acquired for this
+            // process at connect time. Either way there is nothing safe to
+            // signal, and — unlike the old numeric-pid path — nothing to fall
+            // back to: a pid this crate could kill by bare number is exactly
+            // the hazard a pidfd exists to remove.
             return;
-        }
-        if !pid_is_our_app_server(pid) {
-            // The process exited and the number was recycled, or it is already
-            // gone. Either way there is nothing of ours to reap, and signalling
-            // would hit a stranger.
-            return;
-        }
-        // SAFETY: `kill(2)` against a pid whose `/proc` entry named our
-        // app-server invocation on the line above. The check-then-signal gap is
-        // not closable on Linux without pidfd, and it is bounded by the two
-        // syscalls; the failure it leaves is astronomically less likely than
-        // the recycled-pid window it removes. `ESRCH` from a pid that died in
-        // that gap is the outcome cancellation wanted, so it is ignored.
+        };
+        let raw = fd.as_raw_fd();
+        // SAFETY: `raw` names a pidfd this process owns, kept alive by `slot`
+        // (held for this whole call) — never a bare numeric pid. It was
+        // opened via `pidfd_open` at connect time, bound to the exact process
+        // instance the backend spawned; once that instance is reaped the fd's
+        // referent is permanently gone, so a pid number the kernel later
+        // hands to an unrelated live process is unreachable through this fd
+        // by construction. `ESRCH` from a process that exited in the window
+        // between acquiring the pidfd and this call is the outcome
+        // cancellation wanted, so it is ignored.
         unsafe {
-            libc::kill(pid as libc::pid_t, libc::SIGKILL);
+            libc::syscall(
+                libc::SYS_pidfd_send_signal,
+                raw,
+                libc::SIGKILL,
+                std::ptr::null::<libc::siginfo_t>(),
+                0,
+            );
         }
-        let deadline = std::time::Instant::now() + CANCEL_CONFIRM_TIMEOUT;
-        while pid_is_our_app_server(pid) && std::time::Instant::now() < deadline {
-            std::thread::sleep(Duration::from_millis(10));
+        // Confirm: a pidfd becomes readable (POLLIN) once its process has
+        // been reaped, so one poll — bounded by the same timeout the old
+        // design used for its confirm loop — replaces the identity re-check
+        // that loop needed; there is no identity left to re-check.
+        let mut pfd = libc::pollfd {
+            fd: raw,
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        unsafe {
+            libc::poll(
+                &mut pfd,
+                1,
+                libc::c_int::try_from(CANCEL_CONFIRM_TIMEOUT.as_millis())
+                    .unwrap_or(libc::c_int::MAX),
+            );
         }
     }
 }
 
-/// Disarm every canceller cloned from this backend BEFORE the process it named
-/// can be reaped.
+/// Disarm every canceller cloned from this backend BEFORE the process it
+/// named can be reaped.
 ///
-/// A `Drop` body runs before the struct's fields drop, so this store strictly
-/// precedes the `Session`'s (and therefore the `tokio::process::Child`'s) drop.
-/// That ordering is the whole mechanism: after it, the pid slot reads `0` and
-/// [`CodexCanceller::cancel`] returns without signalling, so a cancel racing a
-/// completed cycle cannot reach a number the kernel has already handed to
-/// somebody else. It is a property of the TYPE, not of a caller remembering to
-/// mark the cycle terminal first.
+/// A `Drop` body runs before the struct's fields drop, so clearing the slot
+/// here strictly precedes the `Session`'s (and therefore the
+/// `tokio::process::Child`'s) drop — closing this backend's pidfd before the
+/// process it names is reaped. That ordering is no longer the sole safety
+/// mechanism the way it was under the numeric-pid design (a pidfd's referent
+/// can never be reused regardless of when it closes — see [`PidFdSlot`]'s
+/// docs), but it stays: it is what makes a cancel racing a just-completed
+/// cycle a prompt, observable no-op (`PidFdSlot::Empty`) rather than a signal
+/// against an fd about to be reclaimed anyway.
 impl Drop for CodexAgentBackend {
     fn drop(&mut self) {
-        self.pid.store(0, Ordering::SeqCst);
+        *self.pidfd.lock().unwrap_or_else(|e| e.into_inner()) = PidFdSlot::Empty;
     }
 }
 
@@ -1271,15 +1359,17 @@ mod tests {
     }
 
     // ------------------------------------------------------------------
-    // The canceller may never signal a pid that is no longer ours.
+    // The canceller may never signal a process it does not hold a live
+    // pidfd for.
     //
-    // A pid stops naming our app-server the moment the child is reaped, and
-    // the kernel then hands the number to anyone — on the machine this adapter
-    // targets, plausibly the operator's own Codex session. Two independent
-    // mechanisms prevent that, and these two rows pin one each. Neither
-    // spawns an app-server: both use an ordinary long-lived child as the
-    // stand-in for "some other process holding this pid", which is exactly
-    // the thing that must survive.
+    // A pidfd's referent can never be reused the way a numeric pid can (see
+    // `PidFdSlot`'s docs), so there is no "wrong identity, live process" case
+    // left to pin the way the old numeric-pid design needed to. What remains
+    // to pin: a canceller with nothing armed (backend dropped, or a pidfd
+    // could not be acquired at all) must be a genuine, harmless no-op. Both
+    // rows below use an ordinary long-lived child as the stand-in for "some
+    // other process a wrong signal could have hit"; neither spawns an
+    // app-server.
     // ------------------------------------------------------------------
 
     /// A harmless long-lived child to stand in for whoever inherited a
@@ -1334,8 +1424,8 @@ mod tests {
         }
     }
 
-    /// Mechanism 1: once the backend begins dropping, every canceller cloned
-    /// from it is INERT.
+    /// Once the backend begins dropping, every canceller cloned from it is
+    /// INERT.
     ///
     /// The `Drop` body runs before the fields drop, so the slot is cleared
     /// strictly before the `Child` that owns the app-server is reaped — which
@@ -1345,27 +1435,25 @@ mod tests {
     fn a_dropped_backend_leaves_its_canceller_inert() {
         let mut bystander = Bystander::spawn();
         let backend = CodexAgentBackend::new().expect("build the backend");
-        backend.arm_pid_for_test(bystander.pid());
+        backend.arm_pidfd_for_test(bystander.pid());
 
         // The boxed one is the real seam path; the typed one reads the SAME
         // shared slot, and exists only because `BackendCanceller` is not
         // `Any` and so cannot be downcast.
         let canceller = backend.canceller();
         let armed = CodexCanceller {
-            pid: Arc::clone(&backend.pid),
+            pidfd: Arc::clone(&backend.pidfd),
             cancel_requested: Arc::clone(&backend.cancel_requested),
         };
-        assert_eq!(
-            armed.armed_pid(),
-            bystander.pid(),
+        assert!(
+            armed.is_armed_for_test(),
             "the canceller is armed while the backend is alive"
         );
 
         drop(backend);
 
-        assert_eq!(
-            armed.armed_pid(),
-            0,
+        assert!(
+            !armed.is_armed_for_test(),
             "dropping the backend must disarm every canceller cloned from it"
         );
         canceller.cancel();
@@ -1375,15 +1463,19 @@ mod tests {
         );
     }
 
-    /// A cancel with `pid == 0` (still connecting — spawn or handshake in
-    /// flight) has nothing to SIGKILL, but it must still be RECORDED: this is
-    /// what `start_turn` checks after connecting to avoid running the full
-    /// turn anyway. No process is spawned here — `CodexAgentBackend::new`
-    /// never connects — so this stays in the fast tier.
+    /// A cancel that arrives before a pidfd is acquired (still connecting —
+    /// spawn or handshake in flight) has nothing to SIGKILL, but it must
+    /// still be RECORDED: this is what `start_turn` checks after connecting
+    /// to avoid running the full turn anyway. No process is spawned here —
+    /// `CodexAgentBackend::new` never connects — so this stays in the fast
+    /// tier.
     #[test]
     fn cancel_before_connect_sets_the_flag_without_a_pid_to_signal() {
         let backend = CodexAgentBackend::new().expect("build the backend");
-        assert_eq!(backend.pid.load(Ordering::SeqCst), 0, "never connected");
+        assert!(
+            matches!(*backend.pidfd.lock().unwrap(), PidFdSlot::Empty),
+            "never connected"
+        );
         assert!(!backend.cancel_requested.load(Ordering::SeqCst));
 
         backend.canceller().cancel();
@@ -1394,36 +1486,39 @@ mod tests {
         );
     }
 
-    /// Mechanism 2: even on a LIVE backend, a pid whose command line is not
-    /// our app-server is never signalled.
-    ///
-    /// This is the window no drop discipline can reach — the child exits on its
-    /// own and tokio's reaper frees the pid while the backend is still alive.
-    /// The backend here is deliberately not dropped, so the identity check is
-    /// the only thing that can save the bystander.
+    /// Fail-closed cancellation: when a pidfd cannot be acquired because the
+    /// process it would have named is already reaped, that is recorded as
+    /// [`PidFdSlot::IdentityUnprovable`] and `cancel` signals nothing — never
+    /// a numeric-pid fallback, which is exactly the hazard a pidfd exists to
+    /// remove. A live bystander stands in for "whatever process the kernel
+    /// might have handed the reaped pid to next"; it must survive untouched.
     #[test]
-    fn a_live_canceller_refuses_a_pid_that_is_not_our_app_server() {
+    fn a_reaped_process_leaves_cancellation_identity_unprovable() {
+        let mut reaped = Bystander::spawn();
+        let pid = reaped.pid();
+        // Fully reap it — kill, then wait — so `pid` names no process at all
+        // by the time `pidfd_open` runs, exactly like a process that exited
+        // and was reaped in the gap before a canceller could be armed.
+        reaped.0.kill().expect("kill the to-be-reaped process");
+        reaped.0.wait().expect("reap it");
+
         let mut bystander = Bystander::spawn();
         let backend = CodexAgentBackend::new().expect("build the backend");
-        backend.arm_pid_for_test(bystander.pid());
+        backend.arm_pidfd_for_test(pid);
 
-        let canceller = backend.canceller();
-        canceller.cancel();
+        assert!(
+            matches!(
+                *backend.pidfd.lock().unwrap(),
+                PidFdSlot::IdentityUnprovable
+            ),
+            "pidfd_open against an already-reaped pid must fail closed, not silently succeed"
+        );
+
+        backend.canceller().cancel();
 
         assert!(
             bystander.survives_a_grace_window(),
-            "a live pid that is not our app-server must never be signalled"
-        );
-        // The backend is still alive here on purpose: the slot was armed and
-        // the process existed, so ONLY the cmdline check refused the signal.
-        assert_eq!(
-            CodexCanceller {
-                pid: Arc::clone(&backend.pid),
-                cancel_requested: Arc::clone(&backend.cancel_requested),
-            }
-            .armed_pid(),
-            bystander.pid(),
-            "the refusal was the identity check, not a cleared slot"
+            "a fail-closed cancellation must signal nothing at all, not fall back to a bare pid"
         );
         drop(backend);
     }
