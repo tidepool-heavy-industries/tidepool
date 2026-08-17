@@ -7,11 +7,9 @@
 //! the two lists agree positionally. This module is where that comment goes to
 //! die: one ordered [`crate::types::RecordField`] list produces both sides.
 //!
-//! **It is deliberately NOT in [`crate::effects::all`].** Adding it there would
-//! emit generated modules into `tidepool-mcp` and `tidepool-handlers` whose
-//! mod-index would collide with the still-live `worktree_effect_def!` macro. The
-//! flip is a separate, later branch; this branch builds and PROVES the
-//! capability without touching a consuming crate. See the scaffold doc §11.8.
+//! **Flipped** (scaffold doc §11.13): `worktree_effect_def!` is deleted, the
+//! hand-written `Wt*` block is deleted, and with it the comment asserting that
+//! the two field lists agree positionally — there is only one list now.
 //!
 //! **Helper representability.** Fourteen helpers lived in the hand-written
 //! registry, all fourteen using the `raw` escape hatch. FOUR are described here:
@@ -22,6 +20,13 @@
 //! of the scaffold doc records the per-helper verdict. That gap is a real
 //! finding, not a shortfall of effort: the alternative was embedding a Haskell
 //! expression language in the schema, which is the hatch under a different name.
+//!
+//! Two of the ten could not simply move, and §11.9a is the reason: a helper
+//! emitted into the generated `Tidepool.Effects` is in scope for every OTHER
+//! effect's helpers there, and that module cannot import the library layer.
+//! `worktreeId` was made representable; `renderWorktreeError`'s CALLER moved
+//! instead. Before relocating any helper, grep every `*_effect_def!` for its
+//! name — see §11.12.
 
 use crate::hs::HsType;
 use crate::schema::{

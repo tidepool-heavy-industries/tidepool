@@ -11,3 +11,5 @@
 
 pub mod exec;
 pub mod journal;
+pub mod worktree;
+pub mod worktree_adapters;

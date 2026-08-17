@@ -1359,3 +1359,101 @@ Subagent helper (`renderSpawnError`) is a definition in
 `haskell/lib/Tidepool/Agent/Spawn.hs`. Every module's export list keeps every
 name it had, and the `extra_imports` rows put them back on the eval surface —
 the authored surface is unchanged in every case.
+
+### 11.13 Reviewed diff — the Worktree flip (§9 step 7, in §7's form)
+
+§7 accounted for six differences between generated Rust and macro expansion;
+§10 confirmed all six repeat on Journal. This section states which apply to
+Worktree, and names every NEW class the wire/adapter emission introduces.
+**Nothing else changed.**
+
+**All six of §7's differences apply, and #3 at the largest scale yet:**
+
+1. *Sibling-module glue makes the verb methods `pub(crate)`.* Five of them
+   (`worktree_create`, `worktree_lookup`, `worktree_list`,
+   `worktree_branch_of`, `worktree_head_of`) — the widest instance so far, and
+   the same crate-internal widening Exec and Journal took.
+2. *Derive macros imported by name.* Same rustfmt constraint, same resolution.
+3. *Error-variant docs find a home.* Worktree has the largest `errors` block
+   in the registry — eleven variants, each carrying a `doc` string that
+   `error_enum!` dropped as dead data and the generator emits as a Rust doc
+   comment. Journal skipped this one (no `errors` block); Worktree exercises it
+   hardest.
+4. *`#[must_use]` on the decl builder.*
+5. *`extra_imports` as a literal array.* Worktree's `(Worktree)` arm of
+   `extra_imports_for!` is deleted; `import Tidepool.Worktree` is schema data
+   emitted straight into the generated decl. Its Class A golden bytes are
+   unchanged across the flip, which is what proves the two spellings agree.
+6. *Public paths unchanged.* `tidepool_mcp::worktree_decl`,
+   `tidepool_handlers::WorktreeReq`, `tidepool_handlers::WorktreeError` and
+   every `tidepool_bridge_effects::Wt*` resolve exactly as before —
+   `handlers/worktree.rs` re-exports the generated types and
+   `tidepool-bridge-effects`'s root re-exports `generated::*` flat.
+
+**FOUR new classes, all introduced by the wire/adapter emission:**
+
+**7. Dispatch-arm binders are snake_case.** The macro bound the HASKELL
+argument name verbatim (`WorktreeReq::WorktreeLookup(treeId) => …`) and got
+away with it only because an EXTERNAL macro's expansion is exempt from
+`non_snake_case`. Committed source is not, and `-D warnings` is in the verify
+list. The binder is a local variable, not contract — the Haskell name `treeId`
+is unchanged everywhere it is a contract. Exec's and Journal's argument names
+are already snake_case, so their generated files are byte-identical before and
+after this generator change, which is the check that it moved nothing else.
+Worktree is simply the first migrated effect with a camelCase argument name.
+
+**8. The `Wt*` wire types moved crates-internally, from a hand-written block to
+`tidepool-bridge-effects/src/generated/worktree.rs`.** Field-for-field
+identical, asserted positionally rather than as a set
+(`worktree_wire_types_match_the_hand_written_block_field_for_field`, transcribed
+by hand from the deleted block). The derive sets, the `#[core(name = …)]`
+attributes and the field order are the same; the doc comments move with them.
+**The positional-order comment is DELETED, not reworded** — one ordered field
+list renders both sides, so there is nothing left for two lists to disagree
+about. The `Ev*`/`Ag*` families and the paragraph asserting the invariant FOR
+THEM are untouched; they are still hand-written and still need it.
+
+**9. Each `Identity` gains a boundary constructor, which is strictly new
+surface.** `WtWorktreeId::new` / `WtGitOid::new` / `WtGitRef::new` /
+`WtBranchName::new` returning `Result<Self, WireError>`, plus `as_str`. Nothing
+existed to compare them against; the hand-written block had public fields and
+no constructor. The fields STAY public (§11.4's first honest gap — roughly
+twenty struct-literal sites live in Event's and Subagent's files), so this adds
+a path without closing the old one. `worktree_id_from_wire` now routes through
+`WtWorktreeId::new` and maps its `WireError` onto `WorktreeNotRegistered`;
+`traversal_shaped_wire_ids_are_rejected_at_the_boundary` passes UNCHANGED,
+which is the evidence that the generated policy and the hand-written check
+agree on the inputs that matter.
+
+**10. Seven mechanical conversions moved to a generated adapter module.** The
+four `IdentityRaw` into-wire conversions, `git_ref_from_wire`,
+`dirty_policy_from_wire` and `in_progress_kind_to_wire` are emitted into
+`tidepool-handlers/src/generated/worktree_adapters.rs` and re-exported
+`pub(crate)` from `handlers/worktree.rs`, so `handlers::agent`'s existing
+imports do not move. The bodies are byte-identical to the deleted ones except
+for PARAMETER NAMES, which the generator derives from the domain type
+(`worktree_id`, `git_oid`) where the hand-written versions used one-letter
+names (`id`, `oid`, `r`, `b`). The eight hand-written conversions stay, each
+with its reason recorded in the schema as `AdapterKind::HandWritten` and
+emitted as a comment where the function would have been — so a reader sees
+what was deliberately NOT generated, in place.
+
+**Everything else is identical by proof, not by inspection.**
+`worktree_decl_matches_the_schema_exactly` compared the macro-generated
+`EffectDecl` to the schema's rendering field for field WHILE THE MACRO WAS
+STILL LIVE, and it was exact with nothing excused — the three preceding
+commits are what made that possible. The Class A goldens, captured from the
+hand-written registry in phase 1 and never regenerated in this commit, are
+green against the generated output.
+
+**Deleted:** `worktree_effect_def!` (169 lines) from `effect_defs.rs`, its
+invocation in `effect_decls.rs`, its invocation in `handlers/worktree.rs`, the
+`(Worktree)` arm of `extra_imports_for!`, the hand-written `Wt*` block (124
+lines) from `tidepool-bridge-effects/src/lib.rs`, and the sentence asserting
+that its field order must match the `type_defs` decls positionally. The macro
+grammar and the remaining seventeen definitions are untouched.
+
+**Class D re-checked at the end:** `tidepool-worktree/tests/durable_formats.rs`
+and its `goldens/durable/` fixtures are byte-unchanged across all three
+commits. Step 5 was the first change that COULD have touched a persisted byte;
+it did not.

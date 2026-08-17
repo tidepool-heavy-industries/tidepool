@@ -163,7 +163,15 @@ fn body(e: &Effect) -> String {
     );
     out.push_str("        match req {\n");
     for v in &e.verbs {
-        let names: Vec<&str> = v.args.iter().map(|a| a.name).collect();
+        // The dispatch arm's binders are LOCAL variable names, not contract:
+        // the Haskell argument name (`treeId`) is the contract, the Rust binder
+        // is snake_case because Rust's own lint says so. The macro this
+        // generator replaces bound the Haskell spelling verbatim and got away
+        // with it only because an EXTERNAL macro's expansion is exempt from
+        // `non_snake_case`; committed source is not, and `-D warnings` is in
+        // the verify list. Effects whose argument names are already snake_case
+        // (Exec, Journal) render byte-identically either way.
+        let names: Vec<String> = v.args.iter().map(|a| snake_case(a.name)).collect();
         let pat = if names.is_empty() {
             format!("{}::{}", e.req_enum, v.ctor)
         } else {
@@ -175,12 +183,29 @@ fn body(e: &Effect) -> String {
             format!("cx.respond(self.{}({}))", v.method, names.join(", "))
         } else {
             let mut a = vec!["cx".to_string()];
-            a.extend(names.iter().map(|n| (*n).to_string()));
+            a.extend(names.iter().cloned());
             format!("self.{}({})", v.method, a.join(", "))
         };
         out.push_str(&format!("            {pat} => {call},\n"));
     }
     out.push_str("        }\n");
     out.push_str("    }\n}\n");
+    out
+}
+
+/// `treeId` -> `tree_id`. Only ever applied to a dispatch-arm binder, never to
+/// a name that crosses a boundary.
+fn snake_case(name: &str) -> String {
+    let mut out = String::new();
+    for (i, c) in name.chars().enumerate() {
+        if c.is_uppercase() {
+            if i != 0 {
+                out.push('_');
+            }
+            out.extend(c.to_lowercase());
+        } else {
+            out.push(c);
+        }
+    }
     out
 }

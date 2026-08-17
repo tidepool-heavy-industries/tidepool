@@ -221,17 +221,6 @@ macro_rules! extra_imports_for {
     (AskUser) => {
         &["import Tidepool.Form"]
     };
-    // Eleven of Worktree's fourteen authored names are not representable as
-    // contract helpers (scaffold doc §11.9) and are DEFINED in
-    // `haskell/lib/Tidepool/Worktree.hs`. This row is what keeps the eval
-    // surface identical anyway: a row carrying Worktree imports that module,
-    // so all fourteen names resolve with nothing authored differently. The
-    // three that stayed in the contract are re-exported by the same module,
-    // resolving to the one `Tidepool.Effects` Name — a re-export, not a
-    // second definition, so there is no ambiguous occurrence.
-    (Worktree) => {
-        &["import Tidepool.Worktree"]
-    };
     // `renderSpawnError` is DEFINED in `haskell/lib/Tidepool/Agent/Spawn.hs`
     // rather than emitted into the generated module, because it calls
     // `renderWorktreeError` — authored library code in `Tidepool.Worktree`,
@@ -1757,176 +1746,6 @@ macro_rules! fs_effect_def {
     };
 }
 
-/// Worktree effect — single definition (PRD 19, lane L4).
-///
-/// The authored surface is `haskell/lib/Tidepool/Worktree.hs`, which was
-/// written FIRST and re-exports every name below from the generated
-/// `Tidepool.Effects`. That module is frozen: this definition exists to satisfy
-/// its import list exactly, not to shape it.
-///
-/// **Identity types are `data`, not `newtype`, and not type synonyms.** PRD 19
-/// states that `EventId` is opaque runtime identity while `GitOid` is domain
-/// data, and that they are different kinds of thing. A synonym to `Text` would
-/// make them the same thing and let a git OID be passed where a worktree id is
-/// wanted; a `newtype` is erased in Core, so the Rust `ToCore` side would build
-/// a one-field `Con` the Haskell side no longer has. `data` is the spelling
-/// that survives both.
-///
-/// **`WorktreeReceipt`'s id field is `treeId`, not the PRD snippet's
-/// `worktreeId`.** The PRD's own public surface also requires
-/// `worktreeId :: WorktreeHandle -> WorktreeId` as a standalone function, and a
-/// record field selector and a top-level function of the same name are an
-/// ambiguous occurrence at the export. The function is the one the PRD pins by
-/// signature, so the field yielded. Access is `r.treeId` — record-dot, per the
-/// eval records rule.
-#[macro_export]
-macro_rules! worktree_effect_def {
-    ($project:path) => {
-        $project! {
-            effect Worktree,
-            handler WorktreeHandler,
-            req WorktreeReq,
-            decl_fn worktree_decl,
-            description [
-                "Managed git worktrees: create an isolated worktree from a clean source ",
-                "(or, explicitly, from a dirty-source snapshot), look a retained one back ",
-                "up by durable id, and list what exists. Retain-first — there is no ",
-                "release or delete verb in v1, deliberately. Git WORKFLOW (rebase, merge, ",
-                "cherry-pick, conflict resolution) is absent by design: that work belongs ",
-                "to coding agents with their native tools, and Tidepool observes what the ",
-                "repository became through `Tidepool.Event`.",
-            ],
-            type_defs [
-                "data WorktreeId = WorktreeId Text deriving (Show, Eq)",
-                "data GitOid = GitOid Text deriving (Show, Eq)",
-                "data GitRef = GitRef Text deriving (Show, Eq)",
-                "data BranchName = BranchName Text deriving (Show, Eq)",
-                "data WorktreeSource = SourceCurrentRepository | SourceRef GitRef | SourceWorktree WorktreeId deriving (Show, Eq)",
-                "data DirtyPolicy = RequireClean | AllowDirtySnapshot deriving (Show, Eq)",
-                "data WorktreeSpec = WorktreeSpec { specSource :: WorktreeSource, specLabel :: Text, specDirtyPolicy :: DirtyPolicy } deriving (Show, Eq)",
-                "data InProgressKind = InProgressMerge | InProgressRebase | InProgressCherryPick | InProgressRevert | InProgressBisect deriving (Show, Eq)",
-                "data DirtySummary = DirtySummary { staged :: [Text], unstaged :: [Text], untracked :: [Text], ignoredExcluded :: Int } deriving (Show, Eq)",
-                "data GitFailureReceipt = GitFailureReceipt { gitArgs :: [Text], gitCwd :: Text, gitExitCode :: Maybe Int, gitStdout :: Text, gitStderr :: Text } deriving (Show, Eq)",
-                "data WorktreeReceipt = WorktreeReceipt { treeId :: WorktreeId, cwd :: Text, branch :: BranchName, sourceHead :: GitOid, snapshotRef :: Maybe GitRef, createdAt :: Int } deriving (Show, Eq)",
-                "data WorktreeHandle = WorktreeHandle { handleReceipt :: WorktreeReceipt } deriving (Show, Eq)",
-                "data WorktreeSummary = WorktreeSummary { summaryReceipt :: WorktreeReceipt, present :: Bool } deriving (Show, Eq)",
-                // The `errors` block templates a `ToJSON` instance for
-                // `WorktreeError`, so every type reachable from one of its
-                // fields needs one. These are hand-written rather than derived
-                // because the vendored `ToJSON`'s generic default only covers
-                // single-constructor records — `InProgressKind` is
-                // multi-constructor and the identity types are positional.
-                // The identity types render as their bare payload: a receipt
-                // reader wants the id, not a wrapper object.
-                "instance ToJSON WorktreeId where toJSON (WorktreeId t) = toJSON t",
-                "instance ToJSON GitOid where toJSON (GitOid t) = toJSON t",
-                "instance ToJSON GitRef where toJSON (GitRef t) = toJSON t",
-                "instance ToJSON BranchName where toJSON (BranchName t) = toJSON t",
-                "instance ToJSON InProgressKind where toJSON k = toJSON (show k)",
-                "instance ToJSON DirtySummary where toJSON d = object [\"staged\" .= d.staged, \"unstaged\" .= d.unstaged, \"untracked\" .= d.untracked, \"ignoredExcluded\" .= d.ignoredExcluded]",
-                "instance ToJSON GitFailureReceipt where toJSON r = object [\"args\" .= r.gitArgs, \"cwd\" .= r.gitCwd, \"exitCode\" .= r.gitExitCode, \"stdout\" .= r.gitStdout, \"stderr\" .= r.gitStderr]",
-            ],
-            // Typed per-verb failure (#335): a dirty source, a lost tree, or a
-            // busy worktree is DATA an author cases on, not an eval abort.
-            // These are PRD 19's `WorktreeError` variants plus the two the
-            // PRD's prose requires but its illustrative ADT did not spell out
-            // (see `tidepool-worktree/src/error.rs` for the argument).
-            errors WorktreeError [
-                { ctor SourceDirty, fields { dirty: "DirtySummary" as tidepool_bridge_effects::WtDirtySummary },
-                  doc "source working tree has uncommitted state and the spec did not opt into a snapshot" },
-                { ctor NotARepository, fields { path: "Text" as String },
-                  doc "the path is not inside a git repository" },
-                { ctor WorktreeLost, fields { lostId: "WorktreeId" as tidepool_bridge_effects::WtWorktreeId },
-                  doc "registered but gone from disk; never silently recreated" },
-                { ctor DirtySubmoduleUnsupported, fields { submodule: "Text" as String },
-                  doc "a dirty submodule in the source; v1 refuses rather than capturing a gitlink it did not follow" },
-                { ctor SourceOperationInProgress, fields { inProgress: "InProgressKind" as tidepool_bridge_effects::WtInProgressKind },
-                  doc "source is mid-merge / mid-rebase / mid-cherry-pick" },
-                { ctor WorktreeBusy, fields { busyId: "WorktreeId" as tidepool_bridge_effects::WtWorktreeId, holder: "Text" as String },
-                  doc "one worktree, one agent — binding a second fails explicitly" },
-                { ctor GitFailure, fields { receipt: "GitFailureReceipt" as tidepool_bridge_effects::WtGitFailureReceipt },
-                  doc "git itself failed; the receipt carries the invocation and its output" },
-                // The storage-error lane (L6) added three domain variants after
-                // this block was first written. They get wire variants of their
-                // own rather than being folded into an existing one, because
-                // each names a failure an author would act on DIFFERENTLY, and
-                // `tidepool-worktree/src/error.rs` makes the argument itself:
-                // collapsing a distinct failure into a neighbour "hides the
-                // second behind the first". `InvalidRegistryRoot` and
-                // `StorageFailure` in particular are not `GitFailure` — no git
-                // process runs in either — and spelling them as one would send
-                // an operator reading a git receipt that does not exist.
-                { ctor WorktreeNotRegistered, fields { notRegisteredId: "WorktreeId" as tidepool_bridge_effects::WtWorktreeId },
-                  doc "no worktree registered under this id — a typo or a stale id, DISTINCT from WorktreeLost's data loss" },
-                { ctor InvalidRegistryRoot, fields { root: "Text" as String, inside: "Text" as String },
-                  doc "the registry root resolves inside a git working tree; it must live outside every source repository" },
-                { ctor StorageFailure, fields { storagePath: "Text" as String, storageDetail: "Text" as String },
-                  doc "I/O failure against Tidepool's own registry / binding table / journal" },
-            ],
-            verbs [
-                { ctor WorktreeCreate, method worktree_create,
-                  args { spec: "WorktreeSpec" as tidepool_bridge_effects::WtWorktreeSpec },
-                  ret "WorktreeHandle", errors WorktreeError },
-                { ctor WorktreeLookup, method worktree_lookup,
-                  args { treeId: "WorktreeId" as tidepool_bridge_effects::WtWorktreeId },
-                  ret "WorktreeHandle", errors WorktreeError },
-                { ctor WorktreeList, method worktree_list,
-                  args { },
-                  ret "[WorktreeSummary]", errors WorktreeError },
-                { ctor WorktreeBranchOf, method worktree_branch_of,
-                  args { treeId: "WorktreeId" as tidepool_bridge_effects::WtWorktreeId },
-                  ret "BranchName", errors WorktreeError },
-                // A FRESH git read of the worktree's current HEAD. Deliberately
-                // NOT the handle's recorded `sourceHead` (the seed the branch
-                // was rooted at) and NOT the monitor's last-observed baseline:
-                // the entire point is to see what the monitor did not. See the
-                // helper's docs for the gap it exists to close.
-                { ctor WorktreeHeadOf, method worktree_head_of,
-                  args { treeId: "WorktreeId" as tidepool_bridge_effects::WtWorktreeId },
-                  ret "GitOid", errors WorktreeError },
-            ],
-            // Four helpers live in the contract: the three thin one-verb
-            // wrappers, plus `worktreeId`. The other ten authored names
-            // (`fromCurrentRepository`, `fromRef`, `fromWorktree`,
-            // `allowDirtySnapshot`, `worktreeBranch`, `worktreeHead`,
-            // `renderWorktreeId`, `renderGitOid`, `renderBranchName`,
-            // `renderWorktreeError`) are DEFINITIONS in
-            // `haskell/lib/Tidepool/Worktree.hs` — library code, not contract —
-            // and reach an eval through this effect's
-            // `extra_imports_for!(Worktree)` row. See the scaffold doc §11.9.
-            //
-            // `worktreeId` stays HERE and the reason is structural, not
-            // aesthetic: `event_effect_def!`'s `commit` and `headChanged`
-            // helpers call it, and they are emitted into this same generated
-            // module — which cannot import `Tidepool.Worktree`, because that
-            // module imports IT. Relocating it breaks the generated module's own
-            // compile for every row carrying RepoEvent, and defining it in both
-            // places gives an eval an ambiguous occurrence. It is represented in
-            // the schema as `HelperBody::Projection`.
-            helpers [
-                { raw ["-- | Create a managed worktree. `Left (SourceDirty summary)` when the",
-                       "-- source is dirty and the spec did not opt in; case-match the error",
-                       "-- rather than unwrapping if you mean to handle it.",
-                       "createWorktree :: WorktreeSpec -> M (Either WorktreeError WorktreeHandle)",
-                       "createWorktree = send . WorktreeCreate"] },
-                { raw ["-- | Look a retained worktree up by durable id. Survives restart:",
-                       "-- resolution reads on-disk registry state, not process memory.",
-                       "-- `Left (WorktreeLost i)` when it is registered but gone from disk.",
-                       "lookupWorktree :: WorktreeId -> M (Either WorktreeError WorktreeHandle)",
-                       "lookupWorktree = send . WorktreeLookup"] },
-                { raw ["-- | Every registered worktree, present or lost. A lost tree is listed",
-                       "-- with `present = False` rather than failing the whole listing.",
-                       "listWorktrees :: M [WorktreeSummary]",
-                       "listWorktrees = send WorktreeList >>= liftEither"] },
-                { raw ["-- | The durable identity of a managed worktree. Pure: the handle",
-                       "-- already carries its receipt, so this reads no git state.",
-                       "worktreeId :: WorktreeHandle -> WorktreeId",
-                       "worktreeId h = h.handleReceipt.treeId"] },
-            ],
-        }
-    };
-}
-
 /// Repository-event effect — single definition (PRD 19, lane L4).
 ///
 /// The authored surface is `haskell/lib/Tidepool/Event.hs`, frozen and written
@@ -2191,7 +2010,7 @@ macro_rules! event_effect_def {
 /// does not re-export it.
 ///
 /// **Row requirement.** These types reference `WorktreeSpec` /
-/// `WorktreeHandle` / `WorktreeError` from `worktree_effect_def!`'s
+/// `WorktreeHandle` / `WorktreeError` from the Worktree contract's
 /// type_defs, so a row containing Subagent must also contain Worktree.
 ///
 /// **Typed-result decoding is Haskell-side.** The verb returns the terminal

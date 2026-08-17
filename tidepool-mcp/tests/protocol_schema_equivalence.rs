@@ -93,6 +93,26 @@ fn journal_decl_matches_the_schema_exactly() {
     );
 }
 
+/// Written to run BEFORE the flip, against the still-hand-written
+/// `worktree_effect_def!` macro — see the module doc. Worktree is the first
+/// migrated effect with a non-empty `type_defs` (thirteen declarations, seven
+/// `ToJSON` instances, an eleven-variant error ADT) and the first with a
+/// non-empty `extra_imports` that is schema data from the start, so this is the
+/// widest the field-for-field comparison has ever been.
+///
+/// It is EXACT, with nothing excused. The two preceding commits are what made
+/// it so: ten helpers the schema cannot represent moved to
+/// `haskell/lib/Tidepool/Worktree.hs`, and the eleventh (`renderWorktreeError`)
+/// moved once its caller did — so the four the schema DOES represent are the
+/// whole list the macro emits.
+#[test]
+fn worktree_decl_matches_the_schema_exactly() {
+    assert_decl_matches_schema(
+        &tidepool_mcp::worktree_decl(),
+        &tidepool_protocol::effects::worktree::worktree(),
+    );
+}
+
 /// Every effect the schema claims to own must actually be wired into
 /// `tidepool-mcp` — a schema entry with no live decl would prove nothing while
 /// looking like coverage.
@@ -104,7 +124,7 @@ fn every_schema_effect_is_reachable() {
         .collect();
     assert_eq!(
         names,
-        vec!["Exec", "Journal"],
+        vec!["Exec", "Journal", "Worktree"],
         "the migrated set changed — add the new effect's equivalence assertion above"
     );
 }
