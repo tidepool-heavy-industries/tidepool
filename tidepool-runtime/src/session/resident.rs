@@ -398,6 +398,19 @@ where
         self.core.machine_mut()?.handle_from_finalized(id)
     }
 
+    /// [`Self::finalized_handle`]'s sibling for a result that must outlive
+    /// the frame's OWN realm: mint the handle owned by `realm` instead (a
+    /// green thread's `AsyncDoneWith` payload, owned by the SESSION's realm
+    /// so a waiter's handle survives the thread's own realm later closing —
+    /// PRD 20 S1-L4, `ResidentSession::run_forked`'s doc). Same
+    /// frame-stays-parked semantics; `None` under the same conditions.
+    pub fn finalized_handle_owned_by(&mut self, hole: &str, realm: RealmId) -> Option<ValueHandle> {
+        let &(_, id) = self.parked.iter().find(|(h, _)| h == hole)?;
+        let machine = self.core.machine_mut()?;
+        let slot = machine.take_parked_finalized_root(id)?;
+        Some(machine.mint_handle_from_root(slot, realm))
+    }
+
     /// Resume the turn parked on `cont_id` by DELIVERING a machine-side
     /// rooted value — the handle's payload feeds the continuation verbatim,
     /// no materialization, closures included (pillar B's delivery half; the

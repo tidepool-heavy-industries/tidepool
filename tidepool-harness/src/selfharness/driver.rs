@@ -46,17 +46,19 @@
 //! conversion); see [`Self::drive_answerer_to_finalize`]'s doc for why they
 //! are not `spawn_blocking`'d.
 
+use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use serde_json::Value as Json;
+use tidepool_bridge::ToCore;
 use tidepool_eval::value::Value;
 use tidepool_repr::DataConTable;
 use tidepool_runtime::session::ResidentOutcome;
 
 use crate::compile::{self, CompiledTurn};
 use crate::engine::{self, ClassifiedHole, EngineConfig, HoleRouting, TurnOutcome};
-use crate::harness::{AnswerContract, Harness, HarnessError};
+use crate::harness::{AnswerContract, Harness, HarnessError, OUTER_REALM};
 use crate::log::Actor;
 use crate::selfharness::harness_source::HarnessSource;
 use crate::selfharness::lifecycle::SelfHarnessState;
@@ -149,6 +151,99 @@ pub enum FinalAnswer {
     Handle(tidepool_codegen::jit_machine::ValueHandle),
 }
 
+// --- Green threads (PRD 20 S1-L4) ---------------------------------------
+//
+// The scheduler is entirely LOCAL to one `run_loop_fragment_inner` call —
+// every thread a loop spawns is structured-concurrency-scoped to that one
+// `loop` fragment run; nothing here survives as driver state across loops.
+
+/// Which control-flow chain a suspension belongs to. Chain is invariant
+/// across a resume (resuming a hole continues the SAME chain into whatever
+/// it suspends on next); only starting a freshly spawned thread introduces a
+/// new one. Needed because `AsyncDoneWith`'s own leading `Int` field is
+/// always the dummy `0` `asyncSpawn` bakes in (the wrapping closure is built
+/// before its real thread id is known, `tidepool-mcp/src/effect_defs.rs`) —
+/// the driver identifies which thread settled by WHICH chain reached
+/// `AsyncDoneWith`, never by decoding that field.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GreenChain {
+    /// The outer `loop`'s own top-level continuation, or transitively
+    /// whatever spawned the thread that (recursively) spawned this chain.
+    Primary,
+    Thread(i64),
+}
+
+/// The driver's bookkeeping for one green thread: which realm its frames
+/// park under (the unit `cancel` closes) and its terminal-state sum.
+struct GreenThread {
+    realm: tidepool_codegen::jit_machine::RealmId,
+    state: GreenThreadState,
+}
+
+enum GreenThreadState {
+    Running,
+    Settled(FinalAnswer),
+    Cancelled,
+}
+
+/// One already-produced suspension (or completion) waiting to be classified
+/// and serviced — the scheduler's FIFO ready queue. `chain` is threaded
+/// through unchanged so a later `AsyncDoneWith`/wake can attribute correctly;
+/// order is the driver's business only — the representation-pinning
+/// contract (`plans/self-iterating-harness/20-s1l4-green-threads.md`) is
+/// that resuming ready work in EITHER order produces identical results, so
+/// this queue just picks one (FIFO).
+struct GreenReady {
+    chain: GreenChain,
+    outcome: ResidentOutcome,
+}
+
+/// Deep sentinel scan mirroring [`Harness::finalize_is_closure`] — whether
+/// `request`'s field `idx` carries the tolerant suspend bridge's
+/// `CLOSURE_SENTINEL` placeholder (a live closure kept in-heap) rather than
+/// plain data. Green threads bypass the `Harness` node/convo abstraction
+/// (they run on the shared OUTER session directly), so this operates on the
+/// raw suspended request instead of a node's stashed pending state.
+fn green_field_is_closure(request: &Value, idx: usize) -> bool {
+    fn any_sentinel(v: &Value) -> bool {
+        match v {
+            Value::Con(id, fields) => {
+                (id.0 == u64::MAX && fields.is_empty()) || fields.iter().any(any_sentinel)
+            }
+            _ => false,
+        }
+    }
+    matches!(request, Value::Con(_, fields) if fields.get(idx).is_some_and(any_sentinel))
+}
+
+/// Pull a plain `Int` field out of a Green request Con — every
+/// thread-id-shaped field (`AsyncJoinAnyWith`'s elements, `AsyncStatusWith`/
+/// `AsyncResultWith`/`AsyncCancelWith`'s leading arg) shares this decode.
+fn green_int_field(request: &Value, idx: usize, table: &DataConTable) -> i64 {
+    let Value::Con(_, fields) = request else {
+        return 0;
+    };
+    fields
+        .get(idx)
+        .map(|p| tidepool_runtime::value_to_json(p, table, 0))
+        .and_then(|j| j.as_i64())
+        .unwrap_or(0)
+}
+
+/// Pull an `[Int]` field out of a Green request Con (`AsyncJoinAnyWith`'s
+/// sole field).
+fn green_int_list_field(request: &Value, idx: usize, table: &DataConTable) -> Vec<i64> {
+    let Value::Con(_, fields) = request else {
+        return Vec::new();
+    };
+    fields
+        .get(idx)
+        .map(|p| tidepool_runtime::value_to_json(p, table, 0))
+        .and_then(|j| j.as_array().cloned())
+        .map(|arr| arr.iter().filter_map(|v| v.as_i64()).collect())
+        .unwrap_or_default()
+}
+
 struct OuterSession {
     /// The SHARED session's registry id (one-session collapse): the outer
     /// render/loop fragments AND every answerer node's turns run on this one
@@ -220,9 +315,10 @@ struct OuterSession {
 /// suspension-capable top-level run started under its own realm — driver
 /// machinery in the `RunLLMTurn`/`AskUser` class ([`engine::classify_hole`]/
 /// [`HoleRouting`]), not the `OuterEffectKind`/`dispatch_outer_effect` class.
-/// That servicing, and `green_decl()`'s own verb shapes (a spawn will carry
-/// the thread body as a closure), are future work; this row widening — with
-/// no authored call site compiling against it yet — is this lane's receipt.
+/// [`SelfHarnessDriver::service_green_hole`] is that servicing: a driver-
+/// owned thread table + waiter map + FIFO ready queue, scoped to one
+/// `run_loop_fragment_inner` call (structured concurrency — nothing survives
+/// past the `loop` fragment that spawned it).
 fn outer_decls() -> Vec<tidepool_mcp::EffectDecl> {
     vec![
         tidepool_mcp::runllmturn_decl(),
@@ -1523,17 +1619,47 @@ impl SelfHarnessDriver {
             }
         };
 
-        let mut outcome = {
+        // The scheduler's FIFO ready queue (PRD 20 S1-L4) — EVERY suspension
+        // this loop drives (the primary `loop` chain's own, and any green
+        // thread's) goes through it uniformly: pop one already-produced
+        // outcome, classify it, service it (pushing back whatever it
+        // produces next), repeat. A `Completed` can only ever come from the
+        // PRIMARY chain's own top-level fragment — a green thread's body is
+        // always wrapped (`asyncSpawn`) to end by SUSPENDING on
+        // `AsyncDoneWith`, never by completing — so seeing one here IS this
+        // cycle's `loop` finishing, regardless of any other thread still
+        // parked (an unawaited thread is a legitimate orphan, same
+        // starvation contract `Tidepool.Async`'s module doc already states).
+        let mut ready: VecDeque<GreenReady> = VecDeque::new();
+        {
             let sid = self.outer_sid()?;
-            self.agent
+            let first = self
+                .agent
                 .with_session(sid, |s| s.run("loop", &compiled.expr, &compiled.table))
                 .map_err(|e| DriverError::Session(e.to_string()))?
-                .map_err(|e| map_run_error("loop run failed", e.to_string()))?
-        };
-        loop {
+                .map_err(|e| map_run_error("loop run failed", e.to_string()))?;
+            ready.push_back(GreenReady {
+                chain: GreenChain::Primary,
+                outcome: first,
+            });
+        }
+
+        let mut threads: HashMap<i64, GreenThread> = HashMap::new();
+        let mut waiters: HashMap<i64, Vec<(GreenChain, String)>> = HashMap::new();
+        let mut next_tid: i64 = 1;
+        let mut next_thread_realm: u64 = 1;
+
+        let outcome_result: Result<(Value, DataConTable), DriverError> = loop {
+            let Some(GreenReady { chain, outcome }) = ready.pop_front() else {
+                break Err(DriverError::Session(
+                    "green scheduler starved: no ready work and the outer loop never completed \
+                     (a parked thread with no waiter and no completion path)"
+                        .into(),
+                ));
+            };
             match outcome {
                 ResidentOutcome::Completed { result, .. } => {
-                    return Ok((result.into_value(), compiled.table));
+                    break Ok((result.into_value(), compiled.table.clone()));
                 }
                 ResidentOutcome::Suspended { hole, request, .. } => {
                     let classified =
@@ -1565,7 +1691,7 @@ impl SelfHarnessDriver {
                             // do not.
                             self.maybe_compact_answerer().await?;
                             let sid = self.outer_sid()?;
-                            outcome = self
+                            let next = self
                                 .agent
                                 .with_session(sid, |s| match answer {
                                     FinalAnswer::Value(v) => s.resume(&hole, v),
@@ -1578,6 +1704,10 @@ impl SelfHarnessDriver {
                                 .map_err(|e| {
                                     DriverError::Session(format!("loop resume failed: {e}"))
                                 })?;
+                            ready.push_back(GreenReady {
+                                chain,
+                                outcome: next,
+                            });
                         }
                         // The AUTHORED loop itself evaluated `askUser`/`note`
                         // (`Tidepool.Form`, auto-imported because `AskUser` is in
@@ -1591,13 +1721,17 @@ impl SelfHarnessDriver {
                         // ISN'T another operator form/note — a `runLLMTurn`
                         // suspension the main loop then services, or a completion.
                         HoleRouting::AskUser { .. } | HoleRouting::Note { .. } => {
-                            outcome = self
+                            let next = self
                                 .service_outer_askuser_hole(
                                     hole.clone(),
                                     classified.routing.clone(),
                                     &compiled,
                                 )
                                 .await?;
+                            ready.push_back(GreenReady {
+                                chain,
+                                outcome: next,
+                            });
                         }
                         // The AUTHORED loop called a Subagent verb
                         // (`spawnAgent`/`spawnAgentRaw`) — dispatch the
@@ -1607,13 +1741,17 @@ impl SelfHarnessDriver {
                         HoleRouting::Subagent => {
                             let value = self.service_outer_subagent(&request, &compiled.table)?;
                             let sid = self.outer_sid()?;
-                            outcome = self
+                            let next = self
                                 .agent
                                 .with_session(sid, |s| s.resume(&hole, value))
                                 .map_err(|e| DriverError::Session(e.to_string()))?
                                 .map_err(|e| {
                                     DriverError::Session(format!("subagent resume failed: {e}"))
                                 })?;
+                            ready.push_back(GreenReady {
+                                chain,
+                                outcome: next,
+                            });
                         }
                         // Console/Worktree/RepoEvent/Exec (S1-L1) / Journal
                         // (run-journal lane) — same suspension-servicing
@@ -1624,27 +1762,380 @@ impl SelfHarnessDriver {
                             let value =
                                 self.service_outer_effect(kind, &request, &compiled.table)?;
                             let sid = self.outer_sid()?;
-                            outcome = self
+                            let next = self
                                 .agent
                                 .with_session(sid, |s| s.resume(&hole, value))
                                 .map_err(|e| DriverError::Session(e.to_string()))?
                                 .map_err(|e| {
                                     DriverError::Session(format!("outer effect resume failed: {e}"))
                                 })?;
+                            ready.push_back(GreenReady {
+                                chain,
+                                outcome: next,
+                            });
+                        }
+                        // `Tidepool.Async`'s substrate (PRD 20 S1-L4) — raised
+                        // either by the loop itself or by a green thread's own
+                        // body. Unlike Subagent/OuterEffect above, servicing
+                        // may push ZERO, ONE, or TWO ready items (a park with
+                        // no terminal candidate pushes none; a spawn pushes
+                        // both the resumed spawner and the freshly started
+                        // thread).
+                        HoleRouting::Green => {
+                            self.service_green_hole(
+                                chain,
+                                &hole,
+                                &request,
+                                &compiled.table,
+                                &mut threads,
+                                &mut waiters,
+                                &mut next_tid,
+                                &mut next_thread_realm,
+                                &mut ready,
+                            )?;
                         }
                         other => {
-                            return Err(DriverError::Session(format!(
+                            break Err(DriverError::Session(format!(
                                 "outer loop suspended on an unserviceable hole ({other:?}) — \
                                  the Harness monad exposes runLLMTurn, askUser, note, \
                                  spawnAgent, say, createWorktree/lookupWorktree/listWorktrees/\
                                  worktreeBranch/worktreeHead, withHandler (repository events), \
-                                 run/runIn/runArgv, and record only"
+                                 run/runIn/runArgv, record, and Tidepool.Async's async/wait/\
+                                 waitEither/cancel only"
                             )))
                         }
                     }
                 }
             }
+        };
+
+        // Structured-concurrency scope exit: every thread this loop spawned
+        // is scoped to this ONE `loop` fragment run — close whatever is left
+        // running (never joined/cancelled by the authored code) so its
+        // realm's frames/handles don't outlive the cycle that created them.
+        // Idempotent and cheap on the common case (every thread already
+        // joined or cancelled leaves nothing to close).
+        if let Ok(sid) = self.outer_sid() {
+            for entry in threads.values() {
+                if matches!(entry.state, GreenThreadState::Running) {
+                    let _ = self.agent.with_session(sid, |s| s.close_realm(entry.realm));
+                }
+            }
         }
+        outcome_result
+    }
+
+    /// Service one `Tidepool.Async` suspension (PRD 20 S1-L4): decode which
+    /// of the six `Async*With` verbs `request` is by CONSTRUCTOR NAME (never
+    /// in [`engine::classify_hole`] — the payload may carry a live closure,
+    /// see [`HoleRouting::Green`]'s doc) and act, mutating the scheduler's
+    /// thread table / waiter map / ready queue in place. Mirrors
+    /// [`Self::service_outer_subagent`]'s shape (driver-owned, suspension-
+    /// serviced, no handler) but is not a single dispatch-then-resume: a
+    /// spawn starts a NEW top-level run and a park-until-terminal join may
+    /// register a waiter instead of answering immediately.
+    #[allow(clippy::too_many_arguments)]
+    fn service_green_hole(
+        &mut self,
+        chain: GreenChain,
+        hole: &str,
+        request: &Value,
+        table: &DataConTable,
+        threads: &mut HashMap<i64, GreenThread>,
+        waiters: &mut HashMap<i64, Vec<(GreenChain, String)>>,
+        next_tid: &mut i64,
+        next_realm: &mut u64,
+        ready: &mut VecDeque<GreenReady>,
+    ) -> Result<(), DriverError> {
+        let sid = self.outer_sid()?;
+        match engine::con_name(request, table) {
+            // Field 1 is the thread body — ALWAYS a closure by construction
+            // (`asyncSpawn` wraps every body in a lambda so the
+            // closure-sentinel scan fires even for `async (pure 5)`; see
+            // `tidepool-mcp/src/effect_defs.rs`'s `green_effect_def!` doc).
+            Some("AsyncSpawnWith") => {
+                let body = self
+                    .agent
+                    .with_session(sid, |s| s.finalized_handle(hole))
+                    .map_err(|e| DriverError::Session(e.to_string()))?
+                    .ok_or_else(|| {
+                        DriverError::Session(
+                            "AsyncSpawnWith: spawner frame carries no untaken body closure".into(),
+                        )
+                    })?;
+                let tid = *next_tid;
+                *next_tid += 1;
+                // Tagged with a high bit so a thread realm can never collide
+                // with `OUTER_REALM` (0), a per-loop answerer realm
+                // (`iteration_realm`, small increasing ints), or
+                // `ResidentSession::run_child`'s throwaway realms (bit 63).
+                let realm = tidepool_codegen::jit_machine::RealmId((1u64 << 61) | *next_realm);
+                *next_realm += 1;
+                threads.insert(
+                    tid,
+                    GreenThread {
+                        realm,
+                        state: GreenThreadState::Running,
+                    },
+                );
+                // Spawner-continues-first (the ready queue's own choice, per
+                // this lane's scaffold doc) — resume the spawner immediately
+                // with the fresh id, then start the thread; either push lands
+                // on `ready` so both eventually run regardless.
+                //
+                // Boxed via `i64: ToCore` (an `I#` Con looked up in THIS
+                // compile's own table) — NOT `engine::json_answer_to_value`
+                // (which bridges to `Tidepool.Aeson.Value`, the wrong TYPE
+                // for a plain `Int` `send` delivers natively — that generic
+                // wire path is for an `askUser` submission's `FromJSON`
+                // decode) and NOT a bare `Value::Lit` (unboxed; only
+                // tolerated by the JIT's OWN synthesized `App` in
+                // `apply_finalized`/`run_forked`, not by arbitrary compiled
+                // Haskell that pattern-matches `case x of I# n#`).
+                let tid_value = tid
+                    .to_value(table)
+                    .map_err(|e| DriverError::Session(format!("AsyncSpawnWith tid box: {e}")))?;
+                let spawner_next = self
+                    .agent
+                    .with_session(sid, |s| s.resume(hole, tid_value))
+                    .map_err(|e| DriverError::Session(e.to_string()))?
+                    .map_err(|e| {
+                        DriverError::Session(format!("AsyncSpawnWith spawner resume failed: {e}"))
+                    })?;
+                ready.push_back(GreenReady {
+                    chain,
+                    outcome: spawner_next,
+                });
+                let thread_start = self
+                    .agent
+                    .with_session(sid, |s| {
+                        s.run_forked("async_thread", body, realm, Some(table))
+                    })
+                    .map_err(|e| DriverError::Session(e.to_string()))?
+                    .map_err(|e| DriverError::Session(format!("run_forked failed: {e}")))?;
+                ready.push_back(GreenReady {
+                    chain: GreenChain::Thread(tid),
+                    outcome: thread_start,
+                });
+                Ok(())
+            }
+            // A thread's last act. Its own leading `Int` field is always the
+            // dummy `0` `asyncSpawn` bakes in — the settling thread's real id
+            // is `chain`, not that field (see `GreenChain`'s doc). The
+            // AsyncDoneWith hole itself is deliberately NEVER resumed: the
+            // payload is taken by reference/handle here, exactly like
+            // `finalize`, and the frame stays parked until its realm
+            // eventually closes (`cancel`, or this loop's end-of-scope
+            // sweep) — nothing is lost by never driving it to a Rust-level
+            // `Completed`.
+            Some("AsyncDoneWith") => {
+                let GreenChain::Thread(tid) = chain else {
+                    return Err(DriverError::Session(
+                        "AsyncDoneWith suspended on a non-thread chain (scheduler bug: every \
+                         thread body is reached only via run_forked)"
+                            .into(),
+                    ));
+                };
+                let answer = if green_field_is_closure(request, 1) {
+                    // Owned by the SESSION's realm, deliberately (not the
+                    // thread's own) — a result must outlive the thread realm
+                    // that produced it, since cancelling or retiring this
+                    // thread must not invalidate a waiter's already-delivered
+                    // handle.
+                    let handle = self
+                        .agent
+                        .with_session(sid, |s| s.finalized_handle_owned_by(hole, OUTER_REALM))
+                        .map_err(|e| DriverError::Session(e.to_string()))?
+                        .ok_or_else(|| {
+                            DriverError::Session(
+                                "AsyncDoneWith: thread frame carries no untaken result closure"
+                                    .into(),
+                            )
+                        })?;
+                    FinalAnswer::Handle(handle)
+                } else {
+                    let Value::Con(_, fields) = request else {
+                        return Err(DriverError::Session(
+                            "AsyncDoneWith: malformed request (not a Con)".into(),
+                        ));
+                    };
+                    let value = fields.get(1).cloned().ok_or_else(|| {
+                        DriverError::Session("AsyncDoneWith: missing result field".into())
+                    })?;
+                    FinalAnswer::Value(value)
+                };
+                if let Some(entry) = threads.get_mut(&tid) {
+                    // Cooperative single-threaded scheduling means a cancel
+                    // racing a settle never actually happens, but stay
+                    // defensive/idempotent: cancellation, if it already
+                    // landed, wins — a late result is simply dropped.
+                    if matches!(entry.state, GreenThreadState::Running) {
+                        entry.state = GreenThreadState::Settled(answer);
+                    }
+                }
+                self.wake_green_waiters(tid, table, sid, waiters, ready)
+            }
+            Some("AsyncJoinAnyWith") => {
+                let ids = green_int_list_field(request, 0, table);
+                let winner = ids.iter().copied().find(|&tid| {
+                    threads
+                        .get(&tid)
+                        .is_some_and(|t| !matches!(t.state, GreenThreadState::Running))
+                });
+                match winner {
+                    Some(winner) => {
+                        let winner_value = winner.to_value(table).map_err(|e| {
+                            DriverError::Session(format!("AsyncJoinAnyWith winner box: {e}"))
+                        })?;
+                        let next = self
+                            .agent
+                            .with_session(sid, |s| s.resume(hole, winner_value))
+                            .map_err(|e| DriverError::Session(e.to_string()))?
+                            .map_err(|e| {
+                                DriverError::Session(format!("AsyncJoinAnyWith resume failed: {e}"))
+                            })?;
+                        ready.push_back(GreenReady {
+                            chain,
+                            outcome: next,
+                        });
+                    }
+                    None => {
+                        // None terminal yet — park this caller as a waiter on
+                        // EVERY listed thread; whichever settles/cancels
+                        // first wakes it. The hole stays parked; nothing goes
+                        // on `ready` — this chain is genuinely blocked.
+                        for tid in ids {
+                            waiters
+                                .entry(tid)
+                                .or_default()
+                                .push((chain, hole.to_string()));
+                        }
+                    }
+                }
+                Ok(())
+            }
+            Some("AsyncStatusWith") => {
+                let tid = green_int_field(request, 0, table);
+                let code: i64 = match threads.get(&tid).map(|t| &t.state) {
+                    Some(GreenThreadState::Settled(_)) => 1,
+                    Some(GreenThreadState::Cancelled) => 2,
+                    _ => 0,
+                };
+                let code_value = code
+                    .to_value(table)
+                    .map_err(|e| DriverError::Session(format!("AsyncStatusWith code box: {e}")))?;
+                let next = self
+                    .agent
+                    .with_session(sid, |s| s.resume(hole, code_value))
+                    .map_err(|e| DriverError::Session(e.to_string()))?
+                    .map_err(|e| {
+                        DriverError::Session(format!("AsyncStatusWith resume failed: {e}"))
+                    })?;
+                ready.push_back(GreenReady {
+                    chain,
+                    outcome: next,
+                });
+                Ok(())
+            }
+            Some("AsyncResultWith") => {
+                let tid = green_int_field(request, 0, table);
+                let answer = match threads.get(&tid).map(|t| &t.state) {
+                    Some(GreenThreadState::Settled(FinalAnswer::Value(v))) => {
+                        FinalAnswer::Value(v.clone())
+                    }
+                    Some(GreenThreadState::Settled(FinalAnswer::Handle(h))) => {
+                        FinalAnswer::Handle(*h)
+                    }
+                    _ => {
+                        return Err(DriverError::Session(format!(
+                            "AsyncResultWith: thread {tid} has not settled (gate with \
+                             asyncStatus first)"
+                        )))
+                    }
+                };
+                let next = self
+                    .agent
+                    .with_session(sid, |s| match answer {
+                        FinalAnswer::Value(v) => s.resume(hole, v),
+                        FinalAnswer::Handle(h) => s.resume_handle(hole, h),
+                    })
+                    .map_err(|e| DriverError::Session(e.to_string()))?
+                    .map_err(|e| {
+                        DriverError::Session(format!("AsyncResultWith resume failed: {e}"))
+                    })?;
+                ready.push_back(GreenReady {
+                    chain,
+                    outcome: next,
+                });
+                Ok(())
+            }
+            Some("AsyncCancelWith") => {
+                let tid = green_int_field(request, 0, table);
+                if let Some(entry) = threads.get_mut(&tid) {
+                    if matches!(entry.state, GreenThreadState::Running) {
+                        let realm = entry.realm;
+                        entry.state = GreenThreadState::Cancelled;
+                        self.agent
+                            .with_session(sid, |s| {
+                                s.close_realm(realm);
+                            })
+                            .map_err(|e| DriverError::Session(e.to_string()))?;
+                        self.wake_green_waiters(tid, table, sid, waiters, ready)?;
+                    }
+                    // Idempotent: a terminal thread's cancel is a no-op.
+                }
+                let unit = ()
+                    .to_value(table)
+                    .map_err(|e| DriverError::Session(format!("AsyncCancelWith () bridge: {e}")))?;
+                let next = self
+                    .agent
+                    .with_session(sid, |s| s.resume(hole, unit))
+                    .map_err(|e| DriverError::Session(e.to_string()))?
+                    .map_err(|e| {
+                        DriverError::Session(format!("AsyncCancelWith resume failed: {e}"))
+                    })?;
+                ready.push_back(GreenReady {
+                    chain,
+                    outcome: next,
+                });
+                Ok(())
+            }
+            other => Err(DriverError::Session(format!(
+                "outer loop suspended on an unrecognized Green constructor ({other:?})"
+            ))),
+        }
+    }
+
+    /// Wake every waiter parked (via `AsyncJoinAnyWith`) on `tid` — resume
+    /// each with `tid`'s own id (the winner) and push the result onto
+    /// `ready`. Shared by `AsyncDoneWith` (a settle) and `AsyncCancelWith` (a
+    /// cancellation) servicing.
+    fn wake_green_waiters(
+        &mut self,
+        tid: i64,
+        table: &DataConTable,
+        sid: tidepool_repr::SessionId,
+        waiters: &mut HashMap<i64, Vec<(GreenChain, String)>>,
+        ready: &mut VecDeque<GreenReady>,
+    ) -> Result<(), DriverError> {
+        let Some(parked) = waiters.remove(&tid) else {
+            return Ok(());
+        };
+        let tid_value = tid
+            .to_value(table)
+            .map_err(|e| DriverError::Session(format!("green wake tid box: {e}")))?;
+        for (wchain, whole) in parked {
+            let next = self
+                .agent
+                .with_session(sid, |s| s.resume(&whole, tid_value.clone()))
+                .map_err(|e| DriverError::Session(e.to_string()))?
+                .map_err(|e| DriverError::Session(format!("green wake resume failed: {e}")))?;
+            ready.push_back(GreenReady {
+                chain: wchain,
+                outcome: next,
+            });
+        }
+        Ok(())
     }
 
     /// Service one `runLLMTurn @A` suspension (`site`/`ty` from

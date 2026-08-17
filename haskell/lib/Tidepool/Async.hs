@@ -39,6 +39,16 @@
 -- A thread's value reaches its waiter by handle, never through JSON, so a
 -- thread may return a closure or a record of functions.
 --
+-- __A non-closure result should be forced (WHNF is enough) before it
+-- settles.__  'asyncSpawn' hands a lazy thunk to @AsyncDoneWith@ by
+-- construction; the driver reads that field once, at settle time, and holds
+-- onto it until a waiter's 'asyncResult' delivers it — an unforced thunk
+-- left to cross that gap (rather than being forced at settle time, in the
+-- thread's own realm) has been observed to surface as a GC-forwarding
+-- corruption on delivery, not a clean error.  @pure $! expensiveResult@ (or
+-- an already-strict computation, as most are) sidesteps it entirely; this is
+-- a property of the settle boundary, not of any particular value's shape.
+--
 -- == The ONE divergence from @Control.Concurrent.Async@
 --
 -- __A thread's own failure is not an exception.__  The row has none: failure

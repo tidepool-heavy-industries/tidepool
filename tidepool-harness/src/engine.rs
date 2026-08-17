@@ -140,6 +140,21 @@ pub enum HoleRouting {
     /// non-serializable) — the caller recovers it from the original
     /// suspended request `Value`.
     Finalize { site: u32, ty: Option<String> },
+    /// An `Async*With` verb (`AsyncSpawnWith`/`AsyncDoneWith`/
+    /// `AsyncJoinAnyWith`/`AsyncStatusWith`/`AsyncResultWith`/
+    /// `AsyncCancelWith` — `Tidepool.Async`'s substrate, PRD 20 S1-L4) raised
+    /// by the AUTHORED outer loop or by a green thread's own body. Routed by
+    /// CONSTRUCTOR NAME only, same discipline as [`HoleRouting::Subagent`];
+    /// the payload is NEVER decoded here — field 1 of `AsyncSpawnWith`/
+    /// `AsyncDoneWith` may carry a live closure (the thread body / a
+    /// closure-valued result), so decoding happens at the servicing site
+    /// (`SelfHarnessDriver::service_green_hole`), which also owns the
+    /// driver's thread table and ready queue. Unlike `Subagent`/
+    /// `OuterEffect`, servicing a `Green` suspension is not a single
+    /// dispatch-then-resume: `AsyncSpawnWith` starts a NEW suspension-capable
+    /// top-level run and `AsyncJoinAnyWith` may park the caller rather than
+    /// answer immediately.
+    Green,
     /// A plain `ask schema prompt` (structured operator elicitation) or an
     /// unrecognized payload — operator routing with the raw payload attached.
     Ask { payload: Json },
@@ -188,6 +203,10 @@ pub struct ClassifiedHole {
 ///   `RepoEventDrain`/`RepoEventUnsubscribe` (RepoEvent) / `Run`/`RunIn`/
 ///   `RunArgv` (Exec) / `RecordStep` (Journal) — routed by CONSTRUCTOR NAME
 ///   to [`HoleRouting::OuterEffect`], same discipline as `Subagent` below.
+/// - `AsyncSpawnWith`/`AsyncDoneWith`/`AsyncJoinAnyWith`/`AsyncStatusWith`/
+///   `AsyncResultWith`/`AsyncCancelWith` (`Tidepool.Async`'s substrate) —
+///   routed by CONSTRUCTOR NAME to [`HoleRouting::Green`], same discipline as
+///   `Subagent` above.
 /// - `AskWith` (prompt, payload) — plain [`HoleRouting::Ask`] (a structured
 ///   `ask schema prompt`).
 /// - anything else (an unrecognized Con) — treated as a bare Ask with an empty
@@ -293,6 +312,15 @@ pub fn classify_hole(request: &Value, table: &DataConTable, asks: &AsksSidecar) 
                 prompt: String::new(),
             }
         }
+        Some("AsyncSpawnWith")
+        | Some("AsyncDoneWith")
+        | Some("AsyncJoinAnyWith")
+        | Some("AsyncStatusWith")
+        | Some("AsyncResultWith")
+        | Some("AsyncCancelWith") => ClassifiedHole {
+            routing: HoleRouting::Green,
+            prompt: String::new(),
+        },
         _ => {
             let (prompt, payload) = decode_askwith(request, table);
             ClassifiedHole {
@@ -381,7 +409,7 @@ pub fn strip_list_type(ty: &str) -> Option<&str> {
 /// The request `Value`'s constructor name, when it is a `Con` — `None` for
 /// any other `Value` shape (a suspended Ask/RunLLMTurn/Finalize request is
 /// always a `Con`, by construction of their `*With` GADT constructors).
-fn con_name<'a>(request: &Value, table: &'a DataConTable) -> Option<&'a str> {
+pub(crate) fn con_name<'a>(request: &Value, table: &'a DataConTable) -> Option<&'a str> {
     let Value::Con(con_id, _) = request else {
         return None;
     };
