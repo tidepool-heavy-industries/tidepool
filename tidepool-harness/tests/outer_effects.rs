@@ -157,6 +157,41 @@ async fn outer_loop_effects_round_trip_through_the_driver() {
         "exec's stdout must cross into durable state, got {state:?}"
     );
 
+    // Tidepool.Async (PRD 20 S1-L4) — the green-thread scheduler.
+    assert_eq!(
+        state.get("asyncOne").and_then(|v| v.as_i64()),
+        Some(21),
+        "wait must return the spawned thread's own value, got {state:?}"
+    );
+    let winner = state
+        .get("asyncRaceWinner")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default();
+    assert!(
+        winner == "A" || winner == "B",
+        "waitEither must pick one of the two raced threads, got {state:?}"
+    );
+    let loser_val = state.get("asyncLoserVal").and_then(|v| v.as_i64());
+    let expected_loser_val = if winner == "A" { 2 } else { 1 };
+    assert_eq!(
+        loser_val,
+        Some(expected_loser_val),
+        "waitEither's loser (the thread that did NOT win) must still be joinable \
+         afterward — never cancelled, unlike race — got {state:?}"
+    );
+    assert_eq!(
+        state.get("asyncCancelled").and_then(|v| v.as_bool()),
+        Some(true),
+        "waitCatch on a cancelled thread must report Left AsyncCancelled, got {state:?}"
+    );
+    assert_eq!(
+        state.get("asyncMapResults"),
+        // mapWork n = sumTo n * 10: sumTo 3=6, sumTo 1=1, sumTo 2=3.
+        Some(&serde_json::json!([60, 10, 30])),
+        "mapConcurrently must return results in ORIGINAL list order ([3,1,2], each a \
+         differing-length recursive sum), regardless of completion order, got {state:?}"
+    );
+
     // Journal: the loop's `record "outer-effects" "probe" ...` call must have
     // landed durably in the journal file — read it back through JournalHandler's
     // own fold API, not just trust the loop completed.
