@@ -944,19 +944,15 @@ verbs are `OuterDispatch(Worktree)`.
 every proof green, but the helper census turned up a blocker this section did not
 anticipate. Do not attempt the flip before reading §11.9.
 
-**Step 1 has NOT been done, and steps 2–3 ran ahead of it.** There is no
-durable-format golden in `tidepool-worktree/tests/` — the Class D capture this
-section put first was skipped. It cost nothing here, because lane 3 changed no
-file outside `tidepool-protocol/` and so could not have moved a durable byte; the
-schema's wire types carry no serde at all, which is §11.6's argument that the
-durable formats are outside the generator's blast radius by construction.
-
-But the debt is real and it is now the flip lane's, so state the consequence
-plainly: **step 5 rewrites the adapters, which is the first change that could
-touch a durable format, and step 1 must be paid before it.** Trunk is still
-unmodified with respect to `tidepool-worktree`, so the capture is still a
-legitimate baseline rather than a post-hoc snapshot of whatever the code now
-does — that window closes the moment step 5 starts. Capture Class D first.
+**Step 1 is done** — `tidepool-worktree/tests/durable_formats.rs` plus its
+`goldens/durable/` fixtures, captured from the live hand-written types before any
+generator existed. Steps 2 and 3 were built in parallel with it rather than
+strictly after, which was safe only because lane 3 changed no file outside
+`tidepool-protocol/`: the schema's wire types carry no serde at all, so the
+durable formats were outside the blast radius by construction (§11.6). **That
+stops being true at step 5**, which rewrites the adapters and is the first change
+that could touch a persisted byte. Class D is the baseline it is checked against;
+do not regenerate it there.
 
 ### 11.9 Helper representability — the finding this section did not anticipate
 
