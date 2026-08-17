@@ -2968,6 +2968,11 @@ macro_rules! bin_op {
 bin_op!(bin_op_int, expect_int, i64);
 bin_op!(bin_op_word, expect_word, u64);
 
+/// Matches GHC's `decodeDouble_Int64#` semantics. Returns (mantissa,
+/// exponent) such that mantissa * 2^exponent == d, in GHC's CANONICAL form:
+/// for a normal finite d, 2^52 <= |mantissa| < 2^53 (the raw 52-bit fraction
+/// field plus the implicit leading 1 bit, NOT reduced by trailing zeros —
+/// GHC's own `decodeDouble_Int64#` does not perform that reduction).
 fn eval_decode_double_int64(d: f64) -> (i64, i64) {
     if d == 0.0 || d.is_nan() {
         return (0, 0);
@@ -2984,13 +2989,7 @@ fn eval_decode_double_int64(d: f64) -> (i64, i64) {
     } else {
         (raw_man | (1i64 << 52), raw_exp - 1023 - 52)
     };
-    let man = sign * man;
-    if man != 0 {
-        let tz = man.unsigned_abs().trailing_zeros();
-        (man >> tz, (exp + tz as i32) as i64)
-    } else {
-        (0, 0)
-    }
+    (sign * man, exp as i64)
 }
 
 /// Same shape as `eval_decode_double_int64`, but over Float's own IEEE754
@@ -3013,13 +3012,7 @@ fn eval_decode_float_int(f: f32) -> (i64, i64) {
     } else {
         (raw_man | (1i64 << 23), raw_exp - 127 - 23)
     };
-    let man = sign * man;
-    if man != 0 {
-        let tz = man.unsigned_abs().trailing_zeros();
-        (man >> tz, (exp + tz as i32) as i64)
-    } else {
-        (0, 0)
-    }
+    (sign * man, exp as i64)
 }
 
 /// Format a Double matching Haskell's `show` output.
@@ -4285,5 +4278,89 @@ mod tests {
                 "expected TypeMismatch for negative resizeMutableByteArray# size, got {other:?}"
             ),
         }
+    }
+
+    // -----------------------------------------------------------------
+    // decodeFloat_Int# / decodeDouble_Int64# — GHC-TRUTH pins.
+    //
+    // These hardcode real GHC 9.12 `decodeFloat` output, NOT
+    // eval-vs-JIT agreement: both engines shared the same trailing-zeros
+    // reduction bug (removed above), so their prior agreement was
+    // structurally blind to it. Values verified against GHC directly.
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn decode_float_ghc_truth_one() {
+        assert_eq!(eval_decode_float_int(1.0), (8388608, -23));
+    }
+
+    #[test]
+    fn decode_float_ghc_truth_three() {
+        // 12582912 = 3 * 2^22: the raw combined mantissa has 22 trailing
+        // zero bits, which the removed reduction used to strip down to
+        // (3, 0) — GHC does not strip them.
+        assert_eq!(eval_decode_float_int(3.0), (12582912, -22));
+    }
+
+    #[test]
+    fn decode_float_ghc_truth_power_of_two_boundary() {
+        // 2^24 lands exactly on the mantissa's canonical-range boundary.
+        assert_eq!(eval_decode_float_int(16777216.0), (8388608, 1));
+    }
+
+    #[test]
+    fn decode_float_ghc_truth_denormal() {
+        // Raw bits 0x0000_0002: a denormal with a trailing zero bit, which
+        // the removed reduction would have collapsed to (1, -148).
+        let f = f32::from_bits(2);
+        assert_eq!(eval_decode_float_int(f), (2, -149));
+    }
+
+    #[test]
+    fn decode_float_ghc_truth_zero() {
+        assert_eq!(eval_decode_float_int(0.0), (0, 0));
+    }
+
+    #[test]
+    fn decode_float_ghc_truth_negative() {
+        assert_eq!(eval_decode_float_int(-3.0), (-12582912, -22));
+    }
+
+    #[test]
+    fn decode_double_ghc_truth_one() {
+        assert_eq!(eval_decode_double_int64(1.0), (4503599627370496, -52));
+    }
+
+    #[test]
+    fn decode_double_ghc_truth_three() {
+        assert_eq!(eval_decode_double_int64(3.0), (6755399441055744, -51));
+    }
+
+    #[test]
+    fn decode_double_ghc_truth_power_of_two_boundary() {
+        // 2^53 lands exactly on the mantissa's canonical-range boundary.
+        assert_eq!(
+            eval_decode_double_int64(9007199254740992.0),
+            (4503599627370496, 1)
+        );
+    }
+
+    #[test]
+    fn decode_double_ghc_truth_denormal() {
+        // Raw bits 0x0000_0000_0000_0002: a denormal with a trailing zero
+        // bit, which the removed reduction would have collapsed to
+        // (1, -1073).
+        let d = f64::from_bits(2);
+        assert_eq!(eval_decode_double_int64(d), (2, -1074));
+    }
+
+    #[test]
+    fn decode_double_ghc_truth_zero() {
+        assert_eq!(eval_decode_double_int64(0.0), (0, 0));
+    }
+
+    #[test]
+    fn decode_double_ghc_truth_negative() {
+        assert_eq!(eval_decode_double_int64(-3.0), (-6755399441055744, -51));
     }
 }

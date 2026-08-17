@@ -1476,3 +1476,19 @@ fn qq_fmt_brace_inside_hole_non_string_expr_still_works() {
         serde_json::json!("1"),
     );
 }
+
+/// A let-bound TYPE SIGNATURE (`y :: Int` as its own declaration, distinct
+/// from the expression-level ascription `y = 1 :: Int` pinned above) used to
+/// be silently dropped by `toDecs` — it destructured `ValBinds`' `_sigs`
+/// field and threw it away instead of translating or failing loudly. Fixed
+/// by `toDecs` translating `ValBinds`' sigs into `TH.SigD`s (`toSigDecs`).
+/// This pins that the signature is honored (the binding still evaluates
+/// correctly) rather than silently vanishing.
+#[test]
+fn qq_fmt_let_bound_type_signature_translated() {
+    works_with_imports(
+        QQ_IMPORTS,
+        "pure [fmt|{let { y :: Int; y = 1 } in y}|]",
+        serde_json::json!("1"),
+    );
+}

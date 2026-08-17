@@ -203,22 +203,34 @@ toExp _ (Expr.HsOverLabel _ fastString) = TH.LabelE (unpackFS fastString)
 
 toExp dynFlags e = todo "toExp" (showSDoc dynFlags . ppr $ e)
 
+-- | Translate a let-bound type signature (@let y :: Int; y = 5 in ...@) into
+-- one 'TH.SigD' per named variable. Anything other than a plain
+-- @TypeSig@ (a fixity/inline/pattern-synonym/class-method signature — none
+-- of which a @let@ can actually introduce) fails loudly rather than being
+-- dropped.
+toSigDecs :: DynFlags -> Expr.LSig GhcPs -> [TH.Dec]
+toSigDecs _ (unLoc -> Expr.TypeSig _ names HsWC {hswc_body = unLoc -> HsSig {sig_body}}) =
+  let ty = toType . unLoc $ sig_body
+   in [TH.SigD (toName (unLoc n)) ty | n <- names]
+toSigDecs d (unLoc -> s) = noTH "toSigDecs" (showSDoc d . ppr $ s)
+
 -- | Translate the local bindings of a @let@ expression. Only the shapes a
 -- @let@ can actually introduce are handled: simple variable bindings
 -- (@let y = e@) and single-clause function bindings (@let f x = e@), each
 -- with a single unguarded RHS and no @where@ clause — the same restriction
--- 'toExp''s lambda case already places on a match's RHS.
+-- 'toExp''s lambda case already places on a match's RHS — plus any
+-- let-bound type signatures on those bindings, via 'toSigDecs'.
 toDecs :: DynFlags -> Expr.HsLocalBinds GhcPs -> [TH.Dec]
-toDecs d (Expr.HsValBinds _ (Expr.ValBinds _ binds _sigs))
-  = map (toDec d . unLoc) binds
+toDecs d (Expr.HsValBinds _ (Expr.ValBinds _ binds sigs))
+  = concatMap (toSigDecs d) sigs <> map (toDec d . unLoc) binds
 toDecs _ (Expr.EmptyLocalBinds _) = []
-toDecs d binds = noTH "toDecs" (showSDoc (Settings.baseDynFlags []) . ppr $ binds)
+toDecs d binds = noTH "toDecs" (showSDoc d . ppr $ binds)
 
 toDec :: DynFlags -> Expr.HsBindLR GhcPs GhcPs -> TH.Dec
 toDec d (Expr.FunBind _ (unLoc -> name) (Expr.MG _ (unLoc -> (map unLoc -> [Expr.Match _ _ (map unLoc . unLoc -> pats) (Expr.GRHSs _ [unLoc -> Expr.GRHS _ _ (unLoc -> body)] (Expr.EmptyLocalBinds _))]))))
   | null pats = TH.ValD (TH.VarP (toName name)) (TH.NormalB (toExp d body)) []
   | otherwise = TH.FunD (toName name) [TH.Clause (map (toPat d) pats) (TH.NormalB (toExp d body)) []]
-toDec d b = noTH "toDec" (showSDoc (Settings.baseDynFlags []) . ppr $ b)
+toDec d b = noTH "toDec" (showSDoc d . ppr $ b)
 
 -- | Translate a comprehension\/do statement.  Covers the forms that occur in a
 -- list comprehension: generators (@x <- xs@), boolean guards, and the trailing
