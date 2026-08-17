@@ -179,7 +179,20 @@ loop st
           -- state across children, or threads anything through the traversal
           -- that is not the plan's own data — those three are what would make
           -- the swap expensive, so they are deliberately absent.
-          outcome <- Swarm.hyloM integrate (decompose (budget st)) seed
+          --
+          -- POLICY IS MIDDLEWARE, composed by ordinary function application
+          -- (PRD 20, "The hylo core").  Read the coalgebra outside-in: the
+          -- layer gate sees the produced layer, the depth cap and the cycle
+          -- budget refuse BEFORE `decompose` spawns anything, and each one is
+          -- a `Coalg -> Coalg` that a test can exercise against a pure
+          -- coalgebra with no agent process anywhere.
+          let b = budget st
+              coalg =
+                Swarm.gated (layerGate b)
+                  (Swarm.capped seedDepth b.maxDepth depthRefusal
+                     (Swarm.budgeted cycleRefusal decompose))
+              alg = Swarm.receipted stampFold integrate
+          outcome <- Swarm.hyloM alg coalg seed
           summary <- summarize outcome
           pure
             st
@@ -206,70 +219,128 @@ rootWorktreeSpec st
 -- The coalgebra — how to split
 -- ---------------------------------------------------------------------------
 
--- | Unfold one node.
+-- | Unfold one node.  The BARE split — every policy that could refuse it is
+-- middleware wrapped around it at the 'loop' call site, so what is left here
+-- is only what splitting means.
 --
 -- Order is load-bearing:
 --
--- 1. The guards run FIRST, before anything is spawned.  A coalgebra cannot
---    produce an outcome, so a refusal TRUNCATES the node to a childless
---    'Swarm.PlanF' carrying 'workRefusal', and the algebra reads it as
---    ordinary data.  That shape is why wave 2's wrappers are @Coalg -> Coalg@
---    rather than exceptions.
--- 2. The scaffold worker runs for a node that HAS children — v1's
+-- 1. The scaffold worker runs for a node that HAS children — v1's
 --    @spawnWorker@, unmoved.  It is why children seed from a parent HEAD that
 --    is already final.  A LEAF spawns nothing here: for a leaf, "how to
 --    combine nothing" IS "implement it", so its worker is the algebra's.
--- 3. The split is journaled.  Decomposition is cognition, so it is recorded
+-- 2. The split is journaled.  Decomposition is cognition, so it is recorded
 --    rather than re-derived; a resumed run replays it instead of re-asking
 --    (PRD 20 S1-L5).
--- 4. Child worktrees are allocated from the scaffold HEAD.  A worktree that
+-- 3. Child worktrees are allocated from the scaffold HEAD.  A worktree that
 --    cannot be created is not a split failure — that child is dropped and the
 --    denial rides in 'workDenied' for the algebra to fold as an escalation.
--- 5. The layer gate runs LAST, on the produced layer, so the operator sees a
---    proposal with its parent's real outcome attached.
-decompose :: Budget -> NodeSeed -> Harness (Swarm.PlanF NodeWork NodeSeed)
-decompose b seed
-  | not (null kids) && seed.seedDepth >= b.maxDepth =
-      pure (truncated (Failure DepthCapped [fmt|depth cap {b.maxDepth} reached at {name}|] []))
-  | seed.seedCycles < requiredCycles =
-      pure
-        ( truncated
-            ( Failure
-                BudgetSpent
-                [fmt|{name} needs {requiredCycles} agent cycles, {seed.seedCycles} left in this subtree|]
-                []
-            )
-        )
-  | null kids = pure (Swarm.PlanF (work Nothing [] []) [])
+decompose :: NodeSeed -> Harness (Swarm.PlanF NodeWork NodeSeed)
+decompose seed
+  | null kids = pure (Swarm.PlanF (splitWork seed Nothing [] []) [])
   | otherwise =
       runWorker seed.seedTree name (scaffoldPrompt p kids) >>= \case
         Left err ->
-          pure (truncated (Failure SpawnDenied [fmt|{name} scaffold: {renderSpawnError err}|] []))
+          pure
+            ( Swarm.PlanF
+                (refusalWork seed (Failure SpawnDenied [fmt|{name} scaffold: {renderSpawnError err}|] []))
+                []
+            )
         Right scaffold -> do
           scaffoldHead <- worktreeHead seed.seedTree
           record "split" (branchOf seed.seedTree) (splitPayload p kids scaffoldHead)
           (childSeeds, denied) <- allocateChildren seed kids
-          approveLayer b seed childSeeds >>= \case
-            Just refusal -> pure (truncated refusal)
-            Nothing ->
-              pure (Swarm.PlanF (work (Just scaffold) childSeeds denied) childSeeds)
+          pure (Swarm.PlanF (splitWork seed (Just scaffold) childSeeds denied) childSeeds)
   where
     p = seed.seedPlan
     name = nodeName p
     kids = childPlans p
-    -- A node reserves its own scaffold plus one integration cycle; a leaf
-    -- reserves its implementation.  Resolution agents are drawn from the
-    -- children's shares, which is where the conflicts are.
-    requiredCycles = if null kids then 1 else 2
-    work scaffold childSeeds denied =
-      NodeWork
-        { workSeed = seed
-        , workScaffold = scaffold
-        , workKids = childSeeds
-        , workDenied = denied
-        , workRefusal = Nothing
-        }
-    truncated f = Swarm.PlanF (work Nothing [] []) {workRefusal = Just f} []
+
+splitWork :: NodeSeed -> Maybe WorkerResult -> [NodeSeed] -> [Text] -> NodeWork
+splitWork seed scaffold childSeeds denied =
+  NodeWork
+    { workSeed = seed
+    , workScaffold = scaffold
+    , workKids = childSeeds
+    , workDenied = denied
+    , workRefusal = Nothing
+    }
+
+-- | The task a truncated node carries.  A coalgebra cannot produce an
+-- outcome — its result type is @PlanF@ — so every veto in this file expresses
+-- itself by handing the algebra a childless node whose task says why.
+refusalWork :: NodeSeed -> Failure -> NodeWork
+refusalWork seed f = (splitWork seed Nothing [] []) {workRefusal = Just f}
+
+-- ---------------------------------------------------------------------------
+-- The coalgebra's policy slots
+--
+-- Each is an ordinary function the middleware calls; each is effectful
+-- (@a -> M (Maybe NodeWork)@) so it can tier — a deterministic heuristic
+-- first, the operator past that — inside one function with ordinary
+-- branching.  The two below that CAN be pure are pure, deliberately: a pure
+-- slot is a slot a test can call directly.
+-- ---------------------------------------------------------------------------
+
+-- | 'Swarm.budgeted''s slot.  A node reserves its own scaffold plus one
+-- integration cycle; a leaf reserves its implementation.  Resolution agents
+-- are drawn from the children's shares, which is where the conflicts are.
+cycleRefusal :: NodeSeed -> Harness (Maybe NodeWork)
+cycleRefusal seed
+  | seed.seedCycles >= required = pure Nothing
+  | otherwise =
+      pure
+        ( Just
+            ( refusalWork
+                seed
+                ( Failure
+                    BudgetSpent
+                    [fmt|{nodeName seed.seedPlan} needs {required} agent cycles, {seed.seedCycles} left in this subtree|]
+                    []
+                )
+            )
+        )
+  where
+    required = if null (childPlans seed.seedPlan) then 1 else 2
+
+-- | 'Swarm.capped''s slot.  A leaf at the depth limit is not capped — there
+-- was nothing to unfold — which is exactly why the slot returns a 'Maybe'
+-- rather than the wrapper deciding on depth alone.
+depthRefusal :: NodeSeed -> Harness (Maybe NodeWork)
+depthRefusal seed
+  | null (childPlans seed.seedPlan) = pure Nothing
+  | otherwise =
+      pure
+        ( Just
+            ( refusalWork
+                seed
+                (Failure DepthCapped [fmt|depth cap reached at {nodeName seed.seedPlan}|] [])
+            )
+        )
+
+-- | 'Swarm.gated''s slot: TIERED, and the reason the slots are effectful.
+-- Tier 1 is a deterministic width heuristic and costs nothing.  Tier 2 hands
+-- the operator a typed form with this layer's real child names attached — the
+-- parent's scaffold has already landed by the time it runs, so the approval is
+-- about work that exists rather than a speculative whole-tree sign-off.
+layerGate :: Budget -> Swarm.PlanF NodeWork NodeSeed -> Harness (Maybe NodeWork)
+layerGate b layer
+  | length childSeeds <= b.gateWiderThan = pure Nothing
+  | otherwise = do
+      say [fmt|{nodeName parent.seedPlan} proposes {length childSeeds} children (gate is {b.gateWiderThan})|]
+      approval <- askUser @LayerApproval
+      pure $
+        if approval.layerApproved
+          then Nothing
+          else
+            Just
+              ( refusalWork
+                  parent
+                  (Failure LayerRefused approval.approvalNote (map (nodeName . seedPlan) childSeeds))
+              )
+  where
+    childSeeds = Swarm.kids layer
+    parent = (Swarm.task layer).workSeed
 
 -- | Every child worktree is created from the parent's CURRENT state, which by
 -- the ordering above is the scaffold worker's final commit.
@@ -305,24 +376,6 @@ childAllowance parent n
   | n <= 0 = 0
   | otherwise = max 1 ((parent.seedCycles - 2) `div` n)
 
--- | The layer gate: tier 1 is a deterministic width heuristic and costs
--- nothing; tier 2 hands the operator a typed form with the layer attached.
---
--- Returns the refusal, or 'Nothing' to proceed.  Wave 2 lifts this into
--- 'Swarm.gated' unchanged — it is already the @PlanF -> M (Either t _)@ shape,
--- because the operator approves a layer, never a seed.
-approveLayer :: Budget -> NodeSeed -> [NodeSeed] -> Harness (Maybe Failure)
-approveLayer b seed childSeeds
-  | length childSeeds <= b.gateWiderThan = pure Nothing
-  | otherwise = do
-      say
-        [fmt|{nodeName seed.seedPlan} proposes {length childSeeds} children (gate is {b.gateWiderThan})|]
-      approval <- askUser @LayerApproval
-      pure $
-        if approval.layerApproved
-          then Nothing
-          else Just (Failure LayerRefused approval.approvalNote (map (nodeName . seedPlan) childSeeds))
-
 -- ---------------------------------------------------------------------------
 -- The algebra — how to combine
 -- ---------------------------------------------------------------------------
@@ -330,21 +383,67 @@ approveLayer b seed childSeeds
 -- | Fold one node.  Its children's outcomes arrive in PLAN order (never
 -- completion order), and a failed child arrives as an ordinary value: nothing
 -- here short-circuits, because @traverse@ already visited every sibling.
+--
+-- Every outcome this function returns has an EMPTY trail and an unjudged
+-- receipt.  Filling the trail and applying the trust ladder both belong to
+-- 'stampFold' — the 'Swarm.receipted' middleware — which is the one place with
+-- this node's line and its children's trails in hand, and therefore the one
+-- place a leaf fold and an interior fold cannot drift apart.
 integrate :: Swarm.PlanF NodeWork Outcome -> Harness Outcome
 integrate (Swarm.PlanF w kids) = case w.workRefusal of
-  Just f ->
-    pure
-      Skipped
-        { outcomeNode = name
-        , outcomeTrail = childTrails <> [[fmt|{name}: skipped — {renderFailure f}|]]
-        , skipReason = renderFailure f
-        }
+  Just f -> pure Skipped {outcomeNode = name, outcomeTrail = [], skipReason = renderFailure f}
   Nothing -> case kids of
     [] -> leafFold w
     _ -> interiorFold w kids
   where
     name = nodeName w.workSeed.seedPlan
-    childTrails = concatMap outcomeTrailOf kids
+
+-- | 'Swarm.receipted''s slot, and the whole trust ladder in one place.
+--
+-- A HIGHER RUNG NEVER OVERRIDES A FAILING LOWER RUNG: 'foldLadder' is an
+-- ordered case over the receipt, so an agent's green summary over a red check
+-- is a red node.  Evidence is journaled either way — a fold that failed its
+-- ladder is exactly the fold whose evidence someone will want.
+stampFold :: Swarm.PlanF NodeWork Outcome -> Outcome -> Harness Outcome
+stampFold node folded = do
+  journalOutcome folded
+  pure (withTrail (concatMap outcomeTrailOf (Swarm.kids node)) (foldLadder folded))
+
+journalOutcome :: Outcome -> Harness ()
+journalOutcome o = case o of
+  Done {doneReceipt = r} -> record "outcome" r.receiptBranch (toJSON r)
+  Failed {outcomeNode = n, outcomeFailure = f, partialReceipt = Just r} ->
+    record "outcome" r.receiptBranch (object ["node" .= n, "failure" .= toJSON f, "receipt" .= toJSON r])
+  Failed {outcomeNode = n, outcomeFailure = f, partialReceipt = Nothing} ->
+    record "outcome" n (object ["node" .= n, "failure" .= toJSON f])
+  Skipped {outcomeNode = n, skipReason = why} ->
+    record "outcome" n (object ["node" .= n, "skipped" .= why])
+
+-- | The ladder, computed from the receipt rather than claimed by the folder.
+-- Rung 1 is the repository (an agent cycle that moved no HEAD; a diff outside
+-- the declared boundary), rung 2 is the orchestrator's own checks at the fold
+-- sha.  Rung 3 has its slot ('receiptReviewed') and is honestly 'False'.
+foldLadder :: Outcome -> Outcome
+foldLadder o = case o of
+  Done {outcomeNode = n, doneReceipt = r}
+    | r.receiptAgentRan && not r.receiptHeadMoved ->
+        failedOutcome n (Failure NoHeadMove [fmt|{n} ran an agent cycle but HEAD never moved|] []) (Just r)
+    | not (null r.receiptOutside) ->
+        failedOutcome n (Failure BoundaryViolated [fmt|{n} changed paths outside its boundary|] r.receiptOutside) (Just r)
+    | not (null (failing r)) ->
+        failedOutcome
+          n
+          ( Failure
+              ChecksFailed
+              [fmt|{length (failing r)} of {length r.receiptChecks} checks failed at {r.receiptHead}|]
+              (map checkCommand (failing r))
+          )
+          (Just r)
+    | otherwise -> o
+  Failed {} -> o
+  Skipped {} -> o
+  where
+    failing r = filter checkFailed r.receiptChecks
 
 -- | A leaf: one implementation worker, then the ladder.
 --
@@ -358,11 +457,11 @@ leafFold w = do
   before <- worktreeHead tree
   runWorker tree name (workerPrompt p) >>= \case
     Left err ->
-      pure (failedOutcome name [] (Failure SpawnDenied (renderSpawnError err) []) Nothing)
+      pure (failedOutcome name (Failure SpawnDenied (renderSpawnError err) []) Nothing)
     Right wr -> do
       after <- worktreeHead tree
       checks <- runChecks tree p
-      finishFold w [] wr (before, after) [] [] 1 True checks
+      finishFold w wr (before, after) [] [] 1 True checks
   where
     tree = w.workSeed.seedTree
     p = w.workSeed.seedPlan
@@ -395,16 +494,23 @@ interiorFold w kids = do
           Right merged -> pure (merged, 1, True)
   checks <- if agentRan then runChecks tree p else pure checks0
   after <- worktreeHead tree
-  finishFold
-    w
-    kids
-    wr
-    (before, after)
-    acc.accNotes
-    (maybeToList acc.accAbandon <> acc.accEsc)
-    (acc.accCycles + agentCycles)
-    agentRan
-    checks
+  folded <-
+    finishFold
+      w
+      wr
+      (before, after)
+      acc.accNotes
+      (maybeToList acc.accAbandon <> acc.accEsc)
+      (acc.accCycles + agentCycles)
+      agentRan
+      checks
+  -- An abandoned subtree is the one node-local verdict the receipt cannot
+  -- carry: the evidence is fine as far as it goes, and what failed is that a
+  -- policy chose to stop.  Everything else this fold is worth is 'foldLadder''s.
+  pure $ case (acc.accAbandon, folded) of
+    (Just why, Done {doneReceipt = r}) ->
+      failedOutcome (nodeName p) (Failure ChildrenFailed why []) (Just r)
+    _ -> folded
   where
     tree = w.workSeed.seedTree
     p = w.workSeed.seedPlan
@@ -645,15 +751,15 @@ mergeChild tree p s =
 -- The ladder, the receipt, the journal
 -- ---------------------------------------------------------------------------
 
--- | Rungs 1-2 plus the boundary check, stamped into one 'FoldReceipt' and
--- appended to the run journal.  Rung 3 (adversarial review) has its slot
--- ('receiptReviewed') and is honestly 'False' here.
+-- | Gather this fold's evidence into one 'FoldReceipt' and return the fold.
 --
--- A HIGHER RUNG NEVER OVERRIDES A FAILING LOWER RUNG: the verdict below is an
--- ordered case, so a green agent summary over a red check is a red node.
+-- Deliberately NOT the judge: it observes (HEAD either side of the cycle, the
+-- boundary diff against the seed, the checks the orchestrator ran itself) and
+-- records what it observed.  Whether that evidence adds up to a 'Done' is
+-- 'foldLadder''s, applied uniformly by the 'Swarm.receipted' middleware — so
+-- there is no path on which a fold judges its own receipt.
 finishFold
   :: NodeWork
-  -> [Outcome]
   -> WorkerResult
   -> (GitOid, GitOid)
   -> [RebaseNote]
@@ -662,53 +768,32 @@ finishFold
   -> Bool
   -> [CheckResult]
   -> Harness Outcome
-finishFold w kids wr (before, after) notes escalations cycles agentRan checks = do
+finishFold w wr (before, after) notes escalations cycles agentRan checks = do
   outside <- boundaryViolations tree (nodeBoundary p)
-  let moved = renderGitOid before /= renderGitOid after
-      receipt =
+  pure
+    ( Done
+        name
+        []
         FoldReceipt
           { receiptNode = name
           , receiptBranch = branchOf tree
           , receiptSeedHead = renderGitOid before
           , receiptHead = renderGitOid after
-          , receiptHeadMoved = moved
+          , receiptHeadMoved = renderGitOid before /= renderGitOid after
           , receiptChecks = checks
           , receiptRebases = notes
           , receiptOutside = outside
           , receiptCycles = cycles
+          , receiptAgentRan = agentRan
           , receiptReviewed = False
           , receiptSummary = wr.workSummary
           , receiptEvidence = wr.evidence <> escalations
           }
-  record "outcome" (branchOf tree) (toJSON receipt)
-  pure $ case verdict moved outside of
-    Just f -> failedOutcome name trail f (Just receipt)
-    Nothing -> Done {outcomeNode = name, outcomeTrail = trail <> [line receipt], doneReceipt = receipt}
+    )
   where
     tree = w.workSeed.seedTree
     p = w.workSeed.seedPlan
     name = nodeName p
-    trail = concatMap outcomeTrailOf kids
-    line receipt = outcomeLine (Done name [] receipt)
-    failedChecks = filter checkFailed checks
-    verdict moved outside
-      -- Rung 1: the repository, not the agent.  A cycle that claimed
-      -- completion without moving HEAD stops here.
-      | agentRan && not moved =
-          Just (Failure NoHeadMove [fmt|{name} ran an agent cycle but HEAD never moved|] [])
-      -- Rung 1 again: the boundary is checked against the observed diff, never
-      -- requested in prose.
-      | not (null outside) =
-          Just (Failure BoundaryViolated [fmt|{name} changed paths outside its boundary|] outside)
-      -- Rung 2: the orchestrator's own checks, at the actual fold sha.
-      | not (null failedChecks) =
-          Just
-            ( Failure
-                ChecksFailed
-                [fmt|{length failedChecks} of {length checks} checks failed at {renderGitOid after}|]
-                (map checkCommand failedChecks)
-            )
-      | otherwise = Nothing
 
 runChecks :: WorktreeHandle -> DevPlan -> Harness [CheckResult]
 runChecks tree p = traverse one (nodeChecks p)

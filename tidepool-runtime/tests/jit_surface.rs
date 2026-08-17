@@ -1206,25 +1206,44 @@ target = (Foo "red").color ++ (Bar "blue").color
 /// every eval run from this worktree) already defines an unrelated `hyloM`,
 /// so an unqualified import here would be ambiguous.
 ///
-/// Two parts: (a) `PlanF` construction plus `fmap`/`sum` (derived
+/// Three parts: (a) `PlanF` construction plus `fmap`/`sum` (derived
 /// `Functor`/`Foldable`) and `traverse` (derived `Traversable`) directly on a
 /// value — each acts on `kids` only, `task` is untouched. (b) `hyloM`
 /// unfolding a numeric range `(lo, hi)` by repeated midpoint split down to
 /// singleton leaves, then folding the SAME coalgebra's tree back up two
 /// ways — concatenating leaf values (order-preserving) and summing them —
-/// asserting the exact reconstructed `[1..10]` and its sum `55`.
+/// asserting the exact reconstructed `[1..10]` and its sum `55`. (c) the four
+/// policy wrappers (`budgeted`/`capped`/`gated`/`receipted`) actually applied
+/// over that same coalgebra: each is a higher-order transformer whose slot is
+/// an `M`-effectful function, so this pins that a wrapped seam still runs —
+/// coalgebra-side refusal TRUNCATES to a childless `PlanF` (`[0]`, the
+/// refusal task's leaf) rather than throwing, `budgeted` truncates only the
+/// subtree its slot vetoes, and `receipted`'s stamp is applied at every fold
+/// (three folds over `(1,2)`: `1+1`, `2+1`, then `(2+3)+1` = `6`).
+///
+/// They join this probe rather than getting their own `#[test]`: the wrappers
+/// are ordinary functions over the same derived dictionaries part (b) already
+/// exercises, so a second extract compile would buy no distinct mechanism.
 #[test]
 fn works_swarm_planf_hylo_on_jit() {
     works_with_imports(
         "qualified Tidepool.Swarm as Swarm\nData.Traversable (traverse)",
         r#"Swarm.hyloM algLeaves coalg ((1,10) :: (Int,Int)) >>= \leaves ->
             Swarm.hyloM algSum coalg ((1,10) :: (Int,Int)) >>= \total ->
+            Swarm.hyloM algLeaves (Swarm.capped spanOf 4 refuse coalg) ((1,10) :: (Int,Int)) >>= \cappedOut ->
+            Swarm.hyloM algLeaves (Swarm.budgeted vetoHigh coalg) ((1,10) :: (Int,Int)) >>= \budgetOut ->
+            Swarm.hyloM algLeaves (Swarm.gated refuseRoot coalg) ((1,10) :: (Int,Int)) >>= \gatedOut ->
+            Swarm.hyloM (Swarm.receipted bump algSum) coalg ((1,2) :: (Int,Int)) >>= \stamped ->
             pure (concat
                 [ check "planf_fmap_kids" (Swarm.kids (fmap (+1) (Swarm.PlanF ("root"::Text) [1,2,3::Int])) == [2,3,4::Int])
                 , check "planf_foldable_sum" (sum (Swarm.PlanF ("root"::Text) [1,2,3::Int]) == (6::Int))
                 , check "planf_traverse_maybe" (fmap Swarm.kids (traverse (\x -> if x > (0::Int) then Just (x*10) else Nothing) (Swarm.PlanF ("root"::Text) [1,2,3::Int])) == Just [10,20,30::Int])
                 , check "hylo_range_split_leaves" (leaves == ([1..10] :: [Int]))
                 , check "hylo_range_split_sum" (total == (55 :: Int))
+                , check "swarm_capped_truncates_to_refusal_leaf" (cappedOut == ([0] :: [Int]))
+                , check "swarm_budgeted_truncates_only_the_vetoed_subtree" (budgetOut == ([1,2,3,4,5,0] :: [Int]))
+                , check "swarm_gated_refuses_the_layer_after_unfolding_it" (gatedOut == ([0] :: [Int]))
+                , check "swarm_receipted_stamps_every_fold" (stamped == (6 :: Int))
                 ])
              where {
                check nm ok = if ok then [] else [nm];
@@ -1235,7 +1254,17 @@ fn works_swarm_planf_hylo_on_jit() {
                algLeaves (Swarm.PlanF _ xss) = pure (concat xss);
                algSum :: Swarm.PlanF (Int,Int) Int -> M Int;
                algSum (Swarm.PlanF (lo,_) []) = pure lo;
-               algSum (Swarm.PlanF _ xs) = pure (sum xs)
+               algSum (Swarm.PlanF _ xs) = pure (sum xs);
+               spanOf :: (Int,Int) -> Int;
+               spanOf (lo,hi) = hi - lo;
+               refuse :: (Int,Int) -> M (Maybe (Int,Int));
+               refuse _ = pure (Just (0,0));
+               vetoHigh :: (Int,Int) -> M (Maybe (Int,Int));
+               vetoHigh (lo,_) = pure (if lo > 5 then Just (0,0) else Nothing);
+               refuseRoot :: Swarm.PlanF (Int,Int) (Int,Int) -> M (Maybe (Int,Int));
+               refuseRoot (Swarm.PlanF (lo,_) _) = pure (if lo == 1 then Just (0,0) else Nothing);
+               bump :: Swarm.PlanF (Int,Int) Int -> Int -> M Int;
+               bump _ b = pure (b + 1)
              }"#,
         serde_json::json!([]),
     );

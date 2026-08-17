@@ -43,6 +43,7 @@ module HarnessTypes
   , outcomeLine
   , renderFailure
   , failedOutcome
+  , withTrail
   ) where
 
 import qualified Data.Text as T
@@ -262,6 +263,7 @@ data FoldReceipt = FoldReceipt
   , receiptRebases   :: [RebaseNote]
   , receiptOutside   :: [Text]
   , receiptCycles    :: Int
+  , receiptAgentRan  :: Bool
   , receiptReviewed  :: Bool
   , receiptSummary   :: Text
   , receiptEvidence  :: [Text]
@@ -354,15 +356,25 @@ renderFailure f = [fmt|{show f.failureKind}: {f.failureDetail}{pathsPart}|]
       [] -> "" :: Text
       ps -> " [" <> T.intercalate ", " ps <> "]"
 
--- | Build a 'Failed' outcome whose trail already carries its own line.
-failedOutcome :: Text -> [Text] -> Failure -> Maybe FoldReceipt -> Outcome
-failedOutcome n childTrail f receipt =
+-- | Build a 'Failed' outcome.
+--
+-- The trail is left EMPTY on purpose: an outcome's trail is filled in one
+-- place, by the @receipted@ stamp, which is the only code that has both this
+-- node's line and its children's trails in hand.  See 'withTrail'.
+failedOutcome :: Text -> Failure -> Maybe FoldReceipt -> Outcome
+failedOutcome n f receipt =
   Failed
     { outcomeNode = n
-    , outcomeTrail = childTrail <> [[fmt|{n}: FAILED — {renderFailure f}|]]
+    , outcomeTrail = []
     , outcomeFailure = f
     , partialReceipt = receipt
     }
+
+-- | Fill an outcome's trail: its children's trails in plan order, then its own
+-- line.  A plain record update — @outcomeTrail@ is present in every
+-- constructor, so there is nothing to case-split on.
+withTrail :: [Text] -> Outcome -> Outcome
+withTrail childTrail o = o {outcomeTrail = childTrail <> [outcomeLine o]}
 
 -- ---------------------------------------------------------------------------
 -- Initial state

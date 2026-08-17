@@ -233,14 +233,38 @@ deterministic heuristic → model turn → operator inside one ordinary function
 
 | PRD name | shape | what dev-tree passes it |
 |---|---|---|
-| `receipted` | `(PlanF t b -> b -> m b) -> Alg m t b -> Alg m t b` | stamps `FoldReceipt` and refuses a fold whose outcome carries none |
-| `budgeted` | `(a -> m (Either t ())) -> Coalg m t a -> Coalg m t a` | the structural cycle allowance; `Left` truncates the node to a refusal leaf |
-| `capped` | depth specialization of the same guard | `seedDepth >= maxDepth` |
-| `gated` | `(PlanF t a -> m (Either t (PlanF t a))) -> Coalg m t a -> Coalg m t a` | post-unfold layer approval — `askUser` when the layer is wide, auto-approve otherwise |
+| `receipted` | `(PlanF t b -> b -> m b) -> Alg m t b -> Alg m t b` | `stampFold` — journal the outcome, then apply `foldLadder` (the rung ordering) and fill the outcome's trail |
+| `budgeted` | `(a -> m (Maybe t)) -> Coalg m t a -> Coalg m t a` | `cycleRefusal` — the structural cycle allowance; `Just` truncates the node to a refusal leaf |
+| `capped` | `(a -> Int) -> Int -> (a -> m (Maybe t)) -> Coalg m t a -> Coalg m t a` | `depthRefusal` at `seedDepth`/`maxDepth`; the slot returns `Nothing` for a childless plan, since a leaf at the limit was never going to unfold |
+| `gated` | `(PlanF t a -> m (Maybe t)) -> Coalg m t a -> Coalg m t a` | `layerGate` — TIERED: a deterministic width heuristic, then `askUser @LayerApproval` |
 
-`gated`'s slot sees the produced layer, not the seed, because PRD locks
-"the operator approves the unfolds layer by layer, each proposed with its
-parent's real outcomes attached".
+Composed at the `hyloM` call site by ordinary function application:
+
+```haskell
+let coalg = gated (layerGate b)
+              (capped seedDepth b.maxDepth depthRefusal
+                 (budgeted cycleRefusal decompose))
+    alg   = receipted stampFold integrate
+```
+
+Three things the shapes had to get right, and each one came from the harness
+rather than from the sketch:
+
+- **A refusal returns the TASK to truncate with, not an outcome.** A coalgebra's
+  result type is `PlanF t a`; it cannot produce a `b`. So every slot returns
+  `Maybe t` and the wrapper emits `PlanF t []`. That is what makes
+  failure-as-data structural here rather than a rule to remember.
+- **`gated`'s slot sees the produced layer, not the seed** — PRD locks "the
+  operator approves the unfolds layer by layer, each proposed with its parent's
+  real outcomes attached". It therefore runs AFTER the unfold and refuses the
+  DESCENT, which is where the cost is.
+- **`capped`'s slot still returns `Maybe`.** The first draft had it decide on
+  depth alone; the harness immediately wanted "a leaf at the limit is not
+  capped — there was nothing to unfold", which only the caller knows.
+
+`budgeted` is the primitive guard and `capped` is its depth-shaped
+specialization; saying so is better than pretending they are independent
+mechanisms.
 
 Journaling is NOT a wrapper. `record`'s payload is domain-shaped
 (`SwarmStep`-shaped facts about what was decided, spawned, and folded), and
@@ -258,7 +282,8 @@ coalgebra, at each swarm step.
   harness or not at all.
 - `cargo check --workspace --tests`, `cargo clippy --workspace --all-targets
   -- -D warnings`, `cargo fmt --all -- --check`, `cargo nextest run`.
-- No new `jit_surface` probe unless the wrappers exercise an extraction
-  mechanism `works_swarm_planf_hylo_on_jit` does not already pin. They are
-  ordinary higher-order functions over the same derived dictionaries, so they
-  do not.
+- No new `jit_surface` probe: the wrappers are ordinary higher-order functions
+  over the same derived dictionaries `works_swarm_planf_hylo_on_jit` already
+  pins, so they joined THAT probe as four more `check` lines (part (c)) rather
+  than paying a second extract compile. They run on the JIT there — including
+  that a coalgebra-side refusal truncates rather than throws.
