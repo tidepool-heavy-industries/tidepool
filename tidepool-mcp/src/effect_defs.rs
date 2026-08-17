@@ -2090,6 +2090,55 @@ macro_rules! subagent_effect_def {
     };
 }
 
+/// Journal effect — single definition (PRD 20, S1-L5 substrate slice).
+///
+/// A durable append-only run journal: a resident harness records completed
+/// steps as it happens, mid-loop, so a crash loses only in-flight work —
+/// never the record of what already finished. One verb, `record kind key
+/// payload`: `kind`/`key` are caller-chosen labels, `payload` an opaque JSON
+/// value (the PRD's locked lean — a fixed step shape, not a
+/// harness-extensible one). Like Worktree/RepoEvent/Subagent, this is NOT in
+/// `build_base_stack`'s row: which file a run journals to, and folding it
+/// into boot-time resume, is the swarm driver's job, wired at merge.
+// See `http_effect_def!` on why `crate::` (not `$crate`) is correct for
+// `crate::effect_glue::JsonArg` here — it resolves at the EXPANSION site
+// (tidepool-handlers' `effect_rust_projection!`), the only consumer of the
+// Rust arg types.
+#[allow(clippy::crate_in_macro_def)]
+#[macro_export]
+macro_rules! journal_effect_def {
+    ($project:path) => {
+        $project! {
+            effect Journal,
+            handler JournalHandler,
+            req JournalReq,
+            decl_fn journal_decl,
+            description [
+                "Durable append-only run journal: a resident harness records completed ",
+                "steps as it happens, mid-loop, so progress survives a crash and resume ",
+                "can fold the journal instead of redoing finished work. `record kind key ",
+                "payload` appends ONE entry — `kind` and `key` are caller-chosen labels ",
+                "(e.g. a step kind and the branch or task it concerns), `payload` is an ",
+                "opaque JSON value. Every append is flushed immediately; the journal is ",
+                "append-only forever — there is no rewrite or compaction verb.",
+            ],
+            type_defs [],
+            verbs [
+                { ctor RecordStep, method record_step,
+                  args { kind: "Text" as String, key: "Text" as String, payload: "Value" as crate::effect_glue::JsonArg },
+                  ret "()" },
+            ],
+            helpers [
+                { raw ["-- | Append one durable journal entry. `kind` and `key` are",
+                       "-- caller-chosen labels; `payload` is an opaque JSON value. Flushed",
+                       "-- immediately; append-only — never rewritten or compacted.",
+                       "record :: Text -> Text -> Value -> M ()",
+                       "record kind key payload = send (RecordStep kind key payload)"] },
+            ],
+        }
+    };
+}
+
 #[cfg(test)]
 mod tests {
     /// Every generated `*_decl()` must be byte-identical to the hand-written
