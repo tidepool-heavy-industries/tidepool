@@ -328,9 +328,22 @@ pub struct EvTickReceipt {
 /// the wire — coalescing is decided at `MailboxSend` time, before publish
 /// (see [`SubscriptionRegistry::publish_mailbox_message`] in
 /// `tidepool-handlers`). The payload is `serde_json::Value` rather than
-/// `tidepool_eval::value::Value`: this enum is Ret-only (never decoded from
-/// Haskell), so it drops `FromCore`/`Eq` the same way `AgCyclePayload` does
-/// for the same reason.
+/// `tidepool_eval::value::Value`.
+///
+/// **Ret-only (never decoded from Haskell) — which is why the derive list is
+/// short.** `RepositoryEvent` appears in `event_decl` exclusively as
+/// `ret "[RepositoryEvent]"` (on `RepoEventDrain`/`RepoEventAwait`) and never
+/// in an `args { .. }` clause: Rust produces observations and hands them to
+/// Haskell, and Haskell never passes one back. The projection functions that
+/// consume it (`projectCommit`, `projectMailbox`, …) are pure Haskell and do
+/// not cross the boundary. So `FromCore` here would be an unreachable impl,
+/// not a capability — it is deliberately absent, as it is on `AgCyclePayload`
+/// and `AgAgentStep` for the same reason. `Eq` goes with it (`serde_json::Value`
+/// has neither impl); `PartialEq` is what every use site actually needs.
+///
+/// A `RepositoryEvent` that ever needs to travel Haskell→Rust would invalidate
+/// this, and adding it to an `args` clause is exactly the change that should
+/// force reconsidering the derive list rather than silently re-deriving.
 #[derive(ToCore, Clone, Debug, PartialEq)]
 pub enum EvRepositoryEvent {
     ObservedCommit(EvEventId, EvCommitReceipt),
