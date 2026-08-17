@@ -28,6 +28,11 @@ pub fn path(e: &Effect) -> String {
 /// directory and a directory has exactly one index. Two generators cannot each
 /// own `generated/mod.rs`, so the one that owns the effect's primary module owns
 /// the index too.
+///
+/// The header text is deliberately UNCHANGED by that addition. It is the first
+/// line of a committed file in another crate, and lane 3 flips nothing — an
+/// effect with adapters gains a `pub mod <eff>_adapters;` line here when it is
+/// flipped, and until then this file's bytes must not move.
 #[must_use]
 pub fn module_index(effects: &[Effect]) -> GeneratedFile {
     let mut modules: Vec<String> = effects.iter().map(module_name).collect();
@@ -39,7 +44,7 @@ pub fn module_index(effects: &[Effect]) -> GeneratedFile {
     GeneratedFile {
         path: "tidepool-handlers/src/generated/mod.rs".to_string(),
         contents: index_body(
-            "Generated effect request types, dispatch glue, and domain↔wire adapters",
+            "Generated effect request types and dispatch glue",
             &modules,
             false,
         ),
