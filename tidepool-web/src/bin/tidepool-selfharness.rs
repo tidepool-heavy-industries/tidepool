@@ -22,7 +22,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use tidepool_handlers::{
-    ConsoleHandler, EventConfig, ExecHandler, RepoEventHandler, WorktreeHandler,
+    ConsoleHandler, EventConfig, ExecHandler, JournalHandler, RepoEventHandler, WorktreeHandler,
 };
 use tidepool_harness::engine::EngineConfig;
 use tidepool_harness::log::{LogHeader, LogWriter};
@@ -166,10 +166,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     driver.set_worktree_handler(worktree_handler);
     driver.set_event_handler(event_handler);
     driver.set_exec_handler(exec_handler);
+    // The run journal (PRD 20): append-only `record` sink, one file per run
+    // beside the run log (same timestamp). Fold-on-resume is dev-tree v2's
+    // job — this process only ever appends.
+    let run_journal_path = log_dir.join(format!("journal-{ts}.jsonl"));
+    driver.set_journal_handler(JournalHandler::new(run_journal_path.clone()));
     tracing::info!(
         target: "tidepool_web",
         repo = %source_repo.display(),
-        "outer effect seam wired (Console/Worktree/RepoEvent/Exec)"
+        journal = %run_journal_path.display(),
+        "outer effect seam wired (Console/Worktree/RepoEvent/Exec/Journal)"
     );
 
     // The subagent seam (plans/companion-memory.md): when TIDEPOOL_MEMORY_REPO
