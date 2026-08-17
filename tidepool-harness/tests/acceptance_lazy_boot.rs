@@ -37,14 +37,6 @@ use tidepool_harness::{
 
 mod support;
 
-fn extract_available() -> bool {
-    std::env::var("TIDEPOOL_EXTRACT").is_ok()
-        || std::process::Command::new("tidepool-extract")
-            .arg("--help")
-            .output()
-            .is_ok()
-}
-
 fn prelude_dir() -> PathBuf {
     let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     manifest
@@ -80,7 +72,7 @@ fn reply(content: &str) -> RecordedReply {
 /// Pins the lazy-boot contract above for a plain node.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn no_machine_after_force_a_machine_after_the_first_turn() {
-    if !extract_available() {
+    if !support::extract_available() {
         eprintln!(
             "Skipping: tidepool-extract not available (set TIDEPOOL_EXTRACT, run in nix develop)"
         );
@@ -174,7 +166,7 @@ impl tidepool_harness::provider::ModelProvider for AlwaysReply {
 /// ConTags-reachability invariant.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn outer_session_boots_from_pure_render_then_loop_suspends_on_a_real_hole() {
-    if !extract_available() {
+    if !support::extract_available() {
         eprintln!(
             "Skipping: tidepool-extract not available (set TIDEPOOL_EXTRACT, run in nix develop)"
         );

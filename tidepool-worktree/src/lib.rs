@@ -26,9 +26,11 @@ pub mod error;
 pub mod git;
 pub mod id;
 pub mod journal;
+pub mod label;
 pub mod monitor;
 pub mod registry;
 pub mod snapshot;
+pub mod storage;
 pub mod testing;
 
 pub use binding::{AgentRef, Binding, BindingState, BindingTable};
@@ -40,6 +42,7 @@ pub use error::{DirtySummary, GitFailureReceipt, InProgressKind, WorktreeError};
 pub use git::{GitCli, GitOutput};
 pub use id::{BranchName, EventId, GitOid, GitRef, SubscriptionId, WorktreeId};
 pub use journal::{EventJournal, JournalEntry};
+pub use label::{AgentLabel, BranchLabel};
 pub use monitor::{
     CommitReceipt, HeadChangeKind, HeadChangeReceipt, Observed, RepositoryEvent, WorktreeMonitor,
     DEFAULT_POLL_INTERVAL_MS,

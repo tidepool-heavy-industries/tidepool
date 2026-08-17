@@ -110,25 +110,20 @@
 //! looked healthy is worse than one that fails.
 
 use std::collections::VecDeque;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
 use tidepool_bridge_effects::{
     EvCommitReceipt, EvEventId, EvHeadChangeKind, EvHeadChangeReceipt, EvRepositoryEvent,
     EvSubscriptionId, EvTickReceipt, EvWatch, WtBranchName, WtGitOid, WtWorktreeId,
 };
+use tidepool_worktree::storage::now_ms;
 
-/// Wall-clock epoch milliseconds — an observability stamp only (`Tick`'s
-/// `firedAtMs`); internal deadline SCHEDULING uses the monotonic `Instant`
-/// clock instead, immune to a system-clock jump. `pub(crate)`-per-module is
-/// this crate's existing convention for this exact helper
-/// (`tidepool-worktree`'s `journal.rs`/`registry.rs` each carry their own
-/// copy too); not worth a shared crate for one line.
-fn now_ms() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis() as i64)
-        .unwrap_or(0)
-}
+// Wall-clock epoch milliseconds for `Tick`'s `firedAtMs` — an observability
+// stamp only; internal deadline SCHEDULING uses the monotonic `Instant` clock
+// instead, immune to a system-clock jump. `now_ms` now PANICS on a pre-epoch
+// clock (`tidepool_worktree::storage::now_ms`'s documented behavior), unlike
+// this call site's prior local copy, which silently stamped `0` — see that
+// module's docs for why the panic won.
 
 // `EventError` + `RepoEventReq` + `DescribeEffect` + the `EffectHandler`
 // dispatch match are generated from the single-source definition in

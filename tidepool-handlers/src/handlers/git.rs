@@ -597,15 +597,6 @@ file_c.txt\n\
         }
     }
 
-    fn extract_available() -> bool {
-        let bin =
-            std::env::var("TIDEPOOL_EXTRACT").unwrap_or_else(|_| "tidepool-extract".to_string());
-        std::process::Command::new(&bin)
-            .arg("--help")
-            .output()
-            .is_ok()
-    }
-
     /// Bundles `test_jit_git_log_returns_commit` (full JIT end-to-end:
     /// `gitLog 1` on the real repo returns a Commit record with a
     /// 40-character sha field, exercising the generated Tidepool.Effects
@@ -616,7 +607,7 @@ file_c.txt\n\
     /// compile. Skips cleanly when TIDEPOOL_EXTRACT is unavailable.
     #[tokio::test]
     async fn test_jit_git_family() {
-        if !extract_available() {
+        if !tidepool_testing::eval_harness::extract_available() {
             eprintln!("skipping: tidepool-extract not available (set TIDEPOOL_EXTRACT)");
             return;
         }

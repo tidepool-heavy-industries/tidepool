@@ -63,7 +63,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use tidepool_worktree::{
-    AgentRef, BindingState, BindingTable, WorktreeError, WorktreeHandle, WorktreeId,
+    AgentLabel, AgentRef, BindingState, BindingTable, WorktreeError, WorktreeHandle, WorktreeId,
     WorktreeManager, WorktreeSpec,
 };
 
@@ -73,49 +73,6 @@ use crate::seam::{
     DynamicToolDeclaration, ModelPolicy, ReasoningEffort, ThreadSpec, TokenUsage, ToolCall,
     ToolCallId, ToolOutcome, ToolReply, TurnEvent, TurnId,
 };
-
-/// Wall-clock milliseconds since the Unix epoch, for `bound_at_ms`.
-///
-/// Local rather than shared with `tidepool-worktree`'s identical helper, which
-/// is `pub(crate)` there; a clock before the epoch is a broken machine no
-/// caller can act on, so it panics rather than widening every signature with a
-/// `Result` whose only handling is `unwrap`.
-fn now_ms() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .expect("system clock is before the Unix epoch")
-        .as_millis() as i64
-}
-
-/// Sanitize a caller-supplied label into the tail of an `AgentRef`.
-///
-/// The label is decoration — never a path, never an identity (the minted
-/// [`AgentId`] in front of it is what makes the ref unique), so it is reduced
-/// to `[A-Za-z0-9._-]` with runs of `-` collapsed and the ends trimmed. An
-/// all-punctuation label falls back to `worker` rather than yielding a ref
-/// ending in a bare `-`.
-fn sanitize_label(label: &str) -> String {
-    let mut out = String::with_capacity(label.len());
-    let mut last_was_dash = false;
-    for c in label.chars() {
-        let c = if c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.') {
-            c
-        } else {
-            '-'
-        };
-        if c == '-' && last_was_dash {
-            continue;
-        }
-        last_was_dash = c == '-';
-        out.push(c);
-    }
-    let trimmed = out.trim_matches(|c| c == '-' || c == '.');
-    if trimmed.is_empty() {
-        "worker".to_string()
-    } else {
-        trimmed.to_string()
-    }
-}
 
 /// Where in the saga something happened. Carried on every [`SpawnError`] so a
 /// caller (and a receipt reader) can see how far the spawn got without
@@ -419,7 +376,7 @@ impl SpawnSubstrate {
             .bind(
                 worktree,
                 &AgentRef::from_raw(binding_ref.to_string()),
-                now_ms(),
+                tidepool_worktree::storage::now_ms(),
             )
             .map_err(|error| SpawnError::Binding {
                 stage: SpawnStage::Bound,
@@ -597,7 +554,11 @@ impl CycleSaga {
             // 2. Identity: mint the agent id, then sanitize the label into the
             //    `AgentRef` tail.
             let agent = sub.mint_agent_id();
-            let binding_ref = format!("agent-{}-{}", agent.0, sanitize_label(&request.agent_label));
+            let binding_ref = format!(
+                "agent-{}-{}",
+                agent.0,
+                AgentLabel::new(&request.agent_label).as_str()
+            );
 
             // 3. Bound.
             sub.bind(worktree.id(), &binding_ref)?;

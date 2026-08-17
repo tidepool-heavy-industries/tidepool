@@ -113,14 +113,11 @@ pub fn poisoned_extract_bin() -> (TempDir, std::path::PathBuf) {
     (dir, path)
 }
 
-/// True iff `TIDEPOOL_EXTRACT` is set or a `tidepool-extract` binary is on
-/// `PATH`.
-fn extract_available() -> bool {
-    std::env::var("TIDEPOOL_EXTRACT").is_ok()
-        || std::process::Command::new("tidepool-extract")
-            .arg("--help")
-            .output()
-            .is_ok()
+/// True iff `TIDEPOOL_EXTRACT` is set or a working toolchain is derivable —
+/// delegates to the shared harness helper, which also derives + installs
+/// `TIDEPOOL_EXTRACT` (via `cabal list-bin`) when it isn't already set.
+pub fn extract_available() -> bool {
+    tidepool_testing::eval_harness::extract_available()
 }
 
 /// Panic loudly instead of skipping (which nextest reports as PASS) when

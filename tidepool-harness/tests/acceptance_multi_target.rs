@@ -19,11 +19,7 @@ use tidepool_harness::compile;
 use tidepool_harness::engine::EngineConfig;
 
 fn extract_available() -> bool {
-    std::env::var("TIDEPOOL_EXTRACT").is_ok()
-        || std::process::Command::new("tidepool-extract")
-            .arg("--help")
-            .output()
-            .is_ok()
+    tidepool_testing::eval_harness::extract_available()
 }
 
 fn prelude_dir() -> std::path::PathBuf {

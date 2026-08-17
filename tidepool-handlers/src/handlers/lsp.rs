@@ -312,15 +312,6 @@ mod tests {
         assert!(matches!(req, LspReq::LspDiagnostics(ref f) if f == "src/main.rs"));
     }
 
-    fn extract_available() -> bool {
-        let bin =
-            std::env::var("TIDEPOOL_EXTRACT").unwrap_or_else(|_| "tidepool-extract".to_string());
-        std::process::Command::new(&bin)
-            .arg("--help")
-            .output()
-            .is_ok()
-    }
-
     /// #335 end-to-end acceptance: with no `tidepool-lsp-daemon` reachable, the
     /// socket connect fails immediately (cheap, no live dependency), so
     /// `lspWhere` is a typed `Left (LspDaemonDown _)` the eval pattern-matches
@@ -330,7 +321,7 @@ mod tests {
     /// live query.
     #[tokio::test]
     async fn lsp_where_no_daemon_is_typed_left_lspdaemondown() {
-        if !extract_available() {
+        if !tidepool_testing::eval_harness::extract_available() {
             eprintln!("skipping: tidepool-extract not available (set TIDEPOOL_EXTRACT)");
             return;
         }

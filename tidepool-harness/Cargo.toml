@@ -40,6 +40,7 @@ tracing.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+tidepool-testing.workspace = true
 tracing-subscriber = { workspace = true, features = ["registry"] }
 # The outer-row Subagent acceptance (tests/outer_subagent.rs): a MockBackend-
 # backed SubagentHandler + a TestRepo the curator spawns against.
