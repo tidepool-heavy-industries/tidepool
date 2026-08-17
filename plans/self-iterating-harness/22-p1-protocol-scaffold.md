@@ -1075,3 +1075,66 @@ one mod-index and `handler_rs` owns it**, so it lists `<eff>_adapters` alongside
 `<eff>`. Two generators cannot each own a directory index. Its header text is
 byte-stable across this lane by construction — an effect gains its adapter line
 there when it is flipped, not before.
+
+### 11.11 `WorktreeSpec`'s meaningless states — declined for this lane, with the reason
+
+An external type review (2026-08-17) landed mid-lane on the domain
+`WorktreeSpec { source, label, dirty_policy }`: its fields are public, and
+`dirty_policy` is meaningful only for the `CurrentRepository` and `Worktree`
+sources. A caller can build `{ source: Ref(r), dirty_policy: AllowDirtySnapshot }`
+and `resolve_source`'s `Ref` arm ignores the policy outright — it `rev-parse`s
+the ref and returns `snapshot_ref: None` without ever consulting it
+(`tidepool-worktree/src/create.rs:256-268`). A configuration layer can therefore
+report that it requested a snapshot while actually seeding the named ref. The
+proposed shape was a domain SUM — `Current { label, dirty }` |
+`Existing { id, label, dirty }` | `Ref { reference, label }` — with the
+generated wire type staying a permissive product and the adapter converting.
+
+**The finding is real. The domain sum is declined for this lane.** Not on blast
+radius — that turned out to be small (the only production read of the product
+outside `create.rs` is this lane's own `spec_from_wire`; the three reads in
+`handlers/agent.rs` are inside its `#[cfg(test)]` block). Declined on what the
+refactor would actually accomplish:
+
+**A domain sum alone relocates the drop; it does not close the lie.** Behind the
+sum, `spec_from_wire` still receives the pair `(Ref, AllowDirtySnapshot)` from
+the wire and must do one of two things with it. Silently discard the policy —
+which is today's behavior, now localized to one adapter, tidier but with the
+operator-visible lie fully intact. Or reject it — which is a genuine fix, and
+requires an error variant that does not exist, which means a new wire variant,
+which moves the Class A golden. The pair is constructible from authored Haskell
+today (`allowDirtySnapshot (fromRef r lbl)` typechecks and succeeds), so
+rejecting it is a semantic change to a live contract.
+
+**So the effective fix is a WIRE change, not a domain change** — either that new
+error variant, or the Haskell `WorktreeSpec` itself becoming a sum so
+`allowDirtySnapshot (fromRef r lbl)` stops typechecking. Both move a byte-locked
+golden, and this lane's whole claim is that it moved nothing it did not
+deliberately move. Landing a semantic change inside a byte-compatibility
+migration would make any post-flip failure ambiguous between the two, which is
+the specific thing an effect-at-a-time migration is structured to avoid.
+
+Two things done instead of nothing:
+
+1. **The tolerance is now pinned.** No test covered `Ref` + `AllowDirtySnapshot`
+   at all, so the behavior was real, deliberate, documented in one code comment,
+   and completely unasserted — a later change to it would have been invisible.
+   `tidepool-worktree/tests/dirty_snapshot.rs` now asserts that the two policies
+   produce identical results on the `Ref` path, `snapshot_ref: None` included.
+   The follow-on lane changes that assertion in the same commit as the fix,
+   which is what makes the fix visible in review.
+2. **The architecture the review asks for is what this lane builds.** §11.5
+   already lists `spec_from_wire` and `worktree_source_from_wire` as
+   `HandWritten`, precisely because their error path is semantic. The generated
+   permissive wire product and the hand-written richer domain form, converted at
+   one explicit adapter, IS the split. A domain sum drops in behind that adapter
+   later without touching a wire byte.
+
+**For the follow-on lane, so it inherits the shape and not just the complaint:**
+make the Haskell `WorktreeSpec` a sum. That is the version that makes the
+meaningless pair unrepresentable at the surface an author actually writes,
+rather than at an internal boundary the author never sees. It costs a
+`type_defs` change, a `helpers` change, a Class A golden move, and a
+`Tidepool/Worktree.hs` edit — which after this lane's flip is **one schema edit
+plus one adapter**. That is PRD 22's acceptance line, on a real example, and it
+is a fair test of whether the migration bought what it claimed.
