@@ -109,7 +109,7 @@
 //! no recovery path on purpose — a subscription that dropped commits and then
 //! looked healthy is worse than one that fails.
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use tidepool_bridge_effects::{
@@ -191,6 +191,14 @@ struct Subscription {
     /// here (fire-once) — separate from `watches`, which stays the immutable
     /// record of what was registered.
     pending_deadlines: Vec<Instant>,
+    /// Where a still-queued, not-yet-drained mailbox message sits, keyed by
+    /// (mailbox, caller-supplied coalesce key) — how
+    /// [`SubscriptionRegistry::publish_mailbox_message`] finds the entry a
+    /// same-key send must REPLACE in place rather than append. Cleared
+    /// whenever `queue` drains to empty: a fresh epoch has nothing left to
+    /// coalesce against. Indices stay valid between drains because entries
+    /// are only ever appended or replaced in place, never removed singly.
+    mailbox_slots: HashMap<(i64, String), usize>,
 }
 
 impl Subscription {
@@ -260,6 +268,7 @@ impl SubscriptionRegistry {
                 queue: VecDeque::new(),
                 dropped: 0,
                 pending_deadlines,
+                mailbox_slots: HashMap::new(),
             },
         ));
         EvSubscriptionId { raw }
@@ -325,6 +334,55 @@ impl SubscriptionRegistry {
         }
     }
 
+    /// Publish one mailbox message, coalescing by (mailbox, key) — a caller
+    /// send whose key already sits, undrained, in a subscription's queue
+    /// REPLACES that entry in place (latest payload, earliest position); a
+    /// fresh key appends. Shares `publish`'s queue, bound, and
+    /// poison-on-overflow rule: a poisoned subscription only ever counts the
+    /// loss, and a coalesced replacement never itself grows the queue, so
+    /// coalescing can never be the thing that overflows it.
+    pub fn publish_mailbox_message(&mut self, mailbox: i64, key: &str, payload: serde_json::Value) {
+        for (_, sub) in self.subs.iter_mut() {
+            if !sub
+                .watches
+                .iter()
+                .any(|w| matches!(w, EvWatch::WatchMailbox(m) if *m == mailbox))
+            {
+                continue;
+            }
+            if sub.poisoned() {
+                sub.dropped += 1;
+                continue;
+            }
+            let slot_key = (mailbox, key.to_string());
+            if let Some(&idx) = sub.mailbox_slots.get(&slot_key) {
+                self.next_event_id += 1;
+                sub.queue[idx] = EvRepositoryEvent::ObservedMessage(
+                    EvEventId {
+                        raw: self.next_event_id,
+                    },
+                    mailbox,
+                    payload.clone(),
+                );
+                continue;
+            }
+            if sub.queue.len() >= self.bound {
+                sub.dropped += 1;
+                continue;
+            }
+            self.next_event_id += 1;
+            let idx = sub.queue.len();
+            sub.queue.push_back(EvRepositoryEvent::ObservedMessage(
+                EvEventId {
+                    raw: self.next_event_id,
+                },
+                mailbox,
+                payload.clone(),
+            ));
+            sub.mailbox_slots.insert(slot_key, idx);
+        }
+    }
+
     /// Take everything queued, in observation order, leaving the queue empty.
     pub fn drain(&mut self, id: EvSubscriptionId) -> Result<Vec<EvRepositoryEvent>, EventError> {
         let sub = self
@@ -336,6 +394,10 @@ impl SubscriptionRegistry {
             // caller happened to observe it first.
             return Err(EventError::EventQueueOverflow(id.raw, sub.dropped));
         }
+        // Every queued index a mailbox message coalesced against is about to
+        // be drained away; the next send with that key has nothing left to
+        // replace, so it must append fresh.
+        sub.mailbox_slots.clear();
         Ok(sub.queue.drain(..).collect())
     }
 
@@ -359,16 +421,20 @@ impl SubscriptionRegistry {
     }
 
     /// The union of every live subscription's watched worktrees — what a
-    /// reconciliation pass has to look at. `WatchDeadline` names no
-    /// worktree, so it contributes nothing here — deadlines are checked by
-    /// [`Self::fire_due_deadlines`], never through a git-observing pass.
+    /// reconciliation pass has to look at. `WatchDeadline`, `WatchAsync`, and
+    /// `WatchMailbox` name no worktree, so they contribute nothing here —
+    /// deadlines are checked by [`Self::fire_due_deadlines`], async-done and
+    /// mailbox facts arrive through their own publish paths, never through a
+    /// git-observing pass.
     pub fn watched_worktrees(&self) -> Vec<WtWorktreeId> {
         let mut out: Vec<WtWorktreeId> = Vec::new();
         for (_, sub) in &self.subs {
             for w in &sub.watches {
                 let id = match w {
                     EvWatch::WatchCommit(id) | EvWatch::WatchHead(id) => id,
-                    EvWatch::WatchDeadline(_) => continue,
+                    EvWatch::WatchDeadline(_)
+                    | EvWatch::WatchAsync(_)
+                    | EvWatch::WatchMailbox(_) => continue,
                 };
                 if !out.contains(id) {
                     out.push(id.clone());
@@ -580,10 +646,54 @@ fn domain_kind_to_wire(k: &tidepool_worktree::HeadChangeKind) -> EvHeadChangeKin
 }
 
 // ============================================================================
+// Capability mailboxes (PRD 20 S1-L4 wave 2)
+// ============================================================================
+
+/// Mailbox identity: minted ids and which are still live. Independent of
+/// subscriptions — a mailbox can exist with zero watchers, same as a
+/// worktree can be reconciled with zero subscribers. Possession of the
+/// minted `Int` is the whole capability: this table is an implementation
+/// detail of the effect, never an address space the authored surface reasons
+/// about — no lookup-by-name, no enumeration, no addressing verb.
+#[derive(Debug)]
+struct MailboxTable {
+    next_id: i64,
+    live: HashSet<i64>,
+}
+
+impl MailboxTable {
+    fn new() -> Self {
+        Self {
+            next_id: 1,
+            live: HashSet::new(),
+        }
+    }
+
+    fn mint(&mut self) -> i64 {
+        let id = self.next_id;
+        self.next_id += 1;
+        self.live.insert(id);
+        id
+    }
+
+    fn is_live(&self, id: i64) -> bool {
+        self.live.contains(&id)
+    }
+
+    /// `true` when `id` was live and is now dropped; `false` when it was
+    /// never minted or already dropped — the caller turns that into a typed
+    /// `EventUnknownMailbox`.
+    fn drop_mailbox(&mut self, id: i64) -> bool {
+        self.live.remove(&id)
+    }
+}
+
+// ============================================================================
 // The handler
 // ============================================================================
 
-/// Serves `RepoEventSubscribe` / `RepoEventDrain` / `RepoEventUnsubscribe`.
+/// Serves `RepoEventSubscribe` / `RepoEventDrain` / `RepoEventUnsubscribe` /
+/// `MailboxNew` / `MailboxSend` / `MailboxDrop`.
 ///
 /// Not in `build_base_stack`'s row: PRD 19's surface is opt-in until the
 /// dev-tree dogfood lands, so a caller that wants repository events builds a
@@ -593,6 +703,7 @@ pub struct RepoEventHandler {
     source: Box<dyn ObservationSource>,
     poll_interval: Duration,
     last_pass: Option<Instant>,
+    mailboxes: MailboxTable,
 }
 
 impl RepoEventHandler {
@@ -613,6 +724,7 @@ impl RepoEventHandler {
             source,
             poll_interval: config.poll_interval,
             last_pass: None,
+            mailboxes: MailboxTable::new(),
         }
     }
 
@@ -682,6 +794,32 @@ impl RepoEventHandler {
 
     fn repo_event_unsubscribe(&mut self, subscription: EvSubscriptionId) -> Result<(), EventError> {
         self.registry.unsubscribe(subscription)
+    }
+
+    fn mailbox_new(&mut self) -> Result<i64, EventError> {
+        Ok(self.mailboxes.mint())
+    }
+
+    fn mailbox_send(
+        &mut self,
+        mailbox: i64,
+        key: String,
+        payload: crate::effect_glue::JsonArg,
+    ) -> Result<(), EventError> {
+        if !self.mailboxes.is_live(mailbox) {
+            return Err(EventError::EventUnknownMailbox(mailbox));
+        }
+        self.registry
+            .publish_mailbox_message(mailbox, &key, payload.0);
+        Ok(())
+    }
+
+    fn mailbox_drop(&mut self, mailbox: i64) -> Result<(), EventError> {
+        if self.mailboxes.drop_mailbox(mailbox) {
+            Ok(())
+        } else {
+            Err(EventError::EventUnknownMailbox(mailbox))
+        }
     }
 
     /// Block until `subscription` has queued at least one observation, or
@@ -779,6 +917,8 @@ mod tests {
                 EvRepositoryEvent::ObservedCommit(_, r) => r.oid.raw.clone(),
                 EvRepositoryEvent::ObservedHeadChange(_, r) => r.new_head.raw.clone(),
                 EvRepositoryEvent::ObservedTick(_, t) => format!("tick@{}", t.fired_at_ms),
+                EvRepositoryEvent::ObservedAsyncDone(_, tid) => format!("async@{tid}"),
+                EvRepositoryEvent::ObservedMessage(_, mid, v) => format!("msg@{mid}:{v}"),
             })
             .collect()
     }
@@ -1162,6 +1302,138 @@ mod tests {
             passes_run(&calls),
             1,
             "the await loop's repeated iterations must not re-read git faster than poll_interval"
+        );
+    }
+
+    // ── capability mailboxes (PRD 20, S1-L4 wave 2) ──
+
+    fn payload(v: serde_json::Value) -> crate::effect_glue::JsonArg {
+        crate::effect_glue::JsonArg(v)
+    }
+
+    fn mailbox_payloads(evs: &[EvRepositoryEvent]) -> Vec<serde_json::Value> {
+        evs.iter()
+            .map(|e| match e {
+                EvRepositoryEvent::ObservedMessage(_, _, v) => v.clone(),
+                other => panic!("expected ObservedMessage, got {other:?}"),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_send_is_observed_by_a_watchmailbox_subscriber() {
+        let (mut h, _calls) = handler_with(vec![], Duration::ZERO);
+        let mid = h.mailbox_new().unwrap();
+        let sub = h
+            .repo_event_subscribe(vec![EvWatch::WatchMailbox(mid)])
+            .unwrap();
+        h.mailbox_send(mid, "k".into(), payload(serde_json::json!("hello")))
+            .unwrap();
+        let batch = h.repo_event_drain(sub).unwrap();
+        assert_eq!(mailbox_payloads(&batch), vec![serde_json::json!("hello")]);
+    }
+
+    #[test]
+    fn a_subscriber_to_a_different_mailbox_is_not_observed() {
+        let (mut h, _calls) = handler_with(vec![], Duration::ZERO);
+        let a = h.mailbox_new().unwrap();
+        let b = h.mailbox_new().unwrap();
+        let sub_b = h
+            .repo_event_subscribe(vec![EvWatch::WatchMailbox(b)])
+            .unwrap();
+        h.mailbox_send(a, "k".into(), payload(serde_json::json!(1)))
+            .unwrap();
+        assert_eq!(h.repo_event_drain(sub_b).unwrap(), vec![]);
+    }
+
+    #[test]
+    fn a_burst_of_same_key_sends_is_observed_once_carrying_the_last_payload() {
+        let (mut h, _calls) = handler_with(vec![], Duration::ZERO);
+        let mid = h.mailbox_new().unwrap();
+        let sub = h
+            .repo_event_subscribe(vec![EvWatch::WatchMailbox(mid)])
+            .unwrap();
+        h.mailbox_send(mid, "k".into(), payload(serde_json::json!(1)))
+            .unwrap();
+        h.mailbox_send(mid, "k".into(), payload(serde_json::json!(2)))
+            .unwrap();
+        h.mailbox_send(mid, "k".into(), payload(serde_json::json!(3)))
+            .unwrap();
+        let batch = h.repo_event_drain(sub).unwrap();
+        assert_eq!(mailbox_payloads(&batch), vec![serde_json::json!(3)]);
+    }
+
+    #[test]
+    fn different_keys_do_not_coalesce_with_each_other() {
+        let (mut h, _calls) = handler_with(vec![], Duration::ZERO);
+        let mid = h.mailbox_new().unwrap();
+        let sub = h
+            .repo_event_subscribe(vec![EvWatch::WatchMailbox(mid)])
+            .unwrap();
+        h.mailbox_send(mid, "a".into(), payload(serde_json::json!("a1")))
+            .unwrap();
+        h.mailbox_send(mid, "b".into(), payload(serde_json::json!("b1")))
+            .unwrap();
+        let batch = h.repo_event_drain(sub).unwrap();
+        assert_eq!(
+            mailbox_payloads(&batch),
+            vec![serde_json::json!("a1"), serde_json::json!("b1")]
+        );
+    }
+
+    #[test]
+    fn a_coalesced_replacement_keeps_the_earlier_arrival_position() {
+        let (mut h, _calls) = handler_with(vec![], Duration::ZERO);
+        let mid = h.mailbox_new().unwrap();
+        let sub = h
+            .repo_event_subscribe(vec![EvWatch::WatchMailbox(mid)])
+            .unwrap();
+        h.mailbox_send(mid, "a".into(), payload(serde_json::json!("a1")))
+            .unwrap();
+        h.mailbox_send(mid, "b".into(), payload(serde_json::json!("b1")))
+            .unwrap();
+        // Replaces "a"'s entry in place — "a" must stay FIRST, not move to
+        // the back behind "b".
+        h.mailbox_send(mid, "a".into(), payload(serde_json::json!("a2")))
+            .unwrap();
+        let batch = h.repo_event_drain(sub).unwrap();
+        assert_eq!(
+            mailbox_payloads(&batch),
+            vec![serde_json::json!("a2"), serde_json::json!("b1")]
+        );
+    }
+
+    #[test]
+    fn send_to_a_dropped_mailbox_is_a_typed_error() {
+        let (mut h, _calls) = handler_with(vec![], Duration::ZERO);
+        let mid = h.mailbox_new().unwrap();
+        h.mailbox_drop(mid).unwrap();
+        assert_eq!(
+            h.mailbox_send(mid, "k".into(), payload(serde_json::json!(1))),
+            Err(EventError::EventUnknownMailbox(mid))
+        );
+    }
+
+    #[test]
+    fn send_to_a_never_minted_mailbox_is_a_typed_error() {
+        let (mut h, _calls) = handler_with(vec![], Duration::ZERO);
+        assert_eq!(
+            h.mailbox_send(999, "k".into(), payload(serde_json::json!(1))),
+            Err(EventError::EventUnknownMailbox(999))
+        );
+    }
+
+    #[test]
+    fn a_mailbox_watch_is_skipped_by_worktree_reconciliation() {
+        let mut reg = SubscriptionRegistry::new(8);
+        reg.subscribe(vec![
+            EvWatch::WatchMailbox(1),
+            EvWatch::WatchCommit(wt("a")),
+        ]);
+        assert_eq!(
+            reg.watched_worktrees(),
+            vec![wt("a")],
+            "WatchMailbox names no worktree, same as WatchDeadline"
         );
     }
 }

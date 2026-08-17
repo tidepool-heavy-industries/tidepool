@@ -252,11 +252,18 @@ pub struct EvSubscriptionId {
 /// `now + ms`. `after` itself is therefore pure data construction — no Time
 /// effect, no row dependency — which matters because `RepoEvent` already
 /// ships with rows that carry no `Time` handler.
+///
+/// `WatchAsync`/`WatchMailbox` name no worktree, same as `WatchDeadline` —
+/// they carry a raw thread/mailbox `Int` rather than a newtype on purpose:
+/// `event_decl`'s type_defs must stand alone in a row with `RepoEvent` but
+/// not `Green` (PRD 20 S1-L4 wave 2).
 #[derive(ToCore, FromCore, Clone, Debug, PartialEq, Eq)]
 pub enum EvWatch {
     WatchCommit(WtWorktreeId),
     WatchHead(WtWorktreeId),
     WatchDeadline(i64),
+    WatchAsync(i64),
+    WatchMailbox(i64),
 }
 
 /// Haskell `HeadChangeKind`. `UnknownChange` is a correct answer, not a
@@ -313,29 +320,47 @@ pub struct EvTickReceipt {
 /// because the SHARING is the information. `ObservedTick` is the one variant
 /// the registry (`tidepool-handlers`) never broadcasts — a fired deadline is
 /// queued directly onto the ONE subscription that armed it.
-#[derive(ToCore, FromCore, Clone, Debug, PartialEq, Eq)]
+///
+/// `ObservedAsyncDone` carries only the settled thread's `Int` id, never its
+/// result — the typed result stays on the heap and is read separately, by
+/// handle (PRD 20 S1-L4 wave 2). `ObservedMessage` carries a mailbox `Int`
+/// and a bare JSON payload; the caller-supplied coalesce key does NOT ride
+/// the wire — coalescing is decided at `MailboxSend` time, before publish
+/// (see [`SubscriptionRegistry::publish_mailbox_message`] in
+/// `tidepool-handlers`). The payload is `serde_json::Value` rather than
+/// `tidepool_eval::value::Value`: this enum is Ret-only (never decoded from
+/// Haskell), so it drops `FromCore`/`Eq` the same way `AgCyclePayload` does
+/// for the same reason.
+#[derive(ToCore, Clone, Debug, PartialEq)]
 pub enum EvRepositoryEvent {
     ObservedCommit(EvEventId, EvCommitReceipt),
     ObservedHeadChange(EvEventId, EvHeadChangeReceipt),
     ObservedTick(EvEventId, EvTickReceipt),
+    ObservedAsyncDone(EvEventId, i64),
+    ObservedMessage(EvEventId, i64, serde_json::Value),
 }
 
 impl EvRepositoryEvent {
     /// The worktree this fact is about — what a subscription's watches match
-    /// on. `None` for a `Tick`: a fired deadline is not about any worktree.
+    /// on. `None` for a `Tick`, an async-done, or a mailbox message: none of
+    /// them are about any worktree.
     pub fn worktree(&self) -> Option<&WtWorktreeId> {
         match self {
             EvRepositoryEvent::ObservedCommit(_, r) => Some(&r.commit_worktree),
             EvRepositoryEvent::ObservedHeadChange(_, r) => Some(&r.head_worktree),
             EvRepositoryEvent::ObservedTick(_, _) => None,
+            EvRepositoryEvent::ObservedAsyncDone(_, _) => None,
+            EvRepositoryEvent::ObservedMessage(_, _, _) => None,
         }
     }
 
-    /// Does `watch` select this fact? Kind AND worktree must both match: a
+    /// Does `watch` select this fact? Kind AND identity must both match: a
     /// `commit` subscription on tree A must not be woken by a head movement,
-    /// nor by tree B's commit. `Tick`/`WatchDeadline` never match here — they
-    /// are queued directly by [`SubscriptionRegistry::fire_due_deadlines`],
-    /// never through [`SubscriptionRegistry::publish`]'s broadcast.
+    /// nor by tree B's commit; a `WatchMailbox` subscription on mailbox 1
+    /// must not be woken by a message sent to mailbox 2. `Tick`/`WatchDeadline`
+    /// never match here — they are queued directly by
+    /// [`SubscriptionRegistry::fire_due_deadlines`], never through
+    /// [`SubscriptionRegistry::publish`]'s broadcast.
     pub fn matches(&self, watch: &EvWatch) -> bool {
         match (self, watch) {
             (EvRepositoryEvent::ObservedCommit(_, r), EvWatch::WatchCommit(w)) => {
@@ -344,6 +369,8 @@ impl EvRepositoryEvent {
             (EvRepositoryEvent::ObservedHeadChange(_, r), EvWatch::WatchHead(w)) => {
                 &r.head_worktree == w
             }
+            (EvRepositoryEvent::ObservedAsyncDone(_, tid), EvWatch::WatchAsync(w)) => tid == w,
+            (EvRepositoryEvent::ObservedMessage(_, mid, _), EvWatch::WatchMailbox(w)) => mid == w,
             _ => false,
         }
     }

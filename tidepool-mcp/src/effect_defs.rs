@@ -1812,6 +1812,7 @@ macro_rules! worktree_effect_def {
 /// `nextEvent (someEvent <|> after ms)` is an ordinary select with a timeout
 /// branch.
 #[macro_export]
+#[allow(clippy::crate_in_macro_def)]
 macro_rules! event_effect_def {
     ($project:path) => {
         $project! {
@@ -1848,7 +1849,10 @@ macro_rules! event_effect_def {
                 // `WatchDeadline` carries a RELATIVE millisecond duration: the
                 // runtime fixes the absolute deadline at `subscribe()` time
                 // (`now + ms`), so `after` itself needs no effect of its own.
-                "data Watch = WatchCommit WorktreeId | WatchHead WorktreeId | WatchDeadline Int deriving (Show, Eq)",
+                // `WatchAsync`/`WatchMailbox` (PRD 20 S1-L4 wave 2) name no
+                // worktree either, same as `WatchDeadline` — a raw Int rather
+                // than a newtype, since this row must stand alone without `Green`.
+                "data Watch = WatchCommit WorktreeId | WatchHead WorktreeId | WatchDeadline Int | WatchAsync Int | WatchMailbox Int deriving (Show, Eq)",
                 "data HeadChangeKind = Advanced [GitOid] | Amended GitOid GitOid | Rewritten [(GitOid, GitOid)] | Rewound | Switched | UnknownChange deriving (Show, Eq)",
                 "data HeadChangeReceipt = HeadChangeReceipt { headWorktree :: WorktreeId, oldHead :: Maybe GitOid, newHead :: GitOid, kind :: HeadChangeKind, headBranch :: Maybe BranchName, observedAtMs :: Int } deriving (Show, Eq)",
                 "data CommitReceipt = CommitReceipt { commitWorktree :: WorktreeId, oid :: GitOid, parents :: [GitOid], subject :: Text, author :: Text, committedAtMs :: Int, files :: [Text] } deriving (Show, Eq)",
@@ -1861,7 +1865,13 @@ macro_rules! event_effect_def {
                 // the id rides on the wire rather than being minted per view.
                 // `ObservedTick` is never broadcast — it is queued directly onto
                 // the one subscription that armed the deadline.
-                "data RepositoryEvent = ObservedCommit EventId CommitReceipt | ObservedHeadChange EventId HeadChangeReceipt | ObservedTick EventId Tick deriving (Show, Eq)",
+                // `ObservedAsyncDone` (PRD 20 S1-L4 wave 2) carries only the
+                // settled thread's Int id, never its result — the typed result
+                // stays on the heap, read separately by handle. `ObservedMessage`
+                // carries a mailbox Int and a bare JSON payload; the coalesce key
+                // does not ride the wire, since coalescing is decided at send
+                // time, before publish.
+                "data RepositoryEvent = ObservedCommit EventId CommitReceipt | ObservedHeadChange EventId HeadChangeReceipt | ObservedTick EventId Tick | ObservedAsyncDone EventId Int | ObservedMessage EventId Int Value deriving (Show, Eq)",
                 "data Observed a = Observed { eventId :: EventId, value :: a } deriving (Show, Eq)",
                 // An Event is a DESCRIPTION: what to watch, plus how to project a
                 // raw observation into the author's type. Keeping the projection
@@ -1879,6 +1889,8 @@ macro_rules! event_effect_def {
                   doc "a watched worktree is no longer observable" },
                 { ctor EventSourceFailed, fields { failedDetail: "Text" as String },
                   doc "reconciliation against git failed" },
+                { ctor EventUnknownMailbox, fields { unknownMailbox: "Int" as i64 },
+                  doc "no such live mailbox — never minted, or already dropped" },
             ],
             verbs [
                 { ctor RepoEventSubscribe, method repo_event_subscribe,
@@ -1898,6 +1910,26 @@ macro_rules! event_effect_def {
                   ret "[RepositoryEvent]", errors EventError },
                 { ctor RepoEventUnsubscribe, method repo_event_unsubscribe,
                   args { subscription: "SubscriptionId" as tidepool_bridge_effects::EvSubscriptionId },
+                  ret "()", errors EventError },
+                // Capability mailboxes (PRD 20 S1-L4 wave 2). A mailbox IS an
+                // event source, so it lives on `RepoEvent` rather than `Green` —
+                // this effect is already handler-dispatched and already wired
+                // into the driver, so these three verbs need nothing else.
+                // Mint a fresh mailbox: possession of the returned Int is
+                // permission to send into it. No lookup-by-name, no enumeration.
+                { ctor MailboxNew, method mailbox_new,
+                  args { },
+                  ret "Int", errors EventError },
+                // Sends NEVER block: append and return. A send whose `key`
+                // already sits in a subscriber's undrained queue REPLACES that
+                // entry in place (latest payload, earliest position); a fresh
+                // key appends. The runtime derives no meaning from `key` beyond
+                // identity — the caller decides what coalesces.
+                { ctor MailboxSend, method mailbox_send,
+                  args { mailbox: "Int" as i64, key: "Text" as String, payload: "Value" as crate::effect_glue::JsonArg },
+                  ret "()", errors EventError },
+                { ctor MailboxDrop, method mailbox_drop,
+                  args { mailbox: "Int" as i64 },
                   ret "()", errors EventError },
             ],
             helpers [
@@ -1965,7 +1997,9 @@ macro_rules! event_effect_def {
                 { raw ["eventIdOf :: RepositoryEvent -> EventId",
                        "eventIdOf (ObservedCommit eid _) = eid",
                        "eventIdOf (ObservedHeadChange eid _) = eid",
-                       "eventIdOf (ObservedTick eid _) = eid"] },
+                       "eventIdOf (ObservedTick eid _) = eid",
+                       "eventIdOf (ObservedAsyncDone eid _) = eid",
+                       "eventIdOf (ObservedMessage eid _ _) = eid"] },
                 { raw ["-- | The first batch entry `ev` projects, paired with its own EventId,",
                        "-- in observation order.",
                        "firstMatch :: Event a -> [RepositoryEvent] -> Maybe (Observed a)",
@@ -2005,6 +2039,37 @@ macro_rules! event_effect_def {
                 { raw ["projectTick :: RepositoryEvent -> Maybe Tick",
                        "projectTick (ObservedTick _ t) = Just t",
                        "projectTick _ = Nothing"] },
+                // PRD 20 S1-L4 wave 2 — capability mailboxes and the
+                // green-thread completion watch. Both payloads stay BARE (like
+                // `Tick`, unlike `commit`/`headChanged`), so `nextEvent` yields
+                // a single `Observed`, not a double wrap.
+                { raw ["-- | Observe messages sent into a mailbox this caller holds. Possession",
+                       "-- of the Int is permission — there is no lookup-by-name or enumeration.",
+                       "mailbox :: Int -> Event Value",
+                       "mailbox mid = Event [WatchMailbox mid] (projectMailbox mid)"] },
+                { raw ["projectMailbox :: Int -> RepositoryEvent -> Maybe Value",
+                       "projectMailbox mid (ObservedMessage _ m v) = if m == mid then Just v else Nothing",
+                       "projectMailbox _ _ = Nothing"] },
+                { raw ["-- | Fires when the named green thread reaches a terminal state. Carries",
+                       "-- only the thread's own id back, never its result — read the settled",
+                       "-- value separately, by handle.",
+                       "asyncDone :: Int -> Event Int",
+                       "asyncDone tid = Event [WatchAsync tid] (projectAsyncDone tid)"] },
+                { raw ["projectAsyncDone :: Int -> RepositoryEvent -> Maybe Int",
+                       "projectAsyncDone tid (ObservedAsyncDone _ i) = if i == tid then Just i else Nothing",
+                       "projectAsyncDone _ _ = Nothing"] },
+                { raw ["-- | Mint a fresh mailbox: an event source only the caller (and whoever",
+                       "-- it hands the id to) can send into.",
+                       "mailboxNew :: M (Either EventError Int)",
+                       "mailboxNew = send MailboxNew"] },
+                { raw ["-- | Send never blocks: append and return. A burst of sends sharing",
+                       "-- `key` coalesces to the LAST payload.",
+                       "mailboxSend :: Int -> Text -> Value -> M (Either EventError ())",
+                       "mailboxSend mid key payload = send (MailboxSend mid key payload)"] },
+                { raw ["-- | Drop a mailbox. A later send against it is",
+                       "-- `Left (EventUnknownMailbox _)`.",
+                       "mailboxDrop :: Int -> M (Either EventError ())",
+                       "mailboxDrop = send . MailboxDrop"] },
             ],
         }
     };
