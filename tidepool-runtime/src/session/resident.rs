@@ -210,6 +210,12 @@ pub struct ResidentSession<H, O> {
     /// until [`ResidentSession::set_realm`] — per-node realms arrive with the
     /// collapse (one-session plan, Phase 3).
     realm: RealmId,
+    /// The scope tree node every turn this session runs is compiled and bound
+    /// in ([`ScopeId::ROOT`] until [`ResidentSession::set_scope`]). The realm
+    /// field above is the HEAP-side lifetime (parked frames, handles); this is
+    /// the NAME-side one (decl tips, value-plane frames). A window carries
+    /// both, and retiring it exits both — see `Harness::terminate_node`.
+    scope: ScopeId,
     /// Continuation-id prefix (`scont` for the resident surface).
     cont_prefix: String,
 }
@@ -270,6 +276,7 @@ where
             next_id: AtomicU64::new(1),
             parked: Vec::new(),
             realm: RealmId(0),
+            scope: ScopeId::ROOT,
             cont_prefix: "scont".to_string(),
         })
     }
@@ -302,6 +309,7 @@ where
             next_id: AtomicU64::new(1),
             parked: Vec::new(),
             realm: RealmId(0),
+            scope: ScopeId::ROOT,
             cont_prefix: "scont".to_string(),
         }
     }
@@ -318,10 +326,33 @@ where
         self.core.define_scoped(decls)
     }
 
+    /// Scoped [`Self::define_scoped`]: append to `scope`'s own decl tip, which
+    /// already re-exports its ancestors' — so the definition is visible to
+    /// `scope` and its descendants and to nobody else. `define_scoped(d) ==
+    /// define_scoped_in(ScopeId::ROOT, d)`.
+    pub fn define_scoped_in(
+        &mut self,
+        scope: ScopeId,
+        decls: &[&str],
+    ) -> Result<tidepool_repr::Generation, SessionError> {
+        self.core.define_scoped_in(scope, decls)
+    }
+
     /// The current decl-plane module name (`Tidepool.Session.Lib.G<g>`) a later
     /// turn imports to see accumulated declarations, or `None` before any decl.
     pub fn session_import_module(&self) -> Option<String> {
         self.core.current_lib_module().map(|m| m.module_name())
+    }
+
+    /// Scoped [`Self::session_import_module`]: the `Lib.G<g>` module at
+    /// `scope`'s tip. A turn compiled in a child scope imports THIS, not
+    /// ROOT's — which is the whole of "parent declarations callable in every
+    /// child" on the real compile path, since the child's tip module re-exports
+    /// its parent's chain.
+    pub fn session_import_module_in(&self, scope: ScopeId) -> Option<String> {
+        self.core
+            .current_lib_module_in(scope)
+            .map(|m| m.module_name())
     }
 
     /// The decl-plane include directory to add to a later turn's compile search
@@ -351,6 +382,14 @@ where
         self.core.current_val_modules()
     }
 
+    /// Scoped [`Self::current_val_modules`]: the `Val.G<g>` module per name
+    /// VISIBLE at `scope` — its own frame first, then each ancestor's, nearest
+    /// frame winning. A sibling scope's bindings are never in this list, so a
+    /// turn compiled here cannot even name them.
+    pub fn current_val_modules_in(&self, scope: ScopeId) -> Vec<String> {
+        self.core.current_val_modules_in(scope)
+    }
+
     /// The MOST RECENT parked hole (top of the stack), if any — the
     /// single-hole compatibility view; multi-hole callers use
     /// [`Self::parked_holes`].
@@ -373,6 +412,21 @@ where
     /// `close_realm`).
     pub fn set_realm(&mut self, realm: RealmId) {
         self.realm = realm;
+    }
+
+    /// Compile and bind every subsequent turn in `scope` (PRD 21 lane C2): the
+    /// turn imports `scope`'s decl tip and the `Val.G<g>` modules VISIBLE from
+    /// it, and a value-plane bind lands in `scope`'s own frame. The harness
+    /// applies a node's scope here at the same site it applies its realm, so a
+    /// node without one keeps compiling and binding at [`ScopeId::ROOT`] —
+    /// exactly its pre-C2 behavior.
+    pub fn set_scope(&mut self, scope: ScopeId) {
+        self.scope = scope;
+    }
+
+    /// The scope this session's turns currently compile and bind in.
+    pub fn current_scope(&self) -> ScopeId {
+        self.scope
     }
 
     /// SCOPE EXIT for `realm` (one-session plan, pillar A): close the realm
@@ -1184,19 +1238,23 @@ where
             ValueTier::Tier1Closure => BoundValue::Tier1Closure(slot),
         };
         // Evict any pure decl of the same name before binding (cross-plane
-        // shadow). Deliberately FLAT/ROOT: scoped cross-plane retraction waits
-        // on the decl plane's own `retract_in`, so an ordinary bind keeps
-        // retracting the ROOT decl head exactly as it did pre-C2.
-        self.core.retract(&binder.name)?;
-        self.core.bind(BindingEntry {
-            name: BindingName(binder.name.clone()),
-            id: SessionVarId::from_extract(binder.var_id),
-            module: SessionModule::val(gen),
-            value,
-            type_display: Some(binder.type_display.clone()),
-            defining_expr: None,
-            scope: ScopeId::ROOT,
-        });
+        // shadow: a name lives in at most one plane). SCOPED to the binding's
+        // OWN scope — a child binding `helper` retracts the child's decl head,
+        // never the parent's, because nothing in this tree ever walks downward.
+        // At ROOT this is byte-for-byte the pre-C2 retraction.
+        self.core.retract_in(self.scope, &binder.name)?;
+        self.core.bind_in(
+            self.scope,
+            BindingEntry {
+                name: BindingName(binder.name.clone()),
+                id: SessionVarId::from_extract(binder.var_id),
+                module: SessionModule::val(gen),
+                value,
+                type_display: Some(binder.type_display.clone()),
+                defining_expr: None,
+                scope: self.scope,
+            },
+        );
         self.core.set_val_gen(gen);
         Ok(())
     }

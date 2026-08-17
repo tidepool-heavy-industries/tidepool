@@ -22,7 +22,7 @@ pub mod render;
 pub mod resident;
 pub mod turn;
 
-pub use persistent::PersistentSession;
+pub use persistent::{PersistentSession, ScopeRetirement};
 
 pub use engine::{
     extract_ask_request, AbortOutcome, EngineConfig, GateDispatcher, OutputSink, RenderPolicy,

@@ -38,13 +38,15 @@ use std::sync::Arc;
 
 use parking_lot::Mutex;
 use serde_json::Value as Json;
+use tidepool_codegen::scope::ScopeId;
 use tidepool_effect::dispatch::DispatchEffect;
 use tidepool_eval::value::Value;
 use tidepool_mcp::CapturedOutput;
 use tidepool_repr::{DataConTable, Generation, SessionId};
 use tidepool_runtime::session::{
     run_turn, BoundBinder, CompiledTurn, ResidentError, ResidentOutcome, ResidentSession,
-    SessionLib, TemplateSelector, TurnRequest, TurnResult, TurnTemplate, DECL_TEMPLATE_SOURCE,
+    ScopeRetirement, SessionLib, TemplateSelector, TurnRequest, TurnResult, TurnTemplate,
+    DECL_TEMPLATE_SOURCE,
 };
 use tidepool_runtime::DEFAULT_NURSERY_SIZE;
 use tokio::sync::{mpsc, oneshot};
@@ -177,6 +179,13 @@ struct NodeConvo {
     /// SHARED machine; retirement is that realm's scope exit). `None` = the
     /// session's default realm ([`OUTER_REALM`]).
     realm: Option<tidepool_codegen::jit_machine::RealmId>,
+    /// The scope-tree node this node's turns COMPILE and BIND in (PRD 21 lane
+    /// C2). The `realm` above is the window's HEAP-side lifetime (parked
+    /// frames, handles); this is its NAME-side one (decl tip, value-plane
+    /// frame). `None` = [`ScopeId::ROOT`], the flat session — which is every
+    /// pre-C2 node, unchanged. [`Harness::terminate_node`] exits BOTH in one
+    /// step, so a window's names and its heap roots retire together.
+    scope: Option<ScopeId>,
     pending: Option<PendingHole>,
     /// The typed hole this node is currently answering, when it answers by
     /// `finalize` (the self-iterating harness's answerer). Set per hole by
@@ -503,6 +512,16 @@ fn pick_render_opts<'a>(
 pub const OUTER_REALM: tidepool_codegen::jit_machine::RealmId =
     tidepool_codegen::jit_machine::RealmId(0);
 
+/// A queued window exit: the two halves of an attached node's retirement that
+/// need the machine in hand. Either half may be absent (a node with a realm and
+/// no scope is every pre-C2 attached node).
+struct PendingWindowExit {
+    session: tidepool_repr::SessionId,
+    node: NodeId,
+    realm: Option<tidepool_codegen::jit_machine::RealmId>,
+    scope: Option<ScopeId>,
+}
+
 pub struct Harness {
     tree: NodeTree<Session>,
     cfg: EngineConfig,
@@ -525,16 +544,21 @@ pub struct Harness {
     child_cfg: EngineConfig,
     provider: Arc<dyn DynModelProvider>,
     convos: Mutex<HashMap<NodeId, NodeConvo>>,
-    /// Realm closes QUEUED because the attached node's retirement found the
+    /// Window exits QUEUED because the attached node's retirement found the
     /// shared machine out on a turn — drained by the next path holding the
-    /// machine (`run_checked_out`/`with_session`). Scope exit as an eventual
-    /// postcondition; the realm identity lives here until close is confirmed.
-    pending_realm_closes: Mutex<
-        Vec<(
-            tidepool_repr::SessionId,
-            tidepool_codegen::jit_machine::RealmId,
-        )>,
-    >,
+    /// machine (`run_checked_out`/`with_session`). An eventual postcondition,
+    /// never a best-effort side effect; both halves of a window's identity (its
+    /// REALM, whose close reclaims parked frames and handles, and its SCOPE,
+    /// whose retirement drops the value-plane frame and deregisters the roots
+    /// it solely owns) live here until the exit is confirmed.
+    pending_window_exits: Mutex<Vec<PendingWindowExit>>,
+    /// What a node's SCOPE retirement actually released, recorded at
+    /// [`Self::terminate_node`] and read back by [`Self::scope_retirement`].
+    /// The GC-root ledger's movement is the witness for accounting class 4, so
+    /// the receipt has to survive the node whose retirement produced it —
+    /// `convos` is gone by then. Keyed by node, so it is bounded by the run's
+    /// node count, not by the number of retirements.
+    scope_retirements: Mutex<HashMap<NodeId, ScopeRetirement>>,
     /// A just-created node's staged [`NodeSeed`] — a root's opening prompt or
     /// a fork child's inherited transcript, either way paired with its
     /// framing — between node creation and `force` (a thunk node has no live
@@ -619,7 +643,8 @@ impl Harness {
             child_cfg,
             provider,
             convos: Mutex::new(HashMap::new()),
-            pending_realm_closes: Mutex::new(Vec::new()),
+            pending_window_exits: Mutex::new(Vec::new()),
+            scope_retirements: Mutex::new(HashMap::new()),
             pending: Mutex::new(HashMap::new()),
             escalations: Mutex::new(HashMap::new()),
             snapshots: Mutex::new(HashMap::new()),
@@ -946,6 +971,7 @@ impl Harness {
                 effect_trace,
                 effect_seq: 0,
                 realm: None,
+                scope: None,
                 pending: None,
                 answer_contract: None,
                 suspend_table: None,
@@ -985,8 +1011,11 @@ impl Harness {
             .registry()
             .checkout_run(sid)
             .map_err(|e| HarnessError::Resident(format!("outer session checkout: {e}")))?;
-        self.drain_pending_realm_closes(sid, co.machine());
+        self.drain_pending_window_exits(sid, co.machine());
         co.machine().set_realm(OUTER_REALM);
+        // Same reset, name side: the shared session's own runs are ROOT-scoped,
+        // never sticky on whichever answerer window ran last.
+        co.machine().set_scope(ScopeId::ROOT);
         let r = f(co.machine());
         let holes: Vec<HoleId> = co
             .machine()
@@ -998,19 +1027,54 @@ impl Harness {
         Ok(r)
     }
 
-    /// Apply every queued realm close for `sid` (attached-node retirements
+    /// Apply every queued window exit for `sid` (attached-node retirements
     /// that found the machine out on a turn). Called by each path that has
-    /// the machine in hand, so scope exit converges even when retirement
+    /// the machine in hand, so a window's exit converges even when retirement
     /// raced a running turn.
-    fn drain_pending_realm_closes(&self, sid: tidepool_repr::SessionId, session: &mut Session) {
+    fn drain_pending_window_exits(&self, sid: tidepool_repr::SessionId, session: &mut Session) {
         let pending: Vec<_> = {
-            let mut q = self.pending_realm_closes.lock();
-            let (mine, rest): (Vec<_>, Vec<_>) = q.drain(..).partition(|(s, _)| *s == sid);
+            let mut q = self.pending_window_exits.lock();
+            let (mine, rest): (Vec<_>, Vec<_>) = q.drain(..).partition(|e| e.session == sid);
             *q = rest;
             mine
         };
-        for (_, realm) in pending {
-            let _ = session.close_realm(realm);
+        for exit in pending {
+            self.exit_window(session, exit.node, exit.realm, exit.scope);
+        }
+    }
+
+    /// The ONE place a window's realm close and scope retirement happen, so
+    /// the immediate path (`terminate_node` with the machine in hand) and the
+    /// queued path (`drain_pending_window_exits`) cannot diverge. Realm first
+    /// (parked frames and outstanding handles go), then scope — scope
+    /// retirement's sole-ownership rule reads the handle registry, so a handle
+    /// the realm still owned would otherwise wrongly pin a root.
+    fn exit_window(
+        &self,
+        session: &mut Session,
+        node: NodeId,
+        realm: Option<tidepool_codegen::jit_machine::RealmId>,
+        scope: Option<ScopeId>,
+    ) {
+        if let Some(realm) = realm {
+            let (frames, handles) = session.close_realm(realm);
+            if frames + handles > 0 && std::env::var("HARNESS_DEBUG").is_ok() {
+                eprintln!(
+                    "[harness] realm scope-exit for {node:?}: {frames} frame(s), \
+                     {handles} handle(s) released"
+                );
+            }
+        }
+        if let Some(scope) = scope.filter(|s| !s.is_root()) {
+            let receipt = session.retire_scope(scope);
+            if std::env::var("HARNESS_DEBUG").is_ok() {
+                eprintln!(
+                    "[harness] scope retirement for {node:?} ({scope:?}): {} scope(s), \
+                     {} binding(s), {} root(s) released",
+                    receipt.scopes_retired, receipt.bindings_retired, receipt.roots_released
+                );
+            }
+            self.scope_retirements.lock().insert(node, receipt);
         }
     }
 
@@ -1570,9 +1634,16 @@ impl Harness {
         match outcome {
             TurnResult::Decl { .. } => {
                 let checkout = self.checkout_run_retrying(node).await?;
+                // Into the node's OWN scope: the definition joins that scope's
+                // decl tip (which already re-exports its ancestors'), so it is
+                // visible to this window and its descendants and to nobody
+                // else — a sibling window never gains it, and neither does the
+                // parent. `run_checked_out` has already applied the scope to
+                // the session, so this reads it back rather than re-deriving.
+                let scope = self.node_scope(node);
                 let res = self
                     .run_checked_out(node, checkout, move |mut session| {
-                        let r = session.define_scoped(&[&decl_source]);
+                        let r = session.define_scoped_in(scope, &[&decl_source]);
                         (session, r)
                     })
                     .await?;
@@ -1740,17 +1811,25 @@ impl Harness {
         node: NodeId,
     ) -> Option<(String, Vec<String>, PathBuf, Generation)> {
         let sid = self.tree.session_of(node)?;
+        let scope = self.node_scope(node);
         self.tree.registry().peek(sid, |s| {
             let root = s.lib_include_dir()?;
             // Imports: the decl `Lib.G<g>` module + the CURRENT `Val.G<g>` module
             // of each live name (newest gen only — shadowed gens are injected,
             // not imported, to avoid an ambiguous occurrence). Injection
             // (`--inject-val`) uses ALL live gens.
+            //
+            // BOTH import lists are resolved FROM THE NODE'S SCOPE, not from
+            // ROOT: the decl tip module a child imports already re-exports its
+            // parent's chain (so parent declarations are callable here), and
+            // the visible `Val.G<g>` set is the upward walk with child frames
+            // shadowing parent ones (so a sibling's bindings are not even
+            // nameable). At ROOT both are the pre-C2 lists verbatim.
             let mut import_lines: Vec<String> = Vec::new();
-            if let Some(m) = s.session_import_module() {
+            if let Some(m) = s.session_import_module_in(scope) {
                 import_lines.push(m);
             }
-            import_lines.extend(s.current_val_modules());
+            import_lines.extend(s.current_val_modules_in(scope));
             Some((
                 import_lines.join("\n"),
                 s.inject_val_modules(),
@@ -3536,9 +3615,12 @@ impl Harness {
         let Some(sid) = self.tree.session_of(node) else {
             return (None, None);
         };
+        let scope = self.node_scope(node);
         self.tree
             .registry()
-            .peek(sid, |s| (s.session_import_module(), s.lib_include_dir()))
+            .peek(sid, |s| {
+                (s.session_import_module_in(scope), s.lib_include_dir())
+            })
             .unwrap_or((None, None))
     }
 
@@ -3693,18 +3775,25 @@ impl Harness {
         // (never whatever ambient realm the last turn left behind — codex
         // review 2026-08-12, High 2). Queued realm closes for this session
         // drain first, while the machine is in hand.
-        let realm = self
-            .convos
-            .lock()
-            .get(&node)
-            .and_then(|c| c.realm)
-            .unwrap_or(OUTER_REALM);
+        let (realm, scope) = {
+            let convos = self.convos.lock();
+            let c = convos.get(&node);
+            (
+                c.and_then(|c| c.realm).unwrap_or(OUTER_REALM),
+                c.and_then(|c| c.scope).unwrap_or(ScopeId::ROOT),
+            )
+        };
         let sid = checkout.session_id();
         let mut machine = checkout.take();
-        self.drain_pending_realm_closes(sid, &mut machine);
+        self.drain_pending_window_exits(sid, &mut machine);
         match tokio::task::spawn_blocking(move || {
             let mut machine = machine;
             machine.set_realm(realm);
+            // The NAME-side half of the same "this window's turn" statement:
+            // a node without a scope runs at ROOT, never at whatever scope the
+            // last turn on this shared machine left behind (the same ambient-
+            // stickiness hazard the realm reset above answers).
+            machine.set_scope(scope);
             f(machine)
         })
         .await
@@ -3752,26 +3841,30 @@ impl Harness {
                 self.tree.registry().remove(sid);
             } else {
                 // An ATTACHED node (one-session collapse): its retirement is
-                // realm SCOPE EXIT on the shared machine, never slot removal
+                // its WINDOW's exit on the shared machine, never slot removal
                 // — the outer session outlives every answerer node it hosts.
-                // Scope exit is an EVENTUAL POSTCONDITION, not a best-effort
-                // side effect: if the machine is out on a turn right now, the
-                // close is queued (`pending_realm_closes`) and applied by the
-                // next code path that has the machine in hand
-                // (`run_checked_out`/`with_session` drain the queue before
-                // restoring) — the realm identity is retained until the close
-                // is CONFIRMED, never dropped with the convo.
-                let realm = self.convos.lock().get(&node).and_then(|c| c.realm);
-                if let Some(realm) = realm {
+                // Two halves, retired together in `exit_window`: the REALM
+                // (parked frames + outstanding handles) and, since PRD 21 lane
+                // C2, the node's SCOPE (its value-plane frame, and the GC roots
+                // that frame solely owns). A window's names and its heap roots
+                // have one lifetime, so there is one retirement step, not two.
+                //
+                // The exit is an EVENTUAL POSTCONDITION, not a best-effort side
+                // effect: if the machine is out on a turn right now, it is
+                // queued (`pending_window_exits`) and applied by the next code
+                // path that has the machine in hand (`run_checked_out`/
+                // `with_session` drain the queue before restoring) — the realm
+                // and scope identities are retained until the exit is
+                // CONFIRMED, never dropped with the convo.
+                let (realm, scope) = {
+                    let convos = self.convos.lock();
+                    let c = convos.get(&node);
+                    (c.and_then(|c| c.realm), c.and_then(|c| c.scope))
+                };
+                if realm.is_some() || scope.is_some_and(|s| !s.is_root()) {
                     match self.tree.registry().checkout_run(sid) {
                         Ok(mut co) => {
-                            let (frames, handles) = co.machine().close_realm(realm);
-                            if frames + handles > 0 && std::env::var("HARNESS_DEBUG").is_ok() {
-                                eprintln!(
-                                    "[harness] realm scope-exit for {node:?}: {frames} frame(s), \
-                                     {handles} handle(s) released"
-                                );
-                            }
+                            self.exit_window(co.machine(), node, realm, scope);
                             let holes: Vec<HoleId> = co
                                 .machine()
                                 .parked_holes()
@@ -3781,7 +3874,12 @@ impl Harness {
                             co.restore_suspended(holes);
                         }
                         Err(_) => {
-                            self.pending_realm_closes.lock().push((sid, realm));
+                            self.pending_window_exits.lock().push(PendingWindowExit {
+                                session: sid,
+                                node,
+                                realm,
+                                scope,
+                            });
                         }
                     }
                 }
@@ -3799,6 +3897,42 @@ impl Harness {
         if let Some(convo) = convos.get_mut(&node) {
             convo.realm = Some(realm);
         }
+    }
+
+    /// Assign `node`'s SCOPE — every subsequent turn it runs compiles against
+    /// that scope's decl tip and the value bindings visible from it, and binds
+    /// into that scope's own frame (applied inside the checkout by
+    /// [`Self::run_checked_out`], the same one site the realm is applied at).
+    /// [`Self::terminate_node`] retires it.
+    ///
+    /// Mint the scope off the session first
+    /// (`with_session(sid, |s| s.mint_scope(parent))`) — this only records
+    /// which scope the node's window lives in. A node that is never given one
+    /// stays at [`ScopeId::ROOT`], the flat session.
+    pub fn set_node_scope(&self, node: NodeId, scope: ScopeId) {
+        let mut convos = self.convos.lock();
+        if let Some(convo) = convos.get_mut(&node) {
+            convo.scope = Some(scope);
+        }
+    }
+
+    /// `node`'s scope — [`ScopeId::ROOT`] for a node that was never given one
+    /// (every pre-C2 node) and for an unknown node.
+    pub fn node_scope(&self, node: NodeId) -> ScopeId {
+        self.convos
+            .lock()
+            .get(&node)
+            .and_then(|c| c.scope)
+            .unwrap_or(ScopeId::ROOT)
+    }
+
+    /// What retiring `node`'s scope released — `None` for a node that had no
+    /// scope, or has not been retired yet. The receipt outlives the node's
+    /// `convos` entry on purpose: `roots_released` is the number the GC root
+    /// ledger (`persistent_roots_count()`) must have moved by, and a caller
+    /// checking that has nothing else to compare against.
+    pub fn scope_retirement(&self, node: NodeId) -> Option<ScopeRetirement> {
+        self.scope_retirements.lock().get(&node).copied()
     }
 
     /// Opt `node` into retrying (rather than failing fast) a
@@ -4127,7 +4261,8 @@ mod tests {
             child_cfg: test_engine_cfg(),
             provider,
             convos: Mutex::new(HashMap::new()),
-            pending_realm_closes: Mutex::new(Vec::new()),
+            pending_window_exits: Mutex::new(Vec::new()),
+            scope_retirements: Mutex::new(HashMap::new()),
             pending: Mutex::new(HashMap::new()),
             escalations: Mutex::new(HashMap::new()),
             snapshots: Mutex::new(HashMap::new()),
@@ -4162,7 +4297,8 @@ mod tests {
             child_cfg: test_engine_cfg(),
             provider,
             convos: Mutex::new(HashMap::new()),
-            pending_realm_closes: Mutex::new(Vec::new()),
+            pending_window_exits: Mutex::new(Vec::new()),
+            scope_retirements: Mutex::new(HashMap::new()),
             pending: Mutex::new(HashMap::new()),
             escalations: Mutex::new(HashMap::new()),
             snapshots: Mutex::new(HashMap::new()),
@@ -4200,6 +4336,7 @@ mod tests {
                 effect_trace,
                 effect_seq: 0,
                 realm: None,
+                scope: None,
                 pending: None,
                 answer_contract: None,
                 suspend_table: None,

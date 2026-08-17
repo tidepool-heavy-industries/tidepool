@@ -766,6 +766,14 @@ impl PersistentSession {
         self.lib.as_ref().and_then(|l| l.current_module())
     }
 
+    /// Scoped [`Self::current_lib_module`]: the `Lib.G<g>` module at `scope`'s
+    /// OWN tip — the module a turn compiled in that scope imports, and the head
+    /// of a re-export chain that already runs up through its ancestors.
+    /// `current_lib_module() == current_lib_module_in(ScopeId::ROOT)`.
+    pub fn current_lib_module_in(&self, scope: ScopeId) -> Option<SessionModule> {
+        self.lib.as_ref().and_then(|l| l.current_module_in(scope))
+    }
+
     /// The decl-plane include directory (where `Lib.G<g>.hs` modules live), for
     /// a later turn's compile search path. `None` when the session has no decl
     /// plane.
@@ -790,19 +798,48 @@ impl PersistentSession {
     /// `Val.G<g>` is injected for validation. The decl-plane analogue of GHCi
     /// seeing earlier bindings from a new top-level definition.
     pub fn define_scoped(&mut self, decl_texts: &[&str]) -> Result<Generation, SessionError> {
-        let import_modules = self.current_val_modules();
+        self.define_scoped_in(ScopeId::ROOT, decl_texts)
+    }
+
+    /// Scoped [`Self::define_scoped`]: append to `scope`'s own decl tip,
+    /// validated against the value bindings VISIBLE at `scope` (its frame plus
+    /// every ancestor's). `define_scoped(d) == define_scoped_in(ScopeId::ROOT,
+    /// d)`.
+    ///
+    /// Injection stays the FULL live set — `--inject-val` only has to make the
+    /// referenced `Val.G<g>` modules findable, and restricting it by scope
+    /// would buy nothing while risking a missing module for a shadowed gen.
+    /// Visibility is decided by the IMPORT list, which is scoped.
+    pub fn define_scoped_in(
+        &mut self,
+        scope: ScopeId,
+        decl_texts: &[&str],
+    ) -> Result<Generation, SessionError> {
+        let import_modules = self.current_val_modules_in(scope);
         let inject_modules = self.live_val_modules();
         self.lib
             .as_mut()
             .expect("decl plane present")
-            .define_batch_with_vals(decl_texts, &import_modules, &inject_modules)
+            .define_batch_with_vals_in(scope, decl_texts, &import_modules, &inject_modules)
     }
 
     /// Retract `name` from the decl plane (its binding migrated to the value
     /// plane). No-op when `name` is not a current decl head.
     pub fn retract(&mut self, name: &str) -> Result<(), SessionError> {
+        self.retract_in(ScopeId::ROOT, name)
+    }
+
+    /// Scoped [`Self::retract`]: retract `name` from `scope`'s decl tip only.
+    /// `retract(n) == retract_in(ScopeId::ROOT, n)`.
+    ///
+    /// This is the cross-plane rule (design doc §1.3) made scope-correct: a
+    /// name lives in at most one plane *per scope*, so a CHILD binding
+    /// `helper` on the value plane must not retract the PARENT's decl-plane
+    /// `helper` — the parent's name is still the parent's, and nothing ever
+    /// walks downward.
+    pub fn retract_in(&mut self, scope: ScopeId, name: &str) -> Result<(), SessionError> {
         match self.lib.as_mut() {
-            Some(lib) => lib.retract(name),
+            Some(lib) => lib.retract_in(scope, name),
             None => Ok(()),
         }
     }
