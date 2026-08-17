@@ -10,11 +10,14 @@
 //! stay green indefinitely. `examples/harness/` is covered by ~8 driver tests;
 //! without this file the `harness-dogfooding/` harnesses are covered by none.
 //!
-//! COST. Two extract compiles, one per harness, because the two need
-//! DIFFERENT effect rows and a row is what a compile is parameterized by —
-//! there is no bundling that avoids the second. Both live in the GHC-heavy
-//! tier (`.config/nextest.toml`'s default-filter excludes
-//! `package(tidepool-harness) & kind(test)` wholesale).
+//! COST. One extract compile per harness ROW: the companion's narrow row is
+//! its own compile, and dev-tree and recursive-companion share the driver's
+//! full outer row (`outer_row_decls`) so the second of those is a memo hit
+//! only insofar as its SOURCE differs — a row is what a compile is
+//! parameterized by, and there is no bundling that avoids a distinct harness's
+//! own compile. All live in the GHC-heavy tier (`.config/nextest.toml`'s
+//! default-filter excludes `package(tidepool-harness) & kind(test)`
+//! wholesale).
 //!
 //! SCOPE. Typecheck only. These probes force GHC through `render` and `loop`
 //! — plus `resumeLoop` and the pure resume decisions for a harness that
@@ -101,10 +104,11 @@ fn companion_typechecks() {
     );
 }
 
-/// dev-tree's full outer row (mirrors `selfharness::driver::outer_decls`),
-/// shared by the typecheck probe below and the execution test further down
-/// so the two never compile the harness against different rows.
-fn dev_tree_decls() -> Vec<tidepool_mcp::EffectDecl> {
+/// The driver's full outer row (mirrors `selfharness::driver::outer_decls`),
+/// shared by every probe that compiles against it — dev-tree's typecheck and
+/// execution tests, and recursive-companion's typecheck — so no two of them
+/// can compile a harness against different rows.
+fn outer_row_decls() -> Vec<tidepool_mcp::EffectDecl> {
     vec![
         tidepool_mcp::runllmturn_decl(),
         tidepool_mcp::askuser_decl(),
@@ -141,7 +145,7 @@ fn dev_tree_decls() -> Vec<tidepool_mcp::EffectDecl> {
 fn dev_tree_typechecks() {
     typecheck(
         "harness-dogfooding/dev-tree",
-        dev_tree_decls(),
+        outer_row_decls(),
         "import Tidepool.Resume (ResumeFold, emptyResume)\n",
         concat!(
             "__resumeProbe :: M Text\n",
@@ -150,6 +154,45 @@ fn dev_tree_typechecks() {
             "__resumeDecision = resumePlanFor\n",
             "__amendmentNewest :: Maybe Int -> Maybe Int -> Maybe Int -> Bool\n",
             "__amendmentNewest = amendmentIsNewest\n",
+        ),
+    );
+}
+
+/// recursive-companion (PRD 21 lane C3) is the third dogfood harness, and it
+/// compiles against the SAME full outer row dev-tree does — it declares no new
+/// effect and asks for no row widening (that is lane C5's, reserved to the
+/// operator), using only `RunLLMTurn`, `AskUser`, `Console` and `Journal` out
+/// of it.
+///
+/// The `extra_decls` pin the four PURE decisions this harness's whole
+/// correctness story rests on, at their exact declared signatures — the same
+/// precedent dev-tree sets with `resumePlanFor`/`amendmentIsNewest`. They
+/// decide from a seed, a proposal or a verdict alone, with no model and no
+/// operator anywhere in the path, so a drift in any of them is a compile
+/// failure here rather than a wrong tree in production:
+///
+/// - `layerFromProposal` turns a window's answer into a layer, INCLUDING the
+///   empty-split and blank-branch cases that become `InvocationFailed`;
+/// - `applyGate` turns one operator verdict into an amended layer, including
+///   the refusals (`Left`) the gate loop re-presents;
+/// - `renderPath`/`childPath` are node identity, and `childPath` in
+///   particular is the ONE function both the coalgebra and the algebra call,
+///   which is why the two cannot disagree about a child's id.
+#[test]
+fn recursive_companion_typechecks() {
+    typecheck(
+        "harness-dogfooding/recursive-companion",
+        outer_row_decls(),
+        "import Tidepool.Thought (ThoughtF)\n",
+        concat!(
+            "__layerFromProposal :: NodeSeed -> LayerProposal -> ThoughtF NodeSeed\n",
+            "__layerFromProposal = layerFromProposal\n",
+            "__applyGate :: LayerApproval -> ThoughtF NodeSeed -> Either Text (ThoughtF NodeSeed)\n",
+            "__applyGate = applyGate\n",
+            "__renderPath :: NodePath -> Text\n",
+            "__renderPath = renderPath\n",
+            "__childPath :: NodePath -> Int -> Text -> NodePath\n",
+            "__childPath = childPath\n",
         ),
     );
 }
@@ -313,7 +356,7 @@ const RESUME_DECISION_SOURCE: &str = concat!(
 fn dev_tree_resume_decisions_execute() {
     let json = execute_pure(
         "harness-dogfooding/dev-tree",
-        dev_tree_decls(),
+        outer_row_decls(),
         RESUME_DECISION_SOURCE,
         "__resumeDecisionReport",
     );
@@ -406,7 +449,7 @@ fn dev_tree_child_allowance_never_overspends_parent_cap() {
     support::require_extract();
     let _cache_guard = support::isolate_cache();
     let cfg = EngineConfig::from_decls(
-        dev_tree_decls(),
+        outer_row_decls(),
         repo_root().join("haskell/lib"),
         Some(repo_root().join("harness-dogfooding/dev-tree")),
     )
