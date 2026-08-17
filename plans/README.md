@@ -6,6 +6,16 @@ in git history rather than here.
 
 ## Active work
 
+- [Exomonad v3 — the typed swarm](self-iterating-harness/20-exomonad-v3-prd.md):
+  **proposed (2026-08-15).** The full-scope successor to exomonad: swarm
+  coordination as a compiled resident Haskell program — a monadic
+  hylomorphism whose algebra and coalgebra are agents, with policies as
+  middleware over the two seams; concurrent agent cycles, one event algebra,
+  green threads over parked continuations, node residents with typed
+  mailboxes over lexically scoped handles, git-as-persistence with a
+  journaled resume and eager rebase cascades, the trust ladder + fold
+  receipts, and the Stage-2 resident factory. Stage-1 lanes S1-L1…L6 are the
+  current execution order; dev-tree is the executable design target.
 - [One session](one-session.md): **Phases 0–5 LANDED (2026-08-12)**; Phase 6
   (repl/one-shot conversion + slot deletion) is deliberately parked behind
   the production-soak gate. The self-harness runs collapsed on one resident
