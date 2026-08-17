@@ -55,8 +55,11 @@ import Tidepool.Async
   , waitEither
   , waitEvent
   )
-import Tidepool.Node (forkNode, received, sendUp, uplink)
-import Tidepool.Prelude hiding (render)
+import Tidepool.Node (folded, forkNode, received, sendUp, uplink)
+-- `(<|>)`/`folded` hidden: `Tidepool.Prelude` re-exports base's `Alternative`
+-- operator and `Control.Lens.Fold`'s `folded` too, and this fixture wants
+-- `Tidepool.Node`'s Event-algebra names at every use site.
+import Tidepool.Prelude hiding (render, folded, (<|>))
 import Tidepool.QQ (fmt)
 
 import Tidepool.Effects

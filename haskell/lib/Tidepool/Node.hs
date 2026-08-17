@@ -89,11 +89,10 @@
 module Tidepool.Node
   ( NodeHandle
   , Uplink
-  , NodeCtx (..)
+  , NodeCtx (..)  -- ^ includes the 'inbox' field accessor
   , forkNode
   , sendDown
   , sendUp
-  , inbox
   , received
   , folded
   ) where

@@ -535,7 +535,19 @@ pub fn classify_hole(
         Some("RepoEventSubscribe")
         | Some("RepoEventDrain")
         | Some("RepoEventAwait")
-        | Some("RepoEventUnsubscribe") => ClassifiedHole {
+        | Some("RepoEventUnsubscribe")
+        // Capability mailboxes (PRD 20 S1-L4 wave 2) ride the SAME
+        // `RepoEvent` effect as the watch/subscribe verbs above (a mailbox
+        // IS an event source) — see `tidepool-mcp/src/effect_defs.rs`'s
+        // `event_effect_def!` and `RepoEventHandler`'s `mailbox_new`/
+        // `mailbox_send`/`mailbox_drop`. Without these three arms a
+        // `MailboxNew`/`MailboxSend`/`MailboxDrop` suspension falls through
+        // to the wildcard below and is misclassified as `HoleRouting::Ask`
+        // — which the outer session (no `Ask` in its row) then hard-fails
+        // as an unserviceable hole.
+        | Some("MailboxNew")
+        | Some("MailboxSend")
+        | Some("MailboxDrop") => ClassifiedHole {
             routing: HoleRouting::OuterEffect(OuterEffectKind::RepoEvent),
             prompt: String::new(),
         },
