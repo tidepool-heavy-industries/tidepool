@@ -2026,6 +2026,18 @@ impl SelfHarnessDriver {
         let mut next_tid: i64 = 1;
         let mut next_thread_realm: u64 = 1;
 
+        // EVERY arm below must hand its resumed outcome back to `ready` as a
+        // `GreenReady` carrying this iteration's `chain`. `outcome` is bound
+        // IMMUTABLY on purpose: it is read-only per iteration, and the next
+        // step of a thread is queued, never assigned.
+        //
+        // This is not style. A servicing arm that assigns instead of pushing
+        // silently DROPS that thread's continuation — the thread simply never
+        // runs again, with no error anywhere. It has happened once already: a
+        // merge brought in three arms written against an older loop shape
+        // whose `outcome = ...` fed the next iteration, and the only signal
+        // was `warning: value assigned to outcome is never read`. Adding
+        // `mut` to quiet that warning compiles and ships the bug. Do not.
         let outcome_result: Result<(Value, DataConTable), DriverError> = loop {
             let Some(GreenReady { chain, outcome }) = ready.pop_front() else {
                 break Err(DriverError::Session(
