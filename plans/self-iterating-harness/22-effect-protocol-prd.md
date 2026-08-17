@@ -116,7 +116,14 @@ phase 2+ emits them.
    machine checkout becomes a non-`Clone` linear token consumed by check-in,
    with RAII restore as the panic path (the `MachineGuard` pattern) — the
    double-checkin/forgotten-checkin classes go unrepresentable when the
-   unified store is built, not retrofitted after.
+   unified store is built, not retrofitted after. Second principle (external
+   type review, 2026-08-18): the driver's phase sum must OWN its
+   phase-scoped resources (outer session, answerer id, cycle framing,
+   resume state as variant fields, consuming transition methods) — today
+   they are parallel `Option`s beside the enum, and phase/resource mismatch
+   is representable. The existing state enum survives as a read-model
+   projection. Piecemeal migration is explicitly rejected; this lands with
+   the consolidation.
 
 ## Acceptance
 
