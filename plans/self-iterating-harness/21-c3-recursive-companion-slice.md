@@ -325,17 +325,33 @@ Why sequential, mechanically: the one concurrent primitive available to the
 authored loop is `runLLMTurnFanout`, which fans out one WINDOW per prompt and
 retires each at finalize. A window cannot host a recursive subtree (§1), so
 `runLLMTurnFanout` can parallelize a layer of coalgebra windows but not a layer
-of SUBTREES. Making sibling subtrees concurrent needs the green-threads select
-loop PRD 20 S1-L4 names; the seam is marked at the `thoughtHylo` call site and
-built nowhere.
+of SUBTREES.
+
+**The upgrade path, written down so nobody re-derives it.** When the
+green-threads lane folds, the authored loop gains `async`/`mapConcurrently` over
+the outer row, and subtree-level concurrency drops in by INTERPRETING `Strategy`
+at the descent — without touching the fanout machinery at all. So the descent is
+not an inline `traverse`; it is one named function:
+
+```haskell
+traverseLayer :: Strategy -> (Branch a -> Companion b) -> ThoughtF a -> Companion (ThoughtF b)
+```
+
+implemented today as an ordinary order-preserving sequential traversal that
+ignores its `Strategy` argument except to record the transformation. That is the
+single function green threads replaces, and branch order is preserved by
+construction either way.
 
 ---
 
-## 8. Substrate gaps — escalated, not patched around
+## 8. Substrate gaps — escalated, then ruled on
 
-Three, found by building against the real surface. None is worked around in the
-harness; each is named where it bites and the harness is honest about what it
-therefore does not demonstrate.
+Three, found by building against the real surface, escalated before any runtime
+change, and ruled on: **gap 1 is a parallel lane** (context-ref: Haskell-visible
+window identity plus branch-from-frozen-prefix), **gap 2's v1 mitigation is
+accepted** and Haskell-nameable node registration is queued for C5's typed-UI
+scope, and **gap 3 is closed inside this lane** at the verb level. Each is stated
+below as found, with its ruling.
 
 ### Gap 1 — the frozen-snapshot seam has no authored-surface reach
 
@@ -354,12 +370,14 @@ an EMPTY opening. Two things are missing, and the second is the deeper one:
 Consequence for this lane: locked decision 2 is not demonstrated. §4 states what
 v1 sends instead and refuses to call it a snapshot.
 
-Minimal fix sketch (for the operator/parent to rule on, NOT implemented here): a
-window's own frozen digest returned alongside its answer, and accepted as an
-optional branch-of parameter on the next window — e.g. a `ContextRef` value with
-`runLLMTurnBranch @T :: ContextRef -> Text -> M (T, ContextRef)`. That is an
-effect-surface change (`tidepool-mcp` effect defs + engine hole routing + the
-driver's fanout path), not harness authoring.
+**Ruling: a parallel lane owns this.** The context-ref lane builds the
+effect-surface primitive — Haskell-visible window identity plus
+branch-from-a-frozen-prefix, starting from the sketch of a window's own digest
+returned alongside its answer and accepted as an optional branch-of parameter
+(`runLLMTurnBranch @T :: ContextRef -> Text -> M (T, ContextRef)`). C3 does not
+wait on it: the slice proves the driver, gate, journal, and GUI mechanics either
+way, and §4's single named swap point is what makes adopting it a fast
+follow-up.
 
 ### Gap 2 — the multi-node GUI registry is not reachable from an authored harness
 
@@ -370,8 +388,11 @@ opaque `u64` for a driver-minted answerer node), never a `NodePath`. So the
 recursion tree cannot be registered as tabs without either a new Haskell-visible
 verb or a driver-side announcement channel.
 
-Consequence: §10's GUI plan registers what it honestly can and renders the tree
-through the harness's own `render`, with the folded answer primary.
+**Ruling: the v1 mitigation is accepted.** §10.3's plan — register the root
+through `spawn_operator_server_multi`, render the tree through the harness's own
+`render` with the folded answer primary — stands, and Haskell-nameable node
+registration is queued for C5, where it belongs beside the typed-UI work.
+`register_node` being idempotent is why it can wait.
 
 ### Gap 3 — a window's `InvocationExit` aborts its siblings
 
@@ -382,16 +403,30 @@ at its branch position. Today `drive_fanout_child_inner` returns
 whole outer turn, erasing every sibling result. There is no `Either`-shaped
 window verb: `runLLMTurnFork @T` resumes with `T` or the loop dies.
 
-What v1 CAN and does fold as data: a window that finalizes a structurally
-unusable layer (§2) — an empty split, a blank branch — becomes
-`Finish (Draft … (InvocationFailed …))` and its algebra sees it as an ordinary
-value. That is a genuine `InvocationExit` class and it is exercised (§9). Round
-exhaustion and provider failure are not, and the harness does not pretend
-otherwise.
+**Ruling: closed inside this lane**, at the verb level rather than as a
+driver-side policy knob — the caller folding `NodeFailed` at the branch position
+IS the design, so the type hands it to them. Specified in
+[21-c3-exit-verb.md](21-c3-exit-verb.md); the shape:
 
-Minimal fix sketch: an `M (Either InvocationExit T)` spelling of the fork verb,
-or a per-child failure policy on `service_outer_fanout` that yields a typed
-failure value into the assembled answer instead of `?`.
+- `runLLMTurnFork @T :: Text -> M (Either InvocationExit T)` and
+  `runLLMTurnFanout @T :: [Text] -> M [Either InvocationExit T]`, changed IN
+  PLACE rather than grown a `try`-prefixed sibling — one spelling, matching the
+  codebase's own typed-failure idiom (`run`, `llm`, #335) — with exactly one
+  Haskell caller outside the extractor internals to update.
+- `runLLMTurn @T` keeps its signature: its failure is the outer turn's failure,
+  not a branch position, and it has no siblings to erase.
+- The line that decides what becomes a typed exit: a failure attributable to ONE
+  CHILD'S WINDOW (round exhaustion, non-finalization, that child's own
+  compile/provider failure) is typed; a failure of the MECHANISM (fanout
+  cardinality, sum/list assembly against the table, session bookkeeping, the
+  per-loop inference-call runaway cap) still hard-fails. Laundering a broken
+  mechanism into "the model failed" would be a false receipt.
+
+Two classes then fold as data, and both are exercised (§9): a window that
+finalizes a structurally unusable layer (§2 — an empty split, a blank branch),
+and a window that exits abnormally. The harness reaches both through ONE
+function (`runWindow`), which is also what makes the rewire onto the new verb a
+single edit.
 
 ---
 
@@ -414,7 +449,8 @@ imports/decls beyond the universal contract).
 | 1 | the root is never asked for descendant shape | root splits 2; each child splits again | the root's window served exactly ONE reply, and `LayerProposal` has no recursive arm (a compile-level fact, asserted by the type's own shape test) |
 | 2 | grandchild recursion from inherited context | depth-3 tree | the depth-2 window's prompt contains its parent's rendered decision AND its grandparent's ancestry line |
 | 3 | branch-order delivery, never completion order | 3 siblings, the FIRST delayed longest | the algebra's rendered layer lists branches in declared order |
-| 4 | failure accumulates as data | branch 2 finalizes an empty `ProposeSplit` | branch 2 folds as `InvocationFailed`; branches 1 and 3 still fold their real answers |
+| 4 | failure accumulates as data — unusable layer | branch 2 finalizes an empty `ProposeSplit` | branch 2 folds as `InvocationFailed`; branches 1 and 3 still fold their real answers |
+| 4b | failure accumulates as data — abnormal exit | branch 2's window never finalizes (round exhaustion) | branch 2 folds as `InvocationFailed` carrying the rendered `InvocationExit`; siblings' answers all arrive |
 | 5 | budget-forced finish | `maxDepth 2` against a tree that wants 4 | the depth-2 nodes carry `BudgetForced ForcedDepth`, stamped in the receipt and the render |
 | 6 | node-count cap | `maxNodes` smaller than the proposed tree | the overflow branches carry `BudgetForced ForcedNodeCount`; the total window count is exactly the cap |
 | 7 | fan-out cap | a layer proposing more branches than `maxFanOut` | that node finishes with `BudgetForced ForcedFanOut` and NO child window runs |
