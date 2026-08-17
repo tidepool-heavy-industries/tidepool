@@ -12,10 +12,13 @@ and wins on any conflict.
 **Out of scope, deliberately.** Node residency (`forkNode`/`sendDown`/`sendUp`,
 the resident select loop) and green threads (`forkM`/`Promise`/`withForks`) are
 S1-L4, on a sibling branch. This lane leaves a NAMED seam where they land (see
-"The residency seam") and builds nothing behind it. Resume — folding the
-journal back into a map at boot and replaying recorded splits — is S1-L5: this
-lane only WRITES the journal, which is the half `Tidepool.Journal` exposes
-(`record` is write-only by construction).
+"The residency seam") and builds nothing behind it.
+
+The harness both WRITES the journal and READS the fold of it — see "Resume"
+below. `record` itself stays write-only by construction (`Tidepool.Journal`
+exposes no read verb, and nothing in the harness opens a file); the fold
+arrives already folded, from the driver, through the opt-in `resumeLoop` entry
+point (PRD 20 S1-L5).
 
 ---
 
@@ -94,8 +97,8 @@ unqualified into every eval run from this worktree; an unqualified
    implementation is the algebra's job, because for a leaf "how to combine
    nothing" IS "implement it" (PRD: *integrate — leaf implementation, or the
    merge agent plus checks*).
-3. **`record "split" branch (toJSON plan)`** — decomposition is cognition, so
-   it is journaled, never re-derived. S1-L5 replays it.
+3. **`record "split" branch …`** — decomposition is cognition, so it is
+   journaled, never re-derived. A resumed run replays it (see "Resume").
 4. **Child worktrees**: `createWorktree (fromWorktree parentTree name)` per
    child plan, from the scaffold HEAD. A worktree failure is not a split
    failure — that child's seed is dropped and the failure is carried in the
@@ -189,6 +192,120 @@ driver later without the wrapper changing shape.
 
 ---
 
+## Resume — what a resumed run actually skips
+
+The driver folds this run's journal at boot and injects it into the harness's
+opt-in second entry point:
+
+```haskell
+resumeLoop :: ResumeFold -> State -> Harness State
+loop       = resumeLoop emptyResume
+```
+
+One spelling of the run, not two. The resume wrapper `resumed` is the
+IDENTITY when `isResumed` is false, so a fresh boot performs exactly the git
+reads and spawns it performed before resume existed — the fresh path is not a
+special case, it is the empty case.
+
+`resumed` is the OUTERMOST coalgebra wrapper, outside `gated`/`capped`/
+`budgeted`. A subtree the journal already accounts for must not be re-gated
+(the operator approved that layer), re-capped, or re-budgeted (those cycles
+were spent by a process that is gone, and refusing finished work on a budget
+would discard it). Work that is genuinely NEW on a resumed run — an amended
+subtree, an unfold from an adopted scaffold — goes back through the full
+stack.
+
+| the fold says | the resumed run does |
+|---|---|
+| an `outcome` for this branch | the subtree is not re-entered at all; the recorded receipt IS the algebra's input |
+| a `split`, no `outcome` | replay the recorded plan and REBIND the recorded child worktrees; no scaffold worker, no planner |
+| a `replan` NEWER than both | re-unfold under the AMENDED plan (`amendPlan` replaces the task and nothing else), or refuse the subtree when `abandonSubtree` |
+| nothing, and the worktree's HEAD moved | orphaned work: adopt-and-verify (below) |
+| nothing, and the HEAD never moved | ordinary work |
+
+`resumePlanFor` decides all of that from the fold alone — PURE, before any git
+runs — and `amendmentIsNewest` is the seq comparison behind the third row.
+Both are exported and directly callable, in the spirit of the coalgebra's pure
+policy slots.
+
+Resuming a run whose ROOT outcome is recorded does no work: the root's outcome
+stands, so the hylo folds it and returns.
+
+### Adopt and verify, never redo blind, never trust blind
+
+A commit found in a retained worktree is neither redone nor trusted. The
+orchestrator runs its OWN checks (`runChecks`) and boundary diff
+(`boundaryViolations`) in that worktree at that sha, stamps a `FoldReceipt`,
+and hands it to `foldLadder` — the same rungs, in the same order, that judge a
+fold this process performed. There is no second judge, so there is no path on
+which an orphaned commit is trusted because it exists. A rejected verification
+rides on as an ordinary `Failed` outcome, where the parent's `OnFailure` policy
+already lives.
+
+What the orphaned work MEANS depends on the plan, and that is the one place
+resume reads more than the ladder:
+
+- A **leaf**'s commit is its whole fold. Verified ⇒ adopted as the node's
+  outcome.
+- An **interior node with no recorded split** has an orphaned SCAFFOLD, not an
+  orphaned outcome — its children still have to run. Verified ⇒ `decompose`
+  unfolds from it (`seedAdopted`) instead of spawning the scaffold worker
+  again.
+- An **interior node with a recorded split** is adopted only when the
+  integration is provably COMPLETE: every child in the recorded plan recorded a
+  `Done` outcome and every one of those branches is an ancestor of this node's
+  HEAD. A partial integration is replayed instead, which is safe because
+  merging an already-merged branch is a no-op.
+
+**Adoption APPENDS.** The journal is append-only; adopting means recording the
+outcome the crashed process never got to record, which is what makes the NEXT
+resume skip the subtree. A REPLAYED outcome is not re-appended — it is already
+there, and re-appending it every resume would be duplicate noise.
+
+### Rebind, never recreate
+
+PRD 19 retains worktrees indefinitely, so on resume a branch the journal names
+already HAS one: `rebindWorktree` looks it up by BRANCH (its durable identity —
+a managed branch name carries the worktree id) through `listWorktrees` +
+`lookupWorktree`, and `spawnSpecIn` binds agents into it. Nothing on this path
+creates a second tree beside an existing one, and nothing deletes. A tree a
+human removed comes back as data (`present = False` / `WorktreeLost`) and is
+never silently recreated.
+
+The root's branch is named structurally by the fold — the `split` or
+receipt-carrying `outcome` entry whose payload node is the root plan's name —
+so nothing reconstructs a branch from a worktree label.
+
+### The split is appended twice, deliberately
+
+`emitSplit` records the split before allocating children and again after, under
+the same `(kind, key)`; the fold keeps the later one (max seq). The two appends
+close two different crash windows:
+
+- The FIRST records the decision, so a crash during child allocation replays
+  the plan instead of re-running the scaffold worker.
+- The SECOND adds `childTrees` (child node name → branch), the only durable
+  record of which retained tree belongs to which child. Without it a resumed
+  run would create a second worktree beside a child's orphaned commits and redo
+  its work blind — which is the single most likely crash case, a leaf worker
+  caught mid-flight.
+
+One window remains and is not closable at this granularity: a crash between
+`createWorktree` and the FIRST split append leaves nothing journaled at all, so
+the fold is empty and the next boot is an ordinary fresh run (the orphaned tree
+is retained, not reused). Closing it would need a new record kind for
+allocation, which is a bigger write-side change than it buys.
+
+### Carried into the summary
+
+A resumed run's `RunSummary` is about the RUN, not the process that finished
+it: the prior process's journaled `rebase` steps lead its `runTrail` and its
+journaled `escalation`s lead its `runEscalations`. A node adopted from an
+orphaned commit carries its own branch's recorded rebase note and escalation in
+the receipt it is stamped with.
+
+---
+
 ## The residency seam
 
 `hyloM`'s recursive step is
@@ -279,7 +396,10 @@ coalgebra, at each swarm step.
   — `dev_tree_typechecks` compiles v2 against the driver's real widened row
   (`[RunLLMTurn, AskUser, Console, Worktree, RepoEvent, Exec, Subagent,
   Journal]`). It is a fold gate for other lanes; its row moves with the
-  harness or not at all.
+  harness or not at all. The probe names BOTH entry points at their declared
+  signatures (`loop` and `resumeLoop :: ResumeFold -> State -> Harness State`)
+  plus the two pure resume decisions, so a drift in either half is a compile
+  failure here rather than a `DriverError::ResumeEntryMissing` at boot.
 - `cargo check --workspace --tests`, `cargo clippy --workspace --all-targets
   -- -D warnings`, `cargo fmt --all -- --check`, `cargo nextest run`.
 - No new `jit_surface` probe: the wrappers are ordinary higher-order functions

@@ -16,8 +16,10 @@
 //! tier (`.config/nextest.toml`'s default-filter excludes
 //! `package(tidepool-harness) & kind(test)` wholesale).
 //!
-//! SCOPE. Typecheck only. These probes force GHC through `render` and `loop`;
-//! they do not drive a model, spawn an agent, or touch a repository.
+//! SCOPE. Typecheck only. These probes force GHC through `render` and `loop`
+//! — plus `resumeLoop` and the pure resume decisions for a harness that
+//! declares them; they do not drive a model, spawn an agent, or touch a
+//! repository.
 
 mod support;
 
@@ -37,7 +39,16 @@ fn repo_root() -> PathBuf {
 /// `loop`). Importing the module is already enough to typecheck every
 /// declaration in it — GHC compiles a module whole — but naming both keeps
 /// the probe honest about which contract is under test.
-fn typecheck(harness_dir: &str, decls: Vec<tidepool_mcp::EffectDecl>) {
+///
+/// `extra_imports` and `extra_decls` are spliced into the probe's import block
+/// and body respectively, for a harness that declares MORE than the universal
+/// contract (dev-tree's `resumeLoop` and its pure resume decisions).
+fn typecheck(
+    harness_dir: &str,
+    decls: Vec<tidepool_mcp::EffectDecl>,
+    extra_imports: &str,
+    extra_decls: &str,
+) {
     support::require_extract();
     let _cache_guard = support::isolate_cache();
     let cfg = EngineConfig::from_decls(
@@ -46,18 +57,24 @@ fn typecheck(harness_dir: &str, decls: Vec<tidepool_mcp::EffectDecl>) {
         Some(repo_root().join(harness_dir)),
     )
     .expect("engine config for the dogfood row");
-    let source = concat!(
-        "{-# LANGUAGE NoImplicitPrelude, OverloadedStrings, DataKinds, TypeOperators, ",
-        "FlexibleContexts, GADTs, ScopedTypeVariables, TypeApplications, LambdaCase, ",
-        "RecordWildCards, OverloadedRecordDot, QuasiQuotes, DeriveGeneric, DeriveAnyClass #-}\n",
-        "module Probe where\n",
-        "import Tidepool.Prelude hiding (render)\n",
-        "import Tidepool.Effects\n",
-        "import Harness\n",
-        "__probe :: M Text\n",
-        "__probe = do { st <- loop initialState; pure (render st) }\n",
+    let source = format!(
+        concat!(
+            "{{-# LANGUAGE NoImplicitPrelude, OverloadedStrings, DataKinds, TypeOperators, ",
+            "FlexibleContexts, GADTs, ScopedTypeVariables, TypeApplications, LambdaCase, ",
+            "RecordWildCards, OverloadedRecordDot, QuasiQuotes, DeriveGeneric, DeriveAnyClass #-}}\n",
+            "module Probe where\n",
+            "import Tidepool.Prelude hiding (render)\n",
+            "import Tidepool.Effects\n",
+            "import Harness\n",
+            "{extra_imports}",
+            "__probe :: M Text\n",
+            "__probe = do {{ st <- loop initialState; pure (render st) }}\n",
+            "{extra_decls}",
+        ),
+        extra_imports = extra_imports,
+        extra_decls = extra_decls,
     );
-    if let Err(e) = compile_turn(&cfg.extract_bin, source, "__probe", &cfg.include, 0, 0) {
+    if let Err(e) = compile_turn(&cfg.extract_bin, &source, "__probe", &cfg.include, 0, 0) {
         panic!("{harness_dir} does not typecheck against today's surface:\n{e}");
     }
 }
@@ -78,6 +95,8 @@ fn companion_typechecks() {
             tidepool_mcp::worktree_decl(),
             tidepool_mcp::subagent_decl(),
         ],
+        "",
+        "",
     );
 }
 
@@ -88,6 +107,19 @@ fn companion_typechecks() {
 /// suspend threshold stays 0). Typechecking against that exact row is what
 /// turns this from "the file names only landed API" into "this compiles
 /// against what the driver actually serves".
+///
+/// dev-tree also declares the OPT-IN second entry point (PRD 20 S1-L5's
+/// `resumeLoop :: ResumeFold -> State -> Harness State`), so the probe names
+/// both entries: a fresh boot compiles `loop`, a boot with a folded journal
+/// compiles `resumeLoop`, and the driver picks between them. Naming
+/// `resumeLoop` at its exact declared signature is what makes a drift in
+/// either half a compile failure here rather than a boot refusal in
+/// production.
+///
+/// The two pure resume decisions are named at their signatures for the same
+/// reason the coalgebra's pure policy slots are pure: they decide from the
+/// fold alone, with no agent and no git anywhere in the path, so they are
+/// callable directly.
 #[test]
 fn dev_tree_typechecks() {
     typecheck(
@@ -102,5 +134,14 @@ fn dev_tree_typechecks() {
             tidepool_mcp::subagent_decl(),
             tidepool_mcp::journal_decl(),
         ],
+        "import Tidepool.Resume (ResumeFold, emptyResume)\n",
+        concat!(
+            "__resumeProbe :: M Text\n",
+            "__resumeProbe = do { st <- resumeLoop emptyResume initialState; pure (render st) }\n",
+            "__resumeDecision :: ResumeFold -> Text -> DevPlan -> ResumePlan\n",
+            "__resumeDecision = resumePlanFor\n",
+            "__amendmentNewest :: Maybe Int -> Maybe Int -> Maybe Int -> Bool\n",
+            "__amendmentNewest = amendmentIsNewest\n",
+        ),
     );
 }

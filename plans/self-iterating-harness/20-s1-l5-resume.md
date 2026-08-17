@@ -226,6 +226,22 @@ For each branch with a recorded `split` and NO recorded `outcome`:
    where the ordinary `OnFailure` policy (`Retry`/`Replan`/`AskOperator`/
    `Abandon`) already lives. Never a silent redo, never a silent adoption.
 
+Two refinements the ladder needs once it meets a real plan, both in
+`harness-dogfooding/dev-tree/Harness.hs`:
+
+- **Steps 3–5 do not judge; `foldLadder` does.** The verify step stamps a
+  `FoldReceipt` from what it observed and hands it to the harness's existing
+  ladder, so an adopted commit is judged by the same rungs in the same order as
+  a fold the run performed. One judge, no second verdict to drift.
+- **What the orphaned work means depends on the plan.** A LEAF's commit is its
+  whole fold. An INTERIOR node with no recorded split has an orphaned SCAFFOLD,
+  so a passing verification unfolds FROM it rather than adopting it as an
+  outcome — its children still have to run. An interior node WITH a recorded
+  split is adopted only when the integration is provably complete (every child
+  in the recorded plan recorded a `Done` outcome, and every one of those
+  branches is an ancestor of the node's HEAD); a partial integration is
+  replayed, which is safe because merging an already-merged branch is a no-op.
+
 ---
 
 ## 5. What a resumed dev-tree run skips
