@@ -72,9 +72,17 @@ fn compile_turn(
     } else {
         vec![imports.to_string()]
     };
-    let target = cfg
-        .turn_target(finalize_ty.map(|ty| (ty, row_imports.as_slice())))
-        .expect("turn target");
+    // `turn_target` itself can fail here (not just IO): a pinned row whose
+    // applied type has no resolving import fails the ROW at this point, with
+    // GHC's own "Not in scope" diagnostic, rather than materializing a
+    // target that would blow up confusingly downstream — see
+    // `engine::validate_finalize_row`'s doc. Propagated as a `CompileError`
+    // like every other compile failure below, not `.expect()`'d, since
+    // `pinned_finalize_needs_the_type_in_scope` exercises exactly this path.
+    let target = match cfg.turn_target(finalize_ty.map(|ty| (ty, row_imports.as_slice()))) {
+        Ok(t) => t,
+        Err(e) => return Err(CompileError::ExtractFailed(e.to_string())),
+    };
     let src = template_turn_for(&cfg.decls, &target.stack, code, imports, "");
     engine::compile_turn(
         &cfg.extract_bin,

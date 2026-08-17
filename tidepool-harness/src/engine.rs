@@ -45,8 +45,9 @@
 //! module is the glue that sequences them into a turn loop.
 
 use std::collections::HashMap;
+use std::hash::{Hash, Hasher};
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, OnceLock};
 
 use serde_json::Value as Json;
 use tidepool_eval::value::Value;
@@ -1406,6 +1407,13 @@ impl EngineConfig {
         let vocab = vocab_with_runllmturn(&self.decls);
         let effects_dir = tidepool_mcp::ensure_effects_module_with_vocab(&self.decls, &vocab, &row)
             .map_err(|e| EngineError::Setup(format!("materialize effects module: {e}")))?;
+        validate_finalize_row(
+            &self.extract_bin,
+            &self.decls,
+            &vocab,
+            &row,
+            &self.validation_include(),
+        )?;
         let mut include = self.include.clone();
         match include.iter().position(|p| p == &self.effects_dir) {
             Some(pos) => include[pos] = effects_dir,
@@ -1416,6 +1424,93 @@ impl EngineConfig {
             stack: tidepool_mcp::build_effect_stack_type_at(&self.decls, &row),
         })
     }
+}
+
+/// Process-level memo: which generated-effects-module content hashes have
+/// already been probe-validated, and with what outcome. A repeated pin (every
+/// round of the SAME answerer hole reuses the SAME `Finalize <T>` row) is a
+/// cheap in-memory hit, not a second `tidepool-extract` spawn.
+fn finalize_probe_memo() -> &'static Mutex<HashMap<u64, Result<(), String>>> {
+    static MEMO: OnceLock<Mutex<HashMap<u64, Result<(), String>>>> = OnceLock::new();
+    MEMO.get_or_init(Default::default)
+}
+
+/// Probe-compile a pinned `Finalize` row's generated `Tidepool.Effects`
+/// source STANDALONE — as its own compile TARGET (renamed to `Expr`), not as
+/// something a turn module imports — so an applied row type with no
+/// resolving import (e.g. `Finalize Decision` pinned with `row.imports()`
+/// empty) is caught HERE, with GHC's own direct "Not in scope" diagnostic on
+/// the generated module's `type M` line.
+///
+/// This sidesteps a real hazard in extract's `tidepool-extract-bin`
+/// (`GhcPipeline.hs`'s `normalVariant`): when the generated module's OWN
+/// `type M = Eff '[..., Finalize T]` fails to resolve `T`, that failure sits
+/// in a DEPENDENCY of the turn module (which imports `Tidepool.Effects`), not
+/// in the turn module itself — and extract's diagnostic-recovery pass, which
+/// re-typechecks every module in the compile to recover a spanned error, does
+/// so in non-topological order. Whichever module happens to be visited before
+/// `Tidepool.Effects` gets its own turn reports a confusing cascade
+/// ("attempting to use module `Tidepool.Effects' ... which is not loaded")
+/// instead of the real error. Compiling the SAME generated source as the
+/// SOLE target (no separate importer racing it) avoids the hazard entirely —
+/// exactly the shape `wrong_typed_finalize_is_a_compile_error` already proves
+/// works cleanly through this same redo-loop, just with the error moved from
+/// the turn module into the (renamed) generated module. See
+/// `tidepool-harness/tests/finalize_type_pinning.rs`'s
+/// `pinned_finalize_needs_the_type_in_scope`.
+///
+/// `include` is the caller's [`EngineConfig::validation_include`] — every
+/// author module a row might name, minus the generated-effects dir itself
+/// (irrelevant here: the probe source IS that module's body, renamed, not an
+/// importer of it).
+fn validate_finalize_row(
+    extract_bin: &ResolvedExtractBin,
+    decls: &[tidepool_mcp::EffectDecl],
+    vocab: &[tidepool_mcp::EffectDecl],
+    row: &tidepool_mcp::RowArgs,
+    include: &[PathBuf],
+) -> Result<(), EngineError> {
+    let generated = tidepool_mcp::effects_module_source_with_vocab(decls, vocab, row);
+
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    generated.hash(&mut hasher);
+    let key = hasher.finish();
+
+    if let Some(cached) = finalize_probe_memo().lock().unwrap().get(&key) {
+        return cached.clone().map_err(EngineError::Setup);
+    }
+
+    const HEADER: &str = "module Tidepool.Effects where\n";
+    let probe_source = generated.replacen(HEADER, "module Expr where\n", 1);
+    debug_assert_ne!(
+        probe_source, generated,
+        "effects module source must open with `{HEADER}`"
+    );
+
+    // `error` is emitted unconditionally by `effects_module_source_with_vocab`
+    // regardless of `row`/`vocab`, so it's always a valid probe target — GHC
+    // typechecks the WHOLE module (including `type M`) to elaborate it,
+    // target choice doesn't matter beyond "some real binder".
+    let outcome = match compile_targets(
+        &probe_source,
+        &["error"],
+        include,
+        Some(extract_bin),
+        |_, _, _| {},
+    ) {
+        Ok(_) => Ok(()),
+        Err(CompileError::Diagnostics(diags)) => Err(diags
+            .iter()
+            .map(|d| d.message.as_str())
+            .collect::<Vec<_>>()
+            .join("\n\n")),
+        Err(other) => Err(other.to_string()),
+    };
+    finalize_probe_memo()
+        .lock()
+        .unwrap()
+        .insert(key, outcome.clone());
+    outcome.map_err(EngineError::Setup)
 }
 
 /// One turn's compile target — the include search path and the promoted
