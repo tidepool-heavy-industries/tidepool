@@ -53,8 +53,11 @@
 //!   (a) SANCTIONED-RED — currently fails by design, must keep failing
 //!       individually, never inside a green bundle (see
 //!       `plans/post-restart/gate-runbook.md`'s never-green list):
-//!       `works_from_json_float`,
-//!       `qq_fmt_brace_inside_hole_non_string_expr_still_works`.
+//!       `works_from_json_float`. (`qq_fmt_brace_inside_hole_non_string_expr_still_works`
+//!       was in this class until `Tidepool.QQ.HsMeta.Translate.toExp` grew a
+//!       `let`-in-hole case — it is a plain WORKS probe now, kept standalone
+//!       as class (d) DISTINCT-MECHANISM, pinning the quoter's bracket-depth
+//!       tracking rather than a stdlib function's JIT-safety.)
 //!   (b) COMPILE-FAIL probes — anything asserting a compile-time ERROR.
 //!   (c) EFFECTS/DISPATCH probes — anything exercising a real dispatcher
 //!       (not `NullDispatcher`); bundling would change dispatch
@@ -1431,7 +1434,8 @@ fn works_fmt_runtime_helpers_pinned() {
     );
 }
 
-// --- Sanctioned-red (a), continued: the second never-green probe. ---
+// --- (d) DISTINCT-MECHANISM: quoter bracket-depth tracking, not a stdlib
+// function's JIT-safety. ---
 
 /// MUST-NOT-BREAK companion: a `}` INSIDE a hole's expression that is NOT in
 /// a string — an explicit-brace `let { … }` block (the same construct the
@@ -1439,10 +1443,14 @@ fn works_fmt_runtime_helpers_pinned() {
 /// hole's own closing `}` is only recognized at bracket depth 0, so the
 /// nested `{ y = 1 }`'s `}` decrements depth instead of ending the hole.
 ///
-/// SANCTIONED-RED (`plans/post-restart/gate-runbook.md`):
-/// `Tidepool.QQ.HsMeta.Translate.toExp` lacks let-in — this probe has never
-/// passed. Do not absorb into a bundle; do not re-triage as a new
-/// regression.
+/// Formerly SANCTIONED-RED (`plans/post-restart/gate-runbook.md`):
+/// `Tidepool.QQ.HsMeta.Translate.toExp` had no case for `HsLet`, so any
+/// hole containing `let ... in ...` hit the catch-all `todo`/`noTH` at
+/// compile time. Fixed by giving `toExp` an `HsLet` case backed by a new
+/// `toDecs`/`toDec` (translating the two binding shapes an ordinary `let`
+/// can introduce: a simple variable binding and a single-clause function
+/// binding). Kept standalone as class (d) — it pins the quoter's
+/// bracket-depth parsing, not a stdlib function.
 #[test]
 fn qq_fmt_brace_inside_hole_non_string_expr_still_works() {
     works_with_imports(
