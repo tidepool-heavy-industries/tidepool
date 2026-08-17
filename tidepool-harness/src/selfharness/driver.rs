@@ -2374,6 +2374,31 @@ impl SelfHarnessDriver {
                 // tolerated by the JIT's OWN synthesized `App` in
                 // `apply_finalized`/`run_forked`, not by arbitrary compiled
                 // Haskell that pattern-matches `case x of I# n#`).
+                // CONSUME THE BODY CUSTODY FIRST, before anything fallible.
+                //
+                // `body`'s custody was minted above by `finalized_handle`, and
+                // that mint cannot move later: it reads the payload off the
+                // SPAWNER's frame, which only exists while that frame is still
+                // parked. So the window between mint and consume is inherent —
+                // what is not inherent is putting a `?` inside it. Any early
+                // return there drops an unconsumed `RootCustody`, whose `Drop`
+                // panics, which REPLACES the real `DriverError` with a
+                // bookkeeping panic and hides why the spawn actually failed.
+                // Starting the thread first closes the window entirely.
+                //
+                // Scheduling is unaffected: spawner-continues-first is a
+                // property of the READY QUEUE order, which is preserved below,
+                // not of which call happens first. Both frames are ordinary
+                // registry members here — a new top-level run while another
+                // frame is parked is exactly what the multi-hole registry is
+                // for.
+                let thread_start = self
+                    .agent
+                    .with_session(sid, |s| {
+                        s.run_forked("async_thread", body, realm, Some(table))
+                    })
+                    .map_err(|e| DriverError::Session(e.to_string()))?
+                    .map_err(|e| DriverError::Session(format!("run_forked failed: {e}")))?;
                 let tid_value = tid
                     .to_value(table)
                     .map_err(|e| DriverError::Session(format!("AsyncSpawnWith tid box: {e}")))?;
@@ -2388,13 +2413,6 @@ impl SelfHarnessDriver {
                     chain,
                     outcome: spawner_next,
                 });
-                let thread_start = self
-                    .agent
-                    .with_session(sid, |s| {
-                        s.run_forked("async_thread", body, realm, Some(table))
-                    })
-                    .map_err(|e| DriverError::Session(e.to_string()))?
-                    .map_err(|e| DriverError::Session(format!("run_forked failed: {e}")))?;
                 ready.push_back(GreenReady {
                     chain: GreenChain::Thread(tid),
                     outcome: thread_start,
@@ -2418,6 +2436,20 @@ impl SelfHarnessDriver {
                             .into(),
                     ));
                 };
+                // Decide whether this settle will actually be RECORDED before
+                // minting anything. A custody token must not be created on a
+                // path that might not consume it: cancellation, if it already
+                // landed, wins and a late result is dropped — and dropping an
+                // unconsumed `RootCustody` panics, turning a deliberate,
+                // benign no-op into a crash. (Before linearization the drop
+                // really was benign, which is why the guard below reads as if
+                // it still is.)
+                let records_result = threads
+                    .get(&tid)
+                    .is_some_and(|t| matches!(t.state, GreenThreadState::Running));
+                if !records_result {
+                    return self.wake_green_waiters(tid, table, sid, waiters, ready);
+                }
                 let answer = if green_field_is_closure(request, 1) {
                     // Owned by the SESSION's realm, deliberately (not the
                     // thread's own) — a result must outlive the thread realm
@@ -2446,22 +2478,19 @@ impl SelfHarnessDriver {
                     })?;
                     FinalAnswer::Value(value)
                 };
+                // Unconditional by construction: `records_result` above already
+                // established this entry exists and is `Running`, and nothing
+                // between here and now can have changed it (cooperative
+                // scheduling, single-threaded). So the custody minted above is
+                // always consumed on this path.
                 if let Some(entry) = threads.get_mut(&tid) {
-                    // Cooperative single-threaded scheduling means a cancel
-                    // racing a settle never actually happens, but stay
-                    // defensive/idempotent: cancellation, if it already
-                    // landed, wins — a late result is simply dropped.
-                    if matches!(entry.state, GreenThreadState::Running) {
-                        entry.state = GreenThreadState::Settled(match answer {
-                            FinalAnswer::Value(v) => GreenResult::Value(v),
-                            // The ONE custody transfer: out of the thread's
-                            // finalize frame and into the table, which owns it
-                            // for the rest of the session realm's life.
-                            FinalAnswer::Handle(custody) => {
-                                GreenResult::Root(custody.into_handle())
-                            }
-                        });
-                    }
+                    entry.state = GreenThreadState::Settled(match answer {
+                        FinalAnswer::Value(v) => GreenResult::Value(v),
+                        // The ONE custody transfer: out of the thread's
+                        // finalize frame and into the table, which owns it for
+                        // the rest of the session realm's life.
+                        FinalAnswer::Handle(custody) => GreenResult::Root(custody.into_handle()),
+                    });
                 }
                 self.wake_green_waiters(tid, table, sid, waiters, ready)
             }
