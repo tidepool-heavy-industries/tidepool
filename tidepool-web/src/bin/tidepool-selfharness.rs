@@ -143,6 +143,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     });
     let mut driver = SelfHarnessDriver::new(agent, observer);
 
+    // PRD 20 S1-L4: the concurrency cap for concurrently-serviced
+    // fanout/fork `RunLLMTurn` windows (default 8 — see
+    // `SelfHarnessDriver::set_concurrency_cap`'s doc).
+    if let Some(cap) = arg_str(&args, "--concurrency").and_then(|s| s.parse().ok()) {
+        driver.set_concurrency_cap(cap);
+    }
+
     if !auto {
         let port: u16 = arg_str(&args, "--port")
             .and_then(|s| s.parse().ok())

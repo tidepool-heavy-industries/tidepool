@@ -28,6 +28,12 @@ reqwest = { workspace = true, features = ["form"] }
 base64 = "0.22"
 uuid = { version = "1", features = ["v4"] }
 tokio = { workspace = true, features = ["net", "rt", "rt-multi-thread", "sync", "time"] }
+# Bounded-concurrency stream combinator (`buffer_unordered`) for driving N
+# concurrent fanout/fork RunLLMTurn answerer children (PRD 20 S1-L4) without
+# the `'static` requirement `tokio::spawn` would impose on borrowed driver
+# state — already in the workspace's resolved graph (pulled in transitively
+# by reqwest), pinned here as a direct dependency.
+futures-util = "0.3"
 parking_lot.workspace = true
 tempfile.workspace = true
 tracing.workspace = true

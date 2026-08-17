@@ -47,8 +47,10 @@
 //! are not `spawn_blocking`'d.
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 
+use futures_util::stream::{self, StreamExt};
 use serde_json::Value as Json;
 use tidepool_eval::value::Value;
 use tidepool_repr::DataConTable;
@@ -65,7 +67,7 @@ use crate::selfharness::operator::{FormShape, OperatorGate, StdinGate};
 use crate::selfharness::persistence::{self, PersistenceError};
 use crate::selfharness::state_cross;
 use crate::timing;
-use crate::tree::NodeId;
+use crate::tree::{FanBadge, NodeId};
 
 #[derive(Debug, thiserror::Error)]
 pub enum DriverError {
@@ -293,6 +295,58 @@ const ASKUSER_MAX_REPROMPTS: u32 = 8;
 /// budgets or compaction.
 const LOOP_INFERENCE_CALL_CAP: u32 = 1024;
 
+/// Default cap on how many `RunLLMTurn` fanout/fork children
+/// ([`SelfHarnessDriver::service_outer_fanout`]) may be concurrently
+/// mid-window (PRD 20 S1-L4 — "concurrent cognition windows") — each in its
+/// own freshly-minted answerer realm on the shared outer machine. Only
+/// machine occupancy serializes past this point (a window spends most of
+/// its wall time in provider inference, off-machine, with nothing checked
+/// out); this bounds how many windows may be open — and contending for the
+/// machine when their turn comes — at once. Configurable via
+/// [`SelfHarnessDriver::set_concurrency_cap`].
+const DEFAULT_CONCURRENCY_CAP: usize = 8;
+
+/// How long a fanout/fork child backs off after losing the shared outer
+/// machine's checkout race to a sibling child before retrying —
+/// [`HarnessError::TurnInFlight`] between siblings means "a sibling
+/// currently holds the machine," not a real conflict: the
+/// [`crate::registry::SessionRegistry`] refuses a contested checkout
+/// immediately rather than queuing it, so the driver supplies the wait.
+const CHECKOUT_RETRY_BACKOFF: std::time::Duration = std::time::Duration::from_millis(3);
+
+/// Bound on checkout-contention retries (a couple of minutes of backoff at
+/// [`CHECKOUT_RETRY_BACKOFF`]) so a genuinely wedged machine fails loud
+/// instead of spinning forever.
+const CHECKOUT_RETRY_MAX_ATTEMPTS: u32 = 20_000;
+
+/// Retry `attempt` while it keeps losing the shared outer machine's
+/// checkout race to a sibling fanout/fork child
+/// ([`HarnessError::TurnInFlight`]) — the ONLY error this retries; any
+/// other error (a real compile/session fault) propagates immediately. Used
+/// for the SYNC `Harness` calls a fanout child's round loop makes that are
+/// safe to retry as a whole (`take_finalized_value_keep_open`'s checkout is
+/// its first observable effect — nothing has happened yet if it loses the
+/// race). `Harness::drive_turn` is deliberately NEVER retried this way — it
+/// has already called the provider and appended the assistant reply to the
+/// transcript BEFORE its own checkout could contend, so retrying the whole
+/// call would re-call the provider and corrupt the transcript; see
+/// `Harness::checkout_run_retrying`'s doc for the actual fix (the
+/// checkout itself waits, opted into per-node via
+/// `Harness::set_retry_checkout_on_contention`).
+async fn retry_on_turn_in_flight<T>(
+    mut attempt: impl FnMut() -> Result<T, HarnessError>,
+) -> Result<T, HarnessError> {
+    for _ in 0..CHECKOUT_RETRY_MAX_ATTEMPTS {
+        match attempt() {
+            Err(HarnessError::TurnInFlight(_)) => {
+                tokio::time::sleep(CHECKOUT_RETRY_BACKOFF).await;
+            }
+            other => return other,
+        }
+    }
+    attempt()
+}
+
 /// The narrow answerer instruction appended after `render`'s output to form
 /// the per-loop answerer session's system message. Scoped to the answerer's
 /// surface — `askUser`, `fork`/`forkAll`, `finalize` — not the full eval
@@ -390,7 +444,11 @@ pub struct SelfHarnessDriver {
     /// Monotonic per-loop realm counter: each loop's answerer node gets its
     /// own realm on the SHARED machine (structured-concurrency scope; closed
     /// at retirement). Distinct from `iteration` (which restarts restore).
-    iteration_realm: u64,
+    /// Atomic (not a plain `u64`) because concurrent fanout/fork children
+    /// (S1-L4, [`Self::service_outer_fanout`]) each mint their OWN realm
+    /// from `&self`, one per window, alongside the single reused
+    /// [`Self::answerer`]'s realm.
+    iteration_realm: AtomicU64,
     /// The living session values the LAST machine rotation lost — surfaced
     /// once in the next render (legible loss, one-session plan Phase 4),
     /// then cleared.
@@ -449,8 +507,12 @@ pub struct SelfHarnessDriver {
     /// Total model inference calls across the CURRENT loop's holes + rounds:
     /// reset in [`Self::run_loop_fragment`], incremented
     /// per answerer `drive_turn`. The loop hard-stops with a [`DriverError`]
-    /// if it reaches [`LOOP_INFERENCE_CALL_CAP`].
-    loop_inference_calls: u32,
+    /// if it reaches [`LOOP_INFERENCE_CALL_CAP`]. Atomic (not a plain `u32`)
+    /// because concurrent fanout/fork children (S1-L4,
+    /// [`Self::service_outer_fanout`]) each increment it from `&self`
+    /// alongside the single reused [`Self::answerer`]'s rounds — one shared
+    /// budget regardless of how many windows are open at once.
+    loop_inference_calls: AtomicU32,
     /// Per-hole soft cap (nudge threshold), default [`ANSWERER_NUDGE_ROUNDS`].
     /// Configurable via [`Self::set_answerer_round_caps`] so a test can trip
     /// the nudge/hard-fail deterministically with a few small scripted turns
@@ -465,6 +527,14 @@ pub struct SelfHarnessDriver {
     /// model call — e.g. the compaction summarize turn — counts
     /// against it with a small cap instead of scripting 1024 real turns.
     loop_inference_call_cap: u32,
+    /// The concurrency cap for concurrently-serviced fanout/fork
+    /// `RunLLMTurn` windows (PRD 20 S1-L4,
+    /// [`Self::service_outer_fanout`]) — default [`DEFAULT_CONCURRENCY_CAP`]
+    /// (8). Only machine occupancy serializes turns past this point; this
+    /// bounds how many children may be mid-window (a provider call in
+    /// flight, or contending for the shared machine) at once. Configurable
+    /// via [`Self::set_concurrency_cap`].
+    concurrency_cap: usize,
     /// The checkpoint file path: [`Self::restore`] reads it on start, and a
     /// completed cycle commits a fresh [`persistence::Checkpoint`] here (see
     /// [`Self::commit_checkpoint`]) — the one place a checkpoint is ever
@@ -531,7 +601,7 @@ impl SelfHarnessDriver {
     pub fn new(agent: Arc<Harness>, observer: Arc<dyn Observer>) -> Self {
         SelfHarnessDriver {
             outer: None,
-            iteration_realm: 0,
+            iteration_realm: AtomicU64::new(0),
             last_rotation_losses: None,
             pending_operator_input: None,
             cycle_state_json: None,
@@ -543,10 +613,11 @@ impl SelfHarnessDriver {
             compaction_threshold_percent: DEFAULT_COMPACTION_THRESHOLD_PERCENT,
             answerer_framing: None,
             answerer: None,
-            loop_inference_calls: 0,
+            loop_inference_calls: AtomicU32::new(0),
             answerer_nudge_rounds: ANSWERER_NUDGE_ROUNDS,
             answerer_max_rounds: ANSWERER_MAX_ROUNDS,
             loop_inference_call_cap: LOOP_INFERENCE_CALL_CAP,
+            concurrency_cap: DEFAULT_CONCURRENCY_CAP,
             checkpoint_path: persistence::default_checkpoint_path(),
             checkpoint_generation: 0,
             iteration: 0,
@@ -580,7 +651,7 @@ impl SelfHarnessDriver {
         self.retire_answerer();
         self.answerer_framing = None;
         self.cycle_compaction = None;
-        self.loop_inference_calls = 0;
+        self.loop_inference_calls.store(0, Ordering::SeqCst);
         self.outer = None;
     }
 
@@ -709,6 +780,16 @@ impl SelfHarnessDriver {
     /// turn — is counted against it without scripting 1024 real turns.
     pub fn set_loop_inference_call_cap(&mut self, cap: u32) {
         self.loop_inference_call_cap = cap;
+    }
+
+    /// Override the concurrency cap for concurrently-serviced fanout/fork
+    /// `RunLLMTurn` windows (default [`DEFAULT_CONCURRENCY_CAP`], 8;
+    /// [`Self::service_outer_fanout`]). Mainly for tests: a cap of exactly
+    /// one forces full serialization deterministically, or a cap smaller
+    /// than a fan's prompt count proves the excess waits behind it. Clamped
+    /// to at least one — a cap of zero would service nothing.
+    pub fn set_concurrency_cap(&mut self, cap: usize) {
+        self.concurrency_cap = cap.max(1);
     }
 
     /// Override the checkpoint file path (default
@@ -1436,7 +1517,7 @@ impl SelfHarnessDriver {
         prior_state: Option<&Json>,
         precompiled: Option<CompiledTurn>,
     ) -> Result<(Value, DataConTable), DriverError> {
-        self.loop_inference_calls = 0;
+        self.loop_inference_calls.store(0, Ordering::SeqCst);
         self.cycle_compaction = None;
         self.cycle_state_json = prior_state.cloned();
 
@@ -1453,11 +1534,7 @@ impl SelfHarnessDriver {
         // loop; retirement is that realm's scope exit via terminate_node.
         let sid = self.outer_sid()?;
         self.agent.force_attached(answerer, Actor::Operator, sid)?;
-        self.iteration_realm = self.iteration_realm.wrapping_add(1);
-        self.agent.set_node_realm(
-            answerer,
-            tidepool_codegen::jit_machine::RealmId(self.iteration_realm),
-        );
+        self.agent.set_node_realm(answerer, self.mint_realm());
         self.answerer = Some(answerer);
 
         let result = self.run_loop_fragment_inner(prior_state, precompiled).await;
@@ -1472,6 +1549,16 @@ impl SelfHarnessDriver {
         if let Some(node) = self.answerer.take() {
             let _ = self.agent.terminate_node(node, "loop answerer retired");
         }
+    }
+
+    /// Mint a fresh, globally-unique (within this driver) realm id — `&self`
+    /// so concurrent fanout/fork children ([`Self::service_outer_fanout`])
+    /// can each mint their OWN realm alongside the single reused
+    /// [`Self::answerer`]'s, without contending for `&mut self`.
+    fn mint_realm(&self) -> tidepool_codegen::jit_machine::RealmId {
+        tidepool_codegen::jit_machine::RealmId(
+            self.iteration_realm.fetch_add(1, Ordering::SeqCst) + 1,
+        )
     }
 
     /// The body of [`Self::run_loop_fragment`] — run `loop`, service each
@@ -1615,6 +1702,39 @@ impl SelfHarnessDriver {
                                     DriverError::Session(format!("outer effect resume failed: {e}"))
                                 })?;
                         }
+                        // `runLLMTurnFork @T`/`runLLMTurnFanout @T` raised
+                        // DIRECTLY by the AUTHORED loop (`RunLLMTurn`'s own
+                        // fork/fanout payload — reachable wherever
+                        // `RunLLMTurn` is in the row, so the outer session
+                        // needs no separate `Fork` decl): S1-L4 — service
+                        // every prompt CONCURRENTLY, each in its own
+                        // freshly-minted answerer realm, then resume this
+                        // ONE hole once with the assembled answer.
+                        HoleRouting::Fork {
+                            site,
+                            ty,
+                            fan,
+                            prompts,
+                        } => {
+                            let value = self
+                                .service_outer_fanout(
+                                    *site,
+                                    ty.as_deref(),
+                                    *fan,
+                                    &classified.prompt,
+                                    prompts,
+                                    &compiled.table,
+                                )
+                                .await?;
+                            let sid = self.outer_sid()?;
+                            outcome = self
+                                .agent
+                                .with_session(sid, |s| s.resume(&hole, value))
+                                .map_err(|e| DriverError::Session(e.to_string()))?
+                                .map_err(|e| {
+                                    DriverError::Session(format!("fanout resume failed: {e}"))
+                                })?;
+                        }
                         other => {
                             return Err(DriverError::Session(format!(
                                 "outer loop suspended on an unserviceable hole ({other:?}) — \
@@ -1728,6 +1848,337 @@ impl SelfHarnessDriver {
         Ok(answer)
     }
 
+    /// Service a `runLLMTurnFork @T`/`runLLMTurnFanout @T` suspension raised
+    /// DIRECTLY by the AUTHORED outer loop (PRD 20 S1-L4, "concurrent
+    /// cognition windows") — `fan: Some(_)` for a fanout (`prompts` one per
+    /// child, answered as `[T]`), `fan: None` for a single fork (answered as
+    /// bare `T`, `single_prompt` the one task text). Unlike the nested
+    /// answerer's own [`Harness::answer_fanout`] (sequential BY DESIGN —
+    /// this driver's other fork-servicing path, [`Self::drain_answerer_fork`],
+    /// reuses it unchanged), every child here gets its own freshly-minted
+    /// answerer realm on the SHARED outer machine and is driven
+    /// CONCURRENTLY, up to [`Self::concurrency_cap`] at once
+    /// ([`Self::drive_fanout_child`]/[`buffer_unordered`]): only machine
+    /// occupancy serializes a child's actual compile+run, everything else
+    /// (assembling its prompt, awaiting the provider) overlaps freely.
+    /// Completion order is never observable — results are re-sorted back to
+    /// DECLARATION order before assembly, exactly like `answer_fanout`'s own
+    /// order contract, just reached by a different (order-insensitive
+    /// completion, order-preserving assembly) route.
+    async fn service_outer_fanout(
+        &mut self,
+        site: u32,
+        ty: Option<&str>,
+        fan: Option<FanBadge>,
+        single_prompt: &str,
+        prompts: &[String],
+        table: &DataConTable,
+    ) -> Result<Value, DriverError> {
+        self.lifecycle = SelfHarnessState::SuspendedOnHole;
+
+        let is_fanout = fan.is_some();
+        // A fanout site's recorded type is the LIST type (`[T]`); a plain
+        // fork's is already the element type — mirrors
+        // `Harness::answer_fanout`'s `element_ty` derivation.
+        let element_ty = if is_fanout {
+            ty.and_then(engine::strip_list_type)
+        } else {
+            ty
+        };
+        // Normalize fork (one implicit prompt) and fanout (N explicit
+        // prompts) to ONE prompt list, so a single concurrent path serves
+        // both — see this method's doc.
+        let owned_prompts: Vec<String>;
+        let prompts: &[String] = if prompts.is_empty() && !is_fanout {
+            owned_prompts = vec![single_prompt.to_string()];
+            &owned_prompts
+        } else {
+            prompts
+        };
+
+        // Cardinality integrity — same check `answer_fanout` makes: a
+        // dropped non-Text prompt element must fail loud, never silently
+        // under-answer a `[T]` the type system already committed to.
+        if let Some(FanBadge::Exact { n }) = fan {
+            if n as usize != prompts.len() {
+                return Err(DriverError::Session(format!(
+                    "outer fanout cardinality mismatch: fan={n} but {} prompt(s) decoded \
+                     — a non-Text prompt element was dropped, or the fan/prompts wire \
+                     fields disagree",
+                    prompts.len()
+                )));
+            }
+        }
+
+        for prompt in prompts {
+            self.emit(Event::RunLLMTurnHole {
+                site,
+                ty: element_ty.map(String::from),
+                prompt: prompt.clone(),
+            });
+        }
+
+        let sid = self.outer_sid()?;
+        let cap = self.concurrency_cap;
+        // A shared borrow of `self` — every concurrent child needs only
+        // `&self`-reachable state (the `Arc`-shared `agent`/`gate`, the
+        // atomic counters, the plain round-cap config); none of them
+        // outlives this `.await`, so no `Arc<Self>`/`tokio::spawn` is
+        // needed (see `drive_fanout_child`'s doc for why `tokio::spawn`
+        // itself doesn't fit here).
+        let this = &*self;
+        let mut results: Vec<(usize, Result<Value, DriverError>)> =
+            stream::iter(prompts.iter().enumerate())
+                .map(|(idx, prompt)| async move {
+                    let value = this
+                        .drive_fanout_child(sid, site, idx, prompt, element_ty, table)
+                        .await;
+                    (idx, value)
+                })
+                .buffer_unordered(cap)
+                .collect()
+                .await;
+        // Completion order is whatever `buffer_unordered` happened to
+        // finish in (nondeterministic) — re-sort to DECLARATION order
+        // before assembly, so the resumed answer never depends on it.
+        results.sort_by_key(|(idx, _)| *idx);
+
+        self.lifecycle = SelfHarnessState::RunningLoop;
+
+        let mut answers = Vec::with_capacity(results.len());
+        for (_, r) in results {
+            answers.push(r?);
+        }
+
+        if is_fanout {
+            engine::build_list_value(answers, table)
+                .map_err(|e| DriverError::Session(e.to_string()))
+        } else {
+            answers
+                .into_iter()
+                .next()
+                .ok_or_else(|| DriverError::Session("outer fork produced no answer".into()))
+        }
+    }
+
+    /// Drive ONE fanout/fork child to `finalize`, from scratch: mint a fresh
+    /// answerer node ATTACHED to the shared outer session as its OWN realm
+    /// (the "freshly-minted answerer realm" per window S1-L4 asks for —
+    /// distinct from [`Self::answerer`], the single node the REUSED
+    /// single-hole path drives), drive its round loop
+    /// ([`Self::drive_fanout_child_inner`]), and retire the node either way
+    /// (realm scope-exit, never session removal — same discipline
+    /// [`Self::retire_answerer`] uses for the reused answerer).
+    ///
+    /// `&self`, not `&mut self`: [`Self::service_outer_fanout`] runs up to
+    /// [`Self::concurrency_cap`] of these concurrently via
+    /// `futures_util::stream::buffer_unordered`, all borrowing the SAME
+    /// `&SelfHarnessDriver` for the duration of one `.await` — genuine
+    /// `tokio::spawn` tasks would need `'static` ownership of driver state
+    /// this borrow-based shape avoids entirely. Every `Harness` call this
+    /// makes is `&self` too (`agent: Arc<Harness>`); the two pieces of
+    /// driver state a round loop mutates (`loop_inference_calls`,
+    /// `iteration_realm`) are atomics for exactly this reason.
+    async fn drive_fanout_child(
+        &self,
+        sid: tidepool_repr::SessionId,
+        site: u32,
+        idx: usize,
+        prompt: &str,
+        element_ty: Option<&str>,
+        table: &DataConTable,
+    ) -> Result<Value, DriverError> {
+        let node = self.agent.create_root_framed(
+            &format!("fanout answerer {idx}"),
+            "",
+            self.answerer_framing.clone(),
+        )?;
+        self.agent.force_attached(node, Actor::Operator, sid)?;
+        self.agent.set_node_realm(node, self.mint_realm());
+        // Sibling fanout children share this ONE session's machine — a
+        // checkout race against another child's turn is expected, benign
+        // contention (not a real conflict), so this node's checkouts WAIT
+        // instead of failing fast. See `Harness::checkout_run_retrying`'s
+        // doc for why `drive_turn` itself is never retried as a whole.
+        self.agent.set_retry_checkout_on_contention(node, true);
+
+        let result = self
+            .drive_fanout_child_inner(node, site, idx, prompt, element_ty, table)
+            .await;
+        let _ = self.agent.terminate_node(node, "fanout child retired");
+        result
+    }
+
+    /// The round loop for one fanout/fork child — a `&self` sibling of
+    /// [`Self::drive_answerer_to_finalize`], simplified: a concurrent
+    /// fanout child supports `finalize` only (explore/define rounds and
+    /// compile-error correction, exactly like the single-hole path) — it
+    /// does NOT service a nested `askUser`/`note`/`fork` suspension (v1
+    /// scope; the answerer row still declares them, so a child that reaches
+    /// for one gets a clear error naming the gap rather than a hang).
+    /// `drive_turn`'s OWN checkout waits out sibling contention
+    /// transparently (`Harness::checkout_run_retrying`, opted into by
+    /// [`Self::drive_fanout_child`]); [`retry_on_turn_in_flight`] covers the
+    /// one OTHER call here that can lose the same race
+    /// (`take_finalized_value_keep_open`, safe to retry as a whole).
+    async fn drive_fanout_child_inner(
+        &self,
+        node: NodeId,
+        site: u32,
+        idx: usize,
+        prompt: &str,
+        element_ty: Option<&str>,
+        table: &DataConTable,
+    ) -> Result<Value, DriverError> {
+        self.agent
+            .set_answer_contract(node, self.answer_contract(element_ty));
+        let child_prompt =
+            engine::answerer_hole_card(prompt, element_ty, self.answerer_imports(), Some(table));
+        self.agent.push_user_turn(node, &child_prompt)?;
+        self.emit(Event::TurnStart { node });
+
+        let ty_label = element_ty.unwrap_or("A");
+        let max_rounds = self.answerer_max_rounds;
+        let nudge_rounds = self.answerer_nudge_rounds;
+        let hard_rounds = max_rounds.saturating_add(2);
+        let mut rounds: u32 = 0;
+        let mut nudged = false;
+        let mut ultimatum = false;
+        loop {
+            let cap = self.loop_inference_call_cap;
+            if self.loop_inference_calls.load(Ordering::SeqCst) >= cap {
+                return Err(DriverError::Session(format!(
+                    "per-loop inference-call cap ({cap}) reached while servicing \
+                     concurrent fanout child {idx} — hard-stopping the loop (a runaway \
+                     harness)"
+                )));
+            }
+            if rounds >= hard_rounds {
+                return Err(DriverError::Session(format!(
+                    "fanout child {idx} exceeded {hard_rounds} rounds (cap {max_rounds} \
+                     + ultimatum grace) without finalizing — hard-failing the hole"
+                )));
+            }
+            if rounds >= max_rounds && !ultimatum {
+                self.agent.push_user_turn(
+                    node,
+                    &format!(
+                        "ROUND CAP REACHED. Your NEXT reply must be a single ```haskell \
+                         block that ONLY finalizes — the minimal honest answer of type \
+                         `{}` (a no-change/empty answer is acceptable and preferred over \
+                         anything elaborate). Nothing else will be accepted.",
+                        display_ty(ty_label)
+                    ),
+                )?;
+                ultimatum = true;
+            }
+            if rounds == nudge_rounds && !nudged {
+                self.agent.push_user_turn(
+                    node,
+                    &format!(
+                        "You are approaching this window's round limit. Finalize now: \
+                         evaluate `finalize @{} value` with your best answer.",
+                        display_ty(ty_label)
+                    ),
+                )?;
+                nudged = true;
+            }
+
+            self.loop_inference_calls.fetch_add(1, Ordering::SeqCst);
+            rounds += 1;
+            let outcome = self.agent.drive_turn(node).await;
+            match &outcome {
+                Ok(TurnOutcome::Suspended { .. } | TurnOutcome::Completed { .. }) => {
+                    self.emit(Event::AnswererRound {
+                        node,
+                        site,
+                        round: rounds,
+                        error: None,
+                    });
+                }
+                Err(HarnessError::Compile(msg)) => {
+                    self.emit(Event::AnswererRound {
+                        node,
+                        site,
+                        round: rounds,
+                        error: Some(msg.clone()),
+                    });
+                }
+                Ok(TurnOutcome::NoBlock { .. }) | Err(_) => {}
+            }
+            match outcome {
+                Ok(TurnOutcome::Suspended { classified, .. })
+                    if matches!(classified.routing, HoleRouting::Finalize { .. }) =>
+                {
+                    break;
+                }
+                Ok(TurnOutcome::Suspended { classified, .. }) => {
+                    return Err(DriverError::Session(format!(
+                        "fanout child {idx} suspended on a non-finalize hole \
+                         ({:?}) — a concurrent fanout/fork child cannot present an \
+                         operator form, note, or nested fork in this driver (v1 scope)",
+                        classified.routing
+                    )));
+                }
+                Ok(TurnOutcome::Completed { .. }) => {
+                    self.agent.reopen_node(node)?;
+                    let ty_disp = display_ty(ty_label);
+                    self.agent.push_user_turn(
+                        node,
+                        &format!(
+                            "Round complete — your window continues, and that round's \
+                             definitions/bindings persist. The request still awaits its \
+                             answer: when ready, evaluate `finalize @{ty_disp} value` \
+                             (that ends the window)."
+                        ),
+                    )?;
+                }
+                Ok(TurnOutcome::NoBlock { .. }) => {
+                    let ty_disp = display_ty(ty_label);
+                    self.agent.push_user_turn(
+                        node,
+                        &format!(
+                            "Your reply had no ```haskell block, so nothing ran. Reply \
+                             with ```haskell blocks — an explore/define round is fine, \
+                             or `finalize @{ty_disp} value` when ready."
+                        ),
+                    )?;
+                }
+                Err(HarnessError::Compile(msg)) => {
+                    let hint = self.types_in_scope_hint(ty_label, &msg).unwrap_or_default();
+                    let ty_disp = display_ty(ty_label);
+                    self.agent.push_user_turn(
+                        node,
+                        &format!(
+                            "A block did not compile — your window continues; everything \
+                             that already ran persists. Reply with corrected ```haskell \
+                             blocks. Another define/explore round is fine (top-level \
+                             declarations are welcome and persist); when you are ready to \
+                             answer, evaluate \
+                             `finalize @{ty_disp} value`.\n\nGHC error:\n{msg}{hint}"
+                        ),
+                    )?;
+                }
+                Err(e) => return Err(e.into()),
+            }
+        }
+        self.emit(Event::TurnEnd { node });
+
+        if self.agent.finalize_is_closure(node) {
+            return Err(DriverError::Session(format!(
+                "fanout child {idx} finalized a closure — a concurrent fanout/fork \
+                 answer must be plain data in this driver (v1 scope)"
+            )));
+        }
+        let (value, rendered) =
+            retry_on_turn_in_flight(|| self.agent.take_finalized_value_keep_open(node)).await?;
+        self.emit(Event::Finalize {
+            node,
+            value: rendered,
+        });
+        Ok(value)
+    }
+
     /// Drive `node` (the per-loop answerer, already seeded with this hole's
     /// card) turn-by-turn until it suspends on `finalize`, applying the
     /// runaway caps: count each non-finalize model round; at
@@ -1767,7 +2218,7 @@ impl SelfHarnessDriver {
         let mut ultimatum = false;
         loop {
             let cap = self.loop_inference_call_cap;
-            if self.loop_inference_calls >= cap {
+            if self.loop_inference_calls.load(Ordering::SeqCst) >= cap {
                 return Err(DriverError::Session(format!(
                     "per-loop inference-call cap ({cap}) reached — \
                      hard-stopping the loop (a runaway harness)"
@@ -1804,7 +2255,7 @@ impl SelfHarnessDriver {
                 nudged = true;
             }
 
-            self.loop_inference_calls += 1;
+            self.loop_inference_calls.fetch_add(1, Ordering::SeqCst);
             rounds += 1;
             let outcome = self.agent.drive_turn(node).await;
             // A retry loop that burns rounds must be visible while it is
@@ -2666,13 +3117,13 @@ impl SelfHarnessDriver {
         // per-loop inference cap before driving it, exactly like an answerer
         // round, so compaction can never escape the 1024-call runaway guard.
         let cap = self.loop_inference_call_cap;
-        if self.loop_inference_calls >= cap {
+        if self.loop_inference_calls.load(Ordering::SeqCst) >= cap {
             return Err(DriverError::Session(format!(
                 "per-loop inference-call cap ({cap}) reached during \
                  compaction — hard-stopping the loop (a runaway harness)"
             )));
         }
-        self.loop_inference_calls += 1;
+        self.loop_inference_calls.fetch_add(1, Ordering::SeqCst);
 
         // The target is a fraction of the budget, but clamp it against the
         // REAL current window (`context_tokens`) so a summary is never asked to

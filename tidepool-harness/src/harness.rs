@@ -214,6 +214,19 @@ struct NodeConvo {
     /// Cleared by `TurnLease::drop`, so every exit path (success, `?`, panic
     /// unwind) releases it.
     turn_lease: bool,
+    /// When `true`, [`Harness::run_block`]'s checkout attempts for THIS node
+    /// retry (short backoff) instead of failing fast on
+    /// [`HarnessError::TurnInFlight`] — set via
+    /// [`Harness::set_retry_checkout_on_contention`] for a node whose
+    /// contention is EXPECTED and benign: a concurrently-driven sibling
+    /// realm on the SAME shared session (PRD 20 S1-L4,
+    /// `SelfHarnessDriver::drive_fanout_child`), never a re-entrant/manually
+    /// held conflict. `false` by default for every node — the existing
+    /// fail-fast contract (`tests/turn_lease.rs`) is unchanged unless a
+    /// caller explicitly opts in. Read fresh per checkout attempt (not
+    /// snapshotted), so it can be set right after node creation and take
+    /// effect on that node's very first turn.
+    retry_checkout_on_contention: bool,
 }
 
 /// An RAII hold on [`NodeConvo::turn_lease`], returned by
@@ -895,6 +908,7 @@ impl Harness {
                 framing,
                 last_turn_source: None,
                 turn_lease: false,
+                retry_checkout_on_contention: false,
             },
         );
         Ok(())
@@ -1487,7 +1501,7 @@ impl Harness {
 
         match outcome {
             TurnResult::Decl { .. } => {
-                let checkout = self.checkout_run(node)?;
+                let checkout = self.checkout_run_retrying(node).await?;
                 let res = self
                     .run_checked_out(node, checkout, move |mut session| {
                         let r = session.define_scoped(&[&decl_source]);
@@ -1556,7 +1570,7 @@ impl Harness {
 
                 // Run the compiled fragment against the session (move it onto
                 // the blocking pool and back — the resident session is `Send`).
-                let checkout = self.checkout_run(node)?;
+                let checkout = self.checkout_run_retrying(node).await?;
                 let run_table = table.clone();
                 let run_outcome = self
                     .run_checked_out(node, checkout, move |mut session| {
@@ -1702,7 +1716,7 @@ impl Harness {
         let table = compiled.table;
         let expr = compiled.expr;
 
-        let checkout = self.checkout_run(node)?;
+        let checkout = self.checkout_run_retrying(node).await?;
         let binder_for_run = binder.clone();
         let run_table = table.clone();
         let outcome = self
@@ -3254,6 +3268,56 @@ impl Harness {
             .map_err(|e| HarnessError::from_checkout(node, e))
     }
 
+    /// How long [`Self::checkout_run_retrying`] backs off between checkout
+    /// attempts while contested by a sibling realm.
+    const CONTENTION_RETRY_BACKOFF: std::time::Duration = std::time::Duration::from_millis(3);
+
+    /// Bound on contention retries (a couple of minutes of backoff at
+    /// [`Self::CONTENTION_RETRY_BACKOFF`]) — a genuinely wedged machine
+    /// fails loud instead of spinning forever.
+    const CONTENTION_RETRY_MAX_ATTEMPTS: u32 = 20_000;
+
+    /// [`Self::checkout_run`], but — ONLY when `node` opted in via
+    /// [`Self::set_retry_checkout_on_contention`] — retries with a short
+    /// backoff instead of failing fast on [`HarnessError::TurnInFlight`].
+    ///
+    /// This is the ONE place [`Self::run_block`] checks a machine out, so it
+    /// is where a concurrently-driven sibling realm's checkout race against
+    /// this SAME shared session (PRD 20 S1-L4) gets resolved by WAITING
+    /// rather than erroring: unlike retrying [`Self::drive_turn`] as a
+    /// whole (NOT safe — it has already called the provider and appended
+    /// the assistant reply to the transcript by the time a checkout could
+    /// contend), retrying just this checkout is safe because nothing
+    /// observable has happened yet at this point — `f` (the actual resident
+    /// call) is invoked at most once, only after a checkout succeeds.
+    ///
+    /// A node that never opts in (every existing caller) gets EXACTLY
+    /// [`Self::checkout_run`]'s behavior — fail fast, no retry — so
+    /// `tests/turn_lease.rs`'s fail-fast contract is unchanged.
+    async fn checkout_run_retrying(
+        &self,
+        node: NodeId,
+    ) -> Result<Checkout<'_, Session>, HarnessError> {
+        let retry = self
+            .convos
+            .lock()
+            .get(&node)
+            .map(|c| c.retry_checkout_on_contention)
+            .unwrap_or(false);
+        if !retry {
+            return self.checkout_run(node);
+        }
+        for _ in 0..Self::CONTENTION_RETRY_MAX_ATTEMPTS {
+            match self.checkout_run(node) {
+                Err(HarnessError::TurnInFlight(_)) => {
+                    tokio::time::sleep(Self::CONTENTION_RETRY_BACKOFF).await;
+                }
+                other => return other,
+            }
+        }
+        self.checkout_run(node)
+    }
+
     /// Check `node`'s machine out to resume/abort its pending `hole`
     /// (`Suspended{hole} -> Running`), validating the hole matches.
     fn checkout_resume(
@@ -3422,6 +3486,20 @@ impl Harness {
         let mut convos = self.convos.lock();
         if let Some(convo) = convos.get_mut(&node) {
             convo.realm = Some(realm);
+        }
+    }
+
+    /// Opt `node` into retrying (rather than failing fast) a
+    /// [`Self::run_block`] checkout contested by [`HarnessError::TurnInFlight`]
+    /// — see [`NodeConvo::retry_checkout_on_contention`]'s doc for the exact
+    /// contract and why this is safe to enable ONLY for a node whose
+    /// contention is a concurrently-driven sibling realm on the SAME shared
+    /// session (PRD 20 S1-L4). `false` by default; every existing caller
+    /// (which never calls this) keeps today's fail-fast behavior unchanged.
+    pub fn set_retry_checkout_on_contention(&self, node: NodeId, retry: bool) {
+        let mut convos = self.convos.lock();
+        if let Some(convo) = convos.get_mut(&node) {
+            convo.retry_checkout_on_contention = retry;
         }
     }
 
@@ -3778,6 +3856,7 @@ mod tests {
                 framing: None,
                 last_turn_source: None,
                 turn_lease: false,
+                retry_checkout_on_contention: false,
             },
         );
     }
