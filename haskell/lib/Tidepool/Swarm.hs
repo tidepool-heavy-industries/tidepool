@@ -68,9 +68,18 @@ module Tidepool.Swarm
   , budgeted
   , capped
   , gated
+    -- * Cycles budget
+  , Cycles
+  , mkCycles
+  , cyclesToInt
+  , spendCycles
+  , splitAllowance
   ) where
 
-import Prelude (Monad, Functor, Foldable, Traversable, Int, Ord((>=)), Maybe(..), fmap, pure, (>>=))
+import Prelude
+  ( Monad, Functor, Foldable, Traversable, Int, Eq, Show, Ord((>=), (<=))
+  , Maybe(..), pure, (>>=), max, div, replicate, (-), (*), otherwise
+  )
 import Data.Traversable (traverse)
 
 -- | The plan's base functor: a node carries a task and its unfolded
@@ -162,3 +171,60 @@ gated approve coalg a =
     approve layer >>= \refusal -> case refusal of
       Just t -> pure (PlanF t [])
       Nothing -> pure layer
+
+-- ---------------------------------------------------------------------------
+-- Cycles budget (operator's type-level review, 2026-08-17)
+--
+-- An agent-cycle allowance, currency for the SAME budget 'budgeted' spends
+-- against ("Harness.hs"'s dev-tree: one cycle for a leaf's implementation,
+-- two for a node that splits). The raw constructor is NOT exported —
+-- 'mkCycles' clamps to non-negative and 'spendCycles' is monus-style (never
+-- underflows) — so a negative 'Cycles' is simply not representable, which is
+-- what deletes "budget-minting-from-nothing" as a bug class rather than
+-- merely guarding against it at whichever call site remembers to check.
+-- ---------------------------------------------------------------------------
+
+-- | An agent-cycle allowance. See the section doc above for why the
+-- constructor stays unexported.
+newtype Cycles = Cycles Int
+  deriving (Eq, Show)
+
+-- | Clamp a raw count into 'Cycles' — the only way to mint one from outside
+-- this module.
+mkCycles :: Int -> Cycles
+mkCycles n = Cycles (max 0 n)
+
+-- | Read the underlying count back out (e.g. to compare against a plain
+-- 'Int' budget, or to render a receipt).
+cyclesToInt :: Cycles -> Int
+cyclesToInt (Cycles n) = n
+
+-- | Monus subtraction: what is left of the first argument after spending the
+-- second. Never goes negative — spending more than is held leaves 'Cycles'
+-- 0's own zero, not a negative allowance.
+spendCycles :: Cycles -> Cycles -> Cycles
+spendCycles (Cycles a) (Cycles b) = Cycles (max 0 (a - b))
+
+-- | Split an allowance among children after reserving a node's own cost:
+-- @splitAllowance input reservation n@ divides what remains of @input@ after
+-- @reservation@ evenly among @n@ children, returning @(kept, perChild)@ where
+-- @perChild@ has exactly @n@ entries (all equal — the floor share) and
+-- @kept@ absorbs both the reservation itself and the division remainder.
+--
+-- CONSERVATION LAW (property-tested — see the @thought-driver-test@ suite's
+-- @SwarmSpec@): @sum perChild + kept@ never exceeds @input@ (in fact it is
+-- always EXACTLY @input@, since 'spendCycles' never underflows and every
+-- unit taken from @input@ lands in either a child's share or @kept@) — no
+-- call site can ever mint a cycle this combinator did not account for.
+--
+-- @n <= 0@ divides among nobody: the whole @input@ stays kept and
+-- @perChild@ is @[]@, never a bogus per-child figure for zero recipients.
+splitAllowance :: Cycles -> Cycles -> Int -> (Cycles, [Cycles])
+splitAllowance input reservation n
+  | n <= 0 = (input, [])
+  | otherwise = (kept, replicate n perChild)
+  where
+    available = input `spendCycles` reservation
+    perChild = mkCycles (cyclesToInt available `div` n)
+    distributed = mkCycles (cyclesToInt perChild * n)
+    kept = input `spendCycles` distributed

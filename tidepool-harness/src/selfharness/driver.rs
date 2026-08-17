@@ -211,7 +211,7 @@ pub struct CycleOutcome {
 /// collapse exists).
 pub enum FinalAnswer {
     Value(Value),
-    Handle(tidepool_codegen::jit_machine::ValueHandle),
+    Handle(tidepool_runtime::session::RootCustody),
 }
 
 struct OuterSession {
@@ -283,16 +283,60 @@ struct OuterSession {
 /// compile's import list (its `EffectDecl::extra_imports`), which is what puts
 /// `Resume.ResumeFold` in scope for the `__selfHarnessResume` splice.
 fn outer_decls() -> Vec<tidepool_mcp::EffectDecl> {
-    vec![
-        tidepool_mcp::runllmturn_decl(),
-        tidepool_mcp::askuser_decl(),
-        tidepool_mcp::console_decl(),
-        tidepool_mcp::worktree_decl(),
-        tidepool_mcp::event_decl(),
-        tidepool_mcp::exec_decl(),
-        tidepool_mcp::subagent_decl(),
-        tidepool_mcp::journal_decl(),
-    ]
+    OuterRow::new(TurnHeadDecl::run_llm_turn())
+        .push(tidepool_mcp::askuser_decl())
+        .push(tidepool_mcp::console_decl())
+        .push(tidepool_mcp::worktree_decl())
+        .push(tidepool_mcp::event_decl())
+        .push(tidepool_mcp::exec_decl())
+        .push(tidepool_mcp::subagent_decl())
+        .push(tidepool_mcp::journal_decl())
+        .into_decls()
+}
+
+/// A decl permitted to occupy [`OuterRow`]'s HEAD slot. The only constructor
+/// is [`Self::run_llm_turn`], which calls `tidepool_mcp::runllmturn_decl()`
+/// directly (no parameter) — so a `TurnHeadDecl` is never anything other
+/// than the real `RunLLMTurn` decl. This is what makes index-0 displacement
+/// UNWRITABLE rather than merely pinned by a regression test: there is no
+/// value of this type that could wrap a different decl, and [`OuterRow`]
+/// only ever renders its head first.
+struct TurnHeadDecl(tidepool_mcp::EffectDecl);
+
+impl TurnHeadDecl {
+    fn run_llm_turn() -> Self {
+        TurnHeadDecl(tidepool_mcp::runllmturn_decl())
+    }
+}
+
+/// A NonEmpty-shaped builder for the outer row: a `head` slot only
+/// [`TurnHeadDecl`] can occupy, plus an ordinary `tail`. `RunLLMTurn` must be
+/// first — see [`outer_decls`]'s doc for why (the interposed-effect suspend
+/// threshold, `EngineConfig::from_decls`) — and this makes that constructional
+/// rather than a fact only a pin test (`outer_row_suspends_everything`)
+/// happens to keep true: [`Self::into_decls`] always renders `head` before
+/// `tail`, and nothing in this module can construct an `OuterRow` without one.
+struct OuterRow {
+    head: TurnHeadDecl,
+    tail: Vec<tidepool_mcp::EffectDecl>,
+}
+
+impl OuterRow {
+    fn new(head: TurnHeadDecl) -> Self {
+        OuterRow {
+            head,
+            tail: Vec::new(),
+        }
+    }
+
+    fn push(mut self, decl: tidepool_mcp::EffectDecl) -> Self {
+        self.tail.push(decl);
+        self
+    }
+
+    fn into_decls(self) -> Vec<tidepool_mcp::EffectDecl> {
+        std::iter::once(self.head.0).chain(self.tail).collect()
+    }
 }
 
 /// The nested answerer Agent's scoped decl row: `[AskUser, Fork, ReadState, Finalize]`.
@@ -1838,7 +1882,7 @@ impl SelfHarnessDriver {
                         HoleRouting::RunLLMTurn { site, ty } => {
                             let answer = self
                                 .service_runllm_hole(
-                                    *site,
+                                    site.get(),
                                     ty.as_deref(),
                                     &classified.prompt,
                                     &compiled.table,
@@ -1944,7 +1988,7 @@ impl SelfHarnessDriver {
                         } => {
                             let value = self
                                 .service_outer_fanout(
-                                    *site,
+                                    site.get(),
                                     ty.as_deref(),
                                     *fan,
                                     &classified.prompt,
@@ -1988,7 +2032,7 @@ impl SelfHarnessDriver {
                         } => {
                             let value = self
                                 .service_outer_branch(
-                                    *site,
+                                    site.get(),
                                     ty.as_deref(),
                                     context_ref,
                                     &classified.prompt,

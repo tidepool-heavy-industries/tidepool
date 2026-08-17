@@ -190,7 +190,10 @@ test-suite thought-driver-test
   type:             exitcode-stdio-1.0
   main-is:          ThoughtDriverTest.hs
   hs-source-dirs:   lib, test-thought
-  other-modules:    Tidepool.Thought
+  other-modules:
+    Tidepool.Thought
+    Tidepool.Swarm
+    SwarmSpec
   build-depends:
     base       >= 4.20 && < 5,
     text,

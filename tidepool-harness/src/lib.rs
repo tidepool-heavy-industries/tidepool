@@ -38,4 +38,4 @@ pub use selfharness::{
 pub use snapshot::{ContextSnapshot, SnapshotDigest};
 pub use tidepool_runtime::AsksSidecar;
 pub use timing::{record_stage, ExtractTiming};
-pub use tree::{FanBadge, HoleId, NodeId, NodeState, PriceClass, SiteId, Slot};
+pub use tree::{FanBadge, FanCount, HoleId, NodeId, NodeState, PriceClass, SiteId, Slot};

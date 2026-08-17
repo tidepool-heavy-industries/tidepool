@@ -525,10 +525,21 @@ retainedChild parent trees k = case lookup (nodeName k) trees of
 -- every child hands the underfunded ones nothing rather than minting cycles
 -- the parent doesn't have — 'cycleRefusal' turns that zero into a typed
 -- budget refusal for that child instead of an overspend.
+--
+-- Delegates the arithmetic to 'Swarm.splitAllowance' (operator's type-level
+-- review, 2026-08-17): every child gets the same floor share that combinator
+-- computes, and its conservation law — property-tested in the
+-- @thought-driver-test@ suite's @SwarmSpec@, not re-derived here — is what
+-- now guarantees no call site can mint a cycle from nothing, in place of the
+-- old hand-rolled @max 0 (... ) \`div\` n@ this function used to carry
+-- directly. `Swarm.mkCycles`/`Swarm.cyclesToInt` are the boundary: dev-tree's
+-- own budget vocabulary ('NodeSeed.seedCycles', 'requiredCycles') stays
+-- plain 'Int' — only this one call site speaks 'Swarm.Cycles'.
 childAllowance :: NodeSeed -> Int -> Int
-childAllowance parent n
-  | n <= 0 = 0
-  | otherwise = max 0 (parent.seedCycles - requiredCycles parent.seedPlan) `div` n
+childAllowance parent n =
+  case Swarm.splitAllowance (Swarm.mkCycles parent.seedCycles) (Swarm.mkCycles (requiredCycles parent.seedPlan)) n of
+    (_, s : _) -> Swarm.cyclesToInt s
+    (_, []) -> 0
 
 -- ---------------------------------------------------------------------------
 -- The algebra — how to combine

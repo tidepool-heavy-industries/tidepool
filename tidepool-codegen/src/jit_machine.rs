@@ -219,6 +219,15 @@ pub struct RealmId(pub u64);
 /// [`ResumeInput::Handle`], released by [`JitEffectMachine::close_realm`] of
 /// the owning realm. The `!Send` [`crate::old_space::RootSlot`] underneath
 /// never crosses an API layer.
+///
+/// Stays `Copy`/freely re-usable at THIS layer on purpose: this machine-level
+/// primitive is also exercised directly by tests that read a handle
+/// non-linearly (`observe_handle`, `handle_realm`, repeated
+/// `ResumeInput::Handle` — all borrows, never a consuming transfer). The
+/// session layer (`tidepool_runtime::session::resident::RootCustody`) wraps
+/// this type in a linear, non-`Clone` custody token at the ONE seam where a
+/// caller-visible obligation to consume-exactly-once actually exists
+/// (`ResidentSession::finalized_handle` → `resume_handle`/`mount_handle`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct ValueHandle(pub u64);
 
@@ -3718,6 +3727,15 @@ impl JitEffectMachine {
     /// Supersedes [`Self::take_parked_finalized_root`] for new callers: a
     /// handle is `Send`, releasable, and deliverable via
     /// [`ResumeInput::Handle`]; a raw `RootSlot` is none of those.
+    ///
+    /// Raw [`ValueHandle`] on purpose, not [`RootCustody`]: this machine-level
+    /// primitive is also exercised directly by tests that read a handle
+    /// non-linearly (`observe_handle`, `handle_realm`, repeated
+    /// `ResumeInput::Handle` — all borrows, never a consuming transfer). The
+    /// session layer (`tidepool_runtime`'s `ResidentSession::finalized_handle`)
+    /// is where a caller-visible custody obligation actually begins — see
+    /// [`RootCustody`]'s doc — and that is where the linear wrapper is
+    /// applied.
     pub fn handle_from_finalized(&mut self, id: ContinuationId) -> Option<ValueHandle> {
         let frame = self.continuations.get_mut(&id)?;
         let realm = frame.realm;

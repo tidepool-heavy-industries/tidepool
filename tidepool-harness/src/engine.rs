@@ -151,7 +151,10 @@ pub enum OuterEffectKind {
 #[derive(Debug, Clone, PartialEq)]
 pub enum HoleRouting {
     /// `runLLMTurn @T` — the same calling model answers in context.
-    RunLLMTurn { site: u32, ty: Option<String> },
+    RunLLMTurn {
+        site: crate::tree::SiteId,
+        ty: Option<String>,
+    },
     /// Park a suspension into a bounded fan-out with a join. Produced by two
     /// sources that share this routing: the `Fork` effect (`ForkWith` →
     /// `fan: None`, one child; `ForkAllWith` → `fan: Some(_)`, N children —
@@ -162,7 +165,7 @@ pub enum HoleRouting {
     /// `prompts` carries the per-child prompt text, one per fanout child, in
     /// declaration order (empty for a plain fork).
     Fork {
-        site: u32,
+        site: crate::tree::SiteId,
         ty: Option<String>,
         fan: Option<FanBadge>,
         prompts: Vec<String>,
@@ -216,7 +219,7 @@ pub enum HoleRouting {
     /// `site`/`ty` mirror `Fork`'s shape — `ty` is the branch's OWN answer type
     /// `T`, not the wrapping pair.
     Branch {
-        site: u32,
+        site: crate::tree::SiteId,
         ty: Option<String>,
         context_ref: String,
     },
@@ -253,7 +256,10 @@ pub enum HoleRouting {
     /// finalized VALUE is not carried here (it crosses in-heap, may be
     /// non-serializable) — the caller recovers it from the original
     /// suspended request `Value`.
-    Finalize { site: u32, ty: Option<String> },
+    Finalize {
+        site: crate::tree::SiteId,
+        ty: Option<String>,
+    },
     /// A plain `ask schema prompt` (structured operator elicitation) or an
     /// unrecognized payload — operator routing with the raw payload attached.
     Ask { payload: Json },
@@ -300,40 +306,42 @@ pub enum ClassifyError {
     Malformed { constructor: &'static str },
 }
 
-/// Pull a JSON payload's `field` as a `u32` — `Err` on missing/non-numeric or
-/// a value that doesn't fit (see [`ClassifyError`]'s doc).
-fn require_u32_field(
+/// Pull a JSON payload's `field` as a [`crate::tree::SiteId`] — `Err` on
+/// missing/non-numeric or a value that doesn't fit (see [`ClassifyError`]'s
+/// doc). The one mint point for a `SiteId` decoded from a JSON payload key.
+fn require_site_field(
     payload: &Json,
     constructor: &'static str,
     field: &'static str,
-) -> Result<u32, ClassifyError> {
+) -> Result<crate::tree::SiteId, ClassifyError> {
     let raw = payload
         .get(field)
         .and_then(Json::as_u64)
         .ok_or(ClassifyError::MissingField { constructor, field })?;
-    u32::try_from(raw).map_err(|_| ClassifyError::OutOfRange {
+    crate::tree::SiteId::try_from(raw).map_err(|_| ClassifyError::OutOfRange {
         constructor,
         field,
         value: raw,
     })
 }
 
-/// Pull a `Con`'s positional field `idx`, decoded to JSON, as a `u32` — the
-/// [`Value::Con`] counterpart to [`require_u32_field`] for constructors whose
-/// site is a positional field rather than a JSON payload key.
-fn require_con_u32(
+/// Pull a `Con`'s positional field `idx`, decoded to JSON, as a
+/// [`crate::tree::SiteId`] — the [`Value::Con`] counterpart to
+/// [`require_site_field`] for constructors whose site is a positional field
+/// rather than a JSON payload key.
+fn require_con_site(
     fields: &[Value],
     idx: usize,
     table: &DataConTable,
     constructor: &'static str,
     field: &'static str,
-) -> Result<u32, ClassifyError> {
+) -> Result<crate::tree::SiteId, ClassifyError> {
     let raw = fields
         .get(idx)
         .map(|p| tidepool_runtime::value_to_json(p, table, 0))
         .and_then(|j| j.as_u64())
         .ok_or(ClassifyError::MissingField { constructor, field })?;
-    u32::try_from(raw).map_err(|_| ClassifyError::OutOfRange {
+    crate::tree::SiteId::try_from(raw).map_err(|_| ClassifyError::OutOfRange {
         constructor,
         field,
         value: raw,
@@ -412,7 +420,7 @@ pub fn classify_hole(
             ClassifiedHole {
                 routing: HoleRouting::Fork {
                     site,
-                    ty: asks.type_of(site).map(str::to_string),
+                    ty: asks.type_of(site.get()).map(str::to_string),
                     fan: None,
                     prompts: Vec::new(),
                 },
@@ -425,7 +433,7 @@ pub fn classify_hole(
                 prompt: prompts.join("\n"),
                 routing: HoleRouting::Fork {
                     site,
-                    ty: asks.type_of(site).map(str::to_string),
+                    ty: asks.type_of(site.get()).map(str::to_string),
                     fan: Some(FanBadge::Exact {
                         n: prompts.len() as u32,
                     }),
@@ -556,14 +564,14 @@ fn classify_runllmturn_payload(
     payload: &Json,
     asks: &AsksSidecar,
 ) -> Result<HoleRouting, ClassifyError> {
-    let site = require_u32_field(payload, "RunLLMTurnWith", "typedSite")?;
-    let ty = asks.type_of(site).map(str::to_string);
+    let site = require_site_field(payload, "RunLLMTurnWith", "typedSite")?;
+    let ty = asks.type_of(site.get()).map(str::to_string);
     if payload.get("fork").and_then(Json::as_bool).unwrap_or(false) {
         let fan = payload
             .get("fan")
             .and_then(Json::as_u64)
             .map(|n| {
-                u32::try_from(n).map_err(|_| ClassifyError::OutOfRange {
+                crate::tree::FanCount::try_from(n).map_err(|_| ClassifyError::OutOfRange {
                     constructor: "RunLLMTurnWith",
                     field: "fan",
                     value: n,
@@ -587,10 +595,10 @@ fn classify_runllmturn_payload(
             });
         }
         if let Some(n) = fan {
-            if n as usize != prompts.len() {
+            if n.get() as usize != prompts.len() {
                 return Err(ClassifyError::FanMismatch {
                     constructor: "RunLLMTurnWith",
-                    declared: n as usize,
+                    declared: n.get() as usize,
                     actual: prompts.len(),
                 });
             }
@@ -598,7 +606,7 @@ fn classify_runllmturn_payload(
         Ok(HoleRouting::Fork {
             site,
             ty,
-            fan: fan.map(|n| FanBadge::Exact { n }),
+            fan: fan.map(|n| FanBadge::Exact { n: n.get() }),
             prompts,
         })
     } else if payload
@@ -676,14 +684,14 @@ fn decode_finalize_site(
     request: &Value,
     table: &DataConTable,
     asks: &AsksSidecar,
-) -> Result<(u32, Option<String>), ClassifyError> {
+) -> Result<(crate::tree::SiteId, Option<String>), ClassifyError> {
     let Value::Con(_, fields) = request else {
         return Err(ClassifyError::Malformed {
             constructor: "FinalizeWith",
         });
     };
-    let site = require_con_u32(fields, 0, table, "FinalizeWith", "site")?;
-    let ty = asks.type_of(site).map(str::to_string);
+    let site = require_con_site(fields, 0, table, "FinalizeWith", "site")?;
+    let ty = asks.type_of(site.get()).map(str::to_string);
     Ok((site, ty))
 }
 
@@ -691,13 +699,16 @@ fn decode_finalize_site(
 /// Int, brief :: Text])`) — a single `fork @T brief` suspension. The site id
 /// selects the recorded answer type (a ROUTING field, validated — see
 /// [`ClassifyError`]'s doc); the brief is display text, decoded as before.
-fn decode_fork_one(request: &Value, table: &DataConTable) -> Result<(u32, String), ClassifyError> {
+fn decode_fork_one(
+    request: &Value,
+    table: &DataConTable,
+) -> Result<(crate::tree::SiteId, String), ClassifyError> {
     let Value::Con(_, fields) = request else {
         return Err(ClassifyError::Malformed {
             constructor: "ForkWith",
         });
     };
-    let site = require_con_u32(fields, 0, table, "ForkWith", "site")?;
+    let site = require_con_site(fields, 0, table, "ForkWith", "site")?;
     let brief = fields
         .get(1)
         .map(|p| tidepool_runtime::value_to_json(p, table, 0))
@@ -715,13 +726,13 @@ fn decode_fork_one(request: &Value, table: &DataConTable) -> Result<(u32, String
 fn decode_fork_all(
     request: &Value,
     table: &DataConTable,
-) -> Result<(u32, Vec<String>), ClassifyError> {
+) -> Result<(crate::tree::SiteId, Vec<String>), ClassifyError> {
     let Value::Con(_, fields) = request else {
         return Err(ClassifyError::Malformed {
             constructor: "ForkAllWith",
         });
     };
-    let site = require_con_u32(fields, 0, table, "ForkAllWith", "site")?;
+    let site = require_con_site(fields, 0, table, "ForkAllWith", "site")?;
     let raw_prompts = fields
         .get(1)
         .map(|p| tidepool_runtime::value_to_json(p, table, 0))
@@ -2581,7 +2592,7 @@ mod tests {
             HoleRouting::Fork {
                 site, fan, prompts, ..
             } => {
-                assert_eq!(site, 3);
+                assert_eq!(site.get(), 3);
                 assert_eq!(fan, Some(FanBadge::Exact { n: 2 }));
                 assert_eq!(prompts, vec!["first".to_string(), "second".to_string()]);
             }

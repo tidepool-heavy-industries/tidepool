@@ -45,7 +45,7 @@ fn sample_events() -> Vec<Event> {
         Event::HolePublished {
             node: NodeId(1),
             hole: HoleId("scont_1".to_string()),
-            site: Some(SiteId(7)),
+            site: Some(SiteId::try_from(7u64).unwrap()),
             ty: Some("Int".to_string()),
             prompt: "pick a number".to_string(),
             fork: false,

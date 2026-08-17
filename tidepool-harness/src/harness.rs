@@ -1804,7 +1804,7 @@ impl Harness {
                 let site = match &classified.routing {
                     HoleRouting::Fork { site, .. }
                     | HoleRouting::RunLLMTurn { site, .. }
-                    | HoleRouting::Finalize { site, .. } => Some(crate::tree::SiteId(*site)),
+                    | HoleRouting::Finalize { site, .. } => Some(*site),
                     _ => None,
                 };
                 self.tree.hole_published(
@@ -2215,7 +2215,7 @@ impl Harness {
     pub(crate) fn take_finalized_handle_keep_open(
         &self,
         node: NodeId,
-    ) -> Result<tidepool_codegen::jit_machine::ValueHandle, HarnessError> {
+    ) -> Result<tidepool_runtime::session::RootCustody, HarnessError> {
         let hole = {
             let convos = self.convos.lock();
             let convo = convos.get(&node).ok_or(HarnessError::NoSession(node))?;
@@ -3245,7 +3245,7 @@ impl Harness {
                 let site = match &classified.routing {
                     HoleRouting::Fork { site, .. }
                     | HoleRouting::RunLLMTurn { site, .. }
-                    | HoleRouting::Finalize { site, .. } => Some(crate::tree::SiteId(*site)),
+                    | HoleRouting::Finalize { site, .. } => Some(*site),
                     _ => None,
                 };
                 self.tree.hole_published(

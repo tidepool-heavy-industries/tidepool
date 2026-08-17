@@ -81,6 +81,87 @@ use super::persistent::{PersistentSession, ScopeRetirement};
 use super::turn::{BoundBinder, ValueTier};
 use super::{SessionError, SessionLib};
 
+/// A LINEAR custody token over a [`ValueHandle`] between the moment it enters
+/// Rust-side custody — minted by [`ResidentSession::finalized_handle`] — and
+/// the moment it is consumed: delivered into a sibling continuation
+/// ([`ResidentSession::resume_handle`]) or mounted into a named binding
+/// ([`ResidentSession::mount_handle`]/[`ResidentSession::mount_handle_in`]).
+///
+/// Deliberately NOT `Clone`/`Copy`, unlike [`ValueHandle`] itself (which stays
+/// freely copyable at the machine layer — `tidepool_codegen::jit_machine`
+/// tests read a handle non-linearly on purpose: `observe_handle`,
+/// `handle_realm`, repeated `ResumeInput::Handle`, all borrows). At THIS
+/// layer, the three-owner chain documented at [`ResidentSession::mount_handle_in`]'s
+/// doc — handle registry, scope frame, GC root ledger, never two at once — used
+/// to be enforced only by caller discipline plus the machine's debug-mode
+/// `handle_holds_root` assert at scope retirement: a caller that mistakenly
+/// handed the SAME live [`ValueHandle`] to both `resume_handle` and
+/// `mount_handle_in` would not be caught until that assert fired, if it ever
+/// ran (a resume delivery does not consume its handle from the machine's own
+/// registry — see [`ResidentSession::resume_handle`]'s doc — so nothing at the
+/// machine layer stops a second use of the same numeric id). Wrapping the
+/// crossing here moves the check to COMPILE TIME: the only way to recover the
+/// raw handle is [`Self::into_handle`], which consumes `self` by value, so a
+/// second consumer has nothing left to consume — a use-after-move `rustc`
+/// error, not a runtime race. See the compile-fail example below.
+///
+/// Dropping an unconsumed token means custody was LOST — a finalized value was
+/// taken out of the machine and never delivered or mounted, so nothing will
+/// ever explicitly release it (it still dies at the owning realm's
+/// `close_realm`, exactly as before this token existed — this is a lint on
+/// Rust-side bookkeeping, not a memory-safety backstop). Loud in debug builds
+/// so the mistake surfaces at the call site that dropped it; silent in
+/// release, matching every other debug-only assert in this custody chain.
+///
+/// ```compile_fail
+/// use tidepool_codegen::jit_machine::ValueHandle;
+/// use tidepool_runtime::session::RootCustody;
+///
+/// let custody = RootCustody::new(ValueHandle(0));
+/// let delivered = custody.into_handle();   // first (and only legal) consumer
+/// let mounted = custody.into_handle();     // ERROR: `custody` was already moved
+/// ```
+#[derive(Debug)]
+pub struct RootCustody(Option<ValueHandle>);
+
+impl RootCustody {
+    /// Mint a custody token over `handle`. The one real mint site is
+    /// [`ResidentSession::finalized_handle`]; exposed as `pub` (rather than
+    /// `pub(crate)`) only so the compile-fail proof above can construct one
+    /// without a live session — production code never reaches for this
+    /// directly, since `finalized_handle` never hands out a bare
+    /// [`ValueHandle`] at the finalize seam in the first place.
+    pub fn new(handle: ValueHandle) -> Self {
+        RootCustody(Some(handle))
+    }
+
+    /// Consume the token, releasing the raw handle to the caller — the ONLY
+    /// way out. Every legitimate custody transfer (a mount, a resume
+    /// delivery) goes through this exactly once. Takes `self` by value, so a
+    /// second attempt to consume the SAME token is a compile-time
+    /// use-after-move error (see the compile-fail example above) rather than
+    /// a runtime double-custody bug.
+    pub fn into_handle(mut self) -> ValueHandle {
+        self.0
+            .take()
+            .expect("RootCustody always holds a handle until into_handle consumes it")
+    }
+}
+
+impl Drop for RootCustody {
+    fn drop(&mut self) {
+        if let Some(handle) = self.0 {
+            debug_assert!(
+                false,
+                "RootCustody dropped without being consumed — {handle:?}'s custody was \
+                 lost (never delivered via resume_handle, never mounted). The machine-side \
+                 root is unaffected (it releases at the owning realm's close_realm \
+                 regardless), but the value silently never reached wherever it was headed."
+            );
+        }
+    }
+}
+
 /// The classified result of driving a resident turn to its first yield.
 ///
 /// The suspend-and-completion shape mirrors [`super::TurnOutcome`], but a
@@ -455,9 +536,12 @@ where
     /// flow always has); the handle is owned by the frame's realm. `None`
     /// when `hole` is not parked or its frame holds no (untaken) finalized
     /// payload.
-    pub fn finalized_handle(&mut self, hole: &str) -> Option<ValueHandle> {
+    pub fn finalized_handle(&mut self, hole: &str) -> Option<RootCustody> {
         let &(_, id) = self.parked.iter().find(|(h, _)| h == hole)?;
-        self.core.machine_mut()?.handle_from_finalized(id)
+        self.core
+            .machine_mut()?
+            .handle_from_finalized(id)
+            .map(RootCustody::new)
     }
 
     /// Resume the turn parked on `cont_id` by DELIVERING a machine-side
@@ -466,12 +550,20 @@ where
     /// one-session loop receives its `State -> State` this way). Same
     /// validate-before-consume and ground-truth reconciliation as
     /// [`Self::resume`].
+    ///
+    /// Takes the [`RootCustody`] token by value — this IS the consuming half
+    /// of the custody crossing (see that type's doc): the delivery itself
+    /// does not release the handle from the machine's own registry (a resume
+    /// is a scope-owned BORROW at the machine layer, same as `observe_handle`),
+    /// so without the token nothing at this layer stops a caller from also
+    /// mounting the same raw handle. The token is unwrapped once, here, at
+    /// the moment its custody is spent.
     pub fn resume_handle(
         &mut self,
         cont_id: &str,
-        handle: ValueHandle,
+        custody: RootCustody,
     ) -> Result<ResidentOutcome, ResidentError> {
-        self.reenter(cont_id, ResumeInput::Handle(handle), None)
+        self.reenter(cont_id, ResumeInput::Handle(custody.into_handle()), None)
     }
 
     /// The current value-plane binding for `name` — `(SessionVarId, module,
@@ -527,9 +619,9 @@ where
         module: SessionModule,
         tier: ValueTier,
         type_display: Option<String>,
-        handle: ValueHandle,
+        custody: RootCustody,
     ) -> Result<(), ResidentError> {
-        self.mount_handle_in(ScopeId::ROOT, name, id, module, tier, type_display, handle)
+        self.mount_handle_in(ScopeId::ROOT, name, id, module, tier, type_display, custody)
     }
 
     /// Scoped [`Self::mount_handle`]: install the mount in `scope`'s frame
@@ -541,7 +633,9 @@ where
     /// handle registry hands ownership of the tenured root to this frame
     /// (`value_handle_count` drops as the frame's count rises), and the frame
     /// hands it to the GC root ledger's `retire_scope_root` at retirement —
-    /// three named owners in sequence, never two at once.
+    /// three named owners in sequence, never two at once. `custody` is the
+    /// [`RootCustody`] token minted by [`Self::finalized_handle`]; consumed
+    /// exactly once, here, at the moment ownership hands off to the frame.
     #[allow(clippy::too_many_arguments)]
     pub fn mount_handle_in(
         &mut self,
@@ -551,8 +645,9 @@ where
         module: SessionModule,
         tier: ValueTier,
         type_display: Option<String>,
-        handle: ValueHandle,
+        custody: RootCustody,
     ) -> Result<(), ResidentError> {
+        let handle = custody.into_handle();
         let slot = self
             .core
             .machine_mut()

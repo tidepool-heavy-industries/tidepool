@@ -732,7 +732,7 @@ async fn run_llm_turn_second_sequential_hole_carries_its_type() {
         Some("Bool"),
         "the durable HolePublished record for hole 2 must carry its type"
     );
-    assert_eq!(site.map(|s| s.0), Some(second_site));
+    assert_eq!(*site, Some(second_site));
 
     // Answer the SECOND hole and drive the program to completion — the
     // typed-answer path is not just classified correctly but actually usable.

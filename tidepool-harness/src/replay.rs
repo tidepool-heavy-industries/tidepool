@@ -361,7 +361,7 @@ mod tests {
         w.append(Event::HolePublished {
             node: NodeId(0),
             hole: HoleId("scont_1".into()),
-            site: Some(crate::tree::SiteId(0)),
+            site: Some(crate::tree::SiteId::try_from(0u64).unwrap()),
             ty: Some("Int".into()),
             prompt: "n".into(),
             fork: true,

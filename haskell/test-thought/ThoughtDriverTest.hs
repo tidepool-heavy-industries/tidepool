@@ -23,6 +23,7 @@ import qualified Data.Text as T
 import System.Exit (exitFailure, exitSuccess)
 import Test.QuickCheck
 
+import SwarmSpec (properties)
 import Tidepool.Thought
 
 -- ---------------------------------------------------------------------------
@@ -376,7 +377,8 @@ main = do
       , run "failure accumulation" prop_failureAccumulation
       , run "caps forcing local finish" prop_capsForceLocalFinish
       ]
-  if and results then exitSuccess else exitFailure
+  swarmResults <- mapM (uncurry run) properties
+  if and results && and swarmResults then exitSuccess else exitFailure
   where
     run name prop = do
       putStrLn ("--- " <> name <> " ---")
