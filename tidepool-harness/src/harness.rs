@@ -2923,8 +2923,17 @@ impl Harness {
                 Err(e) => {
                     // GHC-verbatim retry: feed the compile error back to the
                     // answerer. The continuation is NEVER consumed by a bad
-                    // attempt.
-                    let err = e.to_string();
+                    // attempt. `CompileError::Diagnostics`' own `Display` is
+                    // only a count ("Haskell compilation failed (N
+                    // diagnostic(s))") — `render_compile_error` renders the
+                    // full per-diagnostic text instead. This call site has no
+                    // `run_turn`-shaped candidate window of its own (this
+                    // compiles `template_answer_turn`'s module, not
+                    // `run_turn`'s), so remapping is skipped (empty
+                    // block/sources) and diagnostics render at their raw
+                    // template-space span — still GHC's own text, never a
+                    // summary.
+                    let err = render_compile_error(&e, "", "", "");
                     self.log_answer_attempt(
                         target,
                         &self

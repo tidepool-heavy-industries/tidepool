@@ -172,7 +172,18 @@ fn pinned_finalize_needs_the_type_in_scope() {
     support::require_extract();
     let err = compile_turn(GOOD_DECISION, "", Some("Decision"))
         .err()
-        .map(|e| e.to_string())
+        .map(|e| match e {
+            // `CompileError::Diagnostics`' own `Display` is only a count
+            // ("Haskell compilation failed (N diagnostic(s))") — assert
+            // against GHC's own message text instead, same as
+            // `classify_compile`/`compile_error_to_session_error` do.
+            CompileError::Diagnostics(diags) => diags
+                .iter()
+                .map(|d| d.message.as_str())
+                .collect::<Vec<_>>()
+                .join("\n\n"),
+            other => other.to_string(),
+        })
         .expect("a pinned turn without the type imported cannot compile");
     assert!(
         err.contains("Decision"),
