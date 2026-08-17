@@ -66,7 +66,7 @@ use std::sync::{Arc, Mutex};
 
 use serde_json::{json, Value as Json};
 
-use tidepool_handlers::{load_journal, ConsoleHandler, JournalEntry, JournalHandler};
+use tidepool_handlers::{load_journal, ConsoleHandler, JournalEntry, JournalHandler, SegmentPath};
 use tidepool_harness::engine::EngineConfig;
 use tidepool_harness::log::{Event as LogEvent, LogHeader, LogReader, LogWriter};
 use tidepool_harness::provider::{
@@ -635,7 +635,10 @@ async fn run_scenario(
     let mut driver = SelfHarnessDriver::new(agent, observer.clone());
     driver.set_checkpoint_path(checkpoint_path.clone());
     driver.set_console_handler(ConsoleHandler);
-    driver.set_journal_handler(JournalHandler::new(journal_path.clone()));
+    driver.set_journal_handler(JournalHandler::new(
+        SegmentPath::create_exclusive(journal_path.clone())
+            .expect("this scenario's journal segment is fresh in its own tempdir"),
+    ));
     driver.set_gate(gate.clone());
     // Every scripted window finalizes on its FIRST round, so lowering the
     // round caps changes nothing for them — and it makes a deliberately
@@ -1366,7 +1369,7 @@ async fn companion_depth_cap_forces_a_stamped_finish() {
     proposed_keys.sort_unstable();
     for path in capped {
         assert!(
-            !proposed_keys.contains(&path.as_ref()),
+            !proposed_keys.contains(&path),
             "a node refused before its coalgebra ran must journal no proposal: {path}"
         );
     }
