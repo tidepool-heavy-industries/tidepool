@@ -3,6 +3,13 @@
 //! re-export, and must carry the `ToJSON` instances its own `errors` block
 //! depends on.
 //!
+//! `Tidepool.Worktree` re-exports FOUR of its fourteen names now — the three
+//! thin one-verb wrappers plus the pure projection `worktreeId`, the helper
+//! shapes the effect contract can represent.
+//! The other ten are DEFINITIONS in that module (scaffold doc §11.9), so the
+//! gates covering them read the authored source rather than the generated one,
+//! and the generated module is gated on NOT redefining them.
+//!
 //! Each test here is a ONE-FAILURE-MODE gate and is named for the failure it
 //! catches, so a receipt can cite it individually — an aggregate count cannot
 //! distinguish "the guard held" from "the guard silently stopped existing".
@@ -102,33 +109,89 @@ fn worktree_error_payload_types_all_have_tojson_instances() {
     }
 }
 
-/// `Tidepool.Worktree`'s import list is frozen — every name below is one it
-/// re-exports, so a name dropping out of the generated module breaks that
-/// module's compile rather than degrading gracefully.
+/// The four helpers `Tidepool.Worktree` still RE-EXPORTS are frozen — three
+/// thin wrappers over one verb plus one pure projection, so each is
+/// schema-representable and stays in the contract. A name dropping out of the
+/// generated module breaks that module's compile rather than degrading
+/// gracefully.
 #[test]
 fn generated_module_carries_the_authored_worktree_surface() {
     let src = worktree_and_event_module();
     for name in [
-        "fromCurrentRepository ::",
-        "fromRef ::",
-        "fromWorktree ::",
-        "allowDirtySnapshot ::",
         "createWorktree ::",
         "lookupWorktree ::",
         "listWorktrees ::",
-        "worktreeBranch ::",
-        "worktreeHead ::",
         "worktreeId ::",
-        "renderWorktreeError ::",
-        "renderWorktreeId ::",
-        "renderGitOid ::",
-        "renderBranchName ::",
     ] {
         assert!(
             src.contains(name),
             "generated Tidepool.Effects is missing `{name}`, which Tidepool.Worktree re-exports"
         );
     }
+}
+
+/// The other side of the same contract: the ten names that are NOT
+/// schema-representable (scaffold doc §11.9) are DEFINED in
+/// `haskell/lib/Tidepool/Worktree.hs` and must NOT also be emitted here. Two
+/// definitions of `fromCurrentRepository` in one row is a duplicate-binding
+/// error the moment that module is imported, and the import is exactly what
+/// `extra_imports` now arranges — so this gate is what keeps the relocation
+/// from silently becoming a collision.
+#[test]
+fn generated_module_does_not_redefine_the_relocated_worktree_helpers() {
+    let src = worktree_and_event_module();
+    for name in [
+        "fromCurrentRepository ::",
+        "fromRef ::",
+        "fromWorktree ::",
+        "allowDirtySnapshot ::",
+        "worktreeBranch ::",
+        "worktreeHead ::",
+        "renderWorktreeError ::",
+        "renderWorktreeId ::",
+        "renderGitOid ::",
+        "renderBranchName ::",
+    ] {
+        assert!(
+            !src.contains(name),
+            "generated Tidepool.Effects still defines `{name}`, which now lives in \
+             haskell/lib/Tidepool/Worktree.hs — two definitions in one row collide"
+        );
+        assert!(
+            authored_worktree_module().contains(name),
+            "haskell/lib/Tidepool/Worktree.hs no longer defines `{name}`, and the \
+             generated module no longer does either — the name has no home"
+        );
+    }
+}
+
+/// The relocation is invisible to an eval author only because the Worktree
+/// decl carries the companion import. Without this row a row containing
+/// Worktree would see ten fewer names than it did before.
+///
+/// The import lands in the AUTHOR's preamble, not inside `Tidepool.Effects` —
+/// which is the only direction that can work, since `Tidepool.Worktree` imports
+/// `Tidepool.Effects` and the reverse would be a module cycle. Both author-
+/// facing planes fold `EffectDecl::extra_imports` the same way, so both are
+/// asserted here.
+#[test]
+fn worktree_decl_imports_the_module_that_defines_the_relocated_helpers() {
+    let decls = vec![tidepool_mcp::console_decl(), tidepool_mcp::worktree_decl()];
+    assert_eq!(
+        tidepool_mcp::worktree_decl().extra_imports.to_vec(),
+        vec!["import Tidepool.Worktree"]
+    );
+    assert!(
+        tidepool_mcp::build_preamble(&decls, false).contains("import Tidepool.Worktree\n"),
+        "an eval whose row carries Worktree must import Tidepool.Worktree"
+    );
+    assert!(
+        tidepool_mcp::session_decl_module_env(&decls, false)
+            .imports
+            .iter()
+            .any(|i| i == "import Tidepool.Worktree"),
+        "a session DECL whose row carries Worktree must import Tidepool.Worktree"
+    );
 }
 
 /// Same for `Tidepool.Event`, plus the interposition `withHandler` is built
@@ -172,19 +235,31 @@ fn generated_module_imports_freer_internal_for_the_pump() {
     );
 }
 
+/// The authored `Tidepool.Worktree` source, which now DEFINES the ten
+/// non-representable helpers rather than re-exporting them (scaffold doc
+/// §11.9). Read from the tree because that is where the signatures live; the
+/// gates below are the same one-failure-mode string gates, following their
+/// subject.
+fn authored_worktree_module() -> String {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("tidepool-mcp lives one level under the workspace root")
+        .join("haskell/lib/Tidepool/Worktree.hs");
+    std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()))
+}
+
 /// `worktreeHead` is a FRESH read and must be effectful. If it ever degraded to
 /// a pure accessor it would be returning recorded state — the seed commit —
 /// which looks like it works while leaving open exactly the cross-cycle gap it
 /// exists to close. `worktreeId` is the opposite case and must stay pure.
 #[test]
 fn worktree_head_is_effectful_and_worktree_id_is_pure() {
-    let src = worktree_and_event_module();
     assert!(
-        src.contains("worktreeHead :: WorktreeHandle -> M GitOid"),
+        authored_worktree_module().contains("worktreeHead :: WorktreeHandle -> M GitOid"),
         "worktreeHead must be a fresh, effectful read — not a pure accessor over recorded state"
     );
     assert!(
-        src.contains("worktreeId :: WorktreeHandle -> WorktreeId"),
+        worktree_and_event_module().contains("worktreeId :: WorktreeHandle -> WorktreeId"),
         "worktreeId must stay pure — the handle already carries its receipt"
     );
 }

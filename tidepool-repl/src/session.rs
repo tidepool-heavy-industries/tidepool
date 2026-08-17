@@ -39,6 +39,7 @@ use tidepool_codegen::binding_table::{BindingEntry, BoundValue};
 use tidepool_codegen::emit::ExternalEnv;
 use tidepool_codegen::jit_machine::{ResumeInput, Suspendable, SuspendableOutcome};
 use tidepool_codegen::old_space::RootSlot;
+use tidepool_codegen::scope::ScopeId;
 use tidepool_effect::dispatch::DispatchEffect;
 use tidepool_effect::pause::PauseGate;
 use tidepool_eval::value::Value;
@@ -1833,6 +1834,8 @@ impl Session {
             value,
             type_display: Some(tail.type_display.clone()),
             defining_expr: Some(tail.defining_expr),
+            // The repl is a flat session: every bind is a ROOT-frame bind.
+            scope: ScopeId::ROOT,
         });
         TurnOutcome::Bound {
             name: tail.name,
@@ -2007,6 +2010,7 @@ impl Session {
                 type_display: Some(binder.type_display.clone()),
                 // The whole multi-bind turn defines each component (`(a,b) <- e`).
                 defining_expr: Some(tail.defining_expr.clone()),
+                scope: ScopeId::ROOT,
             });
             components.push(BoundComponent {
                 name: binder.name.clone(),
@@ -2256,6 +2260,7 @@ impl Session {
             value: it_value,
             type_display: Some(tail.type_display.clone()),
             defining_expr: Some(tail.defining_expr),
+            scope: ScopeId::ROOT,
         });
 
         let rendered = value_to_json(&rendered_value, self.core.session_table(), 0);

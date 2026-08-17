@@ -155,6 +155,12 @@ pub fn classify_compile(err: &CompileError) -> FailureEnvelope {
             Phase::Compile,
             version_skew_message(re),
         ),
+        // The extractor wrote an `asks.json` sidecar this reader could not
+        // parse — the same "wire artifact this reader can't read" story as
+        // `ReadError`, just for the typed-yield sidecar instead of the CBOR.
+        CompileError::Asks(_) => {
+            FailureEnvelope::new(FailureClass::VersionSkew, Phase::Compile, err.to_string())
+        }
     }
 }
 

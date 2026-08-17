@@ -66,6 +66,16 @@ pub(crate) fn to_turn_response(resp: ChatResponse) -> Result<TurnResponse, Provi
     let usage = Usage {
         input_tokens: resp.usage.prompt_tokens.unwrap_or(0).max(0) as u64,
         output_tokens: resp.usage.completion_tokens.unwrap_or(0).max(0) as u64,
+        // Populated ONLY when genai actually surfaced the field — it maps
+        // `prompt_tokens_details` straight from the upstream response and
+        // leaves it `None` for a provider/turn that reports no cache detail.
+        // An absent detail block stays `None` (not reported), never `0`.
+        cached_input_tokens: resp
+            .usage
+            .prompt_tokens_details
+            .as_ref()
+            .and_then(|d| d.cached_tokens)
+            .map(|n| n.max(0) as u64),
     };
     // genai's chat/completions path carries no reasoning-summary stream.
     Ok(TurnResponse {

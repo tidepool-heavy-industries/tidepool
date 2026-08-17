@@ -1015,18 +1015,26 @@ fn check_double(bits: u64) -> Result<(), String> {
     }
 
     // --- decode: structural invariants (exact, all finite nonzero) ---
-    // Mantissa is normalised to have no trailing zeros → odd (nonzero), and
-    // bounded by 2^53 (52-bit fraction + implicit leading bit).
+    // GHC's decodeDouble_Int64# does NOT reduce trailing zeros — the mantissa
+    // is the raw significand. For a NORMAL double: 2^52 <= |m1| < 2^53 (the
+    // raw 52-bit fraction plus the implicit leading bit). For a SUBNORMAL
+    // (raw exponent field == 0): 0 < |m1| < 2^52 (no implicit bit, no
+    // canonical lower bound, just nonzero since d != 0).
     if m1 == 0 {
         return Err(format!("decode of nonzero {d:?} gave zero mantissa (B1)"));
     }
-    if m1 % 2 == 0 {
+    let raw_exp = (bits >> 52) & 0x7ff;
+    let abs_m1 = m1.unsigned_abs();
+    if raw_exp == 0 {
+        if abs_m1 >= (1u64 << 52) {
+            return Err(format!(
+                "decode mantissa {m1} of subnormal {d:?} out of range [1, 2^52) (B1)"
+            ));
+        }
+    } else if !(1u64 << 52..1u64 << 53).contains(&abs_m1) {
         return Err(format!(
-            "decode mantissa {m1} of {d:?} has trailing zero — not normalised (B1)"
+            "decode mantissa {m1} of normal {d:?} not in canonical range [2^52, 2^53) (B1)"
         ));
-    }
-    if m1.unsigned_abs() > (1u64 << 53) {
-        return Err(format!("decode mantissa {m1} of {d:?} exceeds 2^53 (B1)"));
     }
 
     // --- decode/encode identity in the magnitude band where the float

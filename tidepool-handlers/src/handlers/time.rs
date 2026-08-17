@@ -83,15 +83,6 @@ mod tests {
         ]
     }
 
-    fn extract_available() -> bool {
-        let bin =
-            std::env::var("TIDEPOOL_EXTRACT").unwrap_or_else(|_| "tidepool-extract".to_string());
-        std::process::Command::new(&bin)
-            .arg("--help")
-            .output()
-            .is_ok()
-    }
-
     /// Bundles `test_jit_time_format_golden` (pure computation — no Time
     /// effect dispatch; tests civil_from_days + formatting on two literal
     /// `UTCTime`s) + `test_jit_time_now_e2e` (dispatches the real Time effect
@@ -99,7 +90,7 @@ mod tests {
     /// tidepool-extract compile.
     #[tokio::test]
     async fn test_jit_time_family() {
-        if !extract_available() {
+        if !tidepool_testing::eval_harness::extract_available() {
             eprintln!("skipping: tidepool-extract not available (set TIDEPOOL_EXTRACT)");
             return;
         }

@@ -22,14 +22,14 @@ pub mod render;
 pub mod resident;
 pub mod turn;
 
-pub use persistent::PersistentSession;
+pub use persistent::{PersistentSession, ScopeRetirement};
 
 pub use engine::{
     extract_ask_request, AbortOutcome, EngineConfig, GateDispatcher, OutputSink, RenderPolicy,
     ResumeOutcome, Retention, SessionEngine, StartError, StartTurn, TurnOutcome,
 };
 
-pub use resident::{ResidentError, ResidentOutcome, ResidentSession};
+pub use resident::{ResidentError, ResidentOutcome, ResidentSession, RootCustody};
 
 pub use turn::{
     classify_block, compile_session_turn, render_template, run_turn, run_turn_batch,
@@ -38,8 +38,10 @@ pub use turn::{
     TurnResult, TurnTemplate, ValueTier, DECL_TEMPLATE_SOURCE,
 };
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+use tidepool_codegen::scope::ScopeId;
 use tidepool_extract_cmd::{ExitVerdict, ExtractCmd};
 use tidepool_repr::{Generation, SessionId, SessionModule};
 
@@ -117,6 +119,10 @@ fn compile_error_to_session_error(e: crate::CompileError) -> SessionError {
             path.display()
         )),
         CompileError::ReadError(err) => SessionError::BinderExtraction(err.to_string()),
+        // This lane never requests the asks sidecar (it never reaches
+        // `compile_targets`), but the variant must still map somewhere:
+        // treat it the same as any other wire artifact this reader rejected.
+        CompileError::Asks(msg) => SessionError::BinderExtraction(msg),
         CompileError::IOTypeDetected => {
             SessionError::BinderExtraction("IO type detected in decl turn".to_string())
         }
@@ -141,6 +147,25 @@ pub struct SessionLib {
     /// the import. Empty by default (the pure `standalone_default` surface needs
     /// only the stdlib). Set via [`with_validation_include`](Self::with_validation_include).
     extra_include: Vec<PathBuf>,
+    /// Each scope's current decl-plane tip: the generation a new turn in that
+    /// scope chains its [`DeclTurn::parent`] from (PRD 21 lane C2,
+    /// `plans/self-iterating-harness/21-c2-scope-trees.md` §1.2). `SessionLib`
+    /// does not own the [`tidepool_codegen::scope::ScopeTree`] itself (that
+    /// lives on `PersistentSession`) — it only keys this map by whatever
+    /// [`ScopeId`] a caller passes to an `_in` method.
+    ///
+    /// ROOT is seeded at [`Self::open`] and every other scope is seeded from
+    /// its PARENT's tip at mint time ([`Self::seed_scope`], called by
+    /// `PersistentSession::mint_scope`, which owns the tree). That seeding is
+    /// load-bearing, not bookkeeping: a scope absent from this map resolves to
+    /// `Generation(0)` — the empty environment — and NEVER to the log's global
+    /// tip. Falling back to the global tip would hand a scope whatever turn
+    /// happened to be pushed last in ANY scope, so a sibling defining between
+    /// a scope's mint and its first use would leak into it, and a child
+    /// defining before its parent's next turn would leak UPWARD. Both are
+    /// direct violations of PRD 21 locked decision 4; the regression is pinned
+    /// by `session_decl_scope_tree.rs`.
+    tips: HashMap<ScopeId, Generation>,
 }
 
 impl SessionLib {
@@ -160,6 +185,10 @@ impl SessionLib {
             log: DeclLog::new(),
             env,
             extra_include: Vec::new(),
+            // ROOT starts at the empty environment. Seeding it explicitly is
+            // what keeps `scope_tip`'s miss case meaning "empty" rather than
+            // "whatever was pushed last anywhere" — see the field docs.
+            tips: HashMap::from([(ScopeId::ROOT, Generation(0))]),
         })
     }
 
@@ -186,18 +215,56 @@ impl SessionLib {
         self.log.generation()
     }
 
+    /// The generation `scope`'s decl plane currently stands at — the
+    /// [`DeclTurn::parent`] a new turn in `scope` chains from. `Generation(0)`
+    /// means `scope` has never had a turn pushed (nor inherited one): the same
+    /// meaning as an empty session at ROOT. There is NO fallback to the log's
+    /// global tip — see the `tips` field docs for why that is load-bearing, and
+    /// why a scope minted outside `PersistentSession::mint_scope` therefore
+    /// starts empty rather than inheriting anything.
+    #[must_use]
+    pub fn scope_tip(&self, scope: ScopeId) -> Generation {
+        self.tips.get(&scope).copied().unwrap_or(Generation(0))
+    }
+
+    /// Seed `scope`'s decl tip with the generation it INHERITS — its parent's
+    /// tip at mint time. Called by `PersistentSession::mint_scope`, which owns
+    /// the [`ScopeTree`](tidepool_codegen::scope::ScopeTree) and is therefore
+    /// the only place that knows a scope's parent.
+    ///
+    /// A no-op once `scope` has a tip of its own: seeding must never rewind a
+    /// scope that has already pushed turns, and re-seeding a live scope would
+    /// silently drop its declarations.
+    pub fn seed_scope(&mut self, scope: ScopeId, inherited: Generation) {
+        self.tips.entry(scope).or_insert(inherited);
+    }
+
     /// The current session-library module, or `None` before any declaration.
+    /// `current_module() == current_module_in(ScopeId::ROOT)`.
     #[must_use]
     pub fn current_module(&self) -> Option<SessionModule> {
-        let g = self.log.generation();
+        self.current_module_in(ScopeId::ROOT)
+    }
+
+    /// [`Self::current_module`], but for `scope`'s own tip.
+    #[must_use]
+    pub fn current_module_in(&self, scope: ScopeId) -> Option<SessionModule> {
+        let g = self.scope_tip(scope);
         (g.0 > 0).then(|| SessionModule::lib(g))
     }
 
     /// The `import Tidepool.Session.Lib.G<g>` line a turn should prepend to see
     /// the accumulated declarations, or `None` if the session is empty.
+    /// `import_line() == import_line_in(ScopeId::ROOT)`.
     #[must_use]
     pub fn import_line(&self) -> Option<String> {
-        self.current_module()
+        self.import_line_in(ScopeId::ROOT)
+    }
+
+    /// [`Self::import_line`], but for `scope`'s own tip.
+    #[must_use]
+    pub fn import_line_in(&self, scope: ScopeId) -> Option<String> {
+        self.current_module_in(scope)
             .map(|m| format!("import {}", m.module_name()))
     }
 
@@ -258,13 +325,22 @@ impl SessionLib {
     /// assembler to hide session-defined names from the Prelude import so a
     /// user function named `over`/`view`/etc. resolves unambiguously to the
     /// session decl rather than the Prelude re-export.
+    /// `decl_value_names() == decl_value_names_in(ScopeId::ROOT)`.
     #[must_use]
     pub fn decl_value_names(&self) -> Vec<&str> {
+        self.decl_value_names_in(ScopeId::ROOT)
+    }
+
+    /// [`Self::decl_value_names`], but walking only `scope`'s own parent
+    /// chain — a sibling scope's same-named value never shadows this one.
+    #[must_use]
+    pub fn decl_value_names_in(&self, scope: ScopeId) -> Vec<&str> {
         // Latest-wins with retraction: a name removed by a later retraction turn
         // (its binding migrated to the value plane) is no longer a decl-plane
         // value, so it drops out.
         let mut live: Vec<&str> = Vec::new();
-        for turn in &self.log.turns {
+        for g in self.log.chain_from_root(self.scope_tip(scope)) {
+            let turn = &self.log.turns[(g.0 - 1) as usize];
             for r in &turn.retracts {
                 live.retain(|n| *n != r.as_str());
             }
@@ -283,6 +359,10 @@ impl SessionLib {
     /// [`Self::decl_value_names`]) so a session `data Foo`/`class Foo` shadows a
     /// same-named library type instead of becoming an ambiguous occurrence
     /// (e.g. a session `data Hit` vs the `Library` `Hit`).
+    ///
+    /// KNOWN PRE-EXISTING ASYMMETRY (not fixed here, deliberately): unlike
+    /// [`Self::decl_value_names`] this flat-maps EVERY turn in the whole log —
+    /// it honors neither `retracts` nor a scope's parent chain.
     #[must_use]
     pub fn decl_type_names(&self) -> Vec<&str> {
         self.log
@@ -301,9 +381,16 @@ impl SessionLib {
     /// The currently in-scope declaration heads paired with the generation of
     /// their latest defining turn — the decl-plane half of the live
     /// `tidepool://session/bindings` resource snapshot. Latest-wins across turns.
+    /// `current_decl_heads() == current_decl_heads_in(ScopeId::ROOT)`.
     #[must_use]
     pub fn current_decl_heads(&self) -> Vec<(String, u64)> {
-        self.log.current_heads()
+        self.current_decl_heads_in(ScopeId::ROOT)
+    }
+
+    /// [`Self::current_decl_heads`], but for `scope`'s own parent chain.
+    #[must_use]
+    pub fn current_decl_heads_in(&self, scope: ScopeId) -> Vec<(String, u64)> {
+        self.log.current_heads_at(self.scope_tip(scope))
     }
 
     /// A cache salt unique to `(session, generation)`. Threaded into
@@ -334,6 +421,16 @@ impl SessionLib {
     /// ALL declaration kinds — `data`, `class`, `instance`, `type`, and values.
     pub fn define(&mut self, decl_text: &str) -> Result<Generation, SessionError> {
         self.define_batch(&[decl_text])
+    }
+
+    /// [`Self::define`], but against `scope`'s own decl plane rather than
+    /// ROOT's — see [`Self::define_batch_with_vals_in`].
+    pub fn define_scoped_in(
+        &mut self,
+        scope: ScopeId,
+        decl_text: &str,
+    ) -> Result<Generation, SessionError> {
+        self.define_batch_with_vals_in(scope, &[decl_text], &[], &[])
     }
 
     /// [`Self::define`] plus scoping the declaration against live session
@@ -375,8 +472,26 @@ impl SessionLib {
 
     /// [`Self::define_batch`] plus session-value scoping — see
     /// [`Self::define_with_vals`] for what `import_modules`/`inject_modules` do.
+    /// `define_batch_with_vals(...) == define_batch_with_vals_in(ScopeId::ROOT, ...)`.
     pub fn define_batch_with_vals(
         &mut self,
+        decl_texts: &[&str],
+        import_modules: &[String],
+        inject_modules: &[String],
+    ) -> Result<Generation, SessionError> {
+        self.define_batch_with_vals_in(ScopeId::ROOT, decl_texts, import_modules, inject_modules)
+    }
+
+    /// [`Self::define_batch_with_vals`], but the new turn chains from
+    /// `scope`'s own tip instead of ROOT's — the ONE real define
+    /// implementation; every other `define*` funnels into this one. On
+    /// failure (write or GHC validation), `scope`'s tip is restored to
+    /// exactly what it was before this call, and every OTHER scope's tip is
+    /// left untouched — a failed define in a child scope never disturbs a
+    /// sibling or the parent.
+    pub fn define_batch_with_vals_in(
+        &mut self,
+        scope: ScopeId,
         decl_texts: &[&str],
         import_modules: &[String],
         inject_modules: &[String],
@@ -387,7 +502,7 @@ impl SessionLib {
             .map(|s| (*s).to_string())
             .collect();
         if sources.is_empty() {
-            return Ok(self.log.generation());
+            return Ok(self.scope_tip(scope));
         }
 
         let combined = sources.join("\n\n");
@@ -421,12 +536,16 @@ impl SessionLib {
             }
         };
 
-        self.log.push(DeclTurn {
-            sources,
-            items,
-            retracts: Vec::new(),
-        });
-        let gen = self.log.generation();
+        let tip_before = self.tips.get(&scope).copied();
+        let gen = self.push_turn_in(
+            scope,
+            DeclTurn {
+                sources,
+                items,
+                retracts: Vec::new(),
+                parent: None, // set inside push_turn_in from scope's tip
+            },
+        );
         let rendered = render::render_module_with_vals(&self.log, gen, &self.env, import_modules);
         // Roll the just-pushed turn back on a write failure, exactly as the
         // validation-failure path below does — a bare `?` here would bump the
@@ -434,6 +553,7 @@ impl SessionLib {
         // every later turn that imports the (missing) gen module.
         if let Err(e) = self.write_module(&rendered) {
             self.log.turns.pop();
+            self.restore_tip(scope, tip_before);
             return Err(e);
         }
 
@@ -443,10 +563,38 @@ impl SessionLib {
             self.log.turns.pop();
             let gen_path = self.root.join(rendered.module.relative_hs_path());
             let _ = std::fs::remove_file(&gen_path);
+            self.restore_tip(scope, tip_before);
             return Err(e);
         }
 
         Ok(gen)
+    }
+
+    /// Append `turn` as `scope`'s next turn: chains its `parent` from
+    /// [`Self::scope_tip`], pushes it to the shared log, and advances
+    /// `scope`'s tip to the new generation. Returns the new generation.
+    fn push_turn_in(&mut self, scope: ScopeId, mut turn: DeclTurn) -> Generation {
+        let tip = self.scope_tip(scope);
+        turn.parent = (tip.0 > 0).then_some(tip);
+        let gen = self.log.push(turn);
+        self.tips.insert(scope, gen);
+        gen
+    }
+
+    /// Undo [`Self::push_turn_in`]'s tip bump for `scope` — restores it to
+    /// `tip_before` (the value read from `self.tips` immediately before the
+    /// push), which may be `None` if `scope` had never been used yet. Paired
+    /// with a `self.log.turns.pop()` on every rollback path so the log and
+    /// `tips` stay consistent, and touches no other scope's tip.
+    fn restore_tip(&mut self, scope: ScopeId, tip_before: Option<Generation>) {
+        match tip_before {
+            Some(g) => {
+                self.tips.insert(scope, g);
+            }
+            None => {
+                self.tips.remove(&scope);
+            }
+        }
     }
 
     /// Retract `name` from the decl plane: after its binding migrates to the
@@ -462,19 +610,38 @@ impl SessionLib {
     /// shell minus `name`. The shell introduces NO new source (only subtracts an
     /// export), so it cannot fail to type-check — GHC validation is skipped,
     /// making retraction cheap (no ~6s compile).
+    /// `retract(name) == retract_in(ScopeId::ROOT, name)`.
     pub fn retract(&mut self, name: &str) -> Result<(), SessionError> {
-        if !self.log.current_heads().iter().any(|(h, _)| h == name) {
+        self.retract_in(ScopeId::ROOT, name)
+    }
+
+    /// [`Self::retract`], but against `scope`'s own decl plane — a name
+    /// retracted in a child scope never touches the parent's (or a sibling's)
+    /// tip or heads.
+    pub fn retract_in(&mut self, scope: ScopeId, name: &str) -> Result<(), SessionError> {
+        let tip = self.scope_tip(scope);
+        if !self
+            .log
+            .current_heads_at(tip)
+            .iter()
+            .any(|(h, _)| h == name)
+        {
             return Ok(());
         }
-        self.log.push(DeclTurn {
-            sources: Vec::new(),
-            items: Vec::new(),
-            retracts: vec![name.to_string()],
-        });
-        let gen = self.log.generation();
+        let tip_before = self.tips.get(&scope).copied();
+        let gen = self.push_turn_in(
+            scope,
+            DeclTurn {
+                sources: Vec::new(),
+                items: Vec::new(),
+                retracts: vec![name.to_string()],
+                parent: None, // set inside push_turn_in from scope's tip
+            },
+        );
         let rendered = render::render_module(&self.log, gen, &self.env);
         if let Err(e) = self.write_module(&rendered) {
             self.log.turns.pop(); // keep the log consistent with disk
+            self.restore_tip(scope, tip_before);
             return Err(e);
         }
         Ok(())
@@ -600,6 +767,50 @@ mod tests {
         assert_eq!(lib.generation(), Generation(0));
         assert!(lib.current_module().is_none());
         assert!(lib.import_line().is_none());
+    }
+
+    /// An unseeded scope resolves to the EMPTY environment, never to the
+    /// log's global tip. The global-tip fallback is the leak PRD 21 locked
+    /// decision 4 forbids in both directions: a sibling pushing a turn
+    /// between a scope's mint and its first use would leak into that scope,
+    /// and a child defining before its parent's next turn would leak upward
+    /// into the parent. (The GHC-validated end-to-end form of this lives in
+    /// `tests/session_decl_scope_tree.rs`; this pins the pure tip algebra.)
+    #[test]
+    fn an_unseeded_scope_is_empty_not_the_global_tip() {
+        let dir = tempfile::tempdir().unwrap();
+        let lib =
+            SessionLib::open(SessionId(1), dir.path(), ModuleEnv::standalone_default()).unwrap();
+        assert_eq!(lib.scope_tip(ScopeId::ROOT), Generation(0));
+        assert_eq!(
+            lib.scope_tip(ScopeId(42)),
+            Generation(0),
+            "a scope nobody seeded sees nothing, not the last turn pushed anywhere"
+        );
+    }
+
+    /// Seeding carries the PARENT's environment down and is idempotent — it
+    /// must never rewind a scope that has already pushed turns, which would
+    /// silently drop that scope's own declarations.
+    #[test]
+    fn seed_scope_inherits_once_and_never_rewinds() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut lib =
+            SessionLib::open(SessionId(1), dir.path(), ModuleEnv::standalone_default()).unwrap();
+
+        lib.seed_scope(ScopeId(1), Generation(3));
+        assert_eq!(lib.scope_tip(ScopeId(1)), Generation(3));
+
+        lib.seed_scope(ScopeId(1), Generation(9));
+        assert_eq!(
+            lib.scope_tip(ScopeId(1)),
+            Generation(3),
+            "re-seeding a live scope is a no-op, not a rewind"
+        );
+
+        // Siblings seeded from one parent tip start identical and independent.
+        lib.seed_scope(ScopeId(2), Generation(3));
+        assert_eq!(lib.scope_tip(ScopeId(2)), lib.scope_tip(ScopeId(1)));
     }
 
     #[test]

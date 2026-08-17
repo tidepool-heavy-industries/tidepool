@@ -1,7 +1,8 @@
 //! Acceptance: an EFFECTFUL value bind persists across turns.
 //!
 //! The motivating case the decl plane cannot express: turn 1 binds a value
-//! via a FORK (`steps <- runLLMTurnFork @[Int] …`) — an effectful bind that
+//! via a FORK (`steps <- either … <$> runLLMTurnFork @[Int] …`) — an
+//! effectful bind that
 //! SUSPENDS at the fork — and turn 2 references `steps` as a live typed binding.
 //! `acceptance_cross_turn` only covers the weaker decl-plane property (a pure
 //! `steps = [1,2,3]` CAF); this covers the value plane end to end through the
@@ -44,6 +45,7 @@ fn usage() -> Usage {
     Usage {
         input_tokens: 100,
         output_tokens: 20,
+        cached_input_tokens: None,
     }
 }
 
@@ -78,7 +80,17 @@ async fn an_effectful_fork_bind_persists_into_the_next_turn() {
     let replies = vec![
         // Turn 1: an EFFECTFUL bind — the RHS forks, so the bind suspends and
         // materializes only when the fork is answered.
-        reply("I'll ask a sub-agent for the steps.\n\n```haskell\nsteps <- runLLMTurnFork @[Int] \"give me [1,2,3]\"\n```"),
+        //
+        // The `either` is not decoration. `runLLMTurnFork @T` answers
+        // `Either InvocationExit T` (PRD 21 decision 6), and `InvocationExit`
+        // lives in the per-fragment generated `Tidepool.Effects` — so binding
+        // the `Either` ITSELF is refused by the cross-row bind guard
+        // (`Main.mkBoundBinders`/`typeMentionsEffectMonad`: a later turn gets
+        // its own `Tidepool.Effects`, so a value naming one cannot cross).
+        // Projecting to a pure `[Int]` AT the bind is the spelling that
+        // crosses, and it leaves the mechanism under test untouched: the RHS
+        // still suspends at the fork and still materializes on resume.
+        reply("I'll ask a sub-agent for the steps.\n\n```haskell\nsteps <- either (\\_ -> []) id <$> runLLMTurnFork @[Int] \"give me [1,2,3]\"\n```"),
         // The fork answerer (runs against the suspended parent): the raw [Int].
         reply("```haskell\nresume ([1, 2, 3] :: [Int])\n```"),
         // Turn 2: a pure bind that references the PERSISTED `steps`.

@@ -25,13 +25,13 @@
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
 use crate::error::WorktreeError;
 use crate::id::EventId;
 use crate::monitor::RepositoryEvent;
+use crate::storage::{now_ms, storage_failure};
 
 /// A journalled row. `cursor` is the position AFTER this row — a subscription
 /// registering now stores the current end and only ever reads forward.
@@ -41,16 +41,6 @@ pub struct JournalEntry {
     pub event_id: EventId,
     pub event: RepositoryEvent,
     pub recorded_at_ms: i64,
-}
-
-/// Build a [`WorktreeError::StorageFailure`] naming the path that actually
-/// failed, from any underlying error with a `Display` impl (`std::io::Error`
-/// for I/O, `serde_json::Error` for a corrupt record).
-fn storage_failure(path: &Path, detail: impl std::fmt::Display) -> WorktreeError {
-    WorktreeError::StorageFailure {
-        path: path.to_path_buf(),
-        detail: detail.to_string(),
-    }
 }
 
 /// Append-only, crash-safe, restart-durable.
@@ -240,11 +230,4 @@ impl EventJournal {
             .cloned()
             .collect())
     }
-}
-
-pub(crate) fn now_ms() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("system clock before unix epoch")
-        .as_millis() as i64
 }

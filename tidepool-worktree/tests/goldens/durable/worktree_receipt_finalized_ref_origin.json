@@ -1,0 +1,13 @@
+{
+  "worktree_id": "wt-finalized-0002",
+  "cwd": "/var/tidepool/worktrees/wt-finalized-0002",
+  "branch": "tidepool/worktree/sample-wt-finalized-0002",
+  "source_head": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "snapshot_ref": "refs/tidepool/snapshots/wt-finalized-0002",
+  "origin": {
+    "Ref": "refs/heads/main"
+  },
+  "source_repository": "/home/dev/repo",
+  "created_at_ms": 1700000001000,
+  "status": "Finalized"
+}

@@ -38,26 +38,29 @@ use std::sync::Arc;
 
 use parking_lot::Mutex;
 use serde_json::Value as Json;
+use tidepool_codegen::scope::ScopeId;
 use tidepool_effect::dispatch::DispatchEffect;
 use tidepool_eval::value::Value;
 use tidepool_mcp::CapturedOutput;
 use tidepool_repr::{DataConTable, Generation, SessionId};
 use tidepool_runtime::session::{
     run_turn, BoundBinder, CompiledTurn, ResidentError, ResidentOutcome, ResidentSession,
-    SessionLib, TemplateSelector, TurnRequest, TurnResult, TurnTemplate, DECL_TEMPLATE_SOURCE,
+    ScopeRetirement, SessionLib, TemplateSelector, TurnRequest, TurnResult, TurnTemplate,
+    DECL_TEMPLATE_SOURCE,
 };
 use tidepool_runtime::DEFAULT_NURSERY_SIZE;
 use tokio::sync::{mpsc, oneshot};
 
-use crate::compile::{self, AsksSidecar};
 use crate::effect_trace::{EffectRecord, EffectTrace, TracingDispatcher};
 use crate::engine::{
-    self, ClassifiedHole, EngineConfig, EngineError, HoleRouting, TurnOutcome, RESUME_HELPER,
+    self, AsksSidecar, ClassifiedHole, EngineConfig, EngineError, HoleRouting, TurnOutcome,
+    RESUME_HELPER,
 };
 use crate::forcing::{ForkShape, NodeTree, TreeError};
 use crate::log::{Actor, AnswerOutcome, LogWriter};
 use crate::provider::{DynModelProvider, Message, Role, StreamDelta, Usage};
 use crate::registry::{Checkout, CheckoutError};
+use crate::snapshot::{ContextSnapshot, SnapshotDigest};
 use crate::timing;
 use crate::tree::{FanBadge, HoleId, NodeId};
 
@@ -76,6 +79,8 @@ pub enum HarnessError {
     Tree(#[from] TreeError),
     #[error(transparent)]
     Engine(#[from] EngineError),
+    #[error(transparent)]
+    Classify(#[from] engine::ClassifyError),
     #[error("compile failed:\n{0}")]
     Compile(String),
     #[error("resident session error: {0}")]
@@ -104,6 +109,13 @@ pub enum HarnessError {
     /// for "never forced" or "busy, retry".
     #[error("node {node:?}: {detail}")]
     SessionMismatch { node: NodeId, detail: String },
+    /// A [`Harness::fork_from_snapshot`] naming a digest this harness has
+    /// never interned. Distinct from every node-scoped variant because the
+    /// caller's mistake is about a CACHE ROOT, not a node — a snapshot digest
+    /// is only ever minted by [`Harness::freeze_snapshot`] and is never
+    /// evicted, so this means "wrong digest", never "expired".
+    #[error("no frozen context snapshot with digest {0}")]
+    UnknownSnapshot(SnapshotDigest),
 }
 
 impl HarnessError {
@@ -167,6 +179,13 @@ struct NodeConvo {
     /// SHARED machine; retirement is that realm's scope exit). `None` = the
     /// session's default realm ([`OUTER_REALM`]).
     realm: Option<tidepool_codegen::jit_machine::RealmId>,
+    /// The scope-tree node this node's turns COMPILE and BIND in (PRD 21 lane
+    /// C2). The `realm` above is the window's HEAP-side lifetime (parked
+    /// frames, handles); this is its NAME-side one (decl tip, value-plane
+    /// frame). `None` = [`ScopeId::ROOT`], the flat session — which is every
+    /// pre-C2 node, unchanged. [`Harness::terminate_node`] exits BOTH in one
+    /// step, so a window's names and its heap roots retire together.
+    scope: Option<ScopeId>,
     pending: Option<PendingHole>,
     /// The typed hole this node is currently answering, when it answers by
     /// `finalize` (the self-iterating harness's answerer). Set per hole by
@@ -214,6 +233,19 @@ struct NodeConvo {
     /// Cleared by `TurnLease::drop`, so every exit path (success, `?`, panic
     /// unwind) releases it.
     turn_lease: bool,
+    /// When `true`, [`Harness::run_block`]'s checkout attempts for THIS node
+    /// retry (short backoff) instead of failing fast on
+    /// [`HarnessError::TurnInFlight`] — set via
+    /// [`Harness::set_retry_checkout_on_contention`] for a node whose
+    /// contention is EXPECTED and benign: a concurrently-driven sibling
+    /// realm on the SAME shared session (PRD 20 S1-L4,
+    /// `SelfHarnessDriver::drive_fanout_child`), never a re-entrant/manually
+    /// held conflict. `false` by default for every node — the existing
+    /// fail-fast contract (`tests/turn_lease.rs`) is unchanged unless a
+    /// caller explicitly opts in. Read fresh per checkout attempt (not
+    /// snapshotted), so it can be set right after node creation and take
+    /// effect on that node's very first turn.
+    retry_checkout_on_contention: bool,
 }
 
 /// An RAII hold on [`NodeConvo::turn_lease`], returned by
@@ -480,6 +512,16 @@ fn pick_render_opts<'a>(
 pub const OUTER_REALM: tidepool_codegen::jit_machine::RealmId =
     tidepool_codegen::jit_machine::RealmId(0);
 
+/// A queued window exit: the two halves of an attached node's retirement that
+/// need the machine in hand. Either half may be absent (a node with a realm and
+/// no scope is every pre-C2 attached node).
+struct PendingWindowExit {
+    session: tidepool_repr::SessionId,
+    node: NodeId,
+    realm: Option<tidepool_codegen::jit_machine::RealmId>,
+    scope: Option<ScopeId>,
+}
+
 pub struct Harness {
     tree: NodeTree<Session>,
     cfg: EngineConfig,
@@ -502,16 +544,21 @@ pub struct Harness {
     child_cfg: EngineConfig,
     provider: Arc<dyn DynModelProvider>,
     convos: Mutex<HashMap<NodeId, NodeConvo>>,
-    /// Realm closes QUEUED because the attached node's retirement found the
+    /// Window exits QUEUED because the attached node's retirement found the
     /// shared machine out on a turn — drained by the next path holding the
-    /// machine (`run_checked_out`/`with_session`). Scope exit as an eventual
-    /// postcondition; the realm identity lives here until close is confirmed.
-    pending_realm_closes: Mutex<
-        Vec<(
-            tidepool_repr::SessionId,
-            tidepool_codegen::jit_machine::RealmId,
-        )>,
-    >,
+    /// machine (`run_checked_out`/`with_session`). An eventual postcondition,
+    /// never a best-effort side effect; both halves of a window's identity (its
+    /// REALM, whose close reclaims parked frames and handles, and its SCOPE,
+    /// whose retirement drops the value-plane frame and deregisters the roots
+    /// it solely owns) live here until the exit is confirmed.
+    pending_window_exits: Mutex<Vec<PendingWindowExit>>,
+    /// What a node's SCOPE retirement actually released, recorded at
+    /// [`Self::terminate_node`] and read back by [`Self::scope_retirement`].
+    /// The GC-root ledger's movement is the witness for accounting class 4, so
+    /// the receipt has to survive the node whose retirement produced it —
+    /// `convos` is gone by then. Keyed by node, so it is bounded by the run's
+    /// node count, not by the number of retirements.
+    scope_retirements: Mutex<HashMap<NodeId, ScopeRetirement>>,
     /// A just-created node's staged [`NodeSeed`] — a root's opening prompt or
     /// a fork child's inherited transcript, either way paired with its
     /// framing — between node creation and `force` (a thunk node has no live
@@ -529,6 +576,81 @@ pub struct Harness {
     /// the sender and fires it — the pair is inserted together and removed
     /// together, never independently.
     escalations: Mutex<HashMap<NodeId, (Escalation, oneshot::Sender<OperatorDecision>)>>,
+    /// Interned frozen context prefixes, keyed by digest — the cache roots
+    /// [`Self::freeze_snapshot`] mints and [`Self::fork_from_snapshot`]
+    /// branches from. Append-only for this harness's life: an entry is never
+    /// mutated (PRD 21 locked decision 2) and never evicted, so a digest a
+    /// child was minted from always resolves for as long as the child can.
+    snapshots: Mutex<HashMap<SnapshotDigest, InternedSnapshot>>,
+    /// Which frozen cache root a snapshot-forked child branched from, and
+    /// whether its one-shot `BranchInvocation` receipt has been written yet.
+    /// Keyed by the CHILD node; only nodes minted by
+    /// [`Self::fork_from_snapshot`] appear here, so an ordinary fork/root node
+    /// costs nothing and emits nothing.
+    branch_origins: Mutex<HashMap<NodeId, BranchOrigin>>,
+}
+
+/// A [`ContextSnapshot`] plus the node whose transcript it was frozen from —
+/// which is what [`Harness::fork_from_snapshot`] parents a child under and
+/// what `TurnForked` references. Kept beside the snapshot in ONE map rather
+/// than in a parallel origin map that could desync; [`ContextSnapshot`] itself
+/// stays purely about the context, with no node identity baked in.
+///
+/// Two different nodes whose transcript AND framing are byte-identical freeze
+/// to the same digest and therefore share this entry — correctly, since they
+/// are the same cache root; `origin` is then whichever node froze it FIRST.
+struct InternedSnapshot {
+    origin: NodeId,
+    snapshot: Arc<ContextSnapshot>,
+}
+
+/// See [`Harness::branch_origins`].
+struct BranchOrigin {
+    snapshot: SnapshotDigest,
+    /// Set once the branch's first turn has written its `BranchInvocation`.
+    /// The entry itself outlives that (so [`Harness::branch_snapshot`] keeps
+    /// answering for the node's whole life) — this flag is what makes the
+    /// receipt one-shot.
+    invocation_logged: bool,
+}
+
+/// A VALIDATED pointer to a frozen [`ContextSnapshot`] — the Rust-side
+/// capability behind the authored `ContextRef` (PRD 21 lane C3, closing GAP
+/// 1: the frozen-snapshot seam gets an authored-surface reach). Minted ONLY
+/// by [`Harness::resolve_context_ref`], the ONE place the "this digest
+/// resolves to something we actually froze" check happens — a caller
+/// holding one has already proven possession-is-permission, so nothing
+/// downstream ([`Harness::fork_from_context_ref`],
+/// [`Harness::context_ref_scope`]) re-derives or can bypass that check; an
+/// unknown/stale digest is refused right here, once, as a typed
+/// [`HarnessError::UnknownSnapshot`] — never a silent fresh-root fallback at
+/// some later call site.
+///
+/// **Typestate, not discipline** (per the frozen-vs-live review): no method
+/// on this type reaches the LIVE transcript a snapshot was frozen from —
+/// only [`Harness::snapshot`]'s own `Arc<ContextSnapshot>` (itself immutable
+/// by construction: [`ContextSnapshot`] has no `&mut` accessor at all) and
+/// the read-only scope lookup [`Harness::context_ref_scope`]. A raw string
+/// cannot become a `ContextRef` except through the one validating
+/// constructor, so "an unvalidated digest reached the fork/mint path" is not
+/// a mistake a caller of this type can make. What is still enforced by
+/// DISCIPLINE, underneath, in C2's own seams (out of this lane's boundary to
+/// re-derive): [`ContextSnapshot`]'s immutability is "no mutator exists on
+/// the struct", not a phantom-typed frozen/live state machine, and
+/// `Harness::snapshots` is a plain interior-mutable map rather than a
+/// consuming `frozen: fn(Live) -> Snapshot` transition — compaction already
+/// mints a NEW digest/cache root rather than rewriting one (locked decision
+/// 2), which is the semantic this guidance asks for, but it is a live→live
+/// call (`replace_transcript_with_summary`) that happens not to touch an
+/// interned entry, not a type that makes the old one unreachable.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ContextRef(SnapshotDigest);
+
+impl ContextRef {
+    /// The validated digest this ref names — read-only.
+    pub fn digest(&self) -> &SnapshotDigest {
+        &self.0
+    }
 }
 
 impl Harness {
@@ -560,9 +682,12 @@ impl Harness {
             child_cfg,
             provider,
             convos: Mutex::new(HashMap::new()),
-            pending_realm_closes: Mutex::new(Vec::new()),
+            pending_window_exits: Mutex::new(Vec::new()),
+            scope_retirements: Mutex::new(HashMap::new()),
             pending: Mutex::new(HashMap::new()),
             escalations: Mutex::new(HashMap::new()),
+            snapshots: Mutex::new(HashMap::new()),
+            branch_origins: Mutex::new(HashMap::new()),
         })
     }
 
@@ -885,6 +1010,7 @@ impl Harness {
                 effect_trace,
                 effect_seq: 0,
                 realm: None,
+                scope: None,
                 pending: None,
                 answer_contract: None,
                 suspend_table: None,
@@ -895,6 +1021,7 @@ impl Harness {
                 framing,
                 last_turn_source: None,
                 turn_lease: false,
+                retry_checkout_on_contention: false,
             },
         );
         Ok(())
@@ -923,8 +1050,11 @@ impl Harness {
             .registry()
             .checkout_run(sid)
             .map_err(|e| HarnessError::Resident(format!("outer session checkout: {e}")))?;
-        self.drain_pending_realm_closes(sid, co.machine());
+        self.drain_pending_window_exits(sid, co.machine());
         co.machine().set_realm(OUTER_REALM);
+        // Same reset, name side: the shared session's own runs are ROOT-scoped,
+        // never sticky on whichever answerer window ran last.
+        co.machine().set_scope(ScopeId::ROOT);
         let r = f(co.machine());
         let holes: Vec<HoleId> = co
             .machine()
@@ -936,19 +1066,54 @@ impl Harness {
         Ok(r)
     }
 
-    /// Apply every queued realm close for `sid` (attached-node retirements
+    /// Apply every queued window exit for `sid` (attached-node retirements
     /// that found the machine out on a turn). Called by each path that has
-    /// the machine in hand, so scope exit converges even when retirement
+    /// the machine in hand, so a window's exit converges even when retirement
     /// raced a running turn.
-    fn drain_pending_realm_closes(&self, sid: tidepool_repr::SessionId, session: &mut Session) {
+    fn drain_pending_window_exits(&self, sid: tidepool_repr::SessionId, session: &mut Session) {
         let pending: Vec<_> = {
-            let mut q = self.pending_realm_closes.lock();
-            let (mine, rest): (Vec<_>, Vec<_>) = q.drain(..).partition(|(s, _)| *s == sid);
+            let mut q = self.pending_window_exits.lock();
+            let (mine, rest): (Vec<_>, Vec<_>) = q.drain(..).partition(|e| e.session == sid);
             *q = rest;
             mine
         };
-        for (_, realm) in pending {
-            let _ = session.close_realm(realm);
+        for exit in pending {
+            self.exit_window(session, exit.node, exit.realm, exit.scope);
+        }
+    }
+
+    /// The ONE place a window's realm close and scope retirement happen, so
+    /// the immediate path (`terminate_node` with the machine in hand) and the
+    /// queued path (`drain_pending_window_exits`) cannot diverge. Realm first
+    /// (parked frames and outstanding handles go), then scope — scope
+    /// retirement's sole-ownership rule reads the handle registry, so a handle
+    /// the realm still owned would otherwise wrongly pin a root.
+    fn exit_window(
+        &self,
+        session: &mut Session,
+        node: NodeId,
+        realm: Option<tidepool_codegen::jit_machine::RealmId>,
+        scope: Option<ScopeId>,
+    ) {
+        if let Some(realm) = realm {
+            let (frames, handles) = session.close_realm(realm);
+            if frames + handles > 0 && std::env::var("HARNESS_DEBUG").is_ok() {
+                eprintln!(
+                    "[harness] realm scope-exit for {node:?}: {frames} frame(s), \
+                     {handles} handle(s) released"
+                );
+            }
+        }
+        if let Some(scope) = scope.filter(|s| !s.is_root()) {
+            let receipt = session.retire_scope(scope);
+            if std::env::var("HARNESS_DEBUG").is_ok() {
+                eprintln!(
+                    "[harness] scope retirement for {node:?} ({scope:?}): {} scope(s), \
+                     {} binding(s), {} root(s) released",
+                    receipt.scopes_retired, receipt.bindings_retired, receipt.roots_released
+                );
+            }
+            self.scope_retirements.lock().insert(node, receipt);
         }
     }
 
@@ -1117,6 +1282,11 @@ impl Harness {
             Some(driven.usage),
             driven.reasoning.clone(),
         )?;
+        // A snapshot-forked branch's FIRST turn is where the shared-prefix /
+        // branch-suffix / provider-token receipt belongs: `transcript` above
+        // is precisely the request this turn sent. A no-op for every other
+        // node, and for this one on every later turn.
+        self.log_branch_invocation(node, &transcript, &driven.usage)?;
         {
             let mut convos = self.convos.lock();
             let convo = convos.get_mut(&node).ok_or(HarnessError::NoSession(node))?;
@@ -1348,6 +1518,21 @@ impl Harness {
             expr_import_lines.push(imports.to_string());
         }
         expr_import_lines.extend(session_module.clone());
+        // Value-plane bindings (mounted names included — PRD 21 lane C1's
+        // mount seam) are visible to a plain EXPRESSION turn, not just a
+        // `x <- e` BIND: without this, `mounted.applyMounted 41` (a bare
+        // expression) failed "not in scope" even though the SAME name
+        // resolved fine as the right-hand side of a bind. GHCi does not
+        // distinguish these two shapes' name scope, and neither should this.
+        // Reuses `bind_ctx`'s already-computed import line (decl module +
+        // CURRENT `Val.G<g>` per live name — never a shadowed gen, which
+        // would be an ambiguous occurrence): a harmless duplicate of the decl
+        // import already in `session_module` when both are present.
+        if let Some((session_imports, ..)) = &bind_ctx {
+            if !session_imports.is_empty() {
+                expr_import_lines.push(session_imports.clone());
+            }
+        }
         let expr_imports = expr_import_lines.join("\n");
         let target = self.cfg.turn_target(
             contract
@@ -1487,10 +1672,17 @@ impl Harness {
 
         match outcome {
             TurnResult::Decl { .. } => {
-                let checkout = self.checkout_run(node)?;
+                let checkout = self.checkout_run_retrying(node).await?;
+                // Into the node's OWN scope: the definition joins that scope's
+                // decl tip (which already re-exports its ancestors'), so it is
+                // visible to this window and its descendants and to nobody
+                // else — a sibling window never gains it, and neither does the
+                // parent. `run_checked_out` has already applied the scope to
+                // the session, so this reads it back rather than re-deriving.
+                let scope = self.node_scope(node);
                 let res = self
                     .run_checked_out(node, checkout, move |mut session| {
-                        let r = session.define_scoped(&[&decl_source]);
+                        let r = session.define_scoped_in(scope, &[&decl_source]);
                         (session, r)
                     })
                     .await?;
@@ -1556,7 +1748,7 @@ impl Harness {
 
                 // Run the compiled fragment against the session (move it onto
                 // the blocking pool and back — the resident session is `Send`).
-                let checkout = self.checkout_run(node)?;
+                let checkout = self.checkout_run_retrying(node).await?;
                 let run_table = table.clone();
                 let run_outcome = self
                     .run_checked_out(node, checkout, move |mut session| {
@@ -1601,7 +1793,7 @@ impl Harness {
                 Ok(engine::TurnOutcome::Completed { rendered })
             }
             Ok(ResidentOutcome::Suspended { hole, request, .. }) => {
-                let classified = engine::classify_hole(&request, &table, &asks);
+                let classified = engine::classify_hole(&request, &table, &asks)?;
                 let fork = matches!(classified.routing, HoleRouting::Fork { .. });
                 let ty = match &classified.routing {
                     HoleRouting::Fork { ty, .. }
@@ -1612,7 +1804,7 @@ impl Harness {
                 let site = match &classified.routing {
                     HoleRouting::Fork { site, .. }
                     | HoleRouting::RunLLMTurn { site, .. }
-                    | HoleRouting::Finalize { site, .. } => Some(crate::tree::SiteId(*site)),
+                    | HoleRouting::Finalize { site, .. } => Some(*site),
                     _ => None,
                 };
                 self.tree.hole_published(
@@ -1658,17 +1850,25 @@ impl Harness {
         node: NodeId,
     ) -> Option<(String, Vec<String>, PathBuf, Generation)> {
         let sid = self.tree.session_of(node)?;
+        let scope = self.node_scope(node);
         self.tree.registry().peek(sid, |s| {
             let root = s.lib_include_dir()?;
             // Imports: the decl `Lib.G<g>` module + the CURRENT `Val.G<g>` module
             // of each live name (newest gen only — shadowed gens are injected,
             // not imported, to avoid an ambiguous occurrence). Injection
             // (`--inject-val`) uses ALL live gens.
+            //
+            // BOTH import lists are resolved FROM THE NODE'S SCOPE, not from
+            // ROOT: the decl tip module a child imports already re-exports its
+            // parent's chain (so parent declarations are callable here), and
+            // the visible `Val.G<g>` set is the upward walk with child frames
+            // shadowing parent ones (so a sibling's bindings are not even
+            // nameable). At ROOT both are the pre-C2 lists verbatim.
             let mut import_lines: Vec<String> = Vec::new();
-            if let Some(m) = s.session_import_module() {
+            if let Some(m) = s.session_import_module_in(scope) {
                 import_lines.push(m);
             }
-            import_lines.extend(s.current_val_modules());
+            import_lines.extend(s.current_val_modules_in(scope));
             Some((
                 import_lines.join("\n"),
                 s.inject_val_modules(),
@@ -1702,7 +1902,7 @@ impl Harness {
         let table = compiled.table;
         let expr = compiled.expr;
 
-        let checkout = self.checkout_run(node)?;
+        let checkout = self.checkout_run_retrying(node).await?;
         let binder_for_run = binder.clone();
         let run_table = table.clone();
         let outcome = self
@@ -2015,7 +2215,7 @@ impl Harness {
     pub(crate) fn take_finalized_handle_keep_open(
         &self,
         node: NodeId,
-    ) -> Result<tidepool_codegen::jit_machine::ValueHandle, HarnessError> {
+    ) -> Result<tidepool_runtime::session::RootCustody, HarnessError> {
         let hole = {
             let convos = self.convos.lock();
             let convo = convos.get(&node).ok_or(HarnessError::NoSession(node))?;
@@ -2246,6 +2446,41 @@ impl Harness {
         let _ = self.terminate_node(child, "fork child failed");
     }
 
+    /// Put ONE child answer into the shape `node`'s parked fork/fanout
+    /// continuation actually expects.
+    ///
+    /// The two verbs that raise a [`HoleRouting::Fork`] disagree on it:
+    /// `runLLMTurnFork`/`runLLMTurnFanout` answer
+    /// `Either InvocationExit T` (PRD 21 locked decision 6 — a branch
+    /// position's failure is data), so a successful answer is `Right v`;
+    /// `Tidepool.Fork`'s `fork`/`forkAll` answer a bare `T` and are handed
+    /// back untouched. `source` is carried on the routing precisely because
+    /// the answer type alone cannot tell them apart.
+    ///
+    /// The wrap runs against the node's `suspend_table` — the constructor set
+    /// this hole was classified from — and hard-fails if `Right` is not in
+    /// it, rather than resuming with an unwrapped value the continuation
+    /// would then case-trap on.
+    fn wrap_fork_answer(
+        &self,
+        node: NodeId,
+        source: engine::ForkSource,
+        value: Value,
+    ) -> Result<Value, HarnessError> {
+        match source {
+            engine::ForkSource::ForkEffect => Ok(value),
+            engine::ForkSource::RunLLMTurn => {
+                let table = self
+                    .convos
+                    .lock()
+                    .get(&node)
+                    .and_then(|c| c.suspend_table.clone())
+                    .unwrap_or_default();
+                Ok(engine::build_child_answer_value(Ok(value), &table)?)
+            }
+        }
+    }
+
     /// Force + drive a FORK answerer for `node`'s pending single-fork hole
     /// (`fork @T` / `runLLMTurnFork @T`, `fan: None` — a fanout hole routes to
     /// [`Self::answer_fanout`] instead). Registers a child node (transcript
@@ -2265,10 +2500,13 @@ impl Harness {
             .get(&node)
             .and_then(|c| c.pending.clone())
             .ok_or(HarnessError::NotSuspended(node))?;
-        let (site_ty, prompt) = match &pending.classified.routing {
-            HoleRouting::Fork { ty, fan: None, .. } => {
-                (ty.clone(), pending.classified.prompt.clone())
-            }
+        let (site_ty, prompt, source) = match &pending.classified.routing {
+            HoleRouting::Fork {
+                ty,
+                fan: None,
+                source,
+                ..
+            } => (ty.clone(), pending.classified.prompt.clone(), *source),
             other => {
                 return Err(HarnessError::RoutingMismatch {
                     node,
@@ -2308,7 +2546,23 @@ impl Harness {
             }
         };
 
-        // Resume the parent with the child's typed answer.
+        // Resume the parent with the child's typed answer, in the shape the
+        // parked continuation expects: `runLLMTurnFork @T` answers
+        // `Either InvocationExit T`, so the value is wrapped in `Right` here;
+        // `Tidepool.Fork`'s `fork @T` answers a bare `T` and is not wrapped.
+        // Nothing on THIS path produces a `Left` — a child that fails here
+        // still hard-fails the fan (the escalation ladder in
+        // `drive_answerer_to_value` owns that policy, and turning its outcome
+        // into a typed exit is not this change's scope). The concurrent OUTER
+        // path (`SelfHarnessDriver::service_outer_fanout`) is where a
+        // child-attributable failure becomes `Left`.
+        let answer_value = match self.wrap_fork_answer(node, source, answer_value) {
+            Ok(v) => v,
+            Err(e) => {
+                self.cleanup_failed_child(child);
+                return Err(e);
+            }
+        };
         if let Err(e) = self.resume_parent(node, &pending.hole, answer_value).await {
             self.cleanup_failed_child(child);
             return Err(e);
@@ -2358,13 +2612,14 @@ impl Harness {
             .get(&node)
             .and_then(|c| c.pending.clone())
             .ok_or(HarnessError::NotSuspended(node))?;
-        let (list_ty, fan, prompts) = match &pending.classified.routing {
+        let (list_ty, fan, prompts, source) = match &pending.classified.routing {
             HoleRouting::Fork {
                 ty,
                 fan: Some(fan),
                 prompts,
+                source,
                 ..
-            } => (ty.clone(), *fan, prompts.clone()),
+            } => (ty.clone(), *fan, prompts.clone(), *source),
             other => {
                 return Err(HarnessError::RoutingMismatch {
                     node,
@@ -2431,7 +2686,10 @@ impl Harness {
             let _ = self.tree.node_done(child, "answer delivered".to_string());
             let _ = self.terminate_node(child, "answer delivered");
             children.push(child);
-            answers.push(value);
+            // Per-element shape first, list assembly after — `runLLMTurnFanout
+            // @T` answers `[Either InvocationExit T]`, `forkAll @T` answers
+            // `[T]`. See `wrap_fork_answer`.
+            answers.push(self.wrap_fork_answer(node, source, value)?);
         }
 
         let table = self
@@ -2706,7 +2964,7 @@ impl Harness {
             let include = compile_cfg.include.clone();
             let answerer_id = answerer.0;
             let compiled = tokio::task::spawn_blocking(move || {
-                compile::compile_turn(
+                engine::compile_turn(
                     &cfg_bin,
                     &src,
                     "result",
@@ -2723,8 +2981,17 @@ impl Harness {
                 Err(e) => {
                     // GHC-verbatim retry: feed the compile error back to the
                     // answerer. The continuation is NEVER consumed by a bad
-                    // attempt.
-                    let err = e.to_string();
+                    // attempt. `CompileError::Diagnostics`' own `Display` is
+                    // only a count ("Haskell compilation failed (N
+                    // diagnostic(s))") — `render_compile_error` renders the
+                    // full per-diagnostic text instead. This call site has no
+                    // `run_turn`-shaped candidate window of its own (this
+                    // compiles `template_answer_turn`'s module, not
+                    // `run_turn`'s), so remapping is skipped (empty
+                    // block/sources) and diagnostics render at their raw
+                    // template-space span — still GHC's own text, never a
+                    // summary.
+                    let err = render_compile_error(&e, "", "", "");
                     self.log_answer_attempt(
                         target,
                         &self
@@ -3034,7 +3301,7 @@ impl Harness {
                 // table snapshotted above (the compile the still-executing
                 // fragment was built with) and re-publish with its REAL
                 // site + type, same as a first-suspend `run_block` hole.
-                let classified = engine::classify_hole(&request, &table, &asks);
+                let classified = engine::classify_hole(&request, &table, &asks)?;
                 let fork = matches!(classified.routing, HoleRouting::Fork { .. });
                 let ty = match &classified.routing {
                     HoleRouting::Fork { ty, .. }
@@ -3045,7 +3312,7 @@ impl Harness {
                 let site = match &classified.routing {
                     HoleRouting::Fork { site, .. }
                     | HoleRouting::RunLLMTurn { site, .. }
-                    | HoleRouting::Finalize { site, .. } => Some(crate::tree::SiteId(*site)),
+                    | HoleRouting::Finalize { site, .. } => Some(*site),
                     _ => None,
                 };
                 self.tree.hole_published(
@@ -3069,17 +3336,284 @@ impl Harness {
         }
     }
 
+    // -----------------------------------------------------------------
+    // Frozen context snapshots (PRD 21 C2 §4)
+    // -----------------------------------------------------------------
+
+    /// FREEZE `node`'s current context prefix as a named cache root, returning
+    /// its [`SnapshotDigest`] — the explicit harness operation PRD 21 locked
+    /// decision 2 asks for.
+    ///
+    /// The frozen prefix is `[system(framing)] ++ transcript`, exactly what
+    /// [`engine::assemble_request`] re-emits for this node's next turn, and
+    /// exactly what a child forked from this digest carries verbatim. So a
+    /// child's own assembled prefix re-digests to this same value — that is
+    /// what "share the frozen prefix byte-stably" MEANS here, and it is
+    /// asserted (`tests/companion_snapshots.rs`), not inspected.
+    ///
+    /// **Idempotent.** An unchanged transcript freezes to the same digest, the
+    /// interned entry is not duplicated or replaced, and no second
+    /// `SnapshotFrozen` receipt is written — re-freezing is a lookup. A
+    /// CHANGED transcript (another turn, a compaction) yields a DIFFERENT
+    /// digest and a new interned entry; the old one, and every child already
+    /// forked from it, are untouched. Nothing is ever evicted.
+    ///
+    /// The digest is OUR identity for a prefix. It is not a provider cache
+    /// key and equality does not prove any provider reused anything — see
+    /// this crate's `CLAUDE.md`, "The provider cache-metric gap".
+    pub fn freeze_snapshot(&self, node: NodeId) -> Result<SnapshotDigest, HarnessError> {
+        let (transcript, framing, turn_seq) = {
+            let convos = self.convos.lock();
+            let convo = convos.get(&node).ok_or(HarnessError::NoSession(node))?;
+            (
+                convo.transcript.clone(),
+                convo.framing.clone(),
+                convo.turn_seq,
+            )
+        };
+        let snapshot = ContextSnapshot::freeze(framing, transcript, turn_seq);
+        let digest = snapshot.digest.clone();
+        let messages = snapshot.messages.len() as u64;
+        let prefix_bytes = snapshot.prefix_bytes();
+
+        // Intern under the lock, and decide THERE whether this freeze is new
+        // — so two concurrent freezes of the same prefix cannot both decide
+        // they are the first and write two receipts for one cache root.
+        let is_new = {
+            let mut snapshots = self.snapshots.lock();
+            match snapshots.entry(digest.clone()) {
+                std::collections::hash_map::Entry::Occupied(_) => false,
+                std::collections::hash_map::Entry::Vacant(slot) => {
+                    slot.insert(InternedSnapshot {
+                        origin: node,
+                        snapshot: Arc::new(snapshot),
+                    });
+                    true
+                }
+            }
+        };
+        if is_new {
+            self.tree
+                .snapshot_frozen(node, digest.clone(), messages, prefix_bytes)?;
+            tracing::info!(
+                node = node.0,
+                digest = %digest,
+                messages,
+                prefix_bytes,
+                "froze context snapshot"
+            );
+        }
+        Ok(digest)
+    }
+
+    /// Resolve a frozen snapshot by digest. `None` only for a digest this
+    /// harness never minted — an interned snapshot is never evicted.
+    pub fn snapshot(&self, digest: &SnapshotDigest) -> Option<Arc<ContextSnapshot>> {
+        self.snapshots
+            .lock()
+            .get(digest)
+            .map(|i| i.snapshot.clone())
+    }
+
+    /// Mint a child branch off the frozen cache root `digest`: its transcript
+    /// is the frozen prefix, verbatim and unmodified, plus `brief` as its own
+    /// first user turn. The child is a THUNK — the caller forces it.
+    ///
+    /// Goes through [`Self::seed_forked_child`], the same path an ordinary
+    /// fork child takes, so forcing, seeding, framing inheritance, and the
+    /// `TurnForked` checkpoint reference are literally the same code. The only
+    /// difference is WHERE the prefix comes from: a frozen, shared,
+    /// digest-identified snapshot rather than the parent's live transcript.
+    ///
+    /// Every sibling minted from one digest reports that same parent digest
+    /// via [`Self::branch_snapshot`], and each writes one `BranchInvocation`
+    /// receipt naming it at its first turn.
+    pub fn fork_from_snapshot(
+        &self,
+        digest: &SnapshotDigest,
+        brief: &str,
+    ) -> Result<NodeId, HarnessError> {
+        let (origin, snapshot) = {
+            let snapshots = self.snapshots.lock();
+            let interned = snapshots
+                .get(digest)
+                .ok_or_else(|| HarnessError::UnknownSnapshot(digest.clone()))?;
+            (interned.origin, interned.snapshot.clone())
+        };
+        let child = self.seed_forked_child(
+            origin,
+            "snapshot branch",
+            snapshot.messages.to_vec(),
+            snapshot.framing.clone(),
+            brief.to_string(),
+        )?;
+        self.branch_origins.lock().insert(
+            child,
+            BranchOrigin {
+                snapshot: digest.clone(),
+                invocation_logged: false,
+            },
+        );
+        Ok(child)
+    }
+
+    /// The frozen cache root `node` was branched from, for a node minted by
+    /// [`Self::fork_from_snapshot`]; `None` for every other node. Answers for
+    /// the node's whole life, not just until its receipt is written.
+    pub fn branch_snapshot(&self, node: NodeId) -> Option<SnapshotDigest> {
+        self.branch_origins
+            .lock()
+            .get(&node)
+            .map(|b| b.snapshot.clone())
+    }
+
+    /// The scope the ORIGIN node of a frozen snapshot was running in at
+    /// freeze time — [`ScopeId::ROOT`] for a never-scoped origin (every node
+    /// this crate minted before C3, and the ordinary per-loop answerer
+    /// today). `None` only for a digest this harness never minted (mirrors
+    /// [`Self::snapshot`]).
+    ///
+    /// PRD 21 lane C3: locked decision 2 says a child forks "the frozen
+    /// post-coalgebra context... its compiled blocks and declarations" — the
+    /// DECL/VALUE-plane half of that (C2 §1–3's scope trees) is orthogonal to
+    /// the TRANSCRIPT half this module already gives an identity to. This is
+    /// the seam that joins them: a branch verb mints its child's scope as a
+    /// child of THIS, so "child reads parent tip; child-local stays local"
+    /// applies to a branched tree exactly as it does to an ordinary
+    /// `mint_scope` tree, without threading a scope through the wire
+    /// representation at all — the origin node a snapshot was frozen from
+    /// already carries it.
+    pub fn snapshot_origin_scope(&self, digest: &SnapshotDigest) -> Option<ScopeId> {
+        let origin = self.snapshots.lock().get(digest).map(|i| i.origin)?;
+        Some(self.node_scope(origin))
+    }
+
+    /// Resolve a wire digest string into a validated [`ContextRef`] — the ONE
+    /// checkpoint a `runLLMTurnBranch` ref passes through. `Err(UnknownSnapshot)`
+    /// for a digest this harness never minted (a forged string, a stale ref
+    /// from a different run) — nothing downstream re-derives this check,
+    /// because nothing downstream can construct a `ContextRef` any other way.
+    /// See [`ContextRef`]'s doc for the typestate this buys.
+    pub fn resolve_context_ref(&self, digest: &str) -> Result<ContextRef, HarnessError> {
+        let digest = SnapshotDigest(digest.to_string());
+        if self.snapshots.lock().contains_key(&digest) {
+            Ok(ContextRef(digest))
+        } else {
+            Err(HarnessError::UnknownSnapshot(digest))
+        }
+    }
+
+    /// Mint a child branch off a VALIDATED [`ContextRef`] — same seam as
+    /// [`Self::fork_from_snapshot`] (this IS it, typed so a caller can only
+    /// reach it with a digest already proven to resolve).
+    pub fn fork_from_context_ref(
+        &self,
+        cref: &ContextRef,
+        brief: &str,
+    ) -> Result<NodeId, HarnessError> {
+        self.fork_from_snapshot(&cref.0, brief)
+    }
+
+    /// The scope [`ContextRef`]'s origin window was running in at freeze time
+    /// — the typed-ref sibling of [`Self::snapshot_origin_scope`], collapsed
+    /// to a bare [`ScopeId`] rather than `Option`: a `ContextRef` is only
+    /// ever constructed from a digest already proven to resolve
+    /// ([`Self::resolve_context_ref`]), so the underlying lookup cannot miss.
+    pub fn context_ref_scope(&self, cref: &ContextRef) -> ScopeId {
+        self.snapshot_origin_scope(&cref.0).unwrap_or(ScopeId::ROOT)
+    }
+
+    /// `node`'s live transcript and framing — exactly the pair
+    /// [`Self::drive_turn`] snapshots before it assembles a request, so a
+    /// caller can feed them to [`engine::assemble_request`] and re-derive the
+    /// bytes that go to the provider. `None` for a node with no live convo (a
+    /// thunk, or a terminated node).
+    pub fn node_context(&self, node: NodeId) -> Option<(Vec<Message>, Option<String>)> {
+        self.convos
+            .lock()
+            .get(&node)
+            .map(|c| (c.transcript.clone(), c.framing.clone()))
+    }
+
+    /// Write the one-shot `BranchInvocation` receipt for a snapshot-forked
+    /// branch's FIRST turn: what it shares with the frozen root, what it
+    /// added, and what the provider itself reported.
+    ///
+    /// `transcript` is the request this turn actually sent (drive_turn's own
+    /// pre-call snapshot), so the suffix is measured against what crossed the
+    /// wire, not against a later mutation. A node with no branch origin, or
+    /// one whose receipt is already written, is a no-op.
+    ///
+    /// `cached_input_tokens` rides through UNCHANGED from the provider: `None`
+    /// here means the provider reported nothing, and is recorded as an absent
+    /// field, never as `0`. The byte counts are exact and locally
+    /// recomputable; there is no local tokenizer, so no token-level split of
+    /// the prefix is claimed — see this crate's `CLAUDE.md`.
+    fn log_branch_invocation(
+        &self,
+        node: NodeId,
+        transcript: &[Message],
+        usage: &Usage,
+    ) -> Result<(), HarnessError> {
+        let digest = {
+            let mut origins = self.branch_origins.lock();
+            match origins.get_mut(&node) {
+                Some(origin) if !origin.invocation_logged => {
+                    origin.invocation_logged = true;
+                    origin.snapshot.clone()
+                }
+                _ => return Ok(()),
+            }
+        };
+        // The digest was interned before the child was minted and is never
+        // evicted, so this resolves; a missing entry would mean the intern map
+        // was mutated, which nothing does.
+        let Some(snapshot) = self.snapshot(&digest) else {
+            return Ok(());
+        };
+        // VERIFY the sharing before claiming it. A receipt that says "these N
+        // bytes are shared with root D" is worth nothing if nobody checked, so
+        // re-digest what this turn is ACTUALLY sending, through the same
+        // assembly path, and compare. Once per branch, so the cost is a
+        // rounding error; a mismatch (something rewrote the branch's inherited
+        // prefix before its first turn — nothing does today) writes NO receipt
+        // and says why, because no receipt beats a false one.
+        let split = snapshot.messages.len();
+        let framing = self.node_context(node).and_then(|(_, f)| f);
+        let sent = engine::assemble_request(transcript, None, framing.as_deref()).messages;
+        if transcript.len() < split
+            || crate::snapshot::digest_messages(&sent[..split + 1]) != digest
+        {
+            tracing::warn!(
+                node = node.0,
+                digest = %digest,
+                "branch's first request does not re-digest to its frozen root — \
+                 no BranchInvocation receipt written"
+            );
+            return Ok(());
+        }
+        // The shared part is the whole assembled frozen prefix (system message
+        // included); the suffix is whatever this branch appended past it.
+        let shared_prefix_bytes = snapshot.prefix_bytes();
+        let branch_suffix_bytes = crate::snapshot::content_bytes(&transcript[split..]);
+        self.tree.branch_invocation(
+            node,
+            digest,
+            shared_prefix_bytes,
+            branch_suffix_bytes,
+            usage.input_tokens,
+            usage.cached_input_tokens,
+        )?;
+        Ok(())
+    }
+
     /// Register a fork/fanout child under `parent`, inheriting the parent's
     /// transcript prefix through the fork checkpoint plus the hole card, and
     /// the parent's framing (its system message). Emits `TurnForked`
     /// referencing the checkpoint. The child is a THUNK — the caller forces it.
     /// `title` distinguishes a plain fork's single child ("fork answerer") from
-    /// one of a fanout's N children ("fanout answerer <i>").
-    ///
-    /// The checkpoint is the parent transcript's PREFIX LENGTH at fork time (a
-    /// durable transcript position), not the assistant-only `turn_seq` counter
-    /// — the child clones exactly that prefix, so the two agree by
-    /// construction.
+    /// one of a fanout's N children ("fanout answerer <i>"). The checkpoint
+    /// contract is [`Self::seed_forked_child`]'s.
     fn register_fork_child(
         &self,
         parent: NodeId,
@@ -3099,7 +3633,41 @@ impl Harness {
                 convo.suspend_table.clone(),
             )
         };
-        let checkpoint = parent_transcript.len() as u64;
+        // The child's transcript = parent prefix + the hole card as a fresh user
+        // task. The fork IS the calling agent (inherits scope + framing), so the
+        // parent conversation is genuine context.
+        self.seed_forked_child(
+            parent,
+            title,
+            parent_transcript,
+            parent_framing,
+            engine::hole_card(prompt, ty, table.as_ref()),
+        )
+    }
+
+    /// Mint a THUNK child under `parent` seeded with `prefix` (its inherited
+    /// context) + `opening` (its own first user turn), and emit `TurnForked`
+    /// at the checkpoint `prefix` ends at.
+    ///
+    /// The ONE place a [`NodeSeed::Forked`] is staged, shared by
+    /// [`Self::register_fork_child`] (whose opening is a hole card) and
+    /// [`Self::fork_from_snapshot`] (whose opening is a rendered brief) — so
+    /// nothing about how a forked child is created, referenced, or later
+    /// seeded at force time can diverge between the two.
+    ///
+    /// The checkpoint is the inherited prefix's LENGTH (a durable transcript
+    /// position), not the assistant-only `turn_seq` counter — the child
+    /// carries exactly that prefix, so the two agree by construction, and the
+    /// child's assembled request is byte-identical to the parent's through it.
+    fn seed_forked_child(
+        &self,
+        parent: NodeId,
+        title: &str,
+        prefix: Vec<Message>,
+        framing: Option<String>,
+        opening: String,
+    ) -> Result<NodeId, HarnessError> {
+        let checkpoint = prefix.len() as u64;
         let child = self.tree.create_node(
             Some(parent),
             title,
@@ -3108,21 +3676,17 @@ impl Harness {
             false,
         )?;
         self.tree.turn_forked(child, parent, checkpoint)?;
-
-        // The child's transcript = parent prefix + the hole card as a fresh user
-        // task. The fork IS the calling agent (inherits scope + framing), so the
-        // parent conversation is genuine context.
-        let mut transcript = parent_transcript;
+        let mut transcript = prefix;
         transcript.push(Message {
             role: Role::User,
-            content: engine::hole_card(prompt, ty, table.as_ref()),
+            content: opening,
             reasoning_items: Vec::new(),
         });
         self.pending.lock().insert(
             child,
             NodeSeed::Forked {
                 transcript,
-                framing: parent_framing,
+                framing,
             },
         );
         Ok(child)
@@ -3213,9 +3777,12 @@ impl Harness {
         let Some(sid) = self.tree.session_of(node) else {
             return (None, None);
         };
+        let scope = self.node_scope(node);
         self.tree
             .registry()
-            .peek(sid, |s| (s.session_import_module(), s.lib_include_dir()))
+            .peek(sid, |s| {
+                (s.session_import_module_in(scope), s.lib_include_dir())
+            })
             .unwrap_or((None, None))
     }
 
@@ -3252,6 +3819,59 @@ impl Harness {
             .registry()
             .checkout_run(sid)
             .map_err(|e| HarnessError::from_checkout(node, e))
+    }
+
+    /// How long [`Self::checkout_run_retrying`] backs off between checkout
+    /// attempts while contested by a sibling realm.
+    const CONTENTION_RETRY_BACKOFF: std::time::Duration = std::time::Duration::from_millis(3);
+
+    /// Bound on contention retries, as an ELAPSED-TIME budget (~2 minutes)
+    /// rather than an iteration count — a fanout child contending behind
+    /// several siblings' multi-second JIT turns across rounds can
+    /// legitimately need to wait longer than a fixed attempt count assuming
+    /// zero-cost checkouts would allow — so a genuinely wedged machine still
+    /// fails loud, just bounded by wall-clock time instead.
+    const CONTENTION_RETRY_BUDGET: std::time::Duration = std::time::Duration::from_secs(120);
+
+    /// [`Self::checkout_run`], but — ONLY when `node` opted in via
+    /// [`Self::set_retry_checkout_on_contention`] — retries with a short
+    /// backoff instead of failing fast on [`HarnessError::TurnInFlight`].
+    ///
+    /// This is the ONE place [`Self::run_block`] checks a machine out, so it
+    /// is where a concurrently-driven sibling realm's checkout race against
+    /// this SAME shared session (PRD 20 S1-L4) gets resolved by WAITING
+    /// rather than erroring: unlike retrying [`Self::drive_turn`] as a
+    /// whole (NOT safe — it has already called the provider and appended
+    /// the assistant reply to the transcript by the time a checkout could
+    /// contend), retrying just this checkout is safe because nothing
+    /// observable has happened yet at this point — `f` (the actual resident
+    /// call) is invoked at most once, only after a checkout succeeds.
+    ///
+    /// A node that never opts in (every existing caller) gets EXACTLY
+    /// [`Self::checkout_run`]'s behavior — fail fast, no retry — so
+    /// `tests/turn_lease.rs`'s fail-fast contract is unchanged.
+    async fn checkout_run_retrying(
+        &self,
+        node: NodeId,
+    ) -> Result<Checkout<'_, Session>, HarnessError> {
+        let retry = self
+            .convos
+            .lock()
+            .get(&node)
+            .map(|c| c.retry_checkout_on_contention)
+            .unwrap_or(false);
+        if !retry {
+            return self.checkout_run(node);
+        }
+        let deadline = tokio::time::Instant::now() + Self::CONTENTION_RETRY_BUDGET;
+        loop {
+            match self.checkout_run(node) {
+                Err(HarnessError::TurnInFlight(_)) if tokio::time::Instant::now() < deadline => {
+                    tokio::time::sleep(Self::CONTENTION_RETRY_BACKOFF).await;
+                }
+                other => return other,
+            }
+        }
     }
 
     /// Check `node`'s machine out to resume/abort its pending `hole`
@@ -3317,18 +3937,25 @@ impl Harness {
         // (never whatever ambient realm the last turn left behind — codex
         // review 2026-08-12, High 2). Queued realm closes for this session
         // drain first, while the machine is in hand.
-        let realm = self
-            .convos
-            .lock()
-            .get(&node)
-            .and_then(|c| c.realm)
-            .unwrap_or(OUTER_REALM);
+        let (realm, scope) = {
+            let convos = self.convos.lock();
+            let c = convos.get(&node);
+            (
+                c.and_then(|c| c.realm).unwrap_or(OUTER_REALM),
+                c.and_then(|c| c.scope).unwrap_or(ScopeId::ROOT),
+            )
+        };
         let sid = checkout.session_id();
         let mut machine = checkout.take();
-        self.drain_pending_realm_closes(sid, &mut machine);
+        self.drain_pending_window_exits(sid, &mut machine);
         match tokio::task::spawn_blocking(move || {
             let mut machine = machine;
             machine.set_realm(realm);
+            // The NAME-side half of the same "this window's turn" statement:
+            // a node without a scope runs at ROOT, never at whatever scope the
+            // last turn on this shared machine left behind (the same ambient-
+            // stickiness hazard the realm reset above answers).
+            machine.set_scope(scope);
             f(machine)
         })
         .await
@@ -3376,26 +4003,30 @@ impl Harness {
                 self.tree.registry().remove(sid);
             } else {
                 // An ATTACHED node (one-session collapse): its retirement is
-                // realm SCOPE EXIT on the shared machine, never slot removal
+                // its WINDOW's exit on the shared machine, never slot removal
                 // — the outer session outlives every answerer node it hosts.
-                // Scope exit is an EVENTUAL POSTCONDITION, not a best-effort
-                // side effect: if the machine is out on a turn right now, the
-                // close is queued (`pending_realm_closes`) and applied by the
-                // next code path that has the machine in hand
-                // (`run_checked_out`/`with_session` drain the queue before
-                // restoring) — the realm identity is retained until the close
-                // is CONFIRMED, never dropped with the convo.
-                let realm = self.convos.lock().get(&node).and_then(|c| c.realm);
-                if let Some(realm) = realm {
+                // Two halves, retired together in `exit_window`: the REALM
+                // (parked frames + outstanding handles) and, since PRD 21 lane
+                // C2, the node's SCOPE (its value-plane frame, and the GC roots
+                // that frame solely owns). A window's names and its heap roots
+                // have one lifetime, so there is one retirement step, not two.
+                //
+                // The exit is an EVENTUAL POSTCONDITION, not a best-effort side
+                // effect: if the machine is out on a turn right now, it is
+                // queued (`pending_window_exits`) and applied by the next code
+                // path that has the machine in hand (`run_checked_out`/
+                // `with_session` drain the queue before restoring) — the realm
+                // and scope identities are retained until the exit is
+                // CONFIRMED, never dropped with the convo.
+                let (realm, scope) = {
+                    let convos = self.convos.lock();
+                    let c = convos.get(&node);
+                    (c.and_then(|c| c.realm), c.and_then(|c| c.scope))
+                };
+                if realm.is_some() || scope.is_some_and(|s| !s.is_root()) {
                     match self.tree.registry().checkout_run(sid) {
                         Ok(mut co) => {
-                            let (frames, handles) = co.machine().close_realm(realm);
-                            if frames + handles > 0 && std::env::var("HARNESS_DEBUG").is_ok() {
-                                eprintln!(
-                                    "[harness] realm scope-exit for {node:?}: {frames} frame(s), \
-                                     {handles} handle(s) released"
-                                );
-                            }
+                            self.exit_window(co.machine(), node, realm, scope);
                             let holes: Vec<HoleId> = co
                                 .machine()
                                 .parked_holes()
@@ -3405,7 +4036,12 @@ impl Harness {
                             co.restore_suspended(holes);
                         }
                         Err(_) => {
-                            self.pending_realm_closes.lock().push((sid, realm));
+                            self.pending_window_exits.lock().push(PendingWindowExit {
+                                session: sid,
+                                node,
+                                realm,
+                                scope,
+                            });
                         }
                     }
                 }
@@ -3422,6 +4058,56 @@ impl Harness {
         let mut convos = self.convos.lock();
         if let Some(convo) = convos.get_mut(&node) {
             convo.realm = Some(realm);
+        }
+    }
+
+    /// Assign `node`'s SCOPE — every subsequent turn it runs compiles against
+    /// that scope's decl tip and the value bindings visible from it, and binds
+    /// into that scope's own frame (applied inside the checkout by
+    /// [`Self::run_checked_out`], the same one site the realm is applied at).
+    /// [`Self::terminate_node`] retires it.
+    ///
+    /// Mint the scope off the session first
+    /// (`with_session(sid, |s| s.mint_scope(parent))`) — this only records
+    /// which scope the node's window lives in. A node that is never given one
+    /// stays at [`ScopeId::ROOT`], the flat session.
+    pub fn set_node_scope(&self, node: NodeId, scope: ScopeId) {
+        let mut convos = self.convos.lock();
+        if let Some(convo) = convos.get_mut(&node) {
+            convo.scope = Some(scope);
+        }
+    }
+
+    /// `node`'s scope — [`ScopeId::ROOT`] for a node that was never given one
+    /// (every pre-C2 node) and for an unknown node.
+    pub fn node_scope(&self, node: NodeId) -> ScopeId {
+        self.convos
+            .lock()
+            .get(&node)
+            .and_then(|c| c.scope)
+            .unwrap_or(ScopeId::ROOT)
+    }
+
+    /// What retiring `node`'s scope released — `None` for a node that had no
+    /// scope, or has not been retired yet. The receipt outlives the node's
+    /// `convos` entry on purpose: `roots_released` is the number the GC root
+    /// ledger (`persistent_roots_count()`) must have moved by, and a caller
+    /// checking that has nothing else to compare against.
+    pub fn scope_retirement(&self, node: NodeId) -> Option<ScopeRetirement> {
+        self.scope_retirements.lock().get(&node).copied()
+    }
+
+    /// Opt `node` into retrying (rather than failing fast) a
+    /// [`Self::run_block`] checkout contested by [`HarnessError::TurnInFlight`]
+    /// — see [`NodeConvo::retry_checkout_on_contention`]'s doc for the exact
+    /// contract and why this is safe to enable ONLY for a node whose
+    /// contention is a concurrently-driven sibling realm on the SAME shared
+    /// session (PRD 20 S1-L4). `false` by default; every existing caller
+    /// (which never calls this) keeps today's fail-fast behavior unchanged.
+    pub fn set_retry_checkout_on_contention(&self, node: NodeId, retry: bool) {
+        let mut convos = self.convos.lock();
+        if let Some(convo) = convos.get_mut(&node) {
+            convo.retry_checkout_on_contention = retry;
         }
     }
 
@@ -3442,7 +4128,26 @@ impl Harness {
     /// (`node_usage` now reflects only the small compacted window, so the
     /// driver's threshold check does not immediately re-fire). The next hole
     /// (or the current hole's next round) drives on under the smaller context.
-    pub(crate) fn replace_transcript_with_summary(
+    ///
+    /// # Compaction MINTS A NEW CACHE ROOT
+    ///
+    /// This replacement is destructive to the node's LIVE transcript — that is
+    /// unchanged and deliberate. What it must never do is reach a FROZEN
+    /// prefix (PRD 21 locked decision 2: a `ContextSnapshot` is immutable, and
+    /// once it has children its prefix is never rewritten). It cannot: an
+    /// interned snapshot owns its own `Arc<[Message]>` and every existing
+    /// child owns its own copy of that prefix, so neither is reachable from
+    /// here. So instead of rewriting the old root, a compaction of a node that
+    /// HAS one freezes a NEW snapshot — a new digest, a new cache root, a
+    /// second `SnapshotFrozen` receipt — while the old entry keeps resolving
+    /// for every child already forked from it. Pinned by
+    /// `tests/companion_snapshots.rs`.
+    ///
+    /// `pub` (rather than the `pub(crate)` its one driver caller would need)
+    /// because that snapshot-immutability contract is a property of THIS
+    /// operation and is asserted directly against it, not through the
+    /// driver's whole compaction ladder.
+    pub fn replace_transcript_with_summary(
         &self,
         node: NodeId,
         summary: &str,
@@ -3472,7 +4177,26 @@ impl Harness {
         drop(convos);
         self.tree
             .turn_delta(node, turn, Role::User, content, None)?;
+        // Mint the new cache root, if this node had one at all. Only for a
+        // node that has ALREADY frozen a snapshot: freezing is an explicit
+        // operation, and compacting a node nobody ever froze must not start
+        // minting roots nobody asked for.
+        if self.has_frozen_snapshot(node) {
+            let digest = self.freeze_snapshot(node)?;
+            tracing::info!(
+                node = node.0,
+                digest = %digest,
+                "compaction minted a new cache root; existing snapshots and their children are untouched"
+            );
+        }
         Ok(())
+    }
+
+    /// Whether `node` has ever frozen a context snapshot. A scan rather than a
+    /// node→digests index: a node freezes a handful of roots at most, and one
+    /// map that cannot desync beats two that can.
+    fn has_frozen_snapshot(&self, node: NodeId) -> bool {
+        self.snapshots.lock().values().any(|i| i.origin == node)
     }
 
     /// Append a User-role message to `node`'s transcript (and log it), without
@@ -3699,9 +4423,12 @@ mod tests {
             child_cfg: test_engine_cfg(),
             provider,
             convos: Mutex::new(HashMap::new()),
-            pending_realm_closes: Mutex::new(Vec::new()),
+            pending_window_exits: Mutex::new(Vec::new()),
+            scope_retirements: Mutex::new(HashMap::new()),
             pending: Mutex::new(HashMap::new()),
             escalations: Mutex::new(HashMap::new()),
+            snapshots: Mutex::new(HashMap::new()),
+            branch_origins: Mutex::new(HashMap::new()),
         }
     }
 
@@ -3732,9 +4459,12 @@ mod tests {
             child_cfg: test_engine_cfg(),
             provider,
             convos: Mutex::new(HashMap::new()),
-            pending_realm_closes: Mutex::new(Vec::new()),
+            pending_window_exits: Mutex::new(Vec::new()),
+            scope_retirements: Mutex::new(HashMap::new()),
             pending: Mutex::new(HashMap::new()),
             escalations: Mutex::new(HashMap::new()),
+            snapshots: Mutex::new(HashMap::new()),
+            branch_origins: Mutex::new(HashMap::new()),
         };
         (harness, path, dir)
     }
@@ -3768,6 +4498,7 @@ mod tests {
                 effect_trace,
                 effect_seq: 0,
                 realm: None,
+                scope: None,
                 pending: None,
                 answer_contract: None,
                 suspend_table: None,
@@ -3778,6 +4509,7 @@ mod tests {
                 framing: None,
                 last_turn_source: None,
                 turn_lease: false,
+                retry_checkout_on_contention: false,
             },
         );
     }

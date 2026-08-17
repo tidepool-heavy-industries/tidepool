@@ -427,11 +427,17 @@ fn works_map_family() {
 ///
 /// Absorbed: works_from_json, works_either_decode, works_decode,
 /// works_from_json_int_exact, works_from_json_int_rejects_fraction,
-/// works_from_json_int_rejects_out_of_range, works_lens_int_truncates_toward_zero,
-/// works_lens_int_out_of_range_is_nothing, works_lens_integer_truncates_and_is_unbounded,
+/// works_from_json_int_rejects_out_of_range, works_lens_int_floors,
+/// works_lens_int_out_of_range_is_nothing, works_lens_integer_floors_and_is_unbounded,
 /// works_from_json_string_overlapping_spike, works_from_json_char,
 /// works_from_json_integer, works_from_json_word, works_from_json_unit,
 /// works_from_json_tuples, works_from_json_either, works_to_json_string_overlapping.
+///
+/// `lens_int_floors`/`lens_integer_floors` were repinned (sibling audit for
+/// `stdlib_regressions_02_medium::works_int_prism_floors_not_truncates`):
+/// `_Int`/`_Integer` FLOOR a fractional Double toward negative infinity
+/// (`"-3.7"` -> `-4`), matching upstream lens-aeson, not truncate toward
+/// zero (`-3`) as these checks previously (incorrectly) pinned.
 #[test]
 fn works_aeson_family() {
     works(
@@ -446,10 +452,10 @@ fn works_aeson_family() {
             , check "from_json_int_rejects_fraction.neg" (either (const True) (const False) (eitherDecode "-3.7" :: Either Text Int))
             , check "from_json_int_rejects_fraction.pos" (either (const True) (const False) (eitherDecode "3.7" :: Either Text Int))
             , check "from_json_int_rejects_out_of_range" (either (const True) (const False) (eitherDecode "99999999999999999999999999" :: Either Text Int))
-            , check "lens_int_truncates_toward_zero.neg" ((fromMaybe (-999) ((decode "-3.7" :: Maybe Value) >>= (^? _Int))) == (-3))
-            , check "lens_int_truncates_toward_zero.pos" ((fromMaybe (-999) ((decode "10.5" :: Maybe Value) >>= (^? _Int))) == 10)
+            , check "lens_int_floors.neg" ((fromMaybe (-999) ((decode "-3.7" :: Maybe Value) >>= (^? _Int))) == (-4))
+            , check "lens_int_floors.pos" ((fromMaybe (-999) ((decode "10.5" :: Maybe Value) >>= (^? _Int))) == 10)
             , check "lens_int_out_of_range_is_nothing" (not (isJust ((decode "99999999999999999999999999" :: Maybe Value) >>= (^? _Int))))
-            , check "lens_integer_truncates.neg" ((fromMaybe (-999) ((decode "-3.7" :: Maybe Value) >>= (^? _Integer))) == (-3))
+            , check "lens_integer_floors.neg" ((fromMaybe (-999) ((decode "-3.7" :: Maybe Value) >>= (^? _Integer))) == (-4))
             , check "lens_integer_unbounded" ((fromMaybe "MISSING" (show <$> ((decode "123456789012345678901234567890" :: Maybe Value) >>= (^? _Integer)))) == "123456789012345678901234567890")
             , check "from_json_string_overlapping_spike.s" ((either (const "ERR") id (eitherDecode "\"hi\"" :: Either Text String)) == "hi")
             , check "from_json_string_overlapping_spike.xs" ((either (const []) id (eitherDecode "[1,2,3]" :: Either Text [Int])) == [1,2,3])
@@ -1206,25 +1212,44 @@ target = (Foo "red").color ++ (Bar "blue").color
 /// every eval run from this worktree) already defines an unrelated `hyloM`,
 /// so an unqualified import here would be ambiguous.
 ///
-/// Two parts: (a) `PlanF` construction plus `fmap`/`sum` (derived
+/// Three parts: (a) `PlanF` construction plus `fmap`/`sum` (derived
 /// `Functor`/`Foldable`) and `traverse` (derived `Traversable`) directly on a
 /// value — each acts on `kids` only, `task` is untouched. (b) `hyloM`
 /// unfolding a numeric range `(lo, hi)` by repeated midpoint split down to
 /// singleton leaves, then folding the SAME coalgebra's tree back up two
 /// ways — concatenating leaf values (order-preserving) and summing them —
-/// asserting the exact reconstructed `[1..10]` and its sum `55`.
+/// asserting the exact reconstructed `[1..10]` and its sum `55`. (c) the four
+/// policy wrappers (`budgeted`/`capped`/`gated`/`receipted`) actually applied
+/// over that same coalgebra: each is a higher-order transformer whose slot is
+/// an `M`-effectful function, so this pins that a wrapped seam still runs —
+/// coalgebra-side refusal TRUNCATES to a childless `PlanF` (`[0]`, the
+/// refusal task's leaf) rather than throwing, `budgeted` truncates only the
+/// subtree its slot vetoes, and `receipted`'s stamp is applied at every fold
+/// (three folds over `(1,2)`: `1+1`, `2+1`, then `(2+3)+1` = `6`).
+///
+/// They join this probe rather than getting their own `#[test]`: the wrappers
+/// are ordinary functions over the same derived dictionaries part (b) already
+/// exercises, so a second extract compile would buy no distinct mechanism.
 #[test]
 fn works_swarm_planf_hylo_on_jit() {
     works_with_imports(
         "qualified Tidepool.Swarm as Swarm\nData.Traversable (traverse)",
         r#"Swarm.hyloM algLeaves coalg ((1,10) :: (Int,Int)) >>= \leaves ->
             Swarm.hyloM algSum coalg ((1,10) :: (Int,Int)) >>= \total ->
+            Swarm.hyloM algLeaves (Swarm.capped spanOf 4 refuse coalg) ((1,10) :: (Int,Int)) >>= \cappedOut ->
+            Swarm.hyloM algLeaves (Swarm.budgeted vetoHigh coalg) ((1,10) :: (Int,Int)) >>= \budgetOut ->
+            Swarm.hyloM algLeaves (Swarm.gated refuseRoot coalg) ((1,10) :: (Int,Int)) >>= \gatedOut ->
+            Swarm.hyloM (Swarm.receipted bump algSum) coalg ((1,2) :: (Int,Int)) >>= \stamped ->
             pure (concat
                 [ check "planf_fmap_kids" (Swarm.kids (fmap (+1) (Swarm.PlanF ("root"::Text) [1,2,3::Int])) == [2,3,4::Int])
                 , check "planf_foldable_sum" (sum (Swarm.PlanF ("root"::Text) [1,2,3::Int]) == (6::Int))
                 , check "planf_traverse_maybe" (fmap Swarm.kids (traverse (\x -> if x > (0::Int) then Just (x*10) else Nothing) (Swarm.PlanF ("root"::Text) [1,2,3::Int])) == Just [10,20,30::Int])
                 , check "hylo_range_split_leaves" (leaves == ([1..10] :: [Int]))
                 , check "hylo_range_split_sum" (total == (55 :: Int))
+                , check "swarm_capped_truncates_to_refusal_leaf" (cappedOut == ([0] :: [Int]))
+                , check "swarm_budgeted_truncates_only_the_vetoed_subtree" (budgetOut == ([1,2,3,4,5,0] :: [Int]))
+                , check "swarm_gated_refuses_the_layer_after_unfolding_it" (gatedOut == ([0] :: [Int]))
+                , check "swarm_receipted_stamps_every_fold" (stamped == (6 :: Int))
                 ])
              where {
                check nm ok = if ok then [] else [nm];
@@ -1235,7 +1260,17 @@ fn works_swarm_planf_hylo_on_jit() {
                algLeaves (Swarm.PlanF _ xss) = pure (concat xss);
                algSum :: Swarm.PlanF (Int,Int) Int -> M Int;
                algSum (Swarm.PlanF (lo,_) []) = pure lo;
-               algSum (Swarm.PlanF _ xs) = pure (sum xs)
+               algSum (Swarm.PlanF _ xs) = pure (sum xs);
+               spanOf :: (Int,Int) -> Int;
+               spanOf (lo,hi) = hi - lo;
+               refuse :: (Int,Int) -> M (Maybe (Int,Int));
+               refuse _ = pure (Just (0,0));
+               vetoHigh :: (Int,Int) -> M (Maybe (Int,Int));
+               vetoHigh (lo,_) = pure (if lo > 5 then Just (0,0) else Nothing);
+               refuseRoot :: Swarm.PlanF (Int,Int) (Int,Int) -> M (Maybe (Int,Int));
+               refuseRoot (Swarm.PlanF (lo,_) _) = pure (if lo == 1 then Just (0,0) else Nothing);
+               bump :: Swarm.PlanF (Int,Int) Int -> Int -> M Int;
+               bump _ b = pure (b + 1)
              }"#,
         serde_json::json!([]),
     );
@@ -1473,6 +1508,22 @@ fn qq_fmt_brace_inside_hole_non_string_expr_still_works() {
     works_with_imports(
         QQ_IMPORTS,
         "pure [fmt|{let { y = 1 :: Int } in y}|]",
+        serde_json::json!("1"),
+    );
+}
+
+/// A let-bound TYPE SIGNATURE (`y :: Int` as its own declaration, distinct
+/// from the expression-level ascription `y = 1 :: Int` pinned above) used to
+/// be silently dropped by `toDecs` — it destructured `ValBinds`' `_sigs`
+/// field and threw it away instead of translating or failing loudly. Fixed
+/// by `toDecs` translating `ValBinds`' sigs into `TH.SigD`s (`toSigDecs`).
+/// This pins that the signature is honored (the binding still evaluates
+/// correctly) rather than silently vanishing.
+#[test]
+fn qq_fmt_let_bound_type_signature_translated() {
+    works_with_imports(
+        QQ_IMPORTS,
+        "pure [fmt|{let { y :: Int; y = 1 } in y}|]",
         serde_json::json!("1"),
     );
 }

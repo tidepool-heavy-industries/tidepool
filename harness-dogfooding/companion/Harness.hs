@@ -21,18 +21,17 @@ module Harness
 
 import qualified Data.Text as T
 import HarnessTypes
-import Tidepool.Agent.Spawn (spawnAgent)
+import Tidepool.Agent.Spawn (renderSpawnError, spawnAgent)
 import Tidepool.Effects
   ( SpawnError
   , SpawnOutcome (..)
   , SpawnReceipt (..)
   , WorktreeId (..)
-  , fromCurrentRepository
-  , renderSpawnError
   , spawnSpec
   , spawnSpecIn
   )
 import Tidepool.Prelude hiding (render)
+import Tidepool.Worktree (fromCurrentRepository)
 
 import Tidepool.Harness (Harness, runLLMTurn)
 

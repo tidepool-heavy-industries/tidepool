@@ -103,6 +103,89 @@ pub struct ResolvedBin {
     pub source: BinSource,
 }
 
+impl ResolvedBin {
+    /// Discard [`BinSource`] and keep just the resolved path, typed as the
+    /// one thing [`ExtractCmd::with_bin`] and `EngineConfig::extract_bin`
+    /// accept. The source is irrelevant past this point: a caller that
+    /// resolved once and threads the binary through many spawns treats it as
+    /// [`BinSource::Explicit`] from here on, same as [`ExtractCmd::with_bin`]
+    /// always has.
+    #[must_use]
+    pub fn into_extract_bin(self) -> ResolvedExtractBin {
+        ResolvedExtractBin(self.path)
+    }
+}
+
+/// A `tidepool-extract` binary path that came from [`resolve_bin`] (via
+/// [`ResolvedBin::into_extract_bin`]) or from the explicit
+/// [`ResolvedExtractBin::assume_resolved`] escape hatch — the ONLY two ways
+/// to construct one.
+///
+/// This is what [`ExtractCmd::with_bin`] and `EngineConfig::extract_bin`
+/// require, instead of an arbitrary string: an adapter that catches a
+/// [`BinError`] can no longer paper over it by substituting a guessed
+/// binary name, because there is no `From<String>`/`FromStr` impl to reach
+/// for — only a real resolution or a call to the named escape hatch, which
+/// shows up in review.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ResolvedExtractBin(PathBuf);
+
+impl ResolvedExtractBin {
+    /// Bypass resolution entirely. For tests, fixtures, and callers that
+    /// already hold a pre-verified path — NOT a general-purpose way to turn a
+    /// guessed string into a "resolved" binary. Every call site is a
+    /// deliberate, reviewable exception to "only `resolve_bin` decides".
+    #[must_use]
+    pub fn assume_resolved(path: impl Into<PathBuf>) -> Self {
+        ResolvedExtractBin(path.into())
+    }
+
+    #[must_use]
+    pub fn as_path(&self) -> &Path {
+        &self.0
+    }
+
+    #[must_use]
+    pub fn into_os_string(self) -> OsString {
+        self.0.into_os_string()
+    }
+}
+
+/// Read-only path access — `.display()`, `.is_file()`, and friends work
+/// without every caller reaching for [`ResolvedExtractBin::as_path`] first.
+/// This does not weaken construction: `Deref` only exposes `Path`'s
+/// existing shared-reference methods, none of which can produce a new
+/// `ResolvedExtractBin`.
+impl std::ops::Deref for ResolvedExtractBin {
+    type Target = Path;
+
+    fn deref(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl AsRef<Path> for ResolvedExtractBin {
+    fn as_ref(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl AsRef<OsStr> for ResolvedExtractBin {
+    fn as_ref(&self) -> &OsStr {
+        self.0.as_os_str()
+    }
+}
+
+/// Renders as the path's display form — the same text
+/// `resolve_bin().path.to_string_lossy()` produced before this type existed,
+/// so a call site that stringifies for a fingerprint or log line keeps a
+/// byte-identical rendering.
+impl std::fmt::Display for ResolvedExtractBin {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0.display())
+    }
+}
+
 /// `$TIDEPOOL_EXTRACT` is set but does not name a readable file.
 #[derive(Clone, Debug)]
 pub struct BinError {
@@ -137,6 +220,39 @@ impl From<BinError> for std::io::Error {
     }
 }
 
+/// On Unix, verify `path` names a regular file this process can actually
+/// READ, with at least one EXECUTE permission bit set — the two properties
+/// [`BinError`]'s "not a readable file" message (and this module's "readable
+/// file" precedence-table language) promise but `is_file` alone never
+/// checked, so a `TIDEPOOL_EXTRACT=/some/chmod-000-file` used to resolve
+/// successfully here and only fail later, as an opaque OS error, at spawn.
+///
+/// `File::open` is the real read-access check (it honors the same
+/// permission/ACL evaluation a later spawn's read of the binary would hit);
+/// the execute-bit check on `mode()` is the accessible without-`libc`
+/// approximation of "executable" this std-only crate can perform (see the
+/// crate doc's D-A note) — the same thing a later spawn ultimately depends
+/// on to succeed.
+#[cfg(unix)]
+fn is_readable_executable_file(path: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    if !path.is_file() || std::fs::File::open(path).is_err() {
+        return false;
+    }
+    std::fs::metadata(path)
+        .map(|meta| meta.permissions().mode() & 0o111 != 0)
+        .unwrap_or(false)
+}
+
+/// Off Unix, there is no portable, dependency-free access check this
+/// std-only crate can perform (see the crate doc's D-A note); `is_file` is
+/// what this precedence step has always checked here, and a genuinely
+/// unusable binary still fails loudly at spawn time.
+#[cfg(not(unix))]
+fn is_readable_executable_file(path: &Path) -> bool {
+    path.is_file()
+}
+
 /// Resolve the `tidepool-extract` binary, STRICTLY.
 ///
 /// `$TIDEPOOL_EXTRACT` (the same override every test tier honors) wins over
@@ -151,7 +267,7 @@ pub fn resolve_bin() -> Result<ResolvedBin, BinError> {
     match std::env::var_os("TIDEPOOL_EXTRACT") {
         Some(v) => {
             let path = PathBuf::from(v);
-            if !path.is_file() {
+            if !is_readable_executable_file(&path) {
                 return Err(BinError { path });
             }
             Ok(ResolvedBin {
@@ -391,9 +507,13 @@ impl ExtractCmd {
     /// resolves once at construction and reuses the result across many
     /// invocations (`tidepool_harness::compile`, which is handed the binary
     /// path rather than re-reading the env per turn).
-    pub fn with_bin(bin: impl Into<OsString>) -> Self {
+    ///
+    /// Takes [`ResolvedExtractBin`] rather than an arbitrary string, so the
+    /// only way to reach this constructor is through a real [`resolve_bin`]
+    /// call or the named escape hatch — never a guessed fallback name.
+    pub fn with_bin(bin: ResolvedExtractBin) -> Self {
         ExtractCmd {
-            launcher: Launcher::Direct(bin.into()),
+            launcher: Launcher::Direct(bin.into_os_string()),
             bin_source: BinSource::Explicit,
             inputs: Vec::new(),
             flags: Vec::new(),
@@ -628,7 +748,7 @@ mod tests {
 
     #[test]
     fn argv_puts_inputs_first_then_flags_in_order() {
-        let mut cmd = ExtractCmd::with_bin("tidepool-extract");
+        let mut cmd = ExtractCmd::with_bin(ResolvedExtractBin::assume_resolved("tidepool-extract"));
         cmd.input("/tmp/Expr.hs")
             .output_dir("/tmp/out")
             .targets(["a", "b"])
@@ -653,7 +773,7 @@ mod tests {
     /// input N.
     #[test]
     fn classify_mode_preserves_input_order() {
-        let mut cmd = ExtractCmd::with_bin("x");
+        let mut cmd = ExtractCmd::with_bin(ResolvedExtractBin::assume_resolved("x"));
         cmd.input("item-0.hs")
             .input("item-1.hs")
             .classify()
@@ -672,7 +792,7 @@ mod tests {
 
     #[test]
     fn turn_mode_spells_every_flag() {
-        let mut cmd = ExtractCmd::with_bin("x");
+        let mut cmd = ExtractCmd::with_bin(ResolvedExtractBin::assume_resolved("x"));
         cmd.input("turn.txt")
             .turn()
             .turn_template("expr", Path::new("/tmp/t.hs"))
@@ -704,7 +824,7 @@ mod tests {
 
     #[test]
     fn turn_batch_mode_spells_every_flag() {
-        let mut cmd = ExtractCmd::with_bin("x");
+        let mut cmd = ExtractCmd::with_bin(ResolvedExtractBin::assume_resolved("x"));
         cmd.turn_batch("/tmp/plan.json")
             .batch_out("/tmp/batch-out")
             .includes(["/inc/one"]);
@@ -723,7 +843,7 @@ mod tests {
 
     #[test]
     fn session_bind_mode_spells_every_flag() {
-        let mut cmd = ExtractCmd::with_bin("x");
+        let mut cmd = ExtractCmd::with_bin(ResolvedExtractBin::assume_resolved("x"));
         cmd.session_bind()
             .bind_gen(3)
             .emit_bound_binders("/tmp/bb.json")
@@ -757,10 +877,11 @@ mod tests {
         }
     }
 
-    /// One test owns `$TIDEPOOL_EXTRACT` for this binary (both cases in
+    /// One test owns `$TIDEPOOL_EXTRACT` for this binary (all cases in
     /// sequence) so no two tests race on the same process-global env var.
     #[test]
     fn bin_resolution_is_strict() {
+        use std::os::unix::fs::PermissionsExt;
         let dir = std::env::temp_dir().join(format!(
             "tidepool-extract-cmd-resolve-{}",
             std::process::id()
@@ -781,9 +902,36 @@ mod tests {
         let io: std::io::Error = err.into();
         assert_eq!(io.kind(), std::io::ErrorKind::NotFound);
 
-        // Set-and-readable wins over PATH.
+        // A file that EXISTS but has no permission bits at all (`chmod 000`)
+        // must be rejected AT RESOLUTION, with the same "not a readable
+        // file" error — not accepted here and left to fail later, as an
+        // opaque OS error, at spawn.
+        let unreadable = dir.join("chmod-000-extract");
+        std::fs::write(&unreadable, b"#!/bin/sh\nexit 0\n").unwrap();
+        std::fs::set_permissions(&unreadable, std::fs::Permissions::from_mode(0o000)).unwrap();
+        std::env::set_var("TIDEPOOL_EXTRACT", &unreadable);
+        let err = resolve_bin().unwrap_err();
+        assert_eq!(err.path(), unreadable.as_path());
+        assert!(
+            err.to_string().contains("not a readable file"),
+            "unexpected message: {err}"
+        );
+        std::fs::set_permissions(&unreadable, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::remove_file(&unreadable).ok();
+
+        // A readable file with no EXECUTE bit set is rejected the same way —
+        // `is_file` alone would have accepted it.
+        let not_executable = dir.join("not-executable-extract");
+        std::fs::write(&not_executable, b"#!/bin/sh\nexit 0\n").unwrap();
+        std::fs::set_permissions(&not_executable, std::fs::Permissions::from_mode(0o644)).unwrap();
+        std::env::set_var("TIDEPOOL_EXTRACT", &not_executable);
+        let err = resolve_bin().unwrap_err();
+        assert_eq!(err.path(), not_executable.as_path());
+
+        // Set-and-readable-and-executable wins over PATH.
         let real = dir.join("tidepool-extract");
         std::fs::write(&real, b"#!/bin/sh\nexit 0\n").unwrap();
+        std::fs::set_permissions(&real, std::fs::Permissions::from_mode(0o755)).unwrap();
         std::env::set_var("TIDEPOOL_EXTRACT", &real);
         let resolved = resolve_bin().unwrap();
         assert_eq!(resolved.path, real);
@@ -816,13 +964,15 @@ mod tests {
         reset_extract_spawn_count();
 
         // Never launched: not counted.
-        let mut missing = ExtractCmd::with_bin(dir.join("does-not-exist"));
+        let mut missing = ExtractCmd::with_bin(ResolvedExtractBin::assume_resolved(
+            dir.join("does-not-exist"),
+        ));
         let err = missing.input("x.hs").run().unwrap_err();
         assert!(err.is_not_found(), "expected NotFound, got {err}");
         assert_eq!(extract_spawn_count(), 0);
 
         // Ran and failed: counted, and classified by policy.
-        let mut cmd = ExtractCmd::with_bin(&fake);
+        let mut cmd = ExtractCmd::with_bin(ResolvedExtractBin::assume_resolved(&fake));
         let run = cmd.input("x.hs").run().unwrap();
         assert!(!run.success());
         assert_eq!(run.verdict, ExitVerdict::UserOrSkew);

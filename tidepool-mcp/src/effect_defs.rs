@@ -197,10 +197,13 @@ pub(crate) use opt_prompt_card_or_none;
 
 /// The [`crate::EffectDecl::extra_imports`] table: companion `import` lines a
 /// generated effect's helpers need beyond the fixed eval surface
-/// (`preamble::eval_import_lines`) — `Exec`'s helpers build on `runArgv`
-/// (`Tidepool.Shell`/`Tidepool.Cargo`), `Git`'s on the Git verbs
+/// (`preamble::eval_import_lines`) — `Git`'s helpers build on the Git verbs
 /// (`Tidepool.Git`), `AskUser`'s `Tidepool.Form` on `askUserRaw`. Every other
 /// effect needs nothing beyond the fixed surface.
+///
+/// A MIGRATED effect does not appear here at all: its companion imports are
+/// schema data in `tidepool-protocol` and are emitted straight into its
+/// generated decl. `Exec` was the first to leave.
 ///
 /// Matched on the effect's own identifier (`$eff` from the `_effect_def!`
 /// call site) rather than added as a token to the shared `_effect_def!`
@@ -212,19 +215,29 @@ pub(crate) use opt_prompt_card_or_none;
 /// see `preamble.rs`'s import fold, which is the other half of the old
 /// two-planes-must-be-kept-in-sync-by-hand gate (friction #23).
 macro_rules! extra_imports_for {
-    (Exec) => {
-        &[
-            "import qualified Tidepool.Shell as Shell",
-            "import Tidepool.Shell (sh)",
-            "import qualified Tidepool.Cargo as Cargo",
-        ]
-    };
     (Git) => {
         &["import qualified Tidepool.Git as Git"]
     };
     (AskUser) => {
         &["import Tidepool.Form"]
     };
+    // `renderSpawnError` is DEFINED in `haskell/lib/Tidepool/Agent/Spawn.hs`
+    // rather than emitted into the generated module, because it calls
+    // `renderWorktreeError` — authored library code in `Tidepool.Worktree`,
+    // which the generated `Tidepool.Effects` cannot import (that module imports
+    // IT). A forced cross-row edit; see the scaffold doc §11.12.
+    //
+    // NARROW on purpose. The module's other exports (`spawnAgent`,
+    // `spawnAsync`, `awaitAgent`, …) are reached by an explicit import today
+    // and must keep being, or this row would silently WIDEN the eval surface
+    // this migration promised to leave byte-identical.
+    (Subagent) => {
+        &["import Tidepool.Agent.Spawn (renderSpawnError)"]
+    };
+    // Journal was migrated to the `tidepool-protocol` schema (PRD 22 phase 2);
+    // its `extra_imports` (`import qualified Tidepool.Resume as Resume` — the
+    // READ half of the run journal, PRD 20 S1-L5) is schema data now, emitted
+    // straight into its generated decl. See `tidepool-protocol/src/effects/journal.rs`.
     // The green-thread surface rides `Green`'s substrate verbs, so it is in
     // scope exactly when `Green` is in the row — same row-gating as
     // `Tidepool.Form` on `AskUser`.
@@ -295,6 +308,103 @@ pub(crate) use error_decl_text;
 /// [`helper_text!`]. The `handler`/`req`/`method` facts (and the reserved
 /// `errors` slot) are Rust-side and ignored here.
 macro_rules! effect_decl_projection {
+    // `stable_errors true` variant of the unparameterized-effect wrapper arm
+    // below — ONLY matched when a definition carries the extra
+    // `stable_errors true,` marker (today: just `fs_effect_def!`). Forwards
+    // to the `stable_errors` main arm instead of the normal one, so every
+    // OTHER effect's invocation (no `stable_errors` token) still matches the
+    // ORIGINAL arms further down, byte-for-byte unchanged.
+    (
+        effect $eff:ident,
+        handler $handler:ident,
+        req $req:ident,
+        decl_fn $decl_fn:ident,
+        $(prompt_card $pc:tt,)?
+        $(helpers_row_polymorphic $hrp:tt,)?
+        description $desc:tt,
+        type_defs $td:tt,
+        errors $errname:ident $evariants:tt,
+        stable_errors true,
+        verbs $verbs:tt,
+        helpers $helpers:tt $(,)?
+    ) => {
+        crate::effect_defs::effect_decl_projection! {
+            effect $eff,
+            handler $handler,
+            req $req,
+            decl_fn $decl_fn,
+            type_params [] default_row_args [],
+            $(prompt_card $pc,)?
+            $(helpers_row_polymorphic $hrp,)?
+            description $desc,
+            type_defs $td,
+            errors $errname $evariants,
+            stable_errors true,
+            verbs $verbs,
+            helpers $helpers,
+        }
+    };
+    // `stable_errors true` main arm: identical to the normal main arm below,
+    // except `type_defs` OMITS the `errors` block's inline `data`/`ToJSON`
+    // text — that text needs a STABLE home instead (some other type meant to
+    // cross session-bind fragments embeds this errors ADT as a FIELD, e.g.
+    // `Fs`'s `FileRead.contents :: Either FsError Text`; a type inlined into
+    // the per-session `Tidepool.Effects` module is fragment-nominal, so a
+    // record meant to survive a session bind cannot mention one — see
+    // haskell/src/Tidepool/Translate.hs's `typeMentionsEffectMonad` and
+    // `tidepool-mcp/src/fs_stable.rs`, which carries this SAME `errname`
+    // block's text into `haskell/lib/Tidepool/Records/Stable.hs` instead).
+    // The Rust-side projection (`effect_rust_projection!`) is unaffected —
+    // it still generates the error enum from the same `errors` block exactly
+    // as before; only where the HASKELL decl text lands changes.
+    (
+        effect $eff:ident,
+        handler $handler:ident,
+        req $req:ident,
+        decl_fn $decl_fn:ident,
+        type_params $tps:tt default_row_args [$($dra:literal),* $(,)?],
+        $(prompt_card $pc:tt,)?
+        $(helpers_row_polymorphic $hrp:tt,)?
+        description [$($desc:literal),* $(,)?],
+        type_defs [$($td:literal),* $(,)?],
+        errors $errname:ident [
+            $($evariant:tt),* $(,)?
+        ],
+        stable_errors true,
+        verbs [
+            $({ ctor $ctor:ident,
+                method $method:ident,
+                args { $($an:ident : $ah:literal as $ar:ty),* $(,)? },
+                ret $ret:literal
+                $(, errors $everr:ident)?
+                $(,)?
+            }),* $(,)?
+        ],
+        helpers [ $($helper:tt),* $(,)? ] $(,)?
+    ) => {
+        pub fn $decl_fn() -> $crate::EffectDecl {
+            $crate::EffectDecl {
+                type_name: stringify!($eff),
+                description: concat!($($desc),*),
+                prompt_card: crate::effect_defs::opt_prompt_card_or_none!($($pc)?),
+                constructors: &[
+                    $( crate::effect_defs::ctor_sig!(
+                        { $eff, $tps, $ctor, [ $($ah),* ], $ret $(, errors $everr)? }
+                    ) ),*
+                ],
+                // `errors $errname`'s decl text is deliberately NOT appended
+                // here — it lives in the stable module instead (see the arm
+                // doc comment above). Any OTHER literal `$td` entries still
+                // ride along normally.
+                type_defs: &[ $($td,)* ],
+                extra_imports: crate::effect_defs::extra_imports_for!($eff),
+                helpers: &[ $( crate::effect_defs::helper_text!($helper) ),* ],
+                type_params: crate::effect_defs::ty_param_names!($tps),
+                default_row_args: &[ $($dra),* ],
+                helpers_row_polymorphic: crate::effect_defs::opt_bool_or_false!($($hrp)?),
+            }
+        }
+    };
     // An unparameterized effect (all but `Finalize`): forward to the arm below
     // with an empty type-parameter list. Two arms rather than one optional
     // slot because the parameters are consumed INSIDE the per-constructor
@@ -508,54 +618,6 @@ macro_rules! meta_effect_def {
                 { name metaHelp, sig "M [Text]",
                   doc ["Helper-verb signatures of the running stack."],
                   body nullary MetaHelp },
-            ],
-        }
-    };
-}
-
-/// Exec effect — single definition.
-#[macro_export]
-macro_rules! exec_effect_def {
-    ($project:path) => {
-        $project! {
-            effect Exec,
-            handler ExecHandler,
-            req ExecReq,
-            decl_fn exec_decl,
-            description ["Run shell commands and capture output."],
-            type_defs [],
-            // #335 typed-failure ADT. A nonzero EXIT is NOT a failure here — `run`
-            // still returns a Proc with its exitCode on nonzero exit; `Left` is
-            // only for a spawn failure or a bad/escaping working directory.
-            errors ExecError [
-                { ctor ExecSpawn,  fields { detail: "Text" as String }, doc "the process could not be spawned" },
-                { ctor ExecBadDir, fields { detail: "Text" as String }, doc "working directory is invalid or escapes the sandbox" },
-            ],
-            verbs [
-                { ctor Run, method exec_run,
-                  args { cmd: "Text" as String },
-                  ret "Proc", errors ExecError },
-                { ctor RunIn, method exec_run_in,
-                  args { dir: "Text" as String, cmd: "Text" as String },
-                  ret "Proc", errors ExecError },
-                // Shell-free exec: argv list, no sh -c. Safe with metachars ($1, globs).
-                { ctor RunArgv, method exec_run_argv,
-                  args { argv: "[Text]" as Vec<String> },
-                  ret "Proc", errors ExecError },
-            ],
-            helpers [
-                { raw ["-- | Run a shell command; returns a `Proc` record {exitCode, stdout, stderr}",
-                       "-- (use `ok p` for the zero-exit check). Failure is TYPED (#335): `Left",
-                       "-- (ExecSpawn _)` when the process can't be spawned, `Left (ExecBadDir _)`",
-                       "-- for `runIn` with a bad/escaping directory. A nonzero EXIT is NOT a",
-                       "-- failure — inspect `p.exitCode`. Natural spelling: `Right p <- run cmd`.",
-                       "run :: Text -> M (Either ExecError Proc)",
-                       "run = send . Run"] },
-                { raw ["runIn :: Text -> Text -> M (Either ExecError Proc)",
-                       "runIn dir cmd = send (RunIn dir cmd)"] },
-                // Shell-free: argv list, no sh -c. $1/$VAR/globs are literal — safe.
-                { raw ["runArgv :: [Text] -> M (Either ExecError Proc)",
-                       "runArgv = send . RunArgv"] },
             ],
         }
     };
@@ -890,6 +952,30 @@ macro_rules! readstate_effect_def {
 /// suspend paths) — so only [`effect_decl_projection!`] consumes this
 /// definition; the `handler`/`req`/`method` slots name types that are never
 /// generated (same convention as `ask_effect_def!`'s own doc comment).
+///
+/// ## Why only the fork/fanout verbs return an `Either` (PRD 21 decision 6)
+///
+/// `runLLMTurnFork @T :: Text -> M (Either InvocationExit T)` and
+/// `runLLMTurnFanout @T :: [Text] -> M [Either InvocationExit T]`;
+/// `runLLMTurn @T :: Text -> M T` KEEPS its bare answer. That asymmetry is a
+/// real distinction, not an oversight:
+///
+/// - A fork/fanout child is a BRANCH POSITION. Its window is a separate node
+///   with siblings, and PRD 21 locked decision 6 requires an abnormal exit
+///   there to fold as DATA at that position — an exception would erase every
+///   sibling's already-finished result. The caller folding a failure at the
+///   branch position IS the design, so the TYPE hands it to them.
+/// - `runLLMTurn @T` is answered IN CONTEXT by the same node, on the outer
+///   turn's own continuation. It has no siblings to erase and no branch
+///   position to fold at: its failure IS the outer turn's failure. Wrapping it
+///   would make every in-context call site unwrap an `Either` whose `Left`
+///   means "the turn you are in has already failed".
+///
+/// This is the codebase's ordinary typed-failure idiom (`run :: Text -> M
+/// (Either ExecError Proc)`, `llm :: … -> M (Either LlmError Value)`, #335):
+/// ONE spelling per verb, `Either` where failure is data. `InvocationExit` is
+/// generated into `Tidepool.Effects` alongside the GADT (`type_defs` below),
+/// the same way `ExecError`/`FsError` are.
 #[macro_export]
 macro_rules! runllmturn_effect_def {
     ($project:path) => {
@@ -908,18 +994,63 @@ macro_rules! runllmturn_effect_def {
             // gates whether a call site can actually solve the constraint.
             helpers_row_polymorphic true,
             description [
-                "Suspend for a TYPED answer. `runLLMTurn \\@T prompt` (same calling ",
-                "model answers in context) / `runLLMTurnFork \\@T prompt` (a forked ",
-                "sub-agent answers) / `runLLMTurnFanout \\@T prompts` (N forked ",
-                "sub-agents, one per prompt, answered as a batch `[T]`) — GHC ",
-                "validates the answer against `T` before it resumes the continuation ",
-                "(an ill-typed answer never consumes it).",
+                "Suspend for a TYPED answer. `runLLMTurn \\@T prompt :: M T` — the same ",
+                "calling model answers IN CONTEXT; its failure is this turn's failure, so ",
+                "the answer is bare. `runLLMTurnFork \\@T prompt :: M (Either ",
+                "InvocationExit T)` — a forked sub-agent answers in its own window; ",
+                "`runLLMTurnFanout \\@T prompts :: M [Either InvocationExit T]` — N forked ",
+                "sub-agents, one per prompt, one result per prompt IN DECLARED ORDER. A ",
+                "forked window is a BRANCH POSITION, so its abnormal exit (round ",
+                "exhaustion, non-finalization, cancellation, runtime failure) arrives as ",
+                "`Left exit` at that position instead of killing its siblings — natural ",
+                "spelling `Right x <- runLLMTurnFork \\@T p`, or `renderInvocationExit e` ",
+                "to display one. GHC validates each answer against `T` before it resumes ",
+                "the continuation (an ill-typed answer never consumes it). ",
+                "`freezeContext :: M ContextRef` mints a capability naming THIS window's ",
+                "current frozen prefix, immediately (no operator, no model round). ",
+                "`runLLMTurnBranch \\@T ref prompt :: M (Either InvocationExit (T, ",
+                "ContextRef))` forks a FRESH child window off that frozen prefix (never an ",
+                "empty root) — `Right (answer, ref')` is the child's own answer plus a ref ",
+                "to ITS post-finalize context for branching further; a branch child is a ",
+                "BRANCH POSITION too, so its abnormal exit is a `Left` here as well (and a ",
+                "window that never finalized has no context to hand back, which is why the ",
+                "`Either` wraps the whole pair).",
             ],
-            type_defs [],
+            // PRD 21 locked decision 6's typed exit, generated here alongside
+            // the GADT exactly as ExecError/FsError are (they come from the
+            // `errors` block; this one is hand-written because RunLLMTurn has
+            // no Rust handler projection to generate an enum for — see this
+            // macro's own doc comment). The Rust side that BUILDS these values
+            // is `tidepool_harness::engine::InvocationExit`; its constructor
+            // names are this list, and a name missing from a turn's
+            // DataConTable is a hard error there, never a defaulted value.
+            type_defs [
+                "data ContextRef = ContextRef Text deriving (Show, Eq)",
+                "-- | Why a forked cognition window ended WITHOUT a typed answer.\n\
+                 -- Folded as data at the failing branch's own position (PRD 21\n\
+                 -- locked decision 6) — never an exception that erases the results\n\
+                 -- its siblings already produced. Each constructor carries the\n\
+                 -- runtime's own detail text.\n\
+                 data InvocationExit\n\
+                 \x20 = ExitRoundsExhausted Text\n\
+                 \x20 | ExitNotFinalized Text\n\
+                 \x20 | ExitCancelled Text\n\
+                 \x20 | ExitRuntimeFailure Text\n\
+                 \x20 deriving (Show, Eq)",
+                "instance ToJSON InvocationExit where\n\
+                 \x20 toJSON e = case e of\n\
+                 \x20   ExitRoundsExhausted detail -> object [\"tag\" .= (\"ExitRoundsExhausted\" :: Text), \"detail\" .= detail]\n\
+                 \x20   ExitNotFinalized detail -> object [\"tag\" .= (\"ExitNotFinalized\" :: Text), \"detail\" .= detail]\n\
+                 \x20   ExitCancelled detail -> object [\"tag\" .= (\"ExitCancelled\" :: Text), \"detail\" .= detail]\n\
+                 \x20   ExitRuntimeFailure detail -> object [\"tag\" .= (\"ExitRuntimeFailure\" :: Text), \"detail\" .= detail]",
+            ],
             verbs [
                 { ctor RunLLMTurnWith, method run_llm_turn_with,
                   args { prompt: "Text" as String, payload: "Value" as tidepool_eval::value::Value },
                   ret "Value" },
+                { ctor RunLLMTurnFreezeWith, method run_llm_turn_freeze_with,
+                  args { },
+                  ret "ContextRef" },
             ],
             helpers [
                 // #R0 typed-yield pass, plans/harness-r0/10-extract-pass; split out of
@@ -968,8 +1099,15 @@ macro_rules! runllmturn_effect_def {
                 { raw ["{-# OPAQUE runLLMTurn #-}",
                        "runLLMTurn :: forall a effs. Member RunLLMTurn effs => Text -> Eff effs a",
                        "runLLMTurn prompt = runLLMTurnSited 0 prompt"] },
+                // The `@T` a call site applies still pins the CHILD's answer
+                // type — it is the first forall'd tyvar, so `runLLMTurnFork
+                // @Decision p` reads exactly as before and the site's recorded
+                // asks.json type stays `T` (`[T]` for the fanout). The
+                // `Either` is what the PARENT receives: the child's own
+                // finalize contract is unchanged, and so is the driver's
+                // `Finalize T` row pin derived from that recorded type.
                 { raw ["{-# OPAQUE runLLMTurnFork #-}",
-                       "runLLMTurnFork :: forall a effs. Member RunLLMTurn effs => Text -> Eff effs a",
+                       "runLLMTurnFork :: forall a effs. Member RunLLMTurn effs => Text -> Eff effs (Either InvocationExit a)",
                        "runLLMTurnFork prompt = runLLMTurnForkSited 0 prompt"] },
                 // runLLMTurnFanout (B1, widen): one park, N thunk children — the
                 // SAME classification scheme as runLLMTurnFork ("typedSite" +
@@ -980,8 +1118,17 @@ macro_rules! runllmturn_effect_def {
                 // Translate.hs's fanout interception arm) — the harness derives the
                 // element type back by stripping the outer `[]`.
                 { raw ["{-# OPAQUE runLLMTurnFanout #-}",
-                       "runLLMTurnFanout :: forall a effs. Member RunLLMTurn effs => [Text] -> Eff effs [a]",
+                       "runLLMTurnFanout :: forall a effs. Member RunLLMTurn effs => [Text] -> Eff effs [Either InvocationExit a]",
                        "runLLMTurnFanout prompts = runLLMTurnFanoutSited 0 prompts"] },
+                // Display for a folded exit. Beside the type, not in a
+                // curated module: `Tidepool.Effects` is where the type is
+                // generated, and every row that can produce one already
+                // imports it.
+                { raw ["renderInvocationExit :: InvocationExit -> Text",
+                       "renderInvocationExit (ExitRoundsExhausted d) = \"round exhaustion: \" <> d",
+                       "renderInvocationExit (ExitNotFinalized d) = \"non-finalization: \" <> d",
+                       "renderInvocationExit (ExitCancelled d) = \"cancelled: \" <> d",
+                       "renderInvocationExit (ExitRuntimeFailure d) = \"runtime failure: \" <> d"] },
                 // The Int arg is the site id extract substitutes at the call site (the
                 // literal `0` above is a placeholder, never the value that actually
                 // runs). `unsafeCoerce` is safe here ONLY because extract has already
@@ -993,15 +1140,65 @@ macro_rules! runllmturn_effect_def {
                 // surfaces) — the harness resumes this suspension with a value the
                 // caller validated against that exact type, so the coercion is a
                 // same-representation relabeling, not a genuine type change.
+                //
+                // For the two FORK siblings the coerced-to type is the WRAPPED
+                // one (`Either InvocationExit a` / `[Either InvocationExit a]`),
+                // and the harness resumes with exactly that shape: it builds
+                // `Right <child answer>` (or `Left <exit>`) against the turn's
+                // own DataConTable before resuming — `tidepool_harness::engine::
+                // build_child_answer_value`, which hard-fails when a needed
+                // constructor is absent from the table rather than defaulting.
                 { raw ["{-# OPAQUE runLLMTurnSited #-}",
                        "runLLMTurnSited :: forall a effs. Member RunLLMTurn effs => Int -> Text -> Eff effs a",
                        "runLLMTurnSited sid p = unsafeCoerce <$> send (RunLLMTurnWith p (object [\"typedSite\" .= sid]))"] },
                 { raw ["{-# OPAQUE runLLMTurnForkSited #-}",
-                       "runLLMTurnForkSited :: forall a effs. Member RunLLMTurn effs => Int -> Text -> Eff effs a",
+                       "runLLMTurnForkSited :: forall a effs. Member RunLLMTurn effs => Int -> Text -> Eff effs (Either InvocationExit a)",
                        "runLLMTurnForkSited sid p = unsafeCoerce <$> send (RunLLMTurnWith p (object [\"typedSite\" .= sid, \"fork\" .= True]))"] },
                 { raw ["{-# OPAQUE runLLMTurnFanoutSited #-}",
-                       "runLLMTurnFanoutSited :: forall a effs. Member RunLLMTurn effs => Int -> [Text] -> Eff effs [a]",
+                       "runLLMTurnFanoutSited :: forall a effs. Member RunLLMTurn effs => Int -> [Text] -> Eff effs [Either InvocationExit a]",
                        "runLLMTurnFanoutSited sid prompts = unsafeCoerce <$> send (RunLLMTurnWith (intercalate \"\\n\" prompts) (object [\"typedSite\" .= sid, \"fork\" .= True, \"fan\" .= length prompts, \"prompts\" .= prompts]))"] },
+                // PRD 21 lane C3 GAP 1: give the frozen-snapshot seam
+                // (tidepool-harness's ContextSnapshot / freeze_snapshot /
+                // fork_from_snapshot) an authored-surface reach. `freezeContext`
+                // is NOT sited — its answer type (`ContextRef`) is fixed, not a
+                // per-call `\@T`, so it needs no Translate.hs interception, the
+                // same reason `getStateJson`/`ReadStateWith` need none: an
+                // ordinary `send` on an interposed effect suspends regardless of
+                // site-numbering.
+                { raw ["-- | Mint a capability naming THIS window's current frozen",
+                       "-- prefix (PRD 21 locked decision 2: children fork the frozen",
+                       "-- post-coalgebra context). Immediate — no operator, no model",
+                       "-- round (ReadState's service shape). Possession is permission:",
+                       "-- a ContextRef only ever comes from here or from",
+                       "-- runLLMTurnBranch's own return; an unrecognized one is refused",
+                       "-- by the driver as a typed error, never a silent fresh-root",
+                       "-- fallback.",
+                       "freezeContext :: forall effs. Member RunLLMTurn effs => Eff effs ContextRef",
+                       "freezeContext = send RunLLMTurnFreezeWith"] },
+                // `runLLMTurnBranch` IS sited (its `\@T` is model/site-chosen,
+                // exactly like `runLLMTurnFork`), riding the SAME
+                // `RunLLMTurnWith` wire constructor with a `branch`/`ref` payload
+                // flag (classified by `tidepool-harness::engine::classify_hole`)
+                // rather than a new GADT constructor — mirroring how
+                // fork/fanout already share one constructor. See
+                // `haskell/src/Tidepool/Translate.hs`'s `sitedVerbs` table for
+                // its one added row.
+                //
+                // A branch child IS a branch position (PRD 21 decision 6), so
+                // it answers an `Either` like fork/fanout. The `Either` wraps
+                // the WHOLE pair — `Either InvocationExit (a, ContextRef)`,
+                // not `(Either InvocationExit a, ContextRef)`: a window that
+                // never finalized has no post-finalize context, so a
+                // `ContextRef` beside a failure would be a capability with
+                // nothing behind it. `freezeContext` stays bare — it is not a
+                // window (no model round, resolves immediately), so it has no
+                // exit to report.
+                { raw ["{-# OPAQUE runLLMTurnBranch #-}",
+                       "runLLMTurnBranch :: forall a effs. Member RunLLMTurn effs => ContextRef -> Text -> Eff effs (Either InvocationExit (a, ContextRef))",
+                       "runLLMTurnBranch ref p = runLLMTurnBranchSited 0 ref p"] },
+                { raw ["{-# OPAQUE runLLMTurnBranchSited #-}",
+                       "runLLMTurnBranchSited :: forall a effs. Member RunLLMTurn effs => Int -> ContextRef -> Text -> Eff effs (Either InvocationExit (a, ContextRef))",
+                       "runLLMTurnBranchSited sid (ContextRef ref) p = unsafeCoerce <$> send (RunLLMTurnWith p (object [\"typedSite\" .= sid, \"branch\" .= True, \"ref\" .= ref]))"] },
             ],
         }
     };
@@ -1457,13 +1654,17 @@ macro_rules! fs_effect_def {
             req FsReq,
             decl_fn fs_decl,
             description ["Read and write files (sandboxed to server working directory)."],
-            // `FileRead` is the per-file result record `readGlob` yields (records
-            // over tuples). It references `FsError` from the errors block below;
-            // top-level decls in the generated module are order-independent.
-            type_defs [
-                "data FileRead = FileRead { path :: Text, contents :: Either FsError Text } deriving (Show, Eq)",
-                "instance ToJSON FileRead where\n  toJSON (FileRead p c) = object [\"path\" .= p, \"contents\" .= c]",
-            ],
+            // `FileRead` (readGlob's per-file result record) and `FsError`
+            // (below) both live in the STABLE `Tidepool.Records.Stable`
+            // module instead of here (`stable_errors true`, at the bottom of
+            // this block) — NOT inline `type_defs` — because `FileRead`
+            // embeds `FsError` as a FIELD (`contents :: Either FsError
+            // Text`), and a record meant to survive a session bind cannot
+            // mention a type inline in the per-session `Tidepool.Effects`
+            // module (fragment-nominal — see haskell/src/Tidepool/
+            // Translate.hs's `typeMentionsEffectMonad`). See
+            // `tidepool-mcp/src/fs_stable.rs` for both decls' single source.
+            type_defs [],
             // #335 typed-failure ADT. Coarse: `FsNotFound`/`FsNotUtf8` carry the
             // path so callers can dispatch (`Left (FsNotFound _)`); the rest carry
             // a message. `FsSandbox` covers sandbox escapes and the glob boundary
@@ -1476,6 +1677,7 @@ macro_rules! fs_effect_def {
                 { ctor FsBadRegex, fields { detail: "Text" as String }, doc "grep regex failed to compile" },
                 { ctor FsIo,       fields { detail: "Text" as String }, doc "other I/O failure" },
             ],
+            stable_errors true,
             verbs [
                 { ctor FsRead, method fs_read,
                   args { path: "Text" as String },
@@ -1545,221 +1747,6 @@ macro_rules! fs_effect_def {
                 { raw ["-- | Compute-check-commit: write only if every named check holds; failures\n-- come back as a `WriteOutcome` (nothing written on failure).\nwriteChecked :: FilePath -> [(Text, Bool)] -> Text -> M WriteOutcome\nwriteChecked path checks content = do\n  let failed = [name | (name, ok) <- checks, not ok]\n  if null failed\n    then writeFile path content >>= liftEither >> pure (Written path (length checks))\n    else pure (WriteBlocked path failed)"] },
                 { raw ["-- | Blake3 content hash (hex) of a file, or Nothing if it does not exist.\n-- The compare-and-swap token for writeCheckedIf: read it, compute your new\n-- content, then write back only if the file still hashes the same.\nfileHash :: FilePath -> M (Maybe Text)\nfileHash p = send (FsHash p) >>= liftEither"] },
                 { raw ["-- | Content-hash compare-and-swap write (#330). Writes CONTENT only if the\n-- file's current blake3 hash equals EXPECTED (Nothing = expect the file ABSENT,\n-- i.e. create-only). The compare-and-write is atomic within the handler, closing\n-- the lost-update race between parallel agents. Returns a WriteOutcome: 'Written'\n-- on success, or 'WriteConflict' (carrying expected vs actual hash) if the\n-- precondition failed — conflicts come back as DATA, nothing is written. Get\n-- EXPECTED from fileHash; on a conflict re-read, recompute, and retry.\nwriteCheckedIf :: Maybe Text -> FilePath -> Text -> M WriteOutcome\nwriteCheckedIf expected path content = do\n  r <- send (FsWriteCas path expected content)\n  pure $ case r of\n    Right () -> Written path 1\n    Left actual -> WriteConflict path expected actual"] },
-            ],
-        }
-    };
-}
-
-/// Worktree effect — single definition (PRD 19, lane L4).
-///
-/// The authored surface is `haskell/lib/Tidepool/Worktree.hs`, which was
-/// written FIRST and re-exports every name below from the generated
-/// `Tidepool.Effects`. That module is frozen: this definition exists to satisfy
-/// its import list exactly, not to shape it.
-///
-/// **Identity types are `data`, not `newtype`, and not type synonyms.** PRD 19
-/// states that `EventId` is opaque runtime identity while `GitOid` is domain
-/// data, and that they are different kinds of thing. A synonym to `Text` would
-/// make them the same thing and let a git OID be passed where a worktree id is
-/// wanted; a `newtype` is erased in Core, so the Rust `ToCore` side would build
-/// a one-field `Con` the Haskell side no longer has. `data` is the spelling
-/// that survives both.
-///
-/// **`WorktreeReceipt`'s id field is `treeId`, not the PRD snippet's
-/// `worktreeId`.** The PRD's own public surface also requires
-/// `worktreeId :: WorktreeHandle -> WorktreeId` as a standalone function, and a
-/// record field selector and a top-level function of the same name are an
-/// ambiguous occurrence at the export. The function is the one the PRD pins by
-/// signature, so the field yielded. Access is `r.treeId` — record-dot, per the
-/// eval records rule.
-#[macro_export]
-macro_rules! worktree_effect_def {
-    ($project:path) => {
-        $project! {
-            effect Worktree,
-            handler WorktreeHandler,
-            req WorktreeReq,
-            decl_fn worktree_decl,
-            description [
-                "Managed git worktrees: create an isolated worktree from a clean source ",
-                "(or, explicitly, from a dirty-source snapshot), look a retained one back ",
-                "up by durable id, and list what exists. Retain-first — there is no ",
-                "release or delete verb in v1, deliberately. Git WORKFLOW (rebase, merge, ",
-                "cherry-pick, conflict resolution) is absent by design: that work belongs ",
-                "to coding agents with their native tools, and Tidepool observes what the ",
-                "repository became through `Tidepool.Event`.",
-            ],
-            type_defs [
-                "data WorktreeId = WorktreeId Text deriving (Show, Eq)",
-                "data GitOid = GitOid Text deriving (Show, Eq)",
-                "data GitRef = GitRef Text deriving (Show, Eq)",
-                "data BranchName = BranchName Text deriving (Show, Eq)",
-                "data WorktreeSource = SourceCurrentRepository | SourceRef GitRef | SourceWorktree WorktreeId deriving (Show, Eq)",
-                "data DirtyPolicy = RequireClean | AllowDirtySnapshot deriving (Show, Eq)",
-                "data WorktreeSpec = WorktreeSpec { specSource :: WorktreeSource, specLabel :: Text, specDirtyPolicy :: DirtyPolicy } deriving (Show, Eq)",
-                "data InProgressKind = InProgressMerge | InProgressRebase | InProgressCherryPick | InProgressRevert | InProgressBisect deriving (Show, Eq)",
-                "data DirtySummary = DirtySummary { staged :: [Text], unstaged :: [Text], untracked :: [Text], ignoredExcluded :: Int } deriving (Show, Eq)",
-                "data GitFailureReceipt = GitFailureReceipt { gitArgs :: [Text], gitCwd :: Text, gitExitCode :: Maybe Int, gitStdout :: Text, gitStderr :: Text } deriving (Show, Eq)",
-                "data WorktreeReceipt = WorktreeReceipt { treeId :: WorktreeId, cwd :: Text, branch :: BranchName, sourceHead :: GitOid, snapshotRef :: Maybe GitRef, createdAt :: Int } deriving (Show, Eq)",
-                "data WorktreeHandle = WorktreeHandle { handleReceipt :: WorktreeReceipt } deriving (Show, Eq)",
-                "data WorktreeSummary = WorktreeSummary { summaryReceipt :: WorktreeReceipt, present :: Bool } deriving (Show, Eq)",
-                // The `errors` block templates a `ToJSON` instance for
-                // `WorktreeError`, so every type reachable from one of its
-                // fields needs one. These are hand-written rather than derived
-                // because the vendored `ToJSON`'s generic default only covers
-                // single-constructor records — `InProgressKind` is
-                // multi-constructor and the identity types are positional.
-                // The identity types render as their bare payload: a receipt
-                // reader wants the id, not a wrapper object.
-                "instance ToJSON WorktreeId where toJSON (WorktreeId t) = toJSON t",
-                "instance ToJSON GitOid where toJSON (GitOid t) = toJSON t",
-                "instance ToJSON GitRef where toJSON (GitRef t) = toJSON t",
-                "instance ToJSON BranchName where toJSON (BranchName t) = toJSON t",
-                "instance ToJSON InProgressKind where toJSON k = toJSON (show k)",
-                "instance ToJSON DirtySummary where toJSON d = object [\"staged\" .= d.staged, \"unstaged\" .= d.unstaged, \"untracked\" .= d.untracked, \"ignoredExcluded\" .= d.ignoredExcluded]",
-                "instance ToJSON GitFailureReceipt where toJSON r = object [\"args\" .= r.gitArgs, \"cwd\" .= r.gitCwd, \"exitCode\" .= r.gitExitCode, \"stdout\" .= r.gitStdout, \"stderr\" .= r.gitStderr]",
-            ],
-            // Typed per-verb failure (#335): a dirty source, a lost tree, or a
-            // busy worktree is DATA an author cases on, not an eval abort.
-            // These are PRD 19's `WorktreeError` variants plus the two the
-            // PRD's prose requires but its illustrative ADT did not spell out
-            // (see `tidepool-worktree/src/error.rs` for the argument).
-            errors WorktreeError [
-                { ctor SourceDirty, fields { dirty: "DirtySummary" as tidepool_bridge_effects::WtDirtySummary },
-                  doc "source working tree has uncommitted state and the spec did not opt into a snapshot" },
-                { ctor NotARepository, fields { path: "Text" as String },
-                  doc "the path is not inside a git repository" },
-                { ctor WorktreeLost, fields { lostId: "WorktreeId" as tidepool_bridge_effects::WtWorktreeId },
-                  doc "registered but gone from disk; never silently recreated" },
-                { ctor DirtySubmoduleUnsupported, fields { submodule: "Text" as String },
-                  doc "a dirty submodule in the source; v1 refuses rather than capturing a gitlink it did not follow" },
-                { ctor SourceOperationInProgress, fields { inProgress: "InProgressKind" as tidepool_bridge_effects::WtInProgressKind },
-                  doc "source is mid-merge / mid-rebase / mid-cherry-pick" },
-                { ctor WorktreeBusy, fields { busyId: "WorktreeId" as tidepool_bridge_effects::WtWorktreeId, holder: "Text" as String },
-                  doc "one worktree, one agent — binding a second fails explicitly" },
-                { ctor GitFailure, fields { receipt: "GitFailureReceipt" as tidepool_bridge_effects::WtGitFailureReceipt },
-                  doc "git itself failed; the receipt carries the invocation and its output" },
-                // The storage-error lane (L6) added three domain variants after
-                // this block was first written. They get wire variants of their
-                // own rather than being folded into an existing one, because
-                // each names a failure an author would act on DIFFERENTLY, and
-                // `tidepool-worktree/src/error.rs` makes the argument itself:
-                // collapsing a distinct failure into a neighbour "hides the
-                // second behind the first". `InvalidRegistryRoot` and
-                // `StorageFailure` in particular are not `GitFailure` — no git
-                // process runs in either — and spelling them as one would send
-                // an operator reading a git receipt that does not exist.
-                { ctor WorktreeNotRegistered, fields { notRegisteredId: "WorktreeId" as tidepool_bridge_effects::WtWorktreeId },
-                  doc "no worktree registered under this id — a typo or a stale id, DISTINCT from WorktreeLost's data loss" },
-                { ctor InvalidRegistryRoot, fields { root: "Text" as String, inside: "Text" as String },
-                  doc "the registry root resolves inside a git working tree; it must live outside every source repository" },
-                { ctor StorageFailure, fields { storagePath: "Text" as String, storageDetail: "Text" as String },
-                  doc "I/O failure against Tidepool's own registry / binding table / journal" },
-            ],
-            verbs [
-                { ctor WorktreeCreate, method worktree_create,
-                  args { spec: "WorktreeSpec" as tidepool_bridge_effects::WtWorktreeSpec },
-                  ret "WorktreeHandle", errors WorktreeError },
-                { ctor WorktreeLookup, method worktree_lookup,
-                  args { treeId: "WorktreeId" as tidepool_bridge_effects::WtWorktreeId },
-                  ret "WorktreeHandle", errors WorktreeError },
-                { ctor WorktreeList, method worktree_list,
-                  args { },
-                  ret "[WorktreeSummary]", errors WorktreeError },
-                { ctor WorktreeBranchOf, method worktree_branch_of,
-                  args { treeId: "WorktreeId" as tidepool_bridge_effects::WtWorktreeId },
-                  ret "BranchName", errors WorktreeError },
-                // A FRESH git read of the worktree's current HEAD. Deliberately
-                // NOT the handle's recorded `sourceHead` (the seed the branch
-                // was rooted at) and NOT the monitor's last-observed baseline:
-                // the entire point is to see what the monitor did not. See the
-                // helper's docs for the gap it exists to close.
-                { ctor WorktreeHeadOf, method worktree_head_of,
-                  args { treeId: "WorktreeId" as tidepool_bridge_effects::WtWorktreeId },
-                  ret "GitOid", errors WorktreeError },
-            ],
-            helpers [
-                { raw ["-- | Seed a managed worktree from the repository Tidepool is running",
-                       "-- against. Clean-by-default: a dirty source is REFUSED unless the spec",
-                       "-- is passed through 'allowDirtySnapshot'.",
-                       "fromCurrentRepository :: Text -> WorktreeSpec",
-                       "fromCurrentRepository lbl = WorktreeSpec SourceCurrentRepository lbl RequireClean"] },
-                { raw ["-- | Seed from an explicit ref (branch, tag, remote ref, or raw OID).",
-                       "fromRef :: GitRef -> Text -> WorktreeSpec",
-                       "fromRef r lbl = WorktreeSpec (SourceRef r) lbl RequireClean"] },
-                { raw ["-- | Seed from another managed worktree's current HEAD. This is how a",
-                       "-- reviewer gets its own isolated tree off the branch it is reviewing.",
-                       "fromWorktree :: WorktreeHandle -> Text -> WorktreeSpec",
-                       "fromWorktree h lbl = WorktreeSpec (SourceWorktree (worktreeId h)) lbl RequireClean"] },
-                { raw ["-- | Opt IN to snapshotting a dirty source. Spelled at the call site so a",
-                       "-- reader of the resident can see that a synthetic commit was taken; it",
-                       "-- never alters the source branch, HEAD, index, or working-tree bytes.",
-                       "allowDirtySnapshot :: WorktreeSpec -> WorktreeSpec",
-                       "allowDirtySnapshot s = s { specDirtyPolicy = AllowDirtySnapshot }"] },
-                { raw ["-- | Create a managed worktree. `Left (SourceDirty summary)` when the",
-                       "-- source is dirty and the spec did not opt in; case-match the error",
-                       "-- rather than unwrapping if you mean to handle it.",
-                       "createWorktree :: WorktreeSpec -> M (Either WorktreeError WorktreeHandle)",
-                       "createWorktree = send . WorktreeCreate"] },
-                { raw ["-- | Look a retained worktree up by durable id. Survives restart:",
-                       "-- resolution reads on-disk registry state, not process memory.",
-                       "-- `Left (WorktreeLost i)` when it is registered but gone from disk.",
-                       "lookupWorktree :: WorktreeId -> M (Either WorktreeError WorktreeHandle)",
-                       "lookupWorktree = send . WorktreeLookup"] },
-                { raw ["-- | Every registered worktree, present or lost. A lost tree is listed",
-                       "-- with `present = False` rather than failing the whole listing.",
-                       "listWorktrees :: M [WorktreeSummary]",
-                       "listWorktrees = send WorktreeList >>= liftEither"] },
-                { raw ["-- | The managed branch this worktree is on, read fresh from git.",
-                       "worktreeBranch :: WorktreeHandle -> M BranchName",
-                       "worktreeBranch h = send (WorktreeBranchOf (worktreeId h)) >>= liftEither"] },
-                { raw ["-- | This worktree's CURRENT @HEAD@, read fresh from git right now.",
-                       "--",
-                       "-- Deliberately none of the three things it could be confused with: it",
-                       "-- is not the handle's recorded @sourceHead@ (the commit the managed",
-                       "-- branch was rooted at), and it is not the event monitor's",
-                       "-- last-observed baseline.  The whole purpose is to see what the",
-                       "-- monitor did NOT.",
-                       "--",
-                       "-- It exists for the gap a resident spanning cycles has to close",
-                       "-- itself.  A subscription never replays, and it lives only for its",
-                       "-- cycle, so @HEAD@ can move after one cycle unregisters and before the",
-                       "-- next one registers.  A resident closes that window in ORDINARY",
-                       "-- AUTHORED CODE: compare @worktreeHead tree@ against the head it",
-                       "-- checkpointed, act on any difference, and only then register live",
-                       "-- reactions with 'withHandler'.",
-                       "--",
-                       "-- That is a reinforcement of no-replay, not a loophole in it.  The",
-                       "-- journal stays diagnostic rather than quietly becoming a callback",
-                       "-- replay mechanism, because the resident — which knows what it already",
-                       "-- acted on — decides what the gap meant, rather than the runtime",
-                       "-- guessing on its behalf.",
-                       "worktreeHead :: WorktreeHandle -> M GitOid",
-                       "worktreeHead h = send (WorktreeHeadOf (worktreeId h)) >>= liftEither"] },
-                { raw ["-- | The durable identity of a managed worktree. Pure: the handle",
-                       "-- already carries its receipt, so this reads no git state.",
-                       "worktreeId :: WorktreeHandle -> WorktreeId",
-                       "worktreeId h = h.handleReceipt.treeId"] },
-                { raw ["renderWorktreeId :: WorktreeId -> Text",
-                       "renderWorktreeId (WorktreeId t) = t"] },
-                { raw ["renderGitOid :: GitOid -> Text",
-                       "renderGitOid (GitOid t) = t"] },
-                { raw ["renderBranchName :: BranchName -> Text",
-                       "renderBranchName (BranchName t) = t"] },
-                { raw ["-- | A one-line, operator-readable rendering of a worktree failure.",
-                       "-- Case-match the constructor when you mean to BRANCH on the failure;",
-                       "-- this is for receipts and logs.",
-                       "renderWorktreeError :: WorktreeError -> Text",
-                       "renderWorktreeError (SourceDirty d) = \"source repository is dirty: \" <> show (length d.staged) <> \" staged, \" <> show (length d.unstaged) <> \" unstaged, \" <> show (length d.untracked) <> \" untracked\"",
-                       "renderWorktreeError (NotARepository p) = \"not a git repository: \" <> p",
-                       "renderWorktreeError (WorktreeLost i) = \"managed worktree \" <> renderWorktreeId i <> \" is registered but missing on disk\"",
-                       "renderWorktreeError (DirtySubmoduleUnsupported p) = \"dirty submodule is unsupported in v1: \" <> p",
-                       "renderWorktreeError (SourceOperationInProgress k) = \"source repository has an operation in progress: \" <> show k",
-                       "renderWorktreeError (WorktreeBusy i holder) = \"worktree \" <> renderWorktreeId i <> \" is already bound to agent \" <> holder",
-                       "renderWorktreeError (GitFailure r) = \"git \" <> T.intercalate \" \" r.gitArgs <> \" failed: \" <> T.strip r.gitStderr",
-                       "renderWorktreeError (WorktreeNotRegistered i) = \"no managed worktree registered with id \" <> renderWorktreeId i",
-                       "renderWorktreeError (InvalidRegistryRoot root inside) = \"registry root \" <> root <> \" resolves inside the git working tree at \" <> inside <> \" — the registry must live outside every source repository\"",
-                       "renderWorktreeError (StorageFailure p d) = \"tidepool storage failure at \" <> p <> \": \" <> d"] },
             ],
         }
     };
@@ -2104,7 +2091,7 @@ macro_rules! event_effect_def {
 /// does not re-export it.
 ///
 /// **Row requirement.** These types reference `WorktreeSpec` /
-/// `WorktreeHandle` / `WorktreeError` from `worktree_effect_def!`'s
+/// `WorktreeHandle` / `WorktreeError` from the Worktree contract's
 /// type_defs, so a row containing Subagent must also contain Worktree.
 ///
 /// **Typed-result decoding is Haskell-side.** The verb returns the terminal
@@ -2296,15 +2283,6 @@ macro_rules! subagent_effect_def {
                        "renderBackendFailure (BackendUnavailable t) = \"backend unavailable: \" <> t",
                        "renderBackendFailure (ProtocolRejected t) = \"backend rejected request: \" <> t",
                        "renderBackendFailure (RunFailed t) = \"agent run failed: \" <> t"] },
-                { raw ["renderSpawnError :: SpawnError -> Text",
-                       "renderSpawnError (SpawnWorktreeFailed st e) = \"spawn failed at \" <> show st <> \" (worktree): \" <> renderWorktreeError e",
-                       "renderSpawnError (SpawnBindingFailed st e) = \"spawn failed at \" <> show st <> \" (binding): \" <> renderWorktreeError e",
-                       "renderSpawnError (SpawnBackendFailed st b) = \"spawn failed at \" <> show st <> \" (backend): \" <> renderBackendFailure b",
-                       "renderSpawnError (SpawnRollbackFailed st orig rb) = \"spawn failed at \" <> show st <> \" AND rollback failed: \" <> orig <> \"; rollback: \" <> rb",
-                       "renderSpawnError (SpawnResultMalformed d) = \"spawn result malformed: \" <> d",
-                       "renderSpawnError (SpawnDriveFailed st d) = \"spawn drive failed at \" <> show st <> \": \" <> d",
-                       "renderSpawnError (SpawnCapacityExhausted n) = \"spawn refused: cycle table full (\" <> show n <> \" running)\"",
-                       "renderSpawnError (SpawnCancelled c) = \"spawn cancelled before it produced a result: \" <> show c"] },
                 { raw ["-- | RAW async spawn: everything `spawnAgentRaw` does, except that the",
                        "-- cycle runs on its OWN thread and this call returns as soon as it is",
                        "-- admitted — a `CycleId` naming the running cycle, not its outcome.",
@@ -2339,54 +2317,9 @@ macro_rules! subagent_effect_def {
     };
 }
 
-/// Journal effect — single definition (PRD 20, S1-L5 substrate slice).
-///
-/// A durable append-only run journal: a resident harness records completed
-/// steps as it happens, mid-loop, so a crash loses only in-flight work —
-/// never the record of what already finished. One verb, `record kind key
-/// payload`: `kind`/`key` are caller-chosen labels, `payload` an opaque JSON
-/// value (the PRD's locked lean — a fixed step shape, not a
-/// harness-extensible one). Like Worktree/RepoEvent/Subagent, this is NOT in
-/// `build_base_stack`'s row: which file a run journals to, and folding it
-/// into boot-time resume, is the swarm driver's job, wired at merge.
-// See `http_effect_def!` on why `crate::` (not `$crate`) is correct for
-// `crate::effect_glue::JsonArg` here — it resolves at the EXPANSION site
-// (tidepool-handlers' `effect_rust_projection!`), the only consumer of the
-// Rust arg types.
-#[allow(clippy::crate_in_macro_def)]
-#[macro_export]
-macro_rules! journal_effect_def {
-    ($project:path) => {
-        $project! {
-            effect Journal,
-            handler JournalHandler,
-            req JournalReq,
-            decl_fn journal_decl,
-            description [
-                "Durable append-only run journal: a resident harness records completed ",
-                "steps as it happens, mid-loop, so progress survives a crash and resume ",
-                "can fold the journal instead of redoing finished work. `record kind key ",
-                "payload` appends ONE entry — `kind` and `key` are caller-chosen labels ",
-                "(e.g. a step kind and the branch or task it concerns), `payload` is an ",
-                "opaque JSON value. Every append is flushed immediately; the journal is ",
-                "append-only forever — there is no rewrite or compaction verb.",
-            ],
-            type_defs [],
-            verbs [
-                { ctor RecordStep, method record_step,
-                  args { kind: "Text" as String, key: "Text" as String, payload: "Value" as crate::effect_glue::JsonArg },
-                  ret "()" },
-            ],
-            helpers [
-                { raw ["-- | Append one durable journal entry. `kind` and `key` are",
-                       "-- caller-chosen labels; `payload` is an opaque JSON value. Flushed",
-                       "-- immediately; append-only — never rewritten or compacted.",
-                       "record :: Text -> Text -> Value -> M ()",
-                       "record kind key payload = send (RecordStep kind key payload)"] },
-            ],
-        }
-    };
-}
+// Journal effect: MIGRATED to the `tidepool-protocol` schema (PRD 22 phase 2).
+// `journal_decl()` now comes from `tidepool-mcp/src/generated/journal.rs`; see
+// `tidepool-protocol/src/effects/journal.rs` for the single-source definition.
 
 /// Green effect — single definition (PRD 20, S1-L4: green threads).
 ///

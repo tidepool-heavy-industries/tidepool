@@ -21,6 +21,10 @@ tidepool-bridge.workspace = true
 tidepool-codegen.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+# Context-snapshot digests (`src/snapshot.rs`) — the workspace's one digest
+# choice, already used by tidepool-runtime's compile cache and
+# tidepool-handlers.
+blake3.workspace = true
 thiserror = "2"
 genai.workspace = true
 openai-auth = { version = "1", default-features = false, features = ["async", "callback-server"] }
@@ -28,12 +32,19 @@ reqwest = { workspace = true, features = ["form"] }
 base64 = "0.22"
 uuid = { version = "1", features = ["v4"] }
 tokio = { workspace = true, features = ["net", "rt", "rt-multi-thread", "sync", "time"] }
+# Bounded-concurrency stream combinator (`buffer_unordered`) for driving N
+# concurrent fanout/fork RunLLMTurn answerer children (PRD 20 S1-L4) without
+# the `'static` requirement `tokio::spawn` would impose on borrowed driver
+# state — already in the workspace's resolved graph (pulled in transitively
+# by reqwest), pinned here as a direct dependency.
+futures-util = "0.3"
 parking_lot.workspace = true
 tempfile.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+tidepool-testing.workspace = true
 tracing-subscriber = { workspace = true, features = ["registry"] }
 # The outer-row Subagent acceptance (tests/outer_subagent.rs): a MockBackend-
 # backed SubagentHandler + a TestRepo the curator spawns against.

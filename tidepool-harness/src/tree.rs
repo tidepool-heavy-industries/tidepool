@@ -20,8 +20,51 @@ pub struct HoleId(pub String);
 
 /// Extract-time yield-site id: the literal threaded by the head-swap
 /// rewrite, key into the `asks.json` sidecar.
+///
+/// Minted ONLY via the fallible `TryFrom<u64>` boundary constructor, at the
+/// classify seam (`engine::classify_hole`, over a wire `u64`/JSON number
+/// straight from a suspended request) — never via a public field a caller
+/// could hand-construct from an unvalidated integer. An out-of-range wire
+/// value fails there as a typed `ClassifyError`, so a `SiteId` in hand is
+/// always one `asks.json` genuinely indexes; a raw `u32`/`u64` past this
+/// point is structurally unrepresentable as a site id.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct SiteId(pub u32);
+pub struct SiteId(u32);
+
+impl SiteId {
+    pub fn get(self) -> u32 {
+        self.0
+    }
+}
+
+impl std::convert::TryFrom<u64> for SiteId {
+    type Error = std::num::TryFromIntError;
+
+    fn try_from(value: u64) -> Result<Self, Self::Error> {
+        u32::try_from(value).map(SiteId)
+    }
+}
+
+/// A validated fan-out cardinality from the classify seam's `fan` wire field
+/// (`RunLLMTurnWith`'s `fork`/`fan` payload) — same minting discipline as
+/// [`SiteId`]: only the fallible `TryFrom<u64>` boundary constructor, no
+/// public field.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct FanCount(u32);
+
+impl FanCount {
+    pub fn get(self) -> u32 {
+        self.0
+    }
+}
+
+impl std::convert::TryFrom<u64> for FanCount {
+    type Error = std::num::TryFromIntError;
+
+    fn try_from(value: u64) -> Result<Self, Self::Error> {
+        u32::try_from(value).map(FanCount)
+    }
+}
 
 /// Node lifecycle. Who a suspended hole is routed to (model child vs
 /// operator) is a property of the hole, not the node — the observatory's

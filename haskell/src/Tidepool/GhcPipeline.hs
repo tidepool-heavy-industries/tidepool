@@ -37,8 +37,12 @@ import qualified Data.Map.Strict as Map
 import GHC.Platform (genericPlatform)
 import GHC.Utils.Outputable (renderWithContext, defaultSDocContext, ppr)
 import GHC.Types.Id (idName, idType)
-import GHC.Core.Type (Type, splitAppTy_maybe, splitTyConApp_maybe, isFunTy)
-import GHC.Core.TyCon (isTupleTyCon)
+import GHC.Core.Type (splitAppTy_maybe, splitTyConApp_maybe, splitFunTy_maybe)
+import GHC.Core.TyCon (isTupleTyCon, tyConDataCons_maybe, unwrapNewTyCon_maybe, tyConUnique)
+import GHC.Builtin.Names (fUNTyConKey, unrestrictedFunTyConKey)
+import GHC.Core.DataCon (dataConOrigArgTys)
+import GHC.Core.TyCo.Rep (Scaled(..))
+import GHC.Types.Unique.Set (UniqSet, emptyUniqSet, addOneToUniqSet, elementOfUniqSet)
 import GHC.Tc.Utils.TcType (tcSplitSigmaTy)
 import GHC.Types.TypeEnv (typeEnvIds)
 import GHC.Tc.Types (TcGblEnv, tcg_type_env)
@@ -1073,11 +1077,58 @@ stripMonadHead ty =
        Nothing       -> body
 
 -- | Is the bound value a CLOSURE (Tier1) rather than first-order data (Tier0)?
--- True iff @T@ is a function type after stripping its own foralls/context — the
--- distinction the bind path uses to decide strict-force (Tier0) vs store-as-is
--- (Tier1).
+-- True iff @T@ (after stripping its own foralls/context) IS a function type,
+-- OR MENTIONS one anywhere in its structure — a type application argument, a
+-- newtype's representation, or a data constructor field, walked transitively
+-- (visited-set keyed on 'TyCon', so a recursive type terminates instead of
+-- looping; mirrors 'Tidepool.Translate.typeMentionsEffectMonad's walk). The
+-- wider check matters because Tier0 forces the bound value to normal form
+-- before tenuring: a record with a function FIELD (e.g. a companion "mounted
+-- value" carrying an applied handler, PRD 21 lane C1) is not itself a
+-- function type, but deep-forcing it would try to force through the
+-- function field and crash — it needs the SAME store-as-is treatment a bare
+-- function gets.
+--
+-- 'goTc' also special-cases the arrow TyCon itself. A HIGHER-KINDED field
+-- instantiated at a partially-applied arrow (@data Box f = Box (f Int)@ at
+-- @f = (->) Bool@) reaches 'goT' as one of @Box@'s own outer type
+-- arguments — the CONCRETE @(->) Bool@, not @Box@'s abstract, unsubstituted
+-- field declaration @f Int@ (which 'dataConOrigArgTys' can never resolve to
+-- a function regardless of what @f@ is instantiated to, and correctly so —
+-- it is genuinely opaque without that instantiation). A SATURATED arrow
+-- always normalizes to GHC's own @FunTy@ sugar (an invariant GHC itself
+-- maintains — see "Representation of function types" in @GHC.Core.Type@)
+-- and is already caught by 'splitFunTy_maybe' above; only a PARTIAL
+-- application like @(->) Bool@ survives as a bare @TyConApp@ of the
+-- primitive arrow TyCon, which has neither a newtype representation nor
+-- DataCons — so before this case it fell through both 'goTc' checks to
+-- 'False', misclassifying the whole @Box@ value as Tier0 and crashing the
+-- same deep-force this function exists to prevent.
 isClosureType :: Type -> Bool
-isClosureType ty = let (_, _, body) = tcSplitSigmaTy ty in isFunTy body
+isClosureType ty0 =
+  let (_, _, body) = tcSplitSigmaTy ty0
+  in goT emptyUniqSet body
+  where
+    goT :: UniqSet TyCon -> Type -> Bool
+    goT visited ty
+      | Just{} <- splitFunTy_maybe ty = True
+      | Just (tc, tyArgs) <- splitTyConApp_maybe ty = any (goT visited) tyArgs || goTc visited tc
+      | otherwise = False
+
+    goTc :: UniqSet TyCon -> TyCon -> Bool
+    goTc visited tc
+      | tc `elementOfUniqSet` visited = False
+      | tyConUnique tc == fUNTyConKey || tyConUnique tc == unrestrictedFunTyConKey = True
+      | otherwise =
+          let visited' = addOneToUniqSet visited tc
+              newtypeHit = case unwrapNewTyCon_maybe tc of
+                Just (_tvs, reprTy, _coax) -> goT visited' reprTy
+                Nothing -> False
+              fieldHit = case tyConDataCons_maybe tc of
+                Just dcs -> any (\dc -> any (\(Scaled _ ft) -> goT visited' ft)
+                                             (dataConOrigArgTys dc)) dcs
+                Nothing -> False
+          in newtypeHit || fieldHit
 
 -- | Split a tuple type into its component types. @(T1, T2, ..., Tn)@ → @Just
 -- [T1, T2, ..., Tn]@. Returns @Nothing@ for non-tuple types (constructors,

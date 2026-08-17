@@ -12,17 +12,18 @@ pub use tidepool_codegen::jit_machine::{CancelHandle, JitError, ResumeInput};
 use tidepool_codegen::jit_machine::{JitEffectMachine, SuspendableOutcome};
 pub use tidepool_effect::dispatch::DispatchEffect;
 pub use tidepool_eval::value::Value;
-use tidepool_extract_cmd::{ExitVerdict, ExtractCmd};
+use tidepool_extract_cmd::ExtractCmd;
 use tidepool_repr::serial::{read_cbor, read_metadata, MetaWarnings, ReadError};
 use tidepool_repr::{CoreExpr, DataConTable};
 
 /// The compiled-artifact memo. Public for its second consumer,
-/// `tidepool_harness::compile`, which memoizes whole `tidepool-extract`
+/// [`artifacts::compile_targets`], which memoizes whole `tidepool-extract`
 /// invocations through [`cache::invocation_key`] /
 /// [`cache::artifacts_load`] / [`cache::artifacts_store`] rather than
 /// forking this module's fingerprint and staleness discipline
 /// (`plans/compile-memo.md`). The eval pair
 /// ([`cache::cache_key_salted`] and friends) stays crate-private.
+pub mod artifacts;
 pub mod cache;
 pub mod diag;
 pub mod failclass;
@@ -32,6 +33,7 @@ pub mod session;
 pub mod timing;
 pub mod toolchain;
 
+pub use artifacts::{compile_targets, AskSite, AsksSidecar, CompiledArtifacts, TargetArtifact};
 pub use failclass::{
     classify, classify_compile, classify_session, FailureClass, FailureEnvelope, Phase,
 };
@@ -74,6 +76,9 @@ pub enum CompileError {
     /// A required output file (.cbor or meta.cbor) was not produced by the extractor.
     #[error("Missing output file from extractor: {}", .0.display())]
     MissingOutput(PathBuf),
+    /// The `asks.json` sidecar was present but did not parse.
+    #[error("failed to parse asks.json: {0}")]
+    Asks(String),
     /// The target binding has IO type, which is not supported.
     #[error("IO type detected in result binding. IO operations (unsafePerformIO, etc.) are not supported in the Tidepool sandbox.")]
     IOTypeDetected,
@@ -188,60 +193,47 @@ pub fn compile_haskell_salted(
     let input_path = temp_dir.path().join(&filename);
     std::fs::write(&input_path, source)?;
 
-    // 2. Execute tidepool-extract
-    // Arguments: <file.hs> --output-dir <dir> --target <name> [--include <dir> ...]
+    // 2. Execute tidepool-extract and 3. read its raw output bytes — the
+    // mechanics [`artifacts::compile_targets`] also uses (a one-element
+    // target slice here, so `multi` is always false: this lane reads the
+    // plain `asks.json`, which it then ignores — `CompileResult` has no
+    // sidecar field).
     let mut cmd = ExtractCmd::new().map_err(|e| CompileError::Io(e.into()))?;
     cmd.input(&input_path)
         .output_dir(temp_dir.path())
         .target(target)
         .includes(include);
+    let (meta_bytes, raw) = artifacts::extract_and_read(
+        &cmd,
+        temp_dir.path(),
+        &[target],
+        false,
+        |_, _, _| {},
+        |stderr, _success| {
+            // Always print stderr for diagnostics (trace output from Haskell);
+            // purely a human debug channel now — stdout is the authoritative
+            // contract.
+            if !stderr.is_empty() {
+                eprintln!("[tidepool-extract stderr]\n{stderr}");
+            }
+        },
+    )?;
 
-    let run = cmd
-        .run()
-        .map_err(|e| CompileError::Io(extract_spawn_error(e.source)))?;
-    let output = &run.output;
-
-    // Always print stderr for diagnostics (trace output from Haskell); purely
-    // a human debug channel now — stdout is the authoritative contract.
-    let stderr_str = run.stderr_lossy();
-    if !stderr_str.is_empty() {
-        eprintln!("[tidepool-extract stderr]\n{}", stderr_str);
-    }
-
-    if run.verdict != ExitVerdict::Success {
-        return Err(
-            match diag::parse_diag_report(&output.stdout, &output.stderr) {
-                Ok(report) => CompileError::Diagnostics(report.diagnostics),
-                Err(msg) => CompileError::MalformedDiagnostics(msg),
-            },
-        );
-    }
-
-    // 3. Read and deserialize outputs
-    let expr_path = temp_dir.path().join(format!("{}.cbor", target));
-    let meta_path = temp_dir.path().join("meta.cbor");
-
-    if !expr_path.exists() {
-        return Err(CompileError::MissingOutput(expr_path));
-    }
-    if !meta_path.exists() {
-        return Err(CompileError::MissingOutput(meta_path));
-    }
-
-    let expr_bytes = std::fs::read(&expr_path)?;
-    let meta_bytes = std::fs::read(&meta_path)?;
-
-    let expr = read_cbor(&expr_bytes)?;
-    let (table, warnings) = read_metadata(&meta_bytes)?;
-    // Register varId → name pairs so runtime unresolved-variable errors can
-    // name the symbol, and sentinel-slot → external-name pairs so a forced
-    // kind-4 poison names the symbol it replaced; same on the cache-hit path
-    // above and the session-turn reader (session/turn.rs).
-    tidepool_codegen::host_fns::register_var_names(&warnings.var_names);
-    tidepool_codegen::host_fns::register_poisoned_externals(&warnings.poisoned);
+    // 4. Deserialize.
+    let mut bundle = artifacts::assemble(&meta_bytes, &raw, |_, _, _| {})?;
+    let TargetArtifact { expr, .. } = bundle
+        .targets
+        .remove(target)
+        .expect("extract_and_read requested exactly this target");
+    let CompiledArtifacts {
+        table, warnings, ..
+    } = bundle;
+    // `artifacts::assemble` already registered var names/poisoned externals
+    // for this compile (see its doc); the cache-hit branch above does the
+    // same on its own path, since it never calls `assemble`.
 
     // Only store in cache if deserialization succeeded
-    cache::cache_store(&key, &expr_bytes, &meta_bytes);
+    cache::cache_store(&key, &raw[0].expr_bytes, &meta_bytes);
 
     Ok(CompileResult {
         expr,

@@ -23,33 +23,14 @@ use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::error::WorktreeError;
 use crate::git::{inspect, GitCli};
 use crate::id::{BranchName, GitOid, GitRef, WorktreeId};
+use crate::storage::{now_ms, storage_failure};
 
 /// Directory under the registry root holding one JSON file per worktree id.
 const RECORDS_DIR: &str = "records";
-
-/// Current time as Unix epoch milliseconds. Shared with [`crate::create`] so
-/// `created_at_ms` and binding timestamps come from one clock read helper.
-pub(crate) fn now_ms() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("system clock before Unix epoch")
-        .as_millis() as i64
-}
-
-/// Build a [`WorktreeError::StorageFailure`] naming the path that actually
-/// failed, from any underlying error with a `Display` impl (`std::io::Error`
-/// for I/O, `serde_json::Error` for a corrupt record).
-fn storage_failure(path: &Path, detail: impl std::fmt::Display) -> WorktreeError {
-    WorktreeError::StorageFailure {
-        path: path.to_path_buf(),
-        detail: detail.to_string(),
-    }
-}
 
 /// Write `bytes` to `path` crash-safely: a temp file in the SAME directory,
 /// fsynced, then renamed over the target. A torn write cannot land at `path`

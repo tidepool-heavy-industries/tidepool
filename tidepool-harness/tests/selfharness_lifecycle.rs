@@ -89,6 +89,7 @@ impl ModelProvider for FlakyProvider {
             usage: Usage {
                 input_tokens: 50,
                 output_tokens: 10,
+                cached_input_tokens: None,
             },
             reasoning: None,
             reasoning_items: Vec::new(),
@@ -253,13 +254,18 @@ async fn poisoned_driver_refuses_entry_points() {
     ));
 
     // Recovery re-bootstraps from scratch (the prior cycle discarded `outer`)
-    // — point it at an extract binary that cannot possibly exist, so THIS
-    // bootstrap attempt fails deterministically, without depending on GHC.
+    // — point it at an extract "binary" that can never compile anything, so
+    // THIS bootstrap attempt fails deterministically, without depending on
+    // GHC. NOT a nonexistent path: `toolchain::extract_command_name()` is
+    // STRICT about a set-but-unreadable `$TIDEPOOL_EXTRACT` (a hard error,
+    // never a silent PATH fall-through), but a nonexistent path would still
+    // fail at RESOLUTION rather than at bootstrap's compile step — this test
+    // wants the compile step to be what fails. A real, readable, executable
+    // file with garbage content (`support::poisoned_extract_bin`) resolves
+    // cleanly and fails at spawn/exec time instead.
     let original_extract = std::env::var("TIDEPOOL_EXTRACT").ok();
-    std::env::set_var(
-        "TIDEPOOL_EXTRACT",
-        "/nonexistent/tidepool-extract-bin-poisoned-test",
-    );
+    let (_poison_dir, poison_path) = support::poisoned_extract_bin();
+    std::env::set_var("TIDEPOOL_EXTRACT", &poison_path);
     let recovery = driver.run_one_cycle(&harness_source, None).await;
     match original_extract {
         Some(v) => std::env::set_var("TIDEPOOL_EXTRACT", v),
@@ -267,7 +273,7 @@ async fn poisoned_driver_refuses_entry_points() {
     }
     assert!(
         recovery.is_err(),
-        "a re-bootstrap against a nonexistent extract binary must fail"
+        "a re-bootstrap against a poisoned extract binary must fail"
     );
     assert!(
         matches!(driver.lifecycle(), SelfHarnessState::Poisoned { .. }),

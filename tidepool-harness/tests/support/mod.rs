@@ -85,14 +85,39 @@ pub fn isolate_compile_memo() -> TempDir {
     scratch
 }
 
-/// True iff `TIDEPOOL_EXTRACT` is set or a `tidepool-extract` binary is on
-/// `PATH`.
-fn extract_available() -> bool {
-    std::env::var("TIDEPOOL_EXTRACT").is_ok()
-        || std::process::Command::new("tidepool-extract")
-            .arg("--help")
-            .output()
-            .is_ok()
+/// A `$TIDEPOOL_EXTRACT` override that fails UN-RESCUABLY, on any machine —
+/// a real, executable, readable file whose content is garbage, rather than a
+/// nonexistent path.
+///
+/// `tidepool_runtime::toolchain::extract_command_name()` (what builds
+/// `EngineConfig::extract_bin`) is STRICT: a NONEXISTENT path already fails
+/// loudly at resolution, before a binary is ever spawned. This fixture is for
+/// tests that want the failure to happen LATER, at spawn/exec time — a file
+/// that EXISTS and is readable resolves cleanly (`resolve_bin` returns
+/// `Ok(BinSource::Env)`), so the garbage content fails at spawn/exec time
+/// instead (`ENOEXEC` or similar), deterministic on every machine. Keep the
+/// returned `TempDir` alive for as long as the path must stay valid.
+pub fn poisoned_extract_bin() -> (TempDir, std::path::PathBuf) {
+    let dir = tempfile::tempdir().expect("scratch tempdir for a poisoned extract binary");
+    let path = dir.path().join("tidepool-extract-poisoned");
+    std::fs::write(&path, b"not a real executable\n").expect("write poisoned extract binary");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = std::fs::metadata(&path)
+            .expect("stat poisoned extract binary")
+            .permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&path, perms).expect("chmod +x poisoned extract binary");
+    }
+    (dir, path)
+}
+
+/// True iff `TIDEPOOL_EXTRACT` is set or a working toolchain is derivable —
+/// delegates to the shared harness helper, which also derives + installs
+/// `TIDEPOOL_EXTRACT` (via `cabal list-bin`) when it isn't already set.
+pub fn extract_available() -> bool {
+    tidepool_testing::eval_harness::extract_available()
 }
 
 /// Panic loudly instead of skipping (which nextest reports as PASS) when

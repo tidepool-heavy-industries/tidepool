@@ -54,7 +54,8 @@ use serde::{Deserialize, Serialize};
 use crate::error::WorktreeError;
 use crate::git::GitCli;
 use crate::id::{BranchName, EventId, GitOid, WorktreeId};
-use crate::journal::{now_ms, EventJournal};
+use crate::journal::EventJournal;
+use crate::storage::now_ms;
 
 /// Default interval between backstop reconciliation polls, in milliseconds.
 ///

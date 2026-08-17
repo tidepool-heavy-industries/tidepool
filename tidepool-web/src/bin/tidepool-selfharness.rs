@@ -22,7 +22,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use tidepool_handlers::{
-    ConsoleHandler, EventConfig, ExecHandler, JournalHandler, RepoEventHandler, WorktreeHandler,
+    ConsoleHandler, EventConfig, ExecHandler, RepoEventHandler, WorktreeHandler,
 };
 use tidepool_harness::engine::EngineConfig;
 use tidepool_harness::log::{LogHeader, LogWriter};
@@ -124,7 +124,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let log_path = log_dir.join(format!("log-{ts}.jsonl"));
     let header = LogHeader {
         prelude_hash: "self-harness".to_string(),
-        extract_fingerprint: cfg.extract_bin.clone(),
+        // `ResolvedExtractBin`'s `Display` renders the same path text a
+        // plain `String` did before that type existed.
+        extract_fingerprint: cfg.extract_bin.to_string(),
         harness_version: env!("CARGO_PKG_VERSION").to_string(),
     };
     let writer = LogWriter::create(&log_path, &header)?;
@@ -143,11 +145,35 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     });
     let mut driver = SelfHarnessDriver::new(agent, observer);
 
+    // PRD 20 S1-L4: the concurrency cap for concurrently-serviced
+    // fanout/fork `RunLLMTurn` windows (default 8 — see
+    // `SelfHarnessDriver::set_concurrency_cap`'s doc).
+    if let Some(cap) = arg_str(&args, "--concurrency").and_then(|s| s.parse().ok()) {
+        driver.set_concurrency_cap(cap);
+    }
+
     if !auto {
         let port: u16 = arg_str(&args, "--port")
             .and_then(|s| s.parse().ok())
             .unwrap_or(4600);
-        let gate = tidepool_web::spawn_operator_server(port).await?;
+        let (state, gate) = tidepool_web::spawn_operator_server_multi(port).await?;
+        // PRD 21 C3 §10.3: register the recursive-companion harness's root
+        // node alongside the default so the multi-node surface can grow a tab
+        // for it. `register_node` is idempotent (re-registering an existing id
+        // reuses its state), so this composes cleanly with C5 (the GUI/typed-UI
+        // lane) — that is what has to carry a node id from Haskell so the
+        // recursion tree's OWN branch nodes, not just this literal "root", can
+        // be registered and named by the harness itself; see §8 gap 2.
+        //
+        // Conditional on the loaded harness, because until C5 lands this tab
+        // has nothing routed to it: the driver's ONE gate is bound to the
+        // default node, so an unconditional second registration would put a
+        // permanently-empty tab in front of every harness — and a single
+        // registered node rendering no tab strip at all is a property
+        // `tidepool-web` deliberately has (see its CLAUDE.md, "Tab switching").
+        if is_recursive_companion(&harness_source_path) {
+            state.register_node("root");
+        }
         driver.set_gate(gate);
     }
 
@@ -166,15 +192,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     driver.set_worktree_handler(worktree_handler);
     driver.set_event_handler(event_handler);
     driver.set_exec_handler(exec_handler);
-    // The run journal (PRD 20): append-only `record` sink, one file per run
-    // beside the run log (same timestamp). Fold-on-resume is dev-tree v2's
-    // job — this process only ever appends.
-    let run_journal_path = log_dir.join(format!("journal-{ts}.jsonl"));
-    driver.set_journal_handler(JournalHandler::new(run_journal_path.clone()));
+    // The run journal (PRD 20 S1-L5): identity comes from the RUN LEASE, not
+    // from this process. `acquire_lease` resumes the run a prior process left
+    // behind (a crash leaves the lease on disk) or mints a fresh one — either
+    // way this process is handed its OWN, freshly allocated journal SEGMENT
+    // (never one a prior process wrote to; see `tidepool_harness::selfharness::resume`'s
+    // module doc), so a crash mid-append can never poison a later boot.
+    //
+    // `open_run_journal` is the ONE seam: it loads and folds every segment the
+    // run id owns, and builds the appending handler over this process's own
+    // segment — both from the same `AcquiredLease`, so the fold and the
+    // appends cannot desync.
+    let acquired = tidepool_harness::acquire_lease(&log_dir)?;
+    let folded = driver.open_run_journal(&log_dir, &acquired)?;
     tracing::info!(
         target: "tidepool_web",
         repo = %source_repo.display(),
-        journal = %run_journal_path.display(),
+        segment = %acquired.segment.display(),
+        run_id = %acquired.lease.run_id,
+        resumed = acquired.resumed,
+        folded_entries = folded,
         "outer effect seam wired (Console/Worktree/RepoEvent/Exec/Journal)"
     );
 
@@ -194,6 +231,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     driver.run_loop(&source, auto).await?;
+
+    // A NORMAL return retires the lease — renamed to `run-<runId>.json`, kept
+    // beside the journal, never deleted — so the next boot mints a fresh run
+    // instead of resuming a finished one. A crash skips this by construction,
+    // which is precisely how the next boot knows to resume.
+    if let Some(retired) = tidepool_harness::retire_lease(&log_dir)? {
+        tracing::info!(
+            target: "tidepool_web",
+            lease = %retired.display(),
+            "run completed; lease retired"
+        );
+    }
 
     Ok(())
 }
@@ -292,6 +341,19 @@ fn arg_value(args: &[String], flag: &str) -> Option<PathBuf> {
 fn arg_str(args: &[String], flag: &str) -> Option<String> {
     let idx = args.iter().position(|a| a == flag)?;
     args.get(idx + 1).cloned()
+}
+
+/// Whether `path` names the recursive-companion harness (PRD 21 C3), the one
+/// harness whose recursion tree the multi-node GUI surface exists for.
+///
+/// Keys on the harness's own DIRECTORY, not its file name: a harness's
+/// directory is already its identity everywhere else (the driver pushes it onto
+/// the answerer's include path, and the sibling `HarnessTypes` resolves through
+/// it), and every authored harness's file is called `Harness.hs`.
+fn is_recursive_companion(path: &std::path::Path) -> bool {
+    path.parent()
+        .and_then(std::path::Path::file_name)
+        .is_some_and(|d| d == "recursive-companion")
 }
 
 fn default_harness_source_path() -> PathBuf {

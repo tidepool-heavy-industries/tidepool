@@ -49,6 +49,7 @@ fn usage() -> Usage {
     Usage {
         input_tokens: 100,
         output_tokens: 20,
+        cached_input_tokens: None,
     }
 }
 
@@ -71,7 +72,7 @@ fn golden_replies() -> Vec<RecordedReply> {
             "I'll get a number from a sub-agent, confirm it, and finish.\n\n\
            ```haskell\n\
            do\n\
-           \x20 n <- runLLMTurnFork @Int \"pick a number between 1 and 100\"\n\
+           \x20 Right n <- runLLMTurnFork @Int \"pick a number between 1 and 100\"\n\
            \x20 _ <- ask (SEnum [\"yes\", \"no\"]) \"Confirm: Proceed?\"\n\
            \x20 pure (toJSON n)\n\
            ```",
@@ -211,7 +212,7 @@ async fn fork_only_resumes_to_completion() {
         usage: usage(),
     };
     let replies = vec![
-        r("```haskell\ndo\n  n <- runLLMTurnFork @Int \"pick\"\n  pure (toJSON n)\n```"),
+        r("```haskell\ndo\n  Right n <- runLLMTurnFork @Int \"pick\"\n  pure (toJSON n)\n```"),
         r("```haskell\nresume \"nope\"\n```"),   // ill-typed
         r("```haskell\nresume (7 :: Int)\n```"), // valid
     ];

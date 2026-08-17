@@ -15,7 +15,11 @@
 //! effectively-dead-for-this-path) `toBoundedInteger` and returns `Left`.
 //! The `_Int`/`_Integer` prisms (`Aeson/Lens.hs`) get the same bounds check,
 //! plus the LOW fix: they now FLOOR fractional numbers (`"-3.7"` -> `-4`)
-//! like upstream lens-aeson, instead of truncating toward zero.
+//! like upstream lens-aeson, instead of truncating toward zero — fixed via
+//! `Scientific.hs`'s `integerValue` switching its negative-exponent branch
+//! from `quot` (truncates toward zero) to `div` (floors), and renaming the
+//! now-misleadingly-named `truncateScientific`/`truncateBoundedInteger` to
+//! `floorScientific`/`floorBoundedInteger`.
 //!
 //! M3 — `Patch.parsePatch`: a standard `diff -u` timestamp header
 //! (`--- path\t<timestamp>`) no longer corrupts the path (tab+timestamp are
@@ -69,8 +73,10 @@
 //! conditional `Tidepool.QQ` import `eval_raw` already injects via
 //! `uses_qq`, so they get their own bundle rather than forcing that import
 //! on every other check). Eight probes stay standalone — see each one's
-//! comment for why (the sanctioned red, two deliberate-failure assertions,
-//! one crash-class regression, and the four `Patch.*` checks, which are
+//! comment for why (`works_int_prism_floors_not_truncates`, kept standalone
+//! rather than folded into its family bundle now that it's fixed; two
+//! deliberate-failure assertions; one crash-class regression; and the four
+//! `Patch.*` checks, which are
 //! merely un-bundled rather than unbundlable: see the SAFE TO BUNDLE note
 //! above `works_patch_tab_timestamp_not_treated_as_rename`) — and the
 //! commit message carries the full value-vs-crash sort.
@@ -157,8 +163,8 @@ fn fails(code: &str, marker: &str) {
 
 // =========================================================================
 // M1 (non-finite Double -> Null) + M2 (bounds-checked Int decode/prism,
-// minus the sanctioned red) + LOW (parseDoubleM e-notation/overflow,
-// addUTCTime rounding). VALUE-class throughout: every regression here is a
+// plus the _Integer floor sibling case) + LOW (parseDoubleM e-notation/
+// overflow, addUTCTime rounding). VALUE-class throughout: every regression here is a
 // wrong-but-obtained value from a successfully-compiled, successfully-run
 // probe — none of these mechanisms crash or hang on regression.
 // =========================================================================
@@ -172,8 +178,14 @@ fn fails(code: &str, marker: &str) {
 /// works_parsedoublem_roundtrips_showdouble_extreme_magnitudes,
 /// works_addutctime_rounds_ms_conversion.
 ///
-/// NOT absorbed: `works_int_prism_floors_not_truncates` is a sanctioned red
-/// (rule 3) — never bundle it, it must keep failing standalone.
+/// `integer_prism_floors_negative_fractional` below is the sibling-audit
+/// addition for the `works_int_prism_floors_not_truncates` fix (`_Int`'s
+/// unbounded cousin `_Integer` had the exact same truncate-toward-zero bug —
+/// see `stdlib_regressions_02_medium.rs`'s module doc, M2/LOW).
+///
+/// `works_int_prism_floors_not_truncates` itself stays standalone below,
+/// unchanged in shape — the fix makes it green; moving it into this bundle
+/// too is unnecessary churn now that its sibling case lives here.
 #[test]
 fn works_numeric_json_and_parsing_family() {
     works(
@@ -202,6 +214,12 @@ fn works_numeric_json_and_parsing_family() {
                 -- M2: the _Int prism (Aeson/Lens.hs) bounds-checks like
                 -- upstream lens-aeson; out-of-range must be Nothing.
                 (not (isJust ((toJSON (1.0e30 :: Double)) ^? _Int)))
+            , check "integer_prism_floors_negative_fractional"
+                -- Sibling-audit addition for the _Int floor fix
+                -- (works_int_prism_floors_not_truncates): _Integer had the
+                -- same truncate-toward-zero bug on a negative fractional
+                -- Double; upstream lens-aeson floors ("-3.7" -> -4).
+                ((toJSON (-3.7 :: Double) ^? _Integer) == Just (-4))
             , check "parsedoublem_accepts_exponent_notation.e1"
                 -- LOW: parseDoubleM accepts e-notation.
                 ((case parseDoubleM "1.25e1" of { Just dA -> dA; Nothing -> -1 }) == 12.5)
@@ -383,8 +401,11 @@ fn works_fmt_quoter_family() {
 // Standalone probes — the value-vs-crash sort (see also the commit message).
 // =========================================================================
 
-/// SANCTIONED RED (rule 3) — `_Int` currently truncates toward zero instead
-/// of flooring; kept failing individually, never inside a green bundle.
+/// `_Int` floors toward negative infinity for a fractional Double, matching
+/// upstream lens-aeson (fixed in `Scientific.hs`'s `integerValue`: the
+/// negative-exponent branch now uses `div`, not `quot`). See
+/// `integer_prism_floors_negative_fractional` above for the `_Integer`
+/// sibling case.
 #[test]
 fn works_int_prism_floors_not_truncates() {
     // lens-aeson: "-3.7" floors to -4 (truncation toward zero would give -3).

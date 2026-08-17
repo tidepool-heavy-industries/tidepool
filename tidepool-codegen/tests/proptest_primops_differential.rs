@@ -62,7 +62,7 @@ use proptest::prelude::*;
 use proptest::test_runner::{Config, TestRunner};
 use serial_test::serial;
 
-use tidepool_eval::{env_from_datacon_table, eval, VecHeap};
+use tidepool_eval::{env_from_datacon_table, eval, Value, VecHeap};
 use tidepool_repr::types::{DataConId, Literal, PrimOpKind};
 use tidepool_repr::{CoreExpr, CoreFrame, TreeBuilder};
 
@@ -1016,6 +1016,91 @@ fn prop_decode_float() {
         })
         .unwrap();
     reach.assert_floor(0.85);
+}
+
+/// Run a unary primop over one `Literal` through the eval oracle, expecting
+/// an `Int#` result.
+fn eval_lit_int(op: PrimOpKind, lit: Literal) -> i64 {
+    let mut b = TreeBuilder::new();
+    let x = b.push(CoreFrame::Lit(lit));
+    b.push(CoreFrame::PrimOp { op, args: vec![x] });
+    let tree = b.build();
+    let table = build_table_for_expr(&tree);
+    let mut heap = VecHeap::new();
+    let env = env_from_datacon_table(&table);
+    match eval(&tree, &env, &mut heap) {
+        Ok(Value::Lit(Literal::LitInt(n))) => n,
+        other => panic!("eval_lit_int: expected Ok(Lit(LitInt(_))), got {other:?}"),
+    }
+}
+
+/// Same as [`eval_lit_int`], but through the JIT.
+fn jit_lit_int(op: PrimOpKind, lit: Literal) -> i64 {
+    let mut b = TreeBuilder::new();
+    let x = b.push(CoreFrame::Lit(lit));
+    b.push(CoreFrame::PrimOp { op, args: vec![x] });
+    let tree = b.build();
+    let table = build_table_for_expr(&tree);
+    match JitEffectMachine::compile(&tree, &table, 64 * 1024).and_then(|mut m| m.run_pure()) {
+        Ok(Value::Lit(Literal::LitInt(n))) => n,
+        other => panic!("jit_lit_int: expected Ok(Lit(LitInt(_))), got {other:?}"),
+    }
+}
+
+// GHC-truth canonical-range property: for a NORMAL, finite, nonzero
+// double/float, decodeDouble_Int64#/decodeFloat_Int# must return a mantissa
+// in [2^(prec-1), 2^prec) (denormals are exempt — GHC's canonical form does
+// not hold there). This reads the actual mantissa each engine returns and
+// checks it against the mathematical invariant directly, rather than
+// comparing eval against the JIT: both engines shared the trailing-zeros
+// reduction bug this property pins against, so their prior agreement was
+// structurally blind to it.
+#[test]
+#[serial]
+fn prop_decode_double_canonical_range() {
+    let mut runner = TestRunner::new(cfg_float());
+    runner
+        .run(&arb_double(), |d| {
+            let bits = d.to_bits();
+            let raw_exp = (bits >> 52) & 0x7ff;
+            prop_assume!(d.is_finite() && d != 0.0 && raw_exp != 0);
+            let man_eval = eval_lit_int(PrimOpKind::DecodeDoubleMantissa, Literal::LitDouble(bits));
+            let man_jit = jit_lit_int(PrimOpKind::DecodeDoubleMantissa, Literal::LitDouble(bits));
+            for (engine, man) in [("eval", man_eval), ("jit", man_jit)] {
+                let m = man.unsigned_abs();
+                prop_assert!(
+                    (1u64 << 52..1u64 << 53).contains(&m),
+                    "{engine} decodeDouble_Int64# mantissa {man} for {d:e} not in canonical range [2^52, 2^53)"
+                );
+            }
+            Ok(())
+        })
+        .unwrap();
+}
+
+#[test]
+#[serial]
+fn prop_decode_float_canonical_range() {
+    let mut runner = TestRunner::new(cfg_float());
+    runner
+        .run(&arb_float(), |f| {
+            let bits = f.to_bits();
+            let raw_exp = (bits >> 23) & 0xff;
+            prop_assume!(f.is_finite() && f != 0.0 && raw_exp != 0);
+            let man_eval =
+                eval_lit_int(PrimOpKind::DecodeFloatMantissa, Literal::LitFloat(bits as u64));
+            let man_jit =
+                jit_lit_int(PrimOpKind::DecodeFloatMantissa, Literal::LitFloat(bits as u64));
+            for (engine, man) in [("eval", man_eval), ("jit", man_jit)] {
+                let m = man.unsigned_abs();
+                prop_assert!(
+                    (1u64 << 23..1u64 << 24).contains(&m),
+                    "{engine} decodeFloat_Int# mantissa {man} for {f:e} not in canonical range [2^23, 2^24)"
+                );
+            }
+            Ok(())
+        })
+        .unwrap();
 }
 
 // ===========================================================================

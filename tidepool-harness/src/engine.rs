@@ -14,7 +14,11 @@
 //! - `{typedSite, fork:true}` → `runLLMTurnFork`: PARK. The parent stays
 //!   suspended; a child answerer node is registered (transcript forked at the
 //!   checkpoint) and, once forced, drives its own turn loop to produce a typed
-//!   answer that `run_child`s against the parent and resumes it.
+//!   answer that `run_child`s against the parent and resumes it. The parent's
+//!   continuation takes `Either InvocationExit T` — a forked window is a
+//!   BRANCH POSITION, and PRD 21 locked decision 6 folds its abnormal exit as
+//!   data there rather than as an exception over its siblings (see
+//!   [`InvocationExit`], [`build_child_answer_value`]).
 //! - `{typedSite}` (no fork) → `runLLMTurn`: the SAME model answers in
 //!   context by evaluating `resume expr :: T`.
 //! - `AskUserWith shape` (own constructor, answerer-only) → `askUserRaw`:
@@ -28,24 +32,128 @@
 //! # What this module does NOT own
 //!
 //! The event log, node tree, and registry lifecycle live in [`crate::forcing`]
-//! / [`crate::registry`]; the engine calls them. Compilation lives in
-//! [`crate::compile`]. The provider boundary is [`crate::provider`]. The web
-//! protocol / SSE is `tidepool-web`. This module is the glue that sequences
-//! them into a turn loop.
+//! / [`crate::registry`]; the engine calls them. The actual compile mechanics
+//! (spawn `tidepool-extract`, read its output directory, deserialize,
+//! diagnostics, the invocation-keyed memo) live in
+//! `tidepool_runtime::artifacts` — this module's [`compile_turn`]/
+//! [`compile_turns`] are thin wrappers mapping a
+//! [`tidepool_runtime::CompiledArtifacts`] onto this crate's own turn/node
+//! vocabulary ([`CompiledTurn`]) and attributing timing to a (node, round)
+//! pair (architecture review finding 3, 2026-08-17 — this module absorbed
+//! the former `tidepool_harness::compile`). The provider boundary is
+//! [`crate::provider`]. The web protocol / SSE is `tidepool-web`. This
+//! module is the glue that sequences them into a turn loop.
 
+use std::collections::HashMap;
+use std::hash::{Hash, Hasher};
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, OnceLock};
 
 use serde_json::Value as Json;
 use tidepool_eval::value::Value;
-use tidepool_repr::DataConTable;
+use tidepool_extract_cmd::ResolvedExtractBin;
+pub use tidepool_extract_cmd::{extract_spawn_count, reset_extract_spawn_count};
+use tidepool_repr::{CoreExpr, DataConTable};
+pub use tidepool_runtime::AsksSidecar;
+use tidepool_runtime::{compile_targets, CompileError, CompiledArtifacts};
 
-use crate::compile::AsksSidecar;
 use crate::provider::{
     DynModelProvider, Message, ProviderError, ReasoningItem, Role, StreamSink, TurnRequest,
     TurnResponse, Usage,
 };
+use crate::timing;
 use crate::tree::FanBadge;
+
+/// A compiled turn: the Core expression, its constructor table, and the
+/// typed-yield sidecar. A thin per-target mapping over
+/// [`tidepool_runtime::CompiledArtifacts`] onto this crate's own turn
+/// vocabulary — the actual compile mechanics live in
+/// `tidepool_runtime::artifacts`, see this module's doc.
+pub struct CompiledTurn {
+    pub expr: CoreExpr,
+    pub table: DataConTable,
+    pub asks: AsksSidecar,
+}
+
+/// Compile `source` with entry binder `target`, searching `include` for
+/// modules, into a [`CompiledTurn`]. `node`/`round` attribute this compile's
+/// timing stages (pass [`timing::NO_NODE`]/[`timing::NO_ROUND`] when the
+/// caller has no answerer-round context). A thin wrapper over
+/// [`compile_turns`] (a one-element target slice).
+pub fn compile_turn(
+    extract_bin: &ResolvedExtractBin,
+    source: &str,
+    target: &str,
+    include: &[PathBuf],
+    node: u64,
+    round: u64,
+) -> Result<CompiledTurn, CompileError> {
+    let mut turns = compile_turns(extract_bin, source, &[target], include, node, round)?;
+    turns
+        .remove(target)
+        .ok_or_else(|| CompileError::MissingOutput(PathBuf::from(format!("{target}.cbor"))))
+}
+
+/// As [`compile_turn`], but compiles `targets` in ONE `tidepool-extract`
+/// spawn against a SHARED merged `meta.cbor` / [`DataConTable`], returning
+/// one [`CompiledTurn`] per target — [`tidepool_runtime::compile_targets`]
+/// with this crate's timing attributed via `on_stage` and the shared table
+/// distributed onto each per-target [`CompiledTurn`].
+pub fn compile_turns(
+    extract_bin: &ResolvedExtractBin,
+    source: &str,
+    targets: &[&str],
+    include: &[PathBuf],
+    node: u64,
+    round: u64,
+) -> Result<HashMap<String, CompiledTurn>, CompileError> {
+    let CompiledArtifacts {
+        table,
+        targets: artifacts,
+        ..
+    } = compile_targets(
+        source,
+        targets,
+        include,
+        Some(extract_bin),
+        |stage, elapsed, bytes| {
+            timing::record_stage(node, round, stage, elapsed, bytes);
+        },
+    )?;
+    Ok(artifacts
+        .into_iter()
+        .map(|(name, a)| {
+            (
+                name,
+                CompiledTurn {
+                    expr: a.expr,
+                    table: table.clone(),
+                    asks: a.asks,
+                },
+            )
+        })
+        .collect())
+}
+
+/// Which surface verb produced a [`HoleRouting::Fork`] suspension. Two
+/// effects share that routing, and they DIFFER in the shape their parked
+/// continuation expects back, so the answering side must know which it is:
+///
+/// - [`ForkSource::ForkEffect`] — `Tidepool.Fork`'s `fork`/`forkAll`
+///   (`ForkWith`/`ForkAllWith`), which resume with a bare `T` / `[T]`.
+/// - [`ForkSource::RunLLMTurn`] — `runLLMTurnFork`/`runLLMTurnFanout`
+///   (`RunLLMTurnWith` carrying `fork: true`), which resume with
+///   `Either InvocationExit T` / `[Either InvocationExit T]` (PRD 21 locked
+///   decision 6 — see [`InvocationExit`]).
+///
+/// A plain `ty`/`fan` inspection cannot tell them apart (both record the
+/// child's answer type the same way), which is exactly why this is carried
+/// rather than re-derived.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ForkSource {
+    ForkEffect,
+    RunLLMTurn,
+}
 
 /// Which outer-row effect a [`HoleRouting::OuterEffect`] suspension names —
 /// see that variant's doc.
@@ -68,7 +176,10 @@ pub enum OuterEffectKind {
 #[derive(Debug, Clone, PartialEq)]
 pub enum HoleRouting {
     /// `runLLMTurn @T` — the same calling model answers in context.
-    RunLLMTurn { site: u32, ty: Option<String> },
+    RunLLMTurn {
+        site: crate::tree::SiteId,
+        ty: Option<String>,
+    },
     /// Park a suspension into a bounded fan-out with a join. Produced by two
     /// sources that share this routing: the `Fork` effect (`ForkWith` →
     /// `fan: None`, one child; `ForkAllWith` → `fan: Some(_)`, N children —
@@ -77,12 +188,15 @@ pub enum HoleRouting {
     /// the RENDERED answer type: the element type `T` for a plain fork, the
     /// LIST type `[T]` for a fanout (`engine::strip_list_type` recovers `T`).
     /// `prompts` carries the per-child prompt text, one per fanout child, in
-    /// declaration order (empty for a plain fork).
+    /// declaration order (empty for a plain fork). `source` says WHICH of the
+    /// two verbs raised it, because they differ in the shape their parked
+    /// continuation expects back — see [`ForkSource`].
     Fork {
-        site: u32,
+        site: crate::tree::SiteId,
         ty: Option<String>,
         fan: Option<FanBadge>,
         prompts: Vec<String>,
+        source: ForkSource,
     },
     /// `askUserRaw shape` — a typed form
     /// suspends to a HUMAN OPERATOR, routed by CONSTRUCTOR NAME
@@ -106,6 +220,37 @@ pub enum HoleRouting {
     /// cycle's entry state as JSON (note's service shape: no operator, no
     /// model round).
     ReadState,
+    /// A `freezeContext` suspension (`RunLLMTurnFreezeWith`) — PRD 21 lane C3
+    /// GAP 1: mint a `ContextRef` naming the CURRENT loop's per-loop answerer
+    /// window's frozen prefix, right now. Serviced IMMEDIATELY (`ReadState`'s
+    /// shape: no operator, no model round) by
+    /// [`crate::selfharness::driver::SelfHarnessDriver`] freezing that node's
+    /// transcript ([`crate::harness::Harness::freeze_snapshot`]) and
+    /// constructing the `ContextRef` `Value` directly against the table
+    /// ([`build_context_ref_value`]) — never round-tripped through JSON, since
+    /// `RunLLMTurnFreezeWith`'s answer type is fixed, not model-chosen.
+    FreezeContext,
+    /// A `runLLMTurnBranch \@T ref prompt` suspension — the OTHER half of GAP
+    /// 1: fork a FRESH child window off the frozen prefix `context_ref` names
+    /// (never an empty root, PRD 21 locked decision 2), drive it to
+    /// `finalize \@T`, and resume with `(T, ContextRef)` — the child's answer
+    /// plus a ref to ITS OWN post-finalize frozen prefix, for branching
+    /// further. Rides the SAME `RunLLMTurnWith` wire constructor as
+    /// [`HoleRouting::RunLLMTurn`]/[`HoleRouting::Fork`] (a `branch`/`ref`
+    /// payload flag, decoded by [`classify_runllmturn_payload`]) rather than a
+    /// new GADT constructor — the same "one constructor, several payload
+    /// shapes" discipline fork/fanout already use. `context_ref` is the RAW
+    /// wire digest string — UNVALIDATED here; the driver's servicing is where
+    /// it is resolved to a [`crate::harness::ContextRef`]
+    /// (`Harness::resolve_context_ref`), the one typed checkpoint an
+    /// unknown/stale ref is refused at (never a silent fresh-root fallback).
+    /// `site`/`ty` mirror `Fork`'s shape — `ty` is the branch's OWN answer type
+    /// `T`, not the wrapping pair.
+    Branch {
+        site: crate::tree::SiteId,
+        ty: Option<String>,
+        context_ref: String,
+    },
     /// A Subagent verb (`SubagentSpawn`/`SubagentBegin`/`SubagentResume`/
     /// `SubagentSpawnAsync`/`SubagentAwait`/`SubagentCancel` —
     /// `spawnAgentRaw`/`agentBeginRaw`/`agentResumeRaw`/`agentSpawnAsyncRaw`/
@@ -139,7 +284,10 @@ pub enum HoleRouting {
     /// finalized VALUE is not carried here (it crosses in-heap, may be
     /// non-serializable) — the caller recovers it from the original
     /// suspended request `Value`.
-    Finalize { site: u32, ty: Option<String> },
+    Finalize {
+        site: crate::tree::SiteId,
+        ty: Option<String>,
+    },
     /// An `Async*With` verb (`AsyncSpawnWith`/`AsyncDoneWith`/
     /// `AsyncJoinAnyWith`/`AsyncStatusWith`/`AsyncResultWith`/
     /// `AsyncCancelWith` — `Tidepool.Async`'s substrate, PRD 20 S1-L4) raised
@@ -165,6 +313,82 @@ pub enum HoleRouting {
 pub struct ClassifiedHole {
     pub routing: HoleRouting,
     pub prompt: String,
+}
+
+/// A malformed decode of a continuation-ROUTING field (a site id, a fan
+/// count, a fan/prompt-cardinality pair) inside [`classify_hole`]. These
+/// fields select which suspended typed continuation a reply resumes — a
+/// plausible default (site 0, a truncated prompt list) can resume the WRONG
+/// site rather than surface the corruption, so every routing field is
+/// validated rather than defaulted. Display/prompt-text fields (a fork's
+/// `brief`, `AskWith`'s payload) are unaffected — only fields that pick a
+/// continuation.
+#[derive(Debug, Clone, thiserror::Error)]
+pub enum ClassifyError {
+    #[error("{constructor}: missing or non-numeric `{field}`")]
+    MissingField {
+        constructor: &'static str,
+        field: &'static str,
+    },
+    #[error("{constructor}: `{field}` {value} does not fit in a u32")]
+    OutOfRange {
+        constructor: &'static str,
+        field: &'static str,
+        value: u64,
+    },
+    #[error(
+        "{constructor}: fan declares {declared} prompt(s) but the wire carries {actual} — \
+         refusing to silently drop the difference"
+    )]
+    FanMismatch {
+        constructor: &'static str,
+        declared: usize,
+        actual: usize,
+    },
+    #[error("{constructor}: request is not a constructor application")]
+    Malformed { constructor: &'static str },
+}
+
+/// Pull a JSON payload's `field` as a [`crate::tree::SiteId`] — `Err` on
+/// missing/non-numeric or a value that doesn't fit (see [`ClassifyError`]'s
+/// doc). The one mint point for a `SiteId` decoded from a JSON payload key.
+fn require_site_field(
+    payload: &Json,
+    constructor: &'static str,
+    field: &'static str,
+) -> Result<crate::tree::SiteId, ClassifyError> {
+    let raw = payload
+        .get(field)
+        .and_then(Json::as_u64)
+        .ok_or(ClassifyError::MissingField { constructor, field })?;
+    crate::tree::SiteId::try_from(raw).map_err(|_| ClassifyError::OutOfRange {
+        constructor,
+        field,
+        value: raw,
+    })
+}
+
+/// Pull a `Con`'s positional field `idx`, decoded to JSON, as a
+/// [`crate::tree::SiteId`] — the [`Value::Con`] counterpart to
+/// [`require_site_field`] for constructors whose site is a positional field
+/// rather than a JSON payload key.
+fn require_con_site(
+    fields: &[Value],
+    idx: usize,
+    table: &DataConTable,
+    constructor: &'static str,
+    field: &'static str,
+) -> Result<crate::tree::SiteId, ClassifyError> {
+    let raw = fields
+        .get(idx)
+        .map(|p| tidepool_runtime::value_to_json(p, table, 0))
+        .and_then(|j| j.as_u64())
+        .ok_or(ClassifyError::MissingField { constructor, field })?;
+    crate::tree::SiteId::try_from(raw).map_err(|_| ClassifyError::OutOfRange {
+        constructor,
+        field,
+        value: raw,
+    })
 }
 
 /// Decode a suspended request `Value` into a [`ClassifiedHole`] — the ONE
@@ -200,9 +424,10 @@ pub struct ClassifiedHole {
 ///   bare `Text`, decoded directly (no shape/schema involved).
 /// - `Print` (Console) / `WorktreeCreate`/`WorktreeLookup`/`WorktreeList`/
 ///   `WorktreeBranchOf`/`WorktreeHeadOf` (Worktree) / `RepoEventSubscribe`/
-///   `RepoEventDrain`/`RepoEventUnsubscribe` (RepoEvent) / `Run`/`RunIn`/
-///   `RunArgv` (Exec) / `RecordStep` (Journal) — routed by CONSTRUCTOR NAME
-///   to [`HoleRouting::OuterEffect`], same discipline as `Subagent` below.
+///   `RepoEventDrain`/`RepoEventAwait`/`RepoEventUnsubscribe` (RepoEvent) /
+///   `Run`/`RunIn`/`RunArgv` (Exec) / `RecordStep` (Journal) — routed by
+///   CONSTRUCTOR NAME to [`HoleRouting::OuterEffect`], same discipline as
+///   `Subagent` below.
 /// - `AsyncSpawnWith`/`AsyncDoneWith`/`AsyncJoinAnyWith`/`AsyncStatusWith`/
 ///   `AsyncResultWith`/`AsyncCancelWith` (`Tidepool.Async`'s substrate) —
 ///   routed by CONSTRUCTOR NAME to [`HoleRouting::Green`], same discipline as
@@ -211,45 +436,57 @@ pub struct ClassifiedHole {
 ///   `ask schema prompt`).
 /// - anything else (an unrecognized Con) — treated as a bare Ask with an empty
 ///   prompt/`Null` payload, same fallback `decode_askwith` always had.
-pub fn classify_hole(request: &Value, table: &DataConTable, asks: &AsksSidecar) -> ClassifiedHole {
+///
+/// The routing-selecting fields above (`typedSite`, a fork's site, a fan's
+/// declared count against its prompt list) are VALIDATED, not defaulted —
+/// see [`ClassifyError`]'s doc. A malformed value there stops the turn with a
+/// diagnostic instead of silently resuming/finalizing a different typed
+/// continuation.
+pub fn classify_hole(
+    request: &Value,
+    table: &DataConTable,
+    asks: &AsksSidecar,
+) -> Result<ClassifiedHole, ClassifyError> {
     let hole = match con_name(request, table) {
         Some("RunLLMTurnWith") => {
             let (prompt, payload) = decode_prompt_payload(request, table);
             ClassifiedHole {
-                routing: classify_runllmturn_payload(&payload, asks),
+                routing: classify_runllmturn_payload(&payload, asks)?,
                 prompt,
             }
         }
         Some("FinalizeWith") => {
-            let (site, ty) = decode_finalize_site(request, table, asks);
+            let (site, ty) = decode_finalize_site(request, table, asks)?;
             ClassifiedHole {
                 routing: HoleRouting::Finalize { site, ty },
                 prompt: String::new(),
             }
         }
         Some("ForkWith") => {
-            let (site, brief) = decode_fork_one(request, table);
+            let (site, brief) = decode_fork_one(request, table)?;
             ClassifiedHole {
                 routing: HoleRouting::Fork {
                     site,
-                    ty: asks.type_of(site).map(str::to_string),
+                    ty: asks.type_of(site.get()).map(str::to_string),
                     fan: None,
                     prompts: Vec::new(),
+                    source: ForkSource::ForkEffect,
                 },
                 prompt: brief,
             }
         }
         Some("ForkAllWith") => {
-            let (site, prompts) = decode_fork_all(request, table);
+            let (site, prompts) = decode_fork_all(request, table)?;
             ClassifiedHole {
                 prompt: prompts.join("\n"),
                 routing: HoleRouting::Fork {
                     site,
-                    ty: asks.type_of(site).map(str::to_string),
+                    ty: asks.type_of(site.get()).map(str::to_string),
                     fan: Some(FanBadge::Exact {
                         n: prompts.len() as u32,
                     }),
                     prompts,
+                    source: ForkSource::ForkEffect,
                 },
             }
         }
@@ -268,6 +505,10 @@ pub fn classify_hole(request: &Value, table: &DataConTable, asks: &AsksSidecar) 
         },
         Some("ReadStateWith") => ClassifiedHole {
             routing: HoleRouting::ReadState,
+            prompt: String::new(),
+        },
+        Some("RunLLMTurnFreezeWith") => ClassifiedHole {
+            routing: HoleRouting::FreezeContext,
             prompt: String::new(),
         },
         Some("SubagentSpawn")
@@ -291,12 +532,13 @@ pub fn classify_hole(request: &Value, table: &DataConTable, asks: &AsksSidecar) 
             routing: HoleRouting::OuterEffect(OuterEffectKind::Worktree),
             prompt: String::new(),
         },
-        Some("RepoEventSubscribe") | Some("RepoEventDrain") | Some("RepoEventUnsubscribe") => {
-            ClassifiedHole {
-                routing: HoleRouting::OuterEffect(OuterEffectKind::RepoEvent),
-                prompt: String::new(),
-            }
-        }
+        Some("RepoEventSubscribe")
+        | Some("RepoEventDrain")
+        | Some("RepoEventAwait")
+        | Some("RepoEventUnsubscribe") => ClassifiedHole {
+            routing: HoleRouting::OuterEffect(OuterEffectKind::RepoEvent),
+            prompt: String::new(),
+        },
         Some("Run") | Some("RunIn") | Some("RunArgv") => ClassifiedHole {
             routing: HoleRouting::OuterEffect(OuterEffectKind::Exec),
             prompt: String::new(),
@@ -330,7 +572,7 @@ pub fn classify_hole(request: &Value, table: &DataConTable, asks: &AsksSidecar) 
         }
     };
     tracing::info!(routing = ?hole.routing, prompt = %hole.prompt, "suspension classified");
-    hole
+    Ok(hole)
 }
 
 /// Pull `text` out of a `NoteWith`-shaped request (`Con(_, [text :: Text])`)
@@ -369,31 +611,83 @@ fn decode_askuser_spec(
 /// The `typedSite`/`fork`/`fan`/`prompts` payload classification a
 /// `RunLLMTurnWith` request carries — factored out of [`classify_hole`] so
 /// this shape is documented once rather than at every call site.
-fn classify_runllmturn_payload(payload: &Json, asks: &AsksSidecar) -> HoleRouting {
-    let site = payload.get("typedSite").and_then(Json::as_u64).unwrap_or(0) as u32;
-    let ty = asks.type_of(site).map(str::to_string);
+///
+/// `typedSite` and, when present, `fan` are validated ROUTING fields (see
+/// [`ClassifyError`]'s doc): missing/non-numeric/out-of-range is an `Err`,
+/// never a `0`/truncated default. A non-`Text` element in `prompts` is
+/// likewise rejected rather than silently dropped — filtering it out would
+/// under-report the fan's true cardinality; and when `fan` is present, it
+/// must agree with the (validated) prompt count.
+fn classify_runllmturn_payload(
+    payload: &Json,
+    asks: &AsksSidecar,
+) -> Result<HoleRouting, ClassifyError> {
+    let site = require_site_field(payload, "RunLLMTurnWith", "typedSite")?;
+    let ty = asks.type_of(site.get()).map(str::to_string);
     if payload.get("fork").and_then(Json::as_bool).unwrap_or(false) {
         let fan = payload
             .get("fan")
             .and_then(Json::as_u64)
-            .map(|n| FanBadge::Exact { n: n as u32 });
-        let prompts = payload
+            .map(|n| {
+                crate::tree::FanCount::try_from(n).map_err(|_| ClassifyError::OutOfRange {
+                    constructor: "RunLLMTurnWith",
+                    field: "fan",
+                    value: n,
+                })
+            })
+            .transpose()?;
+        let raw_prompts = payload
             .get("prompts")
             .and_then(Json::as_array)
-            .map(|arr| {
-                arr.iter()
-                    .filter_map(|v| v.as_str().map(str::to_string))
-                    .collect()
-            })
+            .cloned()
             .unwrap_or_default();
-        HoleRouting::Fork {
+        let prompts: Vec<String> = raw_prompts
+            .iter()
+            .filter_map(|v| v.as_str().map(str::to_string))
+            .collect();
+        if prompts.len() != raw_prompts.len() {
+            return Err(ClassifyError::FanMismatch {
+                constructor: "RunLLMTurnWith",
+                declared: raw_prompts.len(),
+                actual: prompts.len(),
+            });
+        }
+        if let Some(n) = fan {
+            if n.get() as usize != prompts.len() {
+                return Err(ClassifyError::FanMismatch {
+                    constructor: "RunLLMTurnWith",
+                    declared: n.get() as usize,
+                    actual: prompts.len(),
+                });
+            }
+        }
+        Ok(HoleRouting::Fork {
             site,
             ty,
-            fan,
+            fan: fan.map(|n| FanBadge::Exact { n: n.get() }),
             prompts,
-        }
+            source: ForkSource::RunLLMTurn,
+        })
+    } else if payload
+        .get("branch")
+        .and_then(Json::as_bool)
+        .unwrap_or(false)
+    {
+        let context_ref = payload
+            .get("ref")
+            .and_then(Json::as_str)
+            .map(str::to_string)
+            .ok_or(ClassifyError::MissingField {
+                constructor: "RunLLMTurnWith",
+                field: "ref",
+            })?;
+        Ok(HoleRouting::Branch {
+            site,
+            ty,
+            context_ref,
+        })
     } else {
-        HoleRouting::RunLLMTurn { site, ty }
+        Ok(HoleRouting::RunLLMTurn { site, ty })
     }
 }
 
@@ -442,69 +736,79 @@ fn decode_prompt_payload(request: &Value, table: &DataConTable) -> (String, Json
 /// Int, value])`). Only the leading `Int` site id is JSON-decoded — the
 /// value field crosses in-heap and is deliberately left untouched here (see
 /// [`classify_hole`]'s doc); `asks` resolves the site to its rendered type
-/// the same way [`classify_runllmturn_payload`] does.
+/// the same way [`classify_runllmturn_payload`] does. `site` is a ROUTING
+/// field (see [`ClassifyError`]'s doc) — missing/non-numeric/out-of-range is
+/// an `Err`, never a `0` default.
 fn decode_finalize_site(
     request: &Value,
     table: &DataConTable,
     asks: &AsksSidecar,
-) -> (u32, Option<String>) {
+) -> Result<(crate::tree::SiteId, Option<String>), ClassifyError> {
     let Value::Con(_, fields) = request else {
-        return (0, None);
+        return Err(ClassifyError::Malformed {
+            constructor: "FinalizeWith",
+        });
     };
-    let site = fields
-        .first()
-        .map(|p| tidepool_runtime::value_to_json(p, table, 0))
-        .and_then(|j| j.as_u64())
-        .unwrap_or(0) as u32;
-    let ty = asks.type_of(site).map(str::to_string);
-    (site, ty)
+    let site = require_con_site(fields, 0, table, "FinalizeWith", "site")?;
+    let ty = asks.type_of(site.get()).map(str::to_string);
+    Ok((site, ty))
 }
 
 /// Pull `(site, brief)` out of a `ForkWith`-shaped request (`Con(_, [site ::
 /// Int, brief :: Text])`) — a single `fork @T brief` suspension. The site id
-/// selects the recorded answer type; the brief is the child's task text.
-fn decode_fork_one(request: &Value, table: &DataConTable) -> (u32, String) {
+/// selects the recorded answer type (a ROUTING field, validated — see
+/// [`ClassifyError`]'s doc); the brief is display text, decoded as before.
+fn decode_fork_one(
+    request: &Value,
+    table: &DataConTable,
+) -> Result<(crate::tree::SiteId, String), ClassifyError> {
     let Value::Con(_, fields) = request else {
-        return (0, String::new());
+        return Err(ClassifyError::Malformed {
+            constructor: "ForkWith",
+        });
     };
-    let site = fields
-        .first()
-        .map(|p| tidepool_runtime::value_to_json(p, table, 0))
-        .and_then(|j| j.as_u64())
-        .unwrap_or(0) as u32;
+    let site = require_con_site(fields, 0, table, "ForkWith", "site")?;
     let brief = fields
         .get(1)
         .map(|p| tidepool_runtime::value_to_json(p, table, 0))
         .and_then(|j| j.as_str().map(str::to_string))
         .unwrap_or_default();
-    (site, brief)
+    Ok((site, brief))
 }
 
 /// Pull `(site, prompts)` out of a `ForkAllWith`-shaped request (`Con(_, [site
-/// :: Int, prompts :: [Text]])`) — a `forkAll @T briefs` suspension. `prompts`
-/// is the per-child brief list in declaration order; a non-`Text` element is
-/// silently dropped, so a shorter result than the `fan` count is a cardinality
-/// error the caller catches (`Harness::answer_fanout`).
-fn decode_fork_all(request: &Value, table: &DataConTable) -> (u32, Vec<String>) {
+/// :: Int, prompts :: [Text]])`) — a `forkAll @T briefs` suspension. `site` is
+/// a ROUTING field, validated (see [`ClassifyError`]'s doc). `prompts` is the
+/// per-child brief list in declaration order; a non-`Text` element is
+/// rejected rather than silently dropped — dropping it would under-report the
+/// fan's true cardinality to the caller (`Harness::answer_fanout`).
+fn decode_fork_all(
+    request: &Value,
+    table: &DataConTable,
+) -> Result<(crate::tree::SiteId, Vec<String>), ClassifyError> {
     let Value::Con(_, fields) = request else {
-        return (0, Vec::new());
+        return Err(ClassifyError::Malformed {
+            constructor: "ForkAllWith",
+        });
     };
-    let site = fields
-        .first()
-        .map(|p| tidepool_runtime::value_to_json(p, table, 0))
-        .and_then(|j| j.as_u64())
-        .unwrap_or(0) as u32;
-    let prompts = fields
+    let site = require_con_site(fields, 0, table, "ForkAllWith", "site")?;
+    let raw_prompts = fields
         .get(1)
         .map(|p| tidepool_runtime::value_to_json(p, table, 0))
         .and_then(|j| j.as_array().cloned())
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|v| v.as_str().map(str::to_string))
-                .collect()
-        })
         .unwrap_or_default();
-    (site, prompts)
+    let prompts: Vec<String> = raw_prompts
+        .iter()
+        .filter_map(|v| v.as_str().map(str::to_string))
+        .collect();
+    if prompts.len() != raw_prompts.len() {
+        return Err(ClassifyError::FanMismatch {
+            constructor: "ForkAllWith",
+            declared: raw_prompts.len(),
+            actual: prompts.len(),
+        });
+    }
+    Ok((site, prompts))
 }
 
 /// Pull the prompt (Text) and payload (JSON object) out of an `AskWith` Con.
@@ -873,7 +1177,7 @@ pub fn split_imports(block: &str) -> (String, String) {
 /// include search paths (prelude + effects module + optional project lib), the
 /// effect decls, the Ask tag, and the effect-row names.
 pub struct EngineConfig {
-    pub extract_bin: String,
+    pub extract_bin: tidepool_extract_cmd::ResolvedExtractBin,
     pub include: Vec<PathBuf>,
     pub effect_names: Vec<String>,
     /// The full [`EffectDecl`]s this config was built from — the SOURCE of both
@@ -1000,7 +1304,7 @@ impl EngineConfig {
     #[cfg(test)]
     pub(crate) fn inert(effect_names: Vec<String>) -> Self {
         EngineConfig {
-            extract_bin: "unused".to_string(),
+            extract_bin: tidepool_extract_cmd::ResolvedExtractBin::assume_resolved("unused"),
             include: Vec::new(),
             effect_names,
             decls: Vec::new(),
@@ -1054,7 +1358,8 @@ impl EngineConfig {
             include.push(lib.clone());
         }
         include.push(effects_dir.clone());
-        let extract_bin = tidepool_runtime::toolchain::extract_command_name();
+        let extract_bin = tidepool_runtime::toolchain::extract_command_name()
+            .map_err(|e| EngineError::Setup(format!("resolve extract binary: {e}")))?;
         Ok(EngineConfig {
             extract_bin,
             include,
@@ -1130,6 +1435,13 @@ impl EngineConfig {
         let vocab = vocab_with_runllmturn(&self.decls);
         let effects_dir = tidepool_mcp::ensure_effects_module_with_vocab(&self.decls, &vocab, &row)
             .map_err(|e| EngineError::Setup(format!("materialize effects module: {e}")))?;
+        validate_finalize_row(
+            &self.extract_bin,
+            &self.decls,
+            &vocab,
+            &row,
+            &self.validation_include(),
+        )?;
         let mut include = self.include.clone();
         match include.iter().position(|p| p == &self.effects_dir) {
             Some(pos) => include[pos] = effects_dir,
@@ -1140,6 +1452,93 @@ impl EngineConfig {
             stack: tidepool_mcp::build_effect_stack_type_at(&self.decls, &row),
         })
     }
+}
+
+/// Process-level memo: which generated-effects-module content hashes have
+/// already been probe-validated, and with what outcome. A repeated pin (every
+/// round of the SAME answerer hole reuses the SAME `Finalize <T>` row) is a
+/// cheap in-memory hit, not a second `tidepool-extract` spawn.
+fn finalize_probe_memo() -> &'static Mutex<HashMap<u64, Result<(), String>>> {
+    static MEMO: OnceLock<Mutex<HashMap<u64, Result<(), String>>>> = OnceLock::new();
+    MEMO.get_or_init(Default::default)
+}
+
+/// Probe-compile a pinned `Finalize` row's generated `Tidepool.Effects`
+/// source STANDALONE — as its own compile TARGET (renamed to `Expr`), not as
+/// something a turn module imports — so an applied row type with no
+/// resolving import (e.g. `Finalize Decision` pinned with `row.imports()`
+/// empty) is caught HERE, with GHC's own direct "Not in scope" diagnostic on
+/// the generated module's `type M` line.
+///
+/// This sidesteps a real hazard in extract's `tidepool-extract-bin`
+/// (`GhcPipeline.hs`'s `normalVariant`): when the generated module's OWN
+/// `type M = Eff '[..., Finalize T]` fails to resolve `T`, that failure sits
+/// in a DEPENDENCY of the turn module (which imports `Tidepool.Effects`), not
+/// in the turn module itself — and extract's diagnostic-recovery pass, which
+/// re-typechecks every module in the compile to recover a spanned error, does
+/// so in non-topological order. Whichever module happens to be visited before
+/// `Tidepool.Effects` gets its own turn reports a confusing cascade
+/// ("attempting to use module `Tidepool.Effects' ... which is not loaded")
+/// instead of the real error. Compiling the SAME generated source as the
+/// SOLE target (no separate importer racing it) avoids the hazard entirely —
+/// exactly the shape `wrong_typed_finalize_is_a_compile_error` already proves
+/// works cleanly through this same redo-loop, just with the error moved from
+/// the turn module into the (renamed) generated module. See
+/// `tidepool-harness/tests/finalize_type_pinning.rs`'s
+/// `pinned_finalize_needs_the_type_in_scope`.
+///
+/// `include` is the caller's [`EngineConfig::validation_include`] — every
+/// author module a row might name, minus the generated-effects dir itself
+/// (irrelevant here: the probe source IS that module's body, renamed, not an
+/// importer of it).
+fn validate_finalize_row(
+    extract_bin: &ResolvedExtractBin,
+    decls: &[tidepool_mcp::EffectDecl],
+    vocab: &[tidepool_mcp::EffectDecl],
+    row: &tidepool_mcp::RowArgs,
+    include: &[PathBuf],
+) -> Result<(), EngineError> {
+    let generated = tidepool_mcp::effects_module_source_with_vocab(decls, vocab, row);
+
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    generated.hash(&mut hasher);
+    let key = hasher.finish();
+
+    if let Some(cached) = finalize_probe_memo().lock().unwrap().get(&key) {
+        return cached.clone().map_err(EngineError::Setup);
+    }
+
+    const HEADER: &str = "module Tidepool.Effects where\n";
+    let probe_source = generated.replacen(HEADER, "module Expr where\n", 1);
+    debug_assert_ne!(
+        probe_source, generated,
+        "effects module source must open with `{HEADER}`"
+    );
+
+    // `error` is emitted unconditionally by `effects_module_source_with_vocab`
+    // regardless of `row`/`vocab`, so it's always a valid probe target — GHC
+    // typechecks the WHOLE module (including `type M`) to elaborate it,
+    // target choice doesn't matter beyond "some real binder".
+    let outcome = match compile_targets(
+        &probe_source,
+        &["error"],
+        include,
+        Some(extract_bin),
+        |_, _, _| {},
+    ) {
+        Ok(_) => Ok(()),
+        Err(CompileError::Diagnostics(diags)) => Err(diags
+            .iter()
+            .map(|d| d.message.as_str())
+            .collect::<Vec<_>>()
+            .join("\n\n")),
+        Err(other) => Err(other.to_string()),
+    };
+    finalize_probe_memo()
+        .lock()
+        .unwrap()
+        .insert(key, outcome.clone());
+    outcome.map_err(EngineError::Setup)
 }
 
 /// One turn's compile target — the include search path and the promoted
@@ -1210,7 +1609,7 @@ pub fn template_turn_for(
 /// path `result` itself uses
 /// ([`tidepool_mcp::TurnTemplate::extra_entries`]), so a caller compiling
 /// `result` and an extra entry as two `--targets` of ONE `tidepool-extract`
-/// spawn (`crate::compile::compile_turns`) gets entries that are identical by
+/// spawn ([`compile_turns`]) gets entries that are identical by
 /// construction rather than a hand-copied second `result`-shaped binder — the
 /// self-iterating harness driver's render+loop fusion is the first caller
 /// (`SelfHarnessDriver::compile_cycle_entry`). Routes through the SAME
@@ -1679,6 +2078,151 @@ pub fn build_list_value(items: Vec<Value>, table: &DataConTable) -> Result<Value
         result = Value::Con(cons_id, vec![item, result]);
     }
     Ok(result)
+}
+
+/// Wrap a frozen-snapshot digest as a genuine `ContextRef` `Value` — the Core
+/// counterpart of `Tidepool.Effects`'s `data ContextRef = ContextRef Text`
+/// (spliced into every `RunLLMTurn`-row compile's generated module, so
+/// `"ContextRef"` always resolves in `table` there), for resuming a
+/// `freezeContext`/`runLLMTurnBranch` continuation with a directly
+/// constructed value rather than an Aeson round-trip — the same "hand back
+/// the native representation" discipline [`build_list_value`] uses for `[T]`.
+pub fn build_context_ref_value(digest: &str, table: &DataConTable) -> Result<Value, EngineError> {
+    use tidepool_bridge::ToCore;
+    let con_id = tidepool_bridge::get_resilient(table, "ContextRef", 1).ok_or_else(|| {
+        EngineError::Run("build_context_ref_value: no ContextRef constructor in table".to_string())
+    })?;
+    let text = digest
+        .to_string()
+        .to_value(table)
+        .map_err(|e| EngineError::Run(format!("bridge digest to Value: {e}")))?;
+    Ok(Value::Con(con_id, vec![text]))
+}
+
+/// Assemble a genuine 2-tuple `Value` — `(a, b)` — for a `runLLMTurnBranch`
+/// resume: the pair counterpart of [`build_list_value`]'s list assembly, over
+/// the always-wired-in `"(,)"` constructor.
+pub fn build_pair_value(a: Value, b: Value, table: &DataConTable) -> Result<Value, EngineError> {
+    let pair_id = tidepool_bridge::get_resilient(table, "(,)", 2).ok_or_else(|| {
+        EngineError::Run("build_pair_value: no (,) constructor in table".to_string())
+    })?;
+    Ok(Value::Con(pair_id, vec![a, b]))
+}
+
+/// Why one forked cognition window ended WITHOUT a typed answer — the Rust
+/// side of the `InvocationExit` generated into `Tidepool.Effects`
+/// (`tidepool_mcp::runllmturn_effect_def!`'s `type_defs`). The constructor
+/// names here ARE that ADT's, and [`build_invocation_exit_value`] resolves
+/// them by name against the turn's own `DataConTable`.
+///
+/// **The line this type draws** (PRD 21 locked decision 6): an
+/// `InvocationExit` describes a failure ATTRIBUTABLE TO ONE CHILD'S WINDOW —
+/// its rounds ran out, it ended on something that is not an answer, it was
+/// cancelled, its own provider call failed. Those fold as DATA at that
+/// child's branch position so its siblings' finished results survive. A
+/// failure of the MECHANISM around the children — fan cardinality, list/sum
+/// assembly against the table, session bookkeeping, the per-loop
+/// inference-call runaway cap — is NOT an `InvocationExit` and must hard-fail
+/// the turn: reporting a broken mechanism as "the model failed" would be a
+/// false receipt.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum InvocationExit {
+    /// The window burned its round budget without finalizing.
+    RoundsExhausted(String),
+    /// The window ended on something that is not an answer.
+    NotFinalized(String),
+    /// The window was cancelled before it could answer. No producer in the
+    /// self-harness driver today — cancellation of a live branch is PRD 21
+    /// lane C5's (draining a recursive scope under structured concurrency).
+    /// The constructor exists because decision 6 enumerates it and a caller
+    /// matching exhaustively should not have to be rewritten when C5 lands.
+    Cancelled(String),
+    /// The window's own turn failed at runtime (its provider call errored).
+    RuntimeFailure(String),
+}
+
+impl InvocationExit {
+    /// The Haskell constructor name this variant builds — the one place the
+    /// Rust variant ↔ `Tidepool.Effects` constructor correspondence is
+    /// spelled.
+    fn constructor(&self) -> &'static str {
+        match self {
+            InvocationExit::RoundsExhausted(_) => "ExitRoundsExhausted",
+            InvocationExit::NotFinalized(_) => "ExitNotFinalized",
+            InvocationExit::Cancelled(_) => "ExitCancelled",
+            InvocationExit::RuntimeFailure(_) => "ExitRuntimeFailure",
+        }
+    }
+
+    /// The detail text the constructor carries.
+    pub fn detail(&self) -> &str {
+        match self {
+            InvocationExit::RoundsExhausted(d)
+            | InvocationExit::NotFinalized(d)
+            | InvocationExit::Cancelled(d)
+            | InvocationExit::RuntimeFailure(d) => d,
+        }
+    }
+}
+
+impl std::fmt::Display for InvocationExit {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}: {}", self.constructor(), self.detail())
+    }
+}
+
+/// Build the `InvocationExit` `Value` for `exit` against `table`.
+///
+/// Same loud-failure discipline as [`build_list_value`]: a constructor the
+/// table does not carry is a HARD error, never a defaulted or omitted value.
+/// The alternative — resuming with some other constructor — would feed the
+/// parent's `case` a value of the wrong shape, which case-traps far from the
+/// cause.
+pub fn build_invocation_exit_value(
+    exit: &InvocationExit,
+    table: &DataConTable,
+) -> Result<Value, EngineError> {
+    use tidepool_bridge::ToCore;
+    let name = exit.constructor();
+    let con = tidepool_bridge::get_resilient(table, name, 1).ok_or_else(|| {
+        EngineError::Run(format!(
+            "build_invocation_exit_value: no `{name}` constructor in table — the \
+             compiling row generated no `InvocationExit`, so a fork/fanout child's \
+             typed exit cannot be delivered"
+        ))
+    })?;
+    let detail =
+        exit.detail().to_string().to_value(table).map_err(|e| {
+            EngineError::Run(format!("build_invocation_exit_value: detail text: {e}"))
+        })?;
+    Ok(Value::Con(con, vec![detail]))
+}
+
+/// Assemble ONE fork/fanout child's outcome into the `Either InvocationExit T`
+/// `Value` its branch position resumes with — `Ok(v)` → `Right v`, `Err(exit)`
+/// → `Left (…)`.
+///
+/// This is the shape `runLLMTurnFork`/`runLLMTurnFanout` promise (PRD 21
+/// locked decision 6); `Tidepool.Fork`'s `fork`/`forkAll` do NOT go through
+/// it — they still resume with a bare `T` (see [`ForkSource`]).
+/// [`build_list_value`]'s loud-failure discipline throughout: a missing
+/// `Left`/`Right` is a hard error.
+pub fn build_child_answer_value(
+    outcome: Result<Value, InvocationExit>,
+    table: &DataConTable,
+) -> Result<Value, EngineError> {
+    let (name, payload) = match outcome {
+        Ok(v) => ("Right", v),
+        Err(exit) => ("Left", build_invocation_exit_value(&exit, table)?),
+    };
+    let con = tidepool_bridge::get_resilient(table, name, 1).ok_or_else(|| {
+        EngineError::Run(format!(
+            "build_child_answer_value: no `{name}` constructor in table — a \
+             fork/fanout answer is `Either InvocationExit T`, so both `Left` and \
+             `Right` must be reachable from the compiling row"
+        ))
+    })?;
+    Ok(Value::Con(con, vec![payload]))
 }
 
 /// Shared handle to a provider, so the engine and its forked answerers all use
@@ -2164,5 +2708,379 @@ mod tests {
         assert_eq!(content_line_count("a\n"), 1);
         assert_eq!(content_line_count("a\nb"), 2);
         assert_eq!(content_line_count("a\nb\n"), 2);
+    }
+
+    // -- classify_hole: routing-field validation -----------------------------
+    //
+    // These are continuation-ROUTING inputs (which suspended typed site a
+    // reply resumes) — a malformed value must stop the turn with a
+    // diagnostic, never resume/finalize a plausible-but-wrong site. See
+    // `ClassifyError`'s doc.
+
+    #[test]
+    fn classify_runllmturn_payload_rejects_missing_site() {
+        let asks = AsksSidecar::from_pairs(vec![]);
+        let payload = serde_json::json!({});
+        let err = classify_runllmturn_payload(&payload, &asks).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                ClassifyError::MissingField {
+                    constructor: "RunLLMTurnWith",
+                    field: "typedSite"
+                }
+            ),
+            "{err:?}"
+        );
+    }
+
+    #[test]
+    fn classify_runllmturn_payload_rejects_non_numeric_site() {
+        let asks = AsksSidecar::from_pairs(vec![]);
+        let payload = serde_json::json!({ "typedSite": "not-a-number" });
+        let err = classify_runllmturn_payload(&payload, &asks).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                ClassifyError::MissingField {
+                    constructor: "RunLLMTurnWith",
+                    field: "typedSite"
+                }
+            ),
+            "{err:?}"
+        );
+    }
+
+    /// `2^32` must not alias site `0` via an `as u32` truncation.
+    #[test]
+    fn classify_runllmturn_payload_rejects_out_of_range_site() {
+        let asks = AsksSidecar::from_pairs(vec![]);
+        let huge = (u32::MAX as u64) + 1;
+        let payload = serde_json::json!({ "typedSite": huge });
+        let err = classify_runllmturn_payload(&payload, &asks).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                ClassifyError::OutOfRange {
+                    constructor: "RunLLMTurnWith",
+                    field: "typedSite",
+                    value
+                } if value == huge
+            ),
+            "{err:?}"
+        );
+    }
+
+    #[test]
+    fn classify_runllmturn_payload_rejects_fan_out_of_range() {
+        let asks = AsksSidecar::from_pairs(vec![(0, "Text".to_string())]);
+        let huge = (u32::MAX as u64) + 1;
+        let payload = serde_json::json!({
+            "typedSite": 0,
+            "fork": true,
+            "fan": huge,
+            "prompts": []
+        });
+        let err = classify_runllmturn_payload(&payload, &asks).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                ClassifyError::OutOfRange {
+                    constructor: "RunLLMTurnWith",
+                    field: "fan",
+                    value
+                } if value == huge
+            ),
+            "{err:?}"
+        );
+    }
+
+    #[test]
+    fn classify_runllmturn_payload_rejects_declared_fan_prompt_mismatch() {
+        let asks = AsksSidecar::from_pairs(vec![(0, "Text".to_string())]);
+        let payload = serde_json::json!({
+            "typedSite": 0,
+            "fork": true,
+            "fan": 2,
+            "prompts": ["only one"]
+        });
+        let err = classify_runllmturn_payload(&payload, &asks).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                ClassifyError::FanMismatch {
+                    constructor: "RunLLMTurnWith",
+                    declared: 2,
+                    actual: 1
+                }
+            ),
+            "{err:?}"
+        );
+    }
+
+    /// A non-Text element in `prompts` must not be silently dropped: the raw
+    /// array length and the filtered length disagree, which is exactly the
+    /// corruption this now rejects instead of under-reporting the fan's true
+    /// cardinality.
+    #[test]
+    fn classify_runllmturn_payload_rejects_non_text_prompt_element() {
+        let asks = AsksSidecar::from_pairs(vec![(0, "Text".to_string())]);
+        let payload = serde_json::json!({
+            "typedSite": 0,
+            "fork": true,
+            "prompts": ["fine", 42, "also fine"]
+        });
+        let err = classify_runllmturn_payload(&payload, &asks).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                ClassifyError::FanMismatch {
+                    constructor: "RunLLMTurnWith",
+                    declared: 3,
+                    actual: 2
+                }
+            ),
+            "{err:?}"
+        );
+    }
+
+    /// The happy path still classifies exactly as before — the regression pin
+    /// that the added validation doesn't reject well-formed wire data.
+    #[test]
+    fn classify_runllmturn_payload_accepts_well_formed_fanout() {
+        let asks = AsksSidecar::from_pairs(vec![(3, "[Text]".to_string())]);
+        let payload = serde_json::json!({
+            "typedSite": 3,
+            "fork": true,
+            "fan": 2,
+            "prompts": ["first", "second"]
+        });
+        let routing =
+            classify_runllmturn_payload(&payload, &asks).expect("well-formed payload classifies");
+        match routing {
+            HoleRouting::Fork {
+                site, fan, prompts, ..
+            } => {
+                assert_eq!(site.get(), 3);
+                assert_eq!(fan, Some(FanBadge::Exact { n: 2 }));
+                assert_eq!(prompts, vec!["first".to_string(), "second".to_string()]);
+            }
+            other => panic!("expected Fork routing, got {other:?}"),
+        }
+    }
+
+    /// A bare (non-fork) `runLLMTurn` with a missing site is rejected the
+    /// same way — the validation is not fork-only.
+    #[test]
+    fn classify_runllmturn_payload_rejects_missing_site_on_plain_turn() {
+        let asks = AsksSidecar::from_pairs(vec![]);
+        let payload = serde_json::json!({ "fork": false });
+        assert!(classify_runllmturn_payload(&payload, &asks).is_err());
+    }
+
+    #[test]
+    fn decode_finalize_site_rejects_missing_site() {
+        let table = DataConTable::new();
+        let asks = AsksSidecar::from_pairs(vec![]);
+        let request = Value::Con(DataConId(1), vec![]);
+        let err = decode_finalize_site(&request, &table, &asks).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                ClassifyError::MissingField {
+                    constructor: "FinalizeWith",
+                    field: "site"
+                }
+            ),
+            "{err:?}"
+        );
+    }
+
+    #[test]
+    fn decode_finalize_site_rejects_out_of_range_site() {
+        let table = DataConTable::new();
+        let asks = AsksSidecar::from_pairs(vec![]);
+        let huge = (u32::MAX as u64) + 1;
+        let request = Value::Con(
+            DataConId(1),
+            vec![Value::Lit(tidepool_repr::Literal::LitWord(huge))],
+        );
+        let err = decode_finalize_site(&request, &table, &asks).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                ClassifyError::OutOfRange {
+                    constructor: "FinalizeWith",
+                    field: "site",
+                    value
+                } if value == huge
+            ),
+            "{err:?}"
+        );
+    }
+
+    #[test]
+    fn decode_fork_one_rejects_missing_site() {
+        let table = DataConTable::new();
+        let request = Value::Con(DataConId(1), vec![]);
+        let err = decode_fork_one(&request, &table).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                ClassifyError::MissingField {
+                    constructor: "ForkWith",
+                    field: "site"
+                }
+            ),
+            "{err:?}"
+        );
+    }
+
+    #[test]
+    fn decode_fork_one_rejects_out_of_range_site() {
+        let table = DataConTable::new();
+        let huge = (u32::MAX as u64) + 1;
+        let request = Value::Con(
+            DataConId(1),
+            vec![Value::Lit(tidepool_repr::Literal::LitWord(huge))],
+        );
+        let err = decode_fork_one(&request, &table).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                ClassifyError::OutOfRange {
+                    constructor: "ForkWith",
+                    field: "site",
+                    value
+                } if value == huge
+            ),
+            "{err:?}"
+        );
+    }
+
+    #[test]
+    fn decode_fork_all_rejects_missing_site() {
+        let table = DataConTable::new();
+        let request = Value::Con(DataConId(1), vec![]);
+        let err = decode_fork_all(&request, &table).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                ClassifyError::MissingField {
+                    constructor: "ForkAllWith",
+                    field: "site"
+                }
+            ),
+            "{err:?}"
+        );
+    }
+
+    #[test]
+    fn decode_fork_all_rejects_out_of_range_site() {
+        let table = DataConTable::new();
+        let huge = (u32::MAX as u64) + 1;
+        let request = Value::Con(
+            DataConId(1),
+            vec![
+                Value::Lit(tidepool_repr::Literal::LitWord(huge)),
+                Value::Con(DataConId(2), vec![]),
+            ],
+        );
+        let err = decode_fork_all(&request, &table).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                ClassifyError::OutOfRange {
+                    constructor: "ForkAllWith",
+                    field: "site",
+                    value
+                } if value == huge
+            ),
+            "{err:?}"
+        );
+    }
+
+    /// A non-`Text` element among the prompts must not be silently filtered
+    /// out: that would under-report the fan's true cardinality to
+    /// `Harness::answer_fanout`. Builds a real `[]`/`:` cons list (the shape
+    /// `value_to_json` actually renders as a JSON array) with a stray `Int`
+    /// in the middle.
+    #[test]
+    fn decode_fork_all_rejects_non_text_prompt_element() {
+        use tidepool_repr::Literal;
+        let mut table = DataConTable::new();
+        table.insert(dc(10, "[]", 0, 0));
+        table.insert(dc(11, ":", 1, 2));
+        let nil = Value::Con(DataConId(10), vec![]);
+        let list = Value::Con(
+            DataConId(11),
+            vec![
+                Value::Lit(Literal::LitString(b"fine".to_vec())),
+                Value::Con(
+                    DataConId(11),
+                    vec![
+                        Value::Lit(Literal::LitInt(42)),
+                        Value::Con(
+                            DataConId(11),
+                            vec![Value::Lit(Literal::LitString(b"also fine".to_vec())), nil],
+                        ),
+                    ],
+                ),
+            ],
+        );
+        let request = Value::Con(DataConId(1), vec![Value::Lit(Literal::LitWord(0)), list]);
+        let err = decode_fork_all(&request, &table).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                ClassifyError::FanMismatch {
+                    constructor: "ForkAllWith",
+                    declared: 3,
+                    actual: 2
+                }
+            ),
+            "{err:?}"
+        );
+    }
+
+    /// The exact scenario the review's suggested rewrite checks: a fork's
+    /// declared `fan` must equal its `prompts` cardinality, not silently
+    /// drift when a non-Text element is present.
+    #[test]
+    fn classify_hole_end_to_end_rejects_malformed_site() {
+        let mut table = DataConTable::new();
+        table.insert(dc(1, "FinalizeWith", 1, 2));
+        let asks = AsksSidecar::from_pairs(vec![]);
+        // `FinalizeWith`'s leading field is a non-numeric site.
+        let request = Value::Con(
+            DataConId(1),
+            vec![
+                Value::Lit(tidepool_repr::Literal::LitString(b"not-a-site".to_vec())),
+                Value::Con(DataConId(99), vec![]),
+            ],
+        );
+        let err = classify_hole(&request, &table, &asks).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                ClassifyError::MissingField {
+                    constructor: "FinalizeWith",
+                    field: "site"
+                }
+            ),
+            "{err:?}"
+        );
+    }
+
+    fn dc(id: u64, name: &str, tag: u32, rep_arity: u32) -> DataCon {
+        DataCon {
+            id: DataConId(id),
+            name: name.to_string(),
+            tag,
+            rep_arity,
+            field_bangs: vec![],
+            qualified_name: Some(format!("Effects.{name}")),
+            type_name: "Effects".to_string(),
+        }
     }
 }

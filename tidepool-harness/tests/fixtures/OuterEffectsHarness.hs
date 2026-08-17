@@ -9,11 +9,13 @@
 
 -- | Test fixture for S1-L1 outer-row servicing: a harness whose 'loop' calls
 -- Console (@say@), Worktree (@createWorktree@), Exec (@run@), a
--- RepoEvent @withHandler@\/@headChanged@ subscribe-drain-unsubscribe cycle,
--- Journal (@record@), and (PRD 20 S1-L4) 'Tidepool.Async' — DIRECTLY (no
--- model round at all — the loop is authored orchestration), so the driver's
--- suspension-servicing paths (including the green-thread scheduler,
--- 'SelfHarnessDriver.service_green_hole') are the only thing under test.
+-- RepoEvent @withHandler@\/@headChanged@ subscribe-drain-unsubscribe cycle, a
+-- RepoEvent @after@\/@nextEvent@ blocking deadline wait (the @RepoEventAwait@
+-- suspension), and Journal (@record@) DIRECTLY (no model round at all — the
+-- loop is authored orchestration), so the driver's
+-- Console\/Worktree\/RepoEvent\/Exec\/Journal suspension-servicing paths are
+-- the only thing under test, together with the green-thread scheduler
+-- ('SelfHarnessDriver.service_green_hole').
 --
 -- @Green@ being in 'outer_decls' makes 'Tidepool.Async' auto-import into the
 -- OUTER TURN compile (`tidepool-mcp/src/effect_defs.rs`'s
@@ -48,15 +50,19 @@ import Tidepool.Prelude hiding (render)
 import Tidepool.QQ (fmt)
 
 import Tidepool.Effects
-  ( createWorktree
-  , fromCurrentRepository
+  ( Observed (..)
+  , Tick (..)
+  , after
+  , createWorktree
   , headChanged
+  , nextEvent
   , record
-  , renderWorktreeError
   , run
   , say
   , withHandler
   )
+import Tidepool.Worktree (fromCurrentRepository, renderWorktreeError)
+
 import Tidepool.Harness (Harness)
 
 data State = State
@@ -68,6 +74,7 @@ data State = State
   , asyncLoserVal :: Int
   , asyncCancelled :: Bool
   , asyncMapResults :: [Int]
+  , tickObserved :: Bool
   }
   deriving (Generic, ToJSON, FromJSON, Show)
 
@@ -82,6 +89,7 @@ initialState =
     , asyncLoserVal = 0
     , asyncCancelled = False
     , asyncMapResults = []
+    , tickObserved = False
     }
 
 render :: State -> Text
@@ -102,9 +110,10 @@ mapWork n = pure $! sumTo n * 10
     sumTo 0 = 0
     sumTo k = k + sumTo (k - 1)
 
--- | Console, Worktree, Exec, RepoEvent, Journal, and 'Tidepool.Async',
--- exercised in one loop with no model round: proves the driver services
--- every suspension kind, including the green-thread scheduler.
+-- | Console, Worktree, Exec, RepoEvent (subscribe-drain-unsubscribe AND the
+-- blocking after\/nextEvent deadline wait), and Journal, exercised in one
+-- loop with no model round: proves the driver services every suspension
+-- kind, including RepoEventAwait and the green-thread scheduler.
 loop :: State -> Harness State
 loop st = do
   say "outer-effects probe starting"
@@ -117,6 +126,7 @@ loop st = do
         (headChanged wt)
         (\_change -> say "observed a head change")
         (pure ())
+      Observed _ tick <- after 50 >>= nextEvent
       record "outer-effects" "probe" (object ["exec" .= proc.stdout])
 
       -- `wait`: fork one thread, join it, get its value back.
@@ -156,4 +166,5 @@ loop st = do
               Left AsyncCancelled -> True
               _ -> False
           , asyncMapResults = mapResults
+          , tickObserved = tick.firedAtMs > 0
           }

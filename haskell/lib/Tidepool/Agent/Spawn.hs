@@ -86,7 +86,8 @@
 -- outcome — a refusal the child reads and finishes its turn on — different
 -- text, in a path that only fires if a toolless child invents a tool.
 module Tidepool.Agent.Spawn
-  ( spawnAgent
+  ( renderSpawnError
+  , spawnAgent
   , spawnAgentWithTools
   , spawnAsync
   , awaitAgent
@@ -117,6 +118,7 @@ import Tidepool.Effects
   , agentCancelRaw
   , agentResumeRaw
   , agentSpawnAsyncRaw
+  , renderBackendFailure
   )
 import Tidepool.Agent.Contract
   ( AsServerT
@@ -127,11 +129,39 @@ import Tidepool.Agent.Contract
   , compileTools
   , renderToolCompileError
   )
+import Tidepool.Worktree (renderWorktreeError)
 import Tidepool.Aeson.FromJSON (FromJSON, fromJSON, resultToEither)
 import Tidepool.Aeson.Schema (JsonSchema (..))
 import Tidepool.Aeson.Value (Value, object, toJSON, (.=))
 import Data.Text (Text)
 import qualified Tidepool.Data.Text as T
+
+-- | A one-line, operator-readable rendering of a spawn failure. Case-match the
+-- constructor when you mean to BRANCH on the failure; this is for receipts and
+-- logs.
+--
+-- It lives HERE rather than in the generated @Tidepool.Effects@ because it
+-- calls 'renderWorktreeError', which is authored library code in
+-- "Tidepool.Worktree" (PRD 22 lane 3). @Tidepool.Effects@ cannot import that
+-- module — that module imports IT — so a helper spliced into the generated
+-- module may not reference a name that lives in the library layer. Subagent's
+-- row already requires Worktree, so this module can reach it in the one
+-- direction that is not a cycle. Reached from an eval through Subagent's
+-- @extra_imports@ row, so the authored surface is unchanged.
+--
+-- @show@ is base's here and the text is packed at the use site, matching this
+-- module's existing idiom (see 'toolRoundsExhausted'); @Tidepool.Prelude@'s
+-- @show@ is @T.pack . show@, so the rendering is byte-identical to what the
+-- generated module produced.
+renderSpawnError :: SpawnError -> Text
+renderSpawnError (SpawnWorktreeFailed st e) = "spawn failed at " <> T.pack (show st) <> " (worktree): " <> renderWorktreeError e
+renderSpawnError (SpawnBindingFailed st e) = "spawn failed at " <> T.pack (show st) <> " (binding): " <> renderWorktreeError e
+renderSpawnError (SpawnBackendFailed st b) = "spawn failed at " <> T.pack (show st) <> " (backend): " <> renderBackendFailure b
+renderSpawnError (SpawnRollbackFailed st orig rb) = "spawn failed at " <> T.pack (show st) <> " AND rollback failed: " <> orig <> "; rollback: " <> rb
+renderSpawnError (SpawnResultMalformed d) = "spawn result malformed: " <> d
+renderSpawnError (SpawnDriveFailed st d) = "spawn drive failed at " <> T.pack (show st) <> ": " <> d
+renderSpawnError (SpawnCapacityExhausted n) = "spawn refused: cycle table full (" <> T.pack (show n) <> " running)"
+renderSpawnError (SpawnCancelled c) = "spawn cancelled before it produced a result: " <> T.pack (show c)
 
 -- | How many tool-call rounds the parent will serve before it stops
 -- dispatching.

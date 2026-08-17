@@ -34,9 +34,11 @@
 
 mod support;
 
-use tidepool_harness::compile;
-use tidepool_harness::engine::{answerer_hole_card, template_turn_for, EngineConfig};
+use tidepool_harness::engine::{
+    self, answerer_hole_card, template_turn_for, CompiledTurn, EngineConfig,
+};
 use tidepool_harness::{answerer_decls, load_harness_source};
+use tidepool_runtime::CompileError;
 
 fn repo_root() -> std::path::PathBuf {
     std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -63,18 +65,26 @@ fn compile_turn(
     code: &str,
     imports: &str,
     finalize_ty: Option<&str>,
-) -> Result<compile::CompiledTurn, compile::CompileError> {
+) -> Result<CompiledTurn, CompileError> {
     let cfg = answerer_cfg();
     let row_imports: Vec<String> = if imports.trim().is_empty() {
         Vec::new()
     } else {
         vec![imports.to_string()]
     };
-    let target = cfg
-        .turn_target(finalize_ty.map(|ty| (ty, row_imports.as_slice())))
-        .expect("turn target");
+    // `turn_target` itself can fail here (not just IO): a pinned row whose
+    // applied type has no resolving import fails the ROW at this point, with
+    // GHC's own "Not in scope" diagnostic, rather than materializing a
+    // target that would blow up confusingly downstream — see
+    // `engine::validate_finalize_row`'s doc. Propagated as a `CompileError`
+    // like every other compile failure below, not `.expect()`'d, since
+    // `pinned_finalize_needs_the_type_in_scope` exercises exactly this path.
+    let target = match cfg.turn_target(finalize_ty.map(|ty| (ty, row_imports.as_slice()))) {
+        Ok(t) => t,
+        Err(e) => return Err(CompileError::ExtractFailed(e.to_string())),
+    };
     let src = template_turn_for(&cfg.decls, &target.stack, code, imports, "");
-    compile::compile_turn(
+    engine::compile_turn(
         &cfg.extract_bin,
         &src,
         "result",
@@ -170,7 +180,18 @@ fn pinned_finalize_needs_the_type_in_scope() {
     support::require_extract();
     let err = compile_turn(GOOD_DECISION, "", Some("Decision"))
         .err()
-        .map(|e| e.to_string())
+        .map(|e| match e {
+            // `CompileError::Diagnostics`' own `Display` is only a count
+            // ("Haskell compilation failed (N diagnostic(s))") — assert
+            // against GHC's own message text instead, same as
+            // `classify_compile`/`compile_error_to_session_error` do.
+            CompileError::Diagnostics(diags) => diags
+                .iter()
+                .map(|d| d.message.as_str())
+                .collect::<Vec<_>>()
+                .join("\n\n"),
+            other => other.to_string(),
+        })
         .expect("a pinned turn without the type imported cannot compile");
     assert!(
         err.contains("Decision"),
@@ -209,13 +230,13 @@ fn author_module_edit_between_compiles_is_picked_up_by_the_second() {
     let mut cfg = answerer_cfg();
     cfg.include.push(dir.path().to_path_buf());
 
-    let compile_at = |code: &str| -> Result<compile::CompiledTurn, compile::CompileError> {
+    let compile_at = |code: &str| -> Result<CompiledTurn, CompileError> {
         let row_imports = vec!["AuthorType".to_string()];
         let target = cfg
             .turn_target(Some(("Foo", row_imports.as_slice())))
             .expect("turn target");
         let src = template_turn_for(&cfg.decls, &target.stack, code, "AuthorType", "");
-        compile::compile_turn(
+        engine::compile_turn(
             &cfg.extract_bin,
             &src,
             "result",

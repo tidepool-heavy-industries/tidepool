@@ -25,10 +25,12 @@ Module map:
 - `engine` — the turn engine: prompt assembly, provider call, extract+compile
   the last fenced Haskell block, classify a suspension (`AskWith`/
   `AskUserWith`/`RunLLMTurnWith`/`FinalizeWith`) by its request's constructor
-  name.
-- `compile` — turn compilation (Haskell source → `CoreExpr` + `DataConTable`
-  + `asks.json` sidecar) via `tidepool-extract`, MEMOIZED through
-  `tidepool_runtime::cache` (see Compile memo below).
+  name. `compile_turn`/`compile_turns` (`CompiledTurn`: `CoreExpr` +
+  `DataConTable` + `asks.json` sidecar) are thin wrappers over
+  `tidepool_runtime::artifacts::compile_targets` — the actual
+  spawn/read/deserialize/diagnostics/memo mechanics moved to that crate
+  (architecture review finding 3, 2026-08-17: this crate no longer owns a
+  second compiler frontend). See Compile memo below.
 - `log` — event-log wire schema (header pins prelude+extract fingerprints).
   `Event::TurnStart{source}` carries the EXTRACTED executed Haskell block, not
   a "model" tag; `Event::Effect{req,resp}` is written by the live
@@ -39,16 +41,21 @@ Module map:
   effect) + `provider/{api_key,http,oauth,paths}` impls.
 - `replay` — `ReplayProvider` (turn substitution) + `fold_tree_state`
   (crash-replay tree reconstruction) — see Replay below.
+- `snapshot` — frozen post-coalgebra context prefixes: `SnapshotDigest`
+  (blake3 over the exact prefix `engine::assemble_request` re-emits) and the
+  immutable `ContextSnapshot` the harness interns — see Context snapshots below.
 - `synopsis` — the names-only `type_synopsis` a hole card's shape line reads,
   derived from a compiled `DataConTable` (constructor/selector NAMES only —
   the table has no field TYPES, so this is honestly shallow, never a form).
 
 ## Compile memo — one content-addressed cache, no cache-free path
 
-`compile.rs` memoizes every turn compile. There is no cache-free path, no
-bypass flag, and no second mechanism. The full keying spec, the correctness
-hazards it answers, and the safety argument for sharing one memo across test
-processes are in `plans/compile-memo.md`; what a reader here needs:
+Every turn compile (`engine::compile_turn`/`compile_turns`, wrapping
+`tidepool_runtime::artifacts::compile_targets`) is memoized. There is no
+cache-free path, no bypass flag, and no second mechanism. The full keying
+spec, the correctness hazards it answers, and the safety argument for
+sharing one memo across test processes are in `plans/compile-memo.md`; what
+a reader here needs:
 
 - **The mechanism is `tidepool_runtime::cache`, not a fork of it.**
   `invocation_key` keys the COMPLETE invocation — source CONTENT, the built
@@ -62,10 +69,10 @@ processes are in `plans/compile-memo.md`; what a reader here needs:
 - **A hit stores and restores the FULL artifact set** this module reads —
   `meta.cbor`, every `<target>.cbor`, and the asks sidecar in whichever shape
   the target count selects, with ABSENT distinct from empty. Hit and miss
-  rejoin at `compile::assemble`, so observational identity is a property of
-  the code shape. The one deliberate difference: a hit records no
-  `extract_spawn` timing stage and no `extract.*` phases, because nothing was
-  spawned.
+  rejoin at `tidepool_runtime::artifacts::assemble`, so observational
+  identity is a property of the code shape. The one deliberate difference: a
+  hit records no `extract_spawn` timing stage and no `extract.*` phases,
+  because nothing was spawned.
 - **Tests share the memo, not their state.** `tests/support::isolate_cache`
   still isolates `XDG_CACHE_HOME` per test (checkpoints, transcripts,
   `log.jsonl`, KV, the generated effects module) but points
@@ -189,6 +196,163 @@ effect). A general Agent node (full base-effect row) does produce them.
 **The reserved gap:** nothing READS those records back. Recorded responses are
 never substituted into a resumed session, so a node that suspended after
 running handled effects, then restarted and resumed, RE-EXECUTES them live.
+
+## Scope trees — a window's names retire with its heap (PRD 21 C2 §1–3)
+
+A node already carried a `RealmId`: the HEAP-side lifetime of its window
+(parked frames, outstanding `ValueHandle`s), exited by `close_realm`. C2 gives
+it the NAME-side one alongside — a `ScopeId` (`tidepool_codegen::scope`), the
+frame both session planes hang their per-window declarations and bindings off.
+One window, two halves, **one** retirement step.
+
+**How a window gets a scope.** Mint it off the session
+(`with_session(sid, |s| s.mint_scope(parent))` — `PersistentSession` owns the
+one `ScopeTree`, and minting is also where the DECL plane seeds the child's tip
+from its PARENT's, so a sibling that defines in between cannot leak in), then
+`Harness::set_node_scope(node, scope)`. `Harness::run_checked_out` applies it
+to the session (`ResidentSession::set_scope`) at the SAME one site it applies
+the realm, so every run/resume/child path is covered and a node WITHOUT a scope
+runs at `ScopeId::ROOT` — never at whatever scope the last turn on a shared
+machine left behind (the ambient-stickiness hazard the realm reset already
+answers). `with_session`'s own runs reset to ROOT for the same reason.
+
+**What a scoped turn actually compiles against.** `session_bind_context` and
+`session_decl_context` resolve the turn's decl-tip import module and its
+visible `Val.G<g>` set FROM THE NODE'S SCOPE (`session_import_module_in`,
+`current_val_modules_in`), and a decl turn appends to that scope's own tip
+(`define_scoped_in`). That is the whole of locked decision 4 on the real
+compile path: a child's tip module already re-exports its parent's chain, so
+parent declarations are callable in every child; the visible-binding walk is
+upward-only with child frames shadowing parent ones, so a sibling's names are
+not even *nameable*; and nothing ever walks downward, so the parent gains
+neither. A value bind lands in the turn's own scope, and the cross-plane rule
+(a name lives in at most one plane) is scoped with it — `materialize_binder`
+retracts the decl head in the BINDING's scope, so a child binding `helper`
+never retracts the parent's. At ROOT every one of these is the pre-C2 path
+verbatim; `tests/companion_mount_spike.rs` passing unmodified is the gate.
+
+**What retirement releases.** `Harness::terminate_node` is still the ONE
+retirement path. For an ATTACHED node it now exits both halves in
+`exit_window`: `close_realm(realm)` first (parked frames + handles), then
+`retire_scope(scope)`. That order is load-bearing — scope retirement's
+sole-ownership rule reads the handle registry, so a handle the realm still
+owned would wrongly pin a root. The immediate path and the QUEUED path
+(`pending_window_exits`, drained by whichever code path next holds the machine)
+go through that one function, so they cannot diverge; both halves of the
+window's identity are retained in the queue until the exit is CONFIRMED. An
+OWNING node is unaffected: its whole session is dropped.
+
+The receipt outlives the node. `retire_scope` returns
+`ScopeRetirement { scopes_retired, bindings_retired, roots_released }`, and
+`terminate_node` records it under the node id for `Harness::scope_retirement`
+— by the time a caller checks the ledger the `convos` entry is gone, and
+`roots_released` is the only thing the ledger's movement can be checked
+against.
+
+**The four counted classes, and their harness-visible reads.** Never folded
+together — the full table and the reasoning live in `tidepool-codegen/CLAUDE.md`
+§ root accounting; what a caller here needs is which read to take:
+
+| # | Class | Read (through `with_session`) | Scope retirement |
+|---|-------|-------------------------------|------------------|
+| 1 | parked continuations | `s.stowed_roots_count() == s.parked_count()` | UNCHANGED |
+| 2 | handle registry | `s.value_handle_count()` | UNCHANGED (a mount already transferred out) |
+| 3 | value-plane bindings | `s.binding_names()` (ROOT) / `s.scope_binding_count(scope)` | the retired scope's frame goes to 0 |
+| 4 | GC root ledger | `s.persistent_roots_count()` | drops by EXACTLY the receipt's `roots_released` |
+
+Classes 1 and 2 staying put is an assertion, not an expectation: a parked
+frame's root belongs to a REALM, and a mounted root left the handle registry at
+the mount. Class 4 is the witness — without it class 3 can return to baseline
+while every root stays traced.
+
+**Deregistered is not reclaimed.** Retirement removes a root from the GC TRACE
+LIST; it does not free `OldSpace` bytes (no major or compacting pass exists).
+A long-resident session's OldSpace grows monotonically with the total number of
+mounts ever made and is reclaimed at machine drop or rotation. Written here,
+in `tidepool-codegen/CLAUDE.md`, and in the design doc so nobody re-derives it
+while hunting a leak.
+
+**Escaped closures stay alive by REACHABILITY, not by exemption.** A closure
+finalized in a child scope is mounted into a PARENT-scope binding
+(`mount_handle_in(parent, …)`, the C1 mount seam pointed across a scope
+boundary). That parent binding owns its own `RootSlot`, so retiring the child
+leaves it registered while the child's own bindings' roots go, and the captured
+child-heap objects stay traced transitively through it. Gate:
+`tests/companion_scope_trees.rs`.
+
+## Context snapshots — one frozen prefix, many branches (PRD 21 C2 §4)
+
+The boundary already existed and was never named: `register_fork_child`
+computes `checkpoint = parent_transcript.len()` and seeds the child with the
+parent's transcript AND framing, and `engine::assemble_request` is
+`[system(framing ?? SYSTEM_FRAMING)] ++ transcript` verbatim — so a fork
+child's assembled request prefix has always been byte-identical to its
+parent's through the checkpoint. `snapshot.rs` gives that prefix an identity
+and receipts; it does not invent it.
+
+- **`Harness::freeze_snapshot(node) -> SnapshotDigest`** — the explicit
+  operation. Interns an immutable `Arc<ContextSnapshot>`. IDEMPOTENT: an
+  unchanged transcript freezes to the same digest, does not duplicate the
+  entry, and writes no second `SnapshotFrozen` receipt. Nothing is ever
+  evicted, so a digest a child was minted from always resolves.
+- **The digest runs over the ASSEMBLED prefix**, via `assemble_request`
+  itself (`snapshot::digest_prefix` calls it) — one assembly path, so the
+  digest cannot drift from what a provider is actually sent. Domain-separated
+  (`b"tidepool-context-snapshot-v1"`) and length-framed, mirroring
+  `tidepool_runtime::cache`'s idiom; `frame` is private there, so the same
+  three lines are reimplemented rather than a second scheme invented.
+- **`Harness::fork_from_snapshot(digest, brief)`** goes through the same
+  `seed_forked_child` an ordinary fork does — the ONE place a
+  `NodeSeed::Forked` is staged — so forcing, seeding, framing inheritance, and
+  the `TurnForked` checkpoint cannot diverge between the two. Every sibling
+  reports one parent digest (`Harness::branch_snapshot`).
+- **Immutability is locked decision 2, and it is pinned.** A `ContextSnapshot`
+  is never mutated; an interned snapshot and each child own their own copies,
+  so there is no `&mut` path to a frozen prefix. Compaction
+  (`replace_transcript_with_summary`, destructive to the node's LIVE
+  transcript by design) therefore cannot reach one: a node that HAS a frozen
+  snapshot gets a NEW one minted at compaction — a new digest, a new cache
+  root, a second receipt — while the old entry and every existing child stay
+  exactly as they were. `tests/companion_snapshots.rs` asserts this by
+  re-digesting the children's own assembled prefixes AFTER the parent is
+  compacted.
+
+### The provider cache-metric gap (read this before claiming a cache win)
+
+**No provider impl in this tree emits `cache_control` breakpoints, and until
+C2 none parsed a cache metric. Measured cache REUSE is therefore not
+verifiable from our side.** Stated plainly so C6's dogfood does not go looking
+for a number that isn't there:
+
+- `TurnRequest` has no metadata slot at all, and nothing anywhere emits
+  `cache_control`. We do not *cause* provider-side cache hits; at most we make
+  a stable prefix available for a provider to cache on its own terms.
+- `Usage` now carries `cached_input_tokens: Option<u64>`, populated ONLY from
+  a field the response genuinely has — the Responses-API SSE usage object's
+  `input_tokens_details.cached_tokens` (`provider/oauth.rs`) and genai's
+  `usage.prompt_tokens_details.cached_tokens` (`provider/http.rs`). A provider
+  that reports nothing leaves it `None`. **`None` means NOT REPORTED and is
+  serialized as an absent field — never `0`.** Nothing synthesizes it, and
+  prefix identity is never treated as evidence of a cache hit.
+- There is no local tokenizer here, so a token-level split of a shared prefix
+  is not claimed. What IS verifiable, and what the receipts carry:
+  - the **digest** — the frozen prefix's identity, recomputable by anyone;
+  - the **byte counts** — `shared_prefix_bytes` / `branch_suffix_bytes`, exact
+    UTF-8 content bytes of the assembled prefix and of what a branch added;
+  - the provider's **own `input_tokens`** for the branch's first turn.
+- Two prefix-stability hazards a future cache-breakpoint lane inherits: the
+  self-iterating outer loop recomposes its SYSTEM message per iteration
+  (iteration count, operator input, rotation losses), so message 0 is not
+  stable across loops; and compaction rewrites the framing carried into the
+  next render. Neither blocks digest identity — the digest covers framing
+  explicitly — but both cap what a cache claim could cover.
+
+Receipts: `Event::SnapshotFrozen{node,digest,messages,prefix_bytes}` at the
+freeze, `Event::BranchInvocation{node,snapshot,shared_prefix_bytes,
+branch_suffix_bytes,input_tokens,cached_input_tokens}` at a snapshot-forked
+branch's FIRST turn (one-shot). The `Usage` widening is additive +
+`serde(default)` — the precedent is `Event::TurnDelta`'s `reasoning` — so
+`log.jsonl` files written before it still deserialize.
 
 ## Invariants
 
@@ -370,6 +534,75 @@ AskUser]`, so an AUTHORED `loop` that `import`s `Tidepool.Form` and evaluates
 `Tidepool.Harness`/`HarnessEff` (whose row stays `'[RunLLMTurn]`,
 stale-but-unused): `Harness = M` and `askUser`'s `Member AskUser` constraint
 unifies against the wider generated row.
+
+### Outer fork/fanout servicing — a branch's exit is DATA at its position
+
+An AUTHORED `loop` reaching for `runLLMTurnFork @T`/`runLLMTurnFanout @T`
+suspends on `RunLLMTurn`'s own fork payload (no separate `Fork` decl needed —
+`outer_decls()` has none), classified as `HoleRouting::Fork` and serviced by
+`SelfHarnessDriver::service_outer_fanout` → `drive_fanout_child`: each child
+gets a freshly-minted answerer realm on the shared outer machine, driven
+CONCURRENTLY up to `set_concurrency_cap`, re-sorted to DECLARATION order
+before assembly so completion order is never observable.
+
+**Every verb that opens a window at a BRANCH POSITION answers an `Either`**
+(PRD 21 locked decision 6,
+`plans/self-iterating-harness/21-c3-exit-verb.md`):
+`runLLMTurnFork @T :: Text -> M (Either InvocationExit T)`,
+`runLLMTurnFanout @T :: [Text] -> M [Either InvocationExit T]`, and
+`runLLMTurnBranch @T :: ContextRef -> Text -> M (Either InvocationExit (T, ContextRef))`
+(the `Either` wraps the WHOLE pair — a window that never finalized has no
+post-finalize prefix, so there is no honest `ContextRef` to sit beside the
+failure). The two that do NOT open a branch position keep their bare answers:
+`runLLMTurn @T`, answered in context by the same node, and `freezeContext`,
+which is not a window at all. That asymmetry is documented at the declaration
+(`tidepool_mcp::runllmturn_effect_def!`).
+
+`runLLMTurnBranch` reaches it by a different route — `service_outer_branch` is
+sequential and drives its child through `drive_answerer_to_finalize`, the round
+loop it SHARES with the in-context `service_runllm_hole`. That loop returns
+`Result<Result<TurnOutcome, InvocationExit>, DriverError>` and the two callers
+differ in what they do with an exit, which is exactly the branch-position
+distinction: the branch folds it as `Left`, the in-context hole collapses it
+back into a hard failure (unchanged).
+
+**The line, and it is the whole point of the shape.** A failure attributable
+to ONE CHILD'S WINDOW — round exhaustion, ending on something that is not an
+answer, that window's own provider call failing — comes back from
+`drive_fanout_child` as `Ok(Err(exit))` and is folded as `Left exit` at that
+child's branch position, so its siblings' finished answers survive. A failure
+of the MECHANISM — fan cardinality, `Either`/list assembly against the
+`DataConTable`, session bookkeeping, the per-loop inference-call runaway cap,
+and a child that finalized a CLOSURE (it DID answer; this driver cannot carry
+it) — still hard-fails the turn. Laundering a broken mechanism into "the model
+failed" would be a false receipt. The nesting of
+`Result<Result<Value, InvocationExit>, DriverError>` IS that contract: outer =
+mechanism, inner = the window.
+
+`engine::build_child_answer_value`/`build_invocation_exit_value` construct the
+`Left`/`Right`/`Exit*` values against the turn's own table with
+`build_list_value`'s loud-failure discipline (a missing constructor is a hard
+error, never a default). The constructors are present by construction: a
+fork/fanout site head-swaps to a `*Sited` sibling whose top-level type mentions
+`Either InvocationExit a`, and extract's `collectTransitiveDCons` seeds from
+reachable top-level binders' types.
+
+The NESTED path (`Harness::answer_fork`/`answer_fanout`, the general Agent
+stack and `drain_answerer_fork`) shares `HoleRouting::Fork` with
+`Tidepool.Fork`'s `fork`/`forkAll`, which still answer a bare `T`/`[T]` — so
+the routing carries `engine::ForkSource` and `Harness::wrap_fork_answer` wraps
+in `Right` only for a `runLLMTurn`-sourced hole. That path produces no `Left`
+yet: a child failing there still hard-fails the fan through
+`drive_answerer_to_value`'s escalation ladder.
+
+One consequence worth knowing before writing a harness: `InvocationExit` lives
+in the per-fragment generated `Tidepool.Effects`, so the cross-row bind guard
+refuses an `Either InvocationExit T` as a cross-turn session VALUE BIND (same
+rule that already covered `Schema`). Project at the bind —
+`steps <- either (\_ -> []) id <$> runLLMTurnFork @[Int] "…"`.
+
+Gates: `tests/outer_fanout.rs` (fork/fanout) and
+`tests/companion_context_ref.rs` (branch).
 
 ### One session: attached realms, closure delivery, machine rotation
 

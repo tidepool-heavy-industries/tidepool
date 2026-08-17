@@ -2,9 +2,11 @@
 //! (`plans/self-iterating-harness/20-exomonad-v3-prd.md`): the AUTHORED loop
 //! calls `say` (Console), `createWorktree` (Worktree), `run` (Exec), a
 //! `withHandler`/`headChanged` subscribe-drain-unsubscribe cycle (RepoEvent),
-//! and `record` (Journal), and the driver services each resulting suspension
-//! through its driver-owned handler set — suspension-serviced, the outer
-//! session's handled prefix staying EMPTY on the shared machine.
+//! an `after`/`nextEvent` blocking deadline wait (RepoEvent's `RepoEventAwait`
+//! suspension — the headline verb `nextEvent`/`after`/`awaitSubscription` all
+//! send), and `record` (Journal), and the driver services each resulting
+//! suspension through its driver-owned handler set — suspension-serviced, the
+//! outer session's handled prefix staying EMPTY on the shared machine.
 //!
 //! ONE fixture, ONE compile, every assertion off the single resulting
 //! `State` (family-bundle discipline — a new suspension kind joins this
@@ -26,15 +28,16 @@ mod support;
 
 use tidepool_bridge_effects::{EvRepositoryEvent, WtWorktreeId};
 use tidepool_handlers::{
-    load_journal, ConsoleHandler, EventConfig, EventError, ExecHandler, JournalHandler,
-    ObservationSource, RepoEventHandler, WorktreeHandler,
+    load_journal, ConsoleHandler, EventConfig, EventError, ExecHandler, JournalEntry,
+    JournalHandler, ObservationSource, RepoEventHandler, SegmentPath, WorktreeHandler,
 };
 use tidepool_harness::engine::EngineConfig;
 use tidepool_harness::log::LogHeader;
 use tidepool_harness::provider::DynModelProvider;
 use tidepool_harness::replay::ReplayProvider;
 use tidepool_harness::{
-    answerer_decls, load_harness_source, Harness, LogObserver, SelfHarnessDriver,
+    acquire_lease, answerer_decls, load_harness_source, DriverError, Harness, LogObserver,
+    SelfHarnessDriver,
 };
 use tidepool_worktree::testing::TestRepo;
 
@@ -73,8 +76,8 @@ impl ObservationSource for NoOpSource {
 }
 
 /// The full round trip: authored `loop` → `say`/`createWorktree`/`run`/
-/// `withHandler` → four suspensions → driver-owned handlers → resumed
-/// continuation → durable `State`.
+/// `withHandler`/(`after`+`nextEvent`) → five suspensions → driver-owned
+/// handlers → resumed continuation → durable `State`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn outer_loop_effects_round_trip_through_the_driver() {
     support::require_extract();
@@ -122,7 +125,10 @@ async fn outer_loop_effects_round_trip_through_the_driver() {
         std::process::id()
     ));
     let _ = std::fs::remove_file(&journal_path);
-    let journal_handler = JournalHandler::new(journal_path.clone());
+    let journal_handler = JournalHandler::new(
+        SegmentPath::create_exclusive(journal_path.clone())
+            .expect("journal path just cleared above — exclusive claim must succeed"),
+    );
 
     driver.set_console_handler(ConsoleHandler);
     driver.set_worktree_handler(worktree_handler);
@@ -155,6 +161,12 @@ async fn outer_loop_effects_round_trip_through_the_driver() {
             .map(str::trim),
         Some("outer-effects-probe"),
         "exec's stdout must cross into durable state, got {state:?}"
+    );
+    assert_eq!(
+        state.get("tickObserved").and_then(|v| v.as_bool()),
+        Some(true),
+        "`after 50 >>= nextEvent` must round-trip a Tick through the driver \
+         (RepoEventAwait), got {state:?}"
     );
 
     // Tidepool.Async (PRD 20 S1-L4) — the green-thread scheduler.
@@ -316,5 +328,252 @@ async fn outer_journal_without_handler_errors_legibly() {
     assert!(
         msg.contains("set_journal_handler"),
         "the error names the wiring seam, got: {msg}"
+    );
+}
+
+/// A `state_json` array field, read out as `Vec<&str>` for a plain assertion
+/// against `vec!["alpha", "beta"]`-shaped expectations.
+fn text_array<'a>(state: &'a serde_json::Value, field: &str) -> Vec<&'a str> {
+    state
+        .get(field)
+        .and_then(|v| v.as_array())
+        .unwrap_or_else(|| panic!("{field} must be an array, got {state:?}"))
+        .iter()
+        .map(|v| {
+            v.as_str()
+                .unwrap_or_else(|| panic!("{field} entry must be a string"))
+        })
+        .collect()
+}
+
+/// Every entry a run id owns, across every segment it has ever written, in
+/// segment order — the run's TRUE PHYSICAL WRITE ORDER.
+fn load_run_entries(log_dir: &std::path::Path, run_id: &str) -> Vec<JournalEntry> {
+    let mut entries = Vec::new();
+    for segment in tidepool_harness::list_segments(log_dir, run_id).expect("list segments") {
+        entries.extend(load_journal(&segment).expect("segment loads"));
+    }
+    entries
+}
+
+/// Acceptance for PRD 20 S1-L5 wave 1/3 (`plans/self-iterating-harness/
+/// 20-s1-l5-resume.md`): the driver-side boot fold, across a run's journal
+/// SEGMENTS. `ResumeHarness.hs` declares BOTH `loop` (walks the first two of
+/// three steps — a run a crash caught with one step still to go) and
+/// `resumeLoop` (walks every step against the injected fold, skipping what is
+/// already recorded) so entry SELECTION is what each assertion below actually
+/// exercises.
+///
+/// (a) FRESH: `acquire_lease` mints and allocates segment 0, which folds to
+/// nothing (it doesn't exist yet), one cycle compiles the ordinary `loop`
+/// entry and records two steps into it.
+/// (b) RESUMED: a SECOND driver over the SAME log dir. `acquire_lease`
+/// reports the same run id but a DIFFERENT, freshly allocated segment — never
+/// the fresh boot's own; folding every segment for the run now returns 2; one
+/// cycle compiles `resumeLoop`, skips the two already-recorded steps, and
+/// appends exactly one new entry (`gamma`, `seq` 2 — continuing past the
+/// fresh run's seq numbers rather than restarting at 0, proving
+/// `JournalHandler::resuming` seeded the counter from the fold) into its OWN
+/// segment.
+/// (c) REFUSED: a non-empty fold against `OuterEffectsHarness.hs` (declares
+/// no `resumeLoop`) fails `run_one_cycle` with `DriverError::ResumeEntryMissing`
+/// before any cycle runs — no extract compile paid for this leg.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn resume_boot_fold_fresh_then_resumed_appends_only_the_delta() {
+    support::require_extract();
+    let _cache_guard = support::isolate_cache();
+
+    let resume_source = load_harness_source(&fixtures_dir().join("ResumeHarness.hs"))
+        .expect("fixture harness loads");
+
+    // --- (a) FRESH boot: no lease on disk yet, nothing folded -------------
+    let log_dir = tempfile::TempDir::new().expect("log dir");
+
+    let fresh_agent_cfg = EngineConfig::from_decls(
+        answerer_decls(),
+        repo_root().join("haskell/lib"),
+        Some(fixtures_dir()),
+    )
+    .expect("answerer engine config");
+    let fresh_provider: Arc<dyn DynModelProvider> = Arc::new(ReplayProvider::new(Vec::new()));
+    let fresh_writer = tidepool_harness::log::LogWriter::create(
+        std::env::temp_dir().join(format!("resume-fold-fresh-{}.jsonl", std::process::id())),
+        &header(),
+    )
+    .expect("log writer");
+    let fresh_agent = Arc::new(
+        Harness::new(fresh_writer, fresh_agent_cfg, fresh_provider).expect("agent harness boots"),
+    );
+    let mut fresh_driver = SelfHarnessDriver::new(fresh_agent, Arc::new(LogObserver));
+    // This test drives each driver by hand (no restart-from-checkpoint
+    // involved) and keeps the two boots' checkpoints deliberately apart —
+    // the fresh boot's own file, distinct from the resumed boot's below.
+    fresh_driver.set_checkpoint_path(log_dir.path().join("checkpoint-fresh.json"));
+
+    let fresh_lease = acquire_lease(log_dir.path()).expect("mint the lease");
+    assert!(
+        !fresh_lease.resumed,
+        "no lease on disk yet — this boot must mint one"
+    );
+    let fresh_folded = fresh_driver
+        .open_run_journal(log_dir.path(), &fresh_lease)
+        .expect("open the (nonexistent) journal");
+    assert_eq!(fresh_folded, 0, "a fresh journal folds nothing");
+
+    let fresh_outcome = fresh_driver
+        .run_one_cycle(&resume_source, None)
+        .await
+        .expect("fresh cycle: loop walks the first two of three steps");
+    let fresh_state = &fresh_outcome.state_json;
+    assert_eq!(
+        text_array(fresh_state, "recorded"),
+        vec!["alpha", "beta"],
+        "the fresh loop must record exactly the first two steps, got {fresh_state:?}"
+    );
+    assert_eq!(
+        text_array(fresh_state, "skipped"),
+        Vec::<&str>::new(),
+        "a fresh run skips nothing, got {fresh_state:?}"
+    );
+    assert_eq!(
+        fresh_state.get("sawResume").and_then(|v| v.as_bool()),
+        Some(false),
+        "a fresh boot enters through loop, not resumeLoop, got {fresh_state:?}"
+    );
+
+    let fresh_entries = load_journal(&fresh_lease.segment).expect("the fresh run's segment loads");
+    assert_eq!(
+        fresh_entries.len(),
+        2,
+        "the fresh run must have journaled exactly two steps, got {fresh_entries:?}"
+    );
+    assert!(fresh_entries.iter().all(|e| e.kind == "step"));
+
+    // --- (b) RESUMED boot: a second driver over the SAME log dir ----------
+    let resumed_agent_cfg = EngineConfig::from_decls(
+        answerer_decls(),
+        repo_root().join("haskell/lib"),
+        Some(fixtures_dir()),
+    )
+    .expect("answerer engine config");
+    let resumed_provider: Arc<dyn DynModelProvider> = Arc::new(ReplayProvider::new(Vec::new()));
+    let resumed_writer = tidepool_harness::log::LogWriter::create(
+        std::env::temp_dir().join(format!("resume-fold-resumed-{}.jsonl", std::process::id())),
+        &header(),
+    )
+    .expect("log writer");
+    let resumed_agent = Arc::new(
+        Harness::new(resumed_writer, resumed_agent_cfg, resumed_provider)
+            .expect("agent harness boots"),
+    );
+    let mut resumed_driver = SelfHarnessDriver::new(resumed_agent, Arc::new(LogObserver));
+    resumed_driver.set_checkpoint_path(log_dir.path().join("checkpoint-resumed.json"));
+
+    let resumed_lease = acquire_lease(log_dir.path()).expect("resume the lease");
+    assert!(
+        resumed_lease.resumed,
+        "a lease is already on disk — this boot must resume it"
+    );
+    assert_eq!(resumed_lease.lease.run_id, fresh_lease.lease.run_id);
+    assert_ne!(
+        resumed_lease.segment, fresh_lease.segment,
+        "the resumed boot must own a FRESH segment, never the fresh boot's own"
+    );
+
+    let resumed_folded = resumed_driver
+        .open_run_journal(log_dir.path(), &resumed_lease)
+        .expect("fold the fresh boot's journal");
+    assert_eq!(
+        resumed_folded, 2,
+        "the resumed boot must fold both of the fresh boot's steps"
+    );
+
+    let resumed_outcome = resumed_driver
+        .run_one_cycle(&resume_source, None)
+        .await
+        .expect("resumed cycle: resumeLoop walks every step against the fold");
+    let resumed_state = &resumed_outcome.state_json;
+    assert_eq!(
+        text_array(resumed_state, "skipped"),
+        vec!["alpha", "beta"],
+        "the resumed run must skip the two steps the fold already accounts for, got {resumed_state:?}"
+    );
+    assert_eq!(
+        text_array(resumed_state, "recorded"),
+        vec!["gamma"],
+        "the resumed run must record only the delta, got {resumed_state:?}"
+    );
+    assert_eq!(
+        resumed_state.get("sawResume").and_then(|v| v.as_bool()),
+        Some(true),
+        "the resumed boot must have entered through resumeLoop, got {resumed_state:?}"
+    );
+
+    let resumed_entries = load_run_entries(log_dir.path(), &resumed_lease.lease.run_id);
+    assert_eq!(
+        resumed_entries.len(),
+        3,
+        "appended only the delta, into its OWN segment — nothing rewritten, \
+         got {resumed_entries:?}"
+    );
+    assert_eq!(resumed_entries[2].key, "gamma");
+    assert_eq!(
+        resumed_entries[2].seq, 2,
+        "the resumed handler must continue past the fresh run's seq numbers, \
+         proving JournalHandler::resuming seeded the counter from the fold"
+    );
+
+    // --- (c) REFUSED boot: a non-empty fold, no resumeLoop entry ----------
+    // Deliberately a SEPARATE log dir/journal — the fold here is hand-seeded,
+    // not derived from (a)/(b)'s run.
+    let refused_log_dir = tempfile::TempDir::new().expect("log dir");
+    let refused_lease = acquire_lease(refused_log_dir.path()).expect("mint the lease");
+    std::fs::write(
+        &refused_lease.segment,
+        "{\"seq\":0,\"kind\":\"step\",\"key\":\"alpha\",\"payload\":{}}\n",
+    )
+    .expect("hand-seed a non-empty journal");
+
+    let refused_agent_cfg = EngineConfig::from_decls(
+        answerer_decls(),
+        repo_root().join("haskell/lib"),
+        Some(fixtures_dir()),
+    )
+    .expect("answerer engine config");
+    let refused_provider: Arc<dyn DynModelProvider> = Arc::new(ReplayProvider::new(Vec::new()));
+    let refused_writer = tidepool_harness::log::LogWriter::create(
+        std::env::temp_dir().join(format!("resume-fold-refused-{}.jsonl", std::process::id())),
+        &header(),
+    )
+    .expect("log writer");
+    let refused_agent = Arc::new(
+        Harness::new(refused_writer, refused_agent_cfg, refused_provider)
+            .expect("agent harness boots"),
+    );
+    let mut refused_driver = SelfHarnessDriver::new(refused_agent, Arc::new(LogObserver));
+
+    let refused_folded = refused_driver
+        .open_run_journal(refused_log_dir.path(), &refused_lease)
+        .expect("fold the hand-seeded journal");
+    assert_eq!(refused_folded, 1);
+
+    let no_resume_source = load_harness_source(&fixtures_dir().join("OuterEffectsHarness.hs"))
+        .expect("fixture harness loads");
+    let err = refused_driver
+        .run_one_cycle(&no_resume_source, None)
+        .await
+        .expect_err("a non-empty fold against a harness with no resumeLoop must refuse at boot");
+    assert!(
+        matches!(err, DriverError::ResumeEntryMissing { .. }),
+        "expected ResumeEntryMissing, got {err:?}"
+    );
+    let msg = err.to_string();
+    assert!(
+        msg.contains("OuterEffectsHarness.hs"),
+        "the refusal must name the harness file, got: {msg}"
+    );
+    assert!(
+        msg.contains(&refused_log_dir.path().display().to_string()),
+        "the refusal must name where the run's segments live, got: {msg}"
     );
 }

@@ -469,8 +469,11 @@ pub extern "C" fn runtime_decode_double_exponent(bits: i64) -> i64 {
 }
 
 /// Shared implementation matching GHC's `decodeDouble_Int64#` semantics.
-/// Returns (mantissa, exponent) such that mantissa * 2^exponent == d,
-/// with mantissa normalized to have no trailing zeros in binary.
+/// Returns (mantissa, exponent) such that mantissa * 2^exponent == d, in
+/// GHC's CANONICAL form: for a normal finite d, 2^52 <= |mantissa| < 2^53
+/// (the raw 52-bit fraction field plus the implicit leading 1 bit, NOT
+/// reduced by trailing zeros — GHC's own `decodeDouble_Int64#` does not
+/// perform that reduction).
 fn decode_double_int64(d: f64) -> (i64, i64) {
     if d == 0.0 || d.is_nan() {
         return (0, 0);
@@ -489,13 +492,7 @@ fn decode_double_int64(d: f64) -> (i64, i64) {
         // normal: implicit leading 1
         (raw_man | (1i64 << 52), raw_exp - 1023 - 52)
     };
-    let man = sign * man;
-    if man != 0 {
-        let tz = man.unsigned_abs().trailing_zeros();
-        (man >> tz, (exp + tz as i32) as i64)
-    } else {
-        (0, 0)
-    }
+    (sign * man, exp as i64)
 }
 
 /// Decode a Float into its Int mantissa (significand).
@@ -534,13 +531,7 @@ fn decode_float_int(f: f32) -> (i64, i64) {
         // normal: implicit leading 1
         (raw_man | (1i64 << 23), raw_exp - 127 - 23)
     };
-    let man = sign * man;
-    if man != 0 {
-        let tz = man.unsigned_abs().trailing_zeros();
-        (man >> tz, (exp + tz as i32) as i64)
-    } else {
-        (0, 0)
-    }
+    (sign * man, exp as i64)
 }
 
 /// strlen: count bytes until null terminator.

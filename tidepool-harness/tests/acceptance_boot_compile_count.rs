@@ -3,12 +3,12 @@
 //! harness from launch to the FIRST model call and asserts how many
 //! `tidepool-extract` compiles were paid before that call, against a single
 //! named constant a later dev flips when the fix lands. Own binary, own
-//! process — [`tidepool_harness::compile::extract_spawn_count`] is
+//! process — [`tidepool_harness::engine::extract_spawn_count`] is
 //! PROCESS-GLOBAL (nextest already gives one process per test binary, so
 //! this test's count is never polluted by another test's compiles).
 //!
 //! # Traced call chain (the ONE extract-spawn site the self-harness launch
-//! path reaches before the first model call — see this crate's `compile.rs`
+//! path reaches before the first model call — see this crate's `engine.rs`
 //! module doc and the counter's doc comment in `tidepool-extract-cmd` for the
 //! full site survey)
 //!
@@ -18,9 +18,10 @@
 //! D-B — before that, spawns through `tidepool_runtime` were invisible here).
 //! The constant below is unaffected, because the other sites are not on the
 //! pre-model path: the ONE pre-model compile below funnels through
-//! [`tidepool_harness::compile::compile_turns`]
-//! (`tidepool-harness/src/compile.rs`, at its single `cmd.run()` call) — the
-//! harness's turn-compile path is deliberately independent of
+//! [`tidepool_harness::engine::compile_turns`]
+//! (a thin wrapper over `tidepool_runtime::artifacts::compile_targets`, at
+//! its single `cmd.run()` call) — the harness's turn-compile path is
+//! deliberately independent of
 //! `tidepool_runtime::compile_haskell`/`cache.rs` (the MCP eval path, never
 //! reached from the self-harness driver) and of
 //! `tidepool_runtime::session::turn.rs`'s `run_turn`/`classify_block`/
@@ -33,7 +34,7 @@
 //!
 //! 1. `SelfHarnessDriver::run_one_cycle` →
 //!    `SelfHarnessDriver::compile_cycle_entry` (driver.rs) — ONE
-//!    `tidepool-extract` spawn (`compile::compile_turns`, two `--targets`
+//!    `tidepool-extract` spawn (`engine::compile_turns`, two `--targets`
 //!    over one shared merged `meta.cbor`) compiling the pre-loop
 //!    `render(state, lastCompaction)` and this cycle's
 //!    `loop __selfHarnessState` TOGETHER, as distinct top-level entries of
@@ -56,7 +57,7 @@ use std::sync::{Arc, Mutex};
 
 mod support;
 
-use tidepool_harness::compile;
+use tidepool_harness::engine;
 use tidepool_harness::engine::EngineConfig;
 use tidepool_harness::log::{LogHeader, LogWriter};
 use tidepool_harness::provider::{
@@ -121,7 +122,7 @@ fn header() -> LogHeader {
 }
 
 /// A [`ModelProvider`] whose FIRST invocation snapshots the process-global
-/// [`compile::extract_spawn_count`] into `snapshot`, then returns an error
+/// [`engine::extract_spawn_count`] into `snapshot`, then returns an error
 /// that cleanly terminates the self-harness cycle — the pre-model spawn
 /// count is already captured by the time the error unwinds, so a canned
 /// success reply is unnecessary (and would need a full `finalize @Decision`
@@ -149,7 +150,7 @@ impl ModelProvider for SnapshotOnFirstCall {
     ) -> Result<TurnResponse, ProviderError> {
         let mut snap = self.snapshot.lock().unwrap();
         if snap.is_none() {
-            *snap = Some(compile::extract_spawn_count());
+            *snap = Some(engine::extract_spawn_count());
         }
         Err(ProviderError::Api(
             "acceptance_boot_compile_count: snapshot captured, terminating the cycle by design"
@@ -177,7 +178,7 @@ async fn boot_pays_pre_model_extract_compiles_matching_baseline() {
     // anyway: this test binary has exactly one test function, so this only
     // guards against a future second test landing in this file and sharing
     // the process-global counter unexpectedly.
-    compile::reset_extract_spawn_count();
+    engine::reset_extract_spawn_count();
 
     let agent_cfg = EngineConfig::from_decls(
         answerer_decls(),

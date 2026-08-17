@@ -15,16 +15,7 @@ use std::path::{Path, PathBuf};
 
 use crate::error::WorktreeError;
 use crate::id::WorktreeId;
-
-/// Build a [`WorktreeError::StorageFailure`] naming the path that actually
-/// failed, from any underlying error with a `Display` impl (`std::io::Error`
-/// for I/O, `serde_json::Error` for a corrupt record).
-fn storage_failure(path: &Path, detail: impl std::fmt::Display) -> WorktreeError {
-    WorktreeError::StorageFailure {
-        path: path.to_path_buf(),
-        detail: detail.to_string(),
-    }
-}
+use crate::storage::storage_failure;
 
 /// An opaque agent identity. Deliberately a string newtype and not a typed
 /// agent handle: this module must not reach for anything agent-shaped beyond

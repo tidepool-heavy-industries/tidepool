@@ -264,6 +264,7 @@ fn askuser_reply() -> RecordedReply {
         usage: Usage {
             input_tokens: 50,
             output_tokens: 10,
+            cached_input_tokens: None,
         },
     }
 }
@@ -517,7 +518,7 @@ fn prd_example_adts_compile_with_the_bare_derive_contract() {
         "PrdTypes",
         "",
     );
-    let result = tidepool_harness::compile::compile_turn(
+    let result = tidepool_harness::engine::compile_turn(
         &cfg.extract_bin,
         &src,
         "result",

@@ -14,13 +14,14 @@ module Fidelity.Harness
   , check
   , extractBinding
   , extractError
+  , extractResultTier
   , nodeList
   , nvarIds
   , nlamCount
   , getLibdir
   ) where
 
-import Tidepool.GhcPipeline (runPipeline, PipelineResult(..))
+import Tidepool.GhcPipeline (runPipeline, PipelineResult(..), isClosureType)
 import Tidepool.Translate (translateModuleClosed, ClosedModule(..), FlatNode(..))
 
 import Control.Exception (try, SomeException, evaluate)
@@ -78,6 +79,34 @@ extractError tag modName src target needle =
   extractBinding tag modName src target >>= \case
     Left err -> pure (needle `isInfixOf` err, err)
     Right _  -> pure (False, "<extraction SUCCEEDED — expected a loud failure>")
+
+-- | Compile @src@ through the real pipeline, translate its @result@ binder
+-- to closed Core exactly like 'extractBinding' (pinning that a fixture
+-- extracts and translates cleanly — the "survives a bind" half of a
+-- closure-tier check, without going through the JIT's own deep-force), and
+-- classify the captured 'PipelineResult.prResultType' via 'isClosureType' —
+-- the same static classification 'GhcPipeline.mkBoundBinders' performs at
+-- @--session-bind@ time. 'Left' carries the extraction error text; a module
+-- whose @result@ binder never typechecked (no captured type) is also a
+-- 'Left', with a distinct message.
+extractResultTier :: String -> String -> String -> IO (Either String Bool)
+extractResultTier tag modName src = do
+  let dir  = workRoot ++ "/" ++ tag
+      path = dir ++ "/" ++ modName ++ ".hs"
+  createDirectoryIfMissing True dir
+  writeFile path src
+  r <- try $ do
+    res <- runPipeline path [dir, "lib"]
+    cm  <- translateModuleClosed (prHscEnv res) (prBinds res) "result"
+    _   <- evaluate (length (nodeList cm))
+    case prResultType res of
+      Just t  -> pure (isClosureType t)
+      Nothing -> error "extractResultTier: no captured `result` type"
+  pure $ case r of
+    Left (e :: SomeException) -> Left (oneLine (show e))
+    Right tier                 -> Right tier
+  where
+    oneLine = unwords . words
 
 nodeList :: ClosedModule -> [FlatNode]
 nodeList = toList . cmNodes

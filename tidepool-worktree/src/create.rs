@@ -10,10 +10,12 @@ use std::path::{Path, PathBuf};
 use crate::error::WorktreeError;
 use crate::git::{inspect, GitCli};
 use crate::id::{BranchName, GitOid, GitRef, WorktreeId};
+use crate::label::BranchLabel;
 use crate::registry::{
-    now_ms, worktree_present, WorktreeOrigin, WorktreeReceipt, WorktreeRecordStatus,
-    WorktreeRegistry, WorktreeSummary,
+    worktree_present, WorktreeOrigin, WorktreeReceipt, WorktreeRecordStatus, WorktreeRegistry,
+    WorktreeSummary,
 };
+use crate::storage::now_ms;
 
 /// Tidepool's owned branch namespace. Every managed branch lives under this
 /// prefix so a managed branch can never collide with, or be mistaken for, a
@@ -25,36 +27,6 @@ pub const TIDEPOOL_BRANCH_PREFIX: &str = "tidepool/worktree";
 /// operator is invited to check out, and keeping it out of the branch namespace
 /// keeps it out of every `git branch` listing the operator reads.
 pub const TIDEPOOL_SNAPSHOT_REF_PREFIX: &str = "refs/tidepool/snapshots";
-
-/// Sanitize a caller-supplied label into the tail of a managed branch name.
-/// The label is never a path or an identity — only ASCII alphanumerics, `-`,
-/// `_`, `.`, and `/` survive; everything else becomes `-`, runs of separators
-/// collapse, and leading/trailing separators are trimmed. An empty result
-/// (e.g. an all-punctuation label) falls back to `"worktree"` rather than
-/// producing a branch name that ends in the bare prefix.
-fn sanitize_label(label: &str) -> String {
-    let mut out = String::with_capacity(label.len());
-    let mut last_was_sep = false;
-    for c in label.chars() {
-        let c = if c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '/') {
-            c
-        } else {
-            '-'
-        };
-        let is_sep = c == '-' || c == '/';
-        if is_sep && last_was_sep {
-            continue;
-        }
-        last_was_sep = is_sep;
-        out.push(c);
-    }
-    let trimmed = out.trim_matches(|c| c == '-' || c == '/' || c == '.');
-    if trimmed.is_empty() {
-        "worktree".to_string()
-    } else {
-        trimmed.to_string()
-    }
-}
 
 /// What to seed a managed worktree from, and under what dirty-source policy.
 ///
@@ -227,7 +199,7 @@ impl WorktreeManager {
         let cwd = self.worktree_root.join(id.as_str());
         let branch = BranchName::from_raw(format!(
             "{TIDEPOOL_BRANCH_PREFIX}/{}-{}",
-            sanitize_label(&spec.label),
+            BranchLabel::new(&spec.label).as_str(),
             id.as_str()
         ));
 

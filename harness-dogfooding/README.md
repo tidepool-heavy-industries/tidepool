@@ -39,16 +39,35 @@ roadmap* for the next harness helpers.
   the larger playground: the typed resident REPL, capability rows, executable
   harness self-design, and ephemeral non-serializable values such as closures
   and records of functions alongside durable state.
-- [`dev-tree/`](dev-tree/Harness.hs) — **forward dogfood for typed subagents,
-  retained worktrees, and lexical event handlers**. It unfolds an ordinary
-  recursive `DevPlan` depth-first into coding agents — parent worker first, so
-  each child worktree is seeded from a parent HEAD that is already final, which
-  is why no rebase propagation is needed — then asks fresh integration agents
-  to merge completed branches bottom-up. It is written against PRD 18's typed
-  `spawnAgent @r` (lane 1: synchronous, one cycle) and PRD 19's managed
-  worktrees + events, both of which have landed. What it waits on is ROW
-  COMPOSITION, not API: `Harness` is an alias for `M`, and the driver's v1
-  outer session is `RunLLMTurn`-only, so this file needs
-  `Console`/`Worktree`/`RepoEvent`/`Subagent` appended to that row before the
-  driver can run it. `tidepool-harness/tests/dogfood_harness_typecheck.rs`
-  compiles it against that row.
+- [`dev-tree/`](dev-tree/Harness.hs) — **forward dogfood for the typed swarm**
+  (PRD 20 S1-L3; see
+  [`plans/self-iterating-harness/20-s1-l3-dev-tree-v2.md`](../plans/self-iterating-harness/20-s1-l3-dev-tree-v2.md)).
+  The tree is a monadic hylomorphism over `Tidepool.Swarm`'s `PlanF`: cognition
+  enters at exactly two typed seams — a coalgebra that splits (the parent-first
+  scaffold worker, then one child worktree per child plan seeded from the
+  scaffold HEAD) and an algebra that combines (leaf implementation, or the
+  eager rebase cascade plus the merge). The plan never materializes as a worked
+  tree; what persists is git plus the append-only run journal (`record`).
+  Failure is data — `traverse` visits every sibling, and a failed child arrives
+  at its parent as an ordinary value. Rebases cascade eagerly, mechanical git
+  first and an ephemeral resolution agent second (typed `spawnAsync` handles,
+  awaited in plan order), with escalation as a typed value the parent's failure
+  policy reads. Its row IS the driver's widened outer session — `[RunLLMTurn,
+  AskUser, Console, Worktree, RepoEvent, Exec, Subagent, Journal]` — and
+  `tidepool-harness/tests/dogfood_harness_typecheck.rs` compiles it against
+  exactly that row. Node residency (resident select loops) is S1-L4; the seam
+  where it lands is named at the `hyloM` call site and built nowhere.
+- [`recursive-companion/`](recursive-companion/README.md) — **the C3 vertical
+  slice of the recursive companion**
+  ([PRD 21](../plans/self-iterating-harness/21-recursive-companion-prd.md),
+  [C3 design doc](../plans/self-iterating-harness/21-c3-recursive-companion-slice.md)).
+  One root turn as a monadic hylomorphism over `Tidepool.Thought`'s `ThoughtF`:
+  a coalgebra window finalizes a layer (a split into branches, or a local
+  finish), each branch descends recursively from inherited context, and an
+  algebra window folds typed results back up in branch order at every node,
+  leaves included. The operator gets one folded answer with the tree
+  inspectable but subordinate underneath it. Budgets (`maxDepth`/`maxNodes`/
+  `maxFanOut`) and an operator gate (`gatePolicy`) bound the recursion; the
+  scripted acceptance tier runs unattended under `GateOff`, and the live
+  attended/gated scenario is documented but not run — see that harness's own
+  README for the exact launch line.

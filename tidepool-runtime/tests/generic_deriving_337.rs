@@ -159,28 +159,36 @@ fn named_field_sum_encodes_the_tagged_object_shape() {
     );
 }
 
-/// A POSITIONAL payload constructor still has no generic ToJSON — there are
-/// no field names to key — and the rejection is a compile-time TypeError
-/// naming the fix (record syntax), not a runtime surprise.
+/// REPIN (citing 334d794a, "feat(aeson): positional sum payloads — aeson
+/// TaggedObject contents form"): this test used to pin that a POSITIONAL
+/// payload sum deriving `ToJSON` must not compile. 334d794a deliberately
+/// lifted that rejection — a positional constructor now nests its fields
+/// under a `"contents"` key (aeson's default `TaggedObject` non-record
+/// shape) instead of being rejected at compile time; only a payload
+/// constructor mixing named AND positional fields (impossible in Haskell —
+/// a constructor is all-record or all-positional) or a record field named
+/// `tag` still rejects (`compile_fail_payload_field_named_tag` in
+/// `agent_mode_encoding.rs`). `generic_recursive_sums::positional_payloads_wire_and_roundtrip`
+/// pins the general wire shape (including a two-field positional
+/// constructor); this test now pins the exact `A Int | B Int` shape from
+/// its own name/history, single-field arity, encoding successfully.
 #[test]
-fn positional_sum_tojson_rejected_at_compile_time() {
-    require_extract();
+fn positional_sum_tojson_encodes_the_contents_field() {
     let src = format!(
         "{HEADER}\n\
          data S = A Int | B Int deriving (Generic, ToJSON)\n\n\
-         result :: Int\n\
-         result = 0\n"
+         result :: Value\n\
+         result = toJSON [A 5, B 7]\n"
     );
-    match EvalHarness::new().with_stdlib().compile(&src, "result") {
-        Ok(_) => panic!("positional payload sum deriving ToJSON must not compile"),
-        Err(e) => {
-            let msg = tidepool_runtime::classify_compile(&e).message;
-            assert!(
-                msg.contains("record syntax"),
-                "expected the positional-payload TypeError, got:\n{msg}"
-            );
-        }
-    }
+    assert_eq!(
+        run(&src, "result"),
+        json!([
+            {"tag": "A", "contents": 5},
+            {"tag": "B", "contents": 7}
+        ]),
+        "a positional payload constructor now nests its field under \"contents\" \
+         instead of being rejected at compile time"
+    );
 }
 
 /// Differential parity on the #337 decode path: the generic-deriving Core

@@ -124,6 +124,7 @@ impl ModelProvider for InPlaceProbeProvider {
                 usage: Usage {
                     input_tokens: 20,
                     output_tokens: 5,
+                    cached_input_tokens: None,
                 },
                 reasoning: None,
                 reasoning_items: Vec::new(),
@@ -153,6 +154,7 @@ impl ModelProvider for InPlaceProbeProvider {
             usage: Usage {
                 input_tokens: 600,
                 output_tokens: 50,
+                cached_input_tokens: None,
             },
             reasoning: None,
             reasoning_items: Vec::new(),
@@ -288,6 +290,7 @@ impl ModelProvider for MultiRoundProvider {
                 usage: Usage {
                     input_tokens: self.per_round_input,
                     output_tokens: 5,
+                    cached_input_tokens: None,
                 },
                 reasoning: None,
                 reasoning_items: Vec::new(),
@@ -298,6 +301,7 @@ impl ModelProvider for MultiRoundProvider {
         let usage = Usage {
             input_tokens: self.per_round_input,
             output_tokens: 20,
+            cached_input_tokens: None,
         };
         if is_second {
             // The second hole finalizes immediately.

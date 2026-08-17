@@ -44,6 +44,8 @@ fn entry(name: &str, var: VarId, gen: u64, slot: RootSlot) -> BindingEntry {
         module: SessionModule::val(Generation(gen)),
         value: BoundValue::Tier0Forced(slot),
         type_display: Some("Int".to_string()),
+        // Flat-session fixture; `bind` rewrites this to ROOT anyway.
+        scope: tidepool_codegen::scope::ScopeId::ROOT,
     }
 }
 

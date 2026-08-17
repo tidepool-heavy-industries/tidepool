@@ -1,18 +1,15 @@
 use std::path::PathBuf;
 
 use tidepool_bridge_effects::{
-    WtBranchName, WtDirtyPolicy, WtDirtySummary, WtGitFailureReceipt, WtGitOid, WtGitRef,
-    WtInProgressKind, WtWorktreeHandle, WtWorktreeId, WtWorktreeReceipt, WtWorktreeSource,
-    WtWorktreeSpec, WtWorktreeSummary,
+    WireError, WtBranchName, WtDirtySummary, WtGitFailureReceipt, WtGitOid, WtWorktreeHandle,
+    WtWorktreeId, WtWorktreeReceipt, WtWorktreeSource, WtWorktreeSpec, WtWorktreeSummary,
 };
-use tidepool_worktree::create::{
-    DirtyPolicy, WorktreeHandle, WorktreeManager, WorktreeSource, WorktreeSpec,
-};
+use tidepool_worktree::create::{WorktreeHandle, WorktreeManager, WorktreeSource, WorktreeSpec};
 use tidepool_worktree::error::{
-    DirtySummary, GitFailureReceipt, InProgressKind, WorktreeError as DomainWorktreeError,
+    DirtySummary, GitFailureReceipt, WorktreeError as DomainWorktreeError,
 };
 use tidepool_worktree::git::GitCli;
-use tidepool_worktree::id::{BranchName, GitOid, GitRef, WorktreeId};
+use tidepool_worktree::id::{BranchName, WorktreeId};
 #[cfg(test)]
 use tidepool_worktree::registry::{WorktreeOrigin, WorktreeRecordStatus};
 use tidepool_worktree::registry::{WorktreeReceipt, WorktreeRegistry, WorktreeSummary};
@@ -22,10 +19,12 @@ use tidepool_worktree::registry::{WorktreeReceipt, WorktreeRegistry, WorktreeSum
 // default base_effects! row)
 // ============================================================================
 
-// WorktreeReq + DescribeEffect + EffectHandler dispatch are generated from the
-// single-source definition; only the handler struct and the per-verb method
-// bodies below are hand-written.
-tidepool_mcp::worktree_effect_def!(crate::effect_glue::effect_rust_projection);
+// WorktreeReq, WorktreeError, DescribeEffect and the EffectHandler dispatch are
+// GENERATED from the `tidepool-protocol` schema (PRD 22 phase 3) — re-exported
+// here so the public paths (`tidepool_handlers::WorktreeReq`,
+// `tidepool_handlers::WorktreeError`) are unchanged. Only the handler struct and
+// the per-verb method bodies below are hand-written.
+pub use crate::generated::worktree::{WorktreeError, WorktreeReq};
 
 #[derive(Clone)]
 pub struct WorktreeHandler {
@@ -58,54 +57,48 @@ impl WorktreeHandler {
 //
 // `tidepool_bridge_effects::Wt*` are WIRE types, deliberately distinct from
 // `tidepool_worktree`'s domain types of the same shape (the wire side carries
-// `String` where the domain carries `PathBuf`/newtypes). Field ORDER in the
-// wire structs is the wire contract (matches `worktree_effect_def!`'s
-// `type_defs` positionally) and must never be reordered here.
+// `String` where the domain carries `PathBuf`/newtypes). Both the wire structs
+// and the Haskell decls they cross to are GENERATED from one ordered field list
+// in `tidepool-protocol`, so their field order cannot disagree — there is no
+// longer a positional invariant to keep by hand.
 //
-// The handful marked `pub(crate)` are REUSED by `handlers::agent` — the
+// The MECHANICAL conversions (four identity newtypes, `DirtyPolicy`,
+// `InProgressKind`) come from `crate::generated::worktree_adapters`; the ones
+// carrying a DECISION stay hand-written here, and the schema records which is
+// which (`AdapterKind::HandWritten(reason)`) so a later lane can see what it
+// may safely regenerate without re-deriving the judgement.
+//
+// The handful re-exported `pub(crate)` are REUSED by `handlers::agent` — the
 // Subagent wire types embed the Worktree ones (`AgSpawnWorkspace` carries a
 // `WtWorktreeSpec`/`WtWorktreeId`, `AgWorkerRun` a `WtWorktreeHandle`, and the
 // wire `SpawnError` carries this module's wire `WorktreeError`), so a second
 // copy over there would be two conversions to keep in step with one contract.
 // ============================================================================
 
-pub(crate) fn worktree_id_to_wire(id: &WorktreeId) -> WtWorktreeId {
-    WtWorktreeId {
-        raw: id.as_str().to_string(),
-    }
-}
+pub(crate) use crate::generated::worktree_adapters::{
+    branch_name_to_wire, dirty_policy_from_wire, git_oid_to_wire, git_ref_from_wire,
+    git_ref_to_wire, in_progress_kind_to_wire, worktree_id_to_wire,
+};
 
-/// The trust boundary where a wire id becomes a domain id. A raw value that
-/// is not path-safe (separators, dot-dots, empty, over-long) is rejected as
-/// `WorktreeNotRegistered` — semantically true (no such id was ever minted)
-/// and, load-bearingly, BEFORE the value can reach the registry/binding code
-/// that joins ids into file paths.
+/// The trust boundary where a wire id becomes a domain id.
+///
+/// The MECHANICAL half is generated: `WtWorktreeId::new` is the schema's
+/// `Validation::Segment { max_len: 128, extra_allowed: "-_" }`, which is
+/// byte-for-byte `tidepool_worktree::WorktreeId::is_path_safe` expressed as
+/// declared data (`worktree_wire_segment_policy_agrees_with_is_path_safe`
+/// pins that the two agree).
+///
+/// The SEMANTIC half stays here, and is the reason this conversion is not
+/// generated: a rejected id is spelled `WorktreeNotRegistered` — true, because
+/// no id outside the minted alphabet was ever registered, and it tells the
+/// caller nothing about the filesystem. The rejection happens BEFORE the value
+/// can reach the registry/binding code that joins ids into file paths.
 pub(crate) fn worktree_id_from_wire(id: &WtWorktreeId) -> Result<WorktreeId, WorktreeError> {
-    if !WorktreeId::is_path_safe(&id.raw) {
-        return Err(never_registered(id));
-    }
-    Ok(WorktreeId::from_raw(id.raw.clone()))
-}
-
-fn git_oid_to_wire(oid: &GitOid) -> WtGitOid {
-    WtGitOid {
-        raw: oid.as_str().to_string(),
-    }
-}
-
-fn git_ref_to_wire(r: &GitRef) -> WtGitRef {
-    WtGitRef {
-        raw: r.as_str().to_string(),
-    }
-}
-
-fn git_ref_from_wire(r: &WtGitRef) -> GitRef {
-    GitRef::from_raw(r.raw.clone())
-}
-
-fn branch_name_to_wire(b: &BranchName) -> WtBranchName {
-    WtBranchName {
-        raw: b.as_str().to_string(),
+    match WtWorktreeId::new(id.raw.clone()) {
+        Ok(checked) => Ok(WorktreeId::from_raw(checked.raw)),
+        Err(WireError::Empty { .. } | WireError::InvalidSegment { .. }) => {
+            Err(never_registered(id))
+        }
     }
 }
 
@@ -115,16 +108,6 @@ fn dirty_summary_to_wire(d: &DirtySummary) -> WtDirtySummary {
         unstaged: d.unstaged.clone(),
         untracked: d.untracked.clone(),
         ignored_excluded: d.ignored_excluded as i64,
-    }
-}
-
-fn in_progress_kind_to_wire(k: InProgressKind) -> WtInProgressKind {
-    match k {
-        InProgressKind::Merge => WtInProgressKind::InProgressMerge,
-        InProgressKind::Rebase => WtInProgressKind::InProgressRebase,
-        InProgressKind::CherryPick => WtInProgressKind::InProgressCherryPick,
-        InProgressKind::Revert => WtInProgressKind::InProgressRevert,
-        InProgressKind::Bisect => WtInProgressKind::InProgressBisect,
     }
 }
 
@@ -146,13 +129,6 @@ fn worktree_source_from_wire(source: WtWorktreeSource) -> Result<WorktreeSource,
             WorktreeSource::Worktree(worktree_id_from_wire(&id)?)
         }
     })
-}
-
-fn dirty_policy_from_wire(policy: WtDirtyPolicy) -> DirtyPolicy {
-    match policy {
-        WtDirtyPolicy::RequireClean => DirtyPolicy::RequireClean,
-        WtDirtyPolicy::AllowDirtySnapshot => DirtyPolicy::AllowDirtySnapshot,
-    }
 }
 
 pub(crate) fn spec_from_wire(spec: WtWorktreeSpec) -> Result<WorktreeSpec, WorktreeError> {
@@ -188,8 +164,7 @@ fn summary_to_wire(s: &WorktreeSummary) -> WtWorktreeSummary {
 }
 
 /// Total map from the domain `WorktreeError` (`tidepool-worktree/src/error.rs`)
-/// to the wire `WorktreeError` (generated by `worktree_effect_def!`'s `errors`
-/// block) — ten variants on both sides. No wildcard arm below, so a domain
+/// to the wire `WorktreeError` (generated from the schema's `errors` block) — ten variants on both sides. No wildcard arm below, so a domain
 /// variant added without a wire counterpart fails this match's exhaustiveness
 /// check at compile time.
 pub(crate) fn error_to_wire(e: DomainWorktreeError) -> WorktreeError {
@@ -248,7 +223,10 @@ impl WorktreeHandler {
     // Errors-tagged verbs: total in `WorktreeError`, no `cx` — the dispatch
     // arm wraps the `Result` via `cx.respond` (Ok→Right, Err→Left). See #335.
 
-    fn worktree_create(&mut self, spec: WtWorktreeSpec) -> Result<WtWorktreeHandle, WorktreeError> {
+    pub(crate) fn worktree_create(
+        &mut self,
+        spec: WtWorktreeSpec,
+    ) -> Result<WtWorktreeHandle, WorktreeError> {
         let domain_spec = spec_from_wire(spec)?;
         let handle = self.manager.create(&domain_spec).map_err(error_to_wire)?;
         Ok(handle_to_wire(&handle))
@@ -263,7 +241,7 @@ impl WorktreeHandler {
     /// specifically to preserve this distinction — never collapsed onto
     /// `WorktreeLost`'s tag, which would erase exactly what PRD 19 asks be
     /// kept visible.
-    fn worktree_lookup(
+    pub(crate) fn worktree_lookup(
         &mut self,
         tree_id: WtWorktreeId,
     ) -> Result<WtWorktreeHandle, WorktreeError> {
@@ -274,7 +252,7 @@ impl WorktreeHandler {
         }
     }
 
-    fn worktree_list(&mut self) -> Result<Vec<WtWorktreeSummary>, WorktreeError> {
+    pub(crate) fn worktree_list(&mut self) -> Result<Vec<WtWorktreeSummary>, WorktreeError> {
         let summaries = self.manager.list().map_err(error_to_wire)?;
         Ok(summaries.iter().map(summary_to_wire).collect())
     }
@@ -282,7 +260,10 @@ impl WorktreeHandler {
     /// Reads the branch fresh from git rather than returning the receipt's
     /// recorded one — reconciled inspection is the only source of truth (see
     /// `tidepool-worktree/CLAUDE.md`).
-    fn worktree_branch_of(&mut self, tree_id: WtWorktreeId) -> Result<WtBranchName, WorktreeError> {
+    pub(crate) fn worktree_branch_of(
+        &mut self,
+        tree_id: WtWorktreeId,
+    ) -> Result<WtBranchName, WorktreeError> {
         let id = worktree_id_from_wire(&tree_id)?;
         let handle = self
             .manager
@@ -316,7 +297,10 @@ impl WorktreeHandler {
     /// lost) surfaces as the typed error rather than being swallowed. No
     /// local `rev-parse`, no `source_head` shortcut.
     #[allow(dead_code)]
-    fn worktree_head_of(&mut self, tree_id: WtWorktreeId) -> Result<WtGitOid, WorktreeError> {
+    pub(crate) fn worktree_head_of(
+        &mut self,
+        tree_id: WtWorktreeId,
+    ) -> Result<WtGitOid, WorktreeError> {
         let id = worktree_id_from_wire(&tree_id)?;
         let handle = self
             .manager
@@ -331,6 +315,14 @@ impl WorktreeHandler {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // The wire enums/newtypes these tables construct directly. The module body
+    // no longer names them — its mechanical conversions are generated — but the
+    // tables below still build wire values by hand, which is the point: they
+    // assert against literals, not against the conversions under test.
+    use tidepool_bridge_effects::{WtDirtyPolicy, WtGitRef, WtInProgressKind};
+    use tidepool_worktree::create::DirtyPolicy;
+    use tidepool_worktree::error::InProgressKind;
+    use tidepool_worktree::id::{GitOid, GitRef};
 
     fn sample_dirty_summary() -> DirtySummary {
         DirtySummary {
@@ -631,5 +623,71 @@ mod tests {
             worktree_id_from_wire(&minted),
             Ok(WorktreeId::from_raw("wt-19c8-2a4d-0-deadbeef"))
         );
+    }
+
+    /// The duplication §11.4 names rather than hides, guarded.
+    ///
+    /// The path-safety policy is expressed TWICE: as schema data generated into
+    /// `WtWorktreeId::new` (`Validation::Segment { max_len: 128, extra_allowed:
+    /// "-_" }`), and as `tidepool_worktree::WorktreeId::is_path_safe`. They
+    /// cannot be unified — `tidepool-worktree` is a DOMAIN crate and must not
+    /// depend on the bridge layer, and the bridge layer is lower than the
+    /// domain — so the crate direction forces the copy and this test is the
+    /// mitigation.
+    ///
+    /// Byte-oriented on both sides, deliberately: an id is joined into a
+    /// filesystem path as ONE component, so a char-oriented check would accept
+    /// multi-byte input the domain rejects. The corpus includes every
+    /// traversal-shaped input `traversal_shaped_wire_ids_are_rejected_at_the_
+    /// boundary` pins, plus the multi-byte and boundary-length cases that would
+    /// catch the two policies drifting apart in a way the traversal set cannot.
+    #[test]
+    fn worktree_wire_segment_policy_agrees_with_is_path_safe() {
+        let corpus: Vec<String> = [
+            // the traversal-shaped set the boundary test pins
+            "../../../etc/passwd",
+            "a/b",
+            "a\\b",
+            "..",
+            ".",
+            "",
+            "wt-abc/../../x",
+            // minted shapes
+            "wt-19c8-2a4d-0-deadbeef",
+            "wt_1",
+            "A",
+            "0",
+            // alphabet edges: allowed extras vs everything else
+            "-",
+            "_",
+            "a.b",
+            "a b",
+            "a\tb",
+            "a\nb",
+            "a:b",
+            "a\u{0}b",
+            // multi-byte — the case a char-oriented check would get wrong
+            "wt-café",
+            "日本語",
+            "wt-\u{7f}",
+        ]
+        .iter()
+        .map(|s| (*s).to_string())
+        // length boundary, on BYTES: 128 passes, 129 does not.
+        .chain(["a".repeat(127), "a".repeat(128), "a".repeat(129)])
+        // a 128-BYTE string that is only 64 chars — accepted by a char-oriented
+        // length check and rejected by both of the byte-oriented ones.
+        .chain(std::iter::once("é".repeat(64)))
+        .collect();
+
+        for raw in corpus {
+            let generated = WtWorktreeId::new(raw.clone()).is_ok();
+            let domain = WorktreeId::is_path_safe(&raw);
+            assert_eq!(
+                generated, domain,
+                "policies disagree on {raw:?}: generated Segment says {generated}, \
+                 WorktreeId::is_path_safe says {domain}"
+            );
+        }
     }
 }

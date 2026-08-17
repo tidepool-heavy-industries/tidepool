@@ -32,15 +32,18 @@
 -- * an all-nullary sum (an enum) → @{"type": "string", "enum": [...]}@,
 --   because those encode as a bare constructor-name string;
 -- * a sum with any payload constructor → @oneOf@ of one tagged object per
---   constructor, each carrying @tag@ plus that constructor's record fields
---   — aeson's @TaggedObject@ shape, which is what the two defaults use;
+--   constructor, each carrying @tag@ plus that constructor's payload — a
+--   RECORD constructor's named fields sit beside @tag@; a POSITIONAL
+--   constructor schedules one required @"contents"@ property (the field's
+--   own schema for one field, a fixed-length @prefixItems@ array for
+--   several) — aeson's @TaggedObject@ shape, which is what the two defaults
+--   use ('IsRecordCon' picks the branch, shared with the encoder/decoder);
 -- * a @Maybe@ FIELD → its payload's schema, omitted from @required@,
 --   because the decoder accepts an absent key AND an explicit @null@ there;
--- * a payload constructor with positional fields, or with a field literally
---   named @tag@, → a compile-time 'TypeError', via the SAME
---   'GAllFieldsNamed' witness "Tidepool.Aeson.Value" and
---   "Tidepool.Aeson.FromJSON" use. A type this class accepts is therefore a
---   type those two accept.
+-- * a RECORD payload constructor with a field literally named @tag@ →
+--   a compile-time 'TypeError', via the SAME 'GAllFieldsNamed' witness
+--   "Tidepool.Aeson.Value" and "Tidepool.Aeson.FromJSON" use. A type this
+--   class accepts is therefore a type those two accept.
 --
 -- The consequence worth stating: a schema drift can only come from editing
 -- this module against the other two, not from a second traversal that

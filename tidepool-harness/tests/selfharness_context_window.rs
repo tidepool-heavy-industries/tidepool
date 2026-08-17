@@ -90,6 +90,7 @@ impl ModelProvider for ContextCapturingProvider {
             usage: Usage {
                 input_tokens: 20,
                 output_tokens: 5,
+                cached_input_tokens: None,
             },
             reasoning: None,
             reasoning_items: Vec::new(),

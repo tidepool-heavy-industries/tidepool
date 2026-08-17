@@ -700,6 +700,12 @@ impl SseAcc {
                         u.get("input_tokens").and_then(|x| x.as_u64()).unwrap_or(0);
                     self.usage.output_tokens =
                         u.get("output_tokens").and_then(|x| x.as_u64()).unwrap_or(0);
+                    // Only when the usage object genuinely carries it. A
+                    // response without `input_tokens_details.cached_tokens`
+                    // leaves this `None` — "not reported", never `0`.
+                    self.usage.cached_input_tokens = u
+                        .pointer("/input_tokens_details/cached_tokens")
+                        .and_then(|x| x.as_u64());
                 }
                 self.completed_text = extract_output_text(v.pointer("/response/output"));
                 self.reasoning_items = extract_reasoning_items(v.pointer("/response/output"));

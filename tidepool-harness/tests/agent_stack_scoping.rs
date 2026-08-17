@@ -30,9 +30,28 @@
 
 mod support;
 
-use tidepool_harness::compile;
-use tidepool_harness::engine::{template_turn_for, EngineConfig};
+use tidepool_harness::engine::{self, template_turn_for, CompiledTurn, EngineConfig};
 use tidepool_harness::selfharness::answerer_decls;
+use tidepool_runtime::CompileError;
+
+/// `CompileError::Diagnostics`' own `Display` is only a count ("Haskell
+/// compilation failed (N diagnostic(s))") — these tests assert on GHC's own
+/// per-diagnostic message text (the specific not-in-scope/Member class, and
+/// the identifier it names), so render the joined diagnostic messages
+/// instead, same as `finalize_type_pinning`'s
+/// `pinned_finalize_needs_the_type_in_scope` and production's
+/// `render_compile_error`/`classify_compile`/`compile_error_to_session_error`
+/// all do at their own seams.
+fn diag_text(e: CompileError) -> String {
+    match e {
+        CompileError::Diagnostics(diags) => diags
+            .iter()
+            .map(|d| d.message.as_str())
+            .collect::<Vec<_>>()
+            .join("\n\n"),
+        other => other.to_string(),
+    }
+}
 
 fn prelude_dir() -> std::path::PathBuf {
     let manifest = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -55,11 +74,11 @@ fn compile_against(
     decls: Vec<tidepool_mcp::EffectDecl>,
     code: &str,
     imports: &str,
-) -> Result<compile::CompiledTurn, compile::CompileError> {
+) -> Result<CompiledTurn, CompileError> {
     let cfg = EngineConfig::from_decls(decls, prelude_dir(), None).expect("engine config");
     let target = cfg.turn_target(None).expect("turn target");
     let source = template_turn_for(&cfg.decls, &target.stack, code, imports, "");
-    compile::compile_turn(
+    engine::compile_turn(
         &cfg.extract_bin,
         &source,
         "result",
@@ -78,13 +97,13 @@ fn compile_pinned(
     code: &str,
     imports: &str,
     finalize_ty: &str,
-) -> Result<compile::CompiledTurn, compile::CompileError> {
+) -> Result<CompiledTurn, CompileError> {
     let cfg = EngineConfig::from_decls(decls, prelude_dir(), None).expect("engine config");
     let target = cfg
         .turn_target(Some((finalize_ty, &[])))
         .expect("turn target");
     let source = template_turn_for(&cfg.decls, &target.stack, code, imports, "");
-    compile::compile_turn(
+    engine::compile_turn(
         &cfg.extract_bin,
         &source,
         "result",
@@ -116,7 +135,7 @@ fn run_llm_turn_is_a_member_error_not_a_scope_error_in_the_answerer_stack() {
              — RunLLMTurn must not be IN THE ROW there (the answerer forks, it does not \
              suspend an in-context model turn)"
         ),
-        Err(e) => e.to_string(),
+        Err(e) => diag_text(e),
     };
     assert!(
         err.contains("Member") && err.contains("RunLLMTurn"),
@@ -178,7 +197,7 @@ fn fork_child_leaf_row_cannot_fork() {
             "forkAll compiled against the fork-child leaf row '[AskUser, Finalize] — \
              a fork child must NOT be able to fork (depth-one is structural)"
         ),
-        Err(e) => e.to_string(),
+        Err(e) => diag_text(e),
     };
     assert!(
         err.contains("not in scope") || err.contains("forkAll") || err.contains("Fork"),
@@ -271,7 +290,7 @@ fn ask_is_a_compile_error_in_the_answerer_stack() {
             "ask compiled against the answerer stack '[AskUser, Fork, ReadState, Finalize] \
              — the structural scoping is BROKEN (Ask must be undeclared there)"
         ),
-        Err(e) => e.to_string(),
+        Err(e) => diag_text(e),
     };
     assert!(
         err.contains("ask") && err.contains("not in scope"),
@@ -297,7 +316,7 @@ fn base_effect_is_a_compile_error_in_the_answerer_stack() {
              '[AskUser, Fork, ReadState, Finalize] — the capability boundary is BROKEN \
              (base effects must be undeclared there)"
         ),
-        Err(e) => e.to_string(),
+        Err(e) => diag_text(e),
     };
     assert!(
         err.contains("httpGet") && err.contains("not in scope"),
@@ -318,7 +337,7 @@ fn ask_is_a_compile_error_in_the_harness_stack() {
             "ask compiled against the harness stack '[RunLLMTurn] — the structural \
              scoping is BROKEN (Ask must be undeclared there)"
         ),
-        Err(e) => e.to_string(),
+        Err(e) => diag_text(e),
     };
     assert!(
         err.contains("ask") && err.contains("not in scope"),
@@ -337,7 +356,7 @@ fn finalize_is_a_compile_error_in_the_harness_stack() {
             "finalize compiled against the harness stack '[RunLLMTurn] — the structural \
              scoping is BROKEN (Finalize must be undeclared there)"
         ),
-        Err(e) => e.to_string(),
+        Err(e) => diag_text(e),
     };
     assert!(
         err.contains("finalize") && err.contains("not in scope"),

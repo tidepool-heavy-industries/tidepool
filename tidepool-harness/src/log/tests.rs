@@ -45,7 +45,7 @@ fn sample_events() -> Vec<Event> {
         Event::HolePublished {
             node: NodeId(1),
             hole: HoleId("scont_1".to_string()),
-            site: Some(SiteId(7)),
+            site: Some(SiteId::try_from(7u64).unwrap()),
             ty: Some("Int".to_string()),
             prompt: "pick a number".to_string(),
             fork: false,
@@ -92,6 +92,7 @@ fn sample_events() -> Vec<Event> {
             usage: Some(crate::provider::Usage {
                 input_tokens: 120,
                 output_tokens: 8,
+                cached_input_tokens: None,
             }),
             reasoning: Some("checking both verdicts agree".to_string()),
         },
@@ -146,6 +147,7 @@ fn turn_delta_log_line_is_byte_identical_regardless_of_reasoning_items() {
         usage: Usage {
             input_tokens: 120,
             output_tokens: 8,
+            cached_input_tokens: None,
         },
         reasoning: Some("checking both verdicts agree".to_string()),
         reasoning_items: Vec::new(),
@@ -156,6 +158,7 @@ fn turn_delta_log_line_is_byte_identical_regardless_of_reasoning_items() {
         usage: Usage {
             input_tokens: 120,
             output_tokens: 8,
+            cached_input_tokens: None,
         },
         reasoning: Some("checking both verdicts agree".to_string()),
         reasoning_items: vec![ReasoningItem(json!({

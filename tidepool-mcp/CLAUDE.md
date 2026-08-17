@@ -14,7 +14,11 @@ server, assembled from the `*_decl()` functions here). The eval stdlib lives in
 > the idealized surface — a gap a caller hits is a bug to fix, not a caution to
 > add.
 
-Every effect has ONE definition: a `<eff>_effect_def!` macro in
+Every effect has ONE definition. For a MIGRATED effect (Exec, Journal,
+Worktree) that definition is a schema entry in `tidepool-protocol/src/effects/`
+and every artifact below is GENERATED from it into `src/generated/` — see
+`plans/self-iterating-harness/22-p1-protocol-scaffold.md` §9 for how to add the
+next one. For the rest it is still a `<eff>_effect_def!` macro in
 `src/effect_defs.rs` carrying the GADT constructors (Haskell type strings AND
 Rust bridge types), helper-verb text, and the handler/method wiring. Two
 projections consume it: `effect_decl_projection!` (defined in `effect_defs.rs`,
@@ -26,6 +30,24 @@ handler struct (using `cx.respond`/`respond_list`, or an errors-tagged method
 returning `Result<T, ErrEnum>` for typed failure). A wholly new effect type
 needs a new definition + handler module + a positional union-tag slot.
 
+**Trap: a bridged data record belongs in `Tidepool.Records.Bridged` (or, when
+it embeds an `errors` ADT as a FIELD, `Tidepool.Records.Stable` —
+`fs_effect_def!`'s `stable_errors true`), never inline in a `type_defs`
+literal.** Any `type_defs`/`errors` text a definition emits lands in the
+per-session generated `Tidepool.Effects` module, which is fragment-nominal (a
+fresh one per turn) — the cross-row session-bind guard
+(haskell/src/Tidepool/Translate.hs's `typeMentionsEffectMonad`) rejects ANY
+value whose type mentions a tycon declared there, so an inline record cannot
+survive a session bind (`x <- someVerb ...` reused in a later turn). `FileRead`
+(readGlob's per-file record) shipped this way for a long time harmlessly,
+until a later-landed guard turned the gap into a hard failure the moment
+someone bound it — see `tidepool-mcp/src/fs_stable.rs` for the fix and the
+full story. An `errors` ADT referenced by a bridged record's FIELD (like
+`FileRead.contents :: Either FsError Text`) needs the SAME stable home as the
+record itself — `stable_errors true` is how a definition opts an `errors`
+block out of the inline per-session text without losing its Rust-enum
+generation or per-verb `Either <Err> T` tagging.
+
 the `tidepool` binary only wires the handler stack (`build_base_stack`, called
 from `tidepool/src/stack.rs`); the
 `tidepool-bridge` marshals `Value` ↔ `serde_json::Value`.
@@ -33,13 +55,17 @@ from `tidepool/src/stack.rs`); the
 If an effect's helpers need a companion Haskell import beyond the fixed eval
 surface (`preamble::eval_import_lines` — Prelude, the qualified `T.`/`Map.`/…
 namespaces, `Tidepool.Effects`), add ONE arm to `extra_imports_for!` in
-`effect_defs.rs`, matched on the effect's own identifier (see the `Exec`/
-`Git`/`AskUser` arms — e.g. `Exec`'s helpers build on `runArgv`, so it pulls
-in `Tidepool.Shell`/`Tidepool.Cargo`). That one edit is picked up by both the
-stmt/eval plane (`preamble::pragmas_and_imports`) and the decl plane
+`effect_defs.rs`, matched on the effect's own identifier (see the `Git`/
+`AskUser`/`Subagent` arms). A MIGRATED effect declares them as schema data in
+`tidepool-protocol` instead — `Exec`'s `Tidepool.Shell`/`Tidepool.Cargo` and
+`Worktree`'s `Tidepool.Worktree` are emitted straight into the generated decl.
+Either way, that ONE edit is picked up by both the stmt/eval plane (`preamble::pragmas_and_imports`) and the decl plane
 (`preamble::session_decl_module_env`) automatically — both fold over
 `EffectDecl::extra_imports` the same way, so there is no second gate to keep
-in sync by hand.
+in sync by hand. What it does NOT reach is the generated `Tidepool.Effects`
+module itself — a helper spliced in there may not reference a name that lives
+in the authored library layer, because that module cannot import it (see the
+scaffold doc §11.12, and `prd19_emit.rs`, which pins both facts).
 
 ## On-disk paths & config (`tidepool_runtime::paths`)
 

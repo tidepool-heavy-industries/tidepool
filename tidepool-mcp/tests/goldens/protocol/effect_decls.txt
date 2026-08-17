@@ -1,0 +1,1769 @@
+=============================== EFFECT: Console ===============================
+
+-- type_name (7 bytes) --
+Console
+-- end type_name --
+
+-- description (18 bytes) --
+Print text output.
+-- end description --
+
+-- prompt_card: None --
+
+-- constructors (1 items) --
+-- constructors[0] (27 bytes) --
+Print :: Text -> Console ()
+-- end constructors[0] --
+
+-- end constructors --
+
+-- type_defs (0 items) --
+-- end type_defs --
+
+-- extra_imports (0 items) --
+-- end extra_imports --
+
+-- helpers (2 items) --
+-- helpers[0] (153 bytes) --
+-- | Emit a line of console output. Thin wrapper over the Print effect
+-- so chains never need `send (Print …)`.
+say :: Text -> M ()
+say = send . Print
+-- end helpers[0] --
+
+-- helpers[1] (99 bytes) --
+-- | `say` on anything Showable (`say . show`).
+sayShow :: Show a => a -> M ()
+sayShow = say . show
+-- end helpers[1] --
+
+-- end helpers --
+
+-- type_params (0 items) --
+-- end type_params --
+
+-- default_row_args (0 items) --
+-- end default_row_args --
+
+-- helpers_row_polymorphic --
+false
+-- end helpers_row_polymorphic --
+
+=============================== EFFECT: KV ===============================
+
+-- type_name (2 bytes) --
+KV
+-- end type_name --
+
+-- description (229 bytes) --
+Persistent key-value store. State survives across calls within one server session. Key convention: use slash-delimited namespaces (e.g. "agent-42/foo") to avoid cross-agent collision. kvClear/kvKeysP operate on prefix boundaries.
+-- end description --
+
+-- prompt_card: None --
+
+-- constructors (8 items) --
+-- constructors[0] (33 bytes) --
+KvGet :: Text -> KV (Maybe Value)
+-- end constructors[0] --
+
+-- constructors[1] (31 bytes) --
+KvSet :: Text -> Value -> KV ()
+-- end constructors[1] --
+
+-- constructors[2] (25 bytes) --
+KvDelete :: Text -> KV ()
+-- end constructors[2] --
+
+-- constructors[3] (19 bytes) --
+KvKeys :: KV [Text]
+-- end constructors[3] --
+
+-- constructors[4] (25 bytes) --
+KvClear :: Text -> KV Int
+-- end constructors[4] --
+
+-- constructors[5] (28 bytes) --
+KvKeysP :: Text -> KV [Text]
+-- end constructors[5] --
+
+-- constructors[6] (18 bytes) --
+KvInfo :: KV Value
+-- end constructors[6] --
+
+-- constructors[7] (61 bytes) --
+KvCas :: Text -> Maybe Value -> Value -> KV (Either Value ())
+-- end constructors[7] --
+
+-- end constructors --
+
+-- type_defs (0 items) --
+-- end type_defs --
+
+-- extra_imports (0 items) --
+-- end extra_imports --
+
+-- helpers (8 items) --
+-- helpers[0] (94 bytes) --
+-- | Look up a key; Nothing when absent.
+kvGet :: Text -> M (Maybe Value)
+kvGet = send . KvGet
+-- end helpers[0] --
+
+-- helpers[1] (98 bytes) --
+-- | Persist a JSON value under a key.
+kvSet :: Text -> Value -> M ()
+kvSet k v = send (KvSet k v)
+-- end helpers[1] --
+
+-- helpers[2] (84 bytes) --
+-- | Delete a key (no-op when absent).
+kvDel :: Text -> M ()
+kvDel = send . KvDelete
+-- end helpers[2] --
+
+-- helpers[3] (89 bytes) --
+-- | All keys (unordered; kvKeysP "" for sorted).
+kvKeys :: M [Text]
+kvKeys = send KvKeys
+-- end helpers[3] --
+
+-- helpers[4] (482 bytes) --
+-- | Delete all keys whose name starts with @prefix@; return the count deleted.
+-- Pass "" (empty string) to clear the ENTIRE store — this erases ALL
+-- persisted KV data for this server session, so use with caution.
+-- Recommended pattern: namespace keys as "ns/key" and clear with "ns/".
+-- NOTE: per-session automatic scoping is a deferred design decision (#327);
+-- callers manage namespaces manually via this prefix argument.
+kvClear :: Text -> M Int
+kvClear = send . KvClear
+-- end helpers[4] --
+
+-- helpers[5] (266 bytes) --
+-- | All keys whose name starts with @prefix@, returned sorted.
+-- E.g. @kvKeysP "agent/"@ returns @["agent/bar", "agent/foo", ...]@.
+-- Pass "" to list ALL keys sorted (like kvKeys but deterministically ordered).
+kvKeysP :: Text -> M [Text]
+kvKeysP = send . KvKeysP
+-- end helpers[5] --
+
+-- helpers[6] (288 bytes) --
+-- | Summary of KV store state as a JSON Value:
+-- @{count :: Int, sample :: [Text], file_size_bytes :: Int}@.
+-- Use to inspect junk-drawer accumulation without listing all keys.
+-- Extract fields with optics: @i <- kvInfo; i ^? key "count" . _Int@
+kvInfo :: M Value
+kvInfo = send KvInfo
+-- end helpers[6] --
+
+-- helpers[7] (574 bytes) --
+-- | Atomic compare-and-swap: set @key@ to @new@ only if its current
+-- value equals @expected@ (Nothing = require the key ABSENT).
+-- @Right ()@ on success; @Left actual@ (the current value) on a
+-- mismatch, with nothing written. Cross-process safe (the store
+-- file is flocked), so it is the lost-update-free primitive that
+-- kvModify\/kvIncr\/kvAppend retry over — prefer those for the
+-- common read-modify-write; reach for kvCas directly for a custom
+-- conflict policy.
+kvCas :: Text -> Maybe Value -> Value -> M (Either Value ())
+kvCas k e n = send (KvCas k e n)
+-- end helpers[7] --
+
+-- end helpers --
+
+-- type_params (0 items) --
+-- end type_params --
+
+-- default_row_args (0 items) --
+-- end default_row_args --
+
+-- helpers_row_polymorphic --
+false
+-- end helpers_row_polymorphic --
+
+=============================== EFFECT: Fs ===============================
+
+-- type_name (2 bytes) --
+Fs
+-- end type_name --
+
+-- description (61 bytes) --
+Read and write files (sandboxed to server working directory).
+-- end description --
+
+-- prompt_card: None --
+
+-- constructors (10 items) --
+-- constructors[0] (42 bytes) --
+FsRead :: Text -> Fs (Either FsError Text)
+-- end constructors[0] --
+
+-- constructors[1] (49 bytes) --
+FsWrite :: Text -> Text -> Fs (Either FsError ())
+-- end constructors[1] --
+
+-- constructors[2] (47 bytes) --
+FsListDir :: Text -> Fs (Either FsError [Text])
+-- end constructors[2] --
+
+-- constructors[3] (44 bytes) --
+FsGlob :: Text -> Fs (Either FsError [Text])
+-- end constructors[3] --
+
+-- constructors[4] (51 bytes) --
+FsGrep :: Text -> Text -> Fs (Either FsError [Hit])
+-- end constructors[4] --
+
+-- constructors[5] (44 bytes) --
+FsExists :: Text -> Fs (Either FsError Bool)
+-- end constructors[5] --
+
+-- constructors[6] (41 bytes) --
+FsMetadata :: Text -> Fs (Maybe FileMeta)
+-- end constructors[6] --
+
+-- constructors[7] (35 bytes) --
+FsReadGlob :: Text -> Fs [FileRead]
+-- end constructors[7] --
+
+-- constructors[8] (50 bytes) --
+FsHash :: Text -> Fs (Either FsError (Maybe Text))
+-- end constructors[8] --
+
+-- constructors[9] (71 bytes) --
+FsWriteCas :: Text -> Maybe Text -> Text -> Fs (Either (Maybe Text) ())
+-- end constructors[9] --
+
+-- end constructors --
+
+-- type_defs (0 items) --
+-- end type_defs --
+
+-- extra_imports (0 items) --
+-- end extra_imports --
+
+-- helpers (20 items) --
+-- helpers[0] (312 bytes) --
+-- | Read a file. Failure is TYPED (#335): `Left (FsNotFound p)` / `Left
+-- (FsNotUtf8 p)` / `Left (FsIo _)`. The natural spelling unwraps-or-aborts with
+-- a failable bind: `Right src <- readFile path` (or `readFile path >>= liftEither`).
+readFile :: FilePath -> M (Either FsError Text)
+readFile = send . FsRead
+-- end helpers[0] --
+
+-- helpers[1] (235 bytes) --
+-- | Write a file (mkdir -p on the parent). `Left (FsSandbox _)` on a path
+-- escape, `Left (FsIo _)` on write failure; unwrap with `liftEither`.
+writeFile :: FilePath -> Text -> M (Either FsError ())
+writeFile f c = send (FsWrite f c)
+-- end helpers[1] --
+
+-- helpers[2] (402 bytes) --
+-- | Append to a file (reads then writes). Failure is TYPED (#335): a read
+-- or write failure comes back as `Left (FsError)` DATA, nothing partially
+-- applied; unwrap with `Right () <- appendFile path t` or `>>= liftEither`.
+appendFile :: FilePath -> Text -> M (Either FsError ())
+appendFile p t = do
+  er <- readFile p
+  case er of
+    Left e -> pure (Left e)
+    Right old -> writeFile p (old <> t)
+-- end helpers[2] --
+
+-- helpers[3] (175 bytes) --
+-- | List a directory. `Left (FsNotFound _)` when absent; unwrap with `liftEither`.
+listDirectory :: FilePath -> M (Either FsError [FilePath])
+listDirectory = send . FsListDir
+-- end helpers[3] --
+
+-- helpers[4] (257 bytes) --
+-- | TOTAL existence predicate (System.Directory semantics): False for a
+-- missing path, a directory, or a path outside the sandbox — never throws.
+doesFileExist :: FilePath -> M Bool
+doesFileExist p = send (FsMetadata p) <&> maybe False (\m -> m.isFile)
+-- end helpers[4] --
+
+-- helpers[5] (189 bytes) --
+-- | TOTAL existence predicate: False for missing/non-dir/out-of-sandbox.
+doesDirectoryExist :: FilePath -> M Bool
+doesDirectoryExist p = send (FsMetadata p) <&> maybe False (\m -> m.isDir)
+-- end helpers[5] --
+
+-- helpers[6] (162 bytes) --
+-- | File size in bytes, or `Nothing` if the path is missing.
+getFileSize :: FilePath -> M (Maybe Int)
+getFileSize p = send (FsMetadata p) <&> fmap (\m -> m.size)
+-- end helpers[6] --
+
+-- helpers[7] (221 bytes) --
+-- | File metadata as a `FileMeta` record {size, isFile, isDir}, or `Nothing`
+-- if the path is missing/unreadable (use record-dot: `m.size`, `m.isDir`).
+fsMeta :: FilePath -> M (Maybe FileMeta)
+fsMeta = send . FsMetadata
+-- end helpers[7] --
+
+-- helpers[8] (117 bytes) --
+getCurrentDirectory :: M FilePath
+getCurrentDirectory = do { p <- run "pwd" >>= liftEither; pure (T.strip p.stdout) }
+-- end helpers[8] --
+
+-- helpers[9] (286 bytes) --
+-- | Expand a glob to matching file paths. `Left (FsSandbox _)` on an empty
+-- or absolute pattern, `Left (FsNotFound _)` on a missing search root; unwrap
+-- with `Right ps <- glob pat` or `glob pat >>= liftEither`.
+glob :: FilePath -> M (Either FsError [FilePath])
+glob = send . FsGlob
+-- end helpers[9] --
+
+-- helpers[10] (540 bytes) --
+-- | Regex-search files matching a path glob. ARG ORDER: regex FIRST, glob
+-- SECOND — a path glob like "*.rs" goes in arg 2, not arg 1. Returns [Hit]
+-- {path, line, text} (the shared Hit shape, so it composes with
+-- hitsByFile/refs). Failure is typed: `Left (FsBadRegex _)` on a bad regex.
+-- NB regex metachars are double-escaped here (JSON x Haskell), so a literal dot
+-- needs four backslashes; the FsBadRegex detail shows the exact form.
+grepGlob :: Text -> FilePath -> M (Either FsError [Hit])
+grepGlob pat g = send (FsGrep pat g)
+-- end helpers[10] --
+
+-- helpers[11] (682 bytes) --
+-- | Read every file matching a glob with PER-FILE failure isolation: one
+-- `FileRead {path, contents}` per match — `contents` is `Right text` on a clean
+-- UTF-8 read, `Left err` on a per-file failure (binary / non-UTF-8, permission).
+-- One bad file (e.g. a binary swept up by a wide glob) does NOT fail the whole
+-- batch. An empty glob is rejected loudly, but a glob matching NOTHING yields
+-- `[]` silently — check `null rs` when absence itself is the signal. Recover
+-- the readable files with
+-- `[r.path | r <- rs, isRight r.contents]`, or split all outcomes with
+-- `partitionEithers (map (.contents) rs)`.
+readGlob :: Text -> M [FileRead]
+readGlob = send . FsReadGlob
+-- end helpers[11] --
+
+-- helpers[12] (1134 bytes) --
+-- | Exact str-replace, EXACTLY-ONCE. Reports the outcome as an
+-- `UpdateOneOutcome` DATA value (never throws, mirrors `InsertAfterOutcome`):
+-- empty `old`, a missing file, `old` not found, or `old` matching 2+ places
+-- is `UpdateOneRejected` (nothing written); otherwise `UpdateOneApplied`.
+-- Pass enough surrounding text that `old` is unique. Use planUpdate to review
+-- the diff first; the full editing surface is in tidepool://edits.
+update :: FilePath -> Text -> Text -> M UpdateOneOutcome
+update path old new
+  | T.null old = pure (UpdateOneRejected "'old' must be non-empty" Nothing)
+  | otherwise = do
+      er <- readFile path
+      case er of
+        Left e -> pure (UpdateOneRejected ("file not found: " <> show e) Nothing)
+        Right src ->
+          case len (T.splitOn old src) - 1 of
+            0 -> pure (UpdateOneRejected ("'old' not found in " <> path) Nothing)
+            1 -> writeFile path (replace old new src) >>= liftEither >> pure UpdateOneApplied
+            n -> pure (UpdateOneRejected ("'old' matches " <> show n <> " places in " <> path <> " (add surrounding context to disambiguate)") (Just n))
+-- end helpers[12] --
+
+-- helpers[13] (833 bytes) --
+-- | Replace EVERY occurrence of `old` with `new`. Reports the outcome as an
+-- `UpdateAllOutcome` DATA value (never throws): empty `old`, a missing file,
+-- or zero matches is `UpdateAllRejected` (nothing written); otherwise
+-- `UpdateAllApplied` carries the replacement count.
+updateAll :: FilePath -> Text -> Text -> M UpdateAllOutcome
+updateAll path old new
+  | T.null old = pure (UpdateAllRejected "'old' must be non-empty")
+  | otherwise = do
+      er <- readFile path
+      case er of
+        Left e -> pure (UpdateAllRejected ("file not found: " <> show e))
+        Right src ->
+          let n = len (T.splitOn old src) - 1
+          in if n == 0
+               then pure (UpdateAllRejected ("'old' not found in " <> path))
+               else writeFile path (replace old new src) >>= liftEither >> pure (UpdateAllApplied n)
+-- end helpers[13] --
+
+-- helpers[14] (899 bytes) --
+-- | Dry-run `update`: returns an `UpdateOutcome` (the review diff, or the
+-- reason it can't apply), writes NOTHING. Never errors — the conflict comes
+-- back as data so you can branch before committing.
+planUpdate :: FilePath -> Text -> Text -> M UpdateOutcome
+planUpdate path old new = do
+  er <- readFile path
+  case er of
+    Left e -> pure (UpdateRejected ("file not found: " <> show e) Nothing)
+    Right src ->
+      let n = if T.null old then 0 else len (T.splitOn old src) - 1
+      in if T.null old then pure (UpdateRejected "'old' must be non-empty" Nothing)
+         else if n == 0 then pure (UpdateRejected "not found" Nothing)
+         else if n > 1 then pure (UpdateRejected "ambiguous" (Just n))
+         else case Patch.genPatch path src (replace old new src) of
+                Left _ -> pure UpdateNoChange
+                Right fp -> pure (UpdateDiff (Patch.renderPatch [fp]))
+-- end helpers[14] --
+
+-- helpers[15] (590 bytes) --
+-- | `update` from the input lane: {file, old, new} (for big/quote-heavy
+-- fragments). Reports the outcome as an `UpdateOneOutcome` DATA value (never
+-- throws, same contract as `update`): a malformed payload (missing or
+-- non-string file/old/new key) is `UpdateOneRejected` — one bad item never
+-- aborts a batch.
+updateJ :: Value -> M UpdateOneOutcome
+updateJ v = case (v ^? key "file" . _String, v ^? key "old" . _String, v ^? key "new" . _String) of
+  (Just f, Just o, Just n) -> update f o n
+  _ -> pure (UpdateOneRejected "updateJ: need {file, old, new} strings in input" Nothing)
+-- end helpers[15] --
+
+-- helpers[16] (880 bytes) --
+-- | Insert a block after the unique line containing `anchor`. Reports the
+-- outcome as an `InsertAfterOutcome` DATA value (never throws): a missing
+-- file, or an anchor matching zero or 2+ lines, is `InsertAfterRejected`
+-- (nothing written); otherwise `InsertAfterApplied`.
+insertAfter :: FilePath -> Text -> Text -> M InsertAfterOutcome
+insertAfter path anchor block = do
+  er <- readFile path
+  case er of
+    Left e -> pure (InsertAfterRejected ("file not found: " <> show e) Nothing)
+    Right src ->
+      let ls = lines src
+          n = len (filter (isInfixOf anchor) ls)
+      in case n of
+           1 -> writeFile path (unlines (concatMap (\l -> if anchor `isInfixOf` l then [l, block] else [l]) ls))
+                  >>= liftEither >> pure InsertAfterApplied
+           _ -> pure (InsertAfterRejected ("anchor matched " <> show n <> " lines in " <> path) (Just n))
+-- end helpers[16] --
+
+-- helpers[17] (441 bytes) --
+-- | Compute-check-commit: write only if every named check holds; failures
+-- come back as a `WriteOutcome` (nothing written on failure).
+writeChecked :: FilePath -> [(Text, Bool)] -> Text -> M WriteOutcome
+writeChecked path checks content = do
+  let failed = [name | (name, ok) <- checks, not ok]
+  if null failed
+    then writeFile path content >>= liftEither >> pure (Written path (length checks))
+    else pure (WriteBlocked path failed)
+-- end helpers[17] --
+
+-- helpers[18] (301 bytes) --
+-- | Blake3 content hash (hex) of a file, or Nothing if it does not exist.
+-- The compare-and-swap token for writeCheckedIf: read it, compute your new
+-- content, then write back only if the file still hashes the same.
+fileHash :: FilePath -> M (Maybe Text)
+fileHash p = send (FsHash p) >>= liftEither
+-- end helpers[18] --
+
+-- helpers[19] (809 bytes) --
+-- | Content-hash compare-and-swap write (#330). Writes CONTENT only if the
+-- file's current blake3 hash equals EXPECTED (Nothing = expect the file ABSENT,
+-- i.e. create-only). The compare-and-write is atomic within the handler, closing
+-- the lost-update race between parallel agents. Returns a WriteOutcome: 'Written'
+-- on success, or 'WriteConflict' (carrying expected vs actual hash) if the
+-- precondition failed — conflicts come back as DATA, nothing is written. Get
+-- EXPECTED from fileHash; on a conflict re-read, recompute, and retry.
+writeCheckedIf :: Maybe Text -> FilePath -> Text -> M WriteOutcome
+writeCheckedIf expected path content = do
+  r <- send (FsWriteCas path expected content)
+  pure $ case r of
+    Right () -> Written path 1
+    Left actual -> WriteConflict path expected actual
+-- end helpers[19] --
+
+-- end helpers --
+
+-- type_params (0 items) --
+-- end type_params --
+
+-- default_row_args (0 items) --
+-- end default_row_args --
+
+-- helpers_row_polymorphic --
+false
+-- end helpers_row_polymorphic --
+
+=============================== EFFECT: Lsp ===============================
+
+-- type_name (3 bytes) --
+Lsp
+-- end type_name --
+
+-- description (958 bytes) --
+Semantic code-graph navigation via a language server (rust-analyzer, .rs). Everything is a LspNode {nodeName, nodeContainer, nodeKind, nodeFile, nodePos, nodeText} (nodeLine derives from nodePos) — the currency you thread. `lspWhere name` → all definitions of NAME (the seed, `Either LspError [LspNode]`). Then walk the graph: `lspCallers n` / `lspCallees n` (incoming/outgoing calls), `lspRefs n` (use sites) — each `LspNode -> M [LspNode]`, [] = none, so they chain directly (e.g. `lspWhere "x" >>= liftEither >>= concatMapM lspCallers`). `lspDef n` (any node → its definition), `lspHover n` (type/sig/docs) stay `Maybe` (a node genuinely may lack one). `lspRename n new` (→ unified diff; review then `applyDiff`). `lspDiags file` for a file's errors. Needs the `tidepool-lsp-daemon` running in the workspace; a daemon-down failure surfaces as `Left (LspDaemonDown _)` from `lspWhere`/`lspDiags`, or a structural eval abort from the walker verbs.
+-- end description --
+
+-- prompt_card: None --
+
+-- constructors (8 items) --
+-- constructors[0] (51 bytes) --
+LspWhere :: Text -> Lsp (Either LspError [LspNode])
+-- end constructors[0] --
+
+-- constructors[1] (38 bytes) --
+LspCallers :: LspNode -> Lsp [LspNode]
+-- end constructors[1] --
+
+-- constructors[2] (38 bytes) --
+LspCallees :: LspNode -> Lsp [LspNode]
+-- end constructors[2] --
+
+-- constructors[3] (35 bytes) --
+LspRefs :: LspNode -> Lsp [LspNode]
+-- end constructors[3] --
+
+-- constructors[4] (40 bytes) --
+LspDef :: LspNode -> Lsp (Maybe LspNode)
+-- end constructors[4] --
+
+-- constructors[5] (39 bytes) --
+LspHover :: LspNode -> Lsp (Maybe Text)
+-- end constructors[5] --
+
+-- constructors[6] (48 bytes) --
+LspRename :: LspNode -> Text -> Lsp (Maybe Text)
+-- end constructors[6] --
+
+-- constructors[7] (54 bytes) --
+LspDiagnostics :: Text -> Lsp (Either LspError [Diag])
+-- end constructors[7] --
+
+-- end constructors --
+
+-- type_defs (8 items) --
+-- type_defs[0] (79 bytes) --
+data Position = Position { posLine :: Int, posChar :: Int } deriving (Show, Eq)
+-- end type_defs[0] --
+
+-- type_defs[1] (161 bytes) --
+data LspNode = LspNode { nodeName :: Text, nodeContainer :: Text, nodeKind :: Text, nodeFile :: Text, nodePos :: Position, nodeText :: Text } deriving (Show, Eq)
+-- end type_defs[1] --
+
+-- type_defs[2] (97 bytes) --
+data Diag = Diag { diagFile :: Text, diagLine :: Int, diagSeverity :: Text, diagMessage :: Text }
+-- end type_defs[2] --
+
+-- type_defs[3] (55 bytes) --
+nodeLine :: LspNode -> Int
+nodeLine = posLine . nodePos
+-- end type_defs[3] --
+
+-- type_defs[4] (90 bytes) --
+instance ToJSON Position where
+  toJSON (Position l c) = object ["line" .= l, "char" .= c]
+-- end type_defs[4] --
+
+-- type_defs[5] (166 bytes) --
+instance ToJSON LspNode where
+  toJSON nd@(LspNode n c k f _ t) = object ["name" .= n, "container" .= c, "kind" .= k, "file" .= f, "line" .= nodeLine nd, "text" .= t]
+-- end type_defs[5] --
+
+-- type_defs[6] (119 bytes) --
+instance ToJSON Diag where
+  toJSON (Diag f l s m) = object ["file" .= f, "line" .= l, "severity" .= s, "message" .= m]
+-- end type_defs[6] --
+
+-- type_defs[7] (201 bytes) --
+data LspError = LspDaemonDown Text deriving (Show, Eq)
+instance ToJSON LspError where
+  toJSON e = case e of
+    LspDaemonDown detail -> object ["tag" .= ("LspDaemonDown" :: Text), "detail" .= detail]
+-- end type_defs[7] --
+
+-- end type_defs --
+
+-- extra_imports (0 items) --
+-- end extra_imports --
+
+-- helpers (8 items) --
+-- helpers[0] (268 bytes) --
+-- | Seed: every workspace definition named X (each a LspNode with container/file/line/source line).
+-- `Left (LspDaemonDown _)` when the daemon isn't reachable; unwrap with `>>= liftEither`.
+lspWhere :: Text -> M (Either LspError [LspNode])
+lspWhere = send . LspWhere
+-- end helpers[0] --
+
+-- helpers[1] (230 bytes) --
+-- | Incoming calls; [] = none (or node not callable). A daemon-down failure
+-- aborts the eval structurally (not a silent []) — see the Lsp effect description.
+lspCallers :: LspNode -> M [LspNode]
+lspCallers = send . LspCallers
+-- end helpers[1] --
+
+-- helpers[2] (122 bytes) --
+-- | Outgoing calls; [] = none (or node not callable).
+lspCallees :: LspNode -> M [LspNode]
+lspCallees = send . LspCallees
+-- end helpers[2] --
+
+-- helpers[3] (146 bytes) --
+-- | Use sites of this node's symbol (kind = "reference"); [] = none (or not a symbol).
+lspRefs :: LspNode -> M [LspNode]
+lspRefs = send . LspRefs
+-- end helpers[3] --
+
+-- helpers[4] (125 bytes) --
+-- | Resolve any node (e.g. a use site) to its definition node.
+lspDef :: LspNode -> M (Maybe LspNode)
+lspDef = send . LspDef
+-- end helpers[4] --
+
+-- helpers[5] (105 bytes) --
+-- | Type / signature / docs for a node.
+lspHover :: LspNode -> M (Maybe Text)
+lspHover = send . LspHover
+-- end helpers[5] --
+
+-- helpers[6] (194 bytes) --
+-- | Rename a node's symbol to NEW; returns a unified diff (apply with applyDiff). Nothing = can't rename.
+lspRename :: LspNode -> Text -> M (Maybe Text)
+lspRename n new = send (LspRename n new)
+-- end helpers[6] --
+
+-- helpers[7] (221 bytes) --
+-- | Diagnostics (errors / warnings) for FILE. `Left (LspDaemonDown _)`
+-- when the daemon isn't reachable; unwrap with `>>= liftEither`.
+lspDiags :: FilePath -> M (Either LspError [Diag])
+lspDiags = send . LspDiagnostics
+-- end helpers[7] --
+
+-- end helpers --
+
+-- type_params (0 items) --
+-- end type_params --
+
+-- default_row_args (0 items) --
+-- end default_row_args --
+
+-- helpers_row_polymorphic --
+false
+-- end helpers_row_polymorphic --
+
+=============================== EFFECT: Http ===============================
+
+-- type_name (4 bytes) --
+Http
+-- end type_name --
+
+-- description (160 bytes) --
+JSON I/O. Fetch JSON from HTTP endpoints (returns Value). Parsing JSON Text is PURE — `eitherDecode` (aeson-style, serde_json underneath), no effect involved.
+-- end description --
+
+-- prompt_card: None --
+
+-- constructors (2 items) --
+-- constructors[0] (48 bytes) --
+HttpGet :: Text -> Http (Either HttpError Value)
+-- end constructors[0] --
+
+-- constructors[1] (58 bytes) --
+HttpPost :: Text -> Value -> Http (Either HttpError Value)
+-- end constructors[1] --
+
+-- end constructors --
+
+-- type_defs (1 items) --
+-- type_defs[0] (658 bytes) --
+data HttpError = HttpInvalidUrl Text | HttpRestricted Text | HttpNetwork Text | HttpStatus Int Text | HttpTooLarge Int deriving (Show, Eq)
+instance ToJSON HttpError where
+  toJSON e = case e of
+    HttpInvalidUrl detail -> object ["tag" .= ("HttpInvalidUrl" :: Text), "detail" .= detail]
+    HttpRestricted detail -> object ["tag" .= ("HttpRestricted" :: Text), "detail" .= detail]
+    HttpNetwork detail -> object ["tag" .= ("HttpNetwork" :: Text), "detail" .= detail]
+    HttpStatus code body -> object ["tag" .= ("HttpStatus" :: Text), "code" .= code, "body" .= body]
+    HttpTooLarge nodes -> object ["tag" .= ("HttpTooLarge" :: Text), "nodes" .= nodes]
+-- end type_defs[0] --
+
+-- end type_defs --
+
+-- extra_imports (0 items) --
+-- end extra_imports --
+
+-- helpers (2 items) --
+-- helpers[0] (296 bytes) --
+-- | Fetch JSON from an HTTP endpoint. Failure is TYPED (#335): `Left
+-- (HttpStatus code body)` on a non-2xx response, `Left (HttpNetwork _)`
+-- on a network failure. Unwrap with `Right v <- httpGet url` or `>>= liftEither`.
+httpGet :: Text -> M (Either HttpError Value)
+httpGet = send . HttpGet
+-- end helpers[0] --
+
+-- helpers[1] (192 bytes) --
+-- | POST a JSON body; returns the response Value (see `httpGet` for the
+-- failure shape).
+httpPost :: Text -> Value -> M (Either HttpError Value)
+httpPost url body = send (HttpPost url body)
+-- end helpers[1] --
+
+-- end helpers --
+
+-- type_params (0 items) --
+-- end type_params --
+
+-- default_row_args (0 items) --
+-- end default_row_args --
+
+-- helpers_row_polymorphic --
+false
+-- end helpers_row_polymorphic --
+
+=============================== EFFECT: Exec ===============================
+
+-- type_name (4 bytes) --
+Exec
+-- end type_name --
+
+-- description (38 bytes) --
+Run shell commands and capture output.
+-- end description --
+
+-- prompt_card: None --
+
+-- constructors (3 items) --
+-- constructors[0] (43 bytes) --
+Run :: Text -> Exec (Either ExecError Proc)
+-- end constructors[0] --
+
+-- constructors[1] (53 bytes) --
+RunIn :: Text -> Text -> Exec (Either ExecError Proc)
+-- end constructors[1] --
+
+-- constructors[2] (49 bytes) --
+RunArgv :: [Text] -> Exec (Either ExecError Proc)
+-- end constructors[2] --
+
+-- end constructors --
+
+-- type_defs (1 items) --
+-- type_defs[0] (295 bytes) --
+data ExecError = ExecSpawn Text | ExecBadDir Text deriving (Show, Eq)
+instance ToJSON ExecError where
+  toJSON e = case e of
+    ExecSpawn detail -> object ["tag" .= ("ExecSpawn" :: Text), "detail" .= detail]
+    ExecBadDir detail -> object ["tag" .= ("ExecBadDir" :: Text), "detail" .= detail]
+-- end type_defs[0] --
+
+-- end type_defs --
+
+-- extra_imports (3 items) --
+-- extra_imports[0] (40 bytes) --
+import qualified Tidepool.Shell as Shell
+-- end extra_imports[0] --
+
+-- extra_imports[1] (26 bytes) --
+import Tidepool.Shell (sh)
+-- end extra_imports[1] --
+
+-- extra_imports[2] (40 bytes) --
+import qualified Tidepool.Cargo as Cargo
+-- end extra_imports[2] --
+
+-- end extra_imports --
+
+-- helpers (3 items) --
+-- helpers[0] (428 bytes) --
+-- | Run a shell command; returns a `Proc` record {exitCode, stdout, stderr}
+-- (use `ok p` for the zero-exit check). Failure is TYPED (#335): `Left
+-- (ExecSpawn _)` when the process can't be spawned, `Left (ExecBadDir _)`
+-- for `runIn` with a bad/escaping directory. A nonzero EXIT is NOT a
+-- failure — inspect `p.exitCode`. Natural spelling: `Right p <- run cmd`.
+run :: Text -> M (Either ExecError Proc)
+run = send . Run
+-- end helpers[0] --
+
+-- helpers[1] (87 bytes) --
+runIn :: Text -> Text -> M (Either ExecError Proc)
+runIn dir cmd = send (RunIn dir cmd)
+-- end helpers[1] --
+
+-- helpers[2] (71 bytes) --
+runArgv :: [Text] -> M (Either ExecError Proc)
+runArgv = send . RunArgv
+-- end helpers[2] --
+
+-- end helpers --
+
+-- type_params (0 items) --
+-- end type_params --
+
+-- default_row_args (0 items) --
+-- end default_row_args --
+
+-- helpers_row_polymorphic --
+false
+-- end helpers_row_polymorphic --
+
+=============================== EFFECT: Git ===============================
+
+-- type_name (3 bytes) --
+Git
+-- end type_name --
+
+-- description (485 bytes) --
+Read-only git repository queries. Returns typed records parsed Rust-side from machine-format git output — no text-splitting needed. `gitLog n` → last N commits newest-first; `gitStatus` → working-tree status; `gitDiffStat rev` → per-file diff stats vs a revspec; `gitShow rev` → one commit. All three list verbs return typed records: `Commit {sha,subject,author,date,files}`, `StatusEntry {path,state}` (state = 2-char XY porcelain code), `FileDelta {path,adds,dels,binary}`.
+-- end description --
+
+-- prompt_card: None --
+
+-- constructors (4 items) --
+-- constructors[0] (47 bytes) --
+GitLog :: Int -> Git (Either GitError [Commit])
+-- end constructors[0] --
+
+-- constructors[1] (48 bytes) --
+GitStatus :: Git (Either GitError [StatusEntry])
+-- end constructors[1] --
+
+-- constructors[2] (56 bytes) --
+GitDiffStat :: Text -> Git (Either GitError [FileDelta])
+-- end constructors[2] --
+
+-- constructors[3] (47 bytes) --
+GitShow :: Text -> Git (Either GitError Commit)
+-- end constructors[3] --
+
+-- end constructors --
+
+-- type_defs (1 items) --
+-- type_defs[0] (327 bytes) --
+data GitError = GitBadRevspec Text | GitFailed Int Text deriving (Show, Eq)
+instance ToJSON GitError where
+  toJSON e = case e of
+    GitBadRevspec detail -> object ["tag" .= ("GitBadRevspec" :: Text), "detail" .= detail]
+    GitFailed code detail -> object ["tag" .= ("GitFailed" :: Text), "code" .= code, "detail" .= detail]
+-- end type_defs[0] --
+
+-- end type_defs --
+
+-- extra_imports (1 items) --
+-- extra_imports[0] (36 bytes) --
+import qualified Tidepool.Git as Git
+-- end extra_imports[0] --
+
+-- end extra_imports --
+
+-- helpers (4 items) --
+-- helpers[0] (156 bytes) --
+-- | Last N commits, newest-first. Each 'Commit' carries sha/subject/author/date/files.
+gitLog :: Int -> M (Either GitError [Commit])
+gitLog = send . GitLog
+-- end helpers[0] --
+
+-- helpers[1] (180 bytes) --
+-- | Working-tree status. Each 'StatusEntry' has path and 2-char XY state code
+-- (e.g. "M ", "??", "A ").
+gitStatus :: M (Either GitError [StatusEntry])
+gitStatus = send GitStatus
+-- end helpers[1] --
+
+-- helpers[2] (213 bytes) --
+-- | Per-file diff stats vs a revspec ("HEAD~1", "main", "HEAD~3..HEAD", etc.).
+-- 'FileDelta' carries path/adds/dels/binary.
+gitDiffStat :: Text -> M (Either GitError [FileDelta])
+gitDiffStat = send . GitDiffStat
+-- end helpers[2] --
+
+-- helpers[3] (223 bytes) --
+-- | Single commit by revspec. `Left (GitBadRevspec _)` on an unknown or
+-- ambiguous revspec; unwrap with `Right c <- gitShow rev` or `>>= liftEither`.
+gitShow :: Text -> M (Either GitError Commit)
+gitShow = send . GitShow
+-- end helpers[3] --
+
+-- end helpers --
+
+-- type_params (0 items) --
+-- end type_params --
+
+-- default_row_args (0 items) --
+-- end default_row_args --
+
+-- helpers_row_polymorphic --
+false
+-- end helpers_row_polymorphic --
+
+=============================== EFFECT: Time ===============================
+
+-- type_name (4 bytes) --
+Time
+-- end type_name --
+
+-- description (309 bytes) --
+UTC wall-clock access (epoch milliseconds). `getCurrentTime` returns an opaque `UTCTime` value. `formatISO8601` renders it as ISO-8601 (e.g. "2024-02-29T00:00:00Z"). `diffUTCTime a b` gives seconds between two times; `addUTCTime secs t` adds seconds. `epochMillis t` exposes the raw epoch-millisecond integer.
+-- end description --
+
+-- prompt_card: None --
+
+-- constructors (1 items) --
+-- constructors[0] (19 bytes) --
+TimeNow :: Time Int
+-- end constructors[0] --
+
+-- end constructors --
+
+-- type_defs (0 items) --
+-- end type_defs --
+
+-- extra_imports (0 items) --
+-- end extra_imports --
+
+-- helpers (1 items) --
+-- helpers[0] (144 bytes) --
+-- | Current UTC time as an opaque UTCTime (epoch-millisecond resolution).
+getCurrentTime :: M UTCTime
+getCurrentTime = UTCTime <$> send TimeNow
+-- end helpers[0] --
+
+-- end helpers --
+
+-- type_params (0 items) --
+-- end type_params --
+
+-- default_row_args (0 items) --
+-- end default_row_args --
+
+-- helpers_row_polymorphic --
+false
+-- end helpers_row_polymorphic --
+
+=============================== EFFECT: Meta ===============================
+
+-- type_name (4 bytes) --
+Meta
+-- end type_name --
+
+-- description (79 bytes) --
+Self-mirror for the runtime. Query constructors, primops, effects, diagnostics.
+-- end description --
+
+-- prompt_card: None --
+
+-- constructors (7 items) --
+-- constructors[0] (38 bytes) --
+MetaConstructors :: Meta [(Text, Int)]
+-- end constructors[0] --
+
+-- constructors[1] (48 bytes) --
+MetaLookupCon :: Text -> Meta (Maybe (Int, Int))
+-- end constructors[1] --
+
+-- constructors[2] (26 bytes) --
+MetaPrimOps :: Meta [Text]
+-- end constructors[2] --
+
+-- constructors[3] (26 bytes) --
+MetaEffects :: Meta [Text]
+-- end constructors[3] --
+
+-- constructors[4] (30 bytes) --
+MetaDiagnostics :: Meta [Text]
+-- end constructors[4] --
+
+-- constructors[5] (24 bytes) --
+MetaVersion :: Meta Text
+-- end constructors[5] --
+
+-- constructors[6] (23 bytes) --
+MetaHelp :: Meta [Text]
+-- end constructors[6] --
+
+-- end constructors --
+
+-- type_defs (0 items) --
+-- end type_defs --
+
+-- extra_imports (0 items) --
+-- end extra_imports --
+
+-- helpers (7 items) --
+-- helpers[0] (121 bytes) --
+-- | Constructor table: (name, arity) pairs.
+metaConstructors :: M [(Text, Int)]
+metaConstructors = send MetaConstructors
+-- end helpers[0] --
+
+-- helpers[1] (132 bytes) --
+-- | Look up a constructor by name: (tag, arity).
+metaLookupCon :: Text -> M (Maybe (Int, Int))
+metaLookupCon = send . MetaLookupCon
+-- end helpers[1] --
+
+-- helpers[2] (97 bytes) --
+-- | Names of the JIT-implemented primops.
+metaPrimOps :: M [Text]
+metaPrimOps = send MetaPrimOps
+-- end helpers[2] --
+
+-- helpers[3] (99 bytes) --
+-- | Effect type names in the running stack.
+metaEffects :: M [Text]
+metaEffects = send MetaEffects
+-- end helpers[3] --
+
+-- helpers[4] (106 bytes) --
+-- | Drain pending runtime diagnostics.
+metaDiagnostics :: M [Text]
+metaDiagnostics = send MetaDiagnostics
+-- end helpers[4] --
+
+-- helpers[5] (79 bytes) --
+-- | Server crate version.
+metaVersion :: M Text
+metaVersion = send MetaVersion
+-- end helpers[5] --
+
+-- helpers[6] (95 bytes) --
+-- | Helper-verb signatures of the running stack.
+metaHelp :: M [Text]
+metaHelp = send MetaHelp
+-- end helpers[6] --
+
+-- end helpers --
+
+-- type_params (0 items) --
+-- end type_params --
+
+-- default_row_args (0 items) --
+-- end default_row_args --
+
+-- helpers_row_polymorphic --
+false
+-- end helpers_row_polymorphic --
+
+=============================== EFFECT: Ask ===============================
+
+-- type_name (3 bytes) --
+Ask
+-- end type_name --
+
+-- description (364 bytes) --
+Suspend execution and ask the calling agent a STRUCTURED question. `ask schema prompt` carries the schema as JSON Schema in the suspension; the resume reply is validated against it server-side before re-entering the computation (invalid replies do NOT consume the continuation). Extract fields from the returned Value with optics, e.g. `v ^? key "path" . _String`.
+-- end description --
+
+-- prompt_card: None --
+
+-- constructors (1 items) --
+-- constructors[0] (37 bytes) --
+AskWith :: Text -> Value -> Ask Value
+-- end constructors[0] --
+
+-- end constructors --
+
+-- type_defs (1 items) --
+-- type_defs[0] (100 bytes) --
+data Schema = SObj [(Text, Schema)] | SArr Schema | SStr | SNum | SBool | SEnum [Text] | SOpt Schema
+-- end type_defs[0] --
+
+-- end type_defs --
+
+-- extra_imports (0 items) --
+-- end extra_imports --
+
+-- helpers (4 items) --
+-- helpers[0] (118 bytes) --
+ask :: Schema -> Text -> M Value
+ask schema prompt = send (AskWith prompt (object ["schema" .= schemaToValue schema]))
+-- end helpers[0] --
+
+-- helpers[1] (61 bytes) --
+isOpt :: Schema -> Bool
+isOpt (SOpt _) = True
+isOpt _ = False
+-- end helpers[1] --
+
+-- helpers[2] (74 bytes) --
+innerSchema :: Schema -> Schema
+innerSchema (SOpt s) = s
+innerSchema s = s
+-- end helpers[2] --
+
+-- helpers[3] (638 bytes) --
+schemaToValue :: Schema -> Value
+schemaToValue SStr = object ["type" .= ("string" :: Text)]
+schemaToValue SNum = object ["type" .= ("number" :: Text)]
+schemaToValue SBool = object ["type" .= ("boolean" :: Text)]
+schemaToValue (SEnum vs) = object ["type" .= ("string" :: Text), "enum" .= vs]
+schemaToValue (SArr item) = object ["type" .= ("array" :: Text), "items" .= schemaToValue item]
+schemaToValue (SOpt s) = schemaToValue s
+schemaToValue (SObj fields) = object ["type" .= ("object" :: Text), "properties" .= object (map (\(k,s) -> k .= schemaToValue (innerSchema s)) fields), "required" .= map fst (filter (not . isOpt . snd) fields)]
+-- end helpers[3] --
+
+-- end helpers --
+
+-- type_params (0 items) --
+-- end type_params --
+
+-- default_row_args (0 items) --
+-- end default_row_args --
+
+-- helpers_row_polymorphic --
+false
+-- end helpers_row_polymorphic --
+
+=============================== EFFECT: AskUser ===============================
+
+-- type_name (7 bytes) --
+AskUser
+-- end type_name --
+
+-- description (1350 bytes) --
+Present a typed form to a HUMAN OPERATOR and block until they submit. `askUser @T` presents a human form and returns `T`. Define `T` using ordinary records and constructors, derive `Generic` and `FromJSON` for it and any nested custom types, and end fields in `Text`, `Int`, `Double`, or `Bool`. Constructors are choices, record fields are named inputs, and `Maybe a` is optional; a bad submission re-prompts internally, so there is no `Either` to unwrap. The type IS the form — there is no second description of the shape to drift from the answer type, and the submission is ordinary JSON read back by that same generic `FromJSON`:
+  data Env = Development | Staging | Production deriving (Generic, FromJSON)
+  data Deploy = Deploy { service :: Text, env :: Env, replicas :: Int, note :: Maybe Text } deriving (Generic, FromJSON)
+  d <- askUser @Deploy   -- then read fields with record-dot: d.service, d.env
+For alternatives that exist only as runtime values, `choose :: [(Text, a)] -> M a` and `chooseMany :: [(Text, a)] -> M [a]` take (label, value) pairs. `askUserRaw :: Value -> M Value` is the raw escape hatch these are built on, carrying the form spec as JSON directly. `note :: Text -> M ()` posts markdown-ish text to the operator's feed WITHOUT blocking — use it to explain what you are about to ask and why, before presenting a form.
+-- end description --
+
+-- prompt_card: Some --
+-- prompt_card.0 (1031 bytes) --
+`choose :: [(Text, a)] -> M a` — labeled decision from (label, value) pairs; ALWAYS prefer it for a decision, the label is the only text the operator sees. `chooseMany :: [(Text, a)] -> M [a]` — pick a subset.
+`askUser @T :: M T` — form derived from `T`'s own shape: a record's fields become named inputs, a SUM's constructors become the choices (nullary constructors are direct options; a payload constructor is a selectable branch with its fields), or a primitive (`Text`/`Int`/`Bool`); a bad submission re-prompts internally, no `Either` to unwrap: `d <- askUser @Deploy`, `k <- askUser @NextStep` then `case k of ...` to sequence follow-ups. A type you define for this needs `deriving (Generic, FromJSON)`, and a sum's payload constructors need RECORD syntax — `Other { detail :: Text }`, never `Other Text` (positional fields have no JSON key).
+`note "..." :: M ()` — non-blocking narration to the operator's feed; call it BEFORE presenting a form to explain what you're about to ask and why (it never costs a turn).
+-- end prompt_card.0 --
+
+-- constructors (2 items) --
+-- constructors[0] (37 bytes) --
+AskUserWith :: Value -> AskUser Value
+-- end constructors[0] --
+
+-- constructors[1] (30 bytes) --
+NoteWith :: Text -> AskUser ()
+-- end constructors[1] --
+
+-- end constructors --
+
+-- type_defs (0 items) --
+-- end type_defs --
+
+-- extra_imports (1 items) --
+-- extra_imports[0] (20 bytes) --
+import Tidepool.Form
+-- end extra_imports[0] --
+
+-- end extra_imports --
+
+-- helpers (2 items) --
+-- helpers[0] (72 bytes) --
+askUserRaw :: Value -> M Value
+askUserRaw spec = send (AskUserWith spec)
+-- end helpers[0] --
+
+-- helpers[1] (59 bytes) --
+noteRaw :: Text -> M ()
+noteRaw text = send (NoteWith text)
+-- end helpers[1] --
+
+-- end helpers --
+
+-- type_params (0 items) --
+-- end type_params --
+
+-- default_row_args (0 items) --
+-- end default_row_args --
+
+-- helpers_row_polymorphic --
+false
+-- end helpers_row_polymorphic --
+
+=============================== EFFECT: ReadState ===============================
+
+-- type_name (9 bytes) --
+ReadState
+-- end type_name --
+
+-- description (483 bytes) --
+Read the loop's durable State — the same value the framing renders a SELECTION of — as JSON, immediately. `getStateJson :: M Value` returns the state as of this cognition window's start; the current window's edit (and any operator message being ingested this window) are not yet in it. Use optics for ad-hoc queries, or decode the typed spine with `Aeson.fromJSON` and compute over memories, threads, and scratch with ordinary Haskell — filter the archive, search, count, join.
+-- end description --
+
+-- prompt_card: Some --
+-- prompt_card.0 (332 bytes) --
+`getStateJson :: M Value` — the loop's durable State as JSON, immediately (no operator, no model round), as of this window's START (this window's edit and any operator message being ingested are not in it yet). Query with optics (`v ^? key "memories" . _Array`) or decode the typed spine: `Aeson.fromJSON v :: Aeson.Result State`.
+-- end prompt_card.0 --
+
+-- constructors (1 items) --
+-- constructors[0] (32 bytes) --
+ReadStateWith :: ReadState Value
+-- end constructors[0] --
+
+-- end constructors --
+
+-- type_defs (0 items) --
+-- end type_defs --
+
+-- extra_imports (0 items) --
+-- end extra_imports --
+
+-- helpers (1 items) --
+-- helpers[0] (57 bytes) --
+getStateJson :: M Value
+getStateJson = send ReadStateWith
+-- end helpers[0] --
+
+-- end helpers --
+
+-- type_params (0 items) --
+-- end type_params --
+
+-- default_row_args (0 items) --
+-- end default_row_args --
+
+-- helpers_row_polymorphic --
+false
+-- end helpers_row_polymorphic --
+
+=============================== EFFECT: RunLLMTurn ===============================
+
+-- type_name (10 bytes) --
+RunLLMTurn
+-- end type_name --
+
+-- description (1435 bytes) --
+Suspend for a TYPED answer. `runLLMTurn \@T prompt :: M T` — the same calling model answers IN CONTEXT; its failure is this turn's failure, so the answer is bare. `runLLMTurnFork \@T prompt :: M (Either InvocationExit T)` — a forked sub-agent answers in its own window; `runLLMTurnFanout \@T prompts :: M [Either InvocationExit T]` — N forked sub-agents, one per prompt, one result per prompt IN DECLARED ORDER. A forked window is a BRANCH POSITION, so its abnormal exit (round exhaustion, non-finalization, cancellation, runtime failure) arrives as `Left exit` at that position instead of killing its siblings — natural spelling `Right x <- runLLMTurnFork \@T p`, or `renderInvocationExit e` to display one. GHC validates each answer against `T` before it resumes the continuation (an ill-typed answer never consumes it). `freezeContext :: M ContextRef` mints a capability naming THIS window's current frozen prefix, immediately (no operator, no model round). `runLLMTurnBranch \@T ref prompt :: M (Either InvocationExit (T, ContextRef))` forks a FRESH child window off that frozen prefix (never an empty root) — `Right (answer, ref')` is the child's own answer plus a ref to ITS post-finalize context for branching further; a branch child is a BRANCH POSITION too, so its abnormal exit is a `Left` here as well (and a window that never finalized has no context to hand back, which is why the `Either` wraps the whole pair).
+-- end description --
+
+-- prompt_card: None --
+
+-- constructors (2 items) --
+-- constructors[0] (51 bytes) --
+RunLLMTurnWith :: Text -> Value -> RunLLMTurn Value
+-- end constructors[0] --
+
+-- constructors[1] (45 bytes) --
+RunLLMTurnFreezeWith :: RunLLMTurn ContextRef
+-- end constructors[1] --
+
+-- end constructors --
+
+-- type_defs (3 items) --
+-- type_defs[0] (53 bytes) --
+data ContextRef = ContextRef Text deriving (Show, Eq)
+-- end type_defs[0] --
+
+-- type_defs[1] (437 bytes) --
+-- | Why a forked cognition window ended WITHOUT a typed answer.
+-- Folded as data at the failing branch's own position (PRD 21
+-- locked decision 6) — never an exception that erases the results
+-- its siblings already produced. Each constructor carries the
+-- runtime's own detail text.
+data InvocationExit
+  = ExitRoundsExhausted Text
+  | ExitNotFinalized Text
+  | ExitCancelled Text
+  | ExitRuntimeFailure Text
+  deriving (Show, Eq)
+-- end type_defs[1] --
+
+-- type_defs[2] (455 bytes) --
+instance ToJSON InvocationExit where
+  toJSON e = case e of
+    ExitRoundsExhausted detail -> object ["tag" .= ("ExitRoundsExhausted" :: Text), "detail" .= detail]
+    ExitNotFinalized detail -> object ["tag" .= ("ExitNotFinalized" :: Text), "detail" .= detail]
+    ExitCancelled detail -> object ["tag" .= ("ExitCancelled" :: Text), "detail" .= detail]
+    ExitRuntimeFailure detail -> object ["tag" .= ("ExitRuntimeFailure" :: Text), "detail" .= detail]
+-- end type_defs[2] --
+
+-- end type_defs --
+
+-- extra_imports (0 items) --
+-- end extra_imports --
+
+-- helpers (10 items) --
+-- helpers[0] (144 bytes) --
+{-# OPAQUE runLLMTurn #-}
+runLLMTurn :: forall a effs. Member RunLLMTurn effs => Text -> Eff effs a
+runLLMTurn prompt = runLLMTurnSited 0 prompt
+-- end helpers[0] --
+
+-- helpers[1] (184 bytes) --
+{-# OPAQUE runLLMTurnFork #-}
+runLLMTurnFork :: forall a effs. Member RunLLMTurn effs => Text -> Eff effs (Either InvocationExit a)
+runLLMTurnFork prompt = runLLMTurnForkSited 0 prompt
+-- end helpers[1] --
+
+-- helpers[2] (196 bytes) --
+{-# OPAQUE runLLMTurnFanout #-}
+runLLMTurnFanout :: forall a effs. Member RunLLMTurn effs => [Text] -> Eff effs [Either InvocationExit a]
+runLLMTurnFanout prompts = runLLMTurnFanoutSited 0 prompts
+-- end helpers[2] --
+
+-- helpers[3] (320 bytes) --
+renderInvocationExit :: InvocationExit -> Text
+renderInvocationExit (ExitRoundsExhausted d) = "round exhaustion: " <> d
+renderInvocationExit (ExitNotFinalized d) = "non-finalization: " <> d
+renderInvocationExit (ExitCancelled d) = "cancelled: " <> d
+renderInvocationExit (ExitRuntimeFailure d) = "runtime failure: " <> d
+-- end helpers[3] --
+
+-- helpers[4] (211 bytes) --
+{-# OPAQUE runLLMTurnSited #-}
+runLLMTurnSited :: forall a effs. Member RunLLMTurn effs => Int -> Text -> Eff effs a
+runLLMTurnSited sid p = unsafeCoerce <$> send (RunLLMTurnWith p (object ["typedSite" .= sid]))
+-- end helpers[4] --
+
+-- helpers[5] (263 bytes) --
+{-# OPAQUE runLLMTurnForkSited #-}
+runLLMTurnForkSited :: forall a effs. Member RunLLMTurn effs => Int -> Text -> Eff effs (Either InvocationExit a)
+runLLMTurnForkSited sid p = unsafeCoerce <$> send (RunLLMTurnWith p (object ["typedSite" .= sid, "fork" .= True]))
+-- end helpers[5] --
+
+-- helpers[6] (349 bytes) --
+{-# OPAQUE runLLMTurnFanoutSited #-}
+runLLMTurnFanoutSited :: forall a effs. Member RunLLMTurn effs => Int -> [Text] -> Eff effs [Either InvocationExit a]
+runLLMTurnFanoutSited sid prompts = unsafeCoerce <$> send (RunLLMTurnWith (intercalate "\n" prompts) (object ["typedSite" .= sid, "fork" .= True, "fan" .= length prompts, "prompts" .= prompts]))
+-- end helpers[6] --
+
+-- helpers[7] (555 bytes) --
+-- | Mint a capability naming THIS window's current frozen
+-- prefix (PRD 21 locked decision 2: children fork the frozen
+-- post-coalgebra context). Immediate — no operator, no model
+-- round (ReadState's service shape). Possession is permission:
+-- a ContextRef only ever comes from here or from
+-- runLLMTurnBranch's own return; an unrecognized one is refused
+-- by the driver as a typed error, never a silent fresh-root
+-- fallback.
+freezeContext :: forall effs. Member RunLLMTurn effs => Eff effs ContextRef
+freezeContext = send RunLLMTurnFreezeWith
+-- end helpers[7] --
+
+-- helpers[8] (218 bytes) --
+{-# OPAQUE runLLMTurnBranch #-}
+runLLMTurnBranch :: forall a effs. Member RunLLMTurn effs => ContextRef -> Text -> Eff effs (Either InvocationExit (a, ContextRef))
+runLLMTurnBranch ref p = runLLMTurnBranchSited 0 ref p
+-- end helpers[8] --
+
+-- helpers[9] (330 bytes) --
+{-# OPAQUE runLLMTurnBranchSited #-}
+runLLMTurnBranchSited :: forall a effs. Member RunLLMTurn effs => Int -> ContextRef -> Text -> Eff effs (Either InvocationExit (a, ContextRef))
+runLLMTurnBranchSited sid (ContextRef ref) p = unsafeCoerce <$> send (RunLLMTurnWith p (object ["typedSite" .= sid, "branch" .= True, "ref" .= ref]))
+-- end helpers[9] --
+
+-- end helpers --
+
+-- type_params (0 items) --
+-- end type_params --
+
+-- default_row_args (0 items) --
+-- end default_row_args --
+
+-- helpers_row_polymorphic --
+true
+-- end helpers_row_polymorphic --
+
+=============================== EFFECT: Finalize ===============================
+
+-- type_name (8 bytes) --
+Finalize
+-- end type_name --
+
+-- description (307 bytes) --
+Terminate the current Agent turn loop and hand a typed value UP to the parent `runLLMTurn` hole, in-heap (no JSON round-trip — the value may be a closure or other non-serializable value). `finalize x` never resumes; the harness driver reads the value directly and resolves the parent hole via `run_child`.
+-- end description --
+
+-- prompt_card: Some --
+-- prompt_card.0 (123 bytes) --
+`finalize @T value` — commit the typed answer and end this turn; `value` crosses in-heap to the parent `runLLMTurn` hole.
+-- end prompt_card.0 --
+
+-- constructors (1 items) --
+-- constructors[0] (40 bytes) --
+FinalizeWith :: Int -> v -> Finalize v a
+-- end constructors[0] --
+
+-- end constructors --
+
+-- type_defs (1 items) --
+-- type_defs[0] (13 bytes) --
+data NoAnswer
+-- end type_defs[0] --
+
+-- end type_defs --
+
+-- extra_imports (0 items) --
+-- end extra_imports --
+
+-- helpers (2 items) --
+-- helpers[0] (127 bytes) --
+{-# OPAQUE finalize #-}
+finalize :: forall v a effs. Member (Finalize v) effs => v -> Eff effs a
+finalize v = finalizeSited 0 v
+-- end helpers[0] --
+
+-- helpers[1] (161 bytes) --
+{-# OPAQUE finalizeSited #-}
+finalizeSited :: forall v a effs. Member (Finalize v) effs => Int -> v -> Eff effs a
+finalizeSited sid v = send (FinalizeWith sid v)
+-- end helpers[1] --
+
+-- end helpers --
+
+-- type_params (1 items) --
+-- type_params[0] (1 bytes) --
+v
+-- end type_params[0] --
+
+-- end type_params --
+
+-- default_row_args (1 items) --
+-- default_row_args[0] (8 bytes) --
+NoAnswer
+-- end default_row_args[0] --
+
+-- end default_row_args --
+
+-- helpers_row_polymorphic --
+false
+-- end helpers_row_polymorphic --
+
+=============================== EFFECT: Fork ===============================
+
+-- type_name (4 bytes) --
+Fork
+-- end type_name --
+
+-- description (314 bytes) --
+Spawn parallel sub-answerers and gather their typed answers. `fork \@T brief` forks ONE child that answers a single `T`; `forkAll \@T briefs` forks one child per brief, answered together as `[T]` in order (`import Tidepool.Fork`). A forked child answers its own brief directly and cannot itself fork — depth-one.
+-- end description --
+
+-- prompt_card: Some --
+-- prompt_card.0 (257 bytes) --
+`fork @T brief :: M T` — delegate to one sub-answerer that answers `brief` on its own.
+`forkAll @T briefs :: M [T]` — delegate to one sub-answerer per brief, answered together as a batch `[T]` (`import Tidepool.Fork`). A forked child cannot itself fork.
+-- end prompt_card.0 --
+
+-- constructors (2 items) --
+-- constructors[0] (37 bytes) --
+ForkWith :: Int -> Text -> Fork Value
+-- end constructors[0] --
+
+-- constructors[1] (42 bytes) --
+ForkAllWith :: Int -> [Text] -> Fork Value
+-- end constructors[1] --
+
+-- end constructors --
+
+-- type_defs (0 items) --
+-- end type_defs --
+
+-- extra_imports (0 items) --
+-- end extra_imports --
+
+-- helpers (2 items) --
+-- helpers[0] (163 bytes) --
+{-# OPAQUE forkSited #-}
+forkSited :: forall a effs. Member Fork effs => Int -> Text -> Eff effs a
+forkSited sid brief = unsafeCoerce <$> send (ForkWith sid brief)
+-- end helpers[0] --
+
+-- helpers[1] (183 bytes) --
+{-# OPAQUE forkAllSited #-}
+forkAllSited :: forall a effs. Member Fork effs => Int -> [Text] -> Eff effs [a]
+forkAllSited sid prompts = unsafeCoerce <$> send (ForkAllWith sid prompts)
+-- end helpers[1] --
+
+-- end helpers --
+
+-- type_params (0 items) --
+-- end type_params --
+
+-- default_row_args (0 items) --
+-- end default_row_args --
+
+-- helpers_row_polymorphic --
+false
+-- end helpers_row_polymorphic --
+
+=============================== EFFECT: Llm ===============================
+
+-- type_name (3 bytes) --
+Llm
+-- end type_name --
+
+-- description (221 bytes) --
+Call an LLM for classification, extraction, or judgment. `llm schema prompt` returns a Value validated against the schema (structured output, no markdown fences). Extract with optics, e.g. `v ^? key "category" . _String`.
+-- end description --
+
+-- prompt_card: None --
+
+-- constructors (1 items) --
+-- constructors[0] (61 bytes) --
+LlmStructured :: Text -> Value -> Llm (Either LlmError Value)
+-- end constructors[0] --
+
+-- end constructors --
+
+-- type_defs (1 items) --
+-- type_defs[0] (353 bytes) --
+data LlmError = LlmApi Text | LlmRefusal Text | LlmBudget deriving (Show, Eq)
+instance ToJSON LlmError where
+  toJSON e = case e of
+    LlmApi detail -> object ["tag" .= ("LlmApi" :: Text), "detail" .= detail]
+    LlmRefusal detail -> object ["tag" .= ("LlmRefusal" :: Text), "detail" .= detail]
+    LlmBudget -> object ["tag" .= ("LlmBudget" :: Text)]
+-- end type_defs[0] --
+
+-- end type_defs --
+
+-- extra_imports (0 items) --
+-- end extra_imports --
+
+-- helpers (3 items) --
+-- helpers[0] (456 bytes) --
+-- | Call the LLM for structured output. Failure is TYPED and TOTAL
+-- (#335): `Left (LlmApi _)` on an API/network failure, `Left (LlmRefusal
+-- _)` on a declined answer, `Left LlmBudget` when the per-eval call budget
+-- is exhausted — none of these abort the eval. Unwrap with `Right v <- llm
+-- schema prompt` or `>>= liftEither`.
+llm :: Schema -> Text -> M (Either LlmError Value)
+llm schema prompt = send (LlmStructured prompt (schemaToValue schema))
+-- end helpers[0] --
+
+-- helpers[1] (239 bytes) --
+findTally :: Eq a => a -> [(a, Int)] -> Maybe [(a, Int)]
+findTally _ [] = Nothing
+findTally x ((k, n):rest) = if x == k then Just ((k, n + 1) : rest) else case findTally x rest of { Just rest' -> Just ((k, n) : rest'); Nothing -> Nothing }
+-- end helpers[1] --
+
+-- helpers[2] (146 bytes) --
+tallyList :: Eq a => [a] -> [(a, Int)]
+tallyList = foldl' (\acc x -> case findTally x acc of { Just acc' -> acc'; Nothing -> acc ++ [(x, 1)] }) []
+-- end helpers[2] --
+
+-- end helpers --
+
+-- type_params (0 items) --
+-- end type_params --
+
+-- default_row_args (0 items) --
+-- end default_row_args --
+
+-- helpers_row_polymorphic --
+false
+-- end helpers_row_polymorphic --
+
+=============================== EFFECT: Worktree ===============================
+
+-- type_name (8 bytes) --
+Worktree
+-- end type_name --
+
+-- description (475 bytes) --
+Managed git worktrees: create an isolated worktree from a clean source (or, explicitly, from a dirty-source snapshot), look a retained one back up by durable id, and list what exists. Retain-first — there is no release or delete verb in v1, deliberately. Git WORKFLOW (rebase, merge, cherry-pick, conflict resolution) is absent by design: that work belongs to coding agents with their native tools, and Tidepool observes what the repository became through `Tidepool.Event`.
+-- end description --
+
+-- prompt_card: None --
+
+-- constructors (5 items) --
+-- constructors[0] (80 bytes) --
+WorktreeCreate :: WorktreeSpec -> Worktree (Either WorktreeError WorktreeHandle)
+-- end constructors[0] --
+
+-- constructors[1] (78 bytes) --
+WorktreeLookup :: WorktreeId -> Worktree (Either WorktreeError WorktreeHandle)
+-- end constructors[1] --
+
+-- constructors[2] (65 bytes) --
+WorktreeList :: Worktree (Either WorktreeError [WorktreeSummary])
+-- end constructors[2] --
+
+-- constructors[3] (76 bytes) --
+WorktreeBranchOf :: WorktreeId -> Worktree (Either WorktreeError BranchName)
+-- end constructors[3] --
+
+-- constructors[4] (70 bytes) --
+WorktreeHeadOf :: WorktreeId -> Worktree (Either WorktreeError GitOid)
+-- end constructors[4] --
+
+-- end constructors --
+
+-- type_defs (21 items) --
+-- type_defs[0] (53 bytes) --
+data WorktreeId = WorktreeId Text deriving (Show, Eq)
+-- end type_defs[0] --
+
+-- type_defs[1] (45 bytes) --
+data GitOid = GitOid Text deriving (Show, Eq)
+-- end type_defs[1] --
+
+-- type_defs[2] (45 bytes) --
+data GitRef = GitRef Text deriving (Show, Eq)
+-- end type_defs[2] --
+
+-- type_defs[3] (53 bytes) --
+data BranchName = BranchName Text deriving (Show, Eq)
+-- end type_defs[3] --
+
+-- type_defs[4] (112 bytes) --
+data WorktreeSource = SourceCurrentRepository | SourceRef GitRef | SourceWorktree WorktreeId deriving (Show, Eq)
+-- end type_defs[4] --
+
+-- type_defs[5] (72 bytes) --
+data DirtyPolicy = RequireClean | AllowDirtySnapshot deriving (Show, Eq)
+-- end type_defs[5] --
+
+-- type_defs[6] (136 bytes) --
+data WorktreeSpec = WorktreeSpec { specSource :: WorktreeSource, specLabel :: Text, specDirtyPolicy :: DirtyPolicy } deriving (Show, Eq)
+-- end type_defs[6] --
+
+-- type_defs[7] (137 bytes) --
+data InProgressKind = InProgressMerge | InProgressRebase | InProgressCherryPick | InProgressRevert | InProgressBisect deriving (Show, Eq)
+-- end type_defs[7] --
+
+-- type_defs[8] (138 bytes) --
+data DirtySummary = DirtySummary { staged :: [Text], unstaged :: [Text], untracked :: [Text], ignoredExcluded :: Int } deriving (Show, Eq)
+-- end type_defs[8] --
+
+-- type_defs[9] (164 bytes) --
+data GitFailureReceipt = GitFailureReceipt { gitArgs :: [Text], gitCwd :: Text, gitExitCode :: Maybe Int, gitStdout :: Text, gitStderr :: Text } deriving (Show, Eq)
+-- end type_defs[9] --
+
+-- type_defs[10] (187 bytes) --
+data WorktreeReceipt = WorktreeReceipt { treeId :: WorktreeId, cwd :: Text, branch :: BranchName, sourceHead :: GitOid, snapshotRef :: Maybe GitRef, createdAt :: Int } deriving (Show, Eq)
+-- end type_defs[10] --
+
+-- type_defs[11] (93 bytes) --
+data WorktreeHandle = WorktreeHandle { handleReceipt :: WorktreeReceipt } deriving (Show, Eq)
+-- end type_defs[11] --
+
+-- type_defs[12] (113 bytes) --
+data WorktreeSummary = WorktreeSummary { summaryReceipt :: WorktreeReceipt, present :: Bool } deriving (Show, Eq)
+-- end type_defs[12] --
+
+-- type_defs[13] (65 bytes) --
+instance ToJSON WorktreeId where toJSON (WorktreeId t) = toJSON t
+-- end type_defs[13] --
+
+-- type_defs[14] (57 bytes) --
+instance ToJSON GitOid where toJSON (GitOid t) = toJSON t
+-- end type_defs[14] --
+
+-- type_defs[15] (57 bytes) --
+instance ToJSON GitRef where toJSON (GitRef t) = toJSON t
+-- end type_defs[15] --
+
+-- type_defs[16] (65 bytes) --
+instance ToJSON BranchName where toJSON (BranchName t) = toJSON t
+-- end type_defs[16] --
+
+-- type_defs[17] (63 bytes) --
+instance ToJSON InProgressKind where toJSON k = toJSON (show k)
+-- end type_defs[17] --
+
+-- type_defs[18] (169 bytes) --
+instance ToJSON DirtySummary where toJSON d = object ["staged" .= d.staged, "unstaged" .= d.unstaged, "untracked" .= d.untracked, "ignoredExcluded" .= d.ignoredExcluded]
+-- end type_defs[18] --
+
+-- type_defs[19] (177 bytes) --
+instance ToJSON GitFailureReceipt where toJSON r = object ["args" .= r.gitArgs, "cwd" .= r.gitCwd, "exitCode" .= r.gitExitCode, "stdout" .= r.gitStdout, "stderr" .= r.gitStderr]
+-- end type_defs[19] --
+
+-- type_defs[20] (1544 bytes) --
+data WorktreeError = SourceDirty DirtySummary | NotARepository Text | WorktreeLost WorktreeId | DirtySubmoduleUnsupported Text | SourceOperationInProgress InProgressKind | WorktreeBusy WorktreeId Text | GitFailure GitFailureReceipt | WorktreeNotRegistered WorktreeId | InvalidRegistryRoot Text Text | StorageFailure Text Text deriving (Show, Eq)
+instance ToJSON WorktreeError where
+  toJSON e = case e of
+    SourceDirty dirty -> object ["tag" .= ("SourceDirty" :: Text), "dirty" .= dirty]
+    NotARepository path -> object ["tag" .= ("NotARepository" :: Text), "path" .= path]
+    WorktreeLost lostId -> object ["tag" .= ("WorktreeLost" :: Text), "lostId" .= lostId]
+    DirtySubmoduleUnsupported submodule -> object ["tag" .= ("DirtySubmoduleUnsupported" :: Text), "submodule" .= submodule]
+    SourceOperationInProgress inProgress -> object ["tag" .= ("SourceOperationInProgress" :: Text), "inProgress" .= inProgress]
+    WorktreeBusy busyId holder -> object ["tag" .= ("WorktreeBusy" :: Text), "busyId" .= busyId, "holder" .= holder]
+    GitFailure receipt -> object ["tag" .= ("GitFailure" :: Text), "receipt" .= receipt]
+    WorktreeNotRegistered notRegisteredId -> object ["tag" .= ("WorktreeNotRegistered" :: Text), "notRegisteredId" .= notRegisteredId]
+    InvalidRegistryRoot root inside -> object ["tag" .= ("InvalidRegistryRoot" :: Text), "root" .= root, "inside" .= inside]
+    StorageFailure storagePath storageDetail -> object ["tag" .= ("StorageFailure" :: Text), "storagePath" .= storagePath, "storageDetail" .= storageDetail]
+-- end type_defs[20] --
+
+-- end type_defs --
+
+-- extra_imports (1 items) --
+-- extra_imports[0] (24 bytes) --
+import Tidepool.Worktree
+-- end extra_imports[0] --
+
+-- end extra_imports --
+
+-- helpers (4 items) --
+-- helpers[0] (303 bytes) --
+-- | Create a managed worktree. `Left (SourceDirty summary)` when the
+-- source is dirty and the spec did not opt in; case-match the error
+-- rather than unwrapping if you mean to handle it.
+createWorktree :: WorktreeSpec -> M (Either WorktreeError WorktreeHandle)
+createWorktree = send . WorktreeCreate
+-- end helpers[0] --
+
+-- helpers[1] (309 bytes) --
+-- | Look a retained worktree up by durable id. Survives restart:
+-- resolution reads on-disk registry state, not process memory.
+-- `Left (WorktreeLost i)` when it is registered but gone from disk.
+lookupWorktree :: WorktreeId -> M (Either WorktreeError WorktreeHandle)
+lookupWorktree = send . WorktreeLookup
+-- end helpers[1] --
+
+-- helpers[2] (221 bytes) --
+-- | Every registered worktree, present or lost. A lost tree is listed
+-- with `present = False` rather than failing the whole listing.
+listWorktrees :: M [WorktreeSummary]
+listWorktrees = send WorktreeList >>= liftEither
+-- end helpers[2] --
+
+-- helpers[3] (206 bytes) --
+-- | The durable identity of a managed worktree. Pure: the handle
+-- already carries its receipt, so this reads no git state.
+worktreeId :: WorktreeHandle -> WorktreeId
+worktreeId h = h.handleReceipt.treeId
+-- end helpers[3] --
+
+-- end helpers --
+
+-- type_params (0 items) --
+-- end type_params --
+
+-- default_row_args (0 items) --
+-- end default_row_args --
+
+-- helpers_row_polymorphic --
+false
+-- end helpers_row_polymorphic --
+
+=============================== EFFECT: Journal ===============================
+
+-- type_name (7 bytes) --
+Journal
+-- end type_name --
+
+-- description (491 bytes) --
+Durable append-only run journal: a resident harness records completed steps as it happens, mid-loop, so progress survives a crash and resume can fold the journal instead of redoing finished work. `record kind key payload` appends ONE entry — `kind` and `key` are caller-chosen labels (e.g. a step kind and the branch or task it concerns), `payload` is an opaque JSON value. Every append is flushed immediately; the journal is append-only forever — there is no rewrite or compaction verb.
+-- end description --
+
+-- prompt_card: None --
+
+-- constructors (1 items) --
+-- constructors[0] (49 bytes) --
+RecordStep :: Text -> Text -> Value -> Journal ()
+-- end constructors[0] --
+
+-- end constructors --
+
+-- type_defs (0 items) --
+-- end type_defs --
+
+-- extra_imports (1 items) --
+-- extra_imports[0] (42 bytes) --
+import qualified Tidepool.Resume as Resume
+-- end extra_imports[0] --
+
+-- end extra_imports --
+
+-- helpers (1 items) --
+-- helpers[0] (290 bytes) --
+-- | Append one durable journal entry. `kind` and `key` are
+-- caller-chosen labels; `payload` is an opaque JSON value. Flushed
+-- immediately; append-only — never rewritten or compacted.
+record :: Text -> Text -> Value -> M ()
+record kind key payload = send (RecordStep kind key payload)
+-- end helpers[0] --
+
+-- end helpers --
+
+-- type_params (0 items) --
+-- end type_params --
+
+-- default_row_args (0 items) --
+-- end default_row_args --
+
+-- helpers_row_polymorphic --
+false
+-- end helpers_row_polymorphic --
+

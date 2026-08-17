@@ -1,0 +1,22 @@
+[package]
+name = "tidepool-protocol"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+description = "Data-only schema for the Tidepool effect protocol (effects, verbs, records, errors) plus the generators that project it into the consuming crates"
+
+# ZERO dependencies, deliberately (PRD 22, and `plans/self-iterating-harness/
+# 22-p1-protocol-scaffold.md` §3.1): this crate is the LEAF the whole effect
+# contract is described from. It must never depend on another tidepool crate,
+# because the crates it describes depend on its OUTPUT — a dependency in the
+# other direction would make the schema unusable from the low crates. std only.
+# Keep it that way.
+[dependencies]
+
+[[bin]]
+name = "tidepool-protocol-gen"
+path = "src/bin/tidepool-protocol-gen.rs"

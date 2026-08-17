@@ -118,7 +118,7 @@ failure. The intelligence gradient, made literal.
    parent↔child messaging over lexically scoped handles: amend specs,
    surface issues, communicate replans, cancel subtrees.
 3. Direct-style concurrent orchestration: fork an `M` computation as a green
-   thread over the parked-continuation substrate; `forConcurrently` and every
+   thread over the parked-continuation substrate; `mapConcurrently` and every
    wave/pool/ladder idiom is authored stdlib Haskell, not Rust mechanism.
 4. Data races unrepresentable: forked computations communicate by return
    value and events only; the row carries no shared-mutable-state effect.
@@ -254,13 +254,21 @@ says the same thing in plain language).
 
 ### Green threads (the scheduler)
 
-- **`forkM :: M a -> M (Promise a)`** parks the forked computation as a new
-  continuation in the session's hole registry and returns a promise; `promiseDone
-  :: Promise a -> Event a` joins the algebra (so `awaitP = nextEvent .
-  promiseDone`, and mixed selects over agents and forks are ordinary). The
-  multi-hole registry ("a set of parked holes, each resumable by identity in
-  any order") is the scheduler substrate; parked continuations are GC roots
-  exactly as parked holes are today.
+- **The surface mirrors `Control.Concurrent.Async`** — `async :: M a -> M
+  (Async a)`, `wait`, `waitEither`, `poll`, `cancel`, `mapConcurrently`, with
+  `waitCatch` ranging over `AsyncCancelled` alone (a thread's own failure is
+  an `Either` in its result type — failure as data, the one deliberate
+  semantic divergence from the package, stated in the surface docs).
+  `waitEvent :: Async a -> Event (Async a)` joins the algebra — it carries
+  the HANDLE, not the value, so the typed result stays on the heap and mixed
+  selects over agents, forks, and timers are ordinary. `async` parks the
+  forked computation as a new continuation in the session's hole registry;
+  the multi-hole registry ("a set of parked holes, each resumable by
+  identity in any order") is the scheduler substrate; parked continuations
+  are GC roots exactly as parked holes are today. Each green thread runs in
+  its own realm, which is what makes `cancel` a mechanism rather than
+  bookkeeping: cancelling closes the realm and its pending suspensions go
+  with it.
 - **Cooperative, single-threaded semantics.** The driver's loop: an agent
   cycle, timer, or repository observation completes → resolve which parked
   continuation it wakes → resume it until it parks again. FIFO ready queue.
@@ -268,7 +276,7 @@ says the same thing in plain language).
   starves its siblings — acceptable, it is authored code, and the round/
   budget caps bound it.
 - **Structured concurrency.** A fork is created within a lexical scope
-  (`withForks` / the combinators built on it) and cannot outlive it: scope
+  (`withAsync` / the combinators built on it) and cannot outlive it: scope
   exit awaits or cancels stragglers. An uncaught failure in a fork fails the
   join point — the same propagation posture as PRD 19 handler failure. No
   detached daemons.
@@ -290,10 +298,9 @@ says the same thing in plain language).
   existing rotation refusal generalizes. A crash mid-wave loses only
   in-flight cycles; the run journal (below) makes re-entry
   incremental.
-- **`forConcurrently` and friends are stdlib derivations,** not primitives:
-  `forConcurrently xs f = withForks (traverse (forkM . f) xs) (traverse awaitP)`
-  — written once in `Tidepool.Swarm`, testable in the harness, visible to
-  authors as ordinary Haskell.
+- **`mapConcurrently` and friends are stdlib derivations,** not primitives —
+  written once over `async`/`wait`, testable in the harness, visible to
+  authors as ordinary Haskell, with the package's own names throughout.
 
 ### Node residency and messaging
 
@@ -377,11 +384,17 @@ says the same thing in plain language).
   Open sub-questions, deliberately listed: (i) is `SwarmStep` a
   stdlib-fixed shape or harness-extensible (fixed is simpler; extensible
   lets a harness journal domain facts — lean fixed with one opaque payload
-  field); (ii) is the folded map injected into the harness at boot or read
-  through an effect (lean inject — resume should not be able to forget to
-  look); (iii) journal lifecycle — one file per run id, compacted or
-  deleted after the run's terminal fold (lean per-run file, retained like
-  worktrees).
+  field); (ii) SETTLED (S1-L5): injected at boot through an opt-in second
+  entry point (`resumeLoop`), selected by the driver when the boot fold is
+  non-empty; `record` stays write-only, and a harness that journals without
+  declaring `resumeLoop` is refused at boot — resume structurally cannot
+  forget to look; (iii) SETTLED (S1-L5): a run id owns a SEQUENCE of
+  segments, one per process — a resumed process opens a fresh segment,
+  never appending to a file a crashed process left (appending into a torn
+  tail merges bytes and poisons a later boot), and the fold spans all
+  segments in segment order. Every segment retained, like worktrees; no
+  truncate, rewrite, or compaction — strictly more append-only than the
+  original one-file lean.
 - **Adopt and verify, never redo blind.** The crash window between "agent
   committed" and "step journaled" is detectable deterministically: a
   worktree whose branch moved past its seed with no recorded outcome holds
@@ -486,10 +499,20 @@ says the same thing in plain language).
   Retry | Replan | AskOperator | Abandon` — per node, defaulted per plan.
   `Replan` opens a planning window (`runLLMTurn`) scoped to the failed
   subtree's render; `AskOperator` is a typed triage form. Model cognition
-  enters only through those two constructors.
+  enters only through those two constructors. In-run, a `Replan` decision is
+  journaled (kind `"replan"`) and drives one more resolution round;
+  re-UNFOLDING the failed subtree means re-entering the coalgebra, which is
+  resume's job (S1-L5) — a resumed run reads the journaled amendment and
+  unfolds from there.
 - **Budgets are enforced, not advisory:** per-run agent-cycle cap, per-node
-  retry cap, wall-clock deadline — all in `State`, all visible in render,
-  all refusing loudly at the cap.
+  retry cap, wall-clock deadline — all refusing loudly at the cap (the
+  `budgeted` wrapper refuses BEFORE the coalgebra spends anything). Inside
+  the fused hylo the allowance rides STRUCTURALLY on the seed, divided among
+  children at unfold — bounded, deterministic, order-insensitive, and
+  deliberately conservative (an underspending subtree does not return its
+  share; no shared-mutable-state effect enters the row for this). The
+  resident's loop-boundary `State` (Stage 2) is where cross-run budget
+  visibility and render live.
 
 ### Residency (Stage 2)
 
@@ -523,10 +546,14 @@ agentDone    :: AgentHandle r -> Event (AgentExit r)
 nextEvent    :: Event a -> M (Observed a)
 after        :: Millis -> M (Event Tick)
 
--- Tidepool.Fork (green threads)
-forkM        :: M a -> M (Promise a)
-promiseDone  :: Promise a -> Event a
-withForks    :: M a -> M a          -- structured-concurrency scope
+-- Tidepool.Async (green threads; names mirror Control.Concurrent.Async)
+async        :: M a -> M (Async a)
+wait         :: Async a -> M a
+waitEither   :: Async a -> Async b -> M (Either a b)
+poll         :: Async a -> M (Maybe a)
+cancel       :: Async a -> M ()     -- closes the thread's realm; pending suspensions go with it
+waitEvent    :: Async a -> Event (Async a)  -- handle-carrying; result stays on-heap, one wait away
+withAsync    :: M a -> (Async a -> M b) -> M b  -- structured-concurrency scope
 
 -- Tidepool.Swarm (authored stdlib, all derived)
 data PlanF a = PlanF { task :: Task, kids :: [a] }
@@ -541,7 +568,7 @@ budgeted     :: Budget -> Coalg -> Coalg     -- refuse to unfold past caps
 gated        :: (Layer -> M Approval) -> Coalg -> Coalg  -- layer-by-layer operator gate
 capped       :: Depth -> Coalg -> Coalg
 
-forConcurrently :: [a] -> (a -> M b) -> M [b]
+mapConcurrently :: (a -> M b) -> [a] -> M [b]
 pool         :: Int -> [Spec] -> M [Outcome] -- flat work, bounded pull
 reviewLadder :: ReviewPolicy -> WorktreeHandle -> Spec -> M Outcome
 
@@ -586,7 +613,7 @@ integrate tree scaffold outs
   checks, fold receipts, budgets. Acceptance: the ten-test wave live in a scratch
   repo (`Concurrent` arrives with L4; `pool` covers flat fan-out
   meanwhile); kill -9 mid-wave and resume finishes only the unfinished.
-- **S1-L4 — green threads + node residency.** `forkM`/`Promise`/`withForks`;
+- **S1-L4 — green threads + node residency.** `async`/`wait`/`cancel`/`waitEvent`/`withAsync`;
   the driver scheduler; the wake journal (observability); the
   order-insensitivity property test; `forkNode`/`sendDown`/`sendUp` with
   inboxes as Event sources and per-type coalescing. dev-tree v3 goes

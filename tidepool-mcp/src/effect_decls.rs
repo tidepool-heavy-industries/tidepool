@@ -261,9 +261,8 @@ crate::lsp_effect_def!(crate::effect_defs::effect_decl_projection);
 // (`effect_defs.rs`).
 crate::http_effect_def!(crate::effect_defs::effect_decl_projection);
 
-// Exec effect: `exec_decl()` is generated from the single-source definition
-// (`effect_defs.rs`).
-crate::exec_effect_def!(crate::effect_defs::effect_decl_projection);
+// Exec effect: MIGRATED to the `tidepool-protocol` schema (PRD 22 phase 1).
+// `exec_decl()` now comes from `src/generated/exec.rs`, not from a macro here.
 
 // Git effect: `git_decl()` is generated from the single-source definition
 // (`effect_defs.rs`).
@@ -311,7 +310,9 @@ crate::llm_effect_def!(crate::effect_defs::effect_decl_projection);
 // there is on hold pending the agent lane. They exist as decls so a caller
 // that wants managed worktrees and typed repository events can build a row
 // containing them, which is what lane L4's acceptance harness does.
-crate::worktree_effect_def!(crate::effect_defs::effect_decl_projection);
+// Worktree: MIGRATED to the `tidepool-protocol` schema (PRD 22 phase 3).
+// `worktree_decl()` now comes from `src/generated/worktree.rs`, not from a
+// macro here.
 crate::event_effect_def!(crate::effect_defs::effect_decl_projection);
 
 // Subagent (PRD 18 lane 1): `subagent_decl()`. Like Worktree/RepoEvent, NOT
@@ -320,12 +321,12 @@ crate::event_effect_def!(crate::effect_defs::effect_decl_projection);
 // reference WorktreeSpec/WorktreeHandle/WorktreeError).
 crate::subagent_effect_def!(crate::effect_defs::effect_decl_projection);
 
-// Journal (PRD 20, S1-L5 substrate slice): `journal_decl()`. Like
-// Worktree/RepoEvent/Subagent, NOT in `build_base_stack`'s row — the durable
-// append-only run journal a resident harness records progress to; which
-// file a run journals to, and folding it on boot, is the swarm driver's
-// wiring, done at merge.
-crate::journal_effect_def!(crate::effect_defs::effect_decl_projection);
+// Journal (PRD 20, S1-L5 substrate slice): MIGRATED to the `tidepool-protocol`
+// schema (PRD 22 phase 2). `journal_decl()` now comes from
+// `src/generated/journal.rs`, not from a macro here. Like Worktree/RepoEvent/
+// Subagent, NOT in `build_base_stack`'s row — the durable append-only run
+// journal a resident harness records progress to; which file a run journals
+// to, and folding it on boot, is the swarm driver's wiring, done at merge.
 
 // Green (PRD 20, S1-L4): `green_decl()` — the green-thread substrate behind
 // `Tidepool.Async`. Like Worktree/RepoEvent/Subagent/Journal, NOT in

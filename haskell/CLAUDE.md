@@ -291,6 +291,23 @@ JSON boundary — see the module doc at the top of `jit_surface.rs`).
 
 ## Known Limits / Gotchas
 
+**A failing generated `Tidepool.Effects` module cascades into misleading
+diagnostics.** `GhcPipeline.hs`'s diagnostic-recovery pass (`normalVariant`)
+redoes modules in non-topological order, so when the generated Effects module
+itself fails to typecheck (e.g. its `type M` row names an unresolved type),
+whichever OTHER module the pass visits first reports "attempting to use module
+X which is not loaded" instead of the real error. The harness sidesteps this
+for pinned `Finalize` rows by probe-compiling the generated module STANDALONE
+first (`EngineConfig::turn_target`, memoized per module content) — but any
+other path that compiles a bad generated module alongside user code can still
+hit the cascade. The mechanism fix (topological recovery order) is unowned.
+
+**Manual repro of GHC-heavy tests needs the with-packages GHC on PATH.** A
+bare `nix develop` shell reproduction with the wrong GHC on PATH fails with
+missing `lens`/`freer-simple` package errors that look like the bug under
+investigation. Check `which ghc` resolves to the with-packages derivation
+before trusting any manual failure.
+
 **`Map.` (`Data.Map.Strict`) breaks knot-tied self-referential folds.**
 `Data.Map.Strict.mapWithKey` forces each value into WHNF *during construction*,
 which blackholes (infinite loop / "thunk forces itself") a lazy fixed point

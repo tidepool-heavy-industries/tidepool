@@ -526,6 +526,89 @@ fn manager_level_dirty_create_captures_through_a_nonexistent_index_dir() {
     );
 }
 
+/// Pins the currently-unpinned tolerance flagged by an external type review on
+/// 2026-08-17 (see §11.11 of `plans/self-iterating-harness/22-p1-protocol-scaffold.md`):
+/// `WorktreeSource::Ref` resolves a named ref via `rev-parse` and never
+/// consults `spec.dirty_policy` at all. This is correct as far as it goes — a
+/// named ref is already-committed content, so there is nothing uncommitted to
+/// snapshot — but the TYPE nevertheless permits the pair
+/// `(Ref, AllowDirtySnapshot)`, so a caller can ask for a dirty-snapshot
+/// opt-in against a ref source and silently not get one. This test pins
+/// TODAY's behavior (the pair is accepted and produces identical results
+/// under both policies); the follow-on lane that makes the pair
+/// unrepresentable is expected to CHANGE this test in the same commit as the
+/// fix, not to leave it standing.
+///
+/// Contrast: the same dirty repository through
+/// `WorktreeSource::CurrentRepository` + `AllowDirtySnapshot` DOES produce
+/// `snapshot_ref: Some(..)` — see
+/// `manager_level_dirty_create_captures_through_a_nonexistent_index_dir`
+/// above.
+#[test]
+fn ref_source_ignores_dirty_policy_and_never_snapshots() {
+    use tidepool_worktree::{
+        DirtyPolicy, GitRef, WorktreeManager, WorktreeRegistry, WorktreeSource, WorktreeSpec,
+    };
+
+    let repo = TestRepo::init().expect("init");
+    repo.writer()
+        .commit_file("tracked.txt", "committed\n", "first")
+        .expect("commit");
+    let seed_commit = repo
+        .git()
+        .try_run(repo.path(), &["rev-parse", "HEAD"])
+        .expect("rev-parse HEAD")
+        .trimmed()
+        .to_string();
+    // Dirty the working tree AFTER recording the seed commit, so the ref
+    // being resolved is unambiguously already-committed content distinct
+    // from the uncommitted mess sitting on top of it.
+    std::fs::write(repo.path().join("tracked.txt"), "dirtied\n").expect("dirty the tree");
+
+    let run_with_policy = |policy: DirtyPolicy, label: &str| {
+        let base = tempfile::TempDir::new().expect("tempdir");
+        let registry = WorktreeRegistry::open(base.path().join("registry")).expect("open registry");
+        let manager = WorktreeManager::new(
+            GitCli::new(),
+            registry,
+            base.path().join("worktrees"),
+            repo.path(),
+        );
+        // The returned handle owns a plain-data receipt (already copied out
+        // of the registry), so `base` dropping here and reclaiming the
+        // worktree directory does not affect anything asserted below.
+        manager
+            .create(&WorktreeSpec {
+                source: WorktreeSource::Ref(GitRef::from_raw("main")),
+                label: label.to_string(),
+                dirty_policy: policy,
+            })
+            .expect("ref-source create must succeed regardless of dirty_policy")
+    };
+
+    let under_require_clean = run_with_policy(DirtyPolicy::RequireClean, "ref-require-clean");
+    let under_allow_dirty = run_with_policy(DirtyPolicy::AllowDirtySnapshot, "ref-allow-dirty");
+
+    for (label, handle) in [
+        ("RequireClean", &under_require_clean),
+        ("AllowDirtySnapshot", &under_allow_dirty),
+    ] {
+        assert_eq!(
+            handle.receipt().source_head.as_str(),
+            seed_commit,
+            "{label}: a ref source must seed at the ref's commit"
+        );
+        // The load-bearing assertion: despite AllowDirtySnapshot being
+        // requested, a ref source never takes a snapshot, because a named
+        // ref has nothing uncommitted to snapshot in the first place.
+        assert_eq!(
+            handle.receipt().snapshot_ref,
+            None,
+            "{label}: a ref source must never record a snapshot_ref"
+        );
+    }
+}
+
 /// A staged rename (`git mv`) must not resurrect the OLD path in the snapshot:
 /// `read-tree HEAD` seeds the temp index with the old path, and only staging
 /// the rename's BOTH sides records the deletion. Pre-fix, the porcelain parser

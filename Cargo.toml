@@ -15,6 +15,7 @@ members = [
     "tidepool-codegen",
     "tidepool-runtime",
     "tidepool-mcp",
+    "tidepool-protocol",
     "tidepool-handlers",
     "tidepool-repl",
     "tidepool-lsp",
@@ -55,6 +56,7 @@ tidepool-heap = { version = "0.1.0", path = "tidepool-heap" }
 tidepool-macro = { version = "0.1.0", path = "tidepool-macro" }
 tidepool-mcp = { version = "0.1.0", path = "tidepool-mcp" }
 tidepool-optimize = { version = "0.1.0", path = "tidepool-optimize" }
+tidepool-protocol = { version = "0.1.0", path = "tidepool-protocol" }
 tidepool-repr = { version = "0.1.0", path = "tidepool-repr" }
 tidepool-runtime = { version = "0.1.0", path = "tidepool-runtime" }
 tidepool-testing = { path = "tidepool-testing" }
@@ -65,6 +67,7 @@ blake3 = "1"
 ciborium = "0.2"
 clap = { version = "4", features = ["derive", "env"] }
 frunk = "0.4"
+futures-util = "0.3"
 genai = "0.5"
 glob = "0.3"
 inventory = "0.3"

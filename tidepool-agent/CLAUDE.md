@@ -103,32 +103,41 @@ reaps the backend FROM ANOTHER THREAD. Take it BEFORE the cycle runs: a cycle
 thread inside `start_turn` holds `&mut` on the backend, so nothing else can
 reach it. A flag the blocked thread would have to check is not cancellation.
 
-- `CodexCanceller` SIGKILLs the app-server child by pid. It cannot go through
-  `Session::shutdown` (that consumes `self` and needs the runtime the blocked
-  thread is holding), so the pid is published into a shared `Arc<AtomicU32>`
-  the moment the session connects.
+- `CodexCanceller` SIGKILLs the app-server child through a **pidfd**, never a
+  bare numeric pid. It cannot go through `Session::shutdown` (that consumes
+  `self` and needs the runtime the blocked thread is holding), so a pidfd is
+  opened (`pidfd_open`, via `libc::syscall` — the crate ships the syscall
+  number but no typed wrapper) into a shared `Arc<Mutex<PidFdSlot>>` the
+  moment the session connects.
 
   **A pid is not a durable name for a process, and "we spawned it" is not what
   makes it safe to signal.** Once the child is reaped — by its owning `Child`
   on drop, or by tokio's SIGCHLD reaper while the backend is still alive — the
   kernel is free to hand the number to anyone, and on this box "anyone" is
-  plausibly the operator's own Codex session. `ESRCH` protects an unreaped pid,
-  not a REUSED one. Two independent mechanisms gate every signal:
+  plausibly the operator's own Codex session. A numeric-pid design can only
+  narrow that window (re-check identity immediately before `kill`, still two
+  racing syscalls); a pidfd removes it structurally: `pidfd_open` binds the fd
+  to the exact process INSTANCE, not to its pid number, so `pidfd_send_signal`
+  against it fails `ESRCH` forever once that instance is reaped — including if
+  the kernel later hands the same number to a brand-new, live process. There is
+  no numeric-pid fallback anywhere in this path: if `pidfd_open` fails (an old
+  kernel, `EMFILE`, the process already reaped before the fd could be opened),
+  the slot records `PidFdSlot::IdentityUnprovable` and cancellation against
+  that backend FAILS CLOSED — it signals nothing, ever, rather than falling
+  back to the pid.
 
-  1. `Drop for CodexAgentBackend` stores `0` into the slot. A `Drop` body runs
-     before the struct's fields drop, so the slot clears strictly before the
-     `Child` is reaped: once a backend begins dropping, every canceller cloned
-     from it is inert. This is what keeps the safety a property of the TYPE
-     rather than of a handler in another crate remembering to mark a cycle
-     terminal first.
-  2. `pid_is_our_app_server` re-reads `/proc/<pid>/cmdline` immediately before
-     `kill`, closing the window where the child exited on its own — which no
-     drop discipline can reach. The confirm loop polls the same check, because
-     waiting for a stranger to leave `/proc` and returning as if something had
-     been reaped is worse than not waiting.
+  `Drop for CodexAgentBackend` still clears the slot (closing the fd) before
+  the struct's fields — and therefore the `Child` — drop, so a cancel racing a
+  just-completed cycle is a prompt, observable no-op rather than a signal
+  against an fd about to be reclaimed anyway. That ordering is no longer the
+  sole safety mechanism the way a numeric-pid design needs it to be (the
+  pidfd's own semantics already forbid reuse), but it stays for promptness.
 
-  Both are pinned by named rows in `driver.rs`'s `mod tests`, each verified to
-  FAIL when its mechanism is defeated.
+  Pinned by named rows in `driver.rs`'s `mod tests`: a dropped backend leaves
+  its cancellers inert, a cancel during the connect window is recorded without
+  a pidfd to signal, and a pidfd that could not be acquired for an
+  already-reaped process leaves cancellation `IdentityUnprovable` — signalling
+  nothing, never falling back to a bare pid.
 - The default is a no-op canceller, correct for a backend with no process
   (`replay`, any in-process one). It is NOT a placeholder for an unimplemented
   one on a backend that owns a process — a canceller that returns without

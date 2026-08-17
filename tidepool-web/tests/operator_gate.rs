@@ -1,20 +1,22 @@
 //! HTTP-level integration test: boots the real axum [`router`] on an
 //! ephemeral port and drives it with a real client, proving the
-//! [`OperatorGate`] round trip end to end — no hand-wired handler calls.
+//! [`OperatorGate`] round trip end to end for MULTIPLE registered nodes,
+//! each able to carry SEVERAL concurrently pending asks — no hand-wired
+//! handler calls.
 //!
-//! Assertions are scoped to the wire contract only (the `id="panel"` root,
-//! `data-bind`/`data-kind`, `@post` targets, and JSON bodies) — never on
-//! visual markup, since `render.rs`/`shell.rs` are under concurrent redesign.
+//! Assertions are scoped to the wire contract only (the `id="panel-<node>"`
+//! root, `data-bind`/`data-kind`, `@post` targets, and JSON bodies) — never
+//! on visual markup, since `render.rs`/`shell.rs` are under concurrent
+//! redesign.
 
 use std::net::SocketAddr;
-use std::sync::Arc;
 use std::time::Duration;
 
 use futures_util::StreamExt;
 use reqwest::Client;
 use serde_json::{json, Value};
 use tidepool_harness::selfharness::operator::{FieldShape, FormShape, OperatorGate};
-use tidepool_web::{router, AppState, WebGate};
+use tidepool_web::{router, AppState};
 use tokio::net::TcpListener;
 
 fn sample_spec() -> FormShape {
@@ -35,7 +37,8 @@ fn sample_spec() -> FormShape {
 }
 
 /// Boot the real router on an ephemeral loopback port; returns the address
-/// and the [`AppState`] used to build a [`WebGate`] against it.
+/// and the [`AppState`] used to register nodes / build [`WebGate`]s against
+/// it.
 async fn boot() -> (SocketAddr, AppState) {
     let state = AppState::new();
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -62,13 +65,40 @@ async fn wait_for(client: &Client, url: &str, pred: impl Fn(&str) -> bool) -> St
     }
 }
 
+/// Every `@post('<prefix>...')` target found in `html`, in document order —
+/// the exact URL(s) `data-on-submit` bakes in for a given verb prefix (e.g.
+/// `/node/n1/submit/`). Multiple matches occur when several asks are
+/// stacked.
+fn all_post_urls(html: &str, prefix: &str) -> Vec<String> {
+    let needle = format!("@post('{prefix}");
+    let mut out = Vec::new();
+    let mut rest = html;
+    while let Some(idx) = rest.find(&needle) {
+        let after = &rest[idx + "@post('".len()..];
+        let end = after.find('\'').expect("closing quote");
+        out.push(after[..end].to_string());
+        rest = &after[end..];
+    }
+    out
+}
+
+fn one_post_url(html: &str, prefix: &str) -> String {
+    let urls = all_post_urls(html, prefix);
+    assert_eq!(
+        urls.len(),
+        1,
+        "expected exactly one match for {prefix:?} in:\n{html}"
+    );
+    urls.into_iter().next().unwrap()
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn submit_resolves_present_form_with_exact_submission() {
     let (addr, state) = boot().await;
     let base = format!("http://{addr}");
     let client = Client::new();
 
-    let gate = Arc::new(WebGate::new(state));
+    let gate = state.register_node("n1");
     let driver_gate = gate.clone();
     let handle = tokio::task::spawn_blocking(move || driver_gate.present_form(&sample_spec()));
 
@@ -77,15 +107,15 @@ async fn submit_resolves_present_form_with_exact_submission() {
         b.contains("data-bind=\"answer.mood\"")
     })
     .await;
-    assert!(html.contains("id=\"panel\""));
+    assert!(html.contains("id=\"panel-n1\""));
     assert!(html.contains("data-bind=\"answer.count\""));
     assert!(html.contains("data-kind=\"string\""));
     assert!(html.contains("data-kind=\"int\""));
-    assert!(html.contains("@post('/submit')"));
+    let submit_url = one_post_url(&html, "/node/n1/submit/");
 
     let body = json!({"answer.mood": "calm", "answer.count": 3});
     let resp = client
-        .post(format!("{base}/submit"))
+        .post(format!("{base}{submit_url}"))
         .json(&body)
         .send()
         .await
@@ -104,18 +134,19 @@ async fn continue_resolves_await_continue() {
     let base = format!("http://{addr}");
     let client = Client::new();
 
-    let gate = Arc::new(WebGate::new(state));
+    let gate = state.register_node("n1");
     let driver_gate = gate.clone();
     let handle = tokio::task::spawn_blocking(move || driver_gate.await_continue());
 
     let html = wait_for(&client, &format!("{base}/"), |b| {
-        b.contains("@post('/continue')")
+        b.contains("/node/n1/continue/")
     })
     .await;
-    assert!(html.contains("id=\"panel\""));
+    assert!(html.contains("id=\"panel-n1\""));
+    let continue_url = one_post_url(&html, "/node/n1/continue/");
 
     let resp = client
-        .post(format!("{base}/continue"))
+        .post(format!("{base}{continue_url}"))
         .send()
         .await
         .unwrap();
@@ -140,20 +171,21 @@ async fn continue_with_input_carries_the_operator_message() {
     let base = format!("http://{addr}");
     let client = Client::new();
 
-    let gate = Arc::new(WebGate::new(state));
+    let gate = state.register_node("n1");
     let driver_gate = gate.clone();
     let handle = tokio::task::spawn_blocking(move || driver_gate.await_continue());
 
     let html = wait_for(&client, &format!("{base}/"), |b| {
-        b.contains("@post('/continue')")
+        b.contains("/node/n1/continue/")
     })
     .await;
     // Both variants render (the sum form, not a bespoke pane).
     assert!(html.contains(r#"value="Continue""#));
     assert!(html.contains(r#"value="ContinueWithInput""#));
+    let continue_url = one_post_url(&html, "/node/n1/continue/");
 
     let resp = client
-        .post(format!("{base}/continue"))
+        .post(format!("{base}{continue_url}"))
         .json(&json!({
             "answer": "ContinueWithInput",
             "answer.ContinueWithInput.input": "hello companion",
@@ -172,12 +204,13 @@ async fn continue_with_input_carries_the_operator_message() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn submit_without_pending_form_returns_400() {
-    let (addr, _state) = boot().await;
+    let (addr, state) = boot().await;
     let base = format!("http://{addr}");
     let client = Client::new();
+    let _gate = state.register_node("n1");
 
     let resp = client
-        .post(format!("{base}/submit"))
+        .post(format!("{base}/node/n1/submit/0"))
         .json(&json!({"anything": 1}))
         .send()
         .await
@@ -185,7 +218,29 @@ async fn submit_without_pending_form_returns_400() {
     assert_eq!(resp.status(), 400);
     let v: Value = resp.json().await.unwrap();
     assert_eq!(v["ok"], json!(false));
-    assert!(v["error"].as_str().unwrap().contains("no form is pending"));
+    assert!(v["error"]
+        .as_str()
+        .unwrap()
+        .contains("no such pending interaction"));
+}
+
+/// Submitting against a node that was never registered is rejected the same
+/// way — never a panic, never silently resolving some other node's ask.
+#[tokio::test(flavor = "multi_thread")]
+async fn submit_against_unknown_node_returns_400() {
+    let (addr, _state) = boot().await;
+    let base = format!("http://{addr}");
+    let client = Client::new();
+
+    let resp = client
+        .post(format!("{base}/node/ghost/submit/0"))
+        .json(&json!({}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 400);
+    let v: Value = resp.json().await.unwrap();
+    assert!(v["error"].as_str().unwrap().contains("unknown node"));
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -194,16 +249,17 @@ async fn submit_with_non_object_body_is_rejected() {
     let base = format!("http://{addr}");
     let client = Client::new();
 
-    let gate = Arc::new(WebGate::new(state));
+    let gate = state.register_node("n1");
     let driver_gate = gate.clone();
     let handle = tokio::task::spawn_blocking(move || driver_gate.present_form(&sample_spec()));
-    wait_for(&client, &format!("{base}/"), |b| {
+    let html = wait_for(&client, &format!("{base}/"), |b| {
         b.contains("data-bind=\"answer.mood\"")
     })
     .await;
+    let submit_url = one_post_url(&html, "/node/n1/submit/");
 
     let resp = client
-        .post(format!("{base}/submit"))
+        .post(format!("{base}{submit_url}"))
         .json(&json!([1, 2, 3]))
         .send()
         .await
@@ -216,7 +272,7 @@ async fn submit_with_non_object_body_is_rejected() {
     // there, and a well-formed submission resolves the still-blocked driver.
     let body = json!({"answer.mood": "calm", "answer.count": 0});
     let resp = client
-        .post(format!("{base}/submit"))
+        .post(format!("{base}{submit_url}"))
         .json(&body)
         .send()
         .await
@@ -232,17 +288,21 @@ async fn mismatched_verb_preserves_pending_interaction() {
     let base = format!("http://{addr}");
     let client = Client::new();
 
-    let gate = Arc::new(WebGate::new(state));
+    let gate = state.register_node("n1");
     let driver_gate = gate.clone();
     let handle = tokio::task::spawn_blocking(move || driver_gate.present_form(&sample_spec()));
-    wait_for(&client, &format!("{base}/"), |b| {
+    let html = wait_for(&client, &format!("{base}/"), |b| {
         b.contains("data-bind=\"answer.mood\"")
     })
     .await;
+    let submit_url = one_post_url(&html, "/node/n1/submit/");
+    // The interaction id is the trailing path segment — a form is pending at
+    // this id, not a continue gate, so hitting /continue at the SAME id must
+    // be rejected without dropping the form.
+    let interaction = submit_url.rsplit('/').next().unwrap();
 
-    // A form is pending, not a continue gate — /continue must be rejected...
     let resp = client
-        .post(format!("{base}/continue"))
+        .post(format!("{base}/node/n1/continue/{interaction}"))
         .send()
         .await
         .unwrap();
@@ -252,7 +312,7 @@ async fn mismatched_verb_preserves_pending_interaction() {
     assert!(v["error"]
         .as_str()
         .unwrap()
-        .contains("no continue gate is pending"));
+        .contains("not a pending continue gate"));
 
     // ...and the original form must still be pending, not dropped.
     let html = client
@@ -267,7 +327,7 @@ async fn mismatched_verb_preserves_pending_interaction() {
 
     let body = json!({"answer.mood": "calm", "answer.count": 1});
     let resp = client
-        .post(format!("{base}/submit"))
+        .post(format!("{base}{submit_url}"))
         .json(&body)
         .send()
         .await
@@ -275,6 +335,189 @@ async fn mismatched_verb_preserves_pending_interaction() {
     assert_eq!(resp.status(), 200);
     let got = handle.await.unwrap();
     assert_eq!(got, json!({"mood": "calm", "count": 1}));
+}
+
+/// Once resolved, an interaction's id is gone — resubmitting the SAME url
+/// (a stale nonce) is rejected, never silently resolving a different pending
+/// ask.
+#[tokio::test(flavor = "multi_thread")]
+async fn stale_interaction_after_resolution_is_rejected() {
+    let (addr, state) = boot().await;
+    let base = format!("http://{addr}");
+    let client = Client::new();
+
+    let gate = state.register_node("n1");
+    let driver_gate = gate.clone();
+    let handle = tokio::task::spawn_blocking(move || driver_gate.present_form(&sample_spec()));
+    let html = wait_for(&client, &format!("{base}/"), |b| {
+        b.contains("data-bind=\"answer.mood\"")
+    })
+    .await;
+    let submit_url = one_post_url(&html, "/node/n1/submit/");
+
+    let body = json!({"answer.mood": "calm", "answer.count": 1});
+    let resp = client
+        .post(format!("{base}{submit_url}"))
+        .json(&body)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    handle.await.unwrap();
+
+    // Same URL again — the interaction no longer exists.
+    let resp = client
+        .post(format!("{base}{submit_url}"))
+        .json(&body)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 400);
+    let v: Value = resp.json().await.unwrap();
+    assert!(v["error"]
+        .as_str()
+        .unwrap()
+        .contains("no such pending interaction"));
+}
+
+/// TWO NODES, each with a pending form, resolved independently in EITHER
+/// order — resolving one never touches the other's pending state.
+#[tokio::test(flavor = "multi_thread")]
+async fn two_nodes_with_pending_forms_resolve_independently_in_either_order() {
+    let (addr, state) = boot().await;
+    let base = format!("http://{addr}");
+    let client = Client::new();
+
+    let gate_a = state.register_node("alpha");
+    let gate_b = state.register_node("beta");
+    let handle_a = tokio::task::spawn_blocking(move || gate_a.present_form(&sample_spec()));
+    let handle_b = tokio::task::spawn_blocking(move || gate_b.present_form(&sample_spec()));
+
+    let html = wait_for(&client, &format!("{base}/"), |b| {
+        b.contains("/node/alpha/submit/") && b.contains("/node/beta/submit/")
+    })
+    .await;
+    assert!(html.contains("id=\"panel-alpha\""));
+    assert!(html.contains("id=\"panel-beta\""));
+    assert!(html.contains("data-tab=\"alpha\""));
+    assert!(html.contains("data-tab=\"beta\""));
+
+    let url_a = one_post_url(&html, "/node/alpha/submit/");
+    let url_b = one_post_url(&html, "/node/beta/submit/");
+
+    // Resolve beta FIRST, then alpha — order must not matter.
+    let resp = client
+        .post(format!("{base}{url_b}"))
+        .json(&json!({"answer.mood": "beta-mood", "answer.count": 2}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    assert_eq!(
+        handle_b.await.unwrap(),
+        json!({"mood": "beta-mood", "count": 2})
+    );
+
+    // alpha is still pending and unaffected.
+    let html = client
+        .get(format!("{base}/"))
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    assert!(
+        html.contains("/node/alpha/submit/"),
+        "alpha's ask survives beta's resolution"
+    );
+
+    let resp = client
+        .post(format!("{base}{url_a}"))
+        .json(&json!({"answer.mood": "alpha-mood", "answer.count": 1}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    assert_eq!(
+        handle_a.await.unwrap(),
+        json!({"mood": "alpha-mood", "count": 1})
+    );
+}
+
+/// TWO CONCURRENT ASKS on ONE node: both render (stacked, neither
+/// superseding the other) and both resolve independently, in either order —
+/// the concurrency invariant PRD 20's fanout windows depend on.
+#[tokio::test(flavor = "multi_thread")]
+async fn two_concurrent_asks_on_one_node_both_render_and_resolve() {
+    let (addr, state) = boot().await;
+    let base = format!("http://{addr}");
+    let client = Client::new();
+
+    let gate = state.register_node("n1");
+    let g1 = gate.clone();
+    let handle1 = tokio::task::spawn_blocking(move || g1.present_form(&sample_spec()));
+    let g2 = gate.clone();
+    let handle2 = tokio::task::spawn_blocking(move || g2.present_form(&sample_spec()));
+
+    let html = wait_for(&client, &format!("{base}/"), |b| {
+        all_post_urls(b, "/node/n1/submit/").len() == 2
+    })
+    .await;
+    let urls = all_post_urls(&html, "/node/n1/submit/");
+    assert_eq!(
+        urls.len(),
+        2,
+        "both concurrent asks render, neither dropped"
+    );
+    assert_ne!(urls[0], urls[1], "each ask has its own address/nonce");
+
+    // Resolve the SECOND-listed ask first.
+    let resp = client
+        .post(format!("{base}{}", urls[1]))
+        .json(&json!({"answer.mood": "second", "answer.count": 20}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    // The first ask is STILL pending (not dropped by resolving its sibling).
+    let html = client
+        .get(format!("{base}/"))
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    assert_eq!(
+        all_post_urls(&html, "/node/n1/submit/"),
+        vec![urls[0].clone()]
+    );
+
+    let resp = client
+        .post(format!("{base}{}", urls[0]))
+        .json(&json!({"answer.mood": "first", "answer.count": 10}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    // Both driver calls unpark with exactly what was submitted to their own
+    // ask — which internal `present_form` call happened to land at `urls[0]`
+    // vs `urls[1]` is a scheduling detail, not something this test pins, so
+    // compare the two results as a SET: exactly one call got "first"/10 and
+    // the other got "second"/20, never both getting the same value and never
+    // a value going missing.
+    let mut got = vec![handle1.await.unwrap(), handle2.await.unwrap()];
+    got.sort_by_key(|v| v["count"].as_i64().unwrap());
+    assert_eq!(
+        got,
+        vec![
+            json!({"mood": "first", "count": 10}),
+            json!({"mood": "second", "count": 20}),
+        ]
+    );
 }
 
 /// `post_note` does not block (unlike `present_form`/`await_continue`), so a
@@ -287,7 +530,7 @@ async fn post_note_appears_above_the_pending_form_in_post_order() {
     let base = format!("http://{addr}");
     let client = Client::new();
 
-    let gate = Arc::new(WebGate::new(state));
+    let gate = state.register_node("n1");
     gate.post_note("first note");
     gate.post_note("second note");
 
@@ -314,9 +557,10 @@ async fn post_note_appears_above_the_pending_form_in_post_order() {
     );
 
     // Resolve the form so the spawned blocking task doesn't leak.
+    let submit_url = one_post_url(&html, "/node/n1/submit/");
     let body = json!({"answer.mood": "calm", "answer.count": 0});
     client
-        .post(format!("{base}/submit"))
+        .post(format!("{base}{submit_url}"))
         .json(&body)
         .send()
         .await
@@ -332,18 +576,19 @@ async fn await_continue_clears_the_note_feed() {
     let base = format!("http://{addr}");
     let client = Client::new();
 
-    let gate = Arc::new(WebGate::new(state));
+    let gate = state.register_node("n1");
     gate.post_note("prior loop's note");
 
     let driver_gate = gate.clone();
     let handle = tokio::task::spawn_blocking(move || driver_gate.await_continue());
-    wait_for(&client, &format!("{base}/"), |b| {
-        b.contains("@post('/continue')")
+    let html = wait_for(&client, &format!("{base}/"), |b| {
+        b.contains("/node/n1/continue/")
     })
     .await;
+    let continue_url = one_post_url(&html, "/node/n1/continue/");
 
     let resp = client
-        .post(format!("{base}/continue"))
+        .post(format!("{base}{continue_url}"))
         .send()
         .await
         .unwrap();
@@ -373,7 +618,7 @@ async fn post_turn_source_accumulates_a_history() {
     let base = format!("http://{addr}");
     let client = Client::new();
 
-    let gate = WebGate::new(state);
+    let gate = state.register_node("n1");
     gate.post_turn_source("finalize @Decision Approve");
     gate.post_turn_source("finalize @Decision Reject");
 
@@ -395,10 +640,12 @@ async fn post_turn_source_accumulates_a_history() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn sse_first_frame_patches_panel() {
-    let (addr, _state) = boot().await;
+async fn sse_first_frame_patches_panel_for_every_registered_node() {
+    let (addr, state) = boot().await;
     let base = format!("http://{addr}");
     let client = Client::new();
+    let _alpha = state.register_node("alpha");
+    let _beta = state.register_node("beta");
 
     let resp = client.get(format!("{base}/sse")).send().await.unwrap();
     assert_eq!(resp.status(), 200);
@@ -406,18 +653,21 @@ async fn sse_first_frame_patches_panel() {
     let mut stream = resp.bytes_stream();
     let mut buf = String::new();
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
-    while !buf.contains("\n\n") {
+    // Two nodes registered before connect => two initial frames.
+    while buf.matches("event: datastar-patch-elements").count() < 2 {
         let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-        assert!(!remaining.is_zero(), "timed out waiting for an SSE frame");
+        assert!(
+            !remaining.is_zero(),
+            "timed out waiting for both initial SSE frames; got:\n{buf}"
+        );
         let chunk = tokio::time::timeout(remaining, stream.next())
             .await
             .expect("timed out waiting for an SSE frame")
-            .expect("SSE stream ended before a frame arrived")
+            .expect("SSE stream ended before both frames arrived")
             .expect("SSE stream error");
         buf.push_str(&String::from_utf8_lossy(&chunk));
     }
 
-    // Event name + the patched root only — never inner markup.
-    assert!(buf.contains("event: datastar-patch-elements"), "got: {buf}");
-    assert!(buf.contains("id=\"panel\""), "got: {buf}");
+    assert!(buf.contains("id=\"panel-alpha\""), "got: {buf}");
+    assert!(buf.contains("id=\"panel-beta\""), "got: {buf}");
 }

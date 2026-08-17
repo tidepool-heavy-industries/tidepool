@@ -59,16 +59,65 @@ tidepool_mcp::subagent_effect_def!(crate::effect_glue::effect_rust_projection);
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 struct CycleId(u64);
 
+/// A stepped cycle's backend slot: LIVE while the saga is mid-turn, and
+/// replaced with its extracted transcript the moment the saga finishes.
+///
+/// A terminal table entry must hold no OS process — [`SubagentHandler::drop`]
+/// only reaps ASYNC cycles, and a finished `Stepped` entry that kept its
+/// backend alive (a live app-server child + its tokio runtime) forever would
+/// be exactly the leak that guards against.
+enum StepBackend {
+    Live(Box<dyn AgentBackend + Send>),
+    /// Extracted at the instant the saga finished; the backend that produced
+    /// it has already been dropped.
+    Settled(Vec<String>),
+}
+
+impl StepBackend {
+    fn transcript_jsonl(&self) -> Vec<String> {
+        match self {
+            StepBackend::Live(b) => b.transcript_jsonl(),
+            StepBackend::Settled(lines) => lines.clone(),
+        }
+    }
+
+    /// The live backend, for driving the saga. A saga still mid-turn always
+    /// holds a live backend — [`settle_if_finished`] is the only thing that
+    /// ever transitions this to `Settled`, and it only runs once the saga is
+    /// already finished.
+    fn as_live_mut(&mut self) -> &mut dyn AgentBackend {
+        match self {
+            StepBackend::Live(b) => &mut **b,
+            StepBackend::Settled(_) => {
+                unreachable!("a saga still mid-turn always holds a live StepBackend")
+            }
+        }
+    }
+}
+
+/// If `saga` just finished, extract its backend's transcript and DROP the
+/// backend in place of it. Idempotent (a `Settled` slot is left alone) and a
+/// no-op while the saga is still mid-turn.
+fn settle_if_finished(saga: &CycleSaga, backend: &mut StepBackend) {
+    if !saga.is_finished() {
+        return;
+    }
+    if let StepBackend::Live(live) = backend {
+        let lines = live.transcript_jsonl();
+        *backend = StepBackend::Settled(lines);
+    }
+}
+
 /// One cycle in the table.
 enum Cycle {
     /// Driven one stop at a time by `SubagentBegin`/`SubagentResume`, inline on
     /// the caller's thread — the tool-dispatch path, whose loop lives in
     /// Haskell (`tidepool-agent/CLAUDE.md`, "the seam is a STEP function").
-    /// Both fields are boxed so that no table entry pays for the largest
+    /// The saga is boxed so that no table entry pays for the largest
     /// variant's inline size — same reason as [`Cycle::Async`].
     Stepped {
         saga: Box<CycleSaga>,
-        backend: Box<dyn AgentBackend + Send>,
+        backend: StepBackend,
     },
     /// Driven to completion on its OWN thread — the async path. Awaited or
     /// cancelled; never stepped. Boxed: an [`AsyncCycle`] is several times the
@@ -139,6 +188,17 @@ impl Settled {
     }
 }
 
+/// What an [`AsyncCycle`] says when its thread died without ever reporting —
+/// the shared wording between the blocking [`AsyncCycle::collect`] and the
+/// non-blocking [`AsyncCycle::try_settle`].
+fn lost_no_report(id: CycleId) -> Settled {
+    Settled::Lost(format!(
+        "cycle {} ended without reporting a result: its thread panicked mid-saga, so whether \
+         its binding was settled is unknown",
+        id.0
+    ))
+}
+
 /// A cycle running on its own thread.
 struct AsyncCycle {
     /// `None` once joined.
@@ -150,27 +210,35 @@ struct AsyncCycle {
     canceller: Box<dyn BackendCanceller>,
     /// Handed back by the cycle thread when it finished; what `cancel` settles.
     saga: Option<CycleSaga>,
-    /// Handed back by the cycle thread, so its transcript stays reachable.
-    backend: Option<Box<dyn AgentBackend + Send>>,
+    /// The backend's own transcript, extracted the instant its report
+    /// arrived — a settled cycle holds NO backend (and so no OS process),
+    /// only what it said. Empty until settled, and for a backend that keeps
+    /// none (every mock).
+    transcript: Vec<String>,
     settled: Option<Settled>,
 }
 
 impl AsyncCycle {
-    /// Block for the cycle thread's report, join the thread, and take its saga
-    /// and backend. Never panics: a thread that died mid-saga is a
+    /// Record a report that has already arrived: extract the transcript
+    /// (dropping the backend that produced it — it goes out of scope at the
+    /// end of this call) and remember the saga. The shared tail of
+    /// [`collect`](Self::collect) (which blocks for the report) and
+    /// [`try_settle`](Self::try_settle) (which only acts on one that already
+    /// arrived).
+    fn absorb(&mut self, report: CycleReport) -> Settled {
+        self.saga = report.saga;
+        self.transcript = report.backend.transcript_jsonl();
+        Settled::Reported(Box::new(report.result))
+        // `report.backend` drops here.
+    }
+
+    /// Block for the cycle thread's report, join the thread, and take its
+    /// saga. Never panics: a thread that died mid-saga is a
     /// [`Settled::Lost`], not a second panic here.
     fn collect(&mut self, id: CycleId) -> Settled {
         let settled = match self.reports.recv() {
-            Ok(report) => {
-                self.saga = report.saga;
-                self.backend = Some(report.backend);
-                Settled::Reported(Box::new(report.result))
-            }
-            Err(_) => Settled::Lost(format!(
-                "cycle {} ended without reporting a result: its thread panicked mid-saga, so \
-                 whether its binding was settled is unknown",
-                id.0
-            )),
+            Ok(report) => self.absorb(report),
+            Err(_) => lost_no_report(id),
         };
         if let Some(thread) = self.thread.take() {
             // A panicked cycle thread is already accounted for above; joining
@@ -178,6 +246,30 @@ impl AsyncCycle {
             let _ = thread.join();
         }
         settled
+    }
+
+    /// Non-blocking: if this cycle's thread has already sent its report,
+    /// settle it now. This is what lets a completed-but-never-awaited cycle
+    /// free its capacity slot on the NEXT admission — see
+    /// [`SubagentHandler::admit_cycle`] — without a caller ever calling
+    /// `awaitAgent`/`cancelAgent`. A no-op while the thread has not yet
+    /// reported (never blocks), and idempotent once settled — so it changes
+    /// nothing about what a LATER `await`/`cancel` observes: same typed
+    /// terminal either way, just possibly settled earlier.
+    fn try_settle(&mut self, id: CycleId) {
+        if self.settled.is_some() {
+            return;
+        }
+        use std::sync::mpsc::TryRecvError;
+        let settled = match self.reports.try_recv() {
+            Ok(report) => self.absorb(report),
+            Err(TryRecvError::Empty) => return,
+            Err(TryRecvError::Disconnected) => lost_no_report(id),
+        };
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+        self.settled = Some(settled);
     }
 
     /// Reap this cycle: kill FIRST, then settle. Idempotent — a cycle that
@@ -211,6 +303,10 @@ impl AsyncCycle {
             },
         };
         self.settled = Some(settled);
+    }
+
+    fn transcript_jsonl(&self) -> Vec<String> {
+        self.transcript.clone()
     }
 }
 
@@ -379,29 +475,27 @@ impl SubagentHandler {
         &self.spawner
     }
 
-    /// Every reachable cycle backend's own transcript, as opaque JSONL lines,
+    /// Every reachable cycle's own transcript, as opaque JSONL lines,
     /// concatenated in cycle order — empty for a backend that keeps none
     /// (every mock). The live acceptance writes this to a fixture so the
     /// recording can drive the production pump in CI afterwards.
     ///
     /// Redefined over the cycle table now that a backend is per-cycle rather
-    /// than per-handler. Two consequences worth knowing before reading a
+    /// than per-handler. Three consequences worth knowing before reading a
     /// fixture: an async cycle's backend lives on its own thread while it runs,
     /// so its lines appear only after that cycle is reaped (awaited or
-    /// cancelled); and `SubagentSpawn`'s backend belongs to the call rather
-    /// than to the table, so a one-call sync spawn contributes nothing here.
-    /// The live acceptance drives the tool loop, whose stepped entry the table
-    /// retains.
+    /// cancelled); once reaped, the backend itself is GONE (dropped at settle
+    /// — see [`AsyncCycle::absorb`] / [`settle_if_finished`]) and only its
+    /// extracted transcript remains, which is what this reads for a terminal
+    /// entry; and `SubagentSpawn`'s backend belongs to the call rather than to
+    /// the table, so a one-call sync spawn contributes nothing here. The live
+    /// acceptance drives the tool loop, whose stepped entry the table retains.
     pub fn backend_transcript_jsonl(&self) -> Vec<String> {
         self.cycles
             .values()
             .flat_map(|cycle| match cycle {
                 Cycle::Stepped { backend, .. } => backend.transcript_jsonl(),
-                Cycle::Async(cycle) => cycle
-                    .backend
-                    .as_ref()
-                    .map(|b| b.transcript_jsonl())
-                    .unwrap_or_default(),
+                Cycle::Async(cycle) => cycle.transcript_jsonl(),
             })
             .collect()
     }
@@ -419,7 +513,21 @@ impl SubagentHandler {
     /// Refuse a cycle that would exceed the bound, BEFORE anything is
     /// allocated: no backend is made, no worktree is created, no binding row is
     /// written for a spawn that is refused.
-    fn admit_cycle(&self) -> Result<(), SpawnError> {
+    ///
+    /// Opportunistically settles every async cycle whose thread has already
+    /// sent its report but was never `await`ed or `cancel`ed (a non-blocking
+    /// `try_recv` per cycle — see [`AsyncCycle::try_settle`]) BEFORE counting
+    /// live cycles, so a completed-but-unawaited cycle frees its slot on the
+    /// NEXT admission rather than holding it forever. This changes nothing
+    /// about what a later `await`/`cancel` observes on that cycle — same
+    /// typed terminal either way — only when the capacity count notices it
+    /// finished.
+    fn admit_cycle(&mut self) -> Result<(), SpawnError> {
+        for (id, cycle) in self.cycles.iter_mut() {
+            if let Cycle::Async(async_cycle) = cycle {
+                async_cycle.try_settle(*id);
+            }
+        }
         let live = self.cycles.values().filter(|c| !c.is_terminal()).count();
         if live >= self.capacity {
             return Err(SpawnError::SpawnCapacityExhausted(self.capacity as i64));
@@ -536,13 +644,12 @@ impl SubagentHandler {
             .begin_detached(&mut *backend, &request)
             .map_err(spawn_error_to_wire)?;
         let id = self.mint_cycle();
-        self.cycles.insert(
-            id,
-            Cycle::Stepped {
-                saga: Box::new(saga),
-                backend,
-            },
-        );
+        let saga = Box::new(saga);
+        let mut backend = StepBackend::Live(backend);
+        // A zero-round agent can finish on its very first stop — this entry
+        // must not start life holding a live backend it will never use again.
+        settle_if_finished(&saga, &mut backend);
+        self.cycles.insert(id, Cycle::Stepped { saga, backend });
         Ok(step_to_wire(&step))
     }
 
@@ -578,8 +685,11 @@ impl SubagentHandler {
             unreachable!("`stepped_cycle_of` only ever names a live Stepped entry");
         };
         let step = saga
-            .answer(&mut **backend, agent, ToolCallId(call), outcome)
+            .answer(backend.as_live_mut(), agent, ToolCallId(call), outcome)
             .map_err(spawn_error_to_wire)?;
+        // If this stop finished the saga, drop the backend now — a terminal
+        // entry must hold no OS process.
+        settle_if_finished(saga, backend);
         Ok(step_to_wire(&step))
     }
 
@@ -662,7 +772,7 @@ impl SubagentHandler {
                 reports: receiver,
                 canceller,
                 saga: None,
-                backend: None,
+                transcript: Vec::new(),
                 settled: None,
             })),
         );
@@ -1124,7 +1234,7 @@ mod tests {
     use super::*;
 
     use std::collections::VecDeque;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::{Arc, Condvar, Mutex};
     use std::time::Duration;
 
@@ -2555,5 +2665,367 @@ mod tests {
             }
             other => panic!("expected a BackendUnavailable at Allocating, got {other:?}"),
         }
+    }
+
+    // ==================================================================
+    // Cycle hygiene: cancel during the connect window, backend drop at
+    // settle, and opportunistic capacity settling.
+    // ==================================================================
+
+    /// A backend whose `transcript_jsonl` is a fixed script, and whose `Drop`
+    /// reports itself — so a test can assert BOTH that the extracted
+    /// transcript survived a settle and that the backend object itself was
+    /// actually deallocated (never merely un-referenced).
+    struct DropSignal {
+        inner: MockBackend,
+        transcript: Vec<String>,
+        dropped: Arc<AtomicBool>,
+    }
+
+    impl Drop for DropSignal {
+        fn drop(&mut self) {
+            self.dropped.store(true, Ordering::SeqCst);
+        }
+    }
+
+    impl AgentBackend for DropSignal {
+        fn start_thread(
+            &mut self,
+            spec: &ThreadSpec,
+        ) -> Result<BackendThreadId, AgentBackendError> {
+            self.inner.start_thread(spec)
+        }
+
+        fn start_turn(
+            &mut self,
+            thread: &BackendThreadId,
+            spec: &CycleSpec,
+        ) -> Result<TurnEvent, AgentBackendError> {
+            self.inner.start_turn(thread, spec)
+        }
+
+        fn resume(&mut self, reply: ToolReply) -> Result<TurnEvent, AgentBackendError> {
+            self.inner.resume(reply)
+        }
+
+        fn transcript_jsonl(&self) -> Vec<String> {
+            self.transcript.clone()
+        }
+
+        fn canceller(&self) -> Box<dyn BackendCanceller> {
+            self.inner.canceller()
+        }
+    }
+
+    fn one_shot_queue(backend: Box<dyn AgentBackend + Send>) -> Box<dyn AgentBackendFactory> {
+        let mut queue: VecDeque<Box<dyn AgentBackend + Send>> = VecDeque::new();
+        queue.push_back(backend);
+        Box::new(QueuedBackends {
+            queue,
+            created: Arc::new(AtomicUsize::new(0)),
+        })
+    }
+
+    /// A settled ASYNC cycle drops its backend (no OS process survives a
+    /// reap) but keeps what it said, extracted at the instant it settled.
+    #[test]
+    fn handler_settled_async_cycle_drops_its_backend_but_keeps_the_transcript() {
+        let fx = Fixture::new();
+        let dropped = Arc::new(AtomicBool::new(false));
+        let backend = DropSignal {
+            inner: MockBackend::completing(CycleResultPayload::Absent),
+            transcript: vec!["{\"frame\":1}".to_string(), "{\"frame\":2}".to_string()],
+            dropped: Arc::clone(&dropped),
+        };
+        let mut handler = fx.handler_with(one_shot_queue(Box::new(backend)));
+
+        let cycle = spawn_async(&mut handler, "worker").expect("admitted immediately");
+        handler
+            .subagent_await(cycle)
+            .expect("the mock completes immediately");
+
+        assert!(
+            dropped.load(Ordering::SeqCst),
+            "a settled cycle must drop its backend — no OS process may outlive settle"
+        );
+        assert_eq!(
+            handler.backend_transcript_jsonl(),
+            vec!["{\"frame\":1}".to_string(), "{\"frame\":2}".to_string()],
+            "the transcript survives the backend's drop — extracted at settle"
+        );
+    }
+
+    /// The same guarantee on the STEPPED path: once `SubagentResume` drives a
+    /// saga to `Done`, its backend is dropped even though the table entry is
+    /// retained.
+    #[test]
+    fn handler_settled_stepped_cycle_drops_its_backend_but_keeps_the_transcript() {
+        let fx = Fixture::new();
+        let dropped = Arc::new(AtomicBool::new(false));
+        let backend = DropSignal {
+            inner: MockBackend::scripted([
+                MockStep::Calls {
+                    tool: "ask_parent".to_string(),
+                    arguments: serde_json::json!({ "q": "which file?" }),
+                },
+                MockStep::Completes(CycleResultPayload::Absent),
+            ]),
+            transcript: vec!["{\"frame\":1}".to_string()],
+            dropped: Arc::clone(&dropped),
+        };
+        let mut handler = fx.handler_with(one_shot_queue(Box::new(backend)));
+
+        let step = handler
+            .subagent_begin(
+                new_worktree_spec("reviewer", "summarize the diff"),
+                JsonArg(one_declaration()),
+                JsonArg(sample_schema()),
+            )
+            .expect("the scripted turn parks on a tool call");
+        let AgAgentStep::StepToolCall(agent, call, ..) = step else {
+            panic!("expected a parked tool call, got {step:?}");
+        };
+        assert!(
+            !dropped.load(Ordering::SeqCst),
+            "a mid-turn cycle must keep its backend"
+        );
+
+        handler
+            .subagent_resume(
+                agent,
+                call,
+                true,
+                JsonArg(serde_json::json!({ "file": "notes.md" })),
+            )
+            .expect("answering the parked call drives the turn to done");
+
+        assert!(
+            dropped.load(Ordering::SeqCst),
+            "a finished stepped cycle must drop its backend — the table entry is retained, \
+             the OS process is not"
+        );
+        assert_eq!(
+            handler.backend_transcript_jsonl(),
+            vec!["{\"frame\":1}".to_string()],
+            "the transcript survives the backend's drop — extracted at settle"
+        );
+    }
+
+    /// Retries a spawn until it is admitted or a bounded deadline passes —
+    /// tolerating the tiny window between a released cycle's backend
+    /// returning and its own thread finishing the send that lands its report
+    /// in the channel `try_settle` drains. `yield_now` rather than a sleep:
+    /// there is no real I/O on either side of this race, so a spin is cheap
+    /// and the bound is a liveness backstop, not a timing assumption.
+    fn spawn_async_eventually(handler: &mut SubagentHandler, label: &str) -> AgCycleId {
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            match spawn_async(handler, label) {
+                Ok(id) => return id,
+                Err(SpawnError::SpawnCapacityExhausted(_))
+                    if std::time::Instant::now() < deadline =>
+                {
+                    std::thread::yield_now();
+                }
+                Err(e) => panic!("spawn_async_eventually({label}) timed out or failed: {e:?}"),
+            }
+        }
+    }
+
+    /// The capacity bound counts NON-TERMINAL cycles, but a cycle whose
+    /// thread already finished and was simply never `await`ed is not
+    /// "running" in any sense an operator cares about. Admission must
+    /// opportunistically drain such reports so eight completed-but-unawaited
+    /// cycles free their slots for a ninth spawn.
+    #[test]
+    fn handler_admit_opportunistically_settles_finished_unawaited_cycles() {
+        let fx = Fixture::new();
+        let mut fleet = Fleet::new(9);
+        let started = Arc::clone(&fleet.started);
+        let mut handler = fx.handler_with(fleet.factory()).with_cycle_capacity(8);
+
+        let cycles: Vec<AgCycleId> = (0..8)
+            .map(|i| spawn_async(&mut handler, &format!("worker-{i}")).expect("under the cap"))
+            .collect();
+        started.wait_for(8, "all eight cycles to start");
+
+        // Release all eight and let them run to completion WITHOUT awaiting
+        // any of them — they sit in the table as completed-but-unawaited.
+        for control in &fleet.controls[..8] {
+            control.release();
+        }
+
+        // A ninth spawn must eventually be admitted: opportunistic settling
+        // during admission drains the finished cycles' reports and frees
+        // their slots, even though nothing ever called `awaitAgent`.
+        let ninth = spawn_async_eventually(&mut handler, "worker-8");
+
+        // Every one of the eight is still answerable with its own payload —
+        // opportunistic settling must not change what `await` sees.
+        for (who, cycle) in cycles.iter().enumerate() {
+            let outcome = handler.subagent_await(*cycle).expect(
+                "opportunistic settling during admission must not change the typed terminal \
+                 an await later sees",
+            );
+            assert_eq!(outcome.outcome_payload, Fleet::payload(who));
+        }
+
+        fleet.controls[8].release();
+        handler
+            .subagent_await(ninth)
+            .expect("the ninth cycle, admitted after opportunistic settling, completes normally");
+    }
+
+    /// Blocks [`SlowConnectBackend::start_turn`] until the test releases it —
+    /// standing in for the real Codex adapter's process-spawn + handshake
+    /// window, which a pid-based canceller cannot interrupt before the pid is
+    /// known. Plain `Mutex`+`Condvar`, deliberately NOT `MockControl`: unlike
+    /// a scripted `MockStep::Blocks`, this wait must NOT itself observe
+    /// cancellation — a real handshake keeps running to completion regardless
+    /// of a cancel racing it.
+    #[derive(Default)]
+    struct ConnectGate {
+        released: Mutex<bool>,
+        changed: Condvar,
+    }
+
+    impl ConnectGate {
+        fn block_until_released(&self) {
+            let mut released = self.released.lock().expect("connect gate mutex");
+            while !*released {
+                released = self.changed.wait(released).expect("connect gate mutex");
+            }
+        }
+
+        fn release(&self) {
+            *self.released.lock().expect("connect gate mutex") = true;
+            self.changed.notify_all();
+        }
+    }
+
+    /// Sets `cancel_requested` and announces having done so — the test
+    /// rendezvous that makes "cancel registers before the connect window
+    /// closes" a fact rather than a hope. Deliberately does NOT reach into
+    /// the inner mock's own control: nothing here may rescue a hang via that
+    /// path, or the test would pass whether or not the connect-window check
+    /// under test actually runs.
+    struct SlowConnectCanceller {
+        cancel_requested: Arc<AtomicBool>,
+        registered: Arc<Latch>,
+    }
+
+    impl BackendCanceller for SlowConnectCanceller {
+        fn cancel(&self) {
+            self.cancel_requested.store(true, Ordering::SeqCst);
+            self.registered.arrive(0);
+        }
+    }
+
+    /// Models `CodexAgentBackend::start_turn`'s own shape: block through the
+    /// connect window, THEN check whether a cancel arrived during it, and
+    /// bail out BEFORE ever reaching the (potentially arbitrarily long)
+    /// actual turn if it did.
+    struct SlowConnectBackend {
+        inner: MockBackend,
+        cancel_requested: Arc<AtomicBool>,
+        cancel_registered: Arc<Latch>,
+        gate: Arc<ConnectGate>,
+        entered_connect: Arc<Latch>,
+        entered_turn: Arc<AtomicUsize>,
+    }
+
+    impl AgentBackend for SlowConnectBackend {
+        fn start_thread(
+            &mut self,
+            spec: &ThreadSpec,
+        ) -> Result<BackendThreadId, AgentBackendError> {
+            self.inner.start_thread(spec)
+        }
+
+        fn start_turn(
+            &mut self,
+            thread: &BackendThreadId,
+            spec: &CycleSpec,
+        ) -> Result<TurnEvent, AgentBackendError> {
+            self.entered_connect.arrive(0);
+            self.gate.block_until_released();
+            if self.cancel_requested.load(Ordering::SeqCst) {
+                return Err(AgentBackendError::BackendUnavailable {
+                    detail: "cycle cancelled during connect: never reached its turn".to_string(),
+                });
+            }
+            self.entered_turn.fetch_add(1, Ordering::SeqCst);
+            self.inner.start_turn(thread, spec)
+        }
+
+        fn resume(&mut self, reply: ToolReply) -> Result<TurnEvent, AgentBackendError> {
+            self.inner.resume(reply)
+        }
+
+        fn canceller(&self) -> Box<dyn BackendCanceller> {
+            Box::new(SlowConnectCanceller {
+                cancel_requested: Arc::clone(&self.cancel_requested),
+                registered: Arc::clone(&self.cancel_registered),
+            })
+        }
+    }
+
+    /// The race matrix's missing row: a cancel that arrives while a cycle is
+    /// still "connecting" must reach a typed terminal without ever waiting
+    /// out the (here: indefinite) actual turn — pinning the fix for the
+    /// review finding that `SubagentCancel` during the connect window
+    /// degraded into blocking for a full model turn.
+    #[test]
+    fn handler_cancel_during_connect_reaches_typed_terminal_without_a_full_turn_wait() {
+        let fx = Fixture::new();
+        let gate = Arc::new(ConnectGate::default());
+        let entered_connect = Arc::new(Latch::default());
+        let entered_turn = Arc::new(AtomicUsize::new(0));
+        let cancel_requested = Arc::new(AtomicBool::new(false));
+        let cancel_registered = Arc::new(Latch::default());
+        let backend = SlowConnectBackend {
+            inner: MockBackend::completing(CycleResultPayload::Absent),
+            cancel_requested: Arc::clone(&cancel_requested),
+            cancel_registered: Arc::clone(&cancel_registered),
+            gate: Arc::clone(&gate),
+            entered_connect: Arc::clone(&entered_connect),
+            entered_turn: Arc::clone(&entered_turn),
+        };
+        let mut handler = fx.handler_with(one_shot_queue(Box::new(backend)));
+
+        let cycle = spawn_async(&mut handler, "worker").expect("admitted immediately");
+        entered_connect.wait_for(1, "the cycle to reach the simulated connect window");
+
+        let elapsed = std::thread::scope(|scope| {
+            let cancel_thread = scope.spawn(|| {
+                let start = std::time::Instant::now();
+                handler.cancel_cycle(cycle);
+                start.elapsed()
+            });
+            // Only release the connect window once the cancel has DEFINITELY
+            // registered — otherwise a release winning the race would let
+            // connect finish uncancelled and the test would pass for the
+            // wrong reason.
+            cancel_registered.wait_for(1, "the cancel to register before connect closes");
+            gate.release();
+            cancel_thread.join().expect("cancel_cycle must not panic")
+        });
+
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "cancel-during-connect must not block for anything resembling a full model turn: \
+             {elapsed:?}"
+        );
+        assert_eq!(
+            entered_turn.load(Ordering::SeqCst),
+            0,
+            "a cancel requested during connect must stop the cycle BEFORE it ever reaches its \
+             (potentially very long) actual turn"
+        );
+        assert_eq!(
+            handler.subagent_await(cycle),
+            Err(SpawnError::SpawnCancelled(cycle)),
+            "cancel-during-connect still reaches a typed terminal"
+        );
     }
 }

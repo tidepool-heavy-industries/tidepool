@@ -100,6 +100,7 @@ impl ModelProvider for CompactingProvider {
                 usage: Usage {
                     input_tokens: 30,
                     output_tokens: 5,
+                    cached_input_tokens: None,
                 },
                 reasoning: None,
                 reasoning_items: Vec::new(),
@@ -116,6 +117,7 @@ impl ModelProvider for CompactingProvider {
             usage: Usage {
                 input_tokens: self.pre_input,
                 output_tokens: 50,
+                cached_input_tokens: None,
             },
             reasoning: None,
             reasoning_items: Vec::new(),

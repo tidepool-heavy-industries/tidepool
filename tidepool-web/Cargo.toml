@@ -38,6 +38,7 @@ name = "tidepool-selfharness-web"
 path = "src/bin/tidepool-selfharness-web.rs"
 
 [dev-dependencies]
+tidepool-testing.workspace = true
 reqwest.workspace = true
 tokio = { workspace = true, features = ["net", "rt-multi-thread", "sync", "test-util", "time"] }
 futures-util = "0.3"

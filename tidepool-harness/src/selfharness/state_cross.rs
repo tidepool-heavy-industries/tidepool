@@ -58,6 +58,17 @@ pub(crate) const LOADED_QUALIFIER: &str = "Loaded";
 /// actionable failure mode from a general run error.
 pub(crate) const STATE_DECODE_SENTINEL: &str = "TIDEPOOL_STATE_DECODE_FAILED: ";
 
+/// [`STATE_DECODE_SENTINEL`]'s sibling for the boot-time resume fold
+/// ([`resume_in`]). A DISTINCT prefix, not a shared one: a `ResumeFold` decode
+/// failure means the driver's encoder and `Tidepool.Resume`'s hand-written
+/// `FromJSON` disagree on the wire contract — a Tidepool bug — whereas a
+/// `State` decode failure means the AUTHOR's `ToJSON`/`FromJSON State` are not
+/// inverse. Two different people have to fix them, so the driver maps them to
+/// two different [`crate::selfharness::driver::DriverError`] variants
+/// ([`crate::selfharness::driver::DriverError::ResumeDecode`] and
+/// `StateDecode`).
+pub(crate) const RESUME_DECODE_SENTINEL: &str = "TIDEPOOL_RESUME_DECODE_FAILED: ";
+
 /// Outbound: `loop`'s returned `State` Haskell value → JSON, via
 /// `tidepool_runtime::value_to_json(value, table, 0)`. Called once per loop
 /// boundary, after `loop state` completes with a new `State`; the result is
@@ -120,6 +131,35 @@ pub fn state_in(state_json: Option<&Json>) -> String {
     }
 }
 
+/// Inbound sibling of [`state_in`] for the boot-time run-journal FOLD (PRD 20
+/// S1-L5): splice `__selfHarnessResume :: Resume.ResumeFold`, decoded via
+/// `Aeson.eitherDecode` against `Tidepool.Resume`'s hand-written `FromJSON`.
+/// The driver splices this ONLY when it has a non-empty fold, and pairs it with
+/// the wider `Loaded.resumeLoop __selfHarnessResume __selfHarnessState` entry —
+/// a fresh boot compiles exactly the `Loaded.loop __selfHarnessState` entry it
+/// always did, with no extra helper text at all.
+///
+/// Deliberately the SAME shape as [`state_in`]'s decode branch, down to the
+/// `case … of { Right … ; Left e -> error (SENTINEL <> e) }` form: the sentinel
+/// prefix ([`RESUME_DECODE_SENTINEL`]) is what the driver matches on a fragment
+/// run-error to raise a typed
+/// [`crate::selfharness::driver::DriverError::ResumeDecode`] instead of an
+/// opaque "loop run failed".
+///
+/// `Resume.` is in scope because `Tidepool.Resume` rides `Journal`'s
+/// `EffectDecl::extra_imports` (`tidepool_mcp`'s `extra_imports_for!`), and
+/// `Journal` is in the outer row unconditionally
+/// (`crate::selfharness::driver`'s `outer_decls`) — so the import is present on
+/// EVERY outer compile, not only the ones that splice this.
+pub fn resume_in(fold: &crate::selfharness::resume::ResumeFold) -> String {
+    let literal = haskell_string_literal(&fold.to_json().to_string());
+    format!(
+        "__selfHarnessResume :: Resume.ResumeFold\n__selfHarnessResume = case \
+         Aeson.eitherDecode {literal} of {{ Right f -> f; Left e -> error ({sentinel} <> e) }}\n",
+        sentinel = haskell_string_literal(RESUME_DECODE_SENTINEL),
+    )
+}
+
 /// Render `s` as a double-quoted Haskell `Text` literal (via
 /// `OverloadedStrings`, always on in a harness turn's default pragma set).
 /// Used by [`state_in`] for the spliced `State` JSON literal. Reuses the
@@ -150,6 +190,54 @@ mod tests {
         assert!(src.starts_with("__selfHarnessState :: Loaded.State\n"));
         assert!(src.contains("Aeson.eitherDecode"));
         assert!(src.contains("\\\"loopCount\\\":3"));
+    }
+
+    /// Mirrors [`state_in`]'s decode splice exactly — same binding shape, same
+    /// `eitherDecode`, same sentinel-on-failure form — differing only in the
+    /// bound name, the type, and the sentinel.
+    #[test]
+    fn resume_in_mirrors_state_in_shape() {
+        use crate::selfharness::resume::ResumeFold;
+        let fold = ResumeFold::fold(
+            "run-1",
+            &[tidepool_handlers::JournalEntry {
+                seq: 4,
+                kind: "split".into(),
+                key: "branch/a".into(),
+                payload: serde_json::json!({"n": 1}),
+            }],
+        );
+        let src = resume_in(&fold);
+        assert!(src.starts_with("__selfHarnessResume :: Resume.ResumeFold\n"));
+        assert!(src.contains("Aeson.eitherDecode"));
+        assert!(src.contains(RESUME_DECODE_SENTINEL));
+        assert!(
+            src.contains("\\\"runId\\\":\\\"run-1\\\""),
+            "the fold's wire json must be spliced as an escaped literal, got: {src}"
+        );
+        assert!(src.contains("\\\"kind\\\":\\\"split\\\""), "got: {src}");
+    }
+
+    /// Byte-determinism: the same fold splices the same text, so a resumed
+    /// cycle's compile hits the memo instead of missing on map iteration order.
+    #[test]
+    fn resume_in_is_byte_deterministic() {
+        use crate::selfharness::resume::ResumeFold;
+        let entries: Vec<tidepool_handlers::JournalEntry> = ["b", "a", "c"]
+            .iter()
+            .enumerate()
+            .map(|(i, k)| tidepool_handlers::JournalEntry {
+                seq: i as u64,
+                kind: "split".into(),
+                key: (*k).to_string(),
+                payload: serde_json::json!(i),
+            })
+            .collect();
+        let a = resume_in(&ResumeFold::fold("r", &entries));
+        let mut reversed = entries.clone();
+        reversed.reverse();
+        let b = resume_in(&ResumeFold::fold("r", &reversed));
+        assert_eq!(a, b);
     }
 
     #[test]

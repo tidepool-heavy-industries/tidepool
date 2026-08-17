@@ -43,6 +43,7 @@ fn usage() -> Usage {
     Usage {
         input_tokens: 40,
         output_tokens: 8,
+        cached_input_tokens: None,
     }
 }
 
@@ -99,7 +100,7 @@ impl ModelProvider for SpliceProbeProvider {
                 text: "I'll get a number from a sub-agent, then finish.\n\n\
                        ```haskell\n\
                        do\n\
-                       \x20 n <- runLLMTurnFork @Int \"pick a number between 1 and 100\"\n\
+                       \x20 Right n <- runLLMTurnFork @Int \"pick a number between 1 and 100\"\n\
                        \x20 pure (toJSON n)\n\
                        ```"
                 .to_string(),
@@ -164,7 +165,9 @@ fn event_node(e: &Event) -> Option<NodeId> {
         | Event::NodeCancelled { node, .. }
         | Event::TurnDelta { node, .. }
         | Event::TurnForked { node, .. }
-        | Event::TurnSpliced { node, .. } => Some(*node),
+        | Event::TurnSpliced { node, .. }
+        | Event::SnapshotFrozen { node, .. }
+        | Event::BranchInvocation { node, .. } => Some(*node),
     }
 }
 

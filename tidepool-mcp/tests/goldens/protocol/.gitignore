@@ -1,0 +1,4 @@
+# The root .gitignore's blanket `*.txt` rule is meant for scratch files.
+# These .txt files are committed golden artifacts (PRD 22 phase-1 Class A
+# baseline) — un-ignore them here.
+!*.txt

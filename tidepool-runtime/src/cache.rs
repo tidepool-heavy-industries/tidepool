@@ -441,8 +441,8 @@ pub(crate) fn cache_store(key: &CacheKey, expr_bytes: &[u8], meta_bytes: &[u8]) 
 //
 // The second consumer of this module. `compile_haskell` above memoizes ONE
 // eval compile as a fixed (expr, meta) pair keyed by (source, target,
-// includes-by-path, binary). `tidepool_harness::compile` needs a memo for a
-// whole `tidepool-extract` INVOCATION: N targets, a variable artifact set
+// includes-by-path, binary). `crate::artifacts::compile_targets` needs a
+// memo for a whole `tidepool-extract` INVOCATION: N targets, a variable artifact set
 // (per-target Core, one shared meta, an asks sidecar whose very FILENAME
 // depends on the target count), and a key that survives the same content
 // appearing under a different absolute path. Rather than fork the fingerprint/
@@ -1061,7 +1061,7 @@ mod tests {
         path
     }
 
-    /// The argv `tidepool_harness::compile::compile_turns` builds.
+    /// The argv `crate::artifacts::compile_targets` builds.
     fn turn_argv(input: &Path, out: &Path, targets: &str, includes: &[&Path]) -> Vec<OsString> {
         let mut argv = vec![
             input.as_os_str().to_os_string(),

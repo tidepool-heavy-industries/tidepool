@@ -6,6 +6,25 @@ in git history rather than here.
 
 ## Active work
 
+- [The Effect Protocol](self-iterating-harness/22-effect-protocol-prd.md):
+  **proposed (2026-08-17), approved direction.** One data-only schema crate
+  generating every artifact the effect contract currently maintains by hand
+  in four registries (macro DSL strings, positional wire mirrors, extractor
+  verb tables, harness constructor-name classification) — byte-compatible
+  golden migration, one effect at a time, smallest first. Prerequisite
+  compile-pipeline consolidation in flight.
+- [Recursive Companion](self-iterating-harness/21-recursive-companion-prd.md):
+  **proposed (2026-08-17).** The companion track's successor: reasoning as a
+  recursively discovered typed program — one model invocation per node as the
+  coalgebra (finish locally or define one layer of branches), children forked
+  from the frozen post-coalgebra context, a second invocation as the algebra
+  folding typed results. Locked dataflow: prompt text for meaning, Haskell
+  values for behavior/identity/authority/composition — briefs render down,
+  closures ride up as live artifacts applied by the caller under receipts,
+  and the algebra's window gets a rendered view by default with the real
+  value mounted as an invocation-local binding when higher-order access
+  earns it. Lanes C0–C6; C1 (mounting a function-bearing value into a
+  window) is the de-risk spike.
 - [Exomonad v3 — the typed swarm](self-iterating-harness/20-exomonad-v3-prd.md):
   **proposed (2026-08-15).** The full-scope successor to exomonad: swarm
   coordination as a compiled resident Haskell program — a monadic

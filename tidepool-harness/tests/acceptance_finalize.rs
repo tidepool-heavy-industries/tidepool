@@ -70,6 +70,7 @@ fn reply(content: &str) -> RecordedReply {
         usage: Usage {
             input_tokens: 50,
             output_tokens: 10,
+            cached_input_tokens: None,
         },
     }
 }
@@ -213,7 +214,7 @@ async fn finalize_accepts_function_typed_site_where_runllmturn_rejects_it() {
         "",
         "",
     );
-    let result = tidepool_harness::compile::compile_turn(
+    let result = tidepool_harness::engine::compile_turn(
         &cfg.extract_bin,
         &src,
         "result",

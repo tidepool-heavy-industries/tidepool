@@ -74,10 +74,93 @@ use crate::render::EvalResult;
 use crate::timing;
 use crate::{JitError, RuntimeError, EVAL_STACK_SIZE};
 
+use tidepool_codegen::scope::ScopeId;
+
 use super::engine::OutputSink;
-use super::persistent::PersistentSession;
+use super::persistent::{PersistentSession, ScopeRetirement};
 use super::turn::{BoundBinder, ValueTier};
 use super::{SessionError, SessionLib};
+
+/// A LINEAR custody token over a [`ValueHandle`] between the moment it enters
+/// Rust-side custody — minted by [`ResidentSession::finalized_handle`] — and
+/// the moment it is consumed: delivered into a sibling continuation
+/// ([`ResidentSession::resume_handle`]) or mounted into a named binding
+/// ([`ResidentSession::mount_handle`]/[`ResidentSession::mount_handle_in`]).
+///
+/// Deliberately NOT `Clone`/`Copy`, unlike [`ValueHandle`] itself (which stays
+/// freely copyable at the machine layer — `tidepool_codegen::jit_machine`
+/// tests read a handle non-linearly on purpose: `observe_handle`,
+/// `handle_realm`, repeated `ResumeInput::Handle`, all borrows). At THIS
+/// layer, the three-owner chain documented at [`ResidentSession::mount_handle_in`]'s
+/// doc — handle registry, scope frame, GC root ledger, never two at once — used
+/// to be enforced only by caller discipline plus the machine's debug-mode
+/// `handle_holds_root` assert at scope retirement: a caller that mistakenly
+/// handed the SAME live [`ValueHandle`] to both `resume_handle` and
+/// `mount_handle_in` would not be caught until that assert fired, if it ever
+/// ran (a resume delivery does not consume its handle from the machine's own
+/// registry — see [`ResidentSession::resume_handle`]'s doc — so nothing at the
+/// machine layer stops a second use of the same numeric id). Wrapping the
+/// crossing here moves the check to COMPILE TIME: the only way to recover the
+/// raw handle is [`Self::into_handle`], which consumes `self` by value, so a
+/// second consumer has nothing left to consume — a use-after-move `rustc`
+/// error, not a runtime race. See the compile-fail example below.
+///
+/// Dropping an unconsumed token means custody was LOST — a finalized value was
+/// taken out of the machine and never delivered or mounted, so nothing will
+/// ever explicitly release it (it still dies at the owning realm's
+/// `close_realm`, exactly as before this token existed — this is a lint on
+/// Rust-side bookkeeping, not a memory-safety backstop). Loud in debug builds
+/// so the mistake surfaces at the call site that dropped it; silent in
+/// release, matching every other debug-only assert in this custody chain.
+///
+/// ```compile_fail
+/// use tidepool_codegen::jit_machine::ValueHandle;
+/// use tidepool_runtime::session::RootCustody;
+///
+/// let custody = RootCustody::new(ValueHandle(0));
+/// let delivered = custody.into_handle();   // first (and only legal) consumer
+/// let mounted = custody.into_handle();     // ERROR: `custody` was already moved
+/// ```
+#[derive(Debug)]
+pub struct RootCustody(Option<ValueHandle>);
+
+impl RootCustody {
+    /// Mint a custody token over `handle`. The one real mint site is
+    /// [`ResidentSession::finalized_handle`]; exposed as `pub` (rather than
+    /// `pub(crate)`) only so the compile-fail proof above can construct one
+    /// without a live session — production code never reaches for this
+    /// directly, since `finalized_handle` never hands out a bare
+    /// [`ValueHandle`] at the finalize seam in the first place.
+    pub fn new(handle: ValueHandle) -> Self {
+        RootCustody(Some(handle))
+    }
+
+    /// Consume the token, releasing the raw handle to the caller — the ONLY
+    /// way out. Every legitimate custody transfer (a mount, a resume
+    /// delivery) goes through this exactly once. Takes `self` by value, so a
+    /// second attempt to consume the SAME token is a compile-time
+    /// use-after-move error (see the compile-fail example above) rather than
+    /// a runtime double-custody bug.
+    pub fn into_handle(mut self) -> ValueHandle {
+        self.0
+            .take()
+            .expect("RootCustody always holds a handle until into_handle consumes it")
+    }
+}
+
+impl Drop for RootCustody {
+    fn drop(&mut self) {
+        if let Some(handle) = self.0 {
+            debug_assert!(
+                false,
+                "RootCustody dropped without being consumed — {handle:?}'s custody was \
+                 lost (never delivered via resume_handle, never mounted). The machine-side \
+                 root is unaffected (it releases at the owning realm's close_realm \
+                 regardless), but the value silently never reached wherever it was headed."
+            );
+        }
+    }
+}
 
 /// The classified result of driving a resident turn to its first yield.
 ///
@@ -154,6 +237,12 @@ pub enum ResidentError {
     /// ask-protocol error).
     #[error("turn run failed: {0}")]
     Run(RuntimeError),
+    /// The resident eval thread could not be spawned (a transient OS
+    /// resource failure — thread-limit exhaustion, out of memory). The
+    /// session's machine is restored before this is returned; a retry is
+    /// safe.
+    #[error("failed to spawn resident eval thread: {0}")]
+    EvalThread(std::io::Error),
     /// Merging this turn's constructor metadata into the session table hit a
     /// collision (a Haskell-side DataCon-scheme regression, mirroring the repl's
     /// `merge_table`).
@@ -202,6 +291,12 @@ pub struct ResidentSession<H, O> {
     /// until [`ResidentSession::set_realm`] — per-node realms arrive with the
     /// collapse (one-session plan, Phase 3).
     realm: RealmId,
+    /// The scope tree node every turn this session runs is compiled and bound
+    /// in ([`ScopeId::ROOT`] until [`ResidentSession::set_scope`]). The realm
+    /// field above is the HEAP-side lifetime (parked frames, handles); this is
+    /// the NAME-side one (decl tips, value-plane frames). A window carries
+    /// both, and retiring it exits both — see `Harness::terminate_node`.
+    scope: ScopeId,
     /// Continuation-id prefix (`scont` for the resident surface).
     cont_prefix: String,
 }
@@ -262,6 +357,7 @@ where
             next_id: AtomicU64::new(1),
             parked: Vec::new(),
             realm: RealmId(0),
+            scope: ScopeId::ROOT,
             cont_prefix: "scont".to_string(),
         })
     }
@@ -294,6 +390,7 @@ where
             next_id: AtomicU64::new(1),
             parked: Vec::new(),
             realm: RealmId(0),
+            scope: ScopeId::ROOT,
             cont_prefix: "scont".to_string(),
         }
     }
@@ -310,10 +407,33 @@ where
         self.core.define_scoped(decls)
     }
 
+    /// Scoped [`Self::define_scoped`]: append to `scope`'s own decl tip, which
+    /// already re-exports its ancestors' — so the definition is visible to
+    /// `scope` and its descendants and to nobody else. `define_scoped(d) ==
+    /// define_scoped_in(ScopeId::ROOT, d)`.
+    pub fn define_scoped_in(
+        &mut self,
+        scope: ScopeId,
+        decls: &[&str],
+    ) -> Result<tidepool_repr::Generation, SessionError> {
+        self.core.define_scoped_in(scope, decls)
+    }
+
     /// The current decl-plane module name (`Tidepool.Session.Lib.G<g>`) a later
     /// turn imports to see accumulated declarations, or `None` before any decl.
     pub fn session_import_module(&self) -> Option<String> {
         self.core.current_lib_module().map(|m| m.module_name())
+    }
+
+    /// Scoped [`Self::session_import_module`]: the `Lib.G<g>` module at
+    /// `scope`'s tip. A turn compiled in a child scope imports THIS, not
+    /// ROOT's — which is the whole of "parent declarations callable in every
+    /// child" on the real compile path, since the child's tip module re-exports
+    /// its parent's chain.
+    pub fn session_import_module_in(&self, scope: ScopeId) -> Option<String> {
+        self.core
+            .current_lib_module_in(scope)
+            .map(|m| m.module_name())
     }
 
     /// The decl-plane include directory to add to a later turn's compile search
@@ -343,6 +463,14 @@ where
         self.core.current_val_modules()
     }
 
+    /// Scoped [`Self::current_val_modules`]: the `Val.G<g>` module per name
+    /// VISIBLE at `scope` — its own frame first, then each ancestor's, nearest
+    /// frame winning. A sibling scope's bindings are never in this list, so a
+    /// turn compiled here cannot even name them.
+    pub fn current_val_modules_in(&self, scope: ScopeId) -> Vec<String> {
+        self.core.current_val_modules_in(scope)
+    }
+
     /// The MOST RECENT parked hole (top of the stack), if any — the
     /// single-hole compatibility view; multi-hole callers use
     /// [`Self::parked_holes`].
@@ -365,6 +493,21 @@ where
     /// `close_realm`).
     pub fn set_realm(&mut self, realm: RealmId) {
         self.realm = realm;
+    }
+
+    /// Compile and bind every subsequent turn in `scope` (PRD 21 lane C2): the
+    /// turn imports `scope`'s decl tip and the `Val.G<g>` modules VISIBLE from
+    /// it, and a value-plane bind lands in `scope`'s own frame. The harness
+    /// applies a node's scope here at the same site it applies its realm, so a
+    /// node without one keeps compiling and binding at [`ScopeId::ROOT`] —
+    /// exactly its pre-C2 behavior.
+    pub fn set_scope(&mut self, scope: ScopeId) {
+        self.scope = scope;
+    }
+
+    /// The scope this session's turns currently compile and bind in.
+    pub fn current_scope(&self) -> ScopeId {
+        self.scope
     }
 
     /// SCOPE EXIT for `realm` (one-session plan, pillar A): close the realm
@@ -393,9 +536,12 @@ where
     /// flow always has); the handle is owned by the frame's realm. `None`
     /// when `hole` is not parked or its frame holds no (untaken) finalized
     /// payload.
-    pub fn finalized_handle(&mut self, hole: &str) -> Option<ValueHandle> {
+    pub fn finalized_handle(&mut self, hole: &str) -> Option<RootCustody> {
         let &(_, id) = self.parked.iter().find(|(h, _)| h == hole)?;
-        self.core.machine_mut()?.handle_from_finalized(id)
+        self.core
+            .machine_mut()?
+            .handle_from_finalized(id)
+            .map(RootCustody::new)
     }
 
     /// [`Self::finalized_handle`]'s sibling for a result that must outlive
@@ -404,11 +550,14 @@ where
     /// so a waiter's handle survives the thread's own realm later closing —
     /// PRD 20 S1-L4, `ResidentSession::run_forked`'s doc). Same
     /// frame-stays-parked semantics; `None` under the same conditions.
-    pub fn finalized_handle_owned_by(&mut self, hole: &str, realm: RealmId) -> Option<ValueHandle> {
+    /// Returns a [`RootCustody`] token, exactly as [`Self::finalized_handle`]
+    /// does: minting under a different realm changes WHO owns the root, never
+    /// whether the handle needs consuming exactly once.
+    pub fn finalized_handle_owned_by(&mut self, hole: &str, realm: RealmId) -> Option<RootCustody> {
         let &(_, id) = self.parked.iter().find(|(h, _)| h == hole)?;
         let machine = self.core.machine_mut()?;
         let slot = machine.take_parked_finalized_root(id)?;
-        Some(machine.mint_handle_from_root(slot, realm))
+        Some(RootCustody::new(machine.mint_handle_from_root(slot, realm)))
     }
 
     /// Resume the turn parked on `cont_id` by DELIVERING a machine-side
@@ -417,7 +566,155 @@ where
     /// one-session loop receives its `State -> State` this way). Same
     /// validate-before-consume and ground-truth reconciliation as
     /// [`Self::resume`].
+    ///
+    /// Takes the [`RootCustody`] token by value — this IS the consuming half
+    /// of the custody crossing (see that type's doc): the delivery itself
+    /// does not release the handle from the machine's own registry (a resume
+    /// is a scope-owned BORROW at the machine layer, same as `observe_handle`),
+    /// so without the token nothing at this layer stops a caller from also
+    /// mounting the same raw handle. The token is unwrapped once, here, at
+    /// the moment its custody is spent.
     pub fn resume_handle(
+        &mut self,
+        cont_id: &str,
+        custody: RootCustody,
+    ) -> Result<ResidentOutcome, ResidentError> {
+        self.reenter(cont_id, ResumeInput::Handle(custody.into_handle()), None)
+    }
+
+    /// The current value-plane binding for `name` — `(SessionVarId, module,
+    /// tier, type display)` — if one is live. The mount seam (PRD 21 lane
+    /// C1) reads this off a THROWAWAY same-type placeholder bind (any
+    /// ordinary `x <- e` turn of the target type) to recover the already-
+    /// minted `Val.G<g>` iface identity that [`Self::mount_handle`] then
+    /// redirects to a value that arrived by a different path (a cross-node
+    /// finalize handle) — no second iface is ever minted for the same name.
+    pub fn current_binding(
+        &self,
+        name: &str,
+    ) -> Option<(SessionVarId, SessionModule, ValueTier, Option<String>)> {
+        self.current_binding_in(ScopeId::ROOT, name)
+    }
+
+    /// Scoped [`Self::current_binding`]: the binding `name` resolves to as seen
+    /// FROM `scope` — its own frame first, then each ancestor up to ROOT, so a
+    /// child reads a parent's mounts and a local mount shadows an inherited
+    /// one. `current_binding(n) == current_binding_in(ScopeId::ROOT, n)`.
+    pub fn current_binding_in(
+        &self,
+        scope: ScopeId,
+        name: &str,
+    ) -> Option<(SessionVarId, SessionModule, ValueTier, Option<String>)> {
+        let entry = self.core.resolve_in(scope, name)?;
+        let tier = match entry.value {
+            BoundValue::Tier0Forced(_) => ValueTier::Tier0Data,
+            BoundValue::Tier1Closure(_) => ValueTier::Tier1Closure,
+        };
+        Some((entry.id, entry.module, tier, entry.type_display.clone()))
+    }
+
+    /// Redirect an ALREADY-MINTED value-plane binding (`id`/`module`, read
+    /// via [`Self::current_binding`]) to resolve through `handle`'s tenured
+    /// payload instead of whatever it was bound to before — the mount seam
+    /// (PRD 21 lane C1): "a handle installed under a name in a window's
+    /// declaration scope", the closure-tenure-then-handle delivery path
+    /// (pillar B) pointed the OTHER direction. `handle` is consumed exactly
+    /// like an ordinary bind completion ([`Self::materialize_binder`]): its
+    /// slot is read, the handle released from the machine's handle registry
+    /// (ownership transfers to the value plane — a live [`BindingTable`]
+    /// entry, ended only by the session machine dropping, never by a realm
+    /// scope exit), and re-registered under the SAME `SessionVarId`/module a
+    /// turn compiled against `name` already resolves through. No new
+    /// `Val.G<g>` iface is minted here and the GHC-side type binding is
+    /// unchanged — only WHICH heap object it points at moves. Errors if
+    /// `handle` is not live (already released, or never minted).
+    pub fn mount_handle(
+        &mut self,
+        name: &str,
+        id: SessionVarId,
+        module: SessionModule,
+        tier: ValueTier,
+        type_display: Option<String>,
+        custody: RootCustody,
+    ) -> Result<(), ResidentError> {
+        self.mount_handle_in(ScopeId::ROOT, name, id, module, tier, type_display, custody)
+    }
+
+    /// Scoped [`Self::mount_handle`]: install the mount in `scope`'s frame
+    /// instead of the flat session's. `mount_handle(..) ==
+    /// mount_handle_in(ScopeId::ROOT, ..)`, so the flat mount path is
+    /// bit-for-bit what it was.
+    ///
+    /// A scoped mount is what [`Self::retire_scope`] later releases: the
+    /// handle registry hands ownership of the tenured root to this frame
+    /// (`value_handle_count` drops as the frame's count rises), and the frame
+    /// hands it to the GC root ledger's `retire_scope_root` at retirement —
+    /// three named owners in sequence, never two at once. `custody` is the
+    /// [`RootCustody`] token minted by [`Self::finalized_handle`]; consumed
+    /// exactly once, here, at the moment ownership hands off to the frame.
+    #[allow(clippy::too_many_arguments)]
+    pub fn mount_handle_in(
+        &mut self,
+        scope: ScopeId,
+        name: &str,
+        id: SessionVarId,
+        module: SessionModule,
+        tier: ValueTier,
+        type_display: Option<String>,
+        custody: RootCustody,
+    ) -> Result<(), ResidentError> {
+        let handle = custody.into_handle();
+        let slot = self
+            .core
+            .machine_mut()
+            .and_then(|m| {
+                let slot = m.handle_slot(handle);
+                m.release_handle(handle);
+                slot
+            })
+            .ok_or_else(|| {
+                ResidentError::Run(RuntimeError::Jit(JitError::Effect(EffectError::Handler(
+                    "mount: handle is unknown to the machine (already released or never minted)"
+                        .into(),
+                ))))
+            })?;
+        let value = match tier {
+            ValueTier::Tier0Data => BoundValue::Tier0Forced(slot),
+            ValueTier::Tier1Closure => BoundValue::Tier1Closure(slot),
+        };
+        self.core.bind_in(
+            scope,
+            BindingEntry {
+                name: BindingName(name.to_string()),
+                id,
+                module,
+                value,
+                type_display,
+                defining_expr: None,
+                // Overwritten by `bind_in` with `scope`; see `BindingEntry`.
+                scope,
+            },
+        );
+        Ok(())
+    }
+
+    /// Deliver an already-session-owned root into a parked continuation
+    /// WITHOUT consuming custody — the REPEAT-delivery case.
+    ///
+    /// [`Self::resume_handle`]'s custody token guards a change of OWNER, not a
+    /// delivery: at the machine layer a resume is a scope-owned BORROW (same
+    /// as `observe_handle`), and the root is released by its owning realm's
+    /// scope exit, never by a delivery. A green thread's result is exactly
+    /// that shape — the root is minted under the SESSION's realm at settle
+    /// time (see [`Self::finalized_handle_owned_by`]) and may then be read
+    /// more than once: `poll` then `wait`, or two waiters joined on one
+    /// thread. Each of those is another borrow of one root, not a second
+    /// transfer of one custody.
+    ///
+    /// Use [`Self::resume_handle`] wherever the delivery IS the transfer (the
+    /// finalize seam). Reach for this only when an owner already exists and
+    /// outlives every delivery.
+    pub fn resume_handle_borrowed(
         &mut self,
         cont_id: &str,
         handle: ValueHandle,
@@ -458,6 +755,15 @@ where
         self.core.take_lib()
     }
 
+    /// Number of live [`ValueHandle`]s outstanding on this session's machine
+    /// (0 before the machine is bootstrapped) — the mount seam's ownership-
+    /// accounting read: a handle minted over a finalize payload
+    /// ([`Self::finalized_handle`]) counts here until [`Self::mount_handle`]
+    /// (or an ordinary bind completion / realm close) releases it.
+    pub fn value_handle_count(&self) -> usize {
+        self.core.machine().map_or(0, |m| m.value_handle_count())
+    }
+
     pub fn heap_stats(&self) -> Option<tidepool_codegen::jit_machine::HeapStats> {
         self.core.machine().map(|m| m.heap_stats())
     }
@@ -471,6 +777,75 @@ where
             .iter_current()
             .map(|(name, _)| name.0.clone())
             .collect()
+    }
+
+    // -- scopes (PRD 21 lane C2) -------------------------------------------
+
+    /// Mint a fresh child scope of `parent` ([`ScopeId::ROOT`] for a top-level
+    /// invocation scope). `None` if `parent` is not live.
+    pub fn mint_scope(&mut self, parent: ScopeId) -> Option<ScopeId> {
+        self.core.mint_scope(parent)
+    }
+
+    /// The value-plane names VISIBLE at `scope` — its own frame plus every
+    /// ancestor's, nearest frame winning. `binding_names_in(ScopeId::ROOT)` is
+    /// [`Self::binding_names`]'s set (sorted).
+    pub fn binding_names_in(&self, scope: ScopeId) -> Vec<String> {
+        self.core
+            .bindings()
+            .iter_current_in(self.core.scope_tree(), scope)
+            .into_iter()
+            .map(|(name, _)| name.0.clone())
+            .collect()
+    }
+
+    /// How many names `scope`'s OWN frame binds (accounting class 3, per
+    /// scope — inherited names are not counted, only locally-bound ones).
+    /// Returns to 0 when the scope retires.
+    pub fn scope_binding_count(&self, scope: ScopeId) -> usize {
+        self.core.scope_binding_count(scope)
+    }
+
+    /// Number of persistent GC roots registered on this session's machine
+    /// (accounting class 4 — the GC ROOT LEDGER; 0 before the machine
+    /// bootstraps). This is the WITNESS for [`Self::retire_scope`]: it drops
+    /// by exactly the receipt's `roots_released` and by nothing else.
+    ///
+    /// Deliberately separate from classes 1 (`stowed_roots_count() ==
+    /// parked_count()`) and 2 ([`Self::value_handle_count`]), which a scope
+    /// retirement leaves untouched — folding them together is what makes a
+    /// leak invisible.
+    pub fn persistent_roots_count(&self) -> usize {
+        self.core.persistent_roots_count()
+    }
+
+    /// Accounting class 1 — the PARKED-CONTINUATION roots, as the pair that
+    /// must always agree (`stowed_roots_count() == parked_count()`, the
+    /// machine's own quiescence invariant). 0 before the machine bootstraps.
+    /// A scope retirement must leave both UNCHANGED: a parked frame's root is
+    /// a realm's, not a scope's, and folding the two classes together is how a
+    /// leak becomes invisible.
+    pub fn stowed_roots_count(&self) -> usize {
+        self.core
+            .machine()
+            .map_or(0, JitEffectMachine::stowed_roots_count)
+    }
+
+    /// The parked-frame half of accounting class 1 — see
+    /// [`Self::stowed_roots_count`].
+    pub fn parked_count(&self) -> usize {
+        self.core
+            .machine()
+            .map_or(0, JitEffectMachine::parked_count)
+    }
+
+    /// Retire `scope` and its subtree: drop their value-plane frames and
+    /// release the GC roots those bindings solely owned. See
+    /// [`PersistentSession::retire_scope`] for the sole-ownership rule and the
+    /// deregistered-is-not-reclaimed bound; retiring ROOT or an already-retired
+    /// scope is a no-op returning an all-zero receipt.
+    pub fn retire_scope(&mut self, scope: ScopeId) -> ScopeRetirement {
+        self.core.retire_scope(scope)
     }
 
     /// The `ExternalEnv` a fragment compiling `expr` is seeded with: the
@@ -908,10 +1283,15 @@ where
     pub fn run_forked(
         &mut self,
         name_hint: &str,
-        body: ValueHandle,
+        body: RootCustody,
         realm: RealmId,
         run_table: Option<&DataConTable>,
     ) -> Result<ResidentOutcome, ResidentError> {
+        // Forking CONSUMES the body's custody: the thread that runs it is the
+        // handle's new owner, and there is no second consumer. Taking the
+        // token by value is what makes that a compile-time fact rather than a
+        // convention.
+        let body = body.into_handle();
         let slot = self
             .core
             .machine_mut()
@@ -1130,16 +1510,24 @@ where
             ValueTier::Tier0Data => BoundValue::Tier0Forced(slot),
             ValueTier::Tier1Closure => BoundValue::Tier1Closure(slot),
         };
-        // Evict any pure decl of the same name before binding (cross-plane shadow).
-        self.core.retract(&binder.name)?;
-        self.core.bind(BindingEntry {
-            name: BindingName(binder.name.clone()),
-            id: SessionVarId::from_extract(binder.var_id),
-            module: SessionModule::val(gen),
-            value,
-            type_display: Some(binder.type_display.clone()),
-            defining_expr: None,
-        });
+        // Evict any pure decl of the same name before binding (cross-plane
+        // shadow: a name lives in at most one plane). SCOPED to the binding's
+        // OWN scope — a child binding `helper` retracts the child's decl head,
+        // never the parent's, because nothing in this tree ever walks downward.
+        // At ROOT this is byte-for-byte the pre-C2 retraction.
+        self.core.retract_in(self.scope, &binder.name)?;
+        self.core.bind_in(
+            self.scope,
+            BindingEntry {
+                name: BindingName(binder.name.clone()),
+                id: SessionVarId::from_extract(binder.var_id),
+                module: SessionModule::val(gen),
+                value,
+                type_display: Some(binder.type_display.clone()),
+                defining_expr: None,
+                scope: self.scope,
+            },
+        );
         self.core.set_val_gen(gen);
         Ok(())
     }
@@ -1150,45 +1538,78 @@ where
     /// reach and re-point GC state at the retained heap. Only the machine (and
     /// the accumulated table) crosses to the thread; the rest of the session
     /// core is `!Send` (raw-pointer roots) and stays here.
+    ///
+    /// The machine is taken via [`MachineGuard`], whose `Drop` restores it into
+    /// `self.core` on EVERY exit from this function — success, a `JitError`, a
+    /// caught panic, or a failed thread spawn (a transient OS resource
+    /// failure, not a bug) — so no path can leave the session permanently
+    /// machineless.
     fn on_eval_thread<F, T>(&mut self, body: F) -> Result<T, ResidentError>
     where
         T: Send,
         F: FnOnce(&mut JitEffectMachine, &DataConTable, &mut H, &O) -> Result<T, JitError> + Send,
     {
-        let mut machine = self.core.take_machine();
-        let table = self.core.session_table();
+        self.on_eval_thread_with_stack(EVAL_STACK_SIZE, body)
+    }
+
+    /// [`Self::on_eval_thread`], with the eval thread's stack size as a
+    /// parameter rather than the hardcoded [`EVAL_STACK_SIZE`] — split out
+    /// so a test can force `spawn_scoped` to fail deterministically (an
+    /// absurd stack size) without changing production eval-thread semantics,
+    /// which always go through [`Self::on_eval_thread`]'s fixed constant.
+    fn on_eval_thread_with_stack<F, T>(
+        &mut self,
+        stack_size: usize,
+        body: F,
+    ) -> Result<T, ResidentError>
+    where
+        T: Send,
+        F: FnOnce(&mut JitEffectMachine, &DataConTable, &mut H, &O) -> Result<T, JitError> + Send,
+    {
+        let mut guard = MachineGuard::take(&mut self.core);
+        let table = guard.core.session_table();
+        let machine_ref = guard
+            .machine
+            .as_mut()
+            .expect("machine present while guard is alive");
         let handlers = &mut self.handlers;
         // The sink is Arc-backed (`OutputSink: Clone + Send`) and shares its
         // buffer; move a clone onto the thread rather than requiring `O: Sync`
         // for a borrow — matches the oneshot engine's `captured.clone()`.
         let captured = self.captured.clone();
 
-        // A scoped thread borrows `machine`/`handlers`/`table`/`captured` from
-        // this frame — the machine is moved back into the core after the scope
-        // joins, so it stays resident. `EVAL_STACK_SIZE` matches the oneshot
-        // eval thread (deep JIT recursion needs it), so `Builder::spawn_scoped`
-        // (the stack-sized form of `scope.spawn`) is used.
-        let result = std::thread::scope(|scope| {
-            let handle = std::thread::Builder::new()
+        // A scoped thread borrows `machine_ref`/`handlers`/`table`/`captured`
+        // from this frame. `EVAL_STACK_SIZE` matches the oneshot eval thread
+        // (deep JIT recursion needs it), so `Builder::spawn_scoped` (the
+        // stack-sized form of `scope.spawn`) is used. Unlike the oneshot form,
+        // a failed spawn here is reported through `outcome`, not `.expect()` —
+        // `guard` is still alive and restores the machine either way.
+        let outcome = std::thread::scope(|scope| {
+            match std::thread::Builder::new()
                 .name("tidepool-resident-eval".into())
-                .stack_size(EVAL_STACK_SIZE)
+                .stack_size(stack_size)
                 .spawn_scoped(scope, || {
                     tidepool_codegen::signal_safety::install();
                     std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        body(&mut machine, table, handlers, &captured)
+                        body(machine_ref, table, handlers, &captured)
                     }))
-                })
-                .expect("failed to spawn resident eval thread");
-            handle.join()
+                }) {
+                Ok(handle) => match handle.join() {
+                    Ok(Ok(body_result)) => EvalThreadOutcome::Ran(body_result),
+                    Ok(Err(panic)) => EvalThreadOutcome::Panicked(panic),
+                    Err(join_panic) => EvalThreadOutcome::Panicked(join_panic),
+                },
+                Err(spawn_err) => EvalThreadOutcome::SpawnFailed(spawn_err),
+            }
         });
 
-        // The machine is resident again regardless of the turn's fate.
-        self.core.restore_machine(machine);
-
-        match result {
-            Ok(Ok(outcome)) => outcome.map_err(|e| ResidentError::Run(RuntimeError::Jit(e))),
-            Ok(Err(panic)) => Err(panic_to_run_error(panic)),
-            Err(join_panic) => Err(panic_to_run_error(join_panic)),
+        // `guard` drops here (function-end, on every path above), restoring
+        // the machine into `self.core` regardless of how `outcome` resolved.
+        match outcome {
+            EvalThreadOutcome::Ran(Ok(t)) => Ok(t),
+            EvalThreadOutcome::Ran(Err(e)) => Err(ResidentError::Run(RuntimeError::Jit(e))),
+            EvalThreadOutcome::Panicked(payload) => Err(panic_to_run_error(payload)),
+            EvalThreadOutcome::SpawnFailed(e) => Err(ResidentError::EvalThread(e)),
         }
     }
 
@@ -1267,6 +1688,48 @@ fn project_parked(
     }
 }
 
+/// RAII restore guard for [`ResidentSession::on_eval_thread`]: holds the
+/// session's machine, taken via [`PersistentSession::take_machine`], and
+/// restores it into `core` on `Drop` — on EVERY exit from the borrowing
+/// function, including an early return between the take and the point the
+/// turn's outcome is known (a failed thread spawn, a caught panic). This is
+/// what closes the gap the external review flagged: `spawn_scoped(...).expect(...)`
+/// used to panic AFTER the machine was taken and BEFORE it was restored,
+/// permanently leaving the session machineless past that unwind.
+struct MachineGuard<'a> {
+    core: &'a mut PersistentSession,
+    machine: Option<JitEffectMachine>,
+}
+
+impl<'a> MachineGuard<'a> {
+    fn take(core: &'a mut PersistentSession) -> Self {
+        let machine = core.take_machine();
+        MachineGuard {
+            core,
+            machine: Some(machine),
+        }
+    }
+}
+
+impl Drop for MachineGuard<'_> {
+    fn drop(&mut self) {
+        if let Some(machine) = self.machine.take() {
+            self.core.restore_machine(machine);
+        }
+    }
+}
+
+/// The three ways a resident eval thread's lifecycle can resolve — spawn
+/// failure, a caught panic, or a completed run of `body` (itself carrying its
+/// own `Result`). Distinct from `SpawnError`/join-panic being conflated into
+/// one `.expect()`, which is exactly what let a spawn failure escape as an
+/// unguarded panic before this fix.
+enum EvalThreadOutcome<T> {
+    Ran(Result<T, JitError>),
+    Panicked(Box<dyn std::any::Any + Send>),
+    SpawnFailed(std::io::Error),
+}
+
 /// Map a caught panic payload (a Rust-level fault that unwound past the JIT's
 /// own `with_signal_protection` — a genuine bug, not a language-level error) to
 /// a run error carrying the payload string.
@@ -1281,4 +1744,89 @@ fn panic_to_run_error(payload: Box<dyn std::any::Any + Send>) -> ResidentError {
     ResidentError::Run(RuntimeError::Jit(JitError::Effect(EffectError::Handler(
         format!("resident turn panicked: {detail}"),
     ))))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tidepool_repr::{CoreFrame, Literal, TreeBuilder};
+
+    /// A no-op sink — these tests never suspend or produce output.
+    #[derive(Clone, Default)]
+    struct NullSink;
+
+    impl OutputSink for NullSink {
+        fn drain(&self) -> Vec<String> {
+            Vec::new()
+        }
+        fn snapshot(&self) -> Vec<String> {
+            Vec::new()
+        }
+    }
+
+    /// A trivial, hand-built `Lit` expression over an empty table — no GHC
+    /// extract needed. `ConTags` resolution (`Val`/`E`/`Union`/`Leaf`/`Node`)
+    /// is LAZY on a compiled [`JitEffectMachine`] (its `tags` field is a
+    /// `Result`, not resolved eagerly), so an empty table compiles fine as
+    /// long as nothing ever dispatches an effect — true in every test below,
+    /// since the eval thread never actually runs `body`.
+    fn trivial_expr_and_table() -> (CoreExpr, DataConTable) {
+        let mut b = TreeBuilder::new();
+        b.push(CoreFrame::Lit(Literal::LitInt(42)));
+        (b.build(), DataConTable::new())
+    }
+
+    fn bootstrap_trivial_session() -> ResidentSession<frunk::HNil, NullSink> {
+        let (expr, table) = trivial_expr_and_table();
+        ResidentSession::bootstrap(
+            &expr,
+            table,
+            frunk::HNil,
+            0,
+            Vec::new(),
+            NullSink,
+            Vec::new(),
+            crate::DEFAULT_NURSERY_SIZE,
+            None,
+        )
+        .expect("a trivial Lit expression over an empty table compiles")
+    }
+
+    /// The exact regression the external review flagged
+    /// (`tidepool-runtime/src/session/resident.rs:1113-1141` in the review):
+    /// `spawn_scoped(...).expect(...)` used to run AFTER `take_machine()` and
+    /// panic BEFORE `restore_machine()`, permanently leaving the session
+    /// machineless past that unwind. This forces the spawn to fail
+    /// deterministically — a stack size that vastly exceeds any real address
+    /// space, so `pthread_create` rejects it outright, no actual thread-limit
+    /// exhaustion needed — and asserts: no panic, a typed
+    /// `ResidentError::EvalThread`, and the machine is back in the session's
+    /// slot afterward, still genuinely usable.
+    #[test]
+    fn a_forced_eval_thread_spawn_failure_restores_the_machine_and_returns_a_typed_error() {
+        let mut session = bootstrap_trivial_session();
+
+        let result = session.on_eval_thread_with_stack(
+            1_usize << 56,
+            |_, _, _, _| -> Result<(), JitError> {
+                unreachable!("the spawn itself must fail before body ever runs")
+            },
+        );
+
+        assert!(
+            matches!(result, Err(ResidentError::EvalThread(_))),
+            "expected ResidentError::EvalThread, got {result:?}"
+        );
+        assert!(
+            session.heap_stats().is_some(),
+            "the machine must be restored into the session's slot after a failed spawn, \
+             not left permanently machineless"
+        );
+
+        // The restored machine is genuinely usable, not just present: an
+        // ordinary call through the normal (production) stack size succeeds
+        // right after.
+        let ok = session.on_eval_thread(|_, _, _, _| -> Result<i32, JitError> { Ok(7) });
+        assert_eq!(ok.unwrap(), 7);
+    }
 }
