@@ -614,6 +614,45 @@ struct BranchOrigin {
     invocation_logged: bool,
 }
 
+/// A VALIDATED pointer to a frozen [`ContextSnapshot`] — the Rust-side
+/// capability behind the authored `ContextRef` (PRD 21 lane C3, closing GAP
+/// 1: the frozen-snapshot seam gets an authored-surface reach). Minted ONLY
+/// by [`Harness::resolve_context_ref`], the ONE place the "this digest
+/// resolves to something we actually froze" check happens — a caller
+/// holding one has already proven possession-is-permission, so nothing
+/// downstream ([`Harness::fork_from_context_ref`],
+/// [`Harness::context_ref_scope`]) re-derives or can bypass that check; an
+/// unknown/stale digest is refused right here, once, as a typed
+/// [`HarnessError::UnknownSnapshot`] — never a silent fresh-root fallback at
+/// some later call site.
+///
+/// **Typestate, not discipline** (per the frozen-vs-live review): no method
+/// on this type reaches the LIVE transcript a snapshot was frozen from —
+/// only [`Harness::snapshot`]'s own `Arc<ContextSnapshot>` (itself immutable
+/// by construction: [`ContextSnapshot`] has no `&mut` accessor at all) and
+/// the read-only scope lookup [`Harness::context_ref_scope`]. A raw string
+/// cannot become a `ContextRef` except through the one validating
+/// constructor, so "an unvalidated digest reached the fork/mint path" is not
+/// a mistake a caller of this type can make. What is still enforced by
+/// DISCIPLINE, underneath, in C2's own seams (out of this lane's boundary to
+/// re-derive): [`ContextSnapshot`]'s immutability is "no mutator exists on
+/// the struct", not a phantom-typed frozen/live state machine, and
+/// `Harness::snapshots` is a plain interior-mutable map rather than a
+/// consuming `frozen: fn(Live) -> Snapshot` transition — compaction already
+/// mints a NEW digest/cache root rather than rewriting one (locked decision
+/// 2), which is the semantic this guidance asks for, but it is a live→live
+/// call (`replace_transcript_with_summary`) that happens not to touch an
+/// interned entry, not a type that makes the old one unreachable.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ContextRef(SnapshotDigest);
+
+impl ContextRef {
+    /// The validated digest this ref names — read-only.
+    pub fn digest(&self) -> &SnapshotDigest {
+        &self.0
+    }
+}
+
 impl Harness {
     /// Build a harness over `writer` (a fresh log past its header), the engine
     /// config, and a signed-in provider.
@@ -3359,6 +3398,62 @@ impl Harness {
             .lock()
             .get(&node)
             .map(|b| b.snapshot.clone())
+    }
+
+    /// The scope the ORIGIN node of a frozen snapshot was running in at
+    /// freeze time — [`ScopeId::ROOT`] for a never-scoped origin (every node
+    /// this crate minted before C3, and the ordinary per-loop answerer
+    /// today). `None` only for a digest this harness never minted (mirrors
+    /// [`Self::snapshot`]).
+    ///
+    /// PRD 21 lane C3: locked decision 2 says a child forks "the frozen
+    /// post-coalgebra context... its compiled blocks and declarations" — the
+    /// DECL/VALUE-plane half of that (C2 §1–3's scope trees) is orthogonal to
+    /// the TRANSCRIPT half this module already gives an identity to. This is
+    /// the seam that joins them: a branch verb mints its child's scope as a
+    /// child of THIS, so "child reads parent tip; child-local stays local"
+    /// applies to a branched tree exactly as it does to an ordinary
+    /// `mint_scope` tree, without threading a scope through the wire
+    /// representation at all — the origin node a snapshot was frozen from
+    /// already carries it.
+    pub fn snapshot_origin_scope(&self, digest: &SnapshotDigest) -> Option<ScopeId> {
+        let origin = self.snapshots.lock().get(digest).map(|i| i.origin)?;
+        Some(self.node_scope(origin))
+    }
+
+    /// Resolve a wire digest string into a validated [`ContextRef`] — the ONE
+    /// checkpoint a `runLLMTurnBranch` ref passes through. `Err(UnknownSnapshot)`
+    /// for a digest this harness never minted (a forged string, a stale ref
+    /// from a different run) — nothing downstream re-derives this check,
+    /// because nothing downstream can construct a `ContextRef` any other way.
+    /// See [`ContextRef`]'s doc for the typestate this buys.
+    pub fn resolve_context_ref(&self, digest: &str) -> Result<ContextRef, HarnessError> {
+        let digest = SnapshotDigest(digest.to_string());
+        if self.snapshots.lock().contains_key(&digest) {
+            Ok(ContextRef(digest))
+        } else {
+            Err(HarnessError::UnknownSnapshot(digest))
+        }
+    }
+
+    /// Mint a child branch off a VALIDATED [`ContextRef`] — same seam as
+    /// [`Self::fork_from_snapshot`] (this IS it, typed so a caller can only
+    /// reach it with a digest already proven to resolve).
+    pub fn fork_from_context_ref(
+        &self,
+        cref: &ContextRef,
+        brief: &str,
+    ) -> Result<NodeId, HarnessError> {
+        self.fork_from_snapshot(&cref.0, brief)
+    }
+
+    /// The scope [`ContextRef`]'s origin window was running in at freeze time
+    /// — the typed-ref sibling of [`Self::snapshot_origin_scope`], collapsed
+    /// to a bare [`ScopeId`] rather than `Option`: a `ContextRef` is only
+    /// ever constructed from a digest already proven to resolve
+    /// ([`Self::resolve_context_ref`]), so the underlying lookup cannot miss.
+    pub fn context_ref_scope(&self, cref: &ContextRef) -> ScopeId {
+        self.snapshot_origin_scope(&cref.0).unwrap_or(ScopeId::ROOT)
     }
 
     /// `node`'s live transcript and framing — exactly the pair

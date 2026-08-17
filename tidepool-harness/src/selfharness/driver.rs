@@ -1961,13 +1961,57 @@ impl SelfHarnessDriver {
                                     DriverError::Session(format!("fanout resume failed: {e}"))
                                 })?;
                         }
+                        // PRD 21 lane C3 GAP 1: `freezeContext` — immediate,
+                        // no operator, no model round (mirrors `ReadState`'s
+                        // service shape above it).
+                        HoleRouting::FreezeContext => {
+                            let value = self.service_outer_freeze_context(&compiled.table)?;
+                            let sid = self.outer_sid()?;
+                            outcome = self
+                                .agent
+                                .with_session(sid, |s| s.resume(&hole, value))
+                                .map_err(|e| DriverError::Session(e.to_string()))?
+                                .map_err(|e| {
+                                    DriverError::Session(format!(
+                                        "freezeContext resume failed: {e}"
+                                    ))
+                                })?;
+                        }
+                        // PRD 21 lane C3 GAP 1: `runLLMTurnBranch @T ref
+                        // prompt` — fork a child off the frozen prefix `ref`
+                        // names (never an empty root) and resume with `(T,
+                        // ContextRef)`.
+                        HoleRouting::Branch {
+                            site,
+                            ty,
+                            context_ref,
+                        } => {
+                            let value = self
+                                .service_outer_branch(
+                                    *site,
+                                    ty.as_deref(),
+                                    context_ref,
+                                    &classified.prompt,
+                                    &compiled.table,
+                                )
+                                .await?;
+                            let sid = self.outer_sid()?;
+                            outcome = self
+                                .agent
+                                .with_session(sid, |s| s.resume(&hole, value))
+                                .map_err(|e| DriverError::Session(e.to_string()))?
+                                .map_err(|e| {
+                                    DriverError::Session(format!("branch resume failed: {e}"))
+                                })?;
+                        }
                         other => {
                             return Err(DriverError::Session(format!(
                                 "outer loop suspended on an unserviceable hole ({other:?}) — \
-                                 the Harness monad exposes runLLMTurn, askUser, note, \
-                                 spawnAgent, say, createWorktree/lookupWorktree/listWorktrees/\
-                                 worktreeBranch/worktreeHead, withHandler (repository events), \
-                                 run/runIn/runArgv, and record only"
+                                 the Harness monad exposes runLLMTurn, runLLMTurnBranch, \
+                                 freezeContext, askUser, note, spawnAgent, say, \
+                                 createWorktree/lookupWorktree/listWorktrees/worktreeBranch/\
+                                 worktreeHead, withHandler (repository events), run/runIn/\
+                                 runArgv, and record only"
                             )))
                         }
                     }
@@ -2072,6 +2116,149 @@ impl SelfHarnessDriver {
         // (that would double-count the reused node's running total).
         self.lifecycle = SelfHarnessState::RunningLoop;
         Ok(answer)
+    }
+
+    /// Service a `freezeContext` suspension (PRD 21 lane C3, closing GAP 1):
+    /// mint a `ContextRef` naming the CURRENT loop's per-loop answerer
+    /// window's frozen prefix, right now — immediately, no operator, no
+    /// model round ([`HoleRouting::ReadState`]'s service shape).
+    /// `freeze_snapshot` is idempotent, so calling this more than once
+    /// without an intervening `runLLMTurn`/`runLLMTurnBranch` returns the
+    /// SAME digest rather than writing a second receipt.
+    fn service_outer_freeze_context(&mut self, table: &DataConTable) -> Result<Value, DriverError> {
+        let node = self.answerer.ok_or_else(|| {
+            DriverError::Session(
+                "freezeContext called with no per-loop answerer (run_loop_fragment \
+                 must create it first)"
+                    .into(),
+            )
+        })?;
+        let digest = self.agent.freeze_snapshot(node)?;
+        engine::build_context_ref_value(digest.as_str(), table)
+            .map_err(|e| DriverError::Session(e.to_string()))
+    }
+
+    /// Service a `runLLMTurnBranch @T ref prompt` suspension raised DIRECTLY
+    /// by the AUTHORED outer loop (PRD 21 lane C3, closing GAP 1): fork a
+    /// FRESH child window off the frozen prefix `context_ref` names — via
+    /// [`Harness::resolve_context_ref`]/[`Harness::fork_from_context_ref`],
+    /// C2's `fork_from_snapshot` seam under a typed capability rather than an
+    /// empty root — drive it to `finalize @T` (reusing
+    /// [`Self::drive_answerer_to_finalize`] UNCHANGED: the node arrives
+    /// already seeded with its hole card as the branch's inherited-prefix
+    /// opening turn, exactly the "already seeded" precondition that method
+    /// already documents), and resume with `(T, ContextRef)` — the child's
+    /// answer, plus a ref to ITS OWN post-finalize frozen prefix so it can be
+    /// branched again.
+    ///
+    /// The child's SCOPE is minted as a child of the frozen window's own
+    /// scope ([`Harness::context_ref_scope`]) — locked decision 2's "its
+    /// compiled blocks and declarations" clause, joined to C2's scope trees
+    /// (§1–3) rather than left at the flat `ScopeId::ROOT` every other
+    /// fanout/fork child defaults to: a branch child sees its ancestor
+    /// chain's declarations and its own defines stay local, never leaking to
+    /// a sibling branch or back up to the frozen window.
+    ///
+    /// Sequential by construction (the AUTHORED loop's `do`-block sequences
+    /// `runLLMTurnBranch` calls, each its own suspend/resume round-trip), so
+    /// — unlike [`Self::drive_fanout_child`] — this is `&mut self` and needs
+    /// no realm-checkout retry dance against concurrent siblings.
+    async fn service_outer_branch(
+        &mut self,
+        site: u32,
+        ty: Option<&str>,
+        context_ref: &str,
+        prompt: &str,
+        table: &DataConTable,
+    ) -> Result<Value, DriverError> {
+        self.lifecycle = SelfHarnessState::SuspendedOnHole;
+        self.emit(Event::RunLLMTurnHole {
+            site,
+            ty: ty.map(String::from),
+            prompt: prompt.to_string(),
+        });
+
+        // The ONE typed checkpoint (possession-is-permission): an
+        // unknown/stale ref refuses HERE, as `HarnessError::UnknownSnapshot`
+        // — never a silent fresh-root fallback. Everything below only ever
+        // sees an ALREADY-VALIDATED `ContextRef`.
+        let cref = self.agent.resolve_context_ref(context_ref)?;
+
+        let sid = self.outer_sid()?;
+        let hole_card =
+            engine::answerer_hole_card(prompt, ty, self.answerer_imports(), Some(table));
+        let node = self.agent.fork_from_context_ref(&cref, &hole_card)?;
+        self.agent.force_attached(node, Actor::Operator, sid)?;
+        self.agent.set_node_realm(node, self.mint_realm());
+
+        let parent_scope = self.agent.context_ref_scope(&cref);
+        let child_scope = self
+            .agent
+            .with_session(sid, |s| s.mint_scope(parent_scope))
+            .map_err(|e| DriverError::Session(e.to_string()))?
+            .ok_or_else(|| {
+                DriverError::Session(format!(
+                    "runLLMTurnBranch: the frozen window's scope {parent_scope:?} is not \
+                     live (its owning session was rotated or the window already retired)"
+                ))
+            })?;
+        self.agent.set_node_scope(node, child_scope);
+        self.agent
+            .set_answer_contract(node, self.answer_contract(ty));
+        self.emit(Event::TurnStart { node });
+
+        let outcome = match self.drive_answerer_to_finalize(node, ty, site).await {
+            Ok(o) => o,
+            Err(e) => {
+                let _ = self
+                    .agent
+                    .terminate_node(node, "branch child retired (error)");
+                return Err(e);
+            }
+        };
+        self.emit(Event::TurnEnd { node });
+
+        let is_finalize = matches!(
+            &outcome,
+            TurnOutcome::Suspended { classified, .. }
+                if matches!(classified.routing, HoleRouting::Finalize { .. })
+        );
+        if !is_finalize {
+            let _ = self
+                .agent
+                .terminate_node(node, "branch child retired (no finalize)");
+            return Err(DriverError::Session(format!(
+                "runLLMTurnBranch child {node:?} did not suspend on finalize (got {})",
+                turn_outcome_tag(&outcome)
+            )));
+        }
+        if self.agent.finalize_is_closure(node) {
+            let _ = self
+                .agent
+                .terminate_node(node, "branch child retired (closure)");
+            return Err(DriverError::Session(
+                "runLLMTurnBranch answer must be plain data — a closure cannot cross \
+                 the branch pair (v1 scope)"
+                    .into(),
+            ));
+        }
+        let (value, rendered) = self.agent.take_finalized_value_keep_open(node)?;
+        self.emit(Event::Finalize {
+            node,
+            value: rendered,
+        });
+
+        // Freeze the CHILD's own post-finalize prefix BEFORE retiring it —
+        // `freeze_snapshot` reads the live convo, which `terminate_node`
+        // removes.
+        let child_digest = self.agent.freeze_snapshot(node)?;
+        let _ = self.agent.terminate_node(node, "branch child retired");
+        self.lifecycle = SelfHarnessState::RunningLoop;
+
+        let ref_value = engine::build_context_ref_value(child_digest.as_str(), table)
+            .map_err(|e| DriverError::Session(e.to_string()))?;
+        engine::build_pair_value(value, ref_value, table)
+            .map_err(|e| DriverError::Session(e.to_string()))
     }
 
     /// Service a `runLLMTurnFork @T`/`runLLMTurnFanout @T` suspension raised

@@ -189,6 +189,37 @@ pub enum HoleRouting {
     /// cycle's entry state as JSON (note's service shape: no operator, no
     /// model round).
     ReadState,
+    /// A `freezeContext` suspension (`RunLLMTurnFreezeWith`) — PRD 21 lane C3
+    /// GAP 1: mint a `ContextRef` naming the CURRENT loop's per-loop answerer
+    /// window's frozen prefix, right now. Serviced IMMEDIATELY (`ReadState`'s
+    /// shape: no operator, no model round) by
+    /// [`crate::selfharness::driver::SelfHarnessDriver`] freezing that node's
+    /// transcript ([`crate::harness::Harness::freeze_snapshot`]) and
+    /// constructing the `ContextRef` `Value` directly against the table
+    /// ([`build_context_ref_value`]) — never round-tripped through JSON, since
+    /// `RunLLMTurnFreezeWith`'s answer type is fixed, not model-chosen.
+    FreezeContext,
+    /// A `runLLMTurnBranch \@T ref prompt` suspension — the OTHER half of GAP
+    /// 1: fork a FRESH child window off the frozen prefix `context_ref` names
+    /// (never an empty root, PRD 21 locked decision 2), drive it to
+    /// `finalize \@T`, and resume with `(T, ContextRef)` — the child's answer
+    /// plus a ref to ITS OWN post-finalize frozen prefix, for branching
+    /// further. Rides the SAME `RunLLMTurnWith` wire constructor as
+    /// [`HoleRouting::RunLLMTurn`]/[`HoleRouting::Fork`] (a `branch`/`ref`
+    /// payload flag, decoded by [`classify_runllmturn_payload`]) rather than a
+    /// new GADT constructor — the same "one constructor, several payload
+    /// shapes" discipline fork/fanout already use. `context_ref` is the RAW
+    /// wire digest string — UNVALIDATED here; the driver's servicing is where
+    /// it is resolved to a [`crate::harness::ContextRef`]
+    /// (`Harness::resolve_context_ref`), the one typed checkpoint an
+    /// unknown/stale ref is refused at (never a silent fresh-root fallback).
+    /// `site`/`ty` mirror `Fork`'s shape — `ty` is the branch's OWN answer type
+    /// `T`, not the wrapping pair.
+    Branch {
+        site: u32,
+        ty: Option<String>,
+        context_ref: String,
+    },
     /// A Subagent verb (`SubagentSpawn`/`SubagentBegin`/`SubagentResume`/
     /// `SubagentSpawnAsync`/`SubagentAwait`/`SubagentCancel` —
     /// `spawnAgentRaw`/`agentBeginRaw`/`agentResumeRaw`/`agentSpawnAsyncRaw`/
@@ -419,6 +450,10 @@ pub fn classify_hole(
             routing: HoleRouting::ReadState,
             prompt: String::new(),
         },
+        Some("RunLLMTurnFreezeWith") => ClassifiedHole {
+            routing: HoleRouting::FreezeContext,
+            prompt: String::new(),
+        },
         Some("SubagentSpawn")
         | Some("SubagentBegin")
         | Some("SubagentResume")
@@ -565,6 +600,24 @@ fn classify_runllmturn_payload(
             ty,
             fan: fan.map(|n| FanBadge::Exact { n }),
             prompts,
+        })
+    } else if payload
+        .get("branch")
+        .and_then(Json::as_bool)
+        .unwrap_or(false)
+    {
+        let context_ref = payload
+            .get("ref")
+            .and_then(Json::as_str)
+            .map(str::to_string)
+            .ok_or(ClassifyError::MissingField {
+                constructor: "RunLLMTurnWith",
+                field: "ref",
+            })?;
+        Ok(HoleRouting::Branch {
+            site,
+            ty,
+            context_ref,
         })
     } else {
         Ok(HoleRouting::RunLLMTurn { site, ty })
@@ -1861,6 +1914,35 @@ pub fn build_list_value(items: Vec<Value>, table: &DataConTable) -> Result<Value
         result = Value::Con(cons_id, vec![item, result]);
     }
     Ok(result)
+}
+
+/// Wrap a frozen-snapshot digest as a genuine `ContextRef` `Value` — the Core
+/// counterpart of `Tidepool.Effects`'s `data ContextRef = ContextRef Text`
+/// (spliced into every `RunLLMTurn`-row compile's generated module, so
+/// `"ContextRef"` always resolves in `table` there), for resuming a
+/// `freezeContext`/`runLLMTurnBranch` continuation with a directly
+/// constructed value rather than an Aeson round-trip — the same "hand back
+/// the native representation" discipline [`build_list_value`] uses for `[T]`.
+pub fn build_context_ref_value(digest: &str, table: &DataConTable) -> Result<Value, EngineError> {
+    use tidepool_bridge::ToCore;
+    let con_id = tidepool_bridge::get_resilient(table, "ContextRef", 1).ok_or_else(|| {
+        EngineError::Run("build_context_ref_value: no ContextRef constructor in table".to_string())
+    })?;
+    let text = digest
+        .to_string()
+        .to_value(table)
+        .map_err(|e| EngineError::Run(format!("bridge digest to Value: {e}")))?;
+    Ok(Value::Con(con_id, vec![text]))
+}
+
+/// Assemble a genuine 2-tuple `Value` — `(a, b)` — for a `runLLMTurnBranch`
+/// resume: the pair counterpart of [`build_list_value`]'s list assembly, over
+/// the always-wired-in `"(,)"` constructor.
+pub fn build_pair_value(a: Value, b: Value, table: &DataConTable) -> Result<Value, EngineError> {
+    let pair_id = tidepool_bridge::get_resilient(table, "(,)", 2).ok_or_else(|| {
+        EngineError::Run("build_pair_value: no (,) constructor in table".to_string())
+    })?;
+    Ok(Value::Con(pair_id, vec![a, b]))
 }
 
 /// Shared handle to a provider, so the engine and its forked answerers all use

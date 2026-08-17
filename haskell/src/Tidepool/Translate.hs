@@ -3293,6 +3293,18 @@ sitedVerbs =
              , vsTypeArgs = 1, vsValueArity = 1
              , vsCheckType = checkRunLLMTurnType
              , vsListAnswer = True, vsMisShapeIsError = False }
+    -- PRD 21 lane C3 GAP 1: branch a fresh child off a frozen prefix
+    -- (`ContextRef -> Text -> Eff effs (a, ContextRef)`). Two trailing value
+    -- args (the ref, then the prompt) ahead of which only `Member` dictionaries
+    -- may appear — the same shape `forkMap`/`forkCata` already use. The
+    -- returned `ContextRef` half is fixed/known (never `unsafeCoerce`d in a
+    -- way that matters); only the leading `\@T` is what this check + site id
+    -- resolve, exactly like a bare `runLLMTurnFork` site.
+  , VerbSpec { vsName = "runLLMTurnBranch", vsModule = "Tidepool.Effects"
+             , vsSitedName = "runLLMTurnBranchSited", vsSitedModule = "Tidepool.Effects"
+             , vsTypeArgs = 1, vsValueArity = 2
+             , vsCheckType = checkRunLLMTurnType
+             , vsListAnswer = False, vsMisShapeIsError = False }
     -- self-iterating-harness WS-B. `finalize :: forall v a. v -> M a` has
     -- TWO forall'd tyvars (`v`, the finalized value's type; `a`, its
     -- independent "never returns" placeholder — see effect_defs.rs's

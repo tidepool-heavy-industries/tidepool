@@ -859,13 +859,23 @@ macro_rules! runllmturn_effect_def {
                 "sub-agent answers) / `runLLMTurnFanout \\@T prompts` (N forked ",
                 "sub-agents, one per prompt, answered as a batch `[T]`) — GHC ",
                 "validates the answer against `T` before it resumes the continuation ",
-                "(an ill-typed answer never consumes it).",
+                "(an ill-typed answer never consumes it). `freezeContext :: M ContextRef` ",
+                "mints a capability naming THIS window's current frozen prefix, ",
+                "immediately (no operator, no model round). `runLLMTurnBranch \\@T ref ",
+                "prompt` forks a FRESH child window off that frozen prefix (never an ",
+                "empty root) and returns `(T, ContextRef)` — the child's own answer, ",
+                "plus a ref to ITS post-finalize context for branching further.",
             ],
-            type_defs [],
+            type_defs [
+                "data ContextRef = ContextRef Text deriving (Show, Eq)",
+            ],
             verbs [
                 { ctor RunLLMTurnWith, method run_llm_turn_with,
                   args { prompt: "Text" as String, payload: "Value" as tidepool_eval::value::Value },
                   ret "Value" },
+                { ctor RunLLMTurnFreezeWith, method run_llm_turn_freeze_with,
+                  args { },
+                  ret "ContextRef" },
             ],
             helpers [
                 // #R0 typed-yield pass, plans/harness-r0/10-extract-pass; split out of
@@ -948,6 +958,38 @@ macro_rules! runllmturn_effect_def {
                 { raw ["{-# OPAQUE runLLMTurnFanoutSited #-}",
                        "runLLMTurnFanoutSited :: forall a effs. Member RunLLMTurn effs => Int -> [Text] -> Eff effs [a]",
                        "runLLMTurnFanoutSited sid prompts = unsafeCoerce <$> send (RunLLMTurnWith (intercalate \"\\n\" prompts) (object [\"typedSite\" .= sid, \"fork\" .= True, \"fan\" .= length prompts, \"prompts\" .= prompts]))"] },
+                // PRD 21 lane C3 GAP 1: give the frozen-snapshot seam
+                // (tidepool-harness's ContextSnapshot / freeze_snapshot /
+                // fork_from_snapshot) an authored-surface reach. `freezeContext`
+                // is NOT sited — its answer type (`ContextRef`) is fixed, not a
+                // per-call `\@T`, so it needs no Translate.hs interception, the
+                // same reason `getStateJson`/`ReadStateWith` need none: an
+                // ordinary `send` on an interposed effect suspends regardless of
+                // site-numbering.
+                { raw ["-- | Mint a capability naming THIS window's current frozen",
+                       "-- prefix (PRD 21 locked decision 2: children fork the frozen",
+                       "-- post-coalgebra context). Immediate — no operator, no model",
+                       "-- round (ReadState's service shape). Possession is permission:",
+                       "-- a ContextRef only ever comes from here or from",
+                       "-- runLLMTurnBranch's own return; an unrecognized one is refused",
+                       "-- by the driver as a typed error, never a silent fresh-root",
+                       "-- fallback.",
+                       "freezeContext :: forall effs. Member RunLLMTurn effs => Eff effs ContextRef",
+                       "freezeContext = send RunLLMTurnFreezeWith"] },
+                // `runLLMTurnBranch` IS sited (its `\@T` is model/site-chosen,
+                // exactly like `runLLMTurnFork`), riding the SAME
+                // `RunLLMTurnWith` wire constructor with a `branch`/`ref` payload
+                // flag (classified by `tidepool-harness::engine::classify_hole`)
+                // rather than a new GADT constructor — mirroring how
+                // fork/fanout already share one constructor. See
+                // `haskell/src/Tidepool/Translate.hs`'s `sitedVerbs` table for
+                // its one added row.
+                { raw ["{-# OPAQUE runLLMTurnBranch #-}",
+                       "runLLMTurnBranch :: forall a effs. Member RunLLMTurn effs => ContextRef -> Text -> Eff effs (a, ContextRef)",
+                       "runLLMTurnBranch ref p = runLLMTurnBranchSited 0 ref p"] },
+                { raw ["{-# OPAQUE runLLMTurnBranchSited #-}",
+                       "runLLMTurnBranchSited :: forall a effs. Member RunLLMTurn effs => Int -> ContextRef -> Text -> Eff effs (a, ContextRef)",
+                       "runLLMTurnBranchSited sid (ContextRef ref) p = unsafeCoerce <$> send (RunLLMTurnWith p (object [\"typedSite\" .= sid, \"branch\" .= True, \"ref\" .= ref]))"] },
             ],
         }
     };

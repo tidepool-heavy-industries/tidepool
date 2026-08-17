@@ -27,7 +27,7 @@ pub use engine::{
     TurnOutcome,
 };
 pub use forcing::{derive_teaser, fan_badge, price_class, ForkShape, NodeTree, TreeError};
-pub use harness::{Escalation, Harness, HarnessError, OperatorDecision};
+pub use harness::{ContextRef, Escalation, Harness, HarnessError, OperatorDecision};
 pub use registry::{Checkout, CheckoutError, SessionRegistry};
 pub use selfharness::{
     acquire_lease, answerer_decls, fold_run_journal, list_segments, load_harness_source,
