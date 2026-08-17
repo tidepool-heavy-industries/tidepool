@@ -631,7 +631,7 @@ From that one `TypeDef` list, three emitters run:
 
 | Emitter | Output | Replaces |
 |---|---|---|
-| `gen/decl_rs.rs` (extended) | the `type_defs` slice inside `<eff>_decl()` — Haskell `data` decls, then `ToJSON` instances, then the error ADT | the raw strings in `worktree_effect_def!` |
+| `TypeDef::render_decl`/`render_json` + `Effect::type_def_texts` | the `type_defs` slice inside `<eff>_decl()` — Haskell `data` decls, then `ToJSON` instances, then the error ADT | the raw strings in `worktree_effect_def!` |
 | `gen/wire_rs.rs` (new) | `tidepool-bridge-effects/src/generated/<eff>.rs` — the wire structs/enums, their derives, their boundary constructors | the hand-written `Wt*` block |
 | `gen/adapter_rs.rs` (new) | `tidepool-handlers/src/generated/<eff>_adapters.rs` — the MECHANICAL domain↔wire conversions | the mechanical half of `handlers/worktree.rs`'s conversion block |
 
@@ -664,6 +664,11 @@ a wrapper object). `ShownString` covers `InProgressKind`. `Object` covers
 DELIBERATELY renamed — `gitArgs` → `"args"`, `gitCwd` → `"cwd"`, …, so the JSON
 reads as a git receipt rather than as a Rust struct dump). The key map is data;
 the rename is now visible in the schema instead of buried in a string.
+
+`Object` requires a key for EVERY field of the record, `DirtySummary`'s
+identity-mapped ones included. A partial key list is a silently omitted field —
+the JSON would simply lack it, and nothing downstream would notice — so the
+completeness check is in `TypeDef::validate` and spelling all four is the price.
 
 The `binder` field is carried rather than normalized because the current
 instances use three different binders (`d`, `r`, `k`) and the Class A goldens
@@ -714,6 +719,13 @@ Validation ::= None
              | Segment { max_len, extra_allowed }   // ascii-alphanumeric + these
 ```
 
+`Segment` is BYTE-oriented, not char-oriented: `max_len` counts bytes and the
+alphabet check runs over `.bytes()`. That is not an implementation shortcut —
+`is_path_safe` is byte-oriented because the value is joined into a filesystem
+path as one component, and a char-oriented generated check would accept
+multi-byte input the domain rejects. The two must agree exactly or the
+cross-check test below is the only thing standing between them.
+
 `WorktreeId` gets `Segment { max_len: 128, extra_allowed: "-_" }` — which is
 exactly `tidepool_worktree::WorktreeId::is_path_safe`, hoisted out of
 `handlers/worktree.rs`'s hand-written `worktree_id_from_wire` into declared
@@ -762,13 +774,22 @@ where a richer domain form (PathBuf, Option, newtypes) genuinely differs". The
 split is a schema field, so it is visible rather than inferred:
 
 ```
-DomainMap { domain_path, into_wire: AdapterKind, from_wire: AdapterKind }
+DomainMap { domain_path,
+            into_wire: Option<AdapterKind>,     // None = no such conversion exists
+            from_wire: Option<AdapterKind> }
 
 AdapterKind
   ::= IdentityRaw { as_str, from_raw }          // newtype raw ↔ newtype raw
     | VariantMap  (&[(domain_variant, wire_variant)])
     | HandWritten (reason)                      // NOT generated, and why
 ```
+
+Each direction is an `Option`, because "absent" and "hand-written" are different
+facts and collapsing them puts a reason on a function nobody wrote. Six of the
+Worktree types have a conversion in one direction only — nothing accepts a
+`GitOid` or a `BranchName` FROM Haskell — and recording those as
+`HandWritten("…")` would claim a hand-written counterpart exists. `None` says
+what is true: no such conversion, in either column.
 
 **Generated** for the Worktree slice: the four identity conversions
 (`IdentityRaw`), `DirtyPolicy` and `InProgressKind` (`VariantMap` — note
@@ -910,10 +931,151 @@ verbs are `OuterDispatch(Worktree)`.
 
 1. Class D goldens, from unmodified trunk. Nothing else starts first.
 2. Schema vocabulary + the three emitters + their quick-tier tests, in
-   `tidepool-protocol`. No consuming crate changes yet.
+   `tidepool-protocol`. No consuming crate changes yet. **← steps 2 and 3 are
+   done; see §11.9 and §11.10.**
 3. `effects/worktree.rs` — the Worktree effect described in the schema.
 4. Pre-flip equivalence green against the live macro.
 5. Flip: generated modules in, `worktree_effect_def!` deleted, the `Wt*`
    hand-written block and its positional comment deleted, adapters rewritten
    onto the generated boundary constructors.
 6. Re-assert Class A without regenerating; Class D unchanged; full verify.
+
+**Step 4 cannot start yet, and the reason is §11.9.** Steps 2 and 3 landed with
+every proof green, but the helper census turned up a blocker this section did not
+anticipate. Do not attempt the flip before reading §11.9.
+
+**Step 1 has NOT been done, and steps 2–3 ran ahead of it.** There is no
+durable-format golden in `tidepool-worktree/tests/` — the Class D capture this
+section put first was skipped. It cost nothing here, because lane 3 changed no
+file outside `tidepool-protocol/` and so could not have moved a durable byte; the
+schema's wire types carry no serde at all, which is §11.6's argument that the
+durable formats are outside the generator's blast radius by construction.
+
+But the debt is real and it is now the flip lane's, so state the consequence
+plainly: **step 5 rewrites the adapters, which is the first change that could
+touch a durable format, and step 1 must be paid before it.** Trunk is still
+unmodified with respect to `tidepool-worktree`, so the capture is still a
+legitimate baseline rather than a post-hoc snapshot of whatever the code now
+does — that window closes the moment step 5 starts. Capture Class D first.
+
+### 11.9 Helper representability — the finding this section did not anticipate
+
+§11 was written as if the record vocabulary were the hard part. It was not. The
+thirteen declarations, the seven `ToJSON` instances and the eleven-variant error
+ADT all render byte-identically to `worktree_effect_def!` on the first try, and
+the wire structs come out field-for-field identical to the hand-written `Wt*`
+block. The HELPERS are the hard part, and §11 never looked at them.
+
+`worktree_effect_def!` carries **fourteen** helpers (§11's prose implied fewer),
+all fourteen using the `{ raw [...] }` escape hatch. §3.4's rule is that a thin
+wrapper over one verb is representable and everything else stays hand-written
+OUTSIDE the contract. Applied honestly, that rule admits **three of fourteen**.
+
+| Helper | Verdict | Why |
+|---|---|---|
+| `createWorktree` | **Representable** — `HelperBody::Pointfree` | `send . WorktreeCreate`, exactly the point-free form |
+| `lookupWorktree` | **Representable** — `HelperBody::Pointfree` | `send . WorktreeLookup` |
+| `listWorktrees` | **Representable** — `HelperBody::NullaryLiftEither` (NEW) | `send WorktreeList >>= liftEither`. A shape, not a body: `liftEither` is named once in Rust and the derived sig drops the `Either` |
+| `fromCurrentRepository` | Not representable | Pure `WorktreeSpec` constructor application, no verb. Needs a closed Haskell EXPRESSION language |
+| `fromRef` | Not representable | Same, with a nested constructor (`SourceRef r`) |
+| `fromWorktree` | Not representable | Same, nested constructor over a call to another helper (`worktreeId h`) |
+| `allowDirtySnapshot` | Not representable | Record UPDATE (`s { specDirtyPolicy = … }`), no verb |
+| `worktreeBranch` | Not representable | `send (WorktreeBranchOf (worktreeId h)) >>= liftEither` — adapts its ARGUMENT through a pure projection, so its parameter type is not the verb's arg type and the sig stops being derivable |
+| `worktreeHead` | Not representable | Same shape as `worktreeBranch` |
+| `worktreeId` | Not representable | Field-projection chain (`h.handleReceipt.treeId`), no `send` at all |
+| `renderWorktreeId` | Not representable | Identity unwrap by pattern match |
+| `renderGitOid` | Not representable | Identity unwrap |
+| `renderBranchName` | Not representable | Identity unwrap |
+| `renderWorktreeError` | Not representable | Ten arms of string formatting over `show` / `T.intercalate` / `T.strip` / `length`. This is a program, not a shape |
+
+**Only one new schema feature was added, and it is a shape.**
+`HelperBody::NullaryLiftEither` renders `v = send Ctor >>= liftEither` and
+derives the signature with the `Either` consumed. The point-free and applied
+`liftEither` variants were deliberately NOT added: the only two helpers that
+would want them (`worktreeBranch`, `worktreeHead`) also adapt their argument, so
+they stay unrepresentable either way, and adding unexercised variants would be
+speculation rather than a reviewed feature.
+
+**Nothing was smuggled in.** The alternative on offer was a closed Haskell
+expression AST — `App`/`Var`/`Con`/`FieldAccess`/`RecordUpdate` — which would
+cover the four spec builders, the record update, the projection chain and the
+three unwraps. That is not a shape; it is the raw hatch with an intermediate
+representation, and it would still not reach `renderWorktreeError`. It was
+rejected.
+
+**And that is the blocker.** `haskell/lib/Tidepool/Worktree.hs` is a pure
+re-export module: it `import Tidepool.Effects (…)` naming **all fourteen** helper
+names and re-exports them. So the eleven cannot simply be dropped from the
+schema's `helpers` slice — the emitted `Tidepool.Effects` would stop defining
+them, that import list would fail to compile, and the Class A
+`effects_module.standard.hs` golden would move. The flip is blocked until the
+eleven have a home.
+
+**The recommendation, for the lane that does step 5.** Move the eleven into
+`haskell/lib/Tidepool/Worktree.hs` as DEFINITIONS instead of re-exports, and give
+Worktree an `extra_imports` row pointing at it. This is exactly the
+`Tidepool.Shell` arrangement Exec already uses, and §3.6 already rules that the
+Haskell library layer *consumes* the contract rather than mirroring it — these
+eleven are library code that happens to live in the wrong file. The edit is
+mechanically local: that module's import list loses eleven names, its body gains
+eleven definitions, and its export list does not change at all. The Class A
+golden moves in that same commit, visibly, which is the whole reason the output
+is committed. What the flip lane must confirm: that nothing else imports these
+names from `Tidepool.Effects` directly, and that the eval preamble reaches them
+through the new `extra_imports` row.
+
+The alternative — teach the schema a Haskell expression language — is a much
+larger lane and buys nothing this one needs. If a future lane wants it, the four
+spec builders and the three `render*` unwraps are the closed subset worth
+starting from; `renderWorktreeError` never belongs in a schema.
+
+### 11.10 As built — where §11 was wrong, and what was added beyond it
+
+Everything §11.2–11.6 specified was implementable as written except where noted.
+Six corrections and additions, so a later lane inherits the design that exists
+rather than the one that was sketched.
+
+1. **A `Named` field type's Rust spelling had no stated source.** §11.2 gave
+   `RecordField { hs_name, rust_name, ty }` but never said how `specSource ::
+   WorktreeSource` becomes `spec_source: WtWorktreeSource`. It resolves through
+   `Effect::wire_rust_of`, which asks the `TypeDef` that DECLARES the type for its
+   `wire_name`. There is deliberately no second string: a type from another
+   mechanism (a `CoreRecord` bridged record) cannot appear in a generated wire
+   struct, and asking for one is a generation-time panic.
+2. **`DomainMap`'s directions are `Option`.** Corrected in §11.5 above.
+3. **`JsonInstance::Object` must cover every field.** Corrected in §11.3 above.
+4. **`Validation::Segment` is byte-oriented.** Corrected in §11.4 above.
+5. **The `#[core(name)]` rule is a function, not a convention.**
+   `TypeDef::needs_core_name()` is true exactly when the Rust name differs from
+   the Haskell name AND the shape is not a `Sum`. §11 stated the rule in prose;
+   it is now the only thing the emitter consults, which is why all nine Worktree
+   structs carry the attribute and none of the three enums does.
+6. **`WireDerives` renders in canonical rank order, not authored order.** A set
+   is a set; the rendered line must not depend on how someone listed it. The
+   order `ToCore, FromCore, Clone, Copy, Debug, Default, PartialEq, Eq,
+   PartialOrd, Ord, Hash` reproduces all three derive spellings in the live `Wt*`
+   block, which is the check that it is the RIGHT order and not merely a
+   consistent one. `WireDerives::validate` also rejects the sets that would be a
+   compile error in the emitted file (`Copy` without `Clone`, `Ord` without `Eq`)
+   — a much worse place to learn about it.
+
+Three additions §11 did not call for:
+
+- **`IdentityPayload`** is a closed two-variant enum (`Text`/`Int`) rather than an
+  `HsType`, so an identity cannot be declared over `[Text]`. Event's `EventId Int`
+  and Subagent's `AgentId Int` land on the `Int` arm directly.
+- **`effects::all_described()`** — the test-only view including effects described
+  but not yet flipped. `effects::all()` still drives generation, so a described
+  effect proves and renders without emitting a file into a crate whose
+  hand-written copy is still live. This is the mechanism that let lane 3 ship the
+  capability without touching a consuming crate, and lane N reuses it.
+- **Wire and adapter files are gated on content, not on an allowlist.**
+  `all_files` emits a wire module only when `type_defs` is non-empty and an
+  adapter module only when some entry has a `DomainMap`. Exec and Journal
+  therefore get neither, with no effect-specific special case anywhere.
+
+One structural consequence worth naming: **`tidepool-handlers/src/generated/` has
+one mod-index and `handler_rs` owns it**, so it lists `<eff>_adapters` alongside
+`<eff>`. Two generators cannot each own a directory index. Its header text is
+byte-stable across this lane by construction — an effect gains its adapter line
+there when it is flipped, not before.
