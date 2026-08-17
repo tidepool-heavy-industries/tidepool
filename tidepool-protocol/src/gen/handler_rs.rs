@@ -27,7 +27,11 @@ pub fn path(e: &Effect) -> String {
 pub fn module_index(effects: &[Effect]) -> GeneratedFile {
     GeneratedFile {
         path: "tidepool-handlers/src/generated/mod.rs".to_string(),
-        contents: index_body("Generated effect request types and dispatch glue", effects),
+        contents: index_body(
+            "Generated effect request types and dispatch glue",
+            effects,
+            false,
+        ),
     }
 }
 
@@ -47,10 +51,19 @@ fn body(e: &Effect) -> String {
     );
     out.push('\n');
     out.push_str(&format!(
-        "use crate::handlers::{}::{};\n\n",
+        "use crate::handlers::{}::{};\n",
         module_name(e),
         e.handler
     ));
+    // Derive macros are imported by NAME, not spelled fully-qualified at each
+    // attribute: the qualified form pushes `#[derive(..)]` past rustfmt's
+    // `attr_fn_like_width` (70), and a generated `.rs` file has to be a fixed
+    // point of `cargo fmt` or the format gate and the golden gate fight.
+    if e.errors.is_some() {
+        out.push_str("use tidepool_bridge_derive::{FromCore, ToCore};\n\n");
+    } else {
+        out.push_str("use tidepool_bridge_derive::FromCore;\n\n");
+    }
 
     // --- the typed failure ADT -------------------------------------------
     if let Some(adt) = &e.errors {
@@ -63,9 +76,7 @@ fn body(e: &Effect) -> String {
             "/// `FromCore` is for test-side decoding of a `Left err`; the error is only\n",
         );
         out.push_str("/// ever SENT (`ToCore`) in production. `Debug` backs the `Display` path.\n");
-        out.push_str(
-            "#[derive(tidepool_bridge_derive::ToCore, tidepool_bridge_derive::FromCore, Debug, PartialEq, Eq)]\n",
-        );
+        out.push_str("#[derive(ToCore, FromCore, Debug, PartialEq, Eq)]\n");
         out.push_str(&format!("pub enum {} {{\n", adt.name));
         for v in &adt.variants {
             out.push_str(&format!("    /// {}\n", v.doc));
@@ -91,7 +102,7 @@ fn body(e: &Effect) -> String {
         "/// One variant per `{}` GADT constructor, named EXACTLY as in Haskell.\n",
         e.name
     ));
-    out.push_str("#[derive(tidepool_bridge_derive::FromCore)]\n");
+    out.push_str("#[derive(FromCore)]\n");
     out.push_str(&format!("pub enum {} {{\n", e.req_enum));
     for v in &e.verbs {
         let tys: Vec<String> = v

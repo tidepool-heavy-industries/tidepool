@@ -108,17 +108,24 @@ pub fn module_name(e: &Effect) -> String {
 }
 
 /// The shared `mod`-index body for a directory of generated effect modules.
-fn index_body(prefix_what: &str, effects: &[Effect]) -> String {
+///
+/// `flatten` adds a re-export glob per module. The decl side wants it (the
+/// crate root does `pub use generated::*`, so `tidepool_mcp::exec_decl` keeps
+/// its path); the handler side does not (each effect's own module re-exports
+/// its types, so a second glob here would just be an unused import).
+fn index_body(prefix_what: &str, effects: &[Effect], flatten: bool) -> String {
     let mut out = header("//! ", prefix_what);
     out.push('\n');
     let mut names: Vec<String> = effects.iter().map(module_name).collect();
     names.sort();
     for n in &names {
-        out.push_str(&format!("mod {n};\n"));
+        out.push_str(&format!("pub mod {n};\n"));
     }
-    out.push('\n');
-    for n in &names {
-        out.push_str(&format!("pub use {n}::*;\n"));
+    if flatten {
+        out.push('\n');
+        for n in &names {
+            out.push_str(&format!("pub use {n}::*;\n"));
+        }
     }
     out
 }

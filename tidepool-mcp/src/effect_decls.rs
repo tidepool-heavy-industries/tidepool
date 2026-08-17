@@ -261,9 +261,8 @@ crate::lsp_effect_def!(crate::effect_defs::effect_decl_projection);
 // (`effect_defs.rs`).
 crate::http_effect_def!(crate::effect_defs::effect_decl_projection);
 
-// Exec effect: `exec_decl()` is generated from the single-source definition
-// (`effect_defs.rs`).
-crate::exec_effect_def!(crate::effect_defs::effect_decl_projection);
+// Exec effect: MIGRATED to the `tidepool-protocol` schema (PRD 22 phase 1).
+// `exec_decl()` now comes from `src/generated/exec.rs`, not from a macro here.
 
 // Git effect: `git_decl()` is generated from the single-source definition
 // (`effect_defs.rs`).

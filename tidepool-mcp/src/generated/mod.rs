@@ -9,6 +9,6 @@
 //! `generated_files_are_current` test), or rewrite in place with
 //! `TIDEPOOL_REGEN_PROTOCOL=1`.
 
-mod exec;
+pub mod exec;
 
 pub use exec::*;

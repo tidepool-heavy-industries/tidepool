@@ -10,12 +10,13 @@
 //! `TIDEPOOL_REGEN_PROTOCOL=1`.
 
 use crate::handlers::exec::ExecHandler;
+use tidepool_bridge_derive::{FromCore, ToCore};
 
 /// The `Exec` effect's typed per-verb failure (#335).
 ///
 /// `FromCore` is for test-side decoding of a `Left err`; the error is only
 /// ever SENT (`ToCore`) in production. `Debug` backs the `Display` path.
-#[derive(tidepool_bridge_derive::ToCore, tidepool_bridge_derive::FromCore, Debug, PartialEq, Eq)]
+#[derive(ToCore, FromCore, Debug, PartialEq, Eq)]
 pub enum ExecError {
     /// the process could not be spawned
     ExecSpawn(String),
@@ -24,7 +25,7 @@ pub enum ExecError {
 }
 
 /// One variant per `Exec` GADT constructor, named EXACTLY as in Haskell.
-#[derive(tidepool_bridge_derive::FromCore)]
+#[derive(FromCore)]
 pub enum ExecReq {
     Run(String),
     RunIn(String, String),

@@ -197,10 +197,13 @@ pub(crate) use opt_prompt_card_or_none;
 
 /// The [`crate::EffectDecl::extra_imports`] table: companion `import` lines a
 /// generated effect's helpers need beyond the fixed eval surface
-/// (`preamble::eval_import_lines`) — `Exec`'s helpers build on `runArgv`
-/// (`Tidepool.Shell`/`Tidepool.Cargo`), `Git`'s on the Git verbs
+/// (`preamble::eval_import_lines`) — `Git`'s helpers build on the Git verbs
 /// (`Tidepool.Git`), `AskUser`'s `Tidepool.Form` on `askUserRaw`. Every other
 /// effect needs nothing beyond the fixed surface.
+///
+/// A MIGRATED effect does not appear here at all: its companion imports are
+/// schema data in `tidepool-protocol` and are emitted straight into its
+/// generated decl. `Exec` was the first to leave.
 ///
 /// Matched on the effect's own identifier (`$eff` from the `_effect_def!`
 /// call site) rather than added as a token to the shared `_effect_def!`
@@ -212,13 +215,6 @@ pub(crate) use opt_prompt_card_or_none;
 /// see `preamble.rs`'s import fold, which is the other half of the old
 /// two-planes-must-be-kept-in-sync-by-hand gate (friction #23).
 macro_rules! extra_imports_for {
-    (Exec) => {
-        &[
-            "import qualified Tidepool.Shell as Shell",
-            "import Tidepool.Shell (sh)",
-            "import qualified Tidepool.Cargo as Cargo",
-        ]
-    };
     (Git) => {
         &["import qualified Tidepool.Git as Git"]
     };
@@ -514,54 +510,6 @@ macro_rules! meta_effect_def {
                 { name metaHelp, sig "M [Text]",
                   doc ["Helper-verb signatures of the running stack."],
                   body nullary MetaHelp },
-            ],
-        }
-    };
-}
-
-/// Exec effect — single definition.
-#[macro_export]
-macro_rules! exec_effect_def {
-    ($project:path) => {
-        $project! {
-            effect Exec,
-            handler ExecHandler,
-            req ExecReq,
-            decl_fn exec_decl,
-            description ["Run shell commands and capture output."],
-            type_defs [],
-            // #335 typed-failure ADT. A nonzero EXIT is NOT a failure here — `run`
-            // still returns a Proc with its exitCode on nonzero exit; `Left` is
-            // only for a spawn failure or a bad/escaping working directory.
-            errors ExecError [
-                { ctor ExecSpawn,  fields { detail: "Text" as String }, doc "the process could not be spawned" },
-                { ctor ExecBadDir, fields { detail: "Text" as String }, doc "working directory is invalid or escapes the sandbox" },
-            ],
-            verbs [
-                { ctor Run, method exec_run,
-                  args { cmd: "Text" as String },
-                  ret "Proc", errors ExecError },
-                { ctor RunIn, method exec_run_in,
-                  args { dir: "Text" as String, cmd: "Text" as String },
-                  ret "Proc", errors ExecError },
-                // Shell-free exec: argv list, no sh -c. Safe with metachars ($1, globs).
-                { ctor RunArgv, method exec_run_argv,
-                  args { argv: "[Text]" as Vec<String> },
-                  ret "Proc", errors ExecError },
-            ],
-            helpers [
-                { raw ["-- | Run a shell command; returns a `Proc` record {exitCode, stdout, stderr}",
-                       "-- (use `ok p` for the zero-exit check). Failure is TYPED (#335): `Left",
-                       "-- (ExecSpawn _)` when the process can't be spawned, `Left (ExecBadDir _)`",
-                       "-- for `runIn` with a bad/escaping directory. A nonzero EXIT is NOT a",
-                       "-- failure — inspect `p.exitCode`. Natural spelling: `Right p <- run cmd`.",
-                       "run :: Text -> M (Either ExecError Proc)",
-                       "run = send . Run"] },
-                { raw ["runIn :: Text -> Text -> M (Either ExecError Proc)",
-                       "runIn dir cmd = send (RunIn dir cmd)"] },
-                // Shell-free: argv list, no sh -c. $1/$VAR/globs are literal — safe.
-                { raw ["runArgv :: [Text] -> M (Either ExecError Proc)",
-                       "runArgv = send . RunArgv"] },
             ],
         }
     };

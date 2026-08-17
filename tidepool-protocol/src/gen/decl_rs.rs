@@ -19,7 +19,7 @@ pub fn path(e: &Effect) -> String {
 pub fn module_index(effects: &[Effect]) -> GeneratedFile {
     GeneratedFile {
         path: "tidepool-mcp/src/generated/mod.rs".to_string(),
-        contents: index_body("Generated effect declarations", effects),
+        contents: index_body("Generated effect declarations", effects, true),
     }
 }
 

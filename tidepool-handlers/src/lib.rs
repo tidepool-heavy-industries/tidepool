@@ -26,6 +26,12 @@ use tidepool_mcp::{CapturedOutput, CollectEffectDecls, EffectDecl};
 
 pub(crate) mod effect_glue;
 
+// Request enums, error ADTs and dispatch glue generated from the
+// `tidepool-protocol` schema, for the effects that have migrated. Each
+// effect's own module re-exports its types, so the public paths are
+// unchanged (`tidepool_handlers::ExecReq`).
+mod generated;
+
 pub mod handlers;
 pub use handlers::*;
 

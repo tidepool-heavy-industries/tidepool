@@ -5,10 +5,11 @@ use tidepool_bridge_effects::Proc;
 // Tag 4: Exec (shell commands)
 // ============================================================================
 
-// ExecReq + DescribeEffect + EffectHandler dispatch are generated from the
-// single-source definition; only the handler struct and the per-verb method
-// bodies below are hand-written.
-tidepool_mcp::exec_effect_def!(crate::effect_glue::effect_rust_projection);
+// ExecReq, ExecError, DescribeEffect and the EffectHandler dispatch are
+// GENERATED from the `tidepool-protocol` schema (PRD 22 phase 1) — re-exported
+// here so the public paths (`tidepool_handlers::ExecReq`) are unchanged. Only
+// the handler struct and the per-verb method bodies below are hand-written.
+pub use crate::generated::exec::{ExecError, ExecReq};
 
 #[derive(Clone)]
 pub struct ExecHandler {
@@ -85,20 +86,22 @@ impl ExecHandler {
 }
 
 impl ExecHandler {
+    // `pub(crate)` rather than private: the generated dispatch arm lives in a
+    // sibling module (`crate::generated::exec`) now, not expanded inline here.
     // Errors-tagged verbs: total in `ExecError`, no `cx` — the dispatch arm
     // wraps the `Result` via `cx.respond` (Ok→Right, Err→Left). See #335. A
     // nonzero EXIT is not a failure: `run_command` always returns `Ok(Proc {
     // .. })` once the process spawns — `Err` is only ExecSpawn/ExecBadDir.
-    fn exec_run(&mut self, cmd: String) -> Result<Proc, ExecError> {
+    pub(crate) fn exec_run(&mut self, cmd: String) -> Result<Proc, ExecError> {
         self.run_command(&cmd, &self.root.clone())
     }
 
-    fn exec_run_in(&mut self, dir: String, cmd: String) -> Result<Proc, ExecError> {
+    pub(crate) fn exec_run_in(&mut self, dir: String, cmd: String) -> Result<Proc, ExecError> {
         let target = self.resolve_dir(&dir)?;
         self.run_command(&cmd, &target)
     }
 
-    fn exec_run_argv(&mut self, argv: Vec<String>) -> Result<Proc, ExecError> {
+    pub(crate) fn exec_run_argv(&mut self, argv: Vec<String>) -> Result<Proc, ExecError> {
         if argv.is_empty() {
             return Err(ExecError::ExecSpawn("runArgv: empty argv".to_string()));
         }

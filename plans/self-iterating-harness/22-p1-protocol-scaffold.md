@@ -410,7 +410,57 @@ bytes.
 
 ## 7. Reviewed diff — generated Rust vs macro expansion
 
-*(Filled in at flip time, Class B item 1. Empty until wave 3.)*
+Class B item 1. Generated Rust cannot be byte-compared against a `macro_rules!`
+expansion — there is no expansion text to compare to — so every way the
+generated file differs from what `effect_rust_projection!` / `error_enum!` /
+`dispatch_body!` / `effect_decl_projection!` expanded is accounted for here.
+**Six differences, all deliberate. Nothing else changed.**
+
+**1. The glue moved to a sibling module, so three methods became `pub(crate)`.**
+The macro expanded *inside* `handlers/exec.rs`, so its dispatch arms could reach
+module-private methods. The generated glue lives in `crate::generated::exec`, so
+`exec_run` / `exec_run_in` / `exec_run_argv` are now `pub(crate)` instead of
+private. Visibility widened crate-internally; the public surface is unchanged,
+and the methods stay hand-written where they were. This is the one structural
+consequence of committed-output generation, and it is the price of the diff
+being reviewable.
+
+**2. Derive macros are imported by name.** `#[derive(ToCore, FromCore, Debug,
+PartialEq, Eq)]` under `use tidepool_bridge_derive::{FromCore, ToCore};`, rather
+than the macro's fully-qualified `#[derive(tidepool_bridge_derive::ToCore, …)]`.
+Forced by rustfmt: the qualified form is 97 characters and `attr_fn_like_width`
+is 70, so rustfmt would rewrap it and the format gate would fight the golden
+gate. Same derives, same order, same resolution.
+
+**3. Error-variant docs now have a home.** Each `errors` variant carries a `doc`
+string in the registry, and it is DEAD DATA there — `error_enum!` drops it and
+`error_variant_text!` drops it. The generator emits it as a Rust doc comment on
+the variant. Strictly more information; nothing about behavior or bytes changes.
+
+**4. `#[must_use]` on the decl builder.** The macro emitted none; a pure builder
+that returns a value wants one. Behavior identical.
+
+**5. `extra_imports` is a literal array, not a macro lookup.** Was
+`extra_imports_for!(Exec)` — a table keyed on the effect's identifier in
+`effect_defs.rs`; is now the same three strings emitted directly from schema
+data, and the `(Exec)` arm of that table is deleted. Pinned twice over: by
+`preamble.rs`'s `import_gating_pin` (which asserts the exact `EXEC_GIT_IMPORTS`
+text) and by the Class A golden.
+
+**6. Public paths are unchanged, deliberately.** `tidepool_mcp::exec_decl`,
+`tidepool_handlers::ExecReq`, `tidepool_handlers::ExecError` all resolve exactly
+as before — `handlers/exec.rs` re-exports the generated types. No caller moved.
+
+Everything else is identical *by proof*, not by inspection:
+`tidepool-mcp/tests/protocol_schema_equivalence.rs` asserted the macro-generated
+`EffectDecl` equal to the schema's rendering field for field **while the macro
+was still in place**, and the Class A goldens — captured from the hand-written
+registry and never regenerated — are green against the generated output.
+
+**Deleted:** `exec_effect_def!` (2502 bytes) from `effect_defs.rs`, its
+invocation in `effect_decls.rs`, its invocation in `handlers/exec.rs`, and the
+`(Exec)` arm of `extra_imports_for!`. The macro grammar and the other nineteen
+definitions are untouched.
 
 ---
 
