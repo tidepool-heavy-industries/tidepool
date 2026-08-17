@@ -1,10 +1,10 @@
 //! Acceptance for S1-L1 outer-row servicing
 //! (`plans/self-iterating-harness/20-exomonad-v3-prd.md`): the AUTHORED loop
-//! calls `say` (Console), `createWorktree` (Worktree), `run` (Exec), and a
+//! calls `say` (Console), `createWorktree` (Worktree), `run` (Exec), a
 //! `withHandler`/`headChanged` subscribe-drain-unsubscribe cycle (RepoEvent),
-//! and the driver services each resulting suspension through its
-//! driver-owned handler set — suspension-serviced, the outer session's
-//! handled prefix staying EMPTY on the shared machine.
+//! and `record` (Journal), and the driver services each resulting suspension
+//! through its driver-owned handler set — suspension-serviced, the outer
+//! session's handled prefix staying EMPTY on the shared machine.
 //!
 //! ONE fixture, ONE compile, every assertion off the single resulting
 //! `State` (family-bundle discipline — a new suspension kind joins this
@@ -26,8 +26,8 @@ mod support;
 
 use tidepool_bridge_effects::{EvRepositoryEvent, WtWorktreeId};
 use tidepool_handlers::{
-    ConsoleHandler, EventConfig, EventError, ExecHandler, ObservationSource, RepoEventHandler,
-    WorktreeHandler,
+    load_journal, ConsoleHandler, EventConfig, EventError, ExecHandler, JournalHandler,
+    ObservationSource, RepoEventHandler, WorktreeHandler,
 };
 use tidepool_harness::engine::EngineConfig;
 use tidepool_harness::log::LogHeader;
@@ -117,18 +117,25 @@ async fn outer_loop_effects_round_trip_through_the_driver() {
     .expect("worktree handler opens");
     let exec_handler = ExecHandler::new(worktree_root);
     let event_handler = RepoEventHandler::with_source(Box::new(NoOpSource), EventConfig::default());
+    let journal_path = std::env::temp_dir().join(format!(
+        "outer-effects-journal-{}.jsonl",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_file(&journal_path);
+    let journal_handler = JournalHandler::new(journal_path.clone());
 
     driver.set_console_handler(ConsoleHandler);
     driver.set_worktree_handler(worktree_handler);
     driver.set_exec_handler(exec_handler);
     driver.set_event_handler(event_handler);
+    driver.set_journal_handler(journal_handler);
 
     let source = load_harness_source(&fixtures_dir().join("OuterEffectsHarness.hs"))
         .expect("fixture harness loads");
     let outcome = driver
         .run_one_cycle(&source, None)
         .await
-        .expect("one cycle: say/createWorktree/run/withHandler all serviced");
+        .expect("one cycle: say/createWorktree/run/withHandler/record all serviced");
 
     let state = &outcome.state_json;
     assert_eq!(
@@ -149,6 +156,30 @@ async fn outer_loop_effects_round_trip_through_the_driver() {
         Some("outer-effects-probe"),
         "exec's stdout must cross into durable state, got {state:?}"
     );
+
+    // Journal: the loop's `record "outer-effects" "probe" ...` call must have
+    // landed durably in the journal file — read it back through JournalHandler's
+    // own fold API, not just trust the loop completed.
+    let entries = load_journal(&journal_path).expect("journal file loads");
+    assert_eq!(
+        entries.len(),
+        1,
+        "expected exactly one recorded journal entry, got {entries:?}"
+    );
+    assert_eq!(entries[0].kind, "outer-effects");
+    assert_eq!(entries[0].key, "probe");
+    assert_eq!(
+        entries[0]
+            .payload
+            .get("exec")
+            .and_then(|v| v.as_str())
+            .map(str::trim),
+        Some("outer-effects-probe"),
+        "the recorded payload must carry the exec output, got {:?}",
+        entries[0].payload
+    );
+
+    let _ = std::fs::remove_file(&journal_path);
 }
 
 /// Without a wired Worktree handler, a Worktree suspension fails LOUDLY with
@@ -187,6 +218,68 @@ async fn outer_worktree_without_handler_errors_legibly() {
     let msg = err.to_string();
     assert!(
         msg.contains("set_worktree_handler"),
+        "the error names the wiring seam, got: {msg}"
+    );
+}
+
+/// Without a wired Journal handler, a `record` suspension fails LOUDLY with
+/// the wiring instruction — never a hang, never a silent drop. Console,
+/// Worktree, Exec, and RepoEvent are all wired here (the fixture loop
+/// reaches `record` only after they all succeed), so the failure under test
+/// is specifically Journal's.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn outer_journal_without_handler_errors_legibly() {
+    support::require_extract();
+    let _cache_guard = support::isolate_cache();
+
+    let agent_cfg = EngineConfig::from_decls(
+        answerer_decls(),
+        repo_root().join("haskell/lib"),
+        Some(fixtures_dir()),
+    )
+    .expect("answerer engine config");
+    let provider: Arc<dyn DynModelProvider> = Arc::new(ReplayProvider::new(Vec::new()));
+    let writer = tidepool_harness::log::LogWriter::create(
+        std::env::temp_dir().join(format!("outer-effects-nj-{}.jsonl", std::process::id())),
+        &header(),
+    )
+    .expect("log writer");
+    let agent = Arc::new(Harness::new(writer, agent_cfg, provider).expect("agent harness boots"));
+    let mut driver = SelfHarnessDriver::new(agent, Arc::new(LogObserver));
+
+    let store = TestRepo::init().expect("git init the source repo");
+    store
+        .writer()
+        .commit_file("README.md", "seed\n", "seed the repo")
+        .expect("seed commit");
+    let roots = tempfile::TempDir::new().expect("substrate roots");
+    let worktree_root = roots.path().join("worktrees");
+    std::fs::create_dir_all(&worktree_root).expect("worktree root");
+
+    let worktree_handler = WorktreeHandler::new(
+        roots.path().join("registry"),
+        worktree_root.clone(),
+        store.path().to_path_buf(),
+    )
+    .expect("worktree handler opens");
+    let exec_handler = ExecHandler::new(worktree_root);
+    let event_handler = RepoEventHandler::with_source(Box::new(NoOpSource), EventConfig::default());
+
+    driver.set_console_handler(ConsoleHandler);
+    driver.set_worktree_handler(worktree_handler);
+    driver.set_exec_handler(exec_handler);
+    driver.set_event_handler(event_handler);
+    // Journal deliberately left unwired.
+
+    let source = load_harness_source(&fixtures_dir().join("OuterEffectsHarness.hs"))
+        .expect("fixture harness loads");
+    let err = driver
+        .run_one_cycle(&source, None)
+        .await
+        .expect_err("a Journal suspension with no handler must error");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("set_journal_handler"),
         "the error names the wiring seam, got: {msg}"
     );
 }

@@ -83,10 +83,11 @@ fn companion_typechecks() {
 
 /// dev-tree is the executable design target of S1-L1: its row now IS the
 /// driver's widened outer session (`[RunLLMTurn, AskUser, Console, Worktree,
-/// RepoEvent, Exec, Subagent]` — mirrors `selfharness::driver::outer_decls`,
-/// interposed effects FIRST so the suspend threshold stays 0). Typechecking
-/// against that exact row is what turns this from "the file names only
-/// landed API" into "this compiles against what the driver actually serves".
+/// RepoEvent, Exec, Subagent, Journal]` — mirrors
+/// `selfharness::driver::outer_decls`, interposed effects FIRST so the
+/// suspend threshold stays 0). Typechecking against that exact row is what
+/// turns this from "the file names only landed API" into "this compiles
+/// against what the driver actually serves".
 #[test]
 fn dev_tree_typechecks() {
     typecheck(
@@ -99,6 +100,7 @@ fn dev_tree_typechecks() {
             tidepool_mcp::event_decl(),
             tidepool_mcp::exec_decl(),
             tidepool_mcp::subagent_decl(),
+            tidepool_mcp::journal_decl(),
         ],
     );
 }

@@ -198,6 +198,15 @@ struct OuterSession {
 /// drive managed worktrees AND observe their repository events, and run
 /// shell commands — every one of them suspension-serviced by
 /// [`SelfHarnessDriver::service_outer_effect`], exactly like `Subagent`.
+///
+/// The run-journal lane (PRD 20 S1-L5/S1-L1 wiring) widens it once more with
+/// `Journal`: an authored `loop` can now `record` a durable progress step,
+/// serviced the same suspension way through
+/// [`SelfHarnessDriver::service_outer_effect`]/[`SelfHarnessDriver::set_journal_handler`].
+/// `Journal` is deliberately absent from `tidepool-handlers`'
+/// `base_effects!`/`handler_for!` row (opt-in, like `Worktree`/`RepoEvent`/
+/// `Subagent`) — which journal file a run appends to, and folding it at
+/// boot, is a driver/binary wiring concern, not a base-stack default.
 fn outer_decls() -> Vec<tidepool_mcp::EffectDecl> {
     vec![
         tidepool_mcp::runllmturn_decl(),
@@ -207,6 +216,7 @@ fn outer_decls() -> Vec<tidepool_mcp::EffectDecl> {
         tidepool_mcp::event_decl(),
         tidepool_mcp::exec_decl(),
         tidepool_mcp::subagent_decl(),
+        tidepool_mcp::journal_decl(),
     ]
 }
 
@@ -490,14 +500,14 @@ pub struct SelfHarnessDriver {
     gate: Arc<dyn OperatorGate>,
     /// The driver-owned handler set for every outer-row effect that isn't
     /// `RunLLMTurn`/`AskUser` (which have their own dedicated servicing
-    /// paths) — `Console`/`Worktree`/`RepoEvent`/`Exec`/`Subagent`. Each is
-    /// DRIVER-owned, never a handler stack on the outer session, whose
-    /// handled prefix must stay empty on the shared machine (see
+    /// paths) — `Console`/`Worktree`/`RepoEvent`/`Exec`/`Subagent`/`Journal`.
+    /// Each is DRIVER-owned, never a handler stack on the outer session,
+    /// whose handled prefix must stay empty on the shared machine (see
     /// [`outer_decls`]); a suspension against an unwired handler fails
     /// LOUDLY with the wiring instruction, never a hang. Wire one via
     /// [`Self::set_console_handler`]/[`Self::set_worktree_handler`]/
     /// [`Self::set_event_handler`]/[`Self::set_exec_handler`]/
-    /// [`Self::set_subagent_handler`].
+    /// [`Self::set_subagent_handler`]/[`Self::set_journal_handler`].
     handlers: OuterHandlers,
 }
 
@@ -509,6 +519,7 @@ struct OuterHandlers {
     event: Option<tidepool_handlers::RepoEventHandler>,
     exec: Option<tidepool_handlers::ExecHandler>,
     subagent: Option<tidepool_handlers::SubagentHandler>,
+    journal: Option<tidepool_handlers::JournalHandler>,
 }
 
 impl SelfHarnessDriver {
@@ -663,6 +674,13 @@ impl SelfHarnessDriver {
     /// from the AUTHORED loop dispatches into ([`Self::service_outer_effect`]).
     pub fn set_exec_handler(&mut self, handler: tidepool_handlers::ExecHandler) {
         self.handlers.exec = Some(handler);
+    }
+
+    /// Wire the Journal seam: the handler a `record` suspension from the
+    /// AUTHORED loop dispatches into ([`Self::service_outer_effect`]) — each
+    /// call durably appends one step to the handler's run journal file.
+    pub fn set_journal_handler(&mut self, handler: tidepool_handlers::JournalHandler) {
+        self.handlers.journal = Some(handler);
     }
 
     /// Override the emergency-compaction threshold (default
@@ -1580,9 +1598,10 @@ impl SelfHarnessDriver {
                                     DriverError::Session(format!("subagent resume failed: {e}"))
                                 })?;
                         }
-                        // Console/Worktree/RepoEvent/Exec (S1-L1) — same
-                        // suspension-servicing shape as Subagent above,
-                        // generalized over `OuterEffectKind`.
+                        // Console/Worktree/RepoEvent/Exec (S1-L1) / Journal
+                        // (run-journal lane) — same suspension-servicing
+                        // shape as Subagent above, generalized over
+                        // `OuterEffectKind`.
                         HoleRouting::OuterEffect(kind) => {
                             let kind = *kind;
                             let value =
@@ -1602,7 +1621,7 @@ impl SelfHarnessDriver {
                                  the Harness monad exposes runLLMTurn, askUser, note, \
                                  spawnAgent, say, createWorktree/lookupWorktree/listWorktrees/\
                                  worktreeBranch/worktreeHead, withHandler (repository events), \
-                                 and run/runIn/runArgv only"
+                                 run/runIn/runArgv, and record only"
                             )))
                         }
                     }
@@ -2117,8 +2136,8 @@ impl SelfHarnessDriver {
         Ok(value)
     }
 
-    /// Service a Console/Worktree/RepoEvent/Exec suspension raised by the
-    /// AUTHORED outer loop (`kind` classified by [`engine::classify_hole`]):
+    /// Service a Console/Worktree/RepoEvent/Exec/Journal suspension raised by
+    /// the AUTHORED outer loop (`kind` classified by [`engine::classify_hole`]):
     /// dispatch the ORIGINAL request into the matching driver-owned handler
     /// via [`Self::dispatch_outer_effect`] — the same decode-dispatch-convert
     /// shape [`Self::service_outer_subagent`] uses, generalized over which
@@ -2174,6 +2193,12 @@ impl SelfHarnessDriver {
                         "run/runIn/runArgv",
                         "set_exec_handler",
                     )
+                })?;
+                Self::dispatch_outer_effect(handler, request, table)
+            }
+            engine::OuterEffectKind::Journal => {
+                let handler = self.handlers.journal.as_mut().ok_or_else(|| {
+                    Self::unwired_outer_effect_error("Journal", "record", "set_journal_handler")
                 })?;
                 Self::dispatch_outer_effect(handler, request, table)
             }
@@ -2751,6 +2776,8 @@ mod tests {
         assert!(decls.iter().any(|d| d.type_name == "Console"));
         assert!(decls.iter().any(|d| d.type_name == "RepoEvent"));
         assert!(decls.iter().any(|d| d.type_name == "Exec"));
+        // Run-journal lane: Journal joins the widened outer row.
+        assert!(decls.iter().any(|d| d.type_name == "Journal"));
     }
 
     /// The answerer's generated `Tidepool.Effects` module declares the

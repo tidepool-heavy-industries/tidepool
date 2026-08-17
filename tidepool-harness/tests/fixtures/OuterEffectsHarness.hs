@@ -8,11 +8,12 @@
 {-# LANGUAGE TypeApplications #-}
 
 -- | Test fixture for S1-L1 outer-row servicing: a harness whose 'loop' calls
--- Console (@say@), Worktree (@createWorktree@), Exec (@run@), and a
--- RepoEvent @withHandler@\/@headChanged@ subscribe-drain-unsubscribe cycle
--- DIRECTLY (no model round at all — the loop is authored orchestration), so
--- the driver's Console\/Worktree\/RepoEvent\/Exec suspension-servicing paths
--- are the only thing under test.
+-- Console (@say@), Worktree (@createWorktree@), Exec (@run@), a
+-- RepoEvent @withHandler@\/@headChanged@ subscribe-drain-unsubscribe cycle,
+-- and Journal (@record@) DIRECTLY (no model round at all — the loop is
+-- authored orchestration), so the driver's
+-- Console\/Worktree\/RepoEvent\/Exec\/Journal suspension-servicing paths are
+-- the only thing under test.
 module OuterEffectsHarness
   ( State (..)
   , initialState
@@ -29,6 +30,7 @@ import Tidepool.Effects
   ( createWorktree
   , fromCurrentRepository
   , headChanged
+  , record
   , renderWorktreeError
   , run
   , say
@@ -50,8 +52,8 @@ render :: State -> Text
 render st =
   [fmt|Outer-effects harness. Runs: {runs st}.|]
 
--- | Console, Worktree, Exec, and RepoEvent, exercised in one loop with no
--- model round: proves the driver services all four suspension kinds.
+-- | Console, Worktree, Exec, RepoEvent, and Journal, exercised in one loop
+-- with no model round: proves the driver services all five suspension kinds.
 loop :: State -> Harness State
 loop st = do
   say "outer-effects probe starting"
@@ -64,6 +66,7 @@ loop st = do
         (headChanged wt)
         (\_change -> say "observed a head change")
         (pure ())
+      record "outer-effects" "probe" (object ["exec" .= proc.stdout])
       pure
         st
           { runs = st.runs + 1
