@@ -150,6 +150,18 @@ impl CycleSaga {
 `Released` and leaves the worktree registered and rebindable. It does NOT
 delete anything.
 
+**Cancel SETTLES; it does not merely kill (root, hold 1).** Reaping the
+backend process is half of cancellation — the half that stops the work. The
+other half is that the cycle's binding row must not be left `Active` pointing
+at an agent that will never run again; that is precisely the orphan the saga's
+rollback semantics exist to prevent, and a cancelled cycle is no more entitled
+to leak one than a failed cycle is. Order matters: **kill first, then take the
+substrate mutex briefly to settle.** Settling before the kill would hold the
+lock across a reap of unknown duration, and the invariant above forbids that.
+`abandon` is idempotent: on a saga that already settled (completed, rolled
+back, or previously abandoned) it is a no-op returning `Ok(())`, never a
+second write and never an error.
+
 ### A3. `CoupledSpawner` keeps its API, loses its refusal
 
 - `begin(&mut self, backend, request) -> Result<SpawnStep, SpawnError>` —
@@ -274,7 +286,10 @@ assertion keeps working unchanged.
   bindings, all settled `Terminal`.
 - Add: a saga blocked on `MockStep::Blocks`, cancelled from another thread;
   the blocked call returns, `abandon()` settles `Released`, and the worktree is
-  still registered (retain-first).
+  still registered (retain-first). Assert the binding row is NOT left `Active` —
+  that is the whole point of settling rather than only killing.
+- Add: `abandon()` on an already-settled saga (completed, and rolled back) is
+  a no-op returning `Ok(())`, so a cancel racing a completion cannot double-write.
 - Every existing row in this file must still pass.
 
 ---
@@ -309,6 +324,13 @@ contract; nothing existing moves.
     doc "the handler's cycle table is full — a BOUND, not a queue: a spawn past
          the cap is refused immediately so an operator sees the ceiling instead
          of an unbounded backlog forming behind it" },
+  { ctor SpawnCancelled, fields { cancelledCycle: "CycleId" as tidepool_bridge_effects::AgCycleId },
+    doc "the cycle was cancelled before it produced a result — the terminal an
+         await on a cancelled handle resolves to. A distinct constructor rather
+         than a drive failure: 'I cancelled this' and 'this broke' call for
+         different handling, and an author who raced their own cancel against
+         their own await must be able to tell them apart by case, not by
+         reading a string" },
   ```
 
 - `verbs` += three, LAST, in this order:
@@ -469,8 +491,27 @@ enum Cycle {
   which is exactly that variant's documented meaning (the caller sequenced the
   loop wrongly; the backend did nothing).
 - `subagent_cancel(cycle)`: canceller → join → `saga.abandon()` (settle
-  `Released`) → drop the entry. TOTAL: unknown or terminal is a no-op.
-  Never panics, never blocks forever.
+  `Released`, mutex taken briefly AFTER the kill) → mark the entry terminal
+  with a cancelled result. TOTAL: unknown or terminal is a no-op. Never
+  panics, never blocks forever, and never leaves a binding row `Active`.
+
+**Cancel/await races resolve to typed terminals (root, hold 2).** The two
+verbs can arrive in either order against the same handle, and neither order
+may hang or panic:
+
+| sequence | `await` returns | `cancel` does |
+|---|---|---|
+| cancel, then await | `SpawnCancelled { cancelledCycle }` | reaps + settles |
+| await, then cancel | the real outcome or error | no-op (terminal) |
+| cancel, then cancel | — | no-op (terminal) |
+| await, then await | the SAME memoized result | — |
+| cancel/await on an unknown id | `SpawnDriveFailed(StageRunning, "no such cycle …")` | no-op |
+
+A cancelled cycle is therefore RETAINED in the table as a terminal entry
+carrying `SpawnCancelled`, not dropped — dropping it would make a subsequent
+await indistinguishable from a typo'd handle, which is the one thing the
+`SpawnDriveFailed` spelling is supposed to mean. Entries are reclaimed when
+the handler is dropped.
 - `subagent_spawn` / `subagent_begin` / `subagent_resume` keep their EXACT
   current behavior. `subagent_begin` now inserts a `Stepped` entry;
   `subagent_resume` looks the saga up by agent id. Every existing assertion in
@@ -501,8 +542,11 @@ assumptions):
 3. **Cancel reaps.** A cycle blocked on `MockStep::Blocks`; `cancel` returns,
    the thread is joined, the binding is settled `Released`, and the worktree is
    still registered.
-4. **Cancel is total.** Cancelling an already-awaited cycle, and an unknown
-   `CycleId`, are both no-ops.
+4. **Cancel is total, and the races are TABLE-DRIVEN.** One table over the
+   five rows in the cancel/await matrix above — every sequence asserted to
+   reach its typed terminal, none of them hanging and none of them panicking.
+   Cancelling an already-awaited cycle and an unknown `CycleId` are rows in
+   that table, not separate tests.
 5. **Table full is typed.** Capacity 2, three spawns; the third is
    `SpawnCapacityExhausted { capacityLimit: 2 }` — and nothing was allocated
    for it (no extra worktree registered, no extra binding row), asserted the
