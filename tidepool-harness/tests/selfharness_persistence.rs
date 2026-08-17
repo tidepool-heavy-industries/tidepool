@@ -1006,8 +1006,9 @@ async fn crashed_cycle_keeps_its_lease_and_the_resumed_run_does_only_the_delta()
         "a fresh run must get its OWN segment, never adopt the finished run's"
     );
     assert!(
-        !third.segment.exists(),
-        "the fresh run's segment appears on its first append, not before"
+        third.segment.exists(),
+        "allocation itself exclusively claims the segment file, empty, via \
+         create_new — it exists before the first append, not after"
     );
     let mut after = fixture_driver("crash-delta-3");
     assert_eq!(
@@ -1165,8 +1166,9 @@ fn a_torn_tail_never_poisons_a_later_boot_through_the_driver_seam() {
         let acquired = acquire_lease(&dir).expect("resume");
         assert_eq!(acquired.lease.run_id, first.lease.run_id);
         assert!(
-            !acquired.segment.exists(),
-            "boot {boot} must be allocated a segment no one has written yet"
+            acquired.segment.exists(),
+            "boot {boot}'s segment is exclusively claimed (empty) at allocation \
+             time, via create_new — it exists before this boot ever appends"
         );
 
         let mut driver = fixture_driver(&format!("torn-tail-many-boots-{boot}"));

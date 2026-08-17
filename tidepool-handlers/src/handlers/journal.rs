@@ -265,6 +265,92 @@ pub fn last_by_kind_key(entries: &[JournalEntry]) -> HashMap<(String, String), J
 }
 
 // ============================================================================
+// SegmentPath — a segment path mintable only by exclusively claiming it
+// ============================================================================
+
+/// A journal segment path, mintable ONLY by [`SegmentPath::create_exclusive`]
+/// — never by wrapping an arbitrary `PathBuf`. The invariant this buys:
+/// holding a `SegmentPath` is proof the underlying file was exclusively
+/// claimed (`OpenOptions::create_new`), not merely a promise that some
+/// caller meant to claim it first. [`JournalHandler::new`]/[`JournalHandler::resuming`]
+/// take this instead of a bare `PathBuf` so "a handler pointed at a segment
+/// nobody allocated" is a type error to construct, not a runtime hazard to
+/// remember to avoid.
+///
+/// `tidepool_harness::selfharness::resume::allocate_segment` is the one
+/// legitimate non-test caller: it owns the segment NAMING scheme (ordinal
+/// picking, retry-on-collision) and calls [`Self::create_exclusive`] on each
+/// candidate path in turn. This type owns the CLAIM primitive only, not the
+/// naming scheme — `tidepool-handlers` sits below `tidepool-harness` in the
+/// crate graph (see this module's other doc comments on why this crate
+/// never decides where a segment lives), so the naming scheme cannot live
+/// here.
+///
+/// Cheaply `Clone` — cloning an already-claimed path is harmless aliasing,
+/// not a new claim; what's walled off is MINTING one from a bare `PathBuf`.
+/// `Deref<Target = Path>` + `AsRef<Path>` so ordinary path operations
+/// (`.exists()`, `.display()`, passing to `std::fs::write`/`load_journal`)
+/// work exactly as they would on the underlying path.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct SegmentPath(PathBuf);
+
+impl SegmentPath {
+    /// Exclusively claim `path`: an OS-enforced atomic "this file did not
+    /// exist and now it does, and I'm the one who made it so"
+    /// (`OpenOptions::create_new`). An `Err` with `.kind() ==
+    /// ErrorKind::AlreadyExists` is the collision case a racing allocator's
+    /// retry loop matches on to try the next candidate; any other error is a
+    /// genuine I/O failure (e.g. a missing parent directory).
+    pub fn create_exclusive(path: PathBuf) -> std::io::Result<Self> {
+        OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)?;
+        Ok(SegmentPath(path))
+    }
+
+    /// Wrap a path WITHOUT claiming it — no `create_new`, no OS interaction.
+    /// Escape hatch for this crate's OWN unit tests below, which
+    /// deliberately construct several `JournalHandler`s over the SAME path
+    /// (`new` then `resuming`, simulating one process appending across
+    /// instances) or over a path whose parent doesn't exist yet (append's
+    /// own mkdir-p is under test) — both patterns `create_exclusive` cannot
+    /// serve. `pub(crate)` AND `#[cfg(test)]`: never reachable from another
+    /// crate (not even that crate's own test builds — `cfg(test)` gates on
+    /// THIS crate being under test, not the caller), so this is not a second
+    /// public construction path.
+    #[cfg(test)]
+    pub(crate) fn for_test(path: PathBuf) -> Self {
+        SegmentPath(path)
+    }
+}
+
+impl std::ops::Deref for SegmentPath {
+    type Target = Path;
+    fn deref(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl AsRef<Path> for SegmentPath {
+    fn as_ref(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl PartialEq<PathBuf> for SegmentPath {
+    fn eq(&self, other: &PathBuf) -> bool {
+        &self.0 == other
+    }
+}
+
+impl PartialEq<SegmentPath> for PathBuf {
+    fn eq(&self, other: &SegmentPath) -> bool {
+        self == &other.0
+    }
+}
+
+// ============================================================================
 // The handler
 // ============================================================================
 
@@ -287,18 +373,19 @@ pub struct JournalHandler {
 }
 
 impl JournalHandler {
-    /// One journal file — the caller picks the path (typically one process's
-    /// own SEGMENT of a run; see `tidepool_harness::selfharness::resume`,
-    /// which is what decides that path, never this type). Appends start at
-    /// seq `0`, which is right for a FRESH run's first process. A process
-    /// continuing a run a prior process already wrote to must use
-    /// [`Self::resuming`] instead: two processes' segments both starting
-    /// their entries at seq `0` would make them indistinguishable by
-    /// provenance alone, even though the fold that reads them back no longer
-    /// depends on `seq` to tell them apart.
-    pub fn new(path: PathBuf) -> Self {
+    /// One journal file over an already-claimed [`SegmentPath`] (typically
+    /// one process's own SEGMENT of a run; see
+    /// `tidepool_harness::selfharness::resume`, which is what decides that
+    /// path and claims it, never this type). Appends start at seq `0`,
+    /// which is right for a FRESH run's first process. A process continuing
+    /// a run a prior process already wrote to must use [`Self::resuming`]
+    /// instead: two processes' segments both starting their entries at seq
+    /// `0` would make them indistinguishable by provenance alone, even
+    /// though the fold that reads them back no longer depends on `seq` to
+    /// tell them apart.
+    pub fn new(path: SegmentPath) -> Self {
         Self {
-            path,
+            path: path.0,
             seq: Arc::new(AtomicU64::new(0)),
             lock: Arc::new(Mutex::new(())),
         }
@@ -308,10 +395,14 @@ impl JournalHandler {
     /// from `next_seq` (the driver's `max(seq) + 1` over the entries it just
     /// folded — `0` when the file was empty or absent, which is exactly
     /// [`Self::new`]). Opening in append mode is unchanged; nothing here reads
-    /// or rewrites the file.
-    pub fn resuming(path: PathBuf, next_seq: u64) -> Self {
+    /// or rewrites the file. `next_seq` stays a plain `u64` rather than its
+    /// own newtype: `SelfHarnessDriver::open_run_journal` — the sole caller
+    /// in the harness — already seeds it from `ResumeFold::next_seq()`
+    /// (never a literal), so the misuse this would wall off has no live call
+    /// site to protect against.
+    pub fn resuming(path: SegmentPath, next_seq: u64) -> Self {
         Self {
-            path,
+            path: path.0,
             seq: Arc::new(AtomicU64::new(next_seq)),
             lock: Arc::new(Mutex::new(())),
         }
@@ -494,7 +585,7 @@ mod tests {
     fn append_then_fold_roundtrips() {
         let path = tmp_file("roundtrip");
         let _ = std::fs::remove_file(&path);
-        let h = JournalHandler::new(path.clone());
+        let h = JournalHandler::new(SegmentPath::for_test(path.clone()));
 
         h.append(
             "split".into(),
@@ -525,7 +616,7 @@ mod tests {
     fn seq_is_monotonic() {
         let path = tmp_file("seq");
         let _ = std::fs::remove_file(&path);
-        let h = JournalHandler::new(path.clone());
+        let h = JournalHandler::new(SegmentPath::for_test(path.clone()));
 
         for i in 0..5 {
             h.append("k".into(), format!("key{i}"), serde_json::json!(i))
@@ -543,7 +634,7 @@ mod tests {
     fn torn_last_line_skipped_with_warning() {
         let path = tmp_file("torn");
         let _ = std::fs::remove_file(&path);
-        let h = JournalHandler::new(path.clone());
+        let h = JournalHandler::new(SegmentPath::for_test(path.clone()));
         h.append("split".into(), "a".into(), serde_json::json!(1))
             .unwrap();
         h.append("split".into(), "b".into(), serde_json::json!(2))
@@ -601,7 +692,7 @@ mod tests {
     fn by_key_helper_returns_last_record_per_key() {
         let path = tmp_file("bykey");
         let _ = std::fs::remove_file(&path);
-        let h = JournalHandler::new(path.clone());
+        let h = JournalHandler::new(SegmentPath::for_test(path.clone()));
         h.append("split".into(), "branch/a".into(), serde_json::json!(1))
             .unwrap();
         h.append("outcome".into(), "branch/a".into(), serde_json::json!(2))
@@ -713,7 +804,7 @@ mod tests {
         let path = tmp_file("resuming");
         let _ = std::fs::remove_file(&path);
 
-        let first = JournalHandler::new(path.clone());
+        let first = JournalHandler::new(SegmentPath::for_test(path.clone()));
         for i in 0..3 {
             first
                 .append("split".into(), format!("k{i}"), serde_json::json!(i))
@@ -724,7 +815,7 @@ mod tests {
         let next_seq = loaded.iter().map(|e| e.seq).max().map_or(0, |m| m + 1);
         assert_eq!(next_seq, 3);
 
-        let second = JournalHandler::resuming(path.clone(), next_seq);
+        let second = JournalHandler::resuming(SegmentPath::for_test(path.clone()), next_seq);
         for i in 3..6 {
             second
                 .append("split".into(), format!("k{i}"), serde_json::json!(i))
@@ -759,7 +850,7 @@ mod tests {
         let _ = std::fs::remove_file(&seg0);
         let _ = std::fs::remove_file(&seg1);
 
-        let first = JournalHandler::new(seg0.clone());
+        let first = JournalHandler::new(SegmentPath::for_test(seg0.clone()));
         for i in 0..3 {
             first
                 .append("step".into(), format!("k{i}"), serde_json::json!(i))
@@ -772,7 +863,7 @@ mod tests {
             .max()
             .map_or(0, |m| m + 1);
 
-        let second = JournalHandler::resuming(seg1.clone(), next_seq);
+        let second = JournalHandler::resuming(SegmentPath::for_test(seg1.clone()), next_seq);
         for i in 3..6 {
             second
                 .append("step".into(), format!("k{i}"), serde_json::json!(i))
@@ -805,7 +896,7 @@ mod tests {
         let base = tmp_dir("parentdir");
         let _ = std::fs::remove_dir_all(&base);
         let path = base.join("nested").join("run.jsonl");
-        let h = JournalHandler::new(path.clone());
+        let h = JournalHandler::new(SegmentPath::for_test(path.clone()));
 
         h.append("split".into(), "a".into(), serde_json::json!(1))
             .unwrap();
@@ -831,7 +922,7 @@ mod tests {
         let blocker = base.join("blocker");
         std::fs::write(&blocker, b"not a directory").unwrap();
         let path = blocker.join("journal.jsonl");
-        let h = JournalHandler::new(path);
+        let h = JournalHandler::new(SegmentPath::for_test(path));
 
         let err = h
             .append("k".into(), "a".into(), serde_json::json!(1))
@@ -868,7 +959,7 @@ mod tests {
     fn concurrent_burst_through_cloned_handlers_yields_no_torn_lines() {
         let path = tmp_file("concurrent_burst");
         let _ = std::fs::remove_file(&path);
-        let handler = JournalHandler::new(path.clone());
+        let handler = JournalHandler::new(SegmentPath::for_test(path.clone()));
 
         const THREADS: usize = 8;
         const PER_THREAD: usize = 50;

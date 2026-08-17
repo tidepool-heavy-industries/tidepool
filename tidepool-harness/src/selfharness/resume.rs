@@ -28,10 +28,21 @@
 //!
 //! **Allocation**: [`acquire_lease`] picks the next unused segment for THIS
 //! process — one past the highest segment index already on disk for the run
-//! id, or `0` when the run id owns none yet (a fresh run's first process, or
-//! a resumed run whose prior process crashed before ever appending). The
-//! allocated path is carried on [`AcquiredLease`], not on [`RunLease`] — see
-//! "The run lease" below for why that split is deliberate.
+//! id, or `0` when the run id owns none yet — via [`allocate_segment`],
+//! which claims that candidate EXCLUSIVELY (`create_new`, an OS-enforced
+//! atomic file create) rather than merely returning a computed path: two
+//! processes racing the SAME directory listing at boot would otherwise both
+//! compute the same "next" ordinal and both write into it. A collision
+//! (`AlreadyExists`) retries at the next ordinal — bounded, since each
+//! retry strictly advances past a real file, so the loop terminates in at
+//! most (number of racing allocators) steps. One consequence: once a
+//! segment is allocated its file exists on disk, empty or not — so a
+//! predecessor that crashed before ever appending still counts as CLAIMED,
+//! and the next resume advances past it rather than reusing it (unlike the
+//! pre-exclusivity design, where an unwritten segment was indistinguishable
+//! from an unallocated one). The allocated path is carried on
+//! [`AcquiredLease`], not on [`RunLease`] — see "The run lease" below for
+//! why that split is deliberate.
 //!
 //! **The boot fold** ([`crate::selfharness::driver::SelfHarnessDriver::open_run_journal`])
 //! loads every segment for the run id, in segment order, and concatenates
@@ -109,7 +120,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value as Json;
-use tidepool_handlers::{last_by_kind_key, JournalEntry};
+use tidepool_handlers::{last_by_kind_key, JournalEntry, SegmentPath};
 
 use super::persistence::PersistenceError;
 
@@ -331,9 +342,11 @@ pub fn list_segments(log_dir: &Path, run_id: &str) -> Result<Vec<PathBuf>, Persi
 }
 
 /// The segment index the NEXT process to boot in `log_dir` under `run_id`
-/// should allocate: one past the highest segment already on disk, or `0`
-/// when `run_id` owns none yet (a fresh run's first process, or a resumed
-/// run whose prior process crashed before its first `record`).
+/// SHOULD allocate: one past the highest segment already on disk, or `0`
+/// when `run_id` owns none yet. A pure computation over a directory
+/// listing, nothing more — it does not itself claim anything; see
+/// [`allocate_segment`], its only caller, for why "should" and "does" are
+/// two different steps.
 fn next_segment_ordinal(log_dir: &Path, run_id: &str) -> Result<u64, PersistenceError> {
     let existing = list_segments(log_dir, run_id)?;
     Ok(existing
@@ -345,6 +358,40 @@ fn next_segment_ordinal(log_dir: &Path, run_id: &str) -> Result<u64, Persistence
         })
         .max()
         .map_or(0, |m| m + 1))
+}
+
+/// Claim THIS process's own segment for `run_id`, EXCLUSIVELY. The fast path
+/// is [`next_segment_ordinal`]'s listing-based guess; the claim itself is
+/// [`SegmentPath::create_exclusive`] — an OS-enforced atomic "this file did
+/// not exist and now it does, and I'm the one who made it so" — so a second
+/// allocator racing the same listing can never silently share the winner's
+/// path. On `AlreadyExists` (another process's claim landed first, or beat
+/// us to a still-empty ordinal a crashed process only reserved) the
+/// candidate ordinal is bumped and retried; nothing here is a substantive
+/// fallback — under real contention the loser of a single collision lands
+/// exactly where an uncontended call would have put it anyway, one ordinal
+/// later. This is the crate's ONE legitimate non-test caller of
+/// `create_exclusive` — see that method's doc.
+fn allocate_segment(log_dir: &Path, run_id: &str) -> Result<SegmentPath, PersistenceError> {
+    let mut seg = next_segment_ordinal(log_dir, run_id)?;
+    loop {
+        let path = segment_path(log_dir, run_id, seg);
+        match SegmentPath::create_exclusive(path.clone()) {
+            Ok(claimed) => return Ok(claimed),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => seg += 1,
+            Err(source) => return Err(PersistenceError::Io { path, source }),
+        }
+    }
+}
+
+/// Best-effort liveness check via `/proc/<pid>` (Linux only — the same idiom
+/// `Harness::sweep_stale_run_dirs` uses for its own stale-dir sweep). Backs a
+/// WARNING only (see [`acquire_lease`]'s resume path), never a correctness
+/// decision: `false` on a platform without `/proc`, or if `/proc` itself is
+/// unreadable, just means a live process goes unwarned rather than blocking
+/// anything.
+fn pid_is_alive(pid: u32) -> bool {
+    Path::new("/proc").join(pid.to_string()).exists()
 }
 
 /// Load and fold every segment `run_id` owns in `log_dir`, in true physical
@@ -380,10 +427,13 @@ pub enum RunJournalError {
 #[derive(Debug, Clone, PartialEq)]
 pub struct AcquiredLease {
     pub lease: RunLease,
-    /// This process's own segment — allocated by [`next_segment_ordinal`] at
-    /// acquisition time, guaranteed not to already exist (no process ever
-    /// appends into a segment another process owns).
-    pub segment: PathBuf,
+    /// This process's own segment — allocated (and EXCLUSIVELY claimed, see
+    /// [`allocate_segment`]) at acquisition time. A [`SegmentPath`], not a
+    /// bare `PathBuf`: holding one is proof the file was exclusively
+    /// created, not merely a computed name — no process ever appends into a
+    /// segment another process owns, and now that can't even be constructed
+    /// by accident.
+    pub segment: SegmentPath,
     /// `true` when a lease was already on disk — this boot continues a run a
     /// prior process started, whether or not that run had journaled anything
     /// yet.
@@ -482,11 +532,25 @@ pub fn acquire_lease(log_dir: &Path) -> Result<AcquiredLease, PersistenceError> 
             )
         }
     };
+    // Observability, not a gate: segments already make coexistence
+    // file-safe (this boot allocates its own, below), so a live prior pid is
+    // never refused — only named loudly, before it's overwritten, so a
+    // human can tell a genuine double-work situation from an ordinary crash
+    // resume.
+    if resumed && pid_is_alive(lease.pid) {
+        tracing::warn!(
+            run_id = %lease.run_id,
+            prior_pid = lease.pid,
+            resuming_pid = std::process::id(),
+            "resuming a run whose lease still names a LIVE prior process — \
+             segments keep this file-safe, but the run is now being worked \
+             by two processes at once"
+        );
+    }
     lease.pid = std::process::id();
     lease.started_at = now;
     write_lease(log_dir, &lease)?;
-    let seg = next_segment_ordinal(log_dir, &lease.run_id)?;
-    let segment = segment_path(log_dir, &lease.run_id, seg);
+    let segment = allocate_segment(log_dir, &lease.run_id)?;
     Ok(AcquiredLease {
         lease,
         segment,
@@ -709,21 +773,135 @@ mod tests {
     }
 
     /// A resumed process whose predecessor crashed before ever appending
-    /// (segment 0 was allocated but never written) still allocates its OWN
-    /// next segment rather than reusing the empty/never-created one — segment
-    /// allocation is driven by the directory listing, not by whether the
-    /// prior segment happened to get written.
+    /// still advances to its OWN, later segment rather than reusing the
+    /// predecessor's — allocation (exclusive `create_new`, [`allocate_segment`])
+    /// is what CLAIMS an ordinal now, not the act of later writing to it, so
+    /// an empty, never-appended segment is exactly as claimed as one with a
+    /// torn tail.
     #[test]
     fn resume_after_a_predecessor_that_never_wrote_still_advances() {
         let dir = temp_dir("resume-no-write");
         let first = acquire_lease(&dir).expect("mint");
-        assert!(!first.segment.exists(), "nothing has been written yet");
+        assert!(
+            first.segment.exists(),
+            "allocation itself claims the segment file, empty, via create_new"
+        );
 
         let second = acquire_lease(&dir).expect("resume");
         assert_eq!(second.lease.run_id, first.lease.run_id);
-        assert_eq!(
+        assert_ne!(
             second.segment, first.segment,
-            "with nothing on disk for this run yet, ordinal 0 is still the next unused one"
+            "the predecessor's segment is already claimed (its file exists, even \
+             empty) — a resume must never reuse it"
+        );
+        assert_eq!(second.segment, segment_path(&dir, &first.lease.run_id, 1));
+    }
+
+    /// The race [`allocate_segment`] exists to close: several allocators
+    /// contending for the SAME run id's next segment, simultaneously, via a
+    /// barrier so every thread's `create_new` genuinely contends rather than
+    /// serializing by scheduling luck. Every one must land on a DISTINCT
+    /// path — under the pre-exclusivity design (a bare directory listing,
+    /// no `create_new`) every thread would compute ordinal 0 from the same
+    /// empty listing and return the SAME path.
+    #[test]
+    fn concurrent_allocators_never_collide_on_the_same_segment() {
+        use std::sync::{Arc, Barrier};
+
+        let dir = Arc::new(temp_dir("concurrent-allocate"));
+        const N: usize = 8;
+        let barrier = Arc::new(Barrier::new(N));
+        let handles: Vec<_> = (0..N)
+            .map(|_| {
+                let dir = Arc::clone(&dir);
+                let barrier = Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    allocate_segment(&dir, "run-concurrent").expect("allocate")
+                })
+            })
+            .collect();
+        let mut paths: Vec<SegmentPath> = handles
+            .into_iter()
+            .map(|h| h.join().expect("allocator thread must not panic"))
+            .collect();
+        paths.sort();
+        paths.dedup();
+        assert_eq!(
+            paths.len(),
+            N,
+            "every concurrently racing allocator must land on a distinct segment path, \
+             and each SegmentPath must be a genuinely distinct claim, not just a distinct string"
+        );
+    }
+
+    /// [`acquire_lease`]'s resume path warns, naming both pids, when the
+    /// lease it inherits still names a LIVE process — captured via a
+    /// scoped `tracing` subscriber rather than asserted indirectly, so this
+    /// pins the observability itself, not just a side effect of it.
+    #[test]
+    fn alive_pid_lease_warns_loudly_at_resume() {
+        use std::sync::{Arc, Mutex};
+
+        struct CaptureEvents(Arc<Mutex<Vec<String>>>);
+
+        struct FieldsToString(String);
+        impl tracing::field::Visit for FieldsToString {
+            fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+                use std::fmt::Write;
+                let _ = write!(self.0, "{}={:?} ", field.name(), value);
+            }
+        }
+
+        impl tracing::Subscriber for CaptureEvents {
+            fn enabled(&self, _metadata: &tracing::Metadata<'_>) -> bool {
+                true
+            }
+            fn new_span(&self, _span: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+                tracing::span::Id::from_u64(1)
+            }
+            fn record(&self, _span: &tracing::span::Id, _values: &tracing::span::Record<'_>) {}
+            fn record_follows_from(&self, _span: &tracing::span::Id, _follows: &tracing::span::Id) {
+            }
+            fn event(&self, event: &tracing::Event<'_>) {
+                let mut visitor = FieldsToString(String::new());
+                event.record(&mut visitor);
+                self.0.lock().expect("capture lock").push(visitor.0);
+            }
+            fn enter(&self, _span: &tracing::span::Id) {}
+            fn exit(&self, _span: &tracing::span::Id) {}
+        }
+
+        let dir = temp_dir("lease-alive-pid-warn");
+        let my_pid = std::process::id();
+        write_lease(
+            &dir,
+            &RunLease {
+                run_id: "run-alive".to_string(),
+                pid: my_pid,
+                started_at: "0".to_string(),
+            },
+        )
+        .expect("plant a lease naming this (guaranteed-alive) test process");
+
+        let captured = Arc::new(Mutex::new(Vec::new()));
+        let subscriber = CaptureEvents(Arc::clone(&captured));
+        let acquired = tracing::subscriber::with_default(subscriber, || {
+            acquire_lease(&dir).expect("resuming a lease with a live prior pid must still succeed")
+        });
+
+        assert!(acquired.resumed, "a lease was on disk — this boot resumes");
+        assert_eq!(
+            acquired.lease.pid, my_pid,
+            "re-stamped to this process, as always"
+        );
+
+        let events = captured.lock().expect("capture lock");
+        assert!(
+            events
+                .iter()
+                .any(|e| e.contains(&format!("prior_pid={my_pid}"))),
+            "resuming a lease whose pid is still alive must warn, naming that pid; got {events:?}"
         );
     }
 

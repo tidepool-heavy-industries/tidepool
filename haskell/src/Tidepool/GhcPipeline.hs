@@ -38,7 +38,8 @@ import GHC.Platform (genericPlatform)
 import GHC.Utils.Outputable (renderWithContext, defaultSDocContext, ppr)
 import GHC.Types.Id (idName, idType)
 import GHC.Core.Type (splitAppTy_maybe, splitTyConApp_maybe, splitFunTy_maybe)
-import GHC.Core.TyCon (isTupleTyCon, tyConDataCons_maybe, unwrapNewTyCon_maybe)
+import GHC.Core.TyCon (isTupleTyCon, tyConDataCons_maybe, unwrapNewTyCon_maybe, tyConUnique)
+import GHC.Builtin.Names (fUNTyConKey, unrestrictedFunTyConKey)
 import GHC.Core.DataCon (dataConOrigArgTys)
 import GHC.Core.TyCo.Rep (Scaled(..))
 import GHC.Types.Unique.Set (UniqSet, emptyUniqSet, addOneToUniqSet, elementOfUniqSet)
@@ -1087,6 +1088,22 @@ stripMonadHead ty =
 -- function type, but deep-forcing it would try to force through the
 -- function field and crash — it needs the SAME store-as-is treatment a bare
 -- function gets.
+--
+-- 'goTc' also special-cases the arrow TyCon itself. A HIGHER-KINDED field
+-- instantiated at a partially-applied arrow (@data Box f = Box (f Int)@ at
+-- @f = (->) Bool@) reaches 'goT' as one of @Box@'s own outer type
+-- arguments — the CONCRETE @(->) Bool@, not @Box@'s abstract, unsubstituted
+-- field declaration @f Int@ (which 'dataConOrigArgTys' can never resolve to
+-- a function regardless of what @f@ is instantiated to, and correctly so —
+-- it is genuinely opaque without that instantiation). A SATURATED arrow
+-- always normalizes to GHC's own @FunTy@ sugar (an invariant GHC itself
+-- maintains — see "Representation of function types" in @GHC.Core.Type@)
+-- and is already caught by 'splitFunTy_maybe' above; only a PARTIAL
+-- application like @(->) Bool@ survives as a bare @TyConApp@ of the
+-- primitive arrow TyCon, which has neither a newtype representation nor
+-- DataCons — so before this case it fell through both 'goTc' checks to
+-- 'False', misclassifying the whole @Box@ value as Tier0 and crashing the
+-- same deep-force this function exists to prevent.
 isClosureType :: Type -> Bool
 isClosureType ty0 =
   let (_, _, body) = tcSplitSigmaTy ty0
@@ -1101,6 +1118,7 @@ isClosureType ty0 =
     goTc :: UniqSet TyCon -> TyCon -> Bool
     goTc visited tc
       | tc `elementOfUniqSet` visited = False
+      | tyConUnique tc == fUNTyConKey || tyConUnique tc == unrestrictedFunTyConKey = True
       | otherwise =
           let visited' = addOneToUniqSet visited tc
               newtypeHit = case unwrapNewTyCon_maybe tc of

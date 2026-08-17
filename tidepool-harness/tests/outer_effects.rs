@@ -29,7 +29,7 @@ mod support;
 use tidepool_bridge_effects::{EvRepositoryEvent, WtWorktreeId};
 use tidepool_handlers::{
     load_journal, ConsoleHandler, EventConfig, EventError, ExecHandler, JournalEntry,
-    JournalHandler, ObservationSource, RepoEventHandler, WorktreeHandler,
+    JournalHandler, ObservationSource, RepoEventHandler, SegmentPath, WorktreeHandler,
 };
 use tidepool_harness::engine::EngineConfig;
 use tidepool_harness::log::LogHeader;
@@ -125,7 +125,10 @@ async fn outer_loop_effects_round_trip_through_the_driver() {
         std::process::id()
     ));
     let _ = std::fs::remove_file(&journal_path);
-    let journal_handler = JournalHandler::new(journal_path.clone());
+    let journal_handler = JournalHandler::new(
+        SegmentPath::create_exclusive(journal_path.clone())
+            .expect("journal path just cleared above — exclusive claim must succeed"),
+    );
 
     driver.set_console_handler(ConsoleHandler);
     driver.set_worktree_handler(worktree_handler);
