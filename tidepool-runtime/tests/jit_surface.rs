@@ -1173,6 +1173,54 @@ target = (Foo "red").color ++ (Bar "blue").color
     );
 }
 
+/// `Tidepool.Swarm`'s `PlanF`/`hyloM` (PRD 20, "The hylo core") — the swarm
+/// engine's recursion-scheme core surviving derivation and extraction on the
+/// JIT. Standalone per exclusion class (d) DISTINCT-MECHANISM: this pins
+/// whether GHC-derived `Functor`/`Foldable`/`Traversable` dictionaries for a
+/// user-defined recursive-shaped data type, plus a higher-order recursive
+/// fold (`hyloM`'s `traverse go`), survive the Core extract → Cranelift JIT
+/// pipeline — a compiler/runtime mechanism, not a stdlib function's
+/// JIT-safety, so it does not belong in a family bundle. `Tidepool.Swarm` is
+/// imported qualified: this repo's own `.tidepool/lib/Schemes.hs` (the
+/// project-local dev verb library, auto-imported unqualified as `Library` in
+/// every eval run from this worktree) already defines an unrelated `hyloM`,
+/// so an unqualified import here would be ambiguous.
+///
+/// Two parts: (a) `PlanF` construction plus `fmap`/`sum` (derived
+/// `Functor`/`Foldable`) and `traverse` (derived `Traversable`) directly on a
+/// value — each acts on `kids` only, `task` is untouched. (b) `hyloM`
+/// unfolding a numeric range `(lo, hi)` by repeated midpoint split down to
+/// singleton leaves, then folding the SAME coalgebra's tree back up two
+/// ways — concatenating leaf values (order-preserving) and summing them —
+/// asserting the exact reconstructed `[1..10]` and its sum `55`.
+#[test]
+fn works_swarm_planf_hylo_on_jit() {
+    works_with_imports(
+        "qualified Tidepool.Swarm as Swarm\nData.Traversable (traverse)",
+        r#"Swarm.hyloM algLeaves coalg ((1,10) :: (Int,Int)) >>= \leaves ->
+            Swarm.hyloM algSum coalg ((1,10) :: (Int,Int)) >>= \total ->
+            pure (concat
+                [ check "planf_fmap_kids" (Swarm.kids (fmap (+1) (Swarm.PlanF ("root"::Text) [1,2,3::Int])) == [2,3,4::Int])
+                , check "planf_foldable_sum" (sum (Swarm.PlanF ("root"::Text) [1,2,3::Int]) == (6::Int))
+                , check "planf_traverse_maybe" (fmap Swarm.kids (traverse (\x -> if x > (0::Int) then Just (x*10) else Nothing) (Swarm.PlanF ("root"::Text) [1,2,3::Int])) == Just [10,20,30::Int])
+                , check "hylo_range_split_leaves" (leaves == ([1..10] :: [Int]))
+                , check "hylo_range_split_sum" (total == (55 :: Int))
+                ])
+             where {
+               check nm ok = if ok then [] else [nm];
+               coalg :: (Int,Int) -> M (Swarm.PlanF (Int,Int) (Int,Int));
+               coalg (lo,hi) = if lo == hi then pure (Swarm.PlanF (lo,hi) []) else let { mid = (lo+hi) `div` 2 } in pure (Swarm.PlanF (lo,hi) [(lo,mid),(mid+1,hi)]);
+               algLeaves :: Swarm.PlanF (Int,Int) [Int] -> M [Int];
+               algLeaves (Swarm.PlanF (lo,_) []) = pure [lo];
+               algLeaves (Swarm.PlanF _ xss) = pure (concat xss);
+               algSum :: Swarm.PlanF (Int,Int) Int -> M Int;
+               algSum (Swarm.PlanF (lo,_) []) = pure lo;
+               algSum (Swarm.PlanF _ xs) = pure (sum xs)
+             }"#,
+        serde_json::json!([]),
+    );
+}
+
 // --- (e) `works_stdlib_quoter_survives_extract` — the QQ-survival proof,
 // load-bearing coverage, kept standalone by explicit instruction. ---
 
