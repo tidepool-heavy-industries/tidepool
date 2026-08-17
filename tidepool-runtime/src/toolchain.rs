@@ -174,7 +174,8 @@ fn render_tried(tried: &[(&'static str, PathBuf)]) -> String {
 // Extract location — delegated
 // ---------------------------------------------------------------------------
 
-/// The program name for the extract, as a string.
+/// The resolved extract binary, typed so a caller cannot substitute a
+/// guessed name for a real resolution.
 ///
 /// Deliberately spelled without naming the std spawn constructor: this module
 /// resolves and fingerprints, it never spawns, and
@@ -184,9 +185,9 @@ fn render_tried(tried: &[(&'static str, PathBuf)]) -> String {
 ///
 /// Thin delegation to [`tidepool_extract_cmd::resolve_bin`], which owns the
 /// extract-binary precedence (see the table in this module's docs). Kept as a
-/// named entry point so a caller that only needs the SPELLING — the compile
-/// cache, the harness's `EngineConfig` — does not have to reach into the
-/// invocation crate.
+/// named entry point so a caller that only needs the resolved binary — the
+/// harness's `EngineConfig` — does not have to reach into the invocation
+/// crate.
 ///
 /// STRICT, per the precedence table: a set-but-unreadable `$TIDEPOOL_EXTRACT`
 /// is a hard error here too, never a silent fall-through to the bare
@@ -200,9 +201,9 @@ fn render_tried(tried: &[(&'static str, PathBuf)]) -> String {
 /// [`ToolchainError::ExtractNotFound`] when `$TIDEPOOL_EXTRACT` names an
 /// unreadable file, naming the path, why it failed, and that unsetting the
 /// var falls back to `$PATH`.
-pub fn extract_command_name() -> Result<String, ToolchainError> {
+pub fn extract_command_name() -> Result<tidepool_extract_cmd::ResolvedExtractBin, ToolchainError> {
     tidepool_extract_cmd::resolve_bin()
-        .map(|b| b.path.to_string_lossy().into_owned())
+        .map(tidepool_extract_cmd::ResolvedBin::into_extract_bin)
         .map_err(|e| ToolchainError::ExtractNotFound {
             tried: format!(
                 "{ENV_EXTRACT} is set to {} but that is not a readable file; \
@@ -755,8 +756,8 @@ mod tests {
 
         std::env::remove_var(ENV_EXTRACT);
         assert_eq!(
-            extract_command_name().unwrap(),
-            tidepool_extract_cmd::DEFAULT_BIN,
+            extract_command_name().unwrap().as_path(),
+            Path::new(tidepool_extract_cmd::DEFAULT_BIN),
             "an unset override must still fall back to the bare $PATH name"
         );
 

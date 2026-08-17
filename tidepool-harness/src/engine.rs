@@ -847,7 +847,7 @@ pub fn split_imports(block: &str) -> (String, String) {
 /// include search paths (prelude + effects module + optional project lib), the
 /// effect decls, the Ask tag, and the effect-row names.
 pub struct EngineConfig {
-    pub extract_bin: String,
+    pub extract_bin: tidepool_extract_cmd::ResolvedExtractBin,
     pub include: Vec<PathBuf>,
     pub effect_names: Vec<String>,
     /// The full [`EffectDecl`]s this config was built from — the SOURCE of both
@@ -974,7 +974,7 @@ impl EngineConfig {
     #[cfg(test)]
     pub(crate) fn inert(effect_names: Vec<String>) -> Self {
         EngineConfig {
-            extract_bin: "unused".to_string(),
+            extract_bin: tidepool_extract_cmd::ResolvedExtractBin::assume_resolved("unused"),
             include: Vec::new(),
             effect_names,
             decls: Vec::new(),

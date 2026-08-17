@@ -124,7 +124,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let log_path = log_dir.join(format!("log-{ts}.jsonl"));
     let header = LogHeader {
         prelude_hash: "self-harness".to_string(),
-        extract_fingerprint: cfg.extract_bin.clone(),
+        // `ResolvedExtractBin`'s `Display` renders the same path text a
+        // plain `String` did before that type existed.
+        extract_fingerprint: cfg.extract_bin.to_string(),
         harness_version: env!("CARGO_PKG_VERSION").to_string(),
     };
     let writer = LogWriter::create(&log_path, &header)?;

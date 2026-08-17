@@ -35,7 +35,7 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use serde::Deserialize;
-use tidepool_extract_cmd::{ExitVerdict, ExtractCmd};
+use tidepool_extract_cmd::{ExitVerdict, ExtractCmd, ResolvedExtractBin};
 use tidepool_repr::serial::{read_cbor, read_metadata};
 use tidepool_repr::{CoreExpr, DataConTable};
 use tidepool_runtime::cache;
@@ -118,7 +118,7 @@ pub enum CompileError {
 /// Compile `source` (a fully-templated Haskell module) with entry binder
 /// `target`, searching `include` for modules, into `(expr, table, asks)`.
 ///
-/// `extract_bin` is the `tidepool-extract` binary path (normally from
+/// `extract_bin` is the resolved `tidepool-extract` binary (normally from
 /// `TIDEPOOL_EXTRACT`); pass it explicitly so the harness resolves it once at
 /// construction rather than re-reading the env per turn.
 ///
@@ -128,7 +128,7 @@ pub enum CompileError {
 ///
 /// A thin wrapper over [`compile_turns`] (a one-element target slice).
 pub fn compile_turn(
-    extract_bin: &str,
+    extract_bin: &ResolvedExtractBin,
     source: &str,
     target: &str,
     include: &[PathBuf],
@@ -167,7 +167,7 @@ struct RawTargetOutput {
 /// file. This function reads whichever shape the spawn produced, keyed on
 /// the same `targets.len() > 1` test the Haskell side uses.
 pub fn compile_turns(
-    extract_bin: &str,
+    extract_bin: &ResolvedExtractBin,
     source: &str,
     targets: &[&str],
     include: &[PathBuf],
@@ -191,7 +191,7 @@ pub fn compile_turns(
 
     // The caller resolved the binary once at construction, so this site takes
     // it as given (`with_bin`) rather than re-reading the env per turn.
-    let mut cmd = ExtractCmd::with_bin(extract_bin);
+    let mut cmd = ExtractCmd::with_bin(extract_bin.clone());
     cmd.input(&input_path)
         .output_dir(temp_dir.path())
         .targets(targets)
@@ -207,7 +207,7 @@ pub fn compile_turns(
         argv: &argv,
         input_path: &input_path,
         include,
-        bin: Path::new(extract_bin),
+        bin: extract_bin.as_path(),
     });
     let names = artifact_names(targets, multi);
     let name_refs: Vec<&str> = names.iter().map(String::as_str).collect();
@@ -227,6 +227,9 @@ pub fn compile_turns(
         }
     }
 
+    // `ResolvedExtractBin`'s `Display` renders the same path text
+    // `to_string_lossy` did before this type existed, so this error message
+    // is byte-identical to before.
     let run = cmd.run().map_err(|e| CompileError::Spawn {
         bin: extract_bin.to_string(),
         source: e.source,
