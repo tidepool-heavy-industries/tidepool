@@ -636,19 +636,45 @@ impl DomainMap {
                 }
             }
             if let (AdapterKind::VariantMap(pairs), TypeShape::Sum { variants }) = (kind, shape) {
-                if pairs.len() != variants.len() {
-                    errs.push(format!(
-                        "{whose}: {dir} VariantMap covers {} of {} variants — a partial \
-                         map is a non-exhaustive generated `match`",
-                        pairs.len(),
-                        variants.len()
-                    ));
+                // A VariantMap must be a true bijection against the declared wire
+                // variants: every domain name appears once, every wire constructor
+                // is targeted exactly once, and no wire constructor is left out.
+                // Count-only and existence-only checks both pass a map that hits
+                // one wire constructor twice while missing another entirely — the
+                // generator then emits a duplicate `match` arm and no arm at all
+                // for the missed variant, a non-exhaustive match reaching Rust.
+                let mut domain_seen: Vec<&str> = Vec::new();
+                for (domain, _) in *pairs {
+                    if domain_seen.contains(domain) {
+                        errs.push(format!(
+                            "{whose}: {dir} VariantMap names domain variant `{domain}` twice"
+                        ));
+                    }
+                    domain_seen.push(domain);
                 }
+
+                let mut wire_seen: Vec<&str> = Vec::new();
                 for (_, wire) in *pairs {
                     if !variants.iter().any(|v| v.ctor == *wire) {
                         errs.push(format!(
                             "{whose}: {dir} VariantMap names wire variant `{wire}`, \
                              which this type does not declare"
+                        ));
+                    } else if wire_seen.contains(wire) {
+                        errs.push(format!(
+                            "{whose}: {dir} VariantMap maps wire variant `{wire}` twice — \
+                             the generated `match` would have a duplicate arm"
+                        ));
+                    }
+                    wire_seen.push(wire);
+                }
+
+                for v in variants {
+                    if !wire_seen.contains(&v.ctor) {
+                        errs.push(format!(
+                            "{whose}: {dir} VariantMap does not cover wire variant `{}` — \
+                             the generated `match` would be non-exhaustive",
+                            v.ctor
                         ));
                     }
                 }
@@ -691,4 +717,78 @@ pub enum AdapterKind {
     /// Not decoration. The reason is emitted as a comment in the generated
     /// file, so the file itself says which conversions carry a decision.
     HandWritten(&'static str),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sum_shape(ctors: &[&'static str]) -> TypeShape {
+        TypeShape::Sum {
+            variants: ctors
+                .iter()
+                .map(|c| SumVariant {
+                    ctor: c,
+                    fields: vec![],
+                    doc: &[],
+                })
+                .collect(),
+        }
+    }
+
+    fn variant_map(pairs: &'static [(&'static str, &'static str)]) -> DomainMap {
+        DomainMap {
+            domain_path: "some_crate::Domain",
+            into_wire: None,
+            from_wire: Some(AdapterKind::VariantMap(pairs)),
+        }
+    }
+
+    #[test]
+    fn variant_map_bijection_is_clean() {
+        let shape = sum_shape(&["X", "Y"]);
+        let map = variant_map(&[("A", "X"), ("B", "Y")]);
+        assert!(map.validate("Test", &shape).is_empty());
+    }
+
+    #[test]
+    fn variant_map_missing_target_is_reported() {
+        let shape = sum_shape(&["X", "Y"]);
+        let map = variant_map(&[("A", "X")]);
+        let errs = map.validate("Test", &shape);
+        assert!(
+            errs.iter()
+                .any(|e| e.contains("does not cover wire variant `Y`")),
+            "{errs:?}"
+        );
+    }
+
+    #[test]
+    fn variant_map_duplicate_target_is_reported() {
+        let shape = sum_shape(&["X", "Y"]);
+        let map = variant_map(&[("A", "X"), ("B", "X")]);
+        let errs = map.validate("Test", &shape);
+        assert!(
+            errs.iter()
+                .any(|e| e.contains("maps wire variant `X` twice")),
+            "{errs:?}"
+        );
+        assert!(
+            errs.iter()
+                .any(|e| e.contains("does not cover wire variant `Y`")),
+            "{errs:?}"
+        );
+    }
+
+    #[test]
+    fn variant_map_duplicate_domain_name_is_reported() {
+        let shape = sum_shape(&["X", "Y"]);
+        let map = variant_map(&[("A", "X"), ("A", "Y")]);
+        let errs = map.validate("Test", &shape);
+        assert!(
+            errs.iter()
+                .any(|e| e.contains("names domain variant `A` twice")),
+            "{errs:?}"
+        );
+    }
 }
