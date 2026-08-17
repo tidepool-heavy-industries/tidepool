@@ -218,8 +218,10 @@ impl SessionLib {
     /// The generation `scope`'s decl plane currently stands at — the
     /// [`DeclTurn::parent`] a new turn in `scope` chains from. `Generation(0)`
     /// means `scope` has never had a turn pushed (nor inherited one): the same
-    /// meaning as an empty session at ROOT. See the `tips` field docs for the
-    /// first-use fallback.
+    /// meaning as an empty session at ROOT. There is NO fallback to the log's
+    /// global tip — see the `tips` field docs for why that is load-bearing, and
+    /// why a scope minted outside `PersistentSession::mint_scope` therefore
+    /// starts empty rather than inheriting anything.
     #[must_use]
     pub fn scope_tip(&self, scope: ScopeId) -> Generation {
         self.tips.get(&scope).copied().unwrap_or(Generation(0))
