@@ -107,7 +107,21 @@ phase 2+ emits them.
    positional-comment protocol.
 3. **Subagent row last** (largest surface: async trio, cycle table, tool
    loop), plus generated harness classification and the `Translate.hs`
-   metadata module. Registry count for a new verb: one.
+   metadata module. Registry count for a new verb: one. PRECONDITION
+   (found by the Worktree lane, §11.12 of the scaffold doc): `SpawnError`
+   embeds the wire `WorktreeError` as a FIELD in two variants — the
+   fragment-crossing stable-home placement must be settled BEFORE this
+   row's goldens are captured, not after.
+
+   **Placement is a schema attribute with DERIVED answers** (locked,
+   2026-08-18, from the Worktree lane's §11.12): per-session `type_defs`
+   vs stable committed home is one decision currently spelled three ways
+   (the Fs stable-errors flag, `Records.Bridged`, helper relocation). The
+   schema derives it from two computable rules — a declaration reachable
+   as a field of anything that crosses a fragment boundary needs a stable
+   home; a definition referenced by another effect's emitted text must
+   stay in the generated module — and a conflict between the rules fails
+   GENERATION, the same move as the handling-class requirement.
 4. **Then** (separate decisions, better-informed post-migration): failure
    envelopes at boundaries; `tidepool-testing` split by dependency
    direction; resident-session host consolidation (deferred until S1/C-lane
