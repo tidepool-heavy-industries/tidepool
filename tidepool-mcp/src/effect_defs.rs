@@ -1891,6 +1891,8 @@ macro_rules! event_effect_def {
                   doc "reconciliation against git failed" },
                 { ctor EventUnknownMailbox, fields { unknownMailbox: "Int" as i64 },
                   doc "no such live mailbox — never minted, or already dropped" },
+                { ctor EventBadTimeout, fields { badTimeoutMs: "Int" as i64 },
+                  doc "a non-negative timeout too large to be a deadline on this platform (unreachable on 64-bit); a NEGATIVE timeout is the no-deadline sentinel and is never an error" },
             ],
             verbs [
                 { ctor RepoEventSubscribe, method repo_event_subscribe,
@@ -1905,6 +1907,14 @@ macro_rules! event_effect_def {
                 // error — the same typed distinction `RepoEventDrain` already
                 // makes between "nothing yet" and a real failure, just with a
                 // deadline attached. Poison/overflow semantics are unchanged.
+                //
+                // NEGATIVE is the no-deadline SENTINEL, not a bug: it is
+                // `nextEvent`'s own calling convention (`awaitFirst` passes
+                // `-1`), so it is never rejected. A NON-NEGATIVE timeout too
+                // large to add to `now` IS rejected (`EventBadTimeout`)
+                // rather than degraded to no-deadline, which would turn a
+                // bounded wait unbounded undetectably — though no `Int` can
+                // actually reach that on a 64-bit `Instant` (see the handler).
                 { ctor RepoEventAwait, method repo_event_await,
                   args { subscription: "SubscriptionId" as tidepool_bridge_effects::EvSubscriptionId, timeoutMs: "Int" as i64 },
                   ret "[RepositoryEvent]", errors EventError },

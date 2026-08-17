@@ -837,12 +837,34 @@ impl RepoEventHandler {
         timeout_ms: i64,
     ) -> Result<Vec<EvRepositoryEvent>, EventError> {
         let deadline = if timeout_ms < 0 {
+            // The no-deadline SENTINEL, not a bug to guard against: this is
+            // `nextEvent`'s own calling convention (`awaitFirst` passes `-1`),
+            // and it is the documented contract. Rejecting it would break the
+            // one blocking coordination primitive.
             None
         } else {
-            // `checked_add` rather than a bare `+`: an absurdly large
-            // timeout must not PANIC the handler — falling back to "no
-            // deadline" is the same failure mode as "block until a match".
-            Instant::now().checked_add(Duration::from_millis(timeout_ms as u64))
+            // `checked_add` rather than a bare `+`: an absurdly large timeout
+            // must not PANIC the handler. On failure this REFUSES rather than
+            // falling back to `None`, because those are not the same failure
+            // mode: `None` is an unbounded wait, so the fallback would turn a
+            // bounded wait unbounded — and from outside, "timeout elapsed"
+            // and "still waiting" look identical, so the caller could never
+            // detect it.
+            //
+            // UNREACHABLE on 64-bit platforms, and deliberately kept anyway.
+            // `Instant` is a `timespec` whose `tv_sec` is an `i64`, and the
+            // largest `timeout_ms` an `i64` can carry is ~9.2e15 ms ≈ 9.2e12
+            // seconds — twelve orders of magnitude short of overflowing it.
+            // So there is no input to this verb that reaches the refusal here,
+            // which is also why no test drives it: the arm is untestable
+            // through the public API by construction, not untested by
+            // omission. It exists so that a platform with a narrower `Instant`
+            // fails typed instead of silently downgrading.
+            Some(
+                Instant::now()
+                    .checked_add(Duration::from_millis(timeout_ms as u64))
+                    .ok_or(EventError::EventBadTimeout(timeout_ms))?,
+            )
         };
         loop {
             self.reconcile()?;
@@ -1401,6 +1423,28 @@ mod tests {
             mailbox_payloads(&batch),
             vec![serde_json::json!("a2"), serde_json::json!("b1")]
         );
+    }
+
+    /// The pin that matters here: a NEGATIVE
+    /// timeout is the documented no-deadline sentinel and `nextEvent`'s own
+    /// calling convention (`awaitFirst` passes `-1`). It must never join the
+    /// rejection above — doing so would break the one blocking coordination
+    /// primitive. Driven with a match already queued so it returns at once
+    /// instead of blocking this test forever, which is exactly the behaviour
+    /// under test: wait with no deadline, return on the first match.
+    #[test]
+    fn a_negative_timeout_is_the_no_deadline_sentinel_not_an_error() {
+        let (mut h, _calls) = handler_with(vec![], Duration::ZERO);
+        let mid = h.mailbox_new().unwrap();
+        let sub = h
+            .repo_event_subscribe(vec![EvWatch::WatchMailbox(mid)])
+            .unwrap();
+        h.mailbox_send(mid, "k".into(), payload(serde_json::json!("queued")))
+            .unwrap();
+        let batch = h
+            .repo_event_await(sub, -1)
+            .expect("a negative timeout is accepted, never a validation error");
+        assert_eq!(mailbox_payloads(&batch), vec![serde_json::json!("queued")]);
     }
 
     #[test]
