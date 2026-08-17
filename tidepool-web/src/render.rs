@@ -1,23 +1,30 @@
-//! `FormShape` → maud markup for the operator panel.
+//! `FormShape` → maud markup for a NODE's operator panel — stacking every
+//! ask currently pending for that node.
 //!
-//! [`View`] and [`panel`] are consumed by [`crate::server`]. `panel` always
-//! yields the single `id="panel"` element
-//! the SSE stream patches in place — the page shell embeds it once, and every
-//! SSE frame replaces it wholesale. The `data-rev` attribute it stamps is
-//! part of that wire contract too — [`crate::shell`]'s client JS compares it
-//! against the currently-mounted `#panel` to decide whether a focus-preserving
-//! skip applies (see `shell.rs`'s `applyPatch`).
+//! [`Ask`] and [`node_panel`] are consumed by [`crate::server`]. `node_panel`
+//! always yields a single `id="panel-<node_id>"` element — the unit the SSE
+//! stream patches in place, and the page shell embeds one per registered
+//! node. The `data-rev` attribute it stamps on that root is part of the wire
+//! contract too — [`crate::shell`]'s client JS compares it against the
+//! currently-mounted `#panel-<node_id>`'s to decide whether a
+//! focus-preserving skip applies (see `shell.rs`'s `applyPatch`). Each
+//! STACKED ask within also carries its OWN `data-rev` — stable for the ask's
+//! whole pending lifetime (its interaction id never changes), so the
+//! identity of an untouched ask survives a sibling ask's arrival/resolution
+//! or a note/turn-history update even though the whole panel replaces
+//! wholesale on any of those.
 //!
 //! Every input carries a dotted `data-bind` path and a scalar `data-kind`.
 //! The client collects those controls into a flat object and POSTs it to
-//! `/submit`; [`crate::server::collect_form_json`] validates and reassembles
-//! the object using the same [`FormShape`] rendered here. Leaves bind at
-//! paths built by `tidepool_harness::selfharness::operator::child_path`,
-//! e.g. a nested `destination.host` input. `shell::JS`'s collector
-//! treats a dotted path as an ordinary (if unusual) object key string; it
-//! doesn't need to understand nesting, because `server::collect_form_json`
-//! reassembles the resulting flat `{"destination.host": …}` map back into a
-//! plain JSON answer (`server.rs::collect_form_json`) on the
+//! `/node/<node>/submit/<interaction>` (baked directly into the rendered
+//! `@post('...')` literal — no client-side URL assembly);
+//! [`crate::server::collect_form_json`] validates and reassembles the object
+//! using the same [`FormShape`] rendered here. Leaves bind at paths built by
+//! `tidepool_harness::selfharness::operator::child_path`, e.g. a nested
+//! `destination.host` input. `shell::JS`'s collector treats a dotted path as
+//! an ordinary (if unusual) object key string; it doesn't need to understand
+//! nesting, because `server::collect_form_json` reassembles the resulting
+//! flat `{"destination.host": …}` map back into a plain JSON answer on the
 //! server side, guided by the same `FormShape` the form was rendered from.
 //!
 //! A payload-bearing sum renders the discriminating choice and every
@@ -35,46 +42,64 @@ use tidepool_harness::selfharness::operator::{
     child_path, humanize_key, FieldShape, FormShape, VariantShape, ROOT_BIND_PATH,
 };
 
-/// What the operator panel is currently showing.
-pub enum View<'a> {
-    /// Nothing pending — the driver is between operator interactions.
-    Idle,
-    /// A pending `askUser` form: render the fields + a Submit button.
+/// One ask currently pending for a node — either an `askUser` form or the
+/// between-loops continue gate.
+pub enum Ask<'a> {
     Form(&'a FormShape),
-    /// The between-loops gate: render a single Continue button.
     Continue,
 }
 
-/// The `id="panel"` fragment — the one element patched over SSE. Rendered both
-/// into the initial page ([`crate::shell::page`]) and into every SSE frame.
-/// `rev` is the server's monotonically-bumped revision counter
-/// ([`crate::server::AppState`]), stamped as `data-rev` so the client can
-/// tell a genuinely NEW pending interaction (always replace `#panel`) apart
-/// from a same-interaction re-render (skip while the operator has focus
-/// inside it).
+/// The `id="panel-<node_id>"` fragment for one node — the one element the
+/// SSE stream patches in place for that node. Rendered both into the initial
+/// page ([`crate::shell::page`]) and into every SSE frame for `node_id`.
+///
+/// `asks` is every currently pending interaction for `node_id`, in publish
+/// order — rendered STACKED (never just the newest; an operator gate never
+/// hides a question). An empty `asks` renders the idle placeholder. `rev` is
+/// the node's aggregate revision ([`crate::server::AppState`]), stamped as
+/// `data-rev` on the panel root so the client can tell a genuinely NEW
+/// interaction (always replace `#panel-<node_id>`) apart from a
+/// same-interaction-set re-render (skip while the operator has focus inside
+/// it).
 ///
 /// `notes` is the current loop's accumulated `note` feed (empty renders
-/// nothing), shown ABOVE the form/idle/continue view — narration explaining
-/// what is about to be asked and why belongs before the thing it explains.
-/// `turn_history` is every compiled answerer round's Haskell in post order
-/// (oldest first, empty renders nothing), shown BELOW the view as the
-/// scrollable turn-history pane.
-pub fn panel(view: &View, notes: &[String], turn_history: &[String], rev: u64) -> Markup {
+/// nothing), shown ABOVE the asks — narration explaining what is about to be
+/// asked and why belongs before the thing it explains. `turn_history` is
+/// every compiled answerer round's Haskell in post order (oldest first,
+/// empty renders nothing), shown BELOW the asks as the scrollable
+/// turn-history pane.
+pub fn node_panel(
+    node_id: &str,
+    asks: &[(u64, Ask)],
+    notes: &[String],
+    turn_history: &[String],
+    rev: u64,
+) -> Markup {
     html! {
-        div id="panel" data-rev=(rev) {
+        div id=(panel_id(node_id)) data-rev=(rev) {
             @if !notes.is_empty() {
                 (notes_feed(notes))
             }
-            @match view {
-                View::Idle => (idle()),
-                View::Form(shape) => (form(shape)),
-                View::Continue => (continue_prompt()),
+            @if asks.is_empty() {
+                (idle())
+            } @else {
+                div class="asks" data-node="asks" {
+                    @for (interaction, ask) in asks {
+                        (ask_view(node_id, *interaction, ask))
+                    }
+                }
             }
             @if !turn_history.is_empty() {
                 (turn_history_pane(turn_history))
             }
         }
     }
+}
+
+/// The DOM id a node's panel root carries — `id="panel-<node_id>"`.
+#[must_use]
+pub fn panel_id(node_id: &str) -> String {
+    format!("panel-{node_id}")
 }
 
 /// The accumulated `note` feed: one paragraph per posted note, in post
@@ -91,10 +116,10 @@ fn notes_feed(notes: &[String]) -> Markup {
     }
 }
 
-/// The turn-history pane, below the form/notes: one nested `<details>` per
+/// The turn-history pane, below the asks/notes: one nested `<details>` per
 /// compiled turn, NEWEST FIRST with only the newest open — the operator
 /// scrolls back through past turns inside a bounded-height container
-/// (`.turn-history` CSS), so an open pane never crowds the form. Entries are
+/// (`.turn-history` CSS), so an open pane never crowds the asks. Entries are
 /// numbered in post order (turn 1 = oldest still retained; the server caps
 /// the history, so numbering restarts only across process restarts). Plain
 /// `<pre>`, no syntax highlighting; every source string is interpolated as
@@ -139,11 +164,22 @@ fn idle() -> Markup {
     }
 }
 
-/// The pending form. The browser collector posts its leaf controls as a flat
-/// dotted-path object; the server reassembles it using this same shape.
-fn form(shape: &FormShape) -> Markup {
+/// One stacked ask: a form or the continue gate, dispatched by kind.
+fn ask_view(node_id: &str, interaction: u64, ask: &Ask) -> Markup {
+    match ask {
+        Ask::Form(shape) => ask_form(node_id, interaction, shape),
+        Ask::Continue => ask_continue(node_id, interaction),
+    }
+}
+
+/// One pending form, addressed by `node_id`/`interaction` in its own
+/// `@post(...)` target — the client posts its collected flat controls
+/// straight to the exact ask that produced them, no separate nonce field
+/// needed in the body.
+fn ask_form(node_id: &str, interaction: u64, shape: &FormShape) -> Markup {
     html! {
-        form class="form" data-on-submit="@post('/submit')" {
+        form id=(ask_id(node_id, interaction)) data-rev=(interaction) class="form"
+             data-on-submit=(post_url(node_id, "submit", interaction)) {
             (generic_shape(ROOT_BIND_PATH, shape))
             div class="actions" {
                 button type="submit" class="btn btn-primary" { "Submit" }
@@ -186,16 +222,30 @@ pub fn continue_shape() -> FormShape {
     }
 }
 
-/// The between-loops continue gate: the [`continue_shape`] sum rendered by
-/// the generic machinery, POSTing to `/continue` instead of `/submit`.
-fn continue_prompt() -> Markup {
+/// One pending between-loops continue gate: the [`continue_shape`] sum
+/// rendered by the generic machinery, POSTing to
+/// `/node/<node_id>/continue/<interaction>`.
+fn ask_continue(node_id: &str, interaction: u64) -> Markup {
     html! {
-        form class="continue" data-on-submit="@post('/continue')" {
+        form id=(ask_id(node_id, interaction)) data-rev=(interaction) class="continue"
+             data-on-submit=(post_url(node_id, "continue", interaction)) {
             p class="eyebrow" { "Loop complete — awaiting operator" }
             (generic_shape(ROOT_BIND_PATH, &continue_shape()))
             button type="submit" class="btn btn-primary" { "Continue" }
         }
     }
+}
+
+/// The DOM id one stacked ask carries — `id="ask-<node_id>-<interaction>"`.
+fn ask_id(node_id: &str, interaction: u64) -> String {
+    format!("ask-{node_id}-{interaction}")
+}
+
+/// The literal `@post('...')` target `shell::JS`'s vendored client parses out
+/// of a `data-on-submit` attribute — node- and interaction-scoped, baked in
+/// at render time so no client-side URL assembly is needed.
+fn post_url(node_id: &str, verb: &str, interaction: u64) -> String {
+    format!("@post('/node/{node_id}/{verb}/{interaction}')")
 }
 
 // -------------------------------------------------------------------------
@@ -349,43 +399,70 @@ mod tests {
     use super::*;
 
     #[test]
-    fn panel_continue_renders_button() {
-        let html = panel(&View::Continue, &[], &[], 0).into_string();
-        assert!(html.contains("@post('/continue')"));
+    fn node_panel_continue_renders_button() {
+        let asks = vec![(0u64, Ask::Continue)];
+        let html = node_panel("n1", &asks, &[], &[], 0).into_string();
+        assert!(html.contains("@post('/node/n1/continue/0')"));
     }
 
     #[test]
-    fn panel_idle_is_quiet() {
-        let html = panel(&View::Idle, &[], &[], 0).into_string();
-        assert!(html.starts_with("<div id=\"panel\""));
+    fn node_panel_idle_is_quiet() {
+        let html = node_panel("n1", &[], &[], &[], 0).into_string();
+        assert!(html.starts_with("<div id=\"panel-n1\""));
         assert!(!html.contains("@post"));
     }
 
-    /// F10: `panel()` stamps the caller's revision as `data-rev` on the
-    /// `#panel` root, and a different revision produces a different
-    /// attribute value — the signal `shell.rs`'s client JS keys its
-    /// skip-on-focus rule off.
+    /// F10 (per-node): `node_panel()` stamps the caller's revision as
+    /// `data-rev` on the panel root, and a different revision produces a
+    /// different attribute value.
     #[test]
-    fn panel_stamps_data_rev_from_the_argument() {
-        let a = panel(&View::Idle, &[], &[], 7).into_string();
-        assert!(a.contains("id=\"panel\" data-rev=\"7\""), "{a}");
+    fn node_panel_stamps_data_rev_from_the_argument() {
+        let a = node_panel("n1", &[], &[], &[], 7).into_string();
+        assert!(a.contains("id=\"panel-n1\" data-rev=\"7\""), "{a}");
 
-        let b = panel(&View::Idle, &[], &[], 8).into_string();
-        assert!(b.contains("id=\"panel\" data-rev=\"8\""), "{b}");
+        let b = node_panel("n1", &[], &[], &[], 8).into_string();
+        assert!(b.contains("id=\"panel-n1\" data-rev=\"8\""), "{b}");
         assert_ne!(a, b);
     }
 
-    /// Notes render ABOVE the form, in post order, escaped as ordinary text.
+    /// The panel id is node-scoped, distinguishing tabs.
     #[test]
-    fn panel_renders_notes_above_the_form() {
+    fn node_panel_id_is_scoped_per_node() {
+        let a = node_panel("alpha", &[], &[], &[], 0).into_string();
+        let b = node_panel("beta", &[], &[], &[], 0).into_string();
+        assert!(a.starts_with("<div id=\"panel-alpha\""));
+        assert!(b.starts_with("<div id=\"panel-beta\""));
+    }
+
+    /// The core stacking behavior: two pending asks on one node BOTH render,
+    /// each with its own stable id/data-rev keyed on its interaction id —
+    /// an operator gate never hides a question by only showing the newest.
+    #[test]
+    fn node_panel_stacks_every_pending_ask_with_its_own_rev() {
+        let shape = FormShape::String;
+        let asks = vec![(3u64, Ask::Form(&shape)), (7u64, Ask::Continue)];
+        let html = node_panel("n1", &asks, &[], &[], 42).into_string();
+
+        assert!(html.contains("id=\"ask-n1-3\" data-rev=\"3\""), "{html}");
+        assert!(html.contains("id=\"ask-n1-7\" data-rev=\"7\""), "{html}");
+        assert!(html.contains("@post('/node/n1/submit/3')"), "{html}");
+        assert!(html.contains("@post('/node/n1/continue/7')"), "{html}");
+        // The panel root's own aggregate revision is distinct from either
+        // ask's individual one.
+        assert!(html.contains("id=\"panel-n1\" data-rev=\"42\""), "{html}");
+    }
+
+    /// Notes render ABOVE the asks, in post order, escaped as ordinary text.
+    #[test]
+    fn node_panel_renders_notes_above_the_asks() {
         let notes = vec!["first note".to_string(), "<b>second</b> note".to_string()];
-        let html = panel(&View::Idle, &notes, &[], 0).into_string();
+        let html = node_panel("n1", &[], &notes, &[], 0).into_string();
         let notes_pos = html.find("first note").expect("first note rendered");
         let second_pos = html.find("second").expect("second note rendered");
         let idle_pos = html.find("Standby").expect("idle view still rendered");
         assert!(
             notes_pos < idle_pos && second_pos < idle_pos,
-            "notes must render above the form/idle view:\n{html}"
+            "notes must render above the asks/idle view:\n{html}"
         );
         assert!(
             html.contains("&lt;b&gt;second&lt;/b&gt; note"),
@@ -395,18 +472,18 @@ mod tests {
 
     /// An empty note feed adds no notes markup at all.
     #[test]
-    fn panel_with_no_notes_renders_no_notes_node() {
-        let html = panel(&View::Idle, &[], &[], 0).into_string();
+    fn node_panel_with_no_notes_renders_no_notes_node() {
+        let html = node_panel("n1", &[], &[], &[], 0).into_string();
         assert!(!html.contains("data-node=\"notes\""), "{html}");
     }
 
-    /// The turn-history pane renders BELOW the form/idle view with every
+    /// The turn-history pane renders BELOW the asks/idle view with every
     /// source escaped as an ordinary text node (never `PreEscaped`) — a
     /// source containing `<script>` must not survive as live markup.
     #[test]
-    fn panel_renders_turn_history_below_view_and_escaped() {
+    fn node_panel_renders_turn_history_below_view_and_escaped() {
         let history = vec!["resume (Approve :: Decision) -- <script>alert(1)</script>".to_string()];
-        let html = panel(&View::Idle, &[], &history, 0).into_string();
+        let html = node_panel("n1", &[], &[], &history, 0).into_string();
         assert!(html.contains("<details"), "{html}");
         assert!(html.contains("Haskell turns (1)"), "{html}");
         assert!(!html.contains("<script>alert"), "{html}");
@@ -415,20 +492,20 @@ mod tests {
         let details_pos = html.find("<details").expect("details rendered");
         assert!(
             idle_pos < details_pos,
-            "the turn-history pane must render BELOW the form/idle view:\n{html}"
+            "the turn-history pane must render BELOW the asks/idle view:\n{html}"
         );
     }
 
     /// Every retained turn renders as its own entry, newest first, with only
     /// the NEWEST entry open — the operator scrolls back through the rest.
     #[test]
-    fn panel_turn_history_lists_all_turns_newest_first_newest_open() {
+    fn node_panel_turn_history_lists_all_turns_newest_first_newest_open() {
         let history = vec![
             "pure (toJSON 1) -- oldest".to_string(),
             "pure (toJSON 2) -- middle".to_string(),
             "pure (toJSON 3) -- newest".to_string(),
         ];
-        let html = panel(&View::Idle, &[], &history, 0).into_string();
+        let html = node_panel("n1", &[], &[], &history, 0).into_string();
         assert!(html.contains("Haskell turns (3)"), "{html}");
         let p1 = html.find("turn 1 —").expect("oldest entry rendered");
         let p3 = html.find("turn 3 —").expect("newest entry rendered");
@@ -441,8 +518,8 @@ mod tests {
 
     /// An empty history adds no turn-source markup at all.
     #[test]
-    fn panel_with_no_turn_history_renders_no_details() {
-        let html = panel(&View::Idle, &[], &[], 0).into_string();
+    fn node_panel_with_no_turn_history_renders_no_details() {
+        let html = node_panel("n1", &[], &[], &[], 0).into_string();
         assert!(!html.contains("<details"), "{html}");
     }
 

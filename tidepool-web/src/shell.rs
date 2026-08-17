@@ -2,32 +2,46 @@
 //! Style) + a small vendored vanilla-JS Datastar client. No CDN, no external
 //! font, no build step — everything ships in one served page.
 //!
-//! The client ([`JS`]) speaks exactly the wire the renderer emits: it opens
-//! the `/sse` stream, applies `datastar-patch-elements` frames by replacing
-//! the same-`id` element in place, and wires `data-on-submit`/
-//! `data-on-click="@post('/x')"` handlers. A `data-on-submit` form collects
-//! every `[data-bind]` input into a FLAT `{ <key>: <scalar> }` object
-//! (coerced by `data-kind`: int → number, bool → boolean, enum/text →
+//! The page now renders a TAB STRIP across every registered node, each with
+//! its own panel. The client ([`JS`]) speaks exactly the wire the renderer
+//! emits: it opens the `/sse` stream, applies `datastar-patch-elements`
+//! frames by replacing the same-`id` element in place (now one
+//! `id="panel-<node_id>"` per node instead of a single global `#panel`), and
+//! wires `data-on-submit="@post('/x')"` handlers — the exact node/interaction
+//! is baked into that literal URL at render time
+//! ([`crate::render::node_panel`]), so the client-side collector and POST
+//! logic need no node/interaction awareness at all. A `data-on-submit` form
+//! collects every `[data-bind]` input into a FLAT `{ <key>: <scalar> }`
+//! object (coerced by `data-kind`: int → number, bool → boolean, enum/text →
 //! string) and POSTs it.
 //!
-//! ## Focus-preserving skip is gated on `data-rev` (F10)
+//! ## Focus-preserving skip is gated on `data-rev` (F10, now per-node)
 //! A focused/typed-in field is preserved across an SSE tick ONLY when the
-//! incoming fragment's `data-rev` (stamped by [`crate::render::panel`])
-//! matches the currently-mounted element's — i.e. the server re-rendered the
-//! SAME pending interaction (e.g. a periodic keep-alive tick). A DIFFERENT
-//! `data-rev` always replaces the element regardless of focus: it means the
-//! pending interaction itself changed (a submit resolved a form and the next
-//! interaction — `Idle`, another form, the continue gate — was published),
-//! and skipping that replace on stale-focus grounds is exactly the bug this
-//! gate fixes (a submit's resulting SSE tick used to get dropped while the
-//! panel still had focus, leaving the operator staring at an already-resolved
-//! form).
+//! incoming fragment's `data-rev` (stamped by [`crate::render::node_panel`]
+//! on that node's panel root) matches the currently-mounted element's — i.e.
+//! the server re-rendered the SAME node's pending state (e.g. a periodic
+//! keep-alive tick, or an unrelated sibling node's tick that never touches
+//! this one). A DIFFERENT `data-rev` always replaces the element regardless
+//! of focus: it means THIS node's pending state itself changed (an ask was
+//! published or resolved, or notes/turn-history updated), and skipping that
+//! replace on stale-focus grounds is exactly the bug this gate fixes.
+//!
+//! ## Tab switching is a separate, inert concern
+//! Every node's panel is always present in the DOM (wrapped in a STABLE
+//! `.tab-slot` container that the SSE patch logic never touches — only the
+//! inner `#panel-<node_id>` is replaced by a patch); [`wireTabs`]-equivalent
+//! JS below toggles the `.active` class on `.tab-slot`/`.tab` elements on
+//! click. Because the toggle lives on the stable wrapper rather than the
+//! patched panel itself, an SSE patch to a hidden node's panel can never
+//! resurrect it into view.
 
 use maud::{html, Markup, PreEscaped, DOCTYPE};
 
 /// The full page: `<head>` with inline [`CSS`] + [`JS`], `<body>` with a
-/// masthead and the passed `panel` markup (already `id="panel"`).
-pub fn page(panel: Markup) -> Markup {
+/// masthead, a tab strip across every `(node_id, panel)` pair, and each
+/// node's panel wrapped in its own stable `.tab-slot` (first node active by
+/// default).
+pub fn page(panels: Vec<(String, Markup)>) -> Markup {
     html! {
         (DOCTYPE)
         html lang="en" {
@@ -47,7 +61,23 @@ pub fn page(panel: Markup) -> Markup {
                         }
                         span id="conn" class="conn ok" { "live" }
                     }
-                    (panel)
+                    @if panels.len() > 1 {
+                        div class="tabs" data-node="tabs" {
+                            @for (i, (node_id, _)) in panels.iter().enumerate() {
+                                button type="button"
+                                    class=(if i == 0 { "tab active" } else { "tab" })
+                                    data-tab=(node_id) { (node_id) }
+                            }
+                        }
+                    }
+                    div class="tab-panels" data-node="tab-panels" {
+                        @for (i, (node_id, panel)) in panels.iter().enumerate() {
+                            div class=(if i == 0 { "tab-slot active" } else { "tab-slot" })
+                                data-node-id=(node_id) {
+                                (panel)
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -79,6 +109,23 @@ pub const CSS: &str = r#"
 
 * { box-sizing: border-box; }
 
+/* -------------------------------------------------------------------- tabs */
+.tabs {
+  display: flex; flex-wrap: wrap; gap: calc(1 * var(--unit));
+  border-bottom: var(--hair);
+  margin-bottom: calc(4 * var(--unit));
+}
+.tab {
+  font: inherit; font-size: var(--text-micro); font-weight: 700; text-transform: uppercase;
+  letter-spacing: var(--tracking-wide);
+  padding: calc(2 * var(--unit)) calc(3 * var(--unit));
+  border: var(--hair-faint); border-bottom: none; border-radius: 0;
+  background: transparent; color: var(--muted); cursor: pointer;
+}
+.tab.active { color: var(--ink); border-color: var(--line); background: var(--paper); }
+.tab-slot { display: none; }
+.tab-slot.active { display: block; }
+
 /* Last turn's Haskell — a readable code sheet: preserved line structure,
    soft-wrapped long strings (prompts/notes inside the code would otherwise
    run far off-canvas), hairline frame in the page's print idiom. */
@@ -93,6 +140,8 @@ pub const CSS: &str = r#"
   font-size: var(--text-body);
   resize: vertical;
 }
+
+.asks { display: flex; flex-direction: column; gap: calc(6 * var(--unit)); }
 
 .turn-source { margin-top: calc(var(--unit) * 2); }
 .turn-source summary {
@@ -291,16 +340,18 @@ input[type="radio"]:focus-visible, input[type="checkbox"]:focus-visible,
 "#;
 
 /// The vendored Datastar client: opens `/sse`, applies patch-elements frames
-/// by same-`id` replacement, and collects a `data-on-submit` form into a FLAT,
-/// `data-kind`-coerced submission for the two-verb (`/submit`, `/continue`)
-/// surface.
+/// by same-`id` replacement (one `panel-<node_id>` per registered node),
+/// collects a `data-on-submit` form into a FLAT, `data-kind`-coerced
+/// submission and POSTs it to the node/interaction-scoped URL already baked
+/// into that form's `@post(...)` literal, and wires tab-strip clicks to
+/// toggle which node's stable `.tab-slot` is visible.
 pub const JS: &str = r#"
 (function () {
   // Apply one datastar-patch-elements payload: replace each same-id element in
   // place. A focused/typed-in field is preserved (its element is left this
   // tick) ONLY when the incoming data-rev matches the currently-mounted
-  // element's — the SAME pending interaction re-rendered. A DIFFERENT
-  // data-rev (a new pending interaction was published) always replaces the
+  // element's — the SAME pending state re-rendered. A DIFFERENT
+  // data-rev (this node's pending state changed) always replaces the
   // element regardless of focus, so a submit's resulting tick is never
   // dropped just because the panel still has focus.
   function applyPatch(html) {
@@ -331,6 +382,25 @@ pub const JS: &str = r#"
       form.addEventListener('submit', (e) => {
         e.preventDefault();
         post(parsePost(form.getAttribute('data-on-submit')), form, collect(form), form);
+      });
+    });
+  }
+
+  // Wire the tab strip: clicking a tab toggles which node's STABLE
+  // .tab-slot wrapper is visible. The wrapper is never itself replaced by
+  // an SSE patch (only the inner #panel-<node> is), so this toggle survives
+  // any number of patches to a hidden node's panel.
+  function wireTabs() {
+    document.querySelectorAll('[data-tab]').forEach((btn) => {
+      if (btn.__wired) return; btn.__wired = true;
+      btn.addEventListener('click', () => {
+        const id = btn.getAttribute('data-tab');
+        document.querySelectorAll('.tab-slot').forEach((slot) => {
+          slot.classList.toggle('active', slot.getAttribute('data-node-id') === id);
+        });
+        document.querySelectorAll('[data-tab]').forEach((b) => {
+          b.classList.toggle('active', b === btn);
+        });
       });
     });
   }
@@ -416,7 +486,7 @@ pub const JS: &str = r#"
     es.onerror = () => setConn(false);
   }
 
-  window.addEventListener('DOMContentLoaded', () => { wire(document); connect(); });
+  window.addEventListener('DOMContentLoaded', () => { wire(document); wireTabs(); connect(); });
 })();
 "#;
 
@@ -426,15 +496,51 @@ mod tests {
     use maud::html;
 
     #[test]
-    fn page_embeds_panel_and_inline_assets() {
-        let doc = page(html! { div id="panel" { "hi" } }).into_string();
-        assert!(doc.contains("<div id=\"panel\">hi</div>"));
+    fn page_embeds_panels_and_inline_assets() {
+        let doc = page(vec![(
+            "n1".to_string(),
+            html! { div id="panel-n1" { "hi" } },
+        )])
+        .into_string();
+        assert!(doc.contains("<div id=\"panel-n1\">hi</div>"));
         // inline, no external host
         assert!(doc.contains("<style>"));
         assert!(doc.contains("<script>"));
         assert!(!doc.contains("http://"));
         assert!(!doc.contains("https://"));
         assert!(!doc.contains("cdn"));
+    }
+
+    /// A single registered node renders no tab strip — the one-tab case
+    /// existing single-node callers get by default stays visually quiet.
+    #[test]
+    fn single_node_renders_no_tab_strip() {
+        let doc = page(vec![("only".to_string(), html! { div id="panel-only" {} })]).into_string();
+        assert!(!doc.contains("data-node=\"tabs\""), "{doc}");
+        assert!(doc.contains("data-node-id=\"only\""), "{doc}");
+    }
+
+    /// Multiple registered nodes render a tab strip, one button per node,
+    /// each node's panel wrapped in its own stable `.tab-slot`, first active.
+    #[test]
+    fn multiple_nodes_render_a_tab_strip_and_stable_slots() {
+        let doc = page(vec![
+            ("alpha".to_string(), html! { div id="panel-alpha" {} }),
+            ("beta".to_string(), html! { div id="panel-beta" {} }),
+        ])
+        .into_string();
+        assert!(doc.contains("data-tab=\"alpha\""), "{doc}");
+        assert!(doc.contains("data-tab=\"beta\""), "{doc}");
+        assert!(doc.contains("data-node-id=\"alpha\""), "{doc}");
+        assert!(doc.contains("data-node-id=\"beta\""), "{doc}");
+        assert!(
+            doc.contains("class=\"tab-slot active\" data-node-id=\"alpha\""),
+            "{doc}"
+        );
+        assert!(
+            doc.contains("class=\"tab-slot\" data-node-id=\"beta\""),
+            "{doc}"
+        );
     }
 
     #[test]
@@ -444,9 +550,19 @@ mod tests {
         assert!(JS.contains("datastar-patch-elements"));
     }
 
+    /// Tab-switching toggles the STABLE `.tab-slot` wrapper, never the
+    /// SSE-patched inner panel — so a patch to a hidden node can't resurrect
+    /// it into view.
+    #[test]
+    fn js_wires_tabs_via_stable_slot_wrapper() {
+        assert!(JS.contains("function wireTabs"));
+        assert!(JS.contains(".tab-slot"));
+        assert!(JS.contains("wireTabs()"));
+    }
+
     /// F10: the focus-preserving skip must be GATED on a matching `data-rev`
     /// — computed and checked before the unconditional replace, so a
-    /// differing revision (a new pending interaction) always reaches
+    /// differing revision (this node's pending state changed) always reaches
     /// `replaceWith` regardless of what currently has focus.
     #[test]
     fn js_focus_skip_gated_on_matching_data_rev() {

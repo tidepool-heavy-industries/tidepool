@@ -1,8 +1,10 @@
-//! Testing-convenience HTTP surface on the operator gate: `GET /api/form`
-//! returns the pending form as JSON (the same `FormShape` the web renderer
-//! consumes) plus a nonce; `POST /api/form` echoes that nonce back with an
-//! answer to resolve the SAME pending gate a browser `/submit` would — a
-//! second front door onto [`crate::server::WebGate`], not a second gate.
+//! Testing-convenience HTTP surface on the operator gate:
+//! `GET /node/{node}/api/form` returns every currently pending FORM ask for
+//! `node`, each with its interaction id (the nonce); `POST
+//! /node/{node}/api/form` echoes that nonce back with an answer to resolve
+//! the SAME pending ask a browser `/node/{node}/submit/{interaction}` would
+//! — a second front door onto [`crate::server::AppState`]'s node-scoped
+//! resolution, not a second gate.
 //!
 //! HARDENING IS PART OF THE SPEC, not optional:
 //! - **Disabled by default.** These routes are mounted only when
@@ -15,24 +17,24 @@
 //!   these routes mount onto the SAME router [`crate::spawn_operator_server`]
 //!   serves from its one hardcoded `127.0.0.1` listener. This module never
 //!   binds a socket of its own.
-//! - **Per-prompt nonce.** Every pending form has a nonce — the shared
-//!   [`crate::server::AppState`] revision counter, already bumped exactly
-//!   once per publish/take under F10's single-lock discipline — returned by
-//!   `GET` and REQUIRED on `POST`. A submission naming a stale nonce (the
-//!   pending form already changed underneath it) is rejected rather than
-//!   silently resolving whatever happens to be pending now.
+//! - **Per-ask nonce.** Every pending form has a nonce — its own interaction
+//!   id, assigned once when it's published and never reused — returned by
+//!   `GET` and REQUIRED on `POST`. A submission naming an id that no longer
+//!   names a pending form (already resolved, wrong node, or never existed)
+//!   is rejected rather than silently resolving whatever else happens to be
+//!   pending.
 //! - **Self-describing.** Every response carries a `test_only` note.
 //!
 //! An operator answer is authority regardless of which door it came through
 //! — this surface does not get to be "just for testing" about that.
 
-use axum::extract::State;
+use axum::extract::{Path, State};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::{Json, Router};
 use serde_json::{json, Map, Value as Jv};
 
-use crate::server::AppState;
+use crate::server::{resolve_error_message, AppState};
 
 const TEST_ONLY_NOTE: &str = "tidepool-web form-api: testing convenience only, not a browser \
      surface — gated on TIDEPOOL_FORM_API=1, loopback bind only";
@@ -59,71 +61,67 @@ fn env_flag_enabled(v: Option<&str>) -> bool {
     v == Some("1")
 }
 
-/// Why a form-api `POST` was rejected.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum FormApiSubmitError {
-    /// Nothing is pending (idle, or a Continue gate rather than a form).
-    NoFormPending,
-    /// The nonce didn't match the pending form's current revision — either
-    /// stale (the form changed since it was last GET'd) or never observed.
-    NonceMismatch { current: u64 },
-}
-
-/// Mount `GET`/`POST /api/form` onto `router` iff `config.enabled`; returns
-/// `router` unchanged when disabled — the route table itself differs, not
-/// just its runtime behavior.
+/// Mount `GET`/`POST /node/{node}/api/form` onto `router` iff
+/// `config.enabled`; returns `router` unchanged when disabled — the route
+/// table itself differs, not just its runtime behavior.
 pub fn merge(router: Router<AppState>, config: FormApiConfig) -> Router<AppState> {
     if !config.enabled {
         return router;
     }
-    router.route("/api/form", get(get_form).post(submit_form))
+    router.route("/node/{node}/api/form", get(get_form).post(submit_form))
 }
 
-/// `{"test_only": ..., "pending": bool, "form": FormShape | null, "nonce": u64 | null}`.
-async fn get_form(State(st): State<AppState>) -> Json<Jv> {
-    Json(match st.pending_form() {
-        Some((shape, nonce)) => json!({
-            "test_only": TEST_ONLY_NOTE,
-            "pending": true,
-            "form": shape,
-            "nonce": nonce,
-        }),
-        None => json!({
-            "test_only": TEST_ONLY_NOTE,
-            "pending": false,
-            "form": null,
-            "nonce": null,
-        }),
-    })
+/// `{"test_only": ..., "pending": bool, "forms": [{"interaction": u64, "form": FormShape}, ...]}`,
+/// or a 400 naming an unregistered node.
+async fn get_form(State(st): State<AppState>, Path(node): Path<String>) -> Response {
+    match st.pending_forms(&node) {
+        Ok(forms) => {
+            let items: Vec<Jv> = forms
+                .into_iter()
+                .map(|(interaction, shape)| json!({"interaction": interaction, "form": shape}))
+                .collect();
+            Json(json!({
+                "test_only": TEST_ONLY_NOTE,
+                "pending": !items.is_empty(),
+                "forms": items,
+            }))
+            .into_response()
+        }
+        Err(()) => err(format!("unknown node {node:?}")),
+    }
 }
 
-/// Resolve the pending form. Body: `{"nonce": <n>, "answer": {<key>: <scalar>,
-/// ...}}` — `nonce` is the value the matching `GET` returned, `answer` is the
-/// flat dotted-path object taken verbatim, same as a browser `/submit`.
-async fn submit_form(State(st): State<AppState>, body: Option<Json<Jv>>) -> Response {
+/// Resolve one pending form. Body: `{"interaction": <n>, "answer": {<key>:
+/// <scalar>, ...}}` — `interaction` is one of the ids the matching `GET`
+/// returned, `answer` is the flat dotted-path object taken verbatim, same as
+/// a browser `/node/{node}/submit/{interaction}`.
+async fn submit_form(
+    State(st): State<AppState>,
+    Path(node): Path<String>,
+    body: Option<Json<Jv>>,
+) -> Response {
     let raw = body.map(|Json(v)| v).unwrap_or_else(|| json!({}));
-    let (nonce, answer) = match parse_submission(raw) {
+    let (interaction, answer) = match parse_submission(raw) {
         Ok(pair) => pair,
         Err(msg) => return err(msg),
     };
-    match st.submit_form(nonce, answer) {
+    match st.resolve_form(&node, interaction, answer) {
         Ok(()) => Json(json!({"test_only": TEST_ONLY_NOTE, "ok": true})).into_response(),
-        Err(FormApiSubmitError::NoFormPending) => err("no form is pending".to_string()),
-        Err(FormApiSubmitError::NonceMismatch { current }) => err(format!(
-            "nonce mismatch: the pending form's current nonce is {current} — GET /api/form again before submitting"
-        )),
+        Err(e) => err(resolve_error_message(&node, e, "form")),
     }
 }
 
 fn parse_submission(raw: Jv) -> Result<(u64, Map<String, Jv>), String> {
     let Jv::Object(mut obj) = raw else {
-        return Err("body must be a JSON object: {\"nonce\": <n>, \"answer\": {...}}".to_string());
+        return Err(
+            "body must be a JSON object: {\"interaction\": <n>, \"answer\": {...}}".to_string(),
+        );
     };
-    let nonce = match obj.remove("nonce") {
+    let interaction = match obj.remove("interaction") {
         Some(Jv::Number(n)) if n.as_u64().is_some() => n.as_u64().unwrap(),
         _ => {
             return Err(
-                "missing/invalid \"nonce\" — must be the integer GET /api/form returned"
+                "missing/invalid \"interaction\" — must be one of the ids GET /node/{node}/api/form returned"
                     .to_string(),
             )
         }
@@ -132,7 +130,7 @@ fn parse_submission(raw: Jv) -> Result<(u64, Map<String, Jv>), String> {
         Some(Jv::Object(m)) => m,
         _ => return Err("missing/invalid \"answer\" — must be a flat JSON object".to_string()),
     };
-    Ok((nonce, answer))
+    Ok((interaction, answer))
 }
 
 fn err(msg: String) -> Response {
