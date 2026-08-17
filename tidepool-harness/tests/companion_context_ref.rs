@@ -24,6 +24,14 @@
 //!   upward-visible/downward-invisible walk `companion_scope_trees.rs`'s
 //!   `locked_decision_4_holds_through_the_real_compile_path` proves for an
 //!   ordinary `mint_scope` tree, proved here for a BRANCHED one instead.
+//! - **A branch child's abnormal exit is DATA at its branch position** (PRD
+//!   21 locked decision 6): `runLLMTurnBranch @T` answers
+//!   `Either InvocationExit (T, ContextRef)`, so a branch whose window
+//!   exhausts its rounds folds as `Left` there instead of aborting the outer
+//!   turn and erasing its sibling's finished answer.
+//!
+//! ONE fixture (`fixtures/ContextRefHarness.hs`), ONE compile shape shared by
+//! both tests below — family-bundle discipline.
 //!
 //! GHC-heavy: needs `TIDEPOOL_EXTRACT` + the with-packages GHC on PATH
 //! (`--ignore-default-filter` to run).
@@ -84,6 +92,27 @@ fn events(path: &std::path::Path) -> Vec<Event> {
     iter.map(|r| r.expect("event parses").event).collect()
 }
 
+/// The fixture's two per-branch projections: `answers` (the branch answers
+/// that arrived, plus ROOT's own trailing re-read) and `outcomes` (one entry
+/// per BRANCH POSITION — `ok:<n>` or `exit:<reason>`).
+fn answers_and_outcomes(state_json: &serde_json::Value) -> (Vec<i64>, Vec<String>) {
+    let answers = state_json
+        .get("answers")
+        .and_then(|v| v.as_array())
+        .expect("answers is a JSON array")
+        .iter()
+        .map(|v| v.as_i64().expect("each answer is an Int"))
+        .collect();
+    let outcomes = state_json
+        .get("outcomes")
+        .and_then(|v| v.as_array())
+        .expect("outcomes is a JSON array")
+        .iter()
+        .map(|v| v.as_str().expect("each outcome is Text").to_string())
+        .collect();
+    (answers, outcomes)
+}
+
 /// The six scripted replies, in the exact order `ContextRefHarness.hs`'s
 /// `loop` drives them:
 ///
@@ -138,14 +167,12 @@ async fn branch_forks_from_frozen_prefix_and_inherits_declarations() {
         .expect("one render->loop->freezeContext->runLLMTurnBranch(x2)->finalize->render cycle");
 
     // --- decl-scope inheritance, proved by VALUE (C2's scope contract) ---
-    let answers: Vec<i64> = outcome
-        .state_json
-        .get("answers")
-        .and_then(|v| v.as_array())
-        .expect("answers is a JSON array")
-        .iter()
-        .map(|v| v.as_i64().expect("each answer is an Int"))
-        .collect();
+    let (answers, outcomes) = answers_and_outcomes(&outcome.state_json);
+    assert_eq!(
+        outcomes,
+        vec!["ok:101".to_string(), "ok:2".to_string()],
+        "both branch positions carry their own answer in this scenario"
+    );
     assert_eq!(
         answers,
         vec![101, 2, 101],
@@ -251,4 +278,110 @@ async fn branch_forks_from_frozen_prefix_and_inherits_declarations() {
             "branch {node:?} must carry its own hole-card suffix past the shared prefix"
         );
     }
+}
+
+/// PRD 21 locked decision 6, applied to the BRANCH verb: branch A's window
+/// exhausts its rounds while branch B finalizes normally. The outer turn must
+/// still complete, branch B's answer and ROOT's own trailing re-read must both
+/// arrive, and branch A must arrive as a typed `InvocationExit` at its own
+/// branch position — not as an error that takes the turn (and B's finished
+/// answer) down with it.
+///
+/// `Either InvocationExit (T, ContextRef)`, not
+/// `(Either InvocationExit T, ContextRef)`: a window that never finalized has
+/// no post-finalize prefix, so there is no honest `ContextRef` to sit beside
+/// the failure — the `Either` wraps the whole pair.
+///
+/// Round caps are lowered to 1/2 (hard stop at max+2 = 4 rounds) and branch
+/// A's replies carry no ```haskell block, so its budget is spent in four
+/// instant `NoBlock` re-prompts with nothing compiled on that branch.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn branch_child_that_exhausts_its_rounds_folds_as_data_without_erasing_its_sibling() {
+    support::require_extract();
+    let _cache_guard = support::isolate_cache();
+
+    let prose = |text: &str| RecordedReply {
+        node: NodeId(0),
+        turn: 0,
+        content: text.to_string(),
+        usage: Usage {
+            input_tokens: 50,
+            output_tokens: 10,
+            cached_input_tokens: None,
+        },
+    };
+    let replies = vec![
+        // ROOT's `runLLMTurn @Bool` hole: define, then finalize.
+        reply("helper :: Int -> Int\nhelper x = x + 100"),
+        reply("finalize @Bool True"),
+        // Branch A: four block-less rounds — nudge, ultimatum, and the two
+        // grace rounds — then the window is out of budget.
+        prose("Branch A: still thinking (1)."),
+        prose("Branch A: still thinking (2)."),
+        prose("Branch A: still thinking (3)."),
+        prose("Branch A: still thinking (4)."),
+        // Branch B: unaffected, defines its own helper and finalizes.
+        reply("helper :: Int -> Int\nhelper x = x * 2"),
+        reply("finalize @Int (helper 1)"),
+        // ROOT's second hole: `helper` is still ROOT's own.
+        reply("finalize @Int (helper 1)"),
+    ];
+
+    let agent_cfg = EngineConfig::from_decls(
+        answerer_decls(),
+        repo_root().join("haskell/lib"),
+        Some(fixtures_dir()),
+    )
+    .expect("answerer engine config");
+    let provider: Arc<dyn DynModelProvider> = Arc::new(ReplayProvider::new(replies));
+    let log_path =
+        std::env::temp_dir().join(format!("context-ref-exit-{}.jsonl", std::process::id()));
+    let writer = LogWriter::create(&log_path, &header("exit")).expect("log writer");
+    let agent = Arc::new(Harness::new(writer, agent_cfg, provider).expect("agent harness boots"));
+    let mut driver = SelfHarnessDriver::new(agent, Arc::new(LogObserver));
+    driver.set_answerer_round_caps(1, 2);
+
+    let source = load_harness_source(&fixtures_dir().join("ContextRefHarness.hs"))
+        .expect("context-ref fixture loads");
+
+    // The turn COMPLETES. Before decision 6 reached this verb, branch A's
+    // round exhaustion propagated out of `service_outer_branch` and this call
+    // returned `Err`.
+    let outcome = driver
+        .run_one_cycle(&source, None)
+        .await
+        .expect("the outer turn completes despite branch A's window exiting");
+
+    let (answers, outcomes) = answers_and_outcomes(&outcome.state_json);
+    assert_eq!(
+        answers,
+        vec![2, 101],
+        "branch B's answer (2) and ROOT's own trailing re-read (101) must both \
+         survive branch A's exit; branch A contributes nothing rather than \
+         displacing anyone"
+    );
+    assert_eq!(outcomes.len(), 2, "one outcome per branch position");
+    assert_eq!(
+        outcomes[0],
+        "exit:round exhaustion: runLLMTurn answerer exceeded 4 rounds (cap 2 + \
+         ultimatum grace) without finalizing",
+        "branch A's position carries the typed round-exhaustion exit, rendered \
+         by `renderInvocationExit`"
+    );
+    assert_eq!(
+        outcomes[1], "ok:2",
+        "branch B's position is untouched by its sibling's failure"
+    );
+
+    // The exited branch left no BranchInvocation-less debris: branch B still
+    // forked off the SAME frozen root, so the seam itself is unaffected.
+    let branches = events(&log_path)
+        .into_iter()
+        .filter(|e| matches!(e, Event::BranchInvocation { .. }))
+        .count();
+    assert_eq!(
+        branches, 2,
+        "BOTH branch children are still real fork_from_snapshot children — an \
+         exiting window is one that failed to ANSWER, not one that was never opened"
+    );
 }

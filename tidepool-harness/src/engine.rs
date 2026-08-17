@@ -14,7 +14,11 @@
 //! - `{typedSite, fork:true}` → `runLLMTurnFork`: PARK. The parent stays
 //!   suspended; a child answerer node is registered (transcript forked at the
 //!   checkpoint) and, once forced, drives its own turn loop to produce a typed
-//!   answer that `run_child`s against the parent and resumes it.
+//!   answer that `run_child`s against the parent and resumes it. The parent's
+//!   continuation takes `Either InvocationExit T` — a forked window is a
+//!   BRANCH POSITION, and PRD 21 locked decision 6 folds its abnormal exit as
+//!   data there rather than as an exception over its siblings (see
+//!   [`InvocationExit`], [`build_child_answer_value`]).
 //! - `{typedSite}` (no fork) → `runLLMTurn`: the SAME model answers in
 //!   context by evaluating `resume expr :: T`.
 //! - `AskUserWith shape` (own constructor, answerer-only) → `askUserRaw`:
@@ -130,6 +134,26 @@ pub fn compile_turns(
         .collect())
 }
 
+/// Which surface verb produced a [`HoleRouting::Fork`] suspension. Two
+/// effects share that routing, and they DIFFER in the shape their parked
+/// continuation expects back, so the answering side must know which it is:
+///
+/// - [`ForkSource::ForkEffect`] — `Tidepool.Fork`'s `fork`/`forkAll`
+///   (`ForkWith`/`ForkAllWith`), which resume with a bare `T` / `[T]`.
+/// - [`ForkSource::RunLLMTurn`] — `runLLMTurnFork`/`runLLMTurnFanout`
+///   (`RunLLMTurnWith` carrying `fork: true`), which resume with
+///   `Either InvocationExit T` / `[Either InvocationExit T]` (PRD 21 locked
+///   decision 6 — see [`InvocationExit`]).
+///
+/// A plain `ty`/`fan` inspection cannot tell them apart (both record the
+/// child's answer type the same way), which is exactly why this is carried
+/// rather than re-derived.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ForkSource {
+    ForkEffect,
+    RunLLMTurn,
+}
+
 /// Which outer-row effect a [`HoleRouting::OuterEffect`] suspension names —
 /// see that variant's doc.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -163,12 +187,15 @@ pub enum HoleRouting {
     /// the RENDERED answer type: the element type `T` for a plain fork, the
     /// LIST type `[T]` for a fanout (`engine::strip_list_type` recovers `T`).
     /// `prompts` carries the per-child prompt text, one per fanout child, in
-    /// declaration order (empty for a plain fork).
+    /// declaration order (empty for a plain fork). `source` says WHICH of the
+    /// two verbs raised it, because they differ in the shape their parked
+    /// continuation expects back — see [`ForkSource`].
     Fork {
         site: crate::tree::SiteId,
         ty: Option<String>,
         fan: Option<FanBadge>,
         prompts: Vec<String>,
+        source: ForkSource,
     },
     /// `askUserRaw shape` — a typed form
     /// suspends to a HUMAN OPERATOR, routed by CONSTRUCTOR NAME
@@ -423,6 +450,7 @@ pub fn classify_hole(
                     ty: asks.type_of(site.get()).map(str::to_string),
                     fan: None,
                     prompts: Vec::new(),
+                    source: ForkSource::ForkEffect,
                 },
                 prompt: brief,
             }
@@ -438,6 +466,7 @@ pub fn classify_hole(
                         n: prompts.len() as u32,
                     }),
                     prompts,
+                    source: ForkSource::ForkEffect,
                 },
             }
         }
@@ -608,6 +637,7 @@ fn classify_runllmturn_payload(
             ty,
             fan: fan.map(|n| FanBadge::Exact { n: n.get() }),
             prompts,
+            source: ForkSource::RunLLMTurn,
         })
     } else if payload
         .get("branch")
@@ -1954,6 +1984,122 @@ pub fn build_pair_value(a: Value, b: Value, table: &DataConTable) -> Result<Valu
         EngineError::Run("build_pair_value: no (,) constructor in table".to_string())
     })?;
     Ok(Value::Con(pair_id, vec![a, b]))
+}
+
+/// Why one forked cognition window ended WITHOUT a typed answer — the Rust
+/// side of the `InvocationExit` generated into `Tidepool.Effects`
+/// (`tidepool_mcp::runllmturn_effect_def!`'s `type_defs`). The constructor
+/// names here ARE that ADT's, and [`build_invocation_exit_value`] resolves
+/// them by name against the turn's own `DataConTable`.
+///
+/// **The line this type draws** (PRD 21 locked decision 6): an
+/// `InvocationExit` describes a failure ATTRIBUTABLE TO ONE CHILD'S WINDOW —
+/// its rounds ran out, it ended on something that is not an answer, it was
+/// cancelled, its own provider call failed. Those fold as DATA at that
+/// child's branch position so its siblings' finished results survive. A
+/// failure of the MECHANISM around the children — fan cardinality, list/sum
+/// assembly against the table, session bookkeeping, the per-loop
+/// inference-call runaway cap — is NOT an `InvocationExit` and must hard-fail
+/// the turn: reporting a broken mechanism as "the model failed" would be a
+/// false receipt.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum InvocationExit {
+    /// The window burned its round budget without finalizing.
+    RoundsExhausted(String),
+    /// The window ended on something that is not an answer.
+    NotFinalized(String),
+    /// The window was cancelled before it could answer. No producer in the
+    /// self-harness driver today — cancellation of a live branch is PRD 21
+    /// lane C5's (draining a recursive scope under structured concurrency).
+    /// The constructor exists because decision 6 enumerates it and a caller
+    /// matching exhaustively should not have to be rewritten when C5 lands.
+    Cancelled(String),
+    /// The window's own turn failed at runtime (its provider call errored).
+    RuntimeFailure(String),
+}
+
+impl InvocationExit {
+    /// The Haskell constructor name this variant builds — the one place the
+    /// Rust variant ↔ `Tidepool.Effects` constructor correspondence is
+    /// spelled.
+    fn constructor(&self) -> &'static str {
+        match self {
+            InvocationExit::RoundsExhausted(_) => "ExitRoundsExhausted",
+            InvocationExit::NotFinalized(_) => "ExitNotFinalized",
+            InvocationExit::Cancelled(_) => "ExitCancelled",
+            InvocationExit::RuntimeFailure(_) => "ExitRuntimeFailure",
+        }
+    }
+
+    /// The detail text the constructor carries.
+    pub fn detail(&self) -> &str {
+        match self {
+            InvocationExit::RoundsExhausted(d)
+            | InvocationExit::NotFinalized(d)
+            | InvocationExit::Cancelled(d)
+            | InvocationExit::RuntimeFailure(d) => d,
+        }
+    }
+}
+
+impl std::fmt::Display for InvocationExit {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}: {}", self.constructor(), self.detail())
+    }
+}
+
+/// Build the `InvocationExit` `Value` for `exit` against `table`.
+///
+/// Same loud-failure discipline as [`build_list_value`]: a constructor the
+/// table does not carry is a HARD error, never a defaulted or omitted value.
+/// The alternative — resuming with some other constructor — would feed the
+/// parent's `case` a value of the wrong shape, which case-traps far from the
+/// cause.
+pub fn build_invocation_exit_value(
+    exit: &InvocationExit,
+    table: &DataConTable,
+) -> Result<Value, EngineError> {
+    use tidepool_bridge::ToCore;
+    let name = exit.constructor();
+    let con = tidepool_bridge::get_resilient(table, name, 1).ok_or_else(|| {
+        EngineError::Run(format!(
+            "build_invocation_exit_value: no `{name}` constructor in table — the \
+             compiling row generated no `InvocationExit`, so a fork/fanout child's \
+             typed exit cannot be delivered"
+        ))
+    })?;
+    let detail =
+        exit.detail().to_string().to_value(table).map_err(|e| {
+            EngineError::Run(format!("build_invocation_exit_value: detail text: {e}"))
+        })?;
+    Ok(Value::Con(con, vec![detail]))
+}
+
+/// Assemble ONE fork/fanout child's outcome into the `Either InvocationExit T`
+/// `Value` its branch position resumes with — `Ok(v)` → `Right v`, `Err(exit)`
+/// → `Left (…)`.
+///
+/// This is the shape `runLLMTurnFork`/`runLLMTurnFanout` promise (PRD 21
+/// locked decision 6); `Tidepool.Fork`'s `fork`/`forkAll` do NOT go through
+/// it — they still resume with a bare `T` (see [`ForkSource`]).
+/// [`build_list_value`]'s loud-failure discipline throughout: a missing
+/// `Left`/`Right` is a hard error.
+pub fn build_child_answer_value(
+    outcome: Result<Value, InvocationExit>,
+    table: &DataConTable,
+) -> Result<Value, EngineError> {
+    let (name, payload) = match outcome {
+        Ok(v) => ("Right", v),
+        Err(exit) => ("Left", build_invocation_exit_value(&exit, table)?),
+    };
+    let con = tidepool_bridge::get_resilient(table, name, 1).ok_or_else(|| {
+        EngineError::Run(format!(
+            "build_child_answer_value: no `{name}` constructor in table — a \
+             fork/fanout answer is `Either InvocationExit T`, so both `Left` and \
+             `Right` must be reachable from the compiling row"
+        ))
+    })?;
+    Ok(Value::Con(con, vec![payload]))
 }
 
 /// Shared handle to a provider, so the engine and its forked answerers all use

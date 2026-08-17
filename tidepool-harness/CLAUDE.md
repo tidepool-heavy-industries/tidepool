@@ -535,6 +535,75 @@ AskUser]`, so an AUTHORED `loop` that `import`s `Tidepool.Form` and evaluates
 stale-but-unused): `Harness = M` and `askUser`'s `Member AskUser` constraint
 unifies against the wider generated row.
 
+### Outer fork/fanout servicing — a branch's exit is DATA at its position
+
+An AUTHORED `loop` reaching for `runLLMTurnFork @T`/`runLLMTurnFanout @T`
+suspends on `RunLLMTurn`'s own fork payload (no separate `Fork` decl needed —
+`outer_decls()` has none), classified as `HoleRouting::Fork` and serviced by
+`SelfHarnessDriver::service_outer_fanout` → `drive_fanout_child`: each child
+gets a freshly-minted answerer realm on the shared outer machine, driven
+CONCURRENTLY up to `set_concurrency_cap`, re-sorted to DECLARATION order
+before assembly so completion order is never observable.
+
+**Every verb that opens a window at a BRANCH POSITION answers an `Either`**
+(PRD 21 locked decision 6,
+`plans/self-iterating-harness/21-c3-exit-verb.md`):
+`runLLMTurnFork @T :: Text -> M (Either InvocationExit T)`,
+`runLLMTurnFanout @T :: [Text] -> M [Either InvocationExit T]`, and
+`runLLMTurnBranch @T :: ContextRef -> Text -> M (Either InvocationExit (T, ContextRef))`
+(the `Either` wraps the WHOLE pair — a window that never finalized has no
+post-finalize prefix, so there is no honest `ContextRef` to sit beside the
+failure). The two that do NOT open a branch position keep their bare answers:
+`runLLMTurn @T`, answered in context by the same node, and `freezeContext`,
+which is not a window at all. That asymmetry is documented at the declaration
+(`tidepool_mcp::runllmturn_effect_def!`).
+
+`runLLMTurnBranch` reaches it by a different route — `service_outer_branch` is
+sequential and drives its child through `drive_answerer_to_finalize`, the round
+loop it SHARES with the in-context `service_runllm_hole`. That loop returns
+`Result<Result<TurnOutcome, InvocationExit>, DriverError>` and the two callers
+differ in what they do with an exit, which is exactly the branch-position
+distinction: the branch folds it as `Left`, the in-context hole collapses it
+back into a hard failure (unchanged).
+
+**The line, and it is the whole point of the shape.** A failure attributable
+to ONE CHILD'S WINDOW — round exhaustion, ending on something that is not an
+answer, that window's own provider call failing — comes back from
+`drive_fanout_child` as `Ok(Err(exit))` and is folded as `Left exit` at that
+child's branch position, so its siblings' finished answers survive. A failure
+of the MECHANISM — fan cardinality, `Either`/list assembly against the
+`DataConTable`, session bookkeeping, the per-loop inference-call runaway cap,
+and a child that finalized a CLOSURE (it DID answer; this driver cannot carry
+it) — still hard-fails the turn. Laundering a broken mechanism into "the model
+failed" would be a false receipt. The nesting of
+`Result<Result<Value, InvocationExit>, DriverError>` IS that contract: outer =
+mechanism, inner = the window.
+
+`engine::build_child_answer_value`/`build_invocation_exit_value` construct the
+`Left`/`Right`/`Exit*` values against the turn's own table with
+`build_list_value`'s loud-failure discipline (a missing constructor is a hard
+error, never a default). The constructors are present by construction: a
+fork/fanout site head-swaps to a `*Sited` sibling whose top-level type mentions
+`Either InvocationExit a`, and extract's `collectTransitiveDCons` seeds from
+reachable top-level binders' types.
+
+The NESTED path (`Harness::answer_fork`/`answer_fanout`, the general Agent
+stack and `drain_answerer_fork`) shares `HoleRouting::Fork` with
+`Tidepool.Fork`'s `fork`/`forkAll`, which still answer a bare `T`/`[T]` — so
+the routing carries `engine::ForkSource` and `Harness::wrap_fork_answer` wraps
+in `Right` only for a `runLLMTurn`-sourced hole. That path produces no `Left`
+yet: a child failing there still hard-fails the fan through
+`drive_answerer_to_value`'s escalation ladder.
+
+One consequence worth knowing before writing a harness: `InvocationExit` lives
+in the per-fragment generated `Tidepool.Effects`, so the cross-row bind guard
+refuses an `Either InvocationExit T` as a cross-turn session VALUE BIND (same
+rule that already covered `Schema`). Project at the bind —
+`steps <- either (\_ -> []) id <$> runLLMTurnFork @[Int] "…"`.
+
+Gates: `tests/outer_fanout.rs` (fork/fanout) and
+`tests/companion_context_ref.rs` (branch).
+
 ### One session: attached realms, closure delivery, machine rotation
 
 Pre-collapse, the outer `render`/`loop` session and each loop's answerer

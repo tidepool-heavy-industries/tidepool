@@ -82,7 +82,7 @@ async fn fanout_of_three_preserves_order_across_a_retry() {
             "I'll fan out three prompts for numbers.\n\n\
              ```haskell\n\
              do\n\
-             \x20 ns <- runLLMTurnFanout @Int [\"pick 1\", \"pick 2\", \"pick 3\"]\n\
+             \x20 ns <- mapM liftEither =<< runLLMTurnFanout @Int [\"pick 1\", \"pick 2\", \"pick 3\"]\n\
              \x20 pure (toJSON ns)\n\
              ```",
         ),
@@ -214,7 +214,7 @@ async fn fanout_child_recovers_via_rung_one_auto_retry_after_cap_exhaustion() {
         reply(
             "```haskell\n\
              do\n\
-             \x20 ns <- runLLMTurnFanout @Int [\"pick 1\"]\n\
+             \x20 ns <- mapM liftEither =<< runLLMTurnFanout @Int [\"pick 1\"]\n\
              \x20 pure (toJSON ns)\n\
              ```",
         ),
@@ -283,7 +283,7 @@ async fn fanout_child_stuck_past_rung_one_aborts_clean_no_leaked_running_node() 
         reply(
             "```haskell\n\
              do\n\
-             \x20 ns <- runLLMTurnFanout @Int [\"pick 1\"]\n\
+             \x20 ns <- mapM liftEither =<< runLLMTurnFanout @Int [\"pick 1\"]\n\
              \x20 pure (toJSON ns)\n\
              ```",
         ),

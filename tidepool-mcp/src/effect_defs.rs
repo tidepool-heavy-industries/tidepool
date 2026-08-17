@@ -836,6 +836,30 @@ macro_rules! readstate_effect_def {
 /// suspend paths) — so only [`effect_decl_projection!`] consumes this
 /// definition; the `handler`/`req`/`method` slots name types that are never
 /// generated (same convention as `ask_effect_def!`'s own doc comment).
+///
+/// ## Why only the fork/fanout verbs return an `Either` (PRD 21 decision 6)
+///
+/// `runLLMTurnFork @T :: Text -> M (Either InvocationExit T)` and
+/// `runLLMTurnFanout @T :: [Text] -> M [Either InvocationExit T]`;
+/// `runLLMTurn @T :: Text -> M T` KEEPS its bare answer. That asymmetry is a
+/// real distinction, not an oversight:
+///
+/// - A fork/fanout child is a BRANCH POSITION. Its window is a separate node
+///   with siblings, and PRD 21 locked decision 6 requires an abnormal exit
+///   there to fold as DATA at that position — an exception would erase every
+///   sibling's already-finished result. The caller folding a failure at the
+///   branch position IS the design, so the TYPE hands it to them.
+/// - `runLLMTurn @T` is answered IN CONTEXT by the same node, on the outer
+///   turn's own continuation. It has no siblings to erase and no branch
+///   position to fold at: its failure IS the outer turn's failure. Wrapping it
+///   would make every in-context call site unwrap an `Either` whose `Left`
+///   means "the turn you are in has already failed".
+///
+/// This is the codebase's ordinary typed-failure idiom (`run :: Text -> M
+/// (Either ExecError Proc)`, `llm :: … -> M (Either LlmError Value)`, #335):
+/// ONE spelling per verb, `Either` where failure is data. `InvocationExit` is
+/// generated into `Tidepool.Effects` alongside the GADT (`type_defs` below),
+/// the same way `ExecError`/`FsError` are.
 #[macro_export]
 macro_rules! runllmturn_effect_def {
     ($project:path) => {
@@ -854,20 +878,55 @@ macro_rules! runllmturn_effect_def {
             // gates whether a call site can actually solve the constraint.
             helpers_row_polymorphic true,
             description [
-                "Suspend for a TYPED answer. `runLLMTurn \\@T prompt` (same calling ",
-                "model answers in context) / `runLLMTurnFork \\@T prompt` (a forked ",
-                "sub-agent answers) / `runLLMTurnFanout \\@T prompts` (N forked ",
-                "sub-agents, one per prompt, answered as a batch `[T]`) — GHC ",
-                "validates the answer against `T` before it resumes the continuation ",
-                "(an ill-typed answer never consumes it). `freezeContext :: M ContextRef` ",
-                "mints a capability naming THIS window's current frozen prefix, ",
-                "immediately (no operator, no model round). `runLLMTurnBranch \\@T ref ",
-                "prompt` forks a FRESH child window off that frozen prefix (never an ",
-                "empty root) and returns `(T, ContextRef)` — the child's own answer, ",
-                "plus a ref to ITS post-finalize context for branching further.",
+                "Suspend for a TYPED answer. `runLLMTurn \\@T prompt :: M T` — the same ",
+                "calling model answers IN CONTEXT; its failure is this turn's failure, so ",
+                "the answer is bare. `runLLMTurnFork \\@T prompt :: M (Either ",
+                "InvocationExit T)` — a forked sub-agent answers in its own window; ",
+                "`runLLMTurnFanout \\@T prompts :: M [Either InvocationExit T]` — N forked ",
+                "sub-agents, one per prompt, one result per prompt IN DECLARED ORDER. A ",
+                "forked window is a BRANCH POSITION, so its abnormal exit (round ",
+                "exhaustion, non-finalization, cancellation, runtime failure) arrives as ",
+                "`Left exit` at that position instead of killing its siblings — natural ",
+                "spelling `Right x <- runLLMTurnFork \\@T p`, or `renderInvocationExit e` ",
+                "to display one. GHC validates each answer against `T` before it resumes ",
+                "the continuation (an ill-typed answer never consumes it). ",
+                "`freezeContext :: M ContextRef` mints a capability naming THIS window's ",
+                "current frozen prefix, immediately (no operator, no model round). ",
+                "`runLLMTurnBranch \\@T ref prompt :: M (Either InvocationExit (T, ",
+                "ContextRef))` forks a FRESH child window off that frozen prefix (never an ",
+                "empty root) — `Right (answer, ref')` is the child's own answer plus a ref ",
+                "to ITS post-finalize context for branching further; a branch child is a ",
+                "BRANCH POSITION too, so its abnormal exit is a `Left` here as well (and a ",
+                "window that never finalized has no context to hand back, which is why the ",
+                "`Either` wraps the whole pair).",
             ],
+            // PRD 21 locked decision 6's typed exit, generated here alongside
+            // the GADT exactly as ExecError/FsError are (they come from the
+            // `errors` block; this one is hand-written because RunLLMTurn has
+            // no Rust handler projection to generate an enum for — see this
+            // macro's own doc comment). The Rust side that BUILDS these values
+            // is `tidepool_harness::engine::InvocationExit`; its constructor
+            // names are this list, and a name missing from a turn's
+            // DataConTable is a hard error there, never a defaulted value.
             type_defs [
                 "data ContextRef = ContextRef Text deriving (Show, Eq)",
+                "-- | Why a forked cognition window ended WITHOUT a typed answer.\n\
+                 -- Folded as data at the failing branch's own position (PRD 21\n\
+                 -- locked decision 6) — never an exception that erases the results\n\
+                 -- its siblings already produced. Each constructor carries the\n\
+                 -- runtime's own detail text.\n\
+                 data InvocationExit\n\
+                 \x20 = ExitRoundsExhausted Text\n\
+                 \x20 | ExitNotFinalized Text\n\
+                 \x20 | ExitCancelled Text\n\
+                 \x20 | ExitRuntimeFailure Text\n\
+                 \x20 deriving (Show, Eq)",
+                "instance ToJSON InvocationExit where\n\
+                 \x20 toJSON e = case e of\n\
+                 \x20   ExitRoundsExhausted detail -> object [\"tag\" .= (\"ExitRoundsExhausted\" :: Text), \"detail\" .= detail]\n\
+                 \x20   ExitNotFinalized detail -> object [\"tag\" .= (\"ExitNotFinalized\" :: Text), \"detail\" .= detail]\n\
+                 \x20   ExitCancelled detail -> object [\"tag\" .= (\"ExitCancelled\" :: Text), \"detail\" .= detail]\n\
+                 \x20   ExitRuntimeFailure detail -> object [\"tag\" .= (\"ExitRuntimeFailure\" :: Text), \"detail\" .= detail]",
             ],
             verbs [
                 { ctor RunLLMTurnWith, method run_llm_turn_with,
@@ -924,8 +983,15 @@ macro_rules! runllmturn_effect_def {
                 { raw ["{-# OPAQUE runLLMTurn #-}",
                        "runLLMTurn :: forall a effs. Member RunLLMTurn effs => Text -> Eff effs a",
                        "runLLMTurn prompt = runLLMTurnSited 0 prompt"] },
+                // The `@T` a call site applies still pins the CHILD's answer
+                // type — it is the first forall'd tyvar, so `runLLMTurnFork
+                // @Decision p` reads exactly as before and the site's recorded
+                // asks.json type stays `T` (`[T]` for the fanout). The
+                // `Either` is what the PARENT receives: the child's own
+                // finalize contract is unchanged, and so is the driver's
+                // `Finalize T` row pin derived from that recorded type.
                 { raw ["{-# OPAQUE runLLMTurnFork #-}",
-                       "runLLMTurnFork :: forall a effs. Member RunLLMTurn effs => Text -> Eff effs a",
+                       "runLLMTurnFork :: forall a effs. Member RunLLMTurn effs => Text -> Eff effs (Either InvocationExit a)",
                        "runLLMTurnFork prompt = runLLMTurnForkSited 0 prompt"] },
                 // runLLMTurnFanout (B1, widen): one park, N thunk children — the
                 // SAME classification scheme as runLLMTurnFork ("typedSite" +
@@ -936,8 +1002,17 @@ macro_rules! runllmturn_effect_def {
                 // Translate.hs's fanout interception arm) — the harness derives the
                 // element type back by stripping the outer `[]`.
                 { raw ["{-# OPAQUE runLLMTurnFanout #-}",
-                       "runLLMTurnFanout :: forall a effs. Member RunLLMTurn effs => [Text] -> Eff effs [a]",
+                       "runLLMTurnFanout :: forall a effs. Member RunLLMTurn effs => [Text] -> Eff effs [Either InvocationExit a]",
                        "runLLMTurnFanout prompts = runLLMTurnFanoutSited 0 prompts"] },
+                // Display for a folded exit. Beside the type, not in a
+                // curated module: `Tidepool.Effects` is where the type is
+                // generated, and every row that can produce one already
+                // imports it.
+                { raw ["renderInvocationExit :: InvocationExit -> Text",
+                       "renderInvocationExit (ExitRoundsExhausted d) = \"round exhaustion: \" <> d",
+                       "renderInvocationExit (ExitNotFinalized d) = \"non-finalization: \" <> d",
+                       "renderInvocationExit (ExitCancelled d) = \"cancelled: \" <> d",
+                       "renderInvocationExit (ExitRuntimeFailure d) = \"runtime failure: \" <> d"] },
                 // The Int arg is the site id extract substitutes at the call site (the
                 // literal `0` above is a placeholder, never the value that actually
                 // runs). `unsafeCoerce` is safe here ONLY because extract has already
@@ -949,14 +1024,22 @@ macro_rules! runllmturn_effect_def {
                 // surfaces) — the harness resumes this suspension with a value the
                 // caller validated against that exact type, so the coercion is a
                 // same-representation relabeling, not a genuine type change.
+                //
+                // For the two FORK siblings the coerced-to type is the WRAPPED
+                // one (`Either InvocationExit a` / `[Either InvocationExit a]`),
+                // and the harness resumes with exactly that shape: it builds
+                // `Right <child answer>` (or `Left <exit>`) against the turn's
+                // own DataConTable before resuming — `tidepool_harness::engine::
+                // build_child_answer_value`, which hard-fails when a needed
+                // constructor is absent from the table rather than defaulting.
                 { raw ["{-# OPAQUE runLLMTurnSited #-}",
                        "runLLMTurnSited :: forall a effs. Member RunLLMTurn effs => Int -> Text -> Eff effs a",
                        "runLLMTurnSited sid p = unsafeCoerce <$> send (RunLLMTurnWith p (object [\"typedSite\" .= sid]))"] },
                 { raw ["{-# OPAQUE runLLMTurnForkSited #-}",
-                       "runLLMTurnForkSited :: forall a effs. Member RunLLMTurn effs => Int -> Text -> Eff effs a",
+                       "runLLMTurnForkSited :: forall a effs. Member RunLLMTurn effs => Int -> Text -> Eff effs (Either InvocationExit a)",
                        "runLLMTurnForkSited sid p = unsafeCoerce <$> send (RunLLMTurnWith p (object [\"typedSite\" .= sid, \"fork\" .= True]))"] },
                 { raw ["{-# OPAQUE runLLMTurnFanoutSited #-}",
-                       "runLLMTurnFanoutSited :: forall a effs. Member RunLLMTurn effs => Int -> [Text] -> Eff effs [a]",
+                       "runLLMTurnFanoutSited :: forall a effs. Member RunLLMTurn effs => Int -> [Text] -> Eff effs [Either InvocationExit a]",
                        "runLLMTurnFanoutSited sid prompts = unsafeCoerce <$> send (RunLLMTurnWith (intercalate \"\\n\" prompts) (object [\"typedSite\" .= sid, \"fork\" .= True, \"fan\" .= length prompts, \"prompts\" .= prompts]))"] },
                 // PRD 21 lane C3 GAP 1: give the frozen-snapshot seam
                 // (tidepool-harness's ContextSnapshot / freeze_snapshot /
@@ -984,11 +1067,21 @@ macro_rules! runllmturn_effect_def {
                 // fork/fanout already share one constructor. See
                 // `haskell/src/Tidepool/Translate.hs`'s `sitedVerbs` table for
                 // its one added row.
+                //
+                // A branch child IS a branch position (PRD 21 decision 6), so
+                // it answers an `Either` like fork/fanout. The `Either` wraps
+                // the WHOLE pair — `Either InvocationExit (a, ContextRef)`,
+                // not `(Either InvocationExit a, ContextRef)`: a window that
+                // never finalized has no post-finalize context, so a
+                // `ContextRef` beside a failure would be a capability with
+                // nothing behind it. `freezeContext` stays bare — it is not a
+                // window (no model round, resolves immediately), so it has no
+                // exit to report.
                 { raw ["{-# OPAQUE runLLMTurnBranch #-}",
-                       "runLLMTurnBranch :: forall a effs. Member RunLLMTurn effs => ContextRef -> Text -> Eff effs (a, ContextRef)",
+                       "runLLMTurnBranch :: forall a effs. Member RunLLMTurn effs => ContextRef -> Text -> Eff effs (Either InvocationExit (a, ContextRef))",
                        "runLLMTurnBranch ref p = runLLMTurnBranchSited 0 ref p"] },
                 { raw ["{-# OPAQUE runLLMTurnBranchSited #-}",
-                       "runLLMTurnBranchSited :: forall a effs. Member RunLLMTurn effs => Int -> ContextRef -> Text -> Eff effs (a, ContextRef)",
+                       "runLLMTurnBranchSited :: forall a effs. Member RunLLMTurn effs => Int -> ContextRef -> Text -> Eff effs (Either InvocationExit (a, ContextRef))",
                        "runLLMTurnBranchSited sid (ContextRef ref) p = unsafeCoerce <$> send (RunLLMTurnWith p (object [\"typedSite\" .= sid, \"branch\" .= True, \"ref\" .= ref]))"] },
             ],
         }

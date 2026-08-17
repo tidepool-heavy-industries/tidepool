@@ -2446,6 +2446,41 @@ impl Harness {
         let _ = self.terminate_node(child, "fork child failed");
     }
 
+    /// Put ONE child answer into the shape `node`'s parked fork/fanout
+    /// continuation actually expects.
+    ///
+    /// The two verbs that raise a [`HoleRouting::Fork`] disagree on it:
+    /// `runLLMTurnFork`/`runLLMTurnFanout` answer
+    /// `Either InvocationExit T` (PRD 21 locked decision 6 — a branch
+    /// position's failure is data), so a successful answer is `Right v`;
+    /// `Tidepool.Fork`'s `fork`/`forkAll` answer a bare `T` and are handed
+    /// back untouched. `source` is carried on the routing precisely because
+    /// the answer type alone cannot tell them apart.
+    ///
+    /// The wrap runs against the node's `suspend_table` — the constructor set
+    /// this hole was classified from — and hard-fails if `Right` is not in
+    /// it, rather than resuming with an unwrapped value the continuation
+    /// would then case-trap on.
+    fn wrap_fork_answer(
+        &self,
+        node: NodeId,
+        source: engine::ForkSource,
+        value: Value,
+    ) -> Result<Value, HarnessError> {
+        match source {
+            engine::ForkSource::ForkEffect => Ok(value),
+            engine::ForkSource::RunLLMTurn => {
+                let table = self
+                    .convos
+                    .lock()
+                    .get(&node)
+                    .and_then(|c| c.suspend_table.clone())
+                    .unwrap_or_default();
+                Ok(engine::build_child_answer_value(Ok(value), &table)?)
+            }
+        }
+    }
+
     /// Force + drive a FORK answerer for `node`'s pending single-fork hole
     /// (`fork @T` / `runLLMTurnFork @T`, `fan: None` — a fanout hole routes to
     /// [`Self::answer_fanout`] instead). Registers a child node (transcript
@@ -2465,10 +2500,13 @@ impl Harness {
             .get(&node)
             .and_then(|c| c.pending.clone())
             .ok_or(HarnessError::NotSuspended(node))?;
-        let (site_ty, prompt) = match &pending.classified.routing {
-            HoleRouting::Fork { ty, fan: None, .. } => {
-                (ty.clone(), pending.classified.prompt.clone())
-            }
+        let (site_ty, prompt, source) = match &pending.classified.routing {
+            HoleRouting::Fork {
+                ty,
+                fan: None,
+                source,
+                ..
+            } => (ty.clone(), pending.classified.prompt.clone(), *source),
             other => {
                 return Err(HarnessError::RoutingMismatch {
                     node,
@@ -2508,7 +2546,23 @@ impl Harness {
             }
         };
 
-        // Resume the parent with the child's typed answer.
+        // Resume the parent with the child's typed answer, in the shape the
+        // parked continuation expects: `runLLMTurnFork @T` answers
+        // `Either InvocationExit T`, so the value is wrapped in `Right` here;
+        // `Tidepool.Fork`'s `fork @T` answers a bare `T` and is not wrapped.
+        // Nothing on THIS path produces a `Left` — a child that fails here
+        // still hard-fails the fan (the escalation ladder in
+        // `drive_answerer_to_value` owns that policy, and turning its outcome
+        // into a typed exit is not this change's scope). The concurrent OUTER
+        // path (`SelfHarnessDriver::service_outer_fanout`) is where a
+        // child-attributable failure becomes `Left`.
+        let answer_value = match self.wrap_fork_answer(node, source, answer_value) {
+            Ok(v) => v,
+            Err(e) => {
+                self.cleanup_failed_child(child);
+                return Err(e);
+            }
+        };
         if let Err(e) = self.resume_parent(node, &pending.hole, answer_value).await {
             self.cleanup_failed_child(child);
             return Err(e);
@@ -2558,13 +2612,14 @@ impl Harness {
             .get(&node)
             .and_then(|c| c.pending.clone())
             .ok_or(HarnessError::NotSuspended(node))?;
-        let (list_ty, fan, prompts) = match &pending.classified.routing {
+        let (list_ty, fan, prompts, source) = match &pending.classified.routing {
             HoleRouting::Fork {
                 ty,
                 fan: Some(fan),
                 prompts,
+                source,
                 ..
-            } => (ty.clone(), *fan, prompts.clone()),
+            } => (ty.clone(), *fan, prompts.clone(), *source),
             other => {
                 return Err(HarnessError::RoutingMismatch {
                     node,
@@ -2631,7 +2686,10 @@ impl Harness {
             let _ = self.tree.node_done(child, "answer delivered".to_string());
             let _ = self.terminate_node(child, "answer delivered");
             children.push(child);
-            answers.push(value);
+            // Per-element shape first, list assembly after — `runLLMTurnFanout
+            // @T` answers `[Either InvocationExit T]`, `forkAll @T` answers
+            // `[T]`. See `wrap_fork_answer`.
+            answers.push(self.wrap_fork_answer(node, source, value)?);
         }
 
         let table = self

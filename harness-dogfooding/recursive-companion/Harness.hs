@@ -79,7 +79,14 @@ import qualified Data.List.NonEmpty as NE
 import qualified Data.Text as T
 import HarnessTypes
 import Tidepool.Aeson (object, toJSON, (.=))
-import Tidepool.Effects (ContextRef, freezeContext, runLLMTurnBranch, runLLMTurnFork, say)
+import Tidepool.Effects
+  ( ContextRef
+  , freezeContext
+  , liftEither
+  , runLLMTurnBranch
+  , runLLMTurnFork
+  , say
+  )
 import Tidepool.Form (askUser)
 import Tidepool.Harness (Harness)
 import Tidepool.Journal (record)
@@ -270,22 +277,29 @@ summarize a =
 -- ---------------------------------------------------------------------------
 -- The two windows — ONE named seam each
 --
--- Gap 3 (a window's abnormal exit aborting its siblings) is closed in a
--- sibling lane: @runLLMTurnFork@ becomes per-child-typed,
--- @M (Either InvocationExit T)@, so a branch's round exhaustion or
--- non-finalization folds as a failure AT ITS BRANCH POSITION instead of
--- erasing every sibling result.  Both invocations are funnelled through the
--- two functions below so that swap is one edit each:
+-- Gap 3 (a window's abnormal exit aborting its siblings) is closed at the
+-- verb: @runLLMTurnFork \@T@ answers @M (Either InvocationExit T)@, so the
+-- DRIVER no longer fails the whole outer turn when one branch's window
+-- exhausts its rounds — the exit arrives as data at that branch's position
+-- (plans/self-iterating-harness/21-c3-exit-verb.md).
+--
+-- This harness has not yet USED that: both seams below unwrap with
+-- @liftEither@, which is exactly the pre-verb behaviour (a window exit aborts
+-- the turn).  The fold that makes the exit a branch-position failure is this
+-- lane's own edit, still one per seam, and the shape is unchanged:
 --
 -- >   Right v   -> pure v
 -- >   Left exit -> ... Finish (Draft (renderInvocationExit exit)
 -- >                            (InvocationFailed (NodeFailure ...)) depth)
 --
--- 'layerWindow' now branches rather than forks, so whatever that lane does to
--- @runLLMTurnFork@ it will do to @runLLMTurnBranch@ around the WHOLE returned
--- pair (@M (Either InvocationExit (T, ContextRef))@) — a window that never
--- finalized minted no context of its own to hand on either.  Still one edit
--- each, still these two functions.
+-- 'layerWindow' branches rather than forks, and the verb wraps the WHOLE
+-- returned pair (@M (Either InvocationExit (T, ContextRef))@) — a window that
+-- never finalized minted no context of its own to hand on either.  Still one
+-- edit each, still these two functions.
+--
+-- (`foldWindow`'s @Left@ has no written mapping yet — what a failed ALGEBRA
+-- window folds to is a decision this lane still owes, which is why neither
+-- seam was rewired on its behalf.)
 --
 -- TWO functions rather than one @runWindow :: Text -> Companion a@, and the
 -- reason is mechanical: extract's typed-yield site pass rejects a
@@ -305,7 +319,7 @@ summarize a =
 -- It returns its answer AND its own post-finalize ref, which is what lets the
 -- next layer down branch off THIS node ('childSeed').
 layerWindow :: ContextRef -> Text -> Companion (LayerProposal, ContextRef)
-layerWindow ref prompt = runLLMTurnBranch @LayerProposal ref prompt
+layerWindow ref prompt = runLLMTurnBranch @LayerProposal ref prompt >>= liftEither
 
 -- | The ALGEBRA's window, FORKED — deliberately NOT branched, for two
 -- reasons, and both are load-bearing.
@@ -326,7 +340,7 @@ layerWindow ref prompt = runLLMTurnBranch @LayerProposal ref prompt
 -- capability laundered through the fold and would still be wrong for a leaf,
 -- whose layer has no children to read it off at all.
 foldWindow :: Text -> Companion FoldProposal
-foldWindow prompt = runLLMTurnFork @FoldProposal prompt
+foldWindow prompt = runLLMTurnFork @FoldProposal prompt >>= liftEither
 
 -- ---------------------------------------------------------------------------
 -- The coalgebra — how to split

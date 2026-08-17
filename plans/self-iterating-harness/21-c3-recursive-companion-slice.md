@@ -308,8 +308,9 @@ capability through the fold and still fails for a leaf, whose layer has no
 children to read it off.
 
 **The gate cannot live inside a window.** `drive_fanout_child_inner` supports
-`finalize` only; a nested `askUser`/`note`/`fork` from a fanout child gets a
-clear error naming the gap, not service. So the layer-approval gate is raised by
+`finalize` only; a nested `askUser`/`note`/`fork` from a fanout child ends that
+window with a typed `ExitNotFinalized` naming the gap (§8 gap 3), not service.
+So the layer-approval gate is raised by
 the AUTHORED LOOP between the coalgebra and the descent
 (`service_outer_askuser_hole`), which is also the right place on the merits: the
 gate is the operator's authority over the driver, not a capability the model
@@ -492,33 +493,41 @@ through `spawn_operator_server_multi`, render the tree through the harness's own
 registration is queued for C5, where it belongs beside the typed-UI work.
 `register_node` being idempotent is why it can wait.
 
-### Gap 3 — a window's `InvocationExit` aborts its siblings
+### Gap 3 — CLOSED (2026-08-17): the window verbs answer an `Either`
 
-Locked decision 6 requires a child window's abnormal exit to fold as `NodeFailed`
-at its branch position. Today `drive_fanout_child_inner` returns
-`Err(DriverError::Session(..))` on round exhaustion / non-finalization, and
-`service_outer_fanout` propagates it with `?` — so one branch's failure fails the
-whole outer turn, erasing every sibling result. There is no `Either`-shaped
-window verb: `runLLMTurnFork @T` resumes with `T` or the loop dies.
+Was: `drive_fanout_child_inner` returned `Err(DriverError::Session(..))` on
+round exhaustion / non-finalization and `service_outer_fanout` propagated it
+with `?`, so one branch's window failure failed the whole outer turn and
+erased every sibling result.
 
-**Ruling: closed inside this lane**, at the verb level rather than as a
+**Ruling: closed inside this lane** (LANDED 2026-08-17), at the verb level rather than as a
 driver-side policy knob — the caller folding `NodeFailed` at the branch position
 IS the design, so the type hands it to them. Specified in
 [21-c3-exit-verb.md](21-c3-exit-verb.md); the shape:
 
-- `runLLMTurnFork @T :: Text -> M (Either InvocationExit T)` and
-  `runLLMTurnFanout @T :: [Text] -> M [Either InvocationExit T]`, changed IN
-  PLACE rather than grown a `try`-prefixed sibling — one spelling, matching the
-  codebase's own typed-failure idiom (`run`, `llm`, #335) — with exactly one
-  Haskell caller outside the extractor internals to update.
-- `runLLMTurn @T` keeps its signature: its failure is the outer turn's failure,
-  not a branch position, and it has no siblings to erase.
+- EVERY verb that opens a window at a branch position answers an `Either`:
+  `runLLMTurnFork @T :: Text -> M (Either InvocationExit T)`,
+  `runLLMTurnFanout @T :: [Text] -> M [Either InvocationExit T]`, and
+  `runLLMTurnBranch @T :: ContextRef -> Text -> M (Either InvocationExit (T,
+  ContextRef))` — the `Either` around the WHOLE pair for the last, since a
+  window that never finalized minted no context of its own. Changed IN PLACE
+  rather than grown a `try`-prefixed sibling — one spelling, matching the
+  codebase's own typed-failure idiom (`run`, `llm`, #335). The authored `.hs`
+  callers were updated, plus the inline-Haskell fixtures in the harness test
+  suite (`golden_path`, `acceptance_fanout`, `turn_splice`,
+  `acceptance_value_bind`) — the general Agent stack reaches the fork/fanout
+  verbs through `Harness::answer_fork`/`answer_fanout`, which now wrap in
+  `Right` for a `runLLMTurn`-sourced hole (`engine::ForkSource`).
+- `runLLMTurn @T` and `freezeContext` keep their signatures: the first is
+  answered in context (its failure is the outer turn's failure, and it has no
+  siblings to erase), the second is not a window at all.
 - The line that decides what becomes a typed exit: a failure attributable to ONE
   CHILD'S WINDOW (round exhaustion, non-finalization, that child's own
   compile/provider failure) is typed; a failure of the MECHANISM (fanout
   cardinality, sum/list assembly against the table, session bookkeeping, the
-  per-loop inference-call runaway cap) still hard-fails. Laundering a broken
-  mechanism into "the model failed" would be a false receipt.
+  per-loop inference-call runaway cap, a stale or unknown `ContextRef`) still
+  hard-fails. Laundering a broken mechanism into "the model failed" would be a
+  false receipt.
 
 Two classes then fold as data, and both are exercised (§9): a window that
 finalizes a structurally unusable layer (§2 — an empty split, a blank branch),
@@ -526,11 +535,20 @@ and a window that exits abnormally.
 
 The harness funnels both invocations through `layerWindow`/`foldWindow`, two
 adjacent one-line functions under a single comment block, so the rewire is one
-edit each. TWO rather than one polymorphic `runWindow :: Text -> Companion a`,
+edit each. Today both simply `>>= liftEither` — the pre-verb behaviour, kept
+deliberately: what a failed ALGEBRA window folds to is a decision this lane
+still owes, and neither seam was rewired on its behalf. TWO rather than one polymorphic `runWindow :: Text -> Companion a`,
 for a mechanical reason worth recording: extract's typed-yield site pass
 rejects a `runLLMTurnFork @a` call at a bare type VARIABLE ("polymorphic
 runLLMTurn site"), which is the same constraint that makes `Tidepool.Harness`
 re-export `runLLMTurn` rather than wrap it.
+
+One constraint that came with it, and it binds any harness: `InvocationExit`
+lives in the per-fragment generated `Tidepool.Effects`, so an
+`Either InvocationExit T` cannot be a cross-turn session VALUE BIND (the
+cross-row bind guard refuses it, as it already did for `Schema`). Irrelevant
+to this lane's authored loop — the `Either` is consumed inside one fragment —
+but do not bind one by name across turns; project at the bind instead.
 
 ---
 

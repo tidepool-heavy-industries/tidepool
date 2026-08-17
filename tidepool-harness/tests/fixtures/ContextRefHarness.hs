@@ -16,6 +16,14 @@
 -- unmodified; branch B defines its OWN local `helper` that shadows freely;
 -- and ROOT's own `helper` is unchanged by either, checked AFTER both
 -- branches finish.
+--
+-- It ALSO carries PRD 21 locked decision 6 for this verb: a branch child is a
+-- BRANCH POSITION, so `runLLMTurnBranch @T` answers
+-- @Either InvocationExit (T, ContextRef)@ and a window that exits without an
+-- answer folds as data at its own position instead of aborting the turn. The
+-- state keeps both projections — `answers` (what arrived) and `outcomes` (one
+-- entry per branch position) — so one fixture serves both the all-success
+-- scenario and the starved-branch one.
 module ContextRefHarness
   ( State (..)
   , initialState
@@ -25,7 +33,14 @@ module ContextRefHarness
 
 import GHC.Generics (Generic)
 import Tidepool.Aeson (FromJSON, ToJSON)
-import Tidepool.Effects (freezeContext, runLLMTurn, runLLMTurnBranch)
+import Tidepool.Effects
+  ( ContextRef
+  , InvocationExit
+  , freezeContext
+  , renderInvocationExit
+  , runLLMTurn
+  , runLLMTurnBranch
+  )
 import Tidepool.Prelude hiding (render)
 import Tidepool.QQ (fmt)
 
@@ -34,11 +49,12 @@ import Tidepool.Harness (Harness)
 data State = State
   { loopCount :: Int
   , answers   :: [Int]
+  , outcomes  :: [Text]
   }
   deriving (Generic, ToJSON, FromJSON, Show)
 
 initialState :: State
-initialState = State {loopCount = 0, answers = []}
+initialState = State {loopCount = 0, answers = [], outcomes = []}
 
 render :: State -> Text
 render st =
@@ -51,7 +67,26 @@ loop :: State -> Harness State
 loop st = do
   _declared <- runLLMTurn @Bool "declare the shared helper"
   ref <- freezeContext
-  (a, _refA) <- runLLMTurnBranch @Int ref "Branch A: use the shared helper, do not redefine it"
-  (b, _refB) <- runLLMTurnBranch @Int ref "Branch B: define your OWN local helper, then use it"
+  -- NOT `Right (a, _) <- ...`: a refutable bind would turn a branch exit back
+  -- into an abort, which is exactly what decision 6 forbids. Each branch's
+  -- outcome is kept AT ITS OWN POSITION and projected below.
+  eA <- runLLMTurnBranch @Int ref "Branch A: use the shared helper, do not redefine it"
+  eB <- runLLMTurnBranch @Int ref "Branch B: define your OWN local helper, then use it"
   rootAfter <- runLLMTurn @Int "check the shared helper is unchanged after both branches"
-  pure st {loopCount = loopCount st + 1, answers = [a, b, rootAfter]}
+  pure st { loopCount = loopCount st + 1
+          , answers = answered [eA, eB] ++ [rootAfter]
+          , outcomes = map renderOutcome [eA, eB]
+          }
+
+-- | The branch answers that arrived, in branch order — a window that exited
+-- without one contributes nothing and does NOT displace its sibling.
+answered :: [Either InvocationExit (Int, ContextRef)] -> [Int]
+answered = foldr keep []
+  where
+    keep (Right (n, _)) acc = n : acc
+    keep (Left _)       acc = acc
+
+-- | One line per BRANCH POSITION, so a failure is legible where it happened.
+renderOutcome :: Either InvocationExit (Int, ContextRef) -> Text
+renderOutcome (Right (n, _)) = "ok:" <> show n
+renderOutcome (Left e)       = "exit:" <> renderInvocationExit e

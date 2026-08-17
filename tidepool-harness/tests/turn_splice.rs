@@ -100,7 +100,7 @@ impl ModelProvider for SpliceProbeProvider {
                 text: "I'll get a number from a sub-agent, then finish.\n\n\
                        ```haskell\n\
                        do\n\
-                       \x20 n <- runLLMTurnFork @Int \"pick a number between 1 and 100\"\n\
+                       \x20 Right n <- runLLMTurnFork @Int \"pick a number between 1 and 100\"\n\
                        \x20 pure (toJSON n)\n\
                        ```"
                 .to_string(),

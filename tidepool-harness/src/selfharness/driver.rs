@@ -74,7 +74,10 @@ use tidepool_eval::value::Value;
 use tidepool_repr::DataConTable;
 use tidepool_runtime::session::ResidentOutcome;
 
-use crate::engine::{self, ClassifiedHole, CompiledTurn, EngineConfig, HoleRouting, TurnOutcome};
+use crate::engine::{
+    self, ClassifiedHole, CompiledTurn, EngineConfig, EngineError, HoleRouting, InvocationExit,
+    TurnOutcome,
+};
 use crate::harness::{AnswerContract, Harness, HarnessError};
 use crate::log::Actor;
 use crate::selfharness::harness_source::HarnessSource;
@@ -1980,11 +1983,17 @@ impl SelfHarnessDriver {
                         // every prompt CONCURRENTLY, each in its own
                         // freshly-minted answerer realm, then resume this
                         // ONE hole once with the assembled answer.
+                        // `source` is unread here: the outer row is
+                        // `outer_decls()`, which has no `Fork` effect, so the
+                        // only verb that can raise this routing on the outer
+                        // session is `runLLMTurnFork`/`runLLMTurnFanout` —
+                        // `ForkSource::RunLLMTurn` by construction.
                         HoleRouting::Fork {
                             site,
                             ty,
                             fan,
                             prompts,
+                            source: _,
                         } => {
                             let value = self
                                 .service_outer_fanout(
@@ -2117,7 +2126,20 @@ impl SelfHarnessDriver {
         self.agent.push_user_turn(node, &child_prompt)?;
         self.emit(Event::TurnStart { node });
 
-        let outcome = self.drive_answerer_to_finalize(node, ty, site).await?;
+        // An in-context window has NO branch position and no siblings — its
+        // failure IS this turn's failure, which is why `runLLMTurn @T` keeps
+        // a bare answer (PRD 21 decision 6's asymmetry, stated at the verb
+        // declaration). So a typed exit from the shared round loop collapses
+        // back into a hard failure HERE, unchanged from before the exit
+        // plumbing existed.
+        let outcome = match self.drive_answerer_to_finalize(node, ty, site).await? {
+            Ok(o) => o,
+            Err(exit) => {
+                return Err(DriverError::Session(format!(
+                    "runLLMTurn answerer node {node:?}: {exit}"
+                )))
+            }
+        };
         self.emit(Event::TurnEnd { node });
 
         let is_finalize = matches!(
@@ -2191,9 +2213,20 @@ impl SelfHarnessDriver {
     /// [`Self::drive_answerer_to_finalize`] UNCHANGED: the node arrives
     /// already seeded with its hole card as the branch's inherited-prefix
     /// opening turn, exactly the "already seeded" precondition that method
-    /// already documents), and resume with `(T, ContextRef)` — the child's
-    /// answer, plus a ref to ITS OWN post-finalize frozen prefix so it can be
+    /// already documents), and resume with
+    /// `Either InvocationExit (T, ContextRef)` — on success the child's
+    /// answer plus a ref to ITS OWN post-finalize frozen prefix so it can be
     /// branched again.
+    ///
+    /// A branch child is a BRANCH POSITION, so PRD 21 locked decision 6
+    /// applies here exactly as it does to fork/fanout: a failure of THIS
+    /// WINDOW (round exhaustion, non-finalization) folds as `Left exit` into
+    /// the answer, and a failure of the MECHANISM still hard-fails the turn —
+    /// notably [`Harness::resolve_context_ref`] refusing an unknown or stale
+    /// ref, which is a capability that was never valid rather than a window
+    /// that failed. The `Either` wraps the WHOLE pair because a window that
+    /// never finalized has no post-finalize prefix, so there would be no
+    /// honest `ContextRef` to hand back beside the failure.
     ///
     /// The child's SCOPE is minted as a child of the frozen window's own
     /// scope ([`Harness::context_ref_scope`]) — locked decision 2's "its
@@ -2251,8 +2284,21 @@ impl SelfHarnessDriver {
             .set_answer_contract(node, self.answer_contract(ty));
         self.emit(Event::TurnStart { node });
 
+        // A branch child is a BRANCH POSITION, so from here on this window's
+        // own failures are DATA — folded as `Left exit` into the answer
+        // instead of aborting the outer turn (PRD 21 locked decision 6; see
+        // `service_outer_fanout`'s doc for the child-attributable/mechanism
+        // line, which holds identically here). Everything ABOVE this point is
+        // mechanism and still hard-fails: `resolve_context_ref` refusing an
+        // unknown or stale ref is a capability that was never valid, not a
+        // window that failed, and the scope/fork/force steps are bookkeeping.
+        let mut exit: Option<InvocationExit> = None;
         let outcome = match self.drive_answerer_to_finalize(node, ty, site).await {
-            Ok(o) => o,
+            Ok(Ok(o)) => Some(o),
+            Ok(Err(e)) => {
+                exit = Some(e);
+                None
+            }
             Err(e) => {
                 let _ = self
                     .agent
@@ -2262,21 +2308,45 @@ impl SelfHarnessDriver {
         };
         self.emit(Event::TurnEnd { node });
 
-        let is_finalize = matches!(
-            &outcome,
-            TurnOutcome::Suspended { classified, .. }
-                if matches!(classified.routing, HoleRouting::Finalize { .. })
-        );
-        if !is_finalize {
+        if let Some(outcome) = &outcome {
+            let is_finalize = matches!(
+                outcome,
+                TurnOutcome::Suspended { classified, .. }
+                    if matches!(classified.routing, HoleRouting::Finalize { .. })
+            );
+            if !is_finalize {
+                // NON-FINALIZATION — the window ended on something that is not
+                // an answer. Decision 6 names this class; it folds at the
+                // branch, it does not take the turn down.
+                exit = Some(InvocationExit::NotFinalized(format!(
+                    "runLLMTurnBranch child {node:?} did not suspend on finalize (got {})",
+                    turn_outcome_tag(outcome)
+                )));
+            }
+        }
+
+        if let Some(exit) = exit {
+            tracing::warn!(
+                node = ?node,
+                exit = %exit,
+                "branch child exited without an answer — folding it as data at its \
+                 branch position"
+            );
             let _ = self
                 .agent
-                .terminate_node(node, "branch child retired (no finalize)");
-            return Err(DriverError::Session(format!(
-                "runLLMTurnBranch child {node:?} did not suspend on finalize (got {})",
-                turn_outcome_tag(&outcome)
-            )));
+                .terminate_node(node, "branch child retired (exit)");
+            self.lifecycle = SelfHarnessState::RunningLoop;
+            // The `Either` wraps the WHOLE pair: a window that never finalized
+            // has no post-finalize prefix, so there is no honest `ContextRef`
+            // to put beside the failure.
+            return engine::build_child_answer_value(Err(exit), table)
+                .map_err(|e| DriverError::Session(e.to_string()));
         }
+
         if self.agent.finalize_is_closure(node) {
+            // NOT a typed exit, for the same reason as the fanout path: the
+            // window DID answer, and it is this driver that cannot carry a
+            // closure across the branch pair (v1 scope). Our gap fails as ours.
             let _ = self
                 .agent
                 .terminate_node(node, "branch child retired (closure)");
@@ -2301,7 +2371,9 @@ impl SelfHarnessDriver {
 
         let ref_value = engine::build_context_ref_value(child_digest.as_str(), table)
             .map_err(|e| DriverError::Session(e.to_string()))?;
-        engine::build_pair_value(value, ref_value, table)
+        let pair = engine::build_pair_value(value, ref_value, table)
+            .map_err(|e| DriverError::Session(e.to_string()))?;
+        engine::build_child_answer_value(Ok(pair), table)
             .map_err(|e| DriverError::Session(e.to_string()))
     }
 
@@ -2322,6 +2394,25 @@ impl SelfHarnessDriver {
     /// DECLARATION order before assembly, exactly like `answer_fanout`'s own
     /// order contract, just reached by a different (order-insensitive
     /// completion, order-preserving assembly) route.
+    ///
+    /// # The child-attributable / mechanism line (PRD 21 locked decision 6)
+    ///
+    /// This is the ONE place the two are separated, and the separation is the
+    /// whole point of the verbs' `Either` shape:
+    ///
+    /// - A failure ATTRIBUTABLE TO ONE CHILD'S WINDOW — its rounds ran out, it
+    ///   ended on something that is not an answer, its own provider call
+    ///   failed — comes back from [`Self::drive_fanout_child`] as
+    ///   `Ok(Err(exit))` and is folded as `Left exit` AT THAT CHILD'S BRANCH
+    ///   POSITION. Its siblings' answers are unaffected: the whole reason
+    ///   decision 6 exists is that an exception here erases results that were
+    ///   already produced.
+    /// - A failure of the MECHANISM — the fan cardinality check below, the
+    ///   `Either`/list assembly against the table, session bookkeeping, the
+    ///   per-loop inference-call runaway cap — still hard-fails the turn via
+    ///   `?`. Laundering a broken mechanism into "the model failed" would put
+    ///   a false receipt in front of the operator, which is precisely what
+    ///   this codebase refuses.
     async fn service_outer_fanout(
         &mut self,
         site: u32,
@@ -2384,7 +2475,8 @@ impl SelfHarnessDriver {
         // needed (see `drive_fanout_child`'s doc for why `tokio::spawn`
         // itself doesn't fit here).
         let this = &*self;
-        let mut results: Vec<(usize, Result<Value, DriverError>)> =
+        #[allow(clippy::type_complexity)]
+        let mut results: Vec<(usize, Result<Result<Value, InvocationExit>, DriverError>)> =
             stream::iter(prompts.iter().enumerate())
                 .map(|(idx, prompt)| async move {
                     let value = this
@@ -2402,9 +2494,28 @@ impl SelfHarnessDriver {
 
         self.lifecycle = SelfHarnessState::RunningLoop;
 
+        // Per-child assembly. The `?` on the OUTER `Result` is the mechanism
+        // line: only a mechanism failure reaches it. The INNER `Result` is the
+        // child's own outcome and becomes `Right`/`Left` at its position —
+        // `engine::build_child_answer_value` follows `build_list_value`'s
+        // loud-failure discipline (a `Left`/`Right`/`Exit*` constructor absent
+        // from the turn's table is itself a mechanism failure, never a
+        // defaulted value).
         let mut answers = Vec::with_capacity(results.len());
-        for (_, r) in results {
-            answers.push(r?);
+        for (idx, r) in results {
+            let outcome = r?;
+            if let Err(exit) = &outcome {
+                tracing::warn!(
+                    child = idx,
+                    exit = %exit,
+                    "fanout child exited without an answer — folding it as data at its \
+                     branch position; siblings are unaffected"
+                );
+            }
+            answers.push(
+                engine::build_child_answer_value(outcome, table)
+                    .map_err(|e| DriverError::Session(e.to_string()))?,
+            );
         }
 
         if is_fanout {
@@ -2436,6 +2547,13 @@ impl SelfHarnessDriver {
     /// makes is `&self` too (`agent: Arc<Harness>`); the two pieces of
     /// driver state a round loop mutates (`loop_inference_calls`,
     /// `iteration_realm`) are atomics for exactly this reason.
+    ///
+    /// The nesting of the return type is the contract: the OUTER `Result` is
+    /// the MECHANISM (a hard failure of this driver, which fails the turn),
+    /// the INNER one is THIS CHILD'S WINDOW (`Err(exit)` folds as `Left` at
+    /// its branch position). See [`Self::service_outer_fanout`]'s doc for the
+    /// line between them. The node is retired either way — a child that exits
+    /// without an answer still releases its realm and scope.
     async fn drive_fanout_child(
         &self,
         sid: tidepool_repr::SessionId,
@@ -2444,7 +2562,7 @@ impl SelfHarnessDriver {
         prompt: &str,
         element_ty: Option<&str>,
         table: &DataConTable,
-    ) -> Result<Value, DriverError> {
+    ) -> Result<Result<Value, InvocationExit>, DriverError> {
         let node = self.agent.create_root_framed(
             &format!("fanout answerer {idx}"),
             "",
@@ -2478,6 +2596,26 @@ impl SelfHarnessDriver {
     /// [`Self::drive_fanout_child`]); [`retry_on_turn_in_flight`] covers the
     /// one OTHER call here that can lose the same race
     /// (`take_finalized_value_keep_open`, safe to retry as a whole).
+    ///
+    /// # What is a typed exit here and what is not
+    ///
+    /// `Ok(Err(exit))` — THIS WINDOW ended without an answer, and nothing
+    /// about the driver is broken:
+    /// - round exhaustion ([`InvocationExit::RoundsExhausted`]);
+    /// - a suspension on a non-`finalize` hole, i.e. the window ended on
+    ///   something that is not an answer ([`InvocationExit::NotFinalized`]);
+    /// - the window's own provider call failing
+    ///   ([`InvocationExit::RuntimeFailure`]).
+    ///
+    /// `Err(..)` — the MECHANISM is broken, and calling that "the model
+    /// failed" would be a false receipt:
+    /// - the per-loop inference-call cap (a runaway HARNESS, not a runaway
+    ///   window — and it is shared, so the next child would trip it too);
+    /// - a finalized CLOSURE. Note the difference from the cases above: the
+    ///   window DID answer, and this driver cannot carry the answer it gave
+    ///   (v1 scope). The gap is ours, so it fails as ours.
+    /// - session/registry faults, and any `Harness` error that is not the
+    ///   window's own compile (handled in-loop) or provider call.
     async fn drive_fanout_child_inner(
         &self,
         node: NodeId,
@@ -2486,7 +2624,7 @@ impl SelfHarnessDriver {
         prompt: &str,
         element_ty: Option<&str>,
         table: &DataConTable,
-    ) -> Result<Value, DriverError> {
+    ) -> Result<Result<Value, InvocationExit>, DriverError> {
         self.agent
             .set_answer_contract(node, self.answer_contract(element_ty));
         let child_prompt =
@@ -2511,10 +2649,13 @@ impl SelfHarnessDriver {
                 )));
             }
             if rounds >= hard_rounds {
-                return Err(DriverError::Session(format!(
+                // ROUND EXHAUSTION — this window's own budget, spent. Data at
+                // the branch position, not an exception that would erase every
+                // sibling's finished answer (PRD 21 locked decision 6).
+                return Ok(Err(InvocationExit::RoundsExhausted(format!(
                     "fanout child {idx} exceeded {hard_rounds} rounds (cap {max_rounds} \
-                     + ultimatum grace) without finalizing — hard-failing the hole"
-                )));
+                     + ultimatum grace) without finalizing"
+                ))));
             }
             if rounds >= max_rounds && !ultimatum {
                 self.agent.push_user_turn(
@@ -2570,12 +2711,17 @@ impl SelfHarnessDriver {
                     break;
                 }
                 Ok(TurnOutcome::Suspended { classified, .. }) => {
-                    return Err(DriverError::Session(format!(
-                        "fanout child {idx} suspended on a non-finalize hole \
-                         ({:?}) — a concurrent fanout/fork child cannot present an \
-                         operator form, note, or nested fork in this driver (v1 scope)",
+                    // NON-FINALIZATION — the window ended on something that is
+                    // not an answer (a concurrent fanout/fork child cannot
+                    // present an operator form, note, or nested fork in this
+                    // driver, v1 scope), so it has no answer to give. Decision
+                    // 6 names this class explicitly.
+                    return Ok(Err(InvocationExit::NotFinalized(format!(
+                        "fanout child {idx} suspended on a non-finalize hole ({:?}) — a \
+                         concurrent fanout/fork child cannot present an operator form, \
+                         note, or nested fork in this driver (v1 scope)",
                         classified.routing
-                    )));
+                    ))));
                 }
                 Ok(TurnOutcome::Completed { .. }) => {
                     self.agent.reopen_node(node)?;
@@ -2616,12 +2762,25 @@ impl SelfHarnessDriver {
                         ),
                     )?;
                 }
+                // A provider fault is THIS WINDOW's own runtime failure —
+                // decision 6's "runtime failure" class. Every other
+                // `HarnessError` is driver/session machinery and hard-fails
+                // the turn.
+                Err(HarnessError::Engine(EngineError::Provider(pe))) => {
+                    return Ok(Err(InvocationExit::RuntimeFailure(format!(
+                        "fanout child {idx} provider call failed: {pe}"
+                    ))));
+                }
                 Err(e) => return Err(e.into()),
             }
         }
         self.emit(Event::TurnEnd { node });
 
         if self.agent.finalize_is_closure(node) {
+            // NOT a typed exit: the window DID answer, and it is this driver
+            // that cannot carry a closure across the fanout join (v1 scope).
+            // Reporting our own gap as the child's failure would be a false
+            // receipt — see `service_outer_fanout`'s doc.
             return Err(DriverError::Session(format!(
                 "fanout child {idx} finalized a closure — a concurrent fanout/fork \
                  answer must be plain data in this driver (v1 scope)"
@@ -2633,7 +2792,7 @@ impl SelfHarnessDriver {
             node,
             value: rendered,
         });
-        Ok(value)
+        Ok(Ok(value))
     }
 
     /// Drive `node` (the per-loop answerer, already seeded with this hole's
@@ -2654,12 +2813,22 @@ impl SelfHarnessDriver {
     /// with no bridge), so nothing about that changes here. It is not
     /// `spawn_blocking`'d: the resident session is not `Send`-shaped for
     /// that, and doing so is a separate piece of work.
+    /// The return NESTING is the child-attributable/mechanism line, same
+    /// contract as [`Self::drive_fanout_child_inner`]: `Ok(Err(exit))` means
+    /// THIS WINDOW ended without an answer (round exhaustion, its own
+    /// provider call failing), `Err(..)` means the mechanism is broken (the
+    /// per-loop inference-call cap, session faults). Whether an exit is DATA
+    /// or fatal is the CALLER's to decide, because it depends on whether the
+    /// window sits at a branch position: [`Self::service_outer_branch`] folds
+    /// it as `Left` at that branch, while [`Self::service_runllm_hole`] —
+    /// answering IN CONTEXT on the outer turn's own continuation, with no
+    /// siblings and no position — still hard-fails, exactly as before.
     async fn drive_answerer_to_finalize(
         &mut self,
         node: NodeId,
         ty: Option<&str>,
         site: u32,
-    ) -> Result<TurnOutcome, DriverError> {
+    ) -> Result<Result<TurnOutcome, InvocationExit>, DriverError> {
         let ty_label = ty.unwrap_or("A");
         let max_rounds = self.answerer_max_rounds;
         let nudge_rounds = self.answerer_nudge_rounds;
@@ -2682,10 +2851,13 @@ impl SelfHarnessDriver {
                 )));
             }
             if rounds >= hard_rounds {
-                return Err(DriverError::Session(format!(
+                // ROUND EXHAUSTION — this window's own budget, spent. Data
+                // for a caller that has a branch position to fold it at;
+                // `service_runllm_hole` still turns it into a hard failure.
+                return Ok(Err(InvocationExit::RoundsExhausted(format!(
                     "runLLMTurn answerer exceeded {hard_rounds} rounds (cap {max_rounds} \
-                     + ultimatum grace) without finalizing — hard-failing the hole"
-                )));
+                     + ultimatum grace) without finalizing"
+                ))));
             }
             if rounds >= max_rounds && !ultimatum {
                 self.agent.push_user_turn(
@@ -2787,11 +2959,11 @@ impl SelfHarnessDriver {
                             }
                         };
                     if matches!(classified.routing, HoleRouting::Finalize { .. }) {
-                        return Ok(TurnOutcome::Suspended { hole, classified });
+                        return Ok(Ok(TurnOutcome::Suspended { hole, classified }));
                     }
                     if let HoleRouting::AskUser { shape } = &classified.routing {
                         match self.service_askuser_hole(node, shape).await? {
-                            Some(finalize_outcome) => return Ok(finalize_outcome),
+                            Some(finalize_outcome) => return Ok(Ok(finalize_outcome)),
                             None => {
                                 // The askUser chain resolved (the answerer's block
                                 // completed) WITHOUT finalize — same corrective
@@ -2819,7 +2991,7 @@ impl SelfHarnessDriver {
                     // doesn't exist here.
                     if matches!(classified.routing, HoleRouting::Fork { .. }) {
                         if let Some(out) = self.drain_answerer_fork(node, ty_label).await? {
-                            return Ok(out);
+                            return Ok(Ok(out));
                         }
                         // The parent completed without ever finalizing —
                         // `drain_answerer_fork` already reopened the node and
