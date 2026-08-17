@@ -23,7 +23,9 @@
 //!
 //! [`extract_command_name`] returns what to spawn; [`locate_extract`] resolves
 //! it to an ABSOLUTE path (the handshake must fingerprint a real file) and
-//! fails typed when there is none.
+//! fails typed when there is none. Both honor row 1's STRICT clause — a
+//! set-but-unreadable `$TIDEPOOL_EXTRACT` is a hard error out of either, never
+//! a silent fall-through to row 2.
 //!
 //! # Precedence: the Haskell stdlib source root
 //!
@@ -186,16 +188,28 @@ fn render_tried(tried: &[(&'static str, PathBuf)]) -> String {
 /// cache, the harness's `EngineConfig` — does not have to reach into the
 /// invocation crate.
 ///
-/// A set-but-unreadable `$TIDEPOOL_EXTRACT` degrades to the bare name here
-/// rather than erroring, because both callers already fail loudly downstream
-/// (the cache simply gets no fingerprint; `ExtractCmd::new` rejects it at
-/// spawn time with the strict message). Callers that want that error up front
-/// use [`locate_extract`].
-#[must_use]
-pub fn extract_command_name() -> String {
+/// STRICT, per the precedence table: a set-but-unreadable `$TIDEPOOL_EXTRACT`
+/// is a hard error here too, never a silent fall-through to the bare
+/// [`tidepool_extract_cmd::DEFAULT_BIN`] name — a caller that received the
+/// bare name back would spawn a DIFFERENT binary than the override named, and
+/// believe it was running the one it configured. An UNSET env falls back to
+/// the bare name unchanged (`Ok`, not an error — [`ToolchainError::ExtractNotFound`]
+/// is for [`locate_extract`]'s PATH-lookup failure, a distinct case).
+///
+/// # Errors
+/// [`ToolchainError::ExtractNotFound`] when `$TIDEPOOL_EXTRACT` names an
+/// unreadable file, naming the path, why it failed, and that unsetting the
+/// var falls back to `$PATH`.
+pub fn extract_command_name() -> Result<String, ToolchainError> {
     tidepool_extract_cmd::resolve_bin()
         .map(|b| b.path.to_string_lossy().into_owned())
-        .unwrap_or_else(|_| tidepool_extract_cmd::DEFAULT_BIN.to_string())
+        .map_err(|e| ToolchainError::ExtractNotFound {
+            tried: format!(
+                "{ENV_EXTRACT} is set to {} but that is not a readable file; \
+                 unset {ENV_EXTRACT} to fall back to $PATH lookup",
+                e.path().display()
+            ),
+        })
 }
 
 /// A resolved extract binary: an ABSOLUTE path plus where it came from.
@@ -712,6 +726,45 @@ pub fn enforce_handshake(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serial_test::serial;
+
+    /// A set-but-nonexistent `$TIDEPOOL_EXTRACT` must be a hard error out of
+    /// [`extract_command_name`], naming the offending path — the exact
+    /// silent-degrade-to-`$PATH` failure this module exists to close (a
+    /// caller must never spawn a different binary than the override named).
+    /// Unsetting the var is the other half of the contract: it must fall
+    /// back to the bare `$PATH` name unchanged, not become an error too.
+    #[test]
+    #[serial]
+    fn extract_command_name_is_strict_about_a_bad_override() {
+        let original = std::env::var(ENV_EXTRACT).ok();
+
+        let bad_path = "/nonexistent/tidepool-extract-loudfail-test";
+        std::env::set_var(ENV_EXTRACT, bad_path);
+        let err = extract_command_name().unwrap_err();
+        assert!(
+            matches!(err, ToolchainError::ExtractNotFound { .. }),
+            "expected ExtractNotFound, got {err:?}"
+        );
+        let msg = err.to_string();
+        assert!(msg.contains(bad_path), "message must name the path: {msg}");
+        assert!(
+            msg.contains("$PATH"),
+            "message must say unsetting falls back to $PATH: {msg}"
+        );
+
+        std::env::remove_var(ENV_EXTRACT);
+        assert_eq!(
+            extract_command_name().unwrap(),
+            tidepool_extract_cmd::DEFAULT_BIN,
+            "an unset override must still fall back to the bare $PATH name"
+        );
+
+        match original {
+            Some(v) => std::env::set_var(ENV_EXTRACT, v),
+            None => std::env::remove_var(ENV_EXTRACT),
+        }
+    }
 
     fn write_stdlib(root: &Path, prelude_body: &str) {
         let tp = root.join("Tidepool");

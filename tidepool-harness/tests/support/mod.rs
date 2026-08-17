@@ -89,18 +89,13 @@ pub fn isolate_compile_memo() -> TempDir {
 /// a real, executable, readable file whose content is garbage, rather than a
 /// nonexistent path.
 ///
-/// `tidepool_extract_cmd::resolve_bin()` only checks `path.is_file()`; a
-/// NONEXISTENT path is the one case `tidepool_runtime::toolchain::
-/// extract_command_name()` (what builds `EngineConfig::extract_bin`)
-/// silently degrades to a bare `tidepool-extract` PATH lookup, on the
-/// documented assumption that a bad override "fails loudly downstream" —
-/// which does not hold when a real `tidepool-extract` happens to sit on
-/// `$PATH` (e.g. a `~/.nix-profile/bin/tidepool-extract` from an unrelated
-/// install): the fallback silently compiles against THAT binary instead of
-/// failing. A file that EXISTS and is readable defeats the fallback
-/// (`resolve_bin` returns `Ok(BinSource::Env)` unconditionally), so the
-/// garbage content fails at spawn/exec time instead (`ENOEXEC` or similar) —
-/// deterministic on every machine, independent of `$PATH` contents. Keep the
+/// `tidepool_runtime::toolchain::extract_command_name()` (what builds
+/// `EngineConfig::extract_bin`) is STRICT: a NONEXISTENT path already fails
+/// loudly at resolution, before a binary is ever spawned. This fixture is for
+/// tests that want the failure to happen LATER, at spawn/exec time — a file
+/// that EXISTS and is readable resolves cleanly (`resolve_bin` returns
+/// `Ok(BinSource::Env)`), so the garbage content fails at spawn/exec time
+/// instead (`ENOEXEC` or similar), deterministic on every machine. Keep the
 /// returned `TempDir` alive for as long as the path must stay valid.
 pub fn poisoned_extract_bin() -> (TempDir, std::path::PathBuf) {
     let dir = tempfile::tempdir().expect("scratch tempdir for a poisoned extract binary");

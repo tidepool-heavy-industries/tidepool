@@ -255,17 +255,13 @@ async fn poisoned_driver_refuses_entry_points() {
     // Recovery re-bootstraps from scratch (the prior cycle discarded `outer`)
     // — point it at an extract "binary" that can never compile anything, so
     // THIS bootstrap attempt fails deterministically, without depending on
-    // GHC. NOT a nonexistent path: `toolchain::extract_command_name()`
-    // degrades a SET-but-unreadable `$TIDEPOOL_EXTRACT` to a bare
-    // `tidepool-extract` PATH lookup, which silently RESCUES a nonexistent
-    // override on any machine that happens to have a real `tidepool-extract`
-    // on `$PATH` (e.g. a `~/.nix-profile` install unrelated to this repo) —
-    // that rescue is exactly what let `poisoned_driver_refuses_entry_points`
-    // pass on such a machine without ever exercising the Poisoned escalation
-    // this test exists to pin. A real, readable, executable file with
-    // garbage content (`support::poisoned_extract_bin`) defeats the PATH
-    // fallback (the override resolves, so there's nothing to fall back to)
-    // and fails at spawn/exec time instead — un-rescuably, on every machine.
+    // GHC. NOT a nonexistent path: `toolchain::extract_command_name()` is
+    // STRICT about a set-but-unreadable `$TIDEPOOL_EXTRACT` (a hard error,
+    // never a silent PATH fall-through), but a nonexistent path would still
+    // fail at RESOLUTION rather than at bootstrap's compile step — this test
+    // wants the compile step to be what fails. A real, readable, executable
+    // file with garbage content (`support::poisoned_extract_bin`) resolves
+    // cleanly and fails at spawn/exec time instead.
     let original_extract = std::env::var("TIDEPOOL_EXTRACT").ok();
     let (_poison_dir, poison_path) = support::poisoned_extract_bin();
     std::env::set_var("TIDEPOOL_EXTRACT", &poison_path);

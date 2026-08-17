@@ -1028,7 +1028,8 @@ impl EngineConfig {
             include.push(lib.clone());
         }
         include.push(effects_dir.clone());
-        let extract_bin = tidepool_runtime::toolchain::extract_command_name();
+        let extract_bin = tidepool_runtime::toolchain::extract_command_name()
+            .map_err(|e| EngineError::Setup(format!("resolve extract binary: {e}")))?;
         Ok(EngineConfig {
             extract_bin,
             include,
