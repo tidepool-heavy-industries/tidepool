@@ -81,8 +81,9 @@ import HarnessTypes
 import Tidepool.Aeson (object, toJSON, (.=))
 import Tidepool.Effects
   ( ContextRef
+  , InvocationExit
   , freezeContext
-  , liftEither
+  , renderInvocationExit
   , runLLMTurnBranch
   , runLLMTurnFork
   , say
@@ -283,23 +284,23 @@ summarize a =
 -- exhausts its rounds — the exit arrives as data at that branch's position
 -- (plans/self-iterating-harness/21-c3-exit-verb.md).
 --
--- This harness has not yet USED that: both seams below unwrap with
--- @liftEither@, which is exactly the pre-verb behaviour (a window exit aborts
--- the turn).  The fold that makes the exit a branch-position failure is this
--- lane's own edit, still one per seam, and the shape is unchanged:
+-- Both seams pass the @Either@ through UNWRAPPED, and their two callers fold
+-- it — because the two exits mean different things and the difference is the
+-- whole point:
 --
--- >   Right v   -> pure v
--- >   Left exit -> ... Finish (Draft (renderInvocationExit exit)
--- >                            (InvocationFailed (NodeFailure ...)) depth)
+-- * a COALGEBRA exit means this node decided no layer, so 'discover' makes it
+--   a leaf whose @FinishOrigin@ is @InvocationFailed@.  The node's own algebra
+--   then folds it like any other childless layer.  The verb wraps the WHOLE
+--   returned pair — a window that never finalized minted no context of its own
+--   to hand on — which is also why nothing there needs a ref it does not have.
+-- * an ALGEBRA exit means the layer was fine and the FOLD failed.  'foldAt'
+--   replaces only what this node itself owed (its synthesis and tensions) and
+--   rolls its children's answers, tree lines, and accounting up untouched.
+--   Discarding them would erase completed sibling work one level up, which is
+--   the same erasure decision 6 forbids at a branch position.
 --
--- 'layerWindow' branches rather than forks, and the verb wraps the WHOLE
--- returned pair (@M (Either InvocationExit (T, ContextRef))@) — a window that
--- never finalized minted no context of its own to hand on either.  Still one
--- edit each, still these two functions.
---
--- (`foldWindow`'s @Left@ has no written mapping yet — what a failed ALGEBRA
--- window folds to is a decision this lane still owes, which is why neither
--- seam was rewired on its behalf.)
+-- Neither exit is an abort, and neither is silent: both journal under kind
+-- @failed@, tagged with which window produced them.
 --
 -- TWO functions rather than one @runWindow :: Text -> Companion a@, and the
 -- reason is mechanical: extract's typed-yield site pass rejects a
@@ -318,8 +319,8 @@ summarize a =
 -- shared prefix is the frozen context that ref names, never an empty root.
 -- It returns its answer AND its own post-finalize ref, which is what lets the
 -- next layer down branch off THIS node ('childSeed').
-layerWindow :: ContextRef -> Text -> Companion (LayerProposal, ContextRef)
-layerWindow ref prompt = runLLMTurnBranch @LayerProposal ref prompt >>= liftEither
+layerWindow :: ContextRef -> Text -> Companion (Either InvocationExit (LayerProposal, ContextRef))
+layerWindow ref prompt = runLLMTurnBranch @LayerProposal ref prompt
 
 -- | The ALGEBRA's window, FORKED — deliberately NOT branched, for two
 -- reasons, and both are load-bearing.
@@ -339,8 +340,8 @@ layerWindow ref prompt = runLLMTurnBranch @LayerProposal ref prompt >>= liftEith
 -- child's seed and reading it back off a child's answer, which would be a
 -- capability laundered through the fold and would still be wrong for a leaf,
 -- whose layer has no children to read it off at all.
-foldWindow :: Text -> Companion FoldProposal
-foldWindow prompt = runLLMTurnFork @FoldProposal prompt >>= liftEither
+foldWindow :: Text -> Companion (Either InvocationExit FoldProposal)
+foldWindow prompt = runLLMTurnFork @FoldProposal prompt
 
 -- ---------------------------------------------------------------------------
 -- The coalgebra — how to split
@@ -362,8 +363,16 @@ foldWindow prompt = runLLMTurnFork @FoldProposal prompt >>= liftEither
 -- that parent decided this layer.
 discover :: Config -> NodeSeed -> Companion (ThoughtF NodeSeed)
 discover _cfg seed = do
-  (proposal, myRef) <- layerWindow seed.seedRef (coalgebraPrompt seed)
-  let layer = layerFromProposal seed {seedRef = myRef} proposal
+  outcome <- layerWindow seed.seedRef (coalgebraPrompt seed)
+  let layer = case outcome of
+        -- A window that exited without an answer decided no layer, so this
+        -- node becomes a leaf whose ORIGIN says why (PRD 21 locked decision 6:
+        -- folded as data at its branch position, never an exception that
+        -- erases siblings).  It also minted no context of its own — which is
+        -- exactly why the verb wraps the whole pair, and why nothing here
+        -- needs a ref it does not have: a 'Th.Finish' has no children to seed.
+        Left e -> invocationFailed seed (renderInvocationExit e)
+        Right (proposal, myRef) -> layerFromProposal seed {seedRef = myRef} proposal
   journalLayer seed layer
   pure layer
 
@@ -594,32 +603,56 @@ foldAt layer path = do
   realized <- traverseLayer (layerStrategy layer) (applyChild path) (indexLayer layer)
   let kids = layerBranches realized
       kidAnswers = map (.value) kids
-  proposal <- foldWindow (algebraPrompt path layer kids)
+  outcome <- foldWindow (algebraPrompt path layer kids)
+  -- A FOLD window that exits is this node's OWN failure, and it must not be
+  -- its subtree's.  The children below it already ran and already folded;
+  -- discarding their answers, their tree lines, or their accounting here
+  -- would erase completed sibling work one level up — the same erasure
+  -- decision 6 forbids at a branch position, just reached from the algebra
+  -- side.  So the exit replaces only what this node itself was going to
+  -- contribute (its synthesis and tensions), and everything the children
+  -- earned rolls up untouched.
+  let (synthesis, tensions, foldBadges, foldFailed) = case outcome of
+        Right p -> (p.foldSynthesis, p.foldTensions, [], 0)
+        Left e ->
+          ( [fmt|<this node's fold window exited: {renderInvocationExit e}> — its {show (length kids)} branch result(s) are below, unfolded|]
+          , []
+          , ["fold failed"]
+          , 1
+          )
   record
     "fold"
     key
     ( object
-        [ "synthesis" .= proposal.foldSynthesis
-        , "tensions" .= proposal.foldTensions
+        [ "synthesis" .= synthesis
+        , "tensions" .= tensions
         , "children" .= map (renderPath . (.answerPath)) kidAnswers
         , "depth" .= pathDepth path
         ]
     )
+  -- Two independent failure classes, journaled separately on purpose: the
+  -- COALGEBRA's (this node never decided a layer — 'failureReason' reads it
+  -- off the layer's own origin) and the ALGEBRA's (the layer was fine, the
+  -- fold window exited).  A node can carry both.
   case failureReason layer of
     Nothing -> pure ()
-    Just why -> record "failed" key (object ["reason" .= why])
+    Just why -> record "failed" key (object ["reason" .= why, "window" .= ("coalgebra" :: Text)])
+  case outcome of
+    Right _ -> pure ()
+    Left e ->
+      record "failed" key (object ["reason" .= renderInvocationExit e, "window" .= ("algebra" :: Text)])
   pure
     NodeAnswer
       { answerPath = path
       , answerPosture = layerPosture layer
-      , answerSynthesis = proposal.foldSynthesis
-      , answerTensions = proposal.foldTensions
-      , answerBadges = strategyBadges (layerStrategy layer) <> originBadges layer
+      , answerSynthesis = synthesis
+      , answerTensions = tensions
+      , answerBadges = strategyBadges (layerStrategy layer) <> originBadges layer <> foldBadges
       , answerTree = concatMap childLines kids
       , answerNodes = 1 + sum (map (.answerNodes) kidAnswers)
       , answerWindows = selfWindows layer + sum (map (.answerWindows) kidAnswers)
       , answerForced = selfForced layer + sum (map (.answerForced) kidAnswers)
-      , answerFailed = selfFailed layer + sum (map (.answerFailed) kidAnswers)
+      , answerFailed = selfFailed layer + foldFailed + sum (map (.answerFailed) kidAnswers)
       }
   where
     key = renderPath path

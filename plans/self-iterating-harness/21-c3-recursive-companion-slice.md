@@ -533,6 +533,17 @@ Two classes then fold as data, and both are exercised (§9): a window that
 finalizes a structurally unusable layer (§2 — an empty split, a blank branch),
 and a window that exits abnormally.
 
+**The harness folds the two exits differently, and the difference is the
+point.** A COALGEBRA exit means the node decided no layer, so `discover` makes
+it a leaf whose `FinishOrigin` is `InvocationFailed`; its own algebra then folds
+it like any other childless layer. An ALGEBRA exit means the layer was fine and
+the FOLD failed — so `foldAt` replaces only what that node itself owed (its
+synthesis and tensions) and rolls its children's answers, tree lines, and
+accounting up **untouched**. Discarding them would erase completed sibling work
+one level up, which is the same erasure decision 6 forbids at a branch position,
+just reached from the algebra side. Neither exit aborts and neither is silent:
+both journal under kind `failed`, tagged with which window produced them.
+
 The harness funnels both invocations through `layerWindow`/`foldWindow`, two
 adjacent one-line functions under a single comment block, so the rewire is one
 edit each. Today both simply `>>= liftEither` — the pre-verb behaviour, kept
