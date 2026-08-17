@@ -81,21 +81,24 @@ fn companion_typechecks() {
     );
 }
 
-/// dev-tree is a FORWARD dogfood: every name it calls exists today, but its
-/// row is wider than the driver's v1 outer session composes. This test pins
-/// the half that is real — that the file names only landed API — by handing it
-/// the row it documents in its own module haddock. When the driver's outer row
-/// widens, this test's decl list is what it widens to.
+/// dev-tree is the executable design target of S1-L1: its row now IS the
+/// driver's widened outer session (`[RunLLMTurn, AskUser, Console, Worktree,
+/// RepoEvent, Exec, Subagent]` — mirrors `selfharness::driver::outer_decls`,
+/// interposed effects FIRST so the suspend threshold stays 0). Typechecking
+/// against that exact row is what turns this from "the file names only
+/// landed API" into "this compiles against what the driver actually serves".
 #[test]
 fn dev_tree_typechecks() {
     typecheck(
         "harness-dogfooding/dev-tree",
         vec![
+            tidepool_mcp::runllmturn_decl(),
+            tidepool_mcp::askuser_decl(),
             tidepool_mcp::console_decl(),
             tidepool_mcp::worktree_decl(),
             tidepool_mcp::event_decl(),
+            tidepool_mcp::exec_decl(),
             tidepool_mcp::subagent_decl(),
-            tidepool_mcp::runllmturn_decl(),
         ],
     );
 }

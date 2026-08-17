@@ -47,6 +47,16 @@ use crate::provider::{
 };
 use crate::tree::FanBadge;
 
+/// Which outer-row effect a [`HoleRouting::OuterEffect`] suspension names —
+/// see that variant's doc.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OuterEffectKind {
+    Console,
+    Worktree,
+    RepoEvent,
+    Exec,
+}
+
 /// How a suspended request routes — decoded from its constructor name +
 /// payload: `Ask`, `RunLLMTurn`, and `Finalize`
 /// are each their own GADT/union-tag, see [`classify_hole`].
@@ -104,6 +114,18 @@ pub enum HoleRouting {
     /// `SubagentHandler`, suspension-serviced because the outer row's
     /// handled prefix must stay EMPTY on the shared machine).
     Subagent,
+    /// A Console/Worktree/RepoEvent/Exec verb (`say`/`createWorktree`/
+    /// `lookupWorktree`/`listWorktrees`/`worktreeBranch`/`worktreeHead`/
+    /// `withHandler`'s subscribe-drain-unsubscribe/`run`/`runIn`/`runArgv`)
+    /// raised by the AUTHORED outer loop — routed by CONSTRUCTOR NAME, same
+    /// discipline as [`HoleRouting::Subagent`]. One variant carrying WHICH
+    /// effect rather than four near-identical ones: the servicing site
+    /// decodes/dispatches identically for all four (decode the ORIGINAL
+    /// request `Value` via the generated `<Eff>Req: FromCore`, dispatch into
+    /// a driver-owned handler, resume with the response), differing only in
+    /// which handler it reaches (and, for Console, an extra observer-feed
+    /// post — see `SelfHarnessDriver::service_outer_effect`).
+    OuterEffect(OuterEffectKind),
     /// `finalize @T x` — an Agent turn hands a
     /// typed value UP to the parent `runLLMTurn` hole and TERMINATES its own
     /// turn loop, rather than resuming in context like [`HoleRouting::RunLLMTurn`]
@@ -158,6 +180,11 @@ pub struct ClassifiedHole {
 /// - `NoteWith` (text) — a real constructor arm on the SAME `AskUser` GADT,
 ///   routed by CONSTRUCTOR NAME → [`HoleRouting::Note`]. The sole field is a
 ///   bare `Text`, decoded directly (no shape/schema involved).
+/// - `Print` (Console) / `WorktreeCreate`/`WorktreeLookup`/`WorktreeList`/
+///   `WorktreeBranchOf`/`WorktreeHeadOf` (Worktree) / `RepoEventSubscribe`/
+///   `RepoEventDrain`/`RepoEventUnsubscribe` (RepoEvent) / `Run`/`RunIn`/
+///   `RunArgv` (Exec) — routed by CONSTRUCTOR NAME to
+///   [`HoleRouting::OuterEffect`], same discipline as `Subagent` below.
 /// - `AskWith` (prompt, payload) — plain [`HoleRouting::Ask`] (a structured
 ///   `ask schema prompt`).
 /// - anything else (an unrecognized Con) — treated as a bare Ask with an empty
@@ -223,6 +250,28 @@ pub fn classify_hole(request: &Value, table: &DataConTable, asks: &AsksSidecar) 
         },
         Some("SubagentSpawn") | Some("SubagentBegin") | Some("SubagentResume") => ClassifiedHole {
             routing: HoleRouting::Subagent,
+            prompt: String::new(),
+        },
+        Some("Print") => ClassifiedHole {
+            routing: HoleRouting::OuterEffect(OuterEffectKind::Console),
+            prompt: String::new(),
+        },
+        Some("WorktreeCreate")
+        | Some("WorktreeLookup")
+        | Some("WorktreeList")
+        | Some("WorktreeBranchOf")
+        | Some("WorktreeHeadOf") => ClassifiedHole {
+            routing: HoleRouting::OuterEffect(OuterEffectKind::Worktree),
+            prompt: String::new(),
+        },
+        Some("RepoEventSubscribe") | Some("RepoEventDrain") | Some("RepoEventUnsubscribe") => {
+            ClassifiedHole {
+                routing: HoleRouting::OuterEffect(OuterEffectKind::RepoEvent),
+                prompt: String::new(),
+            }
+        }
+        Some("Run") | Some("RunIn") | Some("RunArgv") => ClassifiedHole {
+            routing: HoleRouting::OuterEffect(OuterEffectKind::Exec),
             prompt: String::new(),
         },
         Some("NoteWith") => {

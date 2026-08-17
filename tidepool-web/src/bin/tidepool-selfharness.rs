@@ -21,6 +21,9 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use tidepool_handlers::{
+    ConsoleHandler, EventConfig, ExecHandler, RepoEventHandler, WorktreeHandler,
+};
 use tidepool_harness::engine::EngineConfig;
 use tidepool_harness::log::{LogHeader, LogWriter};
 use tidepool_harness::provider::api_key::{ApiKeyConfig, ApiKeyProvider};
@@ -32,6 +35,7 @@ use tidepool_harness::{
     answerer_decls, load_harness_source, Event, Harness, JsonlObserver, LogObserver, Observer,
     SelfHarnessDriver,
 };
+use tidepool_worktree::{EventJournal, GitCli, WorktreeMonitor};
 
 /// Dispatches every driver [`Event`] to each of several observers — lets the
 /// bin wire both stderr logging and the durable transcript without
@@ -147,6 +151,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         driver.set_gate(gate);
     }
 
+    // S1-L1 (plans/self-iterating-harness/20-exomonad-v3-prd.md): the
+    // Console/Worktree/RepoEvent/Exec seams for the AUTHORED outer loop —
+    // always wired (Console has no external state; Worktree/RepoEvent/Exec
+    // are scoped to TIDEPOOL_SOURCE_REPO, defaulting to the repo this process
+    // runs in), unlike the optional Subagent seam below.
+    let source_repo = match std::env::var_os("TIDEPOOL_SOURCE_REPO") {
+        Some(p) => PathBuf::from(p),
+        None => std::env::current_dir()?,
+    };
+    let (console_handler, worktree_handler, event_handler, exec_handler) =
+        build_outer_handlers(&source_repo)?;
+    driver.set_console_handler(console_handler);
+    driver.set_worktree_handler(worktree_handler);
+    driver.set_event_handler(event_handler);
+    driver.set_exec_handler(exec_handler);
+    tracing::info!(
+        target: "tidepool_web",
+        repo = %source_repo.display(),
+        "outer effect seam wired (Console/Worktree/RepoEvent/Exec)"
+    );
+
     // The subagent seam (plans/companion-memory.md): when TIDEPOOL_MEMORY_REPO
     // names the companion's memory store, wire a driver-owned SubagentHandler
     // over it so the authored loop's `spawnAgent` (the memory curator) is
@@ -167,6 +192,62 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+/// The durable data root (NOT the regenerable cache — worktree state must
+/// survive cache clears): `$XDG_DATA_HOME`, or `$HOME/.local/share` when
+/// unset.
+fn xdg_data_root() -> Result<PathBuf, Box<dyn std::error::Error>> {
+    std::env::var_os("XDG_DATA_HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/share")))
+        .ok_or_else(|| "neither XDG_DATA_HOME nor HOME is set".into())
+}
+
+/// The registry/worktree roots EVERY worktree-adjacent handler shares
+/// (`WorktreeHandler`, `RepoEventHandler`'s monitor, and — when
+/// TIDEPOOL_MEMORY_REPO is set — the Subagent handler): a `WorktreeId` minted
+/// through one resolves through the others. Outside any git work tree (the
+/// registry refuses otherwise) — same paths [`build_subagent_handler`] always
+/// used, just factored out so the two call sites cannot drift apart.
+fn shared_worktree_roots() -> Result<(PathBuf, PathBuf), Box<dyn std::error::Error>> {
+    let base = xdg_data_root()?.join("tidepool/subagent");
+    Ok((base.join("registry"), base.join("worktrees")))
+}
+
+/// Build the S1-L1 Console/Worktree/RepoEvent/Exec handlers: Console has no
+/// external state; Worktree and RepoEvent's `WorktreeMonitor` share their
+/// registry/worktree roots ([`shared_worktree_roots`]) and are scoped to
+/// `source_repo`; Exec's sandbox roots at the managed-worktrees root so `run`/
+/// `runIn` can operate inside a worktree by relative path.
+fn build_outer_handlers(
+    source_repo: &std::path::Path,
+) -> Result<
+    (
+        ConsoleHandler,
+        WorktreeHandler,
+        RepoEventHandler,
+        ExecHandler,
+    ),
+    Box<dyn std::error::Error>,
+> {
+    let (registry_root, worktree_root) = shared_worktree_roots()?;
+    let worktree_handler = WorktreeHandler::new(
+        registry_root,
+        worktree_root.clone(),
+        source_repo.to_path_buf(),
+    )?;
+    let journal_path = xdg_data_root()?.join("tidepool/repo-events.jsonl");
+    let journal = EventJournal::open(&journal_path)?;
+    let monitor = WorktreeMonitor::new(GitCli::new(), journal);
+    let event_handler = RepoEventHandler::new(monitor, EventConfig::default());
+    let exec_handler = ExecHandler::new(worktree_root);
+    Ok((
+        ConsoleHandler,
+        worktree_handler,
+        event_handler,
+        exec_handler,
+    ))
+}
+
 /// Build the memory curator's [`tidepool_handlers::SubagentHandler`]: source
 /// repository = the memory store; registry/worktree/binding roots under the
 /// durable data dir (NOT the regenerable cache — worktree state must survive
@@ -185,16 +266,13 @@ fn build_subagent_handler(
         )
         .into());
     }
-    let data_root = std::env::var_os("XDG_DATA_HOME")
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/share")))
-        .ok_or("neither XDG_DATA_HOME nor HOME is set")?
-        .join("tidepool/subagent");
+    let (registry_root, worktree_root) = shared_worktree_roots()?;
+    let binding_root = xdg_data_root()?.join("tidepool/subagent/bindings");
     let backend = tidepool_agent::backend::codex::CodexAgentBackend::new()?;
     let handler = tidepool_handlers::SubagentHandler::new(
-        data_root.join("registry"),
-        data_root.join("worktrees"),
-        data_root.join("bindings"),
+        registry_root,
+        worktree_root,
+        binding_root,
         repo.to_path_buf(),
         Box::new(backend),
     )?;

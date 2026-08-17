@@ -39,3 +39,7 @@ tracing-subscriber = { workspace = true, features = ["registry"] }
 # backed SubagentHandler + a TestRepo the curator spawns against.
 tidepool-agent.workspace = true
 tidepool-worktree.workspace = true
+# The outer-row Console/Worktree/RepoEvent/Exec acceptance
+# (tests/outer_effects.rs): a scripted `ObservationSource` over the wire
+# `WtWorktreeId`/`EvRepositoryEvent` types.
+tidepool-bridge-effects.workspace = true

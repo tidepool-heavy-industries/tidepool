@@ -192,11 +192,20 @@ struct OuterSession {
 /// `renderSpawnError` helper calls Worktree's `renderWorktreeError` — helper
 /// emission is row-membership-gated, so Worktree must be IN the row, not just
 /// in vocab.
+///
+/// S1-L1 (`plans/self-iterating-harness/20-exomonad-v3-prd.md`) widens this
+/// with `Console`/`RepoEvent`/`Exec`: an authored `loop` can now `say`,
+/// drive managed worktrees AND observe their repository events, and run
+/// shell commands — every one of them suspension-serviced by
+/// [`SelfHarnessDriver::service_outer_effect`], exactly like `Subagent`.
 fn outer_decls() -> Vec<tidepool_mcp::EffectDecl> {
     vec![
         tidepool_mcp::runllmturn_decl(),
         tidepool_mcp::askuser_decl(),
+        tidepool_mcp::console_decl(),
         tidepool_mcp::worktree_decl(),
+        tidepool_mcp::event_decl(),
+        tidepool_mcp::exec_decl(),
         tidepool_mcp::subagent_decl(),
     ]
 }
@@ -479,15 +488,26 @@ pub struct SelfHarnessDriver {
     /// Default [`StdinGate`] (headless behavior); override via
     /// [`Self::set_gate`] (a web/GUI implementation, or a scripted test gate).
     gate: Arc<dyn OperatorGate>,
-    /// The PRD 18 subagent seam for the AUTHORED loop: services a `Subagent`
-    /// suspension (`spawnAgent`/`spawnAgentRaw` raised by outer `loop` code)
-    /// by dispatching the decoded request into this handler — DRIVER-owned,
-    /// never a handler stack on the outer session, whose handled prefix must
-    /// stay empty on the shared machine (see [`outer_decls`]). The handler
-    /// holds a flocked binding table and (live) a running app-server, so it
-    /// rides the driver's process lifetime, surviving machine rotation.
-    /// `None` (default) fails a Subagent suspension with a legible error;
-    /// wire one via [`Self::set_subagent_handler`].
+    /// The driver-owned handler set for every outer-row effect that isn't
+    /// `RunLLMTurn`/`AskUser` (which have their own dedicated servicing
+    /// paths) — `Console`/`Worktree`/`RepoEvent`/`Exec`/`Subagent`. Each is
+    /// DRIVER-owned, never a handler stack on the outer session, whose
+    /// handled prefix must stay empty on the shared machine (see
+    /// [`outer_decls`]); a suspension against an unwired handler fails
+    /// LOUDLY with the wiring instruction, never a hang. Wire one via
+    /// [`Self::set_console_handler`]/[`Self::set_worktree_handler`]/
+    /// [`Self::set_event_handler`]/[`Self::set_exec_handler`]/
+    /// [`Self::set_subagent_handler`].
+    handlers: OuterHandlers,
+}
+
+/// See [`SelfHarnessDriver::handlers`]'s doc.
+#[derive(Default)]
+struct OuterHandlers {
+    console: Option<tidepool_handlers::ConsoleHandler>,
+    worktree: Option<tidepool_handlers::WorktreeHandler>,
+    event: Option<tidepool_handlers::RepoEventHandler>,
+    exec: Option<tidepool_handlers::ExecHandler>,
     subagent: Option<tidepool_handlers::SubagentHandler>,
 }
 
@@ -520,7 +540,7 @@ impl SelfHarnessDriver {
             checkpoint_generation: 0,
             iteration: 0,
             gate: Arc::new(StdinGate),
-            subagent: None,
+            handlers: OuterHandlers::default(),
         }
     }
 
@@ -611,7 +631,38 @@ impl SelfHarnessDriver {
     /// registry/worktree/binding roots OUTSIDE any git work tree; back it
     /// with `MockBackend` in tests and `CodexAgentBackend` live.
     pub fn set_subagent_handler(&mut self, handler: tidepool_handlers::SubagentHandler) {
-        self.subagent = Some(handler);
+        self.handlers.subagent = Some(handler);
+    }
+
+    /// Wire the Console seam: the handler a `say`/`Print` suspension from the
+    /// AUTHORED loop dispatches into ([`Self::service_outer_effect`]).
+    pub fn set_console_handler(&mut self, handler: tidepool_handlers::ConsoleHandler) {
+        self.handlers.console = Some(handler);
+    }
+
+    /// Wire the Worktree seam: the handler a `createWorktree`/
+    /// `lookupWorktree`/`listWorktrees`/`worktreeBranch`/`worktreeHead`
+    /// suspension from the AUTHORED loop dispatches into
+    /// ([`Self::service_outer_effect`]). Must share its registry/worktree
+    /// roots with [`Self::set_event_handler`]'s handler (and, when both are
+    /// wired, [`Self::set_subagent_handler`]'s) so a `WorktreeId` minted by
+    /// one resolves in the others.
+    pub fn set_worktree_handler(&mut self, handler: tidepool_handlers::WorktreeHandler) {
+        self.handlers.worktree = Some(handler);
+    }
+
+    /// Wire the RepoEvent seam: the handler a `withHandler` subscribe/drain/
+    /// unsubscribe suspension from the AUTHORED loop dispatches into
+    /// ([`Self::service_outer_effect`]). See [`Self::set_worktree_handler`]'s
+    /// doc on shared roots.
+    pub fn set_event_handler(&mut self, handler: tidepool_handlers::RepoEventHandler) {
+        self.handlers.event = Some(handler);
+    }
+
+    /// Wire the Exec seam: the handler a `run`/`runIn`/`runArgv` suspension
+    /// from the AUTHORED loop dispatches into ([`Self::service_outer_effect`]).
+    pub fn set_exec_handler(&mut self, handler: tidepool_handlers::ExecHandler) {
+        self.handlers.exec = Some(handler);
     }
 
     /// Override the emergency-compaction threshold (default
@@ -1529,11 +1580,29 @@ impl SelfHarnessDriver {
                                     DriverError::Session(format!("subagent resume failed: {e}"))
                                 })?;
                         }
+                        // Console/Worktree/RepoEvent/Exec (S1-L1) — same
+                        // suspension-servicing shape as Subagent above,
+                        // generalized over `OuterEffectKind`.
+                        HoleRouting::OuterEffect(kind) => {
+                            let kind = *kind;
+                            let value =
+                                self.service_outer_effect(kind, &request, &compiled.table)?;
+                            let sid = self.outer_sid()?;
+                            outcome = self
+                                .agent
+                                .with_session(sid, |s| s.resume(&hole, value))
+                                .map_err(|e| DriverError::Session(e.to_string()))?
+                                .map_err(|e| {
+                                    DriverError::Session(format!("outer effect resume failed: {e}"))
+                                })?;
+                        }
                         other => {
                             return Err(DriverError::Session(format!(
                                 "outer loop suspended on an unserviceable hole ({other:?}) — \
-                                 the Harness monad exposes runLLMTurn, askUser, note, and \
-                                 spawnAgent only"
+                                 the Harness monad exposes runLLMTurn, askUser, note, \
+                                 spawnAgent, say, createWorktree/lookupWorktree/listWorktrees/\
+                                 worktreeBranch/worktreeHead, withHandler (repository events), \
+                                 and run/runIn/runArgv only"
                             )))
                         }
                     }
@@ -2029,9 +2098,7 @@ impl SelfHarnessDriver {
         request: &Value,
         table: &DataConTable,
     ) -> Result<Value, DriverError> {
-        use tidepool_bridge::FromCore;
-        use tidepool_effect::dispatch::{EffectContext, EffectHandler};
-        let handler = self.subagent.as_mut().ok_or_else(|| {
+        let handler = self.handlers.subagent.as_mut().ok_or_else(|| {
             DriverError::Session(
                 "the authored loop called a Subagent verb (spawnAgent/spawnAgentRaw) but no \
                  subagent handler is configured — wire one with \
@@ -2040,38 +2107,133 @@ impl SelfHarnessDriver {
                     .into(),
             )
         })?;
-        let req = tidepool_handlers::SubagentReq::from_value(request, table)
-            .map_err(|e| DriverError::Session(format!("subagent request decode: {e}")))?;
-        let captured = tidepool_mcp::CapturedOutput::new();
         let started = std::time::Instant::now();
+        let value = Self::dispatch_outer_effect(handler, request, table)
+            .map_err(|e| DriverError::Session(format!("subagent dispatch: {e}")))?;
+        tracing::info!(
+            elapsed_ms = started.elapsed().as_millis() as u64,
+            "outer subagent suspension serviced"
+        );
+        Ok(value)
+    }
+
+    /// Service a Console/Worktree/RepoEvent/Exec suspension raised by the
+    /// AUTHORED outer loop (`kind` classified by [`engine::classify_hole`]):
+    /// dispatch the ORIGINAL request into the matching driver-owned handler
+    /// via [`Self::dispatch_outer_effect`] — the same decode-dispatch-convert
+    /// shape [`Self::service_outer_subagent`] uses, generalized over which
+    /// handler is reached. `Console`'s `say` additionally posts its text to
+    /// the operator feed the way the `note` servicing arm does
+    /// ([`Self::announce_note`]) before resuming with `()`.
+    fn service_outer_effect(
+        &mut self,
+        kind: engine::OuterEffectKind,
+        request: &Value,
+        table: &DataConTable,
+    ) -> Result<Value, DriverError> {
+        if kind == engine::OuterEffectKind::Console {
+            if let Ok(tidepool_handlers::ConsoleReq::Print(text)) =
+                <tidepool_handlers::ConsoleReq as tidepool_bridge::FromCore>::from_value(
+                    request, table,
+                )
+            {
+                self.announce_note(FormSource::OuterLoop, &text);
+            }
+        }
+        match kind {
+            engine::OuterEffectKind::Console => {
+                let handler = self.handlers.console.as_mut().ok_or_else(|| {
+                    Self::unwired_outer_effect_error("Console", "say", "set_console_handler")
+                })?;
+                Self::dispatch_outer_effect(handler, request, table)
+            }
+            engine::OuterEffectKind::Worktree => {
+                let handler = self.handlers.worktree.as_mut().ok_or_else(|| {
+                    Self::unwired_outer_effect_error(
+                        "Worktree",
+                        "createWorktree/lookupWorktree/listWorktrees/worktreeBranch/worktreeHead",
+                        "set_worktree_handler",
+                    )
+                })?;
+                Self::dispatch_outer_effect(handler, request, table)
+            }
+            engine::OuterEffectKind::RepoEvent => {
+                let handler = self.handlers.event.as_mut().ok_or_else(|| {
+                    Self::unwired_outer_effect_error(
+                        "RepoEvent",
+                        "withHandler (repository events)",
+                        "set_event_handler",
+                    )
+                })?;
+                Self::dispatch_outer_effect(handler, request, table)
+            }
+            engine::OuterEffectKind::Exec => {
+                let handler = self.handlers.exec.as_mut().ok_or_else(|| {
+                    Self::unwired_outer_effect_error(
+                        "Exec",
+                        "run/runIn/runArgv",
+                        "set_exec_handler",
+                    )
+                })?;
+                Self::dispatch_outer_effect(handler, request, table)
+            }
+        }
+        .map_err(|e| DriverError::Session(format!("{kind:?} dispatch: {e}")))
+    }
+
+    /// The legible "no handler wired" error every [`Self::service_outer_effect`]
+    /// branch raises for its own effect — names the verb family and the
+    /// setter that fixes it, never a hang.
+    fn unwired_outer_effect_error(effect: &str, verbs: &str, setter: &str) -> DriverError {
+        DriverError::Session(format!(
+            "the authored loop called a {effect} verb ({verbs}) but no {effect} handler is \
+             configured — wire one with SelfHarnessDriver::{setter}"
+        ))
+    }
+
+    /// The shared decode-dispatch-convert shape every outer-row effect
+    /// suspension goes through: decode the ORIGINAL suspended request `Value`
+    /// via the handler's generated `<Eff>Req: FromCore` (against the loop
+    /// compile's own table — never JSON-probed), dispatch it into `handler`
+    /// under `tokio::task::block_in_place` (the same discipline every
+    /// `OperatorGate` call and [`Self::service_outer_subagent`] use), and
+    /// convert the [`tidepool_effect::Response`] back into a resumable
+    /// `Value` — a `Complete` value as-is, a `List` folded into a cons chain
+    /// from its carried `cons_id`/`nil_id` (mirrors the in-machine dispatch
+    /// path's own fold, `tidepool_effect::machine`; a suspending outer row
+    /// never reaches that path itself, so this is the suspend-side
+    /// equivalent). No outer-row verb returns a list today, but a future one
+    /// (`respond_list`) resumes correctly without another servicing site.
+    fn dispatch_outer_effect<H>(
+        handler: &mut H,
+        request: &Value,
+        table: &DataConTable,
+    ) -> Result<Value, tidepool_effect::EffectError>
+    where
+        H: tidepool_effect::EffectHandler<tidepool_mcp::CapturedOutput>,
+    {
+        use tidepool_bridge::FromCore;
+        use tidepool_effect::dispatch::EffectContext;
+        let req = H::Request::from_value(request, table)?;
+        let captured = tidepool_mcp::CapturedOutput::new();
         let resp = tokio::task::block_in_place(|| {
             let cx = EffectContext::with_user(table, &captured);
             handler.handle(req, &cx)
-        })
-        .map_err(|e| DriverError::Session(format!("subagent dispatch: {e}")))?;
-        let root = match &resp {
-            tidepool_effect::Response::Complete(Value::Con(id, fields)) => {
-                let inner = fields.first().and_then(|f| match f {
-                    Value::Con(iid, _) => table.name_of(*iid),
-                    _ => None,
-                });
-                format!("{:?}({:?})", table.name_of(*id), inner)
+        })?;
+        Ok(match resp {
+            tidepool_effect::Response::Complete(v) => v,
+            tidepool_effect::Response::List {
+                items,
+                cons_id,
+                nil_id,
+            } => {
+                let mut acc = Value::Con(nil_id, vec![]);
+                for item in items.into_iter().rev() {
+                    acc = Value::Con(cons_id, vec![item, acc]);
+                }
+                acc
             }
-            other => format!("{other:?}"),
-        };
-        tracing::info!(
-            elapsed_ms = started.elapsed().as_millis() as u64,
-            resp_root = %root,
-            "outer subagent suspension serviced"
-        );
-        match resp {
-            tidepool_effect::Response::Complete(v) => Ok(v),
-            // Subagent verbs never return a list; a `Response::List` here is
-            // a wiring bug, surfaced loudly rather than resumed wrong-shaped.
-            other => Err(DriverError::Session(format!(
-                "subagent dispatch returned a non-Complete response ({other:?})"
-            ))),
-        }
+        })
     }
 
     async fn service_outer_askuser_hole(
@@ -2585,6 +2747,10 @@ mod tests {
         // The Subagent lane's hard companion rides along.
         assert!(decls.iter().any(|d| d.type_name == "Worktree"));
         assert!(decls.iter().any(|d| d.type_name == "Subagent"));
+        // S1-L1: Console/RepoEvent/Exec join the widened outer row.
+        assert!(decls.iter().any(|d| d.type_name == "Console"));
+        assert!(decls.iter().any(|d| d.type_name == "RepoEvent"));
+        assert!(decls.iter().any(|d| d.type_name == "Exec"));
     }
 
     /// The answerer's generated `Tidepool.Effects` module declares the
@@ -2645,6 +2811,8 @@ mod tests {
 
         assert!(outer_section.contains("**RunLLMTurn**"));
         assert!(!answerer_section.contains("**RunLLMTurn**"));
+        assert!(outer_section.contains("**Console**"));
+        assert!(!answerer_section.contains("**Console**"));
         assert!(!outer_section.contains("**Fork**"));
         assert!(answerer_section.contains("**Fork**"));
         assert_ne!(outer_section, answerer_section);
