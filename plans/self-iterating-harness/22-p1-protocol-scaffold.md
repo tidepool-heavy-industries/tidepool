@@ -1138,3 +1138,60 @@ rather than at an internal boundary the author never sees. It costs a
 `Tidepool/Worktree.hs` edit — which after this lane's flip is **one schema edit
 plus one adapter**. That is PRD 22's acceptance line, on a real example, and it
 is a fair test of whether the migration bought what it claimed.
+
+### 11.12 Two placement rules the emitted Haskell obeys
+
+Prompted by a sibling lane (2026-08-17) giving Fs's `errors FsError [...]` block
+an opt-in STABLE COMMITTED home instead of a per-session `type_defs` emission,
+because a bridged record's FIELD (`FileRead.contents :: Either FsError Text`)
+needs `FsError` to hold nominal identity across session fragments. Both
+questions it raises are placement questions, and this lane had to answer the
+second one the hard way.
+
+**Rule 1 — an error ADT reachable as a FIELD needs a stable home.** Checked for
+Worktree rather than assumed: no Worktree `type_def` record has a field whose
+type is an error ADT. The dependency runs the other way — `WorktreeError`'s
+variants carry `DirtySummary` / `GitFailureReceipt` / `WorktreeId` /
+`InProgressKind`, all ordinary records — and a verb result (`Either WorktreeError
+X`) never leaves the fragment that produced it. So the Worktree slice does not
+have Fs's constraint and its per-session emission is correct.
+
+> **It does apply one row over.** `subagent_effect_def!`'s `SpawnError` embeds
+> the wire `WorktreeError` as a FIELD, in two variants
+> (`SpawnWorktreeFailed`, `SpawnBindingFailed`). That is exactly Fs's shape:
+> an error ADT reachable as a field of another error ADT, across an effect
+> boundary. The Subagent lane inherits the stable-home constraint and should
+> settle it before it goldens, not after.
+
+**Rule 2 — nothing spliced into `Tidepool.Effects` may reference a name
+relocated into the authored library layer.** This one was found by walking into
+it. §11.9's fix relocates eleven non-representable helpers into
+`Tidepool.Worktree`. One of them, `renderWorktreeError`, is called by
+`subagent_effect_def!`'s `renderSpawnError` — and helpers are spliced INTO the
+generated `Tidepool.Effects`. `Tidepool.Worktree` imports `Tidepool.Effects`, so
+Effects cannot import it back; and `extra_imports` reaches the eval preamble and
+the decl plane but explicitly NOT the generated module. There is no import that
+fixes it.
+
+So relocation is safe only for a helper that no OTHER effect's helper text
+calls, and that is a whole-registry check, not a spot check. The fix is
+symmetry: `renderSpawnError` relocates into `Tidepool.Agent.Spawn` the same way,
+in its own commit, declared as the forced cross-row edit it is.
+
+**The generalization, and it is one attribute rather than two mechanisms.** Both
+rules are the same axis §11.6 already drew for the Haskell slice — *effect-scoped
+per-session `type_defs`* versus *stable committed home*. Fs's flag, the
+`Records.Bridged` module, and this lane's helper relocation are three instances
+of one placement decision, currently spelled three different ways. When the
+protocol program absorbs that artifact, the right shape is a PLACEMENT attribute
+on the emitted declaration — not a special case for error ADTs — with generation
+deriving the answer rather than an author remembering it:
+
+- a declaration reachable as a FIELD of anything that crosses a fragment
+  boundary must have a stable home (Rule 1), and
+- a definition referenced by any other effect's emitted text must stay in the
+  generated module (Rule 2).
+
+Both are computable from the schema, which means both can fail GENERATION rather
+than a GHC battery. That is the same move as the handling-class requirement, and
+it is worth making at the same time.
