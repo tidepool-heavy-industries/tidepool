@@ -679,32 +679,48 @@ impl CompiledEffectMachine {
                 // E(union, k'): compose ALL remaining k2s into k'. Both forces
                 // can GC: `result` (field 1 is read after the first force),
                 // `union_val` across the second force, and the pending k2s
-                // all need protecting. The alloc_con composition below is
-                // bump-only (null on exhaustion), so no protection is needed
-                // past here.
-                let (union_val, mut k_prime) = {
+                // all need protecting. The alloc_con composition below ALSO
+                // retries through GC on nursery exhaustion (a deep k2_stack —
+                // e.g. from nested mapM/foldM over many effectful iterations —
+                // can outrun the nursery), so union_val and k' must stay
+                // rooted for the ENTIRE composition, not just the initial
+                // extraction: a retry's collection can move either one, and
+                // nothing past the extraction block used to keep them live.
+                let mut union_val = unsafe { RootedLocal::new(vmctx, std::ptr::null_mut()) };
+                let mut k_prime = unsafe { RootedLocal::new(vmctx, std::ptr::null_mut()) };
+                {
                     let _roots = unsafe { RootedStack::new(vmctx, &mut k2_stack) };
-                    let mut union_val =
-                        unsafe { RootedLocal::new(vmctx, Self::read_con_field(result.get(), 0)) };
+                    union_val.set(Self::read_con_field(result.get(), 0));
                     union_val.set(self.force_ptr(union_val.get()));
-                    let k_prime = self.force_ptr(Self::read_con_field(result.get(), 1));
-                    (union_val.get(), k_prime)
-                };
+                    k_prime.set(self.force_ptr(Self::read_con_field(result.get(), 1)));
+                }
                 if crate::host_fns::has_runtime_error() {
                     return std::ptr::null_mut();
                 }
 
-                while let Some(k2) = k2_stack.pop() {
-                    k_prime = self.alloc_con(self.tags.node, &[k_prime, k2]);
-                    if k_prime.is_null() {
-                        // alloc_con failed (OOM)
+                // `k2_stack.last()` (not `.pop()`) so the entry under
+                // composition stays IN the Vec, and therefore covered by the
+                // `RootedStack` guard below, for the duration of the
+                // GC-capable alloc — popped only once the call returns.
+                while let Some(&k2) = k2_stack.last() {
+                    let next = {
+                        let _roots = unsafe { RootedStack::new(vmctx, &mut k2_stack) };
+                        self.alloc_con(self.tags.node, &mut [k_prime.get(), k2])
+                    };
+                    if next.is_null() {
+                        // alloc_con failed (OOM even after a GC retry)
                         let msg = "apply_cont_heap: failed to allocate Node during continuation composition";
                         crate::host_fns::push_diagnostic(msg.to_string());
                         crate::host_fns::runtime_error_with_msg(2, msg.as_ptr(), msg.len() as u64);
                         return std::ptr::null_mut();
                     }
+                    k_prime.set(next);
+                    k2_stack.pop();
                 }
-                let res = self.alloc_con(self.tags.e, &[union_val, k_prime]);
+                let res = {
+                    let _roots = unsafe { RootedStack::new(vmctx, &mut k2_stack) };
+                    self.alloc_con(self.tags.e, &mut [union_val.get(), k_prime.get()])
+                };
                 if res.is_null() {
                     let msg = "apply_cont_heap: failed to allocate E result during continuation composition";
                     crate::host_fns::push_diagnostic(msg.to_string());
@@ -831,21 +847,54 @@ impl CompiledEffectMachine {
         }
     }
 
-    /// Allocate a Con HeapObject on the nursery with the given tag and fields.
-    unsafe fn alloc_con(&mut self, con_tag: u64, fields: &[*mut u8]) -> *mut u8 {
-        // The header stores size and num_fields as u16. Unbounded, `size as
-        // u16` wraps at >= 8189 fields while num_fields stays correct — GC
-        // evacuation then copies the wrapped size (fields LOST) and the
-        // Cheney scan walks into garbage. Refuse at the bound the read side
-        // enforces; the null return routes through the caller's existing
-        // OOM/poison handling.
+    /// Allocate a Con HeapObject on the nursery with the given tag and
+    /// fields, retrying once through a GC cycle (`heap_bridge::gc_retry`) if
+    /// the nursery is exhausted. `apply_cont_heap`'s continuation-composition
+    /// loop is the sole caller: a `k2_stack` deep enough (e.g. from nested
+    /// `mapM`/`foldM` over many effectful iterations) can need more Node
+    /// allocations than a single nursery holds.
+    ///
+    /// Every entry of `fields` is registered as a Rust GC root for the
+    /// duration, and the array itself — not just whatever cell each pointer
+    /// was read from — is what a triggered collection updates in place: the
+    /// header write below reads `fields` back out AFTER the retry, so the
+    /// object is built from the post-collection addresses. A caller whose
+    /// operands are ALSO tracked elsewhere (e.g. via a `RootedLocal` or an
+    /// outer `RootedStack`) still needs this, because that outer tracking
+    /// updates its OWN storage in place — not a local copy already extracted
+    /// into a temporary array.
+    ///
+    /// # Safety
+    /// `fields.len()` must not exceed `heap_bridge::MAX_FIELDS`, checked
+    /// below (a bound the write side's `u16` header field also enforces).
+    unsafe fn alloc_con(&mut self, con_tag: u64, fields: &mut [*mut u8]) -> *mut u8 {
         if fields.len() > heap_bridge::MAX_FIELDS {
             return std::ptr::null_mut();
         }
-        // SAFETY: Bump-allocating from vmctx nursery. Writing Con header, tag,
-        // num_fields, and field pointers at known layout offsets within the allocation.
+        let vmctx = &mut self.vmctx as *mut VMContext;
+        let mark = crate::host_fns::rust_roots_mark(vmctx);
+        for slot in fields.iter_mut() {
+            // SAFETY: slot is a valid, non-moving address for this guard's
+            // lifetime (the exclusive `&mut [*mut u8]` borrow prevents the
+            // caller from reallocating the backing storage underneath us).
+            unsafe {
+                crate::host_fns::register_rust_root(vmctx, slot as *mut *mut u8);
+            }
+        }
         let size = 24 + 8 * fields.len();
-        let ptr = heap_bridge::bump_alloc_from_vmctx(&mut self.vmctx, size);
+        // SAFETY: every live pointer this allocation's collection could move
+        // (`fields`) is rooted above; `vmctx` is this machine's own, valid
+        // for the call.
+        let ptr = unsafe {
+            heap_bridge::gc_retry(
+                vmctx,
+                |p: &*mut u8| p.is_null(),
+                || heap_bridge::bump_alloc_from_vmctx(&mut self.vmctx, size),
+            )
+        };
+        unsafe {
+            crate::host_fns::truncate_rust_roots(vmctx, mark);
+        }
         if ptr.is_null() {
             return std::ptr::null_mut();
         }
