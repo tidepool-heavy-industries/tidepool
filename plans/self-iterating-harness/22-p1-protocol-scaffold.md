@@ -379,9 +379,10 @@ visible in review — which is the whole reason for committed output.
 
 ---
 
-## 6. The flip
+## 6. The flip — **done for Exec**
 
-Wave 3, after Class A/B/C all pass on unmodified trunk.
+Wave 3, after Class A/B/C all passed on unmodified trunk. Recorded here in the
+order it was performed, because §9 asks every later lane to repeat it.
 
 1. `tidepool-mcp/src/generated/exec.rs` — `pub fn exec_decl() -> EffectDecl`.
    `effect_decls.rs:266`'s `exec_effect_def!(…effect_decl_projection)` line is
@@ -489,13 +490,30 @@ Subagent row.
 
 ## 9. Adding an effect (for lanes 2..N)
 
-1. Add `src/effects/<name>.rs` returning an `Effect`. Every verb needs a
-   `handling` class; a sited verb needs an `extract` policy.
+1. Add `src/effects/<name>.rs` returning an `Effect`, and list it in
+   `effects::all()`. Every verb needs a `handling` class; a sited verb needs an
+   `extract` policy. `Effect::validate` catches the structural mistakes.
 2. If a helper or type is not representable, say so and leave it hand-written
    outside the contract — or add a deliberate schema feature and document it
    here. Do not add a raw hatch.
-3. Run the generator; confirm Class A goldens for **every other effect** are
-   unchanged and yours matches its pre-flip capture.
-4. Flip: swap the macro invocation for the generated module, delete the
-   `<name>_effect_def!` macro, re-assert the goldens.
-5. Verify with the batteries that touch the effect.
+3. **Prove it before you flip.** Add the effect to
+   `tidepool-mcp/tests/protocol_schema_equivalence.rs`. That test compares the
+   `EffectDecl` against the schema's rendering field for field, and while the
+   `<name>_effect_def!` macro is still in place it is a genuine proof rather
+   than a tautology. Green here is the go-ahead; nothing is deleted before it.
+   (`EffectDecl` is destructured exhaustively there, so a field added to the
+   contract cannot silently go unproven.)
+4. Run the generator. Confirm the Class A goldens are unchanged for **every
+   other effect** — that is the non-regression half, and it is what makes an
+   effect-at-a-time migration safe.
+5. Flip: swap each macro invocation for the generated module, delete the
+   `<name>_effect_def!` macro and any table arms keyed on the effect
+   (`extra_imports_for!`), re-export the generated types from the effect's own
+   module so public paths do not move.
+6. Re-assert the goldens **without regenerating them**. Untouched goldens green
+   against generated output IS the byte-compatibility result; regenerating them
+   at this step destroys the proof.
+7. Account for every difference from the macro expansion in a §7-style reviewed
+   diff. If you cannot explain a difference, it is a bug, not a nuance.
+8. Verify: `cargo fmt --all -- --check` (generated `.rs` must be a rustfmt fixed
+   point), `cargo nextest run`, and the batteries that touch the effect.

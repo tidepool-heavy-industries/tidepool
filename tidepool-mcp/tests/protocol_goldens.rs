@@ -204,14 +204,23 @@ fn tool_description_effects_index_golden_matches_committed_file() {
 // ---------------------------------------------------------------------------
 // Layer 2 — an INDEPENDENT hardcoded pin, modelled on
 // `tidepool-mcp/src/preamble.rs`'s `import_gating_pin` module doc: these are
-// literal strings copied by hand from `effect_defs.rs`'s `exec_effect_def!`/
-// `console_effect_def!` definitions, NOT read from any golden file and NOT
-// produced by `render_effect_decl` above. Their whole job is to stay true
-// even when someone regenerates `effect_decls.txt` blindly (`TIDEPOOL_REGEN_
-// PROTOCOL_GOLDENS=1` over a change that also altered the underlying
-// definition): a dumper bug or a silent definition drift can launder itself
-// into a regenerated golden, but it cannot launder itself into a string
-// written independently, by hand, from the source of truth.
+// literal strings transcribed BY HAND from the hand-written definitions, NOT
+// read from any golden file and NOT produced by `render_effect_decl` above.
+// Their whole job is to stay true even when someone regenerates
+// `effect_decls.txt` blindly (`TIDEPOOL_REGEN_PROTOCOL_GOLDENS=1` over a
+// change that also altered the underlying definition): a dumper bug or a
+// silent definition drift can launder itself into a regenerated golden, but it
+// cannot launder itself into a string written independently, by hand, from the
+// source of truth.
+//
+// The Exec pins have since outgrown that job. They were transcribed from
+// `effect_defs.rs`'s `exec_effect_def!` while it still existed; that macro is
+// now DELETED and `exec_decl()` is generated from the `tidepool-protocol`
+// schema (PRD 22 phase 1). So these particular literals are a hand-written
+// record of the pre-migration contract that the generated output still
+// satisfies — the most direct byte-compatibility evidence in the tree. Do not
+// "update" them to match a future generator change: a diff here means the
+// contract moved, which is a decision, not a refresh.
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -224,14 +233,14 @@ fn hardcoded_pins_survive_a_blind_regen() {
             "RunIn :: Text -> Text -> Exec (Either ExecError Proc)",
             "RunArgv :: [Text] -> Exec (Either ExecError Proc)",
         ],
-        "Exec's three constructor signatures drifted from effect_defs.rs's exec_effect_def!"
+        "Exec's three constructor signatures moved since the pre-migration macro"
     );
     assert_eq!(
         exec.type_defs.to_vec(),
         vec![
             "data ExecError = ExecSpawn Text | ExecBadDir Text deriving (Show, Eq)\ninstance ToJSON ExecError where\n  toJSON e = case e of\n    ExecSpawn detail -> object [\"tag\" .= (\"ExecSpawn\" :: Text), \"detail\" .= detail]\n    ExecBadDir detail -> object [\"tag\" .= (\"ExecBadDir\" :: Text), \"detail\" .= detail]\n",
         ],
-        "Exec's ExecError type_defs entry drifted from effect_defs.rs's exec_effect_def!"
+        "Exec's ExecError type_defs entry moved since the pre-migration macro"
     );
     assert_eq!(
         exec.extra_imports.to_vec(),
