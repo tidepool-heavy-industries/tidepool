@@ -6,6 +6,13 @@ in git history rather than here.
 
 ## Active work
 
+- [The Effect Protocol](self-iterating-harness/22-effect-protocol-prd.md):
+  **proposed (2026-08-17), approved direction.** One data-only schema crate
+  generating every artifact the effect contract currently maintains by hand
+  in four registries (macro DSL strings, positional wire mirrors, extractor
+  verb tables, harness constructor-name classification) — byte-compatible
+  golden migration, one effect at a time, smallest first. Prerequisite
+  compile-pipeline consolidation in flight.
 - [Recursive Companion](self-iterating-harness/21-recursive-companion-prd.md):
   **proposed (2026-08-17).** The companion track's successor: reasoning as a
   recursively discovered typed program — one model invocation per node as the
