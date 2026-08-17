@@ -562,3 +562,329 @@ which is the migration's whole proof.
 arm of `extra_imports_for!`. The macro grammar and the remaining definitions
 (now eighteen) are untouched. Event/Subagent/Exec rows were not read, written,
 or depended on.
+
+---
+
+## 11. Wire-record emission (lane 3 — the capability the mirror retirements need)
+
+Lanes 1 and 2 migrated effects whose `type_defs` were EMPTY. Worktree is the
+first effect whose contract includes a *record vocabulary*: thirteen Haskell
+declarations in `worktree_effect_def!`'s `type_defs`, thirteen matching Rust
+wire structs hand-written in `tidepool-bridge-effects`, and a comment asserting
+that the two lists agree positionally. That comment is the artifact this section
+exists to delete — not by hoping, but by generating both sides from ONE ordered
+field list.
+
+Written BEFORE implementing, per §9 step 2: what follows is the design the
+Worktree flip is built against, and the capability the Event and Subagent
+retirements reuse unchanged.
+
+### 11.1 The problem, precisely
+
+`tidepool-bridge-effects/src/lib.rs` says, of the `Wt*`/`Ev*`/`Ag*` families:
+
+> Field ORDER in these structs is the wire contract and must match those
+> `type_defs` decls positionally.
+
+Two hand-maintained lists, one invariant, zero enforcement. `ToCore` builds the
+`Con` in Rust struct-field order; the extractor assigns positions from the
+Haskell decl's field order. A field inserted in the middle of one list and
+appended to the other type-checks on both sides and silently swaps two payloads
+on the wire. Nothing in the workspace fails.
+
+The `type_defs` strings are also the largest surviving raw-Haskell hatch in the
+registry: thirteen `data` declarations and seven `instance ToJSON` bodies,
+written as source text.
+
+### 11.2 What generates
+
+**One new schema vocabulary, three new emitters.** The schema's `TypeDef` grows
+from the phase-1 placeholder (a record with a name and fields) into a shape
+that can describe every declaration the Worktree slice carries:
+
+```
+TypeDef { name,              // the HASKELL type name — also the ctor for a Record
+          wire_rust,         // the Rust wire type name when it differs (`WtWorktreeId`)
+          shape: TypeShape,
+          json:  JsonInstance,
+          derives: WireDerives,
+          domain: Option<DomainMap>,
+          doc }
+
+TypeShape
+  ::= Record   { fields: Vec<RecordField> }        // data X = X { f :: T, … }
+    | Sum      { variants: Vec<SumVariant> }       // data X = A | B T | C T U
+    | Identity { payload, hs_binder, rust_field, validation }
+                                                    // data X = X Text  — an id
+
+RecordField { hs_name, rust_name, ty: HsType, doc }
+SumVariant  { ctor, fields: Vec<HsType>, doc }
+```
+
+`RecordField` is the whole point: **one `Vec`, two renderings.** The Haskell
+`data` declaration's field order and the Rust wire struct's field order are the
+same vector traversed twice. They cannot disagree, because there is nothing for
+them to disagree about. The positional comment does not get a better guard; it
+gets deleted, and the invariant it asserted becomes untrue-by-construction.
+
+From that one `TypeDef` list, three emitters run:
+
+| Emitter | Output | Replaces |
+|---|---|---|
+| `gen/decl_rs.rs` (extended) | the `type_defs` slice inside `<eff>_decl()` — Haskell `data` decls, then `ToJSON` instances, then the error ADT | the raw strings in `worktree_effect_def!` |
+| `gen/wire_rs.rs` (new) | `tidepool-bridge-effects/src/generated/<eff>.rs` — the wire structs/enums, their derives, their boundary constructors | the hand-written `Wt*` block |
+| `gen/adapter_rs.rs` (new) | `tidepool-handlers/src/generated/<eff>_adapters.rs` — the MECHANICAL domain↔wire conversions | the mechanical half of `handlers/worktree.rs`'s conversion block |
+
+Emission ORDER inside `type_defs` is fixed and reproduces today's bytes: every
+shape declaration in schema order, then every `ToJSON` instance in schema order,
+then the derived error ADT. That is the order `worktree_effect_def!` already
+uses, and the Class A `effect_decls.txt` golden is what proves it.
+
+### 11.3 `ToJSON` instances become a closed policy, not source text
+
+Seven `instance ToJSON …` strings live in the Worktree `type_defs` today. They
+are needed — the `errors` block templates a `ToJSON` for `WorktreeError`, so
+every type reachable from an error field needs one, and the vendored generic
+default only covers single-constructor records. They are also raw Haskell, which
+the first hard rule forbids in the schema.
+
+They are not, however, arbitrary. Four distinct shapes cover all seven:
+
+```
+JsonInstance
+  ::= None                                  // no instance emitted
+    | Transparent                           // toJSON (X t) = toJSON t
+    | ShownString { binder }                // toJSON k = toJSON (show k)
+    | Object { binder, keys: &[(json_key, hs_field)] }
+```
+
+`Transparent` covers the four identity types (a receipt reader wants the id, not
+a wrapper object). `ShownString` covers `InProgressKind`. `Object` covers
+`DirtySummary` (keys equal to field names) and `GitFailureReceipt` (keys
+DELIBERATELY renamed — `gitArgs` → `"args"`, `gitCwd` → `"cwd"`, …, so the JSON
+reads as a git receipt rather than as a Rust struct dump). The key map is data;
+the rename is now visible in the schema instead of buried in a string.
+
+The `binder` field is carried rather than normalized because the current
+instances use three different binders (`d`, `r`, `k`) and the Class A goldens
+are byte-locked. A binder is data, not source.
+
+### 11.4 Wire newtypes and fallible boundary constructors
+
+PRD 22's generator requirement: *wire-side integers and identifiers generate as
+newtypes with fallible boundary constructors — decode once at the edge, typed
+everywhere after.*
+
+**The rule this lane locks:** a newtype with a boundary constructor is minted for
+every `TypeShape::Identity` — a type that EXISTS as a type in the contract,
+declared `data X = X Text` or `data X = X Int`. A bare `Int` or `Text` FIELD
+inside a record is NOT promoted. The reason is the byte lock, and it is worth
+stating plainly: promoting `createdAt :: Int` to `createdAt :: CreatedAtMs`
+changes the Haskell declaration, and that declaration is pinned by the Class A
+golden. A wire-side-only newtype (Rust newtype, transparent codec, unchanged
+Haskell) is technically possible but would need hand-written `ToCore`/`FromCore`
+impls to stay byte-identical, which trades a proven mechanism for an unproven
+one to buy type safety on a timestamp. If a later lane wants a typed timestamp
+it changes the Haskell decl deliberately and moves the golden in the same
+commit — visibly, which is the whole reason the output is committed.
+
+Under that rule the Worktree slice mints four: `WorktreeId`, `GitOid`, `GitRef`,
+`BranchName`. It is exactly the right rule for the lanes that follow — Event's
+`EventId Int` / `SubscriptionId Int` and Subagent's `AgentId Int` /
+`CycleId Int` are standalone identity declarations carrying integers, so
+"wire-side integers generate as newtypes" lands on them directly when those
+mirrors retire.
+
+Each `Identity` emits, beside the struct:
+
+```rust
+impl WtWorktreeId {
+    /// The trust boundary: an untrusted raw value becomes a wire id here or
+    /// not at all.
+    pub fn new(raw: impl Into<String>) -> Result<Self, WireError> { … }
+    pub fn as_str(&self) -> &str { … }
+}
+```
+
+with the policy declared in the schema:
+
+```
+Validation ::= None
+             | NonEmpty
+             | Segment { max_len, extra_allowed }   // ascii-alphanumeric + these
+```
+
+`WorktreeId` gets `Segment { max_len: 128, extra_allowed: "-_" }` — which is
+exactly `tidepool_worktree::WorktreeId::is_path_safe`, hoisted out of
+`handlers/worktree.rs`'s hand-written `worktree_id_from_wire` into declared
+schema data. The handler keeps the SEMANTIC half (a rejected id is spelled
+`WorktreeNotRegistered`, because no id outside the minted alphabet was ever
+registered, and the caller learns nothing about the filesystem); the generator
+owns the MECHANICAL half. `GitOid`/`GitRef`/`BranchName` get `NonEmpty` — the
+weakest policy that is true today. Tightening one is a schema edit with a test,
+not a code change.
+
+**Two honest gaps, both closing on the same trigger.**
+
+1. *The `raw` field stays `pub`.* A private field with `new` as the only
+   constructor is the shape that makes an unvalidated wire id unrepresentable.
+   It is not taken here because roughly twenty struct-literal construction sites
+   live in `handlers/event.rs`, `handlers/agent.rs` and
+   `tests/repo_event_with_handler.rs` — files owned by the Event and Subagent
+   lanes, which are explicitly out of bounds for this lane.
+2. *The `Wt` prefix stays.* PRD 22 retires the `Wt`/`Ag` prefixes "with the
+   mirrors". The prefix's actual job is disambiguating
+   `tidepool-bridge-effects`'s own namespace, where the hand-written `Ev*`/`Ag*`
+   types sit alongside the Worktree ones and REFERENCE them; dropping it while
+   those neighbours exist is a rename of shared vocabulary in another lane's
+   files, with no proof value for this lane's claim. The schema carries
+   `wire_rust: Some("WtWorktreeId")` as one line of data, so the retirement is a
+   schema edit.
+
+**The trigger for both, stated so no lane loses it:** when the LAST mirror
+family (`Ev*`, then `Ag*`) is generated, drop `wire_rust` from every `TypeDef`
+and make every `Identity` field private in one sweep. Both are one-line schema
+changes at that point and neither is a rename across lane boundaries.
+
+**One duplication this creates, named rather than hidden.** The `Segment` policy
+is now expressed twice: in the schema (generated into `tidepool-bridge-effects`)
+and in `tidepool_worktree::WorktreeId::is_path_safe`. They cannot be unified —
+`tidepool-worktree` is a domain crate and must not depend on the bridge layer,
+and the bridge layer is lower than the domain. A cross-check test in
+`tidepool-handlers` asserts the two agree over a shared corpus (including the
+traversal-shaped inputs the existing boundary test already pins). That is a real
+cost of the crate direction, not an oversight, and the guard is the mitigation.
+
+### 11.5 Adapter skeletons — the generated/hand-written split, stated explicitly
+
+The PRD asks for "mechanical `From<domain>`/`TryFrom<wire>` adapter skeletons
+where a richer domain form (PathBuf, Option, newtypes) genuinely differs". The
+split is a schema field, so it is visible rather than inferred:
+
+```
+DomainMap { domain_path, into_wire: AdapterKind, from_wire: AdapterKind }
+
+AdapterKind
+  ::= IdentityRaw { as_str, from_raw }          // newtype raw ↔ newtype raw
+    | VariantMap  (&[(domain_variant, wire_variant)])
+    | HandWritten (reason)                      // NOT generated, and why
+```
+
+**Generated** for the Worktree slice: the four identity conversions
+(`IdentityRaw`), `DirtyPolicy` and `InProgressKind` (`VariantMap` — note
+`InProgressKind` renames every variant, `Merge` → `InProgressMerge`, which is
+precisely the mechanical-but-error-prone case).
+
+**Hand-written, with the reason recorded in the schema:**
+
+| Conversion | Why it stays hand-written |
+|---|---|
+| `worktree_id_from_wire` | the rejection must become a DOMAIN error (`WorktreeNotRegistered`); only the check is generated |
+| `git_failure_receipt_to_wire` | `PathBuf` → lossy `String`, `Option<i32>` → `Option<i64>` |
+| `receipt_to_wire` | field renames (`worktree_id`→`tree_id`, `created_at_ms`→`created_at`) plus a `PathBuf` |
+| `spec_from_wire`, `worktree_source_from_wire` | compose a FALLIBLE conversion; the error path is semantic |
+| `error_to_wire` | a ten-arm map between two error vocabularies, several with different field arities |
+
+`HandWritten(reason)` is not decoration. Today the split between "this
+conversion is trivial" and "this conversion carries a decision" exists only in a
+reader's head. Recording it in the schema is what lets a later lane see, without
+re-deriving it, which conversions it may safely regenerate.
+
+**Where the generated adapters live:** `tidepool-handlers/src/generated/`, not
+the schema crate and not `tidepool-bridge-effects`. The schema stays a leaf
+(PRD open question 2's leaning, already confirmed in §3.1): it carries Rust PATH
+strings, exactly as `RustBinding::Path` already does, and those paths resolve at
+the consuming crate. `tidepool-bridge-effects` does not gain a dependency on
+`tidepool-worktree`, which is the property that lets test mocks in low crates
+keep importing the wire types.
+
+### 11.6 What does NOT change, and where the Haskell slice lands
+
+`Tidepool.Records.Bridged` is untouched. It is generated from the six
+`CoreRecord`-deriving Rust structs (`Proc`, `Hit`, `FileMeta`, `Commit`,
+`StatusEntry`, `FileDelta`) through a DIFFERENT mechanism, and those types are
+cross-effect result records rather than effect-scoped vocabulary. §3.6's ruling
+stands: folding that module into the schema is a later lane.
+
+So the capability is stated carefully. It is *"generate a Haskell declaration
+slice from the same ordered field list that produces the Rust wire struct"*. Where
+the slice LANDS is decided by which mechanism owns the type today:
+
+- **effect-scoped vocabulary** (every `Wt*`, `Ev*`, `Ag*` type) → the effect's
+  own `type_defs`, emitted by `decl_rs`. This is Worktree's whole slice, and it
+  is what Event and Subagent reuse.
+- **cross-effect result records** (the six above) → `Records.Bridged`, still
+  emitted by `CoreRecord`. Unchanged by this lane.
+
+Also unchanged, and worth restating because the durable-format lock depends on
+it: **nothing in `tidepool-worktree` is generated.** The registry entries,
+binding records, journal entries and monitor state are durable JSON on operator
+machines. Their serde names, field order and every persisted byte are frozen.
+The wire types the generator emits carry no serde at all — they cross to Haskell
+through `ToCore`/`FromCore`, not through JSON — so the durable formats are not
+in the generator's blast radius by construction. §11.7 proves that rather than
+asserting it.
+
+### 11.7 Proof obligations, in the order they are discharged
+
+Extending §5's three classes with the two this lane adds. Nothing is deleted
+before every item below is green.
+
+**Class D — durable formats (NEW, and captured FIRST).** Before a line of
+generator code exists: canonical sample values of every durable
+`tidepool-worktree` type (`WorktreeReceipt`, the registry record and its status,
+`WorktreeOrigin`, the binding table's records, journal entries, monitor state,
+`WorktreeError` and its payload types) serialized and pinned byte-for-byte in
+`tidepool-worktree/tests/`. Captured from the LIVE hand-written types on
+unmodified trunk. `tidepool-worktree` is a quick-tier crate (not in
+`.config/nextest.toml`'s `default-filter` exclusion set), so this guard runs on
+`cargo nextest run` — the §4 placement rule, satisfied.
+
+These goldens are the answer to a question the golden itself cannot beg: they do
+not prove the migration is safe, they prove the migration did not touch what it
+claimed not to touch. Same discipline as §5's Class A, applied to disk instead
+of to the wire.
+
+**Class E — wire-struct identity (NEW).** Type-level assertions that the
+generated wire types are the same types the hand-written ones were: for each,
+the field/variant NAMES and ORDER, the Rust types, the derive set, and the
+`#[core(name = …)]` mapping. Written against the generated module, and read
+side-by-side against the deleted hand-written block in review.
+
+The load-bearing one is ORDER, and it is asserted positionally rather than as a
+set — a permutation is exactly the failure the positional comment was standing
+guard against, and a set comparison would pass through it.
+
+**Class A (unchanged, and the acceptance moment).** `worktree_decl()` is already
+in `protocol_goldens.rs`'s pinned list, so `effect_decls.txt` and
+`effects_module.standard.hs` already carry every Worktree byte, captured from
+the hand-written registry in phase 1. They are re-asserted after the flip
+WITHOUT regeneration. Untouched goldens green against generated output is the
+byte-compatibility result; regenerating them at that step destroys the proof.
+
+**Class B (unchanged).** The reviewed diff, in §7's form, extended with the
+wire-emission diff classes.
+
+**Class C (unchanged).** Every new `HsType` the Worktree slice needs must already
+render byte-identically in `hs.rs`'s coverage table — it does; `[Text]`,
+`Maybe Int`, `Maybe GitRef`, `[WorktreeSummary]` are all present.
+
+**Pre-flip equivalence (§9 step 3).** `worktree_decl_matches_the_schema_exactly`
+joins `protocol_schema_equivalence.rs` while `worktree_effect_def!` is still
+live. Green there is the go-ahead; nothing is deleted before it.
+
+**Missing-handling-class-fails-to-compile** holds for every Worktree verb, as it
+does for every verb — `HandlingClass` is a required field, and all five Worktree
+verbs are `OuterDispatch(Worktree)`.
+
+### 11.8 Order of work
+
+1. Class D goldens, from unmodified trunk. Nothing else starts first.
+2. Schema vocabulary + the three emitters + their quick-tier tests, in
+   `tidepool-protocol`. No consuming crate changes yet.
+3. `effects/worktree.rs` — the Worktree effect described in the schema.
+4. Pre-flip equivalence green against the live macro.
+5. Flip: generated modules in, `worktree_effect_def!` deleted, the `Wt*`
+   hand-written block and its positional comment deleted, adapters rewritten
+   onto the generated boundary constructors.
+6. Re-assert Class A without regenerating; Class D unchanged; full verify.
