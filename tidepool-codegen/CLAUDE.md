@@ -81,6 +81,54 @@ realm's parked frames and its outstanding handles together, leaving sibling
 realms untouched. See the contract doc's amendment for the full signature
 table and gates (`tests/realm_handles.rs`).
 
+## Root accounting — four counted classes, never folded together
+
+A session's rooted values fall into four classes with four separate counters.
+They are kept separate so intent stays auditable: folding any two together is
+how a leak becomes invisible (class 3 can return to baseline while every root
+stays traced).
+
+| # | Class | Read | What a SCOPE RETIREMENT does to it |
+|---|-------|------|-------------------------------------|
+| 1 | parked continuations | `stowed_roots_count() == parked_count()` | untouched |
+| 2 | handle registry | `value_handle_count()` | untouched (a mount already transferred out) |
+| 3 | value-plane bindings | `ResidentSession::binding_names()` (ROOT) / `scope_binding_count(scope)` | the retired scope's frame goes to 0 |
+| 4 | GC root ledger | `persistent_roots_count()` | drops by exactly the sole-owner slots retired |
+
+Class 4 is the WITNESS: `PersistentSession::retire_scope` returns a
+`ScopeRetirement { scopes_retired, bindings_retired, roots_released }` and the
+ledger must move by exactly `roots_released`. `retire_scope_root` is the only
+value-plane deregistration primitive, and it is deliberately named as a
+scope-retirement tool rather than a general "drop a root" one — its invariant
+(sole ownership, exactly once, witnessed) is carried at its definition site.
+Gate: `tidepool-runtime/tests/session_scope_retirement.rs` (GHC-free, but
+`tidepool-runtime` is skipped wholesale by the nextest default-filter, so it
+needs `--ignore-default-filter -p tidepool-runtime`).
+
+**DEREGISTERED IS NOT RECLAIMED — the honest bound.** Deregistration removes a
+root from the GC TRACE LIST. It does not free `OldSpace` bytes: `OldSpace`
+never frees an arena or a slot cell before machine drop, `slots` is push-only,
+`cursor`/`used` are monotone, and the major/compacting pass its module doc
+promises is not implemented. So a long-resident session's OldSpace **grows
+monotonically with the total number of mounts ever made, bounded per turn, and
+is reclaimed only at machine drop**. What retirement actually reclaims is the
+nursery-resident subgraph hanging off the retired root that the remembered set
+does not pin; what it caps is what stays *traced* (and therefore what a
+collection must walk), not what stays *allocated*. This is deliberate and
+bounded — the tenured residue is at most the retired scope's own bindings, the
+same lifetime bound every value-plane binding already has — and it is written
+here, in the design doc (`plans/self-iterating-harness/21-c2-scope-trees.md`
+§2.2) and in PRD 21's deferred list so nobody re-derives it while hunting a
+leak.
+
+Two things that stay true because the slot cell outlives deregistration: an
+already-compiled fragment that `iconst`ed a `RootSlot::addr()` still `load`s
+successfully, and `perform_gc` rebuilds its root vector per collection
+(`extend_persistent_roots`), so `Vec::remove`'s shifting is harmless — no
+tombstones, no index-stability concern. **Do not** pair retirement with
+`forget_remembered_range`: that dangles a live indirection cell and is sound
+only at arena teardown, where the memory itself dies.
+
 The adversarial suite (`tests/nested_child_gc_rooting.rs`, run with
 `TIDEPOOL_GC_POISON`/`TIDEPOOL_HEAP_VERIFY` on) is the memory-safety gate: child
 GC + heap doubling with a live suspended parent, deep-verified resume, decl

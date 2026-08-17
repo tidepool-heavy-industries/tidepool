@@ -3891,6 +3891,60 @@ impl JitEffectMachine {
         self.assert_rooting_receipt();
         (ids.len(), hids.len())
     }
+
+    /// SCOPE RETIREMENT (PRD 21 lane C2): deregister one value-plane binding's
+    /// persistent GC root, because the scope that solely owned it is retiring.
+    ///
+    /// **This is a scope-retirement primitive, not a general "drop a root"
+    /// tool**, and it is named that way on purpose. Its invariant, which the
+    /// caller carries and this method cannot check:
+    ///
+    /// - `slot` belongs to a binding the RETIRING SCOPE SOLELY OWNS — no other
+    ///   live `BindingEntry`, in any scope, holds the same
+    ///   [`crate::old_space::RootSlot::addr`], and no live [`ValueHandle`]
+    ///   still holds it (see [`Self::handle_holds_root`]);
+    /// - it is called EXACTLY ONCE per root;
+    /// - the release is WITNESSED by a [`Self::persistent_roots_count`]
+    ///   decrement, asserted by the caller — a retirement that reports a
+    ///   release without moving that counter is a false receipt.
+    ///
+    /// A caller that cannot name which scope owns the root is not a legitimate
+    /// caller. The value plane's owner is
+    /// `tidepool_runtime::session::PersistentSession::retire_scope`; nothing
+    /// else should reach for this.
+    ///
+    /// Removal is memory-safe here for the same reasons it is in
+    /// [`Self::close_realm`]: `perform_gc` rebuilds its root vector per
+    /// collection (`extend_persistent_roots`), so nothing holds an index
+    /// across collections. It does **not** touch `OldSpace::slots` — the `Box`
+    /// cell stays allocated for the machine's life, so an already-compiled
+    /// fragment that `iconst`ed that address still `load`s. What is released
+    /// is the root's place in the GC TRACE LIST, not its bytes; see
+    /// `tidepool-codegen/CLAUDE.md`'s root-accounting section for the honest
+    /// bound.
+    ///
+    /// Idempotent (the underlying deregistration is a `Vec::remove` by
+    /// position, a no-op if absent), but a caller relying on that is a caller
+    /// violating the exactly-once clause above.
+    pub fn retire_scope_root(&mut self, slot: crate::old_space::RootSlot) {
+        self.machine_state.deregister_persistent_root(slot.addr());
+    }
+
+    /// Whether any LIVE [`ValueHandle`] still holds `slot` — the
+    /// handle-registry half of [`Self::retire_scope_root`]'s sole-ownership
+    /// clause, so a retirement site can debug-assert it rather than assume it.
+    ///
+    /// A mount transfers ownership out of the handle registry
+    /// (`release_handle`) before the value plane records the binding, so this
+    /// answers `false` for every properly-mounted root; a `true` means the
+    /// handle registry and the value plane both believe they own the slot,
+    /// which is the state retirement must not act on.
+    #[must_use]
+    pub fn handle_holds_root(&self, slot: crate::old_space::RootSlot) -> bool {
+        self.value_handles
+            .values()
+            .any(|e| std::ptr::eq(e.slot.addr(), slot.addr()))
+    }
 }
 
 /// RAII proof that a nested child is running against a suspended parent.

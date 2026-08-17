@@ -74,8 +74,10 @@ use crate::render::EvalResult;
 use crate::timing;
 use crate::{JitError, RuntimeError, EVAL_STACK_SIZE};
 
+use tidepool_codegen::scope::ScopeId;
+
 use super::engine::OutputSink;
-use super::persistent::PersistentSession;
+use super::persistent::{PersistentSession, ScopeRetirement};
 use super::turn::{BoundBinder, ValueTier};
 use super::{SessionError, SessionLib};
 
@@ -429,7 +431,19 @@ where
         &self,
         name: &str,
     ) -> Option<(SessionVarId, SessionModule, ValueTier, Option<String>)> {
-        let entry = self.core.bindings().resolve(name)?;
+        self.current_binding_in(ScopeId::ROOT, name)
+    }
+
+    /// Scoped [`Self::current_binding`]: the binding `name` resolves to as seen
+    /// FROM `scope` — its own frame first, then each ancestor up to ROOT, so a
+    /// child reads a parent's mounts and a local mount shadows an inherited
+    /// one. `current_binding(n) == current_binding_in(ScopeId::ROOT, n)`.
+    pub fn current_binding_in(
+        &self,
+        scope: ScopeId,
+        name: &str,
+    ) -> Option<(SessionVarId, SessionModule, ValueTier, Option<String>)> {
+        let entry = self.core.resolve_in(scope, name)?;
         let tier = match entry.value {
             BoundValue::Tier0Forced(_) => ValueTier::Tier0Data,
             BoundValue::Tier1Closure(_) => ValueTier::Tier1Closure,
@@ -461,6 +475,30 @@ where
         type_display: Option<String>,
         handle: ValueHandle,
     ) -> Result<(), ResidentError> {
+        self.mount_handle_in(ScopeId::ROOT, name, id, module, tier, type_display, handle)
+    }
+
+    /// Scoped [`Self::mount_handle`]: install the mount in `scope`'s frame
+    /// instead of the flat session's. `mount_handle(..) ==
+    /// mount_handle_in(ScopeId::ROOT, ..)`, so the flat mount path is
+    /// bit-for-bit what it was.
+    ///
+    /// A scoped mount is what [`Self::retire_scope`] later releases: the
+    /// handle registry hands ownership of the tenured root to this frame
+    /// (`value_handle_count` drops as the frame's count rises), and the frame
+    /// hands it to the GC root ledger's `retire_scope_root` at retirement —
+    /// three named owners in sequence, never two at once.
+    #[allow(clippy::too_many_arguments)]
+    pub fn mount_handle_in(
+        &mut self,
+        scope: ScopeId,
+        name: &str,
+        id: SessionVarId,
+        module: SessionModule,
+        tier: ValueTier,
+        type_display: Option<String>,
+        handle: ValueHandle,
+    ) -> Result<(), ResidentError> {
         let slot = self
             .core
             .machine_mut()
@@ -479,14 +517,19 @@ where
             ValueTier::Tier0Data => BoundValue::Tier0Forced(slot),
             ValueTier::Tier1Closure => BoundValue::Tier1Closure(slot),
         };
-        self.core.bind(BindingEntry {
-            name: BindingName(name.to_string()),
-            id,
-            module,
-            value,
-            type_display,
-            defining_expr: None,
-        });
+        self.core.bind_in(
+            scope,
+            BindingEntry {
+                name: BindingName(name.to_string()),
+                id,
+                module,
+                value,
+                type_display,
+                defining_expr: None,
+                // Overwritten by `bind_in` with `scope`; see `BindingEntry`.
+                scope,
+            },
+        );
         Ok(())
     }
 
@@ -545,6 +588,55 @@ where
             .iter_current()
             .map(|(name, _)| name.0.clone())
             .collect()
+    }
+
+    // -- scopes (PRD 21 lane C2) -------------------------------------------
+
+    /// Mint a fresh child scope of `parent` ([`ScopeId::ROOT`] for a top-level
+    /// invocation scope). `None` if `parent` is not live.
+    pub fn mint_scope(&mut self, parent: ScopeId) -> Option<ScopeId> {
+        self.core.mint_scope(parent)
+    }
+
+    /// The value-plane names VISIBLE at `scope` — its own frame plus every
+    /// ancestor's, nearest frame winning. `binding_names_in(ScopeId::ROOT)` is
+    /// [`Self::binding_names`]'s set (sorted).
+    pub fn binding_names_in(&self, scope: ScopeId) -> Vec<String> {
+        self.core
+            .bindings()
+            .iter_current_in(self.core.scope_tree(), scope)
+            .into_iter()
+            .map(|(name, _)| name.0.clone())
+            .collect()
+    }
+
+    /// How many names `scope`'s OWN frame binds (accounting class 3, per
+    /// scope — inherited names are not counted, only locally-bound ones).
+    /// Returns to 0 when the scope retires.
+    pub fn scope_binding_count(&self, scope: ScopeId) -> usize {
+        self.core.scope_binding_count(scope)
+    }
+
+    /// Number of persistent GC roots registered on this session's machine
+    /// (accounting class 4 — the GC ROOT LEDGER; 0 before the machine
+    /// bootstraps). This is the WITNESS for [`Self::retire_scope`]: it drops
+    /// by exactly the receipt's `roots_released` and by nothing else.
+    ///
+    /// Deliberately separate from classes 1 (`stowed_roots_count() ==
+    /// parked_count()`) and 2 ([`Self::value_handle_count`]), which a scope
+    /// retirement leaves untouched — folding them together is what makes a
+    /// leak invisible.
+    pub fn persistent_roots_count(&self) -> usize {
+        self.core.persistent_roots_count()
+    }
+
+    /// Retire `scope` and its subtree: drop their value-plane frames and
+    /// release the GC roots those bindings solely owned. See
+    /// [`PersistentSession::retire_scope`] for the sole-ownership rule and the
+    /// deregistered-is-not-reclaimed bound; retiring ROOT or an already-retired
+    /// scope is a no-op returning an all-zero receipt.
+    pub fn retire_scope(&mut self, scope: ScopeId) -> ScopeRetirement {
+        self.core.retire_scope(scope)
     }
 
     /// The `ExternalEnv` a fragment compiling `expr` is seeded with: the
@@ -1091,7 +1183,10 @@ where
             ValueTier::Tier0Data => BoundValue::Tier0Forced(slot),
             ValueTier::Tier1Closure => BoundValue::Tier1Closure(slot),
         };
-        // Evict any pure decl of the same name before binding (cross-plane shadow).
+        // Evict any pure decl of the same name before binding (cross-plane
+        // shadow). Deliberately FLAT/ROOT: scoped cross-plane retraction waits
+        // on the decl plane's own `retract_in`, so an ordinary bind keeps
+        // retracting the ROOT decl head exactly as it did pre-C2.
         self.core.retract(&binder.name)?;
         self.core.bind(BindingEntry {
             name: BindingName(binder.name.clone()),
@@ -1100,6 +1195,7 @@ where
             value,
             type_display: Some(binder.type_display.clone()),
             defining_expr: None,
+            scope: ScopeId::ROOT,
         });
         self.core.set_val_gen(gen);
         Ok(())

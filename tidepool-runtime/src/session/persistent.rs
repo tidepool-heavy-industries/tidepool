@@ -52,6 +52,7 @@ use tidepool_codegen::jit_machine::{
     FuncId, JitEffectMachine, ResumeInput, Suspendable, SuspendableOutcome,
 };
 use tidepool_codegen::old_space::RootSlot;
+use tidepool_codegen::scope::{ScopeId, ScopeTree};
 use tidepool_effect::dispatch::DispatchEffect;
 use tidepool_eval::value::Value;
 use tidepool_repr::{CoreExpr, DataCon, DataConTable, Generation, SessionModule, VarId};
@@ -93,6 +94,13 @@ pub struct PersistentSession {
     /// `Val.G<g>` so its `stableVarId` is collision-free and a rebind shadows
     /// without clobbering the prior root.
     val_gen: Generation,
+    /// THE scope tree (PRD 21 lane C2) — one per session, shared by BOTH
+    /// planes. The value plane hangs [`BindingTable`] frames off these ids and
+    /// the decl plane keys its per-scope tips off the SAME ids, which is why
+    /// neither owns a tree of its own: two trees would be two answers to "is
+    /// this scope live", and a scoped decl and a scoped binding would drift.
+    /// [`ScopeId::ROOT`] is the flat session every pre-C2 caller lives in.
+    scopes: ScopeTree,
     /// Monotonic per-turn counter → unique fragment function names.
     turn_counter: u64,
     /// The `Ask` union tag intercepted at the suspend boundary.
@@ -112,6 +120,7 @@ impl PersistentSession {
             lib,
             bindings: BindingTable::new(),
             val_gen: Generation(0),
+            scopes: ScopeTree::new(),
             turn_counter: 0,
             ask_tag,
             nursery_size,
@@ -797,4 +806,177 @@ impl PersistentSession {
             None => Ok(()),
         }
     }
+
+    // -- scopes (PRD 21 lane C2) -------------------------------------------
+
+    /// Mint a fresh child scope of `parent`. `None` if `parent` is not live
+    /// (never minted, or already retired) — a scope is never born under a dead
+    /// ancestor.
+    pub fn mint_scope(&mut self, parent: ScopeId) -> Option<ScopeId> {
+        self.scopes.mint_child(parent)
+    }
+
+    /// The session's one scope tree — read by both planes for their lookup
+    /// walks. There is no `_mut` sibling on purpose: minting and retiring are
+    /// the only writes, and both go through this type so the value plane's
+    /// frames and roots are released in the same step as the tree edge.
+    pub fn scope_tree(&self) -> &ScopeTree {
+        &self.scopes
+    }
+
+    /// Record a materialized value binding in `scope`'s frame.
+    /// `bind(e) == bind_in(ScopeId::ROOT, e)`.
+    pub fn bind_in(&mut self, scope: ScopeId, entry: BindingEntry) {
+        self.bindings.bind_in(scope, entry);
+    }
+
+    /// Resolve `name` as seen FROM `scope`: local frame first, then each
+    /// ancestor up to ROOT.
+    pub fn resolve_in(&self, scope: ScopeId, name: &str) -> Option<&BindingEntry> {
+        self.bindings.resolve_in(&self.scopes, scope, name)
+    }
+
+    /// Scoped [`Self::current_val_modules`]: the `Val.G<g>` module per name
+    /// VISIBLE at `scope` (child frames shadowing parent ones) — what a turn
+    /// compiled in that scope imports unqualified.
+    pub fn current_val_modules_in(&self, scope: ScopeId) -> Vec<String> {
+        let mut v: Vec<String> = self
+            .bindings
+            .iter_current_in(&self.scopes, scope)
+            .into_iter()
+            .map(|(_, entry)| entry.module.module_name())
+            .collect();
+        v.sort();
+        v.dedup();
+        v
+    }
+
+    /// How many names `scope`'s own frame currently binds (accounting class 3,
+    /// per scope). `scope_binding_count(ScopeId::ROOT)` is the flat session's
+    /// `current_val_modules`/`binding_names` population.
+    pub fn scope_binding_count(&self, scope: ScopeId) -> usize {
+        self.bindings.scope_binding_count(scope)
+    }
+
+    /// Number of persistent GC roots registered on the resident machine
+    /// (accounting class 4 — the GC ROOT LEDGER, the witness that a retirement
+    /// actually released what it claims). 0 before the machine bootstraps.
+    pub fn persistent_roots_count(&self) -> usize {
+        self.machine
+            .as_ref()
+            .map_or(0, |m| m.persistent_roots_count())
+    }
+
+    /// Retire `scope` and its whole subtree: drop each scope's value-plane
+    /// frame and RELEASE the GC roots those bindings solely owned.
+    ///
+    /// Walks [`ScopeTree::retire`]'s deepest-first order so a child's frames
+    /// are gone before its parent's, drains each frame
+    /// ([`BindingTable::drain_scope`]), and for every drained entry applies the
+    /// **sole-ownership rule**: its root is deregistered
+    /// ([`JitEffectMachine::retire_scope_root`]) only when no OTHER live
+    /// `BindingEntry` — in any scope, including the not-yet-drained ancestors
+    /// of this same retirement — holds the same slot address, and no live
+    /// `ValueHandle` still does.
+    ///
+    /// That rule is what makes the escaped-closure case safe: a value produced
+    /// in a child and mounted into a PARENT-scope binding is still owned by
+    /// that surviving entry when the child retires, so its root stays
+    /// registered and its captured heap subgraph stays traced transitively.
+    ///
+    /// Retiring ROOT, or a scope that is already retired, is a no-op returning
+    /// an all-zero receipt.
+    ///
+    /// # What this does and does not reclaim
+    /// Deregistration removes a root from the GC TRACE LIST. It does not free
+    /// `OldSpace` bytes — no major/compacting pass exists — so a long-resident
+    /// session's old space still grows monotonically with total mounts ever
+    /// made, reclaimed only at machine drop. See
+    /// `tidepool-codegen/CLAUDE.md`'s root-accounting section.
+    pub fn retire_scope(&mut self, scope: ScopeId) -> ScopeRetirement {
+        let roots_before = self.persistent_roots_count();
+        let doomed = self.scopes.retire(scope);
+        let mut receipt = ScopeRetirement {
+            scopes_retired: doomed.len(),
+            bindings_retired: 0,
+            roots_released: 0,
+        };
+        // EXACTLY ONCE PER ROOT is `retire_scope_root`'s stated invariant, and
+        // two names in the SAME frame can share one slot (two mounts from one
+        // handle). The alias check below cannot see that — both entries are
+        // already drained — so already-released addresses are tracked here.
+        // Without this the second release is a ledger no-op while the receipt
+        // counts two, which is precisely the false receipt this lane rejects.
+        let mut released: Vec<*mut *mut u8> = Vec::new();
+        for dead in &doomed {
+            for entry in self.bindings.drain_scope(*dead) {
+                receipt.bindings_retired += 1;
+                let slot = entry.value.root();
+                // SOLE OWNERSHIP, checked against what is STILL live: the
+                // drained entry is already out of `live`, and deeper scopes
+                // drained before this one, so an alias found here belongs to a
+                // survivor (a parent-scope mount, a sibling, or an ancestor
+                // retiring later in this same walk — which then releases it).
+                let aliased_by_binding = self
+                    .bindings
+                    .iter_live()
+                    .any(|e| std::ptr::eq(e.value.root().addr(), slot.addr()));
+                let Some(machine) = self.machine.as_mut() else {
+                    // No machine, hence no registered roots: the frames are
+                    // still dropped, and the receipt honestly reports zero
+                    // releases rather than claiming one it did not make.
+                    continue;
+                };
+                // A LIVE HANDLE over a retiring value-plane root is a genuine
+                // bug, not a legitimate co-owner: mounting releases the handle
+                // (ownership transfers to the value plane) BEFORE the binding
+                // exists, so a handle still holding this slot means that
+                // transfer never happened. Asserted, then also honored — the
+                // root stays registered rather than being pulled out from
+                // under the registry in release builds.
+                let held_by_handle = machine.handle_holds_root(slot);
+                debug_assert!(
+                    !held_by_handle,
+                    "retire_scope: slot {:p} is still held by a live ValueHandle — \
+                     ownership never transferred to the value plane",
+                    slot.addr()
+                );
+                // Aliasing by a surviving BINDING is the opposite: entirely
+                // legitimate (the escaped-closure case), and precisely what
+                // the sole-ownership rule exists to skip.
+                let already_released = released.iter().any(|&a| std::ptr::eq(a, slot.addr()));
+                if !aliased_by_binding && !held_by_handle && !already_released {
+                    machine.retire_scope_root(slot);
+                    released.push(slot.addr());
+                    receipt.roots_released += 1;
+                }
+            }
+        }
+        debug_assert_eq!(
+            roots_before - self.persistent_roots_count(),
+            receipt.roots_released,
+            "retire_scope receipt must be witnessed by the GC root ledger",
+        );
+        receipt
+    }
+}
+
+/// What a [`PersistentSession::retire_scope`] actually released — counts, not
+/// booleans, so a caller can assert the accounting rather than trust it.
+///
+/// `roots_released` is the number of persistent GC roots deregistered, and it
+/// is exactly the drop a caller must observe in
+/// [`PersistentSession::persistent_roots_count`] across the call. It is `<=`
+/// `bindings_retired`: a binding whose slot is still owned by a survivor (the
+/// sole-ownership rule) retires its NAME without releasing its ROOT.
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+pub struct ScopeRetirement {
+    /// Scopes removed from the tree — the retired scope plus every live
+    /// descendant.
+    pub scopes_retired: usize,
+    /// `live` entries evicted across all of those scopes' frames, shadowed
+    /// older gens included.
+    pub bindings_retired: usize,
+    /// Persistent GC roots deregistered — the sole-owner subset of the above.
+    pub roots_released: usize,
 }
