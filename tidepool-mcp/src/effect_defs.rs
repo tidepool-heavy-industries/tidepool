@@ -225,6 +225,12 @@ macro_rules! extra_imports_for {
     (AskUser) => {
         &["import Tidepool.Form"]
     };
+    // The green-thread surface rides `Green`'s substrate verbs, so it is in
+    // scope exactly when `Green` is in the row — same row-gating as
+    // `Tidepool.Form` on `AskUser`.
+    (Green) => {
+        &["import Tidepool.Async"]
+    };
     ($other:ident) => {
         &[]
     };
@@ -2229,6 +2235,84 @@ macro_rules! journal_effect_def {
                        "-- immediately; append-only — never rewritten or compacted.",
                        "record :: Text -> Text -> Value -> M ()",
                        "record kind key payload = send (RecordStep kind key payload)"] },
+            ],
+        }
+    };
+}
+
+/// Green effect — single definition (PRD 20, S1-L4: green threads).
+///
+/// The ONLY runtime surface the green-thread scheduler needs. A green thread
+/// IS an `M a` value — its residual computation — driven one effect at a time
+/// by an ordinary Haskell round-robin over freer-simple's `Eff` (see
+/// `plans/self-iterating-harness/20-s1l4-green-threads.md`); what a Haskell
+/// value cannot hold is thread IDENTITY and CANCELLATION status, because
+/// `cancel a` must be observable to a later `wait a` held by someone else.
+/// Those two live in a runtime table behind these four verbs.
+///
+/// Return types stay primitive (`Int`/`Bool`/`()`) on purpose — nothing here
+/// needs a bridged record, so `tidepool-bridge-effects` is untouched.
+///
+/// Like Worktree/RepoEvent/Subagent/Journal, this is NOT in
+/// `build_base_stack`'s row: it is opt-in, wired by the driver, and it must
+/// sit at the END of `outer_decls()` so `RunLLMTurn` keeps index 0
+/// (`outer_row_suspends_everything`).
+#[macro_export]
+macro_rules! green_effect_def {
+    ($project:path) => {
+        $project! {
+            effect Green,
+            handler GreenHandler,
+            req GreenReq,
+            decl_fn green_decl,
+            description [
+                "Green threads: cooperative concurrency over the one driver loop, with ",
+                "the authored surface of `Control.Concurrent.Async` (`Tidepool.Async`: ",
+                "`async`/`wait`/`waitEither`/`cancel`, plus `race`/`concurrently`/ ",
+                "`mapConcurrently`). A thread is a suspended `M a` computation; it ",
+                "advances exactly one effect per turn of a scheduler, so threads ",
+                "interleave at effect boundaries and never preempt each other. There is ",
+                "no background execution: a thread progresses only while a scheduling ",
+                "point (`wait`, `waitBoth`, `waitAny`, `mapConcurrently`, ...) is ",
+                "driving it. The verbs here are substrate — mint a thread id, mark it ",
+                "cancelled, read that back, mark it settled — authors call ",
+                "`Tidepool.Async`, not these.",
+            ],
+            type_defs [],
+            verbs [
+                { ctor GreenNew, method green_new,
+                  args { },
+                  ret "Int" },
+                { ctor GreenCancel, method green_cancel,
+                  args { threadId: "Int" as i64 },
+                  ret "()" },
+                { ctor GreenCancelled, method green_cancelled,
+                  args { threadId: "Int" as i64 },
+                  ret "Bool" },
+                { ctor GreenSettle, method green_settle,
+                  args { threadId: "Int" as i64 },
+                  ret "()" },
+            ],
+            helpers [
+                { raw ["-- | Mint a fresh green-thread id. Substrate for 'Tidepool.Async.async';",
+                       "-- authors do not call this.",
+                       "greenNew :: M Int",
+                       "greenNew = send GreenNew"] },
+                { raw ["-- | Mark a green thread cancelled. Idempotent. Substrate for",
+                       "-- 'Tidepool.Async.cancel'; the residual computation is dropped by the",
+                       "-- caller, so the suspensions it would have raised never reach the",
+                       "-- driver.",
+                       "greenCancel :: Int -> M ()",
+                       "greenCancel = send . GreenCancel"] },
+                { raw ["-- | Has this thread been cancelled? Read at scheduling-point entry and",
+                       "-- at each round-robin iteration — a cancel takes effect at the next",
+                       "-- scheduling point that observes the handle.",
+                       "greenCancelled :: Int -> M Bool",
+                       "greenCancelled = send . GreenCancelled"] },
+                { raw ["-- | Mark a green thread settled (its value is known). Substrate for",
+                       "-- 'Tidepool.Async.poll' and for wake observability.",
+                       "greenSettle :: Int -> M ()",
+                       "greenSettle = send . GreenSettle"] },
             ],
         }
     };

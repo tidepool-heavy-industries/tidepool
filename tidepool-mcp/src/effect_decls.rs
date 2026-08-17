@@ -326,3 +326,9 @@ crate::subagent_effect_def!(crate::effect_defs::effect_decl_projection);
 // file a run journals to, and folding it on boot, is the swarm driver's
 // wiring, done at merge.
 crate::journal_effect_def!(crate::effect_defs::effect_decl_projection);
+
+// Green (PRD 20, S1-L4): `green_decl()` — the green-thread substrate behind
+// `Tidepool.Async`. Like Worktree/RepoEvent/Subagent/Journal, NOT in
+// `build_base_stack`'s row; opt-in, and it must sit LAST in `outer_decls()`
+// so `RunLLMTurn` keeps index 0.
+crate::green_effect_def!(crate::effect_defs::effect_decl_projection);
