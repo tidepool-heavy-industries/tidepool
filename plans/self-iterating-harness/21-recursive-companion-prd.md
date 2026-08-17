@@ -270,3 +270,11 @@ stability.
    into another's, exhaustively matching an ancestor-declared rich sum, or
    consuming child-local detail through an ancestor-known eliminator.
    Rendered views otherwise.
+4. Precondition discovered in C3 (mechanism and policy agreeing from
+   independent directions): a node's ALGEBRA cannot receive a value its own
+   COALGEBRA minted — `ThoughtF` has no task slot to carry it (Swarm's
+   `PlanF` does), relaying through child seeds would launder a capability
+   through the fold, and a leaf has no children to read a relay off. Any
+   C4/C5 feature wanting algebra access to coalgebra-minted values (refs,
+   receipts, node-local capabilities) is a `ThoughtF` change FIRST, then a
+   harness change.
