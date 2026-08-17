@@ -338,9 +338,15 @@ outcomeIsDone o = case o of
 outcomeLine :: Outcome -> Text
 outcomeLine o = case o of
   Done {outcomeNode = n, doneReceipt = r} ->
-    [fmt|{n}: done at {r.receiptHead} ({checksLine r}, {length r.receiptRebases} rebase steps)|]
+    [fmt|{n}: done at {r.receiptHead} ({checksLine r}, {length r.receiptRebases} rebase steps, {escalationCount r} escalated, {r.receiptCycles} agent cycles)|]
   Failed {outcomeNode = n, outcomeFailure = f} -> [fmt|{n}: FAILED — {renderFailure f}|]
   Skipped {outcomeNode = n, skipReason = why} -> [fmt|{n}: skipped — {why}|]
+
+-- | How many of this fold's rebase steps reached tier 3.  Counted per node so
+-- the run trail shows escalations wherever they happened, not only at the root
+-- (a fused fold keeps no tree to walk back down).
+escalationCount :: FoldReceipt -> Int
+escalationCount r = length (filter ((== RebaseEscalation) . rebaseTier) r.receiptRebases)
 
 checksLine :: FoldReceipt -> Text
 checksLine r = case r.receiptChecks of

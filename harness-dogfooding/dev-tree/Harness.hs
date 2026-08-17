@@ -544,7 +544,11 @@ foldChildren tree p ((s, o) : rest) acc = case acc.accAbandon of
             newHead <- worktreeHead tree
             -- EAGER: the fold just moved this node's HEAD, so every sibling
             -- tip ahead of us is stale RIGHT NOW, not at integration time.
-            cascaded <- cascade p newHead (map fst rest) acc {accNotes = acc.accNotes <> [note], accMerged = acc.accMerged + 1}
+            -- Only the siblings that will actually be merged — rebasing a
+            -- branch this node has already decided not to fold would spend a
+            -- resolution cycle on work nobody is going to use.
+            let ahead = [sib | (sib, out) <- rest, outcomeIsDone out]
+            cascaded <- cascade p newHead ahead acc {accNotes = acc.accNotes <> [note], accMerged = acc.accMerged + 1}
             foldChildren tree p rest cascaded
   where
     childName = nodeName s.seedPlan
@@ -812,7 +816,10 @@ boundaryViolations :: WorktreeHandle -> [Text] -> Harness [Text]
 boundaryViolations _ [] = pure []
 boundaryViolations tree prefixes =
   gitIn tree [fmt|diff --name-only {seedHead}..HEAD|] >>= \case
-    Left _ -> pure []
+    -- A boundary check that could not RUN is a failing boundary check, never
+    -- a clean one: reporting [] here would silently convert "git is broken in
+    -- this worktree" into "this node stayed inside its boundary".
+    Left e -> pure [[fmt|<boundary check could not run: {e}>|]]
     Right pr -> pure (filter (not . inside) (filter (not . T.null) (T.lines pr.stdout)))
   where
     seedHead = renderGitOid tree.handleReceipt.sourceHead
