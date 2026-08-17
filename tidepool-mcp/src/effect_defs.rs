@@ -2077,7 +2077,16 @@ macro_rules! subagent_effect_def {
                 "  Right (outcome, r) <- spawnAgent @WorkerResult (spawnSpec wspec \"porter\" \"port the handler\")\n",
                 "A payload that does not decode is `SpawnResultMalformed`, never a success with ",
                 "a defaulted field. `spawnAgentWithTools @tools @r rounds tools spec` is the ",
-                "same call for a child that may CALL BACK into your own Haskell handlers.",
+                "same call for a child that may CALL BACK into your own Haskell handlers.\n",
+                "CONCURRENT: `spawnAsync @r spec` is the same saga detached — it returns an ",
+                "abstract `AgentHandle r` as soon as the cycle is admitted, `awaitAgent h` ",
+                "blocks for that one cycle's `(outcome, r)`, and `cancelAgent h` reaps it ",
+                "(total: cancelling a finished or unknown handle is a no-op, and settles the ",
+                "binding without deleting anything). Run N children by spawning N handles and ",
+                "awaiting them in whatever order suits you — completion order is not an input ",
+                "to any result. A spawn past the handler's cycle cap is refused immediately ",
+                "with `SpawnCapacityExhausted` (a BOUND, not a queue), and an await on a ",
+                "cancelled handle is `SpawnCancelled`, never a hang.",
             ],
             type_defs [
                 "data AgentId = AgentId Int deriving (Show, Eq)",
@@ -2102,6 +2111,17 @@ macro_rules! subagent_effect_def {
                 // these are hand-written, same as the Worktree family's.
                 "instance ToJSON SpawnStage where toJSON s = toJSON (show s)",
                 "instance ToJSON BackendFailure where { toJSON (BackendUnavailable t) = object [\"backendUnavailable\" .= t]; toJSON (ProtocolRejected t) = object [\"protocolRejected\" .= t]; toJSON (RunFailed t) = object [\"runFailed\" .= t] }",
+                // The async trio's handle. Opaque and cycle-scoped: the handler
+                // mints it, an author echoes it back, nobody parses it. The
+                // typed surface (`Tidepool.Agent.Spawn`) wraps it in an
+                // ABSTRACT `AgentHandle r`, so a forged `CycleId Int` is not a
+                // handle. APPENDED — type_defs order is not the wire contract,
+                // but the widening rule is the same everywhere in this def.
+                "data CycleId = CycleId Int deriving (Show, Eq)",
+                // `SpawnCancelled` carries a CycleId, and the errors block
+                // templates `ToJSON SpawnError` over its fields — so CycleId
+                // needs one, same reason SpawnStage/BackendFailure do.
+                "instance ToJSON CycleId where toJSON (CycleId n) = toJSON n",
             ],
             // Typed per-verb failure (#335) + PRD 18 addendum decision 2
             // (typed failure results everywhere; variant list is this lane's
@@ -2119,6 +2139,10 @@ macro_rules! subagent_effect_def {
                   doc "the structured terminal payload did not decode to the requested result type — produced by the Haskell-side decoder, never sent by Rust" },
                 { ctor SpawnDriveFailed, fields { driveStage: "SpawnStage" as tidepool_bridge_effects::AgSpawnStage, driveDetail: "Text" as String },
                   doc "the tool-dispatch loop was driven wrongly (a reply naming an agent or call that is not the parked one), or the runtime's hard round backstop fired — a caller-sequencing failure, not a backend one" },
+                { ctor SpawnCapacityExhausted, fields { capacityLimit: "Int" as i64 },
+                  doc "the handler's cycle table is full — a BOUND, not a queue: a spawn past the cap is refused immediately so an operator sees the ceiling instead of an unbounded backlog forming behind it" },
+                { ctor SpawnCancelled, fields { cancelledCycle: "CycleId" as tidepool_bridge_effects::AgCycleId },
+                  doc "the cycle was cancelled before it produced a result — the terminal an await on a cancelled handle resolves to. A distinct constructor rather than a drive failure: 'I cancelled this' and 'this broke' call for different handling, and an author who raced their own cancel against their own await must be able to tell them apart by case, not by reading a string" },
             ],
             verbs [
                 { ctor SubagentSpawn, method subagent_spawn,
@@ -2135,6 +2159,24 @@ macro_rules! subagent_effect_def {
                 { ctor SubagentResume, method subagent_resume,
                   args { agent: "AgentId" as tidepool_bridge_effects::AgAgentId, call: "Text" as String, ok: "Bool" as bool, body: "Value" as crate::effect_glue::JsonArg },
                   ret "AgentStep", errors SpawnError },
+                // The async trio (PRD 20 S1-L2), APPENDED — verb order is the
+                // wire contract, so these three sit after the three that
+                // already existed and nothing above moves. Same saga as
+                // `SubagentSpawn`, detached onto its own cycle: spawn returns a
+                // `CycleId` immediately, await blocks for that cycle's outcome,
+                // cancel reaps it.
+                { ctor SubagentSpawnAsync, method subagent_spawn_async,
+                  args { spec: "SpawnSpec" as tidepool_bridge_effects::AgSpawnSpec, schema: "Value" as crate::effect_glue::JsonArg },
+                  ret "CycleId", errors SpawnError },
+                { ctor SubagentAwait, method subagent_await,
+                  args { cycle: "CycleId" as tidepool_bridge_effects::AgCycleId },
+                  ret "SpawnOutcome", errors SpawnError },
+                // TOTAL, deliberately — no `errors` block. Cancelling a cycle
+                // that already finished, or one this handler never minted, is a
+                // NO-OP, so there is no failure to type (PRD 20).
+                { ctor SubagentCancel, method subagent_cancel,
+                  args { cycle: "CycleId" as tidepool_bridge_effects::AgCycleId },
+                  ret "()" },
             ],
             helpers [
                 { raw ["-- | RAW one-cycle coupled spawn: workspace + binding + agent + one",
@@ -2185,7 +2227,38 @@ macro_rules! subagent_effect_def {
                        "renderSpawnError (SpawnBackendFailed st b) = \"spawn failed at \" <> show st <> \" (backend): \" <> renderBackendFailure b",
                        "renderSpawnError (SpawnRollbackFailed st orig rb) = \"spawn failed at \" <> show st <> \" AND rollback failed: \" <> orig <> \"; rollback: \" <> rb",
                        "renderSpawnError (SpawnResultMalformed d) = \"spawn result malformed: \" <> d",
-                       "renderSpawnError (SpawnDriveFailed st d) = \"spawn drive failed at \" <> show st <> \": \" <> d"] },
+                       "renderSpawnError (SpawnDriveFailed st d) = \"spawn drive failed at \" <> show st <> \": \" <> d",
+                       "renderSpawnError (SpawnCapacityExhausted n) = \"spawn refused: cycle table full (\" <> show n <> \" running)\"",
+                       "renderSpawnError (SpawnCancelled c) = \"spawn cancelled before it produced a result: \" <> show c"] },
+                { raw ["-- | RAW async spawn: everything `spawnAgentRaw` does, except that the",
+                       "-- cycle runs on its OWN thread and this call returns as soon as it is",
+                       "-- admitted — a `CycleId` naming the running cycle, not its outcome.",
+                       "-- Refused with `SpawnCapacityExhausted` when the handler's cycle table",
+                       "-- is already full; that is a BOUND, not a queue, so nothing is",
+                       "-- allocated behind it. Every cycle must eventually be reaped by",
+                       "-- `agentAwaitRaw` or `agentCancelRaw`. Prefer the typed wrapper",
+                       "-- `spawnAsync` in `Tidepool.Agent.Spawn` (schema derived from your",
+                       "-- result type, handle abstract over it); this is its substrate.",
+                       "agentSpawnAsyncRaw :: SpawnSpec -> Value -> M (Either SpawnError CycleId)",
+                       "agentSpawnAsyncRaw spec schema = send (SubagentSpawnAsync spec schema)"] },
+                { raw ["-- | RAW await: BLOCK until the named cycle finishes, and return the same",
+                       "-- `Either SpawnError SpawnOutcome` the synchronous `spawnAgentRaw`",
+                       "-- returns — the async path is the same saga, reaped later. Awaiting a",
+                       "-- cycle this handler never minted (or one already reaped) is a",
+                       "-- `SpawnDriveFailed` at `StageRunning`: a caller-sequencing failure,",
+                       "-- not a backend one. Prefer the typed wrapper `awaitAgent` in",
+                       "-- `Tidepool.Agent.Spawn`, which decodes the payload into your result",
+                       "-- type as `spawnAgent` does.",
+                       "agentAwaitRaw :: CycleId -> M (Either SpawnError SpawnOutcome)",
+                       "agentAwaitRaw cycle = send (SubagentAwait cycle)"] },
+                { raw ["-- | RAW cancel: reap the named cycle's backend and release its binding.",
+                       "-- TOTAL — cancelling a cycle that already finished, or one this handler",
+                       "-- never minted, is a NO-OP, so there is nothing to case-match. Retain-",
+                       "-- first as everywhere else: the binding is settled, and the worktree",
+                       "-- stays registered and rebindable — nothing is deleted. Prefer the",
+                       "-- typed wrapper `cancelAgent` in `Tidepool.Agent.Spawn`.",
+                       "agentCancelRaw :: CycleId -> M ()",
+                       "agentCancelRaw cycle = send (SubagentCancel cycle)"] },
             ],
         }
     };

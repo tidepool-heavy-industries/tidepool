@@ -18,13 +18,16 @@ pub mod backend;
 pub mod seam;
 pub mod spawn;
 
-pub use backend::{run_turn_to_completion, AgentBackend};
+pub use backend::{
+    run_turn_to_completion, AgentBackend, AgentBackendFactory, BackendCanceller,
+    ClosureBackendFactory,
+};
 pub use seam::{
     AgentBackendError, AgentId, BackendThreadId, CycleOutcome, CycleResultPayload, CycleSpec,
     DynamicToolDeclaration, ModelPolicy, ReasoningEffort, ThreadSpec, TokenUsage, ToolCall,
     ToolCallId, ToolOutcome, ToolReply, TurnEvent, TurnId,
 };
 pub use spawn::{
-    CoupledSpawner, OneCycleRun, SpawnError, SpawnReceipt, SpawnRequest, SpawnStage, SpawnStep,
-    SpawnWorkspace, WorkerRun, MAX_TOOL_ROUNDS,
+    CoupledSpawner, CycleSaga, OneCycleRun, SpawnError, SpawnReceipt, SpawnRequest, SpawnStage,
+    SpawnStep, SpawnSubstrate, SpawnWorkspace, WorkerRun, MAX_TOOL_ROUNDS,
 };

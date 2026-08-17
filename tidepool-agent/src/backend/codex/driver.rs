@@ -26,6 +26,8 @@
 //!    parks the child's turn until the timeout kills it. That holds for a
 //!    declared tool, an undeclared one, and a round-cap refusal alike.
 
+use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 use codex_codes::{
@@ -36,8 +38,10 @@ use codex_codes::{
 use crate::backend::codex::dynamic_tools::{
     DynamicToolFunctionSpec, DynamicToolSpec, ThreadStartWithDynamicTools,
 };
-use crate::backend::codex::process::{last_agent_message_text, Session, SessionError, TurnStop};
-use crate::backend::AgentBackend;
+use crate::backend::codex::process::{
+    last_agent_message_text, pid_is_our_app_server, Session, SessionError, TurnStop,
+};
+use crate::backend::{AgentBackend, AgentBackendFactory, BackendCanceller};
 use crate::seam::{
     AgentActivity, AgentBackendError, BackendThreadId, CycleOutcome, CycleResultPayload, CycleSpec,
     DynamicToolDeclaration, ModelPolicy, ReasoningEffort, ThreadSpec, TokenUsage, ToolCall,
@@ -103,6 +107,14 @@ pub struct CodexAgentBackend {
     /// "connection lost" — a lost connection surfaces as a
     /// [`AgentBackendError::BackendUnavailable`] from the call that noticed.
     session: Option<Session>,
+    /// The app-server child's pid, published the moment the session connects,
+    /// so a [`CodexCanceller`] taken BEFORE the cycle started can still reach
+    /// it. `0` means "no process yet".
+    ///
+    /// Shared rather than read off `session` because a cycle thread inside
+    /// `start_turn` holds `&mut self`, and the canceller's whole job is to be
+    /// reachable while that borrow is outstanding.
+    pid: Arc<AtomicU32>,
     /// Fetched once per backend and reused: `model/list` is a metadata
     /// request, but re-asking per cycle would let one agent's turns silently
     /// run on two different models.
@@ -126,6 +138,7 @@ impl CodexAgentBackend {
         Ok(Self {
             runtime,
             session: None,
+            pid: Arc::new(AtomicU32::new(0)),
             catalogue: None,
             resolved_model: None,
             turn_timeout: DEFAULT_TURN_TIMEOUT,
@@ -147,6 +160,16 @@ impl CodexAgentBackend {
     /// `None` before the first cycle.
     pub fn resolved_model(&self) -> Option<&str> {
         self.resolved_model.as_deref()
+    }
+
+    /// Arm the canceller slot without connecting a session.
+    ///
+    /// Test-only: the cancellation gates need a canceller pointing at a REAL
+    /// process to prove what it does and does not signal, and spawning an
+    /// actual app-server for that would be a live-model test.
+    #[cfg(test)]
+    pub(crate) fn arm_pid_for_test(&self, pid: u32) {
+        self.pid.store(pid, Ordering::SeqCst);
     }
 
     /// Every JSONL frame exchanged so far, in wire order.
@@ -189,6 +212,9 @@ impl CodexAgentBackend {
                 .runtime
                 .block_on(Session::connect(capabilities))
                 .map_err(map_session_error)?;
+            // Publish the pid BEFORE handing the session back: from here on a
+            // canceller taken at any time can reap this process.
+            self.pid.store(session.pid().unwrap_or(0), Ordering::SeqCst);
             self.session = Some(session);
         }
         let Self {
@@ -261,6 +287,19 @@ impl AgentBackend for CodexAgentBackend {
             .collect()
     }
 
+    /// A handle that SIGKILLs the app-server child from another thread.
+    ///
+    /// Real reaping, not a flag: a cycle thread blocked in
+    /// [`start_turn`](AgentBackend::start_turn) is blocked on a read from the
+    /// child's stdout, so killing the child closes the pipe and the blocked
+    /// read returns — the seam call comes back
+    /// [`AgentBackendError::BackendUnavailable`] instead of hanging.
+    fn canceller(&self) -> Box<dyn BackendCanceller> {
+        Box::new(CodexCanceller {
+            pid: Arc::clone(&self.pid),
+        })
+    }
+
     fn resume(&mut self, reply: ToolReply) -> Result<TurnEvent, AgentBackendError> {
         // The model was resolved when the turn started; re-resolving here could
         // silently move an in-flight turn onto a different model.
@@ -277,6 +316,178 @@ impl AgentBackend for CodexAgentBackend {
             .block_on(session.reply_and_pump(&reply.call.0, &response, timeout))
             .map_err(map_session_error)?;
         project_stop(stop, session, &resolved_model)
+    }
+}
+
+/// How long [`CodexCanceller::cancel`] waits for the killed child to actually
+/// leave the process table before giving up. SIGKILL is unblockable, so this is
+/// a bound on the kernel reaping it, not on the process deciding to comply.
+const CANCEL_CONFIRM_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Reaps one [`CodexAgentBackend`]'s app-server child from another thread.
+///
+/// # What it actually does, and what it cannot do
+///
+/// It sends `SIGKILL` to the recorded pid and then CONFIRMS the process is gone
+/// before returning — the same "never trust that the signal was sent" rule
+/// [`Session::shutdown`] follows. It does not, and cannot, go through
+/// `Session::shutdown`: that method consumes `self` and needs the backend's
+/// tokio runtime, both of which the cycle thread is holding `&mut` on for the
+/// whole duration of the seam call this exists to interrupt. Signalling the
+/// child by pid is the reachable mechanism, and it is a real one — the blocked
+/// read on the child's stdout returns as soon as the pipe closes.
+///
+/// # What makes the pid safe to signal
+///
+/// Not "we spawned it" — that was the load-bearing claim, and it was WRONG. A
+/// pid stops naming our process the moment the child is reaped, by its owning
+/// `Child` on drop or by tokio's SIGCHLD reaper while the backend is still
+/// alive, and the kernel is then free to hand the number to anyone. On the
+/// machine this adapter targets, "anyone" plausibly means the operator's own
+/// Codex session. `ESRCH` does not help: it protects an unreaped pid, not a
+/// REUSED one.
+///
+/// Two independent things make a signal safe here, and both must hold:
+///
+/// 1. **Disarmed on drop.** [`CodexAgentBackend`]'s `Drop` stores `0` into the
+///    shared slot, and a `Drop` body runs BEFORE the struct's fields drop —
+///    so the slot is cleared strictly before the `Child` that owns the process
+///    is reaped. Once a backend begins dropping, every canceller cloned from it
+///    is inert. This closes the window a completed-then-cancelled cycle opens.
+/// 2. **Identity-checked at the signal.** [`pid_is_our_app_server`] re-reads
+///    `/proc/<pid>/cmdline` immediately before `kill`, so a pid freed by a
+///    child that exited on its own — no drop involved, which no drop discipline
+///    can reach — is not signalled either.
+///
+/// The confirm loop polls the same identity check rather than bare existence:
+/// waiting for a stranger to leave `/proc` and then returning as if something
+/// had been reaped is worse than not waiting at all.
+///
+/// A pid of `0` means either that the session has not connected yet — the cycle
+/// thread is inside process spawn + handshake, bounded by the OS rather than by
+/// a model — or that the backend has begun dropping. Both are genuine no-ops,
+/// not silent failures to reap something that exists.
+///
+/// The killed child is left for its owning `tokio::process::Child` to reap;
+/// `cancel` deliberately does not wait on it, because the `Child` belongs to
+/// the blocked thread.
+pub struct CodexCanceller {
+    pid: Arc<AtomicU32>,
+}
+
+impl CodexCanceller {
+    /// The pid this canceller would signal; `0` when it is inert.
+    #[cfg(test)]
+    pub(crate) fn armed_pid(&self) -> u32 {
+        self.pid.load(Ordering::SeqCst)
+    }
+}
+
+impl BackendCanceller for CodexCanceller {
+    fn cancel(&self) {
+        let pid = self.pid.load(Ordering::SeqCst);
+        if pid == 0 {
+            // Never connected, or the backend has begun dropping.
+            return;
+        }
+        if !pid_is_our_app_server(pid) {
+            // The process exited and the number was recycled, or it is already
+            // gone. Either way there is nothing of ours to reap, and signalling
+            // would hit a stranger.
+            return;
+        }
+        // SAFETY: `kill(2)` against a pid whose `/proc` entry named our
+        // app-server invocation on the line above. The check-then-signal gap is
+        // not closable on Linux without pidfd, and it is bounded by the two
+        // syscalls; the failure it leaves is astronomically less likely than
+        // the recycled-pid window it removes. `ESRCH` from a pid that died in
+        // that gap is the outcome cancellation wanted, so it is ignored.
+        unsafe {
+            libc::kill(pid as libc::pid_t, libc::SIGKILL);
+        }
+        let deadline = std::time::Instant::now() + CANCEL_CONFIRM_TIMEOUT;
+        while pid_is_our_app_server(pid) && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+}
+
+/// Disarm every canceller cloned from this backend BEFORE the process it named
+/// can be reaped.
+///
+/// A `Drop` body runs before the struct's fields drop, so this store strictly
+/// precedes the `Session`'s (and therefore the `tokio::process::Child`'s) drop.
+/// That ordering is the whole mechanism: after it, the pid slot reads `0` and
+/// [`CodexCanceller::cancel`] returns without signalling, so a cancel racing a
+/// completed cycle cannot reach a number the kernel has already handed to
+/// somebody else. It is a property of the TYPE, not of a caller remembering to
+/// mark the cycle terminal first.
+impl Drop for CodexAgentBackend {
+    fn drop(&mut self) {
+        self.pid.store(0, Ordering::SeqCst);
+    }
+}
+
+/// Makes one [`CodexAgentBackend`] per cycle.
+///
+/// # Config isolation holds for N instances exactly as for one — verified
+///
+/// PRD 18 acceptance criterion 11 (no normal worker run mutates the operator's
+/// `~/.codex`) is upheld by the REQUEST SHAPE, not by any per-process guard, so
+/// N instances cannot race past it:
+///
+/// - `cwd` rides [`CycleSpec`], i.e. `turn/start`. The thread-start params type
+///   ([`ThreadStartWithDynamicTools`]) has no `cwd` field AT ALL, so the
+///   project-trust write into `config.toml` is structurally unreachable from
+///   every instance independently. Nothing about that is shared state.
+/// - [`CodexAgentBackend::new`] allocates a fresh tokio runtime and sets
+///   `session`/`catalogue`/`resolved_model` to `None`. There are no statics, no
+///   shared caches, and no cross-instance handles — the model catalogue is
+///   cached PER BACKEND, which is what keeps one agent's turns on one model.
+/// - Each instance spawns its OWN `codex app-server` child on first use.
+///
+/// **What N instances do share, stated rather than papered over:** the
+/// operator's real Codex home. In the normal path that is read-only —
+/// `config.toml`, `auth.json` and `installation_id` are read at app-server
+/// startup and not written, which is exactly what
+/// [`ConfigSnapshot`](super::isolation::ConfigSnapshot) checks per run and what
+/// makes a mutation a FAILURE rather than a tolerated side effect. The one
+/// writable case is a credential refresh (`auth.json`), which N concurrent
+/// servers could in principle race on; that is a property of running `codex` at
+/// all and not something this factory introduces, and it already fails the
+/// isolation check loudly rather than silently, on one instance or on eight.
+/// Anything beyond that — the live sqlite logs the operator's own sessions
+/// write continuously — is outside the checked surface by design.
+pub struct CodexBackendFactory {
+    turn_timeout: Duration,
+}
+
+impl CodexBackendFactory {
+    pub fn new() -> Self {
+        Self {
+            turn_timeout: DEFAULT_TURN_TIMEOUT,
+        }
+    }
+
+    /// Give every backend this factory makes the same non-default turn timeout.
+    #[must_use]
+    pub fn with_turn_timeout(mut self, timeout: Duration) -> Self {
+        self.turn_timeout = timeout;
+        self
+    }
+}
+
+impl Default for CodexBackendFactory {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl AgentBackendFactory for CodexBackendFactory {
+    fn create(&mut self) -> Result<Box<dyn AgentBackend + Send>, AgentBackendError> {
+        Ok(Box::new(
+            CodexAgentBackend::new()?.with_turn_timeout(self.turn_timeout),
+        ))
     }
 }
 
@@ -1018,5 +1229,142 @@ mod tests {
         backend
             .shutdown()
             .expect("shutdown of an unconnected backend");
+    }
+
+    // ------------------------------------------------------------------
+    // The canceller may never signal a pid that is no longer ours.
+    //
+    // A pid stops naming our app-server the moment the child is reaped, and
+    // the kernel then hands the number to anyone — on the machine this adapter
+    // targets, plausibly the operator's own Codex session. Two independent
+    // mechanisms prevent that, and these two rows pin one each. Neither
+    // spawns an app-server: both use an ordinary long-lived child as the
+    // stand-in for "some other process holding this pid", which is exactly
+    // the thing that must survive.
+    // ------------------------------------------------------------------
+
+    /// A harmless long-lived child to stand in for whoever inherited a
+    /// recycled pid. Killed by the test that spawned it, never by the code
+    /// under test — that is the assertion.
+    struct Bystander(std::process::Child);
+
+    impl Bystander {
+        fn spawn() -> Self {
+            Self(
+                std::process::Command::new("sleep")
+                    .arg("30")
+                    .spawn()
+                    .expect("spawn a bystander process"),
+            )
+        }
+
+        fn pid(&self) -> u32 {
+            self.0.id()
+        }
+
+        /// Whether the bystander is STILL alive after a grace window.
+        ///
+        /// The window is not decoration and it is not a rendezvous that could
+        /// be replaced by one. The assertion here is a NEGATIVE — that no
+        /// signal was sent — and a negative has no event to wait on: a bare
+        /// `try_wait` immediately after `cancel` reports "alive" even when a
+        /// `SIGKILL` is already in flight, because delivery and reaping are
+        /// asynchronous. That is not hypothetical; defeating the guard and
+        /// running this gate is how it was found, and without the window this
+        /// row passed against the very bug it exists to catch.
+        ///
+        /// 500ms is ~4 orders of magnitude more than `SIGKILL` delivery plus
+        /// reaping needs, so a survivor here survived because nothing was
+        /// sent.
+        fn survives_a_grace_window(&mut self) -> bool {
+            let deadline = std::time::Instant::now() + Duration::from_millis(500);
+            while std::time::Instant::now() < deadline {
+                if self.0.try_wait().expect("poll the bystander").is_some() {
+                    return false;
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            self.0.try_wait().expect("poll the bystander").is_none()
+        }
+    }
+
+    impl Drop for Bystander {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+
+    /// Mechanism 1: once the backend begins dropping, every canceller cloned
+    /// from it is INERT.
+    ///
+    /// The `Drop` body runs before the fields drop, so the slot is cleared
+    /// strictly before the `Child` that owns the app-server is reaped — which
+    /// is what makes this a property of the type rather than of a caller
+    /// remembering to mark the cycle terminal first.
+    #[test]
+    fn a_dropped_backend_leaves_its_canceller_inert() {
+        let mut bystander = Bystander::spawn();
+        let backend = CodexAgentBackend::new().expect("build the backend");
+        backend.arm_pid_for_test(bystander.pid());
+
+        // The boxed one is the real seam path; the typed one reads the SAME
+        // shared slot, and exists only because `BackendCanceller` is not
+        // `Any` and so cannot be downcast.
+        let canceller = backend.canceller();
+        let armed = CodexCanceller {
+            pid: Arc::clone(&backend.pid),
+        };
+        assert_eq!(
+            armed.armed_pid(),
+            bystander.pid(),
+            "the canceller is armed while the backend is alive"
+        );
+
+        drop(backend);
+
+        assert_eq!(
+            armed.armed_pid(),
+            0,
+            "dropping the backend must disarm every canceller cloned from it"
+        );
+        canceller.cancel();
+        assert!(
+            bystander.survives_a_grace_window(),
+            "an inert canceller must signal nothing at all"
+        );
+    }
+
+    /// Mechanism 2: even on a LIVE backend, a pid whose command line is not
+    /// our app-server is never signalled.
+    ///
+    /// This is the window no drop discipline can reach — the child exits on its
+    /// own and tokio's reaper frees the pid while the backend is still alive.
+    /// The backend here is deliberately not dropped, so the identity check is
+    /// the only thing that can save the bystander.
+    #[test]
+    fn a_live_canceller_refuses_a_pid_that_is_not_our_app_server() {
+        let mut bystander = Bystander::spawn();
+        let backend = CodexAgentBackend::new().expect("build the backend");
+        backend.arm_pid_for_test(bystander.pid());
+
+        let canceller = backend.canceller();
+        canceller.cancel();
+
+        assert!(
+            bystander.survives_a_grace_window(),
+            "a live pid that is not our app-server must never be signalled"
+        );
+        // The backend is still alive here on purpose: the slot was armed and
+        // the process existed, so ONLY the cmdline check refused the signal.
+        assert_eq!(
+            CodexCanceller {
+                pid: Arc::clone(&backend.pid),
+            }
+            .armed_pid(),
+            bystander.pid(),
+            "the refusal was the identity check, not a cleared slot"
+        );
+        drop(backend);
     }
 }

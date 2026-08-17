@@ -69,6 +69,88 @@ pub trait AgentBackend {
     fn transcript_jsonl(&self) -> Vec<String> {
         Vec::new()
     }
+
+    /// A handle that reaps this backend FROM ANOTHER THREAD, making an
+    /// in-flight seam call return.
+    ///
+    /// Take it BEFORE the cycle starts running. Once a cycle thread is inside
+    /// [`start_turn`](AgentBackend::start_turn) it holds `&mut` on the backend
+    /// and nothing else can reach it — which is the whole reason a canceller is
+    /// a separate, `Send + Sync` object rather than a `&mut self` method. A
+    /// flag the blocked thread would have to check is not cancellation; it is a
+    /// request the blocked thread cannot read.
+    ///
+    /// Default: a no-op canceller. Correct for a backend with nothing to reap
+    /// (an in-process one, and [`codex::replay`], which pumps a transcript with
+    /// no process behind it) — and what keeps every such backend compiling.
+    fn canceller(&self) -> Box<dyn BackendCanceller> {
+        Box::new(NoopCanceller)
+    }
+}
+
+/// Reaps a backend's underlying process/session FROM ANOTHER THREAD, making
+/// its in-flight seam call return.
+///
+/// `Send + Sync`, because the whole point is that it is held by someone other
+/// than the cycle thread — a supervisor that decided to cancel while the cycle
+/// thread is blocked inside the seam.
+///
+/// `cancel` is total and idempotent: cancelling twice, or cancelling a backend
+/// that already finished, does nothing and reports nothing. There is no
+/// "cancel failed" a caller could act on differently — a process that is
+/// already gone is the outcome cancellation wanted.
+pub trait BackendCanceller: Send + Sync {
+    fn cancel(&self);
+}
+
+/// The default [`AgentBackend::canceller`]: a backend with no process behind
+/// it has nothing to reap, and saying so honestly is better than pretending.
+///
+/// This is NOT a stand-in for an unimplemented canceller on a backend that
+/// DOES own a process — a canceller that returns without reaping anything is
+/// worse than no canceller, because a supervisor would then join a thread that
+/// never returns.
+struct NoopCanceller;
+
+impl BackendCanceller for NoopCanceller {
+    fn cancel(&self) {}
+}
+
+/// Makes one backend instance per cycle.
+///
+/// Concurrent cycles never share a backend: an [`AgentBackend`] is a step
+/// function over ONE live thread, so two cycles sharing one would interleave
+/// `start_turn`/`resume` on the same session and misroute each other's replies.
+/// A factory is what lets a cycle table hold N cycles without ever holding N
+/// references to one backend.
+///
+/// `&mut self` because a factory may legitimately carry state (a one-shot
+/// factory that yields a pre-built instance once, a factory that counts).
+pub trait AgentBackendFactory: Send {
+    fn create(&mut self) -> Result<Box<dyn AgentBackend + Send>, AgentBackendError>;
+}
+
+/// A closure as a factory, so
+/// `|| CodexAgentBackend::new().map(|b| Box::new(b) as _)` is usable without a
+/// named type per call site.
+pub struct ClosureBackendFactory<F>(F);
+
+impl<F> ClosureBackendFactory<F>
+where
+    F: FnMut() -> Result<Box<dyn AgentBackend + Send>, AgentBackendError> + Send,
+{
+    pub fn new(f: F) -> Self {
+        Self(f)
+    }
+}
+
+impl<F> AgentBackendFactory for ClosureBackendFactory<F>
+where
+    F: FnMut() -> Result<Box<dyn AgentBackend + Send>, AgentBackendError> + Send,
+{
+    fn create(&mut self) -> Result<Box<dyn AgentBackend + Send>, AgentBackendError> {
+        (self.0)()
+    }
 }
 
 /// Run one turn to completion, refusing every tool call it makes.

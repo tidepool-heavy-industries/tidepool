@@ -59,6 +59,107 @@ over the step surface, not second primitives. That is PRD 18's own rule for
 synchronous delegation, and it is why the no-tools path cannot drift from the
 tools path.
 
+## Concurrency: a shared substrate, N detachable sagas
+
+`spawn.rs` splits into two pieces because the two halves of a spawn have
+opposite ownership:
+
+- **`SpawnSubstrate`** — SHARED, behind one `Arc<Mutex<…>>`. Holds the
+  `WorktreeManager`, the flocked `BindingTable`, and the agent-id counter.
+  Single-owner is not a policy choice: `BindingTable::open` takes a lifetime
+  flock on its binding root, so "one substrate per cycle" does not exist.
+- **`CycleSaga`** — PER-CYCLE, carrying its own `Arc` to that substrate, so it
+  can be moved to another thread and driven there.
+
+**The load-bearing invariant: no code path holds the substrate lock across a
+backend call.** A saga that does serializes every cycle behind one model turn
+and silently reinstates the one-agent-at-a-time constraint this design removed.
+It is enforced by shape, not only by prose: every critical section goes through
+`lock_substrate` (or a bare `substrate.lock()` in `abandon`/`roll_back`), and
+none of those bodies contains a `backend.` call. Grep `lock_substrate` to audit
+it.
+
+`resolve_workspace` is inside the lock even though `WorktreeManager` is
+internally immutable — concurrent `git worktree add` against one source
+repository contends on git's own locks, and a spurious `GitFailure` from that
+would read as a real allocation failure.
+
+A POISONED substrate mutex means another cycle panicked mid-saga, so the
+binding table's in-memory rows may not match disk. It surfaces as a loud
+`SpawnError::Binding` / `WorktreeError::StorageFailure` naming the poisoning —
+never `unwrap()` (one cycle's panic must not become every cycle's) and never
+`PoisonError::into_inner` (writing binding rows on top of unknown state). It is
+spelled with existing variants because `SpawnError`'s variants are the wire
+contract `tidepool-handlers` converts exhaustively.
+
+`spawn_one_cycle`, `CoupledSpawner::begin`/`answer`, and the detached path are
+all COMBINATORS over one `CycleSaga` — same rule as `run_turn_to_completion`
+over the step seam.
+
+## Cancellation: reap first, then settle
+
+`AgentBackend::canceller()` hands out a `Send + Sync` `BackendCanceller` that
+reaps the backend FROM ANOTHER THREAD. Take it BEFORE the cycle runs: a cycle
+thread inside `start_turn` holds `&mut` on the backend, so nothing else can
+reach it. A flag the blocked thread would have to check is not cancellation.
+
+- `CodexCanceller` SIGKILLs the app-server child by pid. It cannot go through
+  `Session::shutdown` (that consumes `self` and needs the runtime the blocked
+  thread is holding), so the pid is published into a shared `Arc<AtomicU32>`
+  the moment the session connects.
+
+  **A pid is not a durable name for a process, and "we spawned it" is not what
+  makes it safe to signal.** Once the child is reaped — by its owning `Child`
+  on drop, or by tokio's SIGCHLD reaper while the backend is still alive — the
+  kernel is free to hand the number to anyone, and on this box "anyone" is
+  plausibly the operator's own Codex session. `ESRCH` protects an unreaped pid,
+  not a REUSED one. Two independent mechanisms gate every signal:
+
+  1. `Drop for CodexAgentBackend` stores `0` into the slot. A `Drop` body runs
+     before the struct's fields drop, so the slot clears strictly before the
+     `Child` is reaped: once a backend begins dropping, every canceller cloned
+     from it is inert. This is what keeps the safety a property of the TYPE
+     rather than of a handler in another crate remembering to mark a cycle
+     terminal first.
+  2. `pid_is_our_app_server` re-reads `/proc/<pid>/cmdline` immediately before
+     `kill`, closing the window where the child exited on its own — which no
+     drop discipline can reach. The confirm loop polls the same check, because
+     waiting for a stranger to leave `/proc` and returning as if something had
+     been reaped is worse than not waiting.
+
+  Both are pinned by named rows in `driver.rs`'s `mod tests`, each verified to
+  FAIL when its mechanism is defeated.
+- The default is a no-op canceller, correct for a backend with no process
+  (`replay`, any in-process one). It is NOT a placeholder for an unimplemented
+  one on a backend that owns a process — a canceller that returns without
+  reaping is worse than none, because the supervisor then joins a thread that
+  never returns.
+
+**Order: kill, THEN settle.** `CycleSaga::abandon()` takes the substrate mutex
+briefly to settle the binding `Released`; settling first would hold the lock
+across a reap of unknown duration. `abandon` is IDEMPOTENT — on a saga that
+already completed, rolled back, or was abandoned it is `Ok(())` writing
+nothing, because a cancel racing a completion is a real sequence and must not
+write two lease rows for a life that ended once. Retain-first is locked
+(`tidepool-worktree/CLAUDE.md`): cancellation settles and deletes nothing.
+
+## Per-cycle backends: `AgentBackendFactory`
+
+Concurrent cycles never share a backend — an `AgentBackend` is a step function
+over ONE live thread, and two cycles sharing one would interleave their
+`resume`s onto the same session. `CodexBackendFactory` makes one instance per
+cycle; `ClosureBackendFactory` adapts a closure.
+
+Config isolation holds for N instances exactly as for one, and the reason is
+structural: `cwd` rides `turn/start` and `ThreadStartWithDynamicTools` has no
+`cwd` field at all, so the project-trust write is unreachable from every
+instance independently. `new()` shares nothing — fresh runtime, no statics, the
+model catalogue cached PER BACKEND. What N instances do share is the operator's
+real `~/.codex`, read-only in the normal path; the one writable case is a
+credential refresh of `auth.json`, which is a property of running `codex` at
+all and which `ConfigSnapshot` already fails loudly on, at one instance or at
+eight.
+
 ## Model policy: allowlists, never denylists
 
 Each `ModelPolicy` names an ordered allowlist (`driver::preference_for`);

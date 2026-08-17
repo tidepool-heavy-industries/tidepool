@@ -60,13 +60,39 @@
 -- situation with @AskUser@: importing it from a row that lacks those effects
 -- fails at the import, not at the call site.
 --
--- __Scope.__ One call in, one typed outcome or one typed error out —
--- synchronous run-to-completion, one cycle, with the parent serving tool calls
--- inside it. PRD 18's async handle\/@waitAgent@\/poke surface is later work and
--- is deliberately not here.
+-- __Scope.__ Two shapes, one saga. 'spawnAgent' and 'spawnAgentWithTools' are
+-- the SYNCHRONOUS form: one call in, one typed outcome or one typed error out,
+-- run to completion, with the parent serving tool calls inside it. 'spawnAgent'
+-- IS 'spawnAsync' followed by 'awaitAgent' — one implementation, not two, the
+-- same way it was already the zero-tools case of the tool loop.
+-- 'spawnAsync' \/ 'awaitAgent' \/ 'cancelAgent' are the same cycle DETACHED —
+-- spawn hands back an opaque 'AgentHandle' as soon as the cycle is admitted,
+-- await blocks for that one cycle's result, cancel reaps it. Running N children
+-- at once is N handles awaited in whatever order suits you; completion order is
+-- not an input to any result.
+--
+-- __What an await can come back with__, beyond the sync path's own failures:
+-- 'SpawnCapacityExhausted' (refused at 'spawnAsync' — the handler's cycle table
+-- is full, a BOUND rather than a queue, so nothing was allocated behind it) and
+-- 'SpawnCancelled' (this handle was cancelled before it produced a result — a
+-- distinct constructor from 'SpawnDriveFailed' precisely so "I cancelled this"
+-- and "this broke" can be told apart by case rather than by reading a string).
+-- An await never hangs and never throws.
+--
+-- __One behavioral difference on the async path, worth knowing where you would
+-- hit it.__ A child that declared no tools and invents one anyway is refused by
+-- the RUNTIME (@\"no such tool: X — this agent was created with no dynamic
+-- tools\"@) rather than by the Haskell loop (@\"no such tool: X\"@). Same
+-- outcome — a refusal the child reads and finishes its turn on — different
+-- text, in a path that only fires if a toolless child invents a tool.
 module Tidepool.Agent.Spawn
   ( spawnAgent
   , spawnAgentWithTools
+  , spawnAsync
+  , awaitAgent
+  , cancelAgent
+    -- | ABSTRACT — the constructor is deliberately not exported.
+  , AgentHandle
   , ToolRounds (..)
   , ToolAnswer (..)
   , NoTools (..)
@@ -79,14 +105,18 @@ import GHC.Generics (Generic)
 import Tidepool.Effects
   ( AgentId
   , AgentStep (..)
+  , CycleId
   , CyclePayload (..)
   , M
   , SpawnError (..)
   , SpawnOutcome (..)
   , SpawnSpec
   , SpawnStage (..)
+  , agentAwaitRaw
   , agentBeginRaw
+  , agentCancelRaw
   , agentResumeRaw
+  , agentSpawnAsyncRaw
   )
 import Tidepool.Agent.Contract
   ( AsServerT
@@ -134,12 +164,11 @@ data ToolAnswer
     ToolRefused Text
   deriving (Show)
 
--- | The empty tools record: what 'spawnAgent' declares.
---
--- 'spawnAgent' IS 'spawnAgentWithTools' at zero tools, so the no-tools path is
--- the same driver loop rather than a second implementation that could drift
--- from it. Every call a child makes against this record names a tool that was
--- never declared, and is refused.
+-- | The empty tools record: 'spawnAgentWithTools' at ZERO tools, which is how a
+-- child that should call nothing is spawned through the tool loop rather than
+-- through a second implementation that could drift from it. Every call a child
+-- makes against this record names a tool that was never declared, and is
+-- refused.
 data NoTools mode = NoTools
   deriving (Generic)
 
@@ -173,7 +202,76 @@ spawnAgent ::
   (FromJSON r, JsonSchema r) =>
   SpawnSpec ->
   M (Either SpawnError (SpawnOutcome, r))
-spawnAgent = spawnAgentWithTools @NoTools @r (ToolRounds 0) NoTools
+spawnAgent spec = spawnAsync @r spec >>= either (pure . Left) (awaitAgent @r)
+
+-- | An opaque, cycle-scoped handle to a running agent, phantom-typed by the
+-- result the agent was spawned to produce.
+--
+-- The phantom @r@ is what makes 'awaitAgent' need no type application: the
+-- schema the child is held to was fixed at 'spawnAsync', and the handle carries
+-- that choice to the await. A handle never crosses a resident-cycle boundary
+-- (PRD 19's rule for every runtime handle) — what crosses is the recorded
+-- outcome.
+--
+-- ABSTRACT: the constructor is not exported. A 'CycleId' an author could forge
+-- is not a handle, and a handle whose @r@ an author could choose after the fact
+-- would decode a payload against a schema the child was never held to.
+newtype AgentHandle r = AgentHandle CycleId
+
+-- | Start a cycle and hand back its handle as soon as it is ADMITTED — not
+-- when it finishes.
+--
+-- The same saga as 'spawnAgent', detached: the schema the child is held to is
+-- derived from @r@ here, at spawn, and the handle carries that choice to
+-- 'awaitAgent'. Spawn N, await them in whatever order suits you.
+--
+-- Refused rather than queued when the handler's cycle table is full
+-- ('SpawnCapacityExhausted', carrying the cap) — an operator sees the ceiling
+-- instead of a backlog forming invisibly behind it. Every admitted cycle must
+-- eventually be reaped, by 'awaitAgent' or by 'cancelAgent'.
+spawnAsync ::
+  forall r.
+  JsonSchema r =>
+  SpawnSpec ->
+  M (Either SpawnError (AgentHandle r))
+spawnAsync spec = do
+  started <- agentSpawnAsyncRaw spec (jsonSchema (Proxy :: Proxy r))
+  pure $ case started of
+    Left err -> Left err
+    Right cyc -> Right (AgentHandle cyc)
+
+-- | BLOCK until this handle's cycle finishes, and decode its terminal payload
+-- against the @r@ the handle was spawned at.
+--
+-- Decoding is the SAME 'decodeOutcome' the synchronous path uses, so
+-- 'SpawnResultMalformed' is still produced in exactly one place and means
+-- exactly what it means there.
+--
+-- Total: an await resolves to a typed terminal, never a hang and never an
+-- exception. A handle cancelled before it produced a result comes back
+-- 'SpawnCancelled' — deliberately a different constructor from
+-- 'SpawnDriveFailed', because "I cancelled this" and "this broke" call for
+-- different handling at the call site.
+awaitAgent ::
+  forall r.
+  FromJSON r =>
+  AgentHandle r ->
+  M (Either SpawnError (SpawnOutcome, r))
+awaitAgent (AgentHandle cyc) = do
+  finished <- agentAwaitRaw cyc
+  pure $ case finished of
+    Left err -> Left err
+    Right outcome -> decodeOutcome @r outcome
+
+-- | Reap this handle's cycle: the backend is killed and the binding released.
+--
+-- TOTAL, and deliberately so — cancelling a cycle that already finished, or one
+-- that was already cancelled, is a NO-OP, so there is no failure to case-match
+-- and no ordering an author has to get right against their own 'awaitAgent'.
+-- Retain-first as everywhere else: the binding is settled, the worktree stays
+-- registered and rebindable, and nothing is deleted.
+cancelAgent :: AgentHandle r -> M ()
+cancelAgent (AgentHandle cyc) = agentCancelRaw cyc
 
 -- | One-cycle coupled spawn whose child holds DYNAMIC TOOLS, each one answered
 -- by the parent's own Haskell handler.

@@ -645,6 +645,59 @@ fn process_exists(pid: u32) -> bool {
     Path::new(&format!("/proc/{pid}")).exists()
 }
 
+/// The invocation [`AppServerBuilder`] produces:
+/// `codex [-c k=v]… app-server --listen stdio:// [extra]…`.
+///
+/// The guard below checks the program name and the SUBCOMMAND rather than the
+/// full argv, because `-c` overrides and `extra_args` are caller-configurable
+/// and their positions are not: a check that depended on flag order would go
+/// stale the first time a builder option was used.
+const APP_SERVER_PROGRAM: &str = "codex";
+const APP_SERVER_SUBCOMMAND: &str = "app-server";
+
+/// Whether `pid` still names a process whose command line is OUR app-server
+/// invocation.
+///
+/// # Why identity, and not just existence
+///
+/// A pid is not a durable name for a process. Once the app-server exits and is
+/// reaped — by its owning `Child` on drop, or by tokio's SIGCHLD reaper while
+/// the backend is still alive — the number is free for the kernel to hand to
+/// anyone. Signalling a bare remembered pid after that kills a stranger, and on
+/// the machine this adapter is built for that stranger is plausibly the
+/// operator's OWN Codex session. `ESRCH` protects a pid that is merely
+/// unreaped; it does not protect a pid that has been REUSED, which is a
+/// different failure and the dangerous one.
+///
+/// So every signal this crate sends is gated on the pid still looking like the
+/// process we spawned. Reading `/proc/<pid>/cmdline` is not proof of identity
+/// against an adversary (a process can be named anything), and it is not
+/// trying to be: the threat here is coincidence, not malice, and a recycled pid
+/// that happens to also be running `codex app-server` is the operator's own
+/// session — which is why the [`crate::backend::codex::driver::CodexCanceller`]
+/// is additionally disarmed on backend drop, so this check is the second line
+/// and not the only one.
+pub(crate) fn pid_is_our_app_server(pid: u32) -> bool {
+    let Ok(raw) = std::fs::read(format!("/proc/{pid}/cmdline")) else {
+        // Gone, or unreadable (a pid owned by another user). Either way it is
+        // not ours to signal.
+        return false;
+    };
+    let mut argv = raw
+        .split(|byte| *byte == 0)
+        .filter(|part| !part.is_empty())
+        .map(String::from_utf8_lossy);
+    let Some(program) = argv.next() else {
+        // An empty `cmdline` is a kernel thread or a zombie — never ours.
+        return false;
+    };
+    let program_name = Path::new(program.as_ref())
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| program.into_owned());
+    program_name == APP_SERVER_PROGRAM && argv.any(|arg| arg == APP_SERVER_SUBCOMMAND)
+}
+
 /// The text of the last `agentMessage` item in a completed turn — where
 /// `outputSchema`-constrained structured output lands (the CLI source
 /// documents `outputSchema` as constraining "the final assistant message for
