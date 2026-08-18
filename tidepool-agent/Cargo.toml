@@ -18,7 +18,7 @@ libc.workspace = true
 tidepool-worktree.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-sha2 = "0.10"
+sha2 = "0.11"
 thiserror.workspace = true
 tokio = { workspace = true, features = ["process", "rt", "rt-multi-thread", "time"] }
 

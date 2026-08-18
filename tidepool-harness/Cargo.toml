@@ -29,7 +29,7 @@ thiserror.workspace = true
 genai.workspace = true
 openai-auth = { version = "1", default-features = false, features = ["async", "callback-server"] }
 reqwest = { workspace = true, features = ["form"] }
-base64 = "0.22"
+base64 = "0.23"
 uuid = { version = "1", features = ["v4"] }
 tokio = { workspace = true, features = ["net", "rt", "rt-multi-thread", "sync", "time"] }
 # Bounded-concurrency stream combinator (`buffer_unordered`) for driving N

@@ -16,7 +16,7 @@
 //!   (blocking read + reprompt-on-bad-input) against the REAL terminal, which the
 //!   MCP-oriented Console can't do. So it stays custom too (see [`ConsoleHandler`]).
 
-use rand::Rng;
+use rand::RngExt;
 use std::collections::VecDeque;
 use std::io::Write;
 use std::sync::{Arc, Mutex};
@@ -154,8 +154,8 @@ struct RngHandler(Box<dyn FnMut(i64, i64) -> i64>);
 
 impl RngHandler {
     fn thread_rng() -> Self {
-        let mut rng = rand::thread_rng();
-        RngHandler(Box::new(move |lo, hi| rng.gen_range(lo..=hi)))
+        let mut rng = rand::rng();
+        RngHandler(Box::new(move |lo, hi| rng.random_range(lo..=hi)))
     }
 
     /// Test-only constructor: every `RandInt` call returns `n`, regardless of

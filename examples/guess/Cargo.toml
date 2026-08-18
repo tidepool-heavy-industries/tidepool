@@ -15,7 +15,7 @@ tidepool-bridge-derive.workspace = true
 tidepool-macro.workspace = true
 tidepool-codegen.workspace = true
 frunk.workspace = true
-rand = "0.8"
+rand = "0.10"
 
 [package.metadata.tidepool]
 haskell-deps = ["freer-simple"]

@@ -19,7 +19,7 @@ tidepool-codegen.workspace = true
 frunk.workspace = true
 ureq.workspace = true
 url.workspace = true
-rustyline = "15"
+rustyline = "18"
 anyhow = "1.0"
 thiserror.workspace = true
 clap = { version = "4.4", features = ["derive"] }

@@ -1,4 +1,5 @@
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
+use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
+use std::hint::black_box;
 use tidepool_codegen::jit_machine::JitEffectMachine;
 use tidepool_repr::{CoreExpr, CoreFrame, DataConTable, Literal, PrimOpKind, TreeBuilder, VarId};
 

@@ -29,7 +29,7 @@ rustc-hash.workspace = true
 # Dependency-graph traversal + topological sort for LetRec deferred-simple
 # binding order (emit/expr.rs's `topo_sort_deferred_simple`). Project-wide
 # hard directive: petgraph for graph algorithms, never hand-rolled.
-petgraph = "0.6"
+petgraph = "0.8"
 # Stack-growth insurance at the emit recursion spine (emit_node). Tiny, widely
 # vendored (rustc itself uses it). NEW external dep — sanctioned for the
 # stack-safety pass; flagged for human veto at merge.

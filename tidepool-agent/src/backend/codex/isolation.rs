@@ -188,7 +188,13 @@ fn hash_file(path: &Path) -> io::Result<Option<String>> {
         Ok(bytes) => {
             let mut hasher = Sha256::new();
             hasher.update(&bytes);
-            Ok(Some(format!("{:x}", hasher.finalize())))
+            let digest = hasher.finalize();
+            Ok(Some(
+                digest
+                    .iter()
+                    .map(|b| format!("{b:02x}"))
+                    .collect::<String>(),
+            ))
         }
         Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
         Err(e) => Err(e),
