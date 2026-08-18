@@ -9,8 +9,9 @@ use tidepool_agent::seam::{
     DynamicToolDeclaration, ModelPolicy, ReasoningEffort, TokenUsage, ToolCallId, ToolOutcome,
 };
 use tidepool_agent::spawn::{
-    CoupledSpawner, CycleSaga, OneCycleRun, SpawnError as DomainSpawnError, SpawnReceipt,
-    SpawnRequest, SpawnStage, SpawnStep, SpawnWorkspace, WorkerRun,
+    AnswerFailure, CoupledSpawner, CycleProgress, CycleSaga, OneCycleRun, ParkedCycle,
+    SpawnError as DomainSpawnError, SpawnReceipt, SpawnRequest, SpawnStage, SpawnStep,
+    SpawnWorkspace, WorkerRun,
 };
 use tidepool_worktree::error::WorktreeError as DomainWorktreeError;
 use tidepool_worktree::git::GitCli;
@@ -59,52 +60,87 @@ tidepool_mcp::subagent_effect_def!(crate::effect_glue::effect_rust_projection);
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 struct CycleId(u64);
 
-/// A stepped cycle's backend slot: LIVE while the saga is mid-turn, and
-/// replaced with its extracted transcript the moment the saga finishes.
+/// A stepped cycle's own drive state: mid-turn (holding the saga PARKED on
+/// its current call, inseparably, plus the live backend that drives it) or
+/// SETTLED (holding only the extracted transcript).
+///
+/// This is a sum, not two independently-mutable fields, on purpose: the old
+/// shape (`saga: Box<CycleSaga>` next to a separately-toggled `StepBackend`)
+/// let a maintenance change advance one without the other, papered over by a
+/// `settle_if_finished` call that had to be remembered at every call site and
+/// an `unreachable!()` for the cross-product nobody could then rule out by
+/// construction. Here a `Running` entry cannot lack a backend, a `Settled`
+/// entry cannot yield one, and the transition ([`Self::from_progress`]) is
+/// the ONLY place a `Running` becomes a `Settled` — same idiom as
+/// [`AsyncCycle`]'s `Running`/`Settled`.
 ///
 /// A terminal table entry must hold no OS process — [`SubagentHandler::drop`]
 /// only reaps ASYNC cycles, and a finished `Stepped` entry that kept its
 /// backend alive (a live app-server child + its tokio runtime) forever would
 /// be exactly the leak that guards against.
-enum StepBackend {
-    Live(Box<dyn AgentBackend + Send>),
-    /// Extracted at the instant the saga finished; the backend that produced
-    /// it has already been dropped.
-    Settled(Vec<String>),
+enum SteppedCycle {
+    Running {
+        /// The saga, inseparable from the call it is parked on
+        /// ([`tidepool_agent::spawn::CycleProgress`]) — the same bundling
+        /// that closes the cross-cycle SpawnStep/CycleSaga mismatch in
+        /// `tidepool-agent`.
+        parked: ParkedCycle,
+        backend: Box<dyn AgentBackend + Send>,
+    },
+    Settled {
+        /// Extracted from the backend the instant the saga finished; that
+        /// backend has already been dropped.
+        transcript: Vec<String>,
+    },
 }
 
-impl StepBackend {
-    fn transcript_jsonl(&self) -> Vec<String> {
-        match self {
-            StepBackend::Live(b) => b.transcript_jsonl(),
-            StepBackend::Settled(lines) => lines.clone(),
-        }
-    }
-
-    /// The live backend, for driving the saga. A saga still mid-turn always
-    /// holds a live backend — [`settle_if_finished`] is the only thing that
-    /// ever transitions this to `Settled`, and it only runs once the saga is
-    /// already finished.
-    fn as_live_mut(&mut self) -> &mut dyn AgentBackend {
-        match self {
-            StepBackend::Live(b) => &mut **b,
-            StepBackend::Settled(_) => {
-                unreachable!("a saga still mid-turn always holds a live StepBackend")
+impl SteppedCycle {
+    /// Turn a freshly-driven [`CycleProgress`] into the next stepped-cycle
+    /// state and the wire step to hand back — the ONLY constructor, so
+    /// `Running`/`Settled` and their backend are always built together from
+    /// the same drive.
+    fn from_progress(
+        progress: CycleProgress,
+        backend: Box<dyn AgentBackend + Send>,
+    ) -> (Self, AgAgentStep) {
+        match progress {
+            CycleProgress::Done(run) => {
+                let wire = step_to_wire(&SpawnStep::Done(run));
+                // The backend is DROPPED here, in place of being kept: a
+                // terminal entry must hold no OS process.
+                let transcript = backend.transcript_jsonl();
+                (SteppedCycle::Settled { transcript }, wire)
+            }
+            CycleProgress::Parked(parked) => {
+                let step = SpawnStep::ToolCall {
+                    agent: parked.agent(),
+                    call: parked.call().clone(),
+                };
+                let wire = step_to_wire(&step);
+                (
+                    SteppedCycle::Running {
+                        parked: *parked,
+                        backend,
+                    },
+                    wire,
+                )
             }
         }
     }
-}
 
-/// If `saga` just finished, extract its backend's transcript and DROP the
-/// backend in place of it. Idempotent (a `Settled` slot is left alone) and a
-/// no-op while the saga is still mid-turn.
-fn settle_if_finished(saga: &CycleSaga, backend: &mut StepBackend) {
-    if !saga.is_finished() {
-        return;
+    /// The agent mid-turn, `None` once settled.
+    fn agent(&self) -> Option<AgentId> {
+        match self {
+            SteppedCycle::Running { parked, .. } => Some(parked.agent()),
+            SteppedCycle::Settled { .. } => None,
+        }
     }
-    if let StepBackend::Live(live) = backend {
-        let lines = live.transcript_jsonl();
-        *backend = StepBackend::Settled(lines);
+
+    fn transcript_jsonl(&self) -> Vec<String> {
+        match self {
+            SteppedCycle::Running { backend, .. } => backend.transcript_jsonl(),
+            SteppedCycle::Settled { transcript } => transcript.clone(),
+        }
     }
 }
 
@@ -113,12 +149,9 @@ enum Cycle {
     /// Driven one stop at a time by `SubagentBegin`/`SubagentResume`, inline on
     /// the caller's thread — the tool-dispatch path, whose loop lives in
     /// Haskell (`tidepool-agent/CLAUDE.md`, "the seam is a STEP function").
-    /// The saga is boxed so that no table entry pays for the largest
-    /// variant's inline size — same reason as [`Cycle::Async`].
-    Stepped {
-        saga: Box<CycleSaga>,
-        backend: StepBackend,
-    },
+    /// Boxed so that no table entry pays for the largest variant's inline
+    /// size — same reason as [`Cycle::Async`].
+    Stepped(Box<SteppedCycle>),
     /// Driven to completion on its OWN thread — the async path. Awaited or
     /// cancelled; never stepped. Boxed: an [`AsyncCycle`] is several times the
     /// size of a stepped entry, and every table entry would otherwise pay for
@@ -133,7 +166,7 @@ impl Cycle {
     /// slot.
     fn is_terminal(&self) -> bool {
         match self {
-            Cycle::Stepped { saga, .. } => saga.is_finished(),
+            Cycle::Stepped(stepped) => matches!(**stepped, SteppedCycle::Settled { .. }),
             Cycle::Async(cycle) => cycle.settled_terminal().is_some(),
         }
     }
@@ -141,14 +174,20 @@ impl Cycle {
 
 /// What a cycle thread hands back when its saga reaches a terminal.
 ///
-/// It returns the SAGA and the BACKEND along with the result, rather than only
-/// the result: `cancel` settles the binding through the saga (which lives on
-/// the cycle thread while the cycle runs), and the backend's transcript has to
-/// stay reachable from the handler after the thread is gone.
+/// It carries a SAGA slot alongside the result and the BACKEND: `cancel`
+/// settles the binding through the saga (which lives on the cycle thread
+/// while the cycle runs) if a report races it with an unsettled one, and the
+/// backend's transcript has to stay reachable from the handler after the
+/// thread is gone.
 struct CycleReport {
     result: Result<OneCycleRun, DomainSpawnError>,
-    /// `None` when the saga never came into being — a failure inside
-    /// `CycleSaga::begin`, which has already rolled itself back.
+    /// ALWAYS `None`: `CycleProgress::run_to_completion` settles the saga on
+    /// every exit path (completion, or its own rollback on failure) before
+    /// this thread ever gets a saga back to report, and a failure inside
+    /// `CycleSaga::begin` never produced one to begin with. Kept as a slot
+    /// (rather than dropped) so [`AsyncCycle::cancel`]'s defensive
+    /// re-`abandon` — the one thing this field feeds — stays the same shape
+    /// as the async idiom it mirrors.
     saga: Option<CycleSaga>,
     backend: Box<dyn AgentBackend + Send>,
 }
@@ -569,16 +608,17 @@ impl SubagentHandler {
     /// fixture: an async cycle's backend lives on its own thread while it runs,
     /// so its lines appear only after that cycle is reaped (awaited or
     /// cancelled); once reaped, the backend itself is GONE (dropped at settle
-    /// — see [`AsyncCycle::absorb`] / [`settle_if_finished`]) and only its
-    /// extracted transcript remains, which is what this reads for a terminal
-    /// entry; and `SubagentSpawn`'s backend belongs to the call rather than to
-    /// the table, so a one-call sync spawn contributes nothing here. The live
-    /// acceptance drives the tool loop, whose stepped entry the table retains.
+    /// — see [`AsyncCycle::absorb`] / [`SteppedCycle::from_progress`]) and only
+    /// its extracted transcript remains, which is what this reads for a
+    /// terminal entry; and `SubagentSpawn`'s backend belongs to the call rather
+    /// than to the table, so a one-call sync spawn contributes nothing here.
+    /// The live acceptance drives the tool loop, whose stepped entry the table
+    /// retains.
     pub fn backend_transcript_jsonl(&self) -> Vec<String> {
         self.cycles
             .values()
             .flat_map(|cycle| match cycle {
-                Cycle::Stepped { backend, .. } => backend.transcript_jsonl(),
+                Cycle::Stepped(stepped) => stepped.transcript_jsonl(),
                 Cycle::Async(cycle) => cycle.transcript_jsonl(),
             })
             .collect()
@@ -637,7 +677,7 @@ impl SubagentHandler {
         };
         let cycle = match cycle {
             Cycle::Async(boxed) => Cycle::Async(Box::new(f(*boxed))),
-            stepped @ Cycle::Stepped { .. } => stepped,
+            stepped @ Cycle::Stepped(_) => stepped,
         };
         self.cycles.insert(id, cycle);
     }
@@ -660,7 +700,7 @@ impl SubagentHandler {
             .cycles
             .values()
             .filter_map(|c| match c {
-                Cycle::Stepped { saga, .. } if !saga.is_finished() => Some(saga.agent()),
+                Cycle::Stepped(stepped) => stepped.agent(),
                 _ => None,
             })
             .collect();
@@ -746,18 +786,17 @@ impl SubagentHandler {
         let request = request_from_wire(spec, schema, tools, self.model, self.effort)?;
         self.admit_cycle()?;
         let mut backend = self.new_backend()?;
-        let (saga, step) = self
+        let progress = self
             .spawner
             .begin_detached(&mut *backend, &request)
             .map_err(spawn_error_to_wire)?;
         let id = self.mint_cycle();
-        let saga = Box::new(saga);
-        let mut backend = StepBackend::Live(backend);
-        // A zero-round agent can finish on its very first stop — this entry
-        // must not start life holding a live backend it will never use again.
-        settle_if_finished(&saga, &mut backend);
-        self.cycles.insert(id, Cycle::Stepped { saga, backend });
-        Ok(step_to_wire(&step))
+        // A zero-round agent can finish on its very first stop —
+        // `from_progress` is what builds the entry that never starts life
+        // holding a live backend it will never use again.
+        let (stepped, wire) = SteppedCycle::from_progress(progress, backend);
+        self.cycles.insert(id, Cycle::Stepped(Box::new(stepped)));
+        Ok(wire)
     }
 
     /// Serves `SubagentResume`: answer the parked tool call and drive on.
@@ -788,16 +827,51 @@ impl SubagentHandler {
                 detail: self.no_such_agent_detail(),
             }));
         };
-        let Some(Cycle::Stepped { saga, backend }) = self.cycles.get_mut(&id) else {
-            unreachable!("`stepped_cycle_of` only ever names a live Stepped entry");
+        let Some(Cycle::Stepped(stepped)) = self.cycles.remove(&id) else {
+            unreachable!("`stepped_cycle_of` only ever names a Stepped entry");
         };
-        let step = saga
-            .answer(backend.as_live_mut(), agent, ToolCallId(call), outcome)
-            .map_err(spawn_error_to_wire)?;
-        // If this stop finished the saga, drop the backend now — a terminal
-        // entry must hold no OS process.
-        settle_if_finished(saga, backend);
-        Ok(step_to_wire(&step))
+        let SteppedCycle::Running {
+            parked,
+            mut backend,
+        } = *stepped
+        else {
+            unreachable!("`stepped_cycle_of` only ever names a Running entry");
+        };
+        match parked.answer(&mut *backend, agent, ToolCallId(call), outcome) {
+            Ok(progress) => {
+                // Builds the next entry (dropping the backend if this stop
+                // finished the saga) and the wire step from the SAME drive,
+                // so `Running` and `Settled` can never drift apart from what
+                // actually happened.
+                let (next, wire) = SteppedCycle::from_progress(progress, backend);
+                self.cycles.insert(id, Cycle::Stepped(Box::new(next)));
+                Ok(wire)
+            }
+            // The saga was never touched — put the SAME entry back exactly
+            // as it was, so a caller that answered the wrong call can retry
+            // with the right one instead of losing a perfectly good cycle.
+            Err((e, AnswerFailure::StillParked(parked))) => {
+                self.cycles.insert(
+                    id,
+                    Cycle::Stepped(Box::new(SteppedCycle::Running {
+                        parked: *parked,
+                        backend,
+                    })),
+                );
+                Err(spawn_error_to_wire(e))
+            }
+            // The saga rolled itself back before returning (a round-backstop
+            // trip or a backend failure) — a terminal entry must hold no OS
+            // process, so the backend is dropped in place of being kept.
+            Err((e, AnswerFailure::RolledBack)) => {
+                let transcript = backend.transcript_jsonl();
+                self.cycles.insert(
+                    id,
+                    Cycle::Stepped(Box::new(SteppedCycle::Settled { transcript })),
+                );
+                Err(spawn_error_to_wire(e))
+            }
+        }
     }
 
     /// The cycle a stepped saga for `agent` lives in, if one is still mid-turn.
@@ -808,9 +882,7 @@ impl SubagentHandler {
     /// it removed finished sagas.
     fn stepped_cycle_of(&self, agent: AgentId) -> Option<CycleId> {
         self.cycles.iter().find_map(|(id, cycle)| match cycle {
-            Cycle::Stepped { saga, .. } if !saga.is_finished() && saga.agent() == agent => {
-                Some(*id)
-            }
+            Cycle::Stepped(stepped) if stepped.agent() == Some(agent) => Some(*id),
             _ => None,
         })
     }
@@ -848,15 +920,15 @@ impl SubagentHandler {
             .name(format!("tidepool-cycle-{}", id.0))
             .spawn(move || {
                 let mut backend = backend;
-                let (result, saga) = match CycleSaga::begin(&substrate, &mut *backend, &request) {
-                    // A failure inside `begin` has already rolled itself back,
-                    // and there is no saga to hand back.
-                    Err(e) => (Err(e), None),
-                    Ok((mut saga, first)) => {
-                        let run = saga.run_to_completion(&mut *backend, first);
-                        (run, Some(saga))
-                    }
+                let result = match CycleSaga::begin(&substrate, &mut *backend, &request) {
+                    Err(e) => Err(e),
+                    Ok(progress) => progress.run_to_completion(&mut *backend),
                 };
+                // `CycleProgress::run_to_completion` settles the saga on
+                // every exit path before returning (completion, or its own
+                // rollback on failure) — there is never a live saga left to
+                // hand back for `cancel`'s defensive re-`abandon`.
+                let saga = None;
                 // A receiver dropped before the report lands means the handler
                 // itself is gone; there is nobody left to tell.
                 let _ = reports.send(CycleReport {
@@ -901,7 +973,7 @@ impl SubagentHandler {
         let id = cycle_id_from_wire(cycle).ok_or_else(|| no_such_cycle(cycle))?;
         match self.cycles.get(&id) {
             None => return Err(no_such_cycle(cycle)),
-            Some(Cycle::Stepped { .. }) => {
+            Some(Cycle::Stepped(_)) => {
                 return Err(SpawnError::SpawnDriveFailed(
                     AgSpawnStage::StageRunning,
                     format!(
