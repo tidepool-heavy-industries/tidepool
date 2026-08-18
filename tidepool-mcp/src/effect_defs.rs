@@ -1688,6 +1688,12 @@ macro_rules! fs_effect_def {
                 { ctor FsSandbox,  fields { detail: "Text" as String }, doc "path escapes the sandbox, or the glob pattern is not allowed" },
                 { ctor FsBadRegex, fields { detail: "Text" as String }, doc "grep regex failed to compile" },
                 { ctor FsIo,       fields { detail: "Text" as String }, doc "other I/O failure" },
+                // camino-utf8-paths: the OS path itself (not its content) is not
+                // valid UTF-8, so it cannot be represented as Haskell `Text` at
+                // all — `path` carries the lossy (replacement-char) rendering for
+                // diagnostics ONLY, never as something to feed back into another
+                // Fs verb.
+                { ctor FsNonUtf8Path, fields { path: "Text" as String }, doc "path is not valid UTF-8 (lossy rendering shown for diagnostics)" },
             ],
             stable_errors true,
             verbs [

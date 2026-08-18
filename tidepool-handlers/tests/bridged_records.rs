@@ -161,7 +161,14 @@ fn stable_records_decl_matches_fs_effect_def() {
     // `effect_rust_projection!`, is checked independently by every
     // `FsError::<Ctor>(...)` construction already in `handlers/fs.rs` —
     // rename a variant there and the crate fails to compile.)
-    for ctor in ["FsNotFound", "FsNotUtf8", "FsSandbox", "FsBadRegex", "FsIo"] {
+    for ctor in [
+        "FsNotFound",
+        "FsNotUtf8",
+        "FsSandbox",
+        "FsBadRegex",
+        "FsIo",
+        "FsNonUtf8Path",
+    ] {
         assert!(
             tidepool_mcp::FS_ERROR_STABLE_DECL.contains(ctor),
             "stable FsError decl is missing constructor `{ctor}`"

@@ -136,6 +136,7 @@ pub(crate) fn full_effect_test_table() -> DataConTable {
         ("FsSandbox", 1),
         ("FsBadRegex", 1),
         ("FsIo", 1),
+        ("FsNonUtf8Path", 1),
         ("FileRead", 2),
         // #335 rest-wave typed-failure ADTs (Exec/Http/Git/Llm/Lsp) — same
         // reason as the Fs constructors above: they live in each effect's

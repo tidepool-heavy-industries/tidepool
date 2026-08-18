@@ -12,7 +12,7 @@ import Prelude (Either(..), Eq, Show)
 import Data.Text (Text)
 import Tidepool.Aeson.Value (ToJSON(..), object, (.=))
 
-data FsError = FsNotFound Text | FsNotUtf8 Text | FsSandbox Text | FsBadRegex Text | FsIo Text deriving (Show, Eq)
+data FsError = FsNotFound Text | FsNotUtf8 Text | FsSandbox Text | FsBadRegex Text | FsIo Text | FsNonUtf8Path Text deriving (Show, Eq)
 instance ToJSON FsError where
   toJSON e = case e of
     FsNotFound path -> object ["tag" .= ("FsNotFound" :: Text), "path" .= path]
@@ -20,6 +20,7 @@ instance ToJSON FsError where
     FsSandbox detail -> object ["tag" .= ("FsSandbox" :: Text), "detail" .= detail]
     FsBadRegex detail -> object ["tag" .= ("FsBadRegex" :: Text), "detail" .= detail]
     FsIo detail -> object ["tag" .= ("FsIo" :: Text), "detail" .= detail]
+    FsNonUtf8Path path -> object ["tag" .= ("FsNonUtf8Path" :: Text), "path" .= path]
 
 
 data FileRead = FileRead { path :: Text, contents :: Either FsError Text } deriving (Show, Eq)

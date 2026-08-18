@@ -1,4 +1,6 @@
 use std::path::{Path, PathBuf};
+
+use camino::Utf8Path;
 use tidepool_bridge_effects::{FileMeta, Hit};
 use tidepool_effect::dispatch::EffectContext;
 use tidepool_effect::error::EffectError;
@@ -75,6 +77,21 @@ pub fn component_filter(pattern: &str, rel_path: &std::path::Path) -> bool {
 /// Returns true if `p` contains glob metacharacters (`*`, `?`, `[`).
 pub fn is_glob(p: &str) -> bool {
     p.contains('*') || p.contains('?') || p.contains('[')
+}
+
+/// Decode an OS path to UTF-8 text, once, at the point a path is about to
+/// cross to the Haskell/wire boundary — `Ok` is the real Text value; `Err` is
+/// the lossy (replacement-char) rendering, for a caller that needs to name
+/// the bad path in an error or a per-item diagnostic. Never used to build a
+/// value that round-trips back into another Fs call: the lossy string is
+/// display-only. Callers pick how a decode failure surfaces (a verb-level
+/// `FsNonUtf8Path` abort, a per-item skip, or a per-item `Left`) — this
+/// helper only does the ONE decode, so every call site agrees on what
+/// "not UTF-8" means for a path.
+fn utf8_or_lossy(p: &Path) -> Result<String, String> {
+    Utf8Path::from_path(p)
+        .map(|u| u.as_str().to_string())
+        .ok_or_else(|| p.to_string_lossy().into_owned())
 }
 
 /// Blake3 content hash as a lowercase hex digest — the compare-and-swap token
@@ -315,6 +332,7 @@ impl std::fmt::Display for FsError {
         match self {
             FsError::FsNotFound(p) => write!(f, "no such file or directory: {p}"),
             FsError::FsNotUtf8(p) => write!(f, "{p}: not valid UTF-8"),
+            FsError::FsNonUtf8Path(p) => write!(f, "path is not valid UTF-8 (lossy): {p}"),
             FsError::FsSandbox(d) | FsError::FsBadRegex(d) | FsError::FsIo(d) => write!(f, "{d}"),
         }
     }
@@ -347,14 +365,16 @@ impl FsHandler {
 
     fn fs_list_dir(&mut self, path: String) -> Result<Vec<String>, FsError> {
         let resolved = self.resolve(&path)?;
-        let mut entries: Vec<String> = std::fs::read_dir(&resolved)
-            .map_err(|e| match e.kind() {
-                std::io::ErrorKind::NotFound => FsError::FsNotFound(path.clone()),
-                _ => FsError::FsIo(e.to_string()),
-            })?
-            .filter_map(std::result::Result::ok)
-            .map(|e| e.file_name().to_string_lossy().to_string())
-            .collect();
+        let mut entries: Vec<String> = Vec::new();
+        for entry in std::fs::read_dir(&resolved).map_err(|e| match e.kind() {
+            std::io::ErrorKind::NotFound => FsError::FsNotFound(path.clone()),
+            _ => FsError::FsIo(e.to_string()),
+        })? {
+            let Ok(entry) = entry else { continue };
+            entries.push(
+                utf8_or_lossy(Path::new(&entry.file_name())).map_err(FsError::FsNonUtf8Path)?,
+            );
+        }
         entries.sort();
         Ok(entries)
     }
@@ -365,15 +385,13 @@ impl FsHandler {
         // recursion or a `*/`-shaped pattern) would make `readGlob`
         // die "Is a directory" (friction #20). Use `listDir` for dirs.
         let paths = self.expand_glob(&pattern)?;
-        let rel_paths: Vec<String> = paths
-            .into_iter()
-            .filter(|p| p.is_file())
-            .filter_map(|p| {
-                p.strip_prefix(&self.root)
-                    .ok()
-                    .map(|r| r.to_string_lossy().to_string())
-            })
-            .collect();
+        let mut rel_paths: Vec<String> = Vec::new();
+        for p in paths.into_iter().filter(|p| p.is_file()) {
+            let Ok(rel) = p.strip_prefix(&self.root) else {
+                continue;
+            };
+            rel_paths.push(utf8_or_lossy(rel).map_err(FsError::FsNonUtf8Path)?);
+        }
         Ok(rel_paths)
     }
 
@@ -398,11 +416,14 @@ impl FsHandler {
                 Err(_) => continue,
             };
 
-            let rel_path = path
-                .strip_prefix(&self.root)
-                .unwrap_or(&path)
-                .to_string_lossy()
-                .to_string();
+            // A non-UTF-8 PATH is isolated the same way a non-UTF-8-content
+            // file already is above (`continue`) — grep has no per-item
+            // Either to carry a typed failure through, so silently excluding
+            // an unrepresentable match from the result list is the existing
+            // local convention, not new behavior.
+            let Ok(rel_path) = utf8_or_lossy(path.strip_prefix(&self.root).unwrap_or(&path)) else {
+                continue;
+            };
 
             for (i, line) in text.lines().enumerate() {
                 if re.is_match(line) {
@@ -461,18 +482,27 @@ impl FsHandler {
             .into_iter()
             .filter(|p| p.is_file())
             .map(|p| {
-                let rel = p
-                    .strip_prefix(&self.root)
-                    .unwrap_or(&p)
-                    .to_string_lossy()
-                    .to_string();
-                let contents = std::fs::read_to_string(&p).map_err(|e| match e.kind() {
-                    std::io::ErrorKind::InvalidData => FsError::FsNotUtf8(rel.clone()),
-                    _ => FsError::FsIo(format!("{rel} failed: {e}")),
-                });
-                FileRead {
-                    path: rel,
-                    contents,
+                let rel_path = p.strip_prefix(&self.root).unwrap_or(&p);
+                // A non-UTF-8 PATH isolates exactly like a non-UTF-8-content
+                // file already does below: this entry gets `contents = Left
+                // (FsNonUtf8Path _)` instead of failing the whole batch.
+                // `path` carries the lossy rendering — diagnostics only, this
+                // record is never fed back into another Fs verb.
+                match utf8_or_lossy(rel_path) {
+                    Ok(rel) => {
+                        let contents = std::fs::read_to_string(&p).map_err(|e| match e.kind() {
+                            std::io::ErrorKind::InvalidData => FsError::FsNotUtf8(rel.clone()),
+                            _ => FsError::FsIo(format!("{rel} failed: {e}")),
+                        });
+                        FileRead {
+                            path: rel,
+                            contents,
+                        }
+                    }
+                    Err(lossy) => FileRead {
+                        path: lossy.clone(),
+                        contents: Err(FsError::FsNonUtf8Path(lossy)),
+                    },
                 }
             })
             .collect();
@@ -708,6 +738,113 @@ mod tests {
         );
         assert_eq!(results[1].path, "good.txt");
         assert_eq!(results[1].contents.as_deref(), Ok("hello\nworld"));
+    }
+
+    /// `utf8_or_lossy` itself, the one decode point every converted arm below
+    /// shares: a valid-UTF-8 path decodes to the real text; an invalid one
+    /// comes back as its lossy (replacement-char) rendering — labeled `Err`
+    /// so a caller can never mistake it for the real value.
+    #[cfg(unix)]
+    #[test]
+    fn test_utf8_or_lossy_decodes_or_renders_lossily() {
+        use std::ffi::OsString;
+        use std::os::unix::ffi::OsStringExt;
+
+        assert_eq!(
+            utf8_or_lossy(Path::new("good/path.txt")),
+            Ok("good/path.txt".to_string())
+        );
+
+        // `0x80` alone is not a valid UTF-8 lead byte — this name can never
+        // decode as UTF-8, however it's rendered.
+        let bad_name = OsString::from_vec(vec![b'b', b'a', b'd', 0x80, b'.', b't', b'x', b't']);
+        let bad_path = PathBuf::from(bad_name);
+        let Err(lossy) = utf8_or_lossy(&bad_path) else {
+            panic!("expected Err for non-UTF-8 input");
+        };
+        assert!(lossy.contains('\u{fffd}'), "{lossy:?}");
+    }
+
+    /// `listDir` reads real OS directory-entry names directly
+    /// (`std::fs::read_dir`, no glob-pattern matching in between) — a
+    /// non-UTF-8-named entry (raw bytes, unix-only) is the one case among the
+    /// converted arms that's reachable end-to-end: `to_string_lossy` would
+    /// have silently corrupted it into `Text` full of replacement
+    /// characters; it now comes back as a typed `Left (FsNonUtf8Path _)`
+    /// instead, and the call carries no partial/mangled listing.
+    #[cfg(unix)]
+    #[test]
+    fn test_fs_list_dir_non_utf8_entry_is_typed_error() {
+        use std::ffi::OsString;
+        use std::os::unix::ffi::OsStringExt;
+        use tempfile::tempdir;
+
+        let dir = tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        std::fs::write(root.join("good.txt"), "hello").unwrap();
+        let bad_name = OsString::from_vec(vec![b'b', b'a', b'd', 0x80, b'.', b't', b'x', b't']);
+        std::fs::write(root.join(&bad_name), "x").unwrap();
+
+        let mut handler = FsHandler::new(root.clone());
+        let table = full_effect_test_table();
+        let captured = CapturedOutput::new();
+        let cx = EffectContext::with_user(&table, &captured);
+
+        let req = FsReq::FsListDir(".".to_string());
+        let res = response_value(handler.handle(req, &cx).unwrap(), &table);
+        let decoded: Result<Vec<String>, FsError> = FromCore::from_value(&res, &table).unwrap();
+        assert!(
+            matches!(decoded, Err(FsError::FsNonUtf8Path(_))),
+            "{decoded:?}"
+        );
+    }
+
+    /// `glob`/`grepGlob`/`readGlob` all resolve non-UTF-8-named entries
+    /// through `expand_glob`'s shared `glob::Pattern::matches_path_with`
+    /// filter, which is `path.to_str().map_or(false, ...)` inside the `glob`
+    /// crate — a non-UTF-8-named file therefore never survives INTO
+    /// `expand_glob`'s result at all (silently excluded, not silently
+    /// corrupted). This pins that PRE-EXISTING, separate behavior — a
+    /// silent-omission limitation of the `glob` dependency, not a
+    /// `to_string_lossy` call site — so it doesn't get rediscovered as a
+    /// surprise. The `FsNonUtf8Path` handling added to `fs_glob`/`fs_grep`/
+    /// `fs_read_glob` for the entries `expand_glob` DOES return is still
+    /// correct and stays as the defensive decode point for those verbs; it
+    /// just isn't reachable via this path today.
+    #[cfg(unix)]
+    #[test]
+    fn test_expand_glob_family_silently_excludes_non_utf8_named_files_pre_existing() {
+        use std::ffi::OsString;
+        use std::os::unix::ffi::OsStringExt;
+        use tempfile::tempdir;
+
+        let dir = tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        std::fs::write(root.join("good.txt"), "hello").unwrap();
+        let bad_name = OsString::from_vec(vec![b'b', b'a', b'd', 0x80, b'.', b't', b'x', b't']);
+        std::fs::write(root.join(&bad_name), "won't be read").unwrap();
+
+        let mut handler = FsHandler::new(root.clone());
+        let table = full_effect_test_table();
+        let captured = CapturedOutput::new();
+        let cx = EffectContext::with_user(&table, &captured);
+
+        let req = FsReq::FsGlob("*".to_string());
+        let res = response_value(handler.handle(req, &cx).unwrap(), &table);
+        let decoded: Result<Vec<String>, FsError> = FromCore::from_value(&res, &table).unwrap();
+        assert_eq!(decoded, Ok(vec!["good.txt".to_string()]), "{decoded:?}");
+
+        let req = FsReq::FsGrep("won".to_string(), "*".to_string());
+        let res = response_value(handler.handle(req, &cx).unwrap(), &table);
+        let decoded: Result<Vec<Hit>, FsError> = FromCore::from_value(&res, &table).unwrap();
+        assert_eq!(decoded, Ok(Vec::new()), "{decoded:?}");
+
+        let req = FsReq::FsReadGlob("*".to_string());
+        let res = response_value(handler.handle(req, &cx).unwrap(), &table);
+        let results: Vec<FileRead> = FromCore::from_value(&res, &table).unwrap();
+        assert_eq!(results.len(), 1, "{results:?}");
+        assert_eq!(results[0].path, "good.txt");
+        assert_eq!(results[0].contents.as_deref(), Ok("hello"));
     }
 
     #[test]

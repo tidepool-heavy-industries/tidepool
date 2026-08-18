@@ -32,6 +32,7 @@ pub const FS_ERROR_STABLE_DECL: &str = crate::effect_defs::error_decl_text!(
     { ctor FsSandbox,  fields { detail: "Text" as String }, doc "path escapes the sandbox, or the glob pattern is not allowed" },
     { ctor FsBadRegex, fields { detail: "Text" as String }, doc "grep regex failed to compile" },
     { ctor FsIo,       fields { detail: "Text" as String }, doc "other I/O failure" },
+    { ctor FsNonUtf8Path, fields { path: "Text" as String }, doc "path is not valid UTF-8 (lossy rendering shown for diagnostics)" },
 );
 
 /// `FileRead`'s Haskell decl + `ToJSON` instance — the per-file result

@@ -40,6 +40,18 @@ impl WorktreeHandler {
         worktree_root: PathBuf,
         source_repository: PathBuf,
     ) -> Result<Self, DomainWorktreeError> {
+        // Every receipt this handler returns carries `cwd = worktree_root.
+        // join(id)` (`WorktreeManager::create`), and `cwd` crosses to Haskell
+        // as `Text` (`receipt_to_wire`). Decode ONCE here, at construction,
+        // with a typed error — the locked "decode once at the OS boundary"
+        // pattern — instead of letting a non-UTF-8 root surface as silent
+        // corruption downstream on every receipt it touches.
+        if camino::Utf8Path::from_path(&worktree_root).is_none() {
+            return Err(DomainWorktreeError::StorageFailure {
+                path: worktree_root,
+                detail: "worktree_root must be valid UTF-8".to_string(),
+            });
+        }
         let registry = WorktreeRegistry::open(&registry_root)?;
         Ok(Self {
             manager: WorktreeManager::new(
@@ -142,7 +154,20 @@ pub(crate) fn spec_from_wire(spec: WtWorktreeSpec) -> Result<WorktreeSpec, Workt
 fn receipt_to_wire(r: &WorktreeReceipt) -> WtWorktreeReceipt {
     WtWorktreeReceipt {
         tree_id: worktree_id_to_wire(&r.worktree_id),
-        cwd: r.cwd.to_string_lossy().into_owned(),
+        // `cwd` is `worktree_root.join(id)`: `worktree_root` is checked
+        // UTF-8 once at `WorktreeHandler::new` and `id` is ASCII-safe by
+        // construction (`WorktreeId::is_path_safe`) — so this is UTF-8 by
+        // construction, not a per-call fallible boundary.
+        cwd: camino::Utf8Path::from_path(&r.cwd)
+            .unwrap_or_else(|| {
+                panic!(
+                    "invariant violated: worktree cwd is not valid UTF-8 despite a \
+                     UTF-8-checked root and an ASCII-safe id: {}",
+                    r.cwd.display()
+                )
+            })
+            .as_str()
+            .to_string(),
         branch: branch_name_to_wire(&r.branch),
         source_head: git_oid_to_wire(&r.source_head),
         snapshot_ref: r.snapshot_ref.as_ref().map(git_ref_to_wire),
@@ -323,6 +348,36 @@ mod tests {
     use tidepool_worktree::create::DirtyPolicy;
     use tidepool_worktree::error::InProgressKind;
     use tidepool_worktree::id::{GitOid, GitRef};
+
+    /// `cwd` on every receipt this handler returns is `worktree_root.join(id)`
+    /// and crosses to Haskell as `Text` (`receipt_to_wire`) — a non-UTF-8
+    /// `worktree_root` must be rejected here, at construction, as a typed
+    /// error rather than silently corrupting every receipt this handler ever
+    /// returns.
+    #[cfg(unix)]
+    #[test]
+    fn worktree_handler_new_rejects_non_utf8_worktree_root() {
+        use std::ffi::OsString;
+        use std::os::unix::ffi::OsStringExt;
+
+        let registry_dir = tempfile::tempdir().unwrap();
+        let source_dir = tempfile::tempdir().unwrap();
+        // `0x80` alone is not a valid UTF-8 lead byte.
+        let bad_name = OsString::from_vec(vec![b'w', b't', 0x80]);
+        let bad_root = registry_dir.path().join(PathBuf::from(bad_name));
+
+        match WorktreeHandler::new(
+            registry_dir.path().to_path_buf(),
+            bad_root,
+            source_dir.path().to_path_buf(),
+        ) {
+            Ok(_) => panic!("a non-UTF-8 worktree_root must be rejected, not silently accepted"),
+            Err(err) => assert!(
+                matches!(err, DomainWorktreeError::StorageFailure { .. }),
+                "{err:?}"
+            ),
+        }
+    }
 
     fn sample_dirty_summary() -> DirtySummary {
         DirtySummary {

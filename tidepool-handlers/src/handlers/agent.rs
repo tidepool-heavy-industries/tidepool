@@ -29,6 +29,19 @@ use tidepool_bridge_effects::{
     AgTokenUsage, AgWorkerRun,
 };
 
+/// Reject a non-UTF-8 root once, at construction, rather than letting a
+/// `to_string_lossy()` mangle it silently wherever it's later joined into
+/// text that crosses to a spawned backend or to Haskell.
+fn require_utf8(path: &std::path::Path) -> Result<(), DomainWorktreeError> {
+    if camino::Utf8Path::from_path(path).is_none() {
+        return Err(DomainWorktreeError::StorageFailure {
+            path: path.to_path_buf(),
+            detail: "must be valid UTF-8".to_string(),
+        });
+    }
+    Ok(())
+}
+
 // ============================================================================
 // Tag: Subagent (PRD 18 lane 1 — coupled agent+worktree spawn; deliberately
 // NOT in the default base_effects! row, same opt-in status as Worktree /
@@ -551,6 +564,14 @@ impl SubagentHandler {
         source_repository: PathBuf,
         backends: Box<dyn AgentBackendFactory>,
     ) -> Result<Self, DomainWorktreeError> {
+        // `worktree.cwd()` and `source_repository().join(".git")` both cross
+        // into the spawned backend's `CycleSpec` as plain text
+        // (`tidepool-agent/src/spawn.rs`'s `cwd`/`git_dir`). Decode ONCE here,
+        // at construction, with a typed error — the locked "decode once at
+        // the OS boundary" pattern — instead of letting a non-UTF-8 root
+        // silently misconfigure a backend's sandbox.
+        require_utf8(&worktree_root)?;
+        require_utf8(&source_repository)?;
         let registry = WorktreeRegistry::open(&registry_root)?;
         let manager =
             WorktreeManager::new(GitCli::new(), registry, worktree_root, source_repository);
@@ -1514,6 +1535,37 @@ mod tests {
                 .collect();
             out.sort();
             out
+        }
+    }
+
+    /// `worktree.cwd()` and `source_repository().join(".git")` both cross
+    /// into a spawned backend's `CycleSpec` as plain text
+    /// (`tidepool-agent/src/spawn.rs`) — a non-UTF-8 root must be rejected
+    /// here, at construction, as a typed error rather than silently
+    /// misconfiguring every cycle's sandbox.
+    #[cfg(unix)]
+    #[test]
+    fn with_backends_rejects_non_utf8_worktree_root() {
+        use std::ffi::OsString;
+        use std::os::unix::ffi::OsStringExt;
+
+        let roots = tempfile::TempDir::new().expect("create the substrate roots");
+        // `0x80` alone is not a valid UTF-8 lead byte.
+        let bad_name = OsString::from_vec(vec![b'w', b't', 0x80]);
+        let bad_worktree_root = roots.path().join(PathBuf::from(bad_name));
+
+        match SubagentHandler::new(
+            roots.path().join("registry"),
+            bad_worktree_root,
+            roots.path().join("bindings"),
+            roots.path().join("source"),
+            Box::new(MockBackend::scripted([])),
+        ) {
+            Ok(_) => panic!("a non-UTF-8 worktree_root must be rejected, not silently accepted"),
+            Err(err) => assert!(
+                matches!(err, DomainWorktreeError::StorageFailure { .. }),
+                "{err:?}"
+            ),
         }
     }
 
