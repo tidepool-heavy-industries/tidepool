@@ -26,17 +26,13 @@
 //! not stall a sibling green thread's mailbox sends) and the mailbox
 //! coalesce contract, without paying for a second extract compile.
 //!
-//! `outer_loop_effects_round_trip_through_the_driver` is `#[ignore]`d: its
-//! `Tidepool.Node` scenarios (`forkNode`/`sendUp`/`received`) hit the SAME
-//! `tag 255` GC-corruption family `nested_async_repro.rs` characterizes —
-//! see that file's module doc for the mechanism, the ruled-out/still-suspect
-//! split, and the family hypothesis. This is a second manifestation, not a
-//! new bug: `forkNode`'s spawned body closes over its `NodeCtx`, whose
-//! `inbox` field is itself a closure (`Tidepool.Node.hs`'s `decodeMailbox`),
-//! so a closure-capturing-a-closure crosses the SAME tenure boundary
-//! `nested_async_repro.rs` already implicates — plausible family member,
-//! not confirmed. The test's own doc comment carries the exact error and the
-//! bisection that isolated it to `forkNode` specifically.
+//! The `Tidepool.Node` scenarios (`forkNode`/`sendUp`/`received`) are NOT
+//! here — they live in `node_mailboxes.rs` against their own fixture,
+//! because they currently hit the tenure-then-resume GC family and are
+//! CRASH-CLASS. Bundled, they would take S1-L1's outer-row assertions and
+//! wave 1's entire green-thread acceptance down with them; that is exactly
+//! what the root `CLAUDE.md` discipline keeps crash-class fixtures out of
+//! family bundles for. See `nested_async_repro.rs` for the mechanism.
 //!
 //! GHC-heavy: needs `TIDEPOOL_EXTRACT` + the with-packages GHC on PATH
 //! (`--ignore-default-filter` to run).
@@ -98,46 +94,11 @@ impl ObservationSource for NoOpSource {
 /// `withHandler`/(`after`+`nextEvent`) → five suspensions → driver-owned
 /// handlers → resumed continuation → durable `State`.
 ///
-/// `#[ignore]`d, NOT a sanctioned red: the `Tidepool.Async`/wave-1 scenarios
-/// and `waitEvent` all pass on their own (confirmed by bisection, below);
-/// what fails is `Tidepool.Node`'s `forkNode`, which hits the `tag 255`
-/// GC-corruption family `nested_async_repro.rs` documents. Remove
-/// `#[ignore]` once that lane's fix lands — this should need no other change
-/// to go green, same lifecycle as `nested_async_repro.rs`'s own test.
-///
-/// # What fails, verbatim
-///
-/// ```text
-/// Session("AsyncSpawnWith spawner resume failed: turn run failed: heap
-/// bridge error: unexpected heap tag: 255")
-/// ```
-///
-/// # Bisection (2026-08-17)
-///
-/// With every wave-2 scenario stubbed out of `OuterEffectsHarness.hs`: green
-/// (62s). Restoring ONLY `waitEvent` (plain `async` + a `nextEvent` select,
-/// no `Tidepool.Node`): still green (47s). Restoring ONLY the minimal
-/// `forkNode` scenario — one node, one `sendUp`, no burst, no nesting —
-/// alone: reproduces the error above on its own (22s). So this is
-/// `forkNode`'s own spawn path, not `waitEvent`, not the burst/coalesce
-/// logic, not scenario interaction. `Tidepool.Node`'s other two scenarios
-/// (silent-child-observes-Tick, burst-coalesces-to-last-payload) were not
-/// independently bisected past this point — they share `forkNode`'s exact
-/// spawn path, so they are assumed equally blocked rather than reverified at
-/// cost.
-///
-/// # Why this, not just `nested_async_repro.rs`, needed reporting
-///
-/// This reproduces WITHOUT nesting (no node here forks a node) — a green
-/// thread whose body merely CLOSES OVER a closure (`NodeCtx`'s `inbox`
-/// field, built by `Tidepool.Node.hs`'s `decodeMailbox`) hits the same
-/// signature that thread-forks-thread does. Plausibly the same family
-/// (values crossing a tenure boundary while a collection can move them) via
-/// a different trigger shape; offered as a lead for whoever picks up the
-/// fix, not confirmed.
-#[ignore = "chartered gap: forkNode hits the tag-255 GC-corruption family — see this test's \
-            doc comment for the exact error and bisection, and nested_async_repro.rs for \
-            the mechanism"]
+/// This is wave 1's acceptance AND S1-L1's, so it must stay green: it proves
+/// the outer row's Console/Worktree/Exec/RepoEvent/Journal servicing, the
+/// green-thread scheduler (`wait`/`waitEither`/`cancel`/`mapConcurrently`
+/// interleaving in original order), and the driver's non-blocking
+/// `RepoEventAwait` servicing, all off one fixture and one compile.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn outer_loop_effects_round_trip_through_the_driver() {
     support::require_extract();
@@ -272,27 +233,6 @@ async fn outer_loop_effects_round_trip_through_the_driver() {
         Some(55),
         "waitEvent must compose into nextEvent's select and, once resumed with the \
          handle, `wait` must return the thread's own value, got {state:?}"
-    );
-
-    // Tidepool.Node (PRD 20 S1-L4 wave 2) — capability-handle mailboxes over
-    // one green thread, one level only.
-    assert_eq!(
-        state.get("nodeMessage").and_then(|v| v.as_i64()),
-        Some(777),
-        "the parent's select must observe the child's sendUp before the deadline, \
-         got {state:?}"
-    );
-    assert_eq!(
-        state.get("nodeSilentTick").and_then(|v| v.as_bool()),
-        Some(true),
-        "a silent child never sends, so the parent's select must observe the Tick \
-         once the deadline elapses, got {state:?}"
-    );
-    assert_eq!(
-        state.get("nodeBurstPayload").and_then(|v| v.as_i64()),
-        Some(3),
-        "a burst of same-key sends must be observed ONCE, carrying the LAST payload, \
-         got {state:?}"
     );
 
     // Journal: the loop's `record "outer-effects" "probe" ...` call must have

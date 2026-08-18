@@ -3991,8 +3991,7 @@ impl SelfHarnessDriver {
         })?;
         let req = tidepool_handlers::RepoEventReq::from_value(request, table)
             .map_err(|e| DriverError::Session(format!("RepoEventAwait decode: {e}")))?;
-        let tidepool_handlers::RepoEventReq::RepoEventAwait(subscription, _timeout_ms) = req
-        else {
+        let tidepool_handlers::RepoEventReq::RepoEventAwait(subscription, _timeout_ms) = req else {
             return Err(DriverError::Session(
                 "poll_repo_event_await: decoded request was not RepoEventAwait (scheduler bug)"
                     .into(),
