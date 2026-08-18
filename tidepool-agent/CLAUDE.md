@@ -106,9 +106,8 @@ reach it. A flag the blocked thread would have to check is not cancellation.
 - `CodexCanceller` SIGKILLs the app-server child through a **pidfd**, never a
   bare numeric pid. It cannot go through `Session::shutdown` (that consumes
   `self` and needs the runtime the blocked thread is holding), so a pidfd is
-  opened (`pidfd_open`, via `libc::syscall` — the crate ships the syscall
-  number but no typed wrapper) into a shared `Arc<Mutex<PidFdSlot>>` the
-  moment the session connects.
+  opened (`rustix::process::pidfd_open`, a typed wrapper over the syscall)
+  into a shared `Arc<Mutex<PidFdSlot>>` the moment the session connects.
 
   **A pid is not a durable name for a process, and "we spawned it" is not what
   makes it safe to signal.** Once the child is reaped — by its owning `Child`
