@@ -394,6 +394,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fc652a48c352aef3ea3aed32080501cf3ef6ed5da78602a020c991775b0aff04"
 
 [[package]]
+name = "camino"
+version = "1.2.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bb1307f12aa967b5a58416e87b3653360e0fd614a016b6e970db08fecbb1b80d"
+
+[[package]]
 name = "cast"
 version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3865,6 +3871,7 @@ dependencies = [
 name = "tidepool-agent"
 version = "0.1.0"
 dependencies = [
+ "camino",
  "codex-codes",
  "rustix",
  "serde",
@@ -4008,6 +4015,7 @@ name = "tidepool-handlers"
 version = "0.1.0"
 dependencies = [
  "blake3",
+ "camino",
  "frunk",
  "genai",
  "glob",
@@ -4080,6 +4088,7 @@ version = "0.1.0"
 name = "tidepool-lsp"
 version = "0.1.0"
 dependencies = [
+ "camino",
  "clap",
  "crossbeam-channel",
  "serde",
@@ -4304,6 +4313,7 @@ dependencies = [
 name = "tidepool-worktree"
 version = "0.1.0"
 dependencies = [
+ "camino",
  "serde",
  "serde_json",
  "tempfile",

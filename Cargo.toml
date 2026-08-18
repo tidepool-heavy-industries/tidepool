@@ -66,6 +66,7 @@ tidepool-worktree = { path = "tidepool-worktree" }
 
 axum = "0.8"
 blake3 = "1"
+camino = "1.2.5"
 ciborium = "0.2"
 clap = { version = "4", features = ["derive", "env"] }
 frunk = "0.5"

@@ -19,6 +19,8 @@ rustix = { version = "1", features = ["process", "event"] }
 tidepool-worktree.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+# UTF-8-checked paths at the Haskell/wire boundary (camino-utf8-paths lane).
+camino.workspace = true
 sha2 = "0.11"
 thiserror.workspace = true
 tokio = { workspace = true, features = ["process", "rt", "rt-multi-thread", "time"] }

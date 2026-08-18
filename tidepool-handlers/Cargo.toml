@@ -17,6 +17,9 @@ tidepool-repr.workspace = true
 tidepool-bridge.workspace = true
 tidepool-bridge-derive.workspace = true
 tidepool-bridge-effects.workspace = true
+# UTF-8-checked paths at the Haskell/wire boundary — decode PathBuf once with
+# a typed error instead of a silent lossy conversion (camino-utf8-paths lane).
+camino.workspace = true
 # PRD 19 lane L4: the RepoEvent handler's production observation source adapts
 # `WorktreeMonitor` — the git reasoning lives THERE, not here.
 tidepool-worktree.workspace = true

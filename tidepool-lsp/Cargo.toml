@@ -18,6 +18,8 @@ serde.workspace = true
 serde_json.workspace = true
 crossbeam-channel = "0.5"
 similar = "3"
+# UTF-8-checked paths at the Haskell/wire boundary (camino-utf8-paths lane).
+camino.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
