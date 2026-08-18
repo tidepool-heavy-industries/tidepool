@@ -305,7 +305,7 @@ impl CycleProgress {
                     let call = parked.call.call.clone();
                     progress = parked
                         .answer(backend, agent, call, refusal)
-                        .map_err(|(e, _)| e)?;
+                        .map_err(|boxed| boxed.0)?;
                 }
             }
         }
@@ -375,7 +375,7 @@ impl ParkedCycle {
         agent: AgentId,
         call: ToolCallId,
         outcome: ToolOutcome,
-    ) -> Result<CycleProgress, (SpawnError, AnswerFailure)> {
+    ) -> Result<CycleProgress, Box<(SpawnError, AnswerFailure)>> {
         match self.saga.answer(backend, agent, call, outcome) {
             Ok(step) => Ok(CycleProgress::from_step(self.saga, step)),
             Err(e) => {
@@ -384,7 +384,7 @@ impl ParkedCycle {
                 } else {
                     AnswerFailure::StillParked(Box::new(self))
                 };
-                Err((e, failure))
+                Err(Box::new((e, failure)))
             }
         }
     }

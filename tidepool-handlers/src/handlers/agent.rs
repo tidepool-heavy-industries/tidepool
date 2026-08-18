@@ -83,8 +83,10 @@ enum SteppedCycle {
         /// The saga, inseparable from the call it is parked on
         /// ([`tidepool_agent::spawn::CycleProgress`]) — the same bundling
         /// that closes the cross-cycle SpawnStep/CycleSaga mismatch in
-        /// `tidepool-agent`.
-        parked: ParkedCycle,
+        /// `tidepool-agent`. Boxed for the same reason `Cycle::Stepped`
+        /// itself is: no `SteppedCycle` value should pay for the largest
+        /// variant's inline size, including transiently before it's boxed.
+        parked: Box<ParkedCycle>,
         backend: Box<dyn AgentBackend + Send>,
     },
     Settled {
@@ -117,13 +119,7 @@ impl SteppedCycle {
                     call: parked.call().clone(),
                 };
                 let wire = step_to_wire(&step);
-                (
-                    SteppedCycle::Running {
-                        parked: *parked,
-                        backend,
-                    },
-                    wire,
-                )
+                (SteppedCycle::Running { parked, backend }, wire)
             }
         }
     }
@@ -847,30 +843,31 @@ impl SubagentHandler {
                 self.cycles.insert(id, Cycle::Stepped(Box::new(next)));
                 Ok(wire)
             }
-            // The saga was never touched — put the SAME entry back exactly
-            // as it was, so a caller that answered the wrong call can retry
-            // with the right one instead of losing a perfectly good cycle.
-            Err((e, AnswerFailure::StillParked(parked))) => {
-                self.cycles.insert(
-                    id,
-                    Cycle::Stepped(Box::new(SteppedCycle::Running {
-                        parked: *parked,
-                        backend,
-                    })),
-                );
-                Err(spawn_error_to_wire(e))
-            }
-            // The saga rolled itself back before returning (a round-backstop
-            // trip or a backend failure) — a terminal entry must hold no OS
-            // process, so the backend is dropped in place of being kept.
-            Err((e, AnswerFailure::RolledBack)) => {
-                let transcript = backend.transcript_jsonl();
-                self.cycles.insert(
-                    id,
-                    Cycle::Stepped(Box::new(SteppedCycle::Settled { transcript })),
-                );
-                Err(spawn_error_to_wire(e))
-            }
+            Err(failure) => match *failure {
+                // The saga was never touched — put the SAME entry back
+                // exactly as it was, so a caller that answered the wrong
+                // call can retry with the right one instead of losing a
+                // perfectly good cycle.
+                (e, AnswerFailure::StillParked(parked)) => {
+                    self.cycles.insert(
+                        id,
+                        Cycle::Stepped(Box::new(SteppedCycle::Running { parked, backend })),
+                    );
+                    Err(spawn_error_to_wire(e))
+                }
+                // The saga rolled itself back before returning (a
+                // round-backstop trip or a backend failure) — a terminal
+                // entry must hold no OS process, so the backend is dropped
+                // in place of being kept.
+                (e, AnswerFailure::RolledBack) => {
+                    let transcript = backend.transcript_jsonl();
+                    self.cycles.insert(
+                        id,
+                        Cycle::Stepped(Box::new(SteppedCycle::Settled { transcript })),
+                    );
+                    Err(spawn_error_to_wire(e))
+                }
+            },
         }
     }
 
