@@ -133,8 +133,8 @@ fn delegating_reply() -> String {
         "do { r <- delegate (DelegateBrief { delegateLabel = \"probe\", \
          delegateInstruction = \"look around\", delegateExpected = \"a one-line summary\" }); \
          case r of { \
-           Left e -> finalize @LayerProposal (ProposeFinish { finishDraft = renderDelegateError e }); \
-           Right ok -> finalize @LayerProposal (ProposeFinish { finishDraft = delegateSummary ok }) } }",
+           Left e -> finalize @LayerProposal (ProposeFinish { localAnswer = renderDelegateError e }); \
+           Right ok -> finalize @LayerProposal (ProposeFinish { localAnswer = delegateSummary ok }) } }",
     )
 }
 
@@ -225,7 +225,7 @@ async fn root_coalgebra_window_delegates_and_finalizes_on_the_result() {
                 "— FOLD",
                 haskell(
                     "finalize @FoldDecision (FoldDecision { foldSynthesis = \"FOLDED\", \
-                     foldTensions = [], foldSelected = [], foldComposition = [], \
+                     foldTensions = [], foldEditsInOrder = [], \
                      foldProposed = [] })",
                 ),
             ),
@@ -374,8 +374,8 @@ async fn direct_subagent_send_dispatches_within_the_answerer_row() {
          spec = spawnSpec wspec \"probe\" \"look around\" }; \
          spawned <- send (SubagentSpawnAsync spec Aeson.Null); \
          case spawned of { \
-           Left _err -> finalize @LayerProposal (ProposeFinish { finishDraft = \"spawn failed\" }); \
-           Right _cyc -> finalize @LayerProposal (ProposeFinish { finishDraft = \"spawned ok\" }) } }",
+           Left _err -> finalize @LayerProposal (ProposeFinish { localAnswer = \"spawn failed\" }); \
+           Right _cyc -> finalize @LayerProposal (ProposeFinish { localAnswer = \"spawned ok\" }) } }",
     );
     let provider: Arc<dyn DynModelProvider> = Arc::new(KeyedProvider {
         scripted: vec![
@@ -384,7 +384,7 @@ async fn direct_subagent_send_dispatches_within_the_answerer_row() {
                 "— FOLD",
                 haskell(
                     "finalize @FoldDecision (FoldDecision { foldSynthesis = \"FOLDED\", \
-                     foldTensions = [], foldSelected = [], foldComposition = [], \
+                     foldTensions = [], foldEditsInOrder = [], \
                      foldProposed = [] })",
                 ),
             ),
