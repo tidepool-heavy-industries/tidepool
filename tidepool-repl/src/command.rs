@@ -41,6 +41,18 @@ pub struct BoundComponent {
     pub type_display: String,
 }
 
+/// A `session_run` block's last-expression result: the rendered value plus its
+/// type and truncation-hint METADATA — the three only ever describe the SAME
+/// value, so they travel as one struct rather than three independently
+/// optional fields that could drift apart (e.g. a `truncated` hint surviving
+/// after `value` was cleared).
+#[derive(Clone, Debug)]
+pub struct BlockValue {
+    pub value: Json,
+    pub type_display: Option<String>,
+    pub truncated: Option<String>,
+}
+
 /// The response shape a `session_run` block renders to. The verbose diagnostic
 /// shape carries the generation counters it needs; the slim (default) shape does
 /// not — so the counters live INSIDE `Verbose`, never alongside a slim result.
@@ -256,17 +268,14 @@ pub enum TurnOutcome {
     /// `session_run` block result: per-item outcomes + the last expression value.
     Block {
         items: Vec<BlockItemResult>,
-        /// The block's result value: populated ONLY when the FINAL executed
-        /// item is a value-producing expression. `None` when the block ends in
-        /// a bind/decl/meta command, or errored (even if an earlier expression
+        /// The block's result: populated ONLY when the FINAL executed item is
+        /// a value-producing expression. `None` when the block ends in a
+        /// bind/decl/meta command, or errored (even if an earlier expression
         /// produced a value) — read `items[].result` for an intermediate
-        /// expression's value instead.
-        value: Option<Json>,
-        /// Inferred type of the last expression (`None` when the block ends in
-        /// a bind or declaration, or when the type probe failed).
-        last_type: Option<String>,
-        /// Truncation hint when the last expression's value was elided to stubs.
-        last_truncated: Option<String>,
+        /// expression's value instead. Bundled as one [`BlockValue`] (value +
+        /// type + truncation hint) rather than three sibling options, since
+        /// they only ever describe this one value.
+        value: Option<BlockValue>,
         /// Slim (default) vs verbose diagnostic rendering. The verbose-only
         /// generation counters live inside [`ResponseShape::Verbose`].
         shape: ResponseShape,
@@ -328,8 +337,6 @@ impl TurnOutcome {
             TurnOutcome::Block {
                 items,
                 value,
-                last_type,
-                last_truncated,
                 shape,
             } => {
                 if let ResponseShape::Verbose {
@@ -351,7 +358,7 @@ impl TurnOutcome {
                         .collect();
                     serde_json::json!({
                         "items": items_json,
-                        "value": value,
+                        "value": value.as_ref().map(|v| &v.value),
                         "generation": generation,
                         "valGeneration": val_gen,
                     })
@@ -377,13 +384,18 @@ impl TurnOutcome {
                     top.insert("items".into(), serde_json::Value::Array(items_json));
                     top.insert(
                         "value".into(),
-                        value.clone().unwrap_or(serde_json::Value::Null),
+                        value
+                            .as_ref()
+                            .map(|v| v.value.clone())
+                            .unwrap_or(serde_json::Value::Null),
                     );
-                    if let Some(t) = last_type {
-                        top.insert("type".into(), serde_json::json!(t));
-                    }
-                    if let Some(hint) = last_truncated {
-                        top.insert("truncated".into(), serde_json::json!(hint));
+                    if let Some(bv) = value {
+                        if let Some(t) = &bv.type_display {
+                            top.insert("type".into(), serde_json::json!(t));
+                        }
+                        if let Some(hint) = &bv.truncated {
+                            top.insert("truncated".into(), serde_json::json!(hint));
+                        }
                     }
                     serde_json::Value::Object(top).to_string()
                 }
