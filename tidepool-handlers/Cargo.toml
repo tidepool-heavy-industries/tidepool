@@ -35,6 +35,7 @@ genai.workspace = true
 ureq = { workspace = true, features = ["json"] }
 url.workspace = true
 # Direct deps for handler implementations
+serde.workspace = true
 serde_json.workspace = true
 # Content hashing for the Fs compare-and-swap write (FsHash/FsWriteCas) —
 # matches the cache layer's blake3 choice (tidepool-runtime).

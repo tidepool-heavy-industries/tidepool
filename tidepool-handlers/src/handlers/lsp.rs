@@ -13,16 +13,17 @@ use tidepool_mcp::CapturedOutput;
 // bodies below are hand-written.
 tidepool_mcp::lsp_effect_def!(crate::effect_glue::effect_rust_projection);
 
-#[derive(FromCore, ToCore, Clone, CoreRecord)]
+#[derive(FromCore, ToCore, Clone, CoreRecord, serde::Deserialize)]
 #[core(name = "Position")]
 pub struct LspPosition {
     #[core(hs = "posLine")]
     pub line: i64,
     #[core(hs = "posChar")]
+    #[serde(rename = "char")]
     pub character: i64,
 }
 
-#[derive(FromCore, ToCore, Clone, CoreRecord)]
+#[derive(FromCore, ToCore, Clone, CoreRecord, serde::Deserialize)]
 #[core(name = "LspNode")]
 pub struct LspNode {
     #[core(hs = "nodeName")]
@@ -46,29 +47,9 @@ impl LspNode {
             "pos": { "line": self.pos.line, "char": self.pos.character }, "text": self.text,
         })
     }
-
-    pub fn from_wire(o: &serde_json::Value) -> LspNode {
-        let pos = o.get("pos");
-        let line = pos
-            .and_then(|p| p.get("line"))
-            .and_then(serde_json::Value::as_i64)
-            .unwrap_or(0);
-        let character = pos
-            .and_then(|p| p.get("char"))
-            .and_then(serde_json::Value::as_i64)
-            .unwrap_or(0);
-        LspNode {
-            name: json_str(o, "name"),
-            container: json_str(o, "container"),
-            kind: json_str(o, "kind"),
-            file: json_str(o, "file"),
-            pos: LspPosition { line, character },
-            text: json_str(o, "text"),
-        }
-    }
 }
 
-#[derive(ToCore, CoreRecord)]
+#[derive(ToCore, CoreRecord, serde::Deserialize)]
 #[core(name = "Diag")]
 pub struct LspDiag {
     #[core(hs = "diagFile")]
@@ -94,10 +75,16 @@ impl LspHandler {
         Self { sock_path }
     }
 
-    /// Talk to the daemon. Every failure mode here (no daemon, write/read
-    /// failure, bad response, daemon-reported error) is the SAME typed
-    /// failure (#335): the daemon isn't usably present right now.
-    pub fn query(&self, req: serde_json::Value) -> Result<serde_json::Value, LspError> {
+    /// Talk to the daemon and decode its reply as `T`. Every failure mode
+    /// here (no daemon, write/read failure, malformed envelope, a `result`
+    /// that doesn't match `T`, daemon-reported error) is the SAME typed
+    /// failure (#335): the daemon isn't usably present right now. Unlike the
+    /// old `from_wire`-based decoding, a malformed or version-skewed success
+    /// reply is a decode error here, never a fabricated default value.
+    pub fn query<T: serde::de::DeserializeOwned>(
+        &self,
+        req: serde_json::Value,
+    ) -> Result<T, LspError> {
         use std::io::{BufRead, BufReader, Write};
         use std::os::unix::net::UnixStream;
 
@@ -124,15 +111,44 @@ impl LspHandler {
         let v: serde_json::Value = serde_json::from_str(resp.trim())
             .map_err(|e| LspError::LspDaemonDown(format!("bad LSP daemon response: {}", e)))?;
 
-        if v.get("ok").and_then(serde_json::Value::as_bool) == Some(true) {
-            Ok(v.get("result").cloned().unwrap_or(serde_json::Value::Null))
+        match DaemonReply::<T>::from_value(v) {
+            Ok(DaemonReply::Success(t)) => Ok(t),
+            Ok(DaemonReply::Failure(e)) => Err(LspError::LspDaemonDown(e)),
+            Err(e) => Err(LspError::LspDaemonDown(format!(
+                "malformed LSP daemon reply: {e}"
+            ))),
+        }
+    }
+}
+
+/// The tagged envelope every daemon reply carries: `{"ok": true, "result":
+/// ...}` or `{"ok": false, "error": "..."}"`. Decoding into this (rather than
+/// treating the envelope as loose JSON) means a malformed or version-skewed
+/// success reply — a missing `result`, or one that doesn't match the
+/// operation's expected shape `T` — is a decode error, never a fabricated
+/// default (a node at line 0, an empty list standing in for a daemon
+/// outage).
+enum DaemonReply<T> {
+    Success(T),
+    Failure(String),
+}
+
+impl<T: serde::de::DeserializeOwned> DaemonReply<T> {
+    fn from_value(v: serde_json::Value) -> Result<Self, String> {
+        let ok = v
+            .get("ok")
+            .and_then(serde_json::Value::as_bool)
+            .ok_or("missing boolean 'ok'")?;
+        if ok {
+            let result = v.get("result").cloned().ok_or("missing 'result'")?;
+            serde_json::from_value(result)
+                .map(DaemonReply::Success)
+                .map_err(|e| format!("result doesn't match expected shape: {e}"))
         } else {
-            Err(LspError::LspDaemonDown(
-                v.get("error")
-                    .and_then(serde_json::Value::as_str)
-                    .unwrap_or("LSP daemon error")
-                    .to_string(),
-            ))
+            v.get("error")
+                .and_then(serde_json::Value::as_str)
+                .map(|s| DaemonReply::Failure(s.to_string()))
+                .ok_or_else(|| "missing 'error'".to_string())
         }
     }
 }
@@ -156,34 +172,11 @@ fn lsp_err_to_effect(e: LspError) -> EffectError {
     EffectError::Handler(e.to_string())
 }
 
-pub fn json_str(o: &serde_json::Value, k: &str) -> String {
-    o.get(k)
-        .and_then(serde_json::Value::as_str)
-        .unwrap_or("")
-        .to_string()
-}
-
-pub fn json_line(o: &serde_json::Value) -> i64 {
-    o.get("line")
-        .and_then(serde_json::Value::as_i64)
-        .unwrap_or(0)
-}
-
-/// Decode a daemon reply array into nodes.
-fn nodes(r: &serde_json::Value) -> Vec<LspNode> {
-    r.as_array()
-        .into_iter()
-        .flatten()
-        .map(LspNode::from_wire)
-        .collect()
-}
-
 impl LspHandler {
     // Errors-tagged (#335): total in `LspError`, no `cx` — the dispatch arm
     // wraps the `Result` via `cx.respond` (Ok→Right, Err→Left).
     fn lsp_where(&mut self, symbol: String) -> Result<Vec<LspNode>, LspError> {
-        let r = self.query(serde_json::json!({ "op": "where", "symbol": symbol }))?;
-        Ok(nodes(&r))
+        self.query(serde_json::json!({ "op": "where", "symbol": symbol }))
     }
 
     // Untagged, plain [LspNode] (round-2 ergonomics): a daemon-down failure
@@ -198,10 +191,10 @@ impl LspHandler {
         cx: &EffectContext<'_, CapturedOutput>,
         n: LspNode,
     ) -> Result<tidepool_effect::Response, EffectError> {
-        let r = self
+        let r: Option<Vec<LspNode>> = self
             .query(serde_json::json!({ "op": "callers", "node": n.to_wire() }))
             .map_err(lsp_err_to_effect)?;
-        cx.respond(nodes(&r))
+        cx.respond(r.unwrap_or_default())
     }
 
     fn lsp_callees(
@@ -209,10 +202,10 @@ impl LspHandler {
         cx: &EffectContext<'_, CapturedOutput>,
         n: LspNode,
     ) -> Result<tidepool_effect::Response, EffectError> {
-        let r = self
+        let r: Option<Vec<LspNode>> = self
             .query(serde_json::json!({ "op": "callees", "node": n.to_wire() }))
             .map_err(lsp_err_to_effect)?;
-        cx.respond(nodes(&r))
+        cx.respond(r.unwrap_or_default())
     }
 
     fn lsp_refs(
@@ -220,10 +213,10 @@ impl LspHandler {
         cx: &EffectContext<'_, CapturedOutput>,
         n: LspNode,
     ) -> Result<tidepool_effect::Response, EffectError> {
-        let r = self
+        let r: Option<Vec<LspNode>> = self
             .query(serde_json::json!({ "op": "references", "node": n.to_wire() }))
             .map_err(lsp_err_to_effect)?;
-        cx.respond(nodes(&r))
+        cx.respond(r.unwrap_or_default())
     }
 
     fn lsp_def(
@@ -231,15 +224,10 @@ impl LspHandler {
         cx: &EffectContext<'_, CapturedOutput>,
         n: LspNode,
     ) -> Result<tidepool_effect::Response, EffectError> {
-        let r = self
+        let r: Option<LspNode> = self
             .query(serde_json::json!({ "op": "def", "node": n.to_wire() }))
             .map_err(lsp_err_to_effect)?;
-        let opt = if r.is_null() {
-            None
-        } else {
-            Some(LspNode::from_wire(&r))
-        };
-        cx.respond(opt)
+        cx.respond(r)
     }
 
     fn lsp_hover(
@@ -247,10 +235,10 @@ impl LspHandler {
         cx: &EffectContext<'_, CapturedOutput>,
         n: LspNode,
     ) -> Result<tidepool_effect::Response, EffectError> {
-        let r = self
+        let r: Option<String> = self
             .query(serde_json::json!({ "op": "hover", "node": n.to_wire() }))
             .map_err(lsp_err_to_effect)?;
-        cx.respond(r.as_str().map(str::to_string))
+        cx.respond(r)
     }
 
     fn lsp_rename(
@@ -259,29 +247,17 @@ impl LspHandler {
         n: LspNode,
         new_name: String,
     ) -> Result<tidepool_effect::Response, EffectError> {
-        let r = self
+        let r: Option<String> = self
             .query(serde_json::json!({
                 "op": "rename", "node": n.to_wire(), "newName": new_name
             }))
             .map_err(lsp_err_to_effect)?;
-        cx.respond(r.as_str().map(str::to_string))
+        cx.respond(r)
     }
 
     // Errors-tagged (#335): plain list, no Maybe already in play.
     fn lsp_diagnostics(&mut self, file: String) -> Result<Vec<LspDiag>, LspError> {
-        let r = self.query(serde_json::json!({ "op": "diagnostics", "file": file }))?;
-        let diags: Vec<LspDiag> = r
-            .as_array()
-            .into_iter()
-            .flatten()
-            .map(|o| LspDiag {
-                file: json_str(o, "file"),
-                line: json_line(o),
-                severity: json_str(o, "severity"),
-                message: json_str(o, "message"),
-            })
-            .collect();
-        Ok(diags)
+        self.query(serde_json::json!({ "op": "diagnostics", "file": file }))
     }
 }
 
