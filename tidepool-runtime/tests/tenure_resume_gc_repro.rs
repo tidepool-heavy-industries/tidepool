@@ -429,7 +429,7 @@ fn shared_free_variable_survives_forced_gc_between_tenure_and_resume() {
     // persistent root. The wrap's OWN parked continuation independently
     // captured `shared` too, and that copy is NOT touched by this tenure.
     let handle = session
-        .finalized_handle(&wrap_hole)
+        .finalized_handle(wrap_hole.cont_id())
         .unwrap_or_else(|| panic!("wrap frame carries no untaken body closure"));
 
     // THE EXPERIMENT: force a real collection in the window between the
@@ -437,7 +437,7 @@ fn shared_free_variable_survives_forced_gc_between_tenure_and_resume() {
     session.force_gc_for_test();
 
     let outcome = session
-        .resume(&wrap_hole, Value::Lit(Literal::LitInt(0)))
+        .resume(wrap_hole, Value::Lit(Literal::LitInt(0)))
         .unwrap_or_else(|e| panic!("wrap resume failed: {e}"));
     let (shared_back, _answer) = match outcome {
         ResidentOutcome::Completed { result, .. } => expect_wrap_pair(&result.into_value()),
@@ -459,7 +459,7 @@ fn shared_free_variable_survives_forced_gc_between_tenure_and_resume() {
         other => panic!("thread body must suspend on its own effect, got {other:?}"),
     };
     let inner_outcome = session
-        .resume(&inner_hole, Value::Lit(Literal::LitInt(77)))
+        .resume(inner_hole, Value::Lit(Literal::LitInt(77)))
         .unwrap_or_else(|e| panic!("thread resume failed: {e}"));
     let answer = match inner_outcome {
         ResidentOutcome::Completed { result, .. } => match result.into_value() {
@@ -496,7 +496,7 @@ fn shared_closure_applies_correctly_after_forced_gc_between_tenure_and_resume() 
     };
 
     let handle = session
-        .finalized_handle(&wrap_hole)
+        .finalized_handle(wrap_hole.cont_id())
         .unwrap_or_else(|| panic!("wrap frame carries no untaken body closure"));
 
     // Multiple forced collections in the window between tenure and resume —
@@ -506,7 +506,7 @@ fn shared_closure_applies_correctly_after_forced_gc_between_tenure_and_resume() 
     session.force_gc_for_test();
 
     let outcome = session
-        .resume(&wrap_hole, Value::Lit(Literal::LitInt(0)))
+        .resume(wrap_hole, Value::Lit(Literal::LitInt(0)))
         .unwrap_or_else(|e| panic!("wrap resume failed: {e}"));
     let (applied_back, _answer) = match outcome {
         ResidentOutcome::Completed { result, .. } => expect_wrap_pair(&result.into_value()),
@@ -526,7 +526,7 @@ fn shared_closure_applies_correctly_after_forced_gc_between_tenure_and_resume() 
         other => panic!("thread body must suspend on its own effect, got {other:?}"),
     };
     let inner_outcome = session
-        .resume(&inner_hole, Value::Lit(Literal::LitInt(77)))
+        .resume(inner_hole, Value::Lit(Literal::LitInt(77)))
         .unwrap_or_else(|e| panic!("thread resume failed: {e}"));
     let answer = match inner_outcome {
         ResidentOutcome::Completed { result, .. } => match result.into_value() {
@@ -570,7 +570,7 @@ fn shared_closure_survives_when_child_thread_runs_before_spawner_resumes() {
     // observes it (`finalized_handle` called on the just-suspended spawner's
     // own frame, BEFORE the spawner is resumed).
     let handle = session
-        .finalized_handle(&wrap_hole)
+        .finalized_handle(wrap_hole.cont_id())
         .unwrap_or_else(|| panic!("wrap frame carries no untaken body closure"));
 
     // REAL ORDER: run the child thread FIRST (mirrors driver.rs's
@@ -589,7 +589,7 @@ fn shared_closure_survives_when_child_thread_runs_before_spawner_resumes() {
     // ONLY NOW resume the spawner — matching `resume(hole, tid_value)` in
     // driver.rs, which runs AFTER `run_forked` started the child.
     let outcome = session
-        .resume(&wrap_hole, Value::Lit(Literal::LitInt(0)))
+        .resume(wrap_hole, Value::Lit(Literal::LitInt(0)))
         .unwrap_or_else(|e| panic!("wrap resume failed: {e}"));
     let (applied_back, _answer) = match outcome {
         ResidentOutcome::Completed { result, .. } => expect_wrap_pair(&result.into_value()),
@@ -603,7 +603,7 @@ fn shared_closure_survives_when_child_thread_runs_before_spawner_resumes() {
     );
 
     let inner_outcome = session
-        .resume(&inner_hole, Value::Lit(Literal::LitInt(77)))
+        .resume(inner_hole, Value::Lit(Literal::LitInt(77)))
         .unwrap_or_else(|e| panic!("thread resume failed: {e}"));
     let answer = match inner_outcome {
         ResidentOutcome::Completed { result, .. } => match result.into_value() {
@@ -827,7 +827,7 @@ fn handled_dependencies_survive_gc_between_tenure_and_resume() {
     };
 
     let handle = session
-        .finalized_handle(&wrap_hole)
+        .finalized_handle(wrap_hole.cont_id())
         .unwrap_or_else(|| panic!("wrap frame carries no untaken body closure"));
 
     let inner_hole = match session
@@ -841,7 +841,7 @@ fn handled_dependencies_survive_gc_between_tenure_and_resume() {
     session.force_gc_for_test();
 
     let outcome = session
-        .resume(&wrap_hole, Value::Lit(Literal::LitInt(0)))
+        .resume(wrap_hole, Value::Lit(Literal::LitInt(0)))
         .unwrap_or_else(|e| panic!("wrap resume failed: {e}"));
     let (down_back, up_back) = match outcome {
         ResidentOutcome::Completed { result, .. } => expect_wrap_pair(&result.into_value()),
@@ -855,7 +855,7 @@ fn handled_dependencies_survive_gc_between_tenure_and_resume() {
     );
 
     let inner_outcome = session
-        .resume(&inner_hole, Value::Lit(Literal::LitInt(0)))
+        .resume(inner_hole, Value::Lit(Literal::LitInt(0)))
         .unwrap_or_else(|e| panic!("thread resume failed: {e}"));
     match inner_outcome {
         ResidentOutcome::Completed { result, .. } => match result.into_value() {
@@ -1038,7 +1038,7 @@ fn handled_dependencies_survive_when_child_completes_synchronously() {
     };
 
     let handle = session
-        .finalized_handle(&wrap_hole)
+        .finalized_handle(wrap_hole.cont_id())
         .unwrap_or_else(|| panic!("wrap frame carries no untaken body closure"));
 
     // The child dispatches a handled effect and completes SYNCHRONOUSLY here
@@ -1071,7 +1071,7 @@ fn handled_dependencies_survive_when_child_completes_synchronously() {
     session.force_gc_for_test();
 
     let outcome = session
-        .resume(&wrap_hole, Value::Lit(Literal::LitInt(0)))
+        .resume(wrap_hole, Value::Lit(Literal::LitInt(0)))
         .unwrap_or_else(|e| panic!("wrap resume failed: {e}"));
     let (down_back, up_back) = match outcome {
         ResidentOutcome::Completed { result, .. } => expect_wrap_pair(&result.into_value()),
@@ -1234,7 +1234,7 @@ fn shared_unforced_thunk_survives_forced_gc_between_tenure_and_resume() {
     };
 
     let handle = session
-        .finalized_handle(&wrap_hole)
+        .finalized_handle(wrap_hole.cont_id())
         .unwrap_or_else(|| panic!("wrap frame carries no untaken body closure"));
 
     session.force_gc_for_test();
@@ -1243,7 +1243,7 @@ fn shared_unforced_thunk_survives_forced_gc_between_tenure_and_resume() {
     // Resuming forces the wrap continuation, which forces `shared` for the
     // FIRST time here — after tenure and two collections.
     let outcome = session
-        .resume(&wrap_hole, Value::Lit(Literal::LitInt(0)))
+        .resume(wrap_hole, Value::Lit(Literal::LitInt(0)))
         .unwrap_or_else(|e| panic!("wrap resume failed: {e}"));
     let (shared_pair, _answer) = match outcome {
         ResidentOutcome::Completed { result, .. } => {
@@ -1283,7 +1283,7 @@ fn shared_unforced_thunk_survives_forced_gc_between_tenure_and_resume() {
         other => panic!("thread body must suspend on its own effect, got {other:?}"),
     };
     let inner_outcome = session
-        .resume(&inner_hole, Value::Lit(Literal::LitInt(77)))
+        .resume(inner_hole, Value::Lit(Literal::LitInt(77)))
         .unwrap_or_else(|e| panic!("thread resume failed: {e}"));
     match inner_outcome {
         ResidentOutcome::Completed { result, .. } => {
@@ -1496,7 +1496,7 @@ fn event_shaped_capture_survives_tenure_and_resume() {
     };
 
     let handle = session
-        .finalized_handle(&wrap_hole)
+        .finalized_handle(wrap_hole.cont_id())
         .unwrap_or_else(|| panic!("wrap frame carries no untaken body closure"));
 
     let inner_hole = match session
@@ -1510,7 +1510,7 @@ fn event_shaped_capture_survives_tenure_and_resume() {
     session.force_gc_for_test();
 
     let outcome = session
-        .resume(&wrap_hole, Value::Lit(Literal::LitInt(0)))
+        .resume(wrap_hole, Value::Lit(Literal::LitInt(0)))
         .unwrap_or_else(|e| panic!("wrap resume failed: {e}"));
     let (down_back, up_back) = match outcome {
         ResidentOutcome::Completed { result, .. } => expect_wrap_pair(&result.into_value()),
@@ -1524,7 +1524,7 @@ fn event_shaped_capture_survives_tenure_and_resume() {
     );
 
     let inner_outcome = session
-        .resume(&inner_hole, Value::Lit(Literal::LitInt(222)))
+        .resume(inner_hole, Value::Lit(Literal::LitInt(222)))
         .unwrap_or_else(|e| panic!("thread resume failed: {e}"));
     match inner_outcome {
         ResidentOutcome::Completed { result, .. } => {
@@ -1579,7 +1579,7 @@ fn event_shaped_capture_survives_real_inflight_gc_with_tiny_nursery() {
     };
 
     let handle = session
-        .finalized_handle(&wrap_hole)
+        .finalized_handle(wrap_hole.cont_id())
         .unwrap_or_else(|| panic!("wrap frame carries no untaken body closure"));
 
     let inner_hole = match session
@@ -1591,7 +1591,7 @@ fn event_shaped_capture_survives_real_inflight_gc_with_tiny_nursery() {
     };
 
     let outcome = session
-        .resume(&wrap_hole, Value::Lit(Literal::LitInt(0)))
+        .resume(wrap_hole, Value::Lit(Literal::LitInt(0)))
         .unwrap_or_else(|e| panic!("wrap resume failed: {e}"));
 
     let gc_count_after = session.heap_stats().map(|s| s.gc_count).unwrap_or(0);
@@ -1614,7 +1614,7 @@ fn event_shaped_capture_survives_real_inflight_gc_with_tiny_nursery() {
     );
 
     let inner_outcome = session
-        .resume(&inner_hole, Value::Lit(Literal::LitInt(222)))
+        .resume(inner_hole, Value::Lit(Literal::LitInt(222)))
         .unwrap_or_else(|e| panic!("thread resume failed: {e}"));
     match inner_outcome {
         ResidentOutcome::Completed { result, .. } => {
@@ -1880,7 +1880,7 @@ fn event_capture_survives_via_either_unwrap_binding() {
     };
 
     let handle = session
-        .finalized_handle(&wrap_hole)
+        .finalized_handle(wrap_hole.cont_id())
         .unwrap_or_else(|| panic!("wrap frame carries no untaken body closure"));
 
     let inner_hole = match session
@@ -1894,7 +1894,7 @@ fn event_capture_survives_via_either_unwrap_binding() {
     session.force_gc_for_test();
 
     let outcome = session
-        .resume(&wrap_hole, Value::Lit(Literal::LitInt(0)))
+        .resume(wrap_hole, Value::Lit(Literal::LitInt(0)))
         .unwrap_or_else(|e| panic!("wrap resume failed: {e}"));
     let (down_back, up_back) = match outcome {
         ResidentOutcome::Completed { result, .. } => expect_wrap_pair(&result.into_value()),
@@ -2077,7 +2077,7 @@ fn bare_list_capture_survives_tenure_and_resume() {
     };
 
     let handle = session
-        .finalized_handle(&wrap_hole)
+        .finalized_handle(wrap_hole.cont_id())
         .unwrap_or_else(|| panic!("wrap frame carries no untaken body closure"));
 
     let _inner_hole = match session
@@ -2091,7 +2091,7 @@ fn bare_list_capture_survives_tenure_and_resume() {
     session.force_gc_for_test();
 
     let outcome = session
-        .resume(&wrap_hole, Value::Lit(Literal::LitInt(0)))
+        .resume(wrap_hole, Value::Lit(Literal::LitInt(0)))
         .unwrap_or_else(|e| panic!("wrap resume failed: {e}"));
     let (down_back, up_back) = match outcome {
         ResidentOutcome::Completed { result, .. } => expect_wrap_pair(&result.into_value()),
@@ -2330,7 +2330,7 @@ fn undceable_list_capture_survives_tenure_and_resume() {
     };
 
     let handle = session
-        .finalized_handle(&wrap_hole)
+        .finalized_handle(wrap_hole.cont_id())
         .unwrap_or_else(|| panic!("wrap frame carries no untaken body closure"));
 
     // bodyInner ignores watchList but still suspends on body_tag (its own
@@ -2352,7 +2352,7 @@ fn undceable_list_capture_survives_tenure_and_resume() {
     session.force_gc_for_test();
 
     let outcome = session
-        .resume(&wrap_hole, Value::Lit(Literal::LitInt(0)))
+        .resume(wrap_hole, Value::Lit(Literal::LitInt(0)))
         .unwrap_or_else(|e| panic!("wrap resume failed: {e}"));
     let (down_back, up_back) = match outcome {
         ResidentOutcome::Completed { result, .. } => expect_wrap_pair(&result.into_value()),
@@ -2589,7 +2589,7 @@ fn thunked_app_capture_survives_tenure_and_resume() {
     };
 
     let handle = session
-        .finalized_handle(&wrap_hole)
+        .finalized_handle(wrap_hole.cont_id())
         .unwrap_or_else(|| panic!("wrap frame carries no untaken body closure"));
 
     // Forcing X (applying bodyInner to watchList) happens HERE, inside
@@ -2609,7 +2609,7 @@ fn thunked_app_capture_survives_tenure_and_resume() {
     session.force_gc_for_test();
 
     let outcome = session
-        .resume(&wrap_hole, Value::Lit(Literal::LitInt(0)))
+        .resume(wrap_hole, Value::Lit(Literal::LitInt(0)))
         .unwrap_or_else(|e| panic!("wrap resume failed: {e}"));
     let (down_back, up_back) = match outcome {
         ResidentOutcome::Completed { result, .. } => expect_wrap_pair(&result.into_value()),
@@ -2665,13 +2665,13 @@ fn shared_free_variable_stale_immediately_after_tenure_with_no_intervening_gc() 
     // NOT touched by this tenure call, and (unlike every test above) NO
     // subsequent collection runs to give it a chance to self-heal.
     let handle = session
-        .finalized_handle(&wrap_hole)
+        .finalized_handle(wrap_hole.cont_id())
         .unwrap_or_else(|| panic!("wrap frame carries no untaken body closure"));
 
     // No force_gc_for_test() here -- this is the point of the test.
 
     let outcome = session
-        .resume(&wrap_hole, Value::Lit(Literal::LitInt(0)))
+        .resume(wrap_hole, Value::Lit(Literal::LitInt(0)))
         .unwrap_or_else(|e| {
             panic!(
                 "wrap resume failed: {e} -- if this is a case/shape trap reporting \
@@ -2701,7 +2701,7 @@ fn shared_free_variable_stale_immediately_after_tenure_with_no_intervening_gc() 
         other => panic!("thread body must suspend on its own effect, got {other:?}"),
     };
     let inner_outcome = session
-        .resume(&inner_hole, Value::Lit(Literal::LitInt(77)))
+        .resume(inner_hole, Value::Lit(Literal::LitInt(77)))
         .unwrap_or_else(|e| panic!("thread resume failed: {e}"));
     let answer = match inner_outcome {
         ResidentOutcome::Completed { result, .. } => match result.into_value() {
