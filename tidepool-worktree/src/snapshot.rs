@@ -105,10 +105,17 @@ pub fn snapshot_source(
         detail: e.to_string(),
     })?;
     let temp_index_path = temp_index_dir.join(format!("{}.index", worktree_id.as_str()));
-    let temp_git = git.with_env(
-        "GIT_INDEX_FILE",
-        temp_index_path.to_string_lossy().into_owned(),
-    );
+    // `GIT_INDEX_FILE` routes git's own read/write to this path — a lossy
+    // mangle here would silently point git at the wrong file. Decode once,
+    // typed, rather than handing git text that doesn't name the file we just
+    // created.
+    let temp_index_path_utf8 = camino::Utf8Path::from_path(&temp_index_path).ok_or_else(|| {
+        WorktreeError::StorageFailure {
+            path: temp_index_path.clone(),
+            detail: "temp index path is not valid UTF-8".to_string(),
+        }
+    })?;
+    let temp_git = git.with_env("GIT_INDEX_FILE", temp_index_path_utf8.as_str());
 
     temp_git.try_run(source, &["read-tree", "HEAD"])?;
     if !captured_paths.is_empty() {

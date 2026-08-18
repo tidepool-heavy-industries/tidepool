@@ -471,6 +471,42 @@ fn refuses_dirty_submodule_and_leaves_source_untouched() {
     assert_source_untouched(&before, &after);
 }
 
+/// `GIT_INDEX_FILE` routes git's own read/write to `temp_index_path` — a
+/// non-UTF-8 `temp_index_dir` (raw bytes, unix-only) must be refused as a
+/// typed `StorageFailure` here, at the point the path is about to become
+/// text handed to git, rather than silently mangled into pointing git at
+/// the wrong (or no) file.
+#[cfg(unix)]
+#[test]
+fn refuses_non_utf8_temp_index_dir_and_leaves_source_untouched() {
+    use std::ffi::OsString;
+    use std::os::unix::ffi::OsStringExt;
+
+    let repo = TestRepo::init().expect("init");
+    repo.writer()
+        .commit_file("f.txt", "base\n", "base commit")
+        .expect("base commit");
+
+    let before = capture_source_state(repo.git(), repo.path());
+    let parent = tempfile::TempDir::new().expect("temp parent dir");
+    // `0x80` alone is not a valid UTF-8 lead byte.
+    let bad_name = OsString::from_vec(vec![b'i', b'd', 0x80, b'x']);
+    let temp_index_dir = parent.path().join(PathBuf::from(bad_name));
+
+    let worktree_id = WorktreeId::from_raw("w-nonutf8");
+    let err = snapshot_source(repo.git(), repo.path(), &worktree_id, &temp_index_dir)
+        .expect_err("a non-UTF-8 temp index dir must be refused, not silently mangled");
+    match err {
+        WorktreeError::StorageFailure { detail, .. } => {
+            assert!(detail.contains("UTF-8"), "{detail}");
+        }
+        other => panic!("expected StorageFailure, got {other:?}"),
+    }
+
+    let after = capture_source_state(repo.git(), repo.path());
+    assert_source_untouched(&before, &after);
+}
+
 /// Dirty capture through the PRODUCTION path (`WorktreeManager::create` with
 /// `allowDirtySnapshot`), not `snapshot_source` handed a pre-made temp dir.
 /// The manager derives its temp-index dir under `worktree_root` and nothing

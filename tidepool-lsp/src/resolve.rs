@@ -171,7 +171,7 @@ fn node(
 fn node_position(client: &RaClient, n: &Node) -> Result<(String, u64, u64), String> {
     let abs = abs_of(client.root(), &n.file.0)?;
     let line0 = n.pos.line.0.get().saturating_sub(1);
-    Ok((path_to_uri(&abs), line0, n.pos.char.0))
+    Ok((path_to_uri(&abs)?, line0, n.pos.char.0))
 }
 
 /// `(0-based line, 0-based UTF-16 char)` of a range's start.
@@ -570,7 +570,7 @@ pub fn diagnostics(client: &RaClient, file: &str) -> Result<Vec<Value>, String> 
     let root = client.root().to_path_buf();
     let abs = abs_of(&root, file)?;
     client.ensure_open(&abs)?;
-    let uri = path_to_uri(&abs);
+    let uri = path_to_uri(&abs)?;
 
     let items = match client.request(
         "textDocument/diagnostic",

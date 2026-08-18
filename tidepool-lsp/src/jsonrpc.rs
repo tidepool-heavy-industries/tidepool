@@ -160,7 +160,7 @@ impl RaClient {
     }
 
     fn handshake(&self) -> Result<(), String> {
-        let root_uri = path_to_uri(&self.root);
+        let root_uri = path_to_uri(&self.root)?;
         let params = json!({
             "processId": std::process::id(),
             "rootUri": root_uri,
@@ -272,7 +272,7 @@ impl RaClient {
 
     /// Ensure the server has `didOpen` for `abs_path` (needed for diagnostics).
     pub fn ensure_open(&self, abs_path: &Path) -> Result<(), String> {
-        let uri = path_to_uri(abs_path);
+        let uri = path_to_uri(abs_path)?;
         if self.opened.lock().unwrap().contains_key(&uri) {
             return Ok(());
         }
@@ -466,12 +466,18 @@ fn read_message<R: BufRead>(reader: &mut R) -> std::io::Result<Option<Value>> {
 
 /// `file:///abs/path` URI for a filesystem path (no percent-encoding of the
 /// path beyond what rust-analyzer needs; paths here are workspace-local).
-pub fn path_to_uri(path: &Path) -> String {
-    let s = path.to_string_lossy();
-    if s.starts_with('/') {
-        format!("file://{}", s)
+///
+/// `path` usually comes off a `canonicalize()` call (`abs_of`), which can
+/// resolve through a symlink onto an OS path outside the caller's control —
+/// so this is a typed decode, not a lossy one: a mangled URI would silently
+/// point rust-analyzer at the wrong file (or no file) instead of failing.
+pub fn path_to_uri(path: &Path) -> Result<String, String> {
+    let s = camino::Utf8Path::from_path(path)
+        .ok_or_else(|| format!("path is not valid UTF-8: {}", path.display()))?;
+    if s.as_str().starts_with('/') {
+        Ok(format!("file://{}", s))
     } else {
-        format!("file:///{}", s)
+        Ok(format!("file:///{}", s))
     }
 }
 
@@ -498,6 +504,28 @@ mod tests {
 
     fn ev(kind: &str, token: &str) -> Value {
         json!({"token": token, "value": {"kind": kind, "title": "t"}})
+    }
+
+    /// `path_to_uri` typically sees a `canonicalize()`d path (`abs_of`),
+    /// which can resolve through a symlink onto bytes outside the caller's
+    /// control — a non-UTF-8 path (raw bytes, unix-only) must be a typed
+    /// `Err`, not a URI silently built from replacement characters that
+    /// would point rust-analyzer at the wrong file.
+    #[cfg(unix)]
+    #[test]
+    fn path_to_uri_rejects_non_utf8_path() {
+        use std::ffi::OsString;
+        use std::os::unix::ffi::OsStringExt;
+
+        assert_eq!(
+            path_to_uri(Path::new("/workspace/good.rs")),
+            Ok("file:///workspace/good.rs".to_string())
+        );
+
+        // `0x80` alone is not a valid UTF-8 lead byte.
+        let bad_name = OsString::from_vec(vec![b'/', b'b', 0x80, b'.', b'r', b's']);
+        let err = path_to_uri(Path::new(&bad_name)).expect_err("non-UTF-8 path must be rejected");
+        assert!(err.contains("not valid UTF-8"), "{err}");
     }
 
     /// Reader-side view of the gate (what `is_ready` computes).

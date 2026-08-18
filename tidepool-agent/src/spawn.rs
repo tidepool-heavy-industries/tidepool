@@ -593,6 +593,24 @@ impl SpawnSubstrate {
 /// variants are the wire contract `tidepool-handlers` converts exhaustively —
 /// widening it is a separate, coordinated change, not something a lock
 /// mechanism gets to do.
+/// Decode a path checked UTF-8 at the substrate's construction
+/// (`worktree_root`/`source_repository`, both `require_utf8`-checked by
+/// `tidepool-handlers`' `SubagentHandler::with_backends`). A panic here means
+/// that invariant broke — loud and immediate, not a silently mangled sandbox
+/// root or cwd handed to a spawned backend.
+fn utf8_or_panic(path: &std::path::Path) -> String {
+    camino::Utf8Path::from_path(path)
+        .unwrap_or_else(|| {
+            panic!(
+                "invariant violated: path checked UTF-8 at substrate construction is not \
+                 valid UTF-8: {}",
+                path.display()
+            )
+        })
+        .as_str()
+        .to_string()
+}
+
 fn poisoned(stage: SpawnStage) -> SpawnError {
     SpawnError::Binding {
         stage,
@@ -742,11 +760,11 @@ impl CycleSaga {
 
             // The linked worktree's git metadata lives in the SOURCE repo's
             // `.git`; the sandbox must admit it or no worker can ever commit.
-            let git_dir = sub
-                .source_repository()
-                .join(".git")
-                .to_string_lossy()
-                .into_owned();
+            // `source_repository` is checked UTF-8 once, at handler
+            // construction (`SubagentHandler::with_backends`'s
+            // `require_utf8`) — a violation here means that invariant broke,
+            // which is loud, not a silently mangled sandbox root.
+            let git_dir = utf8_or_panic(&sub.source_repository().join(".git"));
             (worktree, agent, binding_ref, git_dir, lease)
         };
         // --- lock released. Everything below may block for a whole turn. ---
@@ -773,7 +791,10 @@ impl CycleSaga {
 
         // 5. Running. `cwd` is supplied per-cycle, not at thread creation —
         //    see `CycleSpec`'s docs for why the seam splits it that way.
-        let cwd = worktree.cwd().to_string_lossy().into_owned();
+        // `worktree.cwd()` is `worktree_root.join(id)`: `worktree_root` is
+        // checked UTF-8 once at handler construction and `id` is ASCII-safe
+        // by construction, so this is UTF-8 by construction too.
+        let cwd = utf8_or_panic(worktree.cwd());
         let event = match backend.start_turn(&thread, &request.cycle_spec(cwd, vec![git_dir])) {
             Ok(event) => event,
             Err(error) => {
