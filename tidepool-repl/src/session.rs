@@ -21,10 +21,12 @@
 //! * the per-item **tail** — the owned bookkeeping a `finish_*` needs after the
 //!   machine returns ([`PendingTail`], one variant per run path); and
 //! * the per-block **cursor** — where `run_block`'s item loop had got to
-//!   ([`BlockCursor`]).
+//!   ([`BlockCursor`], stowed as a [`SuspendedBlockCursor`] once its one item
+//!   suspends).
 //!
-//! Both live on the `Session` across the suspension, and
-//! [`Session::resume_turn`] re-enters the machine and then calls the SAME
+//! Both live on the `Session` across the suspension as ONE [`SuspendedTurn`]
+//! (tail + [`ResumeContext`]) — never as two independently-optional fields —
+//! and [`Session::resume_turn`] re-enters the machine and then calls the SAME
 //! `finish_*` the non-suspending path would have — the completion bookkeeping
 //! exists once, not once per arm.
 //!
@@ -61,8 +63,8 @@ use tidepool_runtime::{
 };
 
 use crate::command::{
-    BlockItem, BlockItemResult, BoundComponent, ExprText, ItemKind, MetaCommand, ResponseShape,
-    SessionCommand, TurnOutcome,
+    BlockItem, BlockItemResult, BlockValue, BoundComponent, ExprText, ItemKind, MetaCommand,
+    ResponseShape, SessionCommand, TurnOutcome,
 };
 
 /// Default session nursery: 64 MiB (matches the eval runtime default).
@@ -97,18 +99,18 @@ pub enum TurnStep {
 /// One ITEM's outcome — the same shape as [`TurnStep`], named separately
 /// because a suspended item is resumed back INTO the block loop rather than
 /// returned to the caller.
+// `PendingTail` is already `#[allow(large_enum_variant)]`'d for carrying the
+// turn's whole `DataConTable` in its largest variant; `Suspended` inherits
+// that size and the same justification — this is a transient boundary value
+// (immediately destructured by its one caller), never accumulated.
+#[allow(clippy::large_enum_variant)]
 enum ItemStep {
     Done(TurnOutcome),
-    Suspended(AskRequest),
-}
-
-impl From<ItemStep> for TurnStep {
-    fn from(step: ItemStep) -> TurnStep {
-        match step {
-            ItemStep::Done(outcome) => TurnStep::Completed(outcome),
-            ItemStep::Suspended(req) => TurnStep::Suspended(req),
-        }
-    }
+    /// Carries the tail that must be stowed alongside whatever [`ResumeContext`]
+    /// the caller assembles — see [`Session::finish_item_step`] (the `Single`
+    /// context) and [`Session::drive_block`]/[`Session::resume_block`] (the
+    /// `Block` context), the only two places a [`SuspendedTurn`] is built.
+    Suspended(PendingTail, AskRequest),
 }
 
 /// What a re-entry feeds the stowed `ask`. Kept JSON-side because the bridge to
@@ -185,15 +187,15 @@ pub struct Session {
     /// the block cursor carries a copy across a suspension. The server resets it
     /// at the start of each `session_run`.
     eval_input: Option<serde_json::Value>,
-    /// The stowed per-item tail of a SUSPENDED item: the owned bookkeeping its
-    /// `finish_*` needs once the machine comes back. `Some` exactly while the
-    /// session is suspended at an `ask`.
-    pending: Option<PendingTail>,
-    /// The stowed block loop of a SUSPENDED `session_run`: results so far, the
-    /// classify verdicts, the next index, the suspended item's index/kind, and
-    /// the `last_*` accumulators. `Some` exactly while a BLOCK is suspended (a
-    /// single-command `Eval` suspension stows only [`Self::pending`]).
-    cursor: Option<BlockCursor>,
+    /// The session's SUSPENDED turn, if any: the stowed per-item tail
+    /// ([`PendingTail`]) paired with which of the two resume contexts it
+    /// suspended under ([`ResumeContext`] — a lone `SessionCommand::Eval`, or
+    /// a `session_run` block loop). `Some` exactly while the session is
+    /// suspended at an `ask`; [`Self::reenter`] consumes it wholesale, so the
+    /// tail and its context can never drift apart the way the old two-field
+    /// `pending`/`cursor` split allowed (a resume path could take one and
+    /// forget the other).
+    suspended: Option<SuspendedTurn>,
     /// Shared slot the server reads to abort a runaway turn at a JIT safepoint.
     /// `None` until the manager wires it via [`Session::set_cancel_slot`]; the
     /// session publishes the machine's [`CancelHandle`] into it the moment the
@@ -342,13 +344,76 @@ impl PendingTail {
     }
 }
 
+/// A suspended turn: the stowed per-item tail plus which resume context it
+/// suspended under. The ONLY thing [`Session::suspended`] ever holds, and the
+/// ONLY thing [`Session::reenter`] ever consumes — a resume can't take the
+/// tail without also taking its context (or vice versa), which is exactly the
+/// bug the old separate `pending`/`cursor` fields allowed.
+struct SuspendedTurn {
+    tail: PendingTail,
+    context: ResumeContext,
+}
+
+/// Which shape of turn suspended: a single `SessionCommand::Eval` (no block
+/// loop to resume into), or a `session_run` block (whose loop state must come
+/// back too).
+// `Block`'s `SuspendedBlockCursor` carries the whole block's accumulated
+// items/results, dwarfing the empty `Single` — a transient boundary value
+// (there is at most one live `SuspendedTurn` per session), same shape as
+// `PendingTail`'s own `#[allow(large_enum_variant)]`.
+#[allow(clippy::large_enum_variant)]
+enum ResumeContext {
+    /// A standalone `SessionCommand::Eval` suspension: the resumed item's
+    /// outcome IS the turn's — no block loop to continue.
+    Single,
+    /// A `session_run` block suspension: the stowed loop state, resumed back
+    /// into [`Session::drive_block`] once the pending item finishes.
+    Block(SuspendedBlockCursor),
+}
+
+/// The suspended item's position and classified kind, held so its result lands
+/// at the right index with the right `kind` when the resume finishes it.
+/// NON-optional: it exists only as part of a [`SuspendedBlockCursor`], which
+/// itself exists only while a block is actually suspended on this item.
+struct PendingItem {
+    index: usize,
+    kind: ItemKind,
+}
+
+/// A [`BlockCursor`] stowed mid-block, paired with the ONE item it suspended
+/// on. Converts back to an ordinary running `BlockCursor` only by being
+/// destructured during resume ([`Session::resume_block`]) — there is no path
+/// that produces a cursor with a pending item the type doesn't know about.
+struct SuspendedBlockCursor {
+    cursor: BlockCursor,
+    pending_item: PendingItem,
+}
+
+/// [`BlockCursor`]'s accumulated last-expression-value state, captured
+/// together because they describe the SAME value: `type_display`/`truncated`
+/// are metadata about `value`, and `result_pos` is where it lives in
+/// `results`. Four independently-optional fields let the four drift apart
+/// (e.g. a `truncated` hint surviving after `value` was cleared); one struct
+/// makes that unrepresentable.
+struct LastBlockValue {
+    value: serde_json::Value,
+    type_display: Option<String>,
+    truncated: Option<String>,
+    /// The `results` INDEX of the item that produced this value — recorded at
+    /// the moment it is assigned, so the finish step strips fields from
+    /// exactly that item, never an unrelated one re-derived by some other
+    /// heuristic.
+    result_pos: usize,
+}
+
 /// `run_block`'s loop state, made re-enterable: everything the item loop had on
 /// the native stack when one of its items suspended.
 ///
 /// The cursor is created per `session_run`, driven by
-/// [`Session::drive_block`], and stowed on the session only while an item is
-/// suspended. It owns its `items`/`verdicts` (rather than borrowing the
-/// request's) precisely because it must outlive the call that built it.
+/// [`Session::drive_block`], and stowed on the session (wrapped in a
+/// [`SuspendedBlockCursor`]) only while an item is suspended. It owns its
+/// `items`/`verdicts` (rather than borrowing the request's) precisely because
+/// it must outlive the call that built it.
 struct BlockCursor {
     /// The block's items, owned so the loop survives the suspension.
     items: Vec<BlockItem>,
@@ -357,13 +422,8 @@ struct BlockCursor {
     verdicts: Vec<Option<TurnClassification>>,
     /// Per-item results accumulated so far.
     results: Vec<BlockItemResult>,
-    /// The next item index to process. Already advanced PAST a suspended item,
-    /// which is tracked separately in [`Self::pending_item`].
+    /// The next item index to process.
     next: usize,
-    /// The suspended item's position and classified kind, held so its result
-    /// lands at the right index with the right `kind` when the resume finishes
-    /// it. `None` while the loop is running normally.
-    pending_item: Option<(usize, ItemKind)>,
     /// The block's `input` payload lane. Carried HERE (not merely left on the
     /// session) so the do-block invariant — `input` in scope for EVERY item,
     /// including items that run after an in-block `ask`/resume — is a property
@@ -372,14 +432,8 @@ struct BlockCursor {
     eval_input: Option<serde_json::Value>,
     /// `verbose: true` ⇒ the full diagnostic response shape.
     verbose: bool,
-    last_value: Option<serde_json::Value>,
-    last_type: Option<String>,
-    last_truncated: Option<String>,
-    /// The `results` INDEX of the item whose `TurnOutcome::Value` most recently
-    /// set `last_value` — recorded at the moment it is assigned, so the
-    /// finish step strips fields from exactly that item, never an unrelated
-    /// one re-derived by some other heuristic.
-    last_value_pos: Option<usize>,
+    /// The most recent `TurnOutcome::Value`'s value + metadata, if any.
+    last: Option<LastBlockValue>,
 }
 
 impl BlockCursor {
@@ -394,13 +448,9 @@ impl BlockCursor {
             items,
             verdicts,
             next: 0,
-            pending_item: None,
             eval_input,
             verbose,
-            last_value: None,
-            last_type: None,
-            last_truncated: None,
-            last_value_pos: None,
+            last: None,
         }
     }
 
@@ -428,10 +478,12 @@ impl BlockCursor {
             ref truncated,
         } = outcome
         {
-            self.last_value = Some(value.clone());
-            self.last_type = type_display.clone();
-            self.last_truncated = truncated.clone();
-            self.last_value_pos = Some(self.results.len());
+            self.last = Some(LastBlockValue {
+                value: value.clone(),
+                type_display: type_display.clone(),
+                truncated: truncated.clone(),
+                result_pos: self.results.len(),
+            });
         }
 
         self.results.push(BlockItemResult {
@@ -479,8 +531,7 @@ impl Session {
             make_handlers,
             core,
             eval_input: None,
-            pending: None,
-            cursor: None,
+            suspended: None,
             cancel_slot: None,
             last_stubs: Vec::new(),
             pure_binds: std::collections::BTreeMap::new(),
@@ -616,7 +667,10 @@ impl Session {
         self.heal_effects_module();
         let mut handlers = GateDispatcher::new((self.make_handlers)(), gate);
         match cmd {
-            SessionCommand::Def(decl) => ItemStep::Done(self.run_def(&decl.0)).into(),
+            SessionCommand::Def(decl) => {
+                let outcome = self.run_def(&decl.0);
+                self.finish_item_step(ItemStep::Done(outcome))
+            }
             SessionCommand::Eval(expr) => {
                 // No block context here (single-command dispatch, not
                 // `run_block`'s batch path) — classify this one item with a
@@ -635,11 +689,32 @@ impl Session {
                     }
                     Err(_) => self.run_eval(&expr.0, None, &mut handlers, captured),
                 };
-                step.into()
+                self.finish_item_step(step)
             }
-            SessionCommand::Cmd(meta) => ItemStep::Done(self.run_meta(meta)).into(),
+            SessionCommand::Cmd(meta) => {
+                let outcome = self.run_meta(meta);
+                self.finish_item_step(ItemStep::Done(outcome))
+            }
             SessionCommand::Block { items, verbose } => {
                 self.run_block(items, &mut handlers, captured, *verbose)
+            }
+        }
+    }
+
+    /// Finish a singleton (non-block) item step: a completed outcome passes
+    /// through, a suspension is stowed under [`ResumeContext::Single`] — the
+    /// ONE place a standalone `SessionCommand`'s suspension becomes a
+    /// [`SuspendedTurn`], so `run_turn`'s three singleton arms can't drift on
+    /// how they wrap it.
+    fn finish_item_step(&mut self, step: ItemStep) -> TurnStep {
+        match step {
+            ItemStep::Done(outcome) => TurnStep::Completed(outcome),
+            ItemStep::Suspended(tail, req) => {
+                self.suspended = Some(SuspendedTurn {
+                    tail,
+                    context: ResumeContext::Single,
+                });
+                TurnStep::Suspended(req)
             }
         }
     }
@@ -681,11 +756,26 @@ impl Session {
         self.reset_cancel();
         self.heal_effects_module();
         let mut handlers = GateDispatcher::new((self.make_handlers)(), gate);
-        match self.cursor.take() {
-            Some(cursor) => self.resume_block(cursor, answer, &mut handlers, captured),
+        // Consuming `self.suspended` wholesale here — rather than taking the
+        // tail and the cursor from two separate fields — is what makes a
+        // resume unable to forget one half of the pair: there is no `Some`
+        // tail without a context to resume it into, and no context without a
+        // tail to feed it.
+        let Some(SuspendedTurn { tail, context }) = self.suspended.take() else {
+            return TurnStep::Completed(TurnOutcome::Error(
+                "internal: no suspended turn to resume".into(),
+            ));
+        };
+        match context {
+            ResumeContext::Block(suspended_cursor) => {
+                self.resume_block(suspended_cursor, tail, answer, &mut handlers, captured)
+            }
             // A single-command (`SessionCommand::Eval`) suspension: no block
             // loop to continue, so the resumed item's outcome IS the turn's.
-            None => self.resume_item(answer, &mut handlers, captured).into(),
+            ResumeContext::Single => {
+                let step = self.resume_item(tail, answer, &mut handlers, captured);
+                self.finish_item_step(step)
+            }
         }
     }
 
@@ -845,9 +935,14 @@ impl Session {
                 );
                 cursor.next = index + 1;
                 match step {
-                    ItemStep::Suspended(req) => {
-                        cursor.pending_item = Some((index, kind));
-                        self.cursor = Some(cursor);
+                    ItemStep::Suspended(tail, req) => {
+                        self.suspended = Some(SuspendedTurn {
+                            tail,
+                            context: ResumeContext::Block(SuspendedBlockCursor {
+                                cursor,
+                                pending_item: PendingItem { index, kind },
+                            }),
+                        });
                         return TurnStep::Suspended(req);
                     }
                     ItemStep::Done(outcome) => {
@@ -937,7 +1032,7 @@ impl Session {
                             // Unreachable by construction (a decl-shaped item
                             // routes to `run_def`); surfaced as an error rather
                             // than a panic if the classification ever drifts.
-                            ItemStep::Suspended(_) => TurnOutcome::Error(
+                            ItemStep::Suspended(..) => TurnOutcome::Error(
                                 "internal: a declaration item suspended at an ask".into(),
                             ),
                         };
@@ -961,35 +1056,42 @@ impl Session {
     }
 
     /// Re-enter a suspended block: finish the pending item with the answer, then
-    /// continue the loop at `cursor.next`.
+    /// continue the loop at `cursor.next`. `tail` is the stowed item tail (moved
+    /// out of `self.suspended` by [`Self::reenter`] along with `suspended_cursor`
+    /// — the two always travel together, so there is no "cursor with no pending
+    /// item" case to guard here).
     fn resume_block<H: DispatchEffect<CapturedOutput>>(
         &mut self,
-        mut cursor: BlockCursor,
+        suspended_cursor: SuspendedBlockCursor,
+        tail: PendingTail,
         answer: ResumeAnswer,
         handlers: &mut H,
         captured: &CapturedOutput,
     ) -> TurnStep {
-        let Some((index, kind)) = cursor.pending_item.take() else {
-            self.pending = None;
-            return TurnStep::Completed(TurnOutcome::Error(
-                "internal: block cursor has no suspended item to resume".into(),
-            ));
-        };
+        let SuspendedBlockCursor {
+            mut cursor,
+            pending_item,
+        } = suspended_cursor;
         // The payload lane is in scope for EVERY item in the block, including
         // the ones after this resume — restore it from the cursor rather than
         // trusting that nothing disturbed the session while it was suspended.
         self.eval_input = cursor.eval_input.clone();
-        match self.resume_item(answer, handlers, captured) {
+        match self.resume_item(tail, answer, handlers, captured) {
             // The same item asked again: re-stow and hand the new ask up.
-            ItemStep::Suspended(req) => {
-                cursor.pending_item = Some((index, kind));
-                self.cursor = Some(cursor);
+            ItemStep::Suspended(new_tail, req) => {
+                self.suspended = Some(SuspendedTurn {
+                    tail: new_tail,
+                    context: ResumeContext::Block(SuspendedBlockCursor {
+                        cursor,
+                        pending_item,
+                    }),
+                });
                 TurnStep::Suspended(req)
             }
             ItemStep::Done(outcome) => {
                 if cursor.absorb(ItemRun {
-                    index,
-                    kind,
+                    index: pending_item.index,
+                    kind: pending_item.kind,
                     outcome,
                 }) {
                     return TurnStep::Completed(self.finish_block(cursor));
@@ -1005,24 +1107,25 @@ impl Session {
         // a block ending in a bind/decl/meta (or one that errored after an
         // earlier expression ran) leaves it null, matching the documented
         // contract ("a block ending in a bind leaves `value` null") and GHCi
-        // intuition. `last_value_pos` was recorded at assignment time, so this
-        // is a direct index comparison, not a re-derived "last ok item" scan.
-        if cursor.last_value_pos != cursor.results.len().checked_sub(1) {
-            cursor.last_value = None;
-            cursor.last_type = None;
-            cursor.last_truncated = None;
-            cursor.last_value_pos = None;
+        // intuition. `result_pos` was recorded at assignment time, so this is a
+        // direct index comparison, not a re-derived "last ok item" scan.
+        let is_final = cursor
+            .last
+            .as_ref()
+            .is_some_and(|lv| Some(lv.result_pos) == cursor.results.len().checked_sub(1));
+        if !is_final {
+            cursor.last = None;
         }
 
-        // Suppress `value` (and `truncated`) from the item that produced
-        // `last_value` — that data now lives at the top level only, eliminating
+        // Suppress `value` (and `truncated`) from the item that produced the
+        // last value — that data now lives at the top level only, eliminating
         // duplication between items[].value and the top-level value. Strips
-        // exactly `results[last_value_pos]`, never an unrelated item (e.g. a
+        // exactly `results[result_pos]`, never an unrelated item (e.g. a
         // trailing `:stub` meta result that happens to carry its OWN `value`
         // key) — the bug this replaced re-scanned for "the last ok item of any
         // kind" and could strip the wrong one.
-        if let Some(pos) = cursor.last_value_pos {
-            if let Some(r) = cursor.results.get_mut(pos) {
+        if let Some(lv) = &cursor.last {
+            if let Some(r) = cursor.results.get_mut(lv.result_pos) {
                 if let serde_json::Value::Object(ref mut obj) = r.result {
                     obj.remove("value");
                     obj.remove("truncated");
@@ -1038,11 +1141,14 @@ impl Session {
         } else {
             ResponseShape::Slim
         };
+        let value = cursor.last.map(|lv| BlockValue {
+            value: lv.value,
+            type_display: lv.type_display,
+            truncated: lv.truncated,
+        });
         TurnOutcome::Block {
             items: cursor.results,
-            value: cursor.last_value,
-            last_type: cursor.last_type,
-            last_truncated: cursor.last_truncated,
+            value,
             shape,
         }
     }
@@ -1055,15 +1161,11 @@ impl Session {
     /// `finish_*` the non-suspending path uses.
     fn resume_item<H: DispatchEffect<CapturedOutput>>(
         &mut self,
+        tail: PendingTail,
         answer: ResumeAnswer,
         handlers: &mut H,
         captured: &CapturedOutput,
     ) -> ItemStep {
-        let Some(tail) = self.pending.take() else {
-            return ItemStep::Done(TurnOutcome::Error(
-                "internal: no suspended ask to resume".into(),
-            ));
-        };
         let input = answer.into_input(tail.run_table(self.core.session_table()));
         match tail {
             PendingTail::PlainEval(t) => {
@@ -1151,10 +1253,7 @@ impl Session {
     ) -> ItemStep {
         let extracted = extract_ask_request(request, tail.run_table(self.core.session_table()));
         match extracted {
-            Ok((prompt, meta)) => {
-                self.pending = Some(tail);
-                ItemStep::Suspended(AskRequest { prompt, meta })
-            }
+            Ok((prompt, meta)) => ItemStep::Suspended(tail, AskRequest { prompt, meta }),
             Err(msg) => {
                 self.abort_pending(&tail, msg.clone(), handlers, captured);
                 ItemStep::Done(TurnOutcome::Error(tag_failure(
