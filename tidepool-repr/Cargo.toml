@@ -16,5 +16,5 @@ rustc-hash.workspace = true
 
 [dev-dependencies]
 proptest.workspace = true
-serial_test = "3.4.0"
+serial_test.workspace = true
 tidepool-testing.workspace = true
