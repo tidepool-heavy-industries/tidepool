@@ -1,9 +1,10 @@
 //! `Tidepool.Node` capability mailboxes (PRD 20 S1-L4 wave 2) — was BLOCKED
 //! on the tenure-then-resume GC family; that bug is now FIXED (see
 //! `tidepool-runtime/tests/tenure_resume_gc_repro.rs`'s module doc). Trying
-//! to un-ignore surfaced a SEPARATE, previously unreachable bug (the burst
-//! scenario's coalesce times out) — see the test's own doc. Still
-//! `#[ignore]`d, now for that new reason.
+//! to un-ignore surfaced a SEPARATE-LOOKING, previously unreachable bug (the
+//! burst scenario's coalesce times out) — see the test's own doc for why
+//! that is real but not yet proven independent. Still `#[ignore]`d, now for
+//! that new reason.
 //!
 //! # What was blocked, and what is not
 //!
@@ -85,19 +86,25 @@ fn fixtures_dir() -> std::path::PathBuf {
 ///
 /// The tenure-then-resume GC bug this was chartered against IS fixed (see
 /// `tidepool-runtime/tests/tenure_resume_gc_repro.rs`'s module doc) — no
-/// more heap-tag-255 crash. Un-ignoring surfaced a SEPARATE, previously
-/// unreachable bug: scenario 3 (the same-key burst) times out — the select
-/// over `received nodeBurst <|> after 5000` takes the deadline branch
-/// (`nodeBurstPayload` reads back the fixture's own `-1` timeout sentinel,
-/// not the coalesced payload `3`) even though the fixture explicitly
-/// `folded`s and `wait`s the burst thread first specifically to make this
-/// deterministic, not a race. Scenarios 1 and 2 (plain message, silent
-/// deadline) both pass. Re-`#[ignore]`d pending its own investigation — this
-/// is a message-coalescing/delivery bug, unrelated to GC tenure/rooting.
+/// more heap-tag-255 crash. Un-ignoring surfaced a SEPARATE-LOOKING,
+/// previously unreachable bug: scenario 3 (the same-key burst) times out —
+/// the select over `received nodeBurst <|> after 5000` takes the deadline
+/// branch (`nodeBurstPayload` reads back the fixture's own `-1` timeout
+/// sentinel, not the coalesced payload `3`) even though the fixture
+/// explicitly `folded`s and `wait`s the burst thread first specifically to
+/// make this deterministic, not a race. Scenarios 1 and 2 (plain message,
+/// silent deadline) both pass. Re-`#[ignore]`d pending its own
+/// investigation — the observed symptom differs from the tag-255 signature
+/// (a timeout / lost delivery, not a heap-tag fault), which is real evidence
+/// but not proof: this scenario still crosses the same suspension/resume
+/// boundaries a rooting defect could in principle manifest through as a
+/// silently-lost delivery rather than a crash. Not yet independently
+/// confirmed as a distinct root cause.
 #[ignore = "chartered gap (new): same-key burst coalesce times out after an explicit \
             folded+wait sync (nodeBurstPayload reads back the -1 timeout sentinel, not \
-            3) — NOT the tenure-then-resume GC bug (that is fixed; scenarios 1/2 pass) — \
-            see this test's doc"]
+            3) — symptom differs from the tag-255 tenure-then-resume signature (timeout \
+            vs heap-tag fault; scenarios 1/2 there pass), but that is not yet independent \
+            confirmation of a distinct root cause — see this test's doc"]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_parent_selects_over_message_and_deadline() {
     support::require_extract();

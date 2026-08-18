@@ -934,6 +934,20 @@ fn perform_gc(fp: usize, vmctx: *mut VMContext) {
         // than permanently marked mutably borrowed. Every teardown path
         // (`reclaim_session_heap`, `clear_run_scratch`, `free_session_heap`)
         // already treats an empty cell as the ordinary "no GC state" case.
+        //
+        // This empty-cell no-op ALSO means a reentrant `perform_gc` call
+        // (this function calling itself, transitively, while `state` is
+        // taken) would silently skip its own collection instead of running
+        // one. `OldSpace::tenure`'s `run_minor_collection_for_tenure_fixup`
+        // call relies on that reentrancy never happening — but the no-op
+        // is a BACKSTOP, not the correctness mechanism: the actual
+        // guarantee is that nothing in this function's body (or its
+        // transitive callees) ever calls `OldSpace::tenure` — there is no
+        // such call today. If a future change adds one anywhere reachable
+        // from here, verify it cannot run while `state` is taken before
+        // relying on this no-op to make it safe; otherwise a nested tenure
+        // fixup pass would silently no-op instead of fixing up siblings,
+        // regressing into the exact bug this mechanism exists to close.
         if let Some(mut state) = ms.take_gc_state() {
             // A real collection is about to run — bump the generation
             // counter so callers holding an address-keyed cache across this
