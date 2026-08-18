@@ -28,8 +28,8 @@
 use std::io::Write;
 use std::num::NonZeroU64;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
 
+use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use serde_json::Value as Json;
 
@@ -297,13 +297,7 @@ impl Observer for JsonlObserver {
                 return;
             }
         };
-        let mut file = match self.file.lock() {
-            Ok(f) => f,
-            Err(e) => {
-                eprintln!("[selfharness] transcript: lock poisoned: {e}");
-                return;
-            }
-        };
+        let mut file = self.file.lock();
         if let Err(e) = writeln!(file, "{line}") {
             eprintln!(
                 "[selfharness] transcript: write to {} failed: {e}",

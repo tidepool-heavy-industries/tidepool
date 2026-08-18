@@ -5,7 +5,9 @@
 //! `tidepool-harness` re-exports it). This test exercises only
 //! `tidepool_harness::timing`'s public surface, so it stays valid either way.
 
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+
+use parking_lot::Mutex;
 use std::time::Duration;
 
 use tracing::field::{Field, Visit};
@@ -77,7 +79,7 @@ impl<S: tracing::Subscriber> Layer<S> for CaptureLayer {
         let mut captured = visitor.0;
         captured.target = event.metadata().target().to_string();
         captured.field_names = field_names;
-        self.events.lock().unwrap().push(captured);
+        self.events.lock().push(captured);
     }
 }
 
@@ -86,7 +88,7 @@ fn capture<R>(f: impl FnOnce() -> R) -> (R, Vec<CapturedEvent>) {
     let events = layer.events.clone();
     let subscriber = tracing_subscriber::registry().with(layer);
     let result = tracing::subscriber::with_default(subscriber, f);
-    let events = events.lock().unwrap().clone();
+    let events = events.lock().clone();
     (result, events)
 }
 

@@ -20,7 +20,9 @@
 //! framing to `None`, which would make the child send the default
 //! `SYSTEM_FRAMING` instead of the inherited one.
 
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+
+use parking_lot::Mutex;
 
 mod support;
 
@@ -88,7 +90,7 @@ impl ModelProvider for CapturingProvider {
         req: TurnRequest,
         sink: Option<StreamSink>,
     ) -> Result<TurnResponse, ProviderError> {
-        self.requests.lock().unwrap().push(req.clone());
+        self.requests.lock().push(req.clone());
         self.inner.complete(req, sink).await
     }
 }
@@ -214,7 +216,7 @@ async fn selfharness_answerer_forks_to_two_children_then_finalizes() {
     // --- block 2: children inherit the parent's byte-identical transcript
     // --- prefix + render-derived framing ---
 
-    let reqs = requests.lock().unwrap();
+    let reqs = requests.lock();
     assert_eq!(
         reqs.len(),
         3,

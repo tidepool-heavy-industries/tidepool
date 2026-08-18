@@ -16,6 +16,7 @@ codex-codes = "=0.146.4"
 # thread blocked in a seam call holds `&mut` on its backend, so reaping it
 # from another thread goes by pidfd (see driver.rs's PidFdSlot docs).
 rustix = { version = "1", features = ["process", "event"] }
+parking_lot.workspace = true
 tidepool-worktree.workspace = true
 serde.workspace = true
 serde_json.workspace = true

@@ -24,6 +24,7 @@ tidepool-effect.workspace = true
 thiserror.workspace = true
 log.workspace = true
 env_logger = "0.11"
+parking_lot.workspace = true
 recursion = "0.5.4"
 rustc-hash.workspace = true
 # Dependency-graph traversal + topological sort for LetRec deferred-simple

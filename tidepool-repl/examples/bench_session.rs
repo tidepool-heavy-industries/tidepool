@@ -25,7 +25,9 @@
 //!   `cargo run --release --example bench_session -p tidepool-repl`
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+
+use parking_lot::Mutex;
 use std::time::Instant;
 
 use tracing::field::{Field, Visit};
@@ -60,15 +62,15 @@ struct Collector {
 
 impl Collector {
     fn begin(&self, label: &str) {
-        *self.current.lock().unwrap() = Some(label.to_string());
+        *self.current.lock() = Some(label.to_string());
     }
 
     fn end(&self) {
-        *self.current.lock().unwrap() = None;
+        *self.current.lock() = None;
     }
 
     fn drain_for(&self, label: &str) -> Vec<(String, u64)> {
-        let sums = self.sums.lock().unwrap();
+        let sums = self.sums.lock();
         let mut out: Vec<(String, u64)> = sums
             .iter()
             .filter(|((l, _), _)| l == label)
@@ -119,16 +121,10 @@ impl<S: tracing::Subscriber> Layer<S> for TimingLayer {
         let (Some(stage), Some(ms)) = (visitor.stage, visitor.ms) else {
             return;
         };
-        let Some(label) = self.0.current.lock().unwrap().clone() else {
+        let Some(label) = self.0.current.lock().clone() else {
             return;
         };
-        *self
-            .0
-            .sums
-            .lock()
-            .unwrap()
-            .entry((label, stage))
-            .or_insert(0) += ms;
+        *self.0.sums.lock().entry((label, stage)).or_insert(0) += ms;
     }
 }
 

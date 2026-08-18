@@ -42,7 +42,9 @@
 //! fails loudly otherwise via [`require_ghc`], never skips-as-pass.
 
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+
+use parking_lot::Mutex;
 
 use tidepool_agent::backend::mock::{MockBackend, MockFailure};
 use tidepool_agent::backend::AgentBackend;
@@ -124,7 +126,7 @@ impl AgentBackend for RecordingBackend {
         thread: &BackendThreadId,
         spec: &CycleSpec,
     ) -> Result<TurnEvent, AgentBackendError> {
-        self.log.lock().unwrap().push(spec.clone());
+        self.log.lock().push(spec.clone());
         self.inner.start_turn(thread, spec)
     }
 
@@ -672,7 +674,7 @@ fn schema_reaches_the_backend_named_field_shape() {
         let out = session.run();
         assert_eq!(out["case"], "completed", "unexpected program branch: {out}");
 
-        let cycles = log.lock().unwrap();
+        let cycles = log.lock();
         assert_eq!(
             cycles.len(),
             1,

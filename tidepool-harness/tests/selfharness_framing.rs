@@ -9,7 +9,9 @@
 //! Needs `TIDEPOOL_EXTRACT` and the with-packages GHC on PATH — run inside
 //! `nix develop` (see `haskell/CLAUDE.md`).
 
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+
+use parking_lot::Mutex;
 
 mod support;
 
@@ -60,7 +62,7 @@ impl ModelProvider for CapturingProvider {
         _sink: Option<StreamSink>,
     ) -> Result<TurnResponse, ProviderError> {
         if let Some(system) = req.messages.iter().find(|m| matches!(m.role, Role::System)) {
-            self.systems.lock().unwrap().push(system.content.clone());
+            self.systems.lock().push(system.content.clone());
         }
         Ok(TurnResponse {
             text: self.reply.clone(),
@@ -111,7 +113,7 @@ async fn render_output_is_the_answerer_system_message() {
         .await
         .expect("one full render->loop->runLLMTurn->finalize->render cycle");
 
-    let systems = systems.lock().unwrap();
+    let systems = systems.lock();
     assert!(
         !systems.is_empty(),
         "the answerer must have been driven at least once (its System message captured)"

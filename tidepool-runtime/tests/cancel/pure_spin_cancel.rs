@@ -14,7 +14,9 @@
 //! layer instead of the resident-REPL layer.
 
 use std::path::Path;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+
+use parking_lot::Mutex;
 use std::time::{Duration, Instant};
 
 use tidepool_runtime::session::{
@@ -30,10 +32,10 @@ struct TestSink {
 
 impl OutputSink for TestSink {
     fn drain(&self) -> Vec<String> {
-        std::mem::take(&mut *self.lines.lock().unwrap())
+        std::mem::take(&mut *self.lines.lock())
     }
     fn snapshot(&self) -> Vec<String> {
-        self.lines.lock().unwrap().clone()
+        self.lines.lock().clone()
     }
 }
 

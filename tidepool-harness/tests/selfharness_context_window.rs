@@ -9,7 +9,9 @@
 //! Needs `TIDEPOOL_EXTRACT` and the with-packages GHC on PATH — run inside
 //! `nix develop` (see `haskell/CLAUDE.md`).
 
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+
+use parking_lot::Mutex;
 
 mod support;
 
@@ -81,7 +83,7 @@ impl ModelProvider for ContextCapturingProvider {
                 .join("\n");
             let saw_first_prompt = joined.contains("FIRST-HOLE");
             let saw_first_answer = joined.contains("apple");
-            *self.second_saw_first.lock().unwrap() = Some(saw_first_prompt && saw_first_answer);
+            *self.second_saw_first.lock() = Some(saw_first_prompt && saw_first_answer);
         }
 
         let answer = if is_second { "blue" } else { "apple" };
@@ -149,7 +151,6 @@ async fn second_hole_sees_first_holes_exchange() {
     // accumulating session, not two isolated nodes.
     let saw = second_saw_first
         .lock()
-        .unwrap()
         .expect("the second hole must have been serviced");
     assert!(
         saw,

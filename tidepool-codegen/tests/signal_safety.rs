@@ -4,8 +4,8 @@
 //! JMP_BUF, so concurrent signal-catching tests will race and crash.
 //! A shared mutex serializes them.
 
+use parking_lot::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Mutex;
 
 static SIGNAL_LOCK: Mutex<()> = Mutex::new(());
 
@@ -21,7 +21,7 @@ unsafe fn trigger_sigill() {
 
 #[test]
 fn test_sigill_returns_signal_error() {
-    let _lock = SIGNAL_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _lock = SIGNAL_LOCK.lock();
     tidepool_codegen::signal_safety::install();
 
     let result = unsafe {
@@ -39,7 +39,7 @@ fn test_sigill_returns_signal_error() {
 
 #[test]
 fn test_normal_execution_returns_ok() {
-    let _lock = SIGNAL_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _lock = SIGNAL_LOCK.lock();
     tidepool_codegen::signal_safety::install();
 
     let result = unsafe { tidepool_codegen::signal_safety::with_signal_protection(|| 42i32) };
@@ -49,7 +49,7 @@ fn test_normal_execution_returns_ok() {
 
 #[test]
 fn test_signal_recovery_allows_subsequent_calls() {
-    let _lock = SIGNAL_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _lock = SIGNAL_LOCK.lock();
     tidepool_codegen::signal_safety::install();
 
     // First call: crash
@@ -77,7 +77,7 @@ impl Drop for DropCounter<'_> {
 
 #[test]
 fn test_fault_mid_closure_never_double_drops_the_capture() {
-    let _lock = SIGNAL_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _lock = SIGNAL_LOCK.lock();
     tidepool_codegen::signal_safety::install();
 
     static COUNT: AtomicUsize = AtomicUsize::new(0);
@@ -108,7 +108,7 @@ fn test_fault_mid_closure_never_double_drops_the_capture() {
 
 #[test]
 fn test_normal_completion_drops_capture_exactly_once() {
-    let _lock = SIGNAL_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _lock = SIGNAL_LOCK.lock();
     tidepool_codegen::signal_safety::install();
 
     static COUNT: AtomicUsize = AtomicUsize::new(0);
@@ -131,7 +131,7 @@ fn test_normal_completion_drops_capture_exactly_once() {
 
 #[test]
 fn test_non_copy_result_round_trips() {
-    let _lock = SIGNAL_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _lock = SIGNAL_LOCK.lock();
     tidepool_codegen::signal_safety::install();
 
     let result = unsafe {

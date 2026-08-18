@@ -12,8 +12,9 @@ use std::fs::OpenOptions;
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
+use parking_lot::Mutex;
 use tidepool_effect::dispatch::EffectContext;
 use tidepool_effect::error::EffectError;
 use tidepool_mcp::CapturedOutput;
@@ -496,13 +497,7 @@ impl JournalHandler {
                 })?;
             }
         }
-        let _guard = self
-            .lock
-            .lock()
-            .map_err(|e| JournalAppendError::LockPoisoned {
-                path: self.path.clone(),
-                detail: e.to_string(),
-            })?;
+        let _guard = self.lock.lock();
         let local = self.local_seq.fetch_add(1, Ordering::SeqCst);
         let seq = compose_journal_seq(self.segment_ordinal, local);
         let entry = JournalEntry {
@@ -566,10 +561,6 @@ pub enum JournalAppendError {
         path: PathBuf,
         source: std::io::Error,
     },
-    LockPoisoned {
-        path: PathBuf,
-        detail: String,
-    },
     Serialize {
         path: PathBuf,
         source: serde_json::Error,
@@ -593,9 +584,6 @@ impl fmt::Display for JournalAppendError {
         match self {
             JournalAppendError::CreateDir { path, source } => {
                 write!(f, "journal: failed to create dir {path:?}: {source}")
-            }
-            JournalAppendError::LockPoisoned { path, detail } => {
-                write!(f, "journal: lock poisoned: {detail} (path {path:?})")
             }
             JournalAppendError::Serialize { path, source } => {
                 write!(f, "journal: serialize failed: {source} (path {path:?})")

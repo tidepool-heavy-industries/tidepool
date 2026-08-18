@@ -53,7 +53,9 @@
 //! 'binary(acceptance_boot_compile_count)'`.
 
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+
+use parking_lot::Mutex;
 
 mod support;
 
@@ -148,7 +150,7 @@ impl ModelProvider for SnapshotOnFirstCall {
         _req: TurnRequest,
         _sink: Option<StreamSink>,
     ) -> Result<TurnResponse, ProviderError> {
-        let mut snap = self.snapshot.lock().unwrap();
+        let mut snap = self.snapshot.lock();
         if snap.is_none() {
             *snap = Some(engine::extract_spawn_count());
         }
@@ -218,7 +220,7 @@ async fn boot_pays_pre_model_extract_compiles_matching_baseline() {
          this receipt's snapshot untrustworthy: {outcome:?}"
     );
 
-    let snapshot = stub.snapshot.lock().unwrap().expect(
+    let snapshot = stub.snapshot.lock().expect(
         "the model provider must have been called at least once for this receipt to mean anything",
     );
 

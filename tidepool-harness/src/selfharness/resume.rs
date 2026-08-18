@@ -1026,7 +1026,9 @@ mod tests {
     /// pins the observability itself, not just a side effect of it.
     #[test]
     fn alive_pid_lease_warns_loudly_at_resume() {
-        use std::sync::{Arc, Mutex};
+        use std::sync::Arc;
+
+        use parking_lot::Mutex;
 
         struct CaptureEvents(Arc<Mutex<Vec<String>>>);
 
@@ -1051,7 +1053,7 @@ mod tests {
             fn event(&self, event: &tracing::Event<'_>) {
                 let mut visitor = FieldsToString(String::new());
                 event.record(&mut visitor);
-                self.0.lock().expect("capture lock").push(visitor.0);
+                self.0.lock().push(visitor.0);
             }
             fn enter(&self, _span: &tracing::span::Id) {}
             fn exit(&self, _span: &tracing::span::Id) {}
@@ -1081,7 +1083,7 @@ mod tests {
             "re-stamped to this process, as always"
         );
 
-        let events = captured.lock().expect("capture lock");
+        let events = captured.lock();
         assert!(
             events
                 .iter()

@@ -149,7 +149,9 @@ fn fingerprint_single_binary(hasher: &mut blake3::Hasher, path: &Path) {
 /// stable value rather than a panic or a silently-skipped input.
 pub(crate) fn binary_content_hash(path: &Path) -> [u8; 32] {
     use std::collections::HashMap;
-    use std::sync::{Mutex, OnceLock};
+    use std::sync::OnceLock;
+
+    use parking_lot::Mutex;
 
     tidepool_codegen::debug::init_logging();
 
@@ -175,11 +177,7 @@ pub(crate) fn binary_content_hash(path: &Path) -> [u8; 32] {
         )
     };
     let memo = MEMO.get_or_init(|| Mutex::new(HashMap::new()));
-    let cached = memo
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .get(&key)
-        .copied();
+    let cached = memo.lock().get(&key).copied();
     log::debug!(
         target: "tidepool::fp",
         "path={} key=({},{},{},{},{}) memo_hit={}",
@@ -251,9 +249,7 @@ pub(crate) fn binary_content_hash(path: &Path) -> [u8; 32] {
                     h
                 }
             };
-            memo.lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .insert(key, h);
+            memo.lock().insert(key, h);
             h
         }
     };

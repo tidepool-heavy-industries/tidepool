@@ -16,7 +16,9 @@
 //! Needs `TIDEPOOL_EXTRACT` and the with-packages GHC on PATH — run inside
 //! `nix develop` (see `haskell/CLAUDE.md`).
 
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+
+use parking_lot::Mutex;
 
 mod support;
 
@@ -143,7 +145,7 @@ impl Observer for CaptureObserver {
             post_input_tokens,
         } = event
         {
-            self.triggers.lock().unwrap().push((
+            self.triggers.lock().push((
                 *node,
                 summary.clone(),
                 *pre_input_tokens,
@@ -289,7 +291,7 @@ async fn c4_compaction_trigger_event_carries_payload() {
         .await
         .expect("cycle with a mid-loop compaction");
 
-    let captured = triggers.lock().unwrap();
+    let captured = triggers.lock();
     // At least one compaction fired (the two-hole fixture re-crosses the
     // threshold after each hole's finalize turn resets the window, so BOTH
     // holes can trip it — the count is not load-bearing here; the PAYLOAD is).

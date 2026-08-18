@@ -17,7 +17,9 @@
 //! X" — not a simulation of a model. Realistic backend behavior comes from
 //! recordings, never from hand-written guesses about what a model would do.
 
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::Arc;
+
+use parking_lot::{Condvar, Mutex};
 
 use crate::backend::{AgentBackend, BackendCanceller};
 use crate::seam::{
@@ -90,7 +92,7 @@ impl MockControl {
 
     /// Let one blocked (or one future) step through.
     pub fn release(&self) {
-        let mut state = self.state.lock().expect("mock control mutex");
+        let mut state = self.state.lock();
         state.releases += 1;
         self.changed.notify_all();
     }
@@ -98,19 +100,19 @@ impl MockControl {
     /// Fail every blocked and future step. Total and idempotent, like every
     /// [`BackendCanceller`].
     pub fn cancel(&self) {
-        let mut state = self.state.lock().expect("mock control mutex");
+        let mut state = self.state.lock();
         state.cancelled = true;
         self.changed.notify_all();
     }
 
     /// Whether [`cancel`](Self::cancel) has been called.
     pub fn is_cancelled(&self) -> bool {
-        self.state.lock().expect("mock control mutex").cancelled
+        self.state.lock().cancelled
     }
 
     /// Block until released or cancelled. `Err` is the cancellation.
     fn wait(&self) -> Result<(), AgentBackendError> {
-        let mut state = self.state.lock().expect("mock control mutex");
+        let mut state = self.state.lock();
         loop {
             if state.cancelled {
                 return Err(AgentBackendError::RunFailed {
@@ -121,7 +123,7 @@ impl MockControl {
                 state.releases -= 1;
                 return Ok(());
             }
-            state = self.changed.wait(state).expect("mock control mutex");
+            self.changed.wait(&mut state);
         }
     }
 }

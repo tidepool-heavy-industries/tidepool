@@ -47,8 +47,9 @@
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, OnceLock};
 
+use parking_lot::Mutex;
 use serde_json::Value as Json;
 use tidepool_eval::value::Value;
 use tidepool_extract_cmd::ResolvedExtractBin;
@@ -1632,7 +1633,7 @@ fn validate_finalize_row(
     generated.hash(&mut hasher);
     let key = hasher.finish();
 
-    if let Some(cached) = finalize_probe_memo().lock().unwrap().get(&key) {
+    if let Some(cached) = finalize_probe_memo().lock().get(&key) {
         return cached.clone().map_err(EngineError::Setup);
     }
 
@@ -1662,10 +1663,7 @@ fn validate_finalize_row(
             .join("\n\n")),
         Err(other) => Err(other.to_string()),
     };
-    finalize_probe_memo()
-        .lock()
-        .unwrap()
-        .insert(key, outcome.clone());
+    finalize_probe_memo().lock().insert(key, outcome.clone());
     outcome.map_err(EngineError::Setup)
 }
 

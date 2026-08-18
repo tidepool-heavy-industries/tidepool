@@ -56,7 +56,9 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+
+use parking_lot::Mutex;
 use std::time::Duration;
 
 use tidepool_bridge::{FromCore, ToCore};
@@ -313,7 +315,7 @@ impl<S: ObservationSource> ObservationSource for Recording<S> {
         worktrees: &[WtWorktreeId],
     ) -> Result<Vec<EvRepositoryEvent>, EventError> {
         let events = self.inner.observe(worktrees)?;
-        self.log.lock().unwrap().extend(events.iter().cloned());
+        self.log.lock().extend(events.iter().cloned());
         Ok(events)
     }
 }
@@ -321,7 +323,6 @@ impl<S: ObservationSource> ObservationSource for Recording<S> {
 /// Every commit oid the observation source ever emitted, in order.
 fn observed_commits(log: &Arc<Mutex<Vec<EvRepositoryEvent>>>) -> Vec<String> {
     log.lock()
-        .unwrap()
         .iter()
         .filter_map(|e| match e {
             EvRepositoryEvent::ObservedCommit(_, r) => Some(r.oid.raw.clone()),

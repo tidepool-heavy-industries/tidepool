@@ -25,7 +25,9 @@
 //! Needs `TIDEPOOL_EXTRACT` and the with-packages GHC on PATH — run inside
 //! `nix develop` (see `haskell/CLAUDE.md`).
 
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+
+use parking_lot::Mutex;
 
 mod support;
 
@@ -143,7 +145,7 @@ impl ModelProvider for InPlaceProbeProvider {
             // The raw first-hole answer ("apple") must be GONE once the context
             // has been compacted in place.
             let saw_raw_first = joined.contains("apple");
-            *self.second_hole.lock().unwrap() = Some((saw_summary, saw_raw_first));
+            *self.second_hole.lock() = Some((saw_summary, saw_raw_first));
         }
 
         let answer = if is_second { "blue" } else { "apple" };
@@ -242,7 +244,6 @@ async fn compaction_fires_mid_loop_in_place_and_reaches_next_render() {
     // SUMMARY and NOT the raw first-hole exchange.
     let (saw_summary, saw_raw_first) = second_hole
         .lock()
-        .unwrap()
         .expect("the second hole must have been serviced");
     assert!(
         saw_summary,
@@ -284,7 +285,7 @@ impl ModelProvider for MultiRoundProvider {
             .unwrap_or_default();
 
         if is_summarize_prompt(&latest_user) {
-            *self.saw_summarize.lock().unwrap() = true;
+            *self.saw_summarize.lock() = true;
             return Ok(TurnResponse {
                 text: "UNEXPECTED-SUMMARY".to_string(),
                 usage: Usage {
@@ -318,7 +319,7 @@ impl ModelProvider for MultiRoundProvider {
         // third. Every round's input is `per_round_input` — the SUMMED input
         // across the three rounds far exceeds it, but the LATEST (high-water)
         // is only `per_round_input`.
-        let mut rounds = self.first_hole_rounds.lock().unwrap();
+        let mut rounds = self.first_hole_rounds.lock();
         *rounds += 1;
         let this_round = *rounds;
         drop(rounds);
@@ -384,7 +385,7 @@ async fn c1_multiround_highwater_does_not_overcount() {
         .expect("two-hole cycle, multi-round first hole, NO compaction");
 
     assert!(
-        !*saw_summarize.lock().unwrap(),
+        !*saw_summarize.lock(),
         "no summarize turn may fire: the high-water input (300) is below the 500 threshold — \
          the OLD summed measure (~900) would have wrongly tripped it"
     );

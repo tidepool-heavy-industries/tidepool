@@ -19,7 +19,9 @@
 use std::collections::HashMap;
 use std::error::Error;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+
+use parking_lot::Mutex;
 use std::time::{Duration, Instant};
 
 use serde::Serialize;
@@ -82,31 +84,30 @@ struct Collector {
 
 impl Collector {
     fn start_window(&self, label: &str) {
-        *self.window.lock().unwrap() = Some(label.to_string());
+        *self.window.lock() = Some(label.to_string());
     }
 
     fn stop_window(&self) {
-        *self.window.lock().unwrap() = None;
+        *self.window.lock() = None;
     }
 
     /// Open a new turn's in-flight window and return its marker id. Pair
     /// with `end_turn` bracketing exactly the turn-driving call.
     fn begin_turn(&self) -> u64 {
-        let mut next = self.next_turn_id.lock().unwrap();
+        let mut next = self.next_turn_id.lock();
         let id = *next;
         *next += 1;
-        *self.current_turn.lock().unwrap() = Some(id);
+        *self.current_turn.lock() = Some(id);
         id
     }
 
     fn end_turn(&self) {
-        *self.current_turn.lock().unwrap() = None;
+        *self.current_turn.lock() = None;
     }
 
     fn samples_for(&self, label: &str) -> Vec<StageSample> {
         self.samples
             .lock()
-            .unwrap()
             .iter()
             .filter(|(l, _)| l == label)
             .map(|(_, s)| s.clone())
@@ -176,11 +177,11 @@ impl<S: tracing::Subscriber> Layer<S> for TimingLayer {
         let (Some(stage), Some(ms)) = (visitor.stage, visitor.ms) else {
             return;
         };
-        let Some(label) = self.0.window.lock().unwrap().clone() else {
+        let Some(label) = self.0.window.lock().clone() else {
             return;
         };
-        let turn_marker = *self.0.current_turn.lock().unwrap();
-        self.0.samples.lock().unwrap().push((
+        let turn_marker = *self.0.current_turn.lock();
+        self.0.samples.lock().push((
             label,
             StageSample {
                 node: visitor.node.unwrap_or_default(),

@@ -123,7 +123,9 @@
 
 mod support;
 
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+
+use parking_lot::Mutex;
 
 use tidepool_harness::engine::EngineConfig;
 use tidepool_harness::log::LogHeader;
@@ -252,7 +254,7 @@ struct CapturingObserver {
 
 impl Observer for CapturingObserver {
     fn on_event(&self, event: &Event) {
-        self.events.lock().unwrap().push(event.clone());
+        self.events.lock().push(event.clone());
     }
 }
 
@@ -319,7 +321,6 @@ async fn fn_finalize_crosses_two_cycles_and_composes() {
     let saw_finalize = observer
         .events
         .lock()
-        .unwrap()
         .iter()
         .any(|e| matches!(e, Event::Finalize { .. }));
     assert!(
@@ -596,7 +597,6 @@ async fn living_helper_survives_loop_boundary_and_rotation() {
         observer
             .events
             .lock()
-            .unwrap()
             .iter()
             .any(|e| matches!(e, Event::MachineRotated { .. })),
         "the ceiling-of-1 run must have rotated the machine between cycles"

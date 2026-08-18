@@ -24,7 +24,8 @@
 
 use std::collections::HashMap;
 use std::path::Path;
-use std::sync::Mutex;
+
+use parking_lot::Mutex;
 
 use crate::log::{Event, LogReader, ReadError};
 use crate::provider::{
@@ -87,7 +88,7 @@ impl ReplayProvider {
 
     /// How many replies remain unserved.
     pub fn remaining(&self) -> usize {
-        self.queue.lock().unwrap().len()
+        self.queue.lock().len()
     }
 }
 
@@ -100,7 +101,6 @@ impl ModelProvider for ReplayProvider {
         let reply = self
             .queue
             .lock()
-            .unwrap()
             .pop_front()
             .ok_or_else(|| ProviderError::Api("replay queue exhausted".to_string()))?;
         // Replay has no real stream; emit the recorded reply as one delta so a
@@ -137,7 +137,7 @@ impl<P> RecordingProvider<P> {
 
     /// The replies captured so far, in order.
     pub fn captured(&self) -> Vec<String> {
-        self.captured.lock().unwrap().clone()
+        self.captured.lock().clone()
     }
 }
 
@@ -148,7 +148,7 @@ impl<P: ModelProvider> ModelProvider for RecordingProvider<P> {
         sink: Option<crate::provider::StreamSink>,
     ) -> Result<TurnResponse, ProviderError> {
         let resp = self.inner.complete(req, sink).await?;
-        self.captured.lock().unwrap().push(resp.text.clone());
+        self.captured.lock().push(resp.text.clone());
         Ok(resp)
     }
 }

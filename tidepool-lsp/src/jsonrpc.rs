@@ -15,11 +15,12 @@ use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::atomic::{AtomicI64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
 use crossbeam_channel::{bounded, Sender};
+use parking_lot::Mutex;
 use serde_json::{json, Value};
 
 /// Per-request timeout. Kept below the tidepool 30s eval timeout so the daemon
@@ -137,7 +138,7 @@ impl RaClient {
                     }
                 }
                 // On exit, fail any in-flight requests so callers don't hang.
-                let mut p = pending.lock().unwrap();
+                let mut p = pending.lock();
                 for (_, tx) in p.drain() {
                     let _ = tx.send(Err("language server exited".to_string()));
                 }
@@ -195,18 +196,18 @@ impl RaClient {
     pub fn request(&self, method: &str, params: Value) -> Result<Value, String> {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let (tx, rx) = bounded(1);
-        self.pending.lock().unwrap().insert(id, tx);
+        self.pending.lock().insert(id, tx);
 
         let msg = json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params });
         if let Err(e) = self.write_message(&msg) {
-            self.pending.lock().unwrap().remove(&id);
+            self.pending.lock().remove(&id);
             return Err(e);
         }
 
         match rx.recv_timeout(REQUEST_TIMEOUT) {
             Ok(result) => result,
             Err(_) => {
-                self.pending.lock().unwrap().remove(&id);
+                self.pending.lock().remove(&id);
                 Err(format!("language server timed out on {}", method))
             }
         }
@@ -220,7 +221,7 @@ impl RaClient {
 
     fn write_message(&self, msg: &Value) -> Result<(), String> {
         let body = serde_json::to_vec(msg).map_err(|e| e.to_string())?;
-        let mut w = self.stdin.lock().unwrap();
+        let mut w = self.stdin.lock();
         write!(w, "Content-Length: {}\r\n\r\n", body.len()).map_err(|e| e.to_string())?;
         w.write_all(&body).map_err(|e| e.to_string())?;
         w.flush().map_err(|e| e.to_string())
@@ -228,14 +229,14 @@ impl RaClient {
 
     /// True once indexing has reported completion.
     pub fn is_ready(&self) -> bool {
-        let mut r = self.ready.lock().unwrap();
+        let mut r = self.ready.lock();
         check_ready(&mut r);
         r.ready
     }
 
     /// Current progress note (e.g. "indexing (37%)").
     pub fn status_message(&self) -> String {
-        let mut r = self.ready.lock().unwrap();
+        let mut r = self.ready.lock();
         check_ready(&mut r);
         if r.ready {
             "ready".to_string()
@@ -265,7 +266,7 @@ impl RaClient {
     /// Requests are then served against whatever rust-analyzer has indexed
     /// so far, rather than erroring forever.
     pub fn force_ready(&self, message: impl Into<String>) {
-        let mut r = self.ready.lock().unwrap();
+        let mut r = self.ready.lock();
         r.ready = true;
         r.message = message.into();
     }
@@ -273,7 +274,7 @@ impl RaClient {
     /// Ensure the server has `didOpen` for `abs_path` (needed for diagnostics).
     pub fn ensure_open(&self, abs_path: &Path) -> Result<(), String> {
         let uri = path_to_uri(abs_path)?;
-        if self.opened.lock().unwrap().contains_key(&uri) {
+        if self.opened.lock().contains_key(&uri) {
             return Ok(());
         }
         let text = std::fs::read_to_string(abs_path)
@@ -285,13 +286,13 @@ impl RaClient {
                 "uri": uri, "languageId": lang_id, "version": 1, "text": text
             }}),
         );
-        self.opened.lock().unwrap().insert(uri, 1);
+        self.opened.lock().insert(uri, 1);
         Ok(())
     }
 
     /// Latest pushed diagnostics for `uri`, if any.
     pub fn cached_diagnostics(&self, uri: &str) -> Option<Value> {
-        self.diagnostics.lock().unwrap().get(uri).cloned()
+        self.diagnostics.lock().get(uri).cloned()
     }
 
     pub fn root(&self) -> &Path {
@@ -320,7 +321,7 @@ fn handle_message(
             } else {
                 Ok(msg.get("result").cloned().unwrap_or(Value::Null))
             };
-            if let Some(tx) = pending.lock().unwrap().remove(&id) {
+            if let Some(tx) = pending.lock().remove(&id) {
                 let _ = tx.send(result);
             }
             return;
@@ -338,7 +339,7 @@ fn handle_message(
                 if let Some(params) = msg.get("params") {
                     if let Some(uri) = params.get("uri").and_then(Value::as_str) {
                         let diags = params.get("diagnostics").cloned().unwrap_or(json!([]));
-                        diagnostics.lock().unwrap().insert(uri.to_string(), diags);
+                        diagnostics.lock().insert(uri.to_string(), diags);
                     }
                 }
             }
@@ -366,11 +367,10 @@ fn reply_to_server_request(id: i64, msg: &Value, stdin: &Arc<Mutex<ChildStdin>>)
     };
     let reply = json!({ "jsonrpc": "2.0", "id": id, "result": result });
     if let Ok(body) = serde_json::to_vec(&reply) {
-        if let Ok(mut w) = stdin.lock() {
-            let _ = write!(w, "Content-Length: {}\r\n\r\n", body.len());
-            let _ = w.write_all(&body);
-            let _ = w.flush();
-        }
+        let mut w = stdin.lock();
+        let _ = write!(w, "Content-Length: {}\r\n\r\n", body.len());
+        let _ = w.write_all(&body);
+        let _ = w.flush();
     }
 }
 
@@ -402,7 +402,7 @@ fn update_progress(params: Option<&Value>, ready: &Arc<Mutex<Ready>>) {
         return;
     }
 
-    let mut r = ready.lock().unwrap();
+    let mut r = ready.lock();
     r.last_index_event = Some(std::time::Instant::now());
     match kind {
         // `report` also opens: a phase observed mid-flight (begin missed)
@@ -530,7 +530,7 @@ mod tests {
 
     /// Reader-side view of the gate (what `is_ready` computes).
     fn gate_open(ready: &Arc<Mutex<Ready>>) -> bool {
-        let mut r = ready.lock().unwrap();
+        let mut r = ready.lock();
         check_ready(&mut r);
         r.ready
     }

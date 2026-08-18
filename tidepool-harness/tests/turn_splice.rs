@@ -13,7 +13,9 @@
 
 mod support;
 
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, OnceLock};
+
+use parking_lot::Mutex;
 
 use tidepool_harness::engine::EngineConfig;
 use tidepool_harness::log::{Actor, Event, LogHeader, LogReader, LogWriter};
@@ -89,7 +91,7 @@ impl ModelProvider for SpliceProbeProvider {
         _sink: Option<tidepool_harness::provider::StreamSink>,
     ) -> Result<TurnResponse, ProviderError> {
         let idx = {
-            let mut n = self.call_index.lock().unwrap();
+            let mut n = self.call_index.lock();
             let i = *n;
             *n += 1;
             i
@@ -128,7 +130,7 @@ impl ModelProvider for SpliceProbeProvider {
             //    child's next prompt assembly after the splice), then answer
             //    correctly.
             2 => {
-                *self.captured_second_prompt.lock().unwrap() = Some(req.messages.clone());
+                *self.captured_second_prompt.lock() = Some(req.messages.clone());
                 Ok(TurnResponse {
                     text: "Right, an Int.\n\n```haskell\nresume (42 :: Int)\n```".to_string(),
                     usage: usage(),
@@ -232,7 +234,6 @@ async fn splice_lands_in_childs_next_prompt_assembly() {
     let second_prompt = probe
         .captured_second_prompt
         .lock()
-        .unwrap()
         .clone()
         .expect("the child's second turn must have been driven");
     assert!(

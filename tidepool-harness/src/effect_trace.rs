@@ -10,8 +10,9 @@
 //! change effect semantics. The harness drains the buffer after each turn and
 //! writes one `Event::Effect` per record (`Harness::flush_effects`).
 
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
+use parking_lot::Mutex;
 use tidepool_effect::dispatch::{DispatchEffect, EffectContext, Response};
 use tidepool_effect::EffectError;
 use tidepool_eval::value::Value;
@@ -65,9 +66,7 @@ impl<H: DispatchEffect<CapturedOutput>> DispatchEffect<CapturedOutput> for Traci
             Err(e) => serde_json::json!({ "error": e.to_string() }),
         };
         tracing::info!(tag, req = %req, resp = %resp, "effect dispatched");
-        if let Ok(mut t) = self.trace.lock() {
-            t.push(EffectRecord { tag, req, resp });
-        }
+        self.trace.lock().push(EffectRecord { tag, req, resp });
         result
     }
 }
