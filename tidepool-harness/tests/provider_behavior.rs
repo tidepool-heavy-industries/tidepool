@@ -9,7 +9,9 @@
 use std::collections::{HashMap, VecDeque};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+
+use parking_lot::Mutex;
 
 use tidepool_harness::provider::api_key::{ApiKeyConfig, ApiKeyProvider};
 use tidepool_harness::provider::oauth::{self, OauthConfig, OauthProvider};
@@ -85,7 +87,6 @@ impl MockServer {
     fn queue_raw(&self, method: &str, path: &str, status: u16, body: String) {
         self.routes
             .lock()
-            .unwrap()
             .entry((method.to_string(), path.to_string()))
             .or_default()
             .push_back((status, body));
@@ -97,7 +98,6 @@ impl MockServer {
         let header_name = header_name.to_ascii_lowercase();
         self.seen_headers
             .lock()
-            .unwrap()
             .get(&(method.to_string(), path.to_string()))
             .and_then(|headers| headers.get(&header_name))
             .cloned()
@@ -108,7 +108,6 @@ impl MockServer {
     fn body_seen(&self, method: &str, path: &str) -> Option<serde_json::Value> {
         self.seen_bodies
             .lock()
-            .unwrap()
             .get(&(method.to_string(), path.to_string()))
             .and_then(|b| serde_json::from_slice(b).ok())
     }
@@ -149,15 +148,13 @@ fn handle_conn(
 
     seen_headers
         .lock()
-        .unwrap()
         .insert((method.clone(), path.clone()), headers);
     seen_bodies
         .lock()
-        .unwrap()
         .insert((method.clone(), path.clone()), body.clone());
 
     let (status, resp_body) = {
-        let mut routes = routes.lock().unwrap();
+        let mut routes = routes.lock();
         match routes.get_mut(&(method.clone(), path.clone())) {
             Some(q) if !q.is_empty() => q.pop_front().unwrap(),
             _ => (

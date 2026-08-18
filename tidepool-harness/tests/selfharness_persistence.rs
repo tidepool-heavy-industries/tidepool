@@ -26,7 +26,9 @@
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+
+use parking_lot::Mutex;
 
 mod support;
 
@@ -543,7 +545,6 @@ impl Observer for FingerprintChangeObserver {
         {
             self.changes
                 .lock()
-                .unwrap()
                 .push((restored_fingerprint.clone(), current_fingerprint.clone()));
         }
     }
@@ -606,7 +607,7 @@ async fn stale_fingerprint_state_carries_forward_and_falls_back_on_decode_failur
          describes a different harness's loop"
     );
     assert_eq!(
-        observer.changes.lock().unwrap().as_slice(),
+        observer.changes.lock().as_slice(),
         &[(
             "fcbd20d2594c4426".to_string(),
             current_source.fingerprint.clone()

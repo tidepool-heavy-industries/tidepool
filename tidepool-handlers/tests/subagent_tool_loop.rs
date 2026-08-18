@@ -39,7 +39,9 @@
 //! fails loudly otherwise via [`require_ghc`], never skips-as-pass.
 
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+
+use parking_lot::Mutex;
 
 use tidepool_agent::backend::mock::{MockBackend, MockStep};
 use tidepool_agent::backend::AgentBackend;
@@ -111,11 +113,11 @@ struct BackendLog {
 
 impl BackendLog {
     fn started(&self) -> Vec<ThreadSpec> {
-        self.started.lock().unwrap().clone()
+        self.started.lock().clone()
     }
 
     fn replies(&self) -> Vec<ToolReply> {
-        self.replies.lock().unwrap().clone()
+        self.replies.lock().clone()
     }
 }
 
@@ -126,7 +128,7 @@ struct RecordingBackend {
 
 impl AgentBackend for RecordingBackend {
     fn start_thread(&mut self, spec: &ThreadSpec) -> Result<BackendThreadId, AgentBackendError> {
-        self.log.started.lock().unwrap().push(spec.clone());
+        self.log.started.lock().push(spec.clone());
         self.inner.start_thread(spec)
     }
 
@@ -139,7 +141,7 @@ impl AgentBackend for RecordingBackend {
     }
 
     fn resume(&mut self, reply: ToolReply) -> Result<TurnEvent, AgentBackendError> {
-        self.log.replies.lock().unwrap().push(reply.clone());
+        self.log.replies.lock().push(reply.clone());
         self.inner.resume(reply)
     }
 }

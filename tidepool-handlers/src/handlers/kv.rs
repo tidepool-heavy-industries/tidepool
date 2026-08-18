@@ -1,6 +1,8 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+
+use parking_lot::Mutex;
 use tidepool_effect::dispatch::EffectContext;
 use tidepool_effect::error::EffectError;
 use tidepool_eval::value::Value;
@@ -96,13 +98,8 @@ impl KvHandler {
     /// Lock the store (shared prelude of every verb).
     fn locked(
         &self,
-    ) -> Result<
-        std::sync::MutexGuard<'_, std::collections::HashMap<String, serde_json::Value>>,
-        EffectError,
-    > {
-        self.store
-            .lock()
-            .map_err(|e| EffectError::Handler(format!("Mutex poisoned: {}", e)))
+    ) -> parking_lot::MutexGuard<'_, std::collections::HashMap<String, serde_json::Value>> {
+        self.store.lock()
     }
 
     fn kv_get(
@@ -110,7 +107,7 @@ impl KvHandler {
         cx: &EffectContext<'_, CapturedOutput>,
         key: String,
     ) -> Result<tidepool_effect::Response, EffectError> {
-        let store = self.locked()?;
+        let store = self.locked();
         let val: Option<serde_json::Value> = store.get(&key).cloned();
         cx.respond(val)
     }
@@ -122,7 +119,7 @@ impl KvHandler {
         val: Value,
     ) -> Result<tidepool_effect::Response, EffectError> {
         let json_val = tidepool_runtime::value_to_json(&val, cx.table(), 0);
-        let mut store = self.locked()?;
+        let mut store = self.locked();
         store.insert(key, json_val);
         self.flush(&store);
         cx.respond(())
@@ -133,7 +130,7 @@ impl KvHandler {
         cx: &EffectContext<'_, CapturedOutput>,
         key: String,
     ) -> Result<tidepool_effect::Response, EffectError> {
-        let mut store = self.locked()?;
+        let mut store = self.locked();
         store.remove(&key);
         self.flush(&store);
         cx.respond(())
@@ -143,7 +140,7 @@ impl KvHandler {
         &mut self,
         cx: &EffectContext<'_, CapturedOutput>,
     ) -> Result<tidepool_effect::Response, EffectError> {
-        let store = self.locked()?;
+        let store = self.locked();
         let keys: Vec<String> = store.keys().cloned().collect();
         cx.respond(keys)
     }
@@ -153,7 +150,7 @@ impl KvHandler {
         cx: &EffectContext<'_, CapturedOutput>,
         prefix: String,
     ) -> Result<tidepool_effect::Response, EffectError> {
-        let mut store = self.locked()?;
+        let mut store = self.locked();
         let before = store.len();
         if prefix.is_empty() {
             // Empty prefix clears the ENTIRE store. This is intentional and loud
@@ -173,7 +170,7 @@ impl KvHandler {
         cx: &EffectContext<'_, CapturedOutput>,
         prefix: String,
     ) -> Result<tidepool_effect::Response, EffectError> {
-        let store = self.locked()?;
+        let store = self.locked();
         let mut keys: Vec<String> = store
             .keys()
             .filter(|k| k.starts_with(prefix.as_str()))
@@ -248,7 +245,7 @@ impl KvHandler {
         // Refresh the in-memory store to the disk state we read under the lock,
         // on success AND conflict, so subsequent in-process reads (incl. a
         // caller's retry `kvGet`) see the committed value.
-        *self.locked()? = disk;
+        *self.locked() = disk;
 
         match outcome {
             Ok(()) => cx.respond(Ok::<(), serde_json::Value>(())),
@@ -262,7 +259,7 @@ impl KvHandler {
         &mut self,
         cx: &EffectContext<'_, CapturedOutput>,
     ) -> Result<tidepool_effect::Response, EffectError> {
-        let store = self.locked()?;
+        let store = self.locked();
         let count = store.len() as i64;
         let mut sample: Vec<String> = store.keys().take(10).cloned().collect();
         sample.sort();

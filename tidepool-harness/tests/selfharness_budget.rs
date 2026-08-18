@@ -20,7 +20,9 @@
 //! Needs `TIDEPOOL_EXTRACT` and the with-packages GHC on PATH — run inside
 //! `nix develop` (see `haskell/CLAUDE.md`).
 
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+
+use parking_lot::Mutex;
 
 mod support;
 
@@ -76,7 +78,7 @@ impl ModelProvider for NeverFinalizeProvider {
         _sink: Option<StreamSink>,
     ) -> Result<TurnResponse, ProviderError> {
         let n = {
-            let mut c = self.calls.lock().unwrap();
+            let mut c = self.calls.lock();
             *c += 1;
             *c
         };
@@ -88,7 +90,7 @@ impl ModelProvider for NeverFinalizeProvider {
             .map(|m| m.content.clone())
             .unwrap_or_default();
         if latest_user.contains("approaching this window's round limit") {
-            let mut slot = self.nudge_seen_at.lock().unwrap();
+            let mut slot = self.nudge_seen_at.lock();
             if slot.is_none() {
                 *slot = Some(n);
             }
@@ -155,7 +157,7 @@ async fn answerer_nudged_at_16_and_hard_fails_at_32() {
     // The answerer was driven exactly 8 rounds — max_rounds (6) plus the
     // 46cb30d8 glide's ultimatum + grace rounds (2) — before the hard cap
     // fires, so the provider saw 8 calls.
-    let total_calls = *calls.lock().unwrap();
+    let total_calls = *calls.lock();
     assert_eq!(
         total_calls, 8,
         "the answerer must be driven exactly max-rounds + ultimatum grace (6 + 2 = 8) \
@@ -166,7 +168,6 @@ async fn answerer_nudged_at_16_and_hard_fails_at_32() {
     // delivered right after round 3 (nudge cap), i.e. seen on the 4th model call.
     let nudge = nudge_seen_at
         .lock()
-        .unwrap()
         .expect("the finalize nudge must have been delivered to the answerer");
     assert_eq!(
         nudge, 4,

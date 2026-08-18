@@ -13,13 +13,13 @@
 //! Shares that file's `SIGNAL_LOCK` discipline (global JMP_BUF — signal tests
 //! must not run concurrently with each other).
 
-use std::sync::Mutex;
+use parking_lot::Mutex;
 
 static SIGNAL_LOCK: Mutex<()> = Mutex::new(());
 
 #[test]
 fn shape_trap_dump_does_not_read_past_a_page_boundary() {
-    let _lock = SIGNAL_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _lock = SIGNAL_LOCK.lock();
     tidepool_codegen::signal_safety::install();
 
     unsafe {

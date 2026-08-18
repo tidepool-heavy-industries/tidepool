@@ -62,7 +62,9 @@ mod support;
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+
+use parking_lot::Mutex;
 
 use serde_json::{json, Value as Json};
 
@@ -192,7 +194,7 @@ impl ModelProvider for KeyedProvider {
         _sink: Option<StreamSink>,
     ) -> Result<TurnResponse, ProviderError> {
         let last = window_message(&req);
-        self.seen.lock().unwrap().push(last.clone());
+        self.seen.lock().push(last.clone());
 
         let reply = self
             .scripted
@@ -242,14 +244,14 @@ impl ScriptedGate {
     }
 
     fn presentations(&self) -> usize {
-        self.presented.lock().unwrap().len()
+        self.presented.lock().len()
     }
 }
 
 impl OperatorGate for ScriptedGate {
     fn present_form(&self, shape: &FormShape) -> Json {
-        self.presented.lock().unwrap().push(shape.clone());
-        let mut queue = self.submissions.lock().unwrap();
+        self.presented.lock().push(shape.clone());
+        let mut queue = self.submissions.lock();
         if queue.is_empty() {
             json!({})
         } else {
@@ -318,15 +320,15 @@ impl Observer for WindowObserver {
     fn on_event(&self, event: &DriverEvent) {
         match event {
             DriverEvent::RunLLMTurnHole { prompt, .. } => {
-                *self.pending.lock().unwrap() = Some(prompt.clone());
+                *self.pending.lock() = Some(prompt.clone());
             }
             DriverEvent::TurnStart { node } => {
-                if let Some(prompt) = self.pending.lock().unwrap().take() {
-                    self.windows.lock().unwrap().push((prompt, *node));
+                if let Some(prompt) = self.pending.lock().take() {
+                    self.windows.lock().push((prompt, *node));
                 }
             }
             DriverEvent::FormSubmitted { submission, .. } => {
-                self.forms.lock().unwrap().push(submission.clone());
+                self.forms.lock().push(submission.clone());
             }
             _ => {}
         }
@@ -698,9 +700,9 @@ async fn run_scenario(
         Vec::new()
     };
 
-    let windows = observer.windows.lock().unwrap().clone();
-    let gate_submissions = observer.forms.lock().unwrap().clone();
-    let requests = provider.seen.lock().unwrap().clone();
+    let windows = observer.windows.lock().clone();
+    let gate_submissions = observer.forms.lock().clone();
+    let requests = provider.seen.lock().clone();
     Run {
         state: outcome.state_json,
         windows,

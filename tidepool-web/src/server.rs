@@ -53,7 +53,7 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::convert::Infallible;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
 
 use axum::extract::{Path, State};
@@ -61,6 +61,7 @@ use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{Html, IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
+use parking_lot::Mutex;
 use serde_json::{json, Map, Value as Jv};
 use tidepool_harness::selfharness::operator::{
     child_path, ContinueSignal, FormShape, OperatorGate, ROOT_BIND_PATH,
@@ -186,7 +187,7 @@ impl AppState {
     pub fn register_node(&self, node_id: impl Into<String>) -> Arc<WebGate> {
         let node_id = node_id.into();
         {
-            let mut reg = self.registry.lock().unwrap();
+            let mut reg = self.registry.lock();
             if !reg.nodes.contains_key(&node_id) {
                 reg.order.push(node_id.clone());
                 reg.nodes.insert(node_id.clone(), NodeSlot::default());
@@ -200,14 +201,14 @@ impl AppState {
 
     /// Registered node ids in registration order — the tab strip's order.
     pub fn node_ids(&self) -> Vec<NodeId> {
-        self.registry.lock().unwrap().order.clone()
+        self.registry.lock().order.clone()
     }
 
     /// Append a new ask onto `node_id`'s stack (NEVER supersedes an existing
     /// one), bump that node's revision, and ping. Returns the new ask's id
     /// (its `data-rev` nonce).
     fn publish_ask(&self, node_id: &str, pending: Pending) -> u64 {
-        let mut reg = self.registry.lock().unwrap();
+        let mut reg = self.registry.lock();
         let slot = reg
             .nodes
             .get_mut(node_id)
@@ -223,7 +224,7 @@ impl AppState {
 
     /// Push a `note` onto `node_id`'s feed, bump its revision, and ping.
     fn push_note(&self, node_id: &str, text: String) {
-        let mut reg = self.registry.lock().unwrap();
+        let mut reg = self.registry.lock();
         let slot = reg.nodes.get_mut(node_id).expect("registered node");
         slot.notes.push(text);
         slot.rev += 1;
@@ -235,7 +236,7 @@ impl AppState {
     /// feed was already empty would still be harmless, but skip it so an
     /// already-quiet feed doesn't force a redundant re-render.
     fn clear_notes(&self, node_id: &str) {
-        let mut reg = self.registry.lock().unwrap();
+        let mut reg = self.registry.lock();
         let slot = reg.nodes.get_mut(node_id).expect("registered node");
         if slot.notes.is_empty() {
             return;
@@ -249,7 +250,7 @@ impl AppState {
     /// Append to `node_id`'s turn history (dropping the oldest past
     /// [`TURN_HISTORY_CAP`]), bump its revision, and ping.
     fn push_turn_source(&self, node_id: &str, source: String) {
-        let mut reg = self.registry.lock().unwrap();
+        let mut reg = self.registry.lock();
         let slot = reg.nodes.get_mut(node_id).expect("registered node");
         slot.turn_history.push_back(source);
         if slot.turn_history.len() > TURN_HISTORY_CAP {
@@ -263,7 +264,7 @@ impl AppState {
     /// Render one node's `id="panel-<node>"` fragment, or `None` if the node
     /// isn't registered.
     fn node_panel_html(&self, node_id: &str) -> Option<String> {
-        let reg = self.registry.lock().unwrap();
+        let reg = self.registry.lock();
         let slot = reg.nodes.get(node_id)?;
         Some(
             render::node_panel(
@@ -280,7 +281,7 @@ impl AppState {
     /// The full page: tab strip + every registered node's panel, in
     /// registration order.
     fn page_markup(&self) -> maud::Markup {
-        let reg = self.registry.lock().unwrap();
+        let reg = self.registry.lock();
         let panels: Vec<(NodeId, maud::Markup)> = reg
             .order
             .iter()
@@ -312,7 +313,7 @@ impl AppState {
         interaction: u64,
         extract: impl FnOnce(Pending) -> Result<T, Pending>,
     ) -> Result<T, ResolveError> {
-        let mut reg = self.registry.lock().unwrap();
+        let mut reg = self.registry.lock();
         let slot = reg
             .nodes
             .get_mut(node_id)
@@ -381,7 +382,7 @@ impl AppState {
     /// nonce `POST` must echo back). `Err(())` if `node_id` isn't
     /// registered.
     pub(crate) fn pending_forms(&self, node_id: &str) -> Result<Vec<(u64, FormShape)>, ()> {
-        let reg = self.registry.lock().unwrap();
+        let reg = self.registry.lock();
         let slot = reg.nodes.get(node_id).ok_or(())?;
         Ok(slot
             .asks
@@ -700,7 +701,6 @@ impl AppState {
     fn first_ask_id(&self, node_id: &str) -> Option<u64> {
         self.registry
             .lock()
-            .unwrap()
             .nodes
             .get(node_id)?
             .asks
@@ -709,7 +709,7 @@ impl AppState {
     }
 
     fn ask_count(&self, node_id: &str) -> usize {
-        self.registry.lock().unwrap().nodes[node_id].asks.len()
+        self.registry.lock().nodes[node_id].asks.len()
     }
 }
 
@@ -812,7 +812,7 @@ mod tests {
             std::thread::yield_now();
         }
         let ids: Vec<u64> = {
-            let reg = st.registry.lock().unwrap();
+            let reg = st.registry.lock();
             reg.nodes["n1"].asks.iter().map(|a| a.id).collect()
         };
         assert_eq!(ids.len(), 2, "both asks coexist, neither dropped");

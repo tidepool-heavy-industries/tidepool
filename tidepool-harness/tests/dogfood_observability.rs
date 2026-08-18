@@ -8,7 +8,9 @@
 //! develop` (see `haskell/CLAUDE.md`).
 
 use std::collections::BTreeMap;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+
+use parking_lot::Mutex;
 
 mod support;
 
@@ -68,7 +70,7 @@ impl Observer for FanoutObserver {
 struct CapturedWriter(Arc<Mutex<Vec<u8>>>);
 impl std::io::Write for CapturedWriter {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        self.0.lock().unwrap().extend_from_slice(buf);
+        self.0.lock().extend_from_slice(buf);
         Ok(buf.len())
     }
     fn flush(&mut self) -> std::io::Result<()> {
@@ -169,7 +171,7 @@ async fn run_one_cycle_with_a_retry() -> (String, String) {
         .await
         .expect("one render->loop->runLLMTurn->finalize->render cycle, surviving one retry");
 
-    let console = String::from_utf8_lossy(&buf.lock().unwrap()).to_string();
+    let console = String::from_utf8_lossy(&buf.lock()).to_string();
     let transcript = std::fs::read_to_string(persistence::default_transcript_path())
         .expect("read transcript.jsonl");
     (console, transcript)

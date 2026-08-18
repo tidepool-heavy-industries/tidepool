@@ -1411,9 +1411,10 @@ mod tests {
 
     use std::collections::VecDeque;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-    use std::sync::{Arc, Condvar, Mutex};
+    use std::sync::Arc;
     use std::time::Duration;
 
+    use parking_lot::{Condvar, Mutex};
     use tidepool_agent::backend::mock::{MockBackend, MockFailure, MockStep};
     use tidepool_agent::seam::{CycleSpec, ThreadSpec, ToolCall, ToolReply, TurnEvent, TurnId};
     use tidepool_worktree::create::WorktreeHandle;
@@ -1538,23 +1539,21 @@ mod tests {
 
     impl Latch {
         fn arrive(&self, who: usize) {
-            self.arrivals.lock().expect("latch mutex").push(who);
+            self.arrivals.lock().push(who);
             self.changed.notify_all();
         }
 
         fn arrivals(&self) -> Vec<usize> {
-            self.arrivals.lock().expect("latch mutex").clone()
+            self.arrivals.lock().clone()
         }
 
         /// Block until at least `n` arrivals, or fail naming what did arrive.
         fn wait_for(&self, n: usize, what: &str) {
-            let mut arrivals = self.arrivals.lock().expect("latch mutex");
+            let mut arrivals = self.arrivals.lock();
             while arrivals.len() < n {
-                let (next, timeout) = self
+                let timeout = self
                     .changed
-                    .wait_timeout(arrivals, Duration::from_secs(30))
-                    .expect("latch mutex");
-                arrivals = next;
+                    .wait_for(&mut arrivals, Duration::from_secs(30));
                 assert!(
                     !timeout.timed_out() || arrivals.len() >= n,
                     "timed out waiting for {n} {what}; only {:?} arrived",
@@ -3067,14 +3066,14 @@ mod tests {
 
     impl ConnectGate {
         fn block_until_released(&self) {
-            let mut released = self.released.lock().expect("connect gate mutex");
+            let mut released = self.released.lock();
             while !*released {
-                released = self.changed.wait(released).expect("connect gate mutex");
+                self.changed.wait(&mut released);
             }
         }
 
         fn release(&self) {
-            *self.released.lock().expect("connect gate mutex") = true;
+            *self.released.lock() = true;
             self.changed.notify_all();
         }
     }

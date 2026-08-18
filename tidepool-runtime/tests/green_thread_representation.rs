@@ -180,15 +180,15 @@ fn expect_thread_result(v: &Value) -> i64 {
 
 #[derive(Clone, Default)]
 struct TestSink {
-    lines: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    lines: std::sync::Arc<parking_lot::Mutex<Vec<String>>>,
 }
 
 impl OutputSink for TestSink {
     fn drain(&self) -> Vec<String> {
-        std::mem::take(&mut *self.lines.lock().unwrap())
+        std::mem::take(&mut *self.lines.lock())
     }
     fn snapshot(&self) -> Vec<String> {
-        self.lines.lock().unwrap().clone()
+        self.lines.lock().clone()
     }
 }
 

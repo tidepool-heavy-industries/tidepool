@@ -30,6 +30,7 @@ glob.workspace = true
 # Gitignore-aware exclusion for the glob/grep walk (#343) — ripgrep's own
 # gitignore matcher, so expand_glob's default exclusions match `rg`'s.
 ignore = "0.4"
+parking_lot.workspace = true
 regex = "1"
 genai.workspace = true
 ureq = { workspace = true, features = ["json"] }

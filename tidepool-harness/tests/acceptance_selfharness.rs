@@ -15,6 +15,8 @@
 
 use std::sync::Arc;
 
+use parking_lot::Mutex;
+
 mod support;
 
 use tidepool_harness::engine::EngineConfig;
@@ -195,12 +197,12 @@ async fn selfharness_multi_cycle_state_accumulates_across_loop_boundaries() {
 /// A capturing observer for event-stream assertions (rotation).
 #[derive(Default)]
 struct CapturingObserver {
-    events: std::sync::Mutex<Vec<tidepool_harness::Event>>,
+    events: Mutex<Vec<tidepool_harness::Event>>,
 }
 
 impl tidepool_harness::Observer for CapturingObserver {
     fn on_event(&self, event: &tidepool_harness::Event) {
-        self.events.lock().unwrap().push(event.clone());
+        self.events.lock().push(event.clone());
     }
 }
 
@@ -264,7 +266,7 @@ async fn machine_rotation_between_cycles_preserves_durable_state() {
         outcome2.state_json
     );
 
-    let events = observer.events.lock().unwrap();
+    let events = observer.events.lock();
     assert!(
         events
             .iter()

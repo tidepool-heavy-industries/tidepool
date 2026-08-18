@@ -8,7 +8,9 @@
 //! `nix develop` (see `haskell/CLAUDE.md`).
 
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+
+use parking_lot::Mutex;
 
 mod support;
 
@@ -145,12 +147,12 @@ impl ScriptedGate {
 
 impl OperatorGate for ScriptedGate {
     fn post_note(&self, text: &str) {
-        self.notes.lock().unwrap().push(text.to_string());
+        self.notes.lock().push(text.to_string());
     }
 
     fn present_form(&self, shape: &FormShape) -> serde_json::Value {
         let shape = shape.clone();
-        self.seen.lock().unwrap().push(shape.clone());
+        self.seen.lock().push(shape.clone());
 
         match &shape {
             // `askUser @Decision`.
@@ -227,7 +229,7 @@ impl Observer for CaptureObserver {
             },
             _ => return,
         };
-        self.forms.lock().unwrap().push(captured);
+        self.forms.lock().push(captured);
     }
 }
 
@@ -307,7 +309,7 @@ async fn askuser_operator_form_round_trip_and_ws4_log() {
     // statement (`askUser @Decision`) still ran in the SAME turn, and the
     // gate saw the note text verbatim.
     assert_eq!(
-        gate.notes.lock().unwrap().as_slice(),
+        gate.notes.lock().as_slice(),
         &[NOTE_TEXT.to_string()],
         "note must post to the gate exactly once, verbatim"
     );
@@ -316,7 +318,7 @@ async fn askuser_operator_form_round_trip_and_ws4_log() {
     // `Decision` value in existence: exact selector keys, exact constructor
     // keys, declaration order, and the nested `Confidence` choice. This is the
     // Haskell encoder and the Rust wire agreeing through the real extract/JIT.
-    let seen = gate.seen.lock().unwrap().clone();
+    let seen = gate.seen.lock().clone();
     assert_eq!(
         seen.first(),
         Some(&expected_decision_shape()),
@@ -361,7 +363,7 @@ async fn askuser_operator_form_round_trip_and_ws4_log() {
     // is the same NOTED/PRESENTED/SUBMITTED pairing in order, all from the
     // nested answerer (`FormSource::Answerer`), never `OuterLoop`. `note`
     // fires FIRST, with no matching `Submitted` (it never blocks).
-    let forms = observer.forms.lock().unwrap().clone();
+    let forms = observer.forms.lock().clone();
     assert_eq!(
         forms,
         vec![

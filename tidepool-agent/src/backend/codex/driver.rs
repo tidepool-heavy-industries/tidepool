@@ -28,13 +28,14 @@
 
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
 
 use codex_codes::{
     InitializeCapabilities, ModelListParams, ModelListResponse, SandboxPolicy, ThreadStartResponse,
     Turn, TurnStartParams, TurnStatus, UserInput,
 };
+use parking_lot::Mutex;
 
 use crate::backend::codex::dynamic_tools::{
     DynamicToolFunctionSpec, DynamicToolSpec, ThreadStartWithDynamicTools,
@@ -187,7 +188,7 @@ impl CodexAgentBackend {
     /// live-model test.
     #[cfg(test)]
     pub(crate) fn arm_pidfd_for_test(&self, pid: u32) {
-        let mut slot = self.pidfd.lock().unwrap_or_else(|e| e.into_inner());
+        let mut slot = self.pidfd.lock();
         *slot = pidfd_slot_for(pid);
     }
 
@@ -239,7 +240,7 @@ impl CodexAgentBackend {
                 Some(pid) => pidfd_slot_for(pid),
                 None => PidFdSlot::IdentityUnprovable,
             };
-            *self.pidfd.lock().unwrap_or_else(|e| e.into_inner()) = identity;
+            *self.pidfd.lock() = identity;
             self.session = Some(session);
         }
         let Self {
@@ -475,10 +476,7 @@ impl CodexCanceller {
     /// Whether this canceller currently has a live pidfd to signal.
     #[cfg(test)]
     pub(crate) fn is_armed_for_test(&self) -> bool {
-        matches!(
-            &*self.pidfd.lock().unwrap_or_else(|e| e.into_inner()),
-            PidFdSlot::Armed(_)
-        )
+        matches!(&*self.pidfd.lock(), PidFdSlot::Armed(_))
     }
 }
 
@@ -488,7 +486,7 @@ impl BackendCanceller for CodexCanceller {
         // record of the cancel that survives a connect window where no pidfd
         // is armed yet, and `start_turn` reads it once connected.
         self.cancel_requested.store(true, Ordering::SeqCst);
-        let slot = self.pidfd.lock().unwrap_or_else(|e| e.into_inner());
+        let slot = self.pidfd.lock();
         let PidFdSlot::Armed(fd) = &*slot else {
             // Empty: never connected, or the backend has begun dropping.
             // IdentityUnprovable: a pidfd could not be acquired for this
@@ -551,7 +549,7 @@ impl BackendCanceller for CodexCanceller {
 /// against an fd about to be reclaimed anyway.
 impl Drop for CodexAgentBackend {
     fn drop(&mut self) {
-        *self.pidfd.lock().unwrap_or_else(|e| e.into_inner()) = PidFdSlot::Empty;
+        *self.pidfd.lock() = PidFdSlot::Empty;
     }
 }
 
@@ -1473,7 +1471,7 @@ mod tests {
     fn cancel_before_connect_sets_the_flag_without_a_pid_to_signal() {
         let backend = CodexAgentBackend::new().expect("build the backend");
         assert!(
-            matches!(*backend.pidfd.lock().unwrap(), PidFdSlot::Empty),
+            matches!(*backend.pidfd.lock(), PidFdSlot::Empty),
             "never connected"
         );
         assert!(!backend.cancel_requested.load(Ordering::SeqCst));
@@ -1507,10 +1505,7 @@ mod tests {
         backend.arm_pidfd_for_test(pid);
 
         assert!(
-            matches!(
-                *backend.pidfd.lock().unwrap(),
-                PidFdSlot::IdentityUnprovable
-            ),
+            matches!(*backend.pidfd.lock(), PidFdSlot::IdentityUnprovable),
             "pidfd_open against an already-reaped pid must fail closed, not silently succeed"
         );
 

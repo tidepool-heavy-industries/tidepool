@@ -16,6 +16,7 @@ path = "src/main.rs"
 serde.workspace = true
 serde_json.workspace = true
 crossbeam-channel = "0.5"
+parking_lot.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

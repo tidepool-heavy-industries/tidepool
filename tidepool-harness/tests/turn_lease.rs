@@ -9,6 +9,8 @@ mod support;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 
+use parking_lot::Mutex;
+
 use tidepool_harness::engine::EngineConfig;
 use tidepool_harness::log::{Actor, Event, LogHeader, LogReader, LogWriter};
 use tidepool_harness::provider::{
@@ -52,7 +54,7 @@ const OK_REPLY: &str = "```haskell\npure (toJSON (0 :: Int))\n```";
 struct GatedProvider {
     calls: AtomicU32,
     started: Arc<tokio::sync::Notify>,
-    proceed: std::sync::Mutex<Option<tokio::sync::oneshot::Receiver<()>>>,
+    proceed: Mutex<Option<tokio::sync::oneshot::Receiver<()>>>,
 }
 
 impl ModelProvider for GatedProvider {
@@ -67,7 +69,6 @@ impl ModelProvider for GatedProvider {
             let rx = self
                 .proceed
                 .lock()
-                .unwrap()
                 .take()
                 .expect("proceed receiver taken exactly once");
             rx.await.expect("proceed sender dropped without firing");
@@ -135,7 +136,7 @@ async fn concurrent_drive_turn_on_one_node_serializes() {
     let provider = Arc::new(GatedProvider {
         calls: AtomicU32::new(0),
         started: started.clone(),
-        proceed: std::sync::Mutex::new(Some(proceed_rx)),
+        proceed: Mutex::new(Some(proceed_rx)),
     });
     let provider_dyn: Arc<dyn DynModelProvider> = provider.clone();
     let harness = Arc::new(Harness::new(writer, cfg, provider_dyn).expect("harness boots"));

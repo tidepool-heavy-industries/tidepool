@@ -754,11 +754,7 @@ impl Harness {
             let Some(convo) = convos.get_mut(&node) else {
                 return Ok(());
             };
-            let records: Vec<EffectRecord> = convo
-                .effect_trace
-                .lock()
-                .map(|mut t| std::mem::take(&mut *t))
-                .unwrap_or_default();
+            let records: Vec<EffectRecord> = std::mem::take(&mut *convo.effect_trace.lock());
             (records, convo.effect_seq)
         };
         if records.is_empty() {
@@ -784,10 +780,9 @@ impl Harness {
                     let mut unwritten = vec![rec];
                     unwritten.extend(iter);
                     if let Some(convo) = self.convos.lock().get_mut(&node) {
-                        if let Ok(mut trace) = convo.effect_trace.lock() {
-                            unwritten.append(&mut trace);
-                            *trace = unwritten;
-                        }
+                        let mut trace = convo.effect_trace.lock();
+                        unwritten.append(&mut trace);
+                        *trace = unwritten;
                     }
                     failure = Some(e.into());
                     break;
@@ -1153,7 +1148,7 @@ impl Harness {
             llm_model: std::env::var("TIDEPOOL_LLM_MODEL")
                 .unwrap_or_else(|_| "gpt-4o-mini".to_string()),
         };
-        let trace: EffectTrace = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let trace: EffectTrace = Arc::new(Mutex::new(Vec::new()));
         let stack =
             TracingDispatcher::new(tidepool_handlers::build_base_stack(&cfg), trace.clone());
         (Box::new(stack), trace)
@@ -4988,8 +4983,7 @@ mod tests {
             req: serde_json::json!({"call": "b"}),
             resp: serde_json::json!({"result": "b"}),
         };
-        let effect_trace: EffectTrace =
-            Arc::new(std::sync::Mutex::new(vec![rec_a.clone(), rec_b.clone()]));
+        let effect_trace: EffectTrace = Arc::new(Mutex::new(vec![rec_a.clone(), rec_b.clone()]));
         insert_convo(&harness, node, effect_trace);
 
         // Suspend the node: `NodeTree::effect` requires `Running`, so the
@@ -5020,7 +5014,7 @@ mod tests {
             convo.effect_seq, 0,
             "effect_seq must not advance past the failed append"
         );
-        let restored = convo.effect_trace.lock().unwrap();
+        let restored = convo.effect_trace.lock();
         assert_eq!(
             restored.iter().map(|r| r.req.clone()).collect::<Vec<_>>(),
             vec![rec_a.req.clone(), rec_b.req.clone()],
@@ -5041,7 +5035,7 @@ mod tests {
             .tree()
             .force(node, Actor::Operator, fake_session(&harness))
             .unwrap();
-        insert_convo(&harness, node, Arc::new(std::sync::Mutex::new(Vec::new())));
+        insert_convo(&harness, node, Arc::new(Mutex::new(Vec::new())));
 
         assert!(harness.flush_effects(node).is_ok());
         assert_eq!(harness.convos.lock().get(&node).unwrap().effect_seq, 0);

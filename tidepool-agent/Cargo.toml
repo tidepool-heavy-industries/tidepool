@@ -15,6 +15,7 @@ codex-codes = "=0.146.4"
 # `kill(2)` for the app-server canceller: a cycle thread blocked in a seam call
 # holds `&mut` on its backend, so reaping it from another thread goes by pid.
 libc.workspace = true
+parking_lot.workspace = true
 tidepool-worktree.workspace = true
 serde.workspace = true
 serde_json.workspace = true

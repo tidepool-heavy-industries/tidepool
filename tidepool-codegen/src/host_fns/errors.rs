@@ -222,7 +222,7 @@ pub fn drain_diagnostics() -> Vec<String> {
 /// Process-global and append-only: ids are content-addressed (stableVarId /
 /// disambiguated local hashes), so cross-session collisions mean identical
 /// names anyway.
-static VAR_NAMES: std::sync::OnceLock<std::sync::RwLock<std::collections::HashMap<u64, String>>> =
+static VAR_NAMES: std::sync::OnceLock<parking_lot::RwLock<std::collections::HashMap<u64, String>>> =
     std::sync::OnceLock::new();
 
 /// Register varId → name pairs (from `MetaWarnings::var_names`).
@@ -231,9 +231,7 @@ pub fn register_var_names(pairs: &[(u64, String)]) {
         return;
     }
     let map = VAR_NAMES.get_or_init(Default::default);
-    let mut w = map
-        .write()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut w = map.write();
     for (id, name) in pairs {
         w.insert(*id, name.clone());
     }
@@ -241,9 +239,7 @@ pub fn register_var_names(pairs: &[(u64, String)]) {
 
 fn lookup_var_name(id: u64) -> Option<String> {
     let map = VAR_NAMES.get()?;
-    let r = map
-        .read()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let r = map.read();
     r.get(&id).cloned()
 }
 
@@ -259,7 +255,7 @@ fn lookup_var_name(id: u64) -> Option<String> {
 /// slot immediately after registering that module's table, so a program is
 /// always compiled against its own names.
 static POISONED_EXTERNALS: std::sync::OnceLock<
-    std::sync::RwLock<std::collections::HashMap<u64, String>>,
+    parking_lot::RwLock<std::collections::HashMap<u64, String>>,
 > = std::sync::OnceLock::new();
 
 /// Register sentinel-slot → external-name pairs (from `MetaWarnings::poisoned`).
@@ -268,9 +264,7 @@ pub fn register_poisoned_externals(pairs: &[(u64, String)]) {
         return;
     }
     let map = POISONED_EXTERNALS.get_or_init(Default::default);
-    let mut w = map
-        .write()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut w = map.write();
     for (slot, name) in pairs {
         w.insert(*slot, name.clone());
     }
@@ -284,9 +278,7 @@ pub fn poisoned_external_name(slot: u64) -> Option<String> {
         return None;
     }
     let map = POISONED_EXTERNALS.get()?;
-    let r = map
-        .read()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let r = map.read();
     r.get(&slot).cloned()
 }
 
@@ -837,12 +829,10 @@ unsafe extern "C" fn poison_trampoline_lazy(
 /// JIT code that holds its address as an `iconst`).
 pub fn error_poison_ptr_lazy_named(kind: u64, name: &str) -> *mut u8 {
     static NAMED_POISONS: std::sync::OnceLock<
-        std::sync::Mutex<std::collections::HashMap<(u64, String), usize>>,
+        parking_lot::Mutex<std::collections::HashMap<(u64, String), usize>>,
     > = std::sync::OnceLock::new();
     let cache = NAMED_POISONS.get_or_init(Default::default);
-    let mut guard = cache
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut guard = cache.lock();
     let key = (kind, name.to_string());
     if let Some(addr) = guard.get(&key) {
         return *addr as *mut u8;

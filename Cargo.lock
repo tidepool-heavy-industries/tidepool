@@ -3802,6 +3802,7 @@ version = "0.1.0"
 dependencies = [
  "codex-codes",
  "libc",
+ "parking_lot",
  "serde",
  "serde_json",
  "sha2 0.11.0",
@@ -3868,6 +3869,7 @@ dependencies = [
  "frunk",
  "libc",
  "log",
+ "parking_lot",
  "petgraph",
  "proptest",
  "recursion",
@@ -3941,6 +3943,7 @@ dependencies = [
  "ignore",
  "inventory",
  "libc",
+ "parking_lot",
  "regex",
  "serde",
  "serde_json",
@@ -4006,6 +4009,7 @@ name = "tidepool-lsp"
 version = "0.1.0"
 dependencies = [
  "crossbeam-channel",
+ "parking_lot",
  "serde",
  "serde_json",
  "tempfile",
@@ -4198,6 +4202,7 @@ dependencies = [
  "futures-core",
  "futures-util",
  "maud",
+ "parking_lot",
  "reqwest 0.13.4",
  "serde_json",
  "tempfile",
