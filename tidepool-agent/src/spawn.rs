@@ -248,6 +248,162 @@ pub enum SpawnStep {
     Done(Box<OneCycleRun>),
 }
 
+/// Where a saga stopped, with the saga bundled INSEPARABLY into the stop.
+///
+/// [`CycleSaga::begin`] and [`ParkedCycle::answer`] are the only ways to
+/// produce one. There is no freestanding [`SpawnStep`] here that a caller
+/// could obtain from one saga and feed into another's drive — the thing that
+/// let a `Done` from cycle A be reported as cycle B's success while B's own
+/// binding/backend turn stayed unsettled. A `Parked` value owns its saga; a
+/// `Done` value has none left to mix up, because the saga that produced it is
+/// already fully settled and consumed.
+#[derive(Debug)]
+pub enum CycleProgress {
+    /// The child called a tool. Answer through [`ParkedCycle::answer`] — the
+    /// only way to drive this exact saga on. Boxed: a live [`CycleSaga`] is
+    /// far larger than a [`OneCycleRun`] pointer, and every `CycleProgress`
+    /// would otherwise pay for the larger variant's inline size.
+    Parked(Box<ParkedCycle>),
+    /// The cycle finished, the binding is settled, and the receipt is
+    /// complete.
+    Done(Box<OneCycleRun>),
+}
+
+impl CycleProgress {
+    fn from_step(saga: CycleSaga, step: SpawnStep) -> Self {
+        match step {
+            SpawnStep::Done(run) => CycleProgress::Done(run),
+            SpawnStep::ToolCall { agent, call } => {
+                CycleProgress::Parked(Box::new(ParkedCycle { saga, agent, call }))
+            }
+        }
+    }
+
+    /// Drive to completion, refusing every tool call the child makes.
+    ///
+    /// The no-tools path: a request carrying no declarations should produce
+    /// no calls, and one that arrives anyway is refused rather than left
+    /// parked.
+    ///
+    /// Consumes `self` — there is no caller-suppliable "first step" separate
+    /// from the saga that produced it, which is the whole point: this method
+    /// can only ever drive the exact saga [`CycleSaga::begin`] started.
+    pub fn run_to_completion(
+        self,
+        backend: &mut dyn AgentBackend,
+    ) -> Result<OneCycleRun, SpawnError> {
+        let mut progress = self;
+        loop {
+            match progress {
+                CycleProgress::Done(run) => return Ok(*run),
+                CycleProgress::Parked(parked) => {
+                    let refusal = ToolOutcome::Refused(format!(
+                        "no such tool: {} — this agent was created with no dynamic tools",
+                        parked.call.tool
+                    ));
+                    let agent = parked.agent;
+                    let call = parked.call.call.clone();
+                    progress = parked
+                        .answer(backend, agent, call, refusal)
+                        .map_err(|(e, _)| e)?;
+                }
+            }
+        }
+    }
+}
+
+/// A saga mid-turn, inseparable from the exact tool call it is parked on.
+///
+/// The only way to advance a parked saga is [`Self::answer`], which consumes
+/// this value — a call parked on one cycle's saga can never be answered
+/// against a different cycle's saga, because there is no way to obtain the
+/// two separately and recombine them.
+#[derive(Debug)]
+pub struct ParkedCycle {
+    saga: CycleSaga,
+    agent: AgentId,
+    call: ToolCall,
+}
+
+impl ParkedCycle {
+    pub fn agent(&self) -> AgentId {
+        self.agent
+    }
+
+    pub fn call(&self) -> &ToolCall {
+        &self.call
+    }
+
+    /// The saga this call is parked on, for read-only inspection
+    /// (`is_finished`, `worktree`, …) without giving up the pairing.
+    pub fn saga(&self) -> &CycleSaga {
+        &self.saga
+    }
+
+    /// Give up the pairing and take the bare saga — for a map-based driver
+    /// ([`CoupledSpawner::begin`]) that re-derives the parked call from the
+    /// saga's own state on the next [`CoupledSpawner::answer`] rather than
+    /// holding it alongside.
+    pub fn into_saga(self) -> CycleSaga {
+        self.saga
+    }
+
+    /// Abandon (cancel) this parked cycle, consuming it.
+    pub fn abandon(mut self) -> Result<(), WorktreeError> {
+        self.saga.abandon()
+    }
+
+    /// Answer this exact parked call and drive on to the next stop.
+    ///
+    /// `agent`/`call` are re-checked against what this bundle is actually
+    /// parked on (same correlation check [`CycleSaga::answer`] has always
+    /// made) — a wire-supplied id that doesn't match is refused before
+    /// anything reaches the backend.
+    ///
+    /// On failure the error is paired with an [`AnswerFailure`] saying
+    /// whether this saga is still alive and parked (a bad `agent`/`call`
+    /// never touched it — the SAME `ParkedCycle` comes back, retryable) or
+    /// whether it already rolled itself back (a round-backstop trip or a
+    /// backend failure — nothing is left to retry). A caller that only ever
+    /// reinserted a table entry on `Ok` would leak a still-good cycle out of
+    /// its table on every misrouted retry; one that always treated a failure
+    /// as terminal would leak the backend of a cycle that merely got a wrong
+    /// call id. Case on [`AnswerFailure`] to do neither.
+    pub fn answer(
+        mut self,
+        backend: &mut dyn AgentBackend,
+        agent: AgentId,
+        call: ToolCallId,
+        outcome: ToolOutcome,
+    ) -> Result<CycleProgress, (SpawnError, AnswerFailure)> {
+        match self.saga.answer(backend, agent, call, outcome) {
+            Ok(step) => Ok(CycleProgress::from_step(self.saga, step)),
+            Err(e) => {
+                let failure = if self.saga.is_finished() {
+                    AnswerFailure::RolledBack
+                } else {
+                    AnswerFailure::StillParked(Box::new(self))
+                };
+                Err((e, failure))
+            }
+        }
+    }
+}
+
+/// What a failed [`ParkedCycle::answer`] left behind.
+#[derive(Debug)]
+pub enum AnswerFailure {
+    /// The saga was never touched — the failure was a correlation mismatch
+    /// (wrong agent, wrong call, or a call answered after the saga already
+    /// finished). The same [`ParkedCycle`], unchanged, comes back so a caller
+    /// can retry with the correct one.
+    StillParked(Box<ParkedCycle>),
+    /// The saga rolled itself back before returning — a round-backstop trip
+    /// or a backend failure. Its binding is already settled; nothing is left
+    /// to retry, and no [`CycleSaga`] survives to (mis)represent otherwise.
+    RolledBack,
+}
+
 /// The coupled pair a successful spawn yields, plus the backend thread
 /// identity a later attach would need.
 #[derive(Debug, Clone)]
@@ -551,9 +707,11 @@ impl std::fmt::Debug for CycleSaga {
 impl CycleSaga {
     /// Run the saga from `Allocating` to its first stop.
     ///
-    /// Returns the saga alongside the step even when the step is
-    /// [`SpawnStep::Done`], so a caller can read the terminal state uniformly;
-    /// [`is_finished`](Self::is_finished) says which it is.
+    /// Returns a [`CycleProgress`] that bundles the saga with where it
+    /// stopped — a `Done` result carries no saga to mix up with another
+    /// cycle's, and a `Parked` result owns its saga inseparably from the call
+    /// it parked on. [`CycleProgress::run_to_completion`] and
+    /// [`ParkedCycle::answer`] are the only ways to drive it further.
     ///
     /// See the module docs for the stage diagram and rollback semantics. Every
     /// error returned here has already rolled back.
@@ -561,7 +719,7 @@ impl CycleSaga {
         substrate: &Arc<Mutex<SpawnSubstrate>>,
         backend: &mut dyn AgentBackend,
         request: &SpawnRequest,
-    ) -> Result<(Self, SpawnStep), SpawnError> {
+    ) -> Result<CycleProgress, SpawnError> {
         // --- critical section: allocate, mint, bind. No backend call here. ---
         let (worktree, agent, binding_ref, git_dir, lease) = {
             let mut sub = lock_substrate(substrate, SpawnStage::Allocating)?;
@@ -642,7 +800,7 @@ impl CycleSaga {
             settled: false,
         };
         let step = saga.settle_step(event)?;
-        Ok((saga, step))
+        Ok(CycleProgress::from_step(saga, step))
     }
 
     /// Answer the parked tool call and drive on to the next stop.
@@ -710,40 +868,6 @@ impl CycleSaga {
             }
         };
         self.settle_step(event)
-    }
-
-    /// Drive to completion, refusing every tool call the child makes.
-    ///
-    /// The no-tools path: a request carrying no declarations should produce no
-    /// calls, and one that arrives anyway is refused rather than left parked.
-    ///
-    /// A COMBINATOR over [`Self::answer`], never a second saga implementation.
-    ///
-    /// `first` is the step [`Self::begin`] already returned. It is a parameter
-    /// rather than something the saga re-derives because the first step is not
-    /// reconstructible: a parked call's TOOL NAME (which the refusal text
-    /// names) is not saga state, and a first step that was already
-    /// [`SpawnStep::Done`] carries the only [`OneCycleRun`] there will ever be.
-    /// Threading it through is what keeps this a combinator instead of a
-    /// second driving path.
-    pub fn run_to_completion(
-        &mut self,
-        backend: &mut dyn AgentBackend,
-        first: SpawnStep,
-    ) -> Result<OneCycleRun, SpawnError> {
-        let mut step = first;
-        loop {
-            match step {
-                SpawnStep::Done(run) => return Ok(*run),
-                SpawnStep::ToolCall { agent, call } => {
-                    let refusal = ToolOutcome::Refused(format!(
-                        "no such tool: {} — this agent was created with no dynamic tools",
-                        call.tool
-                    ));
-                    step = self.answer(backend, agent, call.call, refusal)?;
-                }
-            }
-        }
     }
 
     pub fn agent(&self) -> AgentId {
@@ -1073,11 +1197,17 @@ impl CoupledSpawner {
         backend: &mut dyn AgentBackend,
         request: &SpawnRequest,
     ) -> Result<SpawnStep, SpawnError> {
-        let (saga, step) = CycleSaga::begin(&self.substrate, backend, request)?;
-        if !saga.is_finished() {
-            self.running.insert(saga.agent(), saga);
+        match CycleSaga::begin(&self.substrate, backend, request)? {
+            CycleProgress::Done(run) => Ok(SpawnStep::Done(run)),
+            CycleProgress::Parked(parked) => {
+                let step = SpawnStep::ToolCall {
+                    agent: parked.agent(),
+                    call: parked.call().clone(),
+                };
+                self.running.insert(parked.agent(), parked.into_saga());
+                Ok(step)
+            }
         }
-        Ok(step)
     }
 
     /// BEGIN a saga and hand it to the caller instead of storing it.
@@ -1092,7 +1222,7 @@ impl CoupledSpawner {
         &self,
         backend: &mut dyn AgentBackend,
         request: &SpawnRequest,
-    ) -> Result<(CycleSaga, SpawnStep), SpawnError> {
+    ) -> Result<CycleProgress, SpawnError> {
         CycleSaga::begin(&self.substrate, backend, request)
     }
 
@@ -1131,7 +1261,7 @@ impl CoupledSpawner {
     /// The whole saga behind ONE call, refusing every tool call the child
     /// makes.
     ///
-    /// A combinator over [`CycleSaga::begin`] + [`CycleSaga::run_to_completion`],
+    /// A combinator over [`CycleSaga::begin`] + [`CycleProgress::run_to_completion`],
     /// holding no map entry: nothing can step this cycle from outside, so
     /// nothing needs to find it.
     pub fn spawn_one_cycle(
@@ -1139,8 +1269,7 @@ impl CoupledSpawner {
         backend: &mut dyn AgentBackend,
         request: &SpawnRequest,
     ) -> Result<OneCycleRun, SpawnError> {
-        let (mut saga, step) = CycleSaga::begin(&self.substrate, backend, request)?;
-        saga.run_to_completion(backend, step)
+        CycleSaga::begin(&self.substrate, backend, request)?.run_to_completion(backend)
     }
 
     /// Settle `lease` to `to`'s terminal state (rollback / completion

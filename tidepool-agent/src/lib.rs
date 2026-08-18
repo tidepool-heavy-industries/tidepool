@@ -28,6 +28,7 @@ pub use seam::{
     ToolCallId, ToolOutcome, ToolReply, TurnEvent, TurnId,
 };
 pub use spawn::{
-    CoupledSpawner, CycleSaga, OneCycleRun, SpawnError, SpawnReceipt, SpawnRequest, SpawnStage,
-    SpawnStep, SpawnSubstrate, SpawnWorkspace, WorkerRun, MAX_TOOL_ROUNDS,
+    AnswerFailure, CoupledSpawner, CycleProgress, CycleSaga, OneCycleRun, ParkedCycle, SpawnError,
+    SpawnReceipt, SpawnRequest, SpawnStage, SpawnStep, SpawnSubstrate, SpawnWorkspace, WorkerRun,
+    MAX_TOOL_ROUNDS,
 };

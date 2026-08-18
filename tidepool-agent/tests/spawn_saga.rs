@@ -24,8 +24,8 @@ use tidepool_agent::seam::{
     ReasoningEffort, ThreadSpec, ToolCall, ToolCallId, ToolOutcome, ToolReply, TurnEvent, TurnId,
 };
 use tidepool_agent::spawn::{
-    CoupledSpawner, CycleSaga, SpawnError, SpawnRequest, SpawnStage, SpawnStep, SpawnWorkspace,
-    MAX_TOOL_ROUNDS,
+    CoupledSpawner, CycleProgress, CycleSaga, SpawnError, SpawnRequest, SpawnStage, SpawnStep,
+    SpawnWorkspace, MAX_TOOL_ROUNDS,
 };
 use tidepool_worktree::testing::TestRepo;
 use tidepool_worktree::{
@@ -1235,17 +1235,22 @@ fn three_detached_sagas_complete_out_of_spawn_order_on_three_threads() {
         handles.push(std::thread::spawn(move || {
             // The WHOLE saga runs on this thread: allocate, bind, start the
             // thread, run the turn.
-            let (mut saga, step) = CycleSaga::begin(&substrate, &mut backend, &request)
+            let progress = CycleSaga::begin(&substrate, &mut backend, &request)
                 .expect("each cycle begins independently");
-            assert!(!saga.is_finished(), "the script parks before it completes");
+            let parked = match progress {
+                CycleProgress::Parked(parked) => parked,
+                CycleProgress::Done(run) => {
+                    panic!("the script parks before it completes: {run:?}")
+                }
+            };
             bound_tx
-                .send((index, saga.worktree().id().clone()))
+                .send((index, parked.saga().worktree().id().clone()))
                 .expect("report the binding");
 
             // Refuses the gate call, then blocks inside `resume` until this
             // cycle's own control is released.
-            let run = saga
-                .run_to_completion(&mut backend, step)
+            let run = CycleProgress::Parked(parked)
+                .run_to_completion(&mut backend)
                 .expect("the released cycle completes");
             done_tx.send(index).expect("report completion");
             run
@@ -1359,7 +1364,7 @@ fn a_blocked_saga_is_cancelled_from_another_thread_and_settles_released() {
     // `Send + Sync` object rather than a `&mut self` method.
     let canceller = backend.canceller();
 
-    let (mut saga, step) = spawner
+    let progress = spawner
         .begin_detached(
             &mut backend,
             &request(
@@ -1368,7 +1373,14 @@ fn a_blocked_saga_is_cancelled_from_another_thread_and_settles_released() {
             ),
         )
         .expect("begin_detached parks on the gate call");
-    let worktree = saga.worktree().id().clone();
+    let parked = match progress {
+        CycleProgress::Parked(parked) => parked,
+        CycleProgress::Done(run) => panic!("the script parks before it completes: {run:?}"),
+    };
+    let agent = parked.agent();
+    let call = parked.call().clone();
+    let worktree = parked.saga().worktree().id().clone();
+    let mut saga = parked.into_saga();
 
     // Active while the cycle is live — a blocked turn is not a finished one.
     let active = rows_on_disk(&fixture.binding_root(), &worktree);
@@ -1378,8 +1390,17 @@ fn a_blocked_saga_is_cancelled_from_another_thread_and_settles_released() {
     let (started_tx, started_rx) = std::sync::mpsc::channel::<()>();
     let handle = std::thread::spawn(move || {
         started_tx.send(()).expect("announce the drive");
+        // Refuses the gate call (this agent was created with no dynamic
+        // tools), which is what blocks inside `resume` until this cycle's
+        // canceller is released — same drive `CycleProgress::run_to_completion`
+        // does, spelled out here because this gate needs the saga back
+        // afterward to assert on directly.
+        let refusal = ToolOutcome::Refused(format!(
+            "no such tool: {} — this agent was created with no dynamic tools",
+            call.tool
+        ));
         let err = saga
-            .run_to_completion(&mut backend, step)
+            .answer(&mut backend, agent, call.call, refusal)
             .expect_err("a cancelled cycle cannot complete");
         (saga, err)
     });
@@ -1455,7 +1476,7 @@ fn abandon_settles_released_once_and_is_a_no_op_on_a_settled_saga() {
         },
         MockStep::Completes(CycleResultPayload::Absent),
     ]);
-    let (mut parked, _step) = spawner
+    let progress = spawner
         .begin_detached(
             &mut parked_backend,
             &request(
@@ -1464,17 +1485,25 @@ fn abandon_settles_released_once_and_is_a_no_op_on_a_settled_saga() {
             ),
         )
         .expect("begin_detached");
-    let abandoned = parked.worktree().id().clone();
-    assert!(!parked.is_finished());
+    let parked = match progress {
+        CycleProgress::Parked(parked) => parked,
+        CycleProgress::Done(run) => panic!("this script parks on ask_parent first: {run:?}"),
+    };
+    // `into_saga` for the raw, repeatable `abandon()` this gate needs —
+    // `ParkedCycle::abandon` is consuming, correct for a caller with one shot
+    // at cancelling, but this gate calls it three times to pin idempotence.
+    let mut saga = parked.into_saga();
+    let abandoned = saga.worktree().id().clone();
+    assert!(!saga.is_finished());
 
-    parked.abandon().expect("abandon a live cycle");
-    assert!(parked.is_finished(), "an abandoned saga is finished");
-    parked.abandon().expect("a second abandon is a no-op");
-    parked.abandon().expect("and a third");
+    saga.abandon().expect("abandon a live cycle");
+    assert!(saga.is_finished(), "an abandoned saga is finished");
+    saga.abandon().expect("a second abandon is a no-op");
+    saga.abandon().expect("and a third");
 
     // --- 2. A COMPLETED saga: abandon must not settle a second time. ---
     let mut completed_backend = MockBackend::completing(CycleResultPayload::Absent);
-    let (mut completed, step) = spawner
+    let progress = spawner
         .begin_detached(
             &mut completed_backend,
             &request(
@@ -1483,15 +1512,18 @@ fn abandon_settles_released_once_and_is_a_no_op_on_a_settled_saga() {
             ),
         )
         .expect("begin_detached");
-    let finished = completed.worktree().id().clone();
-    assert!(
-        completed.is_finished(),
-        "a script that completes at the first stop is finished at begin"
-    );
-    assert!(matches!(step, SpawnStep::Done(_)));
-    completed
-        .abandon()
-        .expect("abandon on a completed cycle is a no-op");
+    // A cycle that completes at its very first stop yields `Done` straight
+    // from `begin_detached` — no `CycleSaga` survives to (mis)call `abandon`
+    // on. What used to be a runtime idempotency check is now a type that
+    // cannot represent the misuse.
+    let run = match progress {
+        CycleProgress::Done(run) => run,
+        CycleProgress::Parked(parked) => panic!(
+            "a script that completes at the first stop parks nowhere: {:?}",
+            parked.call()
+        ),
+    };
+    let finished = run.receipt.worktree.clone();
 
     // --- 3. A ROLLED-BACK saga: same rule, reached through a failure. ---
     let mut failed_backend =
@@ -1517,8 +1549,8 @@ fn abandon_settles_released_once_and_is_a_no_op_on_a_settled_saga() {
         .find(|id| *id != abandoned && *id != finished)
         .expect("the failed spawn still created a worktree");
 
-    drop(parked);
-    drop(completed);
+    drop(saga);
+    drop(run);
     drop(spawner);
 
     // One row each, in the state that cycle's ending earned — never two.
