@@ -3219,6 +3219,57 @@ impl JitEffectMachine {
         }
     }
 
+    /// Test/debug-only: force a real Cheney minor collection against this
+    /// session's retained heap, without running any compiled code. Not part
+    /// of the public API.
+    ///
+    /// Production code has no reason to trigger a collection deterministically
+    /// between two calls — every real collection fires from inside compiled
+    /// code, mid-allocation (`gc_trigger`). This exists to close that gap for
+    /// diagnosing whether a collection LANDING BETWEEN a suspend-time tenure
+    /// (`Self::tenure_finalized_payload`) and a later resume corrupts a parked
+    /// frame's own reference into what tenuring evacuated (the tenure-then-
+    /// resume rooting family — see `tidepool-codegen/CLAUDE.md`'s diagnostics
+    /// table). Calling it with the machine suspended (slot path) or holding
+    /// parked frames (registry path) is exactly the intended use.
+    ///
+    /// Installs registries and builds an ordinary session `VMContext` (the
+    /// same construction `with_active_run` uses), calls
+    /// `host_fns::gc_trigger` directly with NO compiled frame on the stack —
+    /// `frame_walker::walk_frames` degrades gracefully in that case (finds no
+    /// JIT stack maps, contributes zero stack roots; see its doc), so this
+    /// collection's root set is exactly {persistent, stowed, remembered}, the
+    /// same classes a real mid-allocation collection would fold in — then
+    /// reclaims the (possibly relocated) heap buffer back onto the session,
+    /// mirroring `RegistryGuard`'s ordinary drop-time reclaim.
+    ///
+    /// # Panics
+    /// Panics if this is not a session machine (`compile_session`).
+    #[doc(hidden)]
+    pub fn force_gc_for_test(&mut self) {
+        assert!(
+            self.session.is_some(),
+            "force_gc_for_test requires a session machine (compile_session)"
+        );
+        let mut guard = self.install_registries();
+        let mut vmctx = self.make_session_vmctx();
+        // SAFETY: machine_state outlives this call (owned by self), matching
+        // every other run entry's vmctx construction.
+        vmctx.machine_state = &mut self.machine_state as *mut MachineState;
+        let vmctx_ptr = &mut vmctx as *mut crate::context::VMContext;
+        // gc_trigger reads the caller's own frame pointer to start its stack
+        // walk, which is sound to call from plain Rust (no JIT frame on the
+        // stack) per `walk_frames`'s doc — degrades to zero stack roots.
+        crate::host_fns::gc_trigger(vmctx_ptr);
+        // SAFETY: vmctx is a local in this frame, live until `guard` drops at
+        // the end of this function — the same arm-last discipline
+        // `with_active_run` uses. Reclaims the (possibly relocated) heap
+        // buffer back into `self.session`.
+        unsafe {
+            guard.arm_reclaim(&mut self.session as *mut _, vmctx_ptr as *const _);
+        }
+    }
+
     // ----------------------------------------------------------------------
     // Nested child runs on a suspended machine.
     //

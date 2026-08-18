@@ -951,6 +951,20 @@ where
         self.core.machine().map(|m| m.heap_stats())
     }
 
+    /// Test/debug-only passthrough to
+    /// [`JitEffectMachine::force_gc_for_test`] — forces a real minor
+    /// collection against the session's retained heap without running any
+    /// compiled code, for diagnosing whether a collection landing between a
+    /// suspend-time tenure and a later resume corrupts a parked frame's own
+    /// reference into what tenuring evacuated. No-op (does nothing) before
+    /// the machine bootstraps.
+    #[doc(hidden)]
+    pub fn force_gc_for_test(&mut self) {
+        if let Some(m) = self.core.machine_mut() {
+            m.force_gc_for_test();
+        }
+    }
+
     /// The CURRENT value-plane binding names (newest gen per name) — what a
     /// machine rotation would lose (one-session plan, Phase 4: enumerated,
     /// legible loss, never silent).
