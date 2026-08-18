@@ -26,7 +26,7 @@
 //!    parks the child's turn until the timeout kills it. That holds for a
 //!    declared tool, an undeclared one, and a round-cap refusal alike.
 
-use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+use std::os::fd::OwnedFd;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -393,23 +393,13 @@ enum PidFdSlot {
 }
 
 /// Open a pidfd for `pid` via the `pidfd_open(2)` syscall, or report why not.
-///
-/// `libc` ships the syscall NUMBER (`SYS_pidfd_open`) but no typed wrapper —
-/// `pidfd_open` postdates the crate's last hand-written binding for this
-/// family of calls — so this goes through `libc::syscall` directly.
 fn pidfd_open(pid: u32) -> std::io::Result<OwnedFd> {
-    // SAFETY: `pidfd_open(2)` takes a pid and a flags word, both plain
-    // integers with no aliasing or lifetime requirement; a negative return is
-    // `-1` with `errno` set, exactly what `std::io::Error::last_os_error`
-    // reads.
-    let raw = unsafe { libc::syscall(libc::SYS_pidfd_open, pid as libc::pid_t, 0) };
-    if raw < 0 {
-        return Err(std::io::Error::last_os_error());
-    }
-    // SAFETY: `raw` is a valid fd `pidfd_open` just opened and handed to no
-    // one else; `OwnedFd` closing it on drop is the correct ownership
-    // discipline for a fd nothing else holds a reference to.
-    Ok(unsafe { OwnedFd::from_raw_fd(raw as std::os::fd::RawFd) })
+    let Some(rpid) = rustix::process::Pid::from_raw(pid as i32) else {
+        return Err(std::io::Error::other(format!(
+            "pid {pid} is not a valid non-zero pid to open a pidfd for"
+        )));
+    };
+    rustix::process::pidfd_open(rpid, rustix::process::PidfdFlags::empty()).map_err(Into::into)
 }
 
 /// What [`CodexAgentBackend::pidfd`] (or a test) should hold for `pid`: a
@@ -498,42 +488,26 @@ impl BackendCanceller for CodexCanceller {
             // the hazard a pidfd exists to remove.
             return;
         };
-        let raw = fd.as_raw_fd();
-        // SAFETY: `raw` names a pidfd this process owns, kept alive by `slot`
-        // (held for this whole call) — never a bare numeric pid. It was
-        // opened via `pidfd_open` at connect time, bound to the exact process
-        // instance the backend spawned; once that instance is reaped the fd's
+        // `fd` names a pidfd this process owns, kept alive by `slot` (held
+        // for this whole call) — never a bare numeric pid. It was opened via
+        // `pidfd_open` at connect time, bound to the exact process instance
+        // the backend spawned; once that instance is reaped the fd's
         // referent is permanently gone, so a pid number the kernel later
         // hands to an unrelated live process is unreachable through this fd
         // by construction. `ESRCH` from a process that exited in the window
         // between acquiring the pidfd and this call is the outcome
         // cancellation wanted, so it is ignored.
-        unsafe {
-            libc::syscall(
-                libc::SYS_pidfd_send_signal,
-                raw,
-                libc::SIGKILL,
-                std::ptr::null::<libc::siginfo_t>(),
-                0,
-            );
-        }
+        let _ = rustix::process::pidfd_send_signal(fd, rustix::process::Signal::KILL);
         // Confirm: a pidfd becomes readable (POLLIN) once its process has
         // been reaped, so one poll — bounded by the same timeout the old
         // design used for its confirm loop — replaces the identity re-check
         // that loop needed; there is no identity left to re-check.
-        let mut pfd = libc::pollfd {
-            fd: raw,
-            events: libc::POLLIN,
-            revents: 0,
+        let mut pfd = [rustix::event::PollFd::new(fd, rustix::event::PollFlags::IN)];
+        let timeout = rustix::event::Timespec {
+            tv_sec: CANCEL_CONFIRM_TIMEOUT.as_secs() as _,
+            tv_nsec: CANCEL_CONFIRM_TIMEOUT.subsec_nanos() as _,
         };
-        unsafe {
-            libc::poll(
-                &mut pfd,
-                1,
-                libc::c_int::try_from(CANCEL_CONFIRM_TIMEOUT.as_millis())
-                    .unwrap_or(libc::c_int::MAX),
-            );
-        }
+        let _ = rustix::event::poll(&mut pfd, Some(&timeout));
     }
 }
 

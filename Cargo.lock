@@ -3866,7 +3866,7 @@ name = "tidepool-agent"
 version = "0.1.0"
 dependencies = [
  "codex-codes",
- "libc",
+ "rustix",
  "serde",
  "serde_json",
  "sha2 0.11.0",
