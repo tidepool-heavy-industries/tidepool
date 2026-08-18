@@ -34,7 +34,7 @@ use tokio_util::sync::CancellationToken;
 use tidepool_effect::pause::PauseGate;
 
 use crate::command::{BlockItem, DeclText, ExprText, MetaCommand, SessionCommand};
-use crate::manager::{empty_cancel_slot, CancelSlot, SessionManager};
+use crate::manager::{empty_cancel_slot, CancelSlot, CheckoutCustody, SessionManager};
 use crate::session::{BoxedStack, Session, SessionConfig, TurnStep, DEFAULT_NURSERY_SIZE};
 use crate::state::{take_suspension, ContinuationId, SessionState, SharedState, Suspension};
 
@@ -119,10 +119,11 @@ fn wedged_message(op: &str, to_secs: u64, effect_in_flight: bool) -> String {
 struct DriveCtl {
     state: SharedState,
     cancel: CancelSlot,
-    /// The manager-entry epoch this turn's session was checked out of. A
-    /// restore against a stale epoch (a `session_reset` swapped the entry
-    /// mid-turn) drops the session instead of clobbering the fresh one.
-    epoch: u64,
+    /// This turn's checkout custody token. A settlement against a stale epoch
+    /// (a `session_reset` swapped the entry mid-turn) drops the session
+    /// instead of clobbering the fresh one; the token itself guarantees the
+    /// epoch it carries can't be separated from the session it settles.
+    custody: CheckoutCustody,
 }
 
 /// One turn's blocking execution: the `Session` moves in and comes back out —
@@ -661,10 +662,10 @@ impl TidepoolReplServer {
             .manager
             .cancel_slot()
             .unwrap_or_else(empty_cancel_slot);
-        let epoch = checkout.epoch;
+        let (session, custody) = checkout.into_parts();
         let turn_gate = Arc::clone(&gate);
         let turn_captured = captured.clone();
-        let join = spawn_turn(checkout.session, move |session| {
+        let join = spawn_turn(session, move |session| {
             session.set_eval_input(eval_input);
             session.run_turn(&cmd, turn_gate, &turn_captured)
         });
@@ -676,7 +677,7 @@ impl TidepoolReplServer {
             DriveCtl {
                 state,
                 cancel,
-                epoch,
+                custody,
             },
             ct,
         )
@@ -829,10 +830,10 @@ impl TidepoolReplServer {
         // The captured buffer carries over from the suspending turn, so the
         // resumed turn's drain includes what the pre-ask items printed.
         let captured = suspension.captured;
-        let epoch = checkout.epoch;
+        let (session, custody) = checkout.into_parts();
         let turn_gate = Arc::clone(&gate);
         let turn_captured = captured.clone();
-        let join = spawn_turn(checkout.session, move |session| {
+        let join = spawn_turn(session, move |session| {
             session.resume_turn(canonical, turn_gate, &turn_captured)
         });
         Ok(self
@@ -844,7 +845,7 @@ impl TidepoolReplServer {
                 DriveCtl {
                     state,
                     cancel,
-                    epoch,
+                    custody,
                 },
                 ct,
             )
@@ -936,7 +937,7 @@ impl TidepoolReplServer {
         let DriveCtl {
             state,
             cancel,
-            epoch,
+            custody,
         } = ctl;
         let turn_timeout = self
             .inner
@@ -973,7 +974,7 @@ impl TidepoolReplServer {
                         // Aborted at a safepoint — clear the flag and put the
                         // session back Idle (self-healed).
                         h.reset();
-                        self.restore_idle(epoch, run.session);
+                        self.restore_idle(custody, run.session);
                         *state.lock() = SessionState::Idle;
                         return CallToolResult::error(vec![Content::text(format!(
                             "{op} timed out after {to_secs}s and was aborted; the \
@@ -993,7 +994,7 @@ impl TidepoolReplServer {
                 *state.lock() = SessionState::Wedged {
                     since: Instant::now(),
                 };
-                self.inner.manager.drop_entry(epoch);
+                self.inner.manager.retire(custody);
                 return CallToolResult::error(vec![Content::text(wedged_message(
                     op,
                     to_secs,
@@ -1011,7 +1012,7 @@ impl TidepoolReplServer {
                 *state.lock() = SessionState::Wedged {
                     since: Instant::now(),
                 };
-                self.inner.manager.drop_entry(epoch);
+                self.inner.manager.retire(custody);
                 return CallToolResult::error(vec![Content::text(format!(
                     "{op}: session turn thread crashed (likely a JIT signal — exhausted case \
                      branch or invalid memory access). {RECLAIMED_NOTICE}"
@@ -1023,7 +1024,7 @@ impl TidepoolReplServer {
             TurnStep::Completed(outcome) => {
                 let is_error = outcome.is_error();
                 let rendered = outcome.render();
-                self.restore_idle(epoch, run.session);
+                self.restore_idle(custody, run.session);
                 *state.lock() = SessionState::Idle;
                 if is_error {
                     let out = captured.snapshot();
@@ -1051,7 +1052,7 @@ impl TidepoolReplServer {
                 // teardown is always forced to decide its fate.
                 self.inner
                     .manager
-                    .restore_suspended(epoch, run.session, cont_id.clone());
+                    .restore_suspended(custody, run.session, cont_id.clone());
                 *state.lock() = SessionState::Suspended(Box::new(Suspension {
                     cont_id,
                     captured,
@@ -1067,11 +1068,11 @@ impl TidepoolReplServer {
     /// bindings snapshot for the `tidepool://session/bindings` resource first
     /// (a decl/bind/reset may have changed the environment). The read side
     /// never drives a turn, so this is the one place the snapshot advances.
-    fn restore_idle(&self, epoch: u64, session: Box<Session>) {
+    fn restore_idle(&self, custody: CheckoutCustody, session: Box<Session>) {
         if let Some(slot) = self.inner.manager.bindings_slot() {
             *slot.lock() = session.bindings_snapshot();
         }
-        self.inner.manager.restore_idle(epoch, session);
+        self.inner.manager.restore_idle(custody, session);
     }
 
     /// The live `tidepool://session/bindings` body: the worker's last-published
@@ -1154,10 +1155,10 @@ async fn abort_abandoned(inner: Arc<ReplServerInner>, state: SharedState, cont_i
         *state.lock() = SessionState::Idle;
         return;
     };
-    let epoch = checkout.epoch;
+    let (session, custody) = checkout.into_parts();
     let gate = PauseGate::new();
     let captured = CapturedOutput::new();
-    let join = spawn_turn(checkout.session, move |session| {
+    let join = spawn_turn(session, move |session| {
         session.abort_turn(
             "continuation expired before it was resumed".to_string(),
             gate,
@@ -1170,7 +1171,7 @@ async fn abort_abandoned(inner: Arc<ReplServerInner>, state: SharedState, cont_i
                 if let Some(slot) = inner.manager.bindings_slot() {
                     *slot.lock() = run.session.bindings_snapshot();
                 }
-                inner.manager.restore_idle(epoch, run.session);
+                inner.manager.restore_idle(custody, run.session);
                 *state.lock() = SessionState::Idle;
             }
             TurnStep::Suspended(_) => {
@@ -1179,11 +1180,11 @@ async fn abort_abandoned(inner: Arc<ReplServerInner>, state: SharedState, cont_i
                 // holding a continuation no caller knows the id of. Retire the
                 // session instead; the next `session_run` opens a fresh one.
                 tracing::warn!("reaped continuation re-suspended on abort; retiring the session");
-                inner.manager.drop_entry(epoch);
+                inner.manager.retire(custody);
             }
         },
         Err(_join_err) => {
-            inner.manager.drop_entry(epoch);
+            inner.manager.retire(custody);
         }
     }
 }

@@ -16,6 +16,13 @@
 //! Every checkout carries an EPOCH. `session_reset` replaces the whole entry, so
 //! an in-flight turn can outlive the entry it was checked out of; restoring
 //! against a stale epoch DROPS the session instead of clobbering the fresh one.
+//! The epoch travels as a private [`CheckoutCustody`] token, not a bare `u64`:
+//! a turn can only settle its checkout (`restore_idle`/`restore_suspended`/
+//! `retire`) by consuming the SAME token `checkout_run`/`checkout_resume`
+//! minted, so a settlement call can never be built from an epoch and a
+//! session that don't actually belong together — and dropping the token
+//! unsettled is loud (a leaked checkout means the manager's only slot is stuck
+//! at `Running` forever).
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -84,16 +91,82 @@ struct SessionEntry {
     bindings_slot: BindingsSlot,
 }
 
-/// A session checked OUT of the manager for the duration of one turn. The turn
-/// owns the session; it must hand it back through
-/// [`SessionManager::restore_idle`] / [`SessionManager::restore_suspended`], or
-/// declare it lost through [`SessionManager::drop_entry`] — all three keyed on
-/// [`Self::epoch`].
+/// A session checked OUT of the manager for the duration of one turn.
+///
+/// The turn drives `session` (moved out of its slot) and, once it settles,
+/// must hand the WHOLE checkout back through exactly one of
+/// [`SessionManager::restore_idle`] / [`SessionManager::restore_suspended`] /
+/// [`SessionManager::retire`] — never the epoch and the session separately.
+/// [`Self::into_parts`] is the only way to split the session out for driving
+/// the turn; it hands back a [`CheckoutCustody`] token that carries the epoch
+/// PRIVATELY and must itself be consumed by one of those three transitions
+/// (it panics in debug builds — mirrors `tidepool_runtime::session::
+/// RootCustody` — if dropped unconsumed), so a settlement call can no longer
+/// be built from an epoch and a session that don't actually belong together.
+#[must_use]
 pub struct Checkout {
-    /// The session, moved out of its slot.
-    pub session: Box<Session>,
-    /// The entry epoch this checkout came from.
-    pub epoch: u64,
+    session: Box<Session>,
+    custody: CheckoutCustody,
+}
+
+impl Checkout {
+    /// Split the checkout into the session (to drive the turn on) and its
+    /// custody token (to settle the checkout once the turn finishes). The
+    /// only way to get either piece out of a `Checkout`.
+    pub fn into_parts(self) -> (Box<Session>, CheckoutCustody) {
+        (self.session, self.custody)
+    }
+}
+
+/// The linear half of a [`Checkout`]: proof that a session was checked out,
+/// carrying the entry epoch it must be settled against. `pub(crate)`
+/// construction ([`CheckoutCustody::new`]) confines minting to
+/// [`SessionManager::checkout_run`] / [`SessionManager::checkout_resume`] —
+/// the two real checkout sites — so a settlement call can never be handed a
+/// forged epoch. Consuming it (`into_epoch`, used only by the three
+/// settlement methods) is the ONLY way to recover the epoch; dropping it
+/// unconsumed is a lost checkout — a turn that would leave the manager's only
+/// slot stuck at `Running` forever — so `Drop` panics loudly in debug builds
+/// (mirrors `tidepool_runtime::session::RootCustody`, which established this
+/// idiom for the same "linear obligation, backed by a bomb" shape).
+#[must_use]
+#[derive(Debug)]
+pub struct CheckoutCustody(Option<u64>);
+
+impl CheckoutCustody {
+    fn new(epoch: u64) -> Self {
+        CheckoutCustody(Some(epoch))
+    }
+
+    /// Consume the token, releasing the epoch to the caller — the ONLY way
+    /// out. Every legitimate settlement (`restore_idle`/`restore_suspended`/
+    /// `retire`) goes through this exactly once.
+    fn into_epoch(mut self) -> u64 {
+        self.0
+            .take()
+            .expect("CheckoutCustody always holds an epoch until into_epoch consumes it")
+    }
+}
+
+impl Drop for CheckoutCustody {
+    fn drop(&mut self) {
+        let Some(epoch) = self.0 else { return };
+        let detail = format!(
+            "CheckoutCustody dropped without being consumed — epoch {epoch}'s checkout was \
+             never settled (no restore_idle/restore_suspended/retire). The manager entry this \
+             checkout came from is left stuck at Running: no future session_run can check the \
+             session back out."
+        );
+        // Never panic while already unwinding — see `RootCustody`'s Drop impl
+        // (tidepool-runtime/src/session/resident.rs) for why: an abort loses
+        // the original diagnosis, and a leak observed mid-unwind is almost
+        // always a CONSEQUENCE of that unwind, not an independent bug.
+        if std::thread::panicking() {
+            tracing::error!("{detail} (reported during an active unwind, so not raised)");
+            return;
+        }
+        debug_assert!(false, "{}", detail);
+    }
 }
 
 /// The single implicit session's manager: holds AT MOST one resident session.
@@ -165,7 +238,7 @@ impl SessionManager {
         match std::mem::replace(&mut entry.slot, SessionSlot::Running) {
             SessionSlot::Idle(session) => Some(Checkout {
                 session,
-                epoch: entry.epoch,
+                custody: CheckoutCustody::new(entry.epoch),
             }),
             other => {
                 entry.slot = other;
@@ -189,7 +262,7 @@ impl SessionManager {
         match std::mem::replace(&mut entry.slot, SessionSlot::Running) {
             SessionSlot::Suspended { session, .. } => Some(Checkout {
                 session,
-                epoch: entry.epoch,
+                custody: CheckoutCustody::new(entry.epoch),
             }),
             other => {
                 entry.slot = other;
@@ -198,10 +271,13 @@ impl SessionManager {
         }
     }
 
-    /// Restore a checked-out session as `Idle` (the turn completed).
-    /// A stale `epoch` (the entry was replaced by `session_reset` mid-turn)
-    /// DROPS the session here rather than resurrecting it over the fresh one.
-    pub fn restore_idle(&self, epoch: u64, session: Box<Session>) {
+    /// Restore a checked-out session as `Idle` (the turn completed). Consumes
+    /// `custody` — the epoch it carries and `session` are back together as one
+    /// call, so they cannot come from mismatched checkouts. A stale epoch (the
+    /// entry was replaced by `session_reset` mid-turn) DROPS the session here
+    /// rather than resurrecting it over the fresh one.
+    pub fn restore_idle(&self, custody: CheckoutCustody, session: Box<Session>) {
+        let epoch = custody.into_epoch();
         let mut guard = self.entry.lock();
         match guard.as_mut() {
             Some(entry) if entry.epoch == epoch => entry.slot = SessionSlot::Idle(session),
@@ -211,7 +287,13 @@ impl SessionManager {
 
     /// Restore a checked-out session as `Suspended{cont_id}` (the turn stowed an
     /// `ask` continuation). Same stale-epoch rule as [`Self::restore_idle`].
-    pub fn restore_suspended(&self, epoch: u64, session: Box<Session>, cont_id: ContinuationId) {
+    pub fn restore_suspended(
+        &self,
+        custody: CheckoutCustody,
+        session: Box<Session>,
+        cont_id: ContinuationId,
+    ) {
+        let epoch = custody.into_epoch();
         let mut guard = self.entry.lock();
         match guard.as_mut() {
             Some(entry) if entry.epoch == epoch => {
@@ -222,11 +304,13 @@ impl SessionManager {
     }
 
     /// The turn never gave the session back (a runaway that outran its abort
-    /// grace): drop the WHOLE entry. Honest bookkeeping — the session was moved
-    /// into the blocking closure, so there is nothing left to restore and a slot
-    /// claiming otherwise would lie. The next `session_run` auto-opens a fresh
-    /// session; `session_reset` does the same explicitly. No-op on a stale epoch.
-    pub fn drop_entry(&self, epoch: u64) {
+    /// grace, or the blocking task itself crashed): drop the WHOLE entry.
+    /// Honest bookkeeping — the session was moved into the blocking closure, so
+    /// there is nothing left to restore and a slot claiming otherwise would
+    /// lie. The next `session_run` auto-opens a fresh session; `session_reset`
+    /// does the same explicitly. No-op on a stale epoch.
+    pub fn retire(&self, custody: CheckoutCustody) {
+        let epoch = custody.into_epoch();
         let mut guard = self.entry.lock();
         if guard.as_ref().is_some_and(|e| e.epoch == epoch) {
             *guard = None;
@@ -286,23 +370,28 @@ mod tests {
         assert!(mgr
             .checkout_resume(&ContinuationId("scont_1".into()))
             .is_none());
-        // Restoring/dropping against an absent entry is inert, not a panic.
-        mgr.drop_entry(1);
+        // Restoring/retiring against an absent entry is inert, not a panic.
+        // `CheckoutCustody::new` here stands in for a checkout that was never
+        // actually issued — only this in-crate test can manufacture one;
+        // production code always gets its token from `checkout_run`/
+        // `checkout_resume`.
+        mgr.retire(CheckoutCustody::new(1));
         mgr.remove();
     }
 
-    /// The POSITIVE half of the wedge path: `drop_entry` with the CURRENT epoch
+    /// The POSITIVE half of the wedge path: `retire` with the CURRENT epoch
     /// really does retire the entry, so a wedged turn's session slot is freed
     /// rather than left `Running` forever. (The stale-epoch half — the same call
     /// arriving after a reset — is the ABA test below.)
     #[test]
-    fn drop_entry_on_the_current_epoch_retires_the_entry() {
+    fn retire_on_the_current_epoch_retires_the_entry() {
         let dir = tempfile::tempdir().expect("tempdir");
         let mgr = SessionManager::new();
         assert!(mgr.install(test_session(1, dir.path())).is_ok(), "install");
         let checkout = mgr.checkout_run().expect("idle → running");
+        let (_session, custody) = checkout.into_parts();
 
-        mgr.drop_entry(checkout.epoch);
+        mgr.retire(custody);
         assert!(
             mgr.state().is_none(),
             "a wedged turn's entry must be retired, not left Running"
@@ -332,9 +421,17 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let mgr = SessionManager::new();
 
-        // --- exit 1: `drop_entry` (the two wedge paths) ----------------------
+        // --- exit 1: `retire` (the two wedge paths) ----------------------
         assert!(mgr.install(test_session(1, dir.path())).is_ok(), "install");
         let stale = mgr.checkout_run().expect("idle → running");
+        let (stale_session, stale_custody) = stale.into_parts();
+        // Consume the real token to recover its epoch, so the rest of this
+        // test can mint FRESH `CheckoutCustody` tokens carrying the same
+        // stale epoch — standing in for "the same stale checkout, tried
+        // against a different exit". Real code never does this (a token is
+        // consumed exactly once); only this in-crate test can, via the
+        // module-private constructor.
+        let stale_epoch = stale_custody.into_epoch();
 
         // `session_reset` lands mid-turn: entry removed, fresh session installed.
         mgr.remove();
@@ -346,7 +443,7 @@ mod tests {
 
         // The stale turn now declares itself wedged. It must NOT take the fresh
         // entry with it.
-        mgr.drop_entry(stale.epoch);
+        mgr.retire(CheckoutCustody::new(stale_epoch));
         let after_wedge = mgr
             .state()
             .expect("a stale wedge must not remove the entry installed after the reset");
@@ -356,11 +453,7 @@ mod tests {
         );
 
         // --- exit 2: `restore_idle` (the completed-turn path) ---------------
-        let Checkout {
-            session: stale_session,
-            epoch: stale_epoch,
-        } = stale;
-        mgr.restore_idle(stale_epoch, stale_session);
+        mgr.restore_idle(CheckoutCustody::new(stale_epoch), stale_session);
         let fresh = mgr
             .checkout_run()
             .expect("the fresh session is still Idle and checkoutable");
@@ -372,16 +465,18 @@ mod tests {
 
         // --- exit 3: `restore_suspended` (the stowed-ask path) --------------
         // The same interleaving again, now with session 2 as the stale turn.
-        let Checkout {
-            session: stale2,
-            epoch: stale2_epoch,
-        } = fresh;
+        let (stale2_session, stale2_custody) = fresh.into_parts();
+        let stale2_epoch = stale2_custody.into_epoch();
         mgr.remove();
         assert!(
             mgr.install(test_session(3, dir.path())).is_ok(),
             "a third session installs"
         );
-        mgr.restore_suspended(stale2_epoch, stale2, ContinuationId("scont_stale".into()));
+        mgr.restore_suspended(
+            CheckoutCustody::new(stale2_epoch),
+            stale2_session,
+            ContinuationId("scont_stale".into()),
+        );
         // `checkout_run` refuses a Suspended slot, so its success is itself the
         // proof that the stale hole was not installed on the fresh entry.
         let third = mgr
@@ -392,5 +487,12 @@ mod tests {
             SessionId(3),
             "a stale suspend-restore must drop its session, not install it over the fresh one"
         );
+        // Settle this last checkout before the test ends: an unconsumed
+        // `CheckoutCustody` is exactly the linear-obligation violation this
+        // type exists to catch, so leaving `third` to drop here would panic
+        // instead of confirming the test's own assertions.
+        let (third_session, third_custody) = third.into_parts();
+        mgr.retire(third_custody);
+        drop(third_session);
     }
 }
