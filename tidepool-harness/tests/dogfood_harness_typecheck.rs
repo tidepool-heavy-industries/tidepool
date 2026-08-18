@@ -192,7 +192,7 @@ fn recursive_companion_typechecks() {
     typecheck(
         "harness-dogfooding/recursive-companion",
         outer_row_decls(),
-        "import Tidepool.Thought (ThoughtF)\n",
+        "import Tidepool.Thought (ThoughtF)\nimport Data.List.NonEmpty (NonEmpty)\n",
         concat!(
             "__layerFromProposal :: NodeSeed -> LayerProposal -> ThoughtF NodeSeed\n",
             "__layerFromProposal = layerFromProposal\n",
@@ -202,6 +202,14 @@ fn recursive_companion_typechecks() {
             "__renderPath = renderPath\n",
             "__childPath :: NodePath -> Int -> Text -> NodePath\n",
             "__childPath = childPath\n",
+            // PRD 21 lane C5 — the merge fold's pure decisions, at their exact
+            // declared signatures: 'mergePlan' is the lazy-acquisition gate and
+            // declared-order filter, 'mergeNote' is the resolver-outcome
+            // rendering. Neither touches git or an agent.
+            "__mergePlan :: [Maybe Text] -> Maybe (NonEmpty Text)\n",
+            "__mergePlan = mergePlan\n",
+            "__mergeNote :: Text -> MergeStatus -> Text\n",
+            "__mergeNote = mergeNote\n",
         ),
     );
 }
@@ -233,6 +241,92 @@ fn execute_pure(
         Ok(result) => result.to_json(),
         Err(e) => panic!("{harness_dir}'s resume decisions did not run cleanly:\n{e}"),
     }
+}
+
+/// The recursive companion's merge-fold pure decisions
+/// (PRD 21 lane C5), EXECUTED — not merely compiled.
+/// `recursive_companion_typechecks` above pins `mergePlan`/`mergeNote` at
+/// their exact signatures; this is the next rung: it runs them on the real
+/// JIT and asserts what comes back against the two properties the design
+/// names directly — LAZY acquisition (no content-bearing child means no
+/// plan at all) and DECLARED-ORDER preservation (content-bearing children
+/// survive `mergePlan`'s filter in the order they were declared, `Nothing`
+/// entries dropped) — plus `mergeNote`'s rendering of all three
+/// `MergeStatus` outcomes (clean, resolver-resolved, still-conflicted).
+/// No git and no agent anywhere in this path.
+const RECURSIVE_COMPANION_MERGE_SOURCE: &str = concat!(
+    "{-# LANGUAGE NoImplicitPrelude, OverloadedStrings, DataKinds, TypeOperators, ",
+    "FlexibleContexts, GADTs, ScopedTypeVariables, TypeApplications, LambdaCase, ",
+    "RecordWildCards, OverloadedRecordDot, QuasiQuotes, DeriveGeneric, DeriveAnyClass #-}\n",
+    "module MergeFoldProbe where\n",
+    "import Tidepool.Prelude hiding (render)\n",
+    "import Tidepool.Effects\n",
+    "import Harness\n",
+    "import Data.List.NonEmpty (NonEmpty ((:|)))\n",
+    "import qualified Data.Text as T\n",
+    "\n",
+    "verify :: Text -> Bool -> Text\n",
+    "verify name ok = (if ok then \"PASS: \" else \"FAIL: \") <> name\n",
+    "\n",
+    "-- No content-bearing child anywhere: lazy acquisition never fires.\n",
+    "caseAllNothingIsLazy :: Text\n",
+    "caseAllNothingIsLazy = verify \"all-nothing-is-no-plan\" (mergePlan [Nothing, Nothing, Nothing] == Nothing)\n",
+    "\n",
+    "caseEmptyListIsNoPlan :: Text\n",
+    "caseEmptyListIsNoPlan = verify \"empty-list-is-no-plan\" (mergePlan [] == Nothing)\n",
+    "\n",
+    "-- One content-bearing child anywhere is enough to trigger acquisition.\n",
+    "caseOneChildTriggersPlan :: Text\n",
+    "caseOneChildTriggersPlan =\n",
+    "  verify \"one-child-triggers-plan\" (mergePlan [Nothing, Just \"b\", Nothing] == Just (\"b\" :| []))\n",
+    "\n",
+    "-- Declared order preserved, 'Nothing' entries dropped -- never reordered\n",
+    "-- and never deduplicated.\n",
+    "caseDeclaredOrderPreserved :: Text\n",
+    "caseDeclaredOrderPreserved =\n",
+    "  verify \"declared-order-preserved\" (mergePlan [Just \"a\", Nothing, Just \"b\", Just \"c\"] == Just (\"a\" :| [\"b\", \"c\"]))\n",
+    "\n",
+    "caseMergeNoteClean :: Text\n",
+    "caseMergeNoteClean = verify \"note-clean\" (mergeNote \"child\" MergeClean == \"child: merged cleanly\")\n",
+    "\n",
+    "caseMergeNoteResolved :: Text\n",
+    "caseMergeNoteResolved =\n",
+    "  verify \"note-resolved\" (mergeNote \"child\" (MergeResolved \"trivial rename\") == \"child: conflict resolved by an agent — trivial rename\")\n",
+    "\n",
+    "caseMergeNoteConflicted :: Text\n",
+    "caseMergeNoteConflicted =\n",
+    "  verify \"note-conflicted\" (mergeNote \"child\" (MergeConflicted \"too risky\") == \"child: NOT merged — too risky\")\n",
+    "\n",
+    "__mergeFoldReport :: Text\n",
+    "__mergeFoldReport =\n",
+    "  T.intercalate \"\\n\"\n",
+    "    [ caseAllNothingIsLazy, caseEmptyListIsNoPlan, caseOneChildTriggersPlan, caseDeclaredOrderPreserved\n",
+    "    , caseMergeNoteClean, caseMergeNoteResolved, caseMergeNoteConflicted\n",
+    "    ]\n",
+);
+
+#[test]
+fn recursive_companion_merge_fold_decisions_execute() {
+    let json = execute_pure(
+        "harness-dogfooding/recursive-companion",
+        outer_row_decls(),
+        RECURSIVE_COMPANION_MERGE_SOURCE,
+        "__mergeFoldReport",
+    );
+    let report = json
+        .as_str()
+        .expect("__mergeFoldReport :: Text renders as a JSON string");
+    let lines: Vec<&str> = report.lines().collect();
+    let failures: Vec<&&str> = lines.iter().filter(|l| l.starts_with("FAIL")).collect();
+    assert!(
+        failures.is_empty(),
+        "merge-fold decision(s) diverged from the spec:\n{report}"
+    );
+    assert_eq!(
+        lines.len(),
+        7,
+        "expected 7 merge-fold decision checks, got:\n{report}"
+    );
 }
 
 /// One `module ResumeDecisionProbe where` source: hand-built `ResumeFold`
