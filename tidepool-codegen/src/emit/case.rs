@@ -470,9 +470,27 @@ fn emit_lit_dispatch(
     let scrut_value = match scrut {
         SsaVal::Raw(v, _) => v,
         SsaVal::HeapPtr(ptr) => {
+            // Runtime tolerance mirroring emit_data_dispatch's bare-Lit
+            // fallback above, in the opposite direction: a Word/Int computed
+            // by un-inlined cross-module generic code (e.g. a Member
+            // dictionary's elemNo — see Data.OpenUnion.decomp's
+            // "Union 0 a" pattern, the freer-simple row-changing
+            // "reinterpret" gap) can reach a literal-case scrutinee as a
+            // BOXED wrapper Con (I#/W#/...), not the "ideal" unboxed Lit
+            // this dispatch otherwise assumes. CompiledEffectMachine::
+            // parse_result already has an equivalent fallback for the
+            // identical representation ambiguity at the suspend boundary
+            // (reading a Union's own tag field generically, from outside the
+            // JIT); a compiled case on a numeric literal needs the same
+            // tolerance for its own scrutinee. unwrap_boxing_chain walks any
+            // such wrapper chain down to the real TAG_LIT (arity-guarded,
+            // traps BoxingArity on a malformed wrapper); a genuine bare Lit
+            // is unaffected (the chain is zero-length for it).
+            let real_lit =
+                crate::emit::primop::unwrap_boxing_chain(args.sess.pipeline, args.builder, ptr);
             args.builder
                 .ins()
-                .load(types::I64, MemFlags::trusted(), ptr, LIT_VALUE_OFFSET)
+                .load(types::I64, MemFlags::trusted(), real_lit, LIT_VALUE_OFFSET)
         }
     };
 

@@ -322,3 +322,128 @@ performs a send reaching a real suspension (see the second amendment).
 The compile-level unnameability proof is complete and green regardless;
 the full runtime positive path is blocked on that JIT-level gap and is
 reported, not worked around.
+
+## Third amendment: the JIT-side mechanism (found, and fixed, by a
+## separate `tidepool-codegen` lane)
+
+The second amendment's gap turned out to be a genuine `tidepool-codegen`
+execution bug, not an architecture question — diagnosed and fixed by the
+`jit-reinterpret-rowchange` lane. Recorded here (not archived) because it
+answers the exact question this amendment leaves open: WHERE the row-changing
+`reinterpret` family actually breaks.
+
+**Minimal repro, isolated from the Subagent/Worktree saga entirely.** A
+two-line private effect (`Ping`), `reinterpret`ed onto the real `AskUser`
+machinery (`send (NoteWith "ping")` inside the handler body) reproduces the
+IDENTICAL misclassification (`HoleRouting::Ask { payload: Null }` instead of
+`HoleRouting::Note { text: "ping" }`) with no Subagent, Worktree, or
+MockBackend saga involved —
+`tidepool-harness/tests/reinterpret_rowchange_repro.rs` +
+`tidepool-harness/tests/fixtures/ReinterpretRepro.hs`. The isolating control
+(the identical `send (NoteWith "ping")` written directly, no `reinterpret`)
+classifies correctly on the same row.
+
+**The divergence, pinned with `TIDEPOOL_DUMP_CLOSED` and
+`RUST_LOG=tidepool::effects=debug` against the real extract/JIT:**
+
+- `TIDEPOOL_DUMP_CLOSED=runPing`'s dump of the closed Core shows GHC fully
+  specializing `reinterpret`/`replaceRelay`/`decomp`/`weaken`/`handlePing`
+  into `runPing`'s own body — nothing here is left generic. The interesting
+  shape is `decomp`'s own pattern, `case bx_aAJf of { 0## -> <matched>;
+  __DEFAULT -> <weaken-and-passthrough> }`, where `bx_aAJf` is `Union`'s
+  `{-# UNPACK #-} !Word` tag field, extracted via `Union @t1 bx a1 -> ...`
+  (an existentially-typed Con pattern — the ONE shape genuinely new to this
+  JIT: every previously-proven `Eff`/`Union` interposition,
+  `Tidepool.Event.pumpEff`/`withHandler` included, walks `Eff`'s `Val`/`E`
+  constructors directly and never destructures `Union`'s own fields via a
+  compiled Core `case`).
+- `RUST_LOG=tidepool::effects=debug` on the SAME repro shows the runtime
+  actually dispatching: `effect_tag=0
+  request=Con(DataConId(...), [Con(DataConId(...), [Lit(LitInt(5))])])` — the
+  request is unambiguously `PingReq 5` (the ORIGINAL, un-transformed `Ping`
+  payload), not `NoteWith "ping"`. This proves `decomp`'s `0## -> <matched>`
+  arm never fired: the runtime took `__DEFAULT` (treat `PingReq`'s injection
+  as "not the effect I'm looking for", weaken it through unchanged) even
+  though the tag genuinely was `0` (Ping is the head of its own row, exactly
+  like AskUser is the head of the row it's weakened back into — the same
+  numeric coincidence is what let the misrouted request still read as
+  `effect_tag=0` and get treated as a plausible-looking, if wrong,
+  suspension instead of erroring outright).
+- **Root cause: `bx_aAJf` reaches `decomp`'s literal-pattern match BOXED, not
+  as the unboxed `Word#` the match assumes.** `ping`'s own `send . PingReq`
+  is defined in a separate module (`ReinterpretRepro.hs`) and is NOT inlined
+  at its call site in the turn module (the same un-inlined-generic-code
+  phenomenon `Tidepool.Fork`'s module doc already names for a different
+  function, confirmed again here via `TIDEPOOL_DUMP_CLOSED`) — so the `Word`
+  tag `ping`'s own `Member Ping effs => ...`/`inj` produces is a genuine
+  heap-allocated `W#` Con, not a literal. `tidepool-codegen`'s
+  `CompiledEffectMachine::parse_result` (`tidepool-codegen/src/
+  effect_machine.rs`) already had a fallback for exactly this "boxed W#"
+  ambiguity when READING a suspended request's Union tag generically from
+  Rust — but the COMPILED HASKELL CASE EXPRESSION for a literal alternative
+  (`emit_lit_dispatch`, `tidepool-codegen/src/emit/case.rs`) had no
+  equivalent tolerance: it unconditionally read `LIT_VALUE_OFFSET` (16) off
+  whatever heap pointer the scrutinee happened to be. Fed a boxed `W#` Con
+  instead of a bare `Lit`, offset 16 lands on the Con's `num_fields` header
+  field, not a real Word value — a stray small integer that (almost) never
+  equals the literal `0` the alt compares against, so `__DEFAULT` fires
+  unconditionally. `emit_data_dispatch` (the sibling DataAlt dispatcher, a
+  few lines above in the same file) already had the MIRROR-IMAGE tolerance
+  ("Runtime Lit-tolerance": a bare `Lit` reaching a `case` that expects a
+  boxed wrapper Con) — `emit_lit_dispatch` was simply missing its own
+  direction of the same fix.
+
+**The fix** (`tidepool-codegen/src/emit/case.rs`,
+`tidepool-codegen/src/emit/primop.rs`): `emit_lit_dispatch`'s `HeapPtr`
+branch now runs the scrutinee through `unwrap_boxing_chain` (widened from
+`fn` to `pub(crate)`) — the SAME arity-guarded boxed-wrapper-Con-unwrap loop
+`unbox_addr`/`unbox_bytearray` already use for primop operands — before
+reading `LIT_VALUE_OFFSET`. A genuine bare `Lit` is unaffected (the chain is
+zero-length for it, byte-identical to the old code path); a boxed `W#`/`I#`/
+etc. now unwraps correctly, and a malformed multi-field wrapper still traps
+loud (`BoxingArity`) rather than reading garbage. No representation change,
+no new suspension class, no poison workaround — this is the SAME
+"reconcile the ideal-unboxed-vs-actually-boxed literal representation"
+mechanism already proven in three other places in this file
+(`emit_data_dispatch`'s bare-Lit tolerance, `unbox_addr`, `unbox_bytearray`),
+applied to the one case-dispatch shape that had never needed it before this
+lane exercised `decomp`.
+
+**Other row-changing freer-simple combinators — exercised or structurally
+immune, per combinator (not fixed speculatively, since none of the others
+are reached by the current stdlib surface):**
+
+- `reinterpret`/`reinterpret2`/`reinterpretN` (built on `replaceRelay`/
+  `replaceRelayN`) — the fixed combinator; `Tidepool.Agent.Delegate.
+  runDelegate` (`reinterpret2`) and the minimal repro (`reinterpret`) both
+  exercise the SAME `decomp`/`weaken` mechanism, now fixed identically for
+  both (the gap was never specific to `reinterpret2`'s extra `Weakens`
+  machinery — the second amendment already ruled that out, and this fix
+  confirms why: the bug is in `decomp`'s own literal match, shared by every
+  arity of `replaceRelay*`).
+- `subsume` (`interpret send`) and `interpret`/`interpretWith` — also built
+  on `decomp` (via `handleRelay`/`interposeWith`'s own `case decomp u' of`),
+  so they inherit the SAME fix. Structurally immune to a DIFFERENT bug
+  (never generic/un-inlined the way `ping`'s cross-module `send` was) is not
+  claimed — the fix is at the mechanism `decomp` itself, so anything built on
+  it benefits regardless of call-site specialization. Not separately
+  exercised by this stdlib (no stdlib code currently calls `subsume`
+  directly), so not separately tested here.
+- `raise` (`Control.Monad.Freer.Internal.raise`) — built on `weaken` ALONE,
+  never `decomp` (`loop (E u q) = E (weaken u) . tsingleton $ qComp q loop` —
+  unconditional, no branch). Not exercised by this stdlib surface (nothing
+  calls `raise`); if it ever is, it inherits the SAME fix trivially, since
+  `weaken` never reads a literal tag at all (it only reads the Con's WORD
+  field to increment it — a plain arithmetic read, not a literal-pattern
+  match, so it was never subject to this specific bug either way).
+- `translate` — reencodes via `qComp`/direct dispatch, not `decomp`/`weaken`
+  (checked against the freer-simple source; it pattern-matches on the
+  effect's OWN request type via ordinary `case`, not `Union`'s internals).
+  Not exercised by this stdlib surface.
+
+Gates: `tidepool-harness/tests/reinterpret_rowchange_repro.rs` (the minimal
+repro + isolating control, both green) and
+`root_coalgebra_window_delegates_and_finalizes_on_the_result`
+(`delegate_positive_path.rs`, un-ignored, green — the full real-world
+Subagent/Worktree/MockBackend path this amendment originally reported as
+blocked).
