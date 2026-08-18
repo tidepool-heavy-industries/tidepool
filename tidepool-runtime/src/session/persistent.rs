@@ -815,6 +815,9 @@ impl PersistentSession {
         scope: ScopeId,
         decl_texts: &[&str],
     ) -> Result<Generation, SessionError> {
+        if !self.scopes.is_live(scope) {
+            return Err(SessionError::DeadScope(scope));
+        }
         let import_modules = self.current_val_modules_in(scope);
         let inject_modules = self.live_val_modules();
         self.lib
@@ -838,6 +841,9 @@ impl PersistentSession {
     /// `helper` — the parent's name is still the parent's, and nothing ever
     /// walks downward.
     pub fn retract_in(&mut self, scope: ScopeId, name: &str) -> Result<(), SessionError> {
+        if !self.scopes.is_live(scope) {
+            return Err(SessionError::DeadScope(scope));
+        }
         match self.lib.as_mut() {
             Some(lib) => lib.retract_in(scope, name),
             None => Ok(()),
@@ -877,8 +883,23 @@ impl PersistentSession {
 
     /// Record a materialized value binding in `scope`'s frame.
     /// `bind(e) == bind_in(ScopeId::ROOT, e)`.
-    pub fn bind_in(&mut self, scope: ScopeId, entry: BindingEntry) {
+    ///
+    /// Rejects a dead `scope` (never minted, or already retired) BEFORE
+    /// touching the binding table: a binding written under a dead scope
+    /// would sit in a frame no lookup chain ever walks and
+    /// [`Self::retire_scope`] can never drain — for a mounted persistent
+    /// root, a permanent GC root by construction. Every caller must check
+    /// liveness before consuming whatever custody transfer led here (a
+    /// [`super::resident::RootCustody`], a released [`ValueHandle`](tidepool_codegen::jit_machine::ValueHandle))
+    /// — this check is the backstop, not the first line, since `bind_in`
+    /// failing here is too late to undo a handle already released from the
+    /// machine's registry.
+    pub fn bind_in(&mut self, scope: ScopeId, entry: BindingEntry) -> Result<(), SessionError> {
+        if !self.scopes.is_live(scope) {
+            return Err(SessionError::DeadScope(scope));
+        }
         self.bindings.bind_in(scope, entry);
+        Ok(())
     }
 
     /// Resolve `name` as seen FROM `scope`: local frame first, then each

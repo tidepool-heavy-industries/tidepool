@@ -208,6 +208,13 @@ pub fn classify_session(err: &SessionError) -> FailureEnvelope {
             };
             FailureEnvelope::new(class, Phase::Compile, t.to_string())
         }
+        // A stale/forged `ScopeId` reaching a scope-taking mutation is a
+        // caller bug (never the user's declaration, never an environment or
+        // wire-format problem) surfacing while the engine is driving a turn —
+        // the same "failed while running" shape `Runtime` already covers.
+        SessionError::DeadScope(_) => {
+            FailureEnvelope::new(FailureClass::Runtime, Phase::Run, err.to_string())
+        }
     }
 }
 

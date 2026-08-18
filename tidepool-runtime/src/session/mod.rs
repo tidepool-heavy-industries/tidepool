@@ -96,6 +96,15 @@ pub enum SessionError {
     /// skewed extract/stdlib pair. Never caused by the user's declaration.
     #[error("toolchain: {0}")]
     Toolchain(#[from] crate::toolchain::ToolchainError),
+    /// A scope-taking mutation (a mount, a scoped define/retract, a scope
+    /// assignment) targeted a [`ScopeId`] that is not live — never minted, or
+    /// already retired (PRD 21 lane C2, `plans/self-iterating-harness/21-c2-scope-trees.md`).
+    /// A dead scope's lookup chain is empty, so anything written under it
+    /// would be permanently unreachable and, for a mounted root, a
+    /// permanent GC root by construction. Never the user's declaration — a
+    /// stale or forged `ScopeId`.
+    #[error("scope {0:?} is not live (never minted, or already retired)")]
+    DeadScope(ScopeId),
 }
 
 /// [`crate::CompileError`] → [`SessionError`]: an environment problem stays

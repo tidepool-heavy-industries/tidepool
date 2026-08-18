@@ -1053,8 +1053,11 @@ impl Harness {
         self.drain_pending_window_exits(sid, co.machine());
         co.machine().set_realm(OUTER_REALM);
         // Same reset, name side: the shared session's own runs are ROOT-scoped,
-        // never sticky on whichever answerer window ran last.
-        co.machine().set_scope(ScopeId::ROOT);
+        // never sticky on whichever answerer window ran last. ROOT is always
+        // live (`ScopeTree::is_live`), so this can never be refused.
+        co.machine()
+            .set_scope(ScopeId::ROOT)
+            .expect("ScopeId::ROOT is always live");
         let r = f(co.machine());
         let holes: Vec<HoleId> = co
             .machine()
@@ -3955,7 +3958,23 @@ impl Harness {
             // a node without a scope runs at ROOT, never at whatever scope the
             // last turn on this shared machine left behind (the same ambient-
             // stickiness hazard the realm reset above answers).
-            machine.set_scope(scope);
+            //
+            // A dead `scope` here means the node's own recorded scope was
+            // retired out from under it (e.g. a queued window exit for this
+            // node drained just above, in `drain_pending_window_exits`) — a
+            // harness invariant violation, not a normal path. Force back to
+            // ROOT rather than let `set_scope` silently no-op and leave
+            // whatever scope the machine was last left at (the exact
+            // ambient-stickiness hazard this reset exists to prevent).
+            if let Err(e) = machine.set_scope(scope) {
+                tracing::error!(
+                    "run_checked_out: node {node:?}'s recorded scope {scope:?} is dead ({e}); \
+                     falling back to ROOT"
+                );
+                machine
+                    .set_scope(ScopeId::ROOT)
+                    .expect("ScopeId::ROOT is always live");
+            }
             f(machine)
         })
         .await

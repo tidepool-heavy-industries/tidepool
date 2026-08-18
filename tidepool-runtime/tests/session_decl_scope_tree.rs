@@ -35,7 +35,7 @@ use std::path::{Path, PathBuf};
 use tidepool_codegen::scope::{ScopeId, ScopeTree};
 use tidepool_repr::Generation;
 use tidepool_repr::SessionId;
-use tidepool_runtime::session::{ModuleEnv, PersistentSession, SessionLib};
+use tidepool_runtime::session::{ModuleEnv, PersistentSession, SessionError, SessionLib};
 use tidepool_runtime::{compile_and_run_pure_salted, paths};
 use tidepool_testing::eval_harness;
 
@@ -336,4 +336,61 @@ fn a_sibling_define_between_mint_and_first_use_does_not_leak() {
         serde_json::json!(6),
         "A's own helper (x + 1) survives B's later define"
     );
+}
+
+/// `define_scoped_in`/`retract_in` on a dead scope (never minted, or already
+/// retired) must reject with a typed [`SessionError::DeadScope`] rather than
+/// silently accumulating decl-plane state under a `ScopeId` no session-owned
+/// `ScopeTree` will ever walk to again — the same liveness precondition the
+/// 2026-08-19 review asked for at the value-plane mount seam, applied to the
+/// decl plane. The liveness check runs BEFORE any GHC work (no compile, no
+/// `TIDEPOOL_EXTRACT`, no `setup()`), so this needs no extract toolchain.
+#[test]
+fn define_and_retract_scoped_in_reject_a_dead_scope_without_touching_the_log() {
+    let session_root = tempfile::tempdir().unwrap();
+    let lib = SessionLib::open(
+        SessionId(45),
+        session_root.path(),
+        ModuleEnv::standalone_default(),
+    )
+    .expect("open session");
+    let mut core = PersistentSession::new(Some(lib), ASK_TAG, NURSERY);
+
+    let child = core.mint_scope(ScopeId::ROOT).expect("ROOT is live");
+    core.retire_scope(child);
+
+    let generation_before = core.lib().generation();
+
+    let result = core.define_scoped_in(child, &["helper x = x"]);
+    assert!(
+        matches!(result, Err(SessionError::DeadScope(s)) if s == child),
+        "expected a typed DeadScope error, got {result:?}"
+    );
+
+    let never_minted = ScopeId(999_999);
+    let result = core.define_scoped_in(never_minted, &["helper x = x"]);
+    assert!(
+        matches!(result, Err(SessionError::DeadScope(s)) if s == never_minted),
+        "expected a typed DeadScope error, got {result:?}"
+    );
+
+    let result = core.retract_in(child, "helper");
+    assert!(
+        matches!(result, Err(SessionError::DeadScope(s)) if s == child),
+        "expected a typed DeadScope error, got {result:?}"
+    );
+
+    assert_eq!(
+        core.lib().generation(),
+        generation_before,
+        "no turn was ever pushed to the shared decl log — the liveness \
+         check runs before any GHC work, so a rejected define never reaches \
+         run_turn at all"
+    );
+
+    // ROOT stays byte-identical: always live, never refused.
+    let g = core
+        .define_scoped_in(ScopeId::ROOT, &[])
+        .expect("ROOT is always live (and an empty batch is a no-op)");
+    assert_eq!(g, generation_before, "an empty batch bumps nothing");
 }

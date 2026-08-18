@@ -51,7 +51,7 @@ use tidepool_repr::{
     BindingName, CoreExpr, CoreFrame, DataConTable, Generation, SessionModule, SessionVarId,
     TreeBuilder,
 };
-use tidepool_runtime::session::PersistentSession;
+use tidepool_runtime::session::{PersistentSession, SessionError};
 
 /// `C1 :: Int -> T`, the one constructor every session fixture here needs.
 const C1: DataConId = DataConId(1);
@@ -116,7 +116,8 @@ fn mount(core: &mut PersistentSession, scope: ScopeId, name: &str, raw: u64, slo
     let handle = machine.mint_handle_from_root(slot, tidepool_codegen::jit_machine::RealmId(0));
     let mounted = machine.handle_slot(handle).expect("handle is live");
     assert!(machine.release_handle(handle), "handle released once");
-    core.bind_in(scope, entry(name, raw, mounted));
+    core.bind_in(scope, entry(name, raw, mounted))
+        .expect("scope is live");
 }
 
 fn entry(name: &str, raw: u64, slot: RootSlot) -> BindingEntry {
@@ -258,7 +259,8 @@ fn a_slot_a_surviving_scope_also_holds_is_not_deregistered() {
     mount(&mut core, ScopeId::ROOT, "escaped", 1, escapee);
 
     let child = core.mint_scope(ScopeId::ROOT).expect("ROOT is live");
-    core.bind_in(child, entry("local", 2, escapee));
+    core.bind_in(child, entry("local", 2, escapee))
+        .expect("child is live");
     // ...plus a mount the child SOLELY owns, so the receipt distinguishes.
     let owned = tenure(&mut core, "owned", 43);
     mount(&mut core, child, "owned", 3, owned);
@@ -299,8 +301,10 @@ fn two_names_in_one_frame_over_one_root_release_it_exactly_once() {
     let mut core = session();
     let child = core.mint_scope(ScopeId::ROOT).expect("ROOT is live");
     let shared = tenure(&mut core, "shared", 9);
-    core.bind_in(child, entry("first", 1, shared));
-    core.bind_in(child, entry("second", 2, shared));
+    core.bind_in(child, entry("first", 1, shared))
+        .expect("child is live");
+    core.bind_in(child, entry("second", 2, shared))
+        .expect("child is live");
 
     let before = core.persistent_roots_count();
     let receipt = core.retire_scope(child);
@@ -377,6 +381,54 @@ fn a_retired_scopes_sibling_and_the_flat_session_are_untouched() {
         vec!["Tidepool.Session.Val.G1", "Tidepool.Session.Val.G3"],
         "the sibling sees its own mount plus the inherited flat one"
     );
+}
+
+// ---------------------------------------------------------------------------
+// (f) the liveness precondition — a dead scope can never receive a mount.
+// ---------------------------------------------------------------------------
+
+/// `bind_in` on a dead scope (never minted, or already retired) must reject
+/// with a typed [`SessionError::DeadScope`] rather than writing a binding no
+/// lookup chain can ever see and no `retire_scope` can ever drain — the
+/// 2026-08-19 review's HIGH finding, at the layer `PersistentSession` owns
+/// the `ScopeTree` from. Covers both shapes of "dead": an id that was live
+/// and is now retired, and one that was never minted at all.
+#[test]
+fn bind_in_rejects_a_dead_scope_and_touches_nothing() {
+    let mut core = session();
+    let child = core.mint_scope(ScopeId::ROOT).expect("ROOT is live");
+    core.retire_scope(child);
+
+    let baseline_roots = core.persistent_roots_count();
+    let baseline_root_frame = core.scope_binding_count(ScopeId::ROOT);
+
+    let slot = tenure(&mut core, "orphan", 99);
+    let result = core.bind_in(child, entry("orphan", 1, slot));
+    assert!(
+        matches!(result, Err(SessionError::DeadScope(s)) if s == child),
+        "expected a typed DeadScope error for a retired scope, got {result:?}"
+    );
+
+    let never_minted = ScopeId(999_999);
+    let result = core.bind_in(never_minted, entry("orphan2", 2, slot));
+    assert!(
+        matches!(result, Err(SessionError::DeadScope(s)) if s == never_minted),
+        "expected a typed DeadScope error for a never-minted scope, got {result:?}"
+    );
+
+    // Rejected binds tenured a root (via `tenure`, the same path `run_bind`
+    // takes) but never MOUNTED it — the ledger only reflects the tenure
+    // itself, and nothing is resolvable under either dead scope.
+    assert_eq!(
+        core.persistent_roots_count(),
+        baseline_roots + 1,
+        "the tenure itself still registers a root (an ordinary bind's own \
+         completion) — bind_in's rejection is about the BINDING, not the \
+         tenure that already happened before it was called"
+    );
+    assert_eq!(core.scope_binding_count(ScopeId::ROOT), baseline_root_frame);
+    assert!(core.resolve_in(child, "orphan").is_none());
+    assert!(core.bindings().resolve("orphan").is_none());
 }
 
 // ---------------------------------------------------------------------------

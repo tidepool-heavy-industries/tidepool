@@ -138,17 +138,28 @@ use super::{SessionError, SessionLib};
 /// let delivered = custody.into_handle();   // first (and only legal) consumer
 /// let mounted = custody.into_handle();     // ERROR: `custody` was already moved
 /// ```
+///
+/// (`new` is `pub(crate)` — see its own doc — so from outside this crate the
+/// block above now also fails on privacy, before it ever reaches the
+/// use-after-move it demonstrates. `compile_fail` only asserts "does not
+/// compile", so that is still a true, still-enforced statement; the
+/// use-after-move contract this docstring is about is exercised in-crate by
+/// [`Self::mount_handle_in`]'s and [`Self::resume_handle`]'s own callers.)
 #[derive(Debug)]
 pub struct RootCustody(Option<ValueHandle>);
 
 impl RootCustody {
-    /// Mint a custody token over `handle`. The one real mint site is
-    /// [`ResidentSession::finalized_handle`]; exposed as `pub` (rather than
-    /// `pub(crate)`) only so the compile-fail proof above can construct one
-    /// without a live session — production code never reaches for this
-    /// directly, since `finalized_handle` never hands out a bare
+    /// Mint a custody token over `handle`. `pub(crate)`, not `pub`: the two
+    /// real mint sites ([`ResidentSession::finalized_handle`],
+    /// [`ResidentSession::finalized_handle_owned_by`]) and every consumer
+    /// live in this crate, so scoping construction to the crate is enough to
+    /// turn fabrication into a reviewable, visible-intent act rather than a
+    /// call any external dependent is one line away from making (codex
+    /// review 2026-08-19, HIGH: "`RootCustody::new` is pub and one call from
+    /// forging custody"). Production code never reaches for this directly —
+    /// `finalized_handle`/`finalized_handle_owned_by` never hand out a bare
     /// [`ValueHandle`] at the finalize seam in the first place.
-    pub fn new(handle: ValueHandle) -> Self {
+    pub(crate) fn new(handle: ValueHandle) -> Self {
         RootCustody(Some(handle))
     }
 
@@ -538,8 +549,18 @@ where
     /// applies a node's scope here at the same site it applies its realm, so a
     /// node without one keeps compiling and binding at [`ScopeId::ROOT`] —
     /// exactly its pre-C2 behavior.
-    pub fn set_scope(&mut self, scope: ScopeId) {
+    ///
+    /// Rejects a dead `scope` (never minted, or already retired) with a typed
+    /// [`ResidentError`] and leaves [`Self::current_scope`] UNCHANGED — a
+    /// failed assignment must not silently rebind subsequent turns to a
+    /// dead frame. [`ScopeId::ROOT`] is always live, so this is a no-op
+    /// widening for every pre-C2 caller.
+    pub fn set_scope(&mut self, scope: ScopeId) -> Result<(), ResidentError> {
+        if !self.core.scope_tree().is_live(scope) {
+            return Err(SessionError::DeadScope(scope).into());
+        }
         self.scope = scope;
+        Ok(())
     }
 
     /// The scope this session's turns currently compile and bind in.
@@ -689,6 +710,20 @@ where
     /// three named owners in sequence, never two at once. `custody` is the
     /// [`RootCustody`] token minted by [`Self::finalized_handle`]; consumed
     /// exactly once, here, at the moment ownership hands off to the frame.
+    ///
+    /// **Liveness is checked FIRST, before `custody` is touched.** A dead
+    /// `scope` (never minted, or already retired) is rejected with a typed
+    /// [`ResidentError`] and `custody` is disposed deliberately (its handle
+    /// is taken and dropped, never mounted) — RootCustody's own doc requires
+    /// consuming or deliberately abandoning custody before propagating an
+    /// error, so its leak-detecting `Drop` never fires. The raw machine-side
+    /// handle is left exactly as it was: still registered, released only at
+    /// the owning realm's eventual `close_realm`, same as any other
+    /// never-mounted finalize. Checking BEFORE `release_handle` also matters
+    /// operationally: once the handle registry releases a root, only a
+    /// successful bind gives it a new owner — a dead scope caught only by
+    /// [`PersistentSession::bind_in`]'s own backstop check would otherwise
+    /// leave that root untracked by every accounting class at once.
     #[allow(clippy::too_many_arguments)]
     pub fn mount_handle_in(
         &mut self,
@@ -700,6 +735,10 @@ where
         type_display: Option<String>,
         custody: RootCustody,
     ) -> Result<(), ResidentError> {
+        if !self.core.scope_tree().is_live(scope) {
+            let _ = custody.into_handle();
+            return Err(SessionError::DeadScope(scope).into());
+        }
         let handle = custody.into_handle();
         let slot = self
             .core
@@ -731,7 +770,7 @@ where
                 // Overwritten by `bind_in` with `scope`; see `BindingEntry`.
                 scope,
             },
-        );
+        )?;
         Ok(())
     }
 
@@ -1513,12 +1552,25 @@ where
     /// repl's `bind_materialized`: the session layer owns the `BindingEntry`
     /// construction, the core owns the plane. Evicts any same-name decl (the
     /// one-plane invariant — a value bind wins over an earlier decl head).
+    ///
+    /// Checks `self.scope`'s liveness FIRST, before `handle` is resolved and
+    /// released from the machine's handle registry — same ordering reason as
+    /// [`Self::mount_handle_in`]: once `release_handle` runs, only a
+    /// successful bind gives the root a new owner, so a dead scope caught
+    /// only by [`PersistentSession::bind_in`]'s backstop would leave it
+    /// untracked by every accounting class at once. In ordinary operation
+    /// `self.scope` cannot go dead mid-turn ([`Self::set_scope`] already
+    /// refuses a dead scope), so this guards a defensive precondition rather
+    /// than a reachable steady-state path.
     fn materialize_binder(
         &mut self,
         binder: &BoundBinder,
         gen: Generation,
         bound: Option<ValueHandle>,
     ) -> Result<(), ResidentError> {
+        if !self.core.scope_tree().is_live(self.scope) {
+            return Err(SessionError::DeadScope(self.scope).into());
+        }
         // The tenured root rode out of the eval thread as a `Send` handle
         // (pillar-B laundering); resolve it back to its slot HERE, on the
         // session thread where the `BindingTable` lives, and release the
@@ -1564,7 +1616,7 @@ where
                 defining_expr: None,
                 scope: self.scope,
             },
-        );
+        )?;
         self.core.set_val_gen(gen);
         Ok(())
     }
@@ -1865,5 +1917,101 @@ mod tests {
         // right after.
         let ok = session.on_eval_thread(|_, _, _, _| -> Result<i32, JitError> { Ok(7) });
         assert_eq!(ok.unwrap(), 7);
+    }
+
+    /// [`ResidentSession::set_scope`] on a dead scope (never minted, or
+    /// already retired) must return a typed error and leave
+    /// [`ResidentSession::current_scope`] exactly where it was — the exact
+    /// gap the 2026-08-19 review flagged (a dead-scope assignment used to
+    /// silently succeed, so a later turn compiled and bound against a scope
+    /// no lookup chain could ever see again).
+    #[test]
+    fn set_scope_rejects_a_dead_scope_and_leaves_current_scope_unchanged() {
+        let mut session = bootstrap_trivial_session();
+        let live = session.mint_scope(ScopeId::ROOT).expect("ROOT is live");
+        session
+            .set_scope(live)
+            .expect("freshly-minted scope is live");
+        assert_eq!(session.current_scope(), live);
+
+        session.retire_scope(live);
+        let now_dead = live;
+
+        let result = session.set_scope(now_dead);
+        assert!(
+            matches!(
+                result,
+                Err(ResidentError::Session(SessionError::DeadScope(s))) if s == now_dead
+            ),
+            "expected a typed DeadScope error, got {result:?}"
+        );
+        assert_eq!(
+            session.current_scope(),
+            live,
+            "a rejected assignment must not move the session off its last live scope"
+        );
+
+        // A never-minted, always-invalid id is rejected the same way.
+        let never_minted = ScopeId(999_999);
+        assert!(matches!(
+            session.set_scope(never_minted),
+            Err(ResidentError::Session(SessionError::DeadScope(s))) if s == never_minted
+        ));
+
+        // ROOT stays byte-identical: always live, never refused.
+        session
+            .set_scope(ScopeId::ROOT)
+            .expect("ROOT is always live");
+        assert_eq!(session.current_scope(), ScopeId::ROOT);
+    }
+
+    /// [`ResidentSession::mount_handle_in`] on a dead scope must reject with
+    /// a typed error WITHOUT leaking the [`RootCustody`] token — the HIGH
+    /// finding from the 2026-08-19 review: a stale/forged scope id used to
+    /// unconditionally transfer a persistent root into a frame no
+    /// `retire_scope` could ever drain (a permanent GC root by construction).
+    ///
+    /// The liveness check runs before `custody` is touched, so a dead-scope
+    /// rejection must consume it deliberately (`RootCustody::into_handle`)
+    /// rather than dropping it unconsumed — an unconsumed drop is this
+    /// type's own loud leak detector (`debug_assert!` in `Drop`), so a test
+    /// process that panics here would prove the opposite of what this test
+    /// asserts. No panic is therefore itself the "custody not leaked" proof.
+    #[test]
+    fn mount_handle_in_rejects_a_dead_scope_without_leaking_custody() {
+        let mut session = bootstrap_trivial_session();
+        let scope = session.mint_scope(ScopeId::ROOT).expect("ROOT is live");
+        session.retire_scope(scope);
+
+        // An arbitrary handle id: the liveness check must short-circuit
+        // before this is ever resolved against the machine's handle
+        // registry, so it need not be a real, live-minted handle.
+        let custody = RootCustody::new(ValueHandle(0));
+        let result = session.mount_handle_in(
+            scope,
+            "escapee",
+            SessionVarId::from_extract(0),
+            SessionModule::val(Generation(1)),
+            ValueTier::Tier0Data,
+            None,
+            custody,
+        );
+
+        assert!(
+            matches!(
+                result,
+                Err(ResidentError::Session(SessionError::DeadScope(s))) if s == scope
+            ),
+            "expected a typed DeadScope error, got {result:?}"
+        );
+        // `custody`'s Drop already ran as part of returning from
+        // `mount_handle_in` (it was consumed by value); reaching this line
+        // at all — rather than a debug_assert panic mid-call — is the leak
+        // proof. Nothing was bound under the dead scope either.
+        assert_eq!(
+            session.binding_names_in(scope),
+            Vec::<String>::new(),
+            "a rejected mount must not have written a binding"
+        );
     }
 }
