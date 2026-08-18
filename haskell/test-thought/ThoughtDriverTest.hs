@@ -12,7 +12,7 @@
 module Main (main) where
 
 import Control.Monad.State (State, evalState, get, modify, put, runState)
-import Data.Functor.Identity (runIdentity)
+import Data.Functor.Identity (Identity, runIdentity)
 import qualified Data.List as L
 import Data.List.NonEmpty (NonEmpty (..))
 import qualified Data.List.NonEmpty as NE
@@ -365,6 +365,158 @@ prop_capsForceLocalFinish :: Property
 prop_capsForceLocalFinish = conjoin [prop_depthCap, prop_nodeCap, prop_fanOutCap]
 
 -- ---------------------------------------------------------------------------
+-- PRD 21 lane C4 — checked edits. Four more families over the same pure
+-- driver: selection-order composition, failure isolation, receipt
+-- completeness, and 'Narrative' never approving. A fifth, run through
+-- 'thoughtHylo' itself rather than hand-assembled: a child proposes an edit
+-- artifact, the parent's algebra selects and composes a subset, and
+-- 'applyEdits' runs them against a known snapshot and stamps one receipt
+-- per plan — "child proposes, parent selects, runtime applies and stamps",
+-- through the real recursive driver.
+-- ---------------------------------------------------------------------------
+
+tshow :: Show a => a -> Text
+tshow = T.pack . show
+
+artifactIdOf :: Int -> ArtifactId
+artifactIdOf i = ArtifactId ("a" <> tshow i)
+
+-- | A pool of edit plans, one per id: each appends its own numbered tag to a
+-- 'Text' snapshot, except ids in 'failing', which always refuse — distinct
+-- tags make application ORDER legible directly in the composed output.
+mkPool :: [Int] -> [Int] -> [Artifact Text]
+mkPool ids failing =
+  [EditArtifact (artifactIdOf i) (EditIntent ("tag " <> tshow i)) (mkApply i) | i <- ids]
+  where
+    mkApply i
+      | i `elem` failing = const (Left (EditFailure ("refused " <> tshow i)))
+      | otherwise = \s -> Right (s <> tshow i)
+
+-- | A decision that selects exactly 'order', composed in exactly that order.
+mkDecision :: [Int] -> FoldDecision Text
+mkDecision order =
+  FoldDecision
+    { synthesis = "unused"
+    , selected = map artifactIdOf order
+    , composition = CompositionOrder (map artifactIdOf order)
+    , decisionProposed = []
+    }
+
+isLeftOutcome :: Either a b -> Bool
+isLeftOutcome e = case e of Left _ -> True; Right _ -> False
+
+-- | Given ANY nonempty subset of ids, in ANY order, the composed result
+-- reflects exactly that order — not the pool's declaration order, and not
+-- whatever order a naive selection-list traversal might have produced.
+prop_selectionOrderComposition :: Property
+prop_selectionOrderComposition =
+  forAll (choose (2, 6)) $ \n ->
+    forAll (sublistOf [1 .. n] `suchThat` (not . null)) $ \chosen0 ->
+      forAll (shuffle chosen0) $ \chosen ->
+        let pool = mkPool [1 .. n] []
+         in case approve (resolveSelection (mkDecision chosen) pool) of
+              Nothing -> counterexample "expected ProposedEdits, got Narrative" False
+              Just approved ->
+                let (final, receipts) = applyEdits id approved ""
+                    expected = T.concat (map tshow chosen)
+                 in conjoin
+                      [ counterexample "final snapshot reflects exactly the chosen ids, in the decision's own order" (final === expected)
+                      , counterexample "one receipt per approved plan" (NE.length receipts === length chosen)
+                      , counterexample "receipt ids follow the same order" (map receiptArtifact (NE.toList receipts) === map artifactIdOf chosen)
+                      ]
+
+-- | A failing artifact never erases a sibling's outcome: every plan in the
+-- selection still gets a receipt, the successes still compose correctly
+-- (skipping the failures, not poisoned by them), and every failure is its
+-- own isolated 'Left'.
+prop_failureIsolation :: Property
+prop_failureIsolation =
+  forAll (choose (2, 6)) $ \n ->
+    forAll (sublistOf [1 .. n] `suchThat` (not . null)) $ \failing ->
+      let pool = mkPool [1 .. n] failing
+       in case approve (resolveSelection (mkDecision [1 .. n]) pool) of
+            Nothing -> counterexample "expected ProposedEdits" False
+            Just approved ->
+              let (final, receipts) = applyEdits id approved ""
+                  succeeding = [i | i <- [1 .. n], i `notElem` failing]
+                  receiptFor i = receipts NE.!! (i - 1)
+               in conjoin
+                    [ counterexample "final snapshot reflects only the succeeding edits, in order" (final === T.concat (map tshow succeeding))
+                    , counterexample "every plan still produced a receipt, failing or not" (NE.length receipts === n)
+                    , counterexample "a failing id's own receipt is Left" (conjoin [counterexample (show i) (isLeftOutcome (receiptOutcome (receiptFor i))) | i <- failing])
+                    , counterexample "a succeeding id's own receipt is Right" (conjoin [counterexample (show i) (not (isLeftOutcome (receiptOutcome (receiptFor i)))) | i <- succeeding])
+                    ]
+
+-- | Receipt completeness: for ANY mix of pass/fail over ANY selection,
+-- there is exactly one receipt per approved plan, in the same order —
+-- never fewer (a failure dropped from the list) and never more.
+prop_receiptCompleteness :: Property
+prop_receiptCompleteness =
+  forAll (choose (1, 8)) $ \n ->
+    forAll (sublistOf [1 .. n]) $ \failing ->
+      let pool = mkPool [1 .. n] failing
+       in case approve (resolveSelection (mkDecision [1 .. n]) pool) of
+            Nothing -> counterexample "expected ProposedEdits" False
+            Just approved ->
+              let (_, receipts) = applyEdits id approved ""
+               in counterexample "exactly one receipt per approved plan, same order" (map receiptArtifact (NE.toList receipts) === map artifactIdOf [1 .. n])
+
+-- | 'Narrative' can never mint 'ApprovedEdits' — the structural guarantee
+-- open question 4 asks for, checked as a property rather than one
+-- hand-picked value.
+prop_narrativeNeverApproves :: Property
+prop_narrativeNeverApproves =
+  forAll genText $ \t -> case approve (Narrative t :: FoldProduct ()) of
+    Nothing -> property True
+    Just _ -> counterexample "a Narrative value minted ApprovedEdits" False
+
+-- | End to end, through 'thoughtHylo' itself: an Explore layer of N leaf
+-- children, each of whose fold proposes exactly one edit artifact tagged
+-- with its own id; the root's algebra gathers every child's artifact into a
+-- pool, builds a 'FoldDecision' that selects and REVERSES them (so the
+-- result can only match if composition order, not arrival/declared order,
+-- governed the apply), resolves, approves, and applies.
+data E2ENode = E2ENode {e2eText :: Text, e2eArtifacts :: [Artifact Text], e2eReceipts :: [EditReceipt]}
+
+e2eCoalg :: Int -> Seed -> ThoughtF Seed
+e2eCoalg n (Seed d s) = case s of
+  SFinish nid _ | d > 0 -> Finish (Draft (tshow nid) ModelFinished d)
+  _ ->
+    Explore
+      "root"
+      (NE.fromList [Branch (ForkBrief ("leaf" <> tshow i) Primary "propose") (Seed (d + 1) (SFinish i "")) | i <- [1 .. n]])
+      Sequential
+
+e2eAlg :: Int -> ThoughtF E2ENode -> Identity E2ENode
+e2eAlg n layer = pure $ case layer of
+  Finish dr ->
+    let nid = draftText dr
+        aid = ArtifactId ("a" <> nid)
+     in E2ENode "" [EditArtifact aid (EditIntent ("leaf " <> nid)) (\s -> Right (s <> nid))] []
+  _ ->
+    let kids = foldr (:) [] layer
+        pool = concatMap e2eArtifacts kids
+        chosen = reverse [1 .. n]
+     in case approve (resolveSelection (mkDecision chosen) pool) of
+          Nothing -> E2ENode "" pool []
+          Just approved ->
+            let (final, receipts) = applyEdits id approved ""
+             in E2ENode final pool (NE.toList receipts)
+
+prop_endToEndChildProposesParentSelects :: Property
+prop_endToEndChildProposesParentSelects =
+  forAll (choose (2, 6)) $ \n ->
+    let seed0 = Seed 0 (SFinish 0 "")
+        result = runIdentity (thoughtHylo (e2eAlg n) (pure . e2eCoalg n) seed0)
+        expected = T.concat (map tshow (reverse [1 .. n]))
+     in conjoin
+          [ counterexample "root text reflects the reversed composition order, not declared branch order" (e2eText result === expected)
+          , counterexample "the root gathered every leaf's proposed artifact" (length (e2eArtifacts result) === n)
+          , counterexample "one receipt per approved (== every) leaf artifact" (length (e2eReceipts result) === n)
+          , counterexample "every receipt succeeded — no failures injected in this slice" (all (not . isLeftOutcome . receiptOutcome) (e2eReceipts result))
+          ]
+
+-- ---------------------------------------------------------------------------
 -- Runner
 -- ---------------------------------------------------------------------------
 
@@ -376,6 +528,11 @@ main = do
       , run "completion-order permutation invariance" prop_permutationInvariance
       , run "failure accumulation" prop_failureAccumulation
       , run "caps forcing local finish" prop_capsForceLocalFinish
+      , run "C4 selection-order composition" prop_selectionOrderComposition
+      , run "C4 failure isolation" prop_failureIsolation
+      , run "C4 receipt completeness" prop_receiptCompleteness
+      , run "C4 Narrative never approves" prop_narrativeNeverApproves
+      , run "C4 end-to-end: child proposes, parent selects, runtime applies" prop_endToEndChildProposesParentSelects
       ]
   swarmResults <- mapM (uncurry run) properties
   if and results && and swarmResults then exitSuccess else exitFailure

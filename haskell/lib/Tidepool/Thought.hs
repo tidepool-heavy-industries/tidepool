@@ -44,6 +44,7 @@ module Tidepool.Thought
   , EditIntent (..)
   , Evidence (..)
   , Artifact (..)
+  , artifactId
   , ProposedArtifact (..)
   , ModelContribution (..)
   , NodeFailure (..)
@@ -51,6 +52,19 @@ module Tidepool.Thought
   , NodeResult (..)
   , CompositionOrder (..)
   , FoldDecision (..)
+
+    -- * C4 — checked edits: the authority-bearing sum, the consuming
+    -- capability, and the runtime apply path (PRD 21 open question 4)
+  , EditFailure (..)
+  , EditPlan (..)
+  , artifactEditPlan
+  , FoldProduct (..)
+  , resolveSelection
+  , ApprovedEdits
+  , approve
+  , approvedOrder
+  , EditReceipt (..)
+  , applyEdits
 
     -- * The driver
   , Coalg
@@ -64,7 +78,8 @@ module Tidepool.Thought
   ) where
 
 import Control.Monad.State.Class (MonadState, get, put)
-import Data.List.NonEmpty (NonEmpty)
+import Data.List (find)
+import Data.List.NonEmpty (NonEmpty (..))
 import qualified Data.List.NonEmpty as NE
 import Data.Text (Text)
 
@@ -178,14 +193,20 @@ newtype Evidence = Evidence Text
 -- its id and intent do — callers compare on those, never on the whole
 -- value.
 data Artifact s
-  = EditArtifact ArtifactId EditIntent (s -> Either Text s)
+  = EditArtifact ArtifactId EditIntent (s -> Either EditFailure s)
   | EvidenceArtifact ArtifactId Evidence
+
+-- | An artifact's id, regardless of which constructor it is.
+artifactId :: Artifact s -> ArtifactId
+artifactId a = case a of
+  EditArtifact aid _ _ -> aid
+  EvidenceArtifact aid _ -> aid
 
 -- | An unstamped artifact proposal, before the runtime assigns it an id.
 data ProposedArtifact s = ProposedArtifact
   { proposedIntent :: EditIntent
   , -- | 'Nothing' for an evidence-only proposal.
-    proposedApply :: Maybe (s -> Either Text s)
+    proposedApply :: Maybe (s -> Either EditFailure s)
   }
 
 -- | What the MODEL finalizes (PRD): a rendered view of this node plus
@@ -234,6 +255,133 @@ data FoldDecision s = FoldDecision
   , composition :: CompositionOrder
   , decisionProposed :: [ProposedArtifact s]
   }
+
+-- ---------------------------------------------------------------------------
+-- C4 — checked edits (PRD 21 open question 4)
+--
+-- The authority-bearing stage is a DISTINCT sum, not a flag or an
+-- optionally-empty list: 'FoldProduct' either carries no artifacts at all
+-- ('Narrative') or a nonempty, already-resolved list of them
+-- ('ProposedEdits'). 'ApprovedEdits' is the consuming capability that
+-- 'applyEdits' requires, and its constructor is NOT exported — the only way
+-- to obtain one is 'approve', and 'approve' can only ever succeed on a
+-- 'FoldProduct' that is already 'ProposedEdits'. A 'Narrative' answer is
+-- text; it carries no 'EditPlan' anywhere in its structure, so there is
+-- nothing in it 'approve' could resolve into a capability. This is what
+-- "unrepresentable, not runtime-checked" means here: 'applyEdits' takes an
+-- 'ApprovedEdits' by VALUE, and no caller anywhere in this module or outside
+-- it can manufacture one except through 'approve'.
+-- ---------------------------------------------------------------------------
+
+-- | Why an edit closure refused to apply — the artifact's OWN invariant
+-- check (PRD locked decision 7 / C4: "the artifact closure's own Either
+-- EditFailure s"), never a build or typecheck gate, because v1 edit targets
+-- are markdown/state, not code. Distinct from 'NodeFailure', which is a
+-- coalgebra\/algebra INVOCATION failing outright — an 'EditFailure' means the
+-- invocation succeeded and the edit it proposed was refused at apply time.
+newtype EditFailure = EditFailure {editFailureReason :: Text}
+  deriving (Eq, Show)
+
+-- | The view of an 'Artifact' that actually carries authority to mutate: an
+-- id, its intent, and the closure. 'EvidenceArtifact's have none of the
+-- latter, so they can never become one — see 'artifactEditPlan'.
+data EditPlan s = EditPlan
+  { editPlanId :: ArtifactId
+  , editPlanIntent :: EditIntent
+  , editPlanApply :: s -> Either EditFailure s
+  }
+
+-- | 'Nothing' for an 'EvidenceArtifact' — it carries no closure, so it is
+-- structurally incapable of becoming an 'EditPlan'.
+artifactEditPlan :: Artifact s -> Maybe (EditPlan s)
+artifactEditPlan a = case a of
+  EditArtifact aid intent f -> Just (EditPlan aid intent f)
+  EvidenceArtifact _ _ -> Nothing
+
+-- | What a fold's authority-bearing stage actually is: free text with no
+-- power to mutate anything, or a nonempty, already-ordered list of REAL,
+-- resolved edit plans. Never both, never neither-but-claims-one: emptiness
+-- is not a value this type can hold under 'ProposedEdits', so "the
+-- selection resolved to nothing" and "the algebra wrote prose" are the one
+-- honest answer ('resolveSelection' below), not two states a caller must
+-- keep in sync by hand.
+data FoldProduct s
+  = Narrative Text
+  | ProposedEdits (NonEmpty (EditPlan s))
+
+-- | Resolve a 'FoldDecision''s id selection against the artifacts actually
+-- on hand, in the decision's own 'CompositionOrder'. An id is kept only when
+-- it is BOTH named in 'selected' AND present in the pool as an
+-- edit-bearing artifact — an id naming nothing resolvable (a typo, an
+-- 'EvidenceArtifact', an id from a sibling's pool) is silently dropped:
+-- selection can shrink what runs, never conjure an edit that was never
+-- proposed. If nothing survives resolution, the result is 'Narrative' —
+-- there is no way to construct an empty 'ProposedEdits'.
+resolveSelection :: FoldDecision s -> [Artifact s] -> FoldProduct s
+resolveSelection decision pool = case NE.nonEmpty resolved of
+  Nothing -> Narrative (synthesis decision)
+  Just plans -> ProposedEdits plans
+  where
+    CompositionOrder orderedIds = composition decision
+    resolved =
+      [ plan
+      | aid <- orderedIds
+      , aid `elem` selected decision
+      , Just artifact <- [find ((== aid) . artifactId) pool]
+      , Just plan <- [artifactEditPlan artifact]
+      ]
+
+-- | The consuming capability PRD 21 open question 4 asks for. Its
+-- constructor is deliberately NOT exported — see the section header above.
+newtype ApprovedEdits s = ApprovedEdits (NonEmpty (EditPlan s))
+
+-- | The ONLY route to an 'ApprovedEdits'. 'Nothing' on 'Narrative' — always,
+-- structurally, because 'Narrative' carries no 'EditPlan' to approve.
+approve :: FoldProduct s -> Maybe (ApprovedEdits s)
+approve fp = case fp of
+  Narrative _ -> Nothing
+  ProposedEdits plans -> Just (ApprovedEdits plans)
+
+-- | The order 'applyEdits' actually runs in, read back off an already-minted
+-- capability rather than re-derived from the 'FoldDecision' that produced
+-- it — a receipt built from this can never claim an order 'resolveSelection'
+-- did not actually resolve to.
+approvedOrder :: ApprovedEdits s -> CompositionOrder
+approvedOrder (ApprovedEdits plans) = CompositionOrder (NE.toList (fmap editPlanId plans))
+
+-- | What the runtime observed about one applied (or refused) edit.
+-- 'receiptBefore' is always the preview of the state the plan actually SAW;
+-- 'receiptOutcome' is 'Left' the plan's own refusal or 'Right' the preview
+-- of the state it produced.
+data EditReceipt = EditReceipt
+  { receiptArtifact :: ArtifactId
+  , receiptIntent :: EditIntent
+  , receiptBefore :: Text
+  , receiptOutcome :: Either EditFailure Text
+  }
+  deriving (Eq, Show)
+
+-- | Apply every approved edit, in the capability's own order, to a known
+-- starting snapshot. Each plan runs against the state the PRECEDING
+-- SUCCESSFUL plan left behind: a refused plan leaves the snapshot
+-- unchanged, so the next plan in line still sees the last good state rather
+-- than one poisoned by a failure that never actually took effect. This is
+-- PRD locked decision 6's shape, read onto composition — one failing
+-- artifact never erases, or corrupts the input to, any sibling — and it is
+-- why the result carries exactly one receipt per plan, always: a failure
+-- is data at its own position, never an early return that drops the rest.
+applyEdits :: (s -> Text) -> ApprovedEdits s -> s -> (s, NonEmpty EditReceipt)
+applyEdits preview (ApprovedEdits plans) snapshot0 = go snapshot0 plans
+  where
+    go s (p :| rest) =
+      let before = preview s
+          (s', outcome) = case editPlanApply p s of
+            Left failure -> (s, Left failure)
+            Right s2 -> (s2, Right (preview s2))
+          thisReceipt = EditReceipt (editPlanId p) (editPlanIntent p) before outcome
+       in case NE.nonEmpty rest of
+            Nothing -> (s', thisReceipt :| [])
+            Just rest' -> let (sFinal, receipts) = go s' rest' in (sFinal, thisReceipt `NE.cons` receipts)
 
 -- ---------------------------------------------------------------------------
 -- The driver

@@ -233,9 +233,23 @@ worktrees and repository events; caller-side receipts everywhere.
 - **C5 — effects in nodes.** Design fully settled (2026-08-18, operator);
   what remains is implementation. Row-widening: decision 10 as amended
   (direct subagent-spawn effect, no raw Worktree verbs) plus the
-  worktree-coordination section. Comparison/choice GUI: DERIVED through
-  the existing generic askUser/forms surface (PRD 14/15) — `FoldDecision`
-  renders as a ranked select over branch results + an artifact checklist +
+  worktree-coordination section. **Precondition this lane's GUI work should
+  check first (learned in C4):** C4 landed the checked-edits MECHANISM
+  (`FoldProduct`, the consuming `ApprovedEdits` capability, `resolveSelection`/
+  `approve`/`applyEdits`, `EditReceipt`) as pure, property-tested code in
+  `Tidepool.Thought` — it does not yet wire into
+  `harness-dogfooding/recursive-companion`'s live fold window
+  (`Harness.foldWindow` still finalizes the plain `FoldProposal`, never
+  `FoldProduct`); nothing a real turn does today can produce a
+  `ProposedEdits` value. Deriving an artifact-checklist form from
+  `FoldDecision` needs that wire-level integration done first — it is a
+  small, well-scoped follow-on (HarnessTypes gains a JSON `FoldProduct`/edit
+  wire type per the existing `ProposedBranch`-style precedent, `foldAt`
+  gathers a selection pool from children, `render`/journal gain a receipts
+  line), not a re-derivation of the mechanism itself. Comparison/choice GUI:
+  DERIVED through the existing generic askUser/forms surface (PRD 14/15) —
+  `FoldDecision` renders as a ranked select over branch results + an artifact
+  checklist +
   composition order; no bespoke widget unless dogfood proves the derived
   form cramped (the goal is strong generic tools that support many harness
   shapes). Cancellation: propagates transitively to leaves, including
