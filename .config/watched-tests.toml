@@ -48,6 +48,8 @@ dogfood_harness_typecheck = "authored dogfood harnesses typecheck against today'
 dogfood_observability = "console narration of what the self-iterating harness is doing"
 finalize_type_pinning = "finalize is monomorphic to the hole's answer type"
 golden_path = "S1 golden path end to end through the record-replay provider"
+nested_async_repro = "IGNORED: nested/closure-capturing async under the tenure-then-resume GC family; carries the mechanism writeup"
+node_mailboxes = "IGNORED: Tidepool.Node forkNode/sendUp/received end-to-end; blocked on the same GC family"
 outer_effects = "authored outer loop services say/createWorktree/run and friends"
 outer_fanout = "authored outer loop's runLLMTurnFanout via service_outer_fanout"
 outer_subagent = "outer-row Subagent seam: spawnAgent @CuratorReceipt"
@@ -72,6 +74,7 @@ subagent_one_cycle = "the whole one-cycle coupled-spawn vertical, real extract/J
 subagent_tool_loop = "the whole parent-serves-child's-tools loop, real extract/JIT"
 
 [tidepool-runtime]
+green_thread_representation = "green threads park as their own registry continuations; two pending at once, either resume order"
 agent_mode_encoding = "Servant-style mode encoding (mode :- Call/Notify) through real extract/JIT"
 bignum_native = "native ghc-bignum backend: Integer/Natural over Word#/ByteArray# primops"
 bridged_records_extract = "user eval code compiles against the generated bridged record decls"
