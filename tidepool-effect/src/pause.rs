@@ -56,8 +56,8 @@ pub struct PauseGate {
 struct GateInner {
     state: GateState,
     /// True while the thread is inside an effect handler (incl. blocked on an
-    /// ask): between [`PauseGate::checkpoint`] returning `Ok` and
-    /// [`PauseGate::exit_effect`]. Read at the grace deadline to distinguish
+    /// ask): from a successful [`PauseGate::checkpoint`] until its returned
+    /// [`EffectLease`] drops. Read at the grace deadline to distinguish
     /// "blocked waiting on an external Exec/Http/LLM call (will park at the next
     /// boundary)" from "pure JIT compute runaway". (#324)
     in_effect: bool,
@@ -99,14 +99,16 @@ impl PauseGate {
 
     /// Eval/worker side, at every effect dispatch entry. Parks while paused;
     /// returns `Err(reason)` on abort (the turn then unwinds). On `Ok`, marks
-    /// `in_effect = true` — the caller MUST pair with [`Self::exit_effect`].
-    pub fn checkpoint(&self) -> Result<(), String> {
+    /// `in_effect = true` and hands back an [`EffectLease`] that clears it on
+    /// drop — hold the lease live across the effect handler call; letting it
+    /// go out of scope (return, `?`, or unwind) clears `in_effect`.
+    pub fn checkpoint(&self) -> Result<EffectLease<'_>, String> {
         let mut g = self.inner.lock();
         loop {
             match &g.state {
                 GateState::Run => {
                     g.in_effect = true;
-                    return Ok(());
+                    return Ok(EffectLease { gate: self });
                 }
                 GateState::AbortRequested(r) => {
                     let r = r.clone();
@@ -122,12 +124,6 @@ impl PauseGate {
                 }
             }
         }
-    }
-
-    /// Eval/worker side, on effect handler return (success or error): clear
-    /// `in_effect`. Must be called after every successful [`Self::checkpoint`].
-    pub fn exit_effect(&self) {
-        self.inner.lock().in_effect = false;
     }
 
     /// Mark the compile phase (eval-thread start → JIT machine creation).
@@ -193,6 +189,19 @@ impl PauseGate {
     }
 }
 
+/// RAII guard returned by a successful [`PauseGate::checkpoint`]. Clears
+/// `in_effect` on drop, so an early return or unwind out of the effect
+/// handler can no longer leave the gate stuck reporting "in effect".
+pub struct EffectLease<'a> {
+    gate: &'a PauseGate,
+}
+
+impl Drop for EffectLease<'_> {
+    fn drop(&mut self) {
+        self.gate.inner.lock().in_effect = false;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -206,16 +215,15 @@ mod tests {
         let gate = PauseGate::new();
         gate.request_pause();
         let g2 = Arc::clone(&gate);
-        let t = std::thread::spawn(move || g2.checkpoint());
+        let t = std::thread::spawn(move || g2.checkpoint().map(|_lease| ()));
         assert!(gate.parked_or_in_effect(Duration::from_secs(2)));
         gate.resume_run();
         assert!(t.join().unwrap().is_ok());
-        gate.exit_effect();
 
         // pause → park → abort errors the checkpoint
         gate.request_pause();
         let g3 = Arc::clone(&gate);
-        let t = std::thread::spawn(move || g3.checkpoint());
+        let t = std::thread::spawn(move || g3.checkpoint().map(|_lease| ()));
         assert!(gate.parked_or_in_effect(Duration::from_secs(2)));
         gate.request_abort("killed".into());
         let err = t.join().unwrap().unwrap_err();
@@ -229,23 +237,24 @@ mod tests {
         // ...unless the thread is inside an effect (e.g. a long LLM
         // call): it will park at the NEXT boundary — not a runaway.
         let busy = PauseGate::new();
-        busy.checkpoint().unwrap(); // enter effect (in_effect = true)
+        let _lease = busy.checkpoint().unwrap(); // enter effect (in_effect = true)
         busy.request_pause();
         assert!(busy.parked_or_in_effect(Duration::from_millis(50)));
     }
 
-    /// `is_in_effect()` is false initially, true after a successful
-    /// `checkpoint()`, and false again after `exit_effect()`. (repl #324)
+    /// `is_in_effect()` is false initially, true while the [`EffectLease`] from
+    /// a successful `checkpoint()` is held, and false again once it drops.
+    /// (repl #324)
     #[test]
     fn pause_gate_in_effect_flag() {
         let gate = PauseGate::new();
         assert!(!gate.is_in_effect(), "fresh gate: not in effect");
 
-        gate.checkpoint().expect("first checkpoint ok");
+        let lease = gate.checkpoint().expect("first checkpoint ok");
         assert!(gate.is_in_effect(), "after checkpoint: in effect");
 
-        gate.exit_effect();
-        assert!(!gate.is_in_effect(), "after exit_effect: not in effect");
+        drop(lease);
+        assert!(!gate.is_in_effect(), "after lease drop: not in effect");
     }
 
     /// When an abort was requested, `checkpoint()` returns `Err` and does NOT
@@ -271,10 +280,12 @@ mod tests {
         gate.request_abort("first abort".into());
         let _ = gate.checkpoint(); // consumes the abort
                                    // Gate is now Run again — next checkpoint should succeed.
-        gate.checkpoint()
+        let lease = gate
+            .checkpoint()
             .expect("second checkpoint ok after abort consumed");
         assert!(gate.is_in_effect());
-        gate.exit_effect();
+        drop(lease);
+        assert!(!gate.is_in_effect());
     }
 
     /// The compile-phase flag round-trips (#324): a timeout during compile must

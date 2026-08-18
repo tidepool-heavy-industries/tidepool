@@ -1226,15 +1226,13 @@ impl<H: DispatchEffect<O>, O> DispatchEffect<O> for GateDispatcher<H> {
         // is a cancellation, not a handler fault — record it in the JIT's
         // first-cause cell so the run boundary surfaces `Cancelled` regardless
         // of which cancellation channel fired first.
-        self.gate.checkpoint().map_err(|reason| {
+        let _lease = self.gate.checkpoint().map_err(|reason| {
             tidepool_codegen::host_fns::set_first_cause(
                 tidepool_codegen::host_fns::RuntimeError::Cancelled,
             );
             tidepool_effect::error::EffectError::Handler(reason)
         })?;
-        let result = self.inner.dispatch(tag, request, cx);
-        self.gate.exit_effect();
-        result
+        self.inner.dispatch(tag, request, cx)
     }
 }
 
