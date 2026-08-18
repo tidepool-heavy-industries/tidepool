@@ -146,19 +146,31 @@ fn dispatch(line: &str, client: &RaClient) -> Value {
 
     let file = req.get("file").and_then(Value::as_str);
     let symbol = req.get("symbol").and_then(Value::as_str);
-    let node = req.get("node");
+    let node_raw = req.get("node");
 
     // Reject files we have no server for (forward-compat with the registry).
-    let node_file = node.and_then(|n| n.get("file")).and_then(Value::as_str);
+    // This is a cheap pre-check on the raw JSON, ahead of full node
+    // validation below — it only ever narrows the error message, never
+    // widens what's accepted.
+    let node_file = node_raw.and_then(|n| n.get("file")).and_then(Value::as_str);
     for f in [file, node_file].into_iter().flatten() {
         if registry::server_for(f).is_none() {
             return err(format!("no language server configured for {}", f));
         }
     }
 
+    // Deserialize the node once at the socket boundary: a missing/malformed
+    // field (e.g. `pos.char`) is a loud error here, never a silent default
+    // downstream in resolve.rs.
+    let node: Option<Result<resolve::Node, String>> = node_raw.map(|raw| {
+        serde_json::from_value::<resolve::Node>(raw.clone())
+            .map_err(|e| format!("invalid node: {}", e))
+    });
+
     // The node-addressed ops share one resolution path.
-    let on_node = |f: &dyn Fn(&Value) -> Result<Value, String>| match node {
-        Some(n) => f(n),
+    let on_node = |f: &dyn Fn(&resolve::Node) -> Result<Value, String>| match &node {
+        Some(Ok(n)) => f(n),
+        Some(Err(e)) => Err(e.clone()),
         None => Err(format!("'{}' needs a node", op)),
     };
 

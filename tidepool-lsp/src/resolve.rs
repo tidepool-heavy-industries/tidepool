@@ -9,12 +9,59 @@
 //! directly — not a substring search, so there is no wrong-column ambiguity.
 
 use std::collections::{HashMap, HashSet};
+use std::num::NonZeroU64;
 use std::path::{Path, PathBuf};
 
 use serde_json::{json, Value};
 
 use crate::diff;
 use crate::jsonrpc::{path_to_uri, uri_to_path, RaClient};
+
+// --- the Node protocol: validated once at the socket boundary ------------
+//
+// Every node-addressed op (callers/callees/def/references/hover/rename)
+// takes a `&Node`, never a raw `serde_json::Value` — a missing/malformed
+// field is a deserialization error at the socket boundary, never a silent
+// default. Defaulting a missing UTF-16 column to 0 used to retarget
+// hover/definition/rename at column 0 of the right line, i.e. the wrong
+// symbol, without any signal that it had happened.
+
+/// A workspace-relative file path, as sent over the socket. Containment is
+/// still enforced downstream by `abs_of` — this newtype only marks that the
+/// value came off the wire, unvalidated against the filesystem.
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct WorkspaceFile(pub String);
+
+/// 1-based display line. `NonZeroU64` rejects a `0` line at deserialization
+/// instead of silently underflowing when converted to the 0-based LSP line.
+#[derive(Debug, Clone, Copy, serde::Deserialize)]
+pub struct DisplayLine(pub NonZeroU64);
+
+/// 0-based UTF-16 column. Required — a missing or malformed value is a
+/// deserialization error, never a silent 0.
+#[derive(Debug, Clone, Copy, serde::Deserialize)]
+pub struct Utf16Column(pub u64);
+
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct NodePos {
+    pub line: DisplayLine,
+    pub char: Utf16Column,
+}
+
+/// The tidepool node protocol `{name, container, kind, file, pos:{line,char},
+/// text}`, deserialized once at the socket boundary in `main.rs::dispatch`.
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct Node {
+    pub name: String,
+    #[allow(dead_code)] // part of the wire shape; not read by any op yet
+    pub container: String,
+    #[allow(dead_code)] // part of the wire shape; not read by any op yet
+    pub kind: String,
+    pub file: WorkspaceFile,
+    pub pos: NodePos,
+    #[allow(dead_code)] // part of the wire shape; not read by any op yet
+    pub text: String,
+}
 
 /// Cache of file contents → lines, so enrichment doesn't re-read.
 #[derive(Default)]
@@ -121,19 +168,10 @@ fn node(
 /// Resolve a node to its exact LSP position, read straight from `node.pos`
 /// (which the daemon populated from the originating LSP response). No substring
 /// search → no wrong-column aborts.
-fn node_position(client: &RaClient, n: &Value) -> Result<(String, u64, u64), String> {
-    let file = n
-        .get("file")
-        .and_then(Value::as_str)
-        .ok_or("node missing 'file'")?;
-    let pos = n.get("pos").ok_or("node missing 'pos'")?;
-    let line1 = pos
-        .get("line")
-        .and_then(Value::as_u64)
-        .ok_or("node pos missing 'line'")?;
-    let char0 = pos.get("char").and_then(Value::as_u64).unwrap_or(0);
-    let abs = abs_of(client.root(), file)?;
-    Ok((path_to_uri(&abs), line1.saturating_sub(1), char0))
+fn node_position(client: &RaClient, n: &Node) -> Result<(String, u64, u64), String> {
+    let abs = abs_of(client.root(), &n.file.0)?;
+    let line0 = n.pos.line.0.get().saturating_sub(1);
+    Ok((path_to_uri(&abs), line0, n.pos.char.0))
 }
 
 /// `(0-based line, 0-based UTF-16 char)` of a range's start.
@@ -192,7 +230,7 @@ pub fn where_symbol(client: &RaClient, name: &str) -> Result<Vec<Value>, String>
 
 /// Incoming calls — the functions that call this node. `Ok(None)` when the
 /// node isn't callable (no call hierarchy); `Ok(Some(_))` (maybe empty) when it is.
-pub fn callers(client: &RaClient, n: &Value) -> Result<Option<Vec<Value>>, String> {
+pub fn callers(client: &RaClient, n: &Node) -> Result<Option<Vec<Value>>, String> {
     let Some(item) = prepare_call_item(client, n)? else {
         return Ok(None);
     };
@@ -209,7 +247,7 @@ pub fn callers(client: &RaClient, n: &Value) -> Result<Option<Vec<Value>>, Strin
 }
 
 /// Outgoing calls — the functions this node calls. `Ok(None)` when not callable.
-pub fn callees(client: &RaClient, n: &Value) -> Result<Option<Vec<Value>>, String> {
+pub fn callees(client: &RaClient, n: &Node) -> Result<Option<Vec<Value>>, String> {
     let Some(item) = prepare_call_item(client, n)? else {
         return Ok(None);
     };
@@ -227,7 +265,7 @@ pub fn callees(client: &RaClient, n: &Value) -> Result<Option<Vec<Value>>, Strin
 
 /// prepareCallHierarchy at the node's position → the first CallHierarchyItem,
 /// or `None` when the symbol has no call hierarchy (not callable — not an error).
-fn prepare_call_item(client: &RaClient, n: &Value) -> Result<Option<Value>, String> {
+fn prepare_call_item(client: &RaClient, n: &Node) -> Result<Option<Value>, String> {
     let (uri, line, ch) = node_position(client, n)?;
     let result = client.request(
         "textDocument/prepareCallHierarchy",
@@ -262,7 +300,7 @@ fn item_to_node(root: &Path, item: &Value, cache: &mut FileCache) -> Value {
 }
 
 /// Resolve a node (often a use-site) to its definition node.
-pub fn def(client: &RaClient, n: &Value) -> Result<Option<Value>, String> {
+pub fn def(client: &RaClient, n: &Node) -> Result<Option<Value>, String> {
     let (uri, line, ch) = node_position(client, n)?;
     let result = client.request(
         "textDocument/definition",
@@ -292,16 +330,8 @@ pub fn def(client: &RaClient, n: &Value) -> Result<Option<Value>, String> {
     let mut cache = FileCache::default();
 
     // Enrich with the symbol's name/kind/container via documentSymbol.
-    let (name, kind, container) = symbol_at_line(client, def_uri, def_line0).unwrap_or_else(|| {
-        (
-            n.get("name")
-                .and_then(Value::as_str)
-                .unwrap_or("")
-                .to_string(),
-            "symbol".to_string(),
-            String::new(),
-        )
-    });
+    let (name, kind, container) = symbol_at_line(client, def_uri, def_line0)
+        .unwrap_or_else(|| (n.name.clone(), "symbol".to_string(), String::new()));
     Ok(Some(node(
         &name,
         &container,
@@ -324,9 +354,9 @@ pub fn def(client: &RaClient, n: &Value) -> Result<Option<Value>, String> {
 /// `(file, line, char)` — the two verbs must agree on what counts as a
 /// reference, since `lspRefs` is the blast-radius query and `lspRename` is
 /// its ground truth for "does this site depend on the symbol".
-pub fn references(client: &RaClient, n: &Value) -> Result<Option<Vec<Value>>, String> {
+pub fn references(client: &RaClient, n: &Node) -> Result<Option<Vec<Value>>, String> {
     let (uri, line, ch) = node_position(client, n)?;
-    let name = n.get("name").and_then(Value::as_str).unwrap_or("");
+    let name = n.name.as_str();
     let result = client.request(
         "textDocument/references",
         json!({
@@ -390,7 +420,7 @@ pub fn references(client: &RaClient, n: &Value) -> Result<Option<Vec<Value>>, St
 // --- hover / rename / diagnostics ----------------------------------------
 
 /// Hover (type / signature / docs) for a node, flattened to plain text.
-pub fn hover(client: &RaClient, n: &Value) -> Result<Option<String>, String> {
+pub fn hover(client: &RaClient, n: &Node) -> Result<Option<String>, String> {
     let (uri, line, ch) = node_position(client, n)?;
     let result = client.request(
         "textDocument/hover",
@@ -407,7 +437,7 @@ pub fn hover(client: &RaClient, n: &Value) -> Result<Option<String>, String> {
 /// it in memory (`rename`) or just harvest touch points (`references`).
 fn request_rename_edit(
     client: &RaClient,
-    n: &Value,
+    n: &Node,
     new_name: &str,
 ) -> Result<Option<Value>, String> {
     let (uri, line, ch) = node_position(client, n)?;
@@ -482,7 +512,7 @@ fn node_sort_key(v: &Value) -> (String, u64, u64) {
 
 /// Rename the node's symbol to `new_name`; returns a unified diff (not applied).
 /// `Ok(None)` when the symbol can't be renamed (RA returns null).
-pub fn rename(client: &RaClient, n: &Value, new_name: &str) -> Result<Option<String>, String> {
+pub fn rename(client: &RaClient, n: &Node, new_name: &str) -> Result<Option<String>, String> {
     let Some(result) = request_rename_edit(client, n, new_name)? else {
         return Ok(None);
     };
