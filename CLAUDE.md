@@ -173,9 +173,15 @@ capped without an edit there. The box-wide ceiling is the product of the two
    `--ignore-default-filter`. The right tier for "does my change to crate X
    still pass".
 3. **Sharded-full** — `scripts/battery-shard.sh <crate>`. Runs one entire
-   GHC-heavy crate's tests (`--ignore-default-filter -p <crate>`), sized to
-   finish inside the ~380s budget. Chain shards (one crate per invocation) to
-   walk full coverage without tripping the environment's kill.
+   GHC-heavy crate's tests (`--ignore-default-filter -p <crate>`). Only
+   `tidepool-handlers` (186 tests) fits this whole within the ~380s budget as
+   a bare `-p <crate>` invocation — `tidepool-harness`/`tidepool-runtime`/
+   `tidepool-repl` each need `-E 'binary(...) or binary(...)'` sub-shards
+   (5/6/7 respectively; the exact groups and measured times are documented in
+   `scripts/battery-shard.sh`'s header). Chain shards (one invocation per
+   group, in sequence — concurrent GHC-heavy shards on a shared box compete
+   for the same `ghc-slots.sh` semaphore and inflate every number) to walk
+   full coverage without tripping the environment's kill.
 4. **Expensive, opt-in** — `TIDEPOOL_EXPENSIVE_TESTS=1 scripts/battery-shard.sh
    <crate>` (or targeted per-test). A handful of suites
    (`corpus_report`, `haskell_suite_differential`,
