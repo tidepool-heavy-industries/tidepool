@@ -276,6 +276,20 @@ fn verdict(kind: &str, target: &str, text: &str) -> Json {
     })
 }
 
+/// An `Add` submission — the one verdict `verdict()` above cannot express,
+/// since it always submits an empty `gateTitle` (fine for the verdicts that
+/// ignore it, but `Add` refuses a blank title).
+fn add_verdict(title: &str, role: &str, text: &str) -> Json {
+    json!({
+        "gateVerdict": "Add",
+        "gateTarget": "",
+        "gateTitle": title,
+        "gateRole": role,
+        "gateText": text,
+        "gateNote": "scripted",
+    })
+}
+
 // ---------------------------------------------------------------------------
 // The observer — what pairs a window's PROMPT with the NODE that served it
 // ---------------------------------------------------------------------------
@@ -1634,5 +1648,55 @@ async fn companion_gate_amend_reaches_the_branches_own_prompt() {
     assert!(
         untouched.contains("the instruction the model proposed for beta"),
         "a sibling the verdict did not name keeps its own brief: {untouched}"
+    );
+}
+
+/// `Add`'s sibling case to row 8b above, and the one the `ChildEdge`
+/// constructor (`Harness.hs`) exists to rule out structurally: an ADDED
+/// branch carries its `Th.ForkBrief` on the `Th.Branch` the render reads AND
+/// inside its OWN seed, the only thing that branch's own coalgebra window is
+/// prompted from. A hand-copied seed (the pre-fix `Add` arm cloned a
+/// sibling's whole `NodeSeed`) could carry the wrong brief there even while
+/// the render looks right. Asserting the render would pass against that bug;
+/// this asserts the added branch's own PROMPT.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn companion_gate_add_reaches_the_added_branchs_own_prompt() {
+    let _cache_guard = support::isolate_cache();
+
+    const ADDED_INSTRUCTION: &str = "the instruction the operator added for gamma";
+
+    let gate = Arc::new(ScriptedGate::new(vec![
+        add_verdict("Gamma", "Primary", ADDED_INSTRUCTION),
+        verdict("Approve", "", ""),
+    ]));
+    let run = run_scenario(
+        "gate-add",
+        gate_every_layer_state(),
+        vec![
+            script(&["NODE root — DISCOVER"], split_two()),
+            script(&["NODE root/1-alpha — DISCOVER"], finish_reply()),
+            script(&["NODE root/2-beta — DISCOVER"], finish_reply()),
+            script(&["NODE root/3-", "— DISCOVER"], finish_reply()),
+            fold_script(),
+        ],
+        gate.clone(),
+    )
+    .await;
+
+    assert_eq!(
+        run.gate_presentations, 2,
+        "the Add-amended layer re-presents once before Approve ends the round"
+    );
+    let added = run.discovered_under("root/3-");
+    let added_prompt = run.window_prompt(&added, Phase::Discover);
+    assert!(
+        added_prompt.contains(ADDED_INSTRUCTION),
+        "the added branch's OWN window must be prompted with the operator's \
+         instruction, got:\n{added_prompt}"
+    );
+    assert_eq!(
+        run.paths_in(Phase::Discover),
+        vec!["root", "root/1-alpha", "root/2-beta", added.as_str()],
+        "the added branch's own window must run, alongside both original siblings'"
     );
 }

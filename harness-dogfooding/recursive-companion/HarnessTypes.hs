@@ -42,7 +42,6 @@ module HarnessTypes
   , slug
   , renderPath
   , childPath
-  , parentPath
   , pathDepth
 
     -- * The brief a node is prompted with
@@ -87,10 +86,12 @@ module HarnessTypes
   , render
   ) where
 
+import Data.List.NonEmpty (NonEmpty ((:|)))
 import qualified Data.List.NonEmpty as NE
 import qualified Data.Text as T
 import GHC.Generics (Generic)
-import Tidepool.Aeson (FromJSON, ToJSON)
+import Tidepool.Aeson (FromJSON (..), Result (..), ToJSON)
+import Tidepool.Aeson.FromJSON (genericParseJSON)
 import Tidepool.Aeson.Schema (JsonSchema)
 import Tidepool.Prelude hiding (render)
 import Tidepool.QQ (fmt)
@@ -131,7 +132,34 @@ data Config = Config
     -- @ASKUSER_MAX_REPROMPTS@'s spirit).  Hitting the bound is journaled.
     gateMaxRounds :: Int
   }
-  deriving (Generic, ToJSON, FromJSON, Show, Eq)
+  deriving (Generic, ToJSON, Show, Eq)
+
+-- | A negative cap is unrepresentable-in-spirit but the fields are plain
+-- 'Int' (every cap-consuming call site reads one directly, with no newtype to
+-- unwrap) — so the decode itself is where a negative value is refused, named
+-- by field, rather than crossing the operator's JSON boundary and producing
+-- accidental semantics downstream (a negative 'gateMaxRounds' making
+-- @done >= gateMaxRounds@ true on round 0, silently auto-accepting a layer
+-- with no presentation at all).  Structural decode first
+-- ('genericParseJSON', unchanged wire shape), THEN validate — so a
+-- malformed-shape error still names the right field via the ordinary
+-- decode path.
+instance FromJSON Config where
+  parseJSON v = do
+    c <- genericParseJSON v
+    nonNeg "maxDepth" c.maxDepth
+    nonNeg "maxNodes" c.maxNodes
+    nonNeg "maxFanOut" c.maxFanOut
+    nonNeg "gateMaxRounds" c.gateMaxRounds
+    pure c
+
+-- | Fail a decode, naming the field, when an Int meant to be a cap or a
+-- count arrives negative.  Shared by 'Config' and 'GatePolicy', the two
+-- decodable types that carry one.
+nonNeg :: Text -> Int -> Result ()
+nonNeg field n
+  | n >= 0 = pure ()
+  | otherwise = Error (unpack (field <> " must be non-negative, got " <> show n))
 
 -- | What @render@ shows about the last turn.  Flat by construction — the tree
 -- is a list of already-rendered lines, not a second tree to walk.
@@ -184,12 +212,6 @@ renderPath :: NodePath -> Text
 renderPath (NodePath segs) = case segs of
   [] -> "root"
   _ -> "root/" <> intercalate "/" segs
-
--- | Drop the last segment.  Total: the root's parent is the root.  Used by
--- @Harness.applyGate@, which must re-derive a whole layer's child paths from a
--- surviving sibling after the operator pruned or added one.
-parentPath :: NodePath -> NodePath
-parentPath (NodePath segs) = NodePath (take (max 0 (length segs - 1)) segs)
 
 -- | A child at zero-based branch index @i@ extends its parent by exactly one
 -- segment: @\<i+1\>-\<slug title\>@.  The leading index makes siblings unique
@@ -340,7 +362,21 @@ data GatePolicy
   = GateOff
   | GateWiderThan {gateWidth :: Int}
   | GateEveryLayer
-  deriving (Generic, ToJSON, FromJSON, JsonSchema, Show, Eq)
+  deriving (Generic, ToJSON, JsonSchema, Show, Eq)
+
+-- | A negative 'gateWidth' has no honest reading — 'gateApplies' also
+-- short-circuits 'Th.Finish' unconditionally (belt AND suspenders: a
+-- @GateWiderThan@ built in-Haskell rather than decoded, e.g. by a future
+-- caller, still cannot make @width > n@ gate a layer with no descent to
+-- approve), but refusing it here is what keeps the JSON boundary from ever
+-- admitting the value at all.
+instance FromJSON GatePolicy where
+  parseJSON v = do
+    p <- genericParseJSON v
+    case p of
+      GateWiderThan {gateWidth = n} -> nonNeg "gateWidth" n
+      _ -> pure ()
+    pure p
 
 data GateVerdict = Approve | Prune | Amend | Add
   deriving (Generic, ToJSON, FromJSON, JsonSchema, Show, Eq)
@@ -362,12 +398,17 @@ data LayerApproval = LayerApproval
   deriving (Generic, ToJSON, FromJSON, JsonSchema, Show, Eq)
 
 -- | Whether this policy wants THIS layer presented.  A 'Th.Finish' is never
--- gated: there is no descent to approve.
+-- gated — checked FIRST and unconditionally, so no policy (including a
+-- 'GateWiderThan' whose width was never validated, e.g. constructed directly
+-- in Haskell rather than decoded) can make @width > n@ gate a layer with no
+-- descent to approve.
 gateApplies :: GatePolicy -> ThoughtF a -> Bool
-gateApplies policy layer = case policy of
-  GateOff -> False
-  GateEveryLayer -> width > 0
-  GateWiderThan {gateWidth = n} -> width > n
+gateApplies policy layer = case layer of
+  Th.Finish _ -> False
+  _ -> case policy of
+    GateOff -> False
+    GateEveryLayer -> width > 0
+    GateWiderThan {gateWidth = n} -> width > n
   where
     width = Th.branchCount layer
 
@@ -382,25 +423,37 @@ layerBranches layer = case layer of
   Th.Compare _ os _ -> NE.toList os
   Th.Challenge _ as _ -> NE.toList as
 
--- | Put a (non-empty) branch list back under the same posture, at whatever
--- element type the caller now holds.  Callers guarantee non-emptiness —
--- @Harness.applyGate@ refuses to prune the last branch, and
--- @Harness.layerFromProposal@ turns an empty proposal into a 'Th.Finish'
--- before this is ever reached.
-rebuildLayer :: ThoughtF a -> [Th.Branch b] -> ThoughtF b
+-- | Put a NON-EMPTY branch list back under the same posture, at whatever
+-- element type the caller now holds.  TOTAL: every non-'Th.Finish' 'ThoughtF'
+-- constructor already carries its branches as a 'NE.NonEmpty', so a caller
+-- rebuilding one always already holds the proof of non-emptiness — carrying
+-- it in the argument's type is what keeps this function total instead of
+-- reaching for a partial @NE.fromList@ on a plain list a caller merely
+-- claims is non-empty.
+rebuildLayer :: ThoughtF a -> NE.NonEmpty (Th.Branch b) -> ThoughtF b
 rebuildLayer layer brs = case layer of
   Th.Finish d -> Th.Finish d
-  Th.Explore f _ s -> Th.Explore f (NE.fromList brs) s
-  Th.Compare d _ s -> Th.Compare d (NE.fromList brs) s
-  Th.Challenge c _ s -> Th.Challenge c (NE.fromList brs) s
+  Th.Explore f _ s -> Th.Explore f brs s
+  Th.Compare d _ s -> Th.Compare d brs s
+  Th.Challenge c _ s -> Th.Challenge c brs s
 
 -- | Attach each branch's zero-based position to its value, preserving order.
 -- The descent needs the index to rebuild a child's 'NodePath', and
 -- @Harness.traverseLayer@'s callback takes a bare branch — so the index rides
 -- in the branch's own value rather than in a second, order-coupled list.
+--
+-- Matches the constructor directly rather than going through 'rebuildLayer':
+-- a 'Th.Finish' has no branches to index, and every other arm's branches are
+-- already the 'NE.NonEmpty' 'rebuildLayer' needs, so there is no list to
+-- reconstruct and nothing partial to invoke.
 indexLayer :: ThoughtF a -> ThoughtF (Int, a)
-indexLayer layer = rebuildLayer layer (imap tag (layerBranches layer))
+indexLayer layer = case layer of
+  Th.Finish d -> Th.Finish d
+  Th.Explore f bs s -> Th.Explore f (tagBranches bs) s
+  Th.Compare d os s -> Th.Compare d (tagBranches os) s
+  Th.Challenge c as s -> Th.Challenge c (tagBranches as) s
   where
+    tagBranches = NE.zipWith tag (0 :| [1 ..])
     tag i (Th.Branch b v) = Th.Branch b (i, v)
 
 -- | The strategy the layer CARRIES, which for a split is the one the model

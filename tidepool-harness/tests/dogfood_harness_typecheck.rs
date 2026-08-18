@@ -174,7 +174,10 @@ fn dev_tree_typechecks() {
 /// - `layerFromProposal` turns a window's answer into a layer, INCLUDING the
 ///   empty-split and blank-branch cases that become `InvocationFailed`;
 /// - `applyGate` turns one operator verdict into an amended layer, including
-///   the refusals (`Left`) the gate loop re-presents;
+///   the refusals (`Left`) the gate loop re-presents — and takes the acting
+///   node's own `NodeSeed` first, which is what an `Add` verdict redivides
+///   allowance from (see `recursive_companion_gate_add_never_mints_allowance`
+///   below);
 /// - `renderPath`/`childPath` are node identity, and `childPath` in
 ///   particular is the ONE function both the coalgebra and the algebra call,
 ///   which is why the two cannot disagree about a child's id.
@@ -187,7 +190,7 @@ fn recursive_companion_typechecks() {
         concat!(
             "__layerFromProposal :: NodeSeed -> LayerProposal -> ThoughtF NodeSeed\n",
             "__layerFromProposal = layerFromProposal\n",
-            "__applyGate :: LayerApproval -> ThoughtF NodeSeed -> Either Text (ThoughtF NodeSeed)\n",
+            "__applyGate :: NodeSeed -> LayerApproval -> ThoughtF NodeSeed -> Either Text (ThoughtF NodeSeed)\n",
             "__applyGate = applyGate\n",
             "__renderPath :: NodePath -> Text\n",
             "__renderPath = renderPath\n",
@@ -677,4 +680,92 @@ fn dev_tree_journal_event_round_trips() {
         20,
         "expected 20 journal round-trip checks, got:\n{report}"
     );
+}
+
+/// The Add-mints-allowance regression the external review flagged
+/// (`harness-dogfooding/recursive-companion/Harness.hs`'s `applyGate`, review
+/// 2026-08-19): the `Add` arm built a new branch by cloning a sibling's whole
+/// `NodeSeed` (`withBrief` only overwrites the brief), including the
+/// PER-CHILD allowance the original split computed for the OLD branch count.
+/// Appending a branch changes that count, so handing the new branch — and
+/// leaving every survivor at — its stale share mints allowance the parent's
+/// own reservation never accounted for: allowance 5, two children at 2 each
+/// (`childAllowance` floors `(5-1) \`div\` 2` to 2), an operator `Add`s a
+/// third — the old code gave it another 2, for 2+2+2=6 against the 5-1=4 the
+/// parent actually had to divide.
+///
+/// The fix redivides EVERY kept-plus-added branch's allowance through
+/// `childAllowance` for the NEW count (3), which floors `(5-1) \`div\` 3` to
+/// 1 each — 1+1+1=3 <= 4. This runs `layerFromProposal` (the real split) and
+/// `applyGate` (the real `Add` path) on the real JIT, pure and with no
+/// operator or model, and asserts the exact numbers the review's scenario
+/// names.
+const GATE_ADD_REGRESSION_SOURCE: &str = concat!(
+    "{-# LANGUAGE NoImplicitPrelude, OverloadedStrings, DataKinds, TypeOperators, ",
+    "FlexibleContexts, GADTs, ScopedTypeVariables, TypeApplications, LambdaCase, ",
+    "RecordWildCards, OverloadedRecordDot, QuasiQuotes, DeriveGeneric, DeriveAnyClass #-}\n",
+    "module GateAddProbe where\n",
+    "import Tidepool.Prelude hiding (render)\n",
+    "import Tidepool.Effects\n",
+    "import Harness\n",
+    "import HarnessTypes (layerBranches)\n",
+    "import Tidepool.Thought (ThoughtF)\n",
+    "import qualified Tidepool.Thought as Th\n",
+    "import Tidepool.QQ (fmt)\n",
+    "import qualified Data.Text as T\n",
+    "\n",
+    "-- Never forced: 'layerFromProposal'/'applyGate'/'childAllowance' only read\n",
+    "-- 'seedPath'/'seedAllowance', so a live 'ContextRef' is not needed for this pin.\n",
+    "parentSeed :: NodeSeed\n",
+    "parentSeed = NodeSeed { seedPath = NodePath [], seedBrief = Th.ForkBrief \"root\" Th.Primary \"root brief\", seedDepth = 0, seedAllowance = 5, seedRef = undefined }\n",
+    "\n",
+    "mkBranch :: Text -> ProposedBranch\n",
+    "mkBranch t = ProposedBranch { branchTitle = t, branchRole = Primary, branchInstruction = \"do \" <> t }\n",
+    "\n",
+    "initialLayer :: ThoughtF NodeSeed\n",
+    "initialLayer = layerFromProposal parentSeed (ProposeSplit { splitPosture = Explore, splitFocus = \"f\", splitStrategy = WantSequential, splitBranches = [mkBranch \"Alpha\", mkBranch \"Beta\"] })\n",
+    "\n",
+    "addVerdict :: LayerApproval\n",
+    "addVerdict = LayerApproval { gateVerdict = Add, gateTarget = \"\", gateTitle = \"Gamma\", gateRole = Primary, gateText = \"do gamma\", gateNote = \"\" }\n",
+    "\n",
+    "-- An empty list on 'Left' rather than an 'error' call (ambiguous here between\n",
+    "-- 'Tidepool.Prelude.error' and 'Tidepool.Effects.error') — an unexpected\n",
+    "-- 'Left' still fails the assertions below loudly, via branchCount=0.\n",
+    "allowances :: [Int]\n",
+    "allowances = case applyGate parentSeed addVerdict initialLayer of\n",
+    "  Left _ -> []\n",
+    "  Right amended -> map (\\(Th.Branch _ s) -> s.seedAllowance) (layerBranches amended)\n",
+    "\n",
+    "totalFunded :: Int\n",
+    "totalFunded = 1 + sum allowances\n",
+    "\n",
+    "__gateAddReport :: Text\n",
+    "__gateAddReport =\n",
+    "  T.intercalate \"\\n\"\n",
+    "    [ [fmt|branchCount={length allowances}|]\n",
+    "    , [fmt|allowances={show allowances}|]\n",
+    "    , [fmt|totalFunded={totalFunded}|]\n",
+    "    , [fmt|withinCap={totalFunded <= parentSeed.seedAllowance}|]\n",
+    "    ]\n",
+);
+
+/// Runs [`GATE_ADD_REGRESSION_SOURCE`] on the real JIT (pure, no agent, no
+/// git, no operator) and asserts the exact numbers the review's scenario
+/// names: three branches sharing 1 each, total funded pinned at 4 (never the
+/// pre-fix 6), and within the parent's own cap of 5.
+#[test]
+fn recursive_companion_gate_add_never_mints_allowance() {
+    let json = execute_pure(
+        "harness-dogfooding/recursive-companion",
+        outer_row_decls(),
+        GATE_ADD_REGRESSION_SOURCE,
+        "__gateAddReport",
+    );
+    let report = json
+        .as_str()
+        .expect("__gateAddReport :: Text renders as a JSON string");
+    assert!(report.contains("branchCount=3"), "{report}");
+    assert!(report.contains("allowances=[1,1,1]"), "{report}");
+    assert!(report.contains("totalFunded=4"), "{report}");
+    assert!(report.contains("withinCap=True"), "{report}");
 }
