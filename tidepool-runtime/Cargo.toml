@@ -31,14 +31,14 @@ tokio = { workspace = true, features = ["rt", "sync", "time"] }
 [dev-dependencies]
 proptest.workspace = true
 tidepool-testing.workspace = true
-tidepool-optimize = { path = "../tidepool-optimize" }
+tidepool-optimize.workspace = true
 frunk.workspace = true
 tidepool-bridge-derive.workspace = true
 tidepool-bridge-effects.workspace = true
 tidepool-bridge.workspace = true
 tidepool-effect.workspace = true
 tidepool-eval.workspace = true
-tidepool-mcp = { path = "../tidepool-mcp" }
+tidepool-mcp.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "sync", "time"] }
 serial_test.workspace = true
 filetime = "0.2"
