@@ -17,3 +17,4 @@ thiserror.workspace = true
 # A normal dependency, not a dev one: `testing` is a pub module so integration
 # tests (separate crates) can use the scripted writer without a feature dance.
 tempfile.workspace = true
+uuid.workspace = true
