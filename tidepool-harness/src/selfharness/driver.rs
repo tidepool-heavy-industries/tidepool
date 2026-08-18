@@ -788,8 +788,9 @@ pub struct SelfHarnessDriver {
     /// `runLLMTurn` hole so hole #2's answerer sees hole #1's exchange (the
     /// accumulating context window — the fused hylo intermediate). Retired
     /// (dropped) at loop end so the next loop gets a fresh render-seeded
-    /// session. `None` between loops.
-    answerer: Option<NodeId>,
+    /// session. `None` between loops. Always [`WindowLease::ReusableLoop`]
+    /// — see that type's doc for the distinction it exists to enforce.
+    answerer: Option<WindowLease>,
     /// Total model inference calls across the CURRENT loop's holes + rounds:
     /// reset in [`Self::run_loop_fragment`], incremented
     /// per answerer `drive_turn`. The loop hard-stops with a [`DriverError`]
@@ -897,6 +898,89 @@ struct OuterHandlers {
     exec: Option<tidepool_handlers::ExecHandler>,
     subagent: Option<tidepool_handlers::SubagentHandler>,
     journal: Option<tidepool_handlers::JournalHandler>,
+}
+
+/// Which of the two answerer-window modes a node is running under — the
+/// path review's own negative evidence (P2.2/P3 typestate opportunity):
+/// [`Self::run_loop_fragment`]'s per-loop answerer (kept open across every
+/// ordinary `runLLMTurn` hole, its cumulative transcript IS the specified
+/// context window) and [`Self::service_outer_branch`]'s branch child
+/// (forked off a frozen prefix, retired after exactly one result) share
+/// the same finalize-driving code (`drive_answerer_to_finalize`) but must
+/// NOT share their post-finalize behavior — merging them would either
+/// discard the loop's accumulating window between ordinary holes or leak a
+/// one-shot branch child past its single result. Previously distinguished
+/// only by comments and which local variable a raw `NodeId` happened to
+/// live in; now a real two-variant sum whose own methods refuse the wrong
+/// mode instead of silently reusing/discarding the wrong window.
+///
+/// The `OneShotBranch` half is superseded at its one call site by
+/// [`BranchWindow`], a consuming guard over the same three fields — this
+/// sum is what proves the two modes are typed as distinct in the first
+/// place; `BranchWindow` is the deeper, ownership-tracked treatment of the
+/// one-shot half alone.
+#[derive(Debug, Clone, Copy)]
+enum WindowLease {
+    /// [`Self::answerer`]'s mode: never retired between holes, only ever
+    /// read via [`Self::retire_answerer`] at loop end.
+    ReusableLoop {
+        node: NodeId,
+        realm: tidepool_codegen::jit_machine::RealmId,
+    },
+    /// A `runLLMTurnBranch` child's mode: answers exactly once, then is
+    /// frozen and retired.
+    OneShotBranch {
+        node: NodeId,
+        realm: tidepool_codegen::jit_machine::RealmId,
+        scope: tidepool_codegen::scope::ScopeId,
+    },
+}
+
+impl WindowLease {
+    fn node(&self) -> NodeId {
+        match self {
+            Self::ReusableLoop { node, .. } | Self::OneShotBranch { node, .. } => *node,
+        }
+    }
+
+    /// Only a `ReusableLoop` lease may take a finalized answer and stay
+    /// open for the NEXT hole — the "keep-open" family
+    /// ([`Harness::take_finalized_value_keep_open`]/
+    /// [`Harness::take_finalized_handle_keep_open`]) is meaningless applied
+    /// to a one-shot branch, which never sees a second hole. Bug class
+    /// removed: a future refactor reading [`Self::answerer`] and treating
+    /// it as reusable when it actually held a one-shot branch's lease now
+    /// hard-errors here instead of silently reusing a window that should
+    /// have been retired.
+    fn require_reusable(&self) -> Result<NodeId, DriverError> {
+        match self {
+            Self::ReusableLoop { node, .. } => Ok(*node),
+            Self::OneShotBranch {
+                node, realm, scope, ..
+            } => Err(DriverError::Session(format!(
+                "window lease: node {node:?} (realm {realm:?}, scope {scope:?}) is a \
+                 one-shot branch window, which cannot be kept open as the loop's reusable \
+                 answerer"
+            ))),
+        }
+    }
+
+    /// Only a `OneShotBranch` lease may be frozen-then-retired — the
+    /// loop's reusable answerer must never be discarded between ordinary
+    /// holes (that would silently reset the specified context window the
+    /// path review's own negative evidence calls load-bearing). Bug class
+    /// removed: retiring/recreating the accumulating loop answerer as if
+    /// it were a one-shot branch now hard-errors instead of quietly
+    /// dropping the loop's accumulated context mid-cycle.
+    fn require_one_shot(&self) -> Result<NodeId, DriverError> {
+        match self {
+            Self::OneShotBranch { node, .. } => Ok(*node),
+            Self::ReusableLoop { node, realm } => Err(DriverError::Session(format!(
+                "window lease: node {node:?} (realm {realm:?}) is the loop's reusable \
+                 answerer, which cannot be frozen-then-retired as if it were a one-shot branch"
+            ))),
+        }
+    }
 }
 
 impl SelfHarnessDriver {
@@ -1977,8 +2061,12 @@ impl SelfHarnessDriver {
         // loop; retirement is that realm's scope exit via terminate_node.
         let sid = self.outer_sid()?;
         self.agent.force_attached(answerer, Actor::Operator, sid)?;
-        self.agent.set_node_realm(answerer, self.mint_realm());
-        self.answerer = Some(answerer);
+        let realm = self.mint_realm();
+        self.agent.set_node_realm(answerer, realm);
+        self.answerer = Some(WindowLease::ReusableLoop {
+            node: answerer,
+            realm,
+        });
 
         let result = self.run_loop_fragment_inner(prior_state, precompiled).await;
         self.retire_answerer();
@@ -1989,8 +2077,10 @@ impl SelfHarnessDriver {
     /// session), so the next loop starts from a fresh render-seeded one.
     /// Idempotent — a no-op if no answerer is live.
     fn retire_answerer(&mut self) {
-        if let Some(node) = self.answerer.take() {
-            let _ = self.agent.terminate_node(node, "loop answerer retired");
+        if let Some(lease) = self.answerer.take() {
+            let _ = self
+                .agent
+                .terminate_node(lease.node(), "loop answerer retired");
         }
     }
 
@@ -2847,13 +2937,17 @@ impl SelfHarnessDriver {
             prompt: prompt.to_string(),
         });
 
-        let node = self.answerer.ok_or_else(|| {
+        let lease = self.answerer.ok_or_else(|| {
             DriverError::Session(
                 "service_runllm_hole called with no per-loop answerer (run_loop_fragment \
                  must create it first)"
                     .into(),
             )
         })?;
+        // This hole finishes by taking the finalized answer and keeping the
+        // node open for the NEXT hole — only a `ReusableLoop` lease may do
+        // that (see `WindowLease::require_reusable`'s doc).
+        let node = lease.require_reusable()?;
 
         // Declare THIS hole's answer contract on the (reused) answerer node
         // before it takes a turn: the type pins `finalize`, and the harness's
@@ -2937,14 +3031,14 @@ impl SelfHarnessDriver {
     /// without an intervening `runLLMTurn`/`runLLMTurnBranch` returns the
     /// SAME digest rather than writing a second receipt.
     fn service_outer_freeze_context(&mut self, table: &DataConTable) -> Result<Value, DriverError> {
-        let node = self.answerer.ok_or_else(|| {
+        let lease = self.answerer.ok_or_else(|| {
             DriverError::Session(
                 "freezeContext called with no per-loop answerer (run_loop_fragment \
                  must create it first)"
                     .into(),
             )
         })?;
-        let digest = self.agent.freeze_snapshot(node)?;
+        let digest = self.agent.freeze_snapshot(lease.node())?;
         engine::build_context_ref_value(digest.as_str(), table)
             .map_err(|e| DriverError::Session(e.to_string()))
     }
@@ -3011,7 +3105,8 @@ impl SelfHarnessDriver {
             engine::answerer_hole_card(prompt, ty, self.answerer_imports(), Some(table));
         let node = self.agent.fork_from_context_ref(&cref, &hole_card)?;
         self.agent.force_attached(node, Actor::Operator, sid)?;
-        self.agent.set_node_realm(node, self.mint_realm());
+        let realm = self.mint_realm();
+        self.agent.set_node_realm(node, realm);
 
         let parent_scope = self.agent.context_ref_scope(&cref);
         let child_scope = self
@@ -3028,6 +3123,15 @@ impl SelfHarnessDriver {
         self.agent
             .set_answer_contract(node, self.answer_contract(ty));
         self.emit(Event::TurnStart { node });
+
+        // This child's mode, typed (`WindowLease::require_one_shot`'s doc):
+        // it answers exactly once, then is frozen and retired below — it
+        // must never be mistaken for the loop's reusable answerer.
+        let lease = WindowLease::OneShotBranch {
+            node,
+            realm,
+            scope: child_scope,
+        };
 
         // A branch child is a BRANCH POSITION, so from here on this window's
         // own failures are DATA — folded as `Left exit` into the answer
@@ -3107,6 +3211,11 @@ impl SelfHarnessDriver {
             value: rendered,
         });
 
+        // The success path is exactly the freeze-then-retire this child's
+        // lease exists to gate: `require_one_shot` refuses to hand back a
+        // node id if `lease` were ever (by a future refactor) the loop's
+        // reusable answerer instead of a branch child's own.
+        let node = lease.require_one_shot()?;
         // Freeze the CHILD's own post-finalize prefix BEFORE retiring it —
         // `freeze_snapshot` reads the live convo, which `terminate_node`
         // removes.
@@ -4523,9 +4632,10 @@ impl SelfHarnessDriver {
         let Some(budget) = self.agent.cfg().context_window_tokens else {
             return Ok(());
         };
-        let Some(answerer) = self.answerer else {
+        let Some(lease) = self.answerer else {
             return Ok(());
         };
+        let answerer = lease.node();
         let Some(context_tokens) = self.agent.node_last_input_tokens(answerer) else {
             return Ok(());
         };
