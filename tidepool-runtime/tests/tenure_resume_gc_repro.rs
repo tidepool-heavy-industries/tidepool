@@ -12,43 +12,44 @@
 //! `tidepool-codegen/CLAUDE.md`'s diagnostics table) to inject a real
 //! collection into the window between tenure and resume.
 //!
-//! # Root cause found — `OldSpace::tenure` does not fix up sibling references
+//! # Root cause found and FIXED — `OldSpace::tenure` folds in a full minor GC
 //!
-//! Twelve structural variants (below, kept for the family-sweep record) all
-//! pass, unweakened, under `TIDEPOOL_GC_POISON=1 TIDEPOOL_HEAP_VERIFY=1` —
-//! escalating in fidelity all the way to the REAL `Tidepool.Node.forkNode`/
-//! `MinimalWatchListHarness.hs` shape. **Every one of them calls
-//! `force_gc_for_test` at least once between tenure and the later read.**
-//! That shared ingredient turned out to be load-bearing, not incidental.
+//! Thirteen structural variants, all passing, unweakened, under
+//! `TIDEPOOL_GC_POISON=1 TIDEPOOL_HEAP_VERIFY=1` — escalating in fidelity all
+//! the way to the REAL `Tidepool.Node.forkNode`/`MinimalWatchListHarness.hs`
+//! shape.
 //!
-//! `shared_free_variable_stale_immediately_after_tenure_with_no_intervening_gc`
-//! (repro #13, last in this file) is byte-for-byte the SAME shape as the very
-//! first test (`build_wrap_suspend_shared`, `shared` captured by both the
-//! tenured `bodyClosure` and the wrap frame's own independently-rooted
-//! continuation) with only the intervening `force_gc_for_test()` call
-//! removed — and it fails immediately with `unexpected heap tag: 255`.
+//! Root cause (found via `shared_free_variable_stale_immediately_after_tenure_with_no_intervening_gc`,
+//! repro #13, last in this file): every one of the first twelve tests calls
+//! `force_gc_for_test` at least once between tenure and the later read — that
+//! shared ingredient was load-bearing, not incidental. `OldSpace::tenure`'s
+//! own `cheney_copy` call (`tidepool-codegen/src/old_space.rs`) walked ONLY
+//! the tenure root's transitive graph — a single-element root slice.
+//! `raw::evacuate` physically overwrites the moved value's old nursery
+//! address with a `TAG_FORWARDED` stub the instant it is copied. A SIBLING
+//! object (like the wrap continuation in repro #13's shape) that
+//! independently captured a pointer to that same value, but is not reachable
+//! from the tenure root, was never visited by that walk — its own field
+//! still held the pre-tenure address, which now reads as a forwarding stub.
+//! The stub only got fixed up as a side effect of a LATER collection that
+//! happened to include the sibling in its own root set — and nothing
+//! guaranteed one would run before the sibling's field was read.
 //!
-//! Mechanism: `OldSpace::tenure`'s own `cheney_copy` call
-//! (`tidepool-codegen/src/old_space.rs`) walks ONLY the tenure root's
-//! transitive graph — a single-element root slice. `raw::evacuate`
-//! physically overwrites the moved value's old nursery address with a
-//! `TAG_FORWARDED` stub the instant it is copied. A SIBLING object (like the
-//! wrap continuation here) that independently captured a pointer to that
-//! same value, but is not reachable from the tenure root, is never visited
-//! by that walk — its own field still holds the pre-tenure address, which
-//! now reads as a forwarding stub. This is correct by construction; nothing
-//! is broken in the ordinary sense. The stub only gets fixed up as a side
-//! effect of a LATER collection that happens to include the sibling in its
-//! own root set (`perform_gc`'s frame-walked-stack/rust/persistent/stowed/
-//! remembered-slot categories) — and the write barrier
-//! (`crate::host_fns::write_barrier`) does not cover this case: its
-//! documented scope is thunk-indirection mutation and array writes, not "a
-//! tenure call physically stamped a forwarding stub in a location some other
-//! live nursery object still points at." If no collection runs in the
-//! window between tenure and the read (a real possibility — nothing
-//! guarantees one), the sibling's reference is permanently stale. See this
-//! lane's `notify_parent` report for the full diagnosis and proposed fix
-//! shapes.
+//! Fix: `OldSpace::tenure` now folds a real minor collection over every
+//! ordinary root category (frame-walked stack, Rust roots, persistent roots,
+//! stowed roots, remembered slots, VMContext tail-call slots) into every
+//! tenure call that actually evacuates something
+//! (`run_minor_collection_for_tenure_fixup`, `tidepool-codegen/src/host_fns/gc.rs`),
+//! immediately after its own tenure-root walk. This reuses the SAME
+//! forward-following logic already proven correct for shared substructure
+//! across two separate tenure calls (`old_space.rs`'s
+//! `test_overlapping_tenures_preserve_sharing`) — a sibling's stale field
+//! gets fixed as a normal consequence of that pass walking an ordinary root
+//! that reaches it, not by a new bespoke mechanism. See
+//! `run_minor_collection_for_tenure_fixup`'s doc for why this is safe to run
+//! from every tenure call site (re-entrancy, frame-pointer provenance, and
+//! why it must not touch `gc_trigger`'s call-count instrumentation), and
+//! this lane's `notify_parent` history for the full diagnosis.
 
 use tidepool_codegen::jit_machine::RealmId;
 use tidepool_effect::dispatch::{DispatchEffect, EffectContext};
@@ -2630,27 +2631,20 @@ fn thunked_app_capture_survives_tenure_and_resume() {
 /// REMOVED.
 ///
 /// Every one of the twelve tests above this one calls `force_gc_for_test`
-/// at least once in that window (grep confirms it) — none test what
-/// `OldSpace::tenure` actually promises on its own: `tenure()`'s own
-/// `cheney_copy` call walks ONLY the tenure root's (`bodyClosure`'s)
+/// at least once in that window (grep confirms it) — none tested what
+/// `OldSpace::tenure` promised on its own BEFORE the fix: the old
+/// `cheney_copy` call walked ONLY the tenure root's (`bodyClosure`'s)
 /// transitive graph (`old_space.rs`'s `tenure`, the single-element root
 /// slice `&[&mut root as *mut *mut u8]`) — a SIBLING closure that
-/// independently captured the SAME free variable is never visited by that
-/// walk, so its own capture field still holds `shared`'s PRE-tenure nursery
-/// address. `raw::evacuate` physically overwrites that address with a
-/// `TAG_FORWARDED` stub the instant `shared` is copied — not lazily, not
-/// contingent on a later GC — so the sibling's stale field is corrupt
-/// *immediately after tenure returns*, before any subsequent collection
-/// ever gets a chance to fix it up via the ordinary root-walk-and-forward
-/// mechanism proven correct in `old_space.rs`'s `test_overlapping_tenures_preserve_sharing`.
-/// A later `force_gc_for_test`/minor GC only "heals" this by accident, if
-/// and only if the sibling happens to be included in that GC's own root set.
-///
-/// Remove `#[ignore]` to turn this into the fix's acceptance test — same
-/// lifecycle as `nested_async_repro.rs`/`minimal_watch_list.rs`.
-#[ignore = "chartered gap: OldSpace::tenure does not fix up a sibling closure's \
-            independently-captured reference to the tenured value (heap tag 255 with \
-            zero intervening GC) — see this file's module doc"]
+/// independently captured the SAME free variable was never visited by that
+/// walk, so its own capture field still held `shared`'s PRE-tenure nursery
+/// address, which `raw::evacuate` had physically overwritten with a
+/// `TAG_FORWARDED` stub. Fixed by folding a real minor collection over every
+/// ordinary root category into `tenure()` itself
+/// (`run_minor_collection_for_tenure_fixup`, `host_fns/gc.rs`), reusing the
+/// same forward-following mechanism proven correct in `old_space.rs`'s
+/// `test_overlapping_tenures_preserve_sharing` — see
+/// `run_minor_collection_for_tenure_fixup`'s doc for the full mechanism.
 #[test]
 fn shared_free_variable_stale_immediately_after_tenure_with_no_intervening_gc() {
     let table = table();
@@ -2670,7 +2664,7 @@ fn shared_free_variable_stale_immediately_after_tenure_with_no_intervening_gc() 
     // parked continuation independently captured `shared` too; that copy is
     // NOT touched by this tenure call, and (unlike every test above) NO
     // subsequent collection runs to give it a chance to self-heal.
-    let _handle = session
+    let handle = session
         .finalized_handle(&wrap_hole)
         .unwrap_or_else(|| panic!("wrap frame carries no untaken body closure"));
 
@@ -2695,5 +2689,31 @@ fn shared_free_variable_stale_immediately_after_tenure_with_no_intervening_gc() 
         "the wrap continuation's own (independently-captured) copy of `shared` must \
          survive tenure of a sibling closure that also captured it, even with NO \
          collection running in between"
+    );
+
+    // Consume `handle`'s RootCustody (matching repro #1's own discipline) --
+    // the tenured closure must also still be independently usable.
+    let inner_hole = match session
+        .run_forked("thread", handle, RealmId(1), Some(&table))
+        .unwrap_or_else(|e| panic!("run_forked failed: {e}"))
+    {
+        ResidentOutcome::Suspended { hole, .. } => hole,
+        other => panic!("thread body must suspend on its own effect, got {other:?}"),
+    };
+    let inner_outcome = session
+        .resume(&inner_hole, Value::Lit(Literal::LitInt(77)))
+        .unwrap_or_else(|e| panic!("thread resume failed: {e}"));
+    let answer = match inner_outcome {
+        ResidentOutcome::Completed { result, .. } => match result.into_value() {
+            Value::Con(id, ref fields) if id.0 == RESULT_ID.0 && fields.len() == 1 => {
+                expect_int(&fields[0])
+            }
+            other => panic!("expected ThreadResult(answer), got {other:?}"),
+        },
+        other => panic!("thread must complete, got {other:?}"),
+    };
+    assert_eq!(
+        answer, 77,
+        "the tenured closure's own result must survive delivery"
     );
 }

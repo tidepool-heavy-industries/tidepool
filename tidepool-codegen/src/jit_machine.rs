@@ -1615,24 +1615,41 @@ impl JitEffectMachine {
                         )),
                     )));
                 }
-                // 3. Capture from_range AFTER deep_force (GC may have changed
-                //    the active region). tenure() is pure Rust — no JIT GC
-                //    fires — so this range stays valid for all field tenures.
-                let from = self
-                    .machine_state
-                    .gc_active_range()
-                    .expect("GC state installed for the bind run");
-                let from_range = (from.0 as *const u8, unsafe {
-                    from.0.add(from.1) as *const u8
-                });
-                // 4. Project each field from nf_tuple and tenure. nf_tuple
-                //    stays valid across all tenure() calls (no JIT GC).
+                // 3. Root nf_tuple across the per-field tenure loop below.
+                //    `tenure()` now folds a real minor collection into every
+                //    call that actually evacuates something (see
+                //    `OldSpace::tenure`'s doc) to fix up sibling references,
+                //    which can relocate other live nursery objects —
+                //    including nf_tuple itself, read again on every
+                //    iteration.
+                let mut nf_tuple = nf_tuple;
+                // SAFETY: vmctx_ptr is the active run's VMContext; the scope
+                // covers the whole per-field tenure loop below.
+                let _root_tuple = unsafe { heap_bridge::RootScope::new(vmctx_ptr) };
+                // SAFETY: the slot lives on this frame until _root_tuple drops.
+                unsafe {
+                    crate::host_fns::register_rust_root(vmctx_ptr, &mut nf_tuple as *mut *mut u8);
+                }
+                // 4. Project each field from nf_tuple and tenure. Both
+                //    nf_tuple (kept current by the registered root above)
+                //    and from_range are re-read fresh every iteration: a
+                //    fixup collection inside any tenure() call can relocate
+                //    nf_tuple and/or grow/replace the active nursery region
+                //    (heap doubling), invalidating a snapshot taken before
+                //    the loop.
                 let mut slots = Vec::with_capacity(n_fields.get());
                 for i in 0..n_fields.get() {
                     let field_ptr = unsafe {
                         *(nf_tuple.add(crate::layout::CON_FIELDS_OFFSET as usize + 8 * i)
                             as *const *mut u8)
                     };
+                    let from = self
+                        .machine_state
+                        .gc_active_range()
+                        .expect("GC state installed for the bind run");
+                    let from_range = (from.0 as *const u8, unsafe {
+                        from.0.add(from.1) as *const u8
+                    });
                     let slot = unsafe {
                         self.session
                             .as_mut()
@@ -1719,9 +1736,12 @@ impl JitEffectMachine {
                 let rendered =
                     crate::host_fns::surface_error(bridge_res.map_err(JitError::HeapBridge))?;
 
-                // field0_ptr is no longer needed as a GC root past this point
-                // — deep_force (if field0_forced) roots its own traversal,
-                // and tenure triggers no JIT GC.
+                // field0_ptr is no longer needed as a GC root past this
+                // point: deep_force (if field0_forced) roots its own
+                // traversal, and the only remaining use of field0_ptr is as
+                // tenure()'s OWN argument below (`nf_field0`), which tenure
+                // roots internally — nothing else here needs to survive
+                // whatever collection tenure() may now fold in.
                 drop(_root0);
 
                 // Force (iff field0_forced) and tenure field0 ONLY. field1 is
@@ -2594,7 +2614,28 @@ impl JitEffectMachine {
                 // frame — never on a machine-level field a second realm
                 // could overwrite.
                 let mut parked_finalized_root = None;
+                // `continuation` is a raw heap pointer used AFTER this block
+                // (stored below, or handed to `park_continuation`).
+                // `tenure_finalized_payload` now folds a real minor
+                // collection into its own tenure call (see
+                // `OldSpace::tenure`'s doc) to fix up sibling references, so
+                // it can relocate other live nursery objects — root
+                // `continuation` across it exactly like `field0_ptr` is
+                // rooted across the field1 bridge in `materialize`'s Render
+                // arm.
+                let mut continuation = continuation;
                 if has_finalized_closure {
+                    let vmctx_ptr = machine.vmctx_mut() as *mut VMContext;
+                    // SAFETY: vmctx_ptr is the active run's VMContext; the
+                    // scope covers exactly the tenure call below.
+                    let _root_cont = unsafe { heap_bridge::RootScope::new(vmctx_ptr) };
+                    // SAFETY: the slot lives on this frame until _root_cont drops.
+                    unsafe {
+                        crate::host_fns::register_rust_root(
+                            vmctx_ptr,
+                            &mut continuation as *mut *mut u8,
+                        );
+                    }
                     let slot = self.tenure_finalized_payload(machine, request_ptr)?;
                     match park {
                         ParkTarget::Slot => self.suspended_finalized_root = Some(slot),

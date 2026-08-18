@@ -1,12 +1,11 @@
-//! `Tidepool.Node` capability mailboxes (PRD 20 S1-L4 wave 2) — currently
-//! BLOCKED on the tenure-then-resume GC family.
+//! `Tidepool.Node` capability mailboxes (PRD 20 S1-L4 wave 2) — was BLOCKED
+//! on the tenure-then-resume GC family; that bug is now FIXED (see
+//! `tidepool-runtime/tests/tenure_resume_gc_repro.rs`'s module doc). Trying
+//! to un-ignore surfaced a SEPARATE, previously unreachable bug (the burst
+//! scenario's coalesce times out) — see the test's own doc. Still
+//! `#[ignore]`d, now for that new reason.
 //!
-//! `#[ignore]`d and documented, NOT a sanctioned red: one attribute removal
-//! from being part of the GC fix's acceptance suite, exactly like
-//! `nested_async_repro.rs`. Read that file's module doc for the mechanism —
-//! this is the same bug, reached WITHOUT nesting.
-//!
-//! # What is blocked, and what is not
+//! # What was blocked, and what is not
 //!
 //! The wave-2 SURFACE is green and proven elsewhere: `Tidepool.Node` compiles
 //! into the dogfood row, `waitEvent` composes into a `nextEvent` select
@@ -15,18 +14,20 @@
 //! `SubscriptionRegistry`, and the driver's non-blocking `RepoEventAwait`
 //! servicing is exercised by that same bundle's deadline wait.
 //!
-//! What is blocked is END-TO-END `forkNode`: a node body whose closure
-//! captures a `NodeCtx` (whose `inbox` field is itself a closure) trips
+//! What WAS blocked (now fixed) was END-TO-END `forkNode`: a node body whose
+//! closure captures a `NodeCtx` (whose `inbox` field is itself a closure)
+//! tripped
 //!
 //! ```text
 //! AsyncSpawnWith spawner resume failed: turn run failed:
 //!   heap bridge error: unexpected heap tag: 255
 //! ```
 //!
-//! ONE `forkNode`, ONE `sendUp`, no burst, no nesting reproduces it. That is
+//! ONE `forkNode`, ONE `sendUp`, no burst, no nesting reproduced it. That was
 //! the finding that renamed the GC hunt from "nested async" to
-//! "tenure-then-resume": nesting is not required, closure-graph depth and
-//! allocation volume are what separate passing from failing.
+//! "tenure-then-resume": nesting was not required, closure-graph depth and
+//! allocation volume were what separated passing from failing. Scenarios 1
+//! and 2 of this test (plain message, silent deadline) now pass cleanly.
 //!
 //! # Why standalone rather than in the `outer_effects` bundle
 //!
@@ -82,10 +83,21 @@ fn fixtures_dir() -> std::path::PathBuf {
 /// child that sends, a silent child that lets the deadline win, and a burst
 /// that must coalesce to its LAST payload.
 ///
-/// Remove `#[ignore]` when the tenure-then-resume fix lands — this should
-/// need no other change to become that fix's end-to-end acceptance.
-#[ignore = "blocked on the tenure-then-resume GC family (heap tag 255 on the AsyncSpawnWith \
-            spawner resume) — see this file's module doc and nested_async_repro.rs"]
+/// The tenure-then-resume GC bug this was chartered against IS fixed (see
+/// `tidepool-runtime/tests/tenure_resume_gc_repro.rs`'s module doc) — no
+/// more heap-tag-255 crash. Un-ignoring surfaced a SEPARATE, previously
+/// unreachable bug: scenario 3 (the same-key burst) times out — the select
+/// over `received nodeBurst <|> after 5000` takes the deadline branch
+/// (`nodeBurstPayload` reads back the fixture's own `-1` timeout sentinel,
+/// not the coalesced payload `3`) even though the fixture explicitly
+/// `folded`s and `wait`s the burst thread first specifically to make this
+/// deterministic, not a race. Scenarios 1 and 2 (plain message, silent
+/// deadline) both pass. Re-`#[ignore]`d pending its own investigation — this
+/// is a message-coalescing/delivery bug, unrelated to GC tenure/rooting.
+#[ignore = "chartered gap (new): same-key burst coalesce times out after an explicit \
+            folded+wait sync (nodeBurstPayload reads back the -1 timeout sentinel, not \
+            3) — NOT the tenure-then-resume GC bug (that is fixed; scenarios 1/2 pass) — \
+            see this test's doc"]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_parent_selects_over_message_and_deadline() {
     support::require_extract();

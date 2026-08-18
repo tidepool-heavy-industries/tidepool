@@ -38,6 +38,26 @@
 //!
 //! Old-space is compacted only on an explicit *major* pass (when a binding
 //! generation dies) — never during a minor GC.
+//!
+//! ## Sibling-reference fixup
+//!
+//! The write barrier above covers stores made AFTER an object is tenured. It
+//! does not cover a SIBLING object — some other live nursery value that
+//! independently held a pointer into the graph [`OldSpace::tenure`] is about
+//! to evacuate, from BEFORE that tenure call runs. `tenure`'s own
+//! `cheney_copy` walk only visits the tenure root's own transitive graph;
+//! `raw::evacuate` unconditionally overwrites a moved object's old nursery
+//! address with a `TAG_FORWARDED` stub the instant it is copied, so a
+//! sibling's untouched field reads that stub the moment it is next
+//! dereferenced — not eventually, immediately. `tenure` closes this by
+//! calling [`crate::host_fns::run_minor_collection_for_tenure_fixup`] right
+//! after its own walk, whenever it actually evacuated something: a real
+//! minor collection over every ordinary root category fixes up any sibling
+//! reachable from those roots via the SAME forward-following logic this
+//! module's own `test_overlapping_tenures_preserve_sharing` proves correct
+//! for shared substructure across two tenure calls. See that function's doc
+//! for the full mechanism and why it is safe to run from every tenure call
+//! site.
 
 #![allow(dead_code)]
 
@@ -269,6 +289,22 @@ impl OldSpace {
 
             self.cursor += res.bytes_copied;
             self.used += res.bytes_copied;
+
+            // Sibling-reference fixup (see the module doc's "The write
+            // barrier" section, and `run_minor_collection_for_tenure_fixup`'s
+            // own doc): the copy above only visited THIS tenure root's own
+            // transitive graph. Any other live nursery object that
+            // independently holds a pointer into what was just moved is left
+            // pointing at the pre-tenure address, which now reads as a
+            // TAG_FORWARDED stub. A real minor collection over every ordinary
+            // root category, run immediately here, fixes every such sibling
+            // via the same forward-following logic already proven correct
+            // for shared substructure (`test_overlapping_tenures_preserve_sharing`
+            // below). Gated on `needed > 0`: nothing new was evacuated this
+            // call in the `needed == 0` branches, so there is nothing new to
+            // fix up (whatever tenure call actually moved the shared object
+            // already ran this fixup itself).
+            crate::host_fns::run_minor_collection_for_tenure_fixup(vmctx);
         }
 
         // Allocate a stable heap cell to hold the root pointer.

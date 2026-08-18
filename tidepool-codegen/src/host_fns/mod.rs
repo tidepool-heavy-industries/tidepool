@@ -25,7 +25,6 @@ mod primops;
 pub(crate) use cancel::check_cancel_and_set_error;
 pub use cancel::runtime_cancel_check;
 
-pub(crate) use gc::GcState;
 pub use gc::{
     arm_gc_fault, arm_write_barrier, clear_gc_poison_override, clear_heap_verify_override,
     clear_rust_roots, gc_doubling_run_count, gc_trigger, gc_trigger_call_count,
@@ -34,6 +33,7 @@ pub use gc::{
     rust_roots_mark, set_gc_poison, set_heap_verify, set_write_barrier_disabled_for_test,
     truncate_rust_roots, write_barrier, GcFaultPoint,
 };
+pub(crate) use gc::{run_minor_collection_for_tenure_fixup, GcState};
 
 use errors::unresolved_var_trap;
 pub use errors::{

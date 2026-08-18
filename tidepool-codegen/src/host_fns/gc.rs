@@ -287,6 +287,83 @@ pub extern "C" fn gc_trigger(vmctx: *mut VMContext) {
     }
 }
 
+/// Run a real minor collection from a non-allocation-triggered call site —
+/// currently only [`crate::old_space::OldSpace::tenure`]'s sibling-reference
+/// fixup pass (see that function's doc and `tidepool-codegen/CLAUDE.md`'s
+/// diagnostics table).
+///
+/// `OldSpace::tenure`'s own `cheney_copy` walk only fixes up the pointer
+/// fields reachable from the tenure root's OWN transitive graph — any other
+/// live object that independently holds a reference into that same graph
+/// (a "sibling") is never visited by that walk, so its field is left
+/// pointing at the pre-tenure address, which now reads as a `TAG_FORWARDED`
+/// stub. Immediately following the tenure walk with a real minor collection
+/// over every ordinary root category fixes every such sibling in one pass,
+/// via the SAME already-proven forward-following logic `perform_gc` and
+/// `OldSpace::tenure`'s own standalone walk both already rely on
+/// (`old_space.rs`'s `test_overlapping_tenures_preserve_sharing`) — nothing
+/// reachable only from the tenure root gets re-promoted (old-space is
+/// outside every minor collection's from-range), and nothing reachable only
+/// from an ordinary root is touched by the tenure walk itself.
+///
+/// Deliberately distinct from [`gc_trigger`] (the JIT allocator's slow
+/// path): does NOT touch `GC_TRIGGER_CALL_COUNT`/`GC_TRIGGER_LAST_VMCTX`
+/// (several tests assert exact counts of allocator-triggered collections;
+/// a tenure-triggered fixup pass is a different event and must not be
+/// counted as one) and skips the cancellation safepoint (this is not an
+/// allocation slow path — cancelling here would abandon the tenure call
+/// mid-evacuation).
+///
+/// Safe to call with zero live JIT frames on the stack — which is always
+/// the case here, since `OldSpace::tenure`'s callers all run after the
+/// compiled function has already yielded control back to Rust (the exact
+/// window `force_gc_for_test`'s own doc names as its motivating case).
+/// `walk_frames` degrades to zero stack roots in that case, same as
+/// `force_gc_for_test`.
+///
+/// No-op when `vmctx` is null or `vmctx.machine_state` is null, matching
+/// every other function in this module's null-`vmctx` convention (see the
+/// module doc) — checked explicitly here, NOT inherited from `perform_gc`
+/// itself: unlike the rest of this module, `perform_gc` calls the asserting
+/// `machine_state()` (not `machine_state_opt()`), because its only other
+/// caller (`gc_trigger`) is always invoked from JIT-triggered contexts with
+/// a real vmctx. `OldSpace::tenure`'s own unit tests call `tenure()` with a
+/// null vmctx directly (testing the copy logic in isolation), so this guard
+/// is load-bearing, not defensive boilerplate.
+#[inline(never)]
+pub(crate) fn run_minor_collection_for_tenure_fixup(vmctx: *mut VMContext) {
+    // SAFETY: if vmctx is non-null, it must point to a live VMContext (the
+    // same contract every other function in this module documents).
+    if unsafe { machine_state_opt(vmctx) }.is_none() {
+        return;
+    }
+
+    // Force a frame to be created — same reasoning as `gc_trigger`.
+    let mut _dummy = [0u64; 2];
+    std::hint::black_box(&mut _dummy);
+
+    #[cfg(target_arch = "x86_64")]
+    {
+        let fp: usize;
+        // SAFETY: Reading the frame pointer register (RBP) via inline asm.
+        // nomem/nostack options are correct — this is a pure register read.
+        unsafe {
+            std::arch::asm!("mov {}, rbp", out(reg) fp, options(nomem, nostack));
+        }
+        perform_gc(fp, vmctx);
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    {
+        let fp: usize;
+        // SAFETY: Reading the frame pointer register (x29) via inline asm.
+        unsafe {
+            std::arch::asm!("mov {}, x29", out(reg) fp, options(nomem, nostack));
+        }
+        perform_gc(fp, vmctx);
+    }
+}
+
 #[inline(never)]
 /// Heap growth ceiling. Defaults to 1 GiB; override with `TIDEPOOL_MAX_HEAP`
 /// (bytes). Reaching the cap with a full live set ends in a clean

@@ -32,6 +32,17 @@ full invariant is in the `jit_machine.rs` module docstring; the essentials:
   `persistent_roots` so intent is auditable: a persistent root is a
   machine-lifetime tenured value; a stowed root is a *transient* parent
   continuation rooted only while a child runs.
+- `OldSpace::tenure` (`old_space.rs`) folds a real minor collection over these
+  same six sources into every tenure call that actually evacuates something
+  (`host_fns::run_minor_collection_for_tenure_fixup`), immediately after its
+  own tenure-root-only `cheney_copy` walk. Without this, a SIBLING object
+  elsewhere on the heap that independently held a pointer into what tenure
+  just moved is left pointing at a `TAG_FORWARDED` stub — not eventually
+  wrong, wrong the instant it is next read, since nothing revisits it until
+  some OTHER collection happens to include it in its own root set. See
+  `old_space.rs`'s "Sibling-reference fixup" module doc section and
+  `tidepool-runtime/tests/tenure_resume_gc_repro.rs`'s module doc for the
+  isolated repro.
 - `JitEffectMachine::run_child_fragment{,_pure}` are the ONLY sanctioned run
   entries while suspended. They go through `enter_nested_child`, which moves the
   continuation into a heap-stable `Box` cell, registers it in `stowed_roots`,

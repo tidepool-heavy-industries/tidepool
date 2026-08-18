@@ -46,11 +46,10 @@ fn fixtures_dir() -> std::path::PathBuf {
     repo_root().join("tidepool-harness/tests/fixtures")
 }
 
-/// Remove `#[ignore]` when the tenure-then-resume fix lands — this should
-/// need no other change to become that fix's smallest acceptance.
-#[ignore = "chartered gap: tenure-then-resume GC family (heap tag 255) — see \
-            MinimalWatchListHarness.hs's module doc for the bisection and \
-            nested_async_repro.rs for the full mechanism writeup"]
+/// Was `#[ignore]`d pending the tenure-then-resume fix — see
+/// `MinimalWatchListHarness.hs`'s module doc for the bisection and
+/// `nested_async_repro.rs` for the full mechanism writeup. Fix:
+/// `tidepool-runtime/tests/tenure_resume_gc_repro.rs`'s module doc.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn minimal_watch_list_round_trips() {
     support::require_extract();

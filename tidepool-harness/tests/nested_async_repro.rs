@@ -1,11 +1,11 @@
-//! THE FAILING HALF of the nested-`async` reproducer (PRD 20 S1-L4).
-//!
-//! `#[ignore]`d and fully documented, NOT a sanctioned red: it should be one
-//! attribute removal from being the fix's acceptance test. Its control — the
-//! passing structural half — is
+//! THE (formerly) FAILING HALF of the nested-`async` reproducer (PRD 20
+//! S1-L4) — was `#[ignore]`d and fully documented as NOT a sanctioned red,
+//! now un-ignored as the fix's acceptance test. Its control — the passing
+//! structural half — is
 //! `tidepool-runtime/tests/green_thread_representation.rs`'s
 //! `a_green_thread_can_fork_another_green_thread`. Read the two together;
-//! neither means much alone.
+//! neither means much alone. Fix:
+//! `tidepool-runtime/tests/tenure_resume_gc_repro.rs`'s module doc.
 //!
 //! # What fails
 //!
@@ -141,11 +141,13 @@ fn fixtures_dir() -> std::path::PathBuf {
 
 /// A green thread's body forks another green thread.
 ///
-/// Remove `#[ignore]` to turn this into the fix's acceptance test — that is
-/// the intended lifecycle, and the reason it is ignored-with-documentation
-/// rather than deleted or left red.
-#[ignore = "chartered gap: nested async corrupts under GC — see this file's module doc for \
-            the ruled-out/still-suspect split and the first experiment"]
+/// Was `#[ignore]`d pending the fix — see this file's module doc for the
+/// full diagnosis (tag 255 / FORWARDED, a parked frame's own reference into
+/// a nursery object that a sibling tenure evacuated). Fixed by folding a
+/// real minor collection into `OldSpace::tenure` itself
+/// (`run_minor_collection_for_tenure_fixup`, `tidepool-codegen/src/host_fns/gc.rs`)
+/// — see `tidepool-runtime/tests/tenure_resume_gc_repro.rs`'s module doc for
+/// the isolated repro and mechanism.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_green_thread_body_can_fork_another_green_thread() {
     support::require_extract();
