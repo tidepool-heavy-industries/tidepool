@@ -96,6 +96,14 @@ ureq = "2"
 url = "2"
 # --- gen-workspace-deps: END ---
 
+# Line tables only (no full DWARF) for ordinary dev builds, matching
+# profile.test below: RUST_BACKTRACE=full still resolves file:line per frame,
+# debug = 0 would drop per-frame file:line entirely. Every dev-profile binary
+# here statically links Cranelift plus the full effect/runtime/harness stack,
+# so full DWARF costs real disk per binary across every worktree.
+[profile.dev]
+debug = 1
+
 # Optimize DEPENDENCIES (Cranelift, regalloc2, …) even in dev/test builds.
 # The JIT differential suites JIT-compile hundreds of fixtures per run (738 and
 # growing) via cranelift-codegen; at opt-level 0 each of those compiles runs
