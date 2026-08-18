@@ -575,6 +575,20 @@ data NodeAnswer = NodeAnswer
     -- persisted 'draft'; every other node's is informational, read back
     -- only for its own receipt.
     answerDraft     :: Text
+  , -- | The branch name of the worktree THIS node ends up owning after its
+    -- own merge fold (PRD 21 C5, "Worktree coordination"), if it ever
+    -- acquired one -- 'Nothing' for a purely deliberative node that never
+    -- needed one, and today for every node until something downstream of a
+    -- window can actually produce mergeable content.  Deliberately a plain
+    -- 'Text', not a live 'WorktreeHandle': that type only NAMES anything in
+    -- a row containing @Worktree@, and this module has to stay compilable
+    -- in the answerer's narrow row, which does not (see the module docs
+    -- above on why 'NodeSeed' carries its 'ContextRef' in "Harness"
+    -- instead -- the same constraint, applied here).  The branch name alone
+    -- is also all a merge into a PARENT's worktree ever needs: every
+    -- managed worktree shares one repository's ref namespace, so a branch
+    -- is mergeable by name from any worktree of it, with no handle to carry.
+    answerMergeBranch :: Maybe Text
   }
 
 -- | The answer a node folds to when nothing usable came back for it.
@@ -593,6 +607,7 @@ failureAnswer path why =
     , answerFailed = 1
     , answerArtifacts = []
     , answerDraft = ""
+    , answerMergeBranch = Nothing
     }
 
 -- | @\<indent\>\<path\>  \<posture\>  \<title\>  [badges]@ — one line per

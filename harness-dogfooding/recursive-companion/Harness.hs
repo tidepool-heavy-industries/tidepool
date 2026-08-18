@@ -1,4 +1,6 @@
 {-# LANGUAGE DataKinds #-}
+{-# LANGUAGE DeriveAnyClass #-}
+{-# LANGUAGE DeriveGeneric #-}
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE NoImplicitPrelude #-}
 {-# LANGUAGE OverloadedRecordDot #-}
@@ -22,9 +24,21 @@
 -- other function here is compiled coordination.
 --
 -- @Companion@ is @M@ at the driver's outer row (@RunLLMTurn@, @AskUser@,
--- @Console@, @Journal@); this file declares no new effect.
--- @tidepool-harness\/tests\/dogfood_harness_typecheck.rs@ pins it against
--- that row.
+-- @Console@, @Worktree@, @RepoEvent@, @Exec@, @Subagent@, and @Journal@ —
+-- exactly the driver's widened outer session,
+-- @selfharness::driver::outer_decls@, the same row @dev-tree@ compiles
+-- against); this file declares no new effect. @tidepool-harness
+-- \/tests\/dogfood_harness_typecheck.rs@ pins it against that row.
+--
+-- __Worktree coordination (PRD 21 lane C5).__ 'mergeFold' is authored
+-- policy over @Worktree@\/@Exec@\/@Subagent@, run by 'foldAt' — never by a
+-- window: node windows ('layerWindow'\/'foldWindow') compile against the
+-- answerer's narrow row, which has neither. It reaches git the same way
+-- @dev-tree@'s own @mergeChild@ does (mechanical @git@ through @Exec@ in a
+-- worktree this node owns; see 'gitIn'), never through a runtime workflow
+-- verb — @tidepool-worktree@'s own boundary is unchanged, and
+-- @tidepool_worktree::merge@ is the fast-tier-tested ground truth this
+-- mirrors.
 module Harness
   ( -- * The locked entry points
     State (..)
@@ -65,20 +79,35 @@ module Harness
   , childSeed
   , childEdge
   , childAllowance
+
+    -- * The merge fold (PRD 21 C5 — pure decisions exercised directly)
+  , mergePlan
+  , MergeStatus (..)
+  , mergeNote
   ) where
 
+import Data.List.NonEmpty (NonEmpty ((:|)))
 import qualified Data.List.NonEmpty as NE
+import Data.Maybe (catMaybes)
 import qualified Data.Text as T
+import GHC.Generics (Generic)
 import HarnessTypes
-import Tidepool.Aeson (Value, object, toJSON, (.=))
+import Tidepool.Agent.Spawn (renderSpawnError, spawnAgent)
+import Tidepool.Aeson (FromJSON, ToJSON, Value, object, toJSON, (.=))
+import Tidepool.Aeson.Schema (JsonSchema)
 import Tidepool.Effects
   ( ContextRef
+  , ExecError (..)
   , InvocationExit
+  , WorktreeHandle (..)
+  , WorktreeReceipt (..)
   , freezeContext
   , renderInvocationExit
+  , runIn
   , runLLMTurnBranch
   , runLLMTurnFork
   , say
+  , spawnSpecIn
   )
 import Tidepool.Form (askUser)
 import Tidepool.Harness (Harness)
@@ -88,6 +117,7 @@ import Tidepool.QQ (fmt)
 import Tidepool.Swarm (cyclesToInt, mkCycles, splitAllowance)
 import Tidepool.Thought (Coalg, Strategy, ThoughtF, depthCapped, fanOutCapped, thoughtHylo)
 import qualified Tidepool.Thought as Th
+import Tidepool.Worktree
 
 -- | The orchestration monad.  @Harness@ is @M@ under a friendlier name; the
 -- row it resolves to is the driver's outer session.
@@ -671,6 +701,176 @@ applyGate seed approval layer = case layer of
 foldNode :: Config -> Text -> ThoughtF Folded -> Companion Folded
 foldNode _cfg initialDraft layer = pure (foldAt initialDraft layer)
 
+-- ---------------------------------------------------------------------------
+-- The merge fold — PRD 21 lane C5, "Worktree coordination"
+--
+-- Worktrees are LAZY: a node acquires one only at its first real merge
+-- need — today, its first content-bearing child ('mergePlan''s whole job).
+-- The design also names a node's OWN subagent spawn as an acquisition
+-- trigger; that rides through the very same 'answerMergeBranch' channel
+-- once a node window has a route to produce one (a sibling lane's — no new
+-- vocabulary needed here, per the PRD's "two edit channels" bullet). A
+-- purely deliberative node — no child carried a branch — never touches git
+-- at all, which is what keeps a run with no worktree content anywhere
+-- byte-behaviorally unchanged.
+--
+-- Merges run in DECLARED branch order (locked decision 5: the same order
+-- the algebra receives results) — 'kids' is already that order, so this
+-- only ever walks it once, left to right. A conflict never leaves this
+-- node's worktree mid-merge: 'mergeChildInto' reads the conflicting paths
+-- and aborts before it ever returns, mirroring
+-- @tidepool_worktree::merge@'s own discipline (its fast-tier tests are the
+-- ground truth for this same "merge / conflict-and-abort / failure"
+-- semantics). A child whose conflict the resolver could not settle is
+-- simply not merged — its own worktree stays retained (PRD 19 retain-first;
+-- nothing here ever deletes anything) and the fold continues to the NEXT
+-- child rather than aborting the whole node. That is the DROP half of
+-- "drop, re-propose, escalate to the operator is the algebra's choice"
+-- (decision 6): the runtime never escalates on its own initiative — it
+-- reports, in the algebra's own prompt ('algebraPrompt''s merge block and
+-- the journal's @"merge"@ entries), and the model decides what (if
+-- anything) to say about it. GUI and cancellation are parked (PRD 21 C5
+-- context note 4): "the algebra deciding" is just this typed data flowing
+-- through the existing fold, nothing more, for now.
+-- ---------------------------------------------------------------------------
+
+-- | Declared-order plan: which of a realized layer's children carry
+-- mergeable content, in the order they were declared. 'Nothing' IS the
+-- lazy-acquisition gate — no content-bearing child means this node never
+-- creates a worktree at all. Pure and total, exercised directly with no
+-- git and no agent anywhere in the path.
+mergePlan :: [Maybe Text] -> Maybe (NonEmpty Text)
+mergePlan = NE.nonEmpty . catMaybes
+
+-- | One child branch's merge outcome. Never a panic and never a
+-- half-merged tree: 'mergeChildInto' always restores a clean worktree
+-- before returning either conflict arm.
+data MergeStatus
+  = MergeClean
+  | MergeResolved Text
+  | MergeConflicted Text
+  deriving (Show, Eq)
+
+-- | @branch: merged cleanly@ / @branch: conflict resolved by an agent —
+-- notes@ / @branch: NOT merged — why@ — one line per merge step, read by
+-- both the algebra's prompt and a human tailing the journal. Pure and
+-- total, exercised directly.
+mergeNote :: Text -> MergeStatus -> Text
+mergeNote branchText status = case status of
+  MergeClean -> [fmt|{branchText}: merged cleanly|]
+  MergeResolved notes -> [fmt|{branchText}: conflict resolved by an agent — {notes}|]
+  MergeConflicted why -> [fmt|{branchText}: NOT merged — {why}|]
+
+-- | What the merge-resolution agent finalizes — decision 6's typed resolver
+-- outcome, in the RUNTIME's own vocabulary (never the algebra's): either a
+-- trivial conflict resolved and committed, or a report of why it is not.
+-- Trivial-vs-nontrivial is the RESOLVER's own judgment, never a heuristic
+-- here — 'resolveConflict' only reads back what actually happened to
+-- @HEAD@, never trusting 'resolved' alone.
+data MergeResolution = MergeResolution
+  { resolved        :: Bool
+  , resolutionNotes :: Text
+  }
+  deriving (Generic, ToJSON, FromJSON, JsonSchema, Show, Eq)
+
+-- | Fold every content-bearing child's branch into this node's own
+-- worktree, lazily acquired on first need, in declared order. Returns this
+-- node's own resulting branch (to hand up to ITS parent, via
+-- 'answerMergeBranch') and one human-legible note per merge step, for the
+-- algebra's prompt and the journal — both are silent (@Nothing@ / @[]@)
+-- when no child carried content, by construction: nothing below ever runs
+-- before 'mergePlan' says there is a plan.
+mergeFold :: NodePath -> [Th.Branch NodeAnswer] -> Companion (Maybe Text, [Text])
+mergeFold path kids = case mergePlan (map ((.answerMergeBranch) . (.value)) kids) of
+  Nothing -> pure (Nothing, [])
+  Just (first_ :| rest) ->
+    createWorktree (fromCurrentRepository (renderPath path)) >>= \case
+      Left err -> pure (Nothing, [[fmt|worktree acquisition failed: {renderWorktreeError err}|]])
+      Right tree -> do
+        notes <- traverse (mergeStep tree) (first_ : rest)
+        branchText <- renderBranchName <$> worktreeBranch tree
+        pure (Just branchText, notes)
+  where
+    mergeStep t branchText = mergeNote branchText <$> mergeChildInto t branchText
+
+-- | One merge, mechanical first: 'gitIn' running plain @git merge --no-ff@
+-- in a worktree this node owns — authored policy, not a runtime workflow
+-- verb (PRD 19's freeze, unchanged). A real conflict is read and aborted
+-- BEFORE the resolver ever spawns, so the resolver always starts from a
+-- clean worktree.
+mergeChildInto :: WorktreeHandle -> Text -> Companion MergeStatus
+mergeChildInto tree branchText =
+  gitIn tree [fmt|merge --no-ff -m "fold {branchText}" {branchText}|] >>= \case
+    Left e -> pure (MergeConflicted [fmt|merge could not run: {e}|])
+    Right pr
+      | ok pr -> pure MergeClean
+      | otherwise -> handleConflict tree branchText
+
+-- | Read the conflicting paths, abort (restoring a clean worktree), THEN
+-- spawn the resolver — never the other order, so the resolver's own
+-- worktree access is never mid-merge.
+handleConflict :: WorktreeHandle -> Text -> Companion MergeStatus
+handleConflict tree branchText = do
+  paths <-
+    gitIn tree "diff --name-only --diff-filter=U" >>= \case
+      Left _ -> pure []
+      Right pr -> pure (filter (/= "") (T.lines pr.stdout))
+  _ <- gitIn tree "merge --abort"
+  resolveConflict tree branchText paths
+
+-- | One ephemeral agent, bound to this node's own (now clean again)
+-- worktree, asked to redo the merge and resolve the conflict itself.
+-- Repository events are authoritative, never the agent's own summary
+-- (mirrors @dev-tree@'s own rule): @HEAD@ either side of the cycle is what
+-- actually decides 'MergeResolved' vs 'MergeConflicted', not 'resolved'
+-- alone — an agent that claims success without ever moving @HEAD@ is
+-- reported as unresolved, the same way a leaf worker that claims
+-- completion without committing is caught in @dev-tree@'s own ladder.
+resolveConflict :: WorktreeHandle -> Text -> [Text] -> Companion MergeStatus
+resolveConflict tree branchText paths = do
+  before <- worktreeHead tree
+  spawnAgent @MergeResolution
+    (spawnSpecIn (worktreeId tree) (branchText <> "-merge-resolve") (mergeResolutionPrompt branchText paths))
+    >>= \case
+      Left err ->
+        pure (MergeConflicted [fmt|resolver spawn failed: {renderSpawnError err}; conflicting: {T.intercalate ", " paths}|])
+      Right (_, mr) -> do
+        after <- worktreeHead tree
+        pure $
+          if mr.resolved && after /= before
+            then MergeResolved mr.resolutionNotes
+            else
+              MergeConflicted $
+                if mr.resolved
+                  then [fmt|resolver claimed success but HEAD never moved; conflicting: {T.intercalate ", " paths}|]
+                  else [fmt|{mr.resolutionNotes}; conflicting: {T.intercalate ", " paths}|]
+
+mergeResolutionPrompt :: Text -> [Text] -> Text
+mergeResolutionPrompt branchText paths =
+  [fmt|Merge the branch `{branchText}` into this worktree's current branch:
+
+`git merge --no-ff {branchText}`
+
+It conflicts on: {T.intercalate ", " paths}. Resolve the conflicts by editing
+the conflicted files, `git add` your resolution, and `git commit` to finish
+the merge. If the conflict is not trivially resolvable, leave the merge
+unresolved and say why instead of guessing at intent.
+
+Finalize a MergeResolution {{ resolved, resolutionNotes }}.|]
+
+-- | Plain git in a worktree this node owns — authored policy, not a
+-- runtime workflow verb (mirrors @dev-tree@'s own @gitIn@ verbatim).
+gitIn :: WorktreeHandle -> Text -> Companion (Either Text Proc)
+gitIn tree args =
+  runIn tree.handleReceipt.cwd ("git " <> args) >>= \case
+    Left e -> pure (Left (renderExecError e))
+    Right pr -> pure (Right pr)
+
+renderExecError :: ExecError -> Text
+renderExecError e = case e of
+  ExecSpawn detail -> "could not spawn: " <> detail
+  ExecBadDir detail -> "bad working directory: " <> detail
+
 foldAt :: Text -> ThoughtF Folded -> Folded
 foldAt initialDraft layer path = do
   realized <- traverseLayer (layerStrategy layer) (applyChild path) (indexLayer layer)
@@ -684,7 +884,11 @@ foldAt initialDraft layer path = do
       -- (a node cannot select what it has not proposed yet — decision 7:
       -- "approval is the PARENT's fold").
       pool = concatMap (.answerArtifacts) kidAnswers
-  outcome <- foldWindow (algebraPrompt path layer kids pool)
+  (mergeBranch, mergeNotes) <- mergeFold path kids
+  case mergeNotes of
+    [] -> pure ()
+    _ -> record "merge" key (object ["branch" .= mergeBranch, "steps" .= mergeNotes])
+  outcome <- foldWindow (algebraPrompt path layer kids pool mergeNotes)
   -- A FOLD window that exits is this node's OWN failure, and it must not be
   -- its subtree's.  The children below it already ran and already folded;
   -- discarding their answers, their tree lines, or their accounting here
@@ -753,6 +957,7 @@ foldAt initialDraft layer path = do
       , answerFailed = selfFailed layer + foldFailed + sum (map (.answerFailed) kidAnswers)
       , answerArtifacts = ownArtifacts
       , answerDraft = nodeDraft
+      , answerMergeBranch = mergeBranch
       }
   where
     key = renderPath path
@@ -1038,17 +1243,25 @@ Finalize a LayerProposal:
 Finalize: `finalize @LayerProposal (...)`|]
 
 -- | @pool@ is every immediate child's own advertised artifacts — this
--- node's own selectable pool (PRD 21 lane C4). Rendered ABOVE the branch
--- block on purpose: 'companion_recursive_slice.rs''s @branch_summary@ reads
--- a branch's own text up to the NEXT "--- branch " or the literal
+-- node's own selectable pool (PRD 21 lane C4). @mergeNotes@ is PRD 21 lane
+-- C5's merge fold, already run by the time this prompt is built ('foldAt'
+-- calls 'mergeFold' before 'foldWindow') — this is the "folded as data for
+-- the algebra to decide" half of decision 6: the model reads what happened
+-- and may say so in 'foldTensions'\/'foldSynthesis', but nothing here
+-- presents it as a form or forces a response. Both blocks render ABOVE the
+-- branch block on purpose: 'companion_recursive_slice.rs''s @branch_summary@
+-- reads a branch's own text up to the NEXT "--- branch " or the literal
 -- "\\n\\nFold this realized layer" marker, so nothing may sit between the
 -- LAST branch's block and that marker without silently widening what a
--- sibling's "own" summary is read to contain.
-algebraPrompt :: NodePath -> ThoughtF a -> [Th.Branch NodeAnswer] -> [Th.Artifact Text] -> Text
-algebraPrompt path layer kids pool =
+-- sibling's "own" summary is read to contain. @mergeSection@ carries its
+-- own leading blank line and is the empty string when @mergeNotes@ is
+-- @[]@, so a node with no worktree content renders BYTE-IDENTICAL to
+-- before this lane existed.
+algebraPrompt :: NodePath -> ThoughtF a -> [Th.Branch NodeAnswer] -> [Th.Artifact Text] -> [Text] -> Text
+algebraPrompt path layer kids pool mergeNotes =
   [fmt|NODE {renderPath path} — FOLD ({posture}: {focus}).
 
-{poolBlock}
+{poolBlock}{mergeSection}
 
 {childBlock}
 
@@ -1080,6 +1293,9 @@ Finalize: `finalize @FoldDecision (...)`|]
     poolBlock = case pool of
       [] -> "No artifacts are available to select at this fold." :: Text
       _ -> "Available artifacts:\n" <> T.intercalate "\n" (map renderPoolArtifact pool)
+    mergeSection = case mergeNotes of
+      [] -> "" :: Text
+      ns -> "\nWorktree merges into this node:\n" <> T.intercalate "\n" (map ("- " <>) ns)
 
 renderPoolArtifact :: Th.Artifact Text -> Text
 renderPoolArtifact a = case a of
