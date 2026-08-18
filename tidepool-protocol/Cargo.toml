@@ -17,6 +17,13 @@ description = "Data-only schema for the Tidepool effect protocol (effects, verbs
 # Keep it that way.
 [dependencies]
 
+# Dev-only: snapshot testing for the per-effect whole-module golden pins
+# (tests/event_wire_rust.rs, tests/worktree_wire_rust.rs,
+# tests/worktree_adapters.rs). A dev-dependency does not propagate to
+# consumers, so this does not touch the zero-dependency leaf rule above.
+[dev-dependencies]
+insta = "1"
+
 [[bin]]
 name = "tidepool-protocol-gen"
 path = "src/bin/tidepool-protocol-gen.rs"
