@@ -154,49 +154,33 @@ fn state_json() -> Json {
     })
 }
 
-/// KNOWN GAP (see this test's `#[ignore]` reason): calling `delegate` for
-/// real — which lowers via `Tidepool.Agent.Delegate.runDelegate`'s
-/// `reinterpret2` onto a `send (SubagentSpawnAsync ...)` performed FROM
-/// WITHIN the reinterpretation handler — reaches the driver as an
-/// UNCLASSIFIED suspension (`HoleRouting::Ask { payload: Null }`,
-/// `classify_hole`'s `con_name` lookup misses `SubagentSpawnAsync`'s own
-/// constructor name), not `HoleRouting::Subagent`. Isolated by direct
-/// comparison, all on the SAME `answerer_decls_with_delegate()` row and the
-/// SAME `Harness`/`SelfHarnessDriver`/`pending_hole_with_request`/
-/// `resume_with_value` servicing this file's OTHER test proves works:
+/// Calling `delegate` for real — which lowers via
+/// `Tidepool.Agent.Delegate.runDelegate`'s `reinterpret2` onto a
+/// `send (SubagentSpawnAsync ...)` performed FROM WITHIN the reinterpretation
+/// handler — used to reach the driver as an UNCLASSIFIED suspension
+/// (`HoleRouting::Ask { payload: Null }`, `classify_hole`'s `con_name` lookup
+/// missing `SubagentSpawnAsync`'s own constructor name), not
+/// `HoleRouting::Subagent`. FIXED (`jit-reinterpret-rowchange` lane): the
+/// root cause was a `tidepool-codegen` JIT bug, isolated with a minimal
+/// standalone repro (`tests/reinterpret_rowchange_repro.rs`, no
+/// Subagent/Worktree involved) and documented in
+/// `plans/self-iterating-harness/21-c5-delegate-effect-survey.md`'s third
+/// amendment — `decomp`'s literal-tag pattern match (`Data.OpenUnion`,
+/// underlying every `reinterpret`/`reinterpret2` call) had no tolerance for
+/// a BOXED `W#` tag reaching it from un-inlined cross-module generic code,
+/// unlike its sibling `emit_data_dispatch`'s already-existing "Runtime
+/// Lit-tolerance" in the opposite direction. Fixed in
+/// `tidepool-codegen/src/emit/case.rs`'s `emit_lit_dispatch` by routing the
+/// scrutinee through the same arity-guarded `unwrap_boxing_chain`
+/// `unbox_addr`/`unbox_bytearray` already use.
 ///
-/// - A `send (SubagentSpawnAsync ...)` written DIRECTLY in the model's own
-///   turn text (bypassing `runDelegate`/`reinterpret2` entirely) classifies
-///   and services correctly — see
-///   `direct_subagent_send_dispatches_within_the_answerer_row` below.
-/// - The SAME send, performed from inside `Tidepool.Agent.Delegate`'s
-///   `reinterpret`/`reinterpret2` handler (via `delegate`), does not.
-///
-/// `reinterpret`/`reinterpret2` themselves are freer-simple library
-/// combinators (not authored here) and PRD 21 C5's settled design explicitly
-/// names them (`plans/self-iterating-harness/21-c5-delegate-effect-survey.md`'s
-/// amendment) as the "same family" `Tidepool.Event.withHandler` is built
-/// from and empirically proved on this JIT
-/// (`plans/post-restart/worktree-lanes/L4-mechanism.md`) — but that proof
-/// covers ONLY same-row interposition (`pumped`/`withHandler`, walking
-/// `Eff`'s `Val`/`E` constructors directly). The ROW-CHANGING combinators
-/// (`replaceRelay`/`replaceRelayN`, which additionally call into
-/// `Data.OpenUnion`'s `decomp`/`weaken`) have never been exercised on this
-/// JIT before this lane, and this test is the evidence that they do not
-/// currently execute correctly here when the reinterpreted handler's own
-/// body performs a send that must reach a real machine suspension. Fixing
-/// this is `tidepool-codegen` work, outside this lane's boundary — reported
-/// rather than worked around. The TYPE-LEVEL mechanism (unnameability) is
-/// unaffected and fully proved at the compile level
-/// (`delegate_type_pinning.rs`, 5/5 green) — this gap is specifically about
-/// RUNTIME EXECUTION of the interpreter once a model turn actually calls
-/// `delegate`.
-#[ignore = "PRD 21 C5 STOP-reportable gap: reinterpret2's handler-internal \
-            Subagent send misclassifies as an unknown suspension at runtime \
-            on this JIT (see this test's doc comment) — a tidepool-codegen \
-            issue, outside this lane's boundary. The compile-level \
-            unnameability proof (delegate_type_pinning.rs) is unaffected \
-            and green."]
+/// This test is the full real-world positive path (isolated by direct
+/// comparison against `direct_subagent_send_dispatches_within_the_answerer_row`
+/// below, all on the SAME `answerer_decls_with_delegate()` row and the SAME
+/// `Harness`/`SelfHarnessDriver`/`pending_hole_with_request`/
+/// `resume_with_value` servicing that test proves works). The TYPE-LEVEL
+/// mechanism (unnameability) was never affected and is proved separately at
+/// the compile level (`delegate_type_pinning.rs`, 5/5 green).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn root_coalgebra_window_delegates_and_finalizes_on_the_result() {
     support::require_extract();
@@ -316,24 +300,38 @@ async fn root_coalgebra_window_delegates_and_finalizes_on_the_result() {
         .iter()
         .map(|v| v.as_str().expect("a tree line is a string").to_string())
         .collect::<Vec<_>>();
-    let root_line = tree
-        .iter()
-        .find(|l| l.starts_with("root "))
-        .unwrap_or_else(|| panic!("no root tree line in {tree:?}"));
     assert!(
-        root_line.contains("found one file: README.md"),
-        "the root's finish must carry the delegated subagent's OWN typed \
-         result (delegateSummary), decoded through the real MockBackend \
-         saga — not a placeholder: {root_line}"
+        tree.iter().any(|l| l.starts_with("root ")),
+        "no root tree line in {tree:?}"
     );
 
     // The journal shows the node actually reached `discover` and `finish` —
-    // ordinary companion bookkeeping, unaffected by delegation.
+    // ordinary companion bookkeeping, unaffected by delegation. The "finish"
+    // entry's own payload (`journalLayer`, `harness-dogfooding/recursive-companion/
+    // Harness.hs`) carries the coalgebra's raw `draftText` — the ONE place the
+    // delegated subagent's OWN typed result (`delegateSummary`, decoded through
+    // the real MockBackend saga) survives into anything this test can observe:
+    // the tree line itself (`nodeLine`, `HarnessTypes.hs`) is deliberately just
+    // `path  posture  title  badges`, never free text, and the root's
+    // `runAnswer`/algebra-fold synthesis is this scenario's SCRIPTED "FOLDED"
+    // reply, not a real model reading the child's answer.
     let journal = tidepool_handlers::load_journal(&journal_path).expect("journal loads");
     let kinds: Vec<&str> = journal.iter().map(|e| e.kind.as_str()).collect();
     assert!(
         kinds.contains(&"finish"),
         "the root must journal a finish, got {kinds:?}"
+    );
+    let finish_draft = journal
+        .iter()
+        .find(|e| e.kind == "finish")
+        .and_then(|e| e.payload.get("draft"))
+        .and_then(Json::as_str)
+        .unwrap_or_else(|| panic!("no \"finish\" journal entry with a \"draft\" field"));
+    assert!(
+        finish_draft.contains("found one file: README.md"),
+        "the root's finish must carry the delegated subagent's OWN typed \
+         result (delegateSummary), decoded through the real MockBackend \
+         saga — not a placeholder: {finish_draft}"
     );
 }
 
@@ -345,7 +343,7 @@ async fn root_coalgebra_window_delegates_and_finalizes_on_the_result() {
 /// node's own session — the new plumbing this lane added to
 /// `HoleRouting::Subagent`'s existing, pre-`drain_note_holes` servicing) and
 /// the typed `CycleId`/`SpawnOutcome` crosses back into the resumed
-/// continuation. This is the CONTROL for the `#[ignore]`d test above: the
+/// continuation. This is the isolating CONTROL for the test above: the
 /// SAME row, the SAME driver wiring, the SAME `MockBackend` saga — the only
 /// difference is that `SubagentSpawnAsync` is sent directly rather than
 /// through `Tidepool.Agent.Delegate`'s reinterpretation.
