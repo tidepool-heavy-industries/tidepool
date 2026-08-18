@@ -1088,6 +1088,36 @@ impl Drop for BranchWindow {
     }
 }
 
+/// A cycle's loop-entry decision, minted once per cycle by
+/// [`SelfHarnessDriver::take_loop_entry`] and consumed by whichever
+/// compilation path runs this cycle — the fused
+/// [`SelfHarnessDriver::compile_cycle_entry`] or the unfused
+/// [`SelfHarnessDriver::run_loop_fragment_inner`]. Its whole reason to
+/// exist is [`SelfHarnessDriver::resume`]'s destructive `self.resume.take()`:
+/// before this type, both compile sites called `take_loop_entry` directly,
+/// each independently reading `self.resume`, and the fact that only one of
+/// them runs per cycle was a RUNTIME CONVENTION a reader had to trust
+/// rather than something the types enforced — exactly the shape a future
+/// third call site (a preparatory/fallback compile) could violate. Non-Clone:
+/// at most one plan is ever live, so a resume fold cannot be injected twice
+/// or consumed by the wrong compile.
+struct CycleEntryPlan {
+    code: String,
+    helpers: String,
+}
+
+impl CycleEntryPlan {
+    /// Consumes the plan. `code` names the loop entry (`Loaded.loop
+    /// __selfHarnessState` or `Loaded.resumeLoop …`); `helpers` is the
+    /// resume-fold decode splice (empty on an ordinary cycle) a caller
+    /// appends alongside `state_cross::state_in`/`operator_msg_in`, which
+    /// stay the CALLER's business — they are cycle-wide, not part of the
+    /// resume decision this plan makes.
+    fn into_code_and_helpers(self) -> (String, String) {
+        (self.code, self.helpers)
+    }
+}
+
 impl SelfHarnessDriver {
     /// Construct a driver over an already-booted [`Harness`] (the nested
     /// orchestrator for `runLLMTurn`-answering Agent sessions) and an event
@@ -1666,22 +1696,32 @@ impl SelfHarnessDriver {
     ///   in the helpers.
     ///
     /// `take()`s the fold: the injection is ONE-SHOT at boot (see
-    /// [`Self::resume`]'s doc). Both compile sites call this — the fused
-    /// [`Self::compile_cycle_entry`] and the unfused
-    /// [`Self::run_loop_fragment_inner`] — but only one of them compiles per
-    /// cycle (the second runs a precompiled turn), so the fold is consumed
-    /// exactly once regardless of which path a caller drives.
+    /// [`Self::resume`]'s doc), minted into a [`CycleEntryPlan`] a caller
+    /// then consumes exactly once. [`Self::run_one_cycle`] mints ONE plan
+    /// per cycle and passes it down to [`Self::compile_cycle_entry`] (the
+    /// fused, production path); the unfused [`Self::run_loop_fragment_inner`]
+    /// — a direct fragment API `run_one_cycle` never itself calls, used by a
+    /// test driving the fragment in isolation — mints its OWN plan instead.
+    /// Either way `self.resume` is readable ONLY through this method, so a
+    /// second call in the same cycle cannot get the resume fold a second
+    /// time: it already saw `self.resume.take()` return `None` from the
+    /// first call and mints the fold-less plan instead — a physically
+    /// enforced one-shot rather than "only one caller happens to run per
+    /// cycle" left to convention.
     ///
     /// A non-empty fold against a harness with no `resumeLoop` never reaches
     /// here: `bootstrap` refused it.
-    fn take_loop_entry(&mut self) -> (String, String) {
+    fn take_loop_entry(&mut self) -> CycleEntryPlan {
         let q = state_cross::LOADED_QUALIFIER;
         match self.resume.take() {
-            Some(pending) if !pending.fold.is_empty() => (
-                format!("{q}.resumeLoop __selfHarnessResume __selfHarnessState"),
-                state_cross::resume_in(&pending.fold),
-            ),
-            _ => (format!("{q}.loop __selfHarnessState"), String::new()),
+            Some(pending) if !pending.fold.is_empty() => CycleEntryPlan {
+                code: format!("{q}.resumeLoop __selfHarnessResume __selfHarnessState"),
+                helpers: state_cross::resume_in(&pending.fold),
+            },
+            _ => CycleEntryPlan {
+                code: format!("{q}.loop __selfHarnessState"),
+                helpers: String::new(),
+            },
         }
     }
 
@@ -1707,9 +1747,15 @@ impl SelfHarnessDriver {
     /// [`Self::render_framing`]/[`Self::run_loop_fragment_inner`]'s job, so a
     /// caller can compile once and run each entry through its own existing
     /// path.
+    ///
+    /// `plan` is this cycle's [`CycleEntryPlan`] — minted ONCE by the caller
+    /// ([`Self::run_one_cycle`]) via [`Self::take_loop_entry`] and consumed
+    /// HERE, never minted by this method itself: see `CycleEntryPlan`'s doc
+    /// for why that split is the point.
     fn compile_cycle_entry(
         &mut self,
         prior_state: Option<&Json>,
+        plan: CycleEntryPlan,
     ) -> Result<(CompiledTurn, CompiledTurn), DriverError> {
         let outer = self.outer.as_ref().ok_or_else(not_bootstrapped)?;
         let imports = format!(
@@ -1725,11 +1771,7 @@ impl SelfHarnessDriver {
         let extract_bin = outer.cfg.extract_bin.clone();
         let include = outer.cfg.include.clone();
 
-        // Entry selection happens HERE, where the loop entry's code string is
-        // composed — the boot fold (if any) is consumed once and its decode
-        // splice joins the shared helpers, so both fused entries see identical
-        // helper text exactly as they did before.
-        let (loop_code, resume_helpers) = self.take_loop_entry();
+        let (loop_code, resume_helpers) = plan.into_code_and_helpers();
         let helpers = format!(
             "{}{}{}",
             state_cross::state_in(prior_state),
@@ -1827,6 +1869,12 @@ impl SelfHarnessDriver {
         self.machine_maintenance()?;
         self.emit(Event::LoopBoundary);
 
+        // Mint THIS cycle's loop-entry plan ONCE, here — the one call to
+        // `take_loop_entry` a production cycle ever makes — and pass it
+        // down to `compile_cycle_entry` rather than letting that method
+        // mint its own (`CycleEntryPlan`'s doc).
+        let plan = self.take_loop_entry();
+
         // Compile the pre-loop `render` and this cycle's `loop` fragment
         // TOGETHER, in ONE spawn (`Self::compile_cycle_entry`), then run the
         // render entry directly against `prior_state` — `None` (the very
@@ -1844,7 +1892,7 @@ impl SelfHarnessDriver {
         // reporting `Failed` forever instead of escalating) — do not
         // simplify this to one.
         let prior_compaction = self.last_compaction.clone();
-        let (prompt_before, loop_turn) = match self.compile_cycle_entry(prior_state) {
+        let (prompt_before, loop_turn) = match self.compile_cycle_entry(prior_state, plan) {
             Ok((render_turn, loop_turn)) => {
                 match self.render_framing_with(&render_turn, prior_compaction.as_deref()) {
                     Ok(prompt) => (prompt, loop_turn),
@@ -2221,10 +2269,11 @@ impl SelfHarnessDriver {
         let compiled = match precompiled {
             Some(compiled) => compiled,
             None => {
-                // The unfused path composes the loop entry itself, so entry
-                // selection lives here too — same helper
-                // ([`Self::take_loop_entry`]), same one-shot `take`.
-                let (code, resume_helpers) = self.take_loop_entry();
+                // The unfused path mints its OWN plan — a direct fragment
+                // API a test drives in isolation, never called from
+                // `run_one_cycle` (which mints one plan and passes it to
+                // `compile_cycle_entry` instead). See `CycleEntryPlan`'s doc.
+                let (code, resume_helpers) = self.take_loop_entry().into_code_and_helpers();
                 let helpers = format!(
                     "{}{}{}",
                     state_cross::state_in(prior_state),
