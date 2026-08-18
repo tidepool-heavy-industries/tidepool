@@ -41,7 +41,7 @@ pub struct LibLayer {
 
 /// Single-entry memo: `(lib-snapshot-hash, layer)`. A snapshot-hash match means
 /// no lib file changed since we last probed, so the previous decision stands.
-static MEMO: Mutex<Option<(u64, LibLayer)>> = Mutex::new(None);
+static MEMO: Mutex<Option<(String, LibLayer)>> = Mutex::new(None);
 
 /// Compile-probe the `.tidepool/lib` facade and, if it is broken, return an
 /// include-path prefix + a sanitized `Library.hs` that excludes the broken
@@ -68,13 +68,13 @@ pub fn isolate_lib_layer(lib_dirs: &[PathBuf], include: &[PathBuf]) -> LibLayer 
         }
     }
 
-    let layer = compute_layer(&lib_src, include, snapshot);
+    let layer = compute_layer(&lib_src, include, &snapshot);
     *MEMO.lock() = Some((snapshot, layer.clone()));
     layer
 }
 
-fn compute_layer(lib_src: &str, include: &[PathBuf], snapshot: u64) -> LibLayer {
-    let salt = format!("libiso-{snapshot:016x}");
+fn compute_layer(lib_src: &str, include: &[PathBuf], snapshot: &str) -> LibLayer {
+    let salt = format!("libiso-{snapshot}");
 
     // Fast path: does `import Library` compile? One probe, cached under `salt`.
     if probe_import("Library", include, &salt).is_ok() {
@@ -218,16 +218,18 @@ fn brick_note(excluded: &[String]) -> String {
 /// stable cache root and return that dir (an include root). Idempotent: the
 /// path is keyed on the source, so identical facades reuse the same dir.
 fn stage_library(src: &str) -> std::io::Result<PathBuf> {
-    let hash = crate::fnv1a_hash(src.as_bytes());
-    let root = tidepool_runtime::paths::effects_dir().join(format!("tidepool-libiso-{hash:016x}"));
+    let hash = crate::content_hash_hex(&[src.as_bytes()]);
+    let root = tidepool_runtime::paths::effects_dir().join(format!("tidepool-libiso-{hash}"));
     crate::write_module_file(&root, "Library.hs", src)?;
     Ok(root)
 }
 
-/// FNV-1a over every `.hs` file (sorted path + content) across `lib_dirs`. Any
-/// edit/add/remove to any lib module changes this, busting both the in-process
-/// memo and every probe's compile cache so the layer is recomputed.
-fn lib_snapshot_hash(lib_dirs: &[PathBuf]) -> u64 {
+/// Blake3 over every `.hs` file (sorted path + content) across `lib_dirs`,
+/// each field length-framed so a path/content split can never collide with a
+/// different one. Any edit/add/remove to any lib module changes this,
+/// busting both the in-process memo and every probe's compile cache so the
+/// layer is recomputed.
+fn lib_snapshot_hash(lib_dirs: &[PathBuf]) -> String {
     let mut entries: Vec<(String, Vec<u8>)> = Vec::new();
     for dir in lib_dirs {
         if let Ok(rd) = std::fs::read_dir(dir) {
@@ -242,14 +244,11 @@ fn lib_snapshot_hash(lib_dirs: &[PathBuf]) -> u64 {
         }
     }
     entries.sort_by(|a, b| a.0.cmp(&b.0));
-    let mut combined: Vec<u8> = Vec::new();
-    for (path, bytes) in entries {
-        combined.extend_from_slice(path.as_bytes());
-        combined.push(0);
-        combined.extend_from_slice(&bytes);
-        combined.push(0);
-    }
-    crate::fnv1a_hash(&combined)
+    let fields: Vec<&[u8]> = entries
+        .iter()
+        .flat_map(|(path, bytes)| [path.as_bytes(), bytes.as_slice()])
+        .collect();
+    crate::content_hash_hex(&fields)
 }
 
 #[cfg(test)]

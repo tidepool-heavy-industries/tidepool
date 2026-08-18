@@ -254,9 +254,9 @@ pub fn ensure_effects_module_with_vocab(
 /// compute a fingerprint / call GHC against an incomplete staging dir.
 /// Inter-process safety (multiple `cargo test` binaries) is handled by the
 /// atomic-rename primitive inside [`write_module_file`].
-fn effects_write_cache() -> &'static Mutex<std::collections::HashMap<u64, PathBuf>> {
+fn effects_write_cache() -> &'static Mutex<std::collections::HashMap<String, PathBuf>> {
     use std::sync::OnceLock;
-    static CACHE: OnceLock<Mutex<std::collections::HashMap<u64, PathBuf>>> = OnceLock::new();
+    static CACHE: OnceLock<Mutex<std::collections::HashMap<String, PathBuf>>> = OnceLock::new();
     CACHE.get_or_init(|| Mutex::new(std::collections::HashMap::new()))
 }
 
@@ -281,15 +281,15 @@ pub(crate) fn write_generated_modules(
     effects_src: &str,
     orchestrate_src: &str,
 ) -> std::io::Result<PathBuf> {
-    // FNV-1a: deterministic across processes (no per-process SipHash seed).
-    // DefaultHasher is randomly seeded, causing identical source to hash to
-    // different paths in each process → "Could not find module Tidepool.Effects"
-    // when a second process picks a different cache dir than the one that wrote it.
-    // Hash both sources together so either changing busts the dir.
-    let combined = format!("{effects_src}\n--ORCH--\n{orchestrate_src}");
-    let hash = fnv1a_hash(combined.as_bytes());
-    let root =
-        tidepool_runtime::paths::effects_dir().join(format!("tidepool-effects-{:016x}", hash));
+    // blake3, content-addressed and deterministic across processes (no
+    // per-process SipHash seed like DefaultHasher, which would hash identical
+    // source to different paths in each process → "Could not find module
+    // Tidepool.Effects" when a second process picks a different cache dir
+    // than the one that wrote it). Each source is its own length-framed
+    // field, so hashing them separately can never collide with hashing their
+    // concatenation.
+    let hash = content_hash_hex(&[effects_src.as_bytes(), orchestrate_src.as_bytes()]);
+    let root = tidepool_runtime::paths::effects_dir().join(format!("tidepool-effects-{hash}"));
     let module_dir = root.join("Tidepool");
 
     // Acquire the process-level serialization lock.  Concurrent callers (parallel
@@ -342,14 +342,18 @@ pub(crate) fn write_module_file(module_dir: &Path, name: &str, src: &str) -> std
     Ok(())
 }
 
-/// FNV-1a 64-bit hash — deterministic, no external dependency.
-pub(crate) fn fnv1a_hash(bytes: &[u8]) -> u64 {
-    let mut h: u64 = 14_695_981_039_346_656_037;
-    for &b in bytes {
-        h ^= b as u64;
-        h = h.wrapping_mul(1_099_511_628_211);
+/// Blake3 content-address hash of `fields`, each framed with its own byte
+/// length before hashing so two different field splits can never collide
+/// (e.g. `["ab", "c"]` hashing the same as `["a", "bc"]` would under bare
+/// concatenation). Truncated to 32 hex chars (128 bits) — collision-safe for
+/// a content-addressed staging dir name.
+pub(crate) fn content_hash_hex(fields: &[&[u8]]) -> String {
+    let mut h = blake3::Hasher::new();
+    for f in fields {
+        h.update(&(f.len() as u64).to_le_bytes());
+        h.update(f);
     }
-    h
+    h.finalize().to_hex()[..32].to_string()
 }
 
 /// Unwrap double-encoded JSON strings if they contain an object or array.
@@ -1291,10 +1295,11 @@ data Console a where
         assert_eq!(input["key"], "value");
         assert_eq!(input["num"], 123);
     }
-    /// Snapshot test: FNV-1a of a fixed string must produce the same hash
-    /// in every process. If DefaultHasher (randomly seeded) is accidentally
-    /// reintroduced, this assertion fails because the computed hash won't
-    /// match the stable FNV-1a value baked into the expected dir name.
+    /// Snapshot test: blake3 of a fixed pair of strings must produce the same
+    /// hash in every process. If DefaultHasher (randomly seeded) were
+    /// accidentally reintroduced, this assertion fails because the computed
+    /// hash won't match the stable blake3 value baked into the expected dir
+    /// name.
     #[test]
     fn test_effects_hash_is_deterministic_across_calls() {
         let eff = "module Tidepool.Effects where\n-- sentinel\n";
@@ -1305,15 +1310,14 @@ data Console a where
             dir1, dir2,
             "same source must yield same content-addressed dir"
         );
-        // Verify the dir name encodes the known FNV-1a hash of BOTH sources
-        // combined (changing either busts the dir).
-        let combined = format!("{eff}\n--ORCH--\n{orch}");
-        let expected_hash = fnv1a_hash(combined.as_bytes());
-        let expected_suffix = format!("tidepool-effects-{:016x}", expected_hash);
+        // Verify the dir name encodes the known blake3 hash of BOTH sources
+        // (changing either busts the dir).
+        let expected_hash = content_hash_hex(&[eff.as_bytes(), orch.as_bytes()]);
+        let expected_suffix = format!("tidepool-effects-{expected_hash}");
         let dir_name = dir1.file_name().unwrap().to_str().unwrap();
         assert_eq!(
             dir_name, expected_suffix,
-            "dir name must be the stable FNV-1a hash of both sources; got {dir_name}"
+            "dir name must be the stable blake3 hash of both sources; got {dir_name}"
         );
         // A change to the orchestrate source alone busts the dir.
         let dir3 =

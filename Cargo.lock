@@ -4074,6 +4074,7 @@ dependencies = [
 name = "tidepool-macro"
 version = "0.1.0"
 dependencies = [
+ "blake3",
  "proc-macro2",
  "quote",
  "serde_json",
@@ -4088,6 +4089,7 @@ name = "tidepool-mcp"
 version = "0.1.0"
 dependencies = [
  "axum",
+ "blake3",
  "dyn-clone",
  "frunk",
  "parking_lot",
