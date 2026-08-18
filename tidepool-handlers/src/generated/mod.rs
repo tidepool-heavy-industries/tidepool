@@ -11,5 +11,6 @@
 
 pub mod exec;
 pub mod journal;
+pub mod repo_event;
 pub mod worktree;
 pub mod worktree_adapters;

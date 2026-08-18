@@ -65,15 +65,23 @@ import Tidepool.Prelude hiding (render, (<|>))
 import Tidepool.QQ (fmt)
 
 import Tidepool.Effects
-  ( Observed (..)
-  , Tick (..)
-  , after
-  , createWorktree
-  , headChanged
-  , nextEvent
+  ( createWorktree
   , record
   , run
   , say
+  )
+-- `Observed`/`Tick`/`after`/`headChanged`/`nextEvent`/`withHandler`/`(<|>)` are
+-- DEFINITIONS in `Tidepool.Event` (PRD 22 lane 4), not the generated
+-- `Tidepool.Effects` module — this fixture is spliced as a plain `--include`d
+-- module rather than compiled as an ordinary turn, so it needs the explicit
+-- import below like any other symbol this module uses (same reason the
+-- module doc above gives for `Tidepool.Async`).
+import Tidepool.Event
+  ( Observed (..)
+  , Tick (..)
+  , after
+  , headChanged
+  , nextEvent
   , withHandler
   , (<|>)
   )

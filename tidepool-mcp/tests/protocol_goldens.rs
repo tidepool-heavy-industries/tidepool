@@ -27,15 +27,20 @@ use tidepool_mcp::EffectDecl;
 // ---------------------------------------------------------------------------
 
 /// Every `*_decl()` function invoked in `tidepool-mcp/src/effect_decls.rs`,
-/// in the ORDER its `<eff>_effect_def!` invocation appears there, EXCEPT:
+/// in the ORDER its `<eff>_effect_def!` invocation (or, for a flipped effect,
+/// its comment marker) appears there, EXCEPT:
 ///
-///   - `event_decl()` and `subagent_decl()` — HARD CONSTRAINT (PRD 22 phase-1
-///     spec): a sibling lane is actively editing the `event_effect_def!` /
-///     `subagent_effect_def!` rows in `tidepool-mcp/src/effect_defs.rs` right
-///     now. Including either decl here would make this baseline chase a
-///     moving target instead of pinning stable trunk state. Do NOT
-///     "helpfully" add them back — once that lane lands, add them as an
-///     ordinary golden update, in the same commit as the rest of the diff.
+///   - `subagent_decl()` — HARD CONSTRAINT (PRD 22 phase-1 spec): a sibling
+///     lane is actively editing the `subagent_effect_def!` row in
+///     `tidepool-mcp/src/effect_defs.rs` right now. Including it here would
+///     make this baseline chase a moving target instead of pinning stable
+///     trunk state. Do NOT "helpfully" add it back — once that lane lands,
+///     add it as an ordinary golden update, in the same commit as the rest
+///     of the diff.
+///
+///   `event_decl()` was under the same constraint until PRD 22 lane 4 landed
+///   (RepoEvent's flip onto the `tidepool-protocol` schema) — it is ordinary
+///   pinned data now, added in the same commit as that flip.
 ///
 /// Do NOT sort this list — emission order is part of the contract (see the
 /// dedup-preserves-order comment on `effects_module_source_with_vocab` in
@@ -59,6 +64,7 @@ fn pinned_decls() -> Vec<EffectDecl> {
         tidepool_mcp::fork_decl(),
         tidepool_mcp::llm_decl(),
         tidepool_mcp::worktree_decl(),
+        tidepool_mcp::event_decl(),
         tidepool_mcp::journal_decl(),
     ]
 }

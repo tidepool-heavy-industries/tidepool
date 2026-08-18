@@ -1,4 +1,4 @@
-{-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE NoImplicitPrelude, OverloadedStrings, DataKinds, TypeOperators, FlexibleContexts, FlexibleInstances, UndecidableInstances, GADTs, PartialTypeSignatures, ScopedTypeVariables, ExtendedDefaultRules, LambdaCase, TupleSections, MultiWayIf, RecordWildCards, NamedFieldPuns, ViewPatterns, BangPatterns, TypeApplications, BlockArguments, NumericUnderscores, MultilineStrings, DeriveFunctor, DeriveFoldable, DeriveTraversable, DeriveGeneric, DeriveAnyClass, QuasiQuotes, DuplicateRecordFields, OverloadedRecordDot #-}
 
 -- | Typed repository events — the authored surface of
 -- @plans\/self-iterating-harness\/19-managed-worktrees-events-prd.md@.
@@ -78,12 +78,41 @@
 -- re-registers its reactions from explicit 'State' and stable 'WorktreeId's; a
 -- parked Haskell closure is never the representation of pending work across a
 -- cycle boundary.
+--
+-- == Capability mailboxes and the green-thread completion watch
+--
+-- 'mailbox'/'asyncDone' are event sources like 'commit'/'headChanged': possession
+-- of the 'Int' is the only capability check, and both payloads stay BARE (like
+-- 'Tick'), so 'nextEvent' yields a single 'Observed', never a double wrap.
+--
+-- == PRD 22 lane 4 — where this module's definitions come from
+--
+-- Twenty-two names used to be spliced directly into the generated
+-- @Tidepool.Effects@ module, string-by-string, from the hand-maintained
+-- @event_effect_def!@ registry. `tidepool-protocol`'s closed schema represents
+-- FOUR of them — 'awaitSubscriptionRaw', 'mailboxNew', 'mailboxSend',
+-- 'mailboxDrop' — because each is a thin wrapper over exactly one verb; those
+-- four still come from @Tidepool.Effects@ (re-exported below, not redefined).
+-- The other EIGHTEEN, plus the 'Event'/'Observed' TYPE declarations and the
+-- 'Functor' instance, are DEFINITIONS in this module: constructor
+-- applications, `case` matches over a sum's variants, `do` blocks, and
+-- recursive functions are not thin verb wrappers, and 'Event'/'Observed' are
+-- genuinely polymorphic (a type parameter, and 'Event' a function-typed
+-- field) with no schema vocabulary to represent them. See
+-- @tidepool-protocol/src/effects/event.rs@'s module doc and
+-- @plans/self-iterating-harness/22-p3-event-survey.md@ for the full verdict
+-- table — the same lever `haskell/lib/Tidepool/Worktree.hs` uses for its own
+-- ten relocated helpers, applied here to type declarations for the first
+-- time.
 module Tidepool.Event
   ( -- * Event descriptions
     Event
   , commit
+  , projectCommit
   , headChanged
+  , projectHead
   , after
+  , projectTick
   , (<|>)
 
     -- * Observations
@@ -93,26 +122,219 @@ module Tidepool.Event
   , HeadChangeKind (..)
   , Tick (..)
   , EventId
+  , SubscriptionId
+  , Watch (..)
+  , RepositoryEvent (..)
+  , eventIdOf
+  , firstMatch
 
     -- * Registration
   , withHandler
+  , pumpEff
+  , drainSubscription
 
     -- * Blocking wait
   , nextEvent
+  , awaitFirst
+  , awaitSubscriptionRaw
+
+    -- * Capability mailboxes and the green-thread completion watch
+  , mailbox
+  , projectMailbox
+  , asyncDone
+  , projectAsyncDone
+  , mailboxNew
+  , mailboxSend
+  , mailboxDrop
   ) where
 
+import Control.Monad.Freer hiding (run)
+-- `Eff`'s own constructors, for `pumpEff`'s interposition — the SAME type
+-- re-exported by `Control.Monad.Freer` above, so this import adds
+-- constructors and the queue operations and shadows nothing. Exactly the
+-- import the generated `Tidepool.Effects` module itself carries
+-- (`tidepool-mcp/src/eval_prep.rs`), reproduced here now that `pumpEff` is
+-- a definition in this module rather than spliced text in that one.
+import Control.Monad.Freer.Internal (Eff (..), qApp, tsingleton)
 import Tidepool.Effects
   ( CommitReceipt (..)
-  , Event
   , EventId
   , HeadChangeKind (..)
   , HeadChangeReceipt (..)
-  , Observed (..)
+  , M
+  , RepoEvent (RepoEventDrain, RepoEventSubscribe, RepoEventUnsubscribe)
+  , RepositoryEvent (..)
+  , SubscriptionId
   , Tick (..)
-  , after
-  , commit
-  , headChanged
-  , nextEvent
-  , withHandler
-  , (<|>)
+  , Watch (..)
+  , WorktreeHandle
+  , WorktreeId
+  , awaitSubscriptionRaw
+  , liftEither
+  , mailboxDrop
+  , mailboxNew
+  , mailboxSend
+  , worktreeId
   )
+-- `Tidepool.Prelude` re-exports `Control.Applicative`'s `(<|>)`
+-- (`Alternative`); this module's OWN `(<|>)` (merging two `Event` sources)
+-- shadows it, matching the splice-in-generated-module behavior this code had
+-- before relocation — an eval importing `Tidepool.Event` sees the Event
+-- merge operator, not the generic Alternative one.
+import Tidepool.Prelude hiding (error, (<|>))
+
+default (Int, Double, Text)
+
+-- | An observation paired with the runtime identity of the reconciled fact
+-- it came from — sharing one 'EventId' is how a consumer tells two views of
+-- one change ('commit'/'headChanged' on the same underlying commit) from two
+-- separate changes.
+data Observed a = Observed { eventId :: EventId, value :: a } deriving (Show, Eq)
+
+-- | An Event is a DESCRIPTION: what to watch, plus how to project a raw
+-- observation into the author's type. Keeping the projection in the value is
+-- what makes Event a lawful Functor and lets '<|>' merge two sources into ONE
+-- subscription.
+data Event a = Event { eventWatches :: [Watch], eventProject :: RepositoryEvent -> Maybe a }
+
+instance Functor Event where
+  fmap f e = Event e.eventWatches (\r -> fmap f (e.eventProject r))
+
+-- | Commits observed in a managed worktree — the high-signal semantic
+-- checkpoint (normal commit, merge, cherry-pick, or amend). For review,
+-- test, and receipt reactions.
+commit :: WorktreeHandle -> Event (Observed CommitReceipt)
+commit h = Event [WatchCommit (worktreeId h)] (projectCommit (worktreeId h))
+
+projectCommit :: WorktreeId -> RepositoryEvent -> Maybe (Observed CommitReceipt)
+projectCommit w (ObservedCommit eid r) = if r.commitWorktree == w then Just (Observed eid r) else Nothing
+projectCommit _ _ = Nothing
+
+-- | Observed movement of a worktree's HEAD — advance, amend,
+-- rebase/rewrite, reset, or checkout. This is the dependency-propagation
+-- signal: children want a rebase poke even when their parent was itself
+-- rebased. Observations are COALESCED state deltas, not a movement log.
+headChanged :: WorktreeHandle -> Event (Observed HeadChangeReceipt)
+headChanged h = Event [WatchHead (worktreeId h)] (projectHead (worktreeId h))
+
+projectHead :: WorktreeId -> RepositoryEvent -> Maybe (Observed HeadChangeReceipt)
+projectHead w (ObservedHeadChange eid r) = if r.headWorktree == w then Just (Observed eid r) else Nothing
+projectHead _ _ = Nothing
+
+-- | Merge two same-typed sources into ONE subscription: observations
+-- from either. Subscriptions repeat for their lexical lifetime — this
+-- is not one-shot. Combine with 'fmap' to keep heterogeneous selection
+-- typed: `fmap Left (commit a) <|> fmap Right (headChanged b)`.
+infixl 3 <|>
+(<|>) :: Event a -> Event a -> Event a
+l <|> r = Event (l.eventWatches ++ r.eventWatches) (\o -> case l.eventProject o of { Just a -> Just a; Nothing -> r.eventProject o })
+
+-- The interposition. `pumpEff` recurses on the BODY only, never on
+-- the tick — that asymmetry IS the one-handler-at-a-time guarantee
+-- for a subscription, and it is structural rather than enforced.
+
+-- | Run `tick` before every effect `body` performs. The scoped
+-- interposition `withHandler` is built from; see
+-- plans/post-restart/worktree-lanes/L4-mechanism.md.
+pumpEff :: Eff effs () -> Eff effs a -> Eff effs a
+pumpEff _ (Val a) = Val a
+pumpEff tick (E u q) = tick >> E u (tsingleton (\x -> pumpEff tick (qApp q x)))
+
+-- | Drain everything this subscription has observed since the last
+-- drain, applying the handler to each match in OBSERVATION ORDER.
+-- A queue overflow aborts here rather than dropping a commit.
+drainSubscription :: Event a -> (a -> M ()) -> SubscriptionId -> M ()
+drainSubscription ev handler sub = do
+  batch <- send (RepoEventDrain sub) >>= liftEither
+  mapM_ (\o -> case ev.eventProject o of { Just a -> handler a; Nothing -> pure () }) batch
+
+-- | `withHandler event handler body` registers atomically, runs `body`
+-- with the handler live, and on exit closes intake, drains what was
+-- already observed, and unregisters. Registration does not block, and
+-- the subscription NEVER replays events older than itself.
+--
+-- The handler runs in the surrounding `M` row: it may send a typed
+-- message, spawn a reviewer, ask the operator, or record a receipt,
+-- and it may itself suspend. Its failure fails this scope.
+withHandler :: Event a -> (a -> M ()) -> M b -> M b
+withHandler ev handler body = do
+  sub <- send (RepoEventSubscribe ev.eventWatches) >>= liftEither
+  r <- pumpEff (drainSubscription ev handler sub) body
+  drainSubscription ev handler sub
+  send (RepoEventUnsubscribe sub) >>= liftEither
+  pure r
+
+eventIdOf :: RepositoryEvent -> EventId
+eventIdOf (ObservedCommit eid _) = eid
+eventIdOf (ObservedHeadChange eid _) = eid
+eventIdOf (ObservedTick eid _) = eid
+eventIdOf (ObservedAsyncDone eid _) = eid
+eventIdOf (ObservedMessage eid _ _) = eid
+
+-- | The first batch entry `ev` projects, paired with its own EventId,
+-- in observation order.
+firstMatch :: Event a -> [RepositoryEvent] -> Maybe (Observed a)
+firstMatch _ [] = Nothing
+firstMatch ev (o:os) = case ev.eventProject o of
+  Just a -> Just (Observed (eventIdOf o) a)
+  Nothing -> firstMatch ev os
+
+-- | Block until `ev` produces its first matching observation:
+-- subscribe, block-await, then ALWAYS unsubscribe. The one-shot
+-- sibling of `withHandler` — same registry, no-replay rule, queue
+-- bound, and loud-overflow semantics — with no caller timeout: compose
+-- a bound wait with `after` and `<|>`. The await itself blocks at the
+-- HANDLER; the retry here only ever re-loops when a batch produced by
+-- a merged, multi-source Event happens to carry no entry `ev` itself
+-- projects, which is not spin-polling — each iteration is still one
+-- genuine blocking round trip.
+nextEvent :: Event a -> M (Observed a)
+nextEvent ev = do
+  sub <- send (RepoEventSubscribe ev.eventWatches) >>= liftEither
+  r <- awaitFirst ev sub
+  send (RepoEventUnsubscribe sub) >>= liftEither
+  pure r
+
+awaitFirst :: Event a -> SubscriptionId -> M (Observed a)
+awaitFirst ev sub = do
+  batch <- awaitSubscriptionRaw sub (-1) >>= liftEither
+  case firstMatch ev batch of
+    Just observed -> pure observed
+    Nothing -> awaitFirst ev sub
+
+-- | A deadline `ms` milliseconds from the moment it is SUBSCRIBED (not
+-- from this call — `after` is pure data construction, no effect of its
+-- own, so it needs no `Time` handler in the row), as a one-shot Event:
+-- it fires exactly one Tick through the SAME subscription registry as
+-- repository watches, so `nextEvent (someEvent <|> after ms)` reads as
+-- an ordinary select with a timeout branch.
+after :: Int -> M (Event Tick)
+after ms = pure (Event [WatchDeadline ms] projectTick)
+
+projectTick :: RepositoryEvent -> Maybe Tick
+projectTick (ObservedTick _ t) = Just t
+projectTick _ = Nothing
+
+-- PRD 20 S1-L4 wave 2 — capability mailboxes and the
+-- green-thread completion watch. Both payloads stay BARE (like
+-- `Tick`, unlike `commit`/`headChanged`), so `nextEvent` yields
+-- a single `Observed`, not a double wrap.
+
+-- | Observe messages sent into a mailbox this caller holds. Possession
+-- of the Int is permission — there is no lookup-by-name or enumeration.
+mailbox :: Int -> Event Value
+mailbox mid = Event [WatchMailbox mid] (projectMailbox mid)
+
+projectMailbox :: Int -> RepositoryEvent -> Maybe Value
+projectMailbox mid (ObservedMessage _ m v) = if m == mid then Just v else Nothing
+projectMailbox _ _ = Nothing
+
+-- | Fires when the named green thread reaches a terminal state. Carries
+-- only the thread's own id back, never its result — read the settled
+-- value separately, by handle.
+asyncDone :: Int -> Event Int
+asyncDone tid = Event [WatchAsync tid] (projectAsyncDone tid)
+
+projectAsyncDone :: Int -> RepositoryEvent -> Maybe Int
+projectAsyncDone tid (ObservedAsyncDone _ i) = if i == tid then Just i else Nothing
+projectAsyncDone _ _ = Nothing

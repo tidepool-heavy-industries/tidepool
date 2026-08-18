@@ -45,43 +45,44 @@ fn emit_for_gates() {
     std::fs::write(p, worktree_and_event_module()).expect("write generated module");
 }
 
-/// The `(<|>)` COLLISION IS OPEN — this gate pins the honest current state.
+/// The `(<|>)` COLLISION IS OPEN, RELOCATED — this gate pins the honest
+/// current state after PRD 22 lane 4's flip moved `(<|>)` OUT of the
+/// generated `Tidepool.Effects` module entirely (it is now a DEFINITION in
+/// `haskell/lib/Tidepool/Event.hs`, not schema-representable — see that
+/// module's own doc). The collision this gate originally tracked —
+/// `Tidepool.Prelude`'s `Alternative` `(<|>)` vs Event's merge `(<|>)`, both
+/// reachable unqualified once RepoEvent is in a row — is UNCHANGED in kind,
+/// only in WHERE it lives: `Tidepool.Event.hs` hides Prelude's `(<|>)` for
+/// its OWN internal resolution (needed just to define `(<|>)` without an
+/// ambiguous-occurrence error at its own export list), but an EVAL importing
+/// both `Tidepool.Prelude` (auto) and `Tidepool.Event` (via `extra_imports`)
+/// still sees both unqualified — the fix is still ROUTED to the
+/// AUTHOR-FACING imports (`preamble.rs`'s `eval_import_lines`), not landed
+/// here, for the same reason the original gate gave.
 ///
-/// `Tidepool.Effects` has no export list, so it re-exports its own generated
-/// `(<|>)`, and the eval preamble imports both it and `Tidepool.Prelude` by
-/// default — so once RepoEvent is in a row, an author writing PRD 19's own
-/// `fmap Left e1 <|> fmap Right e2` hits an ambiguous occurrence. The fix is
-/// APPROVED and PRE-VERIFIED but ROUTED to another lane, because it must land
-/// on the AUTHOR-FACING imports (`preamble.rs`'s `eval_import_lines` and the
-/// Orchestrate module) keyed on boot-vocab's `emits_helpers_for`, and that
-/// function does not exist on this branch.
-///
-/// An earlier attempt put the hiding on the generated module's OWN Prelude
-/// import. That was mis-scoped — it governs name resolution inside
-/// `Tidepool.Effects` and nothing else — and it has been DELETED rather than
-/// shipped, because a term that looks like the fix and is not is worse than an
-/// honest absence: the next reader would find it, conclude the collision was
-/// handled, and be wrong.
-///
-/// This gate therefore asserts the module is UNCHANGED here, so that whoever
-/// lands the routed fix sees this test fail and knows to retire it. See
-/// `plans/post-restart/worktree-lanes/L4-receipt.md` §3b for the full reasoning
-/// and `verified/L4-hiding-term-retarget.patch` for the verified patch.
+/// This gate therefore asserts: the generated module no longer defines its
+/// own `(<|>)` (moved out), `Tidepool.Event.hs` does (where the collision
+/// now lives), and the eval preamble's own `Tidepool.Prelude` import is
+/// UNCHANGED (still not hiding `(<|>)`) — so that whoever lands the routed
+/// fix sees this test move and knows where to retarget it.
 #[test]
 fn the_alternative_collision_is_open_and_the_generated_module_is_unchanged() {
     let src = worktree_and_event_module();
     assert!(
-        src.contains("import Tidepool.Prelude hiding (error)\n"),
-        "the generated module's Prelude import must be byte-identical to its pre-PRD-19 form"
+        !src.contains("(<|>) ::"),
+        "generated Tidepool.Effects no longer defines (<|>) — it relocated to \
+         Tidepool.Event.hs (PRD 22 lane 4)"
     );
     assert!(
-        !src.contains("hiding (error, (<|>))"),
-        "the mis-scoped hiding was deleted deliberately — the fix belongs on the \
-         AUTHOR-FACING imports and is routed, not landed here"
+        authored_event_module().contains("(<|>) :: Event a -> Event a -> Event a"),
+        "Tidepool.Event.hs must define (<|>) — this is where the open collision now lives"
     );
+    let decls = vec![tidepool_mcp::console_decl(), tidepool_mcp::event_decl()];
     assert!(
-        src.contains("(<|>) ::"),
-        "the module still EXPORTS Event's (<|>), which is what makes the collision real"
+        tidepool_mcp::build_preamble(&decls, false)
+            .contains("import Tidepool.Prelude hiding (error)\n"),
+        "the AUTHOR-FACING Prelude import must stay byte-identical to its pre-PRD-19 form — \
+         the routed fix has not landed"
     );
 }
 
@@ -194,32 +195,98 @@ fn worktree_decl_imports_the_module_that_defines_the_relocated_helpers() {
     );
 }
 
-/// Same for `Tidepool.Event`, plus the interposition `withHandler` is built
-/// from. `pumpEff` recursing on the BODY only is what makes a subscription
-/// unable to re-enter its own handler, so its shape is load-bearing, not
-/// incidental — see plans/post-restart/worktree-lanes/L4-mechanism.md.
+/// The FOUR helpers `tidepool-protocol`'s Event schema represents (PRD 22
+/// lane 4) — thin wrappers over the capability-mailbox trio plus the
+/// blocking-wait primitive `nextEvent`/`awaitFirst` build on — plus the
+/// representable TYPE declarations (`Watch`/`HeadChangeKind`/
+/// `RepositoryEvent`/… stay generated; only `Event`/`Observed` and the
+/// `Functor` instance are non-representable, see the test below).
 #[test]
 fn generated_module_carries_the_authored_event_surface() {
+    let src = worktree_and_event_module();
+    for name in [
+        "awaitSubscriptionRaw ::",
+        "mailboxNew ::",
+        "mailboxSend ::",
+        "mailboxDrop ::",
+        "data HeadChangeKind",
+        "data RepositoryEvent",
+        "data Watch",
+    ] {
+        assert!(
+            src.contains(name),
+            "generated Tidepool.Effects is missing `{name}`, which the Event schema represents"
+        );
+    }
+}
+
+/// The other side of the same contract: `commit`/`headChanged`/`(<|>)`/
+/// `pumpEff`/`drainSubscription`/`withHandler`/`eventIdOf`/`firstMatch`/
+/// `nextEvent`/`awaitFirst`/`after`/`projectTick`/`mailbox`/`projectMailbox`/
+/// `asyncDone`/`projectAsyncDone` (eighteen names) plus `Event`/`Observed`
+/// (genuinely polymorphic types with no schema vocabulary) are DEFINED in
+/// `haskell/lib/Tidepool/Event.hs` and must NOT also be emitted here — same
+/// discipline as Worktree's relocated-helpers gate, extended to type
+/// declarations for the first time (PRD 22 lane 4).
+#[test]
+fn generated_module_does_not_redefine_the_relocated_event_helpers() {
     let src = worktree_and_event_module();
     for name in [
         "commit ::",
         "headChanged ::",
         "(<|>) ::",
-        "withHandler ::",
         "pumpEff ::",
         "drainSubscription ::",
+        "withHandler ::",
+        "eventIdOf ::",
+        "firstMatch ::",
+        "nextEvent ::",
+        "awaitFirst ::",
+        "after ::",
+        "projectTick ::",
+        "mailbox ::",
+        "projectMailbox ::",
+        "asyncDone ::",
+        "projectAsyncDone ::",
         "data Event a = Event",
         "instance Functor Event",
         "data Observed a = Observed",
-        "data HeadChangeKind",
-        "data RepositoryEvent",
     ] {
         assert!(
-            src.contains(name),
-            "generated Tidepool.Effects is missing `{name}`, which Tidepool.Event re-exports \
-             or withHandler is built from"
+            !src.contains(name),
+            "generated Tidepool.Effects still defines `{name}`, which now lives in \
+             haskell/lib/Tidepool/Event.hs — two definitions in one row collide"
+        );
+        assert!(
+            authored_event_module().contains(name),
+            "haskell/lib/Tidepool/Event.hs no longer defines `{name}`, and the generated \
+             module no longer does either — the name has no home"
         );
     }
+}
+
+/// The relocation is invisible to an eval author only because the RepoEvent
+/// decl carries the companion import — same mechanism as Worktree's, on the
+/// other side of the module cycle (`Tidepool.Event` imports
+/// `Tidepool.Effects`, never the reverse).
+#[test]
+fn event_decl_imports_the_module_that_defines_the_relocated_helpers() {
+    let decls = vec![tidepool_mcp::console_decl(), tidepool_mcp::event_decl()];
+    assert_eq!(
+        tidepool_mcp::event_decl().extra_imports.to_vec(),
+        vec!["import Tidepool.Event"]
+    );
+    assert!(
+        tidepool_mcp::build_preamble(&decls, false).contains("import Tidepool.Event\n"),
+        "an eval whose row carries RepoEvent must import Tidepool.Event"
+    );
+    assert!(
+        tidepool_mcp::session_decl_module_env(&decls, false)
+            .imports
+            .iter()
+            .any(|i| i == "import Tidepool.Event"),
+        "a session DECL whose row carries RepoEvent must import Tidepool.Event"
+    );
 }
 
 /// `withHandler` interposes on the body's freer structure, which needs `Eff`'s
@@ -245,6 +312,17 @@ fn authored_worktree_module() -> String {
         .parent()
         .expect("tidepool-mcp lives one level under the workspace root")
         .join("haskell/lib/Tidepool/Worktree.hs");
+    std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()))
+}
+
+/// The authored `Tidepool.Event` source, which now DEFINES eighteen
+/// non-representable helpers plus `Event`/`Observed`/the `Functor` instance
+/// (PRD 22 lane 4) rather than being a pure re-export module.
+fn authored_event_module() -> String {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("tidepool-mcp lives one level under the workspace root")
+        .join("haskell/lib/Tidepool/Event.hs");
     std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()))
 }
 

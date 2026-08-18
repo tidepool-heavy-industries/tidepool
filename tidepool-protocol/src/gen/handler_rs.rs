@@ -68,8 +68,7 @@ fn body(e: &Effect) -> String {
     out.push('\n');
     out.push_str(&format!(
         "use crate::handlers::{}::{};\n",
-        module_name(e),
-        e.handler
+        e.handler_module, e.handler
     ));
     // Derive macros are imported by NAME, not spelled fully-qualified at each
     // attribute: the qualified form pushes `#[derive(..)]` past rustfmt's
@@ -186,7 +185,22 @@ fn body(e: &Effect) -> String {
             a.extend(names.iter().cloned());
             format!("self.{}({})", v.method, a.join(", "))
         };
-        out.push_str(&format!("            {pat} => {call},\n"));
+        // rustfmt wraps a match arm into block form once the single-line
+        // rendering would exceed its default 100-column width — `RepoEvent`'s
+        // longer verb/method names are the first migrated effect to cross
+        // that threshold (Exec/Journal/Worktree never did), so the emitter
+        // must reproduce the same wrapping rustfmt would apply, or the format
+        // gate and the golden gate fight (this generator's stated acceptance
+        // property — see the module doc).
+        let single_line = format!("            {pat} => {call},");
+        if single_line.chars().count() <= 100 {
+            out.push_str(&single_line);
+            out.push('\n');
+        } else {
+            out.push_str(&format!(
+                "            {pat} => {{\n                {call}\n            }}\n"
+            ));
+        }
     }
     out.push_str("        }\n");
     out.push_str("    }\n}\n");

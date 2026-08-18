@@ -113,6 +113,24 @@ fn worktree_decl_matches_the_schema_exactly() {
     );
 }
 
+/// Written to run BEFORE the flip, against the still-hand-written
+/// `event_effect_def!` macro — see the module doc. `RepoEvent` is the second
+/// effect to retire a `Wt*`/`Ev*`-family hand-written wire block, and the
+/// first whose `type_defs` reference ANOTHER effect's own types (`Watch`
+/// names Worktree's `WorktreeId`) and the first with a genuinely polymorphic
+/// authored type (`Event a`/`Observed a`) that the schema cannot represent at
+/// all — both relocate to `haskell/lib/Tidepool/Event.hs` alongside eighteen
+/// non-representable helpers (Worktree's lane only ever relocated helpers).
+/// See `tidepool-protocol/src/effects/event.rs`'s module doc and
+/// `plans/self-iterating-harness/22-p3-event-survey.md`.
+#[test]
+fn event_decl_matches_the_schema_exactly() {
+    assert_decl_matches_schema(
+        &tidepool_mcp::event_decl(),
+        &tidepool_protocol::effects::event::event(),
+    );
+}
+
 /// Every effect the schema claims to own must actually be wired into
 /// `tidepool-mcp` — a schema entry with no live decl would prove nothing while
 /// looking like coverage.
@@ -124,7 +142,7 @@ fn every_schema_effect_is_reachable() {
         .collect();
     assert_eq!(
         names,
-        vec!["Exec", "Journal", "Worktree"],
+        vec!["Exec", "Journal", "Worktree", "RepoEvent"],
         "the migrated set changed — add the new effect's equivalence assertion above"
     );
 }

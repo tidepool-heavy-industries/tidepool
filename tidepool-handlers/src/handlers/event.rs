@@ -2,9 +2,9 @@
 //!
 //! `withHandler` itself is HASKELL: a scoped interposition over its body's
 //! freer-simple structure that runs a drain before every effect the body
-//! performs (`pumpEff`, `drainSubscription` — see `event_effect_def!` in
-//! `tidepool-mcp/src/effect_defs.rs` and the mechanism write-up in
-//! `plans/post-restart/worktree-lanes/L4-mechanism.md`). The author's handler
+//! performs (`pumpEff`, `drainSubscription` — DEFINITIONS in
+//! `haskell/lib/Tidepool/Event.hs`, PRD 22 lane 4 — and the mechanism write-up
+//! in `plans/post-restart/worktree-lanes/L4-mechanism.md`). The author's handler
 //! closure is applied by ordinary Haskell application inside the resident's
 //! own continuation; it never crosses to Rust and Rust never roots or applies
 //! one.
@@ -125,11 +125,12 @@ use tidepool_worktree::storage::now_ms;
 // this call site's prior local copy, which silently stamped `0` — see that
 // module's docs for why the panic won.
 
-// `EventError` + `RepoEventReq` + `DescribeEffect` + the `EffectHandler`
-// dispatch match are generated from the single-source definition in
-// `tidepool-mcp/src/effect_defs.rs`; only the handler struct, the registry, and
-// the three per-verb methods below are hand-written.
-tidepool_mcp::event_effect_def!(crate::effect_glue::effect_rust_projection);
+// EventError, RepoEventReq, DescribeEffect and the EffectHandler dispatch are
+// GENERATED from the `tidepool-protocol` schema (PRD 22 phase 3) — re-exported
+// here so the public paths (`tidepool_handlers::EventError`,
+// `tidepool_handlers::RepoEventReq`) are unchanged. Only the handler struct,
+// the registry, and the per-verb methods below are hand-written.
+pub use crate::generated::repo_event::{EventError, RepoEventReq};
 
 // ============================================================================
 // Configuration
@@ -781,7 +782,7 @@ impl RepoEventHandler {
     // dispatch arm wraps the `Result` via `cx.respond` (Ok→Right, Err→Left).
     // See #335 and `tidepool-handlers/CLAUDE.md`.
 
-    fn repo_event_subscribe(
+    pub(crate) fn repo_event_subscribe(
         &mut self,
         watches: Vec<EvWatch>,
     ) -> Result<EvSubscriptionId, EventError> {
@@ -811,15 +812,18 @@ impl RepoEventHandler {
         self.registry.drain(subscription)
     }
 
-    fn repo_event_unsubscribe(&mut self, subscription: EvSubscriptionId) -> Result<(), EventError> {
+    pub(crate) fn repo_event_unsubscribe(
+        &mut self,
+        subscription: EvSubscriptionId,
+    ) -> Result<(), EventError> {
         self.registry.unsubscribe(subscription)
     }
 
-    fn mailbox_new(&mut self) -> Result<i64, EventError> {
+    pub(crate) fn mailbox_new(&mut self) -> Result<i64, EventError> {
         Ok(self.mailboxes.mint())
     }
 
-    fn mailbox_send(
+    pub(crate) fn mailbox_send(
         &mut self,
         mailbox: i64,
         key: String,
@@ -833,7 +837,7 @@ impl RepoEventHandler {
         Ok(())
     }
 
-    fn mailbox_drop(&mut self, mailbox: i64) -> Result<(), EventError> {
+    pub(crate) fn mailbox_drop(&mut self, mailbox: i64) -> Result<(), EventError> {
         if self.mailboxes.drop_mailbox(mailbox) {
             Ok(())
         } else {
@@ -850,7 +854,7 @@ impl RepoEventHandler {
     /// so it is distinguishable from a real (non-empty) observation without
     /// a second signal. Poison/overflow still fail loudly via `drain`'s own
     /// `Err`, exactly as `repo_event_drain` does.
-    fn repo_event_await(
+    pub(crate) fn repo_event_await(
         &mut self,
         subscription: EvSubscriptionId,
         timeout_ms: i64,

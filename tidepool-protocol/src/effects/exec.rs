@@ -33,6 +33,7 @@ pub fn exec() -> Effect {
     Effect {
         name: "Exec",
         handler: "ExecHandler",
+        handler_module: "exec",
         req_enum: "ExecReq",
         decl_fn: "exec_decl",
         description: &["Run shell commands and capture output."],
@@ -46,6 +47,7 @@ pub fn exec() -> Effect {
             "import qualified Tidepool.Cargo as Cargo",
         ],
         type_defs: Vec::new(),
+        foreign_types: &[],
         // #335 typed-failure ADT. A nonzero EXIT is NOT a failure here — `run`
         // still returns a Proc with its exitCode on nonzero exit; `Left` is
         // only for a spawn failure or a bad/escaping working directory.

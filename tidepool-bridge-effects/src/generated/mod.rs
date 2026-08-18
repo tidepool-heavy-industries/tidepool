@@ -9,6 +9,8 @@
 //! `generated_files_are_current` test), or rewrite in place with
 //! `TIDEPOOL_REGEN_PROTOCOL=1`.
 
+pub mod repo_event;
 pub mod worktree;
 
+pub use repo_event::*;
 pub use worktree::*;

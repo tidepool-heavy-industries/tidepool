@@ -31,7 +31,12 @@ module NodeMailboxHarness
 import GHC.Generics (Generic)
 import Tidepool.Aeson (FromJSON, ToJSON)
 import Tidepool.Async (wait)
-import Tidepool.Effects (Observed (..), after, nextEvent, say, (<|>))
+import Tidepool.Effects (say)
+-- `Observed`/`after`/`nextEvent`/`(<|>)` are DEFINITIONS in `Tidepool.Event`
+-- (PRD 22 lane 4), not the generated `Tidepool.Effects` module — this fixture
+-- is spliced rather than compiled as an ordinary turn, so it needs the
+-- explicit import below like any other symbol this module uses.
+import Tidepool.Event (Observed (..), after, nextEvent, (<|>))
 import Tidepool.Node (folded, forkNode, received, sendUp, uplink)
 -- `(<|>)`/`folded` hidden: `Tidepool.Prelude` re-exports base\'s `Alternative`
 -- operator and `Control.Lens.Fold`\'s `folded` too, and this fixture wants the

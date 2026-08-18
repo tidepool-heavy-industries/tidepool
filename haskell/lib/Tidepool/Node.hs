@@ -104,7 +104,10 @@ import Tidepool.Aeson.FromJSON (FromJSON, Result (..), fromJSON)
 import Tidepool.Aeson.Value (ToJSON (..), Value (..))
 import qualified Tidepool.Aeson.KeyMap as KM
 import Tidepool.Async (Async, async, waitEvent)
-import Tidepool.Effects (Event, M, liftEither, mailbox, mailboxNew, mailboxSend)
+import Tidepool.Effects (M, liftEither, mailboxNew, mailboxSend)
+-- `Event`/`mailbox` are DEFINITIONS in `Tidepool.Event` (PRD 22 lane 4), not
+-- the generated `Tidepool.Effects` module.
+import Tidepool.Event (Event, mailbox)
 
 -- | The parent's end of a forked node: send messages DOWN to it, observe
 -- what it sends UP ('received'), and await its fold ('folded') once it

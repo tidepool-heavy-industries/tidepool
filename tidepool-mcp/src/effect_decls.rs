@@ -310,10 +310,9 @@ crate::llm_effect_def!(crate::effect_defs::effect_decl_projection);
 // there is on hold pending the agent lane. They exist as decls so a caller
 // that wants managed worktrees and typed repository events can build a row
 // containing them, which is what lane L4's acceptance harness does.
-// Worktree: MIGRATED to the `tidepool-protocol` schema (PRD 22 phase 3).
-// `worktree_decl()` now comes from `src/generated/worktree.rs`, not from a
-// macro here.
-crate::event_effect_def!(crate::effect_defs::effect_decl_projection);
+// Both: MIGRATED to the `tidepool-protocol` schema (PRD 22 phase 3).
+// `worktree_decl()` / `event_decl()` now come from `src/generated/worktree.rs`
+// / `src/generated/repo_event.rs`, not from a macro here.
 
 // Subagent (PRD 18 lane 1): `subagent_decl()`. Like Worktree/RepoEvent, NOT
 // in `build_base_stack`'s row — an opt-in effect for rows that spawn coupled

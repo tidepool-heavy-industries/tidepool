@@ -11,8 +11,10 @@
 
 pub mod exec;
 pub mod journal;
+pub mod repo_event;
 pub mod worktree;
 
 pub use exec::*;
 pub use journal::*;
+pub use repo_event::*;
 pub use worktree::*;

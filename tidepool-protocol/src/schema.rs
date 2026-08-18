@@ -27,6 +27,17 @@ pub struct Effect {
     pub name: &'static str,
     /// The hand-written handler struct in `tidepool-handlers`: `"ExecHandler"`.
     pub handler: &'static str,
+    /// The snake_case module `handler` lives in under
+    /// `tidepool-handlers/src/handlers/` — usually [`Self::name`]'s own
+    /// snake_case, but not always: `RepoEvent`'s hand-authored module is
+    /// `handlers::event` (matching `Tidepool.Event`/`event_decl`, the family
+    /// name used everywhere ELSE in the registry), not `handlers::repo_event`
+    /// (the GADT's own name — `RepoEvent` rather than `Event` only because
+    /// `Event a` is a separate authored description type). Carried as DATA
+    /// rather than derived, the same reason [`crate::types::TypeDef::wire_rust`]
+    /// is: a convention that breaks once is a convention the schema should not
+    /// re-derive.
+    pub handler_module: &'static str,
     /// The generated request enum: `"ExecReq"`.
     pub req_enum: &'static str,
     /// The generated `EffectDecl` builder: `"exec_decl"`.
@@ -50,6 +61,18 @@ pub struct Effect {
     /// Supporting Haskell declarations emitted before the GADT. The error ADT
     /// is NOT listed here — it is derived from [`Effect::errors`].
     pub type_defs: Vec<TypeDef>,
+    /// `(Haskell name, Rust wire name)` pairs for a NAMED type this effect's own
+    /// `type_defs` reference but which is declared by ANOTHER, already-migrated
+    /// effect (Event's `Watch` names Worktree's `WorktreeId`). All Haskell
+    /// declarations still land in the ONE generated `Tidepool.Effects` module
+    /// regardless of which effect owns them, so the Haskell side needs no
+    /// change — this table exists only so [`Effect::wire_rust_of`] (and
+    /// [`Effect::validate`]'s undeclared-reference check) can resolve a WIRE
+    /// Rust spelling this effect does not itself own. Kept effect-local (no
+    /// `Vec<Effect>` threaded through the generator) rather than a
+    /// whole-registry lookup, because the pairing is small and the owning
+    /// effect's wire name is already public, stable data.
+    pub foreign_types: &'static [(&'static str, &'static str)],
     /// This effect's typed per-verb failure ADT (#335), if it has one.
     pub errors: Option<ErrorAdt>,
     /// The GADT constructors, one per verb.
@@ -118,21 +141,23 @@ impl Effect {
     /// in step, which is the same property [`RecordField`] gives a field name.
     ///
     /// # Panics
-    /// Panics when `name` is not declared by this effect. That is a
-    /// generation-time failure by design — an under-specified schema must not
-    /// produce output.
+    /// Panics when `name` is neither declared by this effect nor listed in its
+    /// [`Effect::foreign_types`]. That is a generation-time failure by design —
+    /// an under-specified schema must not produce output.
     #[must_use]
     pub fn wire_rust_of(&self, name: &str) -> &'static str {
-        self.type_def(name)
-            .unwrap_or_else(|| {
-                panic!(
-                    "{}: no type_defs entry declares `{name}`, so it has no wire Rust \
-                     spelling. A type from another mechanism (a `CoreRecord` bridged \
-                     record) cannot appear in a generated wire struct.",
-                    self.name
-                )
-            })
-            .wire_name()
+        if let Some(td) = self.type_def(name) {
+            return td.wire_name();
+        }
+        if let Some((_, wire)) = self.foreign_types.iter().find(|(hs, _)| *hs == name) {
+            return wire;
+        }
+        panic!(
+            "{}: no type_defs entry (own or foreign_types) declares `{name}`, so it has \
+             no wire Rust spelling. A type from another mechanism (a `CoreRecord` bridged \
+             record) cannot appear in a generated wire struct.",
+            self.name
+        )
     }
 
     /// Walk a field chain through this effect's `type_defs` and return the type
@@ -260,13 +285,30 @@ impl Effect {
             };
             for ty in referenced {
                 for n in named_types(ty) {
-                    if !td_seen.contains(&n) {
+                    if !td_seen.contains(&n) && !self.foreign_types.iter().any(|(hs, _)| *hs == n) {
                         errs.push(format!(
-                            "{}: {} references `{n}`, which this effect does not declare",
+                            "{}: {} references `{n}`, which this effect does not declare \
+                             and which is not listed in `foreign_types`",
                             self.name, t.name
                         ));
                     }
                 }
+            }
+        }
+
+        for (hs, wire) in self.foreign_types {
+            if td_seen.contains(hs) {
+                errs.push(format!(
+                    "{}: `{hs}` is listed in foreign_types but is also declared in this \
+                     effect's own type_defs — foreign_types is for names OTHER effects own",
+                    self.name
+                ));
+            }
+            if wire.is_empty() {
+                errs.push(format!(
+                    "{}: foreign_types entry for `{hs}` carries an empty wire name",
+                    self.name
+                ));
             }
         }
 

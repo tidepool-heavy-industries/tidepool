@@ -24,6 +24,7 @@ pub fn journal() -> Effect {
     Effect {
         name: "Journal",
         handler: "JournalHandler",
+        handler_module: "journal",
         req_enum: "JournalReq",
         decl_fn: "journal_decl",
         description: &[
@@ -46,6 +47,7 @@ pub fn journal() -> Effect {
         // the full rationale this carries forward verbatim.
         extra_imports: &["import qualified Tidepool.Resume as Resume"],
         type_defs: Vec::new(),
+        foreign_types: &[],
         errors: None,
         verbs: vec![Verb {
             ctor: "RecordStep",

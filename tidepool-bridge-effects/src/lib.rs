@@ -20,6 +20,47 @@ use tidepool_bridge_derive::{CoreRecord, ToCore};
 pub mod generated;
 pub use generated::*;
 
+/// Hand-written extension methods on the GENERATED `EvRepositoryEvent` — logic,
+/// not contract, so it stays outside the schema (same split as an
+/// `AdapterKind::HandWritten` conversion — see `tidepool-protocol`'s `DomainMap`
+/// doc). Not derivable from the field list: `worktree()` and `matches()` both
+/// encode a DECISION (which fact-kind carries which watch/worktree), not a
+/// mechanical projection.
+impl EvRepositoryEvent {
+    /// The worktree this fact is about — what a subscription's watches match
+    /// on. `None` for a `Tick`, an async-done, or a mailbox message: none of
+    /// them are about any worktree.
+    pub fn worktree(&self) -> Option<&WtWorktreeId> {
+        match self {
+            EvRepositoryEvent::ObservedCommit(_, r) => Some(&r.commit_worktree),
+            EvRepositoryEvent::ObservedHeadChange(_, r) => Some(&r.head_worktree),
+            EvRepositoryEvent::ObservedTick(_, _) => None,
+            EvRepositoryEvent::ObservedAsyncDone(_, _) => None,
+            EvRepositoryEvent::ObservedMessage(_, _, _) => None,
+        }
+    }
+
+    /// Does `watch` select this fact? Kind AND identity must both match: a
+    /// `commit` subscription on tree A must not be woken by a head movement,
+    /// nor by tree B's commit; a `WatchMailbox` subscription on mailbox 1
+    /// must not be woken by a message sent to mailbox 2. `Tick`/`WatchDeadline`
+    /// never match here — they are queued directly by the registry's
+    /// `fire_due_deadlines`, never through its broadcast `publish`.
+    pub fn matches(&self, watch: &EvWatch) -> bool {
+        match (self, watch) {
+            (EvRepositoryEvent::ObservedCommit(_, r), EvWatch::WatchCommit(w)) => {
+                &r.commit_worktree == w
+            }
+            (EvRepositoryEvent::ObservedHeadChange(_, r), EvWatch::WatchHead(w)) => {
+                &r.head_worktree == w
+            }
+            (EvRepositoryEvent::ObservedAsyncDone(_, tid), EvWatch::WatchAsync(w)) => tid == w,
+            (EvRepositoryEvent::ObservedMessage(_, mid, _), EvWatch::WatchMailbox(w)) => mid == w,
+            _ => false,
+        }
+    }
+}
+
 /// Haskell `Proc` record: exitCode / stdout / stderr — a finished subprocess.
 #[derive(ToCore, Clone, CoreRecord)]
 pub struct Proc {
@@ -90,209 +131,18 @@ pub struct GitFileDelta {
     pub binary: bool,
 }
 
-// ============================================================================
-// PRD 19 — typed repository events (lane L4)
-// ============================================================================
-//
-// These are WIRE types, deliberately distinct from `tidepool-worktree`'s domain
-// types of the same shape. The domain types carry `PathBuf`, `Option`, and the
-// crate's own newtypes; the wire types carry exactly what crosses to Haskell,
-// in the field order the generated `Tidepool.Effects` decl declares. Keeping
-// them separate means `tidepool-bridge-effects` does not have to depend on
-// `tidepool-worktree` (it is a LOW crate — see this module's header), and the
-// handler does one explicit conversion instead of the bridge silently tracking
-// a domain type's evolution.
-//
-// Unlike the six records above, these do NOT derive `CoreRecord`: their Haskell
-// decls are single-sourced from `event_effect_def!`'s `type_defs` (which is also
-// where the ADTs, the `Event` description type, and the `withHandler`
-// interposition live), so generating a competing decl here would give the two
-// copies room to disagree. Field ORDER in these structs is the wire contract
-// and must match those `type_defs` decls positionally.
-//
-// THE `Wt*` FAMILY NO LONGER LIVES HERE. It is generated into
-// `src/generated/worktree.rs` from ONE ordered field list in
-// `tidepool-protocol`, which renders the Haskell decl and the Rust struct from
-// the same `Vec` (PRD 22 phase 3). The positional invariant stated above does
-// not apply to it, because there are no longer two lists to keep in step —
-// which is why the paragraph asserting that invariant for the Worktree types,
-// and the hand-written block it guarded, are both deleted rather than
-// reworded. The `Ev*` types below still REFERENCE the `Wt*` names, and still
-// resolve: `src/generated/` is re-exported flat from this crate's root, so
-// every `tidepool_bridge_effects::Wt*` path is unchanged.
-
 use tidepool_bridge_derive::FromCore;
-
-/// Haskell `EventId` — opaque RUNTIME identity, minted once per reconciliation
-/// pass. A normal commit's `commit` and `headChanged` observations share one,
-/// which is how a consumer tells two views of one change from two changes.
-#[derive(ToCore, FromCore, Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
-#[core(name = "EventId")]
-pub struct EvEventId {
-    pub raw: i64,
-}
-
-/// Haskell `SubscriptionId` — one live `withHandler` registration.
-#[derive(ToCore, FromCore, Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-#[core(name = "SubscriptionId")]
-pub struct EvSubscriptionId {
-    pub raw: i64,
-}
-
-/// Haskell `Watch` — one (worktree, kind) pair a subscription observes, or a
-/// one-shot deadline. `<|>` concatenates watches, so a merged `Event` is ONE
-/// subscription over several watches rather than several subscriptions.
-///
-/// `WatchDeadline` carries a RELATIVE millisecond duration: the runtime
-/// (`tidepool-handlers`) fixes the absolute deadline at `subscribe()` time,
-/// `now + ms`. `after` itself is therefore pure data construction — no Time
-/// effect, no row dependency — which matters because `RepoEvent` already
-/// ships with rows that carry no `Time` handler.
-///
-/// `WatchAsync`/`WatchMailbox` name no worktree, same as `WatchDeadline` —
-/// they carry a raw thread/mailbox `Int` rather than a newtype on purpose:
-/// `event_decl`'s type_defs must stand alone in a row with `RepoEvent` but
-/// not `Green` (PRD 20 S1-L4 wave 2).
-#[derive(ToCore, FromCore, Clone, Debug, PartialEq, Eq)]
-pub enum EvWatch {
-    WatchCommit(WtWorktreeId),
-    WatchHead(WtWorktreeId),
-    WatchDeadline(i64),
-    WatchAsync(i64),
-    WatchMailbox(i64),
-}
-
-/// Haskell `HeadChangeKind`. `UnknownChange` is a correct answer, not a
-/// failure: inventing `Advanced` for what was actually a reset would send a
-/// child rebasing onto a commit that no longer means what the claim said.
-#[derive(ToCore, FromCore, Clone, Debug, PartialEq, Eq)]
-pub enum EvHeadChangeKind {
-    Advanced(Vec<WtGitOid>),
-    Amended(WtGitOid, WtGitOid),
-    Rewritten(Vec<(WtGitOid, WtGitOid)>),
-    Rewound,
-    Switched,
-    UnknownChange,
-}
-
-/// Haskell `HeadChangeReceipt`.
-#[derive(ToCore, FromCore, Clone, Debug, PartialEq, Eq)]
-#[core(name = "HeadChangeReceipt")]
-pub struct EvHeadChangeReceipt {
-    pub head_worktree: WtWorktreeId,
-    /// `None` on the first observation of a worktree that had no recorded head.
-    pub old_head: Option<WtGitOid>,
-    pub new_head: WtGitOid,
-    pub kind: EvHeadChangeKind,
-    /// `None` on a detached HEAD.
-    pub head_branch: Option<WtBranchName>,
-    pub observed_at_ms: i64,
-}
-
-/// Haskell `CommitReceipt`.
-#[derive(ToCore, FromCore, Clone, Debug, PartialEq, Eq)]
-#[core(name = "CommitReceipt")]
-pub struct EvCommitReceipt {
-    pub commit_worktree: WtWorktreeId,
-    pub oid: WtGitOid,
-    pub parents: Vec<WtGitOid>,
-    pub subject: String,
-    pub author: String,
-    pub committed_at_ms: i64,
-    pub files: Vec<String>,
-}
-
-/// Haskell `Tick` — the payload a fired deadline watch delivers. Carries the
-/// wall-clock moment the runtime observed it as due, for observability; the
-/// deadline the caller asked for lives only in the `WatchDeadline` that fired.
-#[derive(ToCore, FromCore, Clone, Copy, Debug, PartialEq, Eq)]
-#[core(name = "Tick")]
-pub struct EvTickReceipt {
-    pub fired_at_ms: i64,
-}
-
-/// Haskell `RepositoryEvent` — one reconciled fact as it crosses the boundary.
-/// The `EvEventId` rides on the wire rather than being minted per view,
-/// because the SHARING is the information. `ObservedTick` is the one variant
-/// the registry (`tidepool-handlers`) never broadcasts — a fired deadline is
-/// queued directly onto the ONE subscription that armed it.
-///
-/// `ObservedAsyncDone` carries only the settled thread's `Int` id, never its
-/// result — the typed result stays on the heap and is read separately, by
-/// handle (PRD 20 S1-L4 wave 2). `ObservedMessage` carries a mailbox `Int`
-/// and a bare JSON payload; the caller-supplied coalesce key does NOT ride
-/// the wire — coalescing is decided at `MailboxSend` time, before publish
-/// (see [`SubscriptionRegistry::publish_mailbox_message`] in
-/// `tidepool-handlers`). The payload is `serde_json::Value` rather than
-/// `tidepool_eval::value::Value`.
-///
-/// **Ret-only (never decoded from Haskell) — which is why the derive list is
-/// short.** `RepositoryEvent` appears in `event_decl` exclusively as
-/// `ret "[RepositoryEvent]"` (on `RepoEventDrain`/`RepoEventAwait`) and never
-/// in an `args { .. }` clause: Rust produces observations and hands them to
-/// Haskell, and Haskell never passes one back. The projection functions that
-/// consume it (`projectCommit`, `projectMailbox`, …) are pure Haskell and do
-/// not cross the boundary. So `FromCore` here would be an unreachable impl,
-/// not a capability — it is deliberately absent, as it is on `AgCyclePayload`
-/// and `AgAgentStep` for the same reason. `Eq` goes with it (`serde_json::Value`
-/// has neither impl); `PartialEq` is what every use site actually needs.
-///
-/// A `RepositoryEvent` that ever needs to travel Haskell→Rust would invalidate
-/// this, and adding it to an `args` clause is exactly the change that should
-/// force reconsidering the derive list rather than silently re-deriving.
-#[derive(ToCore, Clone, Debug, PartialEq)]
-pub enum EvRepositoryEvent {
-    ObservedCommit(EvEventId, EvCommitReceipt),
-    ObservedHeadChange(EvEventId, EvHeadChangeReceipt),
-    ObservedTick(EvEventId, EvTickReceipt),
-    ObservedAsyncDone(EvEventId, i64),
-    ObservedMessage(EvEventId, i64, serde_json::Value),
-}
-
-impl EvRepositoryEvent {
-    /// The worktree this fact is about — what a subscription's watches match
-    /// on. `None` for a `Tick`, an async-done, or a mailbox message: none of
-    /// them are about any worktree.
-    pub fn worktree(&self) -> Option<&WtWorktreeId> {
-        match self {
-            EvRepositoryEvent::ObservedCommit(_, r) => Some(&r.commit_worktree),
-            EvRepositoryEvent::ObservedHeadChange(_, r) => Some(&r.head_worktree),
-            EvRepositoryEvent::ObservedTick(_, _) => None,
-            EvRepositoryEvent::ObservedAsyncDone(_, _) => None,
-            EvRepositoryEvent::ObservedMessage(_, _, _) => None,
-        }
-    }
-
-    /// Does `watch` select this fact? Kind AND identity must both match: a
-    /// `commit` subscription on tree A must not be woken by a head movement,
-    /// nor by tree B's commit; a `WatchMailbox` subscription on mailbox 1
-    /// must not be woken by a message sent to mailbox 2. `Tick`/`WatchDeadline`
-    /// never match here — they are queued directly by
-    /// [`SubscriptionRegistry::fire_due_deadlines`], never through
-    /// [`SubscriptionRegistry::publish`]'s broadcast.
-    pub fn matches(&self, watch: &EvWatch) -> bool {
-        match (self, watch) {
-            (EvRepositoryEvent::ObservedCommit(_, r), EvWatch::WatchCommit(w)) => {
-                &r.commit_worktree == w
-            }
-            (EvRepositoryEvent::ObservedHeadChange(_, r), EvWatch::WatchHead(w)) => {
-                &r.head_worktree == w
-            }
-            (EvRepositoryEvent::ObservedAsyncDone(_, tid), EvWatch::WatchAsync(w)) => tid == w,
-            (EvRepositoryEvent::ObservedMessage(_, mid, _), EvWatch::WatchMailbox(w)) => mid == w,
-            _ => false,
-        }
-    }
-}
 
 // ============================================================================
 // Subagent wire types (PRD 18 lane 1 — coupled spawn), `Ag*`-prefixed.
 //
-// Same rules as the `Wt*`/`Ev*` families above: these do NOT derive
-// `CoreRecord` (their Haskell decls are single-sourced from
-// `subagent_effect_def!`'s `type_defs`), and field ORDER in each struct is the
-// wire contract, matching those decls positionally. PROVISIONAL shapes — this
-// lane exists to inform PRD 18's freezes, and renames land here + in the
+// THE `Wt*`/`Ev*` FAMILIES NO LONGER LIVE HERE — both are generated into
+// `src/generated/` from `tidepool-protocol` (PRD 22 phase 3). `Ag*` below
+// still does NOT derive `CoreRecord` (its Haskell decls are single-sourced
+// from `subagent_effect_def!`'s `type_defs`), and field ORDER in each struct
+// is the wire contract, matching those decls positionally. PROVISIONAL
+// shapes — this lane exists to inform PRD 18's freezes, and renames land
+// here + in the
 // effect def together.
 // ============================================================================
 

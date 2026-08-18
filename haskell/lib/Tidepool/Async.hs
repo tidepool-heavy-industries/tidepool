@@ -100,15 +100,17 @@ import Prelude
 
 import Tidepool.Effects
   ( AsyncStatus (..)
-  , Event
   , M
   , asyncCancel
-  , asyncDone
   , asyncJoinAny
   , asyncResult
   , asyncSpawn
   , asyncStatus
   )
+-- `Event`/`asyncDone` are DEFINITIONS in `Tidepool.Event` (PRD 22 lane 4), not
+-- the generated `Tidepool.Effects` module — see 'waitEvent' below for why this
+-- is the one place this module reaches into `Tidepool.Event`'s algebra.
+import Tidepool.Event (Event, asyncDone)
 
 -- | A handle on a green thread.  Opaque, and phantom-typed by the thread's
 -- result — the same posture as @AgentHandle@.

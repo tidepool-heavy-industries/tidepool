@@ -90,6 +90,7 @@ pub fn worktree() -> Effect {
     Effect {
         name: "Worktree",
         handler: "WorktreeHandler",
+        handler_module: "worktree",
         req_enum: "WorktreeReq",
         decl_fn: "worktree_decl",
         description: &[
@@ -115,6 +116,7 @@ pub fn worktree() -> Effect {
         // one Name and cannot be an ambiguous occurrence.
         extra_imports: &["import Tidepool.Worktree"],
         type_defs: type_defs(),
+        foreign_types: &[],
         // Typed per-verb failure (#335): a dirty source, a lost tree, or a busy
         // worktree is DATA an author cases on, not an eval abort. These are PRD
         // 19's `WorktreeError` variants plus the two the PRD's prose requires

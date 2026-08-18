@@ -1717,6 +1717,146 @@ worktreeId h = h.handleReceipt.treeId
 false
 -- end helpers_row_polymorphic --
 
+=============================== EFFECT: RepoEvent ===============================
+
+-- type_name (9 bytes) --
+RepoEvent
+-- end type_name --
+
+-- description (1204 bytes) --
+Typed repository events. `commit tree` and `headChanged tree` are event DESCRIPTIONS — values you can build, `fmap`, and merge with `<|>` before anything is registered. `withHandler event handler body` makes one live for exactly the extent of its lexical body: it registers without blocking, never replays events older than the registration, invokes the handler in the SAME effect row as the surrounding code (so it may send a typed message, spawn a reviewer, or ask the operator — and may itself suspend), runs one handler at a time per subscription with later observations queued in observation order, and on exit closes intake, drains, then unregisters. Handler failure fails the enclosing scope. Queue overflow fails loudly — commits are never silently dropped. `nextEvent event` blocks until the FIRST matching observation (or forever): subscribe, block-await, unsubscribe — the one-shot sibling of `withHandler`, no caller-supplied timeout. `after ms` is a one-shot deadline event, `ms` milliseconds from the moment it is SUBSCRIBED (not from the `after` call itself), that fires exactly one `Tick`, so `nextEvent (someEvent <|> after ms)` reads as an ordinary select with a timeout branch.
+-- end description --
+
+-- prompt_card: None --
+
+-- constructors (7 items) --
+-- constructors[0] (77 bytes) --
+RepoEventSubscribe :: [Watch] -> RepoEvent (Either EventError SubscriptionId)
+-- end constructors[0] --
+
+-- constructors[1] (83 bytes) --
+RepoEventDrain :: SubscriptionId -> RepoEvent (Either EventError [RepositoryEvent])
+-- end constructors[1] --
+
+-- constructors[2] (90 bytes) --
+RepoEventAwait :: SubscriptionId -> Int -> RepoEvent (Either EventError [RepositoryEvent])
+-- end constructors[2] --
+
+-- constructors[3] (74 bytes) --
+RepoEventUnsubscribe :: SubscriptionId -> RepoEvent (Either EventError ())
+-- end constructors[3] --
+
+-- constructors[4] (47 bytes) --
+MailboxNew :: RepoEvent (Either EventError Int)
+-- end constructors[4] --
+
+-- constructors[5] (71 bytes) --
+MailboxSend :: Int -> Text -> Value -> RepoEvent (Either EventError ())
+-- end constructors[5] --
+
+-- constructors[6] (54 bytes) --
+MailboxDrop :: Int -> RepoEvent (Either EventError ())
+-- end constructors[6] --
+
+-- end constructors --
+
+-- type_defs (9 items) --
+-- type_defs[0] (46 bytes) --
+data EventId = EventId Int deriving (Show, Eq)
+-- end type_defs[0] --
+
+-- type_defs[1] (60 bytes) --
+data SubscriptionId = SubscriptionId Int deriving (Show, Eq)
+-- end type_defs[1] --
+
+-- type_defs[2] (134 bytes) --
+data Watch = WatchCommit WorktreeId | WatchHead WorktreeId | WatchDeadline Int | WatchAsync Int | WatchMailbox Int deriving (Show, Eq)
+-- end type_defs[2] --
+
+-- type_defs[3] (151 bytes) --
+data HeadChangeKind = Advanced [GitOid] | Amended GitOid GitOid | Rewritten [(GitOid, GitOid)] | Rewound | Switched | UnknownChange deriving (Show, Eq)
+-- end type_defs[3] --
+
+-- type_defs[4] (214 bytes) --
+data HeadChangeReceipt = HeadChangeReceipt { headWorktree :: WorktreeId, oldHead :: Maybe GitOid, newHead :: GitOid, kind :: HeadChangeKind, headBranch :: Maybe BranchName, observedAtMs :: Int } deriving (Show, Eq)
+-- end type_defs[4] --
+
+-- type_defs[5] (195 bytes) --
+data CommitReceipt = CommitReceipt { commitWorktree :: WorktreeId, oid :: GitOid, parents :: [GitOid], subject :: Text, author :: Text, committedAtMs :: Int, files :: [Text] } deriving (Show, Eq)
+-- end type_defs[5] --
+
+-- type_defs[6] (57 bytes) --
+data Tick = Tick { firedAtMs :: Int } deriving (Show, Eq)
+-- end type_defs[6] --
+
+-- type_defs[7] (222 bytes) --
+data RepositoryEvent = ObservedCommit EventId CommitReceipt | ObservedHeadChange EventId HeadChangeReceipt | ObservedTick EventId Tick | ObservedAsyncDone EventId Int | ObservedMessage EventId Int Value deriving (Show, Eq)
+-- end type_defs[7] --
+
+-- type_defs[8] (989 bytes) --
+data EventError = EventQueueOverflow Int Int | EventUnknownSubscription Int | EventSourceLost Text | EventSourceFailed Text | EventUnknownMailbox Int | EventBadTimeout Int deriving (Show, Eq)
+instance ToJSON EventError where
+  toJSON e = case e of
+    EventQueueOverflow overflowSub dropped -> object ["tag" .= ("EventQueueOverflow" :: Text), "overflowSub" .= overflowSub, "dropped" .= dropped]
+    EventUnknownSubscription unknownSub -> object ["tag" .= ("EventUnknownSubscription" :: Text), "unknownSub" .= unknownSub]
+    EventSourceLost lostDetail -> object ["tag" .= ("EventSourceLost" :: Text), "lostDetail" .= lostDetail]
+    EventSourceFailed failedDetail -> object ["tag" .= ("EventSourceFailed" :: Text), "failedDetail" .= failedDetail]
+    EventUnknownMailbox unknownMailbox -> object ["tag" .= ("EventUnknownMailbox" :: Text), "unknownMailbox" .= unknownMailbox]
+    EventBadTimeout badTimeoutMs -> object ["tag" .= ("EventBadTimeout" :: Text), "badTimeoutMs" .= badTimeoutMs]
+-- end type_defs[8] --
+
+-- end type_defs --
+
+-- extra_imports (1 items) --
+-- extra_imports[0] (21 bytes) --
+import Tidepool.Event
+-- end extra_imports[0] --
+
+-- end extra_imports --
+
+-- helpers (4 items) --
+-- helpers[0] (428 bytes) --
+-- | Block until `sub` has queued at least one observation, or
+-- `timeoutMs` elapses (negative blocks with no deadline). An elapsed
+-- timeout is an EMPTY list — distinguishable from a real batch, never
+-- an error; poison/source-loss still fail via the `Either`.
+awaitSubscriptionRaw :: SubscriptionId -> Int -> M (Either EventError [RepositoryEvent])
+awaitSubscriptionRaw sub timeoutMs = send (RepoEventAwait sub timeoutMs)
+-- end helpers[0] --
+
+-- helpers[1] (178 bytes) --
+-- | Mint a fresh mailbox: an event source only the caller (and whoever
+-- it hands the id to) can send into.
+mailboxNew :: M (Either EventError Int)
+mailboxNew = send MailboxNew
+-- end helpers[1] --
+
+-- helpers[2] (236 bytes) --
+-- | Send never blocks: append and return. A burst of sends sharing
+-- `key` coalesces to the LAST payload.
+mailboxSend :: Int -> Text -> Value -> M (Either EventError ())
+mailboxSend mid key payload = send (MailboxSend mid key payload)
+-- end helpers[2] --
+
+-- helpers[3] (162 bytes) --
+-- | Drop a mailbox. A later send against it is
+-- `Left (EventUnknownMailbox _)`.
+mailboxDrop :: Int -> M (Either EventError ())
+mailboxDrop = send . MailboxDrop
+-- end helpers[3] --
+
+-- end helpers --
+
+-- type_params (0 items) --
+-- end type_params --
+
+-- default_row_args (0 items) --
+-- end default_row_args --
+
+-- helpers_row_polymorphic --
+false
+-- end helpers_row_polymorphic --
+
 =============================== EFFECT: Journal ===============================
 
 -- type_name (7 bytes) --

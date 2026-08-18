@@ -70,6 +70,20 @@ fn body(e: &Effect) -> String {
     let mut out = header("//! ", &format!("`{}` wire types", e.name));
     out.push('\n');
 
+    // A `foreign_types` entry names a wire type another effect's OWN generated
+    // module declares (Event's `Watch` etc. name Worktree's `WtWorktreeId`).
+    // Every generated wire module lives in `tidepool-bridge-effects`, and the
+    // crate root flattens every effect's module (`pub use generated::*;`), so
+    // the foreign name is reachable at `crate::<Name>` regardless of which
+    // sibling module actually declares it. rustfmt sorts `use` items
+    // lexically, and `crate` sorts before `tidepool_bridge_derive`.
+    if !e.foreign_types.is_empty() {
+        let mut names: Vec<&str> = e.foreign_types.iter().map(|(_, wire)| *wire).collect();
+        names.sort_unstable();
+        names.dedup();
+        out.push_str(&format!("use crate::{{{}}};\n", names.join(", ")));
+    }
+
     let idents = used_bridge_derives(e);
     out.push_str(&format!(
         "use tidepool_bridge_derive::{{{}}};\n",
@@ -133,12 +147,25 @@ fn rust_type(e: &Effect, ty: &HsType) -> String {
         HsType::Text => "String".to_string(),
         HsType::Int => "i64".to_string(),
         HsType::Bool => "bool".to_string(),
+        // The vendored aeson JSON value, ret-only wherever it appears in a wire
+        // record today (`RepositoryEvent::ObservedMessage`'s bare payload) — the
+        // same `serde_json::Value` spelling `AgCyclePayload`/`AgAgentStep` use
+        // for the same reason (no `FromCore` for it, so it never decodes).
+        HsType::Value => "serde_json::Value".to_string(),
         HsType::List(inner) => format!("Vec<{}>", rust_type(e, inner)),
         HsType::Maybe(inner) => format!("Option<{}>", rust_type(e, inner)),
+        // `[(GitOid, GitOid)]` (`HeadChangeKind::Rewritten`) is the only tuple
+        // seen in a wire record today; a Haskell list-of-tuple is a Rust
+        // `Vec<(..)>`, same as every other `HsType::List` — the tuple itself
+        // renders as an ordinary Rust tuple.
+        HsType::Tuple(tys) => {
+            let inner: Vec<String> = tys.iter().map(|t| rust_type(e, t)).collect();
+            format!("({})", inner.join(", "))
+        }
         HsType::Named(n) => e.wire_rust_of(n).to_string(),
         other => panic!(
             "{}: wire_rs cannot render {other:?} as a wire record field type — \
-             only Text/Int/Bool/[T]/Maybe T/Named(n) are representable here",
+             only Text/Int/Bool/Value/[T]/Maybe T/(T, ..)/Named(n) are representable here",
             e.name
         ),
     }
