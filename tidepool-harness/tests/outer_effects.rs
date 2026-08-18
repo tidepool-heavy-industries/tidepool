@@ -26,6 +26,18 @@
 //! not stall a sibling green thread's mailbox sends) and the mailbox
 //! coalesce contract, without paying for a second extract compile.
 //!
+//! `outer_loop_effects_round_trip_through_the_driver` is `#[ignore]`d: its
+//! `Tidepool.Node` scenarios (`forkNode`/`sendUp`/`received`) hit the SAME
+//! `tag 255` GC-corruption family `nested_async_repro.rs` characterizes —
+//! see that file's module doc for the mechanism, the ruled-out/still-suspect
+//! split, and the family hypothesis. This is a second manifestation, not a
+//! new bug: `forkNode`'s spawned body closes over its `NodeCtx`, whose
+//! `inbox` field is itself a closure (`Tidepool.Node.hs`'s `decodeMailbox`),
+//! so a closure-capturing-a-closure crosses the SAME tenure boundary
+//! `nested_async_repro.rs` already implicates — plausible family member,
+//! not confirmed. The test's own doc comment carries the exact error and the
+//! bisection that isolated it to `forkNode` specifically.
+//!
 //! GHC-heavy: needs `TIDEPOOL_EXTRACT` + the with-packages GHC on PATH
 //! (`--ignore-default-filter` to run).
 
@@ -86,14 +98,46 @@ impl ObservationSource for NoOpSource {
 /// `withHandler`/(`after`+`nextEvent`) → five suspensions → driver-owned
 /// handlers → resumed continuation → durable `State`.
 ///
-/// WIP: RED (2026-08-17, round 2) — after root's custody-window fix
-/// (72a15bd1) this now surfaces a REAL error instead of the masked panic:
-/// `AsyncSpawnWith spawner resume failed: turn run failed: heap bridge
-/// error: unexpected heap tag: 255` — a `tag 255` signature, which root's
-/// own vocabulary marks as the GC-corruption family (not the custody
-/// bookkeeping just fixed). Reported verbatim; root owns the next step.
-/// `#[ignore]`d so the family bundle stays green meanwhile.
-#[ignore = "WIP red round 2: AsyncSpawnWith resume hits heap tag 255 (GC-corruption family) — owned by root"]
+/// `#[ignore]`d, NOT a sanctioned red: the `Tidepool.Async`/wave-1 scenarios
+/// and `waitEvent` all pass on their own (confirmed by bisection, below);
+/// what fails is `Tidepool.Node`'s `forkNode`, which hits the `tag 255`
+/// GC-corruption family `nested_async_repro.rs` documents. Remove
+/// `#[ignore]` once that lane's fix lands — this should need no other change
+/// to go green, same lifecycle as `nested_async_repro.rs`'s own test.
+///
+/// # What fails, verbatim
+///
+/// ```text
+/// Session("AsyncSpawnWith spawner resume failed: turn run failed: heap
+/// bridge error: unexpected heap tag: 255")
+/// ```
+///
+/// # Bisection (2026-08-17)
+///
+/// With every wave-2 scenario stubbed out of `OuterEffectsHarness.hs`: green
+/// (62s). Restoring ONLY `waitEvent` (plain `async` + a `nextEvent` select,
+/// no `Tidepool.Node`): still green (47s). Restoring ONLY the minimal
+/// `forkNode` scenario — one node, one `sendUp`, no burst, no nesting —
+/// alone: reproduces the error above on its own (22s). So this is
+/// `forkNode`'s own spawn path, not `waitEvent`, not the burst/coalesce
+/// logic, not scenario interaction. `Tidepool.Node`'s other two scenarios
+/// (silent-child-observes-Tick, burst-coalesces-to-last-payload) were not
+/// independently bisected past this point — they share `forkNode`'s exact
+/// spawn path, so they are assumed equally blocked rather than reverified at
+/// cost.
+///
+/// # Why this, not just `nested_async_repro.rs`, needed reporting
+///
+/// This reproduces WITHOUT nesting (no node here forks a node) — a green
+/// thread whose body merely CLOSES OVER a closure (`NodeCtx`'s `inbox`
+/// field, built by `Tidepool.Node.hs`'s `decodeMailbox`) hits the same
+/// signature that thread-forks-thread does. Plausibly the same family
+/// (values crossing a tenure boundary while a collection can move them) via
+/// a different trigger shape; offered as a lead for whoever picks up the
+/// fix, not confirmed.
+#[ignore = "chartered gap: forkNode hits the tag-255 GC-corruption family — see this test's \
+            doc comment for the exact error and bisection, and nested_async_repro.rs for \
+            the mechanism"]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn outer_loop_effects_round_trip_through_the_driver() {
     support::require_extract();
