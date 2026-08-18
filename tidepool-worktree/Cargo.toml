@@ -11,9 +11,11 @@ rust-version.workspace = true
 description = "Managed git worktrees, durable registry, and typed repository events (PRD 19)"
 
 [dependencies]
+tidepool-atomic-write.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 # A normal dependency, not a dev one: `testing` is a pub module so integration
 # tests (separate crates) can use the scripted writer without a feature dance.
 tempfile.workspace = true
+uuid.workspace = true

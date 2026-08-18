@@ -20,39 +20,25 @@
 
 use serde::{Deserialize, Serialize};
 use std::fs;
-use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::error::WorktreeError;
 use crate::git::{inspect, GitCli};
 use crate::id::{BranchName, GitOid, GitRef, WorktreeId};
-use crate::storage::{now_ms, storage_failure};
+use crate::storage::storage_failure;
 
 /// Directory under the registry root holding one JSON file per worktree id.
 const RECORDS_DIR: &str = "records";
 
-/// Write `bytes` to `path` crash-safely: a temp file in the SAME directory,
-/// fsynced, then renamed over the target. A torn write cannot land at `path`
-/// — either the old content is still there or the new content is, never a
-/// partial file — and a sibling record in the same directory is never
-/// touched by writing this one.
+/// Write `bytes` to `path` crash-safely via the shared durable atomic-write
+/// helper — a temp file in the SAME directory, fsynced, then renamed over
+/// the target, then the directory itself best-effort fsynced. A torn write
+/// cannot land at `path` — either the old content is still there or the new
+/// content is, never a partial file — and a sibling record in the same
+/// directory is never touched by writing this one.
 fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), WorktreeError> {
-    // The path is always built by `record_path`, which always joins onto a
-    // directory — there is no caller-supplied path that could lack a parent.
-    let dir = path.parent().expect("record path has a parent directory");
-    let mut tmp = tempfile::NamedTempFile::new_in(dir).map_err(|e| storage_failure(dir, e))?;
-    tmp.write_all(bytes).map_err(|e| storage_failure(path, e))?;
-    tmp.as_file()
-        .sync_all()
-        .map_err(|e| storage_failure(path, e))?;
-    tmp.persist(path).map_err(|e| storage_failure(path, e))?;
-    // Best-effort directory fsync so the rename itself survives a crash; not
-    // fatal if the platform does not support fsync on a directory handle.
-    if let Ok(dirf) = fs::File::open(dir) {
-        let _ = dirf.sync_all();
-    }
-    Ok(())
+    tidepool_atomic_write::write_durable(path, bytes)
+        .map_err(|e| storage_failure(&e.path, e.source))
 }
 
 /// Whether the recorded `cwd` still holds a real git working tree. A plain
@@ -272,23 +258,13 @@ impl WorktreeRegistry {
             .collect())
     }
 
-    /// Mint a fresh, unused worktree id. Combines wall-clock time, process
-    /// id, an in-process counter, and process-local randomness so two
-    /// creates in the same millisecond — an ordinary event, not a hazard —
-    /// cannot alias, without depending on the clock alone.
+    /// Mint a fresh, unused worktree id: `wt-<uuid v4>`. A v4 UUID's 122 bits
+    /// of randomness make a collision vanishingly unlikely on its own; the
+    /// existence check below is defense-in-depth, not the uniqueness
+    /// mechanism itself.
     pub fn mint_id(&self) -> Result<WorktreeId, WorktreeError> {
-        use std::collections::hash_map::RandomState;
-        use std::hash::{BuildHasher, Hasher};
-
-        static NEXT: AtomicU64 = AtomicU64::new(0);
-
         loop {
-            let now = now_ms();
-            let pid = std::process::id();
-            let counter = NEXT.fetch_add(1, Ordering::Relaxed);
-            let random = RandomState::new().build_hasher().finish();
-            let candidate =
-                WorktreeId::from_raw(format!("wt-{now:x}-{pid:x}-{counter:x}-{random:016x}"));
+            let candidate = WorktreeId::from_raw(format!("wt-{}", uuid::Uuid::new_v4()));
             if !self.record_path(&candidate).exists() {
                 return Ok(candidate);
             }

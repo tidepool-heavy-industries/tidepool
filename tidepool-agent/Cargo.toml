@@ -12,9 +12,10 @@ description = "Typed headless-subagent backend adapters (PRD 18). Backend vocabu
 
 [dependencies]
 codex-codes = "=0.146.4"
-# `kill(2)` for the app-server canceller: a cycle thread blocked in a seam call
-# holds `&mut` on its backend, so reaping it from another thread goes by pid.
-libc.workspace = true
+# pidfd_open/pidfd_send_signal + poll for the app-server canceller: a cycle
+# thread blocked in a seam call holds `&mut` on its backend, so reaping it
+# from another thread goes by pidfd (see driver.rs's PidFdSlot docs).
+rustix = { version = "1", features = ["process", "event"] }
 tidepool-worktree.workspace = true
 serde.workspace = true
 serde_json.workspace = true

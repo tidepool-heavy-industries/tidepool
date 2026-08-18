@@ -21,6 +21,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use clap::Parser;
 use tidepool_handlers::{
     ConsoleHandler, EventConfig, ExecHandler, RepoEventHandler, WorktreeHandler,
 };
@@ -52,6 +53,34 @@ impl Observer for FanoutObserver {
     }
 }
 
+/// Provider select (OAuth default, `--replay <log>` for deterministic replay,
+/// `--api-key <ENV_VAR>` for a non-interactive API-key provider), engine
+/// config, and the self-iterating harness driver loop.
+#[derive(Parser)]
+struct Args {
+    /// Replay a recorded run log deterministically instead of calling a live model.
+    #[arg(long, value_name = "log", conflicts_with = "api_key")]
+    replay: Option<PathBuf>,
+    /// Non-interactive API-key provider, naming the env var holding the key.
+    #[arg(long, value_name = "ENV_VAR")]
+    api_key: Option<String>,
+    /// Path to the harness source (Harness.hs). Defaults to the bundled example.
+    #[arg(long)]
+    harness: Option<PathBuf>,
+    /// Skip the between-loops "press Enter" human gate.
+    #[arg(long)]
+    yes: bool,
+    /// Same as --yes.
+    #[arg(long)]
+    auto: bool,
+    /// Concurrency cap for concurrently-serviced fanout/fork RunLLMTurn windows.
+    #[arg(long)]
+    concurrency: Option<usize>,
+    /// Operator GUI port (only used when not running --yes/--auto/--replay).
+    #[arg(long, default_value_t = 4600)]
+    port: u16,
+}
+
 #[tokio::main(flavor = "multi_thread")]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt()
@@ -59,16 +88,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .init();
 
-    let args: Vec<String> = std::env::args().collect();
+    let args = Args::parse();
 
-    let replay_log = arg_value(&args, "--replay");
-    let api_key_env = arg_str(&args, "--api-key");
-    let harness_source_path =
-        arg_value(&args, "--harness").unwrap_or_else(default_harness_source_path);
+    let replay_log = args.replay;
+    let api_key_env = args.api_key;
+    let harness_source_path = args.harness.unwrap_or_else(default_harness_source_path);
     // Skip the between-loops "press Enter" human gate (W1 runaway cap 3) — for
     // CI/replay/unattended runs. Replay mode implies `--auto` (no operator to
     // press Enter against a recorded run).
-    let auto = args.iter().any(|a| a == "--yes" || a == "--auto") || replay_log.is_some();
+    let auto = args.yes || args.auto || replay_log.is_some();
 
     tracing::info!(
         target: "tidepool_web",
@@ -148,14 +176,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // PRD 20 S1-L4: the concurrency cap for concurrently-serviced
     // fanout/fork `RunLLMTurn` windows (default 8 — see
     // `SelfHarnessDriver::set_concurrency_cap`'s doc).
-    if let Some(cap) = arg_str(&args, "--concurrency").and_then(|s| s.parse().ok()) {
+    if let Some(cap) = args.concurrency {
         driver.set_concurrency_cap(cap);
     }
 
     if !auto {
-        let port: u16 = arg_str(&args, "--port")
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(4600);
+        let port: u16 = args.port;
         let (state, gate) = tidepool_web::spawn_operator_server_multi(port).await?;
         // PRD 21 C3 §10.3: register the recursive-companion harness's root
         // node alongside the default so the multi-node surface can grow a tab
@@ -332,15 +358,6 @@ fn build_subagent_handler(
         Box::new(backend),
     )?;
     Ok(handler)
-}
-
-fn arg_value(args: &[String], flag: &str) -> Option<PathBuf> {
-    arg_str(args, flag).map(PathBuf::from)
-}
-
-fn arg_str(args: &[String], flag: &str) -> Option<String> {
-    let idx = args.iter().position(|a| a == flag)?;
-    args.get(idx + 1).cloned()
 }
 
 /// Whether `path` names the recursive-companion harness (PRD 21 C3), the one

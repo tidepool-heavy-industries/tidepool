@@ -10,6 +10,7 @@ authors.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+tidepool-atomic-write.workspace = true
 tidepool-repr.workspace = true
 tidepool-runtime.workspace = true
 tidepool-mcp.workspace = true
@@ -30,7 +31,7 @@ genai.workspace = true
 openai-auth = { version = "1", default-features = false, features = ["async", "callback-server"] }
 reqwest = { workspace = true, features = ["form"] }
 base64 = "0.23"
-uuid = { version = "1", features = ["v4"] }
+uuid.workspace = true
 tokio = { workspace = true, features = ["net", "rt", "rt-multi-thread", "sync", "time"] }
 # Bounded-concurrency stream combinator (`buffer_unordered`) for driving N
 # concurrent fanout/fork RunLLMTurn answerer children (PRD 20 S1-L4) without

@@ -26,6 +26,7 @@ dyn-clone = "1.0"
 frunk.workspace = true
 schemars.workspace = true
 serde_json = { workspace = true, features = ["arbitrary_precision"] }
+blake3.workspace = true
 
 [dev-dependencies]
 tidepool-protocol.workspace = true

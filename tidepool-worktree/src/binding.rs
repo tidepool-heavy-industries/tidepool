@@ -10,7 +10,6 @@
 
 use serde::{Deserialize, Serialize};
 use std::fs;
-use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use crate::error::WorktreeError;
@@ -280,7 +279,8 @@ impl BindingTable {
     }
 
     /// Rewrite the on-disk file for `worktree` from the current in-memory
-    /// rows, crash-safely (temp file in the same directory, fsync, rename).
+    /// rows, crash-safely via the shared durable atomic-write helper (temp
+    /// file in the same directory, fsync, rename, best-effort dir fsync).
     fn persist(&self, worktree: &WorktreeId) -> Result<(), WorktreeError> {
         let rows: Vec<&Binding> = self
             .bindings
@@ -289,16 +289,8 @@ impl BindingTable {
             .collect();
         let bytes = serde_json::to_vec_pretty(&rows).expect("serialize bindings");
         let path = self.path_for(worktree);
-        // `path_for` always joins onto `self.root`, so this always has a parent.
-        let dir = path.parent().expect("binding path has a parent directory");
-        let mut tmp = tempfile::NamedTempFile::new_in(dir).map_err(|e| storage_failure(dir, e))?;
-        tmp.write_all(&bytes)
-            .map_err(|e| storage_failure(&path, e))?;
-        tmp.as_file()
-            .sync_all()
-            .map_err(|e| storage_failure(&path, e))?;
-        tmp.persist(&path).map_err(|e| storage_failure(&path, e))?;
-        Ok(())
+        tidepool_atomic_write::write_durable(&path, &bytes)
+            .map_err(|e| storage_failure(&e.path, e.source))
     }
 
     /// Bind an agent to a worktree, returning the [`ActiveBinding`] custody

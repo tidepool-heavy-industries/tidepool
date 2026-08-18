@@ -21,20 +21,32 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
+use clap::Parser;
 use serde_json::{json, Value};
 
 use jsonrpc::RaClient;
 
+/// `tidepool-lsp-daemon` — a persistent language-server sidecar for the
+/// tidepool LSP effect.
+#[derive(Parser)]
+struct Args {
+    /// Workspace root (default: current directory)
+    #[arg(long)]
+    root: Option<PathBuf>,
+    /// Socket path (default: $TIDEPOOL_LSP_SOCK or <root>/.tidepool/lsp.sock)
+    #[arg(long, env = "TIDEPOOL_LSP_SOCK")]
+    socket: Option<PathBuf>,
+}
+
 fn main() {
-    let args: Vec<String> = std::env::args().collect();
-    let root = arg(&args, "--root")
-        .map(PathBuf::from)
+    let args = Args::parse();
+    let root = args
+        .root
         .unwrap_or_else(|| std::env::current_dir().expect("cwd"));
     let root = root.canonicalize().unwrap_or(root);
 
-    let sock_path = arg(&args, "--socket")
-        .map(PathBuf::from)
-        .or_else(|| std::env::var("TIDEPOOL_LSP_SOCK").ok().map(PathBuf::from))
+    let sock_path = args
+        .socket
         .unwrap_or_else(|| root.join(".tidepool").join("lsp.sock"));
 
     // v1 manages rust-analyzer for the whole workspace.
@@ -217,11 +229,4 @@ fn err(msg: impl Into<String>) -> Value {
 /// `Some(nodes)` → JSON array; `None` → `null` (the daemon's "Nothing").
 fn opt_list(o: Option<Vec<Value>>) -> Value {
     o.map(Value::from).unwrap_or(Value::Null)
-}
-
-/// Read a `--flag value` argument.
-fn arg(args: &[String], flag: &str) -> Option<String> {
-    args.iter()
-        .position(|a| a == flag)
-        .and_then(|i| args.get(i + 1).cloned())
 }

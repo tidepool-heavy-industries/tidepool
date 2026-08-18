@@ -230,10 +230,11 @@ pub fn load_checkpoint(path: &Path) -> Result<Option<Checkpoint>, PersistenceErr
 }
 
 /// Persist `checkpoint` to `path`, creating the containing directory if
-/// needed. Writes to a `.tmp` sibling then renames over `path` — an atomic
-/// replace on the platforms this runs on, so [`load_checkpoint`] never
-/// observes a partially-written file even if the process is killed
-/// mid-write.
+/// needed. Written via the shared durable atomic-write helper — a
+/// uniquely-named temp sibling, fsynced, then renamed over `path` — so
+/// [`load_checkpoint`] never observes a partially-written file even if the
+/// process is killed mid-write, and two callers racing on the same path
+/// never share (and so can never collide on) a tmp name.
 pub fn save_checkpoint(path: &Path, checkpoint: &Checkpoint) -> Result<(), PersistenceError> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|source| PersistenceError::Io {
@@ -245,14 +246,9 @@ pub fn save_checkpoint(path: &Path, checkpoint: &Checkpoint) -> Result<(), Persi
         path: path.to_path_buf(),
         source,
     })?;
-    let tmp = PathBuf::from(format!("{}.tmp", path.display()));
-    std::fs::write(&tmp, &bytes).map_err(|source| PersistenceError::Io {
-        path: tmp.clone(),
-        source,
-    })?;
-    std::fs::rename(&tmp, path).map_err(|source| PersistenceError::Io {
-        path: path.to_path_buf(),
-        source,
+    tidepool_atomic_write::write_durable(path, &bytes).map_err(|e| PersistenceError::Io {
+        path: e.path,
+        source: e.source,
     })
 }
 

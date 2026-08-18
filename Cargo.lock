@@ -1878,7 +1878,7 @@ checksum = "86f0f8fee8c926415c58d6ae43a08523a26faccb2323f5e6b644fe7dd4ef6b82"
 dependencies = [
  "console",
  "once_cell",
- "similar",
+ "similar 2.7.0",
  "tempfile",
 ]
 
@@ -3544,6 +3544,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "bbbb5d9659141646ae647b42fe094daf6c6192d1620870b449d9557f748b2daa"
 
 [[package]]
+name = "similar"
+version = "3.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4f66ca1f7aca2474dc10c942eb22feffc897735f54cd1db90138c2fddb490987"
+dependencies = [
+ "bstr",
+]
+
+[[package]]
 name = "simple_asn1"
 version = "0.6.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3857,7 +3866,7 @@ name = "tidepool-agent"
 version = "0.1.0"
 dependencies = [
  "codex-codes",
- "libc",
+ "rustix",
  "serde",
  "serde_json",
  "sha2 0.11.0",
@@ -3865,6 +3874,13 @@ dependencies = [
  "thiserror",
  "tidepool-worktree",
  "tokio",
+]
+
+[[package]]
+name = "tidepool-atomic-write"
+version = "0.1.0"
+dependencies = [
+ "tempfile",
 ]
 
 [[package]]
@@ -3997,7 +4013,6 @@ dependencies = [
  "glob",
  "ignore",
  "inventory",
- "libc",
  "regex",
  "serde",
  "serde_json",
@@ -4037,6 +4052,7 @@ dependencies = [
  "tempfile",
  "thiserror",
  "tidepool-agent",
+ "tidepool-atomic-write",
  "tidepool-bridge",
  "tidepool-bridge-effects",
  "tidepool-codegen",
@@ -4064,9 +4080,11 @@ version = "0.1.0"
 name = "tidepool-lsp"
 version = "0.1.0"
 dependencies = [
+ "clap",
  "crossbeam-channel",
  "serde",
  "serde_json",
+ "similar 3.2.0",
  "tempfile",
 ]
 
@@ -4074,6 +4092,7 @@ dependencies = [
 name = "tidepool-macro"
 version = "0.1.0"
 dependencies = [
+ "blake3",
  "proc-macro2",
  "quote",
  "serde_json",
@@ -4088,6 +4107,7 @@ name = "tidepool-mcp"
 version = "0.1.0"
 dependencies = [
  "axum",
+ "blake3",
  "dyn-clone",
  "frunk",
  "parking_lot",
@@ -4190,6 +4210,7 @@ dependencies = [
  "static_assertions",
  "tempfile",
  "thiserror",
+ "tidepool-atomic-write",
  "tidepool-bridge",
  "tidepool-bridge-derive",
  "tidepool-bridge-effects",
@@ -4259,6 +4280,7 @@ name = "tidepool-web"
 version = "0.1.0"
 dependencies = [
  "axum",
+ "clap",
  "datastar",
  "futures-core",
  "futures-util",
@@ -4286,6 +4308,8 @@ dependencies = [
  "serde_json",
  "tempfile",
  "thiserror",
+ "tidepool-atomic-write",
+ "uuid",
 ]
 
 [[package]]

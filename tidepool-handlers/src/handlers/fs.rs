@@ -15,28 +15,15 @@ use tidepool_mcp::CapturedOutput;
 /// a hot path. The lock releases when the directory handle drops. `lock_dir`
 /// must already exist.
 pub(crate) fn with_dir_flock<T>(lock_dir: &Path, f: impl FnOnce() -> T) -> std::io::Result<T> {
-    use std::os::unix::io::AsRawFd;
     let dir = std::fs::File::open(lock_dir)?;
-    let fd = dir.as_raw_fd();
-    loop {
-        // SAFETY: `fd` is a valid open directory descriptor owned by `dir` for
-        // the duration of this call.
-        let rc = unsafe { libc::flock(fd, libc::LOCK_EX) };
-        if rc == 0 {
-            break;
-        }
-        let err = std::io::Error::last_os_error();
-        if err.kind() == std::io::ErrorKind::Interrupted {
-            continue; // EINTR: retry the blocking lock
-        }
-        return Err(err);
-    }
+    // `File::lock` blocks until the exclusive lock is acquired, retrying an
+    // interrupted wait internally — no hand-rolled EINTR loop needed.
+    dir.lock()?;
     let out = f();
-    // SAFETY: same valid descriptor; closing `dir` would also release, but be
-    // explicit so the unlock is visible before `f`'s side effects are observed.
-    unsafe {
-        libc::flock(fd, libc::LOCK_UN);
-    }
+    // Explicit, so the unlock is visible before `f`'s side effects are
+    // observed rather than deferred to `dir`'s drop; same as the flock
+    // original, an unlock failure here is not surfaced.
+    let _ = dir.unlock();
     Ok(out)
 }
 

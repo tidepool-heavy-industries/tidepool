@@ -40,8 +40,6 @@ serde_json.workspace = true
 # Content hashing for the Fs compare-and-swap write (FsHash/FsWriteCas) —
 # matches the cache layer's blake3 choice (tidepool-runtime).
 blake3.workspace = true
-# flock(2) for the cross-process compare-and-swap file locks (Fs/KV CAS).
-libc.workspace = true
 tracing.workspace = true
 # build_base_stack requires a tokio runtime (LlmHandler captures Handle::current())
 tokio = { workspace = true, features = ["rt", "rt-multi-thread"] }

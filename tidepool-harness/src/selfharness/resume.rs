@@ -481,20 +481,17 @@ pub fn load_lease(log_dir: &Path) -> Result<Option<RunLease>, PersistenceError> 
     Ok(Some(lease))
 }
 
-/// Write `lease` as the ACTIVE lease, creating `log_dir` if needed. Atomic (a
-/// `.tmp` sibling, then a rename over the target) for the same reason
-/// `save_checkpoint` is: a kill mid-write must never leave a torn lease for the
-/// next boot to read.
-///
-/// The `.tmp` sibling's name is per-CALL unique ([`lease_tmp_path`]), not a
-/// fixed `<lease>.tmp` — the RESUME row of [`acquire_lease`] can legitimately
-/// be entered by several processes/threads at once (every racer that lost the
-/// fresh claim lands here together), and a shared tmp name would let one
-/// caller's `rename` consume a sibling ITS write never produced, surfacing as
-/// a spurious `NotFound` on the SECOND renamer even though nothing was ever
-/// torn on disk — a race in this function's own bookkeeping, not a durability
-/// hazard. Overwriting the ACTIVE lease itself is still the intended
-/// end state either way: last writer wins, same as before.
+/// Write `lease` as the ACTIVE lease, creating `log_dir` if needed. Written
+/// via the shared durable atomic-write helper (a uniquely-named temp
+/// sibling, fsynced, then renamed over the target) for the same reason
+/// `save_checkpoint` is: a kill mid-write must never leave a torn lease for
+/// the next boot to read. The helper's per-call unique temp name is what
+/// keeps this safe under [`acquire_lease`]'s RESUME row, which can
+/// legitimately be entered by several processes/threads at once (every racer
+/// that lost the fresh claim lands here together) — a shared tmp name would
+/// let one caller's rename consume a sibling ITS write never produced.
+/// Overwriting the ACTIVE lease itself is still the intended end state
+/// either way: last writer wins, same as before.
 pub fn write_lease(log_dir: &Path, lease: &RunLease) -> Result<(), PersistenceError> {
     std::fs::create_dir_all(log_dir).map_err(|source| PersistenceError::Io {
         path: log_dir.to_path_buf(),
@@ -505,12 +502,10 @@ pub fn write_lease(log_dir: &Path, lease: &RunLease) -> Result<(), PersistenceEr
         path: path.clone(),
         source,
     })?;
-    let tmp = lease_tmp_path(&path);
-    std::fs::write(&tmp, &bytes).map_err(|source| PersistenceError::Io {
-        path: tmp.clone(),
-        source,
-    })?;
-    std::fs::rename(&tmp, &path).map_err(|source| PersistenceError::Io { path, source })
+    tidepool_atomic_write::write_durable(&path, &bytes).map_err(|e| PersistenceError::Io {
+        path: e.path,
+        source: e.source,
+    })
 }
 
 /// A per-CALL unique `.tmp` sibling of `path` — see [`write_lease`]'s doc for

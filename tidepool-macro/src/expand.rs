@@ -161,7 +161,7 @@ fn resolve_hs_path(
     let output_dir = Path::new(&manifest_dir)
         .join("target")
         .join("tidepool-cbor")
-        .join(format!("{basename}-{key:016x}"));
+        .join(format!("{basename}-{key}"));
 
     if let Err(msg) = run_tidepool_extract(
         &abs_hs_path,
@@ -447,7 +447,7 @@ pub fn expand_inline(input: TokenStream) -> TokenStream {
     let inline_dir = Path::new(&manifest_dir)
         .join("target")
         .join("tidepool-inline")
-        .join(format!("{key:016x}"));
+        .join(&key);
     if let Err(e) = std::fs::create_dir_all(&inline_dir) {
         return syn::Error::new(
             parsed.source.span(),
@@ -471,7 +471,7 @@ pub fn expand_inline(input: TokenStream) -> TokenStream {
     let output_dir = Path::new(&manifest_dir)
         .join("target")
         .join("tidepool-cbor")
-        .join(format!("{module_name}-{key:016x}"));
+        .join(format!("{module_name}-{key}"));
 
     if let Err(msg) = run_tidepool_extract(
         &hs_file,
@@ -721,28 +721,32 @@ fn run_tidepool_extract(
     }
 }
 
-/// Stable 64-bit key for the extract content cache. `DefaultHasher` is
-/// deterministic for a given toolchain, which is all a `target/`-local cache
-/// needs — every rustc process in one build converges on the same directory.
+/// Feed one field into `h` framed with its own byte length first, so two
+/// different field splits can never hash identically (e.g. `"ab"` + `"c"`
+/// colliding with `"a"` + `"bc"` under bare concatenation).
+fn frame_field(h: &mut blake3::Hasher, bytes: &[u8]) {
+    h.update(&(bytes.len() as u64).to_le_bytes());
+    h.update(bytes);
+}
+
+/// Stable key for the extract content cache, as a lowercase hex digest
+/// (blake3, truncated to 128 bits — collision-safe for a `target/`-local
+/// cache, matching the codebase's `blake3_hex` truncation convention).
 /// `deps` must already be sorted by path (callers own the sort so the same
 /// input set always hashes to the same key regardless of resolution order).
-///
-/// `DefaultHasher`'s output is NOT guaranteed stable across Rust versions,
-/// so these keys — and the `target/tidepool-{cbor,inline}/` dir names built
-/// from them — are toolchain-local by construction: a toolchain bump changes
-/// every key, which is a full miss (safe — never a stale hit) but leaves the
-/// old dirs on disk and re-extracts everything once.
-fn content_key(bytes: &[u8], target: Option<&str>, deps: &[HsDep]) -> u64 {
-    use std::hash::{Hash, Hasher};
-    let mut h = std::collections::hash_map::DefaultHasher::new();
-    bytes.hash(&mut h);
+fn content_key(bytes: &[u8], target: Option<&str>, deps: &[HsDep]) -> String {
+    let mut h = blake3::Hasher::new();
+    frame_field(&mut h, bytes);
     for (path, content) in deps {
-        path.hash(&mut h);
-        content.hash(&mut h);
+        frame_field(&mut h, path.to_string_lossy().as_bytes());
+        frame_field(&mut h, content);
     }
-    target.hash(&mut h);
-    extract_identity().hash(&mut h);
-    h.finish()
+    // Distinguish `None` from `Some("")`: a bare length-0 frame is ambiguous
+    // between the two, so the presence flag rides as its own byte.
+    h.update(&[target.is_some() as u8]);
+    frame_field(&mut h, target.unwrap_or("").as_bytes());
+    frame_field(&mut h, &extract_identity().to_le_bytes());
+    h.finalize().to_hex()[..32].to_string()
 }
 
 /// Extracts the dotted module name from a single `import` line, e.g.
