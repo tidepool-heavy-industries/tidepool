@@ -86,18 +86,14 @@ impl ObservationSource for NoOpSource {
 /// `withHandler`/(`after`+`nextEvent`) → five suspensions → driver-owned
 /// handlers → resumed continuation → durable `State`.
 ///
-/// WIP: RED (2026-08-17) — `forkNode`'s minimal case (one node, one `sendUp`,
-/// no burst, no nesting) panics `tidepool-runtime/src/session/resident.rs:154`
-/// (`RootCustody dropped without being consumed`). Bisected: every wave-2
-/// scenario stubbed → green; `waitEvent` alone restored → green; the ONE
-/// `forkNode`/`sendUp`/`received` scenario alone restored → this panic, on
-/// its own. Root owns the fix (a driver custody-mint/consume gap in
-/// `AsyncDoneWith`/`AsyncSpawnWith`'s servicing, NOT the GC-corruption
-/// family, per root's read of the two mint-then-maybe-drop shapes in
-/// `service_green_hole`) — `#[ignore]`d so the family bundle stays green
-/// while `driver.rs`/`tidepool-runtime` are off limits to this lane. Un-ignore
-/// once root hands the fix back.
-#[ignore = "WIP red: forkNode panics RootCustody drop, resident.rs:154 — driver fix owned by root, see commit message"]
+/// WIP: RED (2026-08-17, round 2) — after root's custody-window fix
+/// (72a15bd1) this now surfaces a REAL error instead of the masked panic:
+/// `AsyncSpawnWith spawner resume failed: turn run failed: heap bridge
+/// error: unexpected heap tag: 255` — a `tag 255` signature, which root's
+/// own vocabulary marks as the GC-corruption family (not the custody
+/// bookkeeping just fixed). Reported verbatim; root owns the next step.
+/// `#[ignore]`d so the family bundle stays green meanwhile.
+#[ignore = "WIP red round 2: AsyncSpawnWith resume hits heap tag 255 (GC-corruption family) — owned by root"]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn outer_loop_effects_round_trip_through_the_driver() {
     support::require_extract();
