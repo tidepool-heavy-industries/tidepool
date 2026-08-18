@@ -97,9 +97,13 @@ experiment (v1 descendants always fork).
    the UI) and the transformation stamped in the receipt.
 10. **Codex is an effect, not the architecture.** A branch CAN delegate
     repository evidence and implementation to a coding subagent; recursive
-    reasoning stays in the companion. Whether that delegation is a direct
-    answer-window effect or a parent-mediated capability is C5's decision,
-    not assumed here.
+    reasoning stays in the companion. **Settled (2026-08-18, operator):**
+    delegation is a DIRECT answer-window effect — node windows spawn coding
+    subagents themselves; narrowing the effect-set for child nodes is
+    deferred until real runs motivate it. Node windows get NO raw
+    `Worktree` verbs: repository access happens only through a spawned
+    subagent's own exclusive `BindingTable` worktree binding, and changes
+    still ride up as artifacts per decision 7.
 
 ## Core types (starting point — expected to be edited through dogfood)
 
@@ -215,9 +219,12 @@ worktrees and repository events; caller-side receipts everywhere.
 - **C4 — checked edits.** Artifacts by id, caller-applied with invariants,
   previews, `EditReceipt`s; `FoldDecision` composition; only state and
   receipts cross checkpoints (closures never do).
-- **C5 — effects in nodes.** The row-widening decision + typed comparison/
-  choice GUI in algebra windows; Codex investigation inside a branch;
-  cancellation draining a recursive scope under structured concurrency.
+- **C5 — effects in nodes.** The row-widening decision is SETTLED (decision
+  10 as amended: direct subagent-spawn effect, no raw Worktree verbs, plus
+  the worktree-coordination section). Remaining design: the typed
+  comparison/choice GUI's concrete shape in algebra windows; cancellation
+  semantics draining a recursive scope under structured concurrency;
+  sibling merge-conflict handling.
 - **C6 — daily dogfood.** Friction log per turn (depth/width discovered,
   cache hit rates, cost, operator interventions, whether branching beat a
   single window). Promote surface changes only from real runs; baseline is
@@ -229,6 +236,21 @@ root-ownership primitive first is efficient, not required. The real joins:
 C3 needs C0 plus C2's context trees; higher-order mounted algebra input
 needs C1; a prompt-rendered vertical slice could run without C1. C4/C5 are
 independent after C3; dogfood begins as each lands.
+
+## Worktree coordination (settled 2026-08-18, operator)
+
+- **Worktrees are lazy.** Only a node whose work produces mergeable
+  repository content acquires a worktree; a purely deliberative node is a
+  no-op on this axis. Acquisition rides the existing managed-worktree
+  machinery — nothing companion-specific.
+- **Each node merges its children's worktrees into its own, in declared
+  branch order** (the same order the algebra receives results, decision 5).
+  The tree's commit history linearizes bottom-up — the exomonad fold
+  pattern — and the root node's worktree is the turn's single integration
+  point. There is no cross-tree shared trunk a node writes to directly.
+- Open (settle in C5): conflict handling when a child's merge collides with
+  an earlier sibling's — a typed failure folded as data at the branch
+  position (decision 6's shape) vs an operator gate.
 
 ## Persistence (v1)
 
