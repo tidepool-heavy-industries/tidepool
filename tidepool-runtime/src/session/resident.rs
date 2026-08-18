@@ -747,24 +747,13 @@ where
         )
     }
 
-    /// The current value-plane binding for `name` — `(SessionVarId, module,
-    /// tier, type display)` — if one is live. The mount seam (PRD 21 lane
-    /// C1) reads this off a THROWAWAY same-type placeholder bind (any
-    /// ordinary `x <- e` turn of the target type) to recover the already-
-    /// minted `Val.G<g>` iface identity that [`Self::mount_handle`] then
-    /// redirects to a value that arrived by a different path (a cross-node
-    /// finalize handle) — no second iface is ever minted for the same name.
-    pub fn current_binding(
-        &self,
-        name: &str,
-    ) -> Option<(SessionVarId, SessionModule, ValueTier, Option<String>)> {
-        self.current_binding_in(ScopeId::ROOT, name)
-    }
-
-    /// Scoped [`Self::current_binding`]: the binding `name` resolves to as seen
-    /// FROM `scope` — its own frame first, then each ancestor up to ROOT, so a
+    /// Scoped read-only query: the binding `name` resolves to as seen FROM
+    /// `scope` — its own frame first, then each ancestor up to ROOT, so a
     /// child reads a parent's mounts and a local mount shadows an inherited
-    /// one. `current_binding(n) == current_binding_in(ScopeId::ROOT, n)`.
+    /// one. Independent of the mount seam ([`Self::mount_handle_in`]
+    /// resolves its own target internally — see that method's doc); this is
+    /// a plain existence/identity probe for callers that need to know what
+    /// `name` is bound to without mounting anything.
     pub fn current_binding_in(
         &self,
         scope: ScopeId,
@@ -778,31 +767,33 @@ where
         Some((entry.id, entry.module, tier, entry.type_display.clone()))
     }
 
-    /// Redirect an ALREADY-MINTED value-plane binding (`id`/`module`, read
-    /// via [`Self::current_binding`]) to resolve through `handle`'s tenured
-    /// payload instead of whatever it was bound to before — the mount seam
-    /// (PRD 21 lane C1): "a handle installed under a name in a window's
-    /// declaration scope", the closure-tenure-then-handle delivery path
-    /// (pillar B) pointed the OTHER direction. `handle` is consumed exactly
-    /// like an ordinary bind completion ([`Self::materialize_binder`]): its
-    /// slot is read, the handle released from the machine's handle registry
-    /// (ownership transfers to the value plane — a live [`BindingTable`]
-    /// entry, ended only by the session machine dropping, never by a realm
-    /// scope exit), and re-registered under the SAME `SessionVarId`/module a
-    /// turn compiled against `name` already resolves through. No new
-    /// `Val.G<g>` iface is minted here and the GHC-side type binding is
-    /// unchanged — only WHICH heap object it points at moves. Errors if
-    /// `handle` is not live (already released, or never minted).
-    pub fn mount_handle(
-        &mut self,
-        name: &str,
-        id: SessionVarId,
-        module: SessionModule,
-        tier: ValueTier,
-        type_display: Option<String>,
-        custody: RootCustody,
-    ) -> Result<(), ResidentError> {
-        self.mount_handle_in(ScopeId::ROOT, name, id, module, tier, type_display, custody)
+    /// Redirect an ALREADY-MINTED value-plane binding for `name` to resolve
+    /// through `custody`'s tenured payload instead of whatever it was bound
+    /// to before — the mount seam (PRD 21 lane C1): "a handle installed under
+    /// a name in a window's declaration scope", the closure-tenure-then-handle
+    /// delivery path (pillar B) pointed the OTHER direction.
+    ///
+    /// **Atomic:** `name`'s current identity (`SessionVarId`/module/tier/type
+    /// display) is resolved INTERNALLY, at mount time, from the live
+    /// `(scope, name)` binding — never carried in by the caller. The idiom
+    /// producing that identity is unchanged: mint a real `Val.G<g>`
+    /// iface/`SessionVarId` cheaply by running an ordinary throwaway bind of
+    /// the mounted type under `name` in `scope` (its own tenured value is
+    /// thrown away), THEN call this to swap in the real value's root. GHC
+    /// never needs to see the real value — only its type, which the
+    /// throwaway bind already established correctly.
+    ///
+    /// `custody`'s handle is consumed exactly like an ordinary bind
+    /// completion ([`Self::materialize_binder`]): its slot is read, the
+    /// handle released from the machine's handle registry (ownership
+    /// transfers to the value plane — a live [`BindingTable`] entry, ended
+    /// only by the session machine dropping, never by a realm scope exit),
+    /// and re-registered under the SAME `SessionVarId`/module the resolved
+    /// binding already carried. No new `Val.G<g>` iface is minted here and
+    /// the GHC-side type binding is unchanged — only WHICH heap object it
+    /// points at moves.
+    pub fn mount_handle(&mut self, name: &str, custody: RootCustody) -> Result<(), ResidentError> {
+        self.mount_handle_in(ScopeId::ROOT, name, custody)
     }
 
     /// Scoped [`Self::mount_handle`]: install the mount in `scope`'s frame
@@ -831,21 +822,43 @@ where
     /// successful bind gives it a new owner — a dead scope caught only by
     /// [`PersistentSession::bind_in`]'s own backstop check would otherwise
     /// leave that root untracked by every accounting class at once.
-    #[allow(clippy::too_many_arguments)]
+    ///
+    /// **`(scope, name)` is resolved SECOND, still before `custody` is
+    /// touched.** A `name` with no live binding in `scope` (the placeholder
+    /// bind never ran, or ran under a different name/scope) is rejected with
+    /// a typed [`ResidentError`] (`SessionError::UnknownBinding`), and
+    /// `custody` is disposed deliberately exactly as in the dead-scope case
+    /// — resolving the target before touching the machine's handle registry
+    /// means a missing binding can never leave a released-but-unmounted
+    /// handle behind.
     pub fn mount_handle_in(
         &mut self,
         scope: ScopeId,
         name: &str,
-        id: SessionVarId,
-        module: SessionModule,
-        tier: ValueTier,
-        type_display: Option<String>,
         custody: RootCustody,
     ) -> Result<(), ResidentError> {
         if !self.core.scope_tree().is_live(scope) {
             let _ = custody.into_handle();
             return Err(SessionError::DeadScope(scope).into());
         }
+        let resolved = self.core.resolve_in(scope, name).map(|entry| {
+            let tier = match entry.value {
+                BoundValue::Tier0Forced(_) => ValueTier::Tier0Data,
+                BoundValue::Tier1Closure(_) => ValueTier::Tier1Closure,
+            };
+            (entry.id, entry.module, tier, entry.type_display.clone())
+        });
+        let (id, module, tier, type_display) = match resolved {
+            Some(v) => v,
+            None => {
+                let _ = custody.into_handle();
+                return Err(SessionError::UnknownBinding {
+                    scope,
+                    name: name.to_string(),
+                }
+                .into());
+            }
+        };
         let handle = custody.into_handle();
         let slot = self
             .core
@@ -2093,15 +2106,7 @@ mod tests {
         // before this is ever resolved against the machine's handle
         // registry, so it need not be a real, live-minted handle.
         let custody = RootCustody::new(ValueHandle(0));
-        let result = session.mount_handle_in(
-            scope,
-            "escapee",
-            SessionVarId::from_extract(0),
-            SessionModule::val(Generation(1)),
-            ValueTier::Tier0Data,
-            None,
-            custody,
-        );
+        let result = session.mount_handle_in(scope, "escapee", custody);
 
         assert!(
             matches!(
@@ -2114,6 +2119,39 @@ mod tests {
         // `mount_handle_in` (it was consumed by value); reaching this line
         // at all — rather than a debug_assert panic mid-call — is the leak
         // proof. Nothing was bound under the dead scope either.
+        assert_eq!(
+            session.binding_names_in(scope),
+            Vec::<String>::new(),
+            "a rejected mount must not have written a binding"
+        );
+    }
+
+    /// [`ResidentSession::mount_handle_in`] resolves `(scope, name)`
+    /// internally now, so a live scope with NO binding under `name` (the
+    /// placeholder bind never ran, or ran under a different name) must
+    /// reject with a typed error WITHOUT leaking `custody` — same shape as
+    /// [`mount_handle_in_rejects_a_dead_scope_without_leaking_custody`], one
+    /// step later: liveness passes, resolution fails, and `custody` is
+    /// disposed deliberately before the machine's handle registry is ever
+    /// touched.
+    #[test]
+    fn mount_handle_in_rejects_a_missing_binding_without_leaking_custody() {
+        let mut session = bootstrap_trivial_session();
+        let scope = session.mint_scope(ScopeId::ROOT).expect("ROOT is live");
+
+        // Arbitrary, need not be live-minted — resolution fails before the
+        // handle registry is ever consulted.
+        let custody = RootCustody::new(ValueHandle(0));
+        let result = session.mount_handle_in(scope, "nope", custody);
+
+        assert!(
+            matches!(
+                &result,
+                Err(ResidentError::Session(SessionError::UnknownBinding { scope: s, name }))
+                    if *s == scope && name == "nope"
+            ),
+            "expected a typed UnknownBinding error, got {result:?}"
+        );
         assert_eq!(
             session.binding_names_in(scope),
             Vec::<String>::new(),

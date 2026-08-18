@@ -105,6 +105,14 @@ pub enum SessionError {
     /// stale or forged `ScopeId`.
     #[error("scope {0:?} is not live (never minted, or already retired)")]
     DeadScope(ScopeId),
+    /// A mount ([`super::resident::ResidentSession::mount_handle_in`])
+    /// targeted a `(scope, name)` pair that resolves to no live binding — the
+    /// throwaway placeholder bind that mints the `name`'s identity was never
+    /// run in `scope`, or under a different name. Never the user's
+    /// declaration; a caller bug in the mount seam's two-step idiom (PRD 21
+    /// lane C1).
+    #[error("no live binding for `{name}` in scope {scope:?} (the mount seam's placeholder bind must run first, under the same name)")]
+    UnknownBinding { scope: ScopeId, name: String },
 }
 
 /// [`crate::CompileError`] → [`SessionError`]: an environment problem stays

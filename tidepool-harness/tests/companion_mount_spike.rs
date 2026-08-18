@@ -266,15 +266,8 @@ async fn mounted_closure_survives_retirement_and_suspension() {
         outcome_tag(&outcome_z)
     );
 
-    let (id, module, tier, type_display) = harness
-        .with_session(sid, |s| s.current_binding("mounted"))
-        .expect("session checkout")
-        .expect("the placeholder bind minted a `mounted` Val.G<g> identity");
-
     harness
-        .with_session(sid, |s| {
-            s.mount_handle("mounted", id, module, tier, type_display, handle)
-        })
+        .with_session(sid, |s| s.mount_handle("mounted", handle))
         .expect("session checkout")
         .expect("mount succeeds: the handle was live");
     assert_eq!(

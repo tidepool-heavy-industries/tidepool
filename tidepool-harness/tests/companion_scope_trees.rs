@@ -531,14 +531,8 @@ async fn escaped_closure_outlives_its_childs_window_and_scope() {
         "the placeholder bind must complete synchronously, got {}",
         outcome_tag(&out)
     );
-    let (id, module, tier, type_display) = harness
-        .with_session(sid, |s| s.current_binding_in(scope_p, "escapee"))
-        .expect("session checkout")
-        .expect("the placeholder bind minted an `escapee` Val.G<g> identity in P");
     harness
-        .with_session(sid, |s| {
-            s.mount_handle_in(scope_p, "escapee", id, module, tier, type_display, handle)
-        })
+        .with_session(sid, |s| s.mount_handle_in(scope_p, "escapee", handle))
         .expect("session checkout")
         .expect("mount succeeds: the handle was live");
     assert_eq!(
@@ -857,14 +851,8 @@ async fn multiple_mounts_in_one_window() {
     }
 
     for (handle, binding) in handles.into_iter().zip(["toolkit", "focus"]) {
-        let (id, module, tier, type_display) = harness
-            .with_session(sid, |s| s.current_binding_in(window, binding))
-            .expect("session checkout")
-            .unwrap_or_else(|| panic!("the placeholder bind minted a `{binding}` identity"));
         harness
-            .with_session(sid, |s| {
-                s.mount_handle_in(window, binding, id, module, tier, type_display, handle)
-            })
+            .with_session(sid, |s| s.mount_handle_in(window, binding, handle))
             .expect("session checkout")
             .unwrap_or_else(|e| panic!("mounting `{binding}` succeeds: {e}"));
     }
