@@ -1055,6 +1055,15 @@ pub struct MachineLease<'a> {
     machine: Option<JitEffectMachine>,
 }
 
+// The exclusive-borrow guarantee this type exists for ("the session's machine
+// slot cannot be observed or touched by anything else while the lease is
+// outstanding") is a `&mut` the borrow checker already enforces — a
+// `#[derive(Clone)]` could never actually compile against the `&'a mut
+// PersistentSession` field as written, but a future refactor that swapped
+// that field for something Clone-able (e.g. an `Rc`/raw pointer) would make
+// the derive compile silently, losing the guarantee this pin exists to catch.
+static_assertions::assert_not_impl_any!(MachineLease<'static>: Clone, Copy);
+
 impl MachineLease<'_> {
     /// The leased machine and the session's accumulated constructor table, on
     /// loan together for a turn run on another thread. Panics if called after

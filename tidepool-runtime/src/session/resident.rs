@@ -148,6 +148,13 @@ use super::{SessionError, SessionLib};
 #[derive(Debug)]
 pub struct RootCustody(Option<ValueHandle>);
 
+// Whole point of this type: custody of a `ValueHandle` is provably exclusive
+// only if `RootCustody` cannot be duplicated. A future `#[derive(Clone)]`
+// would let two custody tokens both claim the same handle and both pass their
+// `into_handle()` — silently reviving the double-consume bug this type exists
+// to make a compile error.
+static_assertions::assert_not_impl_any!(RootCustody: Clone, Copy);
+
 impl RootCustody {
     /// Mint a custody token over `handle`. `pub(crate)`, not `pub`: the two
     /// real mint sites ([`ResidentSession::finalized_handle`],

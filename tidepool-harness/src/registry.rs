@@ -291,6 +291,16 @@ pub struct Checkout<'r, M> {
     holes: Vec<HoleId>,
 }
 
+// Whole point of this type: a checked-out machine is settled by exactly one
+// of `restore_idle`/`restore_suspended`/`abandon`, each consuming `self` by
+// value. A future `#[derive(Clone)]` would let a caller settle the SAME
+// checkout twice (or settle a clone while the panic-safety `Drop` still
+// thinks the original is unsettled), silently reviving the double-settle bug
+// this type exists to make a compile error. Pinned at `M = ()` — the struct
+// has no `Clone`/`Copy` impl for any `M`, so a fixed stand-in is enough to
+// catch a derive that would apply uniformly.
+static_assertions::assert_not_impl_any!(Checkout<'static, ()>: Clone, Copy);
+
 impl<M> Checkout<'_, M> {
     /// The session id this checkout is for.
     pub fn session_id(&self) -> SessionId {

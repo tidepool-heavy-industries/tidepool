@@ -133,6 +133,15 @@ impl Checkout {
 #[derive(Debug)]
 pub struct CheckoutCustody(Option<u64>);
 
+// Mirrors `RootCustody`'s pin (tidepool-runtime/src/session/resident.rs): a
+// Clone would let two settlement calls each believe they hold the epoch this
+// checkout must be settled against, silently reviving the double-settle bug
+// this token exists to make a compile error. `new`/`into_epoch` are private
+// to this module, so there is no honest external trybuild fixture for the
+// use-after-move half of this guarantee — it is exercised by this module's
+// own tests below.
+static_assertions::assert_not_impl_any!(CheckoutCustody: Clone, Copy);
+
 impl CheckoutCustody {
     fn new(epoch: u64) -> Self {
         CheckoutCustody(Some(epoch))

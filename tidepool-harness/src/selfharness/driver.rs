@@ -1016,6 +1016,14 @@ struct BranchWindow {
     retired: bool,
 }
 
+// Every field here (`Arc`, `NodeId`, `RealmId`, `ScopeId`, `ContextRef`,
+// `bool`) is independently Clone, so a `#[derive(Clone)]` would compile
+// silently — and then a clone's `retired` flag would diverge from the
+// original's, letting `finalize_data`/`fold_exit` and the panic-safety `Drop`
+// each believe THEY own retiring the window, double-retiring the node this
+// guard exists to retire exactly once.
+static_assertions::assert_not_impl_any!(BranchWindow: Clone, Copy);
+
 impl BranchWindow {
     /// Mint a guard from an already-established [`WindowLease::OneShotBranch`]
     /// — `require_one_shot` refuses to hand back node/realm/scope if `lease`

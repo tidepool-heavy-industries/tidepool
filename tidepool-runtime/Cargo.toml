@@ -27,9 +27,11 @@ log.workspace = true
 tracing.workspace = true
 parking_lot.workspace = true
 tokio = { workspace = true, features = ["rt", "sync", "time"] }
+static_assertions.workspace = true
 
 [dev-dependencies]
 proptest.workspace = true
+trybuild.workspace = true
 tidepool-testing.workspace = true
 tidepool-optimize.workspace = true
 frunk.workspace = true

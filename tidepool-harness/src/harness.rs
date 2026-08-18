@@ -261,6 +261,13 @@ struct TurnLease<'a> {
     node: NodeId,
 }
 
+// A clone would let a second `TurnLease` believe it independently owns
+// clearing `turn_lease`, so an early drop of one clone could release the flag
+// while the other's turn is still in flight — a non-Clone guard is what makes
+// "exactly one lease clears the flag, on the turn that acquired it" true by
+// construction.
+static_assertions::assert_not_impl_any!(TurnLease<'static>: Clone, Copy);
+
 impl Drop for TurnLease<'_> {
     fn drop(&mut self) {
         if let Some(convo) = self.harness.convos.lock().get_mut(&self.node) {

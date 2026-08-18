@@ -37,6 +37,7 @@ parking_lot.workspace = true
 frunk.workspace = true
 schemars.workspace = true
 clap.workspace = true
+static_assertions.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

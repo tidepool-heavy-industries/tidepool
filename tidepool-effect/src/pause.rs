@@ -196,6 +196,12 @@ pub struct EffectLease<'a> {
     gate: &'a PauseGate,
 }
 
+// A clone would let two guards independently believe they own clearing
+// `in_effect`, so the second one to drop would clear a flag a THIRD checkpoint
+// already set — a non-Clone guard is the only thing that makes "exactly one
+// lease clears the flag on drop" true by construction.
+static_assertions::assert_not_impl_any!(EffectLease<'static>: Clone, Copy);
+
 impl Drop for EffectLease<'_> {
     fn drop(&mut self) {
         self.gate.inner.lock().in_effect = false;
