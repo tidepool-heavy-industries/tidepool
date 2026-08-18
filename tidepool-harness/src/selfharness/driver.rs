@@ -283,6 +283,42 @@ struct GreenReady {
     outcome: ResidentOutcome,
 }
 
+/// What one popped ready item resolved to, and what the scheduler owes it in
+/// response — the classified-hole dispatcher's return value instead of each
+/// arm independently pushing to `ready`/breaking the loop. A new arm that
+/// computes a next outcome and forgets to hand it back through one of these
+/// is a compile error: it has nothing else to return. (The motivating
+/// incident this subsumes: a merge brought in arms written against an older
+/// loop shape whose `outcome = ...` fed the next iteration; the resume was
+/// computed correctly and then silently dropped, the only signal a `value
+/// assigned to outcome is never read` warning that adding `mut` would have
+/// shipped past.)
+///
+/// [`HoleRouting::Green`] is the deliberate exception, checked and rejected
+/// before this was written for the rest: a single Green suspension can
+/// settle into zero, one, or two ready continuations (a spawn resumes the
+/// spawner AND starts the new thread; a join with no terminal candidate
+/// parks with none and touches no hole; a settle or cancel can wake an
+/// arbitrary number of parked waiters), and it mutates the thread table and
+/// waiter map alongside `ready`. No two-or-three-variant sum expresses
+/// "zero to N pushes plus a table mutation" without degrading to a `Vec` or
+/// a payload-free `Handled` marker that types nothing a `Result<(),
+/// DriverError>` didn't already type — so
+/// [`SelfHarnessDriver::service_green_hole`] keeps owning `ready`/the
+/// thread table/the waiter map directly instead of returning one of these.
+enum ServicedHole {
+    /// The popped item was itself terminal — the PRIMARY chain's `loop` has
+    /// finished.
+    Completed { result: Value, table: DataConTable },
+    /// The hole was resumed; its next outcome re-enters the ready queue
+    /// under the same chain.
+    Resumed(GreenReady),
+    /// The hole was left parked, unresumed — reinserted into the ready
+    /// queue so a later iteration revisits it (`RepoEventAwait`'s
+    /// empty-poll case).
+    LeaveParked(GreenReady),
+}
+
 /// Deep sentinel scan mirroring [`Harness::finalize_is_closure`] — whether
 /// `request`'s field `idx` carries the tolerant suspend bridge's
 /// `CLOSURE_SENTINEL` placeholder (a live closure kept in-heap) rather than
@@ -2034,18 +2070,12 @@ impl SelfHarnessDriver {
         let mut next_tid: i64 = 1;
         let mut next_thread_realm: u64 = 1;
 
-        // EVERY arm below must hand its resumed outcome back to `ready` as a
-        // `GreenReady` carrying this iteration's `chain`. `outcome` is bound
-        // IMMUTABLY on purpose: it is read-only per iteration, and the next
-        // step of a thread is queued, never assigned.
-        //
-        // This is not style. A servicing arm that assigns instead of pushing
-        // silently DROPS that thread's continuation — the thread simply never
-        // runs again, with no error anywhere. It has happened once already: a
-        // merge brought in three arms written against an older loop shape
-        // whose `outcome = ...` fed the next iteration, and the only signal
-        // was `warning: value assigned to outcome is never read`. Adding
-        // `mut` to quiet that warning compiles and ships the bug. Do not.
+        // EVERY branch below hands back a `ServicedHole` instead of directly
+        // pushing to `ready`/breaking the loop — see that type's doc for why:
+        // a servicing arm that computed a next outcome and merely assigned it
+        // to a dead local, rather than returning it, is the incident this
+        // subsumes into the type. `HoleRouting::Green` is the one exception,
+        // documented at `ServicedHole` and at `Self::service_green_hole`.
         let outcome_result: Result<(Value, DataConTable), DriverError> = loop {
             let Some(GreenReady { chain, outcome }) = ready.pop_front() else {
                 break Err(DriverError::Session(
@@ -2054,10 +2084,11 @@ impl SelfHarnessDriver {
                         .into(),
                 ));
             };
-            match outcome {
-                ResidentOutcome::Completed { result, .. } => {
-                    break Ok((result.into_value(), compiled.table.clone()));
-                }
+            let serviced: ServicedHole = match outcome {
+                ResidentOutcome::Completed { result, .. } => ServicedHole::Completed {
+                    result: result.into_value(),
+                    table: compiled.table.clone(),
+                },
                 ResidentOutcome::Suspended { hole, request, .. } => {
                     let classified =
                         engine::classify_hole(&request, &compiled.table, &compiled.asks)?;
@@ -2101,10 +2132,10 @@ impl SelfHarnessDriver {
                                 .map_err(|e| {
                                     DriverError::Session(format!("loop resume failed: {e}"))
                                 })?;
-                            ready.push_back(GreenReady {
+                            ServicedHole::Resumed(GreenReady {
                                 chain,
                                 outcome: next,
-                            });
+                            })
                         }
                         // The AUTHORED loop itself evaluated `askUser`/`note`
                         // (`Tidepool.Form`, auto-imported because `AskUser` is in
@@ -2125,10 +2156,10 @@ impl SelfHarnessDriver {
                                     &compiled,
                                 )
                                 .await?;
-                            ready.push_back(GreenReady {
+                            ServicedHole::Resumed(GreenReady {
                                 chain,
                                 outcome: next,
-                            });
+                            })
                         }
                         // The AUTHORED loop called a Subagent verb
                         // (`spawnAgent`/`spawnAgentRaw`) — dispatch the
@@ -2145,10 +2176,10 @@ impl SelfHarnessDriver {
                                 .map_err(|e| {
                                     DriverError::Session(format!("subagent resume failed: {e}"))
                                 })?;
-                            ready.push_back(GreenReady {
+                            ServicedHole::Resumed(GreenReady {
                                 chain,
                                 outcome: next,
-                            });
+                            })
                         }
                         // Console/Worktree/RepoEvent/Exec (S1-L1) / Journal
                         // (run-journal lane) — same suspension-servicing
@@ -2170,15 +2201,16 @@ impl SelfHarnessDriver {
                             // drain; a match resumes the hole immediately,
                             // exactly as if `RepoEventAwait` itself had
                             // returned it; an EMPTY batch leaves the hole
-                            // genuinely parked, reinserted at the BACK of
-                            // `ready` so every other already-ready chain runs
-                            // first, revisited by this same arm on a later
-                            // iteration. The caller-observable contract
-                            // (block until a match) is unchanged — only who
-                            // does the waiting is. `repo_event_await`'s own
-                            // implementation, and every other RepoEvent verb,
-                            // are untouched: this is a DRIVER SERVICING
-                            // CHOICE, made only for this one constructor.
+                            // genuinely parked — `ServicedHole::LeaveParked`,
+                            // reinserted at the BACK of `ready` so every other
+                            // already-ready chain runs first, revisited by
+                            // this same arm on a later iteration. The
+                            // caller-observable contract (block until a
+                            // match) is unchanged — only who does the waiting
+                            // is. `repo_event_await`'s own implementation,
+                            // and every other RepoEvent verb, are untouched:
+                            // this is a DRIVER SERVICING CHOICE, made only
+                            // for this one constructor.
                             if kind == engine::OuterEffectKind::RepoEvent
                                 && engine::con_name(&request, &compiled.table)
                                     == Some("RepoEventAwait")
@@ -2204,14 +2236,14 @@ impl SelfHarnessDriver {
                                             ))
                                             .await;
                                         }
-                                        ready.push_back(GreenReady {
+                                        ServicedHole::LeaveParked(GreenReady {
                                             chain,
                                             outcome: ResidentOutcome::Suspended {
                                                 output: Vec::new(),
                                                 hole,
                                                 request,
                                             },
-                                        });
+                                        })
                                     }
                                     Some(value) => {
                                         let sid = self.outer_sid()?;
@@ -2224,10 +2256,10 @@ impl SelfHarnessDriver {
                                                     "RepoEventAwait resume failed: {e}"
                                                 ))
                                             })?;
-                                        ready.push_back(GreenReady {
+                                        ServicedHole::Resumed(GreenReady {
                                             chain,
                                             outcome: next,
-                                        });
+                                        })
                                     }
                                 }
                             } else {
@@ -2243,19 +2275,21 @@ impl SelfHarnessDriver {
                                             "outer effect resume failed: {e}"
                                         ))
                                     })?;
-                                ready.push_back(GreenReady {
+                                ServicedHole::Resumed(GreenReady {
                                     chain,
                                     outcome: next,
-                                });
+                                })
                             }
                         }
                         // `Tidepool.Async`'s substrate (PRD 20 S1-L4) — raised
                         // either by the loop itself or by a green thread's own
-                        // body. Unlike Subagent/OuterEffect above, servicing
-                        // may push ZERO, ONE, or TWO ready items (a park with
-                        // no terminal candidate pushes none; a spawn pushes
-                        // both the resumed spawner and the freshly started
-                        // thread).
+                        // body. Unlike every other arm here, servicing may push
+                        // ZERO, ONE, or TWO ready items (a park with no terminal
+                        // candidate pushes none; a spawn pushes both the resumed
+                        // spawner and the freshly started thread) and mutates the
+                        // thread table / waiter map — it does not fit
+                        // `ServicedHole` (see that type's doc), so it owns
+                        // `ready` directly and this arm hands nothing back.
                         HoleRouting::Green => {
                             self.service_green_hole(
                                 chain,
@@ -2268,6 +2302,7 @@ impl SelfHarnessDriver {
                                 &mut next_thread_realm,
                                 &mut ready,
                             )?;
+                            continue;
                         }
                         // `runLLMTurnFork @T`/`runLLMTurnFanout @T` raised
                         // DIRECTLY by the AUTHORED loop (`RunLLMTurn`'s own
@@ -2307,10 +2342,10 @@ impl SelfHarnessDriver {
                                 .map_err(|e| {
                                     DriverError::Session(format!("fanout resume failed: {e}"))
                                 })?;
-                            ready.push_back(GreenReady {
+                            ServicedHole::Resumed(GreenReady {
                                 chain,
                                 outcome: next,
-                            });
+                            })
                         }
                         // PRD 21 lane C3 GAP 1: `freezeContext` — immediate,
                         // no operator, no model round (mirrors `ReadState`'s
@@ -2325,10 +2360,10 @@ impl SelfHarnessDriver {
                                 .map_err(|e| {
                                     DriverError::Session(format!("freezeContext resume failed: {e}"))
                                 })?;
-                            ready.push_back(GreenReady {
+                            ServicedHole::Resumed(GreenReady {
                                 chain,
                                 outcome: next,
-                            });
+                            })
                         }
                         // PRD 21 lane C3 GAP 1: `runLLMTurnBranch @T ref
                         // prompt` — fork a child off the frozen prefix `ref`
@@ -2356,10 +2391,10 @@ impl SelfHarnessDriver {
                                 .map_err(|e| {
                                     DriverError::Session(format!("branch resume failed: {e}"))
                                 })?;
-                            ready.push_back(GreenReady {
+                            ServicedHole::Resumed(GreenReady {
                                 chain,
                                 outcome: next,
-                            });
+                            })
                         }
                         other => {
                             break Err(DriverError::Session(format!(
@@ -2373,6 +2408,12 @@ impl SelfHarnessDriver {
                             )))
                         }
                     }
+                }
+            };
+            match serviced {
+                ServicedHole::Completed { result, table } => break Ok((result, table)),
+                ServicedHole::Resumed(gr) | ServicedHole::LeaveParked(gr) => {
+                    ready.push_back(gr);
                 }
             }
         };
@@ -2397,7 +2438,23 @@ impl SelfHarnessDriver {
     /// of the six `Async*With` verbs `request` is by CONSTRUCTOR NAME (never
     /// in [`engine::classify_hole`] — the payload may carry a live closure,
     /// see [`HoleRouting::Green`]'s doc) and act, mutating the scheduler's
-    /// thread table / waiter map / ready queue in place. Mirrors
+    /// thread table / waiter map / ready queue in place.
+    ///
+    /// Deliberately returns `Result<(), DriverError>`, not a [`ServicedHole`]
+    /// — checked and rejected before the rest of the dispatcher adopted that
+    /// sum. Its six arms push zero (`AsyncJoinAnyWith` with no terminal
+    /// candidate, `AsyncDoneWith` on a cancelled/already-settled thread),
+    /// one, two (`AsyncSpawnWith`: the resumed spawner and the freshly
+    /// started thread), or an arbitrary N (`AsyncDoneWith`/`AsyncCancelWith`
+    /// waking every parked joiner) items onto `ready`, and several never
+    /// resume the triggering hole at all (`AsyncDoneWith`'s own hole stays
+    /// parked forever, its frame reclaimed only when the thread's realm
+    /// eventually closes). `ServicedHole::{Resumed,LeaveParked}` both assume
+    /// "exactly one hole, exactly one outcome, handed back once" — this
+    /// method's job is precisely to not have that shape, so forcing it into
+    /// the sum would mean returning `Vec<ServicedHole>` (or a payload-free
+    /// `Handled` marker), neither of which catches anything a caller
+    /// forgetting to `?` this `Result` doesn't already catch today. Mirrors
     /// [`Self::service_outer_subagent`]'s shape (driver-owned, suspension-
     /// serviced, no handler) but is not a single dispatch-then-resume: a
     /// spawn starts a NEW top-level run and a park-until-terminal join may
