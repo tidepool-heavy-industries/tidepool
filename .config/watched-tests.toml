@@ -76,7 +76,7 @@ subagent_tool_loop = "the whole parent-serves-child's-tools loop, real extract/J
 
 [tidepool-runtime]
 green_thread_representation = "green threads park as their own registry continuations; two pending at once, either resume order"
-tenure_resume_gc_repro = "hand-built tenure-then-resume rooting-discipline boundary tests; force_gc_for_test coverage, all pass (see module doc)"
+tenure_resume_gc_repro = "hand-built tenure-then-resume rooting-discipline boundary tests; 12 pass, repro #13 is an ignored chartered-gap red pinning the confirmed OldSpace::tenure sibling-staleness bug (see module doc)"
 agent_mode_encoding = "Servant-style mode encoding (mode :- Call/Notify) through real extract/JIT"
 bignum_native = "native ghc-bignum backend: Integer/Natural over Word#/ByteArray# primops"
 bridged_records_extract = "user eval code compiles against the generated bridged record decls"

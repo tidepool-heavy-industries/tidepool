@@ -12,43 +12,43 @@
 //! `tidepool-codegen/CLAUDE.md`'s diagnostics table) to inject a real
 //! collection into the window between tenure and resume.
 //!
-//! # Exhaustive negative result — the rooting discipline is SOUND here
+//! # Root cause found — `OldSpace::tenure` does not fix up sibling references
 //!
-//! Ten structural variants are tried below, escalating in fidelity to the
-//! REAL `Tidepool.Node.forkNode` shape that reproduces through the full GHC
-//! pipeline (`node_mailboxes.rs`, `MinimalWatchListHarness.hs`):
-//! a free variable shared between the tenured closure and the frame's own
-//! continuation as plain data, as an applied closure, as an unforced thunk;
-//! values materialized via a REAL handled-effect dispatch (not program
-//! literals) including through an `Either`-unwrap `case` (matching
-//! `mailboxNew >>= liftEither` exactly); the REAL driver ordering (the
-//! child thread runs via `run_forked` BEFORE the spawner resumes, not
-//! after); a synchronously-completing child (never parking its own frame,
-//! matching a handled-effects-only body); an EXACT `Event`-shaped capture
-//! (`Con[[Watch], closure]`, matching `tidepool-mcp`'s generated `mailbox`
-//! byte for byte) down to a BARE LIST capture with no closure field at all
-//! (matching `MinimalWatchListHarness.hs`'s own further bisection); and
-//! REAL in-flight collections (a byte-scale nursery, live JIT stack frames
-//! in the root set — not just `force_gc_for_test`'s zero-stack-frame
-//! synthetic collection).
+//! Twelve structural variants (below, kept for the family-sweep record) all
+//! pass, unweakened, under `TIDEPOOL_GC_POISON=1 TIDEPOOL_HEAP_VERIFY=1` —
+//! escalating in fidelity all the way to the REAL `Tidepool.Node.forkNode`/
+//! `MinimalWatchListHarness.hs` shape. **Every one of them calls
+//! `force_gc_for_test` at least once between tenure and the later read.**
+//! That shared ingredient turned out to be load-bearing, not incidental.
 //!
-//! **All ten pass, unweakened, under `TIDEPOOL_GC_POISON=1
-//! TIDEPOOL_HEAP_VERIFY=1`.** Despite matching the REAL reproducer's data
-//! shape as closely as hand-built `CoreExpr` allows — including the exact
-//! `[WatchMailbox downMid]` bare-list capture that is `MinimalWatchListHarness.hs`'s
-//! own minimal trigger — none of these hand-built programs reproduce the
-//! corruption. This is strong evidence that every counted root class
-//! (stowed/parked, persistent, value-plane, handle registry) and the
-//! rooting mechanisms that maintain them (`RootedLocal`/`RootedStack`, the
-//! write barrier, stowed-root registration around `run_forked`/park/resume)
-//! are COMPLETE and CORRECT for every structural pattern reachable through
-//! hand-built `CoreExpr` — i.e. this is NOT a gap in the Rust-side rooting
-//! discipline as it is currently understood. The remaining candidate is a
-//! JIT-codegen difference (e.g. Cranelift stack-map coverage for a specific
-//! compiled shape) that only the REAL GHC-compiled program's machine code
-//! exercises — outside this investigation's reach without new tooling. See
-//! this lane's `notify_parent` report for the full diagnosis and the
-//! family-sweep findings.
+//! `shared_free_variable_stale_immediately_after_tenure_with_no_intervening_gc`
+//! (repro #13, last in this file) is byte-for-byte the SAME shape as the very
+//! first test (`build_wrap_suspend_shared`, `shared` captured by both the
+//! tenured `bodyClosure` and the wrap frame's own independently-rooted
+//! continuation) with only the intervening `force_gc_for_test()` call
+//! removed — and it fails immediately with `unexpected heap tag: 255`.
+//!
+//! Mechanism: `OldSpace::tenure`'s own `cheney_copy` call
+//! (`tidepool-codegen/src/old_space.rs`) walks ONLY the tenure root's
+//! transitive graph — a single-element root slice. `raw::evacuate`
+//! physically overwrites the moved value's old nursery address with a
+//! `TAG_FORWARDED` stub the instant it is copied. A SIBLING object (like the
+//! wrap continuation here) that independently captured a pointer to that
+//! same value, but is not reachable from the tenure root, is never visited
+//! by that walk — its own field still holds the pre-tenure address, which
+//! now reads as a forwarding stub. This is correct by construction; nothing
+//! is broken in the ordinary sense. The stub only gets fixed up as a side
+//! effect of a LATER collection that happens to include the sibling in its
+//! own root set (`perform_gc`'s frame-walked-stack/rust/persistent/stowed/
+//! remembered-slot categories) — and the write barrier
+//! (`crate::host_fns::write_barrier`) does not cover this case: its
+//! documented scope is thunk-indirection mutation and array writes, not "a
+//! tenure call physically stamped a forwarding stub in a location some other
+//! live nursery object still points at." If no collection runs in the
+//! window between tenure and the read (a real possibility — nothing
+//! guarantees one), the sibling's reference is permanently stale. See this
+//! lane's `notify_parent` report for the full diagnosis and proposed fix
+//! shapes.
 
 use tidepool_codegen::jit_machine::RealmId;
 use tidepool_effect::dispatch::{DispatchEffect, EffectContext};
@@ -2101,5 +2101,599 @@ fn bare_list_capture_survives_tenure_and_resume() {
         (111, 222),
         "the wrap continuation's own captured downMid/upMid must survive tenure of a \
          SIBLING closure that captured only a bare list"
+    );
+}
+
+/// THE FIX: every earlier repro in this file bound its "risky" captured
+/// structure (`shared`, the `Event` Con, the bare list) via `LetNonRec`
+/// with a body that never referenced the binder — and
+/// `tidepool-codegen/src/emit/expr.rs`'s `LetNonRec` compilation has an
+/// explicit DCE-skip for EXACTLY that shape ("Dead code elimination: skip
+/// RHS if binder is unused in body"): the RHS is NEVER EVALUATED, NEVER
+/// ALLOCATED. Every earlier test in this file was therefore silently
+/// testing nothing — the list/Event/thunk it claimed to capture was never
+/// built at all.
+///
+/// `MinimalWatchListHarness.hs`'s real shape is NOT a `let`: `asyncBody
+/// upMid [WatchMailbox downMid]` passes the list as a genuine FUNCTION
+/// ARGUMENT to `asyncBody`, which ignores it — the compiler cannot DCE an
+/// argument to an opaque (`Var`-referenced) callee, so the list is
+/// genuinely allocated (as a thunk, per lazy calling convention) and
+/// captured, then NEVER forced by anything for the rest of the program.
+///
+/// This builds that exact shape: `watchList` is bound via `LetNonRec` at
+/// the OUTER scope (alongside `downMid`/`upMid`), so it is a CAPTURED FREE
+/// VARIABLE of `bodyClosure` — built ONCE, BEFORE the wrap suspends and
+/// tenures — referenced only via `Var`, never constructed inline inside
+/// `bodyClosure`'s own body (which would defer its allocation until
+/// `bodyClosure` is APPLIED, i.e. well after resume — not what
+/// `async (asyncBody upMid (mailbox downMid))` does: the argument
+/// expression is evaluated at the call site, captured, and handed to a
+/// closure that ignores it). `bodyInner` ignores its `watchList` argument,
+/// exactly like `asyncBody`. The list is never embedded in anything the
+/// test reads back.
+fn build_wrap_suspend_with_undce_able_list_capture(
+    wrap_tag: u64,
+    dummy: i64,
+    body_tag: u64,
+) -> CoreExpr {
+    let mut b = TreeBuilder::new();
+
+    const DOWN_VAR: VarId = VarId(30);
+    const UP_VAR: VarId = VarId(31);
+    const ARG_VAR: VarId = VarId(1);
+    const CONT_VAR: VarId = VarId(0);
+    const OUTER_CONT_VAR: VarId = VarId(2);
+    const BODY_INNER_VAR: VarId = VarId(40);
+    const IGNORED_WATCHES: VarId = VarId(41);
+    const WATCH_LIST_VAR: VarId = VarId(42);
+
+    // bodyInner = \ignoredWatches -> E (Union body_tag upMid)
+    //                                   (Leaf (\v -> Val (ThreadResult v)))
+    let body_tag_lit = b.push(CoreFrame::Lit(Literal::LitWord(body_tag)));
+    let up_ref_inner = b.push(CoreFrame::Var(UP_VAR));
+    let body_union = b.push(CoreFrame::Con {
+        tag: UNION_ID,
+        fields: vec![body_tag_lit, up_ref_inner],
+    });
+    let cont_v = b.push(CoreFrame::Var(CONT_VAR));
+    let cont_result = b.push(CoreFrame::Con {
+        tag: RESULT_ID,
+        fields: vec![cont_v],
+    });
+    let cont_val = b.push(CoreFrame::Con {
+        tag: VAL_ID,
+        fields: vec![cont_result],
+    });
+    let cont_lam = b.push(CoreFrame::Lam {
+        binder: CONT_VAR,
+        body: cont_val,
+    });
+    let body_leaf = b.push(CoreFrame::Con {
+        tag: LEAF_ID,
+        fields: vec![cont_lam],
+    });
+    let body_e = b.push(CoreFrame::Con {
+        tag: E_ID,
+        fields: vec![body_union, body_leaf],
+    });
+    let body_inner_lam = b.push(CoreFrame::Lam {
+        binder: IGNORED_WATCHES,
+        body: body_e,
+    });
+
+    // bodyClosure = \_ -> App(Var(bodyInner), Var(watchList)) -- both the
+    // callee AND the argument are opaque Var references into the OUTER
+    // scope, so bodyClosure's own captures include watchList itself (the
+    // already-built Con graph), not the code to build it.
+    let body_inner_ref = b.push(CoreFrame::Var(BODY_INNER_VAR));
+    let watch_list_ref = b.push(CoreFrame::Var(WATCH_LIST_VAR));
+    let app_expr = b.push(CoreFrame::App {
+        fun: body_inner_ref,
+        arg: watch_list_ref,
+    });
+    let body_closure = b.push(CoreFrame::Lam {
+        binder: ARG_VAR,
+        body: app_expr,
+    });
+
+    let dummy_lit = b.push(CoreFrame::Lit(Literal::LitInt(dummy)));
+    let wrap_con = b.push(CoreFrame::Con {
+        tag: WRAP_ID,
+        fields: vec![dummy_lit, body_closure],
+    });
+    let wrap_tag_lit = b.push(CoreFrame::Lit(Literal::LitWord(wrap_tag)));
+    let wrap_union = b.push(CoreFrame::Con {
+        tag: UNION_ID,
+        fields: vec![wrap_tag_lit, wrap_con],
+    });
+    let down_ref_outer = b.push(CoreFrame::Var(DOWN_VAR));
+    let up_ref_outer = b.push(CoreFrame::Var(UP_VAR));
+    let outer_payload = b.push(CoreFrame::Con {
+        tag: PAIR_ID,
+        fields: vec![down_ref_outer, up_ref_outer],
+    });
+    let outer_result = b.push(CoreFrame::Con {
+        tag: OUTER_ID,
+        fields: vec![outer_payload],
+    });
+    let outer_val = b.push(CoreFrame::Con {
+        tag: VAL_ID,
+        fields: vec![outer_result],
+    });
+    let outer_lam = b.push(CoreFrame::Lam {
+        binder: OUTER_CONT_VAR,
+        body: outer_val,
+    });
+    let outer_leaf = b.push(CoreFrame::Con {
+        tag: LEAF_ID,
+        fields: vec![outer_lam],
+    });
+    let wrap_e = b.push(CoreFrame::Con {
+        tag: E_ID,
+        fields: vec![wrap_union, outer_leaf],
+    });
+
+    // bodyClosure REFERENCES BODY_INNER_VAR (via app_expr), so this
+    // LetNonRec is NOT DCE'd -- bodyInner is a trivial (already-WHNF) Lam,
+    // evaluated eagerly.
+    let with_body_inner = b.push(CoreFrame::LetNonRec {
+        binder: BODY_INNER_VAR,
+        rhs: body_inner_lam,
+        body: wrap_e,
+    });
+
+    // watchList = [WatchMailbox downMid] = Cons(WatchMailbox downMid, Nil),
+    // bound HERE (outer scope, alongside downMid/upMid) so it is a
+    // CAPTURED FREE VARIABLE of bodyClosure, built ONCE before the wrap
+    // suspends -- not reconstructed when bodyClosure is later applied.
+    // Referenced (via watch_list_ref inside app_expr, transitively through
+    // with_body_inner/wrap_e/body_closure), so NOT DCE'd; `Con` is
+    // `is_trivial_field`, so this evaluates eagerly (a real heap Con, not a
+    // thunk) -- still the exact captured-Con-graph shape under test.
+    let down_ref_for_watch = b.push(CoreFrame::Var(DOWN_VAR));
+    let watch_con = b.push(CoreFrame::Con {
+        tag: WATCH_ID,
+        fields: vec![down_ref_for_watch],
+    });
+    let nil = b.push(CoreFrame::Con {
+        tag: NIL_ID,
+        fields: vec![],
+    });
+    let watch_list = b.push(CoreFrame::Con {
+        tag: CONS_ID,
+        fields: vec![watch_con, nil],
+    });
+    let with_watch_list = b.push(CoreFrame::LetNonRec {
+        binder: WATCH_LIST_VAR,
+        rhs: watch_list,
+        body: with_body_inner,
+    });
+
+    let up_dummy_tag = b.push(CoreFrame::Lit(Literal::LitWord(2)));
+    let up_dummy_req = b.push(CoreFrame::Lit(Literal::LitInt(0)));
+    let up_union = b.push(CoreFrame::Con {
+        tag: UNION_ID,
+        fields: vec![up_dummy_tag, up_dummy_req],
+    });
+    let up_lam = b.push(CoreFrame::Lam {
+        binder: UP_VAR,
+        body: with_watch_list,
+    });
+    let up_leaf = b.push(CoreFrame::Con {
+        tag: LEAF_ID,
+        fields: vec![up_lam],
+    });
+    let up_e = b.push(CoreFrame::Con {
+        tag: E_ID,
+        fields: vec![up_union, up_leaf],
+    });
+
+    let down_dummy_tag = b.push(CoreFrame::Lit(Literal::LitWord(1)));
+    let down_dummy_req = b.push(CoreFrame::Lit(Literal::LitInt(0)));
+    let down_union = b.push(CoreFrame::Con {
+        tag: UNION_ID,
+        fields: vec![down_dummy_tag, down_dummy_req],
+    });
+    let down_lam = b.push(CoreFrame::Lam {
+        binder: DOWN_VAR,
+        body: up_e,
+    });
+    let down_leaf = b.push(CoreFrame::Con {
+        tag: LEAF_ID,
+        fields: vec![down_lam],
+    });
+    b.push(CoreFrame::Con {
+        tag: E_ID,
+        fields: vec![down_union, down_leaf],
+    });
+
+    b.build()
+}
+
+/// THE REPRO, non-DCE'able list variant — see
+/// `build_wrap_suspend_with_undce_able_list_capture`'s doc for why every
+/// earlier repro in this file was silently testing nothing.
+#[test]
+fn undceable_list_capture_survives_tenure_and_resume() {
+    let table = table();
+    let mut session = handled_session();
+
+    let expr = build_wrap_suspend_with_undce_able_list_capture(100, 1, 200);
+    let outcome = session
+        .run("wrap", &expr, &table)
+        .unwrap_or_else(|e| panic!("wrap suspend run failed: {e}"));
+    let wrap_hole = match outcome {
+        ResidentOutcome::Suspended { hole, .. } => hole,
+        other => panic!("wrap suspend must suspend, got {other:?}"),
+    };
+
+    let handle = session
+        .finalized_handle(&wrap_hole)
+        .unwrap_or_else(|| panic!("wrap frame carries no untaken body closure"));
+
+    // bodyInner ignores watchList but still suspends on body_tag (its own
+    // body is `E (Union body_tag upMid) (...)`) -- the risky step is the
+    // TENURE of bodyClosure, whose transitive graph includes the
+    // genuinely-allocated, never-forced watchList thunk, alongside upMid.
+    let inner_hole = match session
+        .run_forked("thread", handle, RealmId(1), Some(&table))
+        .unwrap_or_else(|e| panic!("run_forked failed: {e}"))
+    {
+        ResidentOutcome::Suspended { hole, .. } => hole,
+        other => panic!("thread body must suspend on its own effect, got {other:?}"),
+    };
+    // Left parked, never resumed -- matching AsyncDoneWith's real discipline
+    // (a thread's completion frame stays parked until its realm closes).
+    let _ = &inner_hole;
+
+    session.force_gc_for_test();
+    session.force_gc_for_test();
+
+    let outcome = session
+        .resume(&wrap_hole, Value::Lit(Literal::LitInt(0)))
+        .unwrap_or_else(|e| panic!("wrap resume failed: {e}"));
+    let (down_back, up_back) = match outcome {
+        ResidentOutcome::Completed { result, .. } => expect_wrap_pair(&result.into_value()),
+        other => panic!("wrap resume must complete, got {other:?}"),
+    };
+    assert_eq!(
+        (down_back, up_back),
+        (111, 222),
+        "the wrap continuation's own captured downMid/upMid must survive tenure of a \
+         sibling closure whose transitive graph includes a GENUINELY ALLOCATED, \
+         never-forced list thunk (matching MinimalWatchListHarness.hs exactly)"
+    );
+}
+
+/// Repro #12 — the MOST faithful shape yet, per the second-opinion
+/// investigation's exact suggestion: `asyncSpawn x = send (AsyncSpawnWith 0
+/// (\_ -> x))` captures `x` — a PRE-EXISTING THUNK bound OUTSIDE the field-1
+/// closure, at the `async (...)` call site — as bodyClosure's ONLY free
+/// variable, not code that re-evaluates an application each time
+/// bodyClosure is invoked (repro #11's shape). `x`'s own captured
+/// environment (built when `x` itself was thunked, non-trivially, per
+/// `emit_thunk`) is what contains `bodyInner` and `watchList`. Tenuring
+/// `bodyClosure` must therefore evacuate `x`'s ENTIRE transitive closure
+/// too — `OldSpace::tenure`'s own doc promises exactly this ("Evacuates
+/// ptr's entire transitive closure at tenure time").
+fn build_wrap_suspend_with_thunked_app_capture(
+    wrap_tag: u64,
+    dummy: i64,
+    body_tag: u64,
+) -> CoreExpr {
+    let mut b = TreeBuilder::new();
+
+    const DOWN_VAR: VarId = VarId(30);
+    const UP_VAR: VarId = VarId(31);
+    const ARG_VAR: VarId = VarId(1);
+    const CONT_VAR: VarId = VarId(0);
+    const OUTER_CONT_VAR: VarId = VarId(2);
+    const BODY_INNER_VAR: VarId = VarId(40);
+    const IGNORED_WATCHES: VarId = VarId(41);
+    const WATCH_LIST_VAR: VarId = VarId(42);
+    const X_VAR: VarId = VarId(43);
+
+    // bodyInner = \ignoredWatches -> E (Union body_tag upMid)
+    //                                   (Leaf (\v -> Val (ThreadResult v)))
+    let body_tag_lit = b.push(CoreFrame::Lit(Literal::LitWord(body_tag)));
+    let up_ref_inner = b.push(CoreFrame::Var(UP_VAR));
+    let body_union = b.push(CoreFrame::Con {
+        tag: UNION_ID,
+        fields: vec![body_tag_lit, up_ref_inner],
+    });
+    let cont_v = b.push(CoreFrame::Var(CONT_VAR));
+    let cont_result = b.push(CoreFrame::Con {
+        tag: RESULT_ID,
+        fields: vec![cont_v],
+    });
+    let cont_val = b.push(CoreFrame::Con {
+        tag: VAL_ID,
+        fields: vec![cont_result],
+    });
+    let cont_lam = b.push(CoreFrame::Lam {
+        binder: CONT_VAR,
+        body: cont_val,
+    });
+    let body_leaf = b.push(CoreFrame::Con {
+        tag: LEAF_ID,
+        fields: vec![cont_lam],
+    });
+    let body_e = b.push(CoreFrame::Con {
+        tag: E_ID,
+        fields: vec![body_union, body_leaf],
+    });
+    let body_inner_lam = b.push(CoreFrame::Lam {
+        binder: IGNORED_WATCHES,
+        body: body_e,
+    });
+
+    // bodyClosure = \_ -> Var(X) -- captures ONLY the pre-existing thunk X,
+    // matching `\_ -> x` exactly (asyncSpawn's real shape).
+    let x_ref = b.push(CoreFrame::Var(X_VAR));
+    let body_closure = b.push(CoreFrame::Lam {
+        binder: ARG_VAR,
+        body: x_ref,
+    });
+
+    let dummy_lit = b.push(CoreFrame::Lit(Literal::LitInt(dummy)));
+    let wrap_con = b.push(CoreFrame::Con {
+        tag: WRAP_ID,
+        fields: vec![dummy_lit, body_closure],
+    });
+    let wrap_tag_lit = b.push(CoreFrame::Lit(Literal::LitWord(wrap_tag)));
+    let wrap_union = b.push(CoreFrame::Con {
+        tag: UNION_ID,
+        fields: vec![wrap_tag_lit, wrap_con],
+    });
+    let down_ref_outer = b.push(CoreFrame::Var(DOWN_VAR));
+    let up_ref_outer = b.push(CoreFrame::Var(UP_VAR));
+    let outer_payload = b.push(CoreFrame::Con {
+        tag: PAIR_ID,
+        fields: vec![down_ref_outer, up_ref_outer],
+    });
+    let outer_result = b.push(CoreFrame::Con {
+        tag: OUTER_ID,
+        fields: vec![outer_payload],
+    });
+    let outer_val = b.push(CoreFrame::Con {
+        tag: VAL_ID,
+        fields: vec![outer_result],
+    });
+    let outer_lam = b.push(CoreFrame::Lam {
+        binder: OUTER_CONT_VAR,
+        body: outer_val,
+    });
+    let outer_leaf = b.push(CoreFrame::Con {
+        tag: LEAF_ID,
+        fields: vec![outer_lam],
+    });
+    let wrap_e = b.push(CoreFrame::Con {
+        tag: E_ID,
+        fields: vec![wrap_union, outer_leaf],
+    });
+
+    // X = App(Var(bodyInner), Var(watchList)) -- NON-TRIVIAL RHS (App), so
+    // this becomes a genuine runtime THUNK (emit_thunk). NESTING ORDER
+    // MATTERS: X's RHS references BODY_INNER_VAR/WATCH_LIST_VAR, so X's own
+    // LetNonRec must be the INNERMOST of the three -- nested inside both of
+    // theirs, not the other way around (a LetNonRec's RHS is scoped by its
+    // ANCESTORS, never by its own `body` sibling).
+    let body_inner_ref = b.push(CoreFrame::Var(BODY_INNER_VAR));
+    let watch_list_ref = b.push(CoreFrame::Var(WATCH_LIST_VAR));
+    let x_rhs = b.push(CoreFrame::App {
+        fun: body_inner_ref,
+        arg: watch_list_ref,
+    });
+    let with_x = b.push(CoreFrame::LetNonRec {
+        binder: X_VAR,
+        rhs: x_rhs,
+        body: wrap_e,
+    });
+
+    // bodyInner: trivial (Lam), NOT DCE'd (referenced by X's RHS above).
+    let with_body_inner = b.push(CoreFrame::LetNonRec {
+        binder: BODY_INNER_VAR,
+        rhs: body_inner_lam,
+        body: with_x,
+    });
+
+    // watchList = [WatchMailbox downMid]: trivial (Con of Vars), NOT DCE'd
+    // (referenced by X's RHS above).
+    let down_ref_for_watch = b.push(CoreFrame::Var(DOWN_VAR));
+    let watch_con = b.push(CoreFrame::Con {
+        tag: WATCH_ID,
+        fields: vec![down_ref_for_watch],
+    });
+    let nil = b.push(CoreFrame::Con {
+        tag: NIL_ID,
+        fields: vec![],
+    });
+    let watch_list = b.push(CoreFrame::Con {
+        tag: CONS_ID,
+        fields: vec![watch_con, nil],
+    });
+    let with_watch_list = b.push(CoreFrame::LetNonRec {
+        binder: WATCH_LIST_VAR,
+        rhs: watch_list,
+        body: with_body_inner,
+    });
+
+    let up_dummy_tag = b.push(CoreFrame::Lit(Literal::LitWord(2)));
+    let up_dummy_req = b.push(CoreFrame::Lit(Literal::LitInt(0)));
+    let up_union = b.push(CoreFrame::Con {
+        tag: UNION_ID,
+        fields: vec![up_dummy_tag, up_dummy_req],
+    });
+    let up_lam = b.push(CoreFrame::Lam {
+        binder: UP_VAR,
+        body: with_watch_list,
+    });
+    let up_leaf = b.push(CoreFrame::Con {
+        tag: LEAF_ID,
+        fields: vec![up_lam],
+    });
+    let up_e = b.push(CoreFrame::Con {
+        tag: E_ID,
+        fields: vec![up_union, up_leaf],
+    });
+
+    let down_dummy_tag = b.push(CoreFrame::Lit(Literal::LitWord(1)));
+    let down_dummy_req = b.push(CoreFrame::Lit(Literal::LitInt(0)));
+    let down_union = b.push(CoreFrame::Con {
+        tag: UNION_ID,
+        fields: vec![down_dummy_tag, down_dummy_req],
+    });
+    let down_lam = b.push(CoreFrame::Lam {
+        binder: DOWN_VAR,
+        body: up_e,
+    });
+    let down_leaf = b.push(CoreFrame::Con {
+        tag: LEAF_ID,
+        fields: vec![down_lam],
+    });
+    b.push(CoreFrame::Con {
+        tag: E_ID,
+        fields: vec![down_union, down_leaf],
+    });
+
+    b.build()
+}
+
+/// THE REPRO, thunked-application-capture variant — see
+/// `build_wrap_suspend_with_thunked_app_capture`'s doc.
+///
+/// Unlike repro #11 (`undceable_list_capture_survives_tenure_and_resume`,
+/// which is ALSO a genuine capture but re-evaluates the application every
+/// time `bodyClosure` is invoked), `bodyClosure` here captures ONLY a
+/// pre-built thunk `X`, matching `asyncSpawn`'s real `\_ -> x` shape
+/// exactly. `X` DOES get forced — `run_forked`'s own step-decoding must
+/// force whatever `bodyClosure` returns to WHNF to classify it as `Val`/
+/// `E` — so this exercises `tenure_finalized_payload`'s transitive-closure
+/// copy of a THUNK (`X`) whose own captures (`bodyInner`, `watchList`) were
+/// bound OUTSIDE it, forced only AFTER tenure + a forced collection.
+/// `watchList` itself is never read past that force.
+#[test]
+fn thunked_app_capture_survives_tenure_and_resume() {
+    let table = table();
+    let mut session = handled_session();
+
+    let expr = build_wrap_suspend_with_thunked_app_capture(100, 1, 200);
+    let outcome = session
+        .run("wrap", &expr, &table)
+        .unwrap_or_else(|e| panic!("wrap suspend run failed: {e}"));
+    let wrap_hole = match outcome {
+        ResidentOutcome::Suspended { hole, .. } => hole,
+        other => panic!("wrap suspend must suspend, got {other:?}"),
+    };
+
+    let handle = session
+        .finalized_handle(&wrap_hole)
+        .unwrap_or_else(|| panic!("wrap frame carries no untaken body closure"));
+
+    // Forcing X (applying bodyInner to watchList) happens HERE, inside
+    // run_forked's own drive, forking the thread through its OWN suspend --
+    // this is where tenure's transitive-closure copy of X (and X's own
+    // captures bodyInner/watchList) gets exercised for real.
+    let inner_hole = match session
+        .run_forked("thread", handle, RealmId(1), Some(&table))
+        .unwrap_or_else(|e| panic!("run_forked failed: {e}"))
+    {
+        ResidentOutcome::Suspended { hole, .. } => hole,
+        other => panic!("thread body must suspend on its own effect, got {other:?}"),
+    };
+    let _ = &inner_hole; // left parked, never resumed
+
+    session.force_gc_for_test();
+    session.force_gc_for_test();
+
+    let outcome = session
+        .resume(&wrap_hole, Value::Lit(Literal::LitInt(0)))
+        .unwrap_or_else(|e| panic!("wrap resume failed: {e}"));
+    let (down_back, up_back) = match outcome {
+        ResidentOutcome::Completed { result, .. } => expect_wrap_pair(&result.into_value()),
+        other => panic!("wrap resume must complete, got {other:?}"),
+    };
+    assert_eq!(
+        (down_back, up_back),
+        (111, 222),
+        "the wrap continuation's own captured downMid/upMid must survive tenure of a \
+         sibling closure whose ONLY capture is a pre-built thunk (X), matching \
+         asyncSpawn's real \\_ -> x shape exactly"
+    );
+}
+
+/// Repro #13 — the same `shared` free-variable shape as repro #1
+/// (`build_wrap_suspend_shared`, `shared` captured by BOTH the tenured
+/// `bodyClosure` AND the wrap's own independently-rooted continuation), but
+/// with the `session.force_gc_for_test()` call between tenure and resume
+/// REMOVED.
+///
+/// Every one of the twelve tests above this one calls `force_gc_for_test`
+/// at least once in that window (grep confirms it) — none test what
+/// `OldSpace::tenure` actually promises on its own: `tenure()`'s own
+/// `cheney_copy` call walks ONLY the tenure root's (`bodyClosure`'s)
+/// transitive graph (`old_space.rs`'s `tenure`, the single-element root
+/// slice `&[&mut root as *mut *mut u8]`) — a SIBLING closure that
+/// independently captured the SAME free variable is never visited by that
+/// walk, so its own capture field still holds `shared`'s PRE-tenure nursery
+/// address. `raw::evacuate` physically overwrites that address with a
+/// `TAG_FORWARDED` stub the instant `shared` is copied — not lazily, not
+/// contingent on a later GC — so the sibling's stale field is corrupt
+/// *immediately after tenure returns*, before any subsequent collection
+/// ever gets a chance to fix it up via the ordinary root-walk-and-forward
+/// mechanism proven correct in `old_space.rs`'s `test_overlapping_tenures_preserve_sharing`.
+/// A later `force_gc_for_test`/minor GC only "heals" this by accident, if
+/// and only if the sibling happens to be included in that GC's own root set.
+///
+/// Remove `#[ignore]` to turn this into the fix's acceptance test — same
+/// lifecycle as `nested_async_repro.rs`/`minimal_watch_list.rs`.
+#[ignore = "chartered gap: OldSpace::tenure does not fix up a sibling closure's \
+            independently-captured reference to the tenured value (heap tag 255 with \
+            zero intervening GC) — see this file's module doc"]
+#[test]
+fn shared_free_variable_stale_immediately_after_tenure_with_no_intervening_gc() {
+    let table = table();
+    let mut session = fresh_session();
+
+    let expr = build_wrap_suspend_shared(100, 1, 200, 11);
+    let outcome = session
+        .run("wrap", &expr, &table)
+        .expect("wrap suspend runs");
+    let wrap_hole = match outcome {
+        ResidentOutcome::Suspended { hole, .. } => hole,
+        other => panic!("wrap suspend must suspend, got {other:?}"),
+    };
+
+    // Sentinel-tenure fires here: `bodyClosure`'s transitive closure --
+    // including `shared` -- is evacuated into old-space. The wrap's OWN
+    // parked continuation independently captured `shared` too; that copy is
+    // NOT touched by this tenure call, and (unlike every test above) NO
+    // subsequent collection runs to give it a chance to self-heal.
+    let _handle = session
+        .finalized_handle(&wrap_hole)
+        .unwrap_or_else(|| panic!("wrap frame carries no untaken body closure"));
+
+    // No force_gc_for_test() here -- this is the point of the test.
+
+    let outcome = session
+        .resume(&wrap_hole, Value::Lit(Literal::LitInt(0)))
+        .unwrap_or_else(|e| {
+            panic!(
+                "wrap resume failed: {e} -- if this is a case/shape trap reporting \
+                 tag 255 (Forwarded), it confirms tenure() leaves a SIBLING closure's \
+                 independently-captured reference to the tenured value stale, with no \
+                 write-barrier/remembered-set entry recording the need for a later fixup"
+            )
+        });
+    let (shared_back, _answer) = match outcome {
+        ResidentOutcome::Completed { result, .. } => expect_wrap_pair(&result.into_value()),
+        other => panic!("wrap resume must complete, got {other:?}"),
+    };
+    assert_eq!(
+        shared_back, 999,
+        "the wrap continuation's own (independently-captured) copy of `shared` must \
+         survive tenure of a sibling closure that also captured it, even with NO \
+         collection running in between"
     );
 }
