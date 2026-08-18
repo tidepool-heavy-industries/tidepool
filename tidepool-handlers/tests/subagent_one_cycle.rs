@@ -471,11 +471,11 @@ fn typed_result_round_trips_through_the_real_jit() {
             .last()
             .expect("at least one binding row for the worktree that was bound");
         assert_eq!(
-            last.state,
+            last.state(),
             BindingState::Terminal,
             "a completed one-cycle agent settles Terminal, not Released or Active"
         );
-        assert_eq!(last.agent.as_str(), out["bindingRef"].as_str().unwrap());
+        assert_eq!(last.agent().as_str(), out["bindingRef"].as_str().unwrap());
 
         // The worktree the run actually got is retained and present on disk.
         let found = handler
@@ -554,7 +554,7 @@ fn backend_failure_surfaces_as_typed_spawn_error_and_rolls_back() {
 
         let history = fx.binding_history(&worktree_id);
         assert_eq!(
-            history.last().expect("at least one binding row").state,
+            history.last().expect("at least one binding row").state(),
             BindingState::Released,
             "a post-Bound failure settles Released — unbound and rebindable, never left Active"
         );

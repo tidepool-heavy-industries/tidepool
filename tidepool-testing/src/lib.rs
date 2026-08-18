@@ -25,5 +25,7 @@ pub mod jit_run;
 pub mod oracle;
 pub mod proptest;
 pub mod watchdog;
+#[cfg(test)]
+mod watched_tests;
 
 pub use dispatch::NullDispatcher;

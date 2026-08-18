@@ -72,8 +72,15 @@ module Harness
   ) where
 
 import qualified Data.Text as T
+import DevTreeJournal
+  ( JournalEvent (..)
+  , JournalKey (..)
+  , JournalKind (..)
+  , eventsOfKind
+  , lookupEvent
+  , recordEvent
+  )
 import HarnessTypes
-import Tidepool.Aeson (Value, object, toJSON, (.=))
 import Tidepool.Agent.Spawn
   ( AgentHandle
   , awaitAgent
@@ -101,17 +108,12 @@ import Tidepool.Effects
 import Tidepool.Event
 import Tidepool.Form (askUser)
 import Tidepool.Harness (Harness, runLLMTurn)
-import Tidepool.Journal (record)
 import Tidepool.Prelude hiding (render)
 import Tidepool.QQ (fmt)
 import Tidepool.Resume
-  ( ResumeEntry (..)
-  , ResumeFold (..)
+  ( ResumeFold (..)
   , emptyResume
   , isResumed
-  , lookupResume
-  , lookupResumeEntry
-  , resumeOfKind
   )
 import qualified Tidepool.Swarm as Swarm
 import Tidepool.Worktree
@@ -145,20 +147,41 @@ data NodeSeed = NodeSeed
 -- | What the coalgebra decided, handed to the algebra unchanged.  The hylo's
 -- @t@.
 --
+-- A plain sum of the three mutually-exclusive things a coalgebra step can
+-- decide — ordinary work, a pre-algebra refusal, or a resumed/adopted
+-- terminal outcome — rather than three 'Maybe' fields on one product whose
+-- precedence 'integrate' had to establish by nested inspection.  Every
+-- construction site below (this module's four smart constructors:
+-- 'splitWork', 'refusalWork', 'replayedWork', 'adoptedWork') names, by its own
+-- constructor choice, whether children may exist — 'WorkReady' is the only
+-- one that carries any.  This type is module-private; only those four sites
+-- (plus their two match sites, 'integrate' and 'stampFold') construct or take
+-- one apart.
+--
 -- @workKids@ is the parent's own record of the seeds it unfolded, in plan
 -- order.  It is what lets the algebra zip its @[Outcome]@ back against the
 -- worktrees those outcomes came from — @traverse@ preserves order, and plan
 -- order is the ONLY order any policy here reads.
-data NodeWork = NodeWork
-  { workSeed     :: NodeSeed
-  , workScaffold :: Maybe WorkerResult
-  , workKids     :: [NodeSeed]
-  , workDenied   :: [Text]
-  , workRefusal  :: Maybe Failure
-  , -- | An outcome a RESUMED run already has in hand, so this node is not
+data NodeWork
+  = WorkReady
+      { workSeed     :: NodeSeed
+      , workScaffold :: Maybe WorkerResult
+      , workKids     :: [NodeSeed]
+      , workDenied   :: [Text]
+      }
+  | -- | A veto before any work happened — a coalgebra cannot produce an
+    -- outcome directly (its result type is @PlanF@), so every refusal in
+    -- this file expresses itself this way instead.
+    WorkRefused
+      { workSeed    :: NodeSeed
+      , workFailure :: Failure
+      }
+  | -- | An outcome a RESUMED run already has in hand, so this node is not
     -- worked at all.  'integrate' returns it verbatim.
-    workResumed  :: Maybe ResumedFold
-  }
+    WorkResumed
+      { workSeed    :: NodeSeed
+      , workOutcome :: ResumedFold
+      }
 
 -- | Where a resumed node's outcome came from — and therefore whether it still
 -- needs to be journaled.
@@ -294,9 +317,9 @@ rootWorktreeSpec st
 rootTree :: ResumeFold -> State -> Harness (Either Text WorktreeHandle)
 rootTree fold st = case rootBranchOf fold (nodeName (plan st)) of
   Just branch ->
-    rebindWorktree branch >>= \case
+    retainWorktree branch >>= \case
       Left why -> pure (Left [fmt|Could not rebind the retained root worktree ({branch}): {why}|])
-      Right h -> pure (Right h)
+      Right rt -> pure (Right (retainedHandle rt))
   Nothing ->
     createWorktree (rootWorktreeSpec st) >>= \case
       -- Matching the SPECIFIC Left is what earns a better message than the
@@ -370,31 +393,31 @@ decompose seed
 -- blind.  Append-only, last-one-wins, no rewrite.
 emitSplit :: NodeSeed -> Maybe WorkerResult -> GitOid -> Harness (Swarm.PlanF NodeWork NodeSeed)
 emitSplit seed scaffold scaffoldHead = do
-  record "split" branch (splitPayload p kids scaffoldHead Nothing)
+  recordEvent (SplitEvent (JournalKey branch) p scaffoldHeadText Nothing)
   (childSeeds, denied) <- allocateChildren seed kids (freshChild seed)
-  record "split" branch (splitPayload p kids scaffoldHead (Just childSeeds))
+  recordEvent (SplitEvent (JournalKey branch) p scaffoldHeadText (Just (map childTreeEntry childSeeds)))
   pure (Swarm.PlanF (splitWork seed scaffold childSeeds denied) childSeeds)
   where
     p = seed.seedPlan
     kids = childPlans p
     branch = branchOf seed.seedTree
+    scaffoldHeadText = renderGitOid scaffoldHead
+    childTreeEntry s = (nodeName s.seedPlan, branchOf s.seedTree)
 
 splitWork :: NodeSeed -> Maybe WorkerResult -> [NodeSeed] -> [Text] -> NodeWork
 splitWork seed scaffold childSeeds denied =
-  NodeWork
+  WorkReady
     { workSeed = seed
     , workScaffold = scaffold
     , workKids = childSeeds
     , workDenied = denied
-    , workRefusal = Nothing
-    , workResumed = Nothing
     }
 
 -- | The task a truncated node carries.  A coalgebra cannot produce an
 -- outcome — its result type is @PlanF@ — so every veto in this file expresses
--- itself by handing the algebra a childless node whose task says why.
+-- itself by handing the algebra a childless, refused node instead.
 refusalWork :: NodeSeed -> Failure -> NodeWork
-refusalWork seed f = (splitWork seed Nothing [] []) {workRefusal = Just f}
+refusalWork seed f = WorkRefused {workSeed = seed, workFailure = f}
 
 -- ---------------------------------------------------------------------------
 -- The coalgebra's policy slots
@@ -522,7 +545,7 @@ freshChild parent k =
 retainedChild :: NodeSeed -> [(Text, Text)] -> DevPlan -> Harness (Either Text WorktreeHandle)
 retainedChild parent trees k = case lookup (nodeName k) trees of
   Nothing -> freshChild parent k
-  Just branch -> rebindWorktree branch
+  Just branch -> fmap retainedHandle <$> retainWorktree branch
 
 -- | Divide what is left after this node's own reservation among its children.
 --
@@ -564,18 +587,16 @@ childAllowance parent n =
 -- this node's line and its children's trails in hand, and therefore the one
 -- place a leaf fold and an interior fold cannot drift apart.
 integrate :: Swarm.PlanF NodeWork Outcome -> Harness Outcome
-integrate (Swarm.PlanF w kids) = case w.workResumed of
+integrate (Swarm.PlanF w kids) = case w of
   -- A subtree the journal already accounts for is not re-entered: the recorded
   -- (or adopted-and-verified) receipt IS this fold's input.
-  Just (ReplayedOutcome o) -> pure o
-  Just (AdoptedOutcome o) -> pure o
-  Nothing -> case w.workRefusal of
-    Just f -> pure Skipped {outcomeNode = name, outcomeTrail = [], skipReason = renderFailure f}
-    Nothing -> case kids of
-      [] -> leafFold w
-      _ -> interiorFold w kids
-  where
-    name = nodeName w.workSeed.seedPlan
+  WorkResumed {workOutcome = ReplayedOutcome o} -> pure o
+  WorkResumed {workOutcome = AdoptedOutcome o} -> pure o
+  WorkRefused {workSeed = seed, workFailure = f} ->
+    pure Skipped {outcomeNode = nodeName seed.seedPlan, outcomeTrail = [], skipReason = renderFailure f}
+  WorkReady {workSeed = seed, workKids = wkids, workDenied = denied} -> case kids of
+    [] -> leafFold seed
+    _ -> interiorFold seed wkids denied kids
 
 -- | 'Swarm.receipted''s slot, and the whole trust ladder in one place.
 --
@@ -590,26 +611,32 @@ integrate (Swarm.PlanF w kids) = case w.workResumed of
 -- rather than trusting a verdict it did not compute.
 stampFold :: Swarm.PlanF NodeWork Outcome -> Outcome -> Harness Outcome
 stampFold node folded = do
-  case (Swarm.task node).workResumed of
+  case Swarm.task node of
     -- Already in the journal.  The log is append-only, so re-appending an
     -- outcome a prior process recorded would be duplicate noise on every
     -- resume — and idempotence is the point: resuming a finished run does
     -- nothing at all.
-    Just (ReplayedOutcome _) -> pure ()
+    WorkResumed {workOutcome = ReplayedOutcome _} -> pure ()
     -- ADOPTION APPENDS.  The crashed process never got to record this one, so
     -- writing it now is what makes the next resume skip the subtree.
     _ -> journalOutcome folded
   pure (withTrail (concatMap outcomeTrailOf (Swarm.kids node)) (foldLadder folded))
 
 journalOutcome :: Outcome -> Harness ()
-journalOutcome o = case o of
-  Done {doneReceipt = r} -> record "outcome" r.receiptBranch (toJSON r)
-  Failed {outcomeNode = n, outcomeFailure = f, partialReceipt = Just r} ->
-    record "outcome" r.receiptBranch (object ["node" .= n, "failure" .= toJSON f, "receipt" .= toJSON r])
-  Failed {outcomeNode = n, outcomeFailure = f, partialReceipt = Nothing} ->
-    record "outcome" n (object ["node" .= n, "failure" .= toJSON f])
-  Skipped {outcomeNode = n, skipReason = why} ->
-    record "outcome" n (object ["node" .= n, "skipped" .= why])
+journalOutcome o = recordEvent (OutcomeEvent (JournalKey (outcomeJournalKey o)) o)
+
+-- | The key 'journalOutcome' files an outcome under: the branch when a
+-- receipt is in hand (a 'Done', or a 'Failed' that still carries a partial
+-- one), the plan node name otherwise. Mirrors "HarnessTypes"'s
+-- @outcomeNodeName@ exactly, except that a receipted outcome prefers its
+-- receipt's own branch over its node name — the same precedence
+-- 'journalOutcome' always applied, now named.
+outcomeJournalKey :: Outcome -> Text
+outcomeJournalKey o = case o of
+  Done {doneReceipt = r} -> r.receiptBranch
+  Failed {partialReceipt = Just r} -> r.receiptBranch
+  Failed {outcomeNode = n, partialReceipt = Nothing} -> n
+  Skipped {outcomeNode = n} -> n
 
 -- | The ladder, computed from the receipt rather than claimed by the folder.
 -- Rung 1 is the repository (an agent cycle that moved no HEAD; a diff outside
@@ -644,8 +671,8 @@ foldLadder o = case o of
 -- 'withHandler' scope is observation of the same fact as it happens; the pair
 -- of 'worktreeHead' reads is what closes the window a subscription
 -- deliberately will not (no replay, cycle-scoped lifetime).
-leafFold :: NodeWork -> Harness Outcome
-leafFold w = do
+leafFold :: NodeSeed -> Harness Outcome
+leafFold seed = do
   before <- worktreeHead tree
   runWorker tree name (workerPrompt p) >>= \case
     Left err ->
@@ -653,10 +680,10 @@ leafFold w = do
     Right wr -> do
       after <- worktreeHead tree
       checks <- runChecks tree p
-      finishFold w wr (before, after) [] [] 1 True checks
+      finishFold seed wr (before, after) [] [] 1 True checks
   where
-    tree = w.workSeed.seedTree
-    p = w.workSeed.seedPlan
+    tree = seed.seedTree
+    p = seed.seedPlan
     name = nodeName p
 
 -- | An interior node: the eager rebase cascade, the merges, then the ladder.
@@ -665,10 +692,10 @@ leafFold w = do
 -- integration tier, so the fast-forward question dissolves into it.  The
 -- integration agent is spawned only when the mechanical tier left something
 -- for it: an escalation, or a check that fails at the merged head.
-interiorFold :: NodeWork -> [Outcome] -> Harness Outcome
-interiorFold w kids = do
+interiorFold :: NodeSeed -> [NodeSeed] -> [Text] -> [Outcome] -> Harness Outcome
+interiorFold seed workKids denied kids = do
   before <- worktreeHead tree
-  acc <- foldChildren tree p (zip w.workKids kids) emptyAcc {accEsc = deniedEsc}
+  acc <- foldChildren tree p (zip workKids kids) emptyAcc {accEsc = deniedEsc}
   checks0 <- runChecks tree p
   let needsAgent = not (null acc.accEsc) || any checkFailed checks0
   (wr, agentCycles, agentRan) <-
@@ -688,7 +715,7 @@ interiorFold w kids = do
   after <- worktreeHead tree
   folded <-
     finishFold
-      w
+      seed
       wr
       (before, after)
       acc.accNotes
@@ -704,9 +731,9 @@ interiorFold w kids = do
       failedOutcome (nodeName p) (Failure ChildrenFailed why []) (Just r)
     _ -> folded
   where
-    tree = w.workSeed.seedTree
-    p = w.workSeed.seedPlan
-    deniedEsc = map ("child worktree denied — " <>) w.workDenied
+    tree = seed.seedTree
+    p = seed.seedPlan
+    deniedEsc = map ("child worktree denied — " <>) denied
 
 -- | Walk the children in PLAN order: merge the ones that are done, cascade the
 -- new parent tip to every sibling still ahead of us, and carry everything else
@@ -754,7 +781,7 @@ onChildFailure _ p s o acc = case nodeOnFailure p of
   Abandon -> pure acc {accAbandon = Just why, accEsc = acc.accEsc <> [why]}
   Replan -> do
     decision <- runLLMTurn @ReplanDecision (replanPrompt p s why)
-    record "replan" (branchOf s.seedTree) (toJSON decision)
+    recordEvent (ReplanEvent (JournalKey (branchOf s.seedTree)) decision)
     pure $
       if decision.abandonSubtree
         then acc {accAbandon = Just (why <> " — replan abandoned"), accEsc = acc.accEsc <> [why]}
@@ -810,7 +837,7 @@ mechanicalRebase onto s =
             Left e -> pure (s, Left e)
             Right pr
               | ok pr -> do
-                  record "rebase" branch (toJSON (RebaseNote branch ontoText RebaseClean))
+                  recordEvent (RebaseEvent (JournalKey branch) (RebaseNote branch ontoText RebaseClean))
                   pure (s, Right (RebaseNote branch ontoText RebaseClean))
               | otherwise -> do
                   _ <- gitIn tree "rebase --abort"
@@ -861,7 +888,7 @@ awaitResolutions p onto ((s, h) : rest) acc = case acc.accAbandon of
       next <- case verdict of
         Right () -> do
           let note = RebaseNote (branchOf s.seedTree) (renderGitOid onto) RebaseResolved
-          record "rebase" (branchOf s.seedTree) (toJSON note)
+          recordEvent (RebaseEvent (JournalKey (branchOf s.seedTree)) note)
           pure acc {accNotes = acc.accNotes <> [note], accCycles = acc.accCycles + spent}
         Left why -> do
           escalated <- escalate p s why acc {accCycles = acc.accCycles + spent}
@@ -878,7 +905,7 @@ escalate :: DevPlan -> NodeSeed -> Text -> FoldAcc -> Harness FoldAcc
 escalate p s why acc = do
   let note = RebaseNote branch "-" RebaseEscalation
       base = acc {accNotes = acc.accNotes <> [note]}
-  record "escalation" branch (object ["node" .= name, "detail" .= why])
+  recordEvent (EscalationEvent (JournalKey branch) name why)
   applyPolicy p s why >>= \case
     PolicyResolved spent ->
       pure base {accCycles = base.accCycles + spent, accEsc = base.accEsc <> [[fmt|{name}: {why} (resolved on policy retry)|]]}
@@ -904,7 +931,7 @@ applyPolicy p s why = case nodeOnFailure p of
   Retry -> retryOnce "Try again; the previous resolution round did not converge."
   Replan -> do
     decision <- runLLMTurn @ReplanDecision (replanPrompt p s why)
-    record "replan" (branchOf s.seedTree) (toJSON decision)
+    recordEvent (ReplanEvent (JournalKey (branchOf s.seedTree)) decision)
     if decision.abandonSubtree
       then pure (PolicyAbandoned [fmt|{why} — replan abandoned: {decision.rationale}|] 0)
       else retryOnce decision.amendedInstruction
@@ -955,7 +982,7 @@ mergeChild tree p s =
 -- 'foldLadder''s, applied uniformly by the 'Swarm.receipted' middleware — so
 -- there is no path on which a fold judges its own receipt.
 finishFold
-  :: NodeWork
+  :: NodeSeed
   -> WorkerResult
   -> (GitOid, GitOid)
   -> [RebaseNote]
@@ -964,7 +991,7 @@ finishFold
   -> Bool
   -> [CheckResult]
   -> Harness Outcome
-finishFold w wr (before, after) notes escalations cycles agentRan checks = do
+finishFold seed wr (before, after) notes escalations cycles agentRan checks = do
   outside <- boundaryViolations tree (nodeBoundary p)
   pure
     ( Done
@@ -987,8 +1014,8 @@ finishFold w wr (before, after) notes escalations cycles agentRan checks = do
           }
     )
   where
-    tree = w.workSeed.seedTree
-    p = w.workSeed.seedPlan
+    tree = seed.seedTree
+    p = seed.seedPlan
     name = nodeName p
 
 runChecks :: WorktreeHandle -> DevPlan -> Harness [CheckResult]
@@ -1112,8 +1139,8 @@ data ResumePlan
     ResumeAmend ReplanDecision DevPlan
   deriving (Show, Eq)
 
--- | The @split@ payload, read back.  Written by 'splitPayload'; the two are
--- the only places this schema exists, and it never appears in Rust.
+-- | The @split@ payload, read back — built from a decoded 'SplitEvent' by
+-- 'splitRecordOf'.  This schema never appears in Rust.
 data SplitRecord = SplitRecord
   { splitNode         :: Text
   , splitScaffoldHead :: Text
@@ -1175,19 +1202,35 @@ resumed fold inner
 resumePlanFor :: ResumeFold -> Text -> DevPlan -> ResumePlan
 resumePlanFor fold branch p
   | amendmentIsNewest (seqOf replanEntry) (seqOf splitEntry) (seqOf outcomeEntry)
-  , Just d <- replanEntry >>= (decodeJson . (.resumePayload)) =
+  , Just (_, ReplanEvent {evDecision = d}) <- replanEntry =
       ResumeAmend d (amendPlan d (maybe p (.splitPlan) recordedSplit))
-  | Just o <- outcomeEntry >>= (decodeOutcome (nodeName p) . (.resumePayload)) = ResumeSkip o
+  | Just (_, OutcomeEvent {evOutcome = o}) <- outcomeEntry = ResumeSkip o
   | Just sp <- recordedSplit = ResumeReplay sp
   | otherwise = ResumeFresh
   where
-    splitEntry = lookupResumeEntry "split" branch fold
-    replanEntry = lookupResumeEntry "replan" branch fold
+    splitEntry = lookupEvent SplitKind branch fold
+    replanEntry = lookupEvent ReplanKind branch fold
     outcomeEntry =
-      lookupResumeEntry "outcome" branch fold
-        `orElse` lookupResumeEntry "outcome" (nodeName p) fold
-    recordedSplit = splitEntry >>= (decodeSplit . (.resumePayload))
-    seqOf = fmap (.resumeSeq)
+      lookupEvent OutcomeKind branch fold
+        `orElse` lookupEvent OutcomeKind (nodeName p) fold
+    recordedSplit = splitEntry >>= (splitRecordOf . snd)
+    seqOf = fmap fst
+
+-- | Rebuild the higher-level 'SplitRecord' 'resumePlanFor' and 'replaySplit'
+-- consume from a decoded 'SplitEvent'. An absent second-append ('Nothing')
+-- collapses to '[]' here, same as the pre-refactor @decodeSplit@ — the two
+-- cases ("not yet allocated" and "allocated, all children denied") both mean
+-- "look nothing up", so 'SplitRecord' does not need to distinguish them.
+splitRecordOf :: JournalEvent -> Maybe SplitRecord
+splitRecordOf SplitEvent {evSplitPlan = pl, evScaffoldHead = h, evChildTrees = childTrees} =
+  Just
+    SplitRecord
+      { splitNode = nodeName pl
+      , splitScaffoldHead = h
+      , splitPlan = pl
+      , splitChildTrees = fromMaybe [] childTrees
+      }
+splitRecordOf _ = Nothing
 
 -- | Is the journaled amendment the newest word about this branch?
 --
@@ -1224,24 +1267,25 @@ amendPlan d p
 -- no-op.
 replaySplit :: ResumeFold -> NodeSeed -> SplitRecord -> Harness (Swarm.PlanF NodeWork NodeSeed)
 replaySplit fold seed sp = do
-  found <- worktreeHead seed.seedTree
-  finished <-
-    if renderGitOid found == sp.splitScaffoldHead
-      then pure False
-      else integrationComplete fold seed sp
-  if finished
-    then do
-      o <- verifyOrphan fold recorded sp.splitScaffoldHead found
-      pure (Swarm.PlanF (adoptedWork recorded o) [])
-    else do
-      (childSeeds, denied) <-
-        allocateChildren recorded (childPlans sp.splitPlan) (retainedChild recorded sp.splitChildTrees)
-      pure (Swarm.PlanF (splitWork recorded Nothing childSeeds denied) childSeeds)
+  changed <- checkHeadChanged seed.seedTree sp.splitPlan sp.splitScaffoldHead
+  case changed of
+    Nothing -> unfoldChildren
+    Just hc -> do
+      finished <- integrationComplete fold seed sp
+      if finished
+        then do
+          vo <- verifyOrphan fold hc
+          pure (Swarm.PlanF (adoptedWork recorded (adopt vo)) [])
+        else unfoldChildren
   where
     -- The RECORDED plan is the authority from here down, not the authored one:
     -- replaying a split means replaying what was decided, including whatever
     -- amendment produced it.
     recorded = seed {seedPlan = sp.splitPlan}
+    unfoldChildren = do
+      (childSeeds, denied) <-
+        allocateChildren recorded (childPlans sp.splitPlan) (retainedChild recorded sp.splitChildTrees)
+      pure (Swarm.PlanF (splitWork recorded Nothing childSeeds denied) childSeeds)
 
 -- | Did the crashed process finish folding this node's children into it?
 --
@@ -1268,9 +1312,9 @@ integrationComplete fold seed sp
 
 recordedDone :: ResumeFold -> Text -> Text -> Bool
 recordedDone fold branch node =
-  case lookupResume "outcome" branch fold `orElse` lookupResume "outcome" node fold of
-    Just v -> maybe False outcomeIsDone (decodeOutcome node v)
-    Nothing -> False
+  case lookupEvent OutcomeKind branch fold `orElse` lookupEvent OutcomeKind node fold of
+    Just (_, OutcomeEvent {evOutcome = o}) -> outcomeIsDone o
+    _ -> False
 
 -- | Nothing is recorded for this branch — but its worktree need not be empty.
 -- A crash between an agent's commit and the record of it leaves work with no
@@ -1293,74 +1337,56 @@ adoptOrUnfold
   -> NodeSeed
   -> Harness (Swarm.PlanF NodeWork NodeSeed)
 adoptOrUnfold fold inner seed = do
-  found <- worktreeHead seed.seedTree
-  if renderGitOid found == baseline
-    then inner seed
-    else do
-      o <- verifyOrphan fold seed baseline found
+  changed <- checkHeadChanged seed.seedTree seed.seedPlan baseline
+  case changed of
+    Nothing -> inner seed
+    Just hc -> do
+      vo <- verifyOrphan fold hc
+      let o = adopt vo
       if null (childPlans seed.seedPlan)
         then pure (Swarm.PlanF (adoptedWork seed o) [])
         else case foldLadder o of
-          Done {} -> inner seed {seedAdopted = Just found}
+          Done {} -> inner seed {seedAdopted = Just hc.hcFound}
           rejected -> pure (Swarm.PlanF (adoptedWork seed rejected) [])
   where
     baseline = renderGitOid seed.seedTree.handleReceipt.sourceHead
 
--- | The evidence for a commit this process did not make.
+-- ---------------------------------------------------------------------------
+-- The worktree-adoption typestate
 --
--- Deliberately not a judgement.  It observes — the sha, the orchestrator's own
--- checks run IN that worktree AT that sha, the boundary diff — and stamps a
--- 'FoldReceipt'; 'foldLadder' decides what the evidence is worth.  There is no
--- second judge, and therefore no path on which an orphaned commit is trusted
--- merely because it exists.
-verifyOrphan :: ResumeFold -> NodeSeed -> Text -> GitOid -> Harness Outcome
-verifyOrphan fold seed baseline found = do
-  checks <- runChecks tree p
-  outside <- boundaryViolations tree (nodeBoundary p)
-  pure
-    ( Done
-        name
-        []
-        FoldReceipt
-          { receiptNode = name
-          , receiptBranch = branch
-          , receiptSeedHead = baseline
-          , receiptHead = renderGitOid found
-          , receiptHeadMoved = True
-          , receiptChecks = checks
-          , receiptRebases = maybeToList (lookupResume "rebase" branch fold >>= decodeJson)
-          , receiptOutside = outside
-          , -- The cycles were spent by a process that is gone; this run did not
-            -- spend them and does not claim them.
-            receiptCycles = 0
-          , receiptAgentRan = True
-          , receiptReviewed = False
-          , receiptSummary =
-              [fmt|Adopted work found in this retained worktree at {renderGitOid found}: run {fold.resumeRunId} left it there and crashed before recording an outcome.|]
-          , receiptEvidence =
-              [fmt|orphaned commits {baseline}..{renderGitOid found}, verified by this orchestrator at that sha|]
-                : priorEscalationsFor fold branch
-          }
-    )
-  where
-    tree = seed.seedTree
-    p = seed.seedPlan
-    name = nodeName p
-    branch = branchOf tree
+-- Three steps, three types, and only the last one can be adopted:
+--
+-- 1. 'RetainedWorktree' — a handle PROVEN to have come back through the
+--    registry's own rebind (PRD 19's rebind-never-recreate rule), minted
+--    only by 'retainWorktree'.
+-- 2. 'HeadChanged' — a retained tree whose HEAD has been read and found to
+--    differ from a baseline sha, i.e. an orphan CANDIDATE. Minted only by
+--    'checkHeadChanged'.
+-- 3. 'VerifiedOrphan' — a 'HeadChanged' candidate run through this
+--    orchestrator's OWN checks and boundary diff at its found sha. Minted
+--    only by 'verifyOrphan', and the ONLY thing 'adopt' accepts.
+--
+-- "Never adopt without verification" is therefore not a discipline this file
+-- has to remember at every call site — an 'Outcome' from orphaned work has no
+-- expression here except by way of 'adopt', and 'adopt' has no other input.
+-- ---------------------------------------------------------------------------
 
-priorEscalationsFor :: ResumeFold -> Text -> [Text]
-priorEscalationsFor fold branch = case lookupResume "escalation" branch fold of
-  Just v -> [[fmt|prior escalation: {fromMaybe "escalated" (v ?. "detail" >>= asText)}|]]
-  Nothing -> []
+-- | A worktree handle proven to have come back through the retained-worktree
+-- registry's own rebind, not freshly created and not conjured. The ONE mint
+-- point is 'retainWorktree'.
+newtype RetainedWorktree = RetainedWorktree WorktreeHandle
+
+retainedHandle :: RetainedWorktree -> WorktreeHandle
+retainedHandle (RetainedWorktree h) = h
 
 -- | Look a retained worktree up by BRANCH — its durable identity in the
--- journal — and hand back the live handle.
+-- journal — and hand back a proof-carrying handle.
 --
 -- REBIND, NEVER RECREATE (PRD 19).  A tree a human removed by hand comes back
 -- as a failure here and is surfaced as data by every caller; it is never
 -- silently replaced, and nothing on this path deletes anything.
-rebindWorktree :: Text -> Harness (Either Text WorktreeHandle)
-rebindWorktree branch = do
+retainWorktree :: Text -> Harness (Either Text RetainedWorktree)
+retainWorktree branch = do
   trees <- listWorktrees
   case [s | s <- trees, renderBranchName s.summaryReceipt.branch == branch] of
     [] -> pure (Left [fmt|no retained worktree is registered for branch {branch}|])
@@ -1373,7 +1399,83 @@ rebindWorktree branch = do
       | otherwise ->
           lookupWorktree s.summaryReceipt.treeId >>= \case
             Left err -> pure (Left (renderWorktreeError err))
-            Right h -> pure (Right h)
+            Right h -> pure (Right (RetainedWorktree h))
+
+-- | A retained tree whose HEAD has been read and found to differ from a
+-- baseline sha — an orphan CANDIDATE, not yet trusted at all. Minted only by
+-- 'checkHeadChanged'; 'Nothing' when the tree's HEAD is still on the
+-- baseline, i.e. genuinely unstarted rather than orphaned.
+data HeadChanged = HeadChanged
+  { hcTree     :: WorktreeHandle
+  , hcPlan     :: DevPlan
+  , hcBaseline :: Text
+  , hcFound    :: GitOid
+  }
+
+checkHeadChanged :: WorktreeHandle -> DevPlan -> Text -> Harness (Maybe HeadChanged)
+checkHeadChanged tree p baseline = do
+  found <- worktreeHead tree
+  pure $
+    if renderGitOid found == baseline
+      then Nothing
+      else Just HeadChanged {hcTree = tree, hcPlan = p, hcBaseline = baseline, hcFound = found}
+
+-- | A 'HeadChanged' candidate run through this orchestrator's OWN checks and
+-- boundary diff at its found sha. Deliberately not a judgement on its own —
+-- it observes and stamps a 'FoldReceipt'; 'foldLadder' (applied uniformly by
+-- 'stampFold') decides what the evidence is worth. The checks themselves are
+-- byte-identical to what this function ran before the typestate existed;
+-- only the RESULT is now a capability rather than a plain 'Outcome'.
+newtype VerifiedOrphan = VerifiedOrphan Outcome
+
+verifyOrphan :: ResumeFold -> HeadChanged -> Harness VerifiedOrphan
+verifyOrphan fold hc = do
+  checks <- runChecks tree p
+  outside <- boundaryViolations tree (nodeBoundary p)
+  pure
+    ( VerifiedOrphan
+        ( Done
+            name
+            []
+            FoldReceipt
+              { receiptNode = name
+              , receiptBranch = branch
+              , receiptSeedHead = hc.hcBaseline
+              , receiptHead = renderGitOid hc.hcFound
+              , receiptHeadMoved = True
+              , receiptChecks = checks
+              , receiptRebases = case lookupEvent RebaseKind branch fold of
+                  Just (_, RebaseEvent {evNote = n}) -> [n]
+                  _ -> []
+              , receiptOutside = outside
+              , -- The cycles were spent by a process that is gone; this run
+                -- did not spend them and does not claim them.
+                receiptCycles = 0
+              , receiptAgentRan = True
+              , receiptReviewed = False
+              , receiptSummary =
+                  [fmt|Adopted work found in this retained worktree at {renderGitOid hc.hcFound}: run {fold.resumeRunId} left it there and crashed before recording an outcome.|]
+              , receiptEvidence =
+                  [fmt|orphaned commits {hc.hcBaseline}..{renderGitOid hc.hcFound}, verified by this orchestrator at that sha|]
+                    : priorEscalationsFor fold branch
+              }
+        )
+    )
+  where
+    tree = hc.hcTree
+    p = hc.hcPlan
+    name = nodeName p
+    branch = branchOf tree
+
+-- | Deliver a verified orphan's outcome — the ONLY function that unwraps
+-- 'VerifiedOrphan'.
+adopt :: VerifiedOrphan -> Outcome
+adopt (VerifiedOrphan o) = o
+
+priorEscalationsFor :: ResumeFold -> Text -> [Text]
+priorEscalationsFor fold branch = case lookupEvent EscalationKind branch fold of
+  Just (_, EscalationEvent {evEscDetail = why}) -> [[fmt|prior escalation: {why}|]]
+  _ -> []
 
 -- | The retained root worktree's branch, named structurally by the fold.
 --
@@ -1384,113 +1486,25 @@ rebindWorktree branch = do
 rootBranchOf :: ResumeFold -> Text -> Maybe Text
 rootBranchOf fold node =
   listToMaybe
-    ( [e.resumeKey | e <- resumeOfKind "split" fold, payloadNode e == Just node]
-        <> [ e.resumeKey
-           | e <- resumeOfKind "outcome" fold
-           , payloadNode e == Just node
+    ( [key | (key, _, SplitEvent {evSplitPlan = pl}) <- eventsOfKind SplitKind fold, nodeName pl == node]
+        <> [ key
+           | (key, _, OutcomeEvent {evOutcome = o}) <- eventsOfKind OutcomeKind fold
+           , outcomeNodeName o == node
            , -- A receiptless failure or a skip is keyed by the NODE name, and
              -- that is not a branch.
-             e.resumeKey /= node
+             key /= node
            ]
     )
-  where
-    payloadNode e =
-      (e.resumePayload ?. "node" >>= asText)
-        `orElse` (e.resumePayload ?. "receiptNode" >>= asText)
 
 replayedWork :: NodeSeed -> Outcome -> NodeWork
-replayedWork seed o = (splitWork seed Nothing [] []) {workResumed = Just (ReplayedOutcome o)}
+replayedWork seed o = WorkResumed {workSeed = seed, workOutcome = ReplayedOutcome o}
 
 adoptedWork :: NodeSeed -> Outcome -> NodeWork
-adoptedWork seed o = (splitWork seed Nothing [] []) {workResumed = Just (AdoptedOutcome o)}
-
--- ---------------------------------------------------------------------------
--- Reading journal payloads back
---
--- Structural, not tagged: 'journalOutcome' writes four shapes and none of them
--- carries a discriminator, so the reader discriminates on the keys that are
--- actually there.  Every decode is total — a payload this run cannot make
--- sense of is 'Nothing', which degrades to "do the work", never to a wrong
--- skip.
--- ---------------------------------------------------------------------------
-
-decodeJson :: FromJSON a => Value -> Maybe a
-decodeJson v = case fromJSON v of
-  Success a -> Just a
-  Error _ -> Nothing
-
-decodeSplit :: Value -> Maybe SplitRecord
-decodeSplit v = do
-  n <- v ?. "node" >>= asText
-  h <- v ?. "scaffoldHead" >>= asText
-  p <- v ?. "plan" >>= decodeJson
-  pure
-    SplitRecord
-      { splitNode = n
-      , splitScaffoldHead = h
-      , splitPlan = p
-      , splitChildTrees =
-          fromMaybe [] (v ?. "childTrees" >>= asArray >>= traverse decodeChildTree)
-      }
-
-decodeChildTree :: Value -> Maybe (Text, Text)
-decodeChildTree v = do
-  n <- v ?. "name" >>= asText
-  b <- v ?. "branch" >>= asText
-  pure (n, b)
-
--- | Rebuild an 'Outcome' from what 'journalOutcome' wrote.  The trail is empty
--- by construction: a trail is filled by 'stampFold' from the children actually
--- folded, and a replayed subtree folds none.
-decodeOutcome :: Text -> Value -> Maybe Outcome
-decodeOutcome node v = case v ?. "skipped" >>= asText of
-  Just why -> Just Skipped {outcomeNode = named, outcomeTrail = [], skipReason = why}
-  Nothing -> case v ?. "failure" >>= decodeJson of
-    Just f ->
-      Just
-        Failed
-          { outcomeNode = named
-          , outcomeTrail = []
-          , outcomeFailure = f
-          , partialReceipt = v ?. "receipt" >>= decodeJson
-          }
-    Nothing -> case decodeJson v of
-      Just r -> Just Done {outcomeNode = r.receiptNode, outcomeTrail = [], doneReceipt = r}
-      Nothing -> Nothing
-  where
-    named = fromMaybe node (v ?. "node" >>= asText)
+adoptedWork seed o = WorkResumed {workSeed = seed, workOutcome = AdoptedOutcome o}
 
 orElse :: Maybe a -> Maybe a -> Maybe a
 orElse (Just a) _ = Just a
 orElse Nothing b = b
-
--- ---------------------------------------------------------------------------
--- Journal payloads
--- ---------------------------------------------------------------------------
-
--- | The coalgebra's output.  Decomposition is cognition, so it is recorded and
--- never re-derived; a nondeterministic re-plan on resume would orphan every
--- completed child below it.
---
--- @childTrees@ is present only on the SECOND append (see 'emitSplit'), and it
--- is what makes "rebind, never recreate" mechanical rather than a guess: a
--- child's branch is its durable identity, so a resumed run looks the retained
--- worktree up by it instead of reconstructing a label.
-splitPayload :: DevPlan -> [DevPlan] -> GitOid -> Maybe [NodeSeed] -> Value
-splitPayload p kids scaffoldHead allocated =
-  object
-    ( [ "node" .= nodeName p
-      , "scaffoldHead" .= renderGitOid scaffoldHead
-      , "children" .= map nodeName kids
-      , "plan" .= toJSON p
-      ]
-        <> case allocated of
-          Nothing -> []
-          Just seeds -> ["childTrees" .= map childTreeEntry seeds]
-    )
-  where
-    childTreeEntry s =
-      object ["name" .= nodeName s.seedPlan, "branch" .= branchOf s.seedTree]
 
 -- ---------------------------------------------------------------------------
 -- Run summary
@@ -1519,20 +1533,15 @@ priorTrail fold
   | not (isResumed fold) = []
   | otherwise =
       [fmt|resumed run {fold.resumeRunId}: {length fold.resumeEntries} journaled steps folded in|]
-        : map rebaseLine (resumeOfKind "rebase" fold)
+        : [rebaseLine n | (_, _, RebaseEvent {evNote = n}) <- eventsOfKind RebaseKind fold]
   where
-    rebaseLine e = case decodeJson e.resumePayload :: Maybe RebaseNote of
-      Just n -> [fmt|prior process: rebased {n.rebaseBranch} onto {n.rebaseOnto} ({show n.rebaseTier})|]
-      Nothing -> [fmt|prior process: rebased {e.resumeKey}|]
+    rebaseLine n = [fmt|prior process: rebased {n.rebaseBranch} onto {n.rebaseOnto} ({show n.rebaseTier})|]
 
 priorEscalations :: ResumeFold -> [Text]
 priorEscalations fold =
-  [ [fmt|prior process — {nodeOf e}: {detailOf e}|]
-  | e <- resumeOfKind "escalation" fold
+  [ [fmt|prior process — {n}: {why}|]
+  | (_, _, EscalationEvent {evEscNode = n, evEscDetail = why}) <- eventsOfKind EscalationKind fold
   ]
-  where
-    nodeOf e = fromMaybe e.resumeKey (e.resumePayload ?. "node" >>= asText)
-    detailOf e = fromMaybe "escalated" (e.resumePayload ?. "detail" >>= asText)
 
 escalationsOf :: Outcome -> [Text]
 escalationsOf o = case o of

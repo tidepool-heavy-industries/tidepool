@@ -111,7 +111,17 @@ phase 2+ emits them.
    (found by the Worktree lane, §11.12 of the scaffold doc): `SpawnError`
    embeds the wire `WorktreeError` as a FIELD in two variants — the
    fragment-crossing stable-home placement must be settled BEFORE this
-   row's goldens are captured, not after.
+   row's goldens are captured, not after. Two row-design requirements from
+   the path review (2026-08-19), settled AT migration rather than churned
+   ahead of it: (a) the detached and stepped cycle protocols occupy one
+   opaque id namespace, with wrong-driver use rejected only by runtime
+   text — the migrated row splits the wire identity (mode-indexed ids or
+   separate raw verbs) so an await request for a stepped cycle cannot be
+   formed; (b) an `AgentHandle` can be abandoned without await or cancel,
+   leaving reaping to handler teardown — the migrated surface adds the
+   bracket form (`withAgentAsync spec \\h -> …` whose continuation must
+   settle the handle) as the recommended spelling, with full linearity
+   deferred unless `LinearTypes` proves extract-clean.
 
    **Placement is a schema attribute with DERIVED answers** (locked,
    2026-08-18, from the Worktree lane's §11.12): per-session `type_defs`

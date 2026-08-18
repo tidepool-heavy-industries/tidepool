@@ -6,35 +6,25 @@
 {-# LANGUAGE QuasiQuotes #-}
 {-# LANGUAGE TypeApplications #-}
 
--- | The recursive companion (PRD 21 lane C3): one root turn in which a
--- coalgebra window finalizes a 'ThoughtF' layer (or a local finish), each
--- branch descends recursively from its parent's FROZEN context, an algebra
--- window folds typed results in declared branch order, and the operator gets
--- a folded answer with the tree inspectable but not primary.
+-- | The recursive companion: one root turn in which a coalgebra window
+-- finalizes a 'ThoughtF' layer (or a local finish) for its own node only,
+-- each branch descends recursively from its parent's FROZEN context, an
+-- algebra window folds typed results in declared branch order (including a
+-- leaf's, which sees a childless layer), and the operator gets a folded
+-- answer with the tree inspectable but not primary.
 --
--- __The recursion lives HERE, in the authored outer loop, and that is
--- forced.__  @Harness::new@ builds a window's @child_cfg@ as
--- @fork_child_decls(&cfg.decls)@ — this node's row MINUS the fork-spawning
--- effects — so a fork\/fanout child compiles against a row with no @Fork@ in
--- it and structurally cannot produce grandchildren.  Depth would stop at two.
--- Recursion therefore lives at the one place @Fork@ is never removed: the
--- authored loop.
+-- Recursion lives in this authored outer loop, never inside a window: a
+-- fork\/fanout child compiles against its parent's row MINUS @Fork@, so it is
+-- structurally incapable of producing grandchildren.
 --
--- __The two seams.__  Cognition enters at exactly two typed windows —
--- 'discover' (ONE @runLLMTurnBranch \@LayerProposal@ per node, forked off the
--- parent's frozen post-coalgebra context) and 'foldNode' (ONE
--- @runLLMTurnFork \@FoldProposal@ per node).  Everything else in this
--- file is compiled coordination and costs zero tokens.  The algebra runs at
--- EVERY node (PRD 21 locked decision 8): a leaf's algebra sees a realized
--- layer with no children, and that is the uniform place a fold becomes
--- durable.
+-- Cognition enters at exactly two windows — 'discover' (branched off the
+-- parent's frozen post-coalgebra context) and 'foldNode' (forked) — every
+-- other function here is compiled coordination.
 --
--- __Assumed row.__  @Companion@ is an alias for @M@, and this file needs
--- @RunLLMTurn@, @AskUser@, @Console@ and @Journal@ — a subset of the driver's
--- widened outer session (@selfharness::driver::outer_decls@).  It declares no
--- new effect and asks for no row widening.
--- @tidepool-harness\/tests\/dogfood_harness_typecheck.rs@ compiles it against
--- that full row.
+-- @Companion@ is @M@ at the driver's outer row (@RunLLMTurn@, @AskUser@,
+-- @Console@, @Journal@); this file declares no new effect.
+-- @tidepool-harness\/tests\/dogfood_harness_typecheck.rs@ pins it against
+-- that row.
 module Harness
   ( -- * The locked entry points
     State (..)
@@ -72,6 +62,7 @@ module Harness
   , childPath
   , slug
   , childSeed
+  , childEdge
   , childAllowance
   ) where
 
@@ -93,6 +84,7 @@ import Tidepool.Harness (Harness)
 import Tidepool.Journal (record)
 import Tidepool.Prelude hiding (render)
 import Tidepool.QQ (fmt)
+import Tidepool.Swarm (cyclesToInt, mkCycles, splitAllowance)
 import Tidepool.Thought (Coalg, Strategy, ThoughtF, depthCapped, fanOutCapped, thoughtHylo)
 import qualified Tidepool.Thought as Th
 
@@ -159,6 +151,13 @@ data NodeSeed = NodeSeed
 
 -- | Divide what is left after this node's own reservation among its children.
 --
+-- Routed through 'Tidepool.Swarm.splitAllowance' rather than a second,
+-- hand-rolled formula: that function's conservation law (property-tested —
+-- kept plus every child's share never exceeds the input) is what
+-- 'Harness.applyGate'\'s @Add@ path leans on to redivide a layer for a NEW
+-- branch count without minting allowance the parent never had.  Writing the
+-- arithmetic twice is how that class of bug recurs.
+--
 -- Conservative on purpose (a subtree finishing under its share does not
 -- return the remainder to its siblings) and NEVER clamped upward: a share
 -- that floors to zero stays zero, so a node that cannot fund every child
@@ -168,7 +167,9 @@ data NodeSeed = NodeSeed
 childAllowance :: NodeSeed -> Int -> Int
 childAllowance parent n
   | n <= 0 = 0
-  | otherwise = max 0 (parent.seedAllowance - 1) `div` n
+  | otherwise = case snd (splitAllowance (mkCycles parent.seedAllowance) (mkCycles 1) n) of
+      [] -> 0
+      (perChild : _) -> cyclesToInt perChild
 
 -- | THE inheritance seam — the ONE function that decides what a child knows
 -- from above, and the answer is now: its parent's own frozen window.
@@ -176,7 +177,8 @@ childAllowance parent n
 -- @parent.seedRef@ read here is NOT the ref the parent branched from.
 -- 'discover' re-stamps the seed with the ref its OWN coalgebra window froze
 -- before building this layer, so what a child forks is its parent's
--- POST-coalgebra context — the decision it just made included.
+-- POST-coalgebra context — the decision it just made included.  'childEdge'
+-- is the paired constructor that also stamps the matching 'Th.Branch'.
 childSeed :: NodeSeed -> Int -> Int -> Th.ForkBrief -> NodeSeed
 childSeed parent allowance i b =
   NodeSeed
@@ -186,6 +188,31 @@ childSeed parent allowance i b =
     , seedAllowance = allowance
     , seedRef = parent.seedRef
     }
+
+-- | THE single producer of a child's whole identity: a 'Th.Branch' (what the
+-- render and every receipt read) paired with the 'NodeSeed' that same
+-- child's OWN window is prompted from ('seedBrief' — a coalgebra sees only
+-- its own seed, never the 'Th.Branch' that names it).  Both halves are built
+-- from the same 'Th.ForkBrief' HERE, in one call, so they cannot desync —
+-- the exact failure class a prior regression pinned: a brief written on the
+-- 'Th.Branch' and not into the seed renders right and works wrong.
+--
+-- Every caller that mints OR edits a branch of @parent@ routes through this:
+-- the original split ('splitLayer'), and every accepted gate verdict
+-- ('applyGate').  A KEPT branch is rebuilt here too, from @parent@ and its
+-- own current brief\/allowance, rather than patched onto its old 'Th.Branch'
+-- — there is exactly one formula for "this position, this brief, this
+-- allowance, this parent", never a second one a future edit path could drift
+-- from.
+--
+-- Not made the sole way to construct a 'NodeSeed' AT THE TYPE LEVEL — that
+-- would need 'NodeSeed' opaque, which ripples into every typecheck\/
+-- regression probe that builds one by record literal
+-- (@tidepool-harness\/tests\/dogfood_harness_typecheck.rs@).  This is the
+-- documented sole producer for the two real call sites, with the fields
+-- still exported.
+childEdge :: NodeSeed -> Int -> Int -> Th.ForkBrief -> Th.Branch NodeSeed
+childEdge parent allowance i b = Th.Branch b (childSeed parent allowance i b)
 
 -- ---------------------------------------------------------------------------
 -- The resident cycle
@@ -445,7 +472,7 @@ gateRounds cfg seed done layer
   | otherwise = do
       approval <- askUser @LayerApproval
       let rounds = done + 1
-      case applyGate approval layer of
+      case applyGate seed approval layer of
         Left why -> do
           record "gate" key (gatePayload approval rounds ("refused — " <> why))
           say [fmt|gate refused that verdict: {why}|]
@@ -525,8 +552,7 @@ splitLayer seed po f ps pbs
     blank pb = strip pb.branchTitle == "" || strip pb.branchInstruction == ""
     allowance = childAllowance seed (length pbs)
     child i pb =
-      let b = Th.ForkBrief pb.branchTitle (roleOf pb.branchRole) pb.branchInstruction
-       in Th.Branch b (childSeed seed allowance i b)
+      childEdge seed allowance i (Th.ForkBrief pb.branchTitle (roleOf pb.branchRole) pb.branchInstruction)
 
 invocationFailed :: NodeSeed -> Text -> ThoughtF NodeSeed
 invocationFailed seed why =
@@ -543,7 +569,18 @@ invocationFailed seed why =
 --   wrong one — the operator who wants the subtree gone prunes to one branch,
 --   or ends the turn.
 -- * 'Amend' — replace the matching branch's instruction.
--- * 'Add' — append a branch built from the form's title\/role\/text.
+-- * 'Add' — append a branch built from the form's title\/role\/text, and
+--   REDIVIDE every kept-plus-added branch's allowance for the new branch
+--   count ('reshared').  Appending a branch changes the count @seed@'s
+--   allowance was originally split by, so a survivor's OLD per-child share
+--   is stale the instant the layer grows — handing the new branch a copy of
+--   it (or leaving the survivors' shares untouched) mints allowance @seed@
+--   never had to give out.
+--
+-- @seed@ is the NODE THIS LAYER BELONGS TO — the parent whose own
+-- 'NodeSeed.seedAllowance' every branch's share is divided out of
+-- ('childAllowance'), and the same parent every kept-or-edited branch is
+-- rebuilt against via 'childEdge' — never a sibling's already-built seed.
 --
 -- A verdict naming a title no branch has is 'Left', and the caller
 -- re-presents the form.  Every accepted verdict re-derives the surviving
@@ -554,51 +591,55 @@ invocationFailed seed why =
 -- A 'Th.Finish' is returned unchanged: the gate is only ever presented for a
 -- split ('gateApplies'), and being total about it is cheaper than being
 -- partial.
-applyGate :: LayerApproval -> ThoughtF NodeSeed -> Either Text (ThoughtF NodeSeed)
-applyGate approval layer = case layer of
+applyGate :: NodeSeed -> LayerApproval -> ThoughtF NodeSeed -> Either Text (ThoughtF NodeSeed)
+applyGate seed approval layer = case layer of
   Th.Finish _ -> Right layer
   _ -> case approval.gateVerdict of
     Approve -> Right layer
     Prune
       | not (any titled brs) -> Left (noSuchBranch approval.gateTarget)
       | length brs <= 1 -> Left "pruning the last branch would leave the layer empty"
-      | otherwise -> Right (reindexed (filter (not . titled) brs))
+      | otherwise -> reindexed [(br.brief, br.value.seedAllowance) | br <- filter (not . titled) brs]
     Amend
       | not (any titled brs) -> Left (noSuchBranch approval.gateTarget)
-      | otherwise -> Right (reindexed (map amend brs))
+      | otherwise -> reindexed [(amendedBrief br, br.value.seedAllowance) | br <- brs]
     Add
       | strip approval.gateTitle == "" -> Left "an added branch needs a title"
-      | otherwise -> case brs of
-          [] -> Left "a layer with no branches cannot take an added one"
-          (template : _) -> Right (reindexed (brs <> [addedFrom template]))
+      | null brs -> Left "a layer with no branches cannot take an added one"
+      | otherwise -> reshared (map (.brief) brs <> [addedBrief])
   where
     brs = layerBranches layer
     titled br = br.brief.title == approval.gateTarget
     noSuchBranch t = [fmt|no branch in this layer is titled "{t}"|]
-    amend br = if titled br then withBrief (amendedBrief br.brief) br else br
-    amendedBrief b = b {Th.instruction = approval.gateText}
-    -- An added branch inherits its siblings' depth, allowance and context
-    -- ref: it is a peer at the same position in the tree, so it forks the
-    -- same frozen parent window they do, and the operator adding it changes
-    -- neither that nor how much of the node budget the parent divided out.
-    addedFrom template =
-      withBrief (Th.ForkBrief approval.gateTitle (roleOf approval.gateRole) approval.gateText) template
-    reindexed kept = rebuildLayer layer (imap repath kept)
-    repath i (Th.Branch b s) =
-      Th.Branch b s {seedPath = childPath (parentPath s.seedPath) i b.title}
-
--- | Set a branch's brief on BOTH halves that carry it.
---
--- A branch holds its 'Th.ForkBrief' twice: once on the 'Th.Branch' (what the
--- fold's rendered layer and every receipt read) and once inside the seed
--- ('seedBrief', what the CHILD'S OWN WINDOW is prompted with, since a
--- coalgebra receives only the seed).  Writing one and not the other is
--- silently wrong in the worst direction — an operator's amended instruction
--- would render correctly in the tree while the model kept working the
--- original one.  Every gate verdict that changes a brief goes through here so
--- the two cannot drift.
-withBrief :: Th.ForkBrief -> Th.Branch NodeSeed -> Th.Branch NodeSeed
-withBrief b (Th.Branch _ s) = Th.Branch b s {seedBrief = b}
+    amendedBrief br = if titled br then updated else br.brief
+      where updated = br.brief {Th.instruction = approval.gateText}
+    addedBrief = Th.ForkBrief approval.gateTitle (roleOf approval.gateRole) approval.gateText
+    -- Every branch this layer ends up with is minted fresh from @seed@ via
+    -- 'childEdge' — never patched onto an old 'Th.Branch' — so a kept
+    -- branch's brief and its own seed's prompted brief cannot drift, the
+    -- same guarantee 'childEdge's own doc explains.
+    --
+    -- 'reindexed': allowance UNCHANGED per branch — 'Prune' and 'Amend' never
+    -- change the branch COUNT @seed@'s allowance was divided by, so each
+    -- kept branch's existing share is still exactly what 'splitLayer'
+    -- computed for it.
+    reindexed briefsWithAllowance = case NE.nonEmpty (imap mkEdge briefsWithAllowance) of
+      Nothing -> Left "an edited layer cannot be rebuilt with zero branches"
+      Just ne -> Right (rebuildLayer layer ne)
+      where
+        mkEdge i (b, allowance) = childEdge seed allowance i b
+    -- 'reshared': every kept-plus-added brief is redivided through
+    -- 'childAllowance' (itself routed through 'Tidepool.Swarm.splitAllowance')
+    -- for the NEW branch count — the fix for the review's minted-allowance
+    -- scenario: allowance 5, two children at 2 each; an operator 'Add'
+    -- redivides all THREE to 1 each rather than handing the third a bare
+    -- copy of a sibling's now-stale 2.
+    reshared briefs = case NE.nonEmpty (imap mkEdge briefs) of
+      Nothing -> Left "an edited layer cannot be rebuilt with zero branches"
+      Just ne -> Right (rebuildLayer layer ne)
+      where
+        n = length briefs
+        mkEdge i b = childEdge seed (childAllowance seed n) i b
 
 -- ---------------------------------------------------------------------------
 -- The algebra — how to combine
@@ -697,13 +738,13 @@ foldAt layer path = do
 -- @Tidepool.Thought@, which this lane consumes verbatim.  Making discovery
 -- concurrent is that module's edit, not this one's.)
 traverseLayer :: Strategy -> (Th.Branch a -> Companion b) -> ThoughtF a -> Companion (ThoughtF b)
-traverseLayer _proposed visit layer = do
-  visited <- traverse step (layerBranches layer)
-  pure (rebuildLayer layer visited)
+traverseLayer _proposed visit layer = case layer of
+  Th.Finish d -> pure (Th.Finish d)
+  Th.Explore f bs s -> Th.Explore f <$> traverse step bs <*> pure s
+  Th.Compare d os s -> Th.Compare d <$> traverse step os <*> pure s
+  Th.Challenge c as s -> Th.Challenge c <$> traverse step as <*> pure s
   where
-    step br = do
-      v <- visit br
-      pure (Th.Branch br.brief v)
+    step br = Th.Branch br.brief <$> visit br
 
 -- | How many MODEL windows this node itself spent.  A node a budget refused
 -- before its coalgebra ran spent only its fold; every other node — including

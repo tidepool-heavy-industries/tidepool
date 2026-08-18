@@ -180,7 +180,10 @@ fn dev_tree_typechecks() {
 /// - `layerFromProposal` turns a window's answer into a layer, INCLUDING the
 ///   empty-split and blank-branch cases that become `InvocationFailed`;
 /// - `applyGate` turns one operator verdict into an amended layer, including
-///   the refusals (`Left`) the gate loop re-presents;
+///   the refusals (`Left`) the gate loop re-presents — and takes the acting
+///   node's own `NodeSeed` first, which is what an `Add` verdict redivides
+///   allowance from (see `recursive_companion_gate_add_never_mints_allowance`
+///   below);
 /// - `renderPath`/`childPath` are node identity, and `childPath` in
 ///   particular is the ONE function both the coalgebra and the algebra call,
 ///   which is why the two cannot disagree about a child's id.
@@ -193,7 +196,7 @@ fn recursive_companion_typechecks() {
         concat!(
             "__layerFromProposal :: NodeSeed -> LayerProposal -> ThoughtF NodeSeed\n",
             "__layerFromProposal = layerFromProposal\n",
-            "__applyGate :: LayerApproval -> ThoughtF NodeSeed -> Either Text (ThoughtF NodeSeed)\n",
+            "__applyGate :: NodeSeed -> LayerApproval -> ThoughtF NodeSeed -> Either Text (ThoughtF NodeSeed)\n",
             "__applyGate = applyGate\n",
             "__renderPath :: NodePath -> Text\n",
             "__renderPath = renderPath\n",
@@ -471,5 +474,304 @@ fn dev_tree_child_allowance_never_overspends_parent_cap() {
         .expect("__overspendReport :: Text renders as a JSON string");
     assert!(report.contains("childShare=0"), "{report}");
     assert!(report.contains("totalSpend=2"), "{report}");
+    assert!(report.contains("withinCap=True"), "{report}");
+}
+
+/// The journal vocabulary round-trip pin (dev-tree's own durable
+/// `split`/`outcome`/`replan`/`rebase`/`escalation` schema, typed by
+/// `DevTreeJournal`).
+///
+/// Every case below asserts TWO things about one `JournalEvent`: (1)
+/// `payloadOf` builds the exact wire shape the pre-refactor code wrote by
+/// hand at its `record` call site (a literal captured from that code, not
+/// re-derived here), and (2) `decodeEvent` reconstructs the identical typed
+/// value from that payload — so a journal the pre-refactor code wrote folds
+/// identically under this reader. The escalation-defaulting and
+/// unknown-kind cases pin the total-degrading contract `decodeEvent`'s
+/// module doc promises, which nothing else here exercises.
+const JOURNAL_ROUND_TRIP_SOURCE: &str = concat!(
+    "{-# LANGUAGE NoImplicitPrelude, OverloadedStrings, DataKinds, TypeOperators, ",
+    "FlexibleContexts, GADTs, ScopedTypeVariables, TypeApplications, LambdaCase, ",
+    "RecordWildCards, OverloadedRecordDot, QuasiQuotes, DeriveGeneric, DeriveAnyClass #-}\n",
+    "module JournalRoundTripProbe where\n",
+    "import Tidepool.Prelude hiding (render)\n",
+    "import Tidepool.Effects\n",
+    "import Harness\n",
+    "import DevTreeJournal\n",
+    "import HarnessTypes (OnFailure (..), DevPlan (..), FoldReceipt (..), Outcome (..), Failure (..), FailureKind (..), CheckResult (..), ReplanDecision (..), RebaseNote (..), RebaseTier (..))\n",
+    "import Tidepool.Aeson (Value, object, toJSON, (.=))\n",
+    "import qualified Data.Text as T\n",
+    "\n",
+    "verify :: Text -> Bool -> Text\n",
+    "verify name ok = (if ok then \"PASS: \" else \"FAIL: \") <> name\n",
+    "\n",
+    "childPlan1, childPlan2 :: DevPlan\n",
+    "childPlan1 = DevPlan { nodeName = \"c1\", nodeTask = \"t1\", nodeChecks = [], nodeBoundary = [], nodeOnFailure = Retry, childPlans = [] }\n",
+    "childPlan2 = DevPlan { nodeName = \"c2\", nodeTask = \"t2\", nodeChecks = [], nodeBoundary = [], nodeOnFailure = Retry, childPlans = [] }\n",
+    "\n",
+    "parentPlan :: DevPlan\n",
+    "parentPlan = DevPlan { nodeName = \"parent\", nodeTask = \"t\", nodeChecks = [], nodeBoundary = [], nodeOnFailure = Retry, childPlans = [childPlan1, childPlan2] }\n",
+    "\n",
+    "splitEv1 :: JournalEvent\n",
+    "splitEv1 = SplitEvent (JournalKey \"dev-tree/parent\") parentPlan \"scaffoldHead0\" Nothing\n",
+    "\n",
+    "expectedSplitPayload1 :: Value\n",
+    "expectedSplitPayload1 = object [ \"node\" .= (\"parent\" :: Text), \"scaffoldHead\" .= (\"scaffoldHead0\" :: Text), \"children\" .= ([\"c1\", \"c2\"] :: [Text]), \"plan\" .= toJSON parentPlan ]\n",
+    "\n",
+    "caseSplitPayloadFirstAppend :: Text\n",
+    "caseSplitPayloadFirstAppend = verify \"split-payload-first-append-matches-legacy-wire\" (payloadOf splitEv1 == expectedSplitPayload1)\n",
+    "\n",
+    "caseSplitRoundTripFirstAppend :: Text\n",
+    "caseSplitRoundTripFirstAppend = verify \"split-round-trips-first-append\" (decodeEvent \"split\" \"dev-tree/parent\" (payloadOf splitEv1) == Just splitEv1)\n",
+    "\n",
+    "splitEv2 :: JournalEvent\n",
+    "splitEv2 = SplitEvent (JournalKey \"dev-tree/parent\") parentPlan \"scaffoldHead0\" (Just [(\"c1\", \"dev-tree/parent/c1\"), (\"c2\", \"dev-tree/parent/c2\")])\n",
+    "\n",
+    "expectedSplitPayload2 :: Value\n",
+    "expectedSplitPayload2 = object [ \"node\" .= (\"parent\" :: Text), \"scaffoldHead\" .= (\"scaffoldHead0\" :: Text), \"children\" .= ([\"c1\", \"c2\"] :: [Text]), \"plan\" .= toJSON parentPlan, \"childTrees\" .= [ object [\"name\" .= (\"c1\" :: Text), \"branch\" .= (\"dev-tree/parent/c1\" :: Text)], object [\"name\" .= (\"c2\" :: Text), \"branch\" .= (\"dev-tree/parent/c2\" :: Text)] ] ]\n",
+    "\n",
+    "caseSplitPayloadSecondAppend :: Text\n",
+    "caseSplitPayloadSecondAppend = verify \"split-payload-second-append-matches-legacy-wire\" (payloadOf splitEv2 == expectedSplitPayload2)\n",
+    "\n",
+    "caseSplitRoundTripSecondAppend :: Text\n",
+    "caseSplitRoundTripSecondAppend = verify \"split-round-trips-second-append\" (decodeEvent \"split\" \"dev-tree/parent\" (payloadOf splitEv2) == Just splitEv2)\n",
+    "\n",
+    "mkReceipt :: FoldReceipt\n",
+    "mkReceipt = FoldReceipt { receiptNode = \"leaf\", receiptBranch = \"dev-tree/leaf\", receiptSeedHead = \"seed0000\", receiptHead = \"head1111\", receiptHeadMoved = True, receiptChecks = [CheckResult \"cargo check\" 0 \"\"], receiptRebases = [], receiptOutside = [], receiptCycles = 1, receiptAgentRan = True, receiptReviewed = False, receiptSummary = \"done\", receiptEvidence = [] }\n",
+    "\n",
+    "doneOutcome :: Outcome\n",
+    "doneOutcome = Done { outcomeNode = \"leaf\", outcomeTrail = [], doneReceipt = mkReceipt }\n",
+    "\n",
+    "outcomeEvDone :: JournalEvent\n",
+    "outcomeEvDone = OutcomeEvent (JournalKey \"dev-tree/leaf\") doneOutcome\n",
+    "\n",
+    "caseOutcomeDonePayloadIsBareReceipt :: Text\n",
+    "caseOutcomeDonePayloadIsBareReceipt = verify \"outcome-done-payload-is-bare-receipt\" (payloadOf outcomeEvDone == toJSON mkReceipt)\n",
+    "\n",
+    "caseOutcomeDoneRoundTrips :: Text\n",
+    "caseOutcomeDoneRoundTrips = verify \"outcome-done-round-trips\" (decodeEvent \"outcome\" \"dev-tree/leaf\" (payloadOf outcomeEvDone) == Just outcomeEvDone)\n",
+    "\n",
+    "failure1 :: Failure\n",
+    "failure1 = Failure { failureKind = ChecksFailed, failureDetail = \"boom\", failurePaths = [] }\n",
+    "\n",
+    "failedWithReceipt :: Outcome\n",
+    "failedWithReceipt = Failed { outcomeNode = \"leaf\", outcomeTrail = [], outcomeFailure = failure1, partialReceipt = Just mkReceipt }\n",
+    "\n",
+    "outcomeEvFailedWithReceipt :: JournalEvent\n",
+    "outcomeEvFailedWithReceipt = OutcomeEvent (JournalKey \"dev-tree/leaf\") failedWithReceipt\n",
+    "\n",
+    "expectedFailedWithReceiptPayload :: Value\n",
+    "expectedFailedWithReceiptPayload = object [\"node\" .= (\"leaf\" :: Text), \"failure\" .= toJSON failure1, \"receipt\" .= toJSON mkReceipt]\n",
+    "\n",
+    "caseOutcomeFailedWithReceiptPayload :: Text\n",
+    "caseOutcomeFailedWithReceiptPayload = verify \"outcome-failed-with-receipt-payload-matches-legacy-wire\" (payloadOf outcomeEvFailedWithReceipt == expectedFailedWithReceiptPayload)\n",
+    "\n",
+    "caseOutcomeFailedWithReceiptRoundTrips :: Text\n",
+    "caseOutcomeFailedWithReceiptRoundTrips = verify \"outcome-failed-with-receipt-round-trips\" (decodeEvent \"outcome\" \"dev-tree/leaf\" (payloadOf outcomeEvFailedWithReceipt) == Just outcomeEvFailedWithReceipt)\n",
+    "\n",
+    "failedNoReceipt :: Outcome\n",
+    "failedNoReceipt = Failed { outcomeNode = \"leaf\", outcomeTrail = [], outcomeFailure = failure1, partialReceipt = Nothing }\n",
+    "\n",
+    "outcomeEvFailedNoReceipt :: JournalEvent\n",
+    "outcomeEvFailedNoReceipt = OutcomeEvent (JournalKey \"leaf\") failedNoReceipt\n",
+    "\n",
+    "expectedFailedNoReceiptPayload :: Value\n",
+    "expectedFailedNoReceiptPayload = object [\"node\" .= (\"leaf\" :: Text), \"failure\" .= toJSON failure1]\n",
+    "\n",
+    "caseOutcomeFailedNoReceiptPayload :: Text\n",
+    "caseOutcomeFailedNoReceiptPayload = verify \"outcome-failed-no-receipt-payload-matches-legacy-wire\" (payloadOf outcomeEvFailedNoReceipt == expectedFailedNoReceiptPayload)\n",
+    "\n",
+    "caseOutcomeFailedNoReceiptRoundTrips :: Text\n",
+    "caseOutcomeFailedNoReceiptRoundTrips = verify \"outcome-failed-no-receipt-round-trips\" (decodeEvent \"outcome\" \"leaf\" (payloadOf outcomeEvFailedNoReceipt) == Just outcomeEvFailedNoReceipt)\n",
+    "\n",
+    "skippedOutcome :: Outcome\n",
+    "skippedOutcome = Skipped { outcomeNode = \"leaf\", outcomeTrail = [], skipReason = \"not merged (subtree abandoned)\" }\n",
+    "\n",
+    "outcomeEvSkipped :: JournalEvent\n",
+    "outcomeEvSkipped = OutcomeEvent (JournalKey \"leaf\") skippedOutcome\n",
+    "\n",
+    "expectedSkippedPayload :: Value\n",
+    "expectedSkippedPayload = object [\"node\" .= (\"leaf\" :: Text), \"skipped\" .= (\"not merged (subtree abandoned)\" :: Text)]\n",
+    "\n",
+    "caseOutcomeSkippedPayload :: Text\n",
+    "caseOutcomeSkippedPayload = verify \"outcome-skipped-payload-matches-legacy-wire\" (payloadOf outcomeEvSkipped == expectedSkippedPayload)\n",
+    "\n",
+    "caseOutcomeSkippedRoundTrips :: Text\n",
+    "caseOutcomeSkippedRoundTrips = verify \"outcome-skipped-round-trips\" (decodeEvent \"outcome\" \"leaf\" (payloadOf outcomeEvSkipped) == Just outcomeEvSkipped)\n",
+    "\n",
+    "decision1 :: ReplanDecision\n",
+    "decision1 = ReplanDecision { amendedInstruction = \"try differently\", abandonSubtree = False, rationale = \"child failed\" }\n",
+    "\n",
+    "replanEv :: JournalEvent\n",
+    "replanEv = ReplanEvent (JournalKey \"dev-tree/child\") decision1\n",
+    "\n",
+    "caseReplanPayloadIsBareDecision :: Text\n",
+    "caseReplanPayloadIsBareDecision = verify \"replan-payload-is-bare-decision\" (payloadOf replanEv == toJSON decision1)\n",
+    "\n",
+    "caseReplanRoundTrips :: Text\n",
+    "caseReplanRoundTrips = verify \"replan-round-trips\" (decodeEvent \"replan\" \"dev-tree/child\" (payloadOf replanEv) == Just replanEv)\n",
+    "\n",
+    "note1 :: RebaseNote\n",
+    "note1 = RebaseNote { rebaseBranch = \"dev-tree/child\", rebaseOnto = \"abc123\", rebaseTier = RebaseClean }\n",
+    "\n",
+    "rebaseEv :: JournalEvent\n",
+    "rebaseEv = RebaseEvent (JournalKey \"dev-tree/child\") note1\n",
+    "\n",
+    "caseRebasePayloadIsBareNote :: Text\n",
+    "caseRebasePayloadIsBareNote = verify \"rebase-payload-is-bare-note\" (payloadOf rebaseEv == toJSON note1)\n",
+    "\n",
+    "caseRebaseRoundTrips :: Text\n",
+    "caseRebaseRoundTrips = verify \"rebase-round-trips\" (decodeEvent \"rebase\" \"dev-tree/child\" (payloadOf rebaseEv) == Just rebaseEv)\n",
+    "\n",
+    "escalationEv :: JournalEvent\n",
+    "escalationEv = EscalationEvent (JournalKey \"dev-tree/child\") \"child\" \"unresolved conflict\"\n",
+    "\n",
+    "expectedEscalationPayload :: Value\n",
+    "expectedEscalationPayload = object [\"node\" .= (\"child\" :: Text), \"detail\" .= (\"unresolved conflict\" :: Text)]\n",
+    "\n",
+    "caseEscalationPayload :: Text\n",
+    "caseEscalationPayload = verify \"escalation-payload-matches-legacy-wire\" (payloadOf escalationEv == expectedEscalationPayload)\n",
+    "\n",
+    "caseEscalationRoundTrips :: Text\n",
+    "caseEscalationRoundTrips = verify \"escalation-round-trips\" (decodeEvent \"escalation\" \"dev-tree/child\" (payloadOf escalationEv) == Just escalationEv)\n",
+    "\n",
+    "caseEscalationDefaultsMissingNode :: Text\n",
+    "caseEscalationDefaultsMissingNode =\n",
+    "  let p = object [\"detail\" .= (\"unresolved\" :: Text)]\n",
+    "      decoded = decodeEvent \"escalation\" \"dev-tree/fallback-key\" p\n",
+    "  in verify \"escalation-defaults-node-to-key-when-absent\" (decoded == Just (EscalationEvent (JournalKey \"dev-tree/fallback-key\") \"dev-tree/fallback-key\" \"unresolved\"))\n",
+    "\n",
+    "caseUnknownKindIsNothing :: Text\n",
+    "caseUnknownKindIsNothing = verify \"unknown-kind-decodes-to-nothing\" (decodeEvent \"sprocket\" \"k\" (object []) == Nothing)\n",
+    "\n",
+    "__journalRoundTripReport :: Text\n",
+    "__journalRoundTripReport = T.intercalate \"\\n\"\n",
+    "  [ caseSplitPayloadFirstAppend, caseSplitRoundTripFirstAppend\n",
+    "  , caseSplitPayloadSecondAppend, caseSplitRoundTripSecondAppend\n",
+    "  , caseOutcomeDonePayloadIsBareReceipt, caseOutcomeDoneRoundTrips\n",
+    "  , caseOutcomeFailedWithReceiptPayload, caseOutcomeFailedWithReceiptRoundTrips\n",
+    "  , caseOutcomeFailedNoReceiptPayload, caseOutcomeFailedNoReceiptRoundTrips\n",
+    "  , caseOutcomeSkippedPayload, caseOutcomeSkippedRoundTrips\n",
+    "  , caseReplanPayloadIsBareDecision, caseReplanRoundTrips\n",
+    "  , caseRebasePayloadIsBareNote, caseRebaseRoundTrips\n",
+    "  , caseEscalationPayload, caseEscalationRoundTrips\n",
+    "  , caseEscalationDefaultsMissingNode, caseUnknownKindIsNothing\n",
+    "  ]\n",
+);
+
+/// Runs [`JOURNAL_ROUND_TRIP_SOURCE`] on the real JIT (pure, no agent, no
+/// git, no `Harness` effect at all — `recordEvent` itself is untested here
+/// on purpose, since it is a one-line composition of `payloadOf`/`kindOf`
+/// and "Tidepool.Journal"'s own `record`, already exercised end to end by
+/// `selfharness_persistence`).
+#[test]
+fn dev_tree_journal_event_round_trips() {
+    let json = execute_pure(
+        "harness-dogfooding/dev-tree",
+        outer_row_decls(),
+        JOURNAL_ROUND_TRIP_SOURCE,
+        "__journalRoundTripReport",
+    );
+    let report = json
+        .as_str()
+        .expect("__journalRoundTripReport :: Text renders as a JSON string");
+    let lines: Vec<&str> = report.lines().collect();
+    let failures: Vec<&&str> = lines.iter().filter(|l| l.starts_with("FAIL")).collect();
+    assert!(
+        failures.is_empty(),
+        "journal event round-trip(s) diverged from the legacy wire:\n{report}"
+    );
+    assert_eq!(
+        lines.len(),
+        20,
+        "expected 20 journal round-trip checks, got:\n{report}"
+    );
+}
+
+/// The Add-mints-allowance regression the external review flagged
+/// (`harness-dogfooding/recursive-companion/Harness.hs`'s `applyGate`, review
+/// 2026-08-19): the `Add` arm built a new branch by cloning a sibling's whole
+/// `NodeSeed` (`withBrief` only overwrites the brief), including the
+/// PER-CHILD allowance the original split computed for the OLD branch count.
+/// Appending a branch changes that count, so handing the new branch — and
+/// leaving every survivor at — its stale share mints allowance the parent's
+/// own reservation never accounted for: allowance 5, two children at 2 each
+/// (`childAllowance` floors `(5-1) \`div\` 2` to 2), an operator `Add`s a
+/// third — the old code gave it another 2, for 2+2+2=6 against the 5-1=4 the
+/// parent actually had to divide.
+///
+/// The fix redivides EVERY kept-plus-added branch's allowance through
+/// `childAllowance` for the NEW count (3), which floors `(5-1) \`div\` 3` to
+/// 1 each — 1+1+1=3 <= 4. This runs `layerFromProposal` (the real split) and
+/// `applyGate` (the real `Add` path) on the real JIT, pure and with no
+/// operator or model, and asserts the exact numbers the review's scenario
+/// names.
+const GATE_ADD_REGRESSION_SOURCE: &str = concat!(
+    "{-# LANGUAGE NoImplicitPrelude, OverloadedStrings, DataKinds, TypeOperators, ",
+    "FlexibleContexts, GADTs, ScopedTypeVariables, TypeApplications, LambdaCase, ",
+    "RecordWildCards, OverloadedRecordDot, QuasiQuotes, DeriveGeneric, DeriveAnyClass #-}\n",
+    "module GateAddProbe where\n",
+    "import Tidepool.Prelude hiding (render)\n",
+    "import Tidepool.Effects\n",
+    "import Harness\n",
+    "import HarnessTypes (layerBranches)\n",
+    "import Tidepool.Thought (ThoughtF)\n",
+    "import qualified Tidepool.Thought as Th\n",
+    "import Tidepool.QQ (fmt)\n",
+    "import qualified Data.Text as T\n",
+    "\n",
+    "-- Never forced: 'layerFromProposal'/'applyGate'/'childAllowance' only read\n",
+    "-- 'seedPath'/'seedAllowance', so a live 'ContextRef' is not needed for this pin.\n",
+    "parentSeed :: NodeSeed\n",
+    "parentSeed = NodeSeed { seedPath = NodePath [], seedBrief = Th.ForkBrief \"root\" Th.Primary \"root brief\", seedDepth = 0, seedAllowance = 5, seedRef = undefined }\n",
+    "\n",
+    "mkBranch :: Text -> ProposedBranch\n",
+    "mkBranch t = ProposedBranch { branchTitle = t, branchRole = Primary, branchInstruction = \"do \" <> t }\n",
+    "\n",
+    "initialLayer :: ThoughtF NodeSeed\n",
+    "initialLayer = layerFromProposal parentSeed (ProposeSplit { splitPosture = Explore, splitFocus = \"f\", splitStrategy = WantSequential, splitBranches = [mkBranch \"Alpha\", mkBranch \"Beta\"] })\n",
+    "\n",
+    "addVerdict :: LayerApproval\n",
+    "addVerdict = LayerApproval { gateVerdict = Add, gateTarget = \"\", gateTitle = \"Gamma\", gateRole = Primary, gateText = \"do gamma\", gateNote = \"\" }\n",
+    "\n",
+    "-- An empty list on 'Left' rather than an 'error' call (ambiguous here between\n",
+    "-- 'Tidepool.Prelude.error' and 'Tidepool.Effects.error') — an unexpected\n",
+    "-- 'Left' still fails the assertions below loudly, via branchCount=0.\n",
+    "allowances :: [Int]\n",
+    "allowances = case applyGate parentSeed addVerdict initialLayer of\n",
+    "  Left _ -> []\n",
+    "  Right amended -> map (\\(Th.Branch _ s) -> s.seedAllowance) (layerBranches amended)\n",
+    "\n",
+    "totalFunded :: Int\n",
+    "totalFunded = 1 + sum allowances\n",
+    "\n",
+    "__gateAddReport :: Text\n",
+    "__gateAddReport =\n",
+    "  T.intercalate \"\\n\"\n",
+    "    [ [fmt|branchCount={length allowances}|]\n",
+    "    , [fmt|allowances={show allowances}|]\n",
+    "    , [fmt|totalFunded={totalFunded}|]\n",
+    "    , [fmt|withinCap={totalFunded <= parentSeed.seedAllowance}|]\n",
+    "    ]\n",
+);
+
+/// Runs [`GATE_ADD_REGRESSION_SOURCE`] on the real JIT (pure, no agent, no
+/// git, no operator) and asserts the exact numbers the review's scenario
+/// names: three branches sharing 1 each, total funded pinned at 4 (never the
+/// pre-fix 6), and within the parent's own cap of 5.
+#[test]
+fn recursive_companion_gate_add_never_mints_allowance() {
+    let json = execute_pure(
+        "harness-dogfooding/recursive-companion",
+        outer_row_decls(),
+        GATE_ADD_REGRESSION_SOURCE,
+        "__gateAddReport",
+    );
+    let report = json
+        .as_str()
+        .expect("__gateAddReport :: Text renders as a JSON string");
+    assert!(report.contains("branchCount=3"), "{report}");
+    assert!(report.contains("allowances=[1,1,1]"), "{report}");
+    assert!(report.contains("totalFunded=4"), "{report}");
     assert!(report.contains("withinCap=True"), "{report}");
 }

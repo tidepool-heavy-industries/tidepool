@@ -795,11 +795,12 @@ pub struct SelfHarnessDriver {
     /// scratch dir rather than the real cache dir).
     checkpoint_path: PathBuf,
     /// The generation of the last checkpoint this driver committed or
-    /// restored — `0` before either has happened. A commit writes
-    /// `checkpoint_generation + 1` and then adopts it, so generation
+    /// restored — `None` before either has happened. A commit passes this as
+    /// [`persistence::Checkpoint::committed`]'s `previous`, which derives the
+    /// next generation rather than accepting one directly, so generation
     /// increases by exactly one per committed cycle and stays monotonic
     /// across a restart (restore adopts the reloaded generation first).
-    checkpoint_generation: u64,
+    checkpoint_generation: Option<persistence::CheckpointGeneration>,
     /// The number of loop cycles completed so far — a runtime fact, NOT part
     /// of the authored `State` (`plans/self-iterating-harness/
     /// 15-generic-surface-wave.md`, "Runtime context is the runtime's job").
@@ -889,7 +890,7 @@ impl SelfHarnessDriver {
             loop_inference_call_cap: LOOP_INFERENCE_CALL_CAP,
             concurrency_cap: DEFAULT_CONCURRENCY_CAP,
             checkpoint_path: persistence::default_checkpoint_path(),
-            checkpoint_generation: 0,
+            checkpoint_generation: None,
             iteration: 0,
             gate: Arc::new(StdinGate),
             handlers: OuterHandlers::default(),
@@ -1067,9 +1068,17 @@ impl SelfHarnessDriver {
     /// 3. The handler is built with
     ///    [`tidepool_handlers::JournalHandler::resuming`], targeting
     ///    `acquired.segment` (this process's OWN, freshly allocated segment —
-    ///    never a segment a prior process wrote to) and seeded at the fold's
-    ///    `next_seq` — so a resumed run's appends CONTINUE past what is
-    ///    already on disk instead of restarting at 0.
+    ///    never a segment a prior process wrote to) and seeded at
+    ///    `acquired.segment_ordinal` — the ordinal THIS process's segment
+    ///    claim landed on, never the fold's `next_seq`. Composing that
+    ///    ordinal into every `seq` this handler writes
+    ///    ([`tidepool_handlers::compose_journal_seq`]) is what makes `seq`
+    ///    structurally unique even when two processes resume the SAME
+    ///    extant lease at once and therefore fold the identical prior
+    ///    state: seeding both from that identical fold's `next_seq` is
+    ///    exactly how two concurrent resumes used to collide, and no
+    ///    coordination beyond each process's own exclusively-claimed
+    ///    segment ordinal is needed to prevent it.
     ///
     /// Returns how many `(kind, key)` pairs folded — `0` for a fresh run, which
     /// is also when the ordinary `loop` entry is compiled unchanged.
@@ -1089,7 +1098,7 @@ impl SelfHarnessDriver {
         let segment_count = crate::selfharness::resume::list_segments(log_dir, run_id)?.len();
         self.handlers.journal = Some(tidepool_handlers::JournalHandler::resuming(
             acquired.segment.clone(),
-            fold.next_seq(),
+            acquired.segment_ordinal,
         ));
         self.resume = Some(PendingResume {
             fold,
@@ -1808,8 +1817,8 @@ impl SelfHarnessDriver {
         let Some(checkpoint) = persistence::load_checkpoint(&self.checkpoint_path)? else {
             return Ok(None);
         };
-        self.checkpoint_generation = checkpoint.generation;
-        self.iteration = checkpoint.iteration;
+        self.checkpoint_generation = Some(checkpoint.generation());
+        self.iteration = checkpoint.iteration().get();
         if checkpoint.harness_source != source.fingerprint {
             // CARRY the state forward anyway (revised 2026-08-15, with the
             // operator). History matters here: restore once returned the
@@ -1860,16 +1869,15 @@ impl SelfHarnessDriver {
         source: &HarnessSource,
         state: &Json,
     ) -> Result<(), DriverError> {
-        let generation = self.checkpoint_generation + 1;
-        let checkpoint = persistence::Checkpoint {
-            generation,
-            state: state.clone(),
-            compaction: self.last_compaction.clone(),
-            harness_source: source.fingerprint.clone(),
-            iteration: self.iteration,
-        };
+        let checkpoint = persistence::Checkpoint::committed(
+            self.checkpoint_generation,
+            state.clone(),
+            self.last_compaction.clone(),
+            source.fingerprint.clone(),
+            persistence::LoopIteration::new(self.iteration),
+        );
         persistence::save_checkpoint(&self.checkpoint_path, &checkpoint)?;
-        self.checkpoint_generation = generation;
+        self.checkpoint_generation = Some(checkpoint.generation());
         Ok(())
     }
 

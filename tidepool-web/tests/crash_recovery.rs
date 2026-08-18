@@ -414,13 +414,15 @@ async fn crash_mid_answerer_turn_resumes_from_checkpoint_and_completes() {
         .expect("checkpoint parses cleanly right after the crash")
         .expect("cycle 1 committed a checkpoint before the crash");
     assert_eq!(
-        checkpoint_after_crash.generation, 1,
+        checkpoint_after_crash.generation().get(),
+        1,
         "checkpoint after the crash must be generation 1 (cycle 1's commit), not \
          generation 0 (no commit yet) or 2 (cycle 2 also committed); got \
          {checkpoint_after_crash:?}"
     );
     assert_eq!(
-        checkpoint_after_crash.iteration, 1,
+        checkpoint_after_crash.iteration().get(),
+        1,
         "generation 1's envelope must carry cycle 1's committed iteration count (1); got \
          {checkpoint_after_crash:?}"
     );
@@ -474,7 +476,7 @@ async fn crash_mid_answerer_turn_resumes_from_checkpoint_and_completes() {
     // process left — generation 2 alone would mean it restarted from
     // generation 0 (initialState) instead of the persisted checkpoint.
     assert_eq!(
-        checkpoint_after_restart.generation,
+        checkpoint_after_restart.generation().get(),
         3,
         "the restarted process must continue from generation 1 through 2 more \
          committed cycles to reach generation 3; got {checkpoint_after_restart:?}\n\
@@ -482,7 +484,8 @@ async fn crash_mid_answerer_turn_resumes_from_checkpoint_and_completes() {
         tail(&stderr2_path)
     );
     assert_eq!(
-        checkpoint_after_restart.iteration, 3,
+        checkpoint_after_restart.iteration().get(),
+        3,
         "generation 3's envelope must carry iteration 3, continuing from cycle 1's \
          persisted iteration (1) through 2 more committed cycles; got \
          {checkpoint_after_restart:?}"

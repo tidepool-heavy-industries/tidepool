@@ -30,7 +30,9 @@ use std::sync::{Arc, Mutex};
 
 mod support;
 
-use tidepool_handlers::{load_journal, ConsoleHandler, JournalEntry, JournalLoadError};
+use tidepool_handlers::{
+    compose_journal_seq, load_journal, ConsoleHandler, JournalEntry, JournalLoadError,
+};
 use tidepool_harness::engine::EngineConfig;
 use tidepool_harness::log::LogHeader;
 use tidepool_harness::provider::{
@@ -192,10 +194,11 @@ async fn committed_cycles_restore_state_and_summary_from_the_same_generation() {
     let cp1 = persistence::load_checkpoint(&checkpoint_path)
         .expect("load_checkpoint after cycle 1")
         .expect("cycle 1 committed a checkpoint");
-    assert_eq!(cp1.generation, 1);
+    assert_eq!(cp1.generation().get(), 1);
     assert_eq!(cp1.state, outcome1.state_json);
     assert_eq!(
-        cp1.iteration, 1,
+        cp1.iteration().get(),
+        1,
         "the checkpoint envelope must carry cycle 1's iteration count"
     );
     drop(driver1);
@@ -261,12 +264,14 @@ async fn committed_cycles_restore_state_and_summary_from_the_same_generation() {
         .expect("load_checkpoint after cycle 2")
         .expect("cycle 2 committed a checkpoint");
     assert_eq!(
-        cp2.generation, 2,
+        cp2.generation().get(),
+        2,
         "generation must increase by exactly one per committed cycle, across a restart"
     );
     assert_eq!(cp2.state, outcome2.state_json);
     assert_eq!(
-        cp2.iteration, 2,
+        cp2.iteration().get(),
+        2,
         "the checkpoint envelope must carry the continued iteration count across a restart"
     );
 
@@ -405,7 +410,7 @@ async fn crash_before_cycle_commits_restores_prior_generation_not_a_mixed_pair()
     let cp1 = persistence::load_checkpoint(&checkpoint_path)
         .expect("load_checkpoint after cycle 1")
         .expect("cycle 1 committed");
-    assert_eq!(cp1.generation, 1);
+    assert_eq!(cp1.generation().get(), 1);
     assert_eq!(cp1.compaction, outcome1.compaction);
 
     // Cycle 2: a cap of 2 lets the first hole's finalize round (call #1) and
@@ -472,13 +477,13 @@ async fn crash_before_cycle_commits_restores_prior_generation_not_a_mixed_pair()
 #[test]
 fn truncated_checkpoint_is_a_typed_error_and_writes_leave_no_tmp_behind() {
     let path = scratch("truncated").join("checkpoint.json");
-    let checkpoint = persistence::Checkpoint {
-        generation: 1,
-        iteration: 1,
-        state: serde_json::json!({"mode": "Deciding"}),
-        compaction: Some("a summary".to_string()),
-        harness_source: "fingerprint".to_string(),
-    };
+    let checkpoint = persistence::Checkpoint::committed(
+        None,
+        serde_json::json!({"mode": "Deciding"}),
+        Some("a summary".to_string()),
+        "fingerprint".to_string(),
+        persistence::LoopIteration::new(1),
+    );
     persistence::save_checkpoint(&path, &checkpoint).expect("save_checkpoint");
     let tmp = PathBuf::from(format!("{}.tmp", path.display()));
     assert!(
@@ -630,7 +635,8 @@ async fn stale_fingerprint_state_carries_forward_and_falls_back_on_decode_failur
         .expect("load_checkpoint after the fresh cycle")
         .expect("the fresh cycle committed its own checkpoint");
     assert_eq!(
-        committed.generation, 2,
+        committed.generation().get(),
+        2,
         "generation must continue from the carried checkpoint's generation (1), not \
          reset to 1"
     );
@@ -657,17 +663,17 @@ async fn state_decode_failure_retries_once_from_fresh_state_instead_of_killing_r
     let current_source = source();
     persistence::save_checkpoint(
         &checkpoint_path,
-        &persistence::Checkpoint {
-            generation: 1,
-            iteration: 1,
+        &persistence::Checkpoint::committed(
+            None,
             // Cannot decode against the reference harness's real `State`
             // (which requires `lastDecision`/`mode`/`notes`) —
             // same shape of failure as a hand-edited or cross-version
             // checkpoint that slips past the fingerprint check.
-            state: serde_json::json!({"totally": "not a State"}),
-            compaction: None,
-            harness_source: current_source.fingerprint.clone(),
-        },
+            serde_json::json!({"totally": "not a State"}),
+            None,
+            current_source.fingerprint.clone(),
+            persistence::LoopIteration::new(1),
+        ),
     )
     .expect("plant a same-fingerprint, undecodable checkpoint");
 
@@ -695,7 +701,8 @@ async fn state_decode_failure_retries_once_from_fresh_state_instead_of_killing_r
         .expect("load_checkpoint after the retried cycle")
         .expect("the retried cycle committed its own checkpoint");
     assert_eq!(
-        committed.generation, 2,
+        committed.generation().get(),
+        2,
         "the retried cycle must commit generation 2, continuing from the planted \
          checkpoint's generation 1"
     );
@@ -706,7 +713,8 @@ async fn state_decode_failure_retries_once_from_fresh_state_instead_of_killing_r
     // retry started from fresh initialState is the committed STATE: a real
     // `State` (its `mode` key present), not an echo of the planted garbage.
     assert_eq!(
-        committed.iteration, 1,
+        committed.iteration().get(),
+        1,
         "the fallback cycle runs as iteration 1 — the discarded state's loop \
          history goes with it (run_loop's retry arm zeroes the count)"
     );
@@ -966,15 +974,23 @@ async fn crashed_cycle_keeps_its_lease_and_the_resumed_run_does_only_the_delta()
     );
     assert_eq!(
         seqs(&resumed_entries),
-        vec![0, 1, 2, 3],
-        "the resumed run's seqs must continue PAST the crashed run's rather than \
-         restarting at 0 (which would make the two processes' entries \
-         indistinguishable under a max-seq fold)"
+        vec![
+            compose_journal_seq(first.segment_ordinal, 0),
+            compose_journal_seq(first.segment_ordinal, 1),
+            compose_journal_seq(second.segment_ordinal, 0),
+            compose_journal_seq(second.segment_ordinal, 1),
+        ],
+        "the resumed run's seqs must be composed from ITS OWN segment ordinal \
+         — structurally disjoint from the crashed run's, never continued from \
+         a folded max — which is also why they still sort strictly after the \
+         crashed run's for this well-behaved sequential resume (which would \
+         make the two processes' entries indistinguishable under a max-seq \
+         fold otherwise)"
     );
     let committed = persistence::load_checkpoint(&checkpoint_path)
         .expect("load_checkpoint after the resumed cycle")
         .expect("the resumed cycle committed");
-    assert_eq!(committed.generation, 1);
+    assert_eq!(committed.generation().get(), 1);
 
     // --- normal completion retires; the boot after that MINTS ---------------
     // What `tidepool-selfharness`'s `run_loop` return path does, and the other
@@ -1104,9 +1120,10 @@ fn torn_line_before_the_last_fails_the_boot_loudly() {
     assert!(
         matches!(
             load_journal(&acquired.segment),
-            Err(JournalLoadError::TornMidFile { line_no: 1, .. })
+            Err(JournalLoadError::TornMidFile { line_no: 2, .. })
         ),
-        "expected TornMidFile at line 1, got {:?}",
+        "expected TornMidFile at ONE-based line 2 (the corrupted `beta` line is \
+         the SECOND line in the file), got {:?}",
         load_journal(&acquired.segment)
     );
 
@@ -1116,7 +1133,7 @@ fn torn_line_before_the_last_fails_the_boot_loudly() {
         .expect_err("the boot must refuse a corrupted segment, not fold around it");
     let msg = err.to_string();
     assert!(
-        msg.contains(&acquired.segment.display().to_string()) && msg.contains("line 1"),
+        msg.contains(&acquired.segment.display().to_string()) && msg.contains("line 2"),
         "the refusal must name the segment and the offending line, got: {msg}"
     );
 }

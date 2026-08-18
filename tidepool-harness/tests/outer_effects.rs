@@ -43,8 +43,9 @@ mod support;
 
 use tidepool_bridge_effects::{EvRepositoryEvent, WtWorktreeId};
 use tidepool_handlers::{
-    load_journal, ConsoleHandler, EventConfig, EventError, ExecHandler, JournalEntry,
-    JournalHandler, ObservationSource, RepoEventHandler, SegmentPath, WorktreeHandler,
+    compose_journal_seq, load_journal, ConsoleHandler, EventConfig, EventError, ExecHandler,
+    JournalEntry, JournalHandler, ObservationSource, RepoEventHandler, SegmentPath,
+    WorktreeHandler,
 };
 use tidepool_harness::engine::EngineConfig;
 use tidepool_harness::log::LogHeader;
@@ -402,9 +403,10 @@ fn load_run_entries(log_dir: &std::path::Path, run_id: &str) -> Vec<JournalEntry
 /// reports the same run id but a DIFFERENT, freshly allocated segment — never
 /// the fresh boot's own; folding every segment for the run now returns 2; one
 /// cycle compiles `resumeLoop`, skips the two already-recorded steps, and
-/// appends exactly one new entry (`gamma`, `seq` 2 — continuing past the
-/// fresh run's seq numbers rather than restarting at 0, proving
-/// `JournalHandler::resuming` seeded the counter from the fold) into its OWN
+/// appends exactly one new entry (`gamma`, `seq` composed from ITS OWN
+/// segment ordinal — structurally disjoint from the fresh run's seq numbers
+/// rather than continued from a folded count, and still sorting after them
+/// for this well-behaved sequential resume) into its OWN
 /// segment.
 /// (c) REFUSED: a non-empty fold against `OuterEffectsHarness.hs` (declares
 /// no `resumeLoop`) fails `run_one_cycle` with `DriverError::ResumeEntryMissing`
@@ -549,9 +551,16 @@ async fn resume_boot_fold_fresh_then_resumed_appends_only_the_delta() {
     );
     assert_eq!(resumed_entries[2].key, "gamma");
     assert_eq!(
-        resumed_entries[2].seq, 2,
-        "the resumed handler must continue past the fresh run's seq numbers, \
-         proving JournalHandler::resuming seeded the counter from the fold"
+        resumed_entries[2].seq,
+        compose_journal_seq(resumed_lease.segment_ordinal, 0),
+        "the resumed handler's seq must be composed from ITS OWN segment \
+         ordinal, structurally disjoint from the fresh run's rather than \
+         continued from a folded count"
+    );
+    assert!(
+        resumed_entries[2].seq > resumed_entries[1].seq,
+        "for this well-behaved sequential resume, the resumed handler's seq \
+         must still sort after the fresh run's"
     );
 
     // --- (c) REFUSED boot: a non-empty fold, no resumeLoop entry ----------

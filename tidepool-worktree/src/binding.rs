@@ -62,12 +62,118 @@ impl BindingState {
     }
 }
 
+/// The legal terminal states a caller may SETTLE an active binding to —
+/// deliberately smaller than [`BindingState`], which also has to name
+/// `Active` for reading back stored history. Widening this to `BindingState`
+/// is exactly the bug it exists to rule out: `settle(lease, Active)` would let
+/// a caller report a clean teardown while the durable row stays active and
+/// permanently blocks the next writer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BindingTerminal {
+    /// The agent reached a terminal state on its own.
+    Completed,
+    /// The resident released the agent.
+    Released,
+}
+
+impl From<BindingTerminal> for BindingState {
+    fn from(t: BindingTerminal) -> Self {
+        match t {
+            BindingTerminal::Completed => BindingState::Terminal,
+            BindingTerminal::Released => BindingState::Released,
+        }
+    }
+}
+
+/// One row of a worktree's lease history — a READ MODEL. Fields are private
+/// and construction is `pub(crate)`-only: this type is what
+/// [`BindingTable::open`] deserializes off disk and what [`BindingTable::bind`]
+/// appends, and nothing outside this crate may manufacture a row (an "active"
+/// binding with no acquisition provenance, for instance) that never went
+/// through the table's own rules. Reached from outside only by the accessors
+/// below, or (for durable-format golden tests, which must be able to pin the
+/// wire shape of every state a row COULD hold) via
+/// [`crate::testing::binding_row`].
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Binding {
-    pub worktree: WorktreeId,
-    pub agent: AgentRef,
-    pub state: BindingState,
-    pub bound_at_ms: i64,
+    worktree: WorktreeId,
+    agent: AgentRef,
+    state: BindingState,
+    bound_at_ms: i64,
+}
+
+impl Binding {
+    pub fn worktree(&self) -> &WorktreeId {
+        &self.worktree
+    }
+
+    pub fn agent(&self) -> &AgentRef {
+        &self.agent
+    }
+
+    pub fn state(&self) -> BindingState {
+        self.state
+    }
+
+    pub fn bound_at_ms(&self) -> i64 {
+        self.bound_at_ms
+    }
+
+    pub(crate) fn new(
+        worktree: WorktreeId,
+        agent: AgentRef,
+        state: BindingState,
+        bound_at_ms: i64,
+    ) -> Self {
+        Self {
+            worktree,
+            agent,
+            state,
+            bound_at_ms,
+        }
+    }
+}
+
+/// A non-`Clone` custody receipt for exactly one `Active` row, returned by
+/// [`BindingTable::bind`] and consumed by [`Self::complete`]/[`Self::release`].
+///
+/// This is the whole fix for "`settle` accepts any `BindingState` as the
+/// requested terminal": there is no longer a way to settle a binding without
+/// first holding the receipt `bind` handed out for THAT row, and the receipt
+/// is consumed by value, so it can be spent at most once. It carries the
+/// worktree id and this bind's own in-memory GENERATION (never persisted —
+/// see [`BindingTable`]'s `generations` field) so a stale receipt from a
+/// settled binding can never be replayed against whatever occupies that
+/// worktree after a rebind: [`BindingTable::settle`] checks the generation
+/// still matches the CURRENT active row before mutating anything.
+///
+/// Deliberately has no `Drop` impl: a dropped-without-settling receipt leaves
+/// the row `Active` forever (until some later process notices and can never
+/// settle it either, for want of a receipt) rather than quietly recording a
+/// released binding. A panic must not falsely report a clean release — that
+/// is the lease principle this type exists to enforce.
+#[derive(Debug)]
+pub struct ActiveBinding {
+    worktree: WorktreeId,
+    generation: u64,
+}
+
+impl ActiveBinding {
+    pub fn worktree(&self) -> &WorktreeId {
+        &self.worktree
+    }
+
+    /// Settle this lease `Completed` — the agent reached a terminal state on
+    /// its own, so cycle completion is agent completion.
+    pub fn complete(self, table: &mut BindingTable) -> Result<(), WorktreeError> {
+        table.settle(self, BindingTerminal::Completed)
+    }
+
+    /// Settle this lease `Released` — the resident stopped waiting for it
+    /// (a rollback, or an explicit cancellation).
+    pub fn release(self, table: &mut BindingTable) -> Result<(), WorktreeError> {
+        table.settle(self, BindingTerminal::Released)
+    }
 }
 
 /// Tracks which agent owns which worktree.
@@ -88,6 +194,16 @@ pub struct Binding {
 pub struct BindingTable {
     root: PathBuf,
     bindings: Vec<Binding>,
+    /// Parallel to `bindings` (same length, same index) — the in-memory
+    /// bind-generation of each row, assigned when [`Self::bind`] creates it.
+    /// NEVER persisted: an [`ActiveBinding`] receipt's identity is a fact
+    /// about this process's lifetime, not a durable one. A row loaded from
+    /// disk at [`Self::open`] carries `None` here, so a leftover `Active` row
+    /// from a crashed process can never be settled by a forged receipt — only
+    /// a fresh [`Self::bind`] produces one, and `bind` refuses
+    /// (`WorktreeBusy`) while that row still stands.
+    generations: Vec<Option<u64>>,
+    next_generation: u64,
     /// Held (exclusively flocked) for this table's whole lifetime. The
     /// enforcement decisions (`bind`'s already-bound refusal) run against the
     /// IN-MEMORY rows, which is only sound while exactly one process owns the
@@ -126,6 +242,7 @@ impl BindingTable {
         }
 
         let mut bindings = Vec::new();
+        let mut generations = Vec::new();
         for entry in fs::read_dir(&root).map_err(|e| storage_failure(&root, e))? {
             let entry = entry.map_err(|e| storage_failure(&root, e))?;
             let path = entry.path();
@@ -135,12 +252,17 @@ impl BindingTable {
             let bytes = fs::read(&path).map_err(|e| storage_failure(&path, e))?;
             let mut rows: Vec<Binding> =
                 serde_json::from_slice(&bytes).map_err(|e| storage_failure(&path, e))?;
+            // Loaded rows carry no generation — see the field docs on
+            // `generations`.
+            generations.resize(generations.len() + rows.len(), None);
             bindings.append(&mut rows);
         }
 
         Ok(Self {
             root,
             bindings,
+            generations,
+            next_generation: 0,
             _owner_lock: owner_lock,
         })
     }
@@ -163,7 +285,7 @@ impl BindingTable {
         let rows: Vec<&Binding> = self
             .bindings
             .iter()
-            .filter(|b| &b.worktree == worktree)
+            .filter(|b| b.worktree() == worktree)
             .collect();
         let bytes = serde_json::to_vec_pretty(&rows).expect("serialize bindings");
         let path = self.path_for(worktree);
@@ -179,7 +301,8 @@ impl BindingTable {
         Ok(())
     }
 
-    /// Bind an agent to a worktree.
+    /// Bind an agent to a worktree, returning the [`ActiveBinding`] custody
+    /// receipt for the row just created.
     ///
     /// [`WorktreeError::WorktreeBusy`] when an `Active` binding already exists,
     /// naming the current holder — the failure has to be explicit enough that
@@ -189,19 +312,22 @@ impl BindingTable {
         worktree: &WorktreeId,
         agent: &AgentRef,
         now_ms: i64,
-    ) -> Result<(), WorktreeError> {
+    ) -> Result<ActiveBinding, WorktreeError> {
         if let Some(current) = self.current(worktree) {
             return Err(WorktreeError::WorktreeBusy {
                 worktree: worktree.clone(),
-                holder: current.agent.to_string(),
+                holder: current.agent().to_string(),
             });
         }
-        self.bindings.push(Binding {
-            worktree: worktree.clone(),
-            agent: agent.clone(),
-            state: BindingState::Active,
-            bound_at_ms: now_ms,
-        });
+        let generation = self.next_generation;
+        self.next_generation += 1;
+        self.bindings.push(Binding::new(
+            worktree.clone(),
+            agent.clone(),
+            BindingState::Active,
+            now_ms,
+        ));
+        self.generations.push(Some(generation));
         // ROLL BACK on a failed write. Without this, a persist failure leaves
         // memory holding a binding that disk does not — and since the isolation
         // invariant is enforced from THIS table, a restart would read the
@@ -211,35 +337,53 @@ impl BindingTable {
         // disagree even transiently.
         if let Err(e) = self.persist(worktree) {
             self.bindings.pop();
+            self.generations.pop();
             return Err(e);
         }
-        Ok(())
+        Ok(ActiveBinding {
+            worktree: worktree.clone(),
+            generation,
+        })
     }
 
-    /// Mark the current binding terminal or released, permitting a rebind.
-    /// A no-op (not an error) when there is no active binding to settle:
-    /// `error.rs` is frozen and has no variant for that case, and settling
-    /// twice is a harmless idempotent request rather than a domain failure.
-    pub fn settle(
-        &mut self,
-        worktree: &WorktreeId,
-        state: BindingState,
-    ) -> Result<(), WorktreeError> {
-        let idx = self
-            .bindings
-            .iter()
-            .rposition(|b| &b.worktree == worktree && b.state == BindingState::Active);
-        if let Some(i) = idx {
-            let previous = self.bindings[i].state;
-            self.bindings[i].state = state;
-            // Same rollback discipline as `bind`, mirrored: a failed write here
-            // would leave memory believing the worktree is rebindable while
-            // disk still says Active — the inverse disagreement, reached the
-            // same way.
-            if let Err(e) = self.persist(worktree) {
-                self.bindings[i].state = previous;
-                return Err(e);
-            }
+    /// Settle `lease`'s row to `to`'s terminal state, consuming the receipt.
+    ///
+    /// Looks up the row by BOTH `lease.worktree` and `lease.generation` — not
+    /// just the worktree — so a stale receipt from a binding that was already
+    /// settled (and, since then, rebound) fails loud instead of silently
+    /// settling the NEW occupant. That case is a genuine invariant violation
+    /// rather than a normal outcome (a live `ActiveBinding` is, by
+    /// construction, the only receipt for its worktree until consumed — see
+    /// the type's docs) — reported via the existing `StorageFailure` variant
+    /// rather than a new one (`error.rs` is frozen).
+    fn settle(&mut self, lease: ActiveBinding, to: BindingTerminal) -> Result<(), WorktreeError> {
+        let idx = {
+            let generations = &self.generations;
+            self.bindings.iter().enumerate().rposition(|(i, b)| {
+                b.worktree() == &lease.worktree
+                    && b.state() == BindingState::Active
+                    && generations[i] == Some(lease.generation)
+            })
+        };
+        let Some(i) = idx else {
+            return Err(WorktreeError::StorageFailure {
+                path: self.path_for(&lease.worktree),
+                detail: format!(
+                    "settle: no Active binding for worktree {} matches bind-generation {} — \
+                     this receipt is stale (already settled, or superseded by a rebind)",
+                    lease.worktree, lease.generation
+                ),
+            });
+        };
+        let previous = self.bindings[i].state();
+        self.bindings[i].state = to.into();
+        // Same rollback discipline as `bind`, mirrored: a failed write here
+        // would leave memory believing the worktree is rebindable while
+        // disk still says Active — the inverse disagreement, reached the
+        // same way.
+        if let Err(e) = self.persist(&lease.worktree) {
+            self.bindings[i].state = previous;
+            return Err(e);
         }
         Ok(())
     }
@@ -247,6 +391,6 @@ impl BindingTable {
     pub fn current(&self, worktree: &WorktreeId) -> Option<&Binding> {
         self.bindings
             .iter()
-            .find(|b| &b.worktree == worktree && b.state == BindingState::Active)
+            .find(|b| b.worktree() == worktree && b.state() == BindingState::Active)
     }
 }

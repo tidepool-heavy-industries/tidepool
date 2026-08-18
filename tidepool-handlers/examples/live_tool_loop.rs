@@ -394,8 +394,8 @@ fn run() -> i32 {
                         .map(|b| {
                             format!(
                                 "STILL ACTIVE ({:?}, agent {}) — settle did not happen",
-                                b.state,
-                                b.agent.as_str()
+                                b.state(),
+                                b.agent().as_str()
                             )
                         })
                         .unwrap_or_else(|| {

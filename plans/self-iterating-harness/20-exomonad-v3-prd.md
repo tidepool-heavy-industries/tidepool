@@ -574,7 +574,11 @@ reviewLadder :: ReviewPolicy -> WorktreeHandle -> Spec -> M Outcome
 
 -- node residency (handles as capabilities; harness defines Down/Up sums)
 data NodeCtx up down = NodeCtx { uplink :: Uplink up, inbox :: Event down }
-forkNode     :: (NodeCtx up down -> M r) -> M (NodeHandle down r)
+-- AMENDED (node-mailboxes lane, 2026-08-19): the original sketch listed
+-- sendUp and folded but never said where an up-message is OBSERVED — the
+-- handle must carry the up-type with a symmetric observation accessor
+-- (exact naming per the green-threads scaffold doc at fold):
+forkNode     :: (NodeCtx up down -> M r) -> M (NodeHandle up down r)
 sendDown     :: NodeHandle down r -> down -> M ()  -- nonblocking; coalesces
 sendUp       :: Uplink up -> up -> M ()            -- nonblocking
 folded       :: NodeHandle down r -> Event r

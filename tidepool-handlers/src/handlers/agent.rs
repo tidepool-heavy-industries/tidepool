@@ -134,7 +134,7 @@ impl Cycle {
     fn is_terminal(&self) -> bool {
         match self {
             Cycle::Stepped { saga, .. } => saga.is_finished(),
-            Cycle::Async(cycle) => cycle.settled.is_some(),
+            Cycle::Async(cycle) => cycle.settled_terminal().is_some(),
         }
     }
 }
@@ -200,113 +200,197 @@ fn lost_no_report(id: CycleId) -> Settled {
 }
 
 /// A cycle running on its own thread.
-struct AsyncCycle {
-    /// `None` once joined.
-    thread: Option<JoinHandle<()>>,
-    reports: Receiver<CycleReport>,
-    /// Taken from the backend BEFORE the cycle thread started — once that
-    /// thread is inside `start_turn` it holds `&mut` on the backend and nothing
-    /// else can reach it (`AgentBackend::canceller`'s own docs).
-    canceller: Box<dyn BackendCanceller>,
-    /// Handed back by the cycle thread when it finished; what `cancel` settles.
-    saga: Option<CycleSaga>,
-    /// The backend's own transcript, extracted the instant its report
-    /// arrived — a settled cycle holds NO backend (and so no OS process),
-    /// only what it said. Empty until settled, and for a backend that keeps
-    /// none (every mock).
-    transcript: Vec<String>,
-    settled: Option<Settled>,
+///
+/// A plain sum rather than three `Option`s (`thread`/`saga`/`settled`) on one
+/// product: the old shape let `settled: Some(_)` coexist with an unjoined
+/// thread, or a joined thread with no terminal stored — combinations that
+/// meant nothing, reachable only by a maintenance change getting the manual
+/// bookkeeping wrong. `Running` owns exactly the resources live while the
+/// thread runs; `Settled` owns exactly what survives it. The transitions
+/// ([`Self::collect`]/[`Self::try_settle`]/[`Self::cancel`]) are CONSUMING —
+/// `self -> Self` — so a caller holding a `Running` cannot observe a
+/// half-transitioned state, and the compiler (not a convention) is what
+/// stops a `Drop` from reaping something already `Settled`.
+enum AsyncCycle {
+    Running {
+        thread: JoinHandle<()>,
+        reports: Receiver<CycleReport>,
+        /// Taken from the backend BEFORE the cycle thread started — once that
+        /// thread is inside `start_turn` it holds `&mut` on the backend and
+        /// nothing else can reach it (`AgentBackend::canceller`'s own docs).
+        canceller: Box<dyn BackendCanceller>,
+    },
+    Settled {
+        /// MEMOIZED: a second await answers the same thing rather than
+        /// blocking forever on a receiver whose sender is gone, and a
+        /// cancelled cycle keeps a terminal that says "cancelled" rather than
+        /// vanishing from the table.
+        terminal: Settled,
+        /// The backend's own transcript, extracted the instant its report
+        /// arrived — a settled cycle holds NO backend (and so no OS process),
+        /// only what it said.
+        transcript: Vec<String>,
+    },
 }
 
 impl AsyncCycle {
-    /// Record a report that has already arrived: extract the transcript
-    /// (dropping the backend that produced it — it goes out of scope at the
-    /// end of this call) and remember the saga. The shared tail of
+    /// Extract an arrived report's transcript (dropping the backend that
+    /// produced it — it goes out of scope at the end of this call) and its
+    /// saga (the caller's — only [`cancel`](Self::cancel) needs it, to settle
+    /// the binding through it; a report [`collect`](Self::collect) absorbed
+    /// has nothing left to do with it). The shared tail of
     /// [`collect`](Self::collect) (which blocks for the report) and
     /// [`try_settle`](Self::try_settle) (which only acts on one that already
     /// arrived).
-    fn absorb(&mut self, report: CycleReport) -> Settled {
-        self.saga = report.saga;
-        self.transcript = report.backend.transcript_jsonl();
-        Settled::Reported(Box::new(report.result))
+    fn settle_with(report: CycleReport) -> (Settled, Option<CycleSaga>, Vec<String>) {
+        let transcript = report.backend.transcript_jsonl();
+        (
+            Settled::Reported(Box::new(report.result)),
+            report.saga,
+            transcript,
+        )
         // `report.backend` drops here.
     }
 
-    /// Block for the cycle thread's report, join the thread, and take its
-    /// saga. Never panics: a thread that died mid-saga is a
-    /// [`Settled::Lost`], not a second panic here.
-    fn collect(&mut self, id: CycleId) -> Settled {
-        let settled = match self.reports.recv() {
-            Ok(report) => self.absorb(report),
-            Err(_) => lost_no_report(id),
+    /// Block for `reports`, join `thread`, and produce the report's
+    /// `Settled` alongside its saga and transcript. Never panics: a thread
+    /// that died mid-saga is a [`Settled::Lost`], not a second panic here.
+    /// Shared tail of [`collect`](Self::collect) and [`cancel`](Self::cancel)
+    /// once nothing more needs the canceller.
+    fn recv_and_join(
+        thread: JoinHandle<()>,
+        reports: Receiver<CycleReport>,
+        id: CycleId,
+    ) -> (Settled, Option<CycleSaga>, Vec<String>) {
+        let out = match reports.recv() {
+            Ok(report) => Self::settle_with(report),
+            Err(_) => (lost_no_report(id), None, Vec::new()),
         };
-        if let Some(thread) = self.thread.take() {
-            // A panicked cycle thread is already accounted for above; joining
-            // it is how its resources are released, not how it is diagnosed.
-            let _ = thread.join();
+        // A panicked cycle thread is already accounted for above; joining it
+        // is how its resources are released, not how it is diagnosed.
+        let _ = thread.join();
+        out
+    }
+
+    /// Block for the cycle thread's report, join the thread, and become
+    /// `Settled`. A no-op — returns `self` unchanged — on a cycle already
+    /// `Settled`.
+    fn collect(self, id: CycleId) -> Self {
+        match self {
+            settled @ AsyncCycle::Settled { .. } => settled,
+            AsyncCycle::Running {
+                thread, reports, ..
+            } => {
+                let (terminal, _saga, transcript) = Self::recv_and_join(thread, reports, id);
+                AsyncCycle::Settled {
+                    terminal,
+                    transcript,
+                }
+            }
         }
-        settled
     }
 
     /// Non-blocking: if this cycle's thread has already sent its report,
     /// settle it now. This is what lets a completed-but-never-awaited cycle
     /// free its capacity slot on the NEXT admission — see
     /// [`SubagentHandler::admit_cycle`] — without a caller ever calling
-    /// `awaitAgent`/`cancelAgent`. A no-op while the thread has not yet
-    /// reported (never blocks), and idempotent once settled — so it changes
-    /// nothing about what a LATER `await`/`cancel` observes: same typed
-    /// terminal either way, just possibly settled earlier.
-    fn try_settle(&mut self, id: CycleId) {
-        if self.settled.is_some() {
-            return;
+    /// `awaitAgent`/`cancelAgent`. A no-op — stays `Running` — while the
+    /// thread has not yet reported (never blocks), and a no-op on a cycle
+    /// already `Settled` — so it changes nothing about what a LATER
+    /// `await`/`cancel` observes: same typed terminal either way, just
+    /// possibly settled earlier.
+    fn try_settle(self, id: CycleId) -> Self {
+        match self {
+            settled @ AsyncCycle::Settled { .. } => settled,
+            AsyncCycle::Running {
+                thread,
+                reports,
+                canceller,
+            } => {
+                use std::sync::mpsc::TryRecvError;
+                match reports.try_recv() {
+                    Ok(report) => {
+                        let (terminal, _saga, transcript) = Self::settle_with(report);
+                        let _ = thread.join();
+                        AsyncCycle::Settled {
+                            terminal,
+                            transcript,
+                        }
+                    }
+                    Err(TryRecvError::Empty) => AsyncCycle::Running {
+                        thread,
+                        reports,
+                        canceller,
+                    },
+                    Err(TryRecvError::Disconnected) => {
+                        let _ = thread.join();
+                        AsyncCycle::Settled {
+                            terminal: lost_no_report(id),
+                            transcript: Vec::new(),
+                        }
+                    }
+                }
+            }
         }
-        use std::sync::mpsc::TryRecvError;
-        let settled = match self.reports.try_recv() {
-            Ok(report) => self.absorb(report),
-            Err(TryRecvError::Empty) => return,
-            Err(TryRecvError::Disconnected) => lost_no_report(id),
-        };
-        if let Some(thread) = self.thread.take() {
-            let _ = thread.join();
-        }
-        self.settled = Some(settled);
     }
 
-    /// Reap this cycle: kill FIRST, then settle. Idempotent — a cycle that
-    /// already settled is left exactly as it was.
+    /// Reap this cycle: kill FIRST, then settle. A no-op — returns `self`
+    /// unchanged — on a cycle already `Settled`.
     ///
     /// Order is the rule from `tidepool-agent/CLAUDE.md`: settling before the
     /// kill would hold the substrate mutex across a reap of unknown duration,
     /// which is the one thing the concurrent saga design forbids.
-    fn cancel(&mut self, id: CycleId) {
-        if self.settled.is_some() {
-            return;
+    fn cancel(self, id: CycleId) -> Self {
+        match self {
+            settled @ AsyncCycle::Settled { .. } => settled,
+            AsyncCycle::Running {
+                thread,
+                reports,
+                canceller,
+            } => {
+                canceller.cancel();
+                // The thread's blocked seam call returns, its saga rolls
+                // itself back, and the report arrives. Dropping the reported
+                // result is deliberate: an author who cancelled gets
+                // `SpawnCancelled` whether or not the cycle happened to
+                // finish first, so the answer never depends on a race.
+                let (reported, mut saga, transcript) = Self::recv_and_join(thread, reports, id);
+                let terminal = match saga.as_mut().map(CycleSaga::abandon) {
+                    Some(Err(e)) => Settled::Lost(format!(
+                        "cycle {} was cancelled and its backend reaped, but settling its binding \
+                         Released FAILED: {e} — the binding row may still be Active",
+                        id.0
+                    )),
+                    // A thread that died without reporting left its binding in
+                    // an unknown state; answering "cancelled" would claim a
+                    // settle nobody performed, so that diagnosis survives the
+                    // cancel.
+                    _ => match reported {
+                        lost @ Settled::Lost(_) => lost,
+                        _ => Settled::Cancelled,
+                    },
+                };
+                AsyncCycle::Settled {
+                    terminal,
+                    transcript,
+                }
+            }
         }
-        self.canceller.cancel();
-        // The thread's blocked seam call returns, its saga rolls itself back,
-        // and the report arrives. Dropping the reported result is deliberate:
-        // an author who cancelled gets `SpawnCancelled` whether or not the
-        // cycle happened to finish first, so the answer never depends on a race.
-        let reported = self.collect(id);
-        let settled = match self.saga.as_mut().map(CycleSaga::abandon) {
-            Some(Err(e)) => Settled::Lost(format!(
-                "cycle {} was cancelled and its backend reaped, but settling its binding \
-                 Released FAILED: {e} — the binding row may still be Active",
-                id.0
-            )),
-            // A thread that died without reporting left its binding in an
-            // unknown state; answering "cancelled" would claim a settle nobody
-            // performed, so that diagnosis survives the cancel.
-            _ => match reported {
-                lost @ Settled::Lost(_) => lost,
-                _ => Settled::Cancelled,
-            },
-        };
-        self.settled = Some(settled);
+    }
+
+    /// The memoized terminal, once `Settled` — `None` while still `Running`.
+    fn settled_terminal(&self) -> Option<&Settled> {
+        match self {
+            AsyncCycle::Settled { terminal, .. } => Some(terminal),
+            AsyncCycle::Running { .. } => None,
+        }
     }
 
     fn transcript_jsonl(&self) -> Vec<String> {
-        self.transcript.clone()
+        match self {
+            AsyncCycle::Running { .. } => Vec::new(),
+            AsyncCycle::Settled { transcript, .. } => transcript.clone(),
+        }
     }
 }
 
@@ -523,16 +607,39 @@ impl SubagentHandler {
     /// typed terminal either way — only when the capacity count notices it
     /// finished.
     fn admit_cycle(&mut self) -> Result<(), SpawnError> {
-        for (id, cycle) in self.cycles.iter_mut() {
-            if let Cycle::Async(async_cycle) = cycle {
-                async_cycle.try_settle(*id);
-            }
+        let async_ids: Vec<CycleId> = self
+            .cycles
+            .iter()
+            .filter_map(|(id, cycle)| matches!(cycle, Cycle::Async(_)).then_some(*id))
+            .collect();
+        for id in async_ids {
+            self.update_async(id, |c| c.try_settle(id));
         }
         let live = self.cycles.values().filter(|c| !c.is_terminal()).count();
         if live >= self.capacity {
             return Err(SpawnError::SpawnCapacityExhausted(self.capacity as i64));
         }
         Ok(())
+    }
+
+    /// Apply a CONSUMING [`AsyncCycle`] transition at `id`, in place. `f`'s
+    /// `self -> Self` signature (`collect`/`try_settle`/`cancel`) is why this
+    /// exists: those methods need OWNERSHIP to move a `Running` variant's
+    /// `JoinHandle`/`Receiver` out, which a `&mut AsyncCycle` cannot give
+    /// them. Removing the table entry first and reinserting the transformed
+    /// result is what supplies that ownership without ever leaving the table
+    /// holding a half-transitioned value. A no-op when `id` names nothing, or
+    /// names a `Stepped` entry (put back untouched) — `f` runs only on an
+    /// `Async` entry.
+    fn update_async(&mut self, id: CycleId, f: impl FnOnce(AsyncCycle) -> AsyncCycle) {
+        let Some(cycle) = self.cycles.remove(&id) else {
+            return;
+        };
+        let cycle = match cycle {
+            Cycle::Async(boxed) => Cycle::Async(Box::new(f(*boxed))),
+            stepped @ Cycle::Stepped { .. } => stepped,
+        };
+        self.cycles.insert(id, cycle);
     }
 
     /// One backend for one cycle. A factory failure is reported at
@@ -767,13 +874,10 @@ impl SubagentHandler {
 
         self.cycles.insert(
             id,
-            Cycle::Async(Box::new(AsyncCycle {
-                thread: Some(thread),
+            Cycle::Async(Box::new(AsyncCycle::Running {
+                thread,
                 reports: receiver,
                 canceller,
-                saga: None,
-                transcript: Vec::new(),
-                settled: None,
             })),
         );
         Ok(cycle_id_to_wire(id))
@@ -795,27 +899,30 @@ impl SubagentHandler {
     /// did nothing).
     fn subagent_await(&mut self, cycle: AgCycleId) -> Result<AgSpawnOutcome, SpawnError> {
         let id = cycle_id_from_wire(cycle).ok_or_else(|| no_such_cycle(cycle))?;
-        match self.cycles.get_mut(&id) {
-            None => Err(no_such_cycle(cycle)),
-            Some(Cycle::Stepped { .. }) => Err(SpawnError::SpawnDriveFailed(
-                AgSpawnStage::StageRunning,
-                format!(
-                    "cycle {} is a stepped tool-dispatch cycle: drive it with agentResumeRaw, \
-                     not with awaitAgent",
-                    id.0
-                ),
-            )),
-            Some(Cycle::Async(async_cycle)) => {
-                if async_cycle.settled.is_none() {
-                    async_cycle.settled = Some(async_cycle.collect(id));
-                }
-                async_cycle
-                    .settled
-                    .as_ref()
-                    .expect("just settled")
-                    .to_wire(id)
+        match self.cycles.get(&id) {
+            None => return Err(no_such_cycle(cycle)),
+            Some(Cycle::Stepped { .. }) => {
+                return Err(SpawnError::SpawnDriveFailed(
+                    AgSpawnStage::StageRunning,
+                    format!(
+                        "cycle {} is a stepped tool-dispatch cycle: drive it with agentResumeRaw, \
+                         not with awaitAgent",
+                        id.0
+                    ),
+                ))
             }
+            Some(Cycle::Async(_)) => {}
         }
+        self.update_async(id, |c| c.collect(id));
+        let Some(Cycle::Async(async_cycle)) = self.cycles.get(&id) else {
+            unreachable!(
+                "just confirmed an Async entry at this id, and update_async never removes one"
+            );
+        };
+        async_cycle
+            .settled_terminal()
+            .expect("collect always leaves the entry Settled")
+            .to_wire(id)
     }
 
     /// Serves `SubagentCancel`: reap the cycle's backend, join its thread, and
@@ -858,9 +965,7 @@ impl SubagentHandler {
         let Some(id) = cycle_id_from_wire(cycle) else {
             return;
         };
-        if let Some(Cycle::Async(async_cycle)) = self.cycles.get_mut(&id) {
-            async_cycle.cancel(id);
-        }
+        self.update_async(id, |c| c.cancel(id));
     }
 }
 
@@ -879,9 +984,11 @@ impl SubagentHandler {
 /// reaping would turn this into a hang.
 impl Drop for SubagentHandler {
     fn drop(&mut self) {
-        for (id, cycle) in self.cycles.iter_mut() {
-            if let Cycle::Async(async_cycle) = cycle {
-                async_cycle.cancel(*id);
+        // Drain rather than `update_async` per id: the table is about to be
+        // dropped along with `self`, so there is nothing to reinsert into.
+        for (id, cycle) in std::mem::take(&mut self.cycles) {
+            if let Cycle::Async(boxed) = cycle {
+                let _ = boxed.cancel(id);
             }
         }
     }
@@ -2435,7 +2542,7 @@ mod tests {
             fx.binding_history(&worktree)
                 .last()
                 .expect("one binding row")
-                .state,
+                .state(),
             BindingState::Released,
             "cancel settles Released — stopped waiting, rebindable — never left Active"
         );

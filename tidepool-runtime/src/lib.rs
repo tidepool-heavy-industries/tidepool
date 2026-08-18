@@ -5,15 +5,13 @@
 
 use std::io;
 use std::path::{Path, PathBuf};
-use tempfile::TempDir;
 use thiserror::Error;
 pub use tidepool_codegen::host_fns::{drain_diagnostics, push_diagnostic};
 pub use tidepool_codegen::jit_machine::{CancelHandle, JitError, ResumeInput};
 use tidepool_codegen::jit_machine::{JitEffectMachine, SuspendableOutcome};
 pub use tidepool_effect::dispatch::DispatchEffect;
 pub use tidepool_eval::value::Value;
-use tidepool_extract_cmd::ExtractCmd;
-use tidepool_repr::serial::{read_cbor, read_metadata, MetaWarnings, ReadError};
+use tidepool_repr::serial::{MetaWarnings, ReadError};
 use tidepool_repr::{CoreExpr, DataConTable};
 
 /// The compiled-artifact memo. Public for its second consumer,
@@ -167,73 +165,26 @@ pub fn compile_haskell_salted(
     include: &[&Path],
     cache_salt: Option<&str>,
 ) -> Result<CompileResult, CompileError> {
-    let key = cache::cache_key_salted(source, target, include, cache_salt);
-    if let Some((expr_bytes, meta_bytes)) = cache::cache_load(&key) {
-        // Attempt to deserialize cached data. If this fails, treat it as a cache
-        // miss and fall through to recompilation instead of propagating the error.
-        if let (Ok(expr), Ok((table, warnings))) =
-            (read_cbor(&expr_bytes), read_metadata(&meta_bytes))
-        {
-            tidepool_codegen::host_fns::register_var_names(&warnings.var_names);
-            tidepool_codegen::host_fns::register_poisoned_externals(&warnings.poisoned);
-            return Ok(CompileResult {
-                expr,
-                table,
-                warnings,
-            });
-        }
-    }
-
-    // 1. Setup temporary workspace
-    // Derive filename from the module declaration so GHC's module name matches
-    // the filename (GhcPipeline uses capitalize(takeBaseName(path)) as target).
-    let temp_dir = TempDir::new()?;
-    let filename =
-        extract_module_name(source).map_or_else(|| "Input.hs".to_string(), |m| format!("{}.hs", m));
-    let input_path = temp_dir.path().join(&filename);
-    std::fs::write(&input_path, source)?;
-
-    // 2. Execute tidepool-extract and 3. read its raw output bytes — the
-    // mechanics [`artifacts::compile_targets`] also uses (a one-element
-    // target slice here, so `multi` is always false: this lane reads the
-    // plain `asks.json`, which it then ignores — `CompileResult` has no
-    // sidecar field).
-    let mut cmd = ExtractCmd::new().map_err(|e| CompileError::Io(e.into()))?;
-    cmd.input(&input_path)
-        .output_dir(temp_dir.path())
-        .target(target)
-        .includes(include);
-    let (meta_bytes, raw) = artifacts::extract_and_read(
-        &cmd,
-        temp_dir.path(),
-        &[target],
-        false,
-        |_, _, _| {},
-        |stderr, _success| {
-            // Always print stderr for diagnostics (trace output from Haskell);
-            // purely a human debug channel now — stdout is the authoritative
-            // contract.
-            if !stderr.is_empty() {
-                eprintln!("[tidepool-extract stderr]\n{stderr}");
-            }
-        },
-    )?;
-
-    // 4. Deserialize.
-    let mut bundle = artifacts::assemble(&meta_bytes, &raw, |_, _, _| {})?;
+    let include_owned: Vec<PathBuf> = include.iter().map(|p| p.to_path_buf()).collect();
+    let inv = artifacts::CompileInvocation {
+        source,
+        targets: &[target],
+        include: &include_owned,
+        bin: None,
+        fallback_module_name: "Input",
+        cache: artifacts::CacheStrategy::Eval { salt: cache_salt },
+    };
+    let mut bundle = artifacts::compile_invocation(&inv, |_, _, _| {})?;
     let TargetArtifact { expr, .. } = bundle
         .targets
         .remove(target)
-        .expect("extract_and_read requested exactly this target");
+        .expect("compile_invocation compiled exactly this target");
     let CompiledArtifacts {
         table, warnings, ..
     } = bundle;
-    // `artifacts::assemble` already registered var names/poisoned externals
-    // for this compile (see its doc); the cache-hit branch above does the
-    // same on its own path, since it never calls `assemble`.
-
-    // Only store in cache if deserialization succeeded
-    cache::cache_store(&key, &raw[0].expr_bytes, &meta_bytes);
+    // `artifacts::assemble` (which `compile_invocation` always routes
+    // through, cache hit or miss) already registered var names/poisoned
+    // externals for this compile — see its doc.
 
     Ok(CompileResult {
         expr,

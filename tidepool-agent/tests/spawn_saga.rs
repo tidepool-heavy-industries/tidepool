@@ -192,9 +192,9 @@ fn spawn_completes_and_settles_binding_terminal() {
 
     let rows = rows_on_disk(&fixture.binding_root(), &worktree);
     assert_eq!(rows.len(), 1, "one lease row: {rows:?}");
-    assert_eq!(rows[0].state, BindingState::Terminal);
-    assert_eq!(rows[0].agent.as_str(), "agent-0-worker-one");
-    assert_eq!(rows[0].worktree, worktree);
+    assert_eq!(rows[0].state(), BindingState::Terminal);
+    assert_eq!(rows[0].agent().as_str(), "agent-0-worker-one");
+    assert_eq!(rows[0].worktree(), &worktree);
 
     let reopened = BindingTable::open(fixture.binding_root()).expect("reopen binding table");
     assert!(reopened.current(&worktree).is_none());
@@ -277,10 +277,10 @@ fn thread_start_failure_rolls_back_binding_and_retains_worktree() {
         2,
         "both leases are retained in history: {rows:?}"
     );
-    assert_eq!(rows[0].agent.as_str(), "agent-0-doomed");
-    assert_eq!(rows[0].state, BindingState::Released);
-    assert_eq!(rows[1].agent.as_str(), "agent-1-successor");
-    assert_eq!(rows[1].state, BindingState::Terminal);
+    assert_eq!(rows[0].agent().as_str(), "agent-0-doomed");
+    assert_eq!(rows[0].state(), BindingState::Released);
+    assert_eq!(rows[1].agent().as_str(), "agent-1-successor");
+    assert_eq!(rows[1].state(), BindingState::Terminal);
 
     assert_retained_and_unbound(&fixture, &worktree);
 }
@@ -333,8 +333,8 @@ fn cycle_failure_rolls_back_binding_and_retains_worktree() {
 
     let rows = rows_on_disk(&fixture.binding_root(), &worktree);
     assert_eq!(rows.len(), 1, "one lease row: {rows:?}");
-    assert_eq!(rows[0].state, BindingState::Released);
-    assert_eq!(rows[0].agent.as_str(), "agent-0-half-run");
+    assert_eq!(rows[0].state(), BindingState::Released);
+    assert_eq!(rows[0].agent().as_str(), "agent-0-half-run");
 
     assert_retained_and_unbound(&fixture, &worktree);
 }
@@ -395,8 +395,8 @@ fn spawn_into_existing_bound_worktree_refuses_naming_holder() {
     // steal, or overwrite the incumbent.
     let rows = rows_on_disk(&fixture.binding_root(), &worktree);
     assert_eq!(rows.len(), 1, "no row for the refused spawn: {rows:?}");
-    assert_eq!(rows[0].agent.as_str(), "agent-99-squatter");
-    assert_eq!(rows[0].state, BindingState::Active);
+    assert_eq!(rows[0].agent().as_str(), "agent-99-squatter");
+    assert_eq!(rows[0].state(), BindingState::Active);
 }
 
 #[test]
@@ -626,7 +626,7 @@ fn parked_turn_completes_and_settles_binding_terminal_once() {
     let parked_rows = rows_on_disk(&fixture.binding_root(), &worktree);
     assert_eq!(parked_rows.len(), 1, "one lease row: {parked_rows:?}");
     assert_eq!(
-        parked_rows[0].state,
+        parked_rows[0].state(),
         BindingState::Active,
         "a parked turn must not settle its binding — the agent has not finished"
     );
@@ -669,8 +669,8 @@ fn parked_turn_completes_and_settles_binding_terminal_once() {
         1,
         "the two-stop turn settled ONE lease, not two: {rows:?}"
     );
-    assert_eq!(rows[0].state, BindingState::Terminal);
-    assert_eq!(rows[0].agent.as_str(), "agent-0-parker");
+    assert_eq!(rows[0].state(), BindingState::Terminal);
+    assert_eq!(rows[0].agent().as_str(), "agent-0-parker");
 }
 
 /// A backend failure DURING the resume is the same rollback rule as a failure
@@ -728,8 +728,8 @@ fn resume_backend_failure_rolls_back_binding_and_retains_worktree() {
 
     let rows = rows_on_disk(&fixture.binding_root(), &worktree);
     assert_eq!(rows.len(), 1, "one lease row: {rows:?}");
-    assert_eq!(rows[0].state, BindingState::Released);
-    assert_eq!(rows[0].agent.as_str(), "agent-0-half-answered");
+    assert_eq!(rows[0].state(), BindingState::Released);
+    assert_eq!(rows[0].agent().as_str(), "agent-0-half-answered");
 
     assert_retained_and_unbound(&fixture, &worktree);
 }
@@ -918,7 +918,7 @@ fn round_backstop_fires_and_rolls_back() {
     let rows = rows_on_disk(&fixture.binding_root(), &worktree);
     assert_eq!(rows.len(), 1, "one lease row: {rows:?}");
     assert_eq!(
-        rows[0].state,
+        rows[0].state(),
         BindingState::Released,
         "the backstop rolls back like any other post-Bound failure"
     );
@@ -1055,7 +1055,7 @@ fn two_concurrent_begins_both_run_and_answers_route_by_agent() {
     for worktree in &worktrees {
         let rows = rows_on_disk(&fixture.binding_root(), worktree);
         assert_eq!(rows.len(), 1, "one lease row per worktree: {rows:?}");
-        assert_eq!(rows[0].state, BindingState::Terminal);
+        assert_eq!(rows[0].state(), BindingState::Terminal);
     }
 }
 
@@ -1269,7 +1269,7 @@ fn three_detached_sagas_complete_out_of_spawn_order_on_three_threads() {
             let binding = bindings
                 .current(worktree)
                 .unwrap_or_else(|| panic!("{worktree} must be Active while its cycle runs"));
-            assert_eq!(binding.state, BindingState::Active);
+            assert_eq!(binding.state(), BindingState::Active);
         }
     }
     let mut distinct: Vec<&str> = worktrees.iter().map(|w| w.as_str()).collect();
@@ -1332,7 +1332,7 @@ fn three_detached_sagas_complete_out_of_spawn_order_on_three_threads() {
         let rows = rows_on_disk(&fixture.binding_root(), worktree);
         assert_eq!(rows.len(), 1, "one lease row per cycle: {rows:?}");
         assert_eq!(
-            rows[0].state,
+            rows[0].state(),
             BindingState::Terminal,
             "every completed cycle settles its OWN binding Terminal"
         );
@@ -1373,7 +1373,7 @@ fn a_blocked_saga_is_cancelled_from_another_thread_and_settles_released() {
     // Active while the cycle is live — a blocked turn is not a finished one.
     let active = rows_on_disk(&fixture.binding_root(), &worktree);
     assert_eq!(active.len(), 1, "one lease row: {active:?}");
-    assert_eq!(active[0].state, BindingState::Active);
+    assert_eq!(active[0].state(), BindingState::Active);
 
     let (started_tx, started_rx) = std::sync::mpsc::channel::<()>();
     let handle = std::thread::spawn(move || {
@@ -1427,11 +1427,11 @@ fn a_blocked_saga_is_cancelled_from_another_thread_and_settles_released() {
         "cancellation settles ONE lease, never two: {rows:?}"
     );
     assert_eq!(
-        rows[0].state,
+        rows[0].state(),
         BindingState::Released,
         "cancel SETTLES: a killed cycle's binding is Released, not left Active"
     );
-    assert_eq!(rows[0].agent.as_str(), "agent-0-blocked");
+    assert_eq!(rows[0].agent().as_str(), "agent-0-blocked");
     assert_retained_and_unbound(&fixture, &worktree);
 }
 
@@ -1533,7 +1533,7 @@ fn abandon_settles_released_once_and_is_a_no_op_on_a_settled_saga() {
             1,
             "exactly one lease row for {worktree}: {rows:?}"
         );
-        assert_eq!(rows[0].state, state, "for {worktree}");
+        assert_eq!(rows[0].state(), state, "for {worktree}");
     }
     assert_retained_and_unbound(&fixture, &abandoned);
     assert_retained_and_unbound(&fixture, &rolled_back);
