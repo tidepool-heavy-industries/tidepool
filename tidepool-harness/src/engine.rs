@@ -1181,6 +1181,50 @@ pub fn split_imports(block: &str) -> (String, String) {
     (imports.join("\n"), body.join("\n"))
 }
 
+/// Split a turn's (already import-stripped, see [`split_imports`]) block text
+/// into top-level items — the harness-side counterpart of `tidepool-repl`'s
+/// caller-supplied `session_run { items: [String] }` array. A model writes ONE
+/// fenced block with several top-level chunks (a helper declaration, then the
+/// answer expression); this recovers the item boundaries `run_multi_item_block`
+/// hands to [`tidepool_runtime::session::classify_block`].
+///
+/// A blank line followed by a line that does NOT start with whitespace begins
+/// a new item — the same paragraph convention a Haskell script or GHCi
+/// paste-mode already uses to separate top-level declarations/statements. An
+/// indented continuation (inside a `do`/`where`/`let` block, or a multi-clause
+/// function's later equations, which must stay one item — see
+/// `tidepool-repl/CLAUDE.md`'s "Item classification") never splits, blank
+/// lines and all. A block with no such boundary is a single item — the common
+/// case, `trim_end()`ed identically to the whole-block text `run_block`'s
+/// existing single-item path already receives.
+pub fn split_block_items(block: &str) -> Vec<String> {
+    let mut items: Vec<String> = Vec::new();
+    let mut current = String::new();
+    let mut blank_pending = false;
+    for line in block.lines() {
+        if line.trim().is_empty() {
+            if !current.is_empty() {
+                blank_pending = true;
+            }
+            continue;
+        }
+        let indented = line.starts_with(' ') || line.starts_with('\t');
+        if blank_pending && !indented {
+            items.push(current.trim_end().to_string());
+            current.clear();
+        } else if blank_pending {
+            current.push('\n');
+        }
+        blank_pending = false;
+        current.push_str(line);
+        current.push('\n');
+    }
+    if !current.trim().is_empty() {
+        items.push(current.trim_end().to_string());
+    }
+    items
+}
+
 // ---------------------------------------------------------------------------
 // Include-path resolution + effect-stack config
 // ---------------------------------------------------------------------------
@@ -2367,6 +2411,56 @@ mod tests {
         // Last block failing: nothing unrun, no unrun line at all.
         let msg = sequence_failure_context(&receipts, 4, 4, "boom");
         assert!(!msg.contains("did not run"), "{msg}");
+    }
+
+    // -- block item splitting -------------------------------------------------
+
+    /// A block with no blank-line-separated top-level boundary is one item —
+    /// the common case, and the one `run_block` must route to its unchanged
+    /// single-item path.
+    #[test]
+    fn split_block_items_single_expression_is_one_item() {
+        assert_eq!(split_block_items("sq 7"), vec!["sq 7".to_string()]);
+        assert_eq!(
+            split_block_items("let xs = [1, 2, 3]\n in sum xs"),
+            vec!["let xs = [1, 2, 3]\n in sum xs".to_string()]
+        );
+    }
+
+    /// A blank line followed by a helper decl, then the answer expression —
+    /// the motivating shape — splits into exactly two items.
+    #[test]
+    fn split_block_items_decl_then_expr_splits_in_two() {
+        let block = "sq :: Int -> Int\nsq x = x * x\n\nsq 7";
+        assert_eq!(
+            split_block_items(block),
+            vec![
+                "sq :: Int -> Int\nsq x = x * x".to_string(),
+                "sq 7".to_string()
+            ]
+        );
+    }
+
+    /// An indented continuation after a blank line (inside a `do`/`where`
+    /// block) never starts a new item — only a non-indented line does.
+    #[test]
+    fn split_block_items_indented_continuation_stays_in_one_item() {
+        let block = "f = do\n  x <- pure 1\n\n  pure (x + 1)";
+        assert_eq!(split_block_items(block), vec![block.to_string()]);
+    }
+
+    /// Three items in a row (two helper decls, then the answer) all split out.
+    #[test]
+    fn split_block_items_three_items() {
+        let block = "helper1 x = x + 1\n\nhelper2 x = x * 2\n\nhelper2 (helper1 5)";
+        assert_eq!(
+            split_block_items(block),
+            vec![
+                "helper1 x = x + 1".to_string(),
+                "helper2 x = x * 2".to_string(),
+                "helper2 (helper1 5)".to_string(),
+            ]
+        );
     }
 
     // -- hole card type synopsis --------------------------------------------

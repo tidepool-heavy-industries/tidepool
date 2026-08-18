@@ -1,5 +1,21 @@
 # TODO: GHCi affordances for harness turns (`:t`, multi-item turns)
 
+## Status
+
+**Multi-item turns: LANDED** (`tidepool-harness/src/harness.rs`'s
+`Harness::run_multi_item_block`, adopting the one-spawn-turn-protocol Phase
+B block lane — `classify_block`/`define_scoped_in` from
+`tidepool-runtime::session`, the same primitives `tidepool-repl`'s
+`Session::run_block`/`drive_block` already uses). A harness answerer turn
+whose eval block contains multiple items (e.g. a helper declaration followed
+by the answer expression, blank-line separated within one fenced
+` ```haskell ` block — split by `tidepool-harness::engine::split_block_items`)
+now classifies in ONE batch spawn and runs each item in order, stopping on
+the first error/suspension exactly as the existing multi-BLOCK sequence does.
+A single-item block is untouched (same one `run_turn` spawn, same error
+surfaces — `run_block`'s original path, unchanged). `:t` (below) remains
+deferred — its sequencing note is unaffected by this landing.
+
 ## Priority 0 (Inanna, same session): types IN the prompt beat `:t`
 
 For CORE types — tidepool-native surface a model cannot know from
@@ -35,12 +51,15 @@ the corrective-retry error text). A model fluent in GHCi would have typed
    A turn whose block is `:t expr` (or contains leading `:t` lines) gets a
    type answer instead of an execution. Precedent already in-tree:
    tidepool-repl's block-runner classifies `:commands` (`:t`, `:i`,
-   `:browse`) today. The one-spawn-turn protocol (Phase B, in flight)
-   moves turn classification INTO extract — `:t` support becomes one more
-   classification arm there, shared by repl and harness by construction.
-   "Up to N lines" similarly maps onto repl's existing multi-item block
-   classification (decl/bind/expr sequences), which the harness could
-   adopt once the shared path lands.
+   `:browse`) today. The one-spawn-turn protocol (Phase B) moved turn
+   classification INTO extract — `:t` support would become one more
+   classification arm there, shared by repl and harness by construction, but
+   `:t` itself is NOT built (still deferred, below). "Up to N lines" mapped
+   onto repl's existing multi-item block classification (decl/bind/expr
+   sequences) as expected: the harness has now adopted it (see Status,
+   above) — `:t` was the one classification arm that did NOT come along for
+   free, since a type-answer response has no equivalent in the harness's
+   turn-outcome shape yet.
 2. **Tool-shaped**: a separate typecheck probe the model calls outside the
    eval block. Cheaper to bolt on, but off-thesis (reintroduces the
    N-tool-calls surface the eval block exists to replace) and splits the
@@ -50,10 +69,11 @@ the corrective-retry error text). A model fluent in GHCi would have typed
 
 Do NOT build either before Phase B (one-spawn-turn) lands: extract-side
 classification is the natural mechanism for shape 1, and building shape 1
-pre-Phase-B means writing the classification twice. Revisit at the
-extract-wave TL's spawn; the interim mitigation is signatures-in-prompt
-(landed 2026-08-08: `ANSWERER_FRAMING_SUFFIX` field-builder signatures +
-compiling finalize shape).
+pre-Phase-B means writing the classification twice. Phase B has landed, and
+multi-item turns have landed on top of it (see Status, above). `:t` remains
+unbuilt — revisit at the next spawn that wants it; the interim mitigation is
+still signatures-in-prompt (landed 2026-08-08: `ANSWERER_FRAMING_SUFFIX`
+field-builder signatures + compiling finalize shape).
 
 Tier-0 telemetry angle: if `:t` lands, its usage rate per session is a
 direct dialect-adoption metric (models reaching for GHCi affordances

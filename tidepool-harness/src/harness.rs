@@ -44,9 +44,9 @@ use tidepool_eval::value::Value;
 use tidepool_mcp::CapturedOutput;
 use tidepool_repr::{DataConTable, Generation, SessionId};
 use tidepool_runtime::session::{
-    run_turn, BoundBinder, CompiledTurn, ResidentError, ResidentHole, ResidentOutcome,
-    ResidentSession, ScopeRetirement, SessionLib, TemplateSelector, TurnRequest, TurnResult,
-    TurnTemplate, DECL_TEMPLATE_SOURCE,
+    classify_block, run_turn, BoundBinder, CompiledTurn, ResidentError, ResidentHole,
+    ResidentOutcome, ResidentSession, ScopeRetirement, SessionLib, TemplateSelector, TurnKind,
+    TurnRequest, TurnResult, TurnTemplate, DECL_TEMPLATE_SOURCE,
 };
 use tidepool_runtime::DEFAULT_NURSERY_SIZE;
 use tokio::sync::{mpsc, oneshot};
@@ -414,6 +414,24 @@ fn candidate_window(
     let pos = source.find(marker)?;
     let offset = source[..pos + marker.len()].matches('\n').count();
     Some((offset, (offset + 1, offset + content_lines)))
+}
+
+/// The per-item output of [`Harness::live_turn_context`] — everything one
+/// singleton item's `run_turn` call needs from live session/contract state.
+/// See that method's doc for why this is gathered FRESH per item rather than
+/// once per block.
+struct LiveTurnContext {
+    expr_imports: String,
+    include: Vec<PathBuf>,
+    session_root: PathBuf,
+    inject_modules: Vec<String>,
+    gen: u64,
+    /// The generation a BIND verdict materializes into — `None` when the node
+    /// has no decl plane, in which case a real (non-discarding) bind is
+    /// rejected (mirrors `run_block`'s single-item path).
+    bind_ctx_gen: Option<Generation>,
+    bind_source: String,
+    binddiscard_source: String,
 }
 
 /// Render a turn-compile failure as text a MODEL can act on, with GHC's
@@ -1493,6 +1511,14 @@ impl Harness {
     /// Compile a `block` (with optional imports/helpers) and run it against
     /// `node`'s resident session as a TOP-LEVEL turn. Classifies a suspension.
     ///
+    /// A block that [`engine::split_block_items`] finds more than one item in
+    /// (a helper declaration followed by the answer expression, say) routes
+    /// to [`Self::run_multi_item_block`] instead — see that method for the
+    /// block lane's classify-then-run contract. **A single-item block takes
+    /// the ORIGINAL path below, unchanged**: this is the pinned behavior —
+    /// same spawn count (one `run_turn`, verdict discovered internally), same
+    /// error surfaces — that adopting the block lane must not disturb.
+    ///
     /// ONE `run_turn` spawn classifies and compiles together — the verdict
     /// (decl/bind/expr) is not known until it returns, so every template it
     /// might select is built up front, from the SAME session/contract context
@@ -1504,6 +1530,11 @@ impl Harness {
         imports: &str,
         helpers: &str,
     ) -> Result<engine::TurnOutcome, HarnessError> {
+        if engine::split_block_items(block).len() > 1 {
+            return self
+                .run_multi_item_block(node, block, imports, helpers)
+                .await;
+        }
         // Session/contract context, peeked under the lock WITHOUT checking the
         // session out, so a compile failure below never leaks it (the session
         // is taken only once a compiled fragment is in hand).
@@ -1767,6 +1798,369 @@ impl Harness {
                 self.finish_run(node, run_outcome, table, asks)
             }
         }
+    }
+
+    /// The session/contract context ONE item's compile needs — everything
+    /// [`Self::run_block`]'s single-item path gathers before its `run_turn`
+    /// call, factored out so [`Self::run_multi_item_block`] can gather it
+    /// FRESH before every singleton item rather than once for the whole
+    /// block: an earlier item in the SAME block may have committed a
+    /// declaration or materialized a bind, and this item must compile
+    /// against whatever the session actually looks like right now — exactly
+    /// what a sequence of independent turns already does.
+    fn live_turn_context(
+        &self,
+        node: NodeId,
+        imports: &str,
+        helpers: &str,
+        target_include: &[PathBuf],
+    ) -> Result<LiveTurnContext, HarnessError> {
+        let (session_module, session_include) = self.session_decl_context(node);
+        let bind_ctx = self.session_bind_context(node);
+        let contract = self.answer_contract(node);
+
+        let mut expr_import_lines: Vec<String> = contract
+            .iter()
+            .flat_map(|c| c.imports.iter().cloned())
+            .collect();
+        if !imports.is_empty() {
+            expr_import_lines.push(imports.to_string());
+        }
+        expr_import_lines.extend(session_module.clone());
+        if let Some((session_imports, ..)) = &bind_ctx {
+            if !session_imports.is_empty() {
+                expr_import_lines.push(session_imports.clone());
+            }
+        }
+        let expr_imports = expr_import_lines.join("\n");
+
+        let mut bind_import_lines: Vec<String> = contract
+            .iter()
+            .flat_map(|c| c.imports.iter().cloned())
+            .collect();
+        if !imports.is_empty() {
+            bind_import_lines.push(imports.to_string());
+        }
+        if let Some((session_imports, ..)) = &bind_ctx {
+            if !session_imports.is_empty() {
+                bind_import_lines.push(session_imports.clone());
+            }
+        }
+        let bind_imports = bind_import_lines.join("\n");
+
+        let bind_source =
+            engine::session_bind_template(&self.cfg, "{{BINDERS}}", &bind_imports, helpers);
+        let binddiscard_source =
+            engine::session_bind_template(&self.cfg, "()", &bind_imports, helpers);
+
+        let mut include = target_include.to_vec();
+        if let Some(dir) = session_include {
+            include.push(dir);
+        }
+
+        let scratch_root;
+        let (session_root, inject_modules, gen, bind_ctx_gen) = match &bind_ctx {
+            Some((_, inject, root, gen)) => (root.clone(), inject.clone(), gen.0, Some(*gen)),
+            None => {
+                scratch_root = tempfile::TempDir::new()
+                    .map_err(|e| HarnessError::Resident(format!("scratch session root: {e}")))?;
+                (scratch_root.path().to_path_buf(), Vec::new(), 0, None)
+            }
+        };
+
+        Ok(LiveTurnContext {
+            expr_imports,
+            include,
+            session_root,
+            inject_modules,
+            gen,
+            bind_ctx_gen,
+            bind_source,
+            binddiscard_source,
+        })
+    }
+
+    /// Multi-item sibling of [`Self::run_block`], reached only when
+    /// [`engine::split_block_items`] finds more than one item in `block` (a
+    /// helper declaration followed by the answer expression, say) — the
+    /// one-spawn-turn-protocol Phase B block lane, adopted from
+    /// `tidepool-repl`'s `Session::run_block`/`drive_block`
+    /// (`plans/one-spawn-turn-protocol-phase-b.md` decision 1): classify the
+    /// WHOLE block in ONE [`classify_block`] spawn, then run each item with
+    /// its verdict already in hand.
+    ///
+    /// A maximal run of consecutive DECL-shaped items batches into ONE
+    /// [`ResidentSession::define_scoped_in`] generation (so a signature and
+    /// its binding, split across items, typecheck together) — the same
+    /// batching primitive the decl-items harvest already uses, not a second
+    /// implementation. A bind/expr item compiles through the same `run_turn`
+    /// rail [`Self::run_block`]'s single-item path uses, with `verdict:
+    /// Some(..)` so the extract skips its own re-parse.
+    ///
+    /// Stops at the first compile error or suspension — on suspension the
+    /// remaining items are simply dropped and a corrective note is pushed
+    /// (unless the suspension is a `finalize`, which ends the window), the
+    /// exact contract [`Self::drive_turn`]'s outer multi-BLOCK sequence
+    /// already has, one level down. The block's LAST item must classify as
+    /// something that RUNS (a bind or a bare expression) — ending on a bare
+    /// declaration compiles and persists fine but advances nothing, so it is
+    /// a typed error rather than a silent "declared" completion (a
+    /// single-item block keeps its existing, unrestricted decl-ending
+    /// behavior in [`Self::run_block`]).
+    async fn run_multi_item_block(
+        &self,
+        node: NodeId,
+        block: &str,
+        imports: &str,
+        helpers: &str,
+    ) -> Result<engine::TurnOutcome, HarnessError> {
+        let items = engine::split_block_items(block);
+        let contract = self.answer_contract(node);
+        let target = self.cfg.turn_target(
+            contract
+                .as_ref()
+                .map(|c| (c.ty.as_str(), c.imports.as_slice())),
+        )?;
+
+        // The user-import lines a decl item's compiled module needs re-glued
+        // — the same rebuild `run_block`'s single-item decl path does
+        // (`decl_source`), applied once per decl RUN below: a batch's
+        // declarations land in one module, so the import block is needed
+        // only once at the top of the run, not repeated per source.
+        let decl_import_prefix: String = if imports.is_empty() {
+            String::new()
+        } else {
+            imports
+                .lines()
+                .map(str::trim)
+                .filter(|l| !l.is_empty())
+                .map(|l| format!("import {l}\n"))
+                .collect()
+        };
+
+        let template_started = std::time::Instant::now();
+        let item_refs: Vec<&str> = items.iter().map(String::as_str).collect();
+        let verdicts = classify_block(&item_refs)
+            .map_err(|e| HarnessError::Compile(format!("batch classify failed: {e}")))?;
+        timing::record_stage(
+            node.0,
+            timing::NO_ROUND,
+            timing::STAGE_TEMPLATE,
+            template_started.elapsed(),
+            0,
+        );
+        if verdicts.len() != items.len() {
+            return Err(HarnessError::Resident(format!(
+                "batch classify returned {} verdict(s) for {} item(s)",
+                verdicts.len(),
+                items.len()
+            )));
+        }
+
+        if matches!(verdicts.last().map(|v| v.kind), Some(TurnKind::Decl)) {
+            let msg = "This block's last item is a declaration, not something that runs. \
+                       A multi-item block must end with the answer expression (or a bind) \
+                       — move any trailing declaration earlier in the block, or follow it \
+                       with the expression that uses it."
+                .to_string();
+            self.push_user_turn(node, &msg)?;
+            return Err(HarnessError::Resident(msg));
+        }
+
+        let scope = self.node_scope(node);
+        let mut index = 0usize;
+        let mut last_outcome: Option<engine::TurnOutcome> = None;
+
+        while index < items.len() {
+            if verdicts[index].kind == TurnKind::Decl {
+                let start = index;
+                while index < items.len() && verdicts[index].kind == TurnKind::Decl {
+                    index += 1;
+                }
+                let mut decl_texts: Vec<String> = items[start..index].to_vec();
+                if !decl_import_prefix.is_empty() {
+                    decl_texts[0] = format!("{decl_import_prefix}\n{}", decl_texts[0]);
+                }
+
+                let checkout = self.checkout_run_retrying(node).await?;
+                let res = self
+                    .run_checked_out(node, checkout, move |mut session| {
+                        let refs: Vec<&str> = decl_texts.iter().map(String::as_str).collect();
+                        let r = session.define_scoped_in(scope, &refs);
+                        (session, r)
+                    })
+                    .await?;
+                self.flush_effects(node)?;
+                match res {
+                    Ok(gen) => {
+                        last_outcome = Some(engine::TurnOutcome::Completed {
+                            rendered: format!("declared (gen {})", gen.0),
+                        });
+                    }
+                    // Same COMPILE-class treatment `run_block`'s single-item
+                    // decl path gives a failed decl validation — the
+                    // corrective-retry loop feeds it back as another round.
+                    Err(e) => return Err(HarnessError::Compile(e.to_string())),
+                }
+                continue;
+            }
+
+            // Singleton bind/expr item — fresh live context every iteration
+            // (see `live_turn_context`'s doc).
+            let ctx = self.live_turn_context(node, imports, helpers, &target.include)?;
+            let item_text = items[index].clone();
+            let verdict = verdicts[index].clone();
+            let expr_source = engine::expr_turn_template(
+                &self.cfg,
+                &target.stack,
+                &item_text,
+                &ctx.expr_imports,
+                helpers,
+            );
+            let templates = vec![
+                TurnTemplate {
+                    kind: TemplateSelector::Decl,
+                    source: DECL_TEMPLATE_SOURCE.to_string(),
+                },
+                TurnTemplate {
+                    kind: TemplateSelector::Bind,
+                    source: ctx.bind_source.clone(),
+                },
+                TurnTemplate {
+                    kind: TemplateSelector::BindDiscard,
+                    source: ctx.binddiscard_source.clone(),
+                },
+                TurnTemplate {
+                    kind: TemplateSelector::Expr,
+                    source: expr_source.clone(),
+                },
+            ];
+
+            let include = ctx.include.clone();
+            let session_root = ctx.session_root.clone();
+            let inject_modules = ctx.inject_modules.clone();
+            let gen = ctx.gen;
+            let req_item_text = item_text.clone();
+            let req_verdict = verdict.clone();
+            let outcome = tokio::task::spawn_blocking(move || {
+                let include_refs: Vec<&Path> = include.iter().map(PathBuf::as_path).collect();
+                let req = TurnRequest {
+                    turn_text: &req_item_text,
+                    templates: &templates,
+                    include: &include_refs,
+                    session_root: &session_root,
+                    inject_modules: &inject_modules,
+                    gen,
+                    verdict: Some(req_verdict),
+                    target: None,
+                };
+                run_turn(req)
+            })
+            .await
+            .map_err(|e| HarnessError::Resident(format!("turn compile task join: {e}")))?
+            .map_err(|e| {
+                HarnessError::Compile(render_compile_error(
+                    &e,
+                    &item_text,
+                    &expr_source,
+                    &ctx.bind_source,
+                ))
+            })?;
+
+            let step_outcome = match outcome {
+                TurnResult::Decl { .. } => {
+                    return Err(HarnessError::Resident(
+                        "internal: batch verdict said bind/expr but the compile returned a decl"
+                            .into(),
+                    ));
+                }
+                TurnResult::Bind {
+                    binders,
+                    bound,
+                    compiled,
+                    ..
+                } if !binders.is_empty() => {
+                    let Some(bind_gen) = ctx.bind_ctx_gen else {
+                        return Err(HarnessError::Resident(
+                            "value-plane bind requires a node decl plane".into(),
+                        ));
+                    };
+                    if binders.len() > 1 {
+                        let names = binders.join(", ");
+                        let msg = format!(
+                            "This node binds one name per turn; `{names}` binds {}. \
+                             Bind them one at a time.",
+                            binders.len()
+                        );
+                        self.push_user_turn(node, &msg)?;
+                        return Err(HarnessError::Resident(msg));
+                    }
+                    let binder = bound.into_iter().next().ok_or_else(|| {
+                        HarnessError::Resident("session-bind emitted no binder metadata".into())
+                    })?;
+                    self.run_bind_turn(node, binder, compiled, bind_gen).await?
+                }
+                TurnResult::Bind { compiled, .. } | TurnResult::Expr { compiled, .. } => {
+                    self.log_turn_extracted(node, &compiled.asks, None)?;
+                    let asks = AsksSidecar::from_pairs(compiled.asks);
+                    let table = compiled.table;
+                    let expr = compiled.expr;
+                    let checkout = self.checkout_run_retrying(node).await?;
+                    let run_table = table.clone();
+                    let run_outcome = self
+                        .run_checked_out(node, checkout, move |mut session| {
+                            let out = session.run("turn", &expr, &run_table);
+                            (session, out)
+                        })
+                        .await?;
+                    self.finish_run(node, run_outcome, table, asks)?
+                }
+            };
+
+            if matches!(step_outcome, engine::TurnOutcome::Suspended { .. }) {
+                if index + 1 < items.len() {
+                    let is_finalize = matches!(
+                        &step_outcome,
+                        engine::TurnOutcome::Suspended { classified, .. }
+                            if matches!(classified.routing, engine::HoleRouting::Finalize { .. })
+                    );
+                    if is_finalize {
+                        tracing::warn!(
+                            node = node.0,
+                            unrun = items.len() - index - 1,
+                            "finalize in item {} of {} — later items never run",
+                            index + 1,
+                            items.len()
+                        );
+                    } else {
+                        self.push_user_turn(
+                            node,
+                            &format!(
+                                "Note: item {} of {} in this block suspended awaiting an \
+                                 answer, so the items after it did not run. Items 1–{} ran \
+                                 and persist — when your window continues, pick up from \
+                                 item {}.",
+                                index + 1,
+                                items.len(),
+                                index + 1,
+                                index + 2
+                            ),
+                        )?;
+                    }
+                }
+                return Ok(step_outcome);
+            }
+            last_outcome = Some(step_outcome);
+            index += 1;
+        }
+
+        // The loop above always sets `last_outcome` on every iteration
+        // (decl-run or singleton) before advancing `index`, and the
+        // trailing-decl precheck guarantees the FINAL segment is a
+        // singleton — so a normal loop exit always has one. A `None` here
+        // would mean `items` was empty, which `run_block`'s `> 1` guard
+        // already rules out.
+        Ok(last_outcome.expect("run_multi_item_block: the loop always sets last_outcome"))
     }
 
     /// Shared turn epilogue: restore the session, flush effects, and turn a
