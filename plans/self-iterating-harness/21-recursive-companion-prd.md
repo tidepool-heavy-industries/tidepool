@@ -218,13 +218,32 @@ worktrees and repository events; caller-side receipts everywhere.
   in the GUI without being the primary answer surface.
 - **C4 — checked edits.** Artifacts by id, caller-applied with invariants,
   previews, `EditReceipt`s; `FoldDecision` composition; only state and
-  receipts cross checkpoints (closures never do).
-- **C5 — effects in nodes.** The row-widening decision is SETTLED (decision
-  10 as amended: direct subagent-spawn effect, no raw Worktree verbs, plus
-  the worktree-coordination section). Remaining design: the typed
-  comparison/choice GUI's concrete shape in algebra windows; cancellation
-  semantics draining a recursive scope under structured concurrency;
-  sibling merge-conflict handling.
+  receipts cross checkpoints (closures never do). Settled (2026-08-18,
+  operator): approval is the PARENT'S fold — a child's edits are proposals
+  to its parent's algebra, and selection in `FoldDecision` IS the approval
+  that mints the consuming `ApprovedEdits` capability; no operator gate
+  inside the tree (the operator sees receipts; a root-level gate can grow
+  later if dogfood wants one). v1 apply-time invariants are the closure's
+  own `Either EditFailure s` — no build/typecheck gate, because the
+  companion's v1 edit targets are markdown/state, not code. The `ThoughtF`
+  task-slot change stays DEFERRED: v1 checked edits receive artifacts from
+  children up the fold and never need algebra access to coalgebra-minted
+  values; open question 5's precondition rule stands for whichever future
+  feature first needs it.
+- **C5 — effects in nodes.** Design fully settled (2026-08-18, operator);
+  what remains is implementation. Row-widening: decision 10 as amended
+  (direct subagent-spawn effect, no raw Worktree verbs) plus the
+  worktree-coordination section. Comparison/choice GUI: DERIVED through
+  the existing generic askUser/forms surface (PRD 14/15) — `FoldDecision`
+  renders as a ranked select over branch results + an artifact checklist +
+  composition order; no bespoke widget unless dogfood proves the derived
+  form cramped (the goal is strong generic tools that support many harness
+  shapes). Cancellation: propagates transitively to leaves, including
+  spawned subagents via cycle cancellation; interruption lands at the next
+  suspension point (no mid-stream preemption in v1); a cancelled child
+  folds as typed `InvocationExit` data at its branch position, completed
+  siblings keep their results, the algebra runs over the partial layer,
+  and cancelled nodes' lazy worktrees are discarded unmerged.
 - **C6 — daily dogfood.** Friction log per turn (depth/width discovered,
   cache hit rates, cost, operator interventions, whether branching beat a
   single window). Promote surface changes only from real runs; baseline is
@@ -248,9 +267,14 @@ independent after C3; dogfood begins as each lands.
   The tree's commit history linearizes bottom-up — the exomonad fold
   pattern — and the root node's worktree is the turn's single integration
   point. There is no cross-tree shared trunk a node writes to directly.
-- Open (settle in C5): conflict handling when a child's merge collides with
-  an earlier sibling's — a typed failure folded as data at the branch
-  position (decision 6's shape) vs an operator gate.
+- Conflict handling (settled 2026-08-18, operator): when a child's merge
+  collides with an earlier sibling's, the standard move is to SPAWN AN
+  AGENT on the conflict — resolve it if trivial, otherwise report why it
+  is deeply nontrivial. The resolver's outcome is typed: a resolved merge
+  (applied, receipt-stamped) or a conflict report folded as data at the
+  branch position for the algebra to decide (drop, re-propose, escalate
+  to the operator). Escalation is the algebra's choice, never the default
+  path.
 
 ## Persistence (v1)
 
