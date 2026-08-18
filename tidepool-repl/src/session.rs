@@ -47,7 +47,7 @@ use tidepool_effect::pause::PauseGate;
 use tidepool_eval::value::Value;
 use tidepool_mcp::{
     first_sentence, helper_sig, input_binding_source, library_vocab, template_haskell_show_default,
-    CapturedOutput, EffectDecl, PREAMBLE_DEFAULT_DECL,
+    CapturedOutput, EffectDecl, EffectRoster, PREAMBLE_DEFAULT_DECL,
 };
 use tidepool_repr::{
     BindingName, DataConTable, Generation, SessionId, SessionModule, SessionVarId,
@@ -151,14 +151,13 @@ pub struct SessionConfig {
     pub root: PathBuf,
     /// Base GHC include dirs (generated `Tidepool.Effects` dir + prelude/stdlib).
     pub base_include: Vec<PathBuf>,
-    /// Effect decls for this server (e.g. `[Console, Ask]`).
-    pub decls: Vec<EffectDecl>,
+    /// The single-sourced effect roster (ordered decls + the `Ask` suspend
+    /// tag) for this server, built only via `EffectRoster::from_handlers`.
+    pub roster: EffectRoster,
     /// The assembled eval preamble (from `tidepool_mcp::build_preamble`).
     pub preamble: String,
     /// The effect-stack type string (e.g. `'[Console, Ask]`).
     pub effect_stack: String,
-    /// The `Ask` effect's tag (its index in `decls`).
-    pub ask_tag: u64,
     /// Import/pragma surface for the generated `Lib.G<g>` decl modules.
     pub module_env: ModuleEnv,
     /// Session nursery size in bytes.
@@ -525,7 +524,8 @@ impl Session {
             // Decl validation must resolve the same imports eval does (notably
             // the generated `Tidepool.Effects`), so feed it the base include.
             .with_validation_include(cfg.base_include.clone());
-        let core = PersistentSession::new(Some(lib), cfg.ask_tag, cfg.nursery_size);
+        let core =
+            PersistentSession::new(Some(lib), cfg.roster.suspend_tag().get(), cfg.nursery_size);
         Ok(Session {
             cfg,
             make_handlers,
@@ -786,7 +786,7 @@ impl Session {
     /// server restart. Mirrors the oneshot eval server, which self-heals per
     /// eval the same way.
     fn heal_effects_module(&self) {
-        if let Err(e) = tidepool_mcp::ensure_effects_module(&self.cfg.decls) {
+        if let Err(e) = tidepool_mcp::ensure_effects_module(self.cfg.roster.decls()) {
             tracing::warn!("effects-module self-heal failed: {e}");
         }
     }
@@ -2457,7 +2457,7 @@ impl Session {
                         let lib = lib.with_validation_include(self.cfg.base_include.clone());
                         self.core = PersistentSession::new(
                             Some(lib),
-                            self.cfg.ask_tag,
+                            self.cfg.roster.suspend_tag().get(),
                             self.cfg.nursery_size,
                         );
                         // The rebuilt core has no machine, so publish the (now
@@ -2555,7 +2555,7 @@ impl Session {
                     }));
                 }
                 // 2. Built-in effect decl type_defs (data/newtype/type) and GADT constructors.
-                for decl in &self.cfg.decls {
+                for decl in self.cfg.roster.decls() {
                     for type_def in decl.type_defs {
                         if type_def_head(type_def) == Some(name.as_str()) {
                             return TurnOutcome::Meta(serde_json::json!({
@@ -2681,7 +2681,7 @@ impl Session {
                 }))
             }
             MetaCommand::Browse(only) => {
-                TurnOutcome::Meta(browse_effects(&self.cfg.decls, only.as_deref()))
+                TurnOutcome::Meta(browse_effects(self.cfg.roster.decls(), only.as_deref()))
             }
         }
     }
@@ -4108,8 +4108,8 @@ mod hiding_tests {
 #[cfg(test)]
 mod reset_tests {
     use super::{
-        BoxedStack, Generation, MetaCommand, ModuleEnv, PureBind, Session, SessionConfig,
-        SessionId, StackFactory, TurnOutcome, DEFAULT_NURSERY_SIZE,
+        BoxedStack, EffectRoster, Generation, MetaCommand, ModuleEnv, PureBind, Session,
+        SessionConfig, SessionId, StackFactory, TurnOutcome, DEFAULT_NURSERY_SIZE,
     };
 
     /// A handler-stack factory for a test session that never dispatches an
@@ -4124,10 +4124,9 @@ mod reset_tests {
             id: SessionId(1),
             root,
             base_include: Vec::new(),
-            decls: Vec::new(),
+            roster: EffectRoster::from_handlers(&frunk::HNil),
             preamble: String::new(),
             effect_stack: String::new(),
-            ask_tag: 0,
             module_env: ModuleEnv::standalone_default(),
             nursery_size: DEFAULT_NURSERY_SIZE,
         }
@@ -4189,27 +4188,26 @@ mod reset_tests {
     fn reset_clears_stale_cancel_handle_from_slot() {
         tidepool_testing::eval_harness::require_extract();
         let stack = tidepool_handlers::build_minimal_stack();
-        let (decls, ask_tag) = tidepool_handlers::base_decls_with_ask(&stack);
-        let effects_dir =
-            tidepool_mcp::ensure_effects_module(&decls).expect("write Tidepool.Effects module");
+        let roster = EffectRoster::from_handlers(&stack);
+        let effects_dir = tidepool_mcp::ensure_effects_module(roster.decls())
+            .expect("write Tidepool.Effects module");
         let prelude_dir = tidepool_testing::eval_harness::prelude_path();
-        let module_env = tidepool_mcp::session_decl_module_env(&decls, false);
+        let module_env = tidepool_mcp::session_decl_module_env(roster.decls(), false);
         let preamble = tidepool_mcp::build_preamble_non_interactive_mode(
-            &decls,
+            roster.decls(),
             false,
             tidepool_mcp::PaginateMode::Passthrough,
         );
-        let effect_stack = tidepool_mcp::build_effect_stack_type(&decls);
+        let effect_stack = tidepool_mcp::build_effect_stack_type(roster.decls());
 
         let dir = tempfile::tempdir().expect("tempdir");
         let cfg = SessionConfig {
             id: SessionId(1),
             root: dir.path().to_path_buf(),
             base_include: vec![effects_dir, prelude_dir],
-            decls,
+            roster,
             preamble,
             effect_stack,
-            ask_tag,
             module_env,
             nursery_size: DEFAULT_NURSERY_SIZE,
         };

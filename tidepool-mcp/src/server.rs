@@ -39,6 +39,65 @@ impl<T> McpEffectHandler for T where
 {
 }
 
+// ---------------------------------------------------------------------------
+// EffectRoster — the single append-and-count derivation
+// ---------------------------------------------------------------------------
+
+/// The union tag of the FIRST interposed effect (`Ask`) in an [`EffectRoster`]
+/// — the suspend threshold: the JIT's suspend driver intercepts every tag at
+/// or beyond it rather than dispatching it to a handler.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SuspendTag(u64);
+
+impl SuspendTag {
+    /// The raw union-tag value.
+    pub fn get(self) -> u64 {
+        self.0
+    }
+}
+
+/// An ordered effect declaration list plus its [`SuspendTag`], buildable ONLY
+/// via [`EffectRoster::from_handlers`] — the single place that appends the
+/// interposed suffix (`Ask`, `RunLLMTurn`, `Fork`) and derives the suspend
+/// tag, so the two cannot desync. (A prior audit finding: two independent
+/// copies of this append-and-count algorithm risked a drift that would
+/// misclassify an ordinary handled effect as a suspension, or dispatch an
+/// interposed effect as a normal handler tag, at the union-tag boundary.)
+#[derive(Clone)]
+pub struct EffectRoster {
+    decls: Vec<EffectDecl>,
+    suspend_tag: SuspendTag,
+}
+
+impl EffectRoster {
+    /// Collect `H`'s handler-derived declarations, then append the fixed
+    /// interposed suffix — `Ask`, then `RunLLMTurn` (WS-B split `runLLMTurn`
+    /// out of `Ask`), then `Fork` (the answerer parallel-delegation retarget)
+    /// — in that order. The suspend tag is minted BEFORE the suffix is
+    /// appended, so it always equals the handler-decl count by construction.
+    /// Takes `&H` (unused beyond type inference) so callers holding an
+    /// already-built stack don't need a turbofish.
+    pub fn from_handlers<H: CollectEffectDecls>(_handlers: &H) -> EffectRoster {
+        let mut decls = H::collect_decls();
+        let suspend_tag = SuspendTag(decls.len() as u64);
+        decls.push(ask_decl());
+        decls.push(runllmturn_decl());
+        decls.push(fork_decl());
+        EffectRoster { decls, suspend_tag }
+    }
+
+    /// The full ordered declaration list: handler decls, then the interposed
+    /// suffix.
+    pub fn decls(&self) -> &[EffectDecl] {
+        &self.decls
+    }
+
+    /// The `Ask` effect's union tag — every tag at or beyond it is interposed.
+    pub fn suspend_tag(&self) -> SuspendTag {
+        self.suspend_tag
+    }
+}
+
 /// Generic MCP server wrapper that compiles and runs Haskell via Tidepool.
 #[derive(Clone)]
 pub struct TidepoolMcpServer<H> {
@@ -63,13 +122,14 @@ pub struct TidepoolMcpServerImpl {
     pub(crate) eval_tool_description: String,
     // User library support
     pub(crate) has_user_library: bool,
-    // Ask effect support
-    pub(crate) ask_tag: u64,
     // Effect names for error annotation (indexed by tag)
     pub(crate) effect_names: Vec<String>,
-    // MCP resource backing: the raw sources rendered on demand by `read_resource`
-    // (per-effect detail, live library vocab, patterns, stdlib module sources).
-    pub(crate) effect_decls: Vec<EffectDecl>,
+    // The single-sourced effect roster: ordered decls + the Ask suspend tag,
+    // built only via `EffectRoster::from_handlers` (see its doc for why this
+    // replaced two independent decls+ask_tag derivations). Also backs
+    // `read_resource`'s per-effect detail, live library vocab, patterns, and
+    // stdlib module sources via `resource_ctx`.
+    pub(crate) roster: EffectRoster,
     pub(crate) lib_dirs: Vec<PathBuf>,
     pub(crate) patterns_path: Option<PathBuf>,
     pub(crate) stdlib_dir: Option<PathBuf>,
@@ -88,7 +148,7 @@ impl TidepoolMcpServerImpl {
     /// library vocab, patterns, stdlib module sources).
     fn resource_ctx(&self) -> crate::resources::ResourceCtx<'_> {
         crate::resources::ResourceCtx {
-            effects: &self.effect_decls,
+            effects: self.roster.decls(),
             lib_dirs: &self.lib_dirs,
             patterns_path: self.patterns_path.as_deref(),
             stdlib_dir: self.stdlib_dir.as_deref(),
@@ -186,7 +246,7 @@ impl TidepoolMcpServerImpl {
                 source,
                 include: include_refs,
                 handlers,
-                ask_tag: self.ask_tag,
+                ask_tag: self.roster.suspend_tag().get(),
                 effect_names: self.effect_names.clone(),
                 captured,
                 nursery_size: tidepool_runtime::DEFAULT_NURSERY_SIZE,
@@ -678,37 +738,39 @@ where
     /// Effect declarations are collected automatically from handlers that
     /// implement `DescribeEffect`.
     pub fn new(handler: H) -> Self {
-        let mut decls = H::collect_decls();
-        let ask_tag = decls.len() as u64;
-        decls.push(ask_decl());
-        decls.push(runllmturn_decl());
-        decls.push(fork_decl());
-        let effect_names: Vec<String> = decls.iter().map(|d| d.type_name.to_string()).collect();
+        let roster = EffectRoster::from_handlers(&handler);
+        let effect_names: Vec<String> = roster
+            .decls()
+            .iter()
+            .map(|d| d.type_name.to_string())
+            .collect();
         // The generated Tidepool.Effects module must be on the include path
         // for every eval (the preamble imports it). Keep its source so the
         // eval path can re-materialize it if the staging dir is reaped mid-
         // session (macOS purges $TMPDIR / cache). Failure is survivable here —
         // evals will fail with a clear missing-module error.
-        let effects_source = effects_module_source(&decls);
-        let orchestrate_source = orchestrate_module_source(&decls);
+        let effects_source = effects_module_source(roster.decls());
+        let orchestrate_source = orchestrate_module_source(roster.decls());
         let mut include = Vec::new();
         match write_generated_modules(&effects_source, &orchestrate_source) {
             Ok(dir) => include.push(dir),
             Err(e) => eprintln!("[tidepool] failed to write generated Tidepool modules: {e}"),
         }
+        let haskell_preamble = build_preamble(roster.decls(), false);
+        let effect_stack_type = build_effect_stack_type(roster.decls());
+        let eval_tool_description = build_eval_tool_description(roster.decls());
         Self {
             inner: TidepoolMcpServerImpl {
                 handler_factory: Arc::new(handler),
                 include,
                 effects_source,
                 orchestrate_source,
-                haskell_preamble: build_preamble(&decls, false),
-                effect_stack_type: build_effect_stack_type(&decls),
-                eval_tool_description: build_eval_tool_description(&decls),
+                haskell_preamble,
+                effect_stack_type,
+                eval_tool_description,
                 has_user_library: false,
-                ask_tag,
                 effect_names,
-                effect_decls: decls.clone(),
+                roster,
                 lib_dirs: Vec::new(),
                 patterns_path: None,
                 stdlib_dir: None,
@@ -791,12 +853,10 @@ where
             .cloned();
         self.inner.has_user_library = library_dir.is_some();
         if let Some(lib_root) = library_dir {
-            // Rebuild preamble with the user library import
-            let mut decls = H::collect_decls();
-            decls.push(ask_decl());
-            decls.push(runllmturn_decl());
-            decls.push(fork_decl());
-            self.inner.haskell_preamble = build_preamble(&decls, true);
+            // Rebuild preamble with the user library import. Reuses the
+            // roster built in `new` (a pure function of `H`) rather than
+            // re-deriving decls from `H::collect_decls()` a second time.
+            self.inner.haskell_preamble = build_preamble(self.inner.roster.decls(), true);
             // The full vocabulary digest now lives in `tidepool://vocab` (pulled on
             // demand); the description keeps a short pointer instead of inlining it.
             self.inner.eval_tool_description.push_str(concat!(

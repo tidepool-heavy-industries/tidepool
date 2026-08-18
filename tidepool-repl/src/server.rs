@@ -24,7 +24,7 @@ use rmcp::{
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use tidepool_effect::dispatch::DispatchEffect;
-use tidepool_mcp::{describe_effects_index, CapturedOutput, EffectDecl};
+use tidepool_mcp::{describe_effects_index, CapturedOutput, EffectDecl, EffectRoster};
 use tidepool_repr::SessionId;
 use tidepool_runtime::session::ModuleEnv;
 use tokio::io::{stdin, stdout};
@@ -284,8 +284,11 @@ pub fn classify_item(text: &str) -> Result<BlockItem, String> {
 /// Static config for the server (everything but the per-session root, which is
 /// minted per session open).
 pub struct ReplServerConfig {
-    pub decls: Vec<EffectDecl>,
-    pub ask_tag: u64,
+    /// The single-sourced effect roster (ordered decls + the `Ask` suspend
+    /// tag), built only via `EffectRoster::from_handlers` — replaces what used
+    /// to be an unrelated `decls: Vec<EffectDecl>` + `ask_tag: u64` pair that
+    /// a caller could construct with mismatched ordering.
+    pub roster: EffectRoster,
     /// Base GHC include dirs (generated `Tidepool.Effects` dir + prelude/stdlib).
     pub base_include: Vec<PathBuf>,
     /// Import/pragma surface for generated `Lib.G<g>` decl modules.
@@ -333,7 +336,7 @@ fn has_user_library(cfg: &ReplServerConfig) -> bool {
 /// truncation discards them, leaving `stub_N` markers nothing could fetch).
 fn repl_preamble(cfg: &ReplServerConfig) -> String {
     tidepool_mcp::build_preamble_non_interactive_mode(
-        &cfg.decls,
+        cfg.roster.decls(),
         has_user_library(cfg),
         tidepool_mcp::PaginateMode::Passthrough,
     )
@@ -366,7 +369,7 @@ impl TidepoolReplServer {
         H: DispatchEffect<CapturedOutput> + Clone + Send + Sync + 'static,
     {
         let preamble = repl_preamble(&cfg);
-        let effect_stack = tidepool_mcp::build_effect_stack_type(&cfg.decls);
+        let effect_stack = tidepool_mcp::build_effect_stack_type(cfg.roster.decls());
         // Erase H twice over: the spawn closure owns a clone of `base` per
         // SESSION, and hands the session a factory that clones it again per
         // TURN.
@@ -382,15 +385,17 @@ impl TidepoolReplServer {
     /// `session_reset`). Use this to give the session its own KV namespace
     /// (e.g. a per-session backing file) while sharing all other construction.
     ///
-    /// The `cfg` must already carry the correct `decls` and `ask_tag` (derived
-    /// from a representative stack before calling this constructor).
+    /// The `cfg` must already carry the correct `roster` (built via
+    /// `EffectRoster::from_handlers` against a representative stack before
+    /// calling this constructor — the roster's own constructor is what makes
+    /// its decls/suspend-tag pairing structurally correct).
     pub fn new_with_session_builder<H, F>(builder: F, cfg: ReplServerConfig) -> TidepoolReplServer
     where
         H: DispatchEffect<CapturedOutput> + Clone + Send + Sync + 'static,
         F: Fn() -> H + Send + Sync + 'static,
     {
         let preamble = repl_preamble(&cfg);
-        let effect_stack = tidepool_mcp::build_effect_stack_type(&cfg.decls);
+        let effect_stack = tidepool_mcp::build_effect_stack_type(cfg.roster.decls());
         let spawn: SessionSpawn = Box::new(move |sc| {
             let h = builder();
             Session::open(sc, Box::new(move || Box::new(h.clone()) as BoxedStack))
@@ -413,7 +418,7 @@ impl TidepoolReplServer {
                 spawn,
                 preamble,
                 effect_stack,
-                tool_description: build_tool_description(&cfg.decls),
+                tool_description: build_tool_description(cfg.roster.decls()),
                 cfg,
             }),
         };
@@ -518,10 +523,9 @@ impl TidepoolReplServer {
             id: sid,
             root,
             base_include: self.inner.cfg.base_include.clone(),
-            decls: self.inner.cfg.decls.clone(),
+            roster: self.inner.cfg.roster.clone(),
             preamble: self.inner.preamble.clone(),
             effect_stack: self.inner.effect_stack.clone(),
-            ask_tag: self.inner.cfg.ask_tag,
             module_env: self.inner.cfg.module_env.clone(),
             nursery_size: self.inner.cfg.nursery_size.unwrap_or(DEFAULT_NURSERY_SIZE),
         };
@@ -1432,8 +1436,7 @@ mod tests {
     /// `ensure_session` only creates the session include dir. No turn is run.
     fn wedge_test_server(dir: &std::path::Path) -> TidepoolReplServer {
         let cfg = ReplServerConfig {
-            decls: Vec::new(),
-            ask_tag: 0,
+            roster: EffectRoster::from_handlers(&frunk::HNil),
             base_include: Vec::new(),
             module_env: ModuleEnv::standalone_default(),
             session_root_base: dir.to_path_buf(),

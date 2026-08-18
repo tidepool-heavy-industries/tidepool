@@ -178,16 +178,13 @@ pub fn build_minimal_stack() -> impl tidepool_effect::dispatch::DispatchEffect<C
 /// Returns `(decls, ask_tag)` where `ask_tag` is the index of the FIRST
 /// interposed effect (`Ask`) in `decls` — the suspend threshold every tag at
 /// or beyond it shares (see `jit_machine::drive_effect_loop`'s `suspend_tag`
-/// doc). Mirrors `TidepoolMcpServer::new`'s internal logic so Wave B servers
-/// can build the same declaration list without constructing a full
-/// `TidepoolMcpServer`.
-pub fn base_decls_with_ask<H: CollectEffectDecls>(_stack: &H) -> (Vec<EffectDecl>, u64) {
-    let mut decls = H::collect_decls();
-    let ask_tag = decls.len() as u64;
-    decls.push(tidepool_mcp::ask_decl());
-    decls.push(tidepool_mcp::runllmturn_decl());
-    decls.push(tidepool_mcp::fork_decl());
-    (decls, ask_tag)
+/// doc). A thin tuple-shaped adapter over `tidepool_mcp::EffectRoster` — the
+/// single place that actually appends the interposed suffix and derives the
+/// tag — kept so existing `(Vec<EffectDecl>, u64)` call sites don't need to
+/// migrate to the roster type themselves.
+pub fn base_decls_with_ask<H: CollectEffectDecls>(stack: &H) -> (Vec<EffectDecl>, u64) {
+    let roster = tidepool_mcp::EffectRoster::from_handlers(stack);
+    (roster.decls().to_vec(), roster.suspend_tag().get())
 }
 
 #[cfg(test)]

@@ -9,8 +9,9 @@
 
 use rmcp::model::{CallToolResult, RawContent};
 use tidepool_handlers::{
-    base_decls_with_ask, build_base_stack, build_minimal_stack, HandlerConfig, DEFAULT_OPENAI_MODEL,
+    build_base_stack, build_minimal_stack, HandlerConfig, DEFAULT_OPENAI_MODEL,
 };
+use tidepool_mcp::EffectRoster;
 use tidepool_repl::{ReplServerConfig, TidepoolReplServer};
 
 /// True if the session-aware `tidepool-extract` is reachable.
@@ -78,9 +79,9 @@ pub fn build_server_with_nursery(
     turn_timeout: Option<std::time::Duration>,
 ) -> TidepoolReplServer {
     let stack = build_minimal_stack();
-    let (decls, ask_tag) = base_decls_with_ask(&stack);
+    let roster = EffectRoster::from_handlers(&stack);
     let effects_dir =
-        tidepool_mcp::ensure_effects_module(&decls).expect("write Tidepool.Effects module");
+        tidepool_mcp::ensure_effects_module(roster.decls()).expect("write Tidepool.Effects module");
     // Shared harness helper: the one place the `haskell/lib` stdlib dir is derived.
     let prelude_dir = tidepool_testing::eval_harness::prelude_path();
     let session_root_base = std::env::temp_dir().join(format!(
@@ -99,10 +100,9 @@ pub fn build_server_with_nursery(
     // `try_pure_bind_as_decl` in `tidepool-runtime` — so it type-checks
     // against THIS env, not the effectful eval preamble). The lens-free
     // `standalone_default` dropped `object`/`toJSON` out of scope entirely.
-    let module_env = tidepool_mcp::session_decl_module_env(&decls, false);
+    let module_env = tidepool_mcp::session_decl_module_env(roster.decls(), false);
     let cfg = ReplServerConfig {
-        decls,
-        ask_tag,
+        roster,
         base_include: vec![effects_dir, prelude_dir],
         module_env,
         session_root_base,
@@ -135,9 +135,9 @@ pub fn build_full_server(
         llm_model: DEFAULT_OPENAI_MODEL.to_string(),
     };
     let stack = build_base_stack(&handler_cfg);
-    let (decls, ask_tag) = base_decls_with_ask(&stack);
+    let roster = EffectRoster::from_handlers(&stack);
     let effects_dir =
-        tidepool_mcp::ensure_effects_module(&decls).expect("write Tidepool.Effects module");
+        tidepool_mcp::ensure_effects_module(roster.decls()).expect("write Tidepool.Effects module");
     let repo_root = tidepool_testing::eval_harness::repo_root();
     let prelude_dir = repo_root.join("haskell").join("lib");
     let mut base_include = vec![effects_dir, prelude_dir];
@@ -155,10 +155,9 @@ pub fn build_full_server(
             .map(|d| d.as_nanos())
             .unwrap_or(0)
     ));
-    let module_env = tidepool_mcp::session_decl_module_env(&decls, false);
+    let module_env = tidepool_mcp::session_decl_module_env(roster.decls(), false);
     let cfg = ReplServerConfig {
-        decls,
-        ask_tag,
+        roster,
         base_include,
         module_env,
         session_root_base,

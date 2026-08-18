@@ -5,9 +5,8 @@
 
 use std::path::PathBuf;
 
-use tidepool_handlers::{
-    base_decls_with_ask, build_base_stack, HandlerConfig, DEFAULT_OPENAI_MODEL,
-};
+use tidepool_handlers::{build_base_stack, HandlerConfig, DEFAULT_OPENAI_MODEL};
+use tidepool_mcp::EffectRoster;
 use tidepool_repl::ReplServerConfig;
 
 /// Resolve the Haskell stdlib dir (`Tidepool.*` modules) via the ONE locator —
@@ -75,11 +74,11 @@ pub fn build(
     };
     let stack = build_base_stack(&sample_cfg);
     // Decls derive from the stack (in HList/tag order) + Ask appended.
-    let (decls, ask_tag) = base_decls_with_ask(&stack);
+    let roster = EffectRoster::from_handlers(&stack);
     drop(stack); // the per-session builder owns each session's stack
 
     // The generated Tidepool.Effects module must be on the include path.
-    let effects_dir = tidepool_mcp::ensure_effects_module(&decls)?;
+    let effects_dir = tidepool_mcp::ensure_effects_module(roster.decls())?;
     let prelude_dir = resolve_prelude_dir()?;
     // Startup handshake: refuse to serve an extract/stdlib pair that was not
     // deployed together (see `tidepool_runtime::toolchain`). One subprocess-free
@@ -130,11 +129,10 @@ pub fn build(
     // pragmas/imports an `eval` expression sees, so declaration-item helpers
     // can use `M`, the effect verbs, the Prelude shadows, and `L.`/`Set.`/… —
     // not just the lens-free T+Map of `standalone_default`.
-    let module_env = tidepool_mcp::session_decl_module_env(&decls, user_library);
+    let module_env = tidepool_mcp::session_decl_module_env(roster.decls(), user_library);
 
     let cfg = ReplServerConfig {
-        decls,
-        ask_tag,
+        roster,
         base_include,
         module_env,
         session_root_base,

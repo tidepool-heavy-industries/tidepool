@@ -32,6 +32,7 @@ use tracing::field::{Field, Visit};
 use tracing_subscriber::layer::{Context, SubscriberExt};
 use tracing_subscriber::Layer;
 
+use tidepool_mcp::EffectRoster;
 use tidepool_repl::command::BlockItem;
 use tidepool_repl::session::TurnStep;
 use tidepool_repl::{
@@ -148,26 +149,25 @@ fn install_collector() -> Arc<Collector> {
 
 fn open_session(root: &std::path::Path, tag: &str) -> Session {
     let stack = tidepool_handlers::build_minimal_stack();
-    let (decls, ask_tag) = tidepool_handlers::base_decls_with_ask(&stack);
+    let roster = EffectRoster::from_handlers(&stack);
     let effects_dir =
-        tidepool_mcp::ensure_effects_module(&decls).expect("write Tidepool.Effects module");
+        tidepool_mcp::ensure_effects_module(roster.decls()).expect("write Tidepool.Effects module");
     let prelude_dir = tidepool_testing::eval_harness::prelude_path();
-    let module_env = tidepool_mcp::session_decl_module_env(&decls, false);
+    let module_env = tidepool_mcp::session_decl_module_env(roster.decls(), false);
     let preamble = tidepool_mcp::build_preamble_non_interactive_mode(
-        &decls,
+        roster.decls(),
         false,
         tidepool_mcp::PaginateMode::Passthrough,
     );
-    let effect_stack = tidepool_mcp::build_effect_stack_type(&decls);
+    let effect_stack = tidepool_mcp::build_effect_stack_type(roster.decls());
 
     let cfg = SessionConfig {
         id: SessionId(1),
         root: root.join(tag),
         base_include: vec![effects_dir, prelude_dir],
-        decls,
+        roster,
         preamble,
         effect_stack,
-        ask_tag,
         module_env,
         nursery_size: tidepool_repl::DEFAULT_NURSERY_SIZE,
     };

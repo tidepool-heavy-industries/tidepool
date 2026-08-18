@@ -17,7 +17,8 @@
 mod common;
 use common::*;
 
-use tidepool_handlers::{base_decls_with_ask, build_base_stack, HandlerConfig};
+use tidepool_handlers::{build_base_stack, HandlerConfig};
+use tidepool_mcp::EffectRoster;
 use tidepool_repl::{ReplServerConfig, TidepoolReplServer};
 
 /// Build a repl server over the FULL base handler stack (Fs/Git/Exec/…),
@@ -39,14 +40,13 @@ fn build_full_stack_repl() -> Repl {
         kv_path: scratch.join("kv.json"),
         llm_model: "claude-haiku-4-5-20251001".to_string(),
     });
-    let (decls, ask_tag) = base_decls_with_ask(&stack);
+    let roster = EffectRoster::from_handlers(&stack);
     let effects_dir =
-        tidepool_mcp::ensure_effects_module(&decls).expect("write Tidepool.Effects module");
+        tidepool_mcp::ensure_effects_module(roster.decls()).expect("write Tidepool.Effects module");
     let prelude_dir = tidepool_testing::eval_harness::prelude_path();
-    let module_env = tidepool_mcp::session_decl_module_env(&decls, false);
+    let module_env = tidepool_mcp::session_decl_module_env(roster.decls(), false);
     let cfg = ReplServerConfig {
-        decls,
-        ask_tag,
+        roster,
         base_include: vec![effects_dir, prelude_dir],
         module_env,
         session_root_base: scratch.join("sessions"),

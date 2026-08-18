@@ -332,6 +332,7 @@ mod tests {
     use tidepool_repr::SessionId;
 
     use crate::session::{BoxedStack, SessionConfig, DEFAULT_NURSERY_SIZE};
+    use tidepool_mcp::EffectRoster;
 
     /// A real, openable `Session` tagged with `id`. `Session::open` only creates
     /// the session include dir and an empty decl log — no GHC, no machine (that
@@ -343,10 +344,9 @@ mod tests {
             id: SessionId(id),
             root: root.join(format!("session-{id}")),
             base_include: Vec::new(),
-            decls: Vec::new(),
+            roster: EffectRoster::from_handlers(&frunk::HNil),
             preamble: String::new(),
             effect_stack: String::new(),
-            ask_tag: 0,
             module_env: tidepool_runtime::session::ModuleEnv::standalone_default(),
             nursery_size: DEFAULT_NURSERY_SIZE,
         };

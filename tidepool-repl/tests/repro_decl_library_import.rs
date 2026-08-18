@@ -28,9 +28,8 @@ mod common;
 use std::path::PathBuf;
 
 use rmcp::model::{CallToolResult, RawContent};
-use tidepool_handlers::{
-    base_decls_with_ask, build_base_stack, HandlerConfig, DEFAULT_OPENAI_MODEL,
-};
+use tidepool_handlers::{build_base_stack, HandlerConfig, DEFAULT_OPENAI_MODEL};
+use tidepool_mcp::EffectRoster;
 use tidepool_repl::{ReplServerConfig, TidepoolReplServer};
 
 use common::require_extract;
@@ -65,9 +64,9 @@ fn build_server_with_real_library(cwd: PathBuf) -> TidepoolReplServer {
         llm_model: DEFAULT_OPENAI_MODEL.to_string(),
     };
     let stack = build_base_stack(&handler_cfg);
-    let (decls, ask_tag) = base_decls_with_ask(&stack);
+    let roster = EffectRoster::from_handlers(&stack);
     let effects_dir =
-        tidepool_mcp::ensure_effects_module(&decls).expect("write Tidepool.Effects module");
+        tidepool_mcp::ensure_effects_module(roster.decls()).expect("write Tidepool.Effects module");
     let prelude_dir = repo_root.join("haskell").join("lib");
     let base_include = vec![effects_dir, prelude_dir, project_lib];
     let session_root_base = std::env::temp_dir().join(format!(
@@ -78,10 +77,9 @@ fn build_server_with_real_library(cwd: PathBuf) -> TidepoolReplServer {
             .map(|d| d.as_nanos())
             .unwrap_or(0)
     ));
-    let module_env = tidepool_mcp::session_decl_module_env(&decls, true);
+    let module_env = tidepool_mcp::session_decl_module_env(roster.decls(), true);
     let cfg = ReplServerConfig {
-        decls,
-        ask_tag,
+        roster,
         base_include,
         module_env,
         session_root_base,
