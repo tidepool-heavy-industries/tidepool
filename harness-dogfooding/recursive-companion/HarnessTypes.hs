@@ -5,31 +5,17 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE QuasiQuotes #-}
 
--- | Durable vocabulary for the recursive-companion dogfood (PRD 21 lane C3,
--- @plans\/self-iterating-harness\/21-c3-recursive-companion-slice.md@).
+-- | Durable vocabulary for the recursive-companion dogfood.
 --
--- __Why the answer types live HERE and not beside @loop@.__
--- @HarnessSource::answerer_imports@ derives a window's in-scope modules
--- structurally from the SIBLING modules the harness file imports, and the
--- harness module itself is never among them (it defines @loop@, whose
--- @runLLMTurn*@ verbs are absent from the answerer's row, and GHC compiles an
--- imported module whole).  A type inlined beside @loop@ therefore cannot be
--- named by the window that is asked to finalize it, and the failure looks
--- like a model hallucinating a type rather than a missing import.  So
--- 'LayerProposal', 'FoldProposal' and 'LayerApproval' — every type a window
--- or a form has to name — live in this module.
---
--- __Everything here is pure, and it is also ROW-PORTABLE.__  No effect, no
--- handle, no capability: every type below is nameable in the ANSWERER's row
--- (@[AskUser, Fork, ReadState, Finalize T]@), which has no @RunLLMTurn@ in
--- it.  That is a hard constraint, not a preference — @ContextRef@ is declared
--- BY @RunLLMTurn@'s own decl, so it exists only in a row containing that
--- effect.  The seed carries one, so 'NodeSeed' and every pure decision over
--- it ('layerFromProposal', 'applyGate', @childSeed@) live beside @loop@ in
--- "Harness" instead, exactly as @dev-tree@ keeps its own @NodeSeed@ (which
--- carries a @WorktreeHandle@) there.  Putting them here would make the window
--- types this module exists to define unnameable by the very windows asked to
--- finalize them.
+-- Every type here is nameable in the ANSWERER's row (@[AskUser, Fork,
+-- ReadState, Finalize T]@, which has no @RunLLMTurn@): "Harness" defines
+-- @loop@, whose @runLLMTurn*@ verbs are absent from that row, and GHC
+-- compiles an imported module whole, so a window-facing type declared beside
+-- @loop@ could not be named by the window asked to finalize it.
+-- 'LayerProposal', 'FoldProposal' and 'LayerApproval' therefore live HERE;
+-- 'NodeSeed' and the pure decisions over it ('layerFromProposal',
+-- 'applyGate', @childSeed@) carry a @ContextRef@ (declared by @RunLLMTurn@'s
+-- own decl) and so live in "Harness" instead.
 module HarnessTypes
   ( -- * Checkpointed state
     State (..)

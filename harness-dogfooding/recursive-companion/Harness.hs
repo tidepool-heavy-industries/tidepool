@@ -6,35 +6,25 @@
 {-# LANGUAGE QuasiQuotes #-}
 {-# LANGUAGE TypeApplications #-}
 
--- | The recursive companion (PRD 21 lane C3): one root turn in which a
--- coalgebra window finalizes a 'ThoughtF' layer (or a local finish), each
--- branch descends recursively from its parent's FROZEN context, an algebra
--- window folds typed results in declared branch order, and the operator gets
--- a folded answer with the tree inspectable but not primary.
+-- | The recursive companion: one root turn in which a coalgebra window
+-- finalizes a 'ThoughtF' layer (or a local finish) for its own node only,
+-- each branch descends recursively from its parent's FROZEN context, an
+-- algebra window folds typed results in declared branch order (including a
+-- leaf's, which sees a childless layer), and the operator gets a folded
+-- answer with the tree inspectable but not primary.
 --
--- __The recursion lives HERE, in the authored outer loop, and that is
--- forced.__  @Harness::new@ builds a window's @child_cfg@ as
--- @fork_child_decls(&cfg.decls)@ — this node's row MINUS the fork-spawning
--- effects — so a fork\/fanout child compiles against a row with no @Fork@ in
--- it and structurally cannot produce grandchildren.  Depth would stop at two.
--- Recursion therefore lives at the one place @Fork@ is never removed: the
--- authored loop.
+-- Recursion lives in this authored outer loop, never inside a window: a
+-- fork\/fanout child compiles against its parent's row MINUS @Fork@, so it is
+-- structurally incapable of producing grandchildren.
 --
--- __The two seams.__  Cognition enters at exactly two typed windows —
--- 'discover' (ONE @runLLMTurnBranch \@LayerProposal@ per node, forked off the
--- parent's frozen post-coalgebra context) and 'foldNode' (ONE
--- @runLLMTurnFork \@FoldProposal@ per node).  Everything else in this
--- file is compiled coordination and costs zero tokens.  The algebra runs at
--- EVERY node (PRD 21 locked decision 8): a leaf's algebra sees a realized
--- layer with no children, and that is the uniform place a fold becomes
--- durable.
+-- Cognition enters at exactly two windows — 'discover' (branched off the
+-- parent's frozen post-coalgebra context) and 'foldNode' (forked) — every
+-- other function here is compiled coordination.
 --
--- __Assumed row.__  @Companion@ is an alias for @M@, and this file needs
--- @RunLLMTurn@, @AskUser@, @Console@ and @Journal@ — a subset of the driver's
--- widened outer session (@selfharness::driver::outer_decls@).  It declares no
--- new effect and asks for no row widening.
--- @tidepool-harness\/tests\/dogfood_harness_typecheck.rs@ compiles it against
--- that full row.
+-- @Companion@ is @M@ at the driver's outer row (@RunLLMTurn@, @AskUser@,
+-- @Console@, @Journal@); this file declares no new effect.
+-- @tidepool-harness\/tests\/dogfood_harness_typecheck.rs@ pins it against
+-- that row.
 module Harness
   ( -- * The locked entry points
     State (..)

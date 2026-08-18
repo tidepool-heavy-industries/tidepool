@@ -3,30 +3,25 @@
 {-# LANGUAGE DeriveTraversable #-}
 {-# LANGUAGE OverloadedStrings #-}
 
--- | PRD 21 lane C0 — the recursive companion's pure semantic fixture.
+-- | The recursive companion's pure semantic fixture.
 --
--- 'ThoughtF' is the companion's base functor (PRD 21, "Core types"): a node
--- either finishes locally or defines only its own next layer of branches.
+-- 'ThoughtF' is the companion's base functor: a node either finishes locally
+-- or defines only its own next layer of branches — a branch carries its own
+-- 'ForkBrief' and 'BranchRole', which a bare kids list would lose, so
 -- 'thoughtHylo' is 'Tidepool.Swarm.hyloM's one-recursive-call-site shape
--- (@coalg >=> traverse go >=> alg@), specialized to 'ThoughtF''s own derived
--- 'Traversable' instance instead of 'Tidepool.Swarm.PlanF''s task-plus-flat-
--- kids shape — a branch carries its own 'ForkBrief' and 'BranchRole' per PRD
--- locked decision 3, which flattening into a bare kids list would lose. This
--- is the sanctioned alternative named on PRD 21 lane C0's anti-pattern list
--- ("write the ThoughtF driver as the same one-recursive-call-site shape"),
--- not a second recursion engine — the body is the identical one-liner.
+-- specialized to 'ThoughtF''s own derived 'Traversable' rather than
+-- 'Tidepool.Swarm.PlanF''s task-plus-flat-kids shape — not a second
+-- recursion engine; the body is the identical one-liner.
 --
 -- Budget clamping ('depthCapped', 'nodeCapped', 'fanOutCapped') mirrors
--- 'Tidepool.Swarm.capped'\/'budgeted'\/'gated': each is a @Coalg -> Coalg@
--- policy that forces a local 'Finish' rather than letting the wrapped
--- coalgebra run past its cap (PRD locked decision 9), and the forcing is
--- stamped on the result ('FinishOrigin' inside 'Draft') rather than
--- materialized as a plan the driver consults separately.
+-- 'Tidepool.Swarm.capped'\/'budgeted'\/'gated': each forces a local 'Finish'
+-- rather than letting the wrapped coalgebra run past its cap, stamped on the
+-- result ('FinishOrigin' inside 'Draft') rather than materialized as a plan
+-- the driver consults separately.
 --
--- Genuine model-invocation failure (PRD locked decision 6, "typed
--- InvocationExit") is represented the same way: a coalgebra that cannot
--- decide a real layer still returns an ordinary 'Finish', tagged
--- 'InvocationFailed'. A caller's algebra reads both budget-forced and
+-- Genuine model-invocation failure is represented the same way: a coalgebra
+-- that cannot decide a real layer still returns an ordinary 'Finish', tagged
+-- 'InvocationFailed'.  A caller's algebra reads both budget-forced and
 -- invocation-failed 'Finish' nodes as data through the same exhaustive match
 -- it uses for everything else — nothing in this module throws.
 module Tidepool.Thought
