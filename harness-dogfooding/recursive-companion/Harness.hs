@@ -48,7 +48,8 @@ module Harness
   , Posture (..)
   , ProposedStrategy (..)
   , BranchRoleWire (..)
-  , FoldProposal (..)
+  , ProposedEditWire (..)
+  , FoldDecision (..)
 
     -- * The gate
   , GatePolicy (..)
@@ -252,7 +253,7 @@ loop :: State -> Companion State
 loop st = do
   record "turn" rootKey (object ["root" .= st.question, "config" .= toJSON cfg])
   rootRef <- freezeContext
-  f <- thoughtHylo (foldNode cfg) coalg (rootSeed st rootRef)
+  f <- thoughtHylo (foldNode cfg st.draft) coalg (rootSeed st rootRef)
   answer <- f (NodePath [])
   record
     "turn"
@@ -263,7 +264,12 @@ loop st = do
         , "windows" .= answer.answerWindows
         ]
     )
-  pure st {turnCount = st.turnCount + 1, lastRun = Just (summarize answer)}
+  pure
+    st
+      { turnCount = st.turnCount + 1
+      , lastRun = Just (summarize answer)
+      , draft = answer.answerDraft
+      }
   where
     cfg = st.config
     rootKey = renderPath (NodePath [])
@@ -369,8 +375,8 @@ layerWindow ref prompt = runLLMTurnBranch @LayerProposal ref prompt
 -- child's seed and reading it back off a child's answer, which would be a
 -- capability laundered through the fold and would still be wrong for a leaf,
 -- whose layer has no children to read it off at all.
-foldWindow :: Text -> Companion (Either InvocationExit FoldProposal)
-foldWindow prompt = runLLMTurnFork @FoldProposal prompt
+foldWindow :: Text -> Companion (Either InvocationExit FoldDecision)
+foldWindow prompt = runLLMTurnFork @FoldDecision prompt
 
 -- ---------------------------------------------------------------------------
 -- The coalgebra — how to split
@@ -652,15 +658,33 @@ applyGate seed approval layer = case layer of
 -- finished answer, because that is what lets 'thoughtHylo' stay verbatim: the
 -- algebra has no seed, so the node's identity arrives from its parent, which
 -- computes it with the very same 'childPath' the coalgebra used.
-foldNode :: Config -> ThoughtF Folded -> Companion Folded
-foldNode _cfg layer = pure (foldAt layer)
+--
+-- @initialDraft@ is the companion's working draft AS OF TURN START
+-- ('loop''s own @st.draft@) — ONE frozen value shared by every node's own
+-- fold, never threaded bottom-up between siblings or levels (PRD 21 lane
+-- C4: "applies them to a known snapshot"; keeping that snapshot the SAME
+-- one at every node is what keeps every fold's own apply independent of
+-- fold ORDER, the same guarantee 'traverseLayer' already gives the rest of
+-- this driver). Only the ROOT's own resulting 'answerDraft' is ever read
+-- back into 'State' ('loop'); every other node's is informational,
+-- demonstrating the same mechanism at its own position.
+foldNode :: Config -> Text -> ThoughtF Folded -> Companion Folded
+foldNode _cfg initialDraft layer = pure (foldAt initialDraft layer)
 
-foldAt :: ThoughtF Folded -> Folded
-foldAt layer path = do
+foldAt :: Text -> ThoughtF Folded -> Folded
+foldAt initialDraft layer path = do
   realized <- traverseLayer (layerStrategy layer) (applyChild path) (indexLayer layer)
   let kids = layerBranches realized
       kidAnswers = map (.value) kids
-  outcome <- foldWindow (algebraPrompt path layer kids)
+      -- The pool THIS node's own fold may select from: every immediate
+      -- child's own advertised artifacts — never a grandchild's (an
+      -- artifact a child's own parent did not select is simply dropped,
+      -- not re-offered further up; PRD 21 lane C4 has no
+      -- re-propose/escalate mechanism in v1) and never this node's own
+      -- (a node cannot select what it has not proposed yet — decision 7:
+      -- "approval is the PARENT's fold").
+      pool = concatMap (.answerArtifacts) kidAnswers
+  outcome <- foldWindow (algebraPrompt path layer kids pool)
   -- A FOLD window that exits is this node's OWN failure, and it must not be
   -- its subtree's.  The children below it already ran and already folded;
   -- discarding their answers, their tree lines, or their accounting here
@@ -668,15 +692,20 @@ foldAt layer path = do
   -- decision 6 forbids at a branch position, just reached from the algebra
   -- side.  So the exit replaces only what this node itself was going to
   -- contribute (its synthesis and tensions), and everything the children
-  -- earned rolls up untouched.
-  let (synthesis, tensions, foldBadges, foldFailed) = case outcome of
-        Right p -> (p.foldSynthesis, p.foldTensions, [], 0)
-        Left e ->
-          ( [fmt|<this node's fold window exited: {renderInvocationExit e}> — its {show (length kids)} branch result(s) are below, unfolded|]
-          , []
-          , ["fold failed"]
-          , 1
-          )
+  -- earned rolls up untouched.  A window that exits proposes and selects
+  -- nothing — same as a Narrative fold that mentions neither.
+  let (synthesis, tensions, ownArtifacts, editReceipts, foldBadges, foldFailed, nodeDraft) =
+        case outcome of
+          Right fd -> resolveAndApply path initialDraft pool fd
+          Left e ->
+            ( [fmt|<this node's fold window exited: {renderInvocationExit e}> — its {show (length kids)} branch result(s) are below, unfolded|]
+            , []
+            , []
+            , []
+            , ["fold failed"]
+            , 1
+            , initialDraft
+            )
   record
     "fold"
     key
@@ -698,6 +727,18 @@ foldAt layer path = do
     Right _ -> pure ()
     Left e ->
       record "failed" key (object ["reason" .= renderInvocationExit e, "window" .= ("algebra" :: Text)])
+  -- The receipts (PRD 21 lane C4 step 4): emitted ONLY when this node's own
+  -- fold actually approved something, joining the SAME journal vocabulary
+  -- 'record' already gives "fold"/"finish"/"gate"/"failed" — a narrative
+  -- fold that never selects or proposes anything journals nothing new here,
+  -- which is what keeps a no-edits run's journal byte-identical to before.
+  case editReceipts of
+    [] -> pure ()
+    _ ->
+      record
+        "edits"
+        key
+        (object ["before" .= initialDraft, "after" .= nodeDraft, "receipts" .= map receiptJson editReceipts])
   pure
     NodeAnswer
       { answerPath = path
@@ -710,6 +751,8 @@ foldAt layer path = do
       , answerWindows = selfWindows layer + sum (map (.answerWindows) kidAnswers)
       , answerForced = selfForced layer + sum (map (.answerForced) kidAnswers)
       , answerFailed = selfFailed layer + foldFailed + sum (map (.answerFailed) kidAnswers)
+      , answerArtifacts = ownArtifacts
+      , answerDraft = nodeDraft
       }
   where
     key = renderPath path
@@ -719,6 +762,101 @@ foldAt layer path = do
     -- same brief title.  The two cannot disagree.
     applyChild p (Th.Branch b (i, f)) = f (childPath p i b.title)
     childLines (Th.Branch b a) = subtreeLines b.title a
+
+-- | The C4 mechanism itself, run over one node's own 'FoldDecision': resolve
+-- the selection against the pool, approve, apply against 'initialDraft', and
+-- stamp this node's own new proposals — routed straight through
+-- 'Th.resolveSelection'\/'Th.approve'\/'Th.applyEdits' rather than
+-- reimplemented (PRD 21 lane C4's landed, property-tested mechanism).
+--
+-- 'Th.decisionProposed' is left @[]@ on the 'Th.FoldDecision' built for
+-- 'Th.resolveSelection': that function reads only 'Th.selected'\/
+-- 'Th.composition' (@Tidepool.Thought@'s own definition), so THIS node's own
+-- new proposals never resolve against themselves here — they become
+-- available to select only at the PARENT's fold, exactly like a child's
+-- (stamped below, via 'stampProposed').
+resolveAndApply ::
+  NodePath ->
+  Text ->
+  [Th.Artifact Text] ->
+  FoldDecision ->
+  (Text, [Text], [Th.Artifact Text], [Th.EditReceipt], [Text], Int, Text)
+resolveAndApply path initialDraft pool fd =
+  case Th.approve product_ of
+    Nothing -> (fd.foldSynthesis, fd.foldTensions, ownArtifacts, [], [], 0, initialDraft)
+    Just approved ->
+      let (nodeDraft, receipts) = Th.applyEdits id approved initialDraft
+          receiptList = NE.toList receipts
+       in (fd.foldSynthesis, fd.foldTensions, ownArtifacts, receiptList, [editsBadge receiptList], 0, nodeDraft)
+  where
+    decision =
+      Th.FoldDecision
+        fd.foldSynthesis
+        (map Th.ArtifactId fd.foldSelected)
+        (Th.CompositionOrder (map Th.ArtifactId fd.foldComposition))
+        []
+    product_ = Th.resolveSelection decision pool
+    ownArtifacts = stampProposed path fd.foldProposed
+
+-- | Stamp this node's own wire-level proposals into real, id-bearing
+-- 'Th.Artifact's — the RUNTIME half of decision 7 ("intent metadata + an
+-- @s -> Either EditFailure s@ plan"; ids are the runtime's to assign, never
+-- the model's).  Ids are derived from the node's own path plus a dense
+-- per-node index, never from model-produced text — the same containment
+-- discipline 'slug' gives node ids.  The real closure itself
+-- ('wrapEdit') is built HERE, in the runtime, never by a window: neither
+-- window this harness ever finalizes across can carry one (see
+-- 'ProposedEditWire''s own doc).
+stampProposed :: NodePath -> [ProposedEditWire] -> [Th.Artifact Text]
+stampProposed path proposed =
+  [ Th.EditArtifact (artifactIdAt path i) (Th.EditIntent p.editIntent) (wrapEdit p)
+  | (i, p) <- zip [1 :: Int ..] proposed
+  ]
+
+artifactIdAt :: NodePath -> Int -> Th.ArtifactId
+artifactIdAt path i = Th.ArtifactId (renderPath path <> "#" <> show i)
+
+artifactIdText :: Th.ArtifactId -> Text
+artifactIdText (Th.ArtifactId t) = t
+
+-- | The RUNTIME's own closure over a wire-level proposal — a blank
+-- 'editIntent' is refused (the same blank-input invariant 'splitLayer'
+-- already gives a blank branch title\/instruction, not a new
+-- edit-validation policy); otherwise the proposal's own text is appended to
+-- whatever draft it actually runs against.
+wrapEdit :: ProposedEditWire -> (Text -> Either Th.EditFailure Text)
+wrapEdit p s
+  | strip p.editIntent == "" = Left (Th.EditFailure "an edit with a blank intent is refused")
+  | otherwise = Right (s <> p.editAppend)
+
+-- | @["edits: N applied, M refused"]@ when this node's own fold approved at
+-- least one plan; the CALLER (only reached when 'editReceipts' is
+-- non-empty) never has to ask for @[]@ separately — matches 'strategyBadges'
+-- and 'originBadges''s own "silent when nothing to say" shape.
+editsBadge :: [Th.EditReceipt] -> Text
+editsBadge receipts =
+  [fmt|edits: {show applied} applied, {show refused} refused|]
+  where
+    applied = length (rights (map (.receiptOutcome) receipts))
+    refused = length receipts - applied
+
+-- | One 'Th.EditReceipt' as the journal's own @object@ vocabulary — built by
+-- hand, like every other 'record' payload in this module, rather than a
+-- generic 'ToJSON' derive: 'Th.EditReceipt' carries no such instance (it is
+-- not one of this harness's model-facing wire types), and nothing else here
+-- needs it to.
+receiptJson :: Th.EditReceipt -> Value
+receiptJson r =
+  object
+    [ "artifact" .= artifactIdText r.receiptArtifact
+    , "intent" .= editIntentText r.receiptIntent
+    , "before" .= r.receiptBefore
+    , "outcome" .= case r.receiptOutcome of
+        Left f -> object ["refused" .= f.editFailureReason]
+        Right t -> object ["applied" .= t]
+    ]
+  where
+    editIntentText (Th.EditIntent t) = t
 
 -- | THE CONCURRENCY SEAM — the ONE place this harness visits a layer's
 -- children.
@@ -899,9 +1037,18 @@ Finalize a LayerProposal:
 
 Finalize: `finalize @LayerProposal (...)`|]
 
-algebraPrompt :: NodePath -> ThoughtF a -> [Th.Branch NodeAnswer] -> Text
-algebraPrompt path layer kids =
+-- | @pool@ is every immediate child's own advertised artifacts — this
+-- node's own selectable pool (PRD 21 lane C4). Rendered ABOVE the branch
+-- block on purpose: 'companion_recursive_slice.rs''s @branch_summary@ reads
+-- a branch's own text up to the NEXT "--- branch " or the literal
+-- "\\n\\nFold this realized layer" marker, so nothing may sit between the
+-- LAST branch's block and that marker without silently widening what a
+-- sibling's "own" summary is read to contain.
+algebraPrompt :: NodePath -> ThoughtF a -> [Th.Branch NodeAnswer] -> [Th.Artifact Text] -> Text
+algebraPrompt path layer kids pool =
   [fmt|NODE {renderPath path} — FOLD ({posture}: {focus}).
+
+{poolBlock}
 
 {childBlock}
 
@@ -909,17 +1056,35 @@ Fold this realized layer into one answer. The branches are in DECLARED order,
 never completion order, and a branch that failed is an ordinary value in the
 list — say what it cost you rather than pretending it did not happen.
 
-Finalize a FoldProposal {{ foldSynthesis, foldTensions }}: `foldSynthesis` is
-this node's answer as prose, written to be read on its own; `foldTensions` are
-the disagreements the branches did NOT resolve, one per entry, kept rather
-than averaged away.
+Finalize a FoldDecision {{ foldSynthesis, foldTensions, foldSelected, foldComposition, foldProposed }}:
+`foldSynthesis` is this node's answer as prose, written to be read on its own;
+`foldTensions` are the disagreements the branches did NOT resolve, one per
+entry, kept rather than averaged away. The rest is OPTIONAL and defaults to
+doing nothing — most folds are pure narrative and should leave them empty.
+`foldSelected` names which of the artifact ids listed above (if any) to keep;
+`foldComposition` is the SAME ids, in the order to apply them — every id in
+one must appear in the other. `foldProposed` is how THIS node contributes a
+brand-new draft edit of its own: a non-empty list of
+ProposedEditWire {{ editIntent, editAppend }}, where `editAppend` is the text
+to append to the companion's working draft if this proposal is later
+selected and approved — a blank `editIntent` refuses the edit outright. A
+node's own `foldProposed` artifacts are never selectable at its OWN fold —
+only its PARENT's fold, one level up, can select them.
 
-Finalize: `finalize @FoldProposal (...)`|]
+Finalize: `finalize @FoldDecision (...)`|]
   where
     (posture, focus) = postureAndFocus layer
     childBlock = case kids of
       [] -> "This node has no branches: you are folding a local finish." :: Text
       _ -> T.intercalate "\n\n" (map childSummary kids)
+    poolBlock = case pool of
+      [] -> "No artifacts are available to select at this fold." :: Text
+      _ -> "Available artifacts:\n" <> T.intercalate "\n" (map renderPoolArtifact pool)
+
+renderPoolArtifact :: Th.Artifact Text -> Text
+renderPoolArtifact a = case a of
+  Th.EditArtifact aid (Th.EditIntent intent) _ -> [fmt|- {artifactIdText aid} (edit): {intent}|]
+  Th.EvidenceArtifact aid (Th.Evidence e) -> [fmt|- {artifactIdText aid} (evidence): {e}|]
 
 childSummary :: Th.Branch NodeAnswer -> Text
 childSummary (Th.Branch b a) =

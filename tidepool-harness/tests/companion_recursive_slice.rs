@@ -45,7 +45,7 @@
 //! Each scenario below therefore asserts as many §9 rows as its config can
 //! carry, and the two gate rows (8, 8b) share ONE config between two runs.
 //! Answerer-side compiles are shared the same way: every leaf reuses ONE
-//! `ProposeFinish` reply and every fold reuses ONE `FoldProposal` reply across
+//! `ProposeFinish` reply and every fold reuses ONE `FoldDecision` reply across
 //! all six runs, so those blocks compile once for the whole file.
 //!
 //! Four configs is the floor, not a preference: the depth cap, the node cap
@@ -598,6 +598,20 @@ impl Run {
 /// (`{"tag":"GateWiderThan","gateWidth":3}`); an all-nullary sum would be a
 /// bare string, which is why `gateVerdict` above is one and this is not.
 fn state_json(max_depth: i64, max_nodes: i64, max_fan_out: i64, gate_policy: Json) -> Json {
+    state_json_with_draft(max_depth, max_nodes, max_fan_out, gate_policy, "")
+}
+
+/// As [`state_json`], with an explicit starting `draft` (PRD 21 lane C4 — the
+/// companion's working draft, seeded at whatever the scenario's checked-edits
+/// scripted flow needs to start from; every other scenario starts from `""`,
+/// exactly today's pre-C4 behavior).
+fn state_json_with_draft(
+    max_depth: i64,
+    max_nodes: i64,
+    max_fan_out: i64,
+    gate_policy: Json,
+    draft: &str,
+) -> Json {
     json!({
         "question": "SCENARIO: drive the recursive companion on scripted windows.",
         "config": {
@@ -609,6 +623,7 @@ fn state_json(max_depth: i64, max_nodes: i64, max_fan_out: i64, gate_policy: Jso
         },
         "turnCount": 0,
         "lastRun": Json::Null,
+        "draft": draft,
     })
 }
 
@@ -809,11 +824,16 @@ fn empty_split_reply() -> String {
     split_reply("Explore", "WantSequential", "nothing usable", &[])
 }
 
-/// The ONE fold reply every node's algebra window shares.
+/// The ONE fold reply every node's algebra window shares: a plain narrative
+/// `FoldDecision` (PRD 21 lane C4) that selects and proposes nothing — the
+/// `foldSelected`/`foldComposition`/`foldProposed` defaults every scenario
+/// below that never exercises checked edits relies on to stay
+/// byte-behaviorally identical to the old `FoldProposal`.
 fn fold_reply() -> String {
     haskell(
-        "finalize @FoldProposal (FoldProposal { foldSynthesis = \"FOLDED\", \
-         foldTensions = [\"one unresolved tension\"] })",
+        "finalize @FoldDecision (FoldDecision { foldSynthesis = \"FOLDED\", \
+         foldTensions = [\"one unresolved tension\"], foldSelected = [], \
+         foldComposition = [], foldProposed = [] })",
     )
 }
 
@@ -1698,5 +1718,236 @@ async fn companion_gate_add_reaches_the_added_branchs_own_prompt() {
         run.paths_in(Phase::Discover),
         vec!["root", "root/1-alpha", "root/2-beta", added.as_str()],
         "the added branch's own window must run, alongside both original siblings'"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Scenario F — checked edits (PRD 21 lane C4): a leaf proposes at its own
+// fold, its parent selects and composes, the runtime applies against the
+// companion's working draft, and one receipt is stamped per approved plan.
+// ---------------------------------------------------------------------------
+
+/// A `FoldDecision` reply (PRD 21 lane C4) that proposes exactly ONE new
+/// draft edit of this node's own — a leaf's only route to proposing
+/// anything, since its own fold has no children to select from. PLAIN DATA
+/// only (`intent`/`append`): neither `runLLMTurnBranch` nor `runLLMTurnFork`
+/// — the only two windows this harness ever finalizes across — can deliver a
+/// finalized answer that carries a live closure, so the wire type
+/// (`Harness.hs`'s `ProposedEditWire`) never has one to write here; the
+/// runtime builds the real `Text -> Either EditFailure Text` itself. A blank
+/// `intent` is what the runtime refuses (`Harness.wrapEdit`).
+fn propose_edit_reply(synthesis: &str, intent: &str, append: &str) -> String {
+    haskell(&format!(
+        "finalize @FoldDecision (FoldDecision {{ foldSynthesis = \"{synthesis}\", \
+         foldTensions = [], foldSelected = [], foldComposition = [], \
+         foldProposed = [ProposedEditWire {{ editIntent = \"{intent}\", \
+         editAppend = \"{append}\" }}] }})"
+    ))
+}
+
+/// A `FoldDecision` reply that selects and composes artifact ids from the
+/// pool its children advertised — `selected`/`composition` may name the SAME
+/// ids in DIFFERENT orders, since `composition`, not `selected`, is what
+/// governs apply order (`Tidepool.Thought.resolveSelection`).
+fn select_composed_reply(synthesis: &str, selected: &[&str], composition: &[&str]) -> String {
+    let quote_join = |ids: &[&str]| {
+        ids.iter()
+            .map(|id| format!("\"{id}\""))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    haskell(&format!(
+        "finalize @FoldDecision (FoldDecision {{ foldSynthesis = \"{synthesis}\", \
+         foldTensions = [], foldSelected = [{}], foldComposition = [{}], \
+         foldProposed = [] }})",
+        quote_join(selected),
+        quote_join(composition)
+    ))
+}
+
+/// PRD 21 lane C4 — the live fold window actually runs
+/// `resolveSelection`/`approve`/`applyEdits` against the companion's working
+/// draft, with failure isolation and one receipt per approved plan.
+///
+/// The tree: root splits into two leaves, Alpha and Beta (`split_two()`).
+/// Alpha's own fold proposes an edit that SUCCEEDS; Beta's own fold proposes
+/// one that always REFUSES. Neither leaf's own artifact is selectable at its
+/// own fold (an empty pool — no children), so this ALSO proves "approval is
+/// the parent's fold": only root, one level up, can ever apply either one.
+/// Root's own fold selects BOTH ids but COMPOSES beta before alpha — the
+/// opposite of `foldSelected`'s own list order — so the result can only
+/// match if composition order, not selection order, governed the apply.
+/// Reuses the "tree" scenario's exact config (`state_json(3, 40, 5,
+/// GateOff)`), so this shares that compile shape rather than opening a new
+/// one.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn companion_leaf_proposes_parent_selects_runtime_applies_with_receipts() {
+    let _cache_guard = support::isolate_cache();
+
+    let alpha_id = "root/1-alpha#1";
+    let beta_id = "root/2-beta#1";
+
+    let run = run_scenario(
+        "checked-edits",
+        state_json_with_draft(3, 40, 5, json!({"tag": "GateOff"}), "seed"),
+        vec![
+            script(&["NODE root — DISCOVER"], split_two()),
+            script(&["NODE root/1-alpha — DISCOVER"], finish_reply()),
+            script(&["NODE root/2-beta — DISCOVER"], finish_reply()),
+            script(
+                &["NODE root/1-alpha — FOLD"],
+                propose_edit_reply("alpha folds locally", "append alpha's suggestion", "-alpha"),
+            ),
+            script(
+                &["NODE root/2-beta — FOLD"],
+                // A BLANK intent is what the runtime refuses — the only
+                // refusal a plain-data proposal can express (see
+                // `propose_edit_reply`'s own doc).
+                propose_edit_reply("beta folds locally", "", "-beta"),
+            ),
+            script(
+                &["NODE root — FOLD"],
+                select_composed_reply(
+                    "root selects both, composed beta then alpha",
+                    &[alpha_id, beta_id],
+                    &[beta_id, alpha_id],
+                ),
+            ),
+        ],
+        Arc::new(ScriptedGate::default()),
+    )
+    .await;
+
+    // --- the draft actually changed, at the ROOT's own position -----------
+    assert_eq!(
+        run.state.get("draft").and_then(|v| v.as_str()),
+        Some("seed-alpha"),
+        "root approved and applied alpha's edit against the turn-start draft \
+         (\"seed\"); beta's own refusal left the running snapshot untouched \
+         for alpha to apply against, got: {}",
+        run.state
+    );
+
+    // --- one receipt per approved plan, in COMPOSITION order ---------------
+    let edits_at = |path: &str| -> Vec<Json> {
+        run.journal_kind("edits")
+            .into_iter()
+            .filter(|e| e.key == path)
+            .map(|e| e.payload.clone())
+            .collect()
+    };
+    let root_edits = edits_at("root");
+    assert_eq!(
+        root_edits.len(),
+        1,
+        "root's own fold approved exactly one selection: {root_edits:?}"
+    );
+    let payload = &root_edits[0];
+    assert_eq!(payload.get("before").and_then(|v| v.as_str()), Some("seed"));
+    assert_eq!(
+        payload.get("after").and_then(|v| v.as_str()),
+        Some("seed-alpha")
+    );
+    let receipts = payload
+        .get("receipts")
+        .and_then(|v| v.as_array())
+        .expect("root's edits receipt carries a receipts array");
+    assert_eq!(
+        receipts.len(),
+        2,
+        "one receipt per approved plan, failing or not: {receipts:?}"
+    );
+    assert_eq!(
+        receipts[0].get("artifact").and_then(|v| v.as_str()),
+        Some(beta_id),
+        "receipts follow COMPOSITION order, not foldSelected's own list order: {receipts:?}"
+    );
+    assert!(
+        receipts[0]
+            .get("outcome")
+            .and_then(|o| o.get("refused"))
+            .is_some(),
+        "beta's own refusal is an isolated Left, never poisoning a sibling: {receipts:?}"
+    );
+    assert_eq!(
+        receipts[1].get("artifact").and_then(|v| v.as_str()),
+        Some(alpha_id)
+    );
+    assert_eq!(
+        receipts[1]
+            .get("outcome")
+            .and_then(|o| o.get("applied"))
+            .and_then(|v| v.as_str()),
+        Some("seed-alpha"),
+        "alpha's edit applied against the state beta's refusal left untouched: {receipts:?}"
+    );
+
+    // --- neither LEAF's own fold ever approves anything ---------------------
+    // Decision 7 ("approval is the parent's fold"), read structurally: a
+    // leaf's own pool is always empty (no children), so its own selection
+    // can never resolve past Narrative, and it journals no "edits" entry at
+    // all — the exact same silence a narrative fold keeps.
+    assert!(
+        edits_at("root/1-alpha").is_empty(),
+        "a leaf's own fold cannot approve its own proposal"
+    );
+    assert!(
+        edits_at("root/2-beta").is_empty(),
+        "a leaf's own fold cannot approve its own proposal"
+    );
+
+    // --- the receipt is visible in the render tree, and ONLY at root -------
+    assert!(
+        run.tree_line("root")
+            .contains("edits: 1 applied, 1 refused"),
+        "the receipt surfaces as a badge on the node that actually applied: {}",
+        run.tree_line("root")
+    );
+    for leaf in ["root/1-alpha", "root/2-beta"] {
+        assert!(
+            !run.tree_line(leaf).contains("edits:"),
+            "a leaf that only PROPOSED (never approved) carries no edits badge \
+             of its own: {}",
+            run.tree_line(leaf)
+        );
+    }
+}
+
+/// PRD 21 lane C4 — a fold that neither selects nor proposes anything is
+/// byte-behaviorally the pre-C4 narrative fold: no "edits" journal entry, no
+/// "edits:" badge, and the draft carries all the way through a turn
+/// unchanged. Every OTHER scenario in this file already pins this
+/// (`fold_script()`'s shared reply supplies empty defaults throughout), so
+/// this asserts it directly, once, off the smallest possible tree — a single
+/// root `Finish`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn companion_narrative_fold_is_byte_behaviorally_unchanged_by_c4() {
+    let _cache_guard = support::isolate_cache();
+
+    let run = run_scenario(
+        "narrative-unchanged",
+        state_json_with_draft(3, 40, 5, json!({"tag": "GateOff"}), "untouched"),
+        vec![
+            script(&["NODE root — DISCOVER"], finish_reply()),
+            fold_script(),
+        ],
+        Arc::new(ScriptedGate::default()),
+    )
+    .await;
+
+    assert_eq!(
+        run.state.get("draft").and_then(|v| v.as_str()),
+        Some("untouched"),
+        "a fold that selects and proposes nothing never touches the draft: {}",
+        run.state
+    );
+    assert!(
+        run.journal_kind("edits").is_empty(),
+        "no artifacts were ever proposed or selected, so no edits kind is journaled"
+    );
+    assert!(
+        !run.tree_line("root").contains("edits:"),
+        "and no badge appears on the one node that folded: {}",
+        run.tree_line("root")
     );
 }

@@ -12,7 +12,7 @@
 -- @loop@, whose @runLLMTurn*@ verbs are absent from that row, and GHC
 -- compiles an imported module whole, so a window-facing type declared beside
 -- @loop@ could not be named by the window asked to finalize it.
--- 'LayerProposal', 'FoldProposal' and 'LayerApproval' therefore live HERE;
+-- 'LayerProposal', 'FoldDecision' and 'LayerApproval' therefore live HERE;
 -- 'NodeSeed' and the pure decisions over it ('layerFromProposal',
 -- 'applyGate', @childSeed@) carry a @ContextRef@ (declared by @RunLLMTurn@'s
 -- own decl) and so live in "Harness" instead.
@@ -39,7 +39,8 @@ module HarnessTypes
   , Posture (..)
   , ProposedStrategy (..)
   , BranchRoleWire (..)
-  , FoldProposal (..)
+  , ProposedEditWire (..)
+  , FoldDecision (..)
 
     -- * The gate
   , GatePolicy (..)
@@ -103,6 +104,13 @@ data State = State
   , config    :: Config
   , turnCount :: Int
   , lastRun   :: Maybe RunSummary
+  , -- | The companion's WORKING DRAFT (PRD 21 lane C4, "Two edit channels" —
+    -- the in-heap draft C4's checked-edit path targets; file-shaped content
+    -- is a separate C5 lane). Only a node's own fold can ever change it
+    -- (@Harness.foldAt@), and only by running an approved 'Th.EditPlan'
+    -- against the value this field held at TURN START — never by a model
+    -- writing to it directly.
+    draft :: Text
   }
   deriving (Generic, ToJSON, FromJSON, Show)
 
@@ -176,6 +184,7 @@ initialState =
           }
     , turnCount = 0
     , lastRun = Nothing
+    , draft = ""
     }
 
 -- ---------------------------------------------------------------------------
@@ -301,12 +310,48 @@ data ProposedStrategy
 data BranchRoleWire = Primary | Alternative | Critic
   deriving (Generic, ToJSON, FromJSON, JsonSchema, Show, Eq)
 
--- | The ALGEBRA's answer.  Deliberately thin in v1: artifact selection and
--- composition are lane C4's, and PRD 21 open question 2 says this type
--- shrinks freely until persistence depends on it.
-data FoldProposal = FoldProposal
-  { foldSynthesis :: Text
-  , foldTensions  :: [Text]
+-- | One proposed edit to the companion's working draft (PRD 21 lane C4): an
+-- intent describing WHY, and the text to APPEND if approved. PLAIN DATA on
+-- purpose, not the real @s -> Either EditFailure s@ closure
+-- @Tidepool.Thought.EditPlan@ ultimately wants — both windows this harness
+-- ever finalizes across (@runLLMTurnBranch@/@runLLMTurnFork@) refuse a
+-- finalized answer that carries a live function
+-- ("runLLMTurnBranch answer must be plain data — a closure cannot cross";
+-- "a concurrent fanout\/fork answer must be plain data in this driver (v1
+-- scope)"), so a window can never author the closure itself. The RUNTIME
+-- (@Harness.stampProposed@\/@wrapEdit@) is what turns this plain proposal
+-- into the real, id-stamped 'Tidepool.Thought.Artifact' — a blank
+-- 'editIntent' is refused there, mirroring the SAME blank-input invariant
+-- this module already gives a blank 'branchTitle'\/'branchInstruction'
+-- (@Harness.splitLayer@'s @blank@ check), not a new edit-validation policy.
+data ProposedEditWire = ProposedEditWire
+  { editIntent :: Text
+  , editAppend :: Text
+  }
+  deriving (Generic, ToJSON, FromJSON, JsonSchema, Show, Eq)
+
+-- | The ALGEBRA's answer (PRD 21 lane C4 — @Tidepool.Thought.FoldDecision@'s
+-- wire shape). @foldSynthesis@\/@foldTensions@ are unchanged from the old
+-- @FoldProposal@; the rest is OPTIONAL and defaults to doing nothing, so a
+-- narrative fold that never mentions them behaves exactly as before:
+--
+-- * @foldSelected@\/@foldComposition@ name which of THIS NODE'S OWN
+--   CHILDREN's already-advertised artifact ids to keep, and in what order.
+--   A leaf's own fold has no children, so its pool is always empty and
+--   nothing it names here can ever resolve — selection can only ever
+--   approve what a CHILD actually proposed, never conjure one out of thin
+--   air.
+-- * @foldProposed@ is how THIS node contributes a brand-new edit of its
+--   own — a leaf's ONLY route to proposing anything, since it has no
+--   children to select from. A leaf's own proposals are never selectable
+--   at the leaf's own fold; they only become selectable one level up, at
+--   its PARENT's fold, exactly like a child's.
+data FoldDecision = FoldDecision
+  { foldSynthesis   :: Text
+  , foldTensions    :: [Text]
+  , foldSelected    :: [Text]
+  , foldComposition :: [Text]
+  , foldProposed    :: [ProposedEditWire]
   }
   deriving (Generic, ToJSON, FromJSON, JsonSchema, Show, Eq)
 
@@ -514,8 +559,23 @@ data NodeAnswer = NodeAnswer
     answerWindows   :: Int
   , answerForced    :: Int
   , answerFailed    :: Int
+  , -- | THIS node's own newly-proposed artifacts (PRD 21 lane C4), stamped
+    -- with ids and held live — never a child's, and never one this node's
+    -- own fold already selected\/applied.  Available for exactly this
+    -- node's PARENT to select by id; a parent that does not name it drops
+    -- it, rather than re-offering it further up (no re-propose\/escalate
+    -- mechanism in v1).  No 'Eq'\/'Show': an artifact carries a real
+    -- closure.
+    answerArtifacts :: [Th.Artifact Text]
+  , -- | THIS node's own view of the companion's working draft, after
+    -- running whatever THIS node's own fold approved against the draft as
+    -- it stood at TURN START (@Harness.loop@'s @st.draft@, frozen and
+    -- shared by every node — never threaded bottom-up between siblings).
+    -- Only the ROOT's own value here ever becomes the next turn's
+    -- persisted 'draft'; every other node's is informational, read back
+    -- only for its own receipt.
+    answerDraft     :: Text
   }
-  deriving (Show, Eq)
 
 -- | The answer a node folds to when nothing usable came back for it.
 failureAnswer :: NodePath -> Text -> NodeAnswer
@@ -531,6 +591,8 @@ failureAnswer path why =
     , answerWindows = 1
     , answerForced = 0
     , answerFailed = 1
+    , answerArtifacts = []
+    , answerDraft = ""
     }
 
 -- | @\<indent\>\<path\>  \<posture\>  \<title\>  [badges]@ — one line per
@@ -566,7 +628,7 @@ render st = case st.lastRun of
     [fmt|You are a recursive companion. Nothing has folded yet.
 
 Question: {st.question}
-{budgetLine}
+{budgetLine}{draftBlock}
 
 Your next turn discovers a tree one layer at a time: a coalgebra window
 finalizes a LayerProposal for THIS node only (finish locally, or split into
@@ -582,13 +644,20 @@ branch order.|]
 {receiptLine r}
 
 Question: {st.question}
-{budgetLine}
+{budgetLine}{draftBlock}
 Turns folded: {show st.turnCount}|]
   where
     c = st.config
     budgetLine :: Text
     budgetLine =
       [fmt|Budget: depth {c.maxDepth}, {c.maxNodes} nodes, fan-out {c.maxFanOut}; gate {renderPolicy c.gatePolicy} (at most {c.gateMaxRounds} rounds)|]
+    -- Shown only once a fold has actually changed the draft (PRD 21 lane
+    -- C4) — an empty draft is exactly today's pre-C4 behavior, and this
+    -- stays silent about it rather than announcing an empty string.
+    draftBlock :: Text
+    draftBlock
+      | st.draft == "" = ""
+      | otherwise = "\nDraft: " <> st.draft
     tensionsBlock r = case r.runTensions of
       [] -> "" :: Text
       ts -> "\nTensions:\n" <> T.intercalate "\n" (map ("- " <>) ts) <> "\n"
