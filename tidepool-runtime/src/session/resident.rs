@@ -1628,11 +1628,11 @@ where
     /// the accumulated table) crosses to the thread; the rest of the session
     /// core is `!Send` (raw-pointer roots) and stays here.
     ///
-    /// The machine is taken via [`MachineGuard`], whose `Drop` restores it into
-    /// `self.core` on EVERY exit from this function — success, a `JitError`, a
-    /// caught panic, or a failed thread spawn (a transient OS resource
-    /// failure, not a bug) — so no path can leave the session permanently
-    /// machineless.
+    /// The machine is taken via [`PersistentSession::lease_machine`], whose
+    /// [`super::MachineLease`] restores it into `self.core` on EVERY exit from
+    /// this function — success, a `JitError`, a caught panic, or a failed
+    /// thread spawn (a transient OS resource failure, not a bug) — so no path
+    /// can leave the session permanently machineless.
     fn on_eval_thread<F, T>(&mut self, body: F) -> Result<T, ResidentError>
     where
         T: Send,
@@ -1655,12 +1655,8 @@ where
         T: Send,
         F: FnOnce(&mut JitEffectMachine, &DataConTable, &mut H, &O) -> Result<T, JitError> + Send,
     {
-        let mut guard = MachineGuard::take(&mut self.core);
-        let table = guard.core.session_table();
-        let machine_ref = guard
-            .machine
-            .as_mut()
-            .expect("machine present while guard is alive");
+        let mut lease = self.core.lease_machine();
+        let (machine_ref, table) = lease.parts();
         let handlers = &mut self.handlers;
         // The sink is Arc-backed (`OutputSink: Clone + Send`) and shares its
         // buffer; move a clone onto the thread rather than requiring `O: Sync`
@@ -1692,7 +1688,7 @@ where
             }
         });
 
-        // `guard` drops here (function-end, on every path above), restoring
+        // `lease` drops here (function-end, on every path above), restoring
         // the machine into `self.core` regardless of how `outcome` resolved.
         match outcome {
             EvalThreadOutcome::Ran(Ok(t)) => Ok(t),
@@ -1777,37 +1773,6 @@ fn project_parked(
     }
 }
 
-/// RAII restore guard for [`ResidentSession::on_eval_thread`]: holds the
-/// session's machine, taken via [`PersistentSession::take_machine`], and
-/// restores it into `core` on `Drop` — on EVERY exit from the borrowing
-/// function, including an early return between the take and the point the
-/// turn's outcome is known (a failed thread spawn, a caught panic). This is
-/// what closes the gap the external review flagged: `spawn_scoped(...).expect(...)`
-/// used to panic AFTER the machine was taken and BEFORE it was restored,
-/// permanently leaving the session machineless past that unwind.
-struct MachineGuard<'a> {
-    core: &'a mut PersistentSession,
-    machine: Option<JitEffectMachine>,
-}
-
-impl<'a> MachineGuard<'a> {
-    fn take(core: &'a mut PersistentSession) -> Self {
-        let machine = core.take_machine();
-        MachineGuard {
-            core,
-            machine: Some(machine),
-        }
-    }
-}
-
-impl Drop for MachineGuard<'_> {
-    fn drop(&mut self) {
-        if let Some(machine) = self.machine.take() {
-            self.core.restore_machine(machine);
-        }
-    }
-}
-
 /// The three ways a resident eval thread's lifecycle can resolve — spawn
 /// failure, a caught panic, or a completed run of `body` (itself carrying its
 /// own `Result`). Distinct from `SpawnError`/join-panic being conflated into
@@ -1883,8 +1848,8 @@ mod tests {
 
     /// The exact regression the external review flagged
     /// (`tidepool-runtime/src/session/resident.rs:1113-1141` in the review):
-    /// `spawn_scoped(...).expect(...)` used to run AFTER `take_machine()` and
-    /// panic BEFORE `restore_machine()`, permanently leaving the session
+    /// `spawn_scoped(...).expect(...)` used to run AFTER the machine was taken
+    /// and panic BEFORE it was restored, permanently leaving the session
     /// machineless past that unwind. This forces the spawn to fail
     /// deterministically — a stack size that vastly exceeds any real address
     /// space, so `pthread_create` rejects it outright, no actual thread-limit

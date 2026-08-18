@@ -239,8 +239,8 @@ impl PersistentSession {
     // is what the repl does (the session is moved into a `spawn_blocking` turn
     // and returned out of it). The harness instead runs the deep-recursion turn
     // on a fresh big-stack thread while keeping the rest of the session on the
-    // caller's frame: it [`Self::take_machine`]s the machine over with the
-    // accumulated table and [`Self::restore_machine`]s it afterwards.
+    // caller's frame: it [`Self::lease_machine`]s the machine over with the
+    // accumulated table and lets the [`MachineLease`] restore it on `Drop`.
     // `add_function` (which needs the raw-pointer env) therefore always happens
     // on the thread that owns the session.
 
@@ -264,19 +264,23 @@ impl PersistentSession {
         Ok(())
     }
 
-    /// Move the resident machine out (to run a turn on a fresh big-stack eval
-    /// thread — the machine is `Send`, the rest of the session is not). Pair with
-    /// [`Self::restore_machine`]. Panics if the machine is not bootstrapped or is
-    /// already taken.
-    pub fn take_machine(&mut self) -> JitEffectMachine {
-        self.machine
+    /// Move the resident machine out onto a [`MachineLease`] (to run a turn on
+    /// a fresh big-stack eval thread — the machine is `Send`, the rest of the
+    /// session is not). The lease mutably borrows this session for its whole
+    /// lifetime and restores the SAME machine into it on `Drop` — there is no
+    /// way to reach the emptied-slot state through a public method, and no way
+    /// to hand the lease's machine to a different session's restore (the lease
+    /// borrows the session it took from and nothing else). Panics if the
+    /// machine is not bootstrapped or is already leased.
+    pub fn lease_machine(&mut self) -> MachineLease<'_> {
+        let machine = self
+            .machine
             .take()
-            .expect("machine present (idle or suspended) before a turn")
-    }
-
-    /// Move a previously [`Self::take_machine`]d machine back into the session.
-    pub fn restore_machine(&mut self, machine: JitEffectMachine) {
-        self.machine = Some(machine);
+            .expect("machine present (idle or suspended) before a turn");
+        MachineLease {
+            session: self,
+            machine: Some(machine),
+        }
     }
 
     // There is deliberately no `drop_machine`: tearing a session down means
@@ -1030,6 +1034,48 @@ impl PersistentSession {
             "retire_scope receipt must be witnessed by the GC root ledger",
         );
         receipt
+    }
+}
+
+// ---------------------------------------------------------------------------
+// MachineLease — the only way to move a session's machine onto another thread
+// ---------------------------------------------------------------------------
+
+/// An exclusive, scoped loan of a [`PersistentSession`]'s machine, minted by
+/// [`PersistentSession::lease_machine`]. The lease mutably borrows the session
+/// it came from for its entire lifetime, so the session's machine slot cannot
+/// be observed or touched by anything else while the lease is outstanding, and
+/// on `Drop` it restores EXACTLY the machine it took — never an arbitrary one,
+/// and never into a different session. There is no public constructor and no
+/// public field: the empty-slot state this replaces (the audited
+/// `take_machine`/`restore_machine` pair) is not reachable through any safe
+/// call, by construction rather than by convention.
+pub struct MachineLease<'a> {
+    session: &'a mut PersistentSession,
+    machine: Option<JitEffectMachine>,
+}
+
+impl MachineLease<'_> {
+    /// The leased machine and the session's accumulated constructor table, on
+    /// loan together for a turn run on another thread. Panics if called after
+    /// the lease's machine has somehow already been consumed — unreachable
+    /// through this type's own API, kept as a `debug_assert`-strength backstop
+    /// rather than an `unwrap` a reviewer has to re-verify by hand.
+    pub fn parts(&mut self) -> (&mut JitEffectMachine, &DataConTable) {
+        let machine = self
+            .machine
+            .as_mut()
+            .expect("lease holds its machine for its whole lifetime");
+        let table = self.session.session_table();
+        (machine, table)
+    }
+}
+
+impl Drop for MachineLease<'_> {
+    fn drop(&mut self) {
+        if let Some(machine) = self.machine.take() {
+            self.session.machine = Some(machine);
+        }
     }
 }
 
