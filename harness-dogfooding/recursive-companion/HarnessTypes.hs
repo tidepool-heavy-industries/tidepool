@@ -619,11 +619,19 @@ data NodeAnswer = NodeAnswer
   , -- | The branch name of the worktree THIS node ends up owning after its
     -- own merge fold (PRD 21 C5, "Worktree coordination"), if it ever
     -- acquired one -- 'Nothing' for a purely deliberative node that never
-    -- needed one, and today for every node until something downstream of a
-    -- window can actually produce mergeable content.  Deliberately a plain
-    -- 'Text', not a live 'WorktreeHandle': that type only NAMES anything in
-    -- a row containing @Worktree@, and this module has to stay compilable
-    -- in the answerer's narrow row, which does not (see the module docs
+    -- needed one.  Two acquisition routes, both landing here uniformly:
+    -- @Harness.mergeFold@ creating a fresh worktree and merging
+    -- content-bearing children into it, OR this node's OWN coalgebra
+    -- window delegating (@Tidepool.Agent.Delegate.delegate@) and the
+    -- delegated cycle's bound worktree riding straight through with no
+    -- wrapping worktree of its own -- @Harness.foldAt@ populates this
+    -- field from a RUNTIME-STAMPED record the driver keeps (never from
+    -- anything a model finalizes; see @Harness.foldAt@'s own doc on
+    -- @takeDelegatedBranches@), so a model cannot fabricate or influence
+    -- which branch a node hands up.  Deliberately a plain 'Text', not a
+    -- live 'WorktreeHandle': that type only NAMES anything in a row
+    -- containing @Worktree@, and this module has to stay compilable in
+    -- the answerer's narrow row, which does not (see the module docs
     -- above on why 'NodeSeed' carries its 'ContextRef' in "Harness"
     -- instead -- the same constraint, applied here).  The branch name alone
     -- is also all a merge into a PARENT's worktree ever needs: every

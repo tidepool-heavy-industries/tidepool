@@ -306,6 +306,19 @@ pub enum HoleRouting {
     /// A plain `ask schema prompt` (structured operator elicitation) or an
     /// unrecognized payload — operator routing with the raw payload attached.
     Ask { payload: Json },
+    /// `takeDelegatedBranches path` (PRD 21 C5's final wiring) —
+    /// `Harness.hs`'s `foldAt`, and ONLY `foldAt` (this decl is absent from
+    /// `answerer_decls`/`answerer_decls_with_delegate`, so no model window
+    /// can ever name it), reading back this node's own runtime-stamped
+    /// delegation branch(es) — see the module doc on
+    /// [`crate::selfharness::driver::SelfHarnessDriver`]'s
+    /// `branch_node_paths`/`delegated_branches` for where they are
+    /// recorded. `path` is the node's rendered `NodePath` text (the same
+    /// text `coalgebraPrompt` embeds as `"NODE {path} — DISCOVER"` — see
+    /// [`parse_companion_node_path`]). Serviced IMMEDIATELY (`ReadState`'s
+    /// shape: no operator, no model round); the driver's own record for
+    /// `path` is CONSUMED on read.
+    DelegatedBranches { path: String },
 }
 
 /// A classified suspension: the routing plus the human-facing prompt text.
@@ -422,6 +435,11 @@ fn require_con_site(
 /// - `NoteWith` (text) — a real constructor arm on the SAME `AskUser` GADT,
 ///   routed by CONSTRUCTOR NAME → [`HoleRouting::Note`]. The sole field is a
 ///   bare `Text`, decoded directly (no shape/schema involved).
+/// - `TakeDelegatedBranchesWith` (path) — PRD 21 C5's read-back verb, routed
+///   by CONSTRUCTOR NAME → [`HoleRouting::DelegatedBranches`]. The sole
+///   field is a bare `Text` (a rendered `NodePath`), decoded the same way
+///   `NoteWith`'s is. Absent from every model-facing row — see that
+///   variant's doc.
 /// - `Print` (Console) / `WorktreeCreate`/`WorktreeLookup`/`WorktreeList`/
 ///   `WorktreeBranchOf`/`WorktreeHeadOf` (Worktree) / `RepoEventSubscribe`/
 ///   `RepoEventDrain`/`RepoEventAwait`/`RepoEventUnsubscribe` (RepoEvent) /
@@ -563,6 +581,16 @@ pub fn classify_hole(
             let text = decode_note_text(request, table);
             ClassifiedHole {
                 routing: HoleRouting::Note { text },
+                prompt: String::new(),
+            }
+        }
+        // PRD 21 C5's read-back verb — see [`HoleRouting::DelegatedBranches`].
+        // The sole field is a bare `Text` (the rendered `NodePath`), decoded
+        // the same way `NoteWith`'s bare `Text` field is.
+        Some("TakeDelegatedBranchesWith") => {
+            let path = decode_note_text(request, table);
+            ClassifiedHole {
+                routing: HoleRouting::DelegatedBranches { path },
                 prompt: String::new(),
             }
         }
@@ -2207,6 +2235,61 @@ pub fn build_pair_value(a: Value, b: Value, table: &DataConTable) -> Result<Valu
         EngineError::Run("build_pair_value: no (,) constructor in table".to_string())
     })?;
     Ok(Value::Con(pair_id, vec![a, b]))
+}
+
+/// Best-effort: pull the recursive companion's own `NodePath` text out of a
+/// coalgebra prompt shaped `"NODE {path} — DISCOVER (...)"`
+/// (`harness-dogfooding/recursive-companion/Harness.hs`'s `coalgebraPrompt`,
+/// which renders exactly that literal prefix — not merely a test needle).
+/// This is the ONLY place a delegating branch child's domain identity is
+/// observable from the runtime side: `NodePath` never crosses into Rust as a
+/// typed value (`HarnessTypes.hs`'s own module doc explains why — a window
+/// type declared beside `loop` is unnameable by the answerer it is asked to
+/// finalize), so parsing the one place it is already rendered as text is the
+/// least invasive correlation available. `None` for any other harness's
+/// prompt shape — delegation-branch recording ([`crate::selfharness::driver::
+/// SelfHarnessDriver::branch_node_paths`]) is then simply never populated,
+/// which is harmless: no other harness calls `delegate`.
+pub(crate) fn parse_companion_node_path(prompt: &str) -> Option<String> {
+    let rest = prompt.strip_prefix("NODE ")?;
+    let (path, _) = rest.split_once(" — DISCOVER")?;
+    Some(path.to_string())
+}
+
+/// Decode a completed `SubagentAwait` response (`Either SpawnError
+/// SpawnOutcome`) into the delegated cycle's bound worktree branch, on a
+/// `Right` — `None` on a `Left` (the delegation failed; nothing to record)
+/// or any malformed shape.
+///
+/// `tidepool_bridge_effects::AgSpawnOutcome` (the Haskell `SpawnOutcome`'s
+/// wire type) is deliberately ToCore-ONLY — never round-tripped back into a
+/// Rust struct as a whole (its own doc: the model never gets to hand this
+/// back). But its `outcome_run` FIELD is `AgWorkerRun`, and — like every
+/// other bridged Worktree/Agent record — `AgWorkerRun` derives `FromCore`
+/// too; only the OUTER container skips the derive. So this decodes the
+/// OUTER `Either`/`SpawnOutcome` shell by hand (two ordinary `Con` peels —
+/// the constructor names and field ORDER are the wire contract, exactly as
+/// `tidepool-bridge-effects/src/generated/*.rs`'s module doc states), then
+/// hands the ONE nested field that matters to a real typed decode.
+pub(crate) fn decode_completed_delegation_branch(
+    value: &Value,
+    table: &DataConTable,
+) -> Option<String> {
+    use tidepool_bridge::FromCore;
+    if con_name(value, table) != Some("Right") {
+        return None;
+    }
+    let Value::Con(_, right_fields) = value else {
+        return None;
+    };
+    let outcome = right_fields.first()?;
+    let Value::Con(_, outcome_fields) = outcome else {
+        return None;
+    };
+    // `AgSpawnOutcome`'s first field is `outcome_run: AgWorkerRun`.
+    let run_field = outcome_fields.first()?;
+    let run = tidepool_bridge_effects::AgWorkerRun::from_value(run_field, table).ok()?;
+    Some(run.run_worktree.handle_receipt.branch.raw)
 }
 
 /// Why one forked cognition window ended WITHOUT a typed answer — the Rust

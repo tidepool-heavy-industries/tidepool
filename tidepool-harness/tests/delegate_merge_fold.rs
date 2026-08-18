@@ -5,34 +5,25 @@
 //! declared order, and the root worktree carries the result — one sibling
 //! carries no worktree content at all, pinning the mixed case.
 //!
+//! **This drives the REAL `Harness.hs` path end to end** — the aspiration
+//! this file's own module doc used to name as still-open: a branch-node
+//! window delegates in its own DISCOVER window, the runtime stamps the
+//! completed cycle's bound branch keyed by that node (`SelfHarnessDriver`'s
+//! `branch_node_paths`/`delegated_branches`, PRD 21 C5's final wiring),
+//! `foldAt` reads it back via `takeDelegatedBranches` and populates
+//! `answerMergeBranch`, and the PARENT's `mergeFold` — completely unmodified
+//! machinery — merges it into the root worktree it lazily acquires. Nothing
+//! here composes the mechanisms by hand anymore: `run_one_cycle` alone
+//! produces the merged root worktree and the real "merge" journal entry.
+//!
 //! Every piece this test drives is individually landed and green:
 //! `delegate_positive_path.rs` proves delegation dispatch through the real
 //! `SubagentHandler`/`MockBackend` saga (this file reuses the exact same
 //! `answerer_decls_with_delegate()` + `EngineConfig::with_delegate_wrap()`
-//! wiring, now the SAME wiring `tidepool-web/src/bin/tidepool-selfharness.rs`
-//! selects live for the recursive-companion harness); `tidepool_worktree::
-//! merge::merge_branch_into` is the exact primitive
-//! `harness-dogfooding/recursive-companion/Harness.hs`'s `mergeChildInto`
-//! calls through `Exec` (`tidepool-worktree/CLAUDE.md`'s narrow PRD 21 C5
-//! exception); `companion_recursive_slice.rs` proves the scripted-provider,
-//! multi-node fold surface this test's tree shape reuses.
-//!
-//! **What this test does NOT drive live**: `Harness.hs`'s own `mergeFold`
-//! reads its declared-order plan from each child's `NodeAnswer
-//! .answerMergeBranch`, and nothing in the shipped harness today wires a
-//! `delegate` result into that field — its own doc comment
-//! (`Harness.hs`, "The merge fold — PRD 21 lane C5") says so explicitly:
-//! "The design also names a node's OWN subagent spawn as an acquisition
-//! trigger; that rides through the very same `answerMergeBranch` channel
-//! once a node window has a route to produce one (a sibling lane's...)".
-//! That route is a separate, still-open gap. This test therefore composes
-//! the individually-proven mechanisms directly — delegate dispatch through
-//! the real driver, and the real `merge_branch_into` primitive driven by
-//! this test in the SAME declared order `mergePlan` would compute (a pure,
-//! total filter over `Maybe Text`s, already pinned exhaustively by
-//! `dogfood_harness_typecheck.rs`'s
-//! `recursive_companion_merge_fold_decisions_execute`) — rather than
-//! asserting on a live `Harness.hs` merge that cannot yet happen.
+//! wiring, the SAME wiring `tidepool-web/src/bin/tidepool-selfharness.rs`
+//! selects live for the recursive-companion harness); `companion_recursive_slice.rs`
+//! proves the scripted-provider, multi-node fold surface this test's tree
+//! shape reuses.
 //!
 //! GHC-heavy: needs `TIDEPOOL_EXTRACT` + the with-packages GHC on PATH
 //! (`--ignore-default-filter` to run).
@@ -50,7 +41,8 @@ use tidepool_agent::{
     ToolReply, TurnEvent,
 };
 use tidepool_handlers::{
-    load_journal, ConsoleHandler, JournalHandler, SegmentPath, SubagentHandler,
+    load_journal, ConsoleHandler, ExecHandler, JournalHandler, SegmentPath, SubagentHandler,
+    WorktreeHandler,
 };
 use tidepool_harness::engine::EngineConfig;
 use tidepool_harness::log::{LogHeader, LogWriter};
@@ -63,10 +55,9 @@ use tidepool_harness::{
     answerer_decls_with_delegate, load_harness_source, ContinueSignal, Harness, LogObserver,
     OperatorGate, SelfHarnessDriver,
 };
+use tidepool_worktree::registry::WorktreeRegistry;
 use tidepool_worktree::testing::TestRepo;
-use tidepool_worktree::{
-    BranchName, GitCli, MergeOutcome, WorktreeManager, WorktreeRegistry, WorktreeSpec,
-};
+use tidepool_worktree::GitCli;
 
 // ---------------------------------------------------------------------------
 // Where the real harness lives
@@ -249,7 +240,30 @@ fn delegating_reply() -> String {
     )
 }
 
-fn fold_script() -> Script {
+/// The root's OWN fold — scripted SEPARATELY from the children's, and
+/// deliberately dishonest: its prose CLAIMS a branch name
+/// (`totally-bogus-branch-xyz`) that was never delegated, never committed,
+/// and does not exist anywhere in the repository. `FoldDecision` has no
+/// field a model could use to actually NAME a branch — `foldSynthesis` is
+/// free text nobody downstream treats as an identifier — so this is the
+/// closest thing to an attempt at "attesting to its own execution" the type
+/// even permits, and the assertions below confirm it changes nothing: the
+/// real merged branch (in the journal AND in git) is the runtime-stamped
+/// one, never this string.
+fn root_fold_claiming_bogus_branch() -> Script {
+    script(
+        &["NODE root — FOLD"],
+        haskell(
+            "finalize @FoldDecision (FoldDecision { foldSynthesis = \"FOLDED (this fold \
+             hereby claims the merged branch was totally-bogus-branch-xyz)\", \
+             foldTensions = [], foldEditsInOrder = [], foldProposed = [] })",
+        ),
+    )
+}
+
+/// Every OTHER fold window (Scout's own leaf fold, Builder's own leaf
+/// fold) — a plain, uneventful narrative fold.
+fn leaf_fold_script() -> Script {
     script(
         &["— FOLD"],
         haskell(
@@ -357,35 +371,6 @@ impl AgentBackend for CommittingBackend {
 }
 
 // ---------------------------------------------------------------------------
-// The journal's "merge" receipt — the SAME wire shape (`{seq,kind,key,
-// payload}`, `tidepool_handlers::JournalEntry::to_json`) and the SAME
-// `kind`/payload shape `Harness.hs`'s own `foldAt` writes (`record "merge"
-// key (object ["branch" .= mergeBranch, "steps" .= mergeNotes])`) — appended
-// directly because `SegmentPath`'s only public constructor
-// (`create_exclusive`) refuses an already-created path, so there is no
-// public Rust API to append to a segment `run_one_cycle`'s own
-// `JournalHandler` already wrote to. This is this test's stand-in for what
-// `Harness.hs` itself would journal once the live delegate ->
-// `answerMergeBranch` route (this file's module doc) lands.
-// ---------------------------------------------------------------------------
-
-fn append_merge_journal_line(path: &Path, key: &str, branch: &str, steps: &[String]) {
-    use std::io::Write;
-    let line = json!({
-        "seq": 1_000_000_u64,
-        "kind": "merge",
-        "key": key,
-        "payload": { "branch": branch, "steps": steps },
-    });
-    let mut file = std::fs::OpenOptions::new()
-        .append(true)
-        .create(true)
-        .open(path)
-        .expect("journal segment opens for append");
-    writeln!(file, "{line}").expect("journal line writes");
-}
-
-// ---------------------------------------------------------------------------
 // The joint acceptance
 // ---------------------------------------------------------------------------
 
@@ -417,7 +402,10 @@ async fn branch_node_delegate_commits_and_the_merge_fold_integrates_it_in_declar
             script(&["NODE root/1-", "— DISCOVER"], finish_reply()),
             // Position 2 (declared SECOND): Builder, delegates.
             script(&["NODE root/2-", "— DISCOVER"], delegating_reply()),
-            fold_script(),
+            // Root's own fold — scripted first (more specific needle) so it
+            // wins over the generic leaf-fold fallback below.
+            root_fold_claiming_bogus_branch(),
+            leaf_fold_script(),
         ],
     });
 
@@ -434,6 +422,15 @@ async fn branch_node_delegate_commits_and_the_merge_fold_integrates_it_in_declar
             .expect("this scenario's journal segment is fresh in its own tempdir"),
     ));
 
+    // The REAL worktree/exec wiring `Harness.hs`'s own `mergeFold` needs:
+    // `createWorktree` (Worktree) and `gitIn` (Exec) dispatch through these,
+    // exactly like the production binary's own `set_worktree_handler`/
+    // `set_exec_handler` calls. Rooted at the SAME source repository the
+    // delegated cycle commits into (`store`, below), so the branch it
+    // delegates is reachable from the root worktree this fold acquires.
+    let root_worktree_registry_root = dir.join("root-worktree-registry");
+    let root_worktree_root = dir.join("root-worktrees");
+
     // The real saga: a real temporary git repo, a real worktree/binding
     // table, `MockBackend` wrapped by `CommittingBackend` so the delegated
     // cycle's completion is backed by a REAL commit — same tier
@@ -444,6 +441,17 @@ async fn branch_node_delegate_commits_and_the_merge_fold_integrates_it_in_declar
         .writer()
         .commit_file("README.md", "hello\n", "seed commit")
         .expect("seed commit");
+
+    driver.set_worktree_handler(
+        WorktreeHandler::new(
+            root_worktree_registry_root.clone(),
+            root_worktree_root.clone(),
+            store.path().to_path_buf(),
+        )
+        .expect("root worktree handler opens"),
+    );
+    driver.set_exec_handler(ExecHandler::new(root_worktree_root.clone()));
+
     let roots = tempfile::TempDir::new().expect("substrate roots");
     let committed: Arc<Mutex<Option<(String, PathBuf)>>> = Arc::new(Mutex::new(None));
     let backend = CommittingBackend::new(
@@ -487,10 +495,10 @@ async fn branch_node_delegate_commits_and_the_merge_fold_integrates_it_in_declar
         .expect("restore the seeded checkpoint")
         .expect("the seeded checkpoint is on disk");
 
-    let outcome = driver
-        .run_one_cycle(&source, Some(&restored))
-        .await
-        .expect("one render -> loop -> thoughtHylo -> render cycle, one child delegating");
+    let outcome = driver.run_one_cycle(&source, Some(&restored)).await.expect(
+        "one render -> loop -> thoughtHylo -> render cycle, one child delegating, \
+             the parent's merge fold acquiring and merging for real",
+    );
 
     let state = outcome.state_json;
     let last_run = state
@@ -505,7 +513,17 @@ async fn branch_node_delegate_commits_and_the_merge_fold_integrates_it_in_declar
     assert_eq!(
         last_run.get("runFailed").and_then(Json::as_i64),
         Some(0),
-        "neither child, nor the delegation, may fail the run: {last_run}"
+        "neither child, nor the delegation, nor the merge fold may fail the run: {last_run}"
+    );
+    let root_answer = last_run
+        .get("runAnswer")
+        .and_then(Json::as_str)
+        .unwrap_or_default();
+    assert!(
+        root_answer.contains("totally-bogus-branch-xyz"),
+        "sanity: the scripted root fold's dishonest claim really was delivered as \
+         ordinary prose (not swallowed) — otherwise the assertions below prove \
+         nothing: {root_answer}"
     );
 
     // --- the delegate call actually produced a real commit ------------------
@@ -518,74 +536,44 @@ async fn branch_node_delegate_commits_and_the_merge_fold_integrates_it_in_declar
         .expect("the committed file exists in the child's own bound worktree");
     assert_eq!(landed_in_child, "built by the delegated subagent\n");
 
-    // --- declared-order merge plan: mergePlan's own semantics ---------------
-    // Scout (declared position 1) carries no branch; Builder (position 2)
-    // does. `mergePlan :: [Maybe Text] -> Maybe (NonEmpty Text)` is exactly
-    // `NE.nonEmpty . catMaybes` (pinned exhaustively, and executed on the
-    // real JIT, by `dogfood_harness_typecheck.rs`'s
-    // `recursive_companion_merge_fold_decisions_execute`) — this mirrors
-    // that same declared-order filter over the REAL branch this run produced.
-    let declared: Vec<Option<String>> = vec![None, Some(branch.clone())];
-    let plan: Vec<String> = declared.into_iter().flatten().collect();
+    // --- the REAL Harness.hs path: foldAt -> answerMergeBranch -> mergeFold -
+    // No manual composition anywhere below — `run_one_cycle` alone acquired
+    // the root worktree and merged Builder's delegated branch into it.
+    let root_registry = WorktreeRegistry::open(&root_worktree_registry_root)
+        .expect("the root worktree registry `mergeFold`'s own `createWorktree` wrote to reopens");
+    let root_worktrees = root_registry
+        .list()
+        .expect("listing the root registry succeeds");
     assert_eq!(
-        plan,
-        vec![branch.clone()],
-        "mergePlan keeps only content-bearing children, in declared order — the \
-         no-content sibling declared FIRST must not shift the survivor's position"
-    );
-
-    // --- the merge fold: the REAL primitive mergeChildInto calls -----------
-    // Lazy acquisition, mirrored: `mergeFold` only creates a worktree once it
-    // has a real plan (`createWorktree (fromCurrentRepository (renderPath
-    // path))`); this test does the same, over the SAME source repository the
-    // delegated child's own worktree came from.
-    let root_registry =
-        WorktreeRegistry::open(dir.join("root-registry")).expect("root registry opens");
-    let root_manager = WorktreeManager::new(
-        GitCli::new(),
-        root_registry,
-        dir.join("root-worktrees"),
-        store.path().to_path_buf(),
-    );
-    let root_handle = root_manager
-        .create(&WorktreeSpec::from_current_repository("root"))
-        .expect("the root worktree acquires, mirroring mergeFold's lazy acquisition");
-
-    let mut merge_notes = Vec::new();
-    for b in &plan {
-        let outcome = tidepool_worktree::merge_branch_into(
-            root_manager.git(),
-            root_handle.cwd(),
-            &BranchName::from_raw(b.clone()),
-            &format!("fold {b}"),
-        )
-        .expect("merge runs");
-        match outcome {
-            MergeOutcome::Merged { .. } => merge_notes.push(format!("{b}: merged cleanly")),
-            MergeOutcome::Conflict { paths } => {
-                panic!("unexpected conflict merging {b} into the root worktree: {paths:?}")
-            }
-        }
-    }
-    assert_eq!(
-        merge_notes.len(),
+        root_worktrees.len(),
         1,
-        "exactly one content-bearing child to fold"
+        "exactly one worktree acquired: root's own (lazily, on Builder's content) — \
+         Scout never triggers acquisition and Builder's OWN delegated worktree lives \
+         in the SubagentHandler's separate registry, not this one: {root_worktrees:?}"
+    );
+    let root_receipt = &root_worktrees[0].receipt;
+    assert_ne!(
+        root_receipt.branch.as_str(),
+        branch,
+        "root's own branch is a FRESH worktree mergeFold acquired, never the \
+         delegated branch itself — Builder's branch rides INTO it, not in its place"
     );
 
     // --- the root worktree carries the result -------------------------------
-    let landed_in_root = std::fs::read_to_string(root_handle.cwd().join("BUILD_MARKER.txt"))
-        .expect("the delegated content lands in the root worktree after the merge fold");
+    let landed_in_root = std::fs::read_to_string(root_receipt.cwd.join("BUILD_MARKER.txt"))
+        .expect("the delegated content lands in the root worktree after the real merge fold");
     assert_eq!(landed_in_root, "built by the delegated subagent\n");
 
-    // --- merge receipts asserted in the journal -----------------------------
-    append_merge_journal_line(&journal_path, "root", &branch, &merge_notes);
+    // --- the merge receipt: the REAL one `Harness.hs`'s own `foldAt` wrote --
     let journal = load_journal(&journal_path).expect("journal loads");
     let merge_entries: Vec<_> = journal.iter().filter(|e| e.kind == "merge").collect();
     assert_eq!(
         merge_entries.len(),
         1,
-        "exactly one merge receipt: {journal:?}"
+        "exactly one merge receipt — Builder's leaf `foldAt` hands its branch up \
+         directly (no merge of its own, no worktree of its own: it never had \
+         content-bearing children), so ROOT's is the only node that ever calls \
+         `createWorktree`: {journal:?}"
     );
     assert_eq!(merge_entries[0].key, "root");
     assert_eq!(
@@ -593,16 +581,49 @@ async fn branch_node_delegate_commits_and_the_merge_fold_integrates_it_in_declar
             .payload
             .get("branch")
             .and_then(Json::as_str),
-        Some(branch.as_str())
+        Some(root_receipt.branch.as_str()),
+        "the journaled branch is the RUNTIME's own root worktree branch"
+    );
+    let steps = merge_entries[0]
+        .payload
+        .get("steps")
+        .and_then(Json::as_array)
+        .cloned()
+        .unwrap_or_default();
+    assert_eq!(
+        steps.len(),
+        1,
+        "one merge step, for the one content-bearing child (Builder): {steps:?}"
     );
     assert_eq!(
+        steps[0].as_str(),
+        Some(format!("{branch}: merged cleanly").as_str()),
+        "the merged step names Builder's REAL, runtime-observed delegated branch"
+    );
+
+    // --- the model CANNOT override the branch --------------------------------
+    // The scripted root fold's prose claimed `totally-bogus-branch-xyz` (and,
+    // per the sanity check above, that claim really did reach `runAnswer`).
+    // Neither the journal's `branch`/`steps`, nor the actual git branch
+    // merged, nor the root worktree's content, mention it anywhere — the
+    // fold window was never consulted for the branch identity at all
+    // (`Harness.hs`'s `ownDelegatedBranch`/`mergeFold` never read
+    // `FoldDecision` to begin with), so there was never a channel for this
+    // claim to travel through.
+    assert_ne!(
         merge_entries[0]
             .payload
-            .get("steps")
-            .and_then(Json::as_array)
-            .map(Vec::len),
-        Some(1),
-        "one merge step, for the one content-bearing child: {:?}",
-        merge_entries[0].payload
+            .get("branch")
+            .and_then(Json::as_str),
+        Some("totally-bogus-branch-xyz"),
+        "the model's claimed branch name must not appear where the runtime-stamped \
+         branch belongs"
+    );
+    assert!(
+        !steps[0]
+            .as_str()
+            .unwrap_or_default()
+            .contains("totally-bogus-branch-xyz"),
+        "the model's claimed branch name must not appear in the real merge step: {steps:?}"
     );
 }

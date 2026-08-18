@@ -19,6 +19,11 @@ tidepool-eval.workspace = true
 tidepool-extract-cmd.workspace = true
 tidepool-effect.workspace = true
 tidepool-bridge.workspace = true
+# PRD 21 C5's delegation-branch decode (`engine::decode_completed_delegation_branch`):
+# `AgWorkerRun`/`WtWorktreeHandle` are the FromCore-capable bridge types a
+# completed `SubagentAwait` response is walked through — see that function's
+# doc for why the OUTER `SpawnOutcome` container is peeled by hand first.
+tidepool-bridge-effects.workspace = true
 tidepool-codegen.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -53,7 +58,3 @@ tracing-subscriber = { workspace = true, features = ["registry"] }
 # backed SubagentHandler + a TestRepo the curator spawns against.
 tidepool-agent.workspace = true
 tidepool-worktree.workspace = true
-# The outer-row Console/Worktree/RepoEvent/Exec acceptance
-# (tests/outer_effects.rs): a scripted `ObservationSource` over the wire
-# `WtWorktreeId`/`EvRepositoryEvent` types.
-tidepool-bridge-effects.workspace = true

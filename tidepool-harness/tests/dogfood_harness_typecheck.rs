@@ -118,6 +118,7 @@ fn outer_row_decls() -> Vec<tidepool_mcp::EffectDecl> {
         tidepool_mcp::exec_decl(),
         tidepool_mcp::subagent_decl(),
         tidepool_mcp::journal_decl(),
+        tidepool_harness::delegate_branches_decl(),
         tidepool_mcp::green_decl(),
     ]
 }

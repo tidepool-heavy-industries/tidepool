@@ -111,6 +111,7 @@ import Tidepool.Effects
   , runLLMTurnFork
   , say
   , spawnSpecIn
+  , takeDelegatedBranches
   )
 import Tidepool.Form (askUser)
 import Tidepool.Harness (Harness)
@@ -745,6 +746,41 @@ foldNode _cfg initialDraft layer = pure (foldAt initialDraft layer)
 mergePlan :: [Maybe Text] -> Maybe (NonEmpty Text)
 mergePlan = NE.nonEmpty . catMaybes
 
+-- | THIS node's own delegation branches, runtime-stamped and read back at
+-- fold time — the landing of the doc above's "a node's OWN subagent spawn
+-- as an acquisition trigger". 'takeDelegatedBranches' is a plain read
+-- against driver-owned state, keyed by this node's OWN rendered
+-- 'NodePath' (the ONLY identity a delegating branch child's window and
+-- this node's own fold are guaranteed to agree on — see
+-- @tidepool-harness@'s @engine::parse_companion_node_path@): the model's
+-- 'LayerProposal'/'FoldDecision' are never consulted, and could not
+-- influence this even if they tried, since neither type has anywhere to
+-- put a branch name. Ordered oldest-first; a node whose coalgebra never
+-- delegated reads back @[]@, byte-identical to before this landed.
+--
+-- Multiple delegations from ONE node's own coalgebra (a do-block calling
+-- @delegate@ more than once) are a real, decided case, not an oversight:
+-- LAST completed wins for 'answerMergeBranch' — every earlier one is still
+-- a real committed worktree/branch, just not the one this node hands up —
+-- and every one of them is journaled together under kind @"delegate"@ so
+-- none is silently lost, only silently not selected.
+ownDelegatedBranch :: NodePath -> Companion (Maybe Text)
+ownDelegatedBranch path = do
+  branches <- takeDelegatedBranches (renderPath path)
+  case branches of
+    [] -> pure Nothing
+    [one] -> pure (Just one)
+    many -> do
+      -- Non-empty by construction (the `[]`/`[one]` cases above are
+      -- exhaustively handled), so this is `L.last`'s sanctioned deliberate
+      -- spelling, not an unguarded partial use.
+      let winner = L.last many
+      record
+        "delegate"
+        (renderPath path)
+        (object ["branches" .= many, "used" .= winner])
+      pure (Just winner)
+
 -- | One child branch's merge outcome. Never a panic and never a
 -- half-merged tree: 'mergeChildInto' always restores a clean worktree
 -- before returning either conflict arm.
@@ -777,20 +813,33 @@ data MergeResolution = MergeResolution
   deriving (Generic, ToJSON, FromJSON, JsonSchema, Show, Eq)
 
 -- | Fold every content-bearing child's branch into this node's own
--- worktree, lazily acquired on first need, in declared order. Returns this
+-- worktree, lazily acquired on first need, in declared order — PLUS, when
+-- this node's OWN coalgebra window delegated, its own branch (declared
+-- FIRST: it is this node's own contribution, the same position a leaf's
+-- own new edit proposal always resolves at, one level up). Returns this
 -- node's own resulting branch (to hand up to ITS parent, via
 -- 'answerMergeBranch') and one human-legible note per merge step, for the
--- algebra's prompt and the journal — both are silent (@Nothing@ / @[]@)
--- when no child carried content, by construction: nothing below ever runs
--- before 'mergePlan' says there is a plan.
-mergeFold :: NodePath -> [Th.Branch NodeAnswer] -> Companion (Maybe Text, [Text])
-mergeFold path kids = case mergePlan (map ((.answerMergeBranch) . (.value)) kids) of
-  Nothing -> pure (Nothing, [])
-  Just (first_ :| rest) ->
+-- algebra's prompt and the journal.
+--
+-- __The lazy-acquisition gate now has TWO shapes, not one.__ A node with
+-- no own delegation and no content-bearing children never creates a
+-- worktree at all (silent @Nothing@\/@[]@, byte-identical to before this
+-- landed). A node whose ONLY content is its own delegation hands that
+-- branch up DIRECTLY — no wrapping worktree, no merge notes, no @"merge"@
+-- journal entry — because the delegated cycle's bound worktree already IS
+-- the acquisition; creating a second one just to merge one branch into it
+-- would be pure overhead. Only when there is more than one branch to fold
+-- together (an own delegation ALONGSIDE content-bearing children) does this
+-- create a worktree and merge, exactly as before.
+mergeFold :: NodePath -> Maybe Text -> [Th.Branch NodeAnswer] -> Companion (Maybe Text, [Text])
+mergeFold path ownBranch kids = case (ownBranch, mergePlan (map ((.answerMergeBranch) . (.value)) kids)) of
+  (Nothing, Nothing) -> pure (Nothing, [])
+  (Just b, Nothing) -> pure (Just b, [])
+  (mbOwn, Just (first_ :| rest)) ->
     createWorktree (fromCurrentRepository (renderPath path)) >>= \case
       Left err -> pure (Nothing, [[fmt|worktree acquisition failed: {renderWorktreeError err}|]])
       Right tree -> do
-        notes <- traverse (mergeStep tree) (first_ : rest)
+        notes <- traverse (mergeStep tree) (maybe id (:) mbOwn (first_ : rest))
         branchText <- renderBranchName <$> worktreeBranch tree
         pure (Just branchText, notes)
   where
@@ -913,7 +962,8 @@ foldAt initialDraft layer path = do
       pool = concatMap (.answerArtifacts) kidAnswers
       poolRenders = concatMap (.answerArtifactRenders) kidAnswers
       isRoot = path == NodePath []
-  (mergeBranch, mergeNotes) <- mergeFold path kids
+  ownBranch <- ownDelegatedBranch path
+  (mergeBranch, mergeNotes) <- mergeFold path ownBranch kids
   case mergeNotes of
     [] -> pure ()
     _ -> record "merge" key (object ["branch" .= mergeBranch, "steps" .= mergeNotes])
