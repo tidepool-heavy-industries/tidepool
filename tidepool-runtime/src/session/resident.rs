@@ -130,21 +130,16 @@ use super::{SessionError, SessionLib};
 /// a state guard. Both were fixed by moving the fallible work out of the
 /// window rather than by adding cleanup to each exit.
 ///
-/// ```compile_fail
-/// use tidepool_codegen::jit_machine::ValueHandle;
-/// use tidepool_runtime::session::RootCustody;
-///
-/// let custody = RootCustody::new(ValueHandle(0));
-/// let delivered = custody.into_handle();   // first (and only legal) consumer
-/// let mounted = custody.into_handle();     // ERROR: `custody` was already moved
-/// ```
-///
-/// (`new` is `pub(crate)` — see its own doc — so from outside this crate the
-/// block above now also fails on privacy, before it ever reaches the
-/// use-after-move it demonstrates. `compile_fail` only asserts "does not
-/// compile", so that is still a true, still-enforced statement; the
-/// use-after-move contract this docstring is about is exercised in-crate by
-/// [`Self::mount_handle_in`]'s and [`Self::resume_handle`]'s own callers.)
+/// The use-after-move contract is pinned by a trybuild case, not a
+/// `compile_fail` doctest: `tests/compile_fail/root_custody_double_consume.rs`
+/// (harness: `tests/compile_fail.rs`), with a committed `.stderr` golden
+/// showing the SAME use-after-move `rustc` diagnostic that
+/// [`Self::into_handle`] describes below — a bare `compile_fail` doctest
+/// calling `RootCustody::new` directly would actually fail on `new`'s privacy
+/// (see its own doc) before ever reaching that error, so it would pass for
+/// the wrong reason. The trybuild fixture sidesteps this by taking a
+/// `RootCustody` as a function parameter (never calling the private `new`)
+/// and calling [`Self::into_handle`] on it twice.
 #[derive(Debug)]
 pub struct RootCustody(Option<ValueHandle>);
 

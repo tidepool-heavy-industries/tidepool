@@ -1,0 +1,15 @@
+error[E0382]: use of moved value: `custody`
+ --> tests/compile_fail/root_custody_double_consume.rs:9:20
+  |
+7 | fn double_consume(custody: tidepool_runtime::session::RootCustody) {
+  |                   ------- move occurs because `custody` has type `RootCustody`, which does not implement the `Copy` trait
+8 |     let _delivered = custody.into_handle();
+  |                              ------------- `custody` moved due to this method call
+9 |     let _mounted = custody.into_handle();
+  |                    ^^^^^^^ value used here after move
+  |
+note: `RootCustody::into_handle` takes ownership of the receiver `self`, which moves `custody`
+ --> src/session/resident.rs
+  |
+  |     pub fn into_handle(mut self) -> ValueHandle {
+  |                            ^^^^

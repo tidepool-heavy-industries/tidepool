@@ -1,0 +1,9 @@
+error[E0499]: cannot borrow `*session` as mutable more than once at a time
+ --> tests/compile_fail/machine_lease_double_borrow.rs:6:18
+  |
+5 |     let lease1 = session.lease_machine();
+  |                  ------- first mutable borrow occurs here
+6 |     let lease2 = session.lease_machine();
+  |                  ^^^^^^^ second mutable borrow occurs here
+7 |     let _ = (lease1, lease2);
+  |              ------ first borrow later used here
