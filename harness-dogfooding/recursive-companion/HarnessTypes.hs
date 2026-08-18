@@ -65,7 +65,6 @@ module HarnessTypes
 
     -- * What a node folds to
   , NodeAnswer (..)
-  , failureAnswer
   , nodeLine
   , subtreeLines
 
@@ -266,7 +265,12 @@ renderBrief b =
 -- incapable of describing more than its own layer, so a model that tries to
 -- hand back a whole tree produces a decode error, not a deeper tree.
 data LayerProposal
-  = ProposeFinish {finishDraft :: Text}
+  = -- | Renamed from @finishDraft@ (companion review DEFECT-adjacent
+    -- clarity fix): this field is easily confused with 'State''s own
+    -- persistent working @draft@, and it is not that — it is this ONE
+    -- node's local answer, never itself written into the draft (only an
+    -- approved 'ProposedEditWire' can do that).
+    ProposeFinish {localAnswer :: Text}
   | ProposeSplit
       { splitPosture  :: Posture
       , -- | The focus, the decision, or the claim — per the posture.
@@ -310,9 +314,8 @@ data ProposedStrategy
 data BranchRoleWire = Primary | Alternative | Critic
   deriving (Generic, ToJSON, FromJSON, JsonSchema, Show, Eq)
 
--- | One proposed edit to the companion's working draft (PRD 21 lane C4): an
--- intent describing WHY, and the text to APPEND if approved. PLAIN DATA on
--- purpose, not the real @s -> Either EditFailure s@ closure
+-- | One proposed edit to the companion's working draft (PRD 21 lane C4).
+-- PLAIN DATA on purpose, not the real @s -> Either EditFailure s@ closure
 -- @Tidepool.Thought.EditPlan@ ultimately wants — both windows this harness
 -- ever finalizes across (@runLLMTurnBranch@/@runLLMTurnFork@) refuse a
 -- finalized answer that carries a live function
@@ -320,14 +323,30 @@ data BranchRoleWire = Primary | Alternative | Critic
 -- "a concurrent fanout\/fork answer must be plain data in this driver (v1
 -- scope)"), so a window can never author the closure itself. The RUNTIME
 -- (@Harness.stampProposed@\/@wrapEdit@) is what turns this plain proposal
--- into the real, id-stamped 'Tidepool.Thought.Artifact' — a blank
--- 'editIntent' is refused there, mirroring the SAME blank-input invariant
--- this module already gives a blank 'branchTitle'\/'branchInstruction'
--- (@Harness.splitLayer@'s @blank@ check), not a new edit-validation policy.
-data ProposedEditWire = ProposedEditWire
-  { editIntent :: Text
-  , editAppend :: Text
-  }
+-- into the real, id-stamped 'Tidepool.Thought.Artifact', including every
+-- validation the consultation's DEFECT/VALIDATION findings ask for (blank
+-- intent, blank/no-op payload, per-fold and per-payload caps — none of it
+-- lives here, all of it lives at the stamp).
+--
+-- TWO constructors, BOTH record syntax (a payload constructor in a sum must
+-- use record syntax — the vendored generic JSON has no key to put a
+-- positional field under and rejects one with a compile-time @TypeError@,
+-- the same rule 'ProposedStrategy''s @WantPooled@ already follows):
+--
+-- * 'AppendEdit' — the pre-existing shape: append @editAppend@ to the
+--   draft. The runtime closure ('Harness.wrapEdit') inserts a blank-line
+--   paragraph separator before the appended block when the draft is
+--   already nonempty, so sibling appends compose as paragraphs rather than
+--   running together.
+-- * 'ReplaceOnce' — the new edit vocabulary (companion review step 7): a
+--   nonempty @editNeedle@ that must occur EXACTLY ONCE in the draft the
+--   plan actually runs against — zero or multiple occurrences is a typed
+--   'Tidepool.Thought.EditFailure' naming the count, never a silent
+--   first-match replace. An empty @editReplacement@ is an ordinary
+--   deletion, not a special case.
+data ProposedEditWire
+  = AppendEdit {editIntent :: Text, editAppend :: Text}
+  | ReplaceOnce {editIntent :: Text, editNeedle :: Text, editReplacement :: Text}
   deriving (Generic, ToJSON, FromJSON, JsonSchema, Show, Eq)
 
 -- | The ALGEBRA's answer (PRD 21 lane C4 — @Tidepool.Thought.FoldDecision@'s
@@ -335,23 +354,30 @@ data ProposedEditWire = ProposedEditWire
 -- @FoldProposal@; the rest is OPTIONAL and defaults to doing nothing, so a
 -- narrative fold that never mentions them behaves exactly as before:
 --
--- * @foldSelected@\/@foldComposition@ name which of THIS NODE'S OWN
---   CHILDREN's already-advertised artifact ids to keep, and in what order.
---   A leaf's own fold has no children, so its pool is always empty and
---   nothing it names here can ever resolve — selection can only ever
---   approve what a CHILD actually proposed, never conjure one out of thin
---   air.
+-- * @foldEditsInOrder@ collapses the old @foldSelected@\/@foldComposition@
+--   pair (companion review step 5 — the wire never needed two lists that
+--   always had to agree on membership) into ONE ordered list of THIS
+--   NODE'S OWN CHILDREN's already-advertised artifact ids: order IS
+--   application order, an empty list means none, and every id must be
+--   unique (a duplicate is refused at validation — see
+--   @Harness.resolveWithRetry@ — never silently deduped past the model's
+--   own view of what it selected). A leaf's own fold has no children, so
+--   its pool is always empty and nothing it names here can ever resolve —
+--   selection can only ever approve what a CHILD actually proposed, never
+--   conjure one out of thin air.
 -- * @foldProposed@ is how THIS node contributes a brand-new edit of its
 --   own — a leaf's ONLY route to proposing anything, since it has no
 --   children to select from. A leaf's own proposals are never selectable
 --   at the leaf's own fold; they only become selectable one level up, at
---   its PARENT's fold, exactly like a child's.
+--   its PARENT's fold, exactly like a child's. The ROOT fold is the one
+--   exception: @foldProposed@ is FORBIDDEN there (companion review step 4)
+--   and every entry is refused at the stamp, journaled, and never enters
+--   the pool.
 data FoldDecision = FoldDecision
-  { foldSynthesis   :: Text
-  , foldTensions    :: [Text]
-  , foldSelected    :: [Text]
-  , foldComposition :: [Text]
-  , foldProposed    :: [ProposedEditWire]
+  { foldSynthesis    :: Text
+  , foldTensions     :: [Text]
+  , foldEditsInOrder :: [Text]
+  , foldProposed     :: [ProposedEditWire]
   }
   deriving (Generic, ToJSON, FromJSON, JsonSchema, Show, Eq)
 
@@ -559,21 +585,36 @@ data NodeAnswer = NodeAnswer
     answerWindows   :: Int
   , answerForced    :: Int
   , answerFailed    :: Int
-  , -- | THIS node's own newly-proposed artifacts (PRD 21 lane C4), stamped
-    -- with ids and held live — never a child's, and never one this node's
-    -- own fold already selected\/applied.  Available for exactly this
-    -- node's PARENT to select by id; a parent that does not name it drops
-    -- it, rather than re-offering it further up (no re-propose\/escalate
-    -- mechanism in v1).  No 'Eq'\/'Show': an artifact carries a real
-    -- closure.
+  , -- | THIS node's own artifact pool, offered to its PARENT's fold: its own
+    -- newly-proposed artifacts (PRD 21 lane C4), stamped with ids and held
+    -- live, PLUS — as of endorsement propagation (companion review step 4)
+    -- — every artifact this node's own fold ENDORSED (selected via
+    -- @foldEditsInOrder@) from ITS children, republished upward under
+    -- their ORIGINAL id (ids are path-namespaced, so provenance survives
+    -- to the root unchanged). Never one this node's own fold declined to
+    -- select — an available edit a fold omits is dropped from that route
+    -- permanently, not re-offered. Available for exactly this node's
+    -- PARENT to select by id; a parent that does not name it drops it in
+    -- turn. No 'Eq'\/'Show': an artifact carries a real closure.
     answerArtifacts :: [Th.Artifact Text]
+  , -- | The renderable CONTENT behind every id in 'answerArtifacts' that is
+    -- an edit (never an evidence artifact, whose own 'Th.Evidence' text
+    -- already IS its full content) — companion review DEFECT 1's fix: the
+    -- approving fold must see the exact text it is authorizing, not just
+    -- the artifact's declared intent. Carried alongside the opaque
+    -- 'Th.Artifact' closure (which cannot be rendered back into text) and
+    -- propagated together with a republished endorsement, so a
+    -- grandchild's edit is still fully legible at the root.
+    answerArtifactRenders :: [(Th.ArtifactId, Text)]
   , -- | THIS node's own view of the companion's working draft, after
     -- running whatever THIS node's own fold approved against the draft as
     -- it stood at TURN START (@Harness.loop@'s @st.draft@, frozen and
     -- shared by every node — never threaded bottom-up between siblings).
     -- Only the ROOT's own value here ever becomes the next turn's
-    -- persisted 'draft'; every other node's is informational, read back
-    -- only for its own receipt.
+    -- persisted 'draft' and is the one application receipts call
+    -- "applied"\/"persisted"; every other node's is a PREVIEW against the
+    -- same frozen snapshot, read back only for its own receipt (companion
+    -- review step 4).
     answerDraft     :: Text
   , -- | The branch name of the worktree THIS node ends up owning after its
     -- own merge fold (PRD 21 C5, "Worktree coordination"), if it ever
@@ -590,25 +631,6 @@ data NodeAnswer = NodeAnswer
     -- is mergeable by name from any worktree of it, with no handle to carry.
     answerMergeBranch :: Maybe Text
   }
-
--- | The answer a node folds to when nothing usable came back for it.
-failureAnswer :: NodePath -> Text -> NodeAnswer
-failureAnswer path why =
-  NodeAnswer
-    { answerPath = path
-    , answerPosture = "failed"
-    , answerSynthesis = why
-    , answerTensions = []
-    , answerBadges = ["failed"]
-    , answerTree = []
-    , answerNodes = 1
-    , answerWindows = 1
-    , answerForced = 0
-    , answerFailed = 1
-    , answerArtifacts = []
-    , answerDraft = ""
-    , answerMergeBranch = Nothing
-    }
 
 -- | @\<indent\>\<path\>  \<posture\>  \<title\>  [badges]@ — one line per
 -- node, never a nested transcript.
@@ -668,11 +690,19 @@ Turns folded: {show st.turnCount}|]
       [fmt|Budget: depth {c.maxDepth}, {c.maxNodes} nodes, fan-out {c.maxFanOut}; gate {renderPolicy c.gatePolicy} (at most {c.gateMaxRounds} rounds)|]
     -- Shown only once a fold has actually changed the draft (PRD 21 lane
     -- C4) — an empty draft is exactly today's pre-C4 behavior, and this
-    -- stays silent about it rather than announcing an empty string.
+    -- stays silent about it rather than announcing an empty string. A
+    -- delimited BLOCK, not an inline "Draft: ..." line (companion review
+    -- step 8d) — the same reason 'Harness.algebraPrompt' renders the
+    -- turn-start draft as a block: a multi-line draft must not be
+    -- ambiguous with whatever text follows it.
     draftBlock :: Text
     draftBlock
       | st.draft == "" = ""
-      | otherwise = "\nDraft: " <> st.draft
+      | otherwise =
+          [fmt|
+--- BEGIN DRAFT ---
+{st.draft}
+--- END DRAFT ---|]
     tensionsBlock r = case r.runTensions of
       [] -> "" :: Text
       ts -> "\nTensions:\n" <> T.intercalate "\n" (map ("- " <>) ts) <> "\n"

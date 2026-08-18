@@ -66,6 +66,13 @@ module Tidepool.Thought
   , EditReceipt (..)
   , applyEdits
 
+    -- * C4 edit vocabulary (companion review step 7) — the two edit
+    -- closures' own pure behavior, shared between the recursive
+    -- companion's runtime ("Harness.hs"'s @wrapEdit@) and this module's own
+    -- property tests
+  , appendWithSeparator
+  , replaceExactlyOnce
+
     -- * The driver
   , Coalg
   , Alg
@@ -78,10 +85,11 @@ module Tidepool.Thought
   ) where
 
 import Control.Monad.State.Class (MonadState, get, put)
-import Data.List (find)
+import Data.List (find, nub)
 import Data.List.NonEmpty (NonEmpty (..))
 import qualified Data.List.NonEmpty as NE
 import Data.Text (Text)
+import qualified Data.Text as T
 
 -- ---------------------------------------------------------------------------
 -- The base functor (PRD 21, "Core types")
@@ -317,15 +325,25 @@ data FoldProduct s
 -- selection can shrink what runs, never conjure an edit that was never
 -- proposed. If nothing survives resolution, the result is 'Narrative' —
 -- there is no way to construct an empty 'ProposedEdits'.
+--
+-- 'CompositionOrder' is DEDUPED, stably, before resolution: a caller that
+-- feeds a model-authored order straight through (as
+-- @Harness.resolveAndApply@ does) cannot assume the model wrote each id at
+-- most once, and the composition's own order — not 'selected''s, and
+-- definitely not the pool's declaration order — is what decides which
+-- occurrence survives. 'nub' keeps the FIRST occurrence and drops the rest,
+-- which is exactly "first position wins": a duplicated id resolves (and
+-- applies) at most once.
 resolveSelection :: FoldDecision s -> [Artifact s] -> FoldProduct s
 resolveSelection decision pool = case NE.nonEmpty resolved of
   Nothing -> Narrative (synthesis decision)
   Just plans -> ProposedEdits plans
   where
     CompositionOrder orderedIds = composition decision
+    dedupedIds = nub orderedIds
     resolved =
       [ plan
-      | aid <- orderedIds
+      | aid <- dedupedIds
       , aid `elem` selected decision
       , Just artifact <- [find ((== aid) . artifactId) pool]
       , Just plan <- [artifactEditPlan artifact]
@@ -382,6 +400,42 @@ applyEdits preview (ApprovedEdits plans) snapshot0 = go snapshot0 plans
        in case NE.nonEmpty rest of
             Nothing -> (s', thisReceipt :| [])
             Just rest' -> let (sFinal, receipts) = go s' rest' in (sFinal, thisReceipt `NE.cons` receipts)
+
+-- ---------------------------------------------------------------------------
+-- C4 edit vocabulary (companion review step 7) — the two edit closures'
+-- own pure behavior. Neither is model-facing or wire-shaped (that is
+-- "HarnessTypes.hs"'s @ProposedEditWire@); these are what the RUNTIME'S
+-- closure over one actually does, kept here — pure and total — so they
+-- share ONE implementation with this module's own QuickCheck properties
+-- rather than living only inside "Harness.hs"'s @wrapEdit@, untestable by
+-- anything but the scripted Rust acceptance tier.
+-- ---------------------------------------------------------------------------
+
+-- | An 'AppendEdit''s own closure body: append 'add' to 'draft', inserting a
+-- blank-line paragraph separator first when 'draft' is already nonempty —
+-- so sibling appends compose as paragraphs rather than running together.
+appendWithSeparator :: Text -> Text -> Text
+appendWithSeparator draft add
+  | T.null draft = add
+  | otherwise = draft <> "\n\n" <> add
+
+-- | A 'ReplaceOnce''s own closure body: replace the ONE occurrence of
+-- 'needle' in 'haystack' with 'replacement'. Zero or multiple occurrences
+-- is a typed 'EditFailure' naming the count, never a silent first-match
+-- replace. An empty 'replacement' is an ordinary deletion, not a special
+-- case. A blank 'needle' is refused outright — 'ProposedEditWire''s own
+-- wire-level validation (\"HarnessTypes.hs\") already keeps one from ever
+-- reaching this far, but the function stays total rather than partial on
+-- an input its own type does not rule out.
+replaceExactlyOnce :: Text -> Text -> Text -> Either EditFailure Text
+replaceExactlyOnce needle replacement haystack
+  | T.null needle = Left (EditFailure "needle must be nonempty")
+  | otherwise = case T.count needle haystack of
+      1 -> Right (before <> replacement <> T.drop (T.length needle) rest)
+      n -> Left (EditFailure ("needle must occur exactly once in the draft, occurs " <> tshow n <> " times"))
+  where
+    (before, rest) = T.breakOn needle haystack
+    tshow = T.pack . show
 
 -- ---------------------------------------------------------------------------
 -- The driver

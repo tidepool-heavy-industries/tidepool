@@ -813,7 +813,7 @@ fn split_three() -> String {
 /// the whole file.
 fn finish_reply() -> String {
     haskell(
-        "finalize @LayerProposal (ProposeFinish { finishDraft = \"this node answers locally\" })",
+        "finalize @LayerProposal (ProposeFinish { localAnswer = \"this node answers locally\" })",
     )
 }
 
@@ -826,14 +826,14 @@ fn empty_split_reply() -> String {
 
 /// The ONE fold reply every node's algebra window shares: a plain narrative
 /// `FoldDecision` (PRD 21 lane C4) that selects and proposes nothing — the
-/// `foldSelected`/`foldComposition`/`foldProposed` defaults every scenario
-/// below that never exercises checked edits relies on to stay
-/// byte-behaviorally identical to the old `FoldProposal`.
+/// `foldEditsInOrder`/`foldProposed` defaults every scenario below that
+/// never exercises checked edits relies on to stay byte-behaviorally
+/// identical to the old `FoldProposal`.
 fn fold_reply() -> String {
     haskell(
         "finalize @FoldDecision (FoldDecision { foldSynthesis = \"FOLDED\", \
-         foldTensions = [\"one unresolved tension\"], foldSelected = [], \
-         foldComposition = [], foldProposed = [] })",
+         foldTensions = [\"one unresolved tension\"], foldEditsInOrder = [], \
+         foldProposed = [] })",
     )
 }
 
@@ -1722,34 +1722,54 @@ async fn companion_gate_add_reaches_the_added_branchs_own_prompt() {
 }
 
 // ---------------------------------------------------------------------------
-// Scenario F — checked edits (PRD 21 lane C4): a leaf proposes at its own
-// fold, its parent selects and composes, the runtime applies against the
+// Scenario F — checked edits (PRD 21 lane C4 + the companion review's
+// endorsement propagation, wire collapse, and edit vocabulary): a leaf
+// proposes at its own fold, an ancestor's fold selects (endorsing, if not
+// root, or applying, if root), the runtime runs the closure against the
 // companion's working draft, and one receipt is stamped per approved plan.
 // ---------------------------------------------------------------------------
 
-/// A `FoldDecision` reply (PRD 21 lane C4) that proposes exactly ONE new
-/// draft edit of this node's own — a leaf's only route to proposing
-/// anything, since its own fold has no children to select from. PLAIN DATA
-/// only (`intent`/`append`): neither `runLLMTurnBranch` nor `runLLMTurnFork`
-/// — the only two windows this harness ever finalizes across — can deliver a
-/// finalized answer that carries a live closure, so the wire type
-/// (`Harness.hs`'s `ProposedEditWire`) never has one to write here; the
-/// runtime builds the real `Text -> Either EditFailure Text` itself. A blank
-/// `intent` is what the runtime refuses (`Harness.wrapEdit`).
-fn propose_edit_reply(synthesis: &str, intent: &str, append: &str) -> String {
+/// A `FoldDecision` reply that proposes exactly ONE new `AppendEdit` of this
+/// node's own — a leaf's only route to proposing anything, since its own
+/// fold has no children to select from. PLAIN DATA only (`intent`/`append`):
+/// neither `runLLMTurnBranch` nor `runLLMTurnFork` — the only two windows
+/// this harness ever finalizes across — can deliver a finalized answer that
+/// carries a live closure, so the wire type (`HarnessTypes.hs`'s
+/// `ProposedEditWire`) never has one to write here; the runtime builds the
+/// real `Text -> Either EditFailure Text` itself
+/// (`Harness.wrapEdit`/`Tidepool.Thought.appendWithSeparator`). A blank
+/// `intent` — or any proposal at the ROOT — is refused at the STAMP, before
+/// it ever becomes a selectable artifact; see the root-proposal-refusal
+/// scenario below for that path.
+fn propose_append_reply(synthesis: &str, intent: &str, append: &str) -> String {
     haskell(&format!(
         "finalize @FoldDecision (FoldDecision {{ foldSynthesis = \"{synthesis}\", \
-         foldTensions = [], foldSelected = [], foldComposition = [], \
-         foldProposed = [ProposedEditWire {{ editIntent = \"{intent}\", \
+         foldTensions = [], foldEditsInOrder = [], \
+         foldProposed = [AppendEdit {{ editIntent = \"{intent}\", \
          editAppend = \"{append}\" }}] }})"
     ))
 }
 
-/// A `FoldDecision` reply that selects and composes artifact ids from the
-/// pool its children advertised — `selected`/`composition` may name the SAME
-/// ids in DIFFERENT orders, since `composition`, not `selected`, is what
-/// governs apply order (`Tidepool.Thought.resolveSelection`).
-fn select_composed_reply(synthesis: &str, selected: &[&str], composition: &[&str]) -> String {
+/// As [`propose_append_reply`], proposing a `ReplaceOnce` instead — stamps
+/// fine regardless of whether its needle will actually be found; the
+/// exactly-once check runs at APPLY time
+/// (`Tidepool.Thought.replaceExactlyOnce`), against whatever snapshot the
+/// plan actually runs against.
+fn propose_replace_reply(synthesis: &str, intent: &str, needle: &str, replacement: &str) -> String {
+    haskell(&format!(
+        "finalize @FoldDecision (FoldDecision {{ foldSynthesis = \"{synthesis}\", \
+         foldTensions = [], foldEditsInOrder = [], \
+         foldProposed = [ReplaceOnce {{ editIntent = \"{intent}\", \
+         editNeedle = \"{needle}\", editReplacement = \"{replacement}\" }}] }})"
+    ))
+}
+
+/// A `FoldDecision` reply that selects artifact ids from the pool this
+/// node's own children (or, after endorsement propagation, grandchildren)
+/// advertised — `foldEditsInOrder` is the ONE ordered list that is both
+/// selection AND application order (the companion review's wire collapse:
+/// there is no longer a separate composition list to disagree with it).
+fn select_edits_reply(synthesis: &str, ids_in_order: &[&str]) -> String {
     let quote_join = |ids: &[&str]| {
         ids.iter()
             .map(|id| format!("\"{id}\""))
@@ -1758,10 +1778,9 @@ fn select_composed_reply(synthesis: &str, selected: &[&str], composition: &[&str
     };
     haskell(&format!(
         "finalize @FoldDecision (FoldDecision {{ foldSynthesis = \"{synthesis}\", \
-         foldTensions = [], foldSelected = [{}], foldComposition = [{}], \
+         foldTensions = [], foldEditsInOrder = [{}], \
          foldProposed = [] }})",
-        quote_join(selected),
-        quote_join(composition)
+        quote_join(ids_in_order)
     ))
 }
 
@@ -1770,14 +1789,16 @@ fn select_composed_reply(synthesis: &str, selected: &[&str], composition: &[&str
 /// draft, with failure isolation and one receipt per approved plan.
 ///
 /// The tree: root splits into two leaves, Alpha and Beta (`split_two()`).
-/// Alpha's own fold proposes an edit that SUCCEEDS; Beta's own fold proposes
-/// one that always REFUSES. Neither leaf's own artifact is selectable at its
-/// own fold (an empty pool — no children), so this ALSO proves "approval is
-/// the parent's fold": only root, one level up, can ever apply either one.
-/// Root's own fold selects BOTH ids but COMPOSES beta before alpha — the
-/// opposite of `foldSelected`'s own list order — so the result can only
-/// match if composition order, not selection order, governed the apply.
-/// Reuses the "tree" scenario's exact config (`state_json(3, 40, 5,
+/// Alpha's own fold proposes an `AppendEdit` that SUCCEEDS; Beta's own fold
+/// proposes a `ReplaceOnce` whose needle never occurs in the draft, which
+/// stamps fine but FAILS AT APPLY — the receipt-isolation case a
+/// stamp-time-refused proposal can no longer demonstrate, now that a blank
+/// intent never becomes an artifact at all. Neither leaf's own artifact is
+/// selectable at its own fold (an empty pool — no children), so this ALSO
+/// proves "approval is the parent's fold": only root, one level up, can ever
+/// apply either one. Root's own fold selects beta before alpha, so the
+/// result can only match if `foldEditsInOrder`'s own order governed the
+/// apply. Reuses the "tree" scenario's exact config (`state_json(3, 40, 5,
 /// GateOff)`), so this shares that compile shape rather than opening a new
 /// one.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1796,22 +1817,20 @@ async fn companion_leaf_proposes_parent_selects_runtime_applies_with_receipts() 
             script(&["NODE root/2-beta — DISCOVER"], finish_reply()),
             script(
                 &["NODE root/1-alpha — FOLD"],
-                propose_edit_reply("alpha folds locally", "append alpha's suggestion", "-alpha"),
+                propose_append_reply("alpha folds locally", "append alpha's suggestion", "-alpha"),
             ),
             script(
                 &["NODE root/2-beta — FOLD"],
-                // A BLANK intent is what the runtime refuses — the only
-                // refusal a plain-data proposal can express (see
-                // `propose_edit_reply`'s own doc).
-                propose_edit_reply("beta folds locally", "", "-beta"),
+                propose_replace_reply(
+                    "beta folds locally",
+                    "beta's replace attempt",
+                    "MISSING-NEEDLE",
+                    "x",
+                ),
             ),
             script(
                 &["NODE root — FOLD"],
-                select_composed_reply(
-                    "root selects both, composed beta then alpha",
-                    &[alpha_id, beta_id],
-                    &[beta_id, alpha_id],
-                ),
+                select_edits_reply("root selects beta then alpha", &[beta_id, alpha_id]),
             ),
         ],
         Arc::new(ScriptedGate::default()),
@@ -1821,14 +1840,14 @@ async fn companion_leaf_proposes_parent_selects_runtime_applies_with_receipts() 
     // --- the draft actually changed, at the ROOT's own position -----------
     assert_eq!(
         run.state.get("draft").and_then(|v| v.as_str()),
-        Some("seed-alpha"),
-        "root approved and applied alpha's edit against the turn-start draft \
-         (\"seed\"); beta's own refusal left the running snapshot untouched \
+        Some("seed\n\n-alpha"),
+        "root applied alpha's edit against the turn-start draft (\"seed\"); \
+         beta's own apply-time failure left the running snapshot untouched \
          for alpha to apply against, got: {}",
         run.state
     );
 
-    // --- one receipt per approved plan, in COMPOSITION order ---------------
+    // --- one receipt per approved plan, in foldEditsInOrder's own order ----
     let edits_at = |path: &str| -> Vec<Json> {
         run.journal_kind("edits")
             .into_iter()
@@ -1846,7 +1865,12 @@ async fn companion_leaf_proposes_parent_selects_runtime_applies_with_receipts() 
     assert_eq!(payload.get("before").and_then(|v| v.as_str()), Some("seed"));
     assert_eq!(
         payload.get("after").and_then(|v| v.as_str()),
-        Some("seed-alpha")
+        Some("seed\n\n-alpha")
+    );
+    assert_eq!(
+        payload.get("status").and_then(|v| v.as_str()),
+        Some("applied"),
+        "the ROOT's own selection is the turn's one real, persisted application: {payload:?}"
     );
     let receipts = payload
         .get("receipts")
@@ -1860,14 +1884,14 @@ async fn companion_leaf_proposes_parent_selects_runtime_applies_with_receipts() 
     assert_eq!(
         receipts[0].get("artifact").and_then(|v| v.as_str()),
         Some(beta_id),
-        "receipts follow COMPOSITION order, not foldSelected's own list order: {receipts:?}"
+        "receipts follow foldEditsInOrder's own order: {receipts:?}"
     );
     assert!(
         receipts[0]
             .get("outcome")
             .and_then(|o| o.get("refused"))
             .is_some(),
-        "beta's own refusal is an isolated Left, never poisoning a sibling: {receipts:?}"
+        "beta's needle-not-found failure is an isolated Left, never poisoning a sibling: {receipts:?}"
     );
     assert_eq!(
         receipts[1].get("artifact").and_then(|v| v.as_str()),
@@ -1878,8 +1902,8 @@ async fn companion_leaf_proposes_parent_selects_runtime_applies_with_receipts() 
             .get("outcome")
             .and_then(|o| o.get("applied"))
             .and_then(|v| v.as_str()),
-        Some("seed-alpha"),
-        "alpha's edit applied against the state beta's refusal left untouched: {receipts:?}"
+        Some("seed\n\n-alpha"),
+        "alpha's edit applied against the state beta's failure left untouched: {receipts:?}"
     );
 
     // --- neither LEAF's own fold ever approves anything ---------------------
@@ -1911,6 +1935,343 @@ async fn companion_leaf_proposes_parent_selects_runtime_applies_with_receipts() 
             run.tree_line(leaf)
         );
     }
+}
+
+/// The companion review's semantics upgrade — endorsement propagation: an
+/// artifact a GRANDCHILD proposes reaches the ROOT's own persisted draft only
+/// by chained selection, and every non-root application along the way is
+/// labeled a PREVIEW, never "applied".
+///
+/// The tree: root splits into Alpha and Beta (`split_two()`); Alpha itself
+/// splits into two more leaves, `aa` and `ab` (reusing `split_two()` again —
+/// one compile, three uses). `aa`'s own fold proposes an edit; Alpha's own
+/// fold (non-root, depth 1) SELECTS it — endorsing and republishing it under
+/// its ORIGINAL, `aa`-namespaced id — and root's own fold selects that SAME
+/// id from Alpha's now-endorsed pool, applying it for real. Depth 2, chained
+/// selection, one real application.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn companion_endorsement_reaches_root_from_depth_two() {
+    let _cache_guard = support::isolate_cache();
+
+    let aa_id = "root/1-alpha/1-alpha#1";
+
+    let run = run_scenario(
+        "endorsement-depth-2",
+        state_json_with_draft(3, 40, 5, json!({"tag": "GateOff"}), "base"),
+        vec![
+            script(&["NODE root — DISCOVER"], split_two()),
+            script(&["NODE root/1-alpha — DISCOVER"], split_two()),
+            script(&["NODE root/2-beta — DISCOVER"], finish_reply()),
+            script(&["NODE root/1-alpha/1-alpha — DISCOVER"], finish_reply()),
+            script(&["NODE root/1-alpha/2-beta — DISCOVER"], finish_reply()),
+            script(
+                &["NODE root/1-alpha/1-alpha — FOLD"],
+                propose_append_reply("aa proposes", "grand's suggestion", "-grand"),
+            ),
+            script(&["NODE root/1-alpha/2-beta — FOLD"], fold_reply()),
+            script(&["NODE root/2-beta — FOLD"], fold_reply()),
+            script(
+                &["NODE root/1-alpha — FOLD"],
+                select_edits_reply("alpha endorses aa's edit", &[aa_id]),
+            ),
+            script(
+                &["NODE root — FOLD"],
+                select_edits_reply("root applies alpha's endorsed edit", &[aa_id]),
+            ),
+        ],
+        Arc::new(ScriptedGate::default()),
+    )
+    .await;
+
+    // --- the edit reached the persisted draft, at the ROOT's own position --
+    assert_eq!(
+        run.state.get("draft").and_then(|v| v.as_str()),
+        Some("base\n\n-grand"),
+        "a grandchild's edit reaches the persisted draft only through chained \
+         selection all the way to root: {}",
+        run.state
+    );
+
+    // --- provenance survives: the id root selected is the ORIGINAL one -----
+    let root_fold_request = run.request_for("root", Phase::Fold);
+    assert!(
+        root_fold_request.contains(aa_id),
+        "the artifact's id is unchanged end to end — path-namespaced provenance: {root_fold_request}"
+    );
+    assert!(
+        root_fold_request.contains("From Alpha (root/1-alpha)"),
+        "the pool is grouped by IMMEDIATE CHILD (who endorsed it to this fold), \
+         not by where it originated: {root_fold_request}"
+    );
+
+    // --- mid-tree (Alpha) says PREVIEW; only root says APPLIED -------------
+    let edits_at = |path: &str| -> Json {
+        run.journal_kind("edits")
+            .into_iter()
+            .find(|e| e.key == path)
+            .unwrap_or_else(|| panic!("no edits journal entry at {path}"))
+            .payload
+            .clone()
+    };
+    let alpha_edits = edits_at("root/1-alpha");
+    assert_eq!(
+        alpha_edits.get("status").and_then(|v| v.as_str()),
+        Some("preview"),
+        "alpha's own endorsement runs the SAME apply mechanically, but it is \
+         only a preview against the frozen turn-start snapshot: {alpha_edits:?}"
+    );
+    let root_edits = edits_at("root");
+    assert_eq!(
+        root_edits.get("status").and_then(|v| v.as_str()),
+        Some("applied"),
+        "root's own selection is the turn's one real, persisted application: {root_edits:?}"
+    );
+    assert!(
+        run.tree_line("root/1-alpha")
+            .contains("edits: 1 previewed, 0 refused"),
+        "the preview wording surfaces on the node's own badge: {}",
+        run.tree_line("root/1-alpha")
+    );
+    assert!(
+        run.tree_line("root")
+            .contains("edits: 1 applied, 0 refused"),
+        "the applied wording surfaces only at root: {}",
+        run.tree_line("root")
+    );
+
+    // --- the grandchild's own fold never approves its own proposal ---------
+    assert!(
+        run.journal_kind("edits")
+            .into_iter()
+            .all(|e| e.key != "root/1-alpha/1-alpha"),
+        "a leaf's own fold cannot approve its own proposal"
+    );
+}
+
+/// The companion review's semantics upgrade — root's own `foldProposed` is
+/// FORBIDDEN: root selects from the pool, it never authors. Refused at the
+/// stamp and journaled, never silently dropped.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn companion_root_proposed_edits_are_refused_and_journaled() {
+    let _cache_guard = support::isolate_cache();
+
+    let run = run_scenario(
+        "root-proposal-refused",
+        state_json_with_draft(3, 40, 5, json!({"tag": "GateOff"}), "untouched"),
+        vec![
+            script(&["NODE root — DISCOVER"], finish_reply()),
+            script(
+                &["NODE root — FOLD"],
+                propose_append_reply(
+                    "root tries to author an edit",
+                    "root's own suggestion",
+                    "-nope",
+                ),
+            ),
+        ],
+        Arc::new(ScriptedGate::default()),
+    )
+    .await;
+
+    assert_eq!(
+        run.state.get("draft").and_then(|v| v.as_str()),
+        Some("untouched"),
+        "the root fold's own proposal is refused outright, so nothing ever \
+         reaches the draft: {}",
+        run.state
+    );
+    let refused = run.journal_kind("refused");
+    assert_eq!(
+        refused.len(),
+        1,
+        "the root's one proposal is refused exactly once: {refused:?}"
+    );
+    assert_eq!(refused[0].key, "root");
+    assert_eq!(
+        refused[0].payload.get("ordinal").and_then(|v| v.as_i64()),
+        Some(1)
+    );
+    let reason = refused[0]
+        .payload
+        .get("reason")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default();
+    assert!(
+        reason.contains("root fold"),
+        "the refusal names why it was refused: {reason}"
+    );
+    assert!(
+        run.journal_kind("edits").is_empty(),
+        "nothing was ever stamped, so nothing could ever be approved"
+    );
+}
+
+/// The companion review's corrective-retry mechanism: a fold's selection
+/// naming a DUPLICATED id gets exactly ONE fresh window before the runtime
+/// falls back to the valid subset — scripted here as the model getting it
+/// right on the second try. The retry's own prompt carries a distinguishing
+/// marker ("did not validate") the first reply never sees, which is what
+/// lets ONE `KeyedProvider` entry serve the corrected reply only on the
+/// SECOND call to the same node's FOLD window — the more specific entry
+/// (both needles) is listed FIRST, the generic one (which would otherwise
+/// also match the first call) second.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn companion_corrective_retry_recovers_from_invalid_selection() {
+    let _cache_guard = support::isolate_cache();
+
+    let alpha_id = "root/1-alpha#1";
+
+    let run = run_scenario(
+        "corrective-retry",
+        state_json_with_draft(3, 40, 5, json!({"tag": "GateOff"}), "seed"),
+        vec![
+            script(&["NODE root — DISCOVER"], split_two()),
+            script(&["NODE root/1-alpha — DISCOVER"], finish_reply()),
+            script(&["NODE root/2-beta — DISCOVER"], finish_reply()),
+            script(
+                &["NODE root/1-alpha — FOLD"],
+                propose_append_reply("alpha proposes", "alpha's suggestion", "-alpha"),
+            ),
+            script(&["NODE root/2-beta — FOLD"], fold_reply()),
+            script(
+                &["NODE root — FOLD", "did not validate"],
+                select_edits_reply("root corrects its selection", &[alpha_id]),
+            ),
+            script(
+                &["NODE root — FOLD"],
+                select_edits_reply("root selects, duplicated", &[alpha_id, alpha_id]),
+            ),
+        ],
+        Arc::new(ScriptedGate::default()),
+    )
+    .await;
+
+    assert_eq!(
+        run.state.get("draft").and_then(|v| v.as_str()),
+        Some("seed\n\n-alpha"),
+        "the corrected, deduped selection is what actually applied: {}",
+        run.state
+    );
+
+    let retries = run.journal_kind("retry");
+    assert_eq!(
+        retries.len(),
+        1,
+        "exactly ONE corrective retry, never more: {retries:?}"
+    );
+    assert_eq!(retries[0].key, "root");
+    let duplicated = retries[0]
+        .payload
+        .get("duplicated")
+        .and_then(|v| v.as_array())
+        .expect("a duplicated-ids array");
+    assert_eq!(
+        duplicated
+            .iter()
+            .filter_map(|v| v.as_str())
+            .collect::<Vec<_>>(),
+        vec![alpha_id],
+        "the retry names exactly which id was duplicated: {duplicated:?}"
+    );
+
+    let selections = run.journal_kind("selection");
+    let root_selection = selections
+        .into_iter()
+        .find(|e| e.key == "root")
+        .expect("root's own selection classification");
+    let ids = root_selection
+        .payload
+        .get("ids")
+        .and_then(|v| v.as_array())
+        .expect("a selection ids array");
+    assert_eq!(
+        ids.len(),
+        1,
+        "the FINAL (corrected) selection is what gets classified, not the \
+         invalid first attempt: {ids:?}"
+    );
+    assert_eq!(ids[0].get("id").and_then(|v| v.as_str()), Some(alpha_id));
+    assert_eq!(
+        ids[0].get("reason").and_then(|v| v.as_str()),
+        Some("resolved")
+    );
+
+    let root_edits = run
+        .journal_kind("edits")
+        .into_iter()
+        .find(|e| e.key == "root")
+        .expect("root's own edits entry");
+    let receipts = root_edits
+        .payload
+        .get("receipts")
+        .and_then(|v| v.as_array())
+        .expect("receipts array");
+    assert_eq!(
+        receipts.len(),
+        1,
+        "the corrected selection names exactly one id, so exactly one receipt: {receipts:?}"
+    );
+}
+
+/// `ReplaceOnce` end to end: a leaf proposes it, root selects it, and the
+/// runtime's `Tidepool.Thought.replaceExactlyOnce` swaps the draft's single
+/// needle occurrence.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn companion_replace_once_applies_end_to_end() {
+    let _cache_guard = support::isolate_cache();
+
+    let alpha_id = "root/1-alpha#1";
+
+    let run = run_scenario(
+        "replace-once",
+        state_json_with_draft(3, 40, 5, json!({"tag": "GateOff"}), "hello NEEDLE world"),
+        vec![
+            script(&["NODE root — DISCOVER"], split_two()),
+            script(&["NODE root/1-alpha — DISCOVER"], finish_reply()),
+            script(&["NODE root/2-beta — DISCOVER"], finish_reply()),
+            script(
+                &["NODE root/1-alpha — FOLD"],
+                propose_replace_reply(
+                    "alpha proposes a replace",
+                    "swap the needle",
+                    "NEEDLE",
+                    "WORLD",
+                ),
+            ),
+            script(&["NODE root/2-beta — FOLD"], fold_reply()),
+            script(
+                &["NODE root — FOLD"],
+                select_edits_reply("root applies the replacement", &[alpha_id]),
+            ),
+        ],
+        Arc::new(ScriptedGate::default()),
+    )
+    .await;
+
+    assert_eq!(
+        run.state.get("draft").and_then(|v| v.as_str()),
+        Some("hello WORLD world"),
+        "ReplaceOnce swaps its single needle occurrence end to end: {}",
+        run.state
+    );
+    let root_edits = run
+        .journal_kind("edits")
+        .into_iter()
+        .find(|e| e.key == "root")
+        .expect("root's own edits entry");
+    let receipts = root_edits
+        .payload
+        .get("receipts")
+        .and_then(|v| v.as_array())
+        .expect("receipts array");
+    assert_eq!(receipts.len(), 1);
+    assert_eq!(
+        receipts[0]
+            .get("outcome")
+            .and_then(|o| o.get("applied"))
+            .and_then(|v| v.as_str()),
+        Some("hello WORLD world")
+    );
 }
 
 /// PRD 21 lane C4 — a fold that neither selects nor proposes anything is

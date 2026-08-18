@@ -470,6 +470,32 @@ prop_narrativeNeverApproves =
     Nothing -> property True
     Just _ -> counterexample "a Narrative value minted ApprovedEdits" False
 
+-- | The companion review's DEFECT 3: 'resolveSelection' must dedup a
+-- duplicated id in the composition order, stably, so a duplicate resolves
+-- (and applies) at MOST ONCE — the first position it appears at, never a
+-- second time later in the same list. A composition order is model-authored
+-- (@Harness.resolveAndApply@ feeds @foldEditsInOrder@ straight through), so
+-- nothing upstream can be trusted to have deduped it already.
+prop_resolveSelectionDedupsStable :: Property
+prop_resolveSelectionDedupsStable =
+  forAll (choose (1, 6)) $ \n ->
+    forAll (listOf1 (choose (1, n))) $ \composed ->
+      let pool = mkPool [1 .. n] []
+          decision = mkDecision composed
+          expectedIds = L.nub composed
+       in case approve (resolveSelection decision pool) of
+            Nothing -> counterexample "expected ProposedEdits" False
+            Just approved ->
+              let (final, receipts) = applyEdits id approved ""
+               in conjoin
+                    [ counterexample
+                        "each duplicated id applies once, at its first position"
+                        (final === T.concat (map tshow expectedIds))
+                    , counterexample
+                        "one receipt per deduped id, first-position order"
+                        (map receiptArtifact (NE.toList receipts) === map artifactIdOf expectedIds)
+                    ]
+
 -- | End to end, through 'thoughtHylo' itself: an Explore layer of N leaf
 -- children, each of whose fold proposes exactly one edit artifact tagged
 -- with its own id; the root's algebra gathers every child's artifact into a
@@ -517,6 +543,58 @@ prop_endToEndChildProposesParentSelects =
           ]
 
 -- ---------------------------------------------------------------------------
+-- C4 edit vocabulary (companion review step 7) — 'appendWithSeparator' and
+-- 'replaceExactlyOnce', the two edit closures' own pure behavior. 'genText'
+-- draws only from @['a'..'z']@, so a needle built from an UPPERCASE literal
+-- (@"NEEDLE"@) is guaranteed disjoint from any generated haystack piece —
+-- no filtering, no shrinking surprises, exact occurrence counts by
+-- construction.
+-- ---------------------------------------------------------------------------
+
+prop_appendWithSeparatorEmptyDraft :: Property
+prop_appendWithSeparatorEmptyDraft =
+  forAll genText $ \add -> appendWithSeparator "" add === add
+
+prop_appendWithSeparatorNonemptyDraft :: Property
+prop_appendWithSeparatorNonemptyDraft =
+  forAll genText $ \draft ->
+    forAll genText $ \add ->
+      appendWithSeparator draft add === draft <> "\n\n" <> add
+
+prop_replaceExactlyOnceSingleOccurrence :: Property
+prop_replaceExactlyOnceSingleOccurrence =
+  forAll genText $ \before ->
+    forAll genText $ \after ->
+      forAll genText $ \replacement ->
+        replaceExactlyOnce "NEEDLE" replacement (before <> "NEEDLE" <> after)
+          === Right (before <> replacement <> after)
+
+prop_replaceExactlyOnceIsOrdinaryDeletion :: Property
+prop_replaceExactlyOnceIsOrdinaryDeletion =
+  forAll genText $ \before ->
+    forAll genText $ \after ->
+      replaceExactlyOnce "NEEDLE" "" (before <> "NEEDLE" <> after) === Right (before <> after)
+
+prop_replaceExactlyOnceZeroOccurrences :: Property
+prop_replaceExactlyOnceZeroOccurrences =
+  forAll genText $ \haystack ->
+    forAll genText $ \replacement ->
+      case replaceExactlyOnce "NEEDLE" replacement haystack of
+        Left (EditFailure msg) -> counterexample (T.unpack msg) (T.isInfixOf "0 times" msg)
+        Right r -> counterexample ("no generated haystack ever contains NEEDLE: " <> show r) False
+
+prop_replaceExactlyOnceMultipleOccurrences :: Property
+prop_replaceExactlyOnceMultipleOccurrences =
+  forAll genText $ \a ->
+    forAll genText $ \b ->
+      forAll genText $ \c ->
+        forAll genText $ \d ->
+          forAll genText $ \replacement ->
+            case replaceExactlyOnce "NEEDLE" replacement (a <> "NEEDLE" <> b <> "NEEDLE" <> c <> "NEEDLE" <> d) of
+              Left (EditFailure msg) -> counterexample (T.unpack msg) (T.isInfixOf "3 times" msg)
+              Right r -> counterexample ("three occurrences must be refused, got: " <> show r) False
+
+-- ---------------------------------------------------------------------------
 -- Runner
 -- ---------------------------------------------------------------------------
 
@@ -533,6 +611,13 @@ main = do
       , run "C4 receipt completeness" prop_receiptCompleteness
       , run "C4 Narrative never approves" prop_narrativeNeverApproves
       , run "C4 end-to-end: child proposes, parent selects, runtime applies" prop_endToEndChildProposesParentSelects
+      , run "C4 resolveSelection dedups duplicated ids stably" prop_resolveSelectionDedupsStable
+      , run "C4 edit vocabulary: appendWithSeparator on an empty draft" prop_appendWithSeparatorEmptyDraft
+      , run "C4 edit vocabulary: appendWithSeparator on a nonempty draft" prop_appendWithSeparatorNonemptyDraft
+      , run "C4 edit vocabulary: replaceExactlyOnce, single occurrence" prop_replaceExactlyOnceSingleOccurrence
+      , run "C4 edit vocabulary: replaceExactlyOnce, ordinary deletion" prop_replaceExactlyOnceIsOrdinaryDeletion
+      , run "C4 edit vocabulary: replaceExactlyOnce, zero occurrences refused" prop_replaceExactlyOnceZeroOccurrences
+      , run "C4 edit vocabulary: replaceExactlyOnce, multiple occurrences refused" prop_replaceExactlyOnceMultipleOccurrences
       ]
   swarmResults <- mapM (uncurry run) properties
   if and results && and swarmResults then exitSuccess else exitFailure

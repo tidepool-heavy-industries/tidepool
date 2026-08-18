@@ -229,7 +229,13 @@ worktrees and repository events; caller-side receipts everywhere.
   task-slot change stays DEFERRED: v1 checked edits receive artifacts from
   children up the fold and never need algebra access to coalgebra-minted
   values; open question 5's precondition rule stands for whichever future
-  feature first needs it.
+  feature first needs it. Endorsement propagation settled (2026-08-18,
+  operator): a fold's selection IS its endorsement — a selected artifact
+  republishes upward under its original id, every non-root apply is a
+  PREVIEW against the frozen turn-start draft, and only the root's own
+  selection is the turn's one real, persisted application. Root's own
+  `foldProposed` is forbidden in v1 (root selects, it never authors); an
+  edit a fold omits is dropped from that route permanently.
 - **C5 — effects in nodes.** Design fully settled (2026-08-18, operator);
   what remains is implementation. Row-widening: decision 10 as amended
   (direct subagent-spawn effect, no raw Worktree verbs) plus the
@@ -367,3 +373,8 @@ stability.
    C4/C5 feature wanting algebra access to coalgebra-minted values (refs,
    receipts, node-local capabilities) is a `ThoughtF` change FIRST, then a
    harness change.
+6. A root-specific final-proposal/approval stage: root is the only fold
+   that has seen the complete synthesis, so forbidding it from proposing new
+   edits (rather than only selecting) may be leaving its own best editorial
+   judgment unused. Whether that stage is a distinct window, a widened
+   `FoldDecision` at root only, or stays out of scope entirely is unsettled.
