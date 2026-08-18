@@ -289,6 +289,25 @@ independent after C3; dogfood begins as each lands.
   branch position for the algebra to decide (drop, re-propose, escalate
   to the operator). Escalation is the algebra's choice, never the default
   path.
+- **Two edit channels, by representation (settled 2026-08-18, operator).**
+  In-heap state — the working draft — is edited through C4's checked
+  `EditPlan s` path (propose → fold-select → `ApprovedEdits` → apply →
+  receipts). Anything FILE-shaped — including the companion-memory store,
+  which is already a git repo of markdown — is repository content: a
+  subagent edits it in its own bound worktree, and that worktree is just
+  another branch riding this merge tree. Memory edits therefore need no
+  `EditPlan` vocabulary and no second mechanism; "edit memory" = "spawn
+  an agent whose worktree branch merges up".
+- **Node-row enforcement is by INTERPRETATION, not omission (settled
+  2026-08-18, operator).** The model-visible node row carries a narrow
+  delegation effect — its `Member` constraints never include `Worktree`
+  (or raw `Subagent`), so raw verbs are unnameable at the TYPE level, not
+  merely undocumented. A Haskell-side interpreter (freer-simple
+  reinterpretation, the same family as `withHandler`'s interposition)
+  lowers that effect into the real `Subagent`+`Worktree` row outside the
+  model-visible compile. No new wire effect, no new Rust registry row —
+  the narrow effect exists only between the model's compile and its
+  Haskell interpretation.
 
 ## Persistence (v1)
 
