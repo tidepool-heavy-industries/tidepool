@@ -45,6 +45,7 @@ companion_scope_trees = "scope-tree acceptance suite, end to end through the rea
 companion_snapshots = "frozen post-coalgebra context snapshot digest identity"
 compile_fail = "trybuild pins for the linear/custody token family's use-after-move guarantees (Checkout)"
 decl_plane_run_scoping = "node decl-plane directories scoped per Harness run, not process-global"
+delegate_merge_fold = "PRD 21 C5 joint acceptance: a branch-node delegate commits real content in its bound worktree, tidepool_worktree::merge_branch_into folds it into a root worktree in declared order (mixed content/no-content siblings), merge receipt asserted in the journal"
 delegate_positive_path = "PRD 21 C5: direct Subagent send dispatches within the answerer row; delegate's full reinterpret2 runtime path now un-ignored, fixed by the jit-reinterpret-rowchange lane (see reinterpret_rowchange_repro)"
 delegate_type_pinning = "PRD 21 C5: delegate compiles against the narrow row; raw Worktree/Subagent are unnameable (Member-constraint compile errors)"
 dogfood_harness_typecheck = "authored dogfood harnesses typecheck against today's generated effect surface"

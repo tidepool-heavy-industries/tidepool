@@ -33,8 +33,8 @@ use tidepool_harness::provider::DynModelProvider;
 use tidepool_harness::replay::ReplayProvider;
 use tidepool_harness::selfharness::persistence;
 use tidepool_harness::{
-    answerer_decls, load_harness_source, Event, Harness, JsonlObserver, LogObserver, Observer,
-    SelfHarnessDriver,
+    answerer_decls, answerer_decls_with_delegate, load_harness_source, Event, Harness,
+    JsonlObserver, LogObserver, Observer, SelfHarnessDriver,
 };
 use tidepool_worktree::{EventJournal, GitCli, WorktreeMonitor};
 
@@ -108,8 +108,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let prelude_dir = prelude_dir()?;
     let project_lib = project_lib_dir();
     // The nested answerer's SCOPED stack (gui + finalize, base effects dropped
-    // — W1 effect-scoping), not the full Agent stack.
-    let mut cfg = EngineConfig::from_decls(answerer_decls(), prelude_dir, project_lib)?;
+    // — W1 effect-scoping), not the full Agent stack. The recursive-companion
+    // harness gets the delegating row (PRD 21 C5): `Subagent` + `Worktree`
+    // prepended, and the model's own block wrapped under `runDelegate` — every
+    // other harness keeps compiling exactly as before.
+    let mut cfg = if is_recursive_companion(&harness_source_path) {
+        EngineConfig::from_decls(answerer_decls_with_delegate(), prelude_dir, project_lib)?
+            .with_delegate_wrap()
+    } else {
+        EngineConfig::from_decls(answerer_decls(), prelude_dir, project_lib)?
+    };
     // So a sibling `HarnessTypes` module the harness source depends on
     // resolves under the answerer's own compile too.
     cfg.include.push(source.source_dir.clone());
