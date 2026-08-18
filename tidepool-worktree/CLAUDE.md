@@ -35,6 +35,28 @@ inspection, events. The git work belongs to coding agents using their native
 tools, and the runtime observes what the repository became. Adding a workflow
 verb is a design regression, not a convenience.
 
+**The one narrow, deliberate exception: `merge.rs` (PRD 21 C5).** The
+recursive companion's worktree-coordination fold — each node merges its
+children's worktrees into its own, in declared branch order
+(`plans/self-iterating-harness/21-recursive-companion-prd.md`, "Worktree
+coordination") — needs ONE typed primitive: merge a branch into a target
+worktree, abort-and-report on conflict, never leave a half-merged tree.
+`merge::merge_branch_into` is that primitive, through the same `GitCli` call
+site as everything else here, with `MergeOutcome::{Merged,Conflict}` as its
+typed result (a non-conflict failure stays the ordinary
+`WorktreeError::GitFailure`). It does NOT reopen the boundary above: it is
+not exposed as a new `Worktree` effect verb (that decl is generated from
+`tidepool-protocol`, a schema this crate does not own, and widening the
+Haskell-facing surface with a general merge verb is exactly the regression
+the boundary refuses), and it adds no other workflow verb. The authored
+Haskell side (`harness-dogfooding/recursive-companion/Harness.hs`) reaches
+the same semantics through `Exec`, mirroring `harness-dogfooding/dev-tree
+/Harness.hs`'s own `mergeChild` — mechanical git run as authored policy in a
+worktree the node owns, exactly PRD 19's existing carve-out for that class
+of code. `merge.rs` exists so that ONE typed, fast-tier-tested definition of
+"merge, conflict, abort" is the ground truth both sides agree with, instead
+of the semantics being re-derived ad hoc at each authored call site.
+
 **Never dirty the source.** The registry root, worktree root, journal, and any
 temporary index all live OUTSIDE the source working tree. Managed branches use
 `TIDEPOOL_BRANCH_PREFIX`; snapshot commits use `TIDEPOOL_SNAPSHOT_REF_PREFIX`,

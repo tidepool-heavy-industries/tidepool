@@ -27,6 +27,7 @@ pub mod git;
 pub mod id;
 pub mod journal;
 pub mod label;
+pub mod merge;
 pub mod monitor;
 pub mod registry;
 pub mod snapshot;
@@ -43,6 +44,7 @@ pub use git::{GitCli, GitOutput};
 pub use id::{BranchName, EventId, GitOid, GitRef, SubscriptionId, WorktreeId};
 pub use journal::{EventJournal, JournalEntry};
 pub use label::{AgentLabel, BranchLabel};
+pub use merge::{merge_branch_into, MergeOutcome};
 pub use monitor::{
     CommitReceipt, HeadChangeKind, HeadChangeReceipt, Observed, RepositoryEvent, WorktreeMonitor,
     DEFAULT_POLL_INTERVAL_MS,
