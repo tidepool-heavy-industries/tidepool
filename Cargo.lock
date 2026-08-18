@@ -4064,6 +4064,7 @@ version = "0.1.0"
 name = "tidepool-lsp"
 version = "0.1.0"
 dependencies = [
+ "clap",
  "crossbeam-channel",
  "serde",
  "serde_json",
@@ -4259,6 +4260,7 @@ name = "tidepool-web"
 version = "0.1.0"
 dependencies = [
  "axum",
+ "clap",
  "datastar",
  "futures-core",
  "futures-util",

@@ -22,16 +22,24 @@
 
 use std::sync::Arc;
 
+use clap::Parser;
 use tidepool_harness::selfharness::operator::{FieldShape, FormShape, OperatorGate};
 use tidepool_web::WebGate;
 
+#[derive(Parser)]
+struct Args {
+    /// Run against two mock nodes, no harness/model/API calls needed.
+    #[arg(long)]
+    demo: bool,
+    #[arg(long, default_value_t = 4601)]
+    port: u16,
+}
+
 #[tokio::main(flavor = "multi_thread")]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let args: Vec<String> = std::env::args().collect();
-    let demo = args.iter().any(|a| a == "--demo");
-    let port: u16 = arg_str(&args, "--port")
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(4601);
+    let args = Args::parse();
+    let demo = args.demo;
+    let port = args.port;
 
     let (state, gate) = tidepool_web::spawn_operator_server_multi(port).await?;
 
@@ -136,9 +144,4 @@ fn sample_form_b() -> FormShape {
             shape: FormShape::Int,
         }],
     }
-}
-
-fn arg_str(args: &[String], flag: &str) -> Option<String> {
-    let idx = args.iter().position(|a| a == flag)?;
-    args.get(idx + 1).cloned()
 }
