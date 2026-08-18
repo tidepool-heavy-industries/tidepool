@@ -30,10 +30,11 @@ pub use forcing::{derive_teaser, fan_badge, price_class, ForkShape, NodeTree, Tr
 pub use harness::{ContextRef, Escalation, Harness, HarnessError, OperatorDecision};
 pub use registry::{Checkout, CheckoutError, SessionRegistry};
 pub use selfharness::{
-    acquire_lease, answerer_decls, fold_run_journal, list_segments, load_harness_source,
-    retire_lease, segment_path, AcquiredLease, ContinueSignal, DriverError, Event, HarnessSource,
-    HarnessSourceError, JsonlObserver, LogObserver, Observer, OperatorGate, PersistenceError,
-    ResumeFold, RunJournalError, RunLease, SelfHarnessDriver, SelfHarnessState, StdinGate,
+    acquire_lease, answerer_decls, answerer_decls_with_delegate, fold_run_journal, list_segments,
+    load_harness_source, retire_lease, segment_path, AcquiredLease, ContinueSignal, DriverError,
+    Event, HarnessSource, HarnessSourceError, JsonlObserver, LogObserver, Observer, OperatorGate,
+    PersistenceError, ResumeFold, RunJournalError, RunLease, SelfHarnessDriver, SelfHarnessState,
+    StdinGate,
 };
 pub use snapshot::{ContextSnapshot, SnapshotDigest};
 pub use tidepool_runtime::AsksSidecar;

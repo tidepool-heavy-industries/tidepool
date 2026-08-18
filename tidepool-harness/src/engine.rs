@@ -1290,6 +1290,25 @@ pub struct EngineConfig {
     /// `maybe_compact_answerer`). `None` disables the emergency trigger
     /// (structural compaction alone).
     pub context_window_tokens: Option<u32>,
+    /// PRD 21 C5: when set, every single-item turn this config compiles
+    /// (`Harness::run_block`'s `Expr`/`Bind`/`BindDiscard` candidates, never
+    /// the pure `Decl` one) has its block text wrapped as
+    /// `runDelegate $ do <block>` before it reaches the extract compile —
+    /// see `Tidepool.Agent.Delegate.runDelegate`'s doc for the mechanism.
+    /// `false` by default; opt in via [`Self::with_delegate_wrap`]. The
+    /// CALLER'S responsibility: this is only sound for a `decls` that
+    /// actually carries `Subagent` (e.g.
+    /// `selfharness::driver::answerer_decls_with_delegate`) — `Subagent`'s
+    /// presence is what makes `Tidepool.Agent.Delegate` auto-import in the
+    /// first place (`extra_imports_for!(Subagent)`); turning this on for a
+    /// row without `Subagent` fails loud with `runDelegate` simply "not in
+    /// scope". A block whose terminal statement carries an explicit
+    /// `:: M T` annotation (never the prompt-taught shape, but a model
+    /// COULD write one) fails to compile under the wrap — the annotation
+    /// asks for the full row directly, which can never equal `runDelegate`'s
+    /// expected `Eff (Delegate ': effs) T` argument; an ordinary, recoverable
+    /// compile error via the corrective-retry loop, not a hang or a trap.
+    pub delegate_wrap: bool,
 }
 
 /// Default context-window budget the emergency-compaction trigger watches.
@@ -1338,6 +1357,21 @@ fn vocab_with_runllmturn(decls: &[tidepool_mcp::EffectDecl]) -> Vec<tidepool_mcp
     vocab
 }
 
+// PRD 21 C5's delegation surface does NOT need a vocab/row split for
+// `Worktree`: `Tidepool.Agent.Spawn` (auto-imported alongside
+// `Tidepool.Agent.Delegate` whenever `Subagent` is in the row —
+// `extra_imports_for!(Subagent)`) imports `Tidepool.Worktree
+// (renderWorktreeError)`, and `Tidepool.Worktree.hs` is a WHOLE module GHC
+// must typecheck to import anything from it — including its OWN `M`-typed
+// bindings (`worktreeBranch`, `worktreeHead`), which need `Worktree`
+// GENUINELY in the row, not merely nameable. So `Worktree` rides into
+// `type M` for real (`selfharness::driver::answerer_decls_with_delegate`
+// puts it second, right after `Subagent`) and `Tidepool.Agent.Delegate`'s
+// `runDelegate` re-adds BOTH freshly via `reinterpret2` — see its doc for
+// why that still keeps `Worktree` unreachable from the MODEL's own block
+// (freshly re-added effects are never members of the row a `reinterpret`
+// call's ARGUMENT shares).
+
 impl EngineConfig {
     /// The canonical effect stack's decls + ask tag + effect names, resolving
     /// the extract binary from `TIDEPOOL_EXTRACT` (falling back to
@@ -1372,6 +1406,7 @@ impl EngineConfig {
             max_child_turns: 1,
             max_tokens: None,
             context_window_tokens: None,
+            delegate_wrap: false,
         }
     }
 
@@ -1429,7 +1464,16 @@ impl EngineConfig {
             max_child_turns: 4,
             max_tokens: Some(2048),
             context_window_tokens: Some(DEFAULT_CONTEXT_WINDOW_TOKENS),
+            delegate_wrap: false,
         })
+    }
+
+    /// Opt this config into [`Self::delegate_wrap`] — see its doc for what
+    /// that does and the precondition on `decls` it relies on.
+    #[must_use]
+    pub fn with_delegate_wrap(mut self) -> Self {
+        self.delegate_wrap = true;
+        self
     }
 
     /// The promoted-list effect-stack string (`'[Console, KV, …, Finalize

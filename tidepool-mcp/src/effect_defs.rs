@@ -231,8 +231,20 @@ macro_rules! extra_imports_for {
     // `spawnAsync`, `awaitAgent`, …) are reached by an explicit import today
     // and must keep being, or this row would silently WIDEN the eval surface
     // this migration promised to leave byte-identical.
+    //
+    // `Tidepool.Agent.Delegate`'s narrow surface (PRD 21 C5) rides the SAME
+    // row-gate: it only compiles in a row containing `Subagent` (its
+    // interpreter lowers onto `Subagent`'s own GADT), so it is auto-imported
+    // here rather than through a second identifier — a row admitting
+    // `Subagent` directly already has strictly MORE surface than one only
+    // admitting `Delegate`, so widening this one arm cannot leak the narrow
+    // effect's promise (unnameable `Worktree`/`Subagent`) anywhere the model
+    // doesn't already have the wider surface it protects against.
     (Subagent) => {
-        &["import Tidepool.Agent.Spawn (renderSpawnError)"]
+        &[
+            "import Tidepool.Agent.Spawn (renderSpawnError)",
+            "import Tidepool.Agent.Delegate (Delegate, DelegateBrief (..), DelegateResult (..), DelegateError (..), delegate, renderDelegateError, runDelegate)",
+        ]
     };
     // Journal was migrated to the `tidepool-protocol` schema (PRD 22 phase 2);
     // its `extra_imports` (`import qualified Tidepool.Resume as Resume` — the

@@ -533,6 +533,39 @@ pub fn answerer_decls() -> Vec<tidepool_mcp::EffectDecl> {
     ]
 }
 
+/// [`answerer_decls`] with `Subagent` and `Worktree` PREPENDED, in that
+/// order (PRD 21 C5) — the row a recursive-companion branch-node window
+/// compiles against when paired with
+/// [`crate::engine::EngineConfig::with_delegate_wrap`]. Both reused
+/// verbatim (no new Rust registry row); prepended, not appended, and in
+/// THIS order, because `Tidepool.Agent.Delegate.runDelegate`'s own
+/// signature (`Eff (Delegate ': effs) a -> Eff (Subagent ': Worktree ':
+/// effs) a`, freer-simple `reinterpret2`) re-adds them at the HEAD of
+/// whatever row it runs in, in that exact order — for that to line up with
+/// `type M`, `Subagent` then `Worktree` must be `type M`'s own first two
+/// entries.
+///
+/// `Worktree` rides in the ROW for real, not merely as vocabulary: `Subagent`'s
+/// own auto-import (`extra_imports_for!(Subagent)`,
+/// `tidepool-mcp/src/effect_defs.rs`) always pulls in
+/// `Tidepool.Agent.Spawn`, which imports `Tidepool.Worktree
+/// (renderWorktreeError)` — and `Tidepool.Worktree.hs` is a whole module GHC
+/// must typecheck to import anything from it, including its own `M`-typed
+/// bindings (`worktreeBranch`, `worktreeHead`), which need `Worktree`
+/// genuinely present. `runDelegate`'s `reinterpret2` is what keeps this from
+/// widening what the MODEL's own block can reach: freshly re-added effects
+/// on a `reinterpret`/`reinterpret2` call's OUTPUT are never members of the
+/// row its ARGUMENT (the model's block) is checked against — see
+/// `Tidepool.Agent.Delegate`'s module doc.
+///
+/// Does NOT widen `answerer_decls()` itself — every other harness (dev-tree,
+/// the general Agent stack) keeps compiling exactly as before.
+pub fn answerer_decls_with_delegate() -> Vec<tidepool_mcp::EffectDecl> {
+    let mut decls = vec![tidepool_mcp::subagent_decl(), tidepool_mcp::worktree_decl()];
+    decls.extend(answerer_decls());
+    decls
+}
+
 fn not_bootstrapped() -> DriverError {
     DriverError::Session("outer session not bootstrapped (call run_loop/run_one_cycle)".into())
 }
@@ -4540,6 +4573,28 @@ impl SelfHarnessDriver {
                     // operator, no model round (note's service shape).
                     let state = self.cycle_state_json.clone().unwrap_or(Json::Null);
                     self.agent.answer_dialog(node, state).await?;
+                }
+                // PRD 21 C5: a branch-node window's own `delegate` call
+                // lowers to a real `Subagent` send (`Tidepool.Agent.Delegate.
+                // runDelegate`) — same suspension, same driver-owned
+                // handler, as the AUTHORED outer loop's `spawnAgent`
+                // (`Self::service_outer_subagent`); this is the SAME
+                // dispatch, just resumed against THIS node's own session
+                // (`Harness::resume_with_value`) rather than the outer one.
+                // No operator, no model round — the saga itself is the
+                // "wait" (worktree + backend cycle), not a suspension this
+                // driver presents to anyone.
+                HoleRouting::Subagent => {
+                    let (pending_hole, _classified, table, request) =
+                        self.agent.pending_hole_with_request(node).ok_or_else(|| {
+                            DriverError::Session(format!(
+                                "node {node:?} has no pending Subagent hole to service"
+                            ))
+                        })?;
+                    let value = self.service_outer_subagent(&request, &table)?;
+                    self.agent
+                        .resume_with_value(node, &pending_hole, value)
+                        .await?;
                 }
                 _ => break,
             }

@@ -1542,6 +1542,25 @@ impl Harness {
                 .run_multi_item_block(node, block, imports, helpers)
                 .await;
         }
+        // PRD 21 C5: a delegating config's SINGLE-ITEM turn compiles the
+        // model's block as the argument to `runDelegate`, so `Subagent`
+        // never appears in the block's own row — see
+        // `EngineConfig::delegate_wrap`'s doc and
+        // `Tidepool.Agent.Delegate.runDelegate`'s. This is ONE shared text
+        // ahead of every candidate template below (`Decl`/`Bind`/
+        // `BindDiscard`/`Expr` all splice the SAME `turn_text`), so it also
+        // reaches the `Decl` candidate — harmless for the shape every
+        // answerer/branch-node turn actually uses (a bare expression ending
+        // in `finalize`), but it means a genuine top-level DECLARATION
+        // (`helperFn x = x + 1`, no enclosing `let`) is out of scope for a
+        // delegating row; nothing in this harness's dogfood authors one.
+        let wrapped_block;
+        let block: &str = if self.cfg.delegate_wrap {
+            wrapped_block = format!("runDelegate $ do\n{block}");
+            &wrapped_block
+        } else {
+            block
+        };
         // Session/contract context, peeked under the lock WITHOUT checking the
         // session out, so a compile failure below never leaks it (the session
         // is taken only once a compiled fragment is in hand).
@@ -2450,6 +2469,49 @@ impl Harness {
         let pending = convo.pending.as_ref()?;
         let table = convo.suspend_table.clone()?;
         Some((pending.hole.clone(), pending.classified.clone(), table))
+    }
+
+    /// Like [`Self::pending_hole_full`], plus the RAW suspended request
+    /// `Value` — what a caller needs to dispatch a suspension whose payload
+    /// `ClassifiedHole` doesn't carry (PRD 21 C5: [`HoleRouting::Subagent`]
+    /// is a unit variant — no spec/schema/cycle id — because the OUTER
+    /// loop's own equivalent servicing reads those off the original request
+    /// it never discards; a nested-answerer node discards it once
+    /// `classify_hole` runs UNLESS a caller reaches for this accessor first,
+    /// same `raw_request` [`PendingHole`] already stores for
+    /// [`Self::take_finalized_value`]).
+    pub(crate) fn pending_hole_with_request(
+        &self,
+        node: NodeId,
+    ) -> Option<(HoleId, ClassifiedHole, DataConTable, Value)> {
+        let convos = self.convos.lock();
+        let convo = convos.get(&node)?;
+        let pending = convo.pending.as_ref()?;
+        let table = convo.suspend_table.clone()?;
+        Some((
+            pending.hole.clone(),
+            pending.classified.clone(),
+            table,
+            pending.raw_request.clone(),
+        ))
+    }
+
+    /// Resume `node`'s parked continuation with a RAW `Value` answer,
+    /// bypassing [`Self::answer_dialog`]'s `Ask`/`AskUser`/`ReadState`
+    /// routing restriction — for a suspension whose answer is already a
+    /// bridged Core `Value` rather than operator-submitted JSON (PRD 21 C5:
+    /// [`HoleRouting::Subagent`], serviced the same way the AUTHORED outer
+    /// loop's own Subagent suspension already is —
+    /// `SelfHarnessDriver::service_outer_subagent`'s dispatch, just resumed
+    /// against a NODE's own session instead of the outer one).
+    pub(crate) async fn resume_with_value(
+        &self,
+        node: NodeId,
+        hole: &HoleId,
+        value: Value,
+    ) -> Result<(), HarnessError> {
+        let _lease = self.acquire_turn_lease(node)?;
+        self.resume_parent(node, hole, value).await
     }
 
     /// Reconstruct a [`TurnOutcome::Suspended`] from `node`'s CURRENT pending
