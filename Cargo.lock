@@ -3997,7 +3997,6 @@ dependencies = [
  "glob",
  "ignore",
  "inventory",
- "libc",
  "regex",
  "serde",
  "serde_json",
