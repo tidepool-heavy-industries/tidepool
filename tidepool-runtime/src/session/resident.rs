@@ -113,6 +113,23 @@ use super::{SessionError, SessionLib};
 /// so the mistake surfaces at the call site that dropped it; silent in
 /// release, matching every other debug-only assert in this custody chain.
 ///
+/// # On an error path, dispose of custody BEFORE `?`
+///
+/// **A `Drop` panic is a leak DETECTOR, not an error channel.** An arm holding
+/// live custody that hits `?` converts a perfectly recoverable `Err` into this
+/// type's `Drop` panic: the token correctly notices the leak, but it REPLACES
+/// the diagnosis — the caller sees "custody was lost" and never sees the error
+/// that caused the early return. So on any fallible path, consume or
+/// deliberately abandon custody before propagating.
+///
+/// The structural fix is usually better than the careful one: order the work
+/// so nothing fallible sits between the mint and the consume. Two windows in
+/// the green-thread driver taught this (`SelfHarnessDriver`'s `AsyncSpawnWith`
+/// and `AsyncDoneWith` arms) — one had two `?`s between minting a thread body
+/// and forking it, the other minted a result and then consumed it only inside
+/// a state guard. Both were fixed by moving the fallible work out of the
+/// window rather than by adding cleanup to each exit.
+///
 /// ```compile_fail
 /// use tidepool_codegen::jit_machine::ValueHandle;
 /// use tidepool_runtime::session::RootCustody;
@@ -150,15 +167,35 @@ impl RootCustody {
 
 impl Drop for RootCustody {
     fn drop(&mut self) {
-        if let Some(handle) = self.0 {
-            debug_assert!(
-                false,
-                "RootCustody dropped without being consumed — {handle:?}'s custody was \
-                 lost (never delivered via resume_handle, never mounted). The machine-side \
-                 root is unaffected (it releases at the owning realm's close_realm \
-                 regardless), but the value silently never reached wherever it was headed."
-            );
+        let Some(handle) = self.0 else { return };
+        let detail = format!(
+            "RootCustody dropped without being consumed — {handle:?}'s custody was lost \
+             (never delivered via resume_handle, never mounted). The machine-side root is \
+             unaffected (it releases at the owning realm's close_realm regardless), but the \
+             value silently never reached wherever it was headed."
+        );
+        // NEVER panic while an unwind is already in flight. Two reasons, and
+        // the second is why this guard exists at all:
+        //
+        // 1. A panic during unwinding is an immediate ABORT — no backtrace for
+        //    the original fault, no test-harness failure report, nothing.
+        // 2. The original panic is the INTERESTING one. This type is a leak
+        //    detector; a leak observed while something else is already failing
+        //    is almost always a CONSEQUENCE of that failure (the servicing path
+        //    unwound past a delivery), not an independent bug. Eating the real
+        //    diagnosis to report the consequence is exactly backwards, and it
+        //    has already happened once here: a case trap surfaced as a custody
+        //    panic, sending the reader after the wrong defect.
+        //
+        // Note this does NOT cover the `?`-on-a-fallible-path case in this
+        // type's doc — an `Err` return is not an unwind, so `panicking()` is
+        // false and the assert below still fires. That case is a real leak and
+        // must stay loud; it is fixed by ordering, not by suppression.
+        if std::thread::panicking() {
+            tracing::error!("{detail} (reported during an active unwind, so not raised)");
+            return;
         }
+        debug_assert!(false, "{}", detail);
     }
 }
 
