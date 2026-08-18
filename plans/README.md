@@ -33,8 +33,9 @@ in git history rather than here.
   green threads over parked continuations, node residents with typed
   mailboxes over lexically scoped handles, git-as-persistence with a
   journaled resume and eager rebase cascades, the trust ladder + fold
-  receipts, and the Stage-2 resident factory. Stage-1 lanes S1-L1…L6 are the
-  current execution order; dev-tree is the executable design target.
+  receipts, and the Stage-2 resident factory. Stage-1 lanes S1-L1…L6 are
+  LANDED (green threads + capability mailboxes last, 2026-08-17); dev-tree is
+  the executable design target. Stage-2 is next.
 - [One session](one-session.md): **Phases 0–5 LANDED (2026-08-12)**; Phase 6
   (repl/one-shot conversion + slot deletion) is deliberately parked behind
   the production-soak gate. The self-harness runs collapsed on one resident
@@ -56,28 +57,17 @@ in git history rather than here.
   turn support, revisited after Phase B.
 - [Post-restart execution](post-restart/): the current implementation lanes,
   gates, and benchmark track.
-- [Extract-side latency wave](post-restart/extract-wave.md): **folded
-  2026-08-09 — read its CLOSING STATE section first.** C1, D1-A and E6 landed
-  verified (E6 **moves the wire**); item 0 (both boot seeds deleted), item 0b
-  and the `--targets` prerequisite landed **UNVERIFIED** — gate runs were
-  stopped under the wrap-up directive and their legs run in the centralized
-  pass. Item 0's 4 → 2 drop was MEASURED in the 2026-08-09 centralized pass
-  (`acceptance_boot_compile_count` observed 2 and its
-  `PRE_MODEL_EXTRACT_COMPILES` pin now says so). Wave 3 (render+loop fusion) and D2 are CUT and
-  routed forward ready-to-spawn, D2 with a 212-line hand-off at
-  `extract-wave/spawn-latency/03-d2-handoff.md`.
-  The closing section also lists six standing hazards the wave established but
-  did not fix — chief among them that `haskell_suite_differential` and
-  `corpus_report` **never invoke the extractor** and cannot gate extractor
-  changes, and that the "pinned id-stability" trio is three DataConId guards
-  observing no VarIds.
+- [Extract-side latency wave](post-restart/extract-wave.md): folded.
   `extract-wave/OPERATIONAL.md` is the wave's operating doctrine — read it by
-  ref, never from a worktree copy.
+  ref, never from a worktree copy. Two standing hazards it left unfixed:
+  `haskell_suite_differential` and `corpus_report` **never invoke the
+  extractor** and cannot gate extractor changes; the "pinned id-stability"
+  trio is three DataConId guards observing no VarIds. Wave 3 (render+loop
+  fusion) and D2 are cut and routed forward ready-to-spawn, D2 with a
+  hand-off at `extract-wave/spawn-latency/03-d2-handoff.md`.
 - [Generic askUser PRD](self-iterating-harness/14-generic-derived-askuser-prd.md)
   and [generic surface wave](self-iterating-harness/15-generic-surface-wave.md):
   the current typed interaction surface.
-- [Typed subagent spawning PRD](self-iterating-harness/18-typed-subagent-spawning-prd.md):
-  the next substrate/product direction.
 - [Companion memory](companion-memory.md): agent-curated memory store (a git
   repo of markdown the PRD 18 curator agent edits) + the `[Directive]`
   finalize contract — the first LIVE subagent exercise, and the outer-row
