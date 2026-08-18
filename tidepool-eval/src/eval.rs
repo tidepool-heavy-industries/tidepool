@@ -13,7 +13,9 @@
 
 use crate::env::Env;
 use crate::error::{ArityContext, EvalError};
-use crate::heap::{Heap, ThunkState};
+#[cfg(test)]
+use crate::heap::ThunkState;
+use crate::heap::{ForceStart, Heap};
 use crate::value::Value;
 use tidepool_repr::{
     AltCon, CoreExpr, CoreFrame, DataConId, DataConTable, JoinId, Literal, PrimOpKind, VarId,
@@ -153,27 +155,19 @@ pub fn eval(expr: &CoreExpr, env: &Env, heap: &mut dyn Heap) -> Result<Value, Ev
 /// If it is already a constructor, literal, or closure, it is returned as-is.
 pub fn force(val: Value, heap: &mut dyn Heap) -> Result<Value, EvalError> {
     match val {
-        Value::ThunkRef(id) => {
-            match heap.read(id).clone() {
-                ThunkState::Evaluated(v) => force(v, heap),
-                ThunkState::BlackHole => Err(EvalError::InfiniteLoop(id)),
-                ThunkState::Unevaluated(env, expr) => {
-                    heap.write(id, ThunkState::BlackHole);
-                    match eval(&expr, &env, heap) {
-                        Ok(result) => {
-                            heap.write(id, ThunkState::Evaluated(result.clone()));
-                            Ok(result)
-                        }
-                        Err(err) => {
-                            // Restore state on error to avoid masking original failure
-                            // with InfiniteLoop on subsequent forces.
-                            heap.write(id, ThunkState::Unevaluated(env, expr));
-                            Err(err)
-                        }
-                    }
+        Value::ThunkRef(id) => match heap.begin_force(id) {
+            ForceStart::AlreadyEvaluated(v) => force(v, heap),
+            ForceStart::BlackHole => Err(EvalError::InfiniteLoop(id)),
+            ForceStart::Evaluating(token) => match eval(token.expr(), token.env(), heap) {
+                Ok(result) => Ok(token.complete(heap, result)),
+                Err(err) => {
+                    // Restore state on error to avoid masking original failure
+                    // with InfiniteLoop on subsequent forces.
+                    token.restore(heap);
+                    Err(err)
                 }
-            }
-        }
+            },
+        },
         other => Ok(other),
     }
 }
@@ -646,20 +640,20 @@ fn eval_step(
             // env without forcing, so the invariant holds; it is enforced by that
             // property, not by types.
             for (binder, rhs_idx) in bindings {
-                let tid = heap.alloc(Env::new(), CoreExpr { nodes: vec![] });
-                new_env = new_env.update(*binder, Value::ThunkRef(tid));
-                thunks.push((*binder, tid, *rhs_idx));
+                let reserved = heap.reserve();
+                new_env = new_env.update(*binder, Value::ThunkRef(reserved.id()));
+                thunks.push((*binder, reserved, *rhs_idx));
             }
 
             // 2. Evaluate lambda RHSes and back-patch thunks. Update env with Closures.
-            for (binder, tid, rhs_idx) in &thunks {
-                if matches!(&expr.nodes[*rhs_idx], CoreFrame::Lam { .. }) {
-                    let lam_val = eval_lam_leaf(expr, *rhs_idx, &new_env);
-                    heap.write(*tid, ThunkState::Evaluated(lam_val.clone()));
-                    new_env = new_env.update(*binder, lam_val);
+            for (binder, reserved, rhs_idx) in thunks {
+                if matches!(&expr.nodes[rhs_idx], CoreFrame::Lam { .. }) {
+                    let lam_val = eval_lam_leaf(expr, rhs_idx, &new_env);
+                    reserved.fill_evaluated(heap, lam_val.clone());
+                    new_env = new_env.update(binder, lam_val);
                 } else {
-                    let rhs_subtree = expr.extract_subtree(*rhs_idx);
-                    heap.write(*tid, ThunkState::Unevaluated(new_env.clone(), rhs_subtree));
+                    let rhs_subtree = expr.extract_subtree(rhs_idx);
+                    reserved.fill_unevaluated(heap, new_env.clone(), rhs_subtree);
                 }
             }
 
@@ -4013,8 +4007,9 @@ mod tests {
         );
 
         // Thunk A is already evaluated to ThunkRef(B)
-        let id_a = heap.alloc(Env::new(), CoreExpr { nodes: vec![] });
-        heap.write(id_a, ThunkState::Evaluated(Value::ThunkRef(id_b)));
+        let reserved_a = heap.reserve();
+        let id_a = reserved_a.id();
+        reserved_a.fill_evaluated(&mut heap, Value::ThunkRef(id_b));
 
         // Forcing A should transitively force B and return 42.
         // If force() returned Ok(v) instead of recursing on Evaluated(v),
