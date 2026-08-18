@@ -29,7 +29,7 @@ pub use engine::{
     ResumeOutcome, Retention, SessionEngine, StartError, StartTurn, TurnOutcome,
 };
 
-pub use resident::{ResidentError, ResidentOutcome, ResidentSession, RootCustody};
+pub use resident::{ResidentError, ResidentHole, ResidentOutcome, ResidentSession, RootCustody};
 
 pub use turn::{
     classify_block, compile_session_turn, render_template, run_turn, run_turn_batch,

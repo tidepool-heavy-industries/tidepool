@@ -28,7 +28,7 @@ use tidepool_repr::datacon_table::DataConTable;
 use tidepool_repr::frame::CoreFrame;
 use tidepool_repr::types::*;
 use tidepool_repr::{CoreExpr, Literal, TreeBuilder};
-use tidepool_runtime::session::{OutputSink, ResidentOutcome, ResidentSession};
+use tidepool_runtime::session::{OutputSink, ResidentHole, ResidentOutcome, ResidentSession};
 use tidepool_runtime::DEFAULT_NURSERY_SIZE;
 
 use tidepool_codegen::jit_machine::RealmId;
@@ -235,7 +235,7 @@ fn spawn_thread(
     body_tag: u64,
     body_lit: i64,
     realm: RealmId,
-) -> String {
+) -> ResidentHole {
     let expr = build_wrap_suspend(wrap_tag, dummy, body_tag, body_lit);
     let outcome = session
         .run(label, &expr, table)
@@ -245,10 +245,10 @@ fn spawn_thread(
         other => panic!("{label}: wrap suspend must suspend, got {other:?}"),
     };
     let handle = session
-        .finalized_handle(&wrap_hole)
+        .finalized_handle(wrap_hole.cont_id())
         .unwrap_or_else(|| panic!("{label}: wrap frame carries no untaken body closure"));
     let _ = session
-        .resume(&wrap_hole, Value::Lit(Literal::LitInt(0)))
+        .resume(wrap_hole, Value::Lit(Literal::LitInt(0)))
         .unwrap_or_else(|e| panic!("{label}: wrap suspend failed to resume to completion: {e}"));
     let outcome = session
         .run_forked(&format!("{label}_thread"), handle, realm, Some(table))
@@ -263,11 +263,11 @@ fn spawn_thread(
 /// `ThreadResult` payload.
 fn complete_thread(
     session: &mut ResidentSession<NoDispatch, TestSink>,
-    hole: &str,
+    hole: &ResidentHole,
     answer: i64,
 ) -> i64 {
     let outcome = session
-        .resume(hole, Value::Lit(Literal::LitInt(answer)))
+        .resume(hole.clone(), Value::Lit(Literal::LitInt(answer)))
         .unwrap_or_else(|e| panic!("thread resume failed: {e}"));
     match outcome {
         ResidentOutcome::Completed { result, .. } => expect_thread_result(&result.into_value()),
@@ -282,7 +282,7 @@ fn complete_thread(
 fn spawn_two(
     session: &mut ResidentSession<NoDispatch, TestSink>,
     table: &DataConTable,
-) -> (String, String) {
+) -> (ResidentHole, ResidentHole) {
     let hole_a = spawn_thread(session, table, "a", 100, 1, 200, 11, RealmId(1));
     let hole_b = spawn_thread(session, table, "b", 101, 2, 201, 22, RealmId(2));
     (hole_a, hole_b)
@@ -297,7 +297,7 @@ fn two_green_threads_pend_simultaneously_and_resume_order_is_free() {
     let (hole_a, hole_b) = spawn_two(&mut session, &table);
     let mut pending = session.parked_holes();
     pending.sort_unstable();
-    let mut expected = vec![hole_a.as_str(), hole_b.as_str()];
+    let mut expected = vec![hole_a.cont_id(), hole_b.cont_id()];
     expected.sort_unstable();
     assert_eq!(
         pending, expected,
@@ -502,10 +502,10 @@ fn a_green_thread_can_fork_another_green_thread() {
         other => panic!("wrap suspend must suspend, got {other:?}"),
     };
     let outer_body = session
-        .finalized_handle(&wrap_hole)
+        .finalized_handle(wrap_hole.cont_id())
         .expect("wrap frame carries the outer thread body");
     session
-        .resume(&wrap_hole, Value::Lit(Literal::LitInt(0)))
+        .resume(wrap_hole, Value::Lit(Literal::LitInt(0)))
         .expect("scratch spawner resumes");
 
     // Level 1: the outer thread. Its own body suspends carrying ANOTHER
@@ -522,10 +522,10 @@ fn a_green_thread_can_fork_another_green_thread() {
     // `run_forked` itself created, while that frame is still parked, and fork
     // it under its own realm.
     let inner_body = session
-        .finalized_handle(&outer_hole)
+        .finalized_handle(outer_hole.cont_id())
         .expect("the outer THREAD's frame must carry its nested spawn's closure");
     session
-        .resume(&outer_hole, Value::Lit(Literal::LitInt(0)))
+        .resume(outer_hole, Value::Lit(Literal::LitInt(0)))
         .expect("outer thread resumes past its spawn");
     let inner_hole = match session
         .run_forked("inner_thread", inner_body, RealmId(2), Some(&table))

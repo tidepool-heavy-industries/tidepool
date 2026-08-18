@@ -44,9 +44,9 @@ use tidepool_eval::value::Value;
 use tidepool_mcp::CapturedOutput;
 use tidepool_repr::{DataConTable, Generation, SessionId};
 use tidepool_runtime::session::{
-    run_turn, BoundBinder, CompiledTurn, ResidentError, ResidentOutcome, ResidentSession,
-    ScopeRetirement, SessionLib, TemplateSelector, TurnRequest, TurnResult, TurnTemplate,
-    DECL_TEMPLATE_SOURCE,
+    run_turn, BoundBinder, CompiledTurn, ResidentError, ResidentHole, ResidentOutcome,
+    ResidentSession, ScopeRetirement, SessionLib, TemplateSelector, TurnRequest, TurnResult,
+    TurnTemplate, DECL_TEMPLATE_SOURCE,
 };
 use tidepool_runtime::DEFAULT_NURSERY_SIZE;
 use tokio::sync::{mpsc, oneshot};
@@ -197,11 +197,15 @@ struct NodeConvo {
     /// bridge an answer Value against the same constructor set.
     suspend_table: Option<DataConTable>,
     suspend_asks: AsksSidecar,
-    /// When the SUSPENDED turn is a value-plane bind (`x <- fork …`), the binder
-    /// metadata + generation to materialize once the bind completes on resume.
-    /// `resume_parent` drives `resume_bind` (not `resume`) while this is `Some`,
-    /// and clears it when the bind finally lands (a completion, not a re-suspend).
-    pending_bind: Option<(BoundBinder, Generation)>,
+    /// The typed continuation token for the SUSPENDED turn, when there is one
+    /// — `resume_parent` is the sole consumer, via the ONE `ResidentSession::resume`.
+    /// A [`ResidentHole::Binding`] carries its own binder/generation
+    /// obligation (the session materializes it into the value plane on
+    /// completion); there is no second, external flag this node must keep in
+    /// sync with which resume method to call — there is only one method, and
+    /// the hole itself says what it owes. Cleared once the resume consumes it
+    /// (a completion, or a re-suspend that replaces it with the fresh hole).
+    resident_hole: Option<ResidentHole>,
     /// Running sum of every assistant turn's [`Usage`] on this node — the
     /// self-iterating-harness driver's emergency-compaction trigger,
     /// [`Harness::node_usage`], sums this across every `runLLMTurn`
@@ -1015,7 +1019,7 @@ impl Harness {
                 answer_contract: None,
                 suspend_table: None,
                 suspend_asks: AsksSidecar::default(),
-                pending_bind: None,
+                resident_hole: None,
                 usage: Usage::default(),
                 last_input_tokens: 0,
                 framing,
@@ -1760,25 +1764,27 @@ impl Harness {
                     })
                     .await?;
 
-                self.finish_run(node, run_outcome, table, asks, None)
+                self.finish_run(node, run_outcome, table, asks)
             }
         }
     }
 
     /// Shared turn epilogue: restore the session, flush effects, and turn a
     /// [`ResidentOutcome`] into a [`engine::TurnOutcome`] — `node_done` on
-    /// completion, publish + `set_pending` on suspension. `pending_bind` is
-    /// `Some` for a value-plane BIND turn that suspended (`x <- fork …`): it is
-    /// stashed so `resume_parent` drives `resume_bind` and the binding
-    /// materializes when the fork answers. A completion needs no `pending_bind`
-    /// handling — `run_bind` already materialized it.
+    /// completion, publish + `set_pending` on suspension. On suspension the
+    /// [`ResidentHole`] itself is stashed (`convo.resident_hole`) so
+    /// `resume_parent` can drive the ONE `ResidentSession::resume` later — a
+    /// value-plane BIND turn that suspended (`x <- fork …`) already got a
+    /// `ResidentHole::Binding` from `session.run_bind`, carrying its own
+    /// binder/generation, so there is nothing extra to remember here beyond
+    /// the hole. A completion needs no hole handling — `run_bind` already
+    /// materialized it.
     fn finish_run(
         &self,
         node: NodeId,
         outcome: Result<ResidentOutcome, ResidentError>,
         table: DataConTable,
         asks: AsksSidecar,
-        pending_bind: Option<(BoundBinder, Generation)>,
     ) -> Result<engine::TurnOutcome, HarnessError> {
         {
             let mut convos = self.convos.lock();
@@ -1810,9 +1816,10 @@ impl Harness {
                     | HoleRouting::Finalize { site, .. } => Some(*site),
                     _ => None,
                 };
+                let hole_id = hole.cont_id().to_string();
                 self.tree.hole_published(
                     node,
-                    HoleId(hole.clone()),
+                    HoleId(hole_id.clone()),
                     site,
                     ty,
                     classified.prompt.clone(),
@@ -1821,20 +1828,25 @@ impl Harness {
                 self.set_pending(
                     node,
                     PendingHole {
-                        hole: HoleId(hole.clone()),
+                        hole: HoleId(hole_id.clone()),
                         classified: classified.clone(),
                         raw_request: request,
                     },
                 );
-                // A suspended bind: remember the binder+gen so the resume path
-                // materializes it (via `resume_bind`) when the fork answers.
-                if let Some(pb) = pending_bind {
+                // Stash the typed hole so `resume_parent` can drive the ONE
+                // `ResidentSession::resume` when this hole is answered — a
+                // `ResidentHole::Binding` already carries its own
+                // binder/generation obligation, nothing extra to remember.
+                {
                     let mut convos = self.convos.lock();
                     if let Some(convo) = convos.get_mut(&node) {
-                        convo.pending_bind = Some(pb);
+                        convo.resident_hole = Some(hole);
                     }
                 }
-                Ok(engine::TurnOutcome::Suspended { hole, classified })
+                Ok(engine::TurnOutcome::Suspended {
+                    hole: hole_id,
+                    classified,
+                })
             }
             Err(e) => {
                 let msg = format!("The eval failed at runtime: {e}");
@@ -1887,8 +1899,9 @@ impl Harness {
     /// returned a `TurnResult::Bind` with a non-empty binder list and
     /// `session_bind_context` confirmed the node has a decl plane — `gen` is
     /// the SAME generation that compile stamped into `binder.module`. A fork
-    /// bind suspends here and its value is materialized on resume
-    /// (`finish_run` stashes the binder).
+    /// bind suspends here and its value is materialized on resume — the
+    /// `ResidentHole::Binding` `session.run_bind` mints on suspension already
+    /// carries `binder`/`gen` forward, so `finish_run` needs nothing extra.
     async fn run_bind_turn(
         &self,
         node: NodeId,
@@ -1915,7 +1928,7 @@ impl Harness {
             })
             .await?;
 
-        self.finish_run(node, outcome, table, asks, Some((binder, gen)))
+        self.finish_run(node, outcome, table, asks)
     }
 
     /// Loop [`Self::drive_turn`] until the node SUSPENDS at a hole, COMPLETES,
@@ -3229,26 +3242,29 @@ impl Harness {
         // `run_block` resolves the first hole's. Snapshot it now (session is
         // about to be taken out) so the re-suspend arm below can classify the
         // next hole with real site/type instead of publishing `None`/`None`.
-        let (table, asks, pending_bind) = {
+        let (table, asks, resident_hole) = {
             let convos = self.convos.lock();
             let c = convos.get(&node);
             (
                 c.and_then(|c| c.suspend_table.clone()).unwrap_or_default(),
                 c.map(|c| c.suspend_asks.clone()).unwrap_or_default(),
-                c.and_then(|c| c.pending_bind.clone()),
+                c.and_then(|c| c.resident_hole.clone()),
             )
         };
+        let resident_hole = resident_hole.ok_or_else(|| {
+            HarnessError::Resident(format!(
+                "node {node:?}: no resident hole stashed for pending continuation {hole:?}"
+            ))
+        })?;
 
         let checkout = self.checkout_resume(node, hole)?;
-        let hole_str = hole.0.clone();
-        // A suspended value-plane bind resumes via `resume_bind` (which
-        // materializes the binding on completion); a plain hole via `resume`.
+        // ONE consuming resume: `resident_hole` already carries its own
+        // completion obligation (`ResidentHole::Binding` materializes on
+        // completion; `ResidentHole::Plain` needs nothing extra) — no
+        // external flag to pick a method by.
         let outcome = self
             .run_checked_out(node, checkout, move |mut session| {
-                let out = match &pending_bind {
-                    Some((binder, gen)) => session.resume_bind(&hole_str, answer, binder, *gen),
-                    None => session.resume(&hole_str, answer),
-                };
+                let out = session.resume(resident_hole, answer);
                 (session, out)
             })
             .await?;
@@ -3286,11 +3302,12 @@ impl Harness {
                 let rendered = result.to_string_pretty();
                 self.tree.node_done(node, rendered)?;
                 // A suspended value-plane bind materialized on this completion
-                // (via `resume_bind`) — clear the stashed binder.
+                // (inside `session.resume`, from the consumed hole's own
+                // obligation) — clear the now-spent hole.
                 {
                     let mut convos = self.convos.lock();
                     if let Some(convo) = convos.get_mut(&node) {
-                        convo.pending_bind = None;
+                        convo.resident_hole = None;
                     }
                 }
                 // Keep the session ALIVE past completion (don't `terminate_node`),
@@ -3318,9 +3335,10 @@ impl Harness {
                     | HoleRouting::Finalize { site, .. } => Some(*site),
                     _ => None,
                 };
+                let hole_id = hole.cont_id().to_string();
                 self.tree.hole_published(
                     node,
-                    HoleId(hole.clone()),
+                    HoleId(hole_id.clone()),
                     site,
                     ty,
                     classified.prompt.clone(),
@@ -3329,11 +3347,21 @@ impl Harness {
                 self.set_pending(
                     node,
                     PendingHole {
-                        hole: HoleId(hole),
+                        hole: HoleId(hole_id),
                         classified,
                         raw_request: request,
                     },
                 );
+                // Stash the fresh hole for the NEXT `resume_parent` — a
+                // `ResidentHole::Binding` re-suspension already carries its
+                // original binder/generation forward (`ResidentSession::resume`
+                // re-mints it as the same kind).
+                {
+                    let mut convos = self.convos.lock();
+                    if let Some(convo) = convos.get_mut(&node) {
+                        convo.resident_hole = Some(hole);
+                    }
+                }
                 Ok(())
             }
         }
@@ -4522,7 +4550,7 @@ mod tests {
                 answer_contract: None,
                 suspend_table: None,
                 suspend_asks: AsksSidecar::default(),
-                pending_bind: None,
+                resident_hole: None,
                 usage: Usage::default(),
                 last_input_tokens: 0,
                 framing: None,

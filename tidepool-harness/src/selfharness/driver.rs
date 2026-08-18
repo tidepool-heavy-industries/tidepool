@@ -74,7 +74,7 @@ use serde_json::Value as Json;
 use tidepool_bridge::ToCore;
 use tidepool_eval::value::Value;
 use tidepool_repr::DataConTable;
-use tidepool_runtime::session::ResidentOutcome;
+use tidepool_runtime::session::{ResidentHole, ResidentOutcome};
 
 use crate::engine::{
     self, ClassifiedHole, CompiledTurn, EngineConfig, EngineError, HoleRouting, InvocationExit,
@@ -2366,11 +2366,11 @@ impl SelfHarnessDriver {
                             let next = self
                                 .agent
                                 .with_session(sid, |s| match answer {
-                                    FinalAnswer::Value(v) => s.resume(&hole, v),
+                                    FinalAnswer::Value(v) => s.resume(hole, v),
                                     // Pillar B: the closure payload is
                                     // DELIVERED by handle — same heap, no
                                     // bridge, no sentinel.
-                                    FinalAnswer::Handle(h) => s.resume_handle(&hole, h),
+                                    FinalAnswer::Handle(h) => s.resume_handle(hole.cont_id(), h),
                                 })
                                 .map_err(|e| DriverError::Session(e.to_string()))?
                                 .map_err(|e| {
@@ -2415,7 +2415,7 @@ impl SelfHarnessDriver {
                             let sid = self.outer_sid()?;
                             let next = self
                                 .agent
-                                .with_session(sid, |s| s.resume(&hole, value))
+                                .with_session(sid, |s| s.resume(hole, value))
                                 .map_err(|e| DriverError::Session(e.to_string()))?
                                 .map_err(|e| {
                                     DriverError::Session(format!("subagent resume failed: {e}"))
@@ -2493,7 +2493,7 @@ impl SelfHarnessDriver {
                                         let sid = self.outer_sid()?;
                                         let next = self
                                             .agent
-                                            .with_session(sid, |s| s.resume(&hole, value))
+                                            .with_session(sid, |s| s.resume(hole, value))
                                             .map_err(|e| DriverError::Session(e.to_string()))?
                                             .map_err(|e| {
                                                 DriverError::Session(format!(
@@ -2512,7 +2512,7 @@ impl SelfHarnessDriver {
                                 let sid = self.outer_sid()?;
                                 let next = self
                                     .agent
-                                    .with_session(sid, |s| s.resume(&hole, value))
+                                    .with_session(sid, |s| s.resume(hole, value))
                                     .map_err(|e| DriverError::Session(e.to_string()))?
                                     .map_err(|e| {
                                         DriverError::Session(format!(
@@ -2537,7 +2537,7 @@ impl SelfHarnessDriver {
                         HoleRouting::Green => {
                             self.service_green_hole(
                                 chain,
-                                &hole,
+                                hole.cont_id(),
                                 &request,
                                 &compiled.table,
                                 &mut threads,
@@ -2581,7 +2581,7 @@ impl SelfHarnessDriver {
                             let sid = self.outer_sid()?;
                             let next = self
                                 .agent
-                                .with_session(sid, |s| s.resume(&hole, value))
+                                .with_session(sid, |s| s.resume(hole, value))
                                 .map_err(|e| DriverError::Session(e.to_string()))?
                                 .map_err(|e| {
                                     DriverError::Session(format!("fanout resume failed: {e}"))
@@ -2599,7 +2599,7 @@ impl SelfHarnessDriver {
                             let sid = self.outer_sid()?;
                             let next = self
                                 .agent
-                                .with_session(sid, |s| s.resume(&hole, value))
+                                .with_session(sid, |s| s.resume(hole, value))
                                 .map_err(|e| DriverError::Session(e.to_string()))?
                                 .map_err(|e| {
                                     DriverError::Session(format!("freezeContext resume failed: {e}"))
@@ -2630,7 +2630,7 @@ impl SelfHarnessDriver {
                             let sid = self.outer_sid()?;
                             let next = self
                                 .agent
-                                .with_session(sid, |s| s.resume(&hole, value))
+                                .with_session(sid, |s| s.resume(hole, value))
                                 .map_err(|e| DriverError::Session(e.to_string()))?
                                 .map_err(|e| {
                                     DriverError::Session(format!("branch resume failed: {e}"))
@@ -2791,7 +2791,7 @@ impl SelfHarnessDriver {
                     .map_err(|e| DriverError::Session(format!("AsyncSpawnWith tid box: {e}")))?;
                 let spawner_next = self
                     .agent
-                    .with_session(sid, |s| s.resume(hole, tid_value))
+                    .with_session(sid, |s| s.resume(ResidentHole::plain(hole), tid_value))
                     .map_err(|e| DriverError::Session(e.to_string()))?
                     .map_err(|e| {
                         DriverError::Session(format!("AsyncSpawnWith spawner resume failed: {e}"))
@@ -2905,7 +2905,9 @@ impl SelfHarnessDriver {
                         })?;
                         let next = self
                             .agent
-                            .with_session(sid, |s| s.resume(hole, winner_value))
+                            .with_session(sid, |s| {
+                                s.resume(ResidentHole::plain(hole), winner_value)
+                            })
                             .map_err(|e| DriverError::Session(e.to_string()))?
                             .map_err(|e| {
                                 DriverError::Session(format!("AsyncJoinAnyWith resume failed: {e}"))
@@ -2942,7 +2944,7 @@ impl SelfHarnessDriver {
                     .map_err(|e| DriverError::Session(format!("AsyncStatusWith code box: {e}")))?;
                 let next = self
                     .agent
-                    .with_session(sid, |s| s.resume(hole, code_value))
+                    .with_session(sid, |s| s.resume(ResidentHole::plain(hole), code_value))
                     .map_err(|e| DriverError::Session(e.to_string()))?
                     .map_err(|e| {
                         DriverError::Session(format!("AsyncStatusWith resume failed: {e}"))
@@ -2973,7 +2975,7 @@ impl SelfHarnessDriver {
                 let next = self
                     .agent
                     .with_session(sid, |s| match answer {
-                        GreenResult::Value(v) => s.resume(hole, v),
+                        GreenResult::Value(v) => s.resume(ResidentHole::plain(hole), v),
                         GreenResult::Root(h) => s.resume_handle_borrowed(hole, h),
                     })
                     .map_err(|e| DriverError::Session(e.to_string()))?
@@ -3013,7 +3015,7 @@ impl SelfHarnessDriver {
                     .map_err(|e| DriverError::Session(format!("AsyncCancelWith () bridge: {e}")))?;
                 let next = self
                     .agent
-                    .with_session(sid, |s| s.resume(hole, unit))
+                    .with_session(sid, |s| s.resume(ResidentHole::plain(hole), unit))
                     .map_err(|e| DriverError::Session(e.to_string()))?
                     .map_err(|e| {
                         DriverError::Session(format!("AsyncCancelWith resume failed: {e}"))
@@ -3051,7 +3053,9 @@ impl SelfHarnessDriver {
         for (wchain, whole) in parked {
             let next = self
                 .agent
-                .with_session(sid, |s| s.resume(&whole, tid_value.clone()))
+                .with_session(sid, |s| {
+                    s.resume(ResidentHole::plain(whole.clone()), tid_value.clone())
+                })
                 .map_err(|e| DriverError::Session(e.to_string()))?
                 .map_err(|e| DriverError::Session(format!("green wake resume failed: {e}")))?;
             ready.push_back(GreenReady {
@@ -4400,7 +4404,7 @@ impl SelfHarnessDriver {
 
     async fn service_outer_askuser_hole(
         &mut self,
-        hole: String,
+        hole: ResidentHole,
         routing: HoleRouting,
         compiled: &CompiledTurn,
     ) -> Result<ResidentOutcome, DriverError> {
@@ -4419,7 +4423,7 @@ impl SelfHarnessDriver {
                         })?;
                     let sid = self.outer_sid()?;
                     self.agent
-                        .with_session(sid, |s| s.resume(&hole, answer))
+                        .with_session(sid, |s| s.resume(hole, answer))
                         .map_err(|e| DriverError::Session(e.to_string()))?
                         .map_err(|e| {
                             DriverError::Session(format!("outer askUser resume failed: {e}"))
@@ -4433,7 +4437,7 @@ impl SelfHarnessDriver {
                     })?;
                     let sid = self.outer_sid()?;
                     self.agent
-                        .with_session(sid, |s| s.resume(&hole, answer))
+                        .with_session(sid, |s| s.resume(hole, answer))
                         .map_err(|e| DriverError::Session(e.to_string()))?
                         .map_err(|e| {
                             DriverError::Session(format!("outer note resume failed: {e}"))

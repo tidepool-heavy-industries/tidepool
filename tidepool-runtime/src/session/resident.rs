@@ -210,6 +210,108 @@ impl Drop for RootCustody {
     }
 }
 
+/// A parked turn's own completion obligation, carried on the token
+/// [`ResidentSession::run`]/[`ResidentSession::run_bind`]/[`ResidentSession::run_forked`]
+/// hand back on suspension: a [`ParkKind::Plain`] turn's hole needs nothing
+/// extra to resume; a [`ParkKind::Binding`] turn's hole must materialize its
+/// binder into the value plane on completion, using the SAME binder/generation
+/// its initiating `run_bind` carried.
+///
+/// Both `PlainHole`/`BindingHole` have no public constructor and no public
+/// field — the only way to obtain one is a suspension surfaced by this
+/// session's own `run*`/`resume` methods. This is what makes
+/// [`ResidentSession::resume`] a single, unconditional entry point: the
+/// obligation travels WITH the token, so there is no second, external
+/// "is this pending a bind" flag a caller must remember to consult before
+/// picking which method to call — the old split (`resume` vs `resume_bind`)
+/// let a binding hole silently resolve through the plain path, completing the
+/// machine side while the value-plane bind it owed never materialized.
+#[derive(Clone, Debug)]
+pub struct PlainHole {
+    id: String,
+}
+
+/// See [`ResidentHole`]'s doc — the `Binding` variant's payload.
+#[derive(Clone, Debug)]
+pub struct BindingHole {
+    id: String,
+    binder: BoundBinder,
+    generation: Generation,
+}
+
+/// The public continuation token: a sum over a parked turn's completion
+/// obligation. See [`PlainHole`]/[`BindingHole`]'s docs for why neither
+/// variant is externally constructible.
+#[derive(Clone, Debug)]
+pub enum ResidentHole {
+    Plain(PlainHole),
+    Binding(BindingHole),
+}
+
+impl ResidentHole {
+    /// The minted continuation id this hole was parked under — the same
+    /// identity [`ResidentSession::pending_continuation`]/[`ResidentSession::parked_holes`]
+    /// read, for display/logging/tree-bookkeeping purposes that don't need
+    /// (and shouldn't carry) the resume obligation itself.
+    pub fn cont_id(&self) -> &str {
+        match self {
+            ResidentHole::Plain(h) => &h.id,
+            ResidentHole::Binding(h) => &h.id,
+        }
+    }
+
+    fn mint(id: String, seed: HoleSeed) -> Self {
+        match seed {
+            HoleSeed::Plain => ResidentHole::Plain(PlainHole { id }),
+            HoleSeed::Binding { binder, generation } => ResidentHole::Binding(BindingHole {
+                id,
+                binder,
+                generation,
+            }),
+        }
+    }
+
+    /// This hole's own seed — what [`ResidentSession::resume`] re-mints a
+    /// fresh hole as, should this resume re-suspend: a Binding hole's chain
+    /// of re-suspensions all carry the SAME binder/generation through to
+    /// whichever one finally completes.
+    fn seed(&self) -> HoleSeed {
+        match self {
+            ResidentHole::Plain(_) => HoleSeed::Plain,
+            ResidentHole::Binding(h) => HoleSeed::Binding {
+                binder: h.binder.clone(),
+                generation: h.generation,
+            },
+        }
+    }
+
+    /// Construct a `Plain` hole from a bare continuation id, for a caller
+    /// whose own bookkeeping stores just the id string (the self-iterating
+    /// harness driver's `render`/`loop`/green-thread threads — every one of
+    /// those goes through [`ResidentSession::run`]/[`ResidentSession::run_forked`],
+    /// never [`ResidentSession::run_bind`]) rather than the [`ResidentHole`]
+    /// this API otherwise hands back. NOT a backdoor around the
+    /// completion-obligation guarantee: the one failure mode this type
+    /// exists to prevent — a `Binding` hole silently resumed as `Plain`,
+    /// dropping its value-plane materialization — is still impossible
+    /// through this constructor, because it can only ever produce `Plain`.
+    /// There is no way to fabricate a `Binding` hole from a bare string; a
+    /// real suspension through `run_bind` is the only source of one.
+    pub fn plain(cont_id: impl Into<String>) -> Self {
+        ResidentHole::Plain(PlainHole { id: cont_id.into() })
+    }
+}
+
+/// What kind of hole [`ResidentSession::classify_parked`] mints on a fresh
+/// suspension — [`ResidentHole`] minus the id, which is minted alongside it.
+enum HoleSeed {
+    Plain,
+    Binding {
+        binder: BoundBinder,
+        generation: Generation,
+    },
+}
+
 /// The classified result of driving a resident turn to its first yield.
 ///
 /// The suspend-and-completion shape mirrors [`super::TurnOutcome`], but a
@@ -235,7 +337,7 @@ pub enum ResidentOutcome {
     /// continuation id.
     Suspended {
         output: Vec<String>,
-        hole: String,
+        hole: ResidentHole,
         request: Value,
     },
 }
@@ -492,8 +594,8 @@ where
 
     /// The current value-binding generation. The caller mints the NEXT one
     /// (`val_gen().next()`) BEFORE compiling a bind turn — the extract stamps that
-    /// generation into `Val.G<g>`, and [`Self::run_bind`]/[`Self::resume_bind`]
-    /// materialize at the same `g`.
+    /// generation into `Val.G<g>`, and [`Self::run_bind`]/[`Self::resume`]
+    /// (via a [`ResidentHole::Binding`]) materialize at the same `g`.
     pub fn val_gen(&self) -> Generation {
         self.core.val_gen()
     }
@@ -637,7 +739,12 @@ where
         cont_id: &str,
         custody: RootCustody,
     ) -> Result<ResidentOutcome, ResidentError> {
-        self.reenter(cont_id, ResumeInput::Handle(custody.into_handle()), None)
+        self.reenter(
+            cont_id,
+            ResumeInput::Handle(custody.into_handle()),
+            HoleSeed::Plain,
+            None,
+        )
     }
 
     /// The current value-plane binding for `name` — `(SessionVarId, module,
@@ -795,7 +902,7 @@ where
         cont_id: &str,
         handle: ValueHandle,
     ) -> Result<ResidentOutcome, ResidentError> {
-        self.reenter(cont_id, ResumeInput::Handle(handle), None)
+        self.reenter(cont_id, ResumeInput::Handle(handle), HoleSeed::Plain, None)
     }
 
     /// This session's handled-effect prefix, DERIVED from its own
@@ -1018,7 +1125,7 @@ where
             run_exec_started.elapsed(),
             0,
         );
-        Ok(self.classify_parked(outcome, None))
+        Ok(self.classify_parked(outcome, None, HoleSeed::Plain))
     }
 
     /// Run a value-plane BIND turn (`x <- e`): seed the env from prior bindings,
@@ -1026,8 +1133,9 @@ where
     /// (tenure-on-completion). On completion, materialize `binder` into the value
     /// plane at `gen` (the SAME generation the extract stamped into
     /// `binder.module` — mint it once at compile, thread it here). A fork bind
-    /// SUSPENDS here (no value yet); it is bound on the eventual
-    /// [`Self::resume_bind`] with the same `binder`/`gen`.
+    /// SUSPENDS here (no value yet); the returned [`ResidentHole::Binding`]
+    /// carries `binder`/`gen` forward, so the eventual [`Self::resume`] on
+    /// that hole materializes it without the caller re-supplying either.
     pub fn run_bind(
         &mut self,
         name_hint: &str,
@@ -1087,13 +1195,19 @@ where
             0,
         );
         // A completion (no suspension) tenured the result — bind it now (the
-        // root rode out as a handle). A suspension defers to `resume_bind`.
+        // root rode out as a handle). A suspension defers to the eventual
+        // `resume` on the `ResidentHole::Binding` this mints below, which
+        // carries `binder`/`gen` forward itself.
         let bound = match &outcome {
             ParkedRun::Completed { bound, .. } => *bound,
             ParkedRun::Suspended { .. } => None,
         };
         let completed = matches!(outcome, ParkedRun::Completed { .. });
-        let resident_outcome = self.classify_parked(outcome, None);
+        let seed = HoleSeed::Binding {
+            binder: binder.clone(),
+            generation: gen,
+        };
+        let resident_outcome = self.classify_parked(outcome, None, seed);
         if completed {
             self.materialize_binder(binder, gen, bound)?;
         }
@@ -1439,53 +1553,59 @@ where
                 )
                 .map(|o| project_parked(machine, o, owning_realm))
         })?;
-        Ok(self.classify_parked(outcome, None))
+        Ok(self.classify_parked(outcome, None, HoleSeed::Plain))
     }
 
-    /// Resume the suspended turn with `answer`, driving the fragment to its next
-    /// suspension or completion. Atomic validate-before-consume: `cont_id` must
-    /// match the pending continuation or the pending one is untouched
+    /// Resume the suspended turn `hole` answered with `answer`, driving the
+    /// fragment to its next suspension or completion. Atomic
+    /// validate-before-consume: `hole`'s id must match the pending
+    /// continuation or the pending one is untouched
     /// ([`ResidentError::WrongContinuation`], mirroring `engine.rs`:684–698 and
     /// the repl server's three-way resume errors).
+    ///
+    /// The ONE consuming entry point — replaces the old `resume`/`resume_bind`
+    /// split. `hole` carries its own completion obligation ([`ResidentHole`]'s
+    /// doc): a [`ResidentHole::Binding`] materializes its binder into the
+    /// value plane on completion, using the SAME binder/generation its
+    /// initiating [`Self::run_bind`] carried; a [`ResidentHole::Plain`] does
+    /// nothing extra. There is no external "is this pending a bind" flag left
+    /// for a caller to get out of sync with which method it calls — there is
+    /// only this one method, and the hole itself says what it owes.
     pub fn resume(
         &mut self,
-        cont_id: &str,
+        hole: ResidentHole,
         answer: Value,
     ) -> Result<ResidentOutcome, ResidentError> {
-        self.reenter(cont_id, ResumeInput::Answer(answer), None)
-    }
-
-    /// Resume a suspended value-plane BIND turn: like [`Self::resume`], but on
-    /// completion materialize `binder` at `gen` into the value plane — a bind that
-    /// suspended at a fork lands its value here. `binder`/`gen` are the SAME ones
-    /// the initiating [`Self::run_bind`] carried (threaded by the caller across the
-    /// suspension).
-    pub fn resume_bind(
-        &mut self,
-        cont_id: &str,
-        answer: Value,
-        binder: &BoundBinder,
-        gen: Generation,
-    ) -> Result<ResidentOutcome, ResidentError> {
-        self.reenter(cont_id, ResumeInput::Answer(answer), Some((binder, gen)))
+        let seed = hole.seed();
+        match hole {
+            ResidentHole::Plain(h) => self.reenter(&h.id, ResumeInput::Answer(answer), seed, None),
+            ResidentHole::Binding(h) => {
+                let bind = Some((h.binder, h.generation));
+                self.reenter(&h.id, ResumeInput::Answer(answer), seed, bind)
+            }
+        }
     }
 
     /// Abort the suspended turn WITHOUT running the continuation — the ask
     /// itself fails (byte-identically to the engine's stowed-abort path). Same
-    /// validate-before-consume as [`Self::resume`].
+    /// validate-before-consume as [`Self::resume`]. Keyed by the raw
+    /// continuation id (not a [`ResidentHole`]) — an abort never materializes
+    /// a bind regardless of the hole's own kind, so it carries no obligation
+    /// to preserve.
     pub fn abort(
         &mut self,
         cont_id: &str,
         reason: String,
     ) -> Result<ResidentOutcome, ResidentError> {
-        self.reenter(cont_id, ResumeInput::Abort(reason), None)
+        self.reenter(cont_id, ResumeInput::Abort(reason), HoleSeed::Plain, None)
     }
 
     fn reenter(
         &mut self,
         cont_id: &str,
         input: ResumeInput,
-        bind: Option<(&BoundBinder, Generation)>,
+        seed: HoleSeed,
+        bind: Option<(BoundBinder, Generation)>,
     ) -> Result<ResidentOutcome, ResidentError> {
         // Validate BEFORE consuming: `cont_id` must be a MEMBER of the parked
         // set (any-order resume — the machine imposes no order and neither do
@@ -1540,9 +1660,9 @@ where
             ParkedRun::Suspended { .. } => None,
         };
         let completed = matches!(outcome, ParkedRun::Completed { .. });
-        let resident_outcome = self.classify_parked(outcome, Some(cont_id));
+        let resident_outcome = self.classify_parked(outcome, Some(cont_id), seed);
         if let (Some((binder, gen)), true) = (bind, completed) {
-            self.materialize_binder(binder, gen, bound)?;
+            self.materialize_binder(&binder, gen, bound)?;
         }
         Ok(resident_outcome)
     }
@@ -1700,10 +1820,16 @@ where
 
     /// Classify a projected parked outcome into a [`ResidentOutcome`]:
     /// completion retires `resumed` (the hole this outcome answered — `None`
-    /// for a fresh run, which retires nothing), suspension mints a hole and
-    /// pushes `(hole, id)` onto the parked set. Output is drained on
-    /// completion and snapshotted on suspension, same as the engine.
-    fn classify_parked(&mut self, outcome: ParkedRun, resumed: Option<&str>) -> ResidentOutcome {
+    /// for a fresh run, which retires nothing), suspension mints a hole of
+    /// `seed`'s obligation and pushes `(id string, id)` onto the parked set.
+    /// Output is drained on completion and snapshotted on suspension, same as
+    /// the engine.
+    fn classify_parked(
+        &mut self,
+        outcome: ParkedRun,
+        resumed: Option<&str>,
+        seed: HoleSeed,
+    ) -> ResidentOutcome {
         match outcome {
             ParkedRun::Completed { value, .. } => {
                 if let Some(hole) = resumed {
@@ -1722,12 +1848,12 @@ where
                 if let Some(hole) = resumed {
                     self.parked.retain(|(h, _)| h != hole);
                 }
-                let hole = self.next_cont_id();
-                self.parked.push((hole.clone(), id));
+                let cont_id = self.next_cont_id();
+                self.parked.push((cont_id.clone(), id));
                 let output = self.captured.snapshot();
                 ResidentOutcome::Suspended {
                     output,
-                    hole,
+                    hole: ResidentHole::mint(cont_id, seed),
                     request,
                 }
             }
@@ -1762,9 +1888,10 @@ fn project_parked(
     realm: tidepool_codegen::jit_machine::RealmId,
 ) -> ParkedRun {
     match outcome {
-        ParkedOutcome::Completed { value, bound_root } => ParkedRun::Completed {
+        ParkedOutcome::CompletedValue(value) => ParkedRun::Completed { value, bound: None },
+        ParkedOutcome::CompletedBinding { value, root } => ParkedRun::Completed {
             value,
-            bound: bound_root.map(|slot| machine.mint_handle_from_root(slot, realm)),
+            bound: Some(machine.mint_handle_from_root(root, realm)),
         },
         ParkedOutcome::CompletedProject { .. } | ParkedOutcome::CompletedRender { .. } => {
             unreachable!("the resident lane parks only Plain/Binding turns")

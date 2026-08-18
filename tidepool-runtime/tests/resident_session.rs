@@ -195,29 +195,18 @@ fn multi_turn_accumulates_across_suspend_resume() {
     }
     assert_eq!(
         session.pending_continuation(),
-        Some(hole.as_str()),
+        Some(hole.cont_id()),
         "the parked hole survives an unrelated run"
     );
 
-    // Resume on the WRONG continuation id: rejected WITHOUT consuming any
-    // parked frame (atomic validate-before-consume).
-    match session.resume("scont_does_not_exist", int(7)) {
-        Err(ResidentError::WrongContinuation { attempted, pending }) => {
-            assert_eq!(attempted, "scont_does_not_exist");
-            assert_eq!(pending, vec![hole.clone()]);
-        }
-        other => panic!("wrong-id resume must not consume the continuation; got {other:?}"),
-    }
-    assert_eq!(
-        session.pending_continuation(),
-        Some(hole.as_str()),
-        "the pending continuation survives a rejected resume"
-    );
-
     // Resume with the real answer (42): the turn completes on a fresh thread,
-    // and the machine returns to its slot (idle).
+    // and the machine returns to its slot (idle). Clone the hole first — it
+    // is `ResidentHole`, non-constructible outside this API, so the ONLY way
+    // to exercise the "wrong/stale continuation" rejection path below is to
+    // resume the SAME hole again after it has already been spent.
+    let stale_hole = hole.clone();
     match session
-        .resume(&hole, int(42))
+        .resume(hole, int(42))
         .expect("resume with the answer")
     {
         ResidentOutcome::Completed { result, .. } => {
@@ -228,6 +217,22 @@ fn multi_turn_accumulates_across_suspend_resume() {
     assert!(
         session.is_idle(),
         "the session is idle after the resumed turn completes"
+    );
+
+    // Resuming the now-stale (already-consumed) hole again is rejected
+    // WITHOUT touching anything else (atomic validate-before-consume) — the
+    // session stays idle, exactly as it was left above.
+    let stale_id = stale_hole.cont_id().to_string();
+    match session.resume(stale_hole, int(7)) {
+        Err(ResidentError::WrongContinuation { attempted, pending }) => {
+            assert_eq!(attempted, stale_id);
+            assert!(pending.is_empty());
+        }
+        other => panic!("resuming an already-consumed hole must be rejected; got {other:?}"),
+    }
+    assert!(
+        session.is_idle(),
+        "a rejected resume on a stale hole leaves the session idle"
     );
 
     // Turn 2 (machine REUSE after a resumed turn): read back BOTH keys the
@@ -327,7 +332,7 @@ fn nested_child_runs_while_parent_suspended_then_resumes() {
         // The session is STILL suspended on the same hole after each child.
         assert_eq!(
             session.pending_continuation(),
-            Some(hole.as_str()),
+            Some(hole.cont_id()),
             "the parent stays suspended on its hole across child runs (round {round})"
         );
     }
@@ -345,14 +350,14 @@ fn nested_child_runs_while_parent_suspended_then_resumes() {
     }
     assert_eq!(
         session.pending_continuation(),
-        Some(hole.as_str()),
+        Some(hole.cont_id()),
         "the parked hole survives an unrelated top-level run"
     );
 
     // Resume the parent with 42: the continuation (stowed across all the child
     // GCs) drives to completion correctly.
     match session
-        .resume(&hole, int(42))
+        .resume(hole, int(42))
         .expect("resume after children")
     {
         ResidentOutcome::Completed { result, .. } => {
@@ -436,7 +441,7 @@ fn retryable_resume_failure_does_not_wedge_the_session() {
     // A bottom-bearing answer (an unforced thunk reference): the JIT's A5
     // NF-force rejects it WITHOUT consuming the stowed continuation.
     let bottom = Value::ThunkRef(tidepool_eval::value::ThunkId(999));
-    match session.resume(&hole, bottom) {
+    match session.resume(hole.clone(), bottom) {
         Err(_) => {}
         Ok(outcome) => panic!("a bottom-bearing answer must be rejected; got {outcome:?}"),
     }
@@ -449,13 +454,13 @@ fn retryable_resume_failure_does_not_wedge_the_session() {
     );
     assert_eq!(
         session.pending_continuation(),
-        Some(hole.as_str()),
+        Some(hole.cont_id()),
         "the same hole stays pending after a retryable rejection"
     );
 
     // (b) A corrected resume on the SAME hole must succeed.
     match session
-        .resume(&hole, int(42))
+        .resume(hole, int(42))
         .expect("corrected resume on the same hole succeeds")
     {
         ResidentOutcome::Completed { result, .. } => {
