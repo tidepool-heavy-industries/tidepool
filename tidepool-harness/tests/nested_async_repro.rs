@@ -53,6 +53,45 @@
 //! machine does not expose publicly — deliberately not added here, since it
 //! belongs with whoever owns the rooting discipline.
 //!
+//! # UPDATE — the same bug reaches a non-nested case, and names itself
+//!
+//! Wave 2 hit this WITHOUT nesting: one `forkNode`, one `sendUp`, no burst,
+//! no nested `async`. Once a masking custody-drop panic was removed from the
+//! spawn path (see `driver.rs`), the underlying error surfaced verbatim:
+//!
+//! ```text
+//! AsyncSpawnWith spawner resume failed: turn run failed:
+//!   heap bridge error: unexpected heap tag: 255
+//! ```
+//!
+//! Tag 255 is FORWARDED. So the failure is: **resuming a frame whose
+//! request carried a closure at field 1 that was TENURED at suspend time,
+//! after enough allocation for a collection to have run.** The suspect is a
+//! reference the parked frame still holds into a nursery object that tenuring
+//! evacuated, read on the resumption path.
+//!
+//! That reframes this file. "Nested `async`" is a SYMPTOM, not the bug:
+//!
+//! * the nested case traps in `loop_2_lambda_399` — the outer loop's lambda,
+//!   on the RESUMPTION path;
+//! * the wave-2 case fails on the spawner's RESUMPTION, same tag;
+//! * neither needs nesting to be explained, and one of them does not have it.
+//!
+//! **What makes `AsyncSpawnWith` the novel exposure:** the sentinel-tenure
+//! mechanism predates green threads, but its only prior user is `finalize`,
+//! whose frame is never driven onward past the tenure point — `finalize`
+//! diverges by construction. `AsyncSpawnWith` is the first site that tenures
+//! a field-1 closure and then RESUMES that same frame to keep running. So the
+//! tenure-then-resume path is new, which is consistent with a latent gap
+//! surfacing now rather than a regression.
+//!
+//! Why the flat wave-1 cases pass anyway: they tenure too, but their bodies
+//! capture shallow data (`mapWork n = pure $! sumTo n * 10`). The failing
+//! cases capture deeper closure graphs — a `NodeCtx` whose `inbox` field is
+//! itself a closure — so tenuring evacuates more objects, and allocates more.
+//! Graph depth and allocation volume are the two variables that separate
+//! passing from failing; neither is nesting.
+//!
 //! # The family, and the first experiment
 //!
 //! This is plausibly one of three members of a single family — **values
@@ -66,9 +105,13 @@
 //!    at the settle site, documented on `Tidepool.Async`);
 //! 3. this one.
 //!
-//! Hunt the family, not the instance. **The pointed first experiment: what
-//! roots a nested thread's not-yet-forced body while a collection runs?**
-//! That is the one span the structural control never puts under pressure.
+//! Hunt the family, not the instance. **The pointed first experiment, as
+//! revised by the update above: what happens to a parked frame's own
+//! references to its request when field 1 of that request is tenured, and a
+//! collection then runs before the frame is resumed?** That is a narrower
+//! and more reachable question than the original "what roots a nested
+//! thread's not-yet-forced body", and it does not require nesting to set up
+//! — one `forkNode` with a closure-capturing body is enough.
 //!
 //! GHC-heavy: needs `TIDEPOOL_EXTRACT` + the with-packages GHC on PATH.
 
