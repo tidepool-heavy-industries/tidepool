@@ -16,7 +16,7 @@ use crate::error::{ArityContext, EvalError};
 use crate::heap::{Heap, ThunkState};
 use crate::value::Value;
 use tidepool_repr::{
-    AltCon, CoreExpr, CoreFrame, DataConId, DataConTable, Literal, PrimOpKind, VarId,
+    AltCon, CoreExpr, CoreFrame, DataConId, DataConTable, JoinId, Literal, PrimOpKind, VarId,
 };
 
 /// Create an environment pre-populated with data constructor functions.
@@ -30,19 +30,18 @@ pub fn env_from_datacon_table(table: &DataConTable) -> Env {
     // builds its env here), so the primops always see the right ids.
     crate::json::set_json_con_ids(crate::json::JsonConIds::from_table(table));
     crate::time::set_time_con_ids(crate::time::TimeConIds::from_table(table));
-    table
-        .iter()
-        .map(|dc| {
-            let var = VarId(dc.id.0);
-            let val = if dc.rep_arity == 0 {
-                // Nullary constructor: just a Con value
-                Value::Con(dc.id, vec![])
-            } else {
-                Value::ConFun(dc.id, dc.rep_arity as usize, vec![])
-            };
-            (var, val)
-        })
-        .collect()
+    let mut env = Env::new();
+    for dc in table.iter() {
+        let var = VarId(dc.id.0);
+        let val = if dc.rep_arity == 0 {
+            // Nullary constructor: just a Con value
+            Value::Con(dc.id, vec![])
+        } else {
+            Value::ConFun(dc.id, dc.rep_arity as usize, vec![])
+        };
+        env.insert(var, val);
+    }
+    env
 }
 
 /// A pending tail-`Jump`, captured by [`eval_at`] for the trampoline driven by
@@ -58,8 +57,10 @@ pub fn env_from_datacon_table(table: &DataConTable) -> Env {
 /// the nearest driver, which loops. Host-stack use is O(1) in the number of
 /// self-jumps.
 struct JumpReq {
-    /// The join label, encoded as a `VarId` (high bit set) for env lookup.
-    join_var: VarId,
+    /// The join label. Typed as `JoinId` — not encoded into a `VarId` — so it
+    /// is stored under [`crate::env::Env`]'s join namespace, disjoint from
+    /// real Core variables by construction (see `EnvKey` in `env.rs`).
+    join: JoinId,
     /// The join point's parameters.
     params: Vec<VarId>,
     /// The join point's right-hand side (its own subtree).
@@ -102,10 +103,10 @@ fn eval_settled(
             .with(|s| s.borrow_mut().take())
             .expect("JumpInFlight signalled without a parked JumpReq");
         // rhs scope = definition-site env + recursive knot + parameters.
-        // For a non-recursive join the rhs never references `join_var`, so the
+        // For a non-recursive join the rhs never references `join`, so the
         // knot binding is inert and behaviour matches a plain continuation jump.
-        let mut new_env = req.join_env.update(
-            req.join_var,
+        let mut new_env = req.join_env.update_join(
+            req.join,
             Value::JoinCont {
                 params: req.params.clone(),
                 body: req.rhs.clone(),
@@ -684,8 +685,7 @@ fn eval_step(
                 body: expr.extract_subtree(*rhs),
                 env: env.clone(),
             };
-            let join_var = VarId(label.0 | (1u64 << 63)); // high bit distinguishes join labels
-            let new_env = env.update(join_var, join_val);
+            let new_env = env.update_join(*label, join_val);
             // Drive the body through `eval_settled`, not bare `eval_at`: a `Jump`
             // in the body (the only place this join is in scope) parks itself in
             // JUMP_SLOT and signals `JumpInFlight`. Catching it HERE means a
@@ -836,13 +836,12 @@ fn resume_frame(
 #[inline(never)]
 fn enqueue_jump(
     expr: &CoreExpr,
-    label: &tidepool_repr::JoinId,
+    label: &JoinId,
     args: &[usize],
     env: &Env,
     heap: &mut dyn Heap,
 ) -> Result<Value, EvalError> {
-    let join_var = VarId(label.0 | (1u64 << 63));
-    let (params, rhs, join_env) = match env.get(&join_var) {
+    let (params, rhs, join_env) = match env.get_join(label) {
         Some(Value::JoinCont {
             params: p,
             body: r,
@@ -867,7 +866,7 @@ fn enqueue_jump(
     }
     JUMP_SLOT.with(|s| {
         *s.borrow_mut() = Some(JumpReq {
-            join_var,
+            join: *label,
             params,
             rhs,
             join_env,
