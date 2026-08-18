@@ -3877,6 +3877,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "tidepool-atomic-write"
+version = "0.1.0"
+dependencies = [
+ "tempfile",
+]
+
+[[package]]
 name = "tidepool-bignum"
 version = "0.1.0"
 
@@ -4045,6 +4052,7 @@ dependencies = [
  "tempfile",
  "thiserror",
  "tidepool-agent",
+ "tidepool-atomic-write",
  "tidepool-bridge",
  "tidepool-bridge-effects",
  "tidepool-codegen",
@@ -4202,6 +4210,7 @@ dependencies = [
  "static_assertions",
  "tempfile",
  "thiserror",
+ "tidepool-atomic-write",
  "tidepool-bridge",
  "tidepool-bridge-derive",
  "tidepool-bridge-effects",
@@ -4299,6 +4308,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "thiserror",
+ "tidepool-atomic-write",
  "uuid",
 ]
 

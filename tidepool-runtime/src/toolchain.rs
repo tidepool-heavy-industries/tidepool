@@ -64,7 +64,6 @@
 //! so a running server pays it at most once per extract version per machine)
 //! plus one walk of ~40 small `.hs` files. Never per-eval.
 
-use std::io::Write;
 use std::path::{Path, PathBuf};
 
 /// Env var naming the extract binary (step 1 of the extract precedence).
@@ -546,12 +545,13 @@ pub fn read_stamp(path: &Path) -> Result<Option<ToolchainStamp>, ToolchainError>
 /// Called by `scripts/redeploy.sh` via `tidepool --write-toolchain-stamp`, so
 /// the writer and the checker share one implementation and cannot drift.
 ///
-/// Written ATOMICALLY: the content lands in a uniquely-named temp file in the
-/// stamp's own directory (so the rename below stays on one filesystem),
-/// `sync_all`'d to disk, then renamed over the live stamp in one syscall —
-/// a reader (this process's own next startup, or a concurrent one) can never
-/// observe a short/partial write. The directory entry is synced afterward so
-/// the rename itself, not just the temp file's bytes, survives a crash.
+/// Written via the shared durable atomic-write helper: the content lands in
+/// a uniquely-named temp file in the stamp's own directory (so the rename
+/// stays on one filesystem), fsynced, then renamed over the live stamp in
+/// one syscall — a reader (this process's own next startup, or a concurrent
+/// one) can never observe a short/partial write. The directory entry is
+/// synced afterward so the rename itself, not just the temp file's bytes,
+/// survives a crash.
 ///
 /// # Errors
 /// [`ToolchainError::Stamp`] if the stamp cannot be created or written.
@@ -565,26 +565,23 @@ pub fn write_stamp(extract: &Path, stdlib: &Path) -> Result<ToolchainStamp, Tool
         written_by: format!("tidepool {}", env!("CARGO_PKG_VERSION")),
     };
     let path = stamp_path();
-    let write = || -> std::io::Result<()> {
-        let parent = path
-            .parent()
-            .filter(|p| !p.as_os_str().is_empty())
-            .unwrap_or_else(|| Path::new("."));
-        std::fs::create_dir_all(parent)?;
-        let json = serde_json::to_string_pretty(&stamp)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-
-        let mut tmp = tempfile::NamedTempFile::new_in(parent)?;
-        tmp.write_all(json.as_bytes())?;
-        tmp.as_file().sync_all()?;
-        tmp.persist(&path).map_err(|e| e.error)?;
-
-        std::fs::File::open(parent)?.sync_all()?;
-        Ok(())
-    };
-    write().map_err(|source| ToolchainError::Stamp {
-        path: path.clone(),
+    let parent = path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    std::fs::create_dir_all(parent).map_err(|source| ToolchainError::Stamp {
+        path: parent.to_path_buf(),
         source,
+    })?;
+    let json = serde_json::to_string_pretty(&stamp).map_err(|e| ToolchainError::Stamp {
+        path: path.clone(),
+        source: std::io::Error::new(std::io::ErrorKind::InvalidData, e),
+    })?;
+    tidepool_atomic_write::write_durable(&path, json.as_bytes()).map_err(|e| {
+        ToolchainError::Stamp {
+            path: e.path,
+            source: e.source,
+        }
     })?;
     Ok(stamp)
 }

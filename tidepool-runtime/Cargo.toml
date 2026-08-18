@@ -10,6 +10,7 @@ description = "Runtime support for Tidepool applications"
 readme = "../README.md"
 
 [dependencies]
+tidepool-atomic-write.workspace = true
 thiserror.workspace = true
 tidepool-repr.workspace = true
 tidepool-eval.workspace = true

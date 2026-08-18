@@ -20,7 +20,6 @@
 
 use serde::{Deserialize, Serialize};
 use std::fs;
-use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use crate::error::WorktreeError;
@@ -31,27 +30,15 @@ use crate::storage::storage_failure;
 /// Directory under the registry root holding one JSON file per worktree id.
 const RECORDS_DIR: &str = "records";
 
-/// Write `bytes` to `path` crash-safely: a temp file in the SAME directory,
-/// fsynced, then renamed over the target. A torn write cannot land at `path`
-/// — either the old content is still there or the new content is, never a
-/// partial file — and a sibling record in the same directory is never
-/// touched by writing this one.
+/// Write `bytes` to `path` crash-safely via the shared durable atomic-write
+/// helper — a temp file in the SAME directory, fsynced, then renamed over
+/// the target, then the directory itself best-effort fsynced. A torn write
+/// cannot land at `path` — either the old content is still there or the new
+/// content is, never a partial file — and a sibling record in the same
+/// directory is never touched by writing this one.
 fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), WorktreeError> {
-    // The path is always built by `record_path`, which always joins onto a
-    // directory — there is no caller-supplied path that could lack a parent.
-    let dir = path.parent().expect("record path has a parent directory");
-    let mut tmp = tempfile::NamedTempFile::new_in(dir).map_err(|e| storage_failure(dir, e))?;
-    tmp.write_all(bytes).map_err(|e| storage_failure(path, e))?;
-    tmp.as_file()
-        .sync_all()
-        .map_err(|e| storage_failure(path, e))?;
-    tmp.persist(path).map_err(|e| storage_failure(path, e))?;
-    // Best-effort directory fsync so the rename itself survives a crash; not
-    // fatal if the platform does not support fsync on a directory handle.
-    if let Ok(dirf) = fs::File::open(dir) {
-        let _ = dirf.sync_all();
-    }
-    Ok(())
+    tidepool_atomic_write::write_durable(path, bytes)
+        .map_err(|e| storage_failure(&e.path, e.source))
 }
 
 /// Whether the recorded `cwd` still holds a real git working tree. A plain

@@ -756,18 +756,16 @@ impl SessionLib {
     }
 
     /// Atomically write a rendered module to its place in the include tree.
+    /// Best-effort (no fsync): this is a regenerable compile artifact, not
+    /// durable state — a write lost to a crash just recompiles on next use.
     fn write_module(&self, rendered: &RenderedModule) -> Result<(), SessionError> {
         let rel = rendered.module.relative_hs_path();
         let path = self.root.join(rel);
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        // Atomic replace: write a sibling temp then rename.
-        let dir = path.parent().unwrap_or(&self.root);
-        let mut tmp = tempfile::NamedTempFile::new_in(dir)?;
-        use std::io::Write;
-        tmp.write_all(rendered.source.as_bytes())?;
-        tmp.persist(&path).map_err(|e| SessionError::Io(e.error))?;
+        tidepool_atomic_write::write_best_effort(&path, rendered.source.as_bytes())
+            .map_err(|e| SessionError::Io(e.source))?;
         Ok(())
     }
 }

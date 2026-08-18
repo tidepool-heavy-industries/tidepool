@@ -10,6 +10,7 @@ authors.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+tidepool-atomic-write.workspace = true
 tidepool-repr.workspace = true
 tidepool-runtime.workspace = true
 tidepool-mcp.workspace = true
