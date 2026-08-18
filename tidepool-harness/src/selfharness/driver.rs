@@ -80,7 +80,7 @@ use crate::engine::{
     self, ClassifiedHole, CompiledTurn, EngineConfig, EngineError, HoleRouting, InvocationExit,
     TurnOutcome,
 };
-use crate::harness::{AnswerContract, Harness, HarnessError, OUTER_REALM};
+use crate::harness::{AnswerContract, ContextRef, Harness, HarnessError, OUTER_REALM};
 use crate::log::Actor;
 use crate::selfharness::harness_source::HarnessSource;
 use crate::selfharness::lifecycle::SelfHarnessState;
@@ -88,6 +88,7 @@ use crate::selfharness::observer::{Event, FormSource, Observer};
 use crate::selfharness::operator::{FormShape, OperatorGate, StdinGate};
 use crate::selfharness::persistence::{self, PersistenceError};
 use crate::selfharness::state_cross;
+use crate::snapshot::SnapshotDigest;
 use crate::timing;
 use crate::tree::{FanBadge, NodeId};
 
@@ -972,13 +973,117 @@ impl WindowLease {
     /// removed: retiring/recreating the accumulating loop answerer as if
     /// it were a one-shot branch now hard-errors instead of quietly
     /// dropping the loop's accumulated context mid-cycle.
-    fn require_one_shot(&self) -> Result<NodeId, DriverError> {
+    fn require_one_shot(
+        &self,
+    ) -> Result<
+        (
+            NodeId,
+            tidepool_codegen::jit_machine::RealmId,
+            tidepool_codegen::scope::ScopeId,
+        ),
+        DriverError,
+    > {
         match self {
-            Self::OneShotBranch { node, .. } => Ok(*node),
+            Self::OneShotBranch { node, realm, scope } => Ok((*node, *realm, *scope)),
             Self::ReusableLoop { node, realm } => Err(DriverError::Session(format!(
                 "window lease: node {node:?} (realm {realm:?}) is the loop's reusable \
                  answerer, which cannot be frozen-then-retired as if it were a one-shot branch"
             ))),
+        }
+    }
+}
+
+/// A `runLLMTurnBranch` child's window transaction — the deeper,
+/// ownership-tracked treatment of [`WindowLease::OneShotBranch`] alone
+/// (P3.2's typestate opportunity). [`Self::service_outer_branch`] used to
+/// retire its node by hand in four places (a mechanism error, a
+/// non-finalize exit, a closure rejection, and success), linked only by
+/// sequencing and a bare `NodeId` a reader had to trust every future error
+/// arm would remember to terminate. This guard makes retiring exactly
+/// once, on every exit, structural instead of a four-site discipline:
+/// [`Self::finalize_data`] freezes then retires, [`Self::fold_exit`]
+/// retires then produces the exit, and `Drop` retires an unfinished
+/// window — the mechanism-failure `?` early return that used to need its
+/// OWN hand-written `terminate_node` call now needs none.
+///
+/// Non-Clone: at most one guard exists per branch child.
+struct BranchWindow {
+    agent: Arc<Harness>,
+    node: NodeId,
+    realm: tidepool_codegen::jit_machine::RealmId,
+    scope: tidepool_codegen::scope::ScopeId,
+    validated_ref: ContextRef,
+    retired: bool,
+}
+
+impl BranchWindow {
+    /// Mint a guard from an already-established [`WindowLease::OneShotBranch`]
+    /// — `require_one_shot` refuses to hand back node/realm/scope if `lease`
+    /// were ever (by a future refactor) the loop's reusable answerer instead
+    /// of a branch child's own, so this is where that check is load-bearing.
+    fn from_lease(
+        lease: WindowLease,
+        agent: Arc<Harness>,
+        validated_ref: ContextRef,
+    ) -> Result<Self, DriverError> {
+        let (node, realm, scope) = lease.require_one_shot()?;
+        Ok(Self {
+            agent,
+            node,
+            realm,
+            scope,
+            validated_ref,
+            retired: false,
+        })
+    }
+
+    fn node(&self) -> NodeId {
+        self.node
+    }
+
+    /// Success: take the finalized answer, freeze THIS child's own
+    /// post-finalize prefix (before retirement — `freeze_snapshot` reads
+    /// the live convo, which `terminate_node` removes), then retire.
+    /// Consumes the window; the only way to reach a post-finalize digest.
+    fn finalize_data(mut self) -> Result<(Value, String, SnapshotDigest), HarnessError> {
+        let (value, rendered) = self.agent.take_finalized_value_keep_open(self.node)?;
+        let digest = self.agent.freeze_snapshot(self.node)?;
+        self.agent
+            .terminate_node(self.node, "branch child retired")?;
+        self.retired = true;
+        Ok((value, rendered, digest))
+    }
+
+    /// A failure ATTRIBUTABLE TO THIS CHILD's window (round exhaustion, a
+    /// non-finalize suspension, a closure answer this driver cannot
+    /// carry): retire with `reason`, producing nothing further. Consumes
+    /// the window.
+    fn fold_exit(mut self, reason: &str) {
+        let _ = self.agent.terminate_node(self.node, reason);
+        self.retired = true;
+    }
+}
+
+impl Drop for BranchWindow {
+    /// Covers exactly the mechanism-failure path: `service_outer_branch`
+    /// returns `Err(e)` via `?` before ever reaching
+    /// [`Self::finalize_data`]/[`Self::fold_exit`], and this guard simply
+    /// goes out of scope. Idempotent with the two consuming methods
+    /// (`retired` is set the instant either runs), so this never
+    /// double-retires an already-finished window.
+    fn drop(&mut self) {
+        if !self.retired {
+            tracing::warn!(
+                node = ?self.node,
+                realm = ?self.realm,
+                scope = ?self.scope,
+                validated_ref = ?self.validated_ref,
+                "branch window dropped without an explicit exit (mechanism failure)"
+            );
+            let _ = self.agent.terminate_node(
+                self.node,
+                "branch window dropped without an explicit exit (mechanism failure)",
+            );
         }
     }
 }
@@ -3133,6 +3238,12 @@ impl SelfHarnessDriver {
             scope: child_scope,
         };
 
+        // Every exit below this point retires exactly through `window`
+        // (`fold_exit`, `finalize_data`, or — for the mechanism-error `?`
+        // below — its `Drop`). See `BranchWindow`'s doc for the four
+        // hand-written call sites this replaces.
+        let window = BranchWindow::from_lease(lease, self.agent.clone(), cref)?;
+
         // A branch child is a BRANCH POSITION, so from here on this window's
         // own failures are DATA — folded as `Left exit` into the answer
         // instead of aborting the outer turn (PRD 21 locked decision 6; see
@@ -3141,21 +3252,24 @@ impl SelfHarnessDriver {
         // mechanism and still hard-fails: `resolve_context_ref` refusing an
         // unknown or stale ref is a capability that was never valid, not a
         // window that failed, and the scope/fork/force steps are bookkeeping.
+        //
+        // The `Err(e)` arm below is a MECHANISM failure — it returns via `?`
+        // without calling `fold_exit`, so `window` simply drops here; its
+        // `Drop` impl is what retires the node on this path now.
         let mut exit: Option<InvocationExit> = None;
-        let outcome = match self.drive_answerer_to_finalize(node, ty, site).await {
-            Ok(Ok(o)) => Some(o),
-            Ok(Err(e)) => {
+        let outcome = match self
+            .drive_answerer_to_finalize(window.node(), ty, site)
+            .await?
+        {
+            Ok(o) => Some(o),
+            Err(e) => {
                 exit = Some(e);
                 None
             }
-            Err(e) => {
-                let _ = self
-                    .agent
-                    .terminate_node(node, "branch child retired (error)");
-                return Err(e);
-            }
         };
-        self.emit(Event::TurnEnd { node });
+        self.emit(Event::TurnEnd {
+            node: window.node(),
+        });
 
         if let Some(outcome) = &outcome {
             let is_finalize = matches!(
@@ -3168,7 +3282,8 @@ impl SelfHarnessDriver {
                 // an answer. Decision 6 names this class; it folds at the
                 // branch, it does not take the turn down.
                 exit = Some(InvocationExit::NotFinalized(format!(
-                    "runLLMTurnBranch child {node:?} did not suspend on finalize (got {})",
+                    "runLLMTurnBranch child {:?} did not suspend on finalize (got {})",
+                    window.node(),
                     turn_outcome_tag(outcome)
                 )));
             }
@@ -3176,14 +3291,12 @@ impl SelfHarnessDriver {
 
         if let Some(exit) = exit {
             tracing::warn!(
-                node = ?node,
+                node = ?window.node(),
                 exit = %exit,
                 "branch child exited without an answer — folding it as data at its \
                  branch position"
             );
-            let _ = self
-                .agent
-                .terminate_node(node, "branch child retired (exit)");
+            window.fold_exit("branch child retired (exit)");
             self.lifecycle = SelfHarnessState::RunningLoop;
             // The `Either` wraps the WHOLE pair: a window that never finalized
             // has no post-finalize prefix, so there is no honest `ContextRef`
@@ -3192,35 +3305,27 @@ impl SelfHarnessDriver {
                 .map_err(|e| DriverError::Session(e.to_string()));
         }
 
-        if self.agent.finalize_is_closure(node) {
+        if self.agent.finalize_is_closure(window.node()) {
             // NOT a typed exit, for the same reason as the fanout path: the
             // window DID answer, and it is this driver that cannot carry a
             // closure across the branch pair (v1 scope). Our gap fails as ours.
-            let _ = self
-                .agent
-                .terminate_node(node, "branch child retired (closure)");
+            window.fold_exit("branch child retired (closure)");
             return Err(DriverError::Session(
                 "runLLMTurnBranch answer must be plain data — a closure cannot cross \
                  the branch pair (v1 scope)"
                     .into(),
             ));
         }
-        let (value, rendered) = self.agent.take_finalized_value_keep_open(node)?;
+
+        // Success: `finalize_data` takes the finalized answer, freezes
+        // THIS child's own post-finalize prefix, and retires — the one
+        // place a `ContextRef` digest for this window can come from.
+        let node = window.node();
+        let (value, rendered, child_digest) = window.finalize_data()?;
         self.emit(Event::Finalize {
             node,
             value: rendered,
         });
-
-        // The success path is exactly the freeze-then-retire this child's
-        // lease exists to gate: `require_one_shot` refuses to hand back a
-        // node id if `lease` were ever (by a future refactor) the loop's
-        // reusable answerer instead of a branch child's own.
-        let node = lease.require_one_shot()?;
-        // Freeze the CHILD's own post-finalize prefix BEFORE retiring it —
-        // `freeze_snapshot` reads the live convo, which `terminate_node`
-        // removes.
-        let child_digest = self.agent.freeze_snapshot(node)?;
-        let _ = self.agent.terminate_node(node, "branch child retired");
         self.lifecycle = SelfHarnessState::RunningLoop;
 
         let ref_value = engine::build_context_ref_value(child_digest.as_str(), table)
