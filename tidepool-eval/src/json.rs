@@ -22,15 +22,14 @@
 //!
 //! The Value-level shape primitives (Text/list/Map/number construction) live
 //! in [`crate::shapes`] — this module owns only the JSON-document policy
-//! (key sorting, Either wrapping, the `JsonConIds` cache) on top of them.
+//! (key sorting, Either wrapping, resolving [`JsonConIds`]) on top of them.
 
 use crate::value::Value;
-use std::cell::Cell;
 use tidepool_repr::{DataConId, DataConTable};
 
 /// `DataConId`s of every constructor needed to build a `Value` (and optionally an
-/// `Either Text Value`). `Copy` so it can be cached in a thread-local by value,
-/// with no borrow of the originating `DataConTable`.
+/// `Either Text Value`). `Copy` so it can be carried by value on [`crate::env::Env`]
+/// (see [`crate::env::EvalIds`]), with no borrow of the originating `DataConTable`.
 ///
 /// `left`/`right` are `Option<DataConId>` because `json_to_value` does not
 /// need them — only `decode_json_str` (the `JsonDecode` primop) does. This lets
@@ -280,25 +279,6 @@ pub fn decode_json_str(input: &str, ids: &JsonConIds) -> Option<Value> {
         }
         Err(e) => Some(Value::Con(left, vec![text_value(&e.to_string(), ids)])),
     }
-}
-
-thread_local! {
-    /// The aeson-`Value` constructor ids for the current eval, cached by
-    /// `env_from_datacon_table` (the universal eval-setup chokepoint). Read by
-    /// the `JsonDecode` primop arm in `eval.rs`. `None` when the closure isn't
-    /// in scope, or before any env has been built on this thread.
-    static JSON_CON_IDS: Cell<Option<JsonConIds>> = const { Cell::new(None) };
-}
-
-/// Cache the JSON constructor ids for this thread (called from
-/// `env_from_datacon_table`). `None` clears them.
-pub fn set_json_con_ids(ids: Option<JsonConIds>) {
-    JSON_CON_IDS.with(|c| c.set(ids));
-}
-
-/// The JSON constructor ids cached for this thread, if any.
-pub fn json_con_ids() -> Option<JsonConIds> {
-    JSON_CON_IDS.with(|c| c.get())
 }
 
 #[cfg(test)]

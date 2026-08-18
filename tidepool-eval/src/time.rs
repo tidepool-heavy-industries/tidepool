@@ -6,7 +6,6 @@
 //! (`eval.rs`) and the JIT host fn (`runtime_parse_iso8601`), so the two agree
 //! by construction — mirroring the `JsonDecode` rail in `json.rs`.
 
-use std::cell::Cell;
 use tidepool_repr::{DataConId, DataConTable, Literal};
 
 use crate::value::Value;
@@ -60,22 +59,4 @@ pub fn parse_iso8601_str(input: &str, ids: &TimeConIds) -> Value {
             Value::Con(ids.left, vec![msg])
         }
     }
-}
-
-thread_local! {
-    /// The `Either`/`I#`/`Text` ids for the current eval, cached by
-    /// `env_from_datacon_table` (the universal eval-setup chokepoint). Read by
-    /// the `ParseISO8601` primop arm in `eval.rs`. `None` before any env has
-    /// been built on this thread, or when the constructors aren't in scope.
-    static TIME_CON_IDS: Cell<Option<TimeConIds>> = const { Cell::new(None) };
-}
-
-/// Cache the time constructor ids for this thread. `None` clears them.
-pub fn set_time_con_ids(ids: Option<TimeConIds>) {
-    TIME_CON_IDS.with(|c| c.set(ids));
-}
-
-/// The time constructor ids cached for this thread, if any.
-pub fn time_con_ids() -> Option<TimeConIds> {
-    TIME_CON_IDS.with(|c| c.get())
 }

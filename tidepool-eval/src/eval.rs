@@ -11,7 +11,7 @@
 //!   in lockstep with `emit/primop.rs` and the `define_primops!` table in
 //!   `tidepool-repr/src/types.rs`.
 
-use crate::env::Env;
+use crate::env::{Env, EvalIds};
 use crate::error::{ArityContext, EvalError};
 #[cfg(test)]
 use crate::heap::ThunkState;
@@ -25,14 +25,18 @@ use tidepool_repr::{
 /// Each constructor with arity N becomes a `ConFun(tag, N, [])` value
 /// bound to its worker VarId, so that `Var` references to constructors
 /// in the expression tree resolve correctly.
+///
+/// Also resolves the aeson-`Value` constructor ids for the `JsonDecode`
+/// primop and the `Either`/`I#`/`Text` ids for `ParseISO8601`, and sets them
+/// on the returned `Env` (see [`EvalIds`]) — every eval built from this
+/// `Env` (including every closure/thunk that captures it) sees the ids for
+/// THIS table, never a different one resolved later on the same thread.
 pub fn env_from_datacon_table(table: &DataConTable) -> Env {
-    // Cache the aeson-`Value` constructor ids for the `JsonDecode` primop, and
-    // the `Either`/`I#`/`Text` ids for the `ParseISO8601` primop. This is the
-    // universal eval-setup chokepoint (every differential harness and caller
-    // builds its env here), so the primops always see the right ids.
-    crate::json::set_json_con_ids(crate::json::JsonConIds::from_table(table));
-    crate::time::set_time_con_ids(crate::time::TimeConIds::from_table(table));
     let mut env = Env::new();
+    env.set_ids(EvalIds {
+        json: crate::json::JsonConIds::from_table(table).map(std::sync::Arc::new),
+        time: crate::time::TimeConIds::from_table(table).map(std::sync::Arc::new),
+    });
     for dc in table.iter() {
         let var = VarId(dc.id.0);
         let val = if dc.rep_arity == 0 {
@@ -425,14 +429,18 @@ fn primop_step(
         });
         return Ok(Mode::Eval(args[pos], env));
     }
-    dispatch_primop_with_intercepts(op, built, heap).map(Mode::Unwind)
+    dispatch_primop_with_intercepts(op, built, env.ids(), heap).map(Mode::Unwind)
 }
 
 /// Primops that need `heap` access for deep forcing (Text/JSON/ISO-8601
 /// decoding) — intercepted here, ahead of the pure [`dispatch_primop`] table.
+/// `ids` is the [`EvalIds`] carried by the `Env` in scope at the call site
+/// (see `primop_step`) — the ids for the SAME `DataConTable` that built that
+/// `Env`, not a possibly-stale ambient cache.
 fn dispatch_primop_with_intercepts(
     op: PrimOpKind,
     arg_vals: Vec<Value>,
+    ids: EvalIds,
     heap: &mut dyn Heap,
 ) -> Result<Value, EvalError> {
     match op {
@@ -495,7 +503,7 @@ fn dispatch_primop_with_intercepts(
                     got: arg_vals.len(),
                 });
             }
-            let ids = crate::json::json_con_ids().ok_or_else(|| {
+            let ids = ids.json.ok_or_else(|| {
                 EvalError::InternalError(
                     "eitherDecode: aeson Value/Either/Map constructors not in scope".into(),
                 )
@@ -520,7 +528,7 @@ fn dispatch_primop_with_intercepts(
                     got: arg_vals.len(),
                 });
             }
-            let ids = crate::time::time_con_ids().ok_or_else(|| {
+            let ids = ids.time.ok_or_else(|| {
                 EvalError::InternalError(
                     "parseISO8601: Either/I#/Text constructors not in scope".into(),
                 )
