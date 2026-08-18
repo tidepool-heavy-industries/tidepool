@@ -271,9 +271,10 @@ impl Session {
                      completions cannot be produced for them"
                 )
             }
-            Ok(ParkedOutcome::Completed { value, .. }) => {
-                tidepool_runtime::value_to_json(&value, &self.table, 0)
-            }
+            Ok(
+                ParkedOutcome::CompletedValue(value)
+                | ParkedOutcome::CompletedBinding { value, .. },
+            ) => tidepool_runtime::value_to_json(&value, &self.table, 0),
             Ok(ParkedOutcome::Suspended { request, .. }) => panic!(
                 "the acceptance program suspended unexpectedly on {:?} — no program in this \
                  file should ever suspend",

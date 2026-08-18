@@ -78,6 +78,7 @@
 //! for RootSlot` — a new standalone soundness claim, left open deliberately.
 
 use std::collections::HashMap;
+use std::num::NonZeroUsize;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
@@ -255,8 +256,11 @@ pub enum ParkKind {
     Binding { forced: bool },
     /// A multi-binder BIND turn: on completion the `Done` tuple is
     /// deep-forced and each of `n_fields` fields is tenured in order, the
-    /// roots returned inline (`ResultMaterialization::Project`).
-    Project { n_fields: usize },
+    /// roots returned inline (`ResultMaterialization::Project`). `n_fields`
+    /// is a [`NonZeroUsize`] — a zero-field projection is meaningless (there
+    /// is no product to bind) and is rejected once, at the public-method
+    /// boundary, rather than asserted on every route that carries it.
+    Project { n_fields: NonZeroUsize },
     /// The single-compile `it`-binding epilogue: field 1 is bridged FIRST
     /// (aliasing-safe ordering, see [`ResultMaterialization::Render`]), then
     /// field 0 optionally forced + tenured; both products returned inline.
@@ -323,23 +327,24 @@ pub struct ContinuationFrame {
 /// [`ContinuationId`] a suspension parked under.
 #[derive(Debug)]
 pub enum ParkedOutcome {
-    /// The turn ran to completion.
-    Completed {
+    /// A [`ParkKind::Plain`] turn ran to completion: just the bridged result.
+    CompletedValue(tidepool_eval::value::Value),
+    /// A [`ParkKind::Binding`] turn ran to completion: the bridged result
+    /// plus the tenured root of its value-plane BIND, returned INLINE in the
+    /// same call that observed completion. A completed park leaves no frame
+    /// in the registry (a frame exists only while parked), so there is
+    /// nowhere for a machine-level stash to live between write and read — no
+    /// window for a second realm's completion to overwrite it before the
+    /// caller reads it.
+    CompletedBinding {
         /// The bridged result.
         value: tidepool_eval::value::Value,
-        /// The tenured root of a value-plane BIND's result, returned
-        /// INLINE in the same call that observed completion — `Some` exactly
-        /// when the park kind was [`ParkKind::Binding`], `None` for
-        /// [`ParkKind::Plain`]. A completed park leaves no frame in the
-        /// registry (a frame exists only while parked), so there is nowhere
-        /// for a machine-level stash to live between write and read — no
-        /// window for a second realm's completion to overwrite it before the
-        /// caller reads it.
-        bound_root: Option<crate::old_space::RootSlot>,
+        /// The tenured root of the value-plane BIND's result.
+        root: crate::old_space::RootSlot,
     },
     /// A [`ParkKind::Project`] park ran to completion: the tenured field
     /// roots, in field order, returned INLINE (same no-machine-stash argument
-    /// as `bound_root`).
+    /// as [`Self::CompletedBinding`]'s `root`).
     CompletedProject {
         /// The tenured roots of each projected field, in field order.
         roots: Vec<crate::old_space::RootSlot>,
@@ -509,15 +514,11 @@ impl ParkedRaw {
     /// one-session plan.
     fn into_parked(self) -> ParkedOutcome {
         match self {
-            ParkedRaw::Completed(CompletedProduct::Value(value)) => ParkedOutcome::Completed {
-                value,
-                bound_root: None,
-            },
+            ParkedRaw::Completed(CompletedProduct::Value(value)) => {
+                ParkedOutcome::CompletedValue(value)
+            }
             ParkedRaw::Completed(CompletedProduct::Bind { value, slot }) => {
-                ParkedOutcome::Completed {
-                    value,
-                    bound_root: Some(slot),
-                }
+                ParkedOutcome::CompletedBinding { value, root: slot }
             }
             ParkedRaw::Completed(CompletedProduct::Project(roots)) => {
                 ParkedOutcome::CompletedProject { roots }
@@ -582,8 +583,11 @@ enum ResultMaterialization {
     /// old-space, return the persistent [`crate::old_space::RootSlot`].
     Bind { forced: bool },
     /// Multi-binder BIND: deep-force the WHOLE `Done` tuple, then project and
-    /// tenure each of `n_fields` fields in order.
-    Project { n_fields: usize },
+    /// tenure each of `n_fields` fields in order. `n_fields` is a
+    /// [`NonZeroUsize`], parsed once at the public-method boundary (a
+    /// zero-field projection has no product to bind and is rejected there,
+    /// not re-asserted on every route that carries it).
+    Project { n_fields: NonZeroUsize },
     /// The single-compile `it`-binding epilogue: bridge field 1 (the render)
     /// into an owned [`Value`] FIRST — field0/field1 may alias, and the
     /// bridge is a full owned copy immune to whatever tenuring field0 does
@@ -593,16 +597,80 @@ enum ResultMaterialization {
 }
 
 /// The materialized result of [`JitEffectMachine::materialize`], one variant
-/// per [`ResultMaterialization`] policy. Every thin route wrapper requests
-/// exactly one policy and unwraps exactly the matching variant — the other
-/// three are unreachable for that call site by construction.
-enum Materialized {
+/// per [`ResultMaterialization`] policy — a plain closed sum, not a
+/// generic/sealed-trait correlation to [`ResultMaterialization`] (a settled
+/// design choice: no per-policy associated type). Every thin route wrapper
+/// requests exactly one policy and extracts exactly the matching variant via
+/// one of the `expect_*` accessors below — those, not a `match … { _ =>
+/// unreachable!() }` repeated at each call site, are the single place a
+/// request/result mismatch would panic. A new policy variant must update
+/// those accessors (an exhaustive match with no wildcard arm), which is the
+/// point: the compiler forces every accessor to be revisited, not just the
+/// ones a change happens to touch.
+enum MaterializeResult {
     Value(Value),
     Bind(crate::old_space::RootSlot),
     /// The tenured field roots, in field order. Both routes want exactly these
     /// — a projection has no result value of its own.
     Project(Vec<crate::old_space::RootSlot>),
     Render(crate::old_space::RootSlot, Value),
+}
+
+impl MaterializeResult {
+    /// Extract the `Value` policy's payload. Every caller already requested
+    /// [`ResultMaterialization::Value`], so the other arms are unreachable by
+    /// construction — but written out, not `_`, so a fifth policy variant
+    /// fails to compile here until this is updated.
+    fn expect_value(self) -> Value {
+        match self {
+            MaterializeResult::Value(v) => v,
+            MaterializeResult::Bind(_)
+            | MaterializeResult::Project(_)
+            | MaterializeResult::Render(..) => {
+                unreachable!("ResultMaterialization::Value always yields MaterializeResult::Value")
+            }
+        }
+    }
+
+    /// Extract the `Bind` policy's payload — see [`Self::expect_value`].
+    fn expect_bind(self) -> crate::old_space::RootSlot {
+        match self {
+            MaterializeResult::Bind(slot) => slot,
+            MaterializeResult::Value(_)
+            | MaterializeResult::Project(_)
+            | MaterializeResult::Render(..) => {
+                unreachable!("ResultMaterialization::Bind always yields MaterializeResult::Bind")
+            }
+        }
+    }
+
+    /// Extract the `Project` policy's payload — see [`Self::expect_value`].
+    fn expect_project(self) -> Vec<crate::old_space::RootSlot> {
+        match self {
+            MaterializeResult::Project(slots) => slots,
+            MaterializeResult::Value(_)
+            | MaterializeResult::Bind(_)
+            | MaterializeResult::Render(..) => {
+                unreachable!(
+                    "ResultMaterialization::Project always yields MaterializeResult::Project"
+                )
+            }
+        }
+    }
+
+    /// Extract the `Render` policy's payload — see [`Self::expect_value`].
+    fn expect_render(self) -> (crate::old_space::RootSlot, Value) {
+        match self {
+            MaterializeResult::Render(slot, rendered) => (slot, rendered),
+            MaterializeResult::Value(_)
+            | MaterializeResult::Bind(_)
+            | MaterializeResult::Project(_) => {
+                unreachable!(
+                    "ResultMaterialization::Render always yields MaterializeResult::Render"
+                )
+            }
+        }
+    }
 }
 
 /// Which driver [`JitEffectMachine::with_active_run`] uses, and — for the
@@ -747,7 +815,7 @@ pub struct JitEffectMachine {
     /// here on the eventual `resume`, not the initial (suspending) run.
     ///
     /// SLOT PATH ONLY: the parked path never writes this field — its
-    /// `ParkedOutcome::Completed::bound_root` returns the tenured root inline
+    /// `ParkedOutcome::CompletedBinding::root` returns the tenured root inline
     /// instead, so a second realm's completion cannot overwrite a first
     /// realm's still-unread root.
     last_bound_root: Option<crate::old_space::RootSlot>,
@@ -1300,7 +1368,7 @@ impl JitEffectMachine {
         l7_msg: &str,
         exec_start: &str,
         resume_suffix: &str,
-    ) -> Result<Materialized, JitError> {
+    ) -> Result<MaterializeResult, JitError> {
         // L7: shared by every plain entry — starting a new turn while a prior
         // one is still parked at resume_suspended isn't a GC-rooted invariant
         // anything else enforces.
@@ -1441,7 +1509,7 @@ impl JitEffectMachine {
         vmctx: &mut VMContext,
         done_ptr: *mut u8,
         materialization: ResultMaterialization,
-    ) -> Result<Materialized, JitError> {
+    ) -> Result<MaterializeResult, JitError> {
         // One address, used by every arm below: `vmctx` is a live `&mut` for
         // this whole call, so the pointer stays valid throughout.
         let vmctx_ptr: *mut VMContext = vmctx;
@@ -1461,7 +1529,7 @@ impl JitEffectMachine {
                 // of a poison value — is only its symptom.
                 let value =
                     crate::host_fns::surface_error(bridge_res.map_err(JitError::HeapBridge))?;
-                Ok(Materialized::Value(value))
+                Ok(MaterializeResult::Value(value))
             }
             ResultMaterialization::Bind { forced } => {
                 if let Some(err) = crate::host_fns::take_runtime_error() {
@@ -1509,7 +1577,7 @@ impl JitEffectMachine {
                         .old_space
                         .tenure(vmctx_ptr, nf_ptr, from_range)
                 };
-                Ok(Materialized::Bind(slot))
+                Ok(MaterializeResult::Bind(slot))
             }
             ResultMaterialization::Project { n_fields } => {
                 if let Some(err) = crate::host_fns::take_runtime_error() {
@@ -1539,7 +1607,7 @@ impl JitEffectMachine {
                     *(nf_tuple.add(crate::layout::CON_NUM_FIELDS_OFFSET as usize) as *const u16)
                         as usize
                 };
-                if n_actual != n_fields {
+                if n_actual != n_fields.get() {
                     return Err(JitError::Yield(crate::yield_type::YieldError::Runtime(
                         crate::host_fns::RuntimeError::UserErrorMsg(format!(
                             "multi-bind: result tuple has {} fields, expected {}",
@@ -1559,8 +1627,8 @@ impl JitEffectMachine {
                 });
                 // 4. Project each field from nf_tuple and tenure. nf_tuple
                 //    stays valid across all tenure() calls (no JIT GC).
-                let mut slots = Vec::with_capacity(n_fields);
-                for i in 0..n_fields {
+                let mut slots = Vec::with_capacity(n_fields.get());
+                for i in 0..n_fields.get() {
                     let field_ptr = unsafe {
                         *(nf_tuple.add(crate::layout::CON_FIELDS_OFFSET as usize + 8 * i)
                             as *const *mut u8)
@@ -1574,7 +1642,7 @@ impl JitEffectMachine {
                     };
                     slots.push(slot);
                 }
-                Ok(Materialized::Project(slots))
+                Ok(MaterializeResult::Project(slots))
             }
             ResultMaterialization::Render { field0_forced } => {
                 if let Some(err) = crate::host_fns::take_runtime_error() {
@@ -1690,7 +1758,7 @@ impl JitEffectMachine {
                         .old_space
                         .tenure(vmctx_ptr, nf_field0, from_range)
                 };
-                Ok(Materialized::Render(slot, rendered))
+                Ok(MaterializeResult::Render(slot, rendered))
             }
         }
     }
@@ -1718,22 +1786,21 @@ impl JitEffectMachine {
         handlers: &mut H,
         user: &U,
     ) -> Result<Value, JitError> {
-        match self.with_active_run(
-            func_id,
-            RunTarget::Effectful {
-                table,
-                handlers,
-                user,
-            },
-            ResultMaterialization::Value,
-            "run/run_fragment called while a continuation is suspended — \
-             resume_suspended it first",
-            "stepping main function",
-            "",
-        )? {
-            Materialized::Value(v) => Ok(v),
-            _ => unreachable!("ResultMaterialization::Value always yields Materialized::Value"),
-        }
+        Ok(self
+            .with_active_run(
+                func_id,
+                RunTarget::Effectful {
+                    table,
+                    handlers,
+                    user,
+                },
+                ResultMaterialization::Value,
+                "run/run_fragment called while a continuation is suspended — \
+                 resume_suspended it first",
+                "stepping main function",
+                "",
+            )?
+            .expect_value())
     }
 
     // ----------------------------------------------------------------------
@@ -1860,10 +1927,8 @@ impl JitEffectMachine {
         suspend_tag: u64,
         n_fields: usize,
     ) -> Result<Suspendable<Vec<crate::old_space::RootSlot>>, JitError> {
-        assert!(
-            n_fields > 0,
-            "run_fragment_suspendable_projected requires at least one field"
-        );
+        let n_fields = NonZeroUsize::new(n_fields)
+            .expect("run_fragment_suspendable_projected requires at least one field");
         self.run_suspendable_with_entry(
             func_id,
             table,
@@ -2135,10 +2200,8 @@ impl JitEffectMachine {
         input: ResumeInput,
         n_fields: usize,
     ) -> Result<Suspendable<Vec<crate::old_space::RootSlot>>, JitError> {
-        assert!(
-            n_fields > 0,
-            "resume_suspended_projected requires at least one field"
-        );
+        let n_fields = NonZeroUsize::new(n_fields)
+            .expect("resume_suspended_projected requires at least one field");
         self.resume_suspended_inner(
             table,
             handlers,
@@ -2397,7 +2460,7 @@ impl JitEffectMachine {
     ///    goes to `self.last_bound_root`, because
     ///    [`SuspendableOutcome::Completed`] is fixed at a bare `Value` and
     ///    cannot carry it; on the REGISTRY path it is returned INLINE via
-    ///    `ParkedOutcome::Completed::bound_root` instead, so that two realms'
+    ///    `ParkedOutcome::CompletedBinding::root` instead, so that two realms'
     ///    binds completing before either is drained cannot overwrite one
     ///    machine-level slot. `Project`/`Render` never stash: they complete
     ///    as `Suspendable<T>` and return their roots in the outcome. `Bind`
@@ -2446,15 +2509,15 @@ impl JitEffectMachine {
                 // after this returns, because the tenure inside touches
                 // `self.session`.
                 match self.materialize(machine.vmctx_mut(), done_ptr, materialization)? {
-                    Materialized::Value(value) => {
+                    MaterializeResult::Value(value) => {
                         Ok(ParkedRaw::Completed(CompletedProduct::Value(value)))
                     }
-                    Materialized::Bind(slot) => {
+                    MaterializeResult::Bind(slot) => {
                         // Laundering a `!Send` `RootSlot` across the eval-thread
                         // boundary — see the module docstring's `RootSlot: !Send`
                         // contract for why. Only the SLOT path stashes here; the
                         // registry path returns its root inline in
-                        // `ParkedOutcome::Completed::bound_root` instead.
+                        // `ParkedOutcome::CompletedBinding::root` instead.
                         if let ParkTarget::Slot = park {
                             self.last_bound_root = Some(slot);
                         }
@@ -2471,7 +2534,7 @@ impl JitEffectMachine {
                         // same substitution `finalize`'s closure path already
                         // uses for its rendered value: the REAL value stays
                         // live at `slot` regardless (that root is what
-                        // `Materialized::Bind`'s caller actually resolves a
+                        // `MaterializeResult::Bind`'s caller actually resolves a
                         // later reference through), this bridge only needs to
                         // produce SOMETHING renderable. Strictly a superset of
                         // the old behavior — a Tier0 value never reaches a
@@ -2490,7 +2553,7 @@ impl JitEffectMachine {
                         )?;
                         Ok(ParkedRaw::Completed(CompletedProduct::Bind { value, slot }))
                     }
-                    Materialized::Project(slots) => {
+                    MaterializeResult::Project(slots) => {
                         // The slots ARE the products; they ride out in the
                         // completion on BOTH paths (slot: `Suspendable<T>`;
                         // registry: `ParkedOutcome::CompletedProject`), so
@@ -2498,7 +2561,7 @@ impl JitEffectMachine {
                         // off the machine.
                         Ok(ParkedRaw::Completed(CompletedProduct::Project(slots)))
                     }
-                    Materialized::Render(slot, rendered) => {
+                    MaterializeResult::Render(slot, rendered) => {
                         // No second bridge: `rendered` IS field 1, already
                         // bridged inside `materialize` BEFORE field 0 was
                         // tenured (the aliasing-safe ordering). Both products
@@ -2650,18 +2713,17 @@ impl JitEffectMachine {
     /// uses the machine's original entry; [`Self::run_fragment_pure`] passes an
     /// [`Self::add_function`]-minted fragment id. Same session lifecycle either way.
     fn run_pure_with_entry(&mut self, func_id: FuncId) -> Result<Value, JitError> {
-        match self.with_active_run::<(), NoHandlers>(
-            func_id,
-            RunTarget::Pure,
-            ResultMaterialization::Value,
-            "run_pure/run_fragment_pure called while a continuation is suspended — \
-             resume_suspended it first",
-            "running pure computation",
-            "",
-        )? {
-            Materialized::Value(v) => Ok(v),
-            _ => unreachable!("ResultMaterialization::Value always yields Materialized::Value"),
-        }
+        Ok(self
+            .with_active_run::<(), NoHandlers>(
+                func_id,
+                RunTarget::Pure,
+                ResultMaterialization::Value,
+                "run_pure/run_fragment_pure called while a continuation is suspended — \
+                 resume_suspended it first",
+                "running pure computation",
+                "",
+            )?
+            .expect_value())
     }
 
     // ----------------------------------------------------------------------
@@ -2915,18 +2977,17 @@ impl JitEffectMachine {
         // run_pure_and_bind always forces to NF (Tier0 data) before tenuring
         // — unlike its effectful sibling `run_fragment_and_bind`, it takes no
         // `forced` flag.
-        match self.with_active_run::<(), NoHandlers>(
-            func_id,
-            RunTarget::Pure,
-            ResultMaterialization::Bind { forced: true },
-            "run_pure_and_bind called while a continuation is suspended — \
-             resume_suspended it first",
-            "running pure computation (bind)",
-            "",
-        )? {
-            Materialized::Bind(slot) => Ok(slot),
-            _ => unreachable!("ResultMaterialization::Bind always yields Materialized::Bind"),
-        }
+        Ok(self
+            .with_active_run::<(), NoHandlers>(
+                func_id,
+                RunTarget::Pure,
+                ResultMaterialization::Bind { forced: true },
+                "run_pure_and_bind called while a continuation is suspended — \
+                 resume_suspended it first",
+                "running pure computation (bind)",
+                "",
+            )?
+            .expect_bind())
     }
 
     /// The effectful value-plane **bind primitive**: run `func_id` through the
@@ -2960,22 +3021,21 @@ impl JitEffectMachine {
             self.session.is_some(),
             "run_fragment_and_bind requires a session machine (compile_session)"
         );
-        match self.with_active_run(
-            func_id,
-            RunTarget::Effectful {
-                table,
-                handlers,
-                user,
-            },
-            ResultMaterialization::Bind { forced },
-            "run_fragment_and_bind called while a continuation is suspended — \
-             resume_suspended it first",
-            "stepping effectful computation (bind)",
-            "",
-        )? {
-            Materialized::Bind(slot) => Ok(slot),
-            _ => unreachable!("ResultMaterialization::Bind always yields Materialized::Bind"),
-        }
+        Ok(self
+            .with_active_run(
+                func_id,
+                RunTarget::Effectful {
+                    table,
+                    handlers,
+                    user,
+                },
+                ResultMaterialization::Bind { forced },
+                "run_fragment_and_bind called while a continuation is suspended — \
+                 resume_suspended it first",
+                "stepping effectful computation (bind)",
+                "",
+            )?
+            .expect_bind())
     }
 
     /// Multi-binder effectful bind: run `func_id` through the effect step loop,
@@ -3002,26 +3062,23 @@ impl JitEffectMachine {
             self.session.is_some(),
             "run_fragment_and_bind_projected requires a session machine"
         );
-        assert!(
-            n_fields > 0,
-            "run_fragment_and_bind_projected requires at least one field"
-        );
-        match self.with_active_run(
-            func_id,
-            RunTarget::Effectful {
-                table,
-                handlers,
-                user,
-            },
-            ResultMaterialization::Project { n_fields },
-            "run_fragment_and_bind_projected called while a continuation is \
-             suspended — resume_suspended it first",
-            "stepping effectful computation (multi-bind)",
-            " (multi-bind)",
-        )? {
-            Materialized::Project(slots) => Ok(slots),
-            _ => unreachable!("ResultMaterialization::Project always yields Materialized::Project"),
-        }
+        let n_fields = NonZeroUsize::new(n_fields)
+            .expect("run_fragment_and_bind_projected requires at least one field");
+        Ok(self
+            .with_active_run(
+                func_id,
+                RunTarget::Effectful {
+                    table,
+                    handlers,
+                    user,
+                },
+                ResultMaterialization::Project { n_fields },
+                "run_fragment_and_bind_projected called while a continuation is \
+                 suspended — resume_suspended it first",
+                "stepping effectful computation (multi-bind)",
+                " (multi-bind)",
+            )?
+            .expect_project())
     }
 
     /// The single-compile `it`-binding primitive: run `func_id` through the
@@ -3062,22 +3119,21 @@ impl JitEffectMachine {
             self.session.is_some(),
             "run_fragment_and_bind_render requires a session machine"
         );
-        match self.with_active_run(
-            func_id,
-            RunTarget::Effectful {
-                table,
-                handlers,
-                user,
-            },
-            ResultMaterialization::Render { field0_forced },
-            "run_fragment_and_bind_render called while a continuation is \
-             suspended — resume_suspended it first",
-            "stepping effectful computation (bind-render)",
-            " (bind-render)",
-        )? {
-            Materialized::Render(slot, rendered) => Ok((slot, rendered)),
-            _ => unreachable!("ResultMaterialization::Render always yields Materialized::Render"),
-        }
+        Ok(self
+            .with_active_run(
+                func_id,
+                RunTarget::Effectful {
+                    table,
+                    handlers,
+                    user,
+                },
+                ResultMaterialization::Render { field0_forced },
+                "run_fragment_and_bind_render called while a continuation is \
+                 suspended — resume_suspended it first",
+                "stepping effectful computation (bind-render)",
+                " (bind-render)",
+            )?
+            .expect_render())
     }
 
     /// Register a session-scoped GC root slot that survives across runs (i.e.

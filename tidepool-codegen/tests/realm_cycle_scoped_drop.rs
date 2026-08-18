@@ -241,7 +241,9 @@ fn one_cycle(table: &DataConTable, resume_one: bool) -> (usize, usize) {
             )
         }
         ParkedOutcome::Suspended { id, .. } => id,
-        ParkedOutcome::Completed { .. } => panic!("entry should suspend"),
+        ParkedOutcome::CompletedValue(..) | ParkedOutcome::CompletedBinding { .. } => {
+            panic!("entry should suspend")
+        }
     };
 
     // Park the rest as suspending fragments.
@@ -274,7 +276,9 @@ fn one_cycle(table: &DataConTable, resume_one: bool) -> (usize, usize) {
                 )
             }
             ParkedOutcome::Suspended { .. } => {}
-            ParkedOutcome::Completed { .. } => panic!("fragment should suspend"),
+            ParkedOutcome::CompletedValue(..) | ParkedOutcome::CompletedBinding { .. } => {
+                panic!("fragment should suspend")
+            }
         }
     }
     assert_eq!(machine.parked_count(), PARKS_PER_MACHINE);
@@ -505,7 +509,9 @@ fn dropping_with_live_parks_is_clean_and_the_next_machine_is_unaffected() {
                     )
                 }
                 ParkedOutcome::Suspended { id, .. } => id,
-                ParkedOutcome::Completed { .. } => panic!("should suspend"),
+                ParkedOutcome::CompletedValue(..) | ParkedOutcome::CompletedBinding { .. } => {
+                    panic!("should suspend")
+                }
             };
             match machine
                 .resume_parked(
@@ -516,7 +522,8 @@ fn dropping_with_live_parks_is_clean_and_the_next_machine_is_unaffected() {
                 )
                 .expect("resume")
             {
-                ParkedOutcome::Completed { value, .. } => match &value {
+                ParkedOutcome::CompletedValue(value)
+                | ParkedOutcome::CompletedBinding { value, .. } => match &value {
                     Value::Con(cid, fields) if cid.0 == PAIR_ID.0 => {
                         assert_eq!(session_scaffold_expect::expect_int(&fields[0]), 4321);
                         assert_eq!(session_scaffold_expect::expect_int(&fields[1]), 9);

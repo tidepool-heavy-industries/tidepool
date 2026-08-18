@@ -441,7 +441,9 @@ fn run() -> i32 {
                      completions cannot be produced for them"
             )
         }
-        Ok(ParkedOutcome::Completed { value, .. }) => {
+        Ok(
+            ParkedOutcome::CompletedValue(value) | ParkedOutcome::CompletedBinding { value, .. },
+        ) => {
             let json = tidepool_runtime::value_to_json(&value, &table, 0);
             println!(
                 "{}",

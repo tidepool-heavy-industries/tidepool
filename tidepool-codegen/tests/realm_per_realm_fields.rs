@@ -349,7 +349,9 @@ fn park_entry(
             assert_eq!(expect_int(&request), expect_req);
             id
         }
-        ParkedOutcome::Completed { .. } => panic!("the entry should suspend, not complete"),
+        ParkedOutcome::CompletedValue(..) | ParkedOutcome::CompletedBinding { .. } => {
+            panic!("the entry should suspend, not complete")
+        }
     }
 }
 
@@ -392,7 +394,9 @@ fn park_fragment(
             assert_eq!(expect_int(&request), req);
             id
         }
-        ParkedOutcome::Completed { .. } => panic!("the fragment should suspend"),
+        ParkedOutcome::CompletedValue(..) | ParkedOutcome::CompletedBinding { .. } => {
+            panic!("the fragment should suspend")
+        }
     }
 }
 
@@ -414,7 +418,7 @@ fn resume_and_verify(
         )
         .unwrap_or_else(|e| panic!("resume_parked({id:?}) failed: {e}"))
     {
-        ParkedOutcome::Completed { value, .. } => {
+        ParkedOutcome::CompletedValue(value) | ParkedOutcome::CompletedBinding { value, .. } => {
             assert_pair_result(&value, expect_captured, answer)
         }
         ParkedOutcome::CompletedProject { .. } | ParkedOutcome::CompletedRender { .. } => {
@@ -487,14 +491,13 @@ fn a1_bound_root_returns_inline_never_touches_the_machine_level_field() {
             )
             .expect("realm A bind completes");
         let (value_a, root_a) = match outcome_a {
-            ParkedOutcome::Completed { value, bound_root } => (
-                value,
-                bound_root.expect("a Binding park kind must return Some(bound_root)"),
-            ),
-            ParkedOutcome::CompletedProject { .. } | ParkedOutcome::CompletedRender { .. } => {
+            ParkedOutcome::CompletedBinding { value, root } => (value, root),
+            ParkedOutcome::CompletedValue(_)
+            | ParkedOutcome::CompletedProject { .. }
+            | ParkedOutcome::CompletedRender { .. } => {
                 unreachable!(
-                    "this test parks only Plain/Binding turns - Project/Render \
-                     completions cannot be produced for them"
+                    "this test parks only a ParkKind::Binding turn, which can only \
+                     complete as CompletedBinding"
                 )
             }
             ParkedOutcome::Suspended { .. } => panic!("realm A's bind fragment never asks"),
@@ -525,14 +528,13 @@ fn a1_bound_root_returns_inline_never_touches_the_machine_level_field() {
             )
             .expect("realm B bind completes");
         let (value_b, root_b) = match outcome_b {
-            ParkedOutcome::Completed { value, bound_root } => (
-                value,
-                bound_root.expect("a Binding park kind must return Some(bound_root)"),
-            ),
-            ParkedOutcome::CompletedProject { .. } | ParkedOutcome::CompletedRender { .. } => {
+            ParkedOutcome::CompletedBinding { value, root } => (value, root),
+            ParkedOutcome::CompletedValue(_)
+            | ParkedOutcome::CompletedProject { .. }
+            | ParkedOutcome::CompletedRender { .. } => {
                 unreachable!(
-                    "this test parks only Plain/Binding turns - Project/Render \
-                     completions cannot be produced for them"
+                    "this test parks only a ParkKind::Binding turn, which can only \
+                     complete as CompletedBinding"
                 )
             }
             ParkedOutcome::Suspended { .. } => panic!("realm B's bind fragment never asks"),
@@ -602,7 +604,9 @@ fn a2_finalized_root_is_per_frame_not_per_machine() {
                 );
                 id
             }
-            ParkedOutcome::Completed { .. } => panic!("realm A must suspend on the finalize"),
+            ParkedOutcome::CompletedValue(..) | ParkedOutcome::CompletedBinding { .. } => {
+                panic!("realm A must suspend on the finalize")
+            }
         };
         assert_rooting_receipt(&machine, 1);
 
@@ -641,7 +645,9 @@ fn a2_finalized_root_is_per_frame_not_per_machine() {
                 assert!(has_finalized_closure);
                 id
             }
-            ParkedOutcome::Completed { .. } => panic!("realm B must suspend on the finalize"),
+            ParkedOutcome::CompletedValue(..) | ParkedOutcome::CompletedBinding { .. } => {
+                panic!("realm B must suspend on the finalize")
+            }
         };
         assert_rooting_receipt(&machine, 2);
         assert_ne!(id_a, id_b);

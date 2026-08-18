@@ -529,7 +529,7 @@ impl Session {
                 self.assert_rooting_receipt();
                 Ok(Step::Asked(prompt))
             }
-            Ok(ParkedOutcome::Completed { .. }) => {
+            Ok(ParkedOutcome::CompletedValue(..) | ParkedOutcome::CompletedBinding { .. }) => {
                 self.parked = None;
                 self.assert_rooting_receipt();
                 Ok(Step::Completed)

@@ -275,7 +275,9 @@ fn try_park_fragment(
             assert_eq!(expect_int(&request), req, "fragment ask payload");
             Ok(id)
         }
-        ParkedOutcome::Completed { .. } => panic!("the fragment should suspend at the ask"),
+        ParkedOutcome::CompletedValue(..) | ParkedOutcome::CompletedBinding { .. } => {
+            panic!("the fragment should suspend at the ask")
+        }
     }
 }
 
@@ -308,7 +310,7 @@ fn resume_and_verify(
         )
         .unwrap_or_else(|e| panic!("resume_parked({id:?}) failed: {e}"))
     {
-        ParkedOutcome::Completed { value, .. } => {
+        ParkedOutcome::CompletedValue(value) | ParkedOutcome::CompletedBinding { value, .. } => {
             assert_pair_result(&value, expect_captured, answer)
         }
         ParkedOutcome::CompletedProject { .. } | ParkedOutcome::CompletedRender { .. } => {
@@ -863,7 +865,8 @@ fn establishment_on_completion_then_refuses_disagreeing() {
             )
             .expect("a non-suspending turn with a non-empty prefix must be allowed to complete")
         {
-            ParkedOutcome::Completed { value, .. } => assert_eq!(expect_int(&value), 42),
+            ParkedOutcome::CompletedValue(value)
+            | ParkedOutcome::CompletedBinding { value, .. } => assert_eq!(expect_int(&value), 42),
             ParkedOutcome::CompletedProject { .. } | ParkedOutcome::CompletedRender { .. } => {
                 unreachable!(
                     "this test parks only Plain/Binding turns - Project/Render \

@@ -621,7 +621,7 @@ fn park_entry(
             );
             id
         }
-        ParkedOutcome::Completed { .. } => {
+        ParkedOutcome::CompletedValue(..) | ParkedOutcome::CompletedBinding { .. } => {
             panic!("the entry should suspend at the ask, not complete")
         }
     }
@@ -670,7 +670,9 @@ fn park_fragment(
             assert_eq!(expect_int(&request), req, "fragment ask payload");
             id
         }
-        ParkedOutcome::Completed { .. } => panic!("the fragment should suspend at the ask"),
+        ParkedOutcome::CompletedValue(..) | ParkedOutcome::CompletedBinding { .. } => {
+            panic!("the fragment should suspend at the ask")
+        }
     }
 }
 
@@ -690,7 +692,7 @@ fn resume_and_verify(
         )
         .unwrap_or_else(|e| panic!("resume_parked({id:?}) failed: {e}"))
     {
-        ParkedOutcome::Completed { value, .. } => {
+        ParkedOutcome::CompletedValue(value) | ParkedOutcome::CompletedBinding { value, .. } => {
             assert_pair_result(&value, expect_captured, answer)
         }
         ParkedOutcome::CompletedProject { .. } | ParkedOutcome::CompletedRender { .. } => {
@@ -1167,7 +1169,7 @@ fn w1_nested_mid_effect_continuation_parks_across_gc() {
                 assert_eq!(expect_int(&request), 9, "the suspending ask's own payload");
                 id
             }
-            ParkedOutcome::Completed { .. } => {
+            ParkedOutcome::CompletedValue(..) | ParkedOutcome::CompletedBinding { .. } => {
                 panic!("w1 entry should suspend at the ask, not complete")
             }
         };
@@ -1192,7 +1194,8 @@ fn w1_nested_mid_effect_continuation_parks_across_gc() {
             )
             .expect("resume w1")
         {
-            ParkedOutcome::Completed { value, .. } => {
+            ParkedOutcome::CompletedValue(value)
+            | ParkedOutcome::CompletedBinding { value, .. } => {
                 assert_triple_captured_and_answer(&value, 4004, 77);
             }
             ParkedOutcome::CompletedProject { .. } | ParkedOutcome::CompletedRender { .. } => {
@@ -1253,7 +1256,7 @@ fn w2_streamed_response_tail_parks_across_gc() {
                 assert_eq!(expect_int(&request), 10, "the suspending ask's own payload");
                 id
             }
-            ParkedOutcome::Completed { .. } => {
+            ParkedOutcome::CompletedValue(..) | ParkedOutcome::CompletedBinding { .. } => {
                 panic!("w2 entry should suspend at the ask, not complete")
             }
         };
@@ -1276,7 +1279,8 @@ fn w2_streamed_response_tail_parks_across_gc() {
             )
             .expect("resume w2")
         {
-            ParkedOutcome::Completed { value, .. } => {
+            ParkedOutcome::CompletedValue(value)
+            | ParkedOutcome::CompletedBinding { value, .. } => {
                 let streamed = assert_triple_captured_and_answer(&value, 5005, 88);
                 assert_int_list(&streamed, &[10, 20, 30]);
             }
@@ -1337,7 +1341,9 @@ fn w3_finalized_closure_park_survives_gc_and_resume() {
                 );
                 id
             }
-            ParkedOutcome::Completed { .. } => panic!("w3 entry must suspend on the finalize"),
+            ParkedOutcome::CompletedValue(..) | ParkedOutcome::CompletedBinding { .. } => {
+                panic!("w3 entry must suspend on the finalize")
+            }
         };
         assert_rooting_receipt(&machine, 1);
 
@@ -1376,7 +1382,8 @@ fn w3_finalized_closure_park_survives_gc_and_resume() {
             )
             .expect("resume w3")
         {
-            ParkedOutcome::Completed { value, .. } => assert_pair_result(&value, 6006, 42),
+            ParkedOutcome::CompletedValue(value)
+            | ParkedOutcome::CompletedBinding { value, .. } => assert_pair_result(&value, 6006, 42),
             ParkedOutcome::CompletedProject { .. } | ParkedOutcome::CompletedRender { .. } => {
                 unreachable!(
                     "this test parks only Plain/Binding turns - Project/Render \
@@ -1438,7 +1445,9 @@ fn w4_binding_park_case(forced: bool, captured_n: i64, req: i64, answer: i64) {
                 assert_eq!(expect_int(&request), req);
                 id
             }
-            ParkedOutcome::Completed { .. } => panic!("w4 fragment should suspend at the ask"),
+            ParkedOutcome::CompletedValue(..) | ParkedOutcome::CompletedBinding { .. } => {
+                panic!("w4 fragment should suspend at the ask")
+            }
         };
         assert_rooting_receipt(&machine, 1);
 
@@ -1460,17 +1469,18 @@ fn w4_binding_park_case(forced: bool, captured_n: i64, req: i64, answer: i64) {
             )
             .expect("resume w4")
         {
-            ParkedOutcome::Completed { value, bound_root } => {
+            ParkedOutcome::CompletedBinding { value, root } => {
                 assert_pair_result(&value, captured_n, answer);
-                let root = bound_root.expect("a Binding park kind must return Some(bound_root)");
                 let bridged =
                     unsafe { heap_bridge::heap_to_value(root.current()) }.expect("bridge w4 root");
                 assert_pair_result(&bridged, captured_n, answer);
             }
-            ParkedOutcome::CompletedProject { .. } | ParkedOutcome::CompletedRender { .. } => {
+            ParkedOutcome::CompletedValue(_)
+            | ParkedOutcome::CompletedProject { .. }
+            | ParkedOutcome::CompletedRender { .. } => {
                 unreachable!(
-                    "this test parks only Plain/Binding turns - Project/Render \
-                     completions cannot be produced for them"
+                    "this test parks only a ParkKind::Binding turn, which can only \
+                     complete as CompletedBinding"
                 )
             }
             ParkedOutcome::Suspended { .. } => panic!("resume should complete, not re-suspend"),

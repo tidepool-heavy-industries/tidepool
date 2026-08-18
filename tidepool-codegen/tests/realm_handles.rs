@@ -482,7 +482,8 @@ fn h1_closure_handle_delivered_into_sibling_frame_and_applied() {
             .resume_parked(loop_id, &mut NoDispatch, &(), ResumeInput::Handle(h))
             .expect("resume loop with delivered closure")
         {
-            ParkedOutcome::Completed { value, .. } => assert_pair_result(&value, 7007, 99),
+            ParkedOutcome::CompletedValue(value)
+            | ParkedOutcome::CompletedBinding { value, .. } => assert_pair_result(&value, 7007, 99),
             other => panic!("loop resume must complete, got {other:?}"),
         }
         // Loop frame consumed; answerer frame still parked; handle NOT
@@ -604,7 +605,8 @@ fn h2_close_realm_leaves_sibling_realm_untouched() {
             )
             .expect("sibling resume")
         {
-            ParkedOutcome::Completed { value, .. } => assert_pair_result(&value, 4321, 77),
+            ParkedOutcome::CompletedValue(value)
+            | ParkedOutcome::CompletedBinding { value, .. } => assert_pair_result(&value, 4321, 77),
             other => panic!("sibling resume must complete, got {other:?}"),
         }
         assert_receipts(&machine, 0, 0);
@@ -646,7 +648,9 @@ fn h3_project_and_render_parks_complete_inline() {
                 &(),
                 ASK_TAG,
                 RealmId(0),
-                ParkKind::Project { n_fields: 2 },
+                ParkKind::Project {
+                    n_fields: std::num::NonZeroUsize::new(2).unwrap(),
+                },
                 &[],
             )
             .expect("park project fragment")

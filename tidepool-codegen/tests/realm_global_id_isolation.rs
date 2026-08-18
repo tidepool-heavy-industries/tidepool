@@ -297,7 +297,9 @@ fn two_realms_with_colliding_domain_ids_do_not_shadow_each_other() {
                 assert_eq!(expect_int(&request), 1);
                 id
             }
-            ParkedOutcome::Completed { .. } => panic!("realm A must suspend at its ask"),
+            ParkedOutcome::CompletedValue(..) | ParkedOutcome::CompletedBinding { .. } => {
+                panic!("realm A must suspend at its ask")
+            }
         };
 
         // Realm B: compiled + will be decoded against table_b, where the
@@ -336,7 +338,9 @@ fn two_realms_with_colliding_domain_ids_do_not_shadow_each_other() {
                 assert_eq!(expect_int(&request), 2);
                 id
             }
-            ParkedOutcome::Completed { .. } => panic!("realm B must suspend at its ask"),
+            ParkedOutcome::CompletedValue(..) | ParkedOutcome::CompletedBinding { .. } => {
+                panic!("realm B must suspend at its ask")
+            }
         };
         assert_eq!(machine.parked_count(), 2);
 
@@ -351,7 +355,8 @@ fn two_realms_with_colliding_domain_ids_do_not_shadow_each_other() {
             )
             .expect("resume realm B")
         {
-            ParkedOutcome::Completed { value, .. } => match &value {
+            ParkedOutcome::CompletedValue(value)
+            | ParkedOutcome::CompletedBinding { value, .. } => match &value {
                 Value::Con(id, fields) if id.0 == PAIR_ID.0 && fields.len() == 2 => {
                     match &fields[0] {
                         Value::Con(cid, cf) if cid.0 == COLLIDING_ID.0 && cf.len() == 2 => {
@@ -386,7 +391,8 @@ fn two_realms_with_colliding_domain_ids_do_not_shadow_each_other() {
             )
             .expect("resume realm A")
         {
-            ParkedOutcome::Completed { value, .. } => match &value {
+            ParkedOutcome::CompletedValue(value)
+            | ParkedOutcome::CompletedBinding { value, .. } => match &value {
                 Value::Con(id, fields) if id.0 == PAIR_ID.0 && fields.len() == 2 => {
                     match &fields[0] {
                         Value::Con(cid, cf) if cid.0 == COLLIDING_ID.0 && cf.len() == 1 => {
