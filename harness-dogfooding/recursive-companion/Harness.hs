@@ -1512,6 +1512,17 @@ as a forced finish before any of those branches ever run.
 
 Every record field is required — there are no optional fields on this type.
 
+If this layer needs repository evidence or a code change to decide honestly,
+delegate it to a coding subagent before you finalize:
+`delegate (DelegateBrief {{ delegateLabel, delegateInstruction, delegateExpected }})
+:: M (Either DelegateError DelegateResult)`. `delegateLabel` is a short slug;
+`delegateInstruction` is the task in prose; `delegateExpected` says what a good
+result looks like (may be blank). You get back `Left err` (render it with
+`renderDelegateError`) or `Right r` with `delegateSummary r` and
+`delegateCaveats r`. The subagent works in its own fresh worktree off the
+current repository — there is no worktree or raw-subagent surface here, and
+none is needed: bind the result, then finalize based on what it found.
+
 Finalize a LayerProposal:
 - `ProposeFinish {{ localAnswer }}` — this node answers locally. Say the
   answer, not a plan to produce it.
