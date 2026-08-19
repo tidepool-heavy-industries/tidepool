@@ -9,6 +9,7 @@
 //! import the same struct without a dependency cycle — so a mock can no
 //! longer hand-build a stale wire shape for one of these effect results.
 
+#![warn(clippy::unwrap_used, clippy::expect_used)]
 use tidepool_bridge_derive::{CoreRecord, ToCore};
 
 /// The GENERATED wire families. One ordered field list in `tidepool-protocol`

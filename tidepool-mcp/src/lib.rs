@@ -4,6 +4,7 @@
 //! `compile_haskell`, and `eval` tools. Generic over effect handler stacks
 //! via `TidepoolMcpServer<H>`.
 
+#![warn(clippy::unwrap_used, clippy::expect_used)]
 pub mod validate;
 
 mod eval_prep;

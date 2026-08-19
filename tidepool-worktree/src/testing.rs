@@ -57,6 +57,7 @@ impl TestRepo {
     /// pinned because a test that asserts on `main` and a developer whose git
     /// defaults to `master` is a failure with nothing to learn from it.
     pub fn init() -> Result<Self, WorktreeError> {
+        #[allow(clippy::expect_used, reason = "create temp dir")]
         let dir = tempfile::TempDir::new().expect("create temp dir");
         let git = GitCli::new();
         let path = dir.path().to_path_buf();
@@ -121,8 +122,10 @@ impl ScriptedWriter<'_> {
     pub fn write_file(&self, rel: &str, contents: &str) -> Result<(), WorktreeError> {
         let path = self.cwd.join(rel);
         if let Some(parent) = path.parent() {
+            #[allow(clippy::expect_used, reason = "create parent dir")]
             std::fs::create_dir_all(parent).expect("create parent dir");
         }
+        #[allow(clippy::expect_used, reason = "write file")]
         std::fs::write(&path, contents).expect("write file");
         Ok(())
     }

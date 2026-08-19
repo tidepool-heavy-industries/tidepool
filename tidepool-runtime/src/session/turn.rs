@@ -433,6 +433,10 @@ fn forward_extract_timing(stderr: &str, prefix: &str) {
 pub fn run_turn(req: TurnRequest<'_>) -> Result<TurnResult, CompileError> {
     let verdict_arg = match &req.verdict {
         Some(TurnClassification { kind, binders }) => {
+            #[allow(
+                clippy::expect_used,
+                reason = "TemplateSelector::for_verdict is total over TurnKind"
+            )]
             let selector = TemplateSelector::for_verdict(*kind, binders)
                 .expect("TemplateSelector::for_verdict is total over TurnKind");
             if select_template(req.templates, selector).is_none() {
@@ -676,6 +680,10 @@ pub fn run_turn_batch(req: TurnBatchRequest<'_>) -> Result<TurnBatchResult, Comp
 
     let mut plan_items = Vec::with_capacity(req.items.len());
     for (index, item) in req.items.iter().enumerate() {
+        #[allow(
+            clippy::expect_used,
+            reason = "TemplateSelector::for_verdict is total over TurnKind"
+        )]
         let selector = TemplateSelector::for_verdict(item.verdict.kind, &item.verdict.binders)
             .expect("TemplateSelector::for_verdict is total over TurnKind");
         if select_template(req.templates, selector).is_none() {

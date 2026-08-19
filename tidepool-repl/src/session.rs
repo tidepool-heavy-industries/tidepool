@@ -859,6 +859,7 @@ impl Session {
             .collect();
         let mut verdicts: Vec<Option<TurnClassification>> = vec![None; items.len()];
         if !verdict_indices.is_empty() {
+            #[allow(clippy::expect_used, reason = "filtered to Auto/Stmt above")]
             let texts: Vec<&str> = verdict_indices
                 .iter()
                 .map(|&i| block_item_text(&items[i]).expect("filtered to Auto/Stmt above"))

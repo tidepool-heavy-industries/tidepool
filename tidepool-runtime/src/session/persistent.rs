@@ -133,11 +133,13 @@ impl PersistentSession {
     /// a repl invariant; the harness only calls this once a decl plane has been
     /// installed.
     pub fn lib(&self) -> &SessionLib {
+        #[allow(clippy::expect_used, reason = "decl plane present")]
         self.lib.as_ref().expect("decl plane present")
     }
     /// The decl-plane library (mutate — e.g. `define_batch_with_vals`). Panics if
     /// the session has no decl plane (see [`Self::lib`]).
     pub fn lib_mut(&mut self) -> &mut SessionLib {
+        #[allow(clippy::expect_used, reason = "decl plane present")]
         self.lib.as_mut().expect("decl plane present")
     }
     /// Whether this session has a decl plane.
@@ -273,6 +275,10 @@ impl PersistentSession {
     /// borrows the session it took from and nothing else). Panics if the
     /// machine is not bootstrapped or is already leased.
     pub fn lease_machine(&mut self) -> MachineLease<'_> {
+        #[allow(
+            clippy::expect_used,
+            reason = "machine present (idle or suspended) before a turn"
+        )]
         let machine = self
             .machine
             .take()
@@ -308,6 +314,10 @@ impl PersistentSession {
             session_table,
             ..
         } = self;
+        #[allow(
+            clippy::expect_used,
+            reason = "machine bootstrapped before add_fragment_session"
+        )]
         let machine = machine
             .as_mut()
             .expect("machine bootstrapped before add_fragment_session");
@@ -329,6 +339,10 @@ impl PersistentSession {
             session_table,
             ..
         } = self;
+        #[allow(
+            clippy::expect_used,
+            reason = "machine bootstrapped before add_child_fragment_session"
+        )]
         let machine = machine
             .as_mut()
             .expect("machine bootstrapped before add_child_fragment_session");
@@ -347,6 +361,10 @@ impl PersistentSession {
     ) -> Result<FuncId, JitError> {
         self.turn_counter += 1;
         let frag_name = format!("{name_hint}_{}", self.turn_counter);
+        #[allow(
+            clippy::expect_used,
+            reason = "machine bootstrapped before add_fragment_with_table"
+        )]
         let machine = self
             .machine
             .as_mut()
@@ -380,6 +398,7 @@ impl PersistentSession {
         H: DispatchEffect<O>,
     {
         let ask_tag = self.ask_tag;
+        #[allow(clippy::expect_used, reason = "machine bootstrapped before run_entry")]
         let machine = self
             .machine
             .as_mut()
@@ -402,6 +421,10 @@ impl PersistentSession {
         H: DispatchEffect<O>,
     {
         let ask_tag = self.ask_tag;
+        #[allow(
+            clippy::expect_used,
+            reason = "machine bootstrapped before run_funcid_with_table"
+        )]
         let machine = self
             .machine
             .as_mut()
@@ -425,6 +448,10 @@ impl PersistentSession {
         H: DispatchEffect<O>,
     {
         let ask_tag = self.ask_tag;
+        #[allow(
+            clippy::expect_used,
+            reason = "machine present before resume_with_table"
+        )]
         let machine = self
             .machine
             .as_mut()
@@ -451,6 +478,10 @@ impl PersistentSession {
             ask_tag,
             ..
         } = self;
+        #[allow(
+            clippy::expect_used,
+            reason = "machine bootstrapped before run_funcid_session"
+        )]
         let machine = machine
             .as_mut()
             .expect("machine bootstrapped before run_funcid_session");
@@ -475,6 +506,7 @@ impl PersistentSession {
             ask_tag,
             ..
         } = self;
+        #[allow(clippy::expect_used, reason = "machine present before resume_session")]
         let machine = machine
             .as_mut()
             .expect("machine present before resume_session");
@@ -486,6 +518,10 @@ impl PersistentSession {
     /// Pure means no effects, hence no `Ask`, hence no suspension — this is the
     /// one run entry with no `resume_*` sibling.
     pub fn run_funcid_pure(&mut self, func_id: FuncId) -> Result<Value, JitError> {
+        #[allow(
+            clippy::expect_used,
+            reason = "machine bootstrapped before run_funcid_pure"
+        )]
         let machine = self
             .machine
             .as_mut()
@@ -516,6 +552,10 @@ impl PersistentSession {
             ask_tag,
             ..
         } = self;
+        #[allow(
+            clippy::expect_used,
+            reason = "machine bootstrapped before bind_funcid"
+        )]
         let machine = machine
             .as_mut()
             .expect("machine bootstrapped before bind_funcid");
@@ -549,6 +589,7 @@ impl PersistentSession {
             ask_tag,
             ..
         } = self;
+        #[allow(clippy::expect_used, reason = "machine present before resume_bind")]
         let machine = machine
             .as_mut()
             .expect("machine present before resume_bind");
@@ -578,6 +619,10 @@ impl PersistentSession {
             ask_tag,
             ..
         } = self;
+        #[allow(
+            clippy::expect_used,
+            reason = "machine bootstrapped before bind_funcid_projected"
+        )]
         let machine = machine
             .as_mut()
             .expect("machine bootstrapped before bind_funcid_projected");
@@ -611,6 +656,10 @@ impl PersistentSession {
             ask_tag,
             ..
         } = self;
+        #[allow(
+            clippy::expect_used,
+            reason = "machine present before resume_bind_projected"
+        )]
         let machine = machine
             .as_mut()
             .expect("machine present before resume_bind_projected");
@@ -645,6 +694,10 @@ impl PersistentSession {
             ask_tag,
             ..
         } = self;
+        #[allow(
+            clippy::expect_used,
+            reason = "machine bootstrapped before bind_funcid_render"
+        )]
         let machine = machine
             .as_mut()
             .expect("machine bootstrapped before bind_funcid_render");
@@ -679,6 +732,10 @@ impl PersistentSession {
             ask_tag,
             ..
         } = self;
+        #[allow(
+            clippy::expect_used,
+            reason = "machine present before resume_bind_render"
+        )]
         let machine = machine
             .as_mut()
             .expect("machine present before resume_bind_render");
@@ -824,6 +881,7 @@ impl PersistentSession {
         }
         let import_modules = self.current_val_modules_in(scope);
         let inject_modules = self.live_val_modules();
+        #[allow(clippy::expect_used, reason = "decl plane present")]
         self.lib
             .as_mut()
             .expect("decl plane present")
@@ -1071,6 +1129,10 @@ impl MachineLease<'_> {
     /// through this type's own API, kept as a `debug_assert`-strength backstop
     /// rather than an `unwrap` a reviewer has to re-verify by hand.
     pub fn parts(&mut self) -> (&mut JitEffectMachine, &DataConTable) {
+        #[allow(
+            clippy::expect_used,
+            reason = "lease holds its machine for its whole lifetime"
+        )]
         let machine = self
             .machine
             .as_mut()

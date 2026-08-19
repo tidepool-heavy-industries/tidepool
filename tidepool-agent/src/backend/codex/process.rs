@@ -617,7 +617,12 @@ impl<T: Transport> Session<T> {
         let mut stop = self.start_turn(turn_start, timeout).await?;
         loop {
             match stop {
-                TurnStop::Completed(turn) => {
+                TurnStop::Completed(turn) =>
+                {
+                    #[allow(
+                        clippy::expect_used,
+                        reason = "pump refuses to complete without the turn/start response"
+                    )]
                     return Ok(LiveTurnOutcome {
                         turn_start_response: self
                             .turn

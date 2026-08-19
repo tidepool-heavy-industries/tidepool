@@ -477,6 +477,10 @@ impl<O: OutputSink> SessionEngine<O> {
         let cancel_thread = Arc::clone(&cancel_slot);
         let captured_thread = captured.clone();
 
+        #[allow(
+            clippy::expect_used,
+            reason = "spawning a named thread with a fixed stack size does not fail in practice"
+        )]
         let handle = std::thread::Builder::new()
             .name("tidepool-eval".into())
             .stack_size(EVAL_STACK_SIZE)
@@ -653,6 +657,7 @@ impl<O: OutputSink> SessionEngine<O> {
                     state: ContinuationState::Paused { .. },
                     ..
                 }) => {
+                    #[allow(clippy::expect_used, reason = "present: checked under the same lock")]
                     let session = conts
                         .remove(cont_id)
                         .expect("present: checked under the same lock");
@@ -696,6 +701,10 @@ impl<O: OutputSink> SessionEngine<O> {
                             return ResumeOutcome::Invalid(v);
                         }
                         Ok(canonical) => {
+                            #[allow(
+                                clippy::expect_used,
+                                reason = "present: checked under the same lock"
+                            )]
                             let session = conts
                                 .remove(cont_id)
                                 .expect("present: checked under the same lock");

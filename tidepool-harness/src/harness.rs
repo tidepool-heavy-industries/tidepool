@@ -1079,6 +1079,7 @@ impl Harness {
         // Same reset, name side: the shared session's own runs are ROOT-scoped,
         // never sticky on whichever answerer window ran last. ROOT is always
         // live (`ScopeTree::is_live`), so this can never be refused.
+        #[allow(clippy::expect_used, reason = "ScopeId::ROOT is always live")]
         co.machine()
             .set_scope(ScopeId::ROOT)
             .expect("ScopeId::ROOT is always live");
@@ -2181,6 +2182,10 @@ impl Harness {
         // singleton — so a normal loop exit always has one. A `None` here
         // would mean `items` was empty, which `run_block`'s `> 1` guard
         // already rules out.
+        #[allow(
+            clippy::expect_used,
+            reason = "run_multi_item_block: the loop always sets last_outcome"
+        )]
         Ok(last_outcome.expect("run_multi_item_block: the loop always sets last_outcome"))
     }
 
@@ -4457,6 +4462,7 @@ impl Harness {
                     "run_checked_out: node {node:?}'s recorded scope {scope:?} is dead ({e}); \
                      falling back to ROOT"
                 );
+                #[allow(clippy::expect_used, reason = "ScopeId::ROOT is always live")]
                 machine
                     .set_scope(ScopeId::ROOT)
                     .expect("ScopeId::ROOT is always live");

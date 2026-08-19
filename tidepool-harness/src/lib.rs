@@ -7,6 +7,7 @@
 //! ([`selfharness`]). See this crate's `CLAUDE.md` for the full module map
 //! and the machine-lifecycle/replay-scope notes that don't fit here.
 
+#![warn(clippy::unwrap_used, clippy::expect_used)]
 pub mod effect_trace;
 pub mod engine;
 pub mod forcing;

@@ -2614,6 +2614,10 @@ fn emit_boxing_wrapper_guard(
 
     builder.switch_to_block(shape_trap_block);
     builder.seal_block(shape_trap_block);
+    #[allow(
+        clippy::expect_used,
+        reason = "runtime_shape_trap is registered unconditionally by CodegenPipeline::new"
+    )]
     let trap_fn = pipeline
         .module
         .declare_function(
@@ -2657,6 +2661,10 @@ fn emit_boxing_wrapper_guard(
 /// 0 is below `MIN_VALID_ADDR`, so the host fn's `check_ptr_invalid` guard
 /// poisons immediately without ever reading through it.
 fn emit_addr_raw_kind_trap(pipeline: &mut CodegenPipeline, builder: &mut FunctionBuilder) -> Value {
+    #[allow(
+        clippy::expect_used,
+        reason = "runtime_shape_trap is registered unconditionally by CodegenPipeline::new"
+    )]
     let trap_fn = pipeline
         .module
         .declare_function(
@@ -2737,6 +2745,10 @@ fn emit_addr_deref_guard(
 
     builder.switch_to_block(trap_block);
     builder.seal_block(trap_block);
+    #[allow(
+        clippy::expect_used,
+        reason = "runtime_shape_trap is registered unconditionally by CodegenPipeline::new"
+    )]
     let trap_fn = pipeline
         .module
         .declare_function(
@@ -2847,6 +2859,10 @@ fn emit_array_raw_kind_trap(
     pipeline: &mut CodegenPipeline,
     builder: &mut FunctionBuilder,
 ) -> Value {
+    #[allow(
+        clippy::expect_used,
+        reason = "runtime_shape_trap is registered unconditionally by CodegenPipeline::new"
+    )]
     let trap_fn = pipeline
         .module
         .declare_function(
@@ -2946,6 +2962,10 @@ fn unbox_addr(pipeline: &mut CodegenPipeline, builder: &mut FunctionBuilder, val
 
             builder.switch_to_block(addr_trap_block);
             builder.seal_block(addr_trap_block);
+            #[allow(
+                clippy::expect_used,
+                reason = "runtime_shape_trap is registered unconditionally by CodegenPipeline::new"
+            )]
             let trap_fn = pipeline
                 .module
                 .declare_function(
@@ -3079,6 +3099,10 @@ fn unbox_bytearray(
 
             builder.switch_to_block(array_trap_block);
             builder.seal_block(array_trap_block);
+            #[allow(
+                clippy::expect_used,
+                reason = "runtime_shape_trap is registered unconditionally by CodegenPipeline::new"
+            )]
             let trap_fn = pipeline
                 .module
                 .declare_function(
@@ -3184,6 +3208,10 @@ fn unbox_numeric(
             );
             builder.switch_to_block(thunk_force_block);
             builder.seal_block(thunk_force_block);
+            #[allow(
+                clippy::expect_used,
+                reason = "heap_force is registered unconditionally by CodegenPipeline::new"
+            )]
             let force_fn = pipeline
                 .module
                 .declare_function(
@@ -3261,6 +3289,10 @@ fn unbox_numeric(
 
             builder.switch_to_block(lit_trap_block);
             builder.seal_block(lit_trap_block);
+            #[allow(
+                clippy::expect_used,
+                reason = "runtime_shape_trap is registered unconditionally by CodegenPipeline::new"
+            )]
             let trap_fn = pipeline
                 .module
                 .declare_function(

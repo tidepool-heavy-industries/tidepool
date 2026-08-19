@@ -5,6 +5,7 @@
 //! as a [`CoreExpr`]. It also defines identifiers, literals, and a
 //! [`DataConTable`] for constructor metadata.
 
+#![warn(clippy::unwrap_used, clippy::expect_used)]
 pub mod builder;
 pub mod datacon;
 pub mod datacon_table;

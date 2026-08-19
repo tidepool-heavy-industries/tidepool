@@ -181,6 +181,7 @@ impl WorktreeRegistry {
     /// Durably record a receipt. Overwrites an existing row for the same id
     /// (the snapshot lane writes `snapshot_ref` after creation).
     pub fn put(&self, receipt: &WorktreeReceipt) -> Result<(), WorktreeError> {
+        #[allow(clippy::expect_used, reason = "serialize WorktreeReceipt")]
         let bytes = serde_json::to_vec_pretty(receipt).expect("serialize WorktreeReceipt");
         write_atomic(&self.record_path(&receipt.worktree_id), &bytes)
     }

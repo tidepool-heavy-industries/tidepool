@@ -11,6 +11,10 @@ pub static SUITE_META: &[u8] = include_bytes!("../../haskell/test/suite_cbor/met
 
 /// The `DataConTable` every suite fixture was compiled against.
 pub fn suite_table() -> DataConTable {
+    #[allow(
+        clippy::unwrap_used,
+        reason = "SUITE_META is a checked-in, build-time-included fixture; a decode failure means the fixture is corrupt"
+    )]
     read_metadata(SUITE_META).unwrap().0
 }
 

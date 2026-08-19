@@ -44,7 +44,15 @@ pub fn parse(input: &str) -> miette::Result<TExpr> {
         }
     })?;
 
+    #[allow(
+        clippy::unwrap_used,
+        reason = "pest grammar guarantees this rule has at least one inner pair; an empty match here is a grammar bug, not a runtime input condition"
+    )]
     let pair = pairs.into_iter().next().unwrap();
+    #[allow(
+        clippy::unwrap_used,
+        reason = "pest grammar guarantees this rule has at least one inner pair; an empty match here is a grammar bug, not a runtime input condition"
+    )]
     parse_expr(pair.into_inner().next().unwrap())
         .map_err(|e| miette::miette!("Structural parse error: {}", e))
 }
@@ -55,6 +63,10 @@ fn parse_expr(pair: Pair<Rule>) -> Result<TExpr, String> {
         Rule::if_expr => parse_if(pair),
         Rule::lambda_expr => parse_lambda(pair),
         Rule::comparison => parse_comparison(pair),
+        #[allow(
+            clippy::unwrap_used,
+            reason = "pest grammar guarantees this rule has at least one inner pair; an empty match here is a grammar bug, not a runtime input condition"
+        )]
         Rule::expr => parse_expr(pair.into_inner().next().unwrap()),
         _ => Err(format!(
             "Unexpected rule in parse_expr: {:?}",
@@ -65,7 +77,15 @@ fn parse_expr(pair: Pair<Rule>) -> Result<TExpr, String> {
 
 fn parse_let(pair: Pair<Rule>) -> Result<TExpr, String> {
     let mut inner = pair.into_inner();
+    #[allow(
+        clippy::unwrap_used,
+        reason = "pest grammar guarantees let_expr has an identifier pair"
+    )]
     let ident = inner.next().unwrap().as_str().to_string();
+    #[allow(
+        clippy::unwrap_used,
+        reason = "pest grammar guarantees let_expr has a value pair"
+    )]
     let val = parse_expr(inner.next().unwrap())?;
     if let Some(body_pair) = inner.next() {
         let body = parse_expr(body_pair)?;
@@ -78,14 +98,30 @@ fn parse_let(pair: Pair<Rule>) -> Result<TExpr, String> {
 
 fn parse_if(pair: Pair<Rule>) -> Result<TExpr, String> {
     let mut inner = pair.into_inner();
+    #[allow(
+        clippy::unwrap_used,
+        reason = "pest grammar guarantees if_expr has a condition pair"
+    )]
     let cond = parse_expr(inner.next().unwrap())?;
+    #[allow(
+        clippy::unwrap_used,
+        reason = "pest grammar guarantees if_expr has a then-branch pair"
+    )]
     let t = parse_expr(inner.next().unwrap())?;
+    #[allow(
+        clippy::unwrap_used,
+        reason = "pest grammar guarantees if_expr has an else-branch pair"
+    )]
     let e = parse_expr(inner.next().unwrap())?;
     Ok(TExpr::TIf(Box::new(cond), Box::new(t), Box::new(e)))
 }
 
 fn parse_lambda(pair: Pair<Rule>) -> Result<TExpr, String> {
     let mut inner = pair.into_inner().collect::<Vec<_>>();
+    #[allow(
+        clippy::unwrap_used,
+        reason = "pest grammar guarantees lambda_expr has a body pair"
+    )]
     let body_pair = inner.pop().unwrap();
     let params = inner.into_iter().map(|p| p.as_str().to_string()).collect();
     let body = parse_expr(body_pair)?;
@@ -141,9 +177,17 @@ where
             op_pair.as_str()
         } else {
             // Some rules like comp_op have nested ops
+            #[allow(
+                clippy::unwrap_used,
+                reason = "pest grammar guarantees a nested-op rule has an inner op pair"
+            )]
             op_pair.into_inner().next().unwrap().as_str()
         };
         let op = mapper(op_str);
+        #[allow(
+            clippy::unwrap_used,
+            reason = "pest grammar guarantees a binary-op rule has a right-hand pair"
+        )]
         let right = next(inner.next().unwrap())?;
         left = TExpr::TBinOp(op, Box::new(left), Box::new(right));
     }
@@ -165,8 +209,16 @@ fn map_comp_op(op: &str) -> BinOp {
 
 fn parse_unary(pair: Pair<Rule>) -> Result<TExpr, String> {
     let mut inner = pair.into_inner();
+    #[allow(
+        clippy::unwrap_used,
+        reason = "pest grammar guarantees a unary rule has at least one inner pair"
+    )]
     let first = inner.next().unwrap();
     if first.as_rule() == Rule::neg_op {
+        #[allow(
+            clippy::unwrap_used,
+            reason = "neg_op is only matched when a following operand pair exists"
+        )]
         let val = parse_unary(inner.next().unwrap())?;
         Ok(TExpr::TBinOp(
             BinOp::Sub,
@@ -180,6 +232,10 @@ fn parse_unary(pair: Pair<Rule>) -> Result<TExpr, String> {
 
 fn parse_call(pair: Pair<Rule>) -> Result<TExpr, String> {
     let mut inner = pair.into_inner();
+    #[allow(
+        clippy::unwrap_used,
+        reason = "pest grammar guarantees a call rule has an atom pair"
+    )]
     let atom_pair = inner.next().unwrap();
     let mut current = parse_atom(atom_pair)?;
 
@@ -205,6 +261,10 @@ fn parse_arg_list(pair: Pair<Rule>) -> Result<Vec<TExpr>, String> {
 }
 
 fn parse_atom(pair: Pair<Rule>) -> Result<TExpr, String> {
+    #[allow(
+        clippy::unwrap_used,
+        reason = "pest grammar guarantees parse_atom's rule has an inner pair"
+    )]
     let inner = pair.into_inner().next().unwrap();
     match inner.as_rule() {
         Rule::int_lit => Ok(TExpr::TInt(

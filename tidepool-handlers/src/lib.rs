@@ -20,6 +20,7 @@
 //! let server = TidepoolMcpServer::new(stack);
 //! ```
 
+#![warn(clippy::unwrap_used, clippy::expect_used)]
 use std::path::PathBuf;
 
 use tidepool_mcp::{CapturedOutput, CollectEffectDecls, EffectDecl};

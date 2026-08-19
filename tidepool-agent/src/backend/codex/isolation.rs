@@ -29,6 +29,7 @@ pub fn codex_home() -> PathBuf {
     if let Some(dir) = std::env::var_os("CODEX_HOME") {
         return PathBuf::from(dir);
     }
+    #[allow(clippy::expect_used, reason = "HOME must be set to locate ~/.codex")]
     let home = std::env::var_os("HOME").expect("HOME must be set to locate ~/.codex");
     PathBuf::from(home).join(".codex")
 }

@@ -32,6 +32,7 @@
 //! - [`introspect`] — `:i` source-scan resolution for stdlib/preamble types.
 //! - [`truncate`] — Rust-side result truncation + the `:stub <n>` fetch lane.
 
+#![warn(clippy::unwrap_used, clippy::expect_used)]
 pub mod command;
 pub mod introspect;
 pub mod manager;

@@ -4,6 +4,7 @@
 //! Includes runtime representations ([`Value`]), environment management ([`Env`]),
 //! and thunk storage ([`Heap`]).
 
+#![warn(clippy::unwrap_used, clippy::expect_used)]
 pub mod env;
 pub mod error;
 pub mod eval;

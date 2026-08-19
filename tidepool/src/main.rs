@@ -1,3 +1,4 @@
+#![warn(clippy::unwrap_used, clippy::expect_used)]
 use std::net::SocketAddr;
 
 use tidepool_handlers::HandlerConfig;

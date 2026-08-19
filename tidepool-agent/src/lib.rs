@@ -14,6 +14,7 @@
 //!    broken the boundary, because a backend version bump then reaches the
 //!    Haskell surface.
 
+#![warn(clippy::unwrap_used, clippy::expect_used)]
 pub mod backend;
 pub mod seam;
 pub mod spawn;

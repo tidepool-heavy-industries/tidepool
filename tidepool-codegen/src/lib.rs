@@ -3,6 +3,7 @@
 //! Compiles `CoreExpr` to native code via Cranelift, with effect machine support
 //! for yielding on algebraic effects and resuming with handler responses.
 
+#![warn(clippy::unwrap_used, clippy::expect_used)]
 pub mod alloc;
 pub mod binding_table;
 pub mod context;

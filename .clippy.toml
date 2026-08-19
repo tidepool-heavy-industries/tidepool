@@ -1,0 +1,6 @@
+# unwrap_used/expect_used (workspace.lints.clippy, Cargo.toml) are
+# restriction lints scoped to PRODUCTION code — test code idiomatically
+# uses .unwrap()/.expect() on known-good values, which is not the hygiene
+# gap those lints exist to catch.
+allow-unwrap-in-tests = true
+allow-expect-in-tests = true

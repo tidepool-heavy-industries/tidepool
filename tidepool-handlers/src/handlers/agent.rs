@@ -1009,6 +1009,10 @@ impl SubagentHandler {
                 "just confirmed an Async entry at this id, and update_async never removes one"
             );
         };
+        #[allow(
+            clippy::expect_used,
+            reason = "collect always leaves the entry Settled"
+        )]
         async_cycle
             .settled_terminal()
             .expect("collect always leaves the entry Settled")

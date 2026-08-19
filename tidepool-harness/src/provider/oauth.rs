@@ -139,6 +139,7 @@ pub fn load_token(path: &Path) -> Option<TokenSet> {
 }
 
 pub fn save_token(path: &Path, token: &TokenSet) -> std::io::Result<()> {
+    #[allow(clippy::expect_used, reason = "TokenSet serializes")]
     let json = serde_json::to_string(token).expect("TokenSet serializes");
     write_secret(path, &json)
 }

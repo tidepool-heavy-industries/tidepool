@@ -1,3 +1,4 @@
+#![warn(clippy::unwrap_used, clippy::expect_used)]
 extern crate proc_macro;
 use proc_macro::TokenStream;
 

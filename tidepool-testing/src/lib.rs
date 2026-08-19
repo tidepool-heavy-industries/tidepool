@@ -14,6 +14,7 @@
 //! keep driving the production compile→JIT→dispatch path. See that module's docs
 //! for the pure / effectful / compile-only recipes.
 
+#![warn(clippy::unwrap_used, clippy::expect_used)]
 pub mod bridge_roundtrip;
 pub mod compare;
 pub mod differential;

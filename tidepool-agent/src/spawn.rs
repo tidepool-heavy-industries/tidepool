@@ -938,6 +938,10 @@ impl CycleSaga {
         // consumed exactly once, whether or not the settle below succeeds:
         // there is no second receipt to retry with, so `settled` flips to
         // `true` unconditionally once a settle attempt has been made.
+        #[allow(
+            clippy::expect_used,
+            reason = "an unsettled saga always holds its lease"
+        )]
         let lease = self
             .active_binding
             .take()
@@ -977,6 +981,10 @@ impl CycleSaga {
                 // (`answer` refuses before calling it otherwise), and that is
                 // exactly the invariant that keeps `active_binding` `Some`
                 // here.
+                #[allow(
+                    clippy::expect_used,
+                    reason = "settle_step is only reached while !self.settled, which is exactly the invariant keeping active_binding Some here"
+                )]
                 let lease = self.active_binding.take().expect(
                     "settle_step only runs on an unsettled saga, which always holds its lease",
                 );
@@ -1268,6 +1276,7 @@ impl CoupledSpawner {
                 detail: self.no_such_agent_detail(),
             });
         }
+        #[allow(clippy::expect_used, reason = "checked just above")]
         let saga = self.running.get_mut(&agent).expect("checked just above");
         let result = saga.answer(backend, agent, call, outcome);
         // A saga whose life ended — completed, rolled back, or backstopped —

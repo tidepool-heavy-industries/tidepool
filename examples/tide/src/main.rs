@@ -1,3 +1,4 @@
+#![warn(clippy::unwrap_used, clippy::expect_used)]
 use anyhow::{Context, Result};
 use clap::Parser;
 use tidepool_codegen::jit_machine::{JitEffectMachine, JitError};
@@ -35,6 +36,7 @@ fn main() -> Result<()> {
         })
         .context("Failed to spawn runtime thread")?;
 
+    #[allow(clippy::expect_used, reason = "Runtime thread panicked")]
     handler.join().expect("Runtime thread panicked")
 }
 

@@ -8,6 +8,7 @@
 //! across `session_run` turns and Lane-A declarations accumulate, so the
 //! effects compose over persistent, typed session state.
 
+#![warn(clippy::unwrap_used, clippy::expect_used)]
 use std::net::SocketAddr;
 
 use tidepool_handlers::{build_base_stack, HandlerConfig};

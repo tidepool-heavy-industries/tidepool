@@ -3,6 +3,7 @@
 //! Provides `compile_haskell` (source to Core) and `compile_and_run` (source to
 //! evaluated result), with filesystem caching of compiled CBOR artifacts.
 
+#![warn(clippy::unwrap_used, clippy::expect_used)]
 use std::io;
 use std::path::{Path, PathBuf};
 use thiserror::Error;
@@ -175,6 +176,10 @@ pub fn compile_haskell_salted(
         cache: artifacts::CacheStrategy::Eval { salt: cache_salt },
     };
     let mut bundle = artifacts::compile_invocation(&inv, |_, _, _| {})?;
+    #[allow(
+        clippy::expect_used,
+        reason = "compile_invocation compiled exactly this target"
+    )]
     let TargetArtifact { expr, .. } = bundle
         .targets
         .remove(target)

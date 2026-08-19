@@ -269,6 +269,7 @@ pub unsafe fn heap_to_value(
         }
     }
 
+    #[allow(clippy::expect_used, reason = "heap_to_value: empty result stack")]
     results.pop().expect("heap_to_value: empty result stack")
 }
 

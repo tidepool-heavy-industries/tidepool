@@ -25,6 +25,7 @@
 //! target already exists) — that is a different primitive for a different
 //! job and stays with its one caller.
 
+#![warn(clippy::unwrap_used, clippy::expect_used)]
 use std::io::Write;
 use std::path::{Path, PathBuf};
 

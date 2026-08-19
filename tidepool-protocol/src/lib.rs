@@ -37,6 +37,7 @@
 //! `plans/self-iterating-harness/22-p1-protocol-scaffold.md` for the schema
 //! design, the golden protocol, and the procedure for migrating the next one.
 
+#![warn(clippy::unwrap_used, clippy::expect_used)]
 pub mod effects;
 pub mod gen;
 pub mod hs;

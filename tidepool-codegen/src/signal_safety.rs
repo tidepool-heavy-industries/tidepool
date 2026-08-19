@@ -244,6 +244,10 @@ mod inner {
     unsafe extern "C" fn trampoline<F: FnOnce() -> R, R>(userdata: *mut libc::c_void) {
         let payload = &mut *(userdata as *mut Payload<F, R>);
         let f = payload.f.take();
+        #[allow(
+            clippy::unwrap_used,
+            reason = "f was set at construction and taken here exactly once, by this trampoline's own single-shot contract"
+        )]
         let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || f.unwrap()()));
         match outcome {
             Ok(r) => payload.result = Some(r),

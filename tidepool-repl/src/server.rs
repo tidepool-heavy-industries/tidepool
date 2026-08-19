@@ -146,6 +146,10 @@ where
 {
     tokio::task::spawn_blocking(move || {
         let joined = std::thread::scope(|scope| {
+            #[allow(
+                clippy::expect_used,
+                reason = "spawn_scoped a named thread with a fixed stack size does not fail in practice"
+            )]
             std::thread::Builder::new()
                 .name("tidepool-repl-turn".into())
                 .stack_size(tidepool_runtime::EVAL_STACK_SIZE)

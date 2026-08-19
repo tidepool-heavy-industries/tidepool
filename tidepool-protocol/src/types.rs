@@ -603,6 +603,7 @@ impl DomainMap {
     /// Panics on an empty `domain_path`.
     #[must_use]
     pub fn domain_ident(&self) -> &'static str {
+        #[allow(clippy::expect_used, reason = "a domain path has at least one segment")]
         self.domain_path
             .rsplit("::")
             .next()

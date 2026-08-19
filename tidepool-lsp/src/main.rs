@@ -10,6 +10,7 @@
 //!   --root    workspace root (default: current directory)
 //!   --socket  socket path (default: $TIDEPOOL_LSP_SOCK or `<root>/.tidepool/lsp.sock`)
 
+#![warn(clippy::unwrap_used, clippy::expect_used)]
 mod diff;
 mod jsonrpc;
 mod registry;
@@ -40,6 +41,7 @@ struct Args {
 
 fn main() {
     let args = Args::parse();
+    #[allow(clippy::expect_used, reason = "cwd")]
     let root = args
         .root
         .unwrap_or_else(|| std::env::current_dir().expect("cwd"));

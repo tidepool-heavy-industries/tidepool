@@ -246,6 +246,7 @@ impl<M> NodeTree<M> {
             },
         );
         if let Some(p) = parent {
+            #[allow(clippy::expect_used, reason = "checked present above")]
             inner
                 .nodes
                 .get_mut(&p)
@@ -275,6 +276,7 @@ impl<M> NodeTree<M> {
         inner.next_session_id += 1;
         self.registry.insert_idle(session, machine);
 
+        #[allow(clippy::expect_used, reason = "checked present above")]
         let entry = inner.nodes.get_mut(&node).expect("checked present above");
         entry.state = NodeState::Running;
         entry.session = Some(session);
@@ -302,6 +304,7 @@ impl<M> NodeTree<M> {
             other => return Err(TreeError::NotThunk(node, other.clone())),
         }
         inner.writer.append(Event::Forced { node, actor })?;
+        #[allow(clippy::expect_used, reason = "checked present above")]
         let entry = inner.nodes.get_mut(&node).expect("checked present above");
         entry.state = NodeState::Running;
         entry.session = Some(session);
@@ -395,11 +398,14 @@ impl<M> NodeTree<M> {
             prompt,
             fork,
         })?;
-        inner
-            .nodes
-            .get_mut(&node)
-            .expect("checked present above")
-            .state = NodeState::Suspended { hole };
+        #[allow(clippy::expect_used, reason = "checked present above")]
+        {
+            inner
+                .nodes
+                .get_mut(&node)
+                .expect("checked present above")
+                .state = NodeState::Suspended { hole };
+        }
         Ok(())
     }
 
@@ -446,11 +452,14 @@ impl<M> NodeTree<M> {
             other => return Err(TreeError::NotSuspended(node, other.clone())),
         }
         inner.writer.append(Event::HoleConsumed { node, hole })?;
-        inner
-            .nodes
-            .get_mut(&node)
-            .expect("checked present above")
-            .state = NodeState::Running;
+        #[allow(clippy::expect_used, reason = "checked present above")]
+        {
+            inner
+                .nodes
+                .get_mut(&node)
+                .expect("checked present above")
+                .state = NodeState::Running;
+        }
         Ok(())
     }
 
@@ -609,11 +618,14 @@ impl<M> NodeTree<M> {
             node,
             result_rendered,
         })?;
-        inner
-            .nodes
-            .get_mut(&node)
-            .expect("checked present above")
-            .state = NodeState::Done;
+        #[allow(clippy::expect_used, reason = "checked present above")]
+        {
+            inner
+                .nodes
+                .get_mut(&node)
+                .expect("checked present above")
+                .state = NodeState::Done;
+        }
         Ok(())
     }
 
@@ -629,11 +641,14 @@ impl<M> NodeTree<M> {
             NodeState::Done => {}
             other => return Err(TreeError::NotReopenable(node, other.clone())),
         }
-        inner
-            .nodes
-            .get_mut(&node)
-            .expect("checked present above")
-            .state = NodeState::Running;
+        #[allow(clippy::expect_used, reason = "checked present above")]
+        {
+            inner
+                .nodes
+                .get_mut(&node)
+                .expect("checked present above")
+                .state = NodeState::Running;
+        }
         Ok(())
     }
 
@@ -653,11 +668,14 @@ impl<M> NodeTree<M> {
             node,
             reason: reason.clone(),
         })?;
-        inner
-            .nodes
-            .get_mut(&node)
-            .expect("checked present above")
-            .state = NodeState::Cancelled { reason };
+        #[allow(clippy::expect_used, reason = "checked present above")]
+        {
+            inner
+                .nodes
+                .get_mut(&node)
+                .expect("checked present above")
+                .state = NodeState::Cancelled { reason };
+        }
         Ok(())
     }
 

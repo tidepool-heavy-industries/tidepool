@@ -209,6 +209,7 @@ pub fn replace_subtree(
                     for node in &replacement.nodes {
                         new_nodes.push(node.clone().map_layer(|j| j + offset));
                     }
+                    #[allow(clippy::expect_used, reason = "replacement tree must not be empty")]
                     let root = new_nodes
                         .len()
                         .checked_sub(1)

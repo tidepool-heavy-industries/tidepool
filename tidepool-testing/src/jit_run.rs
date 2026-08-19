@@ -39,9 +39,15 @@ impl JitRun {
 /// Set up pipeline + `nursery_size`-byte nursery, compile `tree`, call it,
 /// and return the result with its backing state kept alive.
 pub fn compile_and_run(tree: &CoreExpr, nursery_size: usize) -> JitRun {
+    #[allow(
+        clippy::unwrap_used,
+        reason = "host_fn_symbols() is a fixed, compile-time-known table; construction only fails on a build-time registration bug"
+    )]
     let mut pipeline = CodegenPipeline::new(&host_fns::host_fn_symbols()).unwrap();
+    #[allow(clippy::expect_used, reason = "compile_expr failed")]
     let func_id = compile_expr(&mut pipeline, tree, "test_fn", &ExternalEnv::new())
         .expect("compile_expr failed");
+    #[allow(clippy::expect_used, reason = "failed to finalize")]
     pipeline.finalize().expect("failed to finalize");
 
     let mut nursery = vec![0u8; nursery_size];

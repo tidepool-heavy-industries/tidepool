@@ -151,6 +151,10 @@ impl CheckoutCustody {
     /// out. Every legitimate settlement (`restore_idle`/`restore_suspended`/
     /// `retire`) goes through this exactly once.
     fn into_epoch(mut self) -> u64 {
+        #[allow(
+            clippy::expect_used,
+            reason = "CheckoutCustody always holds an epoch until into_epoch consumes it"
+        )]
         self.0
             .take()
             .expect("CheckoutCustody always holds an epoch until into_epoch consumes it")

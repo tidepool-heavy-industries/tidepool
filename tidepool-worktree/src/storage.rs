@@ -33,10 +33,13 @@ use crate::error::WorktreeError;
 /// If the system clock reads before the Unix epoch — see the module docs for
 /// why every caller here deliberately panics rather than degrading.
 pub fn now_ms() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("system clock is before the Unix epoch")
-        .as_millis() as i64
+    #[allow(clippy::expect_used, reason = "system clock is before the Unix epoch")]
+    {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock is before the Unix epoch")
+            .as_millis() as i64
+    }
 }
 
 /// Build a [`WorktreeError::StorageFailure`] naming the path that actually

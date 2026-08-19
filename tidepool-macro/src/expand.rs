@@ -87,6 +87,10 @@ fn resolve_hs_path(
         .to_compile_error());
     }
 
+    #[allow(
+        clippy::unwrap_used,
+        reason = "abs_hs_path is derived from the crate's own build environment, which this project assumes is UTF-8"
+    )]
     let basename = abs_hs_path.file_stem().unwrap().to_str().unwrap();
     let src_bytes = match std::fs::read(&abs_hs_path) {
         Ok(b) => b,
@@ -205,11 +209,20 @@ fn expand_hs(path_lit: &LitStr, raw_path: &str) -> TokenStream {
         Err(e) => return e,
     };
 
+    #[allow(
+        clippy::unwrap_used,
+        reason = "cbor_path is derived from the crate's own build environment, which this project assumes is UTF-8"
+    )]
     let cbor_path_str = cbor_path.to_str().unwrap();
+    #[allow(
+        clippy::unwrap_used,
+        reason = "abs_hs_path is derived from the crate's own build environment, which this project assumes is UTF-8"
+    )]
     let hs_abs_str = abs_hs_path.to_str().unwrap();
     let dep_tracks: Vec<TokenStream> = dep_paths
         .iter()
         .map(|p| {
+            #[allow(clippy::unwrap_used, reason = "dep_paths are derived from the crate's own build environment, which this project assumes is UTF-8")]
             let s = p.to_str().unwrap().to_string();
             quote! { const _: &[u8] = include_bytes!(#s); }
         })
@@ -497,9 +510,21 @@ pub fn expand_inline(input: TokenStream) -> TokenStream {
         .to_compile_error();
     }
 
+    #[allow(
+        clippy::unwrap_used,
+        reason = "cbor_path is derived from the crate's own build environment, which this project assumes is UTF-8"
+    )]
     let cbor_path_str = cbor_path.to_str().unwrap();
     let meta_path = output_dir.join("meta.cbor");
+    #[allow(
+        clippy::unwrap_used,
+        reason = "meta_path is derived from the crate's own build environment, which this project assumes is UTF-8"
+    )]
     let meta_path_str = meta_path.to_str().unwrap();
+    #[allow(
+        clippy::unwrap_used,
+        reason = "hs_file is derived from the crate's own build environment, which this project assumes is UTF-8"
+    )]
     let hs_path_str = hs_file.to_str().unwrap();
 
     // Track every spliced include-dir `.hs` file (the same validated list
@@ -511,6 +536,7 @@ pub fn expand_inline(input: TokenStream) -> TokenStream {
         .flat_map(|d| &d.hs_files)
         .chain(extra_dep_paths.iter())
         .map(|p| {
+            #[allow(clippy::unwrap_used, reason = "include_dirs are derived from the crate's own build environment, which this project assumes is UTF-8")]
             let s = p.to_str().unwrap().to_string();
             quote! { const _: &[u8] = include_bytes!(#s); }
         })
@@ -905,6 +931,7 @@ fn extract_identity() -> u64 {
                 bytes.hash(&mut h);
             }
             None => {
+                #[allow(clippy::expect_used, reason = "CARGO_MANIFEST_DIR not set")]
                 let manifest_dir =
                     std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR not set");
                 let flake_root = find_flake_root(Path::new(&manifest_dir)).unwrap_or_else(|| {
@@ -1116,6 +1143,10 @@ fn find_single_binding(output_dir: &Path) -> Result<PathBuf, String> {
 
     match entries.len() {
         0 => Err("No .cbor bindings produced by tidepool-extract".to_string()),
+        #[allow(
+            clippy::unwrap_used,
+            reason = "match arm already established entries.len() == 1"
+        )]
         1 => Ok(entries.into_iter().next().unwrap()),
         _ => {
             let names: Vec<String> = entries

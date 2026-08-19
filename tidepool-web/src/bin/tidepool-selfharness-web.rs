@@ -20,6 +20,7 @@
 //! which boots the same server via [`tidepool_web::spawn_operator_server`]
 //! and wires the returned gate into `SelfHarnessDriver`.
 
+#![warn(clippy::unwrap_used, clippy::expect_used)]
 use std::sync::Arc;
 
 use clap::Parser;
@@ -87,7 +88,15 @@ fn demo_loop_concurrent(gate: Arc<WebGate>) {
         let g2 = gate.clone();
         let h2 = std::thread::spawn(move || g2.present_form(&sample_form_b()));
 
+        #[allow(
+            clippy::unwrap_used,
+            reason = "demo smoke-test thread; a panic here means the interactive demo itself is broken"
+        )]
         let a = h1.join().unwrap();
+        #[allow(
+            clippy::unwrap_used,
+            reason = "demo smoke-test thread; a panic here means the interactive demo itself is broken"
+        )]
         let b = h2.join().unwrap();
         eprintln!(
             "[demo:beta] both concurrent asks resolved: a={} b={}",

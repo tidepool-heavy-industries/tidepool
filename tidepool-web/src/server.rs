@@ -209,6 +209,10 @@ impl AppState {
     /// (its `data-rev` nonce).
     fn publish_ask(&self, node_id: &str, pending: Pending) -> u64 {
         let mut reg = self.registry.lock();
+        #[allow(
+            clippy::expect_used,
+            reason = "WebGate only holds ids from register_node, which always inserts one"
+        )]
         let slot = reg
             .nodes
             .get_mut(node_id)
@@ -225,6 +229,7 @@ impl AppState {
     /// Push a `note` onto `node_id`'s feed, bump its revision, and ping.
     fn push_note(&self, node_id: &str, text: String) {
         let mut reg = self.registry.lock();
+        #[allow(clippy::expect_used, reason = "registered node")]
         let slot = reg.nodes.get_mut(node_id).expect("registered node");
         slot.notes.push(text);
         slot.rev += 1;
@@ -237,6 +242,7 @@ impl AppState {
     /// already-quiet feed doesn't force a redundant re-render.
     fn clear_notes(&self, node_id: &str) {
         let mut reg = self.registry.lock();
+        #[allow(clippy::expect_used, reason = "registered node")]
         let slot = reg.nodes.get_mut(node_id).expect("registered node");
         if slot.notes.is_empty() {
             return;
@@ -251,6 +257,7 @@ impl AppState {
     /// [`TURN_HISTORY_CAP`]), bump its revision, and ping.
     fn push_turn_source(&self, node_id: &str, source: String) {
         let mut reg = self.registry.lock();
+        #[allow(clippy::expect_used, reason = "registered node")]
         let slot = reg.nodes.get_mut(node_id).expect("registered node");
         slot.turn_history.push_back(source);
         if slot.turn_history.len() > TURN_HISTORY_CAP {

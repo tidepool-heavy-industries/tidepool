@@ -238,6 +238,10 @@ fn emit_data_dispatch(
         let is_wrapper = Some(alt_idx) == wrapper_pos;
 
         let alt_block = if is_wrapper {
+            #[allow(
+                clippy::expect_used,
+                reason = "wrapper_block is Some whenever wrapper_pos is Some"
+            )]
             wrapper_block.expect("wrapper_block is Some whenever wrapper_pos is Some")
         } else {
             args.builder.create_block()

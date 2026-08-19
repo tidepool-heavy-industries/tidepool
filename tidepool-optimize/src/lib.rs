@@ -3,6 +3,7 @@
 //! Includes beta reduction, case reduction, dead code elimination, inlining,
 //! occurrence analysis, and partial evaluation.
 
+#![warn(clippy::unwrap_used, clippy::expect_used)]
 /// Beta reduction: `(\x -> body) arg` → `body` with `x` substituted for `arg`.
 pub mod beta;
 /// Case-of-known-constructor and case-of-known-literal reduction.

@@ -396,6 +396,7 @@ pub fn make_map_from_sorted(
         }
         let size = entries.len() as i64;
         let mid = entries.len() / 2;
+        #[allow(clippy::expect_used, reason = "entry taken twice")]
         let (k, v) = entries[mid].take().expect("entry taken twice");
         let (l, r) = entries.split_at_mut(mid);
         let left = go(l, bin, tip, i);
@@ -633,6 +634,7 @@ pub fn bignat_bytes_to_decimal(bytes: &[u8]) -> String {
         }
     }
     digits.reverse();
+    #[allow(clippy::expect_used, reason = "only ascii digits")]
     String::from_utf8(digits).expect("only ascii digits")
 }
 

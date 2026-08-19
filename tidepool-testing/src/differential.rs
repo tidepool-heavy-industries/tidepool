@@ -676,6 +676,10 @@ fn classify_run(
                     class: err_entries[0].1,
                 }
             } else {
+                #[allow(
+                    clippy::expect_used,
+                    reason = "at least one nursery's class is not in expected.jit"
+                )]
                 let (nursery, class) = err_entries
                     .iter()
                     .copied()
@@ -690,6 +694,10 @@ fn classify_run(
             if any_jit_ok {
                 return Verdict::EvalOnlyFailure { class: eval_class };
             }
+            #[allow(
+                clippy::expect_used,
+                reason = "no nursery produced a value, so the first nursery must have errored"
+            )]
             let jit_class = reps[0]
                 .1
                 .as_ref()

@@ -13,6 +13,7 @@
 //!
 //! See the repo-root `CLAUDE.md` for the crate map.
 
+#![warn(clippy::unwrap_used, clippy::expect_used)]
 pub use tidepool_bridge as bridge;
 pub use tidepool_bridge_derive as bridge_derive;
 pub use tidepool_codegen as codegen;

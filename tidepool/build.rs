@@ -5,10 +5,16 @@
 //! subset to drift) and including only `.hs` sources — skipping the `Prelude_cbor`
 //! build artifacts and the test-only `Internal/` probe.
 
+#![warn(clippy::unwrap_used, clippy::expect_used)]
 use std::path::{Path, PathBuf};
 
 fn main() {
+    #[allow(clippy::expect_used, reason = "CARGO_MANIFEST_DIR")]
     let manifest = std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR");
+    #[allow(
+        clippy::expect_used,
+        reason = "haskell/lib/Tidepool must exist relative to the tidepool crate"
+    )]
     let root = Path::new(&manifest)
         .join("../haskell/lib/Tidepool")
         .canonicalize()
@@ -34,12 +40,19 @@ fn main() {
     // Rerun if files are added/removed under the tree.
     println!("cargo:rerun-if-changed={}", root.display());
 
+    #[allow(
+        clippy::unwrap_used,
+        reason = "OUT_DIR is always set by cargo when running a build script"
+    )]
     let dest = Path::new(&std::env::var("OUT_DIR").unwrap()).join("embedded_stdlib.rs");
+    #[allow(clippy::expect_used, reason = "write embedded_stdlib.rs")]
     std::fs::write(dest, out).expect("write embedded_stdlib.rs");
 }
 
 fn collect(root: &Path, dir: &Path, out: &mut Vec<(String, PathBuf)>) {
+    #[allow(clippy::expect_used, reason = "read_dir")]
     for entry in std::fs::read_dir(dir).expect("read_dir") {
+        #[allow(clippy::expect_used, reason = "dir entry")]
         let path = entry.expect("dir entry").path();
         if path.is_dir() {
             let name = path.file_name().unwrap_or_default().to_string_lossy();
@@ -49,6 +62,7 @@ fn collect(root: &Path, dir: &Path, out: &mut Vec<(String, PathBuf)>) {
             }
             collect(root, &path, out);
         } else if path.extension().is_some_and(|e| e == "hs") {
+            #[allow(clippy::expect_used, reason = "under root")]
             let rel = path
                 .strip_prefix(root)
                 .expect("under root")

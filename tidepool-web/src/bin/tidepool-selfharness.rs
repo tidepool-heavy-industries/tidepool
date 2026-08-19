@@ -18,6 +18,7 @@
 //! default headless `StdinGate` (no browser needed for CI/replay/unattended
 //! runs).
 
+#![warn(clippy::unwrap_used, clippy::expect_used)]
 use std::path::PathBuf;
 use std::sync::Arc;
 

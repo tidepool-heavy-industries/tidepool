@@ -16,6 +16,7 @@
 //!   (blocking read + reprompt-on-bad-input) against the REAL terminal, which the
 //!   MCP-oriented Console can't do. So it stays custom too (see [`ConsoleHandler`]).
 
+#![warn(clippy::unwrap_used, clippy::expect_used)]
 use rand::RngExt;
 use std::collections::VecDeque;
 use std::io::Write;
@@ -51,6 +52,10 @@ struct EmitLog(Arc<Mutex<Vec<String>>>);
 
 impl EmitLog {
     fn push(&self, line: String) {
+        #[allow(
+            clippy::unwrap_used,
+            reason = "demo capture buffer: nothing panics while the lock is held, so it cannot poison"
+        )]
         self.0.lock().unwrap().push(line);
     }
 
@@ -190,6 +195,7 @@ fn main() {
         include = "haskell",
     };
 
+    #[allow(clippy::expect_used, reason = "JIT compilation failed")]
     let mut vm = JitEffectMachine::compile(&expr, &table, 1 << 20).expect("JIT compilation failed");
 
     let mut handlers = frunk::hlist![ConsoleHandler::new(), RngHandler::thread_rng()];

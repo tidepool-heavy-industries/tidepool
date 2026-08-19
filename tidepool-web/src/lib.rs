@@ -29,6 +29,7 @@
 //!
 //! Loopback bind only: reachability is the authorization boundary.
 
+#![warn(clippy::unwrap_used, clippy::expect_used)]
 pub mod formapi;
 pub mod render;
 pub mod server;

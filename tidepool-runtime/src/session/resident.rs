@@ -172,6 +172,10 @@ impl RootCustody {
     /// use-after-move error (see the compile-fail example above) rather than
     /// a runtime double-custody bug.
     pub fn into_handle(mut self) -> ValueHandle {
+        #[allow(
+            clippy::expect_used,
+            reason = "RootCustody always holds a handle until into_handle consumes it"
+        )]
         self.0
             .take()
             .expect("RootCustody always holds a handle until into_handle consumes it")

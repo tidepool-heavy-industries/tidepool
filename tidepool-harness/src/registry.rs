@@ -309,6 +309,7 @@ impl<M> Checkout<'_, M> {
 
     /// Borrow the checked-out machine for the turn.
     pub fn machine(&mut self) -> &mut M {
+        #[allow(clippy::expect_used, reason = "machine present until restore/abandon")]
         self.machine
             .as_mut()
             .expect("machine present until restore/abandon")
@@ -318,6 +319,7 @@ impl<M> Checkout<'_, M> {
     /// eval thread). The caller MUST return it via [`Self::restore_idle`] /
     /// [`Self::restore_suspended`].
     pub fn take(&mut self) -> M {
+        #[allow(clippy::expect_used, reason = "machine present until restore/abandon")]
         self.machine
             .take()
             .expect("machine present until restore/abandon")
@@ -330,6 +332,7 @@ impl<M> Checkout<'_, M> {
 
     /// Restore the machine as `Idle` — the session reports NO parked holes.
     pub fn restore_idle(mut self) {
+        #[allow(clippy::expect_used, reason = "machine present until restore/abandon")]
         let machine = self
             .machine
             .take()
@@ -341,6 +344,7 @@ impl<M> Checkout<'_, M> {
     /// session's OWN reported holes (`parked_holes()`), never a guess from
     /// the turn's domain result. An empty set restores `Idle`.
     pub fn restore_suspended(mut self, holes: Vec<HoleId>) {
+        #[allow(clippy::expect_used, reason = "machine present until restore/abandon")]
         let machine = self
             .machine
             .take()

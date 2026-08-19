@@ -246,6 +246,7 @@ impl CodexAgentBackend {
         let Self {
             runtime, session, ..
         } = self;
+        #[allow(clippy::expect_used, reason = "session connected just above")]
         Ok((
             runtime,
             session.as_mut().expect("session connected just above"),
@@ -271,6 +272,7 @@ impl CodexAgentBackend {
                 .map_err(map_session_error)?;
             self.catalogue = Some(model_slugs(&response));
         }
+        #[allow(clippy::expect_used, reason = "fetched just above")]
         let available = self.catalogue.as_deref().expect("fetched just above");
         let model = choose_model(policy, available)?;
         self.resolved_model = Some(model.clone());
@@ -320,10 +322,13 @@ impl AgentBackend for CodexAgentBackend {
     /// [`replay::TranscriptTransport`](crate::backend::codex::replay::TranscriptTransport)
     /// reads back.
     fn transcript_jsonl(&self) -> Vec<String> {
-        self.frames()
-            .iter()
-            .map(|f| serde_json::to_string(f).expect("a RecordedFrame always serializes"))
-            .collect()
+        #[allow(clippy::expect_used, reason = "a RecordedFrame always serializes")]
+        {
+            self.frames()
+                .iter()
+                .map(|f| serde_json::to_string(f).expect("a RecordedFrame always serializes"))
+                .collect()
+        }
     }
 
     /// A handle that SIGKILLs the app-server child from another thread.

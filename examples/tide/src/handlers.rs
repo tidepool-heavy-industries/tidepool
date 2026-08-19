@@ -82,10 +82,18 @@ pub struct OutputLog(std::sync::Arc<std::sync::Mutex<Vec<String>>>);
 
 impl OutputLog {
     fn push(&self, line: String) {
+        #[allow(
+            clippy::unwrap_used,
+            reason = "demo capture buffer: nothing panics while the lock is held, so it cannot poison"
+        )]
         self.0.lock().unwrap().push(line);
     }
 
     pub fn drain(&self) -> Vec<String> {
+        #[allow(
+            clippy::unwrap_used,
+            reason = "demo capture buffer: nothing panics while the lock is held, so it cannot poison"
+        )]
         std::mem::take(&mut *self.0.lock().unwrap())
     }
 }

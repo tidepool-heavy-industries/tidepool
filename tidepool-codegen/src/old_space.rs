@@ -242,6 +242,10 @@ impl OldSpace {
             if free < needed {
                 self.arenas.push(vec![0u8; DEFAULT_ARENA.max(needed)]);
                 self.cursor = 0;
+                #[allow(
+                    clippy::unwrap_used,
+                    reason = "an arena was just pushed on this branch, or old_space holds at least one arena by construction"
+                )]
                 let new_arena = self.arenas.last().unwrap();
                 let arena_start = new_arena.as_ptr();
                 let arena_end = arena_start.add(new_arena.len());
@@ -250,6 +254,10 @@ impl OldSpace {
 
             // Copy the closure into the current arena via Cheney's algorithm.
             // to_slice is wholly within a stable inner-arena allocation.
+            #[allow(
+                clippy::unwrap_used,
+                reason = "an arena was just pushed on this branch, or old_space holds at least one arena by construction"
+            )]
             let arena = self.arenas.last_mut().unwrap();
             let to_slice = &mut arena[self.cursor..self.cursor + needed];
 

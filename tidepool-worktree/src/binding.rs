@@ -287,6 +287,7 @@ impl BindingTable {
             .iter()
             .filter(|b| b.worktree() == worktree)
             .collect();
+        #[allow(clippy::expect_used, reason = "serialize bindings")]
         let bytes = serde_json::to_vec_pretty(&rows).expect("serialize bindings");
         let path = self.path_for(worktree);
         tidepool_atomic_write::write_durable(&path, &bytes)

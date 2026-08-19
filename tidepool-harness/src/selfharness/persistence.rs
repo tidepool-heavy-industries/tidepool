@@ -62,6 +62,10 @@ impl CheckpointGeneration {
     /// advances is [`Checkpoint::committed`], so there is exactly one call
     /// site that can get this wrong.
     fn next(self) -> Self {
+        #[allow(
+            clippy::expect_used,
+            reason = "CheckpointGeneration::next is the only place a generation ever advances"
+        )]
         CheckpointGeneration(self.0.checked_add(1).expect(
             "checkpoint generation overflowed u64 — this would take billions of committed cycles",
         ))

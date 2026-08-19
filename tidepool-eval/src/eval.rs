@@ -105,6 +105,10 @@ fn eval_settled(
     // from the rhs loop here — O(1) host stack, mirroring the JIT's TCO.
     let mut pending = eval_at(expr, idx, env, heap);
     while matches!(pending, Err(EvalError::JumpInFlight)) {
+        #[allow(
+            clippy::expect_used,
+            reason = "JumpInFlight signalled without a parked JumpReq"
+        )]
         let req = JUMP_SLOT
             .with(|s| s.borrow_mut().take())
             .expect("JumpInFlight signalled without a parked JumpReq");
@@ -1783,6 +1787,10 @@ fn dispatch_primop(
                     .lock()
                     .map_err(|e| EvalError::InternalError(format!("mutex poisoned: {e}")))?;
                 let end = src_off.checked_add(len);
+                #[allow(
+                    clippy::unwrap_used,
+                    reason = "short-circuits on is_none() immediately before; unwrap only evaluates when Some"
+                )]
                 if end.is_none() || end.unwrap() > src.len() {
                     return Err(EvalError::TypeMismatch {
                         expected: "valid src range",
@@ -1794,6 +1802,10 @@ fn dispatch_primop(
                         )),
                     });
                 }
+                #[allow(
+                    clippy::unwrap_used,
+                    reason = "checked non-None by the guard immediately above"
+                )]
                 src[src_off..end.unwrap()].to_vec()
             };
             {
@@ -1801,6 +1813,10 @@ fn dispatch_primop(
                     .lock()
                     .map_err(|e| EvalError::InternalError(format!("mutex poisoned: {e}")))?;
                 let end = dst_off.checked_add(len);
+                #[allow(
+                    clippy::unwrap_used,
+                    reason = "short-circuits on is_none() immediately before; unwrap only evaluates when Some"
+                )]
                 if end.is_none() || end.unwrap() > dst.len() {
                     return Err(EvalError::TypeMismatch {
                         expected: "valid dst range",
@@ -1812,6 +1828,10 @@ fn dispatch_primop(
                         )),
                     });
                 }
+                #[allow(
+                    clippy::unwrap_used,
+                    reason = "checked non-None by the guard immediately above"
+                )]
                 dst[dst_off..end.unwrap()].copy_from_slice(&src_data);
             }
             Ok(Value::ByteArray(dst_ba.clone()))
@@ -1835,6 +1855,10 @@ fn dispatch_primop(
                 .map_err(|e| EvalError::InternalError(format!("mutex poisoned: {e}")))?;
             let src_end = std::cmp::min(src_bytes.len(), len);
             let end = dst_off.checked_add(src_end);
+            #[allow(
+                clippy::unwrap_used,
+                reason = "short-circuits on is_none() immediately before; unwrap only evaluates when Some"
+            )]
             if end.is_none() || end.unwrap() > dst.len() {
                 return Err(EvalError::TypeMismatch {
                     expected: "valid dst range",
@@ -1846,6 +1870,10 @@ fn dispatch_primop(
                     )),
                 });
             }
+            #[allow(
+                clippy::unwrap_used,
+                reason = "checked non-None by the guard immediately above"
+            )]
             dst[dst_off..end.unwrap()].copy_from_slice(&src_bytes[..src_end]);
             drop(dst);
             Ok(Value::ByteArray(dst_ba.clone()))
@@ -1973,6 +2001,10 @@ fn dispatch_primop(
                     .lock()
                     .map_err(|e| EvalError::InternalError(format!("mutex poisoned: {e}")))?;
                 let end1 = off1.checked_add(len);
+                #[allow(
+                    clippy::unwrap_used,
+                    reason = "short-circuits on is_none() immediately before; unwrap only evaluates when Some"
+                )]
                 if end1.is_none() || end1.unwrap() > b.len() {
                     return Err(EvalError::TypeMismatch {
                         expected: "valid byte range for ba1",
@@ -1984,6 +2016,10 @@ fn dispatch_primop(
                         )),
                     });
                 }
+                #[allow(
+                    clippy::unwrap_used,
+                    reason = "checked non-None by the guard immediately above"
+                )]
                 b[off1..end1.unwrap()].to_vec()
             };
             let slice2: Vec<u8> = {
@@ -1991,6 +2027,10 @@ fn dispatch_primop(
                     .lock()
                     .map_err(|e| EvalError::InternalError(format!("mutex poisoned: {e}")))?;
                 let end2 = off2.checked_add(len);
+                #[allow(
+                    clippy::unwrap_used,
+                    reason = "short-circuits on is_none() immediately before; unwrap only evaluates when Some"
+                )]
                 if end2.is_none() || end2.unwrap() > b.len() {
                     return Err(EvalError::TypeMismatch {
                         expected: "valid byte range for ba2",
@@ -2002,6 +2042,10 @@ fn dispatch_primop(
                         )),
                     });
                 }
+                #[allow(
+                    clippy::unwrap_used,
+                    reason = "checked non-None by the guard immediately above"
+                )]
                 b[off2..end2.unwrap()].to_vec()
             };
             let result = slice1.cmp(&slice2);
@@ -2269,6 +2313,10 @@ fn dispatch_primop(
             let offset = idx.checked_mul(8);
             let end = offset.and_then(|o| o.checked_add(8));
 
+            #[allow(
+                clippy::unwrap_used,
+                reason = "short-circuits on is_none() immediately before; unwrap only evaluates when Some"
+            )]
             if offset.is_none() || end.is_none() || end.unwrap() > bytes.len() {
                 return Err(EvalError::TypeMismatch {
                     expected: "valid IndexWordArray index",
@@ -2279,7 +2327,15 @@ fn dispatch_primop(
                     )),
                 });
             }
+            #[allow(
+                clippy::unwrap_used,
+                reason = "checked non-None by the early return immediately above"
+            )]
             let offset = offset.unwrap();
+            #[allow(
+                clippy::unwrap_used,
+                reason = "checked non-None by the early return immediately above"
+            )]
             let end = end.unwrap();
             let word =
                 u64::from_ne_bytes(bytes[offset..end].try_into().map_err(|_| {
@@ -2370,6 +2426,10 @@ fn dispatch_primop(
             let offset = idx.checked_mul(8);
             let end = offset.and_then(|o| o.checked_add(8));
 
+            #[allow(
+                clippy::unwrap_used,
+                reason = "short-circuits on is_none() immediately before; unwrap only evaluates when Some"
+            )]
             if offset.is_none() || end.is_none() || end.unwrap() > bytes.len() {
                 return Err(EvalError::TypeMismatch {
                     expected: "valid ReadWordArray index",
@@ -2380,7 +2440,15 @@ fn dispatch_primop(
                     )),
                 });
             }
+            #[allow(
+                clippy::unwrap_used,
+                reason = "checked non-None by the early return immediately above"
+            )]
             let offset = offset.unwrap();
+            #[allow(
+                clippy::unwrap_used,
+                reason = "checked non-None by the early return immediately above"
+            )]
             let end = end.unwrap();
             let word =
                 u64::from_ne_bytes(bytes[offset..end].try_into().map_err(|_| {
@@ -2659,6 +2727,10 @@ fn dispatch_primop(
                     .lock()
                     .map_err(|e| EvalError::InternalError(format!("mutex poisoned: {e}")))?;
                 let end = off.checked_add(len);
+                #[allow(
+                    clippy::unwrap_used,
+                    reason = "short-circuits on is_none() immediately before; unwrap only evaluates when Some"
+                )]
                 if end.is_none() || end.unwrap() > src.len() {
                     return Err(EvalError::TypeMismatch {
                         expected: "valid byte range",
@@ -2670,6 +2742,10 @@ fn dispatch_primop(
                         )),
                     });
                 }
+                #[allow(
+                    clippy::unwrap_used,
+                    reason = "checked non-None by the guard immediately above"
+                )]
                 src[off..end.unwrap()].to_vec()
             };
             // Parse UTF-8 chars and reverse

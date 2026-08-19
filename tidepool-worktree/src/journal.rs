@@ -195,6 +195,7 @@ impl EventJournal {
             event: event.clone(),
             recorded_at_ms: now_ms(),
         };
+        #[allow(clippy::expect_used, reason = "serialize event journal entry")]
         let line = serde_json::to_string(&entry).expect("serialize event journal entry");
 
         let mut file = OpenOptions::new()

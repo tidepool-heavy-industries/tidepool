@@ -242,7 +242,10 @@ impl<'a> EffectMachine<'a> {
                         });
                     }
                     arg = vfields[0].clone();
-                    k = pending.pop().expect("pending non-empty");
+                    #[allow(clippy::expect_used, reason = "pending non-empty")]
+                    {
+                        k = pending.pop().expect("pending non-empty");
+                    }
                 }
                 Value::Con(eid, ref efields) if eid == self.e_id => {
                     // E(union, k') — suspend: compose k' with every pending

@@ -118,6 +118,7 @@ fn parse_submission(raw: Jv) -> Result<(u64, Map<String, Jv>), String> {
         );
     };
     let interaction = match obj.remove("interaction") {
+        #[allow(clippy::unwrap_used, reason = "match guard already confirmed is_some()")]
         Some(Jv::Number(n)) if n.as_u64().is_some() => n.as_u64().unwrap(),
         _ => {
             return Err(

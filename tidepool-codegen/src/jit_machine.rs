@@ -529,6 +529,10 @@ impl ParkedRaw {
                     rendered,
                 }
             }
+            #[allow(
+                clippy::expect_used,
+                reason = "registry park target mints an id on suspension"
+            )]
             ParkedRaw::Suspended {
                 request,
                 has_finalized_closure,
@@ -1332,10 +1336,18 @@ impl JitEffectMachine {
     /// # Panics
     /// Panics if called without GC state installed or on a non-session machine.
     fn make_session_vmctx(&self) -> crate::context::VMContext {
+        #[allow(
+            clippy::expect_used,
+            reason = "GC state must be installed before make_session_vmctx"
+        )]
         let (start, size) = self
             .machine_state
             .gc_active_range()
             .expect("GC state must be installed before make_session_vmctx");
+        #[allow(
+            clippy::expect_used,
+            reason = "make_session_vmctx called on non-session machine"
+        )]
         let cursor = self
             .session
             .as_ref()
@@ -1563,6 +1575,7 @@ impl JitEffectMachine {
                 // root valid for the machine's life. `self.session` is
                 // unaliased here — reclaim is armed strictly after this
                 // method returns (`with_active_run`'s single arm-last call).
+                #[allow(clippy::expect_used, reason = "GC state installed for the bind run")]
                 let from = self
                     .machine_state
                     .gc_active_range()
@@ -1571,6 +1584,7 @@ impl JitEffectMachine {
                     from.0.add(from.1) as *const u8
                 });
                 let slot = unsafe {
+                    #[allow(clippy::expect_used, reason = "session machine")]
                     self.session
                         .as_mut()
                         .expect("session machine")
@@ -1643,6 +1657,7 @@ impl JitEffectMachine {
                         *(nf_tuple.add(crate::layout::CON_FIELDS_OFFSET as usize + 8 * i)
                             as *const *mut u8)
                     };
+                    #[allow(clippy::expect_used, reason = "GC state installed for the bind run")]
                     let from = self
                         .machine_state
                         .gc_active_range()
@@ -1651,6 +1666,7 @@ impl JitEffectMachine {
                         from.0.add(from.1) as *const u8
                     });
                     let slot = unsafe {
+                        #[allow(clippy::expect_used, reason = "session machine")]
                         self.session
                             .as_mut()
                             .expect("session machine")
@@ -1764,6 +1780,7 @@ impl JitEffectMachine {
 
                 // Capture from_range AFTER any forcing above (GC may have
                 // changed the active region) — same ordering as Project.
+                #[allow(clippy::expect_used, reason = "GC state installed for the bind run")]
                 let from = self
                     .machine_state
                     .gc_active_range()
@@ -1772,6 +1789,7 @@ impl JitEffectMachine {
                     from.0.add(from.1) as *const u8
                 });
                 let slot = unsafe {
+                    #[allow(clippy::expect_used, reason = "session machine")]
                     self.session
                         .as_mut()
                         .expect("session machine")
@@ -1947,6 +1965,10 @@ impl JitEffectMachine {
         suspend_tag: u64,
         n_fields: usize,
     ) -> Result<Suspendable<Vec<crate::old_space::RootSlot>>, JitError> {
+        #[allow(
+            clippy::expect_used,
+            reason = "run_fragment_suspendable_projected requires at least one field"
+        )]
         let n_fields = NonZeroUsize::new(n_fields)
             .expect("run_fragment_suspendable_projected requires at least one field");
         self.run_suspendable_with_entry(
@@ -2220,6 +2242,10 @@ impl JitEffectMachine {
         input: ResumeInput,
         n_fields: usize,
     ) -> Result<Suspendable<Vec<crate::old_space::RootSlot>>, JitError> {
+        #[allow(
+            clippy::expect_used,
+            reason = "resume_suspended_projected requires at least one field"
+        )]
         let n_fields = NonZeroUsize::new(n_fields)
             .expect("resume_suspended_projected requires at least one field");
         self.resume_suspended_inner(
@@ -2312,6 +2338,10 @@ impl JitEffectMachine {
         }
         // Answer verified NF (or this is an Abort) — NOW consume the
         // continuation. Every early return above left it stowed.
+        #[allow(
+            clippy::expect_used,
+            reason = "suspended_continuation present (checked is_some above)"
+        )]
         let continuation = self
             .suspended_continuation
             .take()
@@ -2699,6 +2729,10 @@ impl JitEffectMachine {
             }
             *(request_ptr.add(crate::layout::CON_FIELDS_OFFSET as usize + 8) as *const *mut u8)
         };
+        #[allow(
+            clippy::expect_used,
+            reason = "GC state installed for the suspending finalize run"
+        )]
         let from = self
             .machine_state
             .gc_active_range()
@@ -2712,6 +2746,7 @@ impl JitEffectMachine {
         // persistent root valid for the machine's life. `self.session` is
         // unaliased (reclaim not yet armed on the suspend path).
         let slot = unsafe {
+            #[allow(clippy::expect_used, reason = "session machine for a finalize tenure")]
             self.session
                 .as_mut()
                 .expect("session machine for a finalize tenure")
@@ -3103,6 +3138,10 @@ impl JitEffectMachine {
             self.session.is_some(),
             "run_fragment_and_bind_projected requires a session machine"
         );
+        #[allow(
+            clippy::expect_used,
+            reason = "run_fragment_and_bind_projected requires at least one field"
+        )]
         let n_fields = NonZeroUsize::new(n_fields)
             .expect("run_fragment_and_bind_projected requires at least one field");
         Ok(self
@@ -3350,6 +3389,10 @@ impl JitEffectMachine {
     /// Panics if the machine is not suspended (no continuation to root) — a
     /// nested child requires a suspended parent by construction.
     fn enter_nested_child(&mut self) -> NestedChildGuard {
+        #[allow(
+            clippy::expect_used,
+            reason = "enter_nested_child on a machine that is not suspended"
+        )]
         let cont = self
             .suspended_continuation
             .take()
@@ -3784,6 +3827,10 @@ impl JitEffectMachine {
         }
         // Answer verified NF (or this is an Abort) — NOW take the frame and
         // release its root. Every early return above left it parked and rooted.
+        #[allow(
+            clippy::expect_used,
+            reason = "frame present (peeked above, &mut self held throughout)"
+        )]
         let mut frame = self
             .continuations
             .remove(&id)
@@ -4029,6 +4076,10 @@ impl JitEffectMachine {
             .map(|(&id, _)| id)
             .collect();
         for id in &ids {
+            #[allow(
+                clippy::expect_used,
+                reason = "id collected from the map above; &mut self held throughout"
+            )]
             let mut frame = self
                 .continuations
                 .remove(id)
@@ -4046,6 +4097,10 @@ impl JitEffectMachine {
             .map(|(&k, _)| k)
             .collect();
         for k in &hids {
+            #[allow(
+                clippy::expect_used,
+                reason = "key collected from the map above; &mut self held throughout"
+            )]
             let entry = self
                 .value_handles
                 .remove(k)
@@ -4145,6 +4200,10 @@ impl Drop for NestedChildGuard {
         // it so the parent stays suspended on the relocated continuation.
         unsafe {
             (*self.machine_state).deregister_stowed_root(self.slot);
+            #[allow(
+                clippy::expect_used,
+                reason = "stowed cell present for the guard's life"
+            )]
             let cell = (*self.stowed_root_cell)
                 .take()
                 .expect("stowed cell present for the guard's life");
@@ -4813,7 +4872,9 @@ fn dismantle_list_spine(
         // avoids building the worklist twice.)
         match cur {
             Value::Con(_, ref mut fields) if fields.len() == 2 => {
+                #[allow(clippy::expect_used, reason = "len checked")]
                 let tail = fields.pop().expect("len checked");
+                #[allow(clippy::expect_used, reason = "len checked")]
                 let head = fields.pop().expect("len checked");
                 items.push(head);
                 // The emptied cell (and its Vec) drops shallowly here.

@@ -35,6 +35,7 @@
 //! it (`tidepool_runtime::compile_haskell`, `tidepool_harness::compile`)
 //! consult it before calling [`ExtractCmd::run`]. See `plans/compile-memo.md`.
 
+#![warn(clippy::unwrap_used, clippy::expect_used)]
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};

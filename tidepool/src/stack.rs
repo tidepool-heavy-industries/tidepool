@@ -27,6 +27,7 @@ fn first_sig_line(helper: &str) -> Option<&str> {
 /// the JIT's suspend-tag threshold to hold.
 fn debug_decls() -> Vec<tidepool_mcp::EffectDecl> {
     let mut decls = tidepool_mcp::standard_decls();
+    #[allow(clippy::expect_used, reason = "standard_decls always contains Ask")]
     let ask_idx = decls
         .iter()
         .position(|d| d.type_name == "Ask")

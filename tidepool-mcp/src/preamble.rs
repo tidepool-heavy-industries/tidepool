@@ -870,6 +870,10 @@ pub fn extract_sigs(src: &str) -> Vec<String> {
                 s.push(' ');
                 s.push_str(t);
             } else {
+                #[allow(
+                    clippy::unwrap_used,
+                    reason = "cur is set to Some before this branch is reachable (else branch of the same if)"
+                )]
                 sigs.push(cur.take().unwrap());
             }
         } else if (line.starts_with("data ") || line.starts_with("type "))

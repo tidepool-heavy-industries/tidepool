@@ -86,6 +86,10 @@ fn apply_rules_once(expr: &CoreExpr, table: &DataConTable) -> (CoreExpr, usize) 
         debug_assert_eq!(old_to_new.len(), old_idx);
         old_to_new.push(new_idx);
     }
+    #[allow(
+        clippy::expect_used,
+        reason = "normalize: old_to_new is non-empty (input RecursiveTree had >=1 node)"
+    )]
     let last_mapped_idx = *old_to_new
         .last()
         .expect("normalize: old_to_new is non-empty (input RecursiveTree had ≥1 node)");

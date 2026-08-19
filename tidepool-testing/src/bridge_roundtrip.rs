@@ -7,7 +7,9 @@ use tidepool_repr::DataConTable;
 /// Encode `val` via `ToCore`, decode it back via `FromCore`, and assert the
 /// result equals the original.
 pub fn roundtrip<T: FromCore + ToCore + PartialEq + std::fmt::Debug>(val: T, table: &DataConTable) {
+    #[allow(clippy::expect_used, reason = "ToCore failed")]
     let value = val.to_value(table).expect("ToCore failed");
+    #[allow(clippy::expect_used, reason = "FromCore failed")]
     let back = T::from_value(&value, table).expect("FromCore failed");
     assert_eq!(val, back, "Roundtrip failed for {:?}", val);
 }

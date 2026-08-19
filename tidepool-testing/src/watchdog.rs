@@ -53,7 +53,13 @@ impl Drop for Guard {
 /// active-cases counter). Bind the returned guard — see the module docs.
 #[must_use = "dropping the guard immediately disarms the watchdog for this item; bind it (`let _guard = begin(...)`) for the duration you want watched"]
 pub fn begin(name: &str) -> Guard {
-    *CURRENT.lock().unwrap() = name.to_string();
+    #[allow(
+        clippy::unwrap_used,
+        reason = "watchdog lock is held only for a brief, panic-free assignment; it cannot poison in normal use"
+    )]
+    {
+        *CURRENT.lock().unwrap() = name.to_string();
+    }
     EPOCH.fetch_add(1, Ordering::Relaxed);
     ACTIVE.fetch_add(1, Ordering::Relaxed);
     Guard(())
@@ -83,6 +89,7 @@ pub fn arm() {
                 // dropped its guard, a quiet epoch just means nobody is
                 // currently being watched, not that something is stuck.
                 if stuck_secs >= limit_secs && ACTIVE.load(Ordering::Relaxed) > 0 {
+                    #[allow(clippy::unwrap_used, reason = "watchdog lock is held only for a brief, panic-free assignment; it cannot poison in normal use")]
                     let name = CURRENT.lock().unwrap().clone();
                     use std::io::Write;
                     let _ = writeln!(

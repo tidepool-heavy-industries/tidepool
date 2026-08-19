@@ -53,6 +53,10 @@ use tidepool_runtime::{
 
 /// Repo root, derived from this crate's manifest dir (`<root>/tidepool-testing`).
 pub fn repo_root() -> PathBuf {
+    #[allow(
+        clippy::expect_used,
+        reason = "tidepool-testing has a parent (repo root)"
+    )]
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .expect("tidepool-testing has a parent (repo root)")
@@ -79,6 +83,7 @@ pub fn user_lib_dir() -> PathBuf {
 /// anything that `import`s the generated effects module). Wraps
 /// [`tidepool_mcp::ensure_effects_module`] over [`tidepool_mcp::standard_decls`].
 pub fn effects_include() -> PathBuf {
+    #[allow(clippy::expect_used, reason = "write Tidepool.Effects module")]
     tidepool_mcp::ensure_effects_module(&tidepool_mcp::standard_decls())
         .expect("write Tidepool.Effects module")
 }
@@ -182,6 +187,10 @@ where
     F: FnOnce() -> T + Send + 'static,
     T: Send + 'static,
 {
+    #[allow(
+        clippy::expect_used,
+        reason = "spawn/join of the eval-stack thread does not fail in practice"
+    )]
     std::thread::Builder::new()
         .stack_size(EVAL_STACK_SIZE)
         .spawn(f)
@@ -235,6 +244,7 @@ impl Outcome {
 
     /// Consume and return the owned [`EvalResult`] (panics on error).
     pub fn unwrap(self) -> EvalResult {
+        #[allow(clippy::expect_used, reason = "expected successful eval")]
         self.0.expect("expected successful eval")
     }
 

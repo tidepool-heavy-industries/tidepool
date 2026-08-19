@@ -140,6 +140,10 @@ fn body(e: &Effect) -> String {
         let Some(dm) = &t.domain else { continue };
         let wire_name = t.wire_name();
         let domain_ident = dm.domain_ident();
+        #[allow(
+            clippy::expect_used,
+            reason = "DomainMap::domain_path is crate-qualified"
+        )]
         let domain_module = dm
             .domain_path
             .rsplit_once("::")

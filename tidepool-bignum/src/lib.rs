@@ -6,6 +6,7 @@
 //! RTS `__int_encodeDouble`/`__word_encodeDouble` (`mantissa * 2^exp`), which
 //! both consumers route here.
 
+#![warn(clippy::unwrap_used, clippy::expect_used)]
 /// `__int_encodeDouble(mantissa, exp)`: the correctly-rounded value of
 /// `mantissa * 2^exp` as a `double` (GHC's `intEncodeDouble#`, an `ldexp`).
 /// Scaling by a power of two is exact, so we round `mantissa` to `f64` once and
