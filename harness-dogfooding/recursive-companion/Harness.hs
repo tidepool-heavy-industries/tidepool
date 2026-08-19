@@ -47,6 +47,7 @@ module Harness
   , initialState
   , render
   , loop
+  , resumeLoop
 
     -- * The driver's own vocabulary
   , Companion
@@ -118,6 +119,7 @@ import Tidepool.Harness (Harness)
 import Tidepool.Journal (record)
 import Tidepool.Prelude hiding (render)
 import Tidepool.QQ (fmt)
+import Tidepool.Resume (ResumeFold)
 import Tidepool.Swarm (cyclesToInt, mkCycles, splitAllowance)
 import Tidepool.Thought (Coalg, Strategy, ThoughtF, depthCapped, fanOutCapped, thoughtHylo)
 import qualified Tidepool.Thought as Th
@@ -317,6 +319,16 @@ loop st = do
                 (depthCapped seedDepth cfg.maxDepth (allowanceCapped (discover cfg)))
             )
         )
+
+-- | The honest opt-out ('Tidepool.Resume' module doc): this harness's
+-- 'record' calls exist for the durable transcript, not to replay prior
+-- windows on a resumed boot — a rerun re-derives 'draft'\/'lastRun' from
+-- 'State' the same way a fresh run does, so there is nothing here for a
+-- fold of recorded steps to inject.  Declaring this (rather than leaving it
+-- absent) is what turns a journal-bearing crash recovery from a boot
+-- refusal into an ordinary 'loop' call.
+resumeLoop :: ResumeFold -> State -> Companion State
+resumeLoop _fold = loop
 
 -- | The root's own seed.  Its brief IS the operator's question, so the root
 -- window is asked the same shape of thing every descendant is — and it holds
