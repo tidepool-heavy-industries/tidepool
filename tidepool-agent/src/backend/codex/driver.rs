@@ -102,7 +102,15 @@ pub const DEFAULT_TURN_TIMEOUT: Duration = Duration::from_secs(300);
 /// because effect handlers are sync, and [`Session`] is async, so exactly one
 /// place blocks — here.
 pub struct CodexAgentBackend {
-    runtime: tokio::runtime::Runtime,
+    /// `ManuallyDrop` so [`Drop for CodexAgentBackend`](#impl-Drop-for-CodexAgentBackend)
+    /// can tear it down with `shutdown_background()` instead of the default
+    /// blocking `Runtime::drop` — this backend is routinely dropped from
+    /// inside an OUTER tokio runtime's async context (e.g. a driver dropped
+    /// during normal, non-killed process shutdown), and a multi-thread
+    /// runtime's default drop blocks the current thread waiting for its
+    /// blocking pool to shut down, which panics when that thread is itself a
+    /// tokio worker.
+    runtime: std::mem::ManuallyDrop<tokio::runtime::Runtime>,
     /// Connected on first use. `None` means "not connected yet", never
     /// "connection lost" — a lost connection surfaces as a
     /// [`AgentBackendError::BackendUnavailable`] from the call that noticed.
@@ -149,7 +157,7 @@ impl CodexAgentBackend {
                 detail: format!("failed to build the backend's tokio runtime: {e}"),
             })?;
         Ok(Self {
-            runtime,
+            runtime: std::mem::ManuallyDrop::new(runtime),
             session: None,
             pidfd: Arc::new(Mutex::new(PidFdSlot::Empty)),
             cancel_requested: Arc::new(AtomicBool::new(false)),
@@ -529,6 +537,12 @@ impl BackendCanceller for CodexCanceller {
 impl Drop for CodexAgentBackend {
     fn drop(&mut self) {
         *self.pidfd.lock() = PidFdSlot::Empty;
+        // SAFETY: `runtime` is never read again after this — this is the
+        // only place it is taken out of the `ManuallyDrop` wrapper, and
+        // `drop` itself only runs once. `shutdown_background` tears the
+        // runtime down without blocking this thread, unlike the default
+        // `Runtime::drop` — see the field's doc comment for why that matters.
+        unsafe { std::mem::ManuallyDrop::take(&mut self.runtime) }.shutdown_background();
     }
 }
 
@@ -1438,6 +1452,30 @@ mod tests {
             bystander.survives_a_grace_window(),
             "an inert canceller must signal nothing at all"
         );
+    }
+
+    /// Dropping the backend from inside an OUTER tokio runtime's async
+    /// context must not panic.
+    ///
+    /// Regression for a real crash: the default `Drop` for a multi-thread
+    /// `tokio::runtime::Runtime` blocks the current thread waiting for its
+    /// blocking pool to shut down, which tokio itself forbids from a worker
+    /// thread ("Cannot drop a runtime in a context where blocking is not
+    /// allowed"). A driver holding this backend is routinely dropped exactly
+    /// this way — inside the process's own outer `#[tokio::main]`/`block_on`
+    /// — on any NORMAL (non-killed) shutdown path, so this is not an edge
+    /// case. See the `runtime` field's doc comment for the fix
+    /// (`ManuallyDrop` + explicit `shutdown_background()`).
+    #[test]
+    fn a_dropped_backend_inside_an_outer_runtime_does_not_panic() {
+        let backend = CodexAgentBackend::new().expect("build the backend");
+        let outer = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .expect("build the outer runtime");
+        outer.block_on(async move {
+            drop(backend);
+        });
     }
 
     /// A cancel that arrives before a pidfd is acquired (still connecting —
