@@ -301,7 +301,13 @@ loop st
       sq <- askUser @SeedQuestion
       case T.strip sq.seedQuestion of
         "" -> loop st
-        q -> pure st {question = q}
+        q -> do
+          -- Without this line the operator's next screen is the bare
+          -- between-loops "loop complete" gate — reading as if a run
+          -- happened and produced nothing (dogfood finding, 2026-08-19).
+          say [fmt|Question seeded: {q}
+Nothing has run yet — press Continue to start the first turn.|]
+          pure st {question = q}
 loop st = do
   record "turn" rootKey (object ["root" .= st.question, "config" .= toJSON cfg])
   rootRef <- freezeContext
