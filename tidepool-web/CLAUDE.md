@@ -201,9 +201,21 @@ this door is exactly as much operator authority as one through the page:
 
 ## Loopback trust model
 
-Binds `127.0.0.1` only; reachability IS the authorization boundary — there is
-no auth token on the HTTP surface itself. Off-box access is via SSH
+Binds `127.0.0.1` by default; reachability IS the authorization boundary —
+there is no auth token on the HTTP surface itself. Off-box access is via SSH
 port-forward or tailnet, not a password.
+
+**`TIDEPOOL_WEB_BIND_HOST` (operator decision, 2026-08-18): a deliberate,
+scoped, opt-in exception.** Set it to a specific IP (e.g. this box's Tailscale
+interface address) and `bind_addr` binds there instead of loopback — every
+other caller (tests, `--demo`, an unset environment) is byte-unchanged. This
+does not add auth; it trades the loopback boundary for whatever access control
+the target network provides (a tailnet's own ACLs, in the Tailscale case).
+**Never set it to `0.0.0.0` or a publicly-routable address** — that would
+expose an unauthenticated LLM-harness control surface (form submission =
+operator authority) to anything that can route to the box. Falls back to
+loopback with a loud stderr warning on an unparseable value, never a bind
+failure or a silent no-op.
 
 **No model-authored content reaches the page.** A form is derived from a
 type's own `Generic` metadata, so every label traces back to a Haskell

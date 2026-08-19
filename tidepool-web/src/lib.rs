@@ -27,7 +27,10 @@
 //!   (`GET`/`POST /node/{node}/api/form`) mounted onto the same router when
 //!   `TIDEPOOL_FORM_API=1`; see that module's docs for the hardening story.
 //!
-//! Loopback bind only: reachability is the authorization boundary.
+//! Loopback bind by default: reachability is the authorization boundary.
+//! There is still no auth token on the HTTP surface itself — see
+//! `TIDEPOOL_WEB_BIND_HOST` on [`bind_addr`] for the one, deliberate,
+//! opt-in exception.
 
 #![warn(clippy::unwrap_used, clippy::expect_used)]
 pub mod formapi;
@@ -47,13 +50,36 @@ use std::sync::Arc;
 /// one-tab case.
 pub const DEFAULT_NODE_ID: &str = "default";
 
-/// The operator server's ONE bind address family — loopback only, any port.
-/// Pulled out so it's pinned by a unit test independent of a real bind: the
-/// form-api testing surface (`formapi`) mounts onto this SAME listener and
-/// never opens one of its own, so pinning this literal pins its reachability
-/// too.
+/// The operator server's bind address — loopback by default, any port.
+/// Pulled out so the default is pinned by a unit test independent of a real
+/// bind: the form-api testing surface (`formapi`) mounts onto this SAME
+/// listener and never opens one of its own, so pinning this literal pins its
+/// reachability too.
+///
+/// **`TIDEPOOL_WEB_BIND_HOST`** is a deliberate, opt-in escape hatch (operator
+/// decision, 2026-08-18): when set to a valid IP, the server binds there
+/// instead of loopback — e.g. a box's own Tailscale interface address, so the
+/// operator GUI is reachable from another machine on the tailnet without an
+/// SSH port-forward. This surface has NO AUTH TOKEN; loopback reachability is
+/// its whole authorization boundary in the default case, so setting this
+/// trades that boundary for whatever access control the target network
+/// provides (a tailnet's own ACLs, in the Tailscale case) — never set it to
+/// `0.0.0.0` or a publicly-routable address. An unparseable value falls back
+/// to loopback with a loud warning rather than failing to bind.
 fn bind_addr(port: u16) -> SocketAddr {
-    SocketAddr::from(([127, 0, 0, 1], port))
+    match std::env::var("TIDEPOOL_WEB_BIND_HOST") {
+        Ok(host) => match host.parse::<std::net::IpAddr>() {
+            Ok(ip) => SocketAddr::from((ip, port)),
+            Err(e) => {
+                eprintln!(
+                    "[boot] TIDEPOOL_WEB_BIND_HOST={host:?} is not a valid IP ({e}); \
+                     falling back to loopback"
+                );
+                SocketAddr::from(([127, 0, 0, 1], port))
+            }
+        },
+        Err(_) => SocketAddr::from(([127, 0, 0, 1], port)),
+    }
 }
 
 /// Boot the operator HTTP server on `127.0.0.1:<port>` and return both the
@@ -106,11 +132,32 @@ mod tests {
     /// `bind_addr`'s doc comment).
     #[test]
     fn loopback_only() {
+        // SAFETY (env mutation in a test): this crate's suite runs one test
+        // per OS process under the project's mandated `cargo-nextest` runner
+        // (root CLAUDE.md), so no other test observes this process's env —
+        // still explicitly ensured absent first, defensively, for a plain
+        // `cargo test` run sharing one process.
+        std::env::remove_var("TIDEPOOL_WEB_BIND_HOST");
         let addr = bind_addr(4601);
         assert!(addr.ip().is_loopback(), "{addr} is not loopback");
         assert_ne!(
             addr.ip(),
             std::net::IpAddr::from(std::net::Ipv4Addr::UNSPECIFIED)
         );
+    }
+
+    /// The opt-in override binds where told, and falls back to loopback
+    /// (never panics, never silently binds nothing) on an unparseable value.
+    #[test]
+    fn bind_host_override() {
+        std::env::set_var("TIDEPOOL_WEB_BIND_HOST", "100.84.124.37");
+        let addr = bind_addr(4602);
+        assert_eq!(addr, "100.84.124.37:4602".parse().unwrap());
+
+        std::env::set_var("TIDEPOOL_WEB_BIND_HOST", "not-an-ip");
+        let addr = bind_addr(4602);
+        assert!(addr.ip().is_loopback(), "{addr} is not loopback");
+
+        std::env::remove_var("TIDEPOOL_WEB_BIND_HOST");
     }
 }
