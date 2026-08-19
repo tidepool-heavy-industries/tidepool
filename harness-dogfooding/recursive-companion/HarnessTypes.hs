@@ -51,6 +51,9 @@ module HarnessTypes
     -- * The seed gate ('Harness.loop'\'s opening ask)
   , SeedQuestion (..)
 
+    -- * A window's ask for operator intent
+  , OperatorSteering (..)
+
     -- * Wire enum to base functor (the one place they are mapped)
   , roleOf
   , postureLayer
@@ -184,7 +187,13 @@ initialState =
           { maxDepth = 3
           , maxNodes = 12
           , maxFanOut = 4
-          , gatePolicy = GateWiderThan {gateWidth = 3}
+          , -- Autonomy by default (operator decision, 2026-08-19): splits
+            -- run without per-layer operator review. The operator hears
+            -- from a window through its own 'OperatorSteering' ask when it
+            -- genuinely needs intent clarified — reviewing every proposed
+            -- split cost more attention than it bought. The gate machinery
+            -- stays config-selectable for runs that want it.
+            gatePolicy = GateOff
           , gateMaxRounds = 8
           }
     , turnCount = 0
@@ -451,6 +460,16 @@ data GateVerdict = Approve | Prune | Amend | Add
 -- text input, presented BEFORE any model window runs.
 data SeedQuestion = SeedQuestion
   { seedQuestion :: Text
+  }
+  deriving (Generic, ToJSON, FromJSON, JsonSchema, Show, Eq)
+
+-- | A window's channel for OPERATOR intent — the steering half of the
+-- autonomy default ('initialState'\'s @GateOff@ comment): windows split and
+-- fold on their own, and raise THIS ask (question posted via @note@, since a
+-- shape-derived form carries no prompt text of its own) only when the
+-- operator's answer would genuinely change what the window does.
+data OperatorSteering = OperatorSteering
+  { steeringReply :: Text
   }
   deriving (Generic, ToJSON, FromJSON, JsonSchema, Show, Eq)
 
