@@ -3473,6 +3473,11 @@ impl SelfHarnessDriver {
         // once the branch finishes, below (mirrors `branch_node_paths`).
         if let Some(label) = label {
             self.node_labels.insert(node, label.to_string());
+            // Register the node's panel NOW, not on its first ask/note: the
+            // operator watches the tree GROW — a window that works silently
+            // (the common case) must still appear the moment it opens and
+            // grey at its fold, or the strip only ever shows the noisy nodes.
+            let _ = self.gate.node_gate(label);
         }
         self.agent.force_attached(node, Actor::Operator, sid)?;
         let realm = self.mint_realm();
