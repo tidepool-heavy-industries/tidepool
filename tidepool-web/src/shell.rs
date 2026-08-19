@@ -439,12 +439,29 @@ pub const JS: &str = r#"
     return !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length);
   }
 
-  // Block submit when a VISIBLE radio/enum group has no option checked,
-  // showing an inline message next to it instead of silently submitting
-  // without that key — an empty gate submission decode-fails Haskell-side
-  // and used to silently re-present the same form (three consecutive silent
-  // re-prompt loops, observed live). A hidden group (a payload-sum branch the
-  // operator did not choose) is never required — collect() never reads it.
+  // A field inside an unchecked Optional's `.optional-inner` is deliberately
+  // excluded (collect_form_json never reads it — Optional submits `null`
+  // without looking at the inner shape at all when `#present` is unchecked),
+  // so it must never be treated as required even though `.optional-inner` has
+  // no CSS hiding of its own (unlike a payload-sum's `.variant-payload`).
+  // Walks every ancestor `.optional` (nested Maybes), not just the nearest.
+  function enabledByAncestors(el) {
+    let node = el.closest('.optional');
+    while (node) {
+      const toggle = node.querySelector('.optional-toggle input[data-bind]');
+      if (toggle && !toggle.checked) return false;
+      node = node.parentElement ? node.parentElement.closest('.optional') : null;
+    }
+    return true;
+  }
+
+  // Block submit when a VISIBLE, ENABLED radio/enum group has no option
+  // checked, showing an inline message next to it instead of silently
+  // submitting without that key — an empty gate submission decode-fails
+  // Haskell-side and used to silently re-present the same form (three
+  // consecutive silent re-prompt loops, observed live). A hidden group (a
+  // payload-sum branch the operator did not choose) or one inside an
+  // unchecked Optional is never required — collect() never reads either.
   function validateRequired(form) {
     form.querySelectorAll('.field-error').forEach((el) => el.remove());
     form.querySelectorAll('[data-node="sum"]').forEach((el) => el.classList.remove('invalid'));
@@ -453,7 +470,7 @@ pub const JS: &str = r#"
     let ok = true;
     form.querySelectorAll('input[data-kind="enum"]').forEach((f) => {
       const key = f.getAttribute('data-bind');
-      if (seen.has(key) || !isVisible(f)) return;
+      if (seen.has(key) || !isVisible(f) || !enabledByAncestors(f)) return;
       seen.add(key);
       const group = Array.from(form.querySelectorAll('input[data-kind="enum"]'))
         .filter((g) => g.getAttribute('data-bind') === key);
@@ -697,6 +714,25 @@ mod tests {
         assert!(
             gate_idx < post_idx,
             "the validateRequired gate must precede the post call"
+        );
+    }
+
+    /// A required-enum check inside an unchecked `Optional`'s
+    /// `.optional-inner` must never block submit — `collect_form_json` never
+    /// even reads that inner shape when `#present` is unchecked, so requiring
+    /// it would be requiring a field that isn't part of the answer at all.
+    #[test]
+    fn js_validate_required_skips_fields_disabled_by_an_unchecked_optional() {
+        assert!(JS.contains("function enabledByAncestors"));
+        let skip_idx = JS
+            .find("!isVisible(f) || !enabledByAncestors(f)")
+            .expect("the required check consults enabledByAncestors");
+        let validate_idx = JS
+            .find("function validateRequired")
+            .expect("validateRequired exists");
+        assert!(
+            validate_idx < skip_idx,
+            "the check lives inside validateRequired"
         );
     }
 
