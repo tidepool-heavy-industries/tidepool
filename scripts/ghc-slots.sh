@@ -122,6 +122,17 @@ if [ -z "$mode" ] || [ $# -eq 0 ]; then
   exit 2
 fi
 
+# Pre-start the sccache server (rustc-wrapper in ~/.cargo/config.toml) with
+# CLEAN fds, BEFORE any slot flock is taken. If the first cargo build under a
+# held slot starts it instead, the daemon inherits the wrapper shell's open
+# fds — including the slot's flock fd and the command's stdout pipe — and
+# holds both for its multi-hour idle lifetime: the slot reads as held by a
+# dead pid, and pipeline readers (`... | tail`) never see EOF (observed
+# 2026-08-19: one wedged battery + one wedged slot, both traced to a
+# daemonized sccache via /proc/locks + /proc/*/fd). Idempotent and ~free when
+# the server is already up; harmless if sccache is not installed.
+command -v sccache >/dev/null 2>&1 && sccache --start-server </dev/null >/dev/null 2>&1 || true
+
 case "$mode" in
   run)
     await_memory
