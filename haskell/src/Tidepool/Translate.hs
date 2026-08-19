@@ -3305,6 +3305,15 @@ sitedVerbs =
              , vsTypeArgs = 1, vsValueArity = 2
              , vsCheckType = checkRunLLMTurnType
              , vsListAnswer = False, vsMisShapeIsError = False }
+    -- PRD 21 C5 GUI lane: `runLLMTurnBranch` with a caller-chosen label Text
+    -- stamped onto the child window for per-node operator routing — one more
+    -- LEADING value arg (label, then ref, then prompt), same `@T` site
+    -- resolution otherwise.
+  , VerbSpec { vsName = "runLLMTurnBranchLabeled", vsModule = "Tidepool.Effects"
+             , vsSitedName = "runLLMTurnBranchLabeledSited", vsSitedModule = "Tidepool.Effects"
+             , vsTypeArgs = 1, vsValueArity = 3
+             , vsCheckType = checkRunLLMTurnType
+             , vsListAnswer = False, vsMisShapeIsError = False }
     -- self-iterating-harness WS-B. `finalize :: forall v a. v -> M a` has
     -- TWO forall'd tyvars (`v`, the finalized value's type; `a`, its
     -- independent "never returns" placeholder — see effect_defs.rs's
