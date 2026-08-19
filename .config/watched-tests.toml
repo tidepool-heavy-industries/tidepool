@@ -52,6 +52,7 @@ dogfood_harness_typecheck = "authored dogfood harnesses typecheck against today'
 dogfood_observability = "console narration of what the self-iterating harness is doing"
 finalize_type_pinning = "finalize is monomorphic to the hole's answer type"
 golden_path = "S1 golden path end to end through the record-replay provider"
+labeled_branch = "PRD 21 C5 GUI lane: runLLMTurnBranchLabeled routes a branch child's asks to its own OperatorGate and retires it on exit"
 minimal_watch_list = "smallest known tenure-then-resume GC family reproducer, bisected from node_mailboxes; un-ignored as the fix's smallest acceptance"
 nested_async_repro = "nested/closure-capturing async under the tenure-then-resume GC family; carries the mechanism writeup; un-ignored as the fix's acceptance"
 node_mailboxes = "IGNORED: Tidepool.Node forkNode/sendUp/received end-to-end; tenure-then-resume GC bug fixed (scenarios 1/2 pass), still blocked on a separate burst-coalesce timeout bug"
