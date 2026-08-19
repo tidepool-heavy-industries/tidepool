@@ -3478,6 +3478,10 @@ impl SelfHarnessDriver {
             // (the common case) must still appear the moment it opens and
             // grey at its fold, or the strip only ever shows the noisy nodes.
             let _ = self.gate.node_gate(label);
+            // The seed is the AUTHORED brief, not the composed hole card —
+            // the operator asked what a node is doing; the answer is what it
+            // was told to do, not the harness plumbing around it.
+            self.gate.node_seeded(label, prompt);
         }
         self.agent.force_attached(node, Actor::Operator, sid)?;
         let realm = self.mint_realm();
@@ -3544,9 +3548,13 @@ impl SelfHarnessDriver {
         // child's per-node gate is retired here, regardless of which outcome
         // follows — the default gate stays the fallback for this node from
         // this point on, and a `WebGate` marks the panel done rather than
-        // dropping it.
-        if let Some(label) = self.node_labels.remove(&window.node()) {
-            self.gate.retire_node(&label);
+        // dropping it. The label is KEPT past retirement so the outcome
+        // paths below can attribute the node's ending (`node_failed`) or its
+        // answer (`node_finalized`, which only exists after `finalize_data`
+        // freezes the window) to the same section.
+        let retired_label = self.node_labels.remove(&window.node());
+        if let Some(label) = &retired_label {
+            self.gate.retire_node(label);
         }
         self.emit(Event::TurnEnd {
             node: window.node(),
@@ -3577,6 +3585,9 @@ impl SelfHarnessDriver {
                 "branch child exited without an answer — folding it as data at its \
                  branch position"
             );
+            if let Some(label) = &retired_label {
+                self.gate.node_failed(label, &exit.to_string());
+            }
             window.fold_exit("branch child retired (exit)");
             self.lifecycle = SelfHarnessState::RunningLoop;
             // The `Either` wraps the WHOLE pair: a window that never finalized
@@ -3590,6 +3601,12 @@ impl SelfHarnessDriver {
             // NOT a typed exit, for the same reason as the fanout path: the
             // window DID answer, and it is this driver that cannot carry a
             // closure across the branch pair (v1 scope). Our gap fails as ours.
+            if let Some(label) = &retired_label {
+                self.gate.node_failed(
+                    label,
+                    "answered with a closure — cannot cross the branch pair (v1 scope)",
+                );
+            }
             window.fold_exit("branch child retired (closure)");
             return Err(DriverError::Session(
                 "runLLMTurnBranch answer must be plain data — a closure cannot cross \
@@ -3603,6 +3620,9 @@ impl SelfHarnessDriver {
         // place a `ContextRef` digest for this window can come from.
         let node = window.node();
         let (value, rendered, child_digest) = window.finalize_data()?;
+        if let Some(label) = &retired_label {
+            self.gate.node_finalized(label, &rendered);
+        }
         self.emit(Event::Finalize {
             node,
             value: rendered,
@@ -4143,9 +4163,12 @@ impl SelfHarnessDriver {
                     // Show the operator what the answerer actually ran —
                     // once per COMPILED round (a failed compile has no
                     // executed source to show; `post_turn_source` is a
-                    // default-no-op on headless gates).
+                    // default-no-op on headless gates). Routed per-node like
+                    // asks/notes: a labeled branch child's turns belong on
+                    // its own section, not the default one.
                     if let Some(src) = self.agent.last_turn_source(node) {
-                        self.gate.post_turn_source(&src);
+                        self.resolve_gate(&FormSource::Answerer { node })
+                            .post_turn_source(&src);
                     }
                 }
                 Err(HarnessError::Compile(msg)) => {

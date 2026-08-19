@@ -1,18 +1,24 @@
-//! `FormShape` → maud markup for a NODE's operator panel — stacking every
-//! ask currently pending for that node.
+//! One node's section markup — the minimal node-lifecycle model, rendered.
 //!
-//! [`Ask`] and [`node_panel`] are consumed by [`crate::server`]. `node_panel`
-//! always yields a single `id="panel-<node_id>"` element — the unit the SSE
-//! stream patches in place, and the page shell embeds one per registered
-//! node. The `data-rev` attribute it stamps on that root is part of the wire
-//! contract too — [`crate::shell`]'s client JS compares it against the
-//! currently-mounted `#panel-<node_id>`'s to decide whether a
-//! focus-preserving skip applies (see `shell.rs`'s `applyPatch`). Each
-//! STACKED ask within also carries its OWN `data-rev` — stable for the ask's
-//! whole pending lifetime (its interaction id never changes), so the
-//! identity of an untouched ask survives a sibling ask's arrival/resolution
-//! or a note/turn-history update even though the whole panel replaces
-//! wholesale on any of those.
+//! A node is `{ seed?, timeline, final value? | failure?, done }` in a tree:
+//! it starts from a seed prompt, produces notes and asks (in one
+//! chronological, append-only TIMELINE — an answered ask stays in place with
+//! its answer, it never vanishes), and ends with a finalized value or a
+//! failure. [`NodeView`]/[`TimelineEntry`] carry exactly that;
+//! [`node_panel`] renders it. Nothing harness-specific appears in this
+//! schema — companion drafts, tensions, gate verdicts all flow through it as
+//! content.
+//!
+//! [`node_panel`] always yields a single `id="panel-<node_id>"` element —
+//! the unit the SSE stream patches in place, and the page shell embeds one
+//! per registered node inside a stable `.node-slot` wrapper. The `data-rev`
+//! attribute on that root is part of the wire contract — [`crate::shell`]'s
+//! client JS compares it against the currently-mounted panel's to decide
+//! whether a focus-preserving skip applies — and `data-path` carries the
+//! node id so the client can MOUNT a panel it has never seen (a node born
+//! after page load) into the tree at the right position. Each ask within
+//! also carries its OWN `data-rev` (its interaction id, stable for its whole
+//! lifetime).
 //!
 //! Every input carries a dotted `data-bind` path and a scalar `data-kind`.
 //! The client collects those controls into a flat object and POSTs it to
@@ -20,12 +26,9 @@
 //! `@post('...')` literal — no client-side URL assembly);
 //! [`crate::server::collect_form_json`] validates and reassembles the object
 //! using the same [`FormShape`] rendered here. Leaves bind at paths built by
-//! `tidepool_harness::selfharness::operator::child_path`, e.g. a nested
-//! `destination.host` input. `shell::JS`'s collector treats a dotted path as
-//! an ordinary (if unusual) object key string; it doesn't need to understand
-//! nesting, because `server::collect_form_json` reassembles the resulting
-//! flat `{"destination.host": …}` map back into a plain JSON answer on the
-//! server side, guided by the same `FormShape` the form was rendered from.
+//! `tidepool_harness::selfharness::operator::child_path`. `shell::JS`'s
+//! collector treats a dotted path as an ordinary flat key; the server
+//! reassembles nesting guided by the shape.
 //!
 //! A payload-bearing sum renders the discriminating choice and every
 //! variant's nested payload form, all at once (server-rendered, no
@@ -34,65 +37,142 @@
 //! collide even though they're all present in the DOM simultaneously.
 //! `server::collect_form_json` reads the chosen constructor and only looks
 //! at that branch's fields; a self-contained `<style>` block (CSS `:has()`)
-//! visually hides every non-chosen branch so the operator only sees the one
-//! they picked, without needing `shell.rs`'s JS to know anything about it.
+//! visually hides every non-chosen branch.
+//!
+//! Model-authored text (seeds, notes, values, turn sources, failure reasons)
+//! renders as maud-ESCAPED TEXT CONTENT only — never markup, never an
+//! attribute value.
 
 use std::collections::VecDeque;
 
 use maud::{html, Markup, PreEscaped};
+use serde_json::Value as Jv;
 use tidepool_harness::selfharness::operator::{
     child_path, humanize_key, FieldShape, FormShape, VariantShape, ROOT_BIND_PATH,
 };
 
-/// One ask currently pending for a node — either an `askUser` form or the
-/// between-loops continue gate.
-pub enum Ask<'a> {
-    Form(&'a FormShape),
-    Continue,
+/// One item in a node's chronological timeline — a note, or an ask in one of
+/// its two lifecycle states (pending: a live form; answered: kept in place,
+/// read-only, with what the operator submitted).
+pub enum TimelineEntry<'a> {
+    /// Display-only narration (`note`), in post order with everything else.
+    Note(&'a str),
+    /// A live `askUser` form awaiting submission.
+    PendingForm { id: u64, shape: &'a FormShape },
+    /// The live between-loops gate awaiting the operator's continue.
+    PendingContinue { id: u64 },
+    /// A form that was answered — stays at its position with the reassembled
+    /// answer the harness actually received.
+    AnsweredForm {
+        id: u64,
+        shape: &'a FormShape,
+        answer: &'a Jv,
+    },
+    /// A continue gate that was clicked — with the operator's message, if
+    /// they attached one.
+    AnsweredContinue { id: u64, input: Option<&'a str> },
+}
+
+impl TimelineEntry<'_> {
+    fn is_pending(&self) -> bool {
+        matches!(
+            self,
+            TimelineEntry::PendingForm { .. } | TimelineEntry::PendingContinue { .. }
+        )
+    }
+}
+
+/// Everything [`node_panel`] renders for one node — the four-field node
+/// lifecycle (seed → timeline → final value | failure) plus the render
+/// bookkeeping (`rev`, `done`, the turn-source history pane).
+pub struct NodeView<'a> {
+    pub node_id: &'a str,
+    /// The starting prompt the node's window was opened with, if the wire
+    /// carried one ([`OperatorGate::node_seeded`]).
+    pub seed: Option<&'a str>,
+    pub timeline: Vec<TimelineEntry<'a>>,
+    /// The finalized answer, JSON-rendered ([`OperatorGate::node_finalized`]).
+    pub final_value: Option<&'a str>,
+    /// Why the node ended without a value ([`OperatorGate::node_failed`]).
+    pub failure: Option<&'a str>,
+    pub done: bool,
+    pub turn_history: &'a VecDeque<String>,
+    pub rev: u64,
+}
+
+/// A node's derived status — never stored, always a function of the view.
+/// Precedence: a failure outranks `done` bookkeeping; a value-carrying done
+/// outranks a bare one; anything live is either waiting on the operator or
+/// running.
+fn status(view: &NodeView) -> (&'static str, &'static str) {
+    if view.failure.is_some() {
+        ("failed", "failed")
+    } else if view.done && view.final_value.is_some() {
+        ("done", "done")
+    } else if view.done {
+        ("ended", "ended")
+    } else if view.timeline.iter().any(TimelineEntry::is_pending) {
+        ("needs-you", "needs you")
+    } else {
+        ("running", "running")
+    }
 }
 
 /// The `id="panel-<node_id>"` fragment for one node — the one element the
 /// SSE stream patches in place for that node. Rendered both into the initial
 /// page ([`crate::shell::page`]) and into every SSE frame for `node_id`.
 ///
-/// `asks` is every currently pending interaction for `node_id`, in publish
-/// order — rendered STACKED (never just the newest; an operator gate never
-/// hides a question). An empty `asks` renders the idle placeholder. `rev` is
-/// the node's aggregate revision ([`crate::server::AppState`]), stamped as
-/// `data-rev` on the panel root so the client can tell a genuinely NEW
-/// interaction (always replace `#panel-<node_id>`) apart from a
-/// same-interaction-set re-render (skip while the operator has focus inside
-/// it).
-///
-/// `notes` is the current loop's accumulated `note` feed (empty renders
-/// nothing), shown ABOVE the asks — narration explaining what is about to be
-/// asked and why belongs before the thing it explains. `turn_history` is
-/// every compiled answerer round's Haskell in post order (oldest first,
-/// empty renders nothing), shown BELOW the asks as the scrollable
-/// turn-history pane.
-pub fn node_panel(
-    node_id: &str,
-    asks: &[(u64, Ask)],
-    notes: &[String],
-    turn_history: &VecDeque<String>,
-    rev: u64,
-) -> Markup {
+/// Anatomy, top to bottom: header (full path + collapse toggle + status
+/// badge) → seed (collapsed `<details>` — briefs are long) → the timeline in
+/// true chronological order (pending asks STACKED and live, answered asks
+/// read-only in place) → failure or final value → the turn-source history.
+pub fn node_panel(view: &NodeView) -> Markup {
+    let (status_class, status_label) = status(view);
+    let has_live_content = !view.timeline.is_empty()
+        || view.seed.is_some()
+        || view.final_value.is_some()
+        || view.failure.is_some();
     html! {
-        div id=(panel_id(node_id)) data-rev=(rev) {
-            @if !notes.is_empty() {
-                (notes_feed(notes))
+        div id=(panel_id(view.node_id)) data-rev=(view.rev) data-path=(view.node_id)
+            class=(format!("node-panel {status_class}")) {
+            header class="node-head" {
+                button type="button" class="node-toggle" data-toggle=(view.node_id)
+                    aria-label="collapse" { "▾" }
+                h2 class="node-title" { (view.node_id) }
+                span class=(format!("status {status_class}")) { (status_label) }
             }
-            @if asks.is_empty() {
-                (idle())
-            } @else {
-                div class="asks" data-node="asks" {
-                    @for (interaction, ask) in asks {
-                        (ask_view(node_id, *interaction, ask))
+            div class="node-body" {
+                @if let Some(seed) = view.seed {
+                    details class="seed" data-node="seed" {
+                        summary { "seed — " (snippet(seed)) }
+                        pre { (seed) }
                     }
                 }
-            }
-            @if !turn_history.is_empty() {
-                (turn_history_pane(turn_history))
+                @if !view.timeline.is_empty() {
+                    div class="timeline" data-node="timeline" {
+                        @for entry in &view.timeline {
+                            (timeline_entry(view.node_id, entry))
+                        }
+                    }
+                }
+                @if !has_live_content && !view.done {
+                    (idle())
+                }
+                @if let Some(reason) = view.failure {
+                    div class="failure" data-node="failure" {
+                        p class="eyebrow failure-eyebrow" { "Ended without a value" }
+                        pre { (reason) }
+                    }
+                }
+                @if let Some(value) = view.final_value {
+                    div class="final" data-node="final" {
+                        p class="eyebrow" { "Final value" }
+                        pre { (pretty_json(value)) }
+                    }
+                }
+                @if !view.turn_history.is_empty() {
+                    (turn_history_pane(view.turn_history))
+                }
             }
         }
     }
@@ -104,28 +184,85 @@ pub fn panel_id(node_id: &str) -> String {
     format!("panel-{node_id}")
 }
 
-/// The accumulated `note` feed: one paragraph per posted note, in post
-/// order, plain text (no markdown — `white-space: pre-wrap` alone carries
-/// blank-line paragraph breaks the author wrote). maud escapes `note` as an
-/// ordinary text node.
-fn notes_feed(notes: &[String]) -> Markup {
+/// Re-render a JSON text pretty-printed when it parses, verbatim when it
+/// doesn't (a finalized value is always JSON today, but a non-JSON string
+/// must still display rather than vanish).
+fn pretty_json(value: &str) -> String {
+    serde_json::from_str::<Jv>(value)
+        .ok()
+        .and_then(|v| serde_json::to_string_pretty(&v).ok())
+        .unwrap_or_else(|| value.to_string())
+}
+
+/// One timeline item, dispatched by kind.
+fn timeline_entry(node_id: &str, entry: &TimelineEntry) -> Markup {
+    match entry {
+        TimelineEntry::Note(text) => html! {
+            p class="note" style="white-space: pre-wrap" { (text) }
+        },
+        TimelineEntry::PendingForm { id, shape } => ask_form(node_id, *id, shape),
+        TimelineEntry::PendingContinue { id } => ask_continue(node_id, *id),
+        TimelineEntry::AnsweredForm { id, shape, answer } => {
+            answered_form(node_id, *id, shape, answer)
+        }
+        TimelineEntry::AnsweredContinue { id, input } => answered_continue(node_id, *id, *input),
+    }
+}
+
+/// An answered form, read-only at its original timeline position: the form's
+/// type name and the answer the harness actually received (the reassembled
+/// submission — the truth of what crossed the gate, not the raw wire).
+fn answered_form(node_id: &str, interaction: u64, shape: &FormShape, answer: &Jv) -> Markup {
     html! {
-        div class="notes" data-node="notes" {
-            @for note in notes {
-                p class="note" style="white-space: pre-wrap" { (note) }
+        div id=(ask_id(node_id, interaction)) data-rev=(interaction)
+            class="answered" data-node="answered" {
+            p class="eyebrow" { "Answered — " (shape_title(shape)) }
+            pre { (answer_text(answer)) }
+        }
+    }
+}
+
+/// A clicked continue gate, read-only at its position.
+fn answered_continue(node_id: &str, interaction: u64, input: Option<&str>) -> Markup {
+    html! {
+        div id=(ask_id(node_id, interaction)) data-rev=(interaction)
+            class="answered" data-node="answered" {
+            @match input {
+                Some(text) => {
+                    p class="eyebrow" { "Continued, with input" }
+                    pre { (text) }
+                }
+                None => {
+                    p class="eyebrow" { "Continued" }
+                }
             }
         }
     }
 }
 
-/// The turn-history pane, below the asks/notes: one nested `<details>` per
-/// compiled turn, NEWEST FIRST with only the newest open — the operator
-/// scrolls back through past turns inside a bounded-height container
-/// (`.turn-history` CSS), so an open pane never crowds the asks. Entries are
-/// numbered in post order (turn 1 = oldest still retained; the server caps
-/// the history, so numbering restarts only across process restarts). Plain
-/// `<pre>`, no syntax highlighting; every source string is interpolated as
-/// an ordinary maud text node (escaped), never `PreEscaped`.
+/// The form's display title — its answer type's own name where the shape
+/// carries one, a generic word where it doesn't (leaves).
+fn shape_title(shape: &FormShape) -> &str {
+    match shape {
+        FormShape::Product { type_key, .. } | FormShape::Sum { type_key, .. } => type_key,
+        _ => "answer",
+    }
+}
+
+/// An answer value as display text: bare text for a string (the common
+/// free-text reply reads as prose, not as a quoted JSON literal), pretty
+/// JSON for anything structured.
+fn answer_text(answer: &Jv) -> String {
+    match answer {
+        Jv::String(s) => s.clone(),
+        other => serde_json::to_string_pretty(other).unwrap_or_else(|_| other.to_string()),
+    }
+}
+
+/// The turn-history pane, at the bottom of the node body: one nested
+/// `<details>` per compiled turn, NEWEST FIRST with only the newest open.
+/// Entries are numbered in post order. Plain `<pre>`, every source string an
+/// ordinary maud text node (escaped), never `PreEscaped`.
 fn turn_history_pane(history: &VecDeque<String>) -> Markup {
     let n = history.len();
     html! {
@@ -143,8 +280,8 @@ fn turn_history_pane(history: &VecDeque<String>) -> Markup {
     }
 }
 
-/// A one-line teaser for a turn entry's summary: the source's first line,
-/// truncated. Rendered as a text node like everything else.
+/// A one-line teaser: the text's first line, truncated. Rendered as a text
+/// node like everything else.
 fn snippet(source: &str) -> String {
     let head = source.lines().next().unwrap_or("").trim();
     let mut s: String = head.chars().take(64).collect();
@@ -154,8 +291,7 @@ fn snippet(source: &str) -> String {
     s
 }
 
-/// Idle placeholder — nothing needs the operator right now. A large, quiet
-/// glyph and a hairline frame read as a composed sheet, not an empty state.
+/// Idle placeholder — a live node with nothing to show yet.
 fn idle() -> Markup {
     html! {
         div class="idle" {
@@ -163,14 +299,6 @@ fn idle() -> Markup {
             p class="idle-glyph" { "—" }
             p class="idle-note" { "No operator input pending. The harness is thinking." }
         }
-    }
-}
-
-/// One stacked ask: a form or the continue gate, dispatched by kind.
-fn ask_view(node_id: &str, interaction: u64, ask: &Ask) -> Markup {
-    match ask {
-        Ask::Form(shape) => ask_form(node_id, interaction, shape),
-        Ask::Continue => ask_continue(node_id, interaction),
     }
 }
 
@@ -238,7 +366,8 @@ fn ask_continue(node_id: &str, interaction: u64) -> Markup {
     }
 }
 
-/// The DOM id one stacked ask carries — `id="ask-<node_id>-<interaction>"`.
+/// The DOM id one ask carries — `id="ask-<node_id>-<interaction>"` — for its
+/// whole lifetime, pending and answered alike.
 fn ask_id(node_id: &str, interaction: u64) -> String {
     format!("ask-{node_id}-{interaction}")
 }
@@ -399,109 +528,313 @@ fn css_escape(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
+
+    fn empty_history() -> VecDeque<String> {
+        VecDeque::new()
+    }
+
+    fn base_view<'a>(
+        node_id: &'a str,
+        timeline: Vec<TimelineEntry<'a>>,
+        turn_history: &'a VecDeque<String>,
+        rev: u64,
+    ) -> NodeView<'a> {
+        NodeView {
+            node_id,
+            seed: None,
+            timeline,
+            final_value: None,
+            failure: None,
+            done: false,
+            turn_history,
+            rev,
+        }
+    }
 
     #[test]
     fn node_panel_continue_renders_button() {
-        let asks = vec![(0u64, Ask::Continue)];
-        let html = node_panel("n1", &asks, &[], &VecDeque::new(), 0).into_string();
+        let th = empty_history();
+        let view = base_view("n1", vec![TimelineEntry::PendingContinue { id: 0 }], &th, 0);
+        let html = node_panel(&view).into_string();
         assert!(html.contains("@post('/node/n1/continue/0')"));
     }
 
     #[test]
     fn node_panel_idle_is_quiet() {
-        let html = node_panel("n1", &[], &[], &VecDeque::new(), 0).into_string();
+        let th = empty_history();
+        let html = node_panel(&base_view("n1", vec![], &th, 0)).into_string();
         assert!(html.starts_with("<div id=\"panel-n1\""));
         assert!(!html.contains("@post"));
+        assert!(html.contains("Standby"), "{html}");
     }
 
-    /// F10 (per-node): `node_panel()` stamps the caller's revision as
+    /// F10 (per-node): `node_panel()` stamps the view's revision as
     /// `data-rev` on the panel root, and a different revision produces a
-    /// different attribute value.
+    /// different attribute value. `data-path` rides alongside so the client
+    /// can mount a never-seen panel into the tree.
     #[test]
-    fn node_panel_stamps_data_rev_from_the_argument() {
-        let a = node_panel("n1", &[], &[], &VecDeque::new(), 7).into_string();
-        assert!(a.contains("id=\"panel-n1\" data-rev=\"7\""), "{a}");
+    fn node_panel_stamps_data_rev_and_data_path() {
+        let th = empty_history();
+        let a = node_panel(&base_view("n1", vec![], &th, 7)).into_string();
+        assert!(
+            a.contains("id=\"panel-n1\" data-rev=\"7\" data-path=\"n1\""),
+            "{a}"
+        );
 
-        let b = node_panel("n1", &[], &[], &VecDeque::new(), 8).into_string();
+        let b = node_panel(&base_view("n1", vec![], &th, 8)).into_string();
         assert!(b.contains("id=\"panel-n1\" data-rev=\"8\""), "{b}");
         assert_ne!(a, b);
     }
 
-    /// The panel id is node-scoped, distinguishing tabs.
+    /// The panel id is node-scoped, distinguishing sections.
     #[test]
     fn node_panel_id_is_scoped_per_node() {
-        let a = node_panel("alpha", &[], &[], &VecDeque::new(), 0).into_string();
-        let b = node_panel("beta", &[], &[], &VecDeque::new(), 0).into_string();
+        let th = empty_history();
+        let a = node_panel(&base_view("alpha", vec![], &th, 0)).into_string();
+        let b = node_panel(&base_view("beta", vec![], &th, 0)).into_string();
         assert!(a.starts_with("<div id=\"panel-alpha\""));
         assert!(b.starts_with("<div id=\"panel-beta\""));
     }
 
-    /// The core stacking behavior: two pending asks on one node BOTH render,
-    /// each with its own stable id/data-rev keyed on its interaction id —
-    /// an operator gate never hides a question by only showing the newest.
+    /// The header carries the FULL path as the title (depth also indents via
+    /// the shell wrapper), a collapse toggle, and the derived status badge.
+    #[test]
+    fn node_panel_header_has_full_path_toggle_and_status() {
+        let th = empty_history();
+        let html = node_panel(&base_view("root/1-x", vec![], &th, 0)).into_string();
+        assert!(html.contains(">root/1-x</h2>"), "{html}");
+        assert!(html.contains("data-toggle=\"root/1-x\""), "{html}");
+        assert!(html.contains(">running</span>"), "{html}");
+    }
+
+    /// Status derivation: pending ask → needs you; done+value → done;
+    /// done bare → ended; failure outranks everything.
+    #[test]
+    fn node_panel_status_derives_from_the_view() {
+        let th = empty_history();
+        let shape = FormShape::String;
+
+        let needs = node_panel(&base_view(
+            "n",
+            vec![TimelineEntry::PendingForm {
+                id: 0,
+                shape: &shape,
+            }],
+            &th,
+            0,
+        ))
+        .into_string();
+        assert!(needs.contains(">needs you</span>"), "{needs}");
+
+        let mut done = base_view("n", vec![], &th, 0);
+        done.done = true;
+        done.final_value = Some("{\"ok\":true}");
+        let done = node_panel(&done).into_string();
+        assert!(done.contains(">done</span>"), "{done}");
+
+        let mut ended = base_view("n", vec![], &th, 0);
+        ended.done = true;
+        let ended = node_panel(&ended).into_string();
+        assert!(ended.contains(">ended</span>"), "{ended}");
+
+        let mut failed = base_view("n", vec![], &th, 0);
+        failed.done = true;
+        failed.failure = Some("round exhaustion");
+        let failed = node_panel(&failed).into_string();
+        assert!(failed.contains(">failed</span>"), "{failed}");
+    }
+
+    /// The seed renders as a collapsed details block with a one-line teaser,
+    /// escaped as ordinary text.
+    #[test]
+    fn node_panel_renders_seed_collapsed_and_escaped() {
+        let th = empty_history();
+        let mut view = base_view("n1", vec![], &th, 0);
+        view.seed = Some("NODE root/1 — DISCOVER <script>alert(1)</script>");
+        let html = node_panel(&view).into_string();
+        assert!(html.contains("data-node=\"seed\""), "{html}");
+        assert!(
+            !html.contains("data-node=\"seed\" open"),
+            "seed starts collapsed: {html}"
+        );
+        assert!(!html.contains("<script>alert"), "{html}");
+        assert!(html.contains("&lt;script&gt;"), "{html}");
+    }
+
+    /// The final value renders pretty-printed when it parses as JSON.
+    #[test]
+    fn node_panel_renders_final_value_pretty() {
+        let th = empty_history();
+        let mut view = base_view("n1", vec![], &th, 0);
+        view.done = true;
+        view.final_value = Some("{\"tag\":\"FinishLayer\",\"confidence\":\"High\"}");
+        let html = node_panel(&view).into_string();
+        assert!(html.contains("data-node=\"final\""), "{html}");
+        assert!(html.contains("Final value"), "{html}");
+        // pretty-printed: the two keys land on separate lines
+        assert!(
+            html.contains("&quot;tag&quot;: &quot;FinishLayer&quot;"),
+            "{html}"
+        );
+    }
+
+    /// A failure renders its reason as escaped text under a distinct block.
+    #[test]
+    fn node_panel_renders_failure_reason() {
+        let th = empty_history();
+        let mut view = base_view("n1", vec![], &th, 0);
+        view.done = true;
+        view.failure = Some("round exhaustion — 8 rounds without finalize");
+        let html = node_panel(&view).into_string();
+        assert!(html.contains("data-node=\"failure\""), "{html}");
+        assert!(html.contains("Ended without a value"), "{html}");
+        assert!(html.contains("round exhaustion"), "{html}");
+    }
+
+    /// The core timeline behavior: entries render in true chronological
+    /// order — a note, an ANSWERED ask (read-only, with its answer), then a
+    /// pending ask — and the answered ask never renders form controls.
+    #[test]
+    fn node_panel_timeline_keeps_chronology_and_answered_asks() {
+        let th = empty_history();
+        let shape = FormShape::String;
+        let answer = json!("keep going");
+        let view = base_view(
+            "n1",
+            vec![
+                TimelineEntry::Note("about to ask"),
+                TimelineEntry::AnsweredForm {
+                    id: 3,
+                    shape: &shape,
+                    answer: &answer,
+                },
+                TimelineEntry::PendingForm {
+                    id: 7,
+                    shape: &shape,
+                },
+            ],
+            &th,
+            42,
+        );
+        let html = node_panel(&view).into_string();
+
+        let note_pos = html.find("about to ask").expect("note rendered");
+        let answered_pos = html.find("id=\"ask-n1-3\"").expect("answered ask rendered");
+        let pending_pos = html.find("id=\"ask-n1-7\"").expect("pending ask rendered");
+        assert!(
+            note_pos < answered_pos && answered_pos < pending_pos,
+            "{html}"
+        );
+
+        assert!(
+            html.contains("keep going"),
+            "the submitted answer shows: {html}"
+        );
+        assert!(html.contains("@post('/node/n1/submit/7')"), "{html}");
+        assert!(
+            !html.contains("@post('/node/n1/submit/3')"),
+            "an answered ask has no live form: {html}"
+        );
+        assert!(html.contains("id=\"panel-n1\" data-rev=\"42\""), "{html}");
+    }
+
+    /// Two pending asks on one node BOTH render, each with its own stable
+    /// id/data-rev keyed on its interaction id — an operator gate never
+    /// hides a question by only showing the newest.
     #[test]
     fn node_panel_stacks_every_pending_ask_with_its_own_rev() {
+        let th = empty_history();
         let shape = FormShape::String;
-        let asks = vec![(3u64, Ask::Form(&shape)), (7u64, Ask::Continue)];
-        let html = node_panel("n1", &asks, &[], &VecDeque::new(), 42).into_string();
+        let view = base_view(
+            "n1",
+            vec![
+                TimelineEntry::PendingForm {
+                    id: 3,
+                    shape: &shape,
+                },
+                TimelineEntry::PendingContinue { id: 7 },
+            ],
+            &th,
+            42,
+        );
+        let html = node_panel(&view).into_string();
 
         assert!(html.contains("id=\"ask-n1-3\" data-rev=\"3\""), "{html}");
         assert!(html.contains("id=\"ask-n1-7\" data-rev=\"7\""), "{html}");
         assert!(html.contains("@post('/node/n1/submit/3')"), "{html}");
         assert!(html.contains("@post('/node/n1/continue/7')"), "{html}");
-        // The panel root's own aggregate revision is distinct from either
-        // ask's individual one.
-        assert!(html.contains("id=\"panel-n1\" data-rev=\"42\""), "{html}");
     }
 
-    /// Notes render ABOVE the asks, in post order, escaped as ordinary text.
+    /// An answered continue renders the operator's message when one was
+    /// attached, and a plain marker when not.
     #[test]
-    fn node_panel_renders_notes_above_the_asks() {
-        let notes = vec!["first note".to_string(), "<b>second</b> note".to_string()];
-        let html = node_panel("n1", &[], &notes, &VecDeque::new(), 0).into_string();
-        let notes_pos = html.find("first note").expect("first note rendered");
-        let second_pos = html.find("second").expect("second note rendered");
-        let idle_pos = html.find("Standby").expect("idle view still rendered");
-        assert!(
-            notes_pos < idle_pos && second_pos < idle_pos,
-            "notes must render above the asks/idle view:\n{html}"
+    fn node_panel_renders_answered_continue_with_and_without_input() {
+        let th = empty_history();
+        let with = base_view(
+            "n1",
+            vec![TimelineEntry::AnsweredContinue {
+                id: 1,
+                input: Some("focus on receipts"),
+            }],
+            &th,
+            0,
         );
+        let html = node_panel(&with).into_string();
+        assert!(html.contains("Continued, with input"), "{html}");
+        assert!(html.contains("focus on receipts"), "{html}");
+
+        let without = base_view(
+            "n1",
+            vec![TimelineEntry::AnsweredContinue { id: 1, input: None }],
+            &th,
+            0,
+        );
+        let html = node_panel(&without).into_string();
+        assert!(html.contains("Continued"), "{html}");
+    }
+
+    /// Notes are escaped as ordinary text nodes.
+    #[test]
+    fn node_panel_escapes_notes() {
+        let th = empty_history();
+        let view = base_view(
+            "n1",
+            vec![TimelineEntry::Note("<b>second</b> note")],
+            &th,
+            0,
+        );
+        let html = node_panel(&view).into_string();
         assert!(
             html.contains("&lt;b&gt;second&lt;/b&gt; note"),
             "a note must be escaped as an ordinary text node: {html}"
         );
     }
 
-    /// An empty note feed adds no notes markup at all.
+    /// The turn-history pane renders at the BOTTOM of the node body with
+    /// every source escaped as an ordinary text node (never `PreEscaped`).
     #[test]
-    fn node_panel_with_no_notes_renders_no_notes_node() {
-        let html = node_panel("n1", &[], &[], &VecDeque::new(), 0).into_string();
-        assert!(!html.contains("data-node=\"notes\""), "{html}");
-    }
-
-    /// The turn-history pane renders BELOW the asks/idle view with every
-    /// source escaped as an ordinary text node (never `PreEscaped`) — a
-    /// source containing `<script>` must not survive as live markup.
-    #[test]
-    fn node_panel_renders_turn_history_below_view_and_escaped() {
+    fn node_panel_renders_turn_history_below_and_escaped() {
         let history = VecDeque::from([
             "resume (Approve :: Decision) -- <script>alert(1)</script>".to_string()
         ]);
-        let html = node_panel("n1", &[], &[], &history, 0).into_string();
-        assert!(html.contains("<details"), "{html}");
+        let view = base_view("n1", vec![TimelineEntry::Note("a note")], &history, 0);
+        let html = node_panel(&view).into_string();
         assert!(html.contains("Haskell turns (1)"), "{html}");
         assert!(!html.contains("<script>alert"), "{html}");
         assert!(html.contains("&lt;script&gt;"), "{html}");
-        let idle_pos = html.find("Standby").expect("idle view still rendered");
-        let details_pos = html.find("<details").expect("details rendered");
+        let note_pos = html.find("a note").expect("note rendered");
+        let details_pos = html
+            .find("data-node=\"turn-source\"")
+            .expect("pane rendered");
         assert!(
-            idle_pos < details_pos,
-            "the turn-history pane must render BELOW the asks/idle view:\n{html}"
+            note_pos < details_pos,
+            "the turn-history pane renders below the timeline:\n{html}"
         );
     }
 
     /// Every retained turn renders as its own entry, newest first, with only
-    /// the NEWEST entry open — the operator scrolls back through the rest.
+    /// the NEWEST entry open.
     #[test]
     fn node_panel_turn_history_lists_all_turns_newest_first_newest_open() {
         let history = VecDeque::from([
@@ -509,7 +842,8 @@ mod tests {
             "pure (toJSON 2) -- middle".to_string(),
             "pure (toJSON 3) -- newest".to_string(),
         ]);
-        let html = node_panel("n1", &[], &[], &history, 0).into_string();
+        let view = base_view("n1", vec![], &history, 0);
+        let html = node_panel(&view).into_string();
         assert!(html.contains("Haskell turns (3)"), "{html}");
         let p1 = html.find("turn 1 —").expect("oldest entry rendered");
         let p3 = html.find("turn 3 —").expect("newest entry rendered");
@@ -520,16 +854,7 @@ mod tests {
         assert!(open_pos < p1, "the open entry is the newest:\n{html}");
     }
 
-    /// An empty history adds no turn-source markup at all.
-    #[test]
-    fn node_panel_with_no_turn_history_renders_no_details() {
-        let html = node_panel("n1", &[], &[], &VecDeque::new(), 0).into_string();
-        assert!(!html.contains("<details"), "{html}");
-    }
-
     // ---- generic_shape ------------------------------------------------------
-
-    use tidepool_harness::selfharness::operator::{FieldShape, FormShape, VariantShape};
 
     #[test]
     fn generic_shape_renders_leaves_with_bind_and_kind() {

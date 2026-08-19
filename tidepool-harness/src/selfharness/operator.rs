@@ -95,9 +95,30 @@ pub trait OperatorGate: Send + Sync {
     /// Mark the labeled window `label` as finished — called once, at that
     /// node's terminate/fold point, regardless of how it finished (answered,
     /// exited, or closure-refused). Default no-op, same reasoning as
-    /// [`Self::post_note`]; a web/GUI gate overrides it to grey the node's tab
-    /// while keeping its panel history readable.
+    /// [`Self::post_note`]; a web/GUI gate overrides it to grey the node's
+    /// section while keeping its history readable.
     fn retire_node(&self, _label: &str) {}
+
+    /// The labeled window's starting prompt — the authored brief the window
+    /// was opened with, sent once at birth, right after the eager
+    /// [`Self::node_gate`] registration. Default no-op, same reasoning as
+    /// [`Self::post_note`]; a web/GUI gate stores it so the operator can see
+    /// what a node was asked to do, not only what it says.
+    fn node_seeded(&self, _label: &str, _seed: &str) {}
+
+    /// The labeled window's finalized answer, rendered to JSON text — the
+    /// same rendering `Event::Finalize` carries. Called on the success path
+    /// only, after [`Self::retire_node`] (retirement marks the END; the
+    /// value materializes a few steps later, when the window's own
+    /// post-finalize prefix is frozen). Default no-op.
+    fn node_finalized(&self, _label: &str, _value: &str) {}
+
+    /// The labeled window ended WITHOUT an answer — `reason` is the
+    /// `InvocationExit` rendering (round exhaustion, non-finalize ending,
+    /// provider failure) or the closure-refusal message. Called after
+    /// [`Self::retire_node`], mutually exclusive with
+    /// [`Self::node_finalized`]. Default no-op.
+    fn node_failed(&self, _label: &str, _reason: &str) {}
 }
 
 /// Headless default: `await_continue` reads a line from stdin (the current
@@ -276,6 +297,17 @@ mod tests {
     fn stdin_gate_has_no_per_node_registrar_by_default() {
         assert!(StdinGate.node_gate("root/1-x").is_none());
         StdinGate.retire_node("root/1-x"); // must not panic
+    }
+
+    /// The node-lifecycle extensions ([`OperatorGate::node_seeded`],
+    /// [`OperatorGate::node_finalized`], [`OperatorGate::node_failed`]) are
+    /// default no-ops for the same reason: every pre-existing gate stays
+    /// valid with zero edits.
+    #[test]
+    fn node_lifecycle_methods_default_to_no_ops() {
+        StdinGate.node_seeded("root/1-x", "NODE root/1 — DISCOVER …");
+        StdinGate.node_finalized("root/1-x", "{\"tag\":\"FinishLayer\"}");
+        StdinGate.node_failed("root/1-x", "round exhaustion");
     }
 
     // ---- humanize_key -----------------------------------------------------

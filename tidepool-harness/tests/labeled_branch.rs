@@ -91,6 +91,9 @@ struct RoutingProbe {
     default_present_calls: AtomicUsize,
     child_present_calls: AtomicUsize,
     retired: Mutex<Vec<String>>,
+    seeded: Mutex<Vec<(String, String)>>,
+    finalized: Mutex<Vec<(String, String)>>,
+    failed: Mutex<Vec<(String, String)>>,
 }
 
 /// The driver's default gate: registers a per-node gate ONLY for the label
@@ -123,6 +126,30 @@ impl OperatorGate for DefaultGate {
 
     fn retire_node(&self, label: &str) {
         self.probe.retired.lock().unwrap().push(label.to_string());
+    }
+
+    fn node_seeded(&self, label: &str, seed: &str) {
+        self.probe
+            .seeded
+            .lock()
+            .unwrap()
+            .push((label.to_string(), seed.to_string()));
+    }
+
+    fn node_finalized(&self, label: &str, value: &str) {
+        self.probe
+            .finalized
+            .lock()
+            .unwrap()
+            .push((label.to_string(), value.to_string()));
+    }
+
+    fn node_failed(&self, label: &str, reason: &str) {
+        self.probe
+            .failed
+            .lock()
+            .unwrap()
+            .push((label.to_string(), reason.to_string()));
     }
 }
 
@@ -224,5 +251,30 @@ async fn labeled_branch_child_asks_route_to_its_own_gate_and_retire_on_exit() {
         ["root/1-child".to_string()],
         "the node's terminate/fold point must retire exactly its own label, \
          exactly once"
+    );
+
+    // The node-lifecycle extensions (seed at birth, outcome at fold): the
+    // seed is the AUTHORED brief carried once at birth; this script never
+    // finalizes, so the fold must attribute a FAILURE (the typed exit's
+    // rendering) and no finalized value.
+    let seeded = probe.seeded.lock().unwrap();
+    assert_eq!(seeded.len(), 1, "exactly one seed, at birth: {seeded:?}");
+    assert_eq!(seeded[0].0, "root/1-child");
+    assert!(
+        seeded[0].1.contains("Branch:"),
+        "the seed is the authored brief, not the composed hole card: {}",
+        seeded[0].1
+    );
+    let failed = probe.failed.lock().unwrap();
+    assert_eq!(failed.len(), 1, "one failure at the fold: {failed:?}");
+    assert_eq!(failed[0].0, "root/1-child");
+    assert!(
+        failed[0].1.contains("ExitRoundsExhausted"),
+        "the failure reason is the InvocationExit rendering: {}",
+        failed[0].1
+    );
+    assert!(
+        probe.finalized.lock().unwrap().is_empty(),
+        "a window that never finalized has no value to attribute"
     );
 }

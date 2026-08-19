@@ -2,54 +2,45 @@
 //! Style) + a small vendored vanilla-JS Datastar client. No CDN, no external
 //! font, no build step — everything ships in one served page.
 //!
-//! The page now renders a TAB STRIP across every registered node, each with
-//! its own panel. The client ([`JS`]) speaks exactly the wire the renderer
-//! emits: it opens the `/sse` stream, applies `datastar-patch-elements`
-//! frames by replacing the same-`id` element in place (now one
-//! `id="panel-<node_id>"` per node instead of a single global `#panel`), and
-//! wires `data-on-submit="@post('/x')"` handlers — the exact node/interaction
-//! is baked into that literal URL at render time
-//! ([`crate::render::node_panel`]), so the client-side collector and POST
-//! logic need no node/interaction awareness at all. A `data-on-submit` form
-//! collects every `[data-bind]` input into a FLAT `{ <key>: <scalar> }`
-//! object (coerced by `data-kind`: int → number, bool → boolean, enum/text →
-//! string) and POSTs it.
+//! The page is ONE OUTLINE: every registered node renders as its own section,
+//! always visible, indented by tree depth (slash count in the `node_id`),
+//! sorted by path with the default node pinned first. There are no tabs —
+//! collapsing a section (the header toggle) is the only hiding mechanism,
+//! and it is operator-initiated. The collapse class lives on the STABLE
+//! `.node-slot` wrapper, never on the SSE-patched inner `#panel-<node_id>`,
+//! so an operator's toggle survives any number of live patches.
 //!
-//! ## Focus-preserving skip is gated on `data-rev` (F10, now per-node)
+//! The client ([`JS`]) speaks exactly the wire the renderer emits: it opens
+//! the `/sse` stream, applies `datastar-patch-elements` frames by replacing
+//! the same-`id` element in place, and — when a frame carries a panel the
+//! page has NEVER seen (a node born after page load) — MOUNTS it into
+//! `#tree` at its sorted position inside a freshly built `.node-slot`
+//! wrapper, so the operator watches the tree grow live. A `data-on-submit`
+//! form collects every `[data-bind]` input into a FLAT `{ <key>: <scalar> }`
+//! object (coerced by `data-kind`: int → number, bool → boolean, enum/text →
+//! string) and POSTs it to the node/interaction-scoped URL baked into the
+//! form's `@post(...)` literal.
+//!
+//! ## Focus-preserving skip is gated on `data-rev` (F10, per-node)
 //! A focused/typed-in field is preserved across an SSE tick ONLY when the
 //! incoming fragment's `data-rev` (stamped by [`crate::render::node_panel`]
 //! on that node's panel root) matches the currently-mounted element's — i.e.
-//! the server re-rendered the SAME node's pending state (e.g. a periodic
-//! keep-alive tick, or an unrelated sibling node's tick that never touches
-//! this one). A DIFFERENT `data-rev` always replaces the element regardless
-//! of focus: it means THIS node's pending state itself changed (an ask was
-//! published or resolved, or notes/turn-history updated), and skipping that
-//! replace on stale-focus grounds is exactly the bug this gate fixes.
-//!
-//! ## Tab switching is a separate, inert concern
-//! Every node's panel is always present in the DOM (wrapped in a STABLE
-//! `.tab-slot` container that the SSE patch logic never touches — only the
-//! inner `#panel-<node_id>` is replaced by a patch); [`wireTabs`]-equivalent
-//! JS below toggles the `.active` class on `.tab-slot`/`.tab` elements on
-//! click. Because the toggle lives on the stable wrapper rather than the
-//! patched panel itself, an SSE patch to a hidden node's panel can never
-//! resurrect it into view.
+//! the server re-rendered the SAME node's state. A DIFFERENT `data-rev`
+//! always replaces the element regardless of focus: it means THIS node's
+//! state itself changed, and skipping that replace on stale-focus grounds is
+//! exactly the bug this gate fixes.
 
 use maud::{html, Markup, PreEscaped, DOCTYPE};
 
 /// The full page: `<head>` with inline [`CSS`] + [`JS`], `<body>` with a
-/// masthead, a tab strip across every `(node_id, panel, done)` triple, and
-/// each node's panel wrapped in its own stable `.tab-slot` (first node active
-/// by default).
+/// masthead and the `#tree` outline — one stable `.node-slot` wrapper per
+/// `(node_id, panel)` pair, in the caller's (already display-sorted) order.
 ///
-/// PRD 21 C5 GUI lane: `node_id`s are slash-separated paths
-/// (`root/1-execution-mode`) — the strip renders as an INDENTED TREE by path
-/// depth (`node_id.matches('/').count()`), registration order preserved
-/// (never re-sorted: registration order already IS discovery order, parent
-/// before child). A `done` node's tab is visually distinct (greyed via
-/// `.tab.done`) but stays clickable — its panel history remains readable, it
-/// is never removed from the strip.
-pub fn page(panels: Vec<(String, Markup, bool)>) -> Markup {
+/// `node_id`s are slash-separated paths (`root/1-execution-mode`) — each
+/// slot indents by path depth, so the outline reads as a tree. The wrapper
+/// for [`crate::DEFAULT_NODE_ID`] carries `data-pinned`, which the client's
+/// mount-on-first-sight insert uses to keep it first regardless of sort.
+pub fn page(panels: Vec<(String, Markup)>) -> Markup {
     html! {
         (DOCTYPE)
         html lang="en" {
@@ -69,20 +60,12 @@ pub fn page(panels: Vec<(String, Markup, bool)>) -> Markup {
                         }
                         span id="conn" class="conn ok" { "live" }
                     }
-                    @if panels.len() > 1 {
-                        div class="tabs" data-node="tabs" {
-                            @for (i, (node_id, _, done)) in panels.iter().enumerate() {
-                                button type="button"
-                                    class=(tab_class(i == 0, *done))
-                                    style=(tab_indent_style(node_id))
-                                    data-tab=(node_id) { (node_id) }
-                            }
-                        }
-                    }
-                    div class="tab-panels" data-node="tab-panels" {
-                        @for (i, (node_id, panel, _)) in panels.iter().enumerate() {
-                            div class=(if i == 0 { "tab-slot active" } else { "tab-slot" })
-                                data-node-id=(node_id) {
+                    div id="tree" data-node="tree" {
+                        @for (node_id, panel) in &panels {
+                            div class="node-slot"
+                                data-node-id=(node_id)
+                                data-pinned[node_id == crate::DEFAULT_NODE_ID]
+                                style=(slot_indent_style(node_id)) {
                                 (panel)
                             }
                         }
@@ -93,40 +76,27 @@ pub fn page(panels: Vec<(String, Markup, bool)>) -> Markup {
     }
 }
 
-/// A tab's path depth — the slash count in its `node_id` (`"root"` → 0,
+/// A node's tree depth — the slash count in its `node_id` (`"root"` → 0,
 /// `"root/1-x"` → 1, `"root/1-x/2-y"` → 2). Purely a function of the id
 /// string, so no separate depth field needs to ride alongside it anywhere.
-fn tab_depth(node_id: &str) -> usize {
+/// The client computes the same depth for panels it mounts itself.
+fn path_depth(node_id: &str) -> usize {
     node_id.matches('/').count()
 }
 
-/// Inline left-padding proportional to [`tab_depth`] — an unbounded tree
+/// Inline left margin proportional to [`path_depth`] — an unbounded tree
 /// depth can't be covered by a fixed set of `[data-depth="N"]` CSS rules, so
-/// this is computed per tab rather than classed.
-fn tab_indent_style(node_id: &str) -> String {
-    format!(
-        "padding-left: calc({}px + 3 * var(--unit))",
-        tab_depth(node_id) * 14
-    )
-}
-
-fn tab_class(active: bool, done: bool) -> String {
-    let mut c = if active {
-        "tab active".to_string()
-    } else {
-        "tab".to_string()
-    };
-    if done {
-        c.push_str(" done");
-    }
-    c
+/// this is computed per slot. The client's mount path uses the same
+/// `depth * 14` formula.
+fn slot_indent_style(node_id: &str) -> String {
+    format!("margin-left: {}px", path_depth(node_id) * 14)
 }
 
 /// Award-grade Swiss / International Typographic Style stylesheet. One
 /// spacing unit, a three-step type scale in a fixed ratio, hairlines as the
-/// only delimiters, a single scarce accent spent on exactly one thing (the
-/// primary action). Every native control is restyled — square, flat, no
-/// browser chrome — so the page reads as one composed sheet, not a form.
+/// only delimiters, a single scarce accent spent on the places the operator
+/// is needed. Every native control is restyled — square, flat, no browser
+/// chrome — so the page reads as one composed sheet, not a form.
 pub const CSS: &str = r#"
 :root {
   --paper: #f5f3ec;
@@ -147,79 +117,6 @@ pub const CSS: &str = r#"
 
 * { box-sizing: border-box; }
 
-/* -------------------------------------------------------------------- tabs */
-.tabs {
-  display: flex; flex-wrap: wrap; gap: calc(1 * var(--unit));
-  border-bottom: var(--hair);
-  margin-bottom: calc(4 * var(--unit));
-}
-.tab {
-  font: inherit; font-size: var(--text-micro); font-weight: 700; text-transform: uppercase;
-  letter-spacing: var(--tracking-wide);
-  padding: calc(2 * var(--unit)) calc(3 * var(--unit));
-  border: var(--hair-faint); border-bottom: none; border-radius: 0;
-  background: transparent; color: var(--muted); cursor: pointer;
-}
-.tab.active { color: var(--ink); border-color: var(--line); background: var(--paper); }
-.tab.done { color: var(--line-faint); }
-.tab.done.active { color: var(--muted); }
-.tab-slot { display: none; }
-.tab-slot.active { display: block; }
-
-/* Last turn's Haskell — a readable code sheet: preserved line structure,
-   soft-wrapped long strings (prompts/notes inside the code would otherwise
-   run far off-canvas), hairline frame in the page's print idiom. */
-.continue-input {
-  display: block;
-  width: 100%;
-  margin: var(--unit) 0;
-  padding: var(--unit);
-  border: var(--hair-faint);
-  background: transparent;
-  font: inherit;
-  font-size: var(--text-body);
-  resize: vertical;
-}
-
-.asks { display: flex; flex-direction: column; gap: calc(6 * var(--unit)); }
-
-.turn-source { margin-top: calc(var(--unit) * 2); }
-.turn-source summary {
-  font-size: var(--text-micro);
-  letter-spacing: var(--tracking-wide);
-  text-transform: uppercase;
-  color: var(--muted);
-  cursor: pointer;
-}
-.turn-source pre {
-  margin: var(--unit) 0 0 0;
-  padding: calc(var(--unit) * 1.5);
-  border: var(--hair-faint);
-  background: rgba(22, 21, 15, 0.03);
-  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
-  font-size: 0.8125rem;
-  line-height: 1.5;
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
-  overflow-x: auto;
-  max-height: 24rem;
-  overflow-y: auto;
-}
-.turn-history {
-  margin-top: var(--unit);
-  max-height: 40vh;
-  overflow-y: auto;
-}
-.turn-entry { margin-top: var(--unit); }
-.turn-entry summary {
-  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
-  font-size: 0.75rem;
-  color: var(--muted);
-  cursor: pointer;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
 html, body { margin: 0; background: var(--paper); }
 body {
   color: var(--ink);
@@ -239,7 +136,7 @@ body {
   display: grid; grid-template-columns: 1fr auto; align-items: end;
   column-gap: calc(3 * var(--unit));
   padding-bottom: calc(3 * var(--unit));
-  margin-bottom: calc(7 * var(--unit));
+  margin-bottom: calc(4 * var(--unit));
   border-bottom: var(--hair);
 }
 .mast-title { display: flex; flex-direction: column; gap: var(--unit); }
@@ -262,6 +159,98 @@ body {
 .eyebrow {
   font-size: var(--text-micro); font-weight: 700; text-transform: uppercase;
   letter-spacing: var(--tracking-wide); color: var(--ink); margin: 0;
+}
+
+/* ---------------------------------------------------------- node sections */
+.node-slot {
+  padding: calc(3 * var(--unit)) 0;
+  border-bottom: var(--hair-faint);
+}
+.node-head {
+  display: flex; align-items: baseline; gap: calc(2 * var(--unit));
+}
+.node-toggle {
+  font: inherit; font-size: 0.75rem; line-height: 1;
+  border: none; background: transparent; color: var(--muted);
+  cursor: pointer; padding: 0; flex: none;
+  transition: transform 0.12s ease;
+}
+.node-slot.collapsed .node-toggle { transform: rotate(-90deg); }
+.node-slot.collapsed .node-body { display: none; }
+.node-title {
+  font-size: var(--text-body); font-weight: 700; margin: 0;
+  letter-spacing: -0.01em; overflow-wrap: anywhere;
+}
+.node-panel.done .node-title, .node-panel.ended .node-title { color: var(--muted); }
+.status {
+  margin-left: auto; flex: none;
+  font-size: var(--text-micro); font-weight: 700; text-transform: uppercase;
+  letter-spacing: var(--tracking-wide);
+  padding: calc(0.5 * var(--unit)) calc(1.5 * var(--unit));
+}
+.status.needs-you { background: var(--accent); color: var(--paper); }
+.status.running { border: 1px solid var(--ink); color: var(--ink); }
+.status.done, .status.ended { border: 1px solid var(--line-faint); color: var(--muted); }
+.status.failed { border: 1px solid var(--accent); color: var(--accent); }
+
+.node-body { padding-top: calc(2 * var(--unit)); }
+
+/* ----------------------------------------------------------- node content */
+.timeline { display: flex; flex-direction: column; gap: calc(2 * var(--unit)); }
+.note { margin: 0; }
+
+.seed summary, .turn-source summary {
+  font-size: var(--text-micro);
+  letter-spacing: var(--tracking-wide);
+  text-transform: uppercase;
+  color: var(--muted);
+  cursor: pointer;
+}
+.seed { margin-bottom: calc(2 * var(--unit)); }
+
+/* mono blocks — seeds, answers, final values, failures, turn sources: one
+   readable code-sheet idiom, preserved line structure, soft-wrapped. */
+.seed pre, .answered pre, .final pre, .failure pre, .turn-source pre {
+  margin: var(--unit) 0 0 0;
+  padding: calc(var(--unit) * 1.5);
+  border: var(--hair-faint);
+  background: rgba(22, 21, 15, 0.03);
+  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  font-size: 0.8125rem;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  overflow-x: auto;
+  max-height: 24rem;
+  overflow-y: auto;
+}
+
+.answered {
+  border-left: 2px solid var(--line-faint);
+  padding-left: calc(2 * var(--unit));
+}
+.answered .eyebrow { color: var(--muted); }
+.answered pre { border: none; background: transparent; padding: 0; color: var(--muted); }
+
+.final { margin-top: calc(2 * var(--unit)); }
+.failure { margin-top: calc(2 * var(--unit)); }
+.failure-eyebrow { color: var(--accent); }
+
+.turn-source { margin-top: calc(var(--unit) * 2); }
+.turn-history {
+  margin-top: var(--unit);
+  max-height: 40vh;
+  overflow-y: auto;
+}
+.turn-entry { margin-top: var(--unit); }
+.turn-entry summary {
+  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  font-size: 0.75rem;
+  color: var(--muted);
+  cursor: pointer;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 /* ------------------------------------------------------------------ form */
@@ -348,24 +337,25 @@ input[type="radio"]:focus-visible, input[type="checkbox"]:focus-visible,
 
 /* ------------------------------------------------------------------ continue */
 .continue {
-  display: flex; flex-direction: column; align-items: center; gap: calc(4 * var(--unit));
+  display: flex; flex-direction: column; align-items: center; gap: calc(3 * var(--unit));
   text-align: center;
-  padding: calc(10 * var(--unit)) 0;
-  border-bottom: var(--hair);
+  padding: calc(4 * var(--unit)) 0;
+  border-top: var(--hair-faint);
+  border-bottom: var(--hair-faint);
 }
 .continue .eyebrow { color: var(--muted); }
 .continue .btn-primary { padding: calc(2.5 * var(--unit)) calc(6 * var(--unit)); }
 
 /* ---------------------------------------------------------------------- idle */
 .idle {
-  display: flex; flex-direction: column; align-items: center; gap: calc(3 * var(--unit));
+  display: flex; flex-direction: column; align-items: center; gap: calc(2 * var(--unit));
   text-align: center;
-  padding: calc(11 * var(--unit)) 0;
-  border-bottom: var(--hair);
+  padding: calc(5 * var(--unit)) 0;
 }
 .idle .eyebrow { color: var(--muted); }
 .idle-glyph {
   font-size: var(--text-display); font-weight: 300; line-height: 1; color: var(--line-faint);
+  margin: 0;
 }
 .idle-note { margin: 0; color: var(--muted); font-size: var(--text-body); }
 
@@ -386,26 +376,29 @@ input[type="radio"]:focus-visible, input[type="checkbox"]:focus-visible,
 "#;
 
 /// The vendored Datastar client: opens `/sse`, applies patch-elements frames
-/// by same-`id` replacement (one `panel-<node_id>` per registered node),
+/// by same-`id` replacement (one `panel-<node_id>` per registered node) —
+/// MOUNTING a never-seen panel into `#tree` at its sorted position —
 /// collects a `data-on-submit` form into a FLAT, `data-kind`-coerced
 /// submission and POSTs it to the node/interaction-scoped URL already baked
-/// into that form's `@post(...)` literal, and wires tab-strip clicks to
-/// toggle which node's stable `.tab-slot` is visible.
+/// into that form's `@post(...)` literal, and wires each section's collapse
+/// toggle (the collapse class lives on the stable `.node-slot` wrapper, so
+/// it survives patches).
 pub const JS: &str = r#"
 (function () {
   // Apply one datastar-patch-elements payload: replace each same-id element in
   // place. A focused/typed-in field is preserved (its element is left this
   // tick) ONLY when the incoming data-rev matches the currently-mounted
-  // element's — the SAME pending state re-rendered. A DIFFERENT
-  // data-rev (this node's pending state changed) always replaces the
-  // element regardless of focus, so a submit's resulting tick is never
-  // dropped just because the panel still has focus.
+  // element's — the SAME state re-rendered. A DIFFERENT data-rev (this
+  // node's state changed) always replaces the element regardless of focus,
+  // so a submit's resulting tick is never dropped just because the panel
+  // still has focus. An id the page has never seen is a NEW node — mount it
+  // into the tree at its sorted position.
   function applyPatch(html) {
     const tpl = document.createElement('template');
     tpl.innerHTML = html.trim();
     tpl.content.querySelectorAll('[id]').forEach((next) => {
       const cur = document.getElementById(next.id);
-      if (!cur) { document.body.appendChild(next); wire(next); return; }
+      if (!cur) { mountPanel(next); return; }
       const sameRev = cur.getAttribute('data-rev') === next.getAttribute('data-rev');
       const active = document.activeElement;
       if (sameRev && active && active !== document.body && cur.contains(active)) return;
@@ -414,7 +407,31 @@ pub const JS: &str = r#"
     });
   }
 
-  // Wire data-on-* handlers within a root (idempotent via __wired).
+  // Mount a panel this page has never seen (a node born after page load):
+  // build the stable .node-slot wrapper the initial render would have built
+  // (indent = path depth * 14px, matching the server), and insert it into
+  // #tree at its path-sorted position — pinned slots (the default node)
+  // always stay first.
+  function mountPanel(next) {
+    if (!/^panel-/.test(next.id)) return;
+    const tree = document.getElementById('tree');
+    if (!tree) return;
+    const path = next.getAttribute('data-path') || next.id.slice(6);
+    const slot = document.createElement('div');
+    slot.className = 'node-slot';
+    slot.setAttribute('data-node-id', path);
+    const depth = (path.match(/\//g) || []).length;
+    slot.style.marginLeft = (depth * 14) + 'px';
+    slot.appendChild(next);
+    const siblings = Array.from(tree.querySelectorAll(':scope > .node-slot'));
+    const after = siblings.find((s) => !s.hasAttribute('data-pinned')
+      && s.getAttribute('data-node-id') > path);
+    tree.insertBefore(slot, after || null);
+    wire(slot);
+  }
+
+  // Wire data-on-* handlers and collapse toggles within a root (idempotent
+  // via __wired).
   function wire(root) {
     root.querySelectorAll('[data-on-click]').forEach((el) => {
       if (el.__wired) return; el.__wired = true;
@@ -429,6 +446,16 @@ pub const JS: &str = r#"
         e.preventDefault();
         if (!validateRequired(form)) return;
         post(parsePost(form.getAttribute('data-on-submit')), form, collect(form), form);
+      });
+    });
+    // The collapse toggle flips a class on the STABLE .node-slot wrapper —
+    // never on the patched panel — so the operator's choice survives any
+    // number of SSE patches to the panel inside.
+    root.querySelectorAll('[data-toggle]').forEach((btn) => {
+      if (btn.__wired) return; btn.__wired = true;
+      btn.addEventListener('click', () => {
+        const slot = btn.closest('.node-slot');
+        if (slot) slot.classList.toggle('collapsed');
       });
     });
   }
@@ -484,25 +511,6 @@ pub const JS: &str = r#"
       host.appendChild(msg);
     });
     return ok;
-  }
-
-  // Wire the tab strip: clicking a tab toggles which node's STABLE
-  // .tab-slot wrapper is visible. The wrapper is never itself replaced by
-  // an SSE patch (only the inner #panel-<node> is), so this toggle survives
-  // any number of patches to a hidden node's panel.
-  function wireTabs() {
-    document.querySelectorAll('[data-tab]').forEach((btn) => {
-      if (btn.__wired) return; btn.__wired = true;
-      btn.addEventListener('click', () => {
-        const id = btn.getAttribute('data-tab');
-        document.querySelectorAll('.tab-slot').forEach((slot) => {
-          slot.classList.toggle('active', slot.getAttribute('data-node-id') === id);
-        });
-        document.querySelectorAll('[data-tab]').forEach((b) => {
-          b.classList.toggle('active', b === btn);
-        });
-      });
-    });
   }
 
   // Collect every [data-bind] input into a FLAT { key: scalar }, coercing by
@@ -586,7 +594,7 @@ pub const JS: &str = r#"
     es.onerror = () => setConn(false);
   }
 
-  window.addEventListener('DOMContentLoaded', () => { wire(document); wireTabs(); connect(); });
+  window.addEventListener('DOMContentLoaded', () => { wire(document); connect(); });
 })();
 "#;
 
@@ -600,7 +608,6 @@ mod tests {
         let doc = page(vec![(
             "n1".to_string(),
             html! { div id="panel-n1" { "hi" } },
-            false,
         )])
         .into_string();
         assert!(doc.contains("<div id=\"panel-n1\">hi</div>"));
@@ -612,82 +619,68 @@ mod tests {
         assert!(!doc.contains("cdn"));
     }
 
-    /// A single registered node renders no tab strip — the one-tab case
-    /// existing single-node callers get by default stays visually quiet.
+    /// Every node renders as its own always-visible section inside a stable
+    /// `.node-slot` wrapper — no tabs, nothing hidden by default.
     #[test]
-    fn single_node_renders_no_tab_strip() {
-        let doc = page(vec![(
-            "only".to_string(),
-            html! { div id="panel-only" {} },
-            false,
-        )])
-        .into_string();
-        assert!(!doc.contains("data-node=\"tabs\""), "{doc}");
-        assert!(doc.contains("data-node-id=\"only\""), "{doc}");
-    }
-
-    /// Multiple registered nodes render a tab strip, one button per node,
-    /// each node's panel wrapped in its own stable `.tab-slot`, first active.
-    #[test]
-    fn multiple_nodes_render_a_tab_strip_and_stable_slots() {
+    fn every_node_renders_as_a_visible_section() {
         let doc = page(vec![
-            (
-                "alpha".to_string(),
-                html! { div id="panel-alpha" {} },
-                false,
-            ),
-            ("beta".to_string(), html! { div id="panel-beta" {} }, false),
+            ("alpha".to_string(), html! { div id="panel-alpha" {} }),
+            ("beta".to_string(), html! { div id="panel-beta" {} }),
         ])
         .into_string();
-        assert!(doc.contains("data-tab=\"alpha\""), "{doc}");
-        assert!(doc.contains("data-tab=\"beta\""), "{doc}");
         assert!(doc.contains("data-node-id=\"alpha\""), "{doc}");
         assert!(doc.contains("data-node-id=\"beta\""), "{doc}");
-        assert!(
-            doc.contains("class=\"tab-slot active\" data-node-id=\"alpha\""),
-            "{doc}"
-        );
-        assert!(
-            doc.contains("class=\"tab-slot\" data-node-id=\"beta\""),
-            "{doc}"
-        );
+        assert!(doc.contains("id=\"tree\""), "{doc}");
+        assert!(!doc.contains("data-tab="), "no tabs anywhere: {doc}");
     }
 
-    /// PRD 21 C5: slash-separated `node_id`s render as an indented tree —
-    /// a deeper path gets more left padding than its parent — and a `done`
-    /// node's tab carries the `.tab.done` class while its slot/panel stay
-    /// exactly as any other node's (never removed from the strip).
+    /// The default node's slot carries `data-pinned` (the client's
+    /// mount-on-first-sight insert keeps pinned slots first); other nodes'
+    /// slots don't.
     #[test]
-    fn tab_strip_indents_by_path_depth_and_marks_done() {
+    fn default_node_slot_is_pinned() {
         let doc = page(vec![
-            ("root".to_string(), html! { div id="panel-root" {} }, false),
             (
-                "root/1-x".to_string(),
-                html! { div id="panel-root/1-x" {} },
-                true,
+                crate::DEFAULT_NODE_ID.to_string(),
+                html! { div id="panel-default" {} },
             ),
+            ("root".to_string(), html! { div id="panel-root" {} }),
+        ])
+        .into_string();
+        // Assert on the slot markup itself ("data-pinned" also appears inside
+        // the embedded JS, which handles it on the mount path).
+        assert!(
+            doc.contains(&format!(
+                "data-node-id=\"{}\" data-pinned",
+                crate::DEFAULT_NODE_ID
+            )),
+            "{doc}"
+        );
+        assert!(!doc.contains("data-node-id=\"root\" data-pinned"), "{doc}");
+    }
+
+    /// Slash-separated `node_id`s indent by path depth — the outline reads
+    /// as a tree.
+    #[test]
+    fn slots_indent_by_path_depth() {
+        let doc = page(vec![
+            ("root".to_string(), html! { div id="panel-root" {} }),
+            ("root/1-x".to_string(), html! { div id="panel-root/1-x" {} }),
             (
                 "root/1-x/2-y".to_string(),
                 html! { div id="panel-root/1-x/2-y" {} },
-                false,
             ),
         ])
         .into_string();
 
-        let root_style = tab_indent_style("root");
-        let mid_style = tab_indent_style("root/1-x");
-        let leaf_style = tab_indent_style("root/1-x/2-y");
+        let root_style = slot_indent_style("root");
+        let mid_style = slot_indent_style("root/1-x");
+        let leaf_style = slot_indent_style("root/1-x/2-y");
         assert_ne!(root_style, mid_style);
         assert_ne!(mid_style, leaf_style);
         assert!(doc.contains(&format!("style=\"{root_style}\"")), "{doc}");
         assert!(doc.contains(&format!("style=\"{mid_style}\"")), "{doc}");
         assert!(doc.contains(&format!("style=\"{leaf_style}\"")), "{doc}");
-
-        // The done node's tab carries "done"; its slot/panel are untouched —
-        // a folded node's history stays readable.
-        assert!(doc.contains("data-tab=\"root/1-x\""), "{doc}");
-        assert!(doc.contains("class=\"tab done\""), "{doc}");
-        assert!(doc.contains("data-node-id=\"root/1-x\""), "{doc}");
     }
 
     #[test]
@@ -695,6 +688,32 @@ mod tests {
         assert!(JS.contains("new EventSource('/sse')"));
         assert!(JS.contains("data-bind"));
         assert!(JS.contains("datastar-patch-elements"));
+    }
+
+    /// A panel the page has never seen must be MOUNTED into #tree at its
+    /// sorted position (pinned slots first) — not appended to document.body
+    /// (the old orphaned-append bug: a node born after page load rendered
+    /// outside the layout entirely).
+    #[test]
+    fn js_mounts_unknown_panels_into_the_tree_sorted() {
+        assert!(JS.contains("function mountPanel"));
+        assert!(
+            !JS.contains("document.body.appendChild(next)"),
+            "an unknown panel must never be orphan-appended to body"
+        );
+        assert!(JS.contains("getElementById('tree')"));
+        assert!(JS.contains("data-pinned"));
+        assert!(JS.contains("tree.insertBefore(slot, after || null)"));
+    }
+
+    /// The collapse toggle flips a class on the STABLE `.node-slot` wrapper,
+    /// never the SSE-patched inner panel — so an operator's collapse
+    /// survives any number of patches.
+    #[test]
+    fn js_collapse_lives_on_the_stable_wrapper() {
+        assert!(JS.contains("[data-toggle]"));
+        assert!(JS.contains("btn.closest('.node-slot')"));
+        assert!(JS.contains("slot.classList.toggle('collapsed')"));
     }
 
     /// A required (visible, unselected) radio/enum group must block the
@@ -736,19 +755,9 @@ mod tests {
         );
     }
 
-    /// Tab-switching toggles the STABLE `.tab-slot` wrapper, never the
-    /// SSE-patched inner panel — so a patch to a hidden node can't resurrect
-    /// it into view.
-    #[test]
-    fn js_wires_tabs_via_stable_slot_wrapper() {
-        assert!(JS.contains("function wireTabs"));
-        assert!(JS.contains(".tab-slot"));
-        assert!(JS.contains("wireTabs()"));
-    }
-
     /// F10: the focus-preserving skip must be GATED on a matching `data-rev`
     /// — computed and checked before the unconditional replace, so a
-    /// differing revision (this node's pending state changed) always reaches
+    /// differing revision (this node's state changed) always reaches
     /// `replaceWith` regardless of what currently has focus.
     #[test]
     fn js_focus_skip_gated_on_matching_data_rev() {

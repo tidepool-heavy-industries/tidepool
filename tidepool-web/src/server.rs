@@ -1,21 +1,23 @@
 //! The operator server: axum routes + the SSE stream + [`WebGate`], the
-//! [`OperatorGate`] implementation the harness driver blocks on — now
-//! generalized to N REGISTERED NODES (opaque `node_id` strings, convention =
-//! branch name), each rendered as its own tab, each able to carry SEVERAL
-//! concurrently pending asks (an operator gate never hides a question by
-//! superseding an unanswered one).
+//! [`OperatorGate`] implementation the harness driver blocks on — over N
+//! REGISTERED NODES (opaque `node_id` strings, convention = slash-separated
+//! tree paths), each holding one node lifecycle: an optional SEED prompt, an
+//! append-only TIMELINE of notes and asks, and a FINAL VALUE or FAILURE once
+//! the node's window ends.
 //!
 //! Loopback bind only: reachability is the authorization boundary.
 //!
 //! # Verbs
 //!
-//! - `GET  /` — the operator page: a tab strip across every registered node
-//!   plus every node's panel.
+//! - `GET  /` — the operator page: every registered node as one outline
+//!   section, sorted by path (the default node pinned first).
 //! - `GET  /sse` — Datastar `patch-elements` stream, one frame per node-scoped
-//!   state change, each replacing that node's `#panel-<node>` in place.
+//!   state change, each replacing that node's `#panel-<node>` in place (the
+//!   client MOUNTS a panel it has never seen into the tree — a node born
+//!   after page load appears live).
 //! - `POST /node/{node}/submit/{interaction}` — resolve one pending form
-//!   (identified by its own interaction id, the "nonce" a stacked ask is
-//!   addressed by) with a flat `{key: scalar}` body; unparks the matching
+//!   (identified by its own interaction id, the "nonce" an ask is addressed
+//!   by) with a flat `{key: scalar}` body; unparks the matching
 //!   `present_form` call.
 //! - `POST /node/{node}/continue/{interaction}` — resolve one pending
 //!   between-loops gate; unparks the matching `await_continue` call.
@@ -25,20 +27,28 @@
 //! over the SAME pending state; see [`crate::formapi`] for the wire shape and
 //! hardening properties.
 //!
+//! # The timeline is append-only
+//!
+//! Notes and asks land on a node's timeline in true chronological order and
+//! STAY there for the node's lifetime: resolving an ask replaces it IN PLACE
+//! with its answered form (what the operator submitted, kept read-only) —
+//! it never vanishes, and notes are never cleared. The stream above an ask
+//! is that ask's context; erasing either would erase the other's meaning.
+//! Publishing never supersedes an existing pending ask on the same node —
+//! concurrent cognition windows (fanout/fork `RunLLMTurn`) each get their
+//! own entry and coexist until answered, in any resolution order.
+//!
 //! # The gate
 //!
 //! [`OperatorGate`] is SYNC-BLOCKING by contract (the driver calls it from a
 //! blocking context). A [`WebGate`] is bound to exactly one `node_id`
 //! ([`AppState::register_node`] mints it); [`WebGate::present_form`] and
-//! [`WebGate::await_continue`] publish a NEW ask onto that node's stack
+//! [`WebGate::await_continue`] publish a NEW ask onto that node's timeline
 //! (pinging the SSE tick for that node), then block the calling thread on a
-//! `oneshot` receiver resolved from an HTTP handler. No async runtime is
-//! entered on the driver's side (`blocking_recv`), so this composes with the
-//! driver's `block_in_place`/`block_on` turn driving.
-//!
-//! Publishing NEVER supersedes an existing pending ask on the same node — the
-//! whole point of the stack is that concurrent cognition windows (fanout/fork
-//! `RunLLMTurn`) each get their own slot and coexist until answered.
+//! `oneshot` receiver resolved from an HTTP handler. The node-lifecycle
+//! extensions ([`WebGate::node_seeded`]/[`WebGate::node_finalized`]/
+//! [`WebGate::node_failed`], keyed by label like `retire_node`) store the
+//! seed and outcome the driver sends across the seam.
 //!
 //! # Shape-guided submissions — [`collect_form_json`]
 //!
@@ -69,37 +79,41 @@ use tidepool_harness::selfharness::operator::{
 use tokio::sync::{broadcast, oneshot};
 
 use crate::formapi::FormApiConfig;
-use crate::render::{self, Ask};
+use crate::render::{self, NodeView, TimelineEntry};
 use crate::shell;
 
-/// An opaque node identity — convention is the node's branch name. Never
-/// model-authored: every `node_id` a caller registers traces to a substrate
-/// identifier, same discipline as a form's field labels (see the crate's
-/// loopback trust model docs).
+/// An opaque node identity — convention is a slash-separated tree path.
+/// Never model-authored: every `node_id` a caller registers traces to a
+/// substrate identifier (a wire-carried branch label), same discipline as a
+/// form's field labels (see the crate's loopback trust model docs).
 pub type NodeId = String;
 
-/// What one pending ask resolves to. Carries the resolution channel;
-/// [`OperatorGate::present_form`]/`await_continue`'s answer value shape.
-enum Pending {
+/// One ask's lifecycle state. Pending states carry the resolution channel
+/// that unparks the blocked gate call; answered states are what the pending
+/// ones become IN PLACE when resolved — the timeline keeps them.
+enum AskState {
     /// A form awaiting submission; `resolve` unparks `present_form`.
-    Form {
+    PendingForm {
         shape: FormShape,
         resolve: oneshot::Sender<Jv>,
     },
     /// The between-loops gate; `resolve` unparks `await_continue`.
-    Continue {
+    PendingContinue {
         resolve: oneshot::Sender<ContinueSignal>,
     },
+    /// A resolved form: the reassembled answer the gate actually returned.
+    AnsweredForm { shape: FormShape, answer: Jv },
+    /// A resolved continue gate, with the operator's message if any.
+    AnsweredContinue { input: Option<String> },
 }
 
-/// One entry in a node's ask stack: `id` is BOTH its identity and its
-/// `data-rev` nonce — assigned once from the node's monotonic counter and
-/// never reused, so it never changes for the ask's lifetime (a re-render
-/// triggered by a sibling ask or a note update leaves an untouched ask's own
-/// revision — and the client's focus-preserving skip signal — stable).
-struct AskEntry {
-    id: u64,
-    pending: Pending,
+/// One item on a node's append-only timeline. An `Ask`'s `id` is BOTH its
+/// identity and its `data-rev` nonce — assigned once from the node's
+/// monotonic counter and never reused, stable for the ask's whole lifetime
+/// (pending and answered alike).
+enum TimelineItem {
+    Note(String),
+    Ask { id: u64, state: AskState },
 }
 
 /// How many compiled turn sources the history pane retains per node — enough
@@ -107,61 +121,83 @@ struct AskEntry {
 /// long-lived process grow the page without bound.
 const TURN_HISTORY_CAP: usize = 50;
 
-/// One registered node's state. Every currently pending ask, in publish
-/// order (never superseded — resolved asks are removed, nothing else is);
-/// `next_ask_id` mints the next ask's id/nonce; `notes`/`turn_history` are
-/// node-scoped exactly as the single-node crate had them; `rev` is this
-/// node's AGGREGATE revision, bumped under the SAME lock as every mutation
-/// below (F10, now per-node) — the panel-root `data-rev` the client's
-/// focus-preserving skip keys off.
-/// `done` (PRD 21 C5 GUI lane) marks a node whose window has retired
-/// ([`OperatorGate::retire_node`]) — the tab strip greys it rather than
-/// removing it, so its panel history (notes/turn-history) stays readable.
+/// One registered node's state — the minimal node lifecycle: `seed` (the
+/// starting prompt, when the wire carried one), the append-only `timeline`
+/// of notes and asks, and `final_value`/`failure` once the window ends.
+/// `next_ask_id` mints ask ids/nonces; `rev` is this node's AGGREGATE
+/// revision, bumped under the SAME lock as every mutation (F10, per-node) —
+/// the panel-root `data-rev` the client's focus-preserving skip keys off.
+/// `done` marks a retired window ([`OperatorGate::retire_node`]) — the
+/// section greys, nothing is removed.
 #[derive(Default)]
 struct NodeSlot {
-    asks: Vec<AskEntry>,
+    seed: Option<String>,
+    timeline: Vec<TimelineItem>,
     next_ask_id: u64,
-    notes: Vec<String>,
+    final_value: Option<String>,
+    failure: Option<String>,
+    done: bool,
     turn_history: VecDeque<String>,
     rev: u64,
-    done: bool,
 }
 
 impl NodeSlot {
-    /// Borrowed ask views for rendering — `(interaction id, kind)` in
-    /// publish order.
-    fn ask_views(&self) -> Vec<(u64, Ask<'_>)> {
-        self.asks
-            .iter()
-            .map(|a| {
-                let view = match &a.pending {
-                    Pending::Form { shape, .. } => Ask::Form(shape),
-                    Pending::Continue { .. } => Ask::Continue,
-                };
-                (a.id, view)
-            })
-            .collect()
+    /// The borrowed render view of this slot.
+    fn view<'a>(&'a self, node_id: &'a str) -> NodeView<'a> {
+        NodeView {
+            node_id,
+            seed: self.seed.as_deref(),
+            timeline: self
+                .timeline
+                .iter()
+                .map(|item| match item {
+                    TimelineItem::Note(text) => TimelineEntry::Note(text),
+                    TimelineItem::Ask { id, state } => match state {
+                        AskState::PendingForm { shape, .. } => {
+                            TimelineEntry::PendingForm { id: *id, shape }
+                        }
+                        AskState::PendingContinue { .. } => {
+                            TimelineEntry::PendingContinue { id: *id }
+                        }
+                        AskState::AnsweredForm { shape, answer } => TimelineEntry::AnsweredForm {
+                            id: *id,
+                            shape,
+                            answer,
+                        },
+                        AskState::AnsweredContinue { input } => TimelineEntry::AnsweredContinue {
+                            id: *id,
+                            input: input.as_deref(),
+                        },
+                    },
+                })
+                .collect(),
+            final_value: self.final_value.as_deref(),
+            failure: self.failure.as_deref(),
+            done: self.done,
+            turn_history: &self.turn_history,
+            rev: self.rev,
+        }
     }
 }
 
-/// Every registered node, plus registration order (tab display order) —
-/// ONE lock over the whole registry (not one per node): with the small
-/// node/ask counts this GUI ever holds, a single lock is simpler and
-/// structurally rules out cross-node races, at no real concurrency cost.
+/// Every registered node, plus registration order — ONE lock over the whole
+/// registry (not one per node): with the small node/ask counts this GUI ever
+/// holds, a single lock is simpler and structurally rules out cross-node
+/// races, at no real concurrency cost.
 #[derive(Default)]
 struct Registry {
     order: Vec<NodeId>,
     nodes: HashMap<NodeId, NodeSlot>,
 }
 
-/// Shared server state: every registered node's pending asks + the re-render
+/// Shared server state: every registered node's lifecycle + the re-render
 /// tick.
 #[derive(Clone)]
 pub struct AppState {
     registry: Arc<Mutex<Registry>>,
     /// Broadcast of "this node's panel changed" — a gate pings this after
-    /// publishing/resolving an ask or updating notes/turn-history so every
-    /// open SSE stream re-renders that one node's panel promptly.
+    /// any mutation so every open SSE stream re-renders that one node's
+    /// panel promptly.
     tick: broadcast::Sender<NodeId>,
 }
 
@@ -169,6 +205,14 @@ impl Default for AppState {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// Display order for the outline: the default (loop) node pinned first, then
+/// path-lexicographic — children group under their parent because a child's
+/// path extends its parent's. The client's mount-on-first-sight insert uses
+/// the same rule, so initial render and live inserts agree.
+fn node_order(id: &str) -> (bool, &str) {
+    (id != crate::DEFAULT_NODE_ID, id)
 }
 
 impl AppState {
@@ -187,15 +231,22 @@ impl AppState {
     /// Register a node (idempotent — re-registering an existing id reuses
     /// its state) and return a [`WebGate`] bound to it. This is the ONLY way
     /// to mint a `WebGate` — a driver holds an ordinary `Arc<WebGate>`
-    /// exactly as before, now scoped to the node it registered.
+    /// exactly as before, now scoped to the node it registered. Pings so a
+    /// live page mounts the new node's section immediately.
     pub fn register_node(&self, node_id: impl Into<String>) -> Arc<WebGate> {
         let node_id = node_id.into();
-        {
+        let fresh = {
             let mut reg = self.registry.lock();
-            if !reg.nodes.contains_key(&node_id) {
+            if reg.nodes.contains_key(&node_id) {
+                false
+            } else {
                 reg.order.push(node_id.clone());
                 reg.nodes.insert(node_id.clone(), NodeSlot::default());
+                true
             }
+        };
+        if fresh {
+            self.ping(node_id.clone());
         }
         Arc::new(WebGate {
             state: self.clone(),
@@ -203,15 +254,17 @@ impl AppState {
         })
     }
 
-    /// Registered node ids in registration order — the tab strip's order.
+    /// Registered node ids in display order (see [`node_order`]).
     pub fn node_ids(&self) -> Vec<NodeId> {
-        self.registry.lock().order.clone()
+        let mut ids = self.registry.lock().order.clone();
+        ids.sort_by(|a, b| node_order(a).cmp(&node_order(b)));
+        ids
     }
 
-    /// Append a new ask onto `node_id`'s stack (NEVER supersedes an existing
-    /// one), bump that node's revision, and ping. Returns the new ask's id
-    /// (its `data-rev` nonce).
-    fn publish_ask(&self, node_id: &str, pending: Pending) -> u64 {
+    /// Append a new pending ask onto `node_id`'s timeline (NEVER supersedes
+    /// an existing one), bump that node's revision, and ping. Returns the
+    /// new ask's id (its `data-rev` nonce).
+    fn publish_ask(&self, node_id: &str, state: AskState) -> u64 {
         let mut reg = self.registry.lock();
         #[allow(
             clippy::expect_used,
@@ -223,45 +276,61 @@ impl AppState {
             .expect("WebGate only holds ids from register_node, which always inserts one");
         let id = slot.next_ask_id;
         slot.next_ask_id += 1;
-        slot.asks.push(AskEntry { id, pending });
+        slot.timeline.push(TimelineItem::Ask { id, state });
         slot.rev += 1;
         drop(reg);
         self.ping(node_id.to_string());
         id
     }
 
-    /// Push a `note` onto `node_id`'s feed, bump its revision, and ping.
+    /// Push a `note` onto `node_id`'s timeline, bump its revision, and ping.
     fn push_note(&self, node_id: &str, text: String) {
         let mut reg = self.registry.lock();
         #[allow(clippy::expect_used, reason = "registered node")]
         let slot = reg.nodes.get_mut(node_id).expect("registered node");
-        slot.notes.push(text);
+        slot.timeline.push(TimelineItem::Note(text));
         slot.rev += 1;
         drop(reg);
         self.ping(node_id.to_string());
     }
 
-    /// Clear `node_id`'s note feed at a loop boundary. A no-op ping when the
-    /// feed was already empty would still be harmless, but skip it so an
-    /// already-quiet feed doesn't force a redundant re-render.
-    fn clear_notes(&self, node_id: &str) {
+    /// Store `node_id`'s seed prompt ([`WebGate::node_seeded`]).
+    fn set_seed(&self, node_id: &str, seed: String) {
         let mut reg = self.registry.lock();
         #[allow(clippy::expect_used, reason = "registered node")]
         let slot = reg.nodes.get_mut(node_id).expect("registered node");
-        if slot.notes.is_empty() {
-            return;
-        }
-        slot.notes.clear();
+        slot.seed = Some(seed);
         slot.rev += 1;
         drop(reg);
         self.ping(node_id.to_string());
     }
 
-    /// Mark `node_id` done (PRD 21 C5 GUI lane: [`WebGate::retire_node`]) —
-    /// idempotent, same no-op-ping discipline as [`Self::clear_notes`]: a
-    /// node already marked done doesn't force a redundant re-render. The slot
-    /// and its history are never removed — only the tab strip's own rendering
-    /// reacts to `done`.
+    /// Store `node_id`'s finalized value ([`WebGate::node_finalized`]).
+    fn set_final(&self, node_id: &str, value: String) {
+        let mut reg = self.registry.lock();
+        #[allow(clippy::expect_used, reason = "registered node")]
+        let slot = reg.nodes.get_mut(node_id).expect("registered node");
+        slot.final_value = Some(value);
+        slot.rev += 1;
+        drop(reg);
+        self.ping(node_id.to_string());
+    }
+
+    /// Store why `node_id` ended without a value ([`WebGate::node_failed`]).
+    fn set_failure(&self, node_id: &str, reason: String) {
+        let mut reg = self.registry.lock();
+        #[allow(clippy::expect_used, reason = "registered node")]
+        let slot = reg.nodes.get_mut(node_id).expect("registered node");
+        slot.failure = Some(reason);
+        slot.rev += 1;
+        drop(reg);
+        self.ping(node_id.to_string());
+    }
+
+    /// Mark `node_id` done ([`WebGate::retire_node`]) — idempotent; a node
+    /// already marked done doesn't force a redundant re-render. The slot and
+    /// its whole timeline are never removed — only the derived status
+    /// changes.
     fn mark_done(&self, node_id: &str) {
         let mut reg = self.registry.lock();
         #[allow(clippy::expect_used, reason = "registered node")]
@@ -295,134 +364,134 @@ impl AppState {
     fn node_panel_html(&self, node_id: &str) -> Option<String> {
         let reg = self.registry.lock();
         let slot = reg.nodes.get(node_id)?;
-        Some(
-            render::node_panel(
-                node_id,
-                &slot.ask_views(),
-                &slot.notes,
-                &slot.turn_history,
-                slot.rev,
-            )
-            .into_string(),
-        )
+        Some(render::node_panel(&slot.view(node_id)).into_string())
     }
 
-    /// The full page: tab strip + every registered node's panel, in
-    /// registration order.
+    /// The full page: every registered node's section, in display order.
     fn page_markup(&self) -> maud::Markup {
         let reg = self.registry.lock();
-        let panels: Vec<(NodeId, maud::Markup, bool)> = reg
-            .order
-            .iter()
-            .map(|id| {
-                let slot = &reg.nodes[id];
-                (
-                    id.clone(),
-                    render::node_panel(
-                        id,
-                        &slot.ask_views(),
-                        &slot.notes,
-                        &slot.turn_history,
-                        slot.rev,
-                    ),
-                    slot.done,
-                )
-            })
+        let mut ids: Vec<&NodeId> = reg.order.iter().collect();
+        ids.sort_by(|a, b| node_order(a).cmp(&node_order(b)));
+        let sections: Vec<(NodeId, maud::Markup)> = ids
+            .into_iter()
+            .map(|id| (id.clone(), render::node_panel(&reg.nodes[id].view(id))))
             .collect();
         drop(reg);
-        shell::page(panels)
+        shell::page(sections)
     }
 
-    /// Take the ask at `(node_id, interaction)` iff it exists AND `extract`
-    /// accepts its [`Pending`] variant; puts it back untouched — same
-    /// position — on a type mismatch (F10: a failure never drops a pending
-    /// interaction, even mid-lookup).
-    fn resolve_ask<T>(
-        &self,
-        node_id: &str,
-        interaction: u64,
-        extract: impl FnOnce(Pending) -> Result<T, Pending>,
-    ) -> Result<T, ResolveError> {
-        let mut reg = self.registry.lock();
-        let slot = reg
-            .nodes
-            .get_mut(node_id)
-            .ok_or(ResolveError::UnknownNode)?;
-        let pos = slot
-            .asks
-            .iter()
-            .position(|a| a.id == interaction)
-            .ok_or(ResolveError::NoSuchInteraction)?;
-        let entry = slot.asks.remove(pos);
-        match extract(entry.pending) {
-            Ok(value) => {
-                slot.rev += 1;
-                drop(reg);
-                self.ping(node_id.to_string());
-                Ok(value)
-            }
-            Err(pending) => {
-                slot.asks.insert(
-                    pos,
-                    AskEntry {
-                        id: interaction,
-                        pending,
-                    },
-                );
-                Err(ResolveError::WrongKind)
-            }
-        }
-    }
-
-    /// Resolve a pending FORM at `(node_id, interaction)`. Shared by the
+    /// Resolve a pending FORM at `(node_id, interaction)`: reassemble the
+    /// flat submission against the pending shape, unpark `present_form`, and
+    /// replace the ask IN PLACE with its answered form. Shared by the
     /// browser `/submit` verb and the form-api `POST` — one resolution path,
-    /// two front doors.
+    /// two front doors. A wrong-kind or stale id never drops any pending
+    /// interaction (F10).
     pub(crate) fn resolve_form(
         &self,
         node_id: &str,
         interaction: u64,
         submission: Map<String, Jv>,
     ) -> Result<(), ResolveError> {
-        let (shape, resolve) = self.resolve_ask(node_id, interaction, |p| match p {
-            Pending::Form { shape, resolve } => Ok((shape, resolve)),
-            other => Err(other),
-        })?;
-        let _ = resolve.send(answer_value(&shape, submission));
+        let mut reg = self.registry.lock();
+        let slot = reg
+            .nodes
+            .get_mut(node_id)
+            .ok_or(ResolveError::UnknownNode)?;
+        let state = find_ask(&mut slot.timeline, interaction)?;
+        match state {
+            AskState::PendingForm { .. } => {}
+            AskState::PendingContinue { .. } => return Err(ResolveError::WrongKind),
+            // An already-answered ask stays on the timeline, but addressing
+            // it again is the same stale-nonce case as an unknown id.
+            _ => return Err(ResolveError::NoSuchInteraction),
+        }
+        let AskState::PendingForm { shape, resolve } =
+            std::mem::replace(state, AskState::AnsweredContinue { input: None })
+        else {
+            // Checked immediately above, under the same lock.
+            unreachable!()
+        };
+        let answer = answer_value(&shape, submission);
+        let _ = resolve.send(answer.clone());
+        *state = AskState::AnsweredForm { shape, answer };
+        slot.rev += 1;
+        drop(reg);
+        self.ping(node_id.to_string());
         Ok(())
     }
 
-    /// Resolve a pending CONTINUE gate at `(node_id, interaction)`.
+    /// Resolve a pending CONTINUE gate at `(node_id, interaction)`, keeping
+    /// the clicked gate on the timeline as its answered form.
     fn resolve_continue(
         &self,
         node_id: &str,
         interaction: u64,
         signal: ContinueSignal,
     ) -> Result<(), ResolveError> {
-        let resolve = self.resolve_ask(node_id, interaction, |p| match p {
-            Pending::Continue { resolve } => Ok(resolve),
-            other => Err(other),
-        })?;
+        let mut reg = self.registry.lock();
+        let slot = reg
+            .nodes
+            .get_mut(node_id)
+            .ok_or(ResolveError::UnknownNode)?;
+        let state = find_ask(&mut slot.timeline, interaction)?;
+        match state {
+            AskState::PendingContinue { .. } => {}
+            AskState::PendingForm { .. } => return Err(ResolveError::WrongKind),
+            _ => return Err(ResolveError::NoSuchInteraction),
+        }
+        let AskState::PendingContinue { resolve } =
+            std::mem::replace(state, AskState::AnsweredContinue { input: None })
+        else {
+            // Checked immediately above, under the same lock.
+            unreachable!()
+        };
+        let input = match &signal {
+            ContinueSignal::Continue => None,
+            ContinueSignal::ContinueWithInput(text) => Some(text.clone()),
+        };
         let _ = resolve.send(signal);
+        *state = AskState::AnsweredContinue { input };
+        slot.rev += 1;
+        drop(reg);
+        self.ping(node_id.to_string());
         Ok(())
     }
 
     /// The form-api `GET` view: every currently pending FORM ask (a Continue
-    /// gate is never surfaced here — same restriction the single-node form
-    /// api had) for `node_id`, each paired with its interaction id (the
-    /// nonce `POST` must echo back). `Err(())` if `node_id` isn't
-    /// registered.
+    /// gate is never surfaced here) for `node_id`, each paired with its
+    /// interaction id (the nonce `POST` must echo back). `Err(())` if
+    /// `node_id` isn't registered.
     pub(crate) fn pending_forms(&self, node_id: &str) -> Result<Vec<(u64, FormShape)>, ()> {
         let reg = self.registry.lock();
         let slot = reg.nodes.get(node_id).ok_or(())?;
         Ok(slot
-            .asks
+            .timeline
             .iter()
-            .filter_map(|a| match &a.pending {
-                Pending::Form { shape, .. } => Some((a.id, shape.clone())),
-                Pending::Continue { .. } => None,
+            .filter_map(|item| match item {
+                TimelineItem::Ask {
+                    id,
+                    state: AskState::PendingForm { shape, .. },
+                } => Some((*id, shape.clone())),
+                _ => None,
             })
             .collect())
     }
+}
+
+/// Find the ask with `interaction` on a timeline, in any state — the state
+/// distinction (pending/answered/wrong kind) is the caller's to make, so
+/// each verb reports the precise refusal.
+fn find_ask(
+    timeline: &mut [TimelineItem],
+    interaction: u64,
+) -> Result<&mut AskState, ResolveError> {
+    timeline
+        .iter_mut()
+        .find_map(|item| match item {
+            TimelineItem::Ask { id, state } if *id == interaction => Some(state),
+            _ => None,
+        })
+        .ok_or(ResolveError::NoSuchInteraction)
 }
 
 /// Why resolving a specific `(node_id, interaction)` failed.
@@ -430,8 +499,8 @@ impl AppState {
 pub(crate) enum ResolveError {
     /// No such registered node.
     UnknownNode,
-    /// Nothing pending at that interaction id — already resolved by someone
-    /// else, or never existed (a stale/guessed nonce).
+    /// Nothing pending at that interaction id — already resolved, or never
+    /// existed (a stale/guessed nonce).
     NoSuchInteraction,
     /// The interaction exists but isn't the kind this verb resolves (e.g.
     /// `/submit` naming a Continue gate).
@@ -451,7 +520,7 @@ pub(crate) fn resolve_error_message(node_id: &str, err: ResolveError, kind: &str
 }
 
 /// The web [`OperatorGate`]: bound to exactly one registered `node_id`.
-/// Publishes a NEW ask onto that node's stack, then BLOCKS the calling
+/// Publishes a NEW ask onto that node's timeline, then BLOCKS the calling
 /// (driver) thread until an HTTP handler resolves it. See the module docs on
 /// why this is sync-blocking, and why publishing never supersedes.
 pub struct WebGate {
@@ -464,7 +533,7 @@ impl OperatorGate for WebGate {
         let (resolve, wait) = oneshot::channel();
         self.state.publish_ask(
             &self.node_id,
-            Pending::Form {
+            AskState::PendingForm {
                 shape: shape.clone(),
                 resolve,
             },
@@ -477,11 +546,9 @@ impl OperatorGate for WebGate {
     }
 
     fn await_continue(&self) -> ContinueSignal {
-        // A loop boundary: the next loop's notes start from an empty feed.
-        self.state.clear_notes(&self.node_id);
         let (resolve, wait) = oneshot::channel();
         self.state
-            .publish_ask(&self.node_id, Pending::Continue { resolve });
+            .publish_ask(&self.node_id, AskState::PendingContinue { resolve });
         wait.blocking_recv().unwrap_or(ContinueSignal::Continue)
     }
 
@@ -494,16 +561,28 @@ impl OperatorGate for WebGate {
             .push_turn_source(&self.node_id, source.to_string());
     }
 
-    /// PRD 21 C5 GUI lane: register (or reuse — [`AppState::register_node`]
-    /// is idempotent) a node for `label` and hand back its own gate, so a
-    /// labeled branch child's asks/notes render on their own panel instead of
-    /// this gate's.
+    /// Register (or reuse — [`AppState::register_node`] is idempotent) a
+    /// node for `label` and hand back its own gate, so a labeled branch
+    /// child's asks/notes render on their own section instead of this
+    /// gate's.
     fn node_gate(&self, label: &str) -> Option<Arc<dyn OperatorGate>> {
         Some(self.state.register_node(label))
     }
 
     fn retire_node(&self, label: &str) {
         self.state.mark_done(label);
+    }
+
+    fn node_seeded(&self, label: &str, seed: &str) {
+        self.state.set_seed(label, seed.to_string());
+    }
+
+    fn node_finalized(&self, label: &str, value: &str) {
+        self.state.set_final(label, value.to_string());
+    }
+
+    fn node_failed(&self, label: &str, reason: &str) {
+        self.state.set_failure(label, reason.to_string());
     }
 }
 
@@ -532,7 +611,9 @@ async fn page(State(st): State<AppState>) -> Html<String> {
 /// The SSE stream: one Datastar `patch-elements` frame per node-scoped tick,
 /// each carrying that node's freshly rendered panel. Initial frames go out
 /// immediately for every currently registered node so a page opened
-/// mid-interaction is correct without waiting for a tick.
+/// mid-interaction is correct without waiting for a tick. A tick for a node
+/// the page has never seen still renders — the client mounts it into the
+/// tree on first sight.
 async fn sse(
     State(st): State<AppState>,
 ) -> Sse<impl futures_core::Stream<Item = Result<Event, Infallible>>> {
@@ -738,20 +819,29 @@ pub fn collect_form_json(shape: &FormShape, path: &str, raw: &Map<String, Jv>) -
 
 #[cfg(test)]
 impl AppState {
-    /// Test-only convenience: the id of the first (oldest) pending ask on
+    /// Test-only convenience: the id of the first (oldest) PENDING ask on
     /// `node_id`, if any.
     fn first_ask_id(&self, node_id: &str) -> Option<u64> {
-        self.registry
-            .lock()
-            .nodes
-            .get(node_id)?
-            .asks
-            .first()
-            .map(|a| a.id)
+        self.pending_ids(node_id).first().copied()
+    }
+
+    /// Test-only: every pending ask id on `node_id`, in publish order.
+    fn pending_ids(&self, node_id: &str) -> Vec<u64> {
+        self.registry.lock().nodes[node_id]
+            .timeline
+            .iter()
+            .filter_map(|item| match item {
+                TimelineItem::Ask {
+                    id,
+                    state: AskState::PendingForm { .. } | AskState::PendingContinue { .. },
+                } => Some(*id),
+                _ => None,
+            })
+            .collect()
     }
 
     fn ask_count(&self, node_id: &str) -> usize {
-        self.registry.lock().nodes[node_id].asks.len()
+        self.pending_ids(node_id).len()
     }
 }
 
@@ -837,6 +927,109 @@ mod tests {
         handle.join().unwrap();
     }
 
+    /// The timeline is append-only: an answered ask stays IN PLACE with its
+    /// answer (rendered read-only), and re-addressing its id is the stale
+    /// case, not a second resolution.
+    #[test]
+    fn answered_ask_persists_in_place_with_its_answer() {
+        let st = AppState::new();
+        let gate = st.register_node("n1");
+        gate.post_note("about to ask");
+        let handle = {
+            let gate = gate.clone();
+            std::thread::spawn(move || gate.present_form(&spec()))
+        };
+        while st.first_ask_id("n1").is_none() {
+            std::thread::yield_now();
+        }
+        let interaction = st.first_ask_id("n1").unwrap();
+        let wire = json!({"answer.mood": "calm", "answer.count": 3});
+        st.resolve_form("n1", interaction, wire.as_object().unwrap().clone())
+            .unwrap();
+        handle.join().unwrap();
+
+        assert_eq!(st.ask_count("n1"), 0, "nothing pending anymore");
+        let html = st.node_panel_html("n1").unwrap();
+        assert!(html.contains("about to ask"), "the note stays: {html}");
+        assert!(
+            html.contains(&format!("id=\"ask-n1-{interaction}\"")),
+            "the answered ask stays at its id: {html}"
+        );
+        assert!(html.contains("calm"), "the answer shows: {html}");
+        assert!(
+            !html.contains(&format!("@post('/node/n1/submit/{interaction}')")),
+            "no live form controls on an answered ask: {html}"
+        );
+
+        let err = st
+            .resolve_form("n1", interaction, Map::new())
+            .expect_err("re-resolving an answered ask is stale");
+        assert_eq!(err, ResolveError::NoSuchInteraction);
+    }
+
+    /// Notes survive the between-loops gate — the timeline is the node's
+    /// history, and a continue click must not erase the context above it.
+    #[test]
+    fn notes_persist_across_continue() {
+        let st = AppState::new();
+        let gate = st.register_node("n1");
+        gate.post_note("turn 1 narration");
+        let handle = {
+            let gate = gate.clone();
+            std::thread::spawn(move || gate.await_continue())
+        };
+        while st.first_ask_id("n1").is_none() {
+            std::thread::yield_now();
+        }
+        let interaction = st.first_ask_id("n1").unwrap();
+        st.resolve_continue(
+            "n1",
+            interaction,
+            ContinueSignal::ContinueWithInput("steer".to_string()),
+        )
+        .unwrap();
+        handle.join().unwrap();
+
+        let html = st.node_panel_html("n1").unwrap();
+        assert!(
+            html.contains("turn 1 narration"),
+            "notes persist across continue: {html}"
+        );
+        assert!(
+            html.contains("steer"),
+            "the operator's continue message stays visible: {html}"
+        );
+    }
+
+    /// The node-lifecycle setters store their field, bump the revision, and
+    /// show up in the rendered panel.
+    #[test]
+    fn seed_final_and_failure_store_and_render() {
+        let st = AppState::new();
+        let gate = st.register_node("root");
+        let child = gate.node_gate("root/1-x").expect("child gate");
+        drop(child);
+
+        let rev0 = extract_rev(&st.node_panel_html("root/1-x").unwrap()).to_string();
+        gate.node_seeded("root/1-x", "NODE root/1 — DISCOVER the thing");
+        let html = st.node_panel_html("root/1-x").unwrap();
+        assert!(html.contains("DISCOVER the thing"), "{html}");
+        let rev1 = extract_rev(&html).to_string();
+        assert_ne!(rev0, rev1, "seed bumps rev");
+
+        gate.retire_node("root/1-x");
+        gate.node_finalized("root/1-x", "{\"tag\":\"FinishLayer\"}");
+        let html = st.node_panel_html("root/1-x").unwrap();
+        assert!(html.contains("Final value"), "{html}");
+        assert!(html.contains("FinishLayer"), "{html}");
+        assert!(html.contains(">done</span>"), "{html}");
+
+        gate.node_failed("root/1-x", "round exhaustion");
+        let html = st.node_panel_html("root/1-x").unwrap();
+        assert!(html.contains("round exhaustion"), "{html}");
+        assert!(html.contains(">failed</span>"), "{html}");
+    }
+
     /// The concurrency invariant the whole generalization exists for: two
     /// asks published on the SAME node coexist (neither supersedes the
     /// other) and each resolves independently, in either order.
@@ -853,10 +1046,7 @@ mod tests {
         while st.ask_count("n1") < 2 {
             std::thread::yield_now();
         }
-        let ids: Vec<u64> = {
-            let reg = st.registry.lock();
-            reg.nodes["n1"].asks.iter().map(|a| a.id).collect()
-        };
+        let ids = st.pending_ids("n1");
         assert_eq!(ids.len(), 2, "both asks coexist, neither dropped");
         assert_ne!(ids[0], ids[1], "each ask has its own nonce");
 
@@ -871,7 +1061,11 @@ mod tests {
                 .clone(),
         )
         .unwrap();
-        assert_eq!(st.ask_count("n1"), 1, "only the resolved ask is removed");
+        assert_eq!(
+            st.ask_count("n1"),
+            1,
+            "only the resolved ask leaves pending"
+        );
         st.resolve_form(
             "n1",
             ids[0],
@@ -942,11 +1136,10 @@ mod tests {
         after.split('"').next().unwrap()
     }
 
-    /// PRD 21 C5 GUI lane: `node_gate` registers (idempotently) a node for
-    /// the label and hands back its own gate; `retire_node` marks it done,
-    /// which bumps the panel's revision but leaves the slot (and any
-    /// history) in place — retiring an already-done node is a no-op ping,
-    /// same discipline as `clear_notes`.
+    /// `node_gate` registers (idempotently) a node for the label and hands
+    /// back its own gate; `retire_node` marks it done, which bumps the
+    /// panel's revision but leaves the slot (and its whole timeline) in
+    /// place — retiring an already-done node is a no-op ping.
     #[test]
     fn node_gate_registers_and_retire_node_marks_done() {
         let st = AppState::new();
@@ -960,7 +1153,7 @@ mod tests {
             .expect("re-registering the same label is idempotent");
         // `register_node` is idempotent on the underlying STATE (a fresh
         // `WebGate` wrapper each call, same node) — re-resolving the same
-        // label must not duplicate the tab-strip entry.
+        // label must not duplicate the outline entry.
         assert_eq!(
             st.node_ids().iter().filter(|id| *id == "root/1-x").count(),
             1,
@@ -975,6 +1168,26 @@ mod tests {
         default_gate.retire_node("root/1-x");
         let rev2 = extract_rev(&st.node_panel_html("root/1-x").unwrap()).to_string();
         assert_eq!(rev1, rev2, "retiring an already-done node is a no-op");
+    }
+
+    /// Display order: the default node first, then path-lexicographic — so
+    /// children group under their parents regardless of registration order.
+    #[test]
+    fn node_ids_sort_default_first_then_by_path() {
+        let st = AppState::new();
+        let _d = st.register_node(crate::DEFAULT_NODE_ID);
+        let _b = st.register_node("root/2-y");
+        let _r = st.register_node("root");
+        let _a = st.register_node("root/1-x");
+        assert_eq!(
+            st.node_ids(),
+            vec![
+                crate::DEFAULT_NODE_ID.to_string(),
+                "root".to_string(),
+                "root/1-x".to_string(),
+                "root/2-y".to_string(),
+            ]
+        );
     }
 
     /// F10 (generalized per-node): every mutation to a node's state bumps
@@ -1086,8 +1299,8 @@ mod tests {
     }
 
     /// The LIVE recursive path, both halves from the same root: a spec
-    /// carrying a `shape` renders through `render::form` at
-    /// [`ROOT_BIND_PATH`], and [`submit`] collects from that same root.
+    /// carrying a `shape` renders through the panel at [`ROOT_BIND_PATH`],
+    /// and [`submit`] collects from that same root.
     ///
     /// A root SUM (what `choose` and `askUser @<enum>` produce) is the case
     /// that pins why the root is NON-EMPTY: its radios are grouped by `name`,
@@ -1096,8 +1309,21 @@ mod tests {
     #[test]
     fn root_bind_path_renders_and_collects_a_root_sum() {
         let shape = destination_shape();
-        let asks = vec![(0u64, Ask::Form(&shape))];
-        let html = crate::render::node_panel("n1", &asks, &[], &VecDeque::new(), 1).into_string();
+        let th = VecDeque::new();
+        let view = NodeView {
+            node_id: "n1",
+            seed: None,
+            timeline: vec![TimelineEntry::PendingForm {
+                id: 0,
+                shape: &shape,
+            }],
+            final_value: None,
+            failure: None,
+            done: false,
+            turn_history: &th,
+            rev: 1,
+        };
+        let html = crate::render::node_panel(&view).into_string();
         assert!(
             html.contains(&format!("name=\"{ROOT_BIND_PATH}\"")),
             "a root sum's radio group must be named at the non-empty root bind path, got:\n{html}"

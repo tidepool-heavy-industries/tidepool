@@ -1,23 +1,28 @@
-//! tidepool-web — the minimal operator GUI for the self-iterating harness.
+//! tidepool-web — the operator GUI for the self-iterating harness, built on
+//! the minimal node model: N REGISTERED NODES in a tree (slash-separated
+//! `node_id` paths), each one lifecycle — a SEED prompt in, an append-only
+//! TIMELINE of notes and asks, a FINAL VALUE (or failure) out — rendered as
+//! one always-visible outline and served over HTTP + Datastar SSE.
 //!
-//! A tab strip across N REGISTERED NODES, each served over HTTP + Datastar
-//! SSE. The harness driver blocks on an
+//! The harness driver blocks on an
 //! [`OperatorGate`](tidepool_harness::selfharness::operator::OperatorGate);
 //! [`server::WebGate`] implements that gate over a web round trip, bound to
 //! one registered node: `present_form` publishes a
 //! [`FormShape`](tidepool_harness::selfharness::operator::FormShape)
-//! (rendered by [`render`]) onto that node's ask stack and parks a channel
+//! (rendered by [`render`]) onto that node's timeline and parks a channel
 //! resolved by `POST /node/{node}/submit/{interaction}`; `await_continue`
 //! parks a channel resolved by `POST /node/{node}/continue/{interaction}`.
-//! Publishing never supersedes an existing pending ask — concurrent asks on
-//! one node stack and coexist.
+//! The node-lifecycle extensions (`node_seeded`/`node_finalized`/
+//! `node_failed`/`retire_node`) store what the driver sends across the seam.
+//! Publishing never supersedes an existing pending ask; resolving keeps the
+//! answered ask in place.
 //!
 //! Four modules, one seam:
-//! - [`render`] — a [`FormShape`](tidepool_harness::selfharness::operator::FormShape)
-//!   → maud form (enum/int/text/bool + a Submit / Continue button), stacked
-//!   per node; the `id="panel-<node_id>"` fragment patched over SSE.
+//! - [`render`] — [`render::NodeView`] → one node's section markup (header +
+//!   status, seed, timeline, final value/failure); the `id="panel-<node_id>"`
+//!   fragment patched over SSE.
 //! - [`shell`] — the full HTML document (inline Swiss-minimal CSS + the
-//!   vendored Datastar patch-apply / form-collection JS + the tab strip; no
+//!   vendored Datastar patch-apply / form-collection / tree-mount JS; no
 //!   CDN, no build step).
 //! - [`server`] — axum routes (`GET /`, `GET /sse`, `POST
 //!   /node/{node}/submit/{interaction}`, `POST
@@ -39,7 +44,7 @@ pub mod server;
 pub mod shell;
 
 pub use formapi::FormApiConfig;
-pub use render::{node_panel, Ask};
+pub use render::{node_panel, NodeView, TimelineEntry};
 pub use server::{router, router_with_form_api, AppState, NodeId, WebGate};
 
 use std::net::SocketAddr;
