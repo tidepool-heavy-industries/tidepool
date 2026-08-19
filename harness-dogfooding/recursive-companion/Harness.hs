@@ -286,6 +286,22 @@ childEdge parent allowance i b = Th.Branch b (childSeed parent allowance i b)
 -- so the root enters the hylo holding a ref exactly like every descendant
 -- does, and 'discover' has no root special case to get wrong.
 loop :: State -> Companion State
+loop st
+  -- The SEED GATE (operator decision, 2026-08-19): an empty question means
+  -- no operator has chosen one yet, so the loop's first act is to ask —
+  -- BEFORE any model window runs.  This is deliberately a SHORT cycle
+  -- (ask, store, return): the answerer framing for a cycle is rendered
+  -- from the state the cycle STARTED with, so running the tree in the
+  -- same cycle would run every window under a framing whose question is
+  -- still blank.  The seeded question is 'State', so it checkpoints, and
+  -- every later loop skips straight past this guard.  A blank submission
+  -- re-asks (bounded by the driver's consecutive-re-presentation cap).
+  | T.strip st.question == "" = do
+      say "No question is seeded yet — provide the question this run should investigate."
+      sq <- askUser @SeedQuestion
+      case T.strip sq.seedQuestion of
+        "" -> loop st
+        q -> pure st {question = q}
 loop st = do
   record "turn" rootKey (object ["root" .= st.question, "config" .= toJSON cfg])
   rootRef <- freezeContext

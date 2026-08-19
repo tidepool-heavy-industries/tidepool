@@ -48,6 +48,9 @@ module HarnessTypes
   , LayerApproval (..)
   , gateApplies
 
+    -- * The seed gate ('Harness.loop'\'s opening ask)
+  , SeedQuestion (..)
+
     -- * Wire enum to base functor (the one place they are mapped)
   , roleOf
   , postureLayer
@@ -167,12 +170,15 @@ data RunSummary = RunSummary
   }
   deriving (Generic, ToJSON, FromJSON, Show, Eq)
 
+-- | The question is deliberately EMPTY: seeding it is the OPERATOR's first
+-- act, not the author's — 'Harness.loop' opens by asking for it
+-- (@askUser \@SeedQuestion@) whenever it is empty, before any model window
+-- runs (operator decision, 2026-08-19; a hardcoded question meant the first
+-- attended run spent real model turns on a question nobody chose).
 initialState :: State
 initialState =
   State
-    { question =
-        "What should the recursive companion's first real dogfood scenario be, \
-        \and what would it have to show to be worth running attended?"
+    { question = ""
     , config =
         Config
           { maxDepth = 3
@@ -440,6 +446,14 @@ data GateVerdict = Approve | Prune | Amend | Add
 
 -- | The gate's form.  ONE record, so it renders as one form rather than a
 -- variant chooser; the fields a verdict does not use are left empty.
+-- | The operator's opening move ('Harness.loop'\'s seed gate): the question
+-- the whole run investigates.  One field, so the derived form is a single
+-- text input, presented BEFORE any model window runs.
+data SeedQuestion = SeedQuestion
+  { seedQuestion :: Text
+  }
+  deriving (Generic, ToJSON, FromJSON, JsonSchema, Show, Eq)
+
 data LayerApproval = LayerApproval
   { gateVerdict :: GateVerdict
   , -- | The branch title the verdict applies to (@""@ for 'Approve'\/'Add').
