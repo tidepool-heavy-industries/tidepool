@@ -38,10 +38,18 @@
 use maud::{html, Markup, PreEscaped, DOCTYPE};
 
 /// The full page: `<head>` with inline [`CSS`] + [`JS`], `<body>` with a
-/// masthead, a tab strip across every `(node_id, panel)` pair, and each
-/// node's panel wrapped in its own stable `.tab-slot` (first node active by
-/// default).
-pub fn page(panels: Vec<(String, Markup)>) -> Markup {
+/// masthead, a tab strip across every `(node_id, panel, done)` triple, and
+/// each node's panel wrapped in its own stable `.tab-slot` (first node active
+/// by default).
+///
+/// PRD 21 C5 GUI lane: `node_id`s are slash-separated paths
+/// (`root/1-execution-mode`) — the strip renders as an INDENTED TREE by path
+/// depth (`node_id.matches('/').count()`), registration order preserved
+/// (never re-sorted: registration order already IS discovery order, parent
+/// before child). A `done` node's tab is visually distinct (greyed via
+/// `.tab.done`) but stays clickable — its panel history remains readable, it
+/// is never removed from the strip.
+pub fn page(panels: Vec<(String, Markup, bool)>) -> Markup {
     html! {
         (DOCTYPE)
         html lang="en" {
@@ -63,15 +71,16 @@ pub fn page(panels: Vec<(String, Markup)>) -> Markup {
                     }
                     @if panels.len() > 1 {
                         div class="tabs" data-node="tabs" {
-                            @for (i, (node_id, _)) in panels.iter().enumerate() {
+                            @for (i, (node_id, _, done)) in panels.iter().enumerate() {
                                 button type="button"
-                                    class=(if i == 0 { "tab active" } else { "tab" })
+                                    class=(tab_class(i == 0, *done))
+                                    style=(tab_indent_style(node_id))
                                     data-tab=(node_id) { (node_id) }
                             }
                         }
                     }
                     div class="tab-panels" data-node="tab-panels" {
-                        @for (i, (node_id, panel)) in panels.iter().enumerate() {
+                        @for (i, (node_id, panel, _)) in panels.iter().enumerate() {
                             div class=(if i == 0 { "tab-slot active" } else { "tab-slot" })
                                 data-node-id=(node_id) {
                                 (panel)
@@ -82,6 +91,35 @@ pub fn page(panels: Vec<(String, Markup)>) -> Markup {
             }
         }
     }
+}
+
+/// A tab's path depth — the slash count in its `node_id` (`"root"` → 0,
+/// `"root/1-x"` → 1, `"root/1-x/2-y"` → 2). Purely a function of the id
+/// string, so no separate depth field needs to ride alongside it anywhere.
+fn tab_depth(node_id: &str) -> usize {
+    node_id.matches('/').count()
+}
+
+/// Inline left-padding proportional to [`tab_depth`] — an unbounded tree
+/// depth can't be covered by a fixed set of `[data-depth="N"]` CSS rules, so
+/// this is computed per tab rather than classed.
+fn tab_indent_style(node_id: &str) -> String {
+    format!(
+        "padding-left: calc({}px + 3 * var(--unit))",
+        tab_depth(node_id) * 14
+    )
+}
+
+fn tab_class(active: bool, done: bool) -> String {
+    let mut c = if active {
+        "tab active".to_string()
+    } else {
+        "tab".to_string()
+    };
+    if done {
+        c.push_str(" done");
+    }
+    c
 }
 
 /// Award-grade Swiss / International Typographic Style stylesheet. One
@@ -123,6 +161,8 @@ pub const CSS: &str = r#"
   background: transparent; color: var(--muted); cursor: pointer;
 }
 .tab.active { color: var(--ink); border-color: var(--line); background: var(--paper); }
+.tab.done { color: var(--line-faint); }
+.tab.done.active { color: var(--muted); }
 .tab-slot { display: none; }
 .tab-slot.active { display: block; }
 
@@ -259,6 +299,12 @@ input.input[data-kind="int"]::-webkit-inner-spin-button {
   appearance: none; -webkit-appearance: none; margin: 0;
 }
 
+.field-error {
+  margin: calc(1 * var(--unit)) 0 0 0;
+  color: var(--accent); font-size: var(--text-micro); font-weight: 600;
+}
+.sum.invalid > .enum { outline: 2px solid var(--accent); outline-offset: calc(1 * var(--unit)); }
+
 .enum { display: flex; flex-direction: column; gap: calc(2 * var(--unit)); width: 100%; }
 .enum-opt, .bool {
   display: flex; align-items: center; gap: calc(2 * var(--unit));
@@ -381,9 +427,46 @@ pub const JS: &str = r#"
       if (form.__wired) return; form.__wired = true;
       form.addEventListener('submit', (e) => {
         e.preventDefault();
+        if (!validateRequired(form)) return;
         post(parsePost(form.getAttribute('data-on-submit')), form, collect(form), form);
       });
     });
+  }
+
+  // An element hidden by the payload-sum CSS reveal (or any display:none
+  // ancestor) has no box — the standard offsetParent-null test.
+  function isVisible(el) {
+    return !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length);
+  }
+
+  // Block submit when a VISIBLE radio/enum group has no option checked,
+  // showing an inline message next to it instead of silently submitting
+  // without that key — an empty gate submission decode-fails Haskell-side
+  // and used to silently re-present the same form (three consecutive silent
+  // re-prompt loops, observed live). A hidden group (a payload-sum branch the
+  // operator did not choose) is never required — collect() never reads it.
+  function validateRequired(form) {
+    form.querySelectorAll('.field-error').forEach((el) => el.remove());
+    form.querySelectorAll('[data-node="sum"]').forEach((el) => el.classList.remove('invalid'));
+
+    const seen = new Set();
+    let ok = true;
+    form.querySelectorAll('input[data-kind="enum"]').forEach((f) => {
+      const key = f.getAttribute('data-bind');
+      if (seen.has(key) || !isVisible(f)) return;
+      seen.add(key);
+      const group = Array.from(form.querySelectorAll('input[data-kind="enum"]'))
+        .filter((g) => g.getAttribute('data-bind') === key);
+      if (group.some((g) => g.checked)) return;
+      ok = false;
+      const host = f.closest('[data-node="sum"]') || f.closest('.field') || form;
+      host.classList.add('invalid');
+      const msg = document.createElement('p');
+      msg.className = 'field-error';
+      msg.textContent = 'Choose one — this field is required.';
+      host.appendChild(msg);
+    });
+    return ok;
   }
 
   // Wire the tab strip: clicking a tab toggles which node's STABLE
@@ -500,6 +583,7 @@ mod tests {
         let doc = page(vec![(
             "n1".to_string(),
             html! { div id="panel-n1" { "hi" } },
+            false,
         )])
         .into_string();
         assert!(doc.contains("<div id=\"panel-n1\">hi</div>"));
@@ -515,7 +599,12 @@ mod tests {
     /// existing single-node callers get by default stays visually quiet.
     #[test]
     fn single_node_renders_no_tab_strip() {
-        let doc = page(vec![("only".to_string(), html! { div id="panel-only" {} })]).into_string();
+        let doc = page(vec![(
+            "only".to_string(),
+            html! { div id="panel-only" {} },
+            false,
+        )])
+        .into_string();
         assert!(!doc.contains("data-node=\"tabs\""), "{doc}");
         assert!(doc.contains("data-node-id=\"only\""), "{doc}");
     }
@@ -525,8 +614,12 @@ mod tests {
     #[test]
     fn multiple_nodes_render_a_tab_strip_and_stable_slots() {
         let doc = page(vec![
-            ("alpha".to_string(), html! { div id="panel-alpha" {} }),
-            ("beta".to_string(), html! { div id="panel-beta" {} }),
+            (
+                "alpha".to_string(),
+                html! { div id="panel-alpha" {} },
+                false,
+            ),
+            ("beta".to_string(), html! { div id="panel-beta" {} }, false),
         ])
         .into_string();
         assert!(doc.contains("data-tab=\"alpha\""), "{doc}");
@@ -543,11 +636,68 @@ mod tests {
         );
     }
 
+    /// PRD 21 C5: slash-separated `node_id`s render as an indented tree —
+    /// a deeper path gets more left padding than its parent — and a `done`
+    /// node's tab carries the `.tab.done` class while its slot/panel stay
+    /// exactly as any other node's (never removed from the strip).
+    #[test]
+    fn tab_strip_indents_by_path_depth_and_marks_done() {
+        let doc = page(vec![
+            ("root".to_string(), html! { div id="panel-root" {} }, false),
+            (
+                "root/1-x".to_string(),
+                html! { div id="panel-root/1-x" {} },
+                true,
+            ),
+            (
+                "root/1-x/2-y".to_string(),
+                html! { div id="panel-root/1-x/2-y" {} },
+                false,
+            ),
+        ])
+        .into_string();
+
+        let root_style = tab_indent_style("root");
+        let mid_style = tab_indent_style("root/1-x");
+        let leaf_style = tab_indent_style("root/1-x/2-y");
+        assert_ne!(root_style, mid_style);
+        assert_ne!(mid_style, leaf_style);
+        assert!(doc.contains(&format!("style=\"{root_style}\"")), "{doc}");
+        assert!(doc.contains(&format!("style=\"{mid_style}\"")), "{doc}");
+        assert!(doc.contains(&format!("style=\"{leaf_style}\"")), "{doc}");
+
+        // The done node's tab carries "done"; its slot/panel are untouched —
+        // a folded node's history stays readable.
+        assert!(doc.contains("data-tab=\"root/1-x\""), "{doc}");
+        assert!(doc.contains("class=\"tab done\""), "{doc}");
+        assert!(doc.contains("data-node-id=\"root/1-x\""), "{doc}");
+    }
+
     #[test]
     fn js_collects_flat_and_opens_sse() {
         assert!(JS.contains("new EventSource('/sse')"));
         assert!(JS.contains("data-bind"));
         assert!(JS.contains("datastar-patch-elements"));
+    }
+
+    /// A required (visible, unselected) radio/enum group must block the
+    /// submit's `post(...)` call — the validation gate has to run and return
+    /// before `post` is reached, not after or in parallel.
+    #[test]
+    fn js_submit_is_gated_on_validate_required() {
+        assert!(JS.contains("function validateRequired"));
+        let gate_idx = JS
+            .find("if (!validateRequired(form)) return;")
+            .expect("submit is gated on validateRequired");
+        let post_idx = JS
+            .find(
+                "post(parsePost(form.getAttribute('data-on-submit')), form, collect(form), form);",
+            )
+            .expect("the submit post call exists");
+        assert!(
+            gate_idx < post_idx,
+            "the validateRequired gate must precede the post call"
+        );
     }
 
     /// Tab-switching toggles the STABLE `.tab-slot` wrapper, never the

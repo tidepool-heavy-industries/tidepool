@@ -114,6 +114,9 @@ const TURN_HISTORY_CAP: usize = 50;
 /// node's AGGREGATE revision, bumped under the SAME lock as every mutation
 /// below (F10, now per-node) — the panel-root `data-rev` the client's
 /// focus-preserving skip keys off.
+/// `done` (PRD 21 C5 GUI lane) marks a node whose window has retired
+/// ([`OperatorGate::retire_node`]) — the tab strip greys it rather than
+/// removing it, so its panel history (notes/turn-history) stays readable.
 #[derive(Default)]
 struct NodeSlot {
     asks: Vec<AskEntry>,
@@ -121,6 +124,7 @@ struct NodeSlot {
     notes: Vec<String>,
     turn_history: VecDeque<String>,
     rev: u64,
+    done: bool,
 }
 
 impl NodeSlot {
@@ -253,6 +257,24 @@ impl AppState {
         self.ping(node_id.to_string());
     }
 
+    /// Mark `node_id` done (PRD 21 C5 GUI lane: [`WebGate::retire_node`]) —
+    /// idempotent, same no-op-ping discipline as [`Self::clear_notes`]: a
+    /// node already marked done doesn't force a redundant re-render. The slot
+    /// and its history are never removed — only the tab strip's own rendering
+    /// reacts to `done`.
+    fn mark_done(&self, node_id: &str) {
+        let mut reg = self.registry.lock();
+        #[allow(clippy::expect_used, reason = "registered node")]
+        let slot = reg.nodes.get_mut(node_id).expect("registered node");
+        if slot.done {
+            return;
+        }
+        slot.done = true;
+        slot.rev += 1;
+        drop(reg);
+        self.ping(node_id.to_string());
+    }
+
     /// Append to `node_id`'s turn history (dropping the oldest past
     /// [`TURN_HISTORY_CAP`]), bump its revision, and ping.
     fn push_turn_source(&self, node_id: &str, source: String) {
@@ -289,7 +311,7 @@ impl AppState {
     /// registration order.
     fn page_markup(&self) -> maud::Markup {
         let reg = self.registry.lock();
-        let panels: Vec<(NodeId, maud::Markup)> = reg
+        let panels: Vec<(NodeId, maud::Markup, bool)> = reg
             .order
             .iter()
             .map(|id| {
@@ -303,6 +325,7 @@ impl AppState {
                         &slot.turn_history,
                         slot.rev,
                     ),
+                    slot.done,
                 )
             })
             .collect();
@@ -469,6 +492,18 @@ impl OperatorGate for WebGate {
     fn post_turn_source(&self, source: &str) {
         self.state
             .push_turn_source(&self.node_id, source.to_string());
+    }
+
+    /// PRD 21 C5 GUI lane: register (or reuse — [`AppState::register_node`]
+    /// is idempotent) a node for `label` and hand back its own gate, so a
+    /// labeled branch child's asks/notes render on their own panel instead of
+    /// this gate's.
+    fn node_gate(&self, label: &str) -> Option<Arc<dyn OperatorGate>> {
+        Some(self.state.register_node(label))
+    }
+
+    fn retire_node(&self, label: &str) {
+        self.state.mark_done(label);
     }
 }
 
@@ -905,6 +940,41 @@ mod tests {
             .nth(1)
             .expect("panel html carries data-rev");
         after.split('"').next().unwrap()
+    }
+
+    /// PRD 21 C5 GUI lane: `node_gate` registers (idempotently) a node for
+    /// the label and hands back its own gate; `retire_node` marks it done,
+    /// which bumps the panel's revision but leaves the slot (and any
+    /// history) in place — retiring an already-done node is a no-op ping,
+    /// same discipline as `clear_notes`.
+    #[test]
+    fn node_gate_registers_and_retire_node_marks_done() {
+        let st = AppState::new();
+        let default_gate = st.register_node("root");
+
+        let _child_gate = default_gate
+            .node_gate("root/1-x")
+            .expect("node_gate registers a gate");
+        let _child_gate_again = default_gate
+            .node_gate("root/1-x")
+            .expect("re-registering the same label is idempotent");
+        // `register_node` is idempotent on the underlying STATE (a fresh
+        // `WebGate` wrapper each call, same node) — re-resolving the same
+        // label must not duplicate the tab-strip entry.
+        assert_eq!(
+            st.node_ids().iter().filter(|id| *id == "root/1-x").count(),
+            1,
+            "re-resolving the same label must not register a second node"
+        );
+
+        let rev0 = extract_rev(&st.node_panel_html("root/1-x").unwrap()).to_string();
+        default_gate.retire_node("root/1-x");
+        let rev1 = extract_rev(&st.node_panel_html("root/1-x").unwrap()).to_string();
+        assert_ne!(rev0, rev1, "retire_node must bump the revision");
+
+        default_gate.retire_node("root/1-x");
+        let rev2 = extract_rev(&st.node_panel_html("root/1-x").unwrap()).to_string();
+        assert_eq!(rev1, rev2, "retiring an already-done node is a no-op");
     }
 
     /// F10 (generalized per-node): every mutation to a node's state bumps

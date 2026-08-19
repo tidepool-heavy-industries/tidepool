@@ -993,6 +993,20 @@ pub struct SelfHarnessDriver {
     /// only ever has the `NodeId` in scope — attribute a completed
     /// delegation to the right entry in [`Self::delegated_branches`].
     branch_node_paths: HashMap<NodeId, String>,
+    /// PRD 21 C5 GUI lane: which per-node operator-gate label a
+    /// `runLLMTurnBranchLabeled` child window carries — populated by
+    /// [`Self::service_outer_branch`] right when that window's `NodeId` is
+    /// minted (mirrors `branch_node_paths` above) and removed once it
+    /// finishes (success, exit, or closure — every path), at which point
+    /// [`crate::selfharness::operator::OperatorGate::retire_node`] is called
+    /// on the default gate. [`Self::present_askuser_form`]/
+    /// [`Self::announce_note`] look a node up here to resolve
+    /// [`crate::selfharness::operator::OperatorGate::node_gate`] instead of
+    /// the default gate; a node absent here (every unlabeled node, including
+    /// the outer loop's own asks and the ordinary per-loop answerer) always
+    /// falls back to the default gate — byte-identical to before this field
+    /// existed.
+    node_labels: HashMap<NodeId, String>,
     /// PRD 21 C5's runtime-stamped record: completed delegation branches,
     /// keyed by the DELEGATING node's own rendered `NodePath` text, in
     /// completion order. Populated by [`Self::drain_note_holes`] the moment
@@ -1283,6 +1297,7 @@ impl SelfHarnessDriver {
             handlers: OuterHandlers::default(),
             resume: None,
             branch_node_paths: HashMap::new(),
+            node_labels: HashMap::new(),
             delegated_branches: HashMap::new(),
         }
     }
@@ -2773,12 +2788,14 @@ impl SelfHarnessDriver {
                             site,
                             ty,
                             context_ref,
+                            label,
                         } => {
                             let value = self
                                 .service_outer_branch(
                                     site.get(),
                                     ty.as_deref(),
                                     context_ref,
+                                    label.as_deref(),
                                     &classified.prompt,
                                     &compiled.table,
                                 )
@@ -3417,6 +3434,7 @@ impl SelfHarnessDriver {
         site: u32,
         ty: Option<&str>,
         context_ref: &str,
+        label: Option<&str>,
         prompt: &str,
         table: &DataConTable,
     ) -> Result<Value, DriverError> {
@@ -3446,6 +3464,15 @@ impl SelfHarnessDriver {
         // finishes, below.
         if let Some(path) = engine::parse_companion_node_path(prompt) {
             self.branch_node_paths.insert(node, path);
+        }
+        // PRD 21 C5 GUI lane: a `runLLMTurnBranchLabeled` child's label rides
+        // the wire structurally (never parsed out of `prompt`, unlike
+        // `branch_node_paths` above) — recorded here so
+        // `present_askuser_form`/`announce_note` can route this node's own
+        // asks/notes to a per-node operator gate; removed unconditionally
+        // once the branch finishes, below (mirrors `branch_node_paths`).
+        if let Some(label) = label {
+            self.node_labels.insert(node, label.to_string());
         }
         self.agent.force_attached(node, Actor::Operator, sid)?;
         let realm = self.mint_realm();
@@ -3508,6 +3535,14 @@ impl SelfHarnessDriver {
         // Every path below this point (exit, closure, success) is done with
         // this node's own delegation window — see the insert above.
         self.branch_node_paths.remove(&window.node());
+        // The node's terminate/fold point (PRD 21 C5 GUI lane): a labeled
+        // child's per-node gate is retired here, regardless of which outcome
+        // follows — the default gate stays the fallback for this node from
+        // this point on, and a `WebGate` marks the panel done rather than
+        // dropping it.
+        if let Some(label) = self.node_labels.remove(&window.node()) {
+            self.gate.retire_node(&label);
+        }
         self.emit(Event::TurnEnd {
             node: window.node(),
         });
@@ -4667,6 +4702,25 @@ impl SelfHarnessDriver {
         }
     }
 
+    /// Resolve which operator gate a form/note tied to `source` should reach:
+    /// a labeled branch child (`source` is [`FormSource::Answerer`] AND the
+    /// node carries an entry in [`Self::node_labels`]) routes to
+    /// [`crate::selfharness::operator::OperatorGate::node_gate`]; every other
+    /// case — an unlabeled answerer node, or [`FormSource::OuterLoop`] (the
+    /// outer session's own seed question / between-loops asks, which are
+    /// never node-scoped) — falls back to the default gate, byte-identical to
+    /// before per-node routing existed.
+    fn resolve_gate(&self, source: &FormSource) -> Arc<dyn OperatorGate> {
+        if let FormSource::Answerer { node } = source {
+            if let Some(label) = self.node_labels.get(node) {
+                if let Some(gate) = self.gate.node_gate(label) {
+                    return gate;
+                }
+            }
+        }
+        Arc::clone(&self.gate)
+    }
+
     /// Post `text` to the operator gate and emit [`Event::NotePosted`] — the
     /// shared, non-blocking half of servicing a `note` hole. `source`
     /// distinguishes a nested answerer's own note from one the AUTHORED
@@ -4674,11 +4728,11 @@ impl SelfHarnessDriver {
     /// Unlike [`Self::present_askuser_form`], there is nothing to wait for:
     /// the caller resumes immediately after this returns.
     fn announce_note(&self, source: FormSource, text: &str) {
+        let gate = self.resolve_gate(&source);
         self.emit(Event::NotePosted {
             source,
             text: text.to_string(),
         });
-        let gate = Arc::clone(&self.gate);
         let posted = text.to_string();
         tokio::task::block_in_place(move || gate.post_note(&posted));
     }
@@ -4783,7 +4837,9 @@ impl SelfHarnessDriver {
     /// reprompt cap, emit [`Event::FormPresented`], block on the operator gate,
     /// then emit [`Event::FormSubmitted`]. `source` is the only observable
     /// difference between the two callers — a genuine tag distinguishing which
-    /// side raised the form in the transcript, not a hidden behavior fork.
+    /// side raised the form in the transcript, not a hidden behavior fork. It
+    /// is also what [`Self::resolve_gate`] reads to route a labeled branch
+    /// child's form to its own per-node gate.
     async fn present_askuser_form(
         &self,
         reprompts: &mut u32,
@@ -4807,7 +4863,7 @@ impl SelfHarnessDriver {
         // (`selfharness/operator.rs`) — a web gate parks a channel. Run it
         // under `block_in_place` so that blocking wait yields the tokio
         // worker rather than stalling it.
-        let gate = Arc::clone(&self.gate);
+        let gate = self.resolve_gate(&source);
         let form = shape.clone();
         let submission = tokio::task::block_in_place(move || gate.present_form(&form));
         self.emit(Event::FormSubmitted {

@@ -42,6 +42,8 @@
 //!
 //! The collector that builds this JSON from the rendered controls is
 //! `tidepool-web`'s submission path, guided by the same [`FormShape`].
+use std::sync::Arc;
+
 use serde::{Deserialize, Serialize};
 
 /// The seam the driver blocks on for operator input. Sync-blocking by design
@@ -77,6 +79,25 @@ pub trait OperatorGate: Send + Sync {
     /// implementations keep only the most recent source, not a history.
     /// Default no-op, same reasoning as [`Self::post_note`].
     fn post_turn_source(&self, _source: &str) {}
+
+    /// Resolve (registering it if needed) a gate scoped to one labeled
+    /// window — PRD 21 C5's per-node operator GUI: a `runLLMTurnBranchLabeled`
+    /// child's asks/notes route here instead of the default gate when this
+    /// returns `Some`. `label` is the caller-chosen Text carried on the wire
+    /// (never parsed out of a prompt). Default `None`, so every existing
+    /// [`OperatorGate`] impl (in particular [`StdinGate`], and any test gate)
+    /// stays valid without change and continues presenting every ask on the
+    /// one default gate.
+    fn node_gate(&self, _label: &str) -> Option<Arc<dyn OperatorGate>> {
+        None
+    }
+
+    /// Mark the labeled window `label` as finished — called once, at that
+    /// node's terminate/fold point, regardless of how it finished (answered,
+    /// exited, or closure-refused). Default no-op, same reasoning as
+    /// [`Self::post_note`]; a web/GUI gate overrides it to grey the node's tab
+    /// while keeping its panel history readable.
+    fn retire_node(&self, _label: &str) {}
 }
 
 /// Headless default: `await_continue` reads a line from stdin (the current
@@ -244,6 +265,18 @@ pub fn humanize_key(key: &str) -> String {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    // ---- OperatorGate registrar defaults ------------------------------------
+
+    /// [`OperatorGate::node_gate`]/[`OperatorGate::retire_node`] are
+    /// default-implemented — [`StdinGate`] (and any other existing gate)
+    /// stays valid with zero edits, and the default routes every ask to the
+    /// one default gate (`node_gate` returns `None`).
+    #[test]
+    fn stdin_gate_has_no_per_node_registrar_by_default() {
+        assert!(StdinGate.node_gate("root/1-x").is_none());
+        StdinGate.retire_node("root/1-x"); // must not panic
+    }
 
     // ---- humanize_key -----------------------------------------------------
 

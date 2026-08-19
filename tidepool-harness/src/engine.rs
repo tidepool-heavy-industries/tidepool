@@ -246,11 +246,19 @@ pub enum HoleRouting {
     /// (`Harness::resolve_context_ref`), the one typed checkpoint an
     /// unknown/stale ref is refused at (never a silent fresh-root fallback).
     /// `site`/`ty` mirror `Fork`'s shape — `ty` is the branch's OWN answer type
-    /// `T`, not the wrapping pair.
+    /// `T`, not the wrapping pair. `label`, when the child was opened via
+    /// `runLLMTurnBranchLabeled` rather than plain `runLLMTurnBranch`, is the
+    /// caller-chosen Text stamped on the SAME payload (`label` key, decoded by
+    /// [`classify_runllmturn_payload`]) — `None` for an ordinary unlabeled
+    /// branch, byte-identical to today. The driver uses a present label to
+    /// route this child's asks/notes to a per-node operator gate
+    /// ([`crate::selfharness::operator::OperatorGate::node_gate`]) instead of
+    /// the default one (PRD 21 C5 GUI lane).
     Branch {
         site: crate::tree::SiteId,
         ty: Option<String>,
         context_ref: String,
+        label: Option<String>,
     },
     /// A Subagent verb (`SubagentSpawn`/`SubagentBegin`/`SubagentResume`/
     /// `SubagentSpawnAsync`/`SubagentAwait`/`SubagentCancel` —
@@ -722,10 +730,15 @@ fn classify_runllmturn_payload(
                 constructor: "RunLLMTurnWith",
                 field: "ref",
             })?;
+        let label = payload
+            .get("label")
+            .and_then(Json::as_str)
+            .map(str::to_string);
         Ok(HoleRouting::Branch {
             site,
             ty,
             context_ref,
+            label,
         })
     } else {
         Ok(HoleRouting::RunLLMTurn { site, ty })

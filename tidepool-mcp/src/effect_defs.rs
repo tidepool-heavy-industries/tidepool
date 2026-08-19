@@ -1026,7 +1026,9 @@ macro_rules! runllmturn_effect_def {
                 "to ITS post-finalize context for branching further; a branch child is a ",
                 "BRANCH POSITION too, so its abnormal exit is a `Left` here as well (and a ",
                 "window that never finalized has no context to hand back, which is why the ",
-                "`Either` wraps the whole pair).",
+                "`Either` wraps the whole pair). `runLLMTurnBranchLabeled \\@T label ref ",
+                "prompt` is the same verb with a caller-chosen `label` Text stamped onto the ",
+                "child window, for routing its asks to a per-window operator surface.",
             ],
             // PRD 21 locked decision 6's typed exit, generated here alongside
             // the GADT exactly as ExecError/FsError are (they come from the
@@ -1211,6 +1213,24 @@ macro_rules! runllmturn_effect_def {
                 { raw ["{-# OPAQUE runLLMTurnBranchSited #-}",
                        "runLLMTurnBranchSited :: forall a effs. Member RunLLMTurn effs => Int -> ContextRef -> Text -> Eff effs (Either InvocationExit (a, ContextRef))",
                        "runLLMTurnBranchSited sid (ContextRef ref) p = unsafeCoerce <$> send (RunLLMTurnWith p (object [\"typedSite\" .= sid, \"branch\" .= True, \"ref\" .= ref]))"] },
+                // PRD 21 C5 GUI lane: an ADDITIVE sibling of `runLLMTurnBranch`
+                // that also stamps a caller-chosen `label` onto the SAME
+                // `branch`/`ref` payload shape (one more JSON field, not a new
+                // GADT constructor — `RunLLMTurnWith`'s arity is untouched).
+                // `label` is a plain runtime `Text` argument, not `@`-applied,
+                // so it carries no site-identity meaning of its own; the driver
+                // reads it back (`tidepool_harness::engine::HoleRouting::
+                // Branch`'s `label` field) to route this branch child's
+                // asks/notes to a per-node operator gate
+                // (`selfharness::operator::OperatorGate::node_gate`) instead of
+                // the default one. Mirrors `runLLMTurnBranch`/
+                // `runLLMTurnBranchSited` exactly otherwise.
+                { raw ["{-# OPAQUE runLLMTurnBranchLabeled #-}",
+                       "runLLMTurnBranchLabeled :: forall a effs. Member RunLLMTurn effs => Text -> ContextRef -> Text -> Eff effs (Either InvocationExit (a, ContextRef))",
+                       "runLLMTurnBranchLabeled label ref p = runLLMTurnBranchLabeledSited 0 label ref p"] },
+                { raw ["{-# OPAQUE runLLMTurnBranchLabeledSited #-}",
+                       "runLLMTurnBranchLabeledSited :: forall a effs. Member RunLLMTurn effs => Int -> Text -> ContextRef -> Text -> Eff effs (Either InvocationExit (a, ContextRef))",
+                       "runLLMTurnBranchLabeledSited sid label (ContextRef ref) p = unsafeCoerce <$> send (RunLLMTurnWith p (object [\"typedSite\" .= sid, \"branch\" .= True, \"ref\" .= ref, \"label\" .= label]))"] },
             ],
         }
     };

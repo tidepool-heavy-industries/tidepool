@@ -108,7 +108,7 @@ import Tidepool.Effects
   , freezeContext
   , renderInvocationExit
   , runIn
-  , runLLMTurnBranch
+  , runLLMTurnBranchLabeled
   , runLLMTurnFork
   , say
   , spawnSpecIn
@@ -422,8 +422,15 @@ summarize a =
 -- shared prefix is the frozen context that ref names, never an empty root.
 -- It returns its answer AND its own post-finalize ref, which is what lets the
 -- next layer down branch off THIS node ('childSeed').
-layerWindow :: ContextRef -> Text -> Companion (Either InvocationExit (LayerProposal, ContextRef))
-layerWindow ref prompt = runLLMTurnBranch @LayerProposal ref prompt
+--
+-- Labeled with this node's own rendered 'NodePath' (PRD 21 C5 GUI lane) —
+-- @root@ for the root window, @root\/1-x@ etc. for a descendant — so the
+-- per-node operator GUI can register and route this window's own asks/notes
+-- to its own panel instead of the default one. The label rides the wire
+-- structurally, never parsed back out of the prompt.
+layerWindow ::
+  NodePath -> ContextRef -> Text -> Companion (Either InvocationExit (LayerProposal, ContextRef))
+layerWindow path ref prompt = runLLMTurnBranchLabeled @LayerProposal (renderPath path) ref prompt
 
 -- | The ALGEBRA's window, FORKED — deliberately NOT branched, for two
 -- reasons, and both are load-bearing.
@@ -466,7 +473,7 @@ foldWindow prompt = runLLMTurnFork @FoldDecision prompt
 -- that parent decided this layer.
 discover :: Config -> NodeSeed -> Companion (ThoughtF NodeSeed)
 discover cfg seed = do
-  outcome <- layerWindow seed.seedRef (coalgebraPrompt cfg.maxFanOut seed)
+  outcome <- layerWindow seed.seedPath seed.seedRef (coalgebraPrompt cfg.maxFanOut seed)
   -- What the WINDOW said, before any policy could refuse or amend it. Kind
   -- 'proposed', never 'split' — see 'journaled' for why the two are different
   -- entries rather than one.
