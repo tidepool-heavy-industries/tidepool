@@ -191,24 +191,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     if !auto {
         let port: u16 = args.port;
-        let (state, gate) = tidepool_web::spawn_operator_server_multi(port).await?;
-        // PRD 21 C3 §10.3: register the recursive-companion harness's root
-        // node alongside the default so the multi-node surface can grow a tab
-        // for it. `register_node` is idempotent (re-registering an existing id
-        // reuses its state), so this composes cleanly with C5 (the GUI/typed-UI
-        // lane) — that is what has to carry a node id from Haskell so the
-        // recursion tree's OWN branch nodes, not just this literal "root", can
-        // be registered and named by the harness itself; see §8 gap 2.
-        //
-        // Conditional on the loaded harness, because until C5 lands this tab
-        // has nothing routed to it: the driver's ONE gate is bound to the
-        // default node, so an unconditional second registration would put a
-        // permanently-empty tab in front of every harness — and a single
-        // registered node rendering no tab strip at all is a property
-        // `tidepool-web` deliberately has (see its CLAUDE.md, "Tab switching").
-        if is_recursive_companion(&harness_source_path) {
-            state.register_node("root");
-        }
+        // ONE registered node (the default the driver's gate is bound to), so
+        // the page renders no tab strip at all — the one-tab case
+        // `tidepool-web` deliberately keeps visually quiet (its CLAUDE.md,
+        // "Tab switching"). A second, speculative `register_node("root")` for
+        // the recursive-companion harness used to sit here (PRD 21 C3 §10.3,
+        // anticipating the per-node GUI lane that carries node ids from
+        // Haskell); until that lane lands nothing routes to any node but the
+        // default, so all it produced was a permanently-empty second tab in
+        // front of the live operator (dogfood finding, 2026-08-19). Re-add
+        // registrations only together with the routing that feeds them.
+        let (_state, gate) = tidepool_web::spawn_operator_server_multi(port).await?;
         driver.set_gate(gate);
     }
 
