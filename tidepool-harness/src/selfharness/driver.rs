@@ -465,6 +465,27 @@ fn outer_decls() -> Vec<tidepool_mcp::EffectDecl> {
         .into_decls()
 }
 
+/// The ONE template every outer-session fragment compile
+/// ([`SelfHarnessDriver::compile_outer`] — the `render`/`loop` entries) goes
+/// through: UNPAGINATED, for the same reason
+/// [`engine::template_turn_for_fused`] states for the fused cycle entry.
+/// Every outer entry's JSON is DRIVER-CONSUMED, never displayed — the loop
+/// entry's output round-trips back in as the next cycle's `State`, and the
+/// render entry feeds the framing/operator page whole.
+///
+/// The paginated template (`engine::template_turn_for`) wraps the result in
+/// `paginateResult 4096`, whose oversized branch on a Console-bearing row
+/// (which [`outer_decls`] is) calls `putStrLn` — a suspension. For the
+/// POST-loop render that suspension hit `render_framing_with`'s purity
+/// refusal the first time a real fold pushed the rendered framing past 4096
+/// bytes, failing the cycle AFTER its turn had already completed — and,
+/// because the checkpoint commits after that render, discarding the finished
+/// turn: a deterministic crash loop redoing (and re-billing) the same turn
+/// forever. Pinned by `outer_template_is_unpaginated` in this module's tests.
+fn outer_template(stack: &str, code: &str, imports: &str, helpers: &str) -> String {
+    engine::template_turn_for_fused(&outer_decls(), stack, code, imports, helpers, &[])
+}
+
 /// PRD 21 C5's read-back half: `takeDelegatedBranches path` lets the
 /// AUTHORED outer loop (`Harness.hs`'s `foldAt`) consume the runtime-stamped
 /// branch(es) a node's own coalgebra delegation produced, keyed by that
@@ -1774,7 +1795,7 @@ impl SelfHarnessDriver {
             .stack;
         let extract_bin = outer.cfg.extract_bin.clone();
         let include = outer.cfg.include.clone();
-        let src = engine::template_turn_for(&outer_decls(), &stack, code, &imports, helpers);
+        let src = outer_template(&stack, code, &imports, helpers);
         self.emit(Event::OuterCompile {
             label: label.to_string(),
             source: src.clone(),
@@ -5194,5 +5215,34 @@ mod tests {
         assert!(!outer_section.contains("**Fork**"));
         assert!(answerer_section.contains("**Fork**"));
         assert_ne!(outer_section, answerer_section);
+    }
+
+    /// Every outer fragment compile (`compile_outer`, via `outer_template`)
+    /// renders WITHOUT the `paginateResult` result wrapper — see
+    /// `outer_template`'s doc for the production failure this pins: the
+    /// paginated wrapper's oversized branch calls `putStrLn` on the outer
+    /// row's Console, which suspends, which the post-loop render's purity
+    /// refusal turns into a cycle-discarding crash loop the first time a
+    /// rendered framing exceeds 4096 bytes. Pure string check, no GHC.
+    #[test]
+    fn outer_template_is_unpaginated() {
+        let src = super::outer_template(
+            "'[RunLLMTurn, AskUser, Console, Finalize NoAnswer]",
+            "pure (Loaded.render __selfHarnessState)",
+            "qualified Harness as Loaded",
+            "",
+        );
+        // The preamble always DECLARES the `paginateResult` alias; what must
+        // not appear is a CALL routing the result through it.
+        assert!(
+            !src.contains("paginateResult 4096"),
+            "outer fragments must not route their result through paginateResult — \
+             its oversized branch suspends on Console, and truncation corrupts \
+             driver-consumed JSON. Got:\n{src}"
+        );
+        assert!(
+            src.contains("pure (toJSON _r)"),
+            "expected the unpaginated result binding, got:\n{src}"
+        );
     }
 }
