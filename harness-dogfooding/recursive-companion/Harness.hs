@@ -322,6 +322,15 @@ loop st = do
         , "windows" .= answer.answerWindows
         ]
     )
+  -- The turn's outcome, ON the operator page (dogfood finding, 2026-08-19):
+  -- without this the parked between-loops screen says only "loop complete" —
+  -- the operator sat 37 minutes next to a finished answer they couldn't see.
+  say
+    [fmt|Turn {show (st.turnCount + 1)} folded — {show answer.answerNodes} nodes, {show answer.answerWindows} windows.
+
+{answer.answerSynthesis}
+
+Press Continue to run another turn (optionally steering it with input).|]
   pure
     st
       { turnCount = st.turnCount + 1
