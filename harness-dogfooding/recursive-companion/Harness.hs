@@ -522,6 +522,7 @@ gateRounds cfg seed done layer
       record "gate" key (boundPayload done)
       pure layer
   | otherwise = do
+      say (gateLayerNote seed.seedPath layer)
       approval <- askUser @LayerApproval
       let rounds = done + 1
       case applyGate seed approval layer of
@@ -552,6 +553,31 @@ gateRounds cfg seed done layer
         , "target" .= a.gateTarget
         , "note" .= (a.gateNote <> " (" <> outcome <> ")")
         , "rounds" .= rounds
+        ]
+
+-- | What the operator is judging, posted to the note feed right before every
+-- gate round's form.  The form itself is shape-derived (@askUser
+-- \@LayerApproval@) and so carries no context — without this note the
+-- operator is shown six bare fields and asked to judge a layer they cannot
+-- see (dogfood finding, 2026-08-19).  Rendered from the CURRENT layer each
+-- round, so a round following an Amend\/Prune\/Add shows the layer as
+-- amended, not as first proposed.
+gateLayerNote :: NodePath -> ThoughtF NodeSeed -> Text
+gateLayerNote path layer =
+  [fmt|{renderPath path} proposes:
+{branchLines}
+
+Verdicts — Approve: run the branches as shown (all other fields ignored).
+Prune: remove the branch whose exact title is in "gate target".
+Amend: rewrite the instruction of the branch titled "gate target" to "gate text".
+Add: append a new branch built from "gate title" + "gate role" + "gate text".
+"gate note" is journaled alongside any verdict.|]
+  where
+    branchLines =
+      T.intercalate
+        "\n"
+        [ [fmt|{show i}. {br.brief.title} ({show br.brief.role}) — {br.brief.instruction}|]
+        | (i, br) <- zip [(1 :: Int) ..] (layerBranches layer)
         ]
 
 -- ---------------------------------------------------------------------------
