@@ -90,11 +90,15 @@ fi
 #   Step 3 embeds the stdlib (haskell/lib/) into the binary at build time.
 
 if [ "$NO_SERVERS" -eq 0 ]; then
+  # --locked: install from the workspace Cargo.lock instead of re-resolving —
+  # a fresh resolution can fail on yanked-but-locked deps (seen live:
+  # arrayref 0.3.x) and would silently deploy different dep versions than the
+  # tree that passed the test suite.
   step "Step 3: cargo install tidepool (eval server + embedded stdlib)"
-  run cargo install --path tidepool
+  run cargo install --locked --path tidepool
 
   step "Step 4: cargo install tidepool-repl"
-  run cargo install --path tidepool-repl
+  run cargo install --locked --path tidepool-repl
 else
   echo; echo "(skipped: --no-servers)"
 fi
