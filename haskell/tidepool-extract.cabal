@@ -162,6 +162,32 @@ test-suite spike-batch
   default-language: GHC2024
   default-extensions: OverloadedStrings
 
+-- Build-products-dir spike (plans/turn-latency-state-injection.md's
+-- "Direction: toward a resident compile daemon" section, prerequisite (2)):
+-- does GHC's own checkOldIface recompilation checking skip an unchanged home
+-- module under backend=noBackend across independent GHC sessions when
+-- interfaces are written to, and read back from, a stable on-disk hidir?
+-- Go/no-go probe only. See spike-build-products/Spike.hs's module haddock.
+-- Run: cabal test spike-build-products  (needs the nix with-packages GHC on
+-- PATH; `cabal build --enable-tests` builds it without running).
+test-suite spike-build-products
+  type:             exitcode-stdio-1.0
+  main-is:          Spike.hs
+  hs-source-dirs:   spike-build-products
+  build-depends:
+    base         >= 4.20 && < 5,
+    ghc          >= 9.12 && < 9.13,
+    ghc-boot     >= 9.12 && < 9.13,
+    tidepool-extract-internal,
+    containers,
+    directory,
+    filepath,
+    process,
+    text,
+    exceptions
+  default-language: GHC2024
+  default-extensions: OverloadedStrings
+
 -- Extract-fidelity regressions: coercion-binder erasure symmetry, intrinsic
 -- recognizer module qualification, unboxed-tuple result-arity fail-loud.
 -- Drives the real runPipeline + translateModuleClosed path on synthetic

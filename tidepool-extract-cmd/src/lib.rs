@@ -638,6 +638,17 @@ impl ExtractCmd {
         self.flag("--classify-out", path)
     }
 
+    /// `--build-products-dir <dir>` — a persistent, shared `-fwrite-interface`
+    /// output dir the extract points `hiDir`/`objectDir` at, so a LATER spawn's
+    /// `load'` can skip an unchanged home module via GHC's own `checkOldIface`
+    /// (spike-verified: `plans/turn-latency-state-injection.md`). Dropped from
+    /// the compile-memo key (`tidepool_runtime::cache::invocation_key`), same
+    /// bucket as `--output-dir`: it changes nothing about the OUTPUT bytes,
+    /// only whether GHC's frontend can skip work to produce them.
+    pub fn build_products_dir(&mut self, dir: impl AsRef<OsStr>) -> &mut Self {
+        self.flag("--build-products-dir", dir)
+    }
+
     /// `--session-root <dir>` — where `Tidepool.Session.Val.G<g>` ifaces are
     /// written and where `--inject-val` ifaces are looked up.
     pub fn session_root(&mut self, dir: impl AsRef<OsStr>) -> &mut Self {
@@ -871,6 +882,27 @@ mod tests {
                 "x",
                 "--bind-name",
                 "y",
+            ]
+        );
+    }
+
+    #[test]
+    fn build_products_dir_emits_the_flag() {
+        let mut cmd = ExtractCmd::with_bin(ResolvedExtractBin::assume_resolved("x"));
+        cmd.input("/tmp/Expr.hs")
+            .output_dir("/tmp/out")
+            .build_products_dir("/tmp/bp")
+            .targets(["a"]);
+        assert_eq!(
+            strs(&cmd.argv()),
+            vec![
+                "/tmp/Expr.hs",
+                "--output-dir",
+                "/tmp/out",
+                "--build-products-dir",
+                "/tmp/bp",
+                "--targets",
+                "a",
             ]
         );
     }

@@ -87,6 +87,7 @@ tenure_resume_gc_repro = "hand-built tenure-then-resume rooting-discipline bound
 agent_mode_encoding = "Servant-style mode encoding (mode :- Call/Notify) through real extract/JIT"
 bignum_native = "native ghc-bignum backend: Integer/Natural over Word#/ByteArray# primops"
 bridged_records_extract = "user eval code compiles against the generated bridged record decls"
+build_products_dir_differential = "cold-vs-warm build-products-dir determinism pin (currently #[ignore]d — known gap, see module doc)"
 cache_tests = "compiled-artifact cache behavior (env-guarded, serial)"
 captured_real_core = "captured-real-Core differential, closing the synthetic-generator gap"
 case_trap_graceful = "case-trap path fails gracefully, not a hard crash"

@@ -246,6 +246,29 @@ pub(crate) fn compile_invocation(
         .targets(inv.targets)
         .includes(inv.include);
 
+    // Persistent build-products dir (module-granular GHC recompilation
+    // avoidance across spawns — see `crate::paths::build_products_dir`'s
+    // doc). NOT active by default: `$TIDEPOOL_BUILD_PRODUCTS_DIR` presence is
+    // BOTH the location override and the enable switch, deliberately —
+    // enabling it changes the compiled BYTES for any turn/eval whose Core
+    // contains a nested (non-top-level) binder, which is nearly all of them
+    // (spike-verified, 2026-08-20: cold-vs-cold is byte-identical, but a
+    // cold-then-warm pair is NOT — GHC's session-wide Unique-allocation
+    // trajectory shifts when `load'` skips a variable number of modules, and
+    // `Translate.hs`'s `localVarId` bakes the raw Unique into every nested
+    // Id's VarId. See plans/turn-latency-state-injection.md's build-products-
+    // dir section for the full finding). Safe to enable once that gap is
+    // closed; until then this stays an opt-in, not a default.
+    if let Some(bp_fingerprint) = std::env::var_os("TIDEPOOL_BUILD_PRODUCTS_DIR")
+        .is_some()
+        .then(|| crate::toolchain::extract_fingerprint(Path::new(cmd.launcher().program())))
+    {
+        let bp_dir = crate::paths::build_products_dir(&bp_fingerprint);
+        if std::fs::create_dir_all(&bp_dir).is_ok() {
+            cmd.build_products_dir(&bp_dir);
+        }
+    }
+
     let names = artifact_names(inv.targets, multi);
     let name_refs: Vec<&str> = names.iter().map(String::as_str).collect();
 
