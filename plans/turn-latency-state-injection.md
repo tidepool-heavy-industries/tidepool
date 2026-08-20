@@ -77,3 +77,23 @@ content (the mutable-state concern was about generation-numbered
 
 - General memo coverage for `Val.G<g>` session binds.
 - Any change to checkpoint format or the harness `State` type.
+
+## Direction: toward a resident compile daemon (operator decision 2026-08-20)
+
+The eventual form is a resident extract daemon (the ghcide/HLS convergence;
+in-repo precedent: `tidepool-lsp-daemon`). A single daemon IS viable despite
+the forking session tree, because tidepool already externalized the one thing
+GHCi keeps ambient: there is no mutable interactive context — every compile's
+scope arrives as explicit request data (import lists, injected iface names,
+include roots, all in the ONE `ExtractCmd` builder). A daemon therefore holds
+only (a) warm compiler state and (b) an append-only store of immutable
+compiled modules — shareable across all branches/windows by construction.
+Daemon-readiness rules to preserve meanwhile:
+- Every compile input stays EXPLICIT in the invocation (no ambient state
+  creep) — the memo allowlist already enforces this; keep it strict.
+- All spawns keep routing through `tidepool-extract-cmd` — the daemon swap
+  is then one seam.
+- A persistent shared build-products dir (module-granular GHC recompilation
+  avoidance across spawns — pending `compile-attribution`'s measurement) is
+  ALSO the daemon's disk-backed seed; growth is bounded by retirement/rotation
+  at quiescent points, mirroring machine rotation.
