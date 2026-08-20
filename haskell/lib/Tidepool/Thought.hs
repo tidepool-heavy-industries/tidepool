@@ -77,6 +77,8 @@ module Tidepool.Thought
   , Coalg
   , Alg
   , thoughtHylo
+  , GroupCoalg
+  , thoughtHyloGrouped
 
     -- * Budget middleware
   , depthCapped
@@ -85,6 +87,7 @@ module Tidepool.Thought
   ) where
 
 import Control.Monad.State.Class (MonadState, get, put)
+import Data.Foldable (toList)
 import Data.List (find, nub)
 import Data.List.NonEmpty (NonEmpty (..))
 import qualified Data.List.NonEmpty as NE
@@ -459,6 +462,68 @@ thoughtHylo :: Monad m => Alg m b -> Coalg m a -> a -> m b
 thoughtHylo alg coalg = go
   where
     go a = coalg a >>= traverse go >>= alg
+
+-- | How to split a whole SIBLING GROUP at once: every seed in the group
+-- shares one parent, and a 'GroupCoalg' resolves all of them together — the
+-- one caller-visible seam that lets a caller batch its OWN suspending work
+-- (one bulk round trip instead of N sequential ones) instead of windowing
+-- siblings one at a time. Answers are returned in the SAME order the seeds
+-- were given, never completion order — the same guarantee 'Coalg' already
+-- gives per node, extended across a group.
+type GroupCoalg m a = NonEmpty a -> m (NonEmpty (ThoughtF a))
+
+-- | Level-synchronized sibling of 'thoughtHylo' (operator decision: sibling
+-- branch windows are ALWAYS driven concurrently, transparently — scheduling
+-- is never a model-visible choice). 'thoughtHylo''s own @coalg a >>= traverse
+-- go >>= alg@ cannot express this: ordinary monadic 'traverse' runs each
+-- sibling's WHOLE subtree to completion (via the recursive @go@) before its
+-- neighbour's own coalgebra call ever happens, so a caller wanting siblings
+-- windowed TOGETHER cannot get there by tweaking 'Coalg' alone — it has to
+-- unfold a GROUP at once. This is that: unfold @seed@'s OWN (singleton)
+-- group first, then for every subsequent layer, unfold ITS children — one
+-- more sibling group, sharing one parent — together, recursing into each
+-- child's own group independently once its layer is known. Still 'ThoughtF'
+-- one-layer-at-a-time discipline, and still 'ThoughtF''s own derived
+-- 'Traversable' order (declared order, never completion order) both within
+-- a group and across the fold; only the sibling GROUPING of the unfold
+-- itself is new. Not a second recursion engine grafted onto 'thoughtHylo':
+-- 'thoughtHylo' is untouched, byte for byte, and every existing caller of it
+-- keeps its current one-seed-at-a-time semantics.
+thoughtHyloGrouped :: Monad m => Alg m b -> GroupCoalg m a -> a -> m b
+thoughtHyloGrouped alg gcoalg seed0 = do
+  layer0 <- soleLayer <$> gcoalg (seed0 :| [])
+  goLayer layer0
+  where
+    soleLayer (l :| _) = l
+    goLayer layer = case NE.nonEmpty (toList layer) of
+      Nothing -> alg (retagEmpty layer)
+      Just seeds -> do
+        childLayers <- gcoalg seeds
+        foldedChildren <- traverse goLayer childLayers
+        alg (reattach foldedChildren layer)
+
+-- | A layer with NO branch seeds is structurally always 'Finish' (every
+-- other constructor's branches are a 'NonEmpty', so it always has at least
+-- one) — this is 'fmap' over that empty structure, total because there is
+-- nothing of type @a@ inside to convert.
+retagEmpty :: ThoughtF a -> ThoughtF b
+retagEmpty layer = case layer of
+  Finish d -> Finish d
+  _ -> error "Tidepool.Thought.retagEmpty: a layer with branches is not childless"
+
+-- | Replace @layer@'s own branch seeds with @bs@, one for one, in order —
+-- the 'GroupCoalg'-batched sibling of 'traverse''s ordinary per-node
+-- rebuild. @bs@ is ALWAYS the same length as @layer@'s own branch list by
+-- construction (built from it, one call site above), so 'NE.zipWith' never
+-- truncates.
+reattach :: NonEmpty b -> ThoughtF a -> ThoughtF b
+reattach bs layer = case layer of
+  Finish d -> Finish d
+  Explore f brs s -> Explore f (NE.zipWith carry brs bs) s
+  Compare d brs s -> Compare d (NE.zipWith carry brs bs) s
+  Challenge c brs s -> Challenge c (NE.zipWith carry brs bs) s
+  where
+    carry br b = br {value = b}
 
 -- ---------------------------------------------------------------------------
 -- Budget middleware — Coalg -> Coalg, mirroring Tidepool.Swarm's

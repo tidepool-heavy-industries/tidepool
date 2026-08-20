@@ -38,6 +38,7 @@ acceptance_run_llm_turn = "in-context runLLMTurn path (Harness::answer_run_llm_t
 acceptance_selfharness = "multi-cycle run of the reference generic-assistant harness"
 acceptance_value_bind = "an effectful value bind persists across turns"
 agent_stack_scoping = "harness/agent effect-stack split: compile-error scoping proofs"
+branch_fanout = "runLLMTurnBranchFanout: bulk sibling branch verb serviced concurrently via service_outer_branch_fanout"
 companion_context_ref = "frozen-snapshot seam through the authored outer loop"
 companion_mount_spike = "a function-bearing value finalized by one window, mounted into a later one"
 companion_recursive_slice = "scripted acceptance tier for the recursive companion"

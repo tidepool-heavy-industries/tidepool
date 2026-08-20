@@ -824,7 +824,7 @@ const GATE_ADD_REGRESSION_SOURCE: &str = concat!(
     "mkBranch t = ProposedBranch { branchTitle = t, branchRole = Primary, branchInstruction = \"do \" <> t }\n",
     "\n",
     "initialLayer :: ThoughtF NodeSeed\n",
-    "initialLayer = layerFromProposal parentSeed (ProposeSplit { splitPosture = Explore, splitFocus = \"f\", splitStrategy = WantSequential, splitBranches = [mkBranch \"Alpha\", mkBranch \"Beta\"] })\n",
+    "initialLayer = layerFromProposal parentSeed (ProposeSplit { splitPosture = Explore, splitFocus = \"f\", splitBranches = [mkBranch \"Alpha\", mkBranch \"Beta\"] })\n",
     "\n",
     "addVerdict :: LayerApproval\n",
     "addVerdict = LayerApproval { gateVerdict = Add, gateTarget = \"\", gateTitle = \"Gamma\", gateRole = Primary, gateText = \"do gamma\", gateNote = \"\" }\n",

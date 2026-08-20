@@ -14,8 +14,10 @@ Full design and locked decisions:
 
 ## The shape
 
-- **Coalgebra** (`discover`, one `runLLMTurnBranch @LayerProposal` per node,
-  forked off the parent's `ContextRef`): proposes either `ProposeFinish`
+- **Coalgebra** (`discoverWith`, one `runLLMTurnBranchFanout @LayerProposal`
+  call per SIBLING GROUP — every child of one parent, forked off that
+  parent's shared `ContextRef` and driven concurrently): proposes either
+  `ProposeFinish`
   (this node is a leaf; done) or
   `ProposeSplit` (a posture — Explore, Compare, or Challenge — plus a list of
   child branches, each with a title, role, and instruction). The root is
@@ -99,9 +101,12 @@ credentials.
   live value is the escalation PRD 21 open question 3 gates, and `ThoughtF`
   has no task slot to carry a node's own ref from its coalgebra to its algebra
   anyway — design doc §5.
-- **Siblings execute sequentially**, always, regardless of what a layer's
-  `ProposedStrategy` requests. `thoughtHylo` descends through `traverse`,
-  which is sequential; a model that proposes `WantConcurrent` gets
-  `Sequential` execution instead, and that transformation is stamped in the
-  node's receipt and rendered in the tree (`strategy: proposed Concurrent,
-  executed Sequential`) rather than silently downgraded.
+- **A model-visible scheduling knob.** Sibling branch windows are ALWAYS
+  driven concurrently — one bulk `runLLMTurnBranchFanout` call per sibling
+  group (`groupCoalg`/`Tidepool.Thought.thoughtHyloGrouped`), never one at a
+  time — and there is no `splitStrategy` field left on `LayerProposal` for a
+  model to request otherwise: scheduling is an implementation detail, not a
+  choice the model makes. The FOLD (algebra) descent that visits a realized
+  layer's already-worked children (`traverseLayer`) is a separate, still
+  sequential seam — see that function's own doc for why batching it is not
+  the same move as batching discovery's siblings.

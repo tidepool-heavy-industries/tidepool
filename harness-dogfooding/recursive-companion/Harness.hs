@@ -19,9 +19,10 @@
 -- fork\/fanout child compiles against its parent's row MINUS @Fork@, so it is
 -- structurally incapable of producing grandchildren.
 --
--- Cognition enters at exactly two windows — 'discover' (branched off the
--- parent's frozen post-coalgebra context) and 'foldNode' (forked) — every
--- other function here is compiled coordination.
+-- Cognition enters at exactly two windows — 'discoverWith' (branched off the
+-- parent's frozen post-coalgebra context, one bulk call per sibling group
+-- via 'bulkLayerWindow') and 'foldNode' (forked) — every other function here
+-- is compiled coordination.
 --
 -- @Companion@ is @M@ at the driver's outer row (@RunLLMTurn@, @AskUser@,
 -- @Console@, @Worktree@, @RepoEvent@, @Exec@, @Subagent@, and @Journal@ —
@@ -32,7 +33,7 @@
 --
 -- __Worktree coordination (PRD 21 lane C5).__ 'mergeFold' is authored
 -- policy over @Worktree@\/@Exec@\/@Subagent@, run by 'foldAt' — never by a
--- window: node windows ('layerWindow'\/'foldWindow') compile against the
+-- window: node windows ('bulkLayerWindow'\/'foldWindow') compile against the
 -- answerer's narrow row, which has neither. It reaches git the same way
 -- @dev-tree@'s own @mergeChild@ does (mechanical @git@ through @Exec@ in a
 -- worktree this node owns; see 'gitIn'), never through a runtime workflow
@@ -61,7 +62,6 @@ module Harness
   , LayerProposal (..)
   , ProposedBranch (..)
   , Posture (..)
-  , ProposedStrategy (..)
   , BranchRoleWire (..)
   , ProposedEditWire (..)
   , FoldDecision (..)
@@ -108,7 +108,7 @@ import Tidepool.Effects
   , freezeContext
   , renderInvocationExit
   , runIn
-  , runLLMTurnBranchLabeled
+  , runLLMTurnBranchFanout
   , runLLMTurnFork
   , say
   , spawnSpecIn
@@ -121,7 +121,7 @@ import Tidepool.Prelude hiding (render)
 import Tidepool.QQ (fmt)
 import Tidepool.Resume (ResumeFold)
 import Tidepool.Swarm (cyclesToInt, mkCycles, splitAllowance)
-import Tidepool.Thought (Coalg, Strategy, ThoughtF, depthCapped, fanOutCapped, thoughtHylo)
+import Tidepool.Thought (Coalg, GroupCoalg, Strategy, ThoughtF, depthCapped, fanOutCapped, thoughtHyloGrouped)
 import qualified Tidepool.Thought as Th
 import Tidepool.Worktree
 
@@ -134,8 +134,9 @@ type Companion = Harness
 --
 -- @ThoughtF@ has no @task@ slot (@Tidepool.Swarm@'s @PlanF@ does), so an
 -- algebra never sees the seed its coalgebra saw.  Threading the node's
--- identity down as a READER is the answer, and it is what keeps 'thoughtHylo'
--- verbatim rather than forked into a second recursion engine that carries a
+-- identity down as a READER is the answer, and it is what keeps
+-- 'Tidepool.Thought.thoughtHyloGrouped' generic over the algebra's own
+-- return type rather than needing a second recursion engine that carries a
 -- seed alongside.
 type Folded = NodePath -> Companion NodeAnswer
 
@@ -169,17 +170,18 @@ data NodeSeed = NodeSeed
     -- @dev-tree@'s @childAllowance@ carries agent cycles.
     seedAllowance :: Int
   , -- | The frozen context this node's coalgebra window is BRANCHED FROM
-    -- ('discover') — PRD 21 locked decision 2, made real: a child forks its
-    -- parent's frozen post-coalgebra window rather than reading a rendered
-    -- summary of it, so the shared prefix is the ancestor's actual transcript
-    -- and only the divergent suffix is new.
+    -- ('discoverWith') — PRD 21 locked decision 2, made real: a child forks
+    -- its parent's frozen post-coalgebra window rather than reading a
+    -- rendered summary of it, so the shared prefix is the ancestor's actual
+    -- transcript and only the divergent suffix is new.
     --
     -- __It is a CAPABILITY, threaded as a value only.__  It never enters
     -- 'State' (which is checkpointed JSON), is never interpolated into a
     -- prompt, and is never reconstructed from text — possession is
     -- permission, and a ref only ever comes from @freezeContext@ or from a
-    -- @runLLMTurnBranch@'s own return.  @ContextRef@ has 'Show' and 'Eq', so
-    -- the seed's deriving clause is unaffected — but 'Show' is not a channel:
+    -- @runLLMTurnBranchFanout@ sibling's own return.  @ContextRef@ has
+    -- 'Show' and 'Eq', so the seed's deriving clause is unaffected — but
+    -- 'Show' is not a channel:
     -- nothing renders a seed into a prompt, a journal payload, or the receipt,
     -- and nothing should start.
     seedRef       :: ContextRef
@@ -212,8 +214,8 @@ childAllowance parent n
 -- from above, and the answer is now: its parent's own frozen window.
 --
 -- @parent.seedRef@ read here is NOT the ref the parent branched from.
--- 'discover' re-stamps the seed with the ref its OWN coalgebra window froze
--- before building this layer, so what a child forks is its parent's
+-- 'discoverWith' re-stamps the seed with the ref its OWN coalgebra window
+-- froze before building this layer, so what a child forks is its parent's
 -- POST-coalgebra context — the decision it just made included.  'childEdge'
 -- is the paired constructor that also stamps the matching 'Th.Branch'.
 childSeed :: NodeSeed -> Int -> Int -> Th.ForkBrief -> NodeSeed
@@ -258,33 +260,26 @@ childEdge parent allowance i b = Th.Branch b (childSeed parent allowance i b)
 -- | One resident turn discovers a tree and folds it.
 --
 -- POLICY IS MIDDLEWARE, composed by ordinary function application over
--- @Tidepool.Thought@'s own @Coalg -> Coalg@ combinators.  Read the coalgebra
--- OUTSIDE-IN, which is also the order the caps FIRE:
+-- @Tidepool.Thought@'s own @Coalg -> Coalg@ combinators, applied PER SEED
+-- inside 'groupCoalg' — see that function's doc for exactly where each cap
+-- fires relative to the ONE bulk window call a sibling group now shares
+-- (operator decision: sibling branch windows are ALWAYS driven concurrently,
+-- transparently — scheduling is never a model-visible choice).
 --
--- 1. 'gatedLayer' sees the finished layer last, so the operator is never
---    shown a layer a budget already refused (design doc §6).  This is why the
---    gate is the OUTERMOST wrapper rather than the innermost one the doc's §1
---    sketch draws: @fanOutCapped@ decides AFTER its inner coalgebra ran, so a
---    gate beneath it would present a layer the fan-out cap then discards.
--- 2. 'fanOutCapped' refuses the DESCENT of a too-wide layer — the coalgebra's
---    own work already happened, because fan-out is a property of the produced
---    layer, not of the seed.
--- 3. 'depthCapped' refuses BEFORE the window runs.
--- 4. 'allowanceCapped' refuses BEFORE the window runs, on the seed-carried
---    node budget (see 'NodeSeed'\'s @seedAllowance@).
---
--- TWO PASSES, deliberately.  'thoughtHylo' returns a 'Folded' — every
+-- TWO PASSES, deliberately.  'thoughtHyloGrouped' returns a 'Folded' — every
 -- coalgebra window has run by then, and no algebra window has.  Applying it
 -- at @NodePath []@ runs the folds.  Neither ORDER changes: discoveries happen
--- in declared branch order (@traverse@ preserves it) and folds happen in
--- declared branch order bottom-up ('traverseLayer' preserves it).  Completion
--- order is not an input to anything here.
+-- in declared branch order (a 'GroupCoalg' answers in the same order it was
+-- asked, exactly like 'ThoughtF''s own derived @Traversable@) and folds
+-- happen in declared branch order bottom-up ('traverseLayer' preserves it).
+-- Completion order is not an input to anything here.
 --
--- THE ROOT'S REF IS MINTED HERE, and that is what makes 'discover' uniform.
+-- THE ROOT'S REF IS MINTED HERE, and that is what makes 'groupCoalg' uniform.
 -- @freezeContext@ freezes the CALLING window — this loop's own accumulated
 -- context, which is precisely what the root's coalgebra should fork from —
 -- so the root enters the hylo holding a ref exactly like every descendant
--- does, and 'discover' has no root special case to get wrong.
+-- does (as a sibling group of exactly one), and 'groupCoalg' has no root
+-- special case to get wrong.
 loop :: State -> Companion State
 loop st
   -- The SEED GATE (operator decision, 2026-08-19): an empty question means
@@ -314,7 +309,7 @@ Starting the first turn.|]
 loop st = do
   record "turn" rootKey (object ["root" .= st.question, "config" .= toJSON cfg])
   rootRef <- freezeContext
-  f <- thoughtHylo (foldNode cfg st.draft) coalg (rootSeed st rootRef)
+  f <- thoughtHyloGrouped (foldNode cfg st.draft) (groupCoalg cfg) (rootSeed st rootRef)
   answer <- f (NodePath [])
   record
     "turn"
@@ -343,16 +338,6 @@ Start the next turn when ready — optionally with steering.|]
   where
     cfg = st.config
     rootKey = renderPath (NodePath [])
-    coalg =
-      journaled
-        ( gatedLayer
-            cfg
-            ( fanOutCapped
-                seedDepth
-                cfg.maxFanOut
-                (depthCapped seedDepth cfg.maxDepth (allowanceCapped (discover cfg)))
-            )
-        )
 
 -- | The honest opt-out ('Tidepool.Resume' module doc): this harness's
 -- 'record' calls exist for the durable transcript, not to replay prior
@@ -403,8 +388,8 @@ summarize a =
 -- it — because the two exits mean different things and the difference is the
 -- whole point:
 --
--- * a COALGEBRA exit means this node decided no layer, so 'discover' makes it
---   a leaf whose @FinishOrigin@ is @InvocationFailed@.  The node's own algebra
+-- * a COALGEBRA exit means this node decided no layer, so 'discoverWith'
+--   makes it a leaf whose @FinishOrigin@ is @InvocationFailed@.  The node's own algebra
 --   then folds it like any other childless layer.  The verb wraps the WHOLE
 --   returned pair — a window that never finalized minted no context of its own
 --   to hand on — which is also why nothing there needs a ref it does not have.
@@ -430,19 +415,31 @@ summarize a =
 -- below mint a fresh answerer node per window.
 -- ---------------------------------------------------------------------------
 
--- | The COALGEBRA's window, BRANCHED off @ref@ — a fresh child window whose
--- shared prefix is the frozen context that ref names, never an empty root.
--- It returns its answer AND its own post-finalize ref, which is what lets the
--- next layer down branch off THIS node ('childSeed').
+-- | The COALGEBRA's window, BULK-BRANCHED off ONE shared @ref@ — every seed
+-- in a sibling group forks off the SAME frozen context that ref names,
+-- never an empty root, in ONE 'runLLMTurnBranchFanout' call (operator
+-- decision: sibling branch windows are ALWAYS driven concurrently,
+-- transparently — scheduling is never a model-visible choice, so there is
+-- no separate sequential path left to fall back to). Each sibling's own
+-- answer AND its own post-finalize ref come back at ITS OWN position, in
+-- declared order — the ref is what lets the next layer down branch off
+-- THAT node ('childSeed').
 --
--- Labeled with this node's own rendered 'NodePath' (PRD 21 C5 GUI lane) —
--- @root@ for the root window, @root\/1-x@ etc. for a descendant — so the
--- per-node operator GUI can register and route this window's own asks/notes
--- to its own panel instead of the default one. The label rides the wire
--- structurally, never parsed back out of the prompt.
-layerWindow ::
-  NodePath -> ContextRef -> Text -> Companion (Either InvocationExit (LayerProposal, ContextRef))
-layerWindow path ref prompt = runLLMTurnBranchLabeled @LayerProposal (renderPath path) ref prompt
+-- Every child is labeled with its own rendered 'NodePath' (PRD 21 C5 GUI
+-- lane) — @root@ for the root window, @root\/1-x@ etc. for a descendant —
+-- so the per-node operator GUI can register and route each window's own
+-- asks/notes to its own panel instead of the default one. The label rides
+-- the wire structurally, never parsed back out of the prompt.
+bulkLayerWindow ::
+  Config ->
+  ContextRef ->
+  NonEmpty NodeSeed ->
+  Companion (NonEmpty (Either InvocationExit (LayerProposal, ContextRef)))
+bulkLayerWindow cfg ref seeds =
+  NE.fromList
+    <$> runLLMTurnBranchFanout @LayerProposal
+      ref
+      (NE.toList (fmap (\s -> (renderPath s.seedPath, coalgebraPrompt cfg.maxFanOut s)) seeds))
 
 -- | The ALGEBRA's window, FORKED — deliberately NOT branched, for two
 -- reasons, and both are load-bearing.
@@ -454,7 +451,7 @@ layerWindow path ref prompt = runLLMTurnBranchLabeled @LayerProposal (renderPath
 --
 -- (2) MECHANISM — it could not branch even if the policy said to.  A branch
 -- needs a 'ContextRef', and the only ref a node ever mints is the one
--- 'discover' gets back from ITS OWN coalgebra window.  @ThoughtF@ has no task
+-- 'discoverWith' gets back from ITS OWN coalgebra window.  @ThoughtF@ has no task
 -- slot (@Tidepool.Swarm@'s @PlanF@ does), so nothing carries a per-node value
 -- from a node's coalgebra to its own algebra: 'foldNode' only ever sees
 -- @ThoughtF Folded@.  This is the same wall the gate-count receipt hit (see
@@ -469,9 +466,11 @@ foldWindow prompt = runLLMTurnFork @FoldDecision prompt
 -- The coalgebra — how to split
 -- ---------------------------------------------------------------------------
 
--- | Unfold one node: ONE window, then the pure conversion, then the journal.
--- Every policy that could refuse this is middleware wrapped around it at the
--- 'loop' call site, so what is left here is only what splitting MEANS.
+-- | The pure conversion, then the journal — what the old per-seed
+-- @discover@ used to do AFTER its own window call, factored apart from the
+-- window call itself so
+-- 'groupCoalg' can run it uniformly over BOTH a live bulk-window outcome and
+-- a budget-capped seed that never got one (see that function's doc).
 --
 -- UNIFORM ACROSS ROOT AND DESCENDANTS, with no special case: every seed
 -- reaching here holds a ref (the root's from @freezeContext@ in 'loop', a
@@ -483,9 +482,8 @@ foldWindow prompt = runLLMTurnFork @FoldDecision prompt
 -- ('childSeed' reads @parent.seedRef@).  That is locked decision 2 exactly:
 -- a child forks the frozen context of its parent's window as of the moment
 -- that parent decided this layer.
-discover :: Config -> NodeSeed -> Companion (ThoughtF NodeSeed)
-discover cfg seed = do
-  outcome <- layerWindow seed.seedPath seed.seedRef (coalgebraPrompt cfg.maxFanOut seed)
+discoverWith :: NodeSeed -> Either InvocationExit (LayerProposal, ContextRef) -> Companion (ThoughtF NodeSeed)
+discoverWith seed outcome = do
   -- What the WINDOW said, before any policy could refuse or amend it. Kind
   -- 'proposed', never 'split' — see 'journaled' for why the two are different
   -- entries rather than one.
@@ -508,9 +506,84 @@ proposedPayload outcome = case outcome of
     object
       [ "posture" .= show p.splitPosture
       , "focus" .= p.splitFocus
-      , "strategy" .= show p.splitStrategy
       , "branches" .= map (.branchTitle) p.splitBranches
       ]
+
+-- | THE GROUP coalgebra 'loop' hands to 'thoughtHyloGrouped': every seed
+-- in ONE sibling group is windowed with a SINGLE bulk
+-- 'runLLMTurnBranchFanout' call ('bulkLayerWindow') — operator decision:
+-- sibling branch windows are ALWAYS driven concurrently, transparently,
+-- because each sibling's window is independent of its neighbours' — never
+-- one at a time the way a per-seed 'Coalg' would force.
+--
+-- A seed a budget already refuses ('preCapped') never enters the bulk call
+-- at all — spending a real window on a seed 'depthCapped'\/'allowanceCapped'
+-- would refuse anyway is exactly the waste those caps exist to prevent, so
+-- 'bulkLayerWindow' only ever windows the group's UN-capped members, and
+-- 'unresolvedOutcome' below stands in for the rest — a value 'depthCapped'\/
+-- 'allowanceCapped' are GUARANTEED to short-circuit before ever forcing,
+-- since they run the SAME two checks 'preCapped' already made.
+--
+-- Every OTHER policy — fan-out, the operator gate, and the journal — still
+-- runs per seed, through the SAME middleware composition 'loop' used to
+-- build once for the whole tree: @journaled . gatedLayer cfg . fanOutCapped
+-- ... . depthCapped ... . allowanceCapped@, applied here per seed so a
+-- batched window call changes nothing about what each seed's own result is
+-- allowed to become.
+groupCoalg :: Config -> GroupCoalg Companion NodeSeed
+groupCoalg cfg seeds = do
+  outcomes <- bulkDiscoverOutcomes cfg seeds
+  traverse (\(seed, outcome) -> perSeed seed outcome) outcomes
+  where
+    perSeed seed outcome =
+      journaled
+        ( gatedLayer
+            cfg
+            ( fanOutCapped
+                seedDepth
+                cfg.maxFanOut
+                (depthCapped seedDepth cfg.maxDepth (allowanceCapped (`discoverWith` outcome)))
+            )
+        )
+        seed
+
+-- | Pure: does a budget already refuse @seed@ before any window would ever
+-- run? Mirrors 'Tidepool.Thought.depthCapped' and this module's own
+-- 'allowanceCapped' EXACTLY (same guard, same 'Th.Finish' text and origin)
+-- — see 'groupCoalg''s doc for why re-deriving the same two conditions here
+-- is safe rather than a second source of truth that could drift: the real
+-- middleware chain re-checks the SAME seed fields, so a mismatch could only
+-- ever waste a window call, never change which seeds end up capped.
+preCapped :: Config -> NodeSeed -> Bool
+preCapped cfg seed = seed.seedDepth >= cfg.maxDepth || seed.seedAllowance < 1
+
+-- | ONE bulk window call per sibling group, windowing every UN-capped seed
+-- and pairing the result back up with EVERY seed in the group, in original
+-- order — a capped seed carries 'unresolvedOutcome', which 'groupCoalg''s
+-- own middleware chain is guaranteed to never force (see its doc).
+bulkDiscoverOutcomes ::
+  Config ->
+  NonEmpty NodeSeed ->
+  Companion (NonEmpty (NodeSeed, Either InvocationExit (LayerProposal, ContextRef)))
+bulkDiscoverOutcomes cfg seeds = do
+  windowed <- case NE.nonEmpty toWindow of
+    Nothing -> pure []
+    Just needWindow ->
+      let sharedRef = seedRef (NE.head needWindow)
+       in NE.toList <$> bulkLayerWindow cfg sharedRef needWindow
+  pure (NE.fromList (zipCapped (NE.toList seeds) windowed))
+  where
+    toWindow = filter (not . preCapped cfg) (NE.toList seeds)
+    zipCapped [] _ = []
+    zipCapped (s : ss) rs
+      | preCapped cfg s = (s, unresolvedOutcome) : zipCapped ss rs
+      | otherwise = case rs of
+          r : rs' -> (s, r) : zipCapped ss rs'
+          [] -> error "bulkDiscoverOutcomes: fewer window results than un-capped seeds"
+
+unresolvedOutcome :: Either InvocationExit (LayerProposal, ContextRef)
+unresolvedOutcome =
+  error "bulkDiscoverOutcomes: a budget-capped seed's window outcome must never be forced"
 
 -- | The seed-carried node-count cap.
 --
@@ -645,28 +718,28 @@ Add: append a new branch built from "gate title" + "gate role" + "gate text".
 --   produce a usable layer, and @FinishOrigin@ is where that distinction
 --   already lives.  The algebra folds it as ordinary data.
 --
--- The seed it is handed is the one 'discover' re-stamped with this node's own
--- post-coalgebra ref, so the child seeds it builds fork the window that just
--- produced this very proposal.
+-- The seed it is handed is the one 'discoverWith' re-stamped with this
+-- node's own post-coalgebra ref, so the child seeds it builds fork the
+-- window that just produced this very proposal.
 --
--- Note what the layer CARRIES: the model's PROPOSED strategy, unmodified.
--- The transformation to 'Th.Sequential' happens at the descent
--- ('traverseLayer'), which is the one place that can also stamp it.
+-- Note what the layer CARRIES: 'Th.Concurrent', unconditionally — sibling
+-- branch windows are ALWAYS driven concurrently now (operator decision:
+-- scheduling is never a model-visible choice, so there is no PROPOSED value
+-- to stamp here, only the one true answer).
 layerFromProposal :: NodeSeed -> LayerProposal -> ThoughtF NodeSeed
 layerFromProposal seed proposal = case proposal of
   ProposeFinish {localAnswer = t} -> Th.Finish (Th.Draft t Th.ModelFinished seed.seedDepth)
   ProposeSplit
     { splitPosture = po
     , splitFocus = f
-    , splitStrategy = ps
     , splitBranches = pbs
-    } -> splitLayer seed po f ps pbs
+    } -> splitLayer seed po f pbs
 
-splitLayer :: NodeSeed -> Posture -> Text -> ProposedStrategy -> [ProposedBranch] -> ThoughtF NodeSeed
-splitLayer seed po f ps pbs
+splitLayer :: NodeSeed -> Posture -> Text -> [ProposedBranch] -> ThoughtF NodeSeed
+splitLayer seed po f pbs
   | null pbs = invocationFailed seed "the window proposed a split with no branches"
   | any blank pbs = invocationFailed seed "the window proposed a branch with a blank title or instruction"
-  | otherwise = postureLayer po f (NE.fromList (imap child pbs)) (strategyOfWire ps)
+  | otherwise = postureLayer po f (NE.fromList (imap child pbs)) Th.Concurrent
   where
     blank pb = strip pb.branchTitle == "" || strip pb.branchInstruction == ""
     allowance = childAllowance seed (length pbs)
@@ -768,9 +841,10 @@ applyGate seed approval layer = case layer of
 -- clear of the wholesale @Control.Lens@ re-export in the prelude.
 --
 -- It returns a 'Folded' — a fold WAITING for its own path — rather than a
--- finished answer, because that is what lets 'thoughtHylo' stay verbatim: the
--- algebra has no seed, so the node's identity arrives from its parent, which
--- computes it with the very same 'childPath' the coalgebra used.
+-- finished answer, because that is what lets 'thoughtHyloGrouped' stay
+-- generic over the algebra's own return type: the algebra has no seed, so
+-- the node's identity arrives from its parent, which computes it with the
+-- very same 'childPath' the coalgebra used.
 --
 -- @initialDraft@ is the companion's working draft AS OF TURN START
 -- ('loop''s own @st.draft@) — ONE frozen value shared by every node's own
@@ -1151,7 +1225,7 @@ foldAt initialDraft layer path = do
       , answerPosture = layerPosture layer
       , answerSynthesis = fo.outcomeSynthesis
       , answerTensions = fo.outcomeTensions
-      , answerBadges = strategyBadges (layerStrategy layer) <> originBadges layer <> fo.outcomeBadges
+      , answerBadges = originBadges layer <> fo.outcomeBadges
       , answerTree = concatMap childLines kids
       , answerNodes = 1 + sum (map (.answerNodes) kidAnswers)
       , answerWindows =
@@ -1444,8 +1518,8 @@ wrapEdit p s = case p of
 -- endorsement propagation needs (companion review step 4): every node ran
 -- the SAME apply mechanically, but only the root's is the turn's one real,
 -- persisted application. Only reached when 'outcomeReceipts' is
--- non-empty; matches 'strategyBadges' and 'originBadges''s own "silent when
--- nothing to say" shape.
+-- non-empty; matches 'originBadges''s own "silent when nothing to say"
+-- shape.
 editsBadge :: Bool -> [Th.EditReceipt] -> Text
 editsBadge isRoot receipts =
   [fmt|edits: {show applied} {verb}, {show refused} refused|]
@@ -1472,23 +1546,24 @@ receiptJson r =
   where
     editIntentText (Th.EditIntent t) = t
 
--- | THE CONCURRENCY SEAM — the ONE place this harness visits a layer's
--- children.
+-- | THE FOLD SEAM — the ONE place this harness visits a REALIZED layer's
+-- children to collect their already-worked answers.
 --
--- Today it is ordinary order-preserving sequential traversal and it IGNORES
--- its 'Strategy' argument except that the caller stamps the transformation
--- ('strategyBadges'); a model that proposes @Concurrent@ gets @Sequential@
--- execution, EXPLICITLY (PRD 21 locked decision 9), never a silent downgrade.
+-- Today it is ordinary order-preserving sequential traversal and it
+-- IGNORES its 'Strategy' argument entirely — every child's fold still runs
+-- one after another, regardless of what a split proposed. This is a
+-- DIFFERENT seam from sibling branch windowing (the DISCOVERY descent,
+-- which now runs concurrently by construction — see 'groupCoalg' and
+-- 'Tidepool.Thought.thoughtHyloGrouped'): folding a realized layer visits
+-- already-produced 'Folded' closures, never opens a new cognition window
+-- itself, so batching it into one call the way discovery's siblings are
+-- batched is not the same move.
 --
 -- When the green-threads lane lands, the authored loop gains
--- async\/mapConcurrently over the outer row and subtree-level concurrency
--- drops in HERE, by interpreting 'Strategy' at the descent — without touching
--- the fanout machinery at all.  Branch order is preserved by construction
--- either way, so nothing downstream changes.
---
--- (The DISCOVERY descent is @thoughtHylo@'s own @traverse@, inside
--- @Tidepool.Thought@, which this lane consumes verbatim.  Making discovery
--- concurrent is that module's edit, not this one's.)
+-- async\/mapConcurrently over the outer row and subtree-level FOLD
+-- concurrency drops in HERE, by interpreting 'Strategy' at the descent —
+-- without touching the discovery machinery at all. Branch order is
+-- preserved by construction either way, so nothing downstream changes.
 traverseLayer :: Strategy -> (Th.Branch a -> Companion b) -> ThoughtF a -> Companion (ThoughtF b)
 traverseLayer _proposed visit layer = case layer of
   Th.Finish d -> pure (Th.Finish d)
@@ -1566,20 +1641,20 @@ originBadges layer = case layer of
 -- | THE OUTERMOST middleware: record the layer the driver will actually
 -- descend through, after every policy has had its say.
 --
--- Why this is a wrapper and not a line inside 'discover': `discover` runs
--- INNERMOST, so a layer it journaled could still be discarded by the fan-out
--- cap or reshaped by the gate.  Journaling there made kind @split@ name
+-- Why this is a wrapper and not a line inside 'discoverWith': `discoverWith`
+-- runs INNERMOST, so a layer it journaled could still be discarded by the
+-- fan-out cap or reshaped by the gate.  Journaling there made kind @split@ name
 -- children that never ran (a fan-out-capped node) and miss children the
 -- operator added (a gated one) — and §10.1 promises that a @split@ entry's
 -- child paths ARE the durable record of the tree's shape.  A resume fold
 -- reading it would have rebuilt a tree the run never had.
 --
 -- So the two facts get two kinds, and neither is a summary of the other:
--- @proposed@ is what the WINDOW said (written by 'discover', the friction
--- log's raw material — a model's refused 7-branch layer is exactly what C6
--- wants to see), and @split@\/@finish@ is what the DRIVER did.  A capped node
--- honestly carries both: a @proposed@ naming seven branches and a @finish@
--- stamped @BudgetForced ForcedFanOut@.
+-- @proposed@ is what the WINDOW said (written by 'discoverWith', the
+-- friction log's raw material — a model's refused 7-branch layer is exactly
+-- what C6 wants to see), and @split@\/@finish@ is what the DRIVER did.  A
+-- capped node honestly carries both: a @proposed@ naming seven branches and
+-- a @finish@ stamped @BudgetForced ForcedFanOut@.
 journaled :: Coalg Companion NodeSeed -> Coalg Companion NodeSeed
 journaled inner seed = do
   layer <- inner seed
@@ -1597,14 +1672,11 @@ journalLayer seed layer = case layer of
       ( object
           [ "posture" .= posture
           , "focus" .= focus
-          , "strategyProposed" .= show proposed
-          , "strategyExecuted" .= show (executedStrategy proposed)
           , "branches" .= map branchEntry (layerBranches layer)
           ]
       )
   where
     key = renderPath seed.seedPath
-    proposed = layerStrategy layer
     (posture, focus) = postureAndFocus layer
     branchEntry br =
       object
@@ -1629,8 +1701,9 @@ postureAndFocus layer = case layer of
 --
 -- A coalgebra prompt says NOTHING about what this node knows from above, and
 -- that absence is the point: the window it is sent to was branched off the
--- parent's frozen context ('discover'), so the ancestry is the window's own
--- shared prefix rather than a summary of it rendered into a suffix.
+-- parent's frozen context ('bulkLayerWindow'), so the ancestry is the
+-- window's own shared prefix rather than a summary of it rendered into a
+-- suffix.
 -- ---------------------------------------------------------------------------
 
 -- | Three complete, minimal, COMPILABLE @finalize@ examples (companion
@@ -1658,7 +1731,6 @@ exampleProposeSplit =
     "finalize @LayerProposal (ProposeSplit\n\
     \  { splitPosture = Explore\n\
     \  , splitFocus = \"what this node needs to settle\"\n\
-    \  , splitStrategy = WantSequential\n\
     \  , splitBranches =\n\
     \      [ ProposedBranch { branchTitle = \"first angle\", branchRole = Primary, branchInstruction = \"work this angle\" } ]\n\
     \  })"
@@ -1711,14 +1783,10 @@ decide, and record the assumption in what you finalize.
 Finalize a LayerProposal:
 - `ProposeFinish {{ localAnswer }}` — this node answers locally. Say the
   answer, not a plan to produce it.
-- `ProposeSplit {{ splitPosture, splitFocus, splitStrategy, splitBranches }}` —
+- `ProposeSplit {{ splitPosture, splitFocus, splitBranches }}` —
   `splitPosture` is Explore (open the space), Compare (weigh named options),
   or Challenge (attack a claim); `splitFocus` is the focus, the decision, or
-  the claim, per the posture; `splitStrategy` is what you would LIKE to run
-  under. v1 executes all branches sequentially. Use WantSequential; the
-  other constructors (WantConcurrent, WantPooled {{ pooledWidth = 2 }}) only
-  record a preference, shown transformed in the receipt, never actually
-  scheduled differently. `splitBranches` is a non-empty list of
+  the claim, per the posture. `splitBranches` is a non-empty list of
   ProposedBranch {{ branchTitle, branchRole, branchInstruction }} with
   branchRole one of Primary, Alternative, Critic. A branch with a blank
   title or instruction, or a split with no branches, is treated as a failed

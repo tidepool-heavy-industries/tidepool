@@ -260,6 +260,30 @@ pub enum HoleRouting {
         context_ref: String,
         label: Option<String>,
     },
+    /// A `runLLMTurnBranchFanout \@T ref labeledPrompts` suspension — the BULK
+    /// sibling of [`HoleRouting::Branch`] (operator decision: sibling branch
+    /// windows are ALWAYS driven concurrently, transparently — scheduling is
+    /// never a model-visible choice). Every `(label, prompt)` pair forks its
+    /// OWN child window off the SAME frozen `context_ref` (never an empty
+    /// root), driven CONCURRENTLY via the same machinery
+    /// [`HoleRouting::Fork`]'s fanout servicing already uses
+    /// ([`crate::selfharness::driver::SelfHarnessDriver::service_outer_branch_fanout`]
+    /// — per-child realm, `set_concurrency_cap`, declaration-order
+    /// reassembly). `ty` is the RENDERED LIST answer type `[T]` (mirroring
+    /// [`HoleRouting::Fork`]'s fanout shape — `engine::strip_list_type`
+    /// recovers the per-child element type `T`); `labels`/`prompts` are
+    /// parallel, one entry per sibling, in declaration order. Each sibling
+    /// window is a BRANCH POSITION exactly like [`HoleRouting::Branch`]'s
+    /// (PRD 21 locked decision 6): its own abnormal exit folds as `Left` at
+    /// its own position in the resumed list, never erasing a sibling's
+    /// already-finished answer.
+    BranchFanout {
+        site: crate::tree::SiteId,
+        ty: Option<String>,
+        context_ref: String,
+        labels: Vec<String>,
+        prompts: Vec<String>,
+    },
     /// A Subagent verb (`SubagentSpawn`/`SubagentBegin`/`SubagentResume`/
     /// `SubagentSpawnAsync`/`SubagentAwait`/`SubagentCancel` —
     /// `spawnAgentRaw`/`agentBeginRaw`/`agentResumeRaw`/`agentSpawnAsyncRaw`/
@@ -419,11 +443,14 @@ fn require_con_site(
 /// dispatches on the request Con's CONSTRUCTOR NAME first, then decodes that
 /// constructor's own wire shape:
 ///
-/// - `RunLLMTurnWith` (prompt, payload) — the `typedSite`/`fork`/`fan`/
-///   `prompts` payload shape carried on the `RunLLMTurn` constructor: `fork` →
-///   [`HoleRouting::Fork`] (the general Agent stack's `runLLMTurnFork`/
-///   `runLLMTurnFanout`), else [`HoleRouting::RunLLMTurn`]. `asks` resolves
-///   `typedSite` to its rendered answer type.
+/// - `RunLLMTurnWith` (prompt, payload) — the `typedSite`/`fork`/`branchFanout`/
+///   `branch`/`fan`/`prompts` payload shape carried on the `RunLLMTurn`
+///   constructor: `fork` → [`HoleRouting::Fork`] (the general Agent stack's
+///   `runLLMTurnFork`/`runLLMTurnFanout`); else `branchFanout` →
+///   [`HoleRouting::BranchFanout`] (the bulk `runLLMTurnBranchFanout`, one
+///   parent `ref` plus parallel `labels`/`prompts` lists); else `branch` →
+///   [`HoleRouting::Branch`]; else [`HoleRouting::RunLLMTurn`]. `asks`
+///   resolves `typedSite` to its rendered answer type.
 /// - `ForkWith` (site, brief) / `ForkAllWith` (site, prompts) — the `Fork`
 ///   effect (`Tidepool.Fork`'s `fork`/`forkAll`), routed by CONSTRUCTOR NAME
 ///   to [`HoleRouting::Fork`] (`fan: None` for one child, `fan: Some(_)` for a
@@ -716,6 +743,74 @@ fn classify_runllmturn_payload(
             fan: fan.map(|n| FanBadge::Exact { n: n.get() }),
             prompts,
             source: ForkSource::RunLLMTurn,
+        })
+    } else if payload
+        .get("branchFanout")
+        .and_then(Json::as_bool)
+        .unwrap_or(false)
+    {
+        let context_ref = payload
+            .get("ref")
+            .and_then(Json::as_str)
+            .map(str::to_string)
+            .ok_or(ClassifyError::MissingField {
+                constructor: "RunLLMTurnWith",
+                field: "ref",
+            })?;
+        let raw_labels = payload
+            .get("labels")
+            .and_then(Json::as_array)
+            .cloned()
+            .unwrap_or_default();
+        let labels: Vec<String> = raw_labels
+            .iter()
+            .filter_map(|v| v.as_str().map(str::to_string))
+            .collect();
+        if labels.len() != raw_labels.len() {
+            return Err(ClassifyError::FanMismatch {
+                constructor: "RunLLMTurnWith",
+                declared: raw_labels.len(),
+                actual: labels.len(),
+            });
+        }
+        let raw_prompts = payload
+            .get("prompts")
+            .and_then(Json::as_array)
+            .cloned()
+            .unwrap_or_default();
+        let prompts: Vec<String> = raw_prompts
+            .iter()
+            .filter_map(|v| v.as_str().map(str::to_string))
+            .collect();
+        if prompts.len() != raw_prompts.len() {
+            return Err(ClassifyError::FanMismatch {
+                constructor: "RunLLMTurnWith",
+                declared: raw_prompts.len(),
+                actual: prompts.len(),
+            });
+        }
+        if labels.len() != prompts.len() {
+            return Err(ClassifyError::FanMismatch {
+                constructor: "RunLLMTurnWith",
+                declared: labels.len(),
+                actual: prompts.len(),
+            });
+        }
+        if let Some(n) = payload.get("fan").and_then(Json::as_u64) {
+            if n as usize != prompts.len() {
+                return Err(ClassifyError::FanMismatch {
+                    constructor: "RunLLMTurnWith",
+                    declared: n as usize,
+                    actual: prompts.len(),
+                });
+            }
+        }
+        Ok(HoleRouting::BranchFanout {
+            site,
+            ty,
+            context_ref,
+            labels,
+            prompts,
         })
     } else if payload
         .get("branch")

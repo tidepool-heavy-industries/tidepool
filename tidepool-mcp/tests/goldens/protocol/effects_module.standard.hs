@@ -491,6 +491,12 @@ runLLMTurnBranchLabeled label ref p = runLLMTurnBranchLabeledSited 0 label ref p
 {-# OPAQUE runLLMTurnBranchLabeledSited #-}
 runLLMTurnBranchLabeledSited :: forall a effs. Member RunLLMTurn effs => Int -> Text -> ContextRef -> Text -> Eff effs (Either InvocationExit (a, ContextRef))
 runLLMTurnBranchLabeledSited sid label (ContextRef ref) p = unsafeCoerce <$> send (RunLLMTurnWith p (object ["typedSite" .= sid, "branch" .= True, "ref" .= ref, "label" .= label]))
+{-# OPAQUE runLLMTurnBranchFanout #-}
+runLLMTurnBranchFanout :: forall a effs. Member RunLLMTurn effs => ContextRef -> [(Text, Text)] -> Eff effs [Either InvocationExit (a, ContextRef)]
+runLLMTurnBranchFanout ref labeledPrompts = runLLMTurnBranchFanoutSited 0 ref labeledPrompts
+{-# OPAQUE runLLMTurnBranchFanoutSited #-}
+runLLMTurnBranchFanoutSited :: forall a effs. Member RunLLMTurn effs => Int -> ContextRef -> [(Text, Text)] -> Eff effs [Either InvocationExit (a, ContextRef)]
+runLLMTurnBranchFanoutSited sid (ContextRef ref) labeledPrompts = unsafeCoerce <$> send (RunLLMTurnWith (intercalate "\n" (map snd labeledPrompts)) (object ["typedSite" .= sid, "branchFanout" .= True, "ref" .= ref, "labels" .= map fst labeledPrompts, "prompts" .= map snd labeledPrompts, "fan" .= length labeledPrompts]))
 {-# OPAQUE forkSited #-}
 forkSited :: forall a effs. Member Fork effs => Int -> Text -> Eff effs a
 forkSited sid brief = unsafeCoerce <$> send (ForkWith sid brief)

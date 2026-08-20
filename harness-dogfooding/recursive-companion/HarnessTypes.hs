@@ -37,7 +37,6 @@ module HarnessTypes
   , LayerProposal (..)
   , ProposedBranch (..)
   , Posture (..)
-  , ProposedStrategy (..)
   , BranchRoleWire (..)
   , ProposedEditWire (..)
   , FoldDecision (..)
@@ -57,7 +56,6 @@ module HarnessTypes
     -- * Wire enum to base functor (the one place they are mapped)
   , roleOf
   , postureLayer
-  , strategyOfWire
 
     -- * Layer plumbing (pure, order-preserving)
   , layerBranches
@@ -65,8 +63,6 @@ module HarnessTypes
   , indexLayer
   , layerStrategy
   , layerPosture
-  , executedStrategy
-  , strategyBadges
   , renderOrigin
 
     -- * What a node folds to
@@ -295,7 +291,6 @@ data LayerProposal
       { splitPosture  :: Posture
       , -- | The focus, the decision, or the claim — per the posture.
         splitFocus    :: Text
-      , splitStrategy :: ProposedStrategy
       , -- | A plain list, not a 'NE.NonEmpty': the wire shape a model writes
         -- must be an ordinary JSON array, and emptiness is a CONDITION the
         -- driver detects (@Harness.layerFromProposal@) rather than a shape the model
@@ -318,19 +313,6 @@ data ProposedBranch = ProposedBranch
 data Posture = Explore | Compare | Challenge
   deriving (Generic, ToJSON, FromJSON, JsonSchema, Show, Eq)
 
--- | What a model may ASK for.  Recorded and rendered, never scheduled in v1 —
--- see 'executedStrategy'.
---
--- @WantPooled@ takes a NAMED field rather than a positional one: a payload
--- constructor in a sum must use record syntax, because the vendored generic
--- JSON has no key to put a positional field under and rejects it with a
--- compile-time @TypeError@.
-data ProposedStrategy
-  = WantSequential
-  | WantConcurrent
-  | WantPooled {pooledWidth :: Int}
-  deriving (Generic, ToJSON, FromJSON, JsonSchema, Show, Eq)
-
 data BranchRoleWire = Primary | Alternative | Critic
   deriving (Generic, ToJSON, FromJSON, JsonSchema, Show, Eq)
 
@@ -350,8 +332,7 @@ data BranchRoleWire = Primary | Alternative | Critic
 --
 -- TWO constructors, BOTH record syntax (a payload constructor in a sum must
 -- use record syntax — the vendored generic JSON has no key to put a
--- positional field under and rejects one with a compile-time @TypeError@,
--- the same rule 'ProposedStrategy''s @WantPooled@ already follows):
+-- positional field under and rejects one with a compile-time @TypeError@):
 --
 -- * 'AppendEdit' — the pre-existing shape: append @editAppend@ to the
 --   draft. The runtime closure ('Harness.wrapEdit') inserts a blank-line
@@ -417,12 +398,6 @@ postureLayer po f brs s = case po of
   Compare -> Th.Compare f brs s
   Challenge -> Th.Challenge f brs s
 
-strategyOfWire :: ProposedStrategy -> Strategy
-strategyOfWire ps = case ps of
-  WantSequential -> Th.Sequential
-  WantConcurrent -> Th.Concurrent
-  WantPooled {pooledWidth = n} -> Th.Pooled n
-
 -- ---------------------------------------------------------------------------
 -- The gate
 -- ---------------------------------------------------------------------------
@@ -433,8 +408,9 @@ strategyOfWire ps = case ps of
 -- configuration rather than a test hook — an unattended companion turn is a
 -- legitimate mode, and under it NO suspension is raised at all.
 --
--- @GateWiderThan@ carries a NAMED field for the same reason 'WantPooled'
--- does.
+-- @GateWiderThan@ carries a NAMED field for the same reason
+-- 'ProposedEditWire''s payload constructors do (a payload constructor in a
+-- sum must use record syntax).
 data GatePolicy
   = GateOff
   | GateWiderThan {gateWidth :: Int}
@@ -551,8 +527,10 @@ indexLayer layer = case layer of
     tagBranches = NE.zipWith tag (0 :| [1 ..])
     tag i (Th.Branch b v) = Th.Branch b (i, v)
 
--- | The strategy the layer CARRIES, which for a split is the one the model
--- PROPOSED — see 'executedStrategy'.
+-- | The strategy the layer CARRIES — every split now runs 'Th.Concurrent'
+-- (operator decision: sibling branch windows are ALWAYS driven concurrently,
+-- transparently — scheduling is never a model-visible choice, so there is no
+-- separate "proposed" value to compare it against).
 layerStrategy :: ThoughtF a -> Strategy
 layerStrategy layer = case layer of
   Th.Finish _ -> Th.Sequential
@@ -566,29 +544,6 @@ layerPosture layer = case layer of
   Th.Explore f _ _ -> "explore: " <> f
   Th.Compare d _ _ -> "compare: " <> d
   Th.Challenge c _ _ -> "challenge: " <> c
-
--- | What the driver actually runs, always.
---
--- 'Tidepool.Thought.thoughtHylo' descends through @traverse@, and the one
--- concurrent primitive the authored loop has today (@runLLMTurnFanout@) fans
--- out one WINDOW per prompt and retires each at finalize — a window cannot
--- host a recursive subtree, so it can parallelize a layer of windows but
--- never a layer of SUBTREES.  Every proposed 'Strategy' therefore executes as
--- 'Th.Sequential'.
---
--- That is PRD 21 locked decision 9's EXPLICIT transformation, not a silent
--- downgrade: 'strategyBadges' stamps it on the node and 'render' shows it.
-executedStrategy :: Strategy -> Strategy
-executedStrategy _proposed = Th.Sequential
-
--- | @["strategy: proposed Concurrent, executed Sequential"]@ when the model
--- asked for something the driver does not run; @[]@ when it did not.
-strategyBadges :: Strategy -> [Text]
-strategyBadges proposed
-  | proposed == executed = []
-  | otherwise = [[fmt|strategy: proposed {show proposed}, executed {show executed}|]]
-  where
-    executed = executedStrategy proposed
 
 -- | Why a node finished, rendered — so a budget-forced finish and a
 -- model-chosen one are distinguishable in every receipt without a second
@@ -754,9 +709,9 @@ Turns folded: {show st.turnCount}|]
       ts -> "\nTensions:\n" <> T.intercalate "\n" (map ("- " <>) ts) <> "\n"
     -- Gate interventions are NOT counted here.  They happen in a node's
     -- coalgebra, and an algebra never sees its own seed (@ThoughtF@ has no
-    -- task slot), so with @thoughtHylo@ used verbatim and no state effect in
-    -- the outer row there is no channel that carries the count into the fold.
-    -- The journal has every one of them, keyed by node path.
+    -- task slot), so with no state effect in the outer row there is no
+    -- channel that carries the count into the fold.  The journal has every
+    -- one of them, keyed by node path.
     receiptLine r =
       [fmt|receipt: {show r.runNodes} nodes, {show r.runWindows} windows, {show r.runForced} budget-forced finishes, {show r.runFailed} failures; gate interventions are journaled per node under kind "gate"|]
 

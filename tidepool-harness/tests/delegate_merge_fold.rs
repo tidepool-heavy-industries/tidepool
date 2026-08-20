@@ -174,12 +174,7 @@ fn haskell(block: &str) -> String {
 /// `finalize @LayerProposal (ProposeSplit …)` — `branches` is
 /// `(title, role, instruction)` in declared order. Verbatim from
 /// `companion_recursive_slice.rs`'s builder of the same name.
-fn split_reply(
-    posture: &str,
-    strategy: &str,
-    focus: &str,
-    branches: &[(&str, &str, &str)],
-) -> String {
+fn split_reply(posture: &str, focus: &str, branches: &[(&str, &str, &str)]) -> String {
     let rendered: Vec<String> = branches
         .iter()
         .map(|(title, role, instruction)| {
@@ -191,7 +186,7 @@ fn split_reply(
         .collect();
     haskell(&format!(
         "finalize @LayerProposal (ProposeSplit {{ splitPosture = {posture}, splitFocus = \
-         \"{focus}\", splitStrategy = {strategy}, splitBranches = [{}] }})",
+         \"{focus}\", splitBranches = [{}] }})",
         rendered.join(", ")
     ))
 }
@@ -204,7 +199,6 @@ fn split_reply(
 fn split_scout_and_builder() -> String {
     split_reply(
         "Explore",
-        "WantSequential",
         "which branch should proceed",
         &[
             ("Scout", "Primary", "look around; do not delegate"),

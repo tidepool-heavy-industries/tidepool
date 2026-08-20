@@ -3314,6 +3314,19 @@ sitedVerbs =
              , vsTypeArgs = 1, vsValueArity = 3
              , vsCheckType = checkRunLLMTurnType
              , vsListAnswer = False, vsMisShapeIsError = False }
+    -- The BULK sibling verb (operator decision: sibling branch windows are
+    -- ALWAYS driven concurrently, transparently — scheduling is never a
+    -- model-visible choice): N children fork off ONE parent `ContextRef`,
+    -- each its own `(label, prompt)` — two trailing value args (the ref,
+    -- then the `[(Text, Text)]` list), same shape class as `runLLMTurnBranch`.
+    -- The site answers a LIST of per-child results ('vsListAnswer' — the same
+    -- reason 'runLLMTurnFanout' sets it), so a bare `\@T` pins the per-child
+    -- ELEMENT type while the sidecar records `[T]`.
+  , VerbSpec { vsName = "runLLMTurnBranchFanout", vsModule = "Tidepool.Effects"
+             , vsSitedName = "runLLMTurnBranchFanoutSited", vsSitedModule = "Tidepool.Effects"
+             , vsTypeArgs = 1, vsValueArity = 2
+             , vsCheckType = checkRunLLMTurnType
+             , vsListAnswer = True, vsMisShapeIsError = False }
     -- self-iterating-harness WS-B. `finalize :: forall v a. v -> M a` has
     -- TWO forall'd tyvars (`v`, the finalized value's type; `a`, its
     -- independent "never returns" placeholder — see effect_defs.rs's

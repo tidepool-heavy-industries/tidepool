@@ -1055,7 +1055,14 @@ macro_rules! runllmturn_effect_def {
                 "window that never finalized has no context to hand back, which is why the ",
                 "`Either` wraps the whole pair). `runLLMTurnBranchLabeled \\@T label ref ",
                 "prompt` is the same verb with a caller-chosen `label` Text stamped onto the ",
-                "child window, for routing its asks to a per-window operator surface.",
+                "child window, for routing its asks to a per-window operator surface. ",
+                "`runLLMTurnBranchFanout \\@T ref labeledPrompts :: M [Either InvocationExit ",
+                "(T, ContextRef)]` is the BULK sibling verb: every `(label, prompt)` pair ",
+                "forks its OWN child window off the SAME frozen `ref` (never a rendered ",
+                "ancestry line), driven CONCURRENTLY (the fanout machinery, not one at a ",
+                "time), with results returned in DECLARED order regardless of completion ",
+                "order — for a layer of independent siblings that should never be scheduled ",
+                "sequentially.",
             ],
             // PRD 21 locked decision 6's typed exit, generated here alongside
             // the GADT exactly as ExecError/FsError are (they come from the
@@ -1258,6 +1265,32 @@ macro_rules! runllmturn_effect_def {
                 { raw ["{-# OPAQUE runLLMTurnBranchLabeledSited #-}",
                        "runLLMTurnBranchLabeledSited :: forall a effs. Member RunLLMTurn effs => Int -> Text -> ContextRef -> Text -> Eff effs (Either InvocationExit (a, ContextRef))",
                        "runLLMTurnBranchLabeledSited sid label (ContextRef ref) p = unsafeCoerce <$> send (RunLLMTurnWith p (object [\"typedSite\" .= sid, \"branch\" .= True, \"ref\" .= ref, \"label\" .= label]))"] },
+                // The BULK sibling verb: N children fork off ONE parent
+                // `ContextRef`, each its own `(label, prompt)`, driven
+                // CONCURRENTLY via the same machinery as `runLLMTurnFanout`
+                // (`tidepool_harness::selfharness::driver::
+                // service_outer_branch_fanout` — per-child realm,
+                // `set_concurrency_cap`, declaration-order reassembly) rather
+                // than `runLLMTurnBranch`'s sequential one-at-a-time driving.
+                // Rides the SAME `RunLLMTurnWith` wire constructor with a
+                // `branchFanout`/`ref`/`labels`/`prompts`/`fan` payload flag
+                // (classified by `tidepool-harness::engine::classify_hole`)
+                // rather than a new GADT constructor — the same "one
+                // constructor, several payload shapes" discipline
+                // fork/fanout/branch already use. Each sibling window is a
+                // BRANCH POSITION exactly like `runLLMTurnBranch`'s (PRD 21
+                // locked decision 6): its own abnormal exit folds as `Left`
+                // at its own position in the returned list, never erasing a
+                // sibling's already-finished answer — scheduling is an
+                // implementation detail the model never chooses (operator
+                // decision: sibling branches are always driven concurrently,
+                // transparently, because each is independent).
+                { raw ["{-# OPAQUE runLLMTurnBranchFanout #-}",
+                       "runLLMTurnBranchFanout :: forall a effs. Member RunLLMTurn effs => ContextRef -> [(Text, Text)] -> Eff effs [Either InvocationExit (a, ContextRef)]",
+                       "runLLMTurnBranchFanout ref labeledPrompts = runLLMTurnBranchFanoutSited 0 ref labeledPrompts"] },
+                { raw ["{-# OPAQUE runLLMTurnBranchFanoutSited #-}",
+                       "runLLMTurnBranchFanoutSited :: forall a effs. Member RunLLMTurn effs => Int -> ContextRef -> [(Text, Text)] -> Eff effs [Either InvocationExit (a, ContextRef)]",
+                       "runLLMTurnBranchFanoutSited sid (ContextRef ref) labeledPrompts = unsafeCoerce <$> send (RunLLMTurnWith (intercalate \"\\n\" (map snd labeledPrompts)) (object [\"typedSite\" .= sid, \"branchFanout\" .= True, \"ref\" .= ref, \"labels\" .= map fst labeledPrompts, \"prompts\" .= map snd labeledPrompts, \"fan\" .= length labeledPrompts]))"] },
             ],
         }
     };

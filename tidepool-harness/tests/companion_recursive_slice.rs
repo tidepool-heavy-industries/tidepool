@@ -61,6 +61,7 @@
 mod support;
 
 use std::collections::BTreeMap;
+use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -300,18 +301,29 @@ fn add_verdict(title: &str, role: &str, text: &str) -> Json {
 /// operator form.
 ///
 /// The pairing is the driver's own emission order: `service_outer_branch` /
-/// `service_outer_fanout` emit `RunLLMTurnHole{prompt}` and then
-/// `TurnStart{node}` for the window they just minted, and this harness's
-/// windows are sequential by construction (`runLLMTurnBranch` and a
-/// single-child `runLLMTurnFork`, each its own suspend/resume round-trip).
-/// `take()` on the pending prompt makes it robust to extra `TurnStart`s.
+/// `service_outer_fanout` / `service_outer_branch_fanout` emit
+/// `RunLLMTurnHole{prompt}` and then `TurnStart{node}` for the window(s)
+/// they mint. A single window (`runLLMTurnBranch`, a single-child
+/// `runLLMTurnFork`) is sequential by construction — one hole immediately
+/// followed by its own `TurnStart`. A BULK window
+/// (`runLLMTurnBranchFanout`/`runLLMTurnFanout`) is not: every sibling's
+/// `RunLLMTurnHole` is emitted upfront, in DECLARED order, before any of
+/// them is driven — sibling windows are ALWAYS driven concurrently
+/// (operator decision), so their `TurnStart`s land in COMPLETION order,
+/// not declaration order. A QUEUE (not a single slot) is what lets this
+/// still pair correctly: every hole is enqueued, and every `TurnStart`
+/// dequeues the OLDEST still-pending prompt — exact for this suite's
+/// deterministic scripted providers (no artificial per-child delay ever
+/// separates a group's completion order from its declaration order here;
+/// `outer_fanout.rs` is where completion-order insensitivity itself is
+/// pinned, via a provider that deliberately forces one).
 ///
 /// This is what lets a `BranchInvocation` receipt — which carries a `NodeId`
 /// and no path — be attributed to the node whose window it belongs to,
 /// without inferring anything from event ORDER.
 #[derive(Default)]
 struct WindowObserver {
-    pending: Mutex<Option<String>>,
+    pending: Mutex<VecDeque<String>>,
     windows: Mutex<Vec<(String, NodeId)>>,
     forms: Mutex<Vec<Json>>,
 }
@@ -320,10 +332,10 @@ impl Observer for WindowObserver {
     fn on_event(&self, event: &DriverEvent) {
         match event {
             DriverEvent::RunLLMTurnHole { prompt, .. } => {
-                *self.pending.lock() = Some(prompt.clone());
+                self.pending.lock().push_back(prompt.clone());
             }
             DriverEvent::TurnStart { node } => {
-                if let Some(prompt) = self.pending.lock().take() {
+                if let Some(prompt) = self.pending.lock().pop_front() {
                     self.windows.lock().push((prompt, *node));
                 }
             }
@@ -739,12 +751,7 @@ fn haskell(block: &str) -> String {
 
 /// `finalize @LayerProposal (ProposeSplit …)` — `branches` is
 /// `(title, role, instruction)` in declared order.
-fn split_reply(
-    posture: &str,
-    strategy: &str,
-    focus: &str,
-    branches: &[(&str, &str, &str)],
-) -> String {
+fn split_reply(posture: &str, focus: &str, branches: &[(&str, &str, &str)]) -> String {
     let rendered: Vec<String> = branches
         .iter()
         .map(|(title, role, instruction)| {
@@ -756,7 +763,7 @@ fn split_reply(
         .collect();
     haskell(&format!(
         "finalize @LayerProposal (ProposeSplit {{ splitPosture = {posture}, splitFocus = \
-         \"{focus}\", splitStrategy = {strategy}, splitBranches = [{}] }})",
+         \"{focus}\", splitBranches = [{}] }})",
         rendered.join(", ")
     ))
 }
@@ -776,7 +783,6 @@ const ALPHA_INSTRUCTION: &str = "the instruction the model proposed for alpha";
 fn split_two() -> String {
     split_reply(
         "Explore",
-        "WantSequential",
         "which reading of this node holds",
         &[
             ("Alpha", "Primary", ALPHA_INSTRUCTION),
@@ -793,7 +799,6 @@ fn split_two() -> String {
 fn split_three() -> String {
     split_reply(
         "Explore",
-        "WantSequential",
         "which reading of this node holds",
         &[
             ("Alpha", "Primary", ALPHA_INSTRUCTION),
@@ -821,7 +826,6 @@ fn split_three() -> String {
 fn split_one() -> String {
     split_reply(
         "Explore",
-        "WantSequential",
         "one more layer, to keep this node interior",
         &[("Solo", "Primary", "the only child of this interior node")],
     )
@@ -847,7 +851,7 @@ fn finish_reply() -> String {
 /// `layerFromProposal` turns it into `Finish (Draft _ (InvocationFailed _))`,
 /// which the algebra folds as ordinary data.
 fn empty_split_reply() -> String {
-    split_reply("Explore", "WantSequential", "nothing usable", &[])
+    split_reply("Explore", "nothing usable", &[])
 }
 
 /// The ONE fold reply every node's algebra window shares: a plain narrative
@@ -992,7 +996,6 @@ async fn companion_tree_recurses_folds_and_contains_its_node_ids() {
                 &["NODE root — DISCOVER"],
                 split_reply(
                     "Compare",
-                    "WantConcurrent",
                     "what the slice must show",
                     &[
                         ("Alpha", "Primary", "work the alpha angle"),
@@ -1340,16 +1343,6 @@ async fn companion_tree_recurses_folds_and_contains_its_node_ids() {
 
     // --- row 11: node ids are containment-safe -----------------------------
     row_11_node_ids_are_containment_safe(&run, &HOSTILE_FRAGMENTS);
-
-    // The explicit Strategy transformation (§7, locked decision 9): the root
-    // proposed `WantConcurrent` and the driver runs Sequential, shown
-    // transformed rather than silently downgraded.
-    assert!(
-        run.tree_line("root")
-            .contains("strategy: proposed Concurrent, executed Sequential"),
-        "a transformed strategy must be stamped on the node, got: {}",
-        run.tree_line("root")
-    );
 }
 
 /// The first fenced Haskell block in `text` — how the hole card's rendered

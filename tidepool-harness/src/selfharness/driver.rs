@@ -70,6 +70,7 @@ use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 
 use futures_util::stream::{self, StreamExt};
+use parking_lot::Mutex;
 use serde_json::Value as Json;
 use tidepool_bridge::ToCore;
 use tidepool_eval::value::Value;
@@ -988,7 +989,14 @@ pub struct SelfHarnessDriver {
     /// [`Self::set_console_handler`]/[`Self::set_worktree_handler`]/
     /// [`Self::set_event_handler`]/[`Self::set_exec_handler`]/
     /// [`Self::set_subagent_handler`]/[`Self::set_journal_handler`].
-    handlers: OuterHandlers,
+    /// `Mutex`-wrapped so [`Self::service_outer_subagent`] — reached from a
+    /// concurrent `runLLMTurnBranchFanout` sibling's own `delegate` call via
+    /// [`Self::drain_note_holes`] — can dispatch through the shared
+    /// `SubagentHandler` from `&self`; two siblings delegating in the same
+    /// bulk window simply serialize on the dispatch call itself (the same
+    /// synchronous handler this driver has always called, never made to run
+    /// two dispatches at once).
+    handlers: Mutex<OuterHandlers>,
     /// This boot's run-journal fold, waiting to be injected — set by
     /// [`Self::open_run_journal`], `None` when no journal was opened (or when
     /// only the append sink was wired via [`Self::set_journal_handler`]).
@@ -1003,17 +1011,22 @@ pub struct SelfHarnessDriver {
     /// PRD 21 C5's final wiring: which recursive-companion `NodePath` (as
     /// rendered text — see [`engine::parse_companion_node_path`]) a given
     /// branch-child window is servicing, populated by
-    /// [`Self::service_outer_branch`] right when that window's `NodeId` is
-    /// minted and removed once it finishes (success, exit, or closure —
-    /// every path). Lets [`Self::drain_note_holes`]'s `Subagent` arm — which
-    /// only ever has the `NodeId` in scope — attribute a completed
-    /// delegation to the right entry in [`Self::delegated_branches`].
-    branch_node_paths: HashMap<NodeId, String>,
+    /// [`Self::service_outer_branch`]/[`Self::drive_branch_fanout_child`]
+    /// right when that window's `NodeId` is minted and removed once it
+    /// finishes (success, exit, or closure — every path). Lets
+    /// [`Self::drain_note_holes`]'s `Subagent` arm — which only ever has the
+    /// `NodeId` in scope — attribute a completed delegation to the right
+    /// entry in [`Self::delegated_branches`]. `Mutex`-wrapped (not a plain
+    /// map behind `&mut self`): concurrent `runLLMTurnBranchFanout` siblings
+    /// (`Self::service_outer_branch_fanout`) each insert/remove their own
+    /// entry from `&self`, so a bare `HashMap` would need `&mut self` at
+    /// exactly the point several siblings are running at once.
+    branch_node_paths: Mutex<HashMap<NodeId, String>>,
     /// PRD 21 C5 GUI lane: which per-node operator-gate label a
-    /// `runLLMTurnBranchLabeled` child window carries — populated by
-    /// [`Self::service_outer_branch`] right when that window's `NodeId` is
-    /// minted (mirrors `branch_node_paths` above) and removed once it
-    /// finishes (success, exit, or closure — every path), at which point
+    /// `runLLMTurnBranchLabeled`/`runLLMTurnBranchFanout` child window
+    /// carries — populated right when that window's `NodeId` is minted
+    /// (mirrors `branch_node_paths` above) and removed once it finishes
+    /// (success, exit, or closure — every path), at which point
     /// [`crate::selfharness::operator::OperatorGate::retire_node`] is called
     /// on the default gate. [`Self::present_askuser_form`]/
     /// [`Self::announce_note`] look a node up here to resolve
@@ -1021,8 +1034,9 @@ pub struct SelfHarnessDriver {
     /// the default gate; a node absent here (every unlabeled node, including
     /// the outer loop's own asks and the ordinary per-loop answerer) always
     /// falls back to the default gate — byte-identical to before this field
-    /// existed.
-    node_labels: HashMap<NodeId, String>,
+    /// existed. `Mutex`-wrapped for the same concurrent-siblings reason as
+    /// `branch_node_paths`.
+    node_labels: Mutex<HashMap<NodeId, String>>,
     /// PRD 21 C5's runtime-stamped record: completed delegation branches,
     /// keyed by the DELEGATING node's own rendered `NodePath` text, in
     /// completion order. Populated by [`Self::drain_note_holes`] the moment
@@ -1031,8 +1045,10 @@ pub struct SelfHarnessDriver {
     /// (removed) by [`Self::service_delegated_branches`] when
     /// `Harness.hs`'s `foldAt` reads it back via `takeDelegatedBranches`.
     /// Never touched by, or visible to, any model window — see
-    /// [`delegate_branches_decl`]'s doc.
-    delegated_branches: HashMap<String, Vec<String>>,
+    /// [`delegate_branches_decl`]'s doc. `Mutex`-wrapped for the same
+    /// concurrent-siblings reason as `branch_node_paths` — two siblings
+    /// under one parent can each `delegate` in the SAME bulk window.
+    delegated_branches: Mutex<HashMap<String, Vec<String>>>,
 }
 
 /// A boot fold and where its segments live, held together so the
@@ -1312,11 +1328,11 @@ impl SelfHarnessDriver {
             iteration: 0,
             gate: Arc::new(StdinGate),
             ask_id_counter: AtomicU64::new(0),
-            handlers: OuterHandlers::default(),
+            handlers: Mutex::new(OuterHandlers::default()),
             resume: None,
-            branch_node_paths: HashMap::new(),
-            node_labels: HashMap::new(),
-            delegated_branches: HashMap::new(),
+            branch_node_paths: Mutex::new(HashMap::new()),
+            node_labels: Mutex::new(HashMap::new()),
+            delegated_branches: Mutex::new(HashMap::new()),
         }
     }
 
@@ -1407,13 +1423,13 @@ impl SelfHarnessDriver {
     /// registry/worktree/binding roots OUTSIDE any git work tree; back it
     /// with `MockBackend` in tests and `CodexAgentBackend` live.
     pub fn set_subagent_handler(&mut self, handler: tidepool_handlers::SubagentHandler) {
-        self.handlers.subagent = Some(handler);
+        self.handlers.lock().subagent = Some(handler);
     }
 
     /// Wire the Console seam: the handler a `say`/`Print` suspension from the
     /// AUTHORED loop dispatches into ([`Self::service_outer_effect`]).
     pub fn set_console_handler(&mut self, handler: tidepool_handlers::ConsoleHandler) {
-        self.handlers.console = Some(handler);
+        self.handlers.lock().console = Some(handler);
     }
 
     /// Wire the Worktree seam: the handler a `createWorktree`/
@@ -1424,7 +1440,7 @@ impl SelfHarnessDriver {
     /// wired, [`Self::set_subagent_handler`]'s) so a `WorktreeId` minted by
     /// one resolves in the others.
     pub fn set_worktree_handler(&mut self, handler: tidepool_handlers::WorktreeHandler) {
-        self.handlers.worktree = Some(handler);
+        self.handlers.lock().worktree = Some(handler);
     }
 
     /// Wire the RepoEvent seam: the handler a `withHandler` subscribe/drain/
@@ -1432,13 +1448,13 @@ impl SelfHarnessDriver {
     /// ([`Self::service_outer_effect`]). See [`Self::set_worktree_handler`]'s
     /// doc on shared roots.
     pub fn set_event_handler(&mut self, handler: tidepool_handlers::RepoEventHandler) {
-        self.handlers.event = Some(handler);
+        self.handlers.lock().event = Some(handler);
     }
 
     /// Wire the Exec seam: the handler a `run`/`runIn`/`runArgv` suspension
     /// from the AUTHORED loop dispatches into ([`Self::service_outer_effect`]).
     pub fn set_exec_handler(&mut self, handler: tidepool_handlers::ExecHandler) {
-        self.handlers.exec = Some(handler);
+        self.handlers.lock().exec = Some(handler);
     }
 
     /// Wire the Journal seam's WRITE half only: the handler a `record`
@@ -1455,7 +1471,7 @@ impl SelfHarnessDriver {
     /// [`Self::open_run_journal`] instead, which wires both halves from one
     /// path so they cannot desync.
     pub fn set_journal_handler(&mut self, handler: tidepool_handlers::JournalHandler) {
-        self.handlers.journal = Some(handler);
+        self.handlers.lock().journal = Some(handler);
         self.resume = None;
     }
 
@@ -1518,7 +1534,7 @@ impl SelfHarnessDriver {
         let fold = crate::selfharness::resume::fold_run_journal(log_dir, run_id)?;
         let folded = fold.len();
         let segment_count = crate::selfharness::resume::list_segments(log_dir, run_id)?.len();
-        self.handlers.journal = Some(tidepool_handlers::JournalHandler::resuming(
+        self.handlers.lock().journal = Some(tidepool_handlers::JournalHandler::resuming(
             acquired.segment.clone(),
             acquired.segment_ordinal,
         ));
@@ -2888,11 +2904,49 @@ impl SelfHarnessDriver {
                                 outcome: next,
                             })
                         }
+                        // The bulk sibling of `HoleRouting::Branch`: N
+                        // children fork off ONE parent `context_ref`,
+                        // driven CONCURRENTLY (operator decision: sibling
+                        // branch windows are ALWAYS concurrent, never a
+                        // model-visible choice).
+                        HoleRouting::BranchFanout {
+                            site,
+                            ty,
+                            context_ref,
+                            labels,
+                            prompts,
+                        } => {
+                            let value = self
+                                .service_outer_branch_fanout(
+                                    site.get(),
+                                    ty.as_deref(),
+                                    context_ref,
+                                    labels,
+                                    prompts,
+                                    &compiled.table,
+                                )
+                                .await?;
+                            let sid = self.outer_sid()?;
+                            let next = self
+                                .agent
+                                .with_session(sid, |s| s.resume(hole, value))
+                                .map_err(|e| DriverError::Session(e.to_string()))?
+                                .map_err(|e| {
+                                    DriverError::Session(format!(
+                                        "branch fanout resume failed: {e}"
+                                    ))
+                                })?;
+                            ServicedHole::Resumed(GreenReady {
+                                chain,
+                                outcome: next,
+                            })
+                        }
                         other => {
                             break Err(DriverError::Session(format!(
                                 "outer loop suspended on an unserviceable hole ({other:?}) — \
                                  the Harness monad exposes runLLMTurn, runLLMTurnBranch, \
-                                 freezeContext, askUser, note, spawnAgent, say, \
+                                 runLLMTurnBranchFanout, freezeContext, askUser, note, \
+                                 spawnAgent, say, \
                                  createWorktree/lookupWorktree/listWorktrees/worktreeBranch/\
                                  worktreeHead, withHandler (repository events), run/runIn/\
                                  runArgv, record, and Tidepool.Async's async/wait/waitEither/cancel \
@@ -3133,7 +3187,7 @@ impl SelfHarnessDriver {
                     // transition, so this always fires exactly once per
                     // settle. No-op if `RepoEvent` was never wired —
                     // `WatchAsync` is unusable without it anyway.
-                    if let Some(h) = self.handlers.event.as_mut() {
+                    if let Some(h) = self.handlers.lock().event.as_mut() {
                         h.registry_mut().publish_async_done(tid);
                     }
                 }
@@ -3251,7 +3305,7 @@ impl SelfHarnessDriver {
                         // a settle — `waitEvent` must fire for either, so it
                         // shares the same publish (see the `AsyncDoneWith` arm
                         // above).
-                        if let Some(h) = self.handlers.event.as_mut() {
+                        if let Some(h) = self.handlers.lock().event.as_mut() {
                             h.registry_mut().publish_async_done(tid);
                         }
                         self.wake_green_waiters(tid, table, sid, waiters, ready)?;
@@ -3464,7 +3518,11 @@ impl SelfHarnessDriver {
         table: &DataConTable,
     ) -> Result<Value, DriverError> {
         use tidepool_bridge::ToCore;
-        let branches = self.delegated_branches.remove(path).unwrap_or_default();
+        let branches = self
+            .delegated_branches
+            .lock()
+            .remove(path)
+            .unwrap_or_default();
         let items = branches
             .into_iter()
             .map(|b| b.to_value(table))
@@ -3548,7 +3606,7 @@ impl SelfHarnessDriver {
         // branch to this node; removed unconditionally once the branch
         // finishes, below.
         if let Some(path) = engine::parse_companion_node_path(prompt) {
-            self.branch_node_paths.insert(node, path);
+            self.branch_node_paths.lock().insert(node, path);
         }
         // PRD 21 C5 GUI lane: a `runLLMTurnBranchLabeled` child's label rides
         // the wire structurally (never parsed out of `prompt`, unlike
@@ -3557,7 +3615,7 @@ impl SelfHarnessDriver {
         // asks/notes to a per-node operator gate; removed unconditionally
         // once the branch finishes, below (mirrors `branch_node_paths`).
         if let Some(label) = label {
-            self.node_labels.insert(node, label.to_string());
+            self.node_labels.lock().insert(node, label.to_string());
             // Register the node's panel NOW, not on its first ask/note: the
             // operator watches the tree GROW — a window that works silently
             // (the common case) must still appear the moment it opens and
@@ -3628,7 +3686,7 @@ impl SelfHarnessDriver {
         };
         // Every path below this point (exit, closure, success) is done with
         // this node's own delegation window — see the insert above.
-        self.branch_node_paths.remove(&window.node());
+        self.branch_node_paths.lock().remove(&window.node());
         // The node's terminate/fold point (PRD 21 C5 GUI lane): a labeled
         // child's per-node gate is retired here, regardless of which outcome
         // follows — the default gate stays the fallback for this node from
@@ -3637,7 +3695,7 @@ impl SelfHarnessDriver {
         // paths below can attribute the node's ending (`node_failed`) or its
         // answer (`node_finalized`, which only exists after `finalize_data`
         // freezes the window) to the same section.
-        let retired_label = self.node_labels.remove(&window.node());
+        let retired_label = self.node_labels.lock().remove(&window.node());
         if let Some(label) = &retired_label {
             self.gate.retire_node(label);
         }
@@ -3720,6 +3778,352 @@ impl SelfHarnessDriver {
             .map_err(|e| DriverError::Session(e.to_string()))?;
         engine::build_child_answer_value(Ok(pair), table)
             .map_err(|e| DriverError::Session(e.to_string()))
+    }
+
+    /// Service a `runLLMTurnBranchFanout @T` suspension — the BULK sibling of
+    /// [`Self::service_outer_branch`] (operator decision: sibling branch
+    /// windows are ALWAYS driven concurrently, transparently — scheduling is
+    /// never a model-visible choice). Every `(label, prompt)` pair forks its
+    /// OWN child window off the SAME parent `context_ref`, resolved and
+    /// scoped ONCE here (the one typed checkpoint — an unknown/stale ref
+    /// refuses HERE, never a silent fresh-root fallback), then driven
+    /// CONCURRENTLY via [`Self::drive_branch_fanout_child`] up to
+    /// [`Self::concurrency_cap`] at once, exactly like
+    /// [`Self::service_outer_fanout`]/[`Self::drive_fanout_child`] — see that
+    /// pair's doc for why this is `&mut self` with an inner `&*self`
+    /// reborrow, and for the child-attributable/mechanism line (PRD 21
+    /// locked decision 6), which holds identically per sibling here: a
+    /// sibling's own round exhaustion/non-finalization/provider failure
+    /// folds as `Left exit` AT ITS OWN POSITION in the resumed list, never
+    /// erasing another sibling's already-finished answer; a broken mechanism
+    /// (cardinality, table assembly, session bookkeeping, the per-loop
+    /// inference-call cap) still hard-fails the turn via `?`.
+    ///
+    /// Each sibling is driven by [`Self::drive_branch_fanout_child`] through
+    /// the FULL [`Self::drive_answerer_to_finalize`] capability set — unlike
+    /// [`Self::drive_fanout_child_inner`]'s finalize-only v1 scope, a branch
+    /// sibling CAN delegate or ask the operator mid-window, exactly as a
+    /// sequential [`Self::service_outer_branch`] child could — see that
+    /// method's own doc for why.
+    async fn service_outer_branch_fanout(
+        &mut self,
+        site: u32,
+        ty: Option<&str>,
+        context_ref: &str,
+        labels: &[String],
+        prompts: &[String],
+        table: &DataConTable,
+    ) -> Result<Value, DriverError> {
+        self.lifecycle = SelfHarnessState::SuspendedOnHole;
+
+        if labels.len() != prompts.len() {
+            return Err(DriverError::Session(format!(
+                "runLLMTurnBranchFanout: {} label(s) but {} prompt(s) — the wire's \
+                 labels/prompts fields disagree",
+                labels.len(),
+                prompts.len()
+            )));
+        }
+
+        // The ONE typed checkpoint (possession-is-permission), resolved
+        // ONCE for the whole sibling group — every child below only ever
+        // sees an ALREADY-VALIDATED `ContextRef`/scope pair.
+        let cref = self.agent.resolve_context_ref(context_ref)?;
+        let parent_scope = self.agent.context_ref_scope(&cref);
+
+        // A fanout site's recorded type is the LIST type (`[T]`); the per-
+        // child answer type is what `answer_contract`/the hole card need —
+        // mirrors `service_outer_fanout`'s `element_ty` derivation exactly.
+        let element_ty = ty.and_then(engine::strip_list_type);
+
+        for prompt in prompts {
+            self.emit(Event::RunLLMTurnHole {
+                site,
+                ty: element_ty.map(String::from),
+                prompt: prompt.clone(),
+            });
+        }
+
+        let sid = self.outer_sid()?;
+
+        // Mint every sibling's own child scope SEQUENTIALLY, here, before any
+        // concurrent driving starts. `Harness::with_session` — unlike a
+        // node-level checkout — has no contention retry: it hard-refuses the
+        // instant another caller holds the shared machine
+        // (`HarnessError::Resident("... already running a turn")`). Minting
+        // N scopes concurrently (one `with_session` call per child, all
+        // racing the SAME `sid`) would trip that refusal under real
+        // concurrency; minting is a fast, non-suspending, purely mechanical
+        // step, so paying for it up front — once, in declaration order —
+        // costs nothing a model window would notice and removes the race
+        // entirely.
+        let mut child_scopes = Vec::with_capacity(labels.len());
+        for _ in labels {
+            let child_scope = self
+                .agent
+                .with_session(sid, |s| s.mint_scope(parent_scope))
+                .map_err(|e| DriverError::Session(e.to_string()))?
+                .ok_or_else(|| {
+                    DriverError::Session(format!(
+                        "runLLMTurnBranchFanout: the frozen window's scope {parent_scope:?} \
+                         is not live (its owning session was rotated or the window already \
+                         retired)"
+                    ))
+                })?;
+            child_scopes.push(child_scope);
+        }
+
+        let cap = self.concurrency_cap;
+        // A shared borrow of `self` — see `service_outer_fanout`'s doc for
+        // why this needs no `Arc<Self>`/`tokio::spawn`.
+        let this = &*self;
+        #[allow(clippy::type_complexity)]
+        let mut results: Vec<(
+            usize,
+            Result<Result<(Value, String), InvocationExit>, DriverError>,
+        )> = stream::iter(
+            labels
+                .iter()
+                .zip(prompts.iter())
+                .zip(child_scopes.iter())
+                .enumerate(),
+        )
+        .map(|(idx, ((label, prompt), child_scope))| {
+            let cref = cref.clone();
+            let child_scope = *child_scope;
+            async move {
+                let value = this
+                    .drive_branch_fanout_child(
+                        sid,
+                        site,
+                        idx,
+                        label,
+                        prompt,
+                        element_ty,
+                        cref,
+                        child_scope,
+                        table,
+                    )
+                    .await;
+                (idx, value)
+            }
+        })
+        .buffer_unordered(cap)
+        .collect()
+        .await;
+        // Completion order is whatever `buffer_unordered` happened to finish
+        // in — re-sort to DECLARATION order before assembly, exactly like
+        // `service_outer_fanout`.
+        results.sort_by_key(|(idx, _)| *idx);
+
+        self.lifecycle = SelfHarnessState::RunningLoop;
+
+        let mut answers = Vec::with_capacity(results.len());
+        for (idx, r) in results {
+            let outcome = r?;
+            let answer = match outcome {
+                Ok((value, child_digest)) => {
+                    let ref_value = engine::build_context_ref_value(&child_digest, table)
+                        .map_err(|e| DriverError::Session(e.to_string()))?;
+                    engine::build_pair_value(value, ref_value, table)
+                        .map(Ok)
+                        .map_err(|e| DriverError::Session(e.to_string()))?
+                }
+                Err(exit) => {
+                    tracing::warn!(
+                        child = idx,
+                        exit = %exit,
+                        "branch fanout child exited without an answer — folding it as \
+                         data at its branch position; siblings are unaffected"
+                    );
+                    Err(exit)
+                }
+            };
+            answers.push(
+                engine::build_child_answer_value(answer, table)
+                    .map_err(|e| DriverError::Session(e.to_string()))?,
+            );
+        }
+
+        engine::build_list_value(answers, table).map_err(|e| DriverError::Session(e.to_string()))
+    }
+
+    /// Drive ONE `runLLMTurnBranchFanout` sibling: fork off the SHARED parent
+    /// `cref` (never an empty root — PRD 21 locked decision 2), apply its
+    /// ALREADY-MINTED `child_scope` (minted sequentially by
+    /// [`Self::service_outer_branch_fanout`] before any concurrent driving
+    /// starts — see that method's doc for why scope-minting itself cannot
+    /// happen here, concurrently, without racing `Harness::with_session`'s
+    /// checkout), and drive it via [`Self::drive_answerer_to_finalize`] —
+    /// the SAME full capability [`Self::service_outer_branch`]'s sequential
+    /// child gets. That reuse is load-bearing, not a convenience: a
+    /// companion coalgebra window can `delegate` (raise a `Subagent`
+    /// suspension) or ask the operator mid-window (`OperatorSteering`), and
+    /// batching siblings into one bulk call must not silently drop that
+    /// capability — the concurrent `runLLMTurnFanout` machinery's own
+    /// finalize-only v1 scope (no nested askUser/note/fork) was built for a
+    /// bare fork/fanout child that never had those capabilities in the
+    /// first place, and is the wrong model for a branch child that did.
+    /// This is why `drive_answerer_to_finalize` and everything it calls —
+    /// `drain_note_holes`/`service_askuser_hole`/`drain_answerer_fork` — are
+    /// `&self`, and why `branch_node_paths`/`node_labels`/
+    /// `delegated_branches` are `Mutex`-wrapped: two siblings under one
+    /// parent can each be mid-delegate or mid-form at once.
+    ///
+    /// Mirrors [`Self::service_outer_branch`]'s own body: the same
+    /// [`BranchWindow`] retirement discipline and the same
+    /// exit/closure/success ladder, labeled and path-stamped the same way.
+    /// Differences: the scope arrives ALREADY minted rather than minted
+    /// here; the label is REQUIRED, never `Option`, since every
+    /// `runLLMTurnBranchFanout` sibling carries one; and the return is the
+    /// bare `(value, digest)` pair, not the fully-assembled `Either` —
+    /// [`Self::service_outer_branch_fanout`] does that assembly itself, once
+    /// per sibling, after re-sorting every result to declaration order.
+    ///
+    /// `&self`, for the same reason [`Self::drive_fanout_child`] is: up to
+    /// [`Self::concurrency_cap`] of these run concurrently via
+    /// `buffer_unordered`, all borrowing the same `&SelfHarnessDriver`.
+    #[allow(clippy::too_many_arguments)]
+    async fn drive_branch_fanout_child(
+        &self,
+        sid: tidepool_repr::SessionId,
+        site: u32,
+        idx: usize,
+        label: &str,
+        prompt: &str,
+        element_ty: Option<&str>,
+        cref: ContextRef,
+        child_scope: tidepool_codegen::scope::ScopeId,
+        table: &DataConTable,
+    ) -> Result<Result<(Value, String), InvocationExit>, DriverError> {
+        let hole_card = engine::answerer_hole_card(
+            prompt,
+            element_ty,
+            self.answerer_imports(),
+            Some(table),
+            &self.agent.hole_card_effect_row(),
+        );
+        let node = self.agent.fork_from_context_ref(&cref, &hole_card)?;
+        // PRD 21 C5: this sibling's prompt is the ONE place its domain
+        // `NodePath` is observable from the runtime side — recorded BEFORE
+        // driving so a delegation mid-turn (`HoleRouting::Subagent`,
+        // serviced by `drain_note_holes`) can attribute its completed
+        // branch to this node; removed unconditionally once it finishes,
+        // below. Mirrors `service_outer_branch` exactly, just against the
+        // `Mutex`-wrapped map concurrent siblings share.
+        if let Some(path) = engine::parse_companion_node_path(prompt) {
+            self.branch_node_paths.lock().insert(node, path);
+        }
+        // Every `runLLMTurnBranchFanout` sibling is labeled (unlike a plain
+        // `runLLMTurnBranch`, whose label is optional) — register its panel
+        // NOW, not on its first ask/note, so the operator sees the tree
+        // GROW rather than only its noisy nodes.
+        self.node_labels.lock().insert(node, label.to_string());
+        let _ = self.gate.node_gate(label);
+        self.gate.node_seeded(label, prompt);
+
+        self.agent.force_attached(node, Actor::Operator, sid)?;
+        let realm = self.mint_realm();
+        self.agent.set_node_realm(node, realm);
+        self.agent.set_node_scope(node, child_scope);
+        // Siblings share this ONE session's machine — a checkout race
+        // against another sibling's turn is expected, benign contention,
+        // not a real conflict — mirrors `drive_fanout_child`'s own opt-in.
+        self.agent.set_retry_checkout_on_contention(node, true);
+        self.agent
+            .set_answer_contract(node, self.answer_contract(element_ty));
+        self.emit(Event::TurnStart { node });
+
+        // This child's mode, typed (`WindowLease::require_one_shot`'s doc):
+        // it answers exactly once, then is frozen and retired below.
+        let lease = WindowLease::OneShotBranch {
+            node,
+            realm,
+            scope: child_scope,
+        };
+        // Every exit below this point retires exactly through `window`
+        // (`fold_exit`, `finalize_data`, or — for the mechanism-error `?`
+        // below — its `Drop`), same discipline `service_outer_branch` uses.
+        let window = BranchWindow::from_lease(lease, self.agent.clone(), cref)?;
+
+        // A branch child is a BRANCH POSITION, so from here on this window's
+        // own failures are DATA — folded as `Left exit` at ITS OWN POSITION
+        // in the resumed list (PRD 21 locked decision 6), never erasing a
+        // sibling's already-finished answer.
+        let mut exit: Option<InvocationExit> = None;
+        let outcome = match self
+            .drive_answerer_to_finalize(window.node(), element_ty, site)
+            .await?
+        {
+            Ok(o) => Some(o),
+            Err(e) => {
+                exit = Some(e);
+                None
+            }
+        };
+        self.branch_node_paths.lock().remove(&window.node());
+        self.node_labels.lock().remove(&window.node());
+        self.gate.retire_node(label);
+        self.emit(Event::TurnEnd {
+            node: window.node(),
+        });
+
+        if let Some(outcome) = &outcome {
+            let is_finalize = matches!(
+                outcome,
+                TurnOutcome::Suspended { classified, .. }
+                    if matches!(classified.routing, HoleRouting::Finalize { .. })
+            );
+            if !is_finalize {
+                // NON-FINALIZATION — the window ended on something that is
+                // not an answer. Decision 6 names this class; it folds at
+                // the branch, it does not take the turn down.
+                exit = Some(InvocationExit::NotFinalized(format!(
+                    "branch fanout child {idx} did not suspend on finalize (got {})",
+                    turn_outcome_tag(outcome)
+                )));
+            }
+        }
+
+        if let Some(exit) = exit {
+            tracing::warn!(
+                child = idx,
+                exit = %exit,
+                "branch fanout child exited without an answer — folding it as data at \
+                 its branch position; siblings are unaffected"
+            );
+            self.gate.node_failed(label, &exit.to_string());
+            window.fold_exit("branch fanout child retired (exit)");
+            return Ok(Err(exit));
+        }
+
+        if self.agent.finalize_is_closure(window.node()) {
+            // NOT a typed exit: the window DID answer, and it is this
+            // driver that cannot carry a closure across the branch pair
+            // (v1 scope). Our gap fails as ours.
+            self.gate.node_failed(
+                label,
+                "answered with a closure — cannot cross the branch pair (v1 scope)",
+            );
+            window.fold_exit("branch fanout child retired (closure)");
+            return Err(DriverError::Session(format!(
+                "branch fanout child {idx} finalized a closure — a concurrent branch \
+                 fanout answer must be plain data in this driver (v1 scope)"
+            )));
+        }
+
+        // Success: `finalize_data` takes the finalized answer, freezes
+        // THIS sibling's own post-finalize prefix, and retires — the one
+        // place a `ContextRef` digest for this window can come from.
+        let node = window.node();
+        let (value, rendered, child_digest) = window.finalize_data()?;
+        self.gate.node_finalized(label, &rendered);
+        self.emit(Event::Finalize {
+            node,
+            value: rendered,
+        });
+
+        Ok(Ok((value, child_digest.as_str().to_string())))
     }
 
     /// Service a `runLLMTurnFork @T`/`runLLMTurnFanout @T` suspension raised
@@ -4174,7 +4578,7 @@ impl SelfHarnessDriver {
     /// answering IN CONTEXT on the outer turn's own continuation, with no
     /// siblings and no position — still hard-fails, exactly as before.
     async fn drive_answerer_to_finalize(
-        &mut self,
+        &self,
         node: NodeId,
         ty: Option<&str>,
         site: u32,
@@ -4461,7 +4865,7 @@ impl SelfHarnessDriver {
     /// its existing completed-without-finalize corrective retry. `Err` on a
     /// resume failure or the reprompt cap being hit.
     async fn service_askuser_hole(
-        &mut self,
+        &self,
         node: NodeId,
         shape: &FormShape,
     ) -> Result<Option<TurnOutcome>, DriverError> {
@@ -4546,11 +4950,12 @@ impl SelfHarnessDriver {
     /// A lane-1 coupled spawn blocks this loop turn for the agent's whole
     /// cycle (~30–120s live), by design (`plans/companion-memory.md`).
     fn service_outer_subagent(
-        &mut self,
+        &self,
         request: &Value,
         table: &DataConTable,
     ) -> Result<Value, DriverError> {
-        let handler = self.handlers.subagent.as_mut().ok_or_else(|| {
+        let mut handlers = self.handlers.lock();
+        let handler = handlers.subagent.as_mut().ok_or_else(|| {
             DriverError::Session(
                 "the authored loop called a Subagent verb (spawnAgent/spawnAgentRaw) but no \
                  subagent handler is configured — wire one with \
@@ -4592,15 +4997,16 @@ impl SelfHarnessDriver {
                 self.announce_note(FormSource::OuterLoop, &text);
             }
         }
+        let mut handlers = self.handlers.lock();
         match kind {
             engine::OuterEffectKind::Console => {
-                let handler = self.handlers.console.as_mut().ok_or_else(|| {
+                let handler = handlers.console.as_mut().ok_or_else(|| {
                     Self::unwired_outer_effect_error("Console", "say", "set_console_handler")
                 })?;
                 Self::dispatch_outer_effect(handler, request, table)
             }
             engine::OuterEffectKind::Worktree => {
-                let handler = self.handlers.worktree.as_mut().ok_or_else(|| {
+                let handler = handlers.worktree.as_mut().ok_or_else(|| {
                     Self::unwired_outer_effect_error(
                         "Worktree",
                         "createWorktree/lookupWorktree/listWorktrees/worktreeBranch/worktreeHead",
@@ -4610,7 +5016,7 @@ impl SelfHarnessDriver {
                 Self::dispatch_outer_effect(handler, request, table)
             }
             engine::OuterEffectKind::RepoEvent => {
-                let handler = self.handlers.event.as_mut().ok_or_else(|| {
+                let handler = handlers.event.as_mut().ok_or_else(|| {
                     Self::unwired_outer_effect_error(
                         "RepoEvent",
                         "withHandler (repository events)",
@@ -4620,7 +5026,7 @@ impl SelfHarnessDriver {
                 Self::dispatch_outer_effect(handler, request, table)
             }
             engine::OuterEffectKind::Exec => {
-                let handler = self.handlers.exec.as_mut().ok_or_else(|| {
+                let handler = handlers.exec.as_mut().ok_or_else(|| {
                     Self::unwired_outer_effect_error(
                         "Exec",
                         "run/runIn/runArgv",
@@ -4630,7 +5036,7 @@ impl SelfHarnessDriver {
                 Self::dispatch_outer_effect(handler, request, table)
             }
             engine::OuterEffectKind::Journal => {
-                let handler = self.handlers.journal.as_mut().ok_or_else(|| {
+                let handler = handlers.journal.as_mut().ok_or_else(|| {
                     Self::unwired_outer_effect_error("Journal", "record", "set_journal_handler")
                 })?;
                 Self::dispatch_outer_effect(handler, request, table)
@@ -4655,7 +5061,8 @@ impl SelfHarnessDriver {
         table: &DataConTable,
     ) -> Result<Option<Value>, DriverError> {
         use tidepool_bridge::FromCore;
-        let handler = self.handlers.event.as_mut().ok_or_else(|| {
+        let mut handlers = self.handlers.lock();
+        let handler = handlers.event.as_mut().ok_or_else(|| {
             Self::unwired_outer_effect_error(
                 "RepoEvent",
                 "withHandler (repository events)",
@@ -4830,8 +5237,8 @@ impl SelfHarnessDriver {
     /// before per-node routing existed.
     fn resolve_gate(&self, source: &FormSource) -> Arc<dyn OperatorGate> {
         if let FormSource::Answerer { node } = source {
-            if let Some(label) = self.node_labels.get(node) {
-                if let Some(gate) = self.gate.node_gate(label) {
+            if let Some(label) = self.node_labels.lock().get(node).cloned() {
+                if let Some(gate) = self.gate.node_gate(&label) {
                     return gate;
                 }
             }
@@ -4860,7 +5267,7 @@ impl SelfHarnessDriver {
     /// interaction, no model round. Unlike `askUser`'s reprompt cap, this has
     /// no bound of its own: a `note` resume always makes progress (the next
     /// pending hole, or none at all), so nothing here can spin.
-    async fn service_note_hole(&mut self, node: NodeId, text: &str) -> Result<(), DriverError> {
+    async fn service_note_hole(&self, node: NodeId, text: &str) -> Result<(), DriverError> {
         self.announce_note(FormSource::Answerer { node }, text);
         self.agent.answer_note(node).await?;
         Ok(())
@@ -4877,7 +5284,7 @@ impl SelfHarnessDriver {
     /// suspension (the caller's existing corrective-retry path, same as a
     /// plain `Completed` round outcome).
     async fn drain_note_holes(
-        &mut self,
+        &self,
         node: NodeId,
         mut hole: String,
         mut classified: ClassifiedHole,
@@ -4923,9 +5330,10 @@ impl SelfHarnessDriver {
                         if let Some(branch) =
                             engine::decode_completed_delegation_branch(&value, &table)
                         {
-                            if let Some(path) = self.branch_node_paths.get(&node) {
+                            if let Some(path) = self.branch_node_paths.lock().get(&node).cloned() {
                                 self.delegated_branches
-                                    .entry(path.clone())
+                                    .lock()
+                                    .entry(path)
                                     .or_default()
                                     .push(branch);
                             }
@@ -5018,7 +5426,7 @@ impl SelfHarnessDriver {
     /// `answer_fanout`/`answer_fork` via `?`) is a hard error — the
     /// self-harness driver has no operator inside a fork child (v1).
     async fn drain_answerer_fork(
-        &mut self,
+        &self,
         node: NodeId,
         ty_label: &str,
     ) -> Result<Option<TurnOutcome>, DriverError> {
