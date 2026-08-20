@@ -78,6 +78,36 @@ content (the mutable-state concern was about generation-numbered
 - General memo coverage for `Val.G<g>` session binds.
 - Any change to checkpoint format or the harness `State` type.
 
+## Measured attribution (compile-attribution lane, 2026-08-20)
+
+Cold fused companion compile, 51 modules, 32.7s total (proportions
+generalize to the live ~361s; absolute seconds don't — bigger harness,
+colder box): `ghc_load` upsweep 59.6%, attributed typecheck+core 35.9%.
+Within the attributed pass: 49 byte-identical stdlib modules = 68.6%,
+the harness's own two modules = 31.4%. **~2/3 of all compile wall goes to
+modules identical across every compile anywhere.** And 10 of 12 real
+spawns in one companion run are per-node `--turn` compiles (29-38 modules,
+zero own content) that state-injection can never help — each node's code
+differs by construction.
+
+Consequences for sequencing:
+- **State injection stands** (it takes the fused outer compile to a full
+  memo hit — zero spawns — which no module cache can), but it is the
+  smaller of the two wins.
+- **The persistent build-products dir helps every compile including the
+  dominant `--turn` class**, and is now known to be a real lift, not a
+  flag-flip: extract runs `backend=noBackend`/`NoLink` and writes NO
+  `.hi`/`.o` today. Prerequisites: (1) enable iface writing with a stable
+  content-addressed hidir/odir; (2) verify `checkOldIface` recompilation
+  checking works under `noBackend` (untested, the real risk); (3) teach
+  the manual second pass to reuse `load''`s results, else a cache touches
+  only the ~60% upsweep share. Needs its own plan before a lane.
+
+The default-on per-compile summary line (`compile summary modules=…
+wall_ms=… top=…`) now lands in harness logs at INFO from both the
+artifacts and session `--turn` lanes; full per-module tables stay behind
+`TIDEPOOL_TIMING`.
+
 ## Direction: toward a resident compile daemon (operator decision 2026-08-20)
 
 The eventual form is a resident extract daemon (the ghcide/HLS convergence;
