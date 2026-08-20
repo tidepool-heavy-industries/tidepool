@@ -780,6 +780,21 @@ fn works_from_json_float() {
     );
 }
 
+/// (d) DISTINCT-MECHANISM: `KnownSymbol` reflection — `symbolVal` recovering
+/// a type-level `Symbol` as a runtime string. GHC constructs `KnownSymbol`
+/// dictionaries magically (no ordinary instance declaration exists), so this
+/// pins that the Core we serialize carries them in a form the JIT executes.
+/// Load-bearing gate for the `askUserWith` typed-field-label design, where a
+/// `#field` reference recovers its field name via `symbolVal` at runtime.
+#[test]
+fn works_known_symbol_reflection() {
+    works_with_imports(
+        "GHC.TypeLits (symbolVal)\nData.Proxy (Proxy(..))",
+        r#"pure (toJSON [symbolVal (Proxy :: Proxy "iterations"), symbolVal (Proxy :: Proxy "verbose")])"#,
+        serde_json::json!(["iterations", "verbose"]),
+    );
+}
+
 // --- (g) RENDER-FIDELITY carve-outs — the property under test is the exact
 // shape of the outer Rust `to_json()` render, not anything a Haskell-side
 // `==` can observe. ---
