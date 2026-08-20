@@ -762,10 +762,11 @@ Two DISTINCT jsonl streams live under `<cache>/selfharness/` (paths from
   `loop` fragment compiles — `crate::log::Event::TurnStart` never covers
   these, the outer session is not a tree node); `CompactionTrigger{summary,…}`.
   One line per driver `Event`.
-- **`log.jsonl`** (`default_log_path`, the durable per-NODE `crate::log`
-  written by the answerer `Harness`'s `LogWriter`) — the fine-grained story:
+- **`log-<epoch>.jsonl`** (parent directory from `default_log_path`, the
+  durable per-NODE `crate::log` written by the answerer `Harness`'s
+  `LogWriter`) — the fine-grained story:
   `Forced`, `TurnStart{source}` (the EXTRACTED executed Haskell, so
-  `tail -f log.jsonl | jq -r 'select(.ev=="turn_start").source'` prints
+  `jq -r 'select(.ev=="turn_start").source'` over the newest `log-*.jsonl` prints
   the exact blocks the answerer ran — also surfaced at console INFO, not just
   the durable line), `TurnExtracted{asks,bound}`
   (what extract said this turn's holes/binds ARE — the `asks.json` site → type
@@ -776,9 +777,15 @@ Two DISTINCT jsonl streams live under `<cache>/selfharness/` (paths from
   answerer/outer stacks have none, so effect activity shows as
   `HolePublished`/`HoleConsumed`, not `Effect` (see Replay).
 
-A caller boots the answerer `Harness` with `LogWriter::create(&default_log_path(),
-&header)` to land `log.jsonl` on this path; the driver writes `transcript.jsonl`
-via a `JsonlObserver` at `default_transcript_path()`. `tail -f` either. A
-`timing` DEBUG stage's `node`/`round` fields render as words
-(`timing::render_node`/`render_round`) — `"bootstrap"`/`"-"` for
-`NO_NODE`/`NO_ROUND`, never a raw `u64::MAX`.
+The production binary (`tidepool-web/src/bin/tidepool-selfharness.rs`) does
+NOT reuse one fixed `log.jsonl`: `LogWriter` refuses to overwrite an existing
+run's log, so each boot mints its own `log-<epoch>.jsonl` sibling under
+`<cache>/selfharness/` — tail the NEWEST one, e.g.
+`tail -f $(ls -t <cache>/selfharness/log-*.jsonl | head -1)`. A caller that
+wants one stable, reused filename (a direct test, say) can still boot the
+answerer `Harness` with `LogWriter::create(&default_log_path(), &header)` to
+land a fixed `log.jsonl` on that exact path; the driver writes
+`transcript.jsonl` via a `JsonlObserver` at `default_transcript_path()`
+regardless. `tail -f` either. A `timing` DEBUG stage's `node`/`round` fields
+render as words (`timing::render_node`/`render_round`) — `"bootstrap"`/`"-"`
+for `NO_NODE`/`NO_ROUND`, never a raw `u64::MAX`.

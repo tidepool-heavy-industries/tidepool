@@ -164,10 +164,38 @@ pub struct Checkpoint {
     /// `TurnDelta.reasoning`'s additive widenings.
     #[serde(default, skip_serializing_if = "is_false")]
     awaiting_continue: bool,
+    /// The operator's between-loops message
+    /// ([`crate::selfharness::operator::ContinueSignal::ContinueWithInput`]),
+    /// captured in the SAME atomic write that clears `awaiting_continue`
+    /// (`SelfHarnessDriver::between_loops_gate`) so a kill anywhere after
+    /// that write cannot separate "gate cleared" from "operator text
+    /// captured" — restore rehydrates it, and the end-of-cycle
+    /// [`Self::committed`] clears it again once it has been consumed into a
+    /// window's framing. `#[serde(default, skip_serializing_if)]`: the same
+    /// additive-widening precedent as `awaiting_continue` — an old
+    /// checkpoint with no such key deserializes as `None`, and a checkpoint
+    /// with nothing pending serializes with no new key at all.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pending_operator_input: Option<String>,
+    /// The highest [`crate::selfharness::observer::AskId`] minted as of this
+    /// checkpoint — seeds [`SelfHarnessDriver`](crate::selfharness::driver::SelfHarnessDriver)'s
+    /// ask-id counter on restore so a restarted process cannot re-mint an id
+    /// already used earlier in the SAME `transcript.jsonl` (which spans
+    /// restarts). `0` before any `askUser`/`note` form has ever been
+    /// presented. `#[serde(default, skip_serializing_if)]`: same additive
+    /// precedent as `awaiting_continue`/`pending_operator_input` — an old
+    /// checkpoint with no such key deserializes as `0`, and a checkpoint
+    /// that never minted an id serializes with no new key at all.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    ask_id_high_water: u64,
 }
 
 fn is_false(b: &bool) -> bool {
     !*b
+}
+
+fn is_zero(n: &u64) -> bool {
+    *n == 0
 }
 
 impl Checkpoint {
@@ -181,6 +209,14 @@ impl Checkpoint {
 
     pub fn awaiting_continue(&self) -> bool {
         self.awaiting_continue
+    }
+
+    pub fn pending_operator_input(&self) -> Option<&str> {
+        self.pending_operator_input.as_deref()
+    }
+
+    pub fn ask_id_high_water(&self) -> u64 {
+        self.ask_id_high_water
     }
 
     /// Commit the generation AFTER `previous` (or [`CheckpointGeneration::FIRST`]
@@ -206,6 +242,8 @@ impl Checkpoint {
             harness_source,
             iteration,
             awaiting_continue: false,
+            pending_operator_input: None,
+            ask_id_high_water: 0,
         }
     }
 
@@ -218,6 +256,30 @@ impl Checkpoint {
     pub fn with_awaiting_continue(&self, awaiting_continue: bool) -> Self {
         Checkpoint {
             awaiting_continue,
+            ..self.clone()
+        }
+    }
+
+    /// A copy of `self` with `pending_operator_input` set, at the SAME
+    /// generation — chained onto [`Self::with_awaiting_continue`] by
+    /// `SelfHarnessDriver::between_loops_gate` so the gate-clear write and
+    /// the operator's captured text land in the ONE `save_checkpoint` call
+    /// that write performs, never two separately-timed writes.
+    pub fn with_pending_operator_input(&self, pending_operator_input: Option<String>) -> Self {
+        Checkpoint {
+            pending_operator_input,
+            ..self.clone()
+        }
+    }
+
+    /// A copy of `self` with `ask_id_high_water` set, at the SAME generation
+    /// — used both by [`Self::committed`]'s caller (after minting the
+    /// checkpoint for a completed cycle) and by the gate-clear write, so the
+    /// persisted high-water mark tracks whatever the driver's own counter
+    /// last reached at either checkpoint-write site.
+    pub fn with_ask_id_high_water(&self, ask_id_high_water: u64) -> Self {
+        Checkpoint {
+            ask_id_high_water,
             ..self.clone()
         }
     }
@@ -247,10 +309,16 @@ pub fn default_transcript_path() -> PathBuf {
 /// answerer turn) and `Event::Effect { req, resp, .. }` (drained per turn by
 /// `Harness::flush_effects`) for the self-iterating answerer nodes — as opposed
 /// to [`default_transcript_path`], which is the loop-level driver-[`Event`]
-/// stream. A caller booting the answerer `Harness` points its `LogWriter` here
-/// (`LogWriter::create(&default_log_path(), &header)`) so `tail -f` on this one
-/// path shows the executed source + effect req/resp interleaved. Sits alongside
-/// `checkpoint.json`/`transcript.jsonl` under the same dir.
+/// stream. Sits alongside `checkpoint.json`/`transcript.jsonl` under the same
+/// dir.
+///
+/// The production binary (`tidepool-web/src/bin/tidepool-selfharness.rs`)
+/// does NOT write to this exact path: `LogWriter` refuses to overwrite an
+/// existing run's log, so each boot mints its own `log-<epoch>.jsonl`
+/// sibling in this function's PARENT directory (only the directory comes
+/// from here) — tail the newest `log-*.jsonl`, not a fixed `log.jsonl`. This
+/// function still IS the fixed path a direct test caller uses when it wants
+/// one stable, reused filename across a process's whole run.
 pub fn default_log_path() -> PathBuf {
     tidepool_runtime::paths::cache_dir()
         .join("selfharness")
@@ -371,6 +439,8 @@ mod tests {
             harness_source: "fingerprint-abc".to_string(),
             iteration: LoopIteration(generation),
             awaiting_continue: false,
+            pending_operator_input: None,
+            ask_id_high_water: 0,
         }
     }
 
@@ -475,6 +545,89 @@ mod tests {
 
         let round_tripped: Checkpoint = serde_json::from_str(&wire).expect("deserialize");
         assert_eq!(round_tripped, parked);
+    }
+
+    /// Backward compat for BOTH new fields (item 1's compatibility pin,
+    /// mirroring [`a_checkpoint_with_no_awaiting_continue_key_deserializes_as_not_parked`]):
+    /// a checkpoint written before `pending_operator_input`/`ask_id_high_water`
+    /// existed — neither key in the JSON at all — must restore as `None`/`0`,
+    /// never a deserialization error.
+    #[test]
+    fn a_checkpoint_with_no_new_gate_fields_deserializes_with_their_defaults() {
+        let dir = tempfile_dir();
+        let path = dir.join("checkpoint.json");
+        std::fs::write(
+            &path,
+            r#"{"generation":1,"state":{"mode":"Deciding"},"compaction":null,"harness_source":"fp","iteration":1}"#,
+        )
+        .expect("write a pre-widening checkpoint");
+        let loaded = load_checkpoint(&path)
+            .expect("a pre-existing checkpoint shape must still deserialize")
+            .expect("some checkpoint");
+        assert_eq!(
+            loaded.pending_operator_input(),
+            None,
+            "an absent key must default to no pending operator input"
+        );
+        assert_eq!(
+            loaded.ask_id_high_water(),
+            0,
+            "an absent key must default to a zero high-water mark"
+        );
+    }
+
+    /// Forward compat: the wire-bytes golden item 3 promise extends to the two
+    /// new fields — a checkpoint carrying neither (the overwhelming common
+    /// case, same as an unparked `awaiting_continue`) must still produce the
+    /// EXACT pinned string from
+    /// [`wire_bytes_are_unchanged_by_the_typed_generation_and_iteration`], so
+    /// an OLD binary reading a checkpoint a NEW binary wrote (before either
+    /// field was ever populated) sees byte-identical JSON.
+    #[test]
+    fn checkpoint_with_neither_new_field_populated_matches_the_pinned_wire_bytes() {
+        let cp = checkpoint(3);
+        let json = serde_json::to_string(&cp).expect("serialize");
+        assert_eq!(
+            json,
+            r#"{"generation":3,"state":{"mode":"Deciding"},"compaction":"a summary","harness_source":"fingerprint-abc","iteration":3}"#,
+        );
+    }
+
+    /// Both new fields round-trip when populated, and stay byte-for-byte
+    /// independent of `awaiting_continue`/each other — the same additive
+    /// widening shape as [`awaiting_continue_key_is_only_present_on_the_wire_when_true`].
+    #[test]
+    fn pending_operator_input_and_ask_id_high_water_round_trip_when_populated() {
+        let cp = checkpoint(1)
+            .with_pending_operator_input(Some("steer left".to_string()))
+            .with_ask_id_high_water(7);
+        let wire = serde_json::to_string(&cp).expect("serialize");
+        assert!(wire.contains(r#""pending_operator_input":"steer left""#));
+        assert!(wire.contains(r#""ask_id_high_water":7"#));
+
+        let round_tripped: Checkpoint = serde_json::from_str(&wire).expect("deserialize");
+        assert_eq!(round_tripped, cp);
+        assert_eq!(round_tripped.pending_operator_input(), Some("steer left"));
+        assert_eq!(round_tripped.ask_id_high_water(), 7);
+    }
+
+    /// [`Checkpoint::committed`] always clears BOTH new fields, exactly as it
+    /// always clears `awaiting_continue` — a newly completed cycle has no
+    /// live gate-park state, whatever the previous checkpoint carried.
+    #[test]
+    fn committed_clears_pending_operator_input_and_does_not_inherit_ask_id_high_water() {
+        let parked = checkpoint(1)
+            .with_pending_operator_input(Some("leftover".to_string()))
+            .with_ask_id_high_water(9);
+        let committed = Checkpoint::committed(
+            Some(parked.generation()),
+            serde_json::json!({"mode": "Deciding"}),
+            None,
+            "fingerprint-abc".to_string(),
+            LoopIteration(2),
+        );
+        assert_eq!(committed.pending_operator_input(), None);
+        assert_eq!(committed.ask_id_high_water(), 0);
     }
 
     #[test]

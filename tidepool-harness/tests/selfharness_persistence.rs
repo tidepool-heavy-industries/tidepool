@@ -415,6 +415,283 @@ async fn old_format_checkpoint_with_no_marker_key_does_not_repark() {
     );
 }
 
+// ============================================================================
+// Operator-input loss window (review finding [1]): a `ContinueWithInput`'s
+// text used to go only to `self.pending_operator_input` — in-memory, never
+// the SAME write that cleared `awaiting_continue` — so a kill anywhere
+// between that write and the next `commit_checkpoint` lost the operator's
+// steering text even though the gate itself correctly re-parked on restart.
+// `SelfHarnessDriver::between_loops_gate`'s `clear_awaiting_continue` now
+// folds `pending_operator_input` into the SAME `save_checkpoint` call that
+// clears the marker, and `SelfHarnessDriver::restore` rehydrates it.
+// ============================================================================
+
+/// A gate that always answers the between-loops park with a fixed message —
+/// the "operator typed something and hit continue" case.
+struct ContinueWithTextGate {
+    text: String,
+}
+
+impl OperatorGate for ContinueWithTextGate {
+    fn present_form(&self, _shape: &FormShape) -> serde_json::Value {
+        panic!("this fixture harness never opens an askUser form")
+    }
+
+    fn await_continue(&self) -> ContinueSignal {
+        ContinueSignal::ContinueWithInput(self.text.clone())
+    }
+}
+
+/// Wraps a [`ReplayProvider`] and records every request's SYSTEM message —
+/// the loop answerer's framing, which is where a surviving
+/// `pending_operator_input` must show up (composed in by
+/// `SelfHarnessDriver::render_framing_with`).
+struct CaptureRequestProvider {
+    inner: Arc<dyn DynModelProvider>,
+    system_messages: Mutex<Vec<String>>,
+}
+
+impl ModelProvider for CaptureRequestProvider {
+    async fn complete(
+        &self,
+        req: TurnRequest,
+        sink: Option<StreamSink>,
+    ) -> Result<TurnResponse, ProviderError> {
+        if let Some(sys) = req.messages.iter().find(|m| m.role == Role::System) {
+            self.system_messages.lock().push(sys.content.clone());
+        }
+        self.inner.complete_boxed(req, sink).await
+    }
+}
+
+/// A kill anywhere AFTER the gate-clear write (`clear_awaiting_continue`)
+/// must not lose the operator's `ContinueWithInput` text: it is captured in
+/// that SAME atomic checkpoint write, so whatever is on disk the instant a
+/// process dies already carries it — a restart rehydrates it via
+/// [`SelfHarnessDriver::restore`] and the next cycle's render composes it
+/// into the answerer's framing, exactly as if the process had never died.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn operator_input_survives_a_kill_after_the_gate_clear_write_and_reaches_the_next_cycle() {
+    support::require_extract();
+    let _cache_guard = support::isolate_cache();
+
+    let checkpoint_path = scratch("operator-input").join("checkpoint.json");
+    let harness_source = source();
+
+    // --- "process 1": completes cycle 1, parks at the between-loops gate,
+    // and receives a `ContinueWithInput` — the gate-clear write lands on
+    // disk, and THEN the process "dies" (cycle 2 has no scripted reply, so
+    // `run_loop` fails deterministically right after that write, same
+    // idiom as the other gate-park tests here). ---
+    let mut driver1 = fresh_driver(
+        vec![decision_reply("observe", "Medium")],
+        "operator-input-1",
+    );
+    driver1.set_checkpoint_path(checkpoint_path.clone());
+    driver1.set_gate(Arc::new(ContinueWithTextGate {
+        text: "steer left".to_string(),
+    }));
+
+    let err = driver1.run_loop(&harness_source, false).await.expect_err(
+        "cycle 2 has no scripted reply, so run_loop must fail after the gate-clear write",
+    );
+    assert!(
+        !matches!(err, DriverError::StateDecode(_)),
+        "the failure must come from cycle 2 running out of replies, not a decode error: {err:?}"
+    );
+    drop(driver1);
+
+    // The bytes a real kill -9 would have left behind at this instant: the
+    // gate-clear write already landed (marker cleared, same generation),
+    // carrying the operator's text.
+    let killed_checkpoint = persistence::load_checkpoint(&checkpoint_path)
+        .expect("load_checkpoint after the simulated kill")
+        .expect("cycle 1's checkpoint, gate-cleared, is on disk");
+    assert!(
+        !killed_checkpoint.awaiting_continue(),
+        "the gate-clear write must have cleared the marker before the process died"
+    );
+    assert_eq!(
+        killed_checkpoint.pending_operator_input(),
+        Some("steer left"),
+        "the SAME write that cleared the marker must carry the operator's text — \
+         this is the exact bytes a kill right after that write would leave behind"
+    );
+
+    // --- "process 2": a brand-new driver restores from the killed checkpoint
+    // and runs the pending cycle. The surviving operator text must reach
+    // THAT cycle's answerer framing (its first model call's system message). ---
+    let agent_cfg = EngineConfig::from_decls(
+        answerer_decls(),
+        prelude_dir(),
+        Some(examples_harness_dir()),
+    )
+    .expect("answerer engine config");
+    let capture = Arc::new(CaptureRequestProvider {
+        inner: Arc::new(ReplayProvider::new(vec![decision_reply(
+            "resumed", "Medium",
+        )])),
+        system_messages: Mutex::new(Vec::new()),
+    });
+    let provider: Arc<dyn DynModelProvider> = capture.clone();
+    let writer = tidepool_harness::log::LogWriter::create(
+        std::env::temp_dir().join(format!(
+            "selfharness-persistence-operator-input-2-{}.jsonl",
+            std::process::id()
+        )),
+        &header(),
+    )
+    .expect("log writer");
+    let agent = Arc::new(Harness::new(writer, agent_cfg, provider).expect("agent harness boots"));
+    let mut driver2 = SelfHarnessDriver::new(agent, Arc::new(LogObserver));
+    driver2.set_checkpoint_path(checkpoint_path.clone());
+
+    let state_json = driver2
+        .restore(&harness_source)
+        .await
+        .expect("restore succeeds");
+    driver2
+        .run_one_cycle(&harness_source, state_json.as_ref())
+        .await
+        .expect("the resumed cycle completes, consuming the surviving operator input");
+
+    let system_messages = capture.system_messages.lock().clone();
+    assert!(
+        !system_messages.is_empty(),
+        "the resumed cycle must have made at least one model call"
+    );
+    assert!(
+        system_messages[0]
+            .contains("THE OPERATOR SAID (between loops, addressed to you): steer left"),
+        "the operator's between-loops text must survive the simulated kill and \
+         reach the resumed cycle's framing verbatim, got: {:?}",
+        system_messages[0]
+    );
+}
+
+// ============================================================================
+// AskId collision across a restart (review finding [2]): the driver's
+// minting counter used to reset to 0 on every fresh process, so a restarted
+// process could re-mint AskId(1), AskId(2), … colliding with ids already in
+// the SAME `transcript.jsonl` (which deliberately spans restarts, append
+// mode). `Checkpoint::ask_id_high_water` now seeds the counter on restore.
+// ============================================================================
+
+/// A gate that answers any `askUser @Decision` form immediately with a fixed
+/// decision — no note, no re-prompt, no `chooseMany` — so each cycle here
+/// mints exactly one [`AskId`](tidepool_harness::selfharness::observer::AskId).
+struct AutoAnswerDecisionGate;
+
+impl OperatorGate for AutoAnswerDecisionGate {
+    fn present_form(&self, _shape: &FormShape) -> serde_json::Value {
+        serde_json::json!({"action": "auto", "rationale": "r", "confidence": "High"})
+    }
+
+    fn await_continue(&self) -> ContinueSignal {
+        ContinueSignal::Continue
+    }
+}
+
+/// One reply that runs a single `askUser @Decision` round-trip straight into
+/// `finalize` — the minimal shape that mints exactly one `AskId` per cycle.
+fn askuser_then_finalize_reply(action: &str) -> RecordedReply {
+    let content = format!(
+        "```haskell\n\
+         import HarnessTypes (Decision (..), Confidence (..))\n\n\
+         (do\n\
+         \x20  d <- askUser @Decision\n\
+         \x20  finalize @Decision (d {{ action = \"{action}\" }})) :: M ()\n\
+         ```"
+    );
+    reply(&content)
+}
+
+#[derive(Default)]
+struct CaptureAskIds {
+    ids: Mutex<Vec<u64>>,
+}
+
+impl Observer for CaptureAskIds {
+    fn on_event(&self, event: &Event) {
+        if let Event::FormPresented { ask_id, .. } = event {
+            self.ids.lock().push(ask_id.0);
+        }
+    }
+}
+
+/// A restarted process must mint an `AskId` STRICTLY GREATER than any id
+/// already committed to the checkpoint before it — never re-minting
+/// `AskId(1)` against a `transcript.jsonl` that already has one, which is
+/// exactly what an unseeded (always-starts-at-0) counter would do.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn ask_ids_strictly_increase_across_a_restart() {
+    support::require_extract();
+    let _cache_guard = support::isolate_cache();
+
+    let checkpoint_path = scratch("ask-id").join("checkpoint.json");
+    let harness_source = source();
+
+    let mut driver1 = fresh_driver(vec![askuser_then_finalize_reply("first")], "ask-id-1");
+    driver1.set_checkpoint_path(checkpoint_path.clone());
+    driver1.set_gate(Arc::new(AutoAnswerDecisionGate));
+    driver1
+        .run_one_cycle(&harness_source, None)
+        .await
+        .expect("cycle 1 with one askUser round-trip finalizes");
+
+    let committed = persistence::load_checkpoint(&checkpoint_path)
+        .expect("load_checkpoint")
+        .expect("cycle 1 committed");
+    assert_eq!(
+        committed.ask_id_high_water(),
+        1,
+        "cycle 1 minted exactly one AskId, so the committed high-water mark must be 1"
+    );
+    drop(driver1);
+
+    // "Restart": a fresh driver restores the checkpoint and runs its OWN
+    // askUser round-trip.
+    let observer = Arc::new(CaptureAskIds::default());
+    let mut driver2 = fresh_driver_with_observer(
+        vec![askuser_then_finalize_reply("second")],
+        "ask-id-2",
+        observer.clone(),
+    );
+    driver2.set_checkpoint_path(checkpoint_path.clone());
+    driver2.set_gate(Arc::new(AutoAnswerDecisionGate));
+
+    let state_json = driver2
+        .restore(&harness_source)
+        .await
+        .expect("restore succeeds");
+    driver2
+        .run_one_cycle(&harness_source, state_json.as_ref())
+        .await
+        .expect("cycle 2 with its own askUser round-trip finalizes");
+
+    let ids = observer.ids.lock().clone();
+    assert_eq!(
+        ids.len(),
+        1,
+        "cycle 2 must mint exactly one AskId presentation, got {ids:?}"
+    );
+    assert!(
+        ids[0] > committed.ask_id_high_water(),
+        "a restarted process must mint an AskId strictly greater than any \
+         pre-restart committed id — got {ids:?} after high-water {}",
+        committed.ask_id_high_water()
+    );
+
+    let committed2 = persistence::load_checkpoint(&checkpoint_path)
+        .expect("load_checkpoint after cycle 2")
+        .expect("cycle 2 committed");
+    assert_eq!(
+        committed2.ask_id_high_water(),
+        ids[0],
+        "the committed high-water mark must track the id actually minted this cycle"
+    );
+}
+
 /// State + summary + iteration count persist to one checkpoint after a
 /// cycle, and a FRESH driver (simulating a restart) restores ALL THREE from
 /// the same generation — advancing mode from where the killed process left

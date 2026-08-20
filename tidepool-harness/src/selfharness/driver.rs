@@ -2294,6 +2294,13 @@ impl SelfHarnessDriver {
         self.last_checkpoint = Some(checkpoint.clone());
         self.checkpoint_generation = Some(checkpoint.generation());
         self.iteration = checkpoint.iteration().get();
+        // Neither is scoped to the harness source: the operator's pending
+        // utterance and the ask-id high-water mark are driver-runtime facts,
+        // not `State`, so both carry forward even through the
+        // fingerprint-mismatch branch below (which only discards `State`).
+        self.pending_operator_input = checkpoint.pending_operator_input().map(str::to_string);
+        self.ask_id_counter
+            .store(checkpoint.ask_id_high_water(), Ordering::SeqCst);
         if checkpoint.harness_source != source.fingerprint {
             // CARRY the state forward anyway (revised 2026-08-15, with the
             // operator). History matters here: restore once returned the
@@ -2350,7 +2357,8 @@ impl SelfHarnessDriver {
             self.last_compaction.clone(),
             source.fingerprint.clone(),
             persistence::LoopIteration::new(self.iteration),
-        );
+        )
+        .with_ask_id_high_water(self.ask_id_counter.load(Ordering::SeqCst));
         persistence::save_checkpoint(&self.checkpoint_path, &checkpoint)?;
         self.checkpoint_generation = Some(checkpoint.generation());
         self.last_checkpoint = Some(checkpoint);
@@ -2364,7 +2372,11 @@ impl SelfHarnessDriver {
     /// `self.last_checkpoint` to already be `Some`: [`Self::between_loops_gate`]
     /// (the only caller) is only ever reached after a checkpoint has been
     /// committed (a prior successful cycle, this same process or a restored
-    /// one) or restored, both of which set it.
+    /// one) or restored, both of which set it. Used ONLY for the park-write
+    /// (`awaiting_continue = true`, before the gate blocks) — the clear-write
+    /// after a continue signal arrives goes through
+    /// [`Self::clear_awaiting_continue`] instead, since that write must ALSO
+    /// carry the operator's text.
     fn mark_awaiting_continue(&mut self, awaiting_continue: bool) -> Result<(), DriverError> {
         #[allow(
             clippy::expect_used,
@@ -2384,6 +2396,40 @@ impl SelfHarnessDriver {
         Ok(())
     }
 
+    /// Clear `awaiting_continue` and, in the SAME `save_checkpoint` call,
+    /// record `pending_operator_input` (the operator's between-loops message,
+    /// if any) and the current ask-id high-water mark — this is the ONE
+    /// write [`Self::between_loops_gate`] performs the instant
+    /// `await_continue` returns, so a kill anywhere after it cannot separate
+    /// "gate cleared" from "operator text captured" (review finding [1]): both
+    /// land in one committed checkpoint or neither does. `self.pending_operator_input`
+    /// is updated from the SAME value written to disk, so the in-memory and
+    /// durable copies never diverge.
+    fn clear_awaiting_continue(
+        &mut self,
+        pending_operator_input: Option<String>,
+    ) -> Result<(), DriverError> {
+        #[allow(
+            clippy::expect_used,
+            reason = "between_loops_gate is only reached after a checkpoint has been \
+                      committed or restored (see run_loop's first-gating)"
+        )]
+        let checkpoint = self
+            .last_checkpoint
+            .as_ref()
+            .expect(
+                "between_loops_gate is only reached after a checkpoint has been \
+                 committed or restored (see run_loop's first-gating)",
+            )
+            .with_awaiting_continue(false)
+            .with_pending_operator_input(pending_operator_input.clone())
+            .with_ask_id_high_water(self.ask_id_counter.load(Ordering::SeqCst));
+        persistence::save_checkpoint(&self.checkpoint_path, &checkpoint)?;
+        self.pending_operator_input = pending_operator_input;
+        self.last_checkpoint = Some(checkpoint);
+        Ok(())
+    }
+
     /// The between-loops human checkpoint: block on [`OperatorGate::await_continue`]
     /// — the human-clicks-continue gate. The default [`StdinGate`] keeps the
     /// original headless behavior (block on a stdin line); a web/GUI gate
@@ -2392,10 +2438,13 @@ impl SelfHarnessDriver {
     /// The gate park is a live continuation only — nothing about it lives in
     /// `State` or anywhere else a checkpoint otherwise captures — so a kill
     /// while parked here needs its OWN durable record: [`Self::mark_awaiting_continue`]
-    /// writes the marker `true` right before blocking and `false` right after
+    /// writes the marker `true` right before blocking, and
+    /// [`Self::clear_awaiting_continue`] writes it `false` — ATOMICALLY WITH
+    /// the operator's continue text, if any (review finding [1]) — right after
     /// the continue signal arrives, so a checkpoint read at any instant this
     /// process might die tells a restart which side of the gate it was on
-    /// (see [`Self::run_loop`]'s restore-time check).
+    /// (see [`Self::run_loop`]'s restore-time check) and never loses the
+    /// operator's steering text to a crash between two separate writes.
     fn between_loops_gate(&mut self) -> Result<(), DriverError> {
         self.mark_awaiting_continue(true)?;
         // `OperatorGate::await_continue` is SYNC-BLOCKING by frozen contract
@@ -2404,11 +2453,14 @@ impl SelfHarnessDriver {
         // worker to other tasks instead of stalling it.
         let gate = Arc::clone(&self.gate);
         let signal = tokio::task::block_in_place(move || gate.await_continue());
-        self.mark_awaiting_continue(false)?;
-        if let crate::selfharness::operator::ContinueSignal::ContinueWithInput(text) = signal {
-            self.emit(Event::OperatorMessage { text: text.clone() });
-            self.pending_operator_input = Some(text);
-        }
+        let operator_text = match signal {
+            crate::selfharness::operator::ContinueSignal::ContinueWithInput(text) => {
+                self.emit(Event::OperatorMessage { text: text.clone() });
+                Some(text)
+            }
+            crate::selfharness::operator::ContinueSignal::Continue => None,
+        };
+        self.clear_awaiting_continue(operator_text)?;
         Ok(())
     }
 

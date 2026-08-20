@@ -33,6 +33,14 @@ pub enum FormSource {
 /// per-source counter would add a map for no extra debugging power).
 /// `#[serde(default)]`: an event logged before this field existed decodes as
 /// `AskId(0)`, a sentinel meaning "not recorded", never a hard error.
+///
+/// **Restart replay semantics:** the driver's minting counter is seeded from
+/// [`crate::selfharness::persistence::Checkpoint::ask_id_high_water`] on
+/// restore, so a restarted process never re-mints an id already used earlier
+/// in the SAME `transcript.jsonl` (which spans restarts) — the one exception
+/// is an id minted after the last committed high-water mark and lost to a
+/// mid-cycle crash, which is legitimately RE-MINTED (a fresh, larger id) for
+/// the re-presented ask on replay, since that presentation itself re-runs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct AskId(pub u64);
 
