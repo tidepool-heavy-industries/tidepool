@@ -171,6 +171,7 @@ fn second_scope_fragment_env_excludes_first_scopes_session_var_id() {
         Some(SessionBind {
             names: &names_a,
             gen: gen_a.0,
+            probe_only: false,
         }),
     )
     .expect("compile bind turn (scope A)");
@@ -207,6 +208,7 @@ fn second_scope_fragment_env_excludes_first_scopes_session_var_id() {
         Some(SessionBind {
             names: &names_b,
             gen: gen_b.0,
+            probe_only: false,
         }),
     )
     .expect("compile bind turn (scope B)");

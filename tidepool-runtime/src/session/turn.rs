@@ -114,6 +114,13 @@ pub struct SessionBind<'a> {
     pub names: &'a [String],
     /// The generation of the `Val.G<g>` module to mint (shared by all N names).
     pub gen: u64,
+    /// This bind is an ephemeral type probe (`:t`) — the binder is read then
+    /// discarded, never registered as a session binding, so it never crosses
+    /// into a later fragment. Exempts the extract's cross-row bind guard
+    /// (`typeMentionsEffectMonad` in `haskell/app/Main.hs`), which otherwise
+    /// rejects any row-mentioning type — the guard exists to protect REAL
+    /// binds, not a discard-immediately probe. `false` for a genuine bind.
+    pub probe_only: bool,
 }
 
 /// Which wrapper template a verdict selects. A refinement of [`TurnKind`]:
@@ -1252,6 +1259,9 @@ pub fn compile_session_turn(
             .emit_bound_binders(&bb_path);
         for name in b.names {
             cmd.bind_name(name);
+        }
+        if b.probe_only {
+            cmd.probe_only();
         }
     }
 

@@ -1838,6 +1838,7 @@ impl Session {
             Some(SessionBind {
                 names: &single,
                 gen: g.0,
+                probe_only: false,
             }),
         ) {
             Ok(t) => t,
@@ -2022,6 +2023,7 @@ impl Session {
             Some(SessionBind {
                 names: &names,
                 gen: g.0,
+                probe_only: false,
             }),
         ) {
             Ok(t) => t,
@@ -2234,6 +2236,7 @@ impl Session {
                 Some(SessionBind {
                     names: &it_names,
                     gen: g.0,
+                    probe_only: false,
                 }),
             )
         };
@@ -2258,6 +2261,7 @@ impl Session {
                     Some(SessionBind {
                         names: &it_names,
                         gen: g.0,
+                        probe_only: false,
                     }),
                 ) {
                     Ok(t) => t,
@@ -2399,6 +2403,7 @@ impl Session {
             Some(SessionBind {
                 names: &names,
                 gen: g.0,
+                probe_only: false,
             }),
         )
         .ok()
@@ -2510,6 +2515,12 @@ impl Session {
                     Some(SessionBind {
                         names: &names,
                         gen: throwaway_gen.0,
+                        // `:t` is pure introspection: read the type, print it,
+                        // discard the bind — never registered in session scope,
+                        // so it must never trip the cross-row guard meant for
+                        // binds that persist across turns (friction 2, round-2
+                        // test-user report).
+                        probe_only: true,
                     }),
                 ) {
                     Ok(t) => t,

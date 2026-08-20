@@ -18,11 +18,13 @@ import System.Exit (exitFailure)
 import System.IO (hPutStrLn, stderr, stdout, hSetEncoding, utf8)
 
 import GHC.Types.SourceError (SourceError)
-import GHC (moduleName, moduleNameString, TyCon)
+import GHC (moduleName, moduleNameString, TyCon, Type)
 import GHC.Driver.Env (HscEnv)
 import GHC.Core (CoreBind, Bind(..))
 import GHC.Core.DataCon (DataCon)
-import GHC.Types.Name (nameOccName, isExternalName, nameModule_maybe)
+import GHC.Core.Type (splitTyConApp_maybe)
+import GHC.Core.TyCon (tyConName)
+import GHC.Types.Name (nameOccName, isExternalName, nameModule_maybe, getOccString)
 import GHC.Types.Id (idName)
 import GHC.Types.Name.Occurrence (occNameString, mkVarOcc)
 import GHC.Types.Unique (getKey)
@@ -225,6 +227,11 @@ data Args = Args
   , argSessionRoot :: Maybe FilePath
   , argInjectVals :: [String]
   , argEmitBoundBinders :: Maybe FilePath
+  -- Ephemeral type-probe bind (`:t`): the same @--session-bind@ machinery,
+  -- but the captured binder is read-and-discarded, never a real session
+  -- binding — so the cross-row bind guard in 'mkBoundBinders' must not
+  -- reject a row-mentioning type here (friction 2, round-2 test-user report).
+  , argProbeOnly :: Bool
   -- --turn mode (one-spawn-per-turn protocol, plans/one-spawn-turn-protocol.md):
   , argTurn :: Bool
   , argTurnTemplates :: [String]
@@ -250,6 +257,7 @@ data Args = Args
 parseArgs :: [String] -> Args
 parseArgs = go (Args Nothing Nothing [] False False False [] []
                      False [] Nothing Nothing [] Nothing
+                     False
                      False [] Nothing Nothing
                      False Nothing
                      Nothing Nothing
@@ -267,6 +275,7 @@ parseArgs = go (Args Nothing Nothing [] False False False [] []
     go a ("--session-root" : dir : rest) = go a { argSessionRoot = Just dir } rest
     go a ("--inject-val" : m : rest) = go a { argInjectVals = argInjectVals a ++ [m] } rest
     go a ("--emit-bound-binders" : out : rest) = go a { argEmitBoundBinders = Just out } rest
+    go a ("--probe-only" : rest) = go a { argProbeOnly = True } rest
     go a ("--turn" : rest) = go a { argTurn = True } rest
     go a ("--turn-template" : kv : rest) = go a { argTurnTemplates = argTurnTemplates a ++ [kv] } rest
     go a ("--turn-out" : out : rest) = go a { argTurnOut = Just out } rest
@@ -964,7 +973,7 @@ runTurnMode args path = do
           SBind -> do
             g    <- requireArg "--bind-gen"     (argBindGen args)
             root <- requireArg "--session-root" (argSessionRoot args)
-            bbs  <- mkBoundBinders (sbBinders sb) g root result
+            bbs  <- mkBoundBinders False (sbBinders sb) g root result
             return (TBind (map T.pack (sbBinders sb)) 0 bbs asksSites wrapped)
           SBindDiscard -> return (TBind [] 0 [] asksSites wrapped)
           SExpr -> return (TExpr 0 asksSites wrapped)
@@ -1297,7 +1306,7 @@ writeBatchItemOutput timing bp (BatchCompileResult result) = do
   turnOut <- case (bpKind bp, bpBinders bp) of
     (KBind, ns@(_ : _)) -> do
       g   <- requireArg ("bind_gen (batch item, module " ++ bpModName bp ++ ")") (bpBindGen bp)
-      bbs <- mkBoundBinders ns g (bpSessionRoot bp) result
+      bbs <- mkBoundBinders False ns g (bpSessionRoot bp) result
       return (TBind (map T.pack ns) 0 bbs asksSites wrapped)
     (KBind, [])   -> return (TBind [] 0 [] asksSites wrapped)
     (KExpr, _)    -> return (TExpr 0 asksSites wrapped)
@@ -1456,9 +1465,15 @@ extractModuleName src = listToMaybe
 -- into per-component types via 'splitTupleType'. The iface + ids are computed
 -- the SAME way a later reference turn recomputes them, so the value plane and
 -- type plane agree on one key. Shared by @--session-bind@ ('emitBindArtifacts')
--- and @--turn@'s bind path — one computation, two callers.
-mkBoundBinders :: [String] -> Word64 -> FilePath -> PipelineResult -> IO [BoundBinder]
-mkBoundBinders bindNames g root result = do
+-- and @--turn@'s bind path — one computation, three callers.
+--
+-- @probeOnly@ exempts the cross-row bind guard below: an ephemeral
+-- type-probe bind (@:t@) reads the captured type and is discarded, never
+-- registered as a session binding, so a row-mentioning type cannot "cross
+-- fragments" here — there is no later fragment. A genuine session bind
+-- passes 'False' and stays guarded.
+mkBoundBinders :: Bool -> [String] -> Word64 -> FilePath -> PipelineResult -> IO [BoundBinder]
+mkBoundBinders probeOnly bindNames g root result = do
   effTy <- case prResultType result of
     Just t  -> return t
     Nothing -> error "session-bind: could not capture the type of `result` \
@@ -1482,12 +1497,15 @@ mkBoundBinders bindNames g root result = do
   -- gets its OWN, differently-numbered @Tidepool.Effects@ (the row is
   -- fragment-nominal, same reasoning as 'Tidepool.Translate.checkRunLLMTurnType').
   -- Reject loudly here rather than let it silently reach a later turn as an
-  -- unresolvable/wrongly-resolved reference.
-  forM_ (zip bindNames componentTypes) $ \(name, cty) ->
-    when (typeMentionsEffectMonad cty) $
-      error $ "session bind '" ++ name ++ "' captures the effect row in its type ("
-            ++ renderType cty ++ "); row-typed values cannot cross fragments — "
-            ++ "bind a pure value or inline the effectful part"
+  -- unresolvable/wrongly-resolved reference. @probeOnly@ (an ephemeral @:t@
+  -- type-probe, never registered as a session binding — see 'mkBoundBinders'
+  -- doc) has no later fragment to cross into, so it is exempt by construction.
+  when (not probeOnly) $
+    forM_ (zip bindNames componentTypes) $ \(name, cty) ->
+      when (typeMentionsEffectMonad cty) $
+        error $ "session bind '" ++ name ++ "' captures the effect row in its type ("
+              ++ renderType cty ++ "); row-typed values cannot cross fragments — "
+              ++ "bind a pure value or inline the effectful part" ++ eitherBindHint cty
   let mkEntry name cty =
         let occ    = mkVarOcc name
             varid  = stableVarId (sessionBinderName hsc sm occ)
@@ -1504,6 +1522,18 @@ mkBoundBinders bindNames g root result = do
              ++ " :: " ++ tdisp ++ ", " ++ tier ++ ", varId " ++ show varid ++ ")"
   return binders
 
+-- | Extra cross-row-bind-guard suggestion for an @Either e t@ reject: the
+-- idiom that actually works is destructuring AT the bind (@Right x <- expr@
+-- peels the success value off before the row-typed 'Either' ever needs to
+-- cross a fragment), which the guard's generic "inline the effectful part"
+-- text doesn't name. Empty string for any other shape, so it's safe to
+-- append unconditionally.
+eitherBindHint :: Type -> String
+eitherBindHint cty = case splitTyConApp_maybe cty of
+  Just (tc, [_e, _t]) | getOccString (tyConName tc) == "Either" ->
+    " or destructure at the bind: `Right x <- <expr>` binds the success value"
+  _ -> ""
+
 -- | The @--session-bind@ artifacts: mint the 'BoundBinder' records via
 -- 'mkBoundBinders' and, when requested, write the standalone JSON sidecar.
 emitBindArtifacts :: Args -> PipelineResult -> IO ()
@@ -1513,7 +1543,7 @@ emitBindArtifacts args result = do
     ns  -> return ns
   g       <- requireArg "--bind-gen"    (argBindGen args)
   root    <- requireArg "--session-root" (argSessionRoot args)
-  binders <- mkBoundBinders bindNames g root result
+  binders <- mkBoundBinders (argProbeOnly args) bindNames g root result
   case argEmitBoundBinders args of
     Just out -> do
       writeFile out (renderBoundBindersJson binders)

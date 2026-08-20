@@ -56,3 +56,126 @@ async fn t_on_wide_multiline_signature_does_not_crash() {
         t.text
     );
 }
+
+/// Extracts the `"bindings"` array (as raw JSON text) from a `:bindings`
+/// response — used to assert "nothing was registered" without also comparing
+/// `generation`/`valGeneration` counters, which a `:t` probe legitimately
+/// bumps (it consumes a throwaway generation to avoid an iface collision with
+/// the NEXT real bind — see `Session::query_inner_type`'s doc).
+fn bindings_only(s: &str) -> serde_json::Value {
+    serde_json::from_str::<serde_json::Value>(s)
+        .ok()
+        .and_then(|v| v.get("bindings").cloned())
+        .unwrap_or(serde_json::Value::Null)
+}
+
+/// Friction 2 (round-2 test-user report): `:t` on an M-returning expression
+/// used to crash — the probe bind's captured type (`Int -> M Int`) mentions
+/// the effect row, and the cross-row bind guard in `Main.mkBoundBinders`
+/// (`typeMentionsEffectMonad`) rejected it exactly as it would a REAL
+/// session bind, even though a `:t` probe is read-and-discarded and never
+/// crosses into a later turn's compile. `:t` must be exempt by construction
+/// (`SessionBind::probe_only`), for ANY well-typed expression, and must
+/// mutate nothing — `:bindings` lists the same names before and after.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn t_on_m_returning_helper_does_not_trip_cross_row_guard() {
+    require_extract();
+    let repl = Repl::new();
+
+    let decl = [
+        "commitDeltaRepro :: Int -> M Int",
+        "commitDeltaRepro x = pure x",
+    ]
+    .join("\n");
+    repl.def(&decl).await.expect_ok("def commitDeltaRepro");
+
+    let before = repl
+        .cmd(":bindings")
+        .await
+        .expect_ok(":bindings before :t")
+        .to_string();
+
+    let t = repl.cmd(":t commitDeltaRepro").await;
+    let out = t.expect_ok(
+        ":t commitDeltaRepro (M-returning expression must not crash the cross-row bind guard)",
+    );
+    assert!(
+        out.contains("->") && out.contains('M'),
+        ":t commitDeltaRepro should report a function type mentioning M: {out}"
+    );
+
+    let after = repl
+        .cmd(":bindings")
+        .await
+        .expect_ok(":bindings after :t")
+        .to_string();
+    assert_eq!(
+        bindings_only(&before),
+        bindings_only(&after),
+        ":t must mutate nothing — the probe bind is never registered: before={before} after={after}"
+    );
+}
+
+/// Same friction, for a stdlib EFFECT VERB whose type is `Either <Err> T`
+/// wrapped in `M` (`run :: Text -> M (Either ExecError Proc)`) — `ExecError`
+/// is defined inline in the per-session generated `Tidepool.Effects` module,
+/// so `:t run`'s probe bind ALSO used to trip the guard. Needs the full
+/// effect stack (Exec) rather than `Repl::new()`'s Console-only minimal one.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn t_on_either_returning_effect_verb_does_not_trip_cross_row_guard() {
+    require_extract();
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let repl = Repl {
+        server: build_full_server(tmp.path().to_path_buf(), "t-either-verb", false),
+    };
+
+    let before = repl
+        .cmd(":bindings")
+        .await
+        .expect_ok(":bindings before :t")
+        .to_string();
+
+    let t = repl.cmd(":t run").await;
+    let out =
+        t.expect_ok(":t run (Either-returning verb type must not crash the cross-row bind guard)");
+    assert!(
+        out.contains("Either"),
+        ":t run should report an Either-shaped type: {out}"
+    );
+
+    let after = repl
+        .cmd(":bindings")
+        .await
+        .expect_ok(":bindings after :t")
+        .to_string();
+    assert_eq!(
+        bindings_only(&before),
+        bindings_only(&after),
+        ":t must mutate nothing — the probe bind is never registered: before={before} after={after}"
+    );
+}
+
+/// A GENUINE bind (not `:t`) of the same `Either ExecError Proc` shape must
+/// still be rejected — the guard itself is unweakened, only `:t` is exempt.
+/// The rejection message must name the idiom that actually works: destructure
+/// AT the bind (`Right x <- run cmd`), not the generic "inline the effectful
+/// part" text alone.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn real_either_bind_still_rejected_with_destructure_hint() {
+    require_extract();
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let repl = Repl {
+        server: build_full_server(tmp.path().to_path_buf(), "either-bind-reject", false),
+    };
+
+    let bind = repl.cmd("p <- run \"echo hi\"").await;
+    let err = bind.expect_err("a real `Either ExecError Proc` session bind must still be rejected");
+    assert!(
+        err.contains("captures the effect row") && err.contains("cross fragments"),
+        "the cross-row bind guard must still fire for a genuine bind: {err}"
+    );
+    assert!(
+        err.contains("Right x <-"),
+        "the rejection must name the destructuring idiom for an Either-shaped reject: {err}"
+    );
+}

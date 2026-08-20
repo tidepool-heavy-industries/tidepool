@@ -683,6 +683,15 @@ impl ExtractCmd {
         self.flag("--emit-bound-binders", path)
     }
 
+    /// `--probe-only` — this bind is an ephemeral type probe (`:t`), read
+    /// then discarded rather than registered as a session binding. Exempts
+    /// the extract's cross-row bind guard, which otherwise rejects any
+    /// row-mentioning type — the guard protects real binds from crossing
+    /// into a later fragment, which a discard-immediately probe never does.
+    pub fn probe_only(&mut self) -> &mut Self {
+        self.bare_flag("--probe-only")
+    }
+
     /// Set what a non-zero exit means here. Defaults to
     /// [`ExitPolicy::DiagnosticReport`].
     pub fn exit_policy(&mut self, policy: ExitPolicy) -> &mut Self {
