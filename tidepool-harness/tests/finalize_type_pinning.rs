@@ -83,7 +83,14 @@ fn compile_turn(
         Ok(t) => t,
         Err(e) => return Err(CompileError::ExtractFailed(e.to_string())),
     };
-    let src = template_turn_for(&cfg.decls, &target.stack, code, imports, "");
+    let src = template_turn_for(
+        &cfg.decls,
+        &target.stack,
+        code,
+        imports,
+        "",
+        cfg.delegate_wrap,
+    );
     engine::compile_turn(
         &cfg.extract_bin,
         &src,
@@ -235,7 +242,14 @@ fn author_module_edit_between_compiles_is_picked_up_by_the_second() {
         let target = cfg
             .turn_target(Some(("Foo", row_imports.as_slice())))
             .expect("turn target");
-        let src = template_turn_for(&cfg.decls, &target.stack, code, "AuthorType", "");
+        let src = template_turn_for(
+            &cfg.decls,
+            &target.stack,
+            code,
+            "AuthorType",
+            "",
+            cfg.delegate_wrap,
+        );
         engine::compile_turn(
             &cfg.extract_bin,
             &src,

@@ -552,6 +552,7 @@ fn prd_example_adts_compile_with_the_bare_derive_contract() {
         code,
         "PrdTypes",
         "",
+        false,
     );
     let result = tidepool_harness::engine::compile_turn(
         &cfg.extract_bin,

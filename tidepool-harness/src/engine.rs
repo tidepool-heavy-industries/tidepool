@@ -1537,6 +1537,31 @@ impl EngineConfig {
         self
     }
 
+    /// The effect-row NAMES a delegating config's model-facing block actually
+    /// compiles against — [`Self::effect_names`] with `Subagent`/`Worktree`
+    /// dropped and `Delegate` prepended, mirroring [`delegate_row_text`]'s
+    /// promoted-row transform (the actual turn-templating change). DISPLAY
+    /// use only (the hole card's "your effect row" line,
+    /// [`answerer_hole_card`]) — [`Self::effect_names`] itself MUST stay the
+    /// real dispatched row: `Harness::flush_effects` maps an effect's stack
+    /// tag through it POSITIONALLY, and the machine genuinely dispatches
+    /// `Subagent`/`Worktree` tags regardless of what the model's own block
+    /// can name. `false`/non-delegating: identical to `effect_names`.
+    #[must_use]
+    pub fn hole_card_effect_row(&self) -> Vec<String> {
+        if !self.delegate_wrap {
+            return self.effect_names.clone();
+        }
+        let mut row = vec!["Delegate".to_string()];
+        row.extend(
+            self.effect_names
+                .iter()
+                .filter(|n| n.as_str() != "Subagent" && n.as_str() != "Worktree")
+                .cloned(),
+        );
+        row
+    }
+
     /// The promoted-list effect-stack string (`'[Console, KV, …, Finalize
     /// NoAnswer]`) for `template_haskell` at the config's default row — every
     /// decl including Ask, each parameterized effect applied to its
@@ -1729,7 +1754,7 @@ pub fn template_turn(
     imports: &str,
     helpers: &str,
 ) -> String {
-    template_turn_for(&cfg.decls, stack, code, imports, helpers)
+    template_turn_for(&cfg.decls, stack, code, imports, helpers, cfg.delegate_wrap)
 }
 
 /// Like [`template_turn`], but for an EXPLICIT decls list rather than the
@@ -1744,20 +1769,152 @@ pub fn template_turn(
 /// why, and `template_haskell_anchored`'s doc (`eval_prep.rs`) for the
 /// mechanism. Every other row (no `Finalize` entry, or the `NoAnswer`
 /// default) compiles exactly as before.
+///
+/// `delegate_wrap`: PRD 21 C5 — when `true`, this turn's preamble routes
+/// through [`delegate_aware_preamble`] (a local `type M` naming the narrow
+/// `Delegate`-form row, so a model-authored `:: M T` annotation resolves
+/// against the row its code actually compiles at) and the entry body applies
+/// `runDelegate` at the RESULT position (`TurnTemplate::delegate_wrap`) —
+/// `code` itself is never textually rewritten, so the SAME text compiles
+/// correctly whether classified as an expr, a bind, or (unwrapped, this flag
+/// plays no part) a top-level decl. `false` byte-identical to before this
+/// parameter existed.
 pub fn template_turn_for(
     decls: &[tidepool_mcp::EffectDecl],
     stack: &str,
     code: &str,
     imports: &str,
     helpers: &str,
+    delegate_wrap: bool,
 ) -> String {
-    let preamble = tidepool_mcp::build_preamble(decls, false);
-    if finalize_pin_active(stack) {
-        tidepool_mcp::template_haskell_anchored(
-            &preamble, stack, code, imports, helpers, None, None,
-        )
+    if delegate_wrap {
+        let preamble = delegate_aware_preamble(decls, stack);
+        tidepool_mcp::TurnTemplate {
+            preamble: &preamble,
+            effect_stack: stack,
+            code,
+            imports,
+            helpers,
+            anchor_result: finalize_pin_active(stack),
+            delegate_wrap: true,
+            ..Default::default()
+        }
+        .render()
     } else {
-        tidepool_mcp::template_haskell(&preamble, stack, code, imports, helpers, None, None)
+        let preamble = tidepool_mcp::build_preamble(decls, false);
+        if finalize_pin_active(stack) {
+            tidepool_mcp::template_haskell_anchored(
+                &preamble, stack, code, imports, helpers, None, None,
+            )
+        } else {
+            tidepool_mcp::template_haskell(&preamble, stack, code, imports, helpers, None, None)
+        }
+    }
+}
+
+/// The shared preamble for a DELEGATING config's turn module (PRD 21 C5):
+/// identical to [`tidepool_mcp::build_preamble`], except `M` is redefined
+/// LOCALLY to the narrow `[Delegate, AskUser, Fork, ReadState, Finalize T]`
+/// row `runDelegate`'s `reinterpret2` signature peels its argument back to —
+/// so a model-authored `:: M T` annotation, INSIDE the `runDelegate`-wrapped
+/// computation, resolves against the row its own code genuinely compiles at,
+/// instead of the outer (`Subagent`/`Worktree`-carrying) row the MACHINE
+/// dispatches.
+///
+/// `M` cannot be redefined to name `Delegate` inside the GENERATED
+/// `Tidepool.Effects` module itself: `Tidepool.Agent.Delegate` imports
+/// `Tidepool.Effects` (for `Subagent`/`Worktree`'s own types), so the reverse
+/// import would be a cyclic module dependency GHC cannot resolve. It has to
+/// live here, in the per-turn module that already imports
+/// `Tidepool.Agent.Delegate` (`extra_imports_for!(Subagent)`,
+/// `tidepool-mcp/src/effect_defs.rs`).
+///
+/// Two consequences of redefining `M` in a module `build_preamble` ALSO uses
+/// for outer-row infrastructure:
+/// - `M` leaks into this module's unqualified scope from TWO imports with no
+///   export list of their own — `Tidepool.Effects` directly, and
+///   `Tidepool.Orchestrate` (which itself imports `Tidepool.Effects`
+///   unqualified and re-exports everything in scope, per Haskell's "omitted
+///   export list exports every top-level name, including imports" rule).
+///   Both must be hidden, or the local redefinition below is a "Conflicting
+///   definitions" compile error.
+/// - `paginateResult`'s own signature (`paginate_alias`, `preamble.rs`) is
+///   spelled `Int -> Value -> M Value` and is ALWAYS emitted (whenever the
+///   decl list is non-empty) — it runs at `result`'s own OUTER-row position,
+///   never inside the `runDelegate`-wrapped block, so it cannot be typechecked
+///   against the narrow `M` this function defines. Its signature is respelled
+///   against `outer_stack` (the literal promoted row, unaffected by the local
+///   `M`) instead, decoupling it from whatever `M` means.
+///
+/// `outer_stack` is the REAL row this turn's `result`/`__result` binding
+/// compiles against (`EngineConfig::turn_target`'s `stack`) — untouched by
+/// this function; only the narrow row `type M` names is new.
+fn delegate_aware_preamble(decls: &[tidepool_mcp::EffectDecl], outer_stack: &str) -> String {
+    let preamble = tidepool_mcp::build_preamble(decls, false);
+    let hidden = preamble
+        .replacen(
+            "import Tidepool.Effects\n",
+            "import Tidepool.Effects hiding (M)\n",
+            1,
+        )
+        .replacen(
+            "import Tidepool.Orchestrate\n",
+            "import Tidepool.Orchestrate hiding (M)\n",
+            1,
+        );
+    let decoupled = hidden.replacen(
+        "paginateResult :: Int -> Value -> M Value\n",
+        &format!("paginateResult :: Int -> Value -> Eff {outer_stack} Value\n"),
+        1,
+    );
+    assert!(
+        decoupled.contains("import Tidepool.Effects hiding (M)\n")
+            && decoupled.contains("import Tidepool.Orchestrate hiding (M)\n")
+            && decoupled.contains(&format!(
+                "paginateResult :: Int -> Value -> Eff {outer_stack} Value\n"
+            )),
+        "delegate-aware preamble patches must all apply — a delegating decls \
+         list must carry the shape `build_preamble` always emits, else this \
+         would silently generate a module with a mis-scoped `M`"
+    );
+    // AFTER the `default (...)` decl, not before it: `TurnTemplate::render`/
+    // `template_haskell` splice USER imports at `preamble.find("default
+    // (Int")` too (right BEFORE that line) — inserting `type M` there would
+    // land it ahead of a later-spliced `import HarnessTypes`, an ordinary
+    // Haskell syntax error (every import must precede every other top-level
+    // declaration in a module).
+    const DEFAULT_DECL: &str = "default (Int, Double, Text)\n";
+    let insert = decoupled
+        .find(DEFAULT_DECL)
+        .map(|pos| pos + DEFAULT_DECL.len())
+        .unwrap_or(decoupled.len());
+    format!(
+        "{}\ntype M = Eff {}\n\n{}",
+        &decoupled[..insert],
+        delegate_row_text(outer_stack),
+        &decoupled[insert..]
+    )
+}
+
+/// The narrow `type M` row text a delegating config's model-facing block
+/// compiles against: `outer_stack` (the real, dispatched row — `'[Subagent,
+/// Worktree, ...]`) with its `Subagent, Worktree` PREFIX replaced by
+/// `Delegate` — the row `runDelegate`'s `reinterpret2` signature (`Eff
+/// (Delegate ': effs) a -> Eff (Subagent ': Worktree ': effs) a`) peels its
+/// argument back to. `answerer_decls_with_delegate` locks this exact prefix
+/// order (see its doc), so a plain string strip is correct here and avoids
+/// re-deriving the row from `EffectDecl`s — `Delegate` has no `EffectDecl` of
+/// its own at all (it is a plain Haskell GADT, never a Rust-registered
+/// effect or a `RowArgs` entry).
+fn delegate_row_text(outer_stack: &str) -> String {
+    const PREFIX: &str = "'[Subagent, Worktree, ";
+    match outer_stack.strip_prefix(PREFIX) {
+        Some(rest) => format!("'[Delegate, {rest}"),
+        None => panic!(
+            "delegate_wrap set on a row not starting with `{PREFIX}` — \
+             answerer_decls_with_delegate's Subagent/Worktree prefix order is \
+             what runDelegate's reinterpret2 signature relies on: {outer_stack}"
+        ),
     }
 }
 
@@ -1890,8 +2047,12 @@ pub fn template_session_bind(
     imports: &str,
     helpers: &str,
 ) -> String {
-    let preamble = tidepool_mcp::build_preamble(&cfg.decls, false);
     let stack = cfg.effect_stack_type();
+    let preamble = if cfg.delegate_wrap {
+        delegate_aware_preamble(&cfg.decls, &stack)
+    } else {
+        tidepool_mcp::build_preamble(&cfg.decls, false)
+    };
 
     let mut out = String::new();
     // Insert user imports right before the `default` decl (the same insertion
@@ -1917,9 +2078,17 @@ pub fn template_session_bind(
         out.push('\n');
     }
     out.push_str(&format!("__result :: Eff {stack} _\n"));
-    out.push_str("__result = do {\n");
+    if cfg.delegate_wrap {
+        out.push_str("__result = runDelegate (do {\n");
+    } else {
+        out.push_str("__result = do {\n");
+    }
     push_braced_stmt(&mut out, stmt);
-    out.push_str(&format!(" ; pure {binder}\n }}\n"));
+    if cfg.delegate_wrap {
+        out.push_str(&format!(" ; pure {binder}\n }})\n"));
+    } else {
+        out.push_str(&format!(" ; pure {binder}\n }}\n"));
+    }
     out
 }
 
@@ -2020,8 +2189,12 @@ pub fn session_bind_template(
     imports: &str,
     helpers: &str,
 ) -> String {
-    let preamble = tidepool_mcp::build_preamble(&cfg.decls, false);
     let stack = cfg.effect_stack_type();
+    let preamble = if cfg.delegate_wrap {
+        delegate_aware_preamble(&cfg.decls, &stack)
+    } else {
+        tidepool_mcp::build_preamble(&cfg.decls, false)
+    };
 
     let mut out = String::new();
     if imports.trim().is_empty() {
@@ -2045,9 +2218,17 @@ pub fn session_bind_template(
         out.push('\n');
     }
     out.push_str(&format!("__result :: Eff {stack} _\n"));
-    out.push_str("__result = do {\n");
+    if cfg.delegate_wrap {
+        out.push_str("__result = runDelegate (do {\n");
+    } else {
+        out.push_str("__result = do {\n");
+    }
     out.push_str("{{TURN_STMT}}");
-    out.push_str(&format!(" ; pure {binder}\n }}\n"));
+    if cfg.delegate_wrap {
+        out.push_str(&format!(" ; pure {binder}\n }})\n"));
+    } else {
+        out.push_str(&format!(" ; pure {binder}\n }}\n"));
+    }
     out
 }
 
@@ -2769,6 +2950,28 @@ mod tests {
 
         let bare = answerer_hole_card("decide", Some("Verdict"), &[], None, &[]);
         assert!(!bare.contains("effect row"), "{bare}");
+    }
+
+    /// PRD 21 C5: the hole card's effect-row line must teach the row a
+    /// delegating window's model text actually compiles against —
+    /// `Delegate`, never `Subagent`/`Worktree`, which the machine dispatches
+    /// but the model's own block can never name.
+    #[test]
+    fn hole_card_effect_row_is_delegate_aware() {
+        let names: Vec<String> = ["Subagent", "Worktree", "AskUser", "Fork", "Finalize"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+
+        let non_delegating = EngineConfig::inert(names.clone());
+        assert_eq!(non_delegating.hole_card_effect_row(), names);
+
+        let mut delegating = EngineConfig::inert(names);
+        delegating.delegate_wrap = true;
+        assert_eq!(
+            delegating.hole_card_effect_row(),
+            vec!["Delegate", "AskUser", "Fork", "Finalize"]
+        );
     }
 
     /// A positional-sum answer type — no field labels at all — previously

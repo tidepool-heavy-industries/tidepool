@@ -3371,7 +3371,7 @@ impl SelfHarnessDriver {
             ty,
             self.answerer_imports(),
             Some(table),
-            self.agent.effect_names(),
+            &self.agent.hole_card_effect_row(),
         );
         self.agent.push_user_turn(node, &child_prompt)?;
         self.emit(Event::TurnStart { node });
@@ -3537,7 +3537,7 @@ impl SelfHarnessDriver {
             ty,
             self.answerer_imports(),
             Some(table),
-            self.agent.effect_names(),
+            &self.agent.hole_card_effect_row(),
         );
         let node = self.agent.fork_from_context_ref(&cref, &hole_card)?;
         // PRD 21 C5: this branch child's prompt is the ONE place its domain
@@ -3977,7 +3977,7 @@ impl SelfHarnessDriver {
             element_ty,
             self.answerer_imports(),
             Some(table),
-            self.agent.effect_names(),
+            &self.agent.hole_card_effect_row(),
         );
         self.agent.push_user_turn(node, &child_prompt)?;
         self.emit(Event::TurnStart { node });

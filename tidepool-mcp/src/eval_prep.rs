@@ -443,6 +443,18 @@ pub struct TurnTemplate<'a> {
     /// bound (an `ideas` array stubbed to a string was the live failure).
     /// Default `false`: every pre-existing caller's bytes are unchanged.
     pub unpaginated: bool,
+    /// PRD 21 C5: when `true`, every entry's result binding applies
+    /// `Tidepool.Agent.Delegate.runDelegate` to its own binder — `_r <-
+    /// runDelegate <binder>` instead of `_r <- <binder>` — so the entry's
+    /// body (`code`) compiles at the narrow `Delegate ': effs` row
+    /// `runDelegate` peels back from, while `self.effect_stack` (this
+    /// entry's own signature) keeps naming the REAL, dispatched OUTER row.
+    /// This is the "wrap lives in the template's RESULT position" mechanism
+    /// (`tidepool-harness::engine::delegate_aware_preamble`'s doc has the
+    /// full story, including why `M` is redefined locally rather than
+    /// touched here) — `code` itself is never textually rewritten. Default
+    /// `false`: every pre-existing caller's bytes are unchanged.
+    pub delegate_wrap: bool,
 }
 
 impl TurnTemplate<'_> {
@@ -584,13 +596,18 @@ impl TurnTemplate<'_> {
         } else {
             "_r"
         };
+        let source = if self.delegate_wrap {
+            format!("runDelegate {binder}")
+        } else {
+            binder.to_string()
+        };
 
         out.push_str(&format!("{name} :: Eff {} Value\n", self.effect_stack));
         out.push_str(&format!("{name} = do\n"));
         if self.budget.is_some() {
             out.push_str("  kvSet \"__sayChars\" (toJSON (0 :: Int))\n");
         }
-        out.push_str(&format!("  _r <- {binder}\n"));
+        out.push_str(&format!("  _r <- {source}\n"));
         if self.unpaginated {
             out.push_str(&format!("  pure ({render_call} {rendered})\n"));
         } else if let Some(b) = self.budget {

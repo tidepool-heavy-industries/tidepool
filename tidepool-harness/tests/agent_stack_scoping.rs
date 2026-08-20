@@ -77,7 +77,14 @@ fn compile_against(
 ) -> Result<CompiledTurn, CompileError> {
     let cfg = EngineConfig::from_decls(decls, prelude_dir(), None).expect("engine config");
     let target = cfg.turn_target(None).expect("turn target");
-    let source = template_turn_for(&cfg.decls, &target.stack, code, imports, "");
+    let source = template_turn_for(
+        &cfg.decls,
+        &target.stack,
+        code,
+        imports,
+        "",
+        cfg.delegate_wrap,
+    );
     engine::compile_turn(
         &cfg.extract_bin,
         &source,
@@ -102,7 +109,14 @@ fn compile_pinned(
     let target = cfg
         .turn_target(Some((finalize_ty, &[])))
         .expect("turn target");
-    let source = template_turn_for(&cfg.decls, &target.stack, code, imports, "");
+    let source = template_turn_for(
+        &cfg.decls,
+        &target.stack,
+        code,
+        imports,
+        "",
+        cfg.delegate_wrap,
+    );
     engine::compile_turn(
         &cfg.extract_bin,
         &source,

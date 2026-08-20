@@ -691,6 +691,16 @@ impl Harness {
         &self.cfg.effect_names
     }
 
+    /// The effect-row a window-opening hole card should STATE (PRD 21 C5):
+    /// [`Self::effect_names`] for a non-delegating config, or the narrow
+    /// `Delegate`-form row a delegating config's model-facing block actually
+    /// compiles against — see [`EngineConfig::hole_card_effect_row`]. Never
+    /// used for tag lookup (`Self::effect_names`/`flush_effects` stay the
+    /// real dispatched row).
+    pub fn hole_card_effect_row(&self) -> Vec<String> {
+        self.cfg.hole_card_effect_row()
+    }
+
     /// Build a harness over `writer` (a fresh log past its header), the engine
     /// config, and a signed-in provider.
     pub fn new(
@@ -1546,25 +1556,16 @@ impl Harness {
                 .run_multi_item_block(node, block, imports, helpers)
                 .await;
         }
-        // PRD 21 C5: a delegating config's SINGLE-ITEM turn compiles the
-        // model's block as the argument to `runDelegate`, so `Subagent`
-        // never appears in the block's own row — see
-        // `EngineConfig::delegate_wrap`'s doc and
-        // `Tidepool.Agent.Delegate.runDelegate`'s. This is ONE shared text
-        // ahead of every candidate template below (`Decl`/`Bind`/
-        // `BindDiscard`/`Expr` all splice the SAME `turn_text`), so it also
-        // reaches the `Decl` candidate — harmless for the shape every
-        // answerer/branch-node turn actually uses (a bare expression ending
-        // in `finalize`), but it means a genuine top-level DECLARATION
-        // (`helperFn x = x + 1`, no enclosing `let`) is out of scope for a
-        // delegating row; nothing in this harness's dogfood authors one.
-        let wrapped_block;
-        let block: &str = if self.cfg.delegate_wrap {
-            wrapped_block = format!("runDelegate $ do\n{block}");
-            &wrapped_block
-        } else {
-            block
-        };
+        // PRD 21 C5: a delegating config's `runDelegate` wrap lives entirely
+        // in the Expr/Bind/BindDiscard TEMPLATES now (`engine::expr_turn_template`/
+        // `engine::session_bind_template`, via `EngineConfig::delegate_wrap`)
+        // — applied at each candidate's own RESULT position, never as a text
+        // prepend to `block` itself. `block` (and so every candidate,
+        // including `Decl`) therefore compiles the model's text UNMODIFIED,
+        // which is what makes a top-level `data`/decl item legal in a
+        // delegating window: the wrap the OLD text-prepend applied uniformly
+        // to every candidate (including `Decl`, where it was nonsensical)
+        // now only ever reaches the candidates whose templates apply it.
         // Session/contract context, peeked under the lock WITHOUT checking the
         // session out, so a compile failure below never leaks it (the session
         // is taken only once a compiled fragment is in hand).
