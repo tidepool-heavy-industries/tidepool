@@ -35,6 +35,10 @@ thiserror.workspace = true
 genai.workspace = true
 openai-auth = { version = "1", default-features = false, features = ["async", "callback-server"] }
 reqwest = { workspace = true, features = ["form"] }
+# `ReasoningTuningArgs` (`provider/oauth.rs`) is `clap::Args` so a binary's
+# own entry point can `#[command(flatten)]` it — the "env" feature backs its
+# `#[arg(env = "...")]` fields.
+clap.workspace = true
 base64 = "0.23"
 uuid = { workspace = true, features = ["v5"] }
 tokio = { workspace = true, features = ["net", "rt", "rt-multi-thread", "sync", "time"] }

@@ -29,7 +29,7 @@ use tidepool_handlers::{
 use tidepool_harness::engine::EngineConfig;
 use tidepool_harness::log::{LogHeader, LogWriter};
 use tidepool_harness::provider::api_key::{ApiKeyConfig, ApiKeyProvider};
-use tidepool_harness::provider::oauth::{OauthConfig, OauthProvider};
+use tidepool_harness::provider::oauth::{OauthConfig, OauthProvider, ReasoningTuningArgs};
 use tidepool_harness::provider::DynModelProvider;
 use tidepool_harness::replay::ReplayProvider;
 use tidepool_harness::selfharness::persistence;
@@ -80,6 +80,12 @@ struct Args {
     /// Operator GUI port (only used when not running --yes/--auto/--replay).
     #[arg(long, default_value_t = 4600)]
     port: u16,
+    /// Reasoning effort/summary knobs for the OAuth provider's `/responses`
+    /// calls (`--reasoning-effort`/`TIDEPOOL_LLM_EFFORT`,
+    /// `--reasoning-summary`/`TIDEPOOL_LLM_REASONING_SUMMARY`); unused in
+    /// `--api-key`/`--replay` mode.
+    #[command(flatten)]
+    reasoning: ReasoningTuningArgs,
 }
 
 #[tokio::main(flavor = "multi_thread")]
@@ -142,7 +148,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             // gpt-4o-mini; default to a Codex-supported model.
             let model =
                 std::env::var("TIDEPOOL_LLM_MODEL").unwrap_or_else(|_| "gpt-5.6-terra".to_string());
-            Arc::new(OauthProvider::new(OauthConfig::new(model)))
+            let mut oauth_cfg = OauthConfig::new(model);
+            oauth_cfg.tuning = args.reasoning.clone().into();
+            Arc::new(OauthProvider::new(oauth_cfg))
         }
     };
 

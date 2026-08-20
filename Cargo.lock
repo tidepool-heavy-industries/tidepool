@@ -4059,6 +4059,7 @@ version = "0.1.0"
 dependencies = [
  "base64 0.23.1",
  "blake3",
+ "clap",
  "futures-util",
  "genai",
  "openai-auth",

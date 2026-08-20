@@ -93,6 +93,103 @@ pub struct OauthConfig {
     /// Chat-completions endpoint override — `None` uses genai's normal
     /// resolution for `model`; tests point this at a local fixture server.
     pub chat_base_url: Option<String>,
+    /// The `reasoning.effort`/`reasoning.summary` knobs sent on every
+    /// `/responses` call — resolved once at process entry (see
+    /// [`ReasoningTuningArgs`]), never read ambiently at request-build time.
+    pub tuning: ReasoningTuning,
+}
+
+/// Reasoning effort for the Codex `/responses` call — clap-typed via
+/// [`ReasoningTuningArgs`] (`TIDEPOOL_LLM_EFFORT`, default `medium`).
+/// `medium` reliably makes the backend emit `reasoning_summary_text` deltas
+/// (the "thinking" the observatory shows); a higher/lower effort trades
+/// thinking visibility for cost.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, clap::ValueEnum)]
+#[value(rename_all = "lowercase")]
+pub enum ReasoningEffort {
+    Minimal,
+    Low,
+    #[default]
+    Medium,
+    High,
+}
+
+impl ReasoningEffort {
+    /// The exact string the Codex `/responses` body expects — kept as an
+    /// explicit mapping (rather than reading `ValueEnum::to_possible_value`)
+    /// so the wire form is never coupled to clap's own rendering.
+    fn wire(self) -> &'static str {
+        match self {
+            Self::Minimal => "minimal",
+            Self::Low => "low",
+            Self::Medium => "medium",
+            Self::High => "high",
+        }
+    }
+}
+
+/// Reasoning-summary verbosity for the same call — clap-typed via
+/// [`ReasoningTuningArgs`] (`TIDEPOOL_LLM_REASONING_SUMMARY`, default
+/// `detailed`). `detailed` by default: the summaries are the ONLY legible
+/// thinking record a run keeps (the raw chain-of-thought exists solely as
+/// encrypted items), and reading where the model was confused is a standing
+/// dogfood instrument — `auto` mostly yields bare section headlines.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, clap::ValueEnum)]
+#[value(rename_all = "lowercase")]
+pub enum ReasoningSummary {
+    Auto,
+    Concise,
+    #[default]
+    Detailed,
+}
+
+impl ReasoningSummary {
+    /// The exact string the Codex `/responses` body expects — see
+    /// [`ReasoningEffort::wire`] for why this isn't `ValueEnum`-derived.
+    fn wire(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Concise => "concise",
+            Self::Detailed => "detailed",
+        }
+    }
+}
+
+/// The two reasoning knobs, resolved once (see [`ReasoningTuningArgs`]) and
+/// carried on [`OauthConfig`] instead of read ambiently at request-build
+/// time. `Default` preserves the pre-clap behavior (`medium`/`detailed`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ReasoningTuning {
+    pub effort: ReasoningEffort,
+    pub summary: ReasoningSummary,
+}
+
+/// Clap-parseable form of [`ReasoningTuning`] — `#[command(flatten)]` this
+/// into a binary's own `Args`/`Parser` struct so `--reasoning-effort`/
+/// `TIDEPOOL_LLM_EFFORT` and `--reasoning-summary`/
+/// `TIDEPOOL_LLM_REASONING_SUMMARY` are validated at startup: an empty or
+/// invalid value fails loudly, naming the flag and every allowed value
+/// (clap's own `ValueEnum` parse-error message), rather than reaching the
+/// backend as a bad `"effort": ""` and surfacing as its own opaque 400.
+#[derive(Debug, Clone, clap::Args)]
+pub struct ReasoningTuningArgs {
+    #[arg(long, env = "TIDEPOOL_LLM_EFFORT", default_value = "medium")]
+    pub reasoning_effort: ReasoningEffort,
+    #[arg(
+        long,
+        env = "TIDEPOOL_LLM_REASONING_SUMMARY",
+        default_value = "detailed"
+    )]
+    pub reasoning_summary: ReasoningSummary,
+}
+
+impl From<ReasoningTuningArgs> for ReasoningTuning {
+    fn from(args: ReasoningTuningArgs) -> Self {
+        Self {
+            effort: args.reasoning_effort,
+            summary: args.reasoning_summary,
+        }
+    }
 }
 
 /// ChatGPT-subscription chat endpoint. A subscription OAuth token is NOT a
@@ -124,6 +221,7 @@ impl OauthConfig {
             token_path: default_token_path(),
             model: model.into(),
             chat_base_url: Some(CHATGPT_BACKEND_URL.to_string()),
+            tuning: ReasoningTuning::default(),
         }
     }
 
@@ -228,11 +326,34 @@ pub struct DeviceCodeStart {
     pub interval_secs: u64,
 }
 
-/// A reqwest client that impersonates the Codex CLI. `auth.openai.com` sits
-/// behind a Cloudflare WAF that 403s the default `reqwest/*` User-Agent with a
-/// JS challenge a headless client can't solve; the `codex_cli_rs` User-Agent +
-/// `originator` header are what the reference CLI sends to get through.
-fn codex_http() -> Result<reqwest::Client, ProviderError> {
+/// Bounds the TCP+TLS handshake for every `codex_http*` client, independent
+/// of whatever (if any) read/total timeout applies to the request that
+/// follows.
+const CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Total-request budget for the small JSON device-auth endpoints (usercode/
+/// token-poll/token-exchange) — bodies are tiny and the poll loop already
+/// carries its own 15-minute deadline, so this just bounds a single stalled
+/// request rather than a hung whole login. Deliberately NOT used for the
+/// streaming `/responses` call — see [`codex_http_streaming`].
+const DEVICE_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Idle-read timeout for the SSE `/responses` stream: resets on every
+/// successful read (headers or a body chunk), so a multi-minute legitimate
+/// stream survives as long as SOME data keeps arriving, while a connection
+/// that accepts then goes silent mid-stream is bounded instead of hanging
+/// `resp.chunk().await` forever. NOT a total-request timeout — a real turn
+/// can legitimately stream for many minutes.
+const SSE_IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
+
+/// Shared builder for every Codex-backend client: impersonates the Codex
+/// CLI (`auth.openai.com` sits behind a Cloudflare WAF that 403s the default
+/// `reqwest/*` User-Agent with a JS challenge a headless client can't solve;
+/// the `codex_cli_rs` User-Agent + `originator` header are what the
+/// reference CLI sends to get through) and caps the connect phase. Callers
+/// add whichever request-level timeout policy fits their endpoint — see
+/// [`codex_http`] (total) vs [`codex_http_streaming`] (idle-only).
+fn codex_http_builder() -> reqwest::ClientBuilder {
     let mut headers = reqwest::header::HeaderMap::new();
     headers.insert(
         "originator",
@@ -243,6 +364,24 @@ fn codex_http() -> Result<reqwest::Client, ProviderError> {
             "codex_cli_rs/{CODEX_CLIENT_VERSION} (linux; x86_64)"
         ))
         .default_headers(headers)
+        .connect_timeout(CONNECT_TIMEOUT)
+}
+
+/// Client for the small JSON device-auth endpoints (usercode/token-poll/
+/// token-exchange): a total-request timeout is safe here — see
+/// [`DEVICE_REQUEST_TIMEOUT`].
+fn codex_http() -> Result<reqwest::Client, ProviderError> {
+    codex_http_builder()
+        .timeout(DEVICE_REQUEST_TIMEOUT)
+        .build()
+        .map_err(|e| ProviderError::Api(format!("http client build failed: {e}")))
+}
+
+/// Client for the streaming `/responses` call — see [`SSE_IDLE_TIMEOUT`] for
+/// why this deliberately carries no total-request timeout.
+fn codex_http_streaming() -> Result<reqwest::Client, ProviderError> {
+    codex_http_builder()
+        .read_timeout(SSE_IDLE_TIMEOUT)
         .build()
         .map_err(|e| ProviderError::Api(format!("http client build failed: {e}")))
 }
@@ -324,11 +463,11 @@ pub async fn complete_device_login(
         let status = resp.status();
         let body = resp.text().await.unwrap_or_default();
         polls += 1;
-        eprintln!(
-            "[login] poll #{polls}: HTTP {} — {}",
-            status.as_u16(),
-            body.chars().take(200).collect::<String>()
-        );
+        // Status + poll count ONLY — the terminal 200 body carries
+        // `authorization_code`/`code_verifier` (plaintext credentials), so
+        // no response body from this endpoint is ever logged, success or
+        // error.
+        eprintln!("[login] poll #{polls}: HTTP {}", status.as_u16());
         if status.is_success() {
             let v: serde_json::Value = serde_json::from_str(&body)
                 .map_err(|e| ProviderError::Api(format!("device token: bad JSON: {e} ({body})")))?;
@@ -539,11 +678,21 @@ fn installation_id() -> String {
 /// still its first message — harmless (and arguably a cache-affinity WIN,
 /// since both share the same ancestor prefix) under `store: false`, where
 /// `session-id` is routing/telemetry, never persisted conversation state.
+///
+/// The key is length-prefixed on `instructions` (not a bare delimiter join):
+/// a raw NUL-joined key would let a NUL byte inside `instructions` shift the
+/// boundary and collide two genuinely different (instructions, opening)
+/// pairs onto the same id — e.g. `("SYS\0", "TAIL")` and `("SYS", "\0TAIL")`
+/// would otherwise join to the identical bytes `SYS\0\0TAIL`. Prefixing only
+/// `instructions`'s length is enough to disambiguate: `opening` is the last
+/// field, so nothing after it needs its own length to stay unambiguous.
 fn session_id_for(instructions: &str, opening: Option<&str>) -> String {
-    let mut key = String::from(instructions);
-    key.push('\0');
-    key.push_str(opening.unwrap_or(""));
-    uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_OID, key.as_bytes()).to_string()
+    let opening = opening.unwrap_or("");
+    let mut key = Vec::with_capacity(8 + instructions.len() + opening.len());
+    key.extend_from_slice(&(instructions.len() as u64).to_le_bytes());
+    key.extend_from_slice(instructions.as_bytes());
+    key.extend_from_slice(opening.as_bytes());
+    uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_OID, &key).to_string()
 }
 
 /// One conversational `TurnRequest` message → its Responses-API `input`
@@ -572,24 +721,6 @@ fn to_input_items(m: &Message) -> Vec<serde_json::Value> {
         "content": [{ "type": content_type, "text": m.content }],
     }));
     items
-}
-
-/// Reasoning effort for the Codex `/responses` call. `medium` reliably makes
-/// the backend emit `reasoning_summary_text` deltas (the "thinking" the
-/// observatory shows); override with `TIDEPOOL_LLM_EFFORT` (`minimal`/`low`/
-/// `medium`/`high`) to trade thinking visibility for cost.
-fn reasoning_effort() -> String {
-    std::env::var("TIDEPOOL_LLM_EFFORT").unwrap_or_else(|_| "medium".to_string())
-}
-
-/// Reasoning-summary verbosity for the same call. `detailed` by default:
-/// the summaries are the ONLY legible thinking record a run keeps (the raw
-/// chain-of-thought exists solely as encrypted items), and reading where the
-/// model was confused is a standing dogfood instrument — `auto` mostly
-/// yields bare section headlines. Override with
-/// `TIDEPOOL_LLM_REASONING_SUMMARY` (`auto`/`concise`/`detailed`).
-fn reasoning_summary() -> String {
-    std::env::var("TIDEPOOL_LLM_REASONING_SUMMARY").unwrap_or_else(|_| "detailed".to_string())
 }
 
 /// Hand-rolled `/responses` call against the ChatGPT Codex backend — see the
@@ -630,9 +761,12 @@ async fn codex_responses(
         "tool_choice": "auto",
         "parallel_tool_calls": false,
         // The summary stream is the "thinking" the observatory renders and
-        // the run log keeps — see `reasoning_summary` for why it defaults
-        // to `detailed`.
-        "reasoning": { "effort": reasoning_effort(), "summary": reasoning_summary() },
+        // the run log keeps — see `ReasoningSummary`'s doc for why it
+        // defaults to `detailed`.
+        "reasoning": {
+            "effort": cfg.tuning.effort.wire(),
+            "summary": cfg.tuning.summary.wire(),
+        },
         "store": false,
         "stream": true,
         "include": ["reasoning.encrypted_content"],
@@ -656,7 +790,7 @@ async fn codex_responses(
         .find(|m| m.role != Role::System)
         .map(|m| m.content.as_str());
 
-    let http = codex_http()?;
+    let http = codex_http_streaming()?;
     let mut request = http
         .post(&url)
         .bearer_auth(token)
@@ -1074,5 +1208,121 @@ mod tests {
         let a = session_id_for("instructions", None);
         let b = session_id_for("instructions", None);
         assert_eq!(a, b);
+    }
+
+    /// The collision the un-prefixed `\0`-join was vulnerable to: without a
+    /// length prefix on `instructions`, `("SYS\0", "TAIL")` and
+    /// `("SYS", "\0TAIL")` join to the identical byte string
+    /// `SYS\0\0TAIL` and would hash to the same id.
+    #[test]
+    fn session_id_does_not_collide_across_the_delimiter_boundary() {
+        let a = session_id_for("SYS\0", Some("TAIL"));
+        let b = session_id_for("SYS", Some("\0TAIL"));
+        assert_ne!(
+            a, b,
+            "a NUL inside `instructions` must not be able to masquerade as the \
+             (instructions, opening) boundary"
+        );
+    }
+
+    // -- ReasoningTuningArgs: clap-typed effort/summary parse. --
+
+    fn with_env<F: FnOnce()>(vars: &[(&str, Option<&str>)], f: F) {
+        let prior: Vec<(String, Option<String>)> = vars
+            .iter()
+            .map(|(k, _)| (k.to_string(), std::env::var(k).ok()))
+            .collect();
+        for (k, v) in vars {
+            match v {
+                Some(v) => std::env::set_var(k, v),
+                None => std::env::remove_var(k),
+            }
+        }
+        f();
+        for (k, v) in prior {
+            match v {
+                Some(v) => std::env::set_var(&k, v),
+                None => std::env::remove_var(&k),
+            }
+        }
+    }
+
+    #[derive(clap::Parser)]
+    struct TuningTestCli {
+        #[command(flatten)]
+        tuning: ReasoningTuningArgs,
+    }
+
+    fn parse_tuning(cli_args: &[&str]) -> Result<ReasoningTuningArgs, clap::Error> {
+        use clap::Parser;
+        TuningTestCli::try_parse_from(std::iter::once("prog").chain(cli_args.iter().copied()))
+            .map(|c| c.tuning)
+    }
+
+    #[test]
+    fn tuning_unset_env_yields_defaults() {
+        with_env(
+            &[
+                ("TIDEPOOL_LLM_EFFORT", None),
+                ("TIDEPOOL_LLM_REASONING_SUMMARY", None),
+            ],
+            || {
+                let tuning: ReasoningTuning = parse_tuning(&[]).expect("unset env parses").into();
+                assert_eq!(tuning.effort, ReasoningEffort::Medium);
+                assert_eq!(tuning.summary, ReasoningSummary::Detailed);
+            },
+        );
+    }
+
+    #[test]
+    fn tuning_empty_env_value_fails_loudly() {
+        with_env(&[("TIDEPOOL_LLM_EFFORT", Some(""))], || {
+            let err = parse_tuning(&[]).expect_err("empty effort must not silently pass through");
+            let msg = err.to_string();
+            assert!(
+                msg.contains("reasoning-effort") || msg.contains("TIDEPOOL_LLM_EFFORT"),
+                "error must name the knob: {msg}"
+            );
+        });
+    }
+
+    #[test]
+    fn tuning_invalid_env_value_fails_loudly_naming_allowed_values() {
+        with_env(&[("TIDEPOOL_LLM_REASONING_SUMMARY", Some("bogus"))], || {
+            let err = parse_tuning(&[]).expect_err("invalid summary must be rejected");
+            let msg = err.to_string();
+            for allowed in ["auto", "concise", "detailed"] {
+                assert!(
+                    msg.contains(allowed),
+                    "error must list allowed values (missing {allowed}): {msg}"
+                );
+            }
+        });
+    }
+
+    #[test]
+    fn tuning_valid_env_value_is_honored() {
+        with_env(
+            &[
+                ("TIDEPOOL_LLM_EFFORT", Some("high")),
+                ("TIDEPOOL_LLM_REASONING_SUMMARY", Some("concise")),
+            ],
+            || {
+                let tuning: ReasoningTuning = parse_tuning(&[]).expect("valid env parses").into();
+                assert_eq!(tuning.effort, ReasoningEffort::High);
+                assert_eq!(tuning.summary, ReasoningSummary::Concise);
+            },
+        );
+    }
+
+    #[test]
+    fn tuning_wire_forms_match_the_backend_contract() {
+        assert_eq!(ReasoningEffort::Minimal.wire(), "minimal");
+        assert_eq!(ReasoningEffort::Low.wire(), "low");
+        assert_eq!(ReasoningEffort::Medium.wire(), "medium");
+        assert_eq!(ReasoningEffort::High.wire(), "high");
+        assert_eq!(ReasoningSummary::Auto.wire(), "auto");
+        assert_eq!(ReasoningSummary::Concise.wire(), "concise");
+        assert_eq!(ReasoningSummary::Detailed.wire(), "detailed");
     }
 }

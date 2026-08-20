@@ -580,6 +580,99 @@ async fn oauth_provider_echoes_reasoning_item_into_next_request() {
     );
 }
 
+/// Wire-level pin for the cache-affinity routing key (`oauth.rs`'s
+/// `session_id_for`): the `session-id` header must actually reach the
+/// `/responses` request (not just be correct as a pure function), stay
+/// IDENTICAL across two calls sharing the same (instructions, opening) — a
+/// later round of the SAME window — and DIFFER once the window's opening
+/// message changes. `session_id_for`'s own unit tests already pin the pure
+/// function; this is the one test that would fail if the header were ever
+/// dropped or wired to the wrong value on the actual HTTP request.
+#[tokio::test]
+async fn oauth_provider_session_id_header_is_present_stable_and_distinct_across_windows() {
+    let chat_server = MockServer::start();
+    chat_server.queue_raw("POST", "/responses", 200, responses_sse_body("pong", 3, 1));
+    chat_server.queue_raw("POST", "/responses", 200, responses_sse_body("pong2", 3, 1));
+    chat_server.queue_raw("POST", "/responses", 200, responses_sse_body("pong3", 3, 1));
+
+    let dir = tempfile::tempdir().unwrap();
+    let token_path = dir.path().join("token.json");
+    write_token(&token_path, &jwt_with_account_id("acct-1"), "rt", 3600);
+    let cfg = oauth_cfg_for_mock(&chat_server, "http://127.0.0.1:1/", token_path);
+    let provider = OauthProvider::new(cfg);
+
+    let window = TurnRequest {
+        messages: vec![
+            Message {
+                role: Role::System,
+                content: "You answer typed holes.".into(),
+                reasoning_items: Vec::new(),
+            },
+            Message {
+                role: Role::User,
+                content: "opening one".into(),
+                reasoning_items: Vec::new(),
+            },
+        ],
+        max_tokens: None,
+    };
+    provider
+        .complete(window.clone(), None)
+        .await
+        .expect("first round completes");
+    let id1 = chat_server
+        .header_seen("POST", "/responses", "session-id")
+        .expect("session-id header must be present on the request");
+
+    // A later round of the SAME window: append the assistant reply, same
+    // instructions and opening.
+    let mut window_round2 = window;
+    window_round2.messages.push(Message {
+        role: Role::Assistant,
+        content: "pong".into(),
+        reasoning_items: Vec::new(),
+    });
+    provider
+        .complete(window_round2, None)
+        .await
+        .expect("second round completes");
+    let id2 = chat_server
+        .header_seen("POST", "/responses", "session-id")
+        .expect("session-id header must be present on the request");
+    assert_eq!(
+        id1, id2,
+        "a later round of the same window must reuse the same session-id header"
+    );
+
+    // A genuinely different window: a different opening message.
+    let other_window = TurnRequest {
+        messages: vec![
+            Message {
+                role: Role::System,
+                content: "You answer typed holes.".into(),
+                reasoning_items: Vec::new(),
+            },
+            Message {
+                role: Role::User,
+                content: "opening two".into(),
+                reasoning_items: Vec::new(),
+            },
+        ],
+        max_tokens: None,
+    };
+    provider
+        .complete(other_window, None)
+        .await
+        .expect("third round completes");
+    let id3 = chat_server
+        .header_seen("POST", "/responses", "session-id")
+        .expect("session-id header must be present on the request");
+    assert_ne!(
+        id1, id3,
+        "a different window's opening message must get a different session-id header"
+    );
+}
+
 /// Token persistence lands at the config-dir/secrets convention with 0600
 /// perms — the same path `complete_login` writes to after the loopback
 /// callback exchange.
