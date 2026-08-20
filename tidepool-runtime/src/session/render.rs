@@ -303,7 +303,7 @@ impl ModuleEnv {
                       ViewPatterns, BangPatterns, TypeApplications, BlockArguments, \
                       NumericUnderscores, MultilineStrings, DeriveFunctor, DeriveFoldable, \
                       DeriveTraversable, DeriveGeneric, DeriveAnyClass, QuasiQuotes, \
-                      DuplicateRecordFields, OverloadedRecordDot #-}"
+                      DuplicateRecordFields, OverloadedRecordDot, OverloadedLabels #-}"
                 .to_string(),
             imports: vec![
                 "import qualified Tidepool.Data.Text as T".to_string(),

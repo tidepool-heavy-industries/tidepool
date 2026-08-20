@@ -205,7 +205,7 @@ pub struct TurnTemplate {
 /// asserts an exact subset with the excluded set spelled out, so adding an
 /// extension here that eval does not also carry fails loud rather than
 /// silently parsing session-decl code in a different dialect than eval does.
-pub const DECL_TEMPLATE_SOURCE: &str = "{-# LANGUAGE GADTs, OverloadedStrings, TypeOperators, DataKinds, ScopedTypeVariables, BangPatterns, ViewPatterns, TupleSections, MultiWayIf, LambdaCase, RecordWildCards, NamedFieldPuns, DeriveFunctor, DeriveFoldable, DeriveTraversable, TypeApplications, QuasiQuotes #-}\nmodule SessionDecls where\n{{TURN}}\n";
+pub const DECL_TEMPLATE_SOURCE: &str = "{-# LANGUAGE GADTs, OverloadedStrings, TypeOperators, DataKinds, ScopedTypeVariables, BangPatterns, ViewPatterns, TupleSections, MultiWayIf, LambdaCase, RecordWildCards, NamedFieldPuns, DeriveFunctor, DeriveFoldable, DeriveTraversable, TypeApplications, QuasiQuotes, OverloadedLabels #-}\nmodule SessionDecls where\n{{TURN}}\n";
 
 /// One `run_turn` request: the raw turn text, the wrapper templates it may
 /// need, the session context, the bind generation, and an optional
