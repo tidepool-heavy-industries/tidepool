@@ -219,3 +219,150 @@ result = concat
         assert_eq!(v, json!([]), "cases that did not decode to the typed value")
     }
 }
+
+// ---------------------------------------------------------------------------
+// `Tidepool.Form`'s `formShapeWith`/`askUserWith`: typed `#field` labels
+// carrying per-field help prose, merged into the derived wire (`field`'s
+// `HasField` constraint is the compile-time check that a label names a real
+// field of the answer type).
+//
+// A separate header from `eval_result`'s above: these need `Tidepool.Form`
+// itself (not just `Form.Shape`/`Form.GForm`), which is built on `M`/
+// `askUserRaw`/`noteRaw` from the generated `Tidepool.Effects` — reachable
+// only with `AskUser` in the compiling row — plus `OverloadedLabels` for the
+// `#field` syntax.
+
+const FORM_HEADER: &str =
+    "{-# LANGUAGE NoImplicitPrelude, OverloadedStrings, DataKinds, DeriveGeneric, DeriveAnyClass, TypeApplications, OverloadedLabels, AllowAmbiguousTypes #-}\n\
+     module Expr where\n\
+     import Tidepool.Prelude hiding (error, note)\n\
+     import Tidepool.Form\n\
+     import Tidepool.Form.GForm (formShape)\n\
+     import Tidepool.Form.Wire (encodeShape)\n";
+
+/// The generated `Tidepool.Effects` module dir for a row carrying only
+/// `AskUser` — enough for `Tidepool.Form`'s own imports (`M`, `askUserRaw`,
+/// `noteRaw`) to resolve, without pulling in the full standard effect set.
+fn form_effects_dir() -> std::path::PathBuf {
+    tidepool_mcp::ensure_effects_module(&[tidepool_mcp::askuser_decl()])
+        .expect("write Tidepool.Effects module for the AskUser-only row")
+}
+
+/// Compile + run a module PURE on the JIT, with `Tidepool.Form` (and its
+/// `AskUser`-only effects module) on the include path, and return `result`
+/// as JSON.
+fn eval_form_result(body: &str) -> Option<serde_json::Value> {
+    tidepool_testing::eval_harness::require_extract();
+    let src = format!("{FORM_HEADER}{DECLS}\n{body}");
+    Some(
+        EvalHarness::new()
+            .with_stdlib()
+            .with_include(form_effects_dir())
+            .run_pure(&src, "result")
+            .expect("compile_and_run_pure failed")
+            .to_json(),
+    )
+}
+
+/// A title plus one field's help land exactly where the wire contract says:
+/// the title as `"doc"` on the root `"sum"` object, the field's help as
+/// `"doc"` on that field's entry inside the `Ssh` variant's `"fields"` array
+/// — every other key byte-identical to the undocumented `encodeShape` wire.
+///
+/// CONFIRMED-BUG REPRO — `#[ignore]`d so the suite stays green. `field`'s
+/// `IsLabel` instance needs GHC's standard `(name ~ name', KnownSymbol
+/// name) => IsLabel name' (FieldRef name)` shape to type `#field` without
+/// "Ambiguous type variable" (the GHC user's guide names this exact
+/// workaround for OverloadedLabels; reproduced with plain `ghc`, so it is
+/// not a design choice to revisit). tidepool-extract currently fails to
+/// extract the resulting `(name ~ name')` dictionary construction when
+/// `field` is called from a DIFFERENT module than the instance (every real
+/// use) — "Dangling NVar reference(s) ... Eq# [GHC.Types]", confirmed via
+/// `TIDEPOOL_DANGLING_DEBUG=1` and isolated to a 3-line repro; same-module
+/// use extracts and runs fine, and plain `ghc -O2` (even under
+/// tidepool-extract's own `-fno-full-laziness -fno-cpr-anal` flags) erases
+/// the same coercion entirely — a real gap in tidepool-extract's Core→CBOR
+/// reachability (see `Tidepool.Form`'s `FieldRef`/`IsLabel` instance
+/// comment), not a mistake in this test or in `field`'s design. Needs a
+/// fix in `haskell/src/Tidepool/Translate.hs`. Run with `--ignored` to
+/// check whether it still reproduces.
+#[test]
+#[ignore = "tidepool-extract cross-module Eq# dangling-reference bug — see Tidepool.Form's FieldRef comment"]
+fn form_shape_with_title_and_field_doc_lands_on_the_wire() {
+    let body = r#"
+result :: Value
+result = formShapeWith @Dest
+  [ title "Where to deploy"
+  , field #host (help "SSH host to connect to.")
+  ]
+"#;
+    if let Some(v) = eval_form_result(body) {
+        assert_eq!(
+            v,
+            json!({"sum": {
+                "type_key": "Dest",
+                "doc": "Where to deploy",
+                "variants": [
+                    {"constructor": "LocalHost", "shape": {"product": {
+                        "type_key": "Dest", "constructor": "LocalHost", "fields": []
+                    }}},
+                    {"constructor": "Ssh", "shape": {"product": {
+                        "type_key": "Dest",
+                        "constructor": "Ssh",
+                        "fields": [
+                            {"key": "host", "shape": "string", "doc": "SSH host to connect to."},
+                            {"key": "port", "shape": "int"}
+                        ]
+                    }}}
+                ]
+            }})
+        )
+    }
+}
+
+/// With no annotations, `formShapeWith` is byte-identical to `askUser`'s own
+/// `encodeShape (formShape \@a)` wire — the doc merge only ever ADDS a key,
+/// it never touches the undocumented shape.
+#[test]
+fn form_shape_with_no_annotations_matches_bare_ask_user_shape() {
+    let body = r#"
+result :: Value
+result = object
+  [ "withEmpty" .= formShapeWith @Dest []
+  , "plain" .= encodeShape (formShape @Dest)
+  ]
+"#;
+    if let Some(v) = eval_form_result(body) {
+        assert_eq!(
+            v["withEmpty"], v["plain"],
+            "an unannotated formShapeWith must match encodeShape (formShape @a) exactly"
+        )
+    }
+}
+
+/// `field #nonexistent` on a record without that field is a compile-time
+/// TypeError naming `HasField` — the label surface's compile-time check, not
+/// a convenience. `Dest` has no `nonexistent` field on any constructor.
+#[test]
+fn field_with_unknown_label_is_rejected_at_compile_time() {
+    tidepool_testing::eval_harness::require_extract();
+    let src = format!(
+        "{FORM_HEADER}{DECLS}\n\
+         result :: Value\n\
+         result = formShapeWith @Dest [field #nonexistent (help \"nope\")]\n"
+    );
+    match EvalHarness::new()
+        .with_stdlib()
+        .with_include(form_effects_dir())
+        .compile(&src, "result")
+    {
+        Ok(_) => panic!("a #field naming no real field of the answer type must not compile"),
+        Err(e) => {
+            let msg = tidepool_runtime::classify_compile(&e).message;
+            assert!(
+                msg.contains("HasField"),
+                "expected the diagnostic to name HasField, got:\n{msg}"
+            );
+        }
+    }
+}

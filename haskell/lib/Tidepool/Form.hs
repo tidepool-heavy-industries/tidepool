@@ -1,6 +1,10 @@
 {-# LANGUAGE AllowAmbiguousTypes #-}
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE FlexibleContexts #-}
+{-# LANGUAGE FlexibleInstances #-}
+{-# LANGUAGE GADTs #-}
+{-# LANGUAGE KindSignatures #-}
+{-# LANGUAGE OverloadedLabels #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TypeApplications #-}
@@ -43,22 +47,38 @@ module Tidepool.Form
   , choose
   , chooseMany
   , note
+
+    -- * Doc-carrying forms
+  , FieldRef
+  , FieldAnn
+  , help
+  , FormAnn
+  , title
+  , field
+  , formShapeWith
+  , askUserWith
   ) where
 
 import Prelude
+import Data.Proxy (Proxy (..))
 import Data.Text (Text)
+import qualified Data.Text as T
 import qualified Data.Map.Strict as Map
+import GHC.Records (HasField)
+import GHC.TypeLits (KnownSymbol, Symbol, symbolVal)
+import GHC.OverloadedLabels (IsLabel (..))
 
 import Tidepool.Aeson.FromJSON (Result (..), fromJSON)
 import Tidepool.Aeson.Value (Value (..))
 import Tidepool.Effects (M, askUserRaw, noteRaw)
 import Tidepool.Form.GForm (DerivedForm, formShape)
 import Tidepool.Form.Shape
-  ( FieldShape (..)
+  ( FieldKey
+  , FieldShape (..)
   , FormShape (..)
   , VariantShape (..)
   )
-import Tidepool.Form.Wire (encodeShape)
+import Tidepool.Form.Wire (encodeShape, encodeShapeAnnotated)
 
 -- | Present a form derived from @a@'s own structure and return the @a@ the
 -- operator built.
@@ -155,3 +175,124 @@ repeatedLabel = go []
   where
     go _ [] = False
     go seen ((label, _) : rest) = label `elem` seen || go (label : seen) rest
+
+-- ---------------------------------------------------------------------------
+-- Doc-carrying forms
+--
+-- 'askUser' derives a form's SHAPE from a type alone; the surface below lets
+-- an author attach a title and per-field help prose to that same derivation
+-- without writing a second description of the shape. A @#field@ is a typed
+-- reference to one of @r@'s own record fields (via 'IsLabel'); 'field' pairs
+-- it with help text, erasing the name to the plain 'FieldKey' the wire
+-- already carries. A typo'd @#field@ — one that does not name a real field
+-- of @r@ — fails to compile: the 'HasField' constraint on 'field' is the
+-- check, not a convenience.
+
+-- | A typed reference to a field, produced by @OverloadedLabels@
+-- (@#fieldName@) and carrying only the field's NAME — @field@'s own
+-- signature carries the record type @r@ and field type @t@, resolved from
+-- the label via @HasField@ once @r@ is known from context.
+--
+-- Deliberately not parameterized over @r@\/@t@ itself: an @IsLabel@ instance
+-- whose head repeats a type variable inside a nested application (as a
+-- @FieldRef r name t@-shaped carrier would) leaves those OTHER variables
+-- ambiguous at the @#label@ use site. Keeping the label-carrier down to its
+-- symbol alone sidesteps that: nothing about resolving @#fieldName@ needs
+-- @r@ or @t@ at all.
+data FieldRef (name :: Symbol) = FieldRef
+
+-- The @name ~ name'@ indirection (rather than @IsLabel name (FieldRef
+-- name)@ directly) is load-bearing, not decorative: GHC's ambiguity check
+-- for a class method does not treat "the wanted's argument structurally
+-- matches the instance head" as enough to pin a metavariable — only a
+-- genuinely unconstrained instance parameter (here, @name'@, which appears
+-- ONLY as the class's own first parameter, nowhere inside @FieldRef@) lets
+-- instance selection proceed before @name@ itself is known, deferring
+-- @name ~ name'@ to ordinary equality solving once context (here, @field@'s
+-- own @HasField@ constraint) pins it down. Confirmed empirically (plain
+-- @ghc@, no tidepool involved): the direct form (@IsLabel name (FieldRef
+-- name)@) leaves every use site "Ambiguous type variable", even fully
+-- monomorphic ones — a vanilla GHC 9.12 @OverloadedLabels@ inference limit,
+-- and the GHC user's guide names this exact workaround for it.
+--
+-- KNOWN LIMITATION (2026-08-20): this equality constraint is also
+-- currently un-runnable through tidepool-extract specifically when 'field'
+-- is called from a DIFFERENT module than this instance (i.e. every real
+-- use — an eval body calling into the stdlib) — extraction fails with
+-- "Dangling NVar reference(s) ... Eq# [GHC.Types]", confirmed via
+-- @TIDEPOOL_DANGLING_DEBUG=1@ to be the boxed equality-coercion witness
+-- GHC's desugarer builds for the @(name ~ name')@ dictionary at the call
+-- site. Reproduced down to a 3-line same-shape repro; SAME-MODULE use (the
+-- instance and its use site in one file) extracts and runs fine, isolating
+-- this to cross-module dictionary passing for an equality superclass
+-- specifically — plain `ghc -O2` (even with tidepool-extract's exact
+-- `-fno-full-laziness -fno-cpr-anal` flags) erases the same coercion
+-- entirely, so this is a real gap in tidepool-extract's Core→CBOR
+-- reachability (most likely: no 'wiredInDataCons'-style entry for the
+-- wired-in boxed-equality witness), not a mistake in this instance. Fixing
+-- it needs a change in @haskell/src/Tidepool/Translate.hs@, outside this
+-- module's scope — until then, 'field' typechecks correctly but a real
+-- @askUserWith@\/@formShapeWith@ call using it traps at extract time.
+-- 'title'\/'help'\/'formShapeWith'\/'askUserWith' with NO 'field' use are
+-- unaffected (confirmed working end to end).
+instance (name ~ name', KnownSymbol name) => IsLabel name' (FieldRef name) where
+  fromLabel = FieldRef
+
+-- | Help prose for one field. Combine with '<>' to prefer the right-hand
+-- (later) text over the left; 'mempty' carries none.
+newtype FieldAnn t = FieldAnn (Maybe Text)
+
+instance Semigroup (FieldAnn t) where
+  FieldAnn a <> FieldAnn b = FieldAnn (b `orElse` a)
+    where
+      orElse (Just x) _ = Just x
+      orElse Nothing y = y
+
+instance Monoid (FieldAnn t) where
+  mempty = FieldAnn Nothing
+
+-- | Help text shown alongside a field's control.
+help :: Text -> FieldAnn t
+help = FieldAnn . Just
+
+-- | One annotation on a form derived from @r@: either the form's own title,
+-- or one field's help text (name already erased to a plain 'FieldKey').
+data FormAnn r
+  = FormTitleAnn Text
+  | FormFieldAnn FieldKey (Maybe Text)
+
+-- | Give the derived form a title.
+title :: Text -> FormAnn r
+title = FormTitleAnn
+
+-- | Attach help text to one of @r@'s own fields. @name@ must actually be a
+-- field of @r@ — 'HasField' is the compile-time check; a typo'd @#field@
+-- fails to compile naming that class.
+field ::
+  forall name r t.
+  (KnownSymbol name, HasField name r t) =>
+  FieldRef name ->
+  FieldAnn t ->
+  FormAnn r
+field FieldRef (FieldAnn h) = FormFieldAnn (T.pack (symbolVal (Proxy @name))) h
+
+-- | The derived wire shape for @a@ with the given title\/field docs merged
+-- in — pure, so tests can assert its exact JSON. With no annotations this is
+-- byte-identical to @encodeShape (formShape \@a)@ ('askUser''s own shape).
+formShapeWith :: forall a. DerivedForm a => [FormAnn a] -> Value
+formShapeWith anns = encodeShapeAnnotated mTitle fieldDocs (formShape @a)
+  where
+    mTitle = case [t | FormTitleAnn t <- anns] of
+      [] -> Nothing
+      ts -> Just (last ts)
+    fieldDocs =
+      Map.fromList [(k, t) | FormFieldAnn k (Just t) <- anns]
+
+-- | Like 'askUser', but the presented form carries the given title\/field
+-- docs. Same retry-on-malformed-submission behavior.
+askUserWith :: forall a. DerivedForm a => [FormAnn a] -> M a
+askUserWith anns = do
+  submitted <- askUserRaw (formShapeWith @a anns)
+  case fromJSON submitted of
+    Success value -> pure value
+    Error _ -> askUserWith @a anns
