@@ -23,7 +23,7 @@ use tidepool_harness::log::{Actor, Event, LogHeader, LogReader, LogWriter};
 use tidepool_harness::provider::{DynModelProvider, Usage};
 use tidepool_harness::replay::{RecordedReply, ReplayProvider};
 use tidepool_harness::tree::{NodeId, NodeState};
-use tidepool_harness::{Harness, HarnessError, TurnOutcome};
+use tidepool_harness::{Harness, TurnOutcome};
 
 fn prelude_dir() -> PathBuf {
     let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -380,11 +380,17 @@ async fn multi_item_block_error_in_first_item_stops_and_corrects() {
 }
 
 /// A multi-item block whose LAST item is a declaration, not something that
-/// runs, is a typed error — not a silent "declared" completion. This is
-/// stricter than a single-item block (which may end on a bare decl today);
-/// the restriction is `run_multi_item_block`-specific.
+/// runs, is a COMPILE-CLASS failure — the model wrote a block this runner
+/// rejects, so it enters the SAME corrective-retry protocol as any GHC
+/// error: the window gets the trailing-decl guidance and survives on a
+/// corrected reply. It used to be `HarnessError::Resident`, which every
+/// driver context escalated as a turn-killing MECHANISM failure — the very
+/// first exploratory window of the interaction-surface dogfood run died on
+/// a stray trailing declaration (2026-08-20). This is stricter than a
+/// single-item block (which may end on a bare decl today); the restriction
+/// is `run_multi_item_block`-specific.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn multi_item_block_ending_in_decl_is_a_typed_error() {
+async fn multi_item_block_ending_in_decl_retries_and_survives() {
     support::require_extract();
 
     let dir = tempfile::tempdir().unwrap();
@@ -392,9 +398,12 @@ async fn multi_item_block_ending_in_decl_is_a_typed_error() {
     let writer = LogWriter::create(&log_path, &header()).unwrap();
 
     let cfg = EngineConfig::standard(prelude_dir(), None).expect("engine config");
-    let replies = vec![reply(
-        "```haskell\npure (toJSON (1 :: Int))\n\nsq :: Int -> Int\nsq x = x * x\n```",
-    )];
+    let replies = vec![
+        // The exploratory mistake: definitions, then… nothing that runs.
+        reply("```haskell\npure (toJSON (1 :: Int))\n\nsq :: Int -> Int\nsq x = x * x\n```"),
+        // The corrective retry ends with the answer expression.
+        reply("```haskell\nsq :: Int -> Int\nsq x = x * x\n\npure (toJSON (sq 3))\n```"),
+    ];
     let provider: Arc<dyn DynModelProvider> = Arc::new(ReplayProvider::new(replies));
     let harness = Arc::new(Harness::new(writer, cfg, provider).expect("harness boots"));
 
@@ -406,19 +415,36 @@ async fn multi_item_block_ending_in_decl_is_a_typed_error() {
         .unwrap();
     harness.force(root, Actor::Operator).unwrap();
 
-    match harness.run_to_hole_or_done(root).await {
-        Err(HarnessError::Resident(msg)) => {
+    let turn = harness
+        .run_to_hole_or_done(root)
+        .await
+        .expect("a trailing declaration costs a corrective round, never the turn");
+    match &turn {
+        TurnOutcome::Completed { rendered } => {
             assert!(
-                msg.contains("last item is a declaration"),
-                "expected the trailing-decl message, got: {msg}"
+                rendered.contains('9'),
+                "the corrected reply's value must win, got: {rendered}"
             );
         }
-        Err(other) => panic!("expected HarnessError::Resident, got {other:?}"),
-        Ok(out) => panic!(
-            "a block ending in a declaration must be a typed error, not a success ({})",
-            outcome_tag(&out)
-        ),
+        other => panic!("expected Completed, got {}", outcome_tag(other)),
     }
+
+    let (_hdr, events) = LogReader::open(&log_path).unwrap();
+    let corrective = events
+        .filter_map(|e| match e.expect("readable log record").event {
+            Event::TurnDelta {
+                role: tidepool_harness::provider::Role::User,
+                content,
+                ..
+            } => Some(content),
+            _ => None,
+        })
+        .find(|c| c.contains("last item is a declaration"))
+        .expect("a corrective user turn carries the trailing-decl guidance");
+    assert!(
+        corrective.contains("did not compile"),
+        "the corrective uses the same wrapper every compile-class failure gets: {corrective}"
+    );
 }
 
 fn outcome_tag(o: &TurnOutcome) -> &'static str {
