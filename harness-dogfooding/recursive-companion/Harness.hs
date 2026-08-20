@@ -1695,12 +1695,16 @@ current repository — there is no worktree or raw-subagent surface here, and
 none is needed: bind the result, then finalize based on what it found.
 
 If the OPERATOR's intent is genuinely ambiguous — the question underdetermines
-a fork only they can steer — ask them: post a `note`, then
-`askUser @OperatorSteering`; the reply's `steeringReply` field is their
-answer. The note is the form's ONLY context, so it must stand alone: say why
-you are asking, name each field you are about to present, and say what a
-good answer to it looks like (the operator sees your note directly above the
-form — write it to them, not to yourself). Ask ONLY when their answer would
+a fork only they can steer — ask them:
+`askUserWith @OperatorSteering [title "<the question, in a sentence or two>"]`;
+the reply's `steeringReply` field is their answer. The title renders directly
+above the form's controls — put the question itself there, phrased to the
+operator: why you are asking and what a good answer looks like. For longer
+context (evidence gathered, options you weighed), post a `note` first; note
+and title together are the form's ONLY context, so they must stand alone.
+If you present discrete alternatives (`choose`), author any escape hatch as
+one of the values — e.g. a "none of these" arm carrying your fallback —
+there is no built-in cancel or back. Ask ONLY when their answer would
 change what this window does; an ask is a human interrupt, so otherwise
 decide, and record the assumption in what you finalize.
 
