@@ -67,7 +67,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// node's operator interactions, looping.
 fn demo_loop_single(gate: Arc<WebGate>) {
     loop {
-        gate.post_note("Coalgebra window opening — deciding how to split the question.");
+        gate.post_note("Deciding how to split the question into branches.");
         let submission = gate.present_form(&sample_form());
         eprintln!(
             "[demo:{}] submission: {}",

@@ -1,13 +1,14 @@
 //! One node's section markup — the minimal node-lifecycle model, rendered.
 //!
-//! A node is `{ seed?, timeline, final value? | failure?, done }` in a tree:
-//! it starts from a seed prompt, produces notes and asks (in one
-//! chronological, append-only TIMELINE — an answered ask stays in place with
-//! its answer, it never vanishes), and ends with a finalized value or a
-//! failure. [`NodeView`]/[`TimelineEntry`] carry exactly that;
-//! [`node_panel`] renders it. Nothing harness-specific appears in this
-//! schema — companion drafts, tensions, gate verdicts all flow through it as
-//! content.
+//! A node is one append-only TIMELINE in a tree: seeds (a window opening
+//! with its starting prompt), notes, asks (an answered ask stays in place
+//! with its answer — it never vanishes), and outcomes (a finalized value or
+//! a failure) all land as entries at their true chronological position.
+//! One node can live several windows in sequence — the unified root does,
+//! every turn — and each chapter reads seed → notes/asks → outcome, in
+//! order. [`NodeView`]/[`TimelineEntry`] carry exactly that; [`node_panel`]
+//! renders it. Nothing harness-specific appears in this schema — companion
+//! drafts, tensions, gate verdicts all flow through it as content.
 //!
 //! [`node_panel`] always yields a single `id="panel-<node_id>"` element —
 //! the unit the SSE stream patches in place, and the page shell embeds one
@@ -51,15 +52,28 @@ use tidepool_harness::selfharness::operator::{
     child_path, humanize_key, FieldShape, FormShape, VariantShape, ROOT_BIND_PATH,
 };
 
-/// One item in a node's chronological timeline — a note, or an ask in one of
+/// One item in a node's chronological timeline: narration, an ask in one of
 /// its two lifecycle states (pending: a live form; answered: kept in place,
-/// read-only, with what the operator submitted).
+/// read-only, with what the operator submitted), or a LIFECYCLE EVENT —
+/// seeds, finalized values, and failures are timeline entries at their true
+/// chronological position, not slots. One node can therefore live several
+/// windows in sequence (the unified root does, every turn): each chapter
+/// reads seed → notes/asks → outcome, in order.
 pub enum TimelineEntry<'a> {
     /// Display-only narration (`note`), in post order with everything else.
     Note(&'a str),
+    /// A window opened here with this starting prompt
+    /// ([`OperatorGate::node_seeded`]).
+    Seeded(&'a str),
+    /// A window finalized here with this JSON-rendered answer
+    /// ([`OperatorGate::node_finalized`]).
+    Finalized(&'a str),
+    /// A window ended here without an answer
+    /// ([`OperatorGate::node_failed`]).
+    Failed(&'a str),
     /// A live `askUser` form awaiting submission.
     PendingForm { id: u64, shape: &'a FormShape },
-    /// The live between-loops gate awaiting the operator's continue.
+    /// The live between-turns gate awaiting the operator.
     PendingContinue { id: u64 },
     /// A form that was answered — stays at its position with the reassembled
     /// answer the harness actually received.
@@ -82,40 +96,42 @@ impl TimelineEntry<'_> {
     }
 }
 
-/// Everything [`node_panel`] renders for one node — the four-field node
-/// lifecycle (seed → timeline → final value | failure) plus the render
-/// bookkeeping (`rev`, `done`, the turn-source history pane).
+/// Everything [`node_panel`] renders for one node — the timeline (which now
+/// carries the whole lifecycle) plus the render bookkeeping (`rev`, `done`,
+/// the turn-source history pane).
 pub struct NodeView<'a> {
     pub node_id: &'a str,
-    /// The starting prompt the node's window was opened with, if the wire
-    /// carried one ([`OperatorGate::node_seeded`]).
-    pub seed: Option<&'a str>,
     pub timeline: Vec<TimelineEntry<'a>>,
-    /// The finalized answer, JSON-rendered ([`OperatorGate::node_finalized`]).
-    pub final_value: Option<&'a str>,
-    /// Why the node ended without a value ([`OperatorGate::node_failed`]).
-    pub failure: Option<&'a str>,
     pub done: bool,
     pub turn_history: &'a VecDeque<String>,
     pub rev: u64,
 }
 
 /// A node's derived status — never stored, always a function of the view.
-/// Precedence: a failure outranks `done` bookkeeping; a value-carrying done
-/// outranks a bare one; anything live is either waiting on the operator or
-/// running.
+///
+/// A pending ask outranks EVERYTHING, `done` included: the unified root node
+/// is marked done at each turn's fold and then immediately carries the
+/// between-turns gate — "do I need to act" is the one question the badge
+/// answers, so operator-actionable always wins. Otherwise a live node is
+/// running, and an ended node reports how its LAST window ended: the scan
+/// walks the timeline backward to the most recent lifecycle marker, so a
+/// revived node's earlier outcomes never speak for its current window.
 fn status(view: &NodeView) -> (&'static str, &'static str) {
-    if view.failure.is_some() {
-        ("failed", "failed")
-    } else if view.done && view.final_value.is_some() {
-        ("done", "done")
-    } else if view.done {
-        ("ended", "ended")
-    } else if view.timeline.iter().any(TimelineEntry::is_pending) {
-        ("needs-you", "needs you")
-    } else {
-        ("running", "running")
+    if view.timeline.iter().any(TimelineEntry::is_pending) {
+        return ("needs-you", "needs you");
     }
+    if !view.done {
+        return ("running", "running");
+    }
+    for entry in view.timeline.iter().rev() {
+        match entry {
+            TimelineEntry::Finalized(_) => return ("done", "done"),
+            TimelineEntry::Failed(_) => return ("failed", "failed"),
+            TimelineEntry::Seeded(_) => break,
+            _ => {}
+        }
+    }
+    ("ended", "ended")
 }
 
 /// The `id="panel-<node_id>"` fragment for one node — the one element the
@@ -123,15 +139,12 @@ fn status(view: &NodeView) -> (&'static str, &'static str) {
 /// page ([`crate::shell::page`]) and into every SSE frame for `node_id`.
 ///
 /// Anatomy, top to bottom: header (full path + collapse toggle + status
-/// badge) → seed (collapsed `<details>` — briefs are long) → the timeline in
-/// true chronological order (pending asks STACKED and live, answered asks
-/// read-only in place) → failure or final value → the turn-source history.
+/// badge) → the timeline in true chronological order (seeds as collapsed
+/// `<details>` — briefs are long; pending asks STACKED and live; answered
+/// asks read-only in place; finalized values and failures where they
+/// happened) → the turn-source history.
 pub fn node_panel(view: &NodeView) -> Markup {
     let (status_class, status_label) = status(view);
-    let has_live_content = !view.timeline.is_empty()
-        || view.seed.is_some()
-        || view.final_value.is_some()
-        || view.failure.is_some();
     html! {
         div id=(panel_id(view.node_id)) data-rev=(view.rev) data-path=(view.node_id)
             class=(format!("node-panel {status_class}")) {
@@ -142,33 +155,14 @@ pub fn node_panel(view: &NodeView) -> Markup {
                 span class=(format!("status {status_class}")) { (status_label) }
             }
             div class="node-body" {
-                @if let Some(seed) = view.seed {
-                    details class="seed" data-node="seed" {
-                        summary { "seed — " (snippet(seed)) }
-                        pre { (seed) }
-                    }
-                }
                 @if !view.timeline.is_empty() {
                     div class="timeline" data-node="timeline" {
                         @for entry in &view.timeline {
                             (timeline_entry(view.node_id, entry))
                         }
                     }
-                }
-                @if !has_live_content && !view.done {
+                } @else if !view.done {
                     (idle())
-                }
-                @if let Some(reason) = view.failure {
-                    div class="failure" data-node="failure" {
-                        p class="eyebrow failure-eyebrow" { "Ended without a value" }
-                        pre { (reason) }
-                    }
-                }
-                @if let Some(value) = view.final_value {
-                    div class="final" data-node="final" {
-                        p class="eyebrow" { "Final value" }
-                        pre { (pretty_json(value)) }
-                    }
                 }
                 @if !view.turn_history.is_empty() {
                     (turn_history_pane(view.turn_history))
@@ -199,6 +193,24 @@ fn timeline_entry(node_id: &str, entry: &TimelineEntry) -> Markup {
     match entry {
         TimelineEntry::Note(text) => html! {
             p class="note" style="white-space: pre-wrap" { (text) }
+        },
+        TimelineEntry::Seeded(seed) => html! {
+            details class="seed" data-node="seed" {
+                summary { "seed — " (snippet(seed)) }
+                pre { (seed) }
+            }
+        },
+        TimelineEntry::Finalized(value) => html! {
+            div class="final" data-node="final" {
+                p class="eyebrow" { "Final value" }
+                pre { (pretty_json(value)) }
+            }
+        },
+        TimelineEntry::Failed(reason) => html! {
+            div class="failure" data-node="failure" {
+                p class="eyebrow failure-eyebrow" { "Ended without a value" }
+                pre { (reason) }
+            }
         },
         TimelineEntry::PendingForm { id, shape } => ask_form(node_id, *id, shape),
         TimelineEntry::PendingContinue { id } => ask_continue(node_id, *id),
@@ -360,9 +372,9 @@ fn ask_continue(node_id: &str, interaction: u64) -> Markup {
     html! {
         form id=(ask_id(node_id, interaction)) data-rev=(interaction) class="continue"
              data-on-submit=(post_url(node_id, "continue", interaction)) {
-            p class="eyebrow" { "ask #" (interaction) " — Loop complete — awaiting operator" }
+            p class="eyebrow" { "ask #" (interaction) " — Turn complete — start the next turn?" }
             (generic_shape(ROOT_BIND_PATH, &continue_shape()))
-            button type="submit" class="btn btn-primary" { "Continue" }
+            button type="submit" class="btn btn-primary" { "Start next turn" }
         }
     }
 }
@@ -568,10 +580,7 @@ mod tests {
     ) -> NodeView<'a> {
         NodeView {
             node_id,
-            seed: None,
             timeline,
-            final_value: None,
-            failure: None,
             done: false,
             turn_history,
             rev,
@@ -634,8 +643,11 @@ mod tests {
         assert!(html.contains(">running</span>"), "{html}");
     }
 
-    /// Status derivation: pending ask → needs you; done+value → done;
-    /// done bare → ended; failure outranks everything.
+    /// Status derivation over the lifecycle-in-timeline model. A pending ask
+    /// outranks `done` (the unified root is done at every fold while its
+    /// between-turns gate is pending — the badge answers "do I need to
+    /// act"); an ended node reports its LAST window's outcome, so a revived
+    /// node's earlier chapters never speak for the current one.
     #[test]
     fn node_panel_status_derives_from_the_view() {
         let th = empty_history();
@@ -653,9 +665,22 @@ mod tests {
         .into_string();
         assert!(needs.contains(">needs you</span>"), "{needs}");
 
-        let mut done = base_view("n", vec![], &th, 0);
+        // Pending outranks done: a done node with a live gate needs you.
+        let mut parked = base_view(
+            "n",
+            vec![
+                TimelineEntry::Finalized("{\"ok\":true}"),
+                TimelineEntry::PendingContinue { id: 1 },
+            ],
+            &th,
+            0,
+        );
+        parked.done = true;
+        let parked = node_panel(&parked).into_string();
+        assert!(parked.contains(">needs you</span>"), "{parked}");
+
+        let mut done = base_view("n", vec![TimelineEntry::Finalized("{\"ok\":true}")], &th, 0);
         done.done = true;
-        done.final_value = Some("{\"ok\":true}");
         let done = node_panel(&done).into_string();
         assert!(done.contains(">done</span>"), "{done}");
 
@@ -664,20 +689,40 @@ mod tests {
         let ended = node_panel(&ended).into_string();
         assert!(ended.contains(">ended</span>"), "{ended}");
 
-        let mut failed = base_view("n", vec![], &th, 0);
+        let mut failed = base_view("n", vec![TimelineEntry::Failed("round exhaustion")], &th, 0);
         failed.done = true;
-        failed.failure = Some("round exhaustion");
         let failed = node_panel(&failed).into_string();
         assert!(failed.contains(">failed</span>"), "{failed}");
+
+        // A revived node's NEW window outranks the old chapter's outcome:
+        // [Finalized (turn 1), Seeded (turn 2)] + done = ended, not done.
+        let mut revived = base_view(
+            "n",
+            vec![
+                TimelineEntry::Finalized("{\"ok\":true}"),
+                TimelineEntry::Seeded("next chapter"),
+            ],
+            &th,
+            0,
+        );
+        revived.done = true;
+        let revived = node_panel(&revived).into_string();
+        assert!(revived.contains(">ended</span>"), "{revived}");
     }
 
     /// The seed renders as a collapsed details block with a one-line teaser,
-    /// escaped as ordinary text.
+    /// escaped as ordinary text — inline in the timeline, at its position.
     #[test]
     fn node_panel_renders_seed_collapsed_and_escaped() {
         let th = empty_history();
-        let mut view = base_view("n1", vec![], &th, 0);
-        view.seed = Some("NODE root/1 — DISCOVER <script>alert(1)</script>");
+        let view = base_view(
+            "n1",
+            vec![TimelineEntry::Seeded(
+                "NODE root/1 — DISCOVER <script>alert(1)</script>",
+            )],
+            &th,
+            0,
+        );
         let html = node_panel(&view).into_string();
         assert!(html.contains("data-node=\"seed\""), "{html}");
         assert!(
@@ -692,9 +737,15 @@ mod tests {
     #[test]
     fn node_panel_renders_final_value_pretty() {
         let th = empty_history();
-        let mut view = base_view("n1", vec![], &th, 0);
+        let mut view = base_view(
+            "n1",
+            vec![TimelineEntry::Finalized(
+                "{\"tag\":\"FinishLayer\",\"confidence\":\"High\"}",
+            )],
+            &th,
+            0,
+        );
         view.done = true;
-        view.final_value = Some("{\"tag\":\"FinishLayer\",\"confidence\":\"High\"}");
         let html = node_panel(&view).into_string();
         assert!(html.contains("data-node=\"final\""), "{html}");
         assert!(html.contains("Final value"), "{html}");
@@ -709,13 +760,54 @@ mod tests {
     #[test]
     fn node_panel_renders_failure_reason() {
         let th = empty_history();
-        let mut view = base_view("n1", vec![], &th, 0);
+        let mut view = base_view(
+            "n1",
+            vec![TimelineEntry::Failed(
+                "round exhaustion — 8 rounds without finalize",
+            )],
+            &th,
+            0,
+        );
         view.done = true;
-        view.failure = Some("round exhaustion — 8 rounds without finalize");
         let html = node_panel(&view).into_string();
         assert!(html.contains("data-node=\"failure\""), "{html}");
         assert!(html.contains("Ended without a value"), "{html}");
         assert!(html.contains("round exhaustion"), "{html}");
+    }
+
+    /// A multi-chapter timeline (the unified root across turns) renders each
+    /// chapter's events at their true positions: seed → note → final value →
+    /// answered gate → next seed.
+    #[test]
+    fn node_panel_renders_chapters_in_order() {
+        let th = empty_history();
+        let view = base_view(
+            "root",
+            vec![
+                TimelineEntry::Seeded("turn 1 brief"),
+                TimelineEntry::Note("working"),
+                TimelineEntry::Finalized("\"turn 1 answer\""),
+                TimelineEntry::AnsweredContinue {
+                    id: 0,
+                    input: Some("steer"),
+                },
+                TimelineEntry::Seeded("turn 2 brief"),
+            ],
+            &th,
+            0,
+        );
+        let html = node_panel(&view).into_string();
+        let p = |needle: &str| {
+            html.find(needle)
+                .unwrap_or_else(|| panic!("{needle} missing"))
+        };
+        assert!(
+            p("turn 1 brief") < p("working")
+                && p("working") < p("turn 1 answer")
+                && p("turn 1 answer") < p("steer")
+                && p("steer") < p("turn 2 brief"),
+            "{html}"
+        );
     }
 
     /// The core timeline behavior: entries render in true chronological

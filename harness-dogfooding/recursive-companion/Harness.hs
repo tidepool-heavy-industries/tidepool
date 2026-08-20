@@ -326,11 +326,11 @@ loop st = do
   -- without this the parked between-loops screen says only "loop complete" —
   -- the operator sat 37 minutes next to a finished answer they couldn't see.
   say
-    [fmt|Turn {show (st.turnCount + 1)} folded — {show answer.answerNodes} nodes, {show answer.answerWindows} windows.
+    [fmt|Turn {show (st.turnCount + 1)} complete — {show answer.answerNodes} nodes, {show answer.answerWindows} windows.
 
 {answer.answerSynthesis}
 
-Press Continue to run another turn (optionally steering it with input).|]
+Start the next turn when ready — optionally with steering.|]
   pure
     st
       { turnCount = st.turnCount + 1

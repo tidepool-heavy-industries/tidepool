@@ -110,9 +110,14 @@ enum AskState {
 /// One item on a node's append-only timeline. An `Ask`'s `id` is BOTH its
 /// identity and its `data-rev` nonce — assigned once from the node's
 /// monotonic counter and never reused, stable for the ask's whole lifetime
-/// (pending and answered alike).
+/// (pending and answered alike). Seeds, finalized values, and failures are
+/// TIMELINE items too, at their true chronological position — one node can
+/// live several windows in sequence (the unified root does, every turn).
 enum TimelineItem {
     Note(String),
+    Seeded(String),
+    Finalized(String),
+    Failed(String),
     Ask { id: u64, state: AskState },
 }
 
@@ -131,11 +136,8 @@ const TURN_HISTORY_CAP: usize = 50;
 /// section greys, nothing is removed.
 #[derive(Default)]
 struct NodeSlot {
-    seed: Option<String>,
     timeline: Vec<TimelineItem>,
     next_ask_id: u64,
-    final_value: Option<String>,
-    failure: Option<String>,
     done: bool,
     turn_history: VecDeque<String>,
     rev: u64,
@@ -146,12 +148,14 @@ impl NodeSlot {
     fn view<'a>(&'a self, node_id: &'a str) -> NodeView<'a> {
         NodeView {
             node_id,
-            seed: self.seed.as_deref(),
             timeline: self
                 .timeline
                 .iter()
                 .map(|item| match item {
                     TimelineItem::Note(text) => TimelineEntry::Note(text),
+                    TimelineItem::Seeded(seed) => TimelineEntry::Seeded(seed),
+                    TimelineItem::Finalized(value) => TimelineEntry::Finalized(value),
+                    TimelineItem::Failed(reason) => TimelineEntry::Failed(reason),
                     TimelineItem::Ask { id, state } => match state {
                         AskState::PendingForm { shape, .. } => {
                             TimelineEntry::PendingForm { id: *id, shape }
@@ -171,8 +175,6 @@ impl NodeSlot {
                     },
                 })
                 .collect(),
-            final_value: self.final_value.as_deref(),
-            failure: self.failure.as_deref(),
             done: self.done,
             turn_history: &self.turn_history,
             rev: self.rev,
@@ -235,17 +237,27 @@ impl AppState {
     /// live page mounts the new node's section immediately.
     pub fn register_node(&self, node_id: impl Into<String>) -> Arc<WebGate> {
         let node_id = node_id.into();
-        let fresh = {
+        let changed = {
             let mut reg = self.registry.lock();
-            if reg.nodes.contains_key(&node_id) {
-                false
-            } else {
-                reg.order.push(node_id.clone());
-                reg.nodes.insert(node_id.clone(), NodeSlot::default());
-                true
+            match reg.nodes.get_mut(&node_id) {
+                None => {
+                    reg.order.push(node_id.clone());
+                    reg.nodes.insert(node_id.clone(), NodeSlot::default());
+                    true
+                }
+                // REVIVAL: a new window re-registering a retired label is
+                // the node living again (the unified root does this every
+                // turn) — clear `done` so the section reads live; the
+                // timeline keeps every previous chapter.
+                Some(slot) if slot.done => {
+                    slot.done = false;
+                    slot.rev += 1;
+                    true
+                }
+                Some(_) => false,
             }
         };
-        if fresh {
+        if changed {
             self.ping(node_id.clone());
         }
         Arc::new(WebGate {
@@ -294,34 +306,13 @@ impl AppState {
         self.ping(node_id.to_string());
     }
 
-    /// Store `node_id`'s seed prompt ([`WebGate::node_seeded`]).
-    fn set_seed(&self, node_id: &str, seed: String) {
+    /// Append a lifecycle event ([`WebGate::node_seeded`]/`node_finalized`/
+    /// `node_failed`) to `node_id`'s timeline, bump its revision, and ping.
+    fn push_lifecycle(&self, node_id: &str, item: TimelineItem) {
         let mut reg = self.registry.lock();
         #[allow(clippy::expect_used, reason = "registered node")]
         let slot = reg.nodes.get_mut(node_id).expect("registered node");
-        slot.seed = Some(seed);
-        slot.rev += 1;
-        drop(reg);
-        self.ping(node_id.to_string());
-    }
-
-    /// Store `node_id`'s finalized value ([`WebGate::node_finalized`]).
-    fn set_final(&self, node_id: &str, value: String) {
-        let mut reg = self.registry.lock();
-        #[allow(clippy::expect_used, reason = "registered node")]
-        let slot = reg.nodes.get_mut(node_id).expect("registered node");
-        slot.final_value = Some(value);
-        slot.rev += 1;
-        drop(reg);
-        self.ping(node_id.to_string());
-    }
-
-    /// Store why `node_id` ended without a value ([`WebGate::node_failed`]).
-    fn set_failure(&self, node_id: &str, reason: String) {
-        let mut reg = self.registry.lock();
-        #[allow(clippy::expect_used, reason = "registered node")]
-        let slot = reg.nodes.get_mut(node_id).expect("registered node");
-        slot.failure = Some(reason);
+        slot.timeline.push(item);
         slot.rev += 1;
         drop(reg);
         self.ping(node_id.to_string());
@@ -574,15 +565,18 @@ impl OperatorGate for WebGate {
     }
 
     fn node_seeded(&self, label: &str, seed: &str) {
-        self.state.set_seed(label, seed.to_string());
+        self.state
+            .push_lifecycle(label, TimelineItem::Seeded(seed.to_string()));
     }
 
     fn node_finalized(&self, label: &str, value: &str) {
-        self.state.set_final(label, value.to_string());
+        self.state
+            .push_lifecycle(label, TimelineItem::Finalized(value.to_string()));
     }
 
     fn node_failed(&self, label: &str, reason: &str) {
-        self.state.set_failure(label, reason.to_string());
+        self.state
+            .push_lifecycle(label, TimelineItem::Failed(reason.to_string()));
     }
 }
 
@@ -1015,8 +1009,8 @@ mod tests {
         );
     }
 
-    /// The node-lifecycle setters store their field, bump the revision, and
-    /// show up in the rendered panel.
+    /// The node-lifecycle events append to the timeline, bump the revision,
+    /// and show up in the rendered panel with the derived status.
     #[test]
     fn seed_final_and_failure_store_and_render() {
         let st = AppState::new();
@@ -1042,6 +1036,57 @@ mod tests {
         let html = st.node_panel_html("root/1-x").unwrap();
         assert!(html.contains("round exhaustion"), "{html}");
         assert!(html.contains(">failed</span>"), "{html}");
+    }
+
+    /// The unified-root lifecycle: a retired node re-registered under the
+    /// same label REVIVES (done clears, timeline keeps every chapter), and a
+    /// pending ask on a done node outranks its done-ness — the root is done
+    /// at every fold while its between-turns gate is pending.
+    #[test]
+    fn re_registering_a_done_label_revives_the_node() {
+        let st = AppState::new();
+        let gate = st.register_node("root");
+
+        // Turn 1's window: seed, finalize, retire.
+        let _w1 = gate.node_gate("root").expect("root window gate");
+        gate.node_seeded("root", "turn 1 brief");
+        gate.retire_node("root");
+        gate.node_finalized("root", "\"turn 1 answer\"");
+        let html = st.node_panel_html("root").unwrap();
+        assert!(html.contains(">done</span>"), "{html}");
+
+        // The between-turns gate arrives on the SAME (done) node: needs you.
+        let g = gate.clone();
+        let handle = std::thread::spawn(move || g.await_continue());
+        while st.first_ask_id("root").is_none() {
+            std::thread::yield_now();
+        }
+        let html = st.node_panel_html("root").unwrap();
+        assert!(
+            html.contains(">needs you</span>"),
+            "a pending gate outranks done: {html}"
+        );
+        let interaction = st.first_ask_id("root").unwrap();
+        st.resolve_continue("root", interaction, ContinueSignal::Continue)
+            .unwrap();
+        handle.join().unwrap();
+
+        // Turn 2's window re-registers the label: the node revives...
+        let _w2 = gate.node_gate("root").expect("revived root window gate");
+        gate.node_seeded("root", "turn 2 brief");
+        let html = st.node_panel_html("root").unwrap();
+        assert!(html.contains(">running</span>"), "revived: {html}");
+        // ...with every chapter still on the timeline, in order.
+        let t1 = html.find("turn 1 brief").expect("turn 1 seed kept");
+        let a1 = html.find("turn 1 answer").expect("turn 1 value kept");
+        let t2 = html.find("turn 2 brief").expect("turn 2 seed present");
+        assert!(t1 < a1 && a1 < t2, "{html}");
+        // Exactly one outline entry for the label throughout.
+        assert_eq!(
+            st.node_ids().iter().filter(|id| *id == "root").count(),
+            1,
+            "revival never duplicates the node"
+        );
     }
 
     /// The concurrency invariant the whole generalization exists for: two
@@ -1184,20 +1229,21 @@ mod tests {
         assert_eq!(rev1, rev2, "retiring an already-done node is a no-op");
     }
 
-    /// Display order: the default node first, then path-lexicographic — so
+    /// Display order: the default (root) node first — even ahead of ids that
+    /// sort before it lexicographically — then path-lexicographic, so
     /// children group under their parents regardless of registration order.
     #[test]
     fn node_ids_sort_default_first_then_by_path() {
         let st = AppState::new();
-        let _d = st.register_node(crate::DEFAULT_NODE_ID);
         let _b = st.register_node("root/2-y");
-        let _r = st.register_node("root");
-        let _a = st.register_node("root/1-x");
+        let _a = st.register_node("alpha");
+        let _d = st.register_node(crate::DEFAULT_NODE_ID);
+        let _c = st.register_node("root/1-x");
         assert_eq!(
             st.node_ids(),
             vec![
                 crate::DEFAULT_NODE_ID.to_string(),
-                "root".to_string(),
+                "alpha".to_string(),
                 "root/1-x".to_string(),
                 "root/2-y".to_string(),
             ]
@@ -1326,13 +1372,10 @@ mod tests {
         let th = VecDeque::new();
         let view = NodeView {
             node_id: "n1",
-            seed: None,
             timeline: vec![TimelineEntry::PendingForm {
                 id: 0,
                 shape: &shape,
             }],
-            final_value: None,
-            failure: None,
             done: false,
             turn_history: &th,
             rev: 1,

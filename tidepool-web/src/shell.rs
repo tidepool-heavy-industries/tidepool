@@ -642,9 +642,9 @@ mod tests {
         let doc = page(vec![
             (
                 crate::DEFAULT_NODE_ID.to_string(),
-                html! { div id="panel-default" {} },
+                html! { div id="panel-root" {} },
             ),
-            ("root".to_string(), html! { div id="panel-root" {} }),
+            ("root/1-x".to_string(), html! { div id="panel-root/1-x" {} }),
         ])
         .into_string();
         // Assert on the slot markup itself ("data-pinned" also appears inside
@@ -656,7 +656,10 @@ mod tests {
             )),
             "{doc}"
         );
-        assert!(!doc.contains("data-node-id=\"root\" data-pinned"), "{doc}");
+        assert!(
+            !doc.contains("data-node-id=\"root/1-x\" data-pinned"),
+            "{doc}"
+        );
     }
 
     /// Slash-separated `node_id`s indent by path depth — the outline reads

@@ -50,10 +50,14 @@ pub use server::{router, router_with_form_api, AppState, NodeId, WebGate};
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-/// The node id [`spawn_operator_server`] registers for its caller —
-/// existing single-gate callers become this one default registration, the
-/// one-tab case.
-pub const DEFAULT_NODE_ID: &str = "default";
+/// The node id [`spawn_operator_server`] registers for its caller — the
+/// TREE ROOT. The driver's default gate and a harness's own root window
+/// (labeled `root` by convention, children `root/…`) deliberately SHARE this
+/// node: there is one root, and its timeline interleaves the outer loop's
+/// narration, each turn's root window (seed → asks → outcome), and the
+/// between-turns gate, in true order. `AppState::register_node`'s revival
+/// semantics exist for exactly this sharing.
+pub const DEFAULT_NODE_ID: &str = "root";
 
 /// The operator server's bind address — loopback by default, any port.
 /// Pulled out so the default is pinned by a unit test independent of a real

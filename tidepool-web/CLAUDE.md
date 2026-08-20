@@ -51,16 +51,24 @@ default methods (`node_gate`, `retire_node`, `node_seeded`,
 
 - **Birth** — the driver's eager `node_gate(label)` registers the node (the
   section appears live on any open page — registration pings the SSE tick);
-  `node_seeded(label, prompt)` stores the authored brief.
+  `node_seeded(label, prompt)` appends a Seeded timeline entry.
 - **Life** — `post_note` appends to the timeline; `present_form` /
   `await_continue` append a PENDING ask; `post_turn_source` accumulates the
   turn history pane.
 - **End** — `retire_node(label)` sets `done`; then exactly one of
-  `node_finalized(label, value)` (the JSON-rendered answer) or
-  `node_failed(label, reason)` (the `InvocationExit` rendering).
-- **Status is derived at render, never stored**: `failed` > `done`
-  (done + value) > `ended` (done, no value) > `needs you` (pending asks) >
-  `running`.
+  `node_finalized(label, value)` / `node_failed(label, reason)` appends the
+  outcome as a timeline entry at its true position.
+- **Revival** — re-registering a done label (a new window under the same
+  label) clears `done` and keeps every previous chapter on the timeline.
+  This is how the UNIFIED ROOT works: [`DEFAULT_NODE_ID`] is `root`, and the
+  driver's default gate and the harness's own root window share that one
+  node — its timeline interleaves loop narration, each turn's root window,
+  and the between-turns gate, chapter after chapter.
+- **Status is derived at render, never stored**: `needs you` (any pending
+  ask — outranks everything, done included: the root is done at every fold
+  while its gate is pending) > `running` (not done) > last lifecycle marker
+  of the current window: `done` (Finalized) / `failed` (Failed) / `ended`
+  (neither since the last Seeded).
 
 ## The timeline is append-only
 

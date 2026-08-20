@@ -543,6 +543,16 @@ fn reasoning_effort() -> String {
     std::env::var("TIDEPOOL_LLM_EFFORT").unwrap_or_else(|_| "medium".to_string())
 }
 
+/// Reasoning-summary verbosity for the same call. `detailed` by default:
+/// the summaries are the ONLY legible thinking record a run keeps (the raw
+/// chain-of-thought exists solely as encrypted items), and reading where the
+/// model was confused is a standing dogfood instrument — `auto` mostly
+/// yields bare section headlines. Override with
+/// `TIDEPOOL_LLM_REASONING_SUMMARY` (`auto`/`concise`/`detailed`).
+fn reasoning_summary() -> String {
+    std::env::var("TIDEPOOL_LLM_REASONING_SUMMARY").unwrap_or_else(|_| "detailed".to_string())
+}
+
 /// Hand-rolled `/responses` call against the ChatGPT Codex backend — see the
 /// module doc for why genai can't do this. STREAMS the SSE body incrementally
 /// (`reqwest::Response::chunk`): as answer/thinking deltas arrive they're
@@ -580,9 +590,10 @@ async fn codex_responses(
         "input": input,
         "tool_choice": "auto",
         "parallel_tool_calls": false,
-        // `summary:"auto"` makes the backend stream a human-readable reasoning
-        // summary — the "thinking" the observatory renders.
-        "reasoning": { "effort": reasoning_effort(), "summary": "auto" },
+        // The summary stream is the "thinking" the observatory renders and
+        // the run log keeps — see `reasoning_summary` for why it defaults
+        // to `detailed`.
+        "reasoning": { "effort": reasoning_effort(), "summary": reasoning_summary() },
         "store": false,
         "stream": true,
         "include": ["reasoning.encrypted_content"],
