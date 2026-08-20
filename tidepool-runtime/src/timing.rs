@@ -347,6 +347,156 @@ impl ExtractTiming {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Default-on per-compile summary (compile-attribution lane)
+// ---------------------------------------------------------------------------
+
+/// Line prefix of the extract's ALWAYS-ON per-compile summary — unlike every
+/// [`ExtractTiming`] phase line (gated on [`TIMING_ENV`]), this one is
+/// emitted unconditionally by `Tidepool.Timing.emitCompileSummary`, so a
+/// caller sees module count / wall time / top modules in a plain harness log
+/// with no env var set. Deliberately a DIFFERENT prefix than
+/// [`TIMING_PREFIX`] (`"tidepool-timing "`) — `"tidepool-compile-summary "`
+/// does not start with `"tidepool-timing "`, so [`ExtractTiming::parse`]
+/// never picks this line up, and this parser never picks up a `phase=` line.
+pub const COMPILE_SUMMARY_PREFIX: &str = "tidepool-compile-summary ";
+
+/// One extract invocation's default-on compile summary — module count, whole
+/// compile wall time, the typecheck/core phase totals (always computed
+/// regardless of [`TIMING_ENV`] — see `GhcPipeline.hs`'s `tcMsRef`/
+/// `coreMsRef`), and the top-3 modules by wall time. Parsed out of a fresh
+/// compile's stderr; absent on a memo hit (no extract process ran) or a hard
+/// compile failure that threw before the summary line was reached.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CompileSummary {
+    pub modules: u32,
+    pub wall_ms: u64,
+    pub typecheck_ms: u64,
+    pub core_ms: u64,
+    /// `(module, ms)` pairs, up to 3, in descending wall-time order.
+    pub top: Vec<(String, u64)>,
+}
+
+impl CompileSummary {
+    /// Scan `stderr` for one `tidepool-compile-summary ...` line. `None` when
+    /// absent (memo hit, or a compile that threw before this line was
+    /// reached) or malformed (missing a required field).
+    pub fn parse(stderr: &str) -> Option<Self> {
+        for line in stderr.lines() {
+            let Some(rest) = line.trim().strip_prefix(COMPILE_SUMMARY_PREFIX) else {
+                continue;
+            };
+            let mut modules = None;
+            let mut wall_ms = None;
+            let mut typecheck_ms = None;
+            let mut core_ms = None;
+            let mut top = Vec::new();
+            for field in rest.split_whitespace() {
+                if let Some(v) = field.strip_prefix("modules=") {
+                    modules = v.parse::<u32>().ok();
+                } else if let Some(v) = field.strip_prefix("wall_ms=") {
+                    wall_ms = v.parse::<u64>().ok();
+                } else if let Some(v) = field.strip_prefix("typecheck_ms=") {
+                    typecheck_ms = v.parse::<u64>().ok();
+                } else if let Some(v) = field.strip_prefix("core_ms=") {
+                    core_ms = v.parse::<u64>().ok();
+                } else if let Some(v) = field.strip_prefix("top=") {
+                    top = v
+                        .split(',')
+                        .filter(|s| !s.is_empty())
+                        .filter_map(|pair| {
+                            let (name, ms) = pair.rsplit_once(':')?;
+                            Some((name.to_string(), ms.parse::<u64>().ok()?))
+                        })
+                        .collect();
+                }
+            }
+            if let (Some(modules), Some(wall_ms), Some(typecheck_ms), Some(core_ms)) =
+                (modules, wall_ms, typecheck_ms, core_ms)
+            {
+                return Some(CompileSummary {
+                    modules,
+                    wall_ms,
+                    typecheck_ms,
+                    core_ms,
+                    top,
+                });
+            }
+        }
+        None
+    }
+}
+
+/// Line prefix of the extract's per-module breakdown line — gated on
+/// `TIDEPOOL_TIMING` (`Tidepool.Timing.emitModuleTiming`), so absent from
+/// `stderr` unless that env var is set on the extract invocation. Distinct
+/// from both [`TIMING_PREFIX`] and [`COMPILE_SUMMARY_PREFIX`].
+pub const MODULE_TIMING_PREFIX: &str = "tidepool-timing-module ";
+
+/// Parse every `tidepool-timing-module module=<name> ms=<ms>` line out of
+/// `stderr` — the full per-module breakdown backing [`CompileSummary::top`]'s
+/// top-3, present only when the extract ran with `TIDEPOOL_TIMING=1`. Empty
+/// when absent or malformed; malformed lines are skipped (diagnostics only).
+pub fn parse_module_timings(stderr: &str) -> Vec<(String, u64)> {
+    let mut out = Vec::new();
+    for line in stderr.lines() {
+        let Some(rest) = line.trim().strip_prefix(MODULE_TIMING_PREFIX) else {
+            continue;
+        };
+        let mut name = None;
+        let mut ms = None;
+        for field in rest.split_whitespace() {
+            if let Some(v) = field.strip_prefix("module=") {
+                name = Some(v.to_string());
+            } else if let Some(v) = field.strip_prefix("ms=") {
+                ms = v.parse::<u64>().ok();
+            }
+        }
+        if let (Some(name), Some(ms)) = (name, ms) {
+            out.push((name, ms));
+        }
+    }
+    out
+}
+
+/// Log the full per-module breakdown at DEBUG — unlike [`log_compile_summary`]
+/// (always-on, INFO), this requires BOTH the extract having run with
+/// `TIDEPOOL_TIMING=1` (or [`parse_module_timings`] returns nothing to log)
+/// AND a subscriber filter that includes this target at debug — matching the
+/// existing gated-diagnostics discipline (haskell/CLAUDE.md's Diagnostics
+/// table) rather than adding a second always-on line.
+pub fn log_module_timings(modules: &[(String, u64)]) {
+    for (name, ms) in modules {
+        tracing::debug!(
+            target: "tidepool_runtime::compile::modules",
+            module = name.as_str(),
+            ms,
+            "compile module timing"
+        );
+    }
+}
+
+/// Log a parsed [`CompileSummary`] at INFO — the one place this crate emits
+/// compile attribution without requiring `TIDEPOOL_TIMING` or a `debug`-level
+/// subscriber filter. Called once per fresh (non-memo-hit) extract spawn.
+pub fn log_compile_summary(summary: &CompileSummary) {
+    let top = summary
+        .top
+        .iter()
+        .map(|(name, ms)| format!("{name}:{ms}"))
+        .collect::<Vec<_>>()
+        .join(",");
+    tracing::info!(
+        target: "tidepool_runtime::compile",
+        modules = summary.modules,
+        wall_ms = summary.wall_ms,
+        typecheck_ms = summary.typecheck_ms,
+        core_ms = summary.core_ms,
+        top = %top,
+        "compile summary"
+    );
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -413,5 +563,63 @@ tidepool-timing phase=ghc_load ms=4533\n";
             classify_stage_name(PHASE_TYPECHECK),
             extract_stage_name(PHASE_TYPECHECK)
         );
+    }
+
+    #[test]
+    fn parses_a_compile_summary_line_with_top_modules() {
+        let stderr = "\
+some ghc warning\n\
+tidepool-compile-summary modules=39 wall_ms=361000 typecheck_ms=120000 core_ms=200000 top=Harness:90000,Tidepool.Prelude:40000,Tidepool.Agent.Spawn:15000\n";
+        let s = CompileSummary::parse(stderr).expect("summary line present");
+        assert_eq!(s.modules, 39);
+        assert_eq!(s.wall_ms, 361000);
+        assert_eq!(s.typecheck_ms, 120000);
+        assert_eq!(s.core_ms, 200000);
+        assert_eq!(
+            s.top,
+            vec![
+                ("Harness".to_string(), 90000),
+                ("Tidepool.Prelude".to_string(), 40000),
+                ("Tidepool.Agent.Spawn".to_string(), 15000),
+            ]
+        );
+    }
+
+    #[test]
+    fn compile_summary_absent_on_a_memo_hit_or_pre_summary_failure() {
+        assert!(CompileSummary::parse("plain stderr, no summary line\n").is_none());
+    }
+
+    #[test]
+    fn compile_summary_prefix_never_collides_with_the_phase_wire_grammar() {
+        assert!(!"tidepool-timing phase=core ms=10".starts_with(COMPILE_SUMMARY_PREFIX.trim_end()));
+        assert!(CompileSummary::parse("tidepool-timing phase=core ms=10\n").is_none());
+        let phase_only = "tidepool-compile-summary modules=1 wall_ms=1 top=A:1\n";
+        // Missing typecheck_ms/core_ms -> malformed, correctly rejected.
+        assert!(CompileSummary::parse(phase_only).is_none());
+    }
+
+    #[test]
+    fn parses_per_module_timing_lines() {
+        let stderr = "\
+tidepool-timing-module module=Harness ms=4399\n\
+tidepool-timing-module module=Tidepool.Prelude ms=1373\n\
+some other noise\n";
+        let modules = parse_module_timings(stderr);
+        assert_eq!(
+            modules,
+            vec![
+                ("Harness".to_string(), 4399),
+                ("Tidepool.Prelude".to_string(), 1373),
+            ]
+        );
+    }
+
+    #[test]
+    fn module_timings_absent_when_not_gated_on() {
+        assert!(parse_module_timings(
+            "tidepool-compile-summary modules=1 wall_ms=1 typecheck_ms=1 core_ms=1 top=A:1\n"
+        )
+        .is_empty());
     }
 }

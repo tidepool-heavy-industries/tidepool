@@ -388,6 +388,23 @@ pub(crate) fn extract_and_read(
             0,
         );
     }
+    // Default-on per-compile summary (compile-attribution lane): unlike
+    // `extract_timing` above, this is emitted by the extract UNCONDITIONALLY
+    // (no `TIDEPOOL_TIMING` required) — see `Tidepool.Timing.emitCompileSummary`.
+    // Logged at INFO so it lands in a plain harness log by default; absent on
+    // a memo hit (this function isn't reached) or on a compile that threw
+    // before reaching the summary line.
+    if let Some(summary) = timing::CompileSummary::parse(&stderr) {
+        timing::log_compile_summary(&summary);
+    }
+    // Full per-module breakdown (compile-attribution lane): DEBUG-gated,
+    // present only when `TIDEPOOL_TIMING=1` reached the extract — see
+    // `timing::log_module_timings`'s doc for why this stays a level below
+    // the always-on summary above.
+    let module_timings = timing::parse_module_timings(&stderr);
+    if !module_timings.is_empty() {
+        timing::log_module_timings(&module_timings);
+    }
     log_stderr(&stderr, run.verdict == ExitVerdict::Success);
 
     if run.verdict != ExitVerdict::Success {

@@ -499,6 +499,20 @@ pub fn run_turn(req: TurnRequest<'_>) -> Result<TurnResult, CompileError> {
     // A failed compile is still a real spawn — attribute its extract phases
     // the same as a successful one, before the early return below.
     forward_extract_timing(&stderr, "extract");
+    // Default-on per-compile summary + gated per-module breakdown
+    // (compile-attribution lane): this `--turn` spawn goes through the SAME
+    // `Tidepool.GhcPipeline.runCompile` skeleton `artifacts.rs::extract_and_read`
+    // instruments (`runTurnMode` → `runPipelineSession` → `runCompile` — see
+    // `haskell/app/Main.hs`), but reads its own `stderr` here rather than
+    // through that shared function, so it needs the same two calls duplicated
+    // rather than silently missing them.
+    if let Some(summary) = timing::CompileSummary::parse(&stderr) {
+        timing::log_compile_summary(&summary);
+    }
+    let module_timings = timing::parse_module_timings(&stderr);
+    if !module_timings.is_empty() {
+        timing::log_module_timings(&module_timings);
+    }
     if run.verdict != ExitVerdict::Success {
         return Err(
             match crate::diag::parse_diag_report(&output.stdout, &output.stderr) {

@@ -54,7 +54,7 @@ import GHC.Types.Unique (getKey)
 import Control.Applicative ((<|>))
 import Control.Exception (SomeException, try)
 import Data.Maybe (fromMaybe)
-import Data.List (nub)
+import Data.List (nub, sortOn)
 import Data.IORef (IORef, newIORef, modifyIORef', readIORef)
 import System.Process (readProcess)
 import System.Environment (lookupEnv)
@@ -66,7 +66,9 @@ import Data.Char (toUpper)
 import Tidepool.Session
   ( SessionScope(..), isSessionScopeActive, injectSessionScope, renderSessionModule
   , scaffoldTargetName, scaffoldOutputBase, evalUserBinder )
-import Tidepool.Timing (readTimingEnabled, timeSection, emitPhase, monotonicTime, elapsedMs)
+import Tidepool.Timing
+  ( readTimingEnabled, timeSection, emitPhase, monotonicTime, elapsedMs
+  , emitCompileSummary, emitModuleTiming )
 import Tidepool.Binders (ExportItem, declItems)
 
 data PipelineResult = PipelineResult
@@ -305,6 +307,15 @@ runCompile variant path includes = do
     -- quantity.
     dsMsRef  <- liftIO (newIORef (0 :: Integer))
     c2cMsRef <- liftIO (newIORef (0 :: Integer))
+    -- Per-module wall time (compile-attribution lane): front (typecheck +
+    -- desugar) and back (core2core) halves keyed by module name and SUMMED
+    -- into one entry per module via 'Map.insertWith' — tracked UNCONDITIONALLY
+    -- (like 'tcMsRef'/'coreMsRef' above, cheap monotonic-clock reads), not
+    -- gated on 'timing', because 'emitCompileSummary' below always needs a
+    -- top-3 to report. Never emitted directly except through
+    -- 'emitCompileSummary' (top-3, always) and 'emitModuleTiming' (every
+    -- module, gated) — this ref itself carries no wire contract.
+    moduleMsRef <- liftIO (newIORef (Map.empty :: Map.Map String Integer))
     let targetModName  = capitalize (takeBaseName path)
         targetModName' = mkModuleName targetModName
         -- The ONE per-module front half. Re-canonicalize the module's
@@ -340,6 +351,8 @@ runCompile variant path includes = do
           (desugared, dsMs) <- timeSection $ liftIO (hscDesugar hscEnv modSum tcGblEnv)
           liftIO (modifyIORef' coreMsRef (+ dsMs))
           liftIO (modifyIORef' dsMsRef (+ dsMs))
+          liftIO (modifyIORef' moduleMsRef
+                    (Map.insertWith (+) (moduleNameString (ms_mod_name modSum)) (tcMs + dsMs)))
           pure ModuleFront { mfSummary    = modSum
                            , mfHscEnv     = hscEnv
                            , mfTcGblEnv   = tcGblEnv
@@ -356,6 +369,8 @@ runCompile variant path includes = do
             liftIO (core2core (mfHscEnv mf) (mfDesugared mf))
           liftIO (modifyIORef' coreMsRef (+ coreMs))
           liftIO (modifyIORef' c2cMsRef (+ coreMs))
+          liftIO (modifyIORef' moduleMsRef
+                    (Map.insertWith (+) (moduleNameString (ms_mod_name (mfSummary mf))) coreMs))
           cpAfterModule plan (mfSummary mf) (mfTcGblEnv mf) (mfHscEnv mf) simplified
           pure (externalizeInternalTops simplified, mfUserType mf, mfResultType mf)
     (fronts, results, mReachable) <- case cpTier plan of
@@ -413,6 +428,19 @@ runCompile variant path includes = do
     totalCoreMs <- liftIO (readIORef coreMsRef)
     liftIO (emitPhase timing "typecheck" totalTcMs)
     liftIO (emitPhase timing "core" totalCoreMs)
+    -- Default-on per-compile summary (compile-attribution lane): ALWAYS
+    -- fires, independent of 'timing' — see 'emitCompileSummary''s haddock for
+    -- why. Wall time is the whole compile so far (session bootstrap through
+    -- the per-module loop above), not a sum of the per-module column, since
+    -- 'ghc_setup'/'ghc_load'/'inject' work outside any one module's own span.
+    -- The per-module BREAKDOWN behind it stays gated on 'timing' exactly like
+    -- every other detailed diagnostic in this file.
+    summaryT1 <- monotonicTime
+    liftIO $ do
+      moduleTimes <- readIORef moduleMsRef
+      let topModules = take 3 (sortOn (negate . snd) (Map.toList moduleTimes))
+      emitCompileSummary (length summaries) (elapsedMs sessionT0 summaryT1) totalTcMs totalCoreMs topModules
+      emitModuleTiming timing (sortOn (negate . snd) (Map.toList moduleTimes))
     -- Diagnostic-only (see 'dsMsRef'/'c2cMsRef' haddock above): NOT part of
     -- the tidepool-timing wire grammar, so 'ExtractTiming::parse' never sees
     -- it and there is nothing to keep in sync there. Emitted only under
