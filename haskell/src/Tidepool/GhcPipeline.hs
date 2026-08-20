@@ -218,7 +218,8 @@ runCompile variant path includes = do
     -- runs GHC's own expression parser inside the splice; those modules import
     -- GHC.Parser.* / GHC.Types.* etc. Without this, compiling Tidepool.QQ
     -- fails with "member of the hidden package ghc-9.12.2".
-    setSessionDynFlags (extractionDynFlags dflags includes)
+    dflags' <- liftIO (withBuildProductsFromEnv (extractionDynFlags dflags includes))
+    setSessionDynFlags dflags'
     target <- guessTarget path Nothing Nothing
     setTargets [target]
     -- Success-path warning capture (see 'warnCollectorHook'): installed before
@@ -789,7 +790,8 @@ runBatchPipeline includes items onItem = do
   emitPhase timing "startup" startupMs
   runGhc (Just libdir) $ do
     dflags <- getSessionDynFlags
-    _ <- setSessionDynFlags (extractionDynFlags dflags includes)
+    dflags' <- liftIO (withBuildProductsFromEnv (extractionDynFlags dflags includes))
+    _ <- setSessionDynFlags dflags'
     cache   <- liftIO newIfaceCache
     memoRef <- liftIO (newIORef Map.empty)
     go cache memoRef timing (0 :: Int) items
@@ -854,6 +856,38 @@ extractionDynFlags dflags includes = canonicalizeDFlags dflags
   , avx512f = False
   , avx512pf = False
   }
+
+-- | Apply the shared, persistent build-products dir (module-granular GHC
+-- recompilation avoidance across `tidepool-extract` spawns — spike-verified
+-- 2026-08-20, plans/turn-latency-state-injection.md's "Direction: toward a
+-- resident compile daemon" section) from @$TIDEPOOL_BUILD_PRODUCTS_DIR@, if
+-- set. Points @hiDir@\/@objectDir@ at it and turns on @-fwrite-interface@ so
+-- GHC's own @checkOldIface@ recompilation checking can skip an unchanged
+-- home module (typically 49 of ~51 modules on a companion turn — every
+-- stdlib module the compiled target doesn't itself edit) instead of
+-- redoing parse\/typecheck\/desugar for it every single spawn.
+--
+-- A no-op (byte-identical 'DynFlags') when the env var is unset — exactly
+-- like 'getLibdir''s own @$TIDEPOOL_GHC_LIBDIR@ — so every existing caller
+-- that never sets it (every test suite besides the acceptance test this
+-- lane adds, every non-companion eval) is untouched. The env var, not a
+-- 'GhcPipeline' function parameter, is the seam deliberately: threading a
+-- new parameter through 'runPipeline'\/'runPipelineSession'\/
+-- 'runBatchPipeline' would ripple into every call site across
+-- @app/Main.hs@ and four independent test-suites for a setting that is
+-- process-wide, not per-compile — @app/Main.hs@'s own @--build-products-dir@
+-- flag (the one 'tidepool-extract-cmd' surface + compile-memo allowlist
+-- entry this lane adds) sets this SAME env var once at startup, before any
+-- 'GhcPipeline' call.
+withBuildProductsFromEnv :: DynFlags -> IO DynFlags
+withBuildProductsFromEnv dflags = do
+  mDir <- lookupEnv "TIDEPOOL_BUILD_PRODUCTS_DIR"
+  pure $ case mDir of
+    Nothing  -> dflags
+    Just dir -> (`gopt_set` Opt_WriteInterface) dflags
+      { hiDir = Just dir
+      , objectDir = Just dir
+      }
 
 -- | The normal (non-session) variant: no injection, and E6's Core-reachability
 -- tier. Everything else is 'runCompile'.
@@ -1323,6 +1357,22 @@ canonicalizeDFlags dflags =
 -- module is complete. Nested binders are untouched: their uniques cannot
 -- collide with top-level uniques of the same module, and cross-module nested
 -- references are lexically impossible.
+--
+-- NOTE (build-products-dir lane, 2026-08-20): a per-module deterministic
+-- index was tried here in place of the raw 'getKey (nameUnique n)' baked
+-- below, on the theory that it would make a cold and a warm (build-products
+-- dir) compile of the same source byte-identical. It did NOT — reverted.
+-- The actual leak is 'Translate.hs''s 'localVarId', used for every NESTED
+-- (non-top-level) 'Id' — lambda parameters, case scrutinee/alt binders,
+-- local lets — which hashes the RAW GHC 'Unique' directly and is untouched
+-- by this function (it only rewrites TOP-LEVEL binders). See
+-- plans/turn-latency-state-injection.md's build-products-dir section for the
+-- full finding: activating 'load'''s warm-dir skip perturbs the session-wide
+-- Unique-allocation trajectory, and that reaches every 'localVarId'-derived
+-- id in the whole compiled program, not just this function's narrow
+-- top-level scope. Fixing THAT needs a stable, content-derived numbering
+-- scheme for nested Ids across the whole 'Translate.hs' pipeline — out of
+-- scope here, and high-risk without dedicated verification.
 externalizeInternalTops :: ModGuts -> ModGuts
 externalizeInternalTops guts = guts { mg_binds = map goTop (mg_binds guts) }
   where

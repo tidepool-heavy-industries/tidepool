@@ -497,6 +497,17 @@ pub struct Invocation<'a> {
 ///
 /// - `--output-dir <dir>` — dropped. Per-invocation; where the bytes are
 ///   written cannot change what they are.
+/// - `--build-products-dir <dir>` — dropped, same reasoning as `--output-dir`:
+///   it only ever points GHC's OWN `hiDir`/`objectDir` at a warm-cache
+///   location so `checkOldIface` can skip an unchanged home module — a
+///   directory whose CONTENT never changes what the extract PRODUCES, only
+///   how much frontend work it redoes to produce it (spike-verified:
+///   `plans/turn-latency-state-injection.md`; a cold-dir and a warm-dir
+///   compile of the same source/argv/include/binary are asserted
+///   byte-identical by `build_products_dir_is_deterministic` below). Its
+///   mutable CONTENTS are therefore never hashed into the key either — doing
+///   so would cost a walk of the whole warm dir for a property this
+///   determinism argument already gives for free.
 /// - `--include <dir>` — dropped HERE and content-fingerprinted below.
 /// - `--target <name>` / `--targets <a,b>` — keyed verbatim, in order. The
 ///   target list decides what is compiled, and (via `targets.len() > 1`)
@@ -521,7 +532,7 @@ pub fn invocation_key(inv: &Invocation<'_>) -> Option<InvocationKey> {
     let mut args = inv.argv.iter();
     while let Some(arg) = args.next() {
         match arg.to_str() {
-            Some("--output-dir" | "--include") => {
+            Some("--output-dir" | "--include" | "--build-products-dir") => {
                 args.next()?;
             }
             Some(flag @ ("--target" | "--targets")) => {
@@ -1213,6 +1224,42 @@ mod tests {
             key_at(two.path()),
             "identical content at different absolute paths must share a key"
         );
+    }
+
+    /// `--build-products-dir <dir>` is DROPPED, same bucket as `--output-dir`:
+    /// the invocation stays cacheable, and the key is blind to the flag's
+    /// value entirely (two otherwise-identical invocations pointing it at
+    /// different paths — the realistic case, since the dir is
+    /// content-addressed per toolchain fingerprint — must still share a key).
+    #[cfg(unix)]
+    #[test]
+    #[serial]
+    fn invocation_key_drops_build_products_dir() {
+        let tmp = TempDir::new().unwrap();
+        let bin = fake_bin(tmp.path(), b"#!/bin/sh\nexit 0\n");
+        let input = tmp.path().join("Expr.hs");
+        fs::write(&input, "module Expr where").unwrap();
+
+        let key = |bp: Option<&str>| {
+            let mut argv = turn_argv(&input, &tmp.path().join("out"), "result", &[]);
+            if let Some(dir) = bp {
+                argv.push(OsString::from("--build-products-dir"));
+                argv.push(OsString::from(dir));
+            }
+            invocation_key(&Invocation {
+                source: "main = pure ()",
+                argv: &argv,
+                input_path: &input,
+                include: &[],
+                bin: &bin,
+            })
+        };
+
+        let without = key(None).expect("cacheable without the flag");
+        let with_a = key(Some("/tmp/bp-a")).expect("cacheable with the flag");
+        let with_b = key(Some("/tmp/bp-b")).expect("cacheable with a different path");
+        assert_eq!(without, with_a, "the flag must not change the key");
+        assert_eq!(with_a, with_b, "the key must be blind to the dir's path");
     }
 
     /// Default-deny: an argv element the allowlist does not classify makes the

@@ -1,6 +1,6 @@
 module Main where
 
-import System.Environment (getArgs)
+import System.Environment (getArgs, setEnv)
 import System.FilePath (takeBaseName, takeDirectory, takeFileName, (</>))
 import System.Directory (createDirectoryIfMissing)
 import qualified Data.ByteString as BS
@@ -65,6 +65,11 @@ main = do
   hSetEncoding stdout utf8
   rawArgs <- getArgs
   let parsedArgs = parseArgs rawArgs
+  -- Set BEFORE any GhcPipeline call, which is what actually reads it (see
+  -- 'Tidepool.GhcPipeline.withBuildProductsFromEnv') — see 'argBuildProductsDir'.
+  case argBuildProductsDir parsedArgs of
+    Just dir -> setEnv "TIDEPOOL_BUILD_PRODUCTS_DIR" dir
+    Nothing  -> pure ()
   -- Read once at process entry (see Tidepool.Timing) and thread down;
   -- TIDEPOOL_TIMING is diagnostic-only and never touches stdout/the emitted
   -- files — see the module doc there and tidepool-harness/src/timing.rs.
@@ -85,7 +90,7 @@ main = do
     _ | isJust (argTurnBatch args) -> runTurnBatchMode args
     _ -> case argFiles args of
       [] -> do
-        hPutStrLn stderr "Usage: tidepool-extract-bin [--output-dir <dir>] [--target <name>] [--targets <a,b,...>] [--include <dir>] [--dump-core] [--harness-profile] [--classify --classify-out <out.json>] [--session-root <dir> --inject-val <mod> ...] [--session-bind --bind-name <occ> --bind-gen <g> --emit-bound-binders <out.json>] [--turn --turn-template <kind>=<file> --turn-out <out.cbor> [--turn-verdict <kind>[:<names>]]] [--turn-batch <plan.json> --batch-out <dir>] <file.hs> ..."
+        hPutStrLn stderr "Usage: tidepool-extract-bin [--output-dir <dir>] [--target <name>] [--targets <a,b,...>] [--include <dir>] [--build-products-dir <dir>] [--dump-core] [--harness-profile] [--classify --classify-out <out.json>] [--session-root <dir> --inject-val <mod> ...] [--session-bind --bind-name <occ> --bind-gen <g> --emit-bound-binders <out.json>] [--turn --turn-template <kind>=<file> --turn-out <out.cbor> [--turn-verdict <kind>[:<names>]]] [--turn-batch <plan.json> --batch-out <dir>] <file.hs> ..."
         putStrLn (renderDiagsJson [])
       (file : _)
         -- Block classify lane: every positional file is one item, classified
@@ -252,6 +257,18 @@ data Args = Args
   -- gets compiled is cache-safe by construction, a flags-based toggle is
   -- not). See Tidepool.Harness.Prelude.
   , argHarnessProfile :: Bool
+  -- Persistent build-products dir (module-granular GHC recompilation
+  -- avoidance across spawns, plans/turn-latency-state-injection.md's
+  -- "Direction: toward a resident compile daemon" section): 'main' sets
+  -- $TIDEPOOL_BUILD_PRODUCTS_DIR from this BEFORE any 'GhcPipeline' call,
+  -- which is what actually reads it (see 'Tidepool.GhcPipeline.withBuildProductsFromEnv') —
+  -- a process-wide setting, not threaded as a function parameter, to avoid
+  -- rippling into every 'GhcPipeline' call site and test suite. Never part
+  -- of the compile MEMO key (`tidepool_runtime::cache::invocation_key`
+  -- drops it, like `--output-dir`): it changes nothing about the OUTPUT
+  -- bytes, only whether GHC's own `checkOldIface` can skip an unchanged
+  -- home module.
+  , argBuildProductsDir :: Maybe FilePath
   }
 
 parseArgs :: [String] -> Args
@@ -261,7 +278,8 @@ parseArgs = go (Args Nothing Nothing [] False False False [] []
                      False [] Nothing Nothing
                      False Nothing
                      Nothing Nothing
-                     False)
+                     False
+                     Nothing)
   where
     go a ("--output-dir" : dir : rest) = go a { argOutDir = Just dir } rest
     go a ("--target" : name : rest) = go a { argTarget = Just name } rest
@@ -286,6 +304,7 @@ parseArgs = go (Args Nothing Nothing [] False False False [] []
     go a ("--batch-out" : d : rest) = go a { argBatchOut = Just d } rest
     go a ("--include" : dir : rest) = go a { argIncludes = argIncludes a ++ [dir] } rest
     go a ("--harness-profile" : rest) = go a { argHarnessProfile = True } rest
+    go a ("--build-products-dir" : dir : rest) = go a { argBuildProductsDir = Just dir } rest
     go a (x : rest) = go a { argFiles = argFiles a ++ [x] } rest
     go a [] = a
 

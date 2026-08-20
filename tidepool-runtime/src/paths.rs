@@ -82,6 +82,39 @@ pub fn stdlib_dir(content_hash: &str) -> PathBuf {
     cache_dir().join("stdlib").join(content_hash)
 }
 
+/// Persistent, shared `-fwrite-interface` output dir: module-granular GHC
+/// recompilation avoidance ACROSS `tidepool-extract` spawns (spike-verified
+/// 2026-08-20, `plans/turn-latency-state-injection.md`'s "Direction: toward
+/// a resident compile daemon" section) — GHC's own `checkOldIface`
+/// recompilation checking skips an unchanged home module (typically every
+/// stdlib module a turn doesn't itself edit) when its interface is already
+/// sitting in this dir from a PRIOR spawn, instead of redoing
+/// parse/typecheck/desugar for it every single time.
+///
+/// `$TIDEPOOL_BUILD_PRODUCTS_DIR` if set (an isolated dir for a test that
+/// needs a genuinely COLD measurement, mirroring [`compile_cache_dir`]'s own
+/// override); else content-addressed under [`compile_cache_dir`] — so a test
+/// suite that already shares the compile memo via
+/// `$TIDEPOOL_COMPILE_CACHE_DIR` shares this dir too, with no extra wiring —
+/// keyed by `toolchain_fingerprint` (the resolved extract binary's own
+/// content fingerprint, see `toolchain::extract_fingerprint`) so a rebuilt
+/// extract binary gets a FRESH directory: staleness is structurally
+/// impossible, never validate it by mtime. A stdlib-only edit does NOT need
+/// its own fresh directory — GHC's per-module interface hash already detects
+/// that (spike-verified: an edited module is selectively recompiled while
+/// every OTHER module in the same directory stays skipped) — so this key
+/// deliberately does not fold in stdlib content; folding it in would cost a
+/// full content walk of the stdlib tree on every compile for a property GHC
+/// already guarantees per-module.
+pub fn build_products_dir(toolchain_fingerprint: &str) -> PathBuf {
+    if let Some(d) = std::env::var_os("TIDEPOOL_BUILD_PRODUCTS_DIR") {
+        return PathBuf::from(d);
+    }
+    compile_cache_dir()
+        .join("build-products")
+        .join(toolchain_fingerprint)
+}
+
 /// Staging dir for the generated `Tidepool.Effects` module.
 pub fn effects_dir() -> PathBuf {
     cache_dir().join("effects")
