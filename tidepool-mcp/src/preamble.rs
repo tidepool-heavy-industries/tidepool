@@ -737,7 +737,9 @@ pub(crate) fn build_eval_tool_description(effects: &[EffectDecl]) -> String {
         "separate evals interleave with concurrent writers, and a join over them ",
         "silently drops keys.\n",
         "The unqualified `Tidepool.Prelude` is the recommended surface: a Text-first, ",
-        "effect-aware standard library that resolves cleanly on the JIT. Qualified ",
+        "effect-aware standard library that resolves cleanly on the JIT. `FilePath` is ",
+        "`Text` here \u{2014} path/extension work is `T.` functions (`T.dropWhile`, ",
+        "`T.stripPrefix`), never `String` idioms like `dropWhile (== '.')`. Qualified ",
         "namespaces reach the wider ecosystem \u{2014} among them T. (Data.Text), ",
         "L. (Data.List), Map. (Data.Map.Strict), MM. (Data.Map.Merge.Strict), ",
         "Set. (Data.Set), KM. (Tidepool.Aeson.KeyMap), TF. (Tidepool.TextFormat), ",
@@ -815,12 +817,12 @@ pub(crate) fn build_eval_tool_description(effects: &[EffectDecl]) -> String {
 
         desc.push_str(concat!(
             "\nResources — this description is a FLOOR; pull the depth on demand via resources/read:\n",
-            "  tidepool://guide           full guide: returning JSON, the input lane, examples, failure isolation\n",
+            "  tidepool://guide           full guide: returning JSON, the input lane, pagination, examples, failure isolation\n",
             "  tidepool://effect/{name}   per-effect constructors, types, and helper signatures\n",
             "  tidepool://schema          the Schema grammar + ask/llm in full\n",
             "  tidepool://edits           the declarative Edit verb JSON schema\n",
             "  tidepool://vocab           live project-library verb signatures (.tidepool/lib)\n",
-            "  tidepool://capabilities    the Prelude shadow surface + names that live under a qualifier\n",
+            "  tidepool://capabilities    the Prelude shadow surface, names under a qualifier, and partial-function safe forms\n",
             "  tidepool://patterns        worked examples\n",
             "  tidepool://stdlib/{module} vendored stdlib module source (e.g. Tidepool.Prelude)\n",
         ));

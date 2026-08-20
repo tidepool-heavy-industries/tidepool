@@ -244,6 +244,16 @@ fn guide_md(ctx: &ResourceCtx) -> String {
         "- `grepGlob`/`searchFiles` → `[Hit]` — fields `path`, `line`, `text`\n",
         "- `readGlob` → `[FileRead]` — fields `path`, `contents :: Either FsError Text`\n",
         "- `fsMeta` → `Maybe FileMeta` — fields `size`, `isFile`, `isDir`\n",
+        "\n## Pagination\n",
+        "An oversized result is auto-paginated PER ELEMENT, not as a whole: each array/object entry ",
+        "is kept as-is if it fits the budget, or replaced with a stub marker string like ",
+        "`\"[~9140 chars -> stub_0]\"` if it doesn't — so a paginated `[Value]` mixes real objects and ",
+        "plain stub strings in the SAME list. Consuming it programmatically needs a guard, not a blind ",
+        "map:\n",
+        "```haskell\n",
+        "[ f v | v <- xs, not (isStub v) ] where isStub v = case v of { String s -> \"-> stub_\" `T.isInfixOf` s; _ -> False }\n",
+        "```\n",
+        "In the REPL (`session_run`) a stubbed subtree also stays fetchable in full via `:stub <n>`.\n",
     ));
     if ctx
         .effects
@@ -552,6 +562,22 @@ fn capabilities_md(ctx: &ResourceCtx) -> String {
         "The T. (Data.Text), L. (Data.List), Map. (Data.Map.Strict), MM. (Data.Map.Merge.Strict), \
          Set. (Data.Set), KM. (Tidepool.Aeson.KeyMap), TF. (Tidepool.TextFormat), Tab. \
          (Tidepool.Table), and P. (base Prelude) qualifiers are always in scope.\n\n",
+    );
+    s.push_str(
+        "## Partial functions — use the total form\n\
+         `head`, `tail`, `last`, `init`, `(!!)`, `foldr1`, `foldl1`, `fromJust` are in scope but \
+         each carries an Unsatisfiable constraint — calling one is a compile error naming its \
+         replacement:\n\
+         - `head` \u{2192} `headMay`\n\
+         - `tail` \u{2192} `tailMay`\n\
+         - `last` \u{2192} `lastMay`\n\
+         - `init` \u{2192} `initMay`\n\
+         - `(!!)` \u{2192} `atMay xs i`\n\
+         - `foldr1`/`foldl1` \u{2192} seed the fold with `foldr`/`foldl'`\n\
+         - `fromJust` \u{2192} `fromMaybe def`, `maybe`, or a `Just` pattern\n\n\
+         `(!?)` sits right next to `(!!)` alphabetically but is Map-only lookup \
+         (`Map k a -> k -> Maybe a`, i.e. `Map.lookup` flipped) — for a safe LIST index use `atMay`, \
+         not `(!?)`.\n\n",
     );
     s.push_str(
         "## Names that live under a qualifier\n\

@@ -1202,6 +1202,20 @@ fn build_tool_description(decls: &[EffectDecl]) -> String {
     // (name + first-sentence + verb names) the eval tool description and
     // `:browse` render — one source, so the three surfaces can't drift.
     let effects = describe_effects_index(decls);
+    // Mirrors the eval tool description's gate (`preamble::build_eval_tool_description`) —
+    // one Schema vocabulary, inlined here too so a first `llm`/`ask` call doesn't cost a
+    // second introspection round-trip (`:i Schema`) just to learn the constructors.
+    let names: std::collections::HashSet<&str> = decls.iter().map(|e| e.type_name).collect();
+    let schema_note = if names.contains("Llm") && names.contains("Ask") {
+        "\nStructured LLM / Ask (one Schema vocabulary; also `:i Schema`):\n\
+         Schema = SObj [(Text,Schema)] | SArr Schema | SStr | SNum | SBool | SEnum [Text] | SOpt Schema\n\
+         ask schema prompt  -- SUSPEND to the caller; reply validated vs schema, no token burn\n\
+         llm schema prompt  -- AUTONOMOUS server-side call (costs tokens); structured Value, no fences\n\
+         bind the Right, then extract with optics:\n\
+         do {{ Right v <- llm (SObj [(\"k\", SEnum [\"a\",\"b\"])]) p; pure (v ^? key \"k\" . _String) }}\n\n"
+    } else {
+        ""
+    };
     format!(
         "tidepool-repl — a GHCi-style stateful Haskell session. ONE resident JIT machine whose \
          value heap and module scope persist across turns; declarations accumulate across \
@@ -1216,7 +1230,12 @@ fn build_tool_description(decls: &[EffectDecl]) -> String {
          • KEEP IT OFF-CONTEXT: a big intermediate lives in the session heap, NOT your \
          context window. Fold it IN the session (count / group / sort / join) and return only \
          the conclusion — aggregate, don't dump. A value too large to render is auto-stubbed \
-         but stays a live binding you can keep computing on.\n\
+         (per element, not as a whole — a stubbed list mixes real values and plain marker \
+         strings like \"[~9140 chars -> stub_0]\" in the SAME array; guard for that shape rather \
+         than mapping blindly: `[ f v | v <- xs, not (isStub v) ] where isStub v = case v of \
+         {{ String s -> \"-> stub_\" `T.isInfixOf` s; _ -> False }}`) but stays a live binding \
+         you can keep computing on, and a stubbed subtree is still fetchable in full via \
+         `:stub <n>`.\n\
          • DERIVE what static tools can't: the sharpest wins aren't a faster grep — they are \
          signals no grep or call-graph can see, because you fold a whole substrate (a git \
          history, a corpus, an API dump) into a derived metric. Method: substrate once → each \
@@ -1258,6 +1277,7 @@ fn build_tool_description(decls: &[EffectDecl]) -> String {
          Show output.\n\n\
          EFFECTS (invoke via the helper verbs; `:browse <Effect>` for its constructors + full \
          signatures):\n{effects}\n\
+         {schema_note}\
          LIFECYCLE: `session_run` auto-opens the session; `session_reset` drops the resident \
          machine and starts fresh (and drops any pending `ask`). \
          An in-turn `ask` suspends with a continuation_id; answer it with session_resume \
@@ -1270,12 +1290,16 @@ fn build_tool_description(decls: &[EffectDecl]) -> String {
          `grepGlob`/`searchFiles` → `[Hit]` (`h.path`, `h.line`, `h.text`); \
          `readGlob` → `[FileRead]` (`r.path`, `r.contents :: Either FsError Text`). \
          Bare selectors like `stdout p` are ambiguous — always use dot syntax.\n\n\
-         SURFACE NOTES — the OverloadedRecordDot extension is ON: `x.f` is field access, so \
+         SURFACE NOTES — `FilePath` is `Text` here: path/extension work is `T.` functions \
+         (`T.dropWhile`, `T.stripPrefix`), never `String` idioms like `dropWhile (== '.')`. \
+         The OverloadedRecordDot extension is ON: `x.f` is field access, so \
          write function composition WITH SPACES (`f . g`); `f.g` parses as projecting field \
-         `g` and will not typecheck. Common partial functions (`head`, `tail`, `!!`, \
-         `fromJust`) are deliberately unsupported — they compile-error naming the total form \
-         (`L.head`, `atMay`, or a pattern-match generator `(x:_) <- …`); reach for those \
-         directly rather than the partial.",
+         `g` and will not typecheck. Common partial functions are deliberately unsupported — \
+         each compile-errors naming its total form: `head`→`headMay`, `tail`→`tailMay`, \
+         `last`→`lastMay`, `init`→`initMay`, `(!!)`→`atMay xs i`, `fromJust`→`fromMaybe`/`maybe`/ \
+         a `Just` pattern (or a pattern-match generator `(x:_) <- …`). `(!?)` looks like the \
+         safe `(!!)` but is Map-only lookup — use `atMay` for a safe list index, not `(!?)`. \
+         tidepool://capabilities has the full pairing.",
     )
 }
 

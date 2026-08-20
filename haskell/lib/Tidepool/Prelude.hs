@@ -185,7 +185,12 @@ module Tidepool.Prelude
   , (?.), lookupKey, asText, asInt, asDouble, asBool, asArray, asObject
     -- * Map operations (qualified via Map prefix)
   , Map.fromList, Map.toList, Map.insert, Map.delete
-  , Map.member, Map.size, Map.keys, Map.elems
+  , Map.member, Map.keys, Map.elems
+    -- Map.size deliberately absent: this export-list syntax re-exports the
+    -- name UNQUALIFIED (Map.member above is really bare `member`), and bare
+    -- `size` collided with bridged record fields named `size` (FileMeta).
+    -- Reach it as `Map.size` — already in scope via the preamble's qualified
+    -- `Data.Map.Strict` import, so nothing is lost.
   , Map.union, Map.intersection, Map.difference
   , Map.foldlWithKey', Map.foldrWithKey
   , Map.mapKeys, Map.mapWithKey, Map.filterWithKey
