@@ -266,6 +266,79 @@ async fn multi_item_block_decl_then_expr_completes_in_one_reply() {
     assert_eq!(harness.tree().state(root), Some(NodeState::Done));
 }
 
+/// GHCi statement semantics (2026-08-20 fix): contiguous bind lines with NO
+/// blank line between them — the shape a GHCi-fluent model naturally writes
+/// (`seed <- pure …`, `runningTotal <- pure …`, one per line) — must split
+/// into one item PER LINE and persist as REAL session bindings, not run
+/// transiently inside a single wrapped `do`-expression. Turn 1's block binds
+/// `a` then `b` with no blank line anywhere in it; turn 2 (a follow-up)
+/// references `b` — this only resolves if turn 1's SECOND bind genuinely
+/// registered as a session binding, the exact case the old blank-line-only
+/// splitter collapsed into one item and lost.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn multi_item_block_contiguous_binds_persist_across_rounds() {
+    support::require_extract();
+
+    let dir = tempfile::tempdir().unwrap();
+    let log_path = dir.path().join("multi_item_contiguous_binds.jsonl");
+    let writer = LogWriter::create(&log_path, &header()).unwrap();
+
+    let cfg = EngineConfig::standard(prelude_dir(), None).expect("engine config");
+    let replies = vec![
+        // Turn 1: two contiguous binds (no blank line between them), then the
+        // answer expression — three items, split purely on unindented lines.
+        reply("```haskell\na <- pure (1 :: Int)\nb <- pure (a + 1)\npure (toJSON (b + 1))\n```"),
+        // Turn 2: references `b` — only resolves if turn 1's SECOND bind
+        // persisted as a live session binding.
+        reply("```haskell\npure (toJSON (b + 10))\n```"),
+    ];
+    let provider: Arc<dyn DynModelProvider> = Arc::new(ReplayProvider::new(replies));
+    let harness = Arc::new(Harness::new(writer, cfg, provider).expect("harness boots"));
+
+    let root = harness
+        .create_root(
+            "contiguous-binds root",
+            "Bind a, then b, with no blank line, then use b next round.",
+        )
+        .unwrap();
+    harness.force(root, Actor::Operator).unwrap();
+
+    let turn1 = harness
+        .run_to_hole_or_done(root)
+        .await
+        .expect("turn 1 (contiguous binds + expr) drives to completion");
+    match &turn1 {
+        TurnOutcome::Completed { rendered } => {
+            assert!(
+                rendered.contains('3'),
+                "b + 1 = (a + 1) + 1 = 3 must come from the SAME block's two contiguous \
+                 binds, got: {rendered}"
+            );
+        }
+        other => panic!("expected Completed, got {}", outcome_tag(other)),
+    }
+    assert_eq!(harness.tree().state(root), Some(NodeState::Done));
+
+    let turn2 = harness
+        .follow_up(root, "Now use b again.")
+        .await
+        .expect("turn 2 (reference to b) drives to completion");
+    match turn2 {
+        TurnOutcome::Completed { rendered } => {
+            assert!(
+                rendered.contains("12"),
+                "b + 10 = 12 must resolve from `b`, persisted by turn 1's SECOND \
+                 contiguous bind, got: {rendered}"
+            );
+        }
+        other => panic!(
+            "turn 2 should complete referencing turn 1's persisted `b`, got {}",
+            outcome_tag(&other)
+        ),
+    }
+    assert_eq!(harness.tree().state(root), Some(NodeState::Done));
+}
+
 /// The pinned identity requirement: a block `split_block_items` finds only
 /// ONE item in must cost exactly the same ONE `tidepool-extract` spawn it
 /// always has — the block lane's `classify_block` pre-pass must never fire

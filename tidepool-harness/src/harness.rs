@@ -1804,7 +1804,7 @@ impl Harness {
                 let binder = bound.into_iter().next().ok_or_else(|| {
                     HarnessError::Resident("session-bind emitted no binder metadata".into())
                 })?;
-                self.run_bind_turn(node, binder, compiled, gen).await
+                self.run_bind_turn(node, binder, compiled, gen, true).await
             }
             // A discarding bind (`_ <- e`) or a bare expression: run for
             // effect/value, no binding materializes on the value plane.
@@ -1825,7 +1825,7 @@ impl Harness {
                     })
                     .await?;
 
-                self.finish_run(node, run_outcome, table, asks)
+                self.finish_run(node, run_outcome, table, asks, true)
             }
         }
     }
@@ -2108,6 +2108,12 @@ impl Harness {
                 ))
             })?;
 
+            // Only the block's LAST item may finalize the node — an
+            // intermediate bind/expr item completes its own step but must
+            // leave the node `Running` for the items still to come (see
+            // `finish_run`'s doc: getting this wrong finalizes the whole
+            // node after item 1 of a multi-bind block).
+            let terminal = index + 1 == items.len();
             let step_outcome = match outcome {
                 TurnResult::Decl { .. } => {
                     return Err(HarnessError::Resident(
@@ -2139,7 +2145,8 @@ impl Harness {
                     let binder = bound.into_iter().next().ok_or_else(|| {
                         HarnessError::Resident("session-bind emitted no binder metadata".into())
                     })?;
-                    self.run_bind_turn(node, binder, compiled, bind_gen).await?
+                    self.run_bind_turn(node, binder, compiled, bind_gen, terminal)
+                        .await?
                 }
                 TurnResult::Bind { compiled, .. } | TurnResult::Expr { compiled, .. } => {
                     self.log_turn_extracted(node, &compiled.asks, None)?;
@@ -2154,7 +2161,7 @@ impl Harness {
                             (session, out)
                         })
                         .await?;
-                    self.finish_run(node, run_outcome, table, asks)?
+                    self.finish_run(node, run_outcome, table, asks, terminal)?
                 }
             };
 
@@ -2218,12 +2225,24 @@ impl Harness {
     /// binder/generation, so there is nothing extra to remember here beyond
     /// the hole. A completion needs no hole handling — `run_bind` already
     /// materialized it.
+    /// `terminal` gates the `node_done` call on a `Completed` outcome: `true`
+    /// for every caller except an INTERMEDIATE item of
+    /// [`Self::run_multi_item_block`] (a bind/expr item that is not the
+    /// block's last), which completes its own step but must leave the node
+    /// `Running` for the items still to come. Getting this wrong finalizes
+    /// the whole node after item 1 of a multi-bind block — the item loop
+    /// mid-sequence dying with `TreeError::NotRunning(.., Done)` on item 2's
+    /// next log/checkout call (caught by
+    /// `multi_item_block_contiguous_binds_persist_across_rounds`, the exact
+    /// shape a contiguous GHCi-style bind sequence now reaches once
+    /// `split_block_items` stopped requiring a blank line between items).
     fn finish_run(
         &self,
         node: NodeId,
         outcome: Result<ResidentOutcome, ResidentError>,
         table: DataConTable,
         asks: AsksSidecar,
+        terminal: bool,
     ) -> Result<engine::TurnOutcome, HarnessError> {
         {
             let mut convos = self.convos.lock();
@@ -2237,7 +2256,9 @@ impl Harness {
         match outcome {
             Ok(ResidentOutcome::Completed { result, .. }) => {
                 let rendered = result.to_string_pretty();
-                self.tree.node_done(node, rendered.clone())?;
+                if terminal {
+                    self.tree.node_done(node, rendered.clone())?;
+                }
                 Ok(engine::TurnOutcome::Completed { rendered })
             }
             Ok(ResidentOutcome::Suspended { hole, request, .. }) => {
@@ -2347,6 +2368,7 @@ impl Harness {
         binder: BoundBinder,
         compiled: CompiledTurn,
         gen: Generation,
+        terminal: bool,
     ) -> Result<engine::TurnOutcome, HarnessError> {
         self.log_turn_extracted(
             node,
@@ -2367,7 +2389,7 @@ impl Harness {
             })
             .await?;
 
-        self.finish_run(node, outcome, table, asks)
+        self.finish_run(node, outcome, table, asks, terminal)
     }
 
     /// Loop [`Self::drive_turn`] until the node SUSPENDS at a hole, COMPLETES,

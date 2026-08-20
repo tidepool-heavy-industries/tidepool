@@ -887,11 +887,12 @@ pub const SYSTEM_FRAMING: &str = "\
 You drive a resident Haskell (tidepool) session. Your runnable output is fenced \
 ```haskell code blocks: EVERY such block in your reply runs, in order, as one \
 sequence — consecutive GHCi entries, so later blocks see earlier blocks' \
-declarations and bindings. A block is one unit: a group of top-level declarations, \
-a bind (`x <- expr`), or ONE expression of type `M a` — the same effect-monad \
-surface as tidepool eval (verbs like `run`, `grepGlob`, `readGlob`, \
-`llm`, `runLLMTurn`, `runLLMTurnFork`). Sequence effectful steps inside a single \
-`do` block; declare the types and helpers they use in a separate block before it. \
+declarations and bindings. Inside a block, each unindented line is its own GHCi \
+statement (a declaration, a bind `x <- expr`, or an expression of type `M a` — the \
+same effect-monad surface as tidepool eval, with verbs like `run`, `grepGlob`, \
+`readGlob`, `llm`, `runLLMTurn`, `runLLMTurnFork`); an indented line continues the \
+statement above it, just like GHCi layout. Sequence effectful steps inside a single \
+`do` block; declare the types and helpers they use in a separate statement before it. \
 If a block fails, everything before it has still run and persists — you'll be told \
 which block failed and why; continue from that block. Prose outside the blocks is \
 ignored by the runtime.\n\
@@ -1246,34 +1247,36 @@ pub fn split_imports(block: &str) -> (String, String) {
 /// answer expression); this recovers the item boundaries `run_multi_item_block`
 /// hands to [`tidepool_runtime::session::classify_block`].
 ///
-/// A blank line followed by a line that does NOT start with whitespace begins
-/// a new item — the same paragraph convention a Haskell script or GHCi
-/// paste-mode already uses to separate top-level declarations/statements. An
-/// indented continuation (inside a `do`/`where`/`let` block, or a multi-clause
-/// function's later equations, which must stay one item — see
-/// `tidepool-repl/CLAUDE.md`'s "Item classification") never splits, blank
-/// lines and all. A block with no such boundary is a single item — the common
-/// case, `trim_end()`ed identically to the whole-block text `run_block`'s
-/// existing single-item path already receives.
+/// GHCi statement semantics, not a blank-line paragraph convention: an
+/// UNINDENTED line starts a new item; an indented line (a `do`/`where`/`let`
+/// continuation, a multi-line `data`/record field list, an `in` clause) stays
+/// part of the item it follows — the same rule a real GHCi paste already
+/// applies to a script. A blank line still closes an open item, but is no
+/// longer REQUIRED to: a model writing contiguous GHCi-style bind lines
+/// (`seed <- pure 1\nrunningTotal <- pure (sum seed)`) with no blank line
+/// between them now gets one item PER LINE, exactly like typing each line at
+/// a real GHCi prompt. Before this, a contiguous run like that stayed ONE
+/// item and compiled as a single wrapped `do`-expression — the binds ran
+/// transiently and never persisted as session bindings, which read as
+/// "session state is broken" a turn later. A block with no unindented
+/// boundary past its first line is a single item — the common case,
+/// `trim_end()`ed identically to the whole-block text `run_block`'s existing
+/// single-item path already receives.
 pub fn split_block_items(block: &str) -> Vec<String> {
     let mut items: Vec<String> = Vec::new();
     let mut current = String::new();
-    let mut blank_pending = false;
     for line in block.lines() {
         if line.trim().is_empty() {
             if !current.is_empty() {
-                blank_pending = true;
+                current.push('\n');
             }
             continue;
         }
         let indented = line.starts_with(' ') || line.starts_with('\t');
-        if blank_pending && !indented {
+        if !indented && !current.is_empty() {
             items.push(current.trim_end().to_string());
             current.clear();
-        } else if blank_pending {
-            current.push('\n');
         }
-        blank_pending = false;
         current.push_str(line);
         current.push('\n');
     }
@@ -2581,29 +2584,55 @@ mod tests {
         );
     }
 
-    /// A blank line followed by a helper decl, then the answer expression —
-    /// the motivating shape — splits into exactly two items.
+    /// GHCi statement semantics (2026-08-20 change): a type signature and its
+    /// equation are two SEPARATE unindented lines, so they are two separate
+    /// items — exactly like typing them as two separate GHCi entries. The
+    /// downstream decl batcher (`run_multi_item_block`) re-joins a maximal
+    /// run of consecutive decl-shaped items into one generation, so the
+    /// signature and its binding still typecheck together. This test used to
+    /// assert the OLD blank-line-only semantics (signature + equation as one
+    /// item, split from `sq 7` only by the blank line between them).
     #[test]
-    fn split_block_items_decl_then_expr_splits_in_two() {
+    fn split_block_items_decl_then_expr_splits_by_line() {
         let block = "sq :: Int -> Int\nsq x = x * x\n\nsq 7";
         assert_eq!(
             split_block_items(block),
             vec![
-                "sq :: Int -> Int\nsq x = x * x".to_string(),
+                "sq :: Int -> Int".to_string(),
+                "sq x = x * x".to_string(),
                 "sq 7".to_string()
             ]
         );
     }
 
-    /// An indented continuation after a blank line (inside a `do`/`where`
-    /// block) never starts a new item — only a non-indented line does.
+    /// An indented continuation (inside a `do`/`where` block) never starts a
+    /// new item — only a non-indented line does. Blank lines inside the
+    /// continuation don't split it either.
     #[test]
     fn split_block_items_indented_continuation_stays_in_one_item() {
         let block = "f = do\n  x <- pure 1\n\n  pure (x + 1)";
         assert_eq!(split_block_items(block), vec![block.to_string()]);
     }
 
-    /// Three items in a row (two helper decls, then the answer) all split out.
+    /// A multi-line `data` record declaration (every field line indented)
+    /// stays one item, no blank line required.
+    #[test]
+    fn split_block_items_data_record_decl_stays_one_item() {
+        let block = "data Foo = Foo\n  { fooA :: Int\n  , fooB :: Text\n  }";
+        assert_eq!(split_block_items(block), vec![block.to_string()]);
+    }
+
+    /// A `where`-continued declaration (the clause indented under the
+    /// equation it belongs to) stays one item.
+    #[test]
+    fn split_block_items_where_continuation_stays_one_item() {
+        let block = "f x = y\n  where y = x + 1";
+        assert_eq!(split_block_items(block), vec![block.to_string()]);
+    }
+
+    /// Three items in a row (two helper decls, then the answer) all split out
+    /// — blank lines between them are incidental, not required (each is
+    /// already its own unindented line).
     #[test]
     fn split_block_items_three_items() {
         let block = "helper1 x = x + 1\n\nhelper2 x = x * 2\n\nhelper2 (helper1 5)";
@@ -2613,6 +2642,40 @@ mod tests {
                 "helper1 x = x + 1".to_string(),
                 "helper2 x = x * 2".to_string(),
                 "helper2 (helper1 5)".to_string(),
+            ]
+        );
+    }
+
+    /// The motivating bug: contiguous GHCi-style bind lines with NO blank
+    /// line between them must split into one item per statement, exactly
+    /// like pasting each line at a real GHCi prompt — previously this stayed
+    /// ONE item and compiled as a single wrapped `do`-expression, so the
+    /// binds ran transiently and never persisted as session bindings.
+    #[test]
+    fn split_block_items_contiguous_binds_split_per_line() {
+        let block = "seed <- pure [2, 3, 5, 7]\nrunningTotal <- pure (sum seed)\nrunningTotal + 1";
+        assert_eq!(
+            split_block_items(block),
+            vec![
+                "seed <- pure [2, 3, 5, 7]".to_string(),
+                "runningTotal <- pure (sum seed)".to_string(),
+                "runningTotal + 1".to_string(),
+            ]
+        );
+    }
+
+    /// A contiguous decl-then-binds-then-expr block (no blank lines at all)
+    /// splits per unindented line, in order — the mixed-shape case.
+    #[test]
+    fn split_block_items_mixed_decl_binds_expr_splits_per_line() {
+        let block = "sq :: Int -> Int\nsq x = x * x\nseed <- pure 1\nsq seed";
+        assert_eq!(
+            split_block_items(block),
+            vec![
+                "sq :: Int -> Int".to_string(),
+                "sq x = x * x".to_string(),
+                "seed <- pure 1".to_string(),
+                "sq seed".to_string(),
             ]
         );
     }
