@@ -1210,8 +1210,8 @@ false
 RunLLMTurn
 -- end type_name --
 
--- description (1435 bytes) --
-Suspend for a TYPED answer. `runLLMTurn \@T prompt :: M T` — the same calling model answers IN CONTEXT; its failure is this turn's failure, so the answer is bare. `runLLMTurnFork \@T prompt :: M (Either InvocationExit T)` — a forked sub-agent answers in its own window; `runLLMTurnFanout \@T prompts :: M [Either InvocationExit T]` — N forked sub-agents, one per prompt, one result per prompt IN DECLARED ORDER. A forked window is a BRANCH POSITION, so its abnormal exit (round exhaustion, non-finalization, cancellation, runtime failure) arrives as `Left exit` at that position instead of killing its siblings — natural spelling `Right x <- runLLMTurnFork \@T p`, or `renderInvocationExit e` to display one. GHC validates each answer against `T` before it resumes the continuation (an ill-typed answer never consumes it). `freezeContext :: M ContextRef` mints a capability naming THIS window's current frozen prefix, immediately (no operator, no model round). `runLLMTurnBranch \@T ref prompt :: M (Either InvocationExit (T, ContextRef))` forks a FRESH child window off that frozen prefix (never an empty root) — `Right (answer, ref')` is the child's own answer plus a ref to ITS post-finalize context for branching further; a branch child is a BRANCH POSITION too, so its abnormal exit is a `Left` here as well (and a window that never finalized has no context to hand back, which is why the `Either` wraps the whole pair).
+-- description (1619 bytes) --
+Suspend for a TYPED answer. `runLLMTurn \@T prompt :: M T` — the same calling model answers IN CONTEXT; its failure is this turn's failure, so the answer is bare. `runLLMTurnFork \@T prompt :: M (Either InvocationExit T)` — a forked sub-agent answers in its own window; `runLLMTurnFanout \@T prompts :: M [Either InvocationExit T]` — N forked sub-agents, one per prompt, one result per prompt IN DECLARED ORDER. A forked window is a BRANCH POSITION, so its abnormal exit (round exhaustion, non-finalization, cancellation, runtime failure) arrives as `Left exit` at that position instead of killing its siblings — natural spelling `Right x <- runLLMTurnFork \@T p`, or `renderInvocationExit e` to display one. GHC validates each answer against `T` before it resumes the continuation (an ill-typed answer never consumes it). `freezeContext :: M ContextRef` mints a capability naming THIS window's current frozen prefix, immediately (no operator, no model round). `runLLMTurnBranch \@T ref prompt :: M (Either InvocationExit (T, ContextRef))` forks a FRESH child window off that frozen prefix (never an empty root) — `Right (answer, ref')` is the child's own answer plus a ref to ITS post-finalize context for branching further; a branch child is a BRANCH POSITION too, so its abnormal exit is a `Left` here as well (and a window that never finalized has no context to hand back, which is why the `Either` wraps the whole pair). `runLLMTurnBranchLabeled \@T label ref prompt` is the same verb with a caller-chosen `label` Text stamped onto the child window, for routing its asks to a per-window operator surface.
 -- end description --
 
 -- prompt_card: None --
@@ -1260,7 +1260,7 @@ instance ToJSON InvocationExit where
 -- extra_imports (0 items) --
 -- end extra_imports --
 
--- helpers (10 items) --
+-- helpers (12 items) --
 -- helpers[0] (144 bytes) --
 {-# OPAQUE runLLMTurn #-}
 runLLMTurn :: forall a effs. Member RunLLMTurn effs => Text -> Eff effs a
@@ -1329,6 +1329,18 @@ runLLMTurnBranch ref p = runLLMTurnBranchSited 0 ref p
 runLLMTurnBranchSited :: forall a effs. Member RunLLMTurn effs => Int -> ContextRef -> Text -> Eff effs (Either InvocationExit (a, ContextRef))
 runLLMTurnBranchSited sid (ContextRef ref) p = unsafeCoerce <$> send (RunLLMTurnWith p (object ["typedSite" .= sid, "branch" .= True, "ref" .= ref]))
 -- end helpers[9] --
+
+-- helpers[10] (266 bytes) --
+{-# OPAQUE runLLMTurnBranchLabeled #-}
+runLLMTurnBranchLabeled :: forall a effs. Member RunLLMTurn effs => Text -> ContextRef -> Text -> Eff effs (Either InvocationExit (a, ContextRef))
+runLLMTurnBranchLabeled label ref p = runLLMTurnBranchLabeledSited 0 label ref p
+-- end helpers[10] --
+
+-- helpers[11] (383 bytes) --
+{-# OPAQUE runLLMTurnBranchLabeledSited #-}
+runLLMTurnBranchLabeledSited :: forall a effs. Member RunLLMTurn effs => Int -> Text -> ContextRef -> Text -> Eff effs (Either InvocationExit (a, ContextRef))
+runLLMTurnBranchLabeledSited sid label (ContextRef ref) p = unsafeCoerce <$> send (RunLLMTurnWith p (object ["typedSite" .= sid, "branch" .= True, "ref" .= ref, "label" .= label]))
+-- end helpers[11] --
 
 -- end helpers --
 
