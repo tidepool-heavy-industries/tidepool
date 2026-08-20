@@ -216,7 +216,7 @@ fn answered_form(node_id: &str, interaction: u64, shape: &FormShape, answer: &Jv
     html! {
         div id=(ask_id(node_id, interaction)) data-rev=(interaction)
             class="answered" data-node="answered" {
-            p class="eyebrow" { "Answered — " (shape_title(shape)) }
+            p class="eyebrow" { "ask #" (interaction) " — Answered — " (shape_title(shape)) }
             pre { (answer_text(answer)) }
         }
     }
@@ -229,11 +229,11 @@ fn answered_continue(node_id: &str, interaction: u64, input: Option<&str>) -> Ma
             class="answered" data-node="answered" {
             @match input {
                 Some(text) => {
-                    p class="eyebrow" { "Continued, with input" }
+                    p class="eyebrow" { "ask #" (interaction) " — Continued, with input" }
                     pre { (text) }
                 }
                 None => {
-                    p class="eyebrow" { "Continued" }
+                    p class="eyebrow" { "ask #" (interaction) " — Continued" }
                 }
             }
         }
@@ -310,6 +310,7 @@ fn ask_form(node_id: &str, interaction: u64, shape: &FormShape) -> Markup {
     html! {
         form id=(ask_id(node_id, interaction)) data-rev=(interaction) class="form"
              data-on-submit=(post_url(node_id, "submit", interaction)) {
+            p class="eyebrow ask-label" { "ask #" (interaction) }
             (generic_shape(ROOT_BIND_PATH, shape))
             div class="actions" {
                 button type="submit" class="btn btn-primary" { "Submit" }
@@ -359,7 +360,7 @@ fn ask_continue(node_id: &str, interaction: u64) -> Markup {
     html! {
         form id=(ask_id(node_id, interaction)) data-rev=(interaction) class="continue"
              data-on-submit=(post_url(node_id, "continue", interaction)) {
-            p class="eyebrow" { "Loop complete — awaiting operator" }
+            p class="eyebrow" { "ask #" (interaction) " — Loop complete — awaiting operator" }
             (generic_shape(ROOT_BIND_PATH, &continue_shape()))
             button type="submit" class="btn btn-primary" { "Continue" }
         }
@@ -789,6 +790,32 @@ mod tests {
         assert!(html.contains("id=\"ask-n1-7\" data-rev=\"7\""), "{html}");
         assert!(html.contains("@post('/node/n1/submit/3')"), "{html}");
         assert!(html.contains("@post('/node/n1/continue/7')"), "{html}");
+    }
+
+    /// A stacked pair of pending asks each carries a visible `ask #<id>`
+    /// identity label — the paper cut a zero-context operator hit: with no
+    /// label, two independent live questions are indistinguishable from a
+    /// stale form the page failed to clean up.
+    #[test]
+    fn stacked_pending_asks_each_show_a_visible_ask_id_label() {
+        let th = empty_history();
+        let shape = FormShape::String;
+        let view = base_view(
+            "n1",
+            vec![
+                TimelineEntry::PendingForm {
+                    id: 3,
+                    shape: &shape,
+                },
+                TimelineEntry::PendingContinue { id: 7 },
+            ],
+            &th,
+            42,
+        );
+        let html = node_panel(&view).into_string();
+
+        assert!(html.contains("ask #3"), "{html}");
+        assert!(html.contains("ask #7"), "{html}");
     }
 
     /// A tree-path node id (containing literal slashes) bakes a

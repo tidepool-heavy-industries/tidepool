@@ -600,7 +600,8 @@ pub fn router_with_form_api(state: AppState, form_api: FormApiConfig) -> Router 
         .route("/", get(page))
         .route("/sse", get(sse))
         .route("/node/{node}/submit/{interaction}", post(submit))
-        .route("/node/{node}/continue/{interaction}", post(continue_loop));
+        .route("/node/{node}/continue/{interaction}", post(continue_loop))
+        .fallback(not_found);
     crate::formapi::merge(base, form_api).with_state(state)
 }
 
@@ -704,6 +705,19 @@ fn err_json(msg: String) -> Response {
     (
         axum::http::StatusCode::BAD_REQUEST,
         Json(json!({"ok": false, "error": msg})),
+    )
+        .into_response()
+}
+
+/// Any route that matches none of the above — a malformed node path, a typo,
+/// a probing curl. Axum's default fallback is an empty-body 404, invisible
+/// to the client JS toast and unhelpful to an agent/curl operator; this keeps
+/// every response on the same `{"ok": false, "error": ...}` JSON shape the
+/// matched handlers speak, just with 404 instead of `err_json`'s 400.
+async fn not_found() -> Response {
+    (
+        axum::http::StatusCode::NOT_FOUND,
+        Json(json!({"ok": false, "error": "no such route"})),
     )
         .into_response()
 }

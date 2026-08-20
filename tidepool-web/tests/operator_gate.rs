@@ -202,6 +202,46 @@ async fn continue_with_input_carries_the_operator_message() {
     );
 }
 
+/// An unmatched route (a malformed node path, a typo, a probing curl) still
+/// speaks the crate's `{"ok": false, "error": ...}` JSON shape, just with 404
+/// instead of a matched handler's 400 — axum's default empty-body 404 is
+/// invisible to the client JS toast and unhelpful to curl/agent operators.
+#[tokio::test(flavor = "multi_thread")]
+async fn unmatched_get_route_returns_404_json() {
+    let (addr, _state) = boot().await;
+    let base = format!("http://{addr}");
+    let client = Client::new();
+
+    let resp = client
+        .get(format!("{base}/node/nope"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 404);
+    let v: Value = resp.json().await.unwrap();
+    assert_eq!(v["ok"], json!(false));
+    assert!(v["error"].as_str().unwrap().contains("no such route"));
+}
+
+/// Same shape for an unmatched POST route.
+#[tokio::test(flavor = "multi_thread")]
+async fn unmatched_post_route_returns_404_json() {
+    let (addr, _state) = boot().await;
+    let base = format!("http://{addr}");
+    let client = Client::new();
+
+    let resp = client
+        .post(format!("{base}/node/nope/frobnicate/0"))
+        .json(&json!({}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 404);
+    let v: Value = resp.json().await.unwrap();
+    assert_eq!(v["ok"], json!(false));
+    assert!(v["error"].as_str().unwrap().contains("no such route"));
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn submit_without_pending_form_returns_400() {
     let (addr, state) = boot().await;
