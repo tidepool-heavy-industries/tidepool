@@ -70,7 +70,8 @@ import GHC.OverloadedLabels (IsLabel (..))
 
 import Tidepool.Aeson.FromJSON (Result (..), fromJSON)
 import Tidepool.Aeson.Value (Value (..))
-import Tidepool.Effects (M, askUserRaw, noteRaw)
+import Control.Monad.Freer (Eff, Member)
+import Tidepool.Effects (AskUser, askUserRaw, noteRaw)
 import Tidepool.Form.GForm (DerivedForm, formShape)
 import Tidepool.Form.Shape
   ( FieldKey
@@ -94,7 +95,7 @@ import Tidepool.Form.Wire (encodeShape, encodeShapeAnnotated)
 -- is entirely here: the caller sees @M a@, never a failure to handle. (The
 -- driver bounds the consecutive re-presentations, so a non-interactive gate
 -- cannot spin forever.)
-askUser :: forall a. DerivedForm a => M a
+askUser :: forall a effs. (DerivedForm a, Member AskUser effs) => Eff effs a
 askUser = do
   submitted <- askUserRaw (encodeShape (formShape @a))
   case fromJSON submitted of
@@ -110,7 +111,7 @@ askUser = do
 -- Use this to say what you are about to ask and why, before presenting a
 -- form via 'askUser'\/'choose'\/'chooseMany' — the operator otherwise sees
 -- only the form itself, with no stated intent behind it.
-note :: Text -> M ()
+note :: forall effs. Member AskUser effs => Text -> Eff effs ()
 note = noteRaw
 
 -- | Ask the operator to pick one of a list of runtime alternatives. The
@@ -122,7 +123,7 @@ note = noteRaw
 -- re-presents an empty choice until the driver's re-prompt bound ends it.
 -- Use 'chooseMany' (which may legitimately return @[]@) when the list can be
 -- empty.
-choose :: forall a. [(Text, a)] -> M a
+choose :: forall a effs. Member AskUser effs => [(Text, a)] -> Eff effs a
 choose options
   | repeatedLabel options = error "choose: labels must be unique"
   | otherwise = awaitChoice
@@ -142,7 +143,7 @@ choose options
 -- offered.
 --
 -- > keep <- chooseMany [(idea, idea) | idea <- ideas st]
-chooseMany :: forall a. [(Text, a)] -> M [a]
+chooseMany :: forall a effs. Member AskUser effs => [(Text, a)] -> Eff effs [a]
 chooseMany options
   | repeatedLabel options = error "chooseMany: labels must be unique"
   | otherwise = awaitChoices
@@ -290,7 +291,7 @@ formShapeWith anns = encodeShapeAnnotated mTitle fieldDocs (formShape @a)
 
 -- | Like 'askUser', but the presented form carries the given title\/field
 -- docs. Same retry-on-malformed-submission behavior.
-askUserWith :: forall a. DerivedForm a => [FormAnn a] -> M a
+askUserWith :: forall a effs. (DerivedForm a, Member AskUser effs) => [FormAnn a] -> Eff effs a
 askUserWith anns = do
   submitted <- askUserRaw (formShapeWith @a anns)
   case fromJSON submitted of

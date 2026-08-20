@@ -133,22 +133,22 @@ type M = Eff '[Console, KV, Fs, Http, Exec, Lsp, Llm, Git, Time, Ask, RunLLMTurn
 
 -- | Emit a line of console output. Thin wrapper over the Print effect
 -- so chains never need `send (Print …)`.
-say :: Text -> M ()
+say :: forall effs. Member Console effs => Text -> Eff effs ()
 say = send . Print
 -- | `say` on anything Showable (`say . show`).
-sayShow :: Show a => a -> M ()
+sayShow :: forall a effs. (Show a, Member Console effs) => a -> Eff effs ()
 sayShow = say . show
 -- | Look up a key; Nothing when absent.
-kvGet :: Text -> M (Maybe Value)
+kvGet :: forall effs. Member KV effs => Text -> Eff effs (Maybe Value)
 kvGet = send . KvGet
 -- | Persist a JSON value under a key.
-kvSet :: Text -> Value -> M ()
+kvSet :: forall effs. Member KV effs => Text -> Value -> Eff effs ()
 kvSet k v = send (KvSet k v)
 -- | Delete a key (no-op when absent).
-kvDel :: Text -> M ()
+kvDel :: forall effs. Member KV effs => Text -> Eff effs ()
 kvDel = send . KvDelete
 -- | All keys (unordered; kvKeysP "" for sorted).
-kvKeys :: M [Text]
+kvKeys :: forall effs. Member KV effs => Eff effs [Text]
 kvKeys = send KvKeys
 -- | Delete all keys whose name starts with @prefix@; return the count deleted.
 -- Pass "" (empty string) to clear the ENTIRE store — this erases ALL
@@ -156,18 +156,18 @@ kvKeys = send KvKeys
 -- Recommended pattern: namespace keys as "ns/key" and clear with "ns/".
 -- NOTE: per-session automatic scoping is a deferred design decision (#327);
 -- callers manage namespaces manually via this prefix argument.
-kvClear :: Text -> M Int
+kvClear :: forall effs. Member KV effs => Text -> Eff effs Int
 kvClear = send . KvClear
 -- | All keys whose name starts with @prefix@, returned sorted.
 -- E.g. @kvKeysP "agent/"@ returns @["agent/bar", "agent/foo", ...]@.
 -- Pass "" to list ALL keys sorted (like kvKeys but deterministically ordered).
-kvKeysP :: Text -> M [Text]
+kvKeysP :: forall effs. Member KV effs => Text -> Eff effs [Text]
 kvKeysP = send . KvKeysP
 -- | Summary of KV store state as a JSON Value:
 -- @{count :: Int, sample :: [Text], file_size_bytes :: Int}@.
 -- Use to inspect junk-drawer accumulation without listing all keys.
 -- Extract fields with optics: @i <- kvInfo; i ^? key "count" . _Int@
-kvInfo :: M Value
+kvInfo :: forall effs. Member KV effs => Eff effs Value
 kvInfo = send KvInfo
 -- | Atomic compare-and-swap: set @key@ to @new@ only if its current
 -- value equals @expected@ (Nothing = require the key ABSENT).
@@ -177,49 +177,49 @@ kvInfo = send KvInfo
 -- kvModify\/kvIncr\/kvAppend retry over — prefer those for the
 -- common read-modify-write; reach for kvCas directly for a custom
 -- conflict policy.
-kvCas :: Text -> Maybe Value -> Value -> M (Either Value ())
+kvCas :: forall effs. Member KV effs => Text -> Maybe Value -> Value -> Eff effs (Either Value ())
 kvCas k e n = send (KvCas k e n)
 -- | Read a file. Failure is TYPED (#335): `Left (FsNotFound p)` / `Left
 -- (FsNotUtf8 p)` / `Left (FsIo _)`. The natural spelling unwraps-or-aborts with
 -- a failable bind: `Right src <- readFile path` (or `readFile path >>= liftEither`).
-readFile :: FilePath -> M (Either FsError Text)
+readFile :: forall effs. Member Fs effs => FilePath -> Eff effs (Either FsError Text)
 readFile = send . FsRead
 -- | Write a file (mkdir -p on the parent). `Left (FsSandbox _)` on a path
 -- escape, `Left (FsIo _)` on write failure; unwrap with `liftEither`.
-writeFile :: FilePath -> Text -> M (Either FsError ())
+writeFile :: forall effs. Member Fs effs => FilePath -> Text -> Eff effs (Either FsError ())
 writeFile f c = send (FsWrite f c)
 -- | Append to a file (reads then writes). Failure is TYPED (#335): a read
 -- or write failure comes back as `Left (FsError)` DATA, nothing partially
 -- applied; unwrap with `Right () <- appendFile path t` or `>>= liftEither`.
-appendFile :: FilePath -> Text -> M (Either FsError ())
+appendFile :: forall effs. Member Fs effs => FilePath -> Text -> Eff effs (Either FsError ())
 appendFile p t = do
   er <- readFile p
   case er of
     Left e -> pure (Left e)
     Right old -> writeFile p (old <> t)
 -- | List a directory. `Left (FsNotFound _)` when absent; unwrap with `liftEither`.
-listDirectory :: FilePath -> M (Either FsError [FilePath])
+listDirectory :: forall effs. Member Fs effs => FilePath -> Eff effs (Either FsError [FilePath])
 listDirectory = send . FsListDir
 -- | TOTAL existence predicate (System.Directory semantics): False for a
 -- missing path, a directory, or a path outside the sandbox — never throws.
-doesFileExist :: FilePath -> M Bool
+doesFileExist :: forall effs. Member Fs effs => FilePath -> Eff effs Bool
 doesFileExist p = send (FsMetadata p) <&> maybe False (\m -> m.isFile)
 -- | TOTAL existence predicate: False for missing/non-dir/out-of-sandbox.
-doesDirectoryExist :: FilePath -> M Bool
+doesDirectoryExist :: forall effs. Member Fs effs => FilePath -> Eff effs Bool
 doesDirectoryExist p = send (FsMetadata p) <&> maybe False (\m -> m.isDir)
 -- | File size in bytes, or `Nothing` if the path is missing.
-getFileSize :: FilePath -> M (Maybe Int)
+getFileSize :: forall effs. Member Fs effs => FilePath -> Eff effs (Maybe Int)
 getFileSize p = send (FsMetadata p) <&> fmap (\m -> m.size)
 -- | File metadata as a `FileMeta` record {size, isFile, isDir}, or `Nothing`
 -- if the path is missing/unreadable (use record-dot: `m.size`, `m.isDir`).
-fsMeta :: FilePath -> M (Maybe FileMeta)
+fsMeta :: forall effs. Member Fs effs => FilePath -> Eff effs (Maybe FileMeta)
 fsMeta = send . FsMetadata
 getCurrentDirectory :: M FilePath
 getCurrentDirectory = do { p <- run "pwd" >>= liftEither; pure (T.strip p.stdout) }
 -- | Expand a glob to matching file paths. `Left (FsSandbox _)` on an empty
 -- or absolute pattern, `Left (FsNotFound _)` on a missing search root; unwrap
 -- with `Right ps <- glob pat` or `glob pat >>= liftEither`.
-glob :: FilePath -> M (Either FsError [FilePath])
+glob :: forall effs. Member Fs effs => FilePath -> Eff effs (Either FsError [FilePath])
 glob = send . FsGlob
 -- | Regex-search files matching a path glob. ARG ORDER: regex FIRST, glob
 -- SECOND — a path glob like "*.rs" goes in arg 2, not arg 1. Returns [Hit]
@@ -227,7 +227,7 @@ glob = send . FsGlob
 -- hitsByFile/refs). Failure is typed: `Left (FsBadRegex _)` on a bad regex.
 -- NB regex metachars are double-escaped here (JSON x Haskell), so a literal dot
 -- needs four backslashes; the FsBadRegex detail shows the exact form.
-grepGlob :: Text -> FilePath -> M (Either FsError [Hit])
+grepGlob :: forall effs. Member Fs effs => Text -> FilePath -> Eff effs (Either FsError [Hit])
 grepGlob pat g = send (FsGrep pat g)
 -- | Read every file matching a glob with PER-FILE failure isolation: one
 -- `FileRead {path, contents}` per match — `contents` is `Right text` on a clean
@@ -238,7 +238,7 @@ grepGlob pat g = send (FsGrep pat g)
 -- the readable files with
 -- `[r.path | r <- rs, isRight r.contents]`, or split all outcomes with
 -- `partitionEithers (map (.contents) rs)`.
-readGlob :: Text -> M [FileRead]
+readGlob :: forall effs. Member Fs effs => Text -> Eff effs [FileRead]
 readGlob = send . FsReadGlob
 -- | Exact str-replace, EXACTLY-ONCE. Reports the outcome as an
 -- `UpdateOneOutcome` DATA value (never throws, mirrors `InsertAfterOutcome`):
@@ -246,7 +246,7 @@ readGlob = send . FsReadGlob
 -- is `UpdateOneRejected` (nothing written); otherwise `UpdateOneApplied`.
 -- Pass enough surrounding text that `old` is unique. Use planUpdate to review
 -- the diff first; the full editing surface is in tidepool://edits.
-update :: FilePath -> Text -> Text -> M UpdateOneOutcome
+update :: forall effs. Member Fs effs => FilePath -> Text -> Text -> Eff effs UpdateOneOutcome
 update path old new
   | T.null old = pure (UpdateOneRejected "'old' must be non-empty" Nothing)
   | otherwise = do
@@ -262,7 +262,7 @@ update path old new
 -- `UpdateAllOutcome` DATA value (never throws): empty `old`, a missing file,
 -- or zero matches is `UpdateAllRejected` (nothing written); otherwise
 -- `UpdateAllApplied` carries the replacement count.
-updateAll :: FilePath -> Text -> Text -> M UpdateAllOutcome
+updateAll :: forall effs. Member Fs effs => FilePath -> Text -> Text -> Eff effs UpdateAllOutcome
 updateAll path old new
   | T.null old = pure (UpdateAllRejected "'old' must be non-empty")
   | otherwise = do
@@ -277,7 +277,7 @@ updateAll path old new
 -- | Dry-run `update`: returns an `UpdateOutcome` (the review diff, or the
 -- reason it can't apply), writes NOTHING. Never errors — the conflict comes
 -- back as data so you can branch before committing.
-planUpdate :: FilePath -> Text -> Text -> M UpdateOutcome
+planUpdate :: forall effs. Member Fs effs => FilePath -> Text -> Text -> Eff effs UpdateOutcome
 planUpdate path old new = do
   er <- readFile path
   case er of
@@ -295,7 +295,7 @@ planUpdate path old new = do
 -- throws, same contract as `update`): a malformed payload (missing or
 -- non-string file/old/new key) is `UpdateOneRejected` — one bad item never
 -- aborts a batch.
-updateJ :: Value -> M UpdateOneOutcome
+updateJ :: forall effs. Member Fs effs => Value -> Eff effs UpdateOneOutcome
 updateJ v = case (v ^? key "file" . _String, v ^? key "old" . _String, v ^? key "new" . _String) of
   (Just f, Just o, Just n) -> update f o n
   _ -> pure (UpdateOneRejected "updateJ: need {file, old, new} strings in input" Nothing)
@@ -303,7 +303,7 @@ updateJ v = case (v ^? key "file" . _String, v ^? key "old" . _String, v ^? key 
 -- outcome as an `InsertAfterOutcome` DATA value (never throws): a missing
 -- file, or an anchor matching zero or 2+ lines, is `InsertAfterRejected`
 -- (nothing written); otherwise `InsertAfterApplied`.
-insertAfter :: FilePath -> Text -> Text -> M InsertAfterOutcome
+insertAfter :: forall effs. Member Fs effs => FilePath -> Text -> Text -> Eff effs InsertAfterOutcome
 insertAfter path anchor block = do
   er <- readFile path
   case er of
@@ -317,7 +317,7 @@ insertAfter path anchor block = do
            _ -> pure (InsertAfterRejected ("anchor matched " <> show n <> " lines in " <> path) (Just n))
 -- | Compute-check-commit: write only if every named check holds; failures
 -- come back as a `WriteOutcome` (nothing written on failure).
-writeChecked :: FilePath -> [(Text, Bool)] -> Text -> M WriteOutcome
+writeChecked :: forall effs. Member Fs effs => FilePath -> [(Text, Bool)] -> Text -> Eff effs WriteOutcome
 writeChecked path checks content = do
   let failed = [name | (name, ok) <- checks, not ok]
   if null failed
@@ -326,7 +326,7 @@ writeChecked path checks content = do
 -- | Blake3 content hash (hex) of a file, or Nothing if it does not exist.
 -- The compare-and-swap token for writeCheckedIf: read it, compute your new
 -- content, then write back only if the file still hashes the same.
-fileHash :: FilePath -> M (Maybe Text)
+fileHash :: forall effs. Member Fs effs => FilePath -> Eff effs (Maybe Text)
 fileHash p = send (FsHash p) >>= liftEither
 -- | Content-hash compare-and-swap write (#330). Writes CONTENT only if the
 -- file's current blake3 hash equals EXPECTED (Nothing = expect the file ABSENT,
@@ -335,7 +335,7 @@ fileHash p = send (FsHash p) >>= liftEither
 -- on success, or 'WriteConflict' (carrying expected vs actual hash) if the
 -- precondition failed — conflicts come back as DATA, nothing is written. Get
 -- EXPECTED from fileHash; on a conflict re-read, recompute, and retry.
-writeCheckedIf :: Maybe Text -> FilePath -> Text -> M WriteOutcome
+writeCheckedIf :: forall effs. Member Fs effs => Maybe Text -> FilePath -> Text -> Eff effs WriteOutcome
 writeCheckedIf expected path content = do
   r <- send (FsWriteCas path expected content)
   pure $ case r of
@@ -344,11 +344,11 @@ writeCheckedIf expected path content = do
 -- | Fetch JSON from an HTTP endpoint. Failure is TYPED (#335): `Left
 -- (HttpStatus code body)` on a non-2xx response, `Left (HttpNetwork _)`
 -- on a network failure. Unwrap with `Right v <- httpGet url` or `>>= liftEither`.
-httpGet :: Text -> M (Either HttpError Value)
+httpGet :: forall effs. Member Http effs => Text -> Eff effs (Either HttpError Value)
 httpGet = send . HttpGet
 -- | POST a JSON body; returns the response Value (see `httpGet` for the
 -- failure shape).
-httpPost :: Text -> Value -> M (Either HttpError Value)
+httpPost :: forall effs. Member Http effs => Text -> Value -> Eff effs (Either HttpError Value)
 httpPost url body = send (HttpPost url body)
 -- | Run a shell command; returns a `Proc` record {exitCode, stdout, stderr}
 -- (use `ok p` for the zero-exit check). Failure is TYPED (#335): `Left
@@ -363,37 +363,37 @@ runArgv :: [Text] -> M (Either ExecError Proc)
 runArgv = send . RunArgv
 -- | Seed: every workspace definition named X (each a LspNode with container/file/line/source line).
 -- `Left (LspDaemonDown _)` when the daemon isn't reachable; unwrap with `>>= liftEither`.
-lspWhere :: Text -> M (Either LspError [LspNode])
+lspWhere :: forall effs. Member Lsp effs => Text -> Eff effs (Either LspError [LspNode])
 lspWhere = send . LspWhere
 -- | Incoming calls; [] = none (or node not callable). A daemon-down failure
 -- aborts the eval structurally (not a silent []) — see the Lsp effect description.
-lspCallers :: LspNode -> M [LspNode]
+lspCallers :: forall effs. Member Lsp effs => LspNode -> Eff effs [LspNode]
 lspCallers = send . LspCallers
 -- | Outgoing calls; [] = none (or node not callable).
-lspCallees :: LspNode -> M [LspNode]
+lspCallees :: forall effs. Member Lsp effs => LspNode -> Eff effs [LspNode]
 lspCallees = send . LspCallees
 -- | Use sites of this node's symbol (kind = "reference"); [] = none (or not a symbol).
-lspRefs :: LspNode -> M [LspNode]
+lspRefs :: forall effs. Member Lsp effs => LspNode -> Eff effs [LspNode]
 lspRefs = send . LspRefs
 -- | Resolve any node (e.g. a use site) to its definition node.
-lspDef :: LspNode -> M (Maybe LspNode)
+lspDef :: forall effs. Member Lsp effs => LspNode -> Eff effs (Maybe LspNode)
 lspDef = send . LspDef
 -- | Type / signature / docs for a node.
-lspHover :: LspNode -> M (Maybe Text)
+lspHover :: forall effs. Member Lsp effs => LspNode -> Eff effs (Maybe Text)
 lspHover = send . LspHover
 -- | Rename a node's symbol to NEW; returns a unified diff (apply with applyDiff). Nothing = can't rename.
-lspRename :: LspNode -> Text -> M (Maybe Text)
+lspRename :: forall effs. Member Lsp effs => LspNode -> Text -> Eff effs (Maybe Text)
 lspRename n new = send (LspRename n new)
 -- | Diagnostics (errors / warnings) for FILE. `Left (LspDaemonDown _)`
 -- when the daemon isn't reachable; unwrap with `>>= liftEither`.
-lspDiags :: FilePath -> M (Either LspError [Diag])
+lspDiags :: forall effs. Member Lsp effs => FilePath -> Eff effs (Either LspError [Diag])
 lspDiags = send . LspDiagnostics
 -- | Call the LLM for structured output. Failure is TYPED and TOTAL
 -- (#335): `Left (LlmApi _)` on an API/network failure, `Left (LlmRefusal
 -- _)` on a declined answer, `Left LlmBudget` when the per-eval call budget
 -- is exhausted — none of these abort the eval. Unwrap with `Right v <- llm
 -- schema prompt` or `>>= liftEither`.
-llm :: Schema -> Text -> M (Either LlmError Value)
+llm :: forall effs. Member Llm effs => Schema -> Text -> Eff effs (Either LlmError Value)
 llm schema prompt = send (LlmStructured prompt (schemaToValue schema))
 findTally :: Eq a => a -> [(a, Int)] -> Maybe [(a, Int)]
 findTally _ [] = Nothing
@@ -401,11 +401,11 @@ findTally x ((k, n):rest) = if x == k then Just ((k, n + 1) : rest) else case fi
 tallyList :: Eq a => [a] -> [(a, Int)]
 tallyList = foldl' (\acc x -> case findTally x acc of { Just acc' -> acc'; Nothing -> acc ++ [(x, 1)] }) []
 -- | Last N commits, newest-first. Each 'Commit' carries sha/subject/author/date/files.
-gitLog :: Int -> M (Either GitError [Commit])
+gitLog :: forall effs. Member Git effs => Int -> Eff effs (Either GitError [Commit])
 gitLog = send . GitLog
 -- | Working-tree status. Each 'StatusEntry' has path and 2-char XY state code
 -- (e.g. "M ", "??", "A ").
-gitStatus :: M (Either GitError [StatusEntry])
+gitStatus :: forall effs. Member Git effs => Eff effs (Either GitError [StatusEntry])
 gitStatus = send GitStatus
 -- | Per-file diff stats. THE ARGUMENT IS A REVSPEC COMPARED AGAINST THE WORKING
 -- TREE, not "commit vs its parent" — `gitDiffStat sha` on a clean tree is
@@ -414,23 +414,23 @@ gitStatus = send GitStatus
 -- "HEAD~3..HEAD"). For bulk per-commit history, use `gitLogNumstat` instead —
 -- one subprocess for N commits, no per-commit mapM. 'FileDelta' carries
 -- path/adds/dels/binary.
-gitDiffStat :: Text -> M (Either GitError [FileDelta])
+gitDiffStat :: forall effs. Member Git effs => Text -> Eff effs (Either GitError [FileDelta])
 gitDiffStat = send . GitDiffStat
 -- | Single commit by revspec. `Left (GitBadRevspec _)` on an unknown or
 -- ambiguous revspec; unwrap with `Right c <- gitShow rev` or `>>= liftEither`.
-gitShow :: Text -> M (Either GitError Commit)
+gitShow :: forall effs. Member Git effs => Text -> Eff effs (Either GitError Commit)
 gitShow = send . GitShow
 -- | Last N commits, newest-first, EACH PAIRED WITH ITS OWN per-file numstat
 -- deltas — one subprocess for all N, in place of `gitLog` followed by a
 -- per-commit `mapM gitDiffStat`. 'CommitDeltas' carries {commit, deltas};
 -- a merge or otherwise-empty commit has `deltas = []`. A renamed file records
 -- only its NEW path.
-gitLogNumstat :: Int -> M (Either GitError [CommitDeltas])
+gitLogNumstat :: forall effs. Member Git effs => Int -> Eff effs (Either GitError [CommitDeltas])
 gitLogNumstat = send . GitLogNumstat
 -- | Current UTC time as an opaque UTCTime (epoch-millisecond resolution).
-getCurrentTime :: M UTCTime
+getCurrentTime :: forall effs. Member Time effs => Eff effs UTCTime
 getCurrentTime = UTCTime <$> send TimeNow
-ask :: Schema -> Text -> M Value
+ask :: forall effs. Member Ask effs => Schema -> Text -> Eff effs Value
 ask schema prompt = send (AskWith prompt (object ["schema" .= schemaToValue schema]))
 isOpt :: Schema -> Bool
 isOpt (SOpt _) = True

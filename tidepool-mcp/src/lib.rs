@@ -495,7 +495,7 @@ mod tests {
         let preamble = generated_sources(&effects, false);
         // grepGlob is the Fs structured text-search verb (the SG structural
         // combinators it used to sit beside were cut with the SG effect).
-        assert!(preamble.contains("grepGlob :: Text -> FilePath -> M (Either FsError [Hit])"));
+        assert!(preamble.contains("grepGlob :: forall effs. Member Fs effs => Text -> FilePath -> Eff effs (Either FsError [Hit])"));
     }
 
     #[test]
@@ -884,20 +884,27 @@ data Console a where
         // #335: the primitive Fs verbs expose typed failure; the composite
         // helpers below (appendFile/doesFileExist/…) absorb it and keep their
         // shape.
-        assert!(preamble.contains("readFile :: FilePath -> M (Either FsError Text)"));
-        assert!(preamble.contains("writeFile :: FilePath -> Text -> M (Either FsError ())"));
-        assert!(preamble.contains("appendFile :: FilePath -> Text -> M (Either FsError ())"));
-        assert!(preamble.contains("listDirectory :: FilePath -> M (Either FsError [FilePath])"));
-        assert!(preamble.contains("doesFileExist :: FilePath -> M Bool"));
-        assert!(preamble.contains("getFileSize :: FilePath -> M (Maybe Int)"));
-        assert!(preamble.contains("fsMeta :: FilePath -> M (Maybe FileMeta)"));
-        assert!(preamble.contains("glob :: FilePath -> M (Either FsError [FilePath])"));
+        assert!(preamble.contains(
+            "readFile :: forall effs. Member Fs effs => FilePath -> Eff effs (Either FsError Text)"
+        ));
+        assert!(preamble.contains("writeFile :: forall effs. Member Fs effs => FilePath -> Text -> Eff effs (Either FsError ())"));
+        assert!(preamble.contains("appendFile :: forall effs. Member Fs effs => FilePath -> Text -> Eff effs (Either FsError ())"));
+        assert!(preamble.contains("listDirectory :: forall effs. Member Fs effs => FilePath -> Eff effs (Either FsError [FilePath])"));
+        assert!(preamble
+            .contains("doesFileExist :: forall effs. Member Fs effs => FilePath -> Eff effs Bool"));
+        assert!(preamble.contains(
+            "getFileSize :: forall effs. Member Fs effs => FilePath -> Eff effs (Maybe Int)"
+        ));
+        assert!(preamble.contains(
+            "fsMeta :: forall effs. Member Fs effs => FilePath -> Eff effs (Maybe FileMeta)"
+        ));
+        assert!(preamble.contains("glob :: forall effs. Member Fs effs => FilePath -> Eff effs (Either FsError [FilePath])"));
         // Core editing verbs (the str-replace common case + dry-run).
-        assert!(preamble.contains("update :: FilePath -> Text -> Text -> M UpdateOneOutcome"));
-        assert!(preamble.contains("updateAll :: FilePath -> Text -> Text -> M UpdateAllOutcome"));
-        assert!(preamble.contains("planUpdate :: FilePath -> Text -> Text -> M UpdateOutcome"));
+        assert!(preamble.contains("update :: forall effs. Member Fs effs => FilePath -> Text -> Text -> Eff effs UpdateOneOutcome"));
+        assert!(preamble.contains("updateAll :: forall effs. Member Fs effs => FilePath -> Text -> Text -> Eff effs UpdateAllOutcome"));
+        assert!(preamble.contains("planUpdate :: forall effs. Member Fs effs => FilePath -> Text -> Text -> Eff effs UpdateOutcome"));
         assert!(
-            preamble.contains("insertAfter :: FilePath -> Text -> Text -> M InsertAfterOutcome")
+            preamble.contains("insertAfter :: forall effs. Member Fs effs => FilePath -> Text -> Text -> Eff effs InsertAfterOutcome")
         );
         assert!(preamble.contains("run :: Text -> M (Either ExecError Proc)"));
         // No old aliases (verb-type sweep: records over tuples, no dup names)
@@ -909,12 +916,16 @@ data Console a where
         assert!(!preamble.contains("fsMetadata"));
         assert!(!preamble.contains("parseFileMeta"));
         // `say` is the Console wrapper (re-added 2026-06-22, friction #5).
-        assert!(preamble.contains("say :: Text -> M ()"));
+        assert!(preamble.contains("say :: forall effs. Member Console effs => Text -> Eff effs ()"));
         // Other helpers unchanged
-        assert!(preamble.contains("kvGet :: Text -> M (Maybe Value)"));
+        assert!(preamble
+            .contains("kvGet :: forall effs. Member KV effs => Text -> Eff effs (Maybe Value)"));
         // #335: httpGet is errors-tagged.
-        assert!(preamble.contains("httpGet :: Text -> M (Either HttpError Value)"));
-        assert!(preamble.contains("ask :: Schema -> Text -> M Value"));
+        assert!(preamble.contains(
+            "httpGet :: forall effs. Member Http effs => Text -> Eff effs (Either HttpError Value)"
+        ));
+        assert!(preamble
+            .contains("ask :: forall effs. Member Ask effs => Schema -> Text -> Eff effs Value"));
     }
 
     #[test]
@@ -931,7 +942,8 @@ data Console a where
         assert!(type_defs.contains("data Schema"));
         assert!(!type_defs.contains("data Q a"));
         let helpers = decl.helpers.join("\n");
-        assert!(helpers.contains("ask :: Schema -> Text -> M Value"));
+        assert!(helpers
+            .contains("ask :: forall effs. Member Ask effs => Schema -> Text -> Eff effs Value"));
         assert!(helpers.contains("schemaToValue :: Schema -> Value"));
         assert!(!helpers.contains("askQ"));
     }
@@ -1054,10 +1066,11 @@ data Console a where
         // and the `??`/`?!`/triage/survey/sift sugar are removed.
         let effects_mod = effects_module_source(&decls);
         assert!(effects_mod.contains("data Schema = SObj"));
-        assert!(effects_mod.contains("ask :: Schema -> Text -> M Value"));
+        assert!(effects_mod
+            .contains("ask :: forall effs. Member Ask effs => Schema -> Text -> Eff effs Value"));
         // #335: llm is errors-tagged (fully total — budget exhaustion is DATA);
         // tryLlm is gone (llm supersedes it).
-        assert!(effects_mod.contains("llm :: Schema -> Text -> M (Either LlmError Value)"));
+        assert!(effects_mod.contains("llm :: forall effs. Member Llm effs => Schema -> Text -> Eff effs (Either LlmError Value)"));
         assert!(!effects_mod.contains("tryLlm"));
         // ask suspends to the caller via AskWith (no autonomous LLM call)
         assert!(effects_mod
@@ -1081,9 +1094,10 @@ data Console a where
             .filter(|d| d.type_name != "Llm")
             .collect();
         let no_llm_mod = effects_module_source(&no_llm);
-        assert!(no_llm_mod.contains("ask :: Schema -> Text -> M Value"));
+        assert!(no_llm_mod
+            .contains("ask :: forall effs. Member Ask effs => Schema -> Text -> Eff effs Value"));
         // llm needs the Llm effect — absent from an Llm-less stack.
-        assert!(!no_llm_mod.contains("llm :: Schema -> Text -> M (Either LlmError Value)"));
+        assert!(!no_llm_mod.contains("llm :: forall effs. Member Llm effs => Schema -> Text -> Eff effs (Either LlmError Value)"));
     }
 
     #[test]

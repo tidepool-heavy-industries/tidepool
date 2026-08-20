@@ -514,6 +514,7 @@ macro_rules! console_effect_def {
             handler ConsoleHandler,
             req ConsoleReq,
             decl_fn console_decl,
+            helpers_row_polymorphic true,
             description ["Print text output."],
             type_defs [],
             verbs [
@@ -522,12 +523,12 @@ macro_rules! console_effect_def {
                   ret "()" },
             ],
             helpers [
-                { name say, sig "Text -> M ()",
+                { name say, sig "forall effs. Member Console effs => Text -> Eff effs ()",
                   doc ["Emit a line of console output. Thin wrapper over the Print effect",
                        "so chains never need `send (Print …)`."],
                   body pointfree Print },
                 { raw ["-- | `say` on anything Showable (`say . show`).",
-                       "sayShow :: Show a => a -> M ()",
+                       "sayShow :: forall a effs. (Show a, Member Console effs) => a -> Eff effs ()",
                        "sayShow = say . show"] },
             ],
         }
@@ -546,6 +547,7 @@ macro_rules! time_effect_def {
             handler TimeHandler,
             req TimeReq,
             decl_fn time_decl,
+            helpers_row_polymorphic true,
             description [
                 "UTC wall-clock access (epoch milliseconds). ",
                 "`getCurrentTime` returns an opaque `UTCTime` value. ",
@@ -561,7 +563,7 @@ macro_rules! time_effect_def {
             ],
             helpers [
                 { raw ["-- | Current UTC time as an opaque UTCTime (epoch-millisecond resolution).",
-                       "getCurrentTime :: M UTCTime",
+                       "getCurrentTime :: forall effs. Member Time effs => Eff effs UTCTime",
                        "getCurrentTime = UTCTime <$> send TimeNow"] },
             ],
         }
@@ -581,6 +583,7 @@ macro_rules! meta_effect_def {
             handler MetaHandler,
             req MetaReq,
             decl_fn meta_decl,
+            helpers_row_polymorphic true,
             description [
                 "Self-mirror for the runtime. Query constructors, primops, effects, diagnostics.",
             ],
@@ -609,25 +612,25 @@ macro_rules! meta_effect_def {
                   ret "[Text]" },
             ],
             helpers [
-                { name metaConstructors, sig "M [(Text, Int)]",
+                { name metaConstructors, sig "forall effs. Member Meta effs => Eff effs [(Text, Int)]",
                   doc ["Constructor table: (name, arity) pairs."],
                   body nullary MetaConstructors },
-                { name metaLookupCon, sig "Text -> M (Maybe (Int, Int))",
+                { name metaLookupCon, sig "forall effs. Member Meta effs => Text -> Eff effs (Maybe (Int, Int))",
                   doc ["Look up a constructor by name: (tag, arity)."],
                   body pointfree MetaLookupCon },
-                { name metaPrimOps, sig "M [Text]",
+                { name metaPrimOps, sig "forall effs. Member Meta effs => Eff effs [Text]",
                   doc ["Names of the JIT-implemented primops."],
                   body nullary MetaPrimOps },
-                { name metaEffects, sig "M [Text]",
+                { name metaEffects, sig "forall effs. Member Meta effs => Eff effs [Text]",
                   doc ["Effect type names in the running stack."],
                   body nullary MetaEffects },
-                { name metaDiagnostics, sig "M [Text]",
+                { name metaDiagnostics, sig "forall effs. Member Meta effs => Eff effs [Text]",
                   doc ["Drain pending runtime diagnostics."],
                   body nullary MetaDiagnostics },
-                { name metaVersion, sig "M Text",
+                { name metaVersion, sig "forall effs. Member Meta effs => Eff effs Text",
                   doc ["Server crate version."],
                   body nullary MetaVersion },
-                { name metaHelp, sig "M [Text]",
+                { name metaHelp, sig "forall effs. Member Meta effs => Eff effs [Text]",
                   doc ["Helper-verb signatures of the running stack."],
                   body nullary MetaHelp },
             ],
@@ -649,6 +652,7 @@ macro_rules! http_effect_def {
             handler HttpHandler,
             req HttpReq,
             decl_fn http_decl,
+            helpers_row_polymorphic true,
             description [
                 "JSON I/O. Fetch JSON from HTTP endpoints (returns Value). ",
                 "Parsing JSON Text is PURE — `eitherDecode` (aeson-style, ",
@@ -677,12 +681,12 @@ macro_rules! http_effect_def {
                   ret "Value", errors HttpError },
             ],
             helpers [
-                { name httpGet, sig "Text -> M (Either HttpError Value)",
+                { name httpGet, sig "forall effs. Member Http effs => Text -> Eff effs (Either HttpError Value)",
                   doc ["Fetch JSON from an HTTP endpoint. Failure is TYPED (#335): `Left",
                        "(HttpStatus code body)` on a non-2xx response, `Left (HttpNetwork _)`",
                        "on a network failure. Unwrap with `Right v <- httpGet url` or `>>= liftEither`."],
                   body pointfree HttpGet },
-                { name httpPost, sig "Text -> Value -> M (Either HttpError Value)",
+                { name httpPost, sig "forall effs. Member Http effs => Text -> Value -> Eff effs (Either HttpError Value)",
                   doc ["POST a JSON body; returns the response Value (see `httpGet` for the",
                        "failure shape)."],
                   body applied HttpPost(url, body) },
@@ -706,6 +710,7 @@ macro_rules! git_effect_def {
             handler GitHandler,
             req GitReq,
             decl_fn git_decl,
+            helpers_row_polymorphic true,
             description [
                 "Read-only git repository queries. Returns typed records parsed Rust-side ",
                 "from machine-format git output — no text-splitting needed. ",
@@ -751,14 +756,14 @@ macro_rules! git_effect_def {
                   ret "[CommitDeltas]", errors GitError },
             ],
             helpers [
-                { name gitLog, sig "Int -> M (Either GitError [Commit])",
+                { name gitLog, sig "forall effs. Member Git effs => Int -> Eff effs (Either GitError [Commit])",
                   doc ["Last N commits, newest-first. Each 'Commit' carries sha/subject/author/date/files."],
                   body pointfree GitLog },
-                { name gitStatus, sig "M (Either GitError [StatusEntry])",
+                { name gitStatus, sig "forall effs. Member Git effs => Eff effs (Either GitError [StatusEntry])",
                   doc ["Working-tree status. Each 'StatusEntry' has path and 2-char XY state code",
                        "(e.g. \"M \", \"??\", \"A \")."],
                   body nullary GitStatus },
-                { name gitDiffStat, sig "Text -> M (Either GitError [FileDelta])",
+                { name gitDiffStat, sig "forall effs. Member Git effs => Text -> Eff effs (Either GitError [FileDelta])",
                   doc ["Per-file diff stats. THE ARGUMENT IS A REVSPEC COMPARED AGAINST THE WORKING",
                        "TREE, not \"commit vs its parent\" — `gitDiffStat sha` on a clean tree is",
                        "`Right []` (correct data, not an error). For \"what did this commit change\",",
@@ -767,11 +772,11 @@ macro_rules! git_effect_def {
                        "one subprocess for N commits, no per-commit mapM. 'FileDelta' carries",
                        "path/adds/dels/binary."],
                   body pointfree GitDiffStat },
-                { name gitShow, sig "Text -> M (Either GitError Commit)",
+                { name gitShow, sig "forall effs. Member Git effs => Text -> Eff effs (Either GitError Commit)",
                   doc ["Single commit by revspec. `Left (GitBadRevspec _)` on an unknown or",
                        "ambiguous revspec; unwrap with `Right c <- gitShow rev` or `>>= liftEither`."],
                   body pointfree GitShow },
-                { name gitLogNumstat, sig "Int -> M (Either GitError [CommitDeltas])",
+                { name gitLogNumstat, sig "forall effs. Member Git effs => Int -> Eff effs (Either GitError [CommitDeltas])",
                   doc ["Last N commits, newest-first, EACH PAIRED WITH ITS OWN per-file numstat",
                        "deltas — one subprocess for all N, in place of `gitLog` followed by a",
                        "per-commit `mapM gitDiffStat`. 'CommitDeltas' carries {commit, deltas};",
@@ -797,6 +802,7 @@ macro_rules! ask_effect_def {
             handler AskHandler,
             req AskReq,
             decl_fn ask_decl,
+            helpers_row_polymorphic true,
             description [
                 "Suspend execution and ask the calling agent a STRUCTURED question. ",
                 "`ask schema prompt` carries the schema as JSON Schema in the suspension; ",
@@ -818,7 +824,7 @@ macro_rules! ask_effect_def {
                   ret "Value" },
             ],
             helpers [
-                { raw ["ask :: Schema -> Text -> M Value",
+                { raw ["ask :: forall effs. Member Ask effs => Schema -> Text -> Eff effs Value",
                        "ask schema prompt = send (AskWith prompt (object [\"schema\" .= schemaToValue schema]))"] },
                 { raw ["isOpt :: Schema -> Bool",
                        "isOpt (SOpt _) = True",
@@ -891,6 +897,7 @@ macro_rules! askuser_effect_def {
                 "BEFORE presenting a form to explain what you're about to ask and why (it never ",
                 "costs a turn).",
             ],
+            helpers_row_polymorphic true,
             description [
                 "Present a typed form to a HUMAN OPERATOR and block until they submit. ",
                 "`askUser @T` presents a human form and returns `T`. Define `T` using ordinary ",
@@ -922,9 +929,9 @@ macro_rules! askuser_effect_def {
                   ret "()" },
             ],
             helpers [
-                { raw ["askUserRaw :: Value -> M Value",
+                { raw ["askUserRaw :: forall effs. Member AskUser effs => Value -> Eff effs Value",
                        "askUserRaw spec = send (AskUserWith spec)"] },
-                { raw ["noteRaw :: Text -> M ()",
+                { raw ["noteRaw :: forall effs. Member AskUser effs => Text -> Eff effs ()",
                        "noteRaw text = send (NoteWith text)"] },
             ],
         }
@@ -954,6 +961,7 @@ macro_rules! readstate_effect_def {
                 "it yet). Query with optics (`v ^? key \"memories\" . _Array`) or decode ",
                 "the typed spine: `Aeson.fromJSON v :: Aeson.Result State`.",
             ],
+            helpers_row_polymorphic true,
             description [
                 "Read the loop's durable State — the same value the framing renders a ",
                 "SELECTION of — as JSON, immediately. `getStateJson :: M Value` returns ",
@@ -970,7 +978,7 @@ macro_rules! readstate_effect_def {
                   ret "Value" },
             ],
             helpers [
-                { raw ["getStateJson :: M Value",
+                { raw ["getStateJson :: forall effs. Member ReadState effs => Eff effs Value",
                        "getStateJson = send ReadStateWith"] },
             ],
         }
@@ -1335,6 +1343,13 @@ macro_rules! finalize_effect_def {
                 "`finalize @T value` — commit the typed answer and end this turn; ",
                 "`value` crosses in-heap to the parent `runLLMTurn` hole.",
             ],
+            // Already Member-polymorphic below (matches RunLLMTurn's own
+            // convention); flagged true for consistency with the
+            // row-polymorphic-by-default rule even though it is inert here —
+            // `effects_module_source_with_vocab` rejects a vocabulary-only
+            // PARAMETERIZED effect outright, so `Finalize` can never be
+            // vocab-without-row in the first place.
+            helpers_row_polymorphic true,
             description [
                 "Terminate the current Agent turn loop and hand a typed value UP to ",
                 "the parent `runLLMTurn` hole, in-heap (no JSON round-trip — the value ",
@@ -1430,6 +1445,10 @@ macro_rules! fork_effect_def {
                 "answered together as a batch `[T]` (`import Tidepool.Fork`). A forked child ",
                 "cannot itself fork.",
             ],
+            // Already Member-polymorphic below; flagged true for consistency
+            // with the row-polymorphic-by-default rule (harmless — every
+            // caller of Fork already puts it in the row).
+            helpers_row_polymorphic true,
             description [
                 "Spawn parallel sub-answerers and gather their typed answers. ",
                 "`fork \\@T brief` forks ONE child that answers a single `T`; ",
@@ -1478,6 +1497,7 @@ macro_rules! llm_effect_def {
             handler LlmHandler,
             req LlmReq,
             decl_fn llm_decl,
+            helpers_row_polymorphic true,
             description [
                 "Call an LLM for classification, extraction, or judgment. ",
                 "`llm schema prompt` returns a Value validated against the schema ",
@@ -1507,7 +1527,7 @@ macro_rules! llm_effect_def {
                        "-- _)` on a declined answer, `Left LlmBudget` when the per-eval call budget",
                        "-- is exhausted — none of these abort the eval. Unwrap with `Right v <- llm",
                        "-- schema prompt` or `>>= liftEither`.",
-                       "llm :: Schema -> Text -> M (Either LlmError Value)",
+                       "llm :: forall effs. Member Llm effs => Schema -> Text -> Eff effs (Either LlmError Value)",
                        "llm schema prompt = send (LlmStructured prompt (schemaToValue schema))"] },
                 // Pure tally utilities (no LLM/Ask): build a frequency list while
                 // preserving first-seen order. Kept for .tidepool/lib verbs.
@@ -1531,6 +1551,7 @@ macro_rules! lsp_effect_def {
             handler LspHandler,
             req LspReq,
             decl_fn lsp_decl,
+            helpers_row_polymorphic true,
             description [
                 "Semantic code-graph navigation via a language server (rust-analyzer, .rs). ",
                 "Everything is a LspNode {nodeName, nodeContainer, nodeKind, nodeFile, nodePos, nodeText} ",
@@ -1598,30 +1619,30 @@ macro_rules! lsp_effect_def {
                   ret "[Diag]", errors LspError },
             ],
             helpers [
-                { name lspWhere, sig "Text -> M (Either LspError [LspNode])",
+                { name lspWhere, sig "forall effs. Member Lsp effs => Text -> Eff effs (Either LspError [LspNode])",
                   doc ["Seed: every workspace definition named X (each a LspNode with container/file/line/source line).",
                        "`Left (LspDaemonDown _)` when the daemon isn't reachable; unwrap with `>>= liftEither`."],
                   body pointfree LspWhere },
-                { name lspCallers, sig "LspNode -> M [LspNode]",
+                { name lspCallers, sig "forall effs. Member Lsp effs => LspNode -> Eff effs [LspNode]",
                   doc ["Incoming calls; [] = none (or node not callable). A daemon-down failure",
                        "aborts the eval structurally (not a silent []) — see the Lsp effect description."],
                   body pointfree LspCallers },
-                { name lspCallees, sig "LspNode -> M [LspNode]",
+                { name lspCallees, sig "forall effs. Member Lsp effs => LspNode -> Eff effs [LspNode]",
                   doc ["Outgoing calls; [] = none (or node not callable)."],
                   body pointfree LspCallees },
-                { name lspRefs, sig "LspNode -> M [LspNode]",
+                { name lspRefs, sig "forall effs. Member Lsp effs => LspNode -> Eff effs [LspNode]",
                   doc ["Use sites of this node's symbol (kind = \"reference\"); [] = none (or not a symbol)."],
                   body pointfree LspRefs },
-                { name lspDef, sig "LspNode -> M (Maybe LspNode)",
+                { name lspDef, sig "forall effs. Member Lsp effs => LspNode -> Eff effs (Maybe LspNode)",
                   doc ["Resolve any node (e.g. a use site) to its definition node."],
                   body pointfree LspDef },
-                { name lspHover, sig "LspNode -> M (Maybe Text)",
+                { name lspHover, sig "forall effs. Member Lsp effs => LspNode -> Eff effs (Maybe Text)",
                   doc ["Type / signature / docs for a node."],
                   body pointfree LspHover },
-                { name lspRename, sig "LspNode -> Text -> M (Maybe Text)",
+                { name lspRename, sig "forall effs. Member Lsp effs => LspNode -> Text -> Eff effs (Maybe Text)",
                   doc ["Rename a node's symbol to NEW; returns a unified diff (apply with applyDiff). Nothing = can't rename."],
                   body applied LspRename(n, new) },
-                { name lspDiags, sig "FilePath -> M (Either LspError [Diag])",
+                { name lspDiags, sig "forall effs. Member Lsp effs => FilePath -> Eff effs (Either LspError [Diag])",
                   doc ["Diagnostics (errors / warnings) for FILE. `Left (LspDaemonDown _)`",
                        "when the daemon isn't reachable; unwrap with `>>= liftEither`."],
                   body pointfree LspDiagnostics },
@@ -1645,6 +1666,7 @@ macro_rules! kv_effect_def {
             handler KvHandler,
             req KvReq,
             decl_fn kv_decl,
+            helpers_row_polymorphic true,
             description [
                 "Persistent key-value store. State survives across calls within one server session. ",
                 "Key convention: use slash-delimited namespaces (e.g. \"agent-42/foo\") to avoid ",
@@ -1687,19 +1709,19 @@ macro_rules! kv_effect_def {
                   ret "(Either Value ())" },
             ],
             helpers [
-                { name kvGet, sig "Text -> M (Maybe Value)",
+                { name kvGet, sig "forall effs. Member KV effs => Text -> Eff effs (Maybe Value)",
                   doc ["Look up a key; Nothing when absent."],
                   body pointfree KvGet },
-                { name kvSet, sig "Text -> Value -> M ()",
+                { name kvSet, sig "forall effs. Member KV effs => Text -> Value -> Eff effs ()",
                   doc ["Persist a JSON value under a key."],
                   body applied KvSet(k, v) },
-                { name kvDel, sig "Text -> M ()",
+                { name kvDel, sig "forall effs. Member KV effs => Text -> Eff effs ()",
                   doc ["Delete a key (no-op when absent)."],
                   body pointfree KvDelete },
-                { name kvKeys, sig "M [Text]",
+                { name kvKeys, sig "forall effs. Member KV effs => Eff effs [Text]",
                   doc ["All keys (unordered; kvKeysP \"\" for sorted)."],
                   body nullary KvKeys },
-                { name kvClear, sig "Text -> M Int",
+                { name kvClear, sig "forall effs. Member KV effs => Text -> Eff effs Int",
                   doc ["Delete all keys whose name starts with @prefix@; return the count deleted.",
                        "Pass \"\" (empty string) to clear the ENTIRE store — this erases ALL",
                        "persisted KV data for this server session, so use with caution.",
@@ -1707,18 +1729,18 @@ macro_rules! kv_effect_def {
                        "NOTE: per-session automatic scoping is a deferred design decision (#327);",
                        "callers manage namespaces manually via this prefix argument."],
                   body pointfree KvClear },
-                { name kvKeysP, sig "Text -> M [Text]",
+                { name kvKeysP, sig "forall effs. Member KV effs => Text -> Eff effs [Text]",
                   doc ["All keys whose name starts with @prefix@, returned sorted.",
                        "E.g. @kvKeysP \"agent/\"@ returns @[\"agent/bar\", \"agent/foo\", ...]@.",
                        "Pass \"\" to list ALL keys sorted (like kvKeys but deterministically ordered)."],
                   body pointfree KvKeysP },
-                { name kvInfo, sig "M Value",
+                { name kvInfo, sig "forall effs. Member KV effs => Eff effs Value",
                   doc ["Summary of KV store state as a JSON Value:",
                        "@{count :: Int, sample :: [Text], file_size_bytes :: Int}@.",
                        "Use to inspect junk-drawer accumulation without listing all keys.",
                        "Extract fields with optics: @i <- kvInfo; i ^? key \"count\" . _Int@"],
                   body nullary KvInfo },
-                { name kvCas, sig "Text -> Maybe Value -> Value -> M (Either Value ())",
+                { name kvCas, sig "forall effs. Member KV effs => Text -> Maybe Value -> Value -> Eff effs (Either Value ())",
                   doc ["Atomic compare-and-swap: set @key@ to @new@ only if its current",
                        "value equals @expected@ (Nothing = require the key ABSENT).",
                        "@Right ()@ on success; @Left actual@ (the current value) on a",
@@ -1748,6 +1770,15 @@ macro_rules! fs_effect_def {
             handler FsHandler,
             req FsReq,
             decl_fn fs_decl,
+            // Every helper below is Member-polymorphic except
+            // `getCurrentDirectory`, which stays concrete-`M` — see the
+            // comment at its own definition site (it calls Exec's `run`, a
+            // MIGRATED/schema-generated helper out of this def's control,
+            // never an Fs constructor at all). That survivor's own
+            // concrete-M dependency is on Exec being in the row, not Fs, so
+            // it does not make emitting the OTHER helpers vocab-without-row
+            // unsafe.
+            helpers_row_polymorphic true,
             description ["Read and write files (sandboxed to server working directory)."],
             // `FileRead` (readGlob's per-file result record) and `FsError`
             // (below) both live in the STABLE `Tidepool.Records.Stable`
@@ -1828,26 +1859,38 @@ macro_rules! fs_effect_def {
                   ret "(Either (Maybe Text) ())" },
             ],
             helpers [
-                { raw ["-- | Read a file. Failure is TYPED (#335): `Left (FsNotFound p)` / `Left\n-- (FsNotUtf8 p)` / `Left (FsIo _)`. The natural spelling unwraps-or-aborts with\n-- a failable bind: `Right src <- readFile path` (or `readFile path >>= liftEither`).\nreadFile :: FilePath -> M (Either FsError Text)\nreadFile = send . FsRead"] },
-                { raw ["-- | Write a file (mkdir -p on the parent). `Left (FsSandbox _)` on a path\n-- escape, `Left (FsIo _)` on write failure; unwrap with `liftEither`.\nwriteFile :: FilePath -> Text -> M (Either FsError ())\nwriteFile f c = send (FsWrite f c)"] },
-                { raw ["-- | Append to a file (reads then writes). Failure is TYPED (#335): a read\n-- or write failure comes back as `Left (FsError)` DATA, nothing partially\n-- applied; unwrap with `Right () <- appendFile path t` or `>>= liftEither`.\nappendFile :: FilePath -> Text -> M (Either FsError ())\nappendFile p t = do\n  er <- readFile p\n  case er of\n    Left e -> pure (Left e)\n    Right old -> writeFile p (old <> t)"] },
-                { raw ["-- | List a directory. `Left (FsNotFound _)` when absent; unwrap with `liftEither`.\nlistDirectory :: FilePath -> M (Either FsError [FilePath])\nlistDirectory = send . FsListDir"] },
-                { raw ["-- | TOTAL existence predicate (System.Directory semantics): False for a\n-- missing path, a directory, or a path outside the sandbox — never throws.\ndoesFileExist :: FilePath -> M Bool\ndoesFileExist p = send (FsMetadata p) <&> maybe False (\\m -> m.isFile)"] },
-                { raw ["-- | TOTAL existence predicate: False for missing/non-dir/out-of-sandbox.\ndoesDirectoryExist :: FilePath -> M Bool\ndoesDirectoryExist p = send (FsMetadata p) <&> maybe False (\\m -> m.isDir)"] },
-                { raw ["-- | File size in bytes, or `Nothing` if the path is missing.\ngetFileSize :: FilePath -> M (Maybe Int)\ngetFileSize p = send (FsMetadata p) <&> fmap (\\m -> m.size)"] },
-                { raw ["-- | File metadata as a `FileMeta` record {size, isFile, isDir}, or `Nothing`\n-- if the path is missing/unreadable (use record-dot: `m.size`, `m.isDir`).\nfsMeta :: FilePath -> M (Maybe FileMeta)\nfsMeta = send . FsMetadata"] },
+                { raw ["-- | Read a file. Failure is TYPED (#335): `Left (FsNotFound p)` / `Left\n-- (FsNotUtf8 p)` / `Left (FsIo _)`. The natural spelling unwraps-or-aborts with\n-- a failable bind: `Right src <- readFile path` (or `readFile path >>= liftEither`).\nreadFile :: forall effs. Member Fs effs => FilePath -> Eff effs (Either FsError Text)\nreadFile = send . FsRead"] },
+                { raw ["-- | Write a file (mkdir -p on the parent). `Left (FsSandbox _)` on a path\n-- escape, `Left (FsIo _)` on write failure; unwrap with `liftEither`.\nwriteFile :: forall effs. Member Fs effs => FilePath -> Text -> Eff effs (Either FsError ())\nwriteFile f c = send (FsWrite f c)"] },
+                { raw ["-- | Append to a file (reads then writes). Failure is TYPED (#335): a read\n-- or write failure comes back as `Left (FsError)` DATA, nothing partially\n-- applied; unwrap with `Right () <- appendFile path t` or `>>= liftEither`.\nappendFile :: forall effs. Member Fs effs => FilePath -> Text -> Eff effs (Either FsError ())\nappendFile p t = do\n  er <- readFile p\n  case er of\n    Left e -> pure (Left e)\n    Right old -> writeFile p (old <> t)"] },
+                { raw ["-- | List a directory. `Left (FsNotFound _)` when absent; unwrap with `liftEither`.\nlistDirectory :: forall effs. Member Fs effs => FilePath -> Eff effs (Either FsError [FilePath])\nlistDirectory = send . FsListDir"] },
+                { raw ["-- | TOTAL existence predicate (System.Directory semantics): False for a\n-- missing path, a directory, or a path outside the sandbox — never throws.\ndoesFileExist :: forall effs. Member Fs effs => FilePath -> Eff effs Bool\ndoesFileExist p = send (FsMetadata p) <&> maybe False (\\m -> m.isFile)"] },
+                { raw ["-- | TOTAL existence predicate: False for missing/non-dir/out-of-sandbox.\ndoesDirectoryExist :: forall effs. Member Fs effs => FilePath -> Eff effs Bool\ndoesDirectoryExist p = send (FsMetadata p) <&> maybe False (\\m -> m.isDir)"] },
+                { raw ["-- | File size in bytes, or `Nothing` if the path is missing.\ngetFileSize :: forall effs. Member Fs effs => FilePath -> Eff effs (Maybe Int)\ngetFileSize p = send (FsMetadata p) <&> fmap (\\m -> m.size)"] },
+                { raw ["-- | File metadata as a `FileMeta` record {size, isFile, isDir}, or `Nothing`\n-- if the path is missing/unreadable (use record-dot: `m.size`, `m.isDir`).\nfsMeta :: forall effs. Member Fs effs => FilePath -> Eff effs (Maybe FileMeta)\nfsMeta = send . FsMetadata"] },
+                // NOT Member-polymorphic, deliberately: this calls `run`
+                // (Exec's own helper), not any Fs constructor at all — its
+                // real dependency is `Member Exec effs`, not `Member Fs
+                // effs`. Exec is a MIGRATED/schema-generated effect
+                // (`tidepool-protocol/src/effects/exec.rs`), out of this
+                // definition's control and out of this lane's boundary, and
+                // its own helper (`run`) is still concrete-`M` — so there is
+                // no `Member Exec effs` signature here to borrow. Left
+                // concrete `M`; safe under `helpers_row_polymorphic true`
+                // above because this helper's compile never depended on Fs
+                // being in the row (only Exec, which every Fs-carrying stack
+                // already has via `standard_decls()`/`build_base_stack`).
                 { raw ["getCurrentDirectory :: M FilePath\ngetCurrentDirectory = do { p <- run \"pwd\" >>= liftEither; pure (T.strip p.stdout) }"] },
-                { raw ["-- | Expand a glob to matching file paths. `Left (FsSandbox _)` on an empty\n-- or absolute pattern, `Left (FsNotFound _)` on a missing search root; unwrap\n-- with `Right ps <- glob pat` or `glob pat >>= liftEither`.\nglob :: FilePath -> M (Either FsError [FilePath])\nglob = send . FsGlob"] },
-                { raw ["-- | Regex-search files matching a path glob. ARG ORDER: regex FIRST, glob\n-- SECOND — a path glob like \"*.rs\" goes in arg 2, not arg 1. Returns [Hit]\n-- {path, line, text} (the shared Hit shape, so it composes with\n-- hitsByFile/refs). Failure is typed: `Left (FsBadRegex _)` on a bad regex.\n-- NB regex metachars are double-escaped here (JSON x Haskell), so a literal dot\n-- needs four backslashes; the FsBadRegex detail shows the exact form.\ngrepGlob :: Text -> FilePath -> M (Either FsError [Hit])\ngrepGlob pat g = send (FsGrep pat g)"] },
-                { raw ["-- | Read every file matching a glob with PER-FILE failure isolation: one\n-- `FileRead {path, contents}` per match — `contents` is `Right text` on a clean\n-- UTF-8 read, `Left err` on a per-file failure (binary / non-UTF-8, permission).\n-- One bad file (e.g. a binary swept up by a wide glob) does NOT fail the whole\n-- batch. An empty glob is rejected loudly, but a glob matching NOTHING yields\n-- `[]` silently — check `null rs` when absence itself is the signal. Recover\n-- the readable files with\n-- `[r.path | r <- rs, isRight r.contents]`, or split all outcomes with\n-- `partitionEithers (map (.contents) rs)`.\nreadGlob :: Text -> M [FileRead]\nreadGlob = send . FsReadGlob"] },
-                { raw ["-- | Exact str-replace, EXACTLY-ONCE. Reports the outcome as an\n-- `UpdateOneOutcome` DATA value (never throws, mirrors `InsertAfterOutcome`):\n-- empty `old`, a missing file, `old` not found, or `old` matching 2+ places\n-- is `UpdateOneRejected` (nothing written); otherwise `UpdateOneApplied`.\n-- Pass enough surrounding text that `old` is unique. Use planUpdate to review\n-- the diff first; the full editing surface is in tidepool://edits.\nupdate :: FilePath -> Text -> Text -> M UpdateOneOutcome\nupdate path old new\n  | T.null old = pure (UpdateOneRejected \"'old' must be non-empty\" Nothing)\n  | otherwise = do\n      er <- readFile path\n      case er of\n        Left e -> pure (UpdateOneRejected (\"file not found: \" <> show e) Nothing)\n        Right src ->\n          case len (T.splitOn old src) - 1 of\n            0 -> pure (UpdateOneRejected (\"'old' not found in \" <> path) Nothing)\n            1 -> writeFile path (replace old new src) >>= liftEither >> pure UpdateOneApplied\n            n -> pure (UpdateOneRejected (\"'old' matches \" <> show n <> \" places in \" <> path <> \" (add surrounding context to disambiguate)\") (Just n))"] },
-                { raw ["-- | Replace EVERY occurrence of `old` with `new`. Reports the outcome as an\n-- `UpdateAllOutcome` DATA value (never throws): empty `old`, a missing file,\n-- or zero matches is `UpdateAllRejected` (nothing written); otherwise\n-- `UpdateAllApplied` carries the replacement count.\nupdateAll :: FilePath -> Text -> Text -> M UpdateAllOutcome\nupdateAll path old new\n  | T.null old = pure (UpdateAllRejected \"'old' must be non-empty\")\n  | otherwise = do\n      er <- readFile path\n      case er of\n        Left e -> pure (UpdateAllRejected (\"file not found: \" <> show e))\n        Right src ->\n          let n = len (T.splitOn old src) - 1\n          in if n == 0\n               then pure (UpdateAllRejected (\"'old' not found in \" <> path))\n               else writeFile path (replace old new src) >>= liftEither >> pure (UpdateAllApplied n)"] },
-                { raw ["-- | Dry-run `update`: returns an `UpdateOutcome` (the review diff, or the\n-- reason it can't apply), writes NOTHING. Never errors — the conflict comes\n-- back as data so you can branch before committing.\nplanUpdate :: FilePath -> Text -> Text -> M UpdateOutcome\nplanUpdate path old new = do\n  er <- readFile path\n  case er of\n    Left e -> pure (UpdateRejected (\"file not found: \" <> show e) Nothing)\n    Right src ->\n      let n = if T.null old then 0 else len (T.splitOn old src) - 1\n      in if T.null old then pure (UpdateRejected \"'old' must be non-empty\" Nothing)\n         else if n == 0 then pure (UpdateRejected \"not found\" Nothing)\n         else if n > 1 then pure (UpdateRejected \"ambiguous\" (Just n))\n         else case Patch.genPatch path src (replace old new src) of\n                Left _ -> pure UpdateNoChange\n                Right fp -> pure (UpdateDiff (Patch.renderPatch [fp]))"] },
-                { raw ["-- | `update` from the input lane: {file, old, new} (for big/quote-heavy\n-- fragments). Reports the outcome as an `UpdateOneOutcome` DATA value (never\n-- throws, same contract as `update`): a malformed payload (missing or\n-- non-string file/old/new key) is `UpdateOneRejected` — one bad item never\n-- aborts a batch.\nupdateJ :: Value -> M UpdateOneOutcome\nupdateJ v = case (v ^? key \"file\" . _String, v ^? key \"old\" . _String, v ^? key \"new\" . _String) of\n  (Just f, Just o, Just n) -> update f o n\n  _ -> pure (UpdateOneRejected \"updateJ: need {file, old, new} strings in input\" Nothing)"] },
-                { raw ["-- | Insert a block after the unique line containing `anchor`. Reports the\n-- outcome as an `InsertAfterOutcome` DATA value (never throws): a missing\n-- file, or an anchor matching zero or 2+ lines, is `InsertAfterRejected`\n-- (nothing written); otherwise `InsertAfterApplied`.\ninsertAfter :: FilePath -> Text -> Text -> M InsertAfterOutcome\ninsertAfter path anchor block = do\n  er <- readFile path\n  case er of\n    Left e -> pure (InsertAfterRejected (\"file not found: \" <> show e) Nothing)\n    Right src ->\n      let ls = lines src\n          n = len (filter (isInfixOf anchor) ls)\n      in case n of\n           1 -> writeFile path (unlines (concatMap (\\l -> if anchor `isInfixOf` l then [l, block] else [l]) ls))\n                  >>= liftEither >> pure InsertAfterApplied\n           _ -> pure (InsertAfterRejected (\"anchor matched \" <> show n <> \" lines in \" <> path) (Just n))"] },
-                { raw ["-- | Compute-check-commit: write only if every named check holds; failures\n-- come back as a `WriteOutcome` (nothing written on failure).\nwriteChecked :: FilePath -> [(Text, Bool)] -> Text -> M WriteOutcome\nwriteChecked path checks content = do\n  let failed = [name | (name, ok) <- checks, not ok]\n  if null failed\n    then writeFile path content >>= liftEither >> pure (Written path (length checks))\n    else pure (WriteBlocked path failed)"] },
-                { raw ["-- | Blake3 content hash (hex) of a file, or Nothing if it does not exist.\n-- The compare-and-swap token for writeCheckedIf: read it, compute your new\n-- content, then write back only if the file still hashes the same.\nfileHash :: FilePath -> M (Maybe Text)\nfileHash p = send (FsHash p) >>= liftEither"] },
-                { raw ["-- | Content-hash compare-and-swap write (#330). Writes CONTENT only if the\n-- file's current blake3 hash equals EXPECTED (Nothing = expect the file ABSENT,\n-- i.e. create-only). The compare-and-write is atomic within the handler, closing\n-- the lost-update race between parallel agents. Returns a WriteOutcome: 'Written'\n-- on success, or 'WriteConflict' (carrying expected vs actual hash) if the\n-- precondition failed — conflicts come back as DATA, nothing is written. Get\n-- EXPECTED from fileHash; on a conflict re-read, recompute, and retry.\nwriteCheckedIf :: Maybe Text -> FilePath -> Text -> M WriteOutcome\nwriteCheckedIf expected path content = do\n  r <- send (FsWriteCas path expected content)\n  pure $ case r of\n    Right () -> Written path 1\n    Left actual -> WriteConflict path expected actual"] },
+                { raw ["-- | Expand a glob to matching file paths. `Left (FsSandbox _)` on an empty\n-- or absolute pattern, `Left (FsNotFound _)` on a missing search root; unwrap\n-- with `Right ps <- glob pat` or `glob pat >>= liftEither`.\nglob :: forall effs. Member Fs effs => FilePath -> Eff effs (Either FsError [FilePath])\nglob = send . FsGlob"] },
+                { raw ["-- | Regex-search files matching a path glob. ARG ORDER: regex FIRST, glob\n-- SECOND — a path glob like \"*.rs\" goes in arg 2, not arg 1. Returns [Hit]\n-- {path, line, text} (the shared Hit shape, so it composes with\n-- hitsByFile/refs). Failure is typed: `Left (FsBadRegex _)` on a bad regex.\n-- NB regex metachars are double-escaped here (JSON x Haskell), so a literal dot\n-- needs four backslashes; the FsBadRegex detail shows the exact form.\ngrepGlob :: forall effs. Member Fs effs => Text -> FilePath -> Eff effs (Either FsError [Hit])\ngrepGlob pat g = send (FsGrep pat g)"] },
+                { raw ["-- | Read every file matching a glob with PER-FILE failure isolation: one\n-- `FileRead {path, contents}` per match — `contents` is `Right text` on a clean\n-- UTF-8 read, `Left err` on a per-file failure (binary / non-UTF-8, permission).\n-- One bad file (e.g. a binary swept up by a wide glob) does NOT fail the whole\n-- batch. An empty glob is rejected loudly, but a glob matching NOTHING yields\n-- `[]` silently — check `null rs` when absence itself is the signal. Recover\n-- the readable files with\n-- `[r.path | r <- rs, isRight r.contents]`, or split all outcomes with\n-- `partitionEithers (map (.contents) rs)`.\nreadGlob :: forall effs. Member Fs effs => Text -> Eff effs [FileRead]\nreadGlob = send . FsReadGlob"] },
+                { raw ["-- | Exact str-replace, EXACTLY-ONCE. Reports the outcome as an\n-- `UpdateOneOutcome` DATA value (never throws, mirrors `InsertAfterOutcome`):\n-- empty `old`, a missing file, `old` not found, or `old` matching 2+ places\n-- is `UpdateOneRejected` (nothing written); otherwise `UpdateOneApplied`.\n-- Pass enough surrounding text that `old` is unique. Use planUpdate to review\n-- the diff first; the full editing surface is in tidepool://edits.\nupdate :: forall effs. Member Fs effs => FilePath -> Text -> Text -> Eff effs UpdateOneOutcome\nupdate path old new\n  | T.null old = pure (UpdateOneRejected \"'old' must be non-empty\" Nothing)\n  | otherwise = do\n      er <- readFile path\n      case er of\n        Left e -> pure (UpdateOneRejected (\"file not found: \" <> show e) Nothing)\n        Right src ->\n          case len (T.splitOn old src) - 1 of\n            0 -> pure (UpdateOneRejected (\"'old' not found in \" <> path) Nothing)\n            1 -> writeFile path (replace old new src) >>= liftEither >> pure UpdateOneApplied\n            n -> pure (UpdateOneRejected (\"'old' matches \" <> show n <> \" places in \" <> path <> \" (add surrounding context to disambiguate)\") (Just n))"] },
+                { raw ["-- | Replace EVERY occurrence of `old` with `new`. Reports the outcome as an\n-- `UpdateAllOutcome` DATA value (never throws): empty `old`, a missing file,\n-- or zero matches is `UpdateAllRejected` (nothing written); otherwise\n-- `UpdateAllApplied` carries the replacement count.\nupdateAll :: forall effs. Member Fs effs => FilePath -> Text -> Text -> Eff effs UpdateAllOutcome\nupdateAll path old new\n  | T.null old = pure (UpdateAllRejected \"'old' must be non-empty\")\n  | otherwise = do\n      er <- readFile path\n      case er of\n        Left e -> pure (UpdateAllRejected (\"file not found: \" <> show e))\n        Right src ->\n          let n = len (T.splitOn old src) - 1\n          in if n == 0\n               then pure (UpdateAllRejected (\"'old' not found in \" <> path))\n               else writeFile path (replace old new src) >>= liftEither >> pure (UpdateAllApplied n)"] },
+                { raw ["-- | Dry-run `update`: returns an `UpdateOutcome` (the review diff, or the\n-- reason it can't apply), writes NOTHING. Never errors — the conflict comes\n-- back as data so you can branch before committing.\nplanUpdate :: forall effs. Member Fs effs => FilePath -> Text -> Text -> Eff effs UpdateOutcome\nplanUpdate path old new = do\n  er <- readFile path\n  case er of\n    Left e -> pure (UpdateRejected (\"file not found: \" <> show e) Nothing)\n    Right src ->\n      let n = if T.null old then 0 else len (T.splitOn old src) - 1\n      in if T.null old then pure (UpdateRejected \"'old' must be non-empty\" Nothing)\n         else if n == 0 then pure (UpdateRejected \"not found\" Nothing)\n         else if n > 1 then pure (UpdateRejected \"ambiguous\" (Just n))\n         else case Patch.genPatch path src (replace old new src) of\n                Left _ -> pure UpdateNoChange\n                Right fp -> pure (UpdateDiff (Patch.renderPatch [fp]))"] },
+                { raw ["-- | `update` from the input lane: {file, old, new} (for big/quote-heavy\n-- fragments). Reports the outcome as an `UpdateOneOutcome` DATA value (never\n-- throws, same contract as `update`): a malformed payload (missing or\n-- non-string file/old/new key) is `UpdateOneRejected` — one bad item never\n-- aborts a batch.\nupdateJ :: forall effs. Member Fs effs => Value -> Eff effs UpdateOneOutcome\nupdateJ v = case (v ^? key \"file\" . _String, v ^? key \"old\" . _String, v ^? key \"new\" . _String) of\n  (Just f, Just o, Just n) -> update f o n\n  _ -> pure (UpdateOneRejected \"updateJ: need {file, old, new} strings in input\" Nothing)"] },
+                { raw ["-- | Insert a block after the unique line containing `anchor`. Reports the\n-- outcome as an `InsertAfterOutcome` DATA value (never throws): a missing\n-- file, or an anchor matching zero or 2+ lines, is `InsertAfterRejected`\n-- (nothing written); otherwise `InsertAfterApplied`.\ninsertAfter :: forall effs. Member Fs effs => FilePath -> Text -> Text -> Eff effs InsertAfterOutcome\ninsertAfter path anchor block = do\n  er <- readFile path\n  case er of\n    Left e -> pure (InsertAfterRejected (\"file not found: \" <> show e) Nothing)\n    Right src ->\n      let ls = lines src\n          n = len (filter (isInfixOf anchor) ls)\n      in case n of\n           1 -> writeFile path (unlines (concatMap (\\l -> if anchor `isInfixOf` l then [l, block] else [l]) ls))\n                  >>= liftEither >> pure InsertAfterApplied\n           _ -> pure (InsertAfterRejected (\"anchor matched \" <> show n <> \" lines in \" <> path) (Just n))"] },
+                { raw ["-- | Compute-check-commit: write only if every named check holds; failures\n-- come back as a `WriteOutcome` (nothing written on failure).\nwriteChecked :: forall effs. Member Fs effs => FilePath -> [(Text, Bool)] -> Text -> Eff effs WriteOutcome\nwriteChecked path checks content = do\n  let failed = [name | (name, ok) <- checks, not ok]\n  if null failed\n    then writeFile path content >>= liftEither >> pure (Written path (length checks))\n    else pure (WriteBlocked path failed)"] },
+                { raw ["-- | Blake3 content hash (hex) of a file, or Nothing if it does not exist.\n-- The compare-and-swap token for writeCheckedIf: read it, compute your new\n-- content, then write back only if the file still hashes the same.\nfileHash :: forall effs. Member Fs effs => FilePath -> Eff effs (Maybe Text)\nfileHash p = send (FsHash p) >>= liftEither"] },
+                { raw ["-- | Content-hash compare-and-swap write (#330). Writes CONTENT only if the\n-- file's current blake3 hash equals EXPECTED (Nothing = expect the file ABSENT,\n-- i.e. create-only). The compare-and-write is atomic within the handler, closing\n-- the lost-update race between parallel agents. Returns a WriteOutcome: 'Written'\n-- on success, or 'WriteConflict' (carrying expected vs actual hash) if the\n-- precondition failed — conflicts come back as DATA, nothing is written. Get\n-- EXPECTED from fileHash; on a conflict re-read, recompute, and retry.\nwriteCheckedIf :: forall effs. Member Fs effs => Maybe Text -> FilePath -> Text -> Eff effs WriteOutcome\nwriteCheckedIf expected path content = do\n  r <- send (FsWriteCas path expected content)\n  pure $ case r of\n    Right () -> Written path 1\n    Left actual -> WriteConflict path expected actual"] },
             ],
         }
     };
@@ -1894,6 +1937,7 @@ macro_rules! subagent_effect_def {
             handler SubagentHandler,
             req SubagentReq,
             decl_fn subagent_decl,
+            helpers_row_polymorphic true,
             description [
                 "Typed headless subagents (LANE 1: one-cycle coupled spawn). ",
                 "`spawnAgentRaw spec schema` is ONE atomic call: it allocates or takes a ",
@@ -2028,7 +2072,7 @@ macro_rules! subagent_effect_def {
                        "-- `Tidepool.Agent.Spawn` (schema derived from your result type's",
                        "-- Generic representation, payload decoded by its FromJSON instance);",
                        "-- this is its substrate.",
-                       "spawnAgentRaw :: SpawnSpec -> Value -> M (Either SpawnError SpawnOutcome)",
+                       "spawnAgentRaw :: forall effs. Member Subagent effs => SpawnSpec -> Value -> Eff effs (Either SpawnError SpawnOutcome)",
                        "spawnAgentRaw spec schema = send (SubagentSpawn spec schema)"] },
                 { raw ["-- | RAW begin of a coupled spawn that carries dynamic tools: it does",
                        "-- everything `spawnAgentRaw` does, then drives the turn to its FIRST",
@@ -2039,7 +2083,7 @@ macro_rules! subagent_effect_def {
                        "-- `schema` is the JSON Schema the terminal result must conform to.",
                        "-- Prefer `spawnAgentWithTools` in `Tidepool.Agent.Spawn`, which",
                        "-- compiles both from your types and runs the answer loop for you.",
-                       "agentBeginRaw :: SpawnSpec -> Value -> Value -> M (Either SpawnError AgentStep)",
+                       "agentBeginRaw :: forall effs. Member Subagent effs => SpawnSpec -> Value -> Value -> Eff effs (Either SpawnError AgentStep)",
                        "agentBeginRaw spec tools schema = send (SubagentBegin spec tools schema)"] },
                 { raw ["-- | RAW answer to the parked tool call, driving the turn on to its next",
                        "-- stop (another `StepToolCall`, or `StepDone`). `agent` and `callId`",
@@ -2049,7 +2093,7 @@ macro_rules! subagent_effect_def {
                        "-- reacts to — an ordinary conversational fact, not a transport error,",
                        "-- and never a way to leave the call unanswered; `body` is then the",
                        "-- text it sees. Prefer `spawnAgentWithTools` in `Tidepool.Agent.Spawn`.",
-                       "agentResumeRaw :: AgentId -> Text -> Bool -> Value -> M (Either SpawnError AgentStep)",
+                       "agentResumeRaw :: forall effs. Member Subagent effs => AgentId -> Text -> Bool -> Value -> Eff effs (Either SpawnError AgentStep)",
                        "agentResumeRaw agent callId ok body = send (SubagentResume agent callId ok body)"] },
                 { raw ["-- | Spawn in a NEW managed worktree: worktree spec, agent label, task.",
                        "spawnSpec :: WorktreeSpec -> Text -> Text -> SpawnSpec",
@@ -2073,7 +2117,7 @@ macro_rules! subagent_effect_def {
                        "-- `agentAwaitRaw` or `agentCancelRaw`. Prefer the typed wrapper",
                        "-- `spawnAsync` in `Tidepool.Agent.Spawn` (schema derived from your",
                        "-- result type, handle abstract over it); this is its substrate.",
-                       "agentSpawnAsyncRaw :: SpawnSpec -> Value -> M (Either SpawnError CycleId)",
+                       "agentSpawnAsyncRaw :: forall effs. Member Subagent effs => SpawnSpec -> Value -> Eff effs (Either SpawnError CycleId)",
                        "agentSpawnAsyncRaw spec schema = send (SubagentSpawnAsync spec schema)"] },
                 { raw ["-- | RAW await: BLOCK until the named cycle finishes, and return the same",
                        "-- `Either SpawnError SpawnOutcome` the synchronous `spawnAgentRaw`",
@@ -2083,7 +2127,7 @@ macro_rules! subagent_effect_def {
                        "-- not a backend one. Prefer the typed wrapper `awaitAgent` in",
                        "-- `Tidepool.Agent.Spawn`, which decodes the payload into your result",
                        "-- type as `spawnAgent` does.",
-                       "agentAwaitRaw :: CycleId -> M (Either SpawnError SpawnOutcome)",
+                       "agentAwaitRaw :: forall effs. Member Subagent effs => CycleId -> Eff effs (Either SpawnError SpawnOutcome)",
                        "agentAwaitRaw cycle = send (SubagentAwait cycle)"] },
                 { raw ["-- | RAW cancel: reap the named cycle's backend and release its binding.",
                        "-- TOTAL — cancelling a cycle that already finished, or one this handler",
@@ -2091,7 +2135,7 @@ macro_rules! subagent_effect_def {
                        "-- first as everywhere else: the binding is settled, and the worktree",
                        "-- stays registered and rebindable — nothing is deleted. Prefer the",
                        "-- typed wrapper `cancelAgent` in `Tidepool.Agent.Spawn`.",
-                       "agentCancelRaw :: CycleId -> M ()",
+                       "agentCancelRaw :: forall effs. Member Subagent effs => CycleId -> Eff effs ()",
                        "agentCancelRaw cycle = send (SubagentCancel cycle)"] },
             ],
         }
@@ -2139,6 +2183,7 @@ macro_rules! green_effect_def {
             handler GreenHandler,
             req GreenReq,
             decl_fn green_decl,
+            helpers_row_polymorphic true,
             description [
                 "Green threads: cooperative concurrency with the authored surface of ",
                 "`Control.Concurrent.Async` (`Tidepool.Async`: `async`/`wait`/ ",
@@ -2191,6 +2236,16 @@ macro_rules! green_effect_def {
                   ret "()" },
             ],
             helpers [
+                // NOT Member-polymorphic, deliberately: `AsyncSpawnWith`'s own
+                // GADT field type is the concrete `Int -> M ()` (its wire arg
+                // descriptor above, `"(Int -> M ())" as tidepool_eval::value::Value`)
+                // — a verb's own constructor field type is fixed to whichever
+                // module's `M` it is declared in, same as every other GADT ctor
+                // arg (this is a property of the wire shape, not something a
+                // helper's signature can generalize away). The lambda passed to
+                // `AsyncSpawnWith` must therefore have type `Int -> M ()`
+                // EXACTLY, which forces `asyncSpawn`'s own `body :: M a`, not a
+                // universally-quantified `Eff effs a`.
                 { raw ["-- | Fork a green thread; substrate for 'Tidepool.Async.async'.",
                        "-- The body rides as a lambda so the closure-sentinel scan fires",
                        "-- and the runtime tenures it (see the effect's Rust definition).",
@@ -2201,10 +2256,10 @@ macro_rules! green_effect_def {
                        "asyncSpawn body = send (AsyncSpawnWith 0 (\\_ -> body >>= \\v -> send (AsyncDoneWith 0 v)))"] },
                 { raw ["-- | Park until ANY of these threads reaches a terminal state;",
                        "-- resumes with the id of the one that did.",
-                       "asyncJoinAny :: [Int] -> M Int",
+                       "asyncJoinAny :: forall effs. Member Green effs => [Int] -> Eff effs Int",
                        "asyncJoinAny = send . AsyncJoinAnyWith"] },
                 { raw ["-- | A thread's current state. Never parks.",
-                       "asyncStatus :: Int -> M AsyncStatus",
+                       "asyncStatus :: forall effs. Member Green effs => Int -> Eff effs AsyncStatus",
                        "asyncStatus t = decode <$> send (AsyncStatusWith t)",
                        "  where",
                        "    decode 1 = AsyncSettled",
@@ -2213,11 +2268,11 @@ macro_rules! green_effect_def {
                 { raw ["-- | A settled thread's result, delivered in-heap by handle.",
                        "-- Gate it with 'asyncStatus': the result of a thread that has",
                        "-- not settled is not defined.",
-                       "asyncResult :: Int -> M a",
+                       "asyncResult :: forall a effs. Member Green effs => Int -> Eff effs a",
                        "asyncResult = send . AsyncResultWith"] },
                 { raw ["-- | Cancel a thread: its realm closes, discarding its pending",
                        "-- suspensions. Idempotent, and a no-op on a terminal thread.",
-                       "asyncCancel :: Int -> M ()",
+                       "asyncCancel :: forall effs. Member Green effs => Int -> Eff effs ()",
                        "asyncCancel = send . AsyncCancelWith"] },
             ],
         }
@@ -2247,7 +2302,7 @@ mod tests {
             d.helpers,
             &[
                 "-- | Current UTC time as an opaque UTCTime (epoch-millisecond resolution).\n\
-               getCurrentTime :: M UTCTime\n\
+               getCurrentTime :: forall effs. Member Time effs => Eff effs UTCTime\n\
                getCurrentTime = UTCTime <$> send TimeNow"
             ]
         );
@@ -2481,10 +2536,10 @@ mod tests {
             &[
                 "-- | Emit a line of console output. Thin wrapper over the Print effect\n\
                  -- so chains never need `send (Print …)`.\n\
-                 say :: Text -> M ()\n\
+                 say :: forall effs. Member Console effs => Text -> Eff effs ()\n\
                  say = send . Print",
                 "-- | `say` on anything Showable (`say . show`).\n\
-                 sayShow :: Show a => a -> M ()\n\
+                 sayShow :: forall a effs. (Show a, Member Console effs) => a -> Eff effs ()\n\
                  sayShow = say . show",
             ]
         );

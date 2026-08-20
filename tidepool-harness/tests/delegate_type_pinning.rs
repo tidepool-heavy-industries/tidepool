@@ -253,53 +253,44 @@ fn answerer_turn_combining_fork_and_delegate_compiles_against_the_narrow_row_wit
     );
 }
 
-/// KNOWN LIMITATION, confirmed pre-existing (present via the ALREADY-SHIPPED
-/// `template_turn_for`/`delegate_aware_preamble` mechanism this test drives —
-/// not introduced by, and not fixable from within, this lane's
-/// `template_answer_turn` migration above). `note`/`getStateJson`/
-/// `askUserWith` are declared with a CONCRETE `M` (`noteRaw :: Text -> M
-/// ()`/`askUserRaw :: Value -> M Value`/`getStateJson :: M Value`,
-/// `tidepool-mcp/src/effect_defs.rs`'s `AskUser`/`ReadState` defs —
-/// `helpers_row_polymorphic` left at its default `false`, unlike
-/// `RunLLMTurn`'s `helpers_row_polymorphic true`), so `M` there is FIXED at
-/// their own definition site to `Tidepool.Effects.M` — the OUTER,
-/// `Subagent`/`Worktree`-carrying row — regardless of any LOCAL `type M`
-/// shadow the delegating turn module defines for itself
+/// PRD 21 C5 row-truth completion, PROMOTED from an expected-failure pin
+/// (row-poly-sweep lane, 2026-08-20). `note`/`getStateJson`/`askUserWith`
+/// used to be declared with a CONCRETE `M` (`noteRaw :: Text -> M ()`/
+/// `askUserRaw :: Value -> M Value`/`getStateJson :: M Value`,
+/// `tidepool-mcp/src/effect_defs.rs`'s `AskUser`/`ReadState` defs), so `M`
+/// there was FIXED at their own definition site to `Tidepool.Effects.M` —
+/// the OUTER, `Subagent`/`Worktree`-carrying row — regardless of any LOCAL
+/// `type M` shadow the delegating turn module defines for itself
 /// (`delegate_aware_preamble` only ever affects names written in the turn
 /// module's OWN source text — `resume`, `paginateResult`'s respelled
 /// signature — never a library function's already-fixed type). `runDelegate`
 /// wraps the WHOLE block, structurally requiring it to be `Eff (Delegate ':
-/// effs) a`; a block whose type is pinned to `Tidepool.Effects.M` (via any
-/// call to `note`/`getStateJson`/`askUserWith`) is headed by `Subagent`, not
+/// effs) a`; a block whose type was pinned to `Tidepool.Effects.M` (via any
+/// call to `note`/`getStateJson`/`askUserWith`) was headed by `Subagent`, not
 /// `Delegate` — an unavoidable mismatch, independent of whether `delegate`
-/// itself is also called. Reproduces the operator report's exact isolated
+/// itself was also called. Reproduced the operator report's exact isolated
 /// `askUserWith`-alone failure.
 ///
-/// The fix (out of THIS lane's boundary) is the SAME mechanism `RunLLMTurn`
-/// already uses: flip `helpers_row_polymorphic true` on the `AskUser`/
-/// `ReadState` effect defs in `tidepool-mcp/src/effect_defs.rs` — explicitly
-/// owned by the sibling `concurrent-branches` lane this wave. Pinned here
-/// (asserting the CURRENT failure, not silently ignored) so a future lane
-/// that lands that fix gets a clear, expected test failure telling it to
-/// promote this block into the passing bundle above instead of re-discovering
-/// the gap from a live dogfood run again.
+/// The fix is the SAME mechanism `RunLLMTurn`/`Finalize`/`Fork` already use:
+/// `AskUser`'s `askUserRaw`/`noteRaw` and `ReadState`'s `getStateJson` are now
+/// `Member <Eff> effs => ... -> Eff effs T`, with `helpers_row_polymorphic
+/// true` on both defs (`tidepool-mcp/src/effect_defs.rs`). All three now
+/// compile — and RUN, via the same `delegate`-then-`finalize` shape the other
+/// positive tests in this file use — against the narrow delegating row.
 #[test]
-fn concrete_m_library_helpers_remain_unreachable_under_delegate_wrap() {
+fn note_getstatejson_and_askuserwith_all_compile_against_the_narrow_row() {
     support::require_extract();
-    let code = "askUserWith @Decision [title \"confirm\"]";
+    let code = "do { note \"about to ask\"; \
+                 _s <- getStateJson; \
+                 d <- askUserWith @Decision [title \"confirm\"]; \
+                 finalize @Decision d }";
     let result = compile_delegating_turn(code, "HarnessTypes", Some("Decision"));
-    let err = result.err().map(full_diag).unwrap_or_else(|| {
-        panic!(
-            "askUserWith alone now compiles under delegate_wrap — the \
-             helpers_row_polymorphic fix has landed; promote this verb into \
-             the passing acceptance bundle above and delete this pin"
-        )
-    });
     assert!(
-        err.contains("Subagent") && err.contains("Delegate"),
-        "expected the known Subagent-vs-Delegate row mismatch (askUserWith's \
-         concrete M vs runDelegate's wrap), got a different error — the \
-         failure mode changed, re-diagnose: {err}"
+        result.is_ok(),
+        "note/getStateJson/askUserWith must all compile against the narrow \
+         delegating row now that AskUser/ReadState's helpers are \
+         Member-polymorphic, got: {:?}",
+        result.err().map(full_diag)
     );
 }
 

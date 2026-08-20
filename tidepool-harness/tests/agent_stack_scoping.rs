@@ -266,6 +266,31 @@ fn askuser_raw_compiles_in_the_answerer_stack() {
     );
 }
 
+/// `noteRaw`/`getStateJson` — the AskUser/ReadState verbs `askuser_raw_...`
+/// above doesn't already cover — also compile against the answerer stack
+/// (both effects are in the row). Row-poly-sweep: these are now
+/// `Member`-polymorphic (`tidepool-mcp/src/effect_defs.rs`'s
+/// `helpers_row_polymorphic true` on `AskUser`/`ReadState`), so this pins
+/// them under the ordinary STANDARD answerer row — [`delegate_type_pinning`]
+/// pins the SAME three verbs (plus `askUserWith`) under the narrower
+/// `delegate_wrap` row.
+#[test]
+fn noteraw_and_getstatejson_compile_in_the_answerer_stack() {
+    support::require_extract();
+
+    let result = compile_against(
+        answerer_decls(),
+        "do { noteRaw \"hi\"; _ <- getStateJson; pure () }",
+        "",
+    );
+    assert!(
+        result.is_ok(),
+        "noteRaw/getStateJson (AskUser/ReadState verbs) must compile against \
+         the answerer stack '[AskUser, Fork, ReadState, Finalize], got:\n{:?}",
+        result.err()
+    );
+}
+
 /// `forkAll @T` (`Tidepool.Fork`) compiles against the answerer stack — the
 /// primitive the answerer's framing advertises for parallel sub-answerer
 /// delegation. It head-swaps to the `Fork` GADT's `forkAllSited`, which is

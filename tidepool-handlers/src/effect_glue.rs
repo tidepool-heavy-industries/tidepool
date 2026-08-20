@@ -26,6 +26,12 @@ macro_rules! effect_rust_projection {
         handler $handler:ident,
         req $req:ident,
         decl_fn $decl_fn:ident,
+        // Accepted and ignored here: `helpers_row_polymorphic` only steers
+        // the Haskell decl projection's helper-emission gate
+        // (`tidepool-mcp/src/effect_defs.rs`'s `opt_bool_or_false!` /
+        // `emits_helpers_for`) — the Rust request enum/dispatch generated
+        // below is unaffected by it either way.
+        $(helpers_row_polymorphic $hrp:tt,)?
         description $desc:tt,
         type_defs $tds:tt,
         $(errors $errname:ident [

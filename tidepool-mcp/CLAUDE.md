@@ -30,6 +30,24 @@ handler struct (using `cx.respond`/`respond_list`, or an errors-tagged method
 returning `Result<T, ErrEnum>` for typed failure). A wholly new effect type
 needs a new definition + handler module + a positional union-tag slot.
 
+**New effect defs are row-polymorphic from birth.** Write every helper's real
+Haskell signature as `Member <Eff> effs => ... -> Eff effs T` (`forall ...
+effs.` when the helper itself is `@`-applied or otherwise needs the tyvar
+named), never the closed `<verb> :: ... -> M T` shape — `M` is a
+per-compile-module alias, so a helper defined against it cannot typecheck
+under a narrower or differently-shaped row than the one the module happened
+to generate for (e.g. a local `type M` shadow, PRD 21 C5's `delegate_wrap`).
+Set `helpers_row_polymorphic true` on the definition once its helpers are
+genuinely Member-based — that flag is what lets `effects_module_source_with_vocab`
+emit them for a row that carries the effect as VOCABULARY without it being IN
+the row (`emits_helpers_for`, `eval_prep.rs`). The model-visible prose
+(`description`/`prompt_card`) may keep the `M` shorthand for readability —
+only the compiled helper text itself needs the real signature. A helper that
+truly cannot be made row-polymorphic (its body calls another helper whose own
+type is still fixed to a concrete `M`, e.g. Fs's `getCurrentDirectory` calling
+Exec's `run`) stays concrete, with a comment at the definition site naming
+exactly which dependency forces it.
+
 **Trap: a bridged data record belongs in `Tidepool.Records.Bridged` (or, when
 it embeds an `errors` ADT as a FIELD, `Tidepool.Records.Stable` —
 `fs_effect_def!`'s `stable_errors true`), never inline in a `type_defs`

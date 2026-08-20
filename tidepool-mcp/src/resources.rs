@@ -680,7 +680,7 @@ mod tests {
         assert!(help(&ctx, "edits").contains("update"));
         // Effect topics: bare name and `effect <Name>` both resolve.
         assert!(help(&ctx, "Fs").contains("readFile"));
-        assert!(help(&ctx, "effect Llm").contains("llm :: Schema"));
+        assert!(help(&ctx, "effect Llm").contains("llm :: forall effs. Member Llm effs"));
         // Empty / unknown fall back to the index.
         assert!(help(&ctx, "").contains("help topics"));
         assert!(help(&ctx, "nope").contains("Unknown help topic"));
