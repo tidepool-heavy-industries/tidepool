@@ -353,6 +353,15 @@ impl AgentBackend for CodexAgentBackend {
         })
     }
 
+    /// Delegates to [`CodexAgentBackend::shutdown`] — the same confirmed-reap
+    /// logic the live handshake tests already exercise, now reachable
+    /// through the trait so every production call site (`tidepool-handlers`)
+    /// can confirm the reap on ordinary completion instead of leaving it to
+    /// `Drop`'s fire-and-forget kill.
+    fn shutdown(self: Box<Self>) -> Result<(), AgentBackendError> {
+        CodexAgentBackend::shutdown(*self)
+    }
+
     fn resume(&mut self, reply: ToolReply) -> Result<TurnEvent, AgentBackendError> {
         // The model was resolved when the turn started; re-resolving here could
         // silently move an in-flight turn onto a different model.
@@ -711,6 +720,12 @@ fn turn_start_params(
         cwd: Some(spec.cwd.clone()),
         model: Some(resolved_model.to_string()),
         sandbox_policy: Some(SandboxPolicy::WorkspaceWrite {
+            // /tmp (and $TMPDIR) stay writable OUTSIDE `writable_roots` —
+            // deliberately, not an oversight like the other fields here. A
+            // coding turn routinely shells out to build tooling (cargo, ghc)
+            // that scratch-writes to /tmp regardless of cwd, and denying it
+            // would turn ordinary builds into sandbox-denial failures rather
+            // than closing any containment gap `writable_roots` already covers.
             exclude_slash_tmp: Some(false),
             exclude_tmpdir_env_var: Some(false),
             network_access: Some(false),
@@ -890,6 +905,7 @@ pub(crate) fn map_session_error(error: SessionError) -> AgentBackendError {
         | SessionError::Timeout { .. }
         | SessionError::Closed { .. }
         | SessionError::OrphanedProcess { .. }
+        | SessionError::CodexBinInvalid { .. }
         | SessionError::Transport(_) => AgentBackendError::BackendUnavailable { detail },
         SessionError::Rpc { .. }
         | SessionError::Decode { .. }

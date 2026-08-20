@@ -42,6 +42,22 @@ fn require_utf8(path: &std::path::Path) -> Result<(), DomainWorktreeError> {
     Ok(())
 }
 
+/// Confirm `backend`'s process is reaped before it drops — the NORMAL
+/// (non-cancelled) teardown path. Every production site that is about to let
+/// a cycle's backend go out of scope calls this first, in place of the
+/// implicit `Drop` (fire-and-forget kill, no confirmation) that would
+/// otherwise run.
+///
+/// A shutdown failure is logged, never propagated: the cycle's own
+/// result — already computed by the time this runs — is the caller's real
+/// answer, and a teardown hiccup must not mask it. `Drop` remains the
+/// backstop for whatever this call could not confirm.
+fn shutdown_backend(backend: Box<dyn AgentBackend + Send>) {
+    if let Err(e) = backend.shutdown() {
+        tracing::warn!("backend shutdown did not confirm a clean reap: {e}");
+    }
+}
+
 // ============================================================================
 // Delegate transcript persistence.
 //
@@ -228,10 +244,11 @@ impl SteppedCycle {
         match progress {
             CycleProgress::Done(run) => {
                 let wire = step_to_wire(&SpawnStep::Done(run));
-                // The backend is DROPPED here, in place of being kept: a
+                // The backend is torn down here, in place of being kept: a
                 // terminal entry must hold no OS process.
                 let transcript = backend.transcript_jsonl();
                 transcripts.persist(&cycle_tag(id), &transcript);
+                shutdown_backend(backend);
                 (SteppedCycle::Settled { transcript }, wire)
             }
             CycleProgress::Parked(parked) => {
@@ -405,12 +422,12 @@ impl AsyncCycle {
     ) -> (Settled, Option<CycleSaga>, Vec<String>) {
         let transcript = report.backend.transcript_jsonl();
         transcripts.persist(&cycle_tag(id), &transcript);
+        shutdown_backend(report.backend);
         (
             Settled::Reported(Box::new(report.result)),
             report.saga,
             transcript,
         )
-        // `report.backend` drops here.
     }
 
     /// Block for `reports`, join `thread`, and produce the report's
@@ -899,10 +916,11 @@ impl SubagentHandler {
     ) -> Result<AgSpawnOutcome, SpawnError> {
         let request = request_from_wire(spec, schema, Vec::new(), self.model, self.effort)?;
         let mut backend = self.new_backend()?;
-        let run = self
-            .spawner
-            .spawn_one_cycle(&mut *backend, &request)
-            .map_err(spawn_error_to_wire)?;
+        let run = self.spawner.spawn_one_cycle(&mut *backend, &request);
+        // Confirmed-reap teardown before the backend drops, regardless of
+        // outcome — this is the ordinary (non-cancelled) completion path.
+        shutdown_backend(backend);
+        let run = run.map_err(spawn_error_to_wire)?;
         Ok(outcome_to_wire(&run))
     }
 
@@ -1011,6 +1029,7 @@ impl SubagentHandler {
                 (e, AnswerFailure::RolledBack) => {
                     let transcript = backend.transcript_jsonl();
                     self.transcripts.persist(&cycle_tag(id), &transcript);
+                    shutdown_backend(backend);
                     self.cycles.insert(
                         id,
                         Cycle::Stepped(Box::new(SteppedCycle::Settled { transcript })),
@@ -1211,8 +1230,19 @@ impl Drop for SubagentHandler {
         // dropped along with `self`, so there is nothing to reinsert into.
         let transcripts = &self.transcripts;
         for (id, cycle) in std::mem::take(&mut self.cycles) {
-            if let Cycle::Async(boxed) = cycle {
-                let _ = boxed.cancel(id, transcripts);
+            match cycle {
+                Cycle::Async(boxed) => {
+                    let _ = boxed.cancel(id, transcripts);
+                }
+                // A stepped cycle still mid-turn when the handler itself
+                // drops: no thread to join, but its backend still deserves a
+                // confirmed reap rather than falling through to `Drop`'s
+                // fire-and-forget kill.
+                Cycle::Stepped(stepped) => {
+                    if let SteppedCycle::Running { backend, .. } = *stepped {
+                        shutdown_backend(backend);
+                    }
+                }
             }
         }
     }
@@ -3041,6 +3071,24 @@ mod tests {
         inner: MockBackend,
         transcript: Vec<String>,
         dropped: Arc<AtomicBool>,
+        /// Set by `shutdown` (the confirmed-reap teardown), independent of
+        /// `dropped` (`Drop`, the fire-and-forget backstop) — the two tests
+        /// this distinction is for want to see teardown happen via the
+        /// explicit call, not merely that the value eventually deallocated.
+        shutdown_called: Arc<AtomicBool>,
+    }
+
+    impl DropSignal {
+        /// The common case: a test that only cares about `Drop`, not
+        /// `shutdown` — a fresh, unshared flag for the field nobody reads.
+        fn new(inner: MockBackend, transcript: Vec<String>, dropped: Arc<AtomicBool>) -> Self {
+            Self {
+                inner,
+                transcript,
+                dropped,
+                shutdown_called: Arc::new(AtomicBool::new(false)),
+            }
+        }
     }
 
     impl Drop for DropSignal {
@@ -3076,6 +3124,11 @@ mod tests {
         fn canceller(&self) -> Box<dyn BackendCanceller> {
             self.inner.canceller()
         }
+
+        fn shutdown(self: Box<Self>) -> Result<(), AgentBackendError> {
+            self.shutdown_called.store(true, Ordering::SeqCst);
+            Ok(())
+        }
     }
 
     fn one_shot_queue(backend: Box<dyn AgentBackend + Send>) -> Box<dyn AgentBackendFactory> {
@@ -3093,11 +3146,13 @@ mod tests {
     fn handler_settled_async_cycle_drops_its_backend_but_keeps_the_transcript() {
         let fx = Fixture::new();
         let dropped = Arc::new(AtomicBool::new(false));
-        let backend = DropSignal {
-            inner: MockBackend::completing(CycleResultPayload::Absent),
-            transcript: vec!["{\"frame\":1}".to_string(), "{\"frame\":2}".to_string()],
-            dropped: Arc::clone(&dropped),
-        };
+        let shutdown_called = Arc::new(AtomicBool::new(false));
+        let mut backend = DropSignal::new(
+            MockBackend::completing(CycleResultPayload::Absent),
+            vec!["{\"frame\":1}".to_string(), "{\"frame\":2}".to_string()],
+            Arc::clone(&dropped),
+        );
+        backend.shutdown_called = Arc::clone(&shutdown_called);
         let mut handler = fx.handler_with(one_shot_queue(Box::new(backend)));
 
         let cycle = spawn_async(&mut handler, "worker").expect("admitted immediately");
@@ -3105,6 +3160,10 @@ mod tests {
             .subagent_await(cycle)
             .expect("the mock completes immediately");
 
+        assert!(
+            shutdown_called.load(Ordering::SeqCst),
+            "a settled cycle must confirm its backend's reap via shutdown, not just drop"
+        );
         assert!(
             dropped.load(Ordering::SeqCst),
             "a settled cycle must drop its backend — no OS process may outlive settle"
@@ -3123,17 +3182,19 @@ mod tests {
     fn handler_settled_stepped_cycle_drops_its_backend_but_keeps_the_transcript() {
         let fx = Fixture::new();
         let dropped = Arc::new(AtomicBool::new(false));
-        let backend = DropSignal {
-            inner: MockBackend::scripted([
+        let shutdown_called = Arc::new(AtomicBool::new(false));
+        let mut backend = DropSignal::new(
+            MockBackend::scripted([
                 MockStep::Calls {
                     tool: "ask_parent".to_string(),
                     arguments: serde_json::json!({ "q": "which file?" }),
                 },
                 MockStep::Completes(CycleResultPayload::Absent),
             ]),
-            transcript: vec!["{\"frame\":1}".to_string()],
-            dropped: Arc::clone(&dropped),
-        };
+            vec!["{\"frame\":1}".to_string()],
+            Arc::clone(&dropped),
+        );
+        backend.shutdown_called = Arc::clone(&shutdown_called);
         let mut handler = fx.handler_with(one_shot_queue(Box::new(backend)));
 
         let step = handler
@@ -3161,6 +3222,10 @@ mod tests {
             .expect("answering the parked call drives the turn to done");
 
         assert!(
+            shutdown_called.load(Ordering::SeqCst),
+            "a finished stepped cycle must confirm its backend's reap via shutdown, not just drop"
+        );
+        assert!(
             dropped.load(Ordering::SeqCst),
             "a finished stepped cycle must drop its backend — the table entry is retained, \
              the OS process is not"
@@ -3170,6 +3235,40 @@ mod tests {
             vec!["{\"frame\":1}".to_string()],
             "the transcript survives the backend's drop — extracted at settle"
         );
+    }
+
+    /// The synchronous, single-call path (`SubagentSpawn`) confirms its
+    /// backend's reap via `shutdown` before returning, on ORDINARY
+    /// completion — not merely relying on the implicit `Drop` at the end of
+    /// the call. This is the specific gap the containment review flagged:
+    /// `subagent_spawn`'s backend used to fall through to fire-and-forget
+    /// `Drop` with nothing confirming the reap.
+    #[test]
+    fn handler_subagent_spawn_confirms_backend_shutdown_on_ordinary_completion() {
+        let fx = Fixture::new();
+        let dropped = Arc::new(AtomicBool::new(false));
+        let shutdown_called = Arc::new(AtomicBool::new(false));
+        let mut backend = DropSignal::new(
+            MockBackend::completing(CycleResultPayload::Absent),
+            vec!["{\"frame\":1}".to_string()],
+            Arc::clone(&dropped),
+        );
+        backend.shutdown_called = Arc::clone(&shutdown_called);
+        let mut handler = fx.handler_with(one_shot_queue(Box::new(backend)));
+
+        handler
+            .subagent_spawn(
+                new_worktree_spec("worker", "run"),
+                JsonArg(serde_json::Value::Null),
+            )
+            .expect("the mock completes immediately");
+
+        assert!(
+            shutdown_called.load(Ordering::SeqCst),
+            "subagent_spawn must confirm its backend's reap via shutdown before it drops, on \
+             the ordinary completion path"
+        );
+        assert!(dropped.load(Ordering::SeqCst));
     }
 
     // ==================================================================
@@ -3184,11 +3283,11 @@ mod tests {
         let out_dir = tempfile::TempDir::new().expect("create the transcript output dir");
         std::env::set_var("TIDEPOOL_DELEGATE_TRANSCRIPT_DIR", out_dir.path());
 
-        let backend = DropSignal {
-            inner: MockBackend::completing(CycleResultPayload::Absent),
-            transcript: vec!["{\"frame\":1}".to_string(), "{\"frame\":2}".to_string()],
-            dropped: Arc::new(AtomicBool::new(false)),
-        };
+        let backend = DropSignal::new(
+            MockBackend::completing(CycleResultPayload::Absent),
+            vec!["{\"frame\":1}".to_string(), "{\"frame\":2}".to_string()],
+            Arc::new(AtomicBool::new(false)),
+        );
         let mut handler = fx.handler_with(one_shot_queue(Box::new(backend)));
 
         let cycle = spawn_async(&mut handler, "worker").expect("admitted immediately");
@@ -3213,11 +3312,11 @@ mod tests {
         std::env::set_var("TIDEPOOL_DELEGATE_TRANSCRIPT_DIR", out_dir.path());
 
         let fx_one = Fixture::new();
-        let backend_one = DropSignal {
-            inner: MockBackend::completing(CycleResultPayload::Absent),
-            transcript: vec!["{\"frame\":\"first\"}".to_string()],
-            dropped: Arc::new(AtomicBool::new(false)),
-        };
+        let backend_one = DropSignal::new(
+            MockBackend::completing(CycleResultPayload::Absent),
+            vec!["{\"frame\":\"first\"}".to_string()],
+            Arc::new(AtomicBool::new(false)),
+        );
         let mut handler_one = fx_one.handler_with(one_shot_queue(Box::new(backend_one)));
         let cycle_one = spawn_async(&mut handler_one, "worker-one").expect("admitted immediately");
         handler_one
@@ -3225,11 +3324,11 @@ mod tests {
             .expect("the mock completes immediately");
 
         let fx_two = Fixture::new();
-        let backend_two = DropSignal {
-            inner: MockBackend::completing(CycleResultPayload::Absent),
-            transcript: vec!["{\"frame\":\"second\"}".to_string()],
-            dropped: Arc::new(AtomicBool::new(false)),
-        };
+        let backend_two = DropSignal::new(
+            MockBackend::completing(CycleResultPayload::Absent),
+            vec!["{\"frame\":\"second\"}".to_string()],
+            Arc::new(AtomicBool::new(false)),
+        );
         let mut handler_two = fx_two.handler_with(one_shot_queue(Box::new(backend_two)));
         let cycle_two = spawn_async(&mut handler_two, "worker-two").expect("admitted immediately");
         handler_two

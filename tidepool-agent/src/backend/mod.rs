@@ -70,6 +70,24 @@ pub trait AgentBackend {
         Vec::new()
     }
 
+    /// Confirm this backend's underlying process, if any, is reaped —
+    /// consuming the backend so nothing can be called on it afterward.
+    ///
+    /// This is the NORMAL (non-cancelled) teardown path: every production
+    /// call site that is about to let a backend drop calls this first, so a
+    /// backend that owns a real child process gets a chance to wait for and
+    /// confirm the reap rather than relying on `Drop`'s fire-and-forget kill.
+    /// `Drop` remains the backstop for the case this is skipped (a panic, or
+    /// a caller that forgot) — it is not made redundant by this method.
+    ///
+    /// Default: a no-op. Correct for a backend with nothing to reap (an
+    /// in-process one, [`codex::replay`](crate::backend::codex::replay), and
+    /// [`mock::MockBackend`](crate::backend::mock::MockBackend)) — same
+    /// reasoning as [`canceller`](Self::canceller)'s default.
+    fn shutdown(self: Box<Self>) -> Result<(), AgentBackendError> {
+        Ok(())
+    }
+
     /// A handle that reaps this backend FROM ANOTHER THREAD, making an
     /// in-flight seam call return.
     ///

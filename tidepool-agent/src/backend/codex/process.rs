@@ -8,7 +8,9 @@
 //! typed request/response structs from `codex_codes` still do the
 //! encoding/decoding — only the framing is manual.
 
-use std::path::Path;
+use std::collections::HashSet;
+use std::ffi::{OsStr, OsString};
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use codex_codes::{
@@ -86,6 +88,8 @@ pub enum SessionError {
     MissingField { method: String, field: &'static str },
     #[error("codex app-server process may be orphaned: still alive {timeout:?} after shutdown")]
     OrphanedProcess { timeout: Duration },
+    #[error("{ENV_CODEX_BIN}={} is not a readable, executable file", .path.display())]
+    CodexBinInvalid { path: PathBuf },
     #[error("no item/tool/call is parked; {call_id} answers nothing")]
     NoParkedCall { call_id: String },
     #[error("reply answers call {answered} but {parked} is the parked call")]
@@ -93,6 +97,23 @@ pub enum SessionError {
     #[error(transparent)]
     Transport(#[from] codex_codes::Error),
 }
+
+/// Ceiling on [`Session::frames`]. Generous — a full fixture recording or a
+/// delegate's whole turn history is the common case this must not truncate —
+/// but finite: a turn pumping years of streaming deltas otherwise grows this
+/// vector without bound. Once hit, further frames are dropped rather than
+/// recorded, and exactly one synthetic marker frame (never a second) is kept
+/// up to date in place naming how many — see [`Session::record_frame`] — so a
+/// transcript reader can SEE truncation happened rather than silently getting
+/// a partial history that still looks complete.
+const MAX_RECORDED_FRAMES: usize = 50_000;
+
+/// The JSON-RPC method name on [`Session::truncation_marker_frame`]'s
+/// synthetic notification — namespaced so it cannot collide with a real
+/// app-server method, and shaped as an ordinary notification so a pump
+/// reading a recording that hit the cap just falls through this driver's
+/// existing "unrecognized notification" catch-all instead of erroring.
+const TRUNCATION_MARKER_METHOD: &str = "tidepool/frameBufferTruncated";
 
 /// A connected, initialized `codex app-server` process.
 ///
@@ -106,7 +127,14 @@ pub enum SessionError {
 pub struct Session<T = RawAsyncClient> {
     client: T,
     next_id: i64,
+    /// Capped at [`MAX_RECORDED_FRAMES`] real frames plus at most one
+    /// synthetic truncation-marker frame — see [`Session::record_frame`].
     frames: Vec<RecordedFrame>,
+    /// The index into `frames` of the truncation marker, once one has been
+    /// pushed, alongside how many real frames have been dropped so far. Set
+    /// once; every further drop rewrites the SAME index rather than pushing
+    /// a new marker, which is what keeps `frames` bounded forever after.
+    truncation_marker: Option<(usize, u64)>,
     pid: Option<u32>,
     /// State of the turn currently being pumped.
     turn: TurnState,
@@ -124,6 +152,7 @@ impl<T: Transport> Session<T> {
             client,
             next_id: 1,
             frames: Vec::new(),
+            truncation_marker: None,
             pid,
             turn: TurnState::default(),
         }
@@ -134,19 +163,212 @@ impl<T: Transport> Session<T> {
     pub fn transport(&self) -> &T {
         &self.client
     }
+
+    /// Record one wire frame, honoring [`MAX_RECORDED_FRAMES`].
+    ///
+    /// Below the cap: pushed normally. At or past it: the frame itself is
+    /// dropped (never recorded) and a single synthetic marker — pushed once,
+    /// then rewritten in place on every further drop — tracks exactly how
+    /// many were lost, so `frames` never grows past `MAX_RECORDED_FRAMES + 1`
+    /// for the lifetime of the session.
+    fn record_frame(&mut self, frame: RecordedFrame) {
+        if let Some((idx, dropped)) = &mut self.truncation_marker {
+            *dropped += 1;
+            self.frames[*idx] = truncation_marker_frame(*dropped);
+            return;
+        }
+        if self.frames.len() < MAX_RECORDED_FRAMES {
+            self.frames.push(frame);
+            return;
+        }
+        let idx = self.frames.len();
+        self.frames.push(truncation_marker_frame(1));
+        self.truncation_marker = Some((idx, 1));
+    }
+}
+
+/// Build the synthetic frame [`Session::record_frame`] records once the cap
+/// is hit, naming the cap and how many real frames have been dropped so far.
+fn truncation_marker_frame(dropped: u64) -> RecordedFrame {
+    RecordedFrame {
+        direction: FrameDirection::ServerToClient,
+        frame: serde_json::json!({
+            "method": TRUNCATION_MARKER_METHOD,
+            "params": {
+                "cap": MAX_RECORDED_FRAMES,
+                "framesDropped": dropped,
+            },
+        }),
+    }
+}
+
+/// `$TIDEPOOL_CODEX_BIN` — an explicit override of which `codex` binary
+/// [`Session::connect`] spawns.
+pub const ENV_CODEX_BIN: &str = "TIDEPOOL_CODEX_BIN";
+
+/// Escape hatch: a comma-separated list of additional env var NAMES (not
+/// values) an operator wants passed through to the app-server child verbatim,
+/// for a local setup [`CHILD_ENV_ALLOWLIST`] does not anticipate.
+pub const ENV_AGENT_ENV_PASSTHROUGH: &str = "TIDEPOOL_AGENT_ENV_PASSTHROUGH";
+
+/// Env vars passed to the app-server child verbatim from this process's own
+/// environment. Everything else in this process's environment — including
+/// every secret the harness process holds — is withheld by default; an
+/// operator who needs one reaches it through [`ENV_AGENT_ENV_PASSTHROUGH`]
+/// rather than a silently widened default.
+///
+/// Every entry here is confirmed load-bearing by `codex-codes`' OWN
+/// config/auth-resolution code, or by this crate's own `isolation::codex_home`
+/// (which resolves the app-server's `$CODEX_HOME` the IDENTICAL way, and is
+/// itself checked per run):
+///
+/// - `CODEX_HOME` — explicit override of the app-server's config/credential
+///   directory (`codex_codes::auth_local::auth_json_path`;
+///   `super::isolation::codex_home`; also named on the wire —
+///   `InitializeResponse.codexHome`, "Absolute path to the server's
+///   `$CODEX_HOME` directory").
+/// - `HOME` (`USERPROFILE` on the platform that name applies to) — how
+///   `$CODEX_HOME` resolves to `~/.codex` when unset
+///   (`codex_codes::auth_local::auth_json_path`).
+/// - `PATH` — needed to resolve `codex`'s own subprocess spawns (`git`,
+///   `cargo`, whatever build tooling a coding turn runs) and, when no
+///   [`ENV_CODEX_BIN`] override is set, to resolve `codex` itself
+///   (`AppServerBuilder::resolve_command`'s `which::which`).
+/// - `TERM`, `LANG`, `LC_ALL`, `LC_CTYPE` — terminal/locale hygiene for
+///   whatever the app-server or its subprocesses shell out to. No secret
+///   rides these; withholding them risks mojibake or ANSI misdetection, not
+///   any containment property.
+///
+/// Deliberately NOT on this list: `OPENAI_API_KEY`. `codex_codes::auth_local`
+/// shows it only as a FIELD NAME persisted inside `auth.json` — nothing in
+/// `codex-codes` reads it from the process environment, and this adapter's
+/// whole design (running against the operator's real `$CODEX_HOME` rather
+/// than threading credentials through another channel — see
+/// [`Session::connect`]'s docs) is file-based auth. An operator who genuinely
+/// needs it reaches it through [`ENV_AGENT_ENV_PASSTHROUGH`].
+const CHILD_ENV_ALLOWLIST: &[&str] = &[
+    "CODEX_HOME",
+    "HOME",
+    "USERPROFILE",
+    "PATH",
+    "TERM",
+    "LANG",
+    "LC_ALL",
+    "LC_CTYPE",
+];
+
+/// Build the app-server child's env from `parent_env`, filtered to
+/// [`CHILD_ENV_ALLOWLIST`] plus whatever `passthrough` names.
+///
+/// Pure and independent of the real process environment so it is testable
+/// without touching `std::env` — see [`child_env_vars`] for the thin wrapper
+/// that supplies the real environment.
+fn child_env_from(
+    parent_env: impl IntoIterator<Item = (OsString, OsString)>,
+    passthrough: Option<&OsStr>,
+) -> Vec<(OsString, OsString)> {
+    let mut allow: HashSet<String> = CHILD_ENV_ALLOWLIST.iter().map(|s| s.to_string()).collect();
+    if let Some(list) = passthrough.and_then(OsStr::to_str) {
+        allow.extend(
+            list.split(',')
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string),
+        );
+    }
+    parent_env
+        .into_iter()
+        .filter(|(k, _)| k.to_str().is_some_and(|k| allow.contains(k)))
+        .collect()
+}
+
+/// [`child_env_from`] applied to this process's real environment and
+/// [`ENV_AGENT_ENV_PASSTHROUGH`].
+fn child_env_vars() -> Vec<(OsString, OsString)> {
+    child_env_from(
+        std::env::vars_os(),
+        std::env::var_os(ENV_AGENT_ENV_PASSTHROUGH).as_deref(),
+    )
+}
+
+/// A readable, executable regular file — the same executable-bit check this
+/// workspace's other strict-override binary locator applies to ITS override
+/// (Linux-only, matching this crate's other platform assumptions — e.g.
+/// [`process_exists`] below reads `/proc` directly).
+fn is_readable_executable_file(path: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    if !path.is_file() || std::fs::File::open(path).is_err() {
+        return false;
+    }
+    std::fs::metadata(path)
+        .map(|meta| meta.permissions().mode() & 0o111 != 0)
+        .unwrap_or(false)
+}
+
+/// `$TIDEPOOL_CODEX_BIN`, STRICTLY — the same pinning precedent
+/// `tidepool-runtime`'s toolchain-locator module doc lays out for its own
+/// strict binary override: a SET-but-unreadable/non-executable override is a
+/// hard error, never a silent fall-through to `$PATH` — falling through
+/// would run a DIFFERENT binary than the caller believes it pinned. `None`
+/// (unset) means the builder's own `$PATH` resolution
+/// (`which::which("codex")`) stands, unmodified.
+fn resolve_codex_binary() -> Result<Option<PathBuf>, SessionError> {
+    let Some(v) = std::env::var_os(ENV_CODEX_BIN) else {
+        return Ok(None);
+    };
+    let path = PathBuf::from(v);
+    if !is_readable_executable_file(&path) {
+        return Err(SessionError::CodexBinInvalid { path });
+    }
+    Ok(Some(path))
+}
+
+/// Build the app-server child's [`tokio::process::Command`], fully configured
+/// but not yet spawned — the construction [`connect`](Session::connect) then
+/// spawns, and what a mock-tier test inspects directly (`.as_std()`) without
+/// spawning anything.
+///
+/// `AppServerBuilder::build_command` is the crate's own documented escape
+/// hatch for process configuration it does not model — env-clearing is
+/// exactly that: the builder's `env`/`envs` only ever ADD onto whatever the
+/// underlying process command inherits by default, with no way to withhold
+/// the rest. `env_clear` here, followed by exactly [`child_env_vars`], is
+/// what turns that inherited-everything default into an allowlist.
+fn build_child_command() -> Result<tokio::process::Command, SessionError> {
+    let mut builder = AppServerBuilder::new();
+    if let Some(bin) = resolve_codex_binary()? {
+        builder = builder.command(bin);
+    }
+    let mut command = builder.build_command().map_err(SessionError::Spawn)?;
+    command.env_clear();
+    command.envs(child_env_vars());
+    Ok(command)
 }
 
 impl Session<RawAsyncClient> {
     /// Spawn `codex app-server` and complete the `initialize` handshake.
     ///
-    /// Inherits the parent process's environment (in particular `HOME`, and
-    /// therefore `~/.codex`) rather than pointing at an isolated
-    /// `CODEX_HOME` — proving normal runs don't mutate the operator's real
-    /// config is the point of this adapter, not something to route around.
+    /// Inherits the parent process's `$CODEX_HOME`/`$HOME` (and therefore
+    /// `~/.codex`) rather than pointing at an isolated `CODEX_HOME` —
+    /// proving normal runs don't mutate the operator's real config is the
+    /// point of this adapter, not something to route around. The child's
+    /// environment beyond that is an ALLOWLIST, not a full inherit — see
+    /// [`CHILD_ENV_ALLOWLIST`] — and the binary spawned honors
+    /// [`ENV_CODEX_BIN`] when set (see [`resolve_codex_binary`]).
     pub async fn connect(capabilities: InitializeCapabilities) -> Result<Self, SessionError> {
-        let raw = RawAsyncClient::start_with(AppServerBuilder::new())
+        // Same compat-version probe `RawAsyncClient::start_with` would have
+        // made; always swallowed to a debug log internally (never returns
+        // Err in practice), kept here for behavior parity now that this
+        // bypasses `start_with` to reach the escape hatch below.
+        codex_codes::version::check_codex_version_async()
             .await
             .map_err(SessionError::Spawn)?;
+
+        let mut command = build_child_command()?;
+        let child = command
+            .spawn()
+            .map_err(|e| SessionError::Spawn(codex_codes::Error::Io(e)))?;
+        let raw = RawAsyncClient::new(child).map_err(SessionError::Spawn)?;
         let mut session = Self::over(raw);
 
         let init_params = InitializeParams {
@@ -217,7 +439,7 @@ impl<T: Transport> Session<T> {
                 });
             };
             let value: Value = serde_json::from_str(&line).map_err(SessionError::MalformedLine)?;
-            self.frames.push(RecordedFrame {
+            self.record_frame(RecordedFrame {
                 direction: FrameDirection::ServerToClient,
                 frame: value.clone(),
             });
@@ -264,7 +486,7 @@ impl<T: Transport> Session<T> {
             method: method.to_string(),
             source,
         })?;
-        self.frames.push(RecordedFrame {
+        self.record_frame(RecordedFrame {
             direction: FrameDirection::ClientToServer,
             frame: value.clone(),
         });
@@ -458,7 +680,7 @@ impl<T: Transport> Session<T> {
                 });
             };
             let value: Value = serde_json::from_str(&line).map_err(SessionError::MalformedLine)?;
-            self.frames.push(RecordedFrame {
+            self.record_frame(RecordedFrame {
                 direction: FrameDirection::ServerToClient,
                 frame: value.clone(),
             });
@@ -668,9 +890,223 @@ mod tests {
     use super::*;
     use crate::backend::codex::isolation;
     use crate::backend::codex::isolation::ConfigSnapshot;
+    use std::collections::BTreeSet;
 
     fn turn_from_json(value: serde_json::Value) -> codex_codes::Turn {
         serde_json::from_value(value).expect("Turn fixture must match the real wire shape")
+    }
+
+    // --- child env allowlist -------------------------------------------------
+
+    #[test]
+    fn child_env_from_is_exactly_allowlist_plus_passthrough() {
+        let parent: Vec<(OsString, OsString)> = [
+            ("HOME", "/home/op"),
+            ("CODEX_HOME", "/home/op/.codex"),
+            ("PATH", "/usr/bin"),
+            ("TERM", "xterm"),
+            ("LANG", "en_US.UTF-8"),
+            ("SECRET_TOKEN", "shhh"),
+            ("AWS_SECRET_ACCESS_KEY", "shhh2"),
+            ("MY_CUSTOM_VAR", "value"),
+        ]
+        .into_iter()
+        .map(|(k, v)| (OsString::from(k), OsString::from(v)))
+        .collect();
+
+        fn keys(built: &[(OsString, OsString)]) -> BTreeSet<String> {
+            built
+                .iter()
+                .map(|(k, _)| k.to_string_lossy().into_owned())
+                .collect()
+        }
+
+        let built = child_env_from(parent.clone(), None);
+        assert_eq!(
+            keys(&built),
+            ["HOME", "CODEX_HOME", "PATH", "TERM", "LANG"]
+                .into_iter()
+                .map(String::from)
+                .collect::<BTreeSet<_>>(),
+            "only the allowlisted names survive with no passthrough — nothing else, \
+             including SECRET_TOKEN / AWS_SECRET_ACCESS_KEY"
+        );
+
+        let built = child_env_from(parent, Some(OsStr::new("MY_CUSTOM_VAR, SECRET_TOKEN")));
+        let got = keys(&built);
+        assert!(
+            got.contains("MY_CUSTOM_VAR"),
+            "named in the passthrough list"
+        );
+        assert!(
+            got.contains("SECRET_TOKEN"),
+            "named in the passthrough list"
+        );
+        assert!(
+            !got.contains("AWS_SECRET_ACCESS_KEY"),
+            "only NAMED vars pass through, not every remaining var"
+        );
+    }
+
+    /// `$TIDEPOOL_CODEX_BIN`/`$TIDEPOOL_AGENT_ENV_PASSTHROUGH` mutation is safe
+    /// here because nextest runs every test in its own OS process (see the
+    /// same pattern in `isolation.rs`'s tests) — never two tests sharing one.
+    fn with_env_var<R>(name: &str, value: Option<&OsStr>, f: impl FnOnce() -> R) -> R {
+        let saved = std::env::var_os(name);
+        unsafe {
+            match value {
+                Some(v) => std::env::set_var(name, v),
+                None => std::env::remove_var(name),
+            }
+        }
+        let result = f();
+        unsafe {
+            match saved {
+                Some(v) => std::env::set_var(name, v),
+                None => std::env::remove_var(name),
+            }
+        }
+        result
+    }
+
+    #[test]
+    fn resolve_codex_binary_unset_is_none() {
+        with_env_var(ENV_CODEX_BIN, None, || {
+            assert_eq!(resolve_codex_binary().unwrap(), None);
+        });
+    }
+
+    #[test]
+    fn resolve_codex_binary_rejects_a_set_but_invalid_override() {
+        with_env_var(
+            ENV_CODEX_BIN,
+            Some(OsStr::new("/definitely/not/a/real/codex/binary")),
+            || {
+                let err = resolve_codex_binary().unwrap_err();
+                assert!(matches!(err, SessionError::CodexBinInvalid { .. }));
+                assert!(err.to_string().contains(ENV_CODEX_BIN));
+            },
+        );
+    }
+
+    #[test]
+    fn resolve_codex_binary_accepts_a_valid_override() {
+        let exe = std::env::current_exe().expect("this test binary's own path");
+        with_env_var(ENV_CODEX_BIN, Some(exe.as_os_str()), || {
+            assert_eq!(resolve_codex_binary().unwrap(), Some(exe.clone()));
+        });
+    }
+
+    /// Construction-level pin (never a live spawn): the actual
+    /// [`tokio::process::Command`] `Session::connect` would spawn carries
+    /// exactly the allowlist plus passthrough, once `env_clear` + `envs` are
+    /// applied — not merely that the pure helper computes the right list.
+    /// `$TIDEPOOL_CODEX_BIN` is pointed at this TEST BINARY'S OWN path (the
+    /// same stand-in `codex-codes`' own `test_build_command_sync_applies_process_configuration`
+    /// uses) so `build_command` never needs a real `codex` on `$PATH`.
+    #[test]
+    fn build_child_command_env_is_exactly_allowlist_plus_passthrough() {
+        let exe = std::env::current_exe().expect("this test binary's own path");
+        const SECRET: &str = "TIDEPOOL_TEST_SECRET_MUST_NOT_LEAK";
+        with_env_var(ENV_CODEX_BIN, Some(exe.as_os_str()), || {
+            with_env_var(ENV_AGENT_ENV_PASSTHROUGH, None, || {
+                with_env_var(SECRET, Some(OsStr::new("shhh")), || {
+                    let command =
+                        build_child_command().expect("construct the child command, no spawn");
+                    let std_command = command.as_std();
+                    assert_eq!(std_command.get_program(), exe.as_os_str());
+
+                    let observed: BTreeSet<String> = std_command
+                        .get_envs()
+                        .filter_map(|(k, v)| v.map(|_| k.to_string_lossy().into_owned()))
+                        .collect();
+
+                    for name in CHILD_ENV_ALLOWLIST {
+                        if std::env::var_os(name).is_some() {
+                            assert!(
+                                observed.contains(*name),
+                                "allowlisted var {name} is set in this process and must reach \
+                                 the child"
+                            );
+                        }
+                    }
+                    assert!(
+                        !observed.contains(SECRET),
+                        "a var outside the allowlist and not in the passthrough list must \
+                         never reach the child: got {observed:?}"
+                    );
+                });
+            });
+        });
+    }
+
+    // --- frame buffer cap -----------------------------------------------------
+
+    struct NullTransport;
+
+    impl Transport for NullTransport {
+        async fn next_line(&mut self) -> Result<Option<String>, codex_codes::Error> {
+            Ok(None)
+        }
+        async fn send(&mut self, _frame: &Value) -> Result<(), codex_codes::Error> {
+            Ok(())
+        }
+        fn pid(&self) -> Option<u32> {
+            None
+        }
+        async fn shutdown(self) -> Result<(), codex_codes::Error> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn record_frame_caps_at_max_and_keeps_one_marker_updated_in_place() {
+        let mut session = Session::over(NullTransport);
+        let frame = |i: i64| RecordedFrame {
+            direction: FrameDirection::ClientToServer,
+            frame: serde_json::json!({ "i": i }),
+        };
+
+        for i in 0..MAX_RECORDED_FRAMES {
+            session.record_frame(frame(i as i64));
+        }
+        assert_eq!(
+            session.frames().len(),
+            MAX_RECORDED_FRAMES,
+            "no truncation yet — exactly at the cap"
+        );
+
+        session.record_frame(frame(-1));
+        assert_eq!(
+            session.frames().len(),
+            MAX_RECORDED_FRAMES + 1,
+            "one marker frame appended once the cap is exceeded"
+        );
+        let marker = session.frames().last().expect("marker frame present");
+        assert_eq!(
+            marker.frame["method"],
+            serde_json::json!(TRUNCATION_MARKER_METHOD)
+        );
+        assert_eq!(
+            marker.frame["params"]["framesDropped"],
+            serde_json::json!(1)
+        );
+
+        for _ in 0..10 {
+            session.record_frame(frame(-1));
+        }
+        assert_eq!(
+            session.frames().len(),
+            MAX_RECORDED_FRAMES + 1,
+            "further drops update the SAME marker in place — frames never grows past the cap \
+             plus one"
+        );
+        let marker = session.frames().last().expect("marker frame present");
+        assert_eq!(
+            marker.frame["params"]["framesDropped"],
+            serde_json::json!(11),
+            "the marker's count reflects every dropped frame, not just the first"
+        );
     }
 
     #[test]
