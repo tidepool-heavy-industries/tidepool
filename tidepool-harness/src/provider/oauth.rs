@@ -507,6 +507,45 @@ fn installation_id() -> String {
     ID.get_or_init(|| uuid::Uuid::new_v4().to_string()).clone()
 }
 
+/// A per-CONVERSATION `session-id`, deterministic over the request's stable
+/// prefix rather than a fresh random UUID every call. The reference Codex
+/// CLI mints ONE `session_id` per conversation and reuses it for every turn
+/// (`codex-rs`'s `Session::new` — see the module doc's verification
+/// discipline); the ChatGPT Codex backend uses it to route repeat requests
+/// to the inference replica already holding that conversation's automatic
+/// prompt-cache prefix. Regenerating it on every call (the prior behavior
+/// here — a bare `Uuid::new_v4()` inline in [`codex_responses`]) defeated
+/// that routing on every single round: dogfood run-4 measured an
+/// ALTERNATING 0%/hit/0%/hit cache pattern within a single append-only
+/// window instead of the near-100% from round 2 on that a stable session
+/// affords (`tidepool-harness/CLAUDE.md`'s "provider cache-metric gap").
+///
+/// `instructions` (the system framing) and a window's OPENING message never
+/// change once a window starts — [`assemble_request`](crate::engine::assemble_request)
+/// sets framing once per node and every later round only ever APPENDS to the
+/// transcript (see that module's prefix-stability tests) — so hashing just
+/// those two is enough to keep one window's `session-id` identical across
+/// every round while still varying between genuinely different windows
+/// (distinct opening prompts). `Uuid::new_v5` (not a hash-to-string) so the
+/// header stays a real UUID, matching what the backend expects.
+///
+/// Deliberately NOT scoped to a `NodeId`: [`ModelProvider::complete`] carries
+/// no session identity (a single provider instance is shared across every
+/// node/window in a harness — see that trait's doc), so this derives
+/// stability from content already in hand rather than widening the trait.
+/// One accepted consequence: a snapshot-forked branch child, whose OPENING
+/// message is inherited verbatim from its parent at the fork checkpoint,
+/// shares its parent's `session-id` for as long as that inherited prefix is
+/// still its first message — harmless (and arguably a cache-affinity WIN,
+/// since both share the same ancestor prefix) under `store: false`, where
+/// `session-id` is routing/telemetry, never persisted conversation state.
+fn session_id_for(instructions: &str, opening: Option<&str>) -> String {
+    let mut key = String::from(instructions);
+    key.push('\0');
+    key.push_str(opening.unwrap_or(""));
+    uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_OID, key.as_bytes()).to_string()
+}
+
 /// One conversational `TurnRequest` message → its Responses-API `input`
 /// item(s): any encrypted reasoning items the provider surfaced for this
 /// message (see [`Message::reasoning_items`]), verbatim and in original
@@ -606,12 +645,23 @@ async fn codex_responses(
     // never sends an output cap on this endpoint. `req.max_tokens` is honored
     // only on the platform API-key path (genai, `super::api_key`).
 
+    // The window's opening message — the first non-system item — anchors
+    // `session_id_for`'s stability (see that fn's doc): `None` only for a
+    // request with no user/assistant content at all (no window has opened
+    // yet), which falls back to hashing `instructions` alone rather than
+    // reaching for a random UUID that would reintroduce the instability.
+    let opening = req
+        .messages
+        .iter()
+        .find(|m| m.role != Role::System)
+        .map(|m| m.content.as_str());
+
     let http = codex_http()?;
     let mut request = http
         .post(&url)
         .bearer_auth(token)
         .header("version", CODEX_CLIENT_VERSION)
-        .header("session-id", uuid::Uuid::new_v4().to_string())
+        .header("session-id", session_id_for(&instructions, opening))
         .header("x-codex-installation-id", installation_id())
         .header(reqwest::header::ACCEPT, "text/event-stream");
     if let Some(account_id) = chatgpt_account_id(token) {
@@ -975,5 +1025,54 @@ mod tests {
         assert_eq!(items.len(), 2);
         assert_eq!(items[0], item);
         assert_eq!(items[1]["type"], "message");
+    }
+
+    // -- session_id_for: the cache-affinity routing key stays fixed within a
+    // window (same instructions/opening) and only varies ACROSS windows. --
+
+    #[test]
+    fn session_id_is_stable_across_rounds_of_the_same_window() {
+        // The window's opening message is fixed once the window starts;
+        // later rounds only ever append (see engine's prefix-stability
+        // tests), so `opening` here stands in for what every round of the
+        // SAME window passes.
+        let a = session_id_for("You answer typed holes.", Some("answer a Decision"));
+        let b = session_id_for("You answer typed holes.", Some("answer a Decision"));
+        assert_eq!(
+            a, b,
+            "same (instructions, opening) must yield the same session-id"
+        );
+    }
+
+    #[test]
+    fn session_id_differs_across_different_windows() {
+        let a = session_id_for("You answer typed holes.", Some("answer a Decision"));
+        let b = session_id_for("You answer typed holes.", Some("answer a LayerProposal"));
+        assert_ne!(
+            a, b,
+            "a different opening message is a different conversation — must not collide"
+        );
+        let c = session_id_for(
+            "A different system framing entirely.",
+            Some("answer a Decision"),
+        );
+        assert_ne!(a, c, "a different framing is a different conversation too");
+    }
+
+    #[test]
+    fn session_id_is_a_well_formed_v5_uuid() {
+        let id = session_id_for("instructions", Some("opening"));
+        let parsed = uuid::Uuid::parse_str(&id).expect("must parse as a UUID");
+        assert_eq!(parsed.get_version_num(), 5);
+    }
+
+    #[test]
+    fn session_id_with_no_opening_message_still_derives_deterministically() {
+        // No user/assistant content yet (no window has opened) falls back to
+        // hashing `instructions` alone, not a random UUID — still
+        // reproducible, never the source of instability.
+        let a = session_id_for("instructions", None);
+        let b = session_id_for("instructions", None);
+        assert_eq!(a, b);
     }
 }

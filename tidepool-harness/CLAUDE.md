@@ -354,6 +354,74 @@ branch's FIRST turn (one-shot). The `Usage` widening is additive +
 `serde(default)` — the precedent is `Event::TurnDelta`'s `reasoning` — so
 `log.jsonl` files written before it still deserialize.
 
+#### Within-window round-to-round cache affinity (fixed 2026-08-20)
+
+Run-4's dogfood measurement showed only 45% of input tokens served from
+OpenAI's prompt cache, with consecutive model rounds inside ONE window going
+0% / 59% / 0% / 68% / 0% — an append-only conversation should approach 100%
+from round 2 on. Diagnosis (`engine.rs`'s `within_window_*_is_prefix_extension`
+tests): **`engine::assemble_request`'s output was already a byte-identical-
+prefix extension every round**, for all three within-window shapes (an
+ordinary next round, a corrective-retry round with a freshly-embedded GHC
+error, and a round following a note/`askUser` resume) — `convo.transcript` is
+`.push()`-only everywhere (`push_user_turn`, `drive_turn`'s assistant append,
+`summarize_turn`), `convo.framing` is set once at node creation and never
+rewritten mid-window, and `answer_dialog`/`answer_note` resume the suspended
+Haskell continuation directly without touching the transcript at all. No
+content near the top of the request was being re-rendered.
+
+The actual defect was one level down, in `provider/oauth.rs`'s
+`codex_responses`: the `session-id` header sent with every `/responses` call
+was a **fresh `Uuid::new_v4()` minted on every single HTTP request**, never
+reused across rounds of the same window. The reference Codex CLI mints ONE
+`session_id` per conversation and reuses it for every turn; the ChatGPT Codex
+backend uses it to route repeat requests to the inference replica already
+holding that conversation's cached prefix (the same reasoning that already
+justified `x-codex-installation-id` being process-stable, just applied one
+level down to the conversation). A random id every round defeated that
+routing on every round — the alternating hit pattern was occasional
+coincidental routing collisions, not content instability.
+
+Fix: `session_id_for(instructions, opening)` derives a deterministic
+`Uuid::new_v5` from the window's two genuinely-invariant pieces —
+`instructions` (the framing) and the window's OPENING message (the first
+non-system item) — both fixed for the life of a window by the prefix-
+stability property above, so the header is now identical across every round
+of one window while still varying across different windows. Not threaded
+through `NodeId`/a session table: `ModelProvider::complete` carries no
+session identity (one provider instance is shared across every node in a
+harness), so deriving from content already in `TurnRequest` avoided widening
+that trait. One accepted consequence: a snapshot-forked branch child, whose
+opening message is inherited verbatim from its parent at the fork checkpoint,
+shares the parent's `session-id` for as long as that inherited message stays
+its first one — harmless (arguably a cache-affinity win, since both share the
+ancestor prefix) under `store: false`, where the header is routing/telemetry
+only, never persisted conversation state.
+
+`SnapshotDigest`/`digest_prefix` are UNCHANGED by this fix — they cover only
+`role_tag` + `content` over `assemble_request`'s output (`snapshot.rs`'s
+`digest_messages`), never provider-side request serialization or headers, so
+no digest shifted and nothing needed re-verifying for restart compat. (Digests
+are not written into `persistence.rs`'s checkpoint at all — confirmed by
+grep — they're interned in-memory per-run and re-minted at freeze, per the
+Context snapshots section above.)
+
+**Turn boundary — recomposed SYSTEM message per loop iteration — is NOT the
+same hazard and was deliberately left alone.** Each self-iterating-harness
+loop iteration creates a brand-NEW per-loop answerer `NodeId`
+(`SelfHarnessDriver::create_root_framed("loop answerer", …,
+self.answerer_framing.clone())`) with its OWN from-scratch transcript — so
+"message 0 differs across loops" is really "these are two different
+conversations, not a continuation of one," and every round WITHIN each of
+those per-loop windows already gets this wave's stability fix. Making the
+framing byte-stable ACROSS loop iterations would mean literally reusing one
+session/transcript for the whole outer loop instead of a fresh answerer node
+per iteration — a real architectural change (touches how `SelfHarnessDriver`
+mints per-loop nodes and threads `answerer_framing`), not a move-to-tail, and
+out of scope here. Compaction's framing rewrite (the other named hazard) is
+the same shape: it deliberately starts a fresh compacted prefix by design
+(`replace_transcript_with_summary`), not an in-place edit of a live window.
+
 ## Invariants
 
 Forcing events are the only work-begins mechanism (consent integrity audits

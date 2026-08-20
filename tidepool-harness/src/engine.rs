@@ -2636,6 +2636,14 @@ mod tests {
         }
     }
 
+    fn assistant(content: &str) -> Message {
+        Message {
+            role: Role::Assistant,
+            content: content.to_string(),
+            reasoning_items: Vec::new(),
+        }
+    }
+
     /// A `Some(framing)` becomes the request's System message verbatim,
     /// NOT the default `SYSTEM_FRAMING` — the self-iterating harness's
     /// `render` output must reach the model as-is.
@@ -2665,6 +2673,152 @@ mod tests {
         let req = assemble_request(&[user("hi")], Some(2048), None);
         assert_eq!(req.messages[0].role, Role::System);
         assert_eq!(req.messages[0].content, SYSTEM_FRAMING);
+    }
+
+    // -- within-window prefix stability (cache-prefix wave) -----------------
+    //
+    // `assemble_request` is the ONE assembly path — `[system(framing)] ++
+    // transcript verbatim` — so provider-side prompt-cache reuse within a
+    // window depends entirely on every round's request being a
+    // byte-identical-prefix EXTENSION of the previous round's. These three
+    // tests script the three within-window round shapes and diff the
+    // serialized request bytes directly, rather than trusting that the code
+    // that builds each round only ever appends.
+
+    /// The byte stream a provider actually walks for one round: each
+    /// assembled message serialized INDEPENDENTLY and concatenated, in
+    /// order — NOT the whole `TurnRequest` as one JSON value. A single
+    /// enclosing array/object necessarily closes at the true end (`]}`),
+    /// so a shorter round's whole-request bytes can never be a literal
+    /// prefix of a longer round's even when every message is byte-identical
+    /// — that mismatch is a JSON-envelope artifact, not evidence of
+    /// instability. A provider's own request shape mirrors this: the
+    /// Responses-API `input` array is built by mapping each `Message` to
+    /// its own item(s) and concatenating (`oauth.rs`'s `to_input_items`),
+    /// so per-message concatenation is the right level to assert prefix
+    /// stability at. `framing`/`max_tokens` held fixed across the window,
+    /// exactly as every real round does (`convo.framing` is set once per
+    /// node and never rewritten mid-window; see `harness.rs`).
+    fn round_bytes(transcript: &[Message], framing: Option<&str>) -> Vec<u8> {
+        assemble_request(transcript, Some(2048), framing)
+            .messages
+            .iter()
+            .flat_map(|m| serde_json::to_vec(m).expect("Message serializes"))
+            .collect()
+    }
+
+    /// `after` must be `before` verbatim plus zero or more bytes appended —
+    /// the property that lets a provider's automatic prompt cache actually
+    /// engage from round 2 on (`tidepool-harness/CLAUDE.md`'s "provider
+    /// cache-metric gap"). A shorter `after`, or any byte inside `before`'s
+    /// span changing, means round N+1 was not a pure append over round N.
+    fn assert_prefix_extension(before: &[u8], after: &[u8]) {
+        assert!(
+            after.len() >= before.len(),
+            "round shrank: {} bytes -> {} bytes",
+            before.len(),
+            after.len()
+        );
+        assert_eq!(
+            &after[..before.len()],
+            before,
+            "round N+1's assembled request is not a byte-identical-prefix \
+             extension of round N's"
+        );
+    }
+
+    /// Shape (a): an ORDINARY next round — the assistant's reply lands, then
+    /// the driver appends its own next user turn ("round complete, your
+    /// window continues"). Pins that `assemble_request` never needs to touch
+    /// anything already sent.
+    #[test]
+    fn within_window_ordinary_round_is_prefix_extension() {
+        let framing = Some("You answer typed holes. Row: [AskUser, Finalize].");
+        let mut transcript = vec![user(
+            "The loop needs a typed answer of type `Decision`. Please decide.",
+        )];
+        let round1 = round_bytes(&transcript, framing);
+
+        transcript.push(assistant(
+            "```haskell\nsubstrate0 = Substrate { samples = [2,3], revision = 0 }\n```",
+        ));
+        transcript.push(user(
+            "Round complete — your window continues, and that round's \
+             definitions/bindings persist. The request still awaits its \
+             answer: when ready, evaluate `finalize @Decision value`.",
+        ));
+        let round2 = round_bytes(&transcript, framing);
+
+        assert_prefix_extension(&round1, &round2);
+    }
+
+    /// Shape (b): a CORRECTIVE-RETRY round — the model's Haskell didn't
+    /// compile, so the driver feeds the GHC error back verbatim as the next
+    /// user turn (`run_to_hole_or_done`/`drive_answerer_to_finalize`'s shared
+    /// idiom). The corrective text is per-round-variable (it embeds a fresh
+    /// GHC error each time) — it must land at the TAIL, never rewrite
+    /// anything earlier, across repeated corrective rounds.
+    #[test]
+    fn within_window_corrective_retry_round_is_prefix_extension() {
+        let framing = Some("You answer typed holes. Row: [AskUser, Finalize].");
+        let mut transcript = vec![user("The loop needs a typed answer of type `Decision`.")];
+        let round1 = round_bytes(&transcript, framing);
+
+        transcript.push(assistant("```haskell\nfinalize @Decision (Approve\n```"));
+        transcript.push(user(&format!(
+            "A block did not compile — your window continues; everything \
+             that already ran persists. Reply with corrected ```haskell \
+             blocks.\n\nGHC error:\n{}",
+            "parse error on input '}' (round 3 corrective retry)"
+        )));
+        let round2 = round_bytes(&transcript, framing);
+        assert_prefix_extension(&round1, &round2);
+
+        // A SECOND corrective retry (a different round, a different GHC
+        // error) — still only ever appended.
+        transcript.push(assistant("```haskell\nfinalize @Decision (Approve\n```"));
+        transcript.push(user(&format!(
+            "A block did not compile — your window continues; everything \
+             that already ran persists. Reply with corrected ```haskell \
+             blocks.\n\nGHC error:\n{}",
+            "parse error on input '}' (round 4 corrective retry)"
+        )));
+        let round3 = round_bytes(&transcript, framing);
+        assert_prefix_extension(&round2, &round3);
+    }
+
+    /// Shape (c): a round FOLLOWING a note/askUser resume. `answer_dialog`/
+    /// `answer_note` resume the suspended Haskell continuation directly
+    /// (`Harness::resume_parent`) WITHOUT pushing anything to the transcript
+    /// themselves — no model call happens for the resume itself. The next
+    /// actual model round therefore sees the transcript exactly as the
+    /// suspending assistant turn left it, plus whatever corrective/nudge
+    /// text the driver appends once the resumed chain settles. Pinned
+    /// separately from shape (a) so a future change to the resume path
+    /// cannot silently start rewriting the pre-suspension transcript.
+    #[test]
+    fn within_window_round_after_note_askuser_resume_is_prefix_extension() {
+        let framing = Some("You answer typed holes. Row: [AskUser, Finalize].");
+        let mut transcript = vec![user("The loop needs a typed answer of type `Decision`.")];
+        transcript.push(assistant(
+            "```haskell\nnote \"about to ask\"\nchoice <- askUser @Confirm \"proceed?\"\npure ()\n```",
+        ));
+        // The assistant's askUser-suspending turn is the last thing on the
+        // wire before the resume — this is what round 1 actually sent.
+        let round1 = round_bytes(&transcript, framing);
+
+        // `answer_note`/`answer_dialog` resume server-side here — NO
+        // transcript push, hence no intermediate round to capture. The chain
+        // resolves without finalizing, so the driver appends its corrective
+        // nudge before the next model round.
+        transcript.push(user(
+            "That did not resolve the request. Answer by evaluating \
+             `(finalize @Decision value :: M Decision)` — the whole \
+             expression must carry the type annotation, not just the argument.",
+        ));
+        let round2 = round_bytes(&transcript, framing);
+
+        assert_prefix_extension(&round1, &round2);
     }
 
     // -- multi-block extraction ---------------------------------------------
