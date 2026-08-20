@@ -13,7 +13,7 @@
   Llm: Call an LLM for classification, extraction, or judgment.
       verbs: llm, findTally, tallyList
   Git: Read-only git repository queries.
-      verbs: gitLog, gitStatus, gitDiffStat, gitShow
+      verbs: gitLog, gitStatus, gitDiffStat, gitShow, gitLogNumstat
   Time: UTC wall-clock access (epoch milliseconds).
       verbs: getCurrentTime
   Ask: Suspend execution and ask the calling agent a STRUCTURED question.

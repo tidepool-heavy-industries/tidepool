@@ -45,15 +45,6 @@ data Fs a where
   FsHash :: Text -> Fs (Either FsError (Maybe Text))
   FsWriteCas :: Text -> Maybe Text -> Text -> Fs (Either (Maybe Text) ())
 
-data HttpError = HttpInvalidUrl Text | HttpRestricted Text | HttpNetwork Text | HttpStatus Int Text | HttpTooLarge Int deriving (Show, Eq)
-instance ToJSON HttpError where
-  toJSON e = case e of
-    HttpInvalidUrl detail -> object ["tag" .= ("HttpInvalidUrl" :: Text), "detail" .= detail]
-    HttpRestricted detail -> object ["tag" .= ("HttpRestricted" :: Text), "detail" .= detail]
-    HttpNetwork detail -> object ["tag" .= ("HttpNetwork" :: Text), "detail" .= detail]
-    HttpStatus code body -> object ["tag" .= ("HttpStatus" :: Text), "code" .= code, "body" .= body]
-    HttpTooLarge nodes -> object ["tag" .= ("HttpTooLarge" :: Text), "nodes" .= nodes]
-
 data Http a where
   HttpGet :: Text -> Http (Either HttpError Value)
   HttpPost :: Text -> Value -> Http (Either HttpError Value)
@@ -95,27 +86,15 @@ data Lsp a where
   LspRename :: LspNode -> Text -> Lsp (Maybe Text)
   LspDiagnostics :: Text -> Lsp (Either LspError [Diag])
 
-data LlmError = LlmApi Text | LlmRefusal Text | LlmBudget deriving (Show, Eq)
-instance ToJSON LlmError where
-  toJSON e = case e of
-    LlmApi detail -> object ["tag" .= ("LlmApi" :: Text), "detail" .= detail]
-    LlmRefusal detail -> object ["tag" .= ("LlmRefusal" :: Text), "detail" .= detail]
-    LlmBudget -> object ["tag" .= ("LlmBudget" :: Text)]
-
 data Llm a where
   LlmStructured :: Text -> Value -> Llm (Either LlmError Value)
-
-data GitError = GitBadRevspec Text | GitFailed Int Text deriving (Show, Eq)
-instance ToJSON GitError where
-  toJSON e = case e of
-    GitBadRevspec detail -> object ["tag" .= ("GitBadRevspec" :: Text), "detail" .= detail]
-    GitFailed code detail -> object ["tag" .= ("GitFailed" :: Text), "code" .= code, "detail" .= detail]
 
 data Git a where
   GitLog :: Int -> Git (Either GitError [Commit])
   GitStatus :: Git (Either GitError [StatusEntry])
   GitDiffStat :: Text -> Git (Either GitError [FileDelta])
   GitShow :: Text -> Git (Either GitError Commit)
+  GitLogNumstat :: Int -> Git (Either GitError [CommitDeltas])
 
 data Time a where
   TimeNow :: Time Int
@@ -428,14 +407,26 @@ gitLog = send . GitLog
 -- (e.g. "M ", "??", "A ").
 gitStatus :: M (Either GitError [StatusEntry])
 gitStatus = send GitStatus
--- | Per-file diff stats vs a revspec ("HEAD~1", "main", "HEAD~3..HEAD", etc.).
--- 'FileDelta' carries path/adds/dels/binary.
+-- | Per-file diff stats. THE ARGUMENT IS A REVSPEC COMPARED AGAINST THE WORKING
+-- TREE, not "commit vs its parent" — `gitDiffStat sha` on a clean tree is
+-- `Right []` (correct data, not an error). For "what did this commit change",
+-- pass a RANGE: `gitDiffStat (sha <> "~1.." <> sha)` (also "main..HEAD",
+-- "HEAD~3..HEAD"). For bulk per-commit history, use `gitLogNumstat` instead —
+-- one subprocess for N commits, no per-commit mapM. 'FileDelta' carries
+-- path/adds/dels/binary.
 gitDiffStat :: Text -> M (Either GitError [FileDelta])
 gitDiffStat = send . GitDiffStat
 -- | Single commit by revspec. `Left (GitBadRevspec _)` on an unknown or
 -- ambiguous revspec; unwrap with `Right c <- gitShow rev` or `>>= liftEither`.
 gitShow :: Text -> M (Either GitError Commit)
 gitShow = send . GitShow
+-- | Last N commits, newest-first, EACH PAIRED WITH ITS OWN per-file numstat
+-- deltas — one subprocess for all N, in place of `gitLog` followed by a
+-- per-commit `mapM gitDiffStat`. 'CommitDeltas' carries {commit, deltas};
+-- a merge or otherwise-empty commit has `deltas = []`. A renamed file records
+-- only its NEW path.
+gitLogNumstat :: Int -> M (Either GitError [CommitDeltas])
+gitLogNumstat = send . GitLogNumstat
 -- | Current UTC time as an opaque UTCTime (epoch-millisecond resolution).
 getCurrentTime :: M UTCTime
 getCurrentTime = UTCTime <$> send TimeNow

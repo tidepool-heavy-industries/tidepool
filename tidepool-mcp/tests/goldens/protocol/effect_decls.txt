@@ -655,18 +655,7 @@ HttpPost :: Text -> Value -> Http (Either HttpError Value)
 
 -- end constructors --
 
--- type_defs (1 items) --
--- type_defs[0] (658 bytes) --
-data HttpError = HttpInvalidUrl Text | HttpRestricted Text | HttpNetwork Text | HttpStatus Int Text | HttpTooLarge Int deriving (Show, Eq)
-instance ToJSON HttpError where
-  toJSON e = case e of
-    HttpInvalidUrl detail -> object ["tag" .= ("HttpInvalidUrl" :: Text), "detail" .= detail]
-    HttpRestricted detail -> object ["tag" .= ("HttpRestricted" :: Text), "detail" .= detail]
-    HttpNetwork detail -> object ["tag" .= ("HttpNetwork" :: Text), "detail" .= detail]
-    HttpStatus code body -> object ["tag" .= ("HttpStatus" :: Text), "code" .= code, "body" .= body]
-    HttpTooLarge nodes -> object ["tag" .= ("HttpTooLarge" :: Text), "nodes" .= nodes]
--- end type_defs[0] --
-
+-- type_defs (0 items) --
 -- end type_defs --
 
 -- extra_imports (0 items) --
@@ -792,13 +781,13 @@ false
 Git
 -- end type_name --
 
--- description (485 bytes) --
-Read-only git repository queries. Returns typed records parsed Rust-side from machine-format git output — no text-splitting needed. `gitLog n` → last N commits newest-first; `gitStatus` → working-tree status; `gitDiffStat rev` → per-file diff stats vs a revspec; `gitShow rev` → one commit. All three list verbs return typed records: `Commit {sha,subject,author,date,files}`, `StatusEntry {path,state}` (state = 2-char XY porcelain code), `FileDelta {path,adds,dels,binary}`.
+-- description (853 bytes) --
+Read-only git repository queries. Returns typed records parsed Rust-side from machine-format git output — no text-splitting needed. `gitLog n` → last N commits newest-first; `gitStatus` → working-tree status; `gitDiffStat rev` → per-file diff stats, WORKING TREE vs `rev` (NOT commit-vs-parent — pass a range like "sha~1..sha" for that; a clean tree ⇒ `[]`, correct data, not an error); `gitLogNumstat n` → last N commits EACH PAIRED WITH ITS OWN numstat deltas, one subprocess for all N — the substrate for any git-history investigation, in place of `gitLog` + a per-commit `mapM gitDiffStat`; `gitShow rev` → one commit. Every list verb returns typed records: `Commit {sha,subject,author,date,files}`, `StatusEntry {path,state}` (state = 2-char XY porcelain code), `FileDelta {path,adds,dels,binary}`, `CommitDeltas {commit,deltas}`.
 -- end description --
 
 -- prompt_card: None --
 
--- constructors (4 items) --
+-- constructors (5 items) --
 -- constructors[0] (47 bytes) --
 GitLog :: Int -> Git (Either GitError [Commit])
 -- end constructors[0] --
@@ -815,17 +804,13 @@ GitDiffStat :: Text -> Git (Either GitError [FileDelta])
 GitShow :: Text -> Git (Either GitError Commit)
 -- end constructors[3] --
 
+-- constructors[4] (60 bytes) --
+GitLogNumstat :: Int -> Git (Either GitError [CommitDeltas])
+-- end constructors[4] --
+
 -- end constructors --
 
--- type_defs (1 items) --
--- type_defs[0] (327 bytes) --
-data GitError = GitBadRevspec Text | GitFailed Int Text deriving (Show, Eq)
-instance ToJSON GitError where
-  toJSON e = case e of
-    GitBadRevspec detail -> object ["tag" .= ("GitBadRevspec" :: Text), "detail" .= detail]
-    GitFailed code detail -> object ["tag" .= ("GitFailed" :: Text), "code" .= code, "detail" .= detail]
--- end type_defs[0] --
-
+-- type_defs (0 items) --
 -- end type_defs --
 
 -- extra_imports (1 items) --
@@ -835,7 +820,7 @@ import qualified Tidepool.Git as Git
 
 -- end extra_imports --
 
--- helpers (4 items) --
+-- helpers (5 items) --
 -- helpers[0] (156 bytes) --
 -- | Last N commits, newest-first. Each 'Commit' carries sha/subject/author/date/files.
 gitLog :: Int -> M (Either GitError [Commit])
@@ -849,9 +834,14 @@ gitStatus :: M (Either GitError [StatusEntry])
 gitStatus = send GitStatus
 -- end helpers[1] --
 
--- helpers[2] (213 bytes) --
--- | Per-file diff stats vs a revspec ("HEAD~1", "main", "HEAD~3..HEAD", etc.).
--- 'FileDelta' carries path/adds/dels/binary.
+-- helpers[2] (578 bytes) --
+-- | Per-file diff stats. THE ARGUMENT IS A REVSPEC COMPARED AGAINST THE WORKING
+-- TREE, not "commit vs its parent" — `gitDiffStat sha` on a clean tree is
+-- `Right []` (correct data, not an error). For "what did this commit change",
+-- pass a RANGE: `gitDiffStat (sha <> "~1.." <> sha)` (also "main..HEAD",
+-- "HEAD~3..HEAD"). For bulk per-commit history, use `gitLogNumstat` instead —
+-- one subprocess for N commits, no per-commit mapM. 'FileDelta' carries
+-- path/adds/dels/binary.
 gitDiffStat :: Text -> M (Either GitError [FileDelta])
 gitDiffStat = send . GitDiffStat
 -- end helpers[2] --
@@ -862,6 +852,16 @@ gitDiffStat = send . GitDiffStat
 gitShow :: Text -> M (Either GitError Commit)
 gitShow = send . GitShow
 -- end helpers[3] --
+
+-- helpers[4] (423 bytes) --
+-- | Last N commits, newest-first, EACH PAIRED WITH ITS OWN per-file numstat
+-- deltas — one subprocess for all N, in place of `gitLog` followed by a
+-- per-commit `mapM gitDiffStat`. 'CommitDeltas' carries {commit, deltas};
+-- a merge or otherwise-empty commit has `deltas = []`. A renamed file records
+-- only its NEW path.
+gitLogNumstat :: Int -> M (Either GitError [CommitDeltas])
+gitLogNumstat = send . GitLogNumstat
+-- end helpers[4] --
 
 -- end helpers --
 
@@ -1496,16 +1496,7 @@ LlmStructured :: Text -> Value -> Llm (Either LlmError Value)
 
 -- end constructors --
 
--- type_defs (1 items) --
--- type_defs[0] (353 bytes) --
-data LlmError = LlmApi Text | LlmRefusal Text | LlmBudget deriving (Show, Eq)
-instance ToJSON LlmError where
-  toJSON e = case e of
-    LlmApi detail -> object ["tag" .= ("LlmApi" :: Text), "detail" .= detail]
-    LlmRefusal detail -> object ["tag" .= ("LlmRefusal" :: Text), "detail" .= detail]
-    LlmBudget -> object ["tag" .= ("LlmBudget" :: Text)]
--- end type_defs[0] --
-
+-- type_defs (0 items) --
 -- end type_defs --
 
 -- extra_imports (0 items) --
