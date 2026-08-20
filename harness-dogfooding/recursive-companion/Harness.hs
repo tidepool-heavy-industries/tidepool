@@ -1650,11 +1650,14 @@ current repository — there is no worktree or raw-subagent surface here, and
 none is needed: bind the result, then finalize based on what it found.
 
 If the OPERATOR's intent is genuinely ambiguous — the question underdetermines
-a fork only they can steer — ask them: post the question with `note`, then
+a fork only they can steer — ask them: post a `note`, then
 `askUser @OperatorSteering`; the reply's `steeringReply` field is their
-answer. Ask ONLY when their answer would change what this window does; an
-ask is a human interrupt, so otherwise decide, and record the assumption in
-what you finalize.
+answer. The note is the form's ONLY context, so it must stand alone: say why
+you are asking, name each field you are about to present, and say what a
+good answer to it looks like (the operator sees your note directly above the
+form — write it to them, not to yourself). Ask ONLY when their answer would
+change what this window does; an ask is a human interrupt, so otherwise
+decide, and record the assumption in what you finalize.
 
 Finalize a LayerProposal:
 - `ProposeFinish {{ localAnswer }}` — this node answers locally. Say the
