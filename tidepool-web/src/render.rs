@@ -375,8 +375,33 @@ fn ask_id(node_id: &str, interaction: u64) -> String {
 /// The literal `@post('...')` target `shell::JS`'s vendored client parses out
 /// of a `data-on-submit` attribute — node- and interaction-scoped, baked in
 /// at render time so no client-side URL assembly is needed.
+///
+/// The node id is percent-encoded into ONE path segment: tree paths carry
+/// literal slashes (`root/1-x`), and the axum route `/node/{node}/...`
+/// matches `{node}` as a single segment — a raw slash in the baked URL 404s
+/// before any handler runs (found live by the zero-context operator probe,
+/// 2026-08-19; axum percent-decodes the matched segment back to the id).
 fn post_url(node_id: &str, verb: &str, interaction: u64) -> String {
-    format!("@post('/node/{node_id}/{verb}/{interaction}')")
+    format!(
+        "@post('/node/{}/{verb}/{interaction}')",
+        encode_path_segment(node_id)
+    )
+}
+
+/// Percent-encode `s` as a single URL path segment: every byte outside the
+/// RFC 3986 unreserved set (`A-Z a-z 0-9 - . _ ~`) is `%XX`-escaped —
+/// slashes included, which is the whole point.
+fn encode_path_segment(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
+                out.push(b as char);
+            }
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
 }
 
 // -------------------------------------------------------------------------
@@ -764,6 +789,41 @@ mod tests {
         assert!(html.contains("id=\"ask-n1-7\" data-rev=\"7\""), "{html}");
         assert!(html.contains("@post('/node/n1/submit/3')"), "{html}");
         assert!(html.contains("@post('/node/n1/continue/7')"), "{html}");
+    }
+
+    /// A tree-path node id (containing literal slashes) bakes a
+    /// percent-encoded `@post` target: the axum route matches `{node}` as a
+    /// SINGLE segment, so a raw slash 404s before any handler runs — found
+    /// live by the zero-context operator probe (2026-08-19), which proved
+    /// the `%2F` form resolves correctly.
+    #[test]
+    fn post_urls_percent_encode_slash_path_node_ids() {
+        let th = empty_history();
+        let view = base_view(
+            "root/1-x",
+            vec![
+                TimelineEntry::PendingForm {
+                    id: 0,
+                    shape: &FormShape::String,
+                },
+                TimelineEntry::PendingContinue { id: 1 },
+            ],
+            &th,
+            0,
+        );
+        let html = node_panel(&view).into_string();
+        assert!(
+            html.contains("@post('/node/root%2F1-x/submit/0')"),
+            "{html}"
+        );
+        assert!(
+            html.contains("@post('/node/root%2F1-x/continue/1')"),
+            "{html}"
+        );
+        assert!(
+            !html.contains("@post('/node/root/1-x"),
+            "no raw-slash target may survive: {html}"
+        );
     }
 
     /// An answered continue renders the operator's message when one was

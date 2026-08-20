@@ -625,6 +625,42 @@ async fn notes_and_answered_continue_persist_across_the_loop_boundary() {
     );
 }
 
+/// A node whose id is a tree path (literal slashes — every labeled branch
+/// child) must be answerable through its OWN baked `@post` URL, exactly as
+/// served: the renderer percent-encodes the id into one path segment, axum
+/// decodes it back, and the submission resolves. Pins the zero-context
+/// probe's finding (2026-08-19): the raw-slash form 404'd before any
+/// handler ran, making every tree child unanswerable from the page.
+#[tokio::test(flavor = "multi_thread")]
+async fn slash_path_node_submits_through_its_own_baked_url() {
+    let (addr, state) = boot().await;
+    let base = format!("http://{addr}");
+    let client = Client::new();
+
+    let gate = state.register_node("root/1-finishes");
+    let driver_gate = gate.clone();
+    let handle = tokio::task::spawn_blocking(move || driver_gate.present_form(&sample_spec()));
+
+    let html = wait_for(&client, &format!("{base}/"), |b| {
+        b.contains("/node/root%2F1-finishes/submit/")
+    })
+    .await;
+    let submit_url = one_post_url(&html, "/node/root%2F1-finishes/submit/");
+
+    let resp = client
+        .post(format!("{base}{submit_url}"))
+        .json(&json!({"answer.mood": "calm", "answer.count": 3}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200, "the served URL must resolve as-is");
+    assert_eq!(
+        handle.await.unwrap(),
+        json!({"mood": "calm", "count": 3}),
+        "the submission reaches the slash-path node's own gate"
+    );
+}
+
 /// The two node-lifecycle fields the wire newly carries — the seed at birth
 /// and the final value at the fold — render on the node's own section, with
 /// the derived status flipping to done.
