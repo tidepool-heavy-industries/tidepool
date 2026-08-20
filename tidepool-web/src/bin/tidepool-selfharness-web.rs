@@ -45,6 +45,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (state, gate) = tidepool_web::spawn_operator_server_multi(port).await?;
 
     if demo {
+        state.set_run_id("demo");
         let loop_gate = gate.clone();
         std::thread::spawn(move || demo_loop_single(loop_gate));
         let tree_gate = gate;

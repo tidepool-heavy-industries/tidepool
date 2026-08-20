@@ -47,7 +47,7 @@
 use std::collections::VecDeque;
 
 use maud::{html, Markup, PreEscaped};
-use serde_json::Value as Jv;
+use serde_json::{Map, Value as Jv};
 use tidepool_harness::selfharness::operator::{
     child_path, humanize_key, FieldShape, FormShape, VariantShape, ROOT_BIND_PATH,
 };
@@ -151,7 +151,7 @@ pub fn node_panel(view: &NodeView) -> Markup {
             header class="node-head" {
                 button type="button" class="node-toggle" data-toggle=(view.node_id)
                     aria-label="collapse" { "▾" }
-                h2 class="node-title" { (view.node_id) }
+                h2 class="node-title" title=(view.node_id) { (truncate_title(view.node_id)) }
                 span class=(format!("status {status_class}")) { (status_label) }
             }
             div class="node-body" {
@@ -188,6 +188,95 @@ fn pretty_json(value: &str) -> String {
         .unwrap_or_else(|| value.to_string())
 }
 
+/// The character budget a node section's title truncates to — long enough
+/// to show a labeled branch's discriminating suffix, short enough that a
+/// deep tree still reads as one outline. See [`truncate_title`].
+const TITLE_BUDGET: usize = 40;
+
+/// Truncate `label` to at most [`TITLE_BUDGET`] characters at the LAST word
+/// boundary within budget, never mid-word, appending an ellipsis. A tree-path
+/// node id carries no spaces, so `/`, `-`, and `_` all count as boundaries
+/// alongside literal whitespace. Falls back to a hard cut at budget only when
+/// no boundary exists at all (a single very long word). A label already
+/// within budget is returned unchanged, with no ellipsis — the full label
+/// always rides alongside it as the caller's `title` attribute.
+fn truncate_title(label: &str) -> String {
+    if label.chars().count() <= TITLE_BUDGET {
+        return label.to_string();
+    }
+    let head: String = label.chars().take(TITLE_BUDGET).collect();
+    let cut = head.rfind(['/', '-', '_', ' ']).unwrap_or(head.len());
+    let mut kept = head[..cut].to_string();
+    if kept.is_empty() {
+        kept = head;
+    }
+    kept.push('…');
+    kept
+}
+
+/// Render a finalized/failure value STRUCTURED when it parses as a JSON
+/// object — a definition list, one row per field, exactly the shape a
+/// `ProposeFinish`/`FoldDecision`-style answer takes — falling back to the
+/// original pretty-printed `<pre>` for anything else (a bare scalar, an
+/// array, or text that isn't JSON at all). Every field value is still an
+/// ordinary maud-escaped text node; nothing here renders model text as
+/// markup.
+fn structured_value(value: &str) -> Markup {
+    match serde_json::from_str::<Jv>(value) {
+        Ok(Jv::Object(fields)) => structured_object(&fields),
+        _ => html! { pre { (pretty_json(value)) } },
+    }
+}
+
+/// A JSON object as a definition list: a `_con`/`tag` field (the generic
+/// sum-type discriminant this codebase's two JSON encodings use) renders as
+/// a small badge instead of an ordinary field row; every other field is a
+/// [`humanize_key`]'d label row whose value renders via
+/// [`structured_field`].
+fn structured_object(fields: &Map<String, Jv>) -> Markup {
+    let con_key = ["_con", "tag"]
+        .into_iter()
+        .find(|k| matches!(fields.get(*k), Some(Jv::String(_))));
+    html! {
+        @if let Some(key) = con_key {
+            @if let Some(Jv::String(con)) = fields.get(key) {
+                span class="con-badge" { (con) }
+            }
+        }
+        dl class="structured" {
+            @for (key, value) in fields {
+                @if Some(key.as_str()) != con_key {
+                    div class="structured-row" {
+                        dt class="eyebrow" { (humanize_key(key)) }
+                        dd { (structured_field(value)) }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// One field's value: a string as wrapped prose (the common case — a
+/// paragraph of model-authored text, unreadable squeezed into a JSON blob),
+/// an object/array recursively via the same treatment, any other scalar as
+/// plain text.
+fn structured_field(value: &Jv) -> Markup {
+    match value {
+        Jv::String(text) => html! { p class="prose" style="white-space: pre-wrap" { (text) } },
+        Jv::Object(fields) => structured_object(fields),
+        Jv::Array(items) => html! {
+            div class="structured-list" {
+                @for item in items {
+                    (structured_field(item))
+                }
+            }
+        },
+        Jv::Null => html! { span class="scalar" { "—" } },
+        Jv::Bool(b) => html! { span class="scalar" { (b.to_string()) } },
+        Jv::Number(n) => html! { span class="scalar" { (n.to_string()) } },
+    }
+}
+
 /// One timeline item, dispatched by kind.
 fn timeline_entry(node_id: &str, entry: &TimelineEntry) -> Markup {
     match entry {
@@ -203,13 +292,13 @@ fn timeline_entry(node_id: &str, entry: &TimelineEntry) -> Markup {
         TimelineEntry::Finalized(value) => html! {
             div class="final" data-node="final" {
                 p class="eyebrow" { "Final value" }
-                pre { (pretty_json(value)) }
+                (structured_value(value))
             }
         },
         TimelineEntry::Failed(reason) => html! {
             div class="failure" data-node="failure" {
                 p class="eyebrow failure-eyebrow" { "Ended without a value" }
-                pre { (reason) }
+                (structured_value(reason))
             }
         },
         TimelineEntry::PendingForm { id, shape } => ask_form(node_id, *id, shape),
@@ -666,6 +755,36 @@ mod tests {
         assert!(html.contains(">running</span>"), "{html}");
     }
 
+    /// A short node id renders untouched in the title, with no ellipsis.
+    #[test]
+    fn node_title_short_label_is_untouched() {
+        let th = empty_history();
+        let html = node_panel(&base_view("root/1-x", vec![], &th, 0)).into_string();
+        assert!(html.contains(">root/1-x</h2>"), "{html}");
+        assert!(!html.contains('…'), "{html}");
+        assert!(html.contains("title=\"root/1-x\""), "{html}");
+    }
+
+    /// A long node id truncates at the LAST word boundary within budget
+    /// (never mid-word), with the FULL id carried in the `title` attribute
+    /// for hover. Pins the paper cut this fixes: a naive char-count cut used
+    /// to land mid-word ("...operator-interru").
+    #[test]
+    fn node_title_long_label_truncates_at_word_boundary_with_full_title_attr() {
+        let th = empty_history();
+        let long_id = "root/2-forms-notes-and-operator-interruptions-that-need-review";
+        let expected = truncate_title(long_id);
+        assert!(expected.ends_with('…'), "{expected}");
+        assert!(
+            !expected.contains("interru"),
+            "must not cut mid-word: {expected}"
+        );
+
+        let html = node_panel(&base_view(long_id, vec![], &th, 0)).into_string();
+        assert!(html.contains(&format!(">{expected}</h2>")), "{html}");
+        assert!(html.contains(&format!("title=\"{long_id}\"")), "{html}");
+    }
+
     /// Status derivation over the lifecycle-in-timeline model. A pending ask
     /// outranks `done` (the unified root is done at every fold while its
     /// between-turns gate is pending — the badge answers "do I need to
@@ -756,9 +875,11 @@ mod tests {
         assert!(html.contains("&lt;script&gt;"), "{html}");
     }
 
-    /// The final value renders pretty-printed when it parses as JSON.
+    /// A finalized value that parses as a JSON OBJECT renders structured: a
+    /// `tag`/`_con` field becomes a small badge, every other field becomes a
+    /// humanized-label row — never a raw `<pre>` JSON blob.
     #[test]
-    fn node_panel_renders_final_value_pretty() {
+    fn node_panel_renders_final_value_structured_for_an_object() {
         let th = empty_history();
         let mut view = base_view(
             "n1",
@@ -772,11 +893,97 @@ mod tests {
         let html = node_panel(&view).into_string();
         assert!(html.contains("data-node=\"final\""), "{html}");
         assert!(html.contains("Final value"), "{html}");
-        // pretty-printed: the two keys land on separate lines
+        assert!(html.contains("class=\"con-badge\""), "{html}");
+        assert!(html.contains("FinishLayer"), "{html}");
+        assert!(html.contains("Confidence"), "humanized label: {html}");
+        assert!(html.contains("High"), "{html}");
         assert!(
-            html.contains("&quot;tag&quot;: &quot;FinishLayer&quot;"),
-            "{html}"
+            !html.contains("&quot;tag&quot;"),
+            "no raw JSON blob: {html}"
         );
+    }
+
+    /// The design target this rendering exists for: a multi-paragraph
+    /// `ProposeFinish`-shaped answer reads as prose paragraphs, not one
+    /// escaped JSON string in a `<pre>`. Field values stay escaped text
+    /// nodes throughout.
+    #[test]
+    fn node_panel_renders_multi_paragraph_finalized_value_as_prose() {
+        let th = empty_history();
+        let value = serde_json::json!({
+            "_con": "ProposeFinish",
+            "localAnswer": "Paragraph one, the summary.\n\nParagraph two, the detail.",
+            "confidence": "High",
+        })
+        .to_string();
+        let mut view = base_view("n1", vec![TimelineEntry::Finalized(&value)], &th, 0);
+        view.done = true;
+        let html = node_panel(&view).into_string();
+
+        assert!(html.contains("class=\"con-badge\""), "{html}");
+        assert!(html.contains("ProposeFinish"), "{html}");
+        assert!(html.contains("Local answer"), "humanized label: {html}");
+        assert!(html.contains("class=\"prose\""), "{html}");
+        assert!(
+            html.contains("Paragraph one, the summary."),
+            "the prose itself renders: {html}"
+        );
+        // No raw JSON braces/quoting leak into the rendered markup.
+        assert!(!html.contains("{&quot;"), "{html}");
+        assert!(!html.contains("\\n\\n"), "{html}");
+    }
+
+    /// Field values inside a structured finalized object are still ordinary
+    /// maud-escaped text nodes — the injection rule holds for the new
+    /// rendering path exactly as it does everywhere else in this crate.
+    #[test]
+    fn node_panel_structured_final_value_escapes_field_text() {
+        let th = empty_history();
+        let value = "{\"note\":\"<script>alert(1)</script>\"}";
+        let mut view = base_view("n1", vec![TimelineEntry::Finalized(value)], &th, 0);
+        view.done = true;
+        let html = node_panel(&view).into_string();
+        assert!(!html.contains("<script>alert"), "{html}");
+        assert!(html.contains("&lt;script&gt;"), "{html}");
+    }
+
+    /// A finalized value that does NOT parse as a JSON object (a bare
+    /// scalar, or non-JSON text) keeps today's pretty-printed `<pre>`
+    /// fallback rather than vanishing or erroring.
+    #[test]
+    fn node_panel_non_object_final_value_falls_back_to_pre() {
+        let th = empty_history();
+        let mut view = base_view(
+            "n1",
+            vec![TimelineEntry::Finalized("\"turn 1 answer\"")],
+            &th,
+            0,
+        );
+        view.done = true;
+        let html = node_panel(&view).into_string();
+        assert!(html.contains("<pre>"), "{html}");
+        assert!(html.contains("turn 1 answer"), "{html}");
+    }
+
+    /// The same structured treatment applies to a Failed reason block when
+    /// it parses as JSON.
+    #[test]
+    fn node_panel_renders_failure_structured_for_an_object() {
+        let th = empty_history();
+        let mut view = base_view(
+            "n1",
+            vec![TimelineEntry::Failed(
+                "{\"tag\":\"RoundExhaustion\",\"detail\":\"8 rounds without finalize\"}",
+            )],
+            &th,
+            0,
+        );
+        view.done = true;
+        let html = node_panel(&view).into_string();
+        assert!(html.contains("data-node=\"failure\""), "{html}");
+        assert!(html.contains("class=\"con-badge\""), "{html}");
+        assert!(html.contains("RoundExhaustion"), "{html}");
+        assert!(html.contains("8 rounds without finalize"), "{html}");
     }
 
     /// A failure renders its reason as escaped text under a distinct block.

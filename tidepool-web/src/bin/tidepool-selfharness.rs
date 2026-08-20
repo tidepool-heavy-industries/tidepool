@@ -189,6 +189,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         driver.set_concurrency_cap(cap);
     }
 
+    // Held past the `if !auto` block so the run id (known only once the
+    // lease below is acquired) can still reach the masthead.
+    let mut web_state: Option<tidepool_web::AppState> = None;
     if !auto {
         let port: u16 = args.port;
         // ONE registered node (the default the driver's gate is bound to), so
@@ -201,8 +204,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         // default, so all it produced was a permanently-empty second tab in
         // front of the live operator (dogfood finding, 2026-08-19). Re-add
         // registrations only together with the routing that feeds them.
-        let (_state, gate) = tidepool_web::spawn_operator_server_multi(port).await?;
+        let (state, gate) = tidepool_web::spawn_operator_server_multi(port).await?;
         driver.set_gate(gate);
+        web_state = Some(state);
     }
 
     // S1-L1 (plans/self-iterating-harness/20-exomonad-v3-prd.md): the
@@ -232,6 +236,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // segment — both from the same `AcquiredLease`, so the fold and the
     // appends cannot desync.
     let acquired = tidepool_harness::acquire_lease(&log_dir)?;
+    // So a pre/post-restart run is distinguishable in a stale operator tab.
+    if let Some(state) = &web_state {
+        state.set_run_id(acquired.lease.run_id.clone());
+    }
     let folded = driver.open_run_journal(&log_dir, &acquired)?;
     tracing::info!(
         target: "tidepool_web",

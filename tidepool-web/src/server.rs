@@ -201,6 +201,11 @@ pub struct AppState {
     /// any mutation so every open SSE stream re-renders that one node's
     /// panel promptly.
     tick: broadcast::Sender<NodeId>,
+    /// The current run's identity, when the boot path has set one (see
+    /// [`AppState::set_run_id`]) — rendered as small masthead text so a
+    /// pre/post-restart run is distinguishable in a stale tab. `None` by
+    /// default (every existing caller's page is unchanged).
+    run_id: Arc<Mutex<Option<String>>>,
 }
 
 impl Default for AppState {
@@ -223,7 +228,16 @@ impl AppState {
         AppState {
             registry: Arc::new(Mutex::new(Registry::default())),
             tick,
+            run_id: Arc::new(Mutex::new(None)),
         }
+    }
+
+    /// Set the current run's identity, rendered as small masthead text on
+    /// every subsequent page load — the boot path's one write, typically
+    /// called once a run lease/id is known. Additive: a caller that never
+    /// calls this renders the same masthead as before.
+    pub fn set_run_id(&self, run_id: impl Into<String>) {
+        *self.run_id.lock() = Some(run_id.into());
     }
 
     fn ping(&self, node_id: NodeId) {
@@ -368,7 +382,8 @@ impl AppState {
             .map(|id| (id.clone(), render::node_panel(&reg.nodes[id].view(id))))
             .collect();
         drop(reg);
-        shell::page(sections)
+        let run_id = self.run_id.lock().clone();
+        shell::page(sections, run_id.as_deref())
     }
 
     /// Resolve a pending FORM at `(node_id, interaction)`: reassemble the
@@ -1188,6 +1203,20 @@ mod tests {
         st.resolve_continue("n1", interaction, ContinueSignal::Continue)
             .unwrap();
         handle.join().unwrap();
+    }
+
+    /// `set_run_id` shows up in the rendered page's masthead; unset, the
+    /// page carries no run-id text at all.
+    #[test]
+    fn set_run_id_renders_in_the_page_masthead() {
+        let st = AppState::new();
+        let before = st.page_markup().into_string();
+        assert!(!before.contains("class=\"run-id\""), "{before}");
+
+        st.set_run_id("run-abc123");
+        let after = st.page_markup().into_string();
+        assert!(after.contains("class=\"run-id\""), "{after}");
+        assert!(after.contains("run-abc123"), "{after}");
     }
 
     fn extract_rev(html: &str) -> &str {

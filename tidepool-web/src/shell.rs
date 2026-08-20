@@ -40,7 +40,14 @@ use maud::{html, Markup, PreEscaped, DOCTYPE};
 /// slot indents by path depth, so the outline reads as a tree. The wrapper
 /// for [`crate::DEFAULT_NODE_ID`] carries `data-pinned`, which the client's
 /// mount-on-first-sight insert uses to keep it first regardless of sort.
-pub fn page(panels: Vec<(String, Markup)>) -> Markup {
+///
+/// `run_id` — the harness's own run identity, when the boot path has set one
+/// (see [`crate::AppState::set_run_id`]) — renders as small masthead text so
+/// a pre/post-restart run is distinguishable in a stale tab. `None` renders
+/// no masthead text at all, the same page every caller saw before this
+/// existed. It is a substrate identifier, never model prose, but is still
+/// rendered as an ordinary escaped text node like everything else here.
+pub fn page(panels: Vec<(String, Markup)>, run_id: Option<&str>) -> Markup {
     html! {
         (DOCTYPE)
         html lang="en" {
@@ -57,6 +64,9 @@ pub fn page(panels: Vec<(String, Markup)>) -> Markup {
                         div class="mast-title" {
                             span class="mark" { "tidepool" }
                             span class="mast-sub" { "self-iterating harness — operator console" }
+                            @if let Some(id) = run_id {
+                                span class="run-id" data-node="run-id" { "run " (id) }
+                            }
                         }
                         span id="conn" class="conn ok" { "live" }
                     }
@@ -148,6 +158,10 @@ body {
   font-size: var(--text-micro); font-weight: 600; text-transform: uppercase;
   letter-spacing: var(--tracking-wide); color: var(--muted);
 }
+.run-id {
+  font-size: var(--text-micro); font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  color: var(--muted);
+}
 .conn {
   font-size: var(--text-micro); font-weight: 600; text-transform: uppercase;
   letter-spacing: var(--tracking-wide); color: var(--muted);
@@ -235,6 +249,35 @@ body {
 .final { margin-top: calc(2 * var(--unit)); }
 .failure { margin-top: calc(2 * var(--unit)); }
 .failure-eyebrow { color: var(--accent); }
+
+/* structured finalized/failure values — a definition list, one row per
+   field, in place of a raw JSON blob. */
+.con-badge {
+  display: inline-block; margin-top: var(--unit);
+  font-size: var(--text-micro); font-weight: 700; text-transform: uppercase;
+  letter-spacing: var(--tracking-wide);
+  padding: calc(0.5 * var(--unit)) calc(1.5 * var(--unit));
+  border: 1px solid var(--ink); color: var(--ink);
+}
+.structured { margin: calc(2 * var(--unit)) 0 0 0; }
+.structured-row {
+  padding: calc(2 * var(--unit)) 0;
+  border-top: var(--hair-faint);
+}
+.structured-row:first-child { border-top: none; padding-top: calc(1 * var(--unit)); }
+.structured-row dt { color: var(--muted); }
+.structured-row dd {
+  margin: calc(1 * var(--unit)) 0 0 0;
+}
+.prose {
+  margin: 0; white-space: pre-wrap; overflow-wrap: anywhere;
+  font-size: var(--text-body); line-height: 1.5;
+}
+.scalar {
+  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  font-size: 0.8125rem;
+}
+.structured-list { display: flex; flex-direction: column; gap: var(--unit); }
 
 .turn-source { margin-top: calc(var(--unit) * 2); }
 .turn-history {
@@ -605,10 +648,10 @@ mod tests {
 
     #[test]
     fn page_embeds_panels_and_inline_assets() {
-        let doc = page(vec![(
-            "n1".to_string(),
-            html! { div id="panel-n1" { "hi" } },
-        )])
+        let doc = page(
+            vec![("n1".to_string(), html! { div id="panel-n1" { "hi" } })],
+            None,
+        )
         .into_string();
         assert!(doc.contains("<div id=\"panel-n1\">hi</div>"));
         // inline, no external host
@@ -623,10 +666,13 @@ mod tests {
     /// `.node-slot` wrapper — no tabs, nothing hidden by default.
     #[test]
     fn every_node_renders_as_a_visible_section() {
-        let doc = page(vec![
-            ("alpha".to_string(), html! { div id="panel-alpha" {} }),
-            ("beta".to_string(), html! { div id="panel-beta" {} }),
-        ])
+        let doc = page(
+            vec![
+                ("alpha".to_string(), html! { div id="panel-alpha" {} }),
+                ("beta".to_string(), html! { div id="panel-beta" {} }),
+            ],
+            None,
+        )
         .into_string();
         assert!(doc.contains("data-node-id=\"alpha\""), "{doc}");
         assert!(doc.contains("data-node-id=\"beta\""), "{doc}");
@@ -639,13 +685,16 @@ mod tests {
     /// slots don't.
     #[test]
     fn default_node_slot_is_pinned() {
-        let doc = page(vec![
-            (
-                crate::DEFAULT_NODE_ID.to_string(),
-                html! { div id="panel-root" {} },
-            ),
-            ("root/1-x".to_string(), html! { div id="panel-root/1-x" {} }),
-        ])
+        let doc = page(
+            vec![
+                (
+                    crate::DEFAULT_NODE_ID.to_string(),
+                    html! { div id="panel-root" {} },
+                ),
+                ("root/1-x".to_string(), html! { div id="panel-root/1-x" {} }),
+            ],
+            None,
+        )
         .into_string();
         // Assert on the slot markup itself ("data-pinned" also appears inside
         // the embedded JS, which handles it on the mount path).
@@ -666,14 +715,17 @@ mod tests {
     /// as a tree.
     #[test]
     fn slots_indent_by_path_depth() {
-        let doc = page(vec![
-            ("root".to_string(), html! { div id="panel-root" {} }),
-            ("root/1-x".to_string(), html! { div id="panel-root/1-x" {} }),
-            (
-                "root/1-x/2-y".to_string(),
-                html! { div id="panel-root/1-x/2-y" {} },
-            ),
-        ])
+        let doc = page(
+            vec![
+                ("root".to_string(), html! { div id="panel-root" {} }),
+                ("root/1-x".to_string(), html! { div id="panel-root/1-x" {} }),
+                (
+                    "root/1-x/2-y".to_string(),
+                    html! { div id="panel-root/1-x/2-y" {} },
+                ),
+            ],
+            None,
+        )
         .into_string();
 
         let root_style = slot_indent_style("root");
@@ -684,6 +736,23 @@ mod tests {
         assert!(doc.contains(&format!("style=\"{root_style}\"")), "{doc}");
         assert!(doc.contains(&format!("style=\"{mid_style}\"")), "{doc}");
         assert!(doc.contains(&format!("style=\"{leaf_style}\"")), "{doc}");
+    }
+
+    /// When a run id is set, the masthead carries it as small text — so a
+    /// pre/post-restart run is distinguishable in a stale tab.
+    #[test]
+    fn masthead_shows_run_id_when_set() {
+        let doc = page(vec![], Some("run-2026-08-20-abc123")).into_string();
+        assert!(doc.contains("class=\"run-id\""), "{doc}");
+        assert!(doc.contains("run-2026-08-20-abc123"), "{doc}");
+    }
+
+    /// No run id set (`None`) renders no masthead run-id text at all — the
+    /// same page every caller saw before this existed.
+    #[test]
+    fn masthead_omits_run_id_when_absent() {
+        let doc = page(vec![], None).into_string();
+        assert!(!doc.contains("class=\"run-id\""), "{doc}");
     }
 
     #[test]
