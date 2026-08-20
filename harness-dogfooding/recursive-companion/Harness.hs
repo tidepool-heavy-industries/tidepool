@@ -302,12 +302,15 @@ loop st
       case T.strip sq.seedQuestion of
         "" -> loop st
         q -> do
-          -- Without this line the operator's next screen is the bare
-          -- between-loops "loop complete" gate — reading as if a run
-          -- happened and produced nothing (dogfood finding, 2026-08-19).
           say [fmt|Question seeded: {q}
-Nothing has run yet — press Continue to start the first turn.|]
-          pure st {question = q}
+Starting the first turn.|]
+          -- RECURSE, don't return: seeding IS the operator's "go" — ending
+          -- the cycle here would park them on a between-turns gate that
+          -- asks them to confirm the thing they just did (dogfood finding,
+          -- 2026-08-20). The price is that the seed only checkpoints once
+          -- turn 1 completes, so a mid-turn crash re-asks the question —
+          -- one cheap re-type against one pointless click per fresh run.
+          loop st {question = q}
 loop st = do
   record "turn" rootKey (object ["root" .= st.question, "config" .= toJSON cfg])
   rootRef <- freezeContext
