@@ -43,6 +43,102 @@ fn require_utf8(path: &std::path::Path) -> Result<(), DomainWorktreeError> {
 }
 
 // ============================================================================
+// Delegate transcript persistence.
+//
+// Opt-in, operator-owned: `transcript_jsonl()` is read at every point a
+// cycle's backend is about to be dropped for good (a terminal Done/RolledBack
+// settle, or an async cycle's report arriving), and this is where those
+// frames land on disk so a delegate's full turn history (including reasoning
+// frames) survives past the cycle that produced it.
+// ============================================================================
+
+/// Writes one cycle's transcript frames to `delegate-<cycle_tag>.jsonl` under
+/// a configured directory — or does nothing when unconfigured.
+///
+/// Constructed ONCE, at handler construction, from
+/// `TIDEPOOL_DELEGATE_TRANSCRIPT_DIR`: unset means `dir: None`, which makes
+/// every [`persist`](Self::persist) call an immediate no-op — zero behavior
+/// change for every wiring that never opts in. IO failure is a `tracing::warn!`,
+/// never a cycle failure: a delegate's own report already succeeded or failed
+/// on its own terms by the time this runs, and a full disk must not turn that
+/// into a second, unrelated failure.
+struct DelegateTranscriptSink {
+    dir: Option<PathBuf>,
+}
+
+impl DelegateTranscriptSink {
+    fn from_env() -> Self {
+        Self {
+            dir: std::env::var_os("TIDEPOOL_DELEGATE_TRANSCRIPT_DIR").map(PathBuf::from),
+        }
+    }
+
+    /// Persist `frames` for `cycle_tag`, one frame per line. A no-op when
+    /// unconfigured. A name COLLISION (two cycles across separate handler
+    /// lifetimes sharing a tag, since [`CycleId`] is minted from 0 each time)
+    /// never overwrites: the write uses `create_new` and retries with a
+    /// numeric suffix, so the file that got there first is never clobbered.
+    fn persist(&self, cycle_tag: &str, frames: &[String]) {
+        let Some(dir) = &self.dir else {
+            return;
+        };
+        if let Err(e) = std::fs::create_dir_all(dir) {
+            tracing::warn!(
+                "delegate transcript sink: could not create directory {}: {e}",
+                dir.display()
+            );
+            return;
+        }
+        let mut contents = frames.join("\n");
+        if !contents.is_empty() {
+            contents.push('\n');
+        }
+        let mut suffix: u32 = 0;
+        loop {
+            let path = if suffix == 0 {
+                dir.join(format!("delegate-{cycle_tag}.jsonl"))
+            } else {
+                dir.join(format!("delegate-{cycle_tag}-{suffix}.jsonl"))
+            };
+            match std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&path)
+            {
+                Ok(mut file) => {
+                    use std::io::Write;
+                    if let Err(e) = file.write_all(contents.as_bytes()) {
+                        tracing::warn!(
+                            "delegate transcript sink: could not write {}: {e}",
+                            path.display()
+                        );
+                    }
+                    return;
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                    suffix += 1;
+                    if suffix > 10_000 {
+                        tracing::warn!(
+                            "delegate transcript sink: giving up finding a free name for cycle \
+                             {cycle_tag} under {} after {suffix} collisions",
+                            dir.display()
+                        );
+                        return;
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        "delegate transcript sink: could not create {}: {e}",
+                        path.display()
+                    );
+                    return;
+                }
+            }
+        }
+    }
+}
+
+// ============================================================================
 // Tag: Subagent (PRD 18 lane 1 — coupled agent+worktree spawn; deliberately
 // NOT in the default base_effects! row, same opt-in status as Worktree /
 // RepoEvent. A row containing Subagent must also contain Worktree — the
@@ -72,6 +168,15 @@ tidepool_mcp::subagent_effect_def!(crate::effect_glue::effect_rust_projection);
 /// finished answers for that cycle rather than for whatever was admitted next.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 struct CycleId(u64);
+
+/// The tag a [`DelegateTranscriptSink`] files this cycle's transcript under.
+/// Monotonic within one handler's lifetime — "timestamp-ish ordering" for
+/// free — but NOT globally unique across separate handler lifetimes (the
+/// counter always starts at 0), which is exactly the collision
+/// [`DelegateTranscriptSink::persist`] is built to survive.
+fn cycle_tag(id: CycleId) -> String {
+    id.0.to_string()
+}
 
 /// A stepped cycle's own drive state: mid-turn (holding the saga PARKED on
 /// its current call, inseparably, plus the live backend that drives it) or
@@ -117,6 +222,8 @@ impl SteppedCycle {
     fn from_progress(
         progress: CycleProgress,
         backend: Box<dyn AgentBackend + Send>,
+        id: CycleId,
+        transcripts: &DelegateTranscriptSink,
     ) -> (Self, AgAgentStep) {
         match progress {
             CycleProgress::Done(run) => {
@@ -124,6 +231,7 @@ impl SteppedCycle {
                 // The backend is DROPPED here, in place of being kept: a
                 // terminal entry must hold no OS process.
                 let transcript = backend.transcript_jsonl();
+                transcripts.persist(&cycle_tag(id), &transcript);
                 (SteppedCycle::Settled { transcript }, wire)
             }
             CycleProgress::Parked(parked) => {
@@ -290,8 +398,13 @@ impl AsyncCycle {
     /// [`collect`](Self::collect) (which blocks for the report) and
     /// [`try_settle`](Self::try_settle) (which only acts on one that already
     /// arrived).
-    fn settle_with(report: CycleReport) -> (Settled, Option<CycleSaga>, Vec<String>) {
+    fn settle_with(
+        report: CycleReport,
+        id: CycleId,
+        transcripts: &DelegateTranscriptSink,
+    ) -> (Settled, Option<CycleSaga>, Vec<String>) {
         let transcript = report.backend.transcript_jsonl();
+        transcripts.persist(&cycle_tag(id), &transcript);
         (
             Settled::Reported(Box::new(report.result)),
             report.saga,
@@ -309,9 +422,10 @@ impl AsyncCycle {
         thread: JoinHandle<()>,
         reports: Receiver<CycleReport>,
         id: CycleId,
+        transcripts: &DelegateTranscriptSink,
     ) -> (Settled, Option<CycleSaga>, Vec<String>) {
         let out = match reports.recv() {
-            Ok(report) => Self::settle_with(report),
+            Ok(report) => Self::settle_with(report, id, transcripts),
             Err(_) => (lost_no_report(id), None, Vec::new()),
         };
         // A panicked cycle thread is already accounted for above; joining it
@@ -323,13 +437,14 @@ impl AsyncCycle {
     /// Block for the cycle thread's report, join the thread, and become
     /// `Settled`. A no-op — returns `self` unchanged — on a cycle already
     /// `Settled`.
-    fn collect(self, id: CycleId) -> Self {
+    fn collect(self, id: CycleId, transcripts: &DelegateTranscriptSink) -> Self {
         match self {
             settled @ AsyncCycle::Settled { .. } => settled,
             AsyncCycle::Running {
                 thread, reports, ..
             } => {
-                let (terminal, _saga, transcript) = Self::recv_and_join(thread, reports, id);
+                let (terminal, _saga, transcript) =
+                    Self::recv_and_join(thread, reports, id, transcripts);
                 AsyncCycle::Settled {
                     terminal,
                     transcript,
@@ -347,7 +462,7 @@ impl AsyncCycle {
     /// already `Settled` — so it changes nothing about what a LATER
     /// `await`/`cancel` observes: same typed terminal either way, just
     /// possibly settled earlier.
-    fn try_settle(self, id: CycleId) -> Self {
+    fn try_settle(self, id: CycleId, transcripts: &DelegateTranscriptSink) -> Self {
         match self {
             settled @ AsyncCycle::Settled { .. } => settled,
             AsyncCycle::Running {
@@ -358,7 +473,8 @@ impl AsyncCycle {
                 use std::sync::mpsc::TryRecvError;
                 match reports.try_recv() {
                     Ok(report) => {
-                        let (terminal, _saga, transcript) = Self::settle_with(report);
+                        let (terminal, _saga, transcript) =
+                            Self::settle_with(report, id, transcripts);
                         let _ = thread.join();
                         AsyncCycle::Settled {
                             terminal,
@@ -388,7 +504,7 @@ impl AsyncCycle {
     /// Order is the rule from `tidepool-agent/CLAUDE.md`: settling before the
     /// kill would hold the substrate mutex across a reap of unknown duration,
     /// which is the one thing the concurrent saga design forbids.
-    fn cancel(self, id: CycleId) -> Self {
+    fn cancel(self, id: CycleId, transcripts: &DelegateTranscriptSink) -> Self {
         match self {
             settled @ AsyncCycle::Settled { .. } => settled,
             AsyncCycle::Running {
@@ -402,7 +518,8 @@ impl AsyncCycle {
                 // result is deliberate: an author who cancelled gets
                 // `SpawnCancelled` whether or not the cycle happened to
                 // finish first, so the answer never depends on a race.
-                let (reported, mut saga, transcript) = Self::recv_and_join(thread, reports, id);
+                let (reported, mut saga, transcript) =
+                    Self::recv_and_join(thread, reports, id, transcripts);
                 let terminal = match saga.as_mut().map(CycleSaga::abandon) {
                     Some(Err(e)) => Settled::Lost(format!(
                         "cycle {} was cancelled and its backend reaped, but settling its binding \
@@ -488,6 +605,10 @@ pub struct SubagentHandler {
     /// is still open.
     model: ModelPolicy,
     effort: ReasoningEffort,
+    /// Where each cycle's transcript frames land once it reaches a terminal —
+    /// `TIDEPOOL_DELEGATE_TRANSCRIPT_DIR`, read once here at construction, or
+    /// nothing when unset.
+    transcripts: DelegateTranscriptSink,
 }
 
 /// The default cycle-table bound: how many cycles may be non-terminal at once.
@@ -583,6 +704,7 @@ impl SubagentHandler {
             capacity: DEFAULT_CYCLE_CAPACITY,
             model: ModelPolicy::CheapPlumbing,
             effort: ReasoningEffort::Low,
+            transcripts: DelegateTranscriptSink::from_env(),
         })
     }
 
@@ -670,7 +792,7 @@ impl SubagentHandler {
             .filter_map(|(id, cycle)| matches!(cycle, Cycle::Async(_)).then_some(*id))
             .collect();
         for id in async_ids {
-            self.update_async(id, |c| c.try_settle(id));
+            self.update_async(id, |c, transcripts| c.try_settle(id, transcripts));
         }
         let live = self.cycles.values().filter(|c| !c.is_terminal()).count();
         if live >= self.capacity {
@@ -688,12 +810,17 @@ impl SubagentHandler {
     /// holding a half-transitioned value. A no-op when `id` names nothing, or
     /// names a `Stepped` entry (put back untouched) — `f` runs only on an
     /// `Async` entry.
-    fn update_async(&mut self, id: CycleId, f: impl FnOnce(AsyncCycle) -> AsyncCycle) {
+    fn update_async(
+        &mut self,
+        id: CycleId,
+        f: impl FnOnce(AsyncCycle, &DelegateTranscriptSink) -> AsyncCycle,
+    ) {
         let Some(cycle) = self.cycles.remove(&id) else {
             return;
         };
+        let transcripts = &self.transcripts;
         let cycle = match cycle {
-            Cycle::Async(boxed) => Cycle::Async(Box::new(f(*boxed))),
+            Cycle::Async(boxed) => Cycle::Async(Box::new(f(*boxed, transcripts))),
             stepped @ Cycle::Stepped(_) => stepped,
         };
         self.cycles.insert(id, cycle);
@@ -811,7 +938,7 @@ impl SubagentHandler {
         // A zero-round agent can finish on its very first stop —
         // `from_progress` is what builds the entry that never starts life
         // holding a live backend it will never use again.
-        let (stepped, wire) = SteppedCycle::from_progress(progress, backend);
+        let (stepped, wire) = SteppedCycle::from_progress(progress, backend, id, &self.transcripts);
         self.cycles.insert(id, Cycle::Stepped(Box::new(stepped)));
         Ok(wire)
     }
@@ -860,7 +987,8 @@ impl SubagentHandler {
                 // finished the saga) and the wire step from the SAME drive,
                 // so `Running` and `Settled` can never drift apart from what
                 // actually happened.
-                let (next, wire) = SteppedCycle::from_progress(progress, backend);
+                let (next, wire) =
+                    SteppedCycle::from_progress(progress, backend, id, &self.transcripts);
                 self.cycles.insert(id, Cycle::Stepped(Box::new(next)));
                 Ok(wire)
             }
@@ -882,6 +1010,7 @@ impl SubagentHandler {
                 // in place of being kept.
                 (e, AnswerFailure::RolledBack) => {
                     let transcript = backend.transcript_jsonl();
+                    self.transcripts.persist(&cycle_tag(id), &transcript);
                     self.cycles.insert(
                         id,
                         Cycle::Stepped(Box::new(SteppedCycle::Settled { transcript })),
@@ -1003,7 +1132,7 @@ impl SubagentHandler {
             }
             Some(Cycle::Async(_)) => {}
         }
-        self.update_async(id, |c| c.collect(id));
+        self.update_async(id, |c, transcripts| c.collect(id, transcripts));
         let Some(Cycle::Async(async_cycle)) = self.cycles.get(&id) else {
             unreachable!(
                 "just confirmed an Async entry at this id, and update_async never removes one"
@@ -1059,7 +1188,7 @@ impl SubagentHandler {
         let Some(id) = cycle_id_from_wire(cycle) else {
             return;
         };
-        self.update_async(id, |c| c.cancel(id));
+        self.update_async(id, |c, transcripts| c.cancel(id, transcripts));
     }
 }
 
@@ -1080,9 +1209,10 @@ impl Drop for SubagentHandler {
     fn drop(&mut self) {
         // Drain rather than `update_async` per id: the table is about to be
         // dropped along with `self`, so there is nothing to reinsert into.
+        let transcripts = &self.transcripts;
         for (id, cycle) in std::mem::take(&mut self.cycles) {
             if let Cycle::Async(boxed) = cycle {
-                let _ = boxed.cancel(id);
+                let _ = boxed.cancel(id, transcripts);
             }
         }
     }
@@ -3040,6 +3170,104 @@ mod tests {
             vec!["{\"frame\":1}".to_string()],
             "the transcript survives the backend's drop — extracted at settle"
         );
+    }
+
+    // ==================================================================
+    // Delegate transcript persistence: TIDEPOOL_DELEGATE_TRANSCRIPT_DIR.
+    // ==================================================================
+
+    /// A cycle that reaches a terminal writes its full frame transcript to
+    /// `delegate-<cycle_tag>.jsonl` under the configured directory.
+    #[test]
+    fn delegate_transcript_sink_persists_a_settled_async_cycle() {
+        let fx = Fixture::new();
+        let out_dir = tempfile::TempDir::new().expect("create the transcript output dir");
+        std::env::set_var("TIDEPOOL_DELEGATE_TRANSCRIPT_DIR", out_dir.path());
+
+        let backend = DropSignal {
+            inner: MockBackend::completing(CycleResultPayload::Absent),
+            transcript: vec!["{\"frame\":1}".to_string(), "{\"frame\":2}".to_string()],
+            dropped: Arc::new(AtomicBool::new(false)),
+        };
+        let mut handler = fx.handler_with(one_shot_queue(Box::new(backend)));
+
+        let cycle = spawn_async(&mut handler, "worker").expect("admitted immediately");
+        handler
+            .subagent_await(cycle)
+            .expect("the mock completes immediately");
+
+        std::env::remove_var("TIDEPOOL_DELEGATE_TRANSCRIPT_DIR");
+
+        let path = out_dir.path().join(format!("delegate-{}.jsonl", cycle.raw));
+        let contents = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("reading persisted transcript at {path:?}: {e}"));
+        assert_eq!(contents, "{\"frame\":1}\n{\"frame\":2}\n");
+    }
+
+    /// Two cycles that land on the SAME tag (a fresh handler's `CycleId`
+    /// counter always starts at 0) never clobber each other's file — the
+    /// second gets a unique suffix instead of overwriting the first.
+    #[test]
+    fn delegate_transcript_sink_never_overwrites_a_name_collision() {
+        let out_dir = tempfile::TempDir::new().expect("create the transcript output dir");
+        std::env::set_var("TIDEPOOL_DELEGATE_TRANSCRIPT_DIR", out_dir.path());
+
+        let fx_one = Fixture::new();
+        let backend_one = DropSignal {
+            inner: MockBackend::completing(CycleResultPayload::Absent),
+            transcript: vec!["{\"frame\":\"first\"}".to_string()],
+            dropped: Arc::new(AtomicBool::new(false)),
+        };
+        let mut handler_one = fx_one.handler_with(one_shot_queue(Box::new(backend_one)));
+        let cycle_one = spawn_async(&mut handler_one, "worker-one").expect("admitted immediately");
+        handler_one
+            .subagent_await(cycle_one)
+            .expect("the mock completes immediately");
+
+        let fx_two = Fixture::new();
+        let backend_two = DropSignal {
+            inner: MockBackend::completing(CycleResultPayload::Absent),
+            transcript: vec!["{\"frame\":\"second\"}".to_string()],
+            dropped: Arc::new(AtomicBool::new(false)),
+        };
+        let mut handler_two = fx_two.handler_with(one_shot_queue(Box::new(backend_two)));
+        let cycle_two = spawn_async(&mut handler_two, "worker-two").expect("admitted immediately");
+        handler_two
+            .subagent_await(cycle_two)
+            .expect("the mock completes immediately");
+
+        std::env::remove_var("TIDEPOOL_DELEGATE_TRANSCRIPT_DIR");
+
+        assert_eq!(
+            cycle_one.raw, cycle_two.raw,
+            "both cycles are the first their own handler ever minted, so they share a tag"
+        );
+
+        let first_path = out_dir
+            .path()
+            .join(format!("delegate-{}.jsonl", cycle_one.raw));
+        let first = std::fs::read_to_string(&first_path)
+            .unwrap_or_else(|e| panic!("reading {first_path:?}: {e}"));
+        assert_eq!(
+            first, "{\"frame\":\"first\"}\n",
+            "the first cycle's file is never overwritten by the second"
+        );
+
+        let mut entries: Vec<String> = std::fs::read_dir(out_dir.path())
+            .expect("read the transcript dir")
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        entries.sort();
+        assert_eq!(entries.len(), 2, "both cycles left a file: {entries:?}");
+        let first_name = format!("delegate-{}.jsonl", cycle_one.raw);
+        let second_name = entries
+            .iter()
+            .find(|n| **n != first_name)
+            .unwrap_or_else(|| panic!("expected a uniquely-suffixed second file: {entries:?}"));
+        let second = std::fs::read_to_string(out_dir.path().join(second_name))
+            .unwrap_or_else(|e| panic!("reading {second_name}: {e}"));
+        assert_eq!(second, "{\"frame\":\"second\"}\n");
     }
 
     /// Retries a spawn until it is admitted or a bounded deadline passes —
