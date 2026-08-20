@@ -4,7 +4,7 @@
 //! adds `JsonlObserver` (appends them to a durable transcript). This is the
 //! render/loop analogue of `crate::forcing`'s durable per-node event log.
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::selfharness::operator::FormShape;
 use crate::tree::NodeId;
@@ -19,6 +19,22 @@ pub enum FormSource {
     Answerer { node: NodeId },
     OuterLoop,
 }
+
+/// A driver-minted identity for one `askUser` presentation, so a
+/// [`Event::FormPresented`]/[`Event::FormSubmitted`] pair (and, across a
+/// decode-failure re-prompt, EVERY pair for the same logical ask) is
+/// unambiguous in the wire log rather than inferred from adjacency.
+/// `OperatorGate::present_form` returns only the operator's raw submission
+/// value — no id of its own — so this is minted driver-side: a single
+/// monotonic counter shared by every [`SelfHarnessDriver::present_askuser_form`]
+/// call regardless of [`FormSource`] (the nested answerer's own forms and the
+/// authored outer loop's both funnel through that one site, and `source`
+/// already disambiguates which raised a given id in the log — a second,
+/// per-source counter would add a map for no extra debugging power).
+/// `#[serde(default)]`: an event logged before this field existed decodes as
+/// `AskId(0)`, a sentinel meaning "not recorded", never a hard error.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct AskId(pub u64);
 
 /// One lifecycle event the driver emits, at the granularity of the outer
 /// render/loop hylo — NOT a duplicate of `crate::forcing::Event`
@@ -76,20 +92,28 @@ pub enum Event {
     NotePosted { source: FormSource, text: String },
     /// A typed operator form (`askUser`) was presented — either a nested
     /// answerer's own form, or one the authored OUTER loop evaluated
-    /// directly (see [`FormSource`]).
+    /// directly (see [`FormSource`]). `ask_id` identifies this ONE
+    /// presentation (see [`AskId`]) — the matching [`Event::FormSubmitted`]
+    /// carries the same value, including across a decode-failure re-prompt,
+    /// which mints a FRESH id for its own re-presentation rather than
+    /// reusing the original.
     FormPresented {
         source: FormSource,
         shape: FormShape,
+        #[serde(default)]
+        ask_id: AskId,
     },
     /// The operator's submission for the most recently presented form. A
     /// decode failure re-suspends on a fresh form (Haskell-side recursion,
     /// no `Either`), so a re-prompt shows as another `FormPresented` /
-    /// `FormSubmitted` pair for the same [`FormSource`].
-    /// `submission` is the gate's answer VALUE; valid forms can produce an
+    /// `FormSubmitted` pair for the same [`FormSource`], with its OWN
+    /// [`AskId`]. `submission` is the gate's answer VALUE; valid forms can produce an
     /// object, scalar, or `null`.
     FormSubmitted {
         source: FormSource,
         submission: serde_json::Value,
+        #[serde(default)]
+        ask_id: AskId,
     },
     /// The driver compiled one or more of the OUTER session's own fragments —
     /// the compiles `crate::log::Event::TurnStart` never covers (the outer

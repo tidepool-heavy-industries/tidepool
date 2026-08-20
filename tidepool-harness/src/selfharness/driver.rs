@@ -84,7 +84,7 @@ use crate::harness::{AnswerContract, ContextRef, Harness, HarnessError, OUTER_RE
 use crate::log::Actor;
 use crate::selfharness::harness_source::HarnessSource;
 use crate::selfharness::lifecycle::SelfHarnessState;
-use crate::selfharness::observer::{Event, FormSource, Observer};
+use crate::selfharness::observer::{AskId, Event, FormSource, Observer};
 use crate::selfharness::operator::{FormShape, OperatorGate, StdinGate};
 use crate::selfharness::persistence::{self, PersistenceError};
 use crate::selfharness::state_cross;
@@ -944,6 +944,15 @@ pub struct SelfHarnessDriver {
     /// increases by exactly one per committed cycle and stays monotonic
     /// across a restart (restore adopts the reloaded generation first).
     checkpoint_generation: Option<persistence::CheckpointGeneration>,
+    /// The last [`persistence::Checkpoint`] this driver committed or
+    /// restored, kept around so [`Self::mark_awaiting_continue`] can flip its
+    /// gate-park marker (`Checkpoint::with_awaiting_continue`) WITHOUT
+    /// deriving a new generation the way [`Self::commit_checkpoint`] does —
+    /// the marker write records a live park, not a newly completed cycle.
+    /// `None` before either a commit or a restore has happened, which is
+    /// exactly when [`Self::between_loops_gate`] is never reached (see
+    /// [`Self::run_loop`]'s `first`-gating).
+    last_checkpoint: Option<persistence::Checkpoint>,
     /// The number of loop cycles completed so far — a runtime fact, NOT part
     /// of the authored `State` (`plans/self-iterating-harness/
     /// 15-generic-surface-wave.md`, "Runtime context is the runtime's job").
@@ -962,6 +971,13 @@ pub struct SelfHarnessDriver {
     /// Default [`StdinGate`] (headless behavior); override via
     /// [`Self::set_gate`] (a web/GUI implementation, or a scripted test gate).
     gate: Arc<dyn OperatorGate>,
+    /// Monotonic id source for [`Event::FormPresented`]/[`Event::FormSubmitted`]
+    /// (see [`AskId`]'s doc for why this is one global counter rather than
+    /// one per [`FormSource`]). Atomic because [`Self::present_askuser_form`]
+    /// mints an id from `&self`. `0` is never minted — the first presentation
+    /// gets `AskId(1)`, so `AskId(0)` stays a clean "not recorded" sentinel
+    /// for an event logged before this field existed.
+    ask_id_counter: AtomicU64,
     /// The driver-owned handler set for every outer-row effect that isn't
     /// `RunLLMTurn`/`AskUser` (which have their own dedicated servicing
     /// paths) — `Console`/`Worktree`/`RepoEvent`/`Exec`/`Subagent`/`Journal`.
@@ -1292,8 +1308,10 @@ impl SelfHarnessDriver {
             concurrency_cap: DEFAULT_CONCURRENCY_CAP,
             checkpoint_path: persistence::default_checkpoint_path(),
             checkpoint_generation: None,
+            last_checkpoint: None,
             iteration: 0,
             gate: Arc::new(StdinGate),
+            ask_id_counter: AtomicU64::new(0),
             handlers: OuterHandlers::default(),
             resume: None,
             branch_node_paths: HashMap::new(),
@@ -2177,7 +2195,20 @@ impl SelfHarnessDriver {
     ) -> Result<(), DriverError> {
         self.refuse_if_poisoned()?;
         let mut state_json: Option<Json> = self.restore(source).await?;
-        let mut first = true;
+        // A restored checkpoint carrying the gate-park marker means the prior
+        // process was killed WHILE PARKED on `between_loops_gate` — restart-
+        // acts-as-continue is exactly the defect this closes, so this run
+        // must re-park BEFORE any turn work rather than silently deciding
+        // "continue" on the operator's behalf. Forcing `first = false` routes
+        // through the ordinary gate check below. A checkpoint with no marker
+        // (never parked, or written before the marker field existed) leaves
+        // `first = true`, byte-for-byte today's straight-into-turn-1 behavior
+        // — including the very first run ever, which has no checkpoint at all
+        // (`last_checkpoint` is `None`, so `is_some_and` is `false`).
+        let mut first = !self
+            .last_checkpoint
+            .as_ref()
+            .is_some_and(persistence::Checkpoint::awaiting_continue);
         loop {
             if !first && !auto {
                 self.between_loops_gate()?;
@@ -2239,6 +2270,12 @@ impl SelfHarnessDriver {
         let Some(checkpoint) = persistence::load_checkpoint(&self.checkpoint_path)? else {
             return Ok(None);
         };
+        // Kept whole (including its `awaiting_continue` marker) so
+        // `Self::run_loop` can decide whether to re-park before any turn work,
+        // and so `Self::mark_awaiting_continue` has a same-generation
+        // checkpoint to flip the marker on without a fresh `run_one_cycle`
+        // commit in between.
+        self.last_checkpoint = Some(checkpoint.clone());
         self.checkpoint_generation = Some(checkpoint.generation());
         self.iteration = checkpoint.iteration().get();
         if checkpoint.harness_source != source.fingerprint {
@@ -2300,6 +2337,34 @@ impl SelfHarnessDriver {
         );
         persistence::save_checkpoint(&self.checkpoint_path, &checkpoint)?;
         self.checkpoint_generation = Some(checkpoint.generation());
+        self.last_checkpoint = Some(checkpoint);
+        Ok(())
+    }
+
+    /// Overwrite the persisted checkpoint's `awaiting_continue` marker in
+    /// place, at the SAME generation ([`persistence::Checkpoint::with_awaiting_continue`])
+    /// — this is not a newly completed cycle, only a record of whether the
+    /// driver is currently parked on the between-turns gate. Requires
+    /// `self.last_checkpoint` to already be `Some`: [`Self::between_loops_gate`]
+    /// (the only caller) is only ever reached after a checkpoint has been
+    /// committed (a prior successful cycle, this same process or a restored
+    /// one) or restored, both of which set it.
+    fn mark_awaiting_continue(&mut self, awaiting_continue: bool) -> Result<(), DriverError> {
+        #[allow(
+            clippy::expect_used,
+            reason = "between_loops_gate is only reached after a checkpoint has been \
+                      committed or restored (see run_loop's first-gating)"
+        )]
+        let checkpoint = self
+            .last_checkpoint
+            .as_ref()
+            .expect(
+                "between_loops_gate is only reached after a checkpoint has been \
+                 committed or restored (see run_loop's first-gating)",
+            )
+            .with_awaiting_continue(awaiting_continue);
+        persistence::save_checkpoint(&self.checkpoint_path, &checkpoint)?;
+        self.last_checkpoint = Some(checkpoint);
         Ok(())
     }
 
@@ -2307,13 +2372,23 @@ impl SelfHarnessDriver {
     /// — the human-clicks-continue gate. The default [`StdinGate`] keeps the
     /// original headless behavior (block on a stdin line); a web/GUI gate
     /// parks on a button click instead.
+    ///
+    /// The gate park is a live continuation only — nothing about it lives in
+    /// `State` or anywhere else a checkpoint otherwise captures — so a kill
+    /// while parked here needs its OWN durable record: [`Self::mark_awaiting_continue`]
+    /// writes the marker `true` right before blocking and `false` right after
+    /// the continue signal arrives, so a checkpoint read at any instant this
+    /// process might die tells a restart which side of the gate it was on
+    /// (see [`Self::run_loop`]'s restore-time check).
     fn between_loops_gate(&mut self) -> Result<(), DriverError> {
+        self.mark_awaiting_continue(true)?;
         // `OperatorGate::await_continue` is SYNC-BLOCKING by frozen contract
         // (`selfharness/operator.rs`) — a web gate parks a channel. Run the
         // park under `block_in_place` so that blocking wait yields the tokio
         // worker to other tasks instead of stalling it.
         let gate = Arc::clone(&self.gate);
         let signal = tokio::task::block_in_place(move || gate.await_continue());
+        self.mark_awaiting_continue(false)?;
         if let crate::selfharness::operator::ContinueSignal::ContinueWithInput(text) = signal {
             self.emit(Event::OperatorMessage { text: text.clone() });
             self.pending_operator_input = Some(text);
@@ -4883,6 +4958,13 @@ impl SelfHarnessDriver {
     /// side raised the form in the transcript, not a hidden behavior fork. It
     /// is also what [`Self::resolve_gate`] reads to route a labeled branch
     /// child's form to its own per-node gate.
+    ///
+    /// This is the ONE site every form presentation funnels through
+    /// (regardless of `source`), so it also mints this presentation's
+    /// [`AskId`] — one global monotonic counter rather than one per
+    /// `source`, since `source` already disambiguates in the log and a
+    /// re-prompt (another call here for the same logical ask) gets a FRESH
+    /// id like any other presentation.
     async fn present_askuser_form(
         &self,
         reprompts: &mut u32,
@@ -4898,9 +4980,11 @@ impl SelfHarnessDriver {
         }
         *reprompts += 1;
 
+        let ask_id = AskId(self.ask_id_counter.fetch_add(1, Ordering::SeqCst) + 1);
         self.emit(Event::FormPresented {
             source: source.clone(),
             shape: shape.clone(),
+            ask_id,
         });
         // `OperatorGate::present_form` is SYNC-BLOCKING by frozen contract
         // (`selfharness/operator.rs`) — a web gate parks a channel. Run it
@@ -4912,6 +4996,7 @@ impl SelfHarnessDriver {
         self.emit(Event::FormSubmitted {
             source,
             submission: submission.clone(),
+            ask_id,
         });
         Ok(submission)
     }

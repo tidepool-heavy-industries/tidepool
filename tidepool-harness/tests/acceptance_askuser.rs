@@ -199,18 +199,17 @@ enum CapturedForm {
     Presented {
         answerer: bool,
         shape: FormShape,
+        ask_id: u64,
     },
     Submitted {
         answerer: bool,
         submission: serde_json::Value,
+        ask_id: u64,
     },
     /// `note text` — riding the same `AskUser` GADT, but display-only: no
     /// matching `Submitted` ever follows it (the driver resumes with `()`
     /// immediately, never blocking on the operator).
-    Noted {
-        answerer: bool,
-        text: String,
-    },
+    Noted { answerer: bool, text: String },
 }
 
 #[derive(Default)]
@@ -221,13 +220,23 @@ struct CaptureObserver {
 impl Observer for CaptureObserver {
     fn on_event(&self, event: &Event) {
         let captured = match event {
-            Event::FormPresented { source, shape } => CapturedForm::Presented {
+            Event::FormPresented {
+                source,
+                shape,
+                ask_id,
+            } => CapturedForm::Presented {
                 answerer: matches!(source, FormSource::Answerer { .. }),
                 shape: shape.clone(),
+                ask_id: ask_id.0,
             },
-            Event::FormSubmitted { source, submission } => CapturedForm::Submitted {
+            Event::FormSubmitted {
+                source,
+                submission,
+                ask_id,
+            } => CapturedForm::Submitted {
                 answerer: matches!(source, FormSource::Answerer { .. }),
                 submission: submission.clone(),
+                ask_id: ask_id.0,
             },
             Event::NotePosted { source, text } => CapturedForm::Noted {
                 answerer: matches!(source, FormSource::Answerer { .. }),
@@ -371,7 +380,12 @@ async fn askuser_operator_form_round_trip_and_ws4_log() {
     // The driver's own emitted event stream — not just what the gate saw —
     // is the same NOTED/PRESENTED/SUBMITTED pairing in order, all from the
     // nested answerer (`FormSource::Answerer`), never `OuterLoop`. `note`
-    // fires FIRST, with no matching `Submitted` (it never blocks).
+    // fires FIRST, with no matching `Submitted` (it never blocks). Each
+    // Presented/Submitted pair shares one `ask_id`, and the re-prompt (a
+    // FRESH presentation of the same `Decision` form after the malformed
+    // submission) mints its OWN id rather than reusing the first — three
+    // presentations here, so ids 1..=3, one per `present_askuser_form` call,
+    // not per logical ask.
     let forms = observer.forms.lock().clone();
     assert_eq!(
         forms,
@@ -383,18 +397,22 @@ async fn askuser_operator_form_round_trip_and_ws4_log() {
             CapturedForm::Presented {
                 answerer: true,
                 shape: expected_decision_shape(),
+                ask_id: 1,
             },
             CapturedForm::Submitted {
                 answerer: true,
                 submission: serde_json::json!({}),
+                ask_id: 1,
             },
             CapturedForm::Presented {
                 answerer: true,
                 shape: expected_decision_shape(),
+                ask_id: 2,
             },
             CapturedForm::Submitted {
                 answerer: true,
                 submission: decision_answer(),
+                ask_id: 2,
             },
             CapturedForm::Presented {
                 answerer: true,
@@ -415,14 +433,17 @@ async fn askuser_operator_form_round_trip_and_ws4_log() {
                     ],
                     doc: None,
                 },
+                ask_id: 3,
             },
             CapturedForm::Submitted {
                 answerer: true,
                 submission: serde_json::json!({"keep": true, "drop": false}),
+                ask_id: 3,
             },
         ],
         "the driver must emit one FormPresented/FormSubmitted pair per \
-         present_form call, in order — the servicing loop's observability \
+         present_form call, in order, each pair sharing one ask_id and a \
+         re-prompt minting a fresh one — the servicing loop's observability \
          contract is unchanged by the answerer/outer dedupe"
     );
 
