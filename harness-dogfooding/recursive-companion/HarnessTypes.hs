@@ -180,7 +180,14 @@ initialState =
     { question = ""
     , config =
         Config
-          { maxDepth = 3
+          { -- Deep by default (operator decision, 2026-08-20): the companion
+            -- should be able to explore genuinely recursive forks rather
+            -- than hitting a silent wall a few layers down. maxNodes and
+            -- maxFanOut remain the real budget guards; every forced finish
+            -- now names its own reason and numbers (see 'renderOrigin'), so
+            -- raising this ceiling trades a legible cap for a deeper one,
+            -- not for a less legible one.
+            maxDepth = 6
           , -- Profligate on purpose (operator decision, 2026-08-20): at 12,
             -- a root split at full fan-out left every child an allowance of
             -- ~2 — too poor to ever split again, so trees pinned flat at
@@ -547,11 +554,14 @@ layerPosture layer = case layer of
 
 -- | Why a node finished, rendered — so a budget-forced finish and a
 -- model-chosen one are distinguishable in every receipt without a second
--- journal kind.
+-- journal kind. A budget-forced finish NAMES its reason and the numbers that
+-- governed it ('Th.renderForcedReason' — the one rendering every caller
+-- shares, so this can never disagree with the text a forced 'Draft' itself
+-- carries), never a bare tag.
 renderOrigin :: Draft -> Text
 renderOrigin d = case d.draftOrigin of
-  Th.ModelFinished -> "model"
-  Th.BudgetForced r -> "forced " <> show r
+  Th.ModelFinished -> "voluntary"
+  Th.BudgetForced r -> "forced: " <> Th.renderForcedReason r
   Th.InvocationFailed f -> "failed: " <> f.failureReason
 
 -- ---------------------------------------------------------------------------

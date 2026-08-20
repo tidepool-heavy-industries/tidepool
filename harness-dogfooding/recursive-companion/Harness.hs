@@ -439,7 +439,7 @@ bulkLayerWindow cfg ref seeds =
   NE.fromList
     <$> runLLMTurnBranchFanout @LayerProposal
       ref
-      (NE.toList (fmap (\s -> (renderPath s.seedPath, coalgebraPrompt cfg.maxFanOut s)) seeds))
+      (NE.toList (fmap (\s -> (renderPath s.seedPath, coalgebraPrompt cfg s)) seeds))
 
 -- | The ALGEBRA's window, FORKED — deliberately NOT branched, for two
 -- reasons, and both are load-bearing.
@@ -542,7 +542,7 @@ groupCoalg cfg seeds = do
             ( fanOutCapped
                 seedDepth
                 cfg.maxFanOut
-                (depthCapped seedDepth cfg.maxDepth (allowanceCapped (`discoverWith` outcome)))
+                (depthCapped seedDepth cfg.maxDepth (allowanceCapped cfg.maxNodes (`discoverWith` outcome)))
             )
         )
         seed
@@ -592,13 +592,16 @@ unresolvedOutcome =
 -- seed instead: a node reserves one unit for itself and divides the remainder
 -- among its children ('childAllowance').  Same shape, same determinism
 -- guarantee, and completion order cannot reach it.
-allowanceCapped :: Coalg Companion NodeSeed -> Coalg Companion NodeSeed
-allowanceCapped inner seed
+--
+-- @rootAllowance@ (the run's own 'Config.maxNodes') rides along purely to
+-- give the forced 'Th.ForcedNodeCount' reason a governing number to report
+-- alongside the exhausted seed allowance ('Th.renderForcedReason') — it is
+-- never itself the guard; @seed.seedAllowance < 1@ is.
+allowanceCapped :: Int -> Coalg Companion NodeSeed -> Coalg Companion NodeSeed
+allowanceCapped rootAllowance inner seed
   | seed.seedAllowance < 1 =
-      pure
-        ( Th.Finish
-            (Th.Draft "<node-count cap reached>" (Th.BudgetForced Th.ForcedNodeCount) seed.seedDepth)
-        )
+      let reason = Th.ForcedNodeCount seed.seedAllowance rootAllowance
+       in pure (Th.Finish (Th.Draft (Th.forcedDraftText reason) (Th.BudgetForced reason) seed.seedDepth))
   | otherwise = inner seed
 
 -- | The operator's authority over the driver, raised by the AUTHORED LOOP
@@ -1579,8 +1582,8 @@ traverseLayer _proposed visit layer = case layer of
 selfWindows :: ThoughtF a -> Int
 selfWindows layer = case layer of
   Th.Finish d -> case d.draftOrigin of
-    Th.BudgetForced Th.ForcedDepth -> 1
-    Th.BudgetForced Th.ForcedNodeCount -> 1
+    Th.BudgetForced Th.ForcedDepth {} -> 1
+    Th.BudgetForced Th.ForcedNodeCount {} -> 1
     _ -> 2
   _ -> 2
 
@@ -1740,9 +1743,16 @@ exampleFoldDecisionEmpty =
   exampleBlock
     "finalize @FoldDecision (FoldDecision { foldSynthesis = \"what this node concludes\", foldTensions = [], foldEditsInOrder = [], foldProposed = [] })"
 
-coalgebraPrompt :: Int -> NodeSeed -> Text
-coalgebraPrompt maxFanOut seed =
-  [fmt|NODE {renderPath seed.seedPath} — DISCOVER (depth {seed.seedDepth}, node allowance {seed.seedAllowance}).
+-- | The numeric budget line every child brief carries (companion review
+-- run-4 finding, P1: "it wants per-node REMAINING depth/slots/rounds" —
+-- this is the mechanical subset: the numbers a coalgebra window needs to
+-- see its own room to fork, read straight off the seed and 'Config' rather
+-- than left implicit).
+coalgebraPrompt :: Config -> NodeSeed -> Text
+coalgebraPrompt cfg seed =
+  [fmt|NODE {renderPath seed.seedPath} — DISCOVER.
+
+Budget: depth {seed.seedDepth} of {cfg.maxDepth} max, node allowance {seed.seedAllowance}, fan-out cap {cfg.maxFanOut}.
 
 {renderBrief seed.seedBrief}
 
@@ -1750,7 +1760,7 @@ Decide THIS LAYER and only this layer. You cannot describe a subtree: the
 answer type has no recursive arm, by design. Either finish here, or name the
 branches that should be worked next — each of them will be discovered the
 same way you are being discovered now, and their results folded back to you.
-At most {show maxFanOut} branches: a split naming more than that is treated
+At most {cfg.maxFanOut} branches: a split naming more than that is treated
 as a forced finish before any of those branches ever run.
 
 Every record field is required — there are no optional fields on this type.

@@ -301,6 +301,18 @@ unboundedCoalg fanout (Seed d _) =
     (NE.fromList [Branch (ForkBrief ("child" <> T.pack (show i)) Primary "go") (Seed (d + 1) (SFinish 0 "")) | i <- [1 .. fanout]])
     Sequential
 
+-- | Whether a 'Snapshot''s own forced reason is the named constructor,
+-- irrespective of the numbers it now carries — the properties below assert
+-- on WHICH cap fired, not on the exact numbers (those are exercised directly
+-- by the companion's own acceptance tier).
+isForcedNodeCount :: Maybe ForcedReason -> Bool
+isForcedNodeCount (Just ForcedNodeCount {}) = True
+isForcedNodeCount _ = False
+
+isForcedDepth :: Maybe ForcedReason -> Bool
+isForcedDepth (Just ForcedDepth {}) = True
+isForcedDepth _ = False
+
 -- | Nodes whose own layer was genuinely decided by the base coalgebra —
 -- i.e. everything except a node the node-count cap forced. What
 -- 'nodeCapped' actually bounds is how many nodes may EXPAND (spend a real
@@ -308,11 +320,11 @@ unboundedCoalg fanout (Seed d _) =
 -- reading in "Harness.hs" — not the final tree's total size, which the
 -- last permitted expansion's own fan-out can still grow past the limit.
 countExpandable :: Snapshot -> Int
-countExpandable s = (if snapForced s == Just ForcedNodeCount then 0 else 1) + sum (map countExpandable (snapKids s))
+countExpandable s = (if isForcedNodeCount (snapForced s) then 0 else 1) + sum (map countExpandable (snapKids s))
 
 allLeavesAtDepthForced :: Int -> Snapshot -> Bool
 allLeavesAtDepthForced limit s
-  | snapDepth s == limit = snapForced s == Just ForcedDepth && null (snapKids s)
+  | snapDepth s == limit = isForcedDepth (snapForced s) && null (snapKids s)
   | otherwise = all (allLeavesAtDepthForced limit) (snapKids s)
 
 -- | Depth alone: a full tree of the given fan-out down to exactly
@@ -357,7 +369,9 @@ prop_fanOutCap =
           w = snapshot (runIdentity (thoughtHylo witnessAlg coalg seed0))
        in counterexample (show (fanLimit, fanoutWanted)) $
             conjoin
-              [ counterexample "root is forced immediately (its own fan-out already exceeds the cap)" (snapForced w === Just ForcedFanOut)
+              [ counterexample
+                  "root is forced immediately, stamped with the exact proposed count and cap"
+                  (snapForced w === Just (ForcedFanOut fanoutWanted fanLimit))
               , counterexample "a forced root has no children" (null (snapKids w))
               ]
 

@@ -35,6 +35,8 @@ module Tidepool.Thought
     -- * Budgets and forced finish
   , Budget (..)
   , ForcedReason (..)
+  , renderForcedReason
+  , forcedDraftText
   , FinishOrigin (..)
   , Draft (..)
   , branchCount
@@ -140,9 +142,36 @@ data Strategy = Sequential | Concurrent | Pooled Int
 data Budget = Budget {maxDepth :: Int, maxNodes :: Int, maxFanOut :: Int}
   deriving (Eq, Show)
 
--- | Which cap forced a local finish.
-data ForcedReason = ForcedDepth | ForcedNodeCount | ForcedFanOut
+-- | Which cap forced a local finish, carrying the exact numbers that decided
+-- it — so a caller renders "depth cap 2 of 2 reached" without re-deriving
+-- anything from the seed or config that produced the forced finish.
+data ForcedReason
+  = ForcedDepth {atDepth :: Int, depthLimit :: Int}
+  | ForcedNodeCount {atNodeCount :: Int, nodeCountLimit :: Int}
+  | ForcedFanOut {proposedBranches :: Int, fanOutLimit :: Int}
   deriving (Eq, Show)
+
+-- | The ONE rendering of a 'ForcedReason' every caller shares: this module's
+-- own middleware below uses it to stamp a forced 'Draft''s text, and the
+-- companion's @HarnessTypes.renderOrigin@ reuses it verbatim for the journal
+-- and the tree-line badge — so the two can never say something different
+-- about the same forced finish.
+renderForcedReason :: ForcedReason -> Text
+renderForcedReason reason = case reason of
+  ForcedDepth {atDepth = d, depthLimit = lim} ->
+    "depth cap " <> tshow d <> "/" <> tshow lim <> " reached"
+  ForcedNodeCount {atNodeCount = n, nodeCountLimit = lim} ->
+    "node allowance exhausted (" <> tshow n <> "/" <> tshow lim <> ")"
+  ForcedFanOut {proposedBranches = n, fanOutLimit = lim} ->
+    "fan-out cap " <> tshow lim <> " exceeded (" <> tshow n <> " branches proposed)"
+  where
+    tshow = T.pack . show
+
+-- | The 'Draft' text a budget-forced 'Finish' carries — what a parent's fold
+-- window (and the journal's "draft" field) actually reads, never a bare
+-- placeholder like the old @"\<depth cap reached\>"@ marker it replaces.
+forcedDraftText :: ForcedReason -> Text
+forcedDraftText reason = "this node stopped without exploring further — " <> renderForcedReason reason
 
 -- | Why a node carries 'Finish': the model chose to stop, a budget forced it
 -- (still an ordinary completion — PRD: "a model-proposed Strategy is
@@ -539,7 +568,9 @@ reattach bs layer = case layer of
 -- cycle gets spent.
 depthCapped :: Monad m => (a -> Int) -> Int -> Coalg m a -> Coalg m a
 depthCapped depthOf limit coalg a
-  | depthOf a >= limit = pure (Finish (Draft "<depth cap reached>" (BudgetForced ForcedDepth) (depthOf a)))
+  | depthOf a >= limit =
+      let reason = ForcedDepth (depthOf a) limit
+       in pure (Finish (Draft (forcedDraftText reason) (BudgetForced reason) (depthOf a)))
   | otherwise = coalg a
 
 -- | Refuse to unfold past a running node-count budget, mirroring
@@ -552,7 +583,9 @@ nodeCapped :: MonadState Int m => (a -> Int) -> Int -> Coalg m a -> Coalg m a
 nodeCapped depthOf limit coalg a = do
   n <- get
   if n >= limit
-    then pure (Finish (Draft "<node-count cap reached>" (BudgetForced ForcedNodeCount) (depthOf a)))
+    then
+      let reason = ForcedNodeCount n limit
+       in pure (Finish (Draft (forcedDraftText reason) (BudgetForced reason) (depthOf a)))
     else put (n + 1) >> coalg a
 
 -- | Refuse a layer whose fan-out exceeds the cap, mirroring
@@ -562,8 +595,10 @@ nodeCapped depthOf limit coalg a = do
 fanOutCapped :: Monad m => (a -> Int) -> Int -> Coalg m a -> Coalg m a
 fanOutCapped depthOf limit coalg a =
   coalg a >>= \layer ->
-    pure
-      ( if branchCount layer > limit
-          then Finish (Draft "<fan-out cap reached>" (BudgetForced ForcedFanOut) (depthOf a))
-          else layer
-      )
+    let n = branchCount layer
+        reason = ForcedFanOut n limit
+     in pure
+          ( if n > limit
+              then Finish (Draft (forcedDraftText reason) (BudgetForced reason) (depthOf a))
+              else layer
+          )

@@ -1229,7 +1229,7 @@ async fn companion_tree_recurses_folds_and_contains_its_node_ids() {
             run.branch_summary("root/1-alpha", child)
         );
         assert!(
-            run.tree_line(child).contains("finish(model)"),
+            run.tree_line(child).contains("finish(voluntary)"),
             "and their tree lines roll up UNTOUCHED past the failed fold: {}",
             run.tree_line(child)
         );
@@ -1396,12 +1396,29 @@ async fn companion_depth_cap_forces_a_stamped_finish() {
         "the depth cap refuses BEFORE the window runs — a capped node must cost no \
          coalgebra window at all"
     );
+
+    // Every child brief states its own numeric budget — depth against the
+    // cap, its own remaining allowance, and the fan-out cap — so a window
+    // can see its own room to fork instead of it staying implicit.
+    let root_request = run.request_for("root", Phase::Discover);
+    assert!(
+        root_request.contains("Budget: depth 0 of 2 max, node allowance 40, fan-out cap 4."),
+        "the root's own brief must state its numeric budget in full: {root_request}"
+    );
+    let alpha_request = run.request_for("root/1-alpha", Phase::Discover);
+    assert!(
+        alpha_request.contains("Budget: depth 1 of 2 max,")
+            && alpha_request.contains("fan-out cap 4."),
+        "a descendant's brief must state its OWN depth against the same cap: {alpha_request}"
+    );
+
     for path in capped {
         let line = run.tree_line(path);
         assert!(
-            line.contains("forced ForcedDepth"),
-            "a depth-capped node's finish must be STAMPED as budget-forced in the \
-             render, not left indistinguishable from a model's own choice: {line}"
+            line.contains("forced: depth cap 2/2 reached"),
+            "a depth-capped node's finish must be STAMPED as budget-forced, NAMING \
+             the depth cap and the governing numbers, not left indistinguishable \
+             from a model's own choice: {line}"
         );
     }
     assert_eq!(
@@ -1496,8 +1513,9 @@ async fn companion_node_cap_bounds_the_windows_that_run() {
     for path in ["root/1-alpha/1-alpha", "root/1-alpha/2-beta"] {
         let line = run.tree_line(path);
         assert!(
-            line.contains("forced ForcedNodeCount"),
-            "an overflow branch's finish must be stamped ForcedNodeCount: {line}"
+            line.contains("forced: node allowance exhausted (0/4)"),
+            "an overflow branch's finish must be stamped with the NAMED allowance \
+             reason and the numbers that governed it: {line}"
         );
     }
     assert_eq!(run.counter("runForced"), 2);
@@ -1545,8 +1563,9 @@ async fn companion_fanout_cap_refuses_the_descent() {
     );
     let root_line = run.tree_line("root");
     assert!(
-        root_line.contains("forced ForcedFanOut"),
-        "the node finishes with a ForcedFanOut stamp: {root_line}"
+        root_line.contains("forced: fan-out cap 2 exceeded (3 branches proposed)"),
+        "the node finishes with a NAMED fan-out-cap reason and the numbers that \
+         governed it: {root_line}"
     );
     assert_eq!(run.counter("runNodes"), 1);
     assert_eq!(run.counter("runForced"), 1);
