@@ -6,6 +6,15 @@ in git history rather than here.
 
 ## Active work
 
+- [Turn latency: state injection + compile incrementalism](turn-latency-state-injection.md):
+  **approved (2026-08-20), standing go-ahead for incremental compile
+  improvements toward eventual daemon mode.** ~67% of a companion turn is the
+  fused outer compile, cold every turn because state rides the source text.
+  Sequence: module-level attribution (in flight) → state injection via a
+  stable-name inject-val (memo learns that one shape) → persistent shared
+  build-products dir if attribution shows unchanged-module recompilation
+  dominates → resident extract daemon as the eventual form (readiness rules
+  in the plan).
 - [The Effect Protocol](self-iterating-harness/22-effect-protocol-prd.md):
   **proposed (2026-08-17), approved direction.** One data-only schema crate
   generating every artifact the effect contract currently maintains by hand
