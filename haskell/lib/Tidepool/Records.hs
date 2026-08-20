@@ -23,8 +23,12 @@ module Tidepool.Records
   , Commit(..)
   , StatusEntry(..)
   , FileDelta(..)
+  , CommitDeltas(..)
   , FsError(..)
   , FileRead(..)
+  , GitError(..)
+  , LlmError(..)
+  , HttpError(..)
   ) where
 
 import Prelude (Int, Bool(..), Eq, Show, Maybe(..), (==))
@@ -32,16 +36,18 @@ import Data.Text (Text)
 import Tidepool.Aeson.Value (ToJSON(..), object, (.=))
 -- Wire records: GENERATED from the Rust structs (single source of truth).
 -- Re-exported below so `Tidepool.Prelude` (→ user evals) sees them unchanged.
-import Tidepool.Records.Bridged (Commit(..), StatusEntry(..), FileDelta(..), Proc(..), Hit(..), FileMeta(..))
--- `FsError`/`FileRead`: single-sourced from Rust the SAME way (see
--- Tidepool.Records.Stable's own header), just not via the CoreRecord
--- pipeline — `FileRead.contents` embeds `FsError`, so both need this
--- stable, always-in-scope home rather than the per-session generated
--- `Tidepool.Effects` module (a record meant to cross a session bind cannot
--- mention a fragment-nominal type). Both carry their own `ToJSON` instance
--- already (unlike the six above, whose instances are hand-written here as
--- orphans), so nothing further is needed to re-export them.
-import Tidepool.Records.Stable (FsError(..), FileRead(..))
+import Tidepool.Records.Bridged (Commit(..), StatusEntry(..), FileDelta(..), CommitDeltas(..), Proc(..), Hit(..), FileMeta(..))
+-- `FsError`/`FileRead`/`GitError`/`LlmError`/`HttpError`: single-sourced from
+-- Rust the SAME way (see Tidepool.Records.Stable's own header), just not via
+-- the CoreRecord pipeline — each is an effect's own `errors` ADT (or, for
+-- `FileRead`, embeds one as a FIELD), so it needs this stable, always-in-scope
+-- home rather than the per-session generated `Tidepool.Effects` module (a
+-- value meant to cross a session bind cannot mention a fragment-nominal
+-- type — that includes a verb's own `Either <Err> a` result, not just a
+-- record field). Each carries its own `ToJSON` instance already (unlike the
+-- bridged records above, whose instances are hand-written here as orphans),
+-- so nothing further is needed to re-export them.
+import Tidepool.Records.Stable (FsError(..), FileRead(..), GitError(..), LlmError(..), HttpError(..))
 
 -- | Did the process exit successfully (exit code 0)?
 ok :: Proc -> Bool
@@ -173,3 +179,9 @@ instance ToJSON FileDelta where
     , "dels"   .= d.dels
     , "binary" .= d.binary
     ]
+
+-- | One commit paired with its own per-file numstat deltas, from
+-- 'gitLogNumstat' — the bulk substrate for a git-history investigation.
+-- The @data CommitDeltas@ decl is GENERATED (Tidepool.Records.Bridged).
+instance ToJSON CommitDeltas where
+  toJSON cd = object ["commit" .= cd.commit, "deltas" .= cd.deltas]

@@ -65,3 +65,32 @@ async fn value_binding_int_json_function_survive_gc() {
         turn.text
     );
 }
+
+/// GitError session-bind acceptance (the git-substrate friction fix): a BARE
+/// `x <- gitLog n` bind — no `Right x <-` destructuring — must survive into a
+/// LATER turn. Before `GitError` moved to the stable `Tidepool.Records.Stable`
+/// module (`stable_errors true`, effect_defs.rs), the whole `Either GitError
+/// [Commit]` result mentioned a type declared inline in the per-turn
+/// fragment-nominal `Tidepool.Effects`, so this exact bind tripped the
+/// cross-row session-bind guard — see `gc_field_replay.rs`, whose own
+/// `gitLog 500` bind still destructures (`Right commits <-`) for the same
+/// reason `Commit` alone (already bridged/stable) crosses fine but the WHOLE
+/// `Either` did not, pre-fix.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn git_error_bare_either_bind_survives_into_next_turn() {
+    require_extract();
+    let repo_root = tidepool_testing::eval_harness::repo_root();
+    let repl = Repl {
+        server: build_full_server(repo_root, "giterr", false),
+    };
+
+    // Turn 1: BARE Either bind — no `Right x <-` destructuring.
+    let t = repl.eval_ok("x <- gitLog 2").await;
+    assert!(t.contains("bound"), "bind x: {t}");
+
+    // Turn 2: `x :: Either GitError [Commit]` is still a live binding.
+    let t = repl
+        .eval_ok("pure (either (const (0 :: Int)) length x)")
+        .await;
+    assert!(t.contains('2'), "either-fold over x in a later turn: {t}");
+}

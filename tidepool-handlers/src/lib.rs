@@ -40,7 +40,8 @@ pub use handlers::*;
 // crate (single source of truth shared with test mocks) — re-exported here so
 // the external surface (`tidepool_handlers::Proc`, etc.) is unchanged.
 pub use tidepool_bridge_effects::{
-    bridged_records_module, FileMeta, GitCommit, GitFileDelta, GitStatusEntry, Hit, Proc,
+    bridged_records_module, FileMeta, GitCommit, GitCommitDeltas, GitFileDelta, GitStatusEntry,
+    Hit, Proc,
 };
 
 // ============================================================================

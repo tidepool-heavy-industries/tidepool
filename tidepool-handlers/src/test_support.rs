@@ -174,6 +174,7 @@ pub(crate) fn full_effect_test_table() -> DataConTable {
         ("Commit", 5),
         ("StatusEntry", 2),
         ("FileDelta", 4),
+        ("CommitDeltas", 2),
         // Exec/Fs bridged records (Proc/Hit/FileMeta) — same reason as the
         // Git records above: they aren't GADT constructors, so the
         // decl-constructor loop above doesn't pick them up.

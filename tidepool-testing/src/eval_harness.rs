@@ -461,10 +461,12 @@ error = P.error . T.unpack
 -- Effect-local error ADTs. Production generates these from effect_defs.rs at
 -- codegen time (see tidepool-mcp/src/effect_defs.rs); this static preamble
 -- hand-declares the same shapes so GADT return types below can reference them.
+-- `HttpError`/`GitError`/`LlmError` (and `FsError`, never declared here) are
+-- NOT hand-declared: they live in the stable `Tidepool.Records.Stable` module
+-- (`stable_errors true`, effect_defs.rs) and arrive already in scope via
+-- `import Tidepool.Prelude` above — a duplicate inline decl here would
+-- conflict with that import instead of merely drifting from it.
 data ExecError = ExecSpawn Text | ExecBadDir Text deriving (Show, Eq)
-data HttpError = HttpInvalidUrl Text | HttpRestricted Text | HttpNetwork Text | HttpStatus Int Text | HttpTooLarge Int deriving (Show, Eq)
-data GitError = GitBadRevspec Text | GitFailed Int Text deriving (Show, Eq)
-data LlmError = LlmApi Text | LlmRefusal Text | LlmBudget deriving (Show, Eq)
 data LspError = LspDaemonDown Text deriving (Show, Eq)
 
 data Console a where

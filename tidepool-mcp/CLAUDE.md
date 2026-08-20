@@ -42,11 +42,14 @@ survive a session bind (`x <- someVerb ...` reused in a later turn). `FileRead`
 (readGlob's per-file record) shipped this way for a long time harmlessly,
 until a later-landed guard turned the gap into a hard failure the moment
 someone bound it — see `tidepool-mcp/src/fs_stable.rs` for the fix and the
-full story. An `errors` ADT referenced by a bridged record's FIELD (like
-`FileRead.contents :: Either FsError Text`) needs the SAME stable home as the
-record itself — `stable_errors true` is how a definition opts an `errors`
-block out of the inline per-session text without losing its Rust-enum
-generation or per-verb `Either <Err> T` tagging.
+full story. The same guard fires even WITHOUT a bridged record in sight: an
+errors-tagged verb's own result IS `Either <Err> T`, so that type alone
+mentions `<Err>` — a bare `x <- gitLog n` (no `Right x <-` destructuring)
+tripped this identically, `Err` never touching a record field at all.
+`stable_errors true` is how a definition opts its whole `errors` block out of
+the inline per-session text (for either reason) without losing its Rust-enum
+generation or per-verb `Either <Err> T` tagging — `Git`/`Llm`/`Http` all carry
+it now, alongside `Fs`.
 
 the `tidepool` binary only wires the handler stack (`build_base_stack`, called
 from `tidepool/src/stack.rs`); the

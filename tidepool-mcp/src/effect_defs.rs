@@ -658,6 +658,8 @@ macro_rules! http_effect_def {
             // #335 typed-failure ADT. The HTTP status code is a FIELD on
             // `HttpStatus` (not folded into a message) so callers can dispatch
             // on it, e.g. `Left (HttpStatus 404 _)`.
+            // STABLE home (`stable_errors true`, below) — see the same note on
+            // `errors GitError` in `git_effect_def!` / `tidepool-mcp/src/fs_stable.rs`.
             errors HttpError [
                 { ctor HttpInvalidUrl, fields { detail: "Text" as String },              doc "the URL is malformed or uses an unsupported scheme" },
                 { ctor HttpRestricted, fields { detail: "Text" as String },              doc "the URL targets a sandboxed/internal address" },
@@ -665,6 +667,7 @@ macro_rules! http_effect_def {
                 { ctor HttpStatus,     fields { code: "Int" as i64, body: "Text" as String }, doc "a non-2xx HTTP response" },
                 { ctor HttpTooLarge,   fields { nodes: "Int" as i64 },                   doc "the JSON response exceeds the materialization cap (node count); narrow the query" },
             ],
+            stable_errors true,
             verbs [
                 { ctor HttpGet, method http_get,
                   args { url: "Text" as String },
@@ -707,20 +710,29 @@ macro_rules! git_effect_def {
                 "Read-only git repository queries. Returns typed records parsed Rust-side ",
                 "from machine-format git output — no text-splitting needed. ",
                 "`gitLog n` → last N commits newest-first; `gitStatus` → working-tree status; ",
-                "`gitDiffStat rev` → per-file diff stats vs a revspec; `gitShow rev` → one commit. ",
-                "All three list verbs return typed records: `Commit {sha,subject,author,date,files}`, ",
+                "`gitDiffStat rev` → per-file diff stats, WORKING TREE vs `rev` (NOT commit-vs-parent — ",
+                "pass a range like \"sha~1..sha\" for that; a clean tree ⇒ `[]`, correct data, not an error); ",
+                "`gitLogNumstat n` → last N commits EACH PAIRED WITH ITS OWN numstat deltas, one ",
+                "subprocess for all N — the substrate for any git-history investigation, in place of ",
+                "`gitLog` + a per-commit `mapM gitDiffStat`; `gitShow rev` → one commit. ",
+                "Every list verb returns typed records: `Commit {sha,subject,author,date,files}`, ",
                 "`StatusEntry {path,state}` (state = 2-char XY porcelain code), ",
-                "`FileDelta {path,adds,dels,binary}`.",
+                "`FileDelta {path,adds,dels,binary}`, `CommitDeltas {commit,deltas}`.",
             ],
             type_defs [],
             // #335 typed-failure ADT. `GitBadRevspec` covers an unknown/ambiguous
             // revspec (also a `gitShow` with zero matching commits); `GitFailed`
             // is the residual (git exited nonzero for another reason, or the git
             // binary itself couldn't be spawned — exit code -1 in that case).
+            // STABLE home (`stable_errors true`, below): a `GitError` inlined into
+            // the per-turn fragment-nominal `Tidepool.Effects` cannot survive a
+            // session bind of the WHOLE `Either GitError a` a verb returns — see
+            // `tidepool-mcp/src/fs_stable.rs`.
             errors GitError [
                 { ctor GitBadRevspec, fields { detail: "Text" as String },                     doc "unknown or ambiguous revspec" },
                 { ctor GitFailed,     fields { code: "Int" as i64, detail: "Text" as String },  doc "git exited nonzero (or could not be spawned)" },
             ],
+            stable_errors true,
             verbs [
                 { ctor GitLog, method git_log,
                   args { n: "Int" as i64 },
@@ -734,6 +746,9 @@ macro_rules! git_effect_def {
                 { ctor GitShow, method git_show,
                   args { rev: "Text" as String },
                   ret "Commit", errors GitError },
+                { ctor GitLogNumstat, method git_log_numstat,
+                  args { n: "Int" as i64 },
+                  ret "[CommitDeltas]", errors GitError },
             ],
             helpers [
                 { name gitLog, sig "Int -> M (Either GitError [Commit])",
@@ -744,13 +759,25 @@ macro_rules! git_effect_def {
                        "(e.g. \"M \", \"??\", \"A \")."],
                   body nullary GitStatus },
                 { name gitDiffStat, sig "Text -> M (Either GitError [FileDelta])",
-                  doc ["Per-file diff stats vs a revspec (\"HEAD~1\", \"main\", \"HEAD~3..HEAD\", etc.).",
-                       "'FileDelta' carries path/adds/dels/binary."],
+                  doc ["Per-file diff stats. THE ARGUMENT IS A REVSPEC COMPARED AGAINST THE WORKING",
+                       "TREE, not \"commit vs its parent\" — `gitDiffStat sha` on a clean tree is",
+                       "`Right []` (correct data, not an error). For \"what did this commit change\",",
+                       "pass a RANGE: `gitDiffStat (sha <> \"~1..\" <> sha)` (also \"main..HEAD\",",
+                       "\"HEAD~3..HEAD\"). For bulk per-commit history, use `gitLogNumstat` instead —",
+                       "one subprocess for N commits, no per-commit mapM. 'FileDelta' carries",
+                       "path/adds/dels/binary."],
                   body pointfree GitDiffStat },
                 { name gitShow, sig "Text -> M (Either GitError Commit)",
                   doc ["Single commit by revspec. `Left (GitBadRevspec _)` on an unknown or",
                        "ambiguous revspec; unwrap with `Right c <- gitShow rev` or `>>= liftEither`."],
                   body pointfree GitShow },
+                { name gitLogNumstat, sig "Int -> M (Either GitError [CommitDeltas])",
+                  doc ["Last N commits, newest-first, EACH PAIRED WITH ITS OWN per-file numstat",
+                       "deltas — one subprocess for all N, in place of `gitLog` followed by a",
+                       "per-commit `mapM gitDiffStat`. 'CommitDeltas' carries {commit, deltas};",
+                       "a merge or otherwise-empty commit has `deltas = []`. A renamed file records",
+                       "only its NEW path."],
+                  body pointfree GitLogNumstat },
             ],
         }
     };
@@ -1427,11 +1454,14 @@ macro_rules! llm_effect_def {
             type_defs [],
             // #335 typed-failure ADT. FULLY TOTAL: budget exhaustion is now DATA
             // (`LlmBudget`), not an abort — nothing in the Llm path kills the eval.
+            // STABLE home (`stable_errors true`, below) — see the same note on
+            // `errors GitError` above / `tidepool-mcp/src/fs_stable.rs`.
             errors LlmError [
                 { ctor LlmApi,     fields { detail: "Text" as String }, doc "API/network call failure" },
                 { ctor LlmRefusal, fields { detail: "Text" as String }, doc "the model declined to answer" },
                 { ctor LlmBudget,  fields { },                          doc "the per-eval call budget is exhausted" },
             ],
+            stable_errors true,
             verbs [
                 { ctor LlmStructured, method llm_structured,
                   args { prompt: "Text" as String, schema: "Value" as crate::effect_glue::JsonArg },
@@ -2261,8 +2291,11 @@ mod tests {
     }
 
     /// #335 Fs wave: the generated `fs_decl()` threads `Either FsError` through
-    /// the tagged verbs, leaves the untagged ones bare, and emits the ADT into
-    /// `type_defs`.
+    /// the tagged verbs, leaves the untagged ones bare. `stable_errors true`
+    /// (fs_stable.rs) means NEITHER `FileRead` nor `FsError` lands in
+    /// `type_defs` — both live in the stable `Tidepool.Records.Stable` module
+    /// instead, so a session bind of the whole `Either FsError a`/`[FileRead]`
+    /// survives into a later turn (see `tidepool-mcp/src/fs_stable.rs`).
     #[test]
     fn generated_fs_decl_threads_either_and_emits_error_adt() {
         let d = crate::fs_decl();
@@ -2287,20 +2320,15 @@ mod tests {
             .contains(&"FsReadGlob :: Text -> Fs [FileRead]"));
         // TryFsRead is gone.
         assert!(!d.constructors.iter().any(|c| c.starts_with("TryFsRead")));
-        // Both the FileRead record and the error ADT land in type_defs.
-        assert!(d.type_defs.contains(
-            &"data FileRead = FileRead { path :: Text, contents :: Either FsError Text } deriving (Show, Eq)"
-        ));
-        // FileRead renders as a result value (the eval wrapper is `toJSON _r`),
-        // so its ToJSON instance ships alongside the decl.
-        assert!(d.type_defs.contains(
-            &"instance ToJSON FileRead where\n  toJSON (FileRead p c) = object [\"path\" .= p, \"contents\" .= c]"
-        ));
-        assert!(d.type_defs.contains(&"data FsError = FsNotFound Text | FsNotUtf8 Text | FsSandbox Text | FsBadRegex Text | FsIo Text deriving (Show, Eq)\ninstance ToJSON FsError where\n  toJSON e = case e of\n    FsNotFound path -> object [\"tag\" .= (\"FsNotFound\" :: Text), \"path\" .= path]\n    FsNotUtf8 path -> object [\"tag\" .= (\"FsNotUtf8\" :: Text), \"path\" .= path]\n    FsSandbox detail -> object [\"tag\" .= (\"FsSandbox\" :: Text), \"detail\" .= detail]\n    FsBadRegex detail -> object [\"tag\" .= (\"FsBadRegex\" :: Text), \"detail\" .= detail]\n    FsIo detail -> object [\"tag\" .= (\"FsIo\" :: Text), \"detail\" .= detail]\n"));
+        // `stable_errors true`: type_defs carries neither decl inline.
+        assert!(d.type_defs.is_empty());
     }
 
-    /// #335 Git wave: every verb threads `Either GitError`, and the error ADT
-    /// (with `GitFailed`'s 2-field variant) lands in type_defs.
+    /// #335 Git wave: every verb threads `Either GitError`. `stable_errors
+    /// true` (fs_stable.rs precedent) means the error ADT does NOT land in
+    /// `type_defs` — it lives in `Tidepool.Records.Stable` instead, so a bare
+    /// `x <- gitLog n` bind (no `Right x <-` destructuring) survives a
+    /// session bind into a later turn.
     #[test]
     fn generated_git_decl_threads_either_and_emits_error_adt() {
         let d = crate::git_decl();
@@ -2317,13 +2345,16 @@ mod tests {
             .constructors
             .contains(&"GitShow :: Text -> Git (Either GitError Commit)"));
         assert!(d
-            .type_defs.contains(&"data GitError = GitBadRevspec Text | GitFailed Int Text deriving (Show, Eq)\ninstance ToJSON GitError where\n  toJSON e = case e of\n    GitBadRevspec detail -> object [\"tag\" .= (\"GitBadRevspec\" :: Text), \"detail\" .= detail]\n    GitFailed code detail -> object [\"tag\" .= (\"GitFailed\" :: Text), \"code\" .= code, \"detail\" .= detail]\n"));
+            .constructors
+            .contains(&"GitLogNumstat :: Int -> Git (Either GitError [CommitDeltas])"));
+        assert!(d.type_defs.is_empty());
     }
 
     /// #335 Http wave: HttpGet/HttpPost thread `Either HttpError`,
     /// `HttpStatus` carries the status CODE as a field, and Try* is gone.
     /// JSON parsing is pure (`eitherDecode` over the JsonDecode primop) — the
-    /// Http effect carries no parse verb and no bad-JSON error.
+    /// Http effect carries no parse verb and no bad-JSON error. `stable_errors
+    /// true` means the error ADT does not land in `type_defs` (same as Git).
     #[test]
     fn generated_http_decl_threads_either_and_emits_error_adt() {
         let d = crate::http_decl();
@@ -2335,12 +2366,13 @@ mod tests {
             .contains(&"HttpPost :: Text -> Value -> Http (Either HttpError Value)"));
         assert!(!d.constructors.iter().any(|c| c.contains("ParseJson")));
         assert!(!d.constructors.iter().any(|c| c.starts_with("Try")));
-        assert!(d.type_defs.contains(&"data HttpError = HttpInvalidUrl Text | HttpRestricted Text | HttpNetwork Text | HttpStatus Int Text | HttpTooLarge Int deriving (Show, Eq)\ninstance ToJSON HttpError where\n  toJSON e = case e of\n    HttpInvalidUrl detail -> object [\"tag\" .= (\"HttpInvalidUrl\" :: Text), \"detail\" .= detail]\n    HttpRestricted detail -> object [\"tag\" .= (\"HttpRestricted\" :: Text), \"detail\" .= detail]\n    HttpNetwork detail -> object [\"tag\" .= (\"HttpNetwork\" :: Text), \"detail\" .= detail]\n    HttpStatus code body -> object [\"tag\" .= (\"HttpStatus\" :: Text), \"code\" .= code, \"body\" .= body]\n    HttpTooLarge nodes -> object [\"tag\" .= (\"HttpTooLarge\" :: Text), \"nodes\" .= nodes]\n"));
+        assert!(d.type_defs.is_empty());
     }
 
     /// #335 Llm wave: LlmStructured threads `Either LlmError`, `LlmBudget` is
     /// a nullary constructor (budget exhaustion is DATA, not an abort), and
-    /// TryLlmStructured is gone.
+    /// TryLlmStructured is gone. `stable_errors true` means the error ADT
+    /// does not land in `type_defs` (same as Git).
     #[test]
     fn generated_llm_decl_threads_either_and_emits_error_adt() {
         let d = crate::llm_decl();
@@ -2348,7 +2380,7 @@ mod tests {
             .constructors
             .contains(&"LlmStructured :: Text -> Value -> Llm (Either LlmError Value)"));
         assert!(!d.constructors.iter().any(|c| c.starts_with("Try")));
-        assert!(d.type_defs.contains(&"data LlmError = LlmApi Text | LlmRefusal Text | LlmBudget deriving (Show, Eq)\ninstance ToJSON LlmError where\n  toJSON e = case e of\n    LlmApi detail -> object [\"tag\" .= (\"LlmApi\" :: Text), \"detail\" .= detail]\n    LlmRefusal detail -> object [\"tag\" .= (\"LlmRefusal\" :: Text), \"detail\" .= detail]\n    LlmBudget -> object [\"tag\" .= (\"LlmBudget\" :: Text)]\n"));
+        assert!(d.type_defs.is_empty());
     }
 
     /// #335 Lsp wave: MINIMAL tagging — only the seed (`lspWhere`) and the

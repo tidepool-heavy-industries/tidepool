@@ -220,8 +220,8 @@ module Tidepool.Prelude
   , Proc(..), ok, Hit(..)
   , FileMeta(..), UpdateOutcome(..), UpdateOneOutcome(..), WriteOutcome(..)
   , UpdateAllOutcome(..), InsertAfterOutcome(..)
-  , Commit(..), StatusEntry(..), FileDelta(..)
-  , FsError(..), FileRead(..)
+  , Commit(..), StatusEntry(..), FileDelta(..), CommitDeltas(..)
+  , FsError(..), FileRead(..), GitError(..), LlmError(..), HttpError(..)
     -- * Text padding, chunking, and prefix utilities
     -- (Text chunking is `T.chunksOf`; the unqualified `chunksOf` is the list
     -- chunker from `.tidepool/lib/Schemes.hs` — do not shadow it here.)
@@ -307,7 +307,7 @@ import Control.Monad
   , (=<<), (>=>), (<=<)
   , foldM, foldM_
   )
-import Tidepool.Records (Proc(..), ok, Hit(..), FileMeta(..), UpdateOutcome(..), UpdateOneOutcome(..), WriteOutcome(..), UpdateAllOutcome(..), InsertAfterOutcome(..), Commit(..), StatusEntry(..), FileDelta(..), FsError(..), FileRead(..))
+import Tidepool.Records (Proc(..), ok, Hit(..), FileMeta(..), UpdateOutcome(..), UpdateOneOutcome(..), WriteOutcome(..), UpdateAllOutcome(..), InsertAfterOutcome(..), Commit(..), StatusEntry(..), FileDelta(..), CommitDeltas(..), FsError(..), FileRead(..), GitError(..), LlmError(..), HttpError(..))
 import Tidepool.Data.Time (UTCTime(..), formatISO8601, parseISO8601, toGregorian, formatDay, daysFromCivil, diffUTCTime, addUTCTime, epochMillis)
 import Tidepool.QQ.Fmt.Runtime
   (FSign(..), FAlign(..), fmtInt, fmtFrac, fmtStr, fmtChar, fmtSigned, fmtPlain)

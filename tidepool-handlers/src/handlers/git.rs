@@ -1,5 +1,5 @@
 use std::path::PathBuf;
-use tidepool_bridge_effects::{GitCommit, GitFileDelta, GitStatusEntry};
+use tidepool_bridge_effects::{GitCommit, GitCommitDeltas, GitFileDelta, GitStatusEntry};
 
 // ============================================================================
 // Tag 7: Git (read-only repository queries)
@@ -168,6 +168,95 @@ impl GitHandler {
             })
             .collect()
     }
+
+    /// A numstat path that names a rename: either the plain `old => new` form
+    /// (no common prefix/suffix) or the `{old => new}` infix form git emits
+    /// when the rename shares a directory prefix and/or filename suffix
+    /// (e.g. `src/{old.rs => new.rs}`, `{old => new}/file.txt`). Returns the
+    /// NEW path in both cases; a non-rename path is returned unchanged.
+    fn resolve_renamed_path(raw: &str) -> String {
+        if let (Some(start), Some(end)) = (raw.find('{'), raw.find('}')) {
+            if end > start {
+                if let Some(arrow) = raw[start..end].find(" => ") {
+                    let prefix = &raw[..start];
+                    let new_part = &raw[start + arrow + 4..end];
+                    let suffix = &raw[end + 1..];
+                    return format!("{prefix}{new_part}{suffix}");
+                }
+            }
+        }
+        match raw.find(" => ") {
+            Some(arrow) => raw[arrow + 4..].trim().to_string(),
+            None => raw.to_string(),
+        }
+    }
+
+    /// Parse `git log --format="%H%x00%s%x00%an%x00%cI" --numstat -M` output:
+    /// one NUL-delimited commit header (same shape `parse_log_output` reads)
+    /// followed by that commit's own numstat lines, in ONE subprocess for
+    /// every commit — the single parse site for `gitLogNumstat`. A merge or
+    /// otherwise-empty commit's header is followed by zero numstat lines (git
+    /// shows no diff for a merge without `-m`), so `deltas` comes back `[]`
+    /// for it, not an error. `Commit.files` is populated from the same
+    /// deltas, matching `gitLog`'s (`--name-only`) shape.
+    fn parse_log_numstat_output(output: &str) -> Vec<GitCommitDeltas> {
+        let mut result = Vec::new();
+        let mut current: Option<(GitCommit, Vec<GitFileDelta>)> = None;
+
+        for line in output.lines() {
+            if line.is_empty() {
+                continue;
+            }
+            let header_parts: Vec<&str> = line.splitn(4, '\x00').collect();
+            if header_parts.len() >= 4 {
+                if let Some((commit, deltas)) = current.take() {
+                    result.push(GitCommitDeltas { commit, deltas });
+                }
+                current = Some((
+                    GitCommit {
+                        sha: header_parts[0].to_string(),
+                        subject: header_parts[1].to_string(),
+                        author: header_parts[2].to_string(),
+                        date: header_parts[3].to_string(),
+                        files: Vec::new(),
+                    },
+                    Vec::new(),
+                ));
+                continue;
+            }
+            let Some((commit, deltas)) = current.as_mut() else {
+                continue;
+            };
+            let parts: Vec<&str> = line.splitn(3, '\t').collect();
+            if parts.len() < 3 {
+                continue;
+            }
+            let (adds_s, dels_s, raw_path) = (parts[0], parts[1], parts[2].trim());
+            let binary = adds_s == "-" || dels_s == "-";
+            let adds = if binary {
+                0
+            } else {
+                adds_s.parse::<i64>().unwrap_or(0)
+            };
+            let dels = if binary {
+                0
+            } else {
+                dels_s.parse::<i64>().unwrap_or(0)
+            };
+            let path = Self::resolve_renamed_path(raw_path);
+            commit.files.push(path.clone());
+            deltas.push(GitFileDelta {
+                path,
+                adds,
+                dels,
+                binary,
+            });
+        }
+        if let Some((commit, deltas)) = current {
+            result.push(GitCommitDeltas { commit, deltas });
+        }
+        result
+    }
 }
 
 impl GitHandler {
@@ -210,6 +299,22 @@ impl GitHandler {
             "--",
         ])?;
         Self::parse_single_commit(&output, &rev)
+    }
+
+    /// The bulk git-history substrate: last N commits, each paired with its
+    /// own numstat deltas, in ONE subprocess (`-M` enables rename detection
+    /// so the parser's `{old => new}`/`old => new` handling is exercised).
+    fn git_log_numstat(&mut self, n: i64) -> Result<Vec<GitCommitDeltas>, GitError> {
+        let n_str = n.to_string();
+        let output = self.run_git(&[
+            "log",
+            "-n",
+            &n_str,
+            "--format=%H%x00%s%x00%an%x00%cI",
+            "--numstat",
+            "-M",
+        ])?;
+        Ok(Self::parse_log_numstat_output(&output))
     }
 }
 
@@ -276,6 +381,16 @@ mod tests {
         assert!(matches!(req, GitReq::GitShow(ref r) if r == "HEAD"));
     }
 
+    #[test]
+    fn test_git_from_core_log_numstat() {
+        let table = full_effect_test_table();
+        let con_id = table.get_by_name("GitLogNumstat").unwrap();
+        let n = (150i64).to_value(&table).unwrap();
+        let val = Value::Con(con_id, vec![n]);
+        let req = GitReq::from_value(&val, &table).unwrap();
+        assert!(matches!(req, GitReq::GitLogNumstat(150)));
+    }
+
     // =========================================================================
     // Git handler tests — unit (parse functions) + integration (scratch repo)
     // =========================================================================
@@ -333,6 +448,76 @@ file_c.txt\n\
         assert_eq!(deltas[2].path, "docs/README.md");
         assert_eq!(deltas[2].adds, 3);
         assert_eq!(deltas[2].dels, 0);
+    }
+
+    /// `gitLogNumstat`'s single parse site (`parse_log_numstat_output`),
+    /// every hazard as one table: a plain file, a plain `old => new` rename,
+    /// a `{old => new}` infix rename with a common PREFIX, one with a common
+    /// SUFFIX, a binary file (`-\t-\tpath`), and a merge/empty commit with
+    /// zero numstat lines (deltas == [], not an error).
+    #[test]
+    fn test_git_parse_log_numstat_output_hazards() {
+        let output = "\
+c1\x00Normal commit\x00Alice\x002024-01-01T00:00:00+00:00\n\
+\n\
+10\t5\tsrc/lib.rs\n\
+\n\
+c2\x00Plain rename\x00Alice\x002024-01-02T00:00:00+00:00\n\
+\n\
+0\t0\told_name.rs => new_name.rs\n\
+\n\
+c3\x00Infix rename, common prefix\x00Alice\x002024-01-03T00:00:00+00:00\n\
+\n\
+2\t1\tsrc/{old.rs => new.rs}\n\
+\n\
+c4\x00Infix rename, common suffix\x00Alice\x002024-01-04T00:00:00+00:00\n\
+\n\
+1\t1\t{old => new}/shared.rs\n\
+\n\
+c5\x00Binary file\x00Alice\x002024-01-05T00:00:00+00:00\n\
+\n\
+-\t-\timage.png\n\
+\n\
+c6\x00Merge commit (no diff)\x00Alice\x002024-01-06T00:00:00+00:00\n\
+\n\
+c7\x00Trailing commit\x00Alice\x002024-01-07T00:00:00+00:00\n\
+\n\
+3\t3\tdocs/README.md\n";
+        let rows = GitHandler::parse_log_numstat_output(output);
+        assert_eq!(rows.len(), 7, "expected 7 commits, got {}", rows.len());
+
+        // c1: plain file, unaffected by rename resolution.
+        assert_eq!(rows[0].commit.sha, "c1");
+        assert_eq!(rows[0].deltas.len(), 1);
+        assert_eq!(rows[0].deltas[0].path, "src/lib.rs");
+        assert_eq!(rows[0].deltas[0].adds, 10);
+        assert_eq!(rows[0].deltas[0].dels, 5);
+        assert!(!rows[0].deltas[0].binary);
+        assert_eq!(rows[0].commit.files, vec!["src/lib.rs"]);
+
+        // c2: plain `old => new` rename records only the NEW path.
+        assert_eq!(rows[1].deltas[0].path, "new_name.rs");
+
+        // c3: `{old => new}` infix with a common directory PREFIX.
+        assert_eq!(rows[2].deltas[0].path, "src/new.rs");
+
+        // c4: `{old => new}` infix with a common filename SUFFIX.
+        assert_eq!(rows[3].deltas[0].path, "new/shared.rs");
+
+        // c5: binary file — adds/dels are 0, not parsed from "-".
+        assert_eq!(rows[4].deltas[0].path, "image.png");
+        assert!(rows[4].deltas[0].binary);
+        assert_eq!(rows[4].deltas[0].adds, 0);
+        assert_eq!(rows[4].deltas[0].dels, 0);
+
+        // c6: merge/empty commit — zero numstat lines, not an error.
+        assert_eq!(rows[5].commit.sha, "c6");
+        assert!(rows[5].deltas.is_empty());
+        assert!(rows[5].commit.files.is_empty());
+
+        // c7: parsing resumes correctly after an empty-deltas commit.
+        assert_eq!(rows[6].commit.sha, "c7");
+        assert_eq!(rows[6].deltas[0].path, "docs/README.md");
     }
 
     // Build a scratch git repo with 2 commits, a staged file, and an untracked file.
@@ -513,6 +698,61 @@ file_c.txt\n\
     }
 
     #[test]
+    fn test_git_handler_log_numstat_two_commits() {
+        let dir = make_scratch_repo();
+        let table = full_effect_test_table();
+        let captured = CapturedOutput::new();
+        let cx = EffectContext::with_user(&table, &captured);
+        let mut handler = GitHandler::new(dir.path().to_path_buf());
+
+        let result = unwrap_right(
+            response_value(
+                handler.handle(GitReq::GitLogNumstat(2), &cx).unwrap(),
+                &table,
+            ),
+            &table,
+        );
+        // Should be a cons list with 2 CommitDeltas cells, each carrying a
+        // Commit (5 fields) and a [FileDelta] with at least one entry.
+        let mut count = 0;
+        let mut node = &result;
+        loop {
+            match node {
+                Value::Con(id, fields) if table.name_of(*id).unwrap() == ":" => {
+                    match &fields[0] {
+                        Value::Con(cdid, cdfields) => {
+                            assert_eq!(table.name_of(*cdid).unwrap(), "CommitDeltas");
+                            assert_eq!(cdfields.len(), 2, "CommitDeltas must have 2 fields");
+                            match &cdfields[0] {
+                                Value::Con(cid, cfields) => {
+                                    assert_eq!(table.name_of(*cid).unwrap(), "Commit");
+                                    assert_eq!(cfields.len(), 5, "Commit must have 5 fields");
+                                }
+                                other => panic!("expected Commit Con, got {:?}", other),
+                            }
+                        }
+                        other => panic!("expected CommitDeltas Con, got {:?}", other),
+                    }
+                    count += 1;
+                    node = &fields[1];
+                }
+                Value::Con(id, _) if table.name_of(*id).unwrap() == "[]" => break,
+                other => panic!("unexpected: {:?}", other),
+            }
+        }
+        assert_eq!(count, 2, "gitLogNumstat 2 should return exactly 2 commits");
+
+        // Cross-check against the handler method directly: the newest commit
+        // (beta.txt added) carries exactly one non-binary delta for it.
+        let rows = handler.git_log_numstat(2).unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].deltas.len(), 1);
+        assert_eq!(rows[0].deltas[0].path, "beta.txt");
+        assert!(!rows[0].deltas[0].binary);
+        assert_eq!(rows[0].commit.files, vec!["beta.txt"]);
+    }
+
+    #[test]
     fn test_git_handler_show_head() {
         let dir = make_scratch_repo();
         let table = full_effect_test_table();
@@ -603,8 +843,11 @@ file_c.txt\n\
     /// wiring + Records visibility + con-name/arity agreement through the
     /// JIT) + `test_jit_git_show_bad_revspec_is_typed_left` (#335 acceptance:
     /// `gitShow` with a bad revspec is a typed `Left (GitBadRevspec _)` the
-    /// eval pattern-matches, never an abort) into one tidepool-extract
-    /// compile. Skips cleanly when TIDEPOOL_EXTRACT is unavailable.
+    /// eval pattern-matches, never an abort) + a `gitLogNumstat 1` exercise
+    /// (the new bulk verb: `CommitDeltas{commit,deltas}` resolves through the
+    /// real `Tidepool.Records.Bridged`/`.Stable` wiring, nested record-dot
+    /// access included) into one tidepool-extract compile. Skips cleanly
+    /// when TIDEPOOL_EXTRACT is unavailable.
     #[tokio::test]
     async fn test_jit_git_family() {
         if !tidepool_testing::eval_harness::extract_available() {
@@ -620,7 +863,10 @@ file_c.txt\n\
             "let shaLen = case commits of { (c:_) -> T.length c.sha; _ -> 0 }",
             "badRevspec <- gitShow \"notaref_zzzzzz\"",
             "let badRevspecOk = case badRevspec of { Left (GitBadRevspec _) -> True; _ -> False }",
-            "pure (object [\"logCount\" .= n, \"shaLen\" .= shaLen, \"badRevspecOk\" .= badRevspecOk])",
+            "deltaRows <- gitLogNumstat 1 >>= liftEither",
+            "let numstatN = length deltaRows",
+            "let numstatShaLen = case deltaRows of { (cd:_) -> T.length cd.commit.sha; _ -> 0 }",
+            "pure (object [\"logCount\" .= n, \"shaLen\" .= shaLen, \"badRevspecOk\" .= badRevspecOk, \"numstatN\" .= numstatN, \"numstatShaLen\" .= numstatShaLen])",
         ]);
         let include = prelude_include();
         let effects_dir = tidepool_mcp::ensure_effects_module(&decls).unwrap();
@@ -663,6 +909,16 @@ file_c.txt\n\
                     json["badRevspecOk"],
                     serde_json::json!(true),
                     "gitShow with a bad revspec should be a typed Left (GitBadRevspec _)"
+                );
+                assert_eq!(
+                    json["numstatN"],
+                    serde_json::json!(1),
+                    "gitLogNumstat 1 should return exactly 1 CommitDeltas"
+                );
+                assert_eq!(
+                    json["numstatShaLen"],
+                    serde_json::json!(40),
+                    "gitLogNumstat 1's CommitDeltas.commit.sha should be 40 chars"
                 );
             }
             Err(e) => panic!("JIT git family eval failed: {:?}", e),

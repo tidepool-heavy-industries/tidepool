@@ -14,13 +14,14 @@
 //!      the committed stdlib file (regen with `TIDEPOOL_REGEN_BRIDGED=1`).
 //!
 //! A fourth, separate guard (bottom of this file) covers `Tidepool.Records.
-//! Stable` — the stable home for `FsError`/`FileRead`, which can't go
-//! through the `CoreRecord` pipeline above (see `tidepool-mcp/src/
-//! fs_stable.rs`) but needs the exact same drift protection.
+//! Stable` — the stable home for `FsError`/`FileRead`/`GitError`/`LlmError`/
+//! `HttpError`, which can't go through the `CoreRecord` pipeline above (see
+//! `tidepool-mcp/src/fs_stable.rs`) but needs the exact same drift protection.
 
 use tidepool_bridge::CoreRecord;
 use tidepool_handlers::{
-    bridged_records_module, GitCommit, GitFileDelta, GitStatusEntry, LspDiag, LspNode, LspPosition,
+    bridged_records_module, GitCommit, GitCommitDeltas, GitFileDelta, GitStatusEntry, LspDiag,
+    LspNode, LspPosition,
 };
 
 /// Strip a trailing `deriving (...)` and collapse whitespace so a hand-written
@@ -48,6 +49,10 @@ fn generated_decls_match_expected_exactly() {
         GitFileDelta::haskell_decl(),
         "data FileDelta = FileDelta { path :: Text, adds :: Int, dels :: Int, \
          binary :: Bool } deriving (Show, Eq)"
+    );
+    assert_eq!(
+        GitCommitDeltas::haskell_decl(),
+        "data CommitDeltas = CommitDeltas { commit :: Commit, deltas :: [FileDelta] } deriving (Show, Eq)"
     );
     // Lsp records (CoreRecord-derived; decls still in effect_decls).
     assert_eq!(
@@ -138,13 +143,13 @@ fn bridged_records_module_matches_committed_file() {
     );
 }
 
-// --- 4. `Tidepool.Records.Stable` — FsError/FileRead's stable home. --------
+// --- 4. `Tidepool.Records.Stable` — the stable home for `errors` ADTs. -----
 //
 // Not `CoreRecord`-derived (see `tidepool-mcp/src/fs_stable.rs` for why:
-// `FsError`'s Rust enum is codegenerated inside THIS crate, so
-// `tidepool-bridge-effects`, a LOW crate, has no path back to it). The two
-// constants there hand-carry the SAME variant list `fs_effect_def!`'s
-// `errors FsError [...]` block declares (effect_defs.rs) — this test is what
+// each Rust enum is codegenerated inside THIS crate, so
+// `tidepool-bridge-effects`, a LOW crate, has no path back to it). Each
+// constant there hand-carries the SAME variant list its effect def's
+// `errors <Err> [...]` block declares (effect_defs.rs) — this test is what
 // catches the two drifting apart.
 
 fn stable_path() -> std::path::PathBuf {
@@ -180,6 +185,53 @@ fn stable_records_decl_matches_fs_effect_def() {
     // that's the whole point (a session bind of `[FileRead]` must not see a
     // fragment-nominal `FsError`/`FileRead`).
     assert!(tidepool_mcp::fs_decl().type_defs.is_empty());
+}
+
+#[test]
+fn stable_records_decl_matches_git_llm_http_effect_defs() {
+    // `GIT_ERROR_STABLE_DECL` hand-carries the SAME 2 variants as
+    // `git_effect_def!`'s `errors GitError [...]` block.
+    for ctor in ["GitBadRevspec", "GitFailed"] {
+        assert!(
+            tidepool_mcp::GIT_ERROR_STABLE_DECL.contains(ctor),
+            "stable GitError decl is missing constructor `{ctor}`"
+        );
+    }
+    assert!(tidepool_mcp::GIT_ERROR_STABLE_DECL.starts_with("data GitError = "));
+
+    // `LLM_ERROR_STABLE_DECL` hand-carries the SAME 3 variants as
+    // `llm_effect_def!`'s `errors LlmError [...]` block.
+    for ctor in ["LlmApi", "LlmRefusal", "LlmBudget"] {
+        assert!(
+            tidepool_mcp::LLM_ERROR_STABLE_DECL.contains(ctor),
+            "stable LlmError decl is missing constructor `{ctor}`"
+        );
+    }
+    assert!(tidepool_mcp::LLM_ERROR_STABLE_DECL.starts_with("data LlmError = "));
+
+    // `HTTP_ERROR_STABLE_DECL` hand-carries the SAME 5 variants as
+    // `http_effect_def!`'s `errors HttpError [...]` block.
+    for ctor in [
+        "HttpInvalidUrl",
+        "HttpRestricted",
+        "HttpNetwork",
+        "HttpStatus",
+        "HttpTooLarge",
+    ] {
+        assert!(
+            tidepool_mcp::HTTP_ERROR_STABLE_DECL.contains(ctor),
+            "stable HttpError decl is missing constructor `{ctor}`"
+        );
+    }
+    assert!(tidepool_mcp::HTTP_ERROR_STABLE_DECL.starts_with("data HttpError = "));
+
+    // None of the three effects' own `type_defs` carries its error ADT
+    // inline anymore — same point as `fs_decl()` above: a session bind of
+    // the WHOLE `Either <Err> a` a verb returns must not see a
+    // fragment-nominal error type.
+    assert!(tidepool_mcp::git_decl().type_defs.is_empty());
+    assert!(tidepool_mcp::llm_decl().type_defs.is_empty());
+    assert!(tidepool_mcp::http_decl().type_defs.is_empty());
 }
 
 #[test]

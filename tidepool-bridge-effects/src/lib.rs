@@ -132,6 +132,20 @@ pub struct GitFileDelta {
     pub binary: bool,
 }
 
+/// Haskell `CommitDeltas` record: one commit paired with its own per-file
+/// numstat deltas — the substrate `gitLogNumstat` returns in ONE subprocess,
+/// where before a bulk git-history investigation needed `gitLog` (paths only)
+/// plus a `mapM gitDiffStat` (one subprocess per commit) to assemble the same
+/// shape by hand.
+#[derive(ToCore, Clone, CoreRecord)]
+#[core(name = "CommitDeltas")]
+pub struct GitCommitDeltas {
+    #[core(hs_type = "Commit")]
+    pub commit: GitCommit,
+    #[core(hs_type = "[FileDelta]")]
+    pub deltas: Vec<GitFileDelta>,
+}
+
 use tidepool_bridge_derive::FromCore;
 
 // ============================================================================
@@ -323,6 +337,7 @@ pub fn bridged_records_module() -> String {
         GitCommit::haskell_decl(),
         GitStatusEntry::haskell_decl(),
         GitFileDelta::haskell_decl(),
+        GitCommitDeltas::haskell_decl(),
         Proc::haskell_decl(),
         Hit::haskell_decl(),
         FileMeta::haskell_decl(),
