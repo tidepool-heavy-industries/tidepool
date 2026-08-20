@@ -27,7 +27,7 @@ use serde_json::{json, Value as Json};
 
 use tidepool_agent::backend::mock::MockBackend;
 use tidepool_agent::seam::CycleResultPayload;
-use tidepool_handlers::{JournalHandler, SegmentPath, SubagentHandler};
+use tidepool_handlers::{ConsoleHandler, JournalHandler, SegmentPath, SubagentHandler};
 use tidepool_harness::engine::EngineConfig;
 use tidepool_harness::log::{LogHeader, LogWriter};
 use tidepool_harness::provider::{
@@ -220,6 +220,7 @@ async fn root_coalgebra_window_delegates_and_finalizes_on_the_result() {
 
     let mut driver = SelfHarnessDriver::new(agent, Arc::new(LogObserver));
     driver.set_checkpoint_path(checkpoint_path.clone());
+    driver.set_console_handler(ConsoleHandler);
     driver.set_gate(Arc::new(NoGate));
     driver.set_answerer_round_caps(1, 2);
     driver.set_journal_handler(JournalHandler::new(
@@ -393,6 +394,7 @@ async fn direct_subagent_send_dispatches_within_the_answerer_row() {
 
     let mut driver = SelfHarnessDriver::new(agent, Arc::new(LogObserver));
     driver.set_checkpoint_path(checkpoint_path.clone());
+    driver.set_console_handler(ConsoleHandler);
     driver.set_gate(Arc::new(NoGate));
     driver.set_answerer_round_caps(1, 2);
     driver.set_journal_handler(JournalHandler::new(

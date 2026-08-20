@@ -811,12 +811,36 @@ fn split_three() -> String {
     )
 }
 
+/// A ONE-branch split — the cheapest way to turn an otherwise-childless node
+/// into an INTERIOR one. Under mechanical-leaf-fold semantics a childless
+/// non-root node runs no fold window at all, so a scenario whose whole point
+/// is that node's OWN fold (proposing or selecting an edit) needs it to have
+/// at least one child; this mints that one child without adding any shape of
+/// its own for the scenario to account for. Reused verbatim everywhere it's
+/// needed, one compile for the whole file.
+fn split_one() -> String {
+    split_reply(
+        "Explore",
+        "WantSequential",
+        "one more layer, to keep this node interior",
+        &[("Solo", "Primary", "the only child of this interior node")],
+    )
+}
+
+/// The text `finish_reply()` finalizes with. Under mechanical-leaf-fold
+/// semantics (commit 8afe890b) a childless non-root node's fold window never
+/// runs at all, so its synthesis — what a parent's fold sees at that branch's
+/// position — is this text verbatim (`leafAnswerText`/`Harness.hs`), never
+/// the scripted fold marker `"FOLDED"`. Named so assertions can check for it
+/// without re-typing the literal.
+const LEAF_FINISH_TEXT: &str = "this node answers locally";
+
 /// The ONE leaf reply every scenario's leaves share — one answerer compile for
 /// the whole file.
 fn finish_reply() -> String {
-    haskell(
-        "finalize @LayerProposal (ProposeFinish { localAnswer = \"this node answers locally\" })",
-    )
+    haskell(&format!(
+        "finalize @LayerProposal (ProposeFinish {{ localAnswer = \"{LEAF_FINISH_TEXT}\" }})"
+    ))
 }
 
 /// A structurally UNUSABLE layer: a split declaring no branches. §2's
@@ -1148,8 +1172,11 @@ async fn companion_tree_recurses_folds_and_contains_its_node_ids() {
             "branch {sibling} must still fold its real answer beside the failed ones"
         );
         assert!(
-            run.branch_summary("root", sibling).contains("FOLDED"),
-            "branch {sibling}'s own answer must still reach its parent's fold: {}",
+            run.branch_summary("root", sibling)
+                .contains(LEAF_FINISH_TEXT),
+            "branch {sibling}'s own answer must still reach its parent's fold — a \
+             childless non-root node folds MECHANICALLY (no fold window at all), so \
+             its synthesis IS its coalgebra's finish text, never a scripted \"FOLDED\": {}",
             run.branch_summary("root", sibling)
         );
     }
@@ -1192,8 +1219,10 @@ async fn companion_tree_recurses_folds_and_contains_its_node_ids() {
     );
     for child in [&alpha_one, &alpha_two] {
         assert!(
-            run.branch_summary("root/1-alpha", child).contains("FOLDED"),
-            "the children HAD answered when their parent's fold window died: {}",
+            run.branch_summary("root/1-alpha", child)
+                .contains(LEAF_FINISH_TEXT),
+            "the children HAD answered when their parent's fold window died — and, being \
+             childless non-root nodes, they fold MECHANICALLY: {}",
             run.branch_summary("root/1-alpha", child)
         );
         assert!(
@@ -1204,10 +1233,12 @@ async fn companion_tree_recurses_folds_and_contains_its_node_ids() {
     }
     assert_eq!(
         run.counter("runWindows"),
-        16,
-        "and their accounting too: eight nodes, two windows each — a failed window \
-         still SPENT one, and a failed fold discards neither its children's nodes nor \
-         what they cost"
+        10,
+        "and their accounting too: root and root/1-alpha each spend two windows \
+         (coalgebra + algebra — a failed algebra window still SPENT one, and a \
+         failed fold discards neither its children's nodes nor what they cost), \
+         while the six childless non-root nodes each spend only their coalgebra — \
+         a mechanical leaf fold runs no window at all"
     );
     let failures: Vec<(&str, &str, &str)> = run
         .journal_kind("failed")
@@ -1388,9 +1419,11 @@ async fn companion_depth_cap_forces_a_stamped_finish() {
     assert_eq!(run.counter("runNodes"), 7);
     assert_eq!(
         run.counter("runWindows"),
-        10,
-        "three nodes spent two windows each (coalgebra + algebra) and four spent only \
-         their algebra — the cap is never itself the reason a window is spent"
+        6,
+        "three nodes (root and the two splitting children) spend two windows each \
+         (coalgebra + algebra); the four depth-capped nodes are childless non-root \
+         leaves that never even reach discover, and — under mechanical-leaf-fold \
+         semantics — never run a fold window either, so they cost none at all"
     );
     // A budget-refused node never reaches `discover`, so it has no window to
     // have SAID anything — no `proposed` entry. But the driver still decided
@@ -1477,8 +1510,12 @@ async fn companion_node_cap_bounds_the_windows_that_run() {
     assert_eq!(run.counter("runForced"), 2);
     assert_eq!(
         run.counter("runWindows"),
-        10,
-        "four nodes spent two windows each; the two unfunded ones spent only their fold"
+        6,
+        "root and root/1-alpha (each with kids) spend two windows apiece; \
+         root/2-beta and root/3-gamma are childless non-root leaves that fold \
+         mechanically, spending only their coalgebra; and the two unfunded, \
+         node-count-capped children never reach discover and — being childless \
+         non-root leaves too — never run a fold window either, so they spend none"
     );
 }
 
@@ -1790,19 +1827,24 @@ fn select_edits_reply(synthesis: &str, ids_in_order: &[&str]) -> String {
 /// `resolveSelection`/`approve`/`applyEdits` against the companion's working
 /// draft, with failure isolation and one receipt per approved plan.
 ///
-/// The tree: root splits into two leaves, Alpha and Beta (`split_two()`).
-/// Alpha's own fold proposes an `AppendEdit` that SUCCEEDS; Beta's own fold
-/// proposes a `ReplaceOnce` whose needle never occurs in the draft, which
-/// stamps fine but FAILS AT APPLY — the receipt-isolation case a
+/// The tree: root splits into two INTERIOR nodes, Alpha and Beta
+/// (`split_two()`), each of which mints exactly one plain child of its own
+/// (`split_one()`) — a childless non-root node folds MECHANICALLY (no fold
+/// window at all) under commit 8afe890b's semantics, so proposing at Alpha's
+/// or Beta's own fold needs each to have at least one child; that lone child
+/// contributes nothing of its own (a plain `finish_reply()`, an empty pool at
+/// its parent). Alpha's own fold proposes an `AppendEdit` that SUCCEEDS;
+/// Beta's own fold proposes a `ReplaceOnce` whose needle never occurs in the
+/// draft, which stamps fine but FAILS AT APPLY — the receipt-isolation case a
 /// stamp-time-refused proposal can no longer demonstrate, now that a blank
-/// intent never becomes an artifact at all. Neither leaf's own artifact is
-/// selectable at its own fold (an empty pool — no children), so this ALSO
-/// proves "approval is the parent's fold": only root, one level up, can ever
-/// apply either one. Root's own fold selects beta before alpha, so the
-/// result can only match if `foldEditsInOrder`'s own order governed the
-/// apply. Reuses the "tree" scenario's exact config (`state_json(3, 40, 5,
-/// GateOff)`), so this shares that compile shape rather than opening a new
-/// one.
+/// intent never becomes an artifact at all. Neither Alpha's nor Beta's own
+/// artifact is selectable at ITS OWN fold (its one child never proposes
+/// anything, so its pool is empty), so this ALSO proves "approval is the
+/// parent's fold": only root, one level up, can ever apply either one.
+/// Root's own fold selects beta before alpha, so the result can only match if
+/// `foldEditsInOrder`'s own order governed the apply. Reuses the "tree"
+/// scenario's exact config (`state_json(3, 40, 5, GateOff)`), so this shares
+/// that compile shape rather than opening a new one.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn companion_leaf_proposes_parent_selects_runtime_applies_with_receipts() {
     let _cache_guard = support::isolate_cache();
@@ -1815,8 +1857,10 @@ async fn companion_leaf_proposes_parent_selects_runtime_applies_with_receipts() 
         state_json_with_draft(3, 40, 5, json!({"tag": "GateOff"}), "seed"),
         vec![
             script(&["NODE root — DISCOVER"], split_two()),
-            script(&["NODE root/1-alpha — DISCOVER"], finish_reply()),
-            script(&["NODE root/2-beta — DISCOVER"], finish_reply()),
+            script(&["NODE root/1-alpha — DISCOVER"], split_one()),
+            script(&["NODE root/1-alpha/1-", "— DISCOVER"], finish_reply()),
+            script(&["NODE root/2-beta — DISCOVER"], split_one()),
+            script(&["NODE root/2-beta/1-", "— DISCOVER"], finish_reply()),
             script(
                 &["NODE root/1-alpha — FOLD"],
                 propose_append_reply("alpha folds locally", "append alpha's suggestion", "-alpha"),
@@ -1908,18 +1952,19 @@ async fn companion_leaf_proposes_parent_selects_runtime_applies_with_receipts() 
         "alpha's edit applied against the state beta's failure left untouched: {receipts:?}"
     );
 
-    // --- neither LEAF's own fold ever approves anything ---------------------
-    // Decision 7 ("approval is the parent's fold"), read structurally: a
-    // leaf's own pool is always empty (no children), so its own selection
-    // can never resolve past Narrative, and it journals no "edits" entry at
-    // all — the exact same silence a narrative fold keeps.
+    // --- neither Alpha's nor Beta's own fold ever approves anything --------
+    // Decision 7 ("approval is the parent's fold"), read structurally: each
+    // one's own pool holds only what its single plain child offered — nothing
+    // — so its own selection can never resolve past Narrative, and it
+    // journals no "edits" entry at all — the exact same silence a narrative
+    // fold keeps.
     assert!(
         edits_at("root/1-alpha").is_empty(),
-        "a leaf's own fold cannot approve its own proposal"
+        "a fold that only PROPOSES cannot also approve its own proposal"
     );
     assert!(
         edits_at("root/2-beta").is_empty(),
-        "a leaf's own fold cannot approve its own proposal"
+        "a fold that only PROPOSES cannot also approve its own proposal"
     );
 
     // --- the receipt is visible in the render tree, and ONLY at root -------
@@ -1929,12 +1974,12 @@ async fn companion_leaf_proposes_parent_selects_runtime_applies_with_receipts() 
         "the receipt surfaces as a badge on the node that actually applied: {}",
         run.tree_line("root")
     );
-    for leaf in ["root/1-alpha", "root/2-beta"] {
+    for path in ["root/1-alpha", "root/2-beta"] {
         assert!(
-            !run.tree_line(leaf).contains("edits:"),
-            "a leaf that only PROPOSED (never approved) carries no edits badge \
+            !run.tree_line(path).contains("edits:"),
+            "a node that only PROPOSED (never approved) carries no edits badge \
              of its own: {}",
-            run.tree_line(leaf)
+            run.tree_line(path)
         );
     }
 }
@@ -1945,11 +1990,18 @@ async fn companion_leaf_proposes_parent_selects_runtime_applies_with_receipts() 
 /// labeled a PREVIEW, never "applied".
 ///
 /// The tree: root splits into Alpha and Beta (`split_two()`); Alpha itself
-/// splits into two more leaves, `aa` and `ab` (reusing `split_two()` again —
-/// one compile, three uses). `aa`'s own fold proposes an edit; Alpha's own
-/// fold (non-root, depth 1) SELECTS it — endorsing and republishing it under
-/// its ORIGINAL, `aa`-namespaced id — and root's own fold selects that SAME
-/// id from Alpha's now-endorsed pool, applying it for real. Depth 2, chained
+/// splits into two more nodes, `aa` and `ab` (reusing `split_two()` again —
+/// one compile, three uses). `aa` in turn mints its own single child
+/// (`split_one()`) — under mechanical-leaf-fold semantics `aa` needs a kid of
+/// its own to run a fold window at all, so it proposes at ITS OWN fold rather
+/// than being a leaf; that lone grandchild is born at depth 3, past this
+/// scenario's `maxDepth` of 3, so the depth cap forces its finish before it
+/// ever reaches discover — no script needed for it, and `aa` still has
+/// exactly the "one kid, no proposal of its own" pool this test needs.
+/// `aa`'s own fold proposes an edit; Alpha's own fold (non-root, depth 1)
+/// SELECTS it — endorsing and republishing it under its ORIGINAL,
+/// `aa`-namespaced id — and root's own fold selects that SAME id from
+/// Alpha's now-endorsed pool, applying it for real. Depth 2, chained
 /// selection, one real application.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn companion_endorsement_reaches_root_from_depth_two() {
@@ -1964,7 +2016,7 @@ async fn companion_endorsement_reaches_root_from_depth_two() {
             script(&["NODE root — DISCOVER"], split_two()),
             script(&["NODE root/1-alpha — DISCOVER"], split_two()),
             script(&["NODE root/2-beta — DISCOVER"], finish_reply()),
-            script(&["NODE root/1-alpha/1-alpha — DISCOVER"], finish_reply()),
+            script(&["NODE root/1-alpha/1-alpha — DISCOVER"], split_one()),
             script(&["NODE root/1-alpha/2-beta — DISCOVER"], finish_reply()),
             script(
                 &["NODE root/1-alpha/1-alpha — FOLD"],
@@ -2117,6 +2169,11 @@ async fn companion_root_proposed_edits_are_refused_and_journaled() {
 /// SECOND call to the same node's FOLD window — the more specific entry
 /// (both needles) is listed FIRST, the generic one (which would otherwise
 /// also match the first call) second.
+///
+/// Alpha mints one plain child of its own (`split_one()`) so it stays an
+/// INTERIOR node under mechanical-leaf-fold semantics — a childless non-root
+/// node never runs a fold window at all, and this scenario is precisely about
+/// Alpha's own fold retrying.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn companion_corrective_retry_recovers_from_invalid_selection() {
     let _cache_guard = support::isolate_cache();
@@ -2128,7 +2185,8 @@ async fn companion_corrective_retry_recovers_from_invalid_selection() {
         state_json_with_draft(3, 40, 5, json!({"tag": "GateOff"}), "seed"),
         vec![
             script(&["NODE root — DISCOVER"], split_two()),
-            script(&["NODE root/1-alpha — DISCOVER"], finish_reply()),
+            script(&["NODE root/1-alpha — DISCOVER"], split_one()),
+            script(&["NODE root/1-alpha/1-", "— DISCOVER"], finish_reply()),
             script(&["NODE root/2-beta — DISCOVER"], finish_reply()),
             script(
                 &["NODE root/1-alpha — FOLD"],
@@ -2215,9 +2273,12 @@ async fn companion_corrective_retry_recovers_from_invalid_selection() {
     );
 }
 
-/// `ReplaceOnce` end to end: a leaf proposes it, root selects it, and the
-/// runtime's `Tidepool.Thought.replaceExactlyOnce` swaps the draft's single
-/// needle occurrence.
+/// `ReplaceOnce` end to end: an interior node proposes it (mechanical-leaf-
+/// fold semantics give a childless non-root node no fold window at all, so
+/// alpha mints one plain child of its own via `split_one()` to stay interior
+/// and keep proposing), root selects it, and the runtime's
+/// `Tidepool.Thought.replaceExactlyOnce` swaps the draft's single needle
+/// occurrence.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn companion_replace_once_applies_end_to_end() {
     let _cache_guard = support::isolate_cache();
@@ -2229,7 +2290,8 @@ async fn companion_replace_once_applies_end_to_end() {
         state_json_with_draft(3, 40, 5, json!({"tag": "GateOff"}), "hello NEEDLE world"),
         vec![
             script(&["NODE root — DISCOVER"], split_two()),
-            script(&["NODE root/1-alpha — DISCOVER"], finish_reply()),
+            script(&["NODE root/1-alpha — DISCOVER"], split_one()),
+            script(&["NODE root/1-alpha/1-", "— DISCOVER"], finish_reply()),
             script(&["NODE root/2-beta — DISCOVER"], finish_reply()),
             script(
                 &["NODE root/1-alpha — FOLD"],
