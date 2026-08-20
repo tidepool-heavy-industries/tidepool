@@ -1046,32 +1046,62 @@ foldAt initialDraft layer path = do
   case mergeNotes of
     [] -> pure ()
     _ -> record "merge" key (object ["branch" .= mergeBranch, "steps" .= mergeNotes])
-  outcome0 <- foldWindow (algebraPrompt path layer kids pool poolRenders initialDraft isRoot mergeNotes)
-  outcome <- resolveWithOneRetry path layer kids pool poolRenders initialDraft isRoot mergeNotes outcome0
-  -- A FOLD window that exits is this node's OWN failure, and it must not be
-  -- its subtree's.  The children below it already ran and already folded;
-  -- discarding their answers, their tree lines, or their accounting here
-  -- would erase completed sibling work one level up — the same erasure
-  -- decision 6 forbids at a branch position, just reached from the algebra
-  -- side.  So the exit replaces only what this node itself was going to
-  -- contribute (its synthesis and tensions), and everything the children
-  -- earned rolls up untouched.  A window that exits proposes and selects
-  -- nothing — same as a Narrative fold that mentions neither.
-  fo <- case outcome of
-    Right fd -> resolveAndApply path isRoot initialDraft pool poolRenders fd
-    Left e ->
-      pure
-        FoldOutcome
-          { outcomeSynthesis =
-              [fmt|<this node's fold window exited: {renderInvocationExit e}> — its {show (length kids)} branch result(s) are below, unfolded|]
-          , outcomeTensions = []
-          , outcomeArtifacts = []
-          , outcomeRenders = []
-          , outcomeReceipts = []
-          , outcomeBadges = ["fold failed"]
-          , outcomeFailed = 1
-          , outcomeDraft = initialDraft
-          }
+  -- A childless non-root node folds MECHANICALLY — no fold window at all
+  -- (operator decision, 2026-08-20). A leaf's fold prompt held nothing but
+  -- the node's own just-finished answer, and observed leaf folds simply
+  -- rewrote that answer (4 of 10 windows in the first interaction-surface
+  -- turn were leaf folds): the finish IS the synthesis, and integration is
+  -- the PARENT fold's job — it sees every child's answer. The ROOT keeps
+  -- its fold window even when childless: its fold is the one place the
+  -- turn's durable draft is actually applied.
+  let mechanicalLeaf = null kids && not isRoot
+  (fo, algebraExit) <-
+    if mechanicalLeaf
+      then
+        pure
+          ( FoldOutcome
+              { outcomeSynthesis = leafAnswerText layer
+              , outcomeTensions = []
+              , outcomeArtifacts = []
+              , outcomeRenders = []
+              , outcomeReceipts = []
+              , outcomeBadges = []
+              , outcomeFailed = 0
+              , outcomeDraft = initialDraft
+              }
+          , Nothing
+          )
+      else do
+        outcome0 <- foldWindow (algebraPrompt path layer kids pool poolRenders initialDraft isRoot mergeNotes)
+        outcome <- resolveWithOneRetry path layer kids pool poolRenders initialDraft isRoot mergeNotes outcome0
+        -- A FOLD window that exits is this node's OWN failure, and it must not be
+        -- its subtree's.  The children below it already ran and already folded;
+        -- discarding their answers, their tree lines, or their accounting here
+        -- would erase completed sibling work one level up — the same erasure
+        -- decision 6 forbids at a branch position, just reached from the algebra
+        -- side.  So the exit replaces only what this node itself was going to
+        -- contribute (its synthesis and tensions), and everything the children
+        -- earned rolls up untouched.  A window that exits proposes and selects
+        -- nothing — same as a Narrative fold that mentions neither.
+        case outcome of
+          Right fd -> do
+            applied <- resolveAndApply path isRoot initialDraft pool poolRenders fd
+            pure (applied, Nothing)
+          Left e ->
+            pure
+              ( FoldOutcome
+                  { outcomeSynthesis =
+                      [fmt|<this node's fold window exited: {renderInvocationExit e}> — its {show (length kids)} branch result(s) are below, unfolded|]
+                  , outcomeTensions = []
+                  , outcomeArtifacts = []
+                  , outcomeRenders = []
+                  , outcomeReceipts = []
+                  , outcomeBadges = ["fold failed"]
+                  , outcomeFailed = 1
+                  , outcomeDraft = initialDraft
+                  }
+              , Just e
+              )
   record
     "fold"
     key
@@ -1089,9 +1119,9 @@ foldAt initialDraft layer path = do
   case failureReason layer of
     Nothing -> pure ()
     Just why -> record "failed" key (object ["reason" .= why, "window" .= ("coalgebra" :: Text)])
-  case outcome of
-    Right _ -> pure ()
-    Left e ->
+  case algebraExit of
+    Nothing -> pure ()
+    Just e ->
       record "failed" key (object ["reason" .= renderInvocationExit e, "window" .= ("algebra" :: Text)])
   -- The receipts (PRD 21 lane C4 step 4): emitted ONLY when this node's own
   -- fold actually approved something, joining the SAME journal vocabulary
@@ -1124,7 +1154,10 @@ foldAt initialDraft layer path = do
       , answerBadges = strategyBadges (layerStrategy layer) <> originBadges layer <> fo.outcomeBadges
       , answerTree = concatMap childLines kids
       , answerNodes = 1 + sum (map (.answerNodes) kidAnswers)
-      , answerWindows = selfWindows layer + sum (map (.answerWindows) kidAnswers)
+      , answerWindows =
+          selfWindows layer
+            - (if mechanicalLeaf then 1 else 0)
+            + sum (map (.answerWindows) kidAnswers)
       , answerForced = selfForced layer + sum (map (.answerForced) kidAnswers)
       , answerFailed = selfFailed layer + fo.outcomeFailed + sum (map (.answerFailed) kidAnswers)
       , answerArtifacts = fo.outcomeArtifacts
@@ -1475,6 +1508,15 @@ selfWindows layer = case layer of
     Th.BudgetForced Th.ForcedNodeCount -> 1
     _ -> 2
   _ -> 2
+
+-- | A childless node's answer text — its coalgebra's own finish draft. Only
+-- a 'Th.Finish' layer can be childless ('splitLayer' turns an empty split
+-- into a forced finish), so the fallback arm is unreachable in practice
+-- but stays legible rather than partial.
+leafAnswerText :: ThoughtF a -> Text
+leafAnswerText layer = case layer of
+  Th.Finish d -> d.draftText
+  _ -> "<childless layer with no finish draft>"
 
 selfForced :: ThoughtF a -> Int
 selfForced layer = case layer of

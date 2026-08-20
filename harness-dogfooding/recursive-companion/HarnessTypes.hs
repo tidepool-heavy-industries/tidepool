@@ -185,7 +185,12 @@ initialState =
     , config =
         Config
           { maxDepth = 3
-          , maxNodes = 12
+          , -- Profligate on purpose (operator decision, 2026-08-20): at 12,
+            -- a root split at full fan-out left every child an allowance of
+            -- ~2 — too poor to ever split again, so trees pinned flat at
+            -- depth 1 across two dogfood runs. 32 lets depth-2 exploration
+            -- happen without anyone rationing.
+            maxNodes = 32
           , maxFanOut = 4
           , -- Autonomy by default (operator decision, 2026-08-19): splits
             -- run without per-layer operator review. The operator hears

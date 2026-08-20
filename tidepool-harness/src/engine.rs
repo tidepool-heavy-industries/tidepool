@@ -1024,6 +1024,7 @@ pub fn answerer_hole_card(
     ty: Option<&str>,
     imports: &[String],
     table: Option<&DataConTable>,
+    effect_row: &[String],
 ) -> String {
     let ty = ty.unwrap_or("A");
     // Parenthesize a compound answer type wherever it follows `@` — the card
@@ -1034,27 +1035,42 @@ pub fn answerer_hole_card(
         ty.to_string()
     };
     let shape = type_shape_line(ty, table);
-    let scope = if imports.is_empty() {
+    // State the row IN the window-opening message (operator decision,
+    // 2026-08-20): a branch child's inherited frozen context may carry a
+    // DIFFERENT row's framing, and windows were observed discovering their
+    // real capabilities through compile-error rounds (4 of 7 failed rounds
+    // in the first interaction-surface turn were row mismatches). The card
+    // is composed fresh per window, so it is the authoritative place.
+    let row = if effect_row.is_empty() {
         String::new()
     } else {
         format!(
-            " `{ty}` is already in scope (this turn imports {}) — and `finalize` \
-             is PINNED to `{ty}` in your row, so a wrong-typed answer is a \
-             compile error naming the row, not a value that silently crosses. \
-             Construct a real `{ty}`, do not substitute a tuple or `Text`. (The \
-             pin constrains `finalize`'s type only — your row's other effects, \
-             and define/explore rounds, remain available as your system framing \
-             says.)",
-            imports.join(", ")
+            "Your effect row THIS WINDOW is `[{}]` — these effects and only \
+             these compile here, whatever any earlier framing listed.\n\n",
+            effect_row.join(", ")
         )
     };
     format!(
         "The loop needs a typed answer of type `{ty}`.\n\n\
          {prompt}\n\n\
-         {shape}This request holds your window open: take the rounds you need \
+         {row}{shape}This request holds your window open: take the rounds you need \
          (```haskell blocks, run in order — explore, define, `note`, `askUser`), \
          then answer by evaluating `finalize @{ty_at} value` — THAT ends the \
-         window and hands the value back to the loop.{scope}"
+         window and hands the value back to the loop.{scope}",
+        scope = if imports.is_empty() {
+            String::new()
+        } else {
+            format!(
+                " `{ty}` is already in scope (this turn imports {}) — and `finalize` \
+                 is PINNED to `{ty}` in your row, so a wrong-typed answer is a \
+                 compile error naming the row, not a value that silently crosses. \
+                 Construct a real `{ty}`, do not substitute a tuple or `Text`. (The \
+                 pin constrains `finalize`'s type only — your row's other effects, \
+                 and define/explore rounds, remain available as your system framing \
+                 says.)",
+                imports.join(", ")
+            )
+        }
     )
 }
 
@@ -2667,8 +2683,29 @@ mod tests {
     #[test]
     fn answerer_hole_card_renders_nullary_sum_in_tag_order() {
         let table = nullary_sum_table();
-        let card = answerer_hole_card("decide", Some("Verdict"), &[], Some(&table));
+        let card = answerer_hole_card("decide", Some("Verdict"), &[], Some(&table), &[]);
         assert!(card.contains("Advance | Hold | Abort"), "{card}");
+    }
+
+    /// The card states the window's ACTUAL effect row when the caller
+    /// supplies one — a branch child's inherited framing may describe a
+    /// different row, and a window must never have to discover its
+    /// capabilities through compile-error rounds (dogfood, 2026-08-20).
+    /// An empty row (callers without one) adds no line.
+    #[test]
+    fn answerer_hole_card_states_the_effect_row() {
+        let row: Vec<String> = ["Subagent", "AskUser", "Finalize"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let card = answerer_hole_card("decide", Some("Verdict"), &[], None, &row);
+        assert!(
+            card.contains("Your effect row THIS WINDOW is `[Subagent, AskUser, Finalize]`"),
+            "{card}"
+        );
+
+        let bare = answerer_hole_card("decide", Some("Verdict"), &[], None, &[]);
+        assert!(!bare.contains("effect row"), "{bare}");
     }
 
     /// A positional-sum answer type — no field labels at all — previously
@@ -2716,7 +2753,7 @@ mod tests {
     #[test]
     fn answerer_hole_card_carries_no_hand_written_verb_docs() {
         let table = nullary_sum_table();
-        let card = answerer_hole_card("decide", Some("Verdict"), &[], Some(&table));
+        let card = answerer_hole_card("decide", Some("Verdict"), &[], Some(&table), &[]);
         assert!(
             !card.contains("choose [(label"),
             "the per-hole card must not hand-narrate `choose`: {card}"

@@ -683,6 +683,14 @@ impl ContextRef {
 }
 
 impl Harness {
+    /// The effect-row names of this harness's compiling decl list, in row
+    /// order — what a window-opening hole card states as "your effect row"
+    /// so a model never has to discover its capabilities through
+    /// compile-error rounds.
+    pub fn effect_names(&self) -> &[String] {
+        &self.cfg.effect_names
+    }
+
     /// Build a harness over `writer` (a fresh log past its header), the engine
     /// config, and a signed-in provider.
     pub fn new(

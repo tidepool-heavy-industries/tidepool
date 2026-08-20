@@ -3291,8 +3291,13 @@ impl SelfHarnessDriver {
         // context rather than spawning a fresh one. The SCOPED answerer card
         // (`[AskUser, Finalize]`) names `finalize @T`, NOT the generic
         // `resume expr` (which does not compile against this stack).
-        let child_prompt =
-            engine::answerer_hole_card(prompt, ty, self.answerer_imports(), Some(table));
+        let child_prompt = engine::answerer_hole_card(
+            prompt,
+            ty,
+            self.answerer_imports(),
+            Some(table),
+            self.agent.effect_names(),
+        );
         self.agent.push_user_turn(node, &child_prompt)?;
         self.emit(Event::TurnStart { node });
 
@@ -3452,8 +3457,13 @@ impl SelfHarnessDriver {
         let cref = self.agent.resolve_context_ref(context_ref)?;
 
         let sid = self.outer_sid()?;
-        let hole_card =
-            engine::answerer_hole_card(prompt, ty, self.answerer_imports(), Some(table));
+        let hole_card = engine::answerer_hole_card(
+            prompt,
+            ty,
+            self.answerer_imports(),
+            Some(table),
+            self.agent.effect_names(),
+        );
         let node = self.agent.fork_from_context_ref(&cref, &hole_card)?;
         // PRD 21 C5: this branch child's prompt is the ONE place its domain
         // `NodePath` is observable from the runtime side (see
@@ -3887,8 +3897,13 @@ impl SelfHarnessDriver {
     ) -> Result<Result<Value, InvocationExit>, DriverError> {
         self.agent
             .set_answer_contract(node, self.answer_contract(element_ty));
-        let child_prompt =
-            engine::answerer_hole_card(prompt, element_ty, self.answerer_imports(), Some(table));
+        let child_prompt = engine::answerer_hole_card(
+            prompt,
+            element_ty,
+            self.answerer_imports(),
+            Some(table),
+            self.agent.effect_names(),
+        );
         self.agent.push_user_turn(node, &child_prompt)?;
         self.emit(Event::TurnStart { node });
 
