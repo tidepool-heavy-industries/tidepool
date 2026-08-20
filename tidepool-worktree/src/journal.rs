@@ -203,7 +203,21 @@ impl EventJournal {
             .append(true)
             .open(&self.path)
             .map_err(|e| storage_failure(&self.path, e))?;
-        writeln!(file, "{line}").map_err(|e| storage_failure(&self.path, e))?;
+        // ONE write() for the whole row (line + trailing newline), not
+        // `writeln!`'s two syscalls — with O_APPEND, Linux serializes each
+        // write() under the inode lock (seek-to-end + write happen as one
+        // step), so two processes/threads appending to this journal can
+        // never land their bytes interleaved. POSIX itself only guarantees
+        // append-write atomicity up to PIPE_BUF-ish sizes; Linux (this
+        // crate's deployment target) does not impose that cap in practice,
+        // but if a single `JournalEntry` line ever grows well past a few KB
+        // (e.g. a huge `files` list on a `Commit` event), that's outside
+        // what this has been verified against and the interleave risk
+        // returns.
+        let mut row = line;
+        row.push('\n');
+        file.write_all(row.as_bytes())
+            .map_err(|e| storage_failure(&self.path, e))?;
         file.sync_all()
             .map_err(|e| storage_failure(&self.path, e))?;
 

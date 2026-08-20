@@ -15,8 +15,8 @@ use std::path::PathBuf;
 
 use tidepool_worktree::testing::TestRepo;
 use tidepool_worktree::{
-    EventJournal, GitCli, HeadChangeKind, Observed, RepositoryEvent, WorktreeError, WorktreeId,
-    WorktreeMonitor,
+    EventId, EventJournal, GitCli, GitOid, HeadChangeKind, HeadChangeReceipt, Observed,
+    RepositoryEvent, WorktreeError, WorktreeId, WorktreeMonitor,
 };
 
 /// A fresh journal path inside its own temp dir, and a monitor over it.
@@ -517,6 +517,61 @@ fn journal_survives_restart_and_skips_a_torn_final_row() {
         "the torn final row must be skipped, not counted, and the earlier rows must survive"
     );
     assert_eq!(recovered, before_restart);
+}
+
+/// Mirrors `tidepool-atomic-write`'s `concurrent_writers_never_observe_a_torn_file`:
+/// several independent writers appending to the SAME journal file at once.
+/// Each writer opens its own [`EventJournal`] handle (never a shared,
+/// in-process-mutex-serialized one) so this actually exercises the O_APPEND
+/// write path across independent file descriptors — the same shape as
+/// separate processes appending, which is the guarantee `EventJournal::append`
+/// documents relying on.
+#[test]
+fn concurrent_appends_never_produce_a_torn_row() {
+    let journal_dir = tempfile::TempDir::new().expect("create journal temp dir");
+    let journal_path = journal_dir.path().join("events.jsonl");
+    // Create the file up front so every writer thread opens an existing path.
+    EventJournal::open(&journal_path).expect("open journal");
+
+    const WRITERS: u64 = 8;
+    const ROWS_PER_WRITER: u64 = 25;
+
+    let handles: Vec<_> = (0..WRITERS)
+        .map(|w| {
+            let journal_path = journal_path.clone();
+            std::thread::spawn(move || {
+                let mut journal = EventJournal::open(&journal_path).expect("open journal");
+                for row in 0..ROWS_PER_WRITER {
+                    let event = RepositoryEvent::HeadChanged(HeadChangeReceipt {
+                        worktree: wt(&format!("writer-{w}")),
+                        old_head: None,
+                        new_head: GitOid::from_raw(format!("oid-{w}-{row}")),
+                        kind: HeadChangeKind::Switched,
+                        branch: None,
+                        observed_at_ms: (w * ROWS_PER_WRITER + row) as i64,
+                    });
+                    journal
+                        .append(&event, EventId(w * ROWS_PER_WRITER + row))
+                        .expect("append");
+                }
+            })
+        })
+        .collect();
+    for h in handles {
+        h.join().expect("writer thread panicked");
+    }
+
+    // A torn row would either fail this open outright (mid-journal corruption
+    // is fatal — see the module docs) or silently drop a row; either way the
+    // count below would not match.
+    let reopened =
+        EventJournal::open(&journal_path).expect("reopen journal after concurrent writes");
+    let rows = reopened.since(0).expect("since");
+    assert_eq!(
+        rows.len() as u64,
+        WRITERS * ROWS_PER_WRITER,
+        "every concurrently-appended row must be present and parseable"
+    );
 }
 
 #[test]

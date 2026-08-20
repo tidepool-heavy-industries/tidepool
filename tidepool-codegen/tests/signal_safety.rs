@@ -1,8 +1,9 @@
 //! Test that sigsetjmp/siglongjmp signal protection actually works.
 //!
-//! These tests MUST NOT run concurrently: the signal protection uses a global
-//! JMP_BUF, so concurrent signal-catching tests will race and crash.
-//! A shared mutex serializes them.
+//! These tests MUST NOT run concurrently: signal handler installation and its
+//! crash-log state are process-global (`JMP_BUF` itself is thread-local, one
+//! jump target per faulting thread), so concurrent signal-catching tests
+//! still race. A shared mutex serializes them.
 
 use parking_lot::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};

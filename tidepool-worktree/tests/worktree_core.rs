@@ -11,8 +11,9 @@ use std::path::Path;
 use tidepool_worktree::git::inspect;
 use tidepool_worktree::testing::{fingerprint, TestRepo};
 use tidepool_worktree::{
-    AgentRef, BindingTable, DirtySummary, GitCli, GitRef, InProgressKind, WorktreeError,
-    WorktreeId, WorktreeManager, WorktreeOrigin, WorktreeRegistry, WorktreeSpec,
+    AgentRef, BindingTable, BranchName, DirtySummary, GitCli, GitOid, GitRef, InProgressKind,
+    WorktreeError, WorktreeId, WorktreeManager, WorktreeOrigin, WorktreeReceipt,
+    WorktreeRecordStatus, WorktreeRegistry, WorktreeSpec,
 };
 
 fn manager_over(repo: &TestRepo, base: &Path) -> WorktreeManager {
@@ -278,6 +279,63 @@ fn hand_deleted_worktree_is_lost_not_recreated() {
         .find(|s| s.receipt.worktree_id == id)
         .expect("still listed after loss");
     assert!(!summary.present);
+}
+
+/// The crash window `create` exists to make discoverable: a `Provisional` row
+/// written before `git worktree add` runs, with no matching directory on disk
+/// (as if the process died in between the two registry writes). Retain-first
+/// means this row is never quietly dropped or auto-finalized — this pins what
+/// `list`/`lookup` actually do with it today, not any new recovery behavior.
+#[test]
+fn provisional_row_with_no_directory_is_visible_not_recreated() {
+    let repo = TestRepo::init().expect("init");
+    repo.writer()
+        .commit_file("a.txt", "one", "first")
+        .expect("commit");
+
+    let base = tempfile::TempDir::new().expect("tempdir");
+    let manager = manager_over(&repo, base.path());
+
+    let id = manager.registry().mint_id().expect("mint id");
+    let cwd = base.path().join("worktrees").join(id.as_str());
+    let receipt = WorktreeReceipt {
+        worktree_id: id.clone(),
+        cwd: cwd.clone(),
+        branch: BranchName::from_raw(format!("tidepool/worktree/provisional-{}", id.as_str())),
+        source_head: GitOid::from_raw("f".repeat(40)),
+        snapshot_ref: None,
+        origin: WorktreeOrigin::CurrentRepository,
+        source_repository: repo.path().to_path_buf(),
+        created_at_ms: 0,
+        status: WorktreeRecordStatus::Provisional,
+    };
+    manager
+        .registry()
+        .put(&receipt)
+        .expect("put provisional row");
+    assert!(
+        !cwd.exists(),
+        "the crash window: no directory was ever materialized"
+    );
+
+    // list(): the row is simply visible, with its recorded status intact —
+    // retain-first means it stays, it is not hidden or auto-finalized.
+    let listed = manager.list().expect("list");
+    let summary = listed
+        .iter()
+        .find(|s| s.receipt.worktree_id == id)
+        .expect("provisional row is listed like any other");
+    assert!(!summary.present, "no directory backs it");
+    assert_eq!(summary.receipt.status, WorktreeRecordStatus::Provisional);
+
+    // lookup(): today's lookup only checks directory presence, not status —
+    // so an unfinalized row with no directory reports exactly the same
+    // WorktreeLost a hand-deleted FINALIZED row would (see
+    // `hand_deleted_worktree_is_lost_not_recreated` above).
+    let err = manager
+        .lookup(&id)
+        .expect_err("no directory backs this row");
+    assert!(matches!(&err, WorktreeError::WorktreeLost(lost) if lost == &id));
 }
 
 /// An unknown id and a LOST id are different failures and must stay
