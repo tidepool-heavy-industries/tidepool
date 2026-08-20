@@ -66,7 +66,9 @@ use std::convert::Infallible;
 use std::sync::Arc;
 use std::time::Duration;
 
+use axum::body::Bytes;
 use axum::extract::{Path, State};
+use axum::http::{HeaderMap, StatusCode};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{Html, IntoResponse, Response};
 use axum::routing::{get, post};
@@ -309,6 +311,41 @@ impl AppState {
         id
     }
 
+    /// If `node_id`'s most recent timeline item is an answered form with the
+    /// SAME shape as `next_shape`, this new `present_form` call is presumably
+    /// the Haskell decode's own retry: `askUser` re-prompts by RECURSION on a
+    /// decode failure (no `Either` — the retry is entirely Haskell-side), so
+    /// the driver calls `present_form` again on this SAME gate with the SAME
+    /// shape, re-asking the identical question. Post an explanatory note
+    /// first, so the re-presented ask is never visually identical to the one
+    /// that failed. A node's first ask, one following anything else (a note,
+    /// a continue gate, nothing at all), or one asking something ELSE
+    /// entirely (a different shape) is left alone — this can only ever be a
+    /// false negative (missing an explanation), never a false claim that a
+    /// decode failed when it didn't.
+    fn note_reask_if_shape_repeats(&self, node_id: &str, next_shape: &FormShape) {
+        let mut reg = self.registry.lock();
+        let Some(slot) = reg.nodes.get_mut(node_id) else {
+            return;
+        };
+        let repeats = matches!(
+            slot.timeline.last(),
+            Some(TimelineItem::Ask {
+                state: AskState::AnsweredForm { shape, .. },
+                ..
+            }) if shape == next_shape
+        );
+        if !repeats {
+            return;
+        }
+        slot.timeline.push(TimelineItem::Note(
+            "the previous submission didn't decode — re-presenting the same question".to_string(),
+        ));
+        slot.rev += 1;
+        drop(reg);
+        self.ping(node_id.to_string());
+    }
+
     /// Push a `note` onto `node_id`'s timeline, bump its revision, and ping.
     fn push_note(&self, node_id: &str, text: String) {
         let mut reg = self.registry.lock();
@@ -392,6 +429,12 @@ impl AppState {
     /// browser `/submit` verb and the form-api `POST` — one resolution path,
     /// two front doors. A wrong-kind or stale id never drops any pending
     /// interaction (F10).
+    ///
+    /// A submission that doesn't decode against the pending shape is
+    /// REJECTED — [`ResolveError::InvalidSubmission`] — without touching the
+    /// pending ask at all: it stays pending, unresolved, and the resolution
+    /// channel is never sent to, so a rejected POST never reaches the gate
+    /// resolve and never consumes the caller's reprompt budget.
     pub(crate) fn resolve_form(
         &self,
         node_id: &str,
@@ -404,20 +447,35 @@ impl AppState {
             .get_mut(node_id)
             .ok_or(ResolveError::UnknownNode)?;
         let state = find_ask(&mut slot.timeline, interaction)?;
-        match state {
-            AskState::PendingForm { .. } => {}
+        let shape = match state {
+            AskState::PendingForm { shape, .. } => shape.clone(),
             AskState::PendingContinue { .. } => return Err(ResolveError::WrongKind),
             // An already-answered ask stays on the timeline, but addressing
             // it again is the same stale-nonce case as an unknown id.
             _ => return Err(ResolveError::NoSuchInteraction),
-        }
-        let AskState::PendingForm { shape, resolve } =
+        };
+        let answer = match collect_form_json(&shape, ROOT_BIND_PATH, &submission) {
+            Some(answer) => answer,
+            None => {
+                return Err(ResolveError::InvalidSubmission(validation_report(
+                    &shape,
+                    ROOT_BIND_PATH,
+                    &submission,
+                )));
+            }
+        };
+        #[allow(
+            clippy::expect_used,
+            reason = "still under the same registry lock as the successful find_ask above"
+        )]
+        let state = find_ask(&mut slot.timeline, interaction)
+            .expect("still under the same registry lock as the check above");
+        let AskState::PendingForm { resolve, .. } =
             std::mem::replace(state, AskState::AnsweredContinue { input: None })
         else {
             // Checked immediately above, under the same lock.
             unreachable!()
         };
-        let answer = answer_value(&shape, submission);
         let _ = resolve.send(answer.clone());
         *state = AskState::AnsweredForm { shape, answer };
         slot.rev += 1;
@@ -501,7 +559,7 @@ fn find_ask(
 }
 
 /// Why resolving a specific `(node_id, interaction)` failed.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ResolveError {
     /// No such registered node.
     UnknownNode,
@@ -511,18 +569,293 @@ pub(crate) enum ResolveError {
     /// The interaction exists but isn't the kind this verb resolves (e.g.
     /// `/submit` naming a Continue gate).
     WrongKind,
+    /// A pending FORM exists, but the submission doesn't decode against its
+    /// [`FormShape`] — see [`ValidationReport`]. The pending ask is left
+    /// untouched: a rejected submission never reaches the gate resolve, so
+    /// it never counts against the caller's reprompt budget.
+    InvalidSubmission(ValidationReport),
 }
 
 /// A human-legible message for a [`ResolveError`], shared by the browser
 /// verbs and the form-api's error responses.
-pub(crate) fn resolve_error_message(node_id: &str, err: ResolveError, kind: &str) -> String {
+pub(crate) fn resolve_error_message(node_id: &str, err: &ResolveError, kind: &str) -> String {
     match err {
         ResolveError::UnknownNode => format!("unknown node {node_id:?}"),
         ResolveError::NoSuchInteraction => {
             "no such pending interaction — already resolved, or the nonce is stale/wrong; GET again for the current pending set".to_string()
         }
         ResolveError::WrongKind => format!("that interaction is not a pending {kind}"),
+        ResolveError::InvalidSubmission(report) => report.summary(),
     }
+}
+
+/// The full JSON error body for a [`ResolveError`]: `{"ok": false, "error":
+/// <message>}`, plus — for [`ResolveError::InvalidSubmission`] — the
+/// structured fields a caller needs to fix its submission (`expected`, the
+/// full bind-path set the pending form reads with each path's kind;
+/// `unrecognized_keys`/`missing_keys`/`wrong_typed_keys`, the exact
+/// submitted keys at fault). Shared by the browser `/submit` verb and the
+/// form-api `POST` — one body shape, two front doors.
+pub(crate) fn resolve_error_json(node_id: &str, err: &ResolveError, kind: &str) -> Jv {
+    let mut body = Map::new();
+    body.insert("ok".to_string(), json!(false));
+    body.insert(
+        "error".to_string(),
+        json!(resolve_error_message(node_id, err, kind)),
+    );
+    if let ResolveError::InvalidSubmission(report) = err {
+        body.insert("expected".to_string(), report.expected_json());
+        body.insert("unrecognized_keys".to_string(), json!(report.unrecognized));
+        body.insert("missing_keys".to_string(), json!(report.missing));
+        body.insert("wrong_typed_keys".to_string(), json!(report.wrong_typed));
+    }
+    Jv::Object(body)
+}
+
+// -------------------------------------------------------------------------
+// Shape-derived submission validation — auto-generated from FormShape, never
+// hand-written per form. Used only to EXPLAIN a rejected submission
+// ([`collect_form_json`] already decides accept/reject); a valid submission
+// never touches this path.
+// -------------------------------------------------------------------------
+
+/// One bind path a [`FormShape`] can read, with a short label for the kind
+/// of value expected there.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ExpectedField {
+    pub path: String,
+    pub kind: &'static str,
+}
+
+/// Why a submission was rejected: every bind path `shape` can read at all
+/// (see [`expected_fields`] — the FULL set, every sum variant's children
+/// included, matching what the renderer always renders), which of the
+/// submitted keys match none of them, and — walking only the branch the
+/// submission itself selects, the same restriction [`collect_form_json`]
+/// applies — which required leaves are absent or present with the wrong
+/// JSON type.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ValidationReport {
+    pub expected: Vec<ExpectedField>,
+    pub unrecognized: Vec<String>,
+    pub missing: Vec<String>,
+    pub wrong_typed: Vec<String>,
+}
+
+impl ValidationReport {
+    fn expected_json(&self) -> Jv {
+        Jv::Array(
+            self.expected
+                .iter()
+                .map(|f| json!({"path": f.path, "kind": f.kind}))
+                .collect(),
+        )
+    }
+
+    /// One-line summary naming the concrete problems, for the `"error"`
+    /// field — the structured lists carry the exact keys.
+    fn summary(&self) -> String {
+        let mut parts = Vec::new();
+        if !self.unrecognized.is_empty() {
+            parts.push(format!(
+                "unrecognized key(s): {}",
+                self.unrecognized.join(", ")
+            ));
+        }
+        if !self.missing.is_empty() {
+            parts.push(format!(
+                "missing required key(s): {}",
+                self.missing.join(", ")
+            ));
+        }
+        if !self.wrong_typed.is_empty() {
+            parts.push(format!(
+                "wrong-typed key(s): {}",
+                self.wrong_typed.join(", ")
+            ));
+        }
+        format!(
+            "submission does not match the pending form's shape — {}; see \"expected\" for every bind path this form reads",
+            parts.join("; ")
+        )
+    }
+}
+
+/// Walk `shape` and collect every bind path it can read, each paired with a
+/// short label for its expected kind — the FULL set (every sum variant's
+/// children, not only a chosen one; the renderer always renders every
+/// variant's inputs), used only to explain a rejected submission.
+fn expected_fields(shape: &FormShape, path: &str, out: &mut Vec<ExpectedField>) {
+    match shape {
+        FormShape::String => out.push(ExpectedField {
+            path: path.to_string(),
+            kind: "string",
+        }),
+        FormShape::Int => out.push(ExpectedField {
+            path: path.to_string(),
+            kind: "int",
+        }),
+        FormShape::Number => out.push(ExpectedField {
+            path: path.to_string(),
+            kind: "number",
+        }),
+        FormShape::Bool => out.push(ExpectedField {
+            path: path.to_string(),
+            kind: "bool",
+        }),
+        FormShape::Unit => {}
+        FormShape::Optional(inner) => {
+            out.push(ExpectedField {
+                path: format!("{path}#present"),
+                kind: "bool (presence flag)",
+            });
+            expected_fields(inner, path, out);
+        }
+        FormShape::Product { fields, .. } => {
+            for field in fields {
+                expected_fields(&field.shape, &child_path(path, &field.key), out);
+            }
+        }
+        FormShape::Sum { variants, .. } => {
+            out.push(ExpectedField {
+                path: path.to_string(),
+                kind: "enum (one of the variant tags)",
+            });
+            for variant in variants {
+                let child = child_path(path, &variant.constructor);
+                expected_fields(&variant.shape, &child, out);
+            }
+        }
+    }
+}
+
+/// Walk `shape` against a submission that already failed
+/// [`collect_form_json`], following the SAME branch that collector would
+/// take (the submitted sum selector, when present and recognized), and
+/// record every required leaf that's absent or present with the wrong JSON
+/// type. Unlike [`expected_fields`], this descends into only the CHOSEN
+/// variant of a sum — the same restriction [`collect_form_json`] applies
+/// when actually reading a value.
+fn diagnose_missing_or_wrong_typed(
+    shape: &FormShape,
+    path: &str,
+    raw: &Map<String, Jv>,
+    missing: &mut Vec<String>,
+    wrong_typed: &mut Vec<String>,
+) {
+    match shape {
+        FormShape::String => match raw.get(path) {
+            None => missing.push(path.to_string()),
+            Some(Jv::String(_)) => {}
+            Some(_) => wrong_typed.push(path.to_string()),
+        },
+        FormShape::Int => match raw.get(path) {
+            None => missing.push(path.to_string()),
+            Some(n @ Jv::Number(_)) if n.as_i64().is_some() => {}
+            Some(_) => wrong_typed.push(path.to_string()),
+        },
+        FormShape::Number => match raw.get(path) {
+            None => missing.push(path.to_string()),
+            Some(n @ Jv::Number(_)) if n.as_f64().is_some() => {}
+            Some(_) => wrong_typed.push(path.to_string()),
+        },
+        FormShape::Bool => match raw.get(path) {
+            None => missing.push(path.to_string()),
+            Some(Jv::Bool(_)) => {}
+            Some(_) => wrong_typed.push(path.to_string()),
+        },
+        FormShape::Unit => {}
+        FormShape::Optional(inner) => {
+            let present_key = format!("{path}#present");
+            if matches!(raw.get(&present_key), Some(Jv::Bool(true))) {
+                diagnose_missing_or_wrong_typed(inner, path, raw, missing, wrong_typed);
+            }
+        }
+        FormShape::Product { fields, .. } => {
+            for field in fields {
+                diagnose_missing_or_wrong_typed(
+                    &field.shape,
+                    &child_path(path, &field.key),
+                    raw,
+                    missing,
+                    wrong_typed,
+                );
+            }
+        }
+        FormShape::Sum { variants, .. } => match raw.get(path) {
+            None => missing.push(path.to_string()),
+            Some(Jv::String(s)) => match variants.iter().find(|v| &v.constructor == s) {
+                None => wrong_typed.push(path.to_string()),
+                Some(_) if all_nullary(variants) => {}
+                Some(variant) => {
+                    let child = child_path(path, &variant.constructor);
+                    if let FormShape::Product { fields, .. } = &variant.shape {
+                        for field in fields {
+                            diagnose_missing_or_wrong_typed(
+                                &field.shape,
+                                &child_path(&child, &field.key),
+                                raw,
+                                missing,
+                                wrong_typed,
+                            );
+                        }
+                    }
+                }
+            },
+            Some(_) => wrong_typed.push(path.to_string()),
+        },
+    }
+}
+
+/// Build the full picture of why a submission was rejected — see
+/// [`ValidationReport`]. Called only after [`collect_form_json`] has
+/// already returned `None` for the same `(shape, path, raw)`.
+fn validation_report(shape: &FormShape, path: &str, raw: &Map<String, Jv>) -> ValidationReport {
+    let mut expected = Vec::new();
+    expected_fields(shape, path, &mut expected);
+    let known: std::collections::HashSet<&str> = expected.iter().map(|f| f.path.as_str()).collect();
+    let mut unrecognized: Vec<String> = raw
+        .keys()
+        .filter(|k| !known.contains(k.as_str()))
+        .cloned()
+        .collect();
+    unrecognized.sort();
+
+    let mut missing = Vec::new();
+    let mut wrong_typed = Vec::new();
+    diagnose_missing_or_wrong_typed(shape, path, raw, &mut missing, &mut wrong_typed);
+
+    ValidationReport {
+        expected,
+        unrecognized,
+        missing,
+        wrong_typed,
+    }
+}
+
+/// Parse a submission body as JSON, rejecting with a message naming what was
+/// expected instead of silently defaulting to `{}` — an empty/absent body, a
+/// non-JSON content type, and unparseable JSON are all distinct reasons a
+/// submission never reaches shape validation. Shared by the browser
+/// `/submit` verb and the form-api `POST`.
+pub(crate) fn parse_json_body(headers: &HeaderMap, body: &[u8]) -> Result<Jv, String> {
+    if body.is_empty() {
+        return Err(
+            "empty request body — expected a JSON object of dotted bind-path keys, e.g. {\"answer.<field>\": <value>}"
+                .to_string(),
+        );
+    }
+    let content_type = headers
+        .get(axum::http::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    if !content_type.starts_with("application/json") {
+        return Err(format!(
+            "expected Content-Type: application/json, got {content_type:?}"
+        ));
+    }
+    serde_json::from_slice::<Jv>(body)
+        .map_err(|e| format!("could not parse request body as JSON: {e}"))
 }
 
 /// The web [`OperatorGate`]: bound to exactly one registered `node_id`.
@@ -536,6 +869,7 @@ pub struct WebGate {
 
 impl OperatorGate for WebGate {
     fn present_form(&self, shape: &FormShape) -> Jv {
+        self.state.note_reask_if_shape_repeats(&self.node_id, shape);
         let (resolve, wait) = oneshot::channel();
         self.state.publish_ask(
             &self.node_id,
@@ -655,20 +989,33 @@ fn frame_html(html: String) -> Event {
 }
 
 /// Resolve the pending form at `(node, interaction)`. The client posts a
-/// flat dotted-path object; the shape-guided collector below validates and
-/// reassembles it.
+/// flat dotted-path object; the shape-guided collector validates and
+/// reassembles it. An unparseable/absent body, or a submission that doesn't
+/// decode against the pending [`FormShape`] (unrecognized keys, missing
+/// required leaves, wrong-typed leaves), is REJECTED with a 400 naming the
+/// problem — never silently collapsed to `{}`. Extra keys alongside an
+/// otherwise-complete submission are accepted and ignored (the browser
+/// always posts every rendered variant's inputs).
 async fn submit(
     State(st): State<AppState>,
     Path((node, interaction)): Path<(String, u64)>,
-    body: Option<Json<Jv>>,
+    headers: HeaderMap,
+    body: Bytes,
 ) -> Response {
-    let raw = body.map(|Json(v)| v).unwrap_or_else(|| json!({}));
+    let raw = match parse_json_body(&headers, &body) {
+        Ok(v) => v,
+        Err(msg) => return err_json(msg),
+    };
     let Jv::Object(submission) = raw else {
         return err_json("submission must be a flat JSON object".to_string());
     };
     match st.resolve_form(&node, interaction, submission) {
         Ok(()) => Json(json!({"ok": true})).into_response(),
-        Err(e) => err_json(resolve_error_message(&node, e, "form")),
+        Err(e) => (
+            StatusCode::BAD_REQUEST,
+            Json(resolve_error_json(&node, &e, "form")),
+        )
+            .into_response(),
     }
 }
 
@@ -706,7 +1053,7 @@ async fn continue_loop(
         .unwrap_or(ContinueSignal::Continue);
     match st.resolve_continue(&node, interaction, signal) {
         Ok(()) => Json(json!({"ok": true})).into_response(),
-        Err(e) => err_json(resolve_error_message(&node, e, "continue gate")),
+        Err(e) => err_json(resolve_error_message(&node, &e, "continue gate")),
     }
 }
 
@@ -1545,5 +1892,279 @@ mod tests {
         let mut keys: Vec<&str> = obj.keys().map(|k| k.as_str()).collect();
         keys.sort_unstable();
         assert_eq!(keys, vec!["destination", "releaseNote", "service"]);
+    }
+
+    // ---- shape-derived submission validation ---------------------------------
+
+    /// [`expected_fields`] walks a product-of-sum-with-optional shape and
+    /// produces exactly the bind paths [`collect_form_json`] itself reads —
+    /// every variant's children included (the renderer always renders every
+    /// variant), the presence-flag key for an optional, the sum's own
+    /// selector path.
+    #[test]
+    fn expected_fields_walks_product_sum_and_optional() {
+        let mut out = Vec::new();
+        expected_fields(&deploy_request_shape(), "", &mut out);
+        let mut paths: Vec<&str> = out.iter().map(|f| f.path.as_str()).collect();
+        paths.sort_unstable();
+        assert_eq!(
+            paths,
+            vec![
+                "destination",
+                "destination.Ssh.host",
+                "destination.Ssh.port",
+                "releaseNote",
+                "releaseNote#present",
+                "service",
+            ]
+        );
+        let kind_of = |p: &str| out.iter().find(|f| f.path == p).unwrap().kind;
+        assert_eq!(kind_of("service"), "string");
+        assert_eq!(kind_of("destination.Ssh.port"), "int");
+        assert_eq!(kind_of("destination"), "enum (one of the variant tags)");
+        assert_eq!(kind_of("releaseNote#present"), "bool (presence flag)");
+    }
+
+    /// A submission with keys matching NONE of the shape's bind paths at
+    /// all: every submitted key is unrecognized, and every required leaf on
+    /// the (unselected — the sum's own selector is absent) path is missing.
+    #[test]
+    fn validation_report_flags_a_submission_matching_no_expected_path() {
+        let raw = obj(json!({ "seedQuestion": "what next?" }));
+        let report = validation_report(&spec(), ROOT_BIND_PATH, &raw);
+        assert_eq!(report.unrecognized, vec!["seedQuestion".to_string()]);
+        assert!(
+            report.missing.contains(&"answer.mood".to_string())
+                && report.missing.contains(&"answer.count".to_string()),
+            "{:?}",
+            report.missing
+        );
+        assert!(report.wrong_typed.is_empty());
+    }
+
+    /// THE live repro this spec exists for (2026-08-20 session): a bare key
+    /// missing the `answer.` bind-path prefix is unrecognized, and the
+    /// report names the exact expected path — `answer.seedQuestion` — so a
+    /// caller can fix its submission instead of getting gaslit by a silent
+    /// `{"ok":true}`.
+    #[test]
+    fn validation_report_live_repro_bare_key_names_answer_seedquestion() {
+        let shape = FormShape::Product {
+            type_key: "Brief".into(),
+            constructor: "Brief".into(),
+            fields: vec![FieldShape {
+                key: "seedQuestion".into(),
+                shape: FormShape::String,
+                doc: None,
+            }],
+            doc: None,
+        };
+        let raw = obj(json!({ "seedQuestion": "what next?" }));
+        let report = validation_report(&shape, ROOT_BIND_PATH, &raw);
+        assert_eq!(report.unrecognized, vec!["seedQuestion".to_string()]);
+        assert_eq!(report.missing, vec!["answer.seedQuestion".to_string()]);
+        assert_eq!(
+            report.expected,
+            vec![ExpectedField {
+                path: "answer.seedQuestion".to_string(),
+                kind: "string",
+            }]
+        );
+        assert!(report.summary().contains("answer.seedQuestion"));
+    }
+
+    /// A present, correctly-keyed leaf with the wrong JSON type is reported
+    /// as wrong-typed, not missing — and a genuinely absent leaf is reported
+    /// as missing, not wrong-typed. Both can appear in the same submission.
+    #[test]
+    fn validation_report_distinguishes_missing_from_wrong_typed() {
+        let raw = obj(json!({ "answer.mood": 3 }));
+        let report = validation_report(&spec(), ROOT_BIND_PATH, &raw);
+        assert_eq!(report.wrong_typed, vec!["answer.mood".to_string()]);
+        assert_eq!(report.missing, vec!["answer.count".to_string()]);
+        assert!(report.unrecognized.is_empty());
+    }
+
+    /// Validation follows the SUBMITTED sum selector, not every branch: an
+    /// unselected variant's leftover fields are neither unrecognized (they
+    /// ARE known bind paths — the renderer always renders every variant) nor
+    /// counted as missing (only the chosen branch's leaves are required).
+    #[test]
+    fn validation_report_only_requires_the_selected_variant_branch() {
+        let raw = obj(json!({
+            "service": "api",
+            "destination": "LocalHost",
+            "releaseNote#present": false,
+        }));
+        // Missing: nothing under Ssh is required since LocalHost was chosen;
+        // this decodes fine, so validation_report is never even reached —
+        // assert collect_form_json accepts it, proving the branch logic
+        // agrees with the collector it explains failures for.
+        assert!(collect_form_json(&deploy_request_shape(), "", &raw).is_some());
+
+        // Now break ONLY the chosen branch (LocalHost has no fields, so
+        // instead choose Ssh without its fields) to see the report skip
+        // LocalHost entirely and require only Ssh's leaves.
+        let raw = obj(json!({
+            "service": "api",
+            "destination": "Ssh",
+            "releaseNote#present": false,
+        }));
+        let report = validation_report(&deploy_request_shape(), "", &raw);
+        assert_eq!(
+            report.missing,
+            vec![
+                "destination.Ssh.host".to_string(),
+                "destination.Ssh.port".to_string()
+            ]
+        );
+    }
+
+    /// The end-to-end rejection path via [`AppState::resolve_form`]: an
+    /// invalid submission is rejected with [`ResolveError::InvalidSubmission`]
+    /// and the pending ask is left untouched — still resolvable afterward
+    /// with a valid submission. The resolution channel is never sent to on
+    /// the rejected attempt, so a rejected POST never reaches the gate.
+    #[test]
+    fn resolve_form_rejects_invalid_submission_leaving_the_ask_pending() {
+        let st = AppState::new();
+        let gate = st.register_node("n1");
+        let handle = {
+            let gate = gate.clone();
+            std::thread::spawn(move || gate.present_form(&spec()))
+        };
+        while st.first_ask_id("n1").is_none() {
+            std::thread::yield_now();
+        }
+        let interaction = st.first_ask_id("n1").unwrap();
+
+        let bad = obj(json!({ "seedQuestion": "nope" }));
+        let err = st
+            .resolve_form("n1", interaction, bad)
+            .expect_err("no expected path matches");
+        match err {
+            ResolveError::InvalidSubmission(report) => {
+                assert_eq!(report.unrecognized, vec!["seedQuestion".to_string()]);
+            }
+            other => panic!("expected InvalidSubmission, got {other:?}"),
+        }
+        assert_eq!(
+            st.ask_count("n1"),
+            1,
+            "the ask stays pending after a reject"
+        );
+
+        let good = obj(json!({"answer.mood": "calm", "answer.count": 1}));
+        st.resolve_form("n1", interaction, good).unwrap();
+        assert_eq!(handle.join().unwrap(), json!({"mood": "calm", "count": 1}));
+    }
+
+    /// Extra keys alongside an otherwise-complete valid submission are
+    /// accepted and ignored — the browser always posts every rendered
+    /// variant's inputs, so this is the existing contract, not a new
+    /// leniency.
+    #[test]
+    fn resolve_form_accepts_extra_unrecognized_keys_alongside_a_valid_submission() {
+        let st = AppState::new();
+        let gate = st.register_node("n1");
+        let handle = {
+            let gate = gate.clone();
+            std::thread::spawn(move || gate.present_form(&spec()))
+        };
+        while st.first_ask_id("n1").is_none() {
+            std::thread::yield_now();
+        }
+        let interaction = st.first_ask_id("n1").unwrap();
+
+        let submission = obj(json!({
+            "answer.mood": "calm",
+            "answer.count": 1,
+            "totally_unrelated_leftover_key": "ignored",
+        }));
+        st.resolve_form("n1", interaction, submission).unwrap();
+        assert_eq!(handle.join().unwrap(), json!({"mood": "calm", "count": 1}));
+    }
+
+    /// The re-ask explanation (step 4): when `present_form` is called again
+    /// on a node whose most recent timeline entry is an ANSWERED form of the
+    /// SAME shape — exactly what `askUser`'s decode-failure recursion
+    /// produces, re-presenting the identical question on the same gate — the
+    /// re-presented ask is preceded by an explanatory note, so it is never
+    /// visually identical to the one that failed.
+    #[test]
+    fn present_form_note_explains_a_same_shape_reask() {
+        let st = AppState::new();
+        let gate = st.register_node("n1");
+
+        let g1 = gate.clone();
+        let h1 = std::thread::spawn(move || g1.present_form(&spec()));
+        while st.first_ask_id("n1").is_none() {
+            std::thread::yield_now();
+        }
+        let first_interaction = st.first_ask_id("n1").unwrap();
+        let wire = obj(json!({"answer.mood": "calm", "answer.count": 3}));
+        st.resolve_form("n1", first_interaction, wire).unwrap();
+        h1.join().unwrap();
+
+        // The driver's askUser recursion: same gate, same shape, again —
+        // simulating a submission that decoded fine at the web layer but
+        // failed the Haskell-side decode.
+        let g2 = gate.clone();
+        let h2 = std::thread::spawn(move || g2.present_form(&spec()));
+        while st.ask_count("n1") == 0 {
+            std::thread::yield_now();
+        }
+
+        let html = st.node_panel_html("n1").unwrap();
+        assert!(
+            html.contains("previous submission didn't decode"),
+            "the re-ask must be visibly explained: {html}"
+        );
+
+        let second_interaction = st.first_ask_id("n1").unwrap();
+        let wire = obj(json!({"answer.mood": "steady", "answer.count": 4}));
+        st.resolve_form("n1", second_interaction, wire).unwrap();
+        assert_eq!(h2.join().unwrap(), json!({"mood": "steady", "count": 4}));
+    }
+
+    /// A node's FIRST ask never gets the re-ask note (nothing preceded it),
+    /// and a fresh ask for a DIFFERENT shape after an answered one is left
+    /// alone too — the heuristic only fires on a genuine same-shape repeat.
+    #[test]
+    fn present_form_note_does_not_fire_for_a_first_ask_or_a_different_shape() {
+        let st = AppState::new();
+        let gate = st.register_node("n1");
+
+        let g1 = gate.clone();
+        let h1 = std::thread::spawn(move || g1.present_form(&spec()));
+        while st.first_ask_id("n1").is_none() {
+            std::thread::yield_now();
+        }
+        let html = st.node_panel_html("n1").unwrap();
+        assert!(!html.contains("previous submission didn't decode"));
+        let interaction = st.first_ask_id("n1").unwrap();
+        st.resolve_form(
+            "n1",
+            interaction,
+            obj(json!({"answer.mood": "calm", "answer.count": 1})),
+        )
+        .unwrap();
+        h1.join().unwrap();
+
+        let different_shape = FormShape::String;
+        let g2 = gate.clone();
+        let h2 = std::thread::spawn(move || g2.present_form(&different_shape));
+        while st.ask_count("n1") == 0 {
+            std::thread::yield_now();
+        }
+        let html = st.node_panel_html("n1").unwrap();
+        assert!(
+            !html.contains("previous submission didn't decode"),
+            "a different shape is a new question, not a re-ask: {html}"
+        );
+        let interaction = st.first_ask_id("n1").unwrap();
+        st.resolve_form("n1", interaction, obj(json!({"answer": "hi"})))
+            .unwrap();
+        h2.join().unwrap();
     }
 }

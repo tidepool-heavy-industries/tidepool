@@ -325,6 +325,205 @@ async fn submit_with_non_object_body_is_rejected() {
     assert_eq!(got, json!({"mood": "calm", "count": 0}));
 }
 
+/// An absent body (no Content-Type, no bytes) is rejected — the old
+/// mechanism silently collapsed this to `{}`, which the Haskell decode
+/// rejected and re-asked with no explanation, invisibly burning
+/// `ASKUSER_MAX_REPROMPTS` budget. The pending ask survives the rejection.
+#[tokio::test(flavor = "multi_thread")]
+async fn submit_with_absent_body_is_rejected_and_pending_ask_survives() {
+    let (addr, state) = boot().await;
+    let base = format!("http://{addr}");
+    let client = Client::new();
+
+    let gate = state.register_node("n1");
+    let driver_gate = gate.clone();
+    let handle = tokio::task::spawn_blocking(move || driver_gate.present_form(&sample_spec()));
+    let html = wait_for(&client, &format!("{base}/"), |b| {
+        b.contains("data-bind=\"answer.mood\"")
+    })
+    .await;
+    let submit_url = one_post_url(&html, "/node/n1/submit/");
+
+    let resp = client
+        .post(format!("{base}{submit_url}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 400);
+    let v: Value = resp.json().await.unwrap();
+    assert_eq!(v["ok"], json!(false));
+    assert!(v["error"].as_str().unwrap().contains("empty request body"));
+
+    let body = json!({"answer.mood": "calm", "answer.count": 0});
+    let resp = client
+        .post(format!("{base}{submit_url}"))
+        .json(&body)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let got = handle.await.unwrap();
+    assert_eq!(got, json!({"mood": "calm", "count": 0}));
+}
+
+/// Unparseable JSON with a correct Content-Type is rejected with a message
+/// naming what went wrong, not silently collapsed.
+#[tokio::test(flavor = "multi_thread")]
+async fn submit_with_malformed_json_is_rejected() {
+    let (addr, state) = boot().await;
+    let base = format!("http://{addr}");
+    let client = Client::new();
+
+    let gate = state.register_node("n1");
+    let driver_gate = gate.clone();
+    let handle = tokio::task::spawn_blocking(move || driver_gate.present_form(&sample_spec()));
+    let html = wait_for(&client, &format!("{base}/"), |b| {
+        b.contains("data-bind=\"answer.mood\"")
+    })
+    .await;
+    let submit_url = one_post_url(&html, "/node/n1/submit/");
+
+    let resp = client
+        .post(format!("{base}{submit_url}"))
+        .header("content-type", "application/json")
+        .body("{not valid json")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 400);
+    let v: Value = resp.json().await.unwrap();
+    assert!(v["error"]
+        .as_str()
+        .unwrap()
+        .contains("could not parse request body as JSON"));
+
+    let body = json!({"answer.mood": "calm", "answer.count": 0});
+    let resp = client
+        .post(format!("{base}{submit_url}"))
+        .json(&body)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    handle.await.unwrap();
+}
+
+/// THE live repro (2026-08-20): a bare `seedQuestion` key — missing the
+/// `answer.` bind-path prefix — is rejected with a 400 that NAMES the exact
+/// expected path (`answer.seedQuestion`), rather than the old silent
+/// `{"ok":true}` that gaslit the caller and burned reprompt budget. The
+/// pending ask is untouched afterward.
+#[tokio::test(flavor = "multi_thread")]
+async fn submit_bare_key_missing_bind_prefix_names_the_expected_path() {
+    use tidepool_harness::selfharness::operator::FormShape as Fs;
+
+    let (addr, state) = boot().await;
+    let base = format!("http://{addr}");
+    let client = Client::new();
+
+    let shape = Fs::Product {
+        type_key: "Brief".into(),
+        constructor: "Brief".into(),
+        fields: vec![FieldShape {
+            key: "seedQuestion".into(),
+            shape: Fs::String,
+            doc: None,
+        }],
+        doc: None,
+    };
+
+    let gate = state.register_node("n1");
+    let driver_gate = gate.clone();
+    let handle = tokio::task::spawn_blocking(move || driver_gate.present_form(&shape));
+    let html = wait_for(&client, &format!("{base}/"), |b| {
+        b.contains("data-bind=\"answer.seedQuestion\"")
+    })
+    .await;
+    let submit_url = one_post_url(&html, "/node/n1/submit/");
+
+    let resp = client
+        .post(format!("{base}{submit_url}"))
+        .json(&json!({"seedQuestion": "what next?"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 400);
+    let v: Value = resp.json().await.unwrap();
+    assert_eq!(v["ok"], json!(false));
+    assert!(
+        v["error"].as_str().unwrap().contains("answer.seedQuestion"),
+        "must name the expected path: {v}"
+    );
+    assert_eq!(v["unrecognized_keys"], json!(["seedQuestion"]));
+    assert_eq!(v["missing_keys"], json!(["answer.seedQuestion"]));
+    assert_eq!(
+        v["expected"],
+        json!([{"path": "answer.seedQuestion", "kind": "string"}])
+    );
+
+    // The pending ask survives: the correct submission still resolves it.
+    let resp = client
+        .post(format!("{base}{submit_url}"))
+        .json(&json!({"answer.seedQuestion": "what next?"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    assert_eq!(handle.await.unwrap(), json!({"seedQuestion": "what next?"}));
+}
+
+/// A submission missing a required leaf (present shape, absent field) is a
+/// 400 naming the missing key; one with a wrong-typed leaf (a string where
+/// an int is expected) is a 400 naming that key too. Both leave the pending
+/// ask untouched.
+#[tokio::test(flavor = "multi_thread")]
+async fn submit_missing_or_wrong_typed_leaf_is_rejected() {
+    let (addr, state) = boot().await;
+    let base = format!("http://{addr}");
+    let client = Client::new();
+
+    let gate = state.register_node("n1");
+    let driver_gate = gate.clone();
+    let handle = tokio::task::spawn_blocking(move || driver_gate.present_form(&sample_spec()));
+    let html = wait_for(&client, &format!("{base}/"), |b| {
+        b.contains("data-bind=\"answer.mood\"")
+    })
+    .await;
+    let submit_url = one_post_url(&html, "/node/n1/submit/");
+
+    // Missing "answer.count" entirely.
+    let resp = client
+        .post(format!("{base}{submit_url}"))
+        .json(&json!({"answer.mood": "calm"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 400);
+    let v: Value = resp.json().await.unwrap();
+    assert_eq!(v["missing_keys"], json!(["answer.count"]));
+
+    // Wrong-typed "answer.count" (a string, not an int).
+    let resp = client
+        .post(format!("{base}{submit_url}"))
+        .json(&json!({"answer.mood": "calm", "answer.count": "three"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 400);
+    let v: Value = resp.json().await.unwrap();
+    assert_eq!(v["wrong_typed_keys"], json!(["answer.count"]));
+
+    // The ask survived both rejections.
+    let resp = client
+        .post(format!("{base}{submit_url}"))
+        .json(&json!({"answer.mood": "calm", "answer.count": 5}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    assert_eq!(handle.await.unwrap(), json!({"mood": "calm", "count": 5}));
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn mismatched_verb_preserves_pending_interaction() {
     let (addr, state) = boot().await;

@@ -443,6 +443,96 @@ async fn pending_form_docs_pass_through_get() {
     handle.await.unwrap();
 }
 
+/// Parity with the browser `/submit` verb: an `answer` object that doesn't
+/// decode against the pending shape is rejected with a 400 naming the
+/// expected paths, and the pending ask survives — never a silent
+/// `{"ok":true}`. THE live repro: a bare `seedQuestion` key.
+#[tokio::test(flavor = "multi_thread")]
+async fn submit_form_rejects_invalid_answer_and_preserves_pending_ask() {
+    let (addr, state) = boot(true).await;
+    let base = format!("http://{addr}");
+    let client = Client::new();
+
+    let shape = FormShape::Product {
+        type_key: "Brief".into(),
+        constructor: "Brief".into(),
+        fields: vec![FieldShape {
+            key: "seedQuestion".into(),
+            shape: FormShape::String,
+            doc: None,
+        }],
+        doc: None,
+    };
+
+    let gate = state.register_node("n1");
+    let driver_gate = gate.clone();
+    let handle = tokio::task::spawn_blocking(move || driver_gate.present_form(&shape));
+
+    let body = wait_for(&client, &format!("{base}/node/n1/api/form"), |b| {
+        b.contains("\"pending\":true")
+    })
+    .await;
+    let v: Value = serde_json::from_str(&body).unwrap();
+    let interaction = v["forms"][0]["interaction"].as_u64().unwrap();
+
+    let resp = client
+        .post(format!("{base}/node/n1/api/form"))
+        .json(&json!({"interaction": interaction, "answer": {"seedQuestion": "what next?"}}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 400);
+    let v: Value = resp.json().await.unwrap();
+    assert_eq!(v["ok"], json!(false));
+    assert!(v["test_only"].as_str().is_some());
+    assert!(
+        v["error"].as_str().unwrap().contains("answer.seedQuestion"),
+        "must name the expected path: {v}"
+    );
+    assert_eq!(v["missing_keys"], json!(["answer.seedQuestion"]));
+
+    // Still pending, same interaction id — untouched by the rejection.
+    let still: Value = client
+        .get(format!("{base}/node/n1/api/form"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(still["pending"], json!(true));
+    assert_eq!(still["forms"][0]["interaction"], json!(interaction));
+
+    let resp = client
+        .post(format!("{base}/node/n1/api/form"))
+        .json(&json!({"interaction": interaction, "answer": {"answer.seedQuestion": "what next?"}}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    assert_eq!(handle.await.unwrap(), json!({"seedQuestion": "what next?"}));
+}
+
+/// An unparseable/absent body is rejected before the `{"interaction": ...}`
+/// wire shape is even inspected — parity with the browser verb.
+#[tokio::test(flavor = "multi_thread")]
+async fn submit_form_rejects_absent_body() {
+    let (addr, state) = boot(true).await;
+    let base = format!("http://{addr}");
+    let client = Client::new();
+    let _gate = state.register_node("n1");
+
+    let resp = client
+        .post(format!("{base}/node/n1/api/form"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 400);
+    let v: Value = resp.json().await.unwrap();
+    assert_eq!(v["ok"], json!(false));
+    assert!(v["test_only"].as_str().is_some());
+}
+
 /// Every response — success or error — self-describes as test-only.
 #[tokio::test(flavor = "multi_thread")]
 async fn responses_self_describe_as_test_only() {
