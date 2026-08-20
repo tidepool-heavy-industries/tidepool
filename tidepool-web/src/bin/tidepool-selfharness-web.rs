@@ -164,16 +164,20 @@ fn sample_form() -> FormShape {
             FieldShape {
                 key: "iterations".into(),
                 shape: FormShape::Int,
+                doc: None,
             },
             FieldShape {
                 key: "note".into(),
                 shape: FormShape::String,
+                doc: None,
             },
             FieldShape {
                 key: "verbose".into(),
                 shape: FormShape::Bool,
+                doc: None,
             },
         ],
+        doc: None,
     }
 }
 
@@ -186,7 +190,9 @@ fn steering_form() -> FormShape {
         fields: vec![FieldShape {
             key: "steeringReply".into(),
             shape: FormShape::String,
+            doc: None,
         }],
+        doc: None,
     }
 }
 
@@ -199,7 +205,9 @@ fn sample_form_a() -> FormShape {
         fields: vec![FieldShape {
             key: "hypothesis".into(),
             shape: FormShape::String,
+            doc: None,
         }],
+        doc: None,
     }
 }
 
@@ -211,6 +219,8 @@ fn sample_form_b() -> FormShape {
         fields: vec![FieldShape {
             key: "confidence".into(),
             shape: FormShape::Int,
+            doc: None,
         }],
+        doc: None,
     }
 }

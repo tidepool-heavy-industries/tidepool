@@ -27,12 +27,15 @@ fn sample_spec() -> FormShape {
             FieldShape {
                 key: "mood".into(),
                 shape: FormShape::String,
+                doc: None,
             },
             FieldShape {
                 key: "count".into(),
                 shape: FormShape::Int,
+                doc: None,
             },
         ],
+        doc: None,
     }
 }
 

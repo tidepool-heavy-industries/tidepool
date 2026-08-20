@@ -23,12 +23,15 @@ fn sample_spec() -> FormShape {
             FieldShape {
                 key: "mood".into(),
                 shape: FormShape::String,
+                doc: None,
             },
             FieldShape {
                 key: "count".into(),
                 shape: FormShape::Int,
+                doc: None,
             },
         ],
+        doc: None,
     }
 }
 
@@ -391,6 +394,53 @@ async fn form_api_lists_and_resolves_stacked_asks_independently() {
             json!({"mood": "y", "count": 200}),
         ]
     );
+}
+
+/// A pending form whose shape carries docs returns them through `GET
+/// /node/{node}/api/form` — the form-api is a second front door onto the
+/// same `FormShape`, so a doc-carrying shape passes through automatically,
+/// with no special-casing.
+#[tokio::test(flavor = "multi_thread")]
+async fn pending_form_docs_pass_through_get() {
+    let (addr, state) = boot(true).await;
+    let base = format!("http://{addr}");
+    let client = Client::new();
+
+    let doc_spec = FormShape::Product {
+        type_key: "Sample".into(),
+        constructor: "Sample".into(),
+        fields: vec![FieldShape {
+            key: "mood".into(),
+            shape: FormShape::String,
+            doc: Some("How you're feeling right now.".into()),
+        }],
+        doc: Some("A quick check-in.".into()),
+    };
+
+    let gate = state.register_node("n1");
+    let driver_gate = gate.clone();
+    let handle = tokio::task::spawn_blocking(move || driver_gate.present_form(&doc_spec));
+
+    let body = wait_for(&client, &format!("{base}/node/n1/api/form"), |b| {
+        b.contains("\"pending\":true")
+    })
+    .await;
+    let v: Value = serde_json::from_str(&body).unwrap();
+    let form = &v["forms"][0]["form"];
+    assert_eq!(form["product"]["doc"], json!("A quick check-in."));
+    assert_eq!(
+        form["product"]["fields"][0]["doc"],
+        json!("How you're feeling right now.")
+    );
+
+    let interaction = v["forms"][0]["interaction"].as_u64().unwrap();
+    client
+        .post(format!("{base}/node/n1/api/form"))
+        .json(&json!({"interaction": interaction, "answer": {"answer.mood": "calm"}}))
+        .send()
+        .await
+        .unwrap();
+    handle.await.unwrap();
 }
 
 /// Every response — success or error — self-describes as test-only.

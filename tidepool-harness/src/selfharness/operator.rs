@@ -25,6 +25,12 @@
 //! `{"optional": <inner>}`. A struct variant (`FormShape::Product { .. }`)
 //! serializes as `{"product": {<fields>}}`.
 //!
+//! `FieldShape` and the `Product`/`Sum` variants of `FormShape` may each
+//! carry an optional `"doc"` string — a sentence or two of help text (on the
+//! ROOT shape, the form's title/intro prose). Absent by default
+//! (`#[serde(default, skip_serializing_if = "Option::is_none")]`), so a wire
+//! without it decodes and re-encodes byte-identically to before.
+//!
 //! ## Answers are ordinary JSON
 //!
 //! What the operator submits travels as a plain `serde_json::Value` shaped
@@ -203,11 +209,19 @@ pub enum FormShape {
         type_key: TypeKey,
         constructor: ConstructorKey,
         fields: Vec<FieldShape>,
+        /// On the ROOT shape, the form's title/intro prose. Optional, absent
+        /// by default.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        doc: Option<String>,
     },
     /// A sum: alternatives in constructor-declaration order.
     Sum {
         type_key: TypeKey,
         variants: Vec<VariantShape>,
+        /// On the ROOT shape, the form's title/intro prose. Optional, absent
+        /// by default.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        doc: Option<String>,
     },
 }
 
@@ -216,6 +230,10 @@ pub enum FormShape {
 pub struct FieldShape {
     pub key: FieldKey,
     pub shape: FormShape,
+    /// A sentence or two of help text for this field. Optional, absent by
+    /// default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub doc: Option<String>,
 }
 
 /// One alternative within a [`FormShape::Sum`]. Mirrors `VariantShape`. A
@@ -362,12 +380,15 @@ mod tests {
                 FieldShape {
                     key: "host".to_string(),
                     shape: FormShape::String,
+                    doc: None,
                 },
                 FieldShape {
                     key: "port".to_string(),
                     shape: FormShape::Int,
+                    doc: None,
                 },
             ],
+            doc: None,
         }
     }
 
@@ -405,6 +426,7 @@ mod tests {
                     shape: empty_product("Environment", "Production"),
                 },
             ],
+            doc: None,
         }
     }
 
@@ -429,7 +451,68 @@ mod tests {
             type_key: type_key.to_string(),
             constructor: constructor.to_string(),
             fields: vec![],
+            doc: None,
         }
+    }
+
+    /// A docless shape's encoding is byte-identical to what it was before
+    /// `doc` existed — the pinned wire strings from
+    /// `record_product_shape_encodes_as_documented` /
+    /// `nullary_sum_shape_encodes_as_documented`, reasserted here as exact
+    /// serialized strings (not just `Value` equality) so a stray empty
+    /// `"doc":null` could never sneak past `skip_serializing_if`.
+    #[test]
+    fn docless_encoding_is_byte_identical_to_before() {
+        assert_eq!(
+            serde_json::to_string(&ssh_product_shape()).unwrap(),
+            r#"{"product":{"type_key":"Ssh","constructor":"Ssh","fields":[{"key":"host","shape":"string"},{"key":"port","shape":"int"}]}}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&environment_sum_shape()).unwrap(),
+            r#"{"sum":{"type_key":"Environment","variants":[{"constructor":"Development","shape":{"product":{"type_key":"Environment","constructor":"Development","fields":[]}}},{"constructor":"Staging","shape":{"product":{"type_key":"Environment","constructor":"Staging","fields":[]}}},{"constructor":"Production","shape":{"product":{"type_key":"Environment","constructor":"Production","fields":[]}}}]}}"#
+        );
+    }
+
+    /// A doc-carrying shape encodes its `doc` string at the field, at the
+    /// root product, and at the root sum — and round-trips.
+    #[test]
+    fn doc_carrying_shape_encodes_and_round_trips() {
+        let shape = FormShape::Product {
+            type_key: "Ssh".to_string(),
+            constructor: "Ssh".to_string(),
+            fields: vec![FieldShape {
+                key: "host".to_string(),
+                shape: FormShape::String,
+                doc: Some("The hostname to connect to.".to_string()),
+            }],
+            doc: Some("Configure the SSH connection.".to_string()),
+        };
+        assert_eq!(
+            serde_json::to_value(&shape).unwrap(),
+            json!({"product": {
+                "type_key": "Ssh",
+                "constructor": "Ssh",
+                "fields": [
+                    {"key": "host", "shape": "string", "doc": "The hostname to connect to."}
+                ],
+                "doc": "Configure the SSH connection."
+            }})
+        );
+        let wire = serde_json::to_string(&shape).unwrap();
+        assert_eq!(serde_json::from_str::<FormShape>(&wire).unwrap(), shape);
+
+        let sum = FormShape::Sum {
+            type_key: "Environment".to_string(),
+            variants: vec![VariantShape {
+                constructor: "Development".to_string(),
+                shape: empty_product("Environment", "Development"),
+            }],
+            doc: Some("Pick an environment.".to_string()),
+        };
+        assert_eq!(
+            serde_json::to_value(&sum).unwrap()["sum"]["doc"],
+            json!("Pick an environment.")
+        );
     }
 
     /// The bare shape round-trips through serde — the whole wire, end to

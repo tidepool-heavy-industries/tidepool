@@ -866,12 +866,15 @@ mod tests {
                 FieldShape {
                     key: "mood".into(),
                     shape: FormShape::String,
+                    doc: None,
                 },
                 FieldShape {
                     key: "count".into(),
                     shape: FormShape::Int,
+                    doc: None,
                 },
             ],
+            doc: None,
         }
     }
 
@@ -1288,12 +1291,15 @@ mod tests {
                 FieldShape {
                     key: "host".to_string(),
                     shape: FormShape::String,
+                    doc: None,
                 },
                 FieldShape {
                     key: "port".to_string(),
                     shape: FormShape::Int,
+                    doc: None,
                 },
             ],
+            doc: None,
         }
     }
 
@@ -1310,6 +1316,7 @@ mod tests {
                     shape: ssh_shape(),
                 },
             ],
+            doc: None,
         }
     }
 
@@ -1321,16 +1328,20 @@ mod tests {
                 FieldShape {
                     key: "service".to_string(),
                     shape: FormShape::String,
+                    doc: None,
                 },
                 FieldShape {
                     key: "destination".to_string(),
                     shape: destination_shape(),
+                    doc: None,
                 },
                 FieldShape {
                     key: "releaseNote".to_string(),
                     shape: FormShape::Optional(Box::new(FormShape::String)),
+                    doc: None,
                 },
             ],
+            doc: None,
         }
     }
 
@@ -1435,6 +1446,7 @@ mod tests {
                     shape: empty_product("Env", "Prod"),
                 },
             ],
+            doc: None,
         };
         let mut raw = Map::new();
         raw.insert(ROOT_BIND_PATH.to_string(), json!("Prod"));
@@ -1449,6 +1461,7 @@ mod tests {
             type_key: type_key.to_string(),
             constructor: constructor.to_string(),
             fields: vec![],
+            doc: None,
         }
     }
 

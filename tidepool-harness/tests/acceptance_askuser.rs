@@ -67,10 +67,12 @@ fn expected_decision_shape() -> FormShape {
             FieldShape {
                 key: "action".to_string(),
                 shape: FormShape::String,
+                doc: None,
             },
             FieldShape {
                 key: "rationale".to_string(),
                 shape: FormShape::String,
+                doc: None,
             },
             FieldShape {
                 key: "confidence".to_string(),
@@ -90,9 +92,12 @@ fn expected_decision_shape() -> FormShape {
                             shape: empty_product("Confidence", "High"),
                         },
                     ],
+                    doc: None,
                 },
+                doc: None,
             },
         ],
+        doc: None,
     }
 }
 
@@ -101,6 +106,7 @@ fn empty_product(type_key: &str, constructor: &str) -> FormShape {
         type_key: type_key.to_string(),
         constructor: constructor.to_string(),
         fields: vec![],
+        doc: None,
     }
 }
 
@@ -349,12 +355,15 @@ async fn askuser_operator_form_round_trip_and_ws4_log() {
                 FieldShape {
                     key: "keep".to_string(),
                     shape: FormShape::Bool,
+                    doc: None,
                 },
                 FieldShape {
                     key: "drop".to_string(),
                     shape: FormShape::Bool,
+                    doc: None,
                 },
             ],
+            doc: None,
         }),
         "chooseMany must offer one control per runtime label, got: {seen:?}"
     );
@@ -396,12 +405,15 @@ async fn askuser_operator_form_round_trip_and_ws4_log() {
                         FieldShape {
                             key: "keep".to_string(),
                             shape: FormShape::Bool,
+                            doc: None,
                         },
                         FieldShape {
                             key: "drop".to_string(),
                             shape: FormShape::Bool,
+                            doc: None,
                         },
                     ],
+                    doc: None,
                 },
             },
             CapturedForm::Submitted {

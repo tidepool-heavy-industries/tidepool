@@ -323,11 +323,24 @@ fn ask_form(node_id: &str, interaction: u64, shape: &FormShape) -> Markup {
         form id=(ask_id(node_id, interaction)) data-rev=(interaction) class="form"
              data-on-submit=(post_url(node_id, "submit", interaction)) {
             p class="eyebrow ask-label" { "ask #" (interaction) }
+            @if let Some(doc) = shape_doc(shape) {
+                p class="form-intro" data-node="form-intro" { (doc) }
+            }
             (generic_shape(ROOT_BIND_PATH, shape))
             div class="actions" {
                 button type="submit" class="btn btn-primary" { "Submit" }
             }
         }
+    }
+}
+
+/// A [`FormShape::Product`]/[`FormShape::Sum`]'s own `doc`, if it carries
+/// one — on the ROOT shape, the form's title/intro prose; on a `Sum`
+/// variant's payload shape, that variant's payload doc.
+fn shape_doc(shape: &FormShape) -> Option<&str> {
+    match shape {
+        FormShape::Product { doc, .. } | FormShape::Sum { doc, .. } => doc.as_deref(),
+        _ => None,
     }
 }
 
@@ -348,6 +361,7 @@ pub fn continue_shape() -> FormShape {
                     type_key: "ContinueSignal".to_string(),
                     constructor: "Continue".to_string(),
                     fields: vec![],
+                    doc: None,
                 },
             },
             VariantShape {
@@ -358,10 +372,13 @@ pub fn continue_shape() -> FormShape {
                     fields: vec![FieldShape {
                         key: "input".to_string(),
                         shape: FormShape::String,
+                        doc: None,
                     }],
+                    doc: None,
                 },
             },
         ],
+        doc: None,
     }
 }
 
@@ -494,6 +511,9 @@ fn generic_field_row(index: usize, parent_path: &str, field: &FieldShape) -> Mar
                 span class="field-index" { (format!("{index:02}")) }
                 label class="eyebrow" for=(bind_path) { (humanize_key(&field.key)) }
             }
+            @if let Some(doc) = &field.doc {
+                p class="field-help" data-node="field-help" { (doc) }
+            }
             div class="field-input" { (generic_shape(&bind_path, &field.shape)) }
         }
     }
@@ -524,6 +544,9 @@ fn generic_sum(path: &str, variants: &[VariantShape]) -> Markup {
                 @for v in variants {
                     @if !is_nullary_variant(&v.shape) {
                         div class="variant-payload" data-for=(v.constructor) {
+                            @if let Some(doc) = shape_doc(&v.shape) {
+                                p class="field-help" data-node="field-help" { (doc) }
+                            }
                             (generic_shape(&child_path(path, &v.constructor), &v.shape))
                         }
                     }
@@ -1060,6 +1083,7 @@ mod tests {
                     shape: empty_product("Environment", "Staging"),
                 },
             ],
+            doc: None,
         };
         let html = generic_shape("environment", &shape).into_string();
         assert!(html.contains("value=\"Development\""));
@@ -1097,15 +1121,19 @@ mod tests {
                             FieldShape {
                                 key: "host".to_string(),
                                 shape: FormShape::String,
+                                doc: None,
                             },
                             FieldShape {
                                 key: "port".to_string(),
                                 shape: FormShape::Int,
+                                doc: None,
                             },
                         ],
+                        doc: None,
                     },
                 },
             ],
+            doc: None,
         }
     }
 
@@ -1141,6 +1169,7 @@ mod tests {
                 FieldShape {
                     key: "releaseNote".to_string(),
                     shape: FormShape::Optional(Box::new(FormShape::String)),
+                    doc: None,
                 },
                 FieldShape {
                     key: "environment".to_string(),
@@ -1150,9 +1179,12 @@ mod tests {
                             constructor: "NeedsReview".to_string(),
                             shape: empty_product("Environment", "NeedsReview"),
                         }],
+                        doc: None,
                     },
+                    doc: None,
                 },
             ],
+            doc: None,
         };
         let html = generic_shape("", &shape).into_string();
 
@@ -1174,6 +1206,151 @@ mod tests {
             type_key: type_key.to_string(),
             constructor: constructor.to_string(),
             fields: vec![],
+            doc: None,
+        }
+    }
+
+    // ---- doc rendering --------------------------------------------------
+
+    /// A root shape's `doc` renders as visible intro prose above the form's
+    /// fields.
+    #[test]
+    fn root_doc_renders_as_visible_intro_prose() {
+        let shape = FormShape::Product {
+            type_key: "Ssh".to_string(),
+            constructor: "Ssh".to_string(),
+            fields: vec![],
+            doc: Some("Configure the SSH connection.".to_string()),
+        };
+        let html = ask_form("n1", 0, &shape).into_string();
+        assert!(html.contains("Configure the SSH connection."), "{html}");
+        assert!(html.contains("data-node=\"form-intro\""), "{html}");
+    }
+
+    /// Model-authored doc text is a maud-escaped text node, same as every
+    /// other model-authored string this crate renders.
+    #[test]
+    fn root_doc_is_escaped() {
+        let shape = FormShape::Product {
+            type_key: "Ssh".to_string(),
+            constructor: "Ssh".to_string(),
+            fields: vec![],
+            doc: Some("<script>alert(1)</script>".to_string()),
+        };
+        let html = ask_form("n1", 0, &shape).into_string();
+        assert!(!html.contains("<script>alert"), "{html}");
+        assert!(html.contains("&lt;script&gt;"), "{html}");
+    }
+
+    /// A field's `doc` renders as help text between the humanized label and
+    /// the input control.
+    #[test]
+    fn field_doc_renders_between_label_and_control() {
+        let shape = FormShape::Product {
+            type_key: "Ssh".to_string(),
+            constructor: "Ssh".to_string(),
+            fields: vec![FieldShape {
+                key: "host".to_string(),
+                shape: FormShape::String,
+                doc: Some("The hostname to connect to.".to_string()),
+            }],
+            doc: None,
+        };
+        let html = generic_shape("", &shape).into_string();
+        assert!(html.contains("The hostname to connect to."), "{html}");
+        assert!(html.contains("data-node=\"field-help\""), "{html}");
+
+        let label_pos = html.find("Host").expect("humanized label rendered");
+        let help_pos = html
+            .find("The hostname to connect to.")
+            .expect("help text rendered");
+        let control_pos = html
+            .find("data-bind=\"host\"")
+            .expect("input control rendered");
+        assert!(
+            label_pos < help_pos && help_pos < control_pos,
+            "help text must render between the label and the control: {html}"
+        );
+    }
+
+    /// Field doc text is escaped, same as root doc text.
+    #[test]
+    fn field_doc_is_escaped() {
+        let shape = FormShape::Product {
+            type_key: "Ssh".to_string(),
+            constructor: "Ssh".to_string(),
+            fields: vec![FieldShape {
+                key: "host".to_string(),
+                shape: FormShape::String,
+                doc: Some("<b>hostname</b>".to_string()),
+            }],
+            doc: None,
+        };
+        let html = generic_shape("", &shape).into_string();
+        assert!(!html.contains("<b>hostname</b>"), "{html}");
+        assert!(html.contains("&lt;b&gt;hostname&lt;/b&gt;"), "{html}");
+    }
+
+    /// A Sum variant's payload doc renders inside that variant's own payload
+    /// block.
+    #[test]
+    fn variant_payload_doc_renders_inside_its_block() {
+        let shape = FormShape::Sum {
+            type_key: "Destination".to_string(),
+            variants: vec![VariantShape {
+                constructor: "Ssh".to_string(),
+                shape: FormShape::Product {
+                    type_key: "Ssh".to_string(),
+                    constructor: "Ssh".to_string(),
+                    fields: vec![FieldShape {
+                        key: "host".to_string(),
+                        shape: FormShape::String,
+                        doc: None,
+                    }],
+                    doc: Some("Connect over SSH.".to_string()),
+                },
+            }],
+            doc: None,
+        };
+        let html = generic_shape("destination", &shape).into_string();
+        let payload_pos = html
+            .find("data-for=\"Ssh\"")
+            .expect("payload block rendered");
+        let doc_pos = html
+            .find("Connect over SSH.")
+            .expect("variant payload doc rendered");
+        assert!(
+            payload_pos < doc_pos,
+            "the variant doc must render inside its own payload block: {html}"
+        );
+    }
+
+    /// A docless form (no root doc, no field docs) renders with no help
+    /// markup at all.
+    #[test]
+    fn docless_form_renders_with_no_help_markup() {
+        let html = ask_form("n1", 0, &ssh_product_shape()).into_string();
+        assert!(!html.contains("data-node=\"form-intro\""), "{html}");
+        assert!(!html.contains("data-node=\"field-help\""), "{html}");
+    }
+
+    fn ssh_product_shape() -> FormShape {
+        FormShape::Product {
+            type_key: "Ssh".to_string(),
+            constructor: "Ssh".to_string(),
+            fields: vec![
+                FieldShape {
+                    key: "host".to_string(),
+                    shape: FormShape::String,
+                    doc: None,
+                },
+                FieldShape {
+                    key: "port".to_string(),
+                    shape: FormShape::Int,
+                    doc: None,
+                },
+            ],
+            doc: None,
         }
     }
 }
