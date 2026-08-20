@@ -716,12 +716,22 @@ impl Harness {
         sweep_stale_run_dirs();
         // The fork-child compile config: this node's row minus the
         // fork-spawning effects, so a child cannot fork (see `child_cfg`).
-        let child_cfg = EngineConfig::from_decls(
+        // `EngineConfig::from_decls` always starts `delegate_wrap: false` —
+        // a delegating parent's child must inherit it too (`fork_child_decls`
+        // keeps `Subagent`/`Worktree` in the child's row, which is exactly
+        // what `delegate_wrap` requires), else a fork/fanout answerer child
+        // of a delegating config compiles its block against the outer
+        // `Subagent`/`Worktree` row instead of the narrow `Delegate` one the
+        // window's hole card advertised (PRD 21 C5 reshape).
+        let mut child_cfg = EngineConfig::from_decls(
             fork_child_decls(&cfg.decls),
             cfg.prelude_dir.clone(),
             cfg.project_lib.clone(),
         )
         .map_err(|e| HarnessError::Compile(format!("fork-child engine config: {e}")))?;
+        if cfg.delegate_wrap {
+            child_cfg = child_cfg.with_delegate_wrap();
+        }
         Ok(Harness {
             tree: NodeTree::new(writer),
             cfg,
@@ -3045,6 +3055,22 @@ impl Harness {
             return Err(e);
         }
 
+        // The fork child answers toward the SAME `Finalize` contract as the
+        // parent whenever the fork's own requested type (`site_ty`, from
+        // `asks.json`) genuinely matches it — a discovery-window child forked
+        // to help decide the parent's own pending answer is the common case,
+        // and this is what lets the child's block reach for `finalize @T`
+        // (the idiom the model already uses everywhere else) rather than only
+        // `resume`. A fork whose type diverges from the parent's own contract
+        // gets no pin here (`None`, the config's default row) — reusing the
+        // wrong contract's imports would be a silent wrong-module guess, not
+        // a fix.
+        let parent_contract = self.answer_contract(node);
+        let finalize_pin = match (&parent_contract, &site_ty) {
+            (Some(c), Some(t)) if &c.ty == t => Some((c.ty.as_str(), c.imports.as_slice())),
+            _ => None,
+        };
+
         // Drive the child's turn loop until it emits an answering block, then run
         // that block via run_child against the SUSPENDED PARENT (not the child's
         // own session) to produce a Value in the parent's heap. On ANY failure
@@ -3057,6 +3083,7 @@ impl Harness {
                 site_ty.as_deref(),
                 self.cfg.max_turns,
                 &self.child_cfg,
+                finalize_pin,
             )
             .await
         {
@@ -3172,6 +3199,16 @@ impl Harness {
             }
         }
 
+        // Same contract-reuse rule `answer_fork` applies: pin the fanout
+        // children's `Finalize` row to the parent's own answer contract only
+        // when the fanout's element type genuinely matches it — computed once
+        // here, outside the loop, since it's the same pin for every child.
+        let parent_contract = self.answer_contract(node);
+        let finalize_pin = match (&parent_contract, element_ty) {
+            (Some(c), Some(t)) if c.ty == t => Some((c.ty.as_str(), c.imports.as_slice())),
+            _ => None,
+        };
+
         let mut children = Vec::with_capacity(prompts.len());
         let mut answers = Vec::with_capacity(prompts.len());
         for (idx, prompt) in prompts.iter().enumerate() {
@@ -3195,6 +3232,7 @@ impl Harness {
                     element_ty,
                     self.cfg.max_child_turns,
                     &self.child_cfg,
+                    finalize_pin,
                 )
                 .await
             {
@@ -3263,8 +3301,24 @@ impl Harness {
             node,
             &engine::hole_card(&pending.classified.prompt, ty.as_deref(), table.as_ref()),
         )?;
+        // `node` answers its OWN `runLLMTurn` hole here, so its own
+        // `AnswerContract` (if any — the same one `run_block` pins `finalize`
+        // to) is unconditionally the right pin: this is not a fork/fanout
+        // child that might diverge from the parent's contract, it IS the
+        // node whose contract this is.
+        let contract = self.answer_contract(node);
+        let finalize_pin = contract
+            .as_ref()
+            .map(|c| (c.ty.as_str(), c.imports.as_slice()));
         let value = self
-            .drive_answerer_to_value(node, node, ty.as_deref(), self.cfg.max_turns, &self.cfg)
+            .drive_answerer_to_value(
+                node,
+                node,
+                ty.as_deref(),
+                self.cfg.max_turns,
+                &self.cfg,
+                finalize_pin,
+            )
             .await?;
         self.resume_parent(node, &pending.hole, value).await?;
         Ok(())
@@ -3381,6 +3435,16 @@ impl Harness {
     /// itself), or the fork-child [`Self::child_cfg`] for a forked child — so a
     /// child cannot name `fork`/`forkAll`. The answer VALUE always crosses via
     /// `run_child` against `target`'s session regardless (a pure `resume expr`).
+    ///
+    /// `finalize_pin`, when `Some((ty, imports))`, is the SAME contract
+    /// `EngineConfig::turn_target` takes elsewhere (`run_block`'s own
+    /// `contract.ty`/`contract.imports`) — it instantiates this answerer's
+    /// `Finalize` row entry at the hole's real answer type instead of the
+    /// config's bare default `Finalize NoAnswer`, so a block that reaches for
+    /// `finalize @T` (the idiom the model already uses everywhere else, not
+    /// just the `resume` helper this function also offers) compiles against a
+    /// row that actually admits `T`. `None` keeps the config's own default
+    /// row, byte-identical to before this parameter existed.
     async fn drive_answerer_to_value(
         &self,
         answerer: NodeId,
@@ -3388,7 +3452,9 @@ impl Harness {
         ty: Option<&str>,
         max_turns: u32,
         compile_cfg: &EngineConfig,
+        finalize_pin: Option<(&str, &[String])>,
     ) -> Result<Value, HarnessError> {
+        let compile_target = compile_cfg.turn_target(finalize_pin)?;
         let mut attempts = 0;
         let mut turn_budget = max_turns;
         let mut auto_retries_used = 0u32;
@@ -3480,9 +3546,15 @@ impl Harness {
                 format!("{}\n\n{helpers}", blocks.join("\n\n"))
             };
             let (imports, body) = engine::split_imports(&block);
-            let src = engine::template_answer_turn(compile_cfg, &body, &imports, &helpers);
+            let src = engine::template_answer_turn(
+                compile_cfg,
+                &compile_target.stack,
+                &body,
+                &imports,
+                &helpers,
+            );
             let cfg_bin = compile_cfg.extract_bin.clone();
-            let include = compile_cfg.include.clone();
+            let include = compile_target.include.clone();
             let answerer_id = answerer.0;
             let compiled = tokio::task::spawn_blocking(move || {
                 engine::compile_turn(

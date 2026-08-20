@@ -168,6 +168,141 @@ fn plain_finalize_still_compiles_under_the_wrap() {
     );
 }
 
+/// Compile one delegating-window ANSWERER turn (`engine::template_answer_turn`
+/// — the fork/return-control path `Harness::drive_answerer_to_value` compiles
+/// through, not `template_turn_for`'s expr/bind path above) against a REAL
+/// `Finalize` pin, mirroring what `drive_answerer_to_value` now does: resolve
+/// `turn_target` from the contract first (so `Finalize` is instantiated at
+/// `finalize_ty`, never the bare default `Finalize NoAnswer`), then template
+/// and compile the raw (non-`toJSON`'d) answerer module against it.
+///
+/// `code_imports` is newline-separated MODULE NAMES spliced into the compiled
+/// turn module itself (`Fork`'s `fork`/`forkAll` are NOT in
+/// `extra_imports_for!`'s auto-import table — unlike `AskUser`'s
+/// `Tidepool.Form` — so a block reaching for `fork` must name
+/// `Tidepool.Fork` here explicitly, exactly as the model itself would in its
+/// own block's import lines). Kept separate from the contract's OWN
+/// `HarnessTypes` import (always the author module for `finalize_ty` here, so
+/// the GENERATED effects module's `Finalize <finalize_ty>` entry resolves)
+/// since the two serve different modules and mixing them into one
+/// newline-joined string would corrupt `turn_target`'s single-line
+/// `RowArgs::importing` entry.
+fn compile_delegating_answerer_turn(
+    code: &str,
+    code_imports: &str,
+    finalize_ty: &str,
+) -> Result<CompiledTurn, CompileError> {
+    let cfg = delegating_cfg();
+    let target = cfg
+        .turn_target(Some((finalize_ty, &["HarnessTypes".to_string()])))
+        .map_err(|e| CompileError::ExtractFailed(e.to_string()))?;
+    let helpers = format!("resume :: {finalize_ty} -> M {finalize_ty}\nresume = pure");
+    let src = engine::template_answer_turn(&cfg, &target.stack, code, code_imports, &helpers);
+    engine::compile_turn(
+        &cfg.extract_bin,
+        &src,
+        "result",
+        &target.include,
+        tidepool_harness::timing::NO_NODE,
+        tidepool_harness::timing::NO_ROUND,
+    )
+}
+
+/// PRD 21 C5 row-truth completion: `template_answer_turn` is the
+/// fork/return-control answerer's compile path — the ONE `template_turn_for`
+/// callers above never exercise, and one of the paths the live dogfood run's
+/// operator report (`.exo/tmp/operator-round4.md`, 2026-08-20) reproduced
+/// failing 4× independently. This block exercises `fork` and `delegate`
+/// together, terminating in `resume` (this compile path's OWN designed idiom
+/// — `template_answer_turn`'s doc: "GHC infers the result type from the
+/// block... the answerer's `resume :: T -> M T` helper fixes T"; UNLIKE
+/// `template_turn_for`'s toJSON'd shape, there is no outer `Eff <stack>
+/// Value` signature here to anchor an otherwise-ambiguous `finalize`, so
+/// `resume` is what closes the type — same as this path always required,
+/// delegating or not). Every verb here is ROW-POLYMORPHIC (`Member X effs
+/// =>`, not fixed to a closed `M`), which is exactly the shape
+/// `runDelegate`'s wrap (and `delegate_aware_preamble`'s local narrow `type
+/// M`) can structurally absorb once `resume` anchors the ambient row — see
+/// `concrete_m_library_helpers_remain_unreachable_under_delegate_wrap` below
+/// for the verbs this mechanism CANNOT yet carry, and why. Adapted onto this
+/// bundle's own `Decision` contract type, since the report's
+/// `LayerProposal`/`OperatorSteering` types are defined only in the off-limits
+/// `harness-dogfooding/recursive-companion/Harness.hs` fixture — and must
+/// compile against the narrow row with `Finalize` genuinely pinned to
+/// `Decision`, not the bare default `NoAnswer` (the contract-pin half of the
+/// bug: `template_answer_turn` never called `turn_target` with the contract
+/// at all before this fix).
+#[test]
+fn answerer_turn_combining_fork_and_delegate_compiles_against_the_narrow_row_with_pinned_contract()
+{
+    support::require_extract();
+    let code = "do { _branch <- fork @Decision \"investigate a branch\"; \
+                 r <- delegate (DelegateBrief { delegateLabel = \"probe\", \
+                 delegateInstruction = \"look around\", delegateExpected = \"\" }); \
+                 case r of { Left e -> resume (Decision { action = \"observe\", \
+                 rationale = renderDelegateError e, confidence = Low }); \
+                 Right ok -> resume (Decision { action = \"observe\", \
+                 rationale = delegateSummary ok, confidence = High }) } }";
+    let result = compile_delegating_answerer_turn(code, "HarnessTypes\nTidepool.Fork", "Decision");
+    assert!(
+        result.is_ok(),
+        "an answerer window combining fork and delegate must compile against \
+         the narrow delegating row with Finalize pinned to the hole's real \
+         contract type, got: {:?}",
+        result.err().map(full_diag)
+    );
+}
+
+/// KNOWN LIMITATION, confirmed pre-existing (present via the ALREADY-SHIPPED
+/// `template_turn_for`/`delegate_aware_preamble` mechanism this test drives —
+/// not introduced by, and not fixable from within, this lane's
+/// `template_answer_turn` migration above). `note`/`getStateJson`/
+/// `askUserWith` are declared with a CONCRETE `M` (`noteRaw :: Text -> M
+/// ()`/`askUserRaw :: Value -> M Value`/`getStateJson :: M Value`,
+/// `tidepool-mcp/src/effect_defs.rs`'s `AskUser`/`ReadState` defs —
+/// `helpers_row_polymorphic` left at its default `false`, unlike
+/// `RunLLMTurn`'s `helpers_row_polymorphic true`), so `M` there is FIXED at
+/// their own definition site to `Tidepool.Effects.M` — the OUTER,
+/// `Subagent`/`Worktree`-carrying row — regardless of any LOCAL `type M`
+/// shadow the delegating turn module defines for itself
+/// (`delegate_aware_preamble` only ever affects names written in the turn
+/// module's OWN source text — `resume`, `paginateResult`'s respelled
+/// signature — never a library function's already-fixed type). `runDelegate`
+/// wraps the WHOLE block, structurally requiring it to be `Eff (Delegate ':
+/// effs) a`; a block whose type is pinned to `Tidepool.Effects.M` (via any
+/// call to `note`/`getStateJson`/`askUserWith`) is headed by `Subagent`, not
+/// `Delegate` — an unavoidable mismatch, independent of whether `delegate`
+/// itself is also called. Reproduces the operator report's exact isolated
+/// `askUserWith`-alone failure.
+///
+/// The fix (out of THIS lane's boundary) is the SAME mechanism `RunLLMTurn`
+/// already uses: flip `helpers_row_polymorphic true` on the `AskUser`/
+/// `ReadState` effect defs in `tidepool-mcp/src/effect_defs.rs` — explicitly
+/// owned by the sibling `concurrent-branches` lane this wave. Pinned here
+/// (asserting the CURRENT failure, not silently ignored) so a future lane
+/// that lands that fix gets a clear, expected test failure telling it to
+/// promote this block into the passing bundle above instead of re-discovering
+/// the gap from a live dogfood run again.
+#[test]
+fn concrete_m_library_helpers_remain_unreachable_under_delegate_wrap() {
+    support::require_extract();
+    let code = "askUserWith @Decision [title \"confirm\"]";
+    let result = compile_delegating_turn(code, "HarnessTypes", Some("Decision"));
+    let err = result.err().map(full_diag).unwrap_or_else(|| {
+        panic!(
+            "askUserWith alone now compiles under delegate_wrap — the \
+             helpers_row_polymorphic fix has landed; promote this verb into \
+             the passing acceptance bundle above and delete this pin"
+        )
+    });
+    assert!(
+        err.contains("Subagent") && err.contains("Delegate"),
+        "expected the known Subagent-vs-Delegate row mismatch (askUserWith's \
+         concrete M vs runDelegate's wrap), got a different error — the \
+         failure mode changed, re-diagnose: {err}"
+    );
+}
+
 /// THE unnameability proof. Each of these spells a raw `Worktree`/`Subagent`
 /// verb or constructor directly — every one must be a COMPILE ERROR naming
 /// the `Member` constraint, not "not in scope": the names ARE nameable

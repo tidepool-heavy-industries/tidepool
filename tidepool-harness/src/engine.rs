@@ -1985,14 +1985,41 @@ fn finalize_pin_active(stack: &str) -> bool {
 /// So this emits `result :: Eff stack a; result = <block>` — GHC infers `a`
 /// from the block's `resume :: T -> M T` (or the polymorphic identity), and the
 /// value stays in its native `T` representation.
+///
+/// `stack` is the promoted effect-row string the answering block ACTUALLY
+/// dispatches against — a fork/return-control answerer resolves it the same
+/// way `run_block` does, via [`EngineConfig::turn_target`] pinned at the
+/// hole's own answer contract (when it has one), so `Finalize`'s row entry
+/// here can genuinely match a `finalize @T` call the block makes — never the
+/// config's bare default `Finalize NoAnswer` row.
+///
+/// `cfg.delegate_wrap` (PRD 21 C5): when `true`, this turn's preamble routes
+/// through [`delegate_aware_preamble`] exactly as [`template_turn_for`]'s
+/// does — a model-authored `:: M T` annotation, or the `resume`/`paginateResult`
+/// helpers' own `M`-typed signatures, resolve against the narrow `Delegate`-form
+/// row instead of the outer `Subagent`/`Worktree`-carrying one — and the
+/// RESULT binding applies `runDelegate` at the wrap position:
+/// `result = runDelegate (let { __b = <block> } in __b)`. No explicit type
+/// signature is needed to anchor this (unlike [`TurnTemplate::render_entry_body`]'s
+/// toJSON'd entries, which rely on an outer `Eff <stack> Value` signature): the
+/// narrow local `type M` is a fully closed, concrete promoted list, so
+/// `runDelegate`'s `Eff (Delegate ': effs) a -> Eff (Subagent ': Worktree ':
+/// effs) a` signature structurally decomposes it and fixes `effs` by ordinary
+/// unification — the same mechanism that already resolves the raw binding's
+/// `a`/`effs` from `resume`'s helper signature when `code` itself carries no
+/// annotation. `false` is byte-identical to before this parameter existed.
 pub fn template_answer_turn(
     cfg: &EngineConfig,
+    stack: &str,
     code: &str,
     imports: &str,
     helpers: &str,
 ) -> String {
-    let preamble = tidepool_mcp::build_preamble(&cfg.decls, false);
-    let stack = cfg.effect_stack_type();
+    let preamble = if cfg.delegate_wrap {
+        delegate_aware_preamble(&cfg.decls, stack)
+    } else {
+        tidepool_mcp::build_preamble(&cfg.decls, false)
+    };
 
     let mut out = String::new();
     // Insert user imports right before the `default` decl (same insertion point
@@ -2022,15 +2049,21 @@ pub fn template_answer_turn(
     // `resume :: T -> M T` helper fixes `T` when the hole type is known). The
     // block is embedded verbatim inside an explicit let-bracket (same
     // layout-suspension trick as template_haskell) so unindented multi-line
-    // blocks stay valid. `stack` is unused in the raw binding (the type is
-    // inferred), so silence it deliberately.
-    let _ = &stack;
-    out.push_str("result = let {\n __b =\n");
+    // blocks stay valid.
+    if cfg.delegate_wrap {
+        out.push_str("result = runDelegate (let {\n __b =\n");
+    } else {
+        out.push_str("result = let {\n __b =\n");
+    }
     out.push_str(code);
     if !code.ends_with('\n') {
         out.push('\n');
     }
-    out.push_str(" } in __b\n");
+    if cfg.delegate_wrap {
+        out.push_str(" } in __b)\n");
+    } else {
+        out.push_str(" } in __b\n");
+    }
     out
 }
 
