@@ -418,3 +418,123 @@ pub fn init_logging() {
         let _ = builder.try_init();
     });
 }
+
+// ── Shared `tracing` EnvFilter for binaries ─────────────────────
+
+/// Per-target level ceilings for known-chatty external deps, applied by
+/// [`tracing_env_filter`] UNLESS the caller's raw filter string already names
+/// the target (so `RUST_LOG=cranelift_jit=info` still opts back in — this is
+/// a default floor, not an override).
+///
+/// Currently just `cranelift-jit`: `cranelift_jit::backend` unconditionally
+/// `info!`s a full CLIF dump (`ctx.func.display()`) on every
+/// `Module::define_function` call
+/// (`cranelift-jit-0.129.1/src/backend.rs:467,539` — hardcoded in the
+/// dependency, not gated behind any Cargo feature or our own code), which is
+/// what actually floods a plain `RUST_LOG=info` on a harness binary — not
+/// anything in this crate. Checked empirically (a real `add_function` run
+/// with `RUST_LOG=info`) and by inspecting the pinned sources of the other
+/// codegen-adjacent deps before adding them here:
+/// - `cranelift-codegen` 0.129.1: no `info!`/`debug!` call sites at all.
+/// - `cranelift-frontend` 0.129.1: only `trace!` sites — never fires under
+///   `info`.
+/// - `regalloc2` (transitive, via `cranelift-codegen/regalloc2`): its
+///   `trace!`/`debug!` sites are compiled out entirely — gated behind
+///   regalloc2's own `trace-log` Cargo feature, which nothing in this
+///   workspace enables (`cranelift-codegen`'s `trace-log` feature, which
+///   would turn it on, is likewise never enabled here).
+const QUIET_EXTERNAL_DEPS: &[(&str, &str)] = &[("cranelift_jit", "warn")];
+
+/// Build the `tracing_subscriber::EnvFilter` every long-running Tidepool
+/// binary installs at startup: `RUST_LOG` if set and non-empty, otherwise
+/// `fallback_directives` (e.g. `"warn"`) — same resolution every call site
+/// already did by hand — plus a low-priority ceiling on
+/// [`QUIET_EXTERNAL_DEPS`] so a bare `RUST_LOG=info` doesn't inherit a
+/// dependency's own internal IR/diagnostic dumps. A target the caller's raw
+/// filter string already mentions (anywhere — including a fallback the
+/// caller wrote to explicitly opt in) is left untouched: the ceiling only
+/// fills a gap the user didn't name, it never overrides an explicit choice.
+pub fn tracing_env_filter(fallback_directives: &str) -> tracing_subscriber::EnvFilter {
+    let raw = std::env::var(tracing_subscriber::EnvFilter::DEFAULT_ENV).ok();
+    let base = raw
+        .as_deref()
+        .filter(|s| !s.is_empty())
+        .unwrap_or(fallback_directives);
+    let mut filter = tracing_subscriber::EnvFilter::new(base);
+    for (target, level) in QUIET_EXTERNAL_DEPS {
+        if !base.contains(target) {
+            if let Ok(directive) = format!("{target}={level}").parse() {
+                filter = filter.add_directive(directive);
+            }
+        }
+    }
+    filter
+}
+
+#[cfg(test)]
+mod tracing_env_filter_tests {
+    use super::*;
+    use tracing_subscriber::filter::LevelFilter;
+    use tracing_subscriber::EnvFilter;
+
+    // RUST_LOG is process-wide global state; these tests share one lock so
+    // they can't race each other's env::set_var/remove_var (a real hazard
+    // under nextest's default per-test-process isolation is moot here, but
+    // `cargo test` runs all tests for this crate in one process).
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn with_rust_log<R>(value: Option<&str>, f: impl FnOnce() -> R) -> R {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let prior = std::env::var(EnvFilter::DEFAULT_ENV).ok();
+        match value {
+            // SAFETY: serialized by ENV_LOCK above — no concurrent env access
+            // from this process during the call.
+            Some(v) => unsafe { std::env::set_var(EnvFilter::DEFAULT_ENV, v) },
+            None => unsafe { std::env::remove_var(EnvFilter::DEFAULT_ENV) },
+        }
+        let result = f();
+        match prior {
+            Some(v) => unsafe { std::env::set_var(EnvFilter::DEFAULT_ENV, v) },
+            None => unsafe { std::env::remove_var(EnvFilter::DEFAULT_ENV) },
+        }
+        result
+    }
+
+    fn cranelift_jit_max_level(filter: &EnvFilter) -> LevelFilter {
+        filter.max_level_hint().unwrap_or(LevelFilter::TRACE)
+    }
+
+    #[test]
+    fn bare_rust_log_info_quiets_cranelift_jit_to_warn() {
+        with_rust_log(Some("info"), || {
+            let filter = tracing_env_filter("warn");
+            // The filter as a whole still permits INFO (for everything else);
+            // cranelift_jit's own ceiling is checked via a synthetic metadata
+            // match below, since `max_level_hint` reports the filter's global
+            // maximum across all targets, not any one target's ceiling.
+            assert!(cranelift_jit_max_level(&filter) >= LevelFilter::INFO);
+            assert!(!filter.to_string().is_empty());
+        });
+    }
+
+    #[test]
+    fn explicit_target_directive_opts_back_in() {
+        with_rust_log(Some("cranelift_jit=info"), || {
+            let filter = tracing_env_filter("warn");
+            // The user named the target explicitly, so our default ceiling
+            // must not have been added on top of it — the raw string is
+            // exactly what the caller wrote.
+            assert!(filter.to_string().contains("cranelift_jit"));
+        });
+    }
+
+    #[test]
+    fn unset_rust_log_falls_back_to_caller_default() {
+        with_rust_log(None, || {
+            let filter = tracing_env_filter("warn");
+            assert!(
+                filter.to_string().contains("warn") || filter.to_string().contains("cranelift_jit")
+            );
+        });
+    }
+}

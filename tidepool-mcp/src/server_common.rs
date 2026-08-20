@@ -150,10 +150,7 @@ pub fn make_tool(
 /// thread and the two call sites should stay visually distinct.
 pub fn init_tracing() {
     tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn")),
-        )
+        .with_env_filter(tidepool_codegen::debug::tracing_env_filter("warn"))
         .with_writer(std::io::stderr)
         .init();
     tidepool_codegen::debug::init_logging();

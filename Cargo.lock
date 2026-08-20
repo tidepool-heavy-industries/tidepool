@@ -3963,6 +3963,7 @@ dependencies = [
  "tidepool-heap",
  "tidepool-repr",
  "tidepool-testing",
+ "tracing-subscriber",
 ]
 
 [[package]]
@@ -4303,6 +4304,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "tidepool-agent",
+ "tidepool-codegen",
  "tidepool-handlers",
  "tidepool-harness",
  "tidepool-runtime",

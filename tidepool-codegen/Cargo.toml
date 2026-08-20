@@ -24,6 +24,11 @@ tidepool-effect.workspace = true
 thiserror.workspace = true
 log.workspace = true
 env_logger = "0.11"
+# Only for `debug::tracing_env_filter` — the one shared `EnvFilter` builder
+# every long-running binary calls so a bare `RUST_LOG=info` doesn't inherit
+# cranelift-jit's own unconditional CLIF-dump `info!`s. Does not touch this
+# crate's own `log`/`env_logger`-based diagnostics (see debug.rs).
+tracing-subscriber = { workspace = true, features = ["env-filter"] }
 parking_lot.workspace = true
 recursion = "0.5.4"
 rustc-hash.workspace = true

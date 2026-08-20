@@ -17,10 +17,7 @@ struct Args {
 fn main() -> Result<()> {
     // Initialize tracing for observability. Try `RUST_LOG=debug cargo run`.
     tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn")),
-        )
+        .with_env_filter(tidepool_codegen::debug::tracing_env_filter("warn"))
         .init();
 
     // emit_node uses ~22KB stack per recursive call in debug builds.

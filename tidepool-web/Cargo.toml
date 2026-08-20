@@ -11,6 +11,7 @@ rust-version.workspace = true
 
 [dependencies]
 clap.workspace = true
+tidepool-codegen.workspace = true
 tidepool-harness.workspace = true
 tidepool-runtime.workspace = true
 # The tidepool-selfharness binary's subagent seam (TIDEPOOL_MEMORY_REPO):
