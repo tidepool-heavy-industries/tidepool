@@ -92,11 +92,12 @@ fn exec_contract_text_is_pinned() {
     assert_eq!(
         exec.type_def_texts(),
         vec![concat!(
-            "data ExecError = ExecSpawn Text | ExecBadDir Text deriving (Show, Eq)\n",
+            "data ExecError = ExecSpawn Text | ExecBadDir Text | ExecTimeout Text deriving (Show, Eq)\n",
             "instance ToJSON ExecError where\n",
             "  toJSON e = case e of\n",
             "    ExecSpawn detail -> object [\"tag\" .= (\"ExecSpawn\" :: Text), \"detail\" .= detail]\n",
             "    ExecBadDir detail -> object [\"tag\" .= (\"ExecBadDir\" :: Text), \"detail\" .= detail]\n",
+            "    ExecTimeout detail -> object [\"tag\" .= (\"ExecTimeout\" :: Text), \"detail\" .= detail]\n",
         )]
     );
 
@@ -107,7 +108,8 @@ fn exec_contract_text_is_pinned() {
                 "-- | Run a shell command; returns a `Proc` record {exitCode, stdout, stderr}\n",
                 "-- (use `ok p` for the zero-exit check). Failure is TYPED (#335): `Left\n",
                 "-- (ExecSpawn _)` when the process can't be spawned, `Left (ExecBadDir _)`\n",
-                "-- for `runIn` with a bad/escaping directory. A nonzero EXIT is NOT a\n",
+                "-- for `runIn` with a bad/escaping directory, `Left (ExecTimeout _)` when\n",
+                "-- the command outran its timeout and was killed. A nonzero EXIT is NOT a\n",
                 "-- failure — inspect `p.exitCode`. Natural spelling: `Right p <- run cmd`.\n",
                 "run :: Text -> M (Either ExecError Proc)\n",
                 "run = send . Run",

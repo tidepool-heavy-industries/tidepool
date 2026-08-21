@@ -49,11 +49,12 @@ data Http a where
   HttpGet :: Text -> Http (Either HttpError Value)
   HttpPost :: Text -> Value -> Http (Either HttpError Value)
 
-data ExecError = ExecSpawn Text | ExecBadDir Text deriving (Show, Eq)
+data ExecError = ExecSpawn Text | ExecBadDir Text | ExecTimeout Text deriving (Show, Eq)
 instance ToJSON ExecError where
   toJSON e = case e of
     ExecSpawn detail -> object ["tag" .= ("ExecSpawn" :: Text), "detail" .= detail]
     ExecBadDir detail -> object ["tag" .= ("ExecBadDir" :: Text), "detail" .= detail]
+    ExecTimeout detail -> object ["tag" .= ("ExecTimeout" :: Text), "detail" .= detail]
 
 data Exec a where
   Run :: Text -> Exec (Either ExecError Proc)
@@ -353,7 +354,8 @@ httpPost url body = send (HttpPost url body)
 -- | Run a shell command; returns a `Proc` record {exitCode, stdout, stderr}
 -- (use `ok p` for the zero-exit check). Failure is TYPED (#335): `Left
 -- (ExecSpawn _)` when the process can't be spawned, `Left (ExecBadDir _)`
--- for `runIn` with a bad/escaping directory. A nonzero EXIT is NOT a
+-- for `runIn` with a bad/escaping directory, `Left (ExecTimeout _)` when
+-- the command outran its timeout and was killed. A nonzero EXIT is NOT a
 -- failure — inspect `p.exitCode`. Natural spelling: `Right p <- run cmd`.
 run :: Text -> M (Either ExecError Proc)
 run = send . Run

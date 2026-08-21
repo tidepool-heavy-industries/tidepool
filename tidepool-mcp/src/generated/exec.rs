@@ -13,7 +13,7 @@ pub fn exec_decl() -> crate::EffectDecl {
             "RunArgv :: [Text] -> Exec (Either ExecError Proc)",
         ],
         type_defs: &[
-            "data ExecError = ExecSpawn Text | ExecBadDir Text deriving (Show, Eq)\ninstance ToJSON ExecError where\n  toJSON e = case e of\n    ExecSpawn detail -> object [\"tag\" .= (\"ExecSpawn\" :: Text), \"detail\" .= detail]\n    ExecBadDir detail -> object [\"tag\" .= (\"ExecBadDir\" :: Text), \"detail\" .= detail]\n",
+            "data ExecError = ExecSpawn Text | ExecBadDir Text | ExecTimeout Text deriving (Show, Eq)\ninstance ToJSON ExecError where\n  toJSON e = case e of\n    ExecSpawn detail -> object [\"tag\" .= (\"ExecSpawn\" :: Text), \"detail\" .= detail]\n    ExecBadDir detail -> object [\"tag\" .= (\"ExecBadDir\" :: Text), \"detail\" .= detail]\n    ExecTimeout detail -> object [\"tag\" .= (\"ExecTimeout\" :: Text), \"detail\" .= detail]\n",
         ],
         extra_imports: &[
             "import qualified Tidepool.Shell as Shell",
@@ -21,7 +21,7 @@ pub fn exec_decl() -> crate::EffectDecl {
             "import qualified Tidepool.Cargo as Cargo",
         ],
         helpers: &[
-            "-- | Run a shell command; returns a `Proc` record {exitCode, stdout, stderr}\n-- (use `ok p` for the zero-exit check). Failure is TYPED (#335): `Left\n-- (ExecSpawn _)` when the process can't be spawned, `Left (ExecBadDir _)`\n-- for `runIn` with a bad/escaping directory. A nonzero EXIT is NOT a\n-- failure — inspect `p.exitCode`. Natural spelling: `Right p <- run cmd`.\nrun :: Text -> M (Either ExecError Proc)\nrun = send . Run",
+            "-- | Run a shell command; returns a `Proc` record {exitCode, stdout, stderr}\n-- (use `ok p` for the zero-exit check). Failure is TYPED (#335): `Left\n-- (ExecSpawn _)` when the process can't be spawned, `Left (ExecBadDir _)`\n-- for `runIn` with a bad/escaping directory, `Left (ExecTimeout _)` when\n-- the command outran its timeout and was killed. A nonzero EXIT is NOT a\n-- failure — inspect `p.exitCode`. Natural spelling: `Right p <- run cmd`.\nrun :: Text -> M (Either ExecError Proc)\nrun = send . Run",
             "runIn :: Text -> Text -> M (Either ExecError Proc)\nrunIn dir cmd = send (RunIn dir cmd)",
             "runArgv :: [Text] -> M (Either ExecError Proc)\nrunArgv = send . RunArgv",
         ],

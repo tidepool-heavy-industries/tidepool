@@ -8,8 +8,10 @@
 //! - **project-local** state — `.tidepool/` discovered by walking up from the
 //!   launch CWD ([`find_project_root`]), git-style.
 //!
-//! The launch CWD remains the Fs/Exec sandbox and is intentionally NOT resolved
-//! here. Env overrides honored: `XDG_CACHE_HOME`, `XDG_CONFIG_HOME`,
+//! The launch CWD remains the Fs sandbox root — and Exec's initial working
+//! directory only; Exec itself is not filesystem-sandboxed (see
+//! `tidepool-handlers/CLAUDE.md`'s Sandboxing section) — and is intentionally
+//! NOT resolved here. Env overrides honored: `XDG_CACHE_HOME`, `XDG_CONFIG_HOME`,
 //! `TIDEPOOL_CONFIG_DIR`. The legacy single-home root `~/.tidepool` is honored if
 //! it exists, so setups that predate the XDG split keep working.
 

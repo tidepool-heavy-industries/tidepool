@@ -1082,6 +1082,7 @@ renderExecError :: ExecError -> Text
 renderExecError e = case e of
   ExecSpawn detail -> "could not spawn: " <> detail
   ExecBadDir detail -> "bad working directory: " <> detail
+  ExecTimeout detail -> "timed out: " <> detail
 
 branchOf :: WorktreeHandle -> Text
 branchOf tree = renderBranchName tree.handleReceipt.branch

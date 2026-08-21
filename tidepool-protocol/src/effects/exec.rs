@@ -72,6 +72,16 @@ pub fn exec() -> Effect {
                     }],
                     doc: "working directory is invalid or escapes the sandbox",
                 },
+                ErrorVariant {
+                    ctor: "ExecTimeout",
+                    fields: vec![ErrorField {
+                        name: "detail",
+                        ty: HsType::Text,
+                        rust: RustBinding::Derived,
+                    }],
+                    doc:
+                        "the command exceeded its timeout and was killed (process group terminated)",
+                },
             ],
         }),
         verbs: vec![
@@ -131,7 +141,8 @@ pub fn exec() -> Effect {
                     "Run a shell command; returns a `Proc` record {exitCode, stdout, stderr}",
                     "(use `ok p` for the zero-exit check). Failure is TYPED (#335): `Left",
                     "(ExecSpawn _)` when the process can't be spawned, `Left (ExecBadDir _)`",
-                    "for `runIn` with a bad/escaping directory. A nonzero EXIT is NOT a",
+                    "for `runIn` with a bad/escaping directory, `Left (ExecTimeout _)` when",
+                    "the command outran its timeout and was killed. A nonzero EXIT is NOT a",
                     "failure — inspect `p.exitCode`. Natural spelling: `Right p <- run cmd`.",
                 ],
                 body: HelperBody::Pointfree,

@@ -50,7 +50,9 @@ pub use tidepool_bridge_effects::{
 
 /// Configuration for building the base effect handler stack.
 pub struct HandlerConfig {
-    /// Working directory (sandbox root for Fs, Exec, Lsp, Git).
+    /// Working directory (sandbox root for Fs/Lsp/Git; Exec's initial cwd
+    /// only — Exec itself is not filesystem-sandboxed, see
+    /// `tidepool-handlers/CLAUDE.md`'s Sandboxing section).
     pub cwd: PathBuf,
     /// Path for the KV store's JSON backing file.
     pub kv_path: PathBuf,

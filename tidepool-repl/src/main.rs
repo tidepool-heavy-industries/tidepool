@@ -47,7 +47,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Full effect suite, shared with the eval server via `tidepool-handlers`.
     // HandlerConfig resolution mirrors `tidepool/src/main.rs` (cwd sandbox for
-    // Fs/Exec/Lsp, the KV backing file, the LLM model). `build_base_stack` must
+    // Fs/Lsp, Exec's initial working directory — Exec itself is unsandboxed,
+    // the KV backing file, the LLM model). `build_base_stack` must
     // run in a tokio context (Llm captures `Handle::current()`), which
     // `#[tokio::main]` provides.
     let cwd = std::env::current_dir()?;

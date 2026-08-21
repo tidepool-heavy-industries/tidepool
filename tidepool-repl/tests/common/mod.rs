@@ -120,7 +120,9 @@ pub fn build_server_with_nursery(
 }
 
 /// Build a server with the FULL effect stack (Fs/Git/Exec/KV/Http/Llm/…),
-/// rooted at `cwd` so Fs/Exec/KV operate in an isolated sandbox.
+/// rooted at `cwd` so Fs/KV operate in an isolated sandbox (Exec's cwd is set
+/// to it, but Exec itself is not filesystem-sandboxed — see
+/// `tidepool-handlers/CLAUDE.md`).
 /// `session_root_label` distinguishes the tempdir prefix per calling suite
 /// (`tidepool-repl-<label>-<pid>-<nonce>`, purely cosmetic). `include_project_lib`
 /// mirrors production (`.tidepool/lib` on the include path, `Library`

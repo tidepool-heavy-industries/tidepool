@@ -103,7 +103,8 @@ through one module, `tidepool-runtime/src/paths.rs`:
   `config.toml`. Legacy `~/.tidepool/{lib,secrets}` is honored if present.
 - **Project-local** — the nearest ancestor of CWD containing a `.tidepool/`
   (git-style walk-up): `lib/`, `secrets/`, `kv.json`, `config.toml`, `PATTERNS.md`.
-- **CWD** — the Fs/Exec sandbox (unchanged).
+- **CWD** — the Fs sandbox root, and Exec's initial working directory only;
+  Exec itself is not filesystem-sandboxed (see `tidepool-handlers/CLAUDE.md`).
 
 **Verb library resolution** is layered: GHC include order
 `[effects, stdlib, project-lib, global-lib]` (first match wins), so `Tidepool.*`

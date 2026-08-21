@@ -138,15 +138,31 @@ Two consequences that survive the cycle table unchanged:
   `Drop` reaps every live async cycle rather than orphaning threads, and a
   durable mailbox or a cross-cycle agent still cannot live here.
 
-## Sandboxing
+## Sandboxing (Fs/Lsp) — and Exec's honest non-sandbox
 
-Fs/Exec are rooted at `HandlerConfig.cwd` (the workspace/session sandbox).
-Path resolution canonicalizes both the sandbox root and the target path, then
-checks `starts_with` — any path resolving outside the root is a loud
-`"path escape: ... is outside sandbox"` / `"Path escapes sandbox: ..."`
+**Fs and Lsp are rooted at `HandlerConfig.cwd`** (the workspace/session
+sandbox). Path resolution canonicalizes both the sandbox root and the target
+path, then checks `starts_with` — any path resolving outside the root is a
+loud `"path escape: ... is outside sandbox"` / `"Path escapes sandbox: ..."`
 error, not a silent clamp. This is enforced per-call at the handler, not once
 at startup — a symlink or `..` component escaping the sandbox is caught
 after canonicalization, not before.
+
+**Exec is NOT filesystem-sandboxed.** `ExecHandler` sets the *initial* working
+directory of the spawned `sh -c`/argv process to `HandlerConfig.cwd` (or, for
+`runIn`, a directory canonicalized to resolve inside it) — that is the entire
+containment. The command itself then runs as an ordinary unrestricted host
+process: it can `cd` anywhere, read/write any path the OS user can reach,
+spawn further children, and make network connections. `resolve_dir`'s
+sandbox check only constrains which directory `runIn`'s `dir` argument may
+name; it says nothing about what the process does once running. There is no
+landlock/seccomp/namespace confinement here, by design (see root `CLAUDE.md`:
+Tidepool is a trusted-operator dev harness — **the effect stack is the
+capability boundary, not the filesystem**; an agent wired without the `Exec`
+effect cannot run shell commands at all, but one wired with it can run
+anything the host user can). Exec's actual robustness controls are process-
+level, not filesystem-level: bounded streaming output capture, a timeout, and
+process-group termination on timeout — see `src/handlers/exec.rs`.
 
 `FsReq::Write` has **mkdir-p semantics**: missing parent directories are
 created automatically (`std::fs::create_dir_all`) before writing. Parent

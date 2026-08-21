@@ -49,7 +49,8 @@ pub struct ReplStartup {
 ///
 /// Full effect suite, shared with the eval server via `tidepool-handlers`.
 /// HandlerConfig resolution mirrors `tidepool/src/main.rs` (cwd sandbox for
-/// Fs/Exec/Lsp, the KV backing file, the LLM model). NOTE: unlike the eval
+/// Fs/Lsp, Exec's initial working directory — Exec itself is unsandboxed,
+/// the KV backing file, the LLM model). NOTE: unlike the eval
 /// binary we don't layer `config.toml` for the model (that `Config` lives in
 /// the `tidepool` binary, not a shared lib) — env + default only; factoring
 /// it out is a follow-up. `build_base_stack` must run in a tokio context (Llm

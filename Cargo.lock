@@ -4029,6 +4029,7 @@ dependencies = [
  "glob",
  "ignore",
  "inventory",
+ "libc",
  "parking_lot",
  "regex",
  "serde",

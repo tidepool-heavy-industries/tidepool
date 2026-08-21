@@ -22,7 +22,8 @@ use tidepool_mcp::EffectRoster;
 use tidepool_repl::{ReplServerConfig, TidepoolReplServer};
 
 /// Build a repl server over the FULL base handler stack (Fs/Git/Exec/…),
-/// sandboxed at the repo root, with the harness's small 2 MiB nursery.
+/// with Fs/Git sandboxed at the repo root (Exec's cwd is set there but Exec
+/// itself is not filesystem-sandboxed) and the harness's small 2 MiB nursery.
 /// Must be called inside a tokio runtime (LlmHandler captures the handle).
 fn build_full_stack_repl() -> Repl {
     let root = tidepool_testing::eval_harness::repo_root();

@@ -38,6 +38,8 @@ regex = "1"
 genai.workspace = true
 ureq = { workspace = true, features = ["json"] }
 url.workspace = true
+# Process-group SIGKILL on Exec timeout (Unix only — see `handlers/exec.rs`).
+libc.workspace = true
 # Direct deps for handler implementations
 serde.workspace = true
 serde_json.workspace = true

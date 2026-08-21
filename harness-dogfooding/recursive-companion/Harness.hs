@@ -1078,6 +1078,7 @@ renderExecError :: ExecError -> Text
 renderExecError e = case e of
   ExecSpawn detail -> "could not spawn: " <> detail
   ExecBadDir detail -> "bad working directory: " <> detail
+  ExecTimeout detail -> "timed out: " <> detail
 
 -- | Every field a fold's own 'FoldOutcome' contributes — replacing the
 -- pre-refactor positional 7-tuple with a named record (companion review

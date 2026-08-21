@@ -717,12 +717,13 @@ RunArgv :: [Text] -> Exec (Either ExecError Proc)
 -- end constructors --
 
 -- type_defs (1 items) --
--- type_defs[0] (295 bytes) --
-data ExecError = ExecSpawn Text | ExecBadDir Text deriving (Show, Eq)
+-- type_defs[0] (402 bytes) --
+data ExecError = ExecSpawn Text | ExecBadDir Text | ExecTimeout Text deriving (Show, Eq)
 instance ToJSON ExecError where
   toJSON e = case e of
     ExecSpawn detail -> object ["tag" .= ("ExecSpawn" :: Text), "detail" .= detail]
     ExecBadDir detail -> object ["tag" .= ("ExecBadDir" :: Text), "detail" .= detail]
+    ExecTimeout detail -> object ["tag" .= ("ExecTimeout" :: Text), "detail" .= detail]
 -- end type_defs[0] --
 
 -- end type_defs --
@@ -743,11 +744,12 @@ import qualified Tidepool.Cargo as Cargo
 -- end extra_imports --
 
 -- helpers (3 items) --
--- helpers[0] (428 bytes) --
+-- helpers[0] (506 bytes) --
 -- | Run a shell command; returns a `Proc` record {exitCode, stdout, stderr}
 -- (use `ok p` for the zero-exit check). Failure is TYPED (#335): `Left
 -- (ExecSpawn _)` when the process can't be spawned, `Left (ExecBadDir _)`
--- for `runIn` with a bad/escaping directory. A nonzero EXIT is NOT a
+-- for `runIn` with a bad/escaping directory, `Left (ExecTimeout _)` when
+-- the command outran its timeout and was killed. A nonzero EXIT is NOT a
 -- failure — inspect `p.exitCode`. Natural spelling: `Right p <- run cmd`.
 run :: Text -> M (Either ExecError Proc)
 run = send . Run
