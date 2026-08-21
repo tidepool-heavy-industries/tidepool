@@ -232,7 +232,7 @@ surface here — it drifts. Module map:
   here because a `Tool`'s `handler :: input -> m output` is parent Haskell
   that Rust cannot run — see `plans/post-restart/agent-lanes/lane-codex-live-plan.md` §2).
   Three things are answered as REFUSALS rather than dispatched, so the child
-  always finishes its turn: a name absent from `dispatchNames` (`dispatch`'s
+  always finishes its turn: a name absent from `declarations` (`dispatch`'s
   own fallthrough `error`s, which would abort the eval with the turn still
   parked), a call past the `ToolRounds` cap (resident POLICY — distinct from
   the runtime's `MAX_TOOL_ROUNDS` catastrophe backstop), and — before any

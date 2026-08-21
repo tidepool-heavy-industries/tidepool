@@ -333,7 +333,7 @@ cancelAgent (AgentHandle cyc) = agentCancelRaw cyc
 -- REFUSALS (the child reads the text and finishes its turn) rather than
 -- silence or an abort:
 --
--- * a tool name that is not in @dispatchNames@ — @dispatch@'s own fallthrough
+-- * a tool name not in @declarations@ — @dispatch@'s own fallthrough
 --   @error@s, and an @error@ inside a dispatch would abort the whole eval with
 --   the child's turn still parked, so the membership check is load-bearing;
 -- * a call past the 'ToolRounds' cap, refused with text naming the cap;
@@ -404,9 +404,10 @@ driveToolLoop rounds compiled served step = case step of
 -- | Decide what one parked call is answered with, and what that costs the
 -- round budget.
 --
--- Name membership is checked FIRST, and against 'dispatchNames' rather than by
--- calling 'dispatch' and hoping: an undeclared name reaching 'dispatch' hits
--- its "unknown tool" fallthrough, which @error@s — aborting the eval with the
+-- Name membership is checked FIRST, against 'declarations' (the same
+-- traversal 'dispatch' itself was built from), rather than by calling
+-- 'dispatch' and hoping: an undeclared name reaching 'dispatch' hits its
+-- "unknown tool" fallthrough, which @error@s — aborting the eval with the
 -- child's turn still parked, which is the one outcome this loop exists to
 -- prevent. Checking the name first also gives the child the more useful of the
 -- two refusals when both would apply.
@@ -418,7 +419,7 @@ answerCall ::
   Value ->
   M (ToolAnswer, Int)
 answerCall (ToolRounds cap) compiled served toolName args
-  | toolName `notElem` dispatchNames compiled =
+  | toolName `notElem` map dtdName (declarations compiled) =
       pure (ToolRefused ("no such tool: " <> toolName), served)
   | served >= cap =
       pure

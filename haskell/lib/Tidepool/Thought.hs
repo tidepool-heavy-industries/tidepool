@@ -33,7 +33,6 @@ module Tidepool.Thought
   , Strategy (..)
 
     -- * Budgets and forced finish
-  , Budget (..)
   , ForcedReason (..)
   , renderForcedReason
   , forcedDraftText
@@ -48,10 +47,7 @@ module Tidepool.Thought
   , Artifact (..)
   , artifactId
   , ProposedArtifact (..)
-  , ModelContribution (..)
   , NodeFailure (..)
-  , NodeReceipt (..)
-  , NodeResult (..)
   , CompositionOrder (..)
   , FoldDecision (..)
 
@@ -135,13 +131,6 @@ data Strategy = Sequential | Concurrent | Pooled Int
 -- Budgets and forced finish
 -- ---------------------------------------------------------------------------
 
--- | Depth, node-count, and fan-out caps (PRD locked decision 9). Rounds,
--- deadline, and cost are deferred — this pure fixture implements exactly the
--- three caps the lane spec asks for; nothing here forecloses adding the
--- rest later.
-data Budget = Budget {maxDepth :: Int, maxNodes :: Int, maxFanOut :: Int}
-  deriving (Eq, Show)
-
 -- | Which cap forced a local finish, carrying the exact numbers that decided
 -- it — so a caller renders "depth cap 2 of 2 reached" without re-deriving
 -- anything from the seed or config that produced the forced finish.
@@ -207,14 +196,6 @@ branchCount layer = case layer of
 
 -- ---------------------------------------------------------------------------
 -- What crosses the model boundary vs. what the runtime stamps
---
--- PRD's dataflow principle, locked: the model attests only to
--- 'ModelContribution' (no ids, no receipts — it cannot attest runtime
--- facts); the RUNTIME assigns ids, computes previews, and stamps the
--- receipt around it, producing 'NodeResult'. Keeping these as two distinct
--- types (rather than one record with optional runtime fields) makes "the
--- model cannot attest to its own execution" a type-level fact, not a
--- convention.
 -- ---------------------------------------------------------------------------
 
 newtype ArtifactId = ArtifactId Text
@@ -249,37 +230,8 @@ data ProposedArtifact s = ProposedArtifact
     proposedApply :: Maybe (s -> Either EditFailure s)
   }
 
--- | What the MODEL finalizes (PRD): a rendered view of this node plus
--- whatever it proposes — no ids, no receipts.
-data ModelContribution s = ModelContribution
-  { contributionView :: Text
-  , contributionProposed :: [ProposedArtifact s]
-  }
-
 newtype NodeFailure = NodeFailure {failureReason :: Text}
   deriving (Eq, Show)
-
--- | What the runtime observed about one fold. 'receiptForced' is set exactly
--- when a budget cap produced this node's 'Finish' rather than the model
--- choosing to stop (PRD: "the transformation stamped in the receipt").
-data NodeReceipt = NodeReceipt {receiptDepth :: Int, receiptForced :: Maybe ForcedReason}
-  deriving (Eq, Show)
-
--- | What the RUNTIME constructs around a 'ModelContribution' — ids assigned,
--- receipt stamped, and failure representable (PRD locked decision 6): a
--- coalgebra or algebra invocation that exits abnormally is folded as
--- 'NodeFailed' at its branch position, never an exception that erases
--- sibling results.
-data NodeResult s
-  = NodeSucceeded
-      { contribution :: ModelContribution s
-      , artifacts :: [Artifact s]
-      , receipt :: NodeReceipt
-      }
-  | NodeFailed
-      { failure :: NodeFailure
-      , receipt :: NodeReceipt
-      }
 
 -- | Placeholder for the PRD's opaque @CompositionOrder@ payload: the order
 -- the algebra composes selected artifacts in.

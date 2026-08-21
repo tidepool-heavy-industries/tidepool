@@ -716,14 +716,6 @@ runCompileCycle mCache mMemoRef timing variant path = do
       , prWarnings     = warnings
       }
 
--- | The batch-item variant: structurally 'sessionVariant' (same deferred-
--- module injection logic, same 'OptimizeEveryModule' tier) with its own
--- error-message label — batch items are compiled via 'runCompileCycle'
--- directly rather than through 'runCompile'/'runPipelineSession'. See
--- 'runBatchPipeline'.
-batchVariant :: SessionScope -> FilePath -> PipelineVariant
-batchVariant scope path = (sessionVariant scope path) { pvLabel = "runBatchPipeline" }
-
 -- | Catch any exception from a 'Ghc' action without losing the live session
 -- (a bare 'IO'-level 'Control.Exception.try' cannot wrap a 'Ghc' action
 -- directly). Standard 'reifyGhc'/'reflectGhc' bridge — see their haddocks in
@@ -803,8 +795,14 @@ runBatchPipeline includes items onItem = do
           BatchDecl path expected ->
             BatchDeclResult <$> runBatchDeclItems path expected
           BatchCompile path scope ->
+            -- Structurally 'sessionVariant' (same deferred-module injection
+            -- logic, same 'OptimizeEveryModule' tier) with its own
+            -- error-message label — batch items are compiled via
+            -- 'runCompileCycle' directly rather than through
+            -- 'runCompile'/'runPipelineSession'.
             BatchCompileResult <$>
-              runCompileCycle (Just cache) (Just memoRef) timing (batchVariant scope path) path
+              runCompileCycle (Just cache) (Just memoRef) timing
+                (sessionVariant scope path) { pvLabel = "runBatchPipeline" } path
         liftIO (onItem n result)
       case attempt of
         Left e   -> pure (n, Just e)

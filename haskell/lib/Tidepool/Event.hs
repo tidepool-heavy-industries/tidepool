@@ -1,7 +1,6 @@
 {-# LANGUAGE NoImplicitPrelude, OverloadedStrings, DataKinds, TypeOperators, FlexibleContexts, FlexibleInstances, UndecidableInstances, GADTs, PartialTypeSignatures, ScopedTypeVariables, ExtendedDefaultRules, LambdaCase, TupleSections, MultiWayIf, RecordWildCards, NamedFieldPuns, ViewPatterns, BangPatterns, TypeApplications, BlockArguments, NumericUnderscores, MultilineStrings, DeriveFunctor, DeriveFoldable, DeriveTraversable, DeriveGeneric, DeriveAnyClass, QuasiQuotes, DuplicateRecordFields, OverloadedRecordDot #-}
 
--- | Typed repository events — the authored surface of
--- @plans\/self-iterating-harness\/19-managed-worktrees-events-prd.md@.
+-- | Typed repository events.
 --
 -- The shared abstraction is an event DESCRIPTION, not a callback registry.  An
 -- 'Event' is a value you can build, map, and merge before anything is
@@ -85,25 +84,18 @@
 -- of the 'Int' is the only capability check, and both payloads stay BARE (like
 -- 'Tick'), so 'nextEvent' yields a single 'Observed', never a double wrap.
 --
--- == PRD 22 lane 4 — where this module's definitions come from
+-- == Where this module's definitions come from
 --
--- Twenty-two names used to be spliced directly into the generated
--- @Tidepool.Effects@ module, string-by-string, from the hand-maintained
--- @event_effect_def!@ registry. `tidepool-protocol`'s closed schema represents
--- FOUR of them — 'awaitSubscriptionRaw', 'mailboxNew', 'mailboxSend',
--- 'mailboxDrop' — because each is a thin wrapper over exactly one verb; those
--- four still come from @Tidepool.Effects@ (re-exported below, not redefined).
--- The other EIGHTEEN, plus the 'Event'/'Observed' TYPE declarations and the
--- 'Functor' instance, are DEFINITIONS in this module: constructor
--- applications, `case` matches over a sum's variants, `do` blocks, and
--- recursive functions are not thin verb wrappers, and 'Event'/'Observed' are
--- genuinely polymorphic (a type parameter, and 'Event' a function-typed
--- field) with no schema vocabulary to represent them. See
--- @tidepool-protocol/src/effects/event.rs@'s module doc and
--- @plans/self-iterating-harness/22-p3-event-survey.md@ for the full verdict
--- table — the same lever `haskell/lib/Tidepool/Worktree.hs` uses for its own
--- ten relocated helpers, applied here to type declarations for the first
--- time.
+-- `tidepool-protocol`'s closed schema represents FOUR names —
+-- 'awaitSubscriptionRaw', 'mailboxNew', 'mailboxSend', 'mailboxDrop' —
+-- because each is a thin wrapper over exactly one verb; those four come from
+-- @Tidepool.Effects@ (re-exported below, not redefined). The rest, plus the
+-- 'Event'/'Observed' TYPE declarations and the 'Functor' instance, are
+-- DEFINITIONS in this module: constructor applications, `case` matches over
+-- a sum's variants, `do` blocks, and recursive functions are not thin verb
+-- wrappers, and 'Event'/'Observed' are genuinely polymorphic (a type
+-- parameter, and 'Event' a function-typed field) with no schema vocabulary
+-- to represent them.
 module Tidepool.Event
   ( -- * Event descriptions
     Event

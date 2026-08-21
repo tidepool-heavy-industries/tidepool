@@ -133,6 +133,35 @@ seedCoalg fails (Seed d s)
       Finish dr -> Finish dr {draftDepth = d}
       layer -> fmap (Seed (d + 1)) layer
 
+-- | What the model finalizes: a rendered view of a node plus whatever it
+-- proposes. This test's own witness type — no production consumer defines
+-- the real recursive companion's own configuration/result shapes instead
+-- (see "Tidepool.Thought"'s module doc for the split this fixture doesn't
+-- need).
+data ModelContribution s = ModelContribution
+  { contributionView :: Text
+  , contributionProposed :: [ProposedArtifact s]
+  }
+
+-- | What the runtime observed about one fold in this test's witness tree.
+data NodeReceipt = NodeReceipt {receiptDepth :: Int, receiptForced :: Maybe ForcedReason}
+
+-- | What the runtime constructs around a 'ModelContribution' for this
+-- test's witness tree — ids assigned, receipt stamped, and failure
+-- representable: a coalgebra or algebra invocation that exits abnormally is
+-- folded as 'NodeFailed' at its branch position, never an exception that
+-- erases sibling results.
+data NodeResult s
+  = NodeSucceeded
+      { contribution :: ModelContribution s
+      , artifacts :: [Artifact s]
+      , receipt :: NodeReceipt
+      }
+  | NodeFailed
+      { failure :: NodeFailure
+      , receipt :: NodeReceipt
+      }
+
 -- | A witness the test can walk: the driven 'NodeResult' plus (for every
 -- non-leaf) its already-folded children, so properties can inspect shape
 -- without re-deriving it from 'NodeResult' alone (which does not keep

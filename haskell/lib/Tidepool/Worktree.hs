@@ -1,7 +1,6 @@
 {-# LANGUAGE NoImplicitPrelude, OverloadedStrings, DataKinds, TypeOperators, FlexibleContexts, FlexibleInstances, UndecidableInstances, GADTs, PartialTypeSignatures, ScopedTypeVariables, ExtendedDefaultRules, LambdaCase, TupleSections, MultiWayIf, RecordWildCards, NamedFieldPuns, ViewPatterns, BangPatterns, TypeApplications, BlockArguments, NumericUnderscores, MultilineStrings, DeriveFunctor, DeriveFoldable, DeriveTraversable, DeriveGeneric, DeriveAnyClass, QuasiQuotes, DuplicateRecordFields, OverloadedRecordDot #-}
 
--- | Managed git worktrees — the authored surface of
--- @plans\/self-iterating-harness\/19-managed-worktrees-events-prd.md@.
+-- | Managed git worktrees.
 --
 -- A resident allocates isolated worktrees, looks retained ones back up by
 -- durable id, and reads what git actually became.  It does not perform git
@@ -72,12 +71,11 @@
 -- meant, rather than the runtime guessing on its behalf.
 --
 -- HOLD: @workspaceOf :: WorktreeHandle -> Workspace@ and the coupled-spawn
--- signature are NOT exported yet.  @Workspace@ is PRD 18's type and the
--- coupling revision is being designed jointly with the agent lane through
--- root; exporting a conversion into a type whose shape is still being settled
--- would freeze the wrong half of a two-sided seam.  The binding enforcement
--- those signatures rest on exists today (one worktree, one agent, explicit
--- refusal) and is tested against a scripted writer.
+-- signature are NOT exported yet — @Workspace@'s shape is still being settled
+-- jointly with the agent lane, and exporting a conversion into it now would
+-- freeze the wrong half of a two-sided seam.  The binding enforcement those
+-- signatures rest on exists today (one worktree, one agent, explicit refusal)
+-- and is tested against a scripted writer.
 module Tidepool.Worktree
   ( -- * Specs
     WorktreeSpec
@@ -147,8 +145,7 @@ default (Int, Double, Text)
 -- Haskell hatch with extra steps. They live here, where library code belongs,
 -- and the Worktree contract carries `import Tidepool.Worktree` as an
 -- `extra_imports` row so an eval whose row includes Worktree still sees all
--- fourteen names with nothing authored differently. See the scaffold doc
--- (`plans/self-iterating-harness/22-p1-protocol-scaffold.md`) §11.9.
+-- fourteen names with nothing authored differently.
 --
 -- FOUR names are re-exported from the generated "Tidepool.Effects" above
 -- rather than defined here, and it is worth knowing WHY before anyone tries to
@@ -161,9 +158,8 @@ default (Int, Double, Text)
 --     relocated is that "Tidepool.Event"'s @commit@ and @headChanged@ helpers
 --     CALL it, and a helper spliced into the generated "Tidepool.Effects" may
 --     not reference a name that lives out here. That module cannot import this
---     one — this module imports IT — and defining a name in both places makes
---     it an ambiguous occurrence in any eval, which is the duplication this
---     migration exists to delete.
+--     one — this module imports IT — and defining a name in both places would
+--     make it an ambiguous occurrence in any eval.
 --
 -- The pragma block at the top of this file is the generated
 -- "Tidepool.Effects" module's own pragma set, verbatim: these bodies used to

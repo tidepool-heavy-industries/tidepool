@@ -147,13 +147,6 @@ data CompiledTools m = CompiledTools
   { declarations :: [DynamicToolDeclaration]
   , dispatch :: ToolName -> StructuralValue -> m StructuralValue
   , synopsis :: Text
-  , -- | Every wire name 'dispatch' will resolve without hitting its
-    -- "unknown tool" fallthrough. NOT part of the PRD's minimum
-    -- 'CompiledTools' shape ("at least" declarations/dispatch/synopsis) —
-    -- added so the single-traversal invariant (declaration key set ==
-    -- dispatch key set) is something a test can assert directly instead of
-    -- only exercising indirectly.
-    dispatchNames :: [ToolName]
   }
 
 -- | Authoring failures only detectable once selector NAMES (not just
@@ -318,7 +311,6 @@ compileTools v =
                   { declarations = [DynamicToolDeclaration (entryWireName e) (entryDescription e) (entryInputSchema e) | e <- named]
                   , dispatch = dispatchFn
                   , synopsis = T.intercalate (T.pack "\n") [entryWireName e <> T.pack ": " <> entryDescription e | e <- named]
-                  , dispatchNames = map entryWireName named
                   }
 
 checkNames :: [ToolEntry m] -> Either ToolCompileError ()

@@ -1,7 +1,6 @@
 {-# LANGUAGE DeriveFunctor, DeriveFoldable, DeriveTraversable #-}
 
--- | The swarm engine's hylo core and its policy middleware (PRD 20, "The hylo
--- core").
+-- | The swarm engine's hylo core and its policy middleware.
 --
 -- The swarm is a monadic hylomorphism: 'PlanF' is the plan's base functor,
 -- and 'hyloM' unfolds a seed into a tree, works every node, and folds it
@@ -47,8 +46,7 @@
 -- == Deliberately NOT here
 --
 -- Any 'Strategy' parameter or concurrent\/pooled traversal (a later
--- green-threads lane — PRD 20 "Concurrency substrate" \/ "Green threads");
--- node residency; and every domain type — @Outcome@, @Review@, @Spec@,
+-- green-threads lane); node residency; and every domain type — @Outcome@, @Review@, @Spec@,
 -- receipts, budgets, approvals. This module is the recursion scheme plus four
 -- transformers over it; everything that decides what a node's task MEANS is a
 -- caller's.

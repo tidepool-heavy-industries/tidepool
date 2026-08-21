@@ -159,42 +159,18 @@ fn notify_endpoint_dispatches_through_the_same_path() {
 }
 
 // ---------------------------------------------------------------------------
-// Single-traversal invariant: declaration keys == dispatch keys
+// Declaration naming: selector -> snake_case, field order preserved
 // ---------------------------------------------------------------------------
 
-/// Pins the property `compileTools`'s doc comment claims: `declarations`
-/// and `dispatchNames` are built from the SAME `GCompileTools` traversal
-/// result, in the same order, so they cannot silently disagree. A
-/// regression that split this into two traversals (e.g. one deriving names
-/// from the record, the other from a separately-maintained list) would show
-/// up here as a set/order mismatch.
+/// Pins that `declarations`' wire names come from one traversal in field
+/// order: two distinct, correctly-named entries, not vacuously empty.
 #[test]
-fn single_traversal_invariant_declaration_and_dispatch_keys_match() {
-    let src = worker_tools_module(
-        "result :: Bool\n\
-         result = case compileTools workerTools of\n\
-         \x20 Left _ -> False\n\
-         \x20 Right compiled -> map dtdName (declarations compiled) == dispatchNames compiled\n",
-    );
-    let v = run_pure(&src, "result");
-    assert_eq!(
-        v,
-        json!(true),
-        "declaration key set must equal dispatch key set"
-    );
-}
-
-/// The invariant test above only proves the two lists are equal for a
-/// well-formed record; this pins that they are also non-trivial (two
-/// distinct, correctly-named entries) so the equality isn't vacuously true
-/// over an accidentally-empty list.
-#[test]
-fn single_traversal_invariant_names_are_the_expected_two() {
+fn declaration_names_are_the_expected_two() {
     let src = worker_tools_module(
         "result :: [Text]\n\
          result = case compileTools workerTools of\n\
          \x20 Left _ -> []\n\
-         \x20 Right compiled -> dispatchNames compiled\n",
+         \x20 Right compiled -> map dtdName (declarations compiled)\n",
     );
     let v = run_pure(&src, "result");
     assert_eq!(

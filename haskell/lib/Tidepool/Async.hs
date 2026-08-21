@@ -1,7 +1,6 @@
 {-# LANGUAGE ScopedTypeVariables #-}
 
--- | Green threads with the authored surface of @Control.Concurrent.Async@ —
--- PRD 20 S1-L4 (@plans\/self-iterating-harness\/20-s1l4-green-threads.md@).
+-- | Green threads with the authored surface of @Control.Concurrent.Async@.
 --
 -- __A green thread is a continuation parked in the session's multi-hole
 -- registry, under its own realm.__  'async' starts a NEW suspension-capable

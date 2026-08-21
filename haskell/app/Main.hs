@@ -175,14 +175,10 @@ harnessProfilePragmaLine =
 
 -- | The shared epilogue every dispatch arm ends on: render the fixed-shape
 -- JSON diagnostics report to stdout from a captured extraction result, with a
--- human-readable debug copy on stderr, exiting non-zero on failure. A STRICT
--- SUPERSET of every former per-call-site copy (once three were textually
--- identical, byte for byte, modulo comments) — it always keeps the
--- 'SourceError' distinction, including at call sites reached through
--- 'runReportingDiags' where no live GHC session exists to ever throw one:
--- 'fromException' can only take the 'Nothing' branch there, which is exactly
--- what the old parse-only epilogue always did, so folding it in changes
--- nothing observable for those callers.
+-- human-readable debug copy on stderr, exiting non-zero on failure. Also used
+-- on parse-only lanes (e.g. 'runClassifyMode') where no live GHC session
+-- exists to ever throw a 'SourceError' — 'fromException' can only take the
+-- 'Nothing' branch there.
 reportDiags :: Either SomeException () -> IO ()
 reportDiags (Left e) = do
   let diags = case fromException e of
@@ -196,14 +192,6 @@ reportDiags (Left e) = do
     Nothing -> hPutStrLn stderr $ "Error: " ++ show e
   exitFailure
 reportDiags (Right ()) = putStrLn (renderDiagsJson [])
-
--- | Run an @IO ()@ action that has no GHC 'SourceError' of its own (the parse-only
--- binder-extraction lanes), reporting the fixed-shape JSON diagnostics report on
--- stdout either way via 'reportDiags'. A caught exception always takes
--- 'reportDiags''s 'Nothing' branch (no live GHC session exists at these call
--- sites, so there is never a 'SourceError' to distinguish).
-runReportingDiags :: IO () -> IO ()
-runReportingDiags act = try act >>= reportDiags
 
 -- | A session-aware turn: any of the @--session-*@ flags are present. Reference
 -- turns set @--session-root@ (+ @--inject-val@); bind turns add @--session-bind@.
@@ -1012,12 +1000,19 @@ runTurnMode args path = do
 -- item.
 runClassifyMode :: Bool -> Args -> IO ()
 runClassifyMode timing args =
-  timePhase timing "total" $ runReportingDiags $ do
-    out      <- requireArg "--classify-out" (argClassifyOut args)
-    srcs     <- mapM readFile (argFiles args)
-    verdicts <- classifyBlock timing srcs
-    writeFile out (renderVerdictsJson verdicts)
-    hPutStrLn stderr $ "  Wrote: " ++ out ++ " (" ++ show (length verdicts) ++ " verdicts)"
+  -- No live GHC session exists on this parse-only lane, so the caught
+  -- exception below always takes 'reportDiags''s 'Nothing' branch (never a
+  -- 'SourceError' to distinguish).
+  timePhase timing "total" $
+    try
+      ( do
+          out      <- requireArg "--classify-out" (argClassifyOut args)
+          srcs     <- mapM readFile (argFiles args)
+          verdicts <- classifyBlock timing srcs
+          writeFile out (renderVerdictsJson verdicts)
+          hPutStrLn stderr $ "  Wrote: " ++ out ++ " (" ++ show (length verdicts) ++ " verdicts)"
+      )
+      >>= reportDiags
 
 --------------------------------------------------------------------------------
 -- Turn-batch mode (--turn-batch <plan.json> --batch-out <dir>,
@@ -1293,13 +1288,6 @@ renameModuleHeader newName src = unlines (go (lines src))
                   else (indent ++ "module " ++ nameSpace ++ newName ++ afterName) : ls
            Nothing -> l : go ls
 
--- | 'PlanItem'/'BatchPlanned' -> the GhcPipeline-side compile request.
-toGhcBatchItem :: BatchPlanned -> BatchItem
-toGhcBatchItem bp = case bpKind bp of
-  KDecl -> BatchDecl (bpModulePath bp) (bpModName bp)
-  _     -> BatchCompile (bpModulePath bp)
-             (SessionScope (bpSessionRoot bp) (mapMaybe parseValModule (bpInjectVals bp)))
-
 -- | Write one item's byte-identical single-turn output set — reuses
 -- 'writeWholeModuleClosed' / 'mkBoundBinders' / 'encodeTurnOut' exactly as
 -- 'runTurnMode' does for a single spawn, so a batched item cannot diverge in
@@ -1370,7 +1358,12 @@ runTurnBatchMode args = do
     items     <- parsePlanItems planSrc
     templates <- mapM parseTurnTemplate (argTurnTemplates args)
     planned   <- mapM (planBatchItem batchOut templates) items
-    let ghcItems = map toGhcBatchItem planned
+    -- 'BatchPlanned' -> the GhcPipeline-side compile request.
+    let toGhcBatchItem bp = case bpKind bp of
+          KDecl -> BatchDecl (bpModulePath bp) (bpModName bp)
+          _     -> BatchCompile (bpModulePath bp)
+                     (SessionScope (bpSessionRoot bp) (mapMaybe parseValModule (bpInjectVals bp)))
+        ghcItems = map toGhcBatchItem planned
         byIdx    = Map.fromList (zip [0 ..] planned)
     statusRef <- newIORef []
     (nDone, mExc) <- runBatchPipeline (argIncludes args) ghcItems $ \idx result -> do
