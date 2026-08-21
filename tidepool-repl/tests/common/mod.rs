@@ -112,6 +112,9 @@ pub fn build_server_with_nursery(
         // suspended, H3 wedged) keep the historical one-knob behavior.
         wedged_ttl: continuation_ttl,
         turn_timeout,
+        lib_dirs: Vec::new(),
+        stdlib_dir: None,
+        patterns_path: None,
     };
     TidepoolReplServer::new(stack, cfg)
 }
@@ -140,11 +143,13 @@ pub fn build_full_server(
         tidepool_mcp::ensure_effects_module(roster.decls()).expect("write Tidepool.Effects module");
     let repo_root = tidepool_testing::eval_harness::repo_root();
     let prelude_dir = repo_root.join("haskell").join("lib");
-    let mut base_include = vec![effects_dir, prelude_dir];
+    let mut base_include = vec![effects_dir, prelude_dir.clone()];
+    let mut lib_dirs = Vec::new();
     if include_project_lib {
         let project_lib = repo_root.join(".tidepool").join("lib");
         if project_lib.is_dir() {
-            base_include.push(project_lib);
+            base_include.push(project_lib.clone());
+            lib_dirs.push(project_lib);
         }
     }
     let session_root_base = std::env::temp_dir().join(format!(
@@ -165,6 +170,9 @@ pub fn build_full_server(
         continuation_ttl: None,
         wedged_ttl: None,
         turn_timeout: None,
+        lib_dirs,
+        stdlib_dir: Some(prelude_dir),
+        patterns_path: None,
     };
     TidepoolReplServer::new(stack, cfg)
 }

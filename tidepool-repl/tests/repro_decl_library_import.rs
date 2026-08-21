@@ -87,6 +87,9 @@ fn build_server_with_real_library(cwd: PathBuf) -> TidepoolReplServer {
         continuation_ttl: None,
         wedged_ttl: None,
         turn_timeout: None,
+        lib_dirs: Vec::new(),
+        stdlib_dir: None,
+        patterns_path: None,
     };
     TidepoolReplServer::new(stack, cfg)
 }

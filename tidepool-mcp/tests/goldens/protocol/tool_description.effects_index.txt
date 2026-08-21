@@ -17,8 +17,7 @@
   Time: UTC wall-clock access (epoch milliseconds).
       verbs: getCurrentTime
   Ask: Suspend execution and ask the calling agent a STRUCTURED question.
-      verbs: ask, isOpt, innerSchema, schemaToValue
+      verbs: ask
   RunLLMTurn: Suspend for a TYPED answer.
-      verbs: runLLMTurn, runLLMTurnFork, runLLMTurnFanout, renderInvocationExit, runLLMTurnSited, runLLMTurnForkSited, runLLMTurnFanoutSited, freezeContext, runLLMTurnBranch, runLLMTurnBranchSited, runLLMTurnBranchLabeled, runLLMTurnBranchLabeledSited, runLLMTurnBranchFanout, runLLMTurnBranchFanoutSited
+      verbs: runLLMTurn, runLLMTurnFork, runLLMTurnFanout, renderInvocationExit, freezeContext, runLLMTurnBranch, runLLMTurnBranchLabeled, runLLMTurnBranchFanout
   Fork: Spawn parallel sub-answerers and gather their typed answers.
-      verbs: forkSited, forkAllSited

@@ -261,18 +261,28 @@ fn guide_md(ctx: &ResourceCtx) -> String {
         .any(|e| matches!(e.type_name, "Http" | "Exec" | "Llm" | "Fs" | "Git" | "Lsp"))
     {
         s.push_str(concat!(
-            "\n## Effect failures are values\n",
-            "Every effect verb returns `Either <EffectError> a`: an external condition — a 404 or network ",
-            "error, an LLM API error or refusal, an exec spawn failure, a missing file — arrives as `Left err`, ",
-            "so one probe's failure is data the eval reads and routes on:\n",
+            "\n## Failure shapes — by signature, not one universal rule\n",
+            "A verb's own type tells you its failure shape; three shapes cover the surface — trust the ",
+            "signature (`tidepool://effect/{name}`) over any rule of thumb:\n",
+            "- **External fallible ops return `Either <EffectError> a`**: a 404 or network error, an LLM ",
+            "API error or refusal, an exec spawn failure, a missing file — arrives as `Left err`, so one ",
+            "probe's failure is data the eval reads and routes on (`readFile`, `run`, `httpGet`, `llm`, ",
+            "`grepGlob`, …).\n",
+            "- **Absence queries return `Maybe a`, not `Either`**: `kvGet :: M (Maybe Value)`, ",
+            "`fsMeta :: M (Maybe FileMeta)` — `Nothing` means \"not there\"; there is no error value to ",
+            "match on.\n",
+            "- **State/clock/form/console verbs are total**: `kvSet`, `getCurrentTime`, `putStrLn`, `ask` ",
+            "never fail at this layer — no wrapper at all.\n",
             "```haskell\n",
             "readFile \"notes.md\" >>= \\case\n",
             "  Right body          -> pure (T.length body)\n",
             "  Left (FsNotFound _) -> pure 0      -- match a specific cause to recover\n",
-            "Right p <- run \"git status --short\"  -- bind the Right; liftEither aborts the eval on a Left\n",
+            "Right p <- run \"git status --short\"  -- Either: bind the Right; liftEither aborts on a Left\n",
+            "mv <- kvGet \"key\"                    -- Maybe: no Either here, match Just/Nothing directly\n",
             "```\n",
-            "`liftEither :: Either e a -> M a` unwraps a `Right` or aborts rendering the `Left`. A command that ",
-            "RUNS and exits nonzero is a `Right proc` — read `proc.exitCode` (record-dot) to branch on the code.\n",
+            "`liftEither :: Either e a -> M a` unwraps a `Right` or aborts rendering the `Left` — only ",
+            "meaningful for the Either shape, never for a `Maybe` or total verb. A command that RUNS and ",
+            "exits nonzero is a `Right proc` — read `proc.exitCode` (record-dot) to branch on the code.\n",
         ));
     }
     s

@@ -62,17 +62,55 @@ pub fn helper_name(helper: &str) -> Option<String> {
     }
 }
 
+/// Is `helper` on `effect` substrate — an implementation detail the extract
+/// layer needs (schema-building internals, the `*Sited` call-site-id plumbing
+/// behind `runLLMTurn`/`fork`/`forkAll`) rather than a verb a model should
+/// reach for directly?
+///
+/// A small hand-maintained allowlist rather than a visibility field on
+/// [`EffectDecl`]: that struct is a plain `Copy` type constructed as a bare
+/// struct literal in several crates this lane does not own (generated glue,
+/// harness fixtures, test doubles) — adding a field there would force an
+/// edit in every one of them. Keyed on (effect, helper name) instead, and
+/// consulted only by the derived INDEX below; the full per-effect resource
+/// (`tidepool://effect/{name}`, `:browse <Effect>`) still lists every helper
+/// verbatim — a model that asks for that depth gets it.
+fn is_substrate_helper(effect: &str, helper: &str) -> bool {
+    matches!(
+        (effect, helper),
+        ("Ask", "isOpt")
+            | ("Ask", "innerSchema")
+            | ("Ask", "schemaToValue")
+            | ("Fork", "forkSited")
+            | ("Fork", "forkAllSited")
+            | ("RunLLMTurn", "runLLMTurnSited")
+            | ("RunLLMTurn", "runLLMTurnForkSited")
+            | ("RunLLMTurn", "runLLMTurnFanoutSited")
+            | ("RunLLMTurn", "runLLMTurnBranchSited")
+            | ("RunLLMTurn", "runLLMTurnBranchLabeledSited")
+            | ("RunLLMTurn", "runLLMTurnBranchFanoutSited")
+    )
+}
+
 /// One derived entry for an effect in a tool-description index: the effect name,
-/// its one-line (first-sentence) description, and the names of the helper verbs
-/// it exposes — the callable surface, derived from the decl so a new helper
-/// auto-appears. Rendered as a header line plus an indented verb list:
+/// its one-line (first-sentence) description, and the names of the PUBLIC helper
+/// verbs it exposes — the recommended callable surface, derived from the decl so
+/// a new public helper auto-appears (substrate helpers, see
+/// [`is_substrate_helper`], are excluded here but still fully documented at
+/// `tidepool://effect/{name}`). Rendered as a header line plus an indented verb
+/// list:
 ///
 /// ```text
 ///   Console: Print text output.
 ///       verbs: say, sayShow
 /// ```
 pub fn describe_effect(decl: &EffectDecl) -> String {
-    let verbs: Vec<String> = decl.helpers.iter().filter_map(|h| helper_name(h)).collect();
+    let verbs: Vec<String> = decl
+        .helpers
+        .iter()
+        .filter_map(|h| helper_name(h))
+        .filter(|name| !is_substrate_helper(decl.type_name, name))
+        .collect();
     let mut s = format!("  {}: {}", decl.type_name, first_sentence(decl.description));
     if !verbs.is_empty() {
         s.push_str("\n      verbs: ");
@@ -134,9 +172,12 @@ mod tests {
     }
 
     /// Snapshot-guard: the derived index names every effect and lists at least
-    /// one of each effect's helper verbs. Adding a new `*_decl()` (with any
-    /// helper) therefore auto-appears in both servers' tool descriptions with
-    /// no hand-edit.
+    /// one of each effect's PUBLIC helper verbs (an effect whose only declared
+    /// helpers are substrate, e.g. `Fork`'s `forkSited`/`forkAllSited`, is
+    /// exempt — its model-facing verbs live in the Haskell stdlib instead, not
+    /// in `EffectDecl::helpers`). Adding a new public helper to a `*_decl()`
+    /// therefore auto-appears in both servers' tool descriptions with no
+    /// hand-edit; a substrate helper never does.
     #[test]
     fn derived_index_covers_every_decl_and_a_helper_verb() {
         let decls = standard_decls();
@@ -147,9 +188,15 @@ mod tests {
                 "index must name effect {}: {index}",
                 d.type_name
             );
-            // At least one helper verb name for the effect must appear (spot the
-            // FIRST helper's name — proof the verb enumeration derives).
-            if let Some(name) = d.helpers.iter().find_map(|h| helper_name(h)) {
+            // At least one PUBLIC helper verb name for the effect must appear
+            // (spot the first PUBLIC helper's name — proof the verb
+            // enumeration derives and substrate is excluded).
+            let public_name = d
+                .helpers
+                .iter()
+                .filter_map(|h| helper_name(h))
+                .find(|n| !is_substrate_helper(d.type_name, n));
+            if let Some(name) = public_name {
                 assert!(
                     index.contains(&name),
                     "index must list a helper verb ({name}) for effect {}: {index}",
@@ -157,5 +204,41 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// The recommended-surface index must not leak the extract-layer
+    /// substrate: `ask`'s schema-building internals, `RunLLMTurn`'s
+    /// call-site-id plumbing, and `Fork`'s — the report finding this closes
+    /// (D's #3): the generated index advertised `isOpt`, `innerSchema`,
+    /// `schemaToValue`, every `*Sited` variant, and only `forkSited`/
+    /// `forkAllSited` for `Fork`, none of which a model should call directly.
+    #[test]
+    fn derived_index_excludes_substrate_helpers() {
+        let decls = standard_decls();
+        let index = describe_effects_index(&decls);
+        for name in [
+            "isOpt",
+            "innerSchema",
+            "schemaToValue",
+            "forkSited",
+            "forkAllSited",
+            "runLLMTurnSited",
+            "runLLMTurnForkSited",
+            "runLLMTurnFanoutSited",
+            "runLLMTurnBranchSited",
+            "runLLMTurnBranchLabeledSited",
+            "runLLMTurnBranchFanoutSited",
+        ] {
+            assert!(
+                !index.contains(name),
+                "index must not advertise substrate helper {name}: {index}"
+            );
+        }
+        // The model-facing verbs stay listed.
+        assert!(index.contains("ask"), "index must still list ask: {index}");
+        assert!(
+            index.contains("runLLMTurn"),
+            "index must still list runLLMTurn: {index}"
+        );
     }
 }

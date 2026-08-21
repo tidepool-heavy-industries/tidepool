@@ -54,6 +54,9 @@ fn build_full_stack_repl() -> Repl {
         continuation_ttl: None,
         wedged_ttl: None,
         turn_timeout: None,
+        lib_dirs: Vec::new(),
+        stdlib_dir: None,
+        patterns_path: None,
     };
     Repl {
         server: TidepoolReplServer::new(stack, cfg),

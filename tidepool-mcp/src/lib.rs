@@ -36,7 +36,7 @@ pub use describe::*;
 mod lib_isolate;
 pub use lib_isolate::*;
 
-mod resources;
+pub mod resources;
 
 mod server;
 pub use server::*;

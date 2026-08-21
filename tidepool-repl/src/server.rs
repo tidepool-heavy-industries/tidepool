@@ -316,6 +316,16 @@ pub struct ReplServerConfig {
     /// safepoint (see [`drive`]). `None` ⇒ [`TURN_TIMEOUT_SECS`] (600 s). Tests
     /// shrink it to exercise the timeout/self-heal path fast.
     pub turn_timeout: Option<Duration>,
+    /// Project/global verb-library dirs (project first), as resolved by
+    /// [`tidepool_mcp::server_common::resolve_lib_dirs`]. Backs the shared
+    /// `tidepool://vocab` resource — see [`ResourceCtx`](tidepool_mcp::resources::ResourceCtx).
+    pub lib_dirs: Vec<PathBuf>,
+    /// The vendored Tidepool stdlib dir (`Tidepool/*.hs`), if resolved. Backs
+    /// `tidepool://capabilities` and `tidepool://stdlib/{module}`.
+    pub stdlib_dir: Option<PathBuf>,
+    /// `PATTERNS.md` beside the active `Library.hs`, if present. Backs
+    /// `tidepool://patterns`.
+    pub patterns_path: Option<PathBuf>,
 }
 
 /// Opens a [`Session`] for a [`SessionConfig`] — the erased handler-stack
@@ -503,6 +513,21 @@ impl TidepoolReplServer {
             })
             .await?;
         Ok(())
+    }
+
+    /// Borrow the values [`tidepool_mcp::resources`] needs to render the
+    /// SHARED resource catalog (guide/schema/edits/vocab/capabilities/
+    /// patterns/effect/stdlib) — the same catalog the stateless `tidepool`
+    /// server serves, so a `tidepool://…` URI mentioned in this server's
+    /// model-visible text (e.g. `tidepool://capabilities`) actually resolves
+    /// here too, instead of only on the other server.
+    fn resource_ctx(&self) -> tidepool_mcp::resources::ResourceCtx<'_> {
+        tidepool_mcp::resources::ResourceCtx {
+            effects: self.inner.cfg.roster.decls(),
+            lib_dirs: &self.inner.cfg.lib_dirs,
+            patterns_path: self.inner.cfg.patterns_path.as_deref(),
+            stdlib_dir: self.inner.cfg.stdlib_dir.as_deref(),
+        }
     }
 
     fn next_continuation_id(&self) -> ContinuationId {
@@ -1404,7 +1429,7 @@ impl ServerHandler for TidepoolReplServer {
         _request: Option<PaginatedRequestParams>,
         _context: RequestContext<RoleServer>,
     ) -> Result<ListResourcesResult, McpError> {
-        let resources = vec![RawResource {
+        let mut resources = vec![RawResource {
             uri: SESSION_BINDINGS_URI.to_string(),
             name: "Session bindings".to_string(),
             title: None,
@@ -1420,8 +1445,48 @@ impl ServerHandler for TidepoolReplServer {
             meta: None,
         }
         .no_annotation()];
+        let ctx = self.resource_ctx();
+        resources.extend(tidepool_mcp::resources::list(&ctx).into_iter().map(|d| {
+            RawResource {
+                uri: d.uri,
+                name: d.name,
+                title: None,
+                description: Some(d.description),
+                mime_type: Some(d.mime.to_string()),
+                size: None,
+                icons: None,
+                meta: None,
+            }
+            .no_annotation()
+        }));
         Ok(ListResourcesResult {
             resources,
+            next_cursor: None,
+            meta: None,
+        })
+    }
+
+    async fn list_resource_templates(
+        &self,
+        _request: Option<PaginatedRequestParams>,
+        _context: RequestContext<RoleServer>,
+    ) -> Result<ListResourceTemplatesResult, McpError> {
+        let resource_templates = tidepool_mcp::resources::templates()
+            .into_iter()
+            .map(|t| {
+                RawResourceTemplate {
+                    uri_template: t.uri_template.to_string(),
+                    name: t.name.to_string(),
+                    title: None,
+                    description: Some(t.description.to_string()),
+                    mime_type: Some(t.mime.to_string()),
+                    icons: None,
+                }
+                .no_annotation()
+            })
+            .collect();
+        Ok(ListResourceTemplatesResult {
+            resource_templates,
             next_cursor: None,
             meta: None,
         })
@@ -1433,19 +1498,29 @@ impl ServerHandler for TidepoolReplServer {
         _context: RequestContext<RoleServer>,
     ) -> Result<ReadResourceResult, McpError> {
         if request.uri == SESSION_BINDINGS_URI {
-            Ok(ReadResourceResult {
+            return Ok(ReadResourceResult {
                 contents: vec![ResourceContents::TextResourceContents {
                     uri: request.uri,
                     mime_type: Some("application/json".to_string()),
                     text: self.session_bindings_body(),
                     meta: None,
                 }],
-            })
-        } else {
-            Err(McpError::resource_not_found(
+            });
+        }
+        let ctx = self.resource_ctx();
+        match tidepool_mcp::resources::read(&ctx, &request.uri) {
+            Some(b) => Ok(ReadResourceResult {
+                contents: vec![ResourceContents::TextResourceContents {
+                    uri: request.uri,
+                    mime_type: Some(b.mime.to_string()),
+                    text: b.text,
+                    meta: None,
+                }],
+            }),
+            None => Err(McpError::resource_not_found(
                 format!("Unknown resource: {}", request.uri),
                 None,
-            ))
+            )),
         }
     }
 }
@@ -1475,6 +1550,9 @@ mod tests {
             continuation_ttl: None,
             wedged_ttl: None,
             turn_timeout: None,
+            lib_dirs: Vec::new(),
+            stdlib_dir: None,
+            patterns_path: None,
         };
         TidepoolReplServer::new(frunk::HNil, cfg)
     }
@@ -1598,6 +1676,38 @@ mod tests {
         assert!(
             fresh.lock().is_idle(),
             "the replacement session must be Idle"
+        );
+    }
+
+    /// Durable fix for the dead-resource-link class of bug: every `tidepool://`
+    /// URI the tool description POINTS a model at must actually resolve on
+    /// THIS server. `tidepool://capabilities` used to be advertised here while
+    /// only `tidepool://session/bindings` was served — a model following the
+    /// docs got "Unknown resource". GHC-free: `resources::read` only touches
+    /// strings + the filesystem, no compile.
+    #[test]
+    fn every_advertised_tidepool_uri_resolves() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let server = wedge_test_server(dir.path());
+        let text = &server.inner.tool_description;
+        let ctx = server.resource_ctx();
+        let mut checked = 0;
+        for token in text.split(|c: char| c == '`' || c.is_whitespace() || c == ')') {
+            let Some(uri) = token.strip_prefix("tidepool://") else {
+                continue;
+            };
+            // Strip trailing punctuation the prose may have glued on.
+            let uri = format!("tidepool://{}", uri.trim_end_matches(['.', ',', ':', ';']));
+            assert!(
+                tidepool_mcp::resources::read(&ctx, &uri).is_some()
+                    || uri.as_str() == SESSION_BINDINGS_URI,
+                "advertised {uri:?} does not resolve on this server"
+            );
+            checked += 1;
+        }
+        assert!(
+            checked > 0,
+            "sanity: the tool description should mention at least one tidepool:// URI"
         );
     }
 }

@@ -85,6 +85,9 @@ pub fn build(
     // check — a memoized binary content hash plus a walk of the stdlib tree —
     // paid once here, never per turn.
     tidepool_mcp::server_common::handshake_logged(&prelude_dir)?;
+    // Backs the shared `tidepool://capabilities` / `tidepool://stdlib/{module}`
+    // resources — see `ReplServerConfig::stdlib_dir`.
+    let stdlib_dir = Some(prelude_dir.clone());
     let mut base_include = vec![effects_dir, prelude_dir];
 
     // Verb libraries (parity with the eval server): project `.tidepool/lib`
@@ -100,6 +103,16 @@ pub fn build(
     // `base_include` is about to move into `cfg` and `session_decl_module_env`
     // needs the flag before that.
     let user_library = tidepool_mcp::server_common::has_library_facade(&base_include);
+
+    // `PATTERNS.md` lives beside the active `Library.hs` dir, if any — backs
+    // the shared `tidepool://patterns` resource (mirrors `with_prelude` in
+    // `tidepool-mcp/src/server.rs`).
+    let patterns_path = lib_dirs
+        .iter()
+        .find(|d| d.join("Library.hs").exists())
+        .and_then(|lib_root| lib_root.parent())
+        .map(|p| p.join("PATTERNS.md"))
+        .filter(|p| p.exists());
 
     // Fault-isolate the verb-library layer (issue #322): if a `.tidepool/lib`
     // module is broken, `import Library` fails for EVERY session turn, including
@@ -145,6 +158,9 @@ pub fn build(
         wedged_ttl: Some(std::time::Duration::from_secs(30 * 60)),
         // Default 600 s turn budget (see `TURN_TIMEOUT_SECS`).
         turn_timeout: None,
+        lib_dirs,
+        stdlib_dir,
+        patterns_path,
     };
 
     Ok(ReplStartup {
