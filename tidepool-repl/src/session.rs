@@ -1,34 +1,21 @@
 //! The resident session: ONE live [`JitEffectMachine`] + the Lane-A decl
-//! library + the value-plane [`BindingTable`], driven turn-by-turn. Both planes
-//! persist across `session_run` items via the re-entry APIs (`compile_session`
-//! for the first turn, then `add_function` + `run_fragment` for each later turn
-//! on the SAME machine).
+//! library + the value-plane [`BindingTable`], driven turn-by-turn via the
+//! re-entry APIs. See `tidepool-repl/CLAUDE.md`'s "Internals: session
+//! lifecycle" for the three-layer split (`session.rs`/`manager.rs`/`state.rs`).
 //!
 //! `run_block` drives a `session_run` block by classifying each item and
-//! reusing the per-item handlers: `run_def` (declaration → Lane-A decl log),
-//! `run_eval` (bind `x <- e` / `let x = e` → `BindingTable`, or a bare
-//! expression → value), and `run_meta` (`:commands`).
+//! reusing the per-item handlers: `run_def`, `run_eval`, `run_meta`.
 //!
 //! # Suspension is data, not a blocked thread
 //!
-//! An in-item `ask` STOWS: the JIT continuation stays on the machine, the run
-//! entry returns [`SuspendableOutcome::Suspended`], and the whole `Session` (with
-//! everything it needs to finish) is handed back to the manager slot. Nothing
-//! blocks, so a `Session` outlives the turn that was running in it.
-//!
-//! Two levels of state therefore have to be plain DATA rather than native stack:
-//!
-//! * the per-item **tail** — the owned bookkeeping a `finish_*` needs after the
-//!   machine returns ([`PendingTail`], one variant per run path); and
-//! * the per-block **cursor** — where `run_block`'s item loop had got to
-//!   ([`BlockCursor`], stowed as a [`SuspendedBlockCursor`] once its one item
-//!   suspends).
-//!
-//! Both live on the `Session` across the suspension as ONE [`SuspendedTurn`]
-//! (tail + [`ResumeContext`]) — never as two independently-optional fields —
-//! and [`Session::resume_turn`] re-enters the machine and then calls the SAME
-//! `finish_*` the non-suspending path would have — the completion bookkeeping
-//! exists once, not once per arm.
+//! An in-item `ask` STOWS: the continuation stays on the JIT machine, and the
+//! whole `Session` — including the owned per-item tail ([`PendingTail`]) and
+//! the block loop's state ([`BlockCursor`], stowed as [`SuspendedBlockCursor`])
+//! — goes back to the manager slot as plain data (as ONE [`SuspendedTurn`],
+//! never two independently-optional fields). Nothing blocks; a `Session`
+//! outlives the turn that was running in it, and [`Session::resume_turn`]
+//! re-enters the machine and calls the SAME `finish_*` the non-suspending path
+//! would have.
 //!
 //! Only a SINGLE item can suspend: a decl batch never runs the machine, and a
 //! `:command` never does either. That is why the cursor needs one pending-item
@@ -106,10 +93,9 @@ pub enum TurnStep {
 #[allow(clippy::large_enum_variant)]
 enum ItemStep {
     Done(TurnOutcome),
-    /// Carries the tail that must be stowed alongside whatever [`ResumeContext`]
-    /// the caller assembles — see [`Session::finish_item_step`] (the `Single`
-    /// context) and [`Session::drive_block`]/[`Session::resume_block`] (the
-    /// `Block` context), the only two places a [`SuspendedTurn`] is built.
+    /// Carries the tail that must be stowed alongside the block cursor the
+    /// caller assembles — see [`Session::drive_block`]/[`Session::resume_block`],
+    /// the only two places a [`SuspendedTurn`] is built.
     Suspended(PendingTail, AskRequest),
 }
 
@@ -187,13 +173,11 @@ pub struct Session {
     /// at the start of each `session_run`.
     eval_input: Option<serde_json::Value>,
     /// The session's SUSPENDED turn, if any: the stowed per-item tail
-    /// ([`PendingTail`]) paired with which of the two resume contexts it
-    /// suspended under ([`ResumeContext`] — a lone `SessionCommand::Eval`, or
-    /// a `session_run` block loop). `Some` exactly while the session is
-    /// suspended at an `ask`; [`Self::reenter`] consumes it wholesale, so the
-    /// tail and its context can never drift apart the way the old two-field
-    /// `pending`/`cursor` split allowed (a resume path could take one and
-    /// forget the other).
+    /// ([`PendingTail`]) paired with the `session_run` block loop state it
+    /// suspended out of. `Some` exactly while the session is suspended at an
+    /// `ask`; [`Self::reenter`] consumes it wholesale, so the tail and its
+    /// cursor can never drift apart the way a two-field split would allow (a
+    /// resume path could take one and forget the other).
     suspended: Option<SuspendedTurn>,
     /// Shared slot the server reads to abort a runaway turn at a JIT safepoint.
     /// `None` until the manager wires it via [`Session::set_cancel_slot`]; the
@@ -231,15 +215,10 @@ struct ItemRun {
 }
 
 // ---------------------------------------------------------------------------
-// Run-path tails: plain owned data computed BEFORE an effect-machine call that
-// a `finish_*` method needs AFTER it, to do the post-run bookkeeping. Every
-// run path (`run_plain_eval`, `run_bind`, `run_multi_bind`,
-// `run_reference_fragment`, `run_bare_expr`) builds its tail right before the
-// machine call and hands it to `finish_*` once the call returns — whether that
-// is on the same stack frame (the run completed) or many seconds and one
-// `session_resume` later (the run suspended and the tail was stowed in
-// `Session::pending`). Every field is owned data borrowing nothing from `self`,
-// which is exactly what makes the second case possible.
+// Run-path tails: owned data (borrowing nothing from `self`) a run path builds
+// right before its machine call and hands to `finish_*` once the call
+// returns — whether that's the same stack frame or, after a suspension, a
+// later `session_resume`.
 // ---------------------------------------------------------------------------
 
 /// [`Session::run_plain_eval`]'s tail: the turn's own [`DataConTable`] (needed
@@ -343,31 +322,14 @@ impl PendingTail {
     }
 }
 
-/// A suspended turn: the stowed per-item tail plus which resume context it
-/// suspended under. The ONLY thing [`Session::suspended`] ever holds, and the
+/// A suspended turn: the stowed per-item tail plus the block loop state it
+/// suspended out of. The ONLY thing [`Session::suspended`] ever holds, and the
 /// ONLY thing [`Session::reenter`] ever consumes — a resume can't take the
-/// tail without also taking its context (or vice versa), which is exactly the
+/// tail without also taking the cursor (or vice versa), which is exactly the
 /// bug the old separate `pending`/`cursor` fields allowed.
 struct SuspendedTurn {
     tail: PendingTail,
-    context: ResumeContext,
-}
-
-/// Which shape of turn suspended: a single `SessionCommand::Eval` (no block
-/// loop to resume into), or a `session_run` block (whose loop state must come
-/// back too).
-// `Block`'s `SuspendedBlockCursor` carries the whole block's accumulated
-// items/results, dwarfing the empty `Single` — a transient boundary value
-// (there is at most one live `SuspendedTurn` per session), same shape as
-// `PendingTail`'s own `#[allow(large_enum_variant)]`.
-#[allow(clippy::large_enum_variant)]
-enum ResumeContext {
-    /// A standalone `SessionCommand::Eval` suspension: the resumed item's
-    /// outcome IS the turn's — no block loop to continue.
-    Single,
-    /// A `session_run` block suspension: the stowed loop state, resumed back
-    /// into [`Session::drive_block`] once the pending item finishes.
-    Block(SuspendedBlockCursor),
+    cursor: SuspendedBlockCursor,
 }
 
 /// The suspended item's position and classified kind, held so its result lands
@@ -615,20 +577,13 @@ impl Session {
     }
 
     /// Bind `entry` on the value (materialized) plane, EVICTING any pure
-    /// decl-plane binding of the same name in the same step. The live
-    /// environment is split across two planes — `bindings` (value) and
-    /// `pure_binds` (decl) — with the invariant that a name lives in AT MOST
-    /// one. That invariant is enforced HERE (and in [`Self::bind_pure`]) so the
-    /// bind sites can't smear a name across both planes by forgetting the paired
-    /// cross-plane removal.
+    /// decl-plane binding of the same name in the same step — a name lives in
+    /// AT MOST one plane, enforced HERE and in [`Self::bind_pure`] so a bind
+    /// site can't smear a name across both by forgetting the paired removal.
     fn bind_materialized(&mut self, entry: BindingEntry) {
-        // Symmetric with `bind_pure`: a name moving to the value plane is
-        // retracted from the decl plane too, so `SessionLib` stops exporting a
-        // now-stale decl (`findings <- pure []` then `findings <- pure
-        // (findings ++ xs)` would otherwise leave `findings = []` defined, and a
-        // later `let`/`def` would compile against it). `retract` is a no-op when
-        // the name was never a decl head (a plain `p <- run …`). Best-effort: a
-        // rare module-write failure leaves the binding materialized correctly.
+        // Retract from the decl plane too, so `SessionLib` stops exporting a
+        // now-stale decl. No-op when the name was never a decl head. Best-effort:
+        // a rare module-write failure leaves the binding materialized correctly.
         let _ = self.core.retract(&entry.name.0);
         self.pure_binds.remove(&entry.name.0);
         self.core.bind(entry);
@@ -646,14 +601,12 @@ impl Session {
     /// Run one turn to its first boundary: a finished [`TurnOutcome`], or an
     /// `ask` suspension whose continuation is stowed on the machine and whose
     /// tail/cursor are stowed on `self`. Errors are folded into
-    /// [`TurnOutcome::Error`] (the server maps that to an MCP error result).
+    /// [`TurnOutcome::Error`].
     ///
-    /// `gate` is the turn's abort latch: the shared [`GateDispatcher`] wrapping
-    /// makes every effect dispatch a checkpoint, so a server-side
-    /// `request_abort` unwinds the turn at the next effect. It does NOT
-    /// intercept the ask tag — the JIT's own suspend driver catches that, which
-    /// is exactly why the repl can share the engine's wrapper instead of keeping
-    /// a second, ask-parking copy.
+    /// `gate` is the turn's abort latch: [`GateDispatcher`] makes every effect
+    /// dispatch a checkpoint, so a server-side `request_abort` unwinds the turn
+    /// at the next effect. It does NOT intercept the ask tag — the JIT's own
+    /// suspend driver catches that first.
     pub fn run_turn(
         &mut self,
         cmd: &SessionCommand,
@@ -666,54 +619,8 @@ impl Session {
         self.heal_effects_module();
         let mut handlers = GateDispatcher::new((self.make_handlers)(), gate);
         match cmd {
-            SessionCommand::Def(decl) => {
-                let outcome = self.run_def(&decl.0);
-                self.finish_item_step(ItemStep::Done(outcome))
-            }
-            SessionCommand::Eval(expr) => {
-                // No block context here (single-command dispatch, not
-                // `run_block`'s batch path) — classify this one item with a
-                // one-item `classify_block` slice, exactly the pattern its doc
-                // names for a caller needing a single verdict.
-                let step = match classify_block(&[expr.0.as_str()]) {
-                    Ok(v) => {
-                        let verdict = v.into_iter().next();
-                        self.run_eval(&expr.0, verdict.as_ref(), &mut handlers, captured)
-                    }
-                    // Version skew stops the turn with the real reason; any
-                    // other failure keeps the resilient plain-eval path (see
-                    // `run_block`'s batch classify for the same split).
-                    Err(CompileError::MalformedDiagnostics(msg)) => {
-                        ItemStep::Done(TurnOutcome::Error(msg))
-                    }
-                    Err(_) => self.run_eval(&expr.0, None, &mut handlers, captured),
-                };
-                self.finish_item_step(step)
-            }
-            SessionCommand::Cmd(meta) => {
-                let outcome = self.run_meta(meta);
-                self.finish_item_step(ItemStep::Done(outcome))
-            }
             SessionCommand::Block { items, verbose } => {
                 self.run_block(items, &mut handlers, captured, *verbose)
-            }
-        }
-    }
-
-    /// Finish a singleton (non-block) item step: a completed outcome passes
-    /// through, a suspension is stowed under [`ResumeContext::Single`] — the
-    /// ONE place a standalone `SessionCommand`'s suspension becomes a
-    /// [`SuspendedTurn`], so `run_turn`'s three singleton arms can't drift on
-    /// how they wrap it.
-    fn finish_item_step(&mut self, step: ItemStep) -> TurnStep {
-        match step {
-            ItemStep::Done(outcome) => TurnStep::Completed(outcome),
-            ItemStep::Suspended(tail, req) => {
-                self.suspended = Some(SuspendedTurn {
-                    tail,
-                    context: ResumeContext::Single,
-                });
-                TurnStep::Suspended(req)
             }
         }
     }
@@ -758,24 +665,14 @@ impl Session {
         // Consuming `self.suspended` wholesale here — rather than taking the
         // tail and the cursor from two separate fields — is what makes a
         // resume unable to forget one half of the pair: there is no `Some`
-        // tail without a context to resume it into, and no context without a
+        // tail without a cursor to resume it into, and no cursor without a
         // tail to feed it.
-        let Some(SuspendedTurn { tail, context }) = self.suspended.take() else {
+        let Some(SuspendedTurn { tail, cursor }) = self.suspended.take() else {
             return TurnStep::Completed(TurnOutcome::Error(
                 "internal: no suspended turn to resume".into(),
             ));
         };
-        match context {
-            ResumeContext::Block(suspended_cursor) => {
-                self.resume_block(suspended_cursor, tail, answer, &mut handlers, captured)
-            }
-            // A single-command (`SessionCommand::Eval`) suspension: no block
-            // loop to continue, so the resumed item's outcome IS the turn's.
-            ResumeContext::Single => {
-                let step = self.resume_item(tail, answer, &mut handlers, captured);
-                self.finish_item_step(step)
-            }
-        }
+        self.resume_block(cursor, tail, answer, &mut handlers, captured)
     }
 
     /// Self-heal the generated Tidepool.Effects/Orchestrate staging dir before
@@ -793,17 +690,12 @@ impl Session {
     /// The declaration text of an item that is a top-level DECLARATION (and so
     /// batches into a decl run), or `None` for a bind/expression/meta (a
     /// singleton). A keyword decl is one lexically; an `Auto` item is one iff
-    /// its precomputed verdict — GHC's parser, the single authority
-    /// (`Tidepool.Binders.classifyTurn`, decl+stmt contexts), from the block's
-    /// one batch [`classify_block`] spawn (`run_block`) — says `Decl`. This
-    /// parse verdict, not the coarse `Auto` tag, is what excludes a trailing
-    /// call from a decl batch. A missing verdict (batch classify unavailable)
-    /// means the `Auto` item is NOT decl-shaped, so it takes the resilient
-    /// per-item path.
+    /// its precomputed verdict — GHC's parser, via the block's one batch
+    /// [`classify_block`] spawn — says `Decl`. A missing verdict means the
+    /// `Auto` item is NOT decl-shaped, so it takes the resilient per-item path.
     ///
-    /// Returning the text (rather than a bool) lets the segment scan CARRY the
-    /// decl sources as it walks, so the batch path never re-derives "this is a
-    /// Decl/Auto" with a panicking match.
+    /// Returns the text (not a bool) so the segment scan can carry the decl
+    /// sources as it walks, without re-matching items to recover them.
     fn decl_shaped_text<'a>(
         &self,
         item: &'a BlockItem,
@@ -822,17 +714,14 @@ impl Session {
     /// Execution stops on the first error; the failing item is included in the
     /// `items` array with `ok = false`. An in-turn `ask` inside a `Stmt` or
     /// `Auto` item suspends the BLOCK: the item's tail and the loop's
-    /// [`BlockCursor`] are stowed on the session, the turn returns
-    /// [`TurnStep::Suspended`], and `session_resume` re-enters at
-    /// [`Self::resume_block`] and runs the remaining items.
+    /// [`BlockCursor`] are stowed on the session, and `session_resume`
+    /// re-enters at [`Self::resume_block`] to run the remaining items.
     ///
     /// `Auto` items dispatch straight from this batch's classify verdict when
-    /// one is present (`Decl` → `run_def`, `Bind`/`Expr` → `run_eval`), never
-    /// paying for a doomed `run_def` probe GHC's own parser already ruled
-    /// out. Only when no verdict is available (the batch classify itself
-    /// failed) do they fall back to the try-cascade: `run_def` attempted
-    /// first, falling back to `run_eval` on a GHC parse error (not a
-    /// type/scope error — that means the item IS a declaration, just a
+    /// one is present, never paying for a doomed `run_def` probe GHC's own
+    /// parser already ruled out. With no verdict (batch classify failed) they
+    /// fall back to the try-cascade: `run_def` first, then `run_eval` on a GHC
+    /// parse error (a type/scope error means the item IS a declaration, just a
     /// broken one, and surfaces as-is).
     fn run_block<H: DispatchEffect<CapturedOutput>>(
         &mut self,
@@ -841,15 +730,10 @@ impl Session {
         captured: &CapturedOutput,
         verbose: bool,
     ) -> TurnStep {
-        // Batch-classify every item whose kind `decl_shaped_text`/`run_eval`
-        // would otherwise classify on its own (`Auto`/`Stmt`) in ONE extract
-        // spawn, regardless of block length — `Decl`/`Meta` items need no
-        // verdict. Verdicts are mapped back onto their original indices so the
-        // segment scan and `run_one_item` below can look one up per item
-        // without re-classifying. A batch failure (extractor unavailable)
-        // degrades exactly as a per-item classify failure did: every verdict
-        // stays `None`, `decl_shaped_text` treats an unclassifiable `Auto` as
-        // not decl-shaped, and `run_eval` falls back to `run_plain_eval`.
+        // Batch-classify every Auto/Stmt item in ONE extract spawn regardless
+        // of block length; verdicts map back onto original indices. A batch
+        // failure degrades exactly as a per-item classify failure would: every
+        // verdict stays `None` and `run_eval` falls back to `run_plain_eval`.
         let verdict_indices: Vec<usize> = items
             .iter()
             .enumerate()
@@ -896,18 +780,15 @@ impl Session {
     ///
     /// Items are processed by batching maximal runs of consecutive decl-shaped
     /// items (Decl/Auto) so a sig+binding pair or a mutual-recursion SCC split
-    /// across items typecheck TOGETHER (whole-block decl elaboration).
-    /// Optimistic: try `define_scoped` on the whole run; on success emit a
-    /// per-source decl result, else fall back to processing each item
-    /// individually (the exact prior behavior — a stmt-shaped Auto item, or a
-    /// genuinely broken decl, lands here). Stmt/Meta items are singletons.
+    /// across items typecheck TOGETHER. Optimistic: try `define_scoped` on the
+    /// whole run; on failure, fall back to processing each item individually.
+    /// Stmt/Meta items are singletons.
     ///
     /// **Only the singleton arm can suspend.** Every item on the decl-batch arm
-    /// (including its per-item fallback) is parser-confirmed a declaration and
-    /// routes to `run_def`, which compiles and validates but never RUNS the
-    /// machine; a `:command` never runs it either. So a suspension always
-    /// originates in one singleton item, and the cursor needs one pending-item
-    /// slot rather than a stack of partially-consumed segments.
+    /// is parser-confirmed a declaration and routes to `run_def`, which never
+    /// RUNS the machine; a `:command` never runs it either. So a suspension
+    /// always originates in one singleton item, and the cursor needs one
+    /// pending-item slot rather than a stack.
     fn drive_block<H: DispatchEffect<CapturedOutput>>(
         &mut self,
         mut cursor: BlockCursor,
@@ -938,10 +819,10 @@ impl Session {
                     ItemStep::Suspended(tail, req) => {
                         self.suspended = Some(SuspendedTurn {
                             tail,
-                            context: ResumeContext::Block(SuspendedBlockCursor {
+                            cursor: SuspendedBlockCursor {
                                 cursor,
                                 pending_item: PendingItem { index, kind },
-                            }),
+                            },
                         });
                         return TurnStep::Suspended(req);
                     }
@@ -1081,10 +962,10 @@ impl Session {
             ItemStep::Suspended(new_tail, req) => {
                 self.suspended = Some(SuspendedTurn {
                     tail: new_tail,
-                    context: ResumeContext::Block(SuspendedBlockCursor {
+                    cursor: SuspendedBlockCursor {
                         cursor,
                         pending_item,
-                    }),
+                    },
                 });
                 TurnStep::Suspended(req)
             }
@@ -1373,29 +1254,20 @@ impl Session {
 
     /// If `expr_text` is a PURE bind of `name`, route it as the top-level decl
     /// `name = <rhs>` (so GHC generalizes it — GHCi parity) and return a `Bound`
-    /// outcome. The decl route is val-scoped (`define_scoped`), so an RHS
-    /// referencing a materialized session value normally compiles here and
-    /// keeps its generalized type. Returns `None` when it is not a pure bind,
-    /// or when the decl route still fails because the RHS needs the value
-    /// plane — a reference the val imports don't cover (e.g. the `input`
-    /// payload lane, or self-reference `let x = … x …`, which is ambiguous on
-    /// the decl plane) — the caller then falls back to the materialize path.
+    /// outcome. Returns `None` when it is not a pure bind, or when the decl
+    /// route fails because the RHS needs the value plane (a reference the val
+    /// imports don't cover, e.g. the `input` payload lane, or a self-reference
+    /// `let x = … x …`) — the caller then falls back to the materialize path.
     ///
-    /// When the decl route fails for ANY OTHER reason (a plain type error), we
-    /// return that error as `Some(Error)` instead of `None`, so the caller does
-    /// NOT materialize. Materializing such a case papers over a real error with
-    /// a broken binding: a polymorphic value (`toList :: Tree a -> [a]`)
-    /// materialized as a monomorphic `Tier1Closure` gets a thin iface with a
-    /// FREE type variable, which then fails cryptically ("Iface type variable
-    /// out of scope: a") only when later referenced. Surfacing the decl error is
-    /// the same actionable message the bare-decl form already gives.
+    /// A decl failure for any OTHER reason (a plain type error) is returned as
+    /// `Some(Error)`, not `None`: materializing that case would paper over a
+    /// real error with a broken binding (a polymorphic value forced into a
+    /// monomorphic `Tier1Closure` fails cryptically later, on reference).
     ///
-    /// `define_batch` always shadows wildcard-imported names (ledger #36) — a
-    /// pure bind must be able to shadow a Prelude/Library/effect-verb name
-    /// exactly as a genuine top-level decl does (`run_def`/`define_batch`), so
-    /// pure and effectful binds stay interchangeable (do-block plane-opacity
-    /// invariant): `let lookup = 42` must shadow `Prelude.lookup`, not raise
-    /// an "Ambiguous occurrence" that a bare `f x = …` decl would never hit.
+    /// `define_batch` always shadows wildcard-imported names (ledger #36) so a
+    /// pure bind can shadow a Prelude/Library/effect-verb name exactly as a
+    /// genuine top-level decl does — `let lookup = 42` must shadow
+    /// `Prelude.lookup`, not raise an "Ambiguous occurrence".
     fn try_pure_bind_as_decl(&mut self, expr_text: &str, name: &str) -> Option<TurnOutcome> {
         let decl = pure_bind_to_decl(expr_text, name)?;
         match self.define_scoped(&[decl.as_str()]) {
@@ -1418,19 +1290,13 @@ impl Session {
                 })
             }
             Err(e) => {
-                // Materialize is the right fallback when the RHS references a
-                // value-plane-only binding the decl plane genuinely lacks:
-                //  (a) a materialized session value (matched by name), or
-                //  (b) the `input` payload lane (injected only on the value/stmt
-                //      plane). We detect (b) PRECISELY by the decl error itself —
-                //      "not in scope: input" — NOT by scanning the text for the
-                //      word `input`: a user's OWN locally-bound `input` (a lambda
-                //      param, an inner `let`, or a decl-plane `let input = …`)
-                //      COMPILES on the decl plane, so it never trips this, and a
-                //      typo like `inputt` yields a different name. do-block
-                //      invariant #1 (payload lane in scope in every item).
-                // Otherwise the decl failure is a real error (collision / type)
-                // — surface it rather than materialize a broken binding.
+                // Materialize is the right fallback when the RHS references (a)
+                // a materialized session value, or (b) the `input` payload lane
+                // (value/stmt-plane only). Detect (b) by the decl error itself —
+                // "not in scope: input" — not by scanning the text: a user's own
+                // locally-bound `input` compiles fine on the decl plane and
+                // never trips this. Any other decl failure is a real error —
+                // surface it rather than materialize a broken binding.
                 let err_str = e.to_string();
                 let refs_materialized_value = self
                     .core
@@ -1612,20 +1478,16 @@ impl Session {
                 [] => self.run_bind_discard(expr_text, handlers, captured),
                 [name] => {
                     let name = name.clone();
-                    // "A pure binding is a declaration": a PURE bind (`let x = e`,
-                    // `x <- pure e`, `x <- return e`) is routed into the decl
-                    // plane as the top-level binding `x = e`, so it GENERALIZES
-                    // (GHCi parity — `xs <- pure []` stays polymorphic, `n <-
-                    // pure 5` instantiates at Double later) instead of freezing
-                    // to a monomorphic heap value. If it fails to compile as a
-                    // decl (its RHS references a materialized/effectful value, so
-                    // it's out of decl scope), fall back to the materialize path.
+                    // A PURE bind (`let x = e`, `x <- pure e`) is routed into the
+                    // decl plane as `x = e` so it GENERALIZES (GHCi parity)
+                    // instead of freezing to a monomorphic heap value; falls back
+                    // to materialize when the RHS is out of decl scope.
                     //
                     // EXCEPT a self-referential monadic pure bind (`n <- pure
                     // (n+1)`): the decl route would emit the RECURSIVE top-level
                     // `n = n + 1` (self-forcing blackhole). GHCi's `>>=` reads the
-                    // PRIOR `n` and shadows, which is exactly what the materialize
-                    // path does — so divert straight to it.
+                    // PRIOR `n` and shadows — exactly what materialize does — so
+                    // divert straight to it.
                     if !self_referential_monadic_pure_bind(expr_text, &name) {
                         // The decl route compiles and validates but never runs
                         // the machine, so it cannot suspend.
@@ -2177,23 +2039,18 @@ impl Session {
     }
 
     /// GHCi-style `it`: a confirmed bare final EXPRESSION (never a bind or a
-    /// discard-bind RHS — those keep the unchanged `run_plain_eval`/
-    /// `run_bind_discard` path) is bound to `it`, rebinding on every such
-    /// turn. The expression's effects (if any) fire EXACTLY ONCE.
+    /// discard-bind RHS) is bound to `it`, rebinding on every such turn. The
+    /// expression's effects (if any) fire EXACTLY ONCE.
     ///
     /// **Single compile, single run:** wraps `expr_text` as a MATERIALIZING
     /// bind whose `result` yields the TUPLE `(it, toWire it)` — `it <- __user`
-    /// tried first (monadic — `__user` hoisted to a module-level binding so a
-    /// trailing `where` still attaches, mirroring `wrap_probe_source`); on a
-    /// compile failure, `let it = __user` (pure fallback — `let` doesn't
-    /// require the RHS to unify with the session's `Eff` stack, matching
-    /// `wrap_pure_ref_source`'s existing Eff-then-pure retry). Either way,
-    /// `run_fragment_and_bind_render` runs the ONE compiled fragment exactly
-    /// once: field 0 (`it`) drives `__user`'s effect and gets tenured; field 1
-    /// (`toWire it`, pure) is bridged to an owned `Value` for the response —
-    /// see that method's doc for why bridging field 1 BEFORE tenuring field 0
-    /// makes this safe even when `toWire` is the identity and the two fields
-    /// alias the same heap object (`pure input`).
+    /// tried first (monadic), falling back to `let it = __user` (pure) on a
+    /// compile failure. Either way, `run_fragment_and_bind_render` runs the ONE
+    /// compiled fragment exactly once: field 0 (`it`) drives `__user`'s effect
+    /// and gets tenured; field 1 (`toWire it`, pure) is bridged to an owned
+    /// `Value` for the response — see that method's doc for why bridging field
+    /// 1 BEFORE tenuring field 0 stays safe even when the two fields alias the
+    /// same heap object (`pure input`).
     fn run_bare_expr<H: DispatchEffect<CapturedOutput>>(
         &mut self,
         expr_text: &str,
@@ -2205,17 +2062,13 @@ impl Session {
         let preamble = self.patched_preamble();
         let g = self.core.val_gen().next();
         let eval_input = self.eval_input.clone();
-        // TWO names, matching the `(it, toWire it)` tuple `result` now
-        // yields: this rides the SAME multi-binder `splitTupleType` path
-        // `run_multi_bind`/`wrap_multi_bind_source` already use (purely
-        // type-driven — `--bind-name` need not correspond to a real bound
-        // identifier in the source), so `emitBindArtifacts` splits
-        // `result`'s captured `(T, Value)` type into `it :: T` +
-        // `__it_render :: Value` instead of (wrongly) taking the whole tuple
-        // type as `it`'s type — which is what a single `--bind-name it`
-        // would do. `__it_render`'s binder metadata is discarded below (only
-        // `turn.binders[0]`, i.e. `it`, is used); its harmless synthetic
-        // export just rides along in the same thin session iface.
+        // TWO names, matching the `(it, toWire it)` tuple `result` now yields:
+        // rides the same multi-binder `splitTupleType` path
+        // `run_multi_bind`/`wrap_multi_bind_source` use, so `emitBindArtifacts`
+        // splits `result`'s `(T, Value)` type into `it :: T` + `__it_render ::
+        // Value` instead of wrongly taking the whole tuple as `it`'s type.
+        // `__it_render`'s binder metadata is discarded below (only
+        // `turn.binders[0]`, i.e. `it`, is used).
         let it_names = vec!["it".to_string(), "__it_render".to_string()];
 
         let monadic_src = wrap_bare_it_monadic(
@@ -2746,20 +2599,16 @@ impl Session {
     }
 
     /// The eval preamble with every import the session can collide with
-    /// (`Tidepool.Prelude`, the project `Library`, and the generated
-    /// `Tidepool.Effects` effect verbs) extended with a `hiding (…)` clause
-    /// covering EVERY name the session owns across BOTH planes:
-    ///   - declaration value binders (`f x = …`),
-    ///   - declaration types/classes (`data Hit`),
-    ///   - live value-plane binds (`let glob = …` / `x <- …`).
+    /// extended with a `hiding (…)` clause covering EVERY name the session
+    /// owns across both planes (decl value binders, decl types/classes, live
+    /// value-plane binds).
     ///
-    /// Without this, a session name that happens to match a Prelude re-export, a
-    /// `Library` verb, or an effect verb becomes a GHC "Ambiguous occurrence"
-    /// that not only fails the current turn but POISONS every later turn (the
-    /// colliding import is regenerated each turn) — a hard-to-debug footgun hit
-    /// in practice by `let glob = …` (vs the `Fs` `glob` verb) and `data Hit`
-    /// (vs the `Library` `Hit`). Hiding makes the session definition win, the
-    /// way GHCi shadowing would.
+    /// Without this, a session name matching a Prelude re-export, a `Library`
+    /// verb, or an effect verb becomes a GHC "Ambiguous occurrence" that
+    /// POISONS every later turn too (the colliding import regenerates each
+    /// turn) — hit in practice by `let glob = …` (vs the `Fs` `glob` verb) and
+    /// `data Hit` (vs `Library`'s `Hit`). Hiding makes the session definition
+    /// win, the way GHCi shadowing would.
     fn patched_preamble(&self) -> String {
         let mut names: Vec<String> = Vec::new();
         names.extend(
@@ -3321,17 +3170,11 @@ fn wrap_multi_bind_source(
 /// Wrap a bare EXPRESSION as a MATERIALIZING bind of `it` — the monadic
 /// attempt (tried first by [`Session::run_bare_expr`]): `it <- __user`, an
 /// `Eff`-typed action, exactly like a real `x <- e` bind. `__user` is hoisted
-/// to a module-level binding (not inlined into the do-block) so a trailing
-/// `where` on the user's expression still attaches legally — mirrors
-/// `wrap_probe_source`/`wrap_pure_ref_source`.
+/// to a module-level binding so a trailing `where` still attaches legally.
 ///
-/// `result` yields `(it, toWire it)` — ONE compile, run via
-/// `run_fragment_and_bind_render` (`run_bare_expr`'s single-compile bind+render
-/// primitive): field 0 (`it`) is the ONE execution of `__user`'s effect; field
-/// 1 (`toWire it`, pure) rides along in the same run and is bridged to an
-/// owned `Value` BEFORE field 0 is tenured, so the two fields aliasing the
-/// same heap object (`toWire = id`, e.g. `pure input`) cannot corrupt — see
-/// `run_fragment_and_bind_render`'s doc for the read-before-tenure ordering.
+/// `result` yields `(it, toWire it)` — see [`Session::run_bare_expr`]'s doc
+/// for why single-compiling that tuple keeps effects-fire-once and aliasing
+/// safe.
 fn wrap_bare_it_monadic(
     preamble: &str,
     effect_stack: &str,
@@ -3369,18 +3212,18 @@ fn wrap_bare_it_pure(
 }
 
 /// Wrap a PURE reference turn as `result = <expr>` (no `Eff`), run via
-/// `run_fragment_pure`. For bare value references like `x + 1` / `f 10` /
-/// `v ^? key …` that are not monadic.
+/// `run_fragment_pure`. For bare value references like `x + 1` / `f 10` that
+/// are not monadic.
 ///
-/// Emits a SECOND `__user = <expr>` binding whose sole purpose is type capture:
-/// the extractor reads the inferred type off the `__user` binder
-/// (`capturedUserType`), so the reference turn can report `{type, value}` for a
-/// bare pure expression instead of `type: null`. `__user` is unused at runtime
-/// (only `result` is executed) and harmless — session compiles are not `-Werror`.
-/// Insert `NoMonomorphismRestriction` into a preamble's `LANGUAGE` pragma (the
-/// same edit [`tidepool_mcp::decl_pragmas`] makes), so a probe compile
-/// generalizes a constrained pure bind instead of failing to monomorphize it.
-/// Idempotent — a no-op if NMR is already present.
+/// Emits a SECOND `__user = <expr>` binding whose sole purpose is type
+/// capture: the extractor reads the inferred type off `__user`
+/// (`capturedUserType`), so the reference turn can report `{type, value}`
+/// instead of `type: null`. Unused at runtime and harmless (session compiles
+/// are not `-Werror`).
+///
+/// Insert `NoMonomorphismRestriction` into a preamble's `LANGUAGE` pragma so a
+/// probe compile generalizes a constrained pure bind instead of failing to
+/// monomorphize it. Idempotent — a no-op if NMR is already present.
 fn to_nmr_pragmas(preamble: &str) -> String {
     if preamble.contains("NoMonomorphismRestriction") {
         return preamble.to_string();
@@ -3663,19 +3506,14 @@ fn slim_item_result(outcome: &TurnOutcome) -> serde_json::Value {
 /// Return `true` when a `run_def` error message indicates a GHC parse (not
 /// type or scope) error, so the try-cascade in `run_block` can fall back from
 /// `run_def` to `run_eval` for items that are expressions, not declarations.
+/// Case-insensitive to tolerate minor GHC version variation.
 ///
-/// GHC parse errors always contain the text "parse error" or "lexical error";
-/// type/scope errors use different phrasing ("Couldn't match", "Not in scope",
-/// "No instance for", …). The check is case-insensitive to tolerate minor GHC
-/// version variation.
-///
-/// We ALSO treat "binder extraction failed" as a not-a-declaration signal:
-/// binder extraction is the parse/scope STAGE (pre-typecheck), so a failure
-/// there — including the extractor throwing an uncaught `SourceError` on a
-/// non-declaration input like `123 :: Int` — means "this isn't a declaration,
-/// try it as an expression." A genuine-but-type-broken declaration parses fine
-/// at this stage and instead fails later as a "declaration type-check failed"
-/// (validation) error, which does NOT match here and so surfaces as a decl error.
+/// Also treats "binder extraction failed" as a not-a-declaration signal:
+/// that's the parse/scope STAGE (pre-typecheck), so a failure there —
+/// including on a non-declaration input like `123 :: Int` — means "try it as
+/// an expression." A genuine-but-type-broken declaration parses fine here and
+/// fails later as a "declaration type-check failed" error instead, which does
+/// NOT match and so surfaces as a decl error.
 fn is_parse_error(msg: &str) -> bool {
     let lower = msg.to_lowercase();
     lower.contains("parse error")

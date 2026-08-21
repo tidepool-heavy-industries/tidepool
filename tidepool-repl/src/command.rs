@@ -2,9 +2,8 @@
 //! per-turn outcome it produces.
 //!
 //! `session_run` classifies each item in a block into a [`BlockItem`] (decl /
-//! stmt / meta) and runs them via the existing `run_def`/`run_eval`/`run_meta`
-//! handlers. `SessionCommand::{Def,Eval,Cmd}` are kept as the per-item handler
-//! targets; `Block` is the new composite variant.
+//! stmt / meta) and runs them via the `run_def`/`run_eval`/`run_meta`
+//! handlers.
 
 use serde::Serialize;
 use serde_json::Value as Json;
@@ -197,22 +196,12 @@ impl MetaCommand {
     }
 }
 
-/// The internal session command sum. The production tool is
-/// `session_run` → [`SessionCommand::Block`]; `Def`/`Eval`/`Cmd` are the
-/// per-item handler targets a block dispatches to (and the standalone paths the
-/// `Repl::{def,eval,cmd}` test helpers exercise via a 1-item block).
+/// The internal session command. The production and only tool is
+/// `session_run` → [`SessionCommand::Block`]: a list of classified items run
+/// in sequence on the resident machine, each dispatched to
+/// `run_def`/`run_eval`/`run_meta`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SessionCommand {
-    /// Append a declaration to the Lane-A decl log and regenerate
-    /// `Tidepool.Session.Lib.G<g>` (per-item handler: `run_def`).
-    Def(DeclText),
-    /// Compile an `M a` expression against the current session include and run
-    /// it on the resident machine (per-item handler: `run_eval`).
-    Eval(ExprText),
-    /// A meta-command (per-item handler: `run_meta`).
-    Cmd(MetaCommand),
-    /// `session_run`: run a list of classified items in sequence on the resident
-    /// machine. Each item is dispatched to `run_def`/`run_eval`/`run_meta`.
     /// `verbose: true` returns the full diagnostic shape instead of the slim default.
     Block {
         items: Vec<BlockItem>,

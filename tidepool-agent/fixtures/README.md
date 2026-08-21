@@ -27,9 +27,10 @@ Generation is offline and side-effect-free: verified not to modify
 `~/.codex` (top-level file size/mtime snapshot identical before and after), so
 regenerating costs nothing and spends no ChatGPT tokens.
 
-`v1/` and `v2/` hold the per-version request/response/notification schemas;
-the two `codex_app_server_protocol*.schemas.json` files are the aggregate
-bundles.
+The generated per-type schema JSON (`v1/`, `v2/`, the two
+`codex_app_server_protocol*.schemas.json` aggregate bundles) is not checked
+in — nothing in this repo reads it. Regenerate on demand with the command
+above if you need to inspect it.
 
 `PROTOCOL-NOTES.md` in that directory records phase-2's offline findings:
 where `dynamicTools` attaches, the `experimentalApi` opt-in, the tool-error

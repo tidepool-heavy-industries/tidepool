@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use crate::error::WorktreeError;
 use crate::git::{inspect, GitCli};
 use crate::id::{BranchName, GitOid, GitRef, WorktreeId};
-use crate::label::BranchLabel;
+use crate::label::sanitize_branch_label;
 use crate::registry::{
     worktree_present, WorktreeOrigin, WorktreeReceipt, WorktreeRecordStatus, WorktreeRegistry,
     WorktreeSummary,
@@ -199,7 +199,7 @@ impl WorktreeManager {
         let cwd = self.worktree_root.join(id.as_str());
         let branch = BranchName::from_raw(format!(
             "{TIDEPOOL_BRANCH_PREFIX}/{}-{}",
-            BranchLabel::new(&spec.label).as_str(),
+            sanitize_branch_label(&spec.label),
             id.as_str()
         ));
 

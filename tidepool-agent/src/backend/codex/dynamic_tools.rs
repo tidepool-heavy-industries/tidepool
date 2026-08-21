@@ -6,8 +6,7 @@
 //! (`codex-rs/app-server-protocol/src/protocol/v2/thread.rs` @ tag
 //! `rust-v0.146.0`), and the crate's type generation is driven from the
 //! generated JSON Schema, which drops experimental-gated fields — so neither
-//! the field nor `DynamicToolSpec`/`DynamicToolFunctionSpec`/
-//! `DynamicToolNamespaceSpec`/`DynamicToolNamespaceTool` ever reach it. See
+//! the field nor `DynamicToolSpec`/`DynamicToolFunctionSpec` ever reach it. See
 //! `fixtures/app-server-0.146.0/PROTOCOL-NOTES.md` for the full sourcing.
 //!
 //! Wire shapes below are transcribed from `codex-rs/protocol/src/dynamic_tools.rs`
@@ -22,7 +21,6 @@ use serde_json::Value;
 #[serde(tag = "type", rename_all = "camelCase")]
 pub enum DynamicToolSpec {
     Function(DynamicToolFunctionSpec),
-    Namespace(DynamicToolNamespaceSpec),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -33,20 +31,6 @@ pub struct DynamicToolFunctionSpec {
     pub input_schema: Value,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub defer_loading: bool,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub struct DynamicToolNamespaceSpec {
-    pub name: String,
-    pub description: String,
-    pub tools: Vec<DynamicToolNamespaceTool>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(tag = "type", rename_all = "camelCase")]
-pub enum DynamicToolNamespaceTool {
-    Function(DynamicToolFunctionSpec),
 }
 
 /// `thread/start` params, hand-rolled because `dynamicTools` is missing from
@@ -101,25 +85,5 @@ mod tests {
             value["dynamicTools"][0]["type"],
             serde_json::json!("function")
         );
-    }
-
-    #[test]
-    fn namespace_spec_matches_the_documented_wire_shape() {
-        let spec = DynamicToolSpec::Namespace(DynamicToolNamespaceSpec {
-            name: "ns".to_string(),
-            description: "d".to_string(),
-            tools: vec![DynamicToolNamespaceTool::Function(
-                DynamicToolFunctionSpec {
-                    name: "f".to_string(),
-                    description: "fd".to_string(),
-                    input_schema: serde_json::json!({}),
-                    defer_loading: true,
-                },
-            )],
-        });
-        let value = serde_json::to_value(&spec).unwrap();
-        assert_eq!(value["type"], serde_json::json!("namespace"));
-        assert_eq!(value["tools"][0]["type"], serde_json::json!("function"));
-        assert_eq!(value["tools"][0]["deferLoading"], serde_json::json!(true));
     }
 }

@@ -106,21 +106,3 @@ impl SessionState {
         }
     }
 }
-
-/// If `state` is `Suspended`, transition it to `Busy` and return the owned
-/// [`Suspension`]; otherwise leave it untouched and return `None`.
-///
-/// The resume/abort paths call this AFTER confirming `Suspended` under the same
-/// lock, so the `None` case is unreachable there — but returning an `Option`
-/// (rather than a re-`match` + `unreachable!`) makes "already checked" a type
-/// guarantee at the call site instead of a panic waiting to fire.
-pub fn take_suspension(state: &mut SessionState) -> Option<Box<Suspension>> {
-    match std::mem::replace(state, SessionState::Busy) {
-        SessionState::Suspended(s) => Some(s),
-        other => {
-            // Not suspended — restore what we displaced and report the miss.
-            *state = other;
-            None
-        }
-    }
-}

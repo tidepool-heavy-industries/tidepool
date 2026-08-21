@@ -167,10 +167,8 @@ impl WorktreeMonitor {
     /// watches — cursor semantics (no-replay, restart recovery) are defined
     /// against one journal end, not one per worktree.
     pub fn new(git: GitCli, journal: EventJournal) -> Self {
-        #[allow(clippy::expect_used, reason = "EventJournal::since never fails")]
         let next_event_seq = journal
             .since(0)
-            .expect("EventJournal::since never fails")
             .iter()
             .map(|e| e.event_id.0)
             .max()
@@ -204,11 +202,7 @@ impl WorktreeMonitor {
     }
 
     fn last_observed(&self, worktree: &WorktreeId) -> (Option<GitOid>, Option<BranchName>) {
-        #[allow(clippy::expect_used, reason = "EventJournal::since never fails")]
-        let entries = self
-            .journal
-            .since(0)
-            .expect("EventJournal::since never fails");
+        let entries = self.journal.since(0);
         entries
             .into_iter()
             .rev()

@@ -2,35 +2,24 @@
 //! policies.
 //!
 //! A caller-supplied label is decoration, never a path or an identity. Two
-//! independent call sites used to sanitize the SAME kind of input under
-//! silently different rules: `tidepool-agent`'s spawn saga folded a label
-//! into the tail of an [`AgentRef`](crate::AgentRef), and
-//! [`crate::create`]'s worktree creation folded one into the tail of a
-//! managed branch name. The two are not interchangeable — a branch name may
-//! contain `/` as a path separator; an `AgentRef` tail never does — so they
-//! stay two named types, [`AgentLabel`] and [`BranchLabel`], rather than
-//! collapsing into one. What collapses is the IMPLEMENTATION: both are the
-//! same `sanitize` sweep, parameterized on whether `/` survives and on the
-//! empty-result fallback, because that parameterization is enough to
-//! reproduce each call site's ORIGINAL behavior byte-for-byte (pinned by
-//! `label_compat` below) — this module changes nothing about what either
-//! caller sees, only where the logic lives.
+//! independent call sites sanitize the SAME kind of input under different
+//! rules: `tidepool-agent`'s spawn saga folds a label into the tail of an
+//! [`AgentRef`](crate::AgentRef), and [`crate::create`]'s worktree creation
+//! folds one into the tail of a managed branch name. The two are not
+//! interchangeable — a branch name may contain `/` as a path separator; an
+//! `AgentRef` tail never does — so they stay two named functions,
+//! [`sanitize_agent_label`] and [`sanitize_branch_label`], rather than
+//! collapsing into one. Both share the same `sanitize` sweep, parameterized
+//! on whether `/` survives and on the empty-result fallback, because that
+//! parameterization is enough to reproduce each call site's ORIGINAL
+//! behavior byte-for-byte (pinned by the compatibility corpus below).
 
 /// Sanitized into the tail of an `AgentRef` (`agent-<id>-<label>`). Only
 /// `[A-Za-z0-9._-]` survives; everything else becomes `-`, runs of `-`
 /// collapse, and the ends are trimmed of `-`/`.`. An all-punctuation label
 /// falls back to `"worker"` rather than yielding a ref ending in a bare `-`.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct AgentLabel(String);
-
-impl AgentLabel {
-    pub fn new(raw: &str) -> Self {
-        Self(sanitize(raw, false, "worker"))
-    }
-
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
+pub fn sanitize_agent_label(raw: &str) -> String {
+    sanitize(raw, false, "worker")
 }
 
 /// Sanitized into the tail of a managed branch name
@@ -38,17 +27,8 @@ impl AgentLabel {
 /// else becomes `-`, runs of `-`/`/` collapse together, and the ends are
 /// trimmed of `-`/`/`/`.`. An all-punctuation label falls back to
 /// `"worktree"` rather than a branch name ending in the bare prefix.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct BranchLabel(String);
-
-impl BranchLabel {
-    pub fn new(raw: &str) -> Self {
-        Self(sanitize(raw, true, "worktree"))
-    }
-
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
+pub fn sanitize_branch_label(raw: &str) -> String {
+    sanitize(raw, true, "worktree")
 }
 
 /// The shared sweep. `allow_slash` is the one axis the two policies differ
@@ -145,9 +125,9 @@ mod tests {
     fn agent_label_matches_pinned_corpus() {
         for (input, expected, _) in CORPUS {
             assert_eq!(
-                AgentLabel::new(input).as_str(),
+                sanitize_agent_label(input),
                 *expected,
-                "AgentLabel::new({input:?})"
+                "sanitize_agent_label({input:?})"
             );
         }
     }
@@ -156,9 +136,9 @@ mod tests {
     fn branch_label_matches_pinned_corpus() {
         for (input, _, expected) in CORPUS {
             assert_eq!(
-                BranchLabel::new(input).as_str(),
+                sanitize_branch_label(input),
                 *expected,
-                "BranchLabel::new({input:?})"
+                "sanitize_branch_label({input:?})"
             );
         }
     }
@@ -169,9 +149,6 @@ mod tests {
     #[test]
     fn policies_genuinely_diverge_on_slash_bearing_labels() {
         let raw = "dev-tree/root";
-        assert_ne!(
-            AgentLabel::new(raw).as_str(),
-            BranchLabel::new(raw).as_str()
-        );
+        assert_ne!(sanitize_agent_label(raw), sanitize_branch_label(raw));
     }
 }

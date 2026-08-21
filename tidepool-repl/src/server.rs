@@ -36,7 +36,7 @@ use tidepool_effect::pause::PauseGate;
 use crate::command::{BlockItem, DeclText, ExprText, MetaCommand, SessionCommand};
 use crate::manager::{empty_cancel_slot, CancelSlot, CheckoutCustody, SessionManager};
 use crate::session::{BoxedStack, Session, SessionConfig, TurnStep, DEFAULT_NURSERY_SIZE};
-use crate::state::{take_suspension, ContinuationId, SessionState, SharedState, Suspension};
+use crate::state::{ContinuationId, SessionState, SharedState, Suspension};
 
 /// The `tidepool://session/bindings` resource URI: read-only JSON over the live
 /// session environment (decl plane + value/pure binds).
@@ -804,13 +804,16 @@ impl TidepoolReplServer {
                 }
                 tidepool_mcp::validate::Outcome::Valid(canonical) => {
                     // Take the suspension out → Busy (the turn is resuming).
-                    // Suspended was confirmed under this same lock above, so this
-                    // yields the payload without a re-match-and-panic.
-                    let Some(s) = take_suspension(&mut st) else {
-                        return Err(McpError::internal_error(
-                            "session state changed under lock (expected Suspended)",
-                            None,
-                        ));
+                    // Suspended was confirmed under this same lock above.
+                    let s = match std::mem::replace(&mut *st, SessionState::Busy) {
+                        SessionState::Suspended(s) => s,
+                        other => {
+                            *st = other;
+                            return Err(McpError::internal_error(
+                                "session state changed under lock (expected Suspended)",
+                                None,
+                            ));
+                        }
                     };
                     (*s, canonical)
                 }

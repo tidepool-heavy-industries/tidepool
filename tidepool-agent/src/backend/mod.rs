@@ -5,7 +5,7 @@
 //! [`crate::seam`] vocabulary.
 
 use crate::seam::{
-    AgentBackendError, BackendThreadId, CycleOutcome, CycleSpec, ThreadSpec, ToolReply, TurnEvent,
+    AgentBackendError, BackendThreadId, CycleSpec, ThreadSpec, ToolReply, TurnEvent,
 };
 
 pub mod codex;
@@ -146,55 +146,4 @@ impl BackendCanceller for NoopCanceller {
 /// factory that yields a pre-built instance once, a factory that counts).
 pub trait AgentBackendFactory: Send {
     fn create(&mut self) -> Result<Box<dyn AgentBackend + Send>, AgentBackendError>;
-}
-
-/// A closure as a factory, so
-/// `|| CodexAgentBackend::new().map(|b| Box::new(b) as _)` is usable without a
-/// named type per call site.
-pub struct ClosureBackendFactory<F>(F);
-
-impl<F> ClosureBackendFactory<F>
-where
-    F: FnMut() -> Result<Box<dyn AgentBackend + Send>, AgentBackendError> + Send,
-{
-    pub fn new(f: F) -> Self {
-        Self(f)
-    }
-}
-
-impl<F> AgentBackendFactory for ClosureBackendFactory<F>
-where
-    F: FnMut() -> Result<Box<dyn AgentBackend + Send>, AgentBackendError> + Send,
-{
-    fn create(&mut self) -> Result<Box<dyn AgentBackend + Send>, AgentBackendError> {
-        (self.0)()
-    }
-}
-
-/// Run one turn to completion, refusing every tool call it makes.
-///
-/// A thread created with no declarations should make no calls at all; if one
-/// arrives anyway it is refused rather than ignored, because an unanswered
-/// call parks the child until its timeout.
-pub fn run_turn_to_completion(
-    backend: &mut dyn AgentBackend,
-    thread: &BackendThreadId,
-    spec: &CycleSpec,
-) -> Result<CycleOutcome, AgentBackendError> {
-    let mut event = backend.start_turn(thread, spec)?;
-    loop {
-        match event {
-            TurnEvent::Completed(outcome) => return Ok(outcome),
-            TurnEvent::ToolCall(call) => {
-                let reply = ToolReply {
-                    call: call.call.clone(),
-                    outcome: crate::seam::ToolOutcome::Refused(format!(
-                        "no such tool: {} — this agent was created with no dynamic tools",
-                        call.tool
-                    )),
-                };
-                event = backend.resume(reply)?;
-            }
-        }
-    }
 }

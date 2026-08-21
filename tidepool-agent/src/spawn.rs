@@ -10,60 +10,38 @@
 //! naming the stage that failed — the saga is hidden behind the call, never
 //! exposed as separate authored steps.
 //!
-//! ## The split: shared substrate, detachable saga
+//! ## Shared substrate, detachable saga
 //!
-//! The worktree substrate ([`WorktreeManager`] + the flocked [`BindingTable`])
-//! is single-owner BY CONSTRUCTION — `BindingTable::open` takes a lifetime
-//! flock on its binding root, so there is exactly one of these per binding
-//! root and "one substrate per cycle" is not available. The backend, by
-//! contrast, must be per-cycle: an `AgentBackend` is a step function over ONE
-//! live thread.
+//! [`SpawnSubstrate`] (the [`WorktreeManager`] + flocked [`BindingTable`]) is
+//! single-owner by construction and SHARED behind a mutex, touched only in
+//! short critical sections. [`CycleSaga`] is per-cycle, detachable, and holds
+//! no lock while it blocks on the backend.
 //!
-//! So concurrency is expressed as two pieces, not one:
+//! **Load-bearing invariant: a saga must never hold the [`SpawnSubstrate`]
+//! mutex across a backend call** — that would serialize every cycle behind one
+//! model turn, reinstating the one-agent-at-a-time constraint this design
+//! removes. Every critical section opens through [`lock_substrate`] (or a bare
+//! `substrate.lock()` in [`CycleSaga::abandon`]/[`roll_back_detached`]); grep
+//! `lock_substrate` to audit that none of those scopes contains a `backend.`
+//! call.
 //!
-//! - [`SpawnSubstrate`] — SHARED, mutex-guarded, and touched only in SHORT
-//!   critical sections: allocate a worktree, take a binding, settle a binding,
-//!   mint an agent id.
-//! - [`CycleSaga`] — PER-CYCLE, detachable, and holding no lock while it
-//!   blocks. Every `start_thread` / `start_turn` / `resume` call happens with
-//!   no substrate lock held.
+//! ## Rollback: settling, not deleting
 //!
-//! **The load-bearing invariant of this module: a saga must never hold the
-//! [`SpawnSubstrate`] mutex across a backend call.** A saga that does
-//! serializes every cycle and silently reinstates the one-agent-at-a-time
-//! constraint this design exists to remove. It is visible in the code shape as
-//! well as in this prose: every critical section in this module is opened by
-//! [`lock_substrate`] (or by a bare `substrate.lock()` in
-//! [`CycleSaga::abandon`] and [`roll_back_detached`]), and NONE of those scopes
-//! contains a `backend.` call. Grep `lock_substrate` to audit it — the guard is
-//! never a `let` that outlives its block and never a struct field.
+//! `tidepool-worktree` is retain-first (locked) — rollback here never undoes
+//! creation, only settles the binding:
 //!
-//! ## Rollback semantics, and what "no orphaned worktree" means here
-//!
-//! `tidepool-worktree` is retain-first (locked): nothing deletes a worktree,
-//! branch, ref, or record. So rollback here does NOT undo creation — it
-//! settles the binding, which is the only state whose persistence would lie:
-//!
-//! - failure after `Bound`: settle the binding `Released`. End state: the
-//!   worktree is retained, registered, UNBOUND, rebindable. That IS the
-//!   rolled-back state; "orphaned" means "left Active-bound to an agent that
-//!   will never run", not "exists".
-//! - success: settle the binding `Terminal` — an agent from this spawner is
-//!   one cycle by construction, so cycle completion is agent completion.
-//!   `Terminal` vs `Released` is the finished-vs-stopped-waiting distinction
-//!   `binding.rs` documents; both permit rebinding.
-//! - CANCELLATION ([`CycleSaga::abandon`]): settle `Released`, same as any
-//!   post-`Bound` failure. A cancelled cycle is no more entitled to leak an
-//!   Active binding than a failed one is.
-//! - a rollback that itself fails is [`SpawnError::RollbackFailed`], loud,
-//!   carrying both the original failure and the rollback failure — never a
-//!   silent swallow of either.
+//! - failure after `Bound`, or [`CycleSaga::abandon`] (cancellation): settle
+//!   `Released` — worktree retained, registered, unbound, rebindable.
+//! - success: settle `Terminal` — a cycle IS the agent's whole life, so
+//!   completion is agent completion.
+//! - a rollback that itself fails is [`SpawnError::RollbackFailed`], carrying
+//!   both the original and the rollback failure.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use tidepool_worktree::{
-    ActiveBinding, AgentLabel, AgentRef, BindingTable, BindingTerminal, WorktreeError,
+    sanitize_agent_label, ActiveBinding, AgentRef, BindingTable, BindingTerminal, WorktreeError,
     WorktreeHandle, WorktreeId, WorktreeManager, WorktreeSpec,
 };
 
@@ -248,21 +226,16 @@ pub enum SpawnStep {
     Done(Box<OneCycleRun>),
 }
 
-/// Where a saga stopped, with the saga bundled INSEPARABLY into the stop.
-///
-/// [`CycleSaga::begin`] and [`ParkedCycle::answer`] are the only ways to
-/// produce one. There is no freestanding [`SpawnStep`] here that a caller
-/// could obtain from one saga and feed into another's drive — the thing that
-/// let a `Done` from cycle A be reported as cycle B's success while B's own
-/// binding/backend turn stayed unsettled. A `Parked` value owns its saga; a
-/// `Done` value has none left to mix up, because the saga that produced it is
+/// Where a saga stopped, with the saga bundled INSEPARABLY into the stop —
+/// there is no freestanding [`SpawnStep`] a caller could take from one saga
+/// and feed into another's drive. A `Parked` value owns its saga; a `Done`
+/// value has none left to mix up, because the saga that produced it is
 /// already fully settled and consumed.
 #[derive(Debug)]
 pub enum CycleProgress {
     /// The child called a tool. Answer through [`ParkedCycle::answer`] — the
     /// only way to drive this exact saga on. Boxed: a live [`CycleSaga`] is
-    /// far larger than a [`OneCycleRun`] pointer, and every `CycleProgress`
-    /// would otherwise pay for the larger variant's inline size.
+    /// far larger than a [`OneCycleRun`] pointer.
     Parked(Box<ParkedCycle>),
     /// The cycle finished, the binding is settled, and the receipt is
     /// complete.
@@ -279,15 +252,8 @@ impl CycleProgress {
         }
     }
 
-    /// Drive to completion, refusing every tool call the child makes.
-    ///
-    /// The no-tools path: a request carrying no declarations should produce
-    /// no calls, and one that arrives anyway is refused rather than left
-    /// parked.
-    ///
-    /// Consumes `self` — there is no caller-suppliable "first step" separate
-    /// from the saga that produced it, which is the whole point: this method
-    /// can only ever drive the exact saga [`CycleSaga::begin`] started.
+    /// Drive to completion, refusing every tool call the child makes — the
+    /// no-tools path, for a request whose declarations should produce none.
     pub fn run_to_completion(
         self,
         backend: &mut dyn AgentBackend,
@@ -354,21 +320,14 @@ impl ParkedCycle {
     }
 
     /// Answer this exact parked call and drive on to the next stop.
+    /// `agent`/`call` are re-checked against what this bundle is parked on —
+    /// a wire-supplied id that doesn't match is refused before the backend.
     ///
-    /// `agent`/`call` are re-checked against what this bundle is actually
-    /// parked on (same correlation check [`CycleSaga::answer`] has always
-    /// made) — a wire-supplied id that doesn't match is refused before
-    /// anything reaches the backend.
-    ///
-    /// On failure the error is paired with an [`AnswerFailure`] saying
-    /// whether this saga is still alive and parked (a bad `agent`/`call`
-    /// never touched it — the SAME `ParkedCycle` comes back, retryable) or
-    /// whether it already rolled itself back (a round-backstop trip or a
-    /// backend failure — nothing is left to retry). A caller that only ever
-    /// reinserted a table entry on `Ok` would leak a still-good cycle out of
-    /// its table on every misrouted retry; one that always treated a failure
-    /// as terminal would leak the backend of a cycle that merely got a wrong
-    /// call id. Case on [`AnswerFailure`] to do neither.
+    /// On failure, [`AnswerFailure`] says whether this saga is still alive and
+    /// parked (a bad `agent`/`call` never touched it — the SAME `ParkedCycle`
+    /// comes back, retryable) or already rolled itself back (nothing left to
+    /// retry). Case on it: treating every failure as terminal would leak the
+    /// backend of a cycle that merely got a wrong call id.
     pub fn answer(
         mut self,
         backend: &mut dyn AgentBackend,
@@ -451,23 +410,16 @@ pub struct OneCycleRun {
 /// The single-owner worktree substrate a cycle touches, and the ONLY thing
 /// concurrent cycles contend on.
 ///
-/// Every method here is a SHORT critical section. **No backend call may happen
-/// under this lock** — see the module docs; that is the invariant the whole
-/// concurrent design rests on.
+/// Every method here is a SHORT critical section — **no backend call may
+/// happen under this lock** (see the module docs). Single-owner because
+/// [`BindingTable::open`] takes a lifetime flock on its binding root, so a
+/// second table over the same root fails loudly at `open`.
 ///
-/// Single-owner is not a policy choice: [`BindingTable::open`] takes a lifetime
-/// flock on its binding root, so a second table over the same root fails
-/// loudly at `open`. That is why the substrate is shared behind a mutex rather
-/// than cloned per cycle.
-///
-/// [`resolve_workspace`](Self::resolve_workspace) is inside the lock even
-/// though [`WorktreeManager`] is internally immutable (`&self` everywhere, ids
-/// minted from a process-global atomic, records written with a rename). It is
-/// here because concurrent `git worktree add` invocations against ONE source
-/// repository contend on git's own index/worktree locks, and a spurious
-/// `GitFailure` from that contention would read as a real allocation failure.
-/// A worktree add is tens to hundreds of milliseconds against a model turn
-/// measured in seconds, so serializing it costs nothing the lane cares about.
+/// [`resolve_workspace`](Self::resolve_workspace) stays inside the lock even
+/// though [`WorktreeManager`] is internally immutable: concurrent
+/// `git worktree add` against ONE source repo contends on git's own locks,
+/// and a spurious `GitFailure` from that would read as a real allocation
+/// failure. A worktree add (tens-hundreds of ms) is cheap next to a model turn.
 pub struct SpawnSubstrate {
     manager: Arc<WorktreeManager>,
     bindings: BindingTable,
@@ -500,10 +452,10 @@ impl SpawnSubstrate {
 
     /// Stage 1: a new managed worktree, or an existing one by durable id.
     ///
-    /// The `lookup` cases stay distinct all the way out: `Ok(None)` is a typo
-    /// or a stale id (`WorktreeNotRegistered`), `Err(WorktreeLost)` is data
-    /// loss, and collapsing them would tell an operator whose worktree a human
-    /// deleted that it never existed.
+    /// `lookup`'s cases stay distinct: `Ok(None)` is a typo/stale id
+    /// (`WorktreeNotRegistered`), `Err(WorktreeLost)` is data loss — collapsing
+    /// them would tell an operator whose worktree a human deleted that it
+    /// never existed.
     pub fn resolve_workspace(
         &self,
         workspace: &SpawnWorkspace,
@@ -524,12 +476,8 @@ impl SpawnSubstrate {
 
     /// Take the binding for `worktree` under `binding_ref`, returning the
     /// [`ActiveBinding`] custody receipt — the only thing that can later
-    /// settle this exact row (see the type's docs: a stale or reused receipt
-    /// can never settle a NEWER occupant after a rebind).
-    ///
-    /// `WorktreeBusy` (one worktree, one agent) and a persist failure are both
-    /// binding failures; `BindingTable::bind` already rolled its own memory
-    /// back on the latter, so there is nothing here to compensate.
+    /// settle this exact row (a stale/reused receipt can never settle a
+    /// NEWER occupant after a rebind — see the type's docs).
     pub fn bind(
         &mut self,
         worktree: &WorktreeId,
@@ -559,11 +507,9 @@ impl SpawnSubstrate {
         }
     }
 
-    /// Compensate a post-`Bound` failure: settle `lease` `Released` so the
-    /// retained worktree is left UNBOUND and rebindable, and return the error
-    /// the caller should see. A rollback that itself fails is escalated to
-    /// [`SpawnError::RollbackFailed`] carrying BOTH — swallowing either hides
-    /// the one a fix needs.
+    /// Compensate a post-`Bound` failure: settle `lease` `Released` (retained,
+    /// unbound, rebindable) and return the error to surface. A rollback that
+    /// itself fails escalates to [`SpawnError::RollbackFailed`] carrying both.
     pub fn roll_back(&mut self, lease: ActiveBinding, original: SpawnError) -> SpawnError {
         let stage = original.stage();
         match lease.release(&mut self.bindings) {
@@ -577,27 +523,10 @@ impl SpawnSubstrate {
     }
 }
 
-/// The rendering a POISONED substrate mutex gets.
-///
-/// Poisoning here means a concurrent cycle's saga panicked while holding the
-/// lock, so the [`BindingTable`]'s in-memory rows may not match what is on
-/// disk and no invariant a saga relies on can be assumed. Two things this
-/// deliberately is NOT: it is not an `unwrap()` (which would turn one cycle's
-/// panic into every other cycle's panic, losing the diagnosis), and it is not
-/// a recover-by-ignoring (`PoisonError::into_inner`, which would keep writing
-/// binding rows on top of unknown state).
-///
-/// It is spelled as a [`WorktreeError::StorageFailure`] against the binding
-/// root rather than as a new [`SpawnError`] variant on purpose: the durable
-/// binding state is exactly what became untrustworthy, and `SpawnError`'s
-/// variants are the wire contract `tidepool-handlers` converts exhaustively —
-/// widening it is a separate, coordinated change, not something a lock
-/// mechanism gets to do.
 /// Decode a path checked UTF-8 at the substrate's construction
-/// (`worktree_root`/`source_repository`, both `require_utf8`-checked by
-/// `tidepool-handlers`' `SubagentHandler::with_backends`). A panic here means
-/// that invariant broke — loud and immediate, not a silently mangled sandbox
-/// root or cwd handed to a spawned backend.
+/// (`tidepool-handlers`' `SubagentHandler::with_backends` `require_utf8`s
+/// `worktree_root`/`source_repository`). A panic here means that invariant
+/// broke — loud, not a silently mangled sandbox root or cwd.
 fn utf8_or_panic(path: &std::path::Path) -> String {
     camino::Utf8Path::from_path(path)
         .unwrap_or_else(|| {
@@ -618,6 +547,11 @@ fn poisoned(stage: SpawnStage) -> SpawnError {
     }
 }
 
+/// Never `unwrap()` (would turn one cycle's panic into every cycle's) and
+/// never `PoisonError::into_inner` (would keep writing atop unknown state).
+/// A [`WorktreeError::StorageFailure`], not a new [`SpawnError`] variant,
+/// because the durable binding state is what's untrustworthy, and
+/// `SpawnError`'s variants are `tidepool-handlers`' wire contract.
 fn poisoned_storage() -> WorktreeError {
     WorktreeError::StorageFailure {
         path: std::path::PathBuf::from("<spawn substrate>"),
@@ -630,10 +564,8 @@ fn poisoned_storage() -> WorktreeError {
 }
 
 /// Lock the substrate, rendering poisoning as a typed failure at `stage`.
-///
-/// The returned guard is deliberately short-lived at every call site: nothing
-/// that calls a backend may hold it. Grep for this function to audit the
-/// invariant — every critical section in this module starts here.
+/// Every critical section in this module starts here — grep to audit that
+/// none holds the guard across a backend call.
 fn lock_substrate(
     substrate: &Arc<Mutex<SpawnSubstrate>>,
     stage: SpawnStage,
@@ -641,13 +573,9 @@ fn lock_substrate(
     substrate.lock().map_err(|_| poisoned(stage))
 }
 
-/// Compensate a post-`Bound` failure that happened before a [`CycleSaga`]
-/// existed — the window inside [`CycleSaga::begin`] between taking the binding
-/// and having a backend thread id to build the saga around.
-///
-/// A SHORT critical section, entered only after the backend call that failed
-/// has already returned. Consumes `lease` — the receipt `bind` handed out for
-/// the row this failure rolls back.
+/// Compensate a post-`Bound` failure from inside [`CycleSaga::begin`],
+/// before a [`CycleSaga`] exists to compensate through — entered only after
+/// the failed backend call has already returned.
 fn roll_back_detached(
     substrate: &Arc<Mutex<SpawnSubstrate>>,
     lease: ActiveBinding,
@@ -670,44 +598,33 @@ fn roll_back_detached(
 
 /// One cycle's saga state, detached from the spawner that started it.
 ///
-/// Carries its own `Arc<Mutex<SpawnSubstrate>>`, so a saga can be MOVED to
-/// another thread and driven there. It locks the substrate only to bind,
-/// settle, and roll back — **never across a backend call**. The two helpers
-/// that touch a backend ([`Self::start_thread_and_turn`] and [`Self::drive`])
-/// take no guard and cannot: the guard's lifetime is confined to
-/// [`lock_substrate`] call sites, none of which contain a backend call.
+/// Carries its own `Arc<Mutex<SpawnSubstrate>>` so it can be MOVED to another
+/// thread and driven there. Locks the substrate only to bind, settle, and
+/// roll back — **never across a backend call**.
 pub struct CycleSaga {
     substrate: Arc<Mutex<SpawnSubstrate>>,
     agent: AgentId,
     worktree: WorktreeHandle,
     thread: BackendThreadId,
     binding_ref: String,
-    /// The custody receipt `bind` handed out for this saga's worktree.
-    /// `Some` for exactly as long as `!self.settled` — the only two places
-    /// that ever take it (`roll_back`, `abandon`) also flip `settled` to
-    /// `true` in the same step, and `settle_step`'s `Completed` arm relies on
-    /// that pairing to `.expect()` it rather than re-checking. Consumed by
-    /// [`ActiveBinding::complete`]/[`release`](ActiveBinding::release) — never
-    /// dropped un-settled by this saga.
+    /// `Some` for exactly as long as `!self.settled` — `roll_back`/`abandon`
+    /// take it and flip `settled` in the same step, so `settle_step`'s
+    /// `Completed` arm can `.expect()` it rather than re-checking.
     active_binding: Option<ActiveBinding>,
     /// The call awaiting an answer. `None` between a completed step and the
-    /// next — which cannot be observed by a caller, since every step either
-    /// parks or finishes.
+    /// next.
     parked: Option<ToolCallId>,
     rounds: u32,
-    /// Whether this saga's binding has already been settled — by completion,
-    /// by rollback, or by a previous [`abandon`](Self::abandon).
-    ///
-    /// This is what makes `abandon` idempotent: a cancel racing a completion is
-    /// a real sequence, and settling twice would write a second lease row for a
-    /// life that ended once.
+    /// Whether this saga's binding is already settled — by completion,
+    /// rollback, or a previous [`abandon`](Self::abandon). Makes `abandon`
+    /// idempotent: a cancel racing a completion must not write a second lease
+    /// row for a life that ended once.
     settled: bool,
 }
 
-/// Hand-written rather than derived: the substrate handle is SHARED, so
-/// printing it would print another cycle's state (and take the lock to do it,
-/// from a `Debug` impl, which is exactly the wrong place to block). What a
-/// reader wants from a saga is which cycle it is and where it stopped.
+/// Hand-written: the substrate handle is SHARED, so a derived impl would
+/// print another cycle's state and take the lock to do it from a `Debug`
+/// impl — exactly the wrong place to block.
 impl std::fmt::Debug for CycleSaga {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("CycleSaga")
@@ -723,58 +640,33 @@ impl std::fmt::Debug for CycleSaga {
 }
 
 impl CycleSaga {
-    /// Run the saga from `Allocating` to its first stop.
-    ///
-    /// Returns a [`CycleProgress`] that bundles the saga with where it
-    /// stopped — a `Done` result carries no saga to mix up with another
-    /// cycle's, and a `Parked` result owns its saga inseparably from the call
-    /// it parked on. [`CycleProgress::run_to_completion`] and
-    /// [`ParkedCycle::answer`] are the only ways to drive it further.
-    ///
-    /// See the module docs for the stage diagram and rollback semantics. Every
-    /// error returned here has already rolled back.
+    /// Run the saga from `Allocating` to its first stop. See the module docs
+    /// for the stage diagram and rollback semantics; every error returned
+    /// here has already rolled back.
     pub fn begin(
         substrate: &Arc<Mutex<SpawnSubstrate>>,
         backend: &mut dyn AgentBackend,
         request: &SpawnRequest,
     ) -> Result<CycleProgress, SpawnError> {
-        // --- critical section: allocate, mint, bind. No backend call here. ---
+        // Allocate, mint, bind — no backend call under this lock.
         let (worktree, agent, binding_ref, git_dir, lease) = {
             let mut sub = lock_substrate(substrate, SpawnStage::Allocating)?;
-
-            // 1. Allocating → WorktreeReady. Nothing is bound yet, so a failure
-            //    here has nothing to compensate: no binding row is ever written.
             let worktree = sub.resolve_workspace(&request.workspace)?;
-
-            // 2. Identity: mint the agent id, then sanitize the label into the
-            //    `AgentRef` tail.
             let agent = sub.mint_agent_id();
             let binding_ref = format!(
                 "agent-{}-{}",
                 agent.0,
-                AgentLabel::new(&request.agent_label).as_str()
+                sanitize_agent_label(&request.agent_label)
             );
-
-            // 3. Bound.
             let lease = sub.bind(worktree.id(), &binding_ref)?;
-
             // The linked worktree's git metadata lives in the SOURCE repo's
             // `.git`; the sandbox must admit it or no worker can ever commit.
-            // `source_repository` is checked UTF-8 once, at handler
-            // construction (`SubagentHandler::with_backends`'s
-            // `require_utf8`) — a violation here means that invariant broke,
-            // which is loud, not a silently mangled sandbox root.
             let git_dir = utf8_or_panic(&sub.source_repository().join(".git"));
             (worktree, agent, binding_ref, git_dir, lease)
         };
-        // --- lock released. Everything below may block for a whole turn. ---
+        // Lock released — everything below may block for a whole turn, and
+        // every failure path from here must settle the binding `Released`.
 
-        // 4. ThreadAccepted. From here on every failure path must settle the
-        //    binding `Released` — the worktree is retained (locked), but
-        //    leaving it Active-bound to an agent that will never run is the
-        //    orphan this saga exists to prevent. The saga struct is not
-        //    constructed until there is a real thread id to put in it, so
-        //    `CycleSaga::thread` is never transiently a placeholder.
         let thread = match backend.start_thread(&request.thread_spec()) {
             Ok(thread) => thread,
             Err(error) => {
@@ -789,11 +681,7 @@ impl CycleSaga {
             }
         };
 
-        // 5. Running. `cwd` is supplied per-cycle, not at thread creation —
-        //    see `CycleSpec`'s docs for why the seam splits it that way.
-        // `worktree.cwd()` is `worktree_root.join(id)`: `worktree_root` is
-        // checked UTF-8 once at handler construction and `id` is ASCII-safe
-        // by construction, so this is UTF-8 by construction too.
+        // `cwd` is per-cycle, not at thread creation — see `CycleSpec`'s docs.
         let cwd = utf8_or_panic(worktree.cwd());
         let event = match backend.start_turn(&thread, &request.cycle_spec(cwd, vec![git_dir])) {
             Ok(event) => event,
@@ -824,12 +712,9 @@ impl CycleSaga {
         Ok(CycleProgress::from_step(saga, step))
     }
 
-    /// Answer the parked tool call and drive on to the next stop.
-    ///
-    /// `agent` is checked against THIS saga's agent before anything is sent:
-    /// answering the wrong agent is the misroute the correlation triple exists
-    /// to catch, and catching it here costs nothing. With N cycles in flight
-    /// that check is more load-bearing than it was with one, not less.
+    /// Answer the parked tool call and drive on to the next stop. `agent` is
+    /// checked against THIS saga's agent before anything is sent — the
+    /// misroute the correlation triple exists to catch.
     pub fn answer(
         &mut self,
         backend: &mut dyn AgentBackend,
@@ -910,34 +795,23 @@ impl CycleSaga {
         self.settled
     }
 
-    /// Settle the binding `Released` for a cycle that is being ABANDONED
-    /// (cancelled) rather than completed.
+    /// Settle the binding `Released` for a cycle being ABANDONED (cancelled)
+    /// rather than completed — retain-first, so this deletes nothing.
     ///
-    /// Cancellation is not exempt from the rollback rule: reaping the backend
-    /// stops the work, but a binding row left Active points at an agent that
-    /// will never run again — the exact orphan this saga's rollback semantics
-    /// exist to prevent. Retain-first is locked, so this settles and deletes
-    /// NOTHING: the worktree stays registered, on disk, and rebindable.
+    /// IDEMPOTENT: a no-op `Ok(())` on an already-settled saga, never a second
+    /// write, because a cancel racing a completion must not record two lease
+    /// rows for one life.
     ///
-    /// IDEMPOTENT. On a saga that already settled — completed, rolled back, or
-    /// previously abandoned — this is a no-op returning `Ok(())`, never a
-    /// second write and never an error. A cancel racing a completion is a real
-    /// sequence, and double-writing the binding table would record two lease
-    /// rows for a life that ended once.
-    ///
-    /// ORDER, for a caller cancelling a live cycle: reap the backend FIRST
-    /// (via [`BackendCanceller`](crate::backend::BackendCanceller)), then call
-    /// this. Settling first would hold the substrate lock across a reap of
-    /// unknown duration, which is the invariant this module is built around.
+    /// ORDER for a caller cancelling a live cycle: reap the backend FIRST (via
+    /// [`BackendCanceller`](crate::backend::BackendCanceller)), then call
+    /// this — settling first would hold the substrate lock across a reap of
+    /// unknown duration.
     pub fn abandon(&mut self) -> Result<(), WorktreeError> {
         if self.settled {
             return Ok(());
         }
-        // `settled` is false, so the invariant on `active_binding` (`Some`
-        // iff `!settled`) says this is always `Some` here — taken and
-        // consumed exactly once, whether or not the settle below succeeds:
-        // there is no second receipt to retry with, so `settled` flips to
-        // `true` unconditionally once a settle attempt has been made.
+        // `!settled` means `active_binding` is `Some` — taken exactly once
+        // here regardless of whether the settle below succeeds.
         #[allow(
             clippy::expect_used,
             reason = "an unsettled saga always holds its lease"
@@ -951,22 +825,13 @@ impl CycleSaga {
         sub.settle(lease, BindingTerminal::Released)
     }
 
-    /// Turn one backend event into a saga step, settling the binding when the
-    /// turn ends.
+    /// Turn one backend event into a saga step, settling the binding
+    /// `Terminal` when the turn ends (a cycle IS the agent's whole life).
     ///
-    /// Success settles `Terminal` — a cycle IS this agent's whole life, so
-    /// cycle completion is agent completion.
-    ///
-    /// A settle failure here is reported `RollbackFailed` rather than
-    /// `Binding`, deliberately: `RollbackFailed` is `SpawnError`'s ONLY signal
-    /// that an Active binding may still be on disk, and that is exactly what a
-    /// failed terminal settle leaves behind. Returning `Binding` would satisfy
-    /// the "no Active binding remains" promise this enum's docs make for every
-    /// other variant, and it would be a lie. `original` and `rollback` carry
-    /// the same failure because on the success path the settle is both the
-    /// operation and its own compensation — there is no earlier failure to
-    /// lose, and no second write worth attempting against storage that just
-    /// refused one.
+    /// A settle failure here is `RollbackFailed`, not `Binding`: `Binding`
+    /// promises no Active row remains, which a failed terminal settle
+    /// contradicts — `RollbackFailed` is `SpawnError`'s only honest signal
+    /// that one might still be on disk.
     fn settle_step(&mut self, event: TurnEvent) -> Result<SpawnStep, SpawnError> {
         match event {
             TurnEvent::ToolCall(call) => {
@@ -977,10 +842,8 @@ impl CycleSaga {
                 })
             }
             TurnEvent::Completed(outcome) => {
-                // `settle_step` is only ever reached while `!self.settled`
-                // (`answer` refuses before calling it otherwise), and that is
-                // exactly the invariant that keeps `active_binding` `Some`
-                // here.
+                // Reached only while `!self.settled`, so `active_binding` is
+                // `Some`.
                 #[allow(
                     clippy::expect_used,
                     reason = "settle_step is only reached while !self.settled, which is exactly the invariant keeping active_binding Some here"
@@ -1028,11 +891,6 @@ impl CycleSaga {
     }
 
     /// Compensate a post-`Bound` failure and mark this saga finished.
-    ///
-    /// Delegates the settle to [`SpawnSubstrate::roll_back`] inside a SHORT
-    /// critical section; a poisoned lock surfaces as
-    /// [`SpawnError::RollbackFailed`] carrying the original, because a
-    /// rollback that could not run is exactly the case that variant exists for.
     fn roll_back(&mut self, original: SpawnError) -> SpawnError {
         let stage = original.stage();
         self.parked = None;
@@ -1071,45 +929,25 @@ impl CycleSaga {
 /// the cycles currently in flight.
 ///
 /// One spawner per (registry root, binding root) — `BindingTable`'s lifetime
-/// flock enforces the single-owner precondition, so constructing a second
-/// spawner over the same binding root fails loudly at `open`.
-///
-/// **N cycles at a time.** The substrate is shared behind a mutex and each
-/// cycle's saga is a separate [`CycleSaga`]; a second [`begin`](Self::begin) is
-/// an ordinary spawn, not a refusal. The invariant that makes that real rather
-/// than nominal: **no code path holds the [`SpawnSubstrate`] lock across a
-/// backend call.** A saga that did would serialize every cycle behind one
-/// model turn and silently reinstate one-agent-at-a-time. Every critical
-/// section in this module goes through [`lock_substrate`] (or `substrate.lock()`
-/// in [`CycleSaga::abandon`], `CycleSaga::roll_back`, and
-/// [`roll_back_detached`]), and none of those scopes contains a `backend.`
-/// call.
-///
-/// A caller that drives a cycle on its OWN thread uses
-/// [`begin_detached`](Self::begin_detached) and owns the saga; the map here is
-/// only for cycles this spawner steps inline.
+/// flock enforces the single-owner precondition. N cycles at a time (see the
+/// module docs for the shared-substrate invariant); a caller driving a cycle
+/// on its OWN thread uses [`begin_detached`](Self::begin_detached) instead —
+/// the map here is only for cycles this spawner steps inline.
 pub struct CoupledSpawner {
     substrate: Arc<Mutex<SpawnSubstrate>>,
     /// A lock-free handle to the same manager the substrate holds, so
-    /// [`manager`](Self::manager) can hand out a plain reference. Sound
-    /// because `WorktreeManager` is internally immutable — every method takes
-    /// `&self`, ids come from a process-global atomic, and records are written
-    /// by rename. The mutex exists for the `BindingTable` and the agent-id
-    /// counter, not for this.
+    /// [`manager`](Self::manager) can hand out a plain reference —
+    /// `WorktreeManager` is internally immutable, so this is sound.
     manager: Arc<WorktreeManager>,
     /// The cycles this spawner is stepping inline, keyed by agent.
     running: HashMap<AgentId, CycleSaga>,
 }
 
-/// A borrowed view of the substrate's [`BindingTable`], held under the lock.
-///
-/// Returned rather than a plain `&BindingTable` because the table lives behind
-/// the shared mutex. It is a live guard, so two rules apply: HOLD IT BRIEFLY
-/// (keeping one across a backend call is the one thing this module forbids),
-/// and do not take a second one while the first is alive — the mutex is not
-/// reentrant. [`CoupledSpawner::manager`] takes no lock at all precisely so
-/// that reading the registry and reading a binding in one expression cannot
-/// deadlock.
+/// A borrowed view of the substrate's [`BindingTable`], held under the lock —
+/// a live guard, so hold it briefly and never take a second one while the
+/// first is alive (the mutex is not reentrant). [`CoupledSpawner::manager`]
+/// takes no lock at all precisely so reading the registry and a binding in
+/// one expression cannot deadlock.
 pub struct BindingsRef<'a>(MutexGuard<'a, SpawnSubstrate>);
 
 impl std::ops::Deref for BindingsRef<'_> {
@@ -1148,12 +986,9 @@ impl CoupledSpawner {
     ///
     /// # Panics
     ///
-    /// If the substrate mutex is poisoned — a concurrent cycle panicked
-    /// mid-saga. This accessor is a diagnostic read with no `Result` to carry
-    /// the fact, so it says so loudly rather than reading rows whose
-    /// relationship to disk is unknown. Every path that can act on the failure
-    /// (`begin`, `answer`, `spawn_one_cycle`, `abandon`) returns it typed
-    /// instead.
+    /// If the substrate mutex is poisoned. This is a diagnostic read with no
+    /// `Result` to carry that fact; every path that can act on it (`begin`,
+    /// `answer`, `spawn_one_cycle`, `abandon`) returns it typed instead.
     pub fn bindings(&self) -> BindingsRef<'_> {
         BindingsRef(self.substrate.lock().unwrap_or_else(|_| {
             panic!("{}", poisoned_storage());
@@ -1180,9 +1015,6 @@ impl CoupledSpawner {
     }
 
     /// Every agent this spawner is currently stepping, sorted.
-    ///
-    /// Replaces the old `running_agent() -> Option<AgentId>`, which had no
-    /// meaning once more than one cycle could be in flight.
     pub fn running_agents(&self) -> Vec<AgentId> {
         let mut agents: Vec<AgentId> = self.running.keys().copied().collect();
         agents.sort_unstable();
@@ -1190,14 +1022,10 @@ impl CoupledSpawner {
     }
 
     /// What a [`SpawnError::NotRunning`] says when the addressed agent is not
-    /// in the map.
-    ///
-    /// The EMPTY case is `"no agent is mid-turn"` verbatim: that exact string
-    /// is asserted literally by
+    /// in the map. The EMPTY case is `"no agent is mid-turn"` verbatim — that
+    /// exact string is asserted literally by
     /// `handler_resume_with_no_agent_running_is_a_drive_failure` in
-    /// `tidepool-handlers`. The non-empty cases name who IS running, because a
-    /// misroute a caller cannot act on is not an explicit failure — and with N
-    /// cycles in flight "which ones" is the fact that makes it actionable.
+    /// `tidepool-handlers`.
     fn no_such_agent_detail(&self) -> String {
         match self.running_agents().as_slice() {
             [] => "no agent is mid-turn".to_string(),
@@ -1212,15 +1040,9 @@ impl CoupledSpawner {
         }
     }
 
-    /// BEGIN the coupled-spawn saga and drive the turn to its first stop:
-    /// workspace, binding, thread (carrying the declared tools), turn start —
-    /// then either a parked tool call or a finished cycle.
-    ///
-    /// A thin wrapper over [`CycleSaga::begin`] that keeps the saga in this
+    /// BEGIN the coupled-spawn saga and drive to its first stop. A thin
+    /// wrapper over [`CycleSaga::begin`] that keeps the saga in this
     /// spawner's map so [`answer`](Self::answer) can find it by agent id.
-    ///
-    /// See the module docs for the stage diagram and rollback semantics. Every
-    /// error returned here has already rolled back.
     pub fn begin(
         &mut self,
         backend: &mut dyn AgentBackend,
@@ -1239,14 +1061,10 @@ impl CoupledSpawner {
         }
     }
 
-    /// BEGIN a saga and hand it to the caller instead of storing it.
-    ///
-    /// This is what a cycle thread uses: the saga carries its own substrate
-    /// handle, so it can be moved across a thread boundary and driven there
-    /// while this spawner keeps serving other cycles.
-    ///
-    /// `&self` rather than `&mut self` — a detached saga is never entered into
-    /// the inline map, so nothing here mutates.
+    /// BEGIN a saga and hand it to the caller instead of storing it — what a
+    /// cycle thread uses, since the saga carries its own substrate handle and
+    /// can be moved across the thread boundary. `&self`: nothing here mutates,
+    /// since a detached saga never enters the inline map.
     pub fn begin_detached(
         &self,
         backend: &mut dyn AgentBackend,
@@ -1256,13 +1074,9 @@ impl CoupledSpawner {
     }
 
     /// Answer the parked tool call for `agent` and drive that cycle on.
-    ///
-    /// Routing is by agent id: with N cycles in flight, answering the wrong
-    /// agent must reach no backend at all, which is what the map lookup and
-    /// [`CycleSaga::answer`]'s own checks jointly guarantee. A misroute is a
-    /// refusal that costs the addressed cycle nothing — it stays parked and
-    /// answerable — and it matters MORE now than it did with one cycle, not
-    /// less.
+    /// Routing is by agent id: the map lookup and [`CycleSaga::answer`]'s own
+    /// checks jointly guarantee a misroute reaches no backend and costs the
+    /// addressed cycle nothing — it stays parked and answerable.
     pub fn answer(
         &mut self,
         backend: &mut dyn AgentBackend,

@@ -5,9 +5,7 @@
 //!
 //! Two independent scenarios, each its own fresh `Session` (its own boot):
 //!
-//! - `session`: turn 0 (a decl) then three subsequent single-item turns
-//!   (`SessionCommand::Eval`, matching how `Repl::eval`'s test helper drives a
-//!   lone item — see `session.rs`'s `SessionCommand` docstring).
+//! - `session`: turn 0 (a decl) then three subsequent one-item `Block` turns.
 //! - `block5`: ONE `SessionCommand::Block` turn of 5 independent items — the
 //!   before/after instrument for the in-flight batch-turns lane: what one
 //!   call carrying 5 items costs today, vs `session`'s per-item turns.
@@ -184,6 +182,13 @@ fn outcome_label(step: &TurnStep) -> &'static str {
     }
 }
 
+fn one_item_block(item: BlockItem) -> SessionCommand {
+    SessionCommand::Block {
+        items: vec![item],
+        verbose: false,
+    }
+}
+
 fn run_one(
     session: &mut Session,
     collector: &Collector,
@@ -216,7 +221,9 @@ fn scenario_session(root: &std::path::Path) {
     let mut session = open_session(root, "session");
     let collector = install_collector_once();
 
-    let turn0 = SessionCommand::Def(DeclText("helper x = x + (1 :: Int)".to_string()));
+    let turn0 = one_item_block(BlockItem::Decl(DeclText(
+        "helper x = x + (1 :: Int)".to_string(),
+    )));
     let (wall, outcome) = run_one(&mut session, &collector, "session.turn0", &turn0);
     report_turn(&collector, "session.turn0", wall, outcome);
 
@@ -226,7 +233,9 @@ fn scenario_session(root: &std::path::Path) {
     // compile retry under this effect stack, independent of this bench.
     for (i, arg) in [1, 2, 3].into_iter().enumerate() {
         let label = format!("session.turn{}", i + 1);
-        let cmd = SessionCommand::Eval(ExprText(format!("v{arg} <- pure (helper {arg})")));
+        let cmd = one_item_block(BlockItem::Stmt(ExprText(format!(
+            "v{arg} <- pure (helper {arg})"
+        ))));
         let (wall, outcome) = run_one(&mut session, &collector, &label, &cmd);
         report_turn(&collector, &label, wall, outcome);
     }

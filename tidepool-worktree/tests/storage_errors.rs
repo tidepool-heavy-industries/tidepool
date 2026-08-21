@@ -391,7 +391,7 @@ fn journal_malformed_middle_row_fails_loudly_rather_than_being_skipped() {
         Ok(j) => panic!(
             "expected StorageFailure; journal opened with {} entries — a corrupted \
              middle receipt was silently elided",
-            j.since(0).map(|v| v.len()).unwrap_or(0)
+            j.since(0).len()
         ),
         other => panic!("expected StorageFailure, got {other:?}"),
     }
@@ -422,7 +422,7 @@ fn journal_torn_final_row_is_still_tolerated_after_the_middle_row_fix() {
 
     let reopened = EventJournal::open(&path).expect("a torn FINAL row stays recoverable");
     assert_eq!(
-        reopened.since(0).expect("since").len(),
+        reopened.since(0).len(),
         1,
         "the intact row survives; only the torn final row is dropped"
     );

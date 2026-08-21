@@ -54,13 +54,6 @@ pub enum BindingState {
     Released,
 }
 
-impl BindingState {
-    /// Whether a replacement agent may take this worktree.
-    pub fn permits_rebinding(self) -> bool {
-        matches!(self, BindingState::Terminal | BindingState::Released)
-    }
-}
-
 /// The legal terminal states a caller may SETTLE an active binding to —
 /// deliberately smaller than [`BindingState`], which also has to name
 /// `Active` for reading back stored history. Widening this to `BindingState`
@@ -112,10 +105,6 @@ impl Binding {
 
     pub fn state(&self) -> BindingState {
         self.state
-    }
-
-    pub fn bound_at_ms(&self) -> i64 {
-        self.bound_at_ms
     }
 
     pub(crate) fn new(

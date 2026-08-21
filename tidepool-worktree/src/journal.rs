@@ -237,12 +237,12 @@ impl EventJournal {
     }
 
     /// Rows strictly after `cursor`. For diagnosis and restart recovery only.
-    pub fn since(&self, cursor: u64) -> Result<Vec<JournalEntry>, WorktreeError> {
-        Ok(self
-            .entries
+    /// Infallible — an in-memory filter over already-loaded entries.
+    pub fn since(&self, cursor: u64) -> Vec<JournalEntry> {
+        self.entries
             .iter()
             .filter(|e| e.cursor > cursor)
             .cloned()
-            .collect())
+            .collect()
     }
 }

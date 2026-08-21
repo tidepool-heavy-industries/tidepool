@@ -127,8 +127,7 @@ fn commit_yields_commit_and_head_changed_sharing_one_event_id() {
     // diagnosis reads, so it must agree with what the caller was handed.
     let entries = EventJournal::open(&_journal_path)
         .expect("reopen journal")
-        .since(0)
-        .expect("since");
+        .since(0);
     let ids: Vec<_> = entries
         .iter()
         .filter(|e| e.event.worktree() == &id)
@@ -456,8 +455,7 @@ fn fresh_subscription_sees_none_of_the_prior_rows() {
 
     let visible = EventJournal::open(&journal_path)
         .expect("reopen journal")
-        .since(subscribed_at)
-        .expect("since");
+        .since(subscribed_at);
 
     assert_eq!(
         visible.len(),
@@ -493,8 +491,7 @@ fn journal_survives_restart_and_skips_a_torn_final_row() {
 
     let before_restart = EventJournal::open(&journal_path)
         .expect("reopen journal")
-        .since(0)
-        .expect("since");
+        .since(0);
     assert_eq!(before_restart.len(), events.len());
 
     // Simulate a crash mid-write: append a syntactically-broken trailing line
@@ -510,7 +507,7 @@ fn journal_survives_restart_and_skips_a_torn_final_row() {
     }
 
     let reopened = EventJournal::open(&journal_path).expect("reopen journal after tear");
-    let recovered = reopened.since(0).expect("since after reopen");
+    let recovered = reopened.since(0);
     assert_eq!(
         recovered.len(),
         before_restart.len(),
@@ -566,7 +563,7 @@ fn concurrent_appends_never_produce_a_torn_row() {
     // count below would not match.
     let reopened =
         EventJournal::open(&journal_path).expect("reopen journal after concurrent writes");
-    let rows = reopened.since(0).expect("since");
+    let rows = reopened.since(0);
     assert_eq!(
         rows.len() as u64,
         WRITERS * ROWS_PER_WRITER,
@@ -721,8 +718,7 @@ fn reconcile_returned_event_id_matches_the_journalled_event_id_for_that_pass() {
 
     let entries = EventJournal::open(&journal_path)
         .expect("reopen journal")
-        .since(0)
-        .expect("since");
+        .since(0);
     let journalled_under_second_id: Vec<_> =
         entries.iter().filter(|e| e.event_id == second_id).collect();
     assert_eq!(
@@ -774,7 +770,7 @@ fn journal_append_after_torn_row_recovery_keeps_the_journal_openable() {
     }
 
     let mut repaired = EventJournal::open(&journal_path).expect("reopen after tear");
-    let survivors = repaired.since(0).expect("since");
+    let survivors = repaired.since(0);
     let sample = survivors
         .last()
         .expect("at least one surviving row")
@@ -786,7 +782,7 @@ fn journal_append_after_torn_row_recovery_keeps_the_journal_openable() {
     let reopened = EventJournal::open(&journal_path)
         .expect("append-after-tear must not corrupt the journal for the next open");
     assert_eq!(
-        reopened.since(0).expect("since").len(),
+        reopened.since(0).len(),
         survivors.len() + 1,
         "every surviving row plus the appended one must be readable"
     );
@@ -881,8 +877,7 @@ fn reconcile_retry_delivers_but_does_not_rejournal_a_failed_pass_leftover() {
     // the HeadChanged. No duplicate receipt under a fresh id.
     let rows = EventJournal::open(&journal_path)
         .expect("reopen for audit")
-        .since(0)
-        .expect("since");
+        .since(0);
     let commit_rows: Vec<_> = rows
         .iter()
         .filter(|e| matches!(&e.event, RepositoryEvent::Commit(c) if c.oid.as_str() == second))

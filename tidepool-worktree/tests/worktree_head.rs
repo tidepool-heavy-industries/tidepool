@@ -140,7 +140,7 @@ fn worktree_head_reflects_movement_the_monitor_never_reconciled() {
     let unread_journal =
         EventJournal::open(journal_dir.path().join("events.jsonl")).expect("reopen journal");
     assert!(
-        unread_journal.since(0).expect("since").is_empty(),
+        unread_journal.since(0).is_empty(),
         "the monitor never reconciled, so nothing was journalled — worktree_head's answer \
          did not come from the journal either"
     );

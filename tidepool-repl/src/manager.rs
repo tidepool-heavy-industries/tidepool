@@ -1,12 +1,8 @@
 //! The single implicit session's manager: an ownership slot machine around ONE
-//! resident [`Session`].
-//!
-//! There is no worker thread. A turn CHECKS the session OUT of the slot (leaving
-//! it [`SessionSlot::Running`]), runs it on the blocking pool with the manager
-//! lock RELEASED, and restores it as `Idle` or `Suspended{cont_id}` under a
-//! second short lock. That is the harness's `SessionRegistry` discipline
-//! (`tidepool-harness/src/registry.rs`) at N = 1 — which is itself a port of this
-//! crate's `state.rs` discipline, so this closes the circle.
+//! resident [`Session`]. A turn checks the session OUT of the slot, runs it on
+//! the blocking pool with the manager lock RELEASED, and restores it under a
+//! second short lock — see `tidepool-repl/CLAUDE.md`'s "Internals: session
+//! lifecycle" section for the full picture.
 //!
 //! The slot is the OWNERSHIP truth (where the session is); [`SessionState`] is
 //! the caller-facing LIFECYCLE truth (what the server tells a client and which

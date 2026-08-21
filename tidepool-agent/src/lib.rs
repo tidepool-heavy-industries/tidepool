@@ -19,10 +19,7 @@ pub mod backend;
 pub mod seam;
 pub mod spawn;
 
-pub use backend::{
-    run_turn_to_completion, AgentBackend, AgentBackendFactory, BackendCanceller,
-    ClosureBackendFactory,
-};
+pub use backend::{AgentBackend, AgentBackendFactory, BackendCanceller};
 pub use seam::{
     AgentBackendError, AgentId, BackendThreadId, CycleOutcome, CycleResultPayload, CycleSpec,
     DynamicToolDeclaration, ModelPolicy, ReasoningEffort, ThreadSpec, TokenUsage, ToolCall,
