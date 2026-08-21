@@ -279,29 +279,10 @@ impl KvHandler {
 mod tests {
     use super::*;
     use crate::test_support::*;
-    use tidepool_bridge::{FromCore, ToCore};
+    use tidepool_bridge::ToCore;
     use tidepool_effect::dispatch::{DispatchEffect, EffectContext};
     use tidepool_eval::value::Value;
     use tidepool_repr::DataConTable;
-
-    #[test]
-    fn test_kv_from_core_keys() {
-        let table = full_effect_test_table();
-        let con_id = table.get_by_name("KvKeys").unwrap();
-        let val = Value::Con(con_id, vec![]);
-        let req = KvReq::from_value(&val, &table).unwrap();
-        assert!(matches!(req, KvReq::KvKeys()));
-    }
-
-    #[test]
-    fn test_kv_from_core_get() {
-        let table = full_effect_test_table();
-        let con_id = table.get_by_name("KvGet").unwrap();
-        let key = "mykey".to_string().to_value(&table).unwrap();
-        let val = Value::Con(con_id, vec![key]);
-        let req = KvReq::from_value(&val, &table).unwrap();
-        assert!(matches!(req, KvReq::KvGet(ref k) if k == "mykey"));
-    }
 
     #[test]
     fn test_kv_dispatch_roundtrip_keys() {

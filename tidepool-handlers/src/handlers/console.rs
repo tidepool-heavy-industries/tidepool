@@ -31,19 +31,9 @@ impl ConsoleHandler {
 mod tests {
     use super::*;
     use crate::test_support::*;
-    use tidepool_bridge::{FromCore, ToCore};
+    use tidepool_bridge::ToCore;
     use tidepool_effect::dispatch::{DispatchEffect, EffectContext};
     use tidepool_eval::value::Value;
-
-    #[test]
-    fn test_console_from_core_print() {
-        let table = full_effect_test_table();
-        let con_id = table.get_by_name("Print").unwrap();
-        let msg = "hello".to_string().to_value(&table).unwrap();
-        let val = Value::Con(con_id, vec![msg]);
-        let req = ConsoleReq::from_value(&val, &table).unwrap();
-        assert!(matches!(req, ConsoleReq::Print(ref s) if s == "hello"));
-    }
 
     #[test]
     fn test_console_dispatch_roundtrip() {

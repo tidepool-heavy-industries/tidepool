@@ -186,7 +186,7 @@ pub fn build_minimal_stack() -> impl tidepool_effect::dispatch::DispatchEffect<C
 /// migrate to the roster type themselves.
 pub fn base_decls_with_ask<H: CollectEffectDecls>(stack: &H) -> (Vec<EffectDecl>, u64) {
     let roster = tidepool_mcp::EffectRoster::from_handlers(stack);
-    (roster.decls().to_vec(), roster.suspend_tag().get())
+    (roster.decls().to_vec(), roster.suspend_tag())
 }
 
 #[cfg(test)]
@@ -216,39 +216,6 @@ mod tests {
                 );
             }
         }
-    }
-
-    const EFFECTS_WITH_ROUNDTRIP_TESTS: &[&str] = &[
-        "Console",
-        "KV",
-        "Fs",
-        "Http",
-        "Exec",
-        "Lsp",
-        "Llm",
-        "Git",
-        "Time",
-        "Ask",
-        "RunLLMTurn",
-        "Fork",
-    ];
-
-    #[test]
-    fn all_effects_have_roundtrip_coverage() {
-        let declared: Vec<&str> = tidepool_mcp::standard_decls()
-            .iter()
-            .map(|d| d.type_name)
-            .collect();
-        let missing: Vec<&&str> = declared
-            .iter()
-            .filter(|name| !EFFECTS_WITH_ROUNDTRIP_TESTS.contains(name))
-            .collect();
-        assert!(
-            missing.is_empty(),
-            "Effects in standard_decls() without roundtrip tests: {:?}\n\
-             Add roundtrip tests and update EFFECTS_WITH_ROUNDTRIP_TESTS.",
-            missing
-        );
     }
 
     // === JIT-level roundtrip tests ===

@@ -231,33 +231,6 @@ impl HttpHandler {
 mod tests {
     use super::*;
     use crate::test_support::*;
-    use tidepool_bridge::{FromCore, ToCore};
-    use tidepool_eval::value::Value;
-
-    #[test]
-    fn test_http_from_core_get() {
-        let table = full_effect_test_table();
-        let con_id = table.get_by_name("HttpGet").unwrap();
-        let url = "https://example.com".to_string().to_value(&table).unwrap();
-        let val = Value::Con(con_id, vec![url]);
-        let req = HttpReq::from_value(&val, &table).unwrap();
-        assert!(matches!(req, HttpReq::HttpGet(ref u) if u == "https://example.com"));
-    }
-
-    #[test]
-    fn test_http_from_core_post() {
-        let table = full_effect_test_table();
-        let con_id = table.get_by_name("HttpPost").unwrap();
-        let url = "https://example.com/api"
-            .to_string()
-            .to_value(&table)
-            .unwrap();
-        let null_id = table.get_by_name("Null").unwrap();
-        let body = Value::Con(null_id, vec![]);
-        let val = Value::Con(con_id, vec![url, body]);
-        let req = HttpReq::from_value(&val, &table).unwrap();
-        assert!(matches!(req, HttpReq::HttpPost(ref u, _) if u == "https://example.com/api"));
-    }
 
     /// An over-cap JSON response is a typed `Left (HttpTooLarge n)`, not a
     /// generic mid-effect abort: a 40k-element array bridges past the

@@ -553,15 +553,6 @@ fn errors() -> ErrorAdt {
                 }],
                 doc: "no such live mailbox — never minted, or already dropped",
             },
-            ErrorVariant {
-                ctor: "EventBadTimeout",
-                fields: vec![ErrorField {
-                    name: "badTimeoutMs",
-                    ty: HsType::Int,
-                    rust: RustBinding::Derived,
-                }],
-                doc: "a non-negative timeout too large to be a deadline on this platform (unreachable on 64-bit); a NEGATIVE timeout is the no-deadline sentinel and is never an error",
-            },
         ],
     }
 }

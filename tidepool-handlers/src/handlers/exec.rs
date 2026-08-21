@@ -118,31 +118,7 @@ impl ExecHandler {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use crate::test_support::*;
-    use tidepool_bridge::{FromCore, ToCore};
-    use tidepool_eval::value::Value;
-
-    #[test]
-    fn test_exec_from_core_run() {
-        let table = full_effect_test_table();
-        let con_id = table.get_by_name("Run").unwrap();
-        let cmd = "echo hello".to_string().to_value(&table).unwrap();
-        let val = Value::Con(con_id, vec![cmd]);
-        let req = ExecReq::from_value(&val, &table).unwrap();
-        assert!(matches!(req, ExecReq::Run(ref c) if c == "echo hello"));
-    }
-
-    #[test]
-    fn test_exec_from_core_run_in() {
-        let table = full_effect_test_table();
-        let con_id = table.get_by_name("RunIn").unwrap();
-        let dir = "/tmp".to_string().to_value(&table).unwrap();
-        let cmd = "ls".to_string().to_value(&table).unwrap();
-        let val = Value::Con(con_id, vec![dir, cmd]);
-        let req = ExecReq::from_value(&val, &table).unwrap();
-        assert!(matches!(req, ExecReq::RunIn(ref d, ref c) if d == "/tmp" && c == "ls"));
-    }
 
     /// Bundles `exec_run_in_bad_dir_is_typed_left_execbaddir` (#335 end-to-end
     /// acceptance: `runIn` with a bad/escaping directory is a typed

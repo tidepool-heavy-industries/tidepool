@@ -43,30 +43,19 @@ impl<T> McpEffectHandler for T where
 // EffectRoster — the single append-and-count derivation
 // ---------------------------------------------------------------------------
 
-/// The union tag of the FIRST interposed effect (`Ask`) in an [`EffectRoster`]
-/// — the suspend threshold: the JIT's suspend driver intercepts every tag at
-/// or beyond it rather than dispatching it to a handler.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct SuspendTag(u64);
-
-impl SuspendTag {
-    /// The raw union-tag value.
-    pub fn get(self) -> u64 {
-        self.0
-    }
-}
-
-/// An ordered effect declaration list plus its [`SuspendTag`], buildable ONLY
-/// via [`EffectRoster::from_handlers`] — the single place that appends the
-/// interposed suffix (`Ask`, `RunLLMTurn`, `Fork`) and derives the suspend
-/// tag, so the two cannot desync. (A prior audit finding: two independent
-/// copies of this append-and-count algorithm risked a drift that would
-/// misclassify an ordinary handled effect as a suspension, or dispatch an
-/// interposed effect as a normal handler tag, at the union-tag boundary.)
+/// An ordered effect declaration list plus its suspend tag (the union tag of
+/// the FIRST interposed effect, `Ask` — the JIT's suspend driver intercepts
+/// every tag at or beyond it rather than dispatching it to a handler),
+/// buildable ONLY via [`EffectRoster::from_handlers`] — the single place that
+/// appends the interposed suffix (`Ask`, `RunLLMTurn`, `Fork`) and derives the
+/// suspend tag, so the two cannot desync. (A prior audit finding: two
+/// independent copies of this append-and-count algorithm risked a drift that
+/// would misclassify an ordinary handled effect as a suspension, or dispatch
+/// an interposed effect as a normal handler tag, at the union-tag boundary.)
 #[derive(Clone)]
 pub struct EffectRoster {
     decls: Vec<EffectDecl>,
-    suspend_tag: SuspendTag,
+    suspend_tag: u64,
 }
 
 impl EffectRoster {
@@ -79,7 +68,7 @@ impl EffectRoster {
     /// already-built stack don't need a turbofish.
     pub fn from_handlers<H: CollectEffectDecls>(_handlers: &H) -> EffectRoster {
         let mut decls = H::collect_decls();
-        let suspend_tag = SuspendTag(decls.len() as u64);
+        let suspend_tag = decls.len() as u64;
         decls.push(ask_decl());
         decls.push(runllmturn_decl());
         decls.push(fork_decl());
@@ -93,7 +82,7 @@ impl EffectRoster {
     }
 
     /// The `Ask` effect's union tag — every tag at or beyond it is interposed.
-    pub fn suspend_tag(&self) -> SuspendTag {
+    pub fn suspend_tag(&self) -> u64 {
         self.suspend_tag
     }
 }
@@ -246,7 +235,7 @@ impl TidepoolMcpServerImpl {
                 source,
                 include: include_refs,
                 handlers,
-                ask_tag: self.roster.suspend_tag().get(),
+                ask_tag: self.roster.suspend_tag(),
                 effect_names: self.effect_names.clone(),
                 captured,
                 nursery_size: tidepool_runtime::DEFAULT_NURSERY_SIZE,

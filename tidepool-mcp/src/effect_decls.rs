@@ -239,96 +239,46 @@ where
 // Standard effect declarations
 // ---------------------------------------------------------------------------
 
-// Console effect: `console_decl()` is generated from the single-source
-// definition in `effect_defs.rs` (the T6 spike prototype) — constructors,
-// description, and helper docstrings all live THERE, alongside the facts the
-// Rust half (`ConsoleReq`, dispatch) projects from the same table.
 crate::console_effect_def!(crate::effect_defs::effect_decl_projection);
-
-// KV effect: `kv_decl()` is generated from the single-source definition
-// (`effect_defs.rs`).
 crate::kv_effect_def!(crate::effect_defs::effect_decl_projection);
-
-// Fs effect: `fs_decl()` is generated from the single-source definition
-// (`effect_defs.rs`).
 crate::fs_effect_def!(crate::effect_defs::effect_decl_projection);
-
-// Lsp effect: `lsp_decl()` is generated from the single-source definition
-// (`effect_defs.rs`).
 crate::lsp_effect_def!(crate::effect_defs::effect_decl_projection);
-
-// Http effect: `http_decl()` is generated from the single-source definition
-// (`effect_defs.rs`).
 crate::http_effect_def!(crate::effect_defs::effect_decl_projection);
 
-// Exec effect: MIGRATED to the `tidepool-protocol` schema (PRD 22 phase 1).
-// `exec_decl()` now comes from `src/generated/exec.rs`, not from a macro here.
+// Exec: MIGRATED — `exec_decl()` comes from `src/generated/exec.rs`.
 
-// Git effect: `git_decl()` is generated from the single-source definition
-// (`effect_defs.rs`).
 crate::git_effect_def!(crate::effect_defs::effect_decl_projection);
-
-// Time effect: `time_decl()` is generated from the single-source definition
-// (`effect_defs.rs`).
 crate::time_effect_def!(crate::effect_defs::effect_decl_projection);
-
-// Meta effect: `meta_decl()` is generated from the single-source definition
-// (`effect_defs.rs`).
 crate::meta_effect_def!(crate::effect_defs::effect_decl_projection);
-
-// Ask effect: `ask_decl()` is generated from the single-source definition
-// (`effect_defs.rs`).
 crate::ask_effect_def!(crate::effect_defs::effect_decl_projection);
 
-// AskUser effect (self-iterating-harness Wave 2, answerer-only): `askuser_decl()`
-// is generated from the single-source definition (`effect_defs.rs`).
+// AskUser (self-iterating-harness Wave 2, answerer-only).
 crate::askuser_effect_def!(crate::effect_defs::effect_decl_projection);
 
-// ReadState effect (companion State v2, answerer-only): `readstate_decl()` —
-// the driver-serviced read of the loop's durable state.
+// ReadState (companion State v2, answerer-only): the driver-serviced read of
+// the loop's durable state.
 crate::readstate_effect_def!(crate::effect_defs::effect_decl_projection);
 
-// RunLLMTurn effect (self-iterating-harness WS-B, split out of Ask):
-// `runllmturn_decl()` is generated from the single-source definition
-// (`effect_defs.rs`).
+// RunLLMTurn (self-iterating-harness WS-B, split out of Ask).
 crate::runllmturn_effect_def!(crate::effect_defs::effect_decl_projection);
 
-// Finalize effect (self-iterating-harness WS-B): `finalize_decl()` is
-// generated from the single-source definition (`effect_defs.rs`).
+// Finalize (self-iterating-harness WS-B).
 crate::finalize_effect_def!(crate::effect_defs::effect_decl_projection);
 
-// Fork effect (answerer parallel-delegation surface): `fork_decl()` is
-// generated from the single-source definition (`effect_defs.rs`).
+// Fork (answerer parallel-delegation surface).
 crate::fork_effect_def!(crate::effect_defs::effect_decl_projection);
 
-// Llm effect: `llm_decl()` is generated from the single-source definition
-// (`effect_defs.rs`).
 crate::llm_effect_def!(crate::effect_defs::effect_decl_projection);
 
-// Worktree / RepoEvent (PRD 19): `worktree_decl()` / `event_decl()`. These are
-// NOT in `build_base_stack`'s row — the dev-tree dogfood that would put them
-// there is on hold pending the agent lane. They exist as decls so a caller
-// that wants managed worktrees and typed repository events can build a row
-// containing them, which is what lane L4's acceptance harness does.
-// Both: MIGRATED to the `tidepool-protocol` schema (PRD 22 phase 3).
-// `worktree_decl()` / `event_decl()` now come from `src/generated/worktree.rs`
-// / `src/generated/repo_event.rs`, not from a macro here.
-
-// Subagent (PRD 18 lane 1): `subagent_decl()`. Like Worktree/RepoEvent, NOT
-// in `build_base_stack`'s row — an opt-in effect for rows that spawn coupled
-// agent+worktree workers. Requires Worktree in the same row (its types
-// reference WorktreeSpec/WorktreeHandle/WorktreeError).
+// Worktree / RepoEvent (PRD 19), Subagent (PRD 18 lane 1), Journal (PRD 20
+// S1-L5), and Green (PRD 20 S1-L4) are all opt-in: NOT in `build_base_stack`'s
+// row, so a caller wanting managed worktrees, repository events, coupled
+// agent+worktree spawn, the run journal, or green threads builds its own row
+// containing them (lane L4's acceptance harness does, for Worktree/RepoEvent).
+// Worktree/RepoEvent/Journal are MIGRATED — `worktree_decl()`/`event_decl()`/
+// `journal_decl()` come from `src/generated/`, not a macro here. Subagent
+// additionally requires Worktree in the same row (its types reference
+// WorktreeSpec/WorktreeHandle/WorktreeError). Green must sit LAST in
+// `outer_decls()` so `RunLLMTurn` keeps index 0.
 crate::subagent_effect_def!(crate::effect_defs::effect_decl_projection);
-
-// Journal (PRD 20, S1-L5 substrate slice): MIGRATED to the `tidepool-protocol`
-// schema (PRD 22 phase 2). `journal_decl()` now comes from
-// `src/generated/journal.rs`, not from a macro here. Like Worktree/RepoEvent/
-// Subagent, NOT in `build_base_stack`'s row — the durable append-only run
-// journal a resident harness records progress to; which file a run journals
-// to, and folding it on boot, is the swarm driver's wiring, done at merge.
-
-// Green (PRD 20, S1-L4): `green_decl()` — the green-thread substrate behind
-// `Tidepool.Async`. Like Worktree/RepoEvent/Subagent/Journal, NOT in
-// `build_base_stack`'s row; opt-in, and it must sit LAST in `outer_decls()`
-// so `RunLLMTurn` keeps index 0.
 crate::green_effect_def!(crate::effect_defs::effect_decl_projection);

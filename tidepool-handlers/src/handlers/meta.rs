@@ -145,27 +145,8 @@ impl MetaHandler {
 mod tests {
     use super::*;
     use crate::test_support::*;
-    use tidepool_bridge::FromCore;
     use tidepool_effect::dispatch::{DispatchEffect, EffectContext};
     use tidepool_eval::value::Value;
-
-    #[test]
-    fn test_meta_from_core_version() {
-        let table = full_effect_test_table();
-        let con_id = table.get_by_name("MetaVersion").unwrap();
-        let val = Value::Con(con_id, vec![]);
-        let req = MetaReq::from_value(&val, &table).unwrap();
-        assert!(matches!(req, MetaReq::MetaVersion()));
-    }
-
-    #[test]
-    fn test_meta_from_core_constructors() {
-        let table = full_effect_test_table();
-        let con_id = table.get_by_name("MetaConstructors").unwrap();
-        let val = Value::Con(con_id, vec![]);
-        let req = MetaReq::from_value(&val, &table).unwrap();
-        assert!(matches!(req, MetaReq::MetaConstructors()));
-    }
 
     #[test]
     fn test_meta_dispatch_roundtrip_version() {

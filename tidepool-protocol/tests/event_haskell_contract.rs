@@ -51,8 +51,8 @@ fn event_type_def_texts_are_pinned() {
                 .to_string(),
             concat!(
                 "data EventError = EventQueueOverflow Int Int | EventUnknownSubscription Int | ",
-                "EventSourceLost Text | EventSourceFailed Text | EventUnknownMailbox Int | ",
-                "EventBadTimeout Int deriving (Show, Eq)\n",
+                "EventSourceLost Text | EventSourceFailed Text | EventUnknownMailbox Int ",
+                "deriving (Show, Eq)\n",
                 "instance ToJSON EventError where\n",
                 "  toJSON e = case e of\n",
                 "    EventQueueOverflow overflowSub dropped -> object [\"tag\" .= \
@@ -66,8 +66,6 @@ fn event_type_def_texts_are_pinned() {
                  (\"EventSourceFailed\" :: Text), \"failedDetail\" .= failedDetail]\n",
                 "    EventUnknownMailbox unknownMailbox -> object [\"tag\" .= \
                  (\"EventUnknownMailbox\" :: Text), \"unknownMailbox\" .= unknownMailbox]\n",
-                "    EventBadTimeout badTimeoutMs -> object [\"tag\" .= (\"EventBadTimeout\" \
-                 :: Text), \"badTimeoutMs\" .= badTimeoutMs]\n",
             )
             .to_string(),
         ]

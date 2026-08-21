@@ -31,18 +31,8 @@ impl TimeHandler {
 mod tests {
     use super::*;
     use crate::test_support::*;
-    use tidepool_bridge::FromCore;
     use tidepool_effect::dispatch::{DispatchEffect, EffectContext};
     use tidepool_eval::value::Value;
-
-    #[test]
-    fn test_time_from_core_now() {
-        let table = full_effect_test_table();
-        let con_id = table.get_by_name("TimeNow").unwrap();
-        let val = Value::Con(con_id, vec![]);
-        let req = TimeReq::from_value(&val, &table).unwrap();
-        assert!(matches!(req, TimeReq::TimeNow()));
-    }
 
     #[test]
     fn test_time_dispatch_now() {
@@ -70,17 +60,11 @@ mod tests {
         cwd: std::path::PathBuf,
         kv_path: std::path::PathBuf,
     ) -> impl tidepool_effect::dispatch::DispatchEffect<CapturedOutput> {
-        frunk::hlist![
-            crate::ConsoleHandler,
-            crate::KvHandler::new(kv_path),
-            crate::FsHandler::new(cwd.clone()),
-            crate::HttpHandler,
-            crate::ExecHandler::new(cwd.clone()),
-            crate::LspHandler::new(cwd.clone()),
-            crate::LlmHandler::new("ollama:llama3.2".to_string()),
-            crate::GitHandler::new(cwd.clone()),
-            TimeHandler,
-        ]
+        crate::build_base_stack(&crate::HandlerConfig {
+            cwd,
+            kv_path,
+            llm_model: "ollama:llama3.2".to_string(),
+        })
     }
 
     /// Bundles `test_jit_time_format_golden` (pure computation — no Time

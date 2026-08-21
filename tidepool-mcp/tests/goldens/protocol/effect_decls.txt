@@ -1808,8 +1808,8 @@ data Tick = Tick { firedAtMs :: Int } deriving (Show, Eq)
 data RepositoryEvent = ObservedCommit EventId CommitReceipt | ObservedHeadChange EventId HeadChangeReceipt | ObservedTick EventId Tick | ObservedAsyncDone EventId Int | ObservedMessage EventId Int Value deriving (Show, Eq)
 -- end type_defs[7] --
 
--- type_defs[8] (989 bytes) --
-data EventError = EventQueueOverflow Int Int | EventUnknownSubscription Int | EventSourceLost Text | EventSourceFailed Text | EventUnknownMailbox Int | EventBadTimeout Int deriving (Show, Eq)
+-- type_defs[8] (853 bytes) --
+data EventError = EventQueueOverflow Int Int | EventUnknownSubscription Int | EventSourceLost Text | EventSourceFailed Text | EventUnknownMailbox Int deriving (Show, Eq)
 instance ToJSON EventError where
   toJSON e = case e of
     EventQueueOverflow overflowSub dropped -> object ["tag" .= ("EventQueueOverflow" :: Text), "overflowSub" .= overflowSub, "dropped" .= dropped]
@@ -1817,7 +1817,6 @@ instance ToJSON EventError where
     EventSourceLost lostDetail -> object ["tag" .= ("EventSourceLost" :: Text), "lostDetail" .= lostDetail]
     EventSourceFailed failedDetail -> object ["tag" .= ("EventSourceFailed" :: Text), "failedDetail" .= failedDetail]
     EventUnknownMailbox unknownMailbox -> object ["tag" .= ("EventUnknownMailbox" :: Text), "unknownMailbox" .= unknownMailbox]
-    EventBadTimeout badTimeoutMs -> object ["tag" .= ("EventBadTimeout" :: Text), "badTimeoutMs" .= badTimeoutMs]
 -- end type_defs[8] --
 
 -- end type_defs --

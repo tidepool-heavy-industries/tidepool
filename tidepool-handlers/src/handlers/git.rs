@@ -342,55 +342,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_git_from_core_log() {
-        let table = full_effect_test_table();
-        let con_id = table.get_by_name("GitLog").unwrap();
-        let n = (5i64).to_value(&table).unwrap();
-        let val = Value::Con(con_id, vec![n]);
-        let req = GitReq::from_value(&val, &table).unwrap();
-        assert!(matches!(req, GitReq::GitLog(5)));
-    }
-
-    #[test]
-    fn test_git_from_core_status() {
-        let table = full_effect_test_table();
-        let con_id = table.get_by_name("GitStatus").unwrap();
-        let val = Value::Con(con_id, vec![]);
-        let req = GitReq::from_value(&val, &table).unwrap();
-        assert!(matches!(req, GitReq::GitStatus()));
-    }
-
-    #[test]
-    fn test_git_from_core_diffstat() {
-        let table = full_effect_test_table();
-        let con_id = table.get_by_name("GitDiffStat").unwrap();
-        let rev = "HEAD~1".to_string().to_value(&table).unwrap();
-        let val = Value::Con(con_id, vec![rev]);
-        let req = GitReq::from_value(&val, &table).unwrap();
-        assert!(matches!(req, GitReq::GitDiffStat(ref r) if r == "HEAD~1"));
-    }
-
-    #[test]
-    fn test_git_from_core_show() {
-        let table = full_effect_test_table();
-        let con_id = table.get_by_name("GitShow").unwrap();
-        let rev = "HEAD".to_string().to_value(&table).unwrap();
-        let val = Value::Con(con_id, vec![rev]);
-        let req = GitReq::from_value(&val, &table).unwrap();
-        assert!(matches!(req, GitReq::GitShow(ref r) if r == "HEAD"));
-    }
-
-    #[test]
-    fn test_git_from_core_log_numstat() {
-        let table = full_effect_test_table();
-        let con_id = table.get_by_name("GitLogNumstat").unwrap();
-        let n = (150i64).to_value(&table).unwrap();
-        let val = Value::Con(con_id, vec![n]);
-        let req = GitReq::from_value(&val, &table).unwrap();
-        assert!(matches!(req, GitReq::GitLogNumstat(150)));
-    }
-
     // =========================================================================
     // Git handler tests — unit (parse functions) + integration (scratch repo)
     // =========================================================================

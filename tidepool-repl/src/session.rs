@@ -524,8 +524,7 @@ impl Session {
             // Decl validation must resolve the same imports eval does (notably
             // the generated `Tidepool.Effects`), so feed it the base include.
             .with_validation_include(cfg.base_include.clone());
-        let core =
-            PersistentSession::new(Some(lib), cfg.roster.suspend_tag().get(), cfg.nursery_size);
+        let core = PersistentSession::new(Some(lib), cfg.roster.suspend_tag(), cfg.nursery_size);
         Ok(Session {
             cfg,
             make_handlers,
@@ -2463,7 +2462,7 @@ impl Session {
                         let lib = lib.with_validation_include(self.cfg.base_include.clone());
                         self.core = PersistentSession::new(
                             Some(lib),
-                            self.cfg.roster.suspend_tag().get(),
+                            self.cfg.roster.suspend_tag(),
                             self.cfg.nursery_size,
                         );
                         // The rebuilt core has no machine, so publish the (now

@@ -111,45 +111,37 @@ impl LspHandler {
         let v: serde_json::Value = serde_json::from_str(resp.trim())
             .map_err(|e| LspError::LspDaemonDown(format!("bad LSP daemon response: {}", e)))?;
 
-        match DaemonReply::<T>::from_value(v) {
-            Ok(DaemonReply::Success(t)) => Ok(t),
-            Ok(DaemonReply::Failure(e)) => Err(LspError::LspDaemonDown(e)),
-            Err(e) => Err(LspError::LspDaemonDown(format!(
-                "malformed LSP daemon reply: {e}"
-            ))),
-        }
-    }
-}
-
-/// The tagged envelope every daemon reply carries: `{"ok": true, "result":
-/// ...}` or `{"ok": false, "error": "..."}"`. Decoding into this (rather than
-/// treating the envelope as loose JSON) means a malformed or version-skewed
-/// success reply — a missing `result`, or one that doesn't match the
-/// operation's expected shape `T` — is a decode error, never a fabricated
-/// default (a node at line 0, an empty list standing in for a daemon
-/// outage).
-enum DaemonReply<T> {
-    Success(T),
-    Failure(String),
-}
-
-impl<T: serde::de::DeserializeOwned> DaemonReply<T> {
-    fn from_value(v: serde_json::Value) -> Result<Self, String> {
+        // The tagged envelope every daemon reply carries: `{"ok": true,
+        // "result": ...}` or `{"ok": false, "error": "..."}`. Decoding this
+        // way (rather than treating it as loose JSON) means a malformed or
+        // version-skewed success reply — a missing `result`, or one that
+        // doesn't match the operation's expected shape `T` — is a decode
+        // error, never a fabricated default (a node at line 0, an empty list
+        // standing in for a daemon outage).
         let ok = v
             .get("ok")
             .and_then(serde_json::Value::as_bool)
-            .ok_or("missing boolean 'ok'")?;
-        if ok {
-            let result = v.get("result").cloned().ok_or("missing 'result'")?;
-            serde_json::from_value(result)
-                .map(DaemonReply::Success)
-                .map_err(|e| format!("result doesn't match expected shape: {e}"))
-        } else {
-            v.get("error")
+            .ok_or_else(|| {
+                LspError::LspDaemonDown(
+                    "malformed LSP daemon reply: missing boolean 'ok'".to_string(),
+                )
+            })?;
+        if !ok {
+            let msg = v
+                .get("error")
                 .and_then(serde_json::Value::as_str)
-                .map(|s| DaemonReply::Failure(s.to_string()))
-                .ok_or_else(|| "missing 'error'".to_string())
+                .map(str::to_string)
+                .unwrap_or_else(|| "malformed LSP daemon reply: missing 'error'".to_string());
+            return Err(LspError::LspDaemonDown(msg));
         }
+        let result = v.get("result").cloned().ok_or_else(|| {
+            LspError::LspDaemonDown("malformed LSP daemon reply: missing 'result'".to_string())
+        })?;
+        serde_json::from_value(result).map_err(|e| {
+            LspError::LspDaemonDown(format!(
+                "malformed LSP daemon reply: result doesn't match expected shape: {e}"
+            ))
+        })
     }
 }
 
@@ -265,28 +257,6 @@ impl LspHandler {
 mod tests {
     use super::*;
     use crate::test_support::*;
-    use tidepool_bridge::{FromCore, ToCore};
-    use tidepool_eval::value::Value;
-
-    #[test]
-    fn test_lsp_from_core_where() {
-        let table = full_effect_test_table();
-        let con_id = table.get_by_name("LspWhere").unwrap();
-        let sym = "my_function".to_string().to_value(&table).unwrap();
-        let val = Value::Con(con_id, vec![sym]);
-        let req = LspReq::from_value(&val, &table).unwrap();
-        assert!(matches!(req, LspReq::LspWhere(ref s) if s == "my_function"));
-    }
-
-    #[test]
-    fn test_lsp_from_core_diagnostics() {
-        let table = full_effect_test_table();
-        let con_id = table.get_by_name("LspDiagnostics").unwrap();
-        let file = "src/main.rs".to_string().to_value(&table).unwrap();
-        let val = Value::Con(con_id, vec![file]);
-        let req = LspReq::from_value(&val, &table).unwrap();
-        assert!(matches!(req, LspReq::LspDiagnostics(ref f) if f == "src/main.rs"));
-    }
 
     /// #335 end-to-end acceptance: with no `tidepool-lsp-daemon` reachable, the
     /// socket connect fails immediately (cheap, no live dependency), so

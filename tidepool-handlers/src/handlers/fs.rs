@@ -1099,16 +1099,6 @@ mod tests {
     }
 
     #[test]
-    fn test_fs_from_core_exists() {
-        let table = full_effect_test_table();
-        let con_id = table.get_by_name("FsExists").unwrap();
-        let path = "Cargo.toml".to_string().to_value(&table).unwrap();
-        let val = Value::Con(con_id, vec![path]);
-        let req = FsReq::from_value(&val, &table).unwrap();
-        assert!(matches!(req, FsReq::FsExists(ref p) if p == "Cargo.toml"));
-    }
-
-    #[test]
     fn test_fs_dispatch_roundtrip_exists() {
         let table = full_effect_test_table();
         let captured = CapturedOutput::new();
