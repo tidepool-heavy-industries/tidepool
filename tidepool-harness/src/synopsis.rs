@@ -163,15 +163,6 @@ fn render_type_body(table: &DataConTable, ty: &str) -> Option<String> {
     fragments.map(|fs| fs.join(" | "))
 }
 
-/// Render a names-only synopsis of `ty`'s shape from `table`: `ty`'s `data`
-/// declaration BODY (see [`render_type_body`]) when every constructor
-/// renders cleanly, or the bare type name `ty` itself on any degrade —
-/// never a partial/invented shape.
-#[must_use]
-pub fn type_synopsis(table: &DataConTable, ty: &str) -> String {
-    render_type_body(table, ty).unwrap_or_else(|| ty.to_string())
-}
-
 /// Lowercase identifier tokens found across `ty`'s own field types, in
 /// first-appearance (constructor-tag, then field) order, deduplicated — the
 /// tyvar header for `ty`'s `data <Ty> <tyvars> = ...` line. Empty for a
@@ -278,8 +269,8 @@ const MAX_EXPANSION_DEPTH: usize = 8;
 /// honestly). If NOTHING ends up rendered (verbatim miss with no reachable
 /// tokens, e.g. `Maybe Int`; or `ty`'s own body can't render and no
 /// transitive expansion resolves either), [`type_document`] degrades to the
-/// bare `ty` string, exactly like [`type_synopsis`] — never a document
-/// containing only broken transitive entries with no root.
+/// bare `ty` string — never a document containing only broken transitive
+/// entries with no root.
 #[must_use]
 pub fn type_document(table: &DataConTable, ty: &str) -> String {
     let mut visited: HashSet<String> = HashSet::new();
@@ -366,7 +357,6 @@ mod tests {
     #[test]
     fn nullary_sum_body_in_declaration_order() {
         let table = verdict_table();
-        assert_eq!(type_synopsis(&table, "Verdict"), "Advance | Hold | Abort");
         assert_eq!(
             type_document(&table, "Verdict"),
             "data Verdict = Advance | Hold | Abort"
@@ -391,10 +381,6 @@ mod tests {
             vec!["[Text]".to_string(), "Text".to_string(), "Bool".to_string()],
         );
         assert_eq!(
-            type_synopsis(&table, "Contribution"),
-            "Contribution { addedIdeas :: [Text], draftDelta :: Text, advance :: Bool }"
-        );
-        assert_eq!(
             type_document(&table, "Contribution"),
             "data Contribution = Contribution { addedIdeas :: [Text], draftDelta :: Text, advance :: Bool }"
         );
@@ -411,8 +397,8 @@ mod tests {
         table.set_field_types(rect.id, vec!["Double".to_string(), "Double".to_string()]);
 
         assert_eq!(
-            type_synopsis(&table, "Shape"),
-            "Circle Double | Rect Double Double"
+            type_document(&table, "Shape"),
+            "data Shape = Circle Double | Rect Double Double"
         );
     }
 
@@ -426,8 +412,8 @@ mod tests {
         table.set_field_types(burst.id, vec!["Int".to_string()]);
 
         assert_eq!(
-            type_synopsis(&table, "Event"),
-            "Tick | Burst { count :: Int }"
+            type_document(&table, "Event"),
+            "data Event = Tick | Burst { count :: Int }"
         );
     }
 
@@ -441,7 +427,10 @@ mod tests {
             vec!["Tree Int".to_string(), "Tree Int".to_string()],
         );
 
-        assert_eq!(type_synopsis(&table, "Tree"), "Node (Tree Int) (Tree Int)");
+        assert_eq!(
+            type_document(&table, "Tree"),
+            "data Tree = Node (Tree Int) (Tree Int)"
+        );
     }
 
     #[test]
@@ -455,8 +444,8 @@ mod tests {
         );
 
         assert_eq!(
-            type_synopsis(&table, "Wrap"),
-            "Wrap [Maybe Int] (Int, Text)"
+            type_document(&table, "Wrap"),
+            "data Wrap = Wrap [Maybe Int] (Int, Text)"
         );
     }
 
@@ -601,7 +590,6 @@ mod tests {
         // rep_arity 2 but no field types ever set — extract omitted them (a
         // non-vanilla constructor, or an older wire payload).
         table.insert(with_fields(1, "Pair", 1, 2, "Pair"));
-        assert_eq!(type_synopsis(&table, "Pair"), "Pair");
         assert_eq!(type_document(&table, "Pair"), "Pair");
     }
 
@@ -616,7 +604,7 @@ mod tests {
         table.insert(dc.clone());
         // Only one SOURCE type though rep_arity says 2.
         table.set_field_types(dc.id, vec!["Int".to_string()]);
-        assert_eq!(type_synopsis(&table, "Pair"), "Pair Int");
+        assert_eq!(type_document(&table, "Pair"), "data Pair = Pair Int");
     }
 
     /// A nullary constructor (`rep_arity == 0`) with field types never set
@@ -626,7 +614,7 @@ mod tests {
     fn nullary_with_absent_field_types_still_renders_bare() {
         let mut table = DataConTable::new();
         table.insert(nullary(1, "Nil", 1, "Nil"));
-        assert_eq!(type_synopsis(&table, "Nil"), "Nil");
+        assert_eq!(type_document(&table, "Nil"), "data Nil = Nil");
     }
 
     #[test]
@@ -639,7 +627,7 @@ mod tests {
             dc.id,
             vec!["[Text]".to_string(), "Text".to_string(), "Bool".to_string()],
         );
-        assert_eq!(type_synopsis(&table, "Contribution"), "Contribution");
+        assert_eq!(type_document(&table, "Contribution"), "Contribution");
     }
 
     /// Mutation-close: one bad constructor in a multi-constructor type
@@ -652,13 +640,12 @@ mod tests {
         table.set_field_types(left.id, vec!["Text".to_string()]);
         // Right has fields but no field types at all.
         table.insert(with_fields(2, "Right", 2, 1, "Either"));
-        assert_eq!(type_synopsis(&table, "Either"), "Either");
+        assert_eq!(type_document(&table, "Either"), "Either");
     }
 
     #[test]
     fn degrades_to_bare_name_for_unknown_type() {
         let table = DataConTable::new();
-        assert_eq!(type_synopsis(&table, "NoSuchType"), "NoSuchType");
         assert_eq!(type_document(&table, "NoSuchType"), "NoSuchType");
     }
 
@@ -689,8 +676,8 @@ mod tests {
         table.set_field_labels(dc.id, vec!["name".to_string(), "age".to_string()]);
         table.set_field_types(dc.id, vec!["Text".to_string(), "Int".to_string()]);
         assert_eq!(
-            type_synopsis(&table, "Person"),
-            "Person { name :: Text, age :: Int }"
+            type_document(&table, "Person"),
+            "data Person = Person { name :: Text, age :: Int }"
         );
 
         let mut table2 = DataConTable::new();
@@ -699,8 +686,8 @@ mod tests {
         table2.set_field_labels(dc2.id, vec!["fullName".to_string(), "yearsOld".to_string()]);
         table2.set_field_types(dc2.id, vec!["Text".to_string(), "Double".to_string()]);
         assert_eq!(
-            type_synopsis(&table2, "Person"),
-            "Person { fullName :: Text, yearsOld :: Double }"
+            type_document(&table2, "Person"),
+            "data Person = Person { fullName :: Text, yearsOld :: Double }"
         );
     }
 }

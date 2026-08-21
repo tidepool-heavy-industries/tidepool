@@ -44,7 +44,6 @@ use tidepool_harness::provider::{
 use tidepool_harness::replay::{RecordedReply, ReplayProvider};
 use tidepool_harness::selfharness::operator::FormShape;
 use tidepool_harness::selfharness::persistence;
-use tidepool_harness::tree::NodeId;
 use tidepool_harness::{
     acquire_lease, answerer_decls, load_harness_source, retire_lease, ContinueSignal, DriverError,
     Event, Harness, HarnessSource, LogObserver, Observer, OperatorGate, ResumeFold, RunLease,
@@ -91,8 +90,6 @@ fn header() -> LogHeader {
 
 fn reply(content: &str) -> RecordedReply {
     RecordedReply {
-        node: NodeId(0),
-        turn: 0,
         content: content.to_string(),
         usage: Usage {
             input_tokens: 50,

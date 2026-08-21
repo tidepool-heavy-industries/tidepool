@@ -131,7 +131,6 @@ use tidepool_harness::engine::EngineConfig;
 use tidepool_harness::log::LogHeader;
 use tidepool_harness::provider::{DynModelProvider, Usage};
 use tidepool_harness::replay::{RecordedReply, ReplayProvider};
-use tidepool_harness::tree::NodeId;
 use tidepool_harness::{
     answerer_decls, load_harness_source, Event, Harness, Observer, SelfHarnessDriver,
 };
@@ -166,8 +165,6 @@ fn record_edit_reply(note: &str) -> RecordedReply {
          :: M ())\n```"
     );
     RecordedReply {
-        node: NodeId(0),
-        turn: 0,
         content,
         usage: Usage {
             input_tokens: 50,
@@ -183,8 +180,6 @@ fn record_edit_reply(note: &str) -> RecordedReply {
 /// round and nudges; the scripted follow-up then finalizes USING the helper.
 fn decl_reply(src: &str) -> RecordedReply {
     RecordedReply {
-        node: NodeId(0),
-        turn: 0,
         content: format!("```haskell\n{src}\n```"),
         usage: Usage {
             input_tokens: 50,
@@ -198,8 +193,6 @@ fn decl_reply(src: &str) -> RecordedReply {
 /// A reply finalizing an edit built from a NAMED decl-plane helper.
 fn helper_edit_reply(expr: &str) -> RecordedReply {
     RecordedReply {
-        node: NodeId(0),
-        turn: 0,
         content: format!(
             "```haskell\nimport HarnessTypes (State (..))\n\n\
              (finalize @(State -> State) ({expr}) :: M ())\n```"
@@ -234,8 +227,6 @@ fn edit_reply(note: &str) -> RecordedReply {
          :: M ())\n```"
     );
     RecordedReply {
-        node: NodeId(0),
-        turn: 0,
         content,
         usage: Usage {
             input_tokens: 50,
@@ -387,8 +378,6 @@ async fn turn_record_delivers_directive_list_beside_closure() {
         EngineConfig::from_decls(answerer_decls(), prelude_dir(), Some(turn_dir.clone()))
             .expect("answerer engine config");
     let reply = RecordedReply {
-        node: NodeId(0),
-        turn: 0,
         content: "```haskell\nimport HarnessTypes (Directive (..), State (..), Turn (..))\n\n\
                   (finalize @Turn (Turn { directives = [Remember \"typed options beat prose\", \
                   Forget \"the stale note\"], edit = \\st -> st { counter = counter st + 1 } }) \
@@ -617,8 +606,6 @@ fn ooda_harness_dir() -> std::path::PathBuf {
 /// edit replies exercise.
 fn typed_reply(block: &str) -> RecordedReply {
     RecordedReply {
-        node: NodeId(0),
-        turn: 0,
         content: format!("```haskell\nimport HarnessTypes\n\n{block}\n```"),
         usage: Usage {
             input_tokens: 50,

@@ -1,12 +1,9 @@
 //! Reads an event-log file written by [`super::LogWriter`]: a from-start
-//! iterator (torn-tail tolerant) for replay, and a follow/tail mode for
-//! the protocol server's SSE stream. Follow mode polls at a fixed interval
-//! rather than using a filesystem watcher.
+//! iterator (torn-tail tolerant) for replay.
 
 use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::path::Path;
-use std::time::Duration;
 
 use super::{EventRecord, LogHeader};
 
@@ -24,20 +21,6 @@ pub enum ReadError {
 pub struct LogReader;
 
 impl LogReader {
-    /// Reads just the header line. Standalone — does not open or consume
-    /// an event iterator, so a version-pin check never disturbs
-    /// replay/tail state.
-    pub fn read_header(path: impl AsRef<Path>) -> Result<LogHeader, ReadError> {
-        let file = File::open(path)?;
-        let mut reader = BufReader::new(file);
-        let mut line = String::new();
-        let n = reader.read_line(&mut line)?;
-        if n == 0 {
-            return Err(ReadError::Empty);
-        }
-        Ok(serde_json::from_str(line.trim_end())?)
-    }
-
     /// Opens `path` from the start and returns the header plus an
     /// iterator over its events.
     pub fn open(path: impl AsRef<Path>) -> Result<(LogHeader, EventIter), ReadError> {
@@ -50,31 +33,6 @@ impl LogReader {
         }
         let header = serde_json::from_str(line.trim_end())?;
         Ok((header, EventIter { reader }))
-    }
-
-    /// Opens `path`, reads the header, and returns a [`Follower`]
-    /// positioned just after it, polling for new events at
-    /// `poll_interval`.
-    pub fn follow(
-        path: impl AsRef<Path>,
-        poll_interval: Duration,
-    ) -> Result<(LogHeader, Follower), ReadError> {
-        let file = File::open(path)?;
-        let mut reader = BufReader::new(file);
-        let mut line = String::new();
-        let n = reader.read_line(&mut line)?;
-        if n == 0 {
-            return Err(ReadError::Empty);
-        }
-        let header = serde_json::from_str(line.trim_end())?;
-        Ok((
-            header,
-            Follower {
-                reader,
-                poll_interval,
-                line_buf: String::new(),
-            },
-        ))
     }
 }
 
@@ -122,31 +80,6 @@ impl Iterator for EventIter {
                 }
             }
             Err(e) => Some(Err(ReadError::Io(e))),
-        }
-    }
-}
-
-/// Tails a log file, blocking (via polling) until the next event lands.
-pub struct Follower {
-    reader: BufReader<File>,
-    poll_interval: Duration,
-    line_buf: String,
-}
-
-impl Follower {
-    /// Blocks until the next event is appended, then returns it. Partial
-    /// lines observed mid-poll (writer is between `write_all` and
-    /// `sync_all`) accumulate across polls rather than being discarded —
-    /// `read_line` appends into `line_buf`, so a line split across polls
-    /// is reassembled once its newline lands.
-    pub fn next_event(&mut self) -> Result<EventRecord, ReadError> {
-        loop {
-            self.reader.read_line(&mut self.line_buf)?;
-            if self.line_buf.ends_with('\n') {
-                let line = std::mem::take(&mut self.line_buf);
-                return Ok(serde_json::from_str(line.trim_end())?);
-            }
-            std::thread::sleep(self.poll_interval);
         }
     }
 }

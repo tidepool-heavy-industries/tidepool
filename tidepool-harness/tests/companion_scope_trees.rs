@@ -122,8 +122,6 @@ fn header(tag: &str) -> LogHeader {
 
 fn reply(block: &str) -> RecordedReply {
     RecordedReply {
-        node: NodeId(0),
-        turn: 0,
         content: format!("```haskell\n{block}\n```"),
         usage: Usage {
             input_tokens: 50,
@@ -602,21 +600,6 @@ async fn escaped_closure_outlives_its_childs_window_and_scope() {
     harness
         .terminate_node(child_worker, "child window done")
         .expect("the child-scoped node retires");
-    let receipt = harness
-        .scope_retirement(child_worker)
-        .expect("terminating a scoped node records a retirement receipt");
-    assert_eq!(
-        receipt.scopes_retired, 1,
-        "the receipt covers exactly the child scope (it has no descendants)"
-    );
-    assert_eq!(
-        receipt.bindings_retired, 1,
-        "the receipt counts the child's own binding, and only it"
-    );
-    assert_eq!(
-        receipt.roots_released, 1,
-        "the child's binding solely owned its root, so retirement released it"
-    );
 
     let (roots_after, parked_after, stowed_after, handles_after, child_frame, escapee_after) =
         harness
@@ -638,14 +621,14 @@ async fn escaped_closure_outlives_its_childs_window_and_scope() {
         "(a) accounting class 3: retiring the child scope returns its frame to 0 — the \
          child's names no longer resolve anywhere"
     );
-    // (b) class 4 moved by EXACTLY what the receipt claims.
+    // (b) class 4 moved by exactly one root: the child's own binding was its
+    // sole owner, so retirement released precisely that root.
     assert_eq!(
-        roots_after,
-        roots_before - receipt.roots_released,
-        "(b) accounting class 4: the GC root ledger dropped by exactly the receipt's \
-         roots_released ({} of {roots_before}) — a receipt that claims a release the \
-         ledger did not make is the false receipt this lane rejects",
-        receipt.roots_released
+        roots_before - roots_after,
+        1,
+        "(b) accounting class 4: the GC root ledger dropped by exactly one root \
+         ({roots_before} -> {roots_after}) — the child's binding solely owned its root, \
+         so retirement released it and nothing else"
     );
     // (c) classes 1 and 2 untouched.
     assert_eq!(
@@ -677,8 +660,14 @@ async fn escaped_closure_outlives_its_childs_window_and_scope() {
     harness
         .terminate_node(producer, "producing window closed")
         .expect("the producer retires");
-    let (parked_final, handles_final) = harness
-        .with_session(sid, |s| (s.parked_count(), s.value_handle_count()))
+    let (roots_final, parked_final, handles_final) = harness
+        .with_session(sid, |s| {
+            (
+                s.persistent_roots_count(),
+                s.parked_count(),
+                s.value_handle_count(),
+            )
+        })
         .expect("session checkout");
     assert_eq!(
         parked_final,
@@ -690,14 +679,13 @@ async fn escaped_closure_outlives_its_childs_window_and_scope() {
         handles_final, 0,
         "no stray handle ever accumulated outside the one mount transfer"
     );
+    // The producer shares scope_c with child_worker, already retired above —
+    // retiring an ALREADY-retired scope is a no-op, so the GC root ledger
+    // does not move again: the release is counted once, by the retirement
+    // that made it.
     assert_eq!(
-        harness
-            .scope_retirement(producer)
-            .expect("the producer records a receipt too")
-            .roots_released,
-        0,
-        "retiring an ALREADY-retired scope is a no-op returning an all-zero receipt — \
-         the release is counted once, by the retirement that made it"
+        roots_final, roots_after,
+        "retiring an already-retired scope must not release a second root"
     );
 
     // --- (e) THE ACCEPTANCE: a brand-new node, scoped to the surviving

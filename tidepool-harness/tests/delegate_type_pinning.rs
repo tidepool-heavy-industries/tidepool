@@ -23,7 +23,6 @@ use tidepool_harness::engine::{self, template_turn_for, CompiledTurn, EngineConf
 use tidepool_harness::log::{Actor, LogHeader, LogWriter};
 use tidepool_harness::provider::{DynModelProvider, Usage};
 use tidepool_harness::replay::{RecordedReply, ReplayProvider};
-use tidepool_harness::tree::NodeId;
 use tidepool_harness::{answerer_decls_with_delegate, load_harness_source, Harness, TurnOutcome};
 use tidepool_runtime::CompileError;
 
@@ -392,8 +391,6 @@ fn usage() -> Usage {
 
 fn reply(content: &str) -> RecordedReply {
     RecordedReply {
-        node: NodeId(0),
-        turn: 0,
         content: content.to_string(),
         usage: usage(),
     }

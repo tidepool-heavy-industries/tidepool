@@ -94,15 +94,11 @@ async fn fork_request_with_no_forcing_event_has_zero_child_events() {
 
     let replies = vec![
         RecordedReply {
-            node: NodeId(0),
-            turn: 0,
             content: "```haskell\nrunLLMTurnFork @Int \"pick a number\"\n```".to_string(),
             usage: usage(),
         },
         // The fork answerer's own turn, once `answer_fork` is (later) called.
         RecordedReply {
-            node: NodeId(0),
-            turn: 0,
             content: "```haskell\nresume (7 :: Int)\n```".to_string(),
             usage: usage(),
         },

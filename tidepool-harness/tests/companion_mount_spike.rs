@@ -65,7 +65,6 @@ use tidepool_harness::harness::{AnswerContract, Session};
 use tidepool_harness::log::{Actor, LogHeader, LogWriter};
 use tidepool_harness::provider::{DynModelProvider, Usage};
 use tidepool_harness::replay::{RecordedReply, ReplayProvider};
-use tidepool_harness::tree::NodeId;
 use tidepool_harness::{answerer_decls, Harness, HoleRouting, TurnOutcome};
 use tidepool_runtime::session::SessionLib;
 
@@ -94,8 +93,6 @@ fn header() -> LogHeader {
 
 fn reply(block: &str) -> RecordedReply {
     RecordedReply {
-        node: NodeId(0),
-        turn: 0,
         content: format!("```haskell\n{block}\n```"),
         usage: Usage {
             input_tokens: 50,

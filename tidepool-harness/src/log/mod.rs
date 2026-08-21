@@ -30,7 +30,7 @@ mod writer;
 #[cfg(test)]
 mod tests;
 
-pub use reader::{EventIter, Follower, LogReader, ReadError};
+pub use reader::{EventIter, LogReader, ReadError};
 pub use writer::{LogWriter, WriteError};
 
 /// First line of every log file.

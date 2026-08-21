@@ -44,9 +44,9 @@ Module map:
 - `snapshot` — frozen post-coalgebra context prefixes: `SnapshotDigest`
   (blake3 over the exact prefix `engine::assemble_request` re-emits) and the
   immutable `ContextSnapshot` the harness interns — see Context snapshots below.
-- `synopsis` — the names-only `type_synopsis` a hole card's shape line reads,
-  derived from a compiled `DataConTable` (constructor/selector NAMES only —
-  the table has no field TYPES, so this is honestly shallow, never a form).
+- `synopsis` — `type_document`, the full GHC-style `data` declaration a hole
+  card's shape line reads, derived from a compiled `DataConTable` (which
+  carries field TYPES as well as NAMES).
 
 ## Compile memo — one content-addressed cache, no cache-free path
 

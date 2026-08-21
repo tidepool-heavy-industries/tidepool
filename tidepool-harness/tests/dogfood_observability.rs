@@ -20,7 +20,6 @@ use tidepool_harness::log::LogHeader;
 use tidepool_harness::provider::{DynModelProvider, Usage};
 use tidepool_harness::replay::{RecordedReply, ReplayProvider};
 use tidepool_harness::selfharness::persistence;
-use tidepool_harness::tree::NodeId;
 use tidepool_harness::{
     answerer_decls, load_harness_source, Event, Harness, JsonlObserver, LogObserver, Observer,
     SelfHarnessDriver,
@@ -89,8 +88,6 @@ impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for CapturedWriter {
 /// answerer must recover from.
 fn bad_finalize_reply() -> RecordedReply {
     RecordedReply {
-        node: NodeId(0),
-        turn: 0,
         content: "```haskell\nimport HarnessTypes (Decision (..), Confidence (..))\n\n\
                   (finalize @Decision (Decision { action = \"observe\", rationale = \"first \
                   loop\", confidence = totallyUndefinedIdentifier }) :: M ())\n```"
@@ -107,8 +104,6 @@ fn bad_finalize_reply() -> RecordedReply {
 /// The corrected reply for the SAME hole — compiles and finalizes.
 fn good_finalize_reply() -> RecordedReply {
     RecordedReply {
-        node: NodeId(0),
-        turn: 1,
         content: "```haskell\nimport HarnessTypes (Decision (..), Confidence (..))\n\n\
                   (finalize @Decision (Decision { action = \"observe\", rationale = \"first \
                   loop\", confidence = Medium }) :: M ())\n```"

@@ -38,7 +38,7 @@ use tidepool_harness::engine::EngineConfig;
 use tidepool_harness::log::{Actor, LogHeader, LogWriter};
 use tidepool_harness::provider::{DynModelProvider, Usage};
 use tidepool_harness::replay::{RecordedReply, ReplayProvider};
-use tidepool_harness::tree::{FanBadge, NodeId, NodeState};
+use tidepool_harness::tree::{FanBadge, NodeState};
 use tidepool_harness::{Harness, HoleRouting};
 
 fn prelude_dir() -> std::path::PathBuf {
@@ -76,8 +76,6 @@ fn usage() -> Usage {
 
 fn reply(content: &str) -> RecordedReply {
     RecordedReply {
-        node: NodeId(0),
-        turn: 0,
         content: content.to_string(),
         usage: usage(),
     }

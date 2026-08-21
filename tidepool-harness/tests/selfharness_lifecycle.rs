@@ -343,7 +343,7 @@ async fn retired_answerer_nodes_are_terminal_across_cycles() {
     let mut driver = SelfHarnessDriver::new(harness.clone(), Arc::new(LogObserver));
     let harness_source = source();
 
-    let mut seen_before: Vec<_> = harness.tree().node_ids_after(None, usize::MAX).0;
+    let mut seen_before: Vec<_> = harness.tree().node_ids();
     let mut retired_nodes = Vec::new();
 
     // Cycle 1: the scripted first model call fails — but `retire_answerer`
@@ -355,7 +355,7 @@ async fn retired_answerer_nodes_are_terminal_across_cycles() {
         cycle1.is_err(),
         "the scripted first model call must fail this cycle"
     );
-    let (after_cycle1, _) = harness.tree().node_ids_after(None, usize::MAX);
+    let after_cycle1 = harness.tree().node_ids();
     let new_in_cycle1: Vec<_> = after_cycle1
         .iter()
         .copied()
@@ -374,7 +374,7 @@ async fn retired_answerer_nodes_are_terminal_across_cycles() {
         .run_one_cycle(&harness_source, None)
         .await
         .expect("cycle 2 (after the recovered driver) must succeed");
-    let (after_cycle2, _) = harness.tree().node_ids_after(None, usize::MAX);
+    let after_cycle2 = harness.tree().node_ids();
     let new_in_cycle2: Vec<_> = after_cycle2
         .iter()
         .copied()

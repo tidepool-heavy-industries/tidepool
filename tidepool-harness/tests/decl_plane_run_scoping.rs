@@ -68,8 +68,6 @@ fn usage() -> Usage {
 
 fn reply(content: &str) -> RecordedReply {
     RecordedReply {
-        node: NodeId(0),
-        turn: 0,
         content: content.to_string(),
         usage: usage(),
     }

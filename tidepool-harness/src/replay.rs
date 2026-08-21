@@ -34,11 +34,10 @@ use crate::provider::{
 use crate::tree::{NodeId, NodeState};
 
 /// One recorded assistant reply (the text a live model produced, plus its
-/// usage) — replayed verbatim.
+/// usage) — replayed verbatim. Replay is strictly queue-order-only, so no
+/// node/turn identity rides along — see the module doc.
 #[derive(Debug, Clone)]
 pub struct RecordedReply {
-    pub node: NodeId,
-    pub turn: u64,
     pub content: String,
     pub usage: Usage,
 }
@@ -67,8 +66,6 @@ impl ReplayProvider {
         for record in events {
             let record = record?;
             if let Event::TurnDelta {
-                node,
-                turn,
                 role: Role::Assistant,
                 content,
                 usage,
@@ -76,8 +73,6 @@ impl ReplayProvider {
             } = record.event
             {
                 replies.push(RecordedReply {
-                    node,
-                    turn,
                     content,
                     // DEFERRED, not fixed: a recorded `None` here means the
                     // source log genuinely has no usage for this turn, and
@@ -134,42 +129,6 @@ impl ModelProvider for ReplayProvider {
     }
 }
 
-/// A provider that RECORDS a live provider's replies into a side channel while
-/// passing them through — the "live mode logs" half. In the harness, logging
-/// happens via the event log (`TurnDelta`), so this wrapper is only needed when
-/// a caller wants an in-memory capture too (e.g. a test that records then
-/// replays in one process without a file round-trip).
-pub struct RecordingProvider<P> {
-    inner: P,
-    captured: Mutex<Vec<String>>,
-}
-
-impl<P> RecordingProvider<P> {
-    pub fn new(inner: P) -> Self {
-        RecordingProvider {
-            inner,
-            captured: Mutex::new(Vec::new()),
-        }
-    }
-
-    /// The replies captured so far, in order.
-    pub fn captured(&self) -> Vec<String> {
-        self.captured.lock().clone()
-    }
-}
-
-impl<P: ModelProvider> ModelProvider for RecordingProvider<P> {
-    async fn complete(
-        &self,
-        req: TurnRequest,
-        sink: Option<crate::provider::StreamSink>,
-    ) -> Result<TurnResponse, ProviderError> {
-        let resp = self.inner.complete(req, sink).await?;
-        self.captured.lock().push(resp.text.clone());
-        Ok(resp)
-    }
-}
-
 /// Reconstructed per-node state after folding a log — an OFFLINE read, not
 /// the startup recovery path (see the module doc).
 #[derive(Debug, Clone, Default)]
@@ -178,12 +137,8 @@ pub struct FoldedTree {
     pub states: HashMap<NodeId, NodeState>,
     /// Parent per node (root nodes map to `None`).
     pub parents: HashMap<NodeId, Option<NodeId>>,
-    /// Children per node, in creation order.
-    pub children: HashMap<NodeId, Vec<NodeId>>,
     /// The transcript per node, reconstructed by folding `TurnDelta`s.
     pub transcripts: HashMap<NodeId, Vec<Message>>,
-    /// Fork references: child → (parent, parent_turn).
-    pub forks: HashMap<NodeId, (NodeId, u64)>,
 }
 
 /// Fold a log file's events into the terminal tree state — an OFFLINE read,
@@ -207,10 +162,6 @@ pub fn apply_event(folded: &mut FoldedTree, event: Event) {
         Event::NodeCreated { node, parent, .. } => {
             folded.states.insert(node, NodeState::Thunk);
             folded.parents.insert(node, parent);
-            folded.children.entry(node).or_default();
-            if let Some(p) = parent {
-                folded.children.entry(p).or_default().push(node);
-            }
         }
         Event::Forced { node, .. } => {
             folded.states.insert(node, NodeState::Running);
@@ -239,13 +190,6 @@ pub fn apply_event(folded: &mut FoldedTree, event: Event) {
                 reasoning_items: Vec::new(), // the durable log never carries them
             });
         }
-        Event::TurnForked {
-            node,
-            parent,
-            parent_turn,
-        } => {
-            folded.forks.insert(node, (parent, parent_turn));
-        }
         Event::TurnSpliced {
             node,
             role,
@@ -263,14 +207,14 @@ pub fn apply_event(folded: &mut FoldedTree, event: Event) {
         }
         // TurnStart / Effect / HoleAnswerAttempt / TurnExtracted do not change
         // tree STATE (they are within-turn detail the replayer substitutes
-        // against, not folded into node lifecycle here). SnapshotFrozen /
-        // BranchInvocation are RECEIPTS about a context prefix — the fork
-        // structure they describe is already folded from `TurnForked`, and a
-        // snapshot is not a node lifecycle state.
+        // against, not folded into node lifecycle here). TurnForked is fork
+        // PROVENANCE, not lifecycle state. SnapshotFrozen / BranchInvocation
+        // are RECEIPTS about a context prefix, not a node lifecycle state.
         Event::TurnStart { .. }
         | Event::Effect { .. }
         | Event::HoleAnswerAttempt { .. }
         | Event::TurnExtracted { .. }
+        | Event::TurnForked { .. }
         | Event::SnapshotFrozen { .. }
         | Event::BranchInvocation { .. } => {}
     }

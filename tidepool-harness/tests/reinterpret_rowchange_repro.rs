@@ -23,7 +23,6 @@ use tidepool_harness::harness::AnswerContract;
 use tidepool_harness::log::{Actor, LogHeader, LogWriter};
 use tidepool_harness::provider::{DynModelProvider, Usage};
 use tidepool_harness::replay::{RecordedReply, ReplayProvider};
-use tidepool_harness::tree::NodeId;
 use tidepool_harness::{answerer_decls, Harness, HoleRouting, TurnOutcome};
 
 fn repo_root() -> std::path::PathBuf {
@@ -51,8 +50,6 @@ fn header() -> LogHeader {
 
 fn reply(content: &str) -> RecordedReply {
     RecordedReply {
-        node: NodeId(0),
-        turn: 0,
         content: content.to_string(),
         usage: Usage {
             input_tokens: 50,

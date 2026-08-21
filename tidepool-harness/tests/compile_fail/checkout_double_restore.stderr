@@ -3,13 +3,7 @@ error[E0382]: use of moved value: `checkout`
   |
 6 | fn double_restore(checkout: tidepool_harness::registry::Checkout<'_, ()>) {
   |                   -------- move occurs because `checkout` has type `Checkout<'_, ()>`, which does not implement the `Copy` trait
-7 |     checkout.restore_idle();
-  |              -------------- `checkout` moved due to this method call
-8 |     checkout.restore_idle();
+7 |     checkout.restore_suspended(Vec::new());
+  |     -------- value moved here
+8 |     checkout.restore_suspended(Vec::new());
   |     ^^^^^^^^ value used here after move
-  |
-note: `Checkout::<'_, M>::restore_idle` takes ownership of the receiver `self`, which moves `checkout`
- --> src/registry.rs
-  |
-  |     pub fn restore_idle(mut self) {
-  |                             ^^^^

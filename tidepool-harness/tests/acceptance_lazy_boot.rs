@@ -2,9 +2,10 @@
 //! (`Harness::new` -> `force` -> `run_to_hole_or_done`): `force` registers a
 //! machine-less session, and the machine comes up on the node's first REAL
 //! turn (`ResidentSession::run`, reached via `Harness::run_to_hole_or_done`).
-//! Observed through `Harness::heap_stats`: `None` when the node has no live
-//! session machine (never forced, terminal, or forced but not yet
-//! bootstrapped), `Some` once a machine is live.
+//! Observed by peeking the node's session machine directly (`peek` succeeds
+//! only when a machine is actually present, never mid-turn or unforced):
+//! `None` when the node has no live session machine (never forced, terminal,
+//! or forced but not yet bootstrapped), `Some` once a machine is live.
 //!
 //! GHC-heavy tier: needs `TIDEPOOL_EXTRACT` + the with-packages GHC on PATH
 //! (`--ignore-default-filter` to run).
@@ -26,16 +27,27 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use tidepool_harness::engine::EngineConfig;
+use tidepool_harness::harness::Session;
 use tidepool_harness::log::{Actor, LogHeader, LogWriter};
 use tidepool_harness::provider::{DynModelProvider, Usage};
 use tidepool_harness::replay::{RecordedReply, ReplayProvider};
-use tidepool_harness::tree::NodeId;
 use tidepool_harness::{
     answerer_decls, load_harness_source, Harness, LogObserver, SelfHarnessDriver, SelfHarnessState,
     TurnOutcome,
 };
 
 mod support;
+
+/// `node`'s live heap/GC snapshot, straight off its resident machine —
+/// `None` when `node` has no live session (never forced, terminal) or during
+/// the transient mid-turn gap while its session runs on the blocking pool.
+fn heap_stats(
+    harness: &Harness,
+    node: tidepool_harness::tree::NodeId,
+) -> Option<tidepool_codegen::jit_machine::HeapStats> {
+    let sid = harness.tree().session_of(node)?;
+    harness.tree().registry().peek(sid, Session::heap_stats)?
+}
 
 fn prelude_dir() -> PathBuf {
     let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -64,8 +76,6 @@ fn usage() -> Usage {
 
 fn reply(content: &str) -> RecordedReply {
     RecordedReply {
-        node: NodeId(0),
-        turn: 0,
         content: content.to_string(),
         usage: usage(),
     }
@@ -100,7 +110,7 @@ async fn no_machine_after_force_a_machine_after_the_first_turn() {
     harness.force(root, Actor::Operator).unwrap();
 
     assert_eq!(
-        harness.heap_stats(root),
+        heap_stats(&harness, root),
         None,
         "a freshly-forced node must have NO live machine yet — force() no longer \
          bootstraps eagerly"
@@ -116,7 +126,7 @@ async fn no_machine_after_force_a_machine_after_the_first_turn() {
     );
 
     assert!(
-        harness.heap_stats(root).is_some(),
+        heap_stats(&harness, root).is_some(),
         "the node's first real turn must have brought the machine up — \
          heap_stats should now report Some"
     );

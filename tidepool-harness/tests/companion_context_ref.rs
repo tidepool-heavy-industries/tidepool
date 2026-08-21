@@ -76,8 +76,6 @@ fn header(label: &str) -> LogHeader {
 /// sequential suspend/resume round-trips, one per `runLLMTurnBranch`).
 fn reply(block: &str) -> RecordedReply {
     RecordedReply {
-        node: NodeId(0),
-        turn: 0,
         content: format!("```haskell\n{block}\n```"),
         usage: Usage {
             input_tokens: 50,
@@ -302,8 +300,6 @@ async fn branch_child_that_exhausts_its_rounds_folds_as_data_without_erasing_its
     let _cache_guard = support::isolate_cache();
 
     let prose = |text: &str| RecordedReply {
-        node: NodeId(0),
-        turn: 0,
         content: text.to_string(),
         usage: Usage {
             input_tokens: 50,

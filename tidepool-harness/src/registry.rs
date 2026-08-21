@@ -31,9 +31,10 @@
 //! A [`Checkout`] is the RAII proof that a machine is out on a turn: it owns the
 //! machine and, on restore, moves it back under the lock. Dropping a `Checkout`
 //! without restoring is a bug (the session is left `Running` forever) — the
-//! `#[must_use]`, the panic-safety `Drop` (which restores the CARRIED hole set,
-//! not a bare `Idle`), and the [`Checkout::abandon`] escape hatch make the
-//! exits explicit.
+//! `#[must_use]` and the panic-safety `Drop` (which restores the CARRIED hole
+//! set, not a bare `Idle`) make the exit explicit. A machine that is
+//! genuinely gone (e.g. a `JoinError` off the blocking pool) is retired via
+//! [`Self::remove`] directly, never through a `Checkout`.
 
 use std::collections::HashMap;
 
@@ -105,11 +106,6 @@ impl<M> SessionRegistry<M> {
         self.slots.lock().remove(&id)
     }
 
-    /// Whether a session exists and is idle (present, no parked holes).
-    pub fn is_idle(&self, id: SessionId) -> bool {
-        matches!(self.slots.lock().get(&id), Some(Slot::Idle(_)))
-    }
-
     /// Read-only access to the machine WITHOUT checking it out — only
     /// succeeds when the machine is actually present in its slot (`Idle` or
     /// `Suspended`; a `Running` machine is out on a turn, so there is nothing
@@ -121,26 +117,6 @@ impl<M> SessionRegistry<M> {
             Some(Slot::Idle(m)) => Some(f(m)),
             Some(Slot::Suspended { machine, .. }) => Some(f(machine)),
             _ => None,
-        }
-    }
-
-    /// The MOST RECENT parked hole (newest last — the single-hole
-    /// compatibility view), if any. A session whose machine is out on a turn
-    /// is still parked on the holes it carried out.
-    pub fn pending_hole(&self, id: SessionId) -> Option<HoleId> {
-        match self.slots.lock().get(&id) {
-            Some(Slot::Suspended { holes, .. }) | Some(Slot::Running { holes }) => {
-                holes.last().cloned()
-            }
-            _ => None,
-        }
-    }
-
-    /// Every parked hole, oldest first. Empty for idle/unknown sessions.
-    pub fn pending_holes(&self, id: SessionId) -> Vec<HoleId> {
-        match self.slots.lock().get(&id) {
-            Some(Slot::Suspended { holes, .. }) | Some(Slot::Running { holes }) => holes.clone(),
-            _ => Vec::new(),
         }
     }
 
@@ -236,11 +212,6 @@ impl<M> SessionRegistry<M> {
         }
     }
 
-    /// Restore a checked-out machine as `Idle` (no parked holes) under the lock.
-    fn restore_idle(&self, id: SessionId, machine: M) {
-        self.slots.lock().insert(id, Slot::Idle(machine));
-    }
-
     /// Restore a checked-out machine with its post-turn parked hole set under
     /// the lock. An empty set restores `Idle` (the two restores are one
     /// operation with two spellings, so a caller passing the session's own
@@ -274,13 +245,13 @@ fn take_machine<M>(slot: &mut Slot<M>, holes: Vec<HoleId>) -> M {
 }
 
 /// RAII proof that a session's machine is OUT on a turn (`Slot::Running`). Owns
-/// the machine for the turn; restore it exactly once via [`Self::restore_idle`]
-/// or [`Self::restore_suspended`].
+/// the machine for the turn; restore it exactly once via
+/// [`Self::restore_suspended`].
 ///
 /// Dropping a `Checkout` without restoring leaves the slot `Running` (the
-/// session is wedged). That is a caller bug; [`Self::abandon`] is the explicit
-/// "the machine is gone, drop the session" path for teardown.
-#[must_use = "a checked-out machine must be restored (or abandoned), or the session is left Running forever"]
+/// session is wedged) — the panic-safety `Drop` below is the only exit that
+/// does not require an explicit restore call.
+#[must_use = "a checked-out machine must be restored, or the session is left Running forever"]
 pub struct Checkout<'r, M> {
     registry: &'r SessionRegistry<M>,
     id: SessionId,
@@ -292,7 +263,7 @@ pub struct Checkout<'r, M> {
 }
 
 // Whole point of this type: a checked-out machine is settled by exactly one
-// of `restore_idle`/`restore_suspended`/`abandon`, each consuming `self` by
+// call to `restore_suspended`, which consumes `self` by
 // value. A future `#[derive(Clone)]` would let a caller settle the SAME
 // checkout twice (or settle a clone while the panic-safety `Drop` still
 // thinks the original is unsettled), silently reviving the double-settle bug
@@ -309,65 +280,42 @@ impl<M> Checkout<'_, M> {
 
     /// Borrow the checked-out machine for the turn.
     pub fn machine(&mut self) -> &mut M {
-        #[allow(clippy::expect_used, reason = "machine present until restore/abandon")]
+        #[allow(clippy::expect_used, reason = "machine present until restore")]
         self.machine
             .as_mut()
-            .expect("machine present until restore/abandon")
+            .expect("machine present until restore")
     }
 
     /// Take ownership of the machine off the checkout (e.g. to move it onto an
-    /// eval thread). The caller MUST return it via [`Self::restore_idle`] /
-    /// [`Self::restore_suspended`].
+    /// eval thread). The caller MUST return it via [`Self::restore_suspended`].
     pub fn take(&mut self) -> M {
-        #[allow(clippy::expect_used, reason = "machine present until restore/abandon")]
-        self.machine
-            .take()
-            .expect("machine present until restore/abandon")
+        #[allow(clippy::expect_used, reason = "machine present until restore")]
+        self.machine.take().expect("machine present until restore")
     }
 
-    /// Put the machine back via [`Self::restore_idle`] after a `take`.
+    /// Put the machine back via [`Self::restore_suspended`] after a `take`.
     pub fn put(&mut self, machine: M) {
         self.machine = Some(machine);
-    }
-
-    /// Restore the machine as `Idle` — the session reports NO parked holes.
-    pub fn restore_idle(mut self) {
-        #[allow(clippy::expect_used, reason = "machine present until restore/abandon")]
-        let machine = self
-            .machine
-            .take()
-            .expect("machine present until restore/abandon");
-        self.registry.restore_idle(self.id, machine);
     }
 
     /// Restore the machine with its post-turn parked hole set — pass the
     /// session's OWN reported holes (`parked_holes()`), never a guess from
     /// the turn's domain result. An empty set restores `Idle`.
     pub fn restore_suspended(mut self, holes: Vec<HoleId>) {
-        #[allow(clippy::expect_used, reason = "machine present until restore/abandon")]
-        let machine = self
-            .machine
-            .take()
-            .expect("machine present until restore/abandon");
+        #[allow(clippy::expect_used, reason = "machine present until restore")]
+        let machine = self.machine.take().expect("machine present until restore");
         self.registry.restore_suspended(self.id, machine, holes);
-    }
-
-    /// The turn faulted irrecoverably: drop the session outright (`Running →
-    /// gone`) rather than leaving it wedged. Teardown path.
-    pub fn abandon(mut self) {
-        self.machine.take();
-        self.registry.remove(self.id);
     }
 }
 
 /// Panic safety net: if a `Checkout` is dropped while it still owns the
-/// machine (an explicit `restore_idle`/`restore_suspended`/`abandon` never
-/// ran — e.g. a panic unwound through the turn between checkout and
-/// restore), restore it with the hole set it CARRIED OUT rather than leaving
-/// the slot `Running` forever — or silently dropping parked frames to a bare
-/// `Idle` (they are still rooted in the machine; the slot must keep saying
-/// so). `restore_idle`/`restore_suspended`/`abandon` all `take()` the machine
-/// first, so `Drop` sees `None` and does nothing on every explicit exit path.
+/// machine (an explicit `restore_suspended` never ran — e.g. a panic unwound
+/// through the turn between checkout and restore), restore it with the hole
+/// set it CARRIED OUT rather than leaving the slot `Running` forever — or
+/// silently dropping parked frames to a bare `Idle` (they are still rooted in
+/// the machine; the slot must keep saying
+/// so). `restore_suspended` `take()`s the machine first, so `Drop` sees
+/// `None` and does nothing on that explicit exit path.
 ///
 /// This does NOT cover [`Checkout::take`]: once the machine has been moved
 /// off the checkout (e.g. onto a blocking thread), `Drop` has nothing to
@@ -407,25 +355,45 @@ mod tests {
         }
     }
 
+    // Test-only slot inspection: no production caller needs `is_idle`/
+    // `pending_hole`/`pending_holes` (production always restores through
+    // `restore_suspended` and reads holes off the SESSION, never the slot),
+    // so these read the private `slots` field directly rather than carrying
+    // dead API on `SessionRegistry`.
+    fn is_idle<M>(reg: &SessionRegistry<M>, id: SessionId) -> bool {
+        matches!(reg.slots.lock().get(&id), Some(Slot::Idle(_)))
+    }
+
+    fn pending_hole<M>(reg: &SessionRegistry<M>, id: SessionId) -> Option<HoleId> {
+        pending_holes(reg, id).last().cloned()
+    }
+
+    fn pending_holes<M>(reg: &SessionRegistry<M>, id: SessionId) -> Vec<HoleId> {
+        match reg.slots.lock().get(&id) {
+            Some(Slot::Suspended { holes, .. }) | Some(Slot::Running { holes }) => holes.clone(),
+            _ => Vec::new(),
+        }
+    }
+
     #[test]
     fn idle_run_completes_back_to_idle() {
         let reg = SessionRegistry::new();
         let id = SessionId(1);
         reg.insert_idle(id, FakeMachine { turns: 0 });
-        assert!(reg.is_idle(id));
+        assert!(is_idle(&reg, id));
 
         let mut co = reg.checkout_run(id).expect("idle → run");
         // While running, the slot rejects a second turn and reads not-idle.
-        assert!(!reg.is_idle(id));
+        assert!(!is_idle(&reg, id));
         assert_eq!(err(reg.checkout_run(id)), CheckoutError::Running(id));
         co.machine().turns += 1;
-        co.restore_idle();
+        co.restore_suspended(Vec::new());
 
-        assert!(reg.is_idle(id));
+        assert!(is_idle(&reg, id));
         // The machine (and its accumulated turn count) survived the round-trip.
         let mut co = reg.checkout_run(id).expect("idle again");
         assert_eq!(co.machine().turns, 1);
-        co.restore_idle();
+        co.restore_suspended(Vec::new());
     }
 
     /// MULTI-HOLE: a session parks two holes across two runs; both are
@@ -440,24 +408,24 @@ mod tests {
         // Run → park hole 1.
         let co = reg.checkout_run(id).expect("idle → run");
         co.restore_suspended(vec![hole("scont_1")]);
-        assert_eq!(reg.pending_hole(id), Some(hole("scont_1")));
+        assert_eq!(pending_hole(&reg, id), Some(hole("scont_1")));
 
         // A NEW run over the parked frame is an ordinary checkout — it
         // carries the holes out, and while running they still read.
         let co = reg.checkout_run(id).expect("run over parked frame");
         assert_eq!(
-            reg.pending_holes(id),
+            pending_holes(&reg, id),
             vec![hole("scont_1")],
             "parked holes stay visible while the machine is out"
         );
         // …this second run parks another hole.
         co.restore_suspended(vec![hole("scont_1"), hole("scont_2")]);
         assert_eq!(
-            reg.pending_holes(id),
+            pending_holes(&reg, id),
             vec![hole("scont_1"), hole("scont_2")]
         );
         assert_eq!(
-            reg.pending_hole(id),
+            pending_hole(&reg, id),
             Some(hole("scont_2")),
             "the single-hole view is the newest"
         );
@@ -467,12 +435,12 @@ mod tests {
             .checkout_resume(id, &hole("scont_1"))
             .expect("older hole is a member");
         co.restore_suspended(vec![hole("scont_2")]);
-        assert_eq!(reg.pending_holes(id), vec![hole("scont_2")]);
+        assert_eq!(pending_holes(&reg, id), vec![hole("scont_2")]);
 
         // Then the newer; the session goes idle via the unified restore.
         let co = reg.checkout_resume(id, &hole("scont_2")).expect("newer");
         co.restore_suspended(Vec::new());
-        assert!(reg.is_idle(id));
+        assert!(is_idle(&reg, id));
     }
 
     #[test]
@@ -491,7 +459,7 @@ mod tests {
                 parked: vec![hole("scont_1")],
             }
         );
-        assert_eq!(reg.pending_holes(id), vec![hole("scont_1")]);
+        assert_eq!(pending_holes(&reg, id), vec![hole("scont_1")]);
 
         // Idle session: WrongHole with an empty parked set, not Running.
         let co = reg.checkout_resume(id, &hole("scont_1")).expect("member");
@@ -529,7 +497,7 @@ mod tests {
 
         let mut child = reg.checkout_child(id).expect("child over parked frame");
         assert_eq!(
-            reg.pending_hole(id),
+            pending_hole(&reg, id),
             Some(hole("scont_1")),
             "parent's hole stays visible while a child runs"
         );
@@ -550,7 +518,7 @@ mod tests {
         // The child ran a turn on the machine; restore with the same holes.
         child.machine().turns += 1;
         child.restore_suspended(vec![hole("scont_1")]);
-        assert_eq!(reg.pending_hole(id), Some(hole("scont_1")));
+        assert_eq!(pending_hole(&reg, id), Some(hole("scont_1")));
 
         // The parent now resumes on its (untouched) hole; the child's turn count
         // survived (it ran on the same machine).
@@ -558,8 +526,8 @@ mod tests {
             .checkout_resume(id, &hole("scont_1"))
             .expect("parent resumes after the child completes");
         assert_eq!(co.machine().turns, 1, "the child's turn ran on the machine");
-        co.restore_idle();
-        assert!(reg.is_idle(id));
+        co.restore_suspended(Vec::new());
+        assert!(is_idle(&reg, id));
     }
 
     /// A child requires a parked hole — checking a child out on an idle
@@ -614,7 +582,7 @@ mod tests {
         }));
         assert!(result.is_err(), "the closure must have panicked");
         assert!(
-            reg.is_idle(id),
+            is_idle(&reg, id),
             "a holeless Checkout dropped by a panic must restore Idle"
         );
 
@@ -627,7 +595,7 @@ mod tests {
         }));
         assert!(result.is_err());
         assert_eq!(
-            reg.pending_holes(id),
+            pending_holes(&reg, id),
             vec![hole("scont_1")],
             "the carried hole set survives an unwound turn"
         );
@@ -639,17 +607,6 @@ mod tests {
             1,
             "the machine's pre-panic mutation survived the Drop-recovery round trip"
         );
-        co.restore_idle();
-    }
-
-    #[test]
-    fn abandon_drops_a_wedged_turn() {
-        let reg = SessionRegistry::new();
-        let id = SessionId(4);
-        reg.insert_idle(id, FakeMachine { turns: 0 });
-        let co = reg.checkout_run(id).expect("idle → run");
-        co.abandon();
-        // The session is gone, not left Running.
-        assert_eq!(err(reg.checkout_run(id)), CheckoutError::Unknown(id));
+        co.restore_suspended(Vec::new());
     }
 }

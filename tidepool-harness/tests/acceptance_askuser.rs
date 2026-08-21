@@ -20,7 +20,6 @@ use tidepool_harness::provider::{DynModelProvider, Usage};
 use tidepool_harness::replay::{RecordedReply, ReplayProvider};
 use tidepool_harness::selfharness::observer::FormSource;
 use tidepool_harness::selfharness::operator::{FieldShape, FormShape, VariantShape};
-use tidepool_harness::tree::NodeId;
 use tidepool_harness::{
     answerer_decls, load_harness_source, Event, Harness, Observer, OperatorGate, SelfHarnessDriver,
 };
@@ -275,8 +274,6 @@ fn askuser_reply() -> RecordedReply {
          ```"
     );
     RecordedReply {
-        node: NodeId(0),
-        turn: 0,
         content,
         usage: Usage {
             input_tokens: 50,

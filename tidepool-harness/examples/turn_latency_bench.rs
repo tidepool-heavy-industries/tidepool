@@ -293,8 +293,6 @@ fn header(tag: &str) -> LogHeader {
 
 fn reply(content: String) -> RecordedReply {
     RecordedReply {
-        node: NodeId(0),
-        turn: 0,
         content,
         usage: Usage {
             input_tokens: 50,

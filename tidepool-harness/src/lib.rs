@@ -27,7 +27,7 @@ pub use engine::{
     ClassifiedHole, ClassifyError, CompiledTurn, EngineConfig, EngineError, HoleRouting,
     TurnOutcome,
 };
-pub use forcing::{derive_teaser, fan_badge, price_class, ForkShape, NodeTree, TreeError};
+pub use forcing::{derive_teaser, NodeTree, TreeError};
 pub use harness::{ContextRef, Escalation, Harness, HarnessError, OperatorDecision};
 pub use registry::{Checkout, CheckoutError, SessionRegistry};
 pub use selfharness::{
@@ -40,4 +40,4 @@ pub use selfharness::{
 pub use snapshot::{ContextSnapshot, SnapshotDigest};
 pub use tidepool_runtime::AsksSidecar;
 pub use timing::{record_stage, ExtractTiming};
-pub use tree::{FanBadge, FanCount, HoleId, NodeId, NodeState, PriceClass, SiteId, Slot};
+pub use tree::{FanBadge, HoleId, NodeId, NodeState, PriceClass, SiteId, Slot};

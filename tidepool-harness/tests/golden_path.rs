@@ -26,7 +26,7 @@ use tidepool_harness::engine::EngineConfig;
 use tidepool_harness::log::{Actor, Event, LogHeader, LogReader, LogWriter};
 use tidepool_harness::provider::{DynModelProvider, Role, Usage};
 use tidepool_harness::replay::{fold_tree_state, RecordedReply, ReplayProvider};
-use tidepool_harness::tree::{NodeId, NodeState};
+use tidepool_harness::tree::NodeState;
 use tidepool_harness::Harness;
 
 fn prelude_dir() -> PathBuf {
@@ -57,10 +57,7 @@ fn usage() -> Usage {
 /// The scripted assistant turns, IN THE ORDER the harness requests them.
 fn golden_replies() -> Vec<RecordedReply> {
     // The harness serves these order-only (a deterministic single thread).
-    // node/turn fields are metadata for the log-replay round-trip, not routing.
     let r = |content: &str| RecordedReply {
-        node: NodeId(0),
-        turn: 0,
         content: content.to_string(),
         usage: usage(),
     };
@@ -242,8 +239,6 @@ async fn fork_only_resumes_to_completion() {
     let cfg = EngineConfig::standard(prelude_dir(), None).expect("cfg");
 
     let r = |c: &str| RecordedReply {
-        node: NodeId(0),
-        turn: 0,
         content: c.to_string(),
         usage: usage(),
     };

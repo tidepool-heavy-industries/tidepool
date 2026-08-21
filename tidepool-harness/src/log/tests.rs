@@ -1,6 +1,4 @@
 use std::fs::OpenOptions;
-use std::io::Write;
-use std::time::Duration;
 
 use serde_json::json;
 
@@ -229,25 +227,6 @@ fn seq_is_monotonic_and_total_per_file() {
 }
 
 #[test]
-fn header_readable_without_consuming_events() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("run.jsonl");
-    let header = write_sample_log(&path);
-
-    // Read the header standalone, more than once, without ever touching
-    // an events iterator.
-    let h1 = LogReader::read_header(&path).expect("read header");
-    let h2 = LogReader::read_header(&path).expect("read header again");
-    assert_eq!(h1, header);
-    assert_eq!(h2, header);
-
-    // The events are still all there afterwards.
-    let (_, iter) = LogReader::open(&path).expect("open log");
-    let count = iter.count();
-    assert_eq!(count, sample_events().len());
-}
-
-#[test]
 fn torn_final_line_reads_cleanly_to_last_whole_event() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("run.jsonl");
@@ -308,49 +287,4 @@ fn corrupt_middle_line_is_a_read_error_not_silent_truncation() {
             records.len()
         ),
     }
-}
-
-#[test]
-fn follow_mode_sees_appends() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("run.jsonl");
-    let header = sample_header();
-    let mut writer = LogWriter::create(&path, &header).expect("create log");
-
-    let events = sample_events();
-    writer.append(events[0].clone()).expect("append first");
-
-    let (followed_header, mut follower) =
-        LogReader::follow(&path, Duration::from_millis(10)).expect("open follower");
-    assert_eq!(followed_header, header);
-
-    let first = follower.next_event().expect("first event");
-    assert_eq!(first.seq, 0);
-    assert_eq!(first.event, events[0]);
-
-    let path_for_thread = path.clone();
-    let second_event = events[1].clone();
-    let appender = std::thread::spawn(move || {
-        std::thread::sleep(Duration::from_millis(50));
-        let mut writer = OpenOptions::new()
-            .append(true)
-            .open(&path_for_thread)
-            .unwrap();
-        // Bypass LogWriter (already owns a handle) and append a raw
-        // record line directly, mirroring what LogWriter::append writes.
-        let record = EventRecord {
-            seq: 1,
-            event: second_event,
-        };
-        let mut line = serde_json::to_vec(&record).unwrap();
-        line.push(b'\n');
-        writer.write_all(&line).unwrap();
-        writer.sync_all().unwrap();
-    });
-
-    let second = follower.next_event().expect("second event (polled)");
-    assert_eq!(second.seq, 1);
-    assert_eq!(second.event, events[1]);
-
-    appender.join().unwrap();
 }

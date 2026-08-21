@@ -14,9 +14,8 @@
 //! durable log: the writer is never called.
 //!
 //! `autoForce = never` is hard-coded here: [`NodeTree::create_node`] never
-//! calls [`NodeTree::force`] itself, regardless of the fan badge. A
-//! `Dynamic`-fan parent's materialized children are ordinary `Thunk` nodes
-//! like any other — each one still needs its own `Forced` event. There is
+//! calls [`NodeTree::force`] itself — a freshly created node is always a
+//! `Thunk`, and each one still needs its own `Forced` event. There is
 //! no policy ladder to bypass — an auto-force policy ladder is R2 scope,
 //! not built here.
 
@@ -29,52 +28,6 @@ use tidepool_repr::SessionId;
 use crate::log::{Actor, AnswerOutcome, Event, LogWriter, WriteError};
 use crate::registry::SessionRegistry;
 use crate::tree::{FanBadge, HoleId, NodeId, NodeState, PriceClass, SiteId};
-
-/// What a fork request's shape tells us about child count BEFORE any child
-/// is materialized — the input to [`fan_badge`]. Extract-time information
-/// (a single `runLLMTurnFork` vs. a statically bounded loop vs. a
-/// runtime-length fan-out) maps onto this, not the other way around.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ForkShape {
-    /// Precisely `n` children, known before any child runs (`n == 0` for a
-    /// node that never forks).
-    Exact(u32),
-    /// At most `max` children, cap known statically but the live count is
-    /// runtime-dependent.
-    Bounded(u32),
-    /// Child count is not knowable until runtime (e.g. `mapM fork` over a
-    /// computed list).
-    Dynamic,
-}
-
-/// Pre-force fan badge derivation: pure function of [`ForkShape`].
-/// `Dynamic` converts to `Exact` only at materialization, and that
-/// conversion re-checks the (hard-coded `never`) forcing policy — since
-/// `create_node` never auto-forces, every materialized child under a
-/// `Dynamic` parent is still a `Thunk` requiring its own `Forced` event.
-#[must_use]
-pub fn fan_badge(shape: ForkShape) -> FanBadge {
-    match shape {
-        ForkShape::Exact(n) => FanBadge::Exact { n },
-        ForkShape::Bounded(max) => FanBadge::Bounded { max },
-        ForkShape::Dynamic => FanBadge::Dynamic,
-    }
-}
-
-/// Pre-force price-class derivation: pure function of the node's
-/// static effect row and whether it spawns calling-model (frontier)
-/// children. `Frontier` dominates — a node with an otherwise `Llm`-free row
-/// that still forks frontier children is priced `Frontier`, not `Zero`.
-#[must_use]
-pub fn price_class(effect_row: &[String], spawns_frontier_children: bool) -> PriceClass {
-    if spawns_frontier_children {
-        PriceClass::Frontier
-    } else if effect_row.iter().any(|e| e == "Llm") {
-        PriceClass::Llm
-    } else {
-        PriceClass::Zero
-    }
-}
 
 /// Harness-generated teaser text — never program-authored. Currently a
 /// minimal deterministic composition of the title hint and effect row; may
@@ -118,8 +71,6 @@ pub enum TreeError {
 }
 
 struct NodeEntry {
-    parent: Option<NodeId>,
-    children: Vec<NodeId>,
     state: NodeState,
     session: Option<SessionId>,
     /// Whether this node OWNS its session's registry slot (true for a
@@ -202,17 +153,14 @@ impl<M> NodeTree<M> {
     }
 
     /// Mint a new node as [`NodeState::Thunk`] under `parent` (root if
-    /// `None`), deriving its badges purely from `effect_row`/`fork_shape`/
-    /// `spawns_frontier_children` and emitting `Event::NodeCreated`. Never
-    /// forces — `autoForce = never` is hard-coded by simply not calling
-    /// [`Self::force`] here, for any fan shape.
+    /// `None`), deriving its badges purely from `effect_row` and emitting
+    /// `Event::NodeCreated`. Never forces — `autoForce = never` is
+    /// hard-coded by simply not calling [`Self::force`] here.
     pub fn create_node(
         &self,
         parent: Option<NodeId>,
         title: &str,
         effect_row: Vec<String>,
-        fork_shape: ForkShape,
-        spawns_frontier_children: bool,
     ) -> Result<NodeId, TreeError> {
         let mut inner = self.inner.lock();
         if let Some(p) = parent {
@@ -222,8 +170,12 @@ impl<M> NodeTree<M> {
         let node = NodeId(inner.next_node_id);
         inner.next_node_id += 1;
 
-        let fan = fan_badge(fork_shape);
-        let price = price_class(&effect_row, spawns_frontier_children);
+        let fan = FanBadge::Exact { n: 0 };
+        let price = if effect_row.iter().any(|e| e == "Llm") {
+            PriceClass::Llm
+        } else {
+            PriceClass::Zero
+        };
         let teaser = derive_teaser(title, &effect_row);
 
         inner.writer.append(Event::NodeCreated {
@@ -238,22 +190,11 @@ impl<M> NodeTree<M> {
         inner.nodes.insert(
             node,
             NodeEntry {
-                parent,
-                children: Vec::new(),
                 state: NodeState::Thunk,
                 session: None,
                 owns_session: false,
             },
         );
-        if let Some(p) = parent {
-            #[allow(clippy::expect_used, reason = "checked present above")]
-            inner
-                .nodes
-                .get_mut(&p)
-                .expect("checked present above")
-                .children
-                .push(node);
-        }
         Ok(node)
     }
 
@@ -684,51 +625,17 @@ impl<M> NodeTree<M> {
         self.inner.lock().nodes.get(&node).map(|e| e.state.clone())
     }
 
-    /// `node`'s parent, if `node` exists (`Some(None)` for a root node).
-    pub fn parent(&self, node: NodeId) -> Option<Option<NodeId>> {
-        self.inner.lock().nodes.get(&node).map(|e| e.parent)
-    }
-
-    /// `node`'s children in creation order, if `node` exists.
-    pub fn children(&self, node: NodeId) -> Option<Vec<NodeId>> {
-        self.inner
-            .lock()
-            .nodes
-            .get(&node)
-            .map(|e| e.children.clone())
-    }
-
     /// The `SessionId` bound to `node`, if it has been forced.
     pub fn session_of(&self, node: NodeId) -> Option<SessionId> {
         self.inner.lock().nodes.get(&node).and_then(|e| e.session)
     }
 
-    /// Cursor-paged node-id enumeration. Node ids are minted monotonically from 0 and
-    /// never reused ([`Self::create_node`]), so every id in `0..next_node_id`
-    /// is a live node — this is an exact `O(min(limit, n))` slice, not a
-    /// probe. Returns up to `limit` ids strictly greater than `cursor`
-    /// (`None` starts from the beginning), plus the next cursor to pass back
-    /// for the following page (`None` once the page reaches the end).
-    pub fn node_ids_after(
-        &self,
-        cursor: Option<NodeId>,
-        limit: usize,
-    ) -> (Vec<NodeId>, Option<NodeId>) {
+    /// Every node id minted so far, in creation order. Ids are minted
+    /// monotonically from 0 and never reused ([`Self::create_node`]), so
+    /// every id in `0..next_node_id` is a live node.
+    pub fn node_ids(&self) -> Vec<NodeId> {
         let inner = self.inner.lock();
-        let start = cursor.map(|c| c.0.saturating_add(1)).unwrap_or(0);
-        let end = inner.next_node_id;
-        let mut ids = Vec::new();
-        let mut id = start;
-        while id < end && ids.len() < limit {
-            ids.push(NodeId(id));
-            id += 1;
-        }
-        let next = if ids.len() == limit && id < end {
-            ids.last().copied()
-        } else {
-            None
-        };
-        (ids, next)
+        (0..inner.next_node_id).map(NodeId).collect()
     }
 }
 
@@ -787,42 +694,35 @@ mod tests {
     // ---- pure badge/teaser derivation ----------------------------------
 
     #[test]
-    fn price_class_zero_when_no_llm_and_no_frontier_children() {
-        assert_eq!(
-            price_class(&["Fs".to_string(), "Exec".to_string()], false),
-            PriceClass::Zero
-        );
-        assert_eq!(price_class(&[], false), PriceClass::Zero);
-    }
+    fn create_node_derives_price_and_fan_from_effect_row() {
+        let dir = tempfile::tempdir().unwrap();
+        let log_path = dir.path().join("run.jsonl");
+        let tree = tree_at(&log_path);
 
-    #[test]
-    fn price_class_llm_when_row_includes_llm_only() {
-        assert_eq!(
-            price_class(&["Fs".to_string(), "Llm".to_string()], false),
-            PriceClass::Llm
-        );
-    }
+        let zero = tree
+            .create_node(None, "zero", vec!["Fs".to_string()])
+            .unwrap();
+        let llm = tree
+            .create_node(None, "llm", vec!["Fs".to_string(), "Llm".to_string()])
+            .unwrap();
 
-    #[test]
-    fn price_class_frontier_dominates() {
-        // Even with no in-row Llm, spawning frontier children wins.
-        assert_eq!(price_class(&["Fs".to_string()], true), PriceClass::Frontier);
-        // And it dominates over an Llm-bearing row too.
+        let (_header, events) = LogReader::open(&log_path).expect("open log");
+        let created: Vec<(NodeId, FanBadge, PriceClass)> = events
+            .map(|r| r.expect("well-formed record").event)
+            .filter_map(|e| match e {
+                LogEvent::NodeCreated {
+                    node, fan, price, ..
+                } => Some((node, fan, price)),
+                _ => None,
+            })
+            .collect();
         assert_eq!(
-            price_class(&["Llm".to_string()], true),
-            PriceClass::Frontier
+            created,
+            vec![
+                (zero, FanBadge::Exact { n: 0 }, PriceClass::Zero),
+                (llm, FanBadge::Exact { n: 0 }, PriceClass::Llm),
+            ]
         );
-    }
-
-    #[test]
-    fn fan_badge_maps_shape_directly() {
-        assert_eq!(fan_badge(ForkShape::Exact(1)), FanBadge::Exact { n: 1 });
-        assert_eq!(fan_badge(ForkShape::Exact(0)), FanBadge::Exact { n: 0 });
-        assert_eq!(
-            fan_badge(ForkShape::Bounded(4)),
-            FanBadge::Bounded { max: 4 }
-        );
-        assert_eq!(fan_badge(ForkShape::Dynamic), FanBadge::Dynamic);
     }
 
     #[test]
@@ -841,9 +741,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let tree = tree_at(&dir.path().join("run.jsonl"));
 
-        let node = tree
-            .create_node(None, "root", vec!["Fs".into()], ForkShape::Exact(0), false)
-            .unwrap();
+        let node = tree.create_node(None, "root", vec!["Fs".into()]).unwrap();
         assert_eq!(tree.state(node), Some(NodeState::Thunk));
 
         // Every work-begins event is rejected while Thunk.
@@ -882,9 +780,7 @@ mod tests {
     fn forcing_a_non_thunk_node_errors() {
         let dir = tempfile::tempdir().unwrap();
         let tree = tree_at(&dir.path().join("run.jsonl"));
-        let node = tree
-            .create_node(None, "root", vec![], ForkShape::Exact(0), false)
-            .unwrap();
+        let node = tree.create_node(None, "root", vec![]).unwrap();
 
         tree.force(node, Actor::Operator, FakeMachine { id: 1 })
             .unwrap();
@@ -914,9 +810,7 @@ mod tests {
     fn hole_lifecycle_transitions_and_rejects_misuse() {
         let dir = tempfile::tempdir().unwrap();
         let tree = tree_at(&dir.path().join("run.jsonl"));
-        let node = tree
-            .create_node(None, "root", vec![], ForkShape::Exact(0), false)
-            .unwrap();
+        let node = tree.create_node(None, "root", vec![]).unwrap();
         tree.force(node, Actor::Operator, FakeMachine { id: 1 })
             .unwrap();
         tree.turn_start(node, "turn".into(), None).unwrap();
@@ -987,9 +881,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let log_path = dir.path().join("run.jsonl");
         let tree = tree_at(&log_path);
-        let node = tree
-            .create_node(None, "root", vec![], ForkShape::Exact(0), false)
-            .unwrap();
+        let node = tree.create_node(None, "root", vec![]).unwrap();
 
         // Unforced: rejected, same guard as turn_delta.
         assert!(matches!(
@@ -1049,9 +941,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let tree = tree_at(&dir.path().join("run.jsonl"));
 
-        let thunk = tree
-            .create_node(None, "a", vec![], ForkShape::Exact(0), false)
-            .unwrap();
+        let thunk = tree.create_node(None, "a", vec![]).unwrap();
         tree.node_cancelled(thunk, "abandoned".into()).unwrap();
         assert_eq!(
             tree.state(thunk),
@@ -1060,9 +950,7 @@ mod tests {
             })
         );
 
-        let running = tree
-            .create_node(None, "b", vec![], ForkShape::Exact(0), false)
-            .unwrap();
+        let running = tree.create_node(None, "b", vec![]).unwrap();
         tree.force(running, Actor::Operator, FakeMachine { id: 1 })
             .unwrap();
         tree.node_cancelled(running, "operator stop".into())
@@ -1080,32 +968,19 @@ mod tests {
     }
 
     #[test]
-    fn dynamic_fan_children_are_never_auto_forced() {
+    fn fanned_children_are_never_auto_forced() {
         let dir = tempfile::tempdir().unwrap();
         let tree = tree_at(&dir.path().join("run.jsonl"));
-        let parent = tree
-            .create_node(None, "fan-out", vec![], ForkShape::Dynamic, false)
-            .unwrap();
+        let parent = tree.create_node(None, "fan-out", vec![]).unwrap();
         tree.force(parent, Actor::Operator, FakeMachine { id: 0 })
             .unwrap();
 
-        let mut kids = Vec::new();
+        // autoForce=never: materializing any number of children under a
+        // forced parent never forces them.
         for i in 0..3 {
-            kids.push(
-                tree.create_node(
-                    Some(parent),
-                    &format!("child {i}"),
-                    vec![],
-                    ForkShape::Exact(0),
-                    false,
-                )
-                .unwrap(),
-            );
-        }
-        assert_eq!(tree.children(parent), Some(kids.clone()));
-        for kid in kids {
-            // autoForce=never: materializing a Dynamic-fan child never
-            // forces it, no matter the parent's fan badge.
+            let kid = tree
+                .create_node(Some(parent), &format!("child {i}"), vec![])
+                .unwrap();
             assert_eq!(tree.state(kid), Some(NodeState::Thunk));
         }
     }
@@ -1119,15 +994,7 @@ mod tests {
         let tree = tree_at(&log_path);
 
         // Parent is forced and running (as if mid-turn).
-        let parent = tree
-            .create_node(
-                None,
-                "parent",
-                vec!["Fs".into()],
-                ForkShape::Exact(1),
-                false,
-            )
-            .unwrap();
+        let parent = tree.create_node(None, "parent", vec!["Fs".into()]).unwrap();
         tree.force(parent, Actor::Operator, FakeMachine { id: 0 })
             .unwrap();
         tree.turn_start(parent, "parent turn".into(), None).unwrap();
@@ -1135,13 +1002,7 @@ mod tests {
         // A `runLLMTurnFork`-shaped request publishes a Thunk child —
         // never a running one.
         let child = tree
-            .create_node(
-                Some(parent),
-                "forked task",
-                vec!["Llm".into()],
-                ForkShape::Exact(1),
-                false,
-            )
+            .create_node(Some(parent), "forked task", vec!["Llm".into()])
             .unwrap();
         assert_eq!(tree.state(child), Some(NodeState::Thunk));
         assert_eq!(tree.session_of(child), None);
@@ -1193,58 +1054,22 @@ mod tests {
         assert!(matches!(child_events[3], LogEvent::NodeDone { .. }));
     }
 
-    // ---- cursor-paged node-id enumeration --------------------------------
+    // ---- node-id enumeration ---------------------------------------------
 
     #[test]
-    fn node_ids_after_pages_through_in_order() {
-        let dir = tempfile::tempdir().unwrap();
-        let tree = tree_at(&dir.path().join("run.jsonl"));
-        let ids: Vec<NodeId> = (0..5)
-            .map(|i| {
-                tree.create_node(None, &format!("n{i}"), vec![], ForkShape::Exact(0), false)
-                    .unwrap()
-            })
-            .collect();
-
-        let (page1, next1) = tree.node_ids_after(None, 2);
-        assert_eq!(page1, ids[0..2]);
-        assert_eq!(next1, Some(ids[1]));
-
-        let (page2, next2) = tree.node_ids_after(next1, 2);
-        assert_eq!(page2, ids[2..4]);
-        assert_eq!(next2, Some(ids[3]));
-
-        let (page3, next3) = tree.node_ids_after(next2, 2);
-        assert_eq!(page3, ids[4..5]);
-        assert_eq!(next3, None, "the last, partial page has no further cursor");
-
-        // Paging explicitly past the end (cursor = the last real id) is empty.
-        let (page4, next4) = tree.node_ids_after(Some(ids[4]), 2);
-        assert!(page4.is_empty());
-        assert_eq!(next4, None);
-    }
-
-    #[test]
-    fn node_ids_after_none_with_large_limit_returns_everything() {
+    fn node_ids_lists_every_minted_id_in_creation_order() {
         let dir = tempfile::tempdir().unwrap();
         let tree = tree_at(&dir.path().join("run.jsonl"));
         let ids: Vec<NodeId> = (0..3)
-            .map(|i| {
-                tree.create_node(None, &format!("n{i}"), vec![], ForkShape::Exact(0), false)
-                    .unwrap()
-            })
+            .map(|i| tree.create_node(None, &format!("n{i}"), vec![]).unwrap())
             .collect();
-        let (all, next) = tree.node_ids_after(None, usize::MAX);
-        assert_eq!(all, ids);
-        assert_eq!(next, None);
+        assert_eq!(tree.node_ids(), ids);
     }
 
     #[test]
-    fn node_ids_after_empty_tree_returns_empty_page() {
+    fn node_ids_on_an_empty_tree_is_empty() {
         let dir = tempfile::tempdir().unwrap();
         let tree: NodeTree<FakeMachine> = tree_at(&dir.path().join("run.jsonl"));
-        let (page, next) = tree.node_ids_after(None, 10);
-        assert!(page.is_empty());
-        assert_eq!(next, None);
+        assert!(tree.node_ids().is_empty());
     }
 }

@@ -45,20 +45,20 @@ use tidepool_mcp::CapturedOutput;
 use tidepool_repr::{DataConTable, Generation, SessionId};
 use tidepool_runtime::session::{
     classify_block, run_turn, BoundBinder, CompiledTurn, ResidentError, ResidentHole,
-    ResidentOutcome, ResidentSession, ScopeRetirement, SessionLib, TemplateSelector, TurnKind,
-    TurnRequest, TurnResult, TurnTemplate, DECL_TEMPLATE_SOURCE,
+    ResidentOutcome, ResidentSession, SessionLib, TemplateSelector, TurnKind, TurnRequest,
+    TurnResult, TurnTemplate, DECL_TEMPLATE_SOURCE,
 };
 use tidepool_runtime::DEFAULT_NURSERY_SIZE;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::oneshot;
 
 use crate::effect_trace::{EffectRecord, EffectTrace, TracingDispatcher};
 use crate::engine::{
     self, AsksSidecar, ClassifiedHole, EngineConfig, EngineError, HoleRouting, TurnOutcome,
     RESUME_HELPER,
 };
-use crate::forcing::{ForkShape, NodeTree, TreeError};
+use crate::forcing::{NodeTree, TreeError};
 use crate::log::{Actor, AnswerOutcome, LogWriter};
-use crate::provider::{DynModelProvider, Message, Role, StreamDelta, Usage};
+use crate::provider::{DynModelProvider, Message, Role, Usage};
 use crate::registry::{Checkout, CheckoutError};
 use crate::snapshot::{ContextSnapshot, SnapshotDigest};
 use crate::timing;
@@ -206,11 +206,6 @@ struct NodeConvo {
     /// the hole itself says what it owes. Cleared once the resume consumes it
     /// (a completion, or a re-suspend that replaces it with the fresh hole).
     resident_hole: Option<ResidentHole>,
-    /// Running sum of every assistant turn's [`Usage`] on this node — the
-    /// self-iterating-harness driver's emergency-compaction trigger,
-    /// [`Harness::node_usage`], sums this across every `runLLMTurn`
-    /// answerer / compaction node it drives per loop.
-    usage: Usage,
     /// The MOST RECENT turn's `input_tokens` (overwritten every turn, not
     /// summed) — the provider's per-round input token count already includes
     /// the whole re-sent transcript, so the latest value IS the node's real
@@ -285,17 +280,6 @@ struct PendingHole {
     /// non-serializable, e.g. a closure). `Harness::take_finalized_value`
     /// reads the finalize payload straight out of this, never through JSON.
     raw_request: Value,
-}
-
-/// A node's live heap/GC snapshot (observatory heap pane) — plain numbers off
-/// its resident `JitEffectMachine`, straight from
-/// [`tidepool_codegen::jit_machine::HeapStats`]: no new GC/rooting
-/// instrumentation, this is a read-only view of counters that already exist.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct HeapSummary {
-    pub nursery_bytes: usize,
-    pub live_bytes: usize,
-    pub gc_count: u64,
 }
 
 /// The escalation-ladder's rung-2 state (operator-in-the-loop): a child
@@ -581,13 +565,6 @@ pub struct Harness {
     /// whose retirement drops the value-plane frame and deregisters the roots
     /// it solely owns) live here until the exit is confirmed.
     pending_window_exits: Mutex<Vec<PendingWindowExit>>,
-    /// What a node's SCOPE retirement actually released, recorded at
-    /// [`Self::terminate_node`] and read back by [`Self::scope_retirement`].
-    /// The GC-root ledger's movement is the witness for accounting class 4, so
-    /// the receipt has to survive the node whose retirement produced it —
-    /// `convos` is gone by then. Keyed by node, so it is bounded by the run's
-    /// node count, not by the number of retirements.
-    scope_retirements: Mutex<HashMap<NodeId, ScopeRetirement>>,
     /// A just-created node's staged [`NodeSeed`] — a root's opening prompt or
     /// a fork child's inherited transcript, either way paired with its
     /// framing — between node creation and `force` (a thunk node has no live
@@ -683,19 +660,11 @@ impl ContextRef {
 }
 
 impl Harness {
-    /// The effect-row names of this harness's compiling decl list, in row
-    /// order — what a window-opening hole card states as "your effect row"
-    /// so a model never has to discover its capabilities through
-    /// compile-error rounds.
-    pub fn effect_names(&self) -> &[String] {
-        &self.cfg.effect_names
-    }
-
     /// The effect-row a window-opening hole card should STATE (PRD 21 C5):
-    /// [`Self::effect_names`] for a non-delegating config, or the narrow
+    /// `self.cfg.effect_names` for a non-delegating config, or the narrow
     /// `Delegate`-form row a delegating config's model-facing block actually
     /// compiles against — see [`EngineConfig::hole_card_effect_row`]. Never
-    /// used for tag lookup (`Self::effect_names`/`flush_effects` stay the
+    /// used for tag lookup (`self.cfg.effect_names`/`flush_effects` stay the
     /// real dispatched row).
     pub fn hole_card_effect_row(&self) -> Vec<String> {
         self.cfg.hole_card_effect_row()
@@ -740,7 +709,6 @@ impl Harness {
             provider,
             convos: Mutex::new(HashMap::new()),
             pending_window_exits: Mutex::new(Vec::new()),
-            scope_retirements: Mutex::new(HashMap::new()),
             pending: Mutex::new(HashMap::new()),
             escalations: Mutex::new(HashMap::new()),
             snapshots: Mutex::new(HashMap::new()),
@@ -748,28 +716,25 @@ impl Harness {
         })
     }
 
-    /// Drive one model turn via the provider over its `StreamSink` (see
-    /// `provider::StreamDelta`/`StreamSink`) — the sink is still wired so the
-    /// provider's own streaming path runs; nothing currently reads the
-    /// deltas past draining the channel. Shared by the root turn loop and the
-    /// fork/fanout answerer loops.
+    /// Drive one model turn via the provider — no `StreamSink`: nothing here
+    /// observes deltas, and the provider contract promises the same
+    /// assembled `TurnResponse` with `sink: None` as with one wired (see
+    /// `provider::oauth::codex_responses`'s doc). Shared by the root turn
+    /// loop and the fork/fanout answerer loops.
     async fn stream_turn(
         &self,
         transcript: &[Message],
         framing: Option<&str>,
     ) -> Result<engine::DrivenTurn, HarnessError> {
-        let (tx, mut rx) = mpsc::unbounded_channel::<StreamDelta>();
-        let provider = self.provider.as_ref();
-        let drive_fut =
-            engine::drive_model_turn(provider, transcript, self.cfg.max_tokens, framing, Some(tx));
-        tokio::pin!(drive_fut);
-        let result = loop {
-            tokio::select! {
-                res = &mut drive_fut => break res,
-                Some(_delta) = rx.recv() => {}
-            }
-        };
-        result.map_err(Into::into)
+        engine::drive_model_turn(
+            self.provider.as_ref(),
+            transcript,
+            Some(engine::DEFAULT_MAX_TOKENS),
+            framing,
+            None,
+        )
+        .await
+        .map_err(Into::into)
     }
 
     /// Drain `node`'s effect-trace buffer and write one `Event::Effect` per
@@ -873,20 +838,6 @@ impl Harness {
         &self.cfg
     }
 
-    /// `node`'s live heap/GC snapshot, straight off its resident
-    /// `JitEffectMachine` — what the observatory heap pane renders. `None`
-    /// when `node` has no live session (never forced, terminal) or during the
-    /// transient mid-turn gap while its session runs on the blocking pool.
-    pub fn heap_stats(&self, node: NodeId) -> Option<HeapSummary> {
-        let sid = self.tree.session_of(node)?;
-        let stats = self.tree.registry().peek(sid, Session::heap_stats)??;
-        Some(HeapSummary {
-            nursery_bytes: stats.nursery_bytes,
-            live_bytes: stats.live_bytes,
-            gc_count: stats.gc_count,
-        })
-    }
-
     /// Create a ROOT node as a thunk with the DEFAULT system framing
     /// ([`engine::SYSTEM_FRAMING`]). `title` seeds the teaser + first user
     /// turn. Equivalent to [`Self::create_root_framed`] with `framing: None`.
@@ -905,13 +856,9 @@ impl Harness {
         prompt: &str,
         framing: Option<String>,
     ) -> Result<NodeId, HarnessError> {
-        let node = self.tree.create_node(
-            None,
-            title,
-            self.cfg.effect_names.clone(),
-            ForkShape::Exact(0),
-            false,
-        )?;
+        let node = self
+            .tree
+            .create_node(None, title, self.cfg.effect_names.clone())?;
         // Seed the (not-yet-live) transcript with the operator's opening prompt
         // and the node's framing. The convo entry is created lazily at force
         // time; stash both in the pending seed map until then.
@@ -1068,7 +1015,6 @@ impl Harness {
                 suspend_table: None,
                 suspend_asks: AsksSidecar::default(),
                 resident_hole: None,
-                usage: Usage::default(),
                 last_input_tokens: 0,
                 framing,
                 last_turn_source: None,
@@ -1169,7 +1115,6 @@ impl Harness {
                     receipt.scopes_retired, receipt.bindings_retired, receipt.roots_released
                 );
             }
-            self.scope_retirements.lock().insert(node, receipt);
         }
     }
 
@@ -1352,8 +1297,6 @@ impl Harness {
                 reasoning_items: driven.reasoning_items.clone(),
             });
             convo.turn_seq += 1;
-            convo.usage.input_tokens += driven.usage.input_tokens;
-            convo.usage.output_tokens += driven.usage.output_tokens;
             // The latest turn's input_tokens IS the node's real context
             // size (the provider re-sends the whole transcript each round, so
             // its input count already includes every prior turn). Overwrite,
@@ -1532,8 +1475,6 @@ impl Harness {
                 reasoning_items: driven.reasoning_items.clone(),
             });
             convo.turn_seq += 1;
-            convo.usage.input_tokens += driven.usage.input_tokens;
-            convo.usage.output_tokens += driven.usage.output_tokens;
             convo.last_input_tokens = driven.usage.input_tokens;
         }
         Ok((driven.reply, driven.usage))
@@ -1566,93 +1507,39 @@ impl Harness {
                 .run_multi_item_block(node, block, imports, helpers)
                 .await;
         }
-        // PRD 21 C5: a delegating config's `runDelegate` wrap lives entirely
-        // in the Expr/Bind/BindDiscard TEMPLATES now (`engine::expr_turn_template`/
+        // A delegating config's `runDelegate` wrap lives entirely in the
+        // Expr/Bind/BindDiscard TEMPLATES (`engine::expr_turn_template`/
         // `engine::session_bind_template`, via `EngineConfig::delegate_wrap`)
         // — applied at each candidate's own RESULT position, never as a text
         // prepend to `block` itself. `block` (and so every candidate,
         // including `Decl`) therefore compiles the model's text UNMODIFIED,
         // which is what makes a top-level `data`/decl item legal in a
-        // delegating window: the wrap the OLD text-prepend applied uniformly
-        // to every candidate (including `Decl`, where it was nonsensical)
-        // now only ever reaches the candidates whose templates apply it.
-        // Session/contract context, peeked under the lock WITHOUT checking the
-        // session out, so a compile failure below never leaks it (the session
-        // is taken only once a compiled fragment is in hand).
-        let (session_module, session_include) = self.session_decl_context(node);
-        let bind_ctx = self.session_bind_context(node);
-
-        // The EXPR template's imports + row: the node's answer contract (when
-        // driving toward a `finalize`) contributes both halves — its `imports`
-        // put the answer type in scope, and its `ty` instantiates the ROW
-        // (`Finalize <ty>`) this turn compiles against — ONE computation
-        // (`turn_target`) resolves both the include dir and the stack string
+        // delegating window.
+        // The node's answer contract (when driving toward a `finalize`)
+        // instantiates the ROW (`Finalize <ty>`) this turn compiles against —
+        // `turn_target` resolves both the include dir and the stack string
         // from the SAME row, so they cannot disagree.
         let contract = self.answer_contract(node);
-        let mut expr_import_lines: Vec<String> = contract
-            .iter()
-            .flat_map(|c| c.imports.iter().cloned())
-            .collect();
-        if !imports.is_empty() {
-            expr_import_lines.push(imports.to_string());
-        }
-        expr_import_lines.extend(session_module.clone());
-        // Value-plane bindings (mounted names included — PRD 21 lane C1's
-        // mount seam) are visible to a plain EXPRESSION turn, not just a
-        // `x <- e` BIND: without this, `mounted.applyMounted 41` (a bare
-        // expression) failed "not in scope" even though the SAME name
-        // resolved fine as the right-hand side of a bind. GHCi does not
-        // distinguish these two shapes' name scope, and neither should this.
-        // Reuses `bind_ctx`'s already-computed import line (decl module +
-        // CURRENT `Val.G<g>` per live name — never a shadowed gen, which
-        // would be an ambiguous occurrence): a harmless duplicate of the decl
-        // import already in `session_module` when both are present.
-        if let Some((session_imports, ..)) = &bind_ctx {
-            if !session_imports.is_empty() {
-                expr_import_lines.push(session_imports.clone());
-            }
-        }
-        let expr_imports = expr_import_lines.join("\n");
         let target = self.cfg.turn_target(
             contract
                 .as_ref()
                 .map(|c| (c.ty.as_str(), c.imports.as_slice())),
         )?;
 
-        // The BIND/BINDDISCARD templates' imports: the CONTRACT's author
-        // imports (so a bind-classified statement can name the answer type
-        // and its siblings — without these, `x <- askUser @AuthorType …`
-        // failed "not in scope" and the corrective hint told the author a
-        // false story about module layout; companion dogfood 2026-08-14),
-        // plus user imports + the decl module + current Val modules.
-        let mut bind_import_lines: Vec<String> = contract
-            .iter()
-            .flat_map(|c| c.imports.iter().cloned())
-            .collect();
-        if !imports.is_empty() {
-            bind_import_lines.push(imports.to_string());
-        }
-        if let Some((session_imports, ..)) = &bind_ctx {
-            if !session_imports.is_empty() {
-                bind_import_lines.push(session_imports.clone());
-            }
-        }
-        let bind_imports = bind_import_lines.join("\n");
+        // Session/contract/bind-template context — exactly what
+        // `run_multi_item_block`'s singleton-item path gathers fresh per item
+        // (see `live_turn_context`'s doc); a single-item block is that same
+        // shape with one item.
+        let ctx = self.live_turn_context(node, imports, helpers, &target.include)?;
 
         // Build every template `run_turn` might select — the verdict, and so
-        // which one applies, isn't known until it returns. Resolved BEFORE
-        // this window (contract/session context above): for a new answer type
-        // that materializes an effects module (a filesystem write), which is
-        // not templating cost and would inflate this stage's attribution.
+        // which one applies, isn't known until it returns. Timed from HERE,
+        // not from the context gathering above: a new answer type
+        // materializing an effects module (a filesystem write) is not
+        // templating cost and would inflate this stage's attribution.
         let template_started = std::time::Instant::now();
         let expr_source =
-            engine::expr_turn_template(&self.cfg, &target.stack, block, &expr_imports, helpers);
-        let bind_source =
-            engine::session_bind_template(&self.cfg, "{{BINDERS}}", &bind_imports, helpers);
-        // BindDiscard: the same bind shape, yielding `pure ()` and splicing no
-        // binder (a literal `"()"`, not a `{{BINDERS}}` placeholder).
-        let binddiscard_source =
-            engine::session_bind_template(&self.cfg, "()", &bind_imports, helpers);
+            engine::expr_turn_template(&self.cfg, &target.stack, block, &ctx.expr_imports, helpers);
         let templates = vec![
             TurnTemplate {
                 kind: TemplateSelector::Decl,
@@ -1663,11 +1550,11 @@ impl Harness {
                 // Kept alongside (see below) — a compile failure carries no
                 // verdict tag, so a corrective error needs both candidate
                 // sources to remap against.
-                source: bind_source.clone(),
+                source: ctx.bind_source.clone(),
             },
             TurnTemplate {
                 kind: TemplateSelector::BindDiscard,
-                source: binddiscard_source,
+                source: ctx.binddiscard_source.clone(),
             },
             TurnTemplate {
                 kind: TemplateSelector::Expr,
@@ -1682,30 +1569,10 @@ impl Harness {
             0,
         );
 
-        // include: the contract-aware target include, plus the decl-plane dir
-        // (if any) — the same path `bind_ctx`'s session root resolves to.
-        let mut include = target.include;
-        if let Some(dir) = session_include {
-            include.push(dir);
-        }
-
-        // session-root/inject/gen: from the bind context when the node has a
-        // decl plane; a scratch dir otherwise. `run_turn` carries these
-        // unconditionally (the decl/expr verdicts don't use them, but the wire
-        // is unconditional), so a node with no decl plane at all (a rare
-        // degrade — see `force`'s `node_decl_plane`) still needs SOME writable
-        // directory to hand the extract; a real Bind verdict on such a node is
-        // rejected below (PRESERVE step) regardless of what the extract did
-        // with this scratch root.
-        let scratch_root;
-        let (session_root, inject_modules, gen) = match &bind_ctx {
-            Some((_, inject, root, gen)) => (root.clone(), inject.clone(), gen.0),
-            None => {
-                scratch_root = tempfile::TempDir::new()
-                    .map_err(|e| HarnessError::Resident(format!("scratch session root: {e}")))?;
-                (scratch_root.path().to_path_buf(), Vec::new(), 0)
-            }
-        };
+        let include = ctx.include.clone();
+        let session_root = ctx.session_root.clone();
+        let inject_modules = ctx.inject_modules.clone();
+        let gen = ctx.gen;
 
         // The DECL path needs the turn's import lines back: `drive_turn`
         // split them off the block, but a declaration's imports (author
@@ -1746,7 +1613,12 @@ impl Harness {
         .await
         .map_err(|e| HarnessError::Resident(format!("turn compile task join: {e}")))?
         .map_err(|e| {
-            HarnessError::Compile(render_compile_error(&e, block, &expr_source, &bind_source))
+            HarnessError::Compile(render_compile_error(
+                &e,
+                block,
+                &expr_source,
+                &ctx.bind_source,
+            ))
         })?;
 
         match outcome {
@@ -1790,7 +1662,7 @@ impl Harness {
                 compiled,
                 ..
             } if !binders.is_empty() => {
-                let Some((.., gen)) = bind_ctx else {
+                let Some(gen) = ctx.bind_ctx_gen else {
                     return Err(HarnessError::Resident(
                         "value-plane bind requires a node decl plane".into(),
                     ));
@@ -2416,7 +2288,7 @@ impl Harness {
     ) -> Result<engine::TurnOutcome, HarnessError> {
         let mut turns = 0;
         loop {
-            if turns >= self.cfg.max_turns {
+            if turns >= engine::DEFAULT_MAX_TURNS {
                 return Err(EngineError::NoBlock { turns }.into());
             }
             turns += 1;
@@ -2442,7 +2314,7 @@ impl Harness {
                         node = node.0,
                         round = turns,
                         "compile attempt failed (round {turns} of {}, corrective retry)",
-                        self.cfg.max_turns
+                        engine::DEFAULT_MAX_TURNS
                     );
                     let ghc = truncate_ghc_error(&msg);
                     self.push_user_turn(
@@ -2893,14 +2765,6 @@ impl Harness {
         Ok(())
     }
 
-    /// The running sum of every assistant turn's [`Usage`] logged on `node`
-    /// so far — what the self-iterating harness driver's emergency
-    /// compaction trigger accumulates across the `runLLMTurn` answerer nodes
-    /// it drives per loop. `None` if `node` has no live session.
-    pub fn node_usage(&self, node: NodeId) -> Option<Usage> {
-        self.convos.lock().get(&node).map(|c| c.usage)
-    }
-
     /// The most recently compiled turn's extracted Haskell on `node`
     /// (overwritten per compiled turn) — what the self-iterating harness
     /// driver posts to the operator GUI's last-turn-source pane
@@ -2917,10 +2781,8 @@ impl Harness {
     /// current context size (the provider re-sends the whole transcript each
     /// round, so its per-round input count already includes every prior turn).
     /// This is a HIGH-WATER mark, not a running sum: the self-iterating
-    /// harness's compaction threshold reads THIS, never
-    /// [`Self::node_usage`]'s summed `input_tokens`, which super-linearly
-    /// over-counts across a multi-round hole. `Some(0)` before the node's
-    /// first turn; `None` if `node` has no live session.
+    /// harness's compaction threshold reads THIS. `Some(0)` before the
+    /// node's first turn; `None` if `node` has no live session.
     pub fn node_last_input_tokens(&self, node: NodeId) -> Option<u64> {
         self.convos.lock().get(&node).map(|c| c.last_input_tokens)
     }
@@ -3081,7 +2943,7 @@ impl Harness {
                 child,
                 node,
                 site_ty.as_deref(),
-                self.cfg.max_turns,
+                engine::DEFAULT_MAX_TURNS,
                 &self.child_cfg,
                 finalize_pin,
             )
@@ -3315,7 +3177,7 @@ impl Harness {
                 node,
                 node,
                 ty.as_deref(),
-                self.cfg.max_turns,
+                engine::DEFAULT_MAX_TURNS,
                 &self.cfg,
                 finalize_pin,
             )
@@ -4276,13 +4138,9 @@ impl Harness {
         opening: String,
     ) -> Result<NodeId, HarnessError> {
         let checkpoint = prefix.len() as u64;
-        let child = self.tree.create_node(
-            Some(parent),
-            title,
-            self.cfg.effect_names.clone(),
-            ForkShape::Exact(0),
-            false,
-        )?;
+        let child = self
+            .tree
+            .create_node(Some(parent), title, self.cfg.effect_names.clone())?;
         self.tree.turn_forked(child, parent, checkpoint)?;
         let mut transcript = prefix;
         transcript.push(Message {
@@ -4447,8 +4305,8 @@ impl Harness {
     ///
     /// This is the ONE place [`Self::run_block`] checks a machine out, so it
     /// is where a concurrently-driven sibling realm's checkout race against
-    /// this SAME shared session (PRD 20 S1-L4) gets resolved by WAITING
-    /// rather than erroring: unlike retrying [`Self::drive_turn`] as a
+    /// this SAME shared session gets resolved by WAITING rather than
+    /// erroring: unlike retrying [`Self::drive_turn`] as a
     /// whole (NOT safe — it has already called the provider and appended
     /// the assistant reply to the transcript by the time a checkout could
     /// contend), retrying just this checkout is safe because nothing
@@ -4713,15 +4571,6 @@ impl Harness {
             .unwrap_or(ScopeId::ROOT)
     }
 
-    /// What retiring `node`'s scope released — `None` for a node that had no
-    /// scope, or has not been retired yet. The receipt outlives the node's
-    /// `convos` entry on purpose: `roots_released` is the number the GC root
-    /// ledger (`persistent_roots_count()`) must have moved by, and a caller
-    /// checking that has nothing else to compare against.
-    pub fn scope_retirement(&self, node: NodeId) -> Option<ScopeRetirement> {
-        self.scope_retirements.lock().get(&node).copied()
-    }
-
     /// Opt `node` into retrying (rather than failing fast) a
     /// [`Self::run_block`] checkout contested by [`HarnessError::TurnInFlight`]
     /// — see [`NodeConvo::retry_checkout_on_contention`]'s doc for the exact
@@ -4749,10 +4598,10 @@ impl Harness {
     /// in-place compaction relief: replace the context with the summary so
     /// the loop CONTINUES, never a loop-abort. The
     /// accumulated exchange is collapsed to one User-role message carrying
-    /// `summary` as prior-window context; the node's running [`Usage`] is reset
-    /// (`node_usage` now reflects only the small compacted window, so the
-    /// driver's threshold check does not immediately re-fire). The next hole
-    /// (or the current hole's next round) drives on under the smaller context.
+    /// `summary` as prior-window context; the node's `last_input_tokens` high-
+    /// water mark is reset (the driver's threshold check does not immediately
+    /// re-fire). The next hole (or the current hole's next round) drives on
+    /// under the smaller context.
     ///
     /// # Compaction MINTS A NEW CACHE ROOT
     ///
@@ -4794,10 +4643,8 @@ impl Harness {
         convo.turn_seq += 1;
         // Reset the running context-size meter: the live context is now just
         // this summary, so the driver's budget check must see the small
-        // compacted window, not the pre-compaction cumulative total. Both the
-        // summed `usage` and the high-water `last_input_tokens`
-        // reset — the next turn's input_tokens re-establishes the real size.
-        convo.usage = Usage::default();
+        // compacted window, not the pre-compaction cumulative total — the
+        // next turn's input_tokens re-establishes the real size.
         convo.last_input_tokens = 0;
         drop(convos);
         self.tree
@@ -5049,7 +4896,6 @@ mod tests {
             provider,
             convos: Mutex::new(HashMap::new()),
             pending_window_exits: Mutex::new(Vec::new()),
-            scope_retirements: Mutex::new(HashMap::new()),
             pending: Mutex::new(HashMap::new()),
             escalations: Mutex::new(HashMap::new()),
             snapshots: Mutex::new(HashMap::new()),
@@ -5085,7 +4931,6 @@ mod tests {
             provider,
             convos: Mutex::new(HashMap::new()),
             pending_window_exits: Mutex::new(Vec::new()),
-            scope_retirements: Mutex::new(HashMap::new()),
             pending: Mutex::new(HashMap::new()),
             escalations: Mutex::new(HashMap::new()),
             snapshots: Mutex::new(HashMap::new()),
@@ -5129,7 +4974,6 @@ mod tests {
                 suspend_table: None,
                 suspend_asks: AsksSidecar::default(),
                 resident_hole: None,
-                usage: Usage::default(),
                 last_input_tokens: 0,
                 framing: None,
                 last_turn_source: None,
@@ -5149,13 +4993,7 @@ mod tests {
         let harness = test_harness();
         let node = harness
             .tree()
-            .create_node(
-                None,
-                "test",
-                vec!["Console".to_string()],
-                ForkShape::Exact(0),
-                false,
-            )
+            .create_node(None, "test", vec!["Console".to_string()])
             .unwrap();
         harness
             .tree()
@@ -5218,7 +5056,7 @@ mod tests {
         let harness = test_harness();
         let node = harness
             .tree()
-            .create_node(None, "test", Vec::new(), ForkShape::Exact(0), false)
+            .create_node(None, "test", Vec::new())
             .unwrap();
         harness
             .tree()

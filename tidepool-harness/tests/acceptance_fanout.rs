@@ -48,8 +48,6 @@ fn usage() -> Usage {
 
 fn reply(content: &str) -> RecordedReply {
     RecordedReply {
-        node: NodeId(0),
-        turn: 0,
         content: content.to_string(),
         usage: usage(),
     }
@@ -377,7 +375,7 @@ async fn fanout_child_stuck_past_rung_one_aborts_clean_no_leaked_running_node() 
 
     // NO node anywhere in the tree is left Running — the leak this ladder
     // replaces is structurally impossible now.
-    let (all_ids, _) = harness.tree().node_ids_after(None, usize::MAX);
+    let all_ids = harness.tree().node_ids();
     for id in all_ids {
         assert!(
             !matches!(harness.tree().state(id), Some(NodeState::Running)),

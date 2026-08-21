@@ -59,8 +59,6 @@ fn header() -> LogHeader {
 /// compile happens. See this module's docs.
 fn prose(content: &str) -> RecordedReply {
     RecordedReply {
-        node: NodeId(0),
-        turn: 0,
         content: content.to_string(),
         usage: Usage {
             input_tokens: 100,

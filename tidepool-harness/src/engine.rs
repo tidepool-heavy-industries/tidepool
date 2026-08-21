@@ -705,7 +705,7 @@ fn classify_runllmturn_payload(
             .get("fan")
             .and_then(Json::as_u64)
             .map(|n| {
-                crate::tree::FanCount::try_from(n).map_err(|_| ClassifyError::OutOfRange {
+                u32::try_from(n).map_err(|_| ClassifyError::OutOfRange {
                     constructor: "RunLLMTurnWith",
                     field: "fan",
                     value: n,
@@ -729,10 +729,10 @@ fn classify_runllmturn_payload(
             });
         }
         if let Some(n) = fan {
-            if n.get() as usize != prompts.len() {
+            if n as usize != prompts.len() {
                 return Err(ClassifyError::FanMismatch {
                     constructor: "RunLLMTurnWith",
-                    declared: n.get() as usize,
+                    declared: n as usize,
                     actual: prompts.len(),
                 });
             }
@@ -740,7 +740,7 @@ fn classify_runllmturn_payload(
         Ok(HoleRouting::Fork {
             site,
             ty,
-            fan: fan.map(|n| FanBadge::Exact { n: n.get() }),
+            fan: fan.map(|n| FanBadge::Exact { n }),
             prompts,
             source: ForkSource::RunLLMTurn,
         })
@@ -1247,7 +1247,7 @@ pub fn extract_haskell_blocks(reply: &str) -> Vec<String> {
             body = Some(String::new());
         }
     }
-    // An unterminated final block still counts (same as the old parse).
+    // An unterminated final block still counts.
     close(&mut blocks, &mut body);
     blocks
 }
@@ -1424,21 +1424,16 @@ pub struct EngineConfig {
     /// for a pinned turn, so it stays correct regardless of what else got
     /// appended later.
     effects_dir: PathBuf,
-    /// Per-node turn cap — a model that never emits a runnable/answering block
-    /// is stopped after this many turns (config, default small).
-    pub max_turns: u32,
     /// Per-CHILD turn cap for a `runLLMTurnFanout` answerer: each of the N
     /// children gets this budget independently, so one
     /// pathological child can't consume the whole node's turn allowance the
     /// way a single shared cap would. Plain fork/return-control answerers
-    /// still use `max_turns`.
+    /// still use [`DEFAULT_MAX_TURNS`].
     pub max_child_turns: u32,
-    /// Per-turn output-token cap handed to the provider.
-    pub max_tokens: Option<u32>,
     /// The context-window budget (in tokens) the runtime watches for MID-LOOP
     /// emergency compaction (self-iterating-harness). DISTINCT from
-    /// [`Self::max_tokens`], which is the ~2048
-    /// per-turn *output* cap — this is the whole answerer session's
+    /// [`DEFAULT_MAX_TOKENS`], the per-turn *output* cap — this is the whole
+    /// answerer session's
     /// accumulated *context* size, summed across its turns. At ~80% of this,
     /// the driver forces a compact-to-text summary of the answerer transcript
     /// and replaces its context IN PLACE so the loop continues under a smaller
@@ -1469,9 +1464,20 @@ pub struct EngineConfig {
 
 /// Default context-window budget the emergency-compaction trigger watches.
 /// A representative small-model context window;
-/// distinct from [`EngineConfig::max_tokens`] (the 2048 per-turn output cap).
+/// distinct from [`DEFAULT_MAX_TOKENS`] (the per-turn output cap).
 /// The driver's `compaction_threshold_percent` (~80%) is taken against THIS.
 pub const DEFAULT_CONTEXT_WINDOW_TOKENS: u32 = 128_000;
+
+/// Per-node turn cap — a model that never emits a runnable/answering block is
+/// stopped after this many turns. Not a configurable knob: nothing in the
+/// workspace ever overrides it, so it is a plain constant rather than an
+/// `EngineConfig` field.
+pub const DEFAULT_MAX_TURNS: u32 = 8;
+
+/// Per-turn output-token cap handed to the provider. Not a configurable
+/// knob: nothing in the workspace ever overrides it, so it is a plain
+/// constant rather than an `EngineConfig` field.
+pub const DEFAULT_MAX_TOKENS: u32 = 2048;
 
 /// The Agent turn engine's decl list: `standard_decls()` (base9 + Ask +
 /// RunLLMTurn) with `Finalize` appended last —
@@ -1558,9 +1564,7 @@ impl EngineConfig {
             prelude_dir: PathBuf::from("."),
             project_lib: None,
             effects_dir: PathBuf::from("."),
-            max_turns: 1,
             max_child_turns: 1,
-            max_tokens: None,
             context_window_tokens: None,
             delegate_wrap: false,
         }
@@ -1616,9 +1620,7 @@ impl EngineConfig {
             prelude_dir,
             project_lib,
             effects_dir,
-            max_turns: 8,
             max_child_turns: 4,
-            max_tokens: Some(2048),
             context_window_tokens: Some(DEFAULT_CONTEXT_WINDOW_TOKENS),
             delegate_wrap: false,
         })
@@ -3106,14 +3108,12 @@ mod tests {
         );
     }
 
-    /// GHCi statement semantics (2026-08-20 change): a type signature and its
-    /// equation are two SEPARATE unindented lines, so they are two separate
-    /// items — exactly like typing them as two separate GHCi entries. The
-    /// downstream decl batcher (`run_multi_item_block`) re-joins a maximal
-    /// run of consecutive decl-shaped items into one generation, so the
-    /// signature and its binding still typecheck together. This test used to
-    /// assert the OLD blank-line-only semantics (signature + equation as one
-    /// item, split from `sq 7` only by the blank line between them).
+    /// GHCi statement semantics: a type signature and its equation are two
+    /// SEPARATE unindented lines, so they are two separate items — exactly
+    /// like typing them as two separate GHCi entries. The downstream decl
+    /// batcher (`run_multi_item_block`) re-joins a maximal run of
+    /// consecutive decl-shaped items into one generation, so the signature
+    /// and its binding still typecheck together.
     #[test]
     fn split_block_items_decl_then_expr_splits_by_line() {
         let block = "sq :: Int -> Int\nsq x = x * x\n\nsq 7";
@@ -3315,10 +3315,8 @@ mod tests {
         );
     }
 
-    /// A positional-sum answer type — no field labels at all — previously
-    /// had no shape a names-only synopsis could render (it degraded to the
-    /// bare type name); with field types on the table it now renders as a
-    /// fenced `data` document instead.
+    /// A positional-sum answer type — no field labels at all — renders as a
+    /// fenced `data` document.
     #[test]
     fn hole_card_renders_positional_sum_instead_of_degrading() {
         let mut table = DataConTable::new();
