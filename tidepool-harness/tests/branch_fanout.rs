@@ -27,7 +27,7 @@ mod support;
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU32, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use tidepool_harness::engine::EngineConfig;
@@ -35,6 +35,7 @@ use tidepool_harness::log::LogHeader;
 use tidepool_harness::provider::{
     ModelProvider, ProviderError, StreamSink, TurnRequest, TurnResponse, Usage,
 };
+use tidepool_harness::selfharness::operator::{ContinueSignal, FormShape, OperatorGate};
 use tidepool_harness::{
     answerer_decls, load_harness_source, Harness, LogObserver, SelfHarnessDriver,
 };
@@ -392,6 +393,144 @@ async fn branch_fanout_round_exhausted_child_folds_as_data_without_erasing_sibli
             outcome,
             &format!("ok:{i}"),
             "branch {i} must still carry its own answer at its own position"
+        );
+    }
+}
+
+/// What the gate-seam-parity test below records: every `node_seeded`/
+/// `node_finalized`/`node_failed` call the CONCURRENT driving path made,
+/// keyed by label — mirrors `labeled_branch.rs`'s `RoutingProbe` fields for
+/// the same three calls, minus the per-node routing bookkeeping that test
+/// needs and this one does not (every lifecycle call here goes through
+/// `self.gate` directly, never `resolve_gate`).
+#[derive(Default)]
+struct FanoutLifecycleProbe {
+    seeded: Mutex<Vec<(String, String)>>,
+    finalized: Mutex<Vec<(String, String)>>,
+    failed: Mutex<Vec<(String, String)>>,
+}
+
+struct FanoutLifecycleGate {
+    probe: Arc<FanoutLifecycleProbe>,
+}
+
+impl OperatorGate for FanoutLifecycleGate {
+    fn present_form(&self, _shape: &FormShape) -> serde_json::Value {
+        serde_json::json!(null)
+    }
+
+    fn await_continue(&self) -> ContinueSignal {
+        ContinueSignal::Continue
+    }
+
+    fn node_seeded(&self, label: &str, seed: &str) {
+        self.probe
+            .seeded
+            .lock()
+            .unwrap()
+            .push((label.to_string(), seed.to_string()));
+    }
+
+    fn node_finalized(&self, label: &str, value: &str) {
+        self.probe
+            .finalized
+            .lock()
+            .unwrap()
+            .push((label.to_string(), value.to_string()));
+    }
+
+    fn node_failed(&self, label: &str, reason: &str) {
+        self.probe
+            .failed
+            .lock()
+            .unwrap()
+            .push((label.to_string(), reason.to_string()));
+    }
+}
+
+/// The gate seam's node-lifecycle extensions
+/// (`node_seeded`/`node_finalized`/`node_failed`) must cross with the same
+/// fidelity for the CONCURRENT `drive_branch_fanout_child` path that
+/// `tests/labeled_branch.rs` already pins for the SEQUENTIAL
+/// `service_outer_branch` path: every sibling seeded at birth with its own
+/// authored prompt (not a composed hole card), a finalized value on the
+/// success path, and a typed failure reason on the round-exhaustion path —
+/// with no cross-talk between concurrently-driven siblings sharing one
+/// `Mutex`-guarded probe.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn branch_fanout_children_cross_the_gate_seam_with_sequential_fidelity() {
+    support::require_extract();
+    let _cache_guard = support::isolate_cache();
+
+    let mut scripted = nine_finalize_replies();
+    let starved = scripted
+        .iter_mut()
+        .find(|(needle, _)| *needle == "BRANCH-4")
+        .expect("BRANCH-4 is one of the nine scripted needles");
+    starved.1 = "Still weighing BRANCH-4; nothing to run yet.".to_string();
+
+    let probe = Arc::new(FanoutLifecycleProbe::default());
+    let gate_probe = probe.clone();
+    let (answers, outcomes) =
+        run_branch_fanout_cycle_with(KeyedProvider::new(scripted), 9, move |driver| {
+            driver.set_answerer_round_caps(1, 2);
+            driver.set_gate(Arc::new(FanoutLifecycleGate { probe: gate_probe }));
+        })
+        .await;
+
+    // Sanity: the same behavior the sibling test above already pins.
+    assert_eq!(answers, vec![0, 1, 2, 3, 5, 6, 7, 8]);
+    assert_eq!(outcomes.len(), 9);
+
+    let labels: Vec<String> = (1..=9).map(|i| format!("root/{i}-child")).collect();
+
+    {
+        let seeded = probe.seeded.lock().unwrap();
+        assert_eq!(
+            seeded.len(),
+            9,
+            "every one of the nine concurrent children must be seeded at birth: {seeded:?}"
+        );
+        for (i, label) in labels.iter().enumerate() {
+            let entry = seeded
+                .iter()
+                .find(|(l, _)| l == label)
+                .unwrap_or_else(|| panic!("{label} must have been seeded: {seeded:?}"));
+            assert_eq!(
+                entry.1,
+                format!("BRANCH-{i}"),
+                "the seed crossing the gate is the AUTHORED per-child prompt, not a \
+                 composed hole card"
+            );
+        }
+    }
+
+    {
+        let finalized = probe.finalized.lock().unwrap();
+        assert_eq!(
+            finalized.len(),
+            8,
+            "eight of the nine children finalize; only the starved BRANCH-4 sibling \
+             (root/5-child) does not: {finalized:?}"
+        );
+        assert!(
+            finalized.iter().all(|(l, _)| l != "root/5-child"),
+            "the starved child must never be attributed a finalized value: {finalized:?}"
+        );
+    }
+
+    {
+        let failed = probe.failed.lock().unwrap();
+        assert_eq!(
+            failed.len(),
+            1,
+            "exactly one child fails — the starved one: {failed:?}"
+        );
+        assert_eq!(failed[0].0, "root/5-child");
+        assert!(
+            failed[0].1.contains("ExitRoundsExhausted"),
+            "the failure reason is the InvocationExit rendering: {}",
+            failed[0].1
         );
     }
 }
