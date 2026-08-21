@@ -220,10 +220,7 @@ module Tidepool.Prelude
   , Proc(..), ok, Hit(..)
   , FileMeta(..), UpdateOutcome(..), UpdateOneOutcome(..), WriteOutcome(..)
   , UpdateAllOutcome(..), InsertAfterOutcome(..)
-    -- CommitDeltas: constructor only, no field selectors — its `commit`
-    -- selector collides with Tidepool.Event's `commit` builder (see
-    -- Tidepool.Records's export note); access fields via record-dot.
-  , Commit(..), StatusEntry(..), FileDelta(..), CommitDeltas(CommitDeltas)
+  , Commit(..), StatusEntry(..), FileDelta(..), CommitDeltas(..)
   , FsError(..), FileRead(..), GitError(..), LlmError(..), HttpError(..)
     -- * Text padding, chunking, and prefix utilities
     -- (Text chunking is `T.chunksOf`; the unqualified `chunksOf` is the list
@@ -310,7 +307,7 @@ import Control.Monad
   , (=<<), (>=>), (<=<)
   , foldM, foldM_
   )
-import Tidepool.Records (Proc(..), ok, Hit(..), FileMeta(..), UpdateOutcome(..), UpdateOneOutcome(..), WriteOutcome(..), UpdateAllOutcome(..), InsertAfterOutcome(..), Commit(..), StatusEntry(..), FileDelta(..), CommitDeltas(CommitDeltas), FsError(..), FileRead(..), GitError(..), LlmError(..), HttpError(..))
+import Tidepool.Records (Proc(..), ok, Hit(..), FileMeta(..), UpdateOutcome(..), UpdateOneOutcome(..), WriteOutcome(..), UpdateAllOutcome(..), InsertAfterOutcome(..), Commit(..), StatusEntry(..), FileDelta(..), CommitDeltas(..), FsError(..), FileRead(..), GitError(..), LlmError(..), HttpError(..))
 import Tidepool.Data.Time (UTCTime(..), formatISO8601, parseISO8601, toGregorian, formatDay, daysFromCivil, diffUTCTime, addUTCTime, epochMillis)
 import Tidepool.QQ.Fmt.Runtime
   (FSign(..), FAlign(..), fmtInt, fmtFrac, fmtStr, fmtChar, fmtSigned, fmtPlain)

@@ -23,13 +23,7 @@ module Tidepool.Records
   , Commit(..)
   , StatusEntry(..)
   , FileDelta(..)
-    -- CommitDeltas exports its CONSTRUCTOR but not its field selectors:
-    -- the `commit` selector collides with Tidepool.Event's `commit` (the
-    -- event-DSL builder) in any module importing both (live break: the
-    -- harness outer row's Green compile, 2026-08-20). Record-dot
-    -- (`cd.commit`, `cd.deltas`) resolves via HasField and needs no
-    -- selector in scope — bare-selector style is deprecated here anyway.
-  , CommitDeltas(CommitDeltas)
+  , CommitDeltas(..)
   , FsError(..)
   , FileRead(..)
   , GitError(..)

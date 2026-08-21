@@ -1,10 +1,14 @@
-{-# LANGUAGE NoImplicitPrelude, DuplicateRecordFields #-}
+{-# LANGUAGE NoImplicitPrelude, DuplicateRecordFields, NoFieldSelectors #-}
 
 -- | GENERATED from the Rust bridged-record structs in tidepool-bridge-effects
 -- (each carries `#[derive(CoreRecord)]`). DO NOT EDIT BY HAND: the Rust
 -- struct is the single source of truth for field order / name / type, and
 -- this file is regenerated + verified by the `bridged_records` test
 -- (`TIDEPOOL_REGEN_BRIDGED=1 cargo test -p tidepool-handlers bridged_records`).
+-- NoFieldSelectors: no field of any record here is exported as a top-level
+-- function — access is record-dot only (HasField). Prevents a field name
+-- (e.g. CommitDeltas's `commit`) from colliding with an unrelated binding
+-- of the same name elsewhere (e.g. Tidepool.Event's `commit` builder).
 module Tidepool.Records.Bridged
   ( Commit(..), StatusEntry(..), FileDelta(..), CommitDeltas(..), Proc(..), Hit(..), FileMeta(..) ) where
 

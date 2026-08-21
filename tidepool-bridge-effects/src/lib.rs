@@ -348,7 +348,7 @@ pub fn bridged_records_module() -> String {
         .collect::<Vec<_>>()
         .join(", ");
     let mut out = String::new();
-    out.push_str("{-# LANGUAGE NoImplicitPrelude, DuplicateRecordFields #-}\n\n");
+    out.push_str("{-# LANGUAGE NoImplicitPrelude, DuplicateRecordFields, NoFieldSelectors #-}\n\n");
     out.push_str(
         "-- | GENERATED from the Rust bridged-record structs in tidepool-bridge-effects\n",
     );
@@ -358,6 +358,10 @@ pub fn bridged_records_module() -> String {
     out.push_str(
         "-- (`TIDEPOOL_REGEN_BRIDGED=1 cargo test -p tidepool-handlers bridged_records`).\n",
     );
+    out.push_str("-- NoFieldSelectors: no field of any record here is exported as a top-level\n");
+    out.push_str("-- function — access is record-dot only (HasField). Prevents a field name\n");
+    out.push_str("-- (e.g. CommitDeltas's `commit`) from colliding with an unrelated binding\n");
+    out.push_str("-- of the same name elsewhere (e.g. Tidepool.Event's `commit` builder).\n");
     out.push_str(&format!(
         "module Tidepool.Records.Bridged\n  ( {exports} ) where\n\n"
     ));
