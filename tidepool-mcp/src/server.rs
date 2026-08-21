@@ -155,16 +155,6 @@ impl TidepoolMcpServerImpl {
             )]));
         }
 
-        // Reject unsafe/IO imports before compilation
-        for imp in req.imports.lines().map(str::trim).filter(|l| !l.is_empty()) {
-            if let Some(module) = rejected_import(imp) {
-                return Ok(CallToolResult::error(vec![Content::text(format!(
-                    "Blocked import: `{}` is not available in the Tidepool sandbox.",
-                    module,
-                ))]));
-            }
-        }
-
         let mut all_imports = aeson_imports();
         // Tidepool.QQ is injected ONLY when a quoter token appears: the
         // import alone drags the quoter home-module graph into every eval

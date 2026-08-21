@@ -375,42 +375,6 @@ pub fn normalize_input(v: &serde_json::Value) -> serde_json::Value {
 }
 
 // ---------------------------------------------------------------------------
-// Import blocklist
-// ---------------------------------------------------------------------------
-
-/// Blocked module prefixes. Returns the module name if the import should be rejected.
-pub(crate) fn rejected_import(import_str: &str) -> Option<&str> {
-    const BLOCKED: &[&str] = &[
-        "System.IO.Unsafe",
-        "System.IO",
-        "System.Process",
-        "System.Posix",
-        "System.Directory",
-        "System.Environment",
-        "GHC.IO",
-        "GHC.Conc",
-        "Foreign",
-        "Network",
-        "Control.Concurrent",
-    ];
-    // Extract module name: skip 'qualified' if present, then take the first token
-    let mut parts = import_str.split_whitespace();
-    let mut module = parts.next().unwrap_or("");
-    if module == "qualified" {
-        module = parts.next().unwrap_or("");
-    }
-    // Remove anything from '(' onwards (for imports like "Data.Map (Map)")
-    let module = module.split('(').next().unwrap_or("").trim();
-
-    for prefix in BLOCKED {
-        if module.starts_with(prefix) {
-            return Some(module);
-        }
-    }
-    None
-}
-
-// ---------------------------------------------------------------------------
 // Output capture
 // ---------------------------------------------------------------------------
 
@@ -550,22 +514,6 @@ mod tests {
             !src.contains("Tidepool.QQ"),
             "no-splice eval must not import Tidepool.QQ"
         );
-    }
-
-    #[test]
-    fn test_rejected_imports() {
-        assert!(rejected_import("System.IO.Unsafe (unsafePerformIO)").is_some());
-        assert!(rejected_import("System.Process (callCommand)").is_some());
-        assert!(rejected_import("System.Posix.Signals").is_some());
-        assert!(rejected_import("GHC.IO.Handle").is_some());
-        assert!(rejected_import("Network.Socket").is_some());
-        assert!(rejected_import("Control.Concurrent (forkIO)").is_some());
-        assert!(rejected_import("Foreign.Ptr").is_some());
-        // Safe imports should pass
-        assert!(rejected_import("Data.List (sort)").is_none());
-        assert!(rejected_import("Data.Map.Strict").is_none());
-        assert!(rejected_import("Tidepool.TextFormat").is_none());
-        assert!(rejected_import("qualified Data.Text as T").is_none());
     }
 
     #[test]
@@ -1381,20 +1329,6 @@ data Console a where
         assert_eq!(std::fs::read_to_string(&module).unwrap(), eff);
         assert_eq!(std::fs::read_to_string(&orch_module).unwrap(), orch);
         let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn test_rejected_import_edge_cases() {
-        // Qualified unsafe
-        assert!(rejected_import("qualified System.IO.Unsafe as Safe").is_some());
-        // Extra whitespace
-        assert!(rejected_import("  System.IO.Unsafe  ").is_some());
-        // Safe Data imports
-        assert!(rejected_import("Data.Map (Map, fromList)").is_none());
-        // Tidepool modules
-        assert!(rejected_import("Tidepool.Table").is_none());
-        // Empty string
-        assert!(rejected_import("").is_none());
     }
 
     #[test]
