@@ -22,7 +22,7 @@ use crate::frame::CoreFrame;
 use crate::tree::MapLayer;
 use crate::types::{DataConId, Literal, VarId};
 use crate::{CoreExpr, DataConTable, RecursiveTree};
-use std::collections::HashMap;
+use std::rc::Rc;
 
 /// Canonicalize a [`CoreExpr`] by applying all normalization rules to
 /// fixpoint.
@@ -60,12 +60,20 @@ fn apply_rules_once(expr: &CoreExpr, table: &DataConTable) -> (CoreExpr, usize) 
     let mut old_to_new: Vec<usize> = Vec::with_capacity(expr.nodes.len());
 
     // Scope-respecting bindings: `scoped_bindings[old_idx]` is the
-    // Let/LetRec binder -> rhs map actually visible AT that node, computed by
-    // a top-down (root-first) walk so an inner binder — or an opaque
-    // Lam/Case/Join binder with no resolvable rhs — correctly shadows an
-    // outer same-named one, rather than the last binding encountered in
+    // Let/LetRec binder -> rhs environment actually visible AT that node,
+    // computed by a top-down (root-first) walk so an inner binder — or an
+    // opaque Lam/Case/Join binder with no resolvable rhs — correctly shadows
+    // an outer same-named one, rather than the last binding encountered in
     // array order winning irrespective of scope. See `collect_scoped_bindings`.
-    let scoped_bindings = collect_scoped_bindings(expr);
+    #[allow(
+        clippy::expect_used,
+        reason = "normalize: cross-scope DAG sharing is unreachable from real \
+                  extractor/builder output (see collect_scoped_bindings' doc \
+                  comment); a hand-built or fuzzer-only tree that violates it \
+                  is a genuine bug to surface loudly, not to swallow"
+    )]
+    let scoped_bindings = collect_scoped_bindings(expr)
+        .expect("normalize: cross-scope DAG sharing detected (see collect_scoped_bindings)");
 
     for (old_idx, frame) in expr.nodes.iter().enumerate() {
         let mut mapped = frame.clone().map_layer(|child_old| old_to_new[child_old]);
@@ -96,34 +104,167 @@ fn apply_rules_once(expr: &CoreExpr, table: &DataConTable) -> (CoreExpr, usize) 
     (RecursiveTree { nodes: out }, last_mapped_idx)
 }
 
+/// A persistent (structurally-shared) binding environment: a cons-list of
+/// scope-entry frames, innermost first. Extending it (`bind`/`mask`) is an
+/// `Rc::new` + refcount bump, not a map copy, so threading it down N nested
+/// scopes costs O(N) total instead of the O(N^2) a clone-per-node `HashMap`
+/// scheme pays (findings 1+3, repr-bridge cross-model review).
+#[derive(Clone, Default)]
+struct ScopeEnv(Option<Rc<EnvNode>>);
+
+enum EnvNode {
+    /// `binder` resolves to the rhs at this (old) node index.
+    Bind {
+        binder: VarId,
+        rhs_old_idx: usize,
+        parent: ScopeEnv,
+    },
+    /// `binder` is masked: bound by an opaque `Lam`/`Case`-alt/`Join`
+    /// binder with no resolvable rhs. Still shadows any outer entry for the
+    /// same `VarId` so it doesn't get looked through to an unrelated outer
+    /// `Let`'s rhs.
+    Mask { binder: VarId, parent: ScopeEnv },
+}
+
+impl ScopeEnv {
+    fn bind(&self, binder: VarId, rhs_old_idx: usize) -> ScopeEnv {
+        ScopeEnv(Some(Rc::new(EnvNode::Bind {
+            binder,
+            rhs_old_idx,
+            parent: self.clone(),
+        })))
+    }
+
+    fn mask(&self, binder: VarId) -> ScopeEnv {
+        ScopeEnv(Some(Rc::new(EnvNode::Mask {
+            binder,
+            parent: self.clone(),
+        })))
+    }
+
+    fn get(&self, v: VarId) -> Option<usize> {
+        let mut cur = &self.0;
+        while let Some(node) = cur {
+            match node.as_ref() {
+                EnvNode::Bind {
+                    binder,
+                    rhs_old_idx,
+                    parent,
+                } => {
+                    if *binder == v {
+                        return Some(*rhs_old_idx);
+                    }
+                    cur = &parent.0;
+                }
+                EnvNode::Mask { binder, parent } => {
+                    if *binder == v {
+                        return None;
+                    }
+                    cur = &parent.0;
+                }
+            }
+        }
+        None
+    }
+}
+
+/// Chase a `Var` reference through `env` (old-index space), mirroring
+/// `resolve_var`'s bounded hop-chase but against the ORIGINAL (pre-rewrite)
+/// tree — used only to check whether two candidate environments for a
+/// DAG-shared node would resolve one of its arguments to different places
+/// (see `collect_scoped_bindings`).
+fn resolve_var_via_env(idx: usize, nodes: &[CoreFrame<usize>], env: &ScopeEnv) -> usize {
+    let mut current = idx;
+    let mut fuel = 10;
+    while fuel > 0 {
+        if let CoreFrame::Var(id) = &nodes[current] {
+            if let Some(rhs) = env.get(*id) {
+                current = rhs;
+                fuel -= 1;
+                continue;
+            }
+        }
+        break;
+    }
+    current
+}
+
+/// Would `frame`'s own scope-sensitive children (`PrimOp` args / `Con`
+/// fields — the only children `apply_rules_once` ever resolves through a
+/// node's OWN `scoped_bindings` entry) resolve to a different node under
+/// `a` vs `b`? Every other frame kind computes a `scoped_bindings` entry
+/// that's simply never read, so sharing one of those under differing
+/// environments is harmless — see `collect_scoped_bindings`.
+fn scope_sensitive_children_diverge(
+    frame: &CoreFrame<usize>,
+    nodes: &[CoreFrame<usize>],
+    a: &ScopeEnv,
+    b: &ScopeEnv,
+) -> bool {
+    let children: &[usize] = match frame {
+        CoreFrame::PrimOp { args, .. } => args,
+        CoreFrame::Con { fields, .. } => fields,
+        _ => return false,
+    };
+    children
+        .iter()
+        .any(|&c| resolve_var_via_env(c, nodes, a) != resolve_var_via_env(c, nodes, b))
+}
+
 /// Build, for every node index, the `Let`/`LetRec` binder -> rhs bindings
 /// that are actually in lexical scope there.
 ///
-/// A single top-down (root-first) walk, threading an environment that is
-/// cloned-and-extended on entry to a binding scope — mirroring how the
+/// A single top-down (root-first) walk, threading a persistent [`ScopeEnv`]
+/// that is push-extended on entry to a binding scope — mirroring how the
 /// shadow-aware passes (`PartialEval`, `subst`) thread their envs — so an
 /// inner binder correctly shadows an outer same-named one. `Lam`/`Case`-alt/
-/// `Join`-param binders have no resolvable rhs, but still MASK (remove) any
-/// outer entry for the same `VarId` while inside their scope, so a variable
+/// `Join`-param binders have no resolvable rhs, but still MASK any outer
+/// entry for the same `VarId` while inside their scope, so a variable
 /// shadowed by one of those opaque binders is never incorrectly looked
 /// through to an unrelated outer `Let`'s rhs.
 ///
 /// Explicit-stack (not recursive), matching this crate's convention for
 /// whole-tree walks (see `tree.rs`'s `extract_subtree`/`replace_subtree`).
-/// DAG-shared nodes are visited once, via whichever parent path reaches them
-/// first — acceptable because a node's meaning only depends on the SAME free
-/// variable being bound consistently across the paths that share it.
-fn collect_scoped_bindings(expr: &CoreExpr) -> Vec<HashMap<VarId, usize>> {
+///
+/// A DAG-shared node is fully processed on whichever parent path reaches it
+/// first (its subtree is not re-walked); every later path that reaches it
+/// instead checks whether the incoming environment would resolve that node's
+/// OWN scope-sensitive children (`PrimOp` args / `Con` fields — see
+/// `scope_sensitive_children_diverge`) to different places than the
+/// first-visit environment did, and returns `Err` if so — normalizing a
+/// shared `PrimOp`/`Con` under the wrong environment is exactly the
+/// unsoundness this guards against. Sharing any OTHER frame kind (or a
+/// `PrimOp`/`Con` whose args happen to resolve identically either way) is
+/// harmless and left alone, matching how `apply_rules_once` only ever reads
+/// a node's own `scoped_bindings` entry for those two frame kinds.
+///
+/// This can't happen from real extractor/builder output: the Haskell
+/// extractor assigns every syntactic Core node a fresh array slot (no
+/// expression-identity memoization), and no Rust-side builder or pass
+/// (`TreeBuilder`, `subst`, `beta`) reuses a non-leaf node's index across two
+/// different binding contexts (repr-bridge cross-model review, findings
+/// 1+3). `Err` here means a hand-built or fuzzer-only tree broke that
+/// invariant.
+fn collect_scoped_bindings(expr: &CoreExpr) -> Result<Vec<ScopeEnv>, String> {
     let len = expr.nodes.len();
-    let mut result = vec![HashMap::new(); len];
+    let mut result = vec![ScopeEnv::default(); len];
     if len == 0 {
-        return result;
+        return Ok(result);
     }
     let root = len - 1;
     let mut visited = vec![false; len];
-    let mut stack = vec![(root, HashMap::new())];
+    let mut stack = vec![(root, ScopeEnv::default())];
     while let Some((idx, env)) = stack.pop() {
         if visited[idx] {
+            if scope_sensitive_children_diverge(&expr.nodes[idx], &expr.nodes, &result[idx], &env) {
+                return Err(format!(
+                    "node {idx} ({:?}) is DAG-shared across two lexical scopes \
+                     that resolve one of its arguments to different places — \
+                     normalize's scoped analysis cannot soundly resolve it \
+                     under a single environment",
+                    expr.nodes[idx]
+                ));
+            }
             continue;
         }
         visited[idx] = true;
@@ -135,21 +276,17 @@ fn collect_scoped_bindings(expr: &CoreExpr) -> Vec<HashMap<VarId, usize>> {
                 stack.push((*arg, env));
             }
             CoreFrame::Lam { binder, body } => {
-                let mut body_env = env;
-                body_env.remove(binder);
-                stack.push((*body, body_env));
+                stack.push((*body, env.mask(*binder)));
             }
             CoreFrame::LetNonRec { binder, rhs, body } => {
                 // Non-recursive: rhs does NOT see its own binder.
                 stack.push((*rhs, env.clone()));
-                let mut body_env = env;
-                body_env.insert(*binder, *rhs);
-                stack.push((*body, body_env));
+                stack.push((*body, env.bind(*binder, *rhs)));
             }
             CoreFrame::LetRec { bindings, body } => {
                 let mut rec_env = env;
                 for (b, r) in bindings {
-                    rec_env.insert(*b, *r);
+                    rec_env = rec_env.bind(*b, *r);
                 }
                 for (_, r) in bindings {
                     stack.push((*r, rec_env.clone()));
@@ -163,10 +300,9 @@ fn collect_scoped_bindings(expr: &CoreExpr) -> Vec<HashMap<VarId, usize>> {
             } => {
                 stack.push((*scrutinee, env.clone()));
                 for alt in alts {
-                    let mut alt_env = env.clone();
-                    alt_env.remove(binder);
+                    let mut alt_env = env.mask(*binder);
                     for b in &alt.binders {
-                        alt_env.remove(b);
+                        alt_env = alt_env.mask(*b);
                     }
                     stack.push((alt.body, alt_env));
                 }
@@ -183,7 +319,7 @@ fn collect_scoped_bindings(expr: &CoreExpr) -> Vec<HashMap<VarId, usize>> {
                 // shadow-aware passes treat join points.
                 let mut rhs_env = env.clone();
                 for p in params {
-                    rhs_env.remove(p);
+                    rhs_env = rhs_env.mask(*p);
                 }
                 stack.push((*rhs, rhs_env));
                 stack.push((*body, env));
@@ -200,7 +336,7 @@ fn collect_scoped_bindings(expr: &CoreExpr) -> Vec<HashMap<VarId, usize>> {
             }
         }
     }
-    result
+    Ok(result)
 }
 
 const BOX_NAMES: &[&str] = &["I#", "W#", "C#", "F#", "D#"];
@@ -216,14 +352,14 @@ fn known_box_dataconid(table: &DataConTable, id: DataConId) -> bool {
 fn resolve_var(
     idx: usize,
     out: &[CoreFrame<usize>],
-    var_map: &HashMap<crate::VarId, usize>,
+    var_map: &ScopeEnv,
     old_to_new: &[usize],
 ) -> usize {
     let mut current_idx = idx;
     let mut fuel = 10;
     while fuel > 0 {
         if let CoreFrame::Var(id) = &out[current_idx] {
-            if let Some(&rhs_old_idx) = var_map.get(id) {
+            if let Some(rhs_old_idx) = var_map.get(*id) {
                 if rhs_old_idx < old_to_new.len() {
                     current_idx = old_to_new[rhs_old_idx];
                     fuel -= 1;
@@ -266,7 +402,7 @@ fn transform_unbox_prim_args(
     frame: &mut CoreFrame<usize>,
     out: &[CoreFrame<usize>],
     table: &DataConTable,
-    var_map: &HashMap<crate::VarId, usize>,
+    var_map: &ScopeEnv,
     old_to_new: &[usize],
 ) {
     if let CoreFrame::PrimOp { args, .. } = frame {
@@ -298,7 +434,7 @@ fn transform_canonicalize_effect_tag(
     frame: &mut CoreFrame<usize>,
     out: &[CoreFrame<usize>],
     table: &DataConTable,
-    var_map: &HashMap<crate::VarId, usize>,
+    var_map: &ScopeEnv,
     old_to_new: &[usize],
 ) {
     // F2: resolve qualified-name-first (falling back to the unqualified name
@@ -1019,6 +1155,49 @@ mod tests {
         let expected = expected_raw.extract_subtree(7);
         assert_eq!(normalized, expected);
     }
+
+    /// Findings 1+3 regression (repr-bridge cross-model review, 2026-08-20):
+    /// a single `PrimOp` node physically shared between an outer scope
+    /// (where its free variable `x` is bound to `1`) and a shadowing `Lam`'s
+    /// body (where `x` is masked). Real extractor/builder output can never
+    /// produce this (see `collect_scoped_bindings`'s doc comment) — this
+    /// hand-builds the tree directly, bypassing every real construction
+    /// path, exactly to exercise the validation.
+    ///
+    /// Pre-fix, `collect_scoped_bindings` silently recorded whichever parent
+    /// path reached the shared node first and treated the other path as
+    /// already-visited, so this test's `#[should_panic]` FAILS against the
+    /// old code (it normalizes without complaint, resolving `x` consistent
+    /// with only one of the two paths depending on stack order — silently
+    /// wrong, not loud). Post-fix it panics instead.
+    #[test]
+    #[should_panic(expected = "DAG-shared across two lexical scopes")]
+    fn cross_scope_shared_primop_node_is_rejected() {
+        let table = setup_table();
+        let x = VarId(1);
+        // let x = 1 in App(sharedAdd, \x -> sharedAdd)
+        // `sharedAdd` = PrimOp(IntAdd, [Var(x)]) is the SAME node index (2),
+        // reachable both directly (x bound to 1 by the outer let) and
+        // through the Lam (x masked).
+        let expr = RecursiveTree {
+            nodes: vec![
+                CoreFrame::Lit(Literal::LitInt(1)), // 0: outer let's rhs
+                CoreFrame::Var(x),                  // 1
+                CoreFrame::PrimOp {
+                    op: crate::types::PrimOpKind::IntAdd,
+                    args: vec![1],
+                }, // 2: the shared node
+                CoreFrame::Lam { binder: x, body: 2 }, // 3: shadows x, reuses node 2
+                CoreFrame::App { fun: 2, arg: 3 },  // 4: also uses node 2 directly
+                CoreFrame::LetNonRec {
+                    binder: x,
+                    rhs: 0,
+                    body: 4,
+                }, // 5
+            ],
+        };
+        let _ = normalize(&expr, &table);
+    }
 }
 
 #[cfg(test)]
@@ -1104,6 +1283,13 @@ mod proptest_normalize {
 
         #[test]
         fn prop_idempotence(expr in arb_recursive_tree()) {
+            // `arb_recursive_tree`'s `idx % i` child remapping can alias a
+            // non-leaf node's index across two unrelated lexical scopes — a
+            // shape real extractor/builder output never produces (see
+            // `collect_scoped_bindings`'s doc comment). Skip those synthetic,
+            // production-unreachable cases rather than expecting `normalize`
+            // to guess a single "right" environment for them.
+            prop_assume!(collect_scoped_bindings(&expr).is_ok());
             let table = setup_table();
             let once = normalize(&expr, &table);
             let twice = normalize(&once, &table);
@@ -1112,6 +1298,7 @@ mod proptest_normalize {
 
         #[test]
         fn prop_bounded_iteration(expr in arb_recursive_tree()) {
+            prop_assume!(collect_scoped_bindings(&expr).is_ok());
             let table = setup_table();
             let mut current = expr;
             let mut count = 0;
