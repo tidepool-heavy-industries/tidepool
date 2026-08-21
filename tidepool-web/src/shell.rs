@@ -1,6 +1,7 @@
-//! The full HTML document: inline CSS (Swiss / International Typographic
-//! Style) + a small vendored vanilla-JS Datastar client. No CDN, no external
-//! font, no build step — everything ships in one served page.
+//! `/legacy`'s full HTML document: inline CSS (Swiss / International
+//! Typographic Style) + [`CORE_JS`] (the wire contract's client half — see
+//! this crate's `CLAUDE.md`, shared verbatim with the d3 tree view) + [`JS`]
+//! (this page's own SSE-apply glue). No CDN, no external font, no build step.
 //!
 //! The page is ONE OUTLINE: every registered node renders as its own section,
 //! always visible, indented by tree depth (slash count in the `node_id`),
@@ -9,33 +10,6 @@
 //! and it is operator-initiated. The collapse class lives on the STABLE
 //! `.node-slot` wrapper, never on the SSE-patched inner `#panel-<node_id>`,
 //! so an operator's toggle survives any number of live patches.
-//!
-//! The client ([`CORE_JS`] + [`JS`]) speaks exactly the wire the renderer
-//! emits: it opens the `/sse` stream, applies `datastar-patch-elements`
-//! frames by replacing the same-`id` element in place, and — when a frame
-//! carries a panel the page has NEVER seen (a node born after page load) —
-//! MOUNTS it into `#tree` at its sorted position inside a freshly built
-//! `.node-slot` wrapper, so the operator watches the tree grow live. A
-//! `data-on-submit` form collects every `[data-bind]` input into a FLAT
-//! `{ <key>: <scalar> }` object (coerced by `data-kind`: int → number, bool →
-//! boolean, enum/text → string) and POSTs it to the node/interaction-scoped
-//! URL baked into the form's `@post(...)` literal.
-//!
-//! [`CORE_JS`] carries every bit of that plumbing (`collect`/`post`/
-//! `validateRequired`/`toast`/`wire`/`applyPatch`/`mountPanel`) as plain
-//! top-level functions, ONE COPY shared verbatim by this page and the d3
-//! tree view (`/`, [`crate::tree`]) — only the page-specific glue (which
-//! stream handler calls `applyPatch`, and how) differs, in [`JS`] here vs.
-//! [`crate::tree::TREE_JS`] there.
-//!
-//! ## Focus-preserving skip is gated on `data-rev` (F10, per-node)
-//! A focused/typed-in field is preserved across an SSE tick ONLY when the
-//! incoming fragment's `data-rev` (stamped by [`crate::render::node_panel`]
-//! on that node's panel root) matches the currently-mounted element's — i.e.
-//! the server re-rendered the SAME node's state. A DIFFERENT `data-rev`
-//! always replaces the element regardless of focus: it means THIS node's
-//! state itself changed, and skipping that replace on stale-focus grounds is
-//! exactly the bug this gate fixes.
 
 use maud::{html, Markup, PreEscaped, DOCTYPE};
 
@@ -110,11 +84,11 @@ fn slot_indent_style(node_id: &str) -> String {
     format!("margin-left: {}px", path_depth(node_id) * 14)
 }
 
-/// Award-grade Swiss / International Typographic Style stylesheet. One
-/// spacing unit, a three-step type scale in a fixed ratio, hairlines as the
-/// only delimiters, a single scarce accent spent on the places the operator
-/// is needed. Every native control is restyled — square, flat, no browser
-/// chrome — so the page reads as one composed sheet, not a form.
+/// Swiss / International Typographic Style stylesheet: one spacing unit, a
+/// three-step type scale in a fixed ratio, hairlines as the only delimiters,
+/// a single scarce accent spent on the places the operator is needed. Every
+/// native control is restyled — square, flat, no browser chrome — so the
+/// page reads as one composed sheet, not a form.
 pub const CSS: &str = r#"
 :root {
   --paper: #f5f3ec;
@@ -774,122 +748,5 @@ mod tests {
     fn masthead_omits_run_id_when_absent() {
         let doc = page(vec![], None).into_string();
         assert!(!doc.contains("class=\"run-id\""), "{doc}");
-    }
-
-    /// The page-specific glue ([`JS`]) opens the SSE stream and hands frames
-    /// to [`CORE_JS`]'s shared `applyPatch`; the flat-collect/`data-bind`
-    /// plumbing itself now lives in `CORE_JS` (shared with the tree view).
-    #[test]
-    fn js_collects_flat_and_opens_sse() {
-        assert!(JS.contains("new EventSource('/sse')"));
-        assert!(JS.contains("datastar-patch-elements"));
-        assert!(CORE_JS.contains("data-bind"));
-    }
-
-    /// A panel the page has never seen must be MOUNTED into #tree at its
-    /// sorted position (pinned slots first) — not appended to document.body
-    /// (the old orphaned-append bug: a node born after page load rendered
-    /// outside the layout entirely). Lives in the shared `CORE_JS` now.
-    #[test]
-    fn js_mounts_unknown_panels_into_the_tree_sorted() {
-        assert!(CORE_JS.contains("function mountPanel"));
-        assert!(
-            !CORE_JS.contains("document.body.appendChild(next)"),
-            "an unknown panel must never be orphan-appended to body"
-        );
-        assert!(CORE_JS.contains("getElementById('tree')"));
-        assert!(CORE_JS.contains("data-pinned"));
-        assert!(CORE_JS.contains("tree.insertBefore(slot, after || null)"));
-    }
-
-    /// The collapse toggle flips a class on the STABLE `.node-slot` wrapper,
-    /// never the SSE-patched inner panel — so an operator's collapse
-    /// survives any number of patches. Lives in the shared `CORE_JS` now.
-    #[test]
-    fn js_collapse_lives_on_the_stable_wrapper() {
-        assert!(CORE_JS.contains("[data-toggle]"));
-        assert!(CORE_JS.contains("btn.closest('.node-slot')"));
-        assert!(CORE_JS.contains("slot.classList.toggle('collapsed')"));
-    }
-
-    /// A required (visible, unselected) radio/enum group must block the
-    /// submit's `post(...)` call — the validation gate has to run and return
-    /// before `post` is reached, not after or in parallel. Lives in the
-    /// shared `CORE_JS` now.
-    #[test]
-    fn js_submit_is_gated_on_validate_required() {
-        assert!(CORE_JS.contains("function validateRequired"));
-        let gate_idx = CORE_JS
-            .find("if (!validateRequired(form)) return;")
-            .expect("submit is gated on validateRequired");
-        let post_idx = CORE_JS
-            .find(
-                "post(parsePost(form.getAttribute('data-on-submit')), form, collect(form), form);",
-            )
-            .expect("the submit post call exists");
-        assert!(
-            gate_idx < post_idx,
-            "the validateRequired gate must precede the post call"
-        );
-    }
-
-    /// A required-enum check inside an unchecked `Optional`'s
-    /// `.optional-inner` must never block submit — `collect_form_json` never
-    /// even reads that inner shape when `#present` is unchecked, so requiring
-    /// it would be requiring a field that isn't part of the answer at all.
-    /// Lives in the shared `CORE_JS` now.
-    #[test]
-    fn js_validate_required_skips_fields_disabled_by_an_unchecked_optional() {
-        assert!(CORE_JS.contains("function enabledByAncestors"));
-        let skip_idx = CORE_JS
-            .find("!isVisible(f) || !enabledByAncestors(f)")
-            .expect("the required check consults enabledByAncestors");
-        let validate_idx = CORE_JS
-            .find("function validateRequired")
-            .expect("validateRequired exists");
-        assert!(
-            validate_idx < skip_idx,
-            "the check lives inside validateRequired"
-        );
-    }
-
-    /// F10: the focus-preserving skip must be GATED on a matching `data-rev`
-    /// — computed and checked before the unconditional replace, so a
-    /// differing revision (this node's state changed) always reaches
-    /// `replaceWith` regardless of what currently has focus. Lives in the
-    /// shared `CORE_JS` now.
-    #[test]
-    fn js_focus_skip_gated_on_matching_data_rev() {
-        assert!(CORE_JS.contains("data-rev"));
-
-        let same_rev_idx = CORE_JS.find("const sameRev").expect("sameRev is computed");
-        let active_idx = CORE_JS
-            .find("const active = document.activeElement")
-            .expect("active is computed");
-        assert!(
-            same_rev_idx < active_idx,
-            "sameRev must be computed before the focus check reads document.activeElement"
-        );
-
-        let gate_idx = CORE_JS
-            .find("if (sameRev && active")
-            .expect("the skip is gated on sameRev");
-        let replace_idx = CORE_JS
-            .find("cur.replaceWith(next)")
-            .expect("the unconditional replace exists");
-        assert!(
-            gate_idx < replace_idx,
-            "the sameRev-gated early return must precede the unconditional replace"
-        );
-    }
-
-    /// The shared `CORE_JS` is embedded verbatim in the page — the wire
-    /// contract's ONE COPY requirement, checked at the byte level (not just
-    /// by matching substrings) so a future edit can't accidentally diverge
-    /// the embedded script from the constant this test suite pins.
-    #[test]
-    fn page_embeds_core_js_verbatim() {
-        let doc = page(vec![], None).into_string();
-        assert!(doc.contains(CORE_JS), "{doc}");
     }
 }

@@ -17,8 +17,9 @@
 //!   the failure block.
 //!
 //! Real-driver wiring lives in the sibling `tidepool-selfharness` binary,
-//! which boots the same server via [`tidepool_web::spawn_operator_server`]
-//! and wires the returned gate into `SelfHarnessDriver`.
+//! which boots the same server via
+//! [`tidepool_web::spawn_operator_server_multi`] and wires the returned gate
+//! into `SelfHarnessDriver`.
 
 #![warn(clippy::unwrap_used, clippy::expect_used)]
 use std::sync::Arc;
@@ -182,46 +183,34 @@ fn sample_form() -> FormShape {
     }
 }
 
-/// The steering form `root/1-finishes` raises — the free-text ask shape the
-/// real companion uses for model-initiated steering.
-fn steering_form() -> FormShape {
+/// A single-field product form — every demo form below except [`sample_form`]
+/// is exactly this shape with a different type/key/leaf.
+fn one_field_form(type_key: &str, key: &str, shape: FormShape) -> FormShape {
     FormShape::Product {
-        type_key: "OperatorSteering".into(),
-        constructor: "OperatorSteering".into(),
+        type_key: type_key.into(),
+        constructor: type_key.into(),
         fields: vec![FieldShape {
-            key: "steeringReply".into(),
-            shape: FormShape::String,
+            key: key.into(),
+            shape,
             doc: None,
         }],
         doc: None,
     }
+}
+
+/// The steering form `root/1-finishes` raises — the free-text ask shape the
+/// real companion uses for model-initiated steering.
+fn steering_form() -> FormShape {
+    one_field_form("OperatorSteering", "steeringReply", FormShape::String)
 }
 
 /// One of `root/2-concurrent`'s two concurrent forms — distinct fields so
 /// the two stacked asks are visually distinguishable on the page.
 fn sample_form_a() -> FormShape {
-    FormShape::Product {
-        type_key: "DemoBranchA".into(),
-        constructor: "DemoBranchA".into(),
-        fields: vec![FieldShape {
-            key: "hypothesis".into(),
-            shape: FormShape::String,
-            doc: None,
-        }],
-        doc: None,
-    }
+    one_field_form("DemoBranchA", "hypothesis", FormShape::String)
 }
 
 /// The other of `root/2-concurrent`'s two concurrent forms.
 fn sample_form_b() -> FormShape {
-    FormShape::Product {
-        type_key: "DemoBranchB".into(),
-        constructor: "DemoBranchB".into(),
-        fields: vec![FieldShape {
-            key: "confidence".into(),
-            shape: FormShape::Int,
-            doc: None,
-        }],
-        doc: None,
-    }
+    one_field_form("DemoBranchB", "confidence", FormShape::Int)
 }

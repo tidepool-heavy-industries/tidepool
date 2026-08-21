@@ -28,7 +28,7 @@ default methods (`node_gate`, `retire_node`, `node_seeded`,
   node registry: per-node seed/timeline/final/failure state), and
   [`WebGate`]: the `OperatorGate` impl, bound to one node. Also the `/`,
   `/legacy`, `/api/tree`, and `/node/{node}/panel` route handlers.
-- `render.rs` — [`NodeView`]/[`TimelineEntry`] → one node's
+- `render.rs` — [`NodeView`] (borrowing `server::TimelineItem`) → one node's
   `id="panel-<node>"` section: header (full path + collapse toggle + derived
   status badge), collapsed seed `<details>`, the timeline in chronological
   order, failure/final-value blocks, the turn-source history pane. Markup
@@ -52,8 +52,7 @@ default methods (`node_gate`, `retire_node`, `node_seeded`,
   `assets/d3.v7.9.0.min.js`, upstream `https://d3js.org`, no CDN at runtime).
 - `lib.rs` — `spawn_operator_server_multi(port)`: binds `127.0.0.1:<port>`,
   spawns the axum server on a background task, and returns `(AppState,
-  Arc<WebGate>)`; `spawn_operator_server(port)` keeps only the default
-  node's gate ([`DEFAULT_NODE_ID`]).
+  Arc<WebGate>)` — the gate bound to [`DEFAULT_NODE_ID`].
 - `bin/tidepool-selfharness-web.rs` — the server binary, plus a `--demo`
   mock node tree (loop node, a full seed→ask→finalize lifecycle, two
   concurrent stacked asks, a failure) for reviewing the page with no

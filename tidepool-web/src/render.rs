@@ -1,35 +1,10 @@
-//! One node's section markup — the minimal node-lifecycle model, rendered.
-//!
-//! A node is one append-only TIMELINE in a tree: seeds (a window opening
-//! with its starting prompt), notes, asks (an answered ask stays in place
-//! with its answer — it never vanishes), and outcomes (a finalized value or
-//! a failure) all land as entries at their true chronological position.
-//! One node can live several windows in sequence — the unified root does,
-//! every turn — and each chapter reads seed → notes/asks → outcome, in
-//! order. [`NodeView`]/[`TimelineEntry`] carry exactly that; [`node_panel`]
-//! renders it. Nothing harness-specific appears in this schema — companion
-//! drafts, tensions, gate verdicts all flow through it as content.
-//!
-//! [`node_panel`] always yields a single `id="panel-<node_id>"` element —
-//! the unit the SSE stream patches in place, and the page shell embeds one
-//! per registered node inside a stable `.node-slot` wrapper. The `data-rev`
-//! attribute on that root is part of the wire contract — [`crate::shell`]'s
-//! client JS compares it against the currently-mounted panel's to decide
-//! whether a focus-preserving skip applies — and `data-path` carries the
-//! node id so the client can MOUNT a panel it has never seen (a node born
-//! after page load) into the tree at the right position. Each ask within
-//! also carries its OWN `data-rev` (its interaction id, stable for its whole
-//! lifetime).
-//!
-//! Every input carries a dotted `data-bind` path and a scalar `data-kind`.
-//! The client collects those controls into a flat object and POSTs it to
-//! `/node/<node>/submit/<interaction>` (baked directly into the rendered
-//! `@post('...')` literal — no client-side URL assembly);
-//! [`crate::server::collect_form_json`] validates and reassembles the object
-//! using the same [`FormShape`] rendered here. Leaves bind at paths built by
-//! `tidepool_harness::selfharness::operator::child_path`. `shell::JS`'s
-//! collector treats a dotted path as an ordinary flat key; the server
-//! reassembles nesting guided by the shape.
+//! One node's section markup, from [`NodeView`] (borrowing
+//! [`crate::server::TimelineItem`] straight from its owned storage). The
+//! node-lifecycle model and the render/client wire contract (`data-rev`,
+//! `data-path`, `data-bind`/`data-kind`, the escaped-text-only rule) are this
+//! crate's `CLAUDE.md`, not retold here — [`node_panel`] and
+//! [`crate::server::collect_form_json`] are the two halves that contract
+//! binds together.
 //!
 //! A payload-bearing sum renders the discriminating choice and every
 //! variant's nested payload form, all at once (server-rendered, no
@@ -39,10 +14,6 @@
 //! `server::collect_form_json` reads the chosen constructor and only looks
 //! at that branch's fields; a self-contained `<style>` block (CSS `:has()`)
 //! visually hides every non-chosen branch.
-//!
-//! Model-authored text (seeds, notes, values, turn sources, failure reasons)
-//! renders as maud-ESCAPED TEXT CONTENT only — never markup, never an
-//! attribute value.
 
 use std::collections::VecDeque;
 
@@ -52,56 +23,33 @@ use tidepool_harness::selfharness::operator::{
     child_path, humanize_key, FieldShape, FormShape, VariantShape, ROOT_BIND_PATH,
 };
 
-/// One item in a node's chronological timeline: narration, an ask in one of
-/// its two lifecycle states (pending: a live form; answered: kept in place,
-/// read-only, with what the operator submitted), or a LIFECYCLE EVENT —
-/// seeds, finalized values, and failures are timeline entries at their true
-/// chronological position, not slots. One node can therefore live several
-/// windows in sequence (the unified root does, every turn): each chapter
-/// reads seed → notes/asks → outcome, in order.
-pub enum TimelineEntry<'a> {
-    /// Display-only narration (`note`), in post order with everything else.
-    Note(&'a str),
-    /// A window opened here with this starting prompt
-    /// ([`OperatorGate::node_seeded`]).
-    Seeded(&'a str),
-    /// A window finalized here with this JSON-rendered answer
-    /// ([`OperatorGate::node_finalized`]).
-    Finalized(&'a str),
-    /// A window ended here without an answer
-    /// ([`OperatorGate::node_failed`]).
-    Failed(&'a str),
-    /// A live `askUser` form awaiting submission.
-    PendingForm { id: u64, shape: &'a FormShape },
-    /// The live between-turns gate awaiting the operator.
-    PendingContinue { id: u64 },
-    /// A form that was answered — stays at its position with the reassembled
-    /// answer the harness actually received.
-    AnsweredForm {
-        id: u64,
-        shape: &'a FormShape,
-        answer: &'a Jv,
-    },
-    /// A continue gate that was clicked — with the operator's message, if
-    /// they attached one.
-    AnsweredContinue { id: u64, input: Option<&'a str> },
-}
+use crate::server::{AskState, TimelineItem};
 
-impl TimelineEntry<'_> {
+impl TimelineItem {
+    /// Whether this timeline item is a live ask awaiting the operator — the
+    /// only distinction [`status`] needs, and the only reason a note/seed/
+    /// outcome/answered-ask entry differs from a pending one.
     fn is_pending(&self) -> bool {
         matches!(
             self,
-            TimelineEntry::PendingForm { .. } | TimelineEntry::PendingContinue { .. }
+            TimelineItem::Ask {
+                state: AskState::PendingForm { .. } | AskState::PendingContinue { .. },
+                ..
+            }
         )
     }
 }
 
-/// Everything [`node_panel`] renders for one node — the timeline (which now
-/// carries the whole lifecycle) plus the render bookkeeping (`rev`, `done`,
-/// the turn-source history pane).
+/// Everything [`node_panel`] renders for one node — the timeline (carrying
+/// the whole lifecycle: narration, seeds/outcomes, and asks in either of
+/// their two states) borrowed straight from [`crate::server`]'s own storage
+/// (rendering pattern-matches `..` past the oneshot channels on the pending
+/// [`AskState`] variants — no second, mirrored enum needed just to hide
+/// them), plus the render bookkeeping (`rev`, `done`, the turn-source
+/// history pane).
 pub struct NodeView<'a> {
     pub node_id: &'a str,
-    pub timeline: Vec<TimelineEntry<'a>>,
+    pub(crate) timeline: &'a [TimelineItem],
     pub done: bool,
     pub turn_history: &'a VecDeque<String>,
     pub rev: u64,
@@ -117,7 +65,7 @@ pub struct NodeView<'a> {
 /// walks the timeline backward to the most recent lifecycle marker, so a
 /// revived node's earlier outcomes never speak for its current window.
 pub(crate) fn status(view: &NodeView) -> (&'static str, &'static str) {
-    if view.timeline.iter().any(TimelineEntry::is_pending) {
+    if view.timeline.iter().any(TimelineItem::is_pending) {
         return ("needs-you", "needs you");
     }
     if !view.done {
@@ -125,9 +73,9 @@ pub(crate) fn status(view: &NodeView) -> (&'static str, &'static str) {
     }
     for entry in view.timeline.iter().rev() {
         match entry {
-            TimelineEntry::Finalized(_) => return ("done", "done"),
-            TimelineEntry::Failed(_) => return ("failed", "failed"),
-            TimelineEntry::Seeded(_) => break,
+            TimelineItem::Finalized(_) => return ("done", "done"),
+            TimelineItem::Failed(_) => return ("failed", "failed"),
+            TimelineItem::Seeded(_) => break,
             _ => {}
         }
     }
@@ -146,7 +94,7 @@ pub(crate) fn status(view: &NodeView) -> (&'static str, &'static str) {
 pub fn node_panel(view: &NodeView) -> Markup {
     let (status_class, status_label) = status(view);
     html! {
-        div id=(panel_id(view.node_id)) data-rev=(view.rev) data-path=(view.node_id)
+        div id=(format!("panel-{}", view.node_id)) data-rev=(view.rev) data-path=(view.node_id)
             class=(format!("node-panel {status_class}")) {
             header class="node-head" {
                 button type="button" class="node-toggle" data-toggle=(view.node_id)
@@ -157,7 +105,7 @@ pub fn node_panel(view: &NodeView) -> Markup {
             div class="node-body" {
                 @if !view.timeline.is_empty() {
                     div class="timeline" data-node="timeline" {
-                        @for entry in &view.timeline {
+                        @for entry in view.timeline {
                             (timeline_entry(view.node_id, entry))
                         }
                     }
@@ -172,12 +120,6 @@ pub fn node_panel(view: &NodeView) -> Markup {
     }
 }
 
-/// The DOM id a node's panel root carries — `id="panel-<node_id>"`.
-#[must_use]
-pub fn panel_id(node_id: &str) -> String {
-    format!("panel-{node_id}")
-}
-
 /// A node's parent id, derived purely from the slash-separated path — same
 /// convention `shell.rs`'s per-slot indent depth uses. `None` for a root (no
 /// `/` at all), e.g. the default node or any other top-level id a caller
@@ -187,16 +129,6 @@ pub fn panel_id(node_id: &str) -> String {
 #[must_use]
 pub(crate) fn parent_id(node_id: &str) -> Option<&str> {
     node_id.rsplit_once('/').map(|(parent, _)| parent)
-}
-
-/// Re-render a JSON text pretty-printed when it parses, verbatim when it
-/// doesn't (a finalized value is always JSON today, but a non-JSON string
-/// must still display rather than vanish).
-fn pretty_json(value: &str) -> String {
-    serde_json::from_str::<Jv>(value)
-        .ok()
-        .and_then(|v| serde_json::to_string_pretty(&v).ok())
-        .unwrap_or_else(|| value.to_string())
 }
 
 /// The character budget a node section's title truncates to — long enough
@@ -235,7 +167,10 @@ pub(crate) fn truncate_title(label: &str) -> String {
 fn structured_value(value: &str) -> Markup {
     match serde_json::from_str::<Jv>(value) {
         Ok(Jv::Object(fields)) => structured_object(&fields),
-        _ => html! { pre { (pretty_json(value)) } },
+        Ok(other) => html! {
+            pre { (serde_json::to_string_pretty(&other).unwrap_or_else(|_| value.to_string())) }
+        },
+        Err(_) => html! { pre { (value) } },
     }
 }
 
@@ -288,36 +223,40 @@ fn structured_field(value: &Jv) -> Markup {
     }
 }
 
-/// One timeline item, dispatched by kind.
-fn timeline_entry(node_id: &str, entry: &TimelineEntry) -> Markup {
+/// One timeline item, dispatched by kind — an `Ask`'s pending [`AskState`]
+/// variants carry an oneshot resolver alongside the shape; `..` skips it,
+/// same as every other field this function doesn't render.
+fn timeline_entry(node_id: &str, entry: &TimelineItem) -> Markup {
     match entry {
-        TimelineEntry::Note(text) => html! {
+        TimelineItem::Note(text) => html! {
             p class="note" style="white-space: pre-wrap" { (text) }
         },
-        TimelineEntry::Seeded(seed) => html! {
+        TimelineItem::Seeded(seed) => html! {
             details class="seed" data-node="seed" {
                 summary { "seed — " (snippet(seed)) }
                 pre { (seed) }
             }
         },
-        TimelineEntry::Finalized(value) => html! {
+        TimelineItem::Finalized(value) => html! {
             div class="final" data-node="final" {
                 p class="eyebrow" { "Final value" }
                 (structured_value(value))
             }
         },
-        TimelineEntry::Failed(reason) => html! {
+        TimelineItem::Failed(reason) => html! {
             div class="failure" data-node="failure" {
                 p class="eyebrow failure-eyebrow" { "Ended without a value" }
                 (structured_value(reason))
             }
         },
-        TimelineEntry::PendingForm { id, shape } => ask_form(node_id, *id, shape),
-        TimelineEntry::PendingContinue { id } => ask_continue(node_id, *id),
-        TimelineEntry::AnsweredForm { id, shape, answer } => {
-            answered_form(node_id, *id, shape, answer)
-        }
-        TimelineEntry::AnsweredContinue { id, input } => answered_continue(node_id, *id, *input),
+        TimelineItem::Ask { id, state } => match state {
+            AskState::PendingForm { shape, .. } => ask_form(node_id, *id, shape),
+            AskState::PendingContinue { .. } => ask_continue(node_id, *id),
+            AskState::AnsweredForm { shape, answer } => answered_form(node_id, *id, shape, answer),
+            AskState::AnsweredContinue { input } => {
+                answered_continue(node_id, *id, input.as_deref())
+            }
+        },
     }
 }
 
@@ -697,7 +636,7 @@ mod tests {
 
     fn base_view<'a>(
         node_id: &'a str,
-        timeline: Vec<TimelineEntry<'a>>,
+        timeline: &'a [TimelineItem],
         turn_history: &'a VecDeque<String>,
         rev: u64,
     ) -> NodeView<'a> {
@@ -710,10 +649,59 @@ mod tests {
         }
     }
 
+    // ---- TimelineItem fixture constructors -----------------------------
+    // The pending [`AskState`] variants carry a real oneshot resolver in
+    // production; tests fabricate one and never look at it again.
+
+    fn tl_note(text: &str) -> TimelineItem {
+        TimelineItem::Note(text.to_string())
+    }
+    fn tl_seeded(text: &str) -> TimelineItem {
+        TimelineItem::Seeded(text.to_string())
+    }
+    fn tl_finalized(text: &str) -> TimelineItem {
+        TimelineItem::Finalized(text.to_string())
+    }
+    fn tl_failed(text: &str) -> TimelineItem {
+        TimelineItem::Failed(text.to_string())
+    }
+    fn tl_pending_form(id: u64, shape: FormShape) -> TimelineItem {
+        TimelineItem::Ask {
+            id,
+            state: AskState::PendingForm {
+                shape,
+                resolve: tokio::sync::oneshot::channel().0,
+            },
+        }
+    }
+    fn tl_pending_continue(id: u64) -> TimelineItem {
+        TimelineItem::Ask {
+            id,
+            state: AskState::PendingContinue {
+                resolve: tokio::sync::oneshot::channel().0,
+            },
+        }
+    }
+    fn tl_answered_form(id: u64, shape: FormShape, answer: Jv) -> TimelineItem {
+        TimelineItem::Ask {
+            id,
+            state: AskState::AnsweredForm { shape, answer },
+        }
+    }
+    fn tl_answered_continue(id: u64, input: Option<&str>) -> TimelineItem {
+        TimelineItem::Ask {
+            id,
+            state: AskState::AnsweredContinue {
+                input: input.map(str::to_string),
+            },
+        }
+    }
+
     #[test]
     fn node_panel_continue_renders_button() {
         let th = empty_history();
-        let view = base_view("n1", vec![TimelineEntry::PendingContinue { id: 0 }], &th, 0);
+        let items = [tl_pending_continue(0)];
+        let view = base_view("n1", &items, &th, 0);
         let html = node_panel(&view).into_string();
         assert!(html.contains("@post('/node/n1/continue/0')"));
     }
@@ -721,26 +709,26 @@ mod tests {
     #[test]
     fn node_panel_idle_is_quiet() {
         let th = empty_history();
-        let html = node_panel(&base_view("n1", vec![], &th, 0)).into_string();
+        let html = node_panel(&base_view("n1", &[], &th, 0)).into_string();
         assert!(html.starts_with("<div id=\"panel-n1\""));
         assert!(!html.contains("@post"));
         assert!(html.contains("Standby"), "{html}");
     }
 
-    /// F10 (per-node): `node_panel()` stamps the view's revision as
-    /// `data-rev` on the panel root, and a different revision produces a
-    /// different attribute value. `data-path` rides alongside so the client
-    /// can mount a never-seen panel into the tree.
+    /// `node_panel()` stamps the view's revision as `data-rev` on the panel
+    /// root, and a different revision produces a different attribute value.
+    /// `data-path` rides alongside so the client can mount a never-seen
+    /// panel into the tree.
     #[test]
     fn node_panel_stamps_data_rev_and_data_path() {
         let th = empty_history();
-        let a = node_panel(&base_view("n1", vec![], &th, 7)).into_string();
+        let a = node_panel(&base_view("n1", &[], &th, 7)).into_string();
         assert!(
             a.contains("id=\"panel-n1\" data-rev=\"7\" data-path=\"n1\""),
             "{a}"
         );
 
-        let b = node_panel(&base_view("n1", vec![], &th, 8)).into_string();
+        let b = node_panel(&base_view("n1", &[], &th, 8)).into_string();
         assert!(b.contains("id=\"panel-n1\" data-rev=\"8\""), "{b}");
         assert_ne!(a, b);
     }
@@ -749,8 +737,8 @@ mod tests {
     #[test]
     fn node_panel_id_is_scoped_per_node() {
         let th = empty_history();
-        let a = node_panel(&base_view("alpha", vec![], &th, 0)).into_string();
-        let b = node_panel(&base_view("beta", vec![], &th, 0)).into_string();
+        let a = node_panel(&base_view("alpha", &[], &th, 0)).into_string();
+        let b = node_panel(&base_view("beta", &[], &th, 0)).into_string();
         assert!(a.starts_with("<div id=\"panel-alpha\""));
         assert!(b.starts_with("<div id=\"panel-beta\""));
     }
@@ -760,7 +748,7 @@ mod tests {
     #[test]
     fn node_panel_header_has_full_path_toggle_and_status() {
         let th = empty_history();
-        let html = node_panel(&base_view("root/1-x", vec![], &th, 0)).into_string();
+        let html = node_panel(&base_view("root/1-x", &[], &th, 0)).into_string();
         assert!(html.contains(">root/1-x</h2>"), "{html}");
         assert!(html.contains("data-toggle=\"root/1-x\""), "{html}");
         assert!(html.contains(">running</span>"), "{html}");
@@ -770,7 +758,7 @@ mod tests {
     #[test]
     fn node_title_short_label_is_untouched() {
         let th = empty_history();
-        let html = node_panel(&base_view("root/1-x", vec![], &th, 0)).into_string();
+        let html = node_panel(&base_view("root/1-x", &[], &th, 0)).into_string();
         assert!(html.contains(">root/1-x</h2>"), "{html}");
         assert!(!html.contains('…'), "{html}");
         assert!(html.contains("title=\"root/1-x\""), "{html}");
@@ -791,7 +779,7 @@ mod tests {
             "must not cut mid-word: {expected}"
         );
 
-        let html = node_panel(&base_view(long_id, vec![], &th, 0)).into_string();
+        let html = node_panel(&base_view(long_id, &[], &th, 0)).into_string();
         assert!(html.contains(&format!(">{expected}</h2>")), "{html}");
         assert!(html.contains(&format!("title=\"{long_id}\"")), "{html}");
     }
@@ -804,14 +792,10 @@ mod tests {
     #[test]
     fn node_panel_status_derives_from_the_view() {
         let th = empty_history();
-        let shape = FormShape::String;
 
         let needs = node_panel(&base_view(
             "n",
-            vec![TimelineEntry::PendingForm {
-                id: 0,
-                shape: &shape,
-            }],
+            &[tl_pending_form(0, FormShape::String)],
             &th,
             0,
         ))
@@ -819,45 +803,33 @@ mod tests {
         assert!(needs.contains(">needs you</span>"), "{needs}");
 
         // Pending outranks done: a done node with a live gate needs you.
-        let mut parked = base_view(
-            "n",
-            vec![
-                TimelineEntry::Finalized("{\"ok\":true}"),
-                TimelineEntry::PendingContinue { id: 1 },
-            ],
-            &th,
-            0,
-        );
+        let parked_items = [tl_finalized("{\"ok\":true}"), tl_pending_continue(1)];
+        let mut parked = base_view("n", &parked_items, &th, 0);
         parked.done = true;
         let parked = node_panel(&parked).into_string();
         assert!(parked.contains(">needs you</span>"), "{parked}");
 
-        let mut done = base_view("n", vec![TimelineEntry::Finalized("{\"ok\":true}")], &th, 0);
+        let done_items = [tl_finalized("{\"ok\":true}")];
+        let mut done = base_view("n", &done_items, &th, 0);
         done.done = true;
         let done = node_panel(&done).into_string();
         assert!(done.contains(">done</span>"), "{done}");
 
-        let mut ended = base_view("n", vec![], &th, 0);
+        let mut ended = base_view("n", &[], &th, 0);
         ended.done = true;
         let ended = node_panel(&ended).into_string();
         assert!(ended.contains(">ended</span>"), "{ended}");
 
-        let mut failed = base_view("n", vec![TimelineEntry::Failed("round exhaustion")], &th, 0);
+        let failed_items = [tl_failed("round exhaustion")];
+        let mut failed = base_view("n", &failed_items, &th, 0);
         failed.done = true;
         let failed = node_panel(&failed).into_string();
         assert!(failed.contains(">failed</span>"), "{failed}");
 
         // A revived node's NEW window outranks the old chapter's outcome:
         // [Finalized (turn 1), Seeded (turn 2)] + done = ended, not done.
-        let mut revived = base_view(
-            "n",
-            vec![
-                TimelineEntry::Finalized("{\"ok\":true}"),
-                TimelineEntry::Seeded("next chapter"),
-            ],
-            &th,
-            0,
-        );
+        let revived_items = [tl_finalized("{\"ok\":true}"), tl_seeded("next chapter")];
+        let mut revived = base_view("n", &revived_items, &th, 0);
         revived.done = true;
         let revived = node_panel(&revived).into_string();
         assert!(revived.contains(">ended</span>"), "{revived}");
@@ -868,14 +840,10 @@ mod tests {
     #[test]
     fn node_panel_renders_seed_collapsed_and_escaped() {
         let th = empty_history();
-        let view = base_view(
-            "n1",
-            vec![TimelineEntry::Seeded(
-                "NODE root/1 — DISCOVER <script>alert(1)</script>",
-            )],
-            &th,
-            0,
-        );
+        let items = [tl_seeded(
+            "NODE root/1 — DISCOVER <script>alert(1)</script>",
+        )];
+        let view = base_view("n1", &items, &th, 0);
         let html = node_panel(&view).into_string();
         assert!(html.contains("data-node=\"seed\""), "{html}");
         assert!(
@@ -892,14 +860,10 @@ mod tests {
     #[test]
     fn node_panel_renders_final_value_structured_for_an_object() {
         let th = empty_history();
-        let mut view = base_view(
-            "n1",
-            vec![TimelineEntry::Finalized(
-                "{\"tag\":\"FinishLayer\",\"confidence\":\"High\"}",
-            )],
-            &th,
-            0,
-        );
+        let items = [tl_finalized(
+            "{\"tag\":\"FinishLayer\",\"confidence\":\"High\"}",
+        )];
+        let mut view = base_view("n1", &items, &th, 0);
         view.done = true;
         let html = node_panel(&view).into_string();
         assert!(html.contains("data-node=\"final\""), "{html}");
@@ -927,7 +891,8 @@ mod tests {
             "confidence": "High",
         })
         .to_string();
-        let mut view = base_view("n1", vec![TimelineEntry::Finalized(&value)], &th, 0);
+        let items = [tl_finalized(&value)];
+        let mut view = base_view("n1", &items, &th, 0);
         view.done = true;
         let html = node_panel(&view).into_string();
 
@@ -951,7 +916,8 @@ mod tests {
     fn node_panel_structured_final_value_escapes_field_text() {
         let th = empty_history();
         let value = "{\"note\":\"<script>alert(1)</script>\"}";
-        let mut view = base_view("n1", vec![TimelineEntry::Finalized(value)], &th, 0);
+        let items = [tl_finalized(value)];
+        let mut view = base_view("n1", &items, &th, 0);
         view.done = true;
         let html = node_panel(&view).into_string();
         assert!(!html.contains("<script>alert"), "{html}");
@@ -964,12 +930,8 @@ mod tests {
     #[test]
     fn node_panel_non_object_final_value_falls_back_to_pre() {
         let th = empty_history();
-        let mut view = base_view(
-            "n1",
-            vec![TimelineEntry::Finalized("\"turn 1 answer\"")],
-            &th,
-            0,
-        );
+        let items = [tl_finalized("\"turn 1 answer\"")];
+        let mut view = base_view("n1", &items, &th, 0);
         view.done = true;
         let html = node_panel(&view).into_string();
         assert!(html.contains("<pre>"), "{html}");
@@ -981,14 +943,10 @@ mod tests {
     #[test]
     fn node_panel_renders_failure_structured_for_an_object() {
         let th = empty_history();
-        let mut view = base_view(
-            "n1",
-            vec![TimelineEntry::Failed(
-                "{\"tag\":\"RoundExhaustion\",\"detail\":\"8 rounds without finalize\"}",
-            )],
-            &th,
-            0,
-        );
+        let items = [tl_failed(
+            "{\"tag\":\"RoundExhaustion\",\"detail\":\"8 rounds without finalize\"}",
+        )];
+        let mut view = base_view("n1", &items, &th, 0);
         view.done = true;
         let html = node_panel(&view).into_string();
         assert!(html.contains("data-node=\"failure\""), "{html}");
@@ -1001,14 +959,8 @@ mod tests {
     #[test]
     fn node_panel_renders_failure_reason() {
         let th = empty_history();
-        let mut view = base_view(
-            "n1",
-            vec![TimelineEntry::Failed(
-                "round exhaustion — 8 rounds without finalize",
-            )],
-            &th,
-            0,
-        );
+        let items = [tl_failed("round exhaustion — 8 rounds without finalize")];
+        let mut view = base_view("n1", &items, &th, 0);
         view.done = true;
         let html = node_panel(&view).into_string();
         assert!(html.contains("data-node=\"failure\""), "{html}");
@@ -1022,21 +974,14 @@ mod tests {
     #[test]
     fn node_panel_renders_chapters_in_order() {
         let th = empty_history();
-        let view = base_view(
-            "root",
-            vec![
-                TimelineEntry::Seeded("turn 1 brief"),
-                TimelineEntry::Note("working"),
-                TimelineEntry::Finalized("\"turn 1 answer\""),
-                TimelineEntry::AnsweredContinue {
-                    id: 0,
-                    input: Some("steer"),
-                },
-                TimelineEntry::Seeded("turn 2 brief"),
-            ],
-            &th,
-            0,
-        );
+        let items = [
+            tl_seeded("turn 1 brief"),
+            tl_note("working"),
+            tl_finalized("\"turn 1 answer\""),
+            tl_answered_continue(0, Some("steer")),
+            tl_seeded("turn 2 brief"),
+        ];
+        let view = base_view("root", &items, &th, 0);
         let html = node_panel(&view).into_string();
         let p = |needle: &str| {
             html.find(needle)
@@ -1057,25 +1002,12 @@ mod tests {
     #[test]
     fn node_panel_timeline_keeps_chronology_and_answered_asks() {
         let th = empty_history();
-        let shape = FormShape::String;
-        let answer = json!("keep going");
-        let view = base_view(
-            "n1",
-            vec![
-                TimelineEntry::Note("about to ask"),
-                TimelineEntry::AnsweredForm {
-                    id: 3,
-                    shape: &shape,
-                    answer: &answer,
-                },
-                TimelineEntry::PendingForm {
-                    id: 7,
-                    shape: &shape,
-                },
-            ],
-            &th,
-            42,
-        );
+        let items = [
+            tl_note("about to ask"),
+            tl_answered_form(3, FormShape::String, json!("keep going")),
+            tl_pending_form(7, FormShape::String),
+        ];
+        let view = base_view("n1", &items, &th, 42);
         let html = node_panel(&view).into_string();
 
         let note_pos = html.find("about to ask").expect("note rendered");
@@ -1104,19 +1036,11 @@ mod tests {
     #[test]
     fn node_panel_stacks_every_pending_ask_with_its_own_rev() {
         let th = empty_history();
-        let shape = FormShape::String;
-        let view = base_view(
-            "n1",
-            vec![
-                TimelineEntry::PendingForm {
-                    id: 3,
-                    shape: &shape,
-                },
-                TimelineEntry::PendingContinue { id: 7 },
-            ],
-            &th,
-            42,
-        );
+        let items = [
+            tl_pending_form(3, FormShape::String),
+            tl_pending_continue(7),
+        ];
+        let view = base_view("n1", &items, &th, 42);
         let html = node_panel(&view).into_string();
 
         assert!(html.contains("id=\"ask-n1-3\" data-rev=\"3\""), "{html}");
@@ -1132,19 +1056,11 @@ mod tests {
     #[test]
     fn stacked_pending_asks_each_show_a_visible_ask_id_label() {
         let th = empty_history();
-        let shape = FormShape::String;
-        let view = base_view(
-            "n1",
-            vec![
-                TimelineEntry::PendingForm {
-                    id: 3,
-                    shape: &shape,
-                },
-                TimelineEntry::PendingContinue { id: 7 },
-            ],
-            &th,
-            42,
-        );
+        let items = [
+            tl_pending_form(3, FormShape::String),
+            tl_pending_continue(7),
+        ];
+        let view = base_view("n1", &items, &th, 42);
         let html = node_panel(&view).into_string();
 
         assert!(html.contains("ask #3"), "{html}");
@@ -1159,18 +1075,11 @@ mod tests {
     #[test]
     fn post_urls_percent_encode_slash_path_node_ids() {
         let th = empty_history();
-        let view = base_view(
-            "root/1-x",
-            vec![
-                TimelineEntry::PendingForm {
-                    id: 0,
-                    shape: &FormShape::String,
-                },
-                TimelineEntry::PendingContinue { id: 1 },
-            ],
-            &th,
-            0,
-        );
+        let items = [
+            tl_pending_form(0, FormShape::String),
+            tl_pending_continue(1),
+        ];
+        let view = base_view("root/1-x", &items, &th, 0);
         let html = node_panel(&view).into_string();
         assert!(
             html.contains("@post('/node/root%2F1-x/submit/0')"),
@@ -1191,25 +1100,14 @@ mod tests {
     #[test]
     fn node_panel_renders_answered_continue_with_and_without_input() {
         let th = empty_history();
-        let with = base_view(
-            "n1",
-            vec![TimelineEntry::AnsweredContinue {
-                id: 1,
-                input: Some("focus on receipts"),
-            }],
-            &th,
-            0,
-        );
+        let with_items = [tl_answered_continue(1, Some("focus on receipts"))];
+        let with = base_view("n1", &with_items, &th, 0);
         let html = node_panel(&with).into_string();
         assert!(html.contains("Continued, with input"), "{html}");
         assert!(html.contains("focus on receipts"), "{html}");
 
-        let without = base_view(
-            "n1",
-            vec![TimelineEntry::AnsweredContinue { id: 1, input: None }],
-            &th,
-            0,
-        );
+        let without_items = [tl_answered_continue(1, None)];
+        let without = base_view("n1", &without_items, &th, 0);
         let html = node_panel(&without).into_string();
         assert!(html.contains("Continued"), "{html}");
     }
@@ -1218,12 +1116,8 @@ mod tests {
     #[test]
     fn node_panel_escapes_notes() {
         let th = empty_history();
-        let view = base_view(
-            "n1",
-            vec![TimelineEntry::Note("<b>second</b> note")],
-            &th,
-            0,
-        );
+        let items = [tl_note("<b>second</b> note")];
+        let view = base_view("n1", &items, &th, 0);
         let html = node_panel(&view).into_string();
         assert!(
             html.contains("&lt;b&gt;second&lt;/b&gt; note"),
@@ -1238,7 +1132,8 @@ mod tests {
         let history = VecDeque::from([
             "resume (Approve :: Decision) -- <script>alert(1)</script>".to_string()
         ]);
-        let view = base_view("n1", vec![TimelineEntry::Note("a note")], &history, 0);
+        let items = [tl_note("a note")];
+        let view = base_view("n1", &items, &history, 0);
         let html = node_panel(&view).into_string();
         assert!(html.contains("Haskell turns (1)"), "{html}");
         assert!(!html.contains("<script>alert"), "{html}");
@@ -1262,7 +1157,7 @@ mod tests {
             "pure (toJSON 2) -- middle".to_string(),
             "pure (toJSON 3) -- newest".to_string(),
         ]);
-        let view = base_view("n1", vec![], &history, 0);
+        let view = base_view("n1", &[], &history, 0);
         let html = node_panel(&view).into_string();
         assert!(html.contains("Haskell turns (3)"), "{html}");
         let p1 = html.find("turn 1 —").expect("oldest entry rendered");
@@ -1382,7 +1277,7 @@ mod tests {
         assert!(html.contains(":has(input[data-bind=\"destination\"][value=\"Ssh\"]:checked)"));
     }
 
-    /// F4/DONE: DISPLAY labels are humanized (`releaseNote` -> "Release
+    /// DISPLAY labels are humanized (`releaseNote` -> "Release
     /// note", `NeedsReview`-style constructors -> "Needs review") while every
     /// submitted bind path keeps the exact source key. Ties render + collect
     /// together: paths this test scrapes out of the rendered HTML are fed

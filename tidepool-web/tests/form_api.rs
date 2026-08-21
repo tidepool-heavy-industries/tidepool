@@ -1,6 +1,6 @@
 //! HTTP-level integration tests for the testing-convenience form API
 //! (`tidepool_web::formapi`): `GET`/`POST /node/{node}/api/form` mounted
-//! alongside the browser routes, gated by an explicit [`FormApiConfig`].
+//! alongside the browser routes, gated by an explicit `enabled` bool.
 //!
 //! Same shape as `tests/operator_gate.rs`: boot the real router on an
 //! ephemeral loopback port, drive it with a real client, prove the round
@@ -12,7 +12,7 @@ use std::time::Duration;
 use reqwest::Client;
 use serde_json::{json, Value};
 use tidepool_harness::selfharness::operator::{FieldShape, FormShape, OperatorGate};
-use tidepool_web::{router_with_form_api, AppState, FormApiConfig};
+use tidepool_web::{router_with_form_api, AppState};
 use tokio::net::TcpListener;
 
 fn sample_spec() -> FormShape {
@@ -42,7 +42,7 @@ async fn boot(enabled: bool) -> (SocketAddr, AppState) {
     let state = AppState::new();
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
-    let app = router_with_form_api(state.clone(), FormApiConfig { enabled });
+    let app = router_with_form_api(state.clone(), enabled);
     tokio::spawn(async move {
         axum::serve(listener, app).await.unwrap();
     });

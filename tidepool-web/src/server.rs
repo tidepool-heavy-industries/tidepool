@@ -37,28 +37,8 @@
 //! over the SAME pending state; see [`crate::formapi`] for the wire shape and
 //! hardening properties.
 //!
-//! # The timeline is append-only
-//!
-//! Notes and asks land on a node's timeline in true chronological order and
-//! STAY there for the node's lifetime: resolving an ask replaces it IN PLACE
-//! with its answered form (what the operator submitted, kept read-only) —
-//! it never vanishes, and notes are never cleared. The stream above an ask
-//! is that ask's context; erasing either would erase the other's meaning.
-//! Publishing never supersedes an existing pending ask on the same node —
-//! concurrent cognition windows (fanout/fork `RunLLMTurn`) each get their
-//! own entry and coexist until answered, in any resolution order.
-//!
-//! # The gate
-//!
-//! [`OperatorGate`] is SYNC-BLOCKING by contract (the driver calls it from a
-//! blocking context). A [`WebGate`] is bound to exactly one `node_id`
-//! ([`AppState::register_node`] mints it); [`WebGate::present_form`] and
-//! [`WebGate::await_continue`] publish a NEW ask onto that node's timeline
-//! (pinging the SSE tick for that node), then block the calling thread on a
-//! `oneshot` receiver resolved from an HTTP handler. The node-lifecycle
-//! extensions ([`WebGate::node_seeded`]/[`WebGate::node_finalized`]/
-//! [`WebGate::node_failed`], keyed by label like `retire_node`) store the
-//! seed and outcome the driver sends across the seam.
+//! The timeline/append-only and sync-blocking-gate invariants are documented
+//! once, in this crate's `CLAUDE.md` — not retold here.
 //!
 //! # Shape-guided submissions — [`collect_form_json`]
 //!
@@ -90,20 +70,16 @@ use tidepool_harness::selfharness::operator::{
 };
 use tokio::sync::{broadcast, oneshot};
 
-use crate::formapi::FormApiConfig;
-use crate::render::{self, NodeView, TimelineEntry};
+use crate::render::{self, NodeView};
 use crate::shell;
-
-/// An opaque node identity — convention is a slash-separated tree path.
-/// Never model-authored: every `node_id` a caller registers traces to a
-/// substrate identifier (a wire-carried branch label), same discipline as a
-/// form's field labels (see the crate's loopback trust model docs).
-pub type NodeId = String;
 
 /// One ask's lifecycle state. Pending states carry the resolution channel
 /// that unparks the blocked gate call; answered states are what the pending
-/// ones become IN PLACE when resolved — the timeline keeps them.
-enum AskState {
+/// ones become IN PLACE when resolved — the timeline keeps them. Rendered
+/// directly by [`crate::render`] (which pattern-matches `..` past the
+/// channels on the pending variants) — never mirrored into a second,
+/// borrowed enum just to hide them.
+pub(crate) enum AskState {
     /// A form awaiting submission; `resolve` unparks `present_form`.
     PendingForm {
         shape: FormShape,
@@ -125,7 +101,7 @@ enum AskState {
 /// (pending and answered alike). Seeds, finalized values, and failures are
 /// TIMELINE items too, at their true chronological position — one node can
 /// live several windows in sequence (the unified root does, every turn).
-enum TimelineItem {
+pub(crate) enum TimelineItem {
     Note(String),
     Seeded(String),
     Finalized(String),
@@ -142,7 +118,7 @@ const TURN_HISTORY_CAP: usize = 50;
 /// starting prompt, when the wire carried one), the append-only `timeline`
 /// of notes and asks, and `final_value`/`failure` once the window ends.
 /// `next_ask_id` mints ask ids/nonces; `rev` is this node's AGGREGATE
-/// revision, bumped under the SAME lock as every mutation (F10, per-node) —
+/// revision, bumped under the SAME lock as every mutation —
 /// the panel-root `data-rev` the client's focus-preserving skip keys off.
 /// `done` marks a retired window ([`OperatorGate::retire_node`]) — the
 /// section greys, nothing is removed.
@@ -156,37 +132,12 @@ struct NodeSlot {
 }
 
 impl NodeSlot {
-    /// The borrowed render view of this slot.
+    /// The borrowed render view of this slot — the timeline borrowed
+    /// straight from its owned storage, no intermediate copy.
     fn view<'a>(&'a self, node_id: &'a str) -> NodeView<'a> {
         NodeView {
             node_id,
-            timeline: self
-                .timeline
-                .iter()
-                .map(|item| match item {
-                    TimelineItem::Note(text) => TimelineEntry::Note(text),
-                    TimelineItem::Seeded(seed) => TimelineEntry::Seeded(seed),
-                    TimelineItem::Finalized(value) => TimelineEntry::Finalized(value),
-                    TimelineItem::Failed(reason) => TimelineEntry::Failed(reason),
-                    TimelineItem::Ask { id, state } => match state {
-                        AskState::PendingForm { shape, .. } => {
-                            TimelineEntry::PendingForm { id: *id, shape }
-                        }
-                        AskState::PendingContinue { .. } => {
-                            TimelineEntry::PendingContinue { id: *id }
-                        }
-                        AskState::AnsweredForm { shape, answer } => TimelineEntry::AnsweredForm {
-                            id: *id,
-                            shape,
-                            answer,
-                        },
-                        AskState::AnsweredContinue { input } => TimelineEntry::AnsweredContinue {
-                            id: *id,
-                            input: input.as_deref(),
-                        },
-                    },
-                })
-                .collect(),
+            timeline: &self.timeline,
             done: self.done,
             turn_history: &self.turn_history,
             rev: self.rev,
@@ -194,14 +145,21 @@ impl NodeSlot {
     }
 }
 
-/// Every registered node, plus registration order — ONE lock over the whole
-/// registry (not one per node): with the small node/ask counts this GUI ever
-/// holds, a single lock is simpler and structurally rules out cross-node
-/// races, at no real concurrency cost.
+/// Every registered node, plus the current run's identity — ONE lock over
+/// the whole registry (not one per node): with the small node/ask counts
+/// this GUI ever holds, a single lock is simpler and structurally rules out
+/// cross-node races, at no real concurrency cost. `nodes`' own `HashMap`
+/// keys ARE the registration set — display order is a pure function of them
+/// ([`node_order`]), never observed separately, so no parallel ordering
+/// vector rides alongside.
 #[derive(Default)]
 struct Registry {
-    order: Vec<NodeId>,
-    nodes: HashMap<NodeId, NodeSlot>,
+    nodes: HashMap<String, NodeSlot>,
+    /// The current run's identity, when the boot path has set one (see
+    /// [`AppState::set_run_id`]) — rendered as small masthead text so a
+    /// pre/post-restart run is distinguishable in a stale tab. `None` by
+    /// default (every existing caller's page is unchanged).
+    run_id: Option<String>,
 }
 
 /// Shared server state: every registered node's lifecycle + the re-render
@@ -212,18 +170,7 @@ pub struct AppState {
     /// Broadcast of "this node's panel changed" — a gate pings this after
     /// any mutation so every open SSE stream re-renders that one node's
     /// panel promptly.
-    tick: broadcast::Sender<NodeId>,
-    /// The current run's identity, when the boot path has set one (see
-    /// [`AppState::set_run_id`]) — rendered as small masthead text so a
-    /// pre/post-restart run is distinguishable in a stale tab. `None` by
-    /// default (every existing caller's page is unchanged).
-    run_id: Arc<Mutex<Option<String>>>,
-}
-
-impl Default for AppState {
-    fn default() -> Self {
-        Self::new()
-    }
+    tick: broadcast::Sender<String>,
 }
 
 /// Display order for the outline: the default (loop) node pinned first, then
@@ -235,12 +182,15 @@ fn node_order(id: &str) -> (bool, &str) {
 }
 
 impl AppState {
+    #[allow(
+        clippy::new_without_default,
+        reason = "Default has no caller in this workspace — cut as an orphan shim"
+    )]
     pub fn new() -> Self {
         let (tick, _) = broadcast::channel(64);
         AppState {
             registry: Arc::new(Mutex::new(Registry::default())),
             tick,
-            run_id: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -249,10 +199,10 @@ impl AppState {
     /// called once a run lease/id is known. Additive: a caller that never
     /// calls this renders the same masthead as before.
     pub fn set_run_id(&self, run_id: impl Into<String>) {
-        *self.run_id.lock() = Some(run_id.into());
+        self.registry.lock().run_id = Some(run_id.into());
     }
 
-    fn ping(&self, node_id: NodeId) {
+    fn ping(&self, node_id: String) {
         let _ = self.tick.send(node_id);
     }
 
@@ -267,7 +217,6 @@ impl AppState {
             let mut reg = self.registry.lock();
             match reg.nodes.get_mut(&node_id) {
                 None => {
-                    reg.order.push(node_id.clone());
                     reg.nodes.insert(node_id.clone(), NodeSlot::default());
                     true
                 }
@@ -293,8 +242,8 @@ impl AppState {
     }
 
     /// Registered node ids in display order (see [`node_order`]).
-    pub fn node_ids(&self) -> Vec<NodeId> {
-        let mut ids = self.registry.lock().order.clone();
+    pub fn node_ids(&self) -> Vec<String> {
+        let mut ids: Vec<String> = self.registry.lock().nodes.keys().cloned().collect();
         ids.sort_by(|a, b| node_order(a).cmp(&node_order(b)));
         ids
     }
@@ -429,7 +378,7 @@ impl AppState {
     /// ([`render::parent_id`]), `null` for a root.
     fn tree_snapshot(&self) -> Vec<Jv> {
         let reg = self.registry.lock();
-        let mut ids: Vec<&NodeId> = reg.order.iter().collect();
+        let mut ids: Vec<&String> = reg.nodes.keys().collect();
         ids.sort_by(|a, b| node_order(a).cmp(&node_order(b)));
         ids.into_iter()
             .map(|id| {
@@ -451,14 +400,14 @@ impl AppState {
     /// The full page: every registered node's section, in display order.
     fn page_markup(&self) -> maud::Markup {
         let reg = self.registry.lock();
-        let mut ids: Vec<&NodeId> = reg.order.iter().collect();
+        let mut ids: Vec<&String> = reg.nodes.keys().collect();
         ids.sort_by(|a, b| node_order(a).cmp(&node_order(b)));
-        let sections: Vec<(NodeId, maud::Markup)> = ids
+        let sections: Vec<(String, maud::Markup)> = ids
             .into_iter()
             .map(|id| (id.clone(), render::node_panel(&reg.nodes[id].view(id))))
             .collect();
+        let run_id = reg.run_id.clone();
         drop(reg);
-        let run_id = self.run_id.lock().clone();
         shell::page(sections, run_id.as_deref())
     }
 
@@ -467,7 +416,7 @@ impl AppState {
     /// replace the ask IN PLACE with its answered form. Shared by the
     /// browser `/submit` verb and the form-api `POST` — one resolution path,
     /// two front doors. A wrong-kind or stale id never drops any pending
-    /// interaction (F10).
+    /// interaction.
     ///
     /// A submission that doesn't decode against the pending shape is
     /// REJECTED — [`ResolveError::InvalidSubmission`] — without touching the
@@ -720,130 +669,140 @@ impl ValidationReport {
     }
 }
 
-/// Walk `shape` and collect every bind path it can read, each paired with a
-/// short label for its expected kind — the FULL set (every sum variant's
-/// children, not only a chosen one; the renderer always renders every
-/// variant's inputs), used only to explain a rejected submission.
-fn expected_fields(shape: &FormShape, path: &str, out: &mut Vec<ExpectedField>) {
+/// The three things [`walk_shape`] accumulates, bundled so the walk (and its
+/// `leaf` helper) take one output parameter instead of three.
+struct Diagnostics<'a> {
+    expected: &'a mut Vec<ExpectedField>,
+    missing: &'a mut Vec<String>,
+    wrong_typed: &'a mut Vec<String>,
+}
+
+/// Walk `shape` ONCE, collecting both the full expected bind-path set (every
+/// sum variant's children, not only a chosen one — the renderer always
+/// renders every variant's inputs) and — restricted to the branch `active`
+/// tracks (the submission's own selector, when present and recognized, the
+/// same restriction [`collect_form_json`] applies) — which required leaves
+/// are absent or present with the wrong JSON type. `active` goes false the
+/// moment the walk steps off that branch (an unselected sum variant, or an
+/// Optional whose presence flag isn't set): the walk still descends there
+/// for `expected`'s sake, it just stops checking `raw` against it.
+fn walk_shape(
+    shape: &FormShape,
+    path: &str,
+    raw: &Map<String, Jv>,
+    active: bool,
+    out: &mut Diagnostics,
+) {
+    fn leaf(
+        path: &str,
+        kind: &'static str,
+        active: bool,
+        matches: impl FnOnce(&Jv) -> bool,
+        raw: &Map<String, Jv>,
+        out: &mut Diagnostics,
+    ) {
+        out.expected.push(ExpectedField {
+            path: path.to_string(),
+            kind,
+        });
+        if !active {
+            return;
+        }
+        match raw.get(path) {
+            None => out.missing.push(path.to_string()),
+            Some(v) if matches(v) => {}
+            Some(_) => out.wrong_typed.push(path.to_string()),
+        }
+    }
+
     match shape {
-        FormShape::String => out.push(ExpectedField {
-            path: path.to_string(),
-            kind: "string",
-        }),
-        FormShape::Int => out.push(ExpectedField {
-            path: path.to_string(),
-            kind: "int",
-        }),
-        FormShape::Number => out.push(ExpectedField {
-            path: path.to_string(),
-            kind: "number",
-        }),
-        FormShape::Bool => out.push(ExpectedField {
-            path: path.to_string(),
-            kind: "bool",
-        }),
+        FormShape::String => leaf(
+            path,
+            "string",
+            active,
+            |v| matches!(v, Jv::String(_)),
+            raw,
+            out,
+        ),
+        FormShape::Int => leaf(
+            path,
+            "int",
+            active,
+            |v| matches!(v, Jv::Number(n) if n.as_i64().is_some()),
+            raw,
+            out,
+        ),
+        FormShape::Number => leaf(
+            path,
+            "number",
+            active,
+            |v| matches!(v, Jv::Number(n) if n.as_f64().is_some()),
+            raw,
+            out,
+        ),
+        FormShape::Bool => leaf(path, "bool", active, |v| matches!(v, Jv::Bool(_)), raw, out),
         FormShape::Unit => {}
         FormShape::Optional(inner) => {
-            out.push(ExpectedField {
-                path: format!("{path}#present"),
+            let present_key = format!("{path}#present");
+            out.expected.push(ExpectedField {
+                path: present_key.clone(),
                 kind: "bool (presence flag)",
             });
-            expected_fields(inner, path, out);
+            let inner_active = active && matches!(raw.get(&present_key), Some(Jv::Bool(true)));
+            walk_shape(inner, path, raw, inner_active, out);
         }
         FormShape::Product { fields, .. } => {
             for field in fields {
-                expected_fields(&field.shape, &child_path(path, &field.key), out);
+                walk_shape(
+                    &field.shape,
+                    &child_path(path, &field.key),
+                    raw,
+                    active,
+                    out,
+                );
             }
         }
         FormShape::Sum { variants, .. } => {
-            out.push(ExpectedField {
+            out.expected.push(ExpectedField {
                 path: path.to_string(),
                 kind: "enum (one of the variant tags)",
             });
+            let selector = if active { raw.get(path) } else { None };
+            if active {
+                match selector {
+                    None => out.missing.push(path.to_string()),
+                    Some(Jv::String(s)) if variants.iter().any(|v| &v.constructor == s) => {}
+                    Some(_) => out.wrong_typed.push(path.to_string()),
+                }
+            }
+            let chosen = match selector {
+                Some(Jv::String(s)) => Some(s.as_str()),
+                _ => None,
+            };
+            let nullary = all_nullary(variants);
             for variant in variants {
                 let child = child_path(path, &variant.constructor);
-                expected_fields(&variant.shape, &child, out);
+                let is_chosen = active && !nullary && chosen == Some(variant.constructor.as_str());
+                walk_shape(&variant.shape, &child, raw, is_chosen, out);
             }
         }
     }
 }
 
-/// Walk `shape` against a submission that already failed
-/// [`collect_form_json`], following the SAME branch that collector would
-/// take (the submitted sum selector, when present and recognized), and
-/// record every required leaf that's absent or present with the wrong JSON
-/// type. Unlike [`expected_fields`], this descends into only the CHOSEN
-/// variant of a sum — the same restriction [`collect_form_json`] applies
-/// when actually reading a value.
-fn diagnose_missing_or_wrong_typed(
-    shape: &FormShape,
-    path: &str,
-    raw: &Map<String, Jv>,
-    missing: &mut Vec<String>,
-    wrong_typed: &mut Vec<String>,
-) {
-    match shape {
-        FormShape::String => match raw.get(path) {
-            None => missing.push(path.to_string()),
-            Some(Jv::String(_)) => {}
-            Some(_) => wrong_typed.push(path.to_string()),
-        },
-        FormShape::Int => match raw.get(path) {
-            None => missing.push(path.to_string()),
-            Some(n @ Jv::Number(_)) if n.as_i64().is_some() => {}
-            Some(_) => wrong_typed.push(path.to_string()),
-        },
-        FormShape::Number => match raw.get(path) {
-            None => missing.push(path.to_string()),
-            Some(n @ Jv::Number(_)) if n.as_f64().is_some() => {}
-            Some(_) => wrong_typed.push(path.to_string()),
-        },
-        FormShape::Bool => match raw.get(path) {
-            None => missing.push(path.to_string()),
-            Some(Jv::Bool(_)) => {}
-            Some(_) => wrong_typed.push(path.to_string()),
-        },
-        FormShape::Unit => {}
-        FormShape::Optional(inner) => {
-            let present_key = format!("{path}#present");
-            if matches!(raw.get(&present_key), Some(Jv::Bool(true))) {
-                diagnose_missing_or_wrong_typed(inner, path, raw, missing, wrong_typed);
-            }
-        }
-        FormShape::Product { fields, .. } => {
-            for field in fields {
-                diagnose_missing_or_wrong_typed(
-                    &field.shape,
-                    &child_path(path, &field.key),
-                    raw,
-                    missing,
-                    wrong_typed,
-                );
-            }
-        }
-        FormShape::Sum { variants, .. } => match raw.get(path) {
-            None => missing.push(path.to_string()),
-            Some(Jv::String(s)) => match variants.iter().find(|v| &v.constructor == s) {
-                None => wrong_typed.push(path.to_string()),
-                Some(_) if all_nullary(variants) => {}
-                Some(variant) => {
-                    let child = child_path(path, &variant.constructor);
-                    if let FormShape::Product { fields, .. } = &variant.shape {
-                        for field in fields {
-                            diagnose_missing_or_wrong_typed(
-                                &field.shape,
-                                &child_path(&child, &field.key),
-                                raw,
-                                missing,
-                                wrong_typed,
-                            );
-                        }
-                    }
-                }
-            },
-            Some(_) => wrong_typed.push(path.to_string()),
-        },
-    }
+/// Every bind path `shape` can read, each paired with a short label for its
+/// expected kind — the FULL set, every sum variant's children included. A
+/// thin, `raw`-free wrapper over [`walk_shape`] (always inactive, so nothing
+/// is ever checked against a submission) for callers that want only the
+/// static shape walk — currently only this module's own tests.
+#[cfg(test)]
+fn expected_fields(shape: &FormShape, path: &str, out: &mut Vec<ExpectedField>) {
+    let (mut missing, mut wrong_typed) = (Vec::new(), Vec::new());
+    let mut diag = Diagnostics {
+        expected: out,
+        missing: &mut missing,
+        wrong_typed: &mut wrong_typed,
+    };
+    walk_shape(shape, path, &Map::new(), false, &mut diag);
 }
 
 /// Build the full picture of why a submission was rejected — see
@@ -851,7 +810,15 @@ fn diagnose_missing_or_wrong_typed(
 /// already returned `None` for the same `(shape, path, raw)`.
 fn validation_report(shape: &FormShape, path: &str, raw: &Map<String, Jv>) -> ValidationReport {
     let mut expected = Vec::new();
-    expected_fields(shape, path, &mut expected);
+    let mut missing = Vec::new();
+    let mut wrong_typed = Vec::new();
+    let mut diag = Diagnostics {
+        expected: &mut expected,
+        missing: &mut missing,
+        wrong_typed: &mut wrong_typed,
+    };
+    walk_shape(shape, path, raw, true, &mut diag);
+
     let known: std::collections::HashSet<&str> = expected.iter().map(|f| f.path.as_str()).collect();
     let mut unrecognized: Vec<String> = raw
         .keys()
@@ -859,10 +826,6 @@ fn validation_report(shape: &FormShape, path: &str, raw: &Map<String, Jv>) -> Va
         .cloned()
         .collect();
     unrecognized.sort();
-
-    let mut missing = Vec::new();
-    let mut wrong_typed = Vec::new();
-    diagnose_missing_or_wrong_typed(shape, path, raw, &mut missing, &mut wrong_typed);
 
     ValidationReport {
         expected,
@@ -903,7 +866,7 @@ pub(crate) fn parse_json_body(headers: &HeaderMap, body: &[u8]) -> Result<Jv, St
 /// why this is sync-blocking, and why publishing never supersedes.
 pub struct WebGate {
     state: AppState,
-    node_id: NodeId,
+    node_id: String,
 }
 
 impl OperatorGate for WebGate {
@@ -969,21 +932,21 @@ impl OperatorGate for WebGate {
 }
 
 /// Build the axum router over the app state. The form-api testing surface is
-/// disabled — equivalent to `router_with_form_api(state, FormApiConfig::default())`.
+/// disabled — equivalent to `router_with_form_api(state, false)`.
 pub fn router(state: AppState) -> Router {
-    router_with_form_api(state, FormApiConfig::default())
+    router_with_form_api(state, false)
 }
 
 /// Build the axum router, optionally mounting the form-api testing surface
 /// (`crate::formapi`) alongside the browser verbs. See that module's docs
-/// for the hardening properties `form_api` gates.
+/// for the hardening properties `form_api_enabled` gates.
 ///
 /// `/` serves the d3 tree view ([`crate::tree::tree_page`]); the original
 /// outline moved VERBATIM to `/legacy` ([`legacy_page`]). `/api/tree` and
 /// `/node/{node}/panel` are the tree view's two data doors onto the SAME
 /// registry state `/legacy` and `/sse` already read — no second source of
 /// truth.
-pub fn router_with_form_api(state: AppState, form_api: FormApiConfig) -> Router {
+pub fn router_with_form_api(state: AppState, form_api_enabled: bool) -> Router {
     let base: Router<AppState> = Router::new()
         .route("/", get(tree_shell))
         .route("/legacy", get(legacy_page))
@@ -994,7 +957,7 @@ pub fn router_with_form_api(state: AppState, form_api: FormApiConfig) -> Router 
         .route("/node/{node}/submit/{interaction}", post(submit))
         .route("/node/{node}/continue/{interaction}", post(continue_loop))
         .fallback(not_found);
-    crate::formapi::merge(base, form_api).with_state(state)
+    crate::formapi::merge(base, form_api_enabled).with_state(state)
 }
 
 /// `GET /` — the d3 tree view shell. Static markup; the page's own JS fetches
@@ -1122,9 +1085,11 @@ async fn continue_loop(
 ) -> Response {
     let signal = body
         .and_then(|Json(v)| match v {
-            Jv::Object(submission) => {
-                Some(answer_value(&crate::render::continue_shape(), submission))
-            }
+            Jv::Object(submission) => collect_form_json(
+                &crate::render::continue_shape(),
+                ROOT_BIND_PATH,
+                &submission,
+            ),
             _ => None,
         })
         .and_then(|answer| {
@@ -1170,16 +1135,6 @@ async fn not_found() -> Response {
 // -------------------------------------------------------------------------
 // Nested submissions — flat wire object -> the plain JSON answer.
 // -------------------------------------------------------------------------
-
-/// Convert a client's flat POST to the answer returned by the gate. The
-/// browser `/submit` and form API share this path. It reassembles dotted bind
-/// paths into the ordinary JSON the answer type's generic `FromJSON` decode
-/// reads; there is no intermediate answer language. An incomplete or
-/// wrong-typed submission resolves to `{}`, which that decode rejects and
-/// re-presents — the same path every malformed submission takes.
-fn answer_value(shape: &FormShape, submission: Map<String, Jv>) -> Jv {
-    collect_form_json(shape, ROOT_BIND_PATH, &submission).unwrap_or_else(|| json!({}))
-}
 
 /// Whether every variant of a sum is nullary — an enum, whose answer is the
 /// chosen constructor as a bare string (matching the generic decode's
@@ -1329,167 +1284,19 @@ mod tests {
         }
     }
 
-    /// The full gate round trip: `present_form` blocks on a worker thread
-    /// while the test resolves it through the same path `POST /submit` uses.
-    #[test]
-    fn present_form_blocks_until_submitted() {
-        let st = AppState::new();
-        let gate = st.register_node("n1");
-        let handle = {
-            let gate = gate.clone();
-            std::thread::spawn(move || gate.present_form(&spec()))
-        };
-
-        while st.first_ask_id("n1").is_none() {
-            std::thread::yield_now();
-        }
-        let interaction = st.first_ask_id("n1").unwrap();
-
-        // Wire submission: flat, dotted, rooted at ROOT_BIND_PATH — the same
-        // shape the browser/form-api collectors produce.
-        let wire = json!({"answer.mood": "calm", "answer.count": 3});
-        st.resolve_form("n1", interaction, wire.as_object().unwrap().clone())
-            .unwrap();
-
-        let got = handle.join().unwrap();
-        assert_eq!(got, json!({"mood": "calm", "count": 3}));
-    }
-
     /// The regression this transport exists for: a unit-shaped form
-    /// (`askUser @()`) answers as `null`.
-    /// The old object-only transport coerced non-object answers to `{}`,
-    /// which the decode rejects — an infinite re-prompt.
+    /// (`askUser @()`) answers as `null`. The old object-only transport
+    /// coerced non-object answers to `{}`, which the decode rejects — an
+    /// infinite re-prompt. `submit_resolves_present_form_with_exact_submission`
+    /// and `continue_resolves_await_continue` in `tests/operator_gate.rs`
+    /// prove the round trip itself over real HTTP; this pins the Unit-shape
+    /// leaf of `collect_form_json` directly.
     #[test]
     fn unit_shaped_answer_survives_reassembly() {
-        assert_eq!(answer_value(&FormShape::Unit, Map::new()), Jv::Null);
-    }
-
-    /// An incomplete shape submission still degrades to `{}` (reject and
-    /// re-present), not a panic and not a partial answer.
-    #[test]
-    fn incomplete_shape_submission_degrades_to_the_rejectable_empty_object() {
-        assert_eq!(answer_value(&FormShape::String, Map::new()), json!({}));
-    }
-
-    #[test]
-    fn await_continue_blocks_until_resolved() {
-        let st = AppState::new();
-        let gate = st.register_node("n1");
-        let handle = {
-            let gate = gate.clone();
-            std::thread::spawn(move || gate.await_continue())
-        };
-
-        while st.first_ask_id("n1").is_none() {
-            std::thread::yield_now();
-        }
-        let interaction = st.first_ask_id("n1").unwrap();
-        st.resolve_continue("n1", interaction, ContinueSignal::Continue)
-            .unwrap();
-        handle.join().unwrap();
-    }
-
-    /// The timeline is append-only: an answered ask stays IN PLACE with its
-    /// answer (rendered read-only), and re-addressing its id is the stale
-    /// case, not a second resolution.
-    #[test]
-    fn answered_ask_persists_in_place_with_its_answer() {
-        let st = AppState::new();
-        let gate = st.register_node("n1");
-        gate.post_note("about to ask");
-        let handle = {
-            let gate = gate.clone();
-            std::thread::spawn(move || gate.present_form(&spec()))
-        };
-        while st.first_ask_id("n1").is_none() {
-            std::thread::yield_now();
-        }
-        let interaction = st.first_ask_id("n1").unwrap();
-        let wire = json!({"answer.mood": "calm", "answer.count": 3});
-        st.resolve_form("n1", interaction, wire.as_object().unwrap().clone())
-            .unwrap();
-        handle.join().unwrap();
-
-        assert_eq!(st.ask_count("n1"), 0, "nothing pending anymore");
-        let html = st.node_panel_html("n1").unwrap();
-        assert!(html.contains("about to ask"), "the note stays: {html}");
-        assert!(
-            html.contains(&format!("id=\"ask-n1-{interaction}\"")),
-            "the answered ask stays at its id: {html}"
+        assert_eq!(
+            collect_form_json(&FormShape::Unit, ROOT_BIND_PATH, &Map::new()),
+            Some(Jv::Null)
         );
-        assert!(html.contains("calm"), "the answer shows: {html}");
-        assert!(
-            !html.contains(&format!("@post('/node/n1/submit/{interaction}')")),
-            "no live form controls on an answered ask: {html}"
-        );
-
-        let err = st
-            .resolve_form("n1", interaction, Map::new())
-            .expect_err("re-resolving an answered ask is stale");
-        assert_eq!(err, ResolveError::NoSuchInteraction);
-    }
-
-    /// Notes survive the between-loops gate — the timeline is the node's
-    /// history, and a continue click must not erase the context above it.
-    #[test]
-    fn notes_persist_across_continue() {
-        let st = AppState::new();
-        let gate = st.register_node("n1");
-        gate.post_note("turn 1 narration");
-        let handle = {
-            let gate = gate.clone();
-            std::thread::spawn(move || gate.await_continue())
-        };
-        while st.first_ask_id("n1").is_none() {
-            std::thread::yield_now();
-        }
-        let interaction = st.first_ask_id("n1").unwrap();
-        st.resolve_continue(
-            "n1",
-            interaction,
-            ContinueSignal::ContinueWithInput("steer".to_string()),
-        )
-        .unwrap();
-        handle.join().unwrap();
-
-        let html = st.node_panel_html("n1").unwrap();
-        assert!(
-            html.contains("turn 1 narration"),
-            "notes persist across continue: {html}"
-        );
-        assert!(
-            html.contains("steer"),
-            "the operator's continue message stays visible: {html}"
-        );
-    }
-
-    /// The node-lifecycle events append to the timeline, bump the revision,
-    /// and show up in the rendered panel with the derived status.
-    #[test]
-    fn seed_final_and_failure_store_and_render() {
-        let st = AppState::new();
-        let gate = st.register_node("root");
-        let child = gate.node_gate("root/1-x").expect("child gate");
-        drop(child);
-
-        let rev0 = extract_rev(&st.node_panel_html("root/1-x").unwrap()).to_string();
-        gate.node_seeded("root/1-x", "NODE root/1 — DISCOVER the thing");
-        let html = st.node_panel_html("root/1-x").unwrap();
-        assert!(html.contains("DISCOVER the thing"), "{html}");
-        let rev1 = extract_rev(&html).to_string();
-        assert_ne!(rev0, rev1, "seed bumps rev");
-
-        gate.retire_node("root/1-x");
-        gate.node_finalized("root/1-x", "{\"tag\":\"FinishLayer\"}");
-        let html = st.node_panel_html("root/1-x").unwrap();
-        assert!(html.contains("Final value"), "{html}");
-        assert!(html.contains("FinishLayer"), "{html}");
-        assert!(html.contains(">done</span>"), "{html}");
-
-        gate.node_failed("root/1-x", "round exhaustion");
-        let html = st.node_panel_html("root/1-x").unwrap();
-        assert!(html.contains("round exhaustion"), "{html}");
-        assert!(html.contains(">failed</span>"), "{html}");
     }
 
     /// The unified-root lifecycle: a retired node re-registered under the
@@ -1541,104 +1348,6 @@ mod tests {
             1,
             "revival never duplicates the node"
         );
-    }
-
-    /// The concurrency invariant the whole generalization exists for: two
-    /// asks published on the SAME node coexist (neither supersedes the
-    /// other) and each resolves independently, in either order.
-    #[test]
-    fn two_concurrent_asks_on_one_node_both_render_and_resolve_independently() {
-        let st = AppState::new();
-        let gate = st.register_node("n1");
-
-        let g1 = gate.clone();
-        let h1 = std::thread::spawn(move || g1.present_form(&spec()));
-        let g2 = gate.clone();
-        let h2 = std::thread::spawn(move || g2.present_form(&spec()));
-
-        while st.ask_count("n1") < 2 {
-            std::thread::yield_now();
-        }
-        let ids = st.pending_ids("n1");
-        assert_eq!(ids.len(), 2, "both asks coexist, neither dropped");
-        assert_ne!(ids[0], ids[1], "each ask has its own nonce");
-
-        // Resolve in REVERSE order — the second-published ask first. Wire
-        // submissions are flat, dotted, rooted at ROOT_BIND_PATH.
-        st.resolve_form(
-            "n1",
-            ids[1],
-            json!({"answer.mood": "b", "answer.count": 2})
-                .as_object()
-                .unwrap()
-                .clone(),
-        )
-        .unwrap();
-        assert_eq!(
-            st.ask_count("n1"),
-            1,
-            "only the resolved ask leaves pending"
-        );
-        st.resolve_form(
-            "n1",
-            ids[0],
-            json!({"answer.mood": "a", "answer.count": 1})
-                .as_object()
-                .unwrap()
-                .clone(),
-        )
-        .unwrap();
-        assert_eq!(st.ask_count("n1"), 0);
-
-        // Which internal `present_form` call happened to land at `ids[0]` vs
-        // `ids[1]` is a scheduling detail; compare the two results as a SET.
-        let mut got = vec![h1.join().unwrap(), h2.join().unwrap()];
-        got.sort_by_key(|v| v["count"].as_i64().unwrap());
-        assert_eq!(
-            got,
-            vec![
-                json!({"mood": "a", "count": 1}),
-                json!({"mood": "b", "count": 2}),
-            ]
-        );
-    }
-
-    /// A stale/unknown interaction id is rejected without touching whatever
-    /// else is pending.
-    #[test]
-    fn resolve_with_unknown_interaction_is_rejected() {
-        let st = AppState::new();
-        let _gate = st.register_node("n1");
-        let err = st
-            .resolve_form("n1", 999, Map::new())
-            .expect_err("no such interaction");
-        assert_eq!(err, ResolveError::NoSuchInteraction);
-    }
-
-    /// A wrong-kind resolution (submitting to a Continue-gate interaction) is
-    /// rejected and leaves the interaction pending.
-    #[test]
-    fn resolve_form_on_a_continue_interaction_is_rejected_and_preserved() {
-        let st = AppState::new();
-        let gate = st.register_node("n1");
-        let handle = {
-            let gate = gate.clone();
-            std::thread::spawn(move || gate.await_continue())
-        };
-        while st.first_ask_id("n1").is_none() {
-            std::thread::yield_now();
-        }
-        let interaction = st.first_ask_id("n1").unwrap();
-
-        let err = st
-            .resolve_form("n1", interaction, Map::new())
-            .expect_err("wrong kind");
-        assert_eq!(err, ResolveError::WrongKind);
-        assert_eq!(st.ask_count("n1"), 1, "the continue gate is still pending");
-
-        st.resolve_continue("n1", interaction, ContinueSignal::Continue)
-            .unwrap();
-        handle.join().unwrap();
     }
 
     /// `set_run_id` shows up in the rendered page's masthead; unset, the
@@ -1718,8 +1427,8 @@ mod tests {
         );
     }
 
-    /// F10 (generalized per-node): every mutation to a node's state bumps
-    /// the revision stamped into that node's rendered panel root.
+    /// Every mutation to a node's state bumps the revision stamped into
+    /// that node's rendered panel root.
     #[test]
     fn panel_html_data_rev_bumps_on_every_mutation() {
         let st = AppState::new();
@@ -1844,14 +1553,17 @@ mod tests {
     /// would let the operator check two branches of one choice.
     #[test]
     fn root_bind_path_renders_and_collects_a_root_sum() {
-        let shape = destination_shape();
         let th = VecDeque::new();
+        let timeline = [TimelineItem::Ask {
+            id: 0,
+            state: AskState::PendingForm {
+                shape: destination_shape(),
+                resolve: oneshot::channel().0,
+            },
+        }];
         let view = NodeView {
             node_id: "n1",
-            timeline: vec![TimelineEntry::PendingForm {
-                id: 0,
-                shape: &shape,
-            }],
+            timeline: &timeline,
             done: false,
             turn_history: &th,
             rev: 1,
@@ -1946,8 +1658,8 @@ mod tests {
         assert_eq!(collect_form_json(&deploy_request_shape(), "", &raw), None);
     }
 
-    /// DONE criterion: the display-humanization / exact-key split, asserted
-    /// end to end. Render the shape, scrape the exact bind paths back out of
+    /// The display-humanization / exact-key split, asserted end to end.
+    /// Render the shape, scrape the exact bind paths back out of
     /// the HTML (not a hand-written guess at what the renderer emits), build
     /// a submission at exactly those paths, and confirm
     /// `collect_form_json` reconstructs the same exact keys — while the

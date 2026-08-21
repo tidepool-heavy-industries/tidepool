@@ -12,8 +12,8 @@
 //! (`tokio::task::block_in_place`, see `driver.rs`'s module doc) — that
 //! requires the multi-thread runtime flavor.
 //!
-//! Boots the operator GUI ([`tidepool_web::spawn_operator_server`]) and wires
-//! its [`tidepool_web::WebGate`] into the driver before `run_loop` — UNLESS
+//! Boots the operator GUI ([`tidepool_web::spawn_operator_server_multi`]) and
+//! wires its [`tidepool_web::WebGate`] into the driver before `run_loop` — UNLESS
 //! `--yes`/`--auto`/`--replay` is set, in which case the driver keeps its
 //! default headless `StdinGate` (no browser needed for CI/replay/unattended
 //! runs).

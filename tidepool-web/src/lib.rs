@@ -51,20 +51,16 @@ pub mod server;
 pub mod shell;
 pub mod tree;
 
-pub use formapi::FormApiConfig;
-pub use render::{node_panel, NodeView, TimelineEntry};
-pub use server::{router, router_with_form_api, AppState, NodeId, WebGate};
+pub use render::{node_panel, NodeView};
+pub use server::{router, router_with_form_api, AppState, WebGate};
 
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-/// The node id [`spawn_operator_server`] registers for its caller — the
-/// TREE ROOT. The driver's default gate and a harness's own root window
-/// (labeled `root` by convention, children `root/…`) deliberately SHARE this
-/// node: there is one root, and its timeline interleaves the outer loop's
-/// narration, each turn's root window (seed → asks → outcome), and the
-/// between-turns gate, in true order. `AppState::register_node`'s revival
-/// semantics exist for exactly this sharing.
+/// The node id [`spawn_operator_server_multi`] registers for its caller —
+/// the TREE ROOT, shared by the driver's default gate and a harness's own
+/// root window (labeled `root` by convention, children `root/…`). See this
+/// crate's `CLAUDE.md` ("Revival") for why that sharing is safe.
 pub const DEFAULT_NODE_ID: &str = "root";
 
 /// The operator server's bind address — loopback by default, any port.
@@ -115,8 +111,8 @@ pub async fn spawn_operator_server_multi(port: u16) -> std::io::Result<(AppState
     let gate = state.register_node(DEFAULT_NODE_ID);
     let addr = bind_addr(port);
     let listener = tokio::net::TcpListener::bind(addr).await?;
-    let form_api = FormApiConfig::from_env();
-    if form_api.enabled {
+    let form_api_enabled = std::env::var("TIDEPOOL_FORM_API").as_deref() == Ok("1");
+    if form_api_enabled {
         eprintln!(
             "[boot] form-api ENABLED (TIDEPOOL_FORM_API=1) — testing-convenience surface on \
              GET/POST /node/{{node}}/api/form, loopback-only, not for browser/production use"
@@ -125,18 +121,16 @@ pub async fn spawn_operator_server_multi(port: u16) -> std::io::Result<(AppState
     eprintln!("[boot] operator GUI on http://{addr}");
     let serve_state = state.clone();
     tokio::spawn(async move {
-        if let Err(e) = axum::serve(listener, router_with_form_api(serve_state, form_api)).await {
+        if let Err(e) = axum::serve(
+            listener,
+            router_with_form_api(serve_state, form_api_enabled),
+        )
+        .await
+        {
             eprintln!("[operator server] error: {e}");
         }
     });
     Ok((state, gate))
-}
-
-/// [`spawn_operator_server_multi`], keeping only the default node's gate —
-/// the single-node call shape every existing caller (and test) uses.
-pub async fn spawn_operator_server(port: u16) -> std::io::Result<Arc<WebGate>> {
-    let (_state, gate) = spawn_operator_server_multi(port).await?;
-    Ok(gate)
 }
 
 #[cfg(test)]
