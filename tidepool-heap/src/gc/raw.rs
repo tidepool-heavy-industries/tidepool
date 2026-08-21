@@ -61,26 +61,35 @@ fn checked_scanning_enabled() -> bool {
 /// leaving the caller to degrade safely (skip the object's fields, or clamp
 /// its size to guarantee scan progress) rather than trust the bogus count.
 ///
+/// `avail` is the number of bytes actually known-readable starting at `obj`
+/// (the distance to the end of the containing arena/tospace/test buffer) —
+/// NOT the object's own (possibly corrupted) `size` field. The diagnostic
+/// dump is bounded by it, so a corrupted `size` can never make this function
+/// itself read past real memory.
+///
 /// # Safety
 ///
 /// `obj` must be valid for reads of at least `HEADER_SIZE` bytes (every
 /// object is written with at least a tag+size header before it becomes
-/// reachable, so this holds even when `size` itself is the corrupted value).
-unsafe fn report_violation(obj: *const u8, tag: u8, size: usize, what: &str) {
-    // Never dump fewer than the always-valid header, and never more than 32
-    // bytes — `size` itself may be the corrupted value under inspection.
-    let dump_len = size.clamp(HEADER_SIZE, 32);
+/// reachable, so this holds even when `size` itself is the corrupted value)
+/// and `avail` must not overstate the bytes actually readable from `obj`.
+unsafe fn report_violation(obj: *const u8, tag: u8, size: usize, avail: usize, what: &str) {
+    // Never dump fewer than the always-valid header, never more than 32
+    // bytes (`size` itself may be the corrupted value under inspection), and
+    // never more than `avail` — the only bound backed by real memory extent.
+    let dump_len = size.clamp(HEADER_SIZE, 32).min(avail);
     // SAFETY: obj is valid for at least HEADER_SIZE bytes per this fn's
-    // safety contract; dump_len is clamped to [HEADER_SIZE, 32].
+    // safety contract; dump_len is clamped to [HEADER_SIZE, 32] and further
+    // capped at avail, which the caller guarantees is real-memory-backed.
     let bytes = std::slice::from_raw_parts(obj, dump_len);
     if checked_scanning_enabled() {
         panic!(
-            "[GC RAW] malformed heap object: {what}\n  tag={tag} size={size}\n  first {dump_len} bytes: {bytes:02x?}"
+            "[GC RAW] malformed heap object: {what}\n  tag={tag} size={size} avail={avail}\n  first {dump_len} bytes: {bytes:02x?}"
         );
     }
     eprintln!(
-        "[GC RAW BUG] {what} (tag={tag} size={size}) — skipping rather than trusting the \
-         bogus count; first {dump_len} bytes: {bytes:02x?}"
+        "[GC RAW BUG] {what} (tag={tag} size={size} avail={avail}) — skipping rather than \
+         trusting the bogus count; first {dump_len} bytes: {bytes:02x?}"
     );
 }
 
@@ -95,12 +104,16 @@ fn field_region_end(base: usize, count: usize) -> Option<usize> {
 /// forwarding pointer at the old location. If the object has already been forwarded,
 /// returns the new location without copying.
 ///
+/// `avail` is the number of bytes known-readable starting at `old_ptr` (used
+/// only to bound the diagnostic dump in [`report_violation`] — see its docs).
+///
 /// # Safety
 ///
 /// - `old_ptr` must point to a valid, 8-byte-aligned heap object with a valid tag/size header.
 /// - `to_base` must point to a buffer with enough space at offset `*free` to hold the object.
 /// - The caller must ensure `old_ptr` is not inside the to-space (no aliasing).
-unsafe fn evacuate(old_ptr: *mut u8, to_base: *mut u8, free: &mut usize) -> *mut u8 {
+/// - `avail` must not overstate the bytes actually readable from `old_ptr`.
+unsafe fn evacuate(old_ptr: *mut u8, to_base: *mut u8, free: &mut usize, avail: usize) -> *mut u8 {
     // SAFETY: old_ptr is a valid heap object per caller's contract; tag is at offset 0.
     let tag = read_tag(old_ptr);
     if tag == TAG_FORWARDED {
@@ -118,6 +131,7 @@ unsafe fn evacuate(old_ptr: *mut u8, to_base: *mut u8, free: &mut usize) -> *mut
             old_ptr,
             tag,
             size,
+            avail,
             "size below header minimum during evacuate",
         );
         HEADER_SIZE
@@ -142,13 +156,27 @@ unsafe fn evacuate(old_ptr: *mut u8, to_base: *mut u8, free: &mut usize) -> *mut
 /// The callback receives a mutable pointer to each pointer field slot within the
 /// object, allowing the caller to read or update the stored pointer value.
 ///
+/// `avail` is the number of bytes actually known-readable starting at `obj`
+/// — the real extent of the containing arena/tospace/allocation, NOT the
+/// object's own (possibly corrupted) `size` field. Every fixed-offset
+/// metadata read (a variant's stored count, its thunk-state byte) and every
+/// derived field-slot offset is checked against `avail` before it is
+/// dereferenced, so a corrupted `size` or count can never make this function
+/// read past real memory — it can only ever cause fields to be under-scanned
+/// (reported as a violation) or, in the false-negative direction, is simply
+/// not achievable: `avail` is trusted, not derived from attacker-controlled
+/// data.
+///
 /// # Safety
 ///
-/// `obj` must point to a valid, properly aligned heap object with a valid tag and
-/// size as understood by this module's layout routines. The object must be
-/// located in memory such that all pointer fields are initialized and safe to
-/// read and write through the provided `*mut *mut u8` pointers.
-pub unsafe fn for_each_pointer_field(obj: *mut u8, mut f: impl FnMut(*mut *mut u8)) {
+/// `obj` must point to a valid, properly aligned heap object with a valid tag
+/// and a readable `HEADER_SIZE`-byte header. `avail` must not overstate the
+/// bytes actually readable from `obj` (i.e. `obj .. obj + avail` must be
+/// valid for reads). The object must be located in memory such that every
+/// pointer field this function decides to visit (per the bounds check above)
+/// is initialized and safe to read and write through the provided
+/// `*mut *mut u8` pointers.
+pub unsafe fn for_each_pointer_field(obj: *mut u8, avail: usize, mut f: impl FnMut(*mut *mut u8)) {
     // SAFETY: obj is a valid heap object per caller's contract; tag and size are in the header.
     let tag = read_tag(obj);
     let size = read_size(obj) as usize;
@@ -157,32 +185,61 @@ pub unsafe fn for_each_pointer_field(obj: *mut u8, mut f: impl FnMut(*mut *mut u
     // metadata, not a legal shape — reject before trusting any derived
     // offset below.
     if size < HEADER_SIZE {
-        report_violation(obj, tag, size, "size below header minimum");
+        report_violation(obj, tag, size, avail, "size below header minimum");
         return;
     }
     match tag {
         TAG_CLOSURE => {
-            // SAFETY: Closure layout: num_captured at CLOSURE_NUM_CAPTURED_OFFSET,
-            // followed by n pointer-sized capture slots starting at CLOSURE_CAPTURED_OFFSET.
+            // Closure layout: num_captured at CLOSURE_NUM_CAPTURED_OFFSET,
+            // followed by n pointer-sized capture slots starting at
+            // CLOSURE_CAPTURED_OFFSET. The count field itself must be
+            // validated (against BOTH the declared size and the real
+            // readable extent) before it is dereferenced — a corrupted
+            // `size` must not let this read past `avail`.
+            let meta_end = CLOSURE_NUM_CAPTURED_OFFSET + 2;
+            if size < meta_end || avail < meta_end {
+                report_violation(
+                    obj,
+                    tag,
+                    size,
+                    avail,
+                    &format!(
+                        "Closure num_captured field at offset {CLOSURE_NUM_CAPTURED_OFFSET} needs {meta_end} bytes but size={size} avail={avail}"
+                    ),
+                );
+                return;
+            }
+            // SAFETY: size and avail both cover [0, meta_end) per the check above.
             let n = *(obj.add(CLOSURE_NUM_CAPTURED_OFFSET) as *const u16) as usize;
             match field_region_end(CLOSURE_CAPTURED_OFFSET, n) {
-                Some(needed) if needed <= size => {
+                Some(needed) if needed <= size && needed <= avail => {
                     for i in 0..n {
                         f(obj.add(CLOSURE_CAPTURED_OFFSET + i * FIELD_STRIDE) as *mut *mut u8);
                     }
                 }
+                Some(needed) if needed > size => report_violation(
+                    obj,
+                    tag,
+                    size,
+                    avail,
+                    &format!(
+                        "Closure num_captured={n} needs {needed} bytes but object size is {size}"
+                    ),
+                ),
                 Some(needed) => report_violation(
                     obj,
                     tag,
                     size,
+                    avail,
                     &format!(
-                        "Closure num_captured={n} needs {needed} bytes but object size is {size}"
+                        "Closure num_captured={n} needs {needed} bytes but only {avail} bytes are readable"
                     ),
                 ),
                 None => report_violation(
                     obj,
                     tag,
                     size,
+                    avail,
                     &format!(
                         "Closure num_captured={n} overflows the capture-region size computation"
                     ),
@@ -190,31 +247,87 @@ pub unsafe fn for_each_pointer_field(obj: *mut u8, mut f: impl FnMut(*mut *mut u
             }
         }
         TAG_CON => {
-            // SAFETY: Con layout: num_fields at CON_NUM_FIELDS_OFFSET,
-            // followed by n pointer-sized field slots starting at CON_FIELDS_OFFSET.
+            // Con layout: num_fields at CON_NUM_FIELDS_OFFSET, followed by n
+            // pointer-sized field slots starting at CON_FIELDS_OFFSET. Same
+            // pre-dereference validation as Closure above.
+            let meta_end = CON_NUM_FIELDS_OFFSET + 2;
+            if size < meta_end || avail < meta_end {
+                report_violation(
+                    obj,
+                    tag,
+                    size,
+                    avail,
+                    &format!(
+                        "Con num_fields field at offset {CON_NUM_FIELDS_OFFSET} needs {meta_end} bytes but size={size} avail={avail}"
+                    ),
+                );
+                return;
+            }
+            // SAFETY: size and avail both cover [0, meta_end) per the check above.
             let n = *(obj.add(CON_NUM_FIELDS_OFFSET) as *const u16) as usize;
             match field_region_end(CON_FIELDS_OFFSET, n) {
-                Some(needed) if needed <= size => {
+                Some(needed) if needed <= size && needed <= avail => {
                     for i in 0..n {
                         f(obj.add(CON_FIELDS_OFFSET + i * FIELD_STRIDE) as *mut *mut u8);
                     }
                 }
+                Some(needed) if needed > size => report_violation(
+                    obj,
+                    tag,
+                    size,
+                    avail,
+                    &format!("Con num_fields={n} needs {needed} bytes but object size is {size}"),
+                ),
                 Some(needed) => report_violation(
                     obj,
                     tag,
                     size,
-                    &format!("Con num_fields={n} needs {needed} bytes but object size is {size}"),
+                    avail,
+                    &format!(
+                        "Con num_fields={n} needs {needed} bytes but only {avail} bytes are readable"
+                    ),
                 ),
                 None => report_violation(
                     obj,
                     tag,
                     size,
+                    avail,
                     &format!("Con num_fields={n} overflows the field-region size computation"),
                 ),
             }
         }
         TAG_THUNK => {
-            // SAFETY: Thunk state byte is at THUNK_STATE_OFFSET within the valid object.
+            // Every thunk state shares ONE canonical minimum size —
+            // THUNK_MIN_SIZE (header + state byte + code-ptr/indirection
+            // slot) — matching layout.rs's ABI. This must be checked before
+            // the state byte itself is read (THUNK_STATE_OFFSET lies inside
+            // this minimum) and before any capture count is derived from
+            // `size`, so the collector and the layout ABI can never bless
+            // different minimum shapes.
+            if size < THUNK_MIN_SIZE {
+                report_violation(
+                    obj,
+                    tag,
+                    size,
+                    avail,
+                    &format!("Thunk size {size} < THUNK_MIN_SIZE ({THUNK_MIN_SIZE})"),
+                );
+                return;
+            }
+            if avail < THUNK_STATE_OFFSET + 1 {
+                report_violation(
+                    obj,
+                    tag,
+                    size,
+                    avail,
+                    &format!(
+                        "Thunk state byte at offset {THUNK_STATE_OFFSET} needs {} bytes but only {avail} are readable",
+                        THUNK_STATE_OFFSET + 1
+                    ),
+                );
+                return;
+            }
+            // SAFETY: avail covers THUNK_STATE_OFFSET per the check above.
             let state = *obj.add(THUNK_STATE_OFFSET);
             match state {
                 // BLACKHOLE = mid-evaluation: the thunk's code may still read
@@ -223,38 +336,58 @@ pub unsafe fn for_each_pointer_field(obj: *mut u8, mut f: impl FnMut(*mut *mut u
                 // like an unevaluated thunk's — otherwise a resumed blackhole
                 // holds stale from-space pointers.
                 THUNK_UNEVALUATED | THUNK_BLACKHOLE => {
-                    // SAFETY: Thunk captures are pointer slots from
+                    // Thunk captures are pointer slots from
                     // THUNK_CAPTURED_OFFSET to end of object (determined by
                     // size). Unlike Con/Closure there is no SEPARATE stored
                     // count to disagree with `size` here — the capture count
-                    // is derived FROM size, so it is self-consistent by
-                    // construction. A header-only thunk (size <
-                    // THUNK_CAPTURED_OFFSET) is legal — a blackhole with no
-                    // captures yet visited — so checked_sub degrading to zero
-                    // captures is the correct behavior, not a violation.
-                    let n = size
-                        .checked_sub(THUNK_CAPTURED_OFFSET)
-                        .map_or(0, |rem| rem / FIELD_STRIDE);
-                    for i in 0..n {
-                        f(obj.add(THUNK_CAPTURED_OFFSET + i * FIELD_STRIDE) as *mut *mut u8);
+                    // is derived FROM size (already >= THUNK_MIN_SIZE ==
+                    // THUNK_CAPTURED_OFFSET, so the subtraction below never
+                    // underflows) — but the derived region must still be
+                    // checked against `avail` before any slot is visited.
+                    let n = (size - THUNK_CAPTURED_OFFSET) / FIELD_STRIDE;
+                    match field_region_end(THUNK_CAPTURED_OFFSET, n) {
+                        Some(needed) if needed <= avail => {
+                            for i in 0..n {
+                                f(obj.add(THUNK_CAPTURED_OFFSET + i * FIELD_STRIDE)
+                                    as *mut *mut u8);
+                            }
+                        }
+                        Some(needed) => report_violation(
+                            obj,
+                            tag,
+                            size,
+                            avail,
+                            &format!(
+                                "Thunk captures (n={n}) need {needed} bytes but only {avail} are readable"
+                            ),
+                        ),
+                        None => report_violation(
+                            obj,
+                            tag,
+                            size,
+                            avail,
+                            &format!(
+                                "Thunk captures n={n} overflows the capture-region size computation"
+                            ),
+                        ),
                     }
                 }
                 THUNK_EVALUATED => {
-                    // SAFETY: Evaluated thunk stores indirection pointer at
-                    // THUNK_INDIRECTION_OFFSET. Unlike the unevaluated case,
-                    // an evaluated thunk MUST have this slot — there is no
-                    // legitimate smaller size, so a shortfall here is a real
-                    // containment violation.
+                    // Evaluated thunk stores indirection pointer at
+                    // THUNK_INDIRECTION_OFFSET. `size` is already known >=
+                    // THUNK_MIN_SIZE == THUNK_INDIRECTION_OFFSET +
+                    // FIELD_STRIDE, so only `avail` can still fall short.
                     let needed = THUNK_INDIRECTION_OFFSET + FIELD_STRIDE;
-                    if size >= needed {
+                    if avail >= needed {
                         f(obj.add(THUNK_INDIRECTION_OFFSET) as *mut *mut u8);
                     } else {
                         report_violation(
                             obj,
                             tag,
                             size,
+                            avail,
                             &format!(
-                                "Thunk (Evaluated) size {size} < required {needed} (indirection slot missing)"
+                                "Thunk (Evaluated) needs {needed} bytes but only {avail} are readable"
                             ),
                         );
                     }
@@ -266,13 +399,15 @@ pub unsafe fn for_each_pointer_field(obj: *mut u8, mut f: impl FnMut(*mut *mut u
         }
         TAG_LIT => {
             // SAFETY: Lit layout: lit_tag byte at LIT_TAG_OFFSET, value field
-            // at LIT_VALUE_OFFSET — reading either requires size >= LIT_SIZE.
-            if size < LIT_SIZE {
+            // at LIT_VALUE_OFFSET — reading either requires size and avail
+            // both >= LIT_SIZE.
+            if size < LIT_SIZE || avail < LIT_SIZE {
                 report_violation(
                     obj,
                     tag,
                     size,
-                    &format!("Lit size {size} < LIT_SIZE ({LIT_SIZE})"),
+                    avail,
+                    &format!("Lit size {size} < LIT_SIZE ({LIT_SIZE}) or avail {avail} too small"),
                 );
             } else {
                 // For SmallArray#/Array#, the value field holds a pointer to
@@ -316,6 +451,7 @@ pub unsafe fn for_each_pointer_field(obj: *mut u8, mut f: impl FnMut(*mut *mut u
                                 obj,
                                 tag,
                                 size,
+                                avail,
                                 &format!(
                                     "boxed array len {len} overflows its byte-span computation (8 + len*{FIELD_STRIDE})"
                                 ),
@@ -350,14 +486,18 @@ pub unsafe fn cheney_copy(
     tospace: &mut [u8],
 ) -> CopyResult {
     let to_base = tospace.as_mut_ptr();
+    let to_len = tospace.len();
     let mut free: usize = 0;
     // Evacuate roots
     for &root_slot in root_ptrs {
         // SAFETY: root_slot is a valid mutable pointer slot per caller's contract.
         let old_ptr = *root_slot;
         if !old_ptr.is_null() && is_in_range(old_ptr as *const u8, from_start, from_end) {
+            // Real bytes readable from old_ptr: the from-space range check
+            // above establishes old_ptr < from_end, so this never underflows.
+            let avail = from_end as usize - old_ptr as usize;
             // SAFETY: old_ptr points to a valid heap object in from-space; tospace has sufficient capacity.
-            let new_ptr = evacuate(old_ptr, to_base, &mut free);
+            let new_ptr = evacuate(old_ptr, to_base, &mut free, avail);
             *root_slot = new_ptr;
         }
     }
@@ -366,6 +506,8 @@ pub unsafe fn cheney_copy(
     while scan < free {
         // SAFETY: scan offset is within [0, free) which is the initialized portion of tospace.
         let obj = to_base.add(scan);
+        // Real bytes readable from obj: bounded by tospace's own extent.
+        let obj_avail = to_len - scan;
         // SAFETY: obj is a valid, fully-copied heap object in tospace.
         let obj_tag = read_tag(obj);
         let obj_size = read_size(obj) as usize;
@@ -379,6 +521,7 @@ pub unsafe fn cheney_copy(
                 obj,
                 obj_tag,
                 obj_size,
+                obj_avail,
                 "size below header minimum during Cheney scan",
             );
             HEADER_SIZE
@@ -388,10 +531,12 @@ pub unsafe fn cheney_copy(
         let aligned = obj_size.checked_add(7).unwrap_or(obj_size) & !7;
         // SAFETY: obj is a valid heap object; for_each_pointer_field reads its layout.
         // The closure evacuates any from-space pointer fields into tospace.
-        for_each_pointer_field(obj, |field_slot| {
+        for_each_pointer_field(obj, obj_avail, |field_slot| {
             let field_val = *field_slot;
             if !field_val.is_null() && is_in_range(field_val as *const u8, from_start, from_end) {
-                let new_ptr = evacuate(field_val, to_base, &mut free);
+                // Real bytes readable from field_val, same reasoning as the root case above.
+                let avail = from_end as usize - field_val as usize;
+                let new_ptr = evacuate(field_val, to_base, &mut free, avail);
                 *field_slot = new_ptr;
             }
         });
@@ -657,7 +802,7 @@ mod tests {
         unsafe {
             write_lit(buf, 0, 10);
             let mut count = 0;
-            for_each_pointer_field(buf.as_mut_ptr(), |_| {
+            for_each_pointer_field(buf.as_mut_ptr(), 1024, |_| {
                 count += 1;
             });
             assert_eq!(count, 0);
@@ -673,7 +818,7 @@ mod tests {
         unsafe {
             write_con(buf, 0, 1, &[0x1000 as *mut u8, 0x2000 as *mut u8]);
             let mut ptrs = Vec::new();
-            for_each_pointer_field(buf.as_mut_ptr(), |p| {
+            for_each_pointer_field(buf.as_mut_ptr(), 1024, |p| {
                 ptrs.push(*p);
             });
             assert_eq!(ptrs, vec![0x1000 as *mut u8, 0x2000 as *mut u8]);
@@ -689,7 +834,7 @@ mod tests {
         unsafe {
             write_closure(buf, 0, 0x9999 as *const u8, &[0x3000 as *mut u8]);
             let mut ptrs = Vec::new();
-            for_each_pointer_field(buf.as_mut_ptr(), |p| {
+            for_each_pointer_field(buf.as_mut_ptr(), 1024, |p| {
                 ptrs.push(*p);
             });
             assert_eq!(ptrs, vec![0x3000 as *mut u8]); // code_ptr is excluded
@@ -704,14 +849,15 @@ mod tests {
         // SAFETY: Test-only. Aligned buffer contains a valid Thunk in BlackHole state (no pointer fields).
         unsafe {
             let ptr = buf.as_mut_ptr();
-            // Header-only blackhole (size 16): no capture region, no visits.
-            write_header(ptr, TAG_THUNK, 16);
+            // Minimum-sized blackhole (size == THUNK_MIN_SIZE, 24): no
+            // capture region, no visits.
+            write_header(ptr, TAG_THUNK, THUNK_MIN_SIZE as u32);
             *ptr.add(THUNK_STATE_OFFSET) = THUNK_BLACKHOLE;
             let mut count = 0;
-            for_each_pointer_field(ptr, |_| {
+            for_each_pointer_field(ptr, 1024, |_| {
                 count += 1;
             });
-            assert_eq!(count, 0, "header-only blackhole has no capture region");
+            assert_eq!(count, 0, "minimum-sized blackhole has no capture region");
 
             // A blackhole WITH captures must have them visited exactly like
             // an unevaluated thunk — its code may still read the slots after
@@ -720,7 +866,7 @@ mod tests {
             write_header(ptr2, TAG_THUNK, 24 + 8 * 3);
             *ptr2.add(THUNK_STATE_OFFSET) = THUNK_BLACKHOLE;
             let mut count2 = 0;
-            for_each_pointer_field(ptr2, |_| {
+            for_each_pointer_field(ptr2, 1024 - 64, |_| {
                 count2 += 1;
             });
             assert_eq!(count2, 3, "blackhole captures must be visible to GC (C6)");

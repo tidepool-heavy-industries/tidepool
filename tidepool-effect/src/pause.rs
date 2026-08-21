@@ -155,10 +155,17 @@ impl PauseGate {
     }
 
     /// Server side: wake a paused (or pause-pending) thread back into `Run`.
+    ///
+    /// Only transitions out of `PauseRequested`/`Paused` — a resume racing a
+    /// concurrent [`Self::request_abort`] must not erase it. If the gate is
+    /// already `Run` (nothing to resume) or `AbortRequested` (an abort is
+    /// pending and must be observed by the next checkpoint), this is a no-op.
     pub fn resume_run(&self) {
         let mut g = self.inner.lock();
-        g.state = GateState::Run;
-        self.cv.notify_all();
+        if matches!(g.state, GateState::PauseRequested | GateState::Paused) {
+            g.state = GateState::Run;
+            self.cv.notify_all();
+        }
     }
 
     /// Server side: wake the thread with an abort. Its current/next checkpoint
@@ -291,6 +298,34 @@ mod tests {
         assert!(gate.is_in_effect());
         drop(lease);
         assert!(!gate.is_in_effect());
+    }
+
+    /// `resume_run` must not erase a racing `request_abort`: if an abort was
+    /// requested (even after a pause), a subsequent `resume_run` is a no-op
+    /// and the next checkpoint still observes the abort — not `Run`.
+    #[test]
+    fn resume_run_does_not_erase_a_racing_abort() {
+        let gate = PauseGate::new();
+        gate.request_pause();
+        gate.request_abort("raced abort".into());
+        // A resume landing after the abort (e.g. a stale pause-timeout retry)
+        // must not clobber it.
+        gate.resume_run();
+        let result = gate.checkpoint();
+        match result {
+            Err(err) => assert!(err.contains("raced abort"), "abort must survive: {err}"),
+            Ok(_) => panic!("resume_run must not erase a racing abort"),
+        }
+    }
+
+    /// `resume_run` on an already-`Run` gate (nothing paused, nothing
+    /// aborted) is a harmless no-op — the next checkpoint proceeds normally.
+    #[test]
+    fn resume_run_on_running_gate_is_a_noop() {
+        let gate = PauseGate::new();
+        gate.resume_run();
+        let lease = gate.checkpoint().expect("checkpoint still succeeds");
+        drop(lease);
     }
 
     /// The compile-phase flag round-trips (#324): a timeout during compile must

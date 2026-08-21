@@ -374,7 +374,10 @@ unsafe fn measure_closure_bytes(ptr: *mut u8, from_start: *const u8, from_end: *
         let aligned = (size + 7) & !7;
         total += aligned;
 
-        for_each_pointer_field(obj, |field_slot| {
+        // Real bytes readable from obj: from-range containment (checked via
+        // `in_range` above and at push-time below) guarantees obj < from_end.
+        let avail = from_end as usize - obj as usize;
+        for_each_pointer_field(obj, avail, |field_slot| {
             let field_val = *field_slot;
             if !field_val.is_null()
                 && in_range(field_val as *const u8)

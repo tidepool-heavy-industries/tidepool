@@ -438,7 +438,7 @@ mod group5_thunk {
             write_header(guard.ptr, TAG_THUNK, byte_size as u32);
             *guard.ptr.add(THUNK_STATE_OFFSET) = THUNK_UNEVALUATED;
             let mut count = 0;
-            for_each_pointer_field(guard.ptr, |_| count += 1);
+            for_each_pointer_field(guard.ptr, byte_size, |_| count += 1);
             assert_eq!(count, ncaps);
         }
     }
@@ -452,7 +452,7 @@ mod group5_thunk {
             write_header(guard.ptr, TAG_THUNK, byte_size as u32);
             *guard.ptr.add(THUNK_STATE_OFFSET) = THUNK_EVALUATED;
             let mut count = 0;
-            for_each_pointer_field(guard.ptr, |_| count += 1);
+            for_each_pointer_field(guard.ptr, byte_size, |_| count += 1);
             assert_eq!(count, 1); // Only indirection pointer at offset 16
         }
     }
@@ -469,7 +469,7 @@ mod group5_thunk {
             write_header(guard.ptr, TAG_THUNK, byte_size as u32);
             *guard.ptr.add(THUNK_STATE_OFFSET) = THUNK_BLACKHOLE;
             let mut count = 0;
-            for_each_pointer_field(guard.ptr, |_| count += 1);
+            for_each_pointer_field(guard.ptr, byte_size, |_| count += 1);
             assert_eq!(count, ncaps, "blackhole captures must be visible to GC");
         }
     }

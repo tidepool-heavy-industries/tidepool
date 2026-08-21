@@ -573,6 +573,20 @@ unsafe fn verify_tenured_graph(
 ) {
     let in_arena = |p: *const u8| arenas.iter().any(|&(start, end)| p >= start && p < end);
     let readable = |p: *const u8| (p >= to_start && p < to_end) || in_arena(p);
+    // Real bytes readable from `p` onward: the distance to the end of
+    // whichever region (to-space or a live old-space arena) actually
+    // contains it. `p` is only ever passed here for a pointer `readable`
+    // already accepted, so one of the two arms below always matches.
+    let avail_from = |p: *const u8| -> usize {
+        if p >= to_start && p < to_end {
+            return to_end as usize - p as usize;
+        }
+        arenas
+            .iter()
+            .find(|&&(start, end)| p >= start && p < end)
+            .map(|&(_, end)| end as usize - p as usize)
+            .unwrap_or(0)
+    };
 
     let fail = |owner: *const u8, target: *const u8, what: &str| -> ! {
         panic!(
@@ -598,7 +612,8 @@ unsafe fn verify_tenured_graph(
         if !visited.insert(obj) {
             continue;
         }
-        tidepool_heap::gc::raw::for_each_pointer_field(obj, |field_slot| {
+        let avail = avail_from(obj as *const u8);
+        tidepool_heap::gc::raw::for_each_pointer_field(obj, avail, |field_slot| {
             let target = *field_slot;
             match classify_field_ptr(target as *const u8, to_start, to_end, retired) {
                 FieldPtrVerdict::Ok => {}

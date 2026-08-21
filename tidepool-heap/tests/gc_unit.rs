@@ -21,7 +21,7 @@ fn test_for_each_pointer_field_con_zero_fields() {
         *(ptr.add(CON_NUM_FIELDS_OFFSET) as *mut u16) = 0;
 
         let mut count = 0;
-        for_each_pointer_field(ptr, |_| {
+        for_each_pointer_field(ptr, 1024, |_| {
             count += 1;
         });
         assert_eq!(count, 0, "Con with 0 fields should have 0 pointer fields");
@@ -39,7 +39,7 @@ fn test_for_each_pointer_field_closure_zero_captures() {
         *(ptr.add(CLOSURE_NUM_CAPTURED_OFFSET) as *mut u16) = 0;
 
         let mut count = 0;
-        for_each_pointer_field(ptr, |_| {
+        for_each_pointer_field(ptr, 1024, |_| {
             count += 1;
         });
         assert_eq!(
