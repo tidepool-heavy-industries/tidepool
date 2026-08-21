@@ -2,6 +2,11 @@
 
 This dossier provides a consolidated, normative reference for the GHC Core constructs and heap shapes supported by the Tidepool JIT. It synthesizes findings from four parallel audits covering translation, codegen, and runtime bridge layers. This document serves as a technical foundation for addressing "cross-module divergence" patterns where bindings merged across modules break assumptions made during single-module optimization. For historical context, see PR #272 and Issue #273.
 
+**Audited as of commit `e49b8cb0` (2026-08-20)**, together with the source
+audits it links (`docs/core-shapes/audit-*.md`). Every entry states current
+behavior only — superseded pre-hardening descriptions have been removed, not
+archived (git history is the record).
+
 ## How to read this dossier
 Each section describes a Core construct or shape concern, defining what the JIT must accept and what it produces as a canonical form. Entries cite source audits using cross-links such as [audit-translate § emitRuntimeUnpackCString](core-shapes/audit-translate.md#emitruntimeunpackcstring). The [Coverage Gaps](#coverage-gaps) section at the end provides a prioritized punch list of uncovered branches, silent fallbacks, and cross-module collision risks that require hardening.
 

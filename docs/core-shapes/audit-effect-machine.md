@@ -1,5 +1,10 @@
 # Audit: effect_machine.rs
 
+**Audited as of commit `e49b8cb0` (2026-08-20).** Entries below describe
+`tidepool-codegen/src/effect_machine.rs` as it reads at that commit — the
+pre-hardening ("silent fallback") behavior some entries described before
+PR #295 no longer exists in the code and has been removed from this file.
+
 ## Basic Con Accessors
 
 - **Location:** `tidepool-codegen/src/effect_machine.rs` (`read_con_tag`, `read_con_num_fields`, `read_con_field`)
@@ -81,9 +86,9 @@
 
 - **Location:** `tidepool-codegen/src/effect_machine.rs` (`force_ptr`)
 - **Reads:** byte at `*current` (0)
-- **Expected shape:** Any valid `HeapObject`.
-- **Tag-check coverage:** yes — verifies `tag == layout::TAG_THUNK`.
-- **Failure mode on shape mismatch:** `silent fallback: returns current`
+- **Expected shape:** `TAG_THUNK` (loops via `heap_force`), or `TAG_CON`/`TAG_LIT`/`TAG_CLOSURE` (WHNF already — returns `current`, the normal terminal case, not a failure).
+- **Tag-check coverage:** yes — any other tag is treated as a shape mismatch.
+- **Failure mode on shape mismatch:** Hardened — `runtime_error_with_msg` raises a recoverable `RuntimeError::UserError` and the call returns `error_poison_ptr()` (see "Runtime error poison pointer" below), not `current`.
 - **Mode:** `always-on`
 - **Test coverage:** `tidepool-codegen/tests/effect_machine.rs` (via lazy fields)
 - **Notes:** Transparently forces thunks. Crucial because `Con` fields in JIT-compiled code are often lazy.
@@ -93,19 +98,19 @@
 - **Location:** `tidepool-codegen/src/effect_machine.rs` (`apply_cont_heap`)
 - **Reads:** byte at `*k` (0)
 - **Expected shape:** `TAG_CON` (Leaf/Node) or `TAG_CLOSURE`.
-- **Tag-check coverage:** yes — `match tag` covers `TAG_CON` and `TAG_CLOSURE`.
-- **Failure mode on shape mismatch:** `silent fallback: returns null_mut` (logged via `push_diagnostic`)
+- **Tag-check coverage:** yes — `match tag` covers `TAG_CON` and `TAG_CLOSURE`; any other tag falls to the `_` arm.
+- **Failure mode on shape mismatch:** Hardened (PR #295) — the `_` arm calls `runtime_error_with_msg` (`RuntimeError::UserError`) via `push_diagnostic` + `runtime_error_with_msg`, then returns `null_mut`. The `null_mut` is not silent: an error is set and callers must check `has_runtime_error()`/`take_runtime_error()`.
 - **Mode:** `always-on`
 - **Test coverage:** `tidepool-codegen/tests/effect_machine.rs:test_resume_leaf_identity`
-- **Notes:** Writer: `tidepool-eval/src/eval.rs` or `alloc_con` in `effect_machine.rs`.
+- **Notes:** Writer: `tidepool-eval/src/eval.rs` or `alloc_con` in `effect_machine.rs`. `k.is_null()` (no continuation at all) is a separate, non-error early return — not this check.
 
 ## apply_cont_heap: Leaf/Node con_tag dispatch
 
-- **Location:** `tidepool-codegen/src/effect_machine.rs` (`apply_cont_heap` loop)
+- **Location:** `tidepool-codegen/src/effect_machine.rs` (`apply_cont_heap` loop, `TAG_CON` arm)
 - **Reads:** `con_tag` (8), then `field[0]` (24) for Leaf, or `field[0], field[1]` for Node.
 - **Expected shape:** `TAG_CON` with `con_tag` being `leaf` (arity 1) or `node` (arity 2).
-- **Tag-check coverage:** yes — follows `tag == layout::TAG_CON` check.
-- **Failure mode on shape mismatch:** `silent fallback: returns null_mut` (diagnostic)
+- **Tag-check coverage:** yes — follows `tag == layout::TAG_CON` check; an unrecognized `con_tag` falls to the `else` branch.
+- **Failure mode on shape mismatch:** Hardened (PR #295) — the `else` branch calls `runtime_error_with_msg` (`RuntimeError::UserError`), then returns `null_mut` with the error set.
 - **Mode:** `always-on`
 - **Test coverage:** `tidepool-codegen/tests/effect_machine.rs:test_resume_node_identity`
 - **Notes:** Iterative work-stack tree walking. `Leaf` contains a closure; `Node` contains two continuations.
@@ -115,8 +120,8 @@
 - **Location:** `tidepool-codegen/src/effect_machine.rs` (`apply_cont_heap` closure arm)
 - **Reads:** none (already read `tag`)
 - **Expected shape:** `TAG_CLOSURE`.
-- **Tag-check coverage:** yes — part of the `match tag` dispatch.
-- **Failure mode on shape mismatch:** `silent fallback: returns null_mut` (diagnostic)
+- **Tag-check coverage:** n/a — the outer `match tag` already dispatched on `tag == TAG_CLOSURE`; this arm calls `call_closure` unconditionally, with no further validation of the closure's own shape (that's `call_closure`'s own fragility — see "call_closure: Code pointer read" below).
+- **Failure mode on shape mismatch:** N/A — a raw closure used as a continuation is an intentional degenerate case (see Notes), not a shape mismatch; any real malformation surfaces later, inside `call_closure`.
 - **Mode:** `always-on`
 - **Test coverage:** `uncovered`
 - **Notes:** Degenerate case where a raw closure is used as a continuation.
@@ -126,8 +131,8 @@
 - **Location:** `tidepool-codegen/src/effect_machine.rs` (`apply_cont_heap` result check)
 - **Reads:** byte at `*result` (0), `con_tag` (8)
 - **Expected shape:** `TAG_CON` with `con_tag == val` or `e`.
-- **Tag-check coverage:** yes — verifies `result_tag == layout::TAG_CON`.
-- **Failure mode on shape mismatch:** `silent fallback: returns null_mut` (diagnostic)
+- **Tag-check coverage:** yes — verifies `result_tag == layout::TAG_CON`, then that `result_con_tag` is `val` or `e`.
+- **Failure mode on shape mismatch:** Hardened (PR #295) — both checks call `runtime_error_with_msg` (`RuntimeError::UserError`) on mismatch, then return `null_mut` with the error set. (A forced result that is unexpectedly `null` with no error already set is also hardened the same way, as is a closure application that itself returns `null`.)
 - **Mode:** `always-on`
 - **Test coverage:** `tidepool-codegen/tests/effect_machine.rs`
 - **Notes:** Verifies the result of a continuation application is a valid `Eff` value.

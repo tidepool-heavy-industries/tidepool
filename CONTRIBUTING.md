@@ -17,20 +17,17 @@ This will provide you with the correct versions of Rust, GHC, and other dependen
 
 ## Build and Test Commands
 
-Always verify your changes by running the workspace-wide tests and checks:
-
 ```bash
-cargo check --workspace           # Type check the entire workspace
-cargo nextest run                 # Quick tier: pure-Rust crates only (the normal local command)
-scripts/battery-shard.sh <crate>  # One GHC-heavy crate's full test suite
-scripts/battery.sh                # Full workspace battery (hours long; not the normal local command)
-cargo clippy --workspace          # Run lints
+cargo check --workspace   # Type check the entire workspace
+cargo nextest run         # Quick tier: pure-Rust crates only (the normal local command)
+cargo clippy --workspace  # Run lints
 ```
 
-The test runner is `cargo-nextest` (`cargo install cargo-nextest --locked`), which
-runs each test in its own OS process. GHC-heavy crates need the `TIDEPOOL_EXTRACT`
-env var pointing at a built `tidepool-extract-bin` — `scripts/battery.sh` sets this
-up automatically. See the Build & Test section of `CLAUDE.md` for the full matrix.
+For anything beyond the quick tier — GHC-heavy crates, targeted vs.
+sharded-full vs. expensive test runs, and why bare `scripts/battery.sh`
+should not be your default — see the **Test tiers** subsection of the root
+`CLAUDE.md`'s Build & Test section. That table is the canonical matrix; it
+is not duplicated here so the two cannot drift apart.
 
 ## MCP Server
 
@@ -43,12 +40,29 @@ tidepool # Communicates via JSON-RPC over stdio
 
 ## Adding New Effects
 
-The effect stack derives from a single declaration: `tidepool-mcp/src/effect_defs.rs`.
-Each effect is one `<effect>_effect_def!` block; two projections generate the
-effect declaration builder and the Rust `<Eff>Req` enum + handler dispatch from it.
-Add, remove, or reorder an effect by editing that file, then write the handler
-method the dispatch arm calls — see `tidepool-mcp/CLAUDE.md` (how to add an effect)
-and `tidepool-handlers/CLAUDE.md` (handler arms, `cx.respond*` variants).
+There are two paths today, depending on whether the effect you're touching
+has migrated to the schema-driven scaffold yet
+(`tidepool-protocol/src/effects/` — currently `Exec`, `Journal`, `Worktree`,
+`RepoEvent`; check `tidepool_protocol::effects::all()` for the current set).
+
+- **Schema-driven (migrated effects):** the effect's truth lives as data in
+  `tidepool-protocol/src/effects/<effect>.rs` (a `schema::Effect` value), and
+  `tidepool-protocol-gen` (the crate's `[[bin]]`) projects it into the macro
+  DSL, wire mirrors, extractor verb tables, and harness classification lists
+  that used to be hand-maintained separately. Edit the schema, regenerate,
+  and the golden byte-compatibility check catches drift. See
+  `plans/self-iterating-harness/22-p1-protocol-scaffold.md` for the schema
+  design and the migration procedure for moving the next effect over.
+- **Legacy (everything else):** still declared by hand in
+  `tidepool-mcp/src/effect_defs.rs`. Each effect is one `<effect>_effect_def!`
+  block; two projections generate the effect declaration builder and the
+  Rust `<Eff>Req` enum + handler dispatch from it. Add, remove, or reorder an
+  effect by editing that file, then write the handler method the dispatch
+  arm calls — see `tidepool-mcp/CLAUDE.md` (how to add an effect) and
+  `tidepool-handlers/CLAUDE.md` (handler arms, `cx.respond*` variants).
+
+New effects should generally target the schema-driven path going forward —
+see the Effect Protocol PRD linked from `plans/README.md`.
 
 ## Adding Prelude Functions
 

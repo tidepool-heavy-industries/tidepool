@@ -166,17 +166,22 @@ tidepool-bridge/            FromCore/ToCore traits for Rust <-> Core value conve
 tidepool-bridge-derive/     Proc-macro: #[derive(FromCore)]
 tidepool-macro/             Proc-macro: haskell_inline! { ... }
 tidepool-effect/            Effect handling: EffectHandler trait, HList dispatch
+tidepool-extract-cmd/       The one `tidepool-extract` invocation builder: bin resolution, typed args, the spawn
+tidepool-atomic-write/      Atomic write-then-rename, shared by every durable on-disk store
+tidepool-protocol/          Effect contract as data: one schema generating macro DSL, wire mirrors, extractor tables, harness classification
 tidepool-codegen/           Cranelift JIT compiler + effect machine
 tidepool-runtime/           High-level API: compile_haskell, compile_and_run, caching
 tidepool-mcp/               MCP server library (generic over effect handlers)
 tidepool-handlers/          Concrete effect handlers shared by both servers
 tidepool-repl/              GHCi-style resident-session MCP server
 tidepool-lsp/               LSP client + workspace daemon (call graph, hover, refs)
-tidepool-harness/           Typed-yield session tree over the eval substrate: forcing, event log, provider-driven turns
-tidepool-web/               Minimal operator GUI (HTTP+SSE, Datastar) for the self-iterating harness
+tidepool-harness/           Resident harness: session-tree turn lifecycle, the selfharness driver
+tidepool-worktree/          Managed git worktrees, durable registry, typed repository events
+tidepool-agent/             Typed headless subagents: the backend seam + the Codex adapter
+tidepool-web/               Operator GUI (HTTP+SSE, Datastar) for the self-iterating harness
 tidepool-bignum/            Native ghc-bignum shims (Integer arithmetic sans GMP)
 tidepool-bridge-effects/    Bridged record types shared by handlers + test mocks
-tidepool-testing/           Test utilities + property-based generators
+tidepool-testing/           Test utilities + property-based generators (internal)
 ```
 
 ## How It Works
@@ -226,7 +231,7 @@ enum ConsoleReq {
 ```rust
 impl EffectHandler for ConsoleHandler {
     type Request = ConsoleReq;
-    fn handle(&mut self, req: ConsoleReq, cx: &EffectContext) -> Result<Value, EffectError> {
+    fn handle(&mut self, req: ConsoleReq, cx: &EffectContext) -> Result<Response, EffectError> {
         match req {
             ConsoleReq::Emit(s) => { println!("{s}"); cx.respond(()) }
             ConsoleReq::AwaitInt => { /* read from stdin */ cx.respond(42i64) }
@@ -344,6 +349,8 @@ The `tidepool` binary provides these effect handlers:
 | **Git** | `GitLog`, `GitStatus`, `GitDiffStat`, `GitShow` — read-only queries as typed records |
 | **Time** | `TimeNow` — UTC clock (epoch millis; `getCurrentTime`, ISO-8601 helpers) |
 | **Ask** | `AskWith :: Text -> Value -> Ask Value` — suspend and ask the calling LLM a schema-validated question |
+| **RunLLMTurn** | `RunLLMTurnWith`, `RunLLMTurnFreezeWith` — interposed, like `Ask`: `runLLMTurn`/`runLLMTurnFork`/`runLLMTurnFanout` open a clean-context model sub-turn and deliver a typed answer; `freezeContext` snapshots the calling context for later branching |
+| **Fork** | `ForkWith`, `ForkAllWith` — `fork @T brief`/`forkAll @T briefs` delegate to one or more sub-answerers, each producing a typed `T` (depth-one — a forked child cannot itself fork) |
 
 > **`--debug` flag**: Run `tidepool --debug` to enable the **Meta** effect (`MetaConstructors`, `MetaLookupCon`, `MetaPrimOps`, `MetaEffects`, `MetaDiagnostics`, `MetaVersion`, `MetaHelp`) for runtime introspection. For git operations, use `run "git ..."` via the Exec effect.
 

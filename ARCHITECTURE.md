@@ -35,8 +35,11 @@ Tidepool transforms `freer-simple` continuations into a state machine:
 - **`tidepool-bignum`**: Native `ghc-bignum` shims — `Integer` arithmetic without GMP.
 - **`tidepool-optimize`**: Contains optimization passes like beta reduction, dead code elimination (DCE), inlining, and case reduction.
 - **`tidepool-codegen`**: The Cranelift-based compiler that generates native code and manages the `JitEffectMachine` lifecycle.
-- **`tidepool-runtime`**: The high-level orchestration layer that handles Haskell compilation (via `tidepool-extract`), caching, and running programs.
+- **`tidepool-extract-cmd`**: The one `tidepool-extract` invocation builder (bin resolution, typed args, the spawn) that every caller of the Haskell toolchain goes through. `std`-only, zero deps, so `tidepool-macro` can depend on it without pulling in the runtime graph.
+- **`tidepool-atomic-write`**: The one atomic write-then-rename helper, shared by every durable on-disk store in the workspace (worktree registry, agent binding table, checkpoints, compile cache, toolchain stamp).
+- **`tidepool-runtime`**: The high-level orchestration layer that handles Haskell compilation (via `tidepool-extract-cmd`), caching (via `tidepool-atomic-write`), and running programs.
 - **`tidepool-effect`**: Core traits and logic for effect dispatch and handling (`EffectHandler`, `DispatchEffect`).
+- **`tidepool-protocol`**: The effect contract as data — one schema (verbs, records, errors, field types) that generates the macro DSL strings, wire mirrors, extractor verb tables, and harness classification lists that used to be hand-maintained separately. A `std`-only leaf with no runtime component; effects migrate here one at a time from `tidepool-mcp/src/effect_defs.rs`.
 - **`tidepool-macro`**: Procedural macros embedding Haskell source as CBOR at build time (`haskell_eval!` for whole programs, `haskell_inline!` for inline snippets).
 - **`tidepool-bridge`**: Provides `FromCore` and `ToCore` traits for seamless data conversion between Rust types and Tidepool `Value`s.
 - **`tidepool-bridge-derive`**: Procedural macro crate providing `#[derive(FromCore)]` and `#[derive(ToCore)]`.
@@ -45,8 +48,10 @@ Tidepool transforms `freer-simple` continuations into a state machine:
 - **`tidepool-mcp`**: MCP server library, generic over effect handlers.
 - **`tidepool-repl`**: GHCi-style resident-session MCP server (declarations and heap persist across calls).
 - **`tidepool-lsp`**: LSP client + workspace daemon (call graph, hover, references).
-- **`tidepool-harness`**: Typed-yield session tree over the eval substrate — forcing, event log, provider-driven turns.
-- **`tidepool-web`**: Minimal operator GUI (HTTP+SSE, Datastar) for the self-iterating harness.
+- **`tidepool-worktree`**: Managed git worktrees, a durable registry, and typed repository events — the runtime observes git state but has no git-workflow verbs of its own (no merge, no rebase).
+- **`tidepool-agent`**: Typed headless coding subagents — the containment boundary and the one place a coding backend (Codex today) is named. Spawns a subagent into a managed `tidepool-worktree` worktree.
+- **`tidepool-harness`**: Resident harness runtime — session-tree turn lifecycle, `SessionRegistry` checkout ownership, the selfharness driver that drives an authored `State`/`render`/`loop` program forever.
+- **`tidepool-web`**: Operator GUI (HTTP+SSE, Datastar) for the self-iterating harness.
 - **`tidepool`**: Facade crate + the `tidepool` MCP server binary.
 - **`tidepool-testing`**: Internal utilities and property-based generators for testing the compiler and runtime.
 

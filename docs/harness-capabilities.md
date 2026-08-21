@@ -4,8 +4,12 @@ An orientation document for LLM collaborators: what this system is, what it
 can do today, what is chartered next, and how to work on it well. It is
 self-contained; pointers to deeper repo docs are collected at the end.
 
+**Verified as of commit `e49b8cb0` (2026-08-20).**
+
 Everything below is marked either **live** (landed, running, tested) or
 **chartered** (locked design in PRD 20, not yet built). Do not conflate them.
+PRD 20 ("Exomonad v3") is itself a mix of both today — see "The authored
+loop's powers" and "The chartered future" below for the current split.
 
 ## What this system is
 
@@ -80,9 +84,12 @@ succeeded, block X failed with Y." One reply = one model round.
 
 ## The authored loop's powers (live)
 
-The outer row today: `RunLLMTurn`, `AskUser`, `Worktree`, `Subagent`
-(Console/RepoEvent/Exec are chartered — S1-L1 below). Everything suspends to
-the driver and is serviced there; nothing dispatches behind the model's back.
+The outer row today: `RunLLMTurn`, `AskUser`, `Worktree`, `Subagent`,
+**and now also `Console`/`RepoEvent`/`Exec`** — PRD 20's S1-L1 row-servicing
+lane has landed (`tidepool-harness/src/engine.rs`'s `OuterEffectKind`,
+serviced the `service_outer_subagent` way; see
+`tidepool-harness/src/selfharness/driver.rs`). Everything suspends to the
+driver and is serviced there; nothing dispatches behind the model's back.
 
 - **Typed subagents** (`spawnAgent @r spec`): spawn a headless coding agent
   (Codex backend today) for one complete cycle in a managed git worktree. The
@@ -92,8 +99,10 @@ the driver and is serviced there; nothing dispatches behind the model's back.
   never defaulted. `spawnSpecIn (WorktreeId …)` rebinds a retained worktree
   from an earlier cycle. `spawnAgentWithTools` gives the child typed tools
   whose handlers run in the *parent's* Haskell — the parent services every
-  child tool call and can refuse, rewrite, or escalate. One agent at a time
-  today (lifted in S1-L2).
+  child tool call and can refuse, rewrite, or escalate. **One-agent-at-a-time
+  is lifted** (PRD 20 S1-L2): `SubagentHandler` holds a cycle table of
+  running agents keyed by handle; backend processes are per-cycle and
+  independent.
 - **Managed worktrees** (PRD 19): `createWorktree`, `fromCurrentRepository`,
   `fromWorktree`, `allowDirtySnapshot` (hidden snapshot of a dirty source —
   never touches the user's branch). Worktrees are retained indefinitely
@@ -117,8 +126,13 @@ the driver and is serviced there; nothing dispatches behind the model's back.
   state across harness edits. Running live, daily.
 - **dev-tree/** — a recursive development tree: `DevPlan` unfolds depth-first
   into implementation agents (parent first — children seed from finalized
-  parent HEAD), then fresh integration agents merge bottom-up. Typechecks
-  against its full row today; *runs* once S1-L1 servicing lands. This
+  parent HEAD), then fresh integration agents merge bottom-up. v2 is built on
+  `Tidepool.Swarm`'s `PlanF`/`hyloM` (PRD 20 S1-L3) over the now-landed S1-L1
+  row and S1-L2 cycle table. It **typechecks** against its full row
+  (`tidepool-harness/tests/dogfood_harness_typecheck.rs`), including
+  `resumeLoop` and the journal-backed resume decisions — but that probe is
+  typecheck-only (it does not drive a model, spawn an agent, or touch a
+  repository), so a live end-to-end run is not yet demonstrated. This
   harness is the executable design target of PRD 20.
 
 ## Operator surface (live)
@@ -129,10 +143,19 @@ Haskell, continue-gates between loops. Observability is two durable JSONL
 streams (loop-level transcript; fine-grained per-turn log with every executed
 block, hole, and answer). Turn compiles are content-addressed and memoized.
 
-## The chartered future — PRD 20, "Exomonad v3" (locked design, not built)
+## The chartered future — PRD 20, "Exomonad v3"
 
 The swarm successor to exomonad: coordination as a compiled resident program,
-cognition only at typed seams. The locked core, compressed:
+cognition only at typed seams. **Stage 1 lanes S1-L1 through S1-L5 are
+landed** (row servicing above; the cycle table above; the hylo swarm
+substrate `Tidepool.Swarm` that dev-tree v2 now uses; green threads +
+capability mailboxes, merged 2026-08-17; journal-backed resume hardening).
+**S1-L6** (the operator surface: a live outcome-tree pane with per-node
+wall-clock/cost observability, agent transcript streaming, typed triage
+forms, and a fold-receipt view) **has no confirmed implementation** as of
+this audit. **Stage 2** (the resident factory: backlog DAG, per-repo memory,
+autonomy policy) and **Stage 3** (self-hosting) are locked design, not built.
+The locked core, compressed:
 
 - **The swarm is a monadic hylomorphism; agents are its algebra and
   coalgebra.** `hyloM alg coalg` over `PlanF a = PlanF { task, kids :: [a] }`.
