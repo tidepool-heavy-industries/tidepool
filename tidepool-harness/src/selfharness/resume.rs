@@ -56,9 +56,10 @@
 //! [`AcquiredLease::segment_ordinal`] — THIS process's own exclusively-claimed
 //! segment ordinal, composed into `seq`'s high bits
 //! ([`tidepool_handlers::compose_journal_seq`]) — never at a count continued
-//! from the fold. Two processes resuming the SAME extant lease at once (the
-//! warn-never-refuse alive-pid policy in [`acquire_lease`] means this is not
-//! merely hypothetical) fold the identical prior state and would seed an
+//! from the fold. Two processes resuming the SAME extant lease at once (a
+//! deliberate TAKEOVER — see "The run lease" below; a live-owned lease is a
+//! hard refusal by default now, never a silent join) fold the identical
+//! prior state and would seed an
 //! identical counter under a fold-derived scheme; seeding from each one's own
 //! DISTINCT segment ordinal instead means their `seq` ranges can never
 //! collide, with no coordination between them beyond the segment claim
@@ -102,7 +103,9 @@
 //! | boot condition | behaviour |
 //! |---|---|
 //! | no lease | mint a `runId`, claim the lease file EXCLUSIVELY (an OS-enforced atomic create — never a blind overwrite); on collision with another racer's simultaneous fresh claim, restart from `load_lease` and take the RESUME row below instead of orphaning a second run; the winner allocates segment 0, empty fold |
-//! | a lease | RESUME: same `runId`, allocate the next unused segment, fold every existing segment |
+//! | a lease naming a DEAD pid, or THIS process's own pid | RESUME: same `runId`, allocate the next unused segment, fold every existing segment |
+//! | a lease naming a DIFFERENT, LIVE pid, no takeover | HARD REFUSAL: `Err(PersistenceError::LiveLeaseHeld)`, naming the pid — nothing on disk is touched |
+//! | a lease naming a DIFFERENT, LIVE pid, [`LEASE_TAKEOVER_ENV_VAR`]`=1` | TAKEOVER: archive the prior lease record (see [`archive_stale_lease`]), then RESUME as above |
 //! | `run_loop` returns normally | [`retire_lease`]: rename to `run-<runId>.json`, RETAINED — so the next boot mints a fresh run |
 //! | the process crashes | the lease survives → the next boot resumes |
 //!
@@ -133,7 +136,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value as Json;
 use tidepool_handlers::{last_by_kind_key, JournalEntry, SegmentPath};
 
-use super::persistence::PersistenceError;
+use super::persistence::{PersistenceError, LEASE_TAKEOVER_ENV_VAR};
 
 /// Everything the driver folded out of one run's segments at boot: the last
 /// entry recorded under each `(kind, key)` pair, plus the run id those entries
@@ -401,11 +404,12 @@ fn allocate_segment(log_dir: &Path, run_id: &str) -> Result<(SegmentPath, u64), 
 }
 
 /// Best-effort liveness check via `/proc/<pid>` (Linux only — the same idiom
-/// `Harness::sweep_stale_run_dirs` uses for its own stale-dir sweep). Backs a
-/// WARNING only (see [`acquire_lease`]'s resume path), never a correctness
-/// decision: `false` on a platform without `/proc`, or if `/proc` itself is
-/// unreadable, just means a live process goes unwarned rather than blocking
-/// anything.
+/// `Harness::sweep_stale_run_dirs` uses for its own stale-dir sweep).
+/// [`acquire_lease`] now gates a hard refusal on this for any pid other than
+/// its own — `false` (a platform without `/proc`, or `/proc` itself
+/// unreadable) means a genuinely live OTHER process goes undetected and its
+/// lease reclaims as if dead, the same best-effort ceiling this check always
+/// had, now load-bearing rather than advisory.
 fn pid_is_alive(pid: u32) -> bool {
     Path::new("/proc").join(pid.to_string()).exists()
 }
@@ -602,6 +606,32 @@ fn now_secs_string() -> String {
         .to_string()
 }
 
+/// Archive the PRIOR lease record before a TAKEOVER overwrites it — called
+/// only from [`acquire_lease`]'s takeover branch, so the fact that a live
+/// process's lease was forcibly reclaimed (never an ordinary dead-pid or
+/// self-pid resume) survives on disk under its own name. Deliberately named
+/// apart from [`retired_lease_path`] (reserved for a run that finished
+/// normally — reusing that name here could be mistaken for a clean finish,
+/// or collide with one written later). Best-effort audit trail, not part of
+/// the lease protocol itself: nothing here or elsewhere ever reads this file
+/// back.
+fn archive_stale_lease(log_dir: &Path, lease: &RunLease) -> Result<(), PersistenceError> {
+    let path = log_dir.join(format!(
+        "run-{}.takeover-from-pid-{}-at-{}.json",
+        lease.run_id,
+        lease.pid,
+        now_secs_string()
+    ));
+    let bytes = serde_json::to_vec_pretty(lease).map_err(|source| PersistenceError::Json {
+        path: path.clone(),
+        source,
+    })?;
+    tidepool_atomic_write::write_durable(&path, &bytes).map_err(|e| PersistenceError::Io {
+        path: e.path,
+        source: e.source,
+    })
+}
+
 /// The boot-time lease step: RESUME the run a prior process left behind, or
 /// mint a fresh one, and ALLOCATE the segment this process will append to —
 /// the next unused ordinal for that run id, every time, fresh boot or resume
@@ -616,6 +646,37 @@ fn now_secs_string() -> String {
 /// both mint: exactly one becomes the fresh run, and every other one resumes
 /// it — never a silently orphaned second run each believing itself fresh.
 ///
+/// # Live-PID refusal
+///
+/// A lease naming a DIFFERENT pid that is still alive (checked via
+/// [`pid_is_alive`]) is a HARD REFUSAL — `Err(PersistenceError::LiveLeaseHeld)`,
+/// naming the pid and the takeover remedy — not merely a warning: segments
+/// keep the JOURNAL file-safe under concurrent writers, but they do nothing
+/// to stop two processes from independently repeating the same external
+/// effects (writes, commits, model calls) or racing the shared checkpoint
+/// with last-writer-wins. Nothing on disk is touched on this path — the
+/// stale-but-existing lease is left exactly as found, so a retry (after
+/// confirming the other process is really gone, or setting
+/// [`LEASE_TAKEOVER_ENV_VAR`]) sees the same state.
+///
+/// Set [`LEASE_TAKEOVER_ENV_VAR`]`=1` to force the join anyway — for a
+/// verified-stale record (the pid was reused by something unrelated, or the
+/// box rebooted and `/proc` just hasn't caught up) or an operator-approved
+/// takeover. The prior lease is archived first ([`archive_stale_lease`]) so
+/// the forced claim leaves an audit trail, then the resume proceeds exactly
+/// as the dead-pid case below.
+///
+/// A lease naming THIS process's own pid is exempt from both the refusal and
+/// the takeover machinery — it is definitionally not a second process, so
+/// there is no dual-ownership hazard to refuse. In production
+/// `acquire_lease` runs exactly once per process boot, so this case is a
+/// test-only artifact (this crate's own resume tests simulate "a later
+/// process resumes" by calling this function again within one test process);
+/// it is handled here rather than special-cased in every such test.
+///
+/// A lease naming a DEAD pid resumes exactly as before this fix — reclaim
+/// behavior for that case is unchanged.
+///
 /// Writing the lease on the resume path is deliberate: it re-stamps `pid` and
 /// `startedAt` with the process that now holds the run, which is what a human
 /// reading the file wants. That path keeps the ordinary replace-rename
@@ -625,22 +686,26 @@ fn now_secs_string() -> String {
 pub fn acquire_lease(log_dir: &Path) -> Result<AcquiredLease, PersistenceError> {
     loop {
         if let Some(mut lease) = load_lease(log_dir)? {
-            // Observability, not a gate: segments already make coexistence
-            // file-safe (this boot allocates its own, below), so a live
-            // prior pid is never refused — only named loudly, before it's
-            // overwritten, so a human can tell a genuine double-work
-            // situation from an ordinary crash resume.
-            if pid_is_alive(lease.pid) {
+            let my_pid = std::process::id();
+            if lease.pid != my_pid && pid_is_alive(lease.pid) {
+                if std::env::var(LEASE_TAKEOVER_ENV_VAR).as_deref() != Ok("1") {
+                    return Err(PersistenceError::LiveLeaseHeld {
+                        run_id: lease.run_id,
+                        pid: lease.pid,
+                    });
+                }
                 tracing::warn!(
                     run_id = %lease.run_id,
                     prior_pid = lease.pid,
-                    resuming_pid = std::process::id(),
-                    "resuming a run whose lease still names a LIVE prior process — \
-                     segments keep this file-safe, but the run is now being worked \
-                     by two processes at once"
+                    resuming_pid = my_pid,
+                    "TAKEOVER ({LEASE_TAKEOVER_ENV_VAR}=1): forcibly claiming a run whose \
+                     lease still names a LIVE prior process — segments keep this file-safe, \
+                     but if that process is still genuinely working the run, its effects and \
+                     this process's will now interleave"
                 );
+                archive_stale_lease(log_dir, &lease)?;
             }
-            lease.pid = std::process::id();
+            lease.pid = my_pid;
             lease.started_at = now_secs_string();
             write_lease(log_dir, &lease)?;
             let (segment, segment_ordinal) = allocate_segment(log_dir, &lease.run_id)?;
@@ -1020,75 +1085,191 @@ mod tests {
         assert_eq!(on_disk.run_id, winner_run_id);
     }
 
-    /// [`acquire_lease`]'s resume path warns, naming both pids, when the
-    /// lease it inherits still names a LIVE process — captured via a
-    /// scoped `tracing` subscriber rather than asserted indirectly, so this
-    /// pins the observability itself, not just a side effect of it.
+    /// A lease naming THIS process's own (necessarily alive) pid is exempt
+    /// from the live-pid refusal — there is no second process here, so
+    /// nothing to refuse. This is the case every OTHER resume test in this
+    /// file relies on implicitly (they simulate "a later process resumes" by
+    /// calling `acquire_lease` again within one test process), so it is
+    /// pinned directly, once, here.
     #[test]
-    fn alive_pid_lease_warns_loudly_at_resume() {
-        use std::sync::Arc;
-
-        use parking_lot::Mutex;
-
-        struct CaptureEvents(Arc<Mutex<Vec<String>>>);
-
-        struct FieldsToString(String);
-        impl tracing::field::Visit for FieldsToString {
-            fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
-                use std::fmt::Write;
-                let _ = write!(self.0, "{}={:?} ", field.name(), value);
-            }
-        }
-
-        impl tracing::Subscriber for CaptureEvents {
-            fn enabled(&self, _metadata: &tracing::Metadata<'_>) -> bool {
-                true
-            }
-            fn new_span(&self, _span: &tracing::span::Attributes<'_>) -> tracing::span::Id {
-                tracing::span::Id::from_u64(1)
-            }
-            fn record(&self, _span: &tracing::span::Id, _values: &tracing::span::Record<'_>) {}
-            fn record_follows_from(&self, _span: &tracing::span::Id, _follows: &tracing::span::Id) {
-            }
-            fn event(&self, event: &tracing::Event<'_>) {
-                let mut visitor = FieldsToString(String::new());
-                event.record(&mut visitor);
-                self.0.lock().push(visitor.0);
-            }
-            fn enter(&self, _span: &tracing::span::Id) {}
-            fn exit(&self, _span: &tracing::span::Id) {}
-        }
-
-        let dir = temp_dir("lease-alive-pid-warn");
+    fn self_owned_lease_resumes_without_a_live_pid_refusal() {
+        let dir = temp_dir("lease-self-pid-exempt");
         let my_pid = std::process::id();
         write_lease(
             &dir,
             &RunLease {
-                run_id: "run-alive".to_string(),
+                run_id: "run-self".to_string(),
                 pid: my_pid,
                 started_at: "0".to_string(),
             },
         )
         .expect("plant a lease naming this (guaranteed-alive) test process");
 
-        let captured = Arc::new(Mutex::new(Vec::new()));
-        let subscriber = CaptureEvents(Arc::clone(&captured));
-        let acquired = tracing::subscriber::with_default(subscriber, || {
-            acquire_lease(&dir).expect("resuming a lease with a live prior pid must still succeed")
-        });
-
+        let acquired = acquire_lease(&dir)
+            .expect("a lease naming this process's own pid must resume, never refuse");
         assert!(acquired.resumed, "a lease was on disk — this boot resumes");
         assert_eq!(
             acquired.lease.pid, my_pid,
             "re-stamped to this process, as always"
         );
+    }
 
-        let events = captured.lock();
+    /// THE fix this lane exists for: a lease naming a DIFFERENT, genuinely
+    /// LIVE process (a real child, not a simulated pid) is a hard refusal —
+    /// `PersistenceError::LiveLeaseHeld`, naming the pid — and nothing on
+    /// disk is touched (the lease still names the live child afterward, no
+    /// segment was allocated).
+    #[test]
+    fn live_pid_lease_is_a_hard_refusal_without_takeover() {
+        std::env::remove_var(LEASE_TAKEOVER_ENV_VAR);
+        let dir = temp_dir("lease-live-pid-refusal");
+
+        let mut child = std::process::Command::new("sleep")
+            .arg("60")
+            .spawn()
+            .expect("spawn a real, genuinely-alive foreign process");
+        let child_pid = child.id();
+
+        write_lease(
+            &dir,
+            &RunLease {
+                run_id: "run-live".to_string(),
+                pid: child_pid,
+                started_at: "0".to_string(),
+            },
+        )
+        .expect("plant a lease naming the live child");
+
+        let err = acquire_lease(&dir)
+            .expect_err("a lease naming a different LIVE pid must refuse, never join");
+        match &err {
+            PersistenceError::LiveLeaseHeld { run_id, pid } => {
+                assert_eq!(run_id, "run-live");
+                assert_eq!(*pid, child_pid);
+            }
+            other => panic!("expected LiveLeaseHeld, got {other:?}"),
+        }
         assert!(
-            events
-                .iter()
-                .any(|e| e.contains(&format!("prior_pid={my_pid}"))),
-            "resuming a lease whose pid is still alive must warn, naming that pid; got {events:?}"
+            err.to_string().contains(LEASE_TAKEOVER_ENV_VAR),
+            "the refusal must name the takeover remedy: {err}"
+        );
+
+        // Nothing was mutated: the lease still names the live child, and no
+        // segment was allocated for this (refused) process.
+        let still = load_lease(&dir).expect("load lease").expect("lease kept");
+        assert_eq!(still.pid, child_pid, "the lease is untouched by a refusal");
+        assert!(
+            list_segments(&dir, "run-live")
+                .expect("list segments")
+                .is_empty(),
+            "a refused acquisition must never allocate a segment"
+        );
+
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+
+    /// [`LEASE_TAKEOVER_ENV_VAR`]`=1` forces the join anyway: the resume
+    /// succeeds, the prior lease record is archived (a
+    /// `run-<id>.takeover-from-pid-<pid>-at-<ts>.json` sibling, distinct from
+    /// [`retired_lease_path`]'s normal-completion naming) before the active
+    /// lease is overwritten with this process's own pid.
+    #[test]
+    fn takeover_env_var_forcibly_claims_a_live_lease_and_archives_the_prior_record() {
+        let dir = temp_dir("lease-takeover");
+
+        let mut child = std::process::Command::new("sleep")
+            .arg("60")
+            .spawn()
+            .expect("spawn a real, genuinely-alive foreign process");
+        let child_pid = child.id();
+
+        write_lease(
+            &dir,
+            &RunLease {
+                run_id: "run-takeover".to_string(),
+                pid: child_pid,
+                started_at: "0".to_string(),
+            },
+        )
+        .expect("plant a lease naming the live child");
+
+        // SAFETY (env mutation in a test): this crate's suite runs one test
+        // per OS process under the project's mandated `cargo-nextest` runner
+        // (root CLAUDE.md), so no other test observes this process's env.
+        std::env::set_var(LEASE_TAKEOVER_ENV_VAR, "1");
+        let acquired = acquire_lease(&dir);
+        std::env::remove_var(LEASE_TAKEOVER_ENV_VAR);
+        let acquired = acquired.expect("the takeover env var must force the join");
+
+        assert!(acquired.resumed);
+        assert_eq!(acquired.lease.run_id, "run-takeover");
+        assert_eq!(
+            acquired.lease.pid,
+            std::process::id(),
+            "the active lease is re-stamped to the taking-over process"
+        );
+
+        let archived: Vec<_> = std::fs::read_dir(&dir)
+            .expect("read dir")
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.contains("takeover-from-pid"))
+            .collect();
+        assert_eq!(
+            archived.len(),
+            1,
+            "exactly one archived record of the forced takeover, got {archived:?}"
+        );
+        assert!(
+            archived[0].contains(&child_pid.to_string()),
+            "the archived record must name the prior (taken-over) pid: {archived:?}"
+        );
+
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+
+    /// A lease naming a DEAD pid reclaims exactly as before this fix —
+    /// unaffected by the live-pid refusal or the takeover machinery, no env
+    /// var needed, and no takeover-archive record is written (this is an
+    /// ordinary crash resume, not a forced claim from a live owner).
+    #[test]
+    fn dead_pid_lease_reclaims_without_a_hard_refusal_or_takeover_var() {
+        std::env::remove_var(LEASE_TAKEOVER_ENV_VAR);
+        let dir = temp_dir("lease-dead-pid-reclaim");
+
+        let mut child = std::process::Command::new("true")
+            .spawn()
+            .expect("spawn a process that exits immediately");
+        let dead_pid = child.id();
+        child.wait().expect("reap it — now genuinely dead");
+
+        write_lease(
+            &dir,
+            &RunLease {
+                run_id: "run-dead".to_string(),
+                pid: dead_pid,
+                started_at: "0".to_string(),
+            },
+        )
+        .expect("plant a lease naming the now-dead child");
+
+        let acquired =
+            acquire_lease(&dir).expect("a lease naming a dead pid must reclaim, never refuse");
+        assert!(acquired.resumed);
+        assert_eq!(acquired.lease.run_id, "run-dead");
+        assert_eq!(acquired.lease.pid, std::process::id());
+
+        let archived: Vec<_> = std::fs::read_dir(&dir)
+            .expect("read dir")
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.contains("takeover-from-pid"))
+            .collect();
+        assert!(
+            archived.is_empty(),
+            "an ordinary dead-pid reclaim must never write a takeover-archive record: {archived:?}"
         );
     }
 

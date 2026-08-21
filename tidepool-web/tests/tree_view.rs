@@ -10,7 +10,7 @@ use std::net::SocketAddr;
 use std::time::Duration;
 
 use reqwest::Client;
-use serde_json::Value;
+use serde_json::{json, Value};
 use tidepool_harness::selfharness::operator::OperatorGate;
 use tidepool_web::{router, AppState};
 use tokio::net::TcpListener;
@@ -179,6 +179,7 @@ async fn api_tree_status_reflects_a_pending_ask() {
     let interaction = &rest[..rest.find('\'').unwrap()];
     client
         .post(format!("{base}/node/n1/continue/{interaction}"))
+        .json(&json!({"answer": "Continue"}))
         .send()
         .await
         .unwrap();

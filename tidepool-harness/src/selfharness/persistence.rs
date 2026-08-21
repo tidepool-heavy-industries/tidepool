@@ -93,6 +93,19 @@ impl LoopIteration {
     }
 }
 
+/// Set to `"1"` to forcibly claim a run whose lease still names a LIVE prior
+/// process — see [`PersistenceError::LiveLeaseHeld`] and
+/// `crate::selfharness::resume::acquire_lease`'s doc. Absent (the default),
+/// a live-owned lease is a hard refusal, never a silent join: two processes
+/// committing the same effects twice — writes, commits, model calls — is
+/// exactly the hazard PRD 20's segments-not-single-file design leaves open,
+/// since segment safety only protects the JOURNAL bytes, never anything an
+/// answerer turn already did in the outside world. Read directly by
+/// `acquire_lease`, and named here (beside the error it gates) rather than
+/// in `resume.rs`, so the constant and the message that tells an operator to
+/// set it can never drift apart.
+pub const LEASE_TAKEOVER_ENV_VAR: &str = "TIDEPOOL_SELFHARNESS_TAKEOVER";
+
 #[derive(Debug, thiserror::Error)]
 pub enum PersistenceError {
     #[error("selfharness persistence io error at {path}: {source}")]
@@ -105,6 +118,15 @@ pub enum PersistenceError {
         path: PathBuf,
         source: serde_json::Error,
     },
+    #[error(
+        "selfharness lease: run {run_id:?} is already held by live process pid {pid} — \
+         refusing to join it (joining would double-run every effect that process already \
+         committed — writes, commits, model calls). If pid {pid} is genuinely gone (a stale \
+         record after a reboot, or a pid a killed process's slot was reused by something \
+         unrelated), set TIDEPOOL_SELFHARNESS_TAKEOVER=1 and restart to forcibly take over the \
+         run; otherwise stop that process first."
+    )]
+    LiveLeaseHeld { run_id: String, pid: u32 },
 }
 
 /// The one durable record a restart reads: a completed cycle's `State`,
@@ -428,6 +450,22 @@ impl Observer for JsonlObserver {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The remedy [`PersistenceError::LiveLeaseHeld`]'s message tells an
+    /// operator to set names the SAME constant `acquire_lease` actually
+    /// reads — a hand-typed env var name in the message that drifted from
+    /// the real one would be a silent operator-facing footgun.
+    #[test]
+    fn live_lease_held_message_names_the_real_takeover_env_var() {
+        let err = PersistenceError::LiveLeaseHeld {
+            run_id: "run-x".to_string(),
+            pid: 4242,
+        };
+        let msg = err.to_string();
+        assert!(msg.contains(LEASE_TAKEOVER_ENV_VAR), "{msg}");
+        assert!(msg.contains("4242"), "{msg}");
+        assert!(msg.contains("run-x"), "{msg}");
+    }
 
     fn checkpoint(generation: u64) -> Checkpoint {
         Checkpoint {

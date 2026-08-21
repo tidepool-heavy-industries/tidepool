@@ -827,6 +827,39 @@ ceiling refuses the loop with a legible error rather than rotating under a
 live suspension. CI oracle:
 `machine_rotation_between_cycles_preserves_durable_state`.
 
+## Run lease — fail-closed against a live prior process
+
+`selfharness::resume::acquire_lease` (called once, at boot, by
+`tidepool-selfharness`) is the seam that decides which run this process joins
+— see that module's own doc for the full segments/lease design. The one
+property worth stating here: **a lease naming a DIFFERENT, still-LIVE pid is
+a hard refusal**, `Err(PersistenceError::LiveLeaseHeld)`, naming the pid and
+the takeover remedy — never a silent join. Segments make the JOURNAL file
+itself safe under concurrent writers, but they do nothing to stop two live
+processes from independently repeating the same external effects (writes,
+commits, model calls) or racing the shared checkpoint with last-writer-wins;
+that is a real hazard, not merely a cosmetic log warning, so it is a refusal.
+
+Set `TIDEPOOL_SELFHARNESS_TAKEOVER=1`
+(`selfharness::persistence::LEASE_TAKEOVER_ENV_VAR`) to force the join
+anyway — for a verified-stale record (the pid was reused by something
+unrelated, or the box rebooted and `/proc` hasn't caught up) or an
+operator-approved takeover. The prior lease is archived first (a
+`run-<id>.takeover-from-pid-<pid>-at-<ts>.json` sibling, distinct from the
+normal-completion `retire_lease` naming) so a forced claim leaves an audit
+trail, then the resume proceeds exactly as an ordinary dead-pid reclaim. A
+lease naming a genuinely DEAD pid reclaims exactly as before this fix —
+unaffected by the refusal or the takeover machinery, no env var needed. A
+lease naming THIS process's own pid (repeated `acquire_lease` calls within
+one process — a test-only shape; production calls this exactly once per
+boot) is likewise exempt, since there is no second process to refuse.
+
+**Residual, out of scope here:** storage is not namespaced by harness
+identity or run id — every harness sharing one `log_dir` shares one lease
+slot. The live-pid refusal stops the double-run hazard regardless, but two
+DIFFERENT harnesses pointed at the same `log_dir` would still contend for
+the same lease/segment namespace the way one harness's two instances would.
+
 ## Tailing the durable log
 
 Two DISTINCT jsonl streams live under `<cache>/selfharness/` (paths from

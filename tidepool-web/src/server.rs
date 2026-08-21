@@ -1073,38 +1073,57 @@ async fn submit(
 
 /// Resolve the pending continue gate at `(node, interaction)`. The body is
 /// the [`render::continue_shape`] sum's flat submission, reassembled by the
-/// SAME machinery as `/submit`: `{"tag": "Continue"}` or `{"tag":
-/// "ContinueWithInput", "input": ...}`. An absent/empty/unshaped body
-/// degrades to a bare continue — the no-body click (and every existing
-/// test/curl) still works, and a chosen-but-empty message is a bare continue
-/// too.
+/// SAME machinery as `/submit`: `{"answer": "Continue"}` or `{"answer":
+/// "ContinueWithInput", "answer.ContinueWithInput.input": ...}` — exactly
+/// what the rendered `<form>` always posts (a plain click is a real `<form
+/// data-on-submit>` submit, never a bodiless click handler; see
+/// `render.rs`'s `continue_shape`). An absent, malformed, or non-decoding
+/// body is REJECTED with a 400 — never silently treated as an approval — a
+/// chosen-but-empty `ContinueWithInput` message degrades to a bare continue,
+/// same as `/submit`'s optional-field handling.
 async fn continue_loop(
     State(st): State<AppState>,
     Path((node, interaction)): Path<(String, u64)>,
-    body: Option<Json<Jv>>,
+    headers: HeaderMap,
+    body: Bytes,
 ) -> Response {
-    let signal = body
-        .and_then(|Json(v)| match v {
-            Jv::Object(submission) => collect_form_json(
-                &crate::render::continue_shape(),
-                ROOT_BIND_PATH,
-                &submission,
-            ),
-            _ => None,
-        })
-        .and_then(|answer| {
-            let tag = answer.get("tag")?.as_str()?.to_string();
-            match tag.as_str() {
-                "ContinueWithInput" => answer
-                    .get("input")
-                    .and_then(|i| i.as_str())
-                    .map(|t| t.trim().to_string())
-                    .filter(|t| !t.is_empty())
-                    .map(ContinueSignal::ContinueWithInput),
-                _ => Some(ContinueSignal::Continue),
-            }
-        })
-        .unwrap_or(ContinueSignal::Continue);
+    let raw = match parse_json_body(&headers, &body) {
+        Ok(v) => v,
+        Err(msg) => return err_json(msg),
+    };
+    let Jv::Object(submission) = raw else {
+        return err_json("submission must be a flat JSON object".to_string());
+    };
+    let shape = crate::render::continue_shape();
+    let answer = match collect_form_json(&shape, ROOT_BIND_PATH, &submission) {
+        Some(answer) => answer,
+        None => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(resolve_error_json(
+                    &node,
+                    &ResolveError::InvalidSubmission(validation_report(
+                        &shape,
+                        ROOT_BIND_PATH,
+                        &submission,
+                    )),
+                    "continue gate",
+                )),
+            )
+                .into_response();
+        }
+    };
+    let signal = match answer.get("tag").and_then(|t| t.as_str()) {
+        Some("ContinueWithInput") => answer
+            .get("input")
+            .and_then(|i| i.as_str())
+            .map(|t| t.trim().to_string())
+            .filter(|t| !t.is_empty())
+            .map(ContinueSignal::ContinueWithInput)
+            .unwrap_or(ContinueSignal::Continue),
+        Some(_) => ContinueSignal::Continue,
+        None => return err_json("continue submission missing \"tag\"".to_string()),
+    };
     match st.resolve_continue(&node, interaction, signal) {
         Ok(()) => Json(json!({"ok": true})).into_response(),
         Err(e) => err_json(resolve_error_message(&node, &e, "continue gate")),

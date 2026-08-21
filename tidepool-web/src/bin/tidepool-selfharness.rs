@@ -243,7 +243,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // run id owns, and builds the appending handler over this process's own
     // segment — both from the same `AcquiredLease`, so the fold and the
     // appends cannot desync.
-    let acquired = tidepool_harness::acquire_lease(&log_dir)?;
+    // The Display message (not just Debug, which is all `main`'s default
+    // `?`-propagated error reporting shows) is where the live-PID refusal's
+    // operator-facing remedy (pid + `TIDEPOOL_SELFHARNESS_TAKEOVER=1`)
+    // actually lives — echo it to stderr before propagating so it's visible
+    // regardless of how the failure is ultimately reported.
+    let acquired = tidepool_harness::acquire_lease(&log_dir).map_err(|e| {
+        eprintln!("[boot] {e}");
+        e
+    })?;
     // So a pre/post-restart run is distinguishable in a stale operator tab.
     if let Some(state) = &web_state {
         state.set_run_id(acquired.lease.run_id.clone());

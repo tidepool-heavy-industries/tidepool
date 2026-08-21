@@ -155,6 +155,7 @@ async fn continue_resolves_await_continue() {
 
     let resp = client
         .post(format!("{base}{continue_url}"))
+        .json(&json!({"answer": "Continue"}))
         .send()
         .await
         .unwrap();
@@ -165,7 +166,8 @@ async fn continue_resolves_await_continue() {
     assert_eq!(
         handle.await.unwrap(),
         tidepool_harness::ContinueSignal::Continue,
-        "a bodiless click is a bare continue"
+        "the plain-Continue submission (what the rendered <form> always sends — a click is a \
+         real form submit, never a bodiless click handler) resolves to a bare continue"
     );
 }
 
@@ -550,6 +552,7 @@ async fn mismatched_verb_preserves_pending_interaction() {
 
     let resp = client
         .post(format!("{base}/node/n1/continue/{interaction}"))
+        .json(&json!({"answer": "Continue"}))
         .send()
         .await
         .unwrap();
@@ -1056,5 +1059,114 @@ async fn sse_emits_a_frame_for_a_node_registered_after_connect() {
     assert!(
         buf.contains("data-path=\"alpha/1-late\""),
         "the frame carries the mount path: {buf}"
+    );
+}
+
+/// THE fix this pair of tests exists for: the continue endpoint used to
+/// degrade an absent/malformed body to a bare `Continue` — silent approval.
+/// A malformed JSON body is now REJECTED with a 400, and the pending gate is
+/// left untouched: a follow-up well-formed submission still resolves it.
+#[tokio::test(flavor = "multi_thread")]
+async fn continue_with_malformed_body_is_rejected_and_pending_ask_survives() {
+    let (addr, state) = boot().await;
+    let base = format!("http://{addr}");
+    let client = Client::new();
+
+    let gate = state.register_node("n1");
+    let driver_gate = gate.clone();
+    let handle = tokio::task::spawn_blocking(move || driver_gate.await_continue());
+    let html = wait_for(&client, &format!("{base}/legacy"), |b| {
+        b.contains("/node/n1/continue/")
+    })
+    .await;
+    let continue_url = one_post_url(&html, "/node/n1/continue/");
+
+    let resp = client
+        .post(format!("{base}{continue_url}"))
+        .header("content-type", "application/json")
+        .body("{not valid json")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 400);
+    let v: Value = resp.json().await.unwrap();
+    assert_eq!(v["ok"], json!(false));
+    assert!(v["error"]
+        .as_str()
+        .unwrap()
+        .contains("could not parse request body as JSON"));
+
+    // The pending gate survives the rejection.
+    let html = client
+        .get(format!("{base}/legacy"))
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    assert!(html.contains("/node/n1/continue/"), "{html}");
+
+    let resp = client
+        .post(format!("{base}{continue_url}"))
+        .json(&json!({"answer": "Continue"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    assert_eq!(
+        handle.await.unwrap(),
+        tidepool_harness::ContinueSignal::Continue
+    );
+}
+
+/// Same claim, for a genuinely ABSENT body (no Content-Type, no bytes) — the
+/// exact case the old code silently treated as an approval.
+#[tokio::test(flavor = "multi_thread")]
+async fn continue_with_absent_body_is_rejected_and_pending_ask_survives() {
+    let (addr, state) = boot().await;
+    let base = format!("http://{addr}");
+    let client = Client::new();
+
+    let gate = state.register_node("n1");
+    let driver_gate = gate.clone();
+    let handle = tokio::task::spawn_blocking(move || driver_gate.await_continue());
+    let html = wait_for(&client, &format!("{base}/legacy"), |b| {
+        b.contains("/node/n1/continue/")
+    })
+    .await;
+    let continue_url = one_post_url(&html, "/node/n1/continue/");
+
+    let resp = client
+        .post(format!("{base}{continue_url}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 400);
+    let v: Value = resp.json().await.unwrap();
+    assert_eq!(v["ok"], json!(false));
+    assert!(v["error"].as_str().unwrap().contains("empty request body"));
+
+    // The pending gate survives the rejection.
+    let html = client
+        .get(format!("{base}/legacy"))
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    assert!(html.contains("/node/n1/continue/"), "{html}");
+
+    let resp = client
+        .post(format!("{base}{continue_url}"))
+        .json(&json!({"answer": "Continue"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    assert_eq!(
+        handle.await.unwrap(),
+        tidepool_harness::ContinueSignal::Continue
     );
 }
