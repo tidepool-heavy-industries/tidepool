@@ -48,12 +48,11 @@ mod tests {
         assert!(d.contains(" c"));
     }
 
-    /// Golden comparison against the hand-rolled LCS implementation this
-    /// module replaced — outputs captured from that implementation before
-    /// deletion. Byte-identical on every ordinary fixture (single change,
-    /// insertion, deletion, multi-hunk, adjacent-hunk coalescing, unchanged
-    /// content, pure append). See `divergent_fixtures_are_the_old_bugs_fixed`
-    /// for the two fixtures that differ, and why.
+    /// Matches the old hand-rolled LCS renderer's output on every ordinary
+    /// fixture (single change, insertion, deletion, multi-hunk,
+    /// adjacent-hunk coalescing, unchanged content, pure append). See
+    /// `divergent_fixtures_are_the_old_bugs_fixed` for the two fixtures that
+    /// differ, and why.
     #[test]
     fn golden_matches_hand_rolled_lcs_on_ordinary_fixtures() {
         let cases: &[(&str, &str, &str, &str)] = &[
@@ -105,18 +104,15 @@ mod tests {
         }
     }
 
-    /// The two fixtures where `similar`'s output diverges from the hand-rolled
-    /// LCS renderer's — both are the OLD renderer's bugs, not a behavior loss:
+    /// Two fixtures pinned as the correct, standards-conformant behavior
+    /// (rather than the naive 1-based-everywhere rendering a hand-rolled
+    /// differ would produce):
     ///
-    /// - File creation (empty `old`): the old renderer emitted `@@ -1,0 +1,2 @@`
-    ///   (a 1-based start on a zero-length range); `similar` emits the
-    ///   standard-conformant `@@ -0,0 +1,2 @@` GNU diff/patch itself uses for an
-    ///   empty original file.
-    /// - No trailing newline: the old renderer silently treated the final
-    ///   line as newline-terminated, so a patch built from its output would
-    ///   ADD a trailing newline that was never there. `similar` emits the
-    ///   POSIX `\ No newline at end of file` marker instead, which is the
-    ///   round-trip-safe behavior.
+    /// - File creation (empty `old`): hunk header is `@@ -0,0 +1,2 @@`, the
+    ///   GNU diff/patch convention for an empty original file.
+    /// - No trailing newline: emits the POSIX `\ No newline at end of file`
+    ///   marker rather than silently treating the last line as
+    ///   newline-terminated (which would round-trip a fabricated newline).
     #[test]
     fn divergent_fixtures_are_the_old_bugs_fixed() {
         assert_eq!(

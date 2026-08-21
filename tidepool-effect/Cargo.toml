@@ -16,7 +16,6 @@ tidepool-bridge.workspace = true
 frunk.workspace = true
 thiserror.workspace = true
 parking_lot.workspace = true
-static_assertions.workspace = true
 
 [dev-dependencies]
 proptest.workspace = true

@@ -14,9 +14,8 @@ pub const MAX_PIPELINE_ITERATIONS: usize = 1000;
 /// Error from running the optimization pipeline to a fixed point.
 ///
 /// The only failure mode is non-convergence within [`MAX_PIPELINE_ITERATIONS`]
-/// (a pass that keeps reporting a change). A dedicated type replaces the old
-/// `Result<_, String>` so callers match on structure, not a `format!`ed string;
-/// the human-readable text lives in the `Display` impl.
+/// (a pass that keeps reporting a change). Callers match on structure, not a
+/// `format!`ed string; the human-readable text lives in the `Display` impl.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum PipelineError {
     /// A pass (or pass sequence) never stopped reporting changes.

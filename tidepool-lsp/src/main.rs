@@ -1,6 +1,11 @@
 //! `tidepool-lsp-daemon` — a persistent language-server sidecar for the tidepool
 //! LSP effect.
 //!
+//! DEPRECATED: unused in practice. Known correctness gaps (stale-document
+//! sync, non-standard URI encoding, incomplete `WorkspaceEdit`/rename
+//! handling) are deliberately not being fixed — see `CLAUDE.md`. Do not
+//! build new work on this crate.
+//!
 //! Spawns rust-analyzer once, keeps it warm/indexed, and serves a tiny
 //! newline-delimited-JSON protocol over a Unix socket. The protocol speaks only
 //! symbol names and file paths — never positions — so the tidepool `LspHandler`

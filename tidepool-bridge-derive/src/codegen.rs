@@ -192,10 +192,10 @@ pub fn generate_from_core(info: &EnumInfo) -> TokenStream {
         // shape every other `emit_datacon_lookup` call site uses — would fail
         // fast on the FIRST variant whose constructor happens to be absent
         // from this compilation's table, even when the value being decoded is
-        // a LATER variant whose constructor IS present (#F7). Matching on the
-        // bare `Result` instead means a missing constructor just skips to the
-        // next variant; only `Err(UnknownDataCon)` after every variant has
-        // had a turn is a genuine decode failure.
+        // a LATER variant whose constructor IS present. Matching on the bare
+        // `Result` instead means a missing constructor just skips to the next
+        // variant; only `Err(UnknownDataCon)` after every variant has had a
+        // turn is a genuine decode failure.
         let lookup = emit_datacon_lookup(core_module, core_name, core_arity_u32, core_arity, false);
 
         match_arms.push(quote! {

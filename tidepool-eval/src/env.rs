@@ -14,11 +14,9 @@ use tidepool_repr::{JoinId, VarId};
 /// must be visible to the same lexical lookups as a variable — see
 /// [`Env::update_join`]), but `VarId` and `JoinId` are unrelated Core
 /// identifier families (real `VarId`s already use high-byte tags, e.g.
-/// `0xFE` for externals). Wrapping them in a sum type — rather than
-/// manufacturing a `VarId` with a high bit set for join labels, as this
-/// crate used to — makes it a compile error to alias one namespace into the
-/// other, so a join label can never collide with a real variable id and
-/// silently resolve the wrong binding.
+/// `0xFE` for externals). Wrapping them in a sum type makes it a compile
+/// error to alias one namespace into the other, so a join label can never
+/// collide with a real variable id and silently resolve the wrong binding.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum EnvKey {
     Var(VarId),

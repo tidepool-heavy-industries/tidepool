@@ -64,12 +64,11 @@ impl Pass for PartialEval {
 /// index memoization — the basis of the converted `extract_subtree`/`free_vars`
 /// walks — is unsound here. It also fuses control flow (a Known let/case
 /// short-circuits straight to a sub-result, never emitting the binder). A
-/// faithful explicit-stack conversion would re-pair per-frame env state and
-/// these short-circuits by construction, whose failure mode is SILENT
-/// miswritten residual code, not a crash — a #313-class risk, deliberately
-/// deferred rather than fixed here. PartialEval is optimize-only (off the JIT
-/// compile path), so its residual recursion depth is unreachable from
-/// production eval.
+/// faithful explicit-stack conversion would need to re-pair per-frame env
+/// state and these short-circuits by construction; a broken conversion would
+/// fail SILENTLY (miswritten residual code), not crash. PartialEval is
+/// optimize-only (off the JIT compile path), so its residual recursion depth
+/// is unreachable from production eval.
 fn partial_eval_at(
     expr: &CoreExpr,
     idx: usize,

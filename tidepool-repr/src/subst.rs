@@ -85,12 +85,10 @@ fn find_max_var_id(tree: &CoreExpr) -> VarId {
 /// output under different envs — the post-order memoization the other walks rely
 /// on is unsound here. A faithful explicit-stack conversion would have to thread
 /// per-frame env state through a two-phase work item and re-pair the
-/// `copy_with_env` sub-walks by construction, whose failure mode is SILENT
-/// miscapture rather than a crash — a #313-class risk, deliberately deferred
-/// rather than fixed here. `subst` is also confined to the optimize passes, which are not on
-/// the JIT compile path, so its residual recursion depth (the substitution
-/// target's subtree depth) is not reachable from production eval. Revisit only
-/// if the optimizer is wired into the compile path over deep trees.
+/// `copy_with_env` sub-walks by construction; a broken conversion would fail
+/// SILENTLY (miscapture), not crash. `subst` is confined to the optimize
+/// passes, off the JIT compile path, so its residual recursion depth (the
+/// substitution target's subtree depth) is not reachable from production eval.
 fn subst_at(
     tree: &CoreExpr,
     idx: usize,

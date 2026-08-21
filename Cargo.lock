@@ -3979,7 +3979,6 @@ dependencies = [
  "frunk",
  "parking_lot",
  "proptest",
- "static_assertions",
  "thiserror",
  "tidepool-bridge",
  "tidepool-eval",

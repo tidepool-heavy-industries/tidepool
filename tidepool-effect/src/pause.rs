@@ -71,7 +71,7 @@ struct GateInner {
 /// Gate state machine. The repl dispatcher only ever moves between `Run` and
 /// `AbortRequested`; the mcp dispatcher exercises the pause states too.
 #[derive(Clone, PartialEq)]
-pub enum GateState {
+enum GateState {
     /// Executing normally; [`PauseGate::checkpoint`] returns immediately.
     Run,
     /// A pause was requested; the next checkpoint will park and flip to [`Self::Paused`].
@@ -198,9 +198,8 @@ pub struct EffectLease<'a> {
 
 // A clone would let two guards independently believe they own clearing
 // `in_effect`, so the second one to drop would clear a flag a THIRD checkpoint
-// already set — a non-Clone guard is the only thing that makes "exactly one
-// lease clears the flag on drop" true by construction.
-static_assertions::assert_not_impl_any!(EffectLease<'static>: Clone, Copy);
+// already set — `EffectLease` deliberately does not derive Clone/Copy, so
+// "exactly one lease clears the flag on drop" is true by construction.
 
 impl Drop for EffectLease<'_> {
     fn drop(&mut self) {

@@ -538,14 +538,8 @@ proptest! {
 
 /// Depth-1200 left-biased vs right-biased trees over the same leaf sequence:
 /// associativity at depth >= 1000, model equality, and qComp composition
-/// (every 5th leaf conditionally emits).
-///
-/// NOTE the stack size: 64MB, not the originally intended 8MB control.
-/// Measured (dev profile): the recursive `apply_cont` burns ~10KB of host
-/// stack PER QUEUE NODE, so an 8MB thread aborts between depth 700 and 800
-/// for BOTH biases. 64MB comfortably runs depth 5000. The semantics at
-/// depth 1200 are correct (this test is green) — only the stack discipline
-/// is broken, which is bug B3 below.
+/// (every 5th leaf conditionally emits). Runs on a 64MB stack for headroom
+/// well beyond the depth exercised by the 8MB regression guards below.
 #[test]
 fn deep_biased_trees_match_model_64mb_control() {
     run_in_thread(64 * 1024 * 1024, || {
@@ -562,11 +556,10 @@ fn deep_biased_trees_match_model_64mb_control() {
     });
 }
 
-/// Boundary evidence for B3: a depth the recursive queue walk can still
-/// survive on a deliberately small (1.5MB) stack. Establishes that the
-/// small-stack harness itself is sound — the ignored B3 repros below fail
-/// by DEPTH, not by harness construction. Measured boundary on 1.5MB (dev
-/// profile): depth 100 OK, depth 150 ABORTS.
+/// A depth the queue walk can still survive on a deliberately small (1.5MB)
+/// stack. Establishes that the small-stack harness itself is sound — the
+/// regression guards below fail by DEPTH, not by harness construction.
+/// Measured boundary on 1.5MB (dev profile): depth 100 OK, depth 150 ABORTS.
 #[test]
 fn small_stack_depth_64_green() {
     run_in_thread(1_536 * 1024, || {
@@ -583,14 +576,13 @@ fn small_stack_depth_64_green() {
     });
 }
 
-/// Regression guard (B3, left spine): a 1200-deep left-biased effect tree runs
-/// flat and MATCHES the model. Both host walkers are iterative now —
+/// Regression guard (left spine): a 1200-deep left-biased effect tree runs
+/// flat and matches the model. Both host walkers are iterative —
 /// `EffectMachine::apply_cont`'s queue walk (explicit pending stack) and
-/// `eval_at` (explicit work-stack, b83cfb09) — so neither the runtime queue
-/// depth nor the expression depth grows the host stack. The original B3 walked
-/// both recursively and aborted here around depth 700-800 on an 8MB stack
-/// (stack overflow is not unwindable); a regression flips this green test to a
-/// process abort.
+/// `eval_at` (explicit work-stack) — so neither the runtime queue depth nor
+/// the expression depth grows the host stack. Stack overflow is not
+/// unwindable, so a regression here flips this green test to a process
+/// abort rather than a catchable error.
 #[test]
 fn bug_b3_left_biased_depth_1200_8mb_stack() {
     run_in_thread(8 * 1024 * 1024, || {
@@ -603,11 +595,10 @@ fn bug_b3_left_biased_depth_1200_8mb_stack() {
     });
 }
 
-/// Regression guard (B3, right spine): the `Val` step `apply_cont(k2, y)` is a
-/// source tail call with no Rust TCO — under recursive walking each right-spine
-/// step burned a host frame and aborted at the same thresholds as the left twin
-/// (8MB: ~700 OK / 800 ABORT). With the iterative walkers it runs flat and
-/// matches the model.
+/// Regression guard (right spine): the `Val` step `apply_cont(k2, y)` is a
+/// source tail call with no Rust TCO, so a right-spine walk that recursed
+/// would burn a host frame per step. With the iterative walkers it runs flat
+/// and matches the model.
 #[test]
 fn bug_b3_right_biased_depth_1200_8mb_stack() {
     run_in_thread(8 * 1024 * 1024, || {
@@ -657,19 +648,14 @@ fn raw_closure_continuation_equals_leaf_wrapped() {
     assert_eq!(t_var, t_ref);
 }
 
-/// FINDING F1 (robustness, candidate B2-inverse): a malformed `Val` with
-/// ZERO fields is silently accepted — both the top-level run loop and the
-/// Node composition arm substitute `LitInt(0)` via `.first().unwrap_or(...)`
-/// instead of reporting `FieldCountMismatch` (machine.rs Val arms). Compare:
-/// every OTHER constructor arity is strictly checked. This masks malformed
-/// trees produced by codegen bugs — exactly what the machine's role as
-/// differential oracle is supposed to surface.
-///
-/// F1 FIXED 2026-06-11: both Val arms now enforce arity 1 and report
-/// FieldCountMismatch instead of fabricating LitInt(0). This is the active
-/// regression test for the strict contract.
+/// A malformed `Val` with ZERO fields is rejected as `FieldCountMismatch` —
+/// both the top-level run loop and the Node composition arm enforce arity 1,
+/// matching every OTHER constructor's strict arity check. This is the
+/// regression test for that strict contract: the machine's role as
+/// differential oracle depends on surfacing malformed trees produced by
+/// codegen bugs, not masking them.
 #[test]
-fn finding_f1_zero_field_val_silently_becomes_zero() {
+fn zero_field_val_rejected_with_field_count_mismatch() {
     // Top level: program is `Val` with no fields -> clean error.
     let mut b = Builder::new();
     b.con(VAL, vec![]);

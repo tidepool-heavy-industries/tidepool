@@ -1,5 +1,10 @@
 # tidepool-lsp — `tidepool-lsp-daemon`, the LSP sidecar
 
+> **DEPRECATED (2026-08-20): unused in practice.** Operator decision: this
+> subsystem is not used and its known correctness gaps (stale-document
+> sync, non-standard URI encoding, incomplete `WorkspaceEdit`/rename
+> handling) will NOT be fixed. Do not build new work on this crate.
+
 A standalone binary (`main.rs`), NOT a library the rest of the workspace
 depends on. It spawns and keeps warm one `rust-analyzer` per workspace root,
 and serves a tiny newline-delimited-JSON protocol over a Unix socket. The
