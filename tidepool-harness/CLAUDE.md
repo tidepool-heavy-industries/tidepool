@@ -426,6 +426,24 @@ captures `cache_write_tokens` (from `input_tokens_details.cache_write_tokens`
 on the SSE usage object) alongside `cached_input_tokens`, so a cold-but-wrote-
 cache round is distinguishable from a wasted rewrite in the durable log.
 
+**Backend canary (2026-08-20, live probes against
+`chatgpt.com/backend-api/codex/responses`):** `prompt_cache_key` is ACCEPTED
+(HTTP 200; usage confirms `input_tokens_details.cache_write_tokens` on the
+wire). `prompt_cache_options` is REJECTED (`Unsupported parameter`) and
+`prompt_cache_breakpoint {mode: explicit}` is REJECTED (`not supported on
+this model`) on BOTH `gpt-5.6-terra` and `gpt-5.6-sol` — explicit cache
+breakpoints are unavailable on this backend, so fold-shaped windows (fresh
+transcript + unique opening prompt, e.g. the companion's `runLLMTurnFork`
+algebra windows) are STRUCTURALLY cold: 0% cached on their first round is
+expected, not a defect, and no request-shape change can fix it here. Do not
+re-probe without reason; do not build breakpoint support against this
+backend. Platform-doc facts that govern interpretation: `prompt_cache_key`
+is REQUIRED for reliable matching on gpt-5.6+; ~15 requests/minute per key
+before overflow misses; 1024-token strict minimum prefix; 30-minute TTL
+refreshing on reuse; cache WRITES bill at 1.25× on gpt-5.6+. Bucketed
+sub-keying for high-fanout bursts is deliberately deferred until
+post-`prompt_cache_key` dogfood data shows sibling scatter persisting.
+
 `SnapshotDigest`/`digest_prefix` are UNCHANGED by this fix — they cover only
 `role_tag` + `content` over `assemble_request`'s output (`snapshot.rs`'s
 `digest_messages`), never provider-side request serialization or headers, so
