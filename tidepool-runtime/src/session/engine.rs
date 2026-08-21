@@ -43,25 +43,15 @@
 //! cannot be stowed), so that continuation still carries a live parked thread.
 //! Only the ask boundary — a clean, reified yield point — goes threadless.
 //!
-//! # Oneshot vs. the end-state registry
+//! # Oneshot vs. the resident shape
 //!
-//! This engine drives the **oneshot** shape: `render = Json`, `retention = DropAfterDone`,
-//! an empty `ModuleEnv` (no declaration accumulation), one pool slot per turn.
-//! Only the stateless MCP eval server drives the engine itself. The RESIDENT
-//! shape is [`super::resident::ResidentSession`] over the shared
-//! [`super::persistent::PersistentSession`] core, and both resident consumers —
-//! `tidepool-harness` and `tidepool-repl` — now drive that one core through the
-//! one threadless suspend mechanism this module's ask path uses. There is no
-//! second, parked-thread suspension left to unify; what the two shapes still
-//! keep apart is oneshot-vs-resident retention, not the suspend boundary. The
-//! end-state registry entry the API is aimed at is
-//! `{machine, ModuleEnv, render policy, retention, pool slot}`;
-//! [`RenderPolicy`] and [`Retention`] are carried on [`EngineConfig`] as that
-//! forward seam even though a oneshot turn pins them. Render policy is applied
-//! at source-wrapping time (the server picks `toJSON` vs `Show`-default before
-//! handing the engine a wrapped `source`), so the engine does not branch on it
-//! today; retention is inherent — a completed oneshot thread exits and drops its
-//! machine.
+//! This engine drives the **oneshot** shape: an empty `ModuleEnv` (no
+//! declaration accumulation), one pool slot per turn, machine dropped when the
+//! turn completes. Only the stateless MCP eval server drives the engine
+//! itself. The RESIDENT shape is [`super::resident::ResidentSession`] over the
+//! shared [`super::persistent::PersistentSession`] core, and both resident
+//! consumers — `tidepool-harness` and `tidepool-repl` — drive that one core
+//! through the one threadless suspend mechanism this module's ask path uses.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -96,32 +86,6 @@ pub trait OutputSink: Clone + Send + 'static {
     fn drain(&self) -> Vec<String>;
     /// Copy the buffered lines without clearing (a suspension keeps computing).
     fn snapshot(&self) -> Vec<String>;
-}
-
-// ---------------------------------------------------------------------------
-// Registry-shape seams (RenderPolicy / Retention)
-// ---------------------------------------------------------------------------
-
-/// How a turn's result is rendered. The server applies this at source-wrapping
-/// time (`toJSON` vs `Show`-default), so the engine carries it as the registry
-/// seam rather than branching on it. Oneshot MCP eval pins [`RenderPolicy::Json`].
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum RenderPolicy {
-    /// Wrap the result in `toJSON` — the stateless eval contract.
-    Json,
-    /// Render via `Show`/`toWire` — the resident REPL surface.
-    Show,
-}
-
-/// Whether the machine is dropped when its turn ends or kept resident. Oneshot
-/// pins [`Retention::DropAfterDone`] (the eval thread exits, freeing its heap);
-/// [`Retention::Persistent`] is the resident-REPL end-state.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Retention {
-    /// Free the machine when the turn completes.
-    DropAfterDone,
-    /// Keep the machine resident across turns.
-    Persistent,
 }
 
 // ---------------------------------------------------------------------------
@@ -350,13 +314,8 @@ pub struct EngineConfig {
     pub max_orphaned: usize,
     /// Prefix for generated continuation ids (e.g. `"cont"` → `cont_1`).
     pub cont_prefix: String,
-    /// The default turn window in seconds, returned by
-    /// [`SessionEngine::default_timeout_secs`].
+    /// The default turn window in seconds.
     pub default_timeout_secs: u64,
-    /// Registry-shape seam (see [`RenderPolicy`]).
-    pub render: RenderPolicy,
-    /// Registry-shape seam (see [`Retention`]).
-    pub retention: Retention,
 }
 
 /// The session-turn driver. Generic over the output sink `O` so it stays below
@@ -385,11 +344,6 @@ impl<O: OutputSink> SessionEngine<O> {
     /// gate reads this to shed load before even building source).
     pub fn orphaned_count(&self) -> usize {
         self.orphaned_threads.load(Ordering::Relaxed)
-    }
-
-    /// The default turn window.
-    pub fn default_timeout_secs(&self) -> u64 {
-        self.config.default_timeout_secs
     }
 
     fn next_continuation_id(&self) -> String {
@@ -1373,8 +1327,6 @@ mod tests {
             // Small window: the harness feeds a message before driving, so this
             // is only a backstop against a silent channel hanging a test.
             default_timeout_secs: 5,
-            render: RenderPolicy::Json,
-            retention: Retention::DropAfterDone,
         })
     }
 

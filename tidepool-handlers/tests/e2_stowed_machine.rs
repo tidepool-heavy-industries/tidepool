@@ -20,8 +20,7 @@ use std::path::{Path, PathBuf};
 
 use tidepool_mcp::CapturedOutput;
 use tidepool_runtime::session::{
-    EngineConfig, RenderPolicy, ResumeOutcome, Retention, SessionEngine, StartError, StartTurn,
-    TurnOutcome,
+    EngineConfig, ResumeOutcome, SessionEngine, StartError, StartTurn, TurnOutcome,
 };
 
 fn ghc_available() -> bool {
@@ -71,8 +70,6 @@ fn test_engine() -> SessionEngine<CapturedOutput> {
         max_orphaned: 16,
         cont_prefix: "cont".into(),
         default_timeout_secs: 60,
-        render: RenderPolicy::Json,
-        retention: Retention::DropAfterDone,
     })
 }
 

@@ -62,12 +62,8 @@
 //! `runCompile` skeleton that emits these phases),
 //! [`PHASE_GHC_SETUP`] (session `DynFlags` setup plus
 //! `guessTarget`/`setTargets`/`depanal`) and [`PHASE_GHC_LOAD`] (the `load'`
-//! call alone) are two
-//! SEPARATE, NON-OVERLAPPING spans — not one nested inside the other. They
-//! PARTITION what an older, now-retired `ghc_session` bracket used to cover
-//! on the compile lane; see [`PHASE_GHC_SESSION`]'s doc for the retirement.
-//! A collector recovers the old coarse figure as the SUM `ghc_setup +
-//! ghc_load` — a flat-sum collector already does this for free, and neither
+//! call alone) are two SEPARATE, NON-OVERLAPPING spans — not one nested
+//! inside the other. A flat-sum collector adds them for free, and neither
 //! row is emitted twice, so there is nothing to avoid double-counting. On the
 //! session path, [`PHASE_INJECT`] (PHASE 2's Val-iface splice) is a third
 //! flat row alongside them, with no normal-path counterpart. `load'` itself
@@ -146,15 +142,11 @@ pub const RUST_STAGES: &[&str] = &[
 
 /// Process start to the point the GHC session is about to be created.
 pub const PHASE_STARTUP: &str = "startup";
-/// `ghc_session` now denotes exactly ONE span — the `--classify` lane's
-/// `getSessionDynFlags` (`Binders.hs` `classifyBlock`). The compile lane's
-/// former, much larger use (session setup + `depanal` + `load'`) is
-/// succeeded by [`PHASE_GHC_SETUP`] + [`PHASE_GHC_LOAD`]; a historical
-/// compile-lane `ghc_session` equals their sum. This is the SAME retirement
-/// discipline as the `classify_extract` tombstone (see the module doc): a
-/// same-named phase never changes meaning, so `ghc_session` keeps its
-/// ORIGINAL (small, classify-lane) meaning rather than being repurposed, and
-/// the compile lane's much larger span gets two new names instead.
+/// The `--classify` lane's `getSessionDynFlags` (`Binders.hs`
+/// `classifyBlock`) — the ONLY thing this phase name denotes. The compile
+/// lane's session setup + `depanal` + `load'` is [`PHASE_GHC_SETUP`] +
+/// [`PHASE_GHC_LOAD`] instead; a collector must never fold those into this
+/// phase even where the coarse figure would equal their sum.
 pub const PHASE_GHC_SESSION: &str = "ghc_session";
 /// FLAT (compile lane, both paths): session `DynFlags` setup +
 /// `guessTarget`/`setTargets` + the `depanal` call alone. Partitions the
@@ -188,25 +180,6 @@ pub const PHASE_CBOR_ENCODE: &str = "cbor_encode";
 pub const PHASE_WRITE: &str = "write";
 /// Whole-process wall clock as the extract itself measures it.
 pub const PHASE_TOTAL: &str = "total";
-
-/// Every extract-side phase, in pipeline order, across BOTH lanes. All
-/// FLAT — no entry is summed into another; see [`PHASE_GHC_SESSION`]'s doc
-/// for why `ghc_session` (classify lane only) sits apart from `ghc_setup`/
-/// `ghc_load` (compile lane) despite the adjacent listing.
-pub const EXTRACT_PHASES: &[&str] = &[
-    PHASE_STARTUP,
-    PHASE_GHC_SETUP,
-    PHASE_GHC_LOAD,
-    PHASE_GHC_SESSION,
-    PHASE_INJECT,
-    PHASE_CLASSIFY,
-    PHASE_TYPECHECK,
-    PHASE_CORE,
-    PHASE_TRANSLATE,
-    PHASE_CBOR_ENCODE,
-    PHASE_WRITE,
-    PHASE_TOTAL,
-];
 
 /// Prefix a forwarded COMPILE-lane phase is emitted under.
 pub const EXTRACT_STAGE_PREFIX: &str = "extract.";

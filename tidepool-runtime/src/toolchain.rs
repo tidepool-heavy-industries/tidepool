@@ -213,15 +213,13 @@ pub fn extract_command_name() -> Result<tidepool_extract_cmd::ResolvedExtractBin
         })
 }
 
-/// A resolved extract binary: an ABSOLUTE path plus where it came from.
+/// A resolved extract binary: an ABSOLUTE path.
 #[derive(Debug, Clone)]
 pub struct ExtractLocation {
     /// Absolute path to the binary (or wrapper script) — resolved through
     /// `PATH` when `$TIDEPOOL_EXTRACT` is unset, so it is always a real file
     /// that can be fingerprinted.
     pub path: PathBuf,
-    /// Which precedence step found it, straight from the locator crate.
-    pub source: tidepool_extract_cmd::BinSource,
 }
 
 /// Resolve the extract to a real file on disk, typed-failing when there is
@@ -242,10 +240,7 @@ pub fn locate_extract() -> Result<ExtractLocation, ToolchainError> {
     // An Env-sourced path is already known-readable; a PathLookup one is the
     // bare name and still needs the OS search.
     which::which(&resolved.path)
-        .map(|path| ExtractLocation {
-            path,
-            source: resolved.source,
-        })
+        .map(|path| ExtractLocation { path })
         .map_err(|_| ToolchainError::ExtractNotFound {
             tried: format!("{} on $PATH", resolved.path.display()),
         })
@@ -262,28 +257,11 @@ pub fn is_stdlib_root(dir: &Path) -> bool {
     dir.join("Tidepool").join("Prelude.hs").is_file()
 }
 
-/// Which precedence step produced a stdlib root.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum StdlibSource {
-    /// `$TIDEPOOL_PRELUDE_DIR`.
-    EnvOverride,
-    /// `./haskell/lib` or `./lib`, relative to the process CWD.
-    RepoTree,
-    /// The `lib/` sibling of the extract's `dist-newstyle` tree.
-    ExtractSibling,
-    /// The stdlib bundled into the server binary, materialized to the cache.
-    Bundle,
-    /// The source tree this binary was built from.
-    BuildTree,
-}
-
 /// A resolved stdlib root.
 #[derive(Debug, Clone)]
 pub struct StdlibLocation {
     /// The include dir to hand GHC (`Tidepool/Prelude.hs` lives under it).
     pub dir: PathBuf,
-    /// Which precedence step found it.
-    pub source: StdlibSource,
 }
 
 /// Binary-supplied tail steps of the stdlib precedence (steps 4 and 5). A
@@ -314,10 +292,7 @@ pub fn locate_stdlib(fallbacks: &StdlibFallbacks) -> Result<StdlibLocation, Tool
     if let Some(dir) = std::env::var_os(ENV_PRELUDE_DIR) {
         let dir = PathBuf::from(dir);
         if is_stdlib_root(&dir) {
-            return Ok(StdlibLocation {
-                dir,
-                source: StdlibSource::EnvOverride,
-            });
+            return Ok(StdlibLocation { dir });
         }
         return Err(ToolchainError::PreludeDirInvalid { dir });
     }
@@ -332,10 +307,7 @@ pub fn locate_stdlib(fallbacks: &StdlibFallbacks) -> Result<StdlibLocation, Tool
         while let Some(dir) = cur {
             for candidate in [dir.join("haskell").join("lib"), dir.join("lib")] {
                 if is_stdlib_root(&candidate) {
-                    return Ok(StdlibLocation {
-                        dir: candidate,
-                        source: StdlibSource::RepoTree,
-                    });
+                    return Ok(StdlibLocation { dir: candidate });
                 }
             }
             cur = dir.parent();
@@ -347,24 +319,20 @@ pub fn locate_stdlib(fallbacks: &StdlibFallbacks) -> Result<StdlibLocation, Tool
     //    `derive_stdlib_include`).
     if let Some(candidate) = extract_sibling_lib() {
         if is_stdlib_root(&candidate) {
-            return Ok(StdlibLocation {
-                dir: candidate,
-                source: StdlibSource::ExtractSibling,
-            });
+            return Ok(StdlibLocation { dir: candidate });
         }
         tried.push(("extract dist-newstyle sibling", candidate));
     }
 
     // 4/5. Binary-supplied fallbacks.
-    for (what, source, candidate) in [
-        ("bundled stdlib", StdlibSource::Bundle, &fallbacks.bundle),
-        ("build tree", StdlibSource::BuildTree, &fallbacks.build_tree),
+    for (what, candidate) in [
+        ("bundled stdlib", &fallbacks.bundle),
+        ("build tree", &fallbacks.build_tree),
     ] {
         let Some(candidate) = candidate else { continue };
         if is_stdlib_root(candidate) {
             return Ok(StdlibLocation {
                 dir: candidate.clone(),
-                source,
             });
         }
         tried.push((what, candidate.clone()));

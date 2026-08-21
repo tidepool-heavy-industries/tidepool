@@ -31,8 +31,7 @@ use tidepool_effect::error::EffectError;
 use tidepool_effect::{DispatchEffect, Response};
 use tidepool_eval::value::Value;
 use tidepool_runtime::session::{
-    EngineConfig, OutputSink, RenderPolicy, ResumeOutcome, Retention, SessionEngine, StartTurn,
-    TurnOutcome,
+    EngineConfig, OutputSink, ResumeOutcome, SessionEngine, StartTurn, TurnOutcome,
 };
 use tidepool_runtime::FailureClass;
 
@@ -99,8 +98,6 @@ fn test_engine(default_timeout_secs: u64) -> SessionEngine<TestSink> {
         // fall-back-to-default bug (the F1 "smaller items" reset) would show
         // up as a `TimedOut.timeout_secs` of 3, not the turn's 45.
         default_timeout_secs,
-        render: RenderPolicy::Json,
-        retention: Retention::DropAfterDone,
     })
 }
 

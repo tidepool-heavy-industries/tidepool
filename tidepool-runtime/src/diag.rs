@@ -80,64 +80,6 @@ pub fn parse_diag_report(stdout: &[u8], stderr: &[u8]) -> Result<DiagReport, Str
     Ok(report)
 }
 
-/// One item's outcome in a `--turn-batch` stdout report (§8 of
-/// `plans/post-restart/batch-turns-feasibility.md`). `dir` is the item's
-/// output directory name, relative to `--batch-out`'s dir (e.g. `"i0"`) —
-/// present for both `"ok"` and `"failed"` per the wire example, though only
-/// an `"ok"` item's directory is ever read. `diagnostics` defaults empty when
-/// the field is absent (an `"ok"` item never carries any).
-#[derive(serde::Deserialize, Debug, Clone)]
-pub struct BatchItemStatus {
-    pub index: usize,
-    pub status: String,
-    pub dir: Option<String>,
-    #[serde(default)]
-    pub diagnostics: Vec<ExtractDiag>,
-}
-
-/// The `--turn-batch` stdout report: a strict superset of [`DiagReport`] — the
-/// flat top-level `diagnostics` field stays and carries the failing item's
-/// diagnostics verbatim, so [`parse_diag_report`] keeps parsing this document
-/// unchanged (serde ignores the unrecognized `items` field) and an
-/// un-upgraded reader still sees a failing item's real diagnostics. `items`
-/// adds per-item attribution, which the flat array alone cannot carry once a
-/// batch has more than one item.
-#[derive(serde::Deserialize, Debug)]
-pub struct BatchDiagReport {
-    pub version: u32,
-    pub diagnostics: Vec<ExtractDiag>,
-    pub items: Vec<BatchItemStatus>,
-}
-
-/// As [`parse_diag_report`], but into [`BatchDiagReport`] — same
-/// malformed-JSON / version-skew handling, independently implemented (not
-/// shared with `parse_diag_report`) so this addition cannot perturb that
-/// function's already-tested behavior.
-pub fn parse_batch_diag_report(stdout: &[u8], stderr: &[u8]) -> Result<BatchDiagReport, String> {
-    let text = String::from_utf8_lossy(stdout);
-    let malformed_err = |e: &dyn std::fmt::Display| {
-        format!(
-            "extract stdout did not parse as the batch diagnostics report ({e}) — likely a \
-             stale deployed `tidepool-extract-bin` predating the --turn-batch contract; \
-             rebuild/redeploy it. stdout: {}\nstderr tail: {}",
-            truncate_tail(&text, 500),
-            truncate_tail(&String::from_utf8_lossy(stderr), 500)
-        )
-    };
-    let value: serde_json::Value = serde_json::from_str(&text).map_err(|e| malformed_err(&e))?;
-    if let Some(v) = value.get("version").and_then(serde_json::Value::as_u64) {
-        if v as u32 != SUPPORTED_VERSION {
-            return Err(format!(
-                "extract emitted batch diagnostics wire version {}, this server expects {} — \
-                 rebuild/redeploy tidepool-extract-bin so both sides agree.",
-                v, SUPPORTED_VERSION
-            ));
-        }
-    }
-    let report: BatchDiagReport = serde_json::from_value(value).map_err(|e| malformed_err(&e))?;
-    Ok(report)
-}
-
 fn truncate_tail(s: &str, max: usize) -> &str {
     if s.len() <= max {
         return s;
@@ -568,42 +510,6 @@ mod tests {
         let err = parse_diag_report(b"not json", b"some stderr").unwrap_err();
         assert!(err.contains("did not parse"), "{err}");
         assert!(err.contains("stderr tail"), "{err}");
-    }
-
-    /// §8's stdout document is a strict superset of the single-turn report:
-    /// an un-upgraded `parse_diag_report` reader must still parse it
-    /// (ignoring the unrecognized `items` field) and still see a failing
-    /// item's real diagnostics via the flat top-level `diagnostics` array.
-    #[test]
-    fn old_diag_reader_still_parses_batch_document_and_sees_failing_item_diagnostics() {
-        let stdout = br#"{"version":1,
-            "diagnostics":[{"span":null,"severity":"error","message":"boom in item 1"}],
-            "items":[
-                {"index":0,"status":"ok","dir":"i0"},
-                {"index":1,"status":"failed","dir":"i1","diagnostics":[{"span":null,"severity":"error","message":"boom in item 1"}]}
-            ]}"#;
-        let report = parse_diag_report(stdout, b"").unwrap();
-        assert_eq!(report.version, 1);
-        assert_eq!(report.diagnostics.len(), 1);
-        assert_eq!(report.diagnostics[0].message, "boom in item 1");
-    }
-
-    #[test]
-    fn parse_batch_diag_report_decodes_items_and_flat_diagnostics() {
-        let stdout = br#"{"version":1,
-            "diagnostics":[{"span":null,"severity":"error","message":"boom in item 1"}],
-            "items":[
-                {"index":0,"status":"ok","dir":"i0"},
-                {"index":1,"status":"failed","dir":"i1","diagnostics":[{"span":null,"severity":"error","message":"boom in item 1"}]}
-            ]}"#;
-        let report = parse_batch_diag_report(stdout, b"").unwrap();
-        assert_eq!(report.items.len(), 2);
-        assert_eq!(report.items[0].status, "ok");
-        assert_eq!(report.items[0].dir.as_deref(), Some("i0"));
-        assert!(report.items[0].diagnostics.is_empty());
-        assert_eq!(report.items[1].status, "failed");
-        assert_eq!(report.items[1].diagnostics.len(), 1);
-        assert_eq!(report.diagnostics.len(), 1);
     }
 
     #[test]

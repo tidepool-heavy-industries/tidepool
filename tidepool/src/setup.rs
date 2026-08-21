@@ -60,14 +60,10 @@ impl ServerHandler for SetupServer {
         _request: Option<PaginatedRequestParams>,
         _context: RequestContext<RoleServer>,
     ) -> Result<ListToolsResult, McpError> {
-        let schema = serde_json::json!({
-            "type": "object",
-            "properties": {},
-        });
-        let input_schema = match schema {
-            serde_json::Value::Object(o) => Arc::new(o),
-            _ => Arc::new(serde_json::Map::new()),
-        };
+        let mut input_schema = serde_json::Map::new();
+        input_schema.insert("type".into(), serde_json::json!("object"));
+        input_schema.insert("properties".into(), serde_json::json!({}));
+        let input_schema = Arc::new(input_schema);
         Ok(ListToolsResult {
             tools: vec![Tool {
                 name: "install_instructions".into(),

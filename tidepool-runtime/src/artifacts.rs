@@ -1,47 +1,31 @@
 //! The ONE policy-bearing `tidepool-extract` compile front door:
 //! [`CompileInvocation`] + [`compile_invocation`]. [`crate::compile_haskell`]
 //! (one target, eval/session lane) and [`compile_targets`] (N targets sharing
-//! one GHC session, harness turn lane) are now both thin projections that
-//! build a [`CompileInvocation`] and hand it to [`compile_invocation`] —
-//! spawning the extractor, reading its output directory, and deserializing
-//! into typed artifacts happens in exactly one place.
-//!
-//! Originally moved here from `tidepool_harness::compile` (architecture
-//! review finding 3, 2026-08-17), which was a second compiler frontend
-//! duplicating this crate's temp-file setup, `ExtractCmd` construction,
-//! output-presence checking, and CBOR reads, with its own parallel
-//! `CompileError` family. A later pass (codex-quality-paths-2026-08-19,
-//! finding P1.1) finished that consolidation by folding
-//! [`crate::compile_haskell`]'s OWN parallel spawn/temp-layout/cache-hit
-//! logic into this same front door, so a new extract flag, sidecar, or
-//! cache-validity condition added here reaches both lanes by construction.
-//! The harness still maps [`CompiledArtifacts`] onto its own turn/node
-//! vocabulary (`tidepool_harness::engine::compile_turn`/`compile_turns`) and
-//! attributes timing to its own (node, round) pairs via the `on_stage` hook,
-//! rather than duplicating the spawn+read+deserialize sequence.
+//! one GHC session, harness turn lane) are both thin projections that build a
+//! [`CompileInvocation`] and hand it to [`compile_invocation`] — spawning the
+//! extractor, reading its output directory, and deserializing into typed
+//! artifacts happens in exactly one place. The harness maps
+//! [`CompiledArtifacts`] onto its own turn/node vocabulary
+//! (`tidepool_harness::engine::compile_turn`/`compile_turns`) and attributes
+//! timing to its own (node, round) pairs via the `on_stage` hook, rather than
+//! duplicating the spawn+read+deserialize sequence.
 //!
 //! # One front door, two DELIBERATELY separate cache schemes
 //!
 //! [`CompileInvocation::cache`] ([`CacheStrategy`]) is the one remaining
-//! policy delta between the lanes, and it is deliberate, not leftover: the
-//! eval lane ([`crate::compile_haskell`]/[`crate::compile_haskell_salted`])
-//! keys through [`crate::cache::cache_key_salted`] / [`crate::cache::cache_load`]
-//! / [`crate::cache::cache_store`] (a single `(expr, meta)` pair, optionally
+//! policy delta between the lanes. The eval lane
+//! ([`crate::compile_haskell`]/[`crate::compile_haskell_salted`]) keys
+//! through [`crate::cache::cache_key_salted`] / [`crate::cache::cache_load`] /
+//! [`crate::cache::cache_store`] (a single `(expr, meta)` pair, optionally
 //! salted per session/generation); the turn lane ([`compile_targets`]) keys
 //! through [`crate::cache::invocation_key`] / [`crate::cache::artifacts_load`]
 //! / [`crate::cache::artifacts_store`] (a named artifact SET, which is what
 //! lets the asks sidecar and multiple targets share one memo entry, but has
-//! no salt concept). Merging those two key spaces is explicitly OUT OF SCOPE
-//! here too: a key change would cold every existing on-disk memo (including
-//! the harness test suite's shared one and every deployed eval cache) for
-//! whichever lane's scheme lost — see `plans/compile-memo.md` and root
-//! CLAUDE.md's "THE MEMO IS THE HAZARD" note. [`compile_invocation`] computes
-//! and consults EACH lane's pre-existing key exactly as its old standalone
-//! code did, so every on-disk entry from before this change still hits.
-//! Nothing about either key's inputs changed, so there is nothing to
-//! cold-start and nothing to measure a before/after delta on: the two
-//! `cache_key_determinism`/`invocation_key_*` test families below and in
-//! `cache.rs` are the receipt that both schemes are byte-for-byte unchanged.
+//! no salt concept). Merging those two key spaces is out of scope: a key
+//! change would cold every existing on-disk memo (including the harness test
+//! suite's shared one and every deployed eval cache) for whichever lane's
+//! scheme lost — see `plans/compile-memo.md` and root CLAUDE.md's "THE MEMO
+//! IS THE HAZARD" note.
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
@@ -49,7 +33,7 @@ use std::time::{Duration, Instant};
 
 use serde::Deserialize;
 use tempfile::TempDir;
-use tidepool_extract_cmd::{ExitVerdict, ExtractCmd, ResolvedExtractBin};
+use tidepool_extract_cmd::{ExtractCmd, ResolvedExtractBin};
 use tidepool_repr::serial::{read_cbor, read_metadata, MetaWarnings};
 use tidepool_repr::{CoreExpr, DataConTable};
 
@@ -428,9 +412,9 @@ pub(crate) fn extract_and_read(
     if !module_timings.is_empty() {
         timing::log_module_timings(&module_timings);
     }
-    log_stderr(&stderr, run.verdict == ExitVerdict::Success);
+    log_stderr(&stderr, run.success());
 
-    if run.verdict != ExitVerdict::Success {
+    if !run.success() {
         return Err(
             match diag::parse_diag_report(&run.output.stdout, &run.output.stderr) {
                 Ok(report) => CompileError::Diagnostics(report.diagnostics),

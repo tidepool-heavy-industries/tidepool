@@ -19,9 +19,7 @@ use std::sync::Arc;
 use parking_lot::Mutex;
 use std::time::{Duration, Instant};
 
-use tidepool_runtime::session::{
-    EngineConfig, OutputSink, RenderPolicy, Retention, SessionEngine, StartTurn, TurnOutcome,
-};
+use tidepool_runtime::session::{EngineConfig, OutputSink, SessionEngine, StartTurn, TurnOutcome};
 use tidepool_runtime::FailureClass;
 use tidepool_testing::NullDispatcher;
 
@@ -60,8 +58,6 @@ fn test_engine() -> SessionEngine<TestSink> {
         max_orphaned: 10,
         cont_prefix: "cont".into(),
         default_timeout_secs: 5,
-        render: RenderPolicy::Json,
-        retention: Retention::DropAfterDone,
     })
 }
 

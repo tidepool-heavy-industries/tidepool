@@ -21,8 +21,7 @@ use std::marker::PhantomData;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tidepool_runtime::session::{
-    AbortOutcome, EngineConfig, RenderPolicy, ResumeOutcome, Retention, SessionEngine, StartError,
-    StartTurn, TurnOutcome,
+    AbortOutcome, EngineConfig, ResumeOutcome, SessionEngine, StartError, StartTurn, TurnOutcome,
 };
 use tidepool_runtime::DispatchEffect;
 use tokio::io::{stdin, stdout};
@@ -769,8 +768,6 @@ where
                     max_orphaned: MAX_ORPHANED_EVALS,
                     cont_prefix: "cont".to_string(),
                     default_timeout_secs: EVAL_TIMEOUT_SECS,
-                    render: RenderPolicy::Json,
-                    retention: Retention::DropAfterDone,
                 })),
             },
             _phantom: PhantomData,

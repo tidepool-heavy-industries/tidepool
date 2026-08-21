@@ -12,17 +12,14 @@
 //! - The spawn itself, which increments [`extract_spawn_count`] on every
 //!   successful spawn, so the counter is correct BY CONSTRUCTION rather than
 //!   by everyone remembering to bump it.
-//! - [`ExitPolicy`] — what a NON-ZERO exit means at this call site, as an
-//!   explicit named enum rather than a comment copy-pasted between sites.
 //!
 //! What deliberately does NOT live here: any parsing of the extract's output.
 //! Diagnostics reports are JSON and the payloads are CBOR, which would mean
 //! `serde_json`/`ciborium` dependencies — and this crate is **std-only on
 //! purpose** (D-A: `tidepool-macro` is a proc-macro crate and must not grow a
 //! dependency on the runtime graph). [`ExtractCmd::run`] hands back the raw
-//! [`std::process::Output`] plus the classification verdict, and each caller
-//! maps that onto its own error type (`CompileError`, `SessionError`,
-//! `String`).
+//! [`std::process::Output`], and each caller maps that onto its own error
+//! type (`CompileError`, `SessionError`, `String`).
 //!
 //! Nor does the **compile memo**, for the same reason. Keying a whole
 //! invocation is the natural job for the crate that BUILDS the invocation, and
@@ -340,61 +337,6 @@ impl Launcher {
 }
 
 // ---------------------------------------------------------------------------
-// Non-zero-exit classification policy
-// ---------------------------------------------------------------------------
-
-/// What a NON-ZERO exit MEANS at a given call site.
-///
-/// This is a policy, not a parse: this crate never reads the diagnostics
-/// report (that needs `serde_json` — see the module doc). It records which
-/// reading the caller is entitled to make, so the one site whose reading
-/// differs says so by name instead of by comment.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum ExitPolicy {
-    /// The default, and what six of the seven sites want: a non-zero exit MAY
-    /// be the user's Haskell, so the caller parses the stdout diagnostics
-    /// report — a parseable report is a real GHC diagnostic, an unparseable
-    /// one is a stale/skewed extractor.
-    #[default]
-    DiagnosticReport,
-    /// `tidepool_runtime::session::turn::classify_block`'s deliberate
-    /// exception. THIS LANE HAS NO USER-ERROR MODE, so a non-zero exit is
-    /// always an infrastructure problem and never the user's Haskell.
-    /// `classifyTurn`'s rule 6 turns an item that parses as neither a
-    /// declaration nor a statement into an `expr` verdict — the classify
-    /// itself cannot reject input. What a non-zero exit really means is a
-    /// stale extract: one predating `--classify` swallows the flag as a
-    /// positional file and falls through to the ordinary compile path,
-    /// which then reports a perfectly parseable GHC diagnostic about a
-    /// target it cannot find. Classifying that as a user-Haskell failure
-    /// would route a version skew into the caller's user-Haskell lane, where
-    /// the repl degrades resiliently and the operator sees `parse error on
-    /// input '<-'` on every bind instead of "your extract is stale".
-    ///
-    /// So a caller under this policy reports BOTH shapes as version skew,
-    /// the same fails-loud reading every other call site gives an unparseable
-    /// report. This is what makes the one-format wire policy true there:
-    /// `--emit-stmt-binders`' removal means a new runtime REQUIRES a
-    /// matching extract, and `scripts/redeploy.sh` ships both together.
-    InfrastructureOnly,
-}
-
-/// The classification of one finished spawn — [`ExitPolicy`] applied to the
-/// process's actual exit status.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ExitVerdict {
-    /// Exited 0.
-    Success,
-    /// Non-zero exit under [`ExitPolicy::DiagnosticReport`]: parse the stdout
-    /// report — a parseable one is the user's Haskell, an unparseable one is
-    /// version skew.
-    UserOrSkew,
-    /// Non-zero exit under [`ExitPolicy::InfrastructureOnly`]: infrastructure
-    /// (a stale extract), never the user's Haskell, whatever the report says.
-    Infrastructure,
-}
-
-// ---------------------------------------------------------------------------
 // Spawn result / error
 // ---------------------------------------------------------------------------
 
@@ -439,8 +381,6 @@ pub struct ExtractRun {
     /// The raw process output. Parsing it (diagnostics JSON, CBOR payloads)
     /// is the caller's job — see the module doc.
     pub output: Output,
-    /// [`ExitPolicy`] applied to `output.status`.
-    pub verdict: ExitVerdict,
     /// Wall time from just before the spawn to the process's exit. Callers
     /// forward this to their own timing collector (`timing::record_stage` /
     /// `record_turn_stage`), so the "extract_spawn" stage is measured
@@ -459,19 +399,14 @@ impl ExtractRun {
     pub fn stderr_lossy(&self) -> std::borrow::Cow<'_, str> {
         String::from_utf8_lossy(&self.output.stderr)
     }
-
-    /// `stdout` as text — the authoritative contract channel.
-    pub fn stdout_lossy(&self) -> std::borrow::Cow<'_, str> {
-        String::from_utf8_lossy(&self.output.stdout)
-    }
 }
 
 // ---------------------------------------------------------------------------
 // The builder
 // ---------------------------------------------------------------------------
 
-/// A `tidepool-extract` invocation: positional inputs, typed flags, a
-/// [`Launcher`], and an [`ExitPolicy`].
+/// A `tidepool-extract` invocation: positional inputs, typed flags, and a
+/// [`Launcher`].
 ///
 /// Flags are emitted in the order they are set, after all positional inputs.
 /// The extractor's own `parseArgs` (`haskell/app/Main.hs`) folds each flag
@@ -488,7 +423,6 @@ pub struct ExtractCmd {
     bin_source: BinSource,
     inputs: Vec<OsString>,
     flags: Vec<OsString>,
-    policy: ExitPolicy,
 }
 
 impl ExtractCmd {
@@ -500,7 +434,6 @@ impl ExtractCmd {
             bin_source: resolved.source,
             inputs: Vec::new(),
             flags: Vec::new(),
-            policy: ExitPolicy::default(),
         })
     }
 
@@ -518,7 +451,6 @@ impl ExtractCmd {
             bin_source: BinSource::Explicit,
             inputs: Vec::new(),
             flags: Vec::new(),
-            policy: ExitPolicy::default(),
         }
     }
 
@@ -596,20 +528,6 @@ impl ExtractCmd {
     /// wrapper template, compiles, and writes the `TurnOut` sidecar).
     pub fn turn(&mut self) -> &mut Self {
         self.bare_flag("--turn")
-    }
-
-    /// `--turn-batch <plan.json>` — one spawn compiles N items in execution
-    /// order (`plans/post-restart/batch-turns-feasibility.md` §8's wire
-    /// contract), each writing its own `<batch-out>/i<k>/` directory
-    /// containing exactly today's single-turn output set.
-    pub fn turn_batch(&mut self, plan_path: impl AsRef<OsStr>) -> &mut Self {
-        self.flag("--turn-batch", plan_path)
-    }
-
-    /// `--batch-out <dir>` — the parent directory `--turn-batch` writes its
-    /// per-item `i<k>/` output directories into.
-    pub fn batch_out(&mut self, dir: impl AsRef<OsStr>) -> &mut Self {
-        self.flag("--batch-out", dir)
     }
 
     /// `--turn-template <kind>=<path>`. Repeatable; order preserved.
@@ -703,13 +621,6 @@ impl ExtractCmd {
         self.bare_flag("--probe-only")
     }
 
-    /// Set what a non-zero exit means here. Defaults to
-    /// [`ExitPolicy::DiagnosticReport`].
-    pub fn exit_policy(&mut self, policy: ExitPolicy) -> &mut Self {
-        self.policy = policy;
-        self
-    }
-
     /// The full argv (positional inputs first, then flags in the order they
     /// were set), without the program. Exposed for tests and diagnostics.
     pub fn argv(&self) -> Vec<OsString> {
@@ -741,19 +652,7 @@ impl ExtractCmd {
         // never paid a real `tidepool-extract` cost and must not count as one.
         EXTRACT_SPAWNS.fetch_add(1, Ordering::Relaxed);
 
-        let verdict = if output.status.success() {
-            ExitVerdict::Success
-        } else {
-            match self.policy {
-                ExitPolicy::DiagnosticReport => ExitVerdict::UserOrSkew,
-                ExitPolicy::InfrastructureOnly => ExitVerdict::Infrastructure,
-            }
-        };
-        Ok(ExtractRun {
-            output,
-            verdict,
-            elapsed,
-        })
+        Ok(ExtractRun { output, elapsed })
     }
 }
 
@@ -839,25 +738,6 @@ mod tests {
                 "2",
                 "--turn-verdict",
                 "bind:x,y",
-            ]
-        );
-    }
-
-    #[test]
-    fn turn_batch_mode_spells_every_flag() {
-        let mut cmd = ExtractCmd::with_bin(ResolvedExtractBin::assume_resolved("x"));
-        cmd.turn_batch("/tmp/plan.json")
-            .batch_out("/tmp/batch-out")
-            .includes(["/inc/one"]);
-        assert_eq!(
-            strs(&cmd.argv()),
-            vec![
-                "--turn-batch",
-                "/tmp/plan.json",
-                "--batch-out",
-                "/tmp/batch-out",
-                "--include",
-                "/inc/one",
             ]
         );
     }
@@ -989,10 +869,9 @@ mod tests {
     }
 
     /// The counter increments on a spawn that RAN, whatever its exit status,
-    /// and not on a spawn that never launched. Also pins the two exit
-    /// policies against the same non-zero exit.
+    /// and not on a spawn that never launched.
     #[test]
-    fn counter_and_verdicts() {
+    fn counter_tracks_spawns_that_ran() {
         use std::os::unix::fs::PermissionsExt;
         let dir = std::env::temp_dir().join(format!(
             "tidepool-extract-cmd-counter-{}",
@@ -1013,17 +892,11 @@ mod tests {
         assert!(err.is_not_found(), "expected NotFound, got {err}");
         assert_eq!(extract_spawn_count(), 0);
 
-        // Ran and failed: counted, and classified by policy.
+        // Ran and failed: still counted.
         let mut cmd = ExtractCmd::with_bin(ResolvedExtractBin::assume_resolved(&fake));
         let run = cmd.input("x.hs").run().unwrap();
         assert!(!run.success());
-        assert_eq!(run.verdict, ExitVerdict::UserOrSkew);
         assert_eq!(extract_spawn_count(), 1);
-
-        cmd.exit_policy(ExitPolicy::InfrastructureOnly);
-        let run = cmd.run().unwrap();
-        assert_eq!(run.verdict, ExitVerdict::Infrastructure);
-        assert_eq!(extract_spawn_count(), 2);
 
         std::fs::remove_dir_all(&dir).ok();
     }

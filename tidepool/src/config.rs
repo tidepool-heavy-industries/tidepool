@@ -37,17 +37,15 @@ impl Config {
             return; // absent → nothing to merge
         };
         match toml::from_str::<Config>(&text) {
-            Ok(other) => self.merge(other),
+            Ok(other) => {
+                if other.llm_model.is_some() {
+                    self.llm_model = other.llm_model;
+                }
+                if other.eval_timeout_secs.is_some() {
+                    self.eval_timeout_secs = other.eval_timeout_secs;
+                }
+            }
             Err(e) => tracing::warn!("ignoring malformed {}: {e}", path.display()),
-        }
-    }
-
-    fn merge(&mut self, other: Config) {
-        if other.llm_model.is_some() {
-            self.llm_model = other.llm_model;
-        }
-        if other.eval_timeout_secs.is_some() {
-            self.eval_timeout_secs = other.eval_timeout_secs;
         }
     }
 }

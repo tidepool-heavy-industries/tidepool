@@ -25,16 +25,15 @@ pub mod turn;
 pub use persistent::{MachineLease, PersistentSession, ScopeRetirement};
 
 pub use engine::{
-    extract_ask_request, AbortOutcome, EngineConfig, GateDispatcher, OutputSink, RenderPolicy,
-    ResumeOutcome, Retention, SessionEngine, StartError, StartTurn, TurnOutcome,
+    extract_ask_request, AbortOutcome, EngineConfig, GateDispatcher, OutputSink, ResumeOutcome,
+    SessionEngine, StartError, StartTurn, TurnOutcome,
 };
 
 pub use resident::{ResidentError, ResidentHole, ResidentOutcome, ResidentSession, RootCustody};
 
 pub use turn::{
-    classify_block, compile_session_turn, render_template, run_turn, run_turn_batch,
-    BatchItemFailure, BatchTurnItem, BoundBinder, CompiledTurn, SessionBind, SessionTurnResult,
-    TemplateSelector, TurnBatchRequest, TurnBatchResult, TurnClassification, TurnKind, TurnRequest,
+    classify_block, compile_session_turn, render_template, run_turn, BoundBinder, CompiledTurn,
+    SessionBind, SessionTurnResult, TemplateSelector, TurnClassification, TurnKind, TurnRequest,
     TurnResult, TurnTemplate, ValueTier, DECL_TEMPLATE_SOURCE,
 };
 
@@ -42,7 +41,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use tidepool_codegen::scope::ScopeId;
-use tidepool_extract_cmd::{ExitVerdict, ExtractCmd};
+use tidepool_extract_cmd::ExtractCmd;
 use tidepool_repr::{Generation, SessionId, SessionModule};
 
 pub use render::{
@@ -720,7 +719,7 @@ impl SessionLib {
             .map_err(|e| SessionError::Io(crate::extract_spawn_error(e.source)))?;
         let output = &run.output;
 
-        if run.verdict != ExitVerdict::Success {
+        if !run.success() {
             // An unparseable report is a stale/skewed extractor, not the
             // user's declaration — the same split every extract call site makes.
             let report = match crate::diag::parse_diag_report(&output.stdout, &output.stderr) {

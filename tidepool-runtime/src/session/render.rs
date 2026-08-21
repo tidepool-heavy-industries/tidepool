@@ -171,18 +171,11 @@ impl DeclLog {
 
     /// The currently in-scope declaration heads (value/type/class names) paired
     /// with the generation of their LATEST defining turn (latest-wins across
-    /// turns, mirroring the eval-time module scoping). Backs the decl-plane half
-    /// of the `tidepool://session/bindings` live-state snapshot.
-    ///
-    /// `current_heads() == current_heads_at(self.generation())`.
-    #[must_use]
-    pub fn current_heads(&self) -> Vec<(String, u64)> {
-        self.current_heads_at(self.generation())
-    }
-
-    /// [`Self::current_heads`], but as seen from `tip` — walks `tip`'s parent
-    /// chain rather than assuming the log is one flat history. Lets a caller
-    /// with several tips in flight (one per scope) query each independently.
+    /// turns, mirroring the eval-time module scoping), as seen from `tip` —
+    /// walks `tip`'s parent chain rather than assuming the log is one flat
+    /// history. Lets a caller with several tips in flight (one per scope)
+    /// query each independently. Backs the decl-plane half of the
+    /// `tidepool://session/bindings` live-state snapshot.
     #[must_use]
     pub fn current_heads_at(&self, tip: Generation) -> Vec<(String, u64)> {
         let mut map: std::collections::BTreeMap<String, u64> = std::collections::BTreeMap::new();
@@ -1157,7 +1150,10 @@ mod tests {
     // --- Retraction (a name leaving the decl plane on decl→value migration) ---
 
     fn heads(log: &DeclLog) -> Vec<String> {
-        log.current_heads().into_iter().map(|(h, _)| h).collect()
+        log.current_heads_at(log.generation())
+            .into_iter()
+            .map(|(h, _)| h)
+            .collect()
     }
 
     #[test]
