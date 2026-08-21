@@ -1,7 +1,7 @@
 //! Occurrence analysis for Core expressions.
 
 use rustc_hash::FxHashMap;
-use tidepool_repr::{CoreExpr, CoreFrame, VarId};
+use tidepool_repr::{get_children, CoreExpr, CoreFrame, VarId};
 
 /// Occurrence count for a variable.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -40,12 +40,25 @@ pub type OccMap = FxHashMap<VarId, Occ>;
 /// Count occurrences of all variables in the expression.
 /// Binding sites (in Lam, Let, Case, Join) are NOT counted as occurrences.
 /// Only Var(v) nodes (variable use sites) are counted.
+///
+/// `CoreExpr` is a DAG, not a tree: a single `Var` node can be reachable via
+/// more than one parent edge (or twice from the same parent, e.g. `x + x`
+/// sharing one `Var` index in both `PrimOp` args). Counting distinct `Var`
+/// frames in the flat node vector — one scan, no notion of "reached from
+/// where" — undercounts any such shared node to `Once`. We instead count
+/// incoming edges: for every node, walk its children (`get_children`, the
+/// same child set the rewrite passes descend through) and charge an
+/// occurrence for each child that is a `Var`. A node with two parent edges is
+/// then correctly `Many`, matching how many times a rewrite would actually
+/// splice a substituted subtree at it.
 pub fn occ_analysis(expr: &CoreExpr) -> OccMap {
     let mut map = OccMap::default();
     for node in &expr.nodes {
-        if let CoreFrame::Var(v) = node {
-            let entry = map.entry(*v).or_insert(Occ::Dead);
-            *entry = entry.add(Occ::Once);
+        for child in get_children(node) {
+            if let CoreFrame::Var(v) = &expr.nodes[child] {
+                let entry = map.entry(*v).or_insert(Occ::Dead);
+                *entry = entry.add(Occ::Once);
+            }
         }
     }
     map
@@ -201,5 +214,40 @@ mod tests {
         assert_eq!(get_occ(&map, x), Occ::Once);
         assert_eq!(get_occ(&map, w), Occ::Once);
         assert_eq!(get_occ(&map, y), Occ::Dead);
+    }
+
+    // 8. A single Var node shared by two parent edges: x + x where both PrimOp
+    // args point at the SAME Var(x) index (index 0 appears once in `nodes`,
+    // but is reachable via two distinct edges). Regression for the DAG-sharing
+    // undercount: a flat scan over `nodes` sees one `Var` frame and reports
+    // `Once`, but the node is used twice.
+    #[test]
+    fn test_shared_var_node_two_parent_edges() {
+        let x = VarId(1);
+        let expr = tree(vec![
+            CoreFrame::Var(x), // 0: the single shared Var(x) node
+            CoreFrame::PrimOp {
+                op: PrimOpKind::IntAdd,
+                args: vec![0, 0], // both operands reference index 0
+            }, // 1: x + x, via one shared node
+        ]);
+        let map = occ_analysis(&expr);
+        assert_eq!(get_occ(&map, x), Occ::Many);
+    }
+
+    // 9. The same shared-node shape as (8), but the two edges come from
+    // different parents rather than the same PrimOp's args list — the "DAG
+    // node referenced by multiple parent edges" shape the sharing gates must
+    // see as Many.
+    #[test]
+    fn test_shared_var_node_distinct_parents() {
+        let x = VarId(1);
+        let expr = tree(vec![
+            CoreFrame::Var(x),                     // 0: the single shared Var(x) node
+            CoreFrame::Lam { binder: x, body: 0 }, // 1: unused wrapper, just another parent of 0
+            CoreFrame::App { fun: 1, arg: 0 },     // 2: also refers to node 0 directly
+        ]);
+        let map = occ_analysis(&expr);
+        assert_eq!(get_occ(&map, x), Occ::Many);
     }
 }

@@ -154,9 +154,7 @@ mod tests {
     fn test_beta_preserves_sharing() {
         // (λx. x + x) (1 + 2): binder occurs at two DISTINCT Var nodes, arg is a
         // non-trivial PrimOp. Reducing would splice `1 + 2` at both occurrences,
-        // duplicating the work — so the redex must be left intact. (Two separate
-        // Var nodes, not a shared one: occurrence analysis counts nodes, and a
-        // shared Var node is genuinely spliced only once.)
+        // duplicating the work — so the redex must be left intact.
         let x = VarId(1);
         let nodes = vec![
             CoreFrame::Var(x), // 0: x
@@ -179,6 +177,41 @@ mod tests {
         assert!(
             !changed,
             "multi-use binder + non-trivial arg must not reduce"
+        );
+    }
+
+    #[test]
+    fn test_beta_preserves_sharing_dag_shared_var() {
+        // Same shape as `test_beta_preserves_sharing`, but this time both `x`
+        // occurrences in the body are the SAME Var node (index 0), reached via
+        // two edges out of the PrimOp's `args`, rather than two distinct Var
+        // nodes. A DAG-shared use site is still two occurrences of `x` — beta
+        // would still splice `1 + 2` twice, once per incoming edge, when
+        // `subst` walks the body and rewrites each reachable occurrence. This
+        // regresses the occurrence-analysis undercount: scanning the flat node
+        // vector for `Var` frames sees index 0 once and would (wrongly) report
+        // `Once`, letting this redex fire and duplicate the non-trivial arg.
+        let x = VarId(1);
+        let nodes = vec![
+            CoreFrame::Var(x), // 0: the single shared Var(x) node
+            CoreFrame::PrimOp {
+                op: tidepool_repr::PrimOpKind::IntAdd,
+                args: vec![0, 0], // both operands reference index 0
+            }, // 1: x + x, via one shared node
+            CoreFrame::Lam { binder: x, body: 1 }, // 2: λx. x + x
+            CoreFrame::Lit(Literal::LitInt(1)), // 3: 1
+            CoreFrame::Lit(Literal::LitInt(2)), // 4: 2
+            CoreFrame::PrimOp {
+                op: tidepool_repr::PrimOpKind::IntAdd,
+                args: vec![3, 4],
+            }, // 5: 1 + 2 (non-trivial arg)
+            CoreFrame::App { fun: 2, arg: 5 }, // 6: (λx. x + x) (1 + 2)
+        ];
+        let mut expr = CoreExpr { nodes };
+        let changed = BetaReduce.run(&mut expr);
+        assert!(
+            !changed,
+            "DAG-shared multi-use binder + non-trivial arg must not reduce"
         );
     }
 
