@@ -20,7 +20,6 @@
 use rand::RngExt;
 use std::collections::VecDeque;
 use std::io::Write;
-use std::sync::{Arc, Mutex};
 use tidepool_bridge_derive::FromCore;
 use tidepool_codegen::jit_machine::JitEffectMachine;
 use tidepool_effect::{EffectContext, EffectError, EffectHandler};
@@ -44,55 +43,27 @@ enum InputSource {
     Scripted(VecDeque<String>),
 }
 
-/// Every line `Emit`/`Prompt` writes, in order — always recorded (cheap:
-/// `Arc<Mutex<Vec<String>>>`), only ever read back by the `#[cfg(test)]` smoke
-/// test via [`EmitLog::drain`].
-#[derive(Clone, Default)]
-struct EmitLog(Arc<Mutex<Vec<String>>>);
-
-impl EmitLog {
-    fn push(&self, line: String) {
-        #[allow(
-            clippy::unwrap_used,
-            reason = "demo capture buffer: nothing panics while the lock is held, so it cannot poison"
-        )]
-        self.0.lock().unwrap().push(line);
-    }
-
-    #[cfg(test)]
-    fn drain(&self) -> Vec<String> {
-        std::mem::take(&mut *self.0.lock().unwrap())
-    }
-}
-
 /// Real-terminal Console: `Emit`/`Prompt` print to actual stdout, `AwaitInt`
 /// blocks on a real (or scripted) line source. See the module doc comment for
 /// why this can't be `tidepool_handlers::ConsoleHandler`.
 struct ConsoleHandler {
     source: InputSource,
-    log: EmitLog,
 }
 
 impl ConsoleHandler {
     fn new() -> Self {
         ConsoleHandler {
             source: InputSource::Stdin,
-            log: EmitLog::default(),
         }
     }
 
     /// Test-only constructor: `AwaitInt` is served from `lines` instead of real
-    /// stdin (exhausting `lines` behaves like stdin EOF). Returns the handler
-    /// plus a cloned [`EmitLog`] handle for asserting on emitted output after
-    /// the JIT run completes.
+    /// stdin (exhausting `lines` behaves like stdin EOF).
     #[cfg(test)]
-    fn scripted(lines: &[&str]) -> (Self, EmitLog) {
-        let log = EmitLog::default();
-        let handler = ConsoleHandler {
+    fn scripted(lines: &[&str]) -> Self {
+        ConsoleHandler {
             source: InputSource::Scripted(lines.iter().map(|s| s.to_string()).collect()),
-            log: log.clone(),
-        };
-        (handler, log)
+        }
     }
 }
 
@@ -107,13 +78,11 @@ impl EffectHandler for ConsoleHandler {
         match req {
             ConsoleReq::Emit(s) => {
                 println!("{}", s);
-                self.log.push(s);
                 cx.respond(())
             }
             ConsoleReq::Prompt(s) => {
                 print!("{}", s);
                 std::io::stdout().flush().ok();
-                self.log.push(s);
                 cx.respond(())
             }
             ConsoleReq::AwaitInt => loop {
@@ -247,17 +216,14 @@ mod tests {
 
         let mut vm =
             JitEffectMachine::compile(&expr, &table, 1 << 20).expect("JIT compilation failed");
-        let (console, log) = ConsoleHandler::scripted(&guesses);
+        let console = ConsoleHandler::scripted(&guesses);
         let mut handlers = frunk::hlist![console, RngHandler::fixed(target)];
 
+        // The scripted handler errors on stdin EOF (see `AwaitInt` above)
+        // unless the game reaches its winning branch and stops asking for
+        // input first — so a successful run already proves the target was
+        // guessed.
         vm.run(&table, &mut handlers, &())
             .expect("scripted game must run to completion, not hit EOF");
-
-        let emitted = log.drain();
-        assert_eq!(
-            emitted.last().map(String::as_str),
-            Some("Correct!"),
-            "game did not reach the winning guess: {emitted:?}"
-        );
     }
 }

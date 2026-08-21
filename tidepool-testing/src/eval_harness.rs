@@ -232,11 +232,6 @@ impl Outcome {
         self.result().to_json()
     }
 
-    /// JSON if successful, else `None` (for tests that tolerate either).
-    pub fn try_json(&self) -> Option<serde_json::Value> {
-        self.0.as_ref().ok().map(|r| r.to_json())
-    }
-
     /// Consume and return the owned [`EvalResult`], panicking with `ctx` + error.
     pub fn expect(self, ctx: &str) -> EvalResult {
         self.0.unwrap_or_else(|e| panic!("{ctx}: {e}"))

@@ -1,4 +1,9 @@
-#![allow(unused, clippy::all)]
+// The `miette::Diagnostic` derive on `TideParseError` below expands into code
+// that trips `unused_assignments` on that struct's own field declarations
+// (the derive's generated impl shadows the field names internally) — a
+// false positive from the derive expansion, not from code in this module.
+#![allow(unused_assignments)]
+
 use crate::ast::{BinOp, BuiltinId, TExpr};
 use miette::{Diagnostic, SourceSpan};
 use pest::iterators::Pair;
@@ -239,7 +244,7 @@ fn parse_call(pair: Pair<Rule>) -> Result<TExpr, String> {
     let atom_pair = inner.next().unwrap();
     let mut current = parse_atom(atom_pair)?;
 
-    while let Some(args_pair) = inner.next() {
+    for args_pair in inner {
         let args = parse_arg_list(args_pair)?;
 
         // Builtin detection: if the callee is an identifier and it matches a builtin name
@@ -337,575 +342,504 @@ fn map_builtin(name: &str) -> Option<BuiltinId> {
 mod tests {
     use super::*;
 
-    #[test]
-    fn test_parse_int() {
-        assert_eq!(parse("42").unwrap(), TExpr::TInt(42));
+    /// One table-driven case: `input` must parse to `expected`.
+    struct Case {
+        name: &'static str,
+        input: &'static str,
+        expected: TExpr,
+    }
+
+    fn c(name: &'static str, input: &'static str, expected: TExpr) -> Case {
+        Case {
+            name,
+            input,
+            expected,
+        }
+    }
+
+    fn assert_all_parse(cases: Vec<Case>) {
+        for case in cases {
+            match parse(case.input) {
+                Ok(actual) => assert_eq!(
+                    actual, case.expected,
+                    "{}: parse({:?}) produced an unexpected AST",
+                    case.name, case.input
+                ),
+                Err(e) => panic!("{}: parse({:?}) failed: {e}", case.name, case.input),
+            }
+        }
     }
 
     #[test]
-    fn test_parse_string() {
-        assert_eq!(parse("\"hello\"").unwrap(), TExpr::TStr("hello".into()));
-    }
-
-    #[test]
-    fn test_parse_bool() {
-        assert_eq!(parse("true").unwrap(), TExpr::TBool(true));
-        assert_eq!(parse("false").unwrap(), TExpr::TBool(false));
-    }
-
-    #[test]
-    fn test_parse_var() {
-        assert_eq!(parse("x").unwrap(), TExpr::TVar("x".into()));
-    }
-
-    #[test]
-    fn test_parse_arithmetic() {
-        let expr = parse("2 + 3").unwrap();
-        assert_eq!(
-            expr,
-            TExpr::TBinOp(
-                BinOp::Add,
-                Box::new(TExpr::TInt(2)),
-                Box::new(TExpr::TInt(3))
-            )
-        );
-    }
-
-    #[test]
-    fn test_parse_precedence() {
-        let expr = parse("1 + 2 * 3").unwrap();
-        assert_eq!(
-            expr,
-            TExpr::TBinOp(
-                BinOp::Add,
-                Box::new(TExpr::TInt(1)),
-                Box::new(TExpr::TBinOp(
-                    BinOp::Mul,
-                    Box::new(TExpr::TInt(2)),
-                    Box::new(TExpr::TInt(3))
-                ))
-            )
-        );
-    }
-
-    #[test]
-    fn test_parse_let_with_body() {
-        let expr = parse("let x = 5; x").unwrap();
-        assert_eq!(
-            expr,
-            TExpr::TLet(
-                "x".into(),
-                Box::new(TExpr::TInt(5)),
-                Box::new(TExpr::TVar("x".into()))
-            )
-        );
-    }
-
-    #[test]
-    fn test_parse_let_no_body() {
-        let expr = parse("let x = 5").unwrap();
-        assert_eq!(expr, TExpr::TBind("x".into(), Box::new(TExpr::TInt(5))));
-    }
-
-    #[test]
-    fn test_parse_if() {
-        let expr = parse("if true then 1 else 2").unwrap();
-        assert_eq!(
-            expr,
-            TExpr::TIf(
-                Box::new(TExpr::TBool(true)),
-                Box::new(TExpr::TInt(1)),
-                Box::new(TExpr::TInt(2))
-            )
-        );
-    }
-
-    #[test]
-    fn test_parse_lambda() {
-        let expr = parse(r#"\x -> x"#).unwrap();
-        assert_eq!(
-            expr,
-            TExpr::TLam(vec!["x".into()], Box::new(TExpr::TVar("x".into())))
-        );
-    }
-
-    #[test]
-    fn test_parse_call() {
-        let expr = parse("f(1, 2)").unwrap();
-        assert_eq!(
-            expr,
-            TExpr::TApp(
-                Box::new(TExpr::TVar("f".into())),
-                vec![TExpr::TInt(1), TExpr::TInt(2)]
-            )
-        );
-    }
-
-    #[test]
-    fn test_parse_builtin() {
-        let expr = parse("print(42)").unwrap();
-        assert_eq!(
-            expr,
-            TExpr::TBuiltin(BuiltinId::Print, vec![TExpr::TInt(42)])
-        );
-    }
-
-    #[test]
-    fn test_parse_list() {
-        let expr = parse("[1, 2, 3]").unwrap();
-        assert_eq!(
-            expr,
-            TExpr::TList(vec![TExpr::TInt(1), TExpr::TInt(2), TExpr::TInt(3)])
-        );
-    }
-
-    #[test]
-    fn test_parse_concat() {
-        let expr = parse(r#""a" ++ "b""#).unwrap();
-        assert_eq!(
-            expr,
-            TExpr::TBinOp(
-                BinOp::Concat,
-                Box::new(TExpr::TStr("a".into())),
-                Box::new(TExpr::TStr("b".into()))
-            )
-        );
-    }
-
-    #[test]
-    fn test_parse_comparison() {
-        let expr = parse("x == 0").unwrap();
-        assert_eq!(
-            expr,
-            TExpr::TBinOp(
-                BinOp::Eq,
-                Box::new(TExpr::TVar("x".into())),
-                Box::new(TExpr::TInt(0))
-            )
-        );
-    }
-
-    #[test]
-    fn test_parse_complex() {
-        let expr = parse("let x = 2 + 3; x * 10").unwrap();
-        assert_eq!(
-            expr,
-            TExpr::TLet(
-                "x".into(),
-                Box::new(TExpr::TBinOp(
-                    BinOp::Add,
-                    Box::new(TExpr::TInt(2)),
-                    Box::new(TExpr::TInt(3))
-                )),
-                Box::new(TExpr::TBinOp(
-                    BinOp::Mul,
-                    Box::new(TExpr::TVar("x".into())),
-                    Box::new(TExpr::TInt(10))
-                ))
-            )
-        );
-    }
-
-    // === Atoms ===
-
-    #[test]
-    fn test_parse_zero() {
-        assert_eq!(parse("0").unwrap(), TExpr::TInt(0));
-    }
-
-    #[test]
-    fn test_parse_large_int() {
-        assert_eq!(parse("999999").unwrap(), TExpr::TInt(999999));
-    }
-
-    #[test]
-    fn test_parse_empty_string() {
-        assert_eq!(parse(r#""""#).unwrap(), TExpr::TStr("".into()));
-    }
-
-    #[test]
-    fn test_parse_string_with_escape() {
-        // Standard C-style escapes are resolved at parse time.
-        assert_eq!(
-            parse(r#""hello\nworld""#).unwrap(),
-            TExpr::TStr("hello\nworld".into())
-        );
-        assert_eq!(
-            parse(r#""say \"hi\"""#).unwrap(),
-            TExpr::TStr("say \"hi\"".into())
-        );
-        assert_eq!(
-            parse(r#""tab\there""#).unwrap(),
-            TExpr::TStr("tab\there".into())
-        );
-    }
-
-    #[test]
-    fn test_parse_empty_list() {
-        assert_eq!(parse("[]").unwrap(), TExpr::TList(vec![]));
-    }
-
-    #[test]
-    fn test_parse_nested_list() {
-        assert_eq!(
-            parse("[[1], [2]]").unwrap(),
-            TExpr::TList(vec![
-                TExpr::TList(vec![TExpr::TInt(1)]),
-                TExpr::TList(vec![TExpr::TInt(2)]),
-            ])
-        );
-    }
-
-    #[test]
-    fn test_parse_paren_expr() {
-        assert_eq!(
-            parse("(1 + 2) * 3").unwrap(),
-            TExpr::TBinOp(
-                BinOp::Mul,
-                Box::new(TExpr::TBinOp(
+    fn success_literals_and_atoms() {
+        assert_all_parse(vec![
+            c("int", "42", TExpr::TInt(42)),
+            c("string", "\"hello\"", TExpr::TStr("hello".into())),
+            c("bool_true", "true", TExpr::TBool(true)),
+            c("bool_false", "false", TExpr::TBool(false)),
+            c("var", "x", TExpr::TVar("x".into())),
+            c("zero", "0", TExpr::TInt(0)),
+            c("large_int", "999999", TExpr::TInt(999999)),
+            c("empty_string", r#""""#, TExpr::TStr("".into())),
+            c(
+                "string_escape_newline",
+                r#""hello\nworld""#,
+                TExpr::TStr("hello\nworld".into()),
+            ),
+            c(
+                "string_escape_quote",
+                r#""say \"hi\"""#,
+                TExpr::TStr("say \"hi\"".into()),
+            ),
+            c(
+                "string_escape_tab",
+                r#""tab\there""#,
+                TExpr::TStr("tab\there".into()),
+            ),
+            c("empty_list", "[]", TExpr::TList(vec![])),
+            c(
+                "list",
+                "[1, 2, 3]",
+                TExpr::TList(vec![TExpr::TInt(1), TExpr::TInt(2), TExpr::TInt(3)]),
+            ),
+            c(
+                "nested_list",
+                "[[1], [2]]",
+                TExpr::TList(vec![
+                    TExpr::TList(vec![TExpr::TInt(1)]),
+                    TExpr::TList(vec![TExpr::TInt(2)]),
+                ]),
+            ),
+            c("underscore_ident", "_foo", TExpr::TVar("_foo".into())),
+            c("ident_with_digits", "x1", TExpr::TVar("x1".into())),
+            c(
+                "keyword_prefix_ident",
+                "letters",
+                TExpr::TVar("letters".into()),
+            ),
+            c("if_prefix_ident", "iffy", TExpr::TVar("iffy".into())),
+            c(
+                "extra_whitespace",
+                "  1  +  2  ",
+                TExpr::TBinOp(
                     BinOp::Add,
                     Box::new(TExpr::TInt(1)),
-                    Box::new(TExpr::TInt(2))
-                )),
-                Box::new(TExpr::TInt(3)),
-            )
-        );
-    }
-
-    // === Arithmetic operators ===
-
-    #[test]
-    fn test_parse_subtraction() {
-        assert_eq!(
-            parse("5 - 3").unwrap(),
-            TExpr::TBinOp(
-                BinOp::Sub,
-                Box::new(TExpr::TInt(5)),
-                Box::new(TExpr::TInt(3))
-            )
-        );
+                    Box::new(TExpr::TInt(2)),
+                ),
+            ),
+            c("with_comment", "42 -- the answer", TExpr::TInt(42)),
+        ]);
     }
 
     #[test]
-    fn test_parse_multiplication() {
-        assert_eq!(
-            parse("4 * 7").unwrap(),
-            TExpr::TBinOp(
-                BinOp::Mul,
-                Box::new(TExpr::TInt(4)),
-                Box::new(TExpr::TInt(7))
-            )
-        );
-    }
-
-    #[test]
-    fn test_parse_division() {
-        assert_eq!(
-            parse("10 / 2").unwrap(),
-            TExpr::TBinOp(
-                BinOp::Div,
-                Box::new(TExpr::TInt(10)),
-                Box::new(TExpr::TInt(2))
-            )
-        );
-    }
-
-    #[test]
-    fn test_parse_chained_addition() {
-        assert_eq!(
-            parse("1 + 2 + 3").unwrap(),
-            TExpr::TBinOp(
-                BinOp::Add,
-                Box::new(TExpr::TBinOp(
+    fn success_operators() {
+        assert_all_parse(vec![
+            c(
+                "add",
+                "2 + 3",
+                TExpr::TBinOp(
                     BinOp::Add,
-                    Box::new(TExpr::TInt(1)),
-                    Box::new(TExpr::TInt(2))
-                )),
-                Box::new(TExpr::TInt(3)),
-            )
-        );
-    }
-
-    #[test]
-    fn test_parse_mixed_mul_div() {
-        assert_eq!(
-            parse("6 * 2 / 3").unwrap(),
-            TExpr::TBinOp(
-                BinOp::Div,
-                Box::new(TExpr::TBinOp(
-                    BinOp::Mul,
-                    Box::new(TExpr::TInt(6)),
-                    Box::new(TExpr::TInt(2))
-                )),
-                Box::new(TExpr::TInt(3)),
-            )
-        );
-    }
-
-    // === Comparison operators ===
-
-    #[test]
-    fn test_parse_not_equal() {
-        assert_eq!(
-            parse("a != b").unwrap(),
-            TExpr::TBinOp(
-                BinOp::Ne,
-                Box::new(TExpr::TVar("a".into())),
-                Box::new(TExpr::TVar("b".into()))
-            )
-        );
-    }
-
-    #[test]
-    fn test_parse_less_than() {
-        assert_eq!(
-            parse("x < 10").unwrap(),
-            TExpr::TBinOp(
-                BinOp::Lt,
-                Box::new(TExpr::TVar("x".into())),
-                Box::new(TExpr::TInt(10))
-            )
-        );
-    }
-
-    #[test]
-    fn test_parse_greater_than() {
-        assert_eq!(
-            parse("x > 0").unwrap(),
-            TExpr::TBinOp(
-                BinOp::Gt,
-                Box::new(TExpr::TVar("x".into())),
-                Box::new(TExpr::TInt(0))
-            )
-        );
-    }
-
-    #[test]
-    fn test_parse_less_equal() {
-        assert_eq!(
-            parse("x <= 5").unwrap(),
-            TExpr::TBinOp(
-                BinOp::Le,
-                Box::new(TExpr::TVar("x".into())),
-                Box::new(TExpr::TInt(5))
-            )
-        );
-    }
-
-    #[test]
-    fn test_parse_greater_equal() {
-        assert_eq!(
-            parse("x >= 1").unwrap(),
-            TExpr::TBinOp(
-                BinOp::Ge,
-                Box::new(TExpr::TVar("x".into())),
-                Box::new(TExpr::TInt(1))
-            )
-        );
-    }
-
-    // === Unary negation ===
-
-    #[test]
-    fn test_parse_negation() {
-        assert_eq!(
-            parse("-5").unwrap(),
-            TExpr::TBinOp(
-                BinOp::Sub,
-                Box::new(TExpr::TInt(0)),
-                Box::new(TExpr::TInt(5))
-            )
-        );
-    }
-
-    #[test]
-    fn test_parse_double_negation_needs_parens() {
-        assert!(parse("--x").is_err());
-        assert_eq!(
-            parse("-(-x)").unwrap(),
-            TExpr::TBinOp(
-                BinOp::Sub,
-                Box::new(TExpr::TInt(0)),
-                Box::new(TExpr::TBinOp(
+                    Box::new(TExpr::TInt(2)),
+                    Box::new(TExpr::TInt(3)),
+                ),
+            ),
+            c(
+                "sub",
+                "5 - 3",
+                TExpr::TBinOp(
                     BinOp::Sub,
-                    Box::new(TExpr::TInt(0)),
-                    Box::new(TExpr::TVar("x".into()))
-                ))
-            )
-        );
-    }
-
-    // === Let expressions ===
-
-    #[test]
-    fn test_parse_let_with_binop_value() {
-        assert_eq!(
-            parse("let x = 1 + 2").unwrap(),
-            TExpr::TBind(
-                "x".into(),
-                Box::new(TExpr::TBinOp(
-                    BinOp::Add,
-                    Box::new(TExpr::TInt(1)),
-                    Box::new(TExpr::TInt(2))
-                ))
-            )
-        );
-    }
-
-    #[test]
-    fn test_parse_nested_let() {
-        assert_eq!(
-            parse("let x = 1; let y = 2; x + y").unwrap(),
-            TExpr::TLet(
-                "x".into(),
-                Box::new(TExpr::TInt(1)),
-                Box::new(TExpr::TLet(
-                    "y".into(),
+                    Box::new(TExpr::TInt(5)),
+                    Box::new(TExpr::TInt(3)),
+                ),
+            ),
+            c(
+                "mul",
+                "4 * 7",
+                TExpr::TBinOp(
+                    BinOp::Mul,
+                    Box::new(TExpr::TInt(4)),
+                    Box::new(TExpr::TInt(7)),
+                ),
+            ),
+            c(
+                "div",
+                "10 / 2",
+                TExpr::TBinOp(
+                    BinOp::Div,
+                    Box::new(TExpr::TInt(10)),
                     Box::new(TExpr::TInt(2)),
-                    Box::new(TExpr::TBinOp(
-                        BinOp::Add,
-                        Box::new(TExpr::TVar("x".into())),
-                        Box::new(TExpr::TVar("y".into()))
-                    )),
-                )),
-            )
-        );
-    }
-
-    #[test]
-    fn test_parse_let_lambda_value() {
-        assert_eq!(
-            parse(r#"let inc = \x -> x + 1"#).unwrap(),
-            TExpr::TBind(
-                "inc".into(),
-                Box::new(TExpr::TLam(
-                    vec!["x".into()],
-                    Box::new(TExpr::TBinOp(
-                        BinOp::Add,
-                        Box::new(TExpr::TVar("x".into())),
-                        Box::new(TExpr::TInt(1))
-                    ))
-                )),
-            )
-        );
-    }
-
-    #[test]
-    fn test_parse_let_if_value() {
-        assert_eq!(
-            parse("let x = if true then 1 else 2").unwrap(),
-            TExpr::TBind(
-                "x".into(),
-                Box::new(TExpr::TIf(
-                    Box::new(TExpr::TBool(true)),
-                    Box::new(TExpr::TInt(1)),
-                    Box::new(TExpr::TInt(2))
-                )),
-            )
-        );
-    }
-
-    // === If expressions ===
-
-    #[test]
-    fn test_parse_if_with_comparison() {
-        assert_eq!(
-            parse("if x > 0 then x else -x").unwrap(),
-            TExpr::TIf(
-                Box::new(TExpr::TBinOp(
+                ),
+            ),
+            c(
+                "concat",
+                r#""a" ++ "b""#,
+                TExpr::TBinOp(
+                    BinOp::Concat,
+                    Box::new(TExpr::TStr("a".into())),
+                    Box::new(TExpr::TStr("b".into())),
+                ),
+            ),
+            c(
+                "eq",
+                "x == 0",
+                TExpr::TBinOp(
+                    BinOp::Eq,
+                    Box::new(TExpr::TVar("x".into())),
+                    Box::new(TExpr::TInt(0)),
+                ),
+            ),
+            c(
+                "ne",
+                "a != b",
+                TExpr::TBinOp(
+                    BinOp::Ne,
+                    Box::new(TExpr::TVar("a".into())),
+                    Box::new(TExpr::TVar("b".into())),
+                ),
+            ),
+            c(
+                "lt",
+                "x < 10",
+                TExpr::TBinOp(
+                    BinOp::Lt,
+                    Box::new(TExpr::TVar("x".into())),
+                    Box::new(TExpr::TInt(10)),
+                ),
+            ),
+            c(
+                "gt",
+                "x > 0",
+                TExpr::TBinOp(
                     BinOp::Gt,
                     Box::new(TExpr::TVar("x".into())),
-                    Box::new(TExpr::TInt(0))
-                )),
-                Box::new(TExpr::TVar("x".into())),
-                Box::new(TExpr::TBinOp(
+                    Box::new(TExpr::TInt(0)),
+                ),
+            ),
+            c(
+                "le",
+                "x <= 5",
+                TExpr::TBinOp(
+                    BinOp::Le,
+                    Box::new(TExpr::TVar("x".into())),
+                    Box::new(TExpr::TInt(5)),
+                ),
+            ),
+            c(
+                "ge",
+                "x >= 1",
+                TExpr::TBinOp(
+                    BinOp::Ge,
+                    Box::new(TExpr::TVar("x".into())),
+                    Box::new(TExpr::TInt(1)),
+                ),
+            ),
+            c(
+                "negation",
+                "-5",
+                TExpr::TBinOp(
                     BinOp::Sub,
                     Box::new(TExpr::TInt(0)),
-                    Box::new(TExpr::TVar("x".into()))
-                )),
-            )
-        );
+                    Box::new(TExpr::TInt(5)),
+                ),
+            ),
+        ]);
     }
 
     #[test]
-    fn test_parse_nested_if() {
-        assert_eq!(
-            parse("if true then if false then 1 else 2 else 3").unwrap(),
-            TExpr::TIf(
-                Box::new(TExpr::TBool(true)),
-                Box::new(TExpr::TIf(
-                    Box::new(TExpr::TBool(false)),
+    fn success_precedence() {
+        assert_all_parse(vec![
+            c(
+                "mul_binds_tighter_than_add",
+                "1 + 2 * 3",
+                TExpr::TBinOp(
+                    BinOp::Add,
+                    Box::new(TExpr::TInt(1)),
+                    Box::new(TExpr::TBinOp(
+                        BinOp::Mul,
+                        Box::new(TExpr::TInt(2)),
+                        Box::new(TExpr::TInt(3)),
+                    )),
+                ),
+            ),
+            c(
+                "parens_override_precedence",
+                "(1 + 2) * 3",
+                TExpr::TBinOp(
+                    BinOp::Mul,
+                    Box::new(TExpr::TBinOp(
+                        BinOp::Add,
+                        Box::new(TExpr::TInt(1)),
+                        Box::new(TExpr::TInt(2)),
+                    )),
+                    Box::new(TExpr::TInt(3)),
+                ),
+            ),
+            c(
+                "add_left_associative",
+                "1 + 2 + 3",
+                TExpr::TBinOp(
+                    BinOp::Add,
+                    Box::new(TExpr::TBinOp(
+                        BinOp::Add,
+                        Box::new(TExpr::TInt(1)),
+                        Box::new(TExpr::TInt(2)),
+                    )),
+                    Box::new(TExpr::TInt(3)),
+                ),
+            ),
+            c(
+                "mul_div_left_associative",
+                "6 * 2 / 3",
+                TExpr::TBinOp(
+                    BinOp::Div,
+                    Box::new(TExpr::TBinOp(
+                        BinOp::Mul,
+                        Box::new(TExpr::TInt(6)),
+                        Box::new(TExpr::TInt(2)),
+                    )),
+                    Box::new(TExpr::TInt(3)),
+                ),
+            ),
+            c(
+                "double_negation_needs_parens",
+                "-(-x)",
+                TExpr::TBinOp(
+                    BinOp::Sub,
+                    Box::new(TExpr::TInt(0)),
+                    Box::new(TExpr::TBinOp(
+                        BinOp::Sub,
+                        Box::new(TExpr::TInt(0)),
+                        Box::new(TExpr::TVar("x".into())),
+                    )),
+                ),
+            ),
+        ]);
+    }
+
+    #[test]
+    fn success_let_expressions() {
+        assert_all_parse(vec![
+            c(
+                "let_with_body",
+                "let x = 5; x",
+                TExpr::TLet(
+                    "x".into(),
+                    Box::new(TExpr::TInt(5)),
+                    Box::new(TExpr::TVar("x".into())),
+                ),
+            ),
+            c(
+                "let_no_body",
+                "let x = 5",
+                TExpr::TBind("x".into(), Box::new(TExpr::TInt(5))),
+            ),
+            c(
+                "let_with_binop_value",
+                "let x = 1 + 2",
+                TExpr::TBind(
+                    "x".into(),
+                    Box::new(TExpr::TBinOp(
+                        BinOp::Add,
+                        Box::new(TExpr::TInt(1)),
+                        Box::new(TExpr::TInt(2)),
+                    )),
+                ),
+            ),
+            c(
+                "nested_let",
+                "let x = 1; let y = 2; x + y",
+                TExpr::TLet(
+                    "x".into(),
+                    Box::new(TExpr::TInt(1)),
+                    Box::new(TExpr::TLet(
+                        "y".into(),
+                        Box::new(TExpr::TInt(2)),
+                        Box::new(TExpr::TBinOp(
+                            BinOp::Add,
+                            Box::new(TExpr::TVar("x".into())),
+                            Box::new(TExpr::TVar("y".into())),
+                        )),
+                    )),
+                ),
+            ),
+            c(
+                "let_lambda_value",
+                r#"let inc = \x -> x + 1"#,
+                TExpr::TBind(
+                    "inc".into(),
+                    Box::new(TExpr::TLam(
+                        vec!["x".into()],
+                        Box::new(TExpr::TBinOp(
+                            BinOp::Add,
+                            Box::new(TExpr::TVar("x".into())),
+                            Box::new(TExpr::TInt(1)),
+                        )),
+                    )),
+                ),
+            ),
+            c(
+                "let_if_value",
+                "let x = if true then 1 else 2",
+                TExpr::TBind(
+                    "x".into(),
+                    Box::new(TExpr::TIf(
+                        Box::new(TExpr::TBool(true)),
+                        Box::new(TExpr::TInt(1)),
+                        Box::new(TExpr::TInt(2)),
+                    )),
+                ),
+            ),
+            c(
+                "complex_let_and_arith",
+                "let x = 2 + 3; x * 10",
+                TExpr::TLet(
+                    "x".into(),
+                    Box::new(TExpr::TBinOp(
+                        BinOp::Add,
+                        Box::new(TExpr::TInt(2)),
+                        Box::new(TExpr::TInt(3)),
+                    )),
+                    Box::new(TExpr::TBinOp(
+                        BinOp::Mul,
+                        Box::new(TExpr::TVar("x".into())),
+                        Box::new(TExpr::TInt(10)),
+                    )),
+                ),
+            ),
+        ]);
+    }
+
+    #[test]
+    fn success_if_expressions() {
+        assert_all_parse(vec![
+            c(
+                "if_basic",
+                "if true then 1 else 2",
+                TExpr::TIf(
+                    Box::new(TExpr::TBool(true)),
                     Box::new(TExpr::TInt(1)),
                     Box::new(TExpr::TInt(2)),
-                )),
-                Box::new(TExpr::TInt(3)),
-            )
-        );
-    }
-
-    // === Lambda expressions ===
-
-    #[test]
-    fn test_parse_multi_param_lambda() {
-        assert_eq!(
-            parse(r#"\x y -> x + y"#).unwrap(),
-            TExpr::TLam(
-                vec!["x".into(), "y".into()],
-                Box::new(TExpr::TBinOp(
-                    BinOp::Add,
+                ),
+            ),
+            c(
+                "if_with_comparison",
+                "if x > 0 then x else -x",
+                TExpr::TIf(
+                    Box::new(TExpr::TBinOp(
+                        BinOp::Gt,
+                        Box::new(TExpr::TVar("x".into())),
+                        Box::new(TExpr::TInt(0)),
+                    )),
                     Box::new(TExpr::TVar("x".into())),
-                    Box::new(TExpr::TVar("y".into()))
-                )),
-            )
-        );
-    }
-
-    // === Function calls ===
-
-    #[test]
-    fn test_parse_call_no_args() {
-        assert_eq!(parse("f()").unwrap(), TExpr::TVar("f".into()));
-    }
-
-    #[test]
-    fn test_parse_call_single_arg() {
-        assert_eq!(
-            parse("f(42)").unwrap(),
-            TExpr::TApp(Box::new(TExpr::TVar("f".into())), vec![TExpr::TInt(42)])
-        );
-    }
-
-    #[test]
-    fn test_parse_call_expr_arg() {
-        assert_eq!(
-            parse("f(1 + 2)").unwrap(),
-            TExpr::TApp(
-                Box::new(TExpr::TVar("f".into())),
-                vec![TExpr::TBinOp(
-                    BinOp::Add,
-                    Box::new(TExpr::TInt(1)),
-                    Box::new(TExpr::TInt(2))
-                )]
-            )
-        );
+                    Box::new(TExpr::TBinOp(
+                        BinOp::Sub,
+                        Box::new(TExpr::TInt(0)),
+                        Box::new(TExpr::TVar("x".into())),
+                    )),
+                ),
+            ),
+            c(
+                "nested_if",
+                "if true then if false then 1 else 2 else 3",
+                TExpr::TIf(
+                    Box::new(TExpr::TBool(true)),
+                    Box::new(TExpr::TIf(
+                        Box::new(TExpr::TBool(false)),
+                        Box::new(TExpr::TInt(1)),
+                        Box::new(TExpr::TInt(2)),
+                    )),
+                    Box::new(TExpr::TInt(3)),
+                ),
+            ),
+        ]);
     }
 
     #[test]
-    fn test_parse_chained_calls() {
-        assert_eq!(
-            parse("f(1)(2)").unwrap(),
-            TExpr::TApp(
-                Box::new(TExpr::TApp(
+    fn success_lambda_expressions() {
+        assert_all_parse(vec![
+            c(
+                "single_param",
+                r#"\x -> x"#,
+                TExpr::TLam(vec!["x".into()], Box::new(TExpr::TVar("x".into()))),
+            ),
+            c(
+                "multi_param",
+                r#"\x y -> x + y"#,
+                TExpr::TLam(
+                    vec!["x".into(), "y".into()],
+                    Box::new(TExpr::TBinOp(
+                        BinOp::Add,
+                        Box::new(TExpr::TVar("x".into())),
+                        Box::new(TExpr::TVar("y".into())),
+                    )),
+                ),
+            ),
+        ]);
+    }
+
+    #[test]
+    fn success_function_calls() {
+        assert_all_parse(vec![
+            c("call_no_args", "f()", TExpr::TVar("f".into())),
+            c(
+                "call_single_arg",
+                "f(42)",
+                TExpr::TApp(Box::new(TExpr::TVar("f".into())), vec![TExpr::TInt(42)]),
+            ),
+            c(
+                "call_expr_arg",
+                "f(1 + 2)",
+                TExpr::TApp(
                     Box::new(TExpr::TVar("f".into())),
-                    vec![TExpr::TInt(1)]
-                )),
-                vec![TExpr::TInt(2)]
-            )
-        );
+                    vec![TExpr::TBinOp(
+                        BinOp::Add,
+                        Box::new(TExpr::TInt(1)),
+                        Box::new(TExpr::TInt(2)),
+                    )],
+                ),
+            ),
+            c(
+                "call_two_args",
+                "f(1, 2)",
+                TExpr::TApp(
+                    Box::new(TExpr::TVar("f".into())),
+                    vec![TExpr::TInt(1), TExpr::TInt(2)],
+                ),
+            ),
+            c(
+                "chained_calls",
+                "f(1)(2)",
+                TExpr::TApp(
+                    Box::new(TExpr::TApp(
+                        Box::new(TExpr::TVar("f".into())),
+                        vec![TExpr::TInt(1)],
+                    )),
+                    vec![TExpr::TInt(2)],
+                ),
+            ),
+        ]);
     }
 
-    // === Builtins ===
+    #[test]
+    fn success_builtins() {
+        assert_all_parse(vec![
+            c(
+                "print",
+                "print(42)",
+                TExpr::TBuiltin(BuiltinId::Print, vec![TExpr::TInt(42)]),
+            ),
+            c(
+                "write_file_multiple_args",
+                r#"write_file("a.txt", "hi")"#,
+                TExpr::TBuiltin(
+                    BuiltinId::WriteFile,
+                    vec![TExpr::TStr("a.txt".into()), TExpr::TStr("hi".into())],
+                ),
+            ),
+        ]);
+    }
 
+    /// Every builtin name maps to its `BuiltinId` tag.
     #[test]
     fn test_parse_all_builtins() {
         let cases: [(&str, BuiltinId); 8] = [
@@ -931,76 +865,19 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_builtin_multiple_args() {
-        assert_eq!(
-            parse(r#"write_file("a.txt", "hi")"#).unwrap(),
-            TExpr::TBuiltin(
-                BuiltinId::WriteFile,
-                vec![TExpr::TStr("a.txt".into()), TExpr::TStr("hi".into())]
-            )
-        );
-    }
-
-    // === Identifiers and keywords ===
-
-    #[test]
-    fn test_parse_underscore_ident() {
-        assert_eq!(parse("_foo").unwrap(), TExpr::TVar("_foo".into()));
-    }
-
-    #[test]
-    fn test_parse_ident_with_digits() {
-        assert_eq!(parse("x1").unwrap(), TExpr::TVar("x1".into()));
-    }
-
-    #[test]
-    fn test_parse_keyword_prefix_ident() {
-        assert_eq!(parse("letters").unwrap(), TExpr::TVar("letters".into()));
-    }
-
-    #[test]
-    fn test_parse_if_prefix_ident() {
-        assert_eq!(parse("iffy").unwrap(), TExpr::TVar("iffy".into()));
-    }
-
-    // === Whitespace and comments ===
-
-    #[test]
-    fn test_parse_extra_whitespace() {
-        assert_eq!(
-            parse("  1  +  2  ").unwrap(),
-            TExpr::TBinOp(
-                BinOp::Add,
-                Box::new(TExpr::TInt(1)),
-                Box::new(TExpr::TInt(2))
-            )
-        );
-    }
-
-    #[test]
-    fn test_parse_with_comment() {
-        assert_eq!(parse("42 -- the answer").unwrap(), TExpr::TInt(42));
-    }
-
-    // === Error cases ===
-
-    #[test]
-    fn test_parse_empty_fails() {
-        assert!(parse("").is_err());
-    }
-
-    #[test]
-    fn test_parse_unclosed_paren() {
-        assert!(parse("(1 + 2").is_err());
-    }
-
-    #[test]
-    fn test_parse_unclosed_string() {
-        assert!(parse(r#""hello"#).is_err());
-    }
-
-    #[test]
-    fn test_parse_trailing_op() {
-        assert!(parse("1 +").is_err());
+    fn error_cases() {
+        let cases: [(&str, &str); 5] = [
+            ("empty_input", ""),
+            ("unclosed_paren", "(1 + 2"),
+            ("unclosed_string", "\"hello"),
+            ("trailing_op", "1 +"),
+            ("double_negation_without_parens", "--x"),
+        ];
+        for (name, input) in cases {
+            assert!(
+                parse(input).is_err(),
+                "{name}: expected parse({input:?}) to fail, but it succeeded"
+            );
+        }
     }
 }

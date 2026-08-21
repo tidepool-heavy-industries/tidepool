@@ -1,4 +1,3 @@
-#![allow(unused, clippy::all)]
 //! All five of Tide's effects (`Repl`, `Console`, `Env`, `Net`, `Fs`) are
 //! hand-rolled rather than assembled via `tidepool_handlers::build_base_stack`.
 //! `Repl`/`Env` have no standard-stack equivalent at all (an interactive
@@ -66,6 +65,10 @@ pub enum ReplReq {
     Display(String),
 }
 
+#[allow(
+    clippy::large_enum_variant,
+    reason = "one Interactive(DefaultEditor) per REPL process — boxing to shrink the rare File variant isn't worth the indirection"
+)]
 enum InputSource {
     Interactive(rustyline::DefaultEditor),
     File { lines: Vec<String>, pos: usize },
@@ -138,12 +141,6 @@ impl ReplHandler {
     pub fn output_log(&self) -> OutputLog {
         self.log.clone()
     }
-}
-
-fn parse_and_serialize(input: &str, cx: &EffectContext) -> Result<Value, TideError> {
-    let expr = crate::parser::parse(input).map_err(|e| TideError::Parse(format!("{:?}", e)))?;
-    expr.to_value(cx.table())
-        .map_err(|e| TideError::Internal(format!("ToCore failed: {:?}", e)))
 }
 
 fn print_welcome() {
@@ -312,6 +309,12 @@ pub enum EnvReq {
 
 pub struct EnvHandler {
     env: HashMap<String, Value>,
+}
+
+impl Default for EnvHandler {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl EnvHandler {

@@ -401,44 +401,16 @@ fn g2_shared_subtree_and_restricted_tp_values_equal() {
     handle.join().unwrap();
 }
 
+/// Structural invariants of `tidepool-testing`'s own generator output
+/// (topological node ordering, no orphaned nodes) — not a test of
+/// `tidepool_repr::builder::TreeBuilder` itself, which has its own coverage
+/// in `tidepool-repr/tests/proptest_cbor.rs`.
 #[test]
-fn g3_tree_builder_invariants() {
+fn g3_generator_tree_invariants() {
     let handle = std::thread::Builder::new()
         .stack_size(8 * 1024 * 1024)
         .spawn(|| {
             let mut runner = TestRunner::new(cfg(300));
-
-            use tidepool_repr::builder::TreeBuilder;
-
-            runner
-                .run(&prop::collection::vec(1..8usize, 2..5), |lens| {
-                    let mut builder = TreeBuilder::new();
-                    let mut expected_len = 0;
-                    for size in lens {
-                        let mut sub = TreeBuilder::new();
-                        for _ in 0..size {
-                            let curr = sub.clone().build().nodes.len();
-                            let frame = if curr == 0 {
-                                CoreFrame::Lit(Literal::LitInt(0))
-                            } else {
-                                CoreFrame::App { fun: 0, arg: 0 }
-                            };
-                            sub.push(frame);
-                        }
-                        let offset = builder.push_tree(sub);
-                        prop_assert_eq!(offset, expected_len);
-                        expected_len += size;
-                    }
-                    let final_tree = builder.build();
-                    for (i, node) in final_tree.nodes.iter().enumerate() {
-                        node.clone().map_layer(|child| {
-                            assert!(child < i);
-                            child
-                        });
-                    }
-                    Ok(())
-                })
-                .unwrap();
 
             runner
                 .run(&tidepool_testing::gen::arb_core_expr_depth(5), |expr| {
@@ -593,27 +565,6 @@ fn bug2_compare_values_equal_bytearray_reflexivity() {
 
 // BUG-3 FIXED: gen_lam's body recursion now decrements depth
 // (`depth.saturating_sub(1)`) instead of reusing the parent's budget
-// unchanged. The remaining overage is the characterized type-nesting cascade
-// (see g4_generator_contracts's 2d+2 bound) — not a violation.
-#[test]
-fn bug3_generator_depth_violation() {
-    let handle = std::thread::Builder::new()
-        .stack_size(8 * 1024 * 1024)
-        .spawn(|| {
-            let mut runner = TestRunner::new(cfg(300));
-            let strat = tidepool_testing::gen::arb_core_expr_depth(3);
-            runner
-                .run(&strat, |expr| {
-                    let measured = get_tree_depth(&expr);
-                    prop_assert!(
-                        measured <= 2 * 3 + 2,
-                        "measured depth {} exceeds the characterized 2d+2 bound for d=3",
-                        measured
-                    );
-                    Ok(())
-                })
-                .unwrap();
-        })
-        .unwrap();
-    handle.join().unwrap();
-}
+// unchanged. The d=3 case of that regression is covered by
+// g4_generator_contracts's 2d+2 bound loop (which already includes d=3),
+// so no standalone repro remains here.

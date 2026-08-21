@@ -65,26 +65,9 @@ if [ -z "${TIDEPOOL_GHC_SLOT:-}" ]; then
   exec /home/inanna/dev/tidepool/scripts/ghc-slots.sh run -- "$PWD/scripts/bench-turn.sh" "$@"
 fi
 
-# --- TIDEPOOL_EXTRACT resolution (copied from scripts/battery.sh) ----------
-if [ -z "${TIDEPOOL_EXTRACT:-}" ]; then
-  echo "==> TIDEPOOL_EXTRACT not set — building the dev tidepool-extract-bin"
-  _w="$HOME/.nix-profile/bin/tidepool-extract"
-  if [ -x "$_w" ]; then
-    _ghc="$(grep -oE '/nix/store/[^:"]*-with-packages/bin' "$_w" | head -1)"
-    if [ -n "${_ghc:-}" ] && [ -d "$_ghc" ]; then
-      export PATH="$_ghc:$PATH"
-      echo "==> prepended with-packages GHC to PATH ($_ghc)"
-    fi
-  fi
-  ( cd haskell && cabal build tidepool-extract-bin )
-  TIDEPOOL_EXTRACT="$(cd haskell && cabal list-bin tidepool-extract-bin)"
-  export TIDEPOOL_EXTRACT
-fi
-if [ ! -x "$TIDEPOOL_EXTRACT" ] || ! "$TIDEPOOL_EXTRACT" 2>&1 | grep -q '^Usage:'; then
-  echo "error: TIDEPOOL_EXTRACT='$TIDEPOOL_EXTRACT' is not a runnable tidepool-extract (no 'Usage:' banner)" >&2
-  exit 1
-fi
-echo "TIDEPOOL_EXTRACT=${TIDEPOOL_EXTRACT}"
+# --- TIDEPOOL_EXTRACT resolution (shared with battery.sh/battery-shard.sh) -
+source "$(dirname "${BASH_SOURCE[0]}")/lib-extract.sh"
+resolve_tidepool_extract
 export TIDEPOOL_TIMING=1
 
 # --- build the bench bins (release — this is a latency measurement) --------
