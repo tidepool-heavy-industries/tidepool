@@ -23,6 +23,14 @@ drives UX changes and new effects, not speculative design.
 
 The Key Decisions Reference section below is the source of truth for all architectural decisions. Every entry is final. Do not deviate from locked decisions. Do not re-derive them. If you need a decision that isn't there, escalate to the human.
 
+### Authority
+
+Root CLAUDE.md's Key Decisions Reference is supreme for cross-crate
+architecture. Per-crate CLAUDE.md files are authoritative for crate-local
+contracts, and subordinate to root on any conflict. `plans/` and PRD
+"locked"/"frozen" language is a design-time record, not standing authority —
+standing authority always runs through the CLAUDE.md hierarchy.
+
 ### Plans
 
 `plans/README.md` tracks the current active plan. Read it before starting new work.
@@ -135,8 +143,10 @@ already on PATH), not plain `cargo test`. nextest runs every test in its own OS
 process — never two tests sharing one — which structurally de-races the JIT's
 process-global-ish state (signal handlers, GC, fork-safety harnesses); that is
 why the only `test-group` override needed is the GHC fan-out cap. See
-`.config/nextest.toml` for the hazard audit and `scripts/battery.sh` for the
-canonical full-suite invocation. Plain `cargo test --workspace -- --test-threads=1`
+`.config/nextest.toml` for the default-filter and `ghc-heavy` group cap
+themselves (the case-by-case hazard audit that justified them lives in that
+file's git history, not inline) and `scripts/battery.sh` for the canonical
+full-suite invocation. Plain `cargo test --workspace -- --test-threads=1`
 still works as a fallback (no `cargo-nextest` available) but is noticeably slower.
 
 **Every test run needs `TIDEPOOL_EXTRACT`** pointing at a built
@@ -178,8 +188,9 @@ capped without an edit there. The box-wide ceiling is the product of the two
    `tidepool-handlers` (186 tests) fits this whole within the ~380s budget as
    a bare `-p <crate>` invocation — `tidepool-harness`/`tidepool-runtime`/
    `tidepool-repl` each need `-E 'binary(...) or binary(...)'` sub-shards
-   (5/6/7 respectively; the exact groups and measured times are documented in
-   `scripts/battery-shard.sh`'s header). Chain shards (one invocation per
+   (5/6/7 respectively; the exact groups are documented in
+   `scripts/battery-shard.sh`'s header — per-shard timings aren't tracked
+   there). Chain shards (one invocation per
    group, in sequence — concurrent GHC-heavy shards on a shared box compete
    for the same `ghc-slots.sh` semaphore and inflate every number) to walk
    full coverage without tripping the environment's kill.
