@@ -13,6 +13,7 @@ import qualified Fidelity.PrimopArity as PrimopArity
 import qualified Fidelity.Recognizers as Recognizers
 import qualified Fidelity.D1Defense as D1Defense
 import qualified Fidelity.TurnBatch as TurnBatch
+import qualified Fidelity.TurnBatchJsonBugs as TurnBatchJsonBugs
 import qualified Fidelity.ClosureTier as ClosureTier
 
 import Control.Monad (forM_)
@@ -25,6 +26,7 @@ groups =
   , ("pipeline barriers + unboxed-tuple arity", PrimopArity.checks)
   , ("D1 hard-fail metadata-subset defense (mutation test)", D1Defense.checks)
   , ("turn-batch per-item error attribution (§8)", TurnBatch.checks)
+  , ("turn-batch plan.json parser bugs (numbers, control chars, surrogate pairs)", TurnBatchJsonBugs.checks)
   , ("closure-tier classification (higher-kinded arrow instantiation)", ClosureTier.checks)
   ]
 

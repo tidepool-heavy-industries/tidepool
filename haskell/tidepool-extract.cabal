@@ -246,6 +246,7 @@ test-suite extract-fidelity-test
     Fidelity.PrimopArity
     Fidelity.D1Defense
     Fidelity.TurnBatch
+    Fidelity.TurnBatchJsonBugs
     Fidelity.ClosureTier
   build-depends:
     tidepool-extract-internal,

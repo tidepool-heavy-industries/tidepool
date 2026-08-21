@@ -7,7 +7,7 @@ import qualified Data.ByteString as BS
 import qualified Data.Map.Strict as Map
 import qualified Data.Sequence as Seq
 import qualified Data.Set as Set
-import Numeric (showHex, readHex)
+import Numeric (showHex, readHex, readFloat)
 import Control.Exception (evaluate, try, SomeException, fromException)
 import Data.Char (toUpper, isAlphaNum, isSpace, isDigit)
 import Data.List (isPrefixOf, isSuffixOf, stripPrefix, intercalate, nub)
@@ -1105,11 +1105,19 @@ parsePlanItems src = case parseJsonValue src of
 -- own no-aeson-dependency rationale.
 --------------------------------------------------------------------------------
 
+-- | @JNum@ carries JSON numbers with no fraction/exponent (arbitrary-
+-- precision, exact); @JReal@ carries ones that used a fraction and/or
+-- exponent (JSON grammar's @frac@/@exp@ productions), stored as 'Double'.
+-- 'plan.json's own fields ("index", "bind_gen") are genuinely integer-only —
+-- 'jInt' below still only matches 'JNum' — but a JSON document may carry
+-- unrelated fractional fields elsewhere (extra metadata, future fields) that
+-- the parser must still be able to walk past.
 data JValue
   = JObj [(String, JValue)]
   | JArr [JValue]
   | JStr String
   | JNum Integer
+  | JReal Double
   | JBool Bool
   | JNull
   deriving (Eq, Show)
@@ -1180,12 +1188,20 @@ pArray s0 = case skipWs s0 of
         s2         -> Left ("expected ',' or ']' in array, got: " ++ take 30 s2)
 
 -- | Parses a string literal's BODY (the caller has already consumed the
--- opening quote), up to and including the closing quote.
+-- opening quote), up to and including the closing quote. JSON requires
+-- every control character (U+0000-U+001F) inside a string to be escaped —
+-- a raw one is a parse error, not silently accepted. A @\\u@ escape whose
+-- hex value is a UTF-16 high surrogate (U+D800-U+DBFF) must be immediately
+-- followed by a low-surrogate @\\u@ escape (U+DC00-U+DFFF); the pair is
+-- combined into the single astral 'Char' it encodes rather than kept as two
+-- lone surrogate code points (which corrupt on the way to a UTF-8 file).
 pStringLit :: String -> Either String (String, String)
 pStringLit = go id
   where
     go acc ('"' : rest)        = Right (acc [], rest)
     go acc ('\\' : c : rest)   = unescape c rest >>= \(ch, rest') -> go (acc . (ch :)) rest'
+    go _   (c : _) | c < '\x20' =
+      Left ("invalid control character in string literal: \\u" ++ pad4 (showHex (fromEnum c) ""))
     go acc (c : rest)          = go (acc . (c :)) rest
     go _   []                  = Left "unterminated string literal"
     unescape 'n' rest  = Right ('\n', rest)
@@ -1196,18 +1212,53 @@ pStringLit = go id
     unescape '/' rest  = Right ('/', rest)
     unescape 'b' rest  = Right ('\b', rest)
     unescape 'f' rest  = Right ('\f', rest)
-    unescape 'u' rest = case splitAt 4 rest of
-      (hex, rest') | length hex == 4, [(n, "")] <- readHex hex ->
-        Right (toEnum n, rest')
-      _ -> Left "bad \\u escape"
+    unescape 'u' rest = case readHex4 rest of
+      Just (n, rest')
+        | n >= 0xD800 && n <= 0xDBFF -> case rest' of
+            ('\\' : 'u' : rest2) -> case readHex4 rest2 of
+              Just (n2, rest2') | n2 >= 0xDC00 && n2 <= 0xDFFF ->
+                Right (toEnum (0x10000 + (n - 0xD800) * 0x400 + (n2 - 0xDC00)), rest2')
+              _ -> Left "invalid low surrogate following \\u high surrogate"
+            _ -> Left "unpaired \\u high surrogate (no following low surrogate)"
+        | n >= 0xDC00 && n <= 0xDFFF -> Left "unpaired \\u low surrogate (no preceding high surrogate)"
+        | otherwise -> Right (toEnum n, rest')
+      Nothing -> Left "bad \\u escape"
     unescape c _ = Left ("bad escape: \\" ++ [c])
+    readHex4 s = case splitAt 4 s of
+      (hex, rest') | length hex == 4, [(n, "")] <- readHex hex -> Just (n :: Int, rest')
+      _ -> Nothing
+    pad4 s' = replicate (4 - length s') '0' ++ s'
 
+-- | Full JSON number grammar: @-? int frac? exp?@. An integer-shaped literal
+-- (no @frac@/@exp@) stays an exact arbitrary-precision 'JNum'; one using
+-- either becomes a 'JReal' 'Double'. The unsigned mantissa/exponent digits
+-- are read with 'Numeric.readFloat' (which already implements this grammar)
+-- rather than 'read', since 'readFloat' takes no leading sign — the sign is
+-- peeled off and applied to the result, sidestepping any ambiguity in how a
+-- bare @read@ would handle a signed exponent.
 pNumber :: String -> Either String (JValue, String)
 pNumber s0 =
-  let (numStr, rest) = span (\c -> isDigit c || c == '-') s0
-  in if null numStr || numStr == "-"
+  let (sign, s1)        = case s0 of ('-' : r) -> ("-", r); _ -> ("", s0)
+      (intPart, s2)      = span isDigit s1
+      (fracPart, s3)     = case s2 of
+        ('.' : r) -> let (d, r') = span isDigit r
+                     in if null d then ("", s2) else ('.' : d, r')
+        _ -> ("", s2)
+      (expPart, s4)      = case s3 of
+        (e : r) | e == 'e' || e == 'E' ->
+          let (esign, r1) = case r of
+                (c : r') | c == '+' || c == '-' -> ([c], r')
+                _ -> ("", r)
+              (ed, r2) = span isDigit r1
+          in if null ed then ("", s3) else (e : esign ++ ed, r2)
+        _ -> ("", s3)
+  in if null intPart
        then Left ("expected a number, got: " ++ take 30 s0)
-       else Right (JNum (read numStr), rest)
+       else if null fracPart && null expPart
+              then Right (JNum (read (sign ++ intPart)), s4)
+              else case readFloat (intPart ++ fracPart ++ expPart) :: [(Double, String)] of
+                     [(d, "")] -> Right (JReal (if sign == "-" then negate d else d), s4)
+                     _         -> Left ("malformed number: " ++ take 30 s0)
 
 expectChar :: Char -> String -> Either String String
 expectChar c (x : xs) | x == c = Right xs
