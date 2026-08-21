@@ -50,6 +50,7 @@ fn usage() -> Usage {
         input_tokens: 100,
         output_tokens: 20,
         cached_input_tokens: None,
+        cache_write_tokens: None,
     }
 }
 

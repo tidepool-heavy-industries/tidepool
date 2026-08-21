@@ -173,6 +173,7 @@ fn record_edit_reply(note: &str) -> RecordedReply {
             input_tokens: 50,
             output_tokens: 10,
             cached_input_tokens: None,
+            cache_write_tokens: None,
         },
     }
 }
@@ -189,6 +190,7 @@ fn decl_reply(src: &str) -> RecordedReply {
             input_tokens: 50,
             output_tokens: 10,
             cached_input_tokens: None,
+            cache_write_tokens: None,
         },
     }
 }
@@ -206,6 +208,7 @@ fn helper_edit_reply(expr: &str) -> RecordedReply {
             input_tokens: 50,
             output_tokens: 10,
             cached_input_tokens: None,
+            cache_write_tokens: None,
         },
     }
 }
@@ -238,6 +241,7 @@ fn edit_reply(note: &str) -> RecordedReply {
             input_tokens: 50,
             output_tokens: 10,
             cached_input_tokens: None,
+            cache_write_tokens: None,
         },
     }
 }
@@ -394,6 +398,7 @@ async fn turn_record_delivers_directive_list_beside_closure() {
             input_tokens: 50,
             output_tokens: 10,
             cached_input_tokens: None,
+            cache_write_tokens: None,
         },
     };
     let provider: Arc<dyn DynModelProvider> = Arc::new(ReplayProvider::new(vec![reply]));
@@ -619,6 +624,7 @@ fn typed_reply(block: &str) -> RecordedReply {
             input_tokens: 50,
             output_tokens: 10,
             cached_input_tokens: None,
+            cache_write_tokens: None,
         },
     }
 }

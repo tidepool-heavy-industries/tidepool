@@ -790,12 +790,22 @@ async fn codex_responses(
         .find(|m| m.role != Role::System)
         .map(|m| m.content.as_str());
 
+    // Computed once and sent identically in both places — the official Codex
+    // client sends the same session identity as both the `session-id` header
+    // and the body's `prompt_cache_key` (`codex-rs`'s
+    // `core/tests/suite/prompt_cache_key.rs`, Apache-2.0). `prompt_cache_key`
+    // is the documented cache-routing parameter; `session-id` alone is not a
+    // publicly documented cache-shard key (see the module doc's verification
+    // discipline).
+    let session_id = session_id_for(&instructions, opening);
+    body["prompt_cache_key"] = serde_json::json!(session_id);
+
     let http = codex_http_streaming()?;
     let mut request = http
         .post(&url)
         .bearer_auth(token)
         .header("version", CODEX_CLIENT_VERSION)
-        .header("session-id", session_id_for(&instructions, opening))
+        .header("session-id", &session_id)
         .header("x-codex-installation-id", installation_id())
         .header(reqwest::header::ACCEPT, "text/event-stream");
     if let Some(account_id) = chatgpt_account_id(token) {
@@ -901,6 +911,13 @@ impl SseAcc {
                     // leaves this `None` — "not reported", never `0`.
                     self.usage.cached_input_tokens = u
                         .pointer("/input_tokens_details/cached_tokens")
+                        .and_then(|x| x.as_u64());
+                    // Same discipline for cache-write cost, reported
+                    // separately at `input_tokens_details.cache_write_tokens`
+                    // (verified against the OpenAI Responses API wire shape —
+                    // see this crate's CLAUDE.md).
+                    self.usage.cache_write_tokens = u
+                        .pointer("/input_tokens_details/cache_write_tokens")
                         .and_then(|x| x.as_u64());
                 }
                 self.completed_text = extract_output_text(v.pointer("/response/output"));
@@ -1094,6 +1111,33 @@ mod tests {
         assert_eq!(out.text, "Hello, world");
         assert_eq!(out.usage.input_tokens, 11);
         assert_eq!(out.usage.output_tokens, 3);
+    }
+
+    #[test]
+    fn parse_sse_captures_cache_write_tokens_when_reported() {
+        let sse = concat!(
+            "event: response.completed\n",
+            "data: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\":100,\"output_tokens\":10,",
+            "\"input_tokens_details\":{\"cached_tokens\":40,\"cache_write_tokens\":25}},",
+            "\"output\":[{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"hi\"}]}]}}\n",
+            "\n",
+        );
+        let out = parse_sse_response(sse).unwrap();
+        assert_eq!(out.usage.cached_input_tokens, Some(40));
+        assert_eq!(out.usage.cache_write_tokens, Some(25));
+    }
+
+    #[test]
+    fn parse_sse_leaves_cache_write_tokens_none_when_not_reported() {
+        let sse = concat!(
+            "event: response.completed\n",
+            "data: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\":100,\"output_tokens\":10},",
+            "\"output\":[{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"hi\"}]}]}}\n",
+            "\n",
+        );
+        let out = parse_sse_response(sse).unwrap();
+        assert_eq!(out.usage.cached_input_tokens, None);
+        assert_eq!(out.usage.cache_write_tokens, None);
     }
 
     #[test]

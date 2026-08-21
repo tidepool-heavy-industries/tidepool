@@ -68,6 +68,7 @@ fn prose(content: &str) -> RecordedReply {
             // The whole point of the receipt assertion below: the replay
             // provider reports NOTHING about caching, so this stays `None`.
             cached_input_tokens: None,
+            cache_write_tokens: None,
         },
     }
 }

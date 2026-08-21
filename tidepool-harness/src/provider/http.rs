@@ -76,6 +76,9 @@ pub(crate) fn to_turn_response(resp: ChatResponse) -> Result<TurnResponse, Provi
             .as_ref()
             .and_then(|d| d.cached_tokens)
             .map(|n| n.max(0) as u64),
+        // genai's `usage` surface carries no cache-write detail for this
+        // (chat/completions) path — always not-reported here.
+        cache_write_tokens: None,
     };
     // genai's chat/completions path carries no reasoning-summary stream.
     Ok(TurnResponse {

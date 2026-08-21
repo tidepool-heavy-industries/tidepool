@@ -372,6 +372,7 @@ mod tests {
                 input_tokens: 10,
                 output_tokens: 20,
                 cached_input_tokens: None,
+                cache_write_tokens: None,
             }),
         })
         .unwrap();

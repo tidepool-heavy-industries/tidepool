@@ -333,7 +333,12 @@ for a number that isn't there:
   `usage.prompt_tokens_details.cached_tokens` (`provider/http.rs`). A provider
   that reports nothing leaves it `None`. **`None` means NOT REPORTED and is
   serialized as an absent field — never `0`.** Nothing synthesizes it, and
-  prefix identity is never treated as evidence of a cache hit.
+  prefix identity is never treated as evidence of a cache hit. `Usage` also
+  carries `cache_write_tokens: Option<u64>` on the same discipline, from
+  `input_tokens_details.cache_write_tokens` — the OAuth `/responses` call now
+  also sends the body field `prompt_cache_key` (equal to the `session-id`
+  header value), matching the official Codex client's cache-routing contract;
+  `session_id_for`'s derivation is unchanged, only what carries its value.
 - There is no local tokenizer here, so a token-level split of a shared prefix
   is not claimed. What IS verifiable, and what the receipts carry:
   - the **digest** — the frozen prefix's identity, recomputable by anyone;
@@ -410,6 +415,16 @@ shares the parent's `session-id` for as long as that inherited message stays
 its first one — harmless (arguably a cache-affinity win, since both share the
 ancestor prefix) under `store: false`, where the header is routing/telemetry
 only, never persisted conversation state.
+
+**2026-08-20 follow-up:** `session-id` alone is a Codex protocol header, not
+the documented cache-routing control — that is the body parameter
+`prompt_cache_key`, and the official Codex client sends both with the same
+session identity. `codex_responses` now sends `prompt_cache_key` equal to
+`session_id_for`'s output alongside the unchanged `session-id` header;
+`session_id_for`'s own derivation is untouched. Separately, `Usage` now
+captures `cache_write_tokens` (from `input_tokens_details.cache_write_tokens`
+on the SSE usage object) alongside `cached_input_tokens`, so a cold-but-wrote-
+cache round is distinguishable from a wasted rewrite in the durable log.
 
 `SnapshotDigest`/`digest_prefix` are UNCHANGED by this fix — they cover only
 `role_tag` + `content` over `assemble_request`'s output (`snapshot.rs`'s

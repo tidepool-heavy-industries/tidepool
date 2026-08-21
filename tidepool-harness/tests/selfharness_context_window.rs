@@ -93,6 +93,7 @@ impl ModelProvider for ContextCapturingProvider {
                 input_tokens: 20,
                 output_tokens: 5,
                 cached_input_tokens: None,
+                cache_write_tokens: None,
             },
             reasoning: None,
             reasoning_items: Vec::new(),

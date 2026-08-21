@@ -110,6 +110,7 @@ fn build_replay_log(path: &Path, replies: u64) {
                     input_tokens: 50,
                     output_tokens: 10,
                     cached_input_tokens: None,
+                    cache_write_tokens: None,
                 }),
                 reasoning: None,
             })

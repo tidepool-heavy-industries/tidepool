@@ -83,6 +83,7 @@ fn reply(block: &str) -> RecordedReply {
             input_tokens: 50,
             output_tokens: 10,
             cached_input_tokens: None,
+            cache_write_tokens: None,
         },
     }
 }
@@ -308,6 +309,7 @@ async fn branch_child_that_exhausts_its_rounds_folds_as_data_without_erasing_its
             input_tokens: 50,
             output_tokens: 10,
             cached_input_tokens: None,
+            cache_write_tokens: None,
         },
     };
     let replies = vec![

@@ -127,6 +127,7 @@ impl ModelProvider for InPlaceProbeProvider {
                     input_tokens: 20,
                     output_tokens: 5,
                     cached_input_tokens: None,
+                    cache_write_tokens: None,
                 },
                 reasoning: None,
                 reasoning_items: Vec::new(),
@@ -157,6 +158,7 @@ impl ModelProvider for InPlaceProbeProvider {
                 input_tokens: 600,
                 output_tokens: 50,
                 cached_input_tokens: None,
+                cache_write_tokens: None,
             },
             reasoning: None,
             reasoning_items: Vec::new(),
@@ -292,6 +294,7 @@ impl ModelProvider for MultiRoundProvider {
                     input_tokens: self.per_round_input,
                     output_tokens: 5,
                     cached_input_tokens: None,
+                    cache_write_tokens: None,
                 },
                 reasoning: None,
                 reasoning_items: Vec::new(),
@@ -303,6 +306,7 @@ impl ModelProvider for MultiRoundProvider {
             input_tokens: self.per_round_input,
             output_tokens: 20,
             cached_input_tokens: None,
+            cache_write_tokens: None,
         };
         if is_second {
             // The second hole finalizes immediately.

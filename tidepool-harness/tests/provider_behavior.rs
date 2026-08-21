@@ -673,6 +673,39 @@ async fn oauth_provider_session_id_header_is_present_stable_and_distinct_across_
     );
 }
 
+/// Alignment with the official Codex client's cache-routing contract: the
+/// request body's `prompt_cache_key` must equal the `session-id` header on
+/// the SAME request — the official client sends both with the same session
+/// identity (`codex-rs`'s `core/tests/suite/prompt_cache_key.rs`).
+#[tokio::test]
+async fn oauth_provider_request_body_prompt_cache_key_matches_session_id_header() {
+    let chat_server = MockServer::start();
+    chat_server.queue_raw("POST", "/responses", 200, responses_sse_body("pong", 3, 1));
+
+    let dir = tempfile::tempdir().unwrap();
+    let token_path = dir.path().join("token.json");
+    write_token(&token_path, &jwt_with_account_id("acct-1"), "rt", 3600);
+    let cfg = oauth_cfg_for_mock(&chat_server, "http://127.0.0.1:1/", token_path);
+    let provider = OauthProvider::new(cfg);
+
+    provider
+        .complete(sample_req(), None)
+        .await
+        .expect("turn completes");
+
+    let session_id = chat_server
+        .header_seen("POST", "/responses", "session-id")
+        .expect("session-id header must be present");
+    let body = chat_server
+        .body_seen("POST", "/responses")
+        .expect("request landed");
+    assert_eq!(
+        body["prompt_cache_key"],
+        serde_json::Value::String(session_id),
+        "body's prompt_cache_key must equal the session-id header value"
+    );
+}
+
 /// Token persistence lands at the config-dir/secrets convention with 0600
 /// perms — the same path `complete_login` writes to after the loopback
 /// callback exchange.

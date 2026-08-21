@@ -93,6 +93,7 @@ fn sample_events() -> Vec<Event> {
                 input_tokens: 120,
                 output_tokens: 8,
                 cached_input_tokens: None,
+                cache_write_tokens: None,
             }),
             reasoning: Some("checking both verdicts agree".to_string()),
         },
@@ -148,6 +149,7 @@ fn turn_delta_log_line_is_byte_identical_regardless_of_reasoning_items() {
             input_tokens: 120,
             output_tokens: 8,
             cached_input_tokens: None,
+            cache_write_tokens: None,
         },
         reasoning: Some("checking both verdicts agree".to_string()),
         reasoning_items: Vec::new(),
@@ -159,6 +161,7 @@ fn turn_delta_log_line_is_byte_identical_regardless_of_reasoning_items() {
             input_tokens: 120,
             output_tokens: 8,
             cached_input_tokens: None,
+            cache_write_tokens: None,
         },
         reasoning: Some("checking both verdicts agree".to_string()),
         reasoning_items: vec![ReasoningItem(json!({

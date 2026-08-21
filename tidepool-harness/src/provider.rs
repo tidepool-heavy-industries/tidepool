@@ -95,6 +95,20 @@ pub struct Usage {
     /// existed still deserialize, as `None`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cached_input_tokens: Option<u64>,
+    /// How many of `input_tokens` the provider WROTE to its own prompt cache
+    /// this turn (as opposed to read from it — see `cached_input_tokens`),
+    /// when the response genuinely reports that number. Same discipline as
+    /// `cached_input_tokens`: `None` means NOT REPORTED, never `0`, and is
+    /// never synthesized or inferred. Populated only from
+    /// `input_tokens_details.cache_write_tokens` on the Responses-API SSE
+    /// usage object (`provider/oauth.rs`) — the OpenAI backend charges and
+    /// reports cache writes separately from cache reads, so this is what
+    /// distinguishes "cold but wrote useful cache" from "repeatedly rewrote
+    /// unique, never-reused prefixes."
+    ///
+    /// Additive + `serde(default)`, same precedent as `cached_input_tokens`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_write_tokens: Option<u64>,
 }
 
 /// One incremental piece of a streaming turn, pushed to a [`StreamSink`] as the
@@ -211,6 +225,20 @@ mod tests {
         );
         assert!(!plain_json.contains("reasoning_items"));
         assert!(!plain_json.contains("encrypted"));
+    }
+
+    /// `cache_write_tokens` is additive + `serde(default)` — a `Usage`
+    /// serialized before the field existed (no `cached_input_tokens` either,
+    /// matching the oldest on-disk shape) must still deserialize, landing
+    /// both new-ish fields as `None`.
+    #[test]
+    fn usage_deserializes_from_pre_cache_write_tokens_wire_shape() {
+        let old = serde_json::json!({"input_tokens": 7, "output_tokens": 2});
+        let usage: Usage = serde_json::from_value(old).expect("old Usage shape must deserialize");
+        assert_eq!(usage.input_tokens, 7);
+        assert_eq!(usage.output_tokens, 2);
+        assert_eq!(usage.cached_input_tokens, None);
+        assert_eq!(usage.cache_write_tokens, None);
     }
 
     #[test]

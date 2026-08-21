@@ -101,6 +101,7 @@ impl ModelProvider for NeverFinalizeProvider {
                 input_tokens: 10,
                 output_tokens: 2,
                 cached_input_tokens: None,
+                cache_write_tokens: None,
             },
             reasoning: None,
             reasoning_items: Vec::new(),

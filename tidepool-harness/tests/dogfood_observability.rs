@@ -99,6 +99,7 @@ fn bad_finalize_reply() -> RecordedReply {
             input_tokens: 50,
             output_tokens: 10,
             cached_input_tokens: None,
+            cache_write_tokens: None,
         },
     }
 }
@@ -116,6 +117,7 @@ fn good_finalize_reply() -> RecordedReply {
             input_tokens: 55,
             output_tokens: 12,
             cached_input_tokens: None,
+            cache_write_tokens: None,
         },
     }
 }
