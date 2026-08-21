@@ -354,6 +354,19 @@ branch's FIRST turn (one-shot). The `Usage` widening is additive +
 `serde(default)` — the precedent is `Event::TurnDelta`'s `reasoning` — so
 `log.jsonl` files written before it still deserialize.
 
+**Per-round usage lives on `Event::TurnDelta.usage: Option<Usage>` (nested,
+NOT a top-level key) — every assistant turn, not just a branch's first one.**
+`BranchInvocation` above is a one-shot receipt scoped to a snapshot-forked
+branch's opening turn; `TurnDelta.usage` is written by every model round
+(`Harness::drive_turn`/`summarize_turn`/`drive_answerer_to_value`), including
+corrective-retry and answerer-loop rounds, so within-window round-to-round
+cache ratios are already computable from any `log-*.jsonl`:
+`jq -c 'select(.event.ev=="turn_delta" and .event.usage != null) |
+{node: .event.node, turn: .event.turn, ratio: ((.event.usage.cached_input_tokens
+// 0) / .event.usage.input_tokens)}' log-*.jsonl`. Look under `.event.usage`,
+not a flat `.event.cached_input_tokens` — that top-level shape only exists on
+`BranchInvocation` lines.
+
 #### Within-window round-to-round cache affinity (fixed 2026-08-20)
 
 Run-4's dogfood measurement showed only 45% of input tokens served from

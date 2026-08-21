@@ -23,8 +23,8 @@ use std::sync::Arc;
 
 use serde_json::json;
 use tidepool_harness::engine::EngineConfig;
-use tidepool_harness::log::{Actor, LogHeader, LogWriter};
-use tidepool_harness::provider::{DynModelProvider, Usage};
+use tidepool_harness::log::{Actor, Event, LogHeader, LogReader, LogWriter};
+use tidepool_harness::provider::{DynModelProvider, Role, Usage};
 use tidepool_harness::replay::{fold_tree_state, RecordedReply, ReplayProvider};
 use tidepool_harness::tree::{NodeId, NodeState};
 use tidepool_harness::Harness;
@@ -168,6 +168,41 @@ async fn golden_path_record_replay() {
         Some(NodeState::Done),
         "the program completes after the operator confirms"
     );
+
+    // --- per-round usage lands on TurnDelta, every assistant turn --------------
+    // Not just a branch's first turn (`Event::BranchInvocation`): each of the
+    // 3 scripted assistant replies above must carry the provider's own
+    // `Usage` on its own `Event::TurnDelta`, so a within-window round 2/3
+    // (the fork answerer's ill-typed retry and its correction) is just as
+    // measurable as round 1.
+    let (_, events) = LogReader::open(&log_path).expect("open log for usage check");
+    let assistant_usages: Vec<Option<Usage>> = events
+        .collect::<Result<Vec<_>, _>>()
+        .expect("read all events")
+        .into_iter()
+        .filter_map(|record| match record.event {
+            Event::TurnDelta {
+                role: Role::Assistant,
+                usage,
+                ..
+            } => Some(usage),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        assistant_usages.len(),
+        3,
+        "one TurnDelta per scripted assistant reply (root do-block, ill-typed \
+         retry, corrected answer)"
+    );
+    for (i, u) in assistant_usages.iter().enumerate() {
+        assert_eq!(
+            *u,
+            Some(usage()),
+            "assistant turn {i} must carry the provider's Usage on its own \
+             TurnDelta, not just the branch's first turn"
+        );
+    }
 
     // --- crash-replay + record-replay round-trip -----------------------------
     let folded = fold_tree_state(&log_path).expect("fold the log");

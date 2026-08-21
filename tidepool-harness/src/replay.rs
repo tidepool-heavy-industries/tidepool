@@ -79,6 +79,23 @@ impl ReplayProvider {
                     node,
                     turn,
                     content,
+                    // DEFERRED, not fixed: a recorded `None` here means the
+                    // source log genuinely has no usage for this turn, and
+                    // per the cache-metric-gap discipline
+                    // (tidepool-harness/CLAUDE.md) that should replay as
+                    // `None`, not a fabricated zero. It can't today —
+                    // `RecordedReply.usage`/`TurnResponse.usage` are bare
+                    // `Usage`, so purifying this one call site needs
+                    // `TurnResponse.usage: Option<Usage>` threaded through
+                    // ~19 construction sites (every mock `ModelProvider` in
+                    // tests, plus oauth.rs/http.rs) and every unconditional
+                    // `driven.usage` read in harness.rs's accounting. Left
+                    // as `unwrap_or_default()` because the branch is
+                    // UNREACHABLE from any log this codebase actually
+                    // writes: every live write site logs
+                    // `Some(driven.usage)` unconditionally, so a real
+                    // recorded assistant `TurnDelta.usage` is never `None`
+                    // — only a hand-built test fixture can hit this.
                     usage: usage.unwrap_or_default(),
                 });
             }
