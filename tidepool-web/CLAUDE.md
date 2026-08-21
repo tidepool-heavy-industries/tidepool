@@ -3,11 +3,18 @@
 Built on the **minimal node model**: N registered nodes in a tree
 (slash-separated `node_id` paths, convention = wire-carried branch labels),
 where each node is one lifecycle — a **seed** prompt in, an append-only
-**timeline** of notes and asks, a **final value** (or **failure**) out. The
-page is ONE OUTLINE: every node renders as its own always-visible section,
-indented by path depth, sorted path-lexicographically with the default node
-pinned first. Nothing harness-specific appears in the UI schema — companion
-drafts, tensions, and synthesis all flow through those channels as content.
+**timeline** of notes and asks, a **final value** (or **failure**) out.
+Nothing harness-specific appears in the UI schema — companion drafts,
+tensions, and synthesis all flow through those channels as content.
+
+**Two views over that one model**, both live via the same `/sse` stream:
+
+- **`/`** — a zoomable/pannable **d3 tree** ([`tree`] module): one
+  status-colored circle per node, laid out by `d3.hierarchy`/`d3.tree`.
+  Clicking a node opens its full panel in a side pane.
+- **`/legacy`** — the ORIGINAL OUTLINE ([`shell`] module): every node renders
+  as its own always-visible section, indented by path depth, sorted
+  path-lexicographically with the default node pinned first.
 
 This crate is the web implementation of
 `tidepool_harness::selfharness::operator::OperatorGate` — the seam the
@@ -19,14 +26,30 @@ default methods (`node_gate`, `retire_node`, `node_seeded`,
 
 - `server.rs` — axum [`router`], the SSE broadcast stream, [`AppState`] (the
   node registry: per-node seed/timeline/final/failure state), and
-  [`WebGate`]: the `OperatorGate` impl, bound to one node.
+  [`WebGate`]: the `OperatorGate` impl, bound to one node. Also the `/`,
+  `/legacy`, `/api/tree`, and `/node/{node}/panel` route handlers.
 - `render.rs` — [`NodeView`]/[`TimelineEntry`] → one node's
   `id="panel-<node>"` section: header (full path + collapse toggle + derived
   status badge), collapsed seed `<details>`, the timeline in chronological
   order, failure/final-value blocks, the turn-source history pane. Markup
-  and CSS are free to change; the wire contract below is not.
-- `shell.rs` — the full HTML document: inline CSS + the vendored client JS +
-  the `#tree` outline of stable `.node-slot` wrappers, no CDN, no build step.
+  and CSS are free to change; the wire contract below is not. Also
+  [`render::status`] (the SAME derivation the `/api/tree` JSON reuses) and
+  [`render::parent_id`] (slash-path parent derivation, for the tree JSON's
+  `parent` field).
+- `shell.rs` — `/legacy`'s full HTML document: inline CSS + [`shell::CORE_JS`]
+  (the vendored client plumbing — `collect`/`post`/`validateRequired`/
+  `toast`/`applyPatch`/`mountPanel` — shared VERBATIM with the tree view) +
+  [`shell::JS`] (this page's own SSE-apply glue) + the `#tree` outline of
+  stable `.node-slot` wrappers. No CDN, no build step.
+- `tree.rs` — `/`'s full HTML document: a d3-hierarchy tree canvas (`#tree-canvas`)
+  + a side pane (`#side-pane`), embedding [`shell::CSS`] (the side pane
+  renders the SAME node-panel markup as `/legacy`, so it needs those same
+  rules) plus [`tree::TREE_CSS`], and [`shell::CORE_JS`] plus this page's own
+  [`tree::TREE_JS`] (the d3 rendering: `d3.stratify`/`d3.tree` layout,
+  `d3.linkHorizontal` links, `d3.zoom` pan/zoom, a keyed `enter`/`update`/
+  `exit` join, refetching `/api/tree` on every `/sse` tick). Also vendors and
+  serves d3 v7.9.0 ([`tree::D3_JS`] at [`tree::D3_ASSET_PATH`] —
+  `assets/d3.v7.9.0.min.js`, upstream `https://d3js.org`, no CDN at runtime).
 - `lib.rs` — `spawn_operator_server_multi(port)`: binds `127.0.0.1:<port>`,
   spawns the axum server on a background task, and returns `(AppState,
   Arc<WebGate>)`; `spawn_operator_server(port)` keeps only the default
@@ -42,7 +65,14 @@ default methods (`node_gate`, `retire_node`, `node_seeded`,
 - `tests/operator_gate.rs` — the HTTP-level integration test: boots the real
   router with `axum::serve` on an ephemeral port and drives it with a real
   client, across multiple nodes, stacked asks, the lifecycle fields, and the
-  late-registration SSE path.
+  late-registration SSE path. Page-markup fetches target `/legacy` (the
+  outline's address since the tree view took over `/`).
+- `tests/tree_view.rs` — the tree view's own HTTP-level integration test:
+  `/` serves the shell with the vendored d3 route wired, `/api/tree` reports
+  correct ids/parent links/statuses (including a pending-ask "needs you"
+  case), `/node/{node}/panel` serves the exact fragment bytes the SSE stream
+  carries (percent-encoded for a slash-path node id, 404 for an unregistered
+  one), and `/legacy` still serves the outline.
 - `formapi.rs` + `tests/form_api.rs` — the testing-convenience `GET`/`POST
   /node/{node}/api/form` surface: a second front door onto the SAME per-node
   pending state, never a second gate. See "Testing convenience" below.
@@ -128,6 +158,35 @@ Don't assert on class names, colors, or element nesting anywhere in this
 crate's tests — those are `render.rs`/`shell.rs`'s to change freely as long
 as the above holds.
 
+## The tree view's two data doors: `/api/tree` and `/node/{node}/panel`
+
+`/` never reads server-rendered node data inline in the page HTML — its own
+JS fetches both routes below, same as any other client of this surface
+would:
+
+- **`GET /api/tree`** — `[{id, path, parent, title, status, rev}, ...]`, one
+  entry per registered node, in the same display order the outline uses.
+  `id`/`path` are the node id verbatim; `parent` is derived purely from the
+  id's slash path ([`render::parent_id`] — `None`/`null` for a root, INCLUDING
+  a top-level id registered with no natural parent at all, e.g. a bare `n1`);
+  `title` is the truncated display label ([`render::truncate_title`]) the
+  outline's `<h2>` also uses; `status` is the SAME class token
+  ([`render::status`]) `node_panel`'s status badge derives — the tree view
+  and the outline can never disagree about what "needs you" means, because
+  there is exactly one status function. The client's `d3.stratify` call
+  synthesizes one invisible super-root parenting every null-parent node, so
+  multiple independent top-level ids (a "forest", not just one tree) never
+  trip stratify's single-root requirement.
+- **`GET /node/{node}/panel`** — one node's `id="panel-<node_id>"` fragment,
+  standalone: the EXACT bytes [`AppState::node_panel_html`] also hands the
+  SSE stream. The tree view's side pane loads a clicked node's panel through
+  this route on open, then relies on the ordinary `/sse` stream (via the
+  shared `applyPatch`) to keep it current afterward — one rendering path, two
+  ways to receive it. A node id containing a literal `/` is percent-encoded
+  as a single path segment, same discipline as `/node/{node}/submit/{...}`
+  (axum matches `{node}` as one segment; a raw slash 404s before any handler
+  runs).
+
 ## Testing convenience: the form API (`formapi.rs`)
 
 `GET`/`POST /node/{node}/api/form`, mounted alongside the browser verbs by
@@ -166,3 +225,13 @@ still derived from a type's own `Generic` metadata, and `node_id` is always
 a substrate identifier carried on the wire (never parsed out of a prompt).
 A change that renders model text as markup, or accepts model-authored ids,
 needs a new injection-surface story first.
+
+**The same rule, in d3 terms.** [`tree::TREE_JS`] draws every node label with
+`selection.text(...)` — never `.html()`/`.innerHTML` on a live, mounted DOM
+node. The one place it parses server HTML text at all (`openPanel`, loading
+a node's panel into the side pane) uses the same detached-`<template>`
+parse-then-move idiom [`shell::CORE_JS`]'s `applyPatch` already uses for SSE
+frames: the fragment is already maud-escaped, server-rendered markup (this
+same injection story, applied once, in `render.rs`), so parsing it into DOM
+nodes is not a second place that needs to reason about escaping — a NEW
+place that assigns fetched/model text as markup on a live element would be.

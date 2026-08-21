@@ -8,6 +8,11 @@
 //! root, `data-bind`/`data-kind`, `@post` targets, and JSON bodies) — never
 //! on visual markup, since `render.rs`/`shell.rs` are under concurrent
 //! redesign.
+//!
+//! The outline page moved from `/` to `/legacy` (`/` now serves the d3 tree
+//! view — see `tests/tree_view.rs`); every page-markup fetch in this file
+//! targets `/legacy` accordingly. The rest of the wire (submit/continue
+//! verbs, SSE) is untouched.
 
 use std::net::SocketAddr;
 use std::time::Duration;
@@ -106,7 +111,7 @@ async fn submit_resolves_present_form_with_exact_submission() {
     let handle = tokio::task::spawn_blocking(move || driver_gate.present_form(&sample_spec()));
 
     // The pending form shows up on the page, wired for the two fields.
-    let html = wait_for(&client, &format!("{base}/"), |b| {
+    let html = wait_for(&client, &format!("{base}/legacy"), |b| {
         b.contains("data-bind=\"answer.mood\"")
     })
     .await;
@@ -141,7 +146,7 @@ async fn continue_resolves_await_continue() {
     let driver_gate = gate.clone();
     let handle = tokio::task::spawn_blocking(move || driver_gate.await_continue());
 
-    let html = wait_for(&client, &format!("{base}/"), |b| {
+    let html = wait_for(&client, &format!("{base}/legacy"), |b| {
         b.contains("/node/n1/continue/")
     })
     .await;
@@ -178,7 +183,7 @@ async fn continue_with_input_carries_the_operator_message() {
     let driver_gate = gate.clone();
     let handle = tokio::task::spawn_blocking(move || driver_gate.await_continue());
 
-    let html = wait_for(&client, &format!("{base}/"), |b| {
+    let html = wait_for(&client, &format!("{base}/legacy"), |b| {
         b.contains("/node/n1/continue/")
     })
     .await;
@@ -295,7 +300,7 @@ async fn submit_with_non_object_body_is_rejected() {
     let gate = state.register_node("n1");
     let driver_gate = gate.clone();
     let handle = tokio::task::spawn_blocking(move || driver_gate.present_form(&sample_spec()));
-    let html = wait_for(&client, &format!("{base}/"), |b| {
+    let html = wait_for(&client, &format!("{base}/legacy"), |b| {
         b.contains("data-bind=\"answer.mood\"")
     })
     .await;
@@ -338,7 +343,7 @@ async fn submit_with_absent_body_is_rejected_and_pending_ask_survives() {
     let gate = state.register_node("n1");
     let driver_gate = gate.clone();
     let handle = tokio::task::spawn_blocking(move || driver_gate.present_form(&sample_spec()));
-    let html = wait_for(&client, &format!("{base}/"), |b| {
+    let html = wait_for(&client, &format!("{base}/legacy"), |b| {
         b.contains("data-bind=\"answer.mood\"")
     })
     .await;
@@ -377,7 +382,7 @@ async fn submit_with_malformed_json_is_rejected() {
     let gate = state.register_node("n1");
     let driver_gate = gate.clone();
     let handle = tokio::task::spawn_blocking(move || driver_gate.present_form(&sample_spec()));
-    let html = wait_for(&client, &format!("{base}/"), |b| {
+    let html = wait_for(&client, &format!("{base}/legacy"), |b| {
         b.contains("data-bind=\"answer.mood\"")
     })
     .await;
@@ -435,7 +440,7 @@ async fn submit_bare_key_missing_bind_prefix_names_the_expected_path() {
     let gate = state.register_node("n1");
     let driver_gate = gate.clone();
     let handle = tokio::task::spawn_blocking(move || driver_gate.present_form(&shape));
-    let html = wait_for(&client, &format!("{base}/"), |b| {
+    let html = wait_for(&client, &format!("{base}/legacy"), |b| {
         b.contains("data-bind=\"answer.seedQuestion\"")
     })
     .await;
@@ -485,7 +490,7 @@ async fn submit_missing_or_wrong_typed_leaf_is_rejected() {
     let gate = state.register_node("n1");
     let driver_gate = gate.clone();
     let handle = tokio::task::spawn_blocking(move || driver_gate.present_form(&sample_spec()));
-    let html = wait_for(&client, &format!("{base}/"), |b| {
+    let html = wait_for(&client, &format!("{base}/legacy"), |b| {
         b.contains("data-bind=\"answer.mood\"")
     })
     .await;
@@ -533,7 +538,7 @@ async fn mismatched_verb_preserves_pending_interaction() {
     let gate = state.register_node("n1");
     let driver_gate = gate.clone();
     let handle = tokio::task::spawn_blocking(move || driver_gate.present_form(&sample_spec()));
-    let html = wait_for(&client, &format!("{base}/"), |b| {
+    let html = wait_for(&client, &format!("{base}/legacy"), |b| {
         b.contains("data-bind=\"answer.mood\"")
     })
     .await;
@@ -558,7 +563,7 @@ async fn mismatched_verb_preserves_pending_interaction() {
 
     // ...and the original form must still be pending, not dropped.
     let html = client
-        .get(format!("{base}/"))
+        .get(format!("{base}/legacy"))
         .send()
         .await
         .unwrap()
@@ -591,7 +596,7 @@ async fn stale_interaction_after_resolution_is_rejected() {
     let gate = state.register_node("n1");
     let driver_gate = gate.clone();
     let handle = tokio::task::spawn_blocking(move || driver_gate.present_form(&sample_spec()));
-    let html = wait_for(&client, &format!("{base}/"), |b| {
+    let html = wait_for(&client, &format!("{base}/legacy"), |b| {
         b.contains("data-bind=\"answer.mood\"")
     })
     .await;
@@ -635,7 +640,7 @@ async fn two_nodes_with_pending_forms_resolve_independently_in_either_order() {
     let handle_a = tokio::task::spawn_blocking(move || gate_a.present_form(&sample_spec()));
     let handle_b = tokio::task::spawn_blocking(move || gate_b.present_form(&sample_spec()));
 
-    let html = wait_for(&client, &format!("{base}/"), |b| {
+    let html = wait_for(&client, &format!("{base}/legacy"), |b| {
         b.contains("/node/alpha/submit/") && b.contains("/node/beta/submit/")
     })
     .await;
@@ -662,7 +667,7 @@ async fn two_nodes_with_pending_forms_resolve_independently_in_either_order() {
 
     // alpha is still pending and unaffected.
     let html = client
-        .get(format!("{base}/"))
+        .get(format!("{base}/legacy"))
         .send()
         .await
         .unwrap()
@@ -702,7 +707,7 @@ async fn two_concurrent_asks_on_one_node_both_render_and_resolve() {
     let g2 = gate.clone();
     let handle2 = tokio::task::spawn_blocking(move || g2.present_form(&sample_spec()));
 
-    let html = wait_for(&client, &format!("{base}/"), |b| {
+    let html = wait_for(&client, &format!("{base}/legacy"), |b| {
         all_post_urls(b, "/node/n1/submit/").len() == 2
     })
     .await;
@@ -725,7 +730,7 @@ async fn two_concurrent_asks_on_one_node_both_render_and_resolve() {
 
     // The first ask is STILL pending (not dropped by resolving its sibling).
     let html = client
-        .get(format!("{base}/"))
+        .get(format!("{base}/legacy"))
         .send()
         .await
         .unwrap()
@@ -779,7 +784,7 @@ async fn post_note_appears_above_the_pending_form_in_post_order() {
     let driver_gate = gate.clone();
     let handle = tokio::task::spawn_blocking(move || driver_gate.present_form(&sample_spec()));
 
-    let html = wait_for(&client, &format!("{base}/"), |b| {
+    let html = wait_for(&client, &format!("{base}/legacy"), |b| {
         b.contains("data-bind=\"answer.mood\"")
     })
     .await;
@@ -824,7 +829,7 @@ async fn notes_and_answered_continue_persist_across_the_loop_boundary() {
 
     let driver_gate = gate.clone();
     let handle = tokio::task::spawn_blocking(move || driver_gate.await_continue());
-    let html = wait_for(&client, &format!("{base}/"), |b| {
+    let html = wait_for(&client, &format!("{base}/legacy"), |b| {
         b.contains("/node/n1/continue/")
     })
     .await;
@@ -846,7 +851,7 @@ async fn notes_and_answered_continue_persist_across_the_loop_boundary() {
     );
 
     let html = client
-        .get(format!("{base}/"))
+        .get(format!("{base}/legacy"))
         .send()
         .await
         .unwrap()
@@ -883,7 +888,7 @@ async fn slash_path_node_submits_through_its_own_baked_url() {
     let driver_gate = gate.clone();
     let handle = tokio::task::spawn_blocking(move || driver_gate.present_form(&sample_spec()));
 
-    let html = wait_for(&client, &format!("{base}/"), |b| {
+    let html = wait_for(&client, &format!("{base}/legacy"), |b| {
         b.contains("/node/root%2F1-finishes/submit/")
     })
     .await;
@@ -919,7 +924,7 @@ async fn seed_and_final_value_render_on_the_nodes_section() {
     default_gate.node_finalized("root/1-x", "{\"tag\":\"FinishLayer\"}");
 
     let html = client
-        .get(format!("{base}/"))
+        .get(format!("{base}/legacy"))
         .send()
         .await
         .unwrap()
@@ -952,7 +957,7 @@ async fn post_turn_source_accumulates_a_history() {
     gate.post_turn_source("finalize @Decision Reject");
 
     let html = client
-        .get(format!("{base}/"))
+        .get(format!("{base}/legacy"))
         .send()
         .await
         .unwrap()

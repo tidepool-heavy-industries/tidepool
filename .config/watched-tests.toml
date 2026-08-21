@@ -20,8 +20,9 @@
 # in sync with .config/nextest.toml's per-binary exceptions):
 #   tidepool-harness/provider_behavior — the sole quick-tier exception
 #     (pure-Rust, no extract/Harness use); already runs on every quick check.
-#   tidepool-web/operator_gate, tidepool-web/form_api — pure HTTP/SSE tests
-#     that already run in the quick tier; only crash_recovery is GHC-heavy.
+#   tidepool-web/operator_gate, tidepool-web/form_api, tidepool-web/tree_view
+#     — pure HTTP/SSE tests that already run in the quick tier; only
+#     crash_recovery is GHC-heavy.
 
 [tidepool-harness]
 acceptance_askuser = "answerer askUser @T operator-form round-trip"

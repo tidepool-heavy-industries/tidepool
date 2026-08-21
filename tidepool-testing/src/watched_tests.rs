@@ -27,7 +27,7 @@ mod tests {
         ("tidepool-repl", &[]),
         ("tidepool-mcp", &[]),
         ("tidepool-testing", &[]),
-        ("tidepool-web", &["operator_gate", "form_api"]),
+        ("tidepool-web", &["operator_gate", "form_api", "tree_view"]),
     ];
 
     /// Test targets declared via Cargo.toml `[[test]] path = ...` that fall

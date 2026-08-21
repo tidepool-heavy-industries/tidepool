@@ -9,12 +9,22 @@
 //!
 //! # Verbs
 //!
-//! - `GET  /` — the operator page: every registered node as one outline
-//!   section, sorted by path (the default node pinned first).
+//! - `GET  /` — the d3 tree view ([`crate::tree`]): every registered node as
+//!   a status-colored circle, laid out by `d3.hierarchy`/`d3.tree`, panned
+//!   and zoomed with `d3.zoom`; clicking a node opens its full panel in a
+//!   side pane.
+//! - `GET  /legacy` — the original operator page: every registered node as
+//!   one outline section, sorted by path (the default node pinned first).
+//! - `GET  /api/tree` — `[{id, path, parent, title, status, rev}, ...]`, the
+//!   tree view's JSON data source (see [`AppState::tree_snapshot`]).
+//! - `GET  /node/{node}/panel` — one node's `id="panel-<node>"` fragment,
+//!   standalone — the tree view's side pane loads a clicked node's panel
+//!   through this route, the exact bytes the SSE stream patches.
 //! - `GET  /sse` — Datastar `patch-elements` stream, one frame per node-scoped
 //!   state change, each replacing that node's `#panel-<node>` in place (the
-//!   client MOUNTS a panel it has never seen into the tree — a node born
-//!   after page load appears live).
+//!   `/legacy` client MOUNTS a panel it has never seen into the tree — a node
+//!   born after page load appears live; the tree view refetches `/api/tree`
+//!   on every frame instead).
 //! - `POST /node/{node}/submit/{interaction}` — resolve one pending form
 //!   (identified by its own interaction id, the "nonce" an ask is addressed
 //!   by) with a flat `{key: scalar}` body; unparks the matching
@@ -402,11 +412,40 @@ impl AppState {
     }
 
     /// Render one node's `id="panel-<node>"` fragment, or `None` if the node
-    /// isn't registered.
+    /// isn't registered. Shared by the SSE stream and `GET
+    /// /node/{node}/panel` (the tree view's side pane) — the exact same
+    /// bytes both ways.
     fn node_panel_html(&self, node_id: &str) -> Option<String> {
         let reg = self.registry.lock();
         let slot = reg.nodes.get(node_id)?;
         Some(render::node_panel(&slot.view(node_id)).into_string())
+    }
+
+    /// The `GET /api/tree` snapshot: one entry per registered node, in the
+    /// same display order the outline uses, each carrying the SAME derived
+    /// `status` [`render::status`] computes for `node_panel` — the tree view
+    /// and the `/legacy` outline never disagree about what "needs you"
+    /// means. `parent` is derived purely from the node id's slash path
+    /// ([`render::parent_id`]), `null` for a root.
+    fn tree_snapshot(&self) -> Vec<Jv> {
+        let reg = self.registry.lock();
+        let mut ids: Vec<&NodeId> = reg.order.iter().collect();
+        ids.sort_by(|a, b| node_order(a).cmp(&node_order(b)));
+        ids.into_iter()
+            .map(|id| {
+                let slot = &reg.nodes[id];
+                let view = slot.view(id);
+                let (status_class, _label) = render::status(&view);
+                json!({
+                    "id": id,
+                    "path": id,
+                    "parent": render::parent_id(id),
+                    "title": render::truncate_title(id),
+                    "status": status_class,
+                    "rev": slot.rev,
+                })
+            })
+            .collect()
     }
 
     /// The full page: every registered node's section, in display order.
@@ -938,9 +977,19 @@ pub fn router(state: AppState) -> Router {
 /// Build the axum router, optionally mounting the form-api testing surface
 /// (`crate::formapi`) alongside the browser verbs. See that module's docs
 /// for the hardening properties `form_api` gates.
+///
+/// `/` serves the d3 tree view ([`crate::tree::tree_page`]); the original
+/// outline moved VERBATIM to `/legacy` ([`legacy_page`]). `/api/tree` and
+/// `/node/{node}/panel` are the tree view's two data doors onto the SAME
+/// registry state `/legacy` and `/sse` already read — no second source of
+/// truth.
 pub fn router_with_form_api(state: AppState, form_api: FormApiConfig) -> Router {
     let base: Router<AppState> = Router::new()
-        .route("/", get(page))
+        .route("/", get(tree_shell))
+        .route("/legacy", get(legacy_page))
+        .route("/api/tree", get(api_tree))
+        .route("/node/{node}/panel", get(node_panel_fragment))
+        .route(crate::tree::D3_ASSET_PATH, get(serve_d3))
         .route("/sse", get(sse))
         .route("/node/{node}/submit/{interaction}", post(submit))
         .route("/node/{node}/continue/{interaction}", post(continue_loop))
@@ -948,8 +997,48 @@ pub fn router_with_form_api(state: AppState, form_api: FormApiConfig) -> Router 
     crate::formapi::merge(base, form_api).with_state(state)
 }
 
-async fn page(State(st): State<AppState>) -> Html<String> {
+/// `GET /` — the d3 tree view shell. Static markup; the page's own JS fetches
+/// `/api/tree` and opens `/sse` once loaded.
+async fn tree_shell() -> Html<String> {
+    Html(crate::tree::tree_page().into_string())
+}
+
+/// `GET /legacy` — the original outline page, byte-for-byte the same
+/// [`shell::page`] render every caller saw at `/` before this existed.
+async fn legacy_page(State(st): State<AppState>) -> Html<String> {
     Html(st.page_markup().into_string())
+}
+
+/// `GET /api/tree` — see [`AppState::tree_snapshot`].
+async fn api_tree(State(st): State<AppState>) -> Json<Vec<Jv>> {
+    Json(st.tree_snapshot())
+}
+
+/// `GET /node/{node}/panel` — the tree view's side pane loads a clicked
+/// node's full panel through this route: the exact same
+/// [`AppState::node_panel_html`] bytes the SSE stream patches, served
+/// standalone. A 404 (same `{"ok": false, "error": ...}` shape every other
+/// unmatched/invalid request on this surface uses) for an unregistered node.
+async fn node_panel_fragment(State(st): State<AppState>, Path(node): Path<String>) -> Response {
+    match st.node_panel_html(&node) {
+        Some(html) => Html(html).into_response(),
+        None => (
+            StatusCode::NOT_FOUND,
+            Json(json!({"ok": false, "error": format!("unknown node {node:?}")})),
+        )
+            .into_response(),
+    }
+}
+
+/// Serve the vendored d3 bundle from this origin — never a CDN.
+async fn serve_d3() -> impl IntoResponse {
+    (
+        [(
+            axum::http::header::CONTENT_TYPE,
+            "text/javascript; charset=utf-8",
+        )],
+        crate::tree::D3_JS,
+    )
 }
 
 /// The SSE stream: one Datastar `patch-elements` frame per node-scoped tick,

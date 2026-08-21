@@ -116,7 +116,7 @@ pub struct NodeView<'a> {
 /// running, and an ended node reports how its LAST window ended: the scan
 /// walks the timeline backward to the most recent lifecycle marker, so a
 /// revived node's earlier outcomes never speak for its current window.
-fn status(view: &NodeView) -> (&'static str, &'static str) {
+pub(crate) fn status(view: &NodeView) -> (&'static str, &'static str) {
     if view.timeline.iter().any(TimelineEntry::is_pending) {
         return ("needs-you", "needs you");
     }
@@ -178,6 +178,17 @@ pub fn panel_id(node_id: &str) -> String {
     format!("panel-{node_id}")
 }
 
+/// A node's parent id, derived purely from the slash-separated path — same
+/// convention `shell.rs`'s per-slot indent depth uses. `None` for a root (no
+/// `/` at all), e.g. the default node or any other top-level id a caller
+/// registered directly. Used by the `/api/tree` JSON endpoint so a client
+/// can build a hierarchy with `d3.stratify` without a separate
+/// parent-tracking field anywhere.
+#[must_use]
+pub(crate) fn parent_id(node_id: &str) -> Option<&str> {
+    node_id.rsplit_once('/').map(|(parent, _)| parent)
+}
+
 /// Re-render a JSON text pretty-printed when it parses, verbatim when it
 /// doesn't (a finalized value is always JSON today, but a non-JSON string
 /// must still display rather than vanish).
@@ -200,7 +211,7 @@ const TITLE_BUDGET: usize = 40;
 /// no boundary exists at all (a single very long word). A label already
 /// within budget is returned unchanged, with no ellipsis — the full label
 /// always rides alongside it as the caller's `title` attribute.
-fn truncate_title(label: &str) -> String {
+pub(crate) fn truncate_title(label: &str) -> String {
     if label.chars().count() <= TITLE_BUDGET {
         return label.to_string();
     }
@@ -1261,6 +1272,16 @@ mod tests {
         assert_eq!(open_entries, 1, "only the newest entry is open: {html}");
         let open_pos = html.find("data-node=\"turn-entry\" open").unwrap();
         assert!(open_pos < p1, "the open entry is the newest:\n{html}");
+    }
+
+    // ---- parent_id ------------------------------------------------------
+
+    #[test]
+    fn parent_id_derives_from_the_slash_path() {
+        assert_eq!(parent_id("root"), None);
+        assert_eq!(parent_id("n1"), None);
+        assert_eq!(parent_id("root/1-x"), Some("root"));
+        assert_eq!(parent_id("root/1-x/2-y"), Some("root/1-x"));
     }
 
     // ---- generic_shape ------------------------------------------------------

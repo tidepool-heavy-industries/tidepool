@@ -17,17 +17,24 @@
 //! Publishing never supersedes an existing pending ask; resolving keeps the
 //! answered ask in place.
 //!
-//! Four modules, one seam:
+//! Five modules, one seam:
 //! - [`render`] — [`render::NodeView`] → one node's section markup (header +
 //!   status, seed, timeline, final value/failure); the `id="panel-<node_id>"`
-//!   fragment patched over SSE.
-//! - [`shell`] — the full HTML document (inline Swiss-minimal CSS + the
-//!   vendored Datastar patch-apply / form-collection / tree-mount JS; no
-//!   CDN, no build step).
-//! - [`server`] — axum routes (`GET /`, `GET /sse`, `POST
-//!   /node/{node}/submit/{interaction}`, `POST
-//!   /node/{node}/continue/{interaction}`), the SSE broadcast stream, and
-//!   [`server::WebGate`].
+//!   fragment patched over SSE (also served standalone at `GET
+//!   /node/{node}/panel` for the tree view's side pane).
+//! - [`shell`] — `/legacy`'s full HTML document (inline Swiss-minimal CSS +
+//!   the vendored Datastar patch-apply / form-collection / tree-mount JS; no
+//!   CDN, no build step) — the ORIGINAL outline page, moved verbatim off
+//!   `/`.
+//! - [`tree`] — `/`'s full HTML document: a d3-hierarchy tree canvas (pan,
+//!   zoom, status-colored nodes) with a side pane for a clicked node's full
+//!   panel. Vendors d3 v7 as a served static asset (no CDN) and shares
+//!   [`shell::CORE_JS`]'s form/SSE-patch plumbing with `/legacy` — one copy,
+//!   two views.
+//! - [`server`] — axum routes (`GET /`, `GET /legacy`, `GET /api/tree`, `GET
+//!   /node/{node}/panel`, `GET /sse`, `POST /node/{node}/submit/{interaction}`,
+//!   `POST /node/{node}/continue/{interaction}`), the SSE broadcast stream,
+//!   and [`server::WebGate`].
 //! - [`formapi`] — a DISABLED-BY-DEFAULT testing-convenience surface
 //!   (`GET`/`POST /node/{node}/api/form`) mounted onto the same router when
 //!   `TIDEPOOL_FORM_API=1`; see that module's docs for the hardening story.
@@ -42,6 +49,7 @@ pub mod formapi;
 pub mod render;
 pub mod server;
 pub mod shell;
+pub mod tree;
 
 pub use formapi::FormApiConfig;
 pub use render::{node_panel, NodeView, TimelineEntry};

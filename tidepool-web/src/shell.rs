@@ -10,16 +10,23 @@
 //! `.node-slot` wrapper, never on the SSE-patched inner `#panel-<node_id>`,
 //! so an operator's toggle survives any number of live patches.
 //!
-//! The client ([`JS`]) speaks exactly the wire the renderer emits: it opens
-//! the `/sse` stream, applies `datastar-patch-elements` frames by replacing
-//! the same-`id` element in place, and — when a frame carries a panel the
-//! page has NEVER seen (a node born after page load) — MOUNTS it into
-//! `#tree` at its sorted position inside a freshly built `.node-slot`
-//! wrapper, so the operator watches the tree grow live. A `data-on-submit`
-//! form collects every `[data-bind]` input into a FLAT `{ <key>: <scalar> }`
-//! object (coerced by `data-kind`: int → number, bool → boolean, enum/text →
-//! string) and POSTs it to the node/interaction-scoped URL baked into the
-//! form's `@post(...)` literal.
+//! The client ([`CORE_JS`] + [`JS`]) speaks exactly the wire the renderer
+//! emits: it opens the `/sse` stream, applies `datastar-patch-elements`
+//! frames by replacing the same-`id` element in place, and — when a frame
+//! carries a panel the page has NEVER seen (a node born after page load) —
+//! MOUNTS it into `#tree` at its sorted position inside a freshly built
+//! `.node-slot` wrapper, so the operator watches the tree grow live. A
+//! `data-on-submit` form collects every `[data-bind]` input into a FLAT
+//! `{ <key>: <scalar> }` object (coerced by `data-kind`: int → number, bool →
+//! boolean, enum/text → string) and POSTs it to the node/interaction-scoped
+//! URL baked into the form's `@post(...)` literal.
+//!
+//! [`CORE_JS`] carries every bit of that plumbing (`collect`/`post`/
+//! `validateRequired`/`toast`/`wire`/`applyPatch`/`mountPanel`) as plain
+//! top-level functions, ONE COPY shared verbatim by this page and the d3
+//! tree view (`/`, [`crate::tree`]) — only the page-specific glue (which
+//! stream handler calls `applyPatch`, and how) differs, in [`JS`] here vs.
+//! [`crate::tree::TREE_JS`] there.
 //!
 //! ## Focus-preserving skip is gated on `data-rev` (F10, per-node)
 //! A focused/typed-in field is preserved across an SSE tick ONLY when the
@@ -56,6 +63,7 @@ pub fn page(panels: Vec<(String, Markup)>, run_id: Option<&str>) -> Markup {
                 meta name="viewport" content="width=device-width, initial-scale=1";
                 title { "tidepool — operator" }
                 style { (PreEscaped(CSS)) }
+                script { (PreEscaped(CORE_JS)) }
                 script { (PreEscaped(JS)) }
             }
             body {
@@ -418,213 +426,226 @@ input[type="radio"]:focus-visible, input[type="checkbox"]:focus-visible,
 }
 "#;
 
-/// The vendored Datastar client: opens `/sse`, applies patch-elements frames
-/// by same-`id` replacement (one `panel-<node_id>` per registered node) —
-/// MOUNTING a never-seen panel into `#tree` at its sorted position —
-/// collects a `data-on-submit` form into a FLAT, `data-kind`-coerced
-/// submission and POSTs it to the node/interaction-scoped URL already baked
-/// into that form's `@post(...)` literal, and wires each section's collapse
-/// toggle (the collapse class lives on the stable `.node-slot` wrapper, so
-/// it survives patches).
+/// The shared vendored client plumbing — form collection/submission, the
+/// toast, and the SSE patch-apply/mount machinery — used VERBATIM by both
+/// `/legacy`'s outline page ([`JS`], below) and `/` 's d3 tree view
+/// ([`crate::tree::TREE_JS`]): one copy of `collect`/`post`/
+/// `validateRequired`/`toast` (and the patch-apply pair `applyPatch`/
+/// `mountPanel`), never two hand-maintained implementations that could
+/// drift apart. Declared as plain top-level functions (no IIFE wrapper) so a
+/// page's own script tag, evaluated right after this one in the same
+/// classic-script global scope, can call them directly.
+pub const CORE_JS: &str = r#"
+// Apply one datastar-patch-elements payload: replace each same-id element in
+// place. A focused/typed-in field is preserved (its element is left this
+// tick) ONLY when the incoming data-rev matches the currently-mounted
+// element's — the SAME state re-rendered. A DIFFERENT data-rev (this
+// node's state changed) always replaces the element regardless of focus,
+// so a submit's resulting tick is never dropped just because the panel
+// still has focus. An id the page has never seen is a NEW node — mount it
+// into the tree at its sorted position (a page with no `#tree` element,
+// e.g. the d3 tree view's side pane, simply has nothing to mount into, and
+// mountPanel no-ops).
+function applyPatch(html) {
+  const tpl = document.createElement('template');
+  tpl.innerHTML = html.trim();
+  tpl.content.querySelectorAll('[id]').forEach((next) => {
+    const cur = document.getElementById(next.id);
+    if (!cur) { mountPanel(next); return; }
+    const sameRev = cur.getAttribute('data-rev') === next.getAttribute('data-rev');
+    const active = document.activeElement;
+    if (sameRev && active && active !== document.body && cur.contains(active)) return;
+    cur.replaceWith(next);
+    wire(next);
+  });
+}
+
+// Mount a panel this page has never seen (a node born after page load):
+// build the stable .node-slot wrapper the initial render would have built
+// (indent = path depth * 14px, matching the server), and insert it into
+// #tree at its path-sorted position — pinned slots (the default node)
+// always stay first. Only `/legacy`'s outline carries a `#tree` outline
+// element; elsewhere this is a deliberate no-op.
+function mountPanel(next) {
+  if (!/^panel-/.test(next.id)) return;
+  const tree = document.getElementById('tree');
+  if (!tree) return;
+  const path = next.getAttribute('data-path') || next.id.slice(6);
+  const slot = document.createElement('div');
+  slot.className = 'node-slot';
+  slot.setAttribute('data-node-id', path);
+  const depth = (path.match(/\//g) || []).length;
+  slot.style.marginLeft = (depth * 14) + 'px';
+  slot.appendChild(next);
+  const siblings = Array.from(tree.querySelectorAll(':scope > .node-slot'));
+  const after = siblings.find((s) => !s.hasAttribute('data-pinned')
+    && s.getAttribute('data-node-id') > path);
+  tree.insertBefore(slot, after || null);
+  wire(slot);
+}
+
+// Wire data-on-* handlers and collapse toggles within a root (idempotent
+// via __wired).
+function wire(root) {
+  root.querySelectorAll('[data-on-click]').forEach((el) => {
+    if (el.__wired) return; el.__wired = true;
+    el.addEventListener('click', (e) => {
+      e.preventDefault();
+      post(parsePost(el.getAttribute('data-on-click')), el, null, null);
+    });
+  });
+  root.querySelectorAll('[data-on-submit]').forEach((form) => {
+    if (form.__wired) return; form.__wired = true;
+    form.addEventListener('submit', (e) => {
+      e.preventDefault();
+      if (!validateRequired(form)) return;
+      post(parsePost(form.getAttribute('data-on-submit')), form, collect(form), form);
+    });
+  });
+  // The collapse toggle flips a class on the STABLE .node-slot wrapper —
+  // never on the patched panel — so the operator's choice survives any
+  // number of SSE patches to the panel inside.
+  root.querySelectorAll('[data-toggle]').forEach((btn) => {
+    if (btn.__wired) return; btn.__wired = true;
+    btn.addEventListener('click', () => {
+      const slot = btn.closest('.node-slot');
+      if (slot) slot.classList.toggle('collapsed');
+    });
+  });
+}
+
+// An element hidden by the payload-sum CSS reveal (or any display:none
+// ancestor) has no box — the standard offsetParent-null test.
+function isVisible(el) {
+  return !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length);
+}
+
+// A field inside an unchecked Optional's `.optional-inner` is deliberately
+// excluded (collect_form_json never reads it — Optional submits `null`
+// without looking at the inner shape at all when `#present` is unchecked),
+// so it must never be treated as required even though `.optional-inner` has
+// no CSS hiding of its own (unlike a payload-sum's `.variant-payload`).
+// Walks every ancestor `.optional` (nested Maybes), not just the nearest.
+function enabledByAncestors(el) {
+  let node = el.closest('.optional');
+  while (node) {
+    const toggle = node.querySelector('.optional-toggle input[data-bind]');
+    if (toggle && !toggle.checked) return false;
+    node = node.parentElement ? node.parentElement.closest('.optional') : null;
+  }
+  return true;
+}
+
+// Block submit when a VISIBLE, ENABLED radio/enum group has no option
+// checked, showing an inline message next to it instead of silently
+// submitting without that key — an empty gate submission decode-fails
+// Haskell-side and used to silently re-present the same form (three
+// consecutive silent re-prompt loops, observed live). A hidden group (a
+// payload-sum branch the operator did not choose) or one inside an
+// unchecked Optional is never required — collect() never reads either.
+function validateRequired(form) {
+  form.querySelectorAll('.field-error').forEach((el) => el.remove());
+  form.querySelectorAll('[data-node="sum"]').forEach((el) => el.classList.remove('invalid'));
+
+  const seen = new Set();
+  let ok = true;
+  form.querySelectorAll('input[data-kind="enum"]').forEach((f) => {
+    const key = f.getAttribute('data-bind');
+    if (seen.has(key) || !isVisible(f) || !enabledByAncestors(f)) return;
+    seen.add(key);
+    const group = Array.from(form.querySelectorAll('input[data-kind="enum"]'))
+      .filter((g) => g.getAttribute('data-bind') === key);
+    if (group.some((g) => g.checked)) return;
+    ok = false;
+    const host = f.closest('[data-node="sum"]') || f.closest('.field') || form;
+    host.classList.add('invalid');
+    const msg = document.createElement('p');
+    msg.className = 'field-error';
+    msg.textContent = 'Choose one — this field is required.';
+    host.appendChild(msg);
+  });
+  return ok;
+}
+
+// Collect every [data-bind] input into a FLAT { key: scalar }, coercing by
+// data-kind: int -> number, bool -> boolean, enum/text -> string. A radio
+// group shares one key; only the checked option contributes.
+function collect(form) {
+  const body = {};
+  form.querySelectorAll('[data-bind]').forEach((f) => {
+    const key = f.getAttribute('data-bind');
+    const kind = f.getAttribute('data-kind');
+    if (kind === 'bool') { body[key] = !!f.checked; return; }
+    if (f.type === 'radio') { if (f.checked) body[key] = f.value; return; }
+    if (kind === 'int') {
+      const n = f.value.trim();
+      body[key] = n === '' ? null : Number(n);
+      return;
+    }
+    body[key] = f.value;
+  });
+  return body;
+}
+
+function parsePost(expr) {
+  const m = /@post\(\s*'([^']*)'\s*\)/.exec(expr || '');
+  return m ? m[1] : null;
+}
+
+// POST a verb: in-flight disabled button, then a toast on failure (the server
+// sends {ok:false,error} with a 4xx; fetch does not reject on those).
+async function post(url, el, body, form) {
+  if (!url) return;
+  const btn = (el && el.tagName === 'BUTTON') ? el
+            : (form ? form.querySelector('button[type=submit]') : null);
+  if (btn) btn.disabled = true;
+  try {
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body || {}),
+    });
+    let data = {};
+    try { data = await res.json(); } catch (_) {}
+    if (!res.ok || data.ok === false) {
+      toast(data.error || (res.status + ' ' + res.statusText), true);
+    } else {
+      toast('', false);
+    }
+  } catch (e) {
+    toast('network error — is the server up? (' + e.message + ')', true);
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
+function toast(msg, isErr) {
+  let t = document.getElementById('toast');
+  if (!t) { t = document.createElement('div'); t.id = 'toast'; document.body.appendChild(t); }
+  if (!msg) { t.classList.remove('show'); return; }
+  t.className = (isErr ? 'err ' : '') + 'show';
+  t.textContent = msg;
+  clearTimeout(t.__timer);
+  t.__timer = setTimeout(() => t.classList.remove('show'), 7000);
+}
+
+// Shared connection-indicator toggle — both views carry a `#conn` badge.
+function setConn(ok) {
+  const s = document.getElementById('conn');
+  if (!s) return;
+  s.className = 'conn ' + (ok ? 'ok' : 'down');
+  s.textContent = ok ? 'live' : 'reconnecting';
+}
+"#;
+
+/// `/legacy`'s own page-specific script: opens `/sse` and applies every
+/// patch-elements frame straight into the outline via [`CORE_JS`]'s
+/// `applyPatch`/`mountPanel`, then wires the initial DOM. The d3 tree view
+/// ([`crate::tree`]) has its own page-specific script instead — refetching
+/// `/api/tree` on every tick rather than mounting into a `#tree` outline —
+/// but shares this exact [`CORE_JS`] for everything else.
 pub const JS: &str = r#"
 (function () {
-  // Apply one datastar-patch-elements payload: replace each same-id element in
-  // place. A focused/typed-in field is preserved (its element is left this
-  // tick) ONLY when the incoming data-rev matches the currently-mounted
-  // element's — the SAME state re-rendered. A DIFFERENT data-rev (this
-  // node's state changed) always replaces the element regardless of focus,
-  // so a submit's resulting tick is never dropped just because the panel
-  // still has focus. An id the page has never seen is a NEW node — mount it
-  // into the tree at its sorted position.
-  function applyPatch(html) {
-    const tpl = document.createElement('template');
-    tpl.innerHTML = html.trim();
-    tpl.content.querySelectorAll('[id]').forEach((next) => {
-      const cur = document.getElementById(next.id);
-      if (!cur) { mountPanel(next); return; }
-      const sameRev = cur.getAttribute('data-rev') === next.getAttribute('data-rev');
-      const active = document.activeElement;
-      if (sameRev && active && active !== document.body && cur.contains(active)) return;
-      cur.replaceWith(next);
-      wire(next);
-    });
-  }
-
-  // Mount a panel this page has never seen (a node born after page load):
-  // build the stable .node-slot wrapper the initial render would have built
-  // (indent = path depth * 14px, matching the server), and insert it into
-  // #tree at its path-sorted position — pinned slots (the default node)
-  // always stay first.
-  function mountPanel(next) {
-    if (!/^panel-/.test(next.id)) return;
-    const tree = document.getElementById('tree');
-    if (!tree) return;
-    const path = next.getAttribute('data-path') || next.id.slice(6);
-    const slot = document.createElement('div');
-    slot.className = 'node-slot';
-    slot.setAttribute('data-node-id', path);
-    const depth = (path.match(/\//g) || []).length;
-    slot.style.marginLeft = (depth * 14) + 'px';
-    slot.appendChild(next);
-    const siblings = Array.from(tree.querySelectorAll(':scope > .node-slot'));
-    const after = siblings.find((s) => !s.hasAttribute('data-pinned')
-      && s.getAttribute('data-node-id') > path);
-    tree.insertBefore(slot, after || null);
-    wire(slot);
-  }
-
-  // Wire data-on-* handlers and collapse toggles within a root (idempotent
-  // via __wired).
-  function wire(root) {
-    root.querySelectorAll('[data-on-click]').forEach((el) => {
-      if (el.__wired) return; el.__wired = true;
-      el.addEventListener('click', (e) => {
-        e.preventDefault();
-        post(parsePost(el.getAttribute('data-on-click')), el, null, null);
-      });
-    });
-    root.querySelectorAll('[data-on-submit]').forEach((form) => {
-      if (form.__wired) return; form.__wired = true;
-      form.addEventListener('submit', (e) => {
-        e.preventDefault();
-        if (!validateRequired(form)) return;
-        post(parsePost(form.getAttribute('data-on-submit')), form, collect(form), form);
-      });
-    });
-    // The collapse toggle flips a class on the STABLE .node-slot wrapper —
-    // never on the patched panel — so the operator's choice survives any
-    // number of SSE patches to the panel inside.
-    root.querySelectorAll('[data-toggle]').forEach((btn) => {
-      if (btn.__wired) return; btn.__wired = true;
-      btn.addEventListener('click', () => {
-        const slot = btn.closest('.node-slot');
-        if (slot) slot.classList.toggle('collapsed');
-      });
-    });
-  }
-
-  // An element hidden by the payload-sum CSS reveal (or any display:none
-  // ancestor) has no box — the standard offsetParent-null test.
-  function isVisible(el) {
-    return !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length);
-  }
-
-  // A field inside an unchecked Optional's `.optional-inner` is deliberately
-  // excluded (collect_form_json never reads it — Optional submits `null`
-  // without looking at the inner shape at all when `#present` is unchecked),
-  // so it must never be treated as required even though `.optional-inner` has
-  // no CSS hiding of its own (unlike a payload-sum's `.variant-payload`).
-  // Walks every ancestor `.optional` (nested Maybes), not just the nearest.
-  function enabledByAncestors(el) {
-    let node = el.closest('.optional');
-    while (node) {
-      const toggle = node.querySelector('.optional-toggle input[data-bind]');
-      if (toggle && !toggle.checked) return false;
-      node = node.parentElement ? node.parentElement.closest('.optional') : null;
-    }
-    return true;
-  }
-
-  // Block submit when a VISIBLE, ENABLED radio/enum group has no option
-  // checked, showing an inline message next to it instead of silently
-  // submitting without that key — an empty gate submission decode-fails
-  // Haskell-side and used to silently re-present the same form (three
-  // consecutive silent re-prompt loops, observed live). A hidden group (a
-  // payload-sum branch the operator did not choose) or one inside an
-  // unchecked Optional is never required — collect() never reads either.
-  function validateRequired(form) {
-    form.querySelectorAll('.field-error').forEach((el) => el.remove());
-    form.querySelectorAll('[data-node="sum"]').forEach((el) => el.classList.remove('invalid'));
-
-    const seen = new Set();
-    let ok = true;
-    form.querySelectorAll('input[data-kind="enum"]').forEach((f) => {
-      const key = f.getAttribute('data-bind');
-      if (seen.has(key) || !isVisible(f) || !enabledByAncestors(f)) return;
-      seen.add(key);
-      const group = Array.from(form.querySelectorAll('input[data-kind="enum"]'))
-        .filter((g) => g.getAttribute('data-bind') === key);
-      if (group.some((g) => g.checked)) return;
-      ok = false;
-      const host = f.closest('[data-node="sum"]') || f.closest('.field') || form;
-      host.classList.add('invalid');
-      const msg = document.createElement('p');
-      msg.className = 'field-error';
-      msg.textContent = 'Choose one — this field is required.';
-      host.appendChild(msg);
-    });
-    return ok;
-  }
-
-  // Collect every [data-bind] input into a FLAT { key: scalar }, coercing by
-  // data-kind: int -> number, bool -> boolean, enum/text -> string. A radio
-  // group shares one key; only the checked option contributes.
-  function collect(form) {
-    const body = {};
-    form.querySelectorAll('[data-bind]').forEach((f) => {
-      const key = f.getAttribute('data-bind');
-      const kind = f.getAttribute('data-kind');
-      if (kind === 'bool') { body[key] = !!f.checked; return; }
-      if (f.type === 'radio') { if (f.checked) body[key] = f.value; return; }
-      if (kind === 'int') {
-        const n = f.value.trim();
-        body[key] = n === '' ? null : Number(n);
-        return;
-      }
-      body[key] = f.value;
-    });
-    return body;
-  }
-
-  function parsePost(expr) {
-    const m = /@post\(\s*'([^']*)'\s*\)/.exec(expr || '');
-    return m ? m[1] : null;
-  }
-
-  // POST a verb: in-flight disabled button, then a toast on failure (the server
-  // sends {ok:false,error} with a 4xx; fetch does not reject on those).
-  async function post(url, el, body, form) {
-    if (!url) return;
-    const btn = (el && el.tagName === 'BUTTON') ? el
-              : (form ? form.querySelector('button[type=submit]') : null);
-    if (btn) btn.disabled = true;
-    try {
-      const res = await fetch(url, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body || {}),
-      });
-      let data = {};
-      try { data = await res.json(); } catch (_) {}
-      if (!res.ok || data.ok === false) {
-        toast(data.error || (res.status + ' ' + res.statusText), true);
-      } else {
-        toast('', false);
-      }
-    } catch (e) {
-      toast('network error — is the server up? (' + e.message + ')', true);
-    } finally {
-      if (btn) btn.disabled = false;
-    }
-  }
-
-  function toast(msg, isErr) {
-    let t = document.getElementById('toast');
-    if (!t) { t = document.createElement('div'); t.id = 'toast'; document.body.appendChild(t); }
-    if (!msg) { t.classList.remove('show'); return; }
-    t.className = (isErr ? 'err ' : '') + 'show';
-    t.textContent = msg;
-    clearTimeout(t.__timer);
-    t.__timer = setTimeout(() => t.classList.remove('show'), 7000);
-  }
-
-  function setConn(ok) {
-    const s = document.getElementById('conn');
-    if (!s) return;
-    s.className = 'conn ' + (ok ? 'ok' : 'down');
-    s.textContent = ok ? 'live' : 'reconnecting';
-  }
-
   function connect() {
     const es = new EventSource('/sse');
     es.onopen = () => setConn(true);
@@ -755,49 +776,53 @@ mod tests {
         assert!(!doc.contains("class=\"run-id\""), "{doc}");
     }
 
+    /// The page-specific glue ([`JS`]) opens the SSE stream and hands frames
+    /// to [`CORE_JS`]'s shared `applyPatch`; the flat-collect/`data-bind`
+    /// plumbing itself now lives in `CORE_JS` (shared with the tree view).
     #[test]
     fn js_collects_flat_and_opens_sse() {
         assert!(JS.contains("new EventSource('/sse')"));
-        assert!(JS.contains("data-bind"));
         assert!(JS.contains("datastar-patch-elements"));
+        assert!(CORE_JS.contains("data-bind"));
     }
 
     /// A panel the page has never seen must be MOUNTED into #tree at its
     /// sorted position (pinned slots first) — not appended to document.body
     /// (the old orphaned-append bug: a node born after page load rendered
-    /// outside the layout entirely).
+    /// outside the layout entirely). Lives in the shared `CORE_JS` now.
     #[test]
     fn js_mounts_unknown_panels_into_the_tree_sorted() {
-        assert!(JS.contains("function mountPanel"));
+        assert!(CORE_JS.contains("function mountPanel"));
         assert!(
-            !JS.contains("document.body.appendChild(next)"),
+            !CORE_JS.contains("document.body.appendChild(next)"),
             "an unknown panel must never be orphan-appended to body"
         );
-        assert!(JS.contains("getElementById('tree')"));
-        assert!(JS.contains("data-pinned"));
-        assert!(JS.contains("tree.insertBefore(slot, after || null)"));
+        assert!(CORE_JS.contains("getElementById('tree')"));
+        assert!(CORE_JS.contains("data-pinned"));
+        assert!(CORE_JS.contains("tree.insertBefore(slot, after || null)"));
     }
 
     /// The collapse toggle flips a class on the STABLE `.node-slot` wrapper,
     /// never the SSE-patched inner panel — so an operator's collapse
-    /// survives any number of patches.
+    /// survives any number of patches. Lives in the shared `CORE_JS` now.
     #[test]
     fn js_collapse_lives_on_the_stable_wrapper() {
-        assert!(JS.contains("[data-toggle]"));
-        assert!(JS.contains("btn.closest('.node-slot')"));
-        assert!(JS.contains("slot.classList.toggle('collapsed')"));
+        assert!(CORE_JS.contains("[data-toggle]"));
+        assert!(CORE_JS.contains("btn.closest('.node-slot')"));
+        assert!(CORE_JS.contains("slot.classList.toggle('collapsed')"));
     }
 
     /// A required (visible, unselected) radio/enum group must block the
     /// submit's `post(...)` call — the validation gate has to run and return
-    /// before `post` is reached, not after or in parallel.
+    /// before `post` is reached, not after or in parallel. Lives in the
+    /// shared `CORE_JS` now.
     #[test]
     fn js_submit_is_gated_on_validate_required() {
-        assert!(JS.contains("function validateRequired"));
-        let gate_idx = JS
+        assert!(CORE_JS.contains("function validateRequired"));
+        let gate_idx = CORE_JS
             .find("if (!validateRequired(form)) return;")
             .expect("submit is gated on validateRequired");
-        let post_idx = JS
+        let post_idx = CORE_JS
             .find(
                 "post(parsePost(form.getAttribute('data-on-submit')), form, collect(form), form);",
             )
@@ -812,13 +837,14 @@ mod tests {
     /// `.optional-inner` must never block submit — `collect_form_json` never
     /// even reads that inner shape when `#present` is unchecked, so requiring
     /// it would be requiring a field that isn't part of the answer at all.
+    /// Lives in the shared `CORE_JS` now.
     #[test]
     fn js_validate_required_skips_fields_disabled_by_an_unchecked_optional() {
-        assert!(JS.contains("function enabledByAncestors"));
-        let skip_idx = JS
+        assert!(CORE_JS.contains("function enabledByAncestors"));
+        let skip_idx = CORE_JS
             .find("!isVisible(f) || !enabledByAncestors(f)")
             .expect("the required check consults enabledByAncestors");
-        let validate_idx = JS
+        let validate_idx = CORE_JS
             .find("function validateRequired")
             .expect("validateRequired exists");
         assert!(
@@ -830,13 +856,14 @@ mod tests {
     /// F10: the focus-preserving skip must be GATED on a matching `data-rev`
     /// — computed and checked before the unconditional replace, so a
     /// differing revision (this node's state changed) always reaches
-    /// `replaceWith` regardless of what currently has focus.
+    /// `replaceWith` regardless of what currently has focus. Lives in the
+    /// shared `CORE_JS` now.
     #[test]
     fn js_focus_skip_gated_on_matching_data_rev() {
-        assert!(JS.contains("data-rev"));
+        assert!(CORE_JS.contains("data-rev"));
 
-        let same_rev_idx = JS.find("const sameRev").expect("sameRev is computed");
-        let active_idx = JS
+        let same_rev_idx = CORE_JS.find("const sameRev").expect("sameRev is computed");
+        let active_idx = CORE_JS
             .find("const active = document.activeElement")
             .expect("active is computed");
         assert!(
@@ -844,15 +871,25 @@ mod tests {
             "sameRev must be computed before the focus check reads document.activeElement"
         );
 
-        let gate_idx = JS
+        let gate_idx = CORE_JS
             .find("if (sameRev && active")
             .expect("the skip is gated on sameRev");
-        let replace_idx = JS
+        let replace_idx = CORE_JS
             .find("cur.replaceWith(next)")
             .expect("the unconditional replace exists");
         assert!(
             gate_idx < replace_idx,
             "the sameRev-gated early return must precede the unconditional replace"
         );
+    }
+
+    /// The shared `CORE_JS` is embedded verbatim in the page — the wire
+    /// contract's ONE COPY requirement, checked at the byte level (not just
+    /// by matching substrings) so a future edit can't accidentally diverge
+    /// the embedded script from the constant this test suite pins.
+    #[test]
+    fn page_embeds_core_js_verbatim() {
+        let doc = page(vec![], None).into_string();
+        assert!(doc.contains(CORE_JS), "{doc}");
     }
 }
