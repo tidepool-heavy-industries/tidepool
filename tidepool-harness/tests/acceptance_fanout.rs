@@ -11,15 +11,61 @@
 
 mod support;
 
-use std::sync::Arc;
+use std::sync::mpsc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use serde_json::json;
 use tidepool_harness::engine::EngineConfig;
 use tidepool_harness::log::{Actor, LogHeader, LogWriter};
 use tidepool_harness::provider::{DynModelProvider, Usage};
 use tidepool_harness::replay::{RecordedReply, ReplayProvider};
+use tidepool_harness::selfharness::operator::FormShape;
 use tidepool_harness::tree::{FanBadge, NodeId, NodeState};
-use tidepool_harness::{Harness, HarnessError, HoleRouting, OperatorDecision};
+use tidepool_harness::{ContinueSignal, Harness, HarnessError, HoleRouting, OperatorGate};
+
+/// A test-double [`OperatorGate`] that answers `present_form` from a
+/// scripted channel — the SAME production seam a real web operator resolves
+/// an escalation through (`Harness::escalate_to_operator` calls
+/// `present_form` exactly like this on any configured gate), just with an
+/// in-process channel standing in for the HTTP `/submit` round-trip. Every
+/// presented [`FormShape`] is recorded, so a test can assert on what the
+/// operator would actually see (the stuck node's reason/transcript preview)
+/// before answering it.
+struct ScriptedGate {
+    answers: Mutex<mpsc::Receiver<serde_json::Value>>,
+    received: Mutex<Vec<FormShape>>,
+}
+
+impl ScriptedGate {
+    /// Build a gate paired with the `Sender` a test uses to answer each
+    /// `present_form` call, in order, whenever it chooses to.
+    fn channel() -> (Arc<Self>, mpsc::Sender<serde_json::Value>) {
+        let (tx, rx) = mpsc::channel();
+        (
+            Arc::new(ScriptedGate {
+                answers: Mutex::new(rx),
+                received: Mutex::new(Vec::new()),
+            }),
+            tx,
+        )
+    }
+}
+
+impl OperatorGate for ScriptedGate {
+    fn present_form(&self, shape: &FormShape) -> serde_json::Value {
+        self.received.lock().unwrap().push(shape.clone());
+        self.answers
+            .lock()
+            .unwrap()
+            .recv()
+            .unwrap_or_else(|_| json!({}))
+    }
+
+    fn await_continue(&self) -> ContinueSignal {
+        ContinueSignal::Continue
+    }
+}
 
 fn prelude_dir() -> std::path::PathBuf {
     let manifest = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -263,9 +309,11 @@ async fn fanout_child_recovers_via_rung_one_auto_retry_after_cap_exhaustion() {
 /// `Running` — the old mid-fan hard-failure's leak), the PARENT must stay
 /// `Suspended` on its original fanout hole (re-answerable, its continuation
 /// never half-consumed), and the error surfaced to the fan must be typed and
-/// name the failing child. The operator-decision oneshot is fired directly
-/// here (`Harness::resolve_escalation`), simulating the web popup's
-/// `/steer/:node/abort` POST without a browser.
+/// name the failing child. The operator's decision is delivered through the
+/// PRODUCTION resolve path — a [`ScriptedGate`] wired via
+/// `Harness::set_escalation_gate`, standing in for a real web operator
+/// answering the escalation's `present_form` ask — not a direct
+/// `resolve_escalation` backdoor call.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn fanout_child_stuck_past_rung_one_aborts_clean_no_leaked_running_node() {
     support::require_extract();
@@ -298,6 +346,8 @@ async fn fanout_child_stuck_past_rung_one_aborts_clean_no_leaked_running_node() 
     ];
     let provider: Arc<dyn DynModelProvider> = Arc::new(ReplayProvider::new(replies));
     let harness = Arc::new(Harness::new(writer, cfg, provider).expect("harness boots"));
+    let (gate, answer_tx) = ScriptedGate::channel();
+    harness.set_escalation_gate(gate.clone());
 
     let root = harness
         .create_root("fanout abort", "Fan out for one number, finish.")
@@ -319,7 +369,9 @@ async fn fanout_child_stuck_past_rung_one_aborts_clean_no_leaked_running_node() 
 
     // Poll for the escalation to appear (rung 1 exhausted, parked on rung 2)
     // — bounded so a regression that never escalates fails the test instead
-    // of hanging it.
+    // of hanging it. The gate's `present_form` is already blocked on
+    // `answer_tx` at this point (nothing has sent yet), so this window is
+    // real, not a race against an instantly-resolving gate.
     let mut waited = Duration::ZERO;
     while harness.escalation_of(child).is_none() {
         assert!(
@@ -338,10 +390,9 @@ async fn fanout_child_stuck_past_rung_one_aborts_clean_no_leaked_running_node() 
         escalation.reason
     );
 
-    // Simulate the web popup's abort control firing directly.
-    harness
-        .resolve_escalation(child, OperatorDecision::Abort)
-        .expect("the escalation is pending; resolving it must succeed");
+    // The operator answers the PRESENTED ask (production path: the gate's
+    // `present_form`, not a direct `resolve_escalation` call) with Abort.
+    answer_tx.send(json!({"tag": "Abort"})).unwrap();
 
     let outcome = fan_task.await.expect("fan task did not panic");
     match outcome {
@@ -384,5 +435,179 @@ async fn fanout_child_stuck_past_rung_one_aborts_clean_no_leaked_running_node() 
     }
 
     // The resolved escalation is cleaned up, not left dangling.
+    assert!(harness.escalation_of(child).is_none());
+
+    // The gate actually received the ask (production wiring, not a
+    // coincidence): one `EscalationDecision` form naming the stuck child.
+    let received = gate.received.lock().unwrap();
+    assert_eq!(received.len(), 1, "exactly one escalation ask presented");
+    match &received[0] {
+        FormShape::Sum { type_key, doc, .. } => {
+            assert_eq!(type_key, "EscalationDecision");
+            assert!(
+                doc.as_deref().is_some_and(|d| d.contains("cap-exhausted")),
+                "the presented form's doc names the cap-exhaustion reason: {doc:?}"
+            );
+        }
+        other => panic!("expected a Sum EscalationDecision shape, got {other:?}"),
+    }
+}
+
+/// The RECOVERY floor: a fanout child STILL stuck after rung 1 escalates to
+/// rung 2, and here the operator grants `AllocateMore` — through the SAME
+/// production gate mechanism as the abort test above — instead of aborting.
+/// The child must recover and the fan must complete, proving `AllocateMore`
+/// genuinely grants a fresh turn budget via the gate-resolved path (not just
+/// a direct `resolve_escalation` call).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn fanout_child_stuck_past_rung_one_recovers_via_operator_allocate_more_through_gate() {
+    support::require_extract();
+
+    let dir = tempfile::tempdir().unwrap();
+    let log_path = dir.path().join("fanout-allocate-more.jsonl");
+    let writer = LogWriter::create(&log_path, &header()).unwrap();
+    let mut cfg = EngineConfig::standard(prelude_dir(), None).expect("engine config");
+    cfg.max_child_turns = 1;
+
+    let replies = vec![
+        // 1. Root turn: fan out ONE prompt.
+        reply(
+            "```haskell\n\
+             do\n\
+             \x20 ns <- mapM liftEither =<< runLLMTurnFanout @Int [\"pick 1\"]\n\
+             \x20 pure (toJSON ns)\n\
+             ```",
+        ),
+        // 2..5. Same four prose-only replies as the abort test: 1 exhausts
+        //    the initial budget, 3 more exhaust rung 1's auto-retry bump —
+        //    the fifth check escalates to rung 2.
+        reply("Thinking (1)."),
+        reply("Thinking (2)."),
+        reply("Thinking (3)."),
+        reply("Thinking (4)."),
+        // 6. After the operator grants more turns, the child answers validly
+        //    on its very next attempt.
+        reply("```haskell\nresume (1 :: Int)\n```"),
+    ];
+    let provider: Arc<dyn DynModelProvider> = Arc::new(ReplayProvider::new(replies));
+    let harness = Arc::new(Harness::new(writer, cfg, provider).expect("harness boots"));
+    // The operator's decision is queued up-front — the gate answers as soon
+    // as the escalation ask reaches it, no polling needed for recovery.
+    let (gate, answer_tx) = ScriptedGate::channel();
+    answer_tx
+        .send(json!({"tag": "AllocateMore", "turns": 2, "steer": null}))
+        .unwrap();
+    harness.set_escalation_gate(gate.clone());
+
+    let root = harness
+        .create_root("fanout allocate-more", "Fan out for one number, finish.")
+        .unwrap();
+    harness.force(root, Actor::Operator).unwrap();
+    harness
+        .run_to_hole_or_done(root)
+        .await
+        .expect("root drives to the fanout hole");
+
+    let child = NodeId(1);
+    let children = harness
+        .answer_fanout(root, Actor::Operator)
+        .await
+        .expect("the fan recovers via the operator's gate-resolved AllocateMore");
+    assert_eq!(children, vec![child]);
+    assert_eq!(
+        harness.tree().state(child),
+        Some(NodeState::Done),
+        "the escalated child completes after the operator grants more turns"
+    );
+    assert_eq!(harness.tree().state(root), Some(NodeState::Done));
+
+    // Escalation state is cleaned up once resolved.
+    assert!(harness.escalation_of(child).is_none());
+
+    // The gate really was consulted (production path, not a coincidence).
+    let received = gate.received.lock().unwrap();
+    assert_eq!(received.len(), 1, "exactly one escalation ask presented");
+}
+
+/// The TIMEOUT FLOOR: a fanout child escalates to rung 2 and NOBODY ever
+/// resolves it (no gate configured, no `resolve_escalation` call) — the
+/// bounded wait must fail loud with `HarnessError::EscalationTimeout` rather
+/// than hang the turn forever. Uses `EngineConfig::escalation_timeout`'s
+/// test-injectable override (a few milliseconds), never a real multi-minute
+/// wait. The cleanup contract matches the abort floor: the child ends up
+/// `Cancelled`, the parent stays `Suspended` on its original hole.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn fanout_child_stuck_past_rung_one_times_out_with_no_operator() {
+    support::require_extract();
+
+    let dir = tempfile::tempdir().unwrap();
+    let log_path = dir.path().join("fanout-timeout.jsonl");
+    let writer = LogWriter::create(&log_path, &header()).unwrap();
+    let mut cfg = EngineConfig::standard(prelude_dir(), None).expect("engine config");
+    cfg.max_child_turns = 1;
+    // Test-injectable override: a bounded wait measured in milliseconds, not
+    // the 20-minute production default.
+    cfg.escalation_timeout = Duration::from_millis(100);
+
+    let replies = vec![
+        reply(
+            "```haskell\n\
+             do\n\
+             \x20 ns <- mapM liftEither =<< runLLMTurnFanout @Int [\"pick 1\"]\n\
+             \x20 pure (toJSON ns)\n\
+             ```",
+        ),
+        reply("Thinking (1)."),
+        reply("Thinking (2)."),
+        reply("Thinking (3)."),
+        reply("Thinking (4)."),
+    ];
+    let provider: Arc<dyn DynModelProvider> = Arc::new(ReplayProvider::new(replies));
+    let harness = Arc::new(Harness::new(writer, cfg, provider).expect("harness boots"));
+    // No gate configured — mirrors a production harness with an unreachable
+    // or never-attended operator.
+
+    let root = harness
+        .create_root("fanout timeout", "Fan out for one number, finish.")
+        .unwrap();
+    harness.force(root, Actor::Operator).unwrap();
+    harness
+        .run_to_hole_or_done(root)
+        .await
+        .expect("root drives to the fanout hole");
+    let root_hole = match harness.tree().state(root) {
+        Some(NodeState::Suspended { hole }) => hole,
+        other => panic!("expected root suspended on its fanout hole, got {other:?}"),
+    };
+
+    let child = NodeId(1);
+    let outcome = harness.answer_fanout(root, Actor::Operator).await;
+    match outcome {
+        Err(HarnessError::EscalationTimeout { node, waited }) => {
+            assert_eq!(node, child, "the typed timeout error names the stuck child");
+            assert!(
+                waited >= Duration::from_millis(100),
+                "the reported wait matches the configured override: {waited:?}"
+            );
+        }
+        other => panic!("expected HarnessError::EscalationTimeout, got {other:?}"),
+    }
+
+    // Same cleanup contract as an operator abort: no leaked Running node, the
+    // child is Cancelled, and the parent stays re-answerable on its original
+    // hole.
+    assert!(
+        matches!(
+            harness.tree().state(child),
+            Some(NodeState::Cancelled { .. })
+        ),
+        "the timed-out child must be Cancelled, got {:?}",
+        harness.tree().state(child)
+    );
+    assert_eq!(
+        harness.tree().state(root),
+        Some(NodeState::Suspended { hole: root_hole }),
+        "the parent must stay suspended on its untouched fanout hole"
+    );
     assert!(harness.escalation_of(child).is_none());
 }

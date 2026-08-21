@@ -1412,8 +1412,12 @@ impl SelfHarnessDriver {
     /// Override the operator-input gate (default [`StdinGate`]). A web/GUI
     /// implementation of [`OperatorGate`] replaces the headless stdin
     /// behavior; a test can inject a scripted gate instead of driving real
-    /// stdin.
+    /// stdin. Also wires the SAME gate into the underlying [`Harness`]'s
+    /// escalation ladder ([`Harness::set_escalation_gate`]), so a fork/fanout
+    /// child's rung-2 cap-exhaustion escalation reaches this gate too — one
+    /// call covers both `askUser` and escalation asks.
     pub fn set_gate(&mut self, gate: Arc<dyn OperatorGate>) {
+        self.agent.set_escalation_gate(gate.clone());
         self.gate = gate;
     }
 

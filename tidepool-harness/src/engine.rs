@@ -48,6 +48,7 @@ use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 use std::path::PathBuf;
 use std::sync::{Arc, OnceLock};
+use std::time::Duration;
 
 use parking_lot::Mutex;
 use serde_json::Value as Json;
@@ -1460,6 +1461,13 @@ pub struct EngineConfig {
     /// expected `Eff (Delegate ': effs) T` argument; an ordinary, recoverable
     /// compile error via the corrective-retry loop, not a hang or a trap.
     pub delegate_wrap: bool,
+    /// How long [`crate::harness::Harness::escalate_to_operator`] (the
+    /// escalation ladder's rung 2) waits for an operator decision before
+    /// failing the turn with `HarnessError::EscalationTimeout` instead of
+    /// hanging forever. Defaults to [`DEFAULT_ESCALATION_TIMEOUT`]; a test
+    /// overrides this field directly (the same idiom [`Self::max_child_turns`]
+    /// already uses) to exercise the timeout path without a real wait.
+    pub escalation_timeout: Duration,
 }
 
 /// Default context-window budget the emergency-compaction trigger watches.
@@ -1467,6 +1475,13 @@ pub struct EngineConfig {
 /// distinct from [`DEFAULT_MAX_TOKENS`] (the per-turn output cap).
 /// The driver's `compaction_threshold_percent` (~80%) is taken against THIS.
 pub const DEFAULT_CONTEXT_WINDOW_TOKENS: u32 = 128_000;
+
+/// Default [`EngineConfig::escalation_timeout`]: long enough for a human
+/// operator to notice a stuck-node popup and act on it (checking a
+/// notification, reading the transcript preview, clicking a decision) while
+/// still bounding an unreachable/forgotten operator to a finite wait rather
+/// than hanging the turn (and everything up-stack awaiting it) forever.
+pub const DEFAULT_ESCALATION_TIMEOUT: Duration = Duration::from_secs(20 * 60);
 
 /// Per-node turn cap — a model that never emits a runnable/answering block is
 /// stopped after this many turns. Not a configurable knob: nothing in the
@@ -1567,6 +1582,7 @@ impl EngineConfig {
             max_child_turns: 1,
             context_window_tokens: None,
             delegate_wrap: false,
+            escalation_timeout: DEFAULT_ESCALATION_TIMEOUT,
         }
     }
 
@@ -1623,6 +1639,7 @@ impl EngineConfig {
             max_child_turns: 4,
             context_window_tokens: Some(DEFAULT_CONTEXT_WINDOW_TOKENS),
             delegate_wrap: false,
+            escalation_timeout: DEFAULT_ESCALATION_TIMEOUT,
         })
     }
 

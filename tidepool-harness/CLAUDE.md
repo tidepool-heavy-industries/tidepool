@@ -728,6 +728,38 @@ rule that already covered `Schema`). Project at the bind —
 Gates: `tests/outer_fanout.rs` (fork/fanout) and
 `tests/companion_context_ref.rs` (branch).
 
+### The escalation ladder — bounded rung-2 wait, gate-resolved
+
+`drive_answerer_to_value`'s cap-exhaustion handling is a two-rung ladder
+(`Harness::handle_cap_exhaustion`). Rung 1 fires at most once per call
+(`AUTO_RETRY_MAX = 1`): it nudges the answerer with a corrective turn and
+grants `AUTO_RETRY_BUMP` (3) more turns. A SECOND exhaustion escalates to rung
+2 (`Harness::escalate_to_operator`): the answerer parks, awaiting an operator
+decision (`OperatorDecision::AllocateMore { turns, steer }` grants a fresh
+budget; `Abort` fails the child with `HarnessError::Aborted`).
+
+The rung-2 wait is BOUNDED, never indefinite: `EngineConfig::escalation_timeout`
+(default `engine::DEFAULT_ESCALATION_TIMEOUT`, 20 minutes) caps it, and an
+unresolved escalation fails the turn loud with `HarnessError::EscalationTimeout`
+instead of hanging the turn — and everything up-stack awaiting it — forever. A
+test overrides `escalation_timeout` directly (the same idiom `max_child_turns`
+already uses) to exercise the timeout path without a real wait.
+
+**Resolution has two paths, raced against each other.** (1)
+`Harness::resolve_escalation(node, decision)` fires the decision directly — a
+test, or an emergency admin override. (2) When `Harness::set_escalation_gate`
+has wired an `OperatorGate` (`SelfHarnessDriver::set_gate` does this
+automatically, so a web/GUI gate covers escalations for free), the escalation
+presents itself as an ordinary operator ask — `AllocateMore`/`Abort` rendered
+as a form, carrying the stuck node's reason and transcript preview as the
+form's `doc` — through the SAME `present_form`/`/submit` wire every `askUser`
+uses. No dedicated endpoint: a live operator resolves an escalation exactly
+like any other pending ask on the operator surface. `Harness::escalation_of`/
+`first_escalated_node` still report a pending rung-2 escalation regardless of
+which resolution path is wired up.
+
+Gate: `tests/acceptance_fanout.rs`.
+
 ### One session: attached realms, closure delivery, machine rotation
 
 Pre-collapse, the outer `render`/`loop` session and each loop's answerer

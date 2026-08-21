@@ -35,6 +35,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 
 use parking_lot::Mutex;
 use serde_json::Value as Json;
@@ -60,6 +61,7 @@ use crate::forcing::{NodeTree, TreeError};
 use crate::log::{Actor, AnswerOutcome, LogWriter};
 use crate::provider::{DynModelProvider, Message, Role, Usage};
 use crate::registry::{Checkout, CheckoutError};
+use crate::selfharness::operator::{FieldShape, FormShape, OperatorGate, VariantShape};
 use crate::snapshot::{ContextSnapshot, SnapshotDigest};
 use crate::timing;
 use crate::tree::{FanBadge, HoleId, NodeId};
@@ -99,6 +101,16 @@ pub enum HarnessError {
     Aborted { node: NodeId, reason: String },
     #[error("node {0:?} has no pending operator escalation to resolve")]
     NoPendingEscalation(NodeId),
+    /// The escalation ladder's rung 2 waited [`EngineConfig::escalation_timeout`]
+    /// for an operator decision and got none — no gate configured, an
+    /// unreachable/unattended operator, or a submitted form that didn't
+    /// decode as a recognized [`OperatorDecision`]. Fails the turn LOUD
+    /// instead of hanging it (and everything up-stack awaiting it) forever.
+    #[error(
+        "node {node:?}: operator escalation timed out after {waited:?} with no decision — \
+         cap exhaustion was never resolved"
+    )]
+    EscalationTimeout { node: NodeId, waited: Duration },
     #[error("node {0:?} already has a turn in flight")]
     TurnInFlight(NodeId),
     /// A registry checkout landed on a state mismatch that is neither "no
@@ -582,6 +594,16 @@ pub struct Harness {
     /// the sender and fires it — the pair is inserted together and removed
     /// together, never independently.
     escalations: Mutex<HashMap<NodeId, (Escalation, oneshot::Sender<OperatorDecision>)>>,
+    /// The production resolve path for a rung-2 escalation: when set,
+    /// [`Self::escalate_to_operator`] presents the `AllocateMore`/`Abort`
+    /// decision as an ordinary operator ask through this gate (the SAME
+    /// `present_form`/`/submit` wire every `askUser` uses), instead of
+    /// relying solely on a caller invoking [`Self::resolve_escalation`]
+    /// directly. `None` by default (every existing caller — tests included —
+    /// keeps working unchanged, resolving only via [`Self::resolve_escalation`]).
+    /// Set by [`Self::set_escalation_gate`], wired from
+    /// `SelfHarnessDriver::set_gate` so a web/GUI gate covers escalations too.
+    escalation_gate: Mutex<Option<Arc<dyn OperatorGate>>>,
     /// Interned frozen context prefixes, keyed by digest — the cache roots
     /// [`Self::freeze_snapshot`] mints and [`Self::fork_from_snapshot`]
     /// branches from. Append-only for this harness's life: an entry is never
@@ -711,6 +733,7 @@ impl Harness {
             pending_window_exits: Mutex::new(Vec::new()),
             pending: Mutex::new(HashMap::new()),
             escalations: Mutex::new(HashMap::new()),
+            escalation_gate: Mutex::new(None),
             snapshots: Mutex::new(HashMap::new()),
             branch_origins: Mutex::new(HashMap::new()),
         })
@@ -2801,9 +2824,23 @@ impl Harness {
         self.escalations.lock().keys().min().copied()
     }
 
+    /// Wire the production resolve path for rung-2 escalations: every
+    /// subsequent [`Self::escalate_to_operator`] call presents its decision
+    /// as an ordinary operator ask through `gate` (see
+    /// [`Self::escalation_gate`]'s doc). Mirrors
+    /// `SelfHarnessDriver::set_gate` — indeed that method calls this one too,
+    /// so wiring a web/GUI gate into the driver covers escalations for free.
+    pub fn set_escalation_gate(&self, gate: Arc<dyn OperatorGate>) {
+        *self.escalation_gate.lock() = Some(gate);
+    }
+
     /// Resolve `node`'s pending rung-2 escalation with the operator's
-    /// `decision` (driven by the web `/steer/:node` endpoint, or fired
-    /// directly in a test to simulate the popup). Errors with
+    /// `decision`. This is the mechanism-level resolve: a caller with no
+    /// gate configured (or one that wants to bypass it — a test, an
+    /// emergency admin override) can fire it directly. When a gate IS
+    /// configured, [`Self::escalate_to_operator`] normally resolves via the
+    /// gate's own ask instead (see that method's doc), but this still works
+    /// concurrently — whichever settles first wins. Errors with
     /// [`HarnessError::NoPendingEscalation`] if `node` has no escalation
     /// parked (already resolved, or never escalated).
     pub fn resolve_escalation(
@@ -3597,41 +3634,81 @@ impl Harness {
     }
 
     /// Rung 2 of the escalation ladder: park `answerer` awaiting an operator
-    /// decision. Publishes an [`Escalation`] (what the stuck-node popup
-    /// renders) and a oneshot sender (fired by [`Self::resolve_escalation`],
-    /// driven by the web `/steer/:node` endpoint or a test simulating the
-    /// popup), THEN drops every lock before awaiting the receiver — the
-    /// partial fan state a caller further up the stack (e.g.
-    /// [`Self::answer_fanout`]'s `answers` vector) is holding lives on the
-    /// ASYNC STACK across this await, which is fine and intended: this is an
-    /// IN-PROCESS control-plane wait, not durable-across-restart mid-fan
-    /// suspension (explicitly out of R0 scope) — a process death here loses
-    /// the in-flight fan and the operator re-triggers, same as any other
-    /// in-flight turn.
+    /// decision. Publishes an [`Escalation`] (what [`Self::escalation_of`]/a
+    /// stuck-node popup reads) and a oneshot sender, THEN drops every lock
+    /// before awaiting a decision — the partial fan state a caller further
+    /// up the stack (e.g. [`Self::answer_fanout`]'s `answers` vector) is
+    /// holding lives on the ASYNC STACK across this await, which is fine and
+    /// intended: this is an IN-PROCESS control-plane wait, not
+    /// durable-across-restart mid-fan suspension (explicitly out of R0
+    /// scope) — a process death here loses the in-flight fan and the
+    /// operator re-triggers, same as any other in-flight turn.
+    ///
+    /// Two ways a decision arrives, raced against each other: (1)
+    /// [`Self::resolve_escalation`] fires the oneshot directly (a test, or
+    /// an emergency admin override); (2) when [`Self::escalation_gate`] is
+    /// configured, this presents the decision as an ordinary operator ask
+    /// (`AllocateMore`/`Abort`, rendered as a form) through the SAME
+    /// `present_form`/`/submit` wire every `askUser` uses — no dedicated
+    /// endpoint. Bounded by [`EngineConfig::escalation_timeout`]: if neither
+    /// arrives in time, this fails loud with
+    /// [`HarnessError::EscalationTimeout`] instead of hanging the turn (and
+    /// everything up-stack awaiting it) forever.
     async fn escalate_to_operator(
         &self,
         answerer: NodeId,
         attempts: u32,
     ) -> Result<CapDecision, HarnessError> {
-        let (tx, rx) = oneshot::channel();
+        let (tx, mut rx) = oneshot::channel();
         let escalation = Escalation {
             reason: format!("cap-exhausted after {attempts} attempts"),
             transcript_preview: self.transcript_tail(answerer, 6),
         };
-        self.escalations.lock().insert(answerer, (escalation, tx));
+        self.escalations
+            .lock()
+            .insert(answerer, (escalation.clone(), tx));
+        let gate = self.escalation_gate.lock().clone();
+        let timeout = self.cfg.escalation_timeout;
 
-        // On success, `resolve_escalation` already removed this entry (it
-        // takes the sender by removing the whole pair) — nothing left to
-        // clean up here. On error (the sender dropped without a decision —
-        // e.g. a second escalation on the same node overwrote this entry
-        // before it resolved), `resolve_escalation` never ran, so the entry
-        // needs cleaning up here instead.
-        let decision = rx.await.map_err(|_| {
-            self.escalations.lock().remove(&answerer);
-            HarnessError::Resident(format!(
-                "node {answerer:?}: operator escalation channel dropped without a decision"
-            ))
-        })?;
+        let wait_for_decision = async {
+            match gate {
+                Some(gate) => {
+                    let shape = escalation_decision_shape(answerer, &escalation);
+                    tokio::select! {
+                        resolved = &mut rx => resolved.ok(),
+                        presented = tokio::task::spawn_blocking(move || gate.present_form(&shape)) => {
+                            presented.ok().and_then(|answer| decode_operator_decision(&answer))
+                        }
+                    }
+                }
+                None => rx.await.ok(),
+            }
+        };
+
+        // Whichever arm resolved the escalation already removed its own
+        // trace of it EXCEPT this map entry (`resolve_escalation` removes
+        // it; the gate arm above does not, since it never touches the
+        // sender). Remove it unconditionally here — idempotent, and the one
+        // place every path (decision, dropped channel, timeout) converges.
+        let outcome = tokio::time::timeout(timeout, wait_for_decision).await;
+        self.escalations.lock().remove(&answerer);
+
+        let decision = match outcome {
+            Ok(Some(decision)) => decision,
+            Ok(None) => {
+                return Err(HarnessError::Resident(format!(
+                    "node {answerer:?}: operator escalation resolved with no usable decision \
+                     (the channel was dropped, the gate task failed, or the submitted form \
+                     didn't decode as a recognized decision)"
+                )));
+            }
+            Err(_elapsed) => {
+                return Err(HarnessError::EscalationTimeout {
+                    node: answerer,
+                    waited: timeout,
+                });
+            }
+        };
 
         match decision {
             OperatorDecision::AllocateMore { turns, steer } => {
@@ -4229,6 +4306,83 @@ impl Harness {
         self.tree
             .turn_spliced(node, turn, Role::User, content.to_string())?;
         Ok(())
+    }
+}
+
+/// The [`FormShape`] [`Harness::escalate_to_operator`] presents through the
+/// operator gate: a two-variant sum mirroring [`OperatorDecision`] exactly
+/// (`AllocateMore { turns, steer }` / `Abort`), with the escalation's reason
+/// and transcript preview carried as the ROOT shape's `doc` — the one place
+/// this ask's form-rendering surface can say WHICH node is stuck and why,
+/// since the wire carries no separate out-of-band channel for it.
+fn escalation_decision_shape(node: NodeId, escalation: &Escalation) -> FormShape {
+    FormShape::Sum {
+        type_key: "EscalationDecision".to_string(),
+        variants: vec![
+            VariantShape {
+                constructor: "AllocateMore".to_string(),
+                shape: FormShape::Product {
+                    type_key: "EscalationDecision".to_string(),
+                    constructor: "AllocateMore".to_string(),
+                    fields: vec![
+                        FieldShape {
+                            key: "turns".to_string(),
+                            shape: FormShape::Int,
+                            doc: Some("How many additional turns to grant.".to_string()),
+                        },
+                        FieldShape {
+                            key: "steer".to_string(),
+                            shape: FormShape::Optional(Box::new(FormShape::String)),
+                            doc: Some(
+                                "Optional corrective note injected as the child's next turn."
+                                    .to_string(),
+                            ),
+                        },
+                    ],
+                    doc: None,
+                },
+            },
+            VariantShape {
+                constructor: "Abort".to_string(),
+                shape: FormShape::Product {
+                    type_key: "EscalationDecision".to_string(),
+                    constructor: "Abort".to_string(),
+                    fields: vec![],
+                    doc: None,
+                },
+            },
+        ],
+        doc: Some(format!(
+            "node {node:?} is stuck: {reason}\n\nrecent transcript:\n{preview}",
+            reason = escalation.reason,
+            preview = escalation.transcript_preview,
+        )),
+    }
+}
+
+/// Decode an operator's submitted answer to [`escalation_decision_shape`]'s
+/// form — the payload-sum wire `operator.rs`'s module docs specify
+/// (`{"tag": "AllocateMore", "turns": ..., "steer": ...}` / `{"tag":
+/// "Abort"}`) — into an [`OperatorDecision`]. `None` for anything that
+/// doesn't match: a malformed/foreign submission never panics or silently
+/// defaults, it just fails to produce a decision (surfaced by
+/// [`Harness::escalate_to_operator`] as a `Resident` error).
+fn decode_operator_decision(answer: &Json) -> Option<OperatorDecision> {
+    let tag = answer.get("tag")?.as_str()?;
+    match tag {
+        "AllocateMore" => {
+            let turns = answer.get("turns")?.as_u64()?;
+            let steer = answer
+                .get("steer")
+                .and_then(|v| v.as_str())
+                .map(str::to_string);
+            Some(OperatorDecision::AllocateMore {
+                turns: turns as u32,
+                steer,
+            })
+        }
+        "Abort" => Some(OperatorDecision::Abort),
+        _ => None,
     }
 }
 
@@ -4898,6 +5052,7 @@ mod tests {
             pending_window_exits: Mutex::new(Vec::new()),
             pending: Mutex::new(HashMap::new()),
             escalations: Mutex::new(HashMap::new()),
+            escalation_gate: Mutex::new(None),
             snapshots: Mutex::new(HashMap::new()),
             branch_origins: Mutex::new(HashMap::new()),
         }
@@ -4933,6 +5088,7 @@ mod tests {
             pending_window_exits: Mutex::new(Vec::new()),
             pending: Mutex::new(HashMap::new()),
             escalations: Mutex::new(HashMap::new()),
+            escalation_gate: Mutex::new(None),
             snapshots: Mutex::new(HashMap::new()),
             branch_origins: Mutex::new(HashMap::new()),
         };

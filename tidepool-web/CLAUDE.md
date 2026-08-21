@@ -22,6 +22,13 @@ driver blocks on when it needs a human, extended by the node-lifecycle
 default methods (`node_gate`, `retire_node`, `node_seeded`,
 `node_finalized`, `node_failed`).
 
+The SAME `WebGate` also serves `tidepool-harness`'s fork/fanout escalation
+ladder (rung 2, a cap-exhausted child awaiting `AllocateMore`/`Abort`) —
+`SelfHarnessDriver::set_gate` wires it into `Harness::set_escalation_gate`
+automatically, so an escalation presents as an ordinary `present_form` ask
+(no dedicated route) and resolves through the existing `/node/{node}/submit/
+{interaction}` verb, same as any other pending form.
+
 ## What's here
 
 - `server.rs` — axum [`router`], the SSE broadcast stream, [`AppState`] (the
