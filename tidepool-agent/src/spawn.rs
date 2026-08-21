@@ -373,14 +373,13 @@ pub struct WorkerRun {
 }
 
 /// The receipt: what the runtime actually did, every field checkable against
-/// disk or the backend — never the model's account of itself.
+/// disk or the backend — never the model's account of itself. Agent/worktree/
+/// thread identity lives once, on the sibling [`WorkerRun`] — a receipt only
+/// carries what it alone knows.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SpawnReceipt {
-    pub agent: AgentId,
-    pub worktree: WorktreeId,
     /// The exact `AgentRef` string the binding was taken under.
     pub binding_ref: String,
-    pub thread: BackendThreadId,
     /// The EXACT model the backend resolved — never the tier name.
     pub resolved_model: String,
     pub turn: TurnId,
@@ -867,10 +866,7 @@ impl CycleSaga {
                     }
                 }
                 let receipt = SpawnReceipt {
-                    agent: self.agent,
-                    worktree: self.worktree.id().clone(),
                     binding_ref: self.binding_ref.clone(),
-                    thread: self.thread.clone(),
                     resolved_model: outcome.resolved_model,
                     turn: outcome.turn,
                     rounds: self.rounds,

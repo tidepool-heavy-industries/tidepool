@@ -130,11 +130,11 @@ fn run() -> Result<(), String> {
     let outcome = match &spawn_result {
         Ok(Ok(run)) => {
             println!("\n--- receipt (every field checkable against disk or the backend) ---");
-            println!("agent id:        {}", run.receipt.agent.0);
-            println!("worktree id:     {}", run.receipt.worktree.as_str());
+            println!("agent id:        {}", run.run.agent.0);
+            println!("worktree id:     {}", run.run.worktree.id().as_str());
             println!("worktree cwd:    {}", run.run.worktree.cwd().display());
             println!("binding ref:     {}", run.receipt.binding_ref);
-            println!("thread id:       {}", run.receipt.thread.0);
+            println!("thread id:       {}", run.run.thread.0);
             println!("RESOLVED MODEL:  {}", run.receipt.resolved_model);
             println!("turn id:         {}", run.receipt.turn.0);
 
@@ -173,7 +173,7 @@ fn run() -> Result<(), String> {
                 }
             }
 
-            print_binding_state(&binding_root, Some(run.receipt.worktree.as_str()));
+            print_binding_state(&binding_root, Some(run.run.worktree.id().as_str()));
             Some(())
         }
         Ok(Err(error)) => {

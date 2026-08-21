@@ -158,12 +158,8 @@ fn spawn_completes_and_settles_binding_terminal() {
         .spawn_one_cycle(&mut backend, &req)
         .expect("happy-path spawn");
 
-    // The coupled pair and the receipt describe the SAME run.
     assert_eq!(run.run.agent, AgentId(0));
-    assert_eq!(run.receipt.agent, run.run.agent);
-    assert_eq!(&run.receipt.worktree, run.run.worktree.id());
-    assert_eq!(run.receipt.thread, run.run.thread);
-    assert_eq!(run.receipt.thread, BackendThreadId("mock-thread-0".into()));
+    assert_eq!(run.run.thread, BackendThreadId("mock-thread-0".into()));
     assert_eq!(run.receipt.turn, TurnId("mock-turn-1".into()));
     assert_eq!(run.payload, payload);
     // The EXACT model, never a tier name — literal by design.
@@ -264,7 +260,7 @@ fn thread_start_failure_rolls_back_binding_and_retains_worktree() {
             &request(SpawnWorkspace::Existing(worktree.clone()), "successor"),
         )
         .expect("the rolled-back worktree must be rebindable");
-    assert_eq!(second.receipt.worktree, worktree);
+    assert_eq!(second.run.worktree.id(), &worktree);
     assert_eq!(second.receipt.binding_ref, "agent-1-successor");
 
     drop(spawner);
@@ -1324,7 +1320,8 @@ fn three_detached_sagas_complete_out_of_spawn_order_on_three_threads() {
             CycleResultPayload::Structured(serde_json::json!({ "summary": label }))
         );
         assert_eq!(
-            run.receipt.worktree, worktrees[index],
+            run.run.worktree.id(),
+            &worktrees[index],
             "{label} completed in the worktree it bound"
         );
     }
@@ -1523,7 +1520,7 @@ fn abandon_settles_released_once_and_is_a_no_op_on_a_settled_saga() {
             parked.call()
         ),
     };
-    let finished = run.receipt.worktree.clone();
+    let finished = run.run.worktree.id().clone();
 
     // --- 3. A ROLLED-BACK saga: same rule, reached through a failure. ---
     let mut failed_backend =

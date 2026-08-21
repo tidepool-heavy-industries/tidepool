@@ -1372,13 +1372,14 @@ fn usage_to_wire(u: &TokenUsage) -> AgTokenUsage {
 /// `receipt_model` carries the backend's EXACT resolved model verbatim — never
 /// a tier name, never re-derived here (`ModelPolicy`'s rule: a receipt naming
 /// a tier is not checkable). `receipt_usage` is `None` when the backend
-/// reported no usage, which is not the same fact as zero.
-fn spawn_receipt_to_wire(r: &SpawnReceipt) -> AgSpawnReceipt {
+/// reported no usage, which is not the same fact as zero. Agent/worktree/
+/// thread identity is read off `run` — `SpawnReceipt` no longer duplicates it.
+fn spawn_receipt_to_wire(run: &WorkerRun, r: &SpawnReceipt) -> AgSpawnReceipt {
     AgSpawnReceipt {
-        receipt_agent: agent_id_to_wire(r.agent),
-        receipt_worktree: worktree_id_to_wire(&r.worktree),
+        receipt_agent: agent_id_to_wire(run.agent),
+        receipt_worktree: worktree_id_to_wire(run.worktree.id()),
         receipt_binding_ref: r.binding_ref.clone(),
-        receipt_thread: thread_id_to_wire(&r.thread),
+        receipt_thread: thread_id_to_wire(&run.thread),
         receipt_model: r.resolved_model.clone(),
         receipt_turn: r.turn.0.clone(),
         receipt_rounds: i64::from(r.rounds),
@@ -1390,7 +1391,7 @@ fn outcome_to_wire(run: &OneCycleRun) -> AgSpawnOutcome {
     AgSpawnOutcome {
         outcome_run: worker_run_to_wire(&run.run),
         outcome_payload: payload_to_wire(&run.payload),
-        outcome_receipt: spawn_receipt_to_wire(&run.receipt),
+        outcome_receipt: spawn_receipt_to_wire(&run.run, &run.receipt),
         outcome_activity: run.activity.iter().map(activity_to_wire).collect(),
     }
 }
@@ -2038,10 +2039,7 @@ mod tests {
             },
             payload,
             receipt: SpawnReceipt {
-                agent: AgentId(7),
-                worktree: WorktreeId::from_raw("wt-1"),
                 binding_ref: "agent-7-reviewer".to_string(),
-                thread: BackendThreadId("mock-thread-0".to_string()),
                 resolved_model: "gpt-5.4-mini".to_string(),
                 turn: TurnId("turn-1".to_string()),
                 rounds: 0,
