@@ -105,12 +105,29 @@ fn emit_datacon_lookup(
         // Silence unused-var warnings in the `Some` branch where arity isn't
         // consumed by the emitted code.
         let _ = core_arity_usize;
+        // `get_by_name_arity_checked`, not the lenient `get_by_name_arity`:
+        // two distinct constructors sharing this name+arity must be a loud,
+        // candidate-naming error — insertion order must never silently
+        // decide which one the derive resolves to.
         quote! {
-            table.get_by_name_arity(#core_name, #core_arity_u32)
-                .ok_or_else(|| tidepool_bridge::BridgeError::UnknownDataConNameArity {
-                    name: #core_name.to_string(),
-                    arity: #core_arity_u32 as usize,
-                })#suffix
+            match table.get_by_name_arity_checked(#core_name, #core_arity_u32) {
+                ::std::result::Result::Ok(::std::option::Option::Some(id)) => {
+                    ::std::result::Result::Ok(id)
+                }
+                ::std::result::Result::Ok(::std::option::Option::None) => {
+                    ::std::result::Result::Err(tidepool_bridge::BridgeError::UnknownDataConNameArity {
+                        name: #core_name.to_string(),
+                        arity: #core_arity_u32 as usize,
+                    })
+                }
+                ::std::result::Result::Err(ambiguous) => {
+                    ::std::result::Result::Err(tidepool_bridge::BridgeError::AmbiguousDataConNameArity {
+                        name: ambiguous.name,
+                        arity: ambiguous.arity as usize,
+                        candidates: ambiguous.candidates,
+                    })
+                }
+            }#suffix
         }
     }
 }

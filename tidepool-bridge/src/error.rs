@@ -20,6 +20,26 @@ pub enum BridgeError {
         /// The expected representation arity.
         arity: usize,
     },
+    /// Lookup by (name, arity) found MORE THAN ONE distinct constructor —
+    /// insertion order would otherwise silently decide which one is used
+    /// (the class of bug that let a wrong-type `Value::Con` reach the
+    /// runtime with metadata/field arity disagreeing). Emitted by derived
+    /// `FromCore`/`ToCore` impls instead of picking a candidate arbitrarily;
+    /// disambiguate with a `#[core(module = "...")]` attribute.
+    #[error(
+        "ambiguous DataCon name+arity: {name} (arity {arity}) matches {candidates:?} — \
+         use a module-qualified #[core(module = \"...\")] attribute or \
+         get_by_qualified_name to disambiguate"
+    )]
+    AmbiguousDataConNameArity {
+        /// The unqualified constructor name.
+        name: String,
+        /// The expected representation arity.
+        arity: usize,
+        /// Module-qualified identity (falling back to unqualified name) of
+        /// every constructor that matched both the name and the arity.
+        candidates: Vec<String>,
+    },
     /// Lookup by module-qualified name failed. Emitted by derived
     /// `FromCore`/`ToCore` impls when a variant carries a
     /// `#[core(module = "...", name = "...")]` attribute and the computed

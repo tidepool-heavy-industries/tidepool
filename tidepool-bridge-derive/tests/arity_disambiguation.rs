@@ -111,6 +111,56 @@ fn alpha_decode_rejects_beta_shaped_value() {
     }
 }
 
+/// Two DISTINCT constructors sharing both the requested name AND arity
+/// (e.g. two independently-compiled modules each contributing a `Read`
+/// with the same shape) must make encode fail with `AmbiguousDataConNameArity`
+/// naming both candidates — not silently resolve to whichever was inserted
+/// last. Fails on the old code (`get_by_name_arity`'s "last matching entry"
+/// tie-break), which would have picked one of the two Reads by insertion
+/// order alone.
+#[test]
+fn true_ambiguity_reports_both_candidates_instead_of_picking_last() {
+    let mut t = standard_datacon_table();
+    // Two distinct arity-1 "Read" constructors — genuinely ambiguous, unlike
+    // `ambiguous_table()` above where arity itself disambiguates Alpha/Beta.
+    t.insert(DataCon {
+        id: DataConId(300),
+        name: "Read".into(),
+        tag: 1,
+        rep_arity: 1,
+        field_bangs: vec![],
+        qualified_name: Some("Pattern.Memory.Read".into()),
+        type_name: String::new(),
+    });
+    t.insert(DataCon {
+        id: DataConId(301),
+        name: "Read".into(),
+        tag: 1,
+        rep_arity: 1,
+        field_bangs: vec![],
+        qualified_name: Some("Pattern.File.Read".into()),
+        type_name: String::new(),
+    });
+
+    let err = Alpha::Read(17)
+        .to_value(&t)
+        .expect_err("two distinct Read/1 constructors must be ambiguous, not resolved");
+    match err {
+        BridgeError::AmbiguousDataConNameArity {
+            name,
+            arity,
+            candidates,
+        } => {
+            assert_eq!(name, "Read");
+            assert_eq!(arity, 1);
+            assert_eq!(candidates.len(), 2);
+            assert!(candidates.contains(&"Pattern.Memory.Read".to_string()));
+            assert!(candidates.contains(&"Pattern.File.Read".to_string()));
+        }
+        other => panic!("expected AmbiguousDataConNameArity, got {other:?}"),
+    }
+}
+
 #[test]
 fn unknown_name_reports_arity() {
     // When a constructor name exists but not at the requested arity, we should

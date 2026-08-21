@@ -71,6 +71,30 @@ pub enum DataConCollision {
     },
 }
 
+/// Two or more DISTINCT constructors share both an unqualified name and a
+/// requested representation arity. [`DataConTable::get_by_name_arity_checked`]
+/// refuses to silently pick one (insertion order deciding encoding is exactly
+/// the freer-simple `Union`-eviction class of bug, one query-time step
+/// removed) — the caller must disambiguate via [`DataConTable::get_companion`]
+/// (sibling-group identity) or [`DataConTable::get_by_qualified_name`]
+/// (module-qualified identity) instead.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error(
+    "ambiguous DataCon lookup: {} constructors named {name:?} with arity {arity} — {candidates:?}. \
+     Insertion order cannot decide which one is correct; disambiguate via get_companion \
+     (sibling-group identity) or get_by_qualified_name (module-qualified identity).",
+    candidates.len()
+)]
+pub struct AmbiguousDataCon {
+    /// The unqualified name that was looked up.
+    pub name: String,
+    /// The requested representation arity.
+    pub arity: u32,
+    /// Module-qualified identity (falling back to unqualified name) of every
+    /// constructor that matched both the name and the arity.
+    pub candidates: Vec<String>,
+}
+
 /// Lookup table for data constructor metadata.
 /// Populated during deserialization from the CBOR metadata section.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -392,6 +416,49 @@ impl DataConTable {
                 .find(|&&id| self.by_id.get(&id).is_some_and(|dc| dc.rep_arity == arity))
                 .copied()
         })
+    }
+
+    /// Look up by name AND expected arity, erroring loudly instead of
+    /// tie-breaking when more than one constructor shares both — the strict
+    /// counterpart of [`Self::get_by_name_arity`]. Callers that must not let
+    /// metadata insertion order decide encoding (the derive's default
+    /// resolution path, `tidepool-bridge`'s `get_resilient`) use this instead.
+    ///
+    /// - Zero matches (name absent entirely, or present only at other
+    ///   arities): `Ok(None)` — a plain "not found," not an ambiguity.
+    /// - Exactly one match: `Ok(Some(id))`.
+    /// - Two or more matches: `Err(AmbiguousDataCon)` naming every candidate's
+    ///   module-qualified identity (falling back to unqualified name).
+    pub fn get_by_name_arity_checked(
+        &self,
+        name: &str,
+        arity: u32,
+    ) -> Result<Option<DataConId>, AmbiguousDataCon> {
+        let Some(ids) = self.by_name.get(name) else {
+            return Ok(None);
+        };
+        let mut candidates: Vec<DataConId> = ids
+            .iter()
+            .copied()
+            .filter(|id| self.by_id.get(id).is_some_and(|dc| dc.rep_arity == arity))
+            .collect();
+        match candidates.len() {
+            0 => Ok(None),
+            1 => Ok(candidates.pop()),
+            _ => Err(AmbiguousDataCon {
+                name: name.to_string(),
+                arity,
+                candidates: candidates
+                    .iter()
+                    .map(|id| {
+                        self.by_id
+                            .get(id)
+                            .map(|dc| dc_identity(dc).to_string())
+                            .unwrap_or_else(|| format!("{id:?}"))
+                    })
+                    .collect(),
+            }),
+        }
     }
 
     /// Return all DataConIds sharing a given name (in insertion order).
@@ -1024,5 +1091,91 @@ mod tests {
         );
         // get_by_name_arity returns one of them (last inserted)
         assert_eq!(table.get_by_name_arity("Tip", 0), Some(DataConId(200)));
+    }
+
+    // ---- get_by_name_arity_checked: loud ambiguity, no insertion-order tie-break ----
+
+    /// Two distinct constructors sharing name AND arity (e.g. `Bin` from
+    /// `Data.Map` vs `Data.Set`, both binary) must be a loud error naming
+    /// both candidates — not a silent last-inserted pick.
+    #[test]
+    fn get_by_name_arity_checked_rejects_true_ambiguity() {
+        let mut table = DataConTable::new();
+        table.insert(make_datacon_qualified(
+            100,
+            "Bin",
+            1,
+            2,
+            "Data.Map.Internal.Bin",
+        ));
+        table.insert(make_datacon_qualified(
+            200,
+            "Bin",
+            1,
+            2,
+            "Data.Set.Internal.Bin",
+        ));
+
+        let err = table
+            .get_by_name_arity_checked("Bin", 2)
+            .expect_err("two distinct Bin/2 constructors must be ambiguous");
+        assert_eq!(err.name, "Bin");
+        assert_eq!(err.arity, 2);
+        assert_eq!(err.candidates.len(), 2);
+        assert!(err
+            .candidates
+            .contains(&"Data.Map.Internal.Bin".to_string()));
+        assert!(err
+            .candidates
+            .contains(&"Data.Set.Internal.Bin".to_string()));
+        let msg = err.to_string();
+        assert!(msg.contains("Bin"), "msg: {msg}");
+        assert!(msg.contains("Data.Map.Internal.Bin"), "msg: {msg}");
+        assert!(msg.contains("Data.Set.Internal.Bin"), "msg: {msg}");
+    }
+
+    /// A requested arity that no same-named constructor carries is a plain
+    /// "not found" — `Ok(None)`, never a silent fallback to a wrong-arity
+    /// entry (that fallback lived in `tidepool-bridge::get_resilient`, not
+    /// here, but this method must not reintroduce it).
+    #[test]
+    fn get_by_name_arity_checked_absent_arity_is_ok_none() {
+        let mut table = DataConTable::new();
+        table.insert(make_datacon(1, "Just", 2, 1));
+
+        assert_eq!(table.get_by_name_arity_checked("Just", 5), Ok(None));
+        assert_eq!(table.get_by_name_arity_checked("Missing", 0), Ok(None));
+    }
+
+    /// A single unambiguous name+arity match still resolves cleanly — the
+    /// strict path must not regress the common, non-colliding case.
+    #[test]
+    fn get_by_name_arity_checked_resolves_unique_match() {
+        let mut table = DataConTable::new();
+        table.insert(make_datacon(1, "Just", 2, 1));
+        table.insert(make_datacon(2, "Nothing", 1, 0));
+
+        assert_eq!(
+            table.get_by_name_arity_checked("Just", 1),
+            Ok(Some(DataConId(1)))
+        );
+    }
+
+    /// Same name, DIFFERENT arities is not ambiguous — arity alone
+    /// disambiguates, each resolves to its own unique id.
+    #[test]
+    fn get_by_name_arity_checked_different_arities_not_ambiguous() {
+        let mut table = DataConTable::new();
+        table.insert(make_datacon(1, "Read", 1, 1));
+        table.insert(make_datacon(2, "Read", 1, 2));
+
+        assert_eq!(
+            table.get_by_name_arity_checked("Read", 1),
+            Ok(Some(DataConId(1)))
+        );
+        assert_eq!(
+            table.get_by_name_arity_checked("Read", 2),
+            Ok(Some(DataConId(2)))
+        );
     }
 }

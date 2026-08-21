@@ -6,38 +6,36 @@ use crate::traits::{
 use tidepool_eval::{shapes, Value};
 use tidepool_repr::{DataConId, DataConTable, Literal};
 
-/// Resilient lookup for hand-written bridge impls (shared by `ToCore`/`FromCore`
-/// impls in this file and effect-response list setup in `tidepool-effect`).
+/// Lookup for hand-written bridge impls (shared by `ToCore`/`FromCore` impls
+/// in this file and effect-response list setup in `tidepool-effect`).
 ///
-/// Look up a DataCon by name and arity. If ambiguous, issues a diagnostic
-/// and returns the first match (preserving best-effort recovery). No
-/// qualified-name fallback — name+arity is the whole resolution policy here.
+/// Look up a DataCon by name and arity. Returns `None` — never a guess — when
+/// the name+arity pair doesn't resolve to exactly one constructor: either no
+/// constructor carries this name at this arity (a plain miss; existing
+/// same-name entries at OTHER arities are not a fallback candidate), or more
+/// than one distinct constructor shares both the name and the arity (in
+/// which case every callsite's `.ok_or_else(...)` already turns the `None`
+/// into a `BridgeError`, and the candidates are named on stderr so the
+/// ambiguity isn't silent even though `Option` can't carry them back to the
+/// caller). No qualified-name fallback — name+arity is the whole resolution
+/// policy here; a caller that needs to survive a genuine collision should
+/// migrate to `get_by_qualified_name` or `get_companion`.
 pub fn get_resilient(table: &DataConTable, name: &str, arity: u32) -> Option<DataConId> {
-    let matches = table.get_all_by_name(name);
-    if matches.is_empty() {
-        return None;
-    }
-
-    // Try name + arity match
-    let by_arity = table.get_by_name_arity(name, arity);
-
-    #[cfg(debug_assertions)]
-    if matches.len() > 1 {
-        // If arity disambiguated it perfectly, it's less of a diagnostic concern,
-        // but we still warn if there are multiple same-name-same-arity entries.
-        let same_arity_matches: Vec<_> = matches
-            .iter()
-            .filter(|&&id| table.get(id).is_some_and(|dc| dc.rep_arity == arity))
-            .collect();
-        if same_arity_matches.len() > 1 {
+    match table.get_by_name_arity_checked(name, arity) {
+        Ok(id) => id,
+        Err(ambiguous) => {
             eprintln!(
-                "[bridge] diagnostic: ambiguous unqualified DataCon name '{}' with arity {} in cross-module compilation context; matches = {:?}. This impl should eventually be migrated to get_by_qualified_name.",
-                name, arity, same_arity_matches
+                "[bridge] ambiguous unqualified DataCon name {:?} with arity {}: {} \
+                 candidates {:?} — refusing to guess; migrate this bridge site to a \
+                 module-qualified lookup (get_by_qualified_name / #[core(module = ...)]).",
+                ambiguous.name,
+                ambiguous.arity,
+                ambiguous.candidates.len(),
+                ambiguous.candidates,
             );
+            None
         }
     }
-
-    by_arity.or_else(|| matches.first().copied())
 }
 
 // Helper for type mismatch errors
