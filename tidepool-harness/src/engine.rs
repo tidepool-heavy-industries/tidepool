@@ -2754,7 +2754,7 @@ pub type SharedProvider = Arc<dyn DynModelProvider>;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::provider::{Message, Role};
+    use crate::provider::{Message, ReasoningItem, Role};
 
     fn user(content: &str) -> Message {
         Message {
@@ -2947,6 +2947,65 @@ mod tests {
         let round2 = round_bytes(&transcript, framing);
 
         assert_prefix_extension(&round1, &round2);
+    }
+
+    /// Shape (d): the actual PROVIDER-VISIBLE prefix, reasoning items
+    /// included. `round_bytes` above serializes each `Message` directly via
+    /// `serde_json::to_vec`, but `Message::reasoning_items` is
+    /// `#[serde(skip)]` — so shapes (a)-(c) can never observe what the real
+    /// wire carries once an assistant turn has reasoning state, and cannot
+    /// catch a regression there. The real request-assembly path
+    /// (`oauth.rs`'s `codex_responses`) excludes system messages (they ride
+    /// `instructions`) and flat_maps every other message through
+    /// `to_input_items`, which echoes `reasoning_items` ahead of the message
+    /// item itself — this test calls that SAME function (not a re-derived
+    /// mirror) to pin the item sequence, not just role+content.
+    fn wire_items(transcript: &[Message]) -> Vec<serde_json::Value> {
+        transcript
+            .iter()
+            .filter(|m| m.role != Role::System)
+            .flat_map(crate::provider::oauth::to_input_items)
+            .collect()
+    }
+
+    #[test]
+    fn within_window_reasoning_items_extend_the_provider_visible_prefix() {
+        let mut transcript = vec![user("The loop needs a typed answer of type `Decision`.")];
+        let round1 = wire_items(&transcript);
+
+        transcript.push(Message {
+            role: Role::Assistant,
+            content: "```haskell\nfinalize @Decision Approve\n```".to_string(),
+            reasoning_items: vec![ReasoningItem(serde_json::json!({
+                "type": "reasoning",
+                "id": "rs_1",
+                "encrypted_content": "opaque-blob-1",
+            }))],
+        });
+        transcript.push(user(
+            "Round complete — your window continues, and that round's \
+             definitions/bindings persist.",
+        ));
+        let round2 = wire_items(&transcript);
+
+        assert!(
+            round2.len() >= round1.len(),
+            "round shrank: {} items -> {} items",
+            round1.len(),
+            round2.len()
+        );
+        assert_eq!(
+            &round2[..round1.len()],
+            &round1[..],
+            "round N+1's provider-visible item sequence is not a pure \
+             extension of round N's once reasoning_items are involved"
+        );
+        // The reasoning item genuinely reached the wire ahead of its
+        // message, at the position `to_input_items` puts it — not merely
+        // "the lengths worked out".
+        assert_eq!(round2[round1.len()]["type"], "reasoning");
+        assert_eq!(round2[round1.len()]["id"], "rs_1");
+        assert_eq!(round2[round1.len() + 1]["type"], "message");
     }
 
     // -- multi-block extraction ---------------------------------------------

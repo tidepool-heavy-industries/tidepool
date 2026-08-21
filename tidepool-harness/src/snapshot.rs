@@ -49,8 +49,12 @@ use crate::provider::{Message, Role};
 /// `tidepool_runtime::cache`'s `INVOCATION_NAMESPACE` idiom so a snapshot
 /// digest can never collide with a compile-cache key computed over
 /// coincidentally-equal bytes. Versioned: a change to what the digest covers
-/// bumps this rather than silently re-meaning old digests.
-const SNAPSHOT_NAMESPACE: &[u8] = b"tidepool-context-snapshot-v1";
+/// bumps this rather than silently re-meaning old digests. Bumped to v2 when
+/// `digest_messages` started covering `reasoning_items` (2026-08-20) — purely
+/// honest hygiene, since digests are interned in-memory per run and re-minted
+/// at freeze, never written into `persistence.rs`'s checkpoint, so this bump
+/// needs no restart-compat handling.
+const SNAPSHOT_NAMESPACE: &[u8] = b"tidepool-context-snapshot-v2";
 
 /// The blake3 identity of a frozen context prefix, hex-encoded. A newtype for
 /// the same reason `tidepool_runtime::cache::InvocationKey` is one: a raw
@@ -143,13 +147,41 @@ pub fn digest_prefix(framing: Option<&str>, transcript: &[Message]) -> SnapshotD
 /// [`digest_prefix`] is defined in terms of, and the one a byte-stability
 /// check calls directly on a child's own assembled request prefix.
 ///
-/// Covers, length-framed: the domain separator, the message count, then each
-/// message's role tag and content in order. Length framing (rather than NUL
-/// separation) for the reason `tidepool_runtime::cache::frame` records: a NUL
-/// embedded in one field would otherwise shift bytes across a boundary and
-/// make two different prefixes hash alike. `reasoning_items` is deliberately
-/// NOT covered: it is `#[serde(skip)]`, in-memory only, and never part of what
-/// a fork child inherits.
+/// Covers, length-framed: the domain separator, the message count, then for
+/// each message its role tag, its content, and its `reasoning_items` — a
+/// length-framed item count followed by each item's own canonical JSON
+/// bytes, in original order. Length framing (rather than NUL separation) for
+/// the reason `tidepool_runtime::cache::frame` records: a NUL embedded in one
+/// field would otherwise shift bytes across a boundary and make two
+/// different prefixes hash alike.
+///
+/// `reasoning_items` participates because the provider request actually
+/// carries it: [`crate::provider::oauth::to_input_items`] echoes each
+/// assistant message's reasoning items into the wire `input` array ahead of
+/// the message itself (`Message` is `Clone`, and `#[serde(skip)]` only means
+/// "never written to the durable log" — it says nothing about what a live
+/// fork child carries to the provider). Two transcripts identical in
+/// role+content but differing in reasoning state are therefore DIFFERENT
+/// provider-visible prefixes; before this change they interned to the same
+/// [`SnapshotDigest`], so a later [`crate::harness::Harness::freeze_snapshot`]
+/// on the second one silently reused the FIRST one's interned entry — and any
+/// [`crate::harness::Harness::fork_from_snapshot`] child inherited the
+/// wrong reasoning state and origin. See the module doc's "What the digest
+/// does NOT claim" for the boundary this fix does not cross (still not a
+/// provider cache key; still no `cache_control`).
+///
+/// Canonicalization: each `ReasoningItem` wraps an opaque provider
+/// `serde_json::Value` (encrypted content, never parsed or reshaped by this
+/// tree). Its bytes come from `serde_json::to_vec`, which is deterministic
+/// here for a given LOGICAL value: this workspace does not enable
+/// serde_json's `preserve_order` feature anywhere (a Cargo feature is unified
+/// workspace-wide, so one crate enabling it would flip this tree-wide), so
+/// `serde_json::Value::Object` is backed by a `BTreeMap` and always iterates
+/// in sorted-key order regardless of the source JSON's key order — two
+/// logically-equal values with differently-ordered keys re-serialize to
+/// IDENTICAL bytes. Pinned by
+/// `reasoning_item_digest_is_independent_of_source_key_order` below, so this
+/// stays true rather than merely observed.
 pub fn digest_messages(messages: &[Message]) -> SnapshotDigest {
     let mut hasher = blake3::Hasher::new();
     frame(&mut hasher, SNAPSHOT_NAMESPACE);
@@ -157,6 +189,12 @@ pub fn digest_messages(messages: &[Message]) -> SnapshotDigest {
     for m in messages {
         frame(&mut hasher, role_tag(&m.role).as_bytes());
         frame(&mut hasher, m.content.as_bytes());
+        frame(&mut hasher, &(m.reasoning_items.len() as u64).to_le_bytes());
+        for item in &m.reasoning_items {
+            #[allow(clippy::expect_used, reason = "serde_json::Value always serializes")]
+            let bytes = serde_json::to_vec(&item.0).expect("serde_json::Value always serializes");
+            frame(&mut hasher, &bytes);
+        }
     }
     SnapshotDigest(hasher.finalize().to_hex().to_string())
 }
@@ -194,6 +232,7 @@ fn role_tag(role: &Role) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::provider::ReasoningItem;
 
     fn msg(role: Role, content: &str) -> Message {
         Message {
@@ -261,17 +300,73 @@ mod tests {
         assert_eq!(digest_messages(&snap.assembled_prefix()), snap.digest);
     }
 
-    /// `reasoning_items` is in-memory only and never inherited — it must not
-    /// move the digest.
+    fn reasoning(json: serde_json::Value) -> ReasoningItem {
+        ReasoningItem(json)
+    }
+
+    /// `reasoning_items` DOES move the digest now — the whole point of the
+    /// fix. Two transcripts identical in role+content but differing in
+    /// reasoning state are different provider-visible prefixes (see
+    /// [`digest_messages`]'s doc) and must not intern to the same
+    /// [`SnapshotDigest`]. Distinct-vs-plain AND distinct-vs-distinct, so a
+    /// bug that merely hashes "has any reasoning items" (rather than their
+    /// content) cannot pass this.
     #[test]
-    fn reasoning_items_do_not_move_the_digest() {
+    fn differing_reasoning_items_move_the_digest() {
         let plain = vec![msg(Role::Assistant, "b")];
-        let mut with_items = plain.clone();
-        with_items[0].reasoning_items = vec![crate::provider::ReasoningItem(serde_json::json!({
+        let mut with_a = plain.clone();
+        with_a[0].reasoning_items = vec![reasoning(serde_json::json!({
             "type": "reasoning",
+            "id": "rs_1",
+            "encrypted_content": "opaque-a",
+        }))];
+        let mut with_b = plain.clone();
+        with_b[0].reasoning_items = vec![reasoning(serde_json::json!({
+            "type": "reasoning",
+            "id": "rs_1",
+            "encrypted_content": "opaque-b",
+        }))];
+        assert_ne!(digest_messages(&plain), digest_messages(&with_a));
+        assert_ne!(digest_messages(&with_a), digest_messages(&with_b));
+    }
+
+    /// The idempotent-freeze half of the same contract: an unchanged
+    /// transcript — reasoning items included — must still digest identically
+    /// on a second freeze, or `Harness::freeze_snapshot`'s idempotence
+    /// (no duplicate `SnapshotFrozen` receipt for the same prefix) breaks for
+    /// any node whose transcript carries reasoning state.
+    #[test]
+    fn identical_reasoning_items_digest_identically() {
+        let mut a = vec![msg(Role::Assistant, "b")];
+        a[0].reasoning_items = vec![reasoning(serde_json::json!({
+            "type": "reasoning",
+            "id": "rs_1",
             "encrypted_content": "opaque",
         }))];
-        assert_eq!(digest_messages(&plain), digest_messages(&with_items));
+        let b = a.clone();
+        assert_eq!(digest_messages(&a), digest_messages(&b));
+    }
+
+    /// The canonicalization claim in [`digest_messages`]'s doc, pinned: two
+    /// logically-equal `ReasoningItem` values whose SOURCE key order differs
+    /// must still digest identically, because `serde_json::Value::Object` is
+    /// `BTreeMap`-backed (no `preserve_order` feature anywhere in this
+    /// workspace) and always re-serializes in sorted-key order.
+    #[test]
+    fn reasoning_item_digest_is_independent_of_source_key_order() {
+        let mut a = vec![msg(Role::Assistant, "b")];
+        a[0].reasoning_items = vec![reasoning(serde_json::json!({
+            "type": "reasoning",
+            "id": "rs_1",
+            "encrypted_content": "opaque",
+        }))];
+        let mut b = vec![msg(Role::Assistant, "b")];
+        b[0].reasoning_items = vec![reasoning(serde_json::json!({
+            "encrypted_content": "opaque",
+            "id": "rs_1",
+            "type": "reasoning",
+        }))];
+        assert_eq!(digest_messages(&a), digest_messages(&b));
     }
 
     #[test]

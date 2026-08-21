@@ -298,9 +298,17 @@ and receipts; it does not invent it.
 - **The digest runs over the ASSEMBLED prefix**, via `assemble_request`
   itself (`snapshot::digest_prefix` calls it) — one assembly path, so the
   digest cannot drift from what a provider is actually sent. Domain-separated
-  (`b"tidepool-context-snapshot-v1"`) and length-framed, mirroring
+  (`b"tidepool-context-snapshot-v2"`) and length-framed, mirroring
   `tidepool_runtime::cache`'s idiom; `frame` is private there, so the same
-  three lines are reimplemented rather than a second scheme invented.
+  three lines are reimplemented rather than a second scheme invented. Covers
+  each message's `reasoning_items` too (bumped to v2, 2026-08-20): the
+  provider request genuinely echoes them onto the wire
+  (`provider::oauth::to_input_items`), and `Message` being `Clone` means a
+  fork child DOES carry them — so two transcripts identical in role+content
+  but differing in reasoning state are different provider-visible prefixes,
+  and must not intern to the same `SnapshotDigest`. Still in-memory only:
+  digests are never written into `persistence.rs`'s checkpoint, so the v2
+  bump needed no restart-compat handling.
 - **`Harness::fork_from_snapshot(digest, brief)`** goes through the same
   `seed_forked_child` an ordinary fork does — the ONE place a
   `NodeSeed::Forked` is staged — so forcing, seeding, framing inheritance, and
@@ -444,13 +452,15 @@ refreshing on reuse; cache WRITES bill at 1.25× on gpt-5.6+. Bucketed
 sub-keying for high-fanout bursts is deliberately deferred until
 post-`prompt_cache_key` dogfood data shows sibling scatter persisting.
 
-`SnapshotDigest`/`digest_prefix` are UNCHANGED by this fix — they cover only
-`role_tag` + `content` over `assemble_request`'s output (`snapshot.rs`'s
-`digest_messages`), never provider-side request serialization or headers, so
-no digest shifted and nothing needed re-verifying for restart compat. (Digests
-are not written into `persistence.rs`'s checkpoint at all — confirmed by
-grep — they're interned in-memory per-run and re-minted at freeze, per the
-Context snapshots section above.)
+`SnapshotDigest`/`digest_prefix` were UNCHANGED by THIS fix — the
+`prompt_cache_key`/`session-id` header change is provider-side request
+serialization, never covered by the digest, so nothing here shifted or
+needed re-verifying for restart compat. (Separately, `digest_messages` was
+later widened to cover `reasoning_items` — see the v2 note in Context
+snapshots above; that was its own fix, for a different defect, not this
+one.) Digests are not written into `persistence.rs`'s checkpoint at all —
+confirmed by grep — they're interned in-memory per-run and re-minted at
+freeze, per the Context snapshots section above.
 
 **Turn boundary — recomposed SYSTEM message per loop iteration — is NOT the
 same hazard and was deliberately left alone.** Each self-iterating-harness

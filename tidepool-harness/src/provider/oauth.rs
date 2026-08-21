@@ -706,7 +706,12 @@ fn session_id_for(instructions: &str, opening: Option<&str>) -> String {
 /// [`codex_responses`]). User carries an `input_text` content part;
 /// assistant carries `output_text` (the Responses API distinguishes the two
 /// by direction).
-fn to_input_items(m: &Message) -> Vec<serde_json::Value> {
+///
+/// `pub(crate)`, not private: `engine.rs`'s within-window prefix-extension
+/// test family calls this directly to pin the actual provider-visible item
+/// sequence (reasoning items included) rather than a re-derived mirror that
+/// could drift from what this function really does.
+pub(crate) fn to_input_items(m: &Message) -> Vec<serde_json::Value> {
     let (role, content_type) = match m.role {
         Role::User => ("user", "input_text"),
         Role::Assistant => ("assistant", "output_text"),
