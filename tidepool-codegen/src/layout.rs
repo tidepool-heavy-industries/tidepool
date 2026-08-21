@@ -22,10 +22,6 @@ pub const VMCTX_ALLOC_LIMIT_OFFSET: i32 = 8;
 pub const VMCTX_GC_TRIGGER_OFFSET: i32 = 16;
 pub const VMCTX_TAIL_CALLEE_OFFSET: i32 = 24;
 pub const VMCTX_TAIL_ARG_OFFSET: i32 = 32;
-/// Offset of machine_state within VMContext. Host-fn-only: JIT-emitted code
-/// must never load this field directly (passing vmctx to a host-fn call is
-/// the only sanctioned access pattern).
-pub const VMCTX_MACHINE_STATE_OFFSET: i32 = 40;
 
 // --- Heap object tags (u8), derived from tidepool_heap::layout::HeapTag ---
 

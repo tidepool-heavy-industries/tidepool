@@ -53,6 +53,5 @@ const _: () = {
     assert!(mem::offset_of!(VMContext, gc_trigger) == VMCTX_GC_TRIGGER_OFFSET as usize);
     assert!(mem::offset_of!(VMContext, tail_callee) == VMCTX_TAIL_CALLEE_OFFSET as usize);
     assert!(mem::offset_of!(VMContext, tail_arg) == VMCTX_TAIL_ARG_OFFSET as usize);
-    assert!(mem::offset_of!(VMContext, machine_state) == VMCTX_MACHINE_STATE_OFFSET as usize);
     assert!(mem::align_of::<VMContext>() == 16);
 };

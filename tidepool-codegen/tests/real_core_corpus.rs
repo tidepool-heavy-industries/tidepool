@@ -7,7 +7,6 @@
 //! and not on the documented KNOWN allow-list is a newly-surfaced real-Core bug.
 //!
 //! Regenerate fixtures with `haskell/regen-corpus.sh` (native-bignum binary).
-use std::collections::BTreeSet;
 use std::path::PathBuf;
 use tidepool_codegen::host_fns::RuntimeError;
 use tidepool_codegen::jit_machine::JitError;
@@ -115,10 +114,9 @@ fn eval_is_closure(o: &CapturedOutcome) -> bool {
     matches!(v, Value::Closure { .. } | Value::ConFun(..))
 }
 
-/// Returns `(is_function_program, tag, detail, emit_coverage)`. The closure-check
-/// and the emit-coverage snapshot both run inside the worker thread (`Value`/`Env`
-/// aren't `Send`, and coverage is a per-thread set populated during this compile).
-fn run_one(node: &[u8], meta: &[u8]) -> (bool, &'static str, String, BTreeSet<&'static str>) {
+/// Returns `(is_function_program, tag, detail)`. The closure-check runs
+/// inside the worker thread (`Value`/`Env` aren't `Send`).
+fn run_one(node: &[u8], meta: &[u8]) -> (bool, &'static str, String) {
     let node = node.to_vec();
     let meta = meta.to_vec();
     let handle = std::thread::Builder::new()
@@ -126,12 +124,10 @@ fn run_one(node: &[u8], meta: &[u8]) -> (bool, &'static str, String, BTreeSet<&'
         .spawn(move || {
             let expr: CoreExpr = read_cbor(&node).unwrap();
             let table: DataConTable = read_metadata(&meta).unwrap().0;
-            tidepool_codegen::coverage::reset();
             let outcome = check_jit_vs_eval_captured(&expr, &table, NURSERY);
-            let cov = tidepool_codegen::coverage::snapshot();
             let is_fn = eval_is_closure(&outcome);
             let (tag, detail) = classify(&outcome);
-            (is_fn, tag, detail, cov)
+            (is_fn, tag, detail)
         })
         .unwrap();
     // A binding can terminate its worker via a fatal signal (e.g. host stack
@@ -143,7 +139,6 @@ fn run_one(node: &[u8], meta: &[u8]) -> (bool, &'static str, String, BTreeSet<&'
             false,
             "CRASH",
             "worker terminated (fatal signal / panic — likely host Drop overflow)".to_string(),
-            BTreeSet::new(),
         ),
     }
 }
@@ -239,7 +234,6 @@ fn corpus_report() {
     let mut counts: std::collections::BTreeMap<&str, usize> = std::collections::BTreeMap::new();
     let mut funcs = 0usize;
     let mut violations: Vec<String> = Vec::new();
-    let mut coverage: BTreeSet<&'static str> = BTreeSet::new();
     let mut gaps: Vec<String> = Vec::new();
     let mut bugs: Vec<String> = Vec::new();
 
@@ -247,8 +241,7 @@ fn corpus_report() {
     for (name, path) in &entries {
         let _guard = tidepool_testing::watchdog::begin(name);
         let node = std::fs::read(path).unwrap();
-        let (is_fn, tag, detail, cov) = run_one(&node, &meta);
-        coverage.extend(cov);
+        let (is_fn, tag, detail) = run_one(&node, &meta);
         if is_fn {
             funcs += 1; // helper function (Closure result) — not a program; skip.
             continue;
@@ -296,60 +289,6 @@ fn corpus_report() {
     );
     for b in &bugs {
         println!("  {b}");
-    }
-
-    // Emit-path coverage (P2): which emitter decision points the corpus exercised.
-    // Two dimensions: STRUCTURAL (frame/case/con shapes) and PRIMOP (per opcode).
-    if tidepool_codegen::coverage::is_enabled() {
-        println!("\n=== EMIT-PATH COVERAGE ===");
-
-        let s_tgt = tidepool_codegen::coverage::TARGETS;
-        let s_unhit: Vec<&&str> = s_tgt.iter().filter(|t| !coverage.contains(*t)).collect();
-        println!(
-            "  structural: {}/{} ({:.0}%) hit",
-            s_tgt.len() - s_unhit.len(),
-            s_tgt.len(),
-            100.0 * (s_tgt.len() - s_unhit.len()) as f64 / s_tgt.len() as f64
-        );
-        if !s_unhit.is_empty() {
-            println!("    UNHIT: {s_unhit:?}");
-        }
-
-        let primops: Vec<&'static str> = tidepool_repr::PrimOpKind::ALL_VARIANTS
-            .iter()
-            .map(|p| p.serial_name())
-            .collect();
-        let p_unhit: Vec<&&str> = primops.iter().filter(|p| !coverage.contains(*p)).collect();
-        println!(
-            "  primops:    {}/{} ({:.0}%) hit",
-            primops.len() - p_unhit.len(),
-            primops.len(),
-            100.0 * (primops.len() - p_unhit.len()) as f64 / primops.len() as f64
-        );
-        let p_hit: Vec<&&str> = primops.iter().filter(|p| coverage.contains(*p)).collect();
-        println!("    HIT primops ({}): {p_hit:?}", p_hit.len());
-        println!("    UNHIT primops ({}) — residual reach:", p_unhit.len());
-        println!("    {p_unhit:?}");
-        // The residual is dominated by opcodes UNREACHABLE from surface Haskell —
-        // a generator emitting raw Core could hit them; curation cannot:
-        //  - GHC rewrites the surface op away: `x - c` -> `x + negate c`
-        //    (DoubleSub/FloatSub), `x /= y` -> `not (x == y)` (DoubleNe/CharNe),
-        //    `x >= y` -> `not (x < y)` (DoubleGe). Only the rewritten-TO op is hit.
-        //  - 64-bit representation collapse: Int64*/Word64* == Int*/Word* on a
-        //    64-bit host, so surface Int64/Word64 arithmetic emits the Int/Word op.
-        //  - narrowing via mask: `fromIntegral :: Word8` emits `and# 0xFF`, not
-        //    narrow8Word#.
-        //  - compiler-internal: TagToEnum / SeqOp desugar to `case`; Raise /
-        //    ReallyUnsafePtrEquality are not surfaced.
-        //  - eval-oracle GAP (separate task): boxed Array#/SmallArray# ops need a
-        //    boxed-array `Value` variant the tree-walker lacks.
-        //  - need Data.Text / ByteString: FfiStrlen / FfiText* / low-level
-        //    ByteArray ops (ReadWord8Array, SetByteArray, ...).
-        println!(
-            "    (residual ≈ GHC-rewritten-away + 64-bit-collapsed + eval-array-gap\n     + Text/ByteArray + compiler-internal — see source note; generator-only.)"
-        );
-    } else {
-        println!("\n(emit-path coverage off — set TIDEPOOL_EMIT_COVERAGE=1)");
     }
 
     assert!(

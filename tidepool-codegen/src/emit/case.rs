@@ -31,21 +31,6 @@ pub fn emit_case(
         .collect();
     let default_alt = alts.iter().find(|alt| matches!(alt.con, AltCon::Default));
 
-    crate::coverage::hit(match alts.len() {
-        0 | 1 => "case:1alt",
-        2 => "case:2alt",
-        _ => "case:3+alt",
-    });
-    if default_alt.is_some() {
-        crate::coverage::hit("case:default");
-    }
-    if !data_alts.is_empty() {
-        crate::coverage::hit("case:dataalt");
-    }
-    if !lit_alts.is_empty() {
-        crate::coverage::hit("case:litalt");
-    }
-
     let merge_block = args.builder.create_block();
     args.builder.append_block_param(merge_block, types::I64);
 

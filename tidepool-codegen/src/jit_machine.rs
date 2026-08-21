@@ -60,9 +60,10 @@
 //! | `Project { n_fields }` | [`JitEffectMachine::run_fragment_suspendable_projected`] | [`JitEffectMachine::resume_suspended_projected`] | `Suspendable<Vec<RootSlot>>` | the N tenured roots, IN the completion |
 //! | `Render { field0_forced }` | [`JitEffectMachine::run_fragment_suspendable_render`] | [`JitEffectMachine::resume_suspended_render`] | `Suspendable<(RootSlot, Value)>` | field 0's tenured root + field 1's render, IN the completion |
 //!
-//! The PARKED (registry) path covers only the first two — [`ParkKind`] has no
-//! `Project`/`Render` spelling, since those are single-session repl paths with
-//! no realm counterpart.
+//! The PARKED (registry) path covers all four — [`ParkKind`] mirrors
+//! `Value`/`Bind`/`Project`/`Render` (one-session plan, Phase 0: `Project`/
+//! `Render` joined `Plain`/`Binding` so the registry path can serve every
+//! session lane).
 //!
 //! CONTRACT (see `plans/unpark/`, §6.2, for why this split is load-bearing):
 //! `Project`/`Render` return their tenured [`crate::old_space::RootSlot`]s
@@ -140,7 +141,9 @@ pub enum JitError {
     Signal(#[from] crate::signal_safety::SignalError),
     #[error("Effect handler response too large ({nodes} value nodes, max {limit}). Narrow your query to return fewer results.")]
     EffectResponseTooLarge { nodes: usize, limit: usize },
-    #[error("VarId collision at load: {0}. This indicates a Haskell-side VarId-scheme regression; set TIDEPOOL_VARID_CHECK=0 only to bypass for bisection.")]
+    #[error(
+        "VarId collision at load: {0}. This indicates a Haskell-side VarId-scheme regression."
+    )]
     VarIdCollision(#[from] tidepool_repr::VarIdCollision),
     /// Refused at ENTRY to the parked path, before the machine is driven at
     /// all (never a machine invariant violation — a caller/configuration
@@ -168,12 +171,6 @@ impl From<crate::host_fns::RuntimeError> for JitError {
     fn from(err: crate::host_fns::RuntimeError) -> Self {
         JitError::Yield(err.into())
     }
-}
-
-/// Kill-switch for the load-time duplicate-VarId check (#313 defense).
-/// Default ON; `TIDEPOOL_VARID_CHECK=0` disables it (bisection escape hatch).
-fn varid_check_enabled() -> bool {
-    std::env::var("TIDEPOOL_VARID_CHECK").map_or(true, |v| v != "0")
 }
 
 /// A read-only snapshot of one machine's heap/GC counters
@@ -386,34 +383,16 @@ enum ParkTarget {
     },
 }
 
-/// What a COMPLETING suspendable run produced, one variant per
-/// [`ResultMaterialization`] policy. Each public entry requests exactly one
-/// policy and projects exactly the matching variant onto its own return type;
-/// the others are unreachable for that call site by construction.
-enum CompletedProduct {
-    /// `Value` — the bridged result.
-    Value(tidepool_eval::value::Value),
-    /// `Bind { forced }` — the bridged TENURED value plus its persistent root.
-    Bind {
-        value: tidepool_eval::value::Value,
-        slot: crate::old_space::RootSlot,
-    },
-    /// `Project { n_fields }` — the tenured field roots, in field order. There
-    /// is no value: the products of a projection ARE the slots.
-    Project(Vec<crate::old_space::RootSlot>),
-    /// `Render { field0_forced }` — field 0's tenured root and field 1's
-    /// already-bridged render.
-    Render {
-        slot: crate::old_space::RootSlot,
-        rendered: tidepool_eval::value::Value,
-    },
-}
-
 /// Result of the shared suspendable body before it is projected into whichever
 /// public outcome type the caller's entry returns. `id` is `Some` exactly when
 /// the park target was [`ParkTarget::Registry`].
+///
+/// `Completed` carries a [`ParkedOutcome`] directly — always one of its four
+/// `Completed*` variants, never `Suspended` — so the registry-path projection
+/// ([`Self::into_parked`]) is a plain pass-through and each slot-path
+/// projection matches the one `Completed*` variant its policy produces.
 enum ParkedRaw {
-    Completed(CompletedProduct),
+    Completed(ParkedOutcome),
     Suspended {
         request: tidepool_eval::value::Value,
         has_finalized_closure: bool,
@@ -437,13 +416,13 @@ impl ParkedRaw {
     /// (the `Value` and `Bind` policies).
     fn into_suspendable(self) -> SuspendableOutcome {
         match self {
-            ParkedRaw::Completed(CompletedProduct::Value(value))
-            | ParkedRaw::Completed(CompletedProduct::Bind { value, .. }) => {
+            ParkedRaw::Completed(ParkedOutcome::CompletedValue(value))
+            | ParkedRaw::Completed(ParkedOutcome::CompletedBinding { value, .. }) => {
                 SuspendableOutcome::Completed(value)
             }
             ParkedRaw::Completed(_) => unreachable!(
                 "into_suspendable is only reached by the Value/Bind entries, \
-                 whose policies produce CompletedProduct::Value/Bind"
+                 whose policies produce ParkedOutcome::CompletedValue/CompletedBinding"
             ),
             ParkedRaw::Suspended {
                 request,
@@ -463,10 +442,12 @@ impl ParkedRaw {
     /// Project onto the multi-binder entries' outcome: the tenured field roots.
     fn into_projected(self) -> Suspendable<Vec<crate::old_space::RootSlot>> {
         match self {
-            ParkedRaw::Completed(CompletedProduct::Project(slots)) => Suspendable::Completed(slots),
+            ParkedRaw::Completed(ParkedOutcome::CompletedProject { roots }) => {
+                Suspendable::Completed(roots)
+            }
             ParkedRaw::Completed(_) => unreachable!(
                 "into_projected is only reached by the Project entries, \
-                 whose policy produces CompletedProduct::Project"
+                 whose policy produces ParkedOutcome::CompletedProject"
             ),
             ParkedRaw::Suspended {
                 request,
@@ -487,12 +468,12 @@ impl ParkedRaw {
     /// root paired with field 1's render.
     fn into_render(self) -> Suspendable<(crate::old_space::RootSlot, tidepool_eval::value::Value)> {
         match self {
-            ParkedRaw::Completed(CompletedProduct::Render { slot, rendered }) => {
-                Suspendable::Completed((slot, rendered))
+            ParkedRaw::Completed(ParkedOutcome::CompletedRender { root, rendered }) => {
+                Suspendable::Completed((root, rendered))
             }
             ParkedRaw::Completed(_) => unreachable!(
                 "into_render is only reached by the Render entries, \
-                 whose policy produces CompletedProduct::Render"
+                 whose policy produces ParkedOutcome::CompletedRender"
             ),
             ParkedRaw::Suspended {
                 request,
@@ -509,26 +490,11 @@ impl ParkedRaw {
         }
     }
 
-    /// Project onto the registry path's outcome type — all four
-    /// [`ParkKind`]/[`CompletedProduct`] spellings since Phase 0 of the
-    /// one-session plan.
+    /// Project onto the registry path's outcome type. `Completed` already IS
+    /// a [`ParkedOutcome`], so this only has to mint the `Suspended` variant.
     fn into_parked(self) -> ParkedOutcome {
         match self {
-            ParkedRaw::Completed(CompletedProduct::Value(value)) => {
-                ParkedOutcome::CompletedValue(value)
-            }
-            ParkedRaw::Completed(CompletedProduct::Bind { value, slot }) => {
-                ParkedOutcome::CompletedBinding { value, root: slot }
-            }
-            ParkedRaw::Completed(CompletedProduct::Project(roots)) => {
-                ParkedOutcome::CompletedProject { roots }
-            }
-            ParkedRaw::Completed(CompletedProduct::Render { slot, rendered }) => {
-                ParkedOutcome::CompletedRender {
-                    root: slot,
-                    rendered,
-                }
-            }
+            ParkedRaw::Completed(outcome) => outcome,
             #[allow(
                 clippy::expect_used,
                 reason = "registry park target mints an id on suspension"
@@ -1108,16 +1074,9 @@ impl JitEffectMachine {
         // distinct top-level bindings silently shadow each other — fail loudly
         // at load instead. Runs on the raw deserialized tree (the wrapAllBinds
         // Let-nest), before normalize/datacon wrapping reshape it.
-        if varid_check_enabled() {
-            tidepool_repr::check_toplevel_varids(expr)?;
-        }
+        tidepool_repr::check_toplevel_varids(expr)?;
         let expr = tidepool_repr::normalize(expr, table);
-        // The wrapper manifest is dropped here: `lower_jump_crosses_lam` below
-        // rebuilds the tree, so its node indices would not survive. The manifest
-        // exists for the session re-entry path (`add_function`), which has prior
-        // fragments to share constructor closures with; a one-shot compile has
-        // none.
-        let expr = crate::datacon_env::wrap_with_datacon_env(expr, table).expr;
+        let expr = crate::datacon_env::wrap_with_datacon_env(expr, table);
         // Defensive precondition restore: the real Haskell pipeline never emits
         // a Jump crossing a Lam boundary (Translate.hs's `jumpCrossesLam` rewrites
         // it first), but hand-built/synthetic CoreExpr producers can. Re-check
@@ -2493,15 +2452,9 @@ impl JitEffectMachine {
     }
 
     /// Shared epilogue for the suspendable path: materialize a `Done` pointer
-    /// under `materialization`, or stow the continuation on `self` and surface
-    /// the suspension.
-    ///
-    /// `materialization` is the SAME [`ResultMaterialization`] the plain routes
-    /// use, and the `Done` arm below calls the SAME [`Self::materialize`] —
-    /// there is no second copy of the force/tenure/bridge sequence to keep in
-    /// step. All four policies are therefore available to a turn that suspends:
-    /// `Value` and `Bind` (the pre-existing pair), plus `Project` (multi-bind)
-    /// and `Render` (bind + render in one run).
+    /// under `materialization` (via the same [`Self::materialize`] the plain
+    /// routes use — see the completion-policy table in the module docs), or
+    /// stow the continuation on `self` and surface the suspension.
     ///
     /// What stays HERE, because it is the suspendable path's own concern, in
     /// this order:
@@ -2560,7 +2513,7 @@ impl JitEffectMachine {
                 // `self.session`.
                 match self.materialize(machine.vmctx_mut(), done_ptr, materialization)? {
                     MaterializeResult::Value(value) => {
-                        Ok(ParkedRaw::Completed(CompletedProduct::Value(value)))
+                        Ok(ParkedRaw::Completed(ParkedOutcome::CompletedValue(value)))
                     }
                     MaterializeResult::Bind(slot) => {
                         // Laundering a `!Send` `RootSlot` across the eval-thread
@@ -2601,7 +2554,10 @@ impl JitEffectMachine {
                         let value = crate::host_fns::surface_error(
                             bridge_res.map_err(JitError::HeapBridge),
                         )?;
-                        Ok(ParkedRaw::Completed(CompletedProduct::Bind { value, slot }))
+                        Ok(ParkedRaw::Completed(ParkedOutcome::CompletedBinding {
+                            value,
+                            root: slot,
+                        }))
                     }
                     MaterializeResult::Project(slots) => {
                         // The slots ARE the products; they ride out in the
@@ -2609,15 +2565,17 @@ impl JitEffectMachine {
                         // registry: `ParkedOutcome::CompletedProject`), so
                         // nothing is stashed and nothing has to be taken back
                         // off the machine.
-                        Ok(ParkedRaw::Completed(CompletedProduct::Project(slots)))
+                        Ok(ParkedRaw::Completed(ParkedOutcome::CompletedProject {
+                            roots: slots,
+                        }))
                     }
                     MaterializeResult::Render(slot, rendered) => {
                         // No second bridge: `rendered` IS field 1, already
                         // bridged inside `materialize` BEFORE field 0 was
                         // tenured (the aliasing-safe ordering). Both products
                         // ride out in the completion on both paths.
-                        Ok(ParkedRaw::Completed(CompletedProduct::Render {
-                            slot,
+                        Ok(ParkedRaw::Completed(ParkedOutcome::CompletedRender {
+                            root: slot,
                             rendered,
                         }))
                     }
@@ -2830,53 +2788,11 @@ impl JitEffectMachine {
         external_env: &crate::emit::ExternalEnv,
     ) -> Result<FuncId, JitError> {
         self.fragments_added += 1;
-        let shape_start = std::time::Instant::now();
         // Mirror compile_inner's tree shaping so the fragment is emitted exactly
         // like the original entry; only the JITModule destination differs (it is
         // already finalized — we add a fresh round).
         let expr = tidepool_repr::normalize(expr, table);
-        // `normalize` is bracketed separately inside `shape`: it is a
-        // whole-tree rebuild whose cost tracks fragment size, while the rest of
-        // shaping tracks table size. One `shape_ms` bucket cannot tell those
-        // two apart.
-        let normalize_ms = shape_start.elapsed();
-        // Pre-wrap reachable-constructor count: the fragment's own Core, before
-        // wrap_with_datacon_env mechanically adds a reference to every table
-        // constructor. This is the number the metadata-vs-reachable ratio needs;
-        // core_cons measured downstream of the wrap (tidepool-codegen/src/emit/expr.rs's
-        // fragment_stats line, a different tree) coincides with table_cons by
-        // construction and cannot answer that question. Gated on the target
-        // being enabled: an unconditional walk + HashSet allocation on every
-        // compile would tax the hot path this instrument exists to measure.
-        // Timed separately and subtracted out of `shape_ms` below so the
-        // diagnostic walk doesn't inflate the metric it reports.
-        let walk_start = std::time::Instant::now();
-        let core_cons_prewrap_count = if log::log_enabled!(target: "tidepool::codegen", log::Level::Debug)
-        {
-            let mut set: rustc_hash::FxHashSet<tidepool_repr::DataConId> =
-                rustc_hash::FxHashSet::default();
-            for node in &expr.nodes {
-                match node {
-                    tidepool_repr::CoreFrame::Con { tag, .. } => {
-                        set.insert(*tag);
-                    }
-                    tidepool_repr::CoreFrame::Case { alts, .. } => {
-                        for alt in alts {
-                            if let tidepool_repr::AltCon::DataAlt(id) = alt.con {
-                                set.insert(id);
-                            }
-                        }
-                    }
-                    _ => {}
-                }
-            }
-            set.len()
-        } else {
-            0
-        };
-        let walk_elapsed = walk_start.elapsed();
-        let crate::datacon_env::WrappedExpr { expr, wraps } =
-            crate::datacon_env::wrap_with_datacon_env(expr, table);
+        let expr = crate::datacon_env::wrap_with_datacon_env(expr, table);
         // Boxed-literal wrapper tolerance is per-compile; refresh from this
         // fragment's table (see compile_inner). Runtime-inert — read only during
         // emission — so refreshing it does not perturb already-compiled code.
@@ -2957,49 +2873,15 @@ impl JitEffectMachine {
             }
             self.tags = Ok(refreshed);
         }
-        let nodes = expr.nodes.len();
-        // Subtract the pre-wrap diagnostic walk's own time: it sits inside this
-        // window (it needs the pre-wrap tree, which wrap_with_datacon_env then
-        // consumes) but is not part of the shaping work this bucket measures.
-        let shape_ms = shape_start.elapsed() - walk_elapsed;
 
-        let functions_defined_before = self.pipeline.functions_defined();
-        let blocks_emitted_before = self.pipeline.blocks_emitted();
-        let dce_before = self.pipeline.dce_scan;
-
-        let emit_start = std::time::Instant::now();
         let func_id =
             crate::emit::expr::compile_expr(&mut self.pipeline, &expr, name, external_env)
                 .map_err(JitError::Compilation)?;
-        let emit_ms = emit_start.elapsed();
 
-        let finalize_start = std::time::Instant::now();
         // Multi-round finalize: finalize_definitions is safe to re-run; finalize()
         // drains only THIS round's pending stack maps and appends them to the
         // registry (round-1 maps were drained on the first finalize).
         self.pipeline.finalize()?;
-        let finalize_ms = finalize_start.elapsed();
-
-        let funcs = self.pipeline.functions_defined() - functions_defined_before;
-        let blocks = self.pipeline.blocks_emitted() - blocks_emitted_before;
-        let dce_delta = self.pipeline.dce_scan.delta_since(&dce_before);
-        log::debug!(
-            target: "tidepool::codegen",
-            "add_function name={name} table_cons={table_cons} core_cons_prewrap={core_cons_prewrap} \
-             wrapped_cons={wrapped_cons} nodes={nodes} normalize_ms={normalize_ms:.3} shape_ms={shape_ms:.3} \
-             emit_ms={emit_ms:.3} finalize_ms={finalize_ms:.3} \
-             funcs={funcs} blocks={blocks} dce_calls={dce_calls} dce_nodes={dce_nodes} dce_ms={dce_ms:.3}",
-            table_cons = table.iter().count(),
-            core_cons_prewrap = core_cons_prewrap_count,
-            wrapped_cons = wraps.len(),
-            normalize_ms = normalize_ms.as_secs_f64() * 1000.0,
-            shape_ms = shape_ms.as_secs_f64() * 1000.0,
-            emit_ms = emit_ms.as_secs_f64() * 1000.0,
-            finalize_ms = finalize_ms.as_secs_f64() * 1000.0,
-            dce_calls = dce_delta.calls,
-            dce_nodes = dce_delta.nodes_walked,
-            dce_ms = dce_delta.elapsed.as_secs_f64() * 1000.0,
-        );
 
         Ok(func_id)
     }
@@ -3351,21 +3233,8 @@ impl JitEffectMachine {
     }
 
     // ----------------------------------------------------------------------
-    // Nested child runs on a suspended machine.
-    //
-    // While a parent turn is suspended at a typed yield (`runLLMTurn`/`Ask`,
-    // `suspended_continuation` is `Some`), CHILD fragment runs can execute
-    // against the SAME machine — reading the parent's bindings zero-copy —
-    // provided the parent's stowed continuation is a REGISTERED GC ROOT so a
-    // child's collection evacuates it rather than freeing it.
-    //
-    // The temporal "no GC runs on a suspended machine" argument (the L7 asserts)
-    // is REPLACED, for the nested case only, by this registered root. The L7
-    // asserts on the plain entries (`run`/`run_pure`/`run_fragment`/`*_and_bind`)
-    // stay UNCHANGED: a plain entry started while a continuation is stowed and
-    // UNREGISTERED is still an illegal state and still panics. The nested-child
-    // entries below are the ONLY sanctioned way to run while suspended, and they
-    // register the root first.
+    // Nested child runs on a suspended machine — see the module docstring's
+    // "Nested child runs on a suspended machine" section for the invariant.
     // ----------------------------------------------------------------------
 
     /// Enter nested-child mode: MOVE the stowed continuation out of
@@ -3464,15 +3333,9 @@ impl JitEffectMachine {
     }
 
     // ----------------------------------------------------------------------
-    // REALM PROTOTYPE — the parked-continuation registry.
-    //
-    // Many continuations parked in ONE machine, each a REGISTERED GC ROOT for
-    // its whole parked lifetime, resumable in any order. The temporal argument
-    // ("no GC runs on a suspended machine") is dropped entirely here: the
-    // parked path never populates `suspended_continuation`, so the L7 asserts
-    // on the plain entries pass and arbitrary further computation — including
-    // computation that collects and doubles the heap — runs freely against a
-    // machine holding N parks.
+    // REALM PROTOTYPE — the parked-continuation registry. See the module
+    // docstring's "The parked-continuation registry (realm prototype)"
+    // section for the invariant.
     // ----------------------------------------------------------------------
 
     /// Check `incoming` — a realm's handled prefix, the effect names for tags
@@ -4343,15 +4206,16 @@ fn request_carries_closure_sentinel(request: &tidepool_eval::value::Value) -> bo
     }
 }
 
-/// Result of a suspendable turn ([`JitEffectMachine::run_suspendable`] /
-/// [`JitEffectMachine::resume_suspended`]): the turn produced a value, or it
-/// suspended at the ask boundary carrying the bridged request `Value` (the
-/// continuation is stowed inside the machine, ready for `resume_suspended`).
-pub enum SuspendableOutcome {
-    /// The turn ran to completion; `Value` is the bridged result.
-    Completed(tidepool_eval::value::Value),
-    /// The turn suspended at the ask boundary. `request` is the bridged `Ask`
-    /// request; the machine holds the continuation internally.
+/// A suspendable turn's outcome, generic over what its
+/// result-materialization policy actually PRODUCES on completion. The
+/// projected/render entries return their real product — N tenured roots, or
+/// a root paired with a render — rather than inventing a `Value` to satisfy
+/// a fixed shape.
+pub enum Suspendable<T> {
+    /// The turn ran to completion, producing `T`.
+    Completed(T),
+    /// The turn suspended at the ask boundary; the machine holds the
+    /// continuation internally.
     Suspended {
         request: tidepool_eval::value::Value,
         /// Finalize-by-reference: `true` when the suspend request was a
@@ -4366,26 +4230,14 @@ pub enum SuspendableOutcome {
     },
 }
 
-/// A suspendable turn's outcome, generic over what its
-/// result-materialization policy actually PRODUCES on completion.
-///
-/// [`SuspendableOutcome`] is the `T = Value` case, kept as its own type because
-/// it predates this one and has consumers matching on it. The newer
-/// projected/render entries use this instead, so each returns its real product
-/// — N tenured roots, or a root paired with a render — rather than inventing a
-/// `Value` to satisfy a fixed shape.
-pub enum Suspendable<T> {
-    /// The turn ran to completion, producing `T`.
-    Completed(T),
-    /// The turn suspended at the ask boundary; the machine holds the
-    /// continuation internally. Same payload as
-    /// [`SuspendableOutcome::Suspended`].
-    Suspended {
-        request: tidepool_eval::value::Value,
-        /// See [`SuspendableOutcome::Suspended::has_finalized_closure`].
-        has_finalized_closure: bool,
-    },
-}
+/// Result of a suspendable turn ([`JitEffectMachine::run_suspendable`] /
+/// [`JitEffectMachine::resume_suspended`]): the turn produced a bridged
+/// `Value`, or it suspended at the ask boundary carrying the bridged request
+/// (the continuation is stowed inside the machine, ready for
+/// `resume_suspended`). The `T = Value` specialization of [`Suspendable`],
+/// kept as its own name because it predates the generic and has consumers
+/// matching on it.
+pub type SuspendableOutcome = Suspendable<tidepool_eval::value::Value>;
 
 /// How a suspended turn is re-entered ([`JitEffectMachine::resume_suspended`]).
 pub enum ResumeInput {
@@ -4983,7 +4835,7 @@ mod tests {
     }
 
     #[test]
-    fn test_varid_check_kill_switch() {
+    fn test_varid_check_rejects_duplicate_toplevel_binder() {
         use tidepool_repr::tree::RecursiveTree;
         use tidepool_repr::types::Literal;
         use tidepool_repr::{CoreFrame, VarId};
@@ -5008,22 +4860,10 @@ mod tests {
         };
         let table = DataConTable::new();
 
-        // 1. Default ON: must fail
         let res = JitEffectMachine::compile(&expr, &table, 1 << 20);
         assert!(
             matches!(res, Err(JitError::VarIdCollision(_))),
             "Expected VarIdCollision, got success"
-        );
-
-        // 2. Kill-switch: must pass
-        std::env::set_var("TIDEPOOL_VARID_CHECK", "0");
-        let res_disabled = JitEffectMachine::compile(&expr, &table, 1 << 20);
-        std::env::remove_var("TIDEPOOL_VARID_CHECK");
-
-        assert!(
-            res_disabled.is_ok(),
-            "Kill-switch failed to bypass VarId collision: {:?}",
-            res_disabled.err()
         );
     }
 

@@ -437,6 +437,33 @@ fn fragment_referencing(vars: &[VarId]) -> CoreExpr {
     b.build()
 }
 
+/// Walk the top-level `LetNonRec` chain a `wrap_with_datacon_env` result
+/// begins with, collecting each minted binding's `VarId` (which is
+/// `VarId(dc.id.0)` for the constructor it binds). Minted nodes are always
+/// pushed AFTER the original fragment's own nodes (`wrap_with_datacon_env`
+/// drains the fragment into a fresh builder first), so `original_len` — the
+/// pre-wrap fragment's node count — is the boundary: the walk stops as soon
+/// as it steps into a node index below it, i.e. into the original fragment's
+/// own tree (which could itself start with an unrelated `LetNonRec`).
+fn top_level_wrapped_binder_ids(
+    expr: &CoreExpr,
+    original_len: usize,
+) -> std::collections::BTreeSet<u64> {
+    let mut out = std::collections::BTreeSet::new();
+    if expr.nodes.is_empty() {
+        return out;
+    }
+    let mut idx = expr.nodes.len() - 1;
+    while idx >= original_len {
+        let CoreFrame::LetNonRec { binder, body, .. } = &expr.nodes[idx] else {
+            break;
+        };
+        out.insert(binder.0);
+        idx = *body;
+    }
+    out
+}
+
 /// The prune's own observable, isolated from the run machinery: which
 /// constructor wrappers `wrap_with_datacon_env` binds for a fragment compiled
 /// against a POPULATED / accumulated table, not a fresh one.
@@ -466,10 +493,11 @@ fn wrap_with_datacon_env_binds_only_referenced_constructors_from_populated_table
     // NODE_ID unreferenced — they must NOT be bound.
     let referenced = [VarId(C1.0), VarId(BOX2.0), VarId(WRAP2.0)];
     let fragment = fragment_referencing(&referenced);
+    let original_len = fragment.nodes.len();
 
     let wrapped = wrap_with_datacon_env(fragment, &session);
 
-    let actual: std::collections::BTreeSet<u64> = wrapped.wraps.iter().map(|w| w.tag.0).collect();
+    let actual = top_level_wrapped_binder_ids(&wrapped, original_len);
     let expected: std::collections::BTreeSet<u64> = [C1.0, BOX2.0, WRAP2.0].into_iter().collect();
 
     assert_eq!(

@@ -1,33 +1,4 @@
-use tidepool_repr::{CoreExpr, CoreFrame, DataConId, DataConTable, TreeBuilder, VarId};
-
-/// One constructor binding minted by [`wrap_with_datacon_env`].
-///
-/// The wrapper RHSs are CLOSED terms — an arity-0 `Con` with no fields, or a
-/// curried lambda chain over freshly-minted binders — so they capture nothing
-/// from the fragment and are identical for a given constructor on every turn.
-/// That closedness is what lets a caller compile a wrapper's closure once per
-/// session and reuse it (see `CodegenPipeline`'s constructor-closure cache).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct DataConWrap {
-    /// Index of the `LetNonRec` node this binding occupies in the wrapped tree.
-    /// Valid only against the tree returned alongside it, and only while that
-    /// tree's indices are untouched — a later pass that rebuilds the tree
-    /// (e.g. `lower::lower_jump_crosses_lam`) invalidates the manifest.
-    pub let_idx: usize,
-    /// The constructor bound at `VarId(tag.0)`.
-    pub tag: DataConId,
-    /// `rep_arity`: 0 binds a saturated `Con`, N binds an N-deep lambda chain.
-    pub arity: usize,
-}
-
-/// [`wrap_with_datacon_env`]'s result: the wrapped tree plus a manifest of the
-/// bindings it minted, innermost (lowest `DataConId`) first.
-pub struct WrappedExpr {
-    /// The fragment with its constructor environment prepended.
-    pub expr: CoreExpr,
-    /// One entry per minted binding, in construction order.
-    pub wraps: Vec<DataConWrap>,
-}
+use tidepool_repr::{CoreExpr, CoreFrame, DataConTable, TreeBuilder, VarId};
 
 /// Wrap a CoreExpr with let-bindings for the data constructors it actually
 /// references from the table.
@@ -47,12 +18,9 @@ pub struct WrappedExpr {
 /// there is no transitive closure to chase over the table, and a single
 /// free-variables pass over the incoming fragment is sufficient to decide the
 /// full referenced set.
-pub fn wrap_with_datacon_env(mut expr: CoreExpr, table: &DataConTable) -> WrappedExpr {
+pub fn wrap_with_datacon_env(mut expr: CoreExpr, table: &DataConTable) -> CoreExpr {
     if expr.nodes.is_empty() {
-        return WrappedExpr {
-            expr,
-            wraps: Vec::new(),
-        };
+        return expr;
     }
     let fvs = tidepool_repr::free_vars::free_vars(&expr);
 
@@ -70,7 +38,6 @@ pub fn wrap_with_datacon_env(mut expr: CoreExpr, table: &DataConTable) -> Wrappe
     datacons.sort_by_key(|dc| dc.id.0);
 
     let mut body = root;
-    let mut wraps = Vec::with_capacity(datacons.len());
 
     for dc in &datacons {
         let binder = VarId(dc.id.0);
@@ -86,11 +53,6 @@ pub fn wrap_with_datacon_env(mut expr: CoreExpr, table: &DataConTable) -> Wrappe
                 binder,
                 rhs: con,
                 body,
-            });
-            wraps.push(DataConWrap {
-                let_idx: body,
-                tag: dc.id,
-                arity,
             });
         } else {
             // Build curried lambda chain: \v0 -> \v1 -> ... -> Con(id, [v0, v1, ...])
@@ -127,24 +89,16 @@ pub fn wrap_with_datacon_env(mut expr: CoreExpr, table: &DataConTable) -> Wrappe
                 rhs: inner,
                 body,
             });
-            wraps.push(DataConWrap {
-                let_idx: body,
-                tag: dc.id,
-                arity,
-            });
         }
     }
 
-    WrappedExpr {
-        expr: b.build(),
-        wraps,
-    }
+    b.build()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tidepool_repr::RecursiveTree;
+    use tidepool_repr::{DataConId, RecursiveTree};
 
     fn make_datacon(id: u64, rep_arity: u32) -> tidepool_repr::DataCon {
         tidepool_repr::DataCon {
@@ -173,23 +127,58 @@ mod tests {
         }
     }
 
+    /// Walk the top-level `LetNonRec` chain a wrapped tree begins with,
+    /// collecting each minted binding's `(binder, arity)` — arity 0 for a
+    /// saturated `Con` RHS, N for an N-deep `Lam` chain over a `Con`. Minted
+    /// nodes are always pushed AFTER the original fragment's own nodes
+    /// (`wrap_with_datacon_env` drains the fragment into a fresh builder
+    /// first), so `original_len` — the pre-wrap fragment's node count —
+    /// is the boundary: the walk stops as soon as it steps into a node
+    /// index below it, i.e. into the original fragment's own tree (which
+    /// may itself start with an unrelated `LetNonRec`).
+    fn top_level_wraps(expr: &CoreExpr, original_len: usize) -> Vec<(VarId, usize)> {
+        let mut out = Vec::new();
+        if expr.nodes.is_empty() {
+            return out;
+        }
+        let mut idx = expr.nodes.len() - 1;
+        while idx >= original_len {
+            let CoreFrame::LetNonRec { binder, rhs, body } = &expr.nodes[idx] else {
+                break;
+            };
+            let mut arity = 0;
+            let mut node = &expr.nodes[*rhs];
+            while let CoreFrame::Lam { body, .. } = node {
+                arity += 1;
+                node = &expr.nodes[*body];
+            }
+            out.push((*binder, arity));
+            idx = *body;
+        }
+        out
+    }
+
     #[test]
     fn wraps_only_referenced_constructor() {
         let table = table_with([make_datacon(1, 0), make_datacon(2, 0), make_datacon(3, 0)]);
-        let wrapped = wrap_with_datacon_env(var_fragment(2), &table);
-        assert_eq!(wrapped.wraps.len(), 1);
-        assert_eq!(wrapped.wraps[0].tag, DataConId(2));
+        let fragment = var_fragment(2);
+        let original_len = fragment.nodes.len();
+        let wrapped = wrap_with_datacon_env(fragment, &table);
+        let wraps = top_level_wraps(&wrapped, original_len);
+        assert_eq!(wraps, vec![(VarId(2), 0)]);
     }
 
     #[test]
     fn wraps_nothing_when_fragment_references_no_constructor() {
         let table = table_with([make_datacon(1, 0), make_datacon(2, 1)]);
         // Fragment free in an unrelated var, not any constructor binder.
-        let wrapped = wrap_with_datacon_env(var_fragment(999), &table);
-        assert!(wrapped.wraps.is_empty());
+        let fragment = var_fragment(999);
+        let original_len = fragment.nodes.len();
+        let wrapped = wrap_with_datacon_env(fragment, &table);
+        assert!(top_level_wraps(&wrapped, original_len).is_empty());
         // Unchanged in shape: still the single Var node.
-        assert_eq!(wrapped.expr.nodes.len(), 1);
-        assert_eq!(wrapped.expr.nodes[0], CoreFrame::Var(VarId(999)));
+        assert_eq!(wrapped.nodes.len(), 1);
+        assert_eq!(wrapped.nodes[0], CoreFrame::Var(VarId(999)));
     }
 
     #[test]
@@ -201,31 +190,16 @@ mod tests {
         let v2 = b.push(CoreFrame::Var(VarId(2)));
         b.push(CoreFrame::App { fun: v1, arg: v2 });
         let fragment = b.build();
+        let original_len = fragment.nodes.len();
 
         let wrapped = wrap_with_datacon_env(fragment, &table);
-        assert_eq!(wrapped.wraps.len(), 2);
-
-        let w0 = wrapped
-            .wraps
-            .iter()
-            .find(|w| w.tag == DataConId(1))
-            .expect("arity-0 con wrapped");
-        assert_eq!(w0.arity, 0);
-        assert!(matches!(
-            wrapped.expr.nodes[w0.let_idx],
-            CoreFrame::LetNonRec { binder, .. } if binder == VarId(1)
-        ));
-
-        let w2 = wrapped
-            .wraps
-            .iter()
-            .find(|w| w.tag == DataConId(2))
-            .expect("arity-2 con wrapped");
-        assert_eq!(w2.arity, 2);
-        assert!(matches!(
-            wrapped.expr.nodes[w2.let_idx],
-            CoreFrame::LetNonRec { binder, .. } if binder == VarId(2)
-        ));
+        let wraps: std::collections::BTreeMap<VarId, usize> =
+            top_level_wraps(&wrapped, original_len)
+                .into_iter()
+                .collect();
+        assert_eq!(wraps.len(), 2);
+        assert_eq!(wraps[&VarId(1)], 0, "arity-0 con wrapped");
+        assert_eq!(wraps[&VarId(2)], 2, "arity-2 con wrapped");
     }
 
     #[test]
@@ -233,8 +207,7 @@ mod tests {
         let table = table_with([make_datacon(1, 0)]);
         let empty = RecursiveTree { nodes: vec![] };
         let wrapped = wrap_with_datacon_env(empty, &table);
-        assert!(wrapped.wraps.is_empty());
-        assert!(wrapped.expr.nodes.is_empty());
+        assert!(wrapped.nodes.is_empty());
     }
 
     /// The equivalence guard: pruning must not orphan a reference. The free
@@ -262,14 +235,16 @@ mod tests {
         });
         let fragment = b.build();
         let fragment_fvs = tidepool_repr::free_vars::free_vars(&fragment);
+        let original_len = fragment.nodes.len();
 
         let wrapped = wrap_with_datacon_env(fragment, &table);
-        assert_eq!(wrapped.wraps.len(), 2);
+        let wraps = top_level_wraps(&wrapped, original_len);
+        assert_eq!(wraps.len(), 2);
 
         let wrapped_binders: std::collections::BTreeSet<VarId> =
-            wrapped.wraps.iter().map(|w| VarId(w.tag.0)).collect();
+            wraps.iter().map(|(binder, _)| *binder).collect();
 
-        let wrapped_fvs = tidepool_repr::free_vars::free_vars(&wrapped.expr);
+        let wrapped_fvs = tidepool_repr::free_vars::free_vars(&wrapped);
         let expected: std::collections::BTreeSet<VarId> = fragment_fvs
             .iter()
             .copied()
@@ -305,14 +280,12 @@ mod tests {
             body,
         });
         let fragment = b.build();
+        let original_len = fragment.nodes.len();
 
         let wrapped = wrap_with_datacon_env(fragment, &table);
 
-        let actual: std::collections::BTreeSet<DataConId> =
-            wrapped.wraps.iter().map(|w| w.tag).collect();
-        let expected: std::collections::BTreeSet<DataConId> = std::collections::BTreeSet::new();
-        assert_eq!(
-            actual, expected,
+        assert!(
+            top_level_wraps(&wrapped, original_len).is_empty(),
             "the constructor's own binder id is bound by an inner let inside the \
              fragment, so it is not free in the fragment as a whole and must not \
              be wrapped — a wrapper here would be shadowed, dead code, exactly as \
@@ -332,10 +305,6 @@ mod tests {
     /// restores the quadratic behavior this prune exists to avoid, since
     /// nearly every constructor in a real fragment appears as a `Con` tag or
     /// `DataAlt` somewhere.
-    ///
-    /// The pre-wrap diagnostic walk in `jit_machine.rs` counts a DIFFERENT
-    /// Con/DataAlt set by design — the two sets are not meant to agree, and
-    /// this test does not compare them.
     #[test]
     fn constructor_used_only_as_con_tag_or_data_alt_is_not_wrapped() {
         let con_tag_id = 30u64;
@@ -359,14 +328,12 @@ mod tests {
             }],
         });
         let fragment = b.build();
+        let original_len = fragment.nodes.len();
 
         let wrapped = wrap_with_datacon_env(fragment, &table);
 
-        let actual: std::collections::BTreeSet<DataConId> =
-            wrapped.wraps.iter().map(|w| w.tag).collect();
-        let expected: std::collections::BTreeSet<DataConId> = std::collections::BTreeSet::new();
-        assert_eq!(
-            actual, expected,
+        assert!(
+            top_level_wraps(&wrapped, original_len).is_empty(),
             "a constructor referenced only as a Con tag or a DataAlt id must not \
              be wrapped — neither use is a Var reference to VarId(dc.id.0), and \
              widening the filter to catch these would restore most of the \

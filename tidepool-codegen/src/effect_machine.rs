@@ -130,24 +130,6 @@ impl EffContKind {
         }
     }
 
-    /// The module-qualified constructor name as recorded in the DataConTable
-    /// (`Module.Ctor`, via `Tidepool.Translate.qualifiedName`).
-    ///
-    /// These are fixed: the freer-simple / open-union / FTCQueue packages are
-    /// pinned in the toolchain, so the defining modules never move. This is the
-    /// reliable discriminator when a user import collides on the unqualified
-    /// name — e.g. `Data.Tree.Node` shadows the FTCQueue continuation `Node`,
-    /// both at arity 2, so unqualified-name and arity lookup are both ambiguous.
-    pub fn qualified_name(self) -> &'static str {
-        match self {
-            EffContKind::Val => "Control.Monad.Freer.Val",
-            EffContKind::E => "Control.Monad.Freer.E",
-            EffContKind::Union => "Data.OpenUnion.Union",
-            EffContKind::Leaf => "Data.FTCQueue.Leaf",
-            EffContKind::Node => "Data.FTCQueue.Node",
-        }
-    }
-
     /// All variants in registration order.
     pub const ALL: [EffContKind; 5] = [
         EffContKind::Val,
@@ -177,13 +159,18 @@ pub struct ConTags {
     pub node: u64,
 }
 
-impl TryFrom<&tidepool_repr::DataConTable> for ConTags {
-    type Error = EffContKind;
-
-    fn try_from(table: &tidepool_repr::DataConTable) -> Result<Self, Self::Error> {
-        // Prefer the qualified name (see `EffContKind::qualified_name` for why
-        // that disambiguates); fall back to unqualified only when the
-        // qualified name is absent.
+impl ConTags {
+    /// Resolve the freer-simple continuation constructors' tags from a
+    /// compiled session's `DataConTable`.
+    pub fn from_table(table: &tidepool_repr::DataConTable) -> Result<Self, EffContKind> {
+        // Prefer the qualified name (`Module.Ctor`, via
+        // `Tidepool.Translate.qualifiedName`) — the freer-simple / open-union
+        // / FTCQueue packages are pinned in the toolchain, so the defining
+        // modules never move, making this the reliable discriminator when a
+        // user import collides on the unqualified name (e.g. `Data.Tree.Node`
+        // shadows the FTCQueue continuation `Node`, both at arity 2, so
+        // unqualified-name and arity lookup are both ambiguous); fall back to
+        // unqualified only when the qualified name is absent.
         let resolve =
             |kind: EffContKind, qualified: &str, bare: &str| -> Result<u64, EffContKind> {
                 tidepool_effect::freer_names::resolve(table, qualified, bare)
@@ -220,12 +207,6 @@ impl TryFrom<&tidepool_repr::DataConTable> for ConTags {
     }
 }
 
-impl ConTags {
-    pub fn from_table(table: &tidepool_repr::DataConTable) -> Result<Self, EffContKind> {
-        Self::try_from(table)
-    }
-}
-
 /// Compiled effect machine — drives JIT-compiled freer-simple effect stacks.
 ///
 /// The step/resume protocol:
@@ -242,11 +223,6 @@ pub struct CompiledEffectMachine {
 
 // SAFETY: All fields are raw pointers or function pointers, which are Send.
 unsafe impl Send for CompiledEffectMachine {}
-
-const _: fn() = || {
-    fn assert_send<T: Send>() {}
-    let _ = assert_send::<CompiledEffectMachine>;
-};
 
 impl CompiledEffectMachine {
     /// Read the constructor tag from a Con heap object.
@@ -415,11 +391,9 @@ impl CompiledEffectMachine {
             let effect_tag = if tag_ptr_tag == layout::TAG_LIT {
                 unsafe { *(tag_ptr.get().add(layout::LIT_VALUE_OFFSET as usize) as *const u64) }
             } else {
-                // Fallback for boxed W#: Read the LitWord from field 0.
-                // Harden: verify it's a TAG_CON and has at least one field.
-                if tag_ptr_tag != layout::TAG_CON {
-                    return Yield::Error(YieldError::UnexpectedTag(tag_ptr_tag));
-                }
+                // Fallback for boxed W#: Read the LitWord from field 0. The
+                // `tag_ptr_tag != TAG_LIT` branch and the check above together
+                // establish this is TAG_CON.
                 let num_fields = unsafe { Self::read_con_num_fields(tag_ptr.get()) };
                 if num_fields == 0 {
                     return Yield::Error(YieldError::UnexpectedTag(tag_ptr_tag));

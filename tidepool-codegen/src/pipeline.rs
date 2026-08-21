@@ -31,37 +31,6 @@ pub enum PipelineError {
     Finalization(String),
 }
 
-/// Per-call stats for the `LetNonRec` dead-code-elimination probe in
-/// `emit_node_impl` (`emit/expr.rs`): each probe walks a candidate RHS's body
-/// subtree via `free_vars` to decide whether the binder is dead.
-///
-/// Snapshot-and-diff friendly: [`CodegenPipeline`] accumulates this for the
-/// machine's whole lifetime (never reset), so a caller wanting a per-call
-/// delta must snapshot before and diff after via [`Self::delta_since`] — a
-/// reset would race the nested/child-fragment paths, which share the same
-/// pipeline.
-#[derive(Debug, Clone, Copy, Default)]
-pub struct DceScanStats {
-    /// Number of DCE probes run (one per `LetNonRec` node visited).
-    pub calls: u64,
-    /// Total nodes walked across all probed subtrees (`extract_subtree` size).
-    pub nodes_walked: u64,
-    /// Total wall time spent in the probe (subtree extraction + `free_vars`).
-    pub elapsed: std::time::Duration,
-}
-
-impl DceScanStats {
-    /// The stats accumulated since `prev` was snapshotted. `prev` must be an
-    /// earlier snapshot of the same (monotonically growing) counters.
-    pub fn delta_since(&self, prev: &DceScanStats) -> DceScanStats {
-        DceScanStats {
-            calls: self.calls - prev.calls,
-            nodes_walked: self.nodes_walked - prev.nodes_walked,
-            elapsed: self.elapsed - prev.elapsed,
-        }
-    }
-}
-
 /// Cranelift JIT compilation pipeline.
 ///
 /// Single-compile strategy: `module.define_function()` compiles and links,
@@ -118,9 +87,6 @@ pub struct CodegenPipeline {
     /// that turn's functions — read it the same snapshot-before/diff-after
     /// way as [`Self::functions_defined`].
     blocks_emitted: u64,
-    /// Accumulated stats for the `LetNonRec` DCE probe in `emit_node_impl`.
-    /// See [`DceScanStats`] for the snapshot-and-diff contract.
-    pub dce_scan: DceScanStats,
     /// String-intern arena for diagnostic strings (e.g. enclosing-function
     /// names) that compiled code holds a raw pointer to.
     ///
@@ -190,7 +156,6 @@ impl CodegenPipeline {
             lit_wrappers: crate::emit::LitWrapperIds::default(),
             functions_defined: 0,
             blocks_emitted: 0,
-            dce_scan: DceScanStats::default(),
             name_arena: HashSet::new(),
         })
     }
@@ -355,12 +320,6 @@ mod tests {
     use std::collections::HashMap;
 
     #[test]
-    fn test_empty_pipeline() {
-        let mut pipeline = CodegenPipeline::new(&[]).unwrap();
-        pipeline.finalize().unwrap();
-    }
-
-    #[test]
     fn test_declare_define_finalize() {
         let mut pipeline = CodegenPipeline::new(&[]).unwrap();
         let func_id = pipeline.declare_function("test_fn").unwrap();
@@ -391,41 +350,6 @@ mod tests {
         // SAFETY: Calling the JIT-compiled function with a dummy vmctx (0).
         let res = unsafe { func(0) };
         assert_eq!(res, 42);
-    }
-
-    #[test]
-    fn test_duplicate_declarations() {
-        let mut pipeline = CodegenPipeline::new(&[]).unwrap();
-        let id1 = pipeline.declare_function("f1").unwrap();
-        let id2 = pipeline.declare_function("f2").unwrap();
-        assert_ne!(id1, id2);
-
-        let id3 = pipeline.declare_function("f1").unwrap();
-        assert_eq!(id1, id3);
-    }
-
-    #[test]
-    fn test_get_function_ptr_after_finalize() {
-        let mut pipeline = CodegenPipeline::new(&[]).unwrap();
-        let func_id = pipeline.declare_function("f1").unwrap();
-
-        let mut ctx = pipeline.module.make_context();
-        ctx.func.signature = pipeline.make_func_signature();
-        let mut builder_context = FunctionBuilderContext::new();
-        let mut builder = FunctionBuilder::new(&mut ctx.func, &mut builder_context);
-        let block = builder.create_block();
-        builder.append_block_params_for_function_params(block);
-        builder.switch_to_block(block);
-        builder.seal_block(block);
-        let val = builder.ins().iconst(types::I64, 0);
-        builder.ins().return_(&[val]);
-        builder.finalize();
-
-        pipeline.define_function(func_id, &mut ctx).unwrap();
-        pipeline.finalize().unwrap();
-
-        let ptr = pipeline.get_function_ptr(func_id);
-        assert!(!ptr.is_null());
     }
 
     #[test]

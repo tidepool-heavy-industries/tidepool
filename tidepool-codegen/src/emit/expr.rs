@@ -350,30 +350,8 @@ fn expand_node(
     }
 }
 
-/// Emit-coverage key for an `EmitFrame` variant (see `crate::coverage`).
-fn emit_frame_cov_key(frame: &EmitFrame<SsaVal>) -> &'static str {
-    match frame {
-        EmitFrame::Var(_) => "frame:Var",
-        EmitFrame::Lit(_) => "frame:Lit",
-        EmitFrame::LitString(_) => "frame:LitString",
-        EmitFrame::LitByteArray(_) => "frame:LitByteArray",
-        EmitFrame::Con { .. } => "frame:Con",
-        EmitFrame::ThunkCon { .. } => "frame:ThunkCon",
-        EmitFrame::App { .. } => "frame:App",
-        EmitFrame::PrimOp { .. } => "frame:PrimOp",
-        EmitFrame::Jump { .. } => "frame:Jump",
-        EmitFrame::Case { .. } => "frame:Case",
-        EmitFrame::Lam { .. } => "frame:Lam",
-        EmitFrame::Join { .. } => "frame:Join",
-        EmitFrame::LetBoundary(_) => "frame:LetBoundary",
-        EmitFrame::Raise { .. } => "frame:Raise",
-        EmitFrame::RaiseLazy { .. } => "frame:RaiseLazy",
-    }
-}
-
 fn collapse_frame(args: EmitArgs, frame: EmitFrame<SsaVal>) -> Result<SsaVal, EmitError> {
     let tail = args.tail;
-    crate::coverage::hit(emit_frame_cov_key(&frame));
     match frame {
         EmitFrame::LitString(ref bytes) => emit_lit_string(
             args.sess.pipeline,
@@ -413,7 +391,6 @@ fn collapse_frame(args: EmitArgs, frame: EmitFrame<SsaVal>) -> Result<SsaVal, Em
                 // on ExternalEnv MEMBERSHIP, not on the tag — the tag is
                 // incidental.
                 if let Some(slot) = args.ctx.external_env.get(vid) {
-                    crate::coverage::hit("var:external_env");
                     return Ok(SsaVal::from_external_slot(args.builder, slot));
                 }
 
@@ -468,11 +445,6 @@ fn collapse_frame(args: EmitArgs, frame: EmitFrame<SsaVal>) -> Result<SsaVal, Em
             }
         },
         EmitFrame::Con { tag, fields } => {
-            crate::coverage::hit(if fields.is_empty() {
-                "con:nullary"
-            } else {
-                "con:nonnullary"
-            });
             let field_vals: Vec<Value> = fields
                 .iter()
                 .map(|v| {
@@ -599,10 +571,9 @@ fn collapse_frame(args: EmitArgs, frame: EmitFrame<SsaVal>) -> Result<SsaVal, Em
             ref op,
             args: ref prim_args,
         } => {
-            crate::coverage::hit(op.serial_name()); // per-primop emit coverage
-                                                    // Force thunked args: PrimOps are strict in all arguments.
-                                                    // Case alt binders can be thunks (lazy Con fields), so force
-                                                    // them before passing to primop unboxing.
+            // Force thunked args: PrimOps are strict in all arguments.
+            // Case alt binders can be thunks (lazy Con fields), so force
+            // them before passing to primop unboxing.
             let forced_args: Vec<SsaVal> = prim_args
                 .iter()
                 .map(|a| force_thunk_ssaval(args.sess.pipeline, args.builder, args.sess.vmctx, *a))
@@ -1236,19 +1207,6 @@ fn emit_lam(args: EmitArgs, binder: VarId, body_idx: usize) -> Result<SsaVal, Em
 
     args.ctx.lambda_counter = inner_emit.lambda_counter;
 
-    if std::env::var("TIDEPOOL_DUMP_CLIF").is_ok() {
-        eprintln!("=== CLIF {} ({} captures) ===", lambda_name, captures.len());
-        for (i, (var_id, ssaval)) in captures.iter().enumerate() {
-            let kind = match ssaval {
-                SsaVal::HeapPtr(_) => "HeapPtr",
-                SsaVal::Raw(_, tag) => &format!("Raw(tag={})", tag),
-            };
-            eprintln!("  capture[{}]: VarId({:#x}) = {}", i, var_id.0, kind);
-        }
-        eprintln!("{}", inner_ctx.func.display());
-        eprintln!("=== END CLIF {} ===", lambda_name);
-    }
-
     args.sess
         .pipeline
         .define_function(lambda_func_id, &mut inner_ctx)?;
@@ -1458,20 +1416,6 @@ fn emit_thunk_promised(
 
     args.ctx.lambda_counter = inner_emit.lambda_counter;
 
-    if std::env::var("TIDEPOOL_DUMP_CLIF").is_ok() {
-        eprintln!("=== CLIF {} ({} captures) ===", thunk_name, captures.len());
-        for (i, (var_id, ssaval)) in captures.iter().enumerate() {
-            let kind = match ssaval {
-                Some(SsaVal::HeapPtr(_)) => "HeapPtr",
-                Some(SsaVal::Raw(_, tag)) => &format!("Raw(tag={})", tag),
-                None => "PENDING (letrec knot placeholder)",
-            };
-            eprintln!("  capture[{}]: VarId({:#x}) = {}", i, var_id.0, kind);
-        }
-        eprintln!("{}", inner_ctx.func.display());
-        eprintln!("=== END CLIF {} ===", thunk_name);
-    }
-
     args.sess
         .pipeline
         .define_function(thunk_func_id, &mut inner_ctx)?;
@@ -1564,66 +1508,10 @@ pub fn compile_expr(
     // Built once, up front, for the whole compilation: this compile_expr call
     // is one `EmitSession::tree` scope end to end (nested Lam/Thunk bodies
     // get their OWN fresh index over their own extracted tree — see
-    // `EmitSession::free_vars_idx`'s doc), so both the debug dump below and
-    // the top-level `EmitSession` constructed further down share this one
-    // analysis rather than each re-deriving it.
+    // `EmitSession::free_vars_idx`'s doc), so the top-level `EmitSession`
+    // constructed further down can reuse this one analysis rather than
+    // re-deriving it.
     let free_vars_idx = crate::emit::free_vars_index::FreeVarsIndex::compute(tree);
-    if std::env::var("TIDEPOOL_DUMP_TREE").is_ok() {
-        eprintln!(
-            "[tree] {} nodes:\n{}",
-            tree.nodes.len(),
-            tidepool_repr::pretty::pretty_print(tree)
-        );
-        let fvs = free_vars_idx.free_vars_at(tree.nodes.len() - 1);
-        if !fvs.is_empty() {
-            eprintln!(
-                "[tree] WARNING: {} free vars in input: {:?}",
-                fvs.len(),
-                fvs
-            );
-        }
-    }
-
-    // Fragment-level structural stats on the post-wrap tree actually handed to
-    // codegen: one pass over the (already-normalized) flat node vector.
-    // Correlates with jit_machine.rs's `add_function` log line by `name=`; kept
-    // as a separate line because it measures a different tree (post-wrap,
-    // here) than that line's pre-wrap `core_cons_prewrap`. Gated on the target
-    // being enabled: an unconditional walk + HashSet allocation on every
-    // compile would tax the hot path this instrument exists to measure.
-    if log::log_enabled!(target: "tidepool::codegen", log::Level::Debug) {
-        let mut core_cons: FxHashSet<DataConId> = FxHashSet::default();
-        let mut app_nodes = 0u64;
-        let mut con_nodes = 0u64;
-        let mut lam_nodes = 0u64;
-        let mut case_nodes = 0u64;
-        for node in &tree.nodes {
-            match node {
-                CoreFrame::App { .. } => app_nodes += 1,
-                CoreFrame::Lam { .. } => lam_nodes += 1,
-                CoreFrame::Con { tag, .. } => {
-                    con_nodes += 1;
-                    core_cons.insert(*tag);
-                }
-                CoreFrame::Case { alts, .. } => {
-                    case_nodes += 1;
-                    for alt in alts {
-                        if let AltCon::DataAlt(id) = alt.con {
-                            core_cons.insert(id);
-                        }
-                    }
-                }
-                _ => {}
-            }
-        }
-        log::debug!(
-            target: "tidepool::codegen",
-            "fragment_stats name={name} core_cons={core_cons} app_nodes={app_nodes} \
-             con_nodes={con_nodes} lam_nodes={lam_nodes} case_nodes={case_nodes} nodes={nodes}",
-            core_cons = core_cons.len(),
-            nodes = tree.nodes.len(),
-        );
-    }
 
     let sig = pipeline.make_func_signature();
     let func_id = pipeline.declare_function(name)?;
@@ -1892,25 +1780,18 @@ impl EmitContext {
                     loop {
                         match &args.sess.tree.nodes[idx] {
                             CoreFrame::LetNonRec { binder, rhs, body } => {
-                                crate::coverage::hit("frame:LetNonRec");
                                 let binder = *binder;
                                 let rhs = *rhs;
                                 let body = *body;
                                 // Dead code elimination: skip RHS if binder is unused in body.
-                                let dce_start = std::time::Instant::now();
                                 // The extracted subtree is scoped to the walk so it is
                                 // freed before the branches below re-enter emission —
                                 // an emit_thunk recursion holding one clone per level
                                 // would otherwise stack them up.
-                                let (body_fvs, scanned_nodes) = {
+                                let body_fvs = {
                                     let body_subtree = args.sess.tree.extract_subtree(body);
-                                    let fvs = tidepool_repr::free_vars::free_vars(&body_subtree);
-                                    (fvs, body_subtree.nodes.len() as u64)
+                                    tidepool_repr::free_vars::free_vars(&body_subtree)
                                 };
-                                let dce_scan = &mut args.sess.pipeline.dce_scan;
-                                dce_scan.calls += 1;
-                                dce_scan.nodes_walked += scanned_nodes;
-                                dce_scan.elapsed += dce_start.elapsed();
                                 if body_fvs.binary_search(&binder).is_ok() {
                                     if is_trivial_field(rhs, args.sess.tree) {
                                         // Trivial RHS (already WHNF \u2014 Var/Lit/Lam/Con \u2014 or a
@@ -1960,7 +1841,6 @@ impl EmitContext {
                                 continue;
                             }
                             CoreFrame::LetRec { bindings, body } => {
-                                crate::coverage::hit("frame:LetRec");
                                 let bindings = bindings.clone();
                                 let body = *body;
                                 // Run phases 1-3b inline, push deferred evals + finish + cleanup

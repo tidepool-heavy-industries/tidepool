@@ -7,7 +7,6 @@
 pub mod alloc;
 pub mod binding_table;
 pub mod context;
-pub mod coverage;
 pub mod datacon_env;
 pub mod debug;
 pub mod effect_machine;

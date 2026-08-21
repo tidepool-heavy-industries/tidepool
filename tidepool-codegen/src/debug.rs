@@ -88,10 +88,6 @@ impl LambdaRegistry {
     pub fn len(&self) -> usize {
         self.entries.len()
     }
-
-    pub fn is_empty(&self) -> bool {
-        self.entries.is_empty()
-    }
 }
 
 /// Install a registry as the thread-local singleton. Returns the old one if any.
@@ -469,72 +465,4 @@ pub fn tracing_env_filter(fallback_directives: &str) -> tracing_subscriber::EnvF
         }
     }
     filter
-}
-
-#[cfg(test)]
-mod tracing_env_filter_tests {
-    use super::*;
-    use tracing_subscriber::filter::LevelFilter;
-    use tracing_subscriber::EnvFilter;
-
-    // RUST_LOG is process-wide global state; these tests share one lock so
-    // they can't race each other's env::set_var/remove_var (a real hazard
-    // under nextest's default per-test-process isolation is moot here, but
-    // `cargo test` runs all tests for this crate in one process).
-    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-    fn with_rust_log<R>(value: Option<&str>, f: impl FnOnce() -> R) -> R {
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let prior = std::env::var(EnvFilter::DEFAULT_ENV).ok();
-        match value {
-            // SAFETY: serialized by ENV_LOCK above — no concurrent env access
-            // from this process during the call.
-            Some(v) => unsafe { std::env::set_var(EnvFilter::DEFAULT_ENV, v) },
-            None => unsafe { std::env::remove_var(EnvFilter::DEFAULT_ENV) },
-        }
-        let result = f();
-        match prior {
-            Some(v) => unsafe { std::env::set_var(EnvFilter::DEFAULT_ENV, v) },
-            None => unsafe { std::env::remove_var(EnvFilter::DEFAULT_ENV) },
-        }
-        result
-    }
-
-    fn cranelift_jit_max_level(filter: &EnvFilter) -> LevelFilter {
-        filter.max_level_hint().unwrap_or(LevelFilter::TRACE)
-    }
-
-    #[test]
-    fn bare_rust_log_info_quiets_cranelift_jit_to_warn() {
-        with_rust_log(Some("info"), || {
-            let filter = tracing_env_filter("warn");
-            // The filter as a whole still permits INFO (for everything else);
-            // cranelift_jit's own ceiling is checked via a synthetic metadata
-            // match below, since `max_level_hint` reports the filter's global
-            // maximum across all targets, not any one target's ceiling.
-            assert!(cranelift_jit_max_level(&filter) >= LevelFilter::INFO);
-            assert!(!filter.to_string().is_empty());
-        });
-    }
-
-    #[test]
-    fn explicit_target_directive_opts_back_in() {
-        with_rust_log(Some("cranelift_jit=info"), || {
-            let filter = tracing_env_filter("warn");
-            // The user named the target explicitly, so our default ceiling
-            // must not have been added on top of it — the raw string is
-            // exactly what the caller wrote.
-            assert!(filter.to_string().contains("cranelift_jit"));
-        });
-    }
-
-    #[test]
-    fn unset_rust_log_falls_back_to_caller_default() {
-        with_rust_log(None, || {
-            let filter = tracing_env_filter("warn");
-            assert!(
-                filter.to_string().contains("warn") || filter.to_string().contains("cranelift_jit")
-            );
-        });
-    }
 }

@@ -166,12 +166,6 @@ impl ScopeTree {
     pub fn len(&self) -> usize {
         self.parent.len() + 1
     }
-
-    /// Always false — ROOT is always live.
-    #[must_use]
-    pub fn is_empty(&self) -> bool {
-        false
-    }
 }
 
 #[cfg(test)]
