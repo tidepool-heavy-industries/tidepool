@@ -20,6 +20,7 @@ use crate::value::Value;
 use tidepool_repr::{
     AltCon, CoreExpr, CoreFrame, DataConId, DataConTable, JoinId, Literal, PrimOpKind, VarId,
 };
+use tidepool_repr::trivial_field::is_trivial_field;
 
 /// Create an environment pre-populated with data constructor functions.
 /// Each constructor with arity N becomes a `ConFun(tag, N, [])` value
@@ -259,53 +260,6 @@ pub fn deep_force(val: Value, heap: &mut dyn Heap) -> Result<Value, EvalError> {
     })
 }
 
-/// Whether the node at `idx` is a trivial Con field — safe to evaluate eagerly
-/// because it is already in WHNF or built entirely from trivial parts. This is a
-/// byte-for-byte mirror of the JIT's `is_trivial_field` in tidepool-codegen
-/// `emit/expr.rs`; the two MUST agree so the oracle and JIT thunk exactly the
-/// same Con fields (a diverging/erroring sub-expression under a constructor must
-/// not be forced at construction time on either backend).
-///
-/// Explicit work-stack (mirrors [`deep_force`]'s style): a chain of nested
-/// trivial `Con`/`PrimOp` wrappers — e.g. the 1200-deep `Con(NODE, [l, r])`
-/// spines built by the freer-queue proptests — walks this predicate before
-/// `eval_at` ever touches it, so it must be stack-safe on its own.
-fn is_trivial_field(idx: usize, expr: &CoreExpr) -> bool {
-    enum Work {
-        Visit(usize),
-        Combine(usize), // number of children just visited, to AND together
-    }
-    let mut stack = vec![Work::Visit(idx)];
-    let mut results: Vec<bool> = Vec::new();
-    while let Some(w) = stack.pop() {
-        match w {
-            Work::Visit(i) => match &expr.nodes[i] {
-                CoreFrame::Var(_) | CoreFrame::Lit(_) | CoreFrame::Lam { .. } => results.push(true),
-                CoreFrame::Con { fields, .. } => {
-                    stack.push(Work::Combine(fields.len()));
-                    for &f in fields.iter().rev() {
-                        stack.push(Work::Visit(f));
-                    }
-                }
-                CoreFrame::PrimOp { args, .. } => {
-                    stack.push(Work::Combine(args.len()));
-                    for &a in args.iter().rev() {
-                        stack.push(Work::Visit(a));
-                    }
-                }
-                _ => results.push(false), // App, Case, LetNonRec, LetRec, Join, Jump
-            },
-            Work::Combine(n) => {
-                let start = results.len() - n;
-                let all = results[start..].iter().all(|&b| b);
-                results.truncate(start);
-                results.push(all);
-            }
-        }
-    }
-    results.pop().unwrap_or(false)
-}
-
 /// Evaluate a `Lam` node to a `Closure` value. Never recurses — a lambda
 /// captures its body as an unevaluated subtree, it does not evaluate it — so
 /// this is safe to call directly wherever `LetNonRec`/`LetRec` need a lambda
@@ -384,8 +338,9 @@ fn con_step(
     while pos < fields.len() {
         let f = fields[pos];
         // Thunkify non-trivial fields to enable lazy evaluation, using the
-        // SAME triviality predicate as the JIT (`is_trivial_field` in
-        // tidepool-codegen `emit/expr.rs`). A field is evaluated eagerly only
+        // SAME triviality predicate as the JIT
+        // (`tidepool_repr::trivial_field::is_trivial_field`). A field is
+        // evaluated eagerly only
         // when it is already in WHNF or built entirely from trivial parts;
         // anything that could diverge or error when forced — including a
         // `PrimOp`/`Con` with a non-trivial argument like

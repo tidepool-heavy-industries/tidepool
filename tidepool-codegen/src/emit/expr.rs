@@ -866,22 +866,12 @@ fn emit_subtree_with_tail(args: EmitArgs, idx: usize) -> Result<SsaVal, EmitErro
 
 /// Returns true if the expression at `idx` is trivial (safe to evaluate eagerly).
 /// Trivial expressions are already in WHNF or produce values with no computation.
-fn is_trivial_field(idx: usize, expr: &CoreExpr) -> bool {
-    match &expr.nodes[idx] {
-        CoreFrame::Var(_) => true,
-        CoreFrame::Lit(_) => true,
-        CoreFrame::Lam { .. } => true, // Already WHNF (closure)
-        CoreFrame::Con { fields, .. } => fields.iter().all(|&f| is_trivial_field(f, expr)),
-        // A `raise#` must stay lazy even with a trivial arg: `let x = raise# e
-        // in if False then x else 0` must return 0, not raise eagerly (M2).
-        CoreFrame::PrimOp {
-            op: PrimOpKind::Raise,
-            ..
-        } => false,
-        CoreFrame::PrimOp { args, .. } => args.iter().all(|&a| is_trivial_field(a, expr)),
-        _ => false, // App, Case, LetNonRec, LetRec, Join, Jump
-    }
-}
+///
+/// Shared with the oracle (`tidepool-eval`) via `tidepool_repr::trivial_field`
+/// — both backends MUST agree on this predicate (see that module's doc for
+/// why: a diverged copy is a real oracle/JIT semantic disagreement, not just
+/// duplicated code).
+use tidepool_repr::trivial_field::is_trivial_field;
 
 /// Topologically sort deferred simple LetRec bindings so each appears AFTER the
 /// deferred-simple siblings it (transitively) depends on. `all_bindings` is the
