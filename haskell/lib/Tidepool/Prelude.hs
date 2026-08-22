@@ -222,8 +222,8 @@ module Tidepool.Prelude
   , FsError(..), FileRead(..), GitError(..), LlmError(..), HttpError(..)
     -- * Text padding, chunking, and prefix utilities
     -- (Text chunking is `T.chunksOf`; the unqualified `chunksOf` is the list
-    -- chunker from `.tidepool/lib/Schemes.hs` — do not shadow it here.)
-  , justifyLeft, justifyRight, center
+    -- chunker from `.tidepool/lib/Schemes.hs` — do not shadow it here.
+    -- Padding itself is `TF.pad*`/`TF.center*` — see `Tidepool.TextFormat`.)
   , textReplicate
   , commonPrefixes
     -- * UTC time (Tidepool.Data.Time)
@@ -1074,37 +1074,6 @@ listIntercalate sep = go
 -- ---------------------------------------------------------------------------
 -- Text padding, chunking, and prefix utilities
 -- ---------------------------------------------------------------------------
-
--- | Left-justify text to width @w@, padding on the right with @c@.
--- @justifyLeft 10 ' ' "hello" == "hello     "@
-justifyLeft :: Int -> Char -> Text -> Text
-justifyLeft w c t =
-  let !l = T.length t
-  in if l >= w then t
-     else t <> T.replicate (w - l) (T.singleton c)
-{-# INLINE justifyLeft #-}
-
--- | Right-justify text to width @w@, padding on the left with @c@.
--- @justifyRight 10 ' ' "hello" == "     hello"@
-justifyRight :: Int -> Char -> Text -> Text
-justifyRight w c t =
-  let !l = T.length t
-  in if l >= w then t
-     else T.replicate (w - l) (T.singleton c) <> t
-{-# INLINE justifyRight #-}
-
--- | Center text to width @w@, padding with @c@ on both sides.
--- Left pad gets the extra character when @(w - length t)@ is odd.
--- @center 11 '-' "hello" == "---hello---"@
-center :: Int -> Char -> Text -> Text
-center w c t =
-  let !l     = T.length t
-  in if l >= w then t
-     else let !total = w - l
-              !rpad  = total `div` 2
-              !lpad  = total - rpad
-          in T.replicate lpad (T.singleton c) <> t <> T.replicate rpad (T.singleton c)
-{-# INLINE center #-}
 
 -- | Repeat a Text @n@ times: @textReplicate 3 "ab" == "ababab"@.
 -- Thin alias for @T.replicate@ (distinct from list 'replicate').
