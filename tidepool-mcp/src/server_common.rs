@@ -10,7 +10,6 @@
 //! process startup diagnostics.
 
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use rmcp::model::Tool;
@@ -96,14 +95,6 @@ pub fn validation_failed_body(
         "Response does not match the suspension's schema. Call {resume_tool} again with the \
          same continuation_id and a corrected response (or {abort_tool}).\n{body}"
     )
-}
-
-/// Mint the next id from a counter with the given prefix (`cont_1`,
-/// `scont_1`, ...). The prefix is what lets a caller tell an eval-server
-/// continuation id apart from a session-server one at a glance.
-pub fn mint_id(counter: &AtomicU64, prefix: &str) -> String {
-    let id = counter.fetch_add(1, Ordering::Relaxed);
-    format!("{prefix}_{id}")
 }
 
 /// Convert a `schemars::Schema` into the `Arc<Map<...>>` shape `rmcp::Tool`
@@ -279,13 +270,6 @@ mod tests {
         assert!(env.get("schema").is_none());
         assert!(env.get("meta").is_none());
         assert_eq!(schema, None);
-    }
-
-    #[test]
-    fn mint_id_uses_prefix_and_increments() {
-        let counter = AtomicU64::new(1);
-        assert_eq!(mint_id(&counter, "cont"), "cont_1");
-        assert_eq!(mint_id(&counter, "cont"), "cont_2");
     }
 
     #[test]

@@ -1,5 +1,6 @@
 use std::path::PathBuf;
 use tidepool_bridge_effects::{GitCommit, GitCommitDeltas, GitFileDelta, GitStatusEntry};
+use tidepool_worktree::git::GitCli;
 
 // ============================================================================
 // Tag 7: Git (read-only repository queries)
@@ -20,32 +21,28 @@ impl GitHandler {
         Self { root }
     }
 
-    /// Run a git command in the sandbox root. Failure is TYPED (#335): an
-    /// unknown/ambiguous revspec is `GitBadRevspec`; any other nonzero exit
-    /// (or a git binary that can't even be spawned, exit code -1) is
-    /// `GitFailed code detail`.
+    /// Run a git command in the sandbox root, through `GitCli` — the
+    /// workspace's one place that shells out to git (env scrubbing, prompt
+    /// disabling, locale; see `tidepool-worktree/CLAUDE.md`'s "one git call
+    /// site" rule). Failure is TYPED (#335): an unknown/ambiguous revspec is
+    /// `GitBadRevspec`; any other nonzero exit (or a git binary that can't
+    /// even be spawned, exit code -1) is `GitFailed code detail`.
     fn run_git(&self, args: &[&str]) -> Result<String, GitError> {
-        let output = std::process::Command::new("git")
-            .args(args)
-            .current_dir(&self.root)
-            // Read-only ops; suppress optional index locks.
-            .env("GIT_OPTIONAL_LOCKS", "0")
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .output()
-            .map_err(|e| GitError::GitFailed(-1, format!("git exec failed: {}", e)))?;
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-            let code = output.status.code().unwrap_or(-1) as i64;
-            if stderr.contains("bad revision")
-                || stderr.contains("unknown revision")
-                || stderr.contains("ambiguous argument")
-            {
-                return Err(GitError::GitBadRevspec(stderr));
-            }
-            return Err(GitError::GitFailed(code, stderr));
-        }
-        Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+        GitCli::new()
+            .run(&self.root, args)
+            .map(|out| out.stdout)
+            .map_err(|receipt: tidepool_worktree::error::GitFailureReceipt| {
+                let stderr = receipt.stderr.trim().to_string();
+                let code = receipt.exit_code.unwrap_or(-1) as i64;
+                if stderr.contains("bad revision")
+                    || stderr.contains("unknown revision")
+                    || stderr.contains("ambiguous argument")
+                {
+                    GitError::GitBadRevspec(stderr)
+                } else {
+                    GitError::GitFailed(code, stderr)
+                }
+            })
     }
 
     /// Reject a revspec that could be mistaken for an option by git's own

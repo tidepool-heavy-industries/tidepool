@@ -55,7 +55,7 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::thread::JoinHandle;
 
@@ -67,6 +67,7 @@ use tokio::time::{timeout, Duration};
 use tidepool_bridge::{FromCore, ToCore};
 use tidepool_effect::error::EffectError;
 use tidepool_effect::pause::PauseGate;
+use tidepool_repr::MonotonicIdIssuer;
 
 use crate::{
     classify, value_to_json, CancelHandle, CompileError, DispatchEffect, FailureClass, JitError,
@@ -322,7 +323,7 @@ pub struct EngineConfig {
 /// the server crate that owns the concrete buffer.
 pub struct SessionEngine<O: OutputSink> {
     continuations: Arc<Mutex<HashMap<String, Continuation<O>>>>,
-    next_cont_id: Arc<AtomicU64>,
+    next_cont_id: Arc<MonotonicIdIssuer>,
     orphaned_threads: Arc<AtomicUsize>,
     semaphore: Arc<tokio::sync::Semaphore>,
     config: EngineConfig,
@@ -333,7 +334,7 @@ impl<O: OutputSink> SessionEngine<O> {
     pub fn new(config: EngineConfig) -> Self {
         SessionEngine {
             continuations: Arc::new(Mutex::new(HashMap::new())),
-            next_cont_id: Arc::new(AtomicU64::new(1)),
+            next_cont_id: Arc::new(MonotonicIdIssuer::new(config.cont_prefix.clone())),
             orphaned_threads: Arc::new(AtomicUsize::new(0)),
             semaphore: Arc::new(tokio::sync::Semaphore::new(config.max_concurrent)),
             config,
@@ -347,8 +348,7 @@ impl<O: OutputSink> SessionEngine<O> {
     }
 
     fn next_continuation_id(&self) -> String {
-        let id = self.next_cont_id.fetch_add(1, Ordering::Relaxed);
-        format!("{}_{}", self.config.cont_prefix, id)
+        self.next_cont_id.next_id()
     }
 
     /// Evict the oldest continuation, freeing its pool slot. Paused: the thread

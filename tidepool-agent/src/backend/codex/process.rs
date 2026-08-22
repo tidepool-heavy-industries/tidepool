@@ -21,6 +21,9 @@ use codex_codes::{
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+// The shared readable-executable-file check — see `resolve_codex_binary`'s
+// doc for why this crate's own Linux-only policy stays on top of it.
+use tidepool_extract_cmd::exec_check::is_readable_executable_file;
 
 use crate::backend::codex::transport::Transport;
 
@@ -289,20 +292,6 @@ fn child_env_vars() -> Vec<(OsString, OsString)> {
         std::env::vars_os(),
         std::env::var_os(ENV_AGENT_ENV_PASSTHROUGH).as_deref(),
     )
-}
-
-/// A readable, executable regular file — the same executable-bit check this
-/// workspace's other strict-override binary locator applies to ITS override
-/// (Linux-only, matching this crate's other platform assumptions — e.g.
-/// [`process_exists`] below reads `/proc` directly).
-fn is_readable_executable_file(path: &Path) -> bool {
-    use std::os::unix::fs::PermissionsExt;
-    if !path.is_file() || std::fs::File::open(path).is_err() {
-        return false;
-    }
-    std::fs::metadata(path)
-        .map(|meta| meta.permissions().mode() & 0o111 != 0)
-        .unwrap_or(false)
 }
 
 /// `$TIDEPOOL_CODEX_BIN`, STRICTLY — the same pinning precedent

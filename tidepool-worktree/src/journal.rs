@@ -22,11 +22,11 @@
 //! calls, at the cost of a syscall per event, which is the right trade for an
 //! event rate driven by git activity rather than a hot loop.
 
-use std::fs::{self, File, OpenOptions};
-use std::io::{BufRead, BufReader, Write};
+use std::fs::{self, OpenOptions};
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
+use tidepool_repr::jsonl::{self, SyncPolicy};
 
 use crate::error::WorktreeError;
 use crate::id::EventId;
@@ -73,104 +73,34 @@ impl EventJournal {
             .open(&path)
             .map_err(|e| storage_failure(&path, e))?;
 
-        let file = File::open(&path).map_err(|e| storage_failure(&path, e))?;
-        let mut reader = BufReader::new(file);
-
-        let mut entries = Vec::new();
-        // A malformed row is recoverable ONLY as the final row — that is the
-        // torn-write shape (a crash mid-`writeln!`). A malformed row with
-        // anything after it was not torn by a crash; it is a corrupted receipt,
-        // and silently eliding it would delete exactly the evidence the journal
-        // exists to preserve. So a bad row is held PENDING and only forgiven at
-        // EOF; if any further line arrives, it was not last and we fail loudly.
-        //
-        // Bytes are counted (hence `read_until`, not `lines()`) because
-        // forgiveness must include TAIL REPAIR: `append` opens with O_APPEND,
-        // so a torn row merely skipped in memory would get valid rows written
-        // AFTER it — manufacturing on disk exactly the corrupted-middle shape
-        // this loop refuses, and making the journal permanently unopenable
-        // one crash later.
-        let mut pending_bad: Option<(usize, String, u64)> = None;
-        let not_final = |path: &Path, bad: (usize, String, u64), next: usize| {
-            storage_failure(
-                path,
+        // A single-owner file (`&mut self` will never share this path with
+        // another handle), so a torn final row is TRUNCATED away — see
+        // `tidepool_repr::jsonl`'s module doc for why this is per-consumer.
+        // A malformed row anywhere else is loud, matching the old behavior.
+        let (entries, repair) = jsonl::read_tail(
+            &path,
+            |l| serde_json::from_str::<JournalEntry>(l).map_err(|e| e.to_string()),
+            jsonl::TailPolicy::Repair,
+        )
+        .map_err(|e| match e {
+            jsonl::JsonlReadError::Io(io) => storage_failure(&path, io),
+            jsonl::JsonlReadError::TornMidFile { line_no, detail } => storage_failure(
+                &path,
                 format!(
-                    "malformed journal row at line {} is followed by line {} — a \
-                     corrupted receipt in the middle of the journal is not a torn \
-                     write and must not be silently skipped: {}",
-                    bad.0, next, bad.1
+                    "malformed journal row at line {line_no} is followed by more data — a \
+                     corrupted receipt in the middle of the journal is not a torn write and \
+                     must not be silently skipped: {detail}"
                 ),
-            )
-        };
-
-        let mut buf: Vec<u8> = Vec::new();
-        let mut offset: u64 = 0;
-        let mut lineno: usize = 0;
-        loop {
-            buf.clear();
-            let n = reader
-                .read_until(b'\n', &mut buf)
-                .map_err(|e| storage_failure(&path, e))?;
-            if n == 0 {
-                break;
-            }
-            lineno += 1;
-            let line_start = offset;
-            offset += n as u64;
-            match std::str::from_utf8(&buf) {
-                Ok(l) => {
-                    if l.trim().is_empty() {
-                        if let Some(bad) = pending_bad.take() {
-                            return Err(not_final(&path, bad, lineno));
-                        }
-                        continue;
-                    }
-                    match serde_json::from_str::<JournalEntry>(l) {
-                        Ok(entry) => {
-                            if let Some(bad) = pending_bad.take() {
-                                return Err(not_final(&path, bad, lineno));
-                            }
-                            entries.push(entry);
-                        }
-                        Err(err) => {
-                            if let Some(bad) = pending_bad.take() {
-                                return Err(not_final(&path, bad, lineno));
-                            }
-                            pending_bad = Some((lineno, err.to_string(), line_start));
-                        }
-                    }
-                }
-                // Non-UTF-8 bytes are the same torn-write shape as a truncated
-                // JSON row, so they get the same final-row-only treatment.
-                Err(err) => {
-                    if let Some(bad) = pending_bad.take() {
-                        return Err(not_final(&path, bad, lineno));
-                    }
-                    pending_bad = Some((lineno, format!("invalid utf-8: {err}"), line_start));
-                }
-            }
-        }
-
-        // Reached EOF with a bad row outstanding: it WAS the final row, so this
-        // is the recoverable torn write. Losing that one observation beats
-        // refusing to open the journal over it — and the file is TRUNCATED to
-        // the last good row so the next `append` lands after good data, not
-        // after garbage (see the loop comment).
-        if let Some((lineno, reason, bad_start)) = pending_bad {
+            ),
+        })?;
+        if let Some(repair) = repair {
             eprintln!(
                 "tidepool-worktree: event journal {} line {} is a torn final row, \
-                 truncating it away: {reason}",
+                 truncating it away: {}",
                 path.display(),
-                lineno
+                repair.line_no,
+                repair.reason
             );
-            let repair = OpenOptions::new()
-                .write(true)
-                .open(&path)
-                .map_err(|e| storage_failure(&path, e))?;
-            repair
-                .set_len(bad_start)
-                .map_err(|e| storage_failure(&path, e))?;
-            repair.sync_all().map_err(|e| storage_failure(&path, e))?;
         }
 
         Ok(Self { path, entries })
@@ -198,11 +128,6 @@ impl EventJournal {
         #[allow(clippy::expect_used, reason = "serialize event journal entry")]
         let line = serde_json::to_string(&entry).expect("serialize event journal entry");
 
-        let mut file = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&self.path)
-            .map_err(|e| storage_failure(&self.path, e))?;
         // ONE write() for the whole row (line + trailing newline), not
         // `writeln!`'s two syscalls — with O_APPEND, Linux serializes each
         // write() under the inode lock (seek-to-end + write happen as one
@@ -213,12 +138,8 @@ impl EventJournal {
         // but if a single `JournalEntry` line ever grows well past a few KB
         // (e.g. a huge `files` list on a `Commit` event), that's outside
         // what this has been verified against and the interleave risk
-        // returns.
-        let mut row = line;
-        row.push('\n');
-        file.write_all(row.as_bytes())
-            .map_err(|e| storage_failure(&self.path, e))?;
-        file.sync_all()
+        // returns. No lock is needed here: `&mut self` is already exclusive.
+        jsonl::append_new_line(&self.path, &line, SyncPolicy::All)
             .map_err(|e| storage_failure(&self.path, e))?;
 
         self.entries.push(entry);

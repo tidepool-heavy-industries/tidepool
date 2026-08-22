@@ -12,6 +12,8 @@ pub mod datacon_table;
 pub mod frame;
 pub mod free_vars;
 pub mod freer_names;
+pub mod id_issuer;
+pub mod jsonl;
 pub mod normalize;
 pub mod pretty;
 pub mod serial;
@@ -26,6 +28,7 @@ pub use builder::TreeBuilder;
 pub use datacon::*;
 pub use datacon_table::*;
 pub use frame::*;
+pub use id_issuer::MonotonicIdIssuer;
 pub use normalize::normalize;
 pub use session_ids::{
     BindingName, Generation, SessionId, SessionModule, SessionModuleKind, SessionVarId,

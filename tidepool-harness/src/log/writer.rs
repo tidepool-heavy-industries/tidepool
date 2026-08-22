@@ -3,8 +3,9 @@
 //! event.
 
 use std::fs::{File, OpenOptions};
-use std::io::Write;
 use std::path::Path;
+
+use tidepool_repr::jsonl::{self, SyncPolicy};
 
 use super::{Event, EventRecord, LogHeader};
 
@@ -45,10 +46,8 @@ impl LogWriter {
     }
 
     fn write_line<T: serde::Serialize>(&mut self, value: &T) -> Result<(), WriteError> {
-        let mut line = serde_json::to_vec(value)?;
-        line.push(b'\n');
-        self.file.write_all(&line)?;
-        self.file.sync_all()?;
+        let line = serde_json::to_string(value)?;
+        jsonl::write_line(&mut self.file, &line, SyncPolicy::All)?;
         Ok(())
     }
 }

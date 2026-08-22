@@ -57,7 +57,6 @@
 //! laundering).
 
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
 
 use tidepool_codegen::binding_table::{BindingEntry, BoundValue};
 use tidepool_codegen::emit::ExternalEnv;
@@ -68,7 +67,9 @@ use tidepool_codegen::jit_machine::{
 use tidepool_effect::dispatch::DispatchEffect;
 use tidepool_effect::error::EffectError;
 use tidepool_eval::value::Value;
-use tidepool_repr::{BindingName, CoreExpr, DataConTable, Generation, SessionModule, SessionVarId};
+use tidepool_repr::{
+    BindingName, CoreExpr, DataConTable, Generation, MonotonicIdIssuer, SessionModule, SessionVarId,
+};
 
 use crate::render::EvalResult;
 use crate::timing;
@@ -436,8 +437,11 @@ pub struct ResidentSession<H, O> {
     /// are pre-compiled Core — but carried as the registry-entry seam).
     #[allow(dead_code)]
     include: Vec<PathBuf>,
-    /// Monotonic continuation-id counter.
-    next_id: AtomicU64,
+    /// Monotonic continuation-id counter (prefix `scont` for the resident
+    /// surface). Also the source of throwaway child-realm ids
+    /// ([`ResidentSession::run_child`]) via [`MonotonicIdIssuer::next_raw`] —
+    /// one shared sequence, not a second counter.
+    cont_id_issuer: MonotonicIdIssuer,
     /// The parked holes, insertion-ordered: `(hole string, machine
     /// ContinuationId)` per live parked frame. The machine's continuation
     /// registry is the ground truth; these are the string identities callers
@@ -453,8 +457,6 @@ pub struct ResidentSession<H, O> {
     /// the NAME-side one (decl tips, value-plane frames). A window carries
     /// both, and retiring it exits both — see `Harness::terminate_node`.
     scope: ScopeId,
-    /// Continuation-id prefix (`scont` for the resident surface).
-    cont_prefix: String,
 }
 
 impl<H, O> ResidentSession<H, O>
@@ -510,11 +512,10 @@ where
             effect_names,
             captured,
             include,
-            next_id: AtomicU64::new(1),
+            cont_id_issuer: MonotonicIdIssuer::new("scont"),
             parked: Vec::new(),
             realm: RealmId(0),
             scope: ScopeId::ROOT,
-            cont_prefix: "scont".to_string(),
         })
     }
 
@@ -543,11 +544,10 @@ where
             effect_names,
             captured,
             include,
-            next_id: AtomicU64::new(1),
+            cont_id_issuer: MonotonicIdIssuer::new("scont"),
             parked: Vec::new(),
             realm: RealmId(0),
             scope: ScopeId::ROOT,
-            cont_prefix: "scont".to_string(),
         }
     }
 
@@ -1082,11 +1082,7 @@ where
     }
 
     fn next_cont_id(&self) -> String {
-        format!(
-            "{}_{}",
-            self.cont_prefix,
-            self.next_id.fetch_add(1, Ordering::Relaxed)
-        )
+        self.cont_id_issuer.next_id()
     }
 
     /// Run one turn: add `expr` as a fragment referencing prior session bindings
@@ -1276,7 +1272,7 @@ where
         // hole, so a child that suspends is ABORTED wholesale (its realm
         // closed) rather than parked. Suspension-capable turns are `run`'s
         // job. High-bit-tagged so it can never collide with a caller realm.
-        let child_realm = RealmId((1 << 63) | self.next_id.fetch_add(1, Ordering::Relaxed));
+        let child_realm = RealmId((1 << 63) | self.cont_id_issuer.next_raw());
         let ask_tag = self.core.ask_tag();
         let prefix = self.handled_prefix();
         let outcome = self.on_eval_thread(move |machine, table, handlers, captured| {

@@ -3886,6 +3886,7 @@ dependencies = [
  "sha2 0.11.0",
  "tempfile",
  "thiserror",
+ "tidepool-extract-cmd",
  "tidepool-worktree",
  "tokio",
 ]
@@ -4333,6 +4334,7 @@ dependencies = [
  "tempfile",
  "thiserror",
  "tidepool-atomic-write",
+ "tidepool-repr",
  "uuid",
 ]
 

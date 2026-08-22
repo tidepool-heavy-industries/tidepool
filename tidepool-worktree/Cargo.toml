@@ -12,6 +12,8 @@ description = "Managed git worktrees, durable registry, and typed repository eve
 
 [dependencies]
 tidepool-atomic-write.workspace = true
+# The shared durable-JSONL append/read primitive (journal.rs).
+tidepool-repr.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
