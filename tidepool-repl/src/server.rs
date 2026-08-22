@@ -25,7 +25,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use tidepool_effect::dispatch::DispatchEffect;
 use tidepool_mcp::{describe_effects_index, CapturedOutput, EffectDecl, EffectRoster};
-use tidepool_repr::SessionId;
+use tidepool_repr::{MonotonicIdIssuer, SessionId};
 use tidepool_runtime::session::ModuleEnv;
 use tokio::io::{stdin, stdout};
 use tokio::time::{timeout, Duration};
@@ -359,7 +359,7 @@ fn repl_preamble(cfg: &ReplServerConfig) -> String {
 /// The non-generic server core (H is erased into the `spawn` closure).
 struct ReplServerInner {
     manager: SessionManager,
-    next_cont_id: AtomicU64,
+    next_cont_id: MonotonicIdIssuer,
     next_session_id: AtomicU64,
     /// Opens a session for a [`SessionConfig`] (captures the handler builder).
     spawn: SessionSpawn,
@@ -427,7 +427,7 @@ impl TidepoolReplServer {
         let server = TidepoolReplServer {
             inner: Arc::new(ReplServerInner {
                 manager: SessionManager::new(),
-                next_cont_id: AtomicU64::new(1),
+                next_cont_id: MonotonicIdIssuer::new("scont"),
                 next_session_id: AtomicU64::new(1),
                 spawn,
                 preamble,
@@ -531,10 +531,7 @@ impl TidepoolReplServer {
     }
 
     fn next_continuation_id(&self) -> ContinuationId {
-        ContinuationId(tidepool_mcp::server_common::mint_id(
-            &self.inner.next_cont_id,
-            "scont",
-        ))
+        ContinuationId(self.inner.next_cont_id.next_id())
     }
 
     // -- session lifecycle -------------------------------------------------
