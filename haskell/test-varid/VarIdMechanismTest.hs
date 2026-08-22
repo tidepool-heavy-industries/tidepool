@@ -1,4 +1,5 @@
 {-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE PatternSynonyms #-}
 
 -- | Contract pin for the record-selector varId disambiguator
 -- ('Tidepool.Translate.fieldParentDisamb' + 'stableVarId').
@@ -30,11 +31,17 @@ import GHC.Unit.Types (mkModule, stringToUnit)
 import GHC.Unit.Module (mkModuleName)
 import GHC.Data.FastString (fsLit)
 import GHC.Types.SrcLoc (noSrcSpan)
+import GHC.Types.Var (Var)
+import GHC.Types.Id (mkSysLocal)
+import GHC.Core.Multiplicity (pattern ManyTy)
+import GHC.Builtin.Types (intTy)
+import GHC.Core (Bind(..), Expr(..), CoreBind)
 
-import Tidepool.Translate (stableVarId, fieldParentDisamb, normalizeMod, checkedKeyToIdx)
+import Tidepool.Translate (stableVarId, fieldParentDisamb, normalizeMod, checkedKeyToIdx, varId, stabilizeLocalUniques)
 
 import Control.Exception (SomeException, evaluate, try)
 import Control.Monad (forM_, unless)
+import Data.Word (Word64)
 import qualified Data.Map.Strict as Map
 import qualified Data.Text as T
 import System.Exit (exitFailure, exitSuccess)
@@ -109,6 +116,70 @@ main = do
   forM_ collisionChecks $ \(label, ok) ->
     putStrLn ((if ok then "ok   - " else "FAIL - ") ++ label)
 
-  unless (all snd checks && all snd collisionChecks) exitFailure
+  -- (e) 'Tidepool.Translate.stabilizeLocalUniques' — the mechanism behind
+  -- the cold/warm build-products-dir fix: a nested Id's VarId must depend
+  -- only on its TRAVERSAL POSITION, never on the raw magnitude of the GHC
+  -- Unique a particular compile session happened to assign it.
+  let mkLocalVar :: Word64 -> String -> Var
+      mkLocalVar u nm = mkSysLocal (fsLit nm) (mkUniqueGrimily u) ManyTy intTy
+
+      -- \x -> x, built twice with DIFFERENT starting uniques for `x` —
+      -- standing in for a cold vs. a warm compile's differing session-wide
+      -- Unique consumption before reaching this same logical binder.
+      identityWith :: Word64 -> CoreBind
+      identityWith xUniq =
+        let x = mkLocalVar xUniq "x"
+            topB = mkLocalVar 999 "top"
+        in NonRec topB (Lam x (Var x))
+
+      binderOccVarIds :: CoreBind -> Maybe (Word64, Word64)
+      binderOccVarIds (NonRec _ (Lam b (Var v))) = Just (varId b, varId v)
+      binderOccVarIds _ = Nothing
+
+      agrees :: Maybe (Word64, Word64) -> Bool
+      agrees = maybe False (uncurry (==))
+
+      [stabCold] = stabilizeLocalUniques [identityWith 500]
+      [stabWarm] = stabilizeLocalUniques [identityWith 90210]
+      coldIds = binderOccVarIds stabCold
+      warmIds = binderOccVarIds stabWarm
+
+      -- Two sibling local binders sharing an OccName ("x") at DISTINCT
+      -- traversal positions: \x1 -> (\x2 -> x2) x1. Positional
+      -- disambiguation must tell them apart even though
+      -- 'stabilizeLocalUniques' discards their original (here: also
+      -- distinct, but irrelevantly so) GHC uniques entirely.
+      siblingBind :: CoreBind
+      siblingBind =
+        let x1 = mkLocalVar 10 "x"
+            x2 = mkLocalVar 20 "x"
+            topB = mkLocalVar 999 "top"
+        in NonRec topB (Lam x1 (App (Lam x2 (Var x2)) (Var x1)))
+
+      siblingVarIds :: CoreBind -> Maybe (Word64, Word64)
+      siblingVarIds (NonRec _ (Lam x1' (App (Lam x2' (Var _)) (Var _)))) =
+        Just (varId x1', varId x2')
+      siblingVarIds _ = Nothing
+
+      [stabSibling] = stabilizeLocalUniques [siblingBind]
+
+      stabChecks :: [(String, Bool)]
+      stabChecks =
+        [ ("stabilizeLocalUniques: binder and occurrence agree post-stabilization (cold)",
+            agrees coldIds)
+        , ("stabilizeLocalUniques: binder and occurrence agree post-stabilization (warm)",
+            agrees warmIds)
+        , ("stabilizeLocalUniques: same source, different starting session uniques -> same stabilized varId",
+            coldIds == warmIds && coldIds /= Nothing)
+        , ("stabilizeLocalUniques: sibling binders sharing an OccName at distinct positions -> distinct varId",
+            case siblingVarIds stabSibling of
+              Just (v1, v2) -> v1 /= v2
+              Nothing -> False)
+        ]
+
+  forM_ stabChecks $ \(label, ok) ->
+    putStrLn ((if ok then "ok   - " else "FAIL - ") ++ label)
+
+  unless (all snd checks && all snd collisionChecks && all snd stabChecks) exitFailure
   putStrLn "all varId-mechanism checks passed"
   exitSuccess
