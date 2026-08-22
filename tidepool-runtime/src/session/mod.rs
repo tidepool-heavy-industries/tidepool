@@ -26,7 +26,9 @@ pub mod turn;
 
 pub use persistent::{MachineLease, PersistentSession, ScopeRetirement};
 
-pub use registry::{Checkout, CheckoutError, SessionRegistry, SingleSlot, Slot};
+pub use registry::{
+    Checkout, CheckoutError, CheckoutReceipt, SessionRegistry, SingleSlot, Slot, SlotKind,
+};
 
 pub use engine::{
     extract_ask_request, AbortOutcome, EngineConfig, GateDispatcher, OutputSink, ResumeOutcome,

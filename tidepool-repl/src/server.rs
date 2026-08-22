@@ -30,10 +30,11 @@ use tokio_util::sync::CancellationToken;
 
 use tidepool_effect::pause::PauseGate;
 
+use tidepool_runtime::session::registry::{CheckoutReceipt, SlotKind};
+
 use crate::command::{BlockItem, DeclText, ExprText, MetaCommand, SessionCommand};
-use crate::manager::{empty_cancel_slot, CancelSlot, CheckoutCustody, SessionManager};
+use crate::manager::{empty_cancel_slot, CancelSlot, ContinuationId, SessionManager};
 use crate::session::{BoxedStack, Session, SessionConfig, TurnStep, DEFAULT_NURSERY_SIZE};
-use crate::state::{ContinuationId, SessionState, SharedState, Suspension};
 
 /// The `tidepool://session/bindings` resource URI: read-only JSON over the live
 /// session environment (decl plane + value/pure binds).
@@ -110,17 +111,15 @@ fn wedged_message(op: &str, to_secs: u64, effect_in_flight: bool) -> String {
 }
 
 /// The manager-side handles for the session whose turn [`TidepoolReplServer::drive`]
-/// awaits: its lifecycle [`SharedState`] and the [`CancelSlot`] read on timeout to
-/// abort a runaway at a JIT safepoint. Bundled so `drive` stays within the
-/// argument-count budget.
+/// awaits: the [`CancelSlot`] read on timeout to abort a runaway at a JIT
+/// safepoint, and this turn's checkout [`CheckoutReceipt`] — settled against
+/// a stale epoch (a `session_reset` swapped the entry mid-turn) drops the
+/// session instead of clobbering the fresh one; the receipt itself
+/// guarantees the epoch it carries can't be separated from the session it
+/// settles. Bundled so `drive` stays within the argument-count budget.
 struct DriveCtl {
-    state: SharedState,
     cancel: CancelSlot,
-    /// This turn's checkout custody token. A settlement against a stale epoch
-    /// (a `session_reset` swapped the entry mid-turn) drops the session
-    /// instead of clobbering the fresh one; the token itself guarantees the
-    /// epoch it carries can't be separated from the session it settles.
-    custody: CheckoutCustody,
+    receipt: CheckoutReceipt,
 }
 
 /// One turn's blocking execution: the `Session` moves in and comes back out —
@@ -526,23 +525,20 @@ impl TidepoolReplServer {
         (self.inner.spawn)(cfg)
     }
 
-    /// The implicit session's lifecycle state, auto-opening it on first use
-    /// (`session_run` needs no explicit open). If a concurrent caller wins the
-    /// install race, our freshly-opened session is dropped and the winner's
-    /// state is returned.
-    fn ensure_session(&self) -> Result<SharedState, String> {
-        if let Some(s) = self.inner.manager.state() {
-            return Ok(s);
+    /// Auto-open the implicit session on first use (`session_run` needs no
+    /// explicit open). If a concurrent caller wins the install race, our
+    /// freshly-opened session is dropped and the winner's stays installed —
+    /// either way a session is present once this returns `Ok`.
+    fn ensure_session_open(&self) -> Result<(), String> {
+        if self.inner.manager.is_present() {
+            return Ok(());
         }
         let session = self
             .open_session()
             .map_err(|e| format!("session open failed: {e}"))?;
         // Lost the race ⇒ someone else installed first; ours drops here.
-        let _ = self.inner.manager.install(Box::new(session));
-        self.inner
-            .manager
-            .state()
-            .ok_or_else(|| "session vanished immediately after install".to_string())
+        let _ = self.inner.manager.install(session.id(), Box::new(session));
+        Ok(())
     }
 
     // -- tool handlers -----------------------------------------------------
@@ -630,28 +626,22 @@ impl TidepoolReplServer {
         eval_input: Option<serde_json::Value>,
         ct: CancellationToken,
     ) -> CallToolResult {
-        let state = match self.ensure_session() {
-            Ok(s) => s,
-            Err(e) => return CallToolResult::error(vec![Content::text(e)]),
-        };
-        // Busy-guard: only an Idle session accepts a new turn. A turn that is
-        // running, suspended on an `ask`, wedged, or closing must be resolved
-        // first.
-        {
-            let mut st = state.lock();
-            if !st.is_idle() {
-                let label = st.busy_label();
+        if let Err(e) = self.ensure_session_open() {
+            return CallToolResult::error(vec![Content::text(e)]);
+        }
+        // Busy-guard: only an Idle session accepts a new turn (REPL policy —
+        // running, suspended on an `ask`, or wedged must be resolved first).
+        // `admit_run` performs the checkout atomically with the guard: a
+        // refusal hands the machine straight back before anyone else can
+        // observe it as checked out.
+        let checkout = match self.inner.manager.admit_run() {
+            None => return CallToolResult::error(vec![Content::text("session is gone")]),
+            Some(Err(label)) => {
                 return CallToolResult::error(vec![Content::text(format!(
                     "session is {label}; resume it (or session_reset) before running again"
-                ))]);
+                ))])
             }
-            *st = SessionState::Busy;
-        }
-        // Idle → Running, with the session moved onto this frame. The manager
-        // lock is released before the turn starts.
-        let Some(checkout) = self.inner.manager.checkout_run() else {
-            *state.lock() = SessionState::Idle;
-            return CallToolResult::error(vec![Content::text("session is gone")]);
+            Some(Ok(checkout)) => checkout,
         };
         let gate = PauseGate::new();
         let captured = CapturedOutput::new();
@@ -660,26 +650,15 @@ impl TidepoolReplServer {
             .manager
             .cancel_slot()
             .unwrap_or_else(empty_cancel_slot);
-        let (session, custody) = checkout.into_parts();
+        let (session, receipt) = checkout.into_parts();
         let turn_gate = Arc::clone(&gate);
         let turn_captured = captured.clone();
         let join = spawn_turn(session, move |session| {
             session.set_eval_input(eval_input);
             session.run_turn(&cmd, turn_gate, &turn_captured)
         });
-        self.drive_detached(
-            op,
-            join,
-            gate,
-            captured,
-            DriveCtl {
-                state,
-                cancel,
-                custody,
-            },
-            ct,
-        )
-        .await
+        self.drive_detached(op, join, gate, captured, DriveCtl { cancel, receipt }, ct)
+            .await
     }
 
     /// `session_reset`: tear down the current session (dropping a suspended
@@ -688,8 +667,8 @@ impl TidepoolReplServer {
     /// suspended drops the pending continuation.
     fn session_reset(&self) -> CallToolResult {
         self.teardown_current();
-        match self.ensure_session() {
-            Ok(_) => CallToolResult::success(vec![Content::text(
+        match self.ensure_session_open() {
+            Ok(()) => CallToolResult::success(vec![Content::text(
                 serde_json::json!({"reset": true}).to_string(),
             )]),
             Err(e) => CallToolResult::error(vec![Content::text(e)]),
@@ -704,8 +683,11 @@ impl TidepoolReplServer {
     /// immediately instead of waiting out an ack window.
     ///
     /// A turn still in flight keeps running until its next safepoint. Its
-    /// restore then finds a stale epoch and drops the session it is holding, so
-    /// it can neither resurrect itself nor clobber the fresh entry.
+    /// settlement then finds a stale epoch and drops the session it is
+    /// holding, so it can neither resurrect itself nor clobber the fresh
+    /// entry — the registry's own epoch guard, not a `Closing` marker (the
+    /// pre-promotion design's synchronous "about to remove" state, no longer
+    /// needed now that `remove` is one atomic call under one lock).
     fn teardown_current(&self) {
         // Abort a runaway turn at a JIT safepoint so its thread stops promptly
         // rather than computing on against a session nobody can reach (no-op if
@@ -714,9 +696,6 @@ impl TidepoolReplServer {
             if let Some(h) = cancel.lock().as_ref().cloned() {
                 h.cancel();
             }
-        }
-        if let Some(state) = self.inner.manager.state() {
-            *state.lock() = SessionState::Closing;
         }
         self.inner.manager.remove();
     }
@@ -732,57 +711,45 @@ impl TidepoolReplServer {
         // string is parsed into the canonical shape — and (b) leaves an
         // invalid reply's continuation un-consumed so the caller can retry.
         // Mirrors the eval server's resume (tidepool-mcp/src/server.rs).
-        let Some(state) = self.inner.manager.state() else {
-            return Err(McpError::invalid_params(
-                format!(
-                    "no session is running; continuation_id {} cannot be resumed \
-                     (run session_run to start one)",
-                    req.continuation_id
-                ),
-                None,
-            ));
+        //
+        // Three distinguishable rejection causes on mismatch: no suspension
+        // at all (never asked, or already spent), suspended on a DIFFERENT
+        // continuation, or a schema-invalid reply.
+        let (schema, captured) = match self.inner.manager.suspension_for(&req.continuation_id) {
+            Err(None) => {
+                let msg = match self.inner.manager.busy_label() {
+                    None => format!(
+                        "no session is running; continuation_id {} cannot be resumed \
+                         (run session_run to start one)",
+                        req.continuation_id
+                    ),
+                    Some(label) => format!(
+                        "session is not awaiting a resume (state: {label}); continuation_id {} \
+                         is already spent or never existed",
+                        req.continuation_id
+                    ),
+                };
+                return Err(McpError::invalid_params(msg, None));
+            }
+            Err(Some(pending)) => {
+                return Err(McpError::invalid_params(
+                    format!(
+                        "session is suspended on continuation {pending}, not {}; resume the \
+                         pending one (or session_reset to drop it)",
+                        req.continuation_id
+                    ),
+                    None,
+                ));
+            }
+            Ok(v) => v,
         };
-        // All under the per-session state lock; we extract the owned `Suspension`
-        // and DROP the lock before `drive().await` (never hold it across await).
-        let suspension = {
-            let mut st = state.lock();
-            // Must be Suspended on the matching continuation. Three distinguishable
-            // causes on mismatch: suspended on a DIFFERENT continuation, or not
-            // suspended at all (already spent or never existed).
-            let schema = match &*st {
-                SessionState::Suspended(s) if s.cont_id == req.continuation_id => {
-                    s.expected_schema.clone()
-                }
-                SessionState::Suspended(s) => {
-                    return Err(McpError::invalid_params(
-                        format!(
-                            "session is suspended on continuation {}, not {}; resume the \
-                             pending one (or session_reset to drop it)",
-                            s.cont_id, req.continuation_id
-                        ),
-                        None,
-                    ));
-                }
-                other => {
-                    return Err(McpError::invalid_params(
-                        format!(
-                            "session is not awaiting a resume (state: {}); continuation_id {} \
-                             is already spent or never existed",
-                            other.busy_label(),
-                            req.continuation_id
-                        ),
-                        None,
-                    ));
-                }
-            };
+        let canonical =
             match tidepool_mcp::validate::validate_response(schema.as_ref(), &req.response) {
                 tidepool_mcp::validate::Outcome::Invalid(violations) => {
                     // Anti-starvation: a retrying continuation must not become the
                     // reaper's oldest-first eviction victim while its caller fixes
                     // the reply. Stays Suspended (un-consumed).
-                    if let SessionState::Suspended(s) = &mut *st {
-                        s.since = Instant::now();
-                    }
+                    self.inner.manager.refresh_suspension_since();
                     let msg = tidepool_mcp::server_common::validation_failed_body(
                         "session_resume",
                         "session_reset",
@@ -792,33 +759,20 @@ impl TidepoolReplServer {
                     );
                     return Ok(CallToolResult::error(vec![Content::text(msg)]));
                 }
-                tidepool_mcp::validate::Outcome::Valid(canonical) => {
-                    // Take the suspension out → Busy (the turn is resuming).
-                    // Suspended was confirmed under this same lock above.
-                    let s = match std::mem::replace(&mut *st, SessionState::Busy) {
-                        SessionState::Suspended(s) => s,
-                        other => {
-                            *st = other;
-                            return Err(McpError::internal_error(
-                                "session state changed under lock (expected Suspended)",
-                                None,
-                            ));
-                        }
-                    };
-                    (*s, canonical)
-                }
+                tidepool_mcp::validate::Outcome::Valid(canonical) => canonical,
+            };
+        // Suspended{cont_id} → Running — the SAME registry checkout that
+        // validated the continuation id in the first place (no second,
+        // separately-locked check to drift from this one, unlike the
+        // pre-promotion two-truths design).
+        let checkout = match self.inner.manager.checkout_resume(&req.continuation_id) {
+            Ok(c) => c,
+            Err(e) => {
+                return Err(McpError::internal_error(
+                    format!("session is no longer holding the continuation it reported: {e}"),
+                    None,
+                ))
             }
-        };
-        let (suspension, canonical) = suspension;
-        // Suspended{cont_id} → Running, validating the id against the SLOT too
-        // (the state lock and the manager lock are separate; this is the second
-        // half of validate-before-consume).
-        let Some(checkout) = self.inner.manager.checkout_resume(&suspension.cont_id) else {
-            *state.lock() = SessionState::Idle;
-            return Err(McpError::internal_error(
-                "session is no longer holding the continuation it reported",
-                None,
-            ));
         };
         let cancel = self
             .inner
@@ -830,8 +784,7 @@ impl TidepoolReplServer {
         let gate = PauseGate::new();
         // The captured buffer carries over from the suspending turn, so the
         // resumed turn's drain includes what the pre-ask items printed.
-        let captured = suspension.captured;
-        let (session, custody) = checkout.into_parts();
+        let (session, receipt) = checkout.into_parts();
         let turn_gate = Arc::clone(&gate);
         let turn_captured = captured.clone();
         let join = spawn_turn(session, move |session| {
@@ -843,11 +796,7 @@ impl TidepoolReplServer {
                 join,
                 gate,
                 captured,
-                DriveCtl {
-                    state,
-                    cancel,
-                    custody,
-                },
+                DriveCtl { cancel, receipt },
                 ct,
             )
             .await)
@@ -934,11 +883,11 @@ impl TidepoolReplServer {
     }
 
     /// Resolve an in-flight turn: await its blocking task, map the outcome to an
-    /// MCP result, restore the session to its manager slot, and drive the
-    /// [`SessionState`] transition. The state arrived `Busy` (set by the
-    /// caller); this resolves it to `Idle` (turn finished), `Suspended` (the
-    /// turn stowed an `ask`), or `Wedged` (timeout / crash). Runs on a detached
-    /// task (see [`Self::drive_detached`]) so its terminal writes survive a
+    /// MCP result, and settle the registry checkout to `Idle` (turn finished),
+    /// `Suspended` (the turn stowed an `ask`), or `Wedged` (timeout / crash) —
+    /// the registry's own [`Slot`](tidepool_runtime::session::registry::Slot)
+    /// is the one lifecycle truth this resolves. Runs on a detached task (see
+    /// [`Self::drive_detached`]) so its terminal writes survive a
     /// cancelled/dropped RPC future.
     async fn drive(
         &self,
@@ -948,11 +897,7 @@ impl TidepoolReplServer {
         captured: CapturedOutput,
         ctl: DriveCtl,
     ) -> CallToolResult {
-        let DriveCtl {
-            state,
-            cancel,
-            custody,
-        } = ctl;
+        let DriveCtl { cancel, receipt } = ctl;
         let turn_timeout = self
             .inner
             .cfg
@@ -991,8 +936,7 @@ impl TidepoolReplServer {
                         // Aborted at a safepoint — clear the flag and put the
                         // session back Idle (self-healed).
                         h.reset();
-                        self.restore_idle(custody, run.session);
-                        *state.lock() = SessionState::Idle;
+                        self.inner.manager.restore_idle(receipt, run.session);
                         return CallToolResult::error(vec![Content::text(format!(
                             "{op} timed out after {to_secs}s and was aborted; the \
                                  session recovered and is ready for the next turn"
@@ -1003,15 +947,11 @@ impl TidepoolReplServer {
                 //
                 // The `Session` was MOVED INTO the blocking closure, so a task
                 // that never returns holds the only copy: there is genuinely
-                // nothing to restore, and a slot claiming otherwise would lie.
-                // Drop the whole manager entry. `session_reset` replaces the
-                // entry wholesale anyway, so the universal get-unstuck button is
-                // unaffected — and the next `session_run` simply auto-opens a
-                // fresh session, exactly as it does from cold.
-                *state.lock() = SessionState::Wedged {
-                    since: Instant::now(),
-                };
-                self.inner.manager.retire(custody);
+                // nothing to restore. Settle the checkout as `Wedged{since}` —
+                // the registry's OWN persisted terminal state (not a full
+                // removal): a LATER caller sees "wedged" too, not just this
+                // one, until the reaper/`session_reset` reclaims it.
+                self.inner.manager.mark_wedged(receipt, Instant::now());
                 return CallToolResult::error(vec![Content::text(wedged_message(
                     op,
                     to_secs,
@@ -1026,10 +966,7 @@ impl TidepoolReplServer {
                 // process thread down past `spawn_turn`'s catch_unwind). The
                 // session went with it — same honest bookkeeping as the wedge
                 // above.
-                *state.lock() = SessionState::Wedged {
-                    since: Instant::now(),
-                };
-                self.inner.manager.retire(custody);
+                self.inner.manager.mark_wedged(receipt, Instant::now());
                 return CallToolResult::error(vec![Content::text(format!(
                     "{op}: session turn thread crashed (likely a JIT signal — exhausted case \
                      branch or invalid memory access). {RECLAIMED_NOTICE}"
@@ -1041,8 +978,7 @@ impl TidepoolReplServer {
             TurnStep::Completed(outcome) => {
                 let is_error = outcome.is_error();
                 let rendered = outcome.render();
-                self.restore_idle(custody, run.session);
-                *state.lock() = SessionState::Idle;
+                self.inner.manager.restore_idle(receipt, run.session);
                 if is_error {
                     let out = captured.snapshot();
                     CallToolResult::error(vec![Content::text(
@@ -1064,32 +1000,19 @@ impl TidepoolReplServer {
                         ask.meta,
                     );
                 // The session goes back into its slot holding the stowed
-                // continuation; the caller-facing half of the suspension lives
-                // IN the state, so a suspension can't exist untracked and
-                // teardown is always forced to decide its fate.
-                self.inner
-                    .manager
-                    .restore_suspended(custody, run.session, cont_id.clone());
-                *state.lock() = SessionState::Suspended(Box::new(Suspension {
-                    cont_id,
+                // continuation; the caller-facing suspension payload lives in
+                // the manager's own suspension record, set atomically with
+                // this same settlement so it can never exist untracked.
+                self.inner.manager.restore_suspended(
+                    receipt,
+                    run.session,
+                    cont_id.clone(),
                     captured,
                     expected_schema,
-                    since: Instant::now(),
-                }));
+                );
                 CallToolResult::success(vec![Content::text(json_obj.to_string())])
             }
         }
-    }
-
-    /// Put a completed turn's session back `Idle`, republishing the live
-    /// bindings snapshot for the `tidepool://session/bindings` resource first
-    /// (a decl/bind/reset may have changed the environment). The read side
-    /// never drives a turn, so this is the one place the snapshot advances.
-    fn restore_idle(&self, custody: CheckoutCustody, session: Box<Session>) {
-        if let Some(slot) = self.inner.manager.bindings_slot() {
-            *slot.lock() = session.bindings_snapshot();
-        }
-        self.inner.manager.restore_idle(custody, session);
     }
 
     /// The live `tidepool://session/bindings` body: the worker's last-published
@@ -1107,12 +1030,13 @@ impl TidepoolReplServer {
     }
 }
 
-/// What a reaper sweep decided to do, computed under the state lock and acted on
-/// after it is released (the lock is never held across an `.await`).
+/// What a reaper sweep decided to do — computed from one read of the
+/// registry's own state, acted on right after (no lock held across the
+/// `AbortSuspension` branch's eventual `.await`, same discipline as before,
+/// just one fewer lock now that there is only the registry's).
 enum ReapAction {
     Nothing,
     /// An abandoned suspension (never resumed): abort its stowed continuation.
-    /// The state is already `Busy` for the duration.
     AbortSuspension(ContinuationId),
     /// A stale wedge: the entry is dead weight — remove it.
     RemoveWedged,
@@ -1132,33 +1056,30 @@ fn reap_once(
     wedged_ttl: Option<Duration>,
 ) {
     let now = Instant::now();
-    let Some(state) = inner.manager.state() else {
-        return;
-    };
-    let action = {
-        let mut st = state.lock();
-        match &*st {
-            SessionState::Suspended(s)
-                if suspended_ttl.is_some_and(|ttl| now.duration_since(s.since) >= ttl) =>
-            {
-                let cont_id = s.cont_id.clone();
-                *st = SessionState::Busy;
-                ReapAction::AbortSuspension(cont_id)
+    let action = match inner.manager.slot_kind() {
+        None => ReapAction::Nothing,
+        Some(SlotKind::Suspended) => match inner.manager.suspension_since() {
+            Some(since) if suspended_ttl.is_some_and(|ttl| now.duration_since(since) >= ttl) => {
+                match inner.manager.suspension_cont_id() {
+                    Some(cont_id) => ReapAction::AbortSuspension(cont_id),
+                    None => ReapAction::Nothing,
+                }
             }
-            SessionState::Wedged { since }
-                if wedged_ttl.is_some_and(|ttl| now.duration_since(*since) >= ttl) =>
-            {
-                *st = SessionState::Closing;
+            _ => ReapAction::Nothing,
+        },
+        Some(SlotKind::Wedged) => match inner.manager.wedged_since() {
+            Some(since) if wedged_ttl.is_some_and(|ttl| now.duration_since(since) >= ttl) => {
                 ReapAction::RemoveWedged
             }
             _ => ReapAction::Nothing,
-        }
+        },
+        Some(_) => ReapAction::Nothing,
     };
     match action {
         ReapAction::Nothing => {}
         ReapAction::RemoveWedged => inner.manager.remove(),
         ReapAction::AbortSuspension(cont_id) => {
-            tokio::spawn(async move { abort_abandoned(inner, state, cont_id).await });
+            tokio::spawn(async move { abort_abandoned(inner, cont_id).await });
         }
     }
 }
@@ -1166,13 +1087,13 @@ fn reap_once(
 /// Reclaim one abandoned suspension: check the session out on its pending
 /// continuation, drive an ABORT through the machine (unwinding the `ask` and
 /// consuming the continuation), and hand the session back `Idle`.
-async fn abort_abandoned(inner: Arc<ReplServerInner>, state: SharedState, cont_id: ContinuationId) {
-    let Some(checkout) = inner.manager.checkout_resume(&cont_id) else {
+async fn abort_abandoned(inner: Arc<ReplServerInner>, cont_id: ContinuationId) {
+    let checkout = match inner.manager.checkout_resume(&cont_id) {
+        Ok(c) => c,
         // Raced with a real resume or a reset — nothing to reclaim.
-        *state.lock() = SessionState::Idle;
-        return;
+        Err(_) => return,
     };
-    let (session, custody) = checkout.into_parts();
+    let (session, receipt) = checkout.into_parts();
     let gate = PauseGate::new();
     let captured = CapturedOutput::new();
     let join = spawn_turn(session, move |session| {
@@ -1185,11 +1106,7 @@ async fn abort_abandoned(inner: Arc<ReplServerInner>, state: SharedState, cont_i
     match join.await {
         Ok(run) => match run.step {
             TurnStep::Completed(_) => {
-                if let Some(slot) = inner.manager.bindings_slot() {
-                    *slot.lock() = run.session.bindings_snapshot();
-                }
-                inner.manager.restore_idle(custody, run.session);
-                *state.lock() = SessionState::Idle;
+                inner.manager.restore_idle(receipt, run.session);
             }
             TurnStep::Suspended(_) => {
                 // The aborted turn caught the failure and asked AGAIN. Nobody is
@@ -1197,11 +1114,11 @@ async fn abort_abandoned(inner: Arc<ReplServerInner>, state: SharedState, cont_i
                 // holding a continuation no caller knows the id of. Retire the
                 // session instead; the next `session_run` opens a fresh one.
                 tracing::warn!("reaped continuation re-suspended on abort; retiring the session");
-                inner.manager.retire(custody);
+                inner.manager.retire(receipt);
             }
         },
         Err(_join_err) => {
-            inner.manager.retire(custody);
+            inner.manager.retire(receipt);
         }
     }
 }
@@ -1538,24 +1455,33 @@ mod tests {
         }
     }
 
-    /// A wedged turn holds the only copy of its session, so the entry is
-    /// DROPPED — and the two ways an operator gets unstuck from there are the
-    /// reaper's TTL sweep and `session_reset`.
-    ///
-    /// Driven at the transition level rather than by manufacturing a runaway: a
-    /// pure loop that outruns the JIT cancel through the full abort grace is
-    /// neither reliable nor cheap to construct, and a flaky test here would be
-    /// worse than none. `SessionState` is already the server's own public
-    /// vocabulary, so installing `Wedged` needs no test-only production
-    /// surface.
+    /// Manufacture a `Wedged` entry directly via the manager, mirroring what
+    /// `drive`'s timeout/crash paths do (`mark_wedged` on a checked-out
+    /// receipt) — driven at the transition level rather than by
+    /// manufacturing a real runaway: a pure loop that outruns the JIT cancel
+    /// through the full abort grace is neither reliable nor cheap to
+    /// construct, and a flaky test here would be worse than none.
+    fn wedge_current_session(server: &TidepoolReplServer) {
+        server.ensure_session_open().expect("session auto-opens");
+        let checkout = server
+            .inner
+            .manager
+            .admit_run()
+            .expect("session present")
+            .expect("idle -> run");
+        let (_session, receipt) = checkout.into_parts();
+        server.inner.manager.mark_wedged(receipt, Instant::now());
+    }
+
+    /// A wedged turn holds the only copy of its session, so nothing can be
+    /// restored — but (post-promotion) the registry's own `Wedged` slot
+    /// stays visibly wedged for every caller, not just the one that wedged
+    /// it, until the reaper's TTL sweep or `session_reset` clears it.
     #[tokio::test]
     async fn reaper_removes_a_wedged_entry_only_once_past_its_ttl() {
         let dir = tempfile::tempdir().expect("tempdir");
         let server = wedge_test_server(dir.path());
-        let state = server.ensure_session().expect("session auto-opens");
-        *state.lock() = SessionState::Wedged {
-            since: Instant::now(),
-        };
+        wedge_current_session(&server);
 
         // A sweep with a TTL the wedge has NOT outlived leaves it alone — this
         // is what makes the assertion below mean "the TTL was consulted" rather
@@ -1566,7 +1492,7 @@ mod tests {
             Some(Duration::from_secs(3600)),
         );
         assert!(
-            server.inner.manager.state().is_some(),
+            server.inner.manager.is_present(),
             "a wedge younger than the TTL must survive the sweep"
         );
 
@@ -1574,12 +1500,15 @@ mod tests {
         // `session_run` auto-opens a fresh session.
         reap_once(Arc::clone(&server.inner), None, Some(Duration::ZERO));
         assert!(
-            server.inner.manager.state().is_none(),
+            !server.inner.manager.is_present(),
             "a wedge past its TTL must be removed, not left occupying the slot"
         );
-        let reopened = server.ensure_session().expect("a fresh session auto-opens");
-        assert!(
-            reopened.lock().is_idle(),
+        server
+            .ensure_session_open()
+            .expect("a fresh session auto-opens");
+        assert_eq!(
+            server.inner.manager.slot_kind(),
+            Some(SlotKind::Idle),
             "the reopened session must be Idle and usable"
         );
     }
@@ -1592,10 +1521,9 @@ mod tests {
     async fn reset_reclaims_a_wedged_entry() {
         let dir = tempfile::tempdir().expect("tempdir");
         let server = wedge_test_server(dir.path());
-        let wedged = server.ensure_session().expect("session auto-opens");
-        *wedged.lock() = SessionState::Wedged {
-            since: Instant::now(),
-        };
+        wedge_current_session(&server);
+        let wedged_id = server.inner.manager.busy_label();
+        assert!(wedged_id.is_some_and(|l| l.contains("wedged")));
 
         let result = server.session_reset();
         assert_ne!(
@@ -1604,18 +1532,10 @@ mod tests {
             "reset must succeed from a wedged session"
         );
 
-        let fresh = server
-            .inner
-            .manager
-            .state()
-            .expect("reset installs a fresh entry");
-        assert!(
-            !Arc::ptr_eq(&fresh, &wedged),
-            "reset must REPLACE the wedged entry, not revive it"
-        );
-        assert!(
-            fresh.lock().is_idle(),
-            "the replacement session must be Idle"
+        assert_eq!(
+            server.inner.manager.slot_kind(),
+            Some(SlotKind::Idle),
+            "reset must REPLACE the wedged entry with a fresh Idle one"
         );
     }
 

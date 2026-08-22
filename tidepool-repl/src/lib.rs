@@ -38,7 +38,6 @@ pub mod introspect;
 pub mod manager;
 pub mod server;
 pub mod session;
-pub mod state;
 pub mod truncate;
 
 pub use command::{DeclText, ExprText, MetaCommand, SessionCommand, TurnOutcome};

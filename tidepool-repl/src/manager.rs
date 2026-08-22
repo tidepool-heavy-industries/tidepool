@@ -1,40 +1,58 @@
-//! The single implicit session's manager: an ownership slot machine around ONE
-//! resident [`Session`]. A turn checks the session OUT of the slot, runs it on
-//! the blocking pool with the manager lock RELEASED, and restores it under a
-//! second short lock — see `tidepool-repl/CLAUDE.md`'s "Internals: session
-//! lifecycle" section for the full picture.
+//! The single implicit session's manager: a thin policy wrapper over the
+//! promoted `tidepool_runtime::session::registry::SingleSlot` — the ONE
+//! session-ownership/lifecycle mechanism (see the root `CLAUDE.md` Mechanism
+//! Index). The registry's [`Slot`](tidepool_runtime::session::registry::Slot)
+//! (`Idle | Running | Suspended | Wedged`) is the ONLY lifecycle truth; this
+//! module adds only what is genuinely REPL-specific policy on top of it:
 //!
-//! The slot is the OWNERSHIP truth (where the session is); [`SessionState`] is
-//! the caller-facing LIFECYCLE truth (what the server tells a client and which
-//! ops it admits, including `Wedged`/`Closing`, which have no slot of their own).
-//! The two are transitioned together at the dispatch boundary.
-//!
-//! Every checkout carries an EPOCH. `session_reset` replaces the whole entry, so
-//! an in-flight turn can outlive the entry it was checked out of; restoring
-//! against a stale epoch DROPS the session instead of clobbering the fresh one.
-//! The epoch travels as a private [`CheckoutCustody`] token, not a bare `u64`:
-//! a turn can only settle its checkout (`restore_idle`/`restore_suspended`/
-//! `retire`) by consuming the SAME token `checkout_run`/`checkout_resume`
-//! minted, so a settlement call can never be built from an epoch and a
-//! session that don't actually belong together — and dropping the token
-//! unsettled is loud (a leaked checkout means the manager's only slot is stuck
-//! at `Running` forever).
+//! - a busy-guard that refuses a fresh `session_run` while `Suspended`
+//!   ([`SessionManager::admit_run`]) — a policy choice the shared
+//!   `checkout_run` deliberately does not make itself, since the harness's
+//!   own keyed usage treats a run over parked frames as ordinary;
+//! - the suspension's caller-facing payload (`captured` output, `expected_schema`,
+//!   the reaper's TTL clock) — domain metadata the registry itself has no
+//!   opinion on, mirroring how the harness keeps its own per-hole metadata
+//!   OUTSIDE the registry (see `tidepool-harness/src/harness.rs`'s
+//!   `pending_holes` map);
+//! - the cancel-handle and live-bindings slots a turn/resource-read needs
+//!   without checking the session out.
 
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::time::Instant;
 
 use parking_lot::Mutex;
+use serde::{Deserialize, Serialize};
 use tidepool_codegen::jit_machine::CancelHandle;
+use tidepool_mcp::CapturedOutput;
+use tidepool_repr::SessionId;
+use tidepool_runtime::session::registry::{CheckoutError, CheckoutReceipt, SingleSlot, SlotKind};
 
 use crate::session::Session;
-use crate::state::{shared, ContinuationId, SessionState, SharedState};
+
+/// An in-turn `ask` continuation id (`scont_<n>`). A minted-once identity,
+/// not a free-form string — compared and routed as this newtype rather than
+/// a bare `String`. `#[serde(transparent)]` keeps the wire form a plain
+/// string, so `continuation_id` request/response JSON is byte-identical.
+/// This is the registry's hole-identity type parameter for this crate —
+/// `tidepool-harness` instantiates the SAME shared registry at its own
+/// `HoleId` instead (see `tidepool-runtime::session::registry`'s module doc
+/// for why the two newtypes stay separate).
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(transparent)]
+pub struct ContinuationId(pub String);
+
+impl std::fmt::Display for ContinuationId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
 
 /// A slot holding the resident machine's [`CancelHandle`], readable from the
-/// async server side. `None` until the machine bootstraps on the session's first
-/// expression turn. The [`Session`] publishes its handle here the instant the
-/// machine bootstraps (via `set_cancel_slot`/`bootstrap_machine`) and `reset()`s
-/// the flag at each turn start, so a timeout can `cancel()` an in-flight runaway
-/// and the next turn starts clean.
+/// async server side. `None` until the machine bootstraps on the session's
+/// first expression turn. The [`Session`] publishes its handle here the
+/// instant the machine bootstraps (via `set_cancel_slot`/`bootstrap_machine`)
+/// and `reset()`s the flag at each turn start, so a timeout can `cancel()` an
+/// in-flight runaway and the next turn starts clean.
 pub type CancelSlot = Arc<Mutex<Option<CancelHandle>>>;
 
 /// A fresh, empty cancel slot.
@@ -43,13 +61,14 @@ pub fn empty_cancel_slot() -> CancelSlot {
 }
 
 /// A shared slot holding a JSON snapshot of the live session environment (the
-/// decl plane + value/pure binds), republished after every completed turn. The
-/// async server reads it directly for the `tidepool://session/bindings` resource
-/// WITHOUT driving a turn — a lock-free-of-await read of live state.
+/// decl plane + value/pure binds), republished after every completed turn.
+/// The async server reads it directly for the `tidepool://session/bindings`
+/// resource WITHOUT driving a turn — a lock-free-of-await read of live state.
 pub type BindingsSlot = Arc<Mutex<serde_json::Value>>;
 
-/// A fresh bindings slot seeded with the empty-session snapshot, so a resource
-/// read before the first turn returns valid (empty) JSON rather than null.
+/// A fresh bindings slot seeded with the empty-session snapshot, so a
+/// resource read before the first turn returns valid (empty) JSON rather
+/// than null.
 pub fn empty_bindings_slot() -> BindingsSlot {
     Arc::new(Mutex::new(serde_json::json!({
         "bindings": [],
@@ -58,279 +77,301 @@ pub fn empty_bindings_slot() -> BindingsSlot {
     })))
 }
 
-/// Where the resident session is right now. The `unsafe impl Send` on the
-/// machine and the binding table is justified by exactly this: the session is in
-/// EXACTLY one place — a slot variant, or the turn that checked it out.
-enum SessionSlot {
-    /// Present and ready for a new turn.
-    Idle(Box<Session>),
-    /// Checked out: a turn owns it on the blocking pool.
-    Running,
-    /// Present, holding a stowed `ask` continuation. Accepts only a resume of
-    /// `cont_id` (or a wholesale [`SessionManager::remove`]).
-    Suspended {
-        session: Box<Session>,
-        cont_id: ContinuationId,
-    },
+/// [`SessionManager`]'s type alias for the promoted `Checkout` at this
+/// crate's machine (`Box<Session>`) and hole ([`ContinuationId`]) types.
+pub type Checkout<'r> =
+    tidepool_runtime::session::registry::Checkout<'r, Box<Session>, ContinuationId>;
+
+/// This crate's instantiation of the promoted checkout error type.
+pub type ManagerCheckoutError = CheckoutError<ContinuationId>;
+
+/// The caller-facing payload of a pending `ask` suspension — everything
+/// `session_resume` and the reaper need that the registry itself has no
+/// opinion on. Lives OUTSIDE the registry, exactly one per manager (this
+/// crate's session is single-hole: only one `ask` is ever pending at a
+/// time), mirroring the harness's own per-hole metadata design.
+struct Suspension {
+    /// The pending continuation's id — kept here too (redundant with the
+    /// registry's own hole set) purely so `session_resume` can build a
+    /// "suspended on X, not Y" message without a separate registry read.
+    cont_id: ContinuationId,
+    /// The console output captured so far, carried across the suspension so
+    /// the resumed turn's drain includes everything the pre-ask items
+    /// printed.
+    captured: CapturedOutput,
+    /// The `ask`'s schema, used to validate + canonicalize the resume reply
+    /// BEFORE the continuation is consumed. `None` ⇒ accept any JSON.
+    expected_schema: Option<serde_json::Value>,
+    /// When the session entered (or last refreshed) this suspension — the
+    /// reaper's TTL clock.
+    since: Instant,
 }
 
-/// One manager entry: the session slot plus everything that outlives an
-/// individual turn. State lives here (not smeared across the server's maps) so
-/// it is owned in one place and transitioned atomically — see [`crate::state`].
-struct SessionEntry {
-    /// Identity of THIS entry. A checkout records it; a restore against a
-    /// different epoch means the entry was replaced (reset) mid-turn.
-    epoch: u64,
-    slot: SessionSlot,
-    state: SharedState,
-    cancel_slot: CancelSlot,
-    bindings_slot: BindingsSlot,
-}
-
-/// A session checked OUT of the manager for the duration of one turn.
-///
-/// The turn drives `session` (moved out of its slot) and, once it settles,
-/// must hand the WHOLE checkout back through exactly one of
-/// [`SessionManager::restore_idle`] / [`SessionManager::restore_suspended`] /
-/// [`SessionManager::retire`] — never the epoch and the session separately.
-/// [`Self::into_parts`] is the only way to split the session out for driving
-/// the turn; it hands back a [`CheckoutCustody`] token that carries the epoch
-/// PRIVATELY and must itself be consumed by one of those three transitions
-/// (it panics in debug builds — mirrors `tidepool_runtime::session::
-/// RootCustody` — if dropped unconsumed), so a settlement call can no longer
-/// be built from an epoch and a session that don't actually belong together.
-#[must_use]
-pub struct Checkout {
-    session: Box<Session>,
-    custody: CheckoutCustody,
-}
-
-impl Checkout {
-    /// Split the checkout into the session (to drive the turn on) and its
-    /// custody token (to settle the checkout once the turn finishes). The
-    /// only way to get either piece out of a `Checkout`.
-    pub fn into_parts(self) -> (Box<Session>, CheckoutCustody) {
-        (self.session, self.custody)
-    }
-}
-
-/// The linear half of a [`Checkout`]: proof that a session was checked out,
-/// carrying the entry epoch it must be settled against. `pub(crate)`
-/// construction ([`CheckoutCustody::new`]) confines minting to
-/// [`SessionManager::checkout_run`] / [`SessionManager::checkout_resume`] —
-/// the two real checkout sites — so a settlement call can never be handed a
-/// forged epoch. Consuming it (`into_epoch`, used only by the three
-/// settlement methods) is the ONLY way to recover the epoch; dropping it
-/// unconsumed is a lost checkout — a turn that would leave the manager's only
-/// slot stuck at `Running` forever — so `Drop` panics loudly in debug builds
-/// (mirrors `tidepool_runtime::session::RootCustody`, which established this
-/// idiom for the same "linear obligation, backed by a bomb" shape).
-#[must_use]
-#[derive(Debug)]
-pub struct CheckoutCustody(Option<u64>);
-
-// Mirrors `RootCustody`'s pin (tidepool-runtime/src/session/resident.rs): a
-// Clone would let two settlement calls each believe they hold the epoch this
-// checkout must be settled against, silently reviving the double-settle bug
-// this token exists to make a compile error. `new`/`into_epoch` are private
-// to this module, so there is no honest external trybuild fixture for the
-// use-after-move half of this guarantee — it is exercised by this module's
-// own tests below.
-static_assertions::assert_not_impl_any!(CheckoutCustody: Clone, Copy);
-
-impl CheckoutCustody {
-    fn new(epoch: u64) -> Self {
-        CheckoutCustody(Some(epoch))
-    }
-
-    /// Consume the token, releasing the epoch to the caller — the ONLY way
-    /// out. Every legitimate settlement (`restore_idle`/`restore_suspended`/
-    /// `retire`) goes through this exactly once.
-    fn into_epoch(mut self) -> u64 {
-        #[allow(
-            clippy::expect_used,
-            reason = "CheckoutCustody always holds an epoch until into_epoch consumes it"
-        )]
-        self.0
-            .take()
-            .expect("CheckoutCustody always holds an epoch until into_epoch consumes it")
-    }
-}
-
-impl Drop for CheckoutCustody {
-    fn drop(&mut self) {
-        let Some(epoch) = self.0 else { return };
-        let detail = format!(
-            "CheckoutCustody dropped without being consumed — epoch {epoch}'s checkout was \
-             never settled (no restore_idle/restore_suspended/retire). The manager entry this \
-             checkout came from is left stuck at Running: no future session_run can check the \
-             session back out."
-        );
-        // Never panic while already unwinding — see `RootCustody`'s Drop impl
-        // (tidepool-runtime/src/session/resident.rs) for why: an abort loses
-        // the original diagnosis, and a leak observed mid-unwind is almost
-        // always a CONSEQUENCE of that unwind, not an independent bug.
-        if std::thread::panicking() {
-            tracing::error!("{detail} (reported during an active unwind, so not raised)");
-            return;
-        }
-        debug_assert!(false, "{}", detail);
-    }
-}
-
-/// The single implicit session's manager: holds AT MOST one resident session.
-/// The multi-agent story is one repl server per agent, so there is exactly one
-/// current session — no keying. `session_run` auto-installs it on first use;
-/// `session_reset` swaps in a fresh one.
-#[derive(Default)]
+/// The single implicit session's manager: holds AT MOST one resident
+/// session, mirroring `tidepool_runtime::session::registry::SingleSlot`'s own
+/// "no keying" shape (the multi-agent story is one repl server per agent).
 pub struct SessionManager {
-    entry: Mutex<Option<SessionEntry>>,
-    next_epoch: AtomicU64,
+    slot: SingleSlot<Box<Session>, ContinuationId>,
+    suspension: Mutex<Option<Suspension>>,
+    cancel_slot: Mutex<Option<CancelSlot>>,
+    bindings_slot: Mutex<Option<BindingsSlot>>,
+}
+
+impl Default for SessionManager {
+    fn default() -> Self {
+        SessionManager {
+            slot: SingleSlot::new(),
+            suspension: Mutex::new(None),
+            cancel_slot: Mutex::new(None),
+            bindings_slot: Mutex::new(None),
+        }
+    }
 }
 
 impl SessionManager {
     pub fn new() -> SessionManager {
-        SessionManager {
-            entry: Mutex::new(None),
-            next_epoch: AtomicU64::new(1),
-        }
+        Self::default()
     }
 
-    /// Install a freshly-opened session, seeded `Idle`. Errors (handing the
-    /// session back) if one is already present — the caller lost an auto-open
-    /// race and should drop this one and use the existing session.
-    pub fn install(&self, mut session: Box<Session>) -> Result<(), Box<Session>> {
-        let mut slot = self.entry.lock();
-        if slot.is_some() {
-            return Err(session);
-        }
+    /// Install a freshly-opened session under `id`, seeded `Idle`. Errors
+    /// (handing the session back) if one is already present — the caller
+    /// lost an auto-open race and should drop this one and use the existing
+    /// session. `id` is the caller's own session id (the same one its
+    /// include-tree/session-config bookkeeping already minted) — the
+    /// registry does not mint its own.
+    pub fn install(&self, id: SessionId, mut session: Box<Session>) -> Result<(), Box<Session>> {
         let cancel_slot = empty_cancel_slot();
-        // The session publishes its machine's cancel handle here at bootstrap,
-        // so even a first-turn runaway is abortable.
+        // The session publishes its machine's cancel handle here at
+        // bootstrap, so even a first-turn runaway is abortable.
         session.set_cancel_slot(cancel_slot.clone());
-        *slot = Some(SessionEntry {
-            epoch: self.next_epoch.fetch_add(1, Ordering::Relaxed),
-            slot: SessionSlot::Idle(session),
-            state: shared(SessionState::Idle),
-            cancel_slot,
-            bindings_slot: empty_bindings_slot(),
-        });
+        self.slot.install(id, session)?;
+        *self.cancel_slot.lock() = Some(cancel_slot);
+        *self.bindings_slot.lock() = Some(empty_bindings_slot());
         Ok(())
     }
 
-    /// Clone the shared lifecycle state for the session, if present. The server
-    /// locks this (briefly, never across an `.await`) to read/drive transitions.
-    pub fn state(&self) -> Option<SharedState> {
-        self.entry.lock().as_ref().map(|e| e.state.clone())
+    /// Whether a session is currently installed at all.
+    pub fn is_present(&self) -> bool {
+        self.slot.current_id().is_some()
     }
 
-    /// Clone the shared cancel slot for the session, if present. The server
-    /// reads the resident machine's [`CancelHandle`] from it on timeout to abort
-    /// a runaway turn at a JIT safepoint.
+    /// A busy-guard label for the current entry, or `None` if no session is
+    /// installed — `run_command`'s "session is X; resume/reset first"
+    /// rejection reads this. Mirrors the pre-promotion `SessionState::
+    /// busy_label`, now a thin read of the registry's own [`Slot::label`]
+    /// (tidepool_runtime::session::registry::Slot::label).
+    pub fn busy_label(&self) -> Option<String> {
+        self.slot.label()
+    }
+
+    /// The current entry's [`SlotKind`], if one is installed — the reaper's
+    /// dispatch on `Suspended` vs `Wedged`.
+    pub fn slot_kind(&self) -> Option<SlotKind> {
+        self.slot.kind()
+    }
+
+    /// The current entry's `Wedged` `since` timestamp — `None` unless it is
+    /// actually `Wedged`.
+    pub fn wedged_since(&self) -> Option<Instant> {
+        self.slot.wedged_since()
+    }
+
+    /// Clone the shared cancel slot for the session, if present.
     pub fn cancel_slot(&self) -> Option<CancelSlot> {
-        self.entry.lock().as_ref().map(|e| e.cancel_slot.clone())
+        self.cancel_slot.lock().clone()
     }
 
-    /// Clone the live bindings snapshot slot for the session, if present. The
-    /// server reads it for the `tidepool://session/bindings` resource.
+    /// Clone the live bindings snapshot slot for the session, if present.
     pub fn bindings_slot(&self) -> Option<BindingsSlot> {
-        self.entry.lock().as_ref().map(|e| e.bindings_slot.clone())
+        self.bindings_slot.lock().clone()
     }
 
-    /// Check the session OUT for a new turn: `Idle → Running`. `None` when there
-    /// is no session, or it is already running, or it is suspended — the server's
-    /// [`SessionState`] busy-guard has already rejected those cases, so a `None`
-    /// here is a lost race, not the normal refusal path.
-    pub fn checkout_run(&self) -> Option<Checkout> {
-        let mut guard = self.entry.lock();
-        let entry = guard.as_mut()?;
-        match std::mem::replace(&mut entry.slot, SessionSlot::Running) {
-            SessionSlot::Idle(session) => Some(Checkout {
-                session,
-                custody: CheckoutCustody::new(entry.epoch),
-            }),
-            other => {
-                entry.slot = other;
-                None
+    /// The pending suspension's expected schema + a fresh clone of its
+    /// captured-output buffer, if the session is suspended AND `cont_id`
+    /// matches the pending one — what `session_resume` needs to validate a
+    /// reply BEFORE consuming the continuation. Distinguishes the THREE
+    /// resume-rejection causes `tidepool-repl/CLAUDE.md` documents: no
+    /// suspension at all (`Err(None)`), suspended on a DIFFERENT
+    /// continuation (`Err(Some(pending))`), or a match (`Ok((schema,
+    /// captured))` — `schema` itself may be `None`, meaning "accept any
+    /// JSON").
+    pub fn suspension_for(
+        &self,
+        cont_id: &ContinuationId,
+    ) -> Result<(Option<serde_json::Value>, CapturedOutput), Option<ContinuationId>> {
+        match self.suspension.lock().as_ref() {
+            None => Err(None),
+            Some(s) if &s.cont_id == cont_id => Ok((s.expected_schema.clone(), s.captured.clone())),
+            Some(s) => Err(Some(s.cont_id.clone())),
+        }
+    }
+
+    /// Refresh the pending suspension's `since` clock (anti-starvation: a
+    /// retrying continuation must not become the reaper's oldest-first
+    /// eviction victim while its caller fixes an invalid reply). No-op if
+    /// nothing is pending.
+    pub fn refresh_suspension_since(&self) {
+        if let Some(s) = self.suspension.lock().as_mut() {
+            s.since = Instant::now();
+        }
+    }
+
+    /// The pending suspension's `since` clock, for the reaper's TTL check.
+    /// `None` if nothing is pending.
+    pub fn suspension_since(&self) -> Option<Instant> {
+        self.suspension.lock().as_ref().map(|s| s.since)
+    }
+
+    /// The pending suspension's continuation id, for the reaper's abort
+    /// path. `None` if nothing is pending.
+    pub fn suspension_cont_id(&self) -> Option<ContinuationId> {
+        self.suspension.lock().as_ref().map(|s| s.cont_id.clone())
+    }
+
+    /// Admit a NEW top-level run: `Idle → Running`. This is REPL POLICY, not
+    /// the registry's own — the shared `checkout_run` allows a fresh run over
+    /// a `Suspended` slot (the harness's multi-hole story), but this crate's
+    /// documented contract is stricter: a session with a pending suspension
+    /// accepts nothing but a resume or a reset. `None` when there is no
+    /// session at all (the caller auto-opens first). `Some(Err(label))`
+    /// carries the refused slot's own [`tidepool_runtime::session::registry::Slot::label`]
+    /// — ready to drop into a rejection message — for EVERY refusal
+    /// (`Running`, `Suspended`, `Wedged`) alike, one string instead of a
+    /// per-variant match at the call site.
+    ///
+    /// Enforced by taking the checkout for real (the SAME atomic operation
+    /// the registry itself uses — no separate check-then-checkout race) and,
+    /// only if it reveals the PRE-checkout slot was non-`Idle`
+    /// ([`Checkout::holes_at_checkout`] non-empty), immediately handing the
+    /// machine straight back before anyone observes it as checked out.
+    pub fn admit_run(&self) -> Option<Result<Checkout<'_>, String>> {
+        self.slot.current_id()?;
+        // Snapshot the label BEFORE checking out — `checkout_run` itself
+        // mutates the slot to `Running`, so a label read AFTER it would
+        // always say "running" regardless of what it was refused for.
+        let label_before_checkout = self.slot.label().unwrap_or_default();
+        Some(match self.slot.checkout_run() {
+            Ok(co) if co.holes_at_checkout().is_empty() => Ok(co),
+            Ok(co) => {
+                let holes = co.holes_at_checkout().to_vec();
+                co.restore_suspended(holes);
+                Err(label_before_checkout)
             }
-        }
+            Err(e) => Err(e.to_string()),
+        })
     }
 
-    /// Check the session OUT to resume its pending continuation:
-    /// `Suspended{cont_id} → Running`, validating `cont_id` matches. A mismatch
-    /// leaves the slot untouched — validate-before-consume, so a wrong id can't
-    /// spend the pending hole.
-    pub fn checkout_resume(&self, cont_id: &ContinuationId) -> Option<Checkout> {
-        let mut guard = self.entry.lock();
-        let entry = guard.as_mut()?;
-        let matches =
-            matches!(&entry.slot, SessionSlot::Suspended { cont_id: p, .. } if p == cont_id);
-        if !matches {
-            return None;
-        }
-        match std::mem::replace(&mut entry.slot, SessionSlot::Running) {
-            SessionSlot::Suspended { session, .. } => Some(Checkout {
-                session,
-                custody: CheckoutCustody::new(entry.epoch),
-            }),
-            other => {
-                entry.slot = other;
-                None
+    /// `SessionRegistry::checkout_resume` against the current entry.
+    pub fn checkout_resume(
+        &self,
+        cont_id: &ContinuationId,
+    ) -> Result<Checkout<'_>, ManagerCheckoutError> {
+        self.slot.checkout_resume(cont_id)
+    }
+
+    /// Record a fresh suspension's caller-facing payload — called once a
+    /// turn's `TurnStep::Suspended` is observed and the checkout has already
+    /// been restored `Suspended` at the registry level.
+    fn set_suspension(
+        &self,
+        cont_id: ContinuationId,
+        captured: CapturedOutput,
+        expected_schema: Option<serde_json::Value>,
+    ) {
+        *self.suspension.lock() = Some(Suspension {
+            cont_id,
+            captured,
+            expected_schema,
+            since: Instant::now(),
+        });
+    }
+
+    /// Clear the pending suspension (a resume consumed it, or a reset/removal
+    /// dropped it).
+    fn clear_suspension(&self) {
+        *self.suspension.lock() = None;
+    }
+
+    /// Whether `id` is still the CURRENT entry — a settlement only touches
+    /// the manager-level side state (`suspension`/`cancel_slot`/
+    /// `bindings_slot`, all flat fields, unlike the registry's own
+    /// per-entry epoch-guarded slot) when this is true. A settlement against
+    /// a STALE id (the entry was replaced by a `session_reset` that raced
+    /// it) must not mutate side state a FRESH, now-current session may
+    /// already own — the registry's own `settle_*` calls stay safe on their
+    /// own epoch guard regardless, but these flat fields have no epoch of
+    /// their own, so this check is what keeps them from aliasing across a
+    /// replace.
+    fn is_current(&self, id: SessionId) -> bool {
+        self.slot.current_id() == Some(id)
+    }
+
+    /// Settle a checkout as `Idle`, republishing the live bindings snapshot
+    /// first (a decl/bind/reset may have changed the environment) and
+    /// clearing any suspension — only when this checkout's session is still
+    /// current (see [`Self::is_current`]).
+    pub fn restore_idle(&self, receipt: CheckoutReceipt, session: Box<Session>) {
+        if self.is_current(receipt.session_id()) {
+            if let Some(slot) = self.bindings_slot() {
+                *slot.lock() = session.bindings_snapshot();
             }
+            self.clear_suspension();
         }
+        self.slot.settle_suspended(receipt, session, Vec::new());
     }
 
-    /// Restore a checked-out session as `Idle` (the turn completed). Consumes
-    /// `custody` — the epoch it carries and `session` are back together as one
-    /// call, so they cannot come from mismatched checkouts. A stale epoch (the
-    /// entry was replaced by `session_reset` mid-turn) DROPS the session here
-    /// rather than resurrecting it over the fresh one.
-    pub fn restore_idle(&self, custody: CheckoutCustody, session: Box<Session>) {
-        let epoch = custody.into_epoch();
-        let mut guard = self.entry.lock();
-        match guard.as_mut() {
-            Some(entry) if entry.epoch == epoch => entry.slot = SessionSlot::Idle(session),
-            _ => drop(session),
-        }
-    }
-
-    /// Restore a checked-out session as `Suspended{cont_id}` (the turn stowed an
-    /// `ask` continuation). Same stale-epoch rule as [`Self::restore_idle`].
+    /// Settle a checkout as `Suspended{cont_id}`, recording the suspension's
+    /// caller-facing payload — only when still current.
     pub fn restore_suspended(
         &self,
-        custody: CheckoutCustody,
+        receipt: CheckoutReceipt,
         session: Box<Session>,
         cont_id: ContinuationId,
+        captured: CapturedOutput,
+        expected_schema: Option<serde_json::Value>,
     ) {
-        let epoch = custody.into_epoch();
-        let mut guard = self.entry.lock();
-        match guard.as_mut() {
-            Some(entry) if entry.epoch == epoch => {
-                entry.slot = SessionSlot::Suspended { session, cont_id }
-            }
-            _ => drop(session),
+        if self.is_current(receipt.session_id()) {
+            self.set_suspension(cont_id.clone(), captured, expected_schema);
         }
+        self.slot.settle_suspended(receipt, session, vec![cont_id]);
     }
 
     /// The turn never gave the session back (a runaway that outran its abort
-    /// grace, or the blocking task itself crashed): drop the WHOLE entry.
-    /// Honest bookkeeping — the session was moved into the blocking closure, so
-    /// there is nothing left to restore and a slot claiming otherwise would
-    /// lie. The next `session_run` auto-opens a fresh session; `session_reset`
-    /// does the same explicitly. No-op on a stale epoch.
-    pub fn retire(&self, custody: CheckoutCustody) {
-        let epoch = custody.into_epoch();
-        let mut guard = self.entry.lock();
-        if guard.as_ref().is_some_and(|e| e.epoch == epoch) {
-            *guard = None;
+    /// grace, or the blocking task itself crashed): settle the checkout as
+    /// `Wedged{since}` — the registry's OWN persisted terminal state, visible
+    /// to every future caller (not just the one holding this receipt) until
+    /// the reaper/`session_reset` reclaims it. Clears any suspension (there
+    /// is nothing left to resume) only when still current.
+    pub fn mark_wedged(&self, receipt: CheckoutReceipt, since: Instant) {
+        if self.is_current(receipt.session_id()) {
+            self.clear_suspension();
+        }
+        self.slot.settle_wedged(receipt, since);
+    }
+
+    /// Settle a checkout by REMOVING the entry outright, with no reason
+    /// worth keeping visible (an abort that unexpectedly re-suspended, with
+    /// no caller left waiting on the fresh hole — the reaper's
+    /// `abort_abandoned` path). Only when still current.
+    pub fn retire(&self, receipt: CheckoutReceipt) {
+        let current = self.is_current(receipt.session_id());
+        self.slot.settle_retire(receipt);
+        if current {
+            self.clear_suspension();
+            *self.cancel_slot.lock() = None;
+            *self.bindings_slot.lock() = None;
         }
     }
 
     /// Remove the session wholesale (`session_reset`), dropping the resident
     /// machine — and with it any stowed `ask` continuation. Abort folds into
-    /// reset. A turn still in flight will find its epoch stale on restore.
+    /// reset. A turn still in flight will find its epoch stale on
+    /// settlement.
     pub fn remove(&self) {
-        *self.entry.lock() = None;
+        self.slot.remove();
+        self.clear_suspension();
+        *self.cancel_slot.lock() = None;
+        *self.bindings_slot.lock() = None;
     }
 }
 
@@ -343,11 +384,10 @@ mod tests {
     use crate::session::{BoxedStack, SessionConfig, DEFAULT_NURSERY_SIZE};
     use tidepool_mcp::EffectRoster;
 
-    /// A real, openable `Session` tagged with `id`. `Session::open` only creates
-    /// the session include dir and an empty decl log — no GHC, no machine (that
-    /// boots lazily on the first real turn) — so the slot machine is testable
-    /// with genuine sessions rather than a stand-in, and `Session::id` gives the
-    /// tests a way to say WHICH session is in the slot.
+    /// A real, openable `Session` tagged with `id`. `Session::open` only
+    /// creates the session include dir and an empty decl log — no GHC, no
+    /// machine (that boots lazily on the first real turn) — so the slot
+    /// machine is testable with genuine sessions rather than a stand-in.
     fn test_session(id: u64, root: &std::path::Path) -> Box<Session> {
         let cfg = SessionConfig {
             id: SessionId(id),
@@ -364,144 +404,92 @@ mod tests {
         Box::new(session)
     }
 
-    /// The slot transitions on an absent entry: every operation is inert rather
-    /// than a panic. The full checkout/restore round trip on a live machine is
-    /// covered end-to-end by the suspension suites (`tests/ask_resume.rs`,
-    /// `tests/lifecycle_state.rs`), which drive real turns through
-    /// `dispatch_tool`.
     #[test]
     fn empty_manager_has_no_entry() {
         let mgr = SessionManager::new();
-        assert!(mgr.state().is_none());
+        assert!(!mgr.is_present());
         assert!(mgr.cancel_slot().is_none());
         assert!(mgr.bindings_slot().is_none());
-        assert!(mgr.checkout_run().is_none());
-        assert!(mgr
-            .checkout_resume(&ContinuationId("scont_1".into()))
-            .is_none());
-        // Restoring/retiring against an absent entry is inert, not a panic.
-        // `CheckoutCustody::new` here stands in for a checkout that was never
-        // actually issued — only this in-crate test can manufacture one;
-        // production code always gets its token from `checkout_run`/
-        // `checkout_resume`.
-        mgr.retire(CheckoutCustody::new(1));
-        mgr.remove();
+        assert!(mgr.admit_run().is_none());
+        assert!(matches!(
+            mgr.checkout_resume(&ContinuationId("scont_1".into())),
+            Err(ManagerCheckoutError::NoSession)
+        ));
     }
 
-    /// The POSITIVE half of the wedge path: `retire` with the CURRENT epoch
-    /// really does retire the entry, so a wedged turn's session slot is freed
-    /// rather than left `Running` forever. (The stale-epoch half — the same call
-    /// arriving after a reset — is the ABA test below.)
+    /// `mark_wedged` leaves the registry's own terminal state behind — a
+    /// SECOND caller (not just the one holding the receipt) sees "wedged",
+    /// and the slot is freed only by an explicit `remove`. This is the fix
+    /// the promotion's epoch/terminal-slot design makes possible: pre-
+    /// promotion, the equivalent `retire()` call fully removed the entry, so
+    /// only the ORIGINAL caller's own already-cloned `SharedState` ever
+    /// showed "wedged" — a later caller's fresh read saw nothing and silently
+    /// auto-opened. `busy_label()` now genuinely persists the reason.
     #[test]
-    fn retire_on_the_current_epoch_retires_the_entry() {
+    fn wedged_leaves_the_slot_visibly_wedged_until_removed() {
         let dir = tempfile::tempdir().expect("tempdir");
         let mgr = SessionManager::new();
-        assert!(mgr.install(test_session(1, dir.path())).is_ok(), "install");
-        let checkout = mgr.checkout_run().expect("idle → running");
-        let (_session, custody) = checkout.into_parts();
-
-        mgr.retire(custody);
         assert!(
-            mgr.state().is_none(),
-            "a wedged turn's entry must be retired, not left Running"
+            mgr.install(SessionId(1), test_session(1, dir.path()))
+                .is_ok(),
+            "install"
         );
-        // The slot is free again: a fresh session installs.
+        let checkout = mgr.admit_run().expect("idle -> run").expect("idle -> run");
+        let (_session, receipt) = checkout.into_parts();
+
+        mgr.mark_wedged(receipt, Instant::now());
         assert!(
-            mgr.install(test_session(2, dir.path())).is_ok(),
+            mgr.busy_label().is_some_and(|l| l.contains("wedged")),
+            "a wedged entry must stay visible as wedged, not vanish"
+        );
+        assert!(
+            mgr.admit_run().unwrap().is_err(),
+            "wedged refuses a fresh run"
+        );
+
+        mgr.remove();
+        assert!(!mgr.is_present(), "remove reclaims a wedged entry");
+        assert!(
+            mgr.install(SessionId(2), test_session(2, dir.path()))
+                .is_ok(),
             "the freed slot accepts a fresh session"
         );
     }
 
-    /// THE EPOCH GUARD — an ABA on the session slot.
-    ///
-    /// A turn owns its session out on the blocking pool while `session_reset`
-    /// can remove the entry and install a FRESH session underneath it, and the
-    /// epoch is the ONLY thing distinguishing "hand back / retire the entry I
-    /// was checked out of" from "…whatever is there now".
-    ///
-    /// The interleaving, driven here at the manager level (no GHC needed): a
-    /// turn checks out, a reset swaps the entry, and only THEN does the stale
-    /// turn take each of its three exits. All three must be inert, and the
-    /// fresh session must still be the one in the slot — asserted by session
-    /// id, because a missing guard would silently leave the STALE session
-    /// installed and drop the fresh one.
+    /// THE EPOCH GUARD, driven through this crate's own facade — a stale
+    /// turn from BEFORE a `session_reset` must not clobber the session
+    /// installed after it.
     #[test]
     fn a_stale_turn_cannot_clobber_a_session_installed_after_a_reset() {
         let dir = tempfile::tempdir().expect("tempdir");
         let mgr = SessionManager::new();
 
-        // --- exit 1: `retire` (the two wedge paths) ----------------------
-        assert!(mgr.install(test_session(1, dir.path())).is_ok(), "install");
-        let stale = mgr.checkout_run().expect("idle → running");
-        let (stale_session, stale_custody) = stale.into_parts();
-        // Consume the real token to recover its epoch, so the rest of this
-        // test can mint FRESH `CheckoutCustody` tokens carrying the same
-        // stale epoch — standing in for "the same stale checkout, tried
-        // against a different exit". Real code never does this (a token is
-        // consumed exactly once); only this in-crate test can, via the
-        // module-private constructor.
-        let stale_epoch = stale_custody.into_epoch();
+        assert!(
+            mgr.install(SessionId(1), test_session(1, dir.path()))
+                .is_ok(),
+            "install"
+        );
+        let stale = mgr.admit_run().expect("idle -> run").expect("idle -> run");
+        let (stale_session, stale_receipt) = stale.into_parts();
 
-        // `session_reset` lands mid-turn: entry removed, fresh session installed.
         mgr.remove();
         assert!(
-            mgr.install(test_session(2, dir.path())).is_ok(),
+            mgr.install(SessionId(2), test_session(2, dir.path()))
+                .is_ok(),
             "a fresh session installs after the reset"
         );
-        let fresh_state = mgr.state().expect("fresh entry present");
 
-        // The stale turn now declares itself wedged. It must NOT take the fresh
-        // entry with it.
-        mgr.retire(CheckoutCustody::new(stale_epoch));
-        let after_wedge = mgr
-            .state()
-            .expect("a stale wedge must not remove the entry installed after the reset");
-        assert!(
-            Arc::ptr_eq(&after_wedge, &fresh_state),
-            "the fresh entry must be untouched, not replaced"
-        );
-
-        // --- exit 2: `restore_idle` (the completed-turn path) ---------------
-        mgr.restore_idle(CheckoutCustody::new(stale_epoch), stale_session);
+        mgr.restore_idle(stale_receipt, stale_session);
         let fresh = mgr
-            .checkout_run()
-            .expect("the fresh session is still Idle and checkoutable");
+            .admit_run()
+            .expect("the fresh session is still Idle and checkoutable")
+            .expect("idle -> run");
         assert_eq!(
-            fresh.session.id(),
+            fresh.session_id(),
             SessionId(2),
-            "a stale restore must drop its session, not install it over the fresh one"
+            "a stale restore must not clobber the fresh entry"
         );
-
-        // --- exit 3: `restore_suspended` (the stowed-ask path) --------------
-        // The same interleaving again, now with session 2 as the stale turn.
-        let (stale2_session, stale2_custody) = fresh.into_parts();
-        let stale2_epoch = stale2_custody.into_epoch();
-        mgr.remove();
-        assert!(
-            mgr.install(test_session(3, dir.path())).is_ok(),
-            "a third session installs"
-        );
-        mgr.restore_suspended(
-            CheckoutCustody::new(stale2_epoch),
-            stale2_session,
-            ContinuationId("scont_stale".into()),
-        );
-        // `checkout_run` refuses a Suspended slot, so its success is itself the
-        // proof that the stale hole was not installed on the fresh entry.
-        let third = mgr
-            .checkout_run()
-            .expect("the third session is still Idle — not Suspended on a stale hole");
-        assert_eq!(
-            third.session.id(),
-            SessionId(3),
-            "a stale suspend-restore must drop its session, not install it over the fresh one"
-        );
-        // Settle this last checkout before the test ends: an unconsumed
-        // `CheckoutCustody` is exactly the linear-obligation violation this
-        // type exists to catch, so leaving `third` to drop here would panic
-        // instead of confirming the test's own assertions.
-        let (third_session, third_custody) = third.into_parts();
-        mgr.retire(third_custody);
-        drop(third_session);
+        let (session, receipt) = fresh.into_parts();
+        mgr.restore_idle(receipt, session);
     }
 }

@@ -129,6 +129,30 @@ pub enum Slot<M, H> {
     },
 }
 
+/// A [`Slot`]'s shape, without its payload — enough for a caller's own
+/// admission policy (e.g. "refuse a fresh run while suspended", a policy the
+/// shared `checkout_run` deliberately does NOT enforce since the keyed
+/// harness registry treats a run over parked frames as ordinary) without
+/// exposing the machine or hole set.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SlotKind {
+    Idle,
+    Running,
+    Suspended,
+    Wedged,
+}
+
+impl<M, H> Slot<M, H> {
+    pub fn kind(&self) -> SlotKind {
+        match self {
+            Slot::Idle(_) => SlotKind::Idle,
+            Slot::Running { .. } => SlotKind::Running,
+            Slot::Suspended { .. } => SlotKind::Suspended,
+            Slot::Wedged { .. } => SlotKind::Wedged,
+        }
+    }
+}
+
 impl<M, H: std::fmt::Debug> Slot<M, H> {
     /// Human-facing summary of this slot's state — a busy-guard rejection
     /// message, a diagnostic log line, or [`CheckoutError::Terminal`]'s
@@ -223,6 +247,23 @@ impl<M, H: Clone + PartialEq + std::fmt::Debug> SessionRegistry<M, H> {
     /// This session's current [`Slot::label`], if it has an entry at all.
     pub fn label(&self, id: SessionId) -> Option<String> {
         self.slots.lock().get(&id).map(|e| e.slot.label())
+    }
+
+    /// This session's current [`SlotKind`], if it has an entry at all.
+    pub fn kind(&self, id: SessionId) -> Option<SlotKind> {
+        self.slots.lock().get(&id).map(|e| e.slot.kind())
+    }
+
+    /// The `since` timestamp of a `Wedged` entry — `None` if the session has
+    /// no entry, or its entry is not `Wedged`.
+    pub fn wedged_since(&self, id: SessionId) -> Option<Instant> {
+        match self.slots.lock().get(&id) {
+            Some(Entry {
+                slot: Slot::Wedged { since },
+                ..
+            }) => Some(*since),
+            _ => None,
+        }
     }
 
     /// Check a machine OUT for a new turn: `Idle | Suspended → Running`. A
@@ -423,6 +464,17 @@ impl<M, H: Clone + PartialEq + std::fmt::Debug> Checkout<'_, M, H> {
         self.id
     }
 
+    /// The parked holes this checkout found when it took the machine out
+    /// (i.e. the slot's state BEFORE this checkout — empty means it was
+    /// `Idle`). Read-only: a caller whose own admission policy is stricter
+    /// than the registry's (e.g. "refuse a fresh run over a suspended
+    /// session", which `checkout_run` itself does not enforce) reads this to
+    /// decide whether to hand the machine straight back via
+    /// [`Self::restore_suspended`] instead of running a turn on it.
+    pub fn holes_at_checkout(&self) -> &[H] {
+        &self.holes
+    }
+
     /// Borrow the checked-out machine for the turn.
     pub fn machine(&mut self) -> &mut M {
         #[allow(clippy::expect_used, reason = "machine present until settled")]
@@ -442,6 +494,27 @@ impl<M, H: Clone + PartialEq + std::fmt::Debug> Checkout<'_, M, H> {
     /// Put the machine back after a `take`, ahead of [`Self::restore_suspended`].
     pub fn put(&mut self, machine: M) {
         self.machine = Some(machine);
+    }
+
+    /// Split into the machine (to drive the turn on, e.g. move onto a
+    /// blocking task) and an OWNED [`CheckoutReceipt`] carrying just enough
+    /// (`session`, `epoch`) to settle LATER against a fresh registry borrow —
+    /// for a caller whose settlement must run from a DIFFERENT async task
+    /// than the one that checked out (a detached `tokio::spawn`, decoupled
+    /// from the original request future, cannot hold a `Checkout<'r, ..>`
+    /// whose `'r` is tied to that original call). Mirrors
+    /// `tidepool-repl`'s pre-promotion `Checkout::into_parts`/
+    /// `CheckoutCustody` split, now shared. Harness never needs this — its
+    /// `run_checked_out` holds the borrowed `Checkout` across an `.await`
+    /// within the SAME async fn instead.
+    pub fn into_parts(mut self) -> (M, CheckoutReceipt) {
+        #[allow(clippy::expect_used, reason = "machine present until settled")]
+        let machine = self.machine.take().expect("machine present until settled");
+        let receipt = CheckoutReceipt {
+            id: self.id,
+            epoch: Some(self.epoch),
+        };
+        (machine, receipt)
     }
 }
 
@@ -490,17 +563,112 @@ impl<M, H: Clone + PartialEq + std::fmt::Debug> Drop for Checkout<'_, M, H> {
     }
 }
 
+/// An OWNED, lifetime-free proof that a session's machine is checked out —
+/// [`Checkout::into_parts`]'s non-borrowed half, for a caller that must
+/// settle from a task the original `Checkout`'s borrow could not survive
+/// into. Settle it via [`SessionRegistry::settle_suspended`]/
+/// [`SessionRegistry::settle_wedged`] (or the [`SingleSlot`] equivalents) —
+/// exactly once. Unlike `Checkout`, there is no automatic panic-safety
+/// restore on drop (the receipt carries no machine to restore); an
+/// unconsumed receipt is a leaked checkout, caught loudly in debug builds —
+/// mirrors `tidepool-runtime::session::resident::RootCustody`'s idiom.
+#[must_use = "a checkout receipt must be settled, or the session is left Running forever"]
+pub struct CheckoutReceipt {
+    id: SessionId,
+    epoch: Option<u64>,
+}
+
+impl CheckoutReceipt {
+    /// The session id this receipt is for.
+    pub fn session_id(&self) -> SessionId {
+        self.id
+    }
+
+    /// Consume the receipt, releasing its epoch — the ONLY way out. Every
+    /// legitimate settlement goes through this exactly once.
+    fn into_epoch(mut self) -> u64 {
+        #[allow(
+            clippy::expect_used,
+            reason = "CheckoutReceipt always holds an epoch until into_epoch consumes it"
+        )]
+        self.epoch
+            .take()
+            .expect("CheckoutReceipt always holds an epoch until into_epoch consumes it")
+    }
+}
+
+impl Drop for CheckoutReceipt {
+    fn drop(&mut self) {
+        let Some(epoch) = self.epoch else { return };
+        let detail = format!(
+            "CheckoutReceipt dropped without being consumed — session {}'s epoch {epoch} \
+             checkout was never settled (no settle_suspended/settle_wedged). The registry \
+             entry this checkout came from is left stuck Running: no future checkout can \
+             check the session back out.",
+            self.id
+        );
+        // Never panic while already unwinding — see `RootCustody`'s Drop impl
+        // for why: an abort loses the original diagnosis, and a leak
+        // observed mid-unwind is almost always a CONSEQUENCE of that unwind,
+        // not an independent bug.
+        if std::thread::panicking() {
+            tracing::error!("{detail} (reported during an active unwind, so not raised)");
+            return;
+        }
+        debug_assert!(false, "{}", detail);
+    }
+}
+
+// Mirrors `Checkout`'s own pin: a Clone would let two settlement calls each
+// believe they hold the epoch this receipt must be settled against.
+static_assertions::assert_not_impl_any!(CheckoutReceipt: Clone, Copy);
+
+impl<M, H: Clone + PartialEq + std::fmt::Debug> SessionRegistry<M, H> {
+    /// Settle an OWNED [`CheckoutReceipt`] (from [`Checkout::into_parts`])
+    /// with its post-turn parked hole set — the SAME settlement as
+    /// [`Checkout::restore_suspended`], reachable without the borrowed
+    /// `Checkout` still in hand.
+    pub fn settle_suspended(&self, receipt: CheckoutReceipt, machine: M, holes: Vec<H>) {
+        let id = receipt.session_id();
+        self.restore_suspended(id, receipt.into_epoch(), machine, holes);
+    }
+
+    /// Settle an OWNED [`CheckoutReceipt`] as `Wedged{since}` — see
+    /// [`Checkout::mark_wedged`].
+    pub fn settle_wedged(&self, receipt: CheckoutReceipt, since: Instant) {
+        let id = receipt.session_id();
+        self.mark_wedged(id, receipt.into_epoch(), since);
+    }
+
+    /// Settle an OWNED [`CheckoutReceipt`] by REMOVING the entry outright —
+    /// for a caller with nothing worth restoring and no reason to keep a
+    /// `Wedged` placeholder visible (e.g. an abort that unexpectedly
+    /// re-suspended, with no caller left waiting on that hole). Same epoch
+    /// guard as every other settlement: a stale receipt (the entry was
+    /// already replaced or removed) removes nothing.
+    pub fn settle_retire(&self, receipt: CheckoutReceipt) {
+        let id = receipt.session_id();
+        let epoch = receipt.into_epoch();
+        let mut slots = self.slots.lock();
+        if slots.get(&id).is_some_and(|e| e.epoch == epoch) {
+            slots.remove(&id);
+        }
+    }
+}
+
 /// A [`SessionRegistry`] restricted to holding AT MOST one entry at a time —
 /// `tidepool-repl`'s "one implicit session, no name" shape, built on the SAME
 /// primitive the keyed (harness) registry uses rather than a second
-/// implementation. Mints a fresh [`SessionId`] per [`Self::install`] (never
-/// reused), tracking which id is "current" — a stale checkout against a
-/// replaced entry finds its epoch stale on settlement (see the module doc)
-/// and drops its machine rather than clobbering the fresh one.
+/// implementation. The caller mints the [`SessionId`] passed to
+/// [`Self::install`] (so it can stay the SAME id the caller's own
+/// include-tree/session-config bookkeeping already uses — this facade does
+/// not maintain a second counter); tracking which id is "current" means a
+/// stale checkout against a replaced entry finds its epoch stale on
+/// settlement (see the module doc) and drops its machine rather than
+/// clobbering the fresh one.
 pub struct SingleSlot<M, H> {
     registry: SessionRegistry<M, H>,
     current: Mutex<Option<SessionId>>,
-    next_id: AtomicU64,
 }
 
 impl<M, H> Default for SingleSlot<M, H> {
@@ -508,7 +676,6 @@ impl<M, H> Default for SingleSlot<M, H> {
         SingleSlot {
             registry: SessionRegistry::default(),
             current: Mutex::new(None),
-            next_id: AtomicU64::new(0),
         }
     }
 }
@@ -518,19 +685,18 @@ impl<M, H: Clone + PartialEq + std::fmt::Debug> SingleSlot<M, H> {
         Self::default()
     }
 
-    /// Install a freshly-opened machine as the current entry, minting a
-    /// fresh id. Errors (handing the machine back) if one is already present
-    /// — the caller lost an auto-open race and should drop this one and use
-    /// the existing session.
-    pub fn install(&self, machine: M) -> Result<SessionId, M> {
+    /// Install a freshly-opened machine as the current entry under `id`.
+    /// Errors (handing the machine back) if one is already present — the
+    /// caller lost an auto-open race and should drop this one and use the
+    /// existing session.
+    pub fn install(&self, id: SessionId, machine: M) -> Result<(), M> {
         let mut current = self.current.lock();
         if current.is_some() {
             return Err(machine);
         }
-        let id = SessionId(self.next_id.fetch_add(1, Ordering::Relaxed));
         self.registry.insert_idle(id, machine);
         *current = Some(id);
-        Ok(id)
+        Ok(())
     }
 
     /// The current entry's id, if one is installed.
@@ -541,6 +707,18 @@ impl<M, H: Clone + PartialEq + std::fmt::Debug> SingleSlot<M, H> {
     /// The current entry's [`Slot::label`], if one is installed.
     pub fn label(&self) -> Option<String> {
         self.current_id().and_then(|id| self.registry.label(id))
+    }
+
+    /// The current entry's [`SlotKind`], if one is installed.
+    pub fn kind(&self) -> Option<SlotKind> {
+        self.current_id().and_then(|id| self.registry.kind(id))
+    }
+
+    /// The current entry's `Wedged` `since` timestamp — `None` unless the
+    /// current entry is actually `Wedged`.
+    pub fn wedged_since(&self) -> Option<Instant> {
+        self.current_id()
+            .and_then(|id| self.registry.wedged_since(id))
     }
 
     /// Read-only access to the machine WITHOUT checking it out — see
@@ -560,6 +738,32 @@ impl<M, H: Clone + PartialEq + std::fmt::Debug> SingleSlot<M, H> {
     pub fn checkout_resume(&self, hole: &H) -> Result<Checkout<'_, M, H>, CheckoutError<H>> {
         let id = self.current_id().ok_or(CheckoutError::NoSession)?;
         self.registry.checkout_resume(id, hole)
+    }
+
+    /// [`SessionRegistry::settle_suspended`] — settle a [`CheckoutReceipt`]
+    /// obtained from a checkout this facade produced.
+    pub fn settle_suspended(&self, receipt: CheckoutReceipt, machine: M, holes: Vec<H>) {
+        self.registry.settle_suspended(receipt, machine, holes);
+    }
+
+    /// [`SessionRegistry::settle_wedged`] — settle a [`CheckoutReceipt`] as
+    /// `Wedged{since}`.
+    pub fn settle_wedged(&self, receipt: CheckoutReceipt, since: Instant) {
+        self.registry.settle_wedged(receipt, since);
+    }
+
+    /// [`SessionRegistry::settle_retire`] — settle a [`CheckoutReceipt`] by
+    /// removing the entry outright. If the receipt's session is still the
+    /// CURRENT one (nothing replaced it since checkout), clears `current`
+    /// too, so the next `install` succeeds instead of finding a phantom
+    /// entry a stale `current` still points at.
+    pub fn settle_retire(&self, receipt: CheckoutReceipt) {
+        let id = receipt.session_id();
+        self.registry.settle_retire(receipt);
+        let mut current = self.current.lock();
+        if *current == Some(id) {
+            *current = None;
+        }
     }
 
     /// Remove the current entry wholesale (drops the machine and, with it,
@@ -757,6 +961,46 @@ mod tests {
         co.restore_suspended(Vec::new());
     }
 
+    /// A [`CheckoutReceipt`] settles the SAME entry a borrowed `Checkout`
+    /// would, and honors the same epoch guard — the shape a detached
+    /// `tokio::spawn`'d settlement (REPL's `drive`) actually uses.
+    #[test]
+    fn receipt_settles_like_a_checkout_and_respects_the_epoch_guard() {
+        let reg: SessionRegistry<FakeMachine, Hole> = SessionRegistry::new();
+        let id = SessionId(40);
+        reg.insert_idle(id, FakeMachine { turns: 0 });
+
+        let co = reg.checkout_run(id).expect("idle -> run");
+        let (mut machine, receipt) = co.into_parts();
+        assert_eq!(receipt.session_id(), id);
+        machine.turns += 1;
+        reg.settle_suspended(receipt, machine, vec![Hole("h1")]);
+
+        let mut co = reg.checkout_resume(id, &Hole("h1")).expect("resume");
+        assert_eq!(co.machine().turns, 1);
+        let (machine, receipt) = co.into_parts();
+        reg.settle_wedged(receipt, Instant::now());
+
+        assert!(matches!(
+            err(reg.checkout_run(id)),
+            CheckoutError::Terminal { session, .. } if session == id
+        ));
+        let _ = machine;
+
+        // A stale receipt from BEFORE a remove+reinstall must not resurrect
+        // or clobber — same epoch guard as a borrowed `Checkout`.
+        reg.remove(id);
+        reg.insert_idle(id, FakeMachine { turns: 9 });
+        let stale_co = reg.checkout_run(id).expect("fresh entry checkoutable");
+        let (stale_machine, stale_receipt) = stale_co.into_parts();
+        reg.remove(id);
+        reg.insert_idle(id, FakeMachine { turns: 99 });
+        reg.settle_suspended(stale_receipt, stale_machine, Vec::new());
+        let mut co = reg.checkout_run(id).expect("the fresh entry survives");
+        assert_eq!(co.machine().turns, 99);
+        co.restore_suspended(Vec::new());
+    }
+
     #[test]
     fn wedged_refuses_every_checkout_until_removed() {
         let reg: SessionRegistry<FakeMachine, Hole> = SessionRegistry::new();
@@ -781,10 +1025,11 @@ mod tests {
         let slot: SingleSlot<FakeMachine, Hole> = SingleSlot::new();
         assert!(matches!(err(slot.checkout_run()), CheckoutError::NoSession));
 
-        slot.install(FakeMachine { turns: 0 })
+        slot.install(SessionId(1), FakeMachine { turns: 0 })
             .expect("first install");
         assert!(
-            slot.install(FakeMachine { turns: 9 }).is_err(),
+            slot.install(SessionId(2), FakeMachine { turns: 9 })
+                .is_err(),
             "second install refused"
         );
 
@@ -803,11 +1048,12 @@ mod tests {
     #[test]
     fn single_slot_stale_turn_cannot_clobber_a_session_installed_after_reset() {
         let slot: SingleSlot<FakeMachine, Hole> = SingleSlot::new();
-        slot.install(FakeMachine { turns: 1 }).expect("install");
+        slot.install(SessionId(1), FakeMachine { turns: 1 })
+            .expect("install");
         let stale = slot.checkout_run().expect("checkout");
 
         slot.remove();
-        slot.install(FakeMachine { turns: 2 })
+        slot.install(SessionId(2), FakeMachine { turns: 2 })
             .expect("fresh install");
 
         stale.restore_suspended(Vec::new());
