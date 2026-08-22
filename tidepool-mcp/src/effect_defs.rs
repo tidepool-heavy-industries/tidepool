@@ -2326,8 +2326,16 @@ mod tests {
             ]
         );
         assert!(!d.constructors.iter().any(|c| c.starts_with("TryRun")));
+        // Re-synced 2026-08-22: the schema (`tidepool-protocol/src/effects/exec.rs`)
+        // added the `ExecTimeout` variant, which this baseline had not caught up to
+        // (a genuine, deliberate content change — not renderer-wording drift). There
+        // is no separate callable "prompt-text renderer" to derive this from short of
+        // `exec_decl()` itself (which the test already calls); re-pasting from the
+        // committed generated source (`tidepool-mcp/src/generated/exec.rs`, itself
+        // single-sourced from the schema) is the closest available approximation of
+        // rule 3's "derive by calling the renderer" for this effect.
         assert!(
-            d.type_defs.contains(&"data ExecError = ExecSpawn Text | ExecBadDir Text deriving (Show, Eq)\ninstance ToJSON ExecError where\n  toJSON e = case e of\n    ExecSpawn detail -> object [\"tag\" .= (\"ExecSpawn\" :: Text), \"detail\" .= detail]\n    ExecBadDir detail -> object [\"tag\" .= (\"ExecBadDir\" :: Text), \"detail\" .= detail]\n")
+            d.type_defs.contains(&"data ExecError = ExecSpawn Text | ExecBadDir Text | ExecTimeout Text deriving (Show, Eq)\ninstance ToJSON ExecError where\n  toJSON e = case e of\n    ExecSpawn detail -> object [\"tag\" .= (\"ExecSpawn\" :: Text), \"detail\" .= detail]\n    ExecBadDir detail -> object [\"tag\" .= (\"ExecBadDir\" :: Text), \"detail\" .= detail]\n    ExecTimeout detail -> object [\"tag\" .= (\"ExecTimeout\" :: Text), \"detail\" .= detail]\n")
         );
         assert_eq!(d.helpers.len(), 3);
         assert_eq!(
@@ -2335,9 +2343,10 @@ mod tests {
             "-- | Run a shell command; returns a `Proc` record {exitCode, stdout, stderr}\n\
              -- (use `ok p` for the zero-exit check). Failure is TYPED (#335): `Left\n\
              -- (ExecSpawn _)` when the process can't be spawned, `Left (ExecBadDir _)`\n\
-             -- for `runIn` with a bad/escaping directory. A nonzero EXIT is NOT a\n\
+             -- for `runIn` with a bad/escaping directory, `Left (ExecTimeout _)` when\n\
+             -- the command outran its timeout and was killed. A nonzero EXIT is NOT a\n\
              -- failure — inspect `p.exitCode`. Natural spelling: `Right p <- run cmd`.\n\
-             run :: Text -> M (Either ExecError Proc)\n\
+             run :: forall effs. Member Exec effs => Text -> Eff effs (Either ExecError Proc)\n\
              run = send . Run"
         );
     }
