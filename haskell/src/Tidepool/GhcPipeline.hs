@@ -818,10 +818,23 @@ normalVariant path = PipelineVariant
   , pvPlan = \_timing modGraphRaw -> pure CompilePlan
       { cpLoadGraph = modGraphRaw
       , cpAfterLoad = \_ -> pure ()
-        -- Summaries come from the post-'load'' module graph in whatever
-        -- order it holds them: with no HPT registration to schedule (see
-        -- 'sessionVariant'), this variant needs no topological order.
-      , cpSummaries = mgModSummaries <$> getModuleGraph
+        -- TOPOLOGICAL RECOVERY ORDER (was: 'mgModSummaries <$> getModuleGraph',
+        -- whose order is NOT guaranteed dependency-first — see its haddock).
+        -- Each summary's own 'parseModule'/'typecheckModule' below redoes its
+        -- typecheck INDEPENDENTLY of 'load'' (see 'compileFront'), and a
+        -- genuine failure throws a spanned 'SourceError' that stops this
+        -- 'forM' loop immediately — so whichever module the loop visits FIRST
+        -- among a failing module and its dependents determines whether a
+        -- caller sees the real diagnostic or a downstream "module X is not
+        -- loaded" cascade (the dependent's own typecheck can't resolve an
+        -- import that hasn't been redone yet in THIS loop, even though
+        -- 'load'' already failed on it upstream). Dependency order makes this
+        -- deterministic: a module with a genuine error of its own is always
+        -- reached before anything that imports it, so its real error fires
+        -- first and the loop never reaches the dependent at all. Same idiom
+        -- 'sessionVariant' already uses one seam down, for the same reason.
+      , cpSummaries = pure
+          [ ms | ModuleNode _ ms <- flattenSCCs (topSortModuleGraph True modGraphRaw Nothing) ]
         -- 'runPipeline' (single-shot eval) always compiles a target named
         -- @result@; a repl session's FIRST turn also lands on this variant
         -- (no prior bindings to inject, so 'isSessionScopeActive' is still
