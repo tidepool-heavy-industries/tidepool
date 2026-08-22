@@ -46,9 +46,7 @@ use tidepool_handlers::{
 };
 use tidepool_harness::engine::EngineConfig;
 use tidepool_harness::log::{LogHeader, LogWriter};
-use tidepool_harness::provider::{
-    DynModelProvider, ModelProvider, ProviderError, StreamSink, TurnRequest, TurnResponse, Usage,
-};
+use tidepool_harness::provider::DynModelProvider;
 use tidepool_harness::selfharness::operator::FormShape;
 use tidepool_harness::selfharness::persistence;
 use tidepool_harness::{
@@ -58,6 +56,8 @@ use tidepool_harness::{
 use tidepool_worktree::registry::WorktreeRegistry;
 use tidepool_worktree::testing::TestRepo;
 use tidepool_worktree::GitCli;
+
+use support::scripted_provider::{script, KeyedProvider, PathKey, Phase, Script};
 
 // ---------------------------------------------------------------------------
 // Where the real harness lives
@@ -93,68 +93,11 @@ fn header() -> LogHeader {
 }
 
 // ---------------------------------------------------------------------------
-// The scripted provider — needle SETS (companion_recursive_slice.rs's
-// pattern, adapted): a node id is derived from a model-produced branch
-// title, so a scenario names a child by POSITION ("NODE root/2-") and PHASE
-// ("— DISCOVER") rather than hardcoding the slug the harness derives.
+// The scripted provider — keyed structurally on (path, phase) via
+// `support::scripted_provider` (companion_recursive_slice.rs's pattern,
+// commit b135d174; this file used to re-derive its own needle-SET matcher —
+// see the shared module's doc for why (path, phase) beats scattered needles).
 // ---------------------------------------------------------------------------
-
-struct Script {
-    needles: Vec<&'static str>,
-    reply: String,
-}
-
-fn script(needles: &[&'static str], reply: String) -> Script {
-    Script {
-        needles: needles.to_vec(),
-        reply,
-    }
-}
-
-fn window_message(req: &TurnRequest) -> String {
-    req.messages
-        .iter()
-        .rev()
-        .find(|m| m.content.contains(" — DISCOVER") || m.content.contains(" — FOLD"))
-        .or_else(|| req.messages.last())
-        .map(|m| m.content.clone())
-        .unwrap_or_default()
-}
-
-struct KeyedProvider {
-    scripted: Vec<Script>,
-}
-
-impl ModelProvider for KeyedProvider {
-    async fn complete(
-        &self,
-        req: TurnRequest,
-        _sink: Option<StreamSink>,
-    ) -> Result<TurnResponse, ProviderError> {
-        let last = window_message(&req);
-        let reply = self
-            .scripted
-            .iter()
-            .find(|s| s.needles.iter().all(|n| last.contains(n)))
-            .map(|s| s.reply.clone())
-            .ok_or_else(|| {
-                ProviderError::Api(format!(
-                    "KeyedProvider: no scripted reply matches the request:\n{last}"
-                ))
-            })?;
-        Ok(TurnResponse {
-            text: reply,
-            usage: Usage {
-                input_tokens: 50,
-                output_tokens: 10,
-                cached_input_tokens: None,
-                cache_write_tokens: None,
-            },
-            reasoning: None,
-            reasoning_items: Vec::new(),
-        })
-    }
-}
 
 /// This scenario runs `GateOff` — no form should ever be presented.
 struct NoGate;
@@ -247,11 +190,12 @@ fn delegating_reply() -> String {
 /// one, never this string.
 fn root_fold_claiming_bogus_branch() -> Script {
     script(
-        &["NODE root — FOLD"],
+        PathKey::Exact("root"),
+        Phase::Fold,
         haskell(
             "finalize @FoldDecision (FoldDecision { foldSynthesis = \"FOLDED (this fold \
              hereby claims the merged branch was totally-bogus-branch-xyz)\", \
-             foldTensions = [], foldEditsInOrder = [], foldProposed = [] })",
+             foldTensions = [] })",
         ),
     )
 }
@@ -260,10 +204,11 @@ fn root_fold_claiming_bogus_branch() -> Script {
 /// fold) — a plain, uneventful narrative fold.
 fn leaf_fold_script() -> Script {
     script(
-        &["— FOLD"],
+        PathKey::Prefix(""),
+        Phase::Fold,
         haskell(
             "finalize @FoldDecision (FoldDecision { foldSynthesis = \"FOLDED\", \
-             foldTensions = [], foldEditsInOrder = [], foldProposed = [] })",
+             foldTensions = [] })",
         ),
     )
 }
@@ -390,19 +335,25 @@ async fn branch_node_delegate_commits_and_the_merge_fold_integrates_it_in_declar
     .expect("delegating answerer engine config over the recursive-companion harness dir")
     .with_delegate_wrap();
 
-    let provider: Arc<dyn DynModelProvider> = Arc::new(KeyedProvider {
-        scripted: vec![
-            script(&["NODE root — DISCOVER"], split_scout_and_builder()),
-            // Position 1 (declared FIRST): Scout, no delegation, no content.
-            script(&["NODE root/1-", "— DISCOVER"], finish_reply()),
-            // Position 2 (declared SECOND): Builder, delegates.
-            script(&["NODE root/2-", "— DISCOVER"], delegating_reply()),
-            // Root's own fold — scripted first (more specific needle) so it
-            // wins over the generic leaf-fold fallback below.
-            root_fold_claiming_bogus_branch(),
-            leaf_fold_script(),
-        ],
-    });
+    let provider: Arc<dyn DynModelProvider> = Arc::new(KeyedProvider::new(vec![
+        script(
+            PathKey::Exact("root"),
+            Phase::Discover,
+            split_scout_and_builder(),
+        ),
+        // Position 1 (declared FIRST): Scout, no delegation, no content.
+        script(PathKey::Prefix("root/1-"), Phase::Discover, finish_reply()),
+        // Position 2 (declared SECOND): Builder, delegates.
+        script(
+            PathKey::Prefix("root/2-"),
+            Phase::Discover,
+            delegating_reply(),
+        ),
+        // Root's own fold — scripted first (more specific key) so it wins
+        // over the generic leaf-fold fallback below.
+        root_fold_claiming_bogus_branch(),
+        leaf_fold_script(),
+    ]));
 
     let writer = LogWriter::create(&log_path, &header()).expect("log writer");
     let agent = Arc::new(Harness::new(writer, agent_cfg, provider).expect("agent harness boots"));
