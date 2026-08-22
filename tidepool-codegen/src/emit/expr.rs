@@ -1062,7 +1062,178 @@ fn compute_captures_promised(
     (body_tree, sorted_fvs)
 }
 
-fn emit_lam(args: EmitArgs, binder: VarId, body_idx: usize) -> Result<SsaVal, EmitError> {
+/// What varies between the three nested-function compilation sites
+/// ([`emit_lam`], [`emit_thunk_promised`], and LetRec phase 3a): arity,
+/// capture-slot stride, and tail position. Everything else — signature
+/// shape, function declaration, the inner `FunctionBuilder`/block/stack-map
+/// setup, the `runtime_oom` import, capture loading, body emission, and the
+/// `ensure_heap_ptr`'d return — is identical and lives in
+/// [`compile_nested_body`].
+struct NestedFnSpec<'a> {
+    /// Already minted via `next_lambda_name()`/`next_thunk_name()` — naming
+    /// policy (and which counter it draws from) stays with the caller.
+    name: String,
+    /// `Some(binder)` gives the function a third `arg` parameter, bound to
+    /// `binder` in the body's env — a Lam (ordinary or LetRec-recursive).
+    /// `None` omits the parameter entirely — a Thunk, which takes no
+    /// argument.
+    arg_binder: Option<VarId>,
+    /// Byte offset of the first capture slot in `self`
+    /// (`CLOSURE_CAPTURED_OFFSET` or `THUNK_CAPTURED_OFFSET`) — every
+    /// capture site uses the same 8-byte stride.
+    captured_offset: i32,
+    /// Captures to load from `self`, in slot order: index `i` loads from
+    /// `captured_offset + 8*i` and binds it to `capture_vars[i]`.
+    capture_vars: &'a [VarId],
+    /// The already-extracted, standalone body tree (`compute_captures`/
+    /// `compute_captures_promised` already ran; this is their `body_tree`).
+    body_tree: &'a CoreExpr,
+    tail: TailCtx,
+}
+
+/// Compile `spec` as a fresh Cranelift function — `(vmctx, self[, arg]) -> i64`
+/// — and return the CODE POINTER as an outer-function `Value` (via
+/// `declare_func_in_func` + `func_addr`), ready for the caller to store into
+/// a closure/thunk object. Declaration, allocation, and capture-slot FILLING
+/// stay with the caller: a Lam allocates its own closure and already has
+/// every capture value in hand; a Thunk allocates its own thunk object and
+/// may leave some captures as `promised` null placeholders; LetRec phase 3a
+/// fills a closure Phase 1 already pre-allocated and may defer some captures
+/// to `pending_capture_updates`. Those three shapes are real, not
+/// accidental duplication — only the function-compilation machinery below
+/// was.
+fn compile_nested_body(args: &mut EmitArgs, spec: NestedFnSpec) -> Result<Value, EmitError> {
+    let mut sig = Signature::new(args.sess.pipeline.isa.default_call_conv());
+    sig.params.push(AbiParam::new(types::I64)); // vmctx
+    sig.params.push(AbiParam::new(types::I64)); // self
+    if spec.arg_binder.is_some() {
+        sig.params.push(AbiParam::new(types::I64)); // arg
+    }
+    sig.returns.push(AbiParam::new(types::I64));
+
+    let func_id = args
+        .sess
+        .pipeline
+        .module
+        .declare_function(&spec.name, Linkage::Local, &sig)
+        .map_err(|e| EmitError::CraneliftError(e.to_string()))?;
+    args.sess
+        .pipeline
+        .register_lambda(func_id, spec.name.clone());
+    if let Some(binder) = spec.arg_binder {
+        log::trace!(target: "tidepool::calls", "[emit] {} binder={:#x}", spec.name, binder.0);
+    }
+
+    let mut inner_ctx = Context::new();
+    inner_ctx.func.signature = sig;
+    inner_ctx.func.name = UserFuncName::default();
+
+    let mut inner_fb_ctx = FunctionBuilderContext::new();
+    let mut inner_builder = FunctionBuilder::new(&mut inner_ctx.func, &mut inner_fb_ctx);
+    let inner_block = inner_builder.create_block();
+    inner_builder.append_block_params_for_function_params(inner_block);
+    inner_builder.switch_to_block(inner_block);
+    inner_builder.seal_block(inner_block);
+
+    let inner_vmctx = inner_builder.block_params(inner_block)[0];
+    let inner_self = inner_builder.block_params(inner_block)[1];
+    let inner_arg = spec
+        .arg_binder
+        .map(|_| inner_builder.block_params(inner_block)[2]);
+
+    inner_builder.declare_value_needs_stack_map(inner_self);
+    if let Some(arg_val) = inner_arg {
+        inner_builder.declare_value_needs_stack_map(arg_val);
+    }
+
+    let mut inner_gc_sig = Signature::new(args.sess.pipeline.isa.default_call_conv());
+    inner_gc_sig.params.push(AbiParam::new(types::I64));
+    let inner_gc_sig_ref = inner_builder.import_signature(inner_gc_sig);
+
+    let inner_oom_func = {
+        let mut sig = Signature::new(args.sess.pipeline.isa.default_call_conv());
+        sig.returns.push(AbiParam::new(types::I64));
+        let func_id = args
+            .sess
+            .pipeline
+            .module
+            .declare_function("runtime_oom", Linkage::Import, &sig)
+            .map_err(|e| EmitError::CraneliftError(format!("declare runtime_oom: {e}")))?;
+        args.sess
+            .pipeline
+            .module
+            .declare_func_in_func(func_id, inner_builder.func)
+    };
+
+    let mut inner_emit = EmitContext::new(args.ctx.prefix.clone());
+    // Propagate session bindings into the nested function's own context so a
+    // Var-miss inside the body can resolve them. Empty in the one-shot path.
+    // See the `external_env` per-function-Value invariant.
+    inner_emit.external_env = args.ctx.external_env.clone();
+    inner_emit.lambda_counter = args.ctx.lambda_counter;
+    inner_emit.current_fn = spec.name.clone();
+
+    if let (Some(binder), Some(arg_val)) = (spec.arg_binder, inner_arg) {
+        inner_emit.trace_scope(&format!("insert lam binder {:?}", binder));
+        inner_emit.env.insert(binder, SsaVal::HeapPtr(arg_val));
+    }
+
+    for (i, var_id) in spec.capture_vars.iter().enumerate() {
+        let offset = spec.captured_offset + 8 * i as i32;
+        let val = inner_builder
+            .ins()
+            .load(types::I64, MemFlags::trusted(), inner_self, offset);
+        inner_builder.declare_value_needs_stack_map(val);
+        inner_emit.trace_scope(&format!("insert capture {:?}", var_id));
+        inner_emit.env.insert(*var_id, SsaVal::HeapPtr(val));
+    }
+
+    let body_root = spec.body_tree.nodes.len() - 1;
+    let mut inner_sess = EmitSession {
+        pipeline: args.sess.pipeline,
+        vmctx: inner_vmctx,
+        gc_sig: inner_gc_sig_ref,
+        oom_func: inner_oom_func,
+        tree: spec.body_tree,
+        lit_wrappers: args.sess.lit_wrappers,
+        free_vars_idx: tidepool_repr::free_vars::FreeVarsIndex::compute(spec.body_tree),
+        function_imports: FunctionImports::default(),
+    };
+    let body_result = EmitContext::emit_node(
+        EmitArgs {
+            ctx: &mut inner_emit,
+            sess: &mut inner_sess,
+            builder: &mut inner_builder,
+            tail: spec.tail,
+        },
+        body_root,
+    )?;
+    let ret_val = ensure_heap_ptr(
+        &mut inner_builder,
+        inner_vmctx,
+        inner_gc_sig_ref,
+        inner_oom_func,
+        body_result,
+    );
+
+    inner_builder.ins().return_(&[ret_val]);
+    inner_builder.finalize();
+
+    args.ctx.lambda_counter = inner_emit.lambda_counter;
+
+    args.sess
+        .pipeline
+        .define_function(func_id, &mut inner_ctx)?;
+
+    let func_ref = args
+        .sess
+        .pipeline
+        .module
+        .declare_func_in_func(func_id, args.builder.func);
+    Ok(args.builder.ins().func_addr(types::I64, func_ref))
+}
+
+fn emit_lam(mut args: EmitArgs, binder: VarId, body_idx: usize) -> Result<SsaVal, EmitError> {
     let (body_tree, sorted_fvs) = compute_captures(
         args.ctx,
         args.sess.tree,
@@ -1087,126 +1258,20 @@ fn emit_lam(args: EmitArgs, binder: VarId, body_idx: usize) -> Result<SsaVal, Em
             Ok::<_, EmitError>((*v, *val))
         })
         .collect::<Result<Vec<_>, EmitError>>()?;
+    let capture_vars: Vec<VarId> = captures.iter().map(|(v, _)| *v).collect();
 
     let lambda_name = args.ctx.next_lambda_name();
-    let mut closure_sig = Signature::new(args.sess.pipeline.isa.default_call_conv());
-    closure_sig.params.push(AbiParam::new(types::I64)); // vmctx
-    closure_sig.params.push(AbiParam::new(types::I64)); // self
-    closure_sig.params.push(AbiParam::new(types::I64)); // arg
-    closure_sig.returns.push(AbiParam::new(types::I64));
-
-    let lambda_func_id = args
-        .sess
-        .pipeline
-        .module
-        .declare_function(&lambda_name, Linkage::Local, &closure_sig)
-        .map_err(|e| EmitError::CraneliftError(e.to_string()))?;
-    args.sess
-        .pipeline
-        .register_lambda(lambda_func_id, lambda_name.clone());
-    log::trace!(target: "tidepool::calls", "[emit] {} binder={:#x}", lambda_name, binder.0);
-
-    let mut inner_ctx = Context::new();
-    inner_ctx.func.signature = closure_sig;
-    inner_ctx.func.name = UserFuncName::default();
-
-    let mut inner_fb_ctx = FunctionBuilderContext::new();
-    let mut inner_builder = FunctionBuilder::new(&mut inner_ctx.func, &mut inner_fb_ctx);
-    let inner_block = inner_builder.create_block();
-    inner_builder.append_block_params_for_function_params(inner_block);
-    inner_builder.switch_to_block(inner_block);
-    inner_builder.seal_block(inner_block);
-
-    let inner_vmctx = inner_builder.block_params(inner_block)[0];
-    let closure_self = inner_builder.block_params(inner_block)[1];
-    let arg_param = inner_builder.block_params(inner_block)[2];
-
-    inner_builder.declare_value_needs_stack_map(closure_self);
-    inner_builder.declare_value_needs_stack_map(arg_param);
-
-    let mut inner_gc_sig = Signature::new(args.sess.pipeline.isa.default_call_conv());
-    inner_gc_sig.params.push(AbiParam::new(types::I64));
-    let inner_gc_sig_ref = inner_builder.import_signature(inner_gc_sig);
-
-    let inner_oom_func = {
-        let mut sig = Signature::new(args.sess.pipeline.isa.default_call_conv());
-        sig.returns.push(AbiParam::new(types::I64));
-        let func_id = args
-            .sess
-            .pipeline
-            .module
-            .declare_function("runtime_oom", Linkage::Import, &sig)
-            .map_err(|e| EmitError::CraneliftError(format!("declare runtime_oom: {e}")))?;
-        args.sess
-            .pipeline
-            .module
-            .declare_func_in_func(func_id, inner_builder.func)
-    };
-
-    let mut inner_emit = EmitContext::new(args.ctx.prefix.clone());
-    // Propagate session bindings into the lambda's own function context so a
-    // Var-miss inside the body can resolve them. Empty in the one-shot path.
-    // See the `external_env` per-function-Value invariant.
-    inner_emit.external_env = args.ctx.external_env.clone();
-    inner_emit.lambda_counter = args.ctx.lambda_counter;
-    inner_emit.current_fn = lambda_name.clone();
-
-    inner_emit.trace_scope(&format!("insert lam binder {:?}", binder));
-    inner_emit.env.insert(binder, SsaVal::HeapPtr(arg_param));
-
-    for (i, (var_id, _)) in captures.iter().enumerate() {
-        let offset = CLOSURE_CAPTURED_OFFSET + 8 * i as i32;
-        let val = inner_builder
-            .ins()
-            .load(types::I64, MemFlags::trusted(), closure_self, offset);
-        inner_builder.declare_value_needs_stack_map(val);
-        inner_emit.trace_scope(&format!("insert lam capture {:?}", var_id));
-        inner_emit.env.insert(*var_id, SsaVal::HeapPtr(val));
-    }
-
-    let body_root = body_tree.nodes.len() - 1;
-    let mut inner_sess = EmitSession {
-        pipeline: args.sess.pipeline,
-        vmctx: inner_vmctx,
-        gc_sig: inner_gc_sig_ref,
-        oom_func: inner_oom_func,
-        tree: &body_tree,
-        lit_wrappers: args.sess.lit_wrappers,
-        free_vars_idx: tidepool_repr::free_vars::FreeVarsIndex::compute(&body_tree),
-        function_imports: FunctionImports::default(),
-    };
-    let body_result = EmitContext::emit_node(
-        EmitArgs {
-            ctx: &mut inner_emit,
-            sess: &mut inner_sess,
-            builder: &mut inner_builder,
+    let code_ptr = compile_nested_body(
+        &mut args,
+        NestedFnSpec {
+            name: lambda_name,
+            arg_binder: Some(binder),
+            captured_offset: CLOSURE_CAPTURED_OFFSET,
+            capture_vars: &capture_vars,
+            body_tree: &body_tree,
             tail: TailCtx::Tail,
         },
-        body_root,
     )?;
-    let ret_val = ensure_heap_ptr(
-        &mut inner_builder,
-        inner_vmctx,
-        inner_gc_sig_ref,
-        inner_oom_func,
-        body_result,
-    );
-
-    inner_builder.ins().return_(&[ret_val]);
-    inner_builder.finalize();
-
-    args.ctx.lambda_counter = inner_emit.lambda_counter;
-
-    args.sess
-        .pipeline
-        .define_function(lambda_func_id, &mut inner_ctx)?;
-
-    let func_ref = args
-        .sess
-        .pipeline
-        .module
-        .declare_func_in_func(lambda_func_id, args.builder.func);
-    let code_ptr = args.builder.ins().func_addr(types::I64, func_ref);
 
     let num_captures = captures.len();
     let closure_size = 24 + 8 * num_captures as u64;
@@ -1278,7 +1343,7 @@ fn emit_thunk(args: EmitArgs, body_idx: usize) -> Result<SsaVal, EmitError> {
 /// meanwhile: the GC's slot walker skips null (`!ptr.is_null()` guard), and
 /// nothing can force the thunk before the letrec completes.
 fn emit_thunk_promised(
-    args: EmitArgs,
+    mut args: EmitArgs,
     body_idx: usize,
     promised: Option<&FxHashSet<VarId>>,
 ) -> Result<(SsaVal, Vec<(VarId, i32)>), EmitError> {
@@ -1308,114 +1373,17 @@ fn emit_thunk_promised(
         .collect::<Result<Vec<_>, EmitError>>()?;
 
     let thunk_name = args.ctx.next_thunk_name();
-    let mut thunk_sig = Signature::new(args.sess.pipeline.isa.default_call_conv());
-    thunk_sig.params.push(AbiParam::new(types::I64)); // vmctx
-    thunk_sig.params.push(AbiParam::new(types::I64)); // thunk_ptr (self)
-    thunk_sig.returns.push(AbiParam::new(types::I64));
-
-    let thunk_func_id = args
-        .sess
-        .pipeline
-        .module
-        .declare_function(&thunk_name, Linkage::Local, &thunk_sig)
-        .map_err(|e| EmitError::CraneliftError(e.to_string()))?;
-    args.sess
-        .pipeline
-        .register_lambda(thunk_func_id, thunk_name.clone());
-
-    let mut inner_ctx = Context::new();
-    inner_ctx.func.signature = thunk_sig;
-    inner_ctx.func.name = UserFuncName::default();
-
-    let mut inner_fb_ctx = FunctionBuilderContext::new();
-    let mut inner_builder = FunctionBuilder::new(&mut inner_ctx.func, &mut inner_fb_ctx);
-    let inner_block = inner_builder.create_block();
-    inner_builder.append_block_params_for_function_params(inner_block);
-    inner_builder.switch_to_block(inner_block);
-    inner_builder.seal_block(inner_block);
-
-    let inner_vmctx = inner_builder.block_params(inner_block)[0];
-    let thunk_self = inner_builder.block_params(inner_block)[1];
-
-    inner_builder.declare_value_needs_stack_map(thunk_self);
-
-    let mut inner_gc_sig = Signature::new(args.sess.pipeline.isa.default_call_conv());
-    inner_gc_sig.params.push(AbiParam::new(types::I64));
-    let inner_gc_sig_ref = inner_builder.import_signature(inner_gc_sig);
-
-    let inner_oom_func = {
-        let mut sig = Signature::new(args.sess.pipeline.isa.default_call_conv());
-        sig.returns.push(AbiParam::new(types::I64));
-        let func_id = args
-            .sess
-            .pipeline
-            .module
-            .declare_function("runtime_oom", Linkage::Import, &sig)
-            .map_err(|e| EmitError::CraneliftError(format!("declare runtime_oom: {e}")))?;
-        args.sess
-            .pipeline
-            .module
-            .declare_func_in_func(func_id, inner_builder.func)
-    };
-
-    let mut inner_emit = EmitContext::new(args.ctx.prefix.clone());
-    inner_emit.external_env = args.ctx.external_env.clone();
-    inner_emit.lambda_counter = args.ctx.lambda_counter;
-    inner_emit.current_fn = thunk_name.clone();
-
-    for (i, (var_id, _)) in captures.iter().enumerate() {
-        let offset = THUNK_CAPTURED_OFFSET + 8 * i as i32;
-        let val = inner_builder
-            .ins()
-            .load(types::I64, MemFlags::trusted(), thunk_self, offset);
-        inner_builder.declare_value_needs_stack_map(val);
-        inner_emit.trace_scope(&format!("insert thunk capture {:?}", var_id));
-        inner_emit.env.insert(*var_id, SsaVal::HeapPtr(val));
-    }
-
-    let body_root = body_tree.nodes.len() - 1;
-    let mut inner_sess = EmitSession {
-        pipeline: args.sess.pipeline,
-        vmctx: inner_vmctx,
-        gc_sig: inner_gc_sig_ref,
-        oom_func: inner_oom_func,
-        tree: &body_tree,
-        lit_wrappers: args.sess.lit_wrappers,
-        free_vars_idx: tidepool_repr::free_vars::FreeVarsIndex::compute(&body_tree),
-        function_imports: FunctionImports::default(),
-    };
-    let body_result = EmitContext::emit_node(
-        EmitArgs {
-            ctx: &mut inner_emit,
-            sess: &mut inner_sess,
-            builder: &mut inner_builder,
+    let code_ptr = compile_nested_body(
+        &mut args,
+        NestedFnSpec {
+            name: thunk_name,
+            arg_binder: None,
+            captured_offset: THUNK_CAPTURED_OFFSET,
+            capture_vars: &sorted_fvs,
+            body_tree: &body_tree,
             tail: TailCtx::NonTail,
         },
-        body_root,
     )?;
-    let ret_val = ensure_heap_ptr(
-        &mut inner_builder,
-        inner_vmctx,
-        inner_gc_sig_ref,
-        inner_oom_func,
-        body_result,
-    );
-
-    inner_builder.ins().return_(&[ret_val]);
-    inner_builder.finalize();
-
-    args.ctx.lambda_counter = inner_emit.lambda_counter;
-
-    args.sess
-        .pipeline
-        .define_function(thunk_func_id, &mut inner_ctx)?;
-
-    let func_ref = args
-        .sess
-        .pipeline
-        .module
-        .declare_func_in_func(thunk_func_id, args.builder.func);
-    let code_ptr = args.builder.ins().func_addr(types::I64, func_ref);
 
     // Allocate the thunk heap object, capture slots pre-zeroed so a GC
     // triggered by `ensure_heap_ptr` mid-loop below never scans an unfilled
@@ -2050,7 +2018,7 @@ impl EmitContext {
     /// Execute LetRec phases 1-3b inline, then push deferred-simple evals
     /// (phase 3c) and finish (3a'/3d) onto the work stack.
     fn emit_letrec_phases(
-        args: EmitArgs,
+        mut args: EmitArgs,
         bindings: &[(VarId, usize)],
         body: usize,
         work: &mut Vec<EmitWork>,
@@ -2331,125 +2299,17 @@ impl EmitContext {
             let lam_body_tree = args.sess.tree.extract_subtree(lam_body);
 
             let lambda_name = args.ctx.next_lambda_name();
-            let mut closure_sig = Signature::new(args.sess.pipeline.isa.default_call_conv());
-            closure_sig.params.push(AbiParam::new(types::I64));
-            closure_sig.params.push(AbiParam::new(types::I64));
-            closure_sig.params.push(AbiParam::new(types::I64));
-            closure_sig.returns.push(AbiParam::new(types::I64));
-
-            let lambda_func_id = args
-                .sess
-                .pipeline
-                .module
-                .declare_function(&lambda_name, Linkage::Local, &closure_sig)
-                .map_err(|e| EmitError::CraneliftError(e.to_string()))?;
-            args.sess
-                .pipeline
-                .register_lambda(lambda_func_id, lambda_name.clone());
-
-            let mut inner_ctx = Context::new();
-            inner_ctx.func.signature = closure_sig;
-            inner_ctx.func.name = UserFuncName::default();
-
-            let mut inner_fb_ctx = FunctionBuilderContext::new();
-            let mut inner_builder = FunctionBuilder::new(&mut inner_ctx.func, &mut inner_fb_ctx);
-            let inner_block = inner_builder.create_block();
-            inner_builder.append_block_params_for_function_params(inner_block);
-            inner_builder.switch_to_block(inner_block);
-            inner_builder.seal_block(inner_block);
-
-            let inner_vmctx = inner_builder.block_params(inner_block)[0];
-            let inner_self = inner_builder.block_params(inner_block)[1];
-            let inner_arg = inner_builder.block_params(inner_block)[2];
-
-            inner_builder.declare_value_needs_stack_map(inner_self);
-            inner_builder.declare_value_needs_stack_map(inner_arg);
-
-            let mut inner_gc_sig = Signature::new(args.sess.pipeline.isa.default_call_conv());
-            inner_gc_sig.params.push(AbiParam::new(types::I64));
-            let inner_gc_sig_ref = inner_builder.import_signature(inner_gc_sig);
-
-            let inner_oom_func = {
-                let mut sig = Signature::new(args.sess.pipeline.isa.default_call_conv());
-                sig.returns.push(AbiParam::new(types::I64));
-                let func_id = args
-                    .sess
-                    .pipeline
-                    .module
-                    .declare_function("runtime_oom", Linkage::Import, &sig)
-                    .map_err(|e| EmitError::CraneliftError(format!("declare runtime_oom: {e}")))?;
-                args.sess
-                    .pipeline
-                    .module
-                    .declare_func_in_func(func_id, inner_builder.func)
-            };
-
-            let mut inner_emit = EmitContext::new(args.ctx.prefix.clone());
-            inner_emit.external_env = args.ctx.external_env.clone();
-            inner_emit.lambda_counter = args.ctx.lambda_counter;
-            inner_emit.current_fn = lambda_name.clone();
-            log::trace!(
-                target: "tidepool::calls",
-                "[emit-letrec] {} lam_binder={:#x}",
-                lambda_name, lam_binder.0
-            );
-            inner_emit
-                .env
-                .insert(lam_binder, SsaVal::HeapPtr(inner_arg));
-
-            for (i, var_id) in sorted_fvs.iter().enumerate() {
-                let offset = CLOSURE_CAPTURED_OFFSET + 8 * i as i32;
-                let val =
-                    inner_builder
-                        .ins()
-                        .load(types::I64, MemFlags::trusted(), inner_self, offset);
-                inner_builder.declare_value_needs_stack_map(val);
-                inner_emit.env.insert(*var_id, SsaVal::HeapPtr(val));
-            }
-
-            let body_root = lam_body_tree.nodes.len() - 1;
-            let mut inner_sess = EmitSession {
-                pipeline: args.sess.pipeline,
-                vmctx: inner_vmctx,
-                gc_sig: inner_gc_sig_ref,
-                oom_func: inner_oom_func,
-                tree: &lam_body_tree,
-                lit_wrappers: args.sess.lit_wrappers,
-                free_vars_idx: tidepool_repr::free_vars::FreeVarsIndex::compute(&lam_body_tree),
-                function_imports: FunctionImports::default(),
-            };
-            let body_result = EmitContext::emit_node(
-                EmitArgs {
-                    ctx: &mut inner_emit,
-                    sess: &mut inner_sess,
-                    builder: &mut inner_builder,
+            let code_ptr = compile_nested_body(
+                &mut args,
+                NestedFnSpec {
+                    name: lambda_name,
+                    arg_binder: Some(lam_binder),
+                    captured_offset: CLOSURE_CAPTURED_OFFSET,
+                    capture_vars: sorted_fvs,
+                    body_tree: &lam_body_tree,
                     tail: TailCtx::Tail,
                 },
-                body_root,
             )?;
-            let ret_val = ensure_heap_ptr(
-                &mut inner_builder,
-                inner_vmctx,
-                inner_gc_sig_ref,
-                inner_oom_func,
-                body_result,
-            );
-
-            inner_builder.ins().return_(&[ret_val]);
-            inner_builder.finalize();
-
-            args.ctx.lambda_counter = inner_emit.lambda_counter;
-
-            args.sess
-                .pipeline
-                .define_function(lambda_func_id, &mut inner_ctx)?;
-
-            let func_ref = args
-                .sess
-                .pipeline
-                .module
-                .declare_func_in_func(lambda_func_id, args.builder.func);
-            let code_ptr = args.builder.ins().func_addr(types::I64, func_ref);
             args.builder.ins().store(
                 MemFlags::trusted(),
                 code_ptr,
