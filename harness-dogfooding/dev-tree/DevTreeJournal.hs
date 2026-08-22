@@ -179,57 +179,57 @@ recordEvent ev = record (kindText (kindOf ev)) (keyOf ev) (payloadOf ev)
 -- cannot make sense of is Nothing, which degrades to 'do the work', never to
 -- a wrong skip"), now enforced at one call site instead of scattered ones.
 decodeEvent :: Text -> Text -> Value -> Maybe JournalEvent
-decodeEvent kind key payload
-  | kind == kindText SplitKind = decodeSplitEvent key payload
-  | kind == kindText OutcomeKind = OutcomeEvent (JournalKey key) <$> decodeOutcomeValue key payload
-  | kind == kindText ReplanKind = ReplanEvent (JournalKey key) <$> decodeJson payload
-  | kind == kindText RebaseKind = RebaseEvent (JournalKey key) <$> decodeJson payload
+decodeEvent kind k payload
+  | kind == kindText SplitKind = decodeSplitEvent k payload
+  | kind == kindText OutcomeKind = OutcomeEvent (JournalKey k) <$> decodeOutcomeValue k payload
+  | kind == kindText ReplanKind = ReplanEvent (JournalKey k) <$> decodeJson payload
+  | kind == kindText RebaseKind = RebaseEvent (JournalKey k) <$> decodeJson payload
   | kind == kindText EscalationKind =
       Just
         ( EscalationEvent
-            (JournalKey key)
-            (fromMaybe key (payload ?. "node" >>= asText))
-            (fromMaybe "escalated" (payload ?. "detail" >>= asText))
+            (JournalKey k)
+            (fromMaybe k (payload ^? key "node" . _String))
+            (fromMaybe "escalated" (payload ^? key "detail" . _String))
         )
   | otherwise = Nothing
 
 decodeSplitEvent :: Text -> Value -> Maybe JournalEvent
-decodeSplitEvent key v = do
-  h <- v ?. "scaffoldHead" >>= asText
-  p <- v ?. "plan" >>= decodeJson
+decodeSplitEvent k v = do
+  h <- v ^? key "scaffoldHead" . _String
+  p <- v ^? key "plan" >>= decodeJson
   pure
     SplitEvent
-      { evKey = JournalKey key
+      { evKey = JournalKey k
       , evSplitPlan = p
       , evScaffoldHead = h
-      , evChildTrees = v ?. "childTrees" >>= asArray >>= traverse decodeChildTree
+      , evChildTrees = v ^? key "childTrees" . _Array >>= traverse decodeChildTree
       }
   where
-    decodeChildTree cv = (,) <$> (cv ?. "name" >>= asText) <*> (cv ?. "branch" >>= asText)
+    decodeChildTree cv = (,) <$> (cv ^? key "name" . _String) <*> (cv ^? key "branch" . _String)
 
--- | 'key' is the fallback for a payload with no "node" field of its own.
+-- | 'k' is the fallback for a payload with no "node" field of its own.
 -- Sound because every current caller looks this up under the same key the
 -- entry was recorded under (a branch, or — for a receiptless 'Failed'\/a
 -- 'Skipped' — the plan node name that also became the key), so the fallback
 -- and the field agree whenever the field is present, and the writer always
 -- writes it.
 decodeOutcomeValue :: Text -> Value -> Maybe Outcome
-decodeOutcomeValue key v = case v ?. "skipped" >>= asText of
+decodeOutcomeValue k v = case v ^? key "skipped" . _String of
   Just why -> Just Skipped {outcomeNode = named, outcomeTrail = [], skipReason = why}
-  Nothing -> case v ?. "failure" >>= decodeJson of
+  Nothing -> case v ^? key "failure" >>= decodeJson of
     Just f ->
       Just
         Failed
           { outcomeNode = named
           , outcomeTrail = []
           , outcomeFailure = f
-          , partialReceipt = v ?. "receipt" >>= decodeJson
+          , partialReceipt = v ^? key "receipt" >>= decodeJson
           }
     Nothing -> case decodeJson v of
       Just r -> Just Done {outcomeNode = r.receiptNode, outcomeTrail = [], doneReceipt = r}
       Nothing -> Nothing
   where
-    named = fromMaybe key (v ?. "node" >>= asText)
+    named = fromMaybe k (v ^? key "node" . _String)
 
 decodeJson :: FromJSON a => Value -> Maybe a
 decodeJson v = case fromJSON v of

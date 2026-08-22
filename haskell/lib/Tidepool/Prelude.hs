@@ -181,8 +181,6 @@ module Tidepool.Prelude
     -- from the import): `imap` (Prelude's list-index map) and `(.=)` (Aeson's
     -- object-pair operator).
   , module Control.Lens
-    -- * JSON Value helpers
-  , (?.), lookupKey, asText, asInt, asDouble, asBool, asArray, asObject
     -- * Map operations (qualified via Map prefix)
   , Map.fromList, Map.toList, Map.insert, Map.delete
   , Map.member, Map.keys, Map.elems
@@ -311,8 +309,7 @@ import Tidepool.Records (Proc(..), ok, Hit(..), FileMeta(..), UpdateOutcome(..),
 import Tidepool.Data.Time (UTCTime(..), formatISO8601, parseISO8601, toGregorian, formatDay, daysFromCivil, diffUTCTime, addUTCTime, epochMillis)
 import Tidepool.QQ.Fmt.Runtime
   (FSign(..), FAlign(..), fmtInt, fmtFrac, fmtStr, fmtChar, fmtSigned, fmtPlain)
-import Tidepool.Aeson (Value(..), Scientific, scientific, coefficient, base10Exponent, fromFloatDigits, toRealFloat, Key, object, (.=), toJSON, ToJSON, fromText, eitherDecode, decode, FromJSON(..), Result(..), fromJSON, resultToEither, (.:), (.:?), (.!=), withObject, withText, withArray, withBool, withDouble)
-import Tidepool.Aeson.Scientific (toBoundedInteger)
+import Tidepool.Aeson (Value(..), Scientific, scientific, coefficient, base10Exponent, fromFloatDigits, toRealFloat, Key, object, (.=), toJSON, ToJSON, eitherDecode, decode, FromJSON(..), Result(..), fromJSON, resultToEither, (.:), (.:?), (.!=), withObject, withText, withArray, withBool, withDouble)
 import Tidepool.Aeson.Lens (key, nth, _String, _Number, _Bool, _Array, _Object, _Int, _Integer, _Double, members, values, _Null)
 -- Wholesale Control.Lens, hiding only the two genuine clashes: `imap` (Prelude's
 -- list-index map, defined below) and `(.=)` (Aeson's object-pair operator, above).
@@ -796,60 +793,6 @@ parseDoubleM t = case T.uncons t of
 -- | Partial shadow (see `parseInt`): use the total `parseDoubleM`.
 parseDouble :: Unsatisfiable ('Text "parseDouble is partial — use parseDoubleM :: Text -> Maybe Double." ':$$: 'Text "Then handle the Nothing (fromMaybe def, a case, or liftMaybe).") => Text -> Double
 parseDouble = unsatisfiable
-
--- ---------------------------------------------------------------------------
--- JSON Value helpers
--- ---------------------------------------------------------------------------
-
--- | Safe key lookup: @v ?. "name"@ returns @Just val@ or @Nothing@.
-(?.) :: Value -> Text -> Maybe Value
-Object o ?. k = Map.lookup (fromText k) o
-_        ?. _ = Nothing
-infixl 9 ?.
-{-# INLINE (?.) #-}
-
--- | Lookup a key in a Value, returning Nothing if not an Object or key missing.
-lookupKey :: Text -> Value -> Maybe Value
-lookupKey k (Object o) = Map.lookup (fromText k) o
-lookupKey _ _          = Nothing
-{-# INLINE lookupKey #-}
-
--- | Extract Text from a String Value, or Nothing.
-asText :: Value -> Maybe Text
-asText (String t) = Just t
-asText _          = Nothing
-{-# INLINE asText #-}
-
--- | Extract Int from a Number Value: @Just@ only for an in-range integral
--- number, @Nothing@ for a fractional or out-of-range one.
-asInt :: Value -> Maybe Int
-asInt (Number s) = toBoundedInteger s
-asInt _          = Nothing
-{-# INLINE asInt #-}
-
--- | Extract Double from a Number Value, or Nothing.
-asDouble :: Value -> Maybe Double
-asDouble (Number s) = Just (toRealFloat s)
-asDouble _          = Nothing
-{-# INLINE asDouble #-}
-
--- | Extract Bool from a Bool Value, or Nothing.
-asBool :: Value -> Maybe Bool
-asBool (Bool b) = Just b
-asBool _        = Nothing
-{-# INLINE asBool #-}
-
--- | Extract the array from an Array Value, or Nothing.
-asArray :: Value -> Maybe [Value]
-asArray (Array a) = Just a
-asArray _         = Nothing
-{-# INLINE asArray #-}
-
--- | Extract the object from an Object Value, or Nothing.
-asObject :: Value -> Maybe (Map.Map Key Value)
-asObject (Object o) = Just o
-asObject _          = Nothing
-{-# INLINE asObject #-}
 
 -- ---------------------------------------------------------------------------
 -- Char predicates

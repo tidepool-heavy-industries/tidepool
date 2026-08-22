@@ -323,21 +323,19 @@ parseEdit v = txtField "op" `bindE` \op -> case op of
     linesField = case getArr v "lines" of
       Nothing -> Left "editsJ: op needs array 'lines'"
       Just ls -> mapEitherList asTextE ls
-    asTextE x = case asText x of { Just t -> Right t; Nothing -> Left "editsJ: 'lines' entries must be strings" }
+    asTextE x = case x ^? _String of { Just t -> Right t; Nothing -> Left "editsJ: 'lines' entries must be strings" }
 
 -- | Extract a Text field from a JSON object; Nothing when absent or not a string.
--- (getTxt/getInt/getArr use explicit case chains, not the Maybe monad —
--- do-notation over Maybe pulls dictionary paths that are riskier on the JIT.)
 getTxt :: Value -> Text -> Maybe Text
-getTxt v k = case v ?. k of { Just x -> asText x; Nothing -> Nothing }
+getTxt v k = v ^? key k . _String
 
 -- | Extract an Int field from a JSON object; Nothing when absent or not a number.
 getInt :: Value -> Text -> Maybe Int
-getInt v k = case v ?. k of { Just x -> asInt x; Nothing -> Nothing }
+getInt v k = v ^? key k . _Int
 
 -- | Extract an array field from a JSON object; Nothing when absent or not an array.
 getArr :: Value -> Text -> Maybe [Value]
-getArr v k = case v ?. k of { Just x -> asArray x; Nothing -> Nothing }
+getArr v k = v ^? key k . _Array
 
 -- | Either threaded by a hand-written bind (the JIT-safe pattern: a plain
 -- function, never the Either Monad dictionary — see "Tidepool.Patch").
