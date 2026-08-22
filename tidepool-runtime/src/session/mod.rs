@@ -693,6 +693,11 @@ impl SessionLib {
         // A misconfigured $TIDEPOOL_EXTRACT is the same environment problem a
         // spawn failure is (`Io` → Infra), never the user's declaration.
         let mut cmd = ExtractCmd::new().map_err(|e| SessionError::Io(e.into()))?;
+        // Default build-products dir (see `crate::paths::apply_build_products_dir`'s
+        // doc) — this validation spawn does a real full typecheck of the
+        // candidate's stdlib closure, so it benefits from the same
+        // module-granular recompilation avoidance every other spawn gets.
+        crate::paths::apply_build_products_dir(&mut cmd);
         cmd.input(&wrapper_path)
             .output_dir(temp.path())
             .target("result")

@@ -117,6 +117,27 @@ pub fn build_products_dir(toolchain_fingerprint: &str) -> PathBuf {
         .join(toolchain_fingerprint)
 }
 
+/// Wire the default build-products dir (see [`build_products_dir`]) onto
+/// `cmd`, on by default for EVERY `tidepool-extract` spawn in this crate —
+/// not just the ones built through `artifacts::compile_invocation`.
+/// `tidepool-runtime` has more than one spawn site (`session/turn.rs`'s
+/// `run_turn`/`classify_block`/`compile_session_turn` and `session/mod.rs`'s
+/// `validate_candidate` build their own `ExtractCmd`s directly, bypassing
+/// `compile_invocation`'s memo — a session turn has on-disk side effects and
+/// mutable-session dependencies a content-addressed cache would get wrong,
+/// see `session/turn.rs`'s module doc), and the module-granular GHC
+/// recompilation win this dir gives is orthogonal to that memo: applying it
+/// everywhere a `tidepool-extract` gets spawned is what makes "on by
+/// default" actually mean every real caller, not just the one with the
+/// fanciest doc comment. A no-op if the directory can't be created.
+pub fn apply_build_products_dir(cmd: &mut tidepool_extract_cmd::ExtractCmd) {
+    let fingerprint = crate::toolchain::extract_fingerprint(Path::new(cmd.launcher().program()));
+    let bp_dir = build_products_dir(&fingerprint);
+    if std::fs::create_dir_all(&bp_dir).is_ok() {
+        cmd.build_products_dir(&bp_dir);
+    }
+}
+
 /// Staging dir for the generated `Tidepool.Effects` module.
 pub fn effects_dir() -> PathBuf {
     cache_dir().join("effects")

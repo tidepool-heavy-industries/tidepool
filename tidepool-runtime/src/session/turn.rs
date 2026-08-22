@@ -388,8 +388,19 @@ fn missing_template_error(selector: TemplateSelector) -> CompileError {
 /// A fresh [`ExtractCmd`] with this crate's error mapping already applied: a
 /// misconfigured `$TIDEPOOL_EXTRACT` is an environment problem, reported the
 /// same way a failed spawn is (`Io`, never a user-Haskell variant).
+///
+/// Also carries the default build-products dir
+/// (`crate::paths::apply_build_products_dir`) — this module's spawns bypass
+/// `crate::artifacts::compile_invocation`'s memo (see the module doc: a
+/// session turn has on-disk side effects and mutable-session dependencies a
+/// content-addressed cache would get wrong), but the module-granular GHC
+/// recompilation win the build-products dir gives is an orthogonal, additive
+/// concern, and this crate's OTHER (turn/eval) spawns get it too — this is
+/// what makes it on-by-default here rather than only through that one lane.
 fn extract_cmd() -> Result<ExtractCmd, CompileError> {
-    ExtractCmd::new().map_err(|e| CompileError::Io(e.into()))
+    let mut cmd = ExtractCmd::new().map_err(|e| CompileError::Io(e.into()))?;
+    crate::paths::apply_build_products_dir(&mut cmd);
+    Ok(cmd)
 }
 
 fn map_notfound(e: SpawnError) -> CompileError {

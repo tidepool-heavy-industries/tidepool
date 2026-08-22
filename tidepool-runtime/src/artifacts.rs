@@ -267,15 +267,11 @@ pub(crate) fn compile_invocation(
     // `$TIDEPOOL_BUILD_PRODUCTS_DIR` still overrides the LOCATION (an
     // isolated dir for a test that needs a genuinely cold measurement,
     // mirroring `compile_cache_dir`'s own override) — it is no longer also
-    // the enable switch.
-    {
-        let bp_fingerprint =
-            crate::toolchain::extract_fingerprint(Path::new(cmd.launcher().program()));
-        let bp_dir = crate::paths::build_products_dir(&bp_fingerprint);
-        if std::fs::create_dir_all(&bp_dir).is_ok() {
-            cmd.build_products_dir(&bp_dir);
-        }
-    }
+    // the enable switch. Applied via `crate::paths::apply_build_products_dir`
+    // — the same helper `session/turn.rs`'s `extract_cmd()` and
+    // `session/mod.rs`'s `validate_candidate` call for their OWN spawn sites,
+    // so this is on by default everywhere in this crate, not just here.
+    crate::paths::apply_build_products_dir(&mut cmd);
 
     let names = artifact_names(inv.targets, multi);
     let name_refs: Vec<&str> = names.iter().map(String::as_str).collect();
