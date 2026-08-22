@@ -26,6 +26,7 @@ module Tidepool.Translate
   , poisonSentinelSlot
   , varId
   , stableVarId
+  , stabilizeLocalUniques
   , fieldParentDisamb
   , normalizeMod
   , binderQualName
@@ -37,7 +38,7 @@ import GHC
 import GHC.Core
 import GHC.Types.Id
 import GHC.Types.Var (isTyVar, isCoVar, varUnique, varName, setVarUnique)
-import GHC.Types.Unique (getKey)
+import GHC.Types.Unique (getKey, mkUnique)
 import GHC.Types.Unique.Supply (UniqSupply, mkSplitUniqSupply, takeUniqFromSupply)
 import GHC.Types.Var.Env (VarEnv, emptyVarEnv, extendVarEnv, lookupVarEnv)
 import GHC.Core.DataCon (DataCon, dataConRepArity, dataConRepArgTys, dataConFullSig, dataConTag, dataConWorkId, dataConName, dataConSrcBangs, dataConOrigArgTys, dataConFieldLabels, dataConTyCon, isUnboxedTupleDataCon, isVanillaDataCon, HsSrcBang(..), HsBang(..), SrcUnpackedness(..), SrcStrictness(..))
@@ -727,7 +728,8 @@ data ClosedModule = ClosedModule
 translateModuleClosed :: HscEnv -> [CoreBind] -> String -> IO ClosedModule
 translateModuleClosed hscEnv allBinds targetName = do
   (closedBinds0, unresolved) <- resolveExternals varId hscEnv allBinds
-  closedBinds <- uniquifyDuplicateBinders closedBinds0
+  dedupedBinds <- uniquifyDuplicateBinders closedBinds0
+  let closedBinds = stabilizeLocalUniques dedupedBinds
   -- TIDEPOOL_DUMP_CLOSED=<needle>: dump resolved bindings whose binder
   -- name contains the needle (post-resolveExternals Core — what the JIT
   -- actually compiles; can differ from --dump-core's module view).
@@ -975,6 +977,132 @@ uniquifyDuplicateBinders binds = do
       return (env'', b' : bs')
 
     goE :: VarEnv Var -> CoreExpr -> State (UniqSupply, Set.Set Word64) CoreExpr
+    goE env expr = case expr of
+      Var v -> return (Var (maybe v id (lookupVarEnv env v)))
+      Lit{} -> return expr
+      App f a -> App <$> goE env f <*> goE env a
+      Lam b body -> do
+        (env', b') <- goB env b
+        Lam b' <$> goE env' body
+      Let (NonRec b rhs) body -> do
+        rhs' <- goE env rhs
+        (env', b') <- goB env b
+        Let (NonRec b' rhs') <$> goE env' body
+      Let (Rec ps) body -> do
+        (env', bs') <- goBs env (map fst ps)
+        rhss' <- mapM (goE env' . snd) ps
+        Let (Rec (zip bs' rhss')) <$> goE env' body
+      Case s b ty alts -> do
+        s' <- goE env s
+        (env', b') <- goB env b
+        alts' <- mapM (goAlt env') alts
+        return (Case s' b' ty alts')
+      Cast e co -> (`Cast` co) <$> goE env e
+      Tick t e -> Tick t <$> goE env e
+      Type{} -> return expr
+      Coercion{} -> return expr
+      where
+        goAlt env' (Alt c bs rhs) = do
+          (env'', bs') <- goBs env' bs
+          Alt c bs' <$> goE env'' rhs
+
+-- | Assign every NESTED (non-top-level, non-erased) 'Id' in the closed graph
+-- a deterministic, CONTENT-DERIVED 'Unique' — a pure function of this pass's
+-- own traversal position, never of GHC's session-wide Unique allocator — so
+-- that 'localVarId'\'s existing formula (hash the OccName together with
+-- @varUnique@) receives a STABLE input across two structurally-identical
+-- compiles of the same source. 'localVarId' itself is UNCHANGED; this is a
+-- normalization pass that runs before it, not a parallel numbering scheme.
+--
+-- THE PROBLEM this closes (plans/turn-latency-state-injection.md's
+-- "Build-products dir: as-built" section; see also this file's own
+-- 'localVarId' doc): a cold compile (GHC's @load'@ fully typechecks every
+-- module) and a warm compile (a populated build-products dir lets @load'@
+-- skip unchanged modules via @checkOldIface@) consume a DIFFERENT quantity
+-- of session Uniques before reaching any given module's own translation —
+-- so the same logical nested binder gets a different raw 'varUnique' each
+-- time, and 'localVarId' (which hashes that raw unique) produces a
+-- different VarId. A structural CBOR diff confirmed node COUNT and SHAPE
+-- are identical cold vs warm, and only VarIds at Case-binder positions
+-- differ — the bug is squarely "the numbering scheme", not the shape of
+-- what gets numbered.
+--
+-- THE FIX: strip the session Unique out of the picture entirely, BEFORE
+-- 'localVarId' ever sees it. This pass walks the closed graph via a plain
+-- structural recursion — 'App' function-then-argument, 'Lam'/'Let'/'Case'
+-- binder-then-body/scrutinee-then-alts, always in the same fixed order for
+-- the same input shape — and assigns each newly-encountered nested binder
+-- the next ordinal from a pure monotonic counter, threaded via 'State' (no
+-- 'UniqSupply', no GHC session interaction of any kind — that IO-backed
+-- allocator is the thing whose consumption trajectory differs cold vs warm;
+-- a plain 'Word64' counter seeded at 0 cannot diverge, since it depends on
+-- nothing but the shape of THIS tree). Given the already-established
+-- invariant that a cold and a warm compile of the same source produce
+-- identical Core shape, this walk visits — and therefore numbers — every
+-- nested binder in the SAME order both times, so two separate compiles of
+-- identical source now produce byte-identical nested VarIds.
+--
+-- Two structurally-identical SIBLING binders (e.g. the same pattern match
+-- compiled twice, or shadowing: @\\x -> \\x -> x@) are still distinguished
+-- automatically — no special-casing needed: they occupy different positions
+-- in the walk (different Lam/Case/Let nodes), so they get different
+-- ordinals regardless of sharing an OccName or an original GHC unique.
+--
+-- The freshly-minted 'Unique' is tagged with the @\'V\'@ domain character
+-- (see 'GHC.Types.Unique.mkUnique'): GHC's own unique-domain scheme
+-- guarantees any two DISTINCT domain characters produce disjoint Unique
+-- sets no matter what numeric ordinal each uses (the character occupies its
+-- own high bits; equality requires both the tag AND the low bits to match)
+-- — so this cannot alias a wired-in constructor/tycon unique (those use
+-- their own reserved characters: @0@-@9@,
+-- b/B/c/C/d/E/f/i/j/k/L/m/P/Q/R/s/S/v/X/z — see 'GHC.Builtin.Uniques') or
+-- anything a GHC unique-supply domain mints ('uniquifyDuplicateBinders'
+-- included, which uses supply domain @\'k\'@).
+--
+-- Runs AFTER 'uniquifyDuplicateBinders' — that pass (#313 t11) and this one
+-- are DELIBERATELY kept separate rather than merged, even though this
+-- pass's unconditional per-position renumbering happens to subsume #313
+-- t11's own concern too (every walked position gets its own fresh ordinal
+-- regardless of the input unique, so two binders that originally shared a
+-- unique via cross-site template duplication end up numbered apart here
+-- regardless): merging would put #313 t11's tested, historically-load-
+-- bearing fix at risk for zero behavioral gain, since this pass alone
+-- already produces collision-free output.
+--
+-- Binding occurrences propagate to every lexical reference via a 'VarEnv'
+-- substitution, mirroring 'uniquifyDuplicateBinders'\'s own walk shape
+-- exactly (same five 'CoreExpr' arms, same env-threading pattern). Top-
+-- level binders are never touched here (unaffected, exactly as in
+-- 'uniquifyDuplicateBinders': they are already 'isExternalName' post-#313's
+-- 'externalizeInternalTops', hence already routed through 'stableVarId').
+-- Contract pinned by @test-varid/VarIdMechanismTest.hs@.
+stabilizeLocalUniques :: [CoreBind] -> [CoreBind]
+stabilizeLocalUniques binds = evalState (mapM goTop binds) 0
+  where
+    goTop (NonRec b rhs) = NonRec b <$> goE emptyVarEnv rhs
+    goTop (Rec ps) = Rec <$> mapM (\(b, rhs) -> (b,) <$> goE emptyVarEnv rhs) ps
+
+    -- Visit a binder: unconditionally rename to the next ordinal (unlike
+    -- 'uniquifyDuplicateBinders'\'s own @goB@, which renames only on a
+    -- collision) — see the pass doc above for why "always" is both simpler
+    -- and sufficient.
+    goB :: VarEnv Var -> Var -> State Word64 (VarEnv Var, Var)
+    goB env b
+      | isErasedBinder b = return (env, b)
+      | otherwise = do
+          nextOrd <- get
+          put (nextOrd + 1)
+          let b' = setVarUnique b (mkUnique 'V' nextOrd)
+          return (extendVarEnv env b b', b')
+
+    goBs :: VarEnv Var -> [Var] -> State Word64 (VarEnv Var, [Var])
+    goBs env [] = return (env, [])
+    goBs env (b:bs) = do
+      (env', b') <- goB env b
+      (env'', bs') <- goBs env' bs
+      return (env'', b' : bs')
+
+    goE :: VarEnv Var -> CoreExpr -> State Word64 CoreExpr
     goE env expr = case expr of
       Var v -> return (Var (maybe v id (lookupVarEnv env v)))
       Lit{} -> return expr
