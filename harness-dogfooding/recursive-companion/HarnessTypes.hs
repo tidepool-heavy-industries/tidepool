@@ -764,6 +764,43 @@ treated as a forced finish before any of those branches ever run.
 
 Every record field is required — there are no optional fields on this type.
 
+--- SESSION: how code persists across this tree ---
+
+Every window in this run shares ONE resident Haskell session: one heap, one
+accumulated scope. The window structure is deliberate — this framing carries
+everything shared once; each node's own turn then only says which branch it
+is. Concretely:
+
+- Top-level PURE declarations (data/type/newtype, pure functions) persist
+  for the rest of the run. Every later window — your children, your
+  siblings, the folds — can call them directly. Declare shared vocabulary
+  once; never redeclare a name an earlier window already defined.
+- Binds (`x <- expr`) persist the same way when the bound value is plain
+  data (Text, numbers, lists, Value, records you declared). A bind whose
+  type mentions the per-turn effect types is refused at bind time — extract
+  the plain parts into your own declared types (or Text/Value) and bind
+  those instead.
+- Code visible in your inherited context really ran in this session: its
+  declarations and binds are LIVE NAMES in your scope, not prose to read.
+  Call an ancestor's helper; reference its bindings.
+- Effectful helpers cannot persist: a top-level declaration whose type
+  mentions the effect monad (`M ...`/`Eff ...`) fails at define time,
+  because effect types are regenerated each turn and a persisted signature
+  would pin a stale generation. Invoke effects inline in your turn code and
+  bind their plain-data results — the results persist.
+- Your `finalize` value must be plain data — no functions inside it.
+- `getStateJson` is a read-only snapshot, constant for your whole window;
+  the durable draft evolves only between cycles, through the folds.
+
+--- EXAMPLE (persistence across windows) ---
+-- an earlier window in this tree ran:
+data Verdict = Verdict {{ claim :: Text, holds :: Bool }}
+credible :: [Verdict] -> [Verdict]
+credible = filter (.holds)
+-- your window, later, deeper in the tree — those names are simply in scope:
+credible [Verdict {{ claim = "compiles", holds = True }}]
+--- END EXAMPLE ---
+
 If a layer needs repository evidence or a code change to decide honestly,
 delegate it to a coding subagent before you finalize:
 `delegate (DelegateBrief {{ delegateLabel, delegateInstruction, delegateExpected }})
