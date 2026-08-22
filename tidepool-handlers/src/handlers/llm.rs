@@ -325,7 +325,7 @@ mod tests {
         let result = jit_eval_with_mock_llm(
             &[
                 "r <- llm (SObj []) \"test\" >>= liftEither",
-                "let encoded = object [\"result\" .= r, \"field\" .= (r ?. \"greeting\")]",
+                "let encoded = object [\"result\" .= r, \"field\" .= (r ^? key \"greeting\")]",
                 "pure (object [\"raw\" .= r, \"encoded\" .= encoded])",
             ],
             mock,
