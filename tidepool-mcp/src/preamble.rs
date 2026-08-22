@@ -177,11 +177,22 @@ pub fn session_decl_module_env(effects: &[EffectDecl], user_library: bool) -> Mo
 /// `haskell/src/Tidepool/Translate.hs`'s narrowed `typeMentionsEffectMonad`).
 ///
 /// The practical effect: a declaration written `Member <Eff> effs => ... ->
-/// Eff effs T` now validates here and persists across turns/windows (it
-/// mentions only Core's stable tycons); a declaration that instead spells the
-/// per-window `M` alias still fails validation with an ordinary GHC "not in
-/// scope" error, because the shim is not on this plane's include path —
-/// effect companion imports (`Tidepool.Form` etc.) are ALSO excluded, since
+/// Eff effs T` validates here and persists across turns/windows (it
+/// mentions only Core's stable tycons). A declaration that instead spells
+/// the per-window `M` alias ALSO validates and persists — `M` still never
+/// resolves here (the shim is not on this plane's include path), but the
+/// decl plane strips an M-mentioning signature before compiling
+/// (`tidepool_runtime::session::render`'s `generalize_m_signatures`, gated on
+/// exactly this env excluding `import Tidepool.Effects`) and lets GHC infer
+/// the body's type from its use of Core's helpers — the same
+/// `Member <Eff> effs => ... -> Eff effs T` shape a hand-written
+/// row-polymorphic signature would have. The model's own spelling of `M` is
+/// therefore no longer something it needs to reason about here; only a
+/// declaration that pins a CONCRETE row (an explicit `Eff '[...]`, not the
+/// bare `M` alias) still fails, and only once some later use genuinely can't
+/// satisfy a `Member` constraint against that pinned row — an ordinary
+/// unsolved-`Member` error at that use site, not a define-time refusal.
+/// Effect companion imports (`Tidepool.Form` etc.) are still excluded, since
 /// they depend on the shim's row being genuinely present. Everything else —
 /// `Tidepool.Prelude` (unqualified `Text`, `object`, the pure vocabulary every
 /// turn has ambient), the qualified namespaces, Aeson — stays, so a decl a

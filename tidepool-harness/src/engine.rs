@@ -1738,12 +1738,16 @@ impl EngineConfig {
     /// shared decl plane's VALIDATION context (one-session living structure).
     /// The STABLE `Tidepool.Effects.Core` dir stays IN this set (stable-
     /// effects-core): a model-authored declaration naming an effect surface
-    /// via `Member <Eff> effs => ... -> Eff effs T` now validates and
-    /// persists, because Core's tycons are the same ones every later turn's
-    /// compile sees. A declaration that instead spells the per-window `M`
-    /// alias or `import Tidepool.Effects` (the shim, not Core) still fails
-    /// validation with an ordinary "not in scope" GHC error — the narrowed
-    /// structural guard, not an import scanner.
+    /// via `Member <Eff> effs => ... -> Eff effs T` validates and persists,
+    /// because Core's tycons are the same ones every later turn's compile
+    /// sees. A declaration that instead spells the per-window `M` alias
+    /// persists identically — `M` still never resolves against this include
+    /// set (the shim isn't on it), but `tidepool_mcp::pure_decl_module_env`'s
+    /// plane strips the M-mentioning signature before compiling and lets GHC
+    /// infer the same `Member`-polymorphic shape. A declaration that instead
+    /// spells `import Tidepool.Effects` (the shim itself, not `M`) still
+    /// fails validation with an ordinary "not in scope" GHC error — the
+    /// narrowed structural guard, not an import scanner.
     pub fn validation_include(&self) -> Vec<PathBuf> {
         self.include
             .iter()

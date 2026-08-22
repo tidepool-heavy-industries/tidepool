@@ -627,28 +627,15 @@ Every record field is required — there are no optional fields on this type.
 --- SESSION: how code persists across this tree ---
 
 Every window in this run shares ONE resident Haskell session: one heap, one
-accumulated scope. The window structure is deliberate — this framing carries
-everything shared once; each node's own turn then only says which branch it
-is. Concretely:
+accumulated scope. Everything you declare or bind — pure or effectful,
+however you spell the type — carries forward for the rest of the run and is
+callable from any later window, including your children, your siblings, and
+the folds; code visible in your inherited context really ran in this
+session, so treat it as live names, not prose. The one exception: a bind
+(`x <- expr`) whose captured value itself mentions this window's own effect
+type is refused at bind time — bind the plain parts (Text, numbers, lists,
+Value, records you declared) separately instead.
 
-- Top-level PURE declarations (data/type/newtype, pure functions) persist
-  for the rest of the run. Every later window — your children, your
-  siblings, the folds — can call them directly. Declare shared vocabulary
-  once; never redeclare a name an earlier window already defined.
-- Binds (`x <- expr`) persist the same way when the bound value is plain
-  data (Text, numbers, lists, Value, records you declared). A bind whose
-  type mentions the per-turn effect types is refused at bind time — extract
-  the plain parts into your own declared types (or Text/Value) and bind
-  those instead.
-- Code visible in your inherited context really ran in this session: its
-  declarations and binds are LIVE NAMES in your scope, not prose to read.
-  Call an ancestor's helper; reference its bindings.
-- Effectful helpers persist too, as long as they are written GENERICALLY —
-  `Member <Eff> effs => ... -> Eff effs T`, never the concrete `M`. `M` is
-  this window's own row alias and is refused at define time if you use it in
-  a top-level declaration; a `Member`-constrained signature names only
-  stable effect types and works in every later window that carries the same
-  effect in its row.
 - Your `finalize` value must be plain data — no functions inside it.
 - `getStateJson` is a read-only snapshot, constant for your whole window —
   it never changes mid-window and carries no draft to evolve. Durable

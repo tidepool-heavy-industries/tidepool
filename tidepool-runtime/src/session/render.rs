@@ -396,6 +396,117 @@ fn extract_user_imports(src: &str) -> (String, Vec<String>) {
     (kept.join("\n"), imports)
 }
 
+/// True iff `env` carries no `import Tidepool.Effects` line — the per-window
+/// SHIM that declares `type M` (stable-effects-core: `pure_decl_module_env`
+/// in `tidepool-mcp` deliberately excludes it, `session_decl_module_env`
+/// deliberately includes it). Exactly the condition under which `M` does not
+/// resolve on this plane, and therefore the condition
+/// [`generalize_m_signatures`] must fire under — a plane that DOES import
+/// the shim leaves user signatures untouched, since `M` already means
+/// something concrete and correct there.
+fn env_lacks_m_shim(env: &ModuleEnv) -> bool {
+    !env.imports.iter().any(|l| l == "import Tidepool.Effects")
+}
+
+/// True if `line` opens a top-level type signature (`name ::` or `(op) ::`
+/// at column 0) — mirrors `tidepool_mcp::preamble::sig_start`, reimplemented
+/// here rather than shared: `tidepool-runtime` sits below `tidepool-mcp` in
+/// the crate dependency graph, so that fn is unreachable from here.
+fn sig_line_start(line: &str) -> bool {
+    if line.starts_with(char::is_whitespace) {
+        return false;
+    }
+    let Some((head, _)) = line.split_once("::") else {
+        return false;
+    };
+    let h = head.trim_end();
+    if h.is_empty() || h.contains(' ') {
+        return false;
+    }
+    (h.starts_with(|c: char| c.is_ascii_lowercase() || c == '_')
+        && h.chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '\''))
+        || (h.starts_with('(') && h.ends_with(')'))
+}
+
+/// True if `ty_text` mentions the per-window row alias `M` as a bare,
+/// unqualified identifier — never as part of a longer name (`Maybe`,
+/// `Member`), and never a qualified reference (`Foo.M`).
+fn mentions_bare_m(ty_text: &str) -> bool {
+    let bytes = ty_text.as_bytes();
+    let is_ident = |b: u8| b.is_ascii_alphanumeric() || b == b'_' || b == b'\'';
+    let mut i = 0;
+    while let Some(rel) = ty_text[i..].find('M') {
+        let idx = i + rel;
+        let prev_boundary = idx == 0 || {
+            let p = bytes[idx - 1];
+            !is_ident(p) && p != b'.'
+        };
+        let next = idx + 1;
+        let next_boundary = next >= bytes.len() || !is_ident(bytes[next]);
+        if prev_boundary && next_boundary {
+            return true;
+        }
+        i = idx + 1;
+    }
+    false
+}
+
+/// Strip a top-level signature block whose type mentions bare `M`, leaving
+/// its equation(s) in place — GHC then infers the type from the body instead
+/// of failing "not in scope" for `M` on a plane that never imports the
+/// per-window shim ([`env_lacks_m_shim`]). `NoMonomorphismRestriction` is
+/// already on in every decl env (`decl_pragmas`), so the inferred type is
+/// exactly the general `Member <Eff> effs => ... -> Eff effs T` form a
+/// hand-written row-polymorphic signature would have named — the model's `M`
+/// spelling and the row-polymorphic spelling now persist identically. A
+/// signature that does NOT mention bare `M` (including one already spelled
+/// `Member`/`Eff`) passes through completely unchanged; this function only
+/// ever REMOVES a signature, never rewrites one.
+///
+/// Text-level, not a real parse: robust for the shapes a model actually
+/// writes (one signature per equation, at most a handful of wrapped
+/// continuation lines), not a general Haskell layout parser. `DeclTurn::sources`
+/// itself is untouched by this — it stays the verbatim text the model wrote
+/// (needed for `:i`/introspection) — only what gets COMPILED for this one
+/// generation's module is affected.
+fn generalize_m_signatures(src: &str) -> String {
+    let lines: Vec<&str> = src.lines().collect();
+    let mut kept: Vec<&str> = Vec::new();
+    let mut i = 0;
+    while i < lines.len() {
+        let line = lines[i];
+        if !sig_line_start(line) {
+            kept.push(line);
+            i += 1;
+            continue;
+        }
+        // Collect the whole (possibly multi-line) signature block.
+        let mut end = i + 1;
+        while end < lines.len() {
+            let next = lines[end];
+            if next.starts_with(char::is_whitespace) && !next.trim().is_empty() {
+                end += 1;
+            } else {
+                break;
+            }
+        }
+        let joined = lines[i..end]
+            .iter()
+            .map(|l| l.trim())
+            .collect::<Vec<_>>()
+            .join(" ");
+        let ty = joined.split_once("::").map(|(_, t)| t).unwrap_or("");
+        if !mentions_bare_m(ty) {
+            kept.extend(&lines[i..end]);
+        }
+        // else: drop the whole signature block (lines i..end) and keep going —
+        // the equation(s) that follow are untouched, further down `lines`.
+        i = end;
+    }
+    kept.join("\n")
+}
+
 /// Rewrite one `env.imports` line so no name in `all_session_heads` reaches
 /// scope through it. Three shapes, because GHC allows at most one of an
 /// explicit import list and a `hiding` clause per import:
@@ -592,6 +703,7 @@ pub fn render_module_with_vals(
     // they don't reappear after the module header / in the declaration body.
     let mut hoisted_exts: Vec<String> = Vec::new();
     let mut hoisted_imports: Vec<String> = Vec::new();
+    let generalize = env_lacks_m_shim(env);
     let stripped_sources: Vec<String> = this
         .sources
         .iter()
@@ -600,7 +712,11 @@ pub fn render_module_with_vals(
             hoisted_exts.extend(exts);
             let (stripped, imps) = extract_user_imports(&stripped);
             hoisted_imports.extend(imps);
-            stripped
+            if generalize {
+                generalize_m_signatures(&stripped)
+            } else {
+                stripped
+            }
         })
         .collect();
 
@@ -1317,6 +1433,97 @@ mod tests {
         assert!(
             !right.source.contains("x + 1"),
             "sibling body must not leak"
+        );
+    }
+
+    #[test]
+    fn mentions_bare_m_matches_only_the_standalone_identifier() {
+        assert!(mentions_bare_m("M Int"));
+        assert!(mentions_bare_m("Int -> M ()"));
+        assert!(mentions_bare_m("Text -> M (Either Foo Bar)"));
+        // Never a substring hit: `Member`, `Maybe`, a qualified `Foo.M`.
+        assert!(!mentions_bare_m(
+            "forall effs. Member ReadState effs => Eff effs Int"
+        ));
+        assert!(!mentions_bare_m("Maybe Int"));
+        assert!(!mentions_bare_m("Foo.M Int"));
+        assert!(!mentions_bare_m("Int -> Int"));
+    }
+
+    #[test]
+    fn generalize_m_signatures_drops_only_the_m_mentioning_signature() {
+        let src = "probeStateM :: M Int\nprobeStateM = getStateJson >> pure 0";
+        let out = generalize_m_signatures(src);
+        assert_eq!(out, "probeStateM = getStateJson >> pure 0");
+
+        // A Member-form signature is untouched — this function only ever
+        // REMOVES a bare-M signature, never rewrites a non-M one.
+        let member_src =
+            "probeState :: forall effs. Member ReadState effs => Eff effs Int\nprobeState = getStateJson";
+        assert_eq!(generalize_m_signatures(member_src), member_src);
+
+        // A pure signature with no M is untouched too.
+        let pure_src = "bumpTwice :: Int -> Int\nbumpTwice n = n + 2";
+        assert_eq!(generalize_m_signatures(pure_src), pure_src);
+    }
+
+    #[test]
+    fn generalize_m_signatures_drops_a_wrapped_m_signature() {
+        // A signature wrapped across a continuation line must still be
+        // recognized and dropped as one block — not left half-stripped.
+        let src = "probeStateM ::\n  M Int\nprobeStateM = getStateJson >> pure 0";
+        assert_eq!(
+            generalize_m_signatures(src),
+            "probeStateM = getStateJson >> pure 0"
+        );
+    }
+
+    #[test]
+    fn env_lacking_the_m_shim_generalizes_an_m_typed_decl_at_render_time() {
+        // `pure_decl_module_env`'s shape: every `eval_import_lines` entry
+        // except `import Tidepool.Effects`, plus `Tidepool.Effects.Core`.
+        let env = ModuleEnv {
+            pragmas: "{-# LANGUAGE NoMonomorphismRestriction #-}".to_string(),
+            imports: vec!["import Tidepool.Effects.Core".to_string()],
+        };
+        let mut log = DeclLog::new();
+        push_chained(
+            &mut log,
+            turn(
+                "probeStateM :: M Int\nprobeStateM = getStateJson >> pure 0",
+                vec![val("probeStateM")],
+            ),
+        );
+        let r = render_module(&log, Generation(1), &env);
+        assert!(
+            !r.source.contains("probeStateM :: M Int"),
+            "the M-mentioning signature must be stripped:\n{}",
+            r.source
+        );
+        assert!(r.source.contains("probeStateM = getStateJson >> pure 0"));
+    }
+
+    #[test]
+    fn env_carrying_the_m_shim_leaves_an_m_typed_decl_untouched() {
+        // `session_decl_module_env`'s shape: `import Tidepool.Effects` IS
+        // present, so `M` genuinely resolves — no stripping should happen.
+        let env = ModuleEnv {
+            pragmas: "{-# LANGUAGE NoMonomorphismRestriction #-}".to_string(),
+            imports: vec!["import Tidepool.Effects".to_string()],
+        };
+        let mut log = DeclLog::new();
+        push_chained(
+            &mut log,
+            turn(
+                "probeStateM :: M Int\nprobeStateM = getStateJson >> pure 0",
+                vec![val("probeStateM")],
+            ),
+        );
+        let r = render_module(&log, Generation(1), &env);
+        assert!(
+            r.source.contains("probeStateM :: M Int"),
+            "a plane that imports the shim must keep the M signature verbatim:\n{}",
+            r.source
         );
     }
 }

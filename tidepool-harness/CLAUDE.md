@@ -805,12 +805,18 @@ machine), validated against an include that admits the STABLE
 (stable-effects-core — see `tidepool-mcp/CLAUDE.md`'s section of that name).
 This is now the payoff feature, not just a pure-decls guard: a declaration
 written `Member <Eff> effs => ... -> Eff effs T` validates and persists
-exactly like a pure one; only a declaration spelling the per-window `M`
-alias still fails at define time (the narrowed structural guard), and the
-authored render/loop compiles still NEVER see this plane either way
-(pillar D, unaffected). The direct, driver-independent acceptance of this is
-`tests/stable_effects_core_decl_plane.rs`. Standing acceptances for the
-pure-decl case, in `tests/selfharness_fn_finalize_spike.rs`: the
+exactly like a pure one, and a declaration spelling the per-window `M` alias
+persists identically — `M` still never resolves on this plane, but the
+plane strips the M-mentioning signature before compiling and lets GHC infer
+the same `Member`-polymorphic shape (`tidepool_runtime::session::render`'s
+`generalize_m_signatures`), so which spelling a model reaches for is no
+longer a taxonomy it has to reason about. Only a declaration pinning a
+genuinely CONCRETE row still surfaces the row boundary — as an ordinary
+unsolved-`Member` error at whatever later use can't satisfy it, never a
+define-time refusal — and the authored render/loop compiles still NEVER see
+this plane either way (pillar D, unaffected). The direct, driver-independent
+acceptance of this is `tests/stable_effects_core_decl_plane.rs`. Standing
+acceptances for the pure-decl case, in `tests/selfharness_fn_finalize_spike.rs`: the
 `State -> State` edit, the record-of-functions delivery, and
 `living_helper_survives_loop_boundary_and_rotation` (declare in cycle N,
 resolve after the loop boundary AND a forced machine rotation into cycle

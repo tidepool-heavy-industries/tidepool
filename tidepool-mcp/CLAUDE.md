@@ -95,6 +95,23 @@ surface — drops the shim but KEEPS Core, which is the whole mechanism behind
 "an effectful helper DECLARATION persists now": see
 `tidepool-harness/tests/stable_effects_core_decl_plane.rs`.
 
+**M carries forward too — a model never has to reason about which spelling
+persists.** A declaration written `Member <Eff> effs => ... -> Eff effs T`
+validates on the shared decl plane because it mentions only Core's stable
+tycons; a declaration spelling the per-window `M` alias instead ALSO
+validates and persists, identically. `M` still never resolves against the
+plane's include set (the shim stays excluded) — but
+`tidepool_runtime::session::render`'s `generalize_m_signatures`, gated on the
+plane's `ModuleEnv` lacking `import Tidepool.Effects`, strips an M-mentioning
+top-level signature before the plane compiles it (leaving the equation body
+untouched — `DeclTurn::sources` itself stays the verbatim model-authored
+text, only what actually gets COMPILED is affected) and lets GHC infer the
+same `Member`-polymorphic shape a hand-written row-polymorphic signature
+would have named. Only a declaration that pins a genuinely CONCRETE row (an
+explicit `Eff '[...]`, not the bare `M` alias) still surfaces the row
+boundary — and even then only as an ordinary unsolved-`Member` error at
+whatever later use can't satisfy it, never a define-time refusal.
+
 **Former trap, now resolved by the above:** a bridged data record or an
 `errors` ADT inlined directly in a `type_defs` literal used to be UNSAFE
 (the per-session generated module was fragment-nominal, so an inline record

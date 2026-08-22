@@ -1568,6 +1568,18 @@ mkBoundBinders probeOnly bindNames g root result = do
   -- ephemeral @:t@ type-probe, never registered as a session binding — see
   -- 'mkBoundBinders' doc) has no later fragment to cross into, so it is
   -- exempt by construction.
+  --
+  -- NOT generalized the way an M-mentioning DECL signature now is (the
+  -- decl-plane fix in @tidepool-runtime@'s @render_module@ that lets
+  -- @probe :: M Value@ persist by stripping the signature and letting GHC
+  -- infer): a bind's type is not an ANNOTATION to strip and re-infer, it is
+  -- the type of a value THAT ALREADY EXISTS on the heap from running this
+  -- turn's expression once. There is nothing to re-infer a bind's captured
+  -- type FROM — the value is already computed, and if it genuinely mentions
+  -- @Eff@ (e.g. the action itself, not its result, or a closure that would
+  -- need to resume a suspended computation) that is a real fact about the
+  -- value, not an artifact of how the model spelled a signature. This
+  -- residual stays exactly as it was.
   when (not probeOnly) $
     forM_ (zip bindNames componentTypes) $ \(name, cty) ->
       when (typeMentionsEffectMonad cty) $
