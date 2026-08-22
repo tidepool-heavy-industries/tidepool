@@ -1,10 +1,14 @@
-//! Integer/Natural → `Double` encoding helpers used by the JIT and tree-walker.
+//! Integer/Natural ↔ `Double`/`Float` encoding, decoding, and `show` helpers
+//! used by the JIT and tree-walker.
 //!
 //! With the native ghc-bignum backend, `Integer`/`Natural` arithmetic is pure
 //! Core over `Word#`/`ByteArray#` primops — no `__gmpn_*`/`integer_gmp_*` FFI —
 //! so the JIT compiles it directly. The only ghc-bignum FFI that survives is the
 //! RTS `__int_encodeDouble`/`__word_encodeDouble` (`mantissa * 2^exp`), which
-//! both consumers route here.
+//! both consumers route here. `decodeDouble_Int64#`/`decodeFloat_Int#` (the
+//! inverse direction) and Haskell's `Show Double` formatting are the same kind
+//! of fact — a numeric policy both backends must agree on bit-for-bit — so they
+//! live here too, one home instead of two hand-kept-in-sync copies.
 
 #![warn(clippy::unwrap_used, clippy::expect_used)]
 /// `__int_encodeDouble(mantissa, exp)`: the correctly-rounded value of
@@ -45,6 +49,102 @@ fn scale_pow2(mut x: f64, e: i64) -> f64 {
     x * 2f64.powi(e as i32)
 }
 
+/// `decodeDouble_Int64#`: decompose a `Double` into `(mantissa, exponent)`
+/// such that `mantissa * 2^exponent == d`, in GHC's CANONICAL form — for a
+/// normal finite `d`, `2^52 <= |mantissa| < 2^53` (the raw 52-bit fraction
+/// field plus the implicit leading 1 bit, NOT reduced by trailing zeros; GHC's
+/// own `decodeDouble_Int64#` does not perform that reduction). The JIT and the
+/// tree-walker both call this — it is THE numeric policy for that primop, not
+/// an implementation each backend happens to agree on.
+pub fn decode_double_int64(d: f64) -> (i64, i64) {
+    if d == 0.0 || d.is_nan() {
+        return (0, 0);
+    }
+    if d.is_infinite() {
+        return (if d > 0.0 { 1 } else { -1 }, 0);
+    }
+    let bits = d.to_bits();
+    let sign: i64 = if bits >> 63 == 0 { 1 } else { -1 };
+    let raw_exp = ((bits >> 52) & 0x7ff) as i32;
+    let raw_man = (bits & 0x000f_ffff_ffff_ffff) as i64;
+    let (man, exp) = if raw_exp == 0 {
+        // subnormal
+        (raw_man, 1 - 1023 - 52)
+    } else {
+        // normal: implicit leading 1
+        (raw_man | (1i64 << 52), raw_exp - 1023 - 52)
+    };
+    (sign * man, exp as i64)
+}
+
+/// `decodeFloat_Int#`: same shape as [`decode_double_int64`], but over
+/// Float's own IEEE754 single layout (8-bit exponent field / 23-bit explicit
+/// mantissa, bias 127). NOT reusable via widening to Double first: that would
+/// decode into Double's wider mantissa/exponent and give a wrong answer for
+/// Float.
+pub fn decode_float_int(f: f32) -> (i64, i64) {
+    if f == 0.0 || f.is_nan() {
+        return (0, 0);
+    }
+    if f.is_infinite() {
+        return (if f > 0.0 { 1 } else { -1 }, 0);
+    }
+    let bits = f.to_bits();
+    let sign: i64 = if bits >> 31 == 0 { 1 } else { -1 };
+    let raw_exp = ((bits >> 23) & 0xff) as i32;
+    let raw_man = (bits & 0x007f_ffff) as i64;
+    let (man, exp) = if raw_exp == 0 {
+        // subnormal
+        (raw_man, 1 - 127 - 23)
+    } else {
+        // normal: implicit leading 1
+        (raw_man | (1i64 << 23), raw_exp - 127 - 23)
+    };
+    (sign * man, exp as i64)
+}
+
+/// Format a Double matching Haskell's `show` output. Decimal notation for
+/// `0.1 <= |x| < 1e7`, scientific notation otherwise. Always includes a
+/// decimal point — Rust's `{:e}` omits it for an integral mantissa
+/// (`"1e10"`), where Haskell's `show` always writes one (`"1.0e10"`); the
+/// scientific-notation branch inserts it when missing. This is the JIT-pinned
+/// behavior (`proptest_host_arrays` BUG-1 / `bug1_show_double_scientific_decimal`) —
+/// the tree-walker used to carry its own copy that predated that fix and
+/// showed `"1e10"`, a real (if latent — no known corpus/suite fixture ever hit
+/// it) oracle/JIT divergence this shared function closes.
+pub fn haskell_show_double(d: f64) -> String {
+    if d.is_nan() {
+        return "NaN".to_string();
+    }
+    if d.is_infinite() {
+        return if d > 0.0 { "Infinity" } else { "-Infinity" }.to_string();
+    }
+    if d == 0.0 {
+        return if d.is_sign_negative() { "-0.0" } else { "0.0" }.to_string();
+    }
+    let abs = d.abs();
+    if (0.1..1.0e7).contains(&abs) {
+        let s = d.to_string();
+        if s.contains('.') {
+            s
+        } else {
+            format!("{}.0", s)
+        }
+    } else {
+        // Scientific notation. Haskell's `show` mantissa always carries a
+        // decimal point ("1.0e10", "5.0e-324"); Rust's {:e} omits it for
+        // integral mantissas ("1e10"). Insert ".0" before the exponent when
+        // missing.
+        let s = format!("{:e}", d);
+        match s.find('e') {
+            Some(epos) if !s[..epos].contains('.') => {
+                format!("{}.0{}", &s[..epos], &s[epos..])
+            }
+            _ => s,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -80,5 +180,67 @@ mod tests {
         // High-bit-set mantissa must be treated as unsigned (not negative).
         assert_eq!(encode_double_word(1u64 << 63, 0), 2f64.powi(63));
         assert_eq!(encode_double_word(3, 4), 48.0);
+    }
+
+    #[test]
+    fn decode_float_int_basic() {
+        assert_eq!(decode_float_int(1.0), (8388608, -23));
+        assert_eq!(decode_float_int(3.0), (12582912, -22));
+        assert_eq!(decode_float_int(16777216.0), (8388608, 1));
+        assert_eq!(decode_float_int(-3.0), (-12582912, -22));
+        assert_eq!(decode_float_int(0.0), (0, 0));
+    }
+
+    #[test]
+    fn decode_float_int_subnormal() {
+        // Raw bits 0x0000_0002: a denormal with a trailing zero bit, which a
+        // trailing-zero-stripping reduction would collapse to (1, -148) —
+        // GHC's decodeFloat_Int# does not perform that reduction.
+        let f = f32::from_bits(2);
+        assert_eq!(decode_float_int(f), (2, -149));
+    }
+
+    #[test]
+    fn decode_double_int64_basic() {
+        assert_eq!(decode_double_int64(1.0), (4503599627370496, -52));
+        assert_eq!(decode_double_int64(3.0), (6755399441055744, -51));
+        assert_eq!(
+            decode_double_int64(9007199254740992.0),
+            (4503599627370496, 1)
+        );
+        assert_eq!(decode_double_int64(-3.0), (-6755399441055744, -51));
+        assert_eq!(decode_double_int64(0.0), (0, 0));
+    }
+
+    #[test]
+    fn decode_double_int64_subnormal() {
+        // Raw bits 0x0000_0000_0000_0002: same trailing-zero-not-stripped
+        // shape as the float case above.
+        let d = f64::from_bits(2);
+        assert_eq!(decode_double_int64(d), (2, -1074));
+    }
+
+    #[test]
+    fn haskell_show_double_decimal_range() {
+        assert_eq!(haskell_show_double(1.0), "1.0");
+        assert_eq!(haskell_show_double(-1.0), "-1.0");
+        assert_eq!(haskell_show_double(0.0), "0.0");
+        assert_eq!(haskell_show_double(-0.0), "-0.0");
+        assert_eq!(haskell_show_double(f64::NAN), "NaN");
+        assert_eq!(haskell_show_double(f64::INFINITY), "Infinity");
+        assert_eq!(haskell_show_double(f64::NEG_INFINITY), "-Infinity");
+    }
+
+    /// BUG-1 (`proptest_host_arrays::bug1_show_double_scientific_decimal`):
+    /// Haskell's `show` mantissa in scientific notation always carries a
+    /// decimal point, even when Rust's `{:e}` would omit it for an integral
+    /// mantissa.
+    #[test]
+    fn haskell_show_double_scientific_always_has_decimal_point() {
+        assert_eq!(haskell_show_double(1e10), "1.0e10");
+        assert_eq!(haskell_show_double(-1e10), "-1.0e10");
+        assert_eq!(haskell_show_double(f64::from_bits(1)), "5.0e-324");
+        assert_eq!(haskell_show_double(2e8), "2.0e8");
+        assert_eq!(haskell_show_double(1e100), "1.0e100");
     }
 }

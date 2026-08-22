@@ -458,80 +458,27 @@ pub extern "C" fn runtime_cas_boxed_array(
 /// Decode a Double into its Int64 mantissa (significand).
 /// GHC's `decodeDouble_Int64#` returns (# mantissa, exponent #).
 pub extern "C" fn runtime_decode_double_mantissa(bits: i64) -> i64 {
-    let (man, _) = decode_double_int64(f64::from_bits(bits as u64));
+    let (man, _) = tidepool_bignum::decode_double_int64(f64::from_bits(bits as u64));
     man
 }
 
 /// Decode a Double into its Int exponent.
 pub extern "C" fn runtime_decode_double_exponent(bits: i64) -> i64 {
-    let (_, exp) = decode_double_int64(f64::from_bits(bits as u64));
+    let (_, exp) = tidepool_bignum::decode_double_int64(f64::from_bits(bits as u64));
     exp
-}
-
-/// Shared implementation matching GHC's `decodeDouble_Int64#` semantics.
-/// Returns (mantissa, exponent) such that mantissa * 2^exponent == d, in
-/// GHC's CANONICAL form: for a normal finite d, 2^52 <= |mantissa| < 2^53
-/// (the raw 52-bit fraction field plus the implicit leading 1 bit, NOT
-/// reduced by trailing zeros — GHC's own `decodeDouble_Int64#` does not
-/// perform that reduction).
-fn decode_double_int64(d: f64) -> (i64, i64) {
-    if d == 0.0 || d.is_nan() {
-        return (0, 0);
-    }
-    if d.is_infinite() {
-        return (if d > 0.0 { 1 } else { -1 }, 0);
-    }
-    let bits = d.to_bits();
-    let sign: i64 = if bits >> 63 == 0 { 1 } else { -1 };
-    let raw_exp = ((bits >> 52) & 0x7ff) as i32;
-    let raw_man = (bits & 0x000f_ffff_ffff_ffff) as i64;
-    let (man, exp) = if raw_exp == 0 {
-        // subnormal
-        (raw_man, 1 - 1023 - 52)
-    } else {
-        // normal: implicit leading 1
-        (raw_man | (1i64 << 52), raw_exp - 1023 - 52)
-    };
-    (sign * man, exp as i64)
 }
 
 /// Decode a Float into its Int mantissa (significand).
 /// GHC's `decodeFloat_Int#` returns (# mantissa, exponent #).
 pub extern "C" fn runtime_decode_float_mantissa(bits: i64) -> i64 {
-    let (man, _) = decode_float_int(f32::from_bits(bits as u32));
+    let (man, _) = tidepool_bignum::decode_float_int(f32::from_bits(bits as u32));
     man
 }
 
 /// Decode a Float into its Int exponent.
 pub extern "C" fn runtime_decode_float_exponent(bits: i64) -> i64 {
-    let (_, exp) = decode_float_int(f32::from_bits(bits as u32));
+    let (_, exp) = tidepool_bignum::decode_float_int(f32::from_bits(bits as u32));
     exp
-}
-
-/// Shared implementation matching GHC's `decodeFloat_Int#` semantics. Same
-/// shape as `decode_double_int64`, but over Float's own IEEE754 single
-/// layout (8-bit exponent field / 23-bit explicit mantissa, bias 127) — NOT
-/// reusable via widening to Double first, which would decode into Double's
-/// wider mantissa/exponent and give a wrong answer for Float.
-fn decode_float_int(f: f32) -> (i64, i64) {
-    if f == 0.0 || f.is_nan() {
-        return (0, 0);
-    }
-    if f.is_infinite() {
-        return (if f > 0.0 { 1 } else { -1 }, 0);
-    }
-    let bits = f.to_bits();
-    let sign: i64 = if bits >> 31 == 0 { 1 } else { -1 };
-    let raw_exp = ((bits >> 23) & 0xff) as i32;
-    let raw_man = (bits & 0x007f_ffff) as i64;
-    let (man, exp) = if raw_exp == 0 {
-        // subnormal
-        (raw_man, 1 - 127 - 23)
-    } else {
-        // normal: implicit leading 1
-        (raw_man | (1i64 << 23), raw_exp - 127 - 23)
-    };
-    (sign * man, exp as i64)
 }
 
 /// strlen: count bytes until null terminator.
@@ -693,7 +640,7 @@ pub extern "C" fn runtime_word_encode_double(mantissa: i64, exp: i64) -> i64 {
 /// The CString is leaked (small bounded strings, acceptable).
 pub extern "C" fn runtime_show_double_addr(bits: i64) -> i64 {
     let d = f64::from_bits(bits as u64);
-    let s = haskell_show_double(d);
+    let s = tidepool_bignum::haskell_show_double(d);
     let c_str = match std::ffi::CString::new(s) {
         Ok(c) => c,
         Err(_) => {
@@ -713,7 +660,7 @@ pub extern "C" fn runtime_show_double_addr(bits: i64) -> i64 {
 /// are added here. Leaked CString, same contract as `runtime_show_double_addr`.
 pub extern "C" fn runtime_show_signed_double_addr(prec: i64, bits: i64) -> i64 {
     let d = f64::from_bits(bits as u64);
-    let body = haskell_show_double(d);
+    let body = tidepool_bignum::haskell_show_double(d);
     // Match `showSignedFloat` EXACTLY: it parenthesizes on `x < 0` (not "renders
     // with a minus"). `-0.0 < 0` is False (IEEE), so GHC shows `Just -0.0`
     // WITHOUT parens; NaN (`NaN < 0` False) and +Inf never parenthesize; only
@@ -731,42 +678,6 @@ pub extern "C" fn runtime_show_signed_double_addr(prec: i64, bits: i64) -> i64 {
         }
     };
     c_str.into_raw() as i64
-}
-
-/// Format a Double matching Haskell's `show` output.
-/// Decimal notation for 0.1 <= |x| < 1e7, scientific notation otherwise.
-/// Always includes a decimal point.
-fn haskell_show_double(d: f64) -> String {
-    if d.is_nan() {
-        return "NaN".to_string();
-    }
-    if d.is_infinite() {
-        return if d > 0.0 { "Infinity" } else { "-Infinity" }.to_string();
-    }
-    if d == 0.0 {
-        return if d.is_sign_negative() { "-0.0" } else { "0.0" }.to_string();
-    }
-    let abs = d.abs();
-    if (0.1..1.0e7).contains(&abs) {
-        let s = d.to_string();
-        if s.contains('.') {
-            s
-        } else {
-            format!("{}.0", s)
-        }
-    } else {
-        // Scientific notation. Haskell's `show` mantissa always carries a
-        // decimal point ("1.0e10", "5.0e-324"); Rust's {:e} omits it for
-        // integral mantissas ("1e10"). Insert ".0" before the exponent when
-        // missing. (proptest_host_arrays BUG-1)
-        let s = format!("{:e}", d);
-        match s.find('e') {
-            Some(epos) if !s[..epos].contains('.') => {
-                format!("{}.0{}", &s[..epos], &s[epos..])
-            }
-            _ => s,
-        }
-    }
 }
 
 // --- Double math runtime functions (libm wrappers) ---

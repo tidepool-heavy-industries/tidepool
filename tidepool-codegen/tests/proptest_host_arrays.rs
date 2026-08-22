@@ -1120,12 +1120,13 @@ proptest! {
 }
 
 // ---------------------------------------------------------------------------
-// BUG-1 regression: haskell_show_double (host_fns/primops.rs) formats |x| >= 1e7 (and
-// |x| < 0.1) via Rust `format!("{:e}", d)`, which drops the mantissa decimal
-// point (e.g. "1e10"). Haskell's `show (1e10 :: Double)` is "1.0e10" — the
-// mantissa always carries a decimal point. Fixed by inserting ".0" before the
-// exponent when `{:e}` omits it; the shrunk counterexample (bits = 1) is
-// pinned in tests/proptest_host_arrays.proptest-regressions.
+// BUG-1 regression: haskell_show_double (now tidepool_bignum::haskell_show_double,
+// the shared oracle/JIT numeric policy) formats |x| >= 1e7 (and |x| < 0.1) via
+// Rust `format!("{:e}", d)`, which drops the mantissa decimal point (e.g.
+// "1e10"). Haskell's `show (1e10 :: Double)` is "1.0e10" — the mantissa always
+// carries a decimal point. Fixed by inserting ".0" before the exponent when
+// `{:e}` omits it; the shrunk counterexample (bits = 1) is pinned in
+// tests/proptest_host_arrays.proptest-regressions.
 // ---------------------------------------------------------------------------
 
 proptest! {
