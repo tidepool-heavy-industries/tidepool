@@ -1,8 +1,73 @@
 # Turn latency: state injection for the outer render/loop compile
 
-**Status: designed, not started.** Narrow-first per operator decision
+**Status: implementing (2026-08-22).** Narrow-first per operator decision
 (2026-08-20): prove the mechanism on the one compile that dominates turn wall
 time; generalize the memo keying later if it earns it.
+
+## Drift note (implementation start, 2026-08-22)
+
+Deltas found between this doc and the current code, before any behavior
+change landed:
+
+1. **The outer render/loop compile has zero session-plane wiring today.**
+   `SelfHarnessDriver::compile_cycle_entry` calls `engine::compile_turns` →
+   `tidepool_runtime::artifacts::compile_targets`, which never sets
+   `--session-root`/`--inject-val`/`--session-bind` on its `ExtractCmd` — the
+   state/operator-msg splice is pure source text, exactly as the Problem
+   section says, but there was no prior partial wiring to build on.
+2. **`--session-root` alone reroutes `tidepool-extract-bin`'s dispatch away
+   from the multi-target path.** `Main.hs`'s `main` sends `isSessionMode args
+   -> processSessionFile` ahead of the plain `processFile` (multi-target)
+   branch, and `processSessionFile` only ever compiles ONE target
+   (`argTarget`, defaulting to `__result`) — it has no `--targets` handling
+   at all. The fused compile needs BOTH targets (`result` +
+   `__selfHarnessLoopEntry`) in one spawn, so turning on `--session-root`
+   unmodified would silently drop the loop entry. Fix (in scope, not a new
+   crate boundary): reorder `main`'s guards so `not (null argTargets)` wins
+   over `isSessionMode`, and make `processFile` itself session-scope-aware
+   (`runPipelineSession (if isSessionMode args then Just (scopeFromArgs args)
+   else Nothing)` in place of the unconditional `runPipeline`). Verified safe
+   for every existing non-session multi-target caller: `runPipelineSession
+   Nothing`/an inert scope is byte-identical to `normalVariant`
+   (`runPipelineSession`'s own doc), and no existing caller sets
+   `--session-root` alongside `--targets`.
+3. **The value-plane "tenure a session Val binding" mechanism already exists
+   end to end** (`tidepool_runtime::session::turn::compile_session_turn`'s
+   `--session-bind` path + `ResidentSession::run_bind`, which compiles, runs,
+   tenures, AND registers the `BindingTable` entry in one call) — no new
+   Rust/Haskell machinery needed for that half. The one gap: the harness
+   driver's outer session (`OuterSession { sid, .. }`) is a bare `SessionId`
+   today with no prior value-plane use, so `run_bind` had never been called
+   against it.
+4. **Reusing `Tidepool.Session.Val.G<g>`'s existing naming scheme at a
+   reserved, non-rotating `Generation(0)`** — rather than inventing a new
+   module-kind/name shape (the plan's illustrative
+   `Tidepool.Session.Val.HarnessCtx`) — turned out sufficient and needs zero
+   Haskell-side naming changes: `PersistentSession::new` starts `val_gen` at
+   `Generation(0)` ("the empty session — no Lib/Val module exists yet"), a
+   real bind always mints `val_gen().next()` (>= 1), and `set_val_gen`'s
+   monotonic-max rule means rebinding at a passed-in `gen: Generation(0)`
+   every cycle never advances the counter — so gen 0 can never collide with a
+   real future bind on this session. One module (`Tidepool.Session.Val.G0`)
+   carries BOTH crossings as a single `(Text, Text)` tuple binder
+   (`__harnessCtx`), rather than two separately-bound names, since
+   `ResidentSession` exposes only the single-binder `run_bind` (no
+   multi-binder/projected wrapper) and adding one was judged out of the
+   narrow scope this pass is locked to.
+5. **Scope stays narrow at the driver layer too**: only
+   `compile_cycle_entry` (the production fused path `run_one_cycle` actually
+   calls) gets the injection treatment. The older unfused paths
+   (`compile_outer`/`render_framing`, and `run_loop_fragment_inner`'s
+   `precompiled: None` branch — doc'd as "a direct fragment API a test drives
+   in isolation, never called from `run_one_cycle`") keep the original
+   literal-splice `state_cross::state_in`/`operator_msg_in` unchanged; new
+   sibling functions carry the injected-Text shape for the one path in scope.
+6. **The harness-ctx refresh's own compile is intentionally never
+   memo-cacheable** — a `--session-bind` invocation with fresh `(Text, Text)`
+   literal content every cycle is hazard (b) in `plans/compile-memo.md` by
+   construction. It is the plan's own "smaller of the two wins" cost: a
+   two-import (`Data.Text` only) tuple-literal compile, orders of magnitude
+   cheaper than the ~51-module fused outer module it unblocks.
 
 ## Problem
 
