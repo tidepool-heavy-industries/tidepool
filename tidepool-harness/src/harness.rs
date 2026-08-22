@@ -388,6 +388,23 @@ fn truncate_ghc_error(msg: &str) -> String {
 const TURN_ANCHOR: &str = "Expr.hs";
 const TURN_LABEL: &str = "<turn>";
 
+/// Display label [`render_answer_compile_error`] renders a remapped
+/// `template_answer_turn` diagnostic under — same `TURN_ANCHOR` (its preamble
+/// is the same `tidepool_mcp::build_preamble`-derived `module Expr where`),
+/// its own label so an answerer's corrective retry reads distinctly from an
+/// ordinary turn's.
+const ANSWER_LABEL: &str = "<answer>";
+
+/// [`template_answer_turn`](engine::template_answer_turn)'s user-code marker
+/// — the text immediately preceding the embedded answer block, non-delegate
+/// form (`cfg.delegate_wrap == false`). Byte-identical to that function's own
+/// `"result = let {\n __b =\n"` literal.
+const ANSWER_MARKER: &str = "result = let {\n __b =\n";
+
+/// As [`ANSWER_MARKER`], for `cfg.delegate_wrap == true` — byte-identical to
+/// `template_answer_turn`'s `"result = runDelegate (let {\n __b =\n"` literal.
+const ANSWER_MARKER_DELEGATE: &str = "result = runDelegate (let {\n __b =\n";
+
 /// The EXPR template's user-code marker — byte-identical to
 /// `tidepool-mcp/src/eval_prep.rs`'s `format_error_with_source::MARKER`,
 /// since `engine::expr_turn_template` is built through the SAME
@@ -525,6 +542,60 @@ fn pick_render_opts<'a>(
         }
     }
     None
+}
+
+/// As [`render_compile_error`], for a
+/// [`template_answer_turn`](engine::template_answer_turn) compile — the
+/// child-answer compile path (`Harness::drive_answerer_to_value`'s corrective
+/// retry). `body` is the answer block's own text (the `code` param
+/// `template_answer_turn` was called with — post `engine::split_imports`);
+/// `src` is that same call's full generated module, so the marker this
+/// function searches for is guaranteed present (this is the ONE template that
+/// produced `src`, unlike `render_compile_error`'s EXPR-then-BIND guesswork
+/// over two candidates GHC's verdict doesn't disambiguate) — the `None` arm
+/// below is unreachable in practice, kept only so a future template-shape
+/// change fails safe (raw template-space span) rather than panicking.
+fn render_answer_compile_error(
+    e: &tidepool_runtime::CompileError,
+    body: &str,
+    src: &str,
+    delegate_wrap: bool,
+) -> String {
+    let tidepool_runtime::CompileError::Diagnostics(diags) = e else {
+        return e.to_string();
+    };
+    let marker = if delegate_wrap {
+        ANSWER_MARKER_DELEGATE
+    } else {
+        ANSWER_MARKER
+    };
+    let content_lines = engine::content_line_count(body);
+    if let Some((offset, (start, end))) = candidate_window(src, marker, content_lines) {
+        let opts = tidepool_runtime::diag::RenderOpts {
+            anchor: TURN_ANCHOR,
+            label: ANSWER_LABEL,
+            user_lines: Some((start, end)),
+            line_offset: offset,
+            col_indent: 0,
+            drop_foreign_gen_warnings_except: None,
+            source: src,
+        };
+        let mut out = format!("GHC error ({} diagnostic(s)):\n", diags.len());
+        out.push_str(&tidepool_runtime::diag::render_diagnostics(diags, &opts));
+        return out;
+    }
+    let mut out = format!("GHC error ({} diagnostic(s)):", diags.len());
+    for d in diags {
+        out.push('\n');
+        match &d.span {
+            Some(s) => out.push_str(&format!(
+                "{}:{}:{}: {}: {}",
+                s.file, s.start_line, s.start_col, d.severity, d.message
+            )),
+            None => out.push_str(&format!("{}: {}", d.severity, d.message)),
+        }
+    }
+    out
 }
 
 /// The orchestrator. Cloneable-cheap? No — it owns the tree + sessions, so it
@@ -3347,7 +3418,7 @@ impl Harness {
     /// `EngineConfig::turn_target` takes elsewhere (`run_block`'s own
     /// `contract.ty`/`contract.imports`) — it instantiates this answerer's
     /// `Finalize` row entry at the hole's real answer type instead of the
-    /// config's bare default `Finalize NoAnswer`, so a block that reaches for
+    /// config's bare default `Finalize Void`, so a block that reaches for
     /// `finalize @T` (the idiom the model already uses everywhere else, not
     /// just the `resume` helper this function also offers) compiles against a
     /// row that actually admits `T`. `None` keeps the config's own default
@@ -3463,6 +3534,9 @@ impl Harness {
             let cfg_bin = compile_cfg.extract_bin.clone();
             let include = compile_target.include.clone();
             let answerer_id = answerer.0;
+            // Kept for the error path below (`spawn_blocking`'s `move`
+            // closure takes ownership of `src`).
+            let src_for_err = src.clone();
             let compiled = tokio::task::spawn_blocking(move || {
                 engine::compile_turn(
                     &cfg_bin,
@@ -3483,15 +3557,19 @@ impl Harness {
                     // answerer. The continuation is NEVER consumed by a bad
                     // attempt. `CompileError::Diagnostics`' own `Display` is
                     // only a count ("Haskell compilation failed (N
-                    // diagnostic(s))") — `render_compile_error` renders the
-                    // full per-diagnostic text instead. This call site has no
-                    // `run_turn`-shaped candidate window of its own (this
-                    // compiles `template_answer_turn`'s module, not
-                    // `run_turn`'s), so remapping is skipped (empty
-                    // block/sources) and diagnostics render at their raw
-                    // template-space span — still GHC's own text, never a
-                    // summary.
-                    let err = render_compile_error(&e, "", "", "");
+                    // diagnostic(s))") — `render_answer_compile_error` renders
+                    // the full per-diagnostic text instead, with GHC's
+                    // coordinates remapped from `src` (this call's own
+                    // `template_answer_turn` module — no EXPR/BIND ambiguity,
+                    // there is only one candidate) to `body`'s line space, so
+                    // the answerer never sees a raw `/tmp/…/Expr.hs` template
+                    // path.
+                    let err = render_answer_compile_error(
+                        &e,
+                        &body,
+                        &src_for_err,
+                        compile_cfg.delegate_wrap,
+                    );
                     self.log_answer_attempt(
                         target,
                         &self
@@ -5031,6 +5109,103 @@ mod tests {
         let out = render_compile_error(&err, "garbage", &expr_source, &bind_source);
         assert!(!out.contains("__b"), "{out}");
         assert!(out.contains("Ambiguous type variable"), "{out}");
+    }
+
+    /// A synthetic `template_answer_turn`-shaped source: `preamble_lines`
+    /// filler lines, the real answer marker (delegate or non-delegate), then
+    /// one line per `content_lines` standing in for the answerer's own block.
+    fn fake_answer_source(preamble_lines: usize, content_lines: usize, delegate: bool) -> String {
+        let mut s = "-- preamble\n".repeat(preamble_lines);
+        s.push_str(if delegate {
+            ANSWER_MARKER_DELEGATE
+        } else {
+            ANSWER_MARKER
+        });
+        for i in 0..content_lines {
+            s.push_str(&format!("answerLine{i}\n"));
+        }
+        s.push_str(if delegate {
+            " } in __b)\n"
+        } else {
+            " } in __b\n"
+        });
+        s
+    }
+
+    /// The bug this item fixes: a live model received `GHC error:
+    /// /tmp/.tmpe0oty7/Expr.hs:29:18: error: ...` in its corrective prompt — a
+    /// path into a template it has never seen, unmappable to its own code.
+    /// `render_answer_compile_error` must remap the coordinate to the
+    /// answerer's own `<answer>` line space and never surface the raw
+    /// generated-template tempdir path.
+    #[test]
+    fn render_answer_compile_error_remaps_coordinates_and_drops_template_path() {
+        let src = fake_answer_source(0, 1, false);
+        // ANSWER_MARKER has 2 newlines, so the first answer line lands on raw
+        // line 3 — same arithmetic as EXPR_MARKER's, different literal.
+        let err = tidepool_runtime::CompileError::Diagnostics(vec![diag(
+            "/tmp/.tmpe0oty7/Expr.hs",
+            3,
+            18,
+            "Couldn't match expected type",
+        )]);
+        let out = render_answer_compile_error(&err, "resume \"nope\"", &src, false);
+        assert!(out.contains("<answer>:1:"), "{out}");
+        assert!(
+            !out.contains("/tmp/"),
+            "template tempdir path leaked: {out}"
+        );
+        assert!(
+            !out.contains("Expr.hs:3"),
+            "raw template line leaked: {out}"
+        );
+    }
+
+    /// A multi-line answer block failing on its Nth line reports N — mirrors
+    /// [`render_compile_error_remaps_nth_line_of_user_code`].
+    #[test]
+    fn render_answer_compile_error_remaps_nth_line() {
+        let src = fake_answer_source(0, 3, false);
+        // Raw line 5 = offset(2) + 3rd content line.
+        let err = tidepool_runtime::CompileError::Diagnostics(vec![diag(
+            "/tmp/.tmpXYZ/Expr.hs",
+            5,
+            1,
+            "type error on the third line",
+        )]);
+        let body = "answerLine0\nanswerLine1\nanswerLine2";
+        let out = render_answer_compile_error(&err, body, &src, false);
+        assert!(out.contains("<answer>:3:"), "{out}");
+    }
+
+    /// The delegate-wrap answerer uses its own marker
+    /// (`result = runDelegate (let { …`) — remapping must land on the right
+    /// line against ITS OWN marker, not silently mis-offset by routing
+    /// through the non-delegate one.
+    #[test]
+    fn render_answer_compile_error_delegate_wrap_marker() {
+        let src = fake_answer_source(0, 1, true);
+        let offset = candidate_window(&src, ANSWER_MARKER_DELEGATE, 1).unwrap().0;
+        let raw_line = (offset + 1) as u32;
+        let err = tidepool_runtime::CompileError::Diagnostics(vec![diag(
+            "/tmp/.tmpABC/Expr.hs",
+            raw_line,
+            1,
+            "delegate-wrapped mismatch",
+        )]);
+        let out = render_answer_compile_error(&err, "x", &src, true);
+        assert!(out.contains("<answer>:1:"), "{out}");
+        assert!(!out.contains("/tmp/"), "{out}");
+    }
+
+    /// A non-`Diagnostics` variant carries no GHC coordinates to remap —
+    /// renders verbatim via `Display`, same as `render_compile_error`'s own
+    /// non-Diagnostics case.
+    #[test]
+    fn render_answer_compile_error_non_diagnostics_variant_renders_verbatim() {
+        let err = tidepool_runtime::CompileError::IOTypeDetected;
+        let out = render_answer_compile_error(&err, "x", "", false);
+        assert_eq!(out, err.to_string());
     }
 
     /// A `Harness` built without `Harness::new`/`Harness::force` (both need a

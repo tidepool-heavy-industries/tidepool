@@ -384,11 +384,11 @@ fn outcome_label(outcome: &TurnOutcome) -> &'static str {
 /// Pin the node's answer type to `Int` before its first turn.
 ///
 /// `Finalize` is type-indexed and instantiated IN THE ROW, so a node with no
-/// answer contract compiles against `Finalize NoAnswer` — an uninhabited type
+/// answer contract compiles against `Finalize Void` — an uninhabited type
 /// that admits no answer at all. Every block this bench replays is
 /// `finalize @Int …`, so without this the row rejects it before any of the
 /// stages being measured runs (`'Finalize Int' is not a member of
-/// '[AskUser, Fork, ReadState, Finalize NoAnswer]'`). `Int` needs no author module, so
+/// '[AskUser, Fork, ReadState, Finalize Void]'`). `Int` needs no author module, so
 /// the contract carries no imports.
 fn pin_int_answer(harness: &Harness, node: NodeId) {
     harness.set_answer_contract(

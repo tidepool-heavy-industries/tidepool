@@ -6,7 +6,7 @@
 -- tidepool-mcp/CLAUDE.md's stable-effects-core section.
 module Tidepool.Effects (module Tidepool.Effects.Core, M) where
 import Tidepool.Effects.Core
-import Control.Monad.Freer.Internal (Eff)
+import Control.Monad.Freer hiding (run)
 import Tidepool.Prelude hiding (error)
 
 type M = Eff '[Console, KV, Fs, Http, Exec, Lsp, Llm, Git, Time, Ask, RunLLMTurn, Fork]

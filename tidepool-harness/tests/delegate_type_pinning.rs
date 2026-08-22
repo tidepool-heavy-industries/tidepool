@@ -172,7 +172,7 @@ fn plain_finalize_still_compiles_under_the_wrap() {
 /// through, not `template_turn_for`'s expr/bind path above) against a REAL
 /// `Finalize` pin, mirroring what `drive_answerer_to_value` now does: resolve
 /// `turn_target` from the contract first (so `Finalize` is instantiated at
-/// `finalize_ty`, never the bare default `Finalize NoAnswer`), then template
+/// `finalize_ty`, never the bare default `Finalize Void`), then template
 /// and compile the raw (non-`toJSON`'d) answerer module against it.
 ///
 /// `code_imports` is newline-separated MODULE NAMES spliced into the compiled
@@ -228,7 +228,7 @@ fn compile_delegating_answerer_turn(
 /// `LayerProposal`/`OperatorSteering` types are defined only in the off-limits
 /// `harness-dogfooding/recursive-companion/Harness.hs` fixture — and must
 /// compile against the narrow row with `Finalize` genuinely pinned to
-/// `Decision`, not the bare default `NoAnswer` (the contract-pin half of the
+/// `Decision`, not the bare default `Void` (the contract-pin half of the
 /// bug: `template_answer_turn` never called `turn_target` with the contract
 /// at all before this fix).
 #[test]

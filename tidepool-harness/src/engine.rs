@@ -1692,7 +1692,7 @@ impl EngineConfig {
     }
 
     /// The promoted-list effect-stack string (`'[Console, KV, …, Finalize
-    /// NoAnswer]`) for `template_haskell` at the config's default row — every
+    /// Void]`) for `template_haskell` at the config's default row — every
     /// decl including Ask, each parameterized effect applied to its
     /// [`EffectDecl::default_row_args`]. Routes through
     /// [`tidepool_mcp::build_effect_stack_type`] (not a bare join of
@@ -1730,7 +1730,7 @@ impl EngineConfig {
     /// the same answer type are free and two answer types can never be
     /// served each other's module.
     ///
-    /// `None` keeps the config's own default row (`Finalize NoAnswer`) and
+    /// `None` keeps the config's own default row (`Finalize Void`) and
     /// `include` unchanged — the shape every turn that isn't answering a
     /// typed hole compiles against.
     ///
@@ -1931,11 +1931,11 @@ pub fn template_turn(
 /// decls, not the Agent's. `stack` must be rendered from the SAME `decls` —
 /// see [`EngineConfig::turn_target`].
 ///
-/// `stack` pinned to a real (non-`NoAnswer`) `Finalize T` entry routes
+/// `stack` pinned to a real (non-`Void`) `Finalize T` entry routes
 /// through [`tidepool_mcp::template_haskell_anchored`] instead of the plain
 /// [`tidepool_mcp::template_haskell`] — see [`finalize_pin_active`]'s doc for
 /// why, and `template_haskell_anchored`'s doc (`eval_prep.rs`) for the
-/// mechanism. Every other row (no `Finalize` entry, or the `NoAnswer`
+/// mechanism. Every other row (no `Finalize` entry, or the `Void`
 /// default) compiles exactly as before.
 ///
 /// `delegate_wrap`: PRD 21 C5 — when `true`, this turn's preamble routes
@@ -2128,7 +2128,7 @@ pub fn template_turn_for_fused(
 
 /// Whether `stack` (the promoted row string a turn compiles against, e.g.
 /// `'[AskUser, Finalize Decision]`) pins `Finalize` to a REAL author type —
-/// `false` for the uninhabited default `Finalize NoAnswer` (a turn not
+/// `false` for the uninhabited default `Finalize Void` (a turn not
 /// currently answering a typed hole — every non-answerer turn, and an
 /// answerer turn before its first `AnswerContract` is set) or a row with no
 /// `Finalize` entry at all (the general Agent stack never carries one).
@@ -2139,7 +2139,7 @@ pub fn template_turn_for_fused(
 /// in hand were it needed for anything else, so there is nothing to recover
 /// from this string, only whether to flip the anchor on.
 fn finalize_pin_active(stack: &str) -> bool {
-    stack.contains("Finalize ") && !stack.contains("Finalize NoAnswer")
+    stack.contains("Finalize ") && !stack.contains("Finalize Void")
 }
 
 /// Wrap an ANSWERER block as a module whose `result` returns the RAW value —
@@ -2159,7 +2159,7 @@ fn finalize_pin_active(stack: &str) -> bool {
 /// way `run_block` does, via [`EngineConfig::turn_target`] pinned at the
 /// hole's own answer contract (when it has one), so `Finalize`'s row entry
 /// here can genuinely match a `finalize @T` call the block makes — never the
-/// config's bare default `Finalize NoAnswer` row.
+/// config's bare default `Finalize Void` row.
 ///
 /// `cfg.delegate_wrap` (PRD 21 C5): when `true`, this turn's preamble routes
 /// through [`delegate_aware_preamble`] exactly as [`template_turn_for`]'s
@@ -3547,7 +3547,7 @@ mod tests {
 
     #[test]
     fn finalize_pin_active_false_for_the_noanswer_sentinel() {
-        assert!(!finalize_pin_active("'[AskUser, Finalize NoAnswer]"));
+        assert!(!finalize_pin_active("'[AskUser, Finalize Void]"));
     }
 
     #[test]

@@ -498,7 +498,7 @@ impl TidepoolMcpServerImpl {
                     Phase::Run,
                     "Crash",
                     &format!(
-                        "{} thread crashed (likely SIGILL from exhausted case branch or SIGSEGV from invalid memory access). Set RUST_LOG=debug for JIT diagnostics on stderr.{}",
+                        "{} thread crashed (likely SIGILL from exhausted case branch or SIGSEGV from invalid memory access). This is a JIT-level crash, not a compile error — narrow down which expression triggered it and retry with simpler code.{}",
                         op, crash_info
                     ),
                     None,

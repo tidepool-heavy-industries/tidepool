@@ -206,6 +206,13 @@ pub fn effects_core_module_source(vocab_effects: &[EffectDecl]) -> String {
     out.push_str("module Tidepool.Effects.Core where\n");
     out.push_str("import Tidepool.Prelude hiding (error)\n");
     out.push_str("import Control.Monad.Fail (MonadFail(..))\n");
+    // Canonical `Data.Void.Void` — the uninhabited default `Finalize` answer
+    // type (`finalize_effect_def!`'s `default_row_args ["Void"]`) for a turn
+    // that isn't answering a typed hole. Imported unconditionally (like the
+    // rest of this preamble) rather than gated on `Finalize`'s presence in
+    // `effects`: it's a zero-cost base import, and gating it would need a
+    // vocabulary check this function doesn't otherwise make per-effect.
+    out.push_str("import Data.Void (Void)\n");
     out.push_str("import qualified Tidepool.Data.Text as T\n");
     out.push_str("import qualified Data.Map.Strict as Map\n");
     out.push_str("import qualified Tidepool.Aeson.KeyMap as KM\n");
@@ -1176,8 +1183,9 @@ mod tests {
 
     /// `Finalize` is type-indexed: its GADT head carries `v`, and its row entry
     /// is APPLIED — to the hole's answer type when the compile supplies one, to
-    /// the uninhabited `NoAnswer` when it doesn't. `Member (Finalize T)` is then
-    /// the whole pin: no shim, no hiding, no per-compile symbol manipulation.
+    /// the uninhabited canonical `Void` when it doesn't. `Member (Finalize T)`
+    /// is then the whole pin: no shim, no hiding, no per-compile symbol
+    /// manipulation.
     /// The GADT itself lives in the STABLE Core text — only `type M` (the
     /// shim) instantiates it per row.
     #[test]
@@ -1194,7 +1202,7 @@ mod tests {
             core.contains("FinalizeWith :: Int -> v -> Finalize v a"),
             "{core}"
         );
-        assert!(core.contains("data NoAnswer"), "{core}");
+        assert!(core.contains("import Data.Void (Void)"), "{core}");
         assert!(
             core.contains(
                 "finalize :: forall v a effs. Member (Finalize v) effs => v -> Eff effs a"
@@ -1208,7 +1216,7 @@ mod tests {
         // that isn't answering a typed hole simply cannot finalize.
         let shim = effects_shim_module_source(&decls, &crate::RowArgs::default());
         assert!(
-            shim.contains("type M = Eff '[AskUser, Finalize NoAnswer]"),
+            shim.contains("type M = Eff '[AskUser, Finalize Void]"),
             "{shim}"
         );
 

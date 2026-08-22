@@ -5890,7 +5890,7 @@ mod tests {
     #[test]
     fn outer_template_is_unpaginated() {
         let src = super::outer_template(
-            "'[RunLLMTurn, AskUser, Console, Finalize NoAnswer]",
+            "'[RunLLMTurn, AskUser, Console, Finalize Void]",
             "pure (Loaded.render __selfHarnessState)",
             "qualified Harness as Loaded",
             "",

@@ -60,7 +60,7 @@ fn answerer_cfg() -> EngineConfig {
 /// Compile one answerer turn. `finalize_ty` is the hole's answer type when the
 /// turn is answering a typed hole — the row is instantiated at it
 /// (`Finalize <ty>`, importing `imports`); `None` compiles at the config's
-/// default row (`Finalize NoAnswer`).
+/// default row (`Finalize Void`).
 fn compile_turn(
     code: &str,
     imports: &str,
@@ -319,7 +319,7 @@ fn author_module_edit_between_compiles_is_picked_up_by_the_second() {
 // nothing else changed, makes defaulting fire. `template_turn_for` supplies
 // that missing anchor (`__anchor :: P.Show a => a -> a; __anchor = P.id`,
 // additive — it never forces `_r`'s type) only when compiling against a real
-// (non-`NoAnswer`) `Finalize T` row.
+// (non-`Void`) `Finalize T` row.
 
 /// Reuse the KNOWN-VALID `Decision` record literal from [`GOOD_DECISION`]
 /// (rather than re-deriving `Decision`'s field names) as the value plugged
@@ -429,7 +429,7 @@ fn bare_finalize_with_no_annotation_compiles_when_pinned() {
 /// `Decision` (`_r :: Decision`) and reject this compile outright —
 /// `Confidence` is not `Decision` — even though the turn never touches
 /// `finalize`. Compiled
-/// against a `Decision`-pinned row specifically (not `Finalize NoAnswer`) so
+/// against a `Decision`-pinned row specifically (not `Finalize Void`) so
 /// the anchor is actually active for this compile, proving the additive
 /// claim rather than a compile that never exercised it.
 #[test]

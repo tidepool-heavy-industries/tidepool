@@ -57,10 +57,11 @@ pub struct EffectDecl {
     /// the row itself is the constraint, exactly as `State s` works.
     pub type_params: &'static [&'static str],
     /// The row arguments a compile that supplies none falls back to — same
-    /// length as `type_params`, empty when there are none. `Finalize`'s is the
-    /// uninhabited `NoAnswer` it declares in its own `type_defs`: a turn that
-    /// is not answering a typed hole cannot finalize at all, and GHC says so
-    /// by name (`'Finalize Text' is not a member of '[…, Finalize NoAnswer]'`).
+    /// length as `type_params`, empty when there are none. `Finalize`'s is
+    /// canonical `Data.Void.Void` (imported into the generated Core module,
+    /// not declared in its own `type_defs`): a turn that is not answering a
+    /// typed hole cannot finalize at all, and GHC says so by name (`'Finalize
+    /// Text' is not a member of '[…, Finalize Void]'`).
     pub default_row_args: &'static [&'static str],
     /// Do this effect's `helpers` typecheck against ANY row that carries the
     /// `Member <Effect> effs` constraint, rather than only the closed `M`

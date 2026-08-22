@@ -1335,10 +1335,14 @@ macro_rules! finalize_effect_def {
             // (`'Finalize Text' is not a member of '[…, Finalize Decision]'`),
             // not a value that compiles and case-traps after crossing in-heap.
             // The type argument is per-compile (an author type like `Decision`),
-            // supplied through `RowArgs`; `NoAnswer` is the default for a turn
-            // that is not answering a typed hole — uninhabited, so such a turn
-            // simply has no finalize capability, which is the true statement.
-            type_params [v] default_row_args ["NoAnswer"],
+            // supplied through `RowArgs`; canonical `Data.Void`'s `Void` is the
+            // default for a turn that is not answering a typed hole —
+            // uninhabited, so such a turn simply has no finalize capability,
+            // which is the true statement, and it is now spelled with GHC's
+            // own name for "uninhabited type" rather than a bespoke one, so a
+            // wrong-typed-answer error names `Void`, not a marker a model has
+            // never heard of.
+            type_params [v] default_row_args ["Void"],
             prompt_card [
                 "`finalize @T value` — commit the typed answer and end this turn; ",
                 "`value` crosses in-heap to the parent `runLLMTurn` hole.",
@@ -1357,8 +1361,11 @@ macro_rules! finalize_effect_def {
                 "resumes; the harness driver reads the value directly and resolves the ",
                 "parent hole via `run_child`.",
             ],
-            // The uninhabited default answer type (see `type_params` above).
-            type_defs ["data NoAnswer"],
+            // The uninhabited default answer type (see `type_params` above) is
+            // canonical `Data.Void.Void`, imported into the generated Core
+            // module (`eval_prep.rs`'s `effects_core_module_source`) — no
+            // bespoke `data` declaration needed here.
+            type_defs [],
             verbs [
                 { ctor FinalizeWith, method finalize_with,
                   args { site: "Int" as i64, value: "v" as tidepool_eval::value::Value },

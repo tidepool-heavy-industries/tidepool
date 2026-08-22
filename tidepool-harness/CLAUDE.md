@@ -575,7 +575,7 @@ is reused across holes whose types differ), and its turns compile with:
   terminates in `finalize`. (Not an `Eff`-row, `MonoLocalBinds`, or
   implication artifact — a plain `IO` repro fails identically.)
   `template_turn_for` (`engine.rs`) supplies the missing anchor: a turn
-  compiled against a real (non-`NoAnswer`) `Finalize T` row routes through
+  compiled against a real (non-`Void`) `Finalize T` row routes through
   `tidepool_mcp::template_haskell_anchored`, which passes `_r` through a
   generated `__anchor :: P.Show a => a -> a; __anchor = P.id` before
   rendering. It is ADDITIVE — `id` never forces `_r`'s type — so an
@@ -596,8 +596,9 @@ is reused across holes whose types differ), and its turns compile with:
   generated module also imports the contract's author modules — naming
   `Decision` in `type M` needs it in scope THERE, not only in the turn module.
 
-  A turn with no contract compiles at `Finalize NoAnswer` — an uninhabited type
-  declared by `Finalize` itself. Such a turn is not answering a typed hole and
+  A turn with no contract compiles at `Finalize Void` — the canonical
+  `Data.Void` uninhabited type, imported into the generated Core module.
+  Such a turn is not answering a typed hole and
   therefore has no finalize capability at all, which is the true statement, and
   GHC says it by name. Because the row admits exactly one answer type, a
   wrong-typed answer cannot compile — it can never cross in-heap into a
@@ -616,7 +617,7 @@ without the imports the model cannot name the type it is being asked for and
 substitutes one that compiles. A harness that inlines its author types alongside
 `loop` fails the second half — `SelfHarnessDriver::types_in_scope_hint` says so
 in the retry rather than looping to the round cap. A node with no contract
-compiles at `Finalize NoAnswer` and simply cannot finalize. Pinned by
+compiles at `Finalize Void` and simply cannot finalize. Pinned by
 `tests/finalize_type_pinning.rs`.
 
 `askUser` re-prompts by RECURSION on a decode failure (no `Either` — the

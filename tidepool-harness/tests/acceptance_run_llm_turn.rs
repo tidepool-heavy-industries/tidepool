@@ -247,6 +247,23 @@ async fn run_llm_turn_end_to_end_type_retry_and_answer() {
         error.contains("Decision") || error.contains("Int"),
         "the logged rejection must be GHC's verbatim type-mismatch diagnostic, got:\n{error}"
     );
+    // The answerer's own compile (`template_answer_turn`, via
+    // `drive_answerer_to_value`) must remap GHC's coordinates the same way
+    // `run_turn`'s do — never leak the raw generated-template tempdir path
+    // (previously: `GHC error: /tmp/.tmpXXXXXX/Expr.hs:N:C: error: ...`,
+    // a path into a template the model has never seen and cannot map back
+    // to its own `resume (42 :: Int)` attempt).
+    assert!(
+        !error.contains("/tmp/")
+            && !error.contains(std::env::temp_dir().to_string_lossy().as_ref()),
+        "the rejected answer-turn error must not leak a raw template tempdir \
+         path, got:\n{error}"
+    );
+    assert!(
+        error.contains("<answer>"),
+        "the rejected answer-turn error must be remapped under the answerer's \
+         own <answer> label (not a raw Expr.hs template span), got:\n{error}"
+    );
 
     let Event::HoleAnswerAttempt {
         hole: h1,

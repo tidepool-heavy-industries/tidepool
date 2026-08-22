@@ -116,7 +116,7 @@ async fn finalize_hands_up_a_plain_data_value() {
     harness.force(root, Actor::Operator).unwrap();
     // `Finalize` is type-indexed (`Member (Finalize T) effs`): the block below
     // calls `finalize @Int`, so the row this turn compiles against must name
-    // `Finalize Int` — the config's own default row (`Finalize NoAnswer`) is
+    // `Finalize Int` — the config's own default row (`Finalize Void`) is
     // uninhabited by design.
     harness.set_answer_contract(
         root,

@@ -1390,11 +1390,7 @@ FinalizeWith :: Int -> v -> Finalize v a
 
 -- end constructors --
 
--- type_defs (1 items) --
--- type_defs[0] (13 bytes) --
-data NoAnswer
--- end type_defs[0] --
-
+-- type_defs (0 items) --
 -- end type_defs --
 
 -- extra_imports (0 items) --
@@ -1423,8 +1419,8 @@ v
 -- end type_params --
 
 -- default_row_args (1 items) --
--- default_row_args[0] (8 bytes) --
-NoAnswer
+-- default_row_args[0] (4 bytes) --
+Void
 -- end default_row_args[0] --
 
 -- end default_row_args --

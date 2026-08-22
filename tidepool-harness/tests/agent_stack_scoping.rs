@@ -97,7 +97,7 @@ fn compile_against(
 
 /// Like [`compile_against`], but with the row's `Finalize` entry instantiated
 /// at `finalize_ty` — `Finalize` is type-indexed, so a block calling `finalize
-/// @T` needs the row to name `T` (`Finalize NoAnswer`, the default, is
+/// @T` needs the row to name `T` (`Finalize Void`, the default, is
 /// uninhabited by design).
 fn compile_pinned(
     decls: Vec<tidepool_mcp::EffectDecl>,

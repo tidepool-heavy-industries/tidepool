@@ -7,6 +7,7 @@
 module Tidepool.Effects.Core where
 import Tidepool.Prelude hiding (error)
 import Control.Monad.Fail (MonadFail(..))
+import Data.Void (Void)
 import qualified Tidepool.Data.Text as T
 import qualified Data.Map.Strict as Map
 import qualified Tidepool.Aeson.KeyMap as KM
