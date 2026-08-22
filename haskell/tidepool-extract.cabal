@@ -236,6 +236,25 @@ test-suite thought-driver-test
     DeriveTraversable
   ghc-options:      -Wall
 
+-- Generates test/corpus_cbor/oracle.json: the GHC-computed expected value
+-- for every "Corpus" binding, the GATING referee real_core_corpus.rs
+-- (tidepool-codegen) compares the JIT against. Run via regen-corpus.sh
+-- (which also regenerates the CBOR fixtures from the same source) — not a
+-- pass/fail test, but a `test-suite` stanza like the other non-default
+-- extras above so it stays out of a bare `cabal build`; `cabal run
+-- corpus-oracle-gen -- <output-path>` builds and runs it directly.
+-- Deliberately independent of tidepool-extract-internal: this is plain-GHC
+-- execution of "Corpus" itself, not the extractor pipeline, so it costs no
+-- extract compile.
+test-suite corpus-oracle-gen
+  type:             exitcode-stdio-1.0
+  main-is:          GenOracle.hs
+  hs-source-dirs:   test/corpus
+  other-modules:    Corpus
+  build-depends:
+    base >= 4.20 && < 5
+  default-language: GHC2024
+
 test-suite extract-fidelity-test
   type:             exitcode-stdio-1.0
   main-is:          Main.hs
