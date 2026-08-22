@@ -18,12 +18,15 @@
 
 pub mod engine;
 pub mod persistent;
+pub mod registry;
 pub mod render;
 pub mod resident;
 pub mod supervisor;
 pub mod turn;
 
 pub use persistent::{MachineLease, PersistentSession, ScopeRetirement};
+
+pub use registry::{Checkout, CheckoutError, SessionRegistry, SingleSlot, Slot};
 
 pub use engine::{
     extract_ask_request, AbortOutcome, EngineConfig, GateDispatcher, OutputSink, ResumeOutcome,

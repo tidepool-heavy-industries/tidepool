@@ -87,31 +87,12 @@ pub enum PriceClass {
     Frontier,
 }
 
-/// Resident-session registry slot. Generic over the machine handle so this
-/// crate stays free of the JIT dependency — a caller instantiates `M` with
-/// its concrete resident-session type. The stowed-XOR-running discipline
-/// (jit_machine.rs Send rationale) maps onto these variants: a machine is
-/// in exactly one slot, and `Running{holes}` means it is out on a turn
-/// (whatever kind — a fresh run, a resume, or a child run over parked
-/// frames), carrying its parked holes with it.
-#[derive(Debug)]
-pub enum Slot<M> {
-    Idle(M),
-    /// The machine is out on a turn — a fresh run, a resume, or a child run
-    /// over parked frames (one-session plan, Phase 2: with the continuation
-    /// registry there is no special "child window"; a machine with N parked
-    /// holes running one more fragment is the NORMAL state). `holes` are the
-    /// parked holes the session had when it left, carried so reads and
-    /// errors stay truthful while the machine is out, and so the
-    /// panic-safety `Drop` can restore them instead of losing them.
-    Running {
-        holes: Vec<HoleId>,
-    },
-    /// The machine is present with one or more parked holes, each resumable
-    /// by identity in any order (the machine's continuation registry imposes
-    /// none). Newest last.
-    Suspended {
-        machine: M,
-        holes: Vec<HoleId>,
-    },
-}
+/// Resident-session registry slot, instantiated at the harness's hole
+/// identity type. The mechanism itself — `Idle(M) | Running{holes} |
+/// Suspended{machine,holes} | Wedged{since}`, the stowed-XOR-running
+/// discipline, the epoch guard — lives in
+/// `tidepool_runtime::session::registry` (the one promoted home, see the
+/// root `CLAUDE.md` Mechanism Index); this crate never constructs
+/// `Slot::Wedged` (a wedged turn here retires the whole node via
+/// `Harness::terminate_node` instead), it simply never sees that variant.
+pub type Slot<M> = tidepool_runtime::session::registry::Slot<M, HoleId>;

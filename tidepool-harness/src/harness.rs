@@ -140,12 +140,19 @@ impl HarnessError {
         match err {
             CheckoutError::Unknown(_) => HarnessError::NoSession(node),
             CheckoutError::Running(_) => HarnessError::TurnInFlight(node),
-            other @ (CheckoutError::NotSuspended(_) | CheckoutError::WrongHole { .. }) => {
-                HarnessError::SessionMismatch {
-                    node,
-                    detail: other.to_string(),
-                }
-            }
+            // `NoSession` (the `SingleSlot` facade's "nothing installed") and
+            // `Terminal` (the REPL-only `Wedged` slot) are never produced by
+            // this crate's keyed registry usage — this crate never installs
+            // via `SingleSlot` and never constructs `Slot::Wedged` (a wedged
+            // turn here retires the whole node via `terminate_node` instead)
+            // — but the match must stay total across the shared error type.
+            other @ (CheckoutError::NotSuspended(_)
+            | CheckoutError::WrongHole { .. }
+            | CheckoutError::NoSession
+            | CheckoutError::Terminal { .. }) => HarnessError::SessionMismatch {
+                node,
+                detail: other.to_string(),
+            },
         }
     }
 }
