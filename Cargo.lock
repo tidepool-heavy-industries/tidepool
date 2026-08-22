@@ -4333,6 +4333,7 @@ dependencies = [
  "tempfile",
  "thiserror",
  "tidepool-atomic-write",
+ "tidepool-repr",
  "uuid",
 ]
 

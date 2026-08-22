@@ -72,22 +72,20 @@ fn sync(file: &File, policy: SyncPolicy) -> std::io::Result<()> {
 }
 
 /// Append `line` (one JSON row, WITHOUT a trailing newline) to `path`,
-/// creating the file (and its parent directories) if needed, opened in
-/// append mode. ONE `write_all` for the whole row plus its newline, not two
-/// syscalls — so a burst of appends can never land interleaved under
-/// `O_APPEND` (see `SyncPolicy`'s callers for why this matters more or less
-/// depending on their own locking).
+/// creating the file if needed (but NOT its parent directory — a missing
+/// parent is a real failure to report, not to silently paper over by
+/// recreating it; a caller that wants mkdir-p-on-append, as
+/// `JournalHandler` does, calls `std::fs::create_dir_all` itself first),
+/// opened in append mode. ONE `write_all` for the whole row plus its
+/// newline, not two syscalls — so a burst of appends can never land
+/// interleaved under `O_APPEND` (see `SyncPolicy`'s callers for why this
+/// matters more or less depending on their own locking).
 ///
 /// Serialization across CONCURRENT writers (multiple threads, multiple
 /// clones of one handler) is the CALLER's job — wrap this in the caller's own
 /// lock, exactly as `JournalHandler` already does. A single owning `&mut
 /// self` (as `EventJournal` has) is exclusive by construction and needs none.
 pub fn append_new_line(path: &Path, line: &str, sync_policy: SyncPolicy) -> std::io::Result<()> {
-    if let Some(parent) = path.parent() {
-        if !parent.as_os_str().is_empty() {
-            std::fs::create_dir_all(parent)?;
-        }
-    }
     let mut file = OpenOptions::new().create(true).append(true).open(path)?;
     let mut row = line.to_string();
     row.push('\n');
@@ -113,7 +111,10 @@ pub enum JsonlReadError {
     /// A malformed row before the last line — never the torn-write shape, so
     /// never silently absorbed. `line_no` is ONE-based (an operator's "line
     /// 1", matching what a text editor or `sed -n '<n>p'` shows).
-    TornMidFile { line_no: usize, detail: String },
+    TornMidFile {
+        line_no: usize,
+        detail: String,
+    },
 }
 
 impl std::fmt::Display for JsonlReadError {
@@ -241,9 +242,7 @@ pub fn read_repairing_tail<T>(
             .write(true)
             .open(path)
             .map_err(JsonlReadError::Io)?;
-        repair_file
-            .set_len(bad_start)
-            .map_err(JsonlReadError::Io)?;
+        repair_file.set_len(bad_start).map_err(JsonlReadError::Io)?;
         repair_file.sync_all().map_err(JsonlReadError::Io)?;
         Some(TailRepair {
             line_no: lineno,
