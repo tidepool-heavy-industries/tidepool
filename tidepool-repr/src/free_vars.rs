@@ -1,146 +1,184 @@
-//! Analysis to identify free variables in Tidepool IR expressions.
+//! Free-variable analysis for Tidepool IR expressions.
+//!
+//! [`FreeVarsIndex`] is the ONE engine: a single forward pass over every node
+//! of a `CoreExpr` that computes the free-variable set of the subtree rooted
+//! at EVERY index, once, and serves each query as an O(1) index lookup (sets
+//! are `Rc`-shared, so a query allocates only the final sorted `Vec`). This
+//! also makes it trivially stack-safe — no explicit-stack walk needed at all:
+//! `RecursiveTree`'s flat-vector invariant (every child index is strictly
+//! less than its parent's, enforced by `debug_assert!(c < i, ...)` at every
+//! whole-tree walk in `tree.rs`) means a single forward pass over
+//! `0..nodes.len()` visits every node's children before the node itself.
+//!
+//! [`free_vars`] — the whole-tree root query most callers want — is just
+//! `FreeVarsIndex::compute(tree).free_vars_at(root)`. Reach for
+//! [`FreeVarsIndex`] directly when you need free variables at more than one
+//! node of the same tree (e.g. a per-binding loop over a `LetRec` group): one
+//! `compute` call amortizes across every query, instead of each query
+//! re-walking (and in the old per-root-only API, re-extracting) its own
+//! subtree.
 
-use crate::tree::for_each_child_rev;
 use crate::{CoreExpr, CoreFrame, VarId};
-use rustc_hash::{FxHashMap, FxHashSet};
+use rustc_hash::FxHashSet;
+use std::rc::Rc;
+
+/// Free-variable sets for every node index of a `CoreExpr`, computed once.
+pub struct FreeVarsIndex {
+    sets: Vec<Rc<FxHashSet<VarId>>>,
+}
+
+impl FreeVarsIndex {
+    /// See the module doc for why a single forward pass suffices.
+    pub fn compute(tree: &CoreExpr) -> Self {
+        let empty: Rc<FxHashSet<VarId>> = Rc::new(FxHashSet::default());
+        let mut sets: Vec<Rc<FxHashSet<VarId>>> = Vec::with_capacity(tree.nodes.len());
+        for frame in &tree.nodes {
+            sets.push(node_free_vars(frame, &sets, &empty));
+        }
+        FreeVarsIndex { sets }
+    }
+
+    /// Free variables of the subtree rooted at `idx`: a sorted, deduplicated
+    /// `Vec<VarId>` — the contract every caller (`binary_search`, sorted
+    /// iteration) relies on.
+    pub fn free_vars_at(&self, idx: usize) -> Vec<VarId> {
+        let mut v: Vec<VarId> = self.sets[idx].iter().copied().collect();
+        v.sort_unstable();
+        v
+    }
+
+    pub fn free_vars_set_at(&self, idx: usize) -> &FxHashSet<VarId> {
+        &self.sets[idx]
+    }
+}
 
 /// Collect all free variables in the expression rooted at this tree's root node.
 /// Returns a sorted, deduplicated `Vec<VarId>` for efficient access and minimal allocation.
-///
-/// Stack-safe: an explicit-stack post-order walk memoizes each subtree's
-/// free-variable set by node index, so arbitrarily deep trees (this runs in the
-/// emit hot path) are analyzed without per-level call-stack growth. A subtree's
-/// free-var set is intrinsic to that subtree (binder removal happens at the
-/// binding node, never propagated inward), so memoizing by index is correct —
-/// and cheap on shared (DAG) subtrees, computed once rather than once per
-/// occurrence.
 pub fn free_vars(tree: &CoreExpr) -> Vec<VarId> {
     if tree.nodes.is_empty() {
         return Vec::new();
     }
     let root = tree.nodes.len() - 1;
-    // memo[i] = free vars of the subtree rooted at i, filled at Exit. Presence
-    // is the sole bookkeeping (no separate "seen" set): an Enter/Exit for an
-    // already-computed index is skipped, so shared subtrees are analyzed once.
-    let mut memo: FxHashMap<usize, FxHashSet<VarId>> = FxHashMap::default();
-
-    enum Step {
-        Enter(usize),
-        Exit(usize),
-    }
-    let mut stack = vec![Step::Enter(root)];
-    while let Some(step) = stack.pop() {
-        match step {
-            Step::Enter(i) => {
-                if memo.contains_key(&i) {
-                    continue;
-                }
-                stack.push(Step::Exit(i));
-                for_each_child_rev(&tree.nodes[i], |c| {
-                    debug_assert!(
-                        c < i,
-                        "free_vars: child {c} is not strictly earlier than parent {i}"
-                    );
-                    if !memo.contains_key(&c) {
-                        stack.push(Step::Enter(c));
-                    }
-                });
-            }
-            Step::Exit(i) => {
-                if memo.contains_key(&i) {
-                    continue; // already computed via another (shared) path
-                }
-                let s = node_free_vars(tree, i, &memo);
-                memo.insert(i, s);
-            }
-        }
-    }
-
-    let mut fvs: Vec<VarId> = memo.remove(&root).unwrap_or_default().into_iter().collect();
-    fvs.sort_unstable();
-    fvs
+    FreeVarsIndex::compute(tree).free_vars_at(root)
 }
 
-/// Compute one node's free-variable set from its already-computed children's
-/// sets (`memo`).
+fn child(sets: &[Rc<FxHashSet<VarId>>], idx: usize) -> &Rc<FxHashSet<VarId>> {
+    &sets[idx]
+}
+
+fn union_children(
+    children: &[&Rc<FxHashSet<VarId>>],
+    empty: &Rc<FxHashSet<VarId>>,
+) -> Rc<FxHashSet<VarId>> {
+    let nonempty: Vec<&Rc<FxHashSet<VarId>>> =
+        children.iter().copied().filter(|s| !s.is_empty()).collect();
+    match nonempty.as_slice() {
+        [] => Rc::clone(empty),
+        [only] => Rc::clone(only),
+        many => {
+            let mut merged: FxHashSet<VarId> = FxHashSet::default();
+            for s in many {
+                merged.extend(s.iter().copied());
+            }
+            Rc::new(merged)
+        }
+    }
+}
+
+fn remove_binders(
+    set: &Rc<FxHashSet<VarId>>,
+    binders: &[VarId],
+    empty: &Rc<FxHashSet<VarId>>,
+) -> Rc<FxHashSet<VarId>> {
+    if binders.iter().all(|b| !set.contains(b)) {
+        return Rc::clone(set);
+    }
+    let mut s: FxHashSet<VarId> = (**set).clone();
+    for b in binders {
+        s.remove(b);
+    }
+    if s.is_empty() {
+        Rc::clone(empty)
+    } else {
+        Rc::new(s)
+    }
+}
+
+/// One node's free-variable set from its already-computed children's sets
+/// (`sets`, filled by the forward pass in [`FreeVarsIndex::compute`] — every
+/// child index is strictly less than `idx`, so it is already present).
 fn node_free_vars(
-    tree: &CoreExpr,
-    idx: usize,
-    memo: &FxHashMap<usize, FxHashSet<VarId>>,
-) -> FxHashSet<VarId> {
-    let child = |i: &usize| memo.get(i).cloned().unwrap_or_default();
-    match &tree.nodes[idx] {
+    frame: &CoreFrame<usize>,
+    sets: &[Rc<FxHashSet<VarId>>],
+    empty: &Rc<FxHashSet<VarId>>,
+) -> Rc<FxHashSet<VarId>> {
+    match frame {
         CoreFrame::Var(v) => {
             let mut s = FxHashSet::default();
             s.insert(*v);
-            s
+            Rc::new(s)
         }
-        CoreFrame::Lit(_) => FxHashSet::default(),
+        CoreFrame::Lit(_) => Rc::clone(empty),
         CoreFrame::App { fun, arg } => {
-            let mut s = child(fun);
-            s.extend(child(arg));
-            s
+            union_children(&[child(sets, *fun), child(sets, *arg)], empty)
         }
         CoreFrame::Lam { binder, body } => {
-            let mut s = child(body);
-            s.remove(binder);
-            s
+            remove_binders(child(sets, *body), std::slice::from_ref(binder), empty)
         }
         CoreFrame::LetNonRec { binder, rhs, body } => {
-            let mut s = child(rhs);
-            let mut body_fvs = child(body);
-            body_fvs.remove(binder);
-            s.extend(body_fvs);
-            s
+            let body_bound =
+                remove_binders(child(sets, *body), std::slice::from_ref(binder), empty);
+            union_children(&[child(sets, *rhs), &body_bound], empty)
         }
         CoreFrame::LetRec { bindings, body } => {
-            let bound: FxHashSet<VarId> = bindings.iter().map(|(v, _)| *v).collect();
-            let mut s: FxHashSet<VarId> = bindings
+            let bound: Vec<VarId> = bindings.iter().map(|(v, _)| *v).collect();
+            let rhs_sets: Vec<Rc<FxHashSet<VarId>>> = bindings
                 .iter()
-                .flat_map(|(_, rhs)| child(rhs))
-                .filter(|v| !bound.contains(v))
+                .map(|(_, rhs)| remove_binders(child(sets, *rhs), &bound, empty))
                 .collect();
-
-            let body_fvs = child(body);
-            s.extend(body_fvs.difference(&bound));
-            s
+            let body_bound = remove_binders(child(sets, *body), &bound, empty);
+            let mut refs: Vec<&Rc<FxHashSet<VarId>>> = rhs_sets.iter().collect();
+            refs.push(&body_bound);
+            union_children(&refs, empty)
         }
         CoreFrame::Case {
             scrutinee,
             binder,
             alts,
         } => {
-            let mut s = child(scrutinee);
+            let mut alt_sets: Vec<Rc<FxHashSet<VarId>>> = Vec::with_capacity(alts.len());
             for alt in alts {
-                let mut alt_fvs = child(&alt.body);
-                alt_fvs.remove(binder); // case binder
-                for b in &alt.binders {
-                    alt_fvs.remove(b); // pattern binders
-                }
-                s.extend(alt_fvs);
+                let mut binders: Vec<VarId> = Vec::with_capacity(alt.binders.len() + 1);
+                binders.push(*binder);
+                binders.extend(alt.binders.iter().copied());
+                alt_sets.push(remove_binders(child(sets, alt.body), &binders, empty));
             }
-            s
+            let mut refs: Vec<&Rc<FxHashSet<VarId>>> = Vec::with_capacity(alt_sets.len() + 1);
+            refs.push(child(sets, *scrutinee));
+            refs.extend(alt_sets.iter());
+            union_children(&refs, empty)
         }
-        CoreFrame::Con { fields, .. } => fields.iter().flat_map(child).collect(),
+        CoreFrame::Con { fields, .. } => {
+            let refs: Vec<&Rc<FxHashSet<VarId>>> = fields.iter().map(|f| child(sets, *f)).collect();
+            union_children(&refs, empty)
+        }
         CoreFrame::Join {
             label: _,
             params,
             rhs,
             body,
         } => {
-            let param_set: FxHashSet<VarId> = params.iter().copied().collect();
-            let mut rhs_fvs = child(rhs);
-            for p in &param_set {
-                rhs_fvs.remove(p);
-            }
-            // Join label scopes over body (and rhs references label via Jump, not as free var)
-            let body_fvs = child(body);
-            let mut s = rhs_fvs;
-            s.extend(body_fvs);
-            s
+            let rhs_bound = remove_binders(child(sets, *rhs), params, empty);
+            union_children(&[&rhs_bound, child(sets, *body)], empty)
         }
-        CoreFrame::Jump { args, .. } => args.iter().flat_map(child).collect(),
-        CoreFrame::PrimOp { args, .. } => args.iter().flat_map(child).collect(),
+        CoreFrame::Jump { args, .. } => {
+            let refs: Vec<&Rc<FxHashSet<VarId>>> = args.iter().map(|a| child(sets, *a)).collect();
+            union_children(&refs, empty)
+        }
+        CoreFrame::PrimOp { args, .. } => {
+            let refs: Vec<&Rc<FxHashSet<VarId>>> = args.iter().map(|a| child(sets, *a)).collect();
+            union_children(&refs, empty)
+        }
     }
 }
 
@@ -363,5 +401,106 @@ mod tests {
         let fvs = free_vars(&tree_expr);
         assert!(fvs.binary_search(&x).is_ok());
         assert!(fvs.binary_search(&y).is_ok());
+    }
+
+    // -- Per-node FreeVarsIndex queries (moved from
+    // tidepool-codegen/src/emit/free_vars_index.rs on consolidation) --
+
+    #[test]
+    fn index_matches_reference_on_lam_bound_and_free() {
+        let x = VarId(1);
+        let y = VarId(2);
+        let expr = tree(vec![
+            CoreFrame::Var(y),                     // 0
+            CoreFrame::Lam { binder: x, body: 0 }, // 1: free = {y}
+        ]);
+        let idx = FreeVarsIndex::compute(&expr);
+        assert_eq!(idx.free_vars_at(1), vec![y]);
+        assert_eq!(idx.free_vars_at(0), vec![y]);
+    }
+
+    #[test]
+    fn index_matches_reference_on_let_rec_self_recursive() {
+        let x = VarId(1);
+        let expr = tree(vec![
+            CoreFrame::Var(x), // 0: rhs/body
+            CoreFrame::LetRec {
+                bindings: vec![(x, 0)],
+                body: 0,
+            }, // 1
+        ]);
+        let idx = FreeVarsIndex::compute(&expr);
+        assert_eq!(idx.free_vars_at(1), Vec::<VarId>::new());
+    }
+
+    #[test]
+    fn index_matches_reference_on_case_binders() {
+        let a = VarId(1);
+        let b = VarId(2);
+        let expr = tree(vec![
+            CoreFrame::Var(a), // 0: scrutinee
+            CoreFrame::Var(b), // 1: alt body
+            CoreFrame::Case {
+                scrutinee: 0,
+                binder: b,
+                alts: vec![Alt {
+                    con: AltCon::Default,
+                    binders: vec![],
+                    body: 1,
+                }],
+            }, // 2
+        ]);
+        let idx = FreeVarsIndex::compute(&expr);
+        assert_eq!(idx.free_vars_at(2), vec![a]);
+    }
+
+    #[test]
+    fn index_matches_reference_on_join_jump() {
+        let x = VarId(1);
+        let y = VarId(2);
+        let expr = tree(vec![
+            CoreFrame::Var(y), // 0: Jump arg
+            CoreFrame::Jump {
+                label: JoinId(1),
+                args: vec![0],
+            }, // 1: rhs
+            CoreFrame::Var(x), // 2: body
+            CoreFrame::Join {
+                label: JoinId(1),
+                params: vec![x],
+                rhs: 1,
+                body: 2,
+            }, // 3
+        ]);
+        let idx = FreeVarsIndex::compute(&expr);
+        let mut expected = vec![x, y];
+        expected.sort();
+        assert_eq!(idx.free_vars_at(3), expected);
+    }
+
+    #[test]
+    fn index_empty_sets_are_shared() {
+        let expr = tree(vec![
+            CoreFrame::Lit(Literal::LitInt(1)), // 0
+            CoreFrame::Lit(Literal::LitInt(2)), // 1
+            CoreFrame::App { fun: 0, arg: 1 },  // 2
+        ]);
+        let idx = FreeVarsIndex::compute(&expr);
+        assert!(idx.free_vars_set_at(0).is_empty());
+        assert!(idx.free_vars_set_at(1).is_empty());
+        assert!(idx.free_vars_set_at(2).is_empty());
+        assert!(Rc::ptr_eq(&idx.sets[0], &idx.sets[1]));
+    }
+
+    #[test]
+    fn index_single_nonempty_child_shares_rc() {
+        let x = VarId(1);
+        let expr = tree(vec![
+            CoreFrame::Var(x),                  // 0
+            CoreFrame::Lit(Literal::LitInt(1)), // 1
+            CoreFrame::App { fun: 0, arg: 1 },  // 2: only fun contributes
+        ]);
+        let idx = FreeVarsIndex::compute(&expr);
+        assert!(Rc::ptr_eq(&idx.sets[0], &idx.sets[2]));
     }
 }

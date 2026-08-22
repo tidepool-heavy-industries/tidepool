@@ -1,19 +1,25 @@
-//! Exhaustive equivalence gate for `emit::free_vars_index::FreeVarsIndex`.
+//! Exhaustive equivalence gate for `tidepool_repr::free_vars::FreeVarsIndex`
+//! (moved here from codegen on consolidation — the indexed engine now lives
+//! in `tidepool-repr`, the one free-variable engine both the oracle-adjacent
+//! callers and `tidepool-codegen`'s `emit/expr.rs` call).
 //!
-//! `FreeVarsIndex::compute` replaces eight `emit/expr.rs` call sites that used
-//! to call `tree.extract_subtree(idx)` (a full subtree copy) followed by
-//! `free_vars` (a walk over that copy). A wrongly-computed free-variable set is
-//! a MISCOMPILE (a closure captures the wrong set of variables), not merely a
-//! perf regression, so this test is the license for converting any call
-//! site: for every node index of every tree in a real + generated corpus, it
-//! asserts `FreeVarsIndex::free_vars_at(idx)` is byte-for-byte identical to
-//! the reference `tidepool_repr::free_vars::free_vars(&tree.extract_subtree(idx))`.
-//! It must be green BEFORE any call site is converted, and stays green after.
+//! `FreeVarsIndex::compute` replaces what used to be eight `emit/expr.rs`
+//! call sites that called `tree.extract_subtree(idx)` (a full subtree copy)
+//! followed by `free_vars` (a walk over that copy). A wrongly-computed
+//! free-variable set is a MISCOMPILE (a closure captures the wrong set of
+//! variables), not merely a perf regression, so this test is the ongoing
+//! guard: for every node index of every tree in a real + generated corpus, it
+//! asserts `FreeVarsIndex::free_vars_at(idx)` (one whole-tree `compute`,
+//! queried at `idx`) is byte-for-byte identical to
+//! `tidepool_repr::free_vars::free_vars(&tree.extract_subtree(idx))` (a fresh
+//! `compute` over a freshly extracted, re-indexed subtree) — a real
+//! cross-check of `FreeVarsIndex`'s per-node sharing against `extract_subtree`'s
+//! reindexing, even though `free_vars` is itself implemented via
+//! `FreeVarsIndex` now.
 
 use proptest::test_runner::{Config, TestRunner};
 use std::path::PathBuf;
-use tidepool_codegen::emit::free_vars_index::FreeVarsIndex;
-use tidepool_repr::free_vars::free_vars;
+use tidepool_repr::free_vars::{free_vars, FreeVarsIndex};
 use tidepool_repr::serial::read::read_cbor;
 use tidepool_repr::CoreExpr;
 use tidepool_testing::gen::{arb_core_expr_depth, arb_core_expr_shadowing};

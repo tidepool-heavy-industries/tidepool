@@ -18,6 +18,7 @@ pub mod serial;
 pub mod session_ids;
 pub mod subst;
 pub mod tree;
+pub mod trivial_field;
 pub mod types;
 pub mod varid_check;
 

@@ -20,20 +20,29 @@ external recursion-schemes library. Root is conventionally the **last** node.
 `MapLayer` is the one-layer functor map (`CoreFrame<A> -> CoreFrame<B>` given
 `A -> B`) every traversal is built from.
 
-**Whole-tree operations (`extract_subtree`, `replace_subtree`, `free_vars`) are
+**Whole-tree operations (`extract_subtree`, `replace_subtree`) are
 explicit-stack post-order walks (`Enter`/`Exit` work-item enum), not recursive
 functions** — deliberately, so arbitrarily deep Core towers don't grow the Rust
-call stack (shared child-scheduling via `for_each_child_rev`). The memo differs
-by walk, same underlying idea: `extract_subtree`/`replace_subtree` use
+call stack (shared child-scheduling via `for_each_child_rev`), memoized via
 `old_to_new: HashMap<usize,usize>` (presence marks "already emitted," which
 both memoizes the walk and preserves DAG sharing — a node reachable from
-multiple parents is emitted once); `free_vars` uses its own
-`FxHashMap<usize,FxHashSet<VarId>>` (a per-node free-variable-set memo, not an
-index remap) — don't grep for `old_to_new` inside `free_vars`, it isn't there.
-If you add a new whole-tree pass here, follow the Enter/Exit pattern rather
-than writing a recursive `fn walk(&self, idx)` — a deep tower will silently
-overflow a naive recursive walk in a way that only shows up on real -O2 Core,
-not small tests.
+multiple parents is emitted once). If you add a new whole-tree pass that isn't
+naturally forward-ordered, follow this Enter/Exit pattern rather than writing
+a recursive `fn walk(&self, idx)` — a deep tower will silently overflow a
+naive recursive walk in a way that only shows up on real -O2 Core, not small
+tests.
+
+**`free_vars.rs`'s `FreeVarsIndex` is the one free-variable engine** (moved
+here from `tidepool-codegen/src/emit/free_vars_index.rs` on consolidation —
+codegen's copy was deleted). It's a single **forward** pass over
+`0..nodes.len()` (not Enter/Exit) computing every node's free-variable set
+once, `Rc`-shared; `free_vars(tree)` is just
+`FreeVarsIndex::compute(tree).free_vars_at(root)`. The forward order alone is
+stack-safe (no recursion, no explicit stack) because `RecursiveTree`'s
+invariant guarantees every child index is less than its parent's. Reach for
+`FreeVarsIndex` directly (not `free_vars`) when you need free variables at
+more than one node of the same tree — one `compute` amortizes across every
+query.
 
 ## `DataConTable` — use `insert_checked`, not `insert`, for any new ingestion path
 
