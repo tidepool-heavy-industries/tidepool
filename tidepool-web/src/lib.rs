@@ -10,9 +10,10 @@
 //! one registered node: `present_form` publishes a
 //! [`FormShape`](tidepool_harness::selfharness::operator::FormShape)
 //! (rendered by [`render`]) onto that node's timeline and parks a channel
-//! resolved by `POST /node/{node}/submit/{interaction}`; `await_continue`
-//! parks a channel resolved by `POST /node/{node}/continue/{interaction}`.
-//! The node-lifecycle extensions (`node_seeded`/`node_finalized`/
+//! resolved by `POST /node/{node}/submit/{interaction}` — this covers the
+//! self-iterating harness's between-loops gate too: it is an ordinary
+//! driver-authored form, not a second mechanism. The node-lifecycle
+//! extensions (`node_seeded`/`node_finalized`/
 //! `node_failed`/`retire_node`) store what the driver sends across the seam.
 //! Publishing never supersedes an existing pending ask; resolving keeps the
 //! answered ask in place.
@@ -32,9 +33,8 @@
 //!   [`shell::CORE_JS`]'s form/SSE-patch plumbing with `/legacy` — one copy,
 //!   two views.
 //! - [`server`] — axum routes (`GET /`, `GET /legacy`, `GET /api/tree`, `GET
-//!   /node/{node}/panel`, `GET /sse`, `POST /node/{node}/submit/{interaction}`,
-//!   `POST /node/{node}/continue/{interaction}`), the SSE broadcast stream,
-//!   and [`server::WebGate`].
+//!   /node/{node}/panel`, `GET /sse`, `POST /node/{node}/submit/{interaction}`),
+//!   the SSE broadcast stream, and [`server::WebGate`].
 //! - [`formapi`] — a DISABLED-BY-DEFAULT testing-convenience surface
 //!   (`GET`/`POST /node/{node}/api/form`) mounted onto the same router when
 //!   `TIDEPOOL_FORM_API=1`; see that module's docs for the hardening story.

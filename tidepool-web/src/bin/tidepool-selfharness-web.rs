@@ -7,7 +7,8 @@
 //! `--demo` runs the server against a mock node TREE, no harness/model/API
 //! calls needed, so the whole node lifecycle is reviewable on localhost:
 //! - the default node ([`tidepool_web::DEFAULT_NODE_ID`]) narrates, presents
-//!   one form, then parks on the continue gate — the loop node's shape.
+//!   one form, then presents the between-turns gate (an ordinary form, same
+//!   as any other) — the loop node's shape.
 //! - `root/1-finishes` walks a full successful lifecycle: seed → notes →
 //!   an ask → finalized value (section flips to done).
 //! - `root/2-concurrent` presents TWO forms CONCURRENTLY (two threads, each
@@ -54,7 +55,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let concurrent = state.register_node("root/2-concurrent");
         std::thread::spawn(move || demo_loop_concurrent(concurrent));
         eprintln!(
-            "[demo] mock driver running — node tree: '{}' (loop: note/ask/continue), \
+            "[demo] mock driver running — node tree: '{}' (loop: note/ask/between-turns gate), \
              root/1-finishes (seed→notes→ask→final value), root/2-concurrent (two \
              stacked asks), root/3-fails (seed→failure)",
             tidepool_web::DEFAULT_NODE_ID
@@ -65,8 +66,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 /// The loop-node mock driver: narrate, present the sample form, report the
-/// submission, then park on the continue gate — one full lap of the loop
-/// node's operator interactions, looping.
+/// submission, then present the between-turns gate — one full lap of the
+/// loop node's operator interactions, looping. The gate is an ORDINARY form,
+/// same wire as any other `present_form` call — no dedicated continue
+/// mechanism.
 fn demo_loop_single(gate: Arc<WebGate>) {
     loop {
         gate.post_note("Deciding how to split the question into branches.");
@@ -76,10 +79,10 @@ fn demo_loop_single(gate: Arc<WebGate>) {
             tidepool_web::DEFAULT_NODE_ID,
             serde_json::to_string(&submission).unwrap_or_default()
         );
-        gate.post_note("Turn folded — 3 nodes, 2 windows. Press Continue to run another turn.");
-        gate.await_continue();
+        gate.post_note("Turn folded — 3 nodes, 2 windows. Submit to run another turn.");
+        gate.present_form(&between_turns_form());
         eprintln!(
-            "[demo:{}] continue — next iteration",
+            "[demo:{}] between-turns gate answered — next iteration",
             tidepool_web::DEFAULT_NODE_ID
         );
     }
@@ -128,8 +131,9 @@ fn demo_tree(gate: Arc<WebGate>) {
 
 /// The two-concurrent-asks mock driver: publish TWO forms on the same node
 /// at once (two threads each blocked in their own `present_form`), wait for
-/// both to resolve (in whatever order the operator answers them), then park
-/// on continue — demonstrating that neither ask supersedes the other.
+/// both to resolve (in whatever order the operator answers them), then
+/// present the between-turns gate — demonstrating that neither ask
+/// supersedes the other.
 fn demo_loop_concurrent(gate: Arc<WebGate>) {
     loop {
         let g1 = gate.clone();
@@ -152,8 +156,8 @@ fn demo_loop_concurrent(gate: Arc<WebGate>) {
             serde_json::to_string(&a).unwrap_or_default(),
             serde_json::to_string(&b).unwrap_or_default()
         );
-        gate.await_continue();
-        eprintln!("[demo:root/2-concurrent] continue — next iteration");
+        gate.present_form(&between_turns_form());
+        eprintln!("[demo:root/2-concurrent] between-turns gate answered — next iteration");
     }
 }
 
@@ -180,6 +184,22 @@ fn sample_form() -> FormShape {
             },
         ],
         doc: None,
+    }
+}
+
+/// A demo stand-in for the real driver's `between_loops_gate_shape` —
+/// same shape (one optional `steer` field), not the exact type name, since
+/// this binary has no `tidepool-harness` driver instance to borrow it from.
+fn between_turns_form() -> FormShape {
+    FormShape::Product {
+        type_key: "BetweenTurns".into(),
+        constructor: "BetweenTurns".into(),
+        fields: vec![FieldShape {
+            key: "steer".into(),
+            shape: FormShape::Optional(Box::new(FormShape::String)),
+            doc: Some("Optional message for the next turn — leave blank to just continue.".into()),
+        }],
+        doc: Some("Turn complete — start the next turn?".into()),
     }
 }
 

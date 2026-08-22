@@ -166,37 +166,15 @@ pub struct Checkpoint {
     /// context is the runtime's job"). `0` before any cycle has completed;
     /// incremented by one per completed cycle, alongside `generation`.
     iteration: LoopIteration,
-    /// Whether the driver was PARKED on the between-turns operator gate
-    /// (`SelfHarnessDriver::between_loops_gate`, `gate.await_continue()`) the
-    /// last time this generation's checkpoint was written to disk. The gate
-    /// park itself is a live continuation only — it holds no state a
-    /// checkpoint otherwise captures — so without this flag a kill while
-    /// parked and a kill mid-cycle look identical on restore, and the restart
-    /// silently runs the next turn instead of re-presenting the "start the
-    /// next turn?" gate to the operator. Set (and the checkpoint re-saved, at
-    /// the SAME generation — see [`Self::with_awaiting_continue`]) right
-    /// before the driver blocks on `await_continue`; cleared the moment a
-    /// continue signal actually arrives, before any further turn work. A
-    /// checkpoint committed for a genuinely completed cycle
-    /// ([`Self::committed`]) is never parked, so it is always `false` there.
-    /// `#[serde(default)]` plus `skip_serializing_if`: an old checkpoint file
-    /// with no such key deserializes as `false` (today's behavior, byte for
-    /// byte), and a checkpoint that was never parked serializes with no new
-    /// key at all — the precedent is `Usage.cached_input_tokens`/
-    /// `TurnDelta.reasoning`'s additive widenings.
-    #[serde(default, skip_serializing_if = "is_false")]
-    awaiting_continue: bool,
-    /// The operator's between-loops message
-    /// ([`crate::selfharness::operator::ContinueSignal::ContinueWithInput`]),
-    /// captured in the SAME atomic write that clears `awaiting_continue`
-    /// (`SelfHarnessDriver::between_loops_gate`) so a kill anywhere after
-    /// that write cannot separate "gate cleared" from "operator text
-    /// captured" — restore rehydrates it, and the end-of-cycle
-    /// [`Self::committed`] clears it again once it has been consumed into a
-    /// window's framing. `#[serde(default, skip_serializing_if)]`: the same
-    /// additive-widening precedent as `awaiting_continue` — an old
-    /// checkpoint with no such key deserializes as `None`, and a checkpoint
-    /// with nothing pending serializes with no new key at all.
+    /// The operator's between-loops message, threaded into the next
+    /// cognition window's framing
+    /// (`SelfHarnessDriver::between_loops_gate`/`render_framing_with`).
+    /// Never durable in practice — [`Self::committed`] always clears it, and
+    /// the between-turns gate itself writes no checkpoint — but the field and
+    /// its `#[serde(default, skip_serializing_if)]` stay so an OLD checkpoint
+    /// written while a bespoke gate-park marker still existed (carrying this
+    /// key non-`None`) still decodes; the precedent is
+    /// `Usage.cached_input_tokens`/`TurnDelta.reasoning`'s additive widenings.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pending_operator_input: Option<String>,
     /// The highest [`crate::selfharness::observer::AskId`] minted as of this
@@ -205,15 +183,11 @@ pub struct Checkpoint {
     /// already used earlier in the SAME `transcript.jsonl` (which spans
     /// restarts). `0` before any `askUser`/`note` form has ever been
     /// presented. `#[serde(default, skip_serializing_if)]`: same additive
-    /// precedent as `awaiting_continue`/`pending_operator_input` — an old
-    /// checkpoint with no such key deserializes as `0`, and a checkpoint
-    /// that never minted an id serializes with no new key at all.
+    /// precedent as `pending_operator_input` — an old checkpoint with no such
+    /// key deserializes as `0`, and a checkpoint that never minted an id
+    /// serializes with no new key at all.
     #[serde(default, skip_serializing_if = "is_zero")]
     ask_id_high_water: u64,
-}
-
-fn is_false(b: &bool) -> bool {
-    !*b
 }
 
 fn is_zero(n: &u64) -> bool {
@@ -229,10 +203,6 @@ impl Checkpoint {
         self.iteration
     }
 
-    pub fn awaiting_continue(&self) -> bool {
-        self.awaiting_continue
-    }
-
     pub fn pending_operator_input(&self) -> Option<&str> {
         self.pending_operator_input.as_deref()
     }
@@ -245,11 +215,7 @@ impl Checkpoint {
     /// when there is none yet — the very first checkpoint) — the only normal
     /// write path. A caller never supplies a generation directly, which is
     /// what makes "advances exactly once, from what came before" true by
-    /// construction rather than by convention at each call site. A newly
-    /// committed cycle is never parked — `awaiting_continue` is always
-    /// `false` here; see [`Self::with_awaiting_continue`] for the gate-park
-    /// marker write, which does NOT go through this constructor (it must
-    /// NOT advance the generation).
+    /// construction rather than by convention at each call site.
     pub fn committed(
         previous: Option<CheckpointGeneration>,
         state: Json,
@@ -263,30 +229,16 @@ impl Checkpoint {
             compaction,
             harness_source,
             iteration,
-            awaiting_continue: false,
             pending_operator_input: None,
             ask_id_high_water: 0,
         }
     }
 
-    /// A copy of `self` with `awaiting_continue` set, at the SAME generation
-    /// — this is not a newly completed cycle, only a record of whether the
-    /// driver is currently parked on the between-turns gate, so it must NOT
-    /// advance the generation the way [`Self::committed`] does. The only
-    /// legitimate way to change this flag: there is no public constructor
-    /// that accepts an arbitrary generation directly.
-    pub fn with_awaiting_continue(&self, awaiting_continue: bool) -> Self {
-        Checkpoint {
-            awaiting_continue,
-            ..self.clone()
-        }
-    }
-
     /// A copy of `self` with `pending_operator_input` set, at the SAME
-    /// generation — chained onto [`Self::with_awaiting_continue`] by
-    /// `SelfHarnessDriver::between_loops_gate` so the gate-clear write and
-    /// the operator's captured text land in the ONE `save_checkpoint` call
-    /// that write performs, never two separately-timed writes.
+    /// generation. Unused by production code today (the between-turns gate
+    /// writes no checkpoint of its own — see [`Checkpoint`]'s field doc) but
+    /// kept as a normal, orthogonal `with_*` builder alongside
+    /// [`Self::with_ask_id_high_water`].
     pub fn with_pending_operator_input(&self, pending_operator_input: Option<String>) -> Self {
         Checkpoint {
             pending_operator_input,
@@ -295,10 +247,9 @@ impl Checkpoint {
     }
 
     /// A copy of `self` with `ask_id_high_water` set, at the SAME generation
-    /// — used both by [`Self::committed`]'s caller (after minting the
-    /// checkpoint for a completed cycle) and by the gate-clear write, so the
-    /// persisted high-water mark tracks whatever the driver's own counter
-    /// last reached at either checkpoint-write site.
+    /// — used by [`Self::committed`]'s caller (after minting the checkpoint
+    /// for a completed cycle) so the persisted high-water mark tracks
+    /// whatever the driver's own counter last reached.
     pub fn with_ask_id_high_water(&self, ask_id_high_water: u64) -> Self {
         Checkpoint {
             ask_id_high_water,
@@ -476,7 +427,6 @@ mod tests {
             compaction: Some("a summary".to_string()),
             harness_source: "fingerprint-abc".to_string(),
             iteration: LoopIteration(generation),
-            awaiting_continue: false,
             pending_operator_input: None,
             ask_id_high_water: 0,
         }
@@ -519,75 +469,33 @@ mod tests {
         assert!(matches!(err, PersistenceError::Json { .. }));
     }
 
-    /// The backward-compat contract item 2 (b) requires: a checkpoint written
-    /// before `awaiting_continue` existed — no such key in the JSON at all —
-    /// must restore exactly as if the flag were `false`, never a
-    /// deserialization error.
+    /// The unified between-turns gate deleted the bespoke `awaiting_continue`
+    /// marker field entirely (the restart rule simplified to "any boot that
+    /// restores a checkpoint re-presents the between-turns ask" — no marker
+    /// needed to distinguish a mid-turn crash from a parked-on-the-gate one).
+    /// A checkpoint written by an OLD binary that still had the field — key
+    /// present on the wire — must still decode: an unrecognized key is
+    /// silently ignored by `serde_json`'s default (non-`deny_unknown_fields`)
+    /// behavior, never a deserialization error.
     #[test]
-    fn a_checkpoint_with_no_awaiting_continue_key_deserializes_as_not_parked() {
+    fn a_checkpoint_carrying_a_stale_awaiting_continue_key_still_decodes() {
         let dir = tempfile_dir();
         let path = dir.join("checkpoint.json");
         std::fs::write(
             &path,
-            r#"{"generation":1,"state":{"mode":"Deciding"},"compaction":null,"harness_source":"fp","iteration":1}"#,
+            r#"{"generation":1,"state":{"mode":"Deciding"},"compaction":null,"harness_source":"fp","iteration":1,"awaiting_continue":true}"#,
         )
-        .expect("write a pre-marker-field checkpoint");
+        .expect("write a checkpoint carrying the retired marker key");
         let loaded = load_checkpoint(&path)
-            .expect("a pre-existing checkpoint shape must still deserialize")
+            .expect("a checkpoint carrying an unrecognized extra key must still deserialize")
             .expect("some checkpoint");
-        assert!(
-            !loaded.awaiting_continue(),
-            "an absent key must default to not-parked, never an error or a stray true"
-        );
+        assert_eq!(loaded.generation().get(), 1);
+        assert_eq!(loaded.iteration().get(), 1);
     }
 
-    /// `with_awaiting_continue` flips ONLY the marker: same generation, same
-    /// state/compaction/harness_source/iteration — this is the operation
-    /// `between_loops_gate` uses to record/clear the gate park without
-    /// treating it as a newly completed cycle (unlike [`Checkpoint::committed`],
-    /// which always advances the generation).
-    #[test]
-    fn with_awaiting_continue_flips_the_flag_and_nothing_else() {
-        let cp = checkpoint(3);
-        assert!(!cp.awaiting_continue());
-
-        let parked = cp.with_awaiting_continue(true);
-        assert!(parked.awaiting_continue());
-        assert_eq!(parked.generation(), cp.generation());
-        assert_eq!(parked.state, cp.state);
-        assert_eq!(parked.iteration(), cp.iteration());
-
-        let cleared = parked.with_awaiting_continue(false);
-        assert_eq!(
-            cleared, cp,
-            "clearing the marker restores byte-for-byte equality"
-        );
-    }
-
-    /// `skip_serializing_if` keeps an unparked checkpoint's wire bytes
-    /// unchanged (the pinned string in
-    /// [`wire_bytes_are_unchanged_by_the_typed_generation_and_iteration`]
-    /// still holds), while a parked one carries the key explicitly — so a
-    /// reader can tell "never recorded" apart from "explicitly not parked"
-    /// is not a distinction this wire makes, by design (both omit the key).
-    #[test]
-    fn awaiting_continue_key_is_only_present_on_the_wire_when_true() {
-        let cp = checkpoint(1);
-        assert!(!serde_json::to_string(&cp)
-            .expect("serialize")
-            .contains("awaiting_continue"));
-
-        let parked = cp.with_awaiting_continue(true);
-        let wire = serde_json::to_string(&parked).expect("serialize");
-        assert!(wire.contains("\"awaiting_continue\":true"));
-
-        let round_tripped: Checkpoint = serde_json::from_str(&wire).expect("deserialize");
-        assert_eq!(round_tripped, parked);
-    }
-
-    /// Backward compat for BOTH new fields (item 1's compatibility pin,
-    /// mirroring [`a_checkpoint_with_no_awaiting_continue_key_deserializes_as_not_parked`]):
-    /// a checkpoint written before `pending_operator_input`/`ask_id_high_water`
+    /// Backward compat for the still-live new fields (item 1's compatibility
+    /// pin): a checkpoint written before `pending_operator_input`/
+    /// `ask_id_high_water`
     /// existed — neither key in the JSON at all — must restore as `None`/`0`,
     /// never a deserialization error.
     #[test]
@@ -616,8 +524,7 @@ mod tests {
 
     /// Forward compat: the wire-bytes golden item 3 promise extends to the two
     /// new fields — a checkpoint carrying neither (the overwhelming common
-    /// case, same as an unparked `awaiting_continue`) must still produce the
-    /// EXACT pinned string from
+    /// case) must still produce the EXACT pinned string from
     /// [`wire_bytes_are_unchanged_by_the_typed_generation_and_iteration`], so
     /// an OLD binary reading a checkpoint a NEW binary wrote (before either
     /// field was ever populated) sees byte-identical JSON.
@@ -632,8 +539,8 @@ mod tests {
     }
 
     /// Both new fields round-trip when populated, and stay byte-for-byte
-    /// independent of `awaiting_continue`/each other — the same additive
-    /// widening shape as [`awaiting_continue_key_is_only_present_on_the_wire_when_true`].
+    /// independent of each other — the same additive widening shape as
+    /// every `#[serde(default, skip_serializing_if)]` field on this struct.
     #[test]
     fn pending_operator_input_and_ask_id_high_water_round_trip_when_populated() {
         let cp = checkpoint(1)
@@ -649,9 +556,9 @@ mod tests {
         assert_eq!(round_tripped.ask_id_high_water(), 7);
     }
 
-    /// [`Checkpoint::committed`] always clears BOTH new fields, exactly as it
-    /// always clears `awaiting_continue` — a newly completed cycle has no
-    /// live gate-park state, whatever the previous checkpoint carried.
+    /// [`Checkpoint::committed`] always clears BOTH new fields — a newly
+    /// completed cycle has no live gate-park state, whatever the previous
+    /// checkpoint carried.
     #[test]
     fn committed_clears_pending_operator_input_and_does_not_inherit_ask_id_high_water() {
         let parked = checkpoint(1)

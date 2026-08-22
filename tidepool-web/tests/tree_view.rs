@@ -11,7 +11,7 @@ use std::time::Duration;
 
 use reqwest::Client;
 use serde_json::{json, Value};
-use tidepool_harness::selfharness::operator::OperatorGate;
+use tidepool_harness::selfharness::operator::{FormShape, OperatorGate};
 use tidepool_web::{router, AppState};
 use tokio::net::TcpListener;
 
@@ -267,11 +267,11 @@ async fn api_tree_status_reflects_a_pending_ask() {
 
     let gate = state.register_node("n1");
     let driver_gate = gate.clone();
-    let handle = tokio::task::spawn_blocking(move || driver_gate.await_continue());
+    let handle = tokio::task::spawn_blocking(move || driver_gate.present_form(&FormShape::Unit));
 
     // Wait until the ask is actually published before checking the endpoint.
     wait_for(&client, &format!("{base}/legacy"), |b| {
-        b.contains("/node/n1/continue/")
+        b.contains("/node/n1/submit/")
     })
     .await;
 
@@ -300,13 +300,13 @@ async fn api_tree_status_reflects_a_pending_ask() {
         .text()
         .await
         .unwrap();
-    let needle = "@post('/node/n1/continue/";
+    let needle = "@post('/node/n1/submit/";
     let start = html.find(needle).unwrap() + needle.len();
     let rest = &html[start..];
     let interaction = &rest[..rest.find('\'').unwrap()];
     client
-        .post(format!("{base}/node/n1/continue/{interaction}"))
-        .json(&json!({"answer": "Continue"}))
+        .post(format!("{base}/node/n1/submit/{interaction}"))
+        .json(&json!({}))
         .send()
         .await
         .unwrap();

@@ -30,9 +30,9 @@
 //! - `POST /node/{node}/submit/{interaction}` — resolve one pending form
 //!   (identified by its own interaction id, the "nonce" an ask is addressed
 //!   by) with a flat `{key: scalar}` body; unparks the matching
-//!   `present_form` call.
-//! - `POST /node/{node}/continue/{interaction}` — resolve one pending
-//!   between-loops gate; unparks the matching `await_continue` call.
+//!   `present_form` call. Covers the between-loops gate too — it is an
+//!   ordinary driver-authored form (one field, `steer`), not a second
+//!   mechanism.
 //!
 //! [`router_with_form_api`] additionally mounts `GET`/`POST
 //! /node/{node}/api/form` — a disabled-by-default testing-convenience surface
@@ -68,7 +68,7 @@ use axum::{Json, Router};
 use parking_lot::Mutex;
 use serde_json::{json, Map, Value as Jv};
 use tidepool_harness::selfharness::operator::{
-    child_path, ContinueSignal, FormShape, OperatorGate, ROOT_BIND_PATH,
+    child_path, FormShape, OperatorGate, ROOT_BIND_PATH,
 };
 use tokio::sync::{broadcast, oneshot};
 
@@ -82,19 +82,15 @@ use crate::shell;
 /// channels on the pending variants) — never mirrored into a second,
 /// borrowed enum just to hide them.
 pub(crate) enum AskState {
-    /// A form awaiting submission; `resolve` unparks `present_form`.
+    /// A form awaiting submission; `resolve` unparks `present_form`. Covers
+    /// the between-loops gate too — it is an ordinary driver-authored form,
+    /// not a second state.
     PendingForm {
         shape: FormShape,
         resolve: oneshot::Sender<Jv>,
     },
-    /// The between-loops gate; `resolve` unparks `await_continue`.
-    PendingContinue {
-        resolve: oneshot::Sender<ContinueSignal>,
-    },
     /// A resolved form: the reassembled answer the gate actually returned.
     AnsweredForm { shape: FormShape, answer: Jv },
-    /// A resolved continue gate, with the operator's message if any.
-    AnsweredContinue { input: Option<String> },
 }
 
 /// One item on a node's append-only timeline. An `Ask`'s `id` is BOTH its
@@ -445,10 +441,9 @@ impl AppState {
         let state = find_ask(&mut slot.timeline, interaction)?;
         let shape = match state {
             AskState::PendingForm { shape, .. } => shape.clone(),
-            AskState::PendingContinue { .. } => return Err(ResolveError::WrongKind),
             // An already-answered ask stays on the timeline, but addressing
             // it again is the same stale-nonce case as an unknown id.
-            _ => return Err(ResolveError::NoSuchInteraction),
+            AskState::AnsweredForm { .. } => return Err(ResolveError::NoSuchInteraction),
         };
         let answer = match collect_form_json(&shape, ROOT_BIND_PATH, &submission) {
             Some(answer) => answer,
@@ -466,9 +461,13 @@ impl AppState {
         )]
         let state = find_ask(&mut slot.timeline, interaction)
             .expect("still under the same registry lock as the check above");
-        let AskState::PendingForm { resolve, .. } =
-            std::mem::replace(state, AskState::AnsweredContinue { input: None })
-        else {
+        let AskState::PendingForm { resolve, .. } = std::mem::replace(
+            state,
+            AskState::AnsweredForm {
+                shape: shape.clone(),
+                answer: answer.clone(),
+            },
+        ) else {
             // Checked immediately above, under the same lock.
             unreachable!()
         };
@@ -480,47 +479,9 @@ impl AppState {
         Ok(())
     }
 
-    /// Resolve a pending CONTINUE gate at `(node_id, interaction)`, keeping
-    /// the clicked gate on the timeline as its answered form.
-    fn resolve_continue(
-        &self,
-        node_id: &str,
-        interaction: u64,
-        signal: ContinueSignal,
-    ) -> Result<(), ResolveError> {
-        let mut reg = self.registry.lock();
-        let slot = reg
-            .nodes
-            .get_mut(node_id)
-            .ok_or(ResolveError::UnknownNode)?;
-        let state = find_ask(&mut slot.timeline, interaction)?;
-        match state {
-            AskState::PendingContinue { .. } => {}
-            AskState::PendingForm { .. } => return Err(ResolveError::WrongKind),
-            _ => return Err(ResolveError::NoSuchInteraction),
-        }
-        let AskState::PendingContinue { resolve } =
-            std::mem::replace(state, AskState::AnsweredContinue { input: None })
-        else {
-            // Checked immediately above, under the same lock.
-            unreachable!()
-        };
-        let input = match &signal {
-            ContinueSignal::Continue => None,
-            ContinueSignal::ContinueWithInput(text) => Some(text.clone()),
-        };
-        let _ = resolve.send(signal);
-        *state = AskState::AnsweredContinue { input };
-        slot.rev += 1;
-        drop(reg);
-        self.ping(node_id.to_string());
-        Ok(())
-    }
-
-    /// The form-api `GET` view: every currently pending FORM ask (a Continue
-    /// gate is never surfaced here) for `node_id`, each paired with its
-    /// interaction id (the nonce `POST` must echo back). `Err(())` if
-    /// `node_id` isn't registered.
+    /// The form-api `GET` view: every currently pending ask for `node_id`,
+    /// each paired with its interaction id (the nonce `POST` must echo
+    /// back). `Err(())` if `node_id` isn't registered.
     pub(crate) fn pending_forms(&self, node_id: &str) -> Result<Vec<(u64, FormShape)>, ()> {
         let reg = self.registry.lock();
         let slot = reg.nodes.get(node_id).ok_or(())?;
@@ -562,9 +523,6 @@ pub(crate) enum ResolveError {
     /// Nothing pending at that interaction id — already resolved, or never
     /// existed (a stale/guessed nonce).
     NoSuchInteraction,
-    /// The interaction exists but isn't the kind this verb resolves (e.g.
-    /// `/submit` naming a Continue gate).
-    WrongKind,
     /// A pending FORM exists, but the submission doesn't decode against its
     /// [`FormShape`] — see [`ValidationReport`]. The pending ask is left
     /// untouched: a rejected submission never reaches the gate resolve, so
@@ -574,13 +532,12 @@ pub(crate) enum ResolveError {
 
 /// A human-legible message for a [`ResolveError`], shared by the browser
 /// verbs and the form-api's error responses.
-pub(crate) fn resolve_error_message(node_id: &str, err: &ResolveError, kind: &str) -> String {
+pub(crate) fn resolve_error_message(node_id: &str, err: &ResolveError) -> String {
     match err {
         ResolveError::UnknownNode => format!("unknown node {node_id:?}"),
         ResolveError::NoSuchInteraction => {
             "no such pending interaction — already resolved, or the nonce is stale/wrong; GET again for the current pending set".to_string()
         }
-        ResolveError::WrongKind => format!("that interaction is not a pending {kind}"),
         ResolveError::InvalidSubmission(report) => report.summary(),
     }
 }
@@ -592,12 +549,12 @@ pub(crate) fn resolve_error_message(node_id: &str, err: &ResolveError, kind: &st
 /// `unrecognized_keys`/`missing_keys`/`wrong_typed_keys`, the exact
 /// submitted keys at fault). Shared by the browser `/submit` verb and the
 /// form-api `POST` — one body shape, two front doors.
-pub(crate) fn resolve_error_json(node_id: &str, err: &ResolveError, kind: &str) -> Jv {
+pub(crate) fn resolve_error_json(node_id: &str, err: &ResolveError) -> Jv {
     let mut body = Map::new();
     body.insert("ok".to_string(), json!(false));
     body.insert(
         "error".to_string(),
-        json!(resolve_error_message(node_id, err, kind)),
+        json!(resolve_error_message(node_id, err)),
     );
     if let ResolveError::InvalidSubmission(report) = err {
         body.insert("expected".to_string(), report.expected_json());
@@ -895,13 +852,6 @@ impl OperatorGate for WebGate {
         wait.blocking_recv().unwrap_or_else(|_| json!({}))
     }
 
-    fn await_continue(&self) -> ContinueSignal {
-        let (resolve, wait) = oneshot::channel();
-        self.state
-            .publish_ask(&self.node_id, AskState::PendingContinue { resolve });
-        wait.blocking_recv().unwrap_or(ContinueSignal::Continue)
-    }
-
     fn post_note(&self, text: &str) {
         self.state.push_note(&self.node_id, text.to_string());
     }
@@ -963,7 +913,6 @@ pub fn router_with_form_api(state: AppState, form_api_enabled: bool) -> Router {
         .route(crate::tree::D3_ASSET_PATH, get(serve_d3))
         .route("/sse", get(sse))
         .route("/node/{node}/submit/{interaction}", post(submit))
-        .route("/node/{node}/continue/{interaction}", post(continue_loop))
         .fallback(not_found);
     crate::formapi::merge(base, form_api_enabled).with_state(state)
 }
@@ -1071,70 +1020,7 @@ async fn submit(
     };
     match st.resolve_form(&node, interaction, submission) {
         Ok(()) => Json(json!({"ok": true})).into_response(),
-        Err(e) => (
-            StatusCode::BAD_REQUEST,
-            Json(resolve_error_json(&node, &e, "form")),
-        )
-            .into_response(),
-    }
-}
-
-/// Resolve the pending continue gate at `(node, interaction)`. The body is
-/// the [`render::continue_shape`] sum's flat submission, reassembled by the
-/// SAME machinery as `/submit`: `{"answer": "Continue"}` or `{"answer":
-/// "ContinueWithInput", "answer.ContinueWithInput.input": ...}` — exactly
-/// what the rendered `<form>` always posts (a plain click is a real `<form
-/// data-on-submit>` submit, never a bodiless click handler; see
-/// `render.rs`'s `continue_shape`). An absent, malformed, or non-decoding
-/// body is REJECTED with a 400 — never silently treated as an approval — a
-/// chosen-but-empty `ContinueWithInput` message degrades to a bare continue,
-/// same as `/submit`'s optional-field handling.
-async fn continue_loop(
-    State(st): State<AppState>,
-    Path((node, interaction)): Path<(String, u64)>,
-    headers: HeaderMap,
-    body: Bytes,
-) -> Response {
-    let raw = match parse_json_body(&headers, &body) {
-        Ok(v) => v,
-        Err(msg) => return err_json(msg),
-    };
-    let Jv::Object(submission) = raw else {
-        return err_json("submission must be a flat JSON object".to_string());
-    };
-    let shape = crate::render::continue_shape();
-    let answer = match collect_form_json(&shape, ROOT_BIND_PATH, &submission) {
-        Some(answer) => answer,
-        None => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(resolve_error_json(
-                    &node,
-                    &ResolveError::InvalidSubmission(validation_report(
-                        &shape,
-                        ROOT_BIND_PATH,
-                        &submission,
-                    )),
-                    "continue gate",
-                )),
-            )
-                .into_response();
-        }
-    };
-    let signal = match answer.get("tag").and_then(|t| t.as_str()) {
-        Some("ContinueWithInput") => answer
-            .get("input")
-            .and_then(|i| i.as_str())
-            .map(|t| t.trim().to_string())
-            .filter(|t| !t.is_empty())
-            .map(ContinueSignal::ContinueWithInput)
-            .unwrap_or(ContinueSignal::Continue),
-        Some(_) => ContinueSignal::Continue,
-        None => return err_json("continue submission missing \"tag\"".to_string()),
-    };
-    match st.resolve_continue(&node, interaction, signal) {
-        Ok(()) => Json(json!({"ok": true})).into_response(),
-        Err(e) => err_json(resolve_error_message(&node, &e, "continue gate")),
+        Err(e) => (StatusCode::BAD_REQUEST, Json(resolve_error_json(&node, &e))).into_response(),
     }
 }
 
@@ -1274,7 +1160,7 @@ impl AppState {
             .filter_map(|item| match item {
                 TimelineItem::Ask {
                     id,
-                    state: AskState::PendingForm { .. } | AskState::PendingContinue { .. },
+                    state: AskState::PendingForm { .. },
                 } => Some(*id),
                 _ => None,
             })
@@ -1315,9 +1201,8 @@ mod tests {
     /// (`askUser @()`) answers as `null`. The old object-only transport
     /// coerced non-object answers to `{}`, which the decode rejects — an
     /// infinite re-prompt. `submit_resolves_present_form_with_exact_submission`
-    /// and `continue_resolves_await_continue` in `tests/operator_gate.rs`
-    /// prove the round trip itself over real HTTP; this pins the Unit-shape
-    /// leaf of `collect_form_json` directly.
+    /// in `tests/operator_gate.rs` proves the round trip itself over real
+    /// HTTP; this pins the Unit-shape leaf of `collect_form_json` directly.
     #[test]
     fn unit_shaped_answer_survives_reassembly() {
         assert_eq!(
@@ -1344,8 +1229,10 @@ mod tests {
         assert!(html.contains(">done</span>"), "{html}");
 
         // The between-turns gate arrives on the SAME (done) node: needs you.
+        // It's an ordinary form (unify-ask) — a trivial Unit shape stands in
+        // for the driver's real `BetweenTurns` shape here.
         let g = gate.clone();
-        let handle = std::thread::spawn(move || g.await_continue());
+        let handle = std::thread::spawn(move || g.present_form(&FormShape::Unit));
         while st.first_ask_id("root").is_none() {
             std::thread::yield_now();
         }
@@ -1355,8 +1242,7 @@ mod tests {
             "a pending gate outranks done: {html}"
         );
         let interaction = st.first_ask_id("root").unwrap();
-        st.resolve_continue("root", interaction, ContinueSignal::Continue)
-            .unwrap();
+        st.resolve_form("root", interaction, Map::new()).unwrap();
         handle.join().unwrap();
 
         // Turn 2's window re-registers the label: the node revives...
@@ -1464,7 +1350,7 @@ mod tests {
 
         let handle = {
             let gate = gate.clone();
-            std::thread::spawn(move || gate.await_continue())
+            std::thread::spawn(move || gate.present_form(&FormShape::Unit))
         };
         while st.first_ask_id("n1").is_none() {
             std::thread::yield_now();
@@ -1473,8 +1359,7 @@ mod tests {
         assert_ne!(rev0, rev1, "publish must bump the revision");
 
         let interaction = st.first_ask_id("n1").unwrap();
-        st.resolve_continue("n1", interaction, ContinueSignal::Continue)
-            .unwrap();
+        st.resolve_form("n1", interaction, Map::new()).unwrap();
         let rev2 = extract_rev(&st.node_panel_html("n1").unwrap()).to_string();
         assert_ne!(rev1, rev2, "resolving must bump the revision");
         handle.join().unwrap();

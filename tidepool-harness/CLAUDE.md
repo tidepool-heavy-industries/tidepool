@@ -661,18 +661,36 @@ model round, but left uncapped it composes with a non-interactive gate at EOF
 into an unbounded hot loop no round-based cap catches.
 
 **The operator-input seam is [`selfharness::operator::OperatorGate`]**
-— consume it, never redefine it there: `present_form(&FormShape) ->
-serde_json::Value` and `await_continue()`, both SYNC-BLOCKING by design (the frozen
-`OperatorGate` contract) even though the driver's turn loop is `async fn` and
-`.await`s the `Harness` directly. `SelfHarnessDriver` holds
-`gate: Arc<dyn OperatorGate>`, defaulting to
-`StdinGate` (headless: reads one JSON line per form, one line per continue)
-and overridable via `SelfHarnessDriver::set_gate` — a web/GUI implementation
-parks on a channel instead. `between_loops_gate` (the human-clicks-continue
-gate between loop iterations) is `gate.await_continue()` — no EOF-driven
-close of the loop; the caller decides how a continue signal arrives. Every
-gate call (`present_form`/`await_continue`) runs under `tokio::task::block_in_place`
-so a web gate's channel park yields the tokio worker instead of stalling it.
+— consume it, never redefine it there: ONE method, `present_form(&FormShape)
+-> serde_json::Value`, SYNC-BLOCKING by design (the frozen `OperatorGate`
+contract) even though the driver's turn loop is `async fn` and `.await`s the
+`Harness` directly. `SelfHarnessDriver` holds `gate: Arc<dyn OperatorGate>`,
+defaulting to `StdinGate` (headless: reads one JSON line per form) and
+overridable via `SelfHarnessDriver::set_gate` — a web/GUI implementation
+parks on a channel instead. `between_loops_gate` (the human-checkpoint between
+loop iterations) is an ORDINARY `present_form` call — a driver-authored
+`FormShape` ("Turn N complete — start turn N+1?" plus one optional `steer`
+text field, precedent: `Harness::escalate_to_operator`'s `AllocateMore`/
+`Abort` form), not a second mechanism. Every gate call runs under
+`tokio::task::block_in_place` so a web gate's channel park yields the tokio
+worker instead of stalling it.
+
+**Restart safety is a uniform rule, not a checkpoint marker.**
+`SelfHarnessDriver::run_loop` gates before the next turn whenever ANY
+checkpoint was restored (`self.last_checkpoint.is_some()`) — regardless of
+whether the prior process crashed mid-turn (the turn simply reruns, per
+existing at-least-once semantics, and the operator is asked again first) or
+genuinely parked at the gate itself (asked again, no different from any other
+restart). Only a first-ever run (no checkpoint at all) skips straight into the
+loop, which asks the seed question via the authored `askUser @SeedQuestion`.
+The between-turns gate writes nothing to disk of its own — no
+`awaiting_continue` marker, no dedicated durability dance — because the
+uniform rule already covers a kill at any point around it: a checkpoint from
+before the gate looks identical to one from mid-park, and both re-present the
+gate on restart. A prior design carried a bespoke `Checkpoint.awaiting_continue`
+field + `mark_awaiting_continue`/`clear_awaiting_continue` writes for exactly
+this; it is gone (old checkpoints carrying that key still decode — the extra
+key is silently ignored).
 
 The OUTER loop can present a form too: `outer_decls()` is `[RunLLMTurn,
 AskUser]`, so an AUTHORED `loop` that `import`s `Tidepool.Form` and evaluates

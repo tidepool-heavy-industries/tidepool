@@ -34,8 +34,8 @@ use tidepool_harness::provider::DynModelProvider;
 use tidepool_harness::selfharness::operator::FormShape;
 use tidepool_harness::selfharness::persistence;
 use tidepool_harness::{
-    answerer_decls_with_delegate, load_harness_source, ContinueSignal, Harness, LogObserver,
-    OperatorGate, SelfHarnessDriver,
+    answerer_decls_with_delegate, load_harness_source, Harness, LogObserver, OperatorGate,
+    SelfHarnessDriver,
 };
 use tidepool_worktree::testing::TestRepo;
 
@@ -76,9 +76,6 @@ struct NoGate;
 impl OperatorGate for NoGate {
     fn present_form(&self, _shape: &FormShape) -> Json {
         panic!("this scenario runs GateOff — no form should ever be presented")
-    }
-    fn await_continue(&self) -> ContinueSignal {
-        ContinueSignal::Continue
     }
 }
 

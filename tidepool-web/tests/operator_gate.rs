@@ -11,8 +11,10 @@
 //!
 //! The outline page moved from `/` to `/legacy` (`/` now serves the d3 tree
 //! view — see `tests/tree_view.rs`); every page-markup fetch in this file
-//! targets `/legacy` accordingly. The rest of the wire (submit/continue
-//! verbs, SSE) is untouched.
+//! targets `/legacy` accordingly. The rest of the wire (the `/submit` verb —
+//! which also covers the self-iterating harness's between-loops gate, an
+//! ordinary driver-authored form, not a second mechanism — and SSE) is
+//! untouched.
 
 use std::net::SocketAddr;
 use std::time::Duration;
@@ -40,6 +42,25 @@ fn sample_spec() -> FormShape {
                 doc: None,
             },
         ],
+        doc: None,
+    }
+}
+
+/// The shape `SelfHarnessDriver::between_loops_gate` presents in production
+/// (`tidepool-harness/src/selfharness/driver.rs`'s `between_loops_gate_shape`)
+/// — one optional `steer` field, no other required content, so ANY
+/// submission (including an empty one) decodes. Reconstructed here rather
+/// than imported: the driver type lives one crate over and this test only
+/// needs the wire shape.
+fn between_turns_spec() -> FormShape {
+    FormShape::Product {
+        type_key: "BetweenTurns".into(),
+        constructor: "BetweenTurns".into(),
+        fields: vec![FieldShape {
+            key: "steer".into(),
+            shape: FormShape::Optional(Box::new(FormShape::String)),
+            doc: None,
+        }],
         doc: None,
     }
 }
@@ -136,26 +157,31 @@ async fn submit_resolves_present_form_with_exact_submission() {
     assert_eq!(got, json!({"mood": "calm", "count": 3}));
 }
 
+/// The between-loops gate is an ORDINARY form, resolved through the SAME
+/// `/submit` verb every `present_form` ask uses — no dedicated continue
+/// endpoint. An empty submission (the plain-continue case) decodes to
+/// `{"steer": null}`.
 #[tokio::test(flavor = "multi_thread")]
-async fn continue_resolves_await_continue() {
+async fn submit_resolves_between_turns_gate_with_a_plain_continue() {
     let (addr, state) = boot().await;
     let base = format!("http://{addr}");
     let client = Client::new();
 
     let gate = state.register_node("n1");
     let driver_gate = gate.clone();
-    let handle = tokio::task::spawn_blocking(move || driver_gate.await_continue());
+    let handle =
+        tokio::task::spawn_blocking(move || driver_gate.present_form(&between_turns_spec()));
 
     let html = wait_for(&client, &format!("{base}/legacy"), |b| {
-        b.contains("/node/n1/continue/")
+        b.contains("data-bind=\"answer.steer\"")
     })
     .await;
     assert!(html.contains("id=\"panel-n1\""));
-    let continue_url = one_post_url(&html, "/node/n1/continue/");
+    let submit_url = one_post_url(&html, "/node/n1/submit/");
 
     let resp = client
-        .post(format!("{base}{continue_url}"))
-        .json(&json!({"answer": "Continue"}))
+        .post(format!("{base}{submit_url}"))
+        .json(&json!({}))
         .send()
         .await
         .unwrap();
@@ -165,40 +191,37 @@ async fn continue_resolves_await_continue() {
 
     assert_eq!(
         handle.await.unwrap(),
-        tidepool_harness::ContinueSignal::Continue,
-        "the plain-Continue submission (what the rendered <form> always sends — a click is a \
-         real form submit, never a bodiless click handler) resolves to a bare continue"
+        json!({"steer": null}),
+        "an empty submission — what a bare click on the rendered <form> always sends — \
+         decodes to no steering message"
     );
 }
 
-/// The continue gate is the `ContinueSignal` SUM rendered through the
-/// generic machinery: the page carries both variants' radio options and the
-/// payload branch's text field; a flat tagged submission reassembles into
-/// `ContinueWithInput` and reaches `await_continue`.
+/// The operator's steering text (the `steer` field) reaches
+/// `present_form`'s caller — their one initiating channel, threaded by the
+/// driver into the next window's framing.
 #[tokio::test(flavor = "multi_thread")]
-async fn continue_with_input_carries_the_operator_message() {
+async fn between_turns_gate_with_steer_carries_the_operator_message() {
     let (addr, state) = boot().await;
     let base = format!("http://{addr}");
     let client = Client::new();
 
     let gate = state.register_node("n1");
     let driver_gate = gate.clone();
-    let handle = tokio::task::spawn_blocking(move || driver_gate.await_continue());
+    let handle =
+        tokio::task::spawn_blocking(move || driver_gate.present_form(&between_turns_spec()));
 
     let html = wait_for(&client, &format!("{base}/legacy"), |b| {
-        b.contains("/node/n1/continue/")
+        b.contains("data-bind=\"answer.steer\"")
     })
     .await;
-    // Both variants render (the sum form, not a bespoke pane).
-    assert!(html.contains(r#"value="Continue""#));
-    assert!(html.contains(r#"value="ContinueWithInput""#));
-    let continue_url = one_post_url(&html, "/node/n1/continue/");
+    let submit_url = one_post_url(&html, "/node/n1/submit/");
 
     let resp = client
-        .post(format!("{base}{continue_url}"))
+        .post(format!("{base}{submit_url}"))
         .json(&json!({
-            "answer": "ContinueWithInput",
-            "answer.ContinueWithInput.input": "hello companion",
+            "answer.steer#present": true,
+            "answer.steer": "hello companion",
         }))
         .send()
         .await
@@ -207,8 +230,8 @@ async fn continue_with_input_carries_the_operator_message() {
 
     assert_eq!(
         handle.await.unwrap(),
-        tidepool_harness::ContinueSignal::ContinueWithInput("hello companion".to_string()),
-        "the chosen payload variant's field reaches await_continue"
+        json!({"steer": "hello companion"}),
+        "the operator's steering text reaches the resolved present_form call"
     );
 }
 
@@ -531,62 +554,6 @@ async fn submit_missing_or_wrong_typed_leaf_is_rejected() {
     assert_eq!(handle.await.unwrap(), json!({"mood": "calm", "count": 5}));
 }
 
-#[tokio::test(flavor = "multi_thread")]
-async fn mismatched_verb_preserves_pending_interaction() {
-    let (addr, state) = boot().await;
-    let base = format!("http://{addr}");
-    let client = Client::new();
-
-    let gate = state.register_node("n1");
-    let driver_gate = gate.clone();
-    let handle = tokio::task::spawn_blocking(move || driver_gate.present_form(&sample_spec()));
-    let html = wait_for(&client, &format!("{base}/legacy"), |b| {
-        b.contains("data-bind=\"answer.mood\"")
-    })
-    .await;
-    let submit_url = one_post_url(&html, "/node/n1/submit/");
-    // The interaction id is the trailing path segment — a form is pending at
-    // this id, not a continue gate, so hitting /continue at the SAME id must
-    // be rejected without dropping the form.
-    let interaction = submit_url.rsplit('/').next().unwrap();
-
-    let resp = client
-        .post(format!("{base}/node/n1/continue/{interaction}"))
-        .json(&json!({"answer": "Continue"}))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), 400);
-    let v: Value = resp.json().await.unwrap();
-    assert_eq!(v["ok"], json!(false));
-    assert!(v["error"]
-        .as_str()
-        .unwrap()
-        .contains("not a pending continue gate"));
-
-    // ...and the original form must still be pending, not dropped.
-    let html = client
-        .get(format!("{base}/legacy"))
-        .send()
-        .await
-        .unwrap()
-        .text()
-        .await
-        .unwrap();
-    assert!(html.contains("data-bind=\"answer.mood\""));
-
-    let body = json!({"answer.mood": "calm", "answer.count": 1});
-    let resp = client
-        .post(format!("{base}{submit_url}"))
-        .json(&body)
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), 200);
-    let got = handle.await.unwrap();
-    assert_eq!(got, json!({"mood": "calm", "count": 1}));
-}
-
 /// Once resolved, an interaction's id is gone — resubmitting the SAME url
 /// (a stale nonce) is rejected, never silently resolving a different pending
 /// ask.
@@ -770,7 +737,7 @@ async fn two_concurrent_asks_on_one_node_both_render_and_resolve() {
     );
 }
 
-/// `post_note` does not block (unlike `present_form`/`await_continue`), so a
+/// `post_note` does not block (unlike `present_form`), so a
 /// driver can post narration and then immediately present the form it
 /// explains. This proves the ordering survives the real HTTP round trip:
 /// notes render in POST order, and ABOVE the pending form — never after it.
@@ -818,11 +785,12 @@ async fn post_note_appears_above_the_pending_form_in_post_order() {
     handle.await.unwrap();
 }
 
-/// The timeline is append-only across loop boundaries: notes survive a
-/// continue click (they are the context of everything that follows), and the
-/// clicked gate itself stays on the page as its answered form.
+/// The timeline is append-only across loop boundaries: notes survive the
+/// between-turns gate's submission (they are the context of everything that
+/// follows), and the answered gate itself stays on the page as its answered
+/// form.
 #[tokio::test(flavor = "multi_thread")]
-async fn notes_and_answered_continue_persist_across_the_loop_boundary() {
+async fn notes_and_answered_between_turns_gate_persist_across_the_loop_boundary() {
     let (addr, state) = boot().await;
     let base = format!("http://{addr}");
     let client = Client::new();
@@ -831,26 +799,27 @@ async fn notes_and_answered_continue_persist_across_the_loop_boundary() {
     gate.post_note("prior loop's note");
 
     let driver_gate = gate.clone();
-    let handle = tokio::task::spawn_blocking(move || driver_gate.await_continue());
+    let handle =
+        tokio::task::spawn_blocking(move || driver_gate.present_form(&between_turns_spec()));
     let html = wait_for(&client, &format!("{base}/legacy"), |b| {
-        b.contains("/node/n1/continue/")
+        b.contains("data-bind=\"answer.steer\"")
     })
     .await;
-    let continue_url = one_post_url(&html, "/node/n1/continue/");
+    let submit_url = one_post_url(&html, "/node/n1/submit/");
 
     let resp = client
-        .post(format!("{base}{continue_url}"))
-        .json(&json!({"answer": "ContinueWithInput",
-                      "answer.ContinueWithInput.input": "steer toward receipts"}))
+        .post(format!("{base}{submit_url}"))
+        .json(&json!({
+            "answer.steer#present": true,
+            "answer.steer": "steer toward receipts",
+        }))
         .send()
         .await
         .unwrap();
     assert_eq!(resp.status(), 200);
     assert_eq!(
         handle.await.unwrap(),
-        tidepool_harness::selfharness::operator::ContinueSignal::ContinueWithInput(
-            "steer toward receipts".to_string()
-        )
+        json!({"steer": "steer toward receipts"})
     );
 
     let html = client
@@ -867,11 +836,11 @@ async fn notes_and_answered_continue_persist_across_the_loop_boundary() {
     );
     assert!(
         html.contains("steer toward receipts"),
-        "the operator's continue message stays on the timeline:\n{html}"
+        "the operator's steering message stays on the timeline:\n{html}"
     );
     assert!(
-        !html.contains("/node/n1/continue/"),
-        "no live continue form remains after the click:\n{html}"
+        !html.contains("data-bind=\"answer.steer\""),
+        "no live gate form remains after the submission:\n{html}"
     );
 }
 
@@ -1062,27 +1031,36 @@ async fn sse_emits_a_frame_for_a_node_registered_after_connect() {
     );
 }
 
-/// THE fix this pair of tests exists for: the continue endpoint used to
-/// degrade an absent/malformed body to a bare `Continue` — silent approval.
-/// A malformed JSON body is now REJECTED with a 400, and the pending gate is
-/// left untouched: a follow-up well-formed submission still resolves it.
+/// THE fix this pair of tests originally existed for: a bespoke continue
+/// endpoint used to degrade an absent/malformed body to a bare `Continue` —
+/// silent approval. That endpoint is gone; the between-turns gate is now an
+/// ordinary form resolved through `/submit`, which already rejects a
+/// malformed JSON body with a 400 and leaves the pending ask untouched —
+/// pinned generically by `submit_with_malformed_json_is_rejected` and
+/// `submit_with_absent_body_is_rejected_and_pending_ask_survives` for
+/// `sample_spec()`. This pins the SAME guarantee for the between-turns
+/// gate's own shape specifically, since it has no required fields (a
+/// malformed/absent body must still be rejected at the body-parse stage,
+/// before shape decoding ever runs) — and that a follow-up well-formed
+/// submission still resolves it.
 #[tokio::test(flavor = "multi_thread")]
-async fn continue_with_malformed_body_is_rejected_and_pending_ask_survives() {
+async fn between_turns_gate_with_malformed_body_is_rejected_and_pending_ask_survives() {
     let (addr, state) = boot().await;
     let base = format!("http://{addr}");
     let client = Client::new();
 
     let gate = state.register_node("n1");
     let driver_gate = gate.clone();
-    let handle = tokio::task::spawn_blocking(move || driver_gate.await_continue());
+    let handle =
+        tokio::task::spawn_blocking(move || driver_gate.present_form(&between_turns_spec()));
     let html = wait_for(&client, &format!("{base}/legacy"), |b| {
-        b.contains("/node/n1/continue/")
+        b.contains("data-bind=\"answer.steer\"")
     })
     .await;
-    let continue_url = one_post_url(&html, "/node/n1/continue/");
+    let submit_url = one_post_url(&html, "/node/n1/submit/");
 
     let resp = client
-        .post(format!("{base}{continue_url}"))
+        .post(format!("{base}{submit_url}"))
         .header("content-type", "application/json")
         .body("{not valid json")
         .send()
@@ -1105,40 +1083,38 @@ async fn continue_with_malformed_body_is_rejected_and_pending_ask_survives() {
         .text()
         .await
         .unwrap();
-    assert!(html.contains("/node/n1/continue/"), "{html}");
+    assert!(html.contains("data-bind=\"answer.steer\""), "{html}");
 
     let resp = client
-        .post(format!("{base}{continue_url}"))
-        .json(&json!({"answer": "Continue"}))
+        .post(format!("{base}{submit_url}"))
+        .json(&json!({}))
         .send()
         .await
         .unwrap();
     assert_eq!(resp.status(), 200);
-    assert_eq!(
-        handle.await.unwrap(),
-        tidepool_harness::ContinueSignal::Continue
-    );
+    assert_eq!(handle.await.unwrap(), json!({"steer": null}));
 }
 
 /// Same claim, for a genuinely ABSENT body (no Content-Type, no bytes) — the
-/// exact case the old code silently treated as an approval.
+/// exact case the old bespoke endpoint silently treated as an approval.
 #[tokio::test(flavor = "multi_thread")]
-async fn continue_with_absent_body_is_rejected_and_pending_ask_survives() {
+async fn between_turns_gate_with_absent_body_is_rejected_and_pending_ask_survives() {
     let (addr, state) = boot().await;
     let base = format!("http://{addr}");
     let client = Client::new();
 
     let gate = state.register_node("n1");
     let driver_gate = gate.clone();
-    let handle = tokio::task::spawn_blocking(move || driver_gate.await_continue());
+    let handle =
+        tokio::task::spawn_blocking(move || driver_gate.present_form(&between_turns_spec()));
     let html = wait_for(&client, &format!("{base}/legacy"), |b| {
-        b.contains("/node/n1/continue/")
+        b.contains("data-bind=\"answer.steer\"")
     })
     .await;
-    let continue_url = one_post_url(&html, "/node/n1/continue/");
+    let submit_url = one_post_url(&html, "/node/n1/submit/");
 
     let resp = client
-        .post(format!("{base}{continue_url}"))
+        .post(format!("{base}{submit_url}"))
         .send()
         .await
         .unwrap();
@@ -1156,17 +1132,14 @@ async fn continue_with_absent_body_is_rejected_and_pending_ask_survives() {
         .text()
         .await
         .unwrap();
-    assert!(html.contains("/node/n1/continue/"), "{html}");
+    assert!(html.contains("data-bind=\"answer.steer\""), "{html}");
 
     let resp = client
-        .post(format!("{base}{continue_url}"))
-        .json(&json!({"answer": "Continue"}))
+        .post(format!("{base}{submit_url}"))
+        .json(&json!({}))
         .send()
         .await
         .unwrap();
     assert_eq!(resp.status(), 200);
-    assert_eq!(
-        handle.await.unwrap(),
-        tidepool_harness::ContinueSignal::Continue
-    );
+    assert_eq!(handle.await.unwrap(), json!({"steer": null}));
 }

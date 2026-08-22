@@ -35,7 +35,7 @@ use tidepool_harness::log::LogHeader;
 use tidepool_harness::provider::{
     ModelProvider, ProviderError, StreamSink, TurnRequest, TurnResponse, Usage,
 };
-use tidepool_harness::selfharness::operator::{ContinueSignal, FormShape, OperatorGate};
+use tidepool_harness::selfharness::operator::{FormShape, OperatorGate};
 use tidepool_harness::{
     answerer_decls, load_harness_source, Harness, LogObserver, SelfHarnessDriver,
 };
@@ -418,10 +418,6 @@ struct FanoutLifecycleGate {
 impl OperatorGate for FanoutLifecycleGate {
     fn present_form(&self, _shape: &FormShape) -> serde_json::Value {
         serde_json::json!(null)
-    }
-
-    fn await_continue(&self) -> ContinueSignal {
-        ContinueSignal::Continue
     }
 
     fn node_seeded(&self, label: &str, seed: &str) {

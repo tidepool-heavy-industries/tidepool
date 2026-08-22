@@ -33,9 +33,9 @@ pub use registry::{Checkout, CheckoutError, SessionRegistry};
 pub use selfharness::{
     acquire_lease, answerer_decls, answerer_decls_with_delegate, delegate_branches_decl,
     fold_run_journal, list_segments, load_harness_source, retire_lease, segment_path,
-    AcquiredLease, ContinueSignal, DriverError, Event, HarnessSource, HarnessSourceError,
-    JsonlObserver, LogObserver, Observer, OperatorGate, PersistenceError, ResumeFold,
-    RunJournalError, RunLease, SelfHarnessDriver, SelfHarnessState, StdinGate,
+    AcquiredLease, DriverError, Event, HarnessSource, HarnessSourceError, JsonlObserver,
+    LogObserver, Observer, OperatorGate, PersistenceError, ResumeFold, RunJournalError, RunLease,
+    SelfHarnessDriver, SelfHarnessState, StdinGate,
 };
 pub use snapshot::{ContextSnapshot, SnapshotDigest};
 pub use tidepool_runtime::AsksSidecar;

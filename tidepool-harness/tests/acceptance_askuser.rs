@@ -183,10 +183,6 @@ impl OperatorGate for ScriptedGate {
             other => panic!("unexpected form shape presented: {other:?}"),
         }
     }
-
-    fn await_continue(&self) -> tidepool_harness::ContinueSignal {
-        tidepool_harness::ContinueSignal::Continue
-    }
 }
 
 /// A driver-emitted form event, reduced to what this test needs to compare:

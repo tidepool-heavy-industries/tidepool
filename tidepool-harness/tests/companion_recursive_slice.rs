@@ -110,8 +110,8 @@ use tidepool_harness::selfharness::operator::FormShape;
 use tidepool_harness::selfharness::persistence;
 use tidepool_harness::tree::NodeId;
 use tidepool_harness::{
-    answerer_decls, load_harness_source, ContinueSignal, Event as DriverEvent, Harness, Observer,
-    OperatorGate, SelfHarnessDriver,
+    answerer_decls, load_harness_source, Event as DriverEvent, Harness, Observer, OperatorGate,
+    SelfHarnessDriver,
 };
 
 use support::scripted_provider::{parse_window, script, KeyedProvider, PathKey, Phase, Script};
@@ -196,10 +196,6 @@ impl OperatorGate for ScriptedGate {
         } else {
             queue.remove(0)
         }
-    }
-
-    fn await_continue(&self) -> ContinueSignal {
-        ContinueSignal::Continue
     }
 }
 

@@ -3,8 +3,9 @@
 The operator GUI for the self-iterating harness, served over HTTP + Datastar
 SSE. The model is minimal and harness-agnostic: **a tree of nodes**, where
 each node has a starting **seed** prompt, produces a chronological
-**timeline** of notes and asks (typed `askUser` forms, the between-loops
-continue gate), and ends with a **final value** or a **failure**, with a
+**timeline** of notes and asks (typed `askUser` forms — the self-iterating
+harness's between-loops gate is an ordinary form too, not a second
+mechanism), and ends with a **final value** or a **failure**, with a
 derived status (`needs you` / `running` / `done` / `ended` / `failed`).
 
 Two views over that same state:
@@ -50,7 +51,7 @@ cargo run --bin tidepool-selfharness-web -- --demo --port 4601
 ```
 
 `--demo` runs a mock node tree: the default loop node (note → form →
-continue, looping), `root/1-finishes` (a full seed → notes → ask → final
+between-turns gate, looping), `root/1-finishes` (a full seed → notes → ask → final
 value lifecycle), `root/2-concurrent` (two stacked concurrent asks), and
 `root/3-fails` (seed → failure). Open `http://127.0.0.1:4601` and drive it
 by hand.
@@ -97,9 +98,12 @@ curl -sX POST http://127.0.0.1:4601/node/n1/submit/0 \
   -H 'content-type: application/json' \
   -d '{"answer.mood": "calm", "answer.count": 3}'
 
-# Resolve a pending between-loops gate. No body = a bare continue; the
-# ContinueSignal sum's flat submission attaches a message.
-curl -sX POST http://127.0.0.1:4601/node/n1/continue/1
+# The between-loops gate is an ordinary pending form (one optional "steer"
+# field) — resolve it through the SAME /submit verb, no dedicated endpoint.
+# An empty body is a bare continue; {"answer.steer#present": true,
+# "answer.steer": "..."} attaches a steering message.
+curl -sX POST http://127.0.0.1:4601/node/n1/submit/1 \
+  -H 'content-type: application/json' -d '{}'
 ```
 
 A verb that doesn't match what's pending at that interaction (wrong kind,
@@ -115,8 +119,9 @@ cargo nextest run -p tidepool-web
 
 `tests/operator_gate.rs` boots the real router with `axum::serve` on an
 ephemeral port and drives it with a real HTTP client (`reqwest`) — the
-`present_form`/`await_continue` round trips across multiple nodes and
-stacked asks, the lifecycle fields (seed/final value), timeline persistence
+`present_form` round trips (covering the between-loops gate too, since it's
+an ordinary form) across multiple nodes and stacked asks, the lifecycle
+fields (seed/final value), timeline persistence
 across the loop boundary, error paths, and the SSE stream (initial frames +
 a node registered after connect). It asserts only on the wire contract — see
 `CLAUDE.md`'s "Wire contract" section. Page-markup fetches in this file

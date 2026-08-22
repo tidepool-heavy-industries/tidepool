@@ -22,7 +22,7 @@ use tidepool_harness::provider::{DynModelProvider, Usage};
 use tidepool_harness::replay::{RecordedReply, ReplayProvider};
 use tidepool_harness::selfharness::operator::FormShape;
 use tidepool_harness::tree::{FanBadge, NodeId, NodeState};
-use tidepool_harness::{ContinueSignal, Harness, HarnessError, HoleRouting, OperatorGate};
+use tidepool_harness::{Harness, HarnessError, HoleRouting, OperatorGate};
 
 use support::haskell_call::{fanout_bind, haskell, resume_call};
 
@@ -62,10 +62,6 @@ impl OperatorGate for ScriptedGate {
             .unwrap()
             .recv()
             .unwrap_or_else(|_| json!({}))
-    }
-
-    fn await_continue(&self) -> ContinueSignal {
-        ContinueSignal::Continue
     }
 }
 

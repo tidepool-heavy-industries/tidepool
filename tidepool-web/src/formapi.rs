@@ -74,7 +74,7 @@ async fn submit_form(
     match st.resolve_form(&node, interaction, answer) {
         Ok(()) => Json(json!({"test_only": TEST_ONLY_NOTE, "ok": true})).into_response(),
         Err(e) => {
-            let mut body = resolve_error_json(&node, &e, "form");
+            let mut body = resolve_error_json(&node, &e);
             if let Jv::Object(ref mut map) = body {
                 map.insert("test_only".to_string(), json!(TEST_ONLY_NOTE));
             }

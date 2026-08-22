@@ -36,7 +36,8 @@
 //! — every entry point here must still be called from a thread with an
 //! ACTIVE tokio runtime (`#[tokio::main]`/`#[tokio::test(flavor =
 //! "multi_thread")]`), because the [`crate::selfharness::operator::OperatorGate`]
-//! park (`present_form`/`await_continue`) is SYNC-BLOCKING by frozen contract
+//! park (`present_form`, which also covers the between-loops gate — see
+//! [`SelfHarnessDriver::between_loops_gate`]) is SYNC-BLOCKING by frozen contract
 //! (a web gate parks a channel), so a call into it from this async code runs
 //! under `tokio::task::block_in_place` — a genuinely blocking call yielding
 //! the tokio worker to other tasks, not a sync-to-async bridge — which
@@ -86,7 +87,7 @@ use crate::log::Actor;
 use crate::selfharness::harness_source::HarnessSource;
 use crate::selfharness::lifecycle::SelfHarnessState;
 use crate::selfharness::observer::{AskId, Event, FormSource, Observer};
-use crate::selfharness::operator::{FormShape, OperatorGate, StdinGate};
+use crate::selfharness::operator::{FieldShape, FormShape, OperatorGate, StdinGate};
 use crate::selfharness::persistence::{self, PersistenceError};
 use crate::selfharness::state_cross;
 use crate::snapshot::SnapshotDigest;
@@ -823,6 +824,32 @@ fn turn_outcome_tag(o: &TurnOutcome) -> &'static str {
     }
 }
 
+/// The [`FormShape`] [`SelfHarnessDriver::between_loops_gate`] presents
+/// through the operator gate: a single-field record — ONE optional `steer`
+/// text field — with the whole question ("Turn N complete — start turn
+/// N+1?") carried as the ROOT shape's `doc`, same as
+/// `Harness::escalate_to_operator`'s `AllocateMore`/`Abort` form carries its
+/// stuck-node reason there. `iteration` is [`SelfHarnessDriver::iteration`]
+/// (the count of turns already completed, restored across a restart), so the
+/// title is accurate on both a live loop and a freshly restarted one.
+fn between_loops_gate_shape(iteration: u64) -> FormShape {
+    FormShape::Product {
+        type_key: "BetweenTurns".to_string(),
+        constructor: "BetweenTurns".to_string(),
+        fields: vec![FieldShape {
+            key: "steer".to_string(),
+            shape: FormShape::Optional(Box::new(FormShape::String)),
+            doc: Some(
+                "Optional message for the next turn — leave blank to just continue.".to_string(),
+            ),
+        }],
+        doc: Some(format!(
+            "Turn {iteration} complete — start turn {next}?",
+            next = iteration + 1
+        )),
+    }
+}
+
 /// The outer driver: owns the Harness-monad's own resident session
 /// (`Eff '[RunLLMTurn]`, distinct from any Agent node's session) plus a
 /// nested [`Harness`] used ONLY to answer `runLLMTurn` holes by driving an
@@ -850,9 +877,10 @@ pub struct SelfHarnessDriver {
     /// once in the next render (legible loss, one-session plan Phase 4),
     /// then cleared.
     last_rotation_losses: Option<Vec<String>>,
-    /// The operator's between-loops message ([`ContinueSignal::ContinueWithInput`]),
-    /// threaded into the NEXT cognition window's framing as their utterance,
-    /// then cleared. Their one channel for initiating.
+    /// The operator's between-loops message — the optional "steering" field
+    /// of [`Self::between_loops_gate`]'s form — threaded into the NEXT
+    /// cognition window's framing as their utterance, then cleared. Their one
+    /// channel for initiating.
     pending_operator_input: Option<String>,
     /// The current cycle's ENTRY state (what `getStateJson` serves): durable
     /// state as of the window's start — this window's edit and operator
@@ -950,13 +978,11 @@ pub struct SelfHarnessDriver {
     /// across a restart (restore adopts the reloaded generation first).
     checkpoint_generation: Option<persistence::CheckpointGeneration>,
     /// The last [`persistence::Checkpoint`] this driver committed or
-    /// restored, kept around so [`Self::mark_awaiting_continue`] can flip its
-    /// gate-park marker (`Checkpoint::with_awaiting_continue`) WITHOUT
-    /// deriving a new generation the way [`Self::commit_checkpoint`] does —
-    /// the marker write records a live park, not a newly completed cycle.
-    /// `None` before either a commit or a restore has happened, which is
-    /// exactly when [`Self::between_loops_gate`] is never reached (see
-    /// [`Self::run_loop`]'s `first`-gating).
+    /// restored. `None` before either a commit or a restore has happened —
+    /// [`Self::run_loop`] reads exactly that to decide whether this is a
+    /// first-ever run (no checkpoint at all, skip straight into the loop) or
+    /// a restart with prior history (gate before the next turn — the uniform
+    /// restart rule, see [`Self::run_loop`]'s doc).
     last_checkpoint: Option<persistence::Checkpoint>,
     /// The number of loop cycles completed so far — a runtime fact, NOT part
     /// of the authored `State` (`plans/self-iterating-harness/
@@ -2212,12 +2238,26 @@ impl SelfHarnessDriver {
     /// see the module doc for why this (and everything it calls) must run
     /// on a thread with an active multi-thread tokio runtime.
     ///
-    /// Between-loops human gate: before each new cycle
-    /// AFTER the first, unless `auto` is set, print "press Enter to continue"
-    /// and block on a line from stdin — a human checkpoint that keeps a
-    /// misbehaving harness from running away across loops. `auto` (the
-    /// binary's `--yes`/`--auto` flag) skips the gate for CI/replay. The
-    /// acceptance path drives [`Self::run_one_cycle`] directly and has NO gate.
+    /// Between-loops human gate: before each new cycle, unless `auto` is set
+    /// or this is the very first cycle of a fresh run (no checkpoint restored
+    /// at all — straight into the loop, which asks the authored seed question
+    /// via `askUser`), block on [`Self::between_loops_gate`] — an ordinary
+    /// operator form ("Turn N complete — start turn N+1?" plus an optional
+    /// steering field), presented through the same `present_form` machinery
+    /// every `askUser` ask uses. `auto` (the binary's `--yes`/`--auto` flag)
+    /// skips the gate for CI/replay. The acceptance path drives
+    /// [`Self::run_one_cycle`] directly and has NO gate.
+    ///
+    /// **Restart rule (uniform, no marker):** ANY boot that restores a
+    /// checkpoint presents the between-turns gate before running the next
+    /// turn — regardless of whether the prior process crashed mid-turn (the
+    /// turn simply reruns per the existing at-least-once semantics, and the
+    /// operator is asked again before it starts) or while genuinely parked on
+    /// the gate itself (the operator is asked again, no different from any
+    /// other restart). This replaces an earlier design that persisted a
+    /// dedicated `awaiting_continue` checkpoint marker to distinguish the two
+    /// cases — the marker is gone; every restart with prior history simply
+    /// re-asks.
     ///
     /// Defense in depth against a state-decode failure taking the whole
     /// process down: whatever [`Self::restore`]'s fingerprint check misses (a
@@ -2240,23 +2280,19 @@ impl SelfHarnessDriver {
     ) -> Result<(), DriverError> {
         self.refuse_if_poisoned()?;
         let mut state_json: Option<Json> = self.restore(source).await?;
-        // A restored checkpoint carrying the gate-park marker means the prior
-        // process was killed WHILE PARKED on `between_loops_gate` — restart-
-        // acts-as-continue is exactly the defect this closes, so this run
-        // must re-park BEFORE any turn work rather than silently deciding
-        // "continue" on the operator's behalf. Forcing `first = false` routes
-        // through the ordinary gate check below. A checkpoint with no marker
-        // (never parked, or written before the marker field existed) leaves
-        // `first = true`, byte-for-byte today's straight-into-turn-1 behavior
-        // — including the very first run ever, which has no checkpoint at all
-        // (`last_checkpoint` is `None`, so `is_some_and` is `false`).
-        let mut first = !self
-            .last_checkpoint
-            .as_ref()
-            .is_some_and(persistence::Checkpoint::awaiting_continue);
+        // Uniform restart rule: any restored checkpoint means this is not the
+        // very first cycle ever, so the between-turns gate must present
+        // before the next turn runs — whether the prior process crashed
+        // mid-turn (the turn reruns, per existing at-least-once semantics,
+        // and the operator is asked again first) or while genuinely parked on
+        // the gate (asked again, no different from any other restart). Only
+        // a first-ever run (no checkpoint at all, `last_checkpoint` is
+        // `None`) skips straight into the loop, which asks the seed question
+        // via the authored `askUser`.
+        let mut first = self.last_checkpoint.is_none();
         loop {
             if !first && !auto {
-                self.between_loops_gate()?;
+                self.between_loops_gate().await?;
             }
             first = false;
             let outcome = match self.run_one_cycle(source, state_json.as_ref()).await {
@@ -2315,11 +2351,10 @@ impl SelfHarnessDriver {
         let Some(checkpoint) = persistence::load_checkpoint(&self.checkpoint_path)? else {
             return Ok(None);
         };
-        // Kept whole (including its `awaiting_continue` marker) so
-        // `Self::run_loop` can decide whether to re-park before any turn work,
-        // and so `Self::mark_awaiting_continue` has a same-generation
-        // checkpoint to flip the marker on without a fresh `run_one_cycle`
-        // commit in between.
+        // Kept whole so `Self::run_loop` can tell "a checkpoint exists" from
+        // "first-ever run" — the uniform restart rule (see that method's
+        // doc): any prior checkpoint means the between-turns gate presents
+        // before the next turn, no marker needed.
         self.last_checkpoint = Some(checkpoint.clone());
         self.checkpoint_generation = Some(checkpoint.generation());
         self.iteration = checkpoint.iteration().get();
@@ -2394,102 +2429,37 @@ impl SelfHarnessDriver {
         Ok(())
     }
 
-    /// Overwrite the persisted checkpoint's `awaiting_continue` marker in
-    /// place, at the SAME generation ([`persistence::Checkpoint::with_awaiting_continue`])
-    /// — this is not a newly completed cycle, only a record of whether the
-    /// driver is currently parked on the between-turns gate. Requires
-    /// `self.last_checkpoint` to already be `Some`: [`Self::between_loops_gate`]
-    /// (the only caller) is only ever reached after a checkpoint has been
-    /// committed (a prior successful cycle, this same process or a restored
-    /// one) or restored, both of which set it. Used ONLY for the park-write
-    /// (`awaiting_continue = true`, before the gate blocks) — the clear-write
-    /// after a continue signal arrives goes through
-    /// [`Self::clear_awaiting_continue`] instead, since that write must ALSO
-    /// carry the operator's text.
-    fn mark_awaiting_continue(&mut self, awaiting_continue: bool) -> Result<(), DriverError> {
-        #[allow(
-            clippy::expect_used,
-            reason = "between_loops_gate is only reached after a checkpoint has been \
-                      committed or restored (see run_loop's first-gating)"
-        )]
-        let checkpoint = self
-            .last_checkpoint
-            .as_ref()
-            .expect(
-                "between_loops_gate is only reached after a checkpoint has been \
-                 committed or restored (see run_loop's first-gating)",
-            )
-            .with_awaiting_continue(awaiting_continue);
-        persistence::save_checkpoint(&self.checkpoint_path, &checkpoint)?;
-        self.last_checkpoint = Some(checkpoint);
-        Ok(())
-    }
-
-    /// Clear `awaiting_continue` and, in the SAME `save_checkpoint` call,
-    /// record `pending_operator_input` (the operator's between-loops message,
-    /// if any) and the current ask-id high-water mark — this is the ONE
-    /// write [`Self::between_loops_gate`] performs the instant
-    /// `await_continue` returns, so a kill anywhere after it cannot separate
-    /// "gate cleared" from "operator text captured" (review finding [1]): both
-    /// land in one committed checkpoint or neither does. `self.pending_operator_input`
-    /// is updated from the SAME value written to disk, so the in-memory and
-    /// durable copies never diverge.
-    fn clear_awaiting_continue(
-        &mut self,
-        pending_operator_input: Option<String>,
-    ) -> Result<(), DriverError> {
-        #[allow(
-            clippy::expect_used,
-            reason = "between_loops_gate is only reached after a checkpoint has been \
-                      committed or restored (see run_loop's first-gating)"
-        )]
-        let checkpoint = self
-            .last_checkpoint
-            .as_ref()
-            .expect(
-                "between_loops_gate is only reached after a checkpoint has been \
-                 committed or restored (see run_loop's first-gating)",
-            )
-            .with_awaiting_continue(false)
-            .with_pending_operator_input(pending_operator_input.clone())
-            .with_ask_id_high_water(self.ask_id_counter.load(Ordering::SeqCst));
-        persistence::save_checkpoint(&self.checkpoint_path, &checkpoint)?;
-        self.pending_operator_input = pending_operator_input;
-        self.last_checkpoint = Some(checkpoint);
-        Ok(())
-    }
-
-    /// The between-loops human checkpoint: block on [`OperatorGate::await_continue`]
-    /// — the human-clicks-continue gate. The default [`StdinGate`] keeps the
-    /// original headless behavior (block on a stdin line); a web/GUI gate
-    /// parks on a button click instead.
+    /// The between-loops human checkpoint: an ORDINARY operator form —
+    /// [`between_loops_gate_shape`] — presented through
+    /// [`Self::present_askuser_form`], the same funnel every `askUser` ask
+    /// uses (precedent: `Harness::escalate_to_operator`'s `AllocateMore`/
+    /// `Abort` form, driver-authored the same way). No dedicated gate
+    /// mechanism, no checkpoint write of its own: the uniform restart rule
+    /// ([`Self::run_loop`]'s doc) covers the crash-while-parked case without
+    /// one — a kill here just means the next boot re-presents this same ask
+    /// before running the next turn, same as a kill mid-turn means the turn
+    /// reruns.
     ///
-    /// The gate park is a live continuation only — nothing about it lives in
-    /// `State` or anywhere else a checkpoint otherwise captures — so a kill
-    /// while parked here needs its OWN durable record: [`Self::mark_awaiting_continue`]
-    /// writes the marker `true` right before blocking, and
-    /// [`Self::clear_awaiting_continue`] writes it `false` — ATOMICALLY WITH
-    /// the operator's continue text, if any (review finding [1]) — right after
-    /// the continue signal arrives, so a checkpoint read at any instant this
-    /// process might die tells a restart which side of the gate it was on
-    /// (see [`Self::run_loop`]'s restore-time check) and never loses the
-    /// operator's steering text to a crash between two separate writes.
-    fn between_loops_gate(&mut self) -> Result<(), DriverError> {
-        self.mark_awaiting_continue(true)?;
-        // `OperatorGate::await_continue` is SYNC-BLOCKING by frozen contract
-        // (`selfharness/operator.rs`) — a web gate parks a channel. Run the
-        // park under `block_in_place` so that blocking wait yields the tokio
-        // worker to other tasks instead of stalling it.
-        let gate = Arc::clone(&self.gate);
-        let signal = tokio::task::block_in_place(move || gate.await_continue());
-        let operator_text = match signal {
-            crate::selfharness::operator::ContinueSignal::ContinueWithInput(text) => {
-                self.emit(Event::OperatorMessage { text: text.clone() });
-                Some(text)
-            }
-            crate::selfharness::operator::ContinueSignal::Continue => None,
-        };
-        self.clear_awaiting_continue(operator_text)?;
+    /// An empty (or whitespace-only) `steer` field is a plain continue; any
+    /// other text becomes [`Self::pending_operator_input`] — the operator's
+    /// one channel for initiating — threaded into the next cognition
+    /// window's framing exactly as before.
+    async fn between_loops_gate(&mut self) -> Result<(), DriverError> {
+        let shape = between_loops_gate_shape(self.iteration);
+        let mut reprompts: u32 = 0;
+        let submission = self
+            .present_askuser_form(&mut reprompts, FormSource::OuterLoop, &shape)
+            .await?;
+        let operator_text = submission
+            .get("steer")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string);
+        if let Some(text) = &operator_text {
+            self.emit(Event::OperatorMessage { text: text.clone() });
+        }
+        self.pending_operator_input = operator_text;
         Ok(())
     }
 

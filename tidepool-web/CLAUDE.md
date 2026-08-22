@@ -88,9 +88,10 @@ automatically, so an escalation presents as an ordinary `present_form` ask
 - **Birth** — the driver's eager `node_gate(label)` registers the node (the
   section appears live on any open page — registration pings the SSE tick);
   `node_seeded(label, prompt)` appends a Seeded timeline entry.
-- **Life** — `post_note` appends to the timeline; `present_form` /
-  `await_continue` append a PENDING ask; `post_turn_source` accumulates the
-  turn history pane.
+- **Life** — `post_note` appends to the timeline; `present_form` appends a
+  PENDING ask (the self-iterating harness's between-loops gate is an
+  ORDINARY form presented this same way, not a second mechanism);
+  `post_turn_source` accumulates the turn history pane.
 - **End** — `retire_node(label)` sets `done`; then exactly one of
   `node_finalized(label, value)` / `node_failed(label, reason)` appends the
   outcome as a timeline entry at its true position.
@@ -111,8 +112,9 @@ automatically, so an escalation presents as an ordinary `present_form` ask
 Notes and asks land in true chronological order and STAY for the node's
 lifetime. Resolving an ask replaces it IN PLACE with its answered form (the
 reassembled answer the harness actually received, rendered read-only) — it
-never vanishes; notes are never cleared, including across `await_continue`.
-The stream above an ask is that ask's context. Publishing never supersedes
+never vanishes; notes are never cleared, including across the between-loops
+gate's own answered form. The stream above an ask is that ask's context.
+Publishing never supersedes
 an existing pending ask — concurrent cognition windows each get their own
 entry and coexist until answered, in any order. An ask's id is assigned once
 from that node's monotonic counter and never reused; POSTing an
@@ -122,9 +124,9 @@ already-answered id is rejected as "no such pending interaction".
 
 `OperatorGate` (frozen contract, `tidepool-harness/src/selfharness/operator.rs`)
 is sync, not async — it mirrors the driver's `block_in_place`/`block_on`
-turn-driving. [`WebGate::present_form`] and [`WebGate::await_continue`]
-publish the new ask into `AppState` (pinging the SSE tick for that node),
-then park the calling thread on a
+turn-driving. [`WebGate::present_form`] — the ONE gate method, covering the
+between-loops gate too — publishes the new ask into `AppState` (pinging the
+SSE tick for that node), then parks the calling thread on a
 `tokio::sync::oneshot::Receiver::blocking_recv()` resolved from inside an
 axum handler. This is why the test files drive gate calls from
 `tokio::task::spawn_blocking`. A `WebGate` is bound to exactly one

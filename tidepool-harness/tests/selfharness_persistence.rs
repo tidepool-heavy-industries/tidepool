@@ -45,9 +45,8 @@ use tidepool_harness::replay::{RecordedReply, ReplayProvider};
 use tidepool_harness::selfharness::operator::FormShape;
 use tidepool_harness::selfharness::persistence;
 use tidepool_harness::{
-    acquire_lease, answerer_decls, load_harness_source, retire_lease, ContinueSignal, DriverError,
-    Event, Harness, HarnessSource, LogObserver, Observer, OperatorGate, ResumeFold, RunLease,
-    SelfHarnessDriver,
+    acquire_lease, answerer_decls, load_harness_source, retire_lease, DriverError, Event, Harness,
+    HarnessSource, LogObserver, Observer, OperatorGate, ResumeFold, RunLease, SelfHarnessDriver,
 };
 
 fn repo_root() -> PathBuf {
@@ -149,46 +148,19 @@ fn source() -> HarnessSource {
 }
 
 // ============================================================================
-// Restart-acts-as-continue: the between-turns operator gate park is a live
-// continuation only (nothing about it lives in `State`), so a checkpoint
-// carries an `awaiting_continue` marker for it — set right before the driver
-// blocks on `OperatorGate::await_continue`, cleared the moment a continue
-// signal arrives. A restore that finds the marker set must re-park at the
-// gate before any turn work, rather than silently treating the restart as
-// the continue itself. See `SelfHarnessDriver::between_loops_gate`/
-// `mark_awaiting_continue` and `persistence::Checkpoint::with_awaiting_continue`.
+// Uniform restart rule: the between-turns gate is an ORDINARY `present_form`
+// ask (`SelfHarnessDriver::between_loops_gate`), not a second mechanism, and
+// writes nothing to disk of its own. Restart safety instead comes from a
+// simpler rule (`SelfHarnessDriver::run_loop`): ANY boot that restores a
+// checkpoint presents the between-turns gate before running the next turn —
+// whether the prior process crashed mid-turn (the turn simply reruns, and the
+// operator is asked again first) or genuinely parked at the gate itself
+// (asked again, no different from any other restart). Only a first-ever run
+// (no checkpoint at all) skips straight into the loop.
 // ============================================================================
 
-/// Captures the checkpoint BYTES on disk the first time `await_continue` is
-/// entered — exactly what a real `kill -9` would leave behind at that
-/// instant, since the marker is written to disk BEFORE the driver blocks on
-/// this call (`SelfHarnessDriver::between_loops_gate`). Never actually kills
-/// anything; it just lets a test read the durable state a kill would have
-/// produced without needing to kill a real process.
-struct SnapshotOnAwaitGate {
-    checkpoint_path: PathBuf,
-    snapshot: Mutex<Option<Vec<u8>>>,
-}
-
-impl OperatorGate for SnapshotOnAwaitGate {
-    fn present_form(&self, _shape: &FormShape) -> serde_json::Value {
-        panic!("this fixture harness never opens an askUser form")
-    }
-
-    fn await_continue(&self) -> ContinueSignal {
-        let mut snapshot = self.snapshot.lock();
-        if snapshot.is_none() {
-            *snapshot = Some(
-                std::fs::read(&self.checkpoint_path)
-                    .expect("checkpoint must be on disk the instant the gate blocks"),
-            );
-        }
-        ContinueSignal::Continue
-    }
-}
-
-/// Logs `"await_continue"` on every gate park, so a test can assert it
-/// happened (and WHEN, relative to provider calls logged into the same
+/// Logs `"gate_presented"` on every `present_form` call, so a test can assert
+/// it happened (and WHEN, relative to provider calls logged into the same
 /// shared order vector by [`OrderLoggingProvider`]) without needing a real
 /// operator or a real model.
 struct OrderLoggingGate {
@@ -197,19 +169,15 @@ struct OrderLoggingGate {
 
 impl OperatorGate for OrderLoggingGate {
     fn present_form(&self, _shape: &FormShape) -> serde_json::Value {
-        panic!("this fixture harness never opens an askUser form")
-    }
-
-    fn await_continue(&self) -> ContinueSignal {
-        self.order.lock().push("await_continue");
-        ContinueSignal::Continue
+        self.order.lock().push("gate_presented");
+        serde_json::json!({})
     }
 }
 
 /// Logs `"provider_call"` on every completion, delegating to `inner` for the
 /// actual (scripted) reply — pairs with [`OrderLoggingGate`] to prove a
-/// restored gate park re-presents BEFORE any turn work runs, not just that
-/// it happens at some point.
+/// restored process presents the gate BEFORE any turn work runs, not just
+/// that it happens at some point.
 struct OrderLoggingProvider {
     inner: Arc<dyn DynModelProvider>,
     order: Arc<Mutex<Vec<&'static str>>>,
@@ -226,68 +194,39 @@ impl ModelProvider for OrderLoggingProvider {
     }
 }
 
-/// THE restart-acts-as-continue regression this marker exists to close
-/// (live-dogfood incident, 2026-08-20): killing the process while parked at
-/// "Turn complete — start the next turn?" must resume back into that SAME
-/// park, never silently run the next turn on the operator's behalf.
-///
-/// "Kill while parked" is simulated rather than performed: `SnapshotOnAwaitGate`
-/// captures the checkpoint bytes the instant `await_continue` is entered —
-/// exactly what is durably on disk at that moment, since the marker write
-/// happens BEFORE the gate blocks. Those bytes are planted as a FRESH
-/// process's checkpoint, and driving IT through `run_loop` must call
-/// `await_continue` again — BEFORE the next cycle's provider call — rather
-/// than silently treating the restart as the continue.
+/// THE restart-acts-as-continue regression the uniform rule exists to close
+/// (live-dogfood incident, 2026-08-20): a restart that finds a completed
+/// checkpoint must present the between-turns gate before running the next
+/// turn, never silently run it on the operator's behalf. Under the unified
+/// design there is no separate "kill while parked" checkpoint state to
+/// simulate — the gate writes nothing to disk of its own — so a restart
+/// after a genuine park and a restart after an ordinary completed cycle look
+/// IDENTICAL on disk (one committed checkpoint), and both must re-present the
+/// gate before the next turn's provider call.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn kill_while_parked_at_the_gate_reparks_on_restart_before_any_turn_work() {
+async fn restart_with_a_prior_checkpoint_gates_before_any_turn_work() {
     support::require_extract();
     let _cache_guard = support::isolate_cache();
 
     let checkpoint_path = scratch("gate-park").join("checkpoint.json");
     let harness_source = source();
 
-    // --- "process 1": completes cycle 1, then parks at the between-loops
-    // gate for cycle 2 — captured mid-park. Only one reply is scripted, so
-    // cycle 2 never actually completes; the run ends by running out of
-    // replies, same deterministic-stop idiom as the other tests here.
+    // --- "process 1": completes cycle 1 and commits, then "dies" (no restart
+    // machinery of its own to model — the marker this used to simulate no
+    // longer exists). ---
     let mut driver1 = fresh_driver(vec![decision_reply("observe", "Medium")], "gate-park-1");
     driver1.set_checkpoint_path(checkpoint_path.clone());
-    let snapshot_gate = Arc::new(SnapshotOnAwaitGate {
-        checkpoint_path: checkpoint_path.clone(),
-        snapshot: Mutex::new(None),
-    });
-    driver1.set_gate(snapshot_gate.clone());
-
-    let err = driver1
-        .run_loop(&harness_source, false)
+    driver1
+        .run_one_cycle(&harness_source, None)
         .await
-        .expect_err("cycle 2 has no scripted reply, so run_loop must fail after the gate park");
-    assert!(
-        !matches!(err, DriverError::StateDecode(_)),
-        "the failure must come from cycle 2 running out of replies, not a decode error: {err:?}"
-    );
-
-    let killed_bytes = snapshot_gate
-        .snapshot
-        .lock()
-        .clone()
-        .expect("await_continue must have been called once, capturing the mid-park checkpoint");
-    let killed_checkpoint: persistence::Checkpoint =
-        serde_json::from_slice(&killed_bytes).expect("captured checkpoint parses");
-    assert!(
-        killed_checkpoint.awaiting_continue(),
-        "the checkpoint captured the instant the gate blocked must carry the \
-         parked marker — this is the exact bytes a real kill -9 would leave behind"
-    );
+        .expect("cycle 1 commits");
+    let cp1 = persistence::load_checkpoint(&checkpoint_path)
+        .expect("load_checkpoint after cycle 1")
+        .expect("cycle 1 committed");
     drop(driver1);
 
-    // --- simulate the kill: the process died with those bytes as the last
-    // thing on disk. Plant them at a fresh checkpoint path. ---
-    let killed_path = scratch("gate-park").join("checkpoint-killed.json");
-    std::fs::write(&killed_path, &killed_bytes).expect("plant the killed-while-parked checkpoint");
-
-    // --- "process 2": a brand-new driver restores from the killed snapshot
-    // and must re-park BEFORE running the next cycle's turn. ---
+    // --- "process 2": a brand-new driver restores that checkpoint and must
+    // present the between-turns gate BEFORE running the next cycle's turn. ---
     let order: Arc<Mutex<Vec<&'static str>>> = Arc::new(Mutex::new(Vec::new()));
     let inner_provider: Arc<dyn DynModelProvider> =
         Arc::new(ReplayProvider::new(vec![decision_reply("act", "High")]));
@@ -311,7 +250,7 @@ async fn kill_while_parked_at_the_gate_reparks_on_restart_before_any_turn_work()
     .expect("log writer");
     let agent = Arc::new(Harness::new(writer, agent_cfg, provider).expect("agent harness boots"));
     let mut driver2 = SelfHarnessDriver::new(agent, Arc::new(LogObserver));
-    driver2.set_checkpoint_path(killed_path.clone());
+    driver2.set_checkpoint_path(checkpoint_path.clone());
     let order_gate = Arc::new(OrderLoggingGate {
         order: order.clone(),
     });
@@ -329,9 +268,9 @@ async fn kill_while_parked_at_the_gate_reparks_on_restart_before_any_turn_work()
     let log = order.lock().clone();
     assert_eq!(
         log.first(),
-        Some(&"await_continue"),
-        "the restored parked marker must re-present the gate BEFORE any provider \
-         call — restart must not act as continue, got order: {log:?}"
+        Some(&"gate_presented"),
+        "a restored checkpoint must present the between-turns gate BEFORE any \
+         provider call — restart must not act as continue, got order: {log:?}"
     );
     assert!(
         log.contains(&"provider_call"),
@@ -339,34 +278,25 @@ async fn kill_while_parked_at_the_gate_reparks_on_restart_before_any_turn_work()
          didn't just hang at the gate forever), got order: {log:?}"
     );
 
-    // The post-restore cycle committed: the marker cleared the moment the
-    // continue arrived, and generation continued from the parked snapshot's
-    // generation rather than restarting.
-    let committed = persistence::load_checkpoint(&killed_path)
+    let committed = persistence::load_checkpoint(&checkpoint_path)
         .expect("load_checkpoint after the resumed cycle")
         .expect("the post-restore cycle committed");
-    assert!(
-        !committed.awaiting_continue(),
-        "a successfully committed cycle must never be left marked as parked"
-    );
     assert_eq!(
         committed.generation().get(),
-        killed_checkpoint.generation().get() + 1,
-        "generation must continue from the parked snapshot's, not reset"
+        cp1.generation().get() + 1,
+        "generation must continue from the restored checkpoint's, not reset"
     );
 }
 
-/// A checkpoint written by a pre-marker binary has no `awaiting_continue` key
-/// at all. `#[serde(default, skip_serializing_if)]` means the CURRENT writer
-/// also omits the key whenever a checkpoint is not parked (the overwhelming
-/// common case), so an ordinary committed checkpoint is already
-/// byte-identical to what a pre-marker binary would have written — this test
-/// uses exactly such a file (no hand-authored JSON literal needed) and pins
-/// that restoring it behaves exactly as before this fix: no re-park before
-/// the first post-restore cycle, only the ordinary between-loops gate before
-/// the SECOND one.
+/// A checkpoint written by a pre-unification binary carries an
+/// `awaiting_continue` key the current struct no longer even has a field
+/// for. The uniform restart rule doesn't look at any such key — it only
+/// checks whether ANY checkpoint was restored — so this old-format file must
+/// both (a) still decode (the stray key is silently ignored, pinned directly
+/// in `persistence.rs`) and (b) still gate before the very FIRST post-restore
+/// cycle, exactly like a checkpoint this crate wrote itself.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn old_format_checkpoint_with_no_marker_key_does_not_repark() {
+async fn old_format_checkpoint_still_gates_before_the_first_post_restore_cycle() {
     support::require_extract();
     let _cache_guard = support::isolate_cache();
 
@@ -377,73 +307,75 @@ async fn old_format_checkpoint_with_no_marker_key_does_not_repark() {
     prep.set_checkpoint_path(checkpoint_path.clone());
     prep.run_one_cycle(&harness_source, None)
         .await
-        .expect("cycle 1 commits a real, unparked checkpoint");
+        .expect("cycle 1 commits a real checkpoint");
     drop(prep);
 
-    let on_disk = std::fs::read_to_string(&checkpoint_path).expect("read the committed checkpoint");
-    assert!(
-        !on_disk.contains("awaiting_continue"),
-        "an unparked checkpoint must carry no marker key at all — this is what \
-         makes it byte-identical to a genuinely pre-marker file: {on_disk}"
-    );
+    // Splice in the retired marker key by hand — this crate never writes it
+    // anymore, so this simulates exactly what a pre-unification binary's
+    // checkpoint file looked like.
+    let mut on_disk: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(&checkpoint_path).expect("read the committed checkpoint"),
+    )
+    .expect("committed checkpoint is valid JSON");
+    on_disk["awaiting_continue"] = serde_json::json!(false);
+    std::fs::write(
+        &checkpoint_path,
+        serde_json::to_string(&on_disk).expect("re-serialize"),
+    )
+    .expect("plant the old-format checkpoint");
 
     // "Restart": a fresh driver restores this file and runs the loop. The
-    // marker key is absent, so the FIRST cycle after restore must run with NO
-    // gate call at all — only the ORDINARY between-loops gate before the
-    // SECOND cycle, exactly as before this fix existed.
+    // gate must present before the FIRST post-restore cycle even attempts a
+    // provider call — no scripted reply is provided at all, so the cycle
+    // fails immediately after that one gate presentation, ending the test
+    // deterministically.
     let order: Arc<Mutex<Vec<&'static str>>> = Arc::new(Mutex::new(Vec::new()));
-    let mut driver = fresh_driver(vec![decision_reply("act", "High")], "old-format");
+    let mut driver = fresh_driver(vec![], "old-format");
     driver.set_checkpoint_path(checkpoint_path.clone());
     driver.set_gate(Arc::new(OrderLoggingGate {
         order: order.clone(),
     }));
 
     let err = driver.run_loop(&harness_source, false).await.expect_err(
-        "the second post-restore cycle has no scripted reply, ending the loop \
+        "the post-restore cycle has no scripted reply at all, ending the loop \
              deterministically",
     );
     assert!(!matches!(err, DriverError::StateDecode(_)));
 
     assert_eq!(
         order.lock().as_slice(),
-        &["await_continue"],
-        "exactly one gate call: the ordinary between-loops gate before the \
-         second post-restore cycle, never an extra re-park before the first \
-         — byte-for-byte today's behavior for an old-format checkpoint"
+        &["gate_presented"],
+        "the gate presents once, before the first post-restore cycle even runs \
+         — the uniform rule applies regardless of the checkpoint's format"
     );
 }
 
 // ============================================================================
-// Operator-input loss window (review finding [1]): a `ContinueWithInput`'s
-// text used to go only to `self.pending_operator_input` — in-memory, never
-// the SAME write that cleared `awaiting_continue` — so a kill anywhere
-// between that write and the next `commit_checkpoint` lost the operator's
-// steering text even though the gate itself correctly re-parked on restart.
-// `SelfHarnessDriver::between_loops_gate`'s `clear_awaiting_continue` now
-// folds `pending_operator_input` into the SAME `save_checkpoint` call that
-// clears the marker, and `SelfHarnessDriver::restore` rehydrates it.
+// The operator's between-loops steering text: their one initiating channel,
+// threaded into the NEXT cognition window's framing. Under the unified gate
+// this is purely an in-memory hand-off within one process — the gate writes
+// nothing to disk, so there is no separate "does it survive a kill" story to
+// pin here: a kill before the next commit just means the checkpoint on disk
+// is unchanged, and `restart_with_a_prior_checkpoint_gates_before_any_turn_work`
+// above already proves that case re-presents the gate for the operator to
+// retype into.
 // ============================================================================
 
-/// A gate that always answers the between-loops park with a fixed message —
-/// the "operator typed something and hit continue" case.
+/// A gate that always answers the between-loops ask with a fixed steering
+/// message — the "operator typed something and submitted" case.
 struct ContinueWithTextGate {
     text: String,
 }
 
 impl OperatorGate for ContinueWithTextGate {
     fn present_form(&self, _shape: &FormShape) -> serde_json::Value {
-        panic!("this fixture harness never opens an askUser form")
-    }
-
-    fn await_continue(&self) -> ContinueSignal {
-        ContinueSignal::ContinueWithInput(self.text.clone())
+        serde_json::json!({"steer": self.text})
     }
 }
 
 /// Wraps a [`ReplayProvider`] and records every request's SYSTEM message —
-/// the loop answerer's framing, which is where a surviving
-/// `pending_operator_input` must show up (composed in by
-/// `SelfHarnessDriver::render_framing_with`).
+/// the loop answerer's framing, which is where the operator's steering text
+/// must show up (composed in by `SelfHarnessDriver::render_framing_with`).
 struct CaptureRequestProvider {
     inner: Arc<dyn DynModelProvider>,
     system_messages: Mutex<Vec<String>>,
@@ -462,63 +394,17 @@ impl ModelProvider for CaptureRequestProvider {
     }
 }
 
-/// A kill anywhere AFTER the gate-clear write (`clear_awaiting_continue`)
-/// must not lose the operator's `ContinueWithInput` text: it is captured in
-/// that SAME atomic checkpoint write, so whatever is on disk the instant a
-/// process dies already carries it — a restart rehydrates it via
-/// [`SelfHarnessDriver::restore`] and the next cycle's render composes it
-/// into the answerer's framing, exactly as if the process had never died.
+/// The operator's steering text reaches the very NEXT cycle's answerer
+/// framing verbatim — the between-turns gate's whole point as an initiating
+/// channel.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn operator_input_survives_a_kill_after_the_gate_clear_write_and_reaches_the_next_cycle() {
+async fn operator_steering_text_reaches_the_next_cycles_framing() {
     support::require_extract();
     let _cache_guard = support::isolate_cache();
 
     let checkpoint_path = scratch("operator-input").join("checkpoint.json");
     let harness_source = source();
 
-    // --- "process 1": completes cycle 1, parks at the between-loops gate,
-    // and receives a `ContinueWithInput` — the gate-clear write lands on
-    // disk, and THEN the process "dies" (cycle 2 has no scripted reply, so
-    // `run_loop` fails deterministically right after that write, same
-    // idiom as the other gate-park tests here). ---
-    let mut driver1 = fresh_driver(
-        vec![decision_reply("observe", "Medium")],
-        "operator-input-1",
-    );
-    driver1.set_checkpoint_path(checkpoint_path.clone());
-    driver1.set_gate(Arc::new(ContinueWithTextGate {
-        text: "steer left".to_string(),
-    }));
-
-    let err = driver1.run_loop(&harness_source, false).await.expect_err(
-        "cycle 2 has no scripted reply, so run_loop must fail after the gate-clear write",
-    );
-    assert!(
-        !matches!(err, DriverError::StateDecode(_)),
-        "the failure must come from cycle 2 running out of replies, not a decode error: {err:?}"
-    );
-    drop(driver1);
-
-    // The bytes a real kill -9 would have left behind at this instant: the
-    // gate-clear write already landed (marker cleared, same generation),
-    // carrying the operator's text.
-    let killed_checkpoint = persistence::load_checkpoint(&checkpoint_path)
-        .expect("load_checkpoint after the simulated kill")
-        .expect("cycle 1's checkpoint, gate-cleared, is on disk");
-    assert!(
-        !killed_checkpoint.awaiting_continue(),
-        "the gate-clear write must have cleared the marker before the process died"
-    );
-    assert_eq!(
-        killed_checkpoint.pending_operator_input(),
-        Some("steer left"),
-        "the SAME write that cleared the marker must carry the operator's text — \
-         this is the exact bytes a kill right after that write would leave behind"
-    );
-
-    // --- "process 2": a brand-new driver restores from the killed checkpoint
-    // and runs the pending cycle. The surviving operator text must reach
-    // THAT cycle's answerer framing (its first model call's system message). ---
     let agent_cfg = EngineConfig::from_decls(
         answerer_decls(),
         prelude_dir(),
@@ -526,44 +412,60 @@ async fn operator_input_survives_a_kill_after_the_gate_clear_write_and_reaches_t
     )
     .expect("answerer engine config");
     let capture = Arc::new(CaptureRequestProvider {
-        inner: Arc::new(ReplayProvider::new(vec![decision_reply(
-            "resumed", "Medium",
-        )])),
+        inner: Arc::new(ReplayProvider::new(vec![
+            decision_reply("observe", "Medium"),
+            decision_reply("resumed", "Medium"),
+        ])),
         system_messages: Mutex::new(Vec::new()),
     });
     let provider: Arc<dyn DynModelProvider> = capture.clone();
     let writer = tidepool_harness::log::LogWriter::create(
         std::env::temp_dir().join(format!(
-            "selfharness-persistence-operator-input-2-{}.jsonl",
+            "selfharness-persistence-operator-input-{}.jsonl",
             std::process::id()
         )),
         &header(),
     )
     .expect("log writer");
     let agent = Arc::new(Harness::new(writer, agent_cfg, provider).expect("agent harness boots"));
-    let mut driver2 = SelfHarnessDriver::new(agent, Arc::new(LogObserver));
-    driver2.set_checkpoint_path(checkpoint_path.clone());
+    let mut driver = SelfHarnessDriver::new(agent, Arc::new(LogObserver));
+    driver.set_checkpoint_path(checkpoint_path.clone());
+    driver.set_gate(Arc::new(ContinueWithTextGate {
+        text: "steer left".to_string(),
+    }));
 
-    let state_json = driver2
-        .restore(&harness_source)
+    // Cycle 1 runs with no gate (first-ever run, no checkpoint yet); the
+    // between-turns gate presents before cycle 2, feeding its answer into
+    // cycle 2's framing; the loop then presents the gate AGAIN before a third
+    // cycle, whose first model call is captured before it fails on an empty
+    // reply queue — ending deterministically at three captured calls, not two.
+    let err = driver
+        .run_loop(&harness_source, false)
         .await
-        .expect("restore succeeds");
-    driver2
-        .run_one_cycle(&harness_source, state_json.as_ref())
-        .await
-        .expect("the resumed cycle completes, consuming the surviving operator input");
+        .expect_err("cycle 3 runs out of scripted replies after its first (captured) model call");
+    assert!(!matches!(err, DriverError::StateDecode(_)));
 
     let system_messages = capture.system_messages.lock().clone();
-    assert!(
-        !system_messages.is_empty(),
-        "the resumed cycle must have made at least one model call"
+    assert_eq!(
+        system_messages.len(),
+        3,
+        "three captured model calls: cycle 1 (no gate yet), cycle 2 (after the \
+         between-turns gate), and cycle 3's doomed first call (captured before \
+         the empty reply queue fails it), got {}",
+        system_messages.len()
     );
     assert!(
+        !system_messages[0].contains("THE OPERATOR SAID"),
+        "cycle 1 runs before any gate presentation, so its framing carries no \
+         operator text yet, got: {:?}",
         system_messages[0]
+    );
+    assert!(
+        system_messages[1]
             .contains("THE OPERATOR SAID (between loops, addressed to you): steer left"),
-        "the operator's between-loops text must survive the simulated kill and \
-         reach the resumed cycle's framing verbatim, got: {:?}",
-        system_messages[0]
+        "the operator's between-loops text must reach cycle 2's framing verbatim, \
+         got: {:?}",
+        system_messages[1]
     );
 }
 
@@ -583,10 +485,6 @@ struct AutoAnswerDecisionGate;
 impl OperatorGate for AutoAnswerDecisionGate {
     fn present_form(&self, _shape: &FormShape) -> serde_json::Value {
         serde_json::json!({"action": "auto", "rationale": "r", "confidence": "High"})
-    }
-
-    fn await_continue(&self) -> ContinueSignal {
-        ContinueSignal::Continue
     }
 }
 

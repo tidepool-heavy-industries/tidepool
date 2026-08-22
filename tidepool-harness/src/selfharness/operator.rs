@@ -1,10 +1,11 @@
 //! Operator input shared by the `AskUser` effect decoder, self-harness driver,
 //! and web UI.
 //!
-//! [`OperatorGate`] is synchronous: `present_form` blocks until submission and
-//! `await_continue` blocks between loop iterations. The web implementation
-//! parks a channel; [`StdinGate`] reads a line. The async driver isolates the
-//! blocking call with `tokio::task::block_in_place`.
+//! [`OperatorGate`] is synchronous: `present_form` blocks until submission —
+//! including the between-loops gate, which is an ordinary driver-authored
+//! form (`SelfHarnessDriver::between_loops_gate`), not a second mechanism.
+//! The web implementation parks a channel; [`StdinGate`] reads a line. The
+//! async driver isolates the blocking call with `tokio::task::block_in_place`.
 //!
 //! [`FormShape`] is the form wire, mirroring Haskell's
 //! `Tidepool.Form.Shape` (`FormShape`/`FieldShape`/`VariantShape`)
@@ -61,14 +62,6 @@ pub trait OperatorGate: Send + Sync {
     /// full `Value` because valid answers include scalars and `null`, not
     /// only objects. A decode failure Haskell-side re-presents the form.
     fn present_form(&self, shape: &FormShape) -> serde_json::Value;
-
-    /// BLOCK until the operator advances to the next loop iteration (the
-    /// human button-click gate that replaces the stdin between-loops gate).
-    /// The operator may attach a message — their ONE channel for initiating
-    /// (the model otherwise only hears them through forms it opens itself):
-    /// [`ContinueSignal::ContinueWithInput`] is threaded by the driver into
-    /// the next cognition window's framing as the operator's utterance.
-    fn await_continue(&self) -> ContinueSignal;
 
     /// Post display-only narration (`note`, riding `AskUser`'s `NoteWith`
     /// constructor) to the operator's accumulating feed. Does NOT block —
@@ -127,21 +120,10 @@ pub trait OperatorGate: Send + Sync {
     fn node_failed(&self, _label: &str, _reason: &str) {}
 }
 
-/// Headless default: `await_continue` reads a line from stdin (the current
-/// between-loops behavior); `present_form` reads one JSON value per line, so
-/// non-web/CLI drives and tests still work. Used as the
-/// default when no web gate is configured.
-/// How the operator advanced past the between-loops gate: a bare continue,
-/// or a continue CARRYING a message for the next cognition window.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ContinueSignal {
-    /// Advance with nothing to say.
-    Continue,
-    /// Advance AND speak: the text reaches the next window's framing as the
-    /// operator's between-loops utterance.
-    ContinueWithInput(String),
-}
-
+/// Headless default: `present_form` reads one JSON value per line (this
+/// covers the between-loops gate too — it is an ordinary form), so
+/// non-web/CLI drives and tests still work. Used as the default when no web
+/// gate is configured.
 #[derive(Debug, Default)]
 pub struct StdinGate;
 
@@ -154,17 +136,6 @@ impl OperatorGate for StdinGate {
         // An unparseable line degrades to `{}`, which the Haskell decoder
         // rejects and re-presents.
         serde_json::from_str(line.trim()).unwrap_or_else(|_| serde_json::json!({}))
-    }
-
-    fn await_continue(&self) -> ContinueSignal {
-        let mut line = String::new();
-        let _ = std::io::stdin().read_line(&mut line);
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            ContinueSignal::Continue
-        } else {
-            ContinueSignal::ContinueWithInput(trimmed.to_string())
-        }
     }
 }
 

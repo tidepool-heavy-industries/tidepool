@@ -31,7 +31,7 @@ use serde_json::json;
 use tidepool_harness::engine::EngineConfig;
 use tidepool_harness::provider::{DynModelProvider, Usage};
 use tidepool_harness::replay::{RecordedReply, ReplayProvider};
-use tidepool_harness::selfharness::operator::{ContinueSignal, FormShape, OperatorGate};
+use tidepool_harness::selfharness::operator::{FormShape, OperatorGate};
 use tidepool_harness::{
     answerer_decls, load_harness_source, Harness, LogObserver, SelfHarnessDriver,
 };
@@ -109,10 +109,6 @@ impl OperatorGate for DefaultGate {
         json!("unexpected — the labeled branch's own ask must never reach the default gate")
     }
 
-    fn await_continue(&self) -> ContinueSignal {
-        ContinueSignal::Continue
-    }
-
     fn node_gate(&self, label: &str) -> Option<Arc<dyn OperatorGate>> {
         (label == self.child_label).then(|| {
             Arc::new(ChildGate {
@@ -162,10 +158,6 @@ impl OperatorGate for ChildGate {
             .child_present_calls
             .fetch_add(1, Ordering::SeqCst);
         json!("a scripted answer")
-    }
-
-    fn await_continue(&self) -> ContinueSignal {
-        ContinueSignal::Continue
     }
 }
 

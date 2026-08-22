@@ -33,7 +33,7 @@ impl TimelineItem {
         matches!(
             self,
             TimelineItem::Ask {
-                state: AskState::PendingForm { .. } | AskState::PendingContinue { .. },
+                state: AskState::PendingForm { .. },
                 ..
             }
         )
@@ -291,11 +291,7 @@ fn timeline_entry(node_id: &str, entry: &TimelineItem) -> Markup {
         },
         TimelineItem::Ask { id, state } => match state {
             AskState::PendingForm { shape, .. } => ask_form(node_id, *id, shape),
-            AskState::PendingContinue { .. } => ask_continue(node_id, *id),
             AskState::AnsweredForm { shape, answer } => answered_form(node_id, *id, shape, answer),
-            AskState::AnsweredContinue { input } => {
-                answered_continue(node_id, *id, input.as_deref())
-            }
         },
     }
 }
@@ -309,24 +305,6 @@ fn answered_form(node_id: &str, interaction: u64, shape: &FormShape, answer: &Jv
             class="answered" data-node="answered" {
             p class="eyebrow" { "ask #" (interaction) " — Answered — " (shape_title(shape)) }
             pre { (answer_text(answer)) }
-        }
-    }
-}
-
-/// A clicked continue gate, read-only at its position.
-fn answered_continue(node_id: &str, interaction: u64, input: Option<&str>) -> Markup {
-    html! {
-        div id=(ask_id(node_id, interaction)) data-rev=(interaction)
-            class="answered" data-node="answered" {
-            @match input {
-                Some(text) => {
-                    p class="eyebrow" { "ask #" (interaction) " — Continued, with input" }
-                    pre { (text) }
-                }
-                None => {
-                    p class="eyebrow" { "ask #" (interaction) " — Continued" }
-                }
-            }
         }
     }
 }
@@ -420,58 +398,6 @@ fn shape_doc(shape: &FormShape) -> Option<&str> {
     match shape {
         FormShape::Product { doc, .. } | FormShape::Sum { doc, .. } => doc.as_deref(),
         _ => None,
-    }
-}
-
-/// The [`ContinueSignal`] sum's own [`FormShape`] — the between-loops gate
-/// rendered and reassembled through the SAME generic sum machinery as every
-/// `askUser` form (one presentation algebra, no bespoke pane): two variants
-/// with different subfields, radio-picked, the payload branch revealing its
-/// text field. Shared with `server::continue_loop`'s reassembly so render
-/// and decode cannot drift. Adding a variant here (and an arm to the
-/// server's mapping) is the WHOLE cost of a new between-loops action.
-pub fn continue_shape() -> FormShape {
-    FormShape::Sum {
-        type_key: "ContinueSignal".to_string(),
-        variants: vec![
-            VariantShape {
-                constructor: "Continue".to_string(),
-                shape: FormShape::Product {
-                    type_key: "ContinueSignal".to_string(),
-                    constructor: "Continue".to_string(),
-                    fields: vec![],
-                    doc: None,
-                },
-            },
-            VariantShape {
-                constructor: "ContinueWithInput".to_string(),
-                shape: FormShape::Product {
-                    type_key: "ContinueSignal".to_string(),
-                    constructor: "ContinueWithInput".to_string(),
-                    fields: vec![FieldShape {
-                        key: "input".to_string(),
-                        shape: FormShape::String,
-                        doc: None,
-                    }],
-                    doc: None,
-                },
-            },
-        ],
-        doc: None,
-    }
-}
-
-/// One pending between-loops continue gate: the [`continue_shape`] sum
-/// rendered by the generic machinery, POSTing to
-/// `/node/<node_id>/continue/<interaction>`.
-fn ask_continue(node_id: &str, interaction: u64) -> Markup {
-    html! {
-        form id=(ask_id(node_id, interaction)) data-rev=(interaction) class="continue"
-             data-on-submit=(post_url(node_id, "continue", interaction)) {
-            p class="eyebrow" { "ask #" (interaction) " — Turn complete — start the next turn?" }
-            (generic_shape(ROOT_BIND_PATH, &continue_shape()))
-            button type="submit" class="btn btn-primary" { "Start next turn" }
-        }
     }
 }
 
@@ -714,36 +640,11 @@ mod tests {
             },
         }
     }
-    fn tl_pending_continue(id: u64) -> TimelineItem {
-        TimelineItem::Ask {
-            id,
-            state: AskState::PendingContinue {
-                resolve: tokio::sync::oneshot::channel().0,
-            },
-        }
-    }
     fn tl_answered_form(id: u64, shape: FormShape, answer: Jv) -> TimelineItem {
         TimelineItem::Ask {
             id,
             state: AskState::AnsweredForm { shape, answer },
         }
-    }
-    fn tl_answered_continue(id: u64, input: Option<&str>) -> TimelineItem {
-        TimelineItem::Ask {
-            id,
-            state: AskState::AnsweredContinue {
-                input: input.map(str::to_string),
-            },
-        }
-    }
-
-    #[test]
-    fn node_panel_continue_renders_button() {
-        let th = empty_history();
-        let items = [tl_pending_continue(0)];
-        let view = base_view("n1", &items, &th, 0);
-        let html = node_panel(&view).into_string();
-        assert!(html.contains("@post('/node/n1/continue/0')"));
     }
 
     #[test]
@@ -843,7 +744,10 @@ mod tests {
         assert!(needs.contains(">needs you</span>"), "{needs}");
 
         // Pending outranks done: a done node with a live gate needs you.
-        let parked_items = [tl_finalized("{\"ok\":true}"), tl_pending_continue(1)];
+        let parked_items = [
+            tl_finalized("{\"ok\":true}"),
+            tl_pending_form(1, FormShape::String),
+        ];
         let mut parked = base_view("n", &parked_items, &th, 0);
         parked.done = true;
         let parked = node_panel(&parked).into_string();
@@ -1018,7 +922,7 @@ mod tests {
             tl_seeded("turn 1 brief"),
             tl_note("working"),
             tl_finalized("\"turn 1 answer\""),
-            tl_answered_continue(0, Some("steer")),
+            tl_answered_form(0, FormShape::String, json!("steer")),
             tl_seeded("turn 2 brief"),
         ];
         let view = base_view("root", &items, &th, 0);
@@ -1078,7 +982,7 @@ mod tests {
         let th = empty_history();
         let items = [
             tl_pending_form(3, FormShape::String),
-            tl_pending_continue(7),
+            tl_pending_form(7, FormShape::Int),
         ];
         let view = base_view("n1", &items, &th, 42);
         let html = node_panel(&view).into_string();
@@ -1086,7 +990,7 @@ mod tests {
         assert!(html.contains("id=\"ask-n1-3\" data-rev=\"3\""), "{html}");
         assert!(html.contains("id=\"ask-n1-7\" data-rev=\"7\""), "{html}");
         assert!(html.contains("@post('/node/n1/submit/3')"), "{html}");
-        assert!(html.contains("@post('/node/n1/continue/7')"), "{html}");
+        assert!(html.contains("@post('/node/n1/submit/7')"), "{html}");
     }
 
     /// A stacked pair of pending asks each carries a visible `ask #<id>`
@@ -1098,7 +1002,7 @@ mod tests {
         let th = empty_history();
         let items = [
             tl_pending_form(3, FormShape::String),
-            tl_pending_continue(7),
+            tl_pending_form(7, FormShape::Int),
         ];
         let view = base_view("n1", &items, &th, 42);
         let html = node_panel(&view).into_string();
@@ -1117,7 +1021,7 @@ mod tests {
         let th = empty_history();
         let items = [
             tl_pending_form(0, FormShape::String),
-            tl_pending_continue(1),
+            tl_pending_form(1, FormShape::Int),
         ];
         let view = base_view("root/1-x", &items, &th, 0);
         let html = node_panel(&view).into_string();
@@ -1126,7 +1030,7 @@ mod tests {
             "{html}"
         );
         assert!(
-            html.contains("@post('/node/root%2F1-x/continue/1')"),
+            html.contains("@post('/node/root%2F1-x/submit/1')"),
             "{html}"
         );
         assert!(
@@ -1135,21 +1039,25 @@ mod tests {
         );
     }
 
-    /// An answered continue renders the operator's message when one was
-    /// attached, and a plain marker when not.
+    /// An answered between-turns gate renders the operator's steering
+    /// message when one was attached — it is an ordinary answered form,
+    /// carrying its `steer` field's value like any other submission.
     #[test]
-    fn node_panel_renders_answered_continue_with_and_without_input() {
+    fn node_panel_renders_answered_between_turns_gate_with_and_without_steer() {
         let th = empty_history();
-        let with_items = [tl_answered_continue(1, Some("focus on receipts"))];
+        let with_items = [tl_answered_form(
+            1,
+            FormShape::String,
+            json!("focus on receipts"),
+        )];
         let with = base_view("n1", &with_items, &th, 0);
         let html = node_panel(&with).into_string();
-        assert!(html.contains("Continued, with input"), "{html}");
         assert!(html.contains("focus on receipts"), "{html}");
 
-        let without_items = [tl_answered_continue(1, None)];
+        let without_items = [tl_answered_form(1, FormShape::Unit, Jv::Null)];
         let without = base_view("n1", &without_items, &th, 0);
         let html = node_panel(&without).into_string();
-        assert!(html.contains("Continued"), "{html}");
+        assert!(html.contains("Answered"), "{html}");
     }
 
     /// Notes are escaped as ordinary text nodes.
