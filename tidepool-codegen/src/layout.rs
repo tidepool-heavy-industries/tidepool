@@ -3,10 +3,12 @@
 //! These constants define the frozen layout of the VMContext struct and
 //! the various heap object types as `i32`/`i64` values suitable for
 //! Cranelift IR emission. The heap-object *tag* discriminants (`TAG_*`,
-//! `THUNK_*`, and `LIT_TAG_*`) are NOT redefined here — they are DERIVED from
-//! (or re-exported from) `tidepool_heap::layout`, which is the single source of
-//! truth for the numeric ABI. This makes drift between the heap runtime and
-//! codegen a compile error rather than a silent divergence. All derivations are
+//! `THUNK_*`, and `LIT_TAG_*`) AND the payload field offsets/sizes
+//! (`CLOSURE_*`/`CON_*`/`LIT_*`/`THUNK_*`/`HEAP_HEADER_SIZE`) are NOT
+//! redefined here — they are DERIVED from (or re-exported from)
+//! `tidepool_heap::layout`, which is the single source of truth for the
+//! numeric ABI. This makes drift between the heap runtime and codegen a
+//! compile error rather than a silent divergence. All derivations are
 //! compile-time `as` casts / re-exports — zero runtime cost.
 
 /// The literal-value discriminant, re-exported from the heap crate so codegen
@@ -37,24 +39,27 @@ pub const THUNK_UNEVALUATED: u8 = tidepool_heap::layout::ThunkStateTag::Unevalua
 pub const THUNK_BLACKHOLE: u8 = tidepool_heap::layout::ThunkStateTag::BlackHole as u8;
 pub const THUNK_EVALUATED: u8 = tidepool_heap::layout::ThunkStateTag::Evaluated as u8;
 
-// --- HeapObject layout constants (i32/u64 for Cranelift and Rust) ---
+// --- HeapObject layout constants (i32/u64 for Cranelift and Rust), derived
+// from tidepool_heap::layout (usize) so an offset/size can never drift from
+// the heap runtime that actually owns the ABI. ---
 
-pub const HEAP_HEADER_SIZE: u64 = 8;
+pub const HEAP_HEADER_SIZE: u64 = tidepool_heap::layout::HEADER_SIZE as u64;
 
 // Closure layout
-pub const CLOSURE_CODE_PTR_OFFSET: i32 = 8;
-pub const CLOSURE_NUM_CAPTURED_OFFSET: i32 = 16;
-pub const CLOSURE_CAPTURED_OFFSET: i32 = 24;
+pub const CLOSURE_CODE_PTR_OFFSET: i32 = tidepool_heap::layout::CLOSURE_CODE_PTR_OFFSET as i32;
+pub const CLOSURE_NUM_CAPTURED_OFFSET: i32 =
+    tidepool_heap::layout::CLOSURE_NUM_CAPTURED_OFFSET as i32;
+pub const CLOSURE_CAPTURED_OFFSET: i32 = tidepool_heap::layout::CLOSURE_CAPTURED_OFFSET as i32;
 
 // Con layout
-pub const CON_TAG_OFFSET: i32 = 8;
-pub const CON_NUM_FIELDS_OFFSET: i32 = 16;
-pub const CON_FIELDS_OFFSET: i32 = 24;
+pub const CON_TAG_OFFSET: i32 = tidepool_heap::layout::CON_TAG_OFFSET as i32;
+pub const CON_NUM_FIELDS_OFFSET: i32 = tidepool_heap::layout::CON_NUM_FIELDS_OFFSET as i32;
+pub const CON_FIELDS_OFFSET: i32 = tidepool_heap::layout::CON_FIELDS_OFFSET as i32;
 
 // Lit layout
-pub const LIT_TAG_OFFSET: i32 = 8;
-pub const LIT_VALUE_OFFSET: i32 = 16;
-pub const LIT_TOTAL_SIZE: u64 = 24;
+pub const LIT_TAG_OFFSET: i32 = tidepool_heap::layout::LIT_TAG_OFFSET as i32;
+pub const LIT_VALUE_OFFSET: i32 = tidepool_heap::layout::LIT_VALUE_OFFSET as i32;
+pub const LIT_TOTAL_SIZE: u64 = tidepool_heap::layout::LIT_SIZE as u64;
 
 // Lit tags, re-exported as `LitTag` values from tidepool_heap::layout (the
 // single ABI source). `SsaVal::Raw` stores one directly; at Cranelift
@@ -71,8 +76,8 @@ pub const LIT_TAG_SMALLARRAY: LitTag = LitTag::SmallArray;
 pub const LIT_TAG_ARRAY: LitTag = LitTag::Array;
 
 // Thunk layout
-pub const THUNK_STATE_OFFSET: i32 = 8;
-pub const THUNK_CODE_PTR_OFFSET: i32 = 16;
-pub const THUNK_CAPTURED_OFFSET: i32 = 24;
-pub const THUNK_MIN_SIZE: u64 = 24;
-pub const THUNK_INDIRECTION_OFFSET: i32 = 16;
+pub const THUNK_STATE_OFFSET: i32 = tidepool_heap::layout::THUNK_STATE_OFFSET as i32;
+pub const THUNK_CODE_PTR_OFFSET: i32 = tidepool_heap::layout::THUNK_CODE_PTR_OFFSET as i32;
+pub const THUNK_CAPTURED_OFFSET: i32 = tidepool_heap::layout::THUNK_CAPTURED_OFFSET as i32;
+pub const THUNK_MIN_SIZE: u64 = tidepool_heap::layout::THUNK_MIN_SIZE as u64;
+pub const THUNK_INDIRECTION_OFFSET: i32 = tidepool_heap::layout::THUNK_INDIRECTION_OFFSET as i32;
