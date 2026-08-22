@@ -49,7 +49,7 @@ module Tidepool.Prelude
   , Functor(..), Applicative(..), Monad(..)
   , (<$>)
     -- * show (Text-returning shadow)
-  , show, showT
+  , show
   , showDouble
     -- * read (String-based, works on the JIT since native bignum — see
     -- gotcha_registry stale_doc_read_now_works; parseInt/parseDouble are the
@@ -81,7 +81,6 @@ module Tidepool.Prelude
   , sortBy
   , maximumBy, minimumBy
   , concatMap, concatMapM
-  , append
   , (++)
   , dropWhile
   , length
@@ -90,7 +89,6 @@ module Tidepool.Prelude
   , intersperse
     -- * Text intercalate (shadows list version)
   , intercalate
-  , joinText
   , tReverse
     -- * Text takeWhile/dropWhile (thin aliases for T.takeWhile/T.dropWhile)
   , takeWhileT
@@ -357,10 +355,6 @@ showDouble d = case d of !_ -> error "showDouble: should be intercepted by Trans
 show :: Show a => a -> Text
 show = T.pack . P.show
 
--- | Alias for 'show' (for discoverability, since our @show@ returns @Text@).
-showT :: Show a => a -> Text
-showT = show
-
 -- | Polymorphic @pack@ (identity on 'Text', pack on 'String') now lives in
 -- 'Tidepool.Data.Text' so that the qualified @T.pack@ and this unqualified
 -- @pack@ are the SAME function — @T.pack (show x)@ is no longer a trap.
@@ -534,11 +528,6 @@ replicate n x = go n
 intercalate :: Text -> [Text] -> Text
 intercalate = T.intercalate
 {-# INLINE intercalate #-}
-
--- | Alias for 'intercalate' (for discoverability).
-joinText :: Text -> [Text] -> Text
-joinText = T.intercalate
-{-# INLINE joinText #-}
 
 -- | Reverse a Text.
 tReverse :: Text -> Text
@@ -724,7 +713,7 @@ parseDoubleM t = case T.uncons t of
     -- correctly-rounded decimal parser would -- chaining @/10@ or @*10@ once
     -- per exponent step instead compounds a rounding error at every step
     -- (measurably wrong for negative exponents, e.g. @parseDoubleM
-    -- (showT (1.5e-10 :: Double))@ no longer round-tripped).
+    -- (show (1.5e-10 :: Double))@ no longer round-tripped).
     scaleByPow10 :: Double -> Int -> Double
     scaleByPow10 x e
       | e >= 0    = x * pow10D e
@@ -1004,7 +993,7 @@ setUnions = foldl' Set.union Set.empty
 -- ---------------------------------------------------------------------------
 
 -- | Intercalate for lists (not Text). Named to avoid shadowing the Text
--- 'intercalate'; for Text use 'intercalate' (or 'joinText'), for lists use this.
+-- 'intercalate'; for Text use 'intercalate', for lists use this.
 -- @listIntercalate [0] [[1,2],[3,4]] == [1,2,0,3,4]@
 listIntercalate :: [a] -> [[a]] -> [a]
 listIntercalate sep = go

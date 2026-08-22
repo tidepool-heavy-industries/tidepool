@@ -39,7 +39,7 @@ async fn session_text_substrate_folds_heap_verified() {
 
     // Turn 2: bind a multi-MB synthetic corpus — one tenure of a large graph.
     repl.eval(
-        "corpus <- pure [ (showT i <> \".rs\", T.unlines [ \"fn f\" <> showT i <> \"_\" <> showT j <> \"() { \" <> (if (i+j) `mod` 7 == 0 then \"unsafe { p }\" else \"x+1\") <> \" }\" | j <- [1 .. 250 + (i*37) `mod` 400 :: Int] ]) | i <- [1 .. 120 :: Int] ]",
+        "corpus <- pure [ (show i <> \".rs\", T.unlines [ \"fn f\" <> show i <> \"_\" <> show j <> \"() { \" <> (if (i+j) `mod` 7 == 0 then \"unsafe { p }\" else \"x+1\") <> \" }\" | j <- [1 .. 250 + (i*37) `mod` 400 :: Int] ]) | i <- [1 .. 120 :: Int] ]",
     )
     .await
     .expect_ok("bind corpus");
@@ -112,7 +112,7 @@ async fn session_rebind_accumulator_heap_verified() {
         // arrays OUTSIDE the GC heap and never trigger a collection): 30k
         // small Texts per rebind keeps the nursery churning.
         repl.eval(&format!(
-            "acc <- pure (map showT [{i} * 100000 .. {i} * 100000 + 30000 :: Int] <> acc)"
+            "acc <- pure (map show [{i} * 100000 .. {i} * 100000 + 30000 :: Int] <> acc)"
         ))
         .await
         .expect_ok(&format!("rebind acc {i}"));

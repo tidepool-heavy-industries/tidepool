@@ -20,7 +20,7 @@ import qualified Data.Set as Set
 -- the same node via multiple paths (diamond edges, cycles), so this is what
 -- `dedupNodes`/`walk`'s visited-set key on.
 nodeKey :: LspNode -> Text
-nodeKey n = nodeFile n <> ":" <> nodeName n <> ":" <> showT (nodeLine n)
+nodeKey n = nodeFile n <> ":" <> nodeName n <> ":" <> show (nodeLine n)
 
 -- | Order-preserving dedupe by 'nodeKey'.
 dedupNodes :: [LspNode] -> [LspNode]
@@ -43,9 +43,9 @@ named name = do
     []  -> error ("named: no workspace definition found for '" <> name <> "'")
     [n] -> pure n
     ns  -> error
-      (  "named: '" <> name <> "' is ambiguous (" <> showT (length ns)
+      (  "named: '" <> name <> "' is ambiguous (" <> show (length ns)
       <> " definitions: " <> intercalate ", "
-           [ nodeFile n <> ":" <> showT (nodeLine n) | n <- ns ]
+           [ nodeFile n <> ":" <> show (nodeLine n) | n <- ns ]
       <> ") — use lspWhere and pick one, or Lsp.the/findDef to disambiguate"
       )
 

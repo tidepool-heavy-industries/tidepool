@@ -164,7 +164,7 @@ the name intent = do
     [n] -> pure (Just n)
     ns  -> Just <$> steer (\_ -> Nothing) (\_ -> pickModel ns) (\_ -> pickHuman ns) ()
   where
-    menu ns = intercalate "\n" (imap (\i n -> showT i <> ") " <> nodeContainer n <> "  " <> nodeText n) ns)
+    menu ns = intercalate "\n" (imap (\i n -> show i <> ") " <> nodeContainer n <> "  " <> nodeText n) ns)
     pickModel ns = do
       r <- llm (SObj [("index", SNum), ("confidence", SNum)])
              ("Pick the definition matching: " <> intent <> "\n" <> menu ns)
@@ -293,7 +293,7 @@ blastRadius name intent = do
   rs   <- refsOf d
   prod <- filterM (fmap not . isTestM) rs
   let byFile = sortOn (negate . snd) (Map.toList (Map.fromListWith (+) [ (nodeFile r, 1 :: Int) | r <- prod ]))
-  pure (object [ "def"      .= (nodeFile d <> ":" <> showT (nodeLine d))
+  pure (object [ "def"      .= (nodeFile d <> ":" <> show (nodeLine d))
                , "totalRefs" .= length rs
                , "prodRefs"  .= length prod
                , "testRefs"  .= (length rs - length prod)

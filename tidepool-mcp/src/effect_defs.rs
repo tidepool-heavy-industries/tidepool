@@ -558,9 +558,6 @@ macro_rules! console_effect_def {
                   doc ["Emit a line of console output. Thin wrapper over the Print effect",
                        "so chains never need `send (Print …)`."],
                   body pointfree Print },
-                { raw ["-- | `say` on anything Showable (`say . show`).",
-                       "sayShow :: forall a effs. (Show a, Member Console effs) => a -> Eff effs ()",
-                       "sayShow = say . show"] },
             ],
         }
     };
@@ -2578,9 +2575,6 @@ mod tests {
                  -- so chains never need `send (Print …)`.\n\
                  say :: forall effs. Member Console effs => Text -> Eff effs ()\n\
                  say = send . Print",
-                "-- | `say` on anything Showable (`say . show`).\n\
-                 sayShow :: forall a effs. (Show a, Member Console effs) => a -> Eff effs ()\n\
-                 sayShow = say . show",
             ]
         );
     }

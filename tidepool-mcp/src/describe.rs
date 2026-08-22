@@ -93,13 +93,13 @@ fn helper_is_substrate(helper: &str) -> bool {
 /// its one-line (first-sentence) description, and the names of the PUBLIC helper
 /// verbs it exposes — the recommended callable surface, derived from the decl so
 /// a new public helper auto-appears (substrate helpers, see
-/// [`is_substrate_helper`], are excluded here but still fully documented at
+/// [`helper_is_substrate`], are excluded here but still fully documented at
 /// `tidepool://effect/{name}`). Rendered as a header line plus an indented verb
 /// list:
 ///
 /// ```text
 ///   Console: Print text output.
-///       verbs: say, sayShow
+///       verbs: say
 /// ```
 pub fn describe_effect(decl: &EffectDecl) -> String {
     let verbs: Vec<String> = decl
