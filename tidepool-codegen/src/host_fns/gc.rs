@@ -775,14 +775,14 @@ unsafe fn verify_heap_post_gc(
                         obj,
                     );
                 }
-                for i in 0..nf {
-                    check_field(
-                        off,
-                        idx,
-                        obj,
-                        l::CON_FIELDS_OFFSET as usize + 8 * i,
-                        "Con field",
-                    );
+                // Field offsets come from the shared, validated visitor
+                // (tidepool_heap::gc::raw::inspect_object) rather than being
+                // re-derived here — the `size == expect` check just above
+                // already guarantees `avail` (== size, since size == expect
+                // == off+size <= live_bytes was checked before this match)
+                // covers every field it reports.
+                for slot in tidepool_heap::gc::raw::inspect_object(obj as *mut u8, size) {
+                    check_field(off, idx, obj, slot.offset, slot.label);
                 }
             }
             l::TAG_LIT => {
@@ -855,54 +855,23 @@ unsafe fn verify_heap_post_gc(
                 // between (the next binding's pre-alloc, a capture's
                 // ensure_heap_ptr) sees this state. Same allowance as null Con
                 // fields below; the verifier must not fail on it.
-                for i in 0..nc {
-                    check_field(
-                        off,
-                        idx,
-                        obj,
-                        l::CLOSURE_CAPTURED_OFFSET as usize + 8 * i,
-                        "Closure capture",
-                    );
+                for slot in tidepool_heap::gc::raw::inspect_object(obj as *mut u8, size) {
+                    check_field(off, idx, obj, slot.offset, slot.label);
                 }
             }
             l::TAG_THUNK => {
                 let state = *obj.add(l::THUNK_STATE_OFFSET as usize);
                 match state {
-                    l::THUNK_UNEVALUATED => {
-                        let n = (size - l::THUNK_CAPTURED_OFFSET as usize) / 8;
-                        for i in 0..n {
-                            check_field(
-                                off,
-                                idx,
-                                obj,
-                                l::THUNK_CAPTURED_OFFSET as usize + 8 * i,
-                                "Thunk capture",
-                            );
-                        }
-                    }
-                    l::THUNK_EVALUATED => {
-                        check_field(
-                            off,
-                            idx,
-                            obj,
-                            l::THUNK_INDIRECTION_OFFSET as usize,
-                            "Thunk indirection",
-                        );
-                    }
-                    l::THUNK_BLACKHOLE => {
-                        // for_each_pointer_field traces THUNK_BLACKHOLE
-                        // captures identically to THUNK_UNEVALUATED — this is
-                        // a second, redundant check on the same invariant,
-                        // not a gap.
-                        let n = (size - l::THUNK_CAPTURED_OFFSET as usize) / 8;
-                        for i in 0..n {
-                            check_field(
-                                off,
-                                idx,
-                                obj,
-                                l::THUNK_CAPTURED_OFFSET as usize + 8 * i,
-                                "BLACKHOLE capture",
-                            );
+                    // for_each_pointer_field traces THUNK_BLACKHOLE captures
+                    // identically to THUNK_UNEVALUATED (a blackhole's code
+                    // may still read its capture slots after a GC it
+                    // triggered itself) — inspect_object shares that
+                    // dispatch, so both states are covered by the same call
+                    // below; this is a second, redundant check on the same
+                    // invariant, not a gap.
+                    l::THUNK_UNEVALUATED | l::THUNK_BLACKHOLE | l::THUNK_EVALUATED => {
+                        for slot in tidepool_heap::gc::raw::inspect_object(obj as *mut u8, size) {
+                            check_field(off, idx, obj, slot.offset, slot.label);
                         }
                     }
                     other => fail(off, idx, &format!("invalid thunk state {other}"), obj),

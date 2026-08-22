@@ -465,6 +465,76 @@ pub unsafe fn for_each_pointer_field(obj: *mut u8, avail: usize, mut f: impl FnM
     }
 }
 
+/// One pointer-field slot within a heap object, as found by [`inspect_object`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FieldSlot {
+    /// Byte offset of the slot from the object's own start (`obj`, not the
+    /// containing arena) — valid for `Closure`/`Con`/`Thunk` slots, which
+    /// this covers; a `Lit`'s boxed-array elements live in a separate
+    /// malloc'd payload and are NOT represented here (see `inspect_object`'s
+    /// doc).
+    pub offset: usize,
+    /// Human-readable field label, derived from the object's own tag —
+    /// "Con field", "Closure capture", "Thunk field".
+    pub label: &'static str,
+}
+
+fn field_label(tag: u8) -> &'static str {
+    match tag {
+        TAG_CON => "Con field",
+        TAG_CLOSURE => "Closure capture",
+        TAG_THUNK => "Thunk field",
+        _ => "field",
+    }
+}
+
+/// The validated, bounds-checked list of pointer-field slots in `obj` —
+/// [`for_each_pointer_field`]'s own decode, collected and labeled instead of
+/// streamed through a callback, for a caller (post-GC verification, debug
+/// validation) that wants to inspect the shape rather than mutate the heap
+/// in place. Reuses `for_each_pointer_field` verbatim (same containment
+/// checks, same `report_violation` on a corrupted count) — this does not
+/// reimplement or relax any of its bounds checking.
+///
+/// Covers `Closure` captures, `Con` fields, and `Thunk` fields (whichever
+/// shape `state` selects) — every slot `for_each_pointer_field` would visit
+/// AND whose address falls within `obj`'s own bytes. A `Lit` holding a
+/// `SmallArray#`/`Array#` visits slots inside a SEPARATE malloc'd payload
+/// buffer, which cannot be expressed as an offset from `obj`; callers that
+/// need those keep using [`for_each_pointer_field`] directly (as
+/// `verify_heap_post_gc` and `cheney_copy` both still do).
+///
+/// # Safety
+/// Same contract as [`for_each_pointer_field`].
+pub unsafe fn inspect_object(obj: *mut u8, avail: usize) -> Vec<FieldSlot> {
+    // SAFETY: obj is a valid heap object per this function's own contract,
+    // which mirrors for_each_pointer_field's.
+    let tag = read_tag(obj);
+    if tag == TAG_LIT {
+        // A Lit's only pointer-bearing shape (SmallArray#/Array#) visits
+        // slots inside a separate malloc'd payload buffer, at an address
+        // with no fixed relationship to `obj` — not representable as an
+        // offset from `obj` at all, so this deliberately visits nothing
+        // rather than guess. See this fn's doc.
+        return Vec::new();
+    }
+    let label = field_label(tag);
+    let base = obj as usize;
+    let mut slots = Vec::new();
+    for_each_pointer_field(obj, avail, |slot| {
+        let addr = slot as usize;
+        debug_assert!(
+            addr >= base,
+            "inspect_object: field slot {addr:#x} precedes object base {base:#x}"
+        );
+        slots.push(FieldSlot {
+            offset: addr - base,
+            label,
+        });
+    });
+    slots
+}
+
 /// Perform a Cheney semi-space copying garbage collection.
 ///
 /// Scans a slice of root pointers, evacuating any live objects from the `from`
@@ -838,6 +908,46 @@ mod tests {
                 ptrs.push(*p);
             });
             assert_eq!(ptrs, vec![0x3000 as *mut u8]); // code_ptr is excluded
+        }
+    }
+
+    // 11b. test_inspect_object_con — offsets/labels match for_each_pointer_field
+    #[test]
+    fn test_inspect_object_con() {
+        let mut buf_data = AlignedBuf([0u8; 1024]);
+        let buf = &mut buf_data.0;
+        // SAFETY: Test-only. Aligned buffer contains a valid Con with 2 synthetic pointer fields.
+        unsafe {
+            write_con(buf, 0, 1, &[0x1000 as *mut u8, 0x2000 as *mut u8]);
+            let slots = inspect_object(buf.as_mut_ptr(), 1024);
+            assert_eq!(
+                slots,
+                vec![
+                    FieldSlot {
+                        offset: CON_FIELDS_OFFSET,
+                        label: "Con field"
+                    },
+                    FieldSlot {
+                        offset: CON_FIELDS_OFFSET + FIELD_STRIDE,
+                        label: "Con field"
+                    },
+                ]
+            );
+        }
+    }
+
+    // 11c. test_inspect_object_lit_visits_nothing — array payload isn't
+    // obj-relative, so inspect_object deliberately returns empty rather than
+    // guess at an offset.
+    #[test]
+    fn test_inspect_object_lit_visits_nothing() {
+        let mut buf_data = AlignedBuf([0u8; 1024]);
+        let buf = &mut buf_data.0;
+        // SAFETY: Test-only. Aligned buffer contains a valid Lit.
+        unsafe {
+            write_lit(buf, 0, 42);
+            let slots = inspect_object(buf.as_mut_ptr(), 1024);
+            assert!(slots.is_empty());
         }
     }
 

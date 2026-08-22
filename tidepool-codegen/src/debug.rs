@@ -302,11 +302,22 @@ pub unsafe fn heap_validate_deep(ptr: *const u8) -> Result<(), HeapError> {
 
     let tag_byte = *ptr.add(heap_layout::OFFSET_TAG);
     match heap_layout::HeapTag::from_byte(tag_byte) {
-        Some(heap_layout::HeapTag::Con) => {
-            let num_fields = *(ptr.add(layout::CON_NUM_FIELDS_OFFSET as usize) as *const u16);
-            for i in 0..num_fields as usize {
-                let field =
-                    *(ptr.add(layout::CON_FIELDS_OFFSET as usize + 8 * i) as *const *const u8);
+        Some(heap_layout::HeapTag::Con) | Some(heap_layout::HeapTag::Closure) => {
+            // Field offsets come from the shared, validated visitor
+            // (tidepool_heap::gc::raw::inspect_object) — `heap_validate`
+            // above already confirmed `size` covers every field this
+            // object's own count declares, so `avail = size` is a real
+            // bound. What stays here, deliberately not delegated: a NULL
+            // field is legal (skipped, not an error — the mid-construction
+            // allowance `verify_heap_post_gc` documents too) and every
+            // non-null field's OWN tag must decode — a check on the
+            // pointee, one level deeper than any slot visitor reports.
+            let size = std::ptr::read_unaligned(ptr.add(heap_layout::OFFSET_SIZE) as *const u32);
+            for (i, slot) in tidepool_heap::gc::raw::inspect_object(ptr as *mut u8, size as usize)
+                .into_iter()
+                .enumerate()
+            {
+                let field = *(ptr.add(slot.offset) as *const *const u8);
                 if field.is_null() {
                     continue;
                 }
@@ -315,24 +326,6 @@ pub unsafe fn heap_validate_deep(ptr: *const u8) -> Result<(), HeapError> {
                     return Err(HeapError::InvalidFieldTag {
                         index: i,
                         tag: field_tag,
-                    });
-                }
-            }
-        }
-        Some(heap_layout::HeapTag::Closure) => {
-            let num_captured =
-                *(ptr.add(layout::CLOSURE_NUM_CAPTURED_OFFSET as usize) as *const u16);
-            for i in 0..num_captured as usize {
-                let cap = *(ptr.add(layout::CLOSURE_CAPTURED_OFFSET as usize + 8 * i)
-                    as *const *const u8);
-                if cap.is_null() {
-                    continue;
-                }
-                let cap_tag = *cap.add(heap_layout::OFFSET_TAG);
-                if heap_layout::HeapTag::from_byte(cap_tag).is_none() {
-                    return Err(HeapError::InvalidFieldTag {
-                        index: i,
-                        tag: cap_tag,
                     });
                 }
             }
