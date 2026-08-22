@@ -603,22 +603,46 @@ is reused across holes whose types differ), and its turns compile with:
   GHC says it by name. Because the row admits exactly one answer type, a
   wrong-typed answer cannot compile — it can never cross in-heap into a
   `T`-typed continuation and case-trap past every check.
-- **The author modules that define the type** — `HarnessSource::answerer_imports`,
-  derived structurally as the sibling modules the harness file itself imports.
-  Not a naming convention: a module the harness does not import is never pulled
-  in (so unrelated harnesses can share a directory — the fixtures do), and the
-  harness module itself never is (it defines `loop`, whose `runLLMTurn` is
-  absent from the answerer's row, and GHC compiles an imported module whole).
-  Resolving the type through the one shared module also fixes WHICH type it is,
-  so constructor ids agree at the crossing.
+- **The modules that define the type** — resolved by EXTRACT, not scraped by
+  the harness. Every sited call site (`finalize`, `fork`/`forkAll`,
+  `runLLMTurn`/`runLLMTurnFork`/…) reports its answer type's defining
+  modules in `asks.json` alongside the rendered type itself
+  (`Tidepool.Translate.modulesOfType`, walking every tycon the type mentions
+  — `Either MyErr MyOk` reports `Either`'s, `MyErr`'s, AND `MyOk`'s modules,
+  not just the head's) — extract has the real type environment in hand at
+  that point, so it answers directly rather than a downstream caller
+  guessing from a source scan. `tidepool_runtime::AsksSidecar::modules_of`
+  is the Rust-side read; `SelfHarnessDriver::answer_contract` and
+  `Harness::answer_fork`/`answer_fanout` build `AnswerContract::imports` from
+  it. This replaced `HarnessSource::answerer_imports` (deleted), which only
+  ever found types the harness AUTHOR imported into `loop`'s own module —
+  a type a MODEL declares in the session decl plane compiled everywhere else
+  (the decl plane is on every compile's include path) but could never be
+  named as a fork/finalize answer type, because nothing scraped an import
+  line for it. The extract-side lookup has no such blind spot: it resolves
+  from the type itself, wherever it's defined.
 
 Both halves are load-bearing: without the pin a wrong-typed answer traps, and
 without the imports the model cannot name the type it is being asked for and
-substitutes one that compiles. A harness that inlines its author types alongside
-`loop` fails the second half — `SelfHarnessDriver::types_in_scope_hint` says so
-in the retry rather than looping to the round cap. A node with no contract
-compiles at `Finalize Void` and simply cannot finalize. Pinned by
-`tests/finalize_type_pinning.rs`.
+substitutes one that compiles. A hole whose type extract could not resolve to
+any module (an unusual case — e.g. a type with no home module at all) fails
+the second half the same way a scrape-miss used to — `SelfHarnessDriver::
+types_in_scope_hint` says so in the retry rather than looping to the round
+cap. A node with no contract compiles at `Finalize Void` and simply cannot
+finalize. Pinned by `tests/finalize_type_pinning.rs`.
+
+A fork/fanout child's row is widened from ITS OWN requested type this same
+way, independent of whatever contract its parent happens to carry
+(`Harness::answer_fork`/`answer_fanout`, `tests/fork_own_type_pin.rs`) — see
+those methods' doc for why a parent-contract-matching guess is no longer
+needed now that the child's own type resolves its own modules directly. The
+practical payoff for THIS servicing path is the type's defining module
+landing on the child's compile include, which is what lets `resume value ::
+T` name `T` at all — the child still answers by `resume` (redefined `= pure`
+for this one-shot `run_child` compile), never `finalize @T`: `finalize` is a
+genuinely suspending effect and crashes this specific path
+(`ResidentError::ChildSuspended`), a separate, pre-existing gap this pin does
+not newly close.
 
 `askUser` re-prompts by RECURSION on a decode failure (no `Either` — the
 retry is entirely Haskell-side): a bad submission genuinely re-suspends on a

@@ -454,12 +454,12 @@ data TurnOut
       { toBinders       :: [Text]
       , toVariant       :: Int
       , toBoundBinders  :: [BoundBinder]
-      , toAsks          :: [(Word64, Text)]
+      , toAsks          :: [(Word64, Text, [Text])]
       , toWrappedSource :: Text
       }
   | TExpr
       { toVariant       :: Int
-      , toAsks          :: [(Word64, Text)]
+      , toAsks          :: [(Word64, Text, [Text])]
       , toWrappedSource :: Text
       }
   deriving (Eq, Show)
@@ -475,7 +475,14 @@ renderBoundBinderJson (BoundBinder name varid modul tier tdisp) =
     ++ ",\"tier\":" ++ jsonString tier
     ++ ",\"typeDisplay\":" ++ jsonString tdisp ++ "}"
 
--- | One runLLMTurn/runLLMTurnFork @{site, type}@ pair as JSON — same shape the
--- @asks.json@ sidecar always used.
-renderAskJson :: (Word64, Text) -> String
-renderAskJson (site, ty) = "{\"site\":" ++ show site ++ ",\"type\":" ++ jsonString (T.unpack ty) ++ "}"
+-- | One runLLMTurn/runLLMTurnFork @{site, type, modules}@ triple as JSON —
+-- the @asks.json@ sidecar shape. @modules@ (added alongside @site@/@type@,
+-- never optional — an extract that doesn't emit it is stale, and the Rust
+-- reader fails loud on the missing key rather than silently falling back to
+-- no modules) is the defining-module set 'Tidepool.Translate.modulesOfType'
+-- resolved for @type@'s mentioned tycons.
+renderAskJson :: (Word64, Text, [Text]) -> String
+renderAskJson (site, ty, modules) =
+  "{\"site\":" ++ show site
+    ++ ",\"type\":" ++ jsonString (T.unpack ty)
+    ++ ",\"modules\":[" ++ intercalate "," (map (jsonString . T.unpack) modules) ++ "]}"

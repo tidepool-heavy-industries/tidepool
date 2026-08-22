@@ -34,10 +34,10 @@
 
 mod support;
 
+use tidepool_harness::answerer_decls;
 use tidepool_harness::engine::{
     self, answerer_hole_card, template_turn_for, CompiledTurn, EngineConfig,
 };
-use tidepool_harness::{answerer_decls, load_harness_source};
 use tidepool_runtime::CompileError;
 
 fn repo_root() -> std::path::PathBuf {
@@ -206,17 +206,31 @@ fn pinned_finalize_needs_the_type_in_scope() {
     );
 }
 
-/// The driver side of SCOPE: the answerer's imports are derived from the
-/// modules the harness itself imports, so the reference harness offers
-/// `HarnessTypes` — and never itself. Importing the harness module would not
-/// work: it defines `loop`, whose `runLLMTurn` is absent from the answerer's
-/// row, and GHC compiles an imported module whole.
+/// The driver side of SCOPE, on the CURRENT mechanism: extract itself
+/// resolves `Decision`'s defining module from the real type environment at
+/// the `finalize @Decision` call site and reports it in `asks.json`
+/// (`AsksSidecar::modules_of`) — `SelfHarnessDriver::answer_contract` pins
+/// its imports from that lookup, not from a scan of `Harness.hs`'s own
+/// import lines (the retired `HarnessSource::answerer_imports`). Pinned
+/// to `HarnessTypes` here exactly like the retired scrape-based test was,
+/// but via the mechanism that also resolves a MODEL-declared decl-plane
+/// type, which no import scan of a static file could ever see.
 #[test]
 fn answer_contract_puts_the_type_in_scope() {
-    let source = load_harness_source(&repo_root().join("examples/harness/Harness.hs"))
-        .expect("reference harness resolves");
-    assert_eq!(source.answerer_imports, vec!["HarnessTypes".to_string()]);
-    assert!(!source.answerer_imports.contains(&source.module_name));
+    support::require_extract();
+    let result = compile_turn(GOOD_DECISION, "HarnessTypes", Some("Decision"))
+        .expect("a correctly-typed finalize compiles");
+    let (_, _, modules) = result
+        .asks
+        .iter()
+        .next()
+        .expect("the finalize call site has an asks.json entry");
+    assert_eq!(
+        modules,
+        &["HarnessTypes".to_string()],
+        "Decision's defining module must be resolved from the type itself, not \
+         scraped from Harness.hs"
+    );
 }
 
 /// The effects staging dir is content-addressed on the GENERATED

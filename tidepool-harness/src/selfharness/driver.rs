@@ -376,10 +376,6 @@ struct OuterSession {
     sid: tidepool_repr::SessionId,
     cfg: EngineConfig,
     module_name: String,
-    /// The author modules every answerer turn imports
-    /// ([`HarnessSource::answerer_imports`]), so the hole's answer type is in
-    /// scope and resolves to the SAME defining module the outer loop used.
-    answerer_imports: Vec<String>,
 }
 
 /// The outer Harness-monad's OWN decl list — `Eff '[RunLLMTurn, AskUser]`,
@@ -1373,23 +1369,26 @@ impl SelfHarnessDriver {
         self.outer = None;
     }
 
-    /// The author modules an answerer turn imports, once bootstrapped — what
-    /// brings the hole's answer type into scope.
-    fn answerer_imports(&self) -> &[String] {
-        self.outer.as_ref().map_or(&[], |o| &o.answerer_imports)
-    }
-
-    /// The [`AnswerContract`] for a hole of type `ty`: pin `finalize` to it and
-    /// import the author modules so the type resolves — to the SAME defining
-    /// module the outer loop resolved, so the finalized value's constructor ids
-    /// match at the crossing.
+    /// The [`AnswerContract`] for a hole of type `ty`: pin `finalize` to it
+    /// and import `modules` — the defining modules `asks.json` reported for
+    /// `ty` ([`tidepool_runtime::AsksSidecar::modules_of`], resolved by
+    /// extract at the call site from the real type environment) — so the
+    /// type resolves to the SAME defining module the outer loop resolved,
+    /// meaning the finalized value's constructor ids match at the crossing.
+    /// This replaced a harness-import-scraping guess
+    /// (`HarnessSource::answerer_imports`, since removed): the scrape only
+    /// ever found types the harness AUTHOR imported into `loop`'s own
+    /// module, so a type the MODEL declares in the session decl plane could
+    /// never be named here even though it compiles everywhere else — the
+    /// extract-side lookup has no such blind spot, because it runs over
+    /// whichever module the type actually came from.
     ///
     /// `None` when the hole's type is unknown (no `asks.json` entry): there is
     /// nothing to pin `finalize` to, so the turn keeps the polymorphic verb.
-    fn answer_contract(&self, ty: Option<&str>) -> Option<AnswerContract> {
+    fn answer_contract(&self, ty: Option<&str>, modules: &[String]) -> Option<AnswerContract> {
         Some(AnswerContract {
             ty: ty?.to_string(),
-            imports: self.answerer_imports().to_vec(),
+            imports: modules.to_vec(),
         })
     }
 
@@ -1401,13 +1400,18 @@ impl SelfHarnessDriver {
     /// author types live in the same module as `loop` fails here, every round,
     /// until the round cap. That must not read as a mysterious not-in-scope
     /// loop: say what was imported and what the author has to change.
-    fn types_in_scope_hint(&self, ty: &str, error: &str) -> Option<String> {
+    /// `node`'s CURRENTLY SET [`AnswerContract`] is the source of truth for
+    /// what was actually imported (`Harness::answer_contract` — set by the
+    /// same caller that pinned this turn), not a second copy of the same
+    /// list threaded down separately.
+    fn types_in_scope_hint(&self, node: NodeId, ty: &str, error: &str) -> Option<String> {
         if !(error.contains("Not in scope") && error.contains(ty)) {
             return None;
         }
-        let imported = match self.answerer_imports() {
-            [] => "no author modules are importable by this stack".to_string(),
-            mods => format!("this turn imports {}", mods.join(", ")),
+        let contract = self.agent.answer_contract(node);
+        let imported = match contract.as_ref().map(|c| c.imports.as_slice()) {
+            None | Some([]) => "no author modules are importable by this stack".to_string(),
+            Some(mods) => format!("this turn imports {}", mods.join(", ")),
         };
         Some(format!(
             "\n\nNOTE: `{ty}` is not in scope and {imported}. The answering stack \
@@ -1681,7 +1685,6 @@ impl SelfHarnessDriver {
             sid,
             cfg: outer_cfg,
             module_name: source.module_name.clone(),
-            answerer_imports: source.answerer_imports.clone(),
         });
         Ok(())
     }
@@ -2660,6 +2663,7 @@ impl SelfHarnessDriver {
                                 .service_runllm_hole(
                                     site.get(),
                                     ty.as_deref(),
+                                    compiled.asks.modules_of(site.get()),
                                     &classified.prompt,
                                     &compiled.table,
                                 )
@@ -2890,6 +2894,7 @@ impl SelfHarnessDriver {
                                 .service_outer_fanout(
                                     site.get(),
                                     ty.as_deref(),
+                                    compiled.asks.modules_of(site.get()),
                                     *fan,
                                     &classified.prompt,
                                     prompts,
@@ -2963,6 +2968,7 @@ impl SelfHarnessDriver {
                                 .service_outer_branch(
                                     site.get(),
                                     ty.as_deref(),
+                                    compiled.asks.modules_of(site.get()),
                                     context_ref,
                                     label.as_deref(),
                                     &classified.prompt,
@@ -2998,6 +3004,7 @@ impl SelfHarnessDriver {
                                 .service_outer_branch_fanout(
                                     site.get(),
                                     ty.as_deref(),
+                                    compiled.asks.modules_of(site.get()),
                                     context_ref,
                                     labels,
                                     prompts,
@@ -3465,6 +3472,7 @@ impl SelfHarnessDriver {
         &mut self,
         site: u32,
         ty: Option<&str>,
+        modules: &[String],
         prompt: &str,
         table: &DataConTable,
     ) -> Result<FinalAnswer, DriverError> {
@@ -3492,7 +3500,7 @@ impl SelfHarnessDriver {
         // types module puts that type in scope. Set per hole, because
         // consecutive holes in one loop can want different types.
         self.agent
-            .set_answer_contract(node, self.answer_contract(ty));
+            .set_answer_contract(node, self.answer_contract(ty, modules));
 
         // Push the hole card onto the EXISTING answerer node, accumulating
         // context rather than spawning a fresh one. The SCOPED answerer card
@@ -3501,7 +3509,7 @@ impl SelfHarnessDriver {
         let child_prompt = engine::answerer_hole_card(
             prompt,
             ty,
-            self.answerer_imports(),
+            modules,
             Some(table),
             &self.agent.hole_card_effect_row(),
         );
@@ -3645,10 +3653,12 @@ impl SelfHarnessDriver {
     /// `runLLMTurnBranch` calls, each its own suspend/resume round-trip), so
     /// — unlike [`Self::drive_fanout_child`] — this is `&mut self` and needs
     /// no realm-checkout retry dance against concurrent siblings.
+    #[allow(clippy::too_many_arguments)]
     async fn service_outer_branch(
         &mut self,
         site: u32,
         ty: Option<&str>,
+        modules: &[String],
         context_ref: &str,
         label: Option<&str>,
         prompt: &str,
@@ -3671,7 +3681,7 @@ impl SelfHarnessDriver {
         let hole_card = engine::answerer_hole_card(
             prompt,
             ty,
-            self.answerer_imports(),
+            modules,
             Some(table),
             &self.agent.hole_card_effect_row(),
         );
@@ -3721,7 +3731,7 @@ impl SelfHarnessDriver {
             })?;
         self.agent.set_node_scope(node, child_scope);
         self.agent
-            .set_answer_contract(node, self.answer_contract(ty));
+            .set_answer_contract(node, self.answer_contract(ty, modules));
         self.emit(Event::TurnStart { node });
 
         // This child's mode, typed (`WindowLease::require_one_shot`'s doc):
@@ -3883,10 +3893,12 @@ impl SelfHarnessDriver {
     /// sibling CAN delegate or ask the operator mid-window, exactly as a
     /// sequential [`Self::service_outer_branch`] child could — see that
     /// method's own doc for why.
+    #[allow(clippy::too_many_arguments)]
     async fn service_outer_branch_fanout(
         &mut self,
         site: u32,
         ty: Option<&str>,
+        modules: &[String],
         context_ref: &str,
         labels: &[String],
         prompts: &[String],
@@ -3978,6 +3990,7 @@ impl SelfHarnessDriver {
                         label,
                         prompt,
                         element_ty,
+                        modules,
                         cref,
                         child_scope,
                         table,
@@ -4070,6 +4083,7 @@ impl SelfHarnessDriver {
         label: &str,
         prompt: &str,
         element_ty: Option<&str>,
+        modules: &[String],
         cref: ContextRef,
         child_scope: tidepool_codegen::scope::ScopeId,
         table: &DataConTable,
@@ -4077,7 +4091,7 @@ impl SelfHarnessDriver {
         let hole_card = engine::answerer_hole_card(
             prompt,
             element_ty,
-            self.answerer_imports(),
+            modules,
             Some(table),
             &self.agent.hole_card_effect_row(),
         );
@@ -4109,7 +4123,7 @@ impl SelfHarnessDriver {
         // not a real conflict — mirrors `drive_fanout_child`'s own opt-in.
         self.agent.set_retry_checkout_on_contention(node, true);
         self.agent
-            .set_answer_contract(node, self.answer_contract(element_ty));
+            .set_answer_contract(node, self.answer_contract(element_ty, modules));
         self.emit(Event::TurnStart { node });
 
         // This child's mode, typed (`WindowLease::require_one_shot`'s doc):
@@ -4240,10 +4254,12 @@ impl SelfHarnessDriver {
     ///   `?`. Laundering a broken mechanism into "the model failed" would put
     ///   a false receipt in front of the operator, which is precisely what
     ///   this codebase refuses.
+    #[allow(clippy::too_many_arguments)]
     async fn service_outer_fanout(
         &mut self,
         site: u32,
         ty: Option<&str>,
+        modules: &[String],
         fan: Option<FanBadge>,
         single_prompt: &str,
         prompts: &[String],
@@ -4307,7 +4323,7 @@ impl SelfHarnessDriver {
             stream::iter(prompts.iter().enumerate())
                 .map(|(idx, prompt)| async move {
                     let value = this
-                        .drive_fanout_child(sid, site, idx, prompt, element_ty, table)
+                        .drive_fanout_child(sid, site, idx, prompt, element_ty, modules, table)
                         .await;
                     (idx, value)
                 })
@@ -4381,6 +4397,7 @@ impl SelfHarnessDriver {
     /// its branch position). See [`Self::service_outer_fanout`]'s doc for the
     /// line between them. The node is retired either way — a child that exits
     /// without an answer still releases its realm and scope.
+    #[allow(clippy::too_many_arguments)]
     async fn drive_fanout_child(
         &self,
         sid: tidepool_repr::SessionId,
@@ -4388,6 +4405,7 @@ impl SelfHarnessDriver {
         idx: usize,
         prompt: &str,
         element_ty: Option<&str>,
+        modules: &[String],
         table: &DataConTable,
     ) -> Result<Result<Value, InvocationExit>, DriverError> {
         let node = self.agent.create_root_framed(
@@ -4405,7 +4423,7 @@ impl SelfHarnessDriver {
         self.agent.set_retry_checkout_on_contention(node, true);
 
         let result = self
-            .drive_fanout_child_inner(node, site, idx, prompt, element_ty, table)
+            .drive_fanout_child_inner(node, site, idx, prompt, element_ty, modules, table)
             .await;
         let _ = self.agent.terminate_node(node, "fanout child retired");
         result
@@ -4443,6 +4461,7 @@ impl SelfHarnessDriver {
     ///   (v1 scope). The gap is ours, so it fails as ours.
     /// - session/registry faults, and any `Harness` error that is not the
     ///   window's own compile (handled in-loop) or provider call.
+    #[allow(clippy::too_many_arguments)]
     async fn drive_fanout_child_inner(
         &self,
         node: NodeId,
@@ -4450,14 +4469,15 @@ impl SelfHarnessDriver {
         idx: usize,
         prompt: &str,
         element_ty: Option<&str>,
+        modules: &[String],
         table: &DataConTable,
     ) -> Result<Result<Value, InvocationExit>, DriverError> {
         self.agent
-            .set_answer_contract(node, self.answer_contract(element_ty));
+            .set_answer_contract(node, self.answer_contract(element_ty, modules));
         let child_prompt = engine::answerer_hole_card(
             prompt,
             element_ty,
-            self.answerer_imports(),
+            modules,
             Some(table),
             &self.agent.hole_card_effect_row(),
         );
@@ -4580,7 +4600,9 @@ impl SelfHarnessDriver {
                     )?;
                 }
                 Err(HarnessError::Compile(msg)) => {
-                    let hint = self.types_in_scope_hint(ty_label, &msg).unwrap_or_default();
+                    let hint = self
+                        .types_in_scope_hint(node, ty_label, &msg)
+                        .unwrap_or_default();
                     let ty_disp = display_ty(ty_label);
                     self.agent.push_user_turn(
                         node,
@@ -4886,7 +4908,9 @@ impl SelfHarnessDriver {
                 // in-heap and case-trapping — that is what pinning `finalize`
                 // to the hole's type buys.
                 Err(HarnessError::Compile(msg)) => {
-                    let hint = self.types_in_scope_hint(ty_label, &msg).unwrap_or_default();
+                    let hint = self
+                        .types_in_scope_hint(node, ty_label, &msg)
+                        .unwrap_or_default();
                     // Parenthesize a compound answer type in the prompt — an
                     // unparenthesized `finalize @State -> State` is itself
                     // ill-typed advice. And do NOT teach single-shot: the

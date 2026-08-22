@@ -26,6 +26,7 @@ module Tidepool.Translate
   , poisonSentinelSlot
   , varId
   , stableVarId
+  , modulesOfType
   , stabilizeLocalUniques
   , fieldParentDisamb
   , normalizeMod
@@ -166,7 +167,11 @@ data TransState = TransState
   -- verb's sibling.
   , tsSitedIds :: !(Map.Map String Word64)
   , tsSiteCounter :: !Word64           -- fresh site-id counter, one per detected call site
-  , tsRunLLMTurnSites :: !(Seq (Word64, Text)) -- accumulated {site, type} for the asks.json sidecar
+  -- Accumulated {site, type, modules} for the asks.json sidecar — 'modules'
+  -- is 'modulesOfType's defining-module set for the site's answer type, the
+  -- extract-side resolution that replaces the harness's own import-scraping
+  -- guess (tidepool-harness's `HarnessSource::answerer_imports`).
+  , tsRunLLMTurnSites :: !(Seq (Word64, Text, [Text]))
   , tsCurrentBinder :: !(Maybe Text)   -- enclosing top-level binder name, for error messages
   }
 
@@ -253,9 +258,28 @@ poisonSlotFor vid = do
       return slot
 
 -- | Record one runLLMTurn/runLLMTurnFork site for the asks.json sidecar.
-recordRunLLMTurnSite :: Word64 -> Text -> TransM ()
-recordRunLLMTurnSite siteId typeStr = modify' $ \s ->
-  s { tsRunLLMTurnSites = tsRunLLMTurnSites s |> (siteId, typeStr) }
+-- @modules@ is 'modulesOfType's defining-module set for the site's answer
+-- type.
+recordRunLLMTurnSite :: Word64 -> Text -> [Text] -> TransM ()
+recordRunLLMTurnSite siteId typeStr modules = modify' $ \s ->
+  s { tsRunLLMTurnSites = tsRunLLMTurnSites s |> (siteId, typeStr, modules) }
+
+-- | The distinct defining modules of every TyCon @ty@ mentions — its own
+-- head plus every type argument's head (e.g. @Either MyErr MyOk@ needs
+-- 'Either', 'MyErr', AND 'MyOk') — what a shim importing @ty@ by name must
+-- have in scope to resolve it. This is the extract-side lookup: extract
+-- already has the type environment in hand at a sited-verb call site, so it
+-- reports the answer, rather than a downstream harness scraping its own
+-- source file's import list and guessing. Sorted + deduplicated for a
+-- stable asks.json rendering; a TyCon whose Name carries no Module (none
+-- exist for a real, named TyCon) is simply skipped rather than guessed.
+modulesOfType :: Type -> [Text]
+modulesOfType ty =
+  Data.List.sort $ Data.List.nub
+    [ T.pack (moduleNameString (moduleName m))
+    | tc <- USet.nonDetEltsUniqSet (tyConsOfType ty)
+    , Just m <- [nameModule_maybe (tyConName tc)]
+    ]
 
 -- | Emit the UTF-8 decode + recurse step for ONE codepoint starting at
 -- address @aId@, given the already-read lead byte @byte0@ (a Char#-typed
@@ -529,7 +553,7 @@ translateBinds binds = concatMap translateBind binds
 -- The fifth component is the poison-slot table (original varId -> identity
 -- slot) for the unresolved externals this run replaced with sentinels; see
 -- 'tsPoisonSlots'.
-translateModule :: [CoreBind] -> String -> Set.Set Word64 -> (Seq FlatNode, Map.Map (Word64, Text) DataCon, [CoreBind], Seq (Word64, Text), Map.Map Word64 Word64)
+translateModule :: [CoreBind] -> String -> Set.Set Word64 -> (Seq FlatNode, Map.Map (Word64, Text) DataCon, [CoreBind], Seq (Word64, Text, [Text]), Map.Map Word64 Word64)
 translateModule allBinds targetName unresolvedIds =
   let targetId = findTargetId targetName allBinds
       neededBinds = reachableBinds allBinds targetId
@@ -715,9 +739,11 @@ data ClosedModule = ClosedModule
     -- ^ The reachable binds actually compiled — the meta walks run over this.
   , cmVarNames   :: [(Word64, Text)]
     -- ^ varId → human name for runtime unresolved-error naming (friction #12).
-  , cmRunLLMTurnSites :: [(Word64, Text)]
-    -- ^ runLLMTurn/runLLMTurnFork {site, type} pairs (#R0), for the
-    -- asks.json sidecar 'writeWholeModuleClosed' writes next to meta.cbor.
+  , cmRunLLMTurnSites :: [(Word64, Text, [Text])]
+    -- ^ runLLMTurn/runLLMTurnFork {site, type, modules} triples (#R0), for
+    -- the asks.json sidecar 'writeWholeModuleClosed' writes next to
+    -- meta.cbor. 'modules' ('modulesOfType's result) is the defining-module
+    -- set a shim must import to resolve 'type' by name.
   , cmPoisoned   :: [(Word64, Text)]
     -- ^ Sentinel identity slot → qualified name, for every unresolved external
     -- the emitted program replaced with a @0x45@ kind-4 poison node. Shipped
@@ -2084,7 +2110,10 @@ translate expr =
             let renderedTy = Tidepool.GhcPipeline.renderType ty
                 typeStr | vsListAnswer spec = "[" ++ renderedTy ++ "]"
                         | otherwise         = renderedTy
-            recordRunLLMTurnSite siteId (T.pack typeStr)
+            -- Modules are resolved from the per-child element type `ty`
+            -- itself (never the `[]`-wrapped 'typeStr') — a fanout site's
+            -- shim needs T's own defining module(s), not '[]''s.
+            recordRunLLMTurnSite siteId (T.pack typeStr) (modulesOfType ty)
             sitedRef <- emitNode $ NVar sitedVarId
             -- Re-apply any `Member <Eff> effs` dictionaries verbatim, in
             -- their original order, before the injected site-id literal —

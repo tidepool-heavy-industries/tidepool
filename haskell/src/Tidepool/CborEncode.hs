@@ -236,8 +236,16 @@ encodeBoundBinder (BoundBinder name varid modul tier tdisp) =
   <> encodeString (T.pack tier)
   <> encodeString (T.pack tdisp)
 
-encodeAsks :: [(Word64, Text)] -> Encoding
+-- | @modules@ (the third element, added alongside @site@/@type@ — see
+-- 'Tidepool.Translate.modulesOfType') is the defining-module set a shim
+-- must import to resolve @type@ by name. This is the SAME wire a resident
+-- session turn's suspension classifies against (@tidepool-harness@'s
+-- @Harness::answer_fork@/@answer_fanout@ read it back to pin a fork
+-- child's @Finalize@ row) — the asks.json sidecar is a SEPARATE encoding
+-- of the identical data for the multi-target/whole-module compile path.
+encodeAsks :: [(Word64, Text, [Text])] -> Encoding
 encodeAsks xs = encodeListLen (fromIntegral (length xs)) <> foldMap encodeAsk xs
 
-encodeAsk :: (Word64, Text) -> Encoding
-encodeAsk (site, ty) = encodeListLen 2 <> encodeWord64 site <> encodeString ty
+encodeAsk :: (Word64, Text, [Text]) -> Encoding
+encodeAsk (site, ty, modules) =
+  encodeListLen 3 <> encodeWord64 site <> encodeString ty <> encodeTextList modules

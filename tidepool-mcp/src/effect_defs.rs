@@ -1070,7 +1070,8 @@ macro_rules! runllmturn_effect_def {
                 "ancestry line), driven CONCURRENTLY (the fanout machinery, not one at a ",
                 "time), with results returned in DECLARED order regardless of completion ",
                 "order — for a layer of independent siblings that should never be scheduled ",
-                "sequentially.",
+                "sequentially. In every verb above, `T` may be any type in scope, ",
+                "including one you declared yourself earlier this session.",
             ],
             // PRD 21 locked decision 6's typed exit, generated here alongside
             // the GADT exactly as ExecError/FsError are (they come from the
@@ -1450,7 +1451,8 @@ macro_rules! fork_effect_def {
                 "on its own.\n",
                 "`forkAll @T briefs :: M [T]` — delegate to one sub-answerer per brief, ",
                 "answered together as a batch `[T]` (`import Tidepool.Fork`). A forked child ",
-                "cannot itself fork.",
+                "cannot itself fork. `T` may be any type in scope, including one you ",
+                "declared yourself earlier this session — the child resolves it the same way.",
             ],
             // Already Member-polymorphic below; flagged true for consistency
             // with the row-polymorphic-by-default rule (harmless — every

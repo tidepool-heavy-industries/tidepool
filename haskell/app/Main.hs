@@ -519,7 +519,7 @@ data TargetWrite = TargetWrite
   , twReachBinds  :: [CoreBind]
   , twVarNames    :: [(Word64, Text)]
   , twHasIO       :: Bool
-  , twAskSites    :: [(Word64, Text)]
+  , twAskSites    :: [(Word64, Text, [Text])]
   , twPoisoned    :: [(Word64, Text)]
   }
 
@@ -577,7 +577,7 @@ mergePoisonedTables tables =
 writeClosedTargets
   :: Bool -> FilePath -> [CoreBind] -> [TyCon] -> Maybe Text -> [Text]
   -> [(String, String, ClosedModule)]  -- ^ (targetName, outFileBase, closed)
-  -> IO [(String, [(Word64, Text)])]   -- ^ outFileBase -> runLLMTurn sites
+  -> IO [(String, [(Word64, Text, [Text])])]   -- ^ outFileBase -> runLLMTurn sites
 writeClosedTargets timing outDir binds _tycons mCapturedTy warnTexts targets = do
   let multi = length targets > 1
 
@@ -806,7 +806,7 @@ assertMetaCoversEmitted targetName nodes reachBinds allMeta = do
 -- singleton target list) since the multi-target '--targets' mode split this
 -- function's original body into those two reusable steps; every existing
 -- caller's signature and on-disk output are unchanged.
-writeWholeModuleClosed :: Bool -> FilePath -> HscEnv -> [CoreBind] -> [TyCon] -> Maybe Text -> [Text] -> String -> String -> IO [(Word64, Text)]
+writeWholeModuleClosed :: Bool -> FilePath -> HscEnv -> [CoreBind] -> [TyCon] -> Maybe Text -> [Text] -> String -> String -> IO [(Word64, Text, [Text])]
 writeWholeModuleClosed timing outDir hscEnv binds tycons mCapturedTy warnTexts targetName outFileBase = do
   closed <- translateTargetClosed timing hscEnv binds targetName
   results <- writeClosedTargets timing outDir binds tycons mCapturedTy warnTexts [(targetName, outFileBase, closed)]
@@ -1655,7 +1655,7 @@ renderBoundBindersJson binders =
 -- number (extract's own monotonic per-module counter, well inside u32 range).
 -- Per-entry rendering ('renderAskJson') is shared with the 'TBind'/'TExpr'
 -- rich-result rendering.
-renderAsksJson :: [(Word64, Text)] -> String
+renderAsksJson :: [(Word64, Text, [Text])] -> String
 renderAsksJson sites =
   "[" ++ intercalate "," (map renderAskJson sites) ++ "]"
 

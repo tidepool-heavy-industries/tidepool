@@ -103,7 +103,7 @@ pub struct SessionTurnResult {
     /// answer type)`. The harness reads these to classify a `fork`/`dialogAsk`
     /// hole; the repl ignores them (its ask surface is untyped-site). Empty when
     /// the turn has no yield sites (or the sidecar is absent — an older extract).
-    pub asks: Vec<(u32, String)>,
+    pub asks: Vec<(u32, String, Vec<String>)>,
 }
 
 /// Arguments for the bind half of a turn (omit for an EXPR turn).
@@ -270,7 +270,7 @@ pub struct CompiledTurn {
     /// Compile warnings (e.g. `has_io`).
     pub warnings: MetaWarnings,
     /// Typed-yield sites, decoded from the `TurnOut` wire payload.
-    pub asks: Vec<(u32, String)>,
+    pub asks: Vec<(u32, String, Vec<String>)>,
 }
 
 /// The result of [`run_turn`] — one variant per verdict, each carrying only
@@ -587,7 +587,7 @@ fn decode_turn_output_dir(dir: &Path) -> Result<TurnResult, CompileError> {
 /// read.
 fn read_compiled_turn(
     output_dir: &Path,
-    asks: Vec<(u32, String)>,
+    asks: Vec<(u32, String, Vec<String>)>,
 ) -> Result<CompiledTurn, CompileError> {
     let expr_path = output_dir.join("result.cbor");
     let meta_path = output_dir.join("meta.cbor");
@@ -643,12 +643,12 @@ enum DecodedTurnOut {
         binders: Vec<String>,
         variant: usize,
         bound: Vec<BoundBinder>,
-        asks: Vec<(u32, String)>,
+        asks: Vec<(u32, String, Vec<String>)>,
         wrapped_source: String,
     },
     Expr {
         variant: usize,
-        asks: Vec<(u32, String)>,
+        asks: Vec<(u32, String, Vec<String>)>,
         wrapped_source: String,
     },
 }
@@ -770,17 +770,18 @@ fn decode_bound_binders(v: &CborValue) -> Result<Vec<BoundBinder>, CompileError>
         .collect()
 }
 
-fn decode_ask(v: &CborValue) -> Result<(u32, String), CompileError> {
-    let arr = cbor_expect_array_len(v, 2, "Ask")?;
+fn decode_ask(v: &CborValue) -> Result<(u32, String, Vec<String>), CompileError> {
+    let arr = cbor_expect_array_len(v, 3, "Ask")?;
     let site = cbor_as_u64(&arr[0], "Ask site")?;
     let site = u32::try_from(site).map_err(|_| {
         CompileError::ExtractFailed("TurnOut CBOR: Ask site too large for u32".into())
     })?;
     let answer_type = cbor_expect_text(&arr[1], "Ask answer type")?.to_string();
-    Ok((site, answer_type))
+    let modules = decode_string_array(&arr[2], "Ask modules")?;
+    Ok((site, answer_type, modules))
 }
 
-fn decode_asks(v: &CborValue) -> Result<Vec<(u32, String)>, CompileError> {
+fn decode_asks(v: &CborValue) -> Result<Vec<(u32, String, Vec<String>)>, CompileError> {
     cbor_expect_array(v, "asks")?
         .iter()
         .map(decode_ask)
@@ -1126,10 +1127,14 @@ pub fn compile_session_turn(
 }
 
 /// Read the `asks.json` typed-yield sidecar the extract writes into the
-/// output-dir — `[{ "site": u32, "type": String }, …]`. A missing file yields
-/// an empty list (a turn with no yield sites, or an older extract); a present
-/// but malformed file is a hard error (a real sidecar-shape regression).
-fn read_asks_sidecar(path: &Path) -> Result<Vec<(u32, String)>, CompileError> {
+/// output-dir — `[{ "site": u32, "type": String, "modules": [String] }, …]`.
+/// A missing file yields an empty list (a turn with no yield sites, or an
+/// older extract); a present but malformed file is a hard error (a real
+/// sidecar-shape regression). `modules` is REQUIRED, not defaulted — an
+/// extract old enough not to emit it fails this parse loudly rather than
+/// silently reporting no modules (mirrors `tidepool_runtime::artifacts::
+/// AskSite`, the `--targets` path's twin of this same sidecar shape).
+fn read_asks_sidecar(path: &Path) -> Result<Vec<(u32, String, Vec<String>)>, CompileError> {
     let bytes = match std::fs::read(path) {
         Ok(b) => b,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
@@ -1140,10 +1145,14 @@ fn read_asks_sidecar(path: &Path) -> Result<Vec<(u32, String)>, CompileError> {
         site: u32,
         #[serde(rename = "type")]
         ty: String,
+        modules: Vec<String>,
     }
     let sites: Vec<Site> = serde_json::from_slice(&bytes)
         .map_err(|e| CompileError::ExtractFailed(format!("invalid asks.json sidecar: {e}")))?;
-    Ok(sites.into_iter().map(|s| (s.site, s.ty)).collect())
+    Ok(sites
+        .into_iter()
+        .map(|s| (s.site, s.ty, s.modules))
+        .collect())
 }
 
 fn parse_bound_binders(json: &str) -> Result<Vec<BoundBinder>, CompileError> {
@@ -1626,6 +1635,7 @@ mod tests {
                 CborValue::Array(vec![CborValue::Array(vec![
                     CborValue::Integer(7.into()),
                     CborValue::Text("Text".into()),
+                    CborValue::Array(vec![]),
                 ])]),
                 CborValue::Text("module M where\nresult = x <- pure 1\n".into()),
             ]),
@@ -1644,7 +1654,7 @@ mod tests {
                 assert_eq!(bound[0].name, "x");
                 assert_eq!(bound[0].var_id, 42);
                 assert_eq!(bound[0].tier, ValueTier::Tier0Data);
-                assert_eq!(asks, vec![(7, "Text".to_string())]);
+                assert_eq!(asks, vec![(7, "Text".to_string(), Vec::<String>::new())]);
                 assert!(wrapped_source.contains("result ="));
             }
             other => panic!("expected Bind, got {other:?}"),

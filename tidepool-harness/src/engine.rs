@@ -1389,6 +1389,7 @@ pub fn split_block_items(block: &str) -> Vec<String> {
 /// Everything the engine needs to compile + run turns: the extract binary, the
 /// include search paths (prelude + effects module + optional project lib), the
 /// effect decls, the Ask tag, and the effect-row names.
+#[derive(Clone)]
 pub struct EngineConfig {
     pub extract_bin: tidepool_extract_cmd::ResolvedExtractBin,
     pub include: Vec<PathBuf>,

@@ -972,6 +972,28 @@ impl Harness {
     /// its first REAL turn (`ResidentSession::unbootstrapped` — see that
     /// constructor's doc) — `force` itself pays no GHC extract compile.
     pub fn force(&self, node: NodeId, actor: Actor) -> Result<(), HarnessError> {
+        self.force_with_extra_include(node, actor, Vec::new())
+    }
+
+    /// As [`Self::force`], but with `extra_include` roots ALSO on every
+    /// compile this node's session runs — the seam [`Self::register_fork_child`]
+    /// uses to make a fork child's session resolve its PARENT's decl-plane
+    /// module by name: `AnswerContract`'s pin (built from
+    /// [`tidepool_runtime::AsksSidecar::modules_of`]) names the module, and
+    /// this is what makes that name findable on disk. `SessionModule`'s
+    /// dotted name (`Tidepool.Session.{Val|Lib}.G<g>`) carries no node
+    /// identity, so the file layout under any node's own decl root matches
+    /// the same relative path regardless of which node it belongs to —
+    /// adding the PARENT's root here is exactly as if the child's own
+    /// session had declared the SAME thing, without actually sharing a
+    /// session (parent and child still have their own, independent planes —
+    /// see [`Self::force`]'s doc).
+    fn force_with_extra_include(
+        &self,
+        node: NodeId,
+        actor: Actor,
+        extra_include: Vec<PathBuf>,
+    ) -> Result<(), HarnessError> {
         // Register a fresh resident session for this node, keeping a handle to
         // its effect-trace buffer so per-turn effects can be logged.
         let (stack, effect_trace) = self.build_stack();
@@ -982,12 +1004,14 @@ impl Harness {
         // separate node with a separate plane. Degrades to no accumulation
         // (`None`) if the session root cannot be created.
         let lib = self.node_decl_plane(node);
+        let mut include = self.cfg.include.clone();
+        include.extend(extra_include);
         let session = ResidentSession::unbootstrapped(
             stack,
             self.cfg.suspend_tag,
             self.cfg.effect_names.clone(),
             CapturedOutput::new(),
-            self.cfg.include.clone(),
+            include,
             DEFAULT_NURSERY_SIZE,
             lib,
         );
@@ -1253,6 +1277,17 @@ impl Harness {
         .map(|lib| lib.with_validation_include(self.cfg.include.clone()))
         .ok()
     }
+}
+
+/// Project a [`CompiledTurn`]'s `(site, type, modules)` asks down to the
+/// `(site, type)` pairs [`Harness::log_turn_extracted`]/the durable
+/// `Event::TurnExtracted` log carry — that event's own wire shape is
+/// unaffected by this lane's module lookup (nothing reads modules off it;
+/// a durable log a caller is replaying should not gain a new required
+/// field), so this is a projection at the log-writing boundary, not a
+/// second copy of the asks data.
+fn asks_log_pairs(asks: &[(u32, String, Vec<String>)]) -> Vec<(u32, String)> {
+    asks.iter().map(|(s, t, _)| (*s, t.clone())).collect()
 }
 
 /// The one place the node decl-plane path shape is constructed:
@@ -1786,8 +1821,8 @@ impl Harness {
             // A discarding bind (`_ <- e`) or a bare expression: run for
             // effect/value, no binding materializes on the value plane.
             TurnResult::Bind { compiled, .. } | TurnResult::Expr { compiled, .. } => {
-                self.log_turn_extracted(node, &compiled.asks, None)?;
-                let asks = AsksSidecar::from_pairs(compiled.asks);
+                self.log_turn_extracted(node, &asks_log_pairs(&compiled.asks), None)?;
+                let asks = AsksSidecar::from_entries(compiled.asks);
                 let table = compiled.table;
                 let expr = compiled.expr;
 
@@ -2134,8 +2169,8 @@ impl Harness {
                         .await?
                 }
                 TurnResult::Bind { compiled, .. } | TurnResult::Expr { compiled, .. } => {
-                    self.log_turn_extracted(node, &compiled.asks, None)?;
-                    let asks = AsksSidecar::from_pairs(compiled.asks);
+                    self.log_turn_extracted(node, &asks_log_pairs(&compiled.asks), None)?;
+                    let asks = AsksSidecar::from_entries(compiled.asks);
                     let table = compiled.table;
                     let expr = compiled.expr;
                     let checkout = self.checkout_run_retrying(node).await?;
@@ -2357,10 +2392,10 @@ impl Harness {
     ) -> Result<engine::TurnOutcome, HarnessError> {
         self.log_turn_extracted(
             node,
-            &compiled.asks,
+            &asks_log_pairs(&compiled.asks),
             Some((&binder.name, &binder.type_display)),
         )?;
-        let asks = AsksSidecar::from_pairs(compiled.asks);
+        let asks = AsksSidecar::from_entries(compiled.asks);
         let table = compiled.table;
         let expr = compiled.expr;
 
@@ -3009,13 +3044,19 @@ impl Harness {
             .get(&node)
             .and_then(|c| c.pending.clone())
             .ok_or(HarnessError::NotSuspended(node))?;
-        let (site_ty, prompt, source) = match &pending.classified.routing {
+        let (site, site_ty, prompt, source) = match &pending.classified.routing {
             HoleRouting::Fork {
+                site,
                 ty,
                 fan: None,
                 source,
                 ..
-            } => (ty.clone(), pending.classified.prompt.clone(), *source),
+            } => (
+                *site,
+                ty.clone(),
+                pending.classified.prompt.clone(),
+                *source,
+            ),
             other => {
                 return Err(HarnessError::RoutingMismatch {
                     node,
@@ -3028,39 +3069,52 @@ impl Harness {
         // Register the fork child: inherit the parent transcript up to the
         // parent's current turn, append the hole card.
         let child = self.register_fork_child(node, "fork answerer", &prompt, site_ty.as_deref())?;
-        if let Err(e) = self.force(child, actor) {
+        // `node`'s own decl-plane root, ALSO on the child's include: the
+        // module `AnswerContract` is about to name (below) may be a type the
+        // PARENT declared live in its own session — see
+        // `force_with_extra_include`'s doc for why this makes that name
+        // resolvable without sharing a session.
+        if let Err(e) =
+            self.force_with_extra_include(child, actor, vec![node_session_dir(&self.run_id, node)])
+        {
             self.cleanup_failed_child(child);
             return Err(e);
         }
 
-        // The fork child answers toward the SAME `Finalize` contract as the
-        // parent whenever the fork's own requested type (`site_ty`, from
-        // `asks.json`) genuinely matches it — a discovery-window child forked
-        // to help decide the parent's own pending answer is the common case,
-        // and this is what lets the child's block reach for `finalize @T`
-        // (the idiom the model already uses everywhere else) rather than only
-        // `resume`. A fork whose type diverges from the parent's own contract
-        // gets no pin here (`None`, the config's default row) — reusing the
-        // wrong contract's imports would be a silent wrong-module guess, not
-        // a fix.
-        let parent_contract = self.answer_contract(node);
-        let finalize_pin = match (&parent_contract, &site_ty) {
-            (Some(c), Some(t)) if &c.ty == t => Some((c.ty.as_str(), c.imports.as_slice())),
-            _ => None,
-        };
+        // Pin the fork child's row to its OWN requested type (`site_ty`, from
+        // `asks.json`) whenever one was resolved, widening it with
+        // `Finalize <T>` alongside the row's actual answering verb
+        // (`resume`, redefined for this one-shot compile — see
+        // `drive_answerer_to_value`'s `helpers`; `finalize @T` is a
+        // genuinely suspending effect and is NOT supported by this
+        // servicing path's `run_child`-based execution, a separate,
+        // pre-existing gap this pin does not newly close). The practical
+        // payoff is `T`'s defining module landing on the child's compile
+        // include (via `turn_target`'s effects-dir swap), which is what lets
+        // `resume value :: T` name `T` at all. Previously this only pinned
+        // when the fork's type happened to match the PARENT's own contract
+        // (reusing the parent's harness-scraped import list otherwise risked
+        // a silent wrong-module guess); the extract-side module lookup
+        // (`AsksSidecar::modules_of`) resolves the fork's own type's
+        // defining modules directly, so there is no longer a parent contract
+        // to borrow from or guess around — every resolved fork type gets
+        // pinned, matching or not.
+        let site_modules = self.asks_modules(node, site.get());
+        let finalize_pin = site_ty.as_deref().map(|t| (t, site_modules.as_slice()));
 
         // Drive the child's turn loop until it emits an answering block, then run
         // that block via run_child against the SUSPENDED PARENT (not the child's
         // own session) to produce a Value in the parent's heap. On ANY failure
         // (provider/join/log fault, or cap-exhaustion abort) clean up the child
         // before propagating — no orphaned Running+resident node.
+        let fork_child_cfg = self.child_cfg_for_fork_of(node);
         let answer_value = match self
             .drive_answerer_to_value(
                 child,
                 node,
                 site_ty.as_deref(),
                 engine::DEFAULT_MAX_TURNS,
-                &self.child_cfg,
+                &fork_child_cfg,
                 finalize_pin,
             )
             .await
@@ -3138,14 +3192,15 @@ impl Harness {
             .get(&node)
             .and_then(|c| c.pending.clone())
             .ok_or(HarnessError::NotSuspended(node))?;
-        let (list_ty, fan, prompts, source) = match &pending.classified.routing {
+        let (site, list_ty, fan, prompts, source) = match &pending.classified.routing {
             HoleRouting::Fork {
+                site,
                 ty,
                 fan: Some(fan),
                 prompts,
                 source,
                 ..
-            } => (ty.clone(), *fan, prompts.clone(), *source),
+            } => (*site, ty.clone(), *fan, prompts.clone(), *source),
             other => {
                 return Err(HarnessError::RoutingMismatch {
                     node,
@@ -3177,15 +3232,15 @@ impl Harness {
             }
         }
 
-        // Same contract-reuse rule `answer_fork` applies: pin the fanout
-        // children's `Finalize` row to the parent's own answer contract only
-        // when the fanout's element type genuinely matches it — computed once
-        // here, outside the loop, since it's the same pin for every child.
-        let parent_contract = self.answer_contract(node);
-        let finalize_pin = match (&parent_contract, element_ty) {
-            (Some(c), Some(t)) if c.ty == t => Some((c.ty.as_str(), c.imports.as_slice())),
-            _ => None,
-        };
+        // Same rule `answer_fork` applies (see its doc for why the parent-
+        // contract-matching guess is gone): pin every child's `Finalize` row
+        // to the fanout's OWN element type, resolved via `asks.json`'s
+        // module lookup — computed once here, outside the loop, since it's
+        // the same pin for every child. `asks_modules` reads the RAW
+        // (pre-`[]`) element type's modules, so no `strip_list_type` is
+        // needed on the module side the way it is for the rendered `ty`.
+        let site_modules = self.asks_modules(node, site.get());
+        let finalize_pin = element_ty.map(|t| (t, site_modules.as_slice()));
 
         let mut children = Vec::with_capacity(prompts.len());
         let mut answers = Vec::with_capacity(prompts.len());
@@ -3198,8 +3253,14 @@ impl Harness {
             )?;
             // Guard every child exit: a force/drive fault must not orphan this
             // child (earlier children are already Done+dropped; later ones are
-            // never created — only the in-flight one can leak).
-            if let Err(e) = self.force(child, actor) {
+            // never created — only the in-flight one can leak). `node`'s own
+            // decl-plane root is ALSO on the child's include — see
+            // `answer_fork`'s matching call for why.
+            if let Err(e) = self.force_with_extra_include(
+                child,
+                actor,
+                vec![node_session_dir(&self.run_id, node)],
+            ) {
                 self.cleanup_failed_child(child);
                 return Err(e);
             }
@@ -3209,7 +3270,7 @@ impl Harness {
                     node,
                     element_ty,
                     self.cfg.max_child_turns,
-                    &self.child_cfg,
+                    &self.child_cfg_for_fork_of(node),
                     finalize_pin,
                 )
                 .await
@@ -4507,10 +4568,40 @@ impl Harness {
         }
     }
 
-    /// `node`'s current [`AnswerContract`], if one is set.
-    fn answer_contract(&self, node: NodeId) -> Option<AnswerContract> {
+    /// `node`'s current [`AnswerContract`], if one is set. `pub(crate)`: the
+    /// self-iterating harness driver reads it back (`types_in_scope_hint`) to
+    /// report which modules a pinned turn actually imports, rather than
+    /// keeping a second copy of the same information.
+    pub(crate) fn answer_contract(&self, node: NodeId) -> Option<AnswerContract> {
         let convos = self.convos.lock();
         convos.get(&node).and_then(|c| c.answer_contract.clone())
+    }
+
+    /// The defining modules `asks.json` reported for `site`'s answer type,
+    /// per `node`'s currently suspended turn's own asks sidecar
+    /// ([`NodeConvo::suspend_asks`]) — the extract-side module lookup
+    /// [`Harness::answer_fork`]/[`Harness::answer_fanout`] pin `finalize`'s
+    /// imports from, replacing the harness-import-scraping guess. Empty when
+    /// `node` has no live convo or `site` has no sidecar entry.
+    fn asks_modules(&self, node: NodeId, site: u32) -> Vec<String> {
+        self.convos
+            .lock()
+            .get(&node)
+            .map(|c| c.suspend_asks.modules_of(site).to_vec())
+            .unwrap_or_default()
+    }
+
+    /// [`Self::child_cfg`], with `node`'s own decl-plane root ALSO on its
+    /// include — the compile config a fork/fanout CHILD of `node` needs so
+    /// its own generated shim can resolve a `finalize_pin` module that
+    /// happens to be `node`'s own decl-plane module by name (matches
+    /// [`Self::force_with_extra_include`]'s addition to the child's
+    /// SESSION include — both must cover the same root, or the child's
+    /// ordinary turn module and its shim would disagree on what resolves).
+    fn child_cfg_for_fork_of(&self, node: NodeId) -> EngineConfig {
+        let mut cfg = self.child_cfg.clone();
+        cfg.include.push(node_session_dir(&self.run_id, node));
+        cfg
     }
 
     /// Check `node`'s machine out for a NEW TOP-LEVEL turn (`Idle ->

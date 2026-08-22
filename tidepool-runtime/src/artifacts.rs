@@ -43,35 +43,84 @@ use crate::{cache, diag, extract_module_name, extract_spawn_error, timing, Compi
 // The asks.json sidecar
 // ---------------------------------------------------------------------------
 
-/// One `asks.json` entry: a yield-site id and its rendered answer type.
+/// One `asks.json` entry: a yield-site id, its rendered answer type, and the
+/// defining modules a shim must import to resolve that type by name —
+/// `Tidepool.Translate.modulesOfType`'s result for every tycon the type
+/// mentions (the type's own head plus every type argument's head). Extract
+/// has the type environment in hand at the call site, so it reports this
+/// directly; `modules` is NOT `#[serde(default)]` — an extract binary old
+/// enough not to emit it fails this deserialization loudly (`CompileError::
+/// Asks`) rather than silently resolving with no modules, since a caller
+/// that built an `AnswerContract` from an empty list would compile a shim
+/// that cannot name the type at all.
 #[derive(Debug, Clone, Deserialize)]
 pub struct AskSite {
     pub site: u32,
     #[serde(rename = "type")]
     pub ty: String,
+    pub modules: Vec<String>,
 }
 
-/// The `asks.json` sidecar as a site-id → rendered-type map. Empty when the
-/// source has no `runLLMTurn`/`runLLMTurnFork` sites (the extract always
-/// writes the file — loud absence beats a silent missing lookup).
+/// The `asks.json` sidecar as a site-id → (rendered-type, defining-modules)
+/// map. Empty when the source has no `runLLMTurn`/`runLLMTurnFork` sites
+/// (the extract always writes the file — loud absence beats a silent
+/// missing lookup).
 #[derive(Debug, Clone, Default)]
 pub struct AsksSidecar {
-    by_site: HashMap<u32, String>,
+    by_site: HashMap<u32, (String, Vec<String>)>,
 }
 
 impl AsksSidecar {
-    /// Build a sidecar from `(site, type)` pairs — the shape
-    /// `tidepool_runtime::session::CompiledTurn::asks` carries, decoded from
-    /// `run_turn`'s `TurnOut` wire payload for a BIND/EXPR verdict.
+    /// Build a sidecar from `(site, type)` pairs, with no module info — the
+    /// shape `tidepool_runtime::session::CompiledTurn::asks` carries,
+    /// decoded from `run_turn`'s `TurnOut` wire payload for a BIND/EXPR
+    /// verdict (that wire is a separate, unwidened format — see
+    /// `Tidepool.Translate`'s module doc on why `TurnOut.toAsks` stayed
+    /// `(Word64, Text)`). Test-only convenience elsewhere in this crate.
     pub fn from_pairs(pairs: Vec<(u32, String)>) -> Self {
         AsksSidecar {
-            by_site: pairs.into_iter().collect(),
+            by_site: pairs
+                .into_iter()
+                .map(|(site, ty)| (site, (ty, Vec::new())))
+                .collect(),
+        }
+    }
+
+    /// Build a sidecar from `(site, type, modules)` triples — the full
+    /// `asks.json` shape, for tests that need module resolution.
+    pub fn from_entries(entries: Vec<(u32, String, Vec<String>)>) -> Self {
+        AsksSidecar {
+            by_site: entries
+                .into_iter()
+                .map(|(site, ty, modules)| (site, (ty, modules)))
+                .collect(),
         }
     }
 
     /// The rendered answer type for a yield-site id, if the site is known.
     pub fn type_of(&self, site: u32) -> Option<&str> {
-        self.by_site.get(&site).map(String::as_str)
+        self.by_site.get(&site).map(|(ty, _)| ty.as_str())
+    }
+
+    /// The defining modules a shim must import to resolve `site`'s answer
+    /// type by name — empty when the site is unknown or the extract that
+    /// produced this sidecar recorded no modules (e.g. a `Prelude`-only
+    /// type).
+    pub fn modules_of(&self, site: u32) -> &[String] {
+        self.by_site
+            .get(&site)
+            .map(|(_, modules)| modules.as_slice())
+            .unwrap_or(&[])
+    }
+
+    /// Every recorded `(site, type, modules)` entry, in no particular order —
+    /// for a caller that needs to find a site by its resolved type/modules
+    /// rather than by a known id (e.g. a test compiling a single-site turn
+    /// without hardcoding extract's site-numbering scheme).
+    pub fn iter(&self) -> impl Iterator<Item = (u32, &str, &[String])> {
+        self.by_site
+            .iter()
+            .map(|(site, (ty, modules))| (*site, ty.as_str(), modules.as_slice()))
     }
 
     /// Number of recorded sites.
@@ -541,7 +590,10 @@ fn parse_asks(bytes: Option<&[u8]>) -> Result<AsksSidecar, CompileError> {
     let sites: Vec<AskSite> =
         serde_json::from_slice(bytes).map_err(|e| CompileError::Asks(e.to_string()))?;
     Ok(AsksSidecar {
-        by_site: sites.into_iter().map(|s| (s.site, s.ty)).collect(),
+        by_site: sites
+            .into_iter()
+            .map(|s| (s.site, (s.ty, s.modules)))
+            .collect(),
     })
 }
 
