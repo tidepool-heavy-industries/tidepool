@@ -15,19 +15,32 @@
 //!
 //! # How a scenario is scripted
 //!
-//! Two knobs, and between them they cover §9's whole matrix:
+//! Two knobs, and between them they cover this file's kept §9 rows:
 //!
 //! - **The provider table.** Every window's prompt embeds its node's
-//!   `NodePath` (`NODE <path> — DISCOVER` / `NODE <path> — FOLD`), so a
-//!   scenario is a table of (path-needle, finalize reply) pairs and the whole
-//!   tree is deterministic. [`KeyedProvider`] is `outer_fanout.rs`'s
-//!   needle-matched provider, adapted: an entry carries a needle SET (all of
-//!   which must appear) rather than one needle, because a node id derived from
-//!   a model-produced branch TITLE (§3's slug — row 11) is not a string this
-//!   file should be hardcoding; `["NODE root/2-", "— DISCOVER"]` names the
-//!   branch by POSITION and phase and lets the harness own the slug.
-//!   `ReplayProvider` cannot serve any of this: its queue is strictly FIFO,
-//!   and the order in which windows reach the provider is itself under test.
+//!   `NodePath` (`NODE <path> — DISCOVER` / `NODE <path> — FOLD`) as its own
+//!   FIRST line — a structural echo of the label `bulkLayerWindow` stamps on
+//!   the `runLLMTurnBranchFanout` wire payload itself (`Harness.hs`'s
+//!   `bulkLayerWindow` doc: "the label rides the wire structurally, never
+//!   parsed back out of the prompt" — true of the DRIVER's own routing; this
+//!   test file has no access to that wire field, since `ModelProvider::complete`
+//!   only ever sees the assembled `TurnRequest`, so it reads the one
+//!   HEADER LINE the harness renders in every window's own voice, via
+//!   [`parse_window`] — the SAME single parse point [`Run`]'s own indexing
+//!   already used before this rewrite). [`KeyedProvider`] keys a reply on the
+//!   parsed `(path, phase)` pair — an [`Script::path`] of [`PathKey::Exact`]
+//!   when this file authored the branch's title itself (so its slug is known
+//!   ahead of time) or [`PathKey::Prefix`] when the slug is model-derived (a
+//!   hostile title, an operator-added branch) and only the branch's POSITION
+//!   is known in advance — never a substring match against arbitrary prose
+//!   inside the message. A window re-visited more than once (a starved
+//!   window's repeated re-prompts; a corrective retry) is served
+//!   [`Script::replies`] front to back, one per call, the last one sticking —
+//!   the round-ordinal case, resolved by call COUNT against one key rather
+//!   than by matching a marker string like "did not validate" inside the
+//!   retry prompt. `ReplayProvider` cannot serve any of this: its queue is
+//!   strictly FIFO, and the order in which windows reach the provider is
+//!   itself under test.
 //! - **The seeded checkpoint.** Scenario config (`maxDepth`/`maxNodes`/
 //!   `maxFanOut`/`gatePolicy`) has to vary per scenario and `initialState` is
 //!   fixed, so each scenario writes a durable `persistence::Checkpoint`
@@ -38,25 +51,43 @@
 //!
 //! # Family-bundle discipline, and what actually costs a compile
 //!
-//! One SCENARIO CONFIG is one compile shape: the driver splices the restored
-//! `State` JSON into the fused `render`+`loop` compile, so two runs sharing a
-//! config share that compile (the memo makes the second free), and two runs
-//! differing only in their provider table or gate script cost nothing extra.
-//! Each scenario below therefore asserts as many §9 rows as its config can
-//! carry, and the two gate rows (8, 8b) share ONE config between two runs.
+//! One SCENARIO CONFIG (including the seeded `draft`, which the driver
+//! splices into the compile alongside the rest of the restored `State`) is
+//! one compile shape: two runs sharing a config share that compile (the memo
+//! makes the second free), and two runs differing only in their provider
+//! table or gate script cost nothing extra. Each kept scenario below asserts
+//! as many §9 rows as its config can carry; the three gate runs (prune,
+//! amend, add) share ONE config, and the checked-edits runs share another.
 //! Answerer-side compiles are shared the same way: every leaf reuses ONE
-//! `ProposeFinish` reply and every fold reuses ONE `FoldDecision` reply across
-//! all six runs, so those blocks compile once for the whole file.
+//! `ProposeFinish` reply and every fold reuses ONE `FoldDecision` reply
+//! wherever a scenario does not need a node-specific override, so those
+//! blocks compile once for the whole file regardless of how many scenarios
+//! reuse them.
 //!
 //! Four configs is the floor, not a preference: the depth cap, the node cap
 //! and the fan-out cap are three DIFFERENT `Config` values, and a run cannot
 //! hold two of them without confounding which cap fired.
 //!
 //! GHC-heavy: needs `TIDEPOOL_EXTRACT` + the with-packages GHC on PATH
-//! (`--ignore-default-filter` to run). Budget the wall time — the six
-//! scenarios run ~7 minutes with a WARM compile memo, and meaningfully longer
-//! cold. What remains warm is per-window JIT compilation, which nothing
-//! memoizes.
+//! (`--ignore-default-filter` to run). What remains warm across runs is only
+//! the `tidepool-extract` compile memo (one entry per distinct scenario
+//! config); per-window JIT compilation is never memoized, so wall time still
+//! scales with the number of windows a scenario's tree actually opens.
+//!
+//! # What this file pins, and what it does not
+//!
+//! This suite used to script every window by matching a SET of substrings
+//! against the request's raw prompt text (a "needle" table) and to pin
+//! several tests' worth of exact prompt WORDING (a coalgebra prompt's full
+//! literal shape; a marker string's exact occurrence count in the assembled
+//! framing). Both are gone: the provider now keys structurally (above), and
+//! every surviving test asserts BEHAVIOR the driver actually produces — a
+//! branch's own window reached, a failure folded as data at its own
+//! position, declared-order reassembly, a node id's containment safety —
+//! never the literal prose of a prompt this file itself is free to reword.
+//! A test that existed only to pin prompt wording (or the one-off teaching
+//! block's exact placement) is deleted outright rather than re-keyed; see
+//! `submit_branch`'s receipts for the kept/deleted accounting.
 
 mod support;
 
@@ -118,48 +149,93 @@ fn header(label: &str) -> LogHeader {
 }
 
 // ---------------------------------------------------------------------------
-// The scripted provider — needle SETS, and a record of what it was asked
+// The scripted provider — keyed structurally on (path, phase[, ordinal]),
+// never on prompt-text substrings
 // ---------------------------------------------------------------------------
 
-/// One scripted window: every needle in `needles` must appear in the request's
-/// last message for `reply` to be served.
-struct Script {
-    needles: Vec<&'static str>,
-    reply: String,
+/// Which structural key one [`Script`] answers.
+///
+/// `Exact` is for a branch whose title THIS FILE authored (`split_two`,
+/// `split_three`, …), so its rendered slug is known ahead of time. `Prefix`
+/// is for a branch whose title is MODEL-produced — a hostile title (row 11),
+/// an operator's `Add` verdict — so only its POSITION segment (`"root/2-"`)
+/// is knowable in advance and the harness is left to own the slug, exactly
+/// the reason `outer_fanout.rs`'s adaptation of this provider first
+/// introduced position-only matching.
+#[derive(Debug, Clone, Copy)]
+enum PathKey {
+    Exact(&'static str),
+    Prefix(&'static str),
 }
 
-fn script(needles: &[&'static str], reply: String) -> Script {
-    Script {
-        needles: needles.to_vec(),
-        reply,
+impl PathKey {
+    fn matches(&self, path: &str) -> bool {
+        match self {
+            PathKey::Exact(p) => path == *p,
+            PathKey::Prefix(p) => path.starts_with(p),
+        }
     }
 }
 
-/// A [`ModelProvider`] that answers each cognition window by matching a set of
-/// NEEDLES against the request's last message (the hole card embeds the
-/// window's own prompt verbatim, and every prompt this harness writes names
-/// its node's `NodePath`), never by call ORDER.
+/// One scripted window, keyed on `(path, phase)` — never on prompt text.
 ///
-/// Adapted from `outer_fanout.rs`'s provider of the same name, for the reason
-/// its doc gives — `ReplayProvider`'s strict FIFO queue cannot serve windows
-/// whose provider-call order is itself under test — plus one change: an entry
-/// matches on ALL of its needles, so a scenario can name a branch by POSITION
-/// (`"NODE root/2-"`) and PHASE (`"— DISCOVER"`) instead of hardcoding a slug
-/// the harness derives from a model-produced title.
+/// `replies` is consumed front-to-back across successive matches of this
+/// SAME key, and the last entry sticks for every match past the end of the
+/// list. That one rule covers both shapes this suite needs: a single-reply
+/// `Script` repeats its one reply for every round of a window that never
+/// finalizes (a starved window's round-cap re-prompts all carry the same
+/// header, so they all match the same key); a multi-reply `Script`
+/// ([`script_seq`]) serves a genuinely different reply per call — the
+/// round-ordinal case, e.g. a corrective retry's second, corrected attempt —
+/// without matching a marker string inside the retry prompt to tell the two
+/// calls apart.
+struct Script {
+    path: PathKey,
+    phase: Phase,
+    replies: Vec<String>,
+}
+
+fn script(path: PathKey, phase: Phase, reply: String) -> Script {
+    Script {
+        path,
+        phase,
+        replies: vec![reply],
+    }
+}
+
+/// As [`script`], for a key that must answer a SEQUENCE of different replies
+/// across successive matches — the round-ordinal case.
+fn script_seq(path: PathKey, phase: Phase, replies: Vec<String>) -> Script {
+    Script {
+        path,
+        phase,
+        replies,
+    }
+}
+
+/// A [`ModelProvider`] that answers each cognition window by its STRUCTURAL
+/// `(path, phase)` key, parsed off the one header line every window's own
+/// prompt opens with ([`parse_window`] — the same single parse point
+/// [`Run`]'s own indexing already uses), never by matching an arbitrary
+/// substring anywhere in the request, and never by call ORDER
+/// (`ReplayProvider`'s strict FIFO queue cannot serve windows whose
+/// provider-call order is itself under test).
 ///
 /// Entries are matched IN ORDER, first match wins, so a catch-all
-/// (`["— FOLD"]`) can sit last. A request nothing matches is a loud
-/// `ProviderError`, never a default reply: "a window that must not run, ran"
-/// has to fail the run rather than be quietly served.
+/// ([`PathKey::Prefix`] of `""`, phase `Fold`) can sit last. A request
+/// nothing matches is a loud `ProviderError`, never a default reply: "a
+/// window that must not run, ran" has to fail the run rather than be
+/// quietly served.
 struct KeyedProvider {
     scripted: Vec<Script>,
+    /// Per-entry index into `scripted[i].replies`, advanced on every match —
+    /// what makes [`script_seq`]'s round-ordinal case serve its replies in
+    /// order rather than repeating only its first one.
+    cursors: Mutex<Vec<usize>>,
     /// The prompt of every window the provider was asked to answer, in order
     /// — the record several assertions below read (which windows ran at all,
     /// and what a window was actually prompted with).
     seen: Mutex<Vec<String>>,
-    /// As `seen`, but the FULL request (every message, framing included) —
-    /// see `full_request_text`.
-    full_seen: Mutex<Vec<String>>,
 }
 
 /// The message a request is MATCHED against: the last one carrying a window
@@ -182,25 +258,13 @@ fn window_message(req: &TurnRequest) -> String {
         .unwrap_or_default()
 }
 
-/// Every message of a request, joined in order — unlike `window_message`
-/// (which picks exactly one message), this is the only way a test can see
-/// the SYSTEM/framing message a coalgebra window inherited: `window_message`
-/// selects on " — DISCOVER"/" — FOLD", which the framing message never
-/// contains, so it is silently absent from `seen`/`requests`.
-fn full_request_text(req: &TurnRequest) -> String {
-    req.messages
-        .iter()
-        .map(|m| m.content.clone())
-        .collect::<Vec<_>>()
-        .join("\n\n===NEXT MESSAGE===\n\n")
-}
-
 impl KeyedProvider {
     fn new(scripted: Vec<Script>) -> Self {
+        let cursors = Mutex::new(vec![0; scripted.len()]);
         KeyedProvider {
             scripted,
+            cursors,
             seen: Mutex::new(Vec::new()),
-            full_seen: Mutex::new(Vec::new()),
         }
     }
 }
@@ -213,18 +277,31 @@ impl ModelProvider for KeyedProvider {
     ) -> Result<TurnResponse, ProviderError> {
         let last = window_message(&req);
         self.seen.lock().push(last.clone());
-        self.full_seen.lock().push(full_request_text(&req));
 
-        let reply = self
+        let (path, phase) = parse_window(&last).ok_or_else(|| {
+            ProviderError::Api(format!(
+                "KeyedProvider: request carries no \"NODE <path> — DISCOVER/FOLD\" \
+                 header to key a reply on:\n{last}"
+            ))
+        })?;
+
+        let idx = self
             .scripted
             .iter()
-            .find(|s| s.needles.iter().all(|n| last.contains(n)))
-            .map(|s| s.reply.clone())
+            .position(|s| s.phase == phase && s.path.matches(&path))
             .ok_or_else(|| {
                 ProviderError::Api(format!(
-                    "KeyedProvider: no scripted reply matches the request:\n{last}"
+                    "KeyedProvider: no scripted reply for path {path:?} phase {phase:?}"
                 ))
             })?;
+
+        let reply = {
+            let mut cursors = self.cursors.lock();
+            let replies = &self.scripted[idx].replies;
+            let cursor = cursors[idx].min(replies.len() - 1);
+            cursors[idx] += 1;
+            replies[cursor].clone()
+        };
 
         Ok(TurnResponse {
             text: reply,
@@ -380,8 +457,16 @@ enum Phase {
 /// `NODE <path> — DISCOVER (…` / `NODE <path> — FOLD (…` → `(path, phase)`.
 /// The ONE place this file parses a prompt, so the coupling to
 /// `Harness.hs`'s prompt headers is a single line rather than scattered.
+///
+/// Locates the header rather than anchoring at the start of `prompt`: a
+/// driver-recorded hole prompt (`DriverEvent::RunLLMTurnHole`) starts with it
+/// verbatim, but the FULL message a provider request embeds it in carries the
+/// hole card's own lead-in first ("The loop needs a typed answer of type
+/// `T`.\n\n") — both callers share this one function rather than one of them
+/// re-deriving the search.
 fn parse_window(prompt: &str) -> Option<(String, Phase)> {
-    let rest = prompt.strip_prefix("NODE ")?;
+    let start = prompt.find("NODE ")?;
+    let rest = &prompt[start + "NODE ".len()..];
     let (path, tail) = rest.split_once(" — ")?;
     let phase = if tail.starts_with("DISCOVER") {
         Phase::Discover
@@ -402,9 +487,6 @@ struct Run {
     windows: Vec<(String, NodeId)>,
     /// Every request's last message, as the provider saw it.
     requests: Vec<String>,
-    /// Every request in FULL (every message, framing included) — see
-    /// `full_request_text`.
-    full_requests: Vec<String>,
     log: Vec<LogEvent>,
     journal: Vec<JournalEntry>,
     gate_presentations: usize,
@@ -480,32 +562,6 @@ impl Run {
             hits.len(),
             1,
             "expected exactly one provider request for {needle}, got {}",
-            hits.len()
-        );
-        hits[0].clone()
-    }
-
-    /// As `request_for`, but the FULL assembled request — every message,
-    /// including the SYSTEM/framing one `request_for`'s window-tagged
-    /// message excludes by construction. The one place a test can see
-    /// what a coalgebra window inherited from its per-cycle framing.
-    fn full_request_for(&self, path: &str, phase: Phase) -> String {
-        let needle = format!(
-            "NODE {path} — {}",
-            match phase {
-                Phase::Discover => "DISCOVER",
-                Phase::Fold => "FOLD",
-            }
-        );
-        let hits: Vec<&String> = self
-            .full_requests
-            .iter()
-            .filter(|r| r.contains(&needle))
-            .collect();
-        assert_eq!(
-            hits.len(),
-            1,
-            "expected exactly one full provider request for {needle}, got {}",
             hits.len()
         );
         hits[0].clone()
@@ -778,12 +834,10 @@ async fn run_scenario(
     let windows = observer.windows.lock().clone();
     let gate_submissions = observer.forms.lock().clone();
     let requests = provider.seen.lock().clone();
-    let full_requests = provider.full_seen.lock().clone();
     Run {
         state: outcome.state_json,
         windows,
         requests,
-        full_requests,
         log,
         journal,
         gate_presentations: gate.presentations(),
@@ -828,8 +882,9 @@ const ALPHA_INSTRUCTION: &str = "the instruction the model proposed for alpha";
 /// Reused rather than re-worded per scenario for a reason that is the whole
 /// point of the family bundle: an answerer compile is keyed by the block's
 /// SOURCE, so one shared reply text is one compile for the entire file, while
-/// six near-identical ones would be six. The needle table is what varies per
-/// scenario; the reply does not have to.
+/// several near-identical ones would each pay their own. The [`Script`] KEY
+/// (its `path`/`phase`) is what varies per scenario; the reply does not have
+/// to.
 fn split_two() -> String {
     split_reply(
         "Explore",
@@ -917,9 +972,9 @@ fn fold_reply() -> String {
     )
 }
 
-/// The catch-all fold entry, matched last.
+/// The catch-all fold entry, matched last (any path, phase `Fold`).
 fn fold_script() -> Script {
-    script(&["— FOLD"], fold_reply())
+    script(PathKey::Prefix(""), Phase::Fold, fold_reply())
 }
 
 /// A window that never answers: prose with no fenced block, so every one of
@@ -1043,7 +1098,8 @@ async fn companion_tree_recurses_folds_and_contains_its_node_ids() {
         state_json(3, 40, 5, json!({"tag": "GateOff"})),
         vec![
             script(
-                &["NODE root — DISCOVER"],
+                PathKey::Exact("root"),
+                Phase::Discover,
                 split_reply(
                     "Compare",
                     "what the slice must show",
@@ -1056,23 +1112,35 @@ async fn companion_tree_recurses_folds_and_contains_its_node_ids() {
                     ],
                 ),
             ),
-            script(&["NODE root/1-alpha — DISCOVER"], split_two()),
-            script(&["NODE root/1-alpha/1-", "— DISCOVER"], finish_reply()),
-            script(&["NODE root/1-alpha/2-", "— DISCOVER"], finish_reply()),
+            script(PathKey::Exact("root/1-alpha"), Phase::Discover, split_two()),
+            script(
+                PathKey::Prefix("root/1-alpha/1-"),
+                Phase::Discover,
+                finish_reply(),
+            ),
+            script(
+                PathKey::Prefix("root/1-alpha/2-"),
+                Phase::Discover,
+                finish_reply(),
+            ),
             // The hostile-titled branch is ALSO the unusable-layer branch
             // (row 4): a node whose own layer fails still has a node id, so
             // one branch carries both properties.
-            script(&["NODE root/2-", "— DISCOVER"], empty_split_reply()),
-            script(&["NODE root/3-", "— DISCOVER"], finish_reply()),
-            script(&["NODE root/4-", "— DISCOVER"], finish_reply()),
+            script(
+                PathKey::Prefix("root/2-"),
+                Phase::Discover,
+                empty_split_reply(),
+            ),
+            script(PathKey::Prefix("root/3-"), Phase::Discover, finish_reply()),
+            script(PathKey::Prefix("root/4-"), Phase::Discover, finish_reply()),
             // Row 4b: this window is STARVED — it burns its round budget
             // without ever running a block, so its coalgebra comes back as a
             // typed `Left InvocationExit`.
-            script(&["NODE root/5-", "— DISCOVER"], starved_reply()),
+            script(PathKey::Prefix("root/5-"), Phase::Discover, starved_reply()),
             // The ALGEBRA side of the same contract: this node's own FOLD
             // window is starved, so the exit replaces what that node owed and
             // must leave its two children's finished answers alone.
-            script(&["NODE root/1-alpha — FOLD"], starved_reply()),
+            script(PathKey::Exact("root/1-alpha"), Phase::Fold, starved_reply()),
             fold_script(),
         ],
         Arc::new(ScriptedGate::default()),
@@ -1424,9 +1492,9 @@ async fn companion_depth_cap_forces_a_stamped_finish() {
         vec![
             // The SAME two-branch reply at all three nodes that split — one
             // answerer compile, three windows.
-            script(&["NODE root — DISCOVER"], split_two()),
-            script(&["NODE root/1-alpha — DISCOVER"], split_two()),
-            script(&["NODE root/2-beta — DISCOVER"], split_two()),
+            script(PathKey::Exact("root"), Phase::Discover, split_two()),
+            script(PathKey::Exact("root/1-alpha"), Phase::Discover, split_two()),
+            script(PathKey::Exact("root/2-beta"), Phase::Discover, split_two()),
             fold_script(),
         ],
         Arc::new(ScriptedGate::default()),
@@ -1544,10 +1612,18 @@ async fn companion_node_cap_bounds_the_windows_that_run() {
         "nodes",
         state_json(5, 4, 4, json!({"tag": "GateOff"})),
         vec![
-            script(&["NODE root — DISCOVER"], split_three()),
-            script(&["NODE root/1-alpha — DISCOVER"], split_two()),
-            script(&["NODE root/2-beta — DISCOVER"], finish_reply()),
-            script(&["NODE root/3-gamma — DISCOVER"], finish_reply()),
+            script(PathKey::Exact("root"), Phase::Discover, split_three()),
+            script(PathKey::Exact("root/1-alpha"), Phase::Discover, split_two()),
+            script(
+                PathKey::Exact("root/2-beta"),
+                Phase::Discover,
+                finish_reply(),
+            ),
+            script(
+                PathKey::Exact("root/3-gamma"),
+                Phase::Discover,
+                finish_reply(),
+            ),
             fold_script(),
         ],
         Arc::new(ScriptedGate::default()),
@@ -1599,7 +1675,7 @@ async fn companion_fanout_cap_refuses_the_descent() {
         "fanout",
         state_json(5, 40, 2, json!({"tag": "GateOff"})),
         vec![
-            script(&["NODE root — DISCOVER"], split_three()),
+            script(PathKey::Exact("root"), Phase::Discover, split_three()),
             fold_script(),
         ],
         Arc::new(ScriptedGate::default()),
@@ -1678,9 +1754,17 @@ async fn companion_gate_prune_then_approve_never_runs_the_pruned_branch() {
         "gate-prune",
         gate_every_layer_state(),
         vec![
-            script(&["NODE root — DISCOVER"], split_three()),
-            script(&["NODE root/1-alpha — DISCOVER"], finish_reply()),
-            script(&["NODE root/2-gamma — DISCOVER"], finish_reply()),
+            script(PathKey::Exact("root"), Phase::Discover, split_three()),
+            script(
+                PathKey::Exact("root/1-alpha"),
+                Phase::Discover,
+                finish_reply(),
+            ),
+            script(
+                PathKey::Exact("root/2-gamma"),
+                Phase::Discover,
+                finish_reply(),
+            ),
             fold_script(),
         ],
         gate.clone(),
@@ -1744,9 +1828,17 @@ async fn companion_gate_amend_reaches_the_branches_own_prompt() {
         "gate-amend",
         gate_every_layer_state(),
         vec![
-            script(&["NODE root — DISCOVER"], split_two()),
-            script(&["NODE root/1-alpha — DISCOVER"], finish_reply()),
-            script(&["NODE root/2-beta — DISCOVER"], finish_reply()),
+            script(PathKey::Exact("root"), Phase::Discover, split_two()),
+            script(
+                PathKey::Exact("root/1-alpha"),
+                Phase::Discover,
+                finish_reply(),
+            ),
+            script(
+                PathKey::Exact("root/2-beta"),
+                Phase::Discover,
+                finish_reply(),
+            ),
             fold_script(),
         ],
         gate.clone(),
@@ -1794,10 +1886,18 @@ async fn companion_gate_add_reaches_the_added_branchs_own_prompt() {
         "gate-add",
         gate_every_layer_state(),
         vec![
-            script(&["NODE root — DISCOVER"], split_two()),
-            script(&["NODE root/1-alpha — DISCOVER"], finish_reply()),
-            script(&["NODE root/2-beta — DISCOVER"], finish_reply()),
-            script(&["NODE root/3-", "— DISCOVER"], finish_reply()),
+            script(PathKey::Exact("root"), Phase::Discover, split_two()),
+            script(
+                PathKey::Exact("root/1-alpha"),
+                Phase::Discover,
+                finish_reply(),
+            ),
+            script(
+                PathKey::Exact("root/2-beta"),
+                Phase::Discover,
+                finish_reply(),
+            ),
+            script(PathKey::Prefix("root/3-"), Phase::Discover, finish_reply()),
             fold_script(),
         ],
         gate.clone(),
@@ -1823,11 +1923,11 @@ async fn companion_gate_add_reaches_the_added_branchs_own_prompt() {
 }
 
 // ---------------------------------------------------------------------------
-// Scenario F — checked edits (PRD 21 lane C4 + the companion review's
-// endorsement propagation, wire collapse, and edit vocabulary): a leaf
-// proposes at its own fold, an ancestor's fold selects (endorsing, if not
-// root, or applying, if root), the runtime runs the closure against the
-// companion's working draft, and one receipt is stamped per approved plan.
+// Scenario F — checked edits (PRD 21 lane C4 + the companion review's wire
+// collapse and edit vocabulary): a leaf proposes at its own fold, root's own
+// fold selects and applies against the companion's working draft, and one
+// receipt is stamped per approved plan — plus the corrective-retry mechanism
+// a fold's selection naming a duplicated id falls back through.
 // ---------------------------------------------------------------------------
 
 /// A `FoldDecision` reply that proposes exactly ONE new `AppendEdit` of this
@@ -1918,17 +2018,27 @@ async fn companion_leaf_proposes_parent_selects_runtime_applies_with_receipts() 
         "checked-edits",
         state_json_with_draft(3, 40, 5, json!({"tag": "GateOff"}), "seed"),
         vec![
-            script(&["NODE root — DISCOVER"], split_two()),
-            script(&["NODE root/1-alpha — DISCOVER"], split_one()),
-            script(&["NODE root/1-alpha/1-", "— DISCOVER"], finish_reply()),
-            script(&["NODE root/2-beta — DISCOVER"], split_one()),
-            script(&["NODE root/2-beta/1-", "— DISCOVER"], finish_reply()),
+            script(PathKey::Exact("root"), Phase::Discover, split_two()),
+            script(PathKey::Exact("root/1-alpha"), Phase::Discover, split_one()),
             script(
-                &["NODE root/1-alpha — FOLD"],
+                PathKey::Prefix("root/1-alpha/1-"),
+                Phase::Discover,
+                finish_reply(),
+            ),
+            script(PathKey::Exact("root/2-beta"), Phase::Discover, split_one()),
+            script(
+                PathKey::Prefix("root/2-beta/1-"),
+                Phase::Discover,
+                finish_reply(),
+            ),
+            script(
+                PathKey::Exact("root/1-alpha"),
+                Phase::Fold,
                 propose_append_reply("alpha folds locally", "append alpha's suggestion", "-alpha"),
             ),
             script(
-                &["NODE root/2-beta — FOLD"],
+                PathKey::Exact("root/2-beta"),
+                Phase::Fold,
                 propose_replace_reply(
                     "beta folds locally",
                     "beta's replace attempt",
@@ -1937,7 +2047,8 @@ async fn companion_leaf_proposes_parent_selects_runtime_applies_with_receipts() 
                 ),
             ),
             script(
-                &["NODE root — FOLD"],
+                PathKey::Exact("root"),
+                Phase::Fold,
                 select_edits_reply("root selects beta then alpha", &[beta_id, alpha_id]),
             ),
         ],
@@ -2046,191 +2157,15 @@ async fn companion_leaf_proposes_parent_selects_runtime_applies_with_receipts() 
     }
 }
 
-/// The companion review's semantics upgrade — endorsement propagation: an
-/// artifact a GRANDCHILD proposes reaches the ROOT's own persisted draft only
-/// by chained selection, and every non-root application along the way is
-/// labeled a PREVIEW, never "applied".
-///
-/// The tree: root splits into Alpha and Beta (`split_two()`); Alpha itself
-/// splits into two more nodes, `aa` and `ab` (reusing `split_two()` again —
-/// one compile, three uses). `aa` in turn mints its own single child
-/// (`split_one()`) — under mechanical-leaf-fold semantics `aa` needs a kid of
-/// its own to run a fold window at all, so it proposes at ITS OWN fold rather
-/// than being a leaf; that lone grandchild is born at depth 3, past this
-/// scenario's `maxDepth` of 3, so the depth cap forces its finish before it
-/// ever reaches discover — no script needed for it, and `aa` still has
-/// exactly the "one kid, no proposal of its own" pool this test needs.
-/// `aa`'s own fold proposes an edit; Alpha's own fold (non-root, depth 1)
-/// SELECTS it — endorsing and republishing it under its ORIGINAL,
-/// `aa`-namespaced id — and root's own fold selects that SAME id from
-/// Alpha's now-endorsed pool, applying it for real. Depth 2, chained
-/// selection, one real application.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn companion_endorsement_reaches_root_from_depth_two() {
-    let _cache_guard = support::isolate_cache();
-
-    let aa_id = "root/1-alpha/1-alpha#1";
-
-    let run = run_scenario(
-        "endorsement-depth-2",
-        state_json_with_draft(3, 40, 5, json!({"tag": "GateOff"}), "base"),
-        vec![
-            script(&["NODE root — DISCOVER"], split_two()),
-            script(&["NODE root/1-alpha — DISCOVER"], split_two()),
-            script(&["NODE root/2-beta — DISCOVER"], finish_reply()),
-            script(&["NODE root/1-alpha/1-alpha — DISCOVER"], split_one()),
-            script(&["NODE root/1-alpha/2-beta — DISCOVER"], finish_reply()),
-            script(
-                &["NODE root/1-alpha/1-alpha — FOLD"],
-                propose_append_reply("aa proposes", "grand's suggestion", "-grand"),
-            ),
-            script(&["NODE root/1-alpha/2-beta — FOLD"], fold_reply()),
-            script(&["NODE root/2-beta — FOLD"], fold_reply()),
-            script(
-                &["NODE root/1-alpha — FOLD"],
-                select_edits_reply("alpha endorses aa's edit", &[aa_id]),
-            ),
-            script(
-                &["NODE root — FOLD"],
-                select_edits_reply("root applies alpha's endorsed edit", &[aa_id]),
-            ),
-        ],
-        Arc::new(ScriptedGate::default()),
-    )
-    .await;
-
-    // --- the edit reached the persisted draft, at the ROOT's own position --
-    assert_eq!(
-        run.state.get("draft").and_then(|v| v.as_str()),
-        Some("base\n\n-grand"),
-        "a grandchild's edit reaches the persisted draft only through chained \
-         selection all the way to root: {}",
-        run.state
-    );
-
-    // --- provenance survives: the id root selected is the ORIGINAL one -----
-    let root_fold_request = run.request_for("root", Phase::Fold);
-    assert!(
-        root_fold_request.contains(aa_id),
-        "the artifact's id is unchanged end to end — path-namespaced provenance: {root_fold_request}"
-    );
-    assert!(
-        root_fold_request.contains("From Alpha (root/1-alpha)"),
-        "the pool is grouped by IMMEDIATE CHILD (who endorsed it to this fold), \
-         not by where it originated: {root_fold_request}"
-    );
-
-    // --- mid-tree (Alpha) says PREVIEW; only root says APPLIED -------------
-    let edits_at = |path: &str| -> Json {
-        run.journal_kind("edits")
-            .into_iter()
-            .find(|e| e.key == path)
-            .unwrap_or_else(|| panic!("no edits journal entry at {path}"))
-            .payload
-            .clone()
-    };
-    let alpha_edits = edits_at("root/1-alpha");
-    assert_eq!(
-        alpha_edits.get("status").and_then(|v| v.as_str()),
-        Some("preview"),
-        "alpha's own endorsement runs the SAME apply mechanically, but it is \
-         only a preview against the frozen turn-start snapshot: {alpha_edits:?}"
-    );
-    let root_edits = edits_at("root");
-    assert_eq!(
-        root_edits.get("status").and_then(|v| v.as_str()),
-        Some("applied"),
-        "root's own selection is the turn's one real, persisted application: {root_edits:?}"
-    );
-    assert!(
-        run.tree_line("root/1-alpha")
-            .contains("edits: 1 previewed, 0 refused"),
-        "the preview wording surfaces on the node's own badge: {}",
-        run.tree_line("root/1-alpha")
-    );
-    assert!(
-        run.tree_line("root")
-            .contains("edits: 1 applied, 0 refused"),
-        "the applied wording surfaces only at root: {}",
-        run.tree_line("root")
-    );
-
-    // --- the grandchild's own fold never approves its own proposal ---------
-    assert!(
-        run.journal_kind("edits")
-            .into_iter()
-            .all(|e| e.key != "root/1-alpha/1-alpha"),
-        "a leaf's own fold cannot approve its own proposal"
-    );
-}
-
-/// The companion review's semantics upgrade — root's own `foldProposed` is
-/// FORBIDDEN: root selects from the pool, it never authors. Refused at the
-/// stamp and journaled, never silently dropped.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn companion_root_proposed_edits_are_refused_and_journaled() {
-    let _cache_guard = support::isolate_cache();
-
-    let run = run_scenario(
-        "root-proposal-refused",
-        state_json_with_draft(3, 40, 5, json!({"tag": "GateOff"}), "untouched"),
-        vec![
-            script(&["NODE root — DISCOVER"], finish_reply()),
-            script(
-                &["NODE root — FOLD"],
-                propose_append_reply(
-                    "root tries to author an edit",
-                    "root's own suggestion",
-                    "-nope",
-                ),
-            ),
-        ],
-        Arc::new(ScriptedGate::default()),
-    )
-    .await;
-
-    assert_eq!(
-        run.state.get("draft").and_then(|v| v.as_str()),
-        Some("untouched"),
-        "the root fold's own proposal is refused outright, so nothing ever \
-         reaches the draft: {}",
-        run.state
-    );
-    let refused = run.journal_kind("refused");
-    assert_eq!(
-        refused.len(),
-        1,
-        "the root's one proposal is refused exactly once: {refused:?}"
-    );
-    assert_eq!(refused[0].key, "root");
-    assert_eq!(
-        refused[0].payload.get("ordinal").and_then(|v| v.as_i64()),
-        Some(1)
-    );
-    let reason = refused[0]
-        .payload
-        .get("reason")
-        .and_then(|v| v.as_str())
-        .unwrap_or_default();
-    assert!(
-        reason.contains("root fold"),
-        "the refusal names why it was refused: {reason}"
-    );
-    assert!(
-        run.journal_kind("edits").is_empty(),
-        "nothing was ever stamped, so nothing could ever be approved"
-    );
-}
-
 /// The companion review's corrective-retry mechanism: a fold's selection
 /// naming a DUPLICATED id gets exactly ONE fresh window before the runtime
 /// falls back to the valid subset — scripted here as the model getting it
-/// right on the second try. The retry's own prompt carries a distinguishing
-/// marker ("did not validate") the first reply never sees, which is what
-/// lets ONE `KeyedProvider` entry serve the corrected reply only on the
-/// SECOND call to the same node's FOLD window — the more specific entry
-/// (both needles) is listed FIRST, the generic one (which would otherwise
-/// also match the first call) second.
+/// right on the second try. Root's own FOLD window is called twice with the
+/// SAME structural key (`path = "root"`, `phase = Fold`); [`script_seq`]
+/// serves its two replies in that call order — the duplicated selection
+/// first, the corrected one second — the round-ordinal case, resolved by
+/// call count against one key rather than by matching a marker string
+/// inside the retry prompt.
 ///
 /// Alpha mints one plain child of its own (`split_one()`) so it stays an
 /// INTERIOR node under mechanical-leaf-fold semantics — a childless non-root
@@ -2246,22 +2181,31 @@ async fn companion_corrective_retry_recovers_from_invalid_selection() {
         "corrective-retry",
         state_json_with_draft(3, 40, 5, json!({"tag": "GateOff"}), "seed"),
         vec![
-            script(&["NODE root — DISCOVER"], split_two()),
-            script(&["NODE root/1-alpha — DISCOVER"], split_one()),
-            script(&["NODE root/1-alpha/1-", "— DISCOVER"], finish_reply()),
-            script(&["NODE root/2-beta — DISCOVER"], finish_reply()),
+            script(PathKey::Exact("root"), Phase::Discover, split_two()),
+            script(PathKey::Exact("root/1-alpha"), Phase::Discover, split_one()),
             script(
-                &["NODE root/1-alpha — FOLD"],
+                PathKey::Prefix("root/1-alpha/1-"),
+                Phase::Discover,
+                finish_reply(),
+            ),
+            script(
+                PathKey::Exact("root/2-beta"),
+                Phase::Discover,
+                finish_reply(),
+            ),
+            script(
+                PathKey::Exact("root/1-alpha"),
+                Phase::Fold,
                 propose_append_reply("alpha proposes", "alpha's suggestion", "-alpha"),
             ),
-            script(&["NODE root/2-beta — FOLD"], fold_reply()),
-            script(
-                &["NODE root — FOLD", "did not validate"],
-                select_edits_reply("root corrects its selection", &[alpha_id]),
-            ),
-            script(
-                &["NODE root — FOLD"],
-                select_edits_reply("root selects, duplicated", &[alpha_id, alpha_id]),
+            script(PathKey::Exact("root/2-beta"), Phase::Fold, fold_reply()),
+            script_seq(
+                PathKey::Exact("root"),
+                Phase::Fold,
+                vec![
+                    select_edits_reply("root selects, duplicated", &[alpha_id, alpha_id]),
+                    select_edits_reply("root corrects its selection", &[alpha_id]),
+                ],
             ),
         ],
         Arc::new(ScriptedGate::default()),
@@ -2333,236 +2277,4 @@ async fn companion_corrective_retry_recovers_from_invalid_selection() {
         1,
         "the corrected selection names exactly one id, so exactly one receipt: {receipts:?}"
     );
-}
-
-/// `ReplaceOnce` end to end: an interior node proposes it (mechanical-leaf-
-/// fold semantics give a childless non-root node no fold window at all, so
-/// alpha mints one plain child of its own via `split_one()` to stay interior
-/// and keep proposing), root selects it, and the runtime's
-/// `Tidepool.Thought.replaceExactlyOnce` swaps the draft's single needle
-/// occurrence.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn companion_replace_once_applies_end_to_end() {
-    let _cache_guard = support::isolate_cache();
-
-    let alpha_id = "root/1-alpha#1";
-
-    let run = run_scenario(
-        "replace-once",
-        state_json_with_draft(3, 40, 5, json!({"tag": "GateOff"}), "hello NEEDLE world"),
-        vec![
-            script(&["NODE root — DISCOVER"], split_two()),
-            script(&["NODE root/1-alpha — DISCOVER"], split_one()),
-            script(&["NODE root/1-alpha/1-", "— DISCOVER"], finish_reply()),
-            script(&["NODE root/2-beta — DISCOVER"], finish_reply()),
-            script(
-                &["NODE root/1-alpha — FOLD"],
-                propose_replace_reply(
-                    "alpha proposes a replace",
-                    "swap the needle",
-                    "NEEDLE",
-                    "WORLD",
-                ),
-            ),
-            script(&["NODE root/2-beta — FOLD"], fold_reply()),
-            script(
-                &["NODE root — FOLD"],
-                select_edits_reply("root applies the replacement", &[alpha_id]),
-            ),
-        ],
-        Arc::new(ScriptedGate::default()),
-    )
-    .await;
-
-    assert_eq!(
-        run.state.get("draft").and_then(|v| v.as_str()),
-        Some("hello WORLD world"),
-        "ReplaceOnce swaps its single needle occurrence end to end: {}",
-        run.state
-    );
-    let root_edits = run
-        .journal_kind("edits")
-        .into_iter()
-        .find(|e| e.key == "root")
-        .expect("root's own edits entry");
-    let receipts = root_edits
-        .payload
-        .get("receipts")
-        .and_then(|v| v.as_array())
-        .expect("receipts array");
-    assert_eq!(receipts.len(), 1);
-    assert_eq!(
-        receipts[0]
-            .get("outcome")
-            .and_then(|o| o.get("applied"))
-            .and_then(|v| v.as_str()),
-        Some("hello WORLD world")
-    );
-}
-
-/// PRD 21 lane C4 — a fold that neither selects nor proposes anything is
-/// byte-behaviorally the pre-C4 narrative fold: no "edits" journal entry, no
-/// "edits:" badge, and the draft carries all the way through a turn
-/// unchanged. Every OTHER scenario in this file already pins this
-/// (`fold_script()`'s shared reply supplies empty defaults throughout), so
-/// this asserts it directly, once, off the smallest possible tree — a single
-/// root `Finish`.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn companion_narrative_fold_is_byte_behaviorally_unchanged_by_c4() {
-    let _cache_guard = support::isolate_cache();
-
-    let run = run_scenario(
-        "narrative-unchanged",
-        state_json_with_draft(3, 40, 5, json!({"tag": "GateOff"}), "untouched"),
-        vec![
-            script(&["NODE root — DISCOVER"], finish_reply()),
-            fold_script(),
-        ],
-        Arc::new(ScriptedGate::default()),
-    )
-    .await;
-
-    assert_eq!(
-        run.state.get("draft").and_then(|v| v.as_str()),
-        Some("untouched"),
-        "a fold that selects and proposes nothing never touches the draft: {}",
-        run.state
-    );
-    assert!(
-        run.journal_kind("edits").is_empty(),
-        "no artifacts were ever proposed or selected, so no edits kind is journaled"
-    );
-    assert!(
-        !run.tree_line("root").contains("edits:"),
-        "and no badge appears on the one node that folded: {}",
-        run.tree_line("root")
-    );
-}
-
-/// The one-off coalgebra teaching (mechanics prose, delegate/askUser
-/// contracts, both compilable examples) moved out of the per-node
-/// `coalgebraPrompt` and into `render`'s output — the per-cycle SYSTEM
-/// framing every coalgebra/algebra window in the tree inherits, root
-/// included, since `loop` freezes its OWN context (which carries that
-/// framing) before minting `rootSeed`. `coalgebraPrompt` is therefore the
-/// SAME minimal shape at every depth: no depth branch, no root special case.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn companion_coalgebra_prompt_is_minimal_at_every_depth() {
-    let _cache_guard = support::isolate_cache();
-
-    let run = run_scenario(
-        "coalgebra-prompt-minimal",
-        state_json(3, 40, 5, json!({"tag": "GateOff"})),
-        vec![
-            script(&["NODE root — DISCOVER"], split_two()),
-            script(&["NODE root/1-alpha — DISCOVER"], finish_reply()),
-            script(&["NODE root/2-beta — DISCOVER"], finish_reply()),
-            fold_script(),
-        ],
-        Arc::new(ScriptedGate::default()),
-    )
-    .await;
-
-    // --- root's own coalgebra prompt is the SAME minimal shape as any
-    // descendant's — NODE/budget/brief/finalize, nothing else.
-    let root_prompt = run.window_prompt("root", Phase::Discover);
-    let expected_root = "NODE root — DISCOVER.\n\n\
-Budget: depth 0 of 3 max, node allowance 40, fan-out cap 5.\n\n\
-Your branch: root (Primary)\n\
-SCENARIO: drive the recursive companion on scripted windows.\n\n\
-Finalize: `finalize @LayerProposal (...)`";
-    assert_eq!(
-        root_prompt, expected_root,
-        "root's own coalgebra prompt must be the minimal per-node form — the \
-         one-off teaching lives in render()'s framing now, not here: {root_prompt}"
-    );
-
-    // --- a depth>0 descendant's own coalgebra prompt is the identical
-    // shape, modulo its own path/depth/allowance/brief — the allowance
-    // split's exact arithmetic is out of scope here, so it is read back out
-    // of the prompt rather than hardcoded.
-    let child_prompt = run.window_prompt("root/1-alpha", Phase::Discover);
-    let allowance = child_prompt
-        .split("node allowance ")
-        .nth(1)
-        .and_then(|s| s.split(',').next())
-        .unwrap_or_else(|| panic!("no 'node allowance N' in: {child_prompt}"))
-        .to_string();
-    let expected_child = format!(
-        "NODE root/1-alpha — DISCOVER.\n\n\
-Budget: depth 1 of 3 max, node allowance {allowance}, fan-out cap 5.\n\n\
-Your branch: Alpha (Primary)\n\
-{ALPHA_INSTRUCTION}\n\n\
-Finalize: `finalize @LayerProposal (...)`"
-    );
-    assert_eq!(
-        child_prompt, expected_child,
-        "a depth>0 node's own coalgebra prompt must be JUST NODE/budget/brief/finalize \
-         — no mechanics prose, no examples: {child_prompt}"
-    );
-
-    // Belt-and-suspenders: neither prompt carries a marker of the mechanics
-    // teaching that now lives only in render()'s framing.
-    for (path, prompt) in [("root", &root_prompt), ("root/1-alpha", &child_prompt)] {
-        for marker in [
-            "delegateLabel",
-            "askUserWith",
-            "Decide THIS LAYER",
-            "Two complete examples",
-            "--- EXAMPLE ---",
-            "ProposeSplit {",
-        ] {
-            assert!(
-                !prompt.contains(marker),
-                "{path}'s own coalgebra prompt must not carry {marker:?}: {prompt}"
-            );
-        }
-    }
-
-    // --- the auto-rendered hole card (the FIRST fenced Haskell block in
-    // root's request) must still not compete with the teaching for that
-    // position — trivially true now the teaching isn't even in this
-    // message, but worth pinning given `HarnessTypes.coalgebraProtocol`'s
-    // doc explicitly re-derives this constraint at its new home.
-    let root_card = run.request_for("root", Phase::Discover);
-    assert!(
-        !root_card.contains("--- EXAMPLE ---") && !root_card.contains("--- PROTOCOL"),
-        "the teaching must not leak into the message carrying the auto-rendered \
-         hole card: {root_card}"
-    );
-}
-
-/// The teaching `companion_coalgebra_prompt_is_minimal_at_every_depth` shows
-/// is ABSENT from every coalgebra prompt lives instead in the per-cycle
-/// SYSTEM framing — present in root's assembled request exactly once.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn companion_root_framing_carries_the_coalgebra_teaching_exactly_once() {
-    let _cache_guard = support::isolate_cache();
-
-    let run = run_scenario(
-        "coalgebra-teaching-in-framing",
-        state_json(3, 40, 5, json!({"tag": "GateOff"})),
-        vec![
-            script(&["NODE root — DISCOVER"], finish_reply()),
-            fold_script(),
-        ],
-        Arc::new(ScriptedGate::default()),
-    )
-    .await;
-
-    let root_full = run.full_request_for("root", Phase::Discover);
-    for marker in [
-        "--- PROTOCOL: every \"NODE ... — DISCOVER\" window in this run ---",
-        "renderDelegateError",
-        "askUserWith @OperatorSteering",
-        "Two complete examples:",
-        "--- END PROTOCOL ---",
-    ] {
-        assert_eq!(
-            root_full.matches(marker).count(),
-            1,
-            "the root window's assembled request must carry the coalgebra teaching \
-             exactly once, in its framing: missing or duplicated {marker:?} in:\n{root_full}"
-        );
-    }
 }
