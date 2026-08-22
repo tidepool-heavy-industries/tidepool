@@ -9,7 +9,6 @@
 use std::collections::HashMap;
 use std::fmt;
 use std::fs::OpenOptions;
-use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -18,6 +17,7 @@ use parking_lot::Mutex;
 use tidepool_effect::dispatch::EffectContext;
 use tidepool_effect::error::EffectError;
 use tidepool_mcp::CapturedOutput;
+use tidepool_repr::jsonl::{self, SyncPolicy};
 
 // JournalReq, DescribeEffect and the EffectHandler dispatch are GENERATED from
 // the `tidepool-protocol` schema (PRD 22 phase 2) — re-exported here so the
@@ -140,7 +140,12 @@ pub enum JournalLoadError {
         /// an operator sees in a text editor or `sed -n '<n>p'` — not the
         /// zero-based array index [`load_journal`] iterates with.
         line_no: usize,
-        detail: JournalParseError,
+        /// [`JournalParseError`]'s `Display` text — a `String` rather than
+        /// the typed error itself, since the shared
+        /// [`tidepool_repr::jsonl::read_repairing_tail`] this now runs
+        /// through is schema-agnostic and only carries `parse`'s `Err` as
+        /// text.
+        detail: String,
     },
 }
 
@@ -171,49 +176,34 @@ impl std::error::Error for JournalLoadError {}
 /// is loud (`Err(JournalLoadError::TornMidFile)`) — the journal is
 /// append-only, so only the very last write can ever be incomplete.
 pub fn load_journal(path: &Path) -> Result<Vec<JournalEntry>, JournalLoadError> {
-    let file = match std::fs::File::open(path) {
-        Ok(f) => f,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(e) => {
-            return Err(JournalLoadError::Io {
-                path: path.to_path_buf(),
-                source: e,
-            })
-        }
-    };
-    let lines: Vec<String> = BufReader::new(file)
-        .lines()
-        .collect::<std::io::Result<_>>()
-        .map_err(|source| JournalLoadError::Io {
+    let (entries, repair) = jsonl::read_repairing_tail(path, |l| {
+        serde_json::from_str::<serde_json::Value>(l)
+            .map_err(JournalParseError::NotJson)
+            .and_then(|v| JournalEntry::from_json(&v))
+            .map_err(|e| e.to_string())
+    })
+    .map_err(|e| match e {
+        jsonl::JsonlReadError::Io(source) => JournalLoadError::Io {
             path: path.to_path_buf(),
             source,
-        })?;
-    let last_idx = lines.len().saturating_sub(1);
-    let mut entries = Vec::with_capacity(lines.len());
-    for (i, line) in lines.iter().enumerate() {
-        if line.trim().is_empty() {
-            continue;
-        }
-        let parsed = serde_json::from_str::<serde_json::Value>(line)
-            .map_err(JournalParseError::NotJson)
-            .and_then(|v| JournalEntry::from_json(&v));
-        match parsed {
-            Ok(entry) => entries.push(entry),
-            Err(detail) if i == last_idx => {
-                tracing::warn!(
-                    "journal {:?}: torn final line skipped (crash mid-append?): {}",
-                    path,
-                    detail
-                );
-            }
-            Err(detail) => {
-                return Err(JournalLoadError::TornMidFile {
-                    path: path.to_path_buf(),
-                    line_no: i + 1,
-                    detail,
-                });
-            }
-        }
+        },
+        jsonl::JsonlReadError::TornMidFile { line_no, detail } => JournalLoadError::TornMidFile {
+            path: path.to_path_buf(),
+            line_no,
+            detail,
+        },
+    })?;
+    // Tail repair (truncating a torn final row away) is unconditional in the
+    // shared reader now — see `tidepool_repr::jsonl`'s module doc for why
+    // this strengthens the old skip-only-in-memory behavior rather than
+    // changing it arbitrarily.
+    if let Some(repair) = repair {
+        tracing::warn!(
+            "journal {:?}: torn final line at line {} truncated away (crash mid-append?): {}",
+            path,
+            repair.line_no,
+            repair.reason
+        );
     }
     Ok(entries)
 }
@@ -506,31 +496,35 @@ impl JournalHandler {
             key,
             payload,
         };
-        let mut line = serde_json::to_string(&entry.to_json()).map_err(|source| {
+        let line = serde_json::to_string(&entry.to_json()).map_err(|source| {
             JournalAppendError::Serialize {
                 path: self.path.clone(),
                 source,
             }
         })?;
-        line.push('\n');
-        let mut file = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&self.path)
-            .map_err(|source| JournalAppendError::Open {
-                path: self.path.clone(),
-                source,
-            })?;
-        file.write_all(line.as_bytes())
-            .map_err(|source| JournalAppendError::Write {
-                path: self.path.clone(),
-                source,
-            })?;
-        file.sync_data()
-            .map_err(|source| JournalAppendError::Sync {
-                path: self.path.clone(),
-                source,
-            })?;
+        // `append_new_line` folds open+write+fsync into one call; this
+        // handler's own lock above already serializes the WHOLE operation
+        // (seq allocation through fsync) across every clone sharing `path` —
+        // see this method's doc for why that, not syscall atomicity, is what
+        // makes a concurrent burst never tear a line. `SyncPolicy::Data`
+        // preserves the original `sync_data` (not `sync_all`) choice.
+        jsonl::append_new_line(&self.path, &line, SyncPolicy::Data).map_err(|source| {
+            // The shared primitive doesn't distinguish open/write/sync
+            // failures; classify a NotFound (a directory that vanished
+            // between the mkdir-p above and this open) as Open, everything
+            // else as Write — a coarser but still-legible split than before.
+            if source.kind() == std::io::ErrorKind::NotFound {
+                JournalAppendError::Open {
+                    path: self.path.clone(),
+                    source,
+                }
+            } else {
+                JournalAppendError::Write {
+                    path: self.path.clone(),
+                    source,
+                }
+            }
+        })?;
         Ok(())
     }
 
