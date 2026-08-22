@@ -347,6 +347,21 @@ pub fn effects_shim_module_source(row_effects: &[EffectDecl], row: &crate::RowAr
             }
         }
     }
+    // `Void` needs the SAME explicit export-list treatment as a row-dependent
+    // effect's own `type_defs` above, for a DIFFERENT reason: it isn't
+    // declared by this module or by Core (`Data.Void`'s own base import), so
+    // neither the `module Tidepool.Effects.Core` wildcard entry nor an
+    // implicit no-export-list rule ever re-exports it. Without this, a TURN
+    // module's own `import Tidepool.Effects` (unqualified, no import list)
+    // cannot see `Void` even though the shim's `type M` line resolves it fine
+    // internally (see the import above) — and the turn module needs it too:
+    // `result :: Eff <promoted-row> Value`, spliced directly by the turn
+    // TEMPLATE (not `type M`), names `Finalize Void` verbatim whenever this
+    // row's `Finalize` entry falls back to its default. Gated on the same
+    // `Finalize`-presence check as the import above.
+    if row_effects.iter().any(|e| e.type_name == "Finalize") {
+        extra_exports.push_str(", Void");
+    }
 
     let mut out = String::new();
     out.push_str(crate::preamble::EVAL_PRAGMAS);
@@ -379,6 +394,22 @@ pub fn effects_shim_module_source(row_effects: &[EffectDecl], row: &crate::RowAr
     if !row_effects.is_empty() {
         out.push_str("import Control.Monad.Freer hiding (run)\n");
         out.push_str("import Tidepool.Prelude hiding (error)\n");
+    }
+    // `Data.Void`'s `Void` rides the SAME re-export hazard as the pair above,
+    // but only when `Finalize` is actually in the vocabulary: Core imports it
+    // (for `Finalize`'s uninhabited default row arg) but cannot re-export it
+    // either, and `type M`'s own RHS below is exactly where an unpinned
+    // `Finalize` row spells `Finalize Void` — without this import that
+    // reference is "Not in scope: type constructor 'Void'", which cascades
+    // into every downstream module reporting confusing fallout ("does not
+    // export", "which is not loaded") via extract's own non-topological
+    // diagnostic-recovery pass (see `validate_finalize_row`'s doc for that
+    // same recovery-pass hazard, there for a PINNED row). Gated on
+    // `Finalize`'s presence (unlike the pair above, needed by any row-
+    // dependent effect generally) so a vocabulary without `Finalize` never
+    // carries an unused import.
+    if row_effects.iter().any(|e| e.type_name == "Finalize") {
+        out.push_str("import Data.Void (Void)\n");
     }
     // Author modules defining the types this row is applied to (e.g. the
     // harness's `HarnessTypes` for a `Finalize Decision` row).
@@ -1209,14 +1240,38 @@ mod tests {
             ),
             "{core}"
         );
-        // Core never mentions `type M` — that's the shim's whole reason to exist.
-        assert!(!core.contains("type M"), "{core}");
+        // Core never DECLARES `type M` — that's the shim's whole reason to
+        // exist. Checked as `"type M ="` (the declaration form), not a bare
+        // `"type M"` substring: Core's own header comment explains this
+        // property in prose ("...no `type M`)...") and a bare substring
+        // check false-positives on that comment — pre-existing, unrelated to
+        // this test's own subject, caught incidentally while verifying the
+        // `Void` import fix below.
+        assert!(!core.contains("type M ="), "{core}");
 
         // No contract: the shim's row names the uninhabited default, so a turn
         // that isn't answering a typed hole simply cannot finalize.
         let shim = effects_shim_module_source(&decls, &crate::RowArgs::default());
         assert!(
             shim.contains("type M = Eff '[AskUser, Finalize Void]"),
+            "{shim}"
+        );
+        // The shim must import `Void` itself — Core imports it too, but (like
+        // `Eff`/`Member`/`send` from freer-simple) Core's own implicit export
+        // list re-exports only what it DEFINES, never what it merely imports,
+        // so `type M`'s own `Finalize Void` reference needs its own import
+        // here or it's "Not in scope: Void" — a real, previously-undetected
+        // regression this project's own GHC-heavy acceptance tier caught.
+        assert!(shim.contains("import Data.Void (Void)"), "{shim}");
+        // AND the shim must RE-EXPORT `Void` too (not just import it for its
+        // own internal `type M` use): a TURN module's own `import
+        // Tidepool.Effects` (unqualified, no import list) needs `Void` in
+        // scope for its OWN `result :: Eff <promoted-row> Value` signature —
+        // the turn template splices the promoted row directly, independent
+        // of `type M` — and an import brings in only what the imported
+        // module itself EXPORTS.
+        assert!(
+            shim.contains("module Tidepool.Effects (module Tidepool.Effects.Core, M, Void)"),
             "{shim}"
         );
 
