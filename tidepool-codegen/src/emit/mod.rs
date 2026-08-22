@@ -1,7 +1,6 @@
 pub mod apply;
 pub mod case;
 pub mod expr;
-pub mod free_vars_index;
 pub mod join;
 pub mod primop;
 
@@ -118,7 +117,7 @@ pub struct EmitSession<'a> {
     /// numbering would silently return answers for the wrong nodes. Each of
     /// the four `EmitSession` construction sites in `emit/expr.rs` builds
     /// this from its own `tree` right there, so the two can never drift.
-    pub free_vars_idx: crate::emit::free_vars_index::FreeVarsIndex,
+    pub free_vars_idx: tidepool_repr::free_vars::FreeVarsIndex,
     /// Per-function cache of the application protocol's imported `FuncRef`s;
     /// see `apply::FunctionImports` for the FuncRef-scoping invariant this
     /// field's per-session lifetime exists to satisfy.

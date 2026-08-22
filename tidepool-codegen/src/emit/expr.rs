@@ -882,7 +882,7 @@ use tidepool_repr::trivial_field::is_trivial_field;
 fn topo_sort_deferred_simple(
     deferred_simple: Vec<(VarId, usize)>,
     all_bindings: &[(VarId, usize)],
-    free_vars_idx: &crate::emit::free_vars_index::FreeVarsIndex,
+    free_vars_idx: &tidepool_repr::free_vars::FreeVarsIndex,
 ) -> Vec<(VarId, usize)> {
     use petgraph::graph::{DiGraph, NodeIndex};
     use petgraph::visit::{Dfs, EdgeRef};
@@ -1013,7 +1013,7 @@ fn topo_sort_deferred_simple(
 fn compute_captures(
     ctx: &EmitContext,
     tree: &CoreExpr,
-    free_vars_idx: &crate::emit::free_vars_index::FreeVarsIndex,
+    free_vars_idx: &tidepool_repr::free_vars::FreeVarsIndex,
     body_idx: usize,
     exclude: Option<VarId>,
     label: &str,
@@ -1028,7 +1028,7 @@ fn compute_captures(
 fn compute_captures_promised(
     ctx: &EmitContext,
     tree: &CoreExpr,
-    free_vars_idx: &crate::emit::free_vars_index::FreeVarsIndex,
+    free_vars_idx: &tidepool_repr::free_vars::FreeVarsIndex,
     body_idx: usize,
     exclude: Option<VarId>,
     label: &str,
@@ -1172,7 +1172,7 @@ fn emit_lam(args: EmitArgs, binder: VarId, body_idx: usize) -> Result<SsaVal, Em
         oom_func: inner_oom_func,
         tree: &body_tree,
         lit_wrappers: args.sess.lit_wrappers,
-        free_vars_idx: crate::emit::free_vars_index::FreeVarsIndex::compute(&body_tree),
+        free_vars_idx: tidepool_repr::free_vars::FreeVarsIndex::compute(&body_tree),
         function_imports: FunctionImports::default(),
     };
     let body_result = EmitContext::emit_node(
@@ -1381,7 +1381,7 @@ fn emit_thunk_promised(
         oom_func: inner_oom_func,
         tree: &body_tree,
         lit_wrappers: args.sess.lit_wrappers,
-        free_vars_idx: crate::emit::free_vars_index::FreeVarsIndex::compute(&body_tree),
+        free_vars_idx: tidepool_repr::free_vars::FreeVarsIndex::compute(&body_tree),
         function_imports: FunctionImports::default(),
     };
     let body_result = EmitContext::emit_node(
@@ -1501,7 +1501,7 @@ pub fn compile_expr(
     // `EmitSession::free_vars_idx`'s doc), so the top-level `EmitSession`
     // constructed further down can reuse this one analysis rather than
     // re-deriving it.
-    let free_vars_idx = crate::emit::free_vars_index::FreeVarsIndex::compute(tree);
+    let free_vars_idx = tidepool_repr::free_vars::FreeVarsIndex::compute(tree);
 
     let sig = pipeline.make_func_signature();
     let func_id = pipeline.declare_function(name)?;
@@ -2415,7 +2415,7 @@ impl EmitContext {
                 oom_func: inner_oom_func,
                 tree: &lam_body_tree,
                 lit_wrappers: args.sess.lit_wrappers,
-                free_vars_idx: crate::emit::free_vars_index::FreeVarsIndex::compute(&lam_body_tree),
+                free_vars_idx: tidepool_repr::free_vars::FreeVarsIndex::compute(&lam_body_tree),
                 function_imports: FunctionImports::default(),
             };
             let body_result = EmitContext::emit_node(
@@ -2500,7 +2500,7 @@ impl EmitContext {
         // each call borrows `args.sess.free_vars_idx` only for its own
         // expression.
         fn field_deferred_deps(
-            free_vars_idx: &crate::emit::free_vars_index::FreeVarsIndex,
+            free_vars_idx: &tidepool_repr::free_vars::FreeVarsIndex,
             simple_binder_set: &FxHashSet<VarId>,
             f_idx: usize,
         ) -> FxHashSet<VarId> {
@@ -3304,7 +3304,7 @@ mod topo_sort_golden_tests {
         let (tree, vars) = build_bindings(deps);
         let all_bindings = bindings_for(deps, &tree, &vars);
         let deferred_simple = all_bindings.clone();
-        let free_vars_idx = crate::emit::free_vars_index::FreeVarsIndex::compute(&tree);
+        let free_vars_idx = tidepool_repr::free_vars::FreeVarsIndex::compute(&tree);
         let sorted = topo_sort_deferred_simple(deferred_simple, &all_bindings, &free_vars_idx);
         assert_eq!(names(&sorted, &vars), vec!["c", "a", "b"]);
     }
@@ -3321,7 +3321,7 @@ mod topo_sort_golden_tests {
         let (tree, vars) = build_bindings(deps);
         let all_bindings = bindings_for(deps, &tree, &vars);
         let deferred_simple = all_bindings.clone();
-        let free_vars_idx = crate::emit::free_vars_index::FreeVarsIndex::compute(&tree);
+        let free_vars_idx = tidepool_repr::free_vars::FreeVarsIndex::compute(&tree);
         let sorted = topo_sort_deferred_simple(deferred_simple, &all_bindings, &free_vars_idx);
         assert_eq!(names(&sorted, &vars), vec!["a", "b", "c"]);
     }
@@ -3340,7 +3340,7 @@ mod topo_sort_golden_tests {
         let (tree, vars) = build_bindings(deps);
         let all_bindings = bindings_for(deps, &tree, &vars);
         let deferred_simple = all_bindings.clone();
-        let free_vars_idx = crate::emit::free_vars_index::FreeVarsIndex::compute(&tree);
+        let free_vars_idx = tidepool_repr::free_vars::FreeVarsIndex::compute(&tree);
         let sorted = topo_sort_deferred_simple(deferred_simple, &all_bindings, &free_vars_idx);
         assert_eq!(names(&sorted, &vars), vec!["a", "c", "b", "d"]);
     }
@@ -3355,7 +3355,7 @@ mod topo_sort_golden_tests {
         let (tree, vars) = build_bindings(deps);
         let all_bindings = bindings_for(deps, &tree, &vars);
         let deferred_simple = all_bindings.clone();
-        let free_vars_idx = crate::emit::free_vars_index::FreeVarsIndex::compute(&tree);
+        let free_vars_idx = tidepool_repr::free_vars::FreeVarsIndex::compute(&tree);
         let sorted = topo_sort_deferred_simple(deferred_simple, &all_bindings, &free_vars_idx);
         assert_eq!(names(&sorted, &vars), vec!["x", "y"]);
     }
@@ -3371,7 +3371,7 @@ mod topo_sort_golden_tests {
         let (tree, vars) = build_bindings(deps);
         let all_bindings = bindings_for(deps, &tree, &vars);
         let deferred_simple = all_bindings.clone();
-        let free_vars_idx = crate::emit::free_vars_index::FreeVarsIndex::compute(&tree);
+        let free_vars_idx = tidepool_repr::free_vars::FreeVarsIndex::compute(&tree);
         let sorted = topo_sort_deferred_simple(deferred_simple, &all_bindings, &free_vars_idx);
         assert_eq!(names(&sorted, &vars), vec!["z", "w"]);
     }
