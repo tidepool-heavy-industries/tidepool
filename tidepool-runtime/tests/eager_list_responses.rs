@@ -57,19 +57,19 @@ fn big_list_materializes_iteratively() {
     // 12k elements (~36k nodes): over the OLD 10k cap, under the 100k one.
     // Must fully materialize — without the silent eval-thread death the
     // recursive paths caused.
-    let r = run_list("xs <- kvKeys\npure (length xs)", 12_000);
+    let r = run_list("xs <- kvKeysP \"\"\npure (length xs)", 12_000);
     assert_eq!(r.ok(), Some(serde_json::json!(12_000)));
 }
 
 #[test]
 fn empty_list_is_nil() {
-    let r = run_list("xs <- kvKeys\npure (length xs)", 0);
+    let r = run_list("xs <- kvKeysP \"\"\npure (length xs)", 0);
     assert_eq!(r.ok(), Some(serde_json::json!(0)));
 }
 
 #[test]
 fn list_elements_round_trip() {
-    let r = run_list("xs <- kvKeys\npure (take 3 xs)", 50);
+    let r = run_list("xs <- kvKeysP \"\"\npure (take 3 xs)", 50);
     assert_eq!(
         r.ok(),
         Some(serde_json::json!(["item-0", "item-1", "item-2"]))
@@ -81,7 +81,7 @@ fn oversize_list_errors_cleanly() {
     // ~5x the node cap: must surface EffectResponseTooLarge as a clean
     // error — historically the error path itself could die in the deep
     // drop of the rejected response.
-    let r = run_list("xs <- kvKeys\npure (length xs)", 200_000);
+    let r = run_list("xs <- kvKeysP \"\"\npure (length xs)", 200_000);
     let err = r.expect_err("oversize response must error");
     assert!(
         err.contains("too large") || err.contains("TooLarge") || err.contains("100000"),

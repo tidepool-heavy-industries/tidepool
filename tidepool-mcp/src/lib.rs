@@ -1149,9 +1149,11 @@ data Console a where
         assert!(orch.contains("searchFiles :: Text -> Text -> M [Hit]"));
         assert!(orch.contains("lineCount :: Text -> M Int"));
         assert!(orch.contains("fileContains :: Text -> Text -> M Bool"));
-        // KV batch helpers
+        // KV batch helper. No orchestration `kvClear :: M ()` here — it
+        // collided with the effect helper `kvClear :: Text -> Eff effs Int`
+        // (dup-survey item 1); the effect helper strictly subsumes it.
         assert!(orch.contains("kvAll :: M [(Text, Value)]"));
-        assert!(orch.contains("kvClear :: M ()"));
+        assert!(!orch.contains("kvClear :: M ()"));
         assert!(orch.contains("runAll :: [Text] -> M [Proc]"));
         // The expr-module preamble no longer splices these bodies — it imports
         // the module and only emits the paginateResult alias.

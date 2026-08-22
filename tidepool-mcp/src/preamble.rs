@@ -587,13 +587,9 @@ pub fn orchestrate_module_source(effects: &[EffectDecl]) -> String {
         out.push_str(concat!(
             "kvAll :: M [(Text, Value)]\n",
             "kvAll = do\n",
-            "  ks <- kvKeys\n",
+            "  ks <- kvKeysP \"\"\n",
             "  vs <- mapM kvGet ks\n",
             "  pure (zipWith (\\k mv -> (k, maybe Null id mv)) ks vs)\n",
-        ));
-        out.push_str(concat!(
-            "kvClear :: M ()\n",
-            "kvClear = kvKeys >>= mapM_ kvDel\n",
         ));
     }
     if has_fs {
