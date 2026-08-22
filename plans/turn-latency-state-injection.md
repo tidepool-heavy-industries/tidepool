@@ -166,60 +166,62 @@ riskier) mechanism, not attempted here.
   never changes the output bytes, only how much frontend work GHC redoes to
   produce them; see `invocation_key_drops_build_products_dir`.
 
-**NOT activated by default — a real determinism gap, found by the mandatory
-differential test.** `tidepool-runtime/src/artifacts.rs::compile_invocation`
-only wires `.build_products_dir(...)` onto the spawned `ExtractCmd` when the
-CALLER has already set `$TIDEPOOL_BUILD_PRODUCTS_DIR` — presence of the env
-var is both the location override and the enable switch, so a normal compile
-today is 100% unaffected (re-verified: two independent cold compiles of the
-same source, no build-products dir at all, are still byte-for-byte identical
-— the pre-lane baseline).
+**Determinism gap CLOSED (varid-stable lane, 2026-08-22) — ON by default.**
+Turning the mechanism on originally exposed a real bug: a cold compile and a
+warm (build-products dir) compile of BYTE-IDENTICAL source produced
+DIFFERENT output. A structural CBOR diff (node-for-node, not a byte diff)
+showed tree SHAPE and node COUNT identical between the two runs; only
+`VarId` values differed, at two distinct sites:
 
-Turning it ON exposed a real bug: a cold compile and a warm (build-products
-dir) compile of BYTE-IDENTICAL source produced DIFFERENT output. A
-structural CBOR diff (node-for-node comparison, not a byte diff) showed the
-tree SHAPE and node COUNT were identical between the two runs; only `VarId`
-values at Case-binder positions differed. Root cause: `Tidepool.Translate`'s
-`localVarId` (used for every NESTED, non-top-level `Id` — lambda parameters,
-case scrutinee/alt binders, local lets) hashes GHC's raw session `Unique`
-directly (`occ ++ "#" ++ show (getKey (varUnique v))`). That raw Unique's
-VALUE depends on how many uniques earlier work in the SAME GHC session
-already consumed — harmless before this lane (every extraction did IDENTICAL
-`load'` work, so the Unique baseline reaching any given module's own compile
-was always the same for the same source+includes+flags), but NOT harmless
-once `load'` can skip a variable number of modules: a cold and a warm
-session consume different quantities of uniques before reaching the SAME
-module's compile, baking a different suffix into the same logical local
-binder.
+1. **Nested (non-top-level) Ids** — `Tidepool.Translate.localVarId` (lambda
+   parameters, case binders, local lets) hashed GHC's raw session `Unique`
+   directly, and that Unique's value depends on how many uniques earlier
+   work in the SAME session already consumed — which a warm `load'` (skip a
+   variable number of modules) perturbs. Fixed by
+   `Tidepool.Translate.stabilizeLocalUniques`: a pure Core-to-Core pass,
+   run once per closed graph, that renumbers every nested Id from a plain
+   monotonic counter (no GHC session interaction at all) before
+   `localVarId` ever hashes it — see that function's own doc comment for
+   the full mechanism and why it needs no change to `localVarId` itself.
+2. **Internalized top-level floats** — `GhcPipeline.hs::externalizeInternalTops`
+   (the #313 fix) disambiguates by baking the binder's raw Unique into its
+   externalized OccName (`_u<unique>`), which is the SAME session-Unique
+   dependency reached through `stableVarId`'s hash instead of `localVarId`'s.
+   Fixed by switching that suffix to the binder's ordinal position in the
+   module's own `mg_binds` (`_t<ordinal>`) — a pure function of source +
+   simplifier passes, stable across cold/warm compiles.
 
-A fix was attempted at `GhcPipeline.hs::externalizeInternalTops` (the #313
-fix, which bakes a similar raw-Unique suffix, but only for TOP-LEVEL
-binders) — replacing its raw Unique with a deterministic per-module
-first-occurrence index. It did NOT close the gap (confirmed: same failing
-byte offset before and after), because `externalizeInternalTops` never
-touches NESTED binders at all — the leak is squarely `localVarId`, a
-different function, used throughout the whole Core tree. The revert is
-clean (`externalizeInternalTops`'s body is byte-for-byte its original text;
-`git diff` on `GhcPipeline.hs` shows no change inside that function). A real
-fix needs a stable, content-derived numbering scheme for NESTED Ids across
-the whole `Translate.hs` pipeline — a separate, higher-risk lane, not
-attempted here.
+Both together make `build_products_dir_cold_warm_identical_output`
+(previously `#[ignore]`d) green — byte-identical Core + `DataConTable`,
+cold vs. warm. `TIDEPOOL_VARID_AUDIT=1` over both `haskell/test/Suite.hs`
+and `haskell/test/corpus/Corpus.hs` (18252 and 6591 binding sites) reports
+zero collisions.
 
-`tidepool-runtime/tests/build_products_dir_differential.rs` pins this
-finding as an `#[ignore]`d reproduction (registered in
-`.config/watched-tests.toml`) — the mandatory differential test this
-boundary calls for exists and correctly documents the gap, but is not
-expected to pass until the `localVarId` fix lands. Whoever picks that up:
-`cargo nextest run --ignore-default-filter -p tidepool-runtime -E
-'binary(build_products_dir_differential)' --run-ignored ignored-only`
-reproduces it directly.
+**Wired on by default everywhere a `tidepool-extract` gets spawned in
+`tidepool-runtime`** via `crate::paths::apply_build_products_dir` — not just
+`artifacts.rs::compile_invocation`, but also `session/turn.rs`'s
+`run_turn`/`classify_block`/`compile_session_turn` and `session/mod.rs`'s
+`validate_candidate` (each builds its own `ExtractCmd`, bypassing
+`compile_invocation`'s memo on purpose — a session turn has on-disk side
+effects and mutable-session dependencies a content-addressed cache would
+get wrong; the build-products dir's module-granular recompilation avoidance
+is an orthogonal, additive concern that applies regardless).
+`$TIDEPOOL_BUILD_PRODUCTS_DIR` still overrides the location; it is no
+longer also the enable switch.
 
-**Net effect of this lane:** zero behavior change for every existing caller
-(nothing sets `$TIDEPOOL_BUILD_PRODUCTS_DIR` today); a fully-built,
-unit-tested on-ramp (location resolver, CLI flag, memo classification, the
-`GhcPipeline.hs` seam) ready for the NEXT lane to flip on the moment the
-`localVarId` determinism gap closes; and a concretely bounded remaining
-task (fix one function's identifier scheme) rather than an open-ended one.
+**Observed bench-turn.sh behavior:** a direct manual measurement (5
+distinct sources each importing `Tidepool.Prelude`'s full closure, one
+shared warm build-products dir vs. none at all) shows the expected win —
+~1875ms → ~1697ms average wall per compile (~9.5%) on this box. The
+standing `scripts/bench-turn.sh` `session`/`harness` rows, by contrast, show
+no measurable turn-over-turn drop in `extract.ghc_load_ms` even with the
+mechanism now wired into their spawn path — those scenarios' generated
+templates apparently pull in a small enough stdlib closure that GHC's own
+fixed session/package-db overhead dominates. Not investigated further here
+(out of this lane's scope: the acceptance bar is byte-identical
+cold-vs-warm output, not a specific speedup magnitude in every scenario);
+worth a follow-up look at what those templates actually import if the
+production win doesn't materialize either.
 
 The default-on per-compile summary line (`compile summary modules=…
 wall_ms=… top=…`) now lands in harness logs at INFO from both the
