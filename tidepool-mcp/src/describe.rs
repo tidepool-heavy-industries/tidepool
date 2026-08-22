@@ -15,6 +15,7 @@
 //! `tidepool://effect/{name}`, the repl points at `:browse`).
 
 use crate::effect_decls::EffectDecl;
+use crate::effect_defs::substrate_marker;
 
 /// The one-line summary of an effect's (often multi-sentence) `description`: the
 /// leading sentence, or the whole (trimmed) string when there is no sentence
@@ -62,34 +63,30 @@ pub fn helper_name(helper: &str) -> Option<String> {
     }
 }
 
-/// Is `helper` on `effect` substrate — an implementation detail the extract
-/// layer needs (schema-building internals, the `*Sited` call-site-id plumbing
-/// behind `runLLMTurn`/`fork`/`forkAll`) rather than a verb a model should
-/// reach for directly?
+/// Is `helper`'s rendered text tagged substrate — an implementation detail
+/// the extract layer needs (schema-building internals, the `*Sited`
+/// call-site-id plumbing behind `runLLMTurn`/`fork`/`forkAll`, Green's raw
+/// thread primitives, Subagent's raw wire helpers) rather than a verb a
+/// model should reach for directly?
 ///
-/// A small hand-maintained allowlist rather than a visibility field on
-/// [`EffectDecl`]: that struct is a plain `Copy` type constructed as a bare
-/// struct literal in several crates this lane does not own (generated glue,
-/// harness fixtures, test doubles) — adding a field there would force an
-/// edit in every one of them. Keyed on (effect, helper name) instead, and
-/// consulted only by the derived INDEX below; the full per-effect resource
-/// (`tidepool://effect/{name}`, `:browse <Effect>`) still lists every helper
-/// verbatim — a model that asks for that depth gets it.
-fn is_substrate_helper(effect: &str, helper: &str) -> bool {
-    matches!(
-        (effect, helper),
-        ("Ask", "isOpt")
-            | ("Ask", "innerSchema")
-            | ("Ask", "schemaToValue")
-            | ("Fork", "forkSited")
-            | ("Fork", "forkAllSited")
-            | ("RunLLMTurn", "runLLMTurnSited")
-            | ("RunLLMTurn", "runLLMTurnForkSited")
-            | ("RunLLMTurn", "runLLMTurnFanoutSited")
-            | ("RunLLMTurn", "runLLMTurnBranchSited")
-            | ("RunLLMTurn", "runLLMTurnBranchLabeledSited")
-            | ("RunLLMTurn", "runLLMTurnBranchFanoutSited")
-    )
+/// Structural, not a hand-maintained (effect, helper name) allowlist: a
+/// helper is substrate iff `effect_defs.rs`'s `helper_text!` macro rendered
+/// it via the `raw substrate [...]` form, which prepends
+/// [`substrate_marker!`] as the helper's first line — the single choke
+/// point every effect definition already routes through, so a newly added
+/// substrate helper is tagged at its own definition site instead of
+/// requiring a second edit here. This checks the rendered TEXT rather than
+/// adding a visibility field to [`EffectDecl`] itself: that struct is a
+/// plain `Copy` type constructed as a bare struct literal in several crates
+/// this lane does not own (e.g. `tidepool-harness`'s
+/// `delegate_branches_decl`) — a new field would force an edit in every one
+/// of them (none of which use `..Default::default()`), which the macro-side
+/// convention avoids entirely. Consulted only by the derived INDEX below;
+/// the full per-effect resource (`tidepool://effect/{name}`,
+/// `:browse <Effect>`) still lists every helper verbatim — a model that
+/// asks for that depth gets it.
+fn helper_is_substrate(helper: &str) -> bool {
+    helper.trim_start().starts_with(substrate_marker!())
 }
 
 /// One derived entry for an effect in a tool-description index: the effect name,
@@ -108,8 +105,8 @@ pub fn describe_effect(decl: &EffectDecl) -> String {
     let verbs: Vec<String> = decl
         .helpers
         .iter()
+        .filter(|h| !helper_is_substrate(h))
         .filter_map(|h| helper_name(h))
-        .filter(|name| !is_substrate_helper(decl.type_name, name))
         .collect();
     let mut s = format!("  {}: {}", decl.type_name, first_sentence(decl.description));
     if !verbs.is_empty() {
@@ -194,8 +191,8 @@ mod tests {
             let public_name = d
                 .helpers
                 .iter()
-                .filter_map(|h| helper_name(h))
-                .find(|n| !is_substrate_helper(d.type_name, n));
+                .filter(|h| !helper_is_substrate(h))
+                .find_map(|h| helper_name(h));
             if let Some(name) = public_name {
                 assert!(
                     index.contains(&name),
@@ -240,5 +237,51 @@ mod tests {
             index.contains("runLLMTurn"),
             "index must still list runLLMTurn: {index}"
         );
+    }
+
+    /// Green and Subagent are not in `standard_decls()` (neither is part of
+    /// the base stack), so the tests above never exercise them — but they
+    /// are exactly the dup-survey's items 2/4: raw substrate leaking beside
+    /// a safer authored wrapper. Assert the marker mechanism reaches them
+    /// too, without a second hand-maintained allowlist entry.
+    #[test]
+    fn derived_index_excludes_green_and_subagent_raw_helpers() {
+        let green = crate::green_decl();
+        let green_index = describe_effect(&green);
+        for name in [
+            "asyncSpawn",
+            "asyncJoinAny",
+            "asyncStatus",
+            "asyncResult",
+            "asyncCancel",
+        ] {
+            assert!(
+                !green_index.contains(name),
+                "Green index must not advertise raw substrate helper {name}: {green_index}"
+            );
+        }
+
+        let subagent = crate::subagent_decl();
+        let subagent_index = describe_effect(&subagent);
+        for name in [
+            "spawnAgentRaw",
+            "agentBeginRaw",
+            "agentResumeRaw",
+            "agentSpawnAsyncRaw",
+            "agentAwaitRaw",
+            "agentCancelRaw",
+        ] {
+            assert!(
+                !subagent_index.contains(name),
+                "Subagent index must not advertise raw substrate helper {name}: {subagent_index}"
+            );
+        }
+        // The genuinely public pure helpers stay listed.
+        for name in ["spawnSpec", "spawnSpecIn", "renderBackendFailure"] {
+            assert!(
+                subagent_index.contains(name),
+                "Subagent index must still list public helper {name}: {subagent_index}"
+            );
+        }
     }
 }

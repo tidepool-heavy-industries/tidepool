@@ -43,6 +43,9 @@
 //!   { name <verb>, sig "<type>", doc [<line>, ...], body nullary <Ctor> },
 //!   { name <verb>, sig "<type>", doc [<line>, ...], body applied <Ctor>(a, b) },
 //!   { raw [<haskell line>, ...] },        escape hatch: arbitrary helper Haskell
+//!   { raw substrate [<haskell line>, ...] }, same, but tagged substrate — an
+//!                                        implementation detail excluded from the
+//!                                        derived model-facing index (describe.rs)
 //! ],
 //! ```
 //!
@@ -92,6 +95,26 @@
 //! needs laziness. This is why Exec/Http/Git/Llm (scalar/`Value`/record
 //! results) are fine to tag.
 
+/// The sentinel [`crate::describe::helper_is_substrate`] checks for,
+/// verbatim, as a helper's rendered text's first line. Emitted only by
+/// `helper_text!`'s `raw substrate [...]` form (below) — the single place
+/// that decides whether a helper is substrate, replacing a hand-maintained
+/// per-(effect, helper-name) allowlist that lived in `describe.rs` and had
+/// to be updated by hand every time a new substrate helper was added
+/// elsewhere. A plain Haskell line comment: inert in the compiled module,
+/// and already skipped by `helper_sig`/`helper_name` (both ignore
+/// `--`-prefixed lines), so marking a helper substrate changes nothing
+/// about whether it compiles or is callable — only whether the derived
+/// model-facing index lists it. Defined as a macro (not a `const`) because
+/// it is spliced into other macros' `concat!` calls, which require literal
+/// tokens.
+macro_rules! substrate_marker {
+    () => {
+        "-- @substrate-helper@"
+    };
+}
+pub(crate) use substrate_marker;
+
 /// Render one helper entry of a definition to its Haskell source string.
 ///
 /// Kept separate from [`effect_decl_projection!`] so each `{ ... }` helper
@@ -129,6 +152,14 @@ macro_rules! helper_text {
             "\n", stringify!($n), $(" ", stringify!($a),)+ " = send (",
             stringify!($ctor), $(" ", stringify!($a),)+ ")"
         )
+    };
+    // Escape hatch, SUBSTRATE: identical to `raw` below, but the rendered
+    // text carries `substrate_marker!()` as its first line — an
+    // implementation detail a model should not call directly (the typed
+    // wrapper's own doc names it). Still fully compiled and importable;
+    // only `describe.rs`'s derived model-facing index excludes it.
+    ({ raw substrate [$l0:literal $(, $l:literal)* $(,)?] $(,)? }) => {
+        concat!($crate::effect_defs::substrate_marker!(), "\n", $l0 $(, "\n", $l)*)
     };
     // Escape hatch: arbitrary Haskell, newline-joined.
     ({ raw [$l0:literal $(, $l:literal)* $(,)?] $(,)? }) => {
@@ -826,13 +857,13 @@ macro_rules! ask_effect_def {
             helpers [
                 { raw ["ask :: forall effs. Member Ask effs => Schema -> Text -> Eff effs Value",
                        "ask schema prompt = send (AskWith prompt (object [\"schema\" .= schemaToValue schema]))"] },
-                { raw ["isOpt :: Schema -> Bool",
+                { raw substrate ["isOpt :: Schema -> Bool",
                        "isOpt (SOpt _) = True",
                        "isOpt _ = False"] },
-                { raw ["innerSchema :: Schema -> Schema",
+                { raw substrate ["innerSchema :: Schema -> Schema",
                        "innerSchema (SOpt s) = s",
                        "innerSchema s = s"] },
-                { raw ["schemaToValue :: Schema -> Value",
+                { raw substrate ["schemaToValue :: Schema -> Value",
                        "schemaToValue SStr = object [\"type\" .= (\"string\" :: Text)]",
                        "schemaToValue SNum = object [\"type\" .= (\"number\" :: Text)]",
                        "schemaToValue SBool = object [\"type\" .= (\"boolean\" :: Text)]",
@@ -1205,13 +1236,13 @@ macro_rules! runllmturn_effect_def {
                 // own DataConTable before resuming — `tidepool_harness::engine::
                 // build_child_answer_value`, which hard-fails when a needed
                 // constructor is absent from the table rather than defaulting.
-                { raw ["{-# OPAQUE runLLMTurnSited #-}",
+                { raw substrate ["{-# OPAQUE runLLMTurnSited #-}",
                        "runLLMTurnSited :: forall a effs. Member RunLLMTurn effs => Int -> Text -> Eff effs a",
                        "runLLMTurnSited sid p = unsafeCoerce <$> send (RunLLMTurnWith p (object [\"typedSite\" .= sid]))"] },
-                { raw ["{-# OPAQUE runLLMTurnForkSited #-}",
+                { raw substrate ["{-# OPAQUE runLLMTurnForkSited #-}",
                        "runLLMTurnForkSited :: forall a effs. Member RunLLMTurn effs => Int -> Text -> Eff effs (Either InvocationExit a)",
                        "runLLMTurnForkSited sid p = unsafeCoerce <$> send (RunLLMTurnWith p (object [\"typedSite\" .= sid, \"fork\" .= True]))"] },
-                { raw ["{-# OPAQUE runLLMTurnFanoutSited #-}",
+                { raw substrate ["{-# OPAQUE runLLMTurnFanoutSited #-}",
                        "runLLMTurnFanoutSited :: forall a effs. Member RunLLMTurn effs => Int -> [Text] -> Eff effs [Either InvocationExit a]",
                        "runLLMTurnFanoutSited sid prompts = unsafeCoerce <$> send (RunLLMTurnWith (intercalate \"\\n\" prompts) (object [\"typedSite\" .= sid, \"fork\" .= True, \"fan\" .= length prompts, \"prompts\" .= prompts]))"] },
                 // PRD 21 lane C3 GAP 1: give the frozen-snapshot seam
@@ -1253,7 +1284,7 @@ macro_rules! runllmturn_effect_def {
                 { raw ["{-# OPAQUE runLLMTurnBranch #-}",
                        "runLLMTurnBranch :: forall a effs. Member RunLLMTurn effs => ContextRef -> Text -> Eff effs (Either InvocationExit (a, ContextRef))",
                        "runLLMTurnBranch ref p = runLLMTurnBranchSited 0 ref p"] },
-                { raw ["{-# OPAQUE runLLMTurnBranchSited #-}",
+                { raw substrate ["{-# OPAQUE runLLMTurnBranchSited #-}",
                        "runLLMTurnBranchSited :: forall a effs. Member RunLLMTurn effs => Int -> ContextRef -> Text -> Eff effs (Either InvocationExit (a, ContextRef))",
                        "runLLMTurnBranchSited sid (ContextRef ref) p = unsafeCoerce <$> send (RunLLMTurnWith p (object [\"typedSite\" .= sid, \"branch\" .= True, \"ref\" .= ref]))"] },
                 // PRD 21 C5 GUI lane: an ADDITIVE sibling of `runLLMTurnBranch`
@@ -1271,7 +1302,7 @@ macro_rules! runllmturn_effect_def {
                 { raw ["{-# OPAQUE runLLMTurnBranchLabeled #-}",
                        "runLLMTurnBranchLabeled :: forall a effs. Member RunLLMTurn effs => Text -> ContextRef -> Text -> Eff effs (Either InvocationExit (a, ContextRef))",
                        "runLLMTurnBranchLabeled label ref p = runLLMTurnBranchLabeledSited 0 label ref p"] },
-                { raw ["{-# OPAQUE runLLMTurnBranchLabeledSited #-}",
+                { raw substrate ["{-# OPAQUE runLLMTurnBranchLabeledSited #-}",
                        "runLLMTurnBranchLabeledSited :: forall a effs. Member RunLLMTurn effs => Int -> Text -> ContextRef -> Text -> Eff effs (Either InvocationExit (a, ContextRef))",
                        "runLLMTurnBranchLabeledSited sid label (ContextRef ref) p = unsafeCoerce <$> send (RunLLMTurnWith p (object [\"typedSite\" .= sid, \"branch\" .= True, \"ref\" .= ref, \"label\" .= label]))"] },
                 // The BULK sibling verb: N children fork off ONE parent
@@ -1297,7 +1328,7 @@ macro_rules! runllmturn_effect_def {
                 { raw ["{-# OPAQUE runLLMTurnBranchFanout #-}",
                        "runLLMTurnBranchFanout :: forall a effs. Member RunLLMTurn effs => ContextRef -> [(Text, Text)] -> Eff effs [Either InvocationExit (a, ContextRef)]",
                        "runLLMTurnBranchFanout ref labeledPrompts = runLLMTurnBranchFanoutSited 0 ref labeledPrompts"] },
-                { raw ["{-# OPAQUE runLLMTurnBranchFanoutSited #-}",
+                { raw substrate ["{-# OPAQUE runLLMTurnBranchFanoutSited #-}",
                        "runLLMTurnBranchFanoutSited :: forall a effs. Member RunLLMTurn effs => Int -> ContextRef -> [(Text, Text)] -> Eff effs [Either InvocationExit (a, ContextRef)]",
                        "runLLMTurnBranchFanoutSited sid (ContextRef ref) labeledPrompts = unsafeCoerce <$> send (RunLLMTurnWith (intercalate \"\\n\" (map snd labeledPrompts)) (object [\"typedSite\" .= sid, \"branchFanout\" .= True, \"ref\" .= ref, \"labels\" .= map fst labeledPrompts, \"prompts\" .= map snd labeledPrompts, \"fan\" .= length labeledPrompts]))"] },
             ],
@@ -1484,10 +1515,10 @@ macro_rules! fork_effect_def {
                 // an effect-monad-mentioning type is rejected
                 // (typeMentionsEffectMonad) — so the harness resumes with a
                 // value the caller validated against that type.
-                { raw ["{-# OPAQUE forkSited #-}",
+                { raw substrate ["{-# OPAQUE forkSited #-}",
                        "forkSited :: forall a effs. Member Fork effs => Int -> Text -> Eff effs a",
                        "forkSited sid brief = unsafeCoerce <$> send (ForkWith sid brief)"] },
-                { raw ["{-# OPAQUE forkAllSited #-}",
+                { raw substrate ["{-# OPAQUE forkAllSited #-}",
                        "forkAllSited :: forall a effs. Member Fork effs => Int -> [Text] -> Eff effs [a]",
                        "forkAllSited sid prompts = unsafeCoerce <$> send (ForkAllWith sid prompts)"] },
             ],
@@ -2069,7 +2100,7 @@ macro_rules! subagent_effect_def {
                   ret "()" },
             ],
             helpers [
-                { raw ["-- | RAW one-cycle coupled spawn: workspace + binding + agent + one",
+                { raw substrate ["-- | RAW one-cycle coupled spawn: workspace + binding + agent + one",
                        "-- backend cycle, atomically; `schema` is the JSON Schema the terminal",
                        "-- result must conform to. Prefer the typed wrapper in",
                        "-- `Tidepool.Agent.Spawn` (schema derived from your result type's",
@@ -2077,7 +2108,7 @@ macro_rules! subagent_effect_def {
                        "-- this is its substrate.",
                        "spawnAgentRaw :: forall effs. Member Subagent effs => SpawnSpec -> Value -> Eff effs (Either SpawnError SpawnOutcome)",
                        "spawnAgentRaw spec schema = send (SubagentSpawn spec schema)"] },
-                { raw ["-- | RAW begin of a coupled spawn that carries dynamic tools: it does",
+                { raw substrate ["-- | RAW begin of a coupled spawn that carries dynamic tools: it does",
                        "-- everything `spawnAgentRaw` does, then drives the turn to its FIRST",
                        "-- stop instead of to the end — either `StepToolCall agent callId tool",
                        "-- args` (the child called one of your tools and its turn is PARKED",
@@ -2088,7 +2119,7 @@ macro_rules! subagent_effect_def {
                        "-- compiles both from your types and runs the answer loop for you.",
                        "agentBeginRaw :: forall effs. Member Subagent effs => SpawnSpec -> Value -> Value -> Eff effs (Either SpawnError AgentStep)",
                        "agentBeginRaw spec tools schema = send (SubagentBegin spec tools schema)"] },
-                { raw ["-- | RAW answer to the parked tool call, driving the turn on to its next",
+                { raw substrate ["-- | RAW answer to the parked tool call, driving the turn on to its next",
                        "-- stop (another `StepToolCall`, or `StepDone`). `agent` and `callId`",
                        "-- are echoed from the `StepToolCall` you are answering; naming a",
                        "-- different agent or a different call is refused (`SpawnDriveFailed`)",
@@ -2111,7 +2142,7 @@ macro_rules! subagent_effect_def {
                        "renderBackendFailure (BackendUnavailable t) = \"backend unavailable: \" <> t",
                        "renderBackendFailure (ProtocolRejected t) = \"backend rejected request: \" <> t",
                        "renderBackendFailure (RunFailed t) = \"agent run failed: \" <> t"] },
-                { raw ["-- | RAW async spawn: everything `spawnAgentRaw` does, except that the",
+                { raw substrate ["-- | RAW async spawn: everything `spawnAgentRaw` does, except that the",
                        "-- cycle runs on its OWN thread and this call returns as soon as it is",
                        "-- admitted — a `CycleId` naming the running cycle, not its outcome.",
                        "-- Refused with `SpawnCapacityExhausted` when the handler's cycle table",
@@ -2122,7 +2153,7 @@ macro_rules! subagent_effect_def {
                        "-- result type, handle abstract over it); this is its substrate.",
                        "agentSpawnAsyncRaw :: forall effs. Member Subagent effs => SpawnSpec -> Value -> Eff effs (Either SpawnError CycleId)",
                        "agentSpawnAsyncRaw spec schema = send (SubagentSpawnAsync spec schema)"] },
-                { raw ["-- | RAW await: BLOCK until the named cycle finishes, and return the same",
+                { raw substrate ["-- | RAW await: BLOCK until the named cycle finishes, and return the same",
                        "-- `Either SpawnError SpawnOutcome` the synchronous `spawnAgentRaw`",
                        "-- returns — the async path is the same saga, reaped later. Awaiting a",
                        "-- cycle this handler never minted (or one already reaped) is a",
@@ -2132,7 +2163,7 @@ macro_rules! subagent_effect_def {
                        "-- type as `spawnAgent` does.",
                        "agentAwaitRaw :: forall effs. Member Subagent effs => CycleId -> Eff effs (Either SpawnError SpawnOutcome)",
                        "agentAwaitRaw cycle = send (SubagentAwait cycle)"] },
-                { raw ["-- | RAW cancel: reap the named cycle's backend and release its binding.",
+                { raw substrate ["-- | RAW cancel: reap the named cycle's backend and release its binding.",
                        "-- TOTAL — cancelling a cycle that already finished, or one this handler",
                        "-- never minted, is a NO-OP, so there is nothing to case-match. Retain-",
                        "-- first as everywhere else: the binding is settled, and the worktree",
@@ -2249,7 +2280,7 @@ macro_rules! green_effect_def {
                 // `AsyncSpawnWith` must therefore have type `Int -> M ()`
                 // EXACTLY, which forces `asyncSpawn`'s own `body :: M a`, not a
                 // universally-quantified `Eff effs a`.
-                { raw ["-- | Fork a green thread; substrate for 'Tidepool.Async.async'.",
+                { raw substrate ["-- | Fork a green thread; substrate for 'Tidepool.Async.async'.",
                        "-- The body rides as a lambda so the closure-sentinel scan fires",
                        "-- and the runtime tenures it (see the effect's Rust definition).",
                        "-- The body is wrapped so its last act is an AsyncDoneWith",
@@ -2257,23 +2288,23 @@ macro_rules! green_effect_def {
                        "-- same field-1 crossing as the outbound one.",
                        "asyncSpawn :: M a -> M Int",
                        "asyncSpawn body = send (AsyncSpawnWith 0 (\\_ -> body >>= \\v -> send (AsyncDoneWith 0 v)))"] },
-                { raw ["-- | Park until ANY of these threads reaches a terminal state;",
+                { raw substrate ["-- | Park until ANY of these threads reaches a terminal state;",
                        "-- resumes with the id of the one that did.",
                        "asyncJoinAny :: forall effs. Member Green effs => [Int] -> Eff effs Int",
                        "asyncJoinAny = send . AsyncJoinAnyWith"] },
-                { raw ["-- | A thread's current state. Never parks.",
+                { raw substrate ["-- | A thread's current state. Never parks.",
                        "asyncStatus :: forall effs. Member Green effs => Int -> Eff effs AsyncStatus",
                        "asyncStatus t = decode <$> send (AsyncStatusWith t)",
                        "  where",
                        "    decode 1 = AsyncSettled",
                        "    decode 2 = AsyncWasCancelled",
                        "    decode _ = AsyncRunning"] },
-                { raw ["-- | A settled thread's result, delivered in-heap by handle.",
+                { raw substrate ["-- | A settled thread's result, delivered in-heap by handle.",
                        "-- Gate it with 'asyncStatus': the result of a thread that has",
                        "-- not settled is not defined.",
                        "asyncResult :: forall a effs. Member Green effs => Int -> Eff effs a",
                        "asyncResult = send . AsyncResultWith"] },
-                { raw ["-- | Cancel a thread: its realm closes, discarding its pending",
+                { raw substrate ["-- | Cancel a thread: its realm closes, discarding its pending",
                        "-- suspensions. Idempotent, and a no-op on a terminal thread.",
                        "asyncCancel :: forall effs. Member Green effs => Int -> Eff effs ()",
                        "asyncCancel = send . AsyncCancelWith"] },
