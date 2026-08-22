@@ -69,9 +69,9 @@ fn eval_does_not_raise_when_con_field_is_unforced() {
     let result = eval(&expr, &env, &mut heap);
     match result {
         Ok(Value::Lit(Literal::LitInt(n))) => assert_eq!(n, 42),
-        other => panic!(
-            "matching only the outer tag of Con(tag, [raise# 5]) must not raise: {other:?}"
-        ),
+        other => {
+            panic!("matching only the outer tag of Con(tag, [raise# 5]) must not raise: {other:?}")
+        }
     }
 }
 
@@ -83,8 +83,8 @@ fn jit_does_not_raise_when_con_field_is_unforced() {
     let result = machine.run_pure();
     match result {
         Ok(Value::Lit(Literal::LitInt(n))) => assert_eq!(n, 42),
-        other => panic!(
-            "matching only the outer tag of Con(tag, [raise# 5]) must not raise: {other:?}"
-        ),
+        other => {
+            panic!("matching only the outer tag of Con(tag, [raise# 5]) must not raise: {other:?}")
+        }
     }
 }

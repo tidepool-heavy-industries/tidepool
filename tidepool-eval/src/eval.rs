@@ -17,10 +17,10 @@ use crate::error::{ArityContext, EvalError};
 use crate::heap::ThunkState;
 use crate::heap::{ForceStart, Heap};
 use crate::value::Value;
+use tidepool_repr::trivial_field::is_trivial_field;
 use tidepool_repr::{
     AltCon, CoreExpr, CoreFrame, DataConId, DataConTable, JoinId, Literal, PrimOpKind, VarId,
 };
-use tidepool_repr::trivial_field::is_trivial_field;
 
 /// Create an environment pre-populated with data constructor functions.
 /// Each constructor with arity N becomes a `ConFun(tag, N, [])` value
