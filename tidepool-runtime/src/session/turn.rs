@@ -311,14 +311,90 @@ pub enum TurnResult {
     },
 }
 
+/// The preamble's `default (...)` declaration line — the same import
+/// injection point `tidepool_mcp::template_haskell` uses. MUST match
+/// `tidepool_mcp::PREAMBLE_DEFAULT_DECL` byte-for-byte; duplicated as a
+/// literal (rather than depending on it) because `tidepool-mcp` depends on
+/// `tidepool-runtime`, not the other way — a real (non-dev) dependency here
+/// would be circular.
+const PREAMBLE_DEFAULT_MARKER: &str = "default (Int, Double, Text)\n";
+
+/// Insert `import <m>` lines into `preamble` immediately before its
+/// [`PREAMBLE_DEFAULT_MARKER`] line — the same injection point
+/// `template_haskell` uses. A no-op (returns `preamble` unchanged) when
+/// `imports` is blank. The ONE import-insertion mechanism a session-turn
+/// module builder needs — `tidepool-repl`'s and `tidepool-harness`'s own turn
+/// wrappers call this rather than reimplementing the same marker search.
+pub fn insert_preamble_imports(preamble: &str, imports: &str) -> String {
+    if imports.trim().is_empty() {
+        return preamble.to_string();
+    }
+    let insert_point = preamble
+        .find(PREAMBLE_DEFAULT_MARKER)
+        .unwrap_or(preamble.len());
+    let mut out = String::new();
+    out.push_str(&preamble[..insert_point]);
+    for imp in imports.lines().map(str::trim).filter(|l| !l.is_empty()) {
+        out.push_str("import ");
+        out.push_str(imp);
+        out.push('\n');
+    }
+    out.push_str(&preamble[insert_point..]);
+    out
+}
+
+/// Assemble a "bind-shaped" session-turn module by concatenating, in order:
+/// `preamble_with_imports` (imports already inserted — see
+/// [`insert_preamble_imports`]), the `-- [user]\n` marker, caller-supplied
+/// `extra` (a value binding, helper decls, or nothing), the `<target> :: Eff
+/// <effect_stack> _` signature, the `<target> = do { ... }` opener, `stmt`
+/// (already placement-normalized via [`place_turn_stmt`], or a literal
+/// `{{TURN_STMT}}` marker for a caller building a [`TurnTemplate`]), and the
+/// ` ; pure <tail> }` closer — optionally wrapped in `runDelegate( ... )` at
+/// the result position (PRD 21 C5's delegate-scoped turn shape).
+///
+/// This is the ONE mechanism behind every BIND/BINDDISCARD/MULTIBIND session
+/// wrapper in both `tidepool-repl` (`wrap_bind_source`/
+/// `wrap_bind_discard_source`/`wrap_multi_bind_source`) and `tidepool-harness`
+/// (`template_session_bind`/`session_bind_template`) — those stay as each
+/// crate's own thin, policy-only callers (what `extra`/`tail`/`delegate_wrap`
+/// to pass), not a second copy of this assembly.
+pub fn assemble_bind_module(
+    preamble_with_imports: &str,
+    extra: &str,
+    target: &str,
+    effect_stack: &str,
+    stmt: &str,
+    tail: &str,
+    delegate_wrap: bool,
+) -> String {
+    let mut out = preamble_with_imports.to_string();
+    out.push_str("-- [user]\n");
+    out.push_str(extra);
+    out.push_str(&format!("{target} :: Eff {effect_stack} _\n"));
+    if delegate_wrap {
+        out.push_str(&format!("{target} = runDelegate (do {{\n"));
+    } else {
+        out.push_str(&format!("{target} = do {{\n"));
+    }
+    out.push_str(stmt);
+    if delegate_wrap {
+        out.push_str(&format!(" ; pure {tail}\n }})\n"));
+    } else {
+        out.push_str(&format!(" ; pure {tail}\n }}\n"));
+    }
+    out
+}
+
 /// Place `turn_text` as a `do`-block statement — the `{{TURN_STMT}}`
-/// placement mode. Mirrors `tidepool-repl`'s `push_braced_stmt` byte-for-byte:
-/// a `let` turn (at column 1, since a raw turn has no leading indentation)
+/// placement mode. Mirrors `tidepool-repl`'s and `tidepool-harness`'s own
+/// `push_braced_stmt` wrappers (both now thin callers of this function): a
+/// `let` turn (at column 1, since a raw turn has no leading indentation)
 /// needs explicit decl braces there (a layout `let` swallows the following
 /// `;`), so it is rewritten to `let { <rest> }`; anything else is placed
 /// verbatim. Both branches guarantee a trailing newline so a template's own
 /// following text always starts on a fresh line.
-fn place_turn_stmt(turn_text: &str) -> String {
+pub fn place_turn_stmt(turn_text: &str) -> String {
     let trimmed = turn_text.trim_start();
     let let_rest = trimmed
         .strip_prefix("let")
@@ -1200,6 +1276,14 @@ fn parse_one_binder(v: &serde_json::Value) -> Result<BoundBinder, CompileError> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// [`PREAMBLE_DEFAULT_MARKER`] is duplicated (not depended-on) from
+    /// `tidepool_mcp::PREAMBLE_DEFAULT_DECL` to avoid a circular crate
+    /// dependency — this pins the two from drifting apart silently.
+    #[test]
+    fn preamble_default_marker_matches_mcp_constant() {
+        assert_eq!(PREAMBLE_DEFAULT_MARKER, tidepool_mcp::PREAMBLE_DEFAULT_DECL);
+    }
 
     /// An extractor whose non-zero-exit stdout does not parse as the
     /// diagnostics report is a stale/skewed build: `MalformedDiagnostics`

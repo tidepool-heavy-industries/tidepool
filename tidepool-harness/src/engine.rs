@@ -56,6 +56,7 @@ use tidepool_eval::value::Value;
 use tidepool_extract_cmd::ResolvedExtractBin;
 pub use tidepool_extract_cmd::{extract_spawn_count, reset_extract_spawn_count};
 use tidepool_repr::{CoreExpr, DataConTable};
+use tidepool_runtime::session::{assemble_bind_module, insert_preamble_imports, place_turn_stmt};
 pub use tidepool_runtime::AsksSidecar;
 use tidepool_runtime::{compile_targets, CompileError, CompiledArtifacts};
 
@@ -2240,12 +2241,30 @@ pub fn template_answer_turn(
     out
 }
 
+/// Format `helpers` (e.g. the answerer's `resume`) as the block spliced right
+/// after a turn module's `-- [user]\n` marker: the literal text, forced to end
+/// in exactly one trailing newline, followed by a blank separator line — empty
+/// when `helpers` is blank (no separator emitted at all).
+fn helpers_block(helpers: &str) -> String {
+    if helpers.trim().is_empty() {
+        return String::new();
+    }
+    let mut out = String::from(helpers);
+    if !out.ends_with('\n') {
+        out.push('\n');
+    }
+    out.push('\n');
+    out
+}
+
 /// Wrap a value-plane BIND turn (`x <- e`) as a session module whose `__result`
 /// runs the bind statement and yields the bound name — the shape
 /// `compile_session_turn` expects (target `__result`, `Eff <stack> _` so GHC
 /// infers the bound type from the block). Mirrors the repl's `wrap_bind_source`;
 /// the harness preamble/effect-stack differ, the `__result`/session-bind contract
-/// is identical. `stmt` is the raw `x <- e` block; `binder` is the bound name.
+/// is identical — both are thin, policy-only callers of
+/// [`tidepool_runtime::session::assemble_bind_module`]. `stmt` is the raw
+/// `x <- e` block; `binder` is the bound name.
 pub fn template_session_bind(
     cfg: &EngineConfig,
     stmt: &str,
@@ -2259,71 +2278,15 @@ pub fn template_session_bind(
     } else {
         tidepool_mcp::build_preamble(&cfg.decls, false)
     };
-
-    let mut out = String::new();
-    // Insert user imports right before the `default` decl (the same insertion
-    // point `template_haskell`/`template_answer_turn` use).
-    if imports.trim().is_empty() {
-        out.push_str(&preamble);
-    } else {
-        let insert = preamble.find("default (Int").unwrap_or(preamble.len());
-        out.push_str(&preamble[..insert]);
-        for imp in imports.lines().map(str::trim).filter(|l| !l.is_empty()) {
-            out.push_str("import ");
-            out.push_str(imp);
-            out.push('\n');
-        }
-        out.push_str(&preamble[insert..]);
-    }
-    out.push_str("-- [user]\n");
-    if !helpers.trim().is_empty() {
-        out.push_str(helpers);
-        if !helpers.ends_with('\n') {
-            out.push('\n');
-        }
-        out.push('\n');
-    }
-    out.push_str(&format!("__result :: Eff {stack} _\n"));
-    if cfg.delegate_wrap {
-        out.push_str("__result = runDelegate (do {\n");
-    } else {
-        out.push_str("__result = do {\n");
-    }
-    push_braced_stmt(&mut out, stmt);
-    if cfg.delegate_wrap {
-        out.push_str(&format!(" ; pure {binder}\n }})\n"));
-    } else {
-        out.push_str(&format!(" ; pure {binder}\n }}\n"));
-    }
-    out
-}
-
-/// Embed a turn statement verbatim inside an explicit `do { }` block (mirrors the
-/// repl's `push_braced_stmt`): a bare `let x = e` gets explicit `let { }`
-/// brackets so an unindented continuation is legal; every other statement is
-/// embedded as-is. Explicit brackets suspend the layout algorithm so multi-line
-/// / quasiquote payloads keep byte fidelity.
-fn push_braced_stmt(out: &mut String, turn_text: &str) {
-    let trimmed = turn_text.trim_start();
-    let let_rest = trimmed
-        .strip_prefix("let")
-        .filter(|r| r.starts_with(|c: char| c.is_whitespace()));
-    match let_rest {
-        Some(rest) if !rest.trim_start().starts_with('{') => {
-            out.push_str("let {");
-            out.push_str(rest);
-            if !rest.ends_with('\n') {
-                out.push('\n');
-            }
-            out.push_str(" }\n");
-        }
-        _ => {
-            out.push_str(turn_text);
-            if !turn_text.ends_with('\n') {
-                out.push('\n');
-            }
-        }
-    }
+    assemble_bind_module(
+        &insert_preamble_imports(&preamble, imports),
+        &helpers_block(helpers),
+        "__result",
+        &stack,
+        &place_turn_stmt(stmt),
+        binder,
+        cfg.delegate_wrap,
+    )
 }
 
 /// Build the EXPR turn template a [`tidepool_runtime::session::TurnRequest`]
@@ -2369,20 +2332,19 @@ pub fn expr_turn_template(
 /// Build a BIND/BINDDISCARD turn template: the same preamble/imports/helpers/
 /// `__result` scaffolding [`template_session_bind`] builds around a REAL
 /// statement, but with the bare `{{TURN_STMT}}` marker placed DIRECTLY —
-/// deliberately NOT through [`push_braced_stmt`].
+/// deliberately NOT through [`tidepool_runtime::session::place_turn_stmt`].
 ///
-/// `push_braced_stmt` (and `render_template`'s own `place_turn_stmt`, which
-/// mirrors it) ends its output in exactly one trailing newline, ADDING one
-/// when its input doesn't already have one — correct for a REAL statement,
-/// but the 13-character marker token `"{{TURN_STMT}}"` itself never ends in
-/// `\n`, so routing the MARKER through the same function bakes an extra
-/// trailing newline into the template. At splice time `render_template`
-/// substitutes the marker with `place_turn_stmt`'s OWN newline-terminated
-/// output, so that baked-in newline becomes a genuine duplicate — a blank
-/// line between the turn statement and `; pure …` that `template_session_bind`
-/// called directly on the same text never produces. Placing the marker bare
-/// leaves supplying the separator entirely to the splice's own normalization,
-/// which is what makes the two agree — see
+/// `place_turn_stmt` ends its output in exactly one trailing newline, ADDING
+/// one when its input doesn't already have one — correct for a REAL
+/// statement, but the 13-character marker token `"{{TURN_STMT}}"` itself
+/// never ends in `\n`, so routing the MARKER through the same function bakes
+/// an extra trailing newline into the template. At splice time
+/// `render_template` substitutes the marker with `place_turn_stmt`'s OWN
+/// newline-terminated output, so that baked-in newline becomes a genuine
+/// duplicate — a blank line between the turn statement and `; pure …` that
+/// `template_session_bind` called directly on the same text never produces.
+/// Placing the marker bare leaves supplying the separator entirely to the
+/// splice's own normalization, which is what makes the two agree — see
 /// `bind_template_byte_identical_to_template_session_bind` for the pin.
 ///
 /// `binder` is `"{{BINDERS}}"` for a real bind (its names are comma-joined
@@ -2401,41 +2363,15 @@ pub fn session_bind_template(
     } else {
         tidepool_mcp::build_preamble(&cfg.decls, false)
     };
-
-    let mut out = String::new();
-    if imports.trim().is_empty() {
-        out.push_str(&preamble);
-    } else {
-        let insert = preamble.find("default (Int").unwrap_or(preamble.len());
-        out.push_str(&preamble[..insert]);
-        for imp in imports.lines().map(str::trim).filter(|l| !l.is_empty()) {
-            out.push_str("import ");
-            out.push_str(imp);
-            out.push('\n');
-        }
-        out.push_str(&preamble[insert..]);
-    }
-    out.push_str("-- [user]\n");
-    if !helpers.trim().is_empty() {
-        out.push_str(helpers);
-        if !helpers.ends_with('\n') {
-            out.push('\n');
-        }
-        out.push('\n');
-    }
-    out.push_str(&format!("__result :: Eff {stack} _\n"));
-    if cfg.delegate_wrap {
-        out.push_str("__result = runDelegate (do {\n");
-    } else {
-        out.push_str("__result = do {\n");
-    }
-    out.push_str("{{TURN_STMT}}");
-    if cfg.delegate_wrap {
-        out.push_str(&format!(" ; pure {binder}\n }})\n"));
-    } else {
-        out.push_str(&format!(" ; pure {binder}\n }}\n"));
-    }
-    out
+    assemble_bind_module(
+        &insert_preamble_imports(&preamble, imports),
+        &helpers_block(helpers),
+        "__result",
+        &stack,
+        "{{TURN_STMT}}",
+        binder,
+        cfg.delegate_wrap,
+    )
 }
 
 /// Rename the compiled EXPR module's top-level binder from `result`

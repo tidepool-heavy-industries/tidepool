@@ -34,15 +34,16 @@ use tidepool_effect::pause::PauseGate;
 use tidepool_eval::value::Value;
 use tidepool_mcp::{
     first_sentence, helper_sig, input_binding_source, library_vocab, template_haskell_show_default,
-    CapturedOutput, EffectDecl, EffectRoster, PREAMBLE_DEFAULT_DECL,
+    CapturedOutput, EffectDecl, EffectRoster,
 };
 use tidepool_repr::{
     BindingName, DataConTable, Generation, SessionId, SessionModule, SessionVarId,
 };
 use tidepool_runtime::session::{
-    classify_block, compile_session_turn, extract_ask_request, subtract_import_list_names,
-    BoundBinder, GateDispatcher, ModuleEnv, PersistentSession, SessionBind, SessionError,
-    SessionLib, TurnClassification, TurnKind, ValueTier,
+    assemble_bind_module, classify_block, compile_session_turn, extract_ask_request,
+    insert_preamble_imports, place_turn_stmt, subtract_import_list_names, BoundBinder,
+    GateDispatcher, ModuleEnv, PersistentSession, SessionBind, SessionError, SessionLib,
+    TurnClassification, TurnKind, ValueTier,
 };
 use tidepool_runtime::{
     classify_compile, classify_session, compile_haskell_salted, value_to_json, CompileError,
@@ -2738,26 +2739,6 @@ impl Session {
 // Turn-wrapping helpers
 // ---------------------------------------------------------------------------
 
-/// Insert `import <m>` lines into the eval preamble immediately before the
-/// `default` declaration (the canonical injection point, matching where
-/// `template_haskell` places user imports). Uses [`PREAMBLE_DEFAULT_DECL`] as
-/// the injection marker — no magic substring (AUDIT-3).
-fn insert_imports(preamble: &str, imports: &str) -> String {
-    if imports.trim().is_empty() {
-        return preamble.to_string();
-    }
-    let insert_point = preamble
-        .find(PREAMBLE_DEFAULT_DECL)
-        .unwrap_or(preamble.len());
-    let mut out = String::new();
-    out.push_str(&preamble[..insert_point]);
-    for imp in imports.lines().map(str::trim).filter(|l| !l.is_empty()) {
-        out.push_str(&format!("import {imp}\n"));
-    }
-    out.push_str(&preamble[insert_point..]);
-    out
-}
-
 /// Rewrite `import Tidepool.Prelude hiding (…)` in the preamble to also hide
 /// the given names. Applied per-turn so that user-defined functions named after
 /// Prelude/lens re-exports (e.g. `over`, `view`, `key`) resolve unambiguously
@@ -2891,7 +2872,7 @@ fn user_code_offset(source: &str) -> Option<(usize, usize)> {
 
 /// 1-based inclusive line count of `text` as it lands in an assembled module:
 /// every wrap_* shape embeds the caller's text verbatim, forcing at most one
-/// trailing `\n` if it's missing (see `push_verbatim_binding`/`push_braced_stmt`),
+/// trailing `\n` if it's missing (see `push_verbatim_binding`/`place_turn_stmt`),
 /// and inserts no other line before the closing scaffold — so this count, paired
 /// with `user_code_offset`'s start line, gives the exact end line without
 /// re-scanning the assembled source.
@@ -3045,7 +3026,7 @@ fn prepend_lib_brick_hint(err: String) -> String {
 }
 
 fn begin_user_module(preamble: &str, imports: &str, input: Option<&serde_json::Value>) -> String {
-    let mut out = insert_imports(preamble, imports);
+    let mut out = insert_preamble_imports(preamble, imports);
     out.push_str("-- [user]\n");
     out.push_str(&input_binding_source(input));
     out
@@ -3067,41 +3048,14 @@ fn push_verbatim_binding(out: &mut String, name: &str, text: &str) {
     out.push_str(" } in __b\n");
 }
 
-/// Emit a turn's statement VERBATIM inside an explicit `do { }` block. `let`
-/// statements need explicit decl braces there (a layout `let` swallows the
-/// following `;` — pinned by jit_surface's
-/// `let_in_braced_do_fails_loudly`): two boundary edits at known
-/// positions, never interior transformation, so payloads and columns survive
-/// byte-exact (modulo +2 on the `let`'s own first line).
-fn push_braced_stmt(out: &mut String, turn_text: &str) {
-    let trimmed = turn_text.trim_start();
-    let let_rest = trimmed
-        .strip_prefix("let")
-        .filter(|r| r.starts_with(|c: char| c.is_whitespace()));
-    match let_rest {
-        Some(rest) if !rest.trim_start().starts_with('{') => {
-            out.push_str("let {");
-            out.push_str(rest);
-            if !rest.ends_with('\n') {
-                out.push('\n');
-            }
-            out.push_str(" }\n");
-        }
-        _ => {
-            out.push_str(turn_text);
-            if !turn_text.ends_with('\n') {
-                out.push('\n');
-            }
-        }
-    }
-}
-
 /// Wrap a BIND turn into an `Eff`-typed module whose `result` runs the bind
 /// statement and yields the bound value, so `run_fragment_and_bind` reduces the
 /// effect tree and roots that value. The monad is pinned to the session effect
 /// stack (`Eff <stack> _`, the value type inferred via `PartialTypeSignatures`,
 /// which the preamble enables) — a bare `pure (42 :: Int)` action would
-/// otherwise leave the monad ambiguous.
+/// otherwise leave the monad ambiguous. Delegates to
+/// [`assemble_bind_module`], the mechanism shared with `tidepool-harness`'s
+/// own `template_session_bind`/`session_bind_template`.
 fn wrap_bind_source(
     preamble: &str,
     effect_stack: &str,
@@ -3110,15 +3064,15 @@ fn wrap_bind_source(
     binder: &str,
     input: Option<&serde_json::Value>,
 ) -> String {
-    let mut out = begin_user_module(preamble, imports, input);
-    out.push_str(&format!("__result :: Eff {effect_stack} _\n"));
-    out.push_str("__result = do {\n");
-    push_braced_stmt(&mut out, turn_text);
-    // Column-1 closer: closes any user implicit contexts (n < m) down to the
-    // explicit brace context. (Edge: a user inner block aligned at exactly
-    // column 1 would receive a layout `;` here — vanishingly rare, loud.)
-    out.push_str(&format!(" ; pure {binder}\n }}\n"));
-    out
+    assemble_bind_module(
+        &insert_preamble_imports(preamble, imports),
+        &input_binding_source(input),
+        "__result",
+        effect_stack,
+        &place_turn_stmt(turn_text),
+        binder,
+        false,
+    )
 }
 
 /// Wrap a DISCARD-BIND turn (`_ <- e`, `(_, _) <- e`) into an `Eff`-typed
@@ -3132,12 +3086,15 @@ fn wrap_bind_discard_source(
     turn_text: &str,
     input: Option<&serde_json::Value>,
 ) -> String {
-    let mut out = begin_user_module(preamble, imports, input);
-    out.push_str(&format!("__result :: Eff {effect_stack} _\n"));
-    out.push_str("__result = do {\n");
-    push_braced_stmt(&mut out, turn_text);
-    out.push_str(" ; pure ()\n }\n");
-    out
+    assemble_bind_module(
+        &insert_preamble_imports(preamble, imports),
+        &input_binding_source(input),
+        "__result",
+        effect_stack,
+        &place_turn_stmt(turn_text),
+        "()",
+        false,
+    )
 }
 
 /// Wrap a MULTI-BIND turn into an `Eff`-typed module whose `__result` runs the
@@ -3159,12 +3116,15 @@ fn wrap_multi_bind_source(
     input: Option<&serde_json::Value>,
 ) -> String {
     let tuple_expr = format!("({})", names.join(", "));
-    let mut out = begin_user_module(preamble, imports, input);
-    out.push_str(&format!("__result :: Eff {effect_stack} _\n"));
-    out.push_str("__result = do {\n");
-    push_braced_stmt(&mut out, turn_text);
-    out.push_str(&format!(" ; pure {tuple_expr}\n }}\n"));
-    out
+    assemble_bind_module(
+        &insert_preamble_imports(preamble, imports),
+        &input_binding_source(input),
+        "__result",
+        effect_stack,
+        &place_turn_stmt(turn_text),
+        &tuple_expr,
+        false,
+    )
 }
 
 /// Wrap a bare EXPRESSION as a MATERIALIZING bind of `it` — the monadic
@@ -4134,12 +4094,12 @@ mod turn_template_byte_identity_tests {
     }
 
     /// Four turn-text shapes: a plain single bind, a single bind whose text
-    /// begins with `let ` (Part 2's named case — `push_braced_stmt`'s
+    /// begins with `let ` (Part 2's named case — `place_turn_stmt`'s
     /// layout-safe `let { … }` rewrite before splicing into the `do` block,
     /// which a verbatim `{{TURN}}` splice cannot reproduce; `{{TURN_STMT}}`
     /// applies the identical normalization), and the same two shapes for a
     /// multi-bind pattern (`wrap_multi_bind_source` also routes through
-    /// `push_braced_stmt`).
+    /// `place_turn_stmt`).
     #[test]
     fn turn_text_matches_wrap_source() {
         let cases: Vec<(&str, &str, Vec<String>)> = vec![

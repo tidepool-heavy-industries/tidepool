@@ -32,9 +32,10 @@ pub use engine::{
 pub use resident::{ResidentError, ResidentHole, ResidentOutcome, ResidentSession, RootCustody};
 
 pub use turn::{
-    classify_block, compile_session_turn, render_template, run_turn, BoundBinder, CompiledTurn,
-    SessionBind, SessionTurnResult, TemplateSelector, TurnClassification, TurnKind, TurnRequest,
-    TurnResult, TurnTemplate, ValueTier, DECL_TEMPLATE_SOURCE,
+    assemble_bind_module, classify_block, compile_session_turn, insert_preamble_imports,
+    place_turn_stmt, render_template, run_turn, BoundBinder, CompiledTurn, SessionBind,
+    SessionTurnResult, TemplateSelector, TurnClassification, TurnKind, TurnRequest, TurnResult,
+    TurnTemplate, ValueTier, DECL_TEMPLATE_SOURCE,
 };
 
 use std::collections::HashMap;
