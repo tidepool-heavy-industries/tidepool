@@ -9,7 +9,7 @@ import qualified Data.Sequence as Seq
 import qualified Data.Set as Set
 import Numeric (showHex, readHex, readFloat)
 import Control.Exception (evaluate, try, SomeException, fromException)
-import Data.Char (toUpper, isAlphaNum, isSpace, isDigit)
+import Data.Char (isAlphaNum, isSpace, isDigit)
 import Data.List (isPrefixOf, isSuffixOf, stripPrefix, intercalate, nub)
 import Data.Maybe (fromMaybe, mapMaybe, isJust, listToMaybe)
 import Control.Monad (foldM, when, forM, forM_, void)
@@ -45,6 +45,7 @@ import Tidepool.GhcPipeline
   , stripMonadHead, isClosureType, renderType, splitTupleType
   , BatchItem(..), BatchItemResult(..), runBatchPipeline )
 import Tidepool.DiagJson (Diag(..), diagsFromSourceError, diagFromException, renderDiagsJson, renderDiag)
+import Tidepool.ExtractUtil (capitalize)
 import Tidepool.Json (jsonString)
 import Tidepool.Session
   ( SessionScope(..), SessionModule(..), SessionModuleKind(..), Generation(..)
@@ -346,7 +347,7 @@ processFile timing args path = do
         -- dependencies — they just don't get their own fixtures, keeping
         -- the fixture sweep (and the JIT differential that walks it) to
         -- user-authored bindings.
-        let targetModName = capitalizeMod (takeBaseName path)
+        let targetModName = capitalize (takeBaseName path)
             keepBinder b
               | not (argTargetModuleOnly args) = True
               | otherwise = case nameModule_maybe (idName b) of
@@ -1658,11 +1659,6 @@ renderBoundBindersJson binders =
 renderAsksJson :: [(Word64, Text, [Text])] -> String
 renderAsksJson sites =
   "[" ++ intercalate "," (map renderAskJson sites) ++ "]"
-
--- | Module name from file basename, mirroring GhcPipeline's convention.
-capitalizeMod :: String -> String
-capitalizeMod [] = []
-capitalizeMod (c:cs) = toUpper c : cs
 
 -- | Deduplicate binding names by appending _1, _2, etc. for collisions.
 dedup :: Map.Map String Int -> [(String, a)] -> [(String, a)]

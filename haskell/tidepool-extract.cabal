@@ -16,6 +16,7 @@ library tidepool-extract-internal
     Tidepool.Binders
     Tidepool.CborEncode
     Tidepool.DiagJson
+    Tidepool.ExtractUtil
     Tidepool.FatIface
     Tidepool.GhcPipeline
     Tidepool.Json

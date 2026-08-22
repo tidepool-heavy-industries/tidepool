@@ -55,13 +55,12 @@ import Control.Exception (SomeException, try)
 import Data.Maybe (fromMaybe)
 import Data.List (nub, sortOn)
 import Data.IORef (IORef, newIORef, modifyIORef', readIORef)
-import System.Process (readProcess)
 import System.Environment (lookupEnv)
 import System.FilePath (takeBaseName)
 import System.IO (hPutStrLn, stderr)
 import Control.Monad.IO.Class (liftIO)
 import Control.Monad (forM, when)
-import Data.Char (toUpper)
+import Tidepool.ExtractUtil (getLibdir, capitalize)
 import Tidepool.Session
   ( SessionScope(..), isSessionScopeActive, injectSessionScope, renderSessionModule
   , scaffoldTargetName, scaffoldOutputBase, evalUserBinder )
@@ -730,10 +729,6 @@ runBatchPipeline includes items onItem = do
         Left e   -> pure (n, Just e)
         Right () -> go cache memoRef timing (n + 1) rest
 
-capitalize :: String -> String
-capitalize [] = []
-capitalize (c:cs) = toUpper c : cs
-
 -- | A 'GHC.Utils.Logger.LogAction' hook that records every @SevWarning@
 -- diagnostic whose source span is @targetPath@ (the file being extracted,
 -- NOT a dependency module — the preamble/stdlib compile alongside it in the
@@ -1338,11 +1333,3 @@ externalizeInternalTops guts = guts { mg_binds = map goTop (mg_binds guts) }
 
 dumpCore :: [CoreBind] -> String
 dumpCore binds = renderWithContext defaultSDocContext (pprCoreBindings binds)
-
-getLibdir :: IO FilePath
-getLibdir = do
-  envDir <- lookupEnv "TIDEPOOL_GHC_LIBDIR"
-  case envDir of
-    Just dir -> pure dir
-    Nothing  -> trim <$> readProcess "ghc" ["--print-libdir"] ""
-  where trim = reverse . dropWhile (== '\n') . reverse

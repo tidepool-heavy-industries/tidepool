@@ -56,8 +56,7 @@ import Data.Maybe (catMaybes, isJust)
 import Data.Text (Text)
 import qualified Data.Text as T
 import Data.Word (Word64)
-import System.Environment (lookupEnv)
-import System.Process (readProcess)
+import Tidepool.ExtractUtil (getLibdir)
 import Tidepool.Json (jsonString)
 import Tidepool.Timing (timeSection, emitPhase)
 
@@ -149,14 +148,6 @@ conDeclNames = \case
 
 occStr :: RdrName -> String
 occStr = occNameString . rdrNameOcc
-
-getLibdir :: IO FilePath
-getLibdir = do
-  envDir <- lookupEnv "TIDEPOOL_GHC_LIBDIR"
-  case envDir of
-    Just dir -> pure dir
-    Nothing  -> trim <$> readProcess "ghc" ["--print-libdir"] ""
-  where trim = reverse . dropWhile (== '\n') . reverse
 
 --------------------------------------------------------------------------------
 -- Statement binders — the session-eval bind-vs-expr signal (Lane VALUE)
