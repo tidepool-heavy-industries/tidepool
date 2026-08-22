@@ -39,50 +39,142 @@ impl RecursiveTree<CoreFrame<usize>> {
     /// (a node reachable from several parents is emitted exactly once, via
     /// `old_to_new`).
     pub fn extract_subtree(&self, idx: usize) -> Self {
-        let mut new_nodes: Vec<CoreFrame<usize>> = Vec::new();
-        // old index -> new index, written at Exit; presence marks "emitted"
-        // and is the sole bookkeeping (no separate "seen" set): an Enter or
-        // Exit for an already-emitted index is skipped, which preserves DAG
-        // sharing for a node reachable from multiple parents.
-        let mut old_to_new: HashMap<usize, usize> = HashMap::new();
+        rebuild_from(self, idx, |_, _| None, default_rebuild_node)
+    }
+}
 
-        let mut stack = vec![WalkStep::Enter(idx)];
-        while let Some(step) = stack.pop() {
-            match step {
-                WalkStep::Enter(i) => {
-                    if old_to_new.contains_key(&i) {
-                        continue;
-                    }
-                    stack.push(WalkStep::Exit(i));
-                    for_each_child_rev(&self.nodes[i], |c| {
-                        // The wire-decode `child < my_idx` check (`serial/read.rs`,
-                        // F1) doesn't run for trees built directly by internal
-                        // constructors, so this debug_assert is the only guard
-                        // against a cycle/forward-reference for those.
-                        debug_assert!(
-                            c < i,
-                            "extract_subtree: child {c} is not strictly earlier than parent {i}"
-                        );
-                        if !old_to_new.contains_key(&c) {
-                            stack.push(WalkStep::Enter(c));
-                        }
-                    });
+/// A stack-safe post-order rebuild of `tree` from `root` — the driver shared
+/// by every whole-tree structural rewrite over this IR: [`RecursiveTree::extract_subtree`],
+/// [`replace_subtree`], and (cross-crate) `tidepool-codegen`'s join/jump
+/// lowering pass. Each independently hand-rolled the same Enter/Exit
+/// explicit-stack walk with `old_to_new` memoization before this
+/// consolidation; only the per-node rebuild policy differed.
+///
+/// `on_enter(idx, new_nodes)` runs first for every node, in whatever order
+/// the walk reaches them: return `Some(new_idx)` to splice `idx` directly
+/// (pushing whatever nodes onto `new_nodes` the splice needs) WITHOUT
+/// descending into its children — [`replace_subtree`]'s target-idx behavior.
+/// Return `None` to descend normally: children are scheduled first (so every
+/// child has a resolved `old_to_new` entry), then `on_exit` runs once for
+/// `idx`.
+///
+/// `on_exit(idx, frame, new_nodes, old_to_new)` rebuilds one node given its
+/// already-rebuilt children (via `old_to_new`) and must push onto
+/// `new_nodes`, returning the new index. [`default_rebuild_node`] is the
+/// identity policy ([`MapLayer::map_layer`] over `old_to_new`) every
+/// pass-through node wants; a caller overrides it only for the node shapes
+/// its rewrite actually changes.
+///
+/// DAG sharing is preserved throughout: `old_to_new` is the sole bookkeeping
+/// (no separate "seen" set), so a node reachable from multiple parents is
+/// entered/exited at most once.
+pub fn rebuild_from(
+    tree: &RecursiveTree<CoreFrame<usize>>,
+    root: usize,
+    mut on_enter: impl FnMut(usize, &mut Vec<CoreFrame<usize>>) -> Option<usize>,
+    mut on_exit: impl FnMut(
+        usize,
+        &CoreFrame<usize>,
+        &mut Vec<CoreFrame<usize>>,
+        &HashMap<usize, usize>,
+    ) -> usize,
+) -> RecursiveTree<CoreFrame<usize>> {
+    let mut new_nodes: Vec<CoreFrame<usize>> = Vec::new();
+    let mut old_to_new: HashMap<usize, usize> = HashMap::new();
+
+    let mut stack = vec![WalkStep::Enter(root)];
+    while let Some(step) = stack.pop() {
+        match step {
+            WalkStep::Enter(i) => {
+                if old_to_new.contains_key(&i) {
+                    continue;
                 }
-                WalkStep::Exit(i) => {
-                    if old_to_new.contains_key(&i) {
-                        continue; // already emitted via another (shared) path
-                    }
-                    // Every child has an `old_to_new` entry by post-order
-                    // discipline (acyclic IR ⇒ no in-progress child here).
-                    let mapped = self.nodes[i].clone().map_layer(|c| old_to_new[&c]);
-                    let new_idx = new_nodes.len();
-                    new_nodes.push(mapped);
+                if let Some(new_idx) = on_enter(i, &mut new_nodes) {
                     old_to_new.insert(i, new_idx);
+                    continue;
                 }
+                stack.push(WalkStep::Exit(i));
+                for_each_child_rev(&tree.nodes[i], |c| {
+                    // The wire-decode `child < my_idx` check (`serial/read.rs`,
+                    // F1) doesn't run for trees built directly by internal
+                    // constructors, so this debug_assert is the only guard
+                    // against a cycle/forward-reference for those.
+                    debug_assert!(
+                        c < i,
+                        "rebuild_from: child {c} is not strictly earlier than parent {i}"
+                    );
+                    if !old_to_new.contains_key(&c) {
+                        stack.push(WalkStep::Enter(c));
+                    }
+                });
+            }
+            WalkStep::Exit(i) => {
+                if old_to_new.contains_key(&i) {
+                    continue; // already emitted via another (shared) path
+                }
+                // Every child has an `old_to_new` entry by post-order
+                // discipline (acyclic IR ⇒ no in-progress child here).
+                let new_idx = on_exit(i, &tree.nodes[i], &mut new_nodes, &old_to_new);
+                old_to_new.insert(i, new_idx);
             }
         }
-        RecursiveTree { nodes: new_nodes }
     }
+    RecursiveTree { nodes: new_nodes }
+}
+
+/// The default [`rebuild_from`] exit policy: copy `frame` as-is, remapping
+/// each child index through `old_to_new`. What every pass-through node in a
+/// structural rewrite wants.
+pub fn default_rebuild_node(
+    _idx: usize,
+    frame: &CoreFrame<usize>,
+    new_nodes: &mut Vec<CoreFrame<usize>>,
+    old_to_new: &HashMap<usize, usize>,
+) -> usize {
+    let mapped = frame.clone().map_layer(|c| old_to_new[&c]);
+    let new_idx = new_nodes.len();
+    new_nodes.push(mapped);
+    new_idx
+}
+
+/// Largest [`crate::VarId`]`.0` mentioned anywhere in `tree` (0 if none),
+/// scanning both references (`Var`) and every binder site
+/// (`Lam`/`LetNonRec`/`LetRec` binders, `Case` binder + alt pattern binders,
+/// `Join` params). Shared by every pass that mints a fresh `VarId` strictly
+/// above everything already in scope (capture-avoiding `subst`, codegen's
+/// join/jump lowering) — both independently scanned the identical binder set
+/// before this consolidation.
+#[must_use]
+pub fn max_var_id(tree: &RecursiveTree<CoreFrame<usize>>) -> u64 {
+    let mut max = 0u64;
+    for node in &tree.nodes {
+        match node {
+            CoreFrame::Var(v) => max = max.max(v.0),
+            CoreFrame::Lam { binder, .. } | CoreFrame::LetNonRec { binder, .. } => {
+                max = max.max(binder.0)
+            }
+            CoreFrame::LetRec { bindings, .. } => {
+                for (v, _) in bindings {
+                    max = max.max(v.0);
+                }
+            }
+            CoreFrame::Case { binder, alts, .. } => {
+                max = max.max(binder.0);
+                for alt in alts {
+                    for b in &alt.binders {
+                        max = max.max(b.0);
+                    }
+                }
+            }
+            CoreFrame::Join { params, .. } => {
+                for p in params {
+                    max = max.max(p.0);
+                }
+            }
+            _ => {}
+        }
+    }
+    max
 }
 
 /// Apply `f` to each child index of `frame` in REVERSE of [`get_children`]
@@ -188,58 +280,28 @@ pub fn replace_subtree(
         expr.nodes.len()
     );
 
-    let mut new_nodes: Vec<CoreFrame<usize>> = Vec::new();
-    let mut old_to_new: HashMap<usize, usize> = HashMap::new();
-
-    // Stack-safe rebuild: explicit-stack post-order copy of `expr`, splicing
-    // `replacement` wholesale wherever the walk reaches `target_idx`, without
-    // per-level call-stack growth. `old_to_new` is the sole bookkeeping — an
-    // Enter/Exit for an already-emitted index is skipped.
-    let mut stack = vec![WalkStep::Enter(expr.nodes.len() - 1)];
-    while let Some(step) = stack.pop() {
-        match step {
-            WalkStep::Enter(i) => {
-                if old_to_new.contains_key(&i) {
-                    continue;
-                }
-                if i == target_idx {
-                    // Splice the replacement here and stop — the original
-                    // subtree at `target_idx` is discarded (no Exit, no descent).
-                    let offset = new_nodes.len();
-                    for node in &replacement.nodes {
-                        new_nodes.push(node.clone().map_layer(|j| j + offset));
-                    }
-                    #[allow(clippy::expect_used, reason = "replacement tree must not be empty")]
-                    let root = new_nodes
-                        .len()
-                        .checked_sub(1)
-                        .expect("replacement tree must not be empty");
-                    old_to_new.insert(i, root);
-                    continue;
-                }
-                stack.push(WalkStep::Exit(i));
-                for_each_child_rev(&expr.nodes[i], |c| {
-                    debug_assert!(
-                        c < i,
-                        "replace_subtree: child {c} is not strictly earlier than parent {i}"
-                    );
-                    if !old_to_new.contains_key(&c) {
-                        stack.push(WalkStep::Enter(c));
-                    }
-                });
+    // Splice `replacement` wholesale wherever the walk reaches `target_idx`
+    // — the original subtree there is discarded (no descent, no Exit).
+    rebuild_from(
+        expr,
+        expr.nodes.len() - 1,
+        |i, new_nodes| {
+            if i != target_idx {
+                return None;
             }
-            WalkStep::Exit(i) => {
-                if old_to_new.contains_key(&i) {
-                    continue; // already emitted via another (shared) path
-                }
-                let mapped = expr.nodes[i].clone().map_layer(|c| old_to_new[&c]);
-                let new_idx = new_nodes.len();
-                new_nodes.push(mapped);
-                old_to_new.insert(i, new_idx);
+            let offset = new_nodes.len();
+            for node in &replacement.nodes {
+                new_nodes.push(node.clone().map_layer(|j| j + offset));
             }
-        }
-    }
-    RecursiveTree { nodes: new_nodes }
+            #[allow(clippy::expect_used, reason = "replacement tree must not be empty")]
+            let root = new_nodes
+                .len()
+                .checked_sub(1)
+                .expect("replacement tree must not be empty");
+            Some(root)
+        },
+        default_rebuild_node,
+    )
 }
 
 /// Functor map over the recursive positions of a frame.

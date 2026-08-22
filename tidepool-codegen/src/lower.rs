@@ -3,8 +3,10 @@
 //! (see `jit_machine::compile_inner`).
 
 use rustc_hash::{FxHashMap, FxHashSet};
-use tidepool_repr::tree::get_children;
-use tidepool_repr::{CoreExpr, CoreFrame, JoinId, MapLayer, TreeBuilder, VarId};
+use tidepool_repr::tree::{get_children, max_var_id, rebuild_from};
+#[cfg(test)]
+use tidepool_repr::TreeBuilder;
+use tidepool_repr::{CoreExpr, CoreFrame, JoinId, VarId};
 
 /// Rewrites `Join`/`Jump` pairs where a `Jump` reaches its label only by
 /// crossing a `Lam` boundary — a shape codegen cannot compile. Each `Lam`
@@ -190,57 +192,17 @@ fn reaches_under_lam(
     false
 }
 
-/// Largest `VarId.0` mentioned anywhere in the tree (0 if none), scanning both
-/// references (`Var`) and every binder site (`Lam`/`LetNonRec`/`LetRec`/`Case`
-/// binders, `Join` params). Converted-join binders are minted above this so
-/// they cannot shadow a live value binder — see [`lower_jump_crosses_lam`].
-fn max_var_id(tree: &CoreExpr) -> u64 {
-    let mut max = 0u64;
-    for node in &tree.nodes {
-        match node {
-            CoreFrame::Var(v) => max = max.max(v.0),
-            CoreFrame::Lam { binder, .. } | CoreFrame::LetNonRec { binder, .. } => {
-                max = max.max(binder.0)
-            }
-            CoreFrame::Case { binder, alts, .. } => {
-                max = max.max(binder.0);
-                // Alt pattern binders are VarIds too — omitting them would let a
-                // converted Jump's fresh binder silently capture one.
-                for alt in alts {
-                    for b in &alt.binders {
-                        max = max.max(b.0);
-                    }
-                }
-            }
-            CoreFrame::LetRec { bindings, .. } => {
-                for (b, _) in bindings {
-                    max = max.max(b.0);
-                }
-            }
-            CoreFrame::Join { params, .. } => {
-                for p in params {
-                    max = max.max(p.0);
-                }
-            }
-            _ => {}
-        }
-    }
-    max
-}
-
 /// Whole-tree rewrite: convert every crossing `Join` into `LetNonRec` plus a
 /// `Lam` wrapper, and every `Jump` to a converted label into an application
-/// chain. Explicit-stack postorder copy (same shape as
-/// `RecursiveTree::extract_subtree`) so the rewrite doesn't grow the host
-/// stack on a deep tower.
+/// chain. Built on the shared [`rebuild_from`] driver (same stack-safe
+/// Enter/Exit walk as `RecursiveTree::extract_subtree`) so the rewrite
+/// doesn't grow the host stack on a deep tower; only the two converted node
+/// shapes override the default copy-through policy.
 fn rewrite(tree: &CoreExpr, root: usize, crosses: &FxHashMap<JoinId, bool>) -> CoreExpr {
-    enum Step {
-        Enter(usize),
-        Exit(usize),
-    }
     // Fresh binder per crossing label, minted strictly above every VarId in
     // the tree (sorted for deterministic assignment) so a converted join's
-    // value binder never shadows a live in-scope binder.
+    // value binder never shadows a live in-scope binder — see
+    // [`max_var_id`]'s doc for why alt pattern binders count too.
     let base = max_var_id(tree) + 1;
     let mut crossing: Vec<JoinId> = crosses
         .iter()
@@ -253,69 +215,54 @@ fn rewrite(tree: &CoreExpr, root: usize, crosses: &FxHashMap<JoinId, bool>) -> C
         .map(|(i, k)| (k, VarId(base + i as u64)))
         .collect();
 
-    let mut b = TreeBuilder::new();
-    let mut old_to_new: FxHashMap<usize, usize> = FxHashMap::default();
-    let mut stack = vec![Step::Enter(root)];
-    while let Some(step) = stack.pop() {
-        match step {
-            Step::Enter(i) => {
-                if old_to_new.contains_key(&i) {
-                    continue;
-                }
-                stack.push(Step::Exit(i));
-                for c in get_children(&tree.nodes[i]) {
-                    if !old_to_new.contains_key(&c) {
-                        stack.push(Step::Enter(c));
-                    }
-                }
-            }
-            Step::Exit(i) => {
-                if old_to_new.contains_key(&i) {
-                    continue;
-                }
-                let new_idx = match &tree.nodes[i] {
-                    CoreFrame::Jump { label, args }
-                        if crosses.get(label).copied().unwrap_or(false) =>
-                    {
-                        // Converted join: a Jump becomes a call to the closure
-                        // now bound at `fresh[label]` — Var applied to each
-                        // (already-mapped) arg in order.
-                        let head = b.push(CoreFrame::Var(fresh[label]));
-                        args.iter().fold(head, |fun, &a| {
-                            b.push(CoreFrame::App {
-                                fun,
-                                arg: old_to_new[&a],
-                            })
+    rebuild_from(
+        tree,
+        root,
+        |_, _| None,
+        |i, frame, new_nodes, old_to_new| {
+            let mut push = |f| {
+                let idx = new_nodes.len();
+                new_nodes.push(f);
+                idx
+            };
+            match frame {
+                CoreFrame::Jump { label, args } if crosses.get(label).copied().unwrap_or(false) => {
+                    // Converted join: a Jump becomes a call to the closure
+                    // now bound at `fresh[label]` — Var applied to each
+                    // (already-mapped) arg in order.
+                    let head = push(CoreFrame::Var(fresh[label]));
+                    args.iter().fold(head, |fun, &a| {
+                        push(CoreFrame::App {
+                            fun,
+                            arg: old_to_new[&a],
                         })
-                    }
-                    CoreFrame::Join {
-                        label,
-                        params,
-                        rhs,
-                        body,
-                    } if crosses.get(label).copied().unwrap_or(false) => {
-                        let new_rhs = old_to_new[rhs];
-                        let new_body = old_to_new[body];
-                        // \p0 -> \p1 -> ... -> rhs (identity when params is empty).
-                        let wrapped = params.iter().rev().fold(new_rhs, |acc, &p| {
-                            b.push(CoreFrame::Lam {
-                                binder: p,
-                                body: acc,
-                            })
-                        });
-                        b.push(CoreFrame::LetNonRec {
-                            binder: fresh[label],
-                            rhs: wrapped,
-                            body: new_body,
+                    })
+                }
+                CoreFrame::Join {
+                    label,
+                    params,
+                    rhs,
+                    body,
+                } if crosses.get(label).copied().unwrap_or(false) => {
+                    let new_rhs = old_to_new[rhs];
+                    let new_body = old_to_new[body];
+                    // \p0 -> \p1 -> ... -> rhs (identity when params is empty).
+                    let wrapped = params.iter().rev().fold(new_rhs, |acc, &p| {
+                        push(CoreFrame::Lam {
+                            binder: p,
+                            body: acc,
                         })
-                    }
-                    frame => b.push(frame.clone().map_layer(|c| old_to_new[&c])),
-                };
-                old_to_new.insert(i, new_idx);
+                    });
+                    push(CoreFrame::LetNonRec {
+                        binder: fresh[label],
+                        rhs: wrapped,
+                        body: new_body,
+                    })
+                }
+                _ => tidepool_repr::tree::default_rebuild_node(i, frame, new_nodes, old_to_new),
             }
-        }
-    }
-    b.build()
+        },
+    )
 }
 
 #[cfg(test)]

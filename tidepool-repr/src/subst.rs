@@ -44,34 +44,7 @@ struct SubstCtx<'a> {
 }
 
 fn find_max_var_id(tree: &CoreExpr) -> VarId {
-    let mut max = VarId(0);
-    for node in &tree.nodes {
-        match node {
-            CoreFrame::Var(v) => max = VarId(max.0.max(v.0)),
-            CoreFrame::Lam { binder, .. } => max = VarId(max.0.max(binder.0)),
-            CoreFrame::LetNonRec { binder, .. } => max = VarId(max.0.max(binder.0)),
-            CoreFrame::LetRec { bindings, .. } => {
-                for (v, _) in bindings {
-                    max = VarId(max.0.max(v.0));
-                }
-            }
-            CoreFrame::Case { binder, alts, .. } => {
-                max = VarId(max.0.max(binder.0));
-                for alt in alts {
-                    for b in &alt.binders {
-                        max = VarId(max.0.max(b.0));
-                    }
-                }
-            }
-            CoreFrame::Join { params, .. } => {
-                for p in params {
-                    max = VarId(max.0.max(p.0));
-                }
-            }
-            _ => {}
-        }
-    }
-    max
+    VarId(crate::tree::max_var_id(tree))
 }
 
 /// Recursive helper for substitution.
