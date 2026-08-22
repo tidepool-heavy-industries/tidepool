@@ -30,7 +30,7 @@ pub use engine::{
     SessionEngine, StartError, StartTurn, TurnOutcome,
 };
 
-pub use supervisor::{wait_for_abort_grace, wait_grace_without_cancel, GraceOutcome};
+pub use supervisor::{GraceOutcome, TurnSupervisor};
 
 pub use resident::{ResidentError, ResidentHole, ResidentOutcome, ResidentSession, RootCustody};
 

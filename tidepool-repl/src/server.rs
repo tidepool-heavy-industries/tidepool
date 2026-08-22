@@ -24,9 +24,7 @@ use serde::{Deserialize, Serialize};
 use tidepool_effect::dispatch::DispatchEffect;
 use tidepool_mcp::{describe_effects_index, CapturedOutput, EffectDecl, EffectRoster};
 use tidepool_repr::{MonotonicIdIssuer, SessionId};
-use tidepool_runtime::session::{
-    wait_for_abort_grace, wait_grace_without_cancel, GraceOutcome, ModuleEnv,
-};
+use tidepool_runtime::session::{GraceOutcome, ModuleEnv, TurnSupervisor};
 use tokio::time::{timeout, Duration};
 use tokio_util::sync::CancellationToken;
 
@@ -900,14 +898,23 @@ impl TidepoolReplServer {
             _ = ct.cancelled() => {
                 // Client asked to stop. Signal abort on both fronts — the same
                 // levers the timeout branch of `drive` uses (via the shared
-                // watchdog, `tidepool_runtime::session::wait_for_abort_grace`)
-                // — then let the resolver record the real terminal state.
+                // watchdog, `tidepool_runtime::session::TurnSupervisor`) —
+                // then let the resolver record the real terminal state.
                 gate_abort.request_abort(format!("{op} cancelled by client"));
                 let handle = cancel_abort.lock().as_ref().cloned();
                 let outcome = if let Some(h) = &handle {
-                    wait_for_abort_grace(h, Duration::from_secs(ABORT_GRACE_SECS), &mut result_rx).await
+                    TurnSupervisor::wait_for_abort_grace(
+                        h,
+                        Duration::from_secs(ABORT_GRACE_SECS),
+                        &mut result_rx,
+                    )
+                    .await
                 } else {
-                    wait_grace_without_cancel(Duration::from_secs(ABORT_GRACE_SECS), &mut result_rx).await
+                    TurnSupervisor::wait_grace_without_cancel(
+                        Duration::from_secs(ABORT_GRACE_SECS),
+                        &mut result_rx,
+                    )
+                    .await
                 };
                 match outcome {
                     GraceOutcome::Recovered(Ok(r)) => r,
@@ -974,9 +981,12 @@ impl TidepoolReplServer {
                 gate.request_abort(format!("{op} timed out after {to_secs}s"));
                 let handle = cancel.lock().as_ref().cloned();
                 if let Some(h) = &handle {
-                    if let GraceOutcome::Recovered(Ok(run)) =
-                        wait_for_abort_grace(h, Duration::from_secs(ABORT_GRACE_SECS), &mut join)
-                            .await
+                    if let GraceOutcome::Recovered(Ok(run)) = TurnSupervisor::wait_for_abort_grace(
+                        h,
+                        Duration::from_secs(ABORT_GRACE_SECS),
+                        &mut join,
+                    )
+                    .await
                     {
                         // Aborted at a safepoint — clear the flag and put the
                         // session back Idle (self-healed).

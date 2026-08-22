@@ -1,4 +1,6 @@
-//! The turn-abort watchdog primitive shared by every resident-turn driver.
+//! [`TurnSupervisor`] — the turn-abort watchdog, tidepool's ONE home for turn
+//! thread supervision (timeout/cancel/crash); see the root `CLAUDE.md`
+//! Mechanism Index.
 //!
 //! A turn that has decided to stop — a timeout window elapsed, or a caller
 //! cancelled the RPC — asks a live JIT machine to abort at its next safepoint
@@ -7,11 +9,11 @@
 //! bounded grace for the awaited work to resolve" step is IDENTICAL wherever
 //! it appears — `tidepool-repl`'s `server.rs` reimplemented it independently
 //! at both its turn-timeout site and its client-cancel site (`drive` and
-//! `drive_detached`) before this module existed. [`wait_for_abort_grace`] is
-//! the one mechanism; each caller keeps its own policy for what "still
-//! running" means (wedge the session, or let a detached resolver keep
-//! ownership) and for whether a `tidepool_effect::pause::PauseGate` abort
-//! request precedes it.
+//! `drive_detached`) before this module existed. [`TurnSupervisor`] is the
+//! one mechanism; each caller keeps its own policy for what "still running"
+//! means (wedge the session, or let a detached resolver keep ownership) and
+//! for whether a `tidepool_effect::pause::PauseGate` abort request precedes
+//! it.
 //!
 //! This is deliberately NOT a full turn supervisor unifying
 //! `tidepool-runtime`'s own [`super::engine::SessionEngine`] (oneshot,
@@ -20,7 +22,9 @@
 //! differ (a resident timeout has no "paused, resumable" state — it recovers
 //! to `Idle` or wedges), and forcing them to share one classification would
 //! be a real behavior change to safety-critical crash/timeout handling, not
-//! a mechanical dedup.
+//! a mechanical dedup. `SessionEngine` remains its own caller of the two
+//! abort levers this module wraps; only the grace-wait step it does NOT
+//! share (it detaches immediately rather than waiting) stays out of scope.
 
 use std::future::Future;
 use std::time::Duration;
@@ -39,34 +43,43 @@ pub enum GraceOutcome<T> {
     StillRunning,
 }
 
-/// Request a cooperative abort on the JIT [`CancelHandle`] lever, then wait up
-/// to `grace` for `awaited` to resolve. Callers that also need the
-/// `PauseGate` abort lever fire its `request_abort` themselves before calling
-/// this — whether that call is unconditional or gated on `cancel` being
-/// available is caller policy (the two `tidepool-repl` call sites this
-/// factors out of already made different choices there).
-pub async fn wait_for_abort_grace<T>(
-    cancel: &CancelHandle,
-    grace: Duration,
-    awaited: impl Future<Output = T>,
-) -> GraceOutcome<T> {
-    cancel.cancel();
-    match timeout(grace, awaited).await {
-        Ok(t) => GraceOutcome::Recovered(t),
-        Err(_) => GraceOutcome::StillRunning,
-    }
-}
+/// The turn-abort watchdog: the one "fire the abort levers, then wait a
+/// bounded grace for the turn to stop" mechanism every turn driver in this
+/// workspace shares. A marker type (no fields) — its methods are the whole
+/// surface.
+pub struct TurnSupervisor;
 
-/// [`wait_for_abort_grace`] for a caller with no [`CancelHandle`] to fire (a
-/// runaway before any JIT machine published one) — no abort lever exists, but
-/// `awaited` is still raced against `grace` since a `PauseGate` abort alone
-/// may still let it resolve.
-pub async fn wait_grace_without_cancel<T>(
-    grace: Duration,
-    awaited: impl Future<Output = T>,
-) -> GraceOutcome<T> {
-    match timeout(grace, awaited).await {
-        Ok(t) => GraceOutcome::Recovered(t),
-        Err(_) => GraceOutcome::StillRunning,
+impl TurnSupervisor {
+    /// Request a cooperative abort on the JIT [`CancelHandle`] lever, then
+    /// wait up to `grace` for `awaited` to resolve. Callers that also need
+    /// the `PauseGate` abort lever fire its `request_abort` themselves
+    /// before calling this — whether that call is unconditional or gated on
+    /// `cancel` being available is caller policy (the two `tidepool-repl`
+    /// call sites this factors out of already made different choices
+    /// there).
+    pub async fn wait_for_abort_grace<T>(
+        cancel: &CancelHandle,
+        grace: Duration,
+        awaited: impl Future<Output = T>,
+    ) -> GraceOutcome<T> {
+        cancel.cancel();
+        match timeout(grace, awaited).await {
+            Ok(t) => GraceOutcome::Recovered(t),
+            Err(_) => GraceOutcome::StillRunning,
+        }
+    }
+
+    /// [`Self::wait_for_abort_grace`] for a caller with no [`CancelHandle`]
+    /// to fire (a runaway before any JIT machine published one) — no abort
+    /// lever exists, but `awaited` is still raced against `grace` since a
+    /// `PauseGate` abort alone may still let it resolve.
+    pub async fn wait_grace_without_cancel<T>(
+        grace: Duration,
+        awaited: impl Future<Output = T>,
+    ) -> GraceOutcome<T> {
+        match timeout(grace, awaited).await {
+            Ok(t) => GraceOutcome::Recovered(t),
+            Err(_) => GraceOutcome::StillRunning,
+        }
     }
 }
