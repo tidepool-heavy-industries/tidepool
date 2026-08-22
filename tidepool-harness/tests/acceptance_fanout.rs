@@ -24,6 +24,8 @@ use tidepool_harness::selfharness::operator::FormShape;
 use tidepool_harness::tree::{FanBadge, NodeId, NodeState};
 use tidepool_harness::{ContinueSignal, Harness, HarnessError, HoleRouting, OperatorGate};
 
+use support::haskell_call::{fanout_bind, haskell, resume_call};
+
 /// A test-double [`OperatorGate`] that answers `present_form` from a
 /// scripted channel — the SAME production seam a real web operator resolves
 /// an escalation through (`Harness::escalate_to_operator` calls
@@ -123,22 +125,21 @@ async fn fanout_of_three_preserves_order_across_a_retry() {
 
     let replies = vec![
         // 1. Root turn: fan out 3 prompts, return the assembled list.
-        reply(
-            "I'll fan out three prompts for numbers.\n\n\
-             ```haskell\n\
-             do\n\
-             \x20 ns <- mapM liftEither =<< runLLMTurnFanout @Int [\"pick 1\", \"pick 2\", \"pick 3\"]\n\
-             \x20 pure (toJSON ns)\n\
-             ```",
-        ),
+        reply(&format!(
+            "I'll fan out three prompts for numbers.\n\n{}",
+            haskell(&format!(
+                "do\n  {}\n  pure (toJSON ns)",
+                fanout_bind("ns", "Int", &["pick 1", "pick 2", "pick 3"])
+            ))
+        )),
         // 2. Child 0 ("pick 1"): valid on the first attempt.
-        reply("```haskell\nresume (1 :: Int)\n```"),
+        reply(&resume_call("(1 :: Int)")),
         // 3. Child 1 ("pick 2"): DELIBERATELY ill-typed first attempt.
-        reply("```haskell\nresume \"nope\"\n```"),
+        reply(&resume_call("\"nope\"")),
         // 4. Child 1, corrected.
-        reply("Right, an Int.\n\n```haskell\nresume (2 :: Int)\n```"),
+        reply(&format!("Right, an Int.\n\n{}", resume_call("(2 :: Int)"))),
         // 5. Child 2 ("pick 3"): valid on the first attempt.
-        reply("```haskell\nresume (3 :: Int)\n```"),
+        reply(&resume_call("(3 :: Int)")),
     ];
     let provider: Arc<dyn DynModelProvider> = Arc::new(ReplayProvider::new(replies));
     let harness = Arc::new(Harness::new(writer, cfg, provider).expect("harness boots"));
@@ -256,18 +257,15 @@ async fn fanout_child_recovers_via_rung_one_auto_retry_after_cap_exhaustion() {
 
     let replies = vec![
         // 1. Root turn: fan out ONE prompt.
-        reply(
-            "```haskell\n\
-             do\n\
-             \x20 ns <- mapM liftEither =<< runLLMTurnFanout @Int [\"pick 1\"]\n\
-             \x20 pure (toJSON ns)\n\
-             ```",
-        ),
+        reply(&haskell(&format!(
+            "do\n  {}\n  pure (toJSON ns)",
+            fanout_bind("ns", "Int", &["pick 1"])
+        ))),
         // 2. Child 0 ("pick 1"): a pure-prose reply, no ```haskell block —
         //    burns the child's entire 1-turn budget with nothing to run.
         reply("Let me think about this for a moment."),
         // 3. Child 0, after rung 1's corrective nudge: answers validly.
-        reply("```haskell\nresume (1 :: Int)\n```"),
+        reply(&resume_call("(1 :: Int)")),
     ];
     let provider: Arc<dyn DynModelProvider> = Arc::new(ReplayProvider::new(replies));
     let harness = Arc::new(Harness::new(writer, cfg, provider).expect("harness boots"));
@@ -327,13 +325,10 @@ async fn fanout_child_stuck_past_rung_one_aborts_clean_no_leaked_running_node() 
     let replies = vec![
         // 1. Root turn: fan out ONE prompt (so the stuck child's id is
         //    predictable: root = NodeId(0), child = NodeId(1)).
-        reply(
-            "```haskell\n\
-             do\n\
-             \x20 ns <- mapM liftEither =<< runLLMTurnFanout @Int [\"pick 1\"]\n\
-             \x20 pure (toJSON ns)\n\
-             ```",
-        ),
+        reply(&haskell(&format!(
+            "do\n  {}\n  pure (toJSON ns)",
+            fanout_bind("ns", "Int", &["pick 1"])
+        ))),
         // 2..5. Four consecutive prose-only (no ```haskell block) replies:
         //    1 to exhaust the initial 1-turn budget, 3 more to exhaust rung
         //    1's auto-retry bump (AUTO_RETRY_BUMP = 3) — the fifth check
@@ -471,13 +466,10 @@ async fn fanout_child_stuck_past_rung_one_recovers_via_operator_allocate_more_th
 
     let replies = vec![
         // 1. Root turn: fan out ONE prompt.
-        reply(
-            "```haskell\n\
-             do\n\
-             \x20 ns <- mapM liftEither =<< runLLMTurnFanout @Int [\"pick 1\"]\n\
-             \x20 pure (toJSON ns)\n\
-             ```",
-        ),
+        reply(&haskell(&format!(
+            "do\n  {}\n  pure (toJSON ns)",
+            fanout_bind("ns", "Int", &["pick 1"])
+        ))),
         // 2..5. Same four prose-only replies as the abort test: 1 exhausts
         //    the initial budget, 3 more exhaust rung 1's auto-retry bump —
         //    the fifth check escalates to rung 2.
@@ -487,7 +479,7 @@ async fn fanout_child_stuck_past_rung_one_recovers_via_operator_allocate_more_th
         reply("Thinking (4)."),
         // 6. After the operator grants more turns, the child answers validly
         //    on its very next attempt.
-        reply("```haskell\nresume (1 :: Int)\n```"),
+        reply(&resume_call("(1 :: Int)")),
     ];
     let provider: Arc<dyn DynModelProvider> = Arc::new(ReplayProvider::new(replies));
     let harness = Arc::new(Harness::new(writer, cfg, provider).expect("harness boots"));
@@ -550,13 +542,10 @@ async fn fanout_child_stuck_past_rung_one_times_out_with_no_operator() {
     cfg.escalation_timeout = Duration::from_millis(100);
 
     let replies = vec![
-        reply(
-            "```haskell\n\
-             do\n\
-             \x20 ns <- mapM liftEither =<< runLLMTurnFanout @Int [\"pick 1\"]\n\
-             \x20 pure (toJSON ns)\n\
-             ```",
-        ),
+        reply(&haskell(&format!(
+            "do\n  {}\n  pure (toJSON ns)",
+            fanout_bind("ns", "Int", &["pick 1"])
+        ))),
         reply("Thinking (1)."),
         reply("Thinking (2)."),
         reply("Thinking (3)."),

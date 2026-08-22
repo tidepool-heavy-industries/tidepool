@@ -29,6 +29,8 @@ use tidepool_harness::replay::{fold_tree_state, RecordedReply, ReplayProvider};
 use tidepool_harness::tree::NodeState;
 use tidepool_harness::Harness;
 
+use support::haskell_call::{fork_bind, haskell, resume_call};
+
 fn prelude_dir() -> PathBuf {
     let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     manifest
@@ -66,19 +68,20 @@ fn golden_replies() -> Vec<RecordedReply> {
         //    the operator via a dialog, then completes. The block suspends first
         //    at the fork; when resumed it suspends again at the dialog; when THAT
         //    resumes it runs to completion — all one resident fragment.
-        r(
-            "I'll get a number from a sub-agent, confirm it, and finish.\n\n\
-           ```haskell\n\
-           do\n\
-           \x20 Right n <- runLLMTurnFork @Int \"pick a number between 1 and 100\"\n\
-           \x20 _ <- ask (SEnum [\"yes\", \"no\"]) \"Confirm: Proceed?\"\n\
-           \x20 pure (toJSON n)\n\
-           ```",
-        ),
+        r(&format!(
+            "I'll get a number from a sub-agent, confirm it, and finish.\n\n{}",
+            haskell(&format!(
+                "do\n  {}\n  _ <- ask (SEnum [\"yes\", \"no\"]) \"Confirm: Proceed?\"\n  pure (toJSON n)",
+                fork_bind("n", "Int", "pick a number between 1 and 100")
+            ))
+        )),
         // 2. Fork answerer, DELIBERATELY ill-typed: a String where Int is wanted.
-        r("```haskell\nresume \"forty-two\"\n```"),
+        r(&resume_call("\"forty-two\"")),
         // 3. Fork answerer, corrected: a real Int.
-        r("Right, it must be an Int.\n\n```haskell\nresume (42 :: Int)\n```"),
+        r(&format!(
+            "Right, it must be an Int.\n\n{}",
+            resume_call("(42 :: Int)")
+        )),
     ]
 }
 
@@ -243,9 +246,12 @@ async fn fork_only_resumes_to_completion() {
         usage: usage(),
     };
     let replies = vec![
-        r("```haskell\ndo\n  Right n <- runLLMTurnFork @Int \"pick\"\n  pure (toJSON n)\n```"),
-        r("```haskell\nresume \"nope\"\n```"),   // ill-typed
-        r("```haskell\nresume (7 :: Int)\n```"), // valid
+        r(&haskell(&format!(
+            "do\n  {}\n  pure (toJSON n)",
+            fork_bind("n", "Int", "pick")
+        ))),
+        r(&resume_call("\"nope\"")),   // ill-typed
+        r(&resume_call("(7 :: Int)")), // valid
     ];
     let provider: Arc<dyn DynModelProvider> = Arc::new(ReplayProvider::new(replies));
     let harness = Arc::new(Harness::new(writer, cfg, provider).expect("harness"));

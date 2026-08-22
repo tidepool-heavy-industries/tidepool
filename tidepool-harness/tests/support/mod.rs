@@ -2,6 +2,9 @@
 
 #![allow(dead_code)]
 
+pub mod haskell_call;
+pub mod scripted_provider;
+
 use tempfile::TempDir;
 
 /// Isolate this test process's MUTABLE cache state, while SHARING the

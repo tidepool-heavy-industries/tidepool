@@ -9,9 +9,11 @@
 //! crate, so the precedent (and the include-root shape) is established.
 //!
 //! **No live model, no operator, no repository.** Every cognition window is
-//! served by [`KeyedProvider`] (below) and every gate presentation by
-//! [`ScriptedGate`]; the only substrate that runs for real is the JIT, the
-//! driver, and GHC.
+//! served by `support::scripted_provider::KeyedProvider` (this file's own
+//! proving ground — see that module's doc for the mechanism, now shared with
+//! `delegate_positive_path.rs`/`delegate_merge_fold.rs`) and every gate
+//! presentation by [`ScriptedGate`]; the only substrate that runs for real is
+//! the JIT, the driver, and GHC.
 //!
 //! # How a scenario is scripted
 //!
@@ -103,9 +105,7 @@ use serde_json::{json, Value as Json};
 use tidepool_handlers::{load_journal, ConsoleHandler, JournalEntry, JournalHandler, SegmentPath};
 use tidepool_harness::engine::EngineConfig;
 use tidepool_harness::log::{Event as LogEvent, LogHeader, LogReader, LogWriter};
-use tidepool_harness::provider::{
-    DynModelProvider, ModelProvider, ProviderError, StreamSink, TurnRequest, TurnResponse, Usage,
-};
+use tidepool_harness::provider::DynModelProvider;
 use tidepool_harness::selfharness::operator::FormShape;
 use tidepool_harness::selfharness::persistence;
 use tidepool_harness::tree::NodeId;
@@ -113,6 +113,8 @@ use tidepool_harness::{
     answerer_decls, load_harness_source, ContinueSignal, Event as DriverEvent, Harness, Observer,
     OperatorGate, SelfHarnessDriver,
 };
+
+use support::scripted_provider::{parse_window, script, KeyedProvider, PathKey, Phase, Script};
 
 // ---------------------------------------------------------------------------
 // Where the real harness lives
@@ -150,161 +152,12 @@ fn header(label: &str) -> LogHeader {
 
 // ---------------------------------------------------------------------------
 // The scripted provider — keyed structurally on (path, phase[, ordinal]),
-// never on prompt-text substrings
+// never on prompt-text substrings. `PathKey`/`Script`/`script`/`KeyedProvider`/
+// `Phase`/`parse_window` now live in `support::scripted_provider` — this file
+// was their original proving ground (commit b135d174), and
+// `delegate_positive_path.rs`/`delegate_merge_fold.rs` now share this same
+// copy instead of each re-deriving their own needle-set matcher.
 // ---------------------------------------------------------------------------
-
-/// Which structural key one [`Script`] answers.
-///
-/// `Exact` is for a branch whose title THIS FILE authored (`split_two`,
-/// `split_three`, …), so its rendered slug is known ahead of time. `Prefix`
-/// is for a branch whose title is MODEL-produced — a hostile title (row 11),
-/// an operator's `Add` verdict — so only its POSITION segment (`"root/2-"`)
-/// is knowable in advance and the harness is left to own the slug, exactly
-/// the reason `outer_fanout.rs`'s adaptation of this provider first
-/// introduced position-only matching.
-#[derive(Debug, Clone, Copy)]
-enum PathKey {
-    Exact(&'static str),
-    Prefix(&'static str),
-}
-
-impl PathKey {
-    fn matches(&self, path: &str) -> bool {
-        match self {
-            PathKey::Exact(p) => path == *p,
-            PathKey::Prefix(p) => path.starts_with(p),
-        }
-    }
-}
-
-/// One scripted window, keyed on `(path, phase)` — never on prompt text.
-///
-/// `replies` is consumed front-to-back across successive matches of this
-/// SAME key, and the last entry sticks for every match past the end of the
-/// list — a single-reply `Script` (every scenario below) repeats its one
-/// reply for every round of a window that never finalizes (a starved
-/// window's round-cap re-prompts all carry the same header, so they all
-/// match the same key); a `Vec` of more than one entry would serve a
-/// genuinely different reply per call — the round-ordinal case, e.g. a
-/// multi-round retry's second, corrected attempt — without matching a
-/// marker string inside a later prompt to tell the calls apart.
-struct Script {
-    path: PathKey,
-    phase: Phase,
-    replies: Vec<String>,
-}
-
-fn script(path: PathKey, phase: Phase, reply: String) -> Script {
-    Script {
-        path,
-        phase,
-        replies: vec![reply],
-    }
-}
-
-/// A [`ModelProvider`] that answers each cognition window by its STRUCTURAL
-/// `(path, phase)` key, parsed off the one header line every window's own
-/// prompt opens with ([`parse_window`] — the same single parse point
-/// [`Run`]'s own indexing already uses), never by matching an arbitrary
-/// substring anywhere in the request, and never by call ORDER
-/// (`ReplayProvider`'s strict FIFO queue cannot serve windows whose
-/// provider-call order is itself under test).
-///
-/// Entries are matched IN ORDER, first match wins, so a catch-all
-/// ([`PathKey::Prefix`] of `""`, phase `Fold`) can sit last. A request
-/// nothing matches is a loud `ProviderError`, never a default reply: "a
-/// window that must not run, ran" has to fail the run rather than be
-/// quietly served.
-struct KeyedProvider {
-    scripted: Vec<Script>,
-    /// Per-entry index into `scripted[i].replies`, advanced on every match —
-    /// what would let a multi-reply `Script` serve its replies in order
-    /// rather than repeating only its first one (see [`Script`]'s doc).
-    cursors: Mutex<Vec<usize>>,
-    /// The prompt of every window the provider was asked to answer, in order
-    /// — the record several assertions below read (which windows ran at all,
-    /// and what a window was actually prompted with).
-    seen: Mutex<Vec<String>>,
-}
-
-/// The message a request is MATCHED against: the last one carrying a window
-/// prompt header, not simply the last message.
-///
-/// Two things make "the last message" wrong here, and both are real:
-/// a branch child's request opens with its PARENT's frozen transcript (which
-/// contains the parent's own prompt header), so matching must look at the
-/// LAST such header, not the first; and a window that burns its round budget
-/// is re-prompted with the driver's round-cap ultimatum, which carries no
-/// header at all — a starved window (row 4b) would otherwise stop matching
-/// its own scripted entry halfway through being starved.
-fn window_message(req: &TurnRequest) -> String {
-    req.messages
-        .iter()
-        .rev()
-        .find(|m| m.content.contains(" — DISCOVER") || m.content.contains(" — FOLD"))
-        .or_else(|| req.messages.last())
-        .map(|m| m.content.clone())
-        .unwrap_or_default()
-}
-
-impl KeyedProvider {
-    fn new(scripted: Vec<Script>) -> Self {
-        let cursors = Mutex::new(vec![0; scripted.len()]);
-        KeyedProvider {
-            scripted,
-            cursors,
-            seen: Mutex::new(Vec::new()),
-        }
-    }
-}
-
-impl ModelProvider for KeyedProvider {
-    async fn complete(
-        &self,
-        req: TurnRequest,
-        _sink: Option<StreamSink>,
-    ) -> Result<TurnResponse, ProviderError> {
-        let last = window_message(&req);
-        self.seen.lock().push(last.clone());
-
-        let (path, phase) = parse_window(&last).ok_or_else(|| {
-            ProviderError::Api(format!(
-                "KeyedProvider: request carries no \"NODE <path> — DISCOVER/FOLD\" \
-                 header to key a reply on:\n{last}"
-            ))
-        })?;
-
-        let idx = self
-            .scripted
-            .iter()
-            .position(|s| s.phase == phase && s.path.matches(&path))
-            .ok_or_else(|| {
-                ProviderError::Api(format!(
-                    "KeyedProvider: no scripted reply for path {path:?} phase {phase:?}"
-                ))
-            })?;
-
-        let reply = {
-            let mut cursors = self.cursors.lock();
-            let replies = &self.scripted[idx].replies;
-            let cursor = cursors[idx].min(replies.len() - 1);
-            cursors[idx] += 1;
-            replies[cursor].clone()
-        };
-
-        Ok(TurnResponse {
-            text: reply,
-            usage: Usage {
-                input_tokens: 50,
-                output_tokens: 10,
-                cached_input_tokens: None,
-                cache_write_tokens: None,
-            },
-            reasoning: None,
-            reasoning_items: Vec::new(),
-        })
-    }
-}
 
 // ---------------------------------------------------------------------------
 // The scripted operator gate
@@ -435,37 +288,6 @@ impl Observer for WindowObserver {
 // ---------------------------------------------------------------------------
 // One scenario run
 // ---------------------------------------------------------------------------
-
-/// Which window a prompt belongs to.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Phase {
-    Discover,
-    Fold,
-}
-
-/// `NODE <path> — DISCOVER (…` / `NODE <path> — FOLD (…` → `(path, phase)`.
-/// The ONE place this file parses a prompt, so the coupling to
-/// `Harness.hs`'s prompt headers is a single line rather than scattered.
-///
-/// Locates the header rather than anchoring at the start of `prompt`: a
-/// driver-recorded hole prompt (`DriverEvent::RunLLMTurnHole`) starts with it
-/// verbatim, but the FULL message a provider request embeds it in carries the
-/// hole card's own lead-in first ("The loop needs a typed answer of type
-/// `T`.\n\n") — both callers share this one function rather than one of them
-/// re-deriving the search.
-fn parse_window(prompt: &str) -> Option<(String, Phase)> {
-    let start = prompt.find("NODE ")?;
-    let rest = &prompt[start + "NODE ".len()..];
-    let (path, tail) = rest.split_once(" — ")?;
-    let phase = if tail.starts_with("DISCOVER") {
-        Phase::Discover
-    } else if tail.starts_with("FOLD") {
-        Phase::Fold
-    } else {
-        return None;
-    };
-    Some((path.to_string(), phase))
-}
 
 /// Everything one cycle left behind: the harness's own durable `State`, the
 /// runtime's per-node event log, the authored journal, the provider's record
@@ -827,7 +649,7 @@ async fn run_scenario(
 
     let windows = observer.windows.lock().clone();
     let gate_submissions = observer.forms.lock().clone();
-    let requests = provider.seen.lock().clone();
+    let requests = provider.seen();
     Run {
         state: outcome.state_json,
         windows,
