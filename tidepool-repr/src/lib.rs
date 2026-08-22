@@ -12,6 +12,7 @@ pub mod datacon_table;
 pub mod frame;
 pub mod free_vars;
 pub mod freer_names;
+pub mod jsonl;
 pub mod normalize;
 pub mod pretty;
 pub mod serial;
