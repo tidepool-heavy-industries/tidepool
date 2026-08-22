@@ -6,24 +6,14 @@
 //! to skip the unchanged `Tidepool.Prelude` closure via a pre-populated
 //! build-products dir) must produce byte-identical Core + `DataConTable`.
 //!
-//! **Currently `#[ignore]`d — this is a KNOWN, DOCUMENTED gap, not a flake.**
-//! Enabling `load'`'s warm-dir skip perturbs GHC's session-wide `Unique`
-//! allocation trajectory (a cold run typechecks every module fully; a warm
-//! run skip-loads most of them, consuming a different quantity/sequence of
-//! uniques before reaching this module's own compile), and
-//! `Tidepool.Translate.localVarId` bakes that raw `Unique` into the `VarId`
-//! of every NESTED (non-top-level) `Id` — every lambda parameter, case
-//! binder, local let. Confirmed via a structural CBOR node diff: node COUNT
-//! and SHAPE are identical between a cold and a warm compile of the same
-//! source, but `VarId`s at Case-binder positions differ. `GhcPipeline.hs`'s
-//! `externalizeInternalTops` (the #313 fix) does NOT cover this — it only
-//! rewrites TOP-LEVEL binders. Fixing this needs a stable, content-derived
-//! numbering scheme for NESTED Ids across `Translate.hs` — a separate,
-//! higher-risk lane. `tidepool-runtime/src/artifacts.rs`'s
-//! `compile_invocation` therefore gates the build-products dir behind an
-//! explicit `$TIDEPOOL_BUILD_PRODUCTS_DIR` opt-in (never active by default),
-//! and this test stays `#[ignore]`d until that gap closes — it is the
-//! reproduction a future fix should turn green.
+//! This used to be a known, documented gap (enabling `load'`'s warm-dir skip
+//! perturbs GHC's session-wide `Unique` allocation trajectory, and
+//! `Tidepool.Translate.localVarId` baked that raw `Unique` into the `VarId`
+//! of every NESTED, non-top-level `Id`) — closed by
+//! `Tidepool.Translate.stabilizeLocalUniques` (nested Ids) together with
+//! `GhcPipeline.hs`'s `externalizeInternalTops` ordinal-based disambiguator
+//! (internal top-level floats). See both functions' doc comments and
+//! `plans/turn-latency-state-injection.md` for the full history.
 
 use serial_test::serial;
 use std::env;
@@ -64,9 +54,6 @@ result = \"hello \" <> toUpper \"world\"\n";
 
 #[test]
 #[serial]
-#[ignore = "known gap: Translate.hs localVarId bakes GHC's raw session Unique \
-into nested-Id VarIds, which a warm build-products dir perturbs — see this \
-file's module doc and plans/turn-latency-state-injection.md"]
 fn build_products_dir_cold_warm_identical_output() {
     // This test's OWN private build-products dir — never the ambient shared
     // one (see the lane boundary: "cold measurements pin their own

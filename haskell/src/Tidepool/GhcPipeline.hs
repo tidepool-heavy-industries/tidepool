@@ -50,7 +50,6 @@ import GHC.Types.Name (nameOccName, nameUnique, mkExternalName, nameModule_maybe
 import GHC.Types.Name.Occurrence (mkOccName, occNameSpace, occNameString)
 import GHC.Types.Var (setVarName)
 import GHC.Types.Var.Env (mkVarEnv, lookupVarEnv)
-import GHC.Types.Unique (getKey)
 import Control.Applicative ((<|>))
 import Control.Exception (SomeException, try)
 import Data.Maybe (fromMaybe)
@@ -1271,29 +1270,23 @@ canonicalizeDFlags dflags =
 -- tuple into a list case → CASE TRAP.
 --
 -- Fix: give every internal top-level binder an EXTERNAL name qualified by its
--- defining module, with the unique key baked into the OccName
--- (@k@ → @Probe.k_u8214565720323785735@), so @Translate.stableVarId@ yields a
--- globally unique, deterministic VarId. Internal names cannot be referenced
--- from other modules' ModGuts, so substituting binder + occurrences within the
--- module is complete. Nested binders are untouched: their uniques cannot
+-- defining module, with a STABLE disambiguator baked into the OccName
+-- (@k@ → @Probe.k_t3@, where @3@ is @k@'s ordinal position among this
+-- module's own top-level binders), so @Translate.stableVarId@ yields a
+-- globally unique, deterministic VarId. The ordinal — not the binder's raw
+-- GHC 'Unique' — is what makes this deterministic ACROSS separate compiles
+-- of the same source: 'mg_binds'\'s order is a pure function of this
+-- module's own source and simplifier passes, never of how many Uniques the
+-- surrounding GHC session happened to consume before reaching this module
+-- (which a warm build-products-dir compile perturbs — see
+-- 'Tidepool.Translate.stabilizeLocalUniques'\'s doc, the companion fix for
+-- NESTED binders; this function only ever rewrites TOP-LEVEL ones, and
+-- together the two close plans/turn-latency-state-injection.md's
+-- build-products-dir determinism gap). Internal names cannot be referenced
+-- from other modules' ModGuts, so substituting binder + occurrences within
+-- the module is complete. Nested binders are untouched: their uniques cannot
 -- collide with top-level uniques of the same module, and cross-module nested
 -- references are lexically impossible.
---
--- NOTE (build-products-dir lane, 2026-08-20): a per-module deterministic
--- index was tried here in place of the raw 'getKey (nameUnique n)' baked
--- below, on the theory that it would make a cold and a warm (build-products
--- dir) compile of the same source byte-identical. It did NOT — reverted.
--- The actual leak is 'Translate.hs''s 'localVarId', used for every NESTED
--- (non-top-level) 'Id' — lambda parameters, case scrutinee/alt binders,
--- local lets — which hashes the RAW GHC 'Unique' directly and is untouched
--- by this function (it only rewrites TOP-LEVEL binders). See
--- plans/turn-latency-state-injection.md's build-products-dir section for the
--- full finding: activating 'load'''s warm-dir skip perturbs the session-wide
--- Unique-allocation trajectory, and that reaches every 'localVarId'-derived
--- id in the whole compiled program, not just this function's narrow
--- top-level scope. Fixing THAT needs a stable, content-derived numbering
--- scheme for nested Ids across the whole 'Translate.hs' pipeline — out of
--- scope here, and high-risk without dedicated verification.
 externalizeInternalTops :: ModGuts -> ModGuts
 externalizeInternalTops guts = guts { mg_binds = map goTop (mg_binds guts) }
   where
@@ -1301,15 +1294,15 @@ externalizeInternalTops guts = guts { mg_binds = map goTop (mg_binds guts) }
     topBinders = concatMap binders (mg_binds guts)
       where binders (NonRec b _) = [b]
             binders (Rec ps)     = map fst ps
-    fixes = mkVarEnv [ (v, externalize v)
-                     | v <- topBinders
+    fixes = mkVarEnv [ (v, externalize ordinal v)
+                     | (ordinal, v) <- zip [0 :: Int ..] topBinders
                      , not (isExternalName (idName v)) ]
-    externalize v =
+    externalize ordinal v =
       let n    = idName v
           u    = nameUnique n
           occ  = nameOccName n
           occ' = mkOccName (occNameSpace occ)
-                           (occNameString occ ++ "_u" ++ show (getKey u))
+                           (occNameString occ ++ "_t" ++ show ordinal)
       in setVarName v (mkExternalName u m occ' (nameSrcSpan n))
     sub v = fromMaybe v (lookupVarEnv fixes v)
     goTop (NonRec b rhs) = NonRec (sub b) (goExpr rhs)
