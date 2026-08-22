@@ -1,31 +1,9 @@
-//! Config-dir resolution for provider secrets — see [`config_dir`]/
-//! [`secrets_dir`] for the resolution order.
-
-use std::path::PathBuf;
-
-fn home() -> Option<PathBuf> {
-    std::env::var_os("HOME").map(PathBuf::from)
-}
-
-/// User-global config root: `$TIDEPOOL_CONFIG_DIR` → `$XDG_CONFIG_HOME/tidepool`
-/// → `~/.config/tidepool` → `$TMPDIR/tidepool-config` (last resort).
-pub fn config_dir() -> PathBuf {
-    if let Some(d) = std::env::var_os("TIDEPOOL_CONFIG_DIR") {
-        return PathBuf::from(d);
-    }
-    if let Some(d) = std::env::var_os("XDG_CONFIG_HOME") {
-        return PathBuf::from(d).join("tidepool");
-    }
-    if let Some(h) = home() {
-        return h.join(".config").join("tidepool");
-    }
-    std::env::temp_dir().join("tidepool-config")
-}
+//! Secure secret storage for provider credentials — root resolution itself
+//! delegates to the canonical `tidepool_runtime::paths::secrets_dir`; only
+//! the secure-write helper is provider-specific.
 
 /// Secrets dir under the config root: `~/.config/tidepool/secrets/`.
-pub fn secrets_dir() -> PathBuf {
-    config_dir().join("secrets")
-}
+pub use tidepool_runtime::paths::secrets_dir;
 
 /// Write `contents` to `path` with mode 0600, creating parent dirs as
 /// needed. Uses `OpenOptions::mode` at creation time so the file is never
@@ -55,10 +33,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn config_dir_honors_override() {
+    fn secrets_dir_honors_config_dir_override() {
         let tmp = std::env::temp_dir().join(format!("tp-harness-paths-{}", std::process::id()));
         std::env::set_var("TIDEPOOL_CONFIG_DIR", &tmp);
-        assert_eq!(config_dir(), tmp);
         assert_eq!(secrets_dir(), tmp.join("secrets"));
         std::env::remove_var("TIDEPOOL_CONFIG_DIR");
     }

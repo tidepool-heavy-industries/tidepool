@@ -71,6 +71,11 @@ pub fn config_dir() -> PathBuf {
     std::env::temp_dir().join("tidepool-config")
 }
 
+/// Secrets dir under the config root: `~/.config/tidepool/secrets/`.
+pub fn secrets_dir() -> PathBuf {
+    config_dir().join("secrets")
+}
+
 /// Legacy single-home root (`~/.tidepool`), honored only if it exists so setups
 /// predating the XDG split keep resolving their `lib/`/`secrets/`.
 fn legacy_dir() -> Option<PathBuf> {
