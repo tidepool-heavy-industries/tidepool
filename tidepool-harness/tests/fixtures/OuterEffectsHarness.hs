@@ -29,7 +29,7 @@
 -- of an unrelated packed-`Text`-literal JIT construction path this lane does
 -- not own.
 --
--- PRD 20 S1-L4 wave 2 widens this bundle with 'Tidepool.Async.waitEvent'
+-- PRD 20 S1-L4 wave 2 widens this bundle with 'Tidepool.Event.waitEvent'
 -- (a select over {thread completion, deadline}), which also exercises the
 -- driver's NON-BLOCKING @RepoEventAwait@ servicing.
 --
@@ -57,7 +57,6 @@ import Tidepool.Async
   , wait
   , waitCatch
   , waitEither
-  , waitEvent
   )
 -- `(<|>)` hidden: `Tidepool.Prelude` re-exports base's `Alternative`
 -- operator too, and this fixture wants the Event algebra's at every use site.
@@ -82,6 +81,7 @@ import Tidepool.Event
   , after
   , headChanged
   , nextEvent
+  , waitEvent
   , withHandler
   , (<|>)
   )

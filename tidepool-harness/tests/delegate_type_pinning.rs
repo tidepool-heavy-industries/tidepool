@@ -125,7 +125,7 @@ fn delegate_call_compiles_against_the_narrow_row() {
 /// A block ANNOTATED `:: M ()` at its terminal statement — the shape a model
 /// fluent in canonical GHCi idiom reaches for on its own — must compile
 /// against the row `type M` NAMES for this delegating window, i.e. the narrow
-/// `[Delegate, AskUser, Fork, ReadState, Finalize T]`, not the outer
+/// `[Delegate, AskUser, Fork, ReadState, Green, Finalize T]`, not the outer
 /// `[Subagent, Worktree, ...]` row the machine actually dispatches. Before
 /// the reshape this was the live PRD 21 C5 defect (companion dogfood,
 /// 2026-08-20): `M` was the OUTER row, so the annotation forced a type

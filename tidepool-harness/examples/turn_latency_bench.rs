@@ -388,7 +388,7 @@ fn outcome_label(outcome: &TurnOutcome) -> &'static str {
 /// that admits no answer at all. Every block this bench replays is
 /// `finalize @Int …`, so without this the row rejects it before any of the
 /// stages being measured runs (`'Finalize Int' is not a member of
-/// '[AskUser, Fork, ReadState, Finalize Void]'`). `Int` needs no author module, so
+/// '[AskUser, Fork, ReadState, Green, Finalize Void]'`). `Int` needs no author module, so
 /// the contract carries no imports.
 fn pin_int_answer(harness: &Harness, node: NodeId) {
     harness.set_answer_contract(

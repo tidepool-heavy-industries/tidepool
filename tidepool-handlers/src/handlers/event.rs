@@ -312,7 +312,7 @@ impl SubscriptionRegistry {
     /// Mint a fresh [`EvEventId`] and broadcast `ObservedAsyncDone` for a
     /// green thread that just reached a terminal state (settle OR cancel —
     /// PRD 20 S1-L4 wave 2's completion watch, `WatchAsync`/
-    /// `Tidepool.Async.waitEvent`). Called by the DRIVER's own scheduler
+    /// `Tidepool.Event.waitEvent`). Called by the DRIVER's own scheduler
     /// bookkeeping, never by an authored `RepoEvent` verb — a thread
     /// settling is not a request/response the Haskell side ever sends, so
     /// there is no `RepoEventReq` variant for this; the driver reaches

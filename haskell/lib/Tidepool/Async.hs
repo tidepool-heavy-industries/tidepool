@@ -16,8 +16,8 @@
 -- * __Cooperative, no preemption.__  A thread runs until it performs an
 --   effect, then parks; the driver services whichever pending hole is ready
 --   and resumes that thread until it parks again.  A thread that never
---   performs an effect starves its siblings — acceptable, it is authored
---   code.
+--   performs an effect starves its siblings — the eval timeout is the
+--   backstop, exactly as for any other non-terminating computation.
 -- * __Data races unrepresentable.__  Threads communicate by return value,
 --   events, and typed messages.  No @IORef@\/@MVar@\/shared-cell effect is in
 --   the row, and that is a decision rather than an omission.
@@ -66,7 +66,14 @@
 -- This module is reachable only in rows containing @Green@, and is
 -- auto-imported whenever @Green@ is in the row.  It has nothing to do with
 -- "Tidepool.Fork", which is the answerer's unrelated fanout-to-sub-answerers
--- surface.
+-- surface — though the two COMPOSE: @'async' (fork \@T brief)@ parks the
+-- fork in a thread of its own, so several forks can be outstanding before
+-- the first 'wait'.
+--
+-- The Event-algebra completion watch (@waitEvent@) lives in "Tidepool.Event"
+-- rather than here: it rides @RepoEvent@'s substrate, and this module must
+-- stay loadable in rows that have @Green@ without @RepoEvent@ (see
+-- "Tidepool.Async.Types").
 module Tidepool.Async
   ( -- * Threads
     Async
@@ -85,9 +92,6 @@ module Tidepool.Async
   , waitBoth
   , waitAny
 
-    -- * Event-algebra select
-  , waitEvent
-
     -- * Derived combinators
   , race
   , concurrently
@@ -97,6 +101,7 @@ module Tidepool.Async
 
 import Prelude
 
+import Tidepool.Async.Types (Async (..), AsyncCancelled (..), asyncThreadId)
 import Tidepool.Effects
   ( AsyncStatus (..)
   , M
@@ -106,23 +111,6 @@ import Tidepool.Effects
   , asyncSpawn
   , asyncStatus
   )
--- `Event`/`asyncDone` are DEFINITIONS in `Tidepool.Event` (PRD 22 lane 4), not
--- the generated `Tidepool.Effects` module — see 'waitEvent' below for why this
--- is the one place this module reaches into `Tidepool.Event`'s algebra.
-import Tidepool.Event (Event, asyncDone)
-
--- | A handle on a green thread.  Opaque, and phantom-typed by the thread's
--- result — the same posture as @AgentHandle@.
-newtype Async a = Async Int
-
--- | The thread's runtime identity.  Stable for the thread's life; useful for
--- tracing.
-asyncThreadId :: Async a -> Int
-asyncThreadId (Async t) = t
-
--- | The outcome of cancelling a thread — what 'waitCatch' reports for one.
-data AsyncCancelled = AsyncCancelled
-  deriving (Show, Eq)
 
 -- | Fork a green thread.  Returns as soon as the thread is registered; the
 -- thread runs until it performs an effect and then parks, independently of
@@ -196,28 +184,6 @@ waitAny hs = do
       a <- wait h
       pure (h, a)
     [] -> error "Tidepool.Async.waitAny: joined a thread that was not waited on"
-
--- | The Event-algebra sibling of the package's @waitSTM@: fires once when
--- the thread reaches a terminal state (settled OR cancelled), so a select
--- over threads, timers, and mailboxes composes as one ordinary 'nextEvent'
--- (@Tidepool.Event@) instead of needing a separate blocking primitive.
---
--- Carries the HANDLE back, never the value: the typed result stays on the
--- heap and is one immediate 'wait' (or 'waitCatch', to observe a cancel) away
--- — the same reason 'poll'/'waitCatch' never take the value off this thread's
--- own settle path directly.
---
--- Built on 'asyncDone' — the raw @Int@-carrying watch this module's own
--- 'async'/'wait' machinery does not otherwise need — so this is the ONE
--- place @Tidepool.Async@ reaches into @Tidepool.Event@'s algebra. That
--- makes @RepoEvent@ a REQUIRED row member alongside @Green@ wherever
--- 'waitEvent' is actually called (a row with @Green@ but no @RepoEvent@
--- fails to resolve 'asyncDone'/'Event' — both are declared under
--- @RepoEvent@, never @Green@, so their watch vocabulary stands alone in a
--- row that has @RepoEvent@ without @Green@; the coupling runs the other way
--- only where @waitEvent@ itself is used).
-waitEvent :: Async a -> Event (Async a)
-waitEvent h = fmap (const h) (asyncDone (asyncThreadId h))
 
 -- | Run two computations concurrently and return the first to finish,
 -- cancelling the loser.

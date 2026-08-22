@@ -587,7 +587,7 @@ impl OuterRow {
     }
 }
 
-/// The nested answerer Agent's scoped decl row: `[AskUser, Fork, ReadState, Finalize]`.
+/// The nested answerer Agent's scoped decl row: `[AskUser, Fork, ReadState, Green, Finalize]`.
 /// It declares no base effects (`Console`/`KV`/`Fs`/`Lsp`/`Http`/`Exec`/`Git`/
 /// `Time`/`Meta`) and no `RunLLMTurn`/`Ask`, so an answerer turn compiles
 /// against a `Tidepool.Effects` that never defines those verbs — the answerer
@@ -597,16 +597,27 @@ impl OuterRow {
 /// (delegate to bounded parallel sub-answerers, riding `Fork` — the driver
 /// services the resulting suspension via [`Harness::answer_fanout`]/
 /// [`Harness::answer_fork`], and each child compiles against a fork-free leaf
-/// row so it cannot itself fork), and `finalize` (the answer path).
+/// row so it cannot itself fork), `Tidepool.Async` over `Green` (green
+/// threads — the composed idiom `async (fork @T brief)` parks a fork in a
+/// thread of its own, so several forks can be outstanding before the first
+/// `wait`; serviced by the answerer-plane green scheduler in
+/// [`SelfHarnessDriver::drive_answerer_to_finalize`]), and `finalize` (the
+/// answer path).
+///
+/// `Green` grants NO new external capability: a green thread's body can only
+/// perform effects already in this row, and `fork_child_decls` strips `Green`
+/// from fork-child rows the same way it strips `Fork` — the composition
+/// bottoms out one level down.
 ///
 /// `AskUser` comes first because [`EngineConfig::from_decls`] takes the first
-/// interposed effect as the suspend threshold; `Fork`/`Finalize` land at or
-/// past it regardless of position.
+/// interposed effect as the suspend threshold; `Fork`/`Green`/`Finalize` land
+/// at or past it regardless of position.
 pub fn answerer_decls() -> Vec<tidepool_mcp::EffectDecl> {
     vec![
         tidepool_mcp::askuser_decl(),
         tidepool_mcp::fork_decl(),
         tidepool_mcp::readstate_decl(),
+        tidepool_mcp::green_decl(),
         tidepool_mcp::finalize_decl(),
     ]
 }
@@ -3236,7 +3247,7 @@ impl SelfHarnessDriver {
                         FinalAnswer::Handle(custody) => GreenResult::Root(custody.into_handle()),
                     });
                     // Wake any `WatchAsync tid` subscriber exactly once — the
-                    // `Tidepool.Async.waitEvent`/`Tidepool.Event` completion
+                    // `Tidepool.Event.waitEvent`/`Tidepool.Event` completion
                     // watch (PRD 20 S1-L4 wave 2). `records_result` above
                     // already established this is a genuine Running→Settled
                     // transition, so this always fires exactly once per
@@ -4758,7 +4769,7 @@ impl SelfHarnessDriver {
                     // read `note "..." >> choose [...]`, so the FIRST classified
                     // hole here is routinely `Note`, not the thing that follows
                     // it. Any OTHER suspension is a hard error: the scoped
-                    // answerer stack (`[AskUser, Fork, ReadState, Finalize]`) can reach
+                    // answerer stack (`[AskUser, Fork, ReadState, Green, Finalize]`) can reach
                     // nothing else, and this driver has no operator for it.
                     let TurnOutcome::Suspended { hole, classified } = out else {
                         unreachable!("matched TurnOutcome::Suspended above");

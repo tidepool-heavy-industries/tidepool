@@ -537,7 +537,7 @@ harness-generated only (`forcing.rs::derive_teaser`).
 ## Self-iterating harness — the answerer row + the `AskUser` operator gate
 
 The self-iterating harness's answerer Agent (`selfharness::driver::answerer_decls`)
-compiles against `Eff '[AskUser, Fork, ReadState, Finalize]` — decl-only effects, disjoint
+compiles against `Eff '[AskUser, Fork, ReadState, Green, Finalize]` — decl-only effects, disjoint
 from the general Agent stack's `standard_decls()` (which keeps `Ask`,
 `RunLLMTurn`, and every base effect untouched; `AskUser` never appears
 there). `AskUser` (`tidepool_mcp::askuser_decl`) is a brand-new effect, not a
@@ -599,7 +599,7 @@ is reused across holes whose types differ), and its turns compile with:
   ReadState, Finalize Decision]` and `Member (Finalize Decision)` IS the pin. Canonical
   freer-simple, the same shape as `State s`. A wrong-typed answer is an
   ordinary GHC error naming the row (`'Finalize Text' is not a member of the
-  type-level list '[AskUser, Fork, ReadState, Finalize Decision]'`), which the
+  type-level list '[AskUser, Fork, ReadState, Green, Finalize Decision]'`), which the
   corrective-retry loop feeds back. Nothing is shimmed, hidden, or
   qualified-aliased: the turn uses the ordinary `build_preamble`.
 

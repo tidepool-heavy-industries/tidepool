@@ -65,7 +65,7 @@ rendered state plus the prompt, writes Haskell, and must deliver a `T`:
   This is the deepest capability: models author typed *behavior*, not just
   data.
 
-What a window can call (its row is `[AskUser, Fork, ReadState, Finalize T]` —
+What a window can call (its row is `[AskUser, Fork, ReadState, Green, Finalize T]` —
 deliberately minimal; no shell, no filesystem, no network):
 
 - `askUser @T` — present a typed form to the human operator, derived from

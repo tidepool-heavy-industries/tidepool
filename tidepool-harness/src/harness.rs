@@ -379,12 +379,18 @@ enum NodeSeed {
 /// (`Fork`/`RunLLMTurn`). A child keeps everything else it needs to compute its
 /// answer (base effects, `AskUser`, `Finalize`) but literally cannot name
 /// `fork`/`forkAll`/`runLLMTurn` — depth-one is structural, not a runtime
-/// guard. For the answerer (`[AskUser, Fork, ReadState, Finalize]`) this yields the leaf
+/// guard. For the answerer (`[AskUser, Fork, ReadState, Green, Finalize]`) this yields the leaf
 /// `[AskUser, Finalize]`.
 fn fork_child_decls(parent: &[tidepool_mcp::EffectDecl]) -> Vec<tidepool_mcp::EffectDecl> {
+    // `Green` is stripped alongside the fork-spawning effects: a fork child
+    // is driven by `drive_answerer_to_value`, which has no green-thread
+    // scheduler — an `async` in a child block would park on a `Green` hole
+    // nothing services. Structurally out of scope (a GHC "not in scope"
+    // error), same discipline as `Fork` itself. The PARENT's window is where
+    // `async (fork @T …)` composes.
     parent
         .iter()
-        .filter(|d| !matches!(d.type_name, "Fork" | "RunLLMTurn"))
+        .filter(|d| !matches!(d.type_name, "Fork" | "RunLLMTurn" | "Green"))
         .copied()
         .collect()
 }
@@ -656,7 +662,7 @@ pub struct Harness {
     /// row minus the fork-spawning effects (`Fork`/`RunLLMTurn`), so a child
     /// structurally cannot fork — a `forkAll` in a child block is a GHC
     /// "not in scope" error, not a runtime `ChildSuspended`. For the answerer
-    /// (`[AskUser, Fork, ReadState, Finalize]`) this is the leaf `[AskUser, Finalize]`.
+    /// (`[AskUser, Fork, ReadState, Green, Finalize]`) this is the leaf `[AskUser, Finalize]`.
     /// The child's answer still runs via `run_child` against the PARENT's
     /// session (a pure `resume expr` value crossing), so the leaf row only
     /// scopes what the child can NAME, not where its value lands.

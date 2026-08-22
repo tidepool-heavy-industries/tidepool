@@ -131,7 +131,7 @@ type Companion = Harness
 --
 -- A 'ContextRef' is declared by @RunLLMTurn@'s own decl, so it EXISTS only in
 -- a row containing that effect.  The answerer's row does not
--- (@[AskUser, Fork, ReadState, Finalize T]@), and "HarnessTypes" has to stay
+-- (@[AskUser, Fork, ReadState, Green, Finalize T]@), and "HarnessTypes" has to stay
 -- compilable there or the window types it defines become unnameable by the
 -- windows asked to finalize them.  So the seed and every pure decision over
 -- it live beside 'loop', exactly as @dev-tree@ keeps its own @NodeSeed@

@@ -1532,8 +1532,8 @@ fn agent_decls() -> Vec<tidepool_mcp::EffectDecl> {
 /// (`EffectDecl::helpers_row_polymorphic`), so this only ever makes
 /// `runLLMTurn`/`RunLLMTurn` NAMEABLE — never adds it to `type M` — and
 /// `Member RunLLMTurn effs` still fails loudly at any call site whose actual
-/// row (`decls`) doesn't carry it, e.g. the answerer's `[AskUser, Fork, ReadState,
-/// Finalize]`.
+/// row (`decls`) doesn't carry it, e.g. the answerer's `[AskUser, Fork,
+/// ReadState, Green, Finalize]`.
 ///
 /// A no-op, returning `decls` unchanged, whenever `RunLLMTurn` is already in
 /// the row (the outer harness session's `[RunLLMTurn, AskUser]`, a general
@@ -1988,7 +1988,7 @@ pub fn template_turn_for(
 
 /// The shared preamble for a DELEGATING config's turn module (PRD 21 C5):
 /// identical to [`tidepool_mcp::build_preamble`], except `M` is redefined
-/// LOCALLY to the narrow `[Delegate, AskUser, Fork, ReadState, Finalize T]`
+/// LOCALLY to the narrow `[Delegate, AskUser, Fork, ReadState, Green, Finalize T]`
 /// row `runDelegate`'s `reinterpret2` signature peels its argument back to —
 /// so a model-authored `:: M T` annotation, INSIDE the `runDelegate`-wrapped
 /// computation, resolves against the row its own code genuinely compiles at,

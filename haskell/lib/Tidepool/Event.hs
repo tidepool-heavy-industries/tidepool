@@ -135,6 +135,7 @@ module Tidepool.Event
   , projectMailbox
   , asyncDone
   , projectAsyncDone
+  , waitEvent
   , mailboxNew
   , mailboxSend
   , mailboxDrop
@@ -148,6 +149,7 @@ import Control.Monad.Freer hiding (run)
 -- (`tidepool-mcp/src/eval_prep.rs`), reproduced here now that `pumpEff` is
 -- a definition in this module rather than spliced text in that one.
 import Control.Monad.Freer.Internal (Eff (..), qApp, tsingleton)
+import Tidepool.Async.Types (Async, asyncThreadId)
 import Tidepool.Effects
   ( CommitReceipt (..)
   , EventId
@@ -330,3 +332,22 @@ asyncDone tid = Event [WatchAsync tid] (projectAsyncDone tid)
 projectAsyncDone :: Int -> RepositoryEvent -> Maybe Int
 projectAsyncDone tid (ObservedAsyncDone _ i) = if i == tid then Just i else Nothing
 projectAsyncDone _ _ = Nothing
+
+-- | The Event-algebra sibling of @Control.Concurrent.Async@'s @waitSTM@:
+-- fires once when the thread reaches a terminal state (settled OR
+-- cancelled), so a select over threads, timers, and mailboxes composes as
+-- one ordinary 'nextEvent' instead of needing a separate blocking primitive.
+--
+-- Carries the HANDLE back, never the value: the typed result stays on the
+-- heap and is one immediate 'Tidepool.Async.wait' (or
+-- 'Tidepool.Async.waitCatch', to observe a cancel) away — the same reason
+-- @poll@\/@waitCatch@ never take the value off the thread's own settle path
+-- directly.
+--
+-- Lives HERE, not in "Tidepool.Async", because it is 'asyncDone' composed
+-- with the handle — @RepoEvent@'s substrate, which a @Green@-only row (the
+-- answerer window's) does not carry. Calling it therefore requires
+-- @RepoEvent@ in the row alongside @Green@; "Tidepool.Async.Types" is the
+-- dependency-free handle vocabulary both sides share.
+waitEvent :: Async a -> Event (Async a)
+waitEvent h = fmap (const h) (asyncDone (asyncThreadId h))

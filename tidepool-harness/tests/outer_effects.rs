@@ -20,7 +20,7 @@
 //! `WorktreeMonitor::register` (a separate concern from S1-L1).
 //!
 //! PRD 20 S1-L4 wave 2 (`plans/self-iterating-harness/20-s1l4-green-threads.md`)
-//! widens the same fixture/compile with `Tidepool.Async.waitEvent` and
+//! widens the same fixture/compile with `Tidepool.Event.waitEvent` and
 //! `Tidepool.Node`'s capability-handle mailboxes — proving the driver's
 //! NON-BLOCKING `RepoEventAwait` servicing (a parent parked in a select does
 //! not stall a sibling green thread's mailbox sends) and the mailbox
@@ -226,7 +226,7 @@ async fn outer_loop_effects_round_trip_through_the_driver() {
          differing-length recursive sum), regardless of completion order, got {state:?}"
     );
 
-    // Tidepool.Async.waitEvent (PRD 20 S1-L4 wave 2) — a select over
+    // Tidepool.Event.waitEvent (PRD 20 S1-L4 wave 2) — a select over
     // {thread completion, deadline} that takes the completion branch and
     // reads the typed result with one immediate `wait`.
     assert_eq!(

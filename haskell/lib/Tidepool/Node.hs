@@ -35,7 +35,7 @@
 --
 -- The scaffold likewise sketched @folded :: NodeHandle down r -> Event r@
 -- but described it as \"'waitEvent' on the underlying thread\" —
--- 'Tidepool.Async.waitEvent' carries the HANDLE, never the value, by
+-- 'Tidepool.Event.waitEvent' carries the HANDLE, never the value, by
 -- design (the typed result stays on the heap; a closure result would not
 -- survive being forced into a bare 'Event' projection, which is pure and
 -- cannot itself perform the effectful 'Tidepool.Async.wait'). The sketch's
@@ -71,7 +71,7 @@
 --
 -- __Receive is an 'Event' source, not a second blocking primitive.__
 -- 'inbox' and 'received' both plug into "Tidepool.Event"'s algebra
--- alongside 'Tidepool.Async.waitEvent' and @after@, so
+-- alongside 'Tidepool.Event.waitEvent' and @after@, so
 -- @'nextEvent' (fmap Left inbox \<|\> fmap Right (after ms))@ is an
 -- ordinary select. There is no blocking mailbox receive anywhere in this
 -- module, and there must never be one — a second blocking primitive is
@@ -84,7 +84,7 @@
 --
 -- This module is reachable only in rows containing BOTH @Green@ (to fork
 -- the thread) and @RepoEvent@ (the mailbox substrate and the whole event
--- algebra both live there) — the same coupling 'Tidepool.Async.waitEvent'
+-- algebra both live there) — the same coupling 'Tidepool.Event.waitEvent'
 -- already has, which 'folded' below reuses directly.
 module Tidepool.Node
   ( NodeHandle
@@ -103,11 +103,11 @@ import Data.Text (Text)
 import Tidepool.Aeson.FromJSON (FromJSON, Result (..), fromJSON)
 import Tidepool.Aeson.Value (ToJSON (..), Value (..))
 import qualified Tidepool.Aeson.KeyMap as KM
-import Tidepool.Async (Async, async, waitEvent)
+import Tidepool.Async (Async, async)
 import Tidepool.Effects (M, liftEither, mailboxNew, mailboxSend)
 -- `Event`/`mailbox` are DEFINITIONS in `Tidepool.Event` (PRD 22 lane 4), not
 -- the generated `Tidepool.Effects` module.
-import Tidepool.Event (Event, mailbox)
+import Tidepool.Event (Event, mailbox, waitEvent)
 
 -- | The parent's end of a forked node: send messages DOWN to it, observe
 -- what it sends UP ('received'), and await its fold ('folded') once it
@@ -173,7 +173,7 @@ received :: FromJSON up => NodeHandle up down r -> Event up
 received h = decodeMailbox (nhUp h)
 
 -- | Fires once when the node's thread reaches a terminal state (settled or
--- cancelled), carrying the HANDLE — 'Tidepool.Async.waitEvent' on the
+-- cancelled), carrying the HANDLE — 'Tidepool.Event.waitEvent' on the
 -- underlying thread, so the typed fold result is one immediate
 -- 'Tidepool.Async.wait' away. See this module's header for why the type
 -- widens past the scaffold's @Event r@ sketch.
