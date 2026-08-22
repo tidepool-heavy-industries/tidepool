@@ -120,7 +120,7 @@ in the same change that creates it.
 | in-process monotonic id minting | `tidepool-repr`'s issuer |
 | Haskell turn-module templates (bind/expr wrappers) | `tidepool-runtime::session::turn` |
 | turn thread supervision (timeout/cancel/crash) | `tidepool-runtime`'s `TurnSupervisor` |
-| session checkout/ownership | `tidepool-harness::registry::SessionRegistry` |
+| session checkout/ownership | `tidepool_runtime::session::registry` (`SessionRegistry`/`Slot`/`Checkout`/`SingleSlot` — `tidepool-harness`'s `registry.rs` and `tidepool-repl`'s `manager.rs` are thin clients) |
 | MCP transport + resource catalog | `tidepool-mcp` shared helpers |
 | heap → `Value` decoding | `tidepool-codegen::heap_bridge` |
 | Core free-variable analysis | `tidepool-repr::free_vars` |

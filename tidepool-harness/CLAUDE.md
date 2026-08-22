@@ -11,17 +11,28 @@ Module map:
   and `NodeTree<M>`: parent/child structure + per-node lifecycle state,
   backed by the durable event log. Generic over a machine handle `M` and
   backed internally by a `SessionRegistry<M>` (see Machine lifecycle below).
-- `registry` — `SessionRegistry<M>`: the `Idle | Running{holes} |
-  Suspended{machine, holes}` slot machine (MULTI-HOLE: a suspended session
-  carries a SET of parked holes, each resumable by identity in any order) +
-  atomic checkout/restore, including a child-run checkout over parked frames
-  (`checkout_child`).
+- `registry` — this crate's instantiation of the promoted
+  `tidepool_runtime::session::registry` primitive (the ONE session-ownership
+  mechanism, see the root `CLAUDE.md` Mechanism Index) at `H = HoleId`: a
+  type-alias `SessionRegistry<M>`/`Checkout<'_, M>`/`CheckoutError` fixing the
+  hole-identity parameter, so every call site keeps its pre-promotion
+  single-type-parameter shape. The mechanism itself — the `Idle |
+  Running{holes} | Suspended{machine, holes} | Wedged{since}` slot (MULTI-HOLE:
+  a suspended session carries a SET of parked holes, each resumable by
+  identity in any order), the epoch guard, atomic checkout/restore including a
+  child-run checkout over parked frames (`checkout_child`) — lives in
+  `tidepool-runtime`; this crate never constructs `Slot::Wedged` (a wedged
+  turn here retires the whole node via `Harness::terminate_node` instead).
 - `harness` — `Harness`: the orchestrator. Owns a `NodeTree<Session>` whose
   `SessionRegistry<Session>` is the one place a resident session lives (see
-  Machine lifecycle below); a separate `convos` map holds everything ELSE
-  per-node (transcript, pending hole, framing, turn lease). Drives the turn
-  loop, hole classification, fork/fanout registration, elaborator proposal
-  confirm/reject.
+  Machine lifecycle below); a `convos` map holds everything ELSE per-node
+  (transcript, framing, turn lease); `pending_holes` — a
+  `HashMap<(SessionId, HoleId), PendingHole>` — holds every currently-parked
+  hole's domain metadata (classified routing, the raw suspended request, the
+  typed resident continuation, the compile table/asks it suspended with),
+  keyed by session+hole rather than scattered per-node fields (see Suspension
+  metadata below). Drives the turn loop, hole classification, fork/fanout
+  registration, elaborator proposal confirm/reject.
 - `engine` — the turn engine: prompt assembly, provider call, extract+compile
   the last fenced Haskell block, classify a suspension (`AskWith`/
   `AskUserWith`/`RunLLMTurnWith`/`FinalizeWith`) by its request's constructor
@@ -92,8 +103,9 @@ a reader here needs:
 `Harness` instantiates its `tree` field as `NodeTree<Session>` (`Session =
 ResidentSession<BoxedStack, CapturedOutput>`), so `NodeTree::force`'s
 caller-supplied machine IS the real resident session — the tree's internal
-`SessionRegistry<Session>` (`registry.rs`) is the ONLY place a session lives.
-There is no second, hand-rolled take/put discipline: a turn-owning method
+`SessionRegistry<Session>` (this crate's instantiation of the promoted
+`tidepool_runtime::session::registry` primitive, `registry.rs`) is the ONLY
+place a session lives. There is no second, hand-rolled take/put discipline: a turn-owning method
 checks a node's machine OUT via `Harness::checkout_run`/`checkout_resume`/
 `checkout_child` (thin wrappers over `SessionRegistry::checkout_run`/
 `checkout_resume`/`checkout_child` that resolve the node's `SessionId` via
@@ -143,21 +155,58 @@ never owns the shared session, so its retirement is realm SCOPE EXIT
 (`close_realm` on the shared machine: the realm's parked frames and any
 outstanding `ValueHandle`s are released together, sibling realms untouched) —
 the outer session outlives every answerer node it hosts. Either way the
-node's `convos` entry is removed. `cancel`, a failed fork/fanout child's
-cleanup, the `JoinError` path above, and the self-iterating harness's
-`retire_answerer` all retire a node through it — there is no second way to
-retire one. A busy node (`CheckoutError::Running`) surfaces as
-`HarnessError::TurnInFlight`, never `NoSession` — that variant is reserved
-for a node that genuinely has no session (never forced, or already
+node's `convos` entry is removed, and any `pending_holes` entries still
+belonging to it are purged (see Suspension metadata below — an orphaned
+entry would otherwise sit unconsumable forever). `cancel`, a failed
+fork/fanout child's cleanup, the `JoinError` path above, and the
+self-iterating harness's `retire_answerer` all retire a node through it —
+there is no second way to retire one. A busy node (`CheckoutError::Running`)
+surfaces as `HarnessError::TurnInFlight`, never `NoSession` — that variant is
+reserved for a node that genuinely has no session (never forced, or already
 terminated).
 
 `convos: Mutex<HashMap<NodeId, NodeConvo>>` still holds everything a session
-checkout doesn't: the transcript, the pending hole, per-node framing, the
-answer contract, the turn lease. A read that needs the session's own state
-WITHOUT checking it out (decl-plane context for a session-aware compile, the
-session's import module) goes through `SessionRegistry::peek`, which succeeds
-only when the machine is actually present in its slot (`Idle`/`Suspended` —
-not `Running`/`RunningChild`, checked out elsewhere).
+checkout doesn't and that isn't suspension-specific: the transcript, per-node
+framing, the answer contract, the turn lease. A read that needs the session's
+own state WITHOUT checking it out (decl-plane context for a session-aware
+compile, the session's import module) goes through `SessionRegistry::peek`,
+which succeeds only when the machine is actually present in its slot
+(`Idle`/`Suspended` — not `Running`/`RunningChild`, checked out elsewhere).
+
+## Suspension metadata — one map, keyed by session + hole
+
+A node's pending suspension's DOMAIN metadata — its classified routing, the
+raw suspended request `Value`, the typed `ResidentHole` continuation token,
+and the `DataConTable`/`AsksSidecar` it compiled against — lives in exactly
+one place: `Harness::pending_holes: Mutex<HashMap<(SessionId, HoleId),
+PendingHole>>`. This is deliberately SEPARATE from the registry's own hole
+SET (`Slot::Suspended{holes}`, machine-reported, the ownership truth for
+checkout purposes) — the same "authoritative set + external domain metadata"
+split the registry itself draws around `Slot`. Keyed by `(SessionId,
+HoleId)`, not bare `HoleId`: the JIT's `scont_N` continuation ids are minted
+per-machine, so two independent sessions can legitimately produce the same
+string.
+
+A node's own turn is suspended on AT MOST one hole at a time — a
+`ResidentHole` is always REPLACED, never accumulated, across a
+suspend → resume → re-suspend cycle — so `Harness::node_pending(node)` is a
+plain scan (`pending_holes.lock().values().find(|p| p.node == node)`), never
+a second node→hole index to keep in sync; session/node counts in flight are
+small (bounded by concurrent fanout width, not corpus size). `NodeState`
+stays single-hole for the same reason — the registry's multi-hole SET is
+multi because it spans MULTIPLE NODES sharing one session (concurrently-
+driven attached answerer realms, the one-session collapse), never because one
+node juggles several holes.
+
+Two methods own every transition: `Harness::publish_hole` (log
+`Event::HolePublished`, the tree's `Running → Suspended{hole}` transition,
+then insert into the map) and `Harness::consume_hole` (log
+`Event::HoleConsumed`, the reverse transition, then remove) — called from
+`finish_run`'s suspend arm and `resume_parent`'s success/re-suspend arms.
+Every other read (`pending_hole`, `pending_hole_full`,
+`pending_hole_with_request`, `pending_turn_outcome`, `take_finalized_value_*`,
+`finalize_is_closure`, `wrap_fork_answer`, `asks_modules`,
+`register_fork_child`, the `answer_*` family) goes through `node_pending`.
 
 ## Replay — turn substitution + crash-replay tree reconstruction, NOT effect replay
 

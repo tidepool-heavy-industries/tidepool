@@ -182,7 +182,7 @@ rather than one generic "unknown or expired continuation_id": no session is
 running, the session is suspended on a DIFFERENT continuation (names the pending
 one), or the session isn't suspended at all.
 
-## Internals: session lifecycle (read if modifying `state.rs`/`manager.rs`/`server.rs`, skip otherwise)
+## Internals: session lifecycle (read if modifying `manager.rs`/`server.rs`, skip otherwise)
 
 **One engine.** The repl is a single-node client of the same threadless
 suspension core `tidepool-harness` drives:
@@ -191,48 +191,84 @@ continuation stays on the machine as data, the run entry returns `Suspended`,
 and the whole `Session` goes back into its slot. No OS thread is parked per
 suspended session, and there is no repl-specific ask dispatcher.
 
-Three layers, each owning one thing:
+**`session.rs` — what a turn is**, unaffected by the registry promotion.
+`run_turn` returns a `TurnStep` (`Completed(TurnOutcome)` or
+`Suspended(AskRequest)`); `resume_turn`/`abort_turn` re-enter. Because a
+suspension outlives the call that made it, two things that used to sit on a
+native stack are plain data on the `Session`: the suspended item's
+`PendingTail` (one variant per run path — plain eval, bind, multi-bind,
+reference, bare-expr `it`) and the block loop's `BlockCursor` (results so
+far, classify verdicts, next index, the pending item's index/kind, the
+`last_*` accumulators, and the `input` payload lane). A resume re-enters the
+machine through the `resume_*` sibling the tail's materialization policy
+calls for and then runs the SAME `finish_*` the non-suspending path would
+have — completion bookkeeping exists once, not once per arm. Only a single
+item can suspend (a decl batch never runs the machine, nor does a
+`:command`), which is why the cursor has one pending-item slot rather than a
+stack.
 
-- **`session.rs` — what a turn is.** `run_turn` returns a `TurnStep`
-  (`Completed(TurnOutcome)` or `Suspended(AskRequest)`); `resume_turn` /
-  `abort_turn` re-enter. Because a suspension outlives the call that made it,
-  two things that used to sit on a native stack are plain data on the
-  `Session`: the suspended item's `PendingTail` (one variant per run path —
-  plain eval, bind, multi-bind, reference, bare-expr `it`) and the block loop's
-  `BlockCursor` (results so far, classify verdicts, next index, the pending
-  item's index/kind, the `last_*` accumulators, and the `input` payload lane).
-  A resume re-enters the machine through the `resume_*` sibling the tail's
-  materialization policy calls for and then runs the SAME `finish_*` the
-  non-suspending path would have — completion bookkeeping exists once, not
-  once per arm. Only a single item can suspend (a decl batch never runs the
-  machine, nor does a `:command`), which is why the cursor has one
-  pending-item slot rather than a stack.
-- **`manager.rs` — where the session is.** `Idle(session) | Running |
-  Suspended{session, cont_id}`, with atomic checkout/restore: lock, move the
-  session out, run with the lock RELEASED, restore under a second short lock.
-  That is `tidepool-harness`'s `SessionRegistry` discipline at N = 1 — itself
-  a port of this crate's own `state.rs` discipline. Every checkout carries an
-  epoch, so a `session_reset` mid-turn can replace the entry and the in-flight
-  turn's restore drops its session instead of clobbering the fresh one.
-- **`state.rs` — what the caller is told.** One owned `SessionState` enum
-  (Idle/Busy/Suspended/Wedged/Closing) transitioned atomically by the server at
-  the dispatch boundary; the ask suspension's caller-facing payload
-  (continuation id, expected schema, captured output, TTL clock) lives INSIDE
-  `SessionState::Suspended`, not a side map. Read its module docstring before
-  changing any of this.
+**One registry, no second lifecycle truth.** `manager.rs`'s `SessionManager`
+is a thin policy wrapper over `tidepool_runtime::session::registry::
+SingleSlot` — the promoted registry primitive (the ONE session-ownership
+mechanism, root `CLAUDE.md` Mechanism Index) restricted to "at most one
+entry, no id parameter", the same shape `tidepool-harness`'s KEYED
+`SessionRegistry` uses at N = 1. There is no second, independently-
+transitioned `SessionState` enum (`state.rs` is deleted): the registry's own
+`Slot` (`Idle | Running | Suspended{holes} | Wedged{since}`) is the ONLY
+lifecycle truth. `manager.rs` keeps only what is genuinely REPL-specific and
+outside the registry's own opinion:
 
-**Load-bearing invariant:** the `SharedState` `parking_lot::Mutex` is NEVER
-held across an `.await`. Every transition is lock → inspect/guard → move
-owned values out → unlock → then `.await`. Holding it across an await would
-deadlock the executor (`parking_lot` is not async-aware).
+- **The busy-guard policy** (`SessionManager::admit_run`): this crate's
+  documented contract refuses a fresh `session_run` while `Suspended` — a
+  POLICY choice, not the registry's own, since the shared `checkout_run`
+  itself permits a run over a suspended slot (the harness's multi-hole
+  story). Enforced by taking the checkout for real (the same atomic
+  operation the registry uses — no separate check-then-checkout race) and,
+  only if `Checkout::holes_at_checkout()` reveals the PRE-checkout slot was
+  non-`Idle`, handing the machine straight back before anyone observes it as
+  checked out.
+- **The suspension's caller-facing payload** (`captured` output buffer,
+  `expected_schema`, the reaper's `since` TTL clock) — domain metadata the
+  registry has no opinion on, held in a `Mutex<Option<Suspension>>` field
+  (this crate's session is single-hole: only one `ask` is ever pending at a
+  time) — mirrors how `tidepool-harness` keeps its own per-hole domain
+  metadata OUTSIDE the registry too (`Harness::pending_holes`).
+- **The cancel-handle and live-bindings slots** a turn/resource-read needs
+  without checking the session out.
 
-A turn runs on `tokio::task::spawn_blocking` with the `Session` moved IN and
-returned OUT (`Harness::run_checked_out`'s shape), on a big-stack thread inside
-that task for deep JIT recursion. One consequence is load-bearing: a runaway
-that outruns its abort grace holds the only copy of the session, so `Wedged`
-DROPS the whole manager entry rather than pretend it can restore a session it
-does not have. The next `session_run` auto-opens a fresh one, and
-`session_reset` — which replaces the entry wholesale — is unaffected.
+Every settlement (`restore_idle`/`restore_suspended`/`mark_wedged`/`retire`)
+takes an OWNED `CheckoutReceipt` (from `Checkout::into_parts`) rather than
+the borrowed `Checkout` itself — REPL's `drive_detached` resolves a turn on
+a DETACHED `tokio::spawn`'d task (decoupled from the original RPC future so
+a cancelled/dropped caller can't strand state at `Running`), and a borrowed
+`Checkout<'r, ..>`'s lifetime cannot cross that boundary; the receipt is
+lifetime-free (just the session id + the epoch it read at checkout time) and
+settles later against a FRESH registry borrow taken inside the spawned task.
+`tidepool-harness`'s `run_checked_out` never needs this — it holds the
+borrowed `Checkout` across an `.await` WITHIN the same async fn instead.
+
+Each settlement is guarded by `SessionManager::is_current` — mutating the
+flat `suspension`/`cancel_slot`/`bindings_slot` fields is skipped when the
+receipt's session is no longer the CURRENT one (a `session_reset` raced it):
+those fields have no epoch of their own the way the registry's `Slot` does,
+so this check is what stops a stale settlement from clobbering a fresh
+session's live state. The registry's own settlement (`SingleSlot::
+settle_suspended`/`settle_wedged`/`settle_retire`) stays correct regardless,
+on its own epoch guard.
+
+**Wedged is a real, visible registry slot, not a vanished entry.** A turn
+that never gives the session back (outran its abort grace, or the blocking
+task crashed) settles its receipt via `SessionManager::mark_wedged`, which
+writes `Slot::Wedged{since}` — a TERMINAL placeholder that stays in the
+registry (refusing every checkout with `CheckoutError::Terminal`) until the
+reaper's TTL sweep or an explicit `session_reset` reclaims it. This is
+stronger than the pre-promotion design: a bare `retire()` used to remove the
+whole entry outright, so only the ORIGINAL caller's own already-cloned
+`SharedState` handle ever showed "Wedged" — a later caller's fresh read saw
+nothing and silently auto-opened a new session. `busy_label()` now genuinely
+persists the reason for every caller, and the documented `wedged_ttl` reaper
+sweep is reachable via the real production path, not only a test that
+manufactures the state directly.
 
 **Timeout/cancel is thread-agnostic and unchanged.** `PauseGate::request_abort`
 fires at the next effect dispatch and the JIT `CancelHandle` at the next
