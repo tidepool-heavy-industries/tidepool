@@ -34,6 +34,15 @@ impl EnvGuard {
         env::set_var(key, value);
         Self { key, old_value }
     }
+
+    /// Removes `key` for the guard's lifetime, restoring its prior value (if
+    /// any) on drop — the complement of `set`, for a test that must exercise
+    /// the "not set at all" default path rather than an explicit override.
+    fn unset(key: &'static str) -> Self {
+        let old_value = env::var(key).ok();
+        env::remove_var(key);
+        Self { key, old_value }
+    }
 }
 
 impl Drop for EnvGuard {
@@ -98,5 +107,75 @@ fn build_products_dir_cold_warm_identical_output() {
     assert_eq!(
         cold.warnings.has_io, warm.warnings.has_io,
         "a warm build-products dir must not change the has_io warning"
+    );
+}
+
+#[test]
+#[serial]
+fn build_products_dir_is_on_by_default() {
+    // Unlike the test above, this one does NOT set
+    // `TIDEPOOL_BUILD_PRODUCTS_DIR` at all — it exercises the default
+    // (no-override) path through `compile_invocation`, isolated via a
+    // private `TIDEPOOL_COMPILE_CACHE_DIR` (the default build-products
+    // location is fingerprint-keyed under it) so this run's directory is
+    // never the ambient shared one.
+    let _bp_unset_guard = EnvGuard::unset("TIDEPOOL_BUILD_PRODUCTS_DIR");
+    let compile_cache = TempDir::new().unwrap();
+    let _compile_cache_guard =
+        EnvGuard::set("TIDEPOOL_COMPILE_CACHE_DIR", compile_cache.path());
+
+    let cold_cache = TempDir::new().unwrap();
+    let cold = {
+        let _cache_guard = EnvGuard::set("XDG_CACHE_HOME", cold_cache.path());
+        EvalHarness::new()
+            .with_stdlib()
+            .compile(SRC, "result")
+            .expect("cold compile failed")
+    };
+
+    // The default build-products dir must have been created and populated
+    // by the compile above — proof the default-on path actually engaged,
+    // not merely that its absence happened not to matter.
+    let bp_root = compile_cache.path().join("build-products");
+    assert!(
+        bp_root.is_dir(),
+        "compile_invocation must create a build-products dir by default \
+         (no $TIDEPOOL_BUILD_PRODUCTS_DIR set) under $TIDEPOOL_COMPILE_CACHE_DIR"
+    );
+    let fingerprint_dirs: Vec<_> = std::fs::read_dir(&bp_root)
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .collect();
+    assert_eq!(
+        fingerprint_dirs.len(),
+        1,
+        "expected exactly one fingerprint-keyed subdirectory"
+    );
+    let has_written_iface = std::fs::read_dir(fingerprint_dirs[0].path())
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .any(|e| e.path().extension().is_some_and(|ext| ext == "hi"));
+    assert!(
+        has_written_iface,
+        "the default build-products dir must contain written .hi interfaces \
+         after a compile"
+    );
+
+    let warm_cache = TempDir::new().unwrap();
+    let warm = {
+        let _cache_guard = EnvGuard::set("XDG_CACHE_HOME", warm_cache.path());
+        EvalHarness::new()
+            .with_stdlib()
+            .compile(SRC, "result")
+            .expect("warm compile failed")
+    };
+
+    assert_eq!(
+        cold.expr, warm.expr,
+        "the default (on-by-default) build-products dir must not change the compiled Core"
+    );
+    assert_eq!(
+        cold.table, warm.table,
+        "the default (on-by-default) build-products dir must not change the DataConTable"
     );
 }

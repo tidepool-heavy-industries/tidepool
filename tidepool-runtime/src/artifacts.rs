@@ -232,21 +232,44 @@ pub(crate) fn compile_invocation(
 
     // Persistent build-products dir (module-granular GHC recompilation
     // avoidance across spawns — see `crate::paths::build_products_dir`'s
-    // doc). NOT active by default: `$TIDEPOOL_BUILD_PRODUCTS_DIR` presence is
-    // BOTH the location override and the enable switch, deliberately —
-    // enabling it changes the compiled BYTES for any turn/eval whose Core
-    // contains a nested (non-top-level) binder, which is nearly all of them
-    // (spike-verified, 2026-08-20: cold-vs-cold is byte-identical, but a
-    // cold-then-warm pair is NOT — GHC's session-wide Unique-allocation
-    // trajectory shifts when `load'` skips a variable number of modules, and
-    // `Translate.hs`'s `localVarId` bakes the raw Unique into every nested
-    // Id's VarId. See plans/turn-latency-state-injection.md's build-products-
-    // dir section for the full finding). Safe to enable once that gap is
-    // closed; until then this stays an opt-in, not a default.
-    if let Some(bp_fingerprint) = std::env::var_os("TIDEPOOL_BUILD_PRODUCTS_DIR")
-        .is_some()
-        .then(|| crate::toolchain::extract_fingerprint(Path::new(cmd.launcher().program())))
+    // doc). ON BY DEFAULT: turning this on used to change the compiled BYTES
+    // for any turn/eval whose Core contains a nested (non-top-level) binder
+    // (spike-verified, 2026-08-20 — cold-vs-cold was byte-identical, but a
+    // cold-then-warm pair was NOT, because GHC's session-wide Unique-
+    // allocation trajectory shifts when `load'` skips a variable number of
+    // modules, and `Translate.hs`'s `localVarId` baked that raw Unique into
+    // every nested Id's VarId). That gap is closed —
+    // `Tidepool.Translate.stabilizeLocalUniques` (nested Ids) together with
+    // `Tidepool.GhcPipeline.externalizeInternalTops`'s ordinal disambiguator
+    // (internalized top-level floats) make a compile's VarIds a pure
+    // function of Core shape, never of session Unique-allocation history —
+    // see `tidepool-runtime/tests/build_products_dir_differential.rs`, the
+    // byte-identical-cold-vs-warm acceptance gate for this mechanism, and
+    // plans/turn-latency-state-injection.md for the full history.
+    //
+    // `crate::paths::build_products_dir` is keyed by the resolved extract
+    // binary's own content fingerprint, so a rebuilt/updated extract gets a
+    // FRESH directory — a stale dir from an older (pre-fix, or otherwise
+    // different) extract binary can never poison a compile; staleness is
+    // structurally impossible rather than mtime-validated. Known,
+    // accepted characteristic (not newly introduced by this default-on
+    // flip): the directory is SHARED across every concurrent spawn using the
+    // same extract binary, so two truly concurrent compiles of DIFFERENT
+    // source under the same module name (e.g. the turn lane's fixed
+    // `Expr`/eval lane's fixed `Input`) race on the same `.hi`/`.o` path;
+    // GHC's own interface content-hash check means the losing race forces a
+    // recompile rather than silently reusing mismatched output, so the
+    // failure mode is wasted work, not wrong output — see
+    // plans/turn-latency-state-injection.md's daemon-direction section,
+    // where a single resident process (not many concurrent spawns) is the
+    // long-term answer.
+    //
+    // `$TIDEPOOL_BUILD_PRODUCTS_DIR` still overrides the LOCATION (an
+    // isolated dir for a test that needs a genuinely cold measurement,
+    // mirroring `compile_cache_dir`'s own override) — it is no longer also
+    // the enable switch.
     {
+        let bp_fingerprint = crate::toolchain::extract_fingerprint(Path::new(cmd.launcher().program()));
         let bp_dir = crate::paths::build_products_dir(&bp_fingerprint);
         if std::fs::create_dir_all(&bp_dir).is_ok() {
             cmd.build_products_dir(&bp_dir);
