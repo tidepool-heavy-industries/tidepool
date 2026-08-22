@@ -20,7 +20,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use super::{header, module_name as effect_module_name, GeneratedFile};
+use super::{header, module_name as effect_module_name, snake_case, GeneratedFile};
 use crate::schema::{AdapterKind, Effect, TypeShape};
 
 /// The module name this effect's adapters live under.
@@ -73,25 +73,6 @@ impl Direction {
             Direction::FromWire => "from_wire",
         }
     }
-}
-
-/// snake_case of a Haskell type name (`WorktreeId` -> `worktree_id`) — the
-/// same rule [`super::module_name`] applies to an effect name, generalized to
-/// any `TypeDef::name`. This is both the function-name prefix and the
-/// parameter name, so naming is mechanical rather than a per-type mnemonic.
-fn snake_case(name: &str) -> String {
-    let mut out = String::new();
-    for (i, c) in name.chars().enumerate() {
-        if c.is_uppercase() {
-            if i != 0 {
-                out.push('_');
-            }
-            out.extend(c.to_lowercase());
-        } else {
-            out.push(c);
-        }
-    }
-    out
 }
 
 /// Record that the short name `short` is imported from `owner`.

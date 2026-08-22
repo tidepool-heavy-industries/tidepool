@@ -93,11 +93,15 @@ pub fn all_files(effects: &[Effect]) -> Vec<GeneratedFile> {
     out
 }
 
-/// The snake_case module name an effect's generated files live under.
+/// snake_case of an UpperCamelCase name (`WorktreeId` -> `worktree_id`).
+///
+/// The one conversion for every generated Rust identifier that must not
+/// cross a wire boundary: effect module names, generated type/parameter
+/// names, and dispatch-arm binders all share this rule.
 #[must_use]
-pub fn module_name(e: &Effect) -> String {
+pub fn snake_case(name: &str) -> String {
     let mut out = String::new();
-    for (i, c) in e.name.chars().enumerate() {
+    for (i, c) in name.chars().enumerate() {
         if c.is_uppercase() {
             if i != 0 {
                 out.push('_');
@@ -108,6 +112,12 @@ pub fn module_name(e: &Effect) -> String {
         }
     }
     out
+}
+
+/// The snake_case module name an effect's generated files live under.
+#[must_use]
+pub fn module_name(e: &Effect) -> String {
+    snake_case(e.name)
 }
 
 /// The shared `mod`-index body for a directory of generated effect modules.

@@ -13,7 +13,7 @@
 //! plain verb's method takes `cx` and returns `Result<Response, EffectError>`,
 //! and the arm forwards it.
 
-use super::{header, index_body, module_name, GeneratedFile};
+use super::{header, index_body, module_name, snake_case, GeneratedFile};
 use crate::schema::Effect;
 
 /// Where this effect's generated glue lives, relative to the workspace root.
@@ -204,22 +204,5 @@ fn body(e: &Effect) -> String {
     }
     out.push_str("        }\n");
     out.push_str("    }\n}\n");
-    out
-}
-
-/// `treeId` -> `tree_id`. Only ever applied to a dispatch-arm binder, never to
-/// a name that crosses a boundary.
-fn snake_case(name: &str) -> String {
-    let mut out = String::new();
-    for (i, c) in name.chars().enumerate() {
-        if c.is_uppercase() {
-            if i != 0 {
-                out.push('_');
-            }
-            out.extend(c.to_lowercase());
-        } else {
-            out.push(c);
-        }
-    }
     out
 }
