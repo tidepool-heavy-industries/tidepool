@@ -46,10 +46,13 @@ else
   echo "No capture-time skips."
 fi
 
-# Drop GHC-lifted local binders (`go_u6341068275337658369.cbor`): they are inlined
-# into the bindings that use them, the runner filters them, and they are just
-# repo noise. The kept program fixtures are self-contained (closed Core).
-find "$OUT" -name '*_u[0-9]*.cbor' -delete
+# Drop GHC-lifted local binders (externalizeInternalTops names them
+# `go_t253.cbor` — an ordinal disambiguator as of the stabilizeLocalUniques
+# lane; older extracts used a raw-Unique suffix, `go_u6341068275337658369.cbor`,
+# matched here too in case of a stale/mixed toolchain): they are inlined into
+# the bindings that use them, the runner filters them, and they are just repo
+# noise. The kept program fixtures are self-contained (closed Core).
+find "$OUT" -regextype posix-extended -regex '.*_(u[0-9]+|t[0-9]+)\.cbor' -delete
 
 N="$(find "$OUT" -name '*.cbor' ! -name meta.cbor | wc -l | tr -d ' ')"
 SKIPS="$(grep -ci "SKIPPED" "$LOG" || true)"

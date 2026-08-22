@@ -137,13 +137,15 @@ cd haskell && cabal run tidepool-extract-bin -- test/Suite.hs --all-closed \
 # --output-dir: default derives from module basename → test/Suite_cbor (wrong dir)
 ```
 
-> Do NOT prune `*_u<n>.cbor` lifted-local fixtures here the way
-> `regen-corpus.sh` does for `test/corpus_cbor`. This suite replays the test
-> suite's own bindings, where lifted locals compare cleanly and carry ~75 of
-> the differential's compared fixtures; dropping them takes `compared` under
-> `haskell_suite_differential`'s `COMPARED_FLOOR`. The corpus harness drops
-> them because it replays real modules, where a lifted local runs outside the
-> call site that gives it meaning.
+> Do NOT prune `*_t<n>.cbor` lifted-local fixtures here the way
+> `regen-corpus.sh` does for `test/corpus_cbor` (older extracts named these
+> `*_u<n>.cbor` — a raw-Unique suffix; `Tidepool.GhcPipeline.externalizeInternalTops`
+> now mints a stable per-module ordinal instead, see its doc comment). This
+> suite replays the test suite's own bindings, where lifted locals compare
+> cleanly and carry ~75 of the differential's compared fixtures; dropping them
+> takes `compared` under `haskell_suite_differential`'s `COMPARED_FLOOR`. The
+> corpus harness drops them because it replays real modules, where a lifted
+> local runs outside the call site that gives it meaning.
 
 > `*.cbor` fixtures are gitignored — new ones must be `git add -f`'d or a
 > `suite_*!` test won't compile on a fresh checkout.
