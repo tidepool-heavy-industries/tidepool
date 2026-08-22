@@ -121,8 +121,7 @@ fn build_products_dir_is_on_by_default() {
     // never the ambient shared one.
     let _bp_unset_guard = EnvGuard::unset("TIDEPOOL_BUILD_PRODUCTS_DIR");
     let compile_cache = TempDir::new().unwrap();
-    let _compile_cache_guard =
-        EnvGuard::set("TIDEPOOL_COMPILE_CACHE_DIR", compile_cache.path());
+    let _compile_cache_guard = EnvGuard::set("TIDEPOOL_COMPILE_CACHE_DIR", compile_cache.path());
 
     let cold_cache = TempDir::new().unwrap();
     let cold = {

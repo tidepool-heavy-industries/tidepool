@@ -269,7 +269,8 @@ pub(crate) fn compile_invocation(
     // mirroring `compile_cache_dir`'s own override) — it is no longer also
     // the enable switch.
     {
-        let bp_fingerprint = crate::toolchain::extract_fingerprint(Path::new(cmd.launcher().program()));
+        let bp_fingerprint =
+            crate::toolchain::extract_fingerprint(Path::new(cmd.launcher().program()));
         let bp_dir = crate::paths::build_products_dir(&bp_fingerprint);
         if std::fs::create_dir_all(&bp_dir).is_ok() {
             cmd.build_products_dir(&bp_dir);
