@@ -2125,23 +2125,40 @@ impl Harness {
                     })
                     .await?;
                 self.flush_effects(node)?;
-                match res {
-                    Ok(gen) => {
-                        last_outcome = Some(engine::TurnOutcome::Completed {
-                            rendered: format!("declared (gen {})", gen.0),
-                        });
-                    }
+                let rendered = match res {
+                    Ok(gen) => format!("declared (gen {})", gen.0),
                     // Same COMPILE-class treatment `run_block`'s single-item
                     // decl path gives a failed decl validation — the
                     // corrective-retry loop feeds it back as another round.
                     Err(e) => return Err(HarnessError::Compile(e.to_string())),
-                }
+                };
                 if index == items.len() {
-                    // The block ended on a declaration — every declaration
-                    // in it, including this trailing run, is now COMMITTED
-                    // to the node's decl plane (the `define_scoped_in` call
-                    // above already ran), so a later round/turn in this
-                    // same window sees it. The round itself still did not
+                    if start == 0 {
+                        // The WHOLE block was declarations — no earlier item
+                        // in THIS round ran anything else. This is exactly a
+                        // single-item decl turn's shape (`run_block`'s
+                        // singleton `TurnResult::Decl` arm), just batched
+                        // into one `define_scoped_in` generation: it commits
+                        // and completes directly, same as that arm does
+                        // (`node_done`, no corrective retry). Requiring a
+                        // trailing answer expression from a turn that never
+                        // claimed to answer anything desynced the
+                        // corrective-retry loop's reply consumption —
+                        // exactly the shape `companion_scope_trees.rs`'s
+                        // `locked_decision_4_holds_through_the_real_compile_path`
+                        // and `acceptance_cross_turn.rs`'s
+                        // `multi_block_reply_runs_in_order_and_fails_with_resume_point`
+                        // pin (a scripted declare-only reply must not eat an
+                        // extra reply meant for the next turn).
+                        self.tree.node_done(node, rendered.clone())?;
+                        return Ok(engine::TurnOutcome::Completed { rendered });
+                    }
+                    // A decl run TRAILING after earlier content in this same
+                    // block (`start > 0`) — every declaration in it,
+                    // including this trailing run, is now COMMITTED to the
+                    // node's decl plane (the `define_scoped_in` call above
+                    // already ran), so a later round/turn in this same
+                    // window sees it. The round itself still did not
                     // ADVANCE (no bind/expr ran as the block's terminal
                     // item, so nothing ever calls `finish_run(terminal:
                     // true)`), which is a MODEL-AUTHORED failure, not a
@@ -2165,6 +2182,7 @@ impl Harness {
                         .to_string();
                     return Err(HarnessError::Compile(msg));
                 }
+                last_outcome = Some(engine::TurnOutcome::Completed { rendered });
                 continue;
             }
 
