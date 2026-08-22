@@ -7,6 +7,54 @@
 //! and not on the documented KNOWN allow-list is a newly-surfaced real-Core bug.
 //!
 //! Regenerate fixtures with `haskell/regen-corpus.sh` (native-bignum binary).
+//!
+//! # GHC oracle sidecar — the GATING referee
+//!
+//! `tidepool-eval` (the tree-walking interpreter) drifted twice in one month
+//! — both times eval was wrong and the JIT was right. Trusting eval as the
+//! sole referee for whether the JIT is "correct" was therefore backwards: a
+//! real GHC execution of the same source is the one referee that cannot
+//! itself be the thing under test. `haskell/regen-corpus.sh` now also runs
+//! `haskell/test/corpus/GenOracle.hs` (a plain-GHC executable that imports
+//! `Corpus` directly, unrelated to the extractor pipeline) and checks in its
+//! output as `haskell/test/corpus_cbor/oracle.json` — one JSON object
+//! mapping every corpus binding's name to `{"mode","kind","value"}`.
+//!
+//! **`mode`** is always `"NF"` in the current corpus: every binding is a
+//! fully-evaluable scalar or list of scalars with no field that must stay
+//! unforced surviving INTO the compared value (a case like `lazyConField`
+//! hides an unforced bottom inside a tuple that is never part of the
+//! returned `Int`, so forcing the `Int` result to normal form never touches
+//! it). This is the same depth `JitEffectMachine::run_pure`'s heap bridge
+//! already forces to, so `"NF"` is the mode that matches today's actual
+//! comparison — not an invented one. The schema reserves `"WHNF"` (observe
+//! only as far as the outer constructor — needed if a future binding must
+//! assert an unused field stays unforced) and `"Display"` (compare GHC's
+//! exact `Show` text, for formatting behavior no structural comparison
+//! captures) for if/when a corpus entry actually needs that shallower or
+//! textual observation; none does today.
+//!
+//! **`kind`** tells the Rust side which GHC boxed representation to expect
+//! and how to decode the JIT's `Value` for comparison (`canonicalize`,
+//! below): `int` (any fixed-width Integral: Int/Word/Int8..64/Word8..64,
+//! boxed as `I#`/`W#`/`I8#`/…), `integer` (arbitrary-precision `Integer`,
+//! boxed as `IS`/`IP`/`IN`), `double`, `float` (widened to `Double` for
+//! comparison — the widening is exact, so no precision is lost), `bool`,
+//! `char`, `string` (`[Char]`, both the literal `LitString` and a real
+//! cons-of-`C#` spine), `list_int` (`[Int]`). Every field type appearing in
+//! `Corpus.hs` today; a new binding with a genuinely new result shape needs
+//! a new kind on both sides (`GenOracle.hs`'s `entryXxx` family and this
+//! file's `canonicalize`).
+//!
+//! **Gating policy:** JIT vs GHC-sidecar is the gate (`assert_eq` on the
+//! canonicalized values) — a mismatch fails the test. Eval's result is
+//! still computed (`check_jit_vs_eval_captured`, unchanged) and compared
+//! against both, but purely OBSERVATIONALLY: a JIT/eval divergence is
+//! logged, never asserted. This is the "shrink eval to its niche" migration
+//! — eval remains fully load-bearing for the synthetic-IR proptests,
+//! optimizer-preservation checks, and effect-dispatch transcripts (none of
+//! which this file touches), but for the real-Core corpus specifically, GHC
+//! itself is the referee now.
 use std::path::PathBuf;
 use tidepool_codegen::host_fns::RuntimeError;
 use tidepool_codegen::jit_machine::JitError;
