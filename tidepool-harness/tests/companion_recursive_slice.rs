@@ -1190,14 +1190,25 @@ async fn companion_tree_recurses_folds_and_contains_its_node_ids() {
     // pre-GAP-1 fork/fanout child was) produces none at all. Its presence per
     // coalgebra window IS the forked-prefix proof; nothing here reads prompt
     // text for it.
+    //
+    // Since the fold-lineage rewrite, a NON-mechanical fold window is ALSO a
+    // real branch off the node's own ref (never a fresh fork), so it ALSO
+    // gets one — `root/1-alpha`'s own fold window opens one even though it
+    // then starves before finalizing (row 4b below): the receipt is written
+    // at the branch's FIRST turn, independent of whether it ever finalizes.
+    // A mechanical leaf's fold never opens a window at all, so it
+    // contributes none — the expected total is therefore every DISCOVER
+    // window plus every FOLD window that actually ran, read back off the
+    // harness's own window record rather than hand-counted.
     let discovered = run.paths_in(Phase::Discover);
+    let folded = run.paths_in(Phase::Fold);
     let branches = run.branch_invocations();
     assert_eq!(
         branches.len(),
-        discovered.len(),
-        "every coalgebra window must be a REAL fork off a frozen prefix — one \
-         BranchInvocation each, and none for the algebra's own (empty-root) fork \
-         windows. Discovered: {discovered:?}"
+        discovered.len() + folded.len(),
+        "every coalgebra window, and every non-mechanical fold window (both are \
+         branches off a frozen prefix now), must produce one BranchInvocation each. \
+         Discovered: {discovered:?}, folded: {folded:?}"
     );
 
     let alpha_node = run.window_node("root/1-alpha", Phase::Discover);
@@ -2079,10 +2090,19 @@ async fn companion_fold_is_a_branch_and_interleaves_with_cousin_discovery() {
         run.tree()
     );
     assert_eq!(run.counter("runNodes"), 5);
+    // root, alpha and beta each have kids, so none is a mechanical leaf: each
+    // spends TWO windows (coalgebra + fold). The two grandchildren are
+    // childless non-root leaves that fold mechanically, spending only their
+    // OWN coalgebra — one window each. (Forgetting the grandchildren's own
+    // windows here is exactly the arithmetic slip this derivation now rules
+    // out.)
+    let non_mechanical_windows = 3 * 2; // root, alpha, beta: coalgebra + fold
+    let mechanical_leaf_windows = 2; // alpha's and beta's own grandchild: coalgebra only
     assert_eq!(
         run.counter("runWindows"),
-        6,
+        non_mechanical_windows + mechanical_leaf_windows,
         "root, alpha and beta each spend two windows (coalgebra + fold); the two grandchildren \
-         are childless non-root leaves that fold mechanically, spending only their coalgebra"
+         are childless non-root leaves that fold mechanically, spending one window (their own \
+         coalgebra) each"
     );
 }
