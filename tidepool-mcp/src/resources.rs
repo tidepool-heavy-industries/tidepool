@@ -222,18 +222,18 @@ fn guide_md(ctx: &ResourceCtx) -> String {
         "into a typed record and the whole payload is available by field:\n",
         "```haskell\n",
         "data Cfg = Cfg { target :: Text, limit :: Int } deriving (Generic, FromJSON)\n",
-        "do { Cfg{..} <- liftEither (resultToEither (fromJSON input)); Right hits <- grepGlob target \"**/*.rs\"; pure (stake limit hits) }\n",
+        "do { Cfg{..} <- liftEither (resultToEither (fromJSON input)); Right hits <- grepGlob target \"**/*.rs\"; pure (take limit hits) }\n",
         "```\n",
         "For a single field, optics read straight off the `Value`: `input ^? key \"target\" . _String`. ",
         "For a whole-file write, put the body on `input`: `writeFile \".tidepool/lib/Mod.hs\" (input ^. _String)`.\n\n",
-        "## Polymorphic Prelude ops\n",
-        "`len` (length of Text or [a]), `isNull` (emptiness of either), `stake`/`sdrop` ",
-        "(take/drop on either), `intercalate` joins Text (alias `joinText`), `tReverse` reverses Text. ",
-        "List-only: `length`, `take`, `drop`, `null`. tidepool://capabilities indexes the full shadow surface.\n\n",
+        "## Container ops\n",
+        "`length`, `take`, `drop`, `null` on lists; the qualified `T.length`, `T.take`, `T.drop`, `T.null` ",
+        "on Text. `intercalate` joins Text, `tReverse` reverses Text. ",
+        "tidepool://capabilities indexes the full shadow surface.\n\n",
         "## Examples (expression-first)\n",
         "```haskell\n",
         "glob \"**/*.rs\" >>= liftEither >>= mapM (\\p -> (,) p <$> getFileSize p)\n",
-        "do { Right src <- readFile \"CLAUDE.md\"; pure (stake 5 (lines src)) }  -- explicit do when sequencing\n",
+        "do { Right src <- readFile \"CLAUDE.md\"; pure (take 5 (lines src)) }  -- explicit do when sequencing\n",
         "```\n\n",
         "Per-effect helper signatures live in `tidepool://effect/{name}`; library verbs in ",
         "`tidepool://vocab`; structured ask/llm in `tidepool://schema`; the Prelude shadow surface ",
@@ -739,7 +739,7 @@ mod tests {
             "the explicit-do example must bind readFile's Right:\n{md}"
         );
         assert!(
-            !md.contains("glob \"**/*.rs\" >>= mapM") && !md.contains("<&> stake limit"),
+            !md.contains("glob \"**/*.rs\" >>= mapM") && !md.contains("<&> take limit"),
             "no guide snippet may map a pure function over an unwrapped Either:\n{md}"
         );
     }

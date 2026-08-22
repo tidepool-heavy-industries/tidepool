@@ -33,9 +33,6 @@
 //! exactly the right trailing newline in `applyFilePatch`'s output, in both
 //! directions (gaining and losing the trailing newline).
 //!
-//! M6 — `Slice [a]`'s `stake`/`sdrop` now clamp `n <= 0` like base
-//! `take`/`drop` and the `Slice Text` instance (`stake (-1) xs == []`).
-//!
 //! M7 — `TF.camelToSnake` no longer emits a leading underscore for
 //! PascalCase input (`"HelloWorld"` -> `"hello_world"`, matching its own
 //! doctest).
@@ -43,8 +40,8 @@
 //! M8 — `isAlpha`/`isUpper`/`isSpace` etc. now match `Data.Char`'s Unicode
 //! semantics (delegate to `Data.Char`) instead of an ASCII-only range check.
 //!
-//! M9 — `center`/`TF.centerWith` now pad the ODD leftover character on the
-//! LEFT (matching their own haddock), not the right.
+//! M9 — `TF.centerWith` now pads the ODD leftover character on the
+//! LEFT (matching its own haddock), not the right.
 //!
 //! LOW — `parseDoubleM` accepts e-notation and accumulates digits as a
 //! `Double` (no `Int` overflow past ~19 digits); `nubBy`'s predicate
@@ -232,10 +229,10 @@ fn works_numeric_json_and_parsing_family() {
                 ((case parseDoubleM "1e-2" of { Just dB -> dB; Nothing -> -1 }) == 0.01)
             , check "parsedoublem_roundtrips_extreme.e19"
                 -- LOW: digits accumulate as a Double (no Int overflow past
-                -- ~19 digits) — round-trips showT at extreme magnitudes.
-                (case parseDoubleM (showT (1.0e19 :: Double)) of { Just dC -> dC == (1.0e19 :: Double); Nothing -> False })
+                -- ~19 digits) — round-trips show at extreme magnitudes.
+                (case parseDoubleM (show (1.0e19 :: Double)) of { Just dC -> dC == (1.0e19 :: Double); Nothing -> False })
             , check "parsedoublem_roundtrips_extreme.eneg10"
-                (case parseDoubleM (showT (1.5e-10 :: Double)) of { Just dD -> dD == (1.5e-10 :: Double); Nothing -> False })
+                (case parseDoubleM (show (1.5e-10 :: Double)) of { Just dD -> dD == (1.5e-10 :: Double); Nothing -> False })
             , check "addutctime_rounds_ms_conversion"
                 -- LOW: addUTCTime rounds (not truncates) the
                 -- seconds->milliseconds conversion, so diffUTCTime
@@ -308,28 +305,19 @@ fn works_patch_apply_marker_new_side_gains_trailing_newline() {
 }
 
 // =========================================================================
-// M6 (Slice clamping) + M7 (camelToSnake) + M8 (Unicode char classes) + M9
-// (center padding) + LOW (nubBy argument order, Tab.parseCsv quoting).
-// VALUE-class throughout.
+// M7 (camelToSnake) + M8 (Unicode char classes) + M9 (TF.centerWith padding)
+// + LOW (nubBy argument order, Tab.parseCsv quoting). VALUE-class throughout.
 // =========================================================================
 
-/// Absorbed: works_slice_list_stake_negative_clamps_to_empty,
-/// works_slice_list_sdrop_negative_clamps_to_whole,
-/// works_cameltosnake_no_leading_underscore, works_isalpha_unicode_letter,
-/// works_isspace_unicode_nbsp, works_center_pads_odd_char_left,
-/// works_textformat_centerwith_agrees, works_nubby_argument_order_matches_base,
+/// Absorbed: works_cameltosnake_no_leading_underscore, works_isalpha_unicode_letter,
+/// works_isspace_unicode_nbsp, works_textformat_centerwith_pads_odd_char_left,
+/// works_nubby_argument_order_matches_base,
 /// works_parsecsv_quoted_field_with_embedded_comma.
 #[test]
 fn works_text_slice_and_csv_family() {
     works(
         r#"pure (concat
-            [ check "slice_list_stake_negative_clamps_to_empty"
-                -- M6: Slice [a]'s stake/sdrop now clamp n<=0 like base
-                -- take/drop and the Slice Text instance.
-                (stake (-1) [1,2,3::Int] == [])
-            , check "slice_list_sdrop_negative_clamps_to_whole"
-                (sdrop (-1) [1,2,3::Int] == [1,2,3])
-            , check "cameltosnake_no_leading_underscore"
+            [ check "cameltosnake_no_leading_underscore"
                 -- M7: TF.camelToSnake no longer emits a leading underscore
                 -- for PascalCase input.
                 (TF.camelToSnake "HelloWorld" == "hello_world")
@@ -343,11 +331,9 @@ fn works_text_slice_and_csv_family() {
                 -- M8: U+00A0 (NO-BREAK SPACE) is whitespace under Unicode
                 -- (category Zs) but outside the old ASCII whitespace set.
                 (isSpace '\160' == True)
-            , check "center_pads_odd_char_left"
-                -- M9: center/TF.centerWith pad the ODD leftover character on
-                -- the LEFT (matching their own haddock), not the right.
-                (center 10 '-' "hello" == "---hello--")
-            , check "textformat_centerwith_agrees"
+            , check "textformat_centerwith_pads_odd_char_left"
+                -- M9: TF.centerWith pads the ODD leftover character on the
+                -- LEFT (matching its own haddock), not the right.
                 (TF.centerWith 10 '-' "hello" == "---hello--")
             , check "nubby_argument_order_matches_base"
                 -- LOW: nubBy's predicate argument order now matches base

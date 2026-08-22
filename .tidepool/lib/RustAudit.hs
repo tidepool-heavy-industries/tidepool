@@ -99,9 +99,9 @@ triageReport = do
   let prod  = filter (not . isTestSite) sites
       needs = filter (needsJudgment . bucket) prod
   pure (object
-    [ "prod"      .= len prod
+    [ "prod"      .= length prod
     , "buckets"   .= rankDesc (tally (map bucket prod))
-    , "needs_llm" .= len needs
+    , "needs_llm" .= length needs
     , "sample"    .= take 12 (map (\s -> object
                         ["f" .= sFile s, "l" .= sLine s, "b" .= bucket s, "t" .= sText s]) needs)
     ])
@@ -127,8 +127,8 @@ clusterReport = do
       unknowns = filter ((== "unknown") . bucket) prod
       byOp     = rankDesc (tally (map opKey unknowns))
   pure (object
-    [ "unknowns"         .= len unknowns
-    , "distinct_ops"     .= len byOp
+    [ "unknowns"         .= length unknowns
+    , "distinct_ops"     .= length byOp
     , "covered_by_top10" .= sum (map snd (take 10 byOp))
     , "top_ops"          .= take 20 byOp
     ])
@@ -139,8 +139,8 @@ panicReport = do
   sites <- panicSites
   let prod = filter (not . isTestSite) sites
   pure (object
-    [ "total"    .= len sites
-    , "prod"     .= len prod
+    [ "total"    .= length sites
+    , "prod"     .= length prod
     , "by_kind"  .= rankDesc (tally (map sKind prod))
     , "by_crate" .= rankDesc (tally (map (crateOf . sFile) prod))
     , "hotspots" .= take 15 (rankDesc (tally (map sFile prod)))

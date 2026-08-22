@@ -785,7 +785,7 @@ pub(crate) fn build_eval_tool_description(effects: &[EffectDecl]) -> String {
         "the eval reads it via the `input` binding, so `code` stays a short verb. ",
         "Decode it into a typed record and the payload is available by field:\n",
         "  data Cfg = Cfg { target :: Text, limit :: Int } deriving (Generic, FromJSON)\n",
-        "  do { Cfg{..} <- liftEither (resultToEither (fromJSON input)); Right hits <- grepGlob target \"**/*.rs\"; pure (stake limit hits) }\n",
+        "  do { Cfg{..} <- liftEither (resultToEither (fromJSON input)); Right hits <- grepGlob target \"**/*.rs\"; pure (take limit hits) }\n",
         "For a single field, optics read straight off the `Value`: ",
         "`input ^? key \"target\" . _String`; for a whole-file write, put the body on ",
         "`input`: `writeFile \".tidepool/lib/Mod.hs\" (input ^. _String)`.",

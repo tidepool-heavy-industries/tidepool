@@ -23,8 +23,9 @@
 //! components exactly swapped (`(xs, [])` instead of base's `([], xs)`).
 //!
 //! M5/M10 are not JIT-eval-reachable (M5) or don't need a fresh test harness
-//! shape (M10 shares `works_len_class` coverage) — see the dedicated notes
-//! at the bottom of this file for how each is actually pinned.
+//! shape (M10 shares `works_length_long_list_no_stack_death` coverage) — see
+//! the dedicated notes at the bottom of this file for how each is actually
+//! pinned.
 //!
 //! H1's three checks and H4 bundle into two `#[test]` fns (one compile per
 //! bundle instead of one per check) via the check-list idiom — see
@@ -240,8 +241,9 @@ fn works_replicate_negative_n_terminates() {
 // added per-eval), so it isn't duplicated as a Rust test here.
 
 // =========================================================================
-// M10 — `Len [a]` non-guarded recursion (`1 + len xs`) must not blow the
-// JIT stack on long lists; fixed to the same accumulator shape as `length`.
+// M10 — `length`'s strict-accumulator recursion must not blow the JIT
+// stack on long lists (the shape the now-deleted `Len [a]` instance was
+// fixed to match).
 //
 // CRASH(stack-death)-class — STANDALONE: this pins a call-depth mechanism
 // (the JIT's non-tail-call stack ceiling), not a stdlib function's ordinary
@@ -252,12 +254,12 @@ fn works_replicate_negative_n_terminates() {
 // =========================================================================
 
 #[test]
-fn works_len_class_long_list_no_stack_death() {
+fn works_length_long_list_no_stack_death() {
     // The repo's own evidence (Data/Text.hs) puts the JIT's non-tail-call
     // stack ceiling around ~20k frames; 50k comfortably exercises the fix
     // without depending on the exact ceiling.
     works(
-        "pure (len (enumFromTo 1 50000 :: [Int]))",
+        "pure (length (enumFromTo 1 50000 :: [Int]))",
         serde_json::json!(50000),
     );
 }

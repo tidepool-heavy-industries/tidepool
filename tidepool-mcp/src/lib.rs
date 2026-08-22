@@ -870,7 +870,7 @@ mod tests {
         );
         // #335: every verb in a modelled snippet returns `Either <Err> a`, so
         // every snippet that USES a verb's result must unwrap it first. These
-        // two examples applied `<&> stake limit` / `<&> (^? …)` straight to the
+        // two examples applied `<&> take limit` / `<&> (^? …)` straight to the
         // `Either` and could not typecheck; pin the unwrapped spellings.
         assert!(
             desc.contains("Right hits <- grepGlob target \"**/*.rs\""),
@@ -881,7 +881,7 @@ mod tests {
             "the llm extraction example must bind the Right before applying optics:\n{desc}"
         );
         assert!(
-            !desc.contains("<&> stake limit") && !desc.contains("p <&> (^? key"),
+            !desc.contains("<&> take limit") && !desc.contains("p <&> (^? key"),
             "no snippet may apply a pure function to an unwrapped Either result:\n{desc}"
         );
     }

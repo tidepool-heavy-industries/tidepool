@@ -720,7 +720,7 @@ import qualified Data.Text as T
 
 result :: Int
 result =
-  let xs = stake 3 [1 :: Int ..]
+  let xs = take 3 [1 :: Int ..]
       n = length xs
       d = fromIntegral n :: Double
   in T.length (pack (showDouble d))
@@ -819,7 +819,7 @@ import qualified Data.Text as T
 
 result :: Int
 result =
-  let xs = stake 3 [1 :: Int ..]
+  let xs = take 3 [1 :: Int ..]
       s = foldl' (+) 0 xs
       d = fromIntegral s :: Double
   in T.length (pack (showDouble d))
@@ -978,7 +978,7 @@ result :: M Value
 result = do
   send (KvSet "__sayChars" (toJSON (0 :: Int)))
   _r <- do
-    let xs = stake 3 [1 :: Int ..]
+    let xs = take 3 [1 :: Int ..]
         s = foldl' (+) 0 xs
         d = fromIntegral s :: Double
     pure (pack (showDouble d))
@@ -1182,7 +1182,7 @@ result :: M Value
 result = do
   send (KvSet "__sayChars" (toJSON (0 :: Int)))
   _r <- do
-    let xs = stake 3 [1 :: Int ..]
+    let xs = take 3 [1 :: Int ..]
         s = foldl' (+) 0 xs
         d = fromIntegral s :: Double
     pure (pack (showDouble d))

@@ -73,4 +73,4 @@ census :: Text -> M Value
 census pat = do
   ps <- glob pat >>= liftEither
   sized <- mapM (\p -> do { s <- getFileSize p; pure (p, fromMaybe 0 s) }) ps
-  pure (object ["files" .= len ps, "exts" .= take 5 (extHisto ps), "heaviest" .= sizeRank 5 sized])
+  pure (object ["files" .= length ps, "exts" .= take 5 (extHisto ps), "heaviest" .= sizeRank 5 sized])

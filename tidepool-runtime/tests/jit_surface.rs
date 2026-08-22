@@ -560,8 +560,8 @@ fn works_lens_family() {
 fn works_text_family() {
     works(
         r#"pure (concat
-            [ check "empty_text_ops.isnull" (isNull ("" :: Text))
-            , check "empty_text_ops.len" (len ("" :: Text) == 0)
+            [ check "empty_text_ops.isnull" (T.null ("" :: Text))
+            , check "empty_text_ops.len" (T.length ("" :: Text) == 0)
             , check "empty_text_ops.eq" ("" == ("" :: Text))
             , check "empty_text_ops.split" (splitOn "/" "" == [""])
             , check "lines_words_vendored.n" (length (lines (T.replicate 20000 "x\n")) == 20000)
@@ -1050,7 +1050,7 @@ fn qq_fmt_unclosed_brace_carries_offset() {
 #[test]
 fn large_value_lens_fold_fails_loudly() {
     fails_loudly(
-        "pure (len (toJSON [1..20000::Int] ^.. values) :: Int)",
+        "pure (length (toJSON [1..20000::Int] ^.. values) :: Int)",
         "stack overflow",
     );
 }

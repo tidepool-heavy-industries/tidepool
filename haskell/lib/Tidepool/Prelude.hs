@@ -95,8 +95,6 @@ module Tidepool.Prelude
     -- * Text takeWhile/dropWhile (thin aliases for T.takeWhile/T.dropWhile)
   , takeWhileT
   , dropWhileT
-    -- * Polymorphic typeclasses (work on both Text and [a])
-  , Len(..), Null(..), Slice(..)
     -- * Additional list combinators
   , find
   , partition
@@ -562,61 +560,6 @@ takeWhileT = T.takeWhile
 dropWhileT :: (Char -> Bool) -> Text -> Text
 dropWhileT = T.dropWhile
 {-# INLINE dropWhileT #-}
-
--- ---------------------------------------------------------------------------
--- Polymorphic typeclasses (work on both Text and [a])
--- ---------------------------------------------------------------------------
-
--- | Length of a container. Works on both Text and lists.
-class Len a where
-  len :: a -> Int
-
-instance Len Text where
-  len = T.length
-  {-# INLINE len #-}
-
-instance Len [a] where
-  len = go 0
-    where
-      go :: Int -> [a] -> Int
-      go !acc []     = acc
-      go !acc (_:xs) = go (acc + 1) xs
-  {-# INLINE len #-}
-
--- | Emptiness check. Works on both Text and lists.
-class Null a where
-  isNull :: a -> Bool
-
-instance Null Text where
-  isNull = T.null
-  {-# INLINE isNull #-}
-
-instance Null [a] where
-  isNull [] = True
-  isNull _  = False
-  {-# INLINE isNull #-}
-
--- | Take/drop prefix. Works on both Text and lists.
--- Named @stake@/@sdrop@ to avoid shadowing list @take@/@drop@.
-class Slice a where
-  stake :: Int -> a -> a
-  sdrop :: Int -> a -> a
-
-instance Slice Text where
-  stake = T.take
-  sdrop = T.drop
-  {-# INLINE stake #-}
-  {-# INLINE sdrop #-}
-
-instance Slice [a] where
-  stake n _      | n <= 0 = []
-  stake _ []     = []
-  stake n (x:xs) = x : stake (n-1) xs
-  sdrop n xs     | n <= 0 = xs
-  sdrop _ []     = []
-  sdrop n (_:xs) = sdrop (n-1) xs
-  {-# INLINE stake #-}
-  {-# INLINE sdrop #-}
 
 -- | Is the first Text a prefix of the second?
 isPrefixOf :: Text -> Text -> Bool

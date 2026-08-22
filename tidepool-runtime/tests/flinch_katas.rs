@@ -126,7 +126,7 @@ result = foldl' (+) 0 [1 .. 200000 :: Int]"#,
     assert_eq!(json, json!(20_000_100_000i64));
 }
 
-/// Kata (d2) — laziness: `stake 5` on an infinite list must not force the
+/// Kata (d2) — laziness: `take 5` on an infinite list must not force the
 /// whole spine.
 ///
 /// HANG-class — STANDALONE: on regression this doesn't return a wrong
@@ -135,7 +135,7 @@ result = foldl' (+) 0 [1 .. 200000 :: Int]"#,
 fn kata_d2_laziness_infinite_list() {
     let json = run_pure_kata(
         r#"result :: [Int]
-result = stake 5 [1 :: Int ..]"#,
+result = take 5 [1 :: Int ..]"#,
         "result",
     );
     eprintln!("kata_d2 result: {json}");

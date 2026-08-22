@@ -3,7 +3,7 @@
 -- composable with the Control.Lens operators the Prelude already
 -- re-exports (&, %~, .~, toListOf, ^..).
 --
---   "a\nbb\nccc" ^.. linesOf . filteredT (\l -> len l > 1)   -- ["bb","ccc"]
+--   "a\nbb\nccc" ^.. linesOf . filteredT (\l -> T.length l > 1)   -- ["bb","ccc"]
 --   t & linesOf . filteredT (isPrefixOf "--") %~ toUpper      -- shout comments
 --
 -- File-level appliers report what changed instead of editing blind:

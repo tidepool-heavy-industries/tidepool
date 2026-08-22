@@ -542,7 +542,7 @@ result = do
 }
 
 /// Test with runtime-computed Double (non-constant-foldable) through effect dispatch.
-/// Uses `stake 3 [1..]` to prevent GHC constant folding.
+/// Uses `take 3 [1..]` to prevent GHC constant folding.
 #[test]
 fn show_double_10_effects_infinite_list() {
     let json = run10(
@@ -550,7 +550,7 @@ fn show_double_10_effects_infinite_list() {
 result = do
   send (KvSet "__sayChars" (toJSON (0 :: Int)))
   _r <- do
-    let xs = stake 3 [1 :: Int ..]
+    let xs = take 3 [1 :: Int ..]
         s = foldl' (+) 0 xs
         d = fromIntegral s :: Double
     pure (pack (showDouble d))

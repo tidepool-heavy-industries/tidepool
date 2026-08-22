@@ -28,7 +28,7 @@ hits <- sgFind Rust "unsafe { $$$B }" ["tidepool-heap/src", "tidepool-codegen/sr
 let byFile = hitsByFile (map (\m -> (matchFile m, matchLine m, matchText m)) hits)
 let files  = map fst (sizeRank 5 byFile)
 v <- ask (SObj [("file", SEnum files)])
-          ("Found " <> pack (show (len hits)) <> " unsafe blocks. Deep-dive which file?")
+          ("Found " <> pack (show (length hits)) <> " unsafe blocks. Deep-dive which file?")
 let target = case v ^? key "file" . _String of { Just f -> f; _ -> "" }
 pure (toJSON [ matchFile m <> ":" <> pack (show (matchLine m))
              | m <- hits, matchFile m == target ])
@@ -46,12 +46,12 @@ picks a label, never emits syntax) → persist at the task boundary (P7).
 fns <- sgFind Rust "fn $N($$$A) -> $R { $$$B }" ["tidepool-codegen/src/emit"]
 verdicts <- mapM (\m -> do
               v <- llm (SObj [("kind", SEnum ["hot-path", "setup", "diagnostic"])])
-                       ("Classify this compiler fn:\n" <> stake 400 (matchText m))
+                       ("Classify this compiler fn:\n" <> T.take 400 (matchText m))
               pure (matchFile m <> ":" <> pack (show (matchLine m)),
                     case v ^? key "kind" . _String of { Just k -> k; _ -> "?" }))
-            (stake 20 fns)
+            (take 20 fns)
 kvSet "emit-census" (toJSON verdicts)
-pure (toJSON (len verdicts))
+pure (toJSON (length verdicts))
 ```
 
 `llm` is autonomous (server-side, costs tokens); swap it for `ask` to suspend
@@ -73,7 +73,7 @@ rewrites matching lines through optics.
 update "target/demo.cfg" "retries = 3" "retries = 5"        -- exact, exactly-once
 r <- insertAfter "target/demo.cfg" "[limits]" "max_depth = 64"   -- after the unique anchor line
 case r of { InsertAfterApplied -> pure (); InsertAfterRejected why _ -> error why }
-overFileM "target/demo.cfg" (linesOf . filteredT (isPrefixOf "#")) (("# [reviewed] " <>) . sdrop 2)
+overFileM "target/demo.cfg" (linesOf . filteredT (isPrefixOf "#")) (("# [reviewed] " <>) . T.drop 2)
 pure "edited"
 ```
 
