@@ -31,6 +31,24 @@ contracts, and subordinate to root on any conflict. `plans/` and PRD
 "locked"/"frozen" language is a design-time record, not standing authority —
 standing authority always runs through the CLAUDE.md hierarchy.
 
+### One mechanism, one home
+
+Every general-purpose mechanism (durable logs, retries, caches, registries,
+template builders, path resolution, process spawning, id minting, supervision)
+has exactly ONE implementation, listed in the Mechanism Index below. Before
+building anything of that shape, check the index and grep — the capability may
+exist under another plane's vocabulary. Three hard rules:
+
+- **A file boundary is never license to copy.** If the mechanism you need
+  lives in code you may not touch, STOP and escalate; a local reimplementation
+  is the one forbidden resolution.
+- **Kept-in-sync copies are forbidden.** A "must stay identical to X" comment
+  or a byte-identity cross-test between two implementations is a bug report,
+  not a maintenance strategy — extract the shared thing or escalate.
+- **An API one notch too narrow is extended, not shadowed.** If the canonical
+  home answers the wrong granularity (root-only where you need per-node),
+  widen it in place.
+
 ### Plans
 
 `plans/README.md` tracks the current active plan. Read it before starting new work.
@@ -86,6 +104,30 @@ tidepool/
 ├── flake.nix              ← Dev shell (Rust + GHC 9.12 with fat interfaces)
 └── CLAUDE.md              ← YOU ARE HERE
 ```
+
+## Mechanism Index
+
+The one home for each cross-cutting mechanism (see "One mechanism, one home"
+above). If a needed mechanism is missing from this list, add it WITH its home
+in the same change that creates it.
+
+| Mechanism | Home |
+|---|---|
+| git subprocess invocation | `tidepool-worktree::git::GitCli` (the ONE git call site) |
+| durable JSONL append/read | the shared primitive under `tidepool-repr` (consumers: worktree journal, handlers journal, harness log, selfharness observer) |
+| config/cache/project path resolution | `tidepool-runtime::paths` |
+| executable resolution + strict validation | `tidepool-extract-cmd` |
+| in-process monotonic id minting | `tidepool-repr`'s issuer |
+| Haskell turn-module templates (bind/expr wrappers) | `tidepool-runtime::session::turn` |
+| turn thread supervision (timeout/cancel/crash) | `tidepool-runtime`'s `TurnSupervisor` |
+| session checkout/ownership | `tidepool-harness::registry::SessionRegistry` |
+| MCP transport + resource catalog | `tidepool-mcp` shared helpers |
+| heap → `Value` decoding | `tidepool-codegen::heap_bridge` |
+| Core free-variable analysis | `tidepool-repr::free_vars` |
+| field/laziness triviality policy | `tidepool-repr` (both JIT and eval call it) |
+| concurrency for authored/model Haskell | `Tidepool.Async` (Control.Concurrent.Async mirror) |
+| operator interaction (forms, gates, steering) | the ask/form machinery (`OperatorGate::present_form` + `Tidepool.Form`) — never a second channel |
+| effect/error type definitions | the effect schema (`effect_defs.rs` / `tidepool-protocol`) — every projection generated, never hand-carried |
 
 **Per-crate `CLAUDE.md` files hold the crate-specific docs** (loaded when you work
 in that directory):
