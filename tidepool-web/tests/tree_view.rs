@@ -53,6 +53,9 @@ async fn root_serves_the_tree_shell_with_the_vendored_d3_route_wired() {
     assert!(html.contains("id=\"tree-canvas\""), "{html}");
     assert!(html.contains("id=\"side-pane\""), "{html}");
     assert!(html.contains("id=\"side-pane-body\""), "{html}");
+    // The fit/reset affordance — the operator's way back to a centered view
+    // after a deliberate pan/zoom.
+    assert!(html.contains("id=\"fit-reset\""), "{html}");
 
     // The exact src the shell baked in must itself be a live, same-origin
     // route serving real JS — never a CDN.
@@ -77,6 +80,130 @@ async fn root_serves_the_tree_shell_with_the_vendored_d3_route_wired() {
         "expected the real d3 bundle, got {} bytes",
         body.len()
     );
+}
+
+/// The real shape that exposed the label-overprint paper cut live: root + 4
+/// children + 12 grandchildren (17 nodes total), depth 2, fan-4 at the first
+/// level, long slash-path slugs throughout. Registers the whole tree and
+/// returns every id in registration order.
+fn realistic_tree_fixture() -> Vec<&'static str> {
+    vec![
+        "root",
+        "root/1-durable-workspace-and-recovery",
+        "root/2-typed-effects-and-programming-errors",
+        "root/3-cranelift-jit-codegen-and-effect-machine",
+        "root/4-mcp-server-eval-and-structural-search",
+        "root/1-durable-workspace-and-recovery/1-seed-recovery-after-crash",
+        "root/1-durable-workspace-and-recovery/2-worktree-registry-durability",
+        "root/1-durable-workspace-and-recovery/3-selfharness-driver-resume-path",
+        "root/2-typed-effects-and-programming-errors/1-freer-simple-continuation-tree",
+        "root/2-typed-effects-and-programming-errors/2-union-tag-dispatch-and-handlers",
+        "root/2-typed-effects-and-programming-errors/3-dispatch-effect-and-hlist-encoding",
+        "root/3-cranelift-jit-codegen-and-effect-machine/1-copying-gc-and-frame-walker",
+        "root/3-cranelift-jit-codegen-and-effect-machine/2-case-trap-and-poison-breadcrumb",
+        "root/3-cranelift-jit-codegen-and-effect-machine/3-compile-cache-content-addressing",
+        "root/4-mcp-server-eval-and-structural-search/1-aperture-census-diff-verbs",
+        "root/4-mcp-server-eval-and-structural-search/2-structural-search-over-core-expr",
+        "root/4-mcp-server-eval-and-structural-search/3-resident-session-block-runner",
+    ]
+}
+
+/// Register [`realistic_tree_fixture`]'s whole shape on `state`, keyed off
+/// the default node id (a root gate with a nested `node_gate` per child) so
+/// parent links line up with the fixture's own slash paths.
+fn register_realistic_tree(state: &tidepool_web::AppState) {
+    let root_gate = state.register_node(tidepool_web::DEFAULT_NODE_ID);
+    for id in realistic_tree_fixture() {
+        if id == tidepool_web::DEFAULT_NODE_ID {
+            continue;
+        }
+        root_gate.node_gate(id).expect("child gate registers");
+    }
+}
+
+/// The paper cut this whole spec fixes: `/api/tree`'s `label` field is each
+/// node's own LAST path segment — never the full slash path — for the exact
+/// 17-node depth-2 fan-4 long-slug shape that exposed the overprinting live.
+#[tokio::test(flavor = "multi_thread")]
+async fn api_tree_labels_are_last_segment_not_full_path_for_the_realistic_shape() {
+    let (addr, state) = boot().await;
+    let base = format!("http://{addr}");
+    let client = Client::new();
+    register_realistic_tree(&state);
+
+    let body: Value = client
+        .get(format!("{base}/api/tree"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let arr = body.as_array().expect("array response");
+    assert_eq!(arr.len(), 17, "{arr:?}");
+
+    for entry in arr {
+        let path = entry["path"].as_str().expect("path is a string");
+        let label = entry["label"].as_str().expect("label is a string");
+        let expected_segment = path.rsplit('/').next().unwrap();
+
+        assert!(!label.contains('/'), "label leaked a slash path: {entry:?}");
+        if path.contains('/') {
+            assert_ne!(
+                label, path,
+                "a nested node's label must not be its full path: {entry:?}"
+            );
+        }
+        assert!(
+            expected_segment.starts_with(label.trim_end_matches('…')),
+            "label {label:?} must be a prefix of the last segment {expected_segment:?}: {entry:?}"
+        );
+    }
+}
+
+/// No two node labels can overprint at default zoom for this shape: every
+/// label is short enough (see `render::TREE_LABEL_BUDGET`, and
+/// `tree.rs`'s matching `tree_label_budget_leaves_a_safety_margin_before_the_next_depth_column`
+/// geometry test) that a label's estimated on-screen extent never reaches
+/// the next depth column's node — asserted here on the actual `label`
+/// values `/api/tree` serves, not a hand-picked example.
+#[tokio::test(flavor = "multi_thread")]
+async fn api_tree_labels_never_reach_the_next_depth_column_for_the_realistic_shape() {
+    let (addr, state) = boot().await;
+    let base = format!("http://{addr}");
+    let client = Client::new();
+    register_realistic_tree(&state);
+
+    // Mirrors TREE_JS's own constants (nodeSize([36, 200]), LABEL_OFFSET=14,
+    // NODE_RADIUS=9) and its CHAR_WIDTH_PX estimate — see
+    // render.rs's tree_label_budget_leaves_a_safety_margin_before_the_next_depth_column
+    // for the single-worst-case version of this same check.
+    const CHAR_WIDTH_PX: f64 = 6.5;
+    const LABEL_OFFSET_PX: f64 = 14.0;
+    const NODE_RADIUS_PX: f64 = 9.0;
+    const DEPTH_SPACING_PX: f64 = 200.0;
+    let next_column_left_edge = DEPTH_SPACING_PX - NODE_RADIUS_PX;
+
+    let body: Value = client
+        .get(format!("{base}/api/tree"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let arr = body.as_array().expect("array response");
+    assert_eq!(arr.len(), 17, "{arr:?}");
+
+    for entry in arr {
+        let label = entry["label"].as_str().expect("label is a string");
+        let right_edge = LABEL_OFFSET_PX + (label.chars().count() as f64) * CHAR_WIDTH_PX;
+        assert!(
+            right_edge < next_column_left_edge,
+            "label {label:?} (edge {right_edge}px) would reach the next depth \
+             column ({next_column_left_edge}px) for entry {entry:?}"
+        );
+    }
 }
 
 #[tokio::test(flavor = "multi_thread")]

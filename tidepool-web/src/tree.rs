@@ -81,6 +81,7 @@ pub fn tree_page() -> Markup {
                     header class="tree-masthead" {
                         span class="mark" { "tidepool" }
                         a class="legacy-link" href="/legacy" { "outline view" }
+                        button type="button" id="fit-reset" class="fit-reset" { "fit" }
                         span id="conn" class="conn ok" { "live" }
                     }
                     svg id="tree-canvas" {
@@ -117,6 +118,13 @@ html, body { height: 100%; overflow: hidden; }
   font-size: var(--text-micro); text-transform: uppercase; letter-spacing: var(--tracking-wide);
   color: var(--muted); text-decoration: none; border-bottom: var(--hair-faint);
 }
+.fit-reset {
+  font: inherit; font-size: var(--text-micro); font-weight: 600; text-transform: uppercase;
+  letter-spacing: var(--tracking-wide); color: var(--muted);
+  border: var(--hair-faint); background: transparent; cursor: pointer;
+  padding: calc(0.5 * var(--unit)) calc(1.5 * var(--unit));
+}
+.fit-reset:hover { color: var(--ink); border-color: var(--line); }
 .tree-masthead .conn { margin-left: auto; }
 
 #tree-canvas { display: block; width: 100%; height: 100%; background: var(--paper); cursor: grab; }
@@ -168,8 +176,28 @@ html, body { height: 100%; overflow: hidden; }
 pub const TREE_JS: &str = r#"
 (function () {
   var SYN_ROOT = '__tidepool_root__';
+  var NODE_RADIUS = 9;
+  var LABEL_OFFSET = 14;
+  // Rough advance width for the 600-weight, text-micro (11px) label font —
+  // used only to estimate a label's on-screen extent for fitToContent's
+  // bounding box, never for layout itself (that stays d3's job).
+  var CHAR_WIDTH_PX = 6.5;
+  var MIN_ZOOM = 0.15, MAX_ZOOM = 3;
+  var FIT_PADDING = 48;
+
   var selectedId = null;
   var svg, viewport, gLinks, gNodes, zoomBehavior;
+  var allNodes = [];
+  // Set the moment a REAL pan/zoom gesture fires (see ensureCanvas's zoom
+  // handler) — once true, fitToContent never runs again on its own; only the
+  // #fit-reset control (which clears this) brings it back. Never fought: an
+  // operator's deliberate pan/zoom is never auto-overridden.
+  var userInteracted = false;
+  // The node count fitToContent last ran against — renderTree re-fits only
+  // when the tree has GROWN past this (nodes streaming in via SSE), never on
+  // every tick, so an unchanged tree never yanks the view.
+  var fittedCount = 0;
+
   var linkGen = d3.linkHorizontal()
     .x(function (d) { return d.y; })
     .y(function (d) { return d.x; });
@@ -181,7 +209,7 @@ pub const TREE_JS: &str = r#"
   // their own (see server.rs: any caller can register a bare top-level id).
   function stratifyTree(nodes) {
     var ids = new Set(nodes.map(function (n) { return n.id; }));
-    var rows = [{ id: SYN_ROOT, parent: null, title: '', status: '', rev: 0 }];
+    var rows = [{ id: SYN_ROOT, parent: null, title: '', label: '', status: '', rev: 0 }];
     nodes.forEach(function (n) {
       var parent = (n.parent && ids.has(n.parent)) ? n.parent : SYN_ROOT;
       rows.push(Object.assign({}, n, { parent: parent }));
@@ -198,18 +226,69 @@ pub const TREE_JS: &str = r#"
     viewport = svg.select('g.viewport');
     gLinks = viewport.select('g.links');
     gNodes = viewport.select('g.nodes');
-    zoomBehavior = d3.zoom().scaleExtent([0.15, 3]).on('zoom', function (event) {
+    zoomBehavior = d3.zoom().scaleExtent([MIN_ZOOM, MAX_ZOOM]).on('zoom', function (event) {
       viewport.attr('transform', event.transform);
+      // A real pan/zoom/wheel/touch gesture always carries the triggering
+      // DOM event as sourceEvent; fitToContent's own programmatic
+      // `.call(zoomBehavior.transform, ...)` never does — this is the
+      // standard d3 idiom for telling an operator's own input apart from an
+      // auto-fit, and the ONLY thing that latches userInteracted.
+      if (event.sourceEvent) userInteracted = true;
     });
     svg.call(zoomBehavior);
+    var fitBtn = document.getElementById('fit-reset');
+    if (fitBtn) fitBtn.addEventListener('click', function () {
+      userInteracted = false;
+      fitToContent();
+    });
+  }
+
+  // The bounding box of every node's rendered extent — circle plus its
+  // last-segment label, estimated from character count — in SCREEN space:
+  // d.y is the horizontal/depth axis, d.x the vertical/sibling axis (see
+  // linkGen and every node's transform below, which swap x/y to lay the
+  // tree out left-to-right).
+  function computeBounds(nodes) {
+    var minSx = Infinity, maxSx = -Infinity, minSy = Infinity, maxSy = -Infinity;
+    nodes.forEach(function (d) {
+      var labelChars = (d.data.label || '').length;
+      var rightEdge = d.y + NODE_RADIUS + LABEL_OFFSET + labelChars * CHAR_WIDTH_PX;
+      minSx = Math.min(minSx, d.y - NODE_RADIUS);
+      maxSx = Math.max(maxSx, rightEdge);
+      minSy = Math.min(minSy, d.x - NODE_RADIUS);
+      maxSy = Math.max(maxSy, d.x + NODE_RADIUS);
+    });
+    return { minSx: minSx, maxSx: maxSx, minSy: minSy, maxSy: maxSy };
+  }
+
+  // Set the zoom transform so every node (plus its label) fits the viewport
+  // with padding — the "where's the root" paper cut this fixes on first
+  // render, and what the #fit-reset control re-runs on demand. Never called
+  // from renderTree once the operator has taken deliberate control of the
+  // view (see the userInteracted gate at that one call site); the reset
+  // control is the only path back, and it clears the flag itself first.
+  function fitToContent() {
+    if (!svg || !allNodes.length) return;
+    var b = computeBounds(allNodes);
+    var rect = svg.node().getBoundingClientRect();
+    var w = rect.width || 800, h = rect.height || 600;
+    var treeW = Math.max(1, b.maxSx - b.minSx);
+    var treeH = Math.max(1, b.maxSy - b.minSy);
+    var scale = Math.min((w - FIT_PADDING * 2) / treeW, (h - FIT_PADDING * 2) / treeH, MAX_ZOOM);
+    scale = Math.max(scale, MIN_ZOOM);
+    var tx = FIT_PADDING - b.minSx * scale + Math.max(0, (w - FIT_PADDING * 2 - treeW * scale) / 2);
+    var ty = h / 2 - ((b.minSy + b.maxSy) / 2) * scale;
+    svg.transition().duration(300)
+      .call(zoomBehavior.transform, d3.zoomIdentity.translate(tx, ty).scale(scale));
+    fittedCount = allNodes.length;
   }
 
   function renderTree(nodes) {
     ensureCanvas();
     var root = stratifyTree(nodes);
-    d3.tree().nodeSize([32, 180])(root);
+    d3.tree().nodeSize([36, 200])(root);
 
-    var allNodes = root.descendants().filter(function (d) { return d.id !== SYN_ROOT; });
+    allNodes = root.descendants().filter(function (d) { return d.id !== SYN_ROOT; });
     var allLinks = root.links().filter(function (l) { return l.source.id !== SYN_ROOT; });
 
     var link = gLinks.selectAll('path.link').data(allLinks, function (l) { return l.target.id; });
@@ -229,8 +308,11 @@ pub const TREE_JS: &str = r#"
       .style('opacity', 0)
       .attr('transform', function (d) { return 'translate(' + d.y + ',' + d.x + ')'; })
       .on('click', function (event, d) { openPanel(d.id); });
-    nodeEnter.append('circle').attr('r', 9);
-    nodeEnter.append('text').attr('x', 14).attr('dy', '0.32em');
+    nodeEnter.append('circle').attr('r', NODE_RADIUS);
+    nodeEnter.append('text').attr('x', LABEL_OFFSET).attr('dy', '0.32em');
+    // The native browser hover tooltip — the full path stays reachable here
+    // even though the drawn label is only the last segment.
+    nodeEnter.append('title');
 
     var merged = nodeEnter.merge(node);
     merged.attr('class', function (d) {
@@ -239,10 +321,24 @@ pub const TREE_JS: &str = r#"
     merged.transition().duration(300)
       .style('opacity', 1)
       .attr('transform', function (d) { return 'translate(' + d.y + ',' + d.x + ')'; });
-    // .text() only — node titles are substrate identifiers (tree paths), and
-    // every other model-authored string this page ever shows lives inside
-    // the side-pane panel fragment, itself already maud-escaped server-side.
-    merged.select('text').text(function (d) { return d.data.title; });
+    // .text() only — node labels/paths are substrate identifiers (tree
+    // paths), and every other model-authored string this page ever shows
+    // lives inside the side-pane panel fragment, itself already
+    // maud-escaped server-side. The drawn label is the node's OWN last path
+    // segment (short, truncated server-side to fit the depth column) —
+    // never the full slash path, which is what used to print straight
+    // through sibling/child labels; the full path stays reachable via this
+    // <title> hover tooltip and the (unchanged) side panel.
+    merged.select('text').text(function (d) { return d.data.label; });
+    merged.select('title').text(function (d) { return d.data.path; });
+
+    // Fit on first render, and again whenever the tree has grown past what
+    // was last fitted (nodes streaming in via SSE) — but never once the
+    // operator has taken deliberate control of the view. The #fit-reset
+    // control is the only way back after that.
+    if (!userInteracted && allNodes.length > fittedCount) {
+      fitToContent();
+    }
   }
 
   function refreshTree() {
@@ -405,14 +501,104 @@ mod tests {
     }
 
     /// Node/section labels are set via `.text()`, never markup — the
-    /// escaping invariant as it applies to d3: a node's title (a substrate
-    /// tree-path id) reaches the DOM as text content only.
+    /// escaping invariant as it applies to d3: a node's drawn label reaches
+    /// the DOM as text content only.
     #[test]
     fn tree_js_sets_labels_via_text_only() {
         assert!(
-            TREE_JS.contains(".text(function (d) { return d.data.title; })"),
+            TREE_JS.contains(".text(function (d) { return d.data.label; })"),
             "{TREE_JS}"
         );
+    }
+
+    /// The drawn label is the tree's short `label` field (last path segment,
+    /// truncated — see `render::tree_label`), NEVER the full `title`/`path` —
+    /// the paper cut this fixes (a parent's full-path label printing
+    /// straight through its children's) regresses if this ever points back
+    /// at the full id.
+    #[test]
+    fn tree_js_labels_use_the_short_label_field_not_the_full_path() {
+        assert!(
+            !TREE_JS.contains(".data.title"),
+            "the tree view must not draw the full-path title as a label: {TREE_JS}"
+        );
+        // `.data.path` (the full, untruncated id) may feed exactly one
+        // thing: the hover `<title>` tooltip — never the drawn node label.
+        assert_eq!(
+            TREE_JS.matches(".data.path").count(),
+            1,
+            "the full path must feed only the hover tooltip: {TREE_JS}"
+        );
+    }
+
+    /// Full path stays reachable on hover: each node mounts a native SVG
+    /// `<title>` element (browser tooltip), set from `d.data.path` — the
+    /// untruncated id.
+    #[test]
+    fn tree_js_hover_tooltip_carries_the_full_path() {
+        assert!(TREE_JS.contains("nodeEnter.append('title')"), "{TREE_JS}");
+        assert!(
+            TREE_JS.contains("merged.select('title').text(function (d) { return d.data.path; })"),
+            "{TREE_JS}"
+        );
+    }
+
+    /// Fit-to-content: a `fitToContent` routine exists, is driven by a
+    /// computed bounding box (not a fixed/guessed transform), and is called
+    /// from `renderTree` — i.e. on every fresh `/api/tree` fetch, which
+    /// includes the very first page load.
+    #[test]
+    fn tree_js_defines_fit_to_content_driven_by_computed_bounds() {
+        assert!(TREE_JS.contains("function fitToContent()"), "{TREE_JS}");
+        assert!(TREE_JS.contains("function computeBounds("), "{TREE_JS}");
+        assert!(
+            TREE_JS.contains("zoomBehavior.transform, d3.zoomIdentity.translate("),
+            "fitToContent must set the transform via d3.zoom's own API: {TREE_JS}"
+        );
+        assert!(
+            TREE_JS.contains(
+                "if (!userInteracted && allNodes.length > fittedCount) {\n      fitToContent();"
+            ),
+            "renderTree must fit on first render / growth: {TREE_JS}"
+        );
+    }
+
+    /// A real operator pan/zoom gesture (one carrying a DOM `sourceEvent`)
+    /// latches `userInteracted`, which gates every auto-fit call — the
+    /// "never fight a deliberate pan/zoom" requirement, pinned at the
+    /// mechanism level rather than by behavior we can't execute here.
+    #[test]
+    fn tree_js_suppresses_autofit_after_a_real_interaction() {
+        assert!(
+            TREE_JS.contains("if (event.sourceEvent) userInteracted = true;"),
+            "only a real gesture (carrying sourceEvent) may set userInteracted: {TREE_JS}"
+        );
+        assert!(
+            TREE_JS.contains("if (!userInteracted &&"),
+            "every auto-fit site must be gated on userInteracted: {TREE_JS}"
+        );
+    }
+
+    /// The `#fit-reset` control resets `userInteracted` and re-fits — the
+    /// operator's way back after taking manual control of the view.
+    #[test]
+    fn tree_js_wires_the_fit_reset_control() {
+        assert!(
+            TREE_JS.contains("document.getElementById('fit-reset')"),
+            "{TREE_JS}"
+        );
+        assert!(
+            TREE_JS.contains("userInteracted = false;\n      fitToContent();"),
+            "the reset control must clear userInteracted before re-fitting: {TREE_JS}"
+        );
+    }
+
+    /// `tree_page()` renders the fit/reset affordance the operator asked
+    /// for, in the masthead alongside the outline-view link.
+    #[test]
+    fn tree_page_has_a_fit_reset_button() {
+        let doc = tree_page().into_string();
+        assert!(doc.contains("id=\"fit-reset\""), "{doc}");
     }
 
     /// The tree/pane CSS is layered on top of `shell::CSS` (not a

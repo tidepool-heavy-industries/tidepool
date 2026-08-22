@@ -170,19 +170,34 @@ as the above holds.
 JS fetches both routes below, same as any other client of this surface
 would:
 
-- **`GET /api/tree`** — `[{id, path, parent, title, status, rev}, ...]`, one
-  entry per registered node, in the same display order the outline uses.
+- **`GET /api/tree`** — `[{id, path, parent, title, label, status, rev}, ...]`,
+  one entry per registered node, in the same display order the outline uses.
   `id`/`path` are the node id verbatim; `parent` is derived purely from the
   id's slash path ([`render::parent_id`] — `None`/`null` for a root, INCLUDING
   a top-level id registered with no natural parent at all, e.g. a bare `n1`);
   `title` is the truncated display label ([`render::truncate_title`]) the
-  outline's `<h2>` also uses; `status` is the SAME class token
-  ([`render::status`]) `node_panel`'s status badge derives — the tree view
-  and the outline can never disagree about what "needs you" means, because
-  there is exactly one status function. The client's `d3.stratify` call
-  synthesizes one invisible super-root parenting every null-parent node, so
-  multiple independent top-level ids (a "forest", not just one tree) never
-  trip stratify's single-root requirement.
+  outline's `<h2>` also uses; `label` is the tree canvas's OWN, much shorter,
+  node text ([`render::tree_label`]) — the node's last path segment only,
+  truncated to fit the d3 layout's depth spacing, so a long slug's label can
+  never overprint a sibling's or a child's (the tree structure already shows
+  ancestry; the full path stays reachable via `path`, drawn into each node's
+  native SVG `<title>` hover tooltip, and via the side panel); `status` is the
+  SAME class token ([`render::status`]) `node_panel`'s status badge derives —
+  the tree view and the outline can never disagree about what "needs you"
+  means, because there is exactly one status function. The client's
+  `d3.stratify` call synthesizes one invisible super-root parenting every
+  null-parent node, so multiple independent top-level ids (a "forest", not
+  just one tree) never trip stratify's single-root requirement.
+
+  **Fit-to-content.** [`TREE_JS`] fits the whole tree (root included) into
+  the viewport on first render, and again whenever the tree grows past what
+  was last fitted (nodes streaming in via SSE) — computed from the laid-out
+  tree's own bounding box (`computeBounds`/`fitToContent`), never a hardcoded
+  transform. It STOPS auto-fitting the instant a real pan/zoom/wheel gesture
+  fires (`d3.zoom`'s `event.sourceEvent`, the standard way to tell an
+  operator's own input apart from a programmatic `.call(zoomBehavior.transform,
+  ...)`) — a deliberate operator view is never fought. The masthead's
+  `#fit-reset` button is the way back: it clears that latch and re-fits.
 - **`GET /node/{node}/panel`** — one node's `id="panel-<node_id>"` fragment,
   standalone: the EXACT bytes [`AppState::node_panel_html`] also hands the
   SSE stream. The tree view's side pane loads a clicked node's panel through

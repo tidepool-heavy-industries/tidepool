@@ -15,8 +15,10 @@
 //!   side pane.
 //! - `GET  /legacy` — the original operator page: every registered node as
 //!   one outline section, sorted by path (the default node pinned first).
-//! - `GET  /api/tree` — `[{id, path, parent, title, status, rev}, ...]`, the
-//!   tree view's JSON data source (see [`AppState::tree_snapshot`]).
+//! - `GET  /api/tree` — `[{id, path, parent, title, label, status, rev}, ...]`,
+//!   the tree view's JSON data source (see [`AppState::tree_snapshot`]).
+//!   `label` is the tree's own short node text (last path segment,
+//!   truncated); `title`/`path` carry the full id.
 //! - `GET  /node/{node}/panel` — one node's `id="panel-<node>"` fragment,
 //!   standalone — the tree view's side pane loads a clicked node's panel
 //!   through this route, the exact bytes the SSE stream patches.
@@ -375,7 +377,12 @@ impl AppState {
     /// `status` [`render::status`] computes for `node_panel` — the tree view
     /// and the `/legacy` outline never disagree about what "needs you"
     /// means. `parent` is derived purely from the node id's slash path
-    /// ([`render::parent_id`]), `null` for a root.
+    /// ([`render::parent_id`]), `null` for a root. `label` — the tree view's
+    /// own node text ([`render::tree_label`]) — is the node's LAST path
+    /// segment only, truncated to a budget sized against the d3 layout's
+    /// depth spacing (see that function's docs): the full path (already
+    /// present as `path`/`title`) is what overlapped sibling/child labels at
+    /// full length; `label` is the fix.
     fn tree_snapshot(&self) -> Vec<Jv> {
         let reg = self.registry.lock();
         let mut ids: Vec<&String> = reg.nodes.keys().collect();
@@ -390,6 +397,7 @@ impl AppState {
                     "path": id,
                     "parent": render::parent_id(id),
                     "title": render::truncate_title(id),
+                    "label": render::tree_label(id),
                     "status": status_class,
                     "rev": slot.rev,
                 })

@@ -136,6 +136,16 @@ pub(crate) fn parent_id(node_id: &str) -> Option<&str> {
 /// deep tree still reads as one outline. See [`truncate_title`].
 const TITLE_BUDGET: usize = 40;
 
+/// The character budget a tree-view node's LABEL truncates to — short enough
+/// that the longest label, drawn starting `LABEL_OFFSET` past the node
+/// circle in `tree.rs`'s `TREE_JS`, never reaches the next depth column
+/// (`nodeSize`'s depth spacing minus a child node's own radius) even at this
+/// crate's real long-slug labels — the paper cut where a parent's label
+/// printed straight through its children's. See [`tree_label`] and
+/// `tree.rs`'s `computeBounds`/`fitToContent` for the matching client-side
+/// geometry the budget is sized against.
+const TREE_LABEL_BUDGET: usize = 16;
+
 /// Truncate `label` to at most [`TITLE_BUDGET`] characters at the LAST word
 /// boundary within budget, never mid-word, appending an ellipsis. A tree-path
 /// node id carries no spaces, so `/`, `-`, and `_` all count as boundaries
@@ -144,10 +154,40 @@ const TITLE_BUDGET: usize = 40;
 /// within budget is returned unchanged, with no ellipsis — the full label
 /// always rides alongside it as the caller's `title` attribute.
 pub(crate) fn truncate_title(label: &str) -> String {
-    if label.chars().count() <= TITLE_BUDGET {
+    truncate_at_word_boundary(label, TITLE_BUDGET)
+}
+
+/// The tree view's per-node display label: the node's OWN last path
+/// segment — the tree structure already shows ancestry, so the full slash
+/// path is both redundant and, at full length, what overlapped sibling and
+/// child labels in the operator's screenshot — truncated to
+/// [`TREE_LABEL_BUDGET`] so even a long slug can't overrun the next depth
+/// column. The full path stays reachable via `/api/tree`'s own `path` field
+/// (the tree view's hover tooltip) and the side panel, both unchanged.
+pub(crate) fn tree_label(node_id: &str) -> String {
+    truncate_at_word_boundary(last_path_segment(node_id), TREE_LABEL_BUDGET)
+}
+
+/// The last slash-separated segment of a tree path: `"root"` for a root with
+/// no slash at all, the leaf slug for anything nested (`"root/1-x/2-y"` ->
+/// `"2-y"`). Never empty for a non-empty `node_id`.
+pub(crate) fn last_path_segment(node_id: &str) -> &str {
+    node_id.rsplit('/').next().unwrap_or(node_id)
+}
+
+/// Truncate `label` to at most `budget` characters at the LAST word boundary
+/// within budget, never mid-word, appending an ellipsis. A tree-path node id
+/// (or one of its segments) carries no spaces, so `/`, `-`, and `_` all count
+/// as boundaries alongside literal whitespace. Falls back to a hard cut at
+/// budget only when no boundary exists at all (a single very long word). A
+/// label already within budget is returned unchanged, with no ellipsis — the
+/// full label always rides alongside it as the caller's `title`
+/// attribute/tooltip.
+fn truncate_at_word_boundary(label: &str, budget: usize) -> String {
+    if label.chars().count() <= budget {
         return label.to_string();
     }
-    let head: String = label.chars().take(TITLE_BUDGET).collect();
+    let head: String = label.chars().take(budget).collect();
     let cut = head.rfind(['/', '-', '_', ' ']).unwrap_or(head.len());
     let mut kept = head[..cut].to_string();
     if kept.is_empty() {
@@ -1177,6 +1217,115 @@ mod tests {
         assert_eq!(parent_id("n1"), None);
         assert_eq!(parent_id("root/1-x"), Some("root"));
         assert_eq!(parent_id("root/1-x/2-y"), Some("root/1-x"));
+    }
+
+    // ---- last_path_segment / tree_label ----------------------------------
+
+    #[test]
+    fn last_path_segment_is_the_final_slash_component() {
+        assert_eq!(last_path_segment("root"), "root");
+        assert_eq!(last_path_segment("root/1-x"), "1-x");
+        assert_eq!(last_path_segment("root/1-x/2-y"), "2-y");
+    }
+
+    /// A short last segment renders untouched, with no ellipsis.
+    #[test]
+    fn tree_label_short_segment_is_untouched() {
+        assert_eq!(tree_label("root/1-x"), "1-x");
+    }
+
+    /// A long last segment truncates (word-boundary, ellipsis) — never the
+    /// whole slash path, even though the source id is long.
+    #[test]
+    fn tree_label_is_the_last_segment_never_the_full_path() {
+        let id = "root/1-durable-workspace-and-recovery/2-typed-effects-and-programming-errors";
+        let label = tree_label(id);
+        assert!(!label.contains('/'), "{label}");
+        assert!(label.starts_with("2-typed"), "{label}");
+        assert!(label.ends_with('…'), "{label}");
+        assert!(label.chars().count() <= TREE_LABEL_BUDGET + 1, "{label}");
+    }
+
+    /// The real shape that exposed this paper cut: root + 4 children + 12
+    /// grandchildren (17 nodes), long slugs at every depth. Every node's
+    /// tree label is short — its own last segment, truncated well inside
+    /// [`TREE_LABEL_BUDGET`] — so a label can never carry the whole
+    /// accumulated path into the next depth's column.
+    #[test]
+    fn tree_label_never_exceeds_budget_across_a_realistic_deep_tree() {
+        for id in realistic_tree_fixture() {
+            let label = tree_label(id);
+            assert!(
+                label.chars().count() <= TREE_LABEL_BUDGET + 1,
+                "{id} -> {label}"
+            );
+            assert!(!label.contains('/'), "{id} -> {label}");
+        }
+    }
+
+    /// A worst-case [`TREE_LABEL_BUDGET`]-length label, drawn starting
+    /// `LABEL_OFFSET` px past a node's circle in `tree.rs`'s `TREE_JS`, must
+    /// end well before the next depth column's node circle (`DEPTH_SPACING`
+    /// px away, `NODE_RADIUS` px wide) — the geometric property that
+    /// prevents a parent's label from ever printing through its children,
+    /// computed here from the same constants `TREE_JS` hard-codes (kept in
+    /// sync by inspection — `tree.rs`'s own tests pin its half of this
+    /// story; there's no single shared constant source across the Rust/JS
+    /// boundary to assert against instead).
+    #[test]
+    fn tree_label_budget_leaves_a_safety_margin_before_the_next_depth_column() {
+        const CHAR_WIDTH_PX: f64 = 6.5;
+        const LABEL_OFFSET_PX: f64 = 14.0;
+        const NODE_RADIUS_PX: f64 = 9.0;
+        const DEPTH_SPACING_PX: f64 = 200.0; // TREE_JS's nodeSize([36, 200])
+
+        // +1 for the ellipsis a truncated label appends.
+        let worst_case_chars = (TREE_LABEL_BUDGET + 1) as f64;
+        let label_right_edge = LABEL_OFFSET_PX + worst_case_chars * CHAR_WIDTH_PX;
+        let next_column_left_edge = DEPTH_SPACING_PX - NODE_RADIUS_PX;
+
+        assert!(
+            label_right_edge < next_column_left_edge,
+            "a maximal tree label (edge {label_right_edge}px) must end before the \
+             next depth column starts ({next_column_left_edge}px), or a parent's \
+             label can print through its children"
+        );
+        // Leave a real margin, not just a technical pass — long slugs vary,
+        // and font metrics are an estimate, not a measurement.
+        assert!(
+            next_column_left_edge - label_right_edge > 30.0,
+            "the safety margin has eroded to {}px",
+            next_column_left_edge - label_right_edge
+        );
+    }
+
+    /// Fixture: root + 4 children + 12 grandchildren (17 nodes total),
+    /// depth 2, fan-4 at the first level — the exact shape (long slash-path
+    /// slugs included) that exposed the label-overprint paper cut live.
+    /// `tests/tree_view.rs` asserts the same shape's `/api/tree` output over
+    /// real HTTP, with its own copy of this literal — this test-only helper
+    /// is `#[cfg(test)]`-gated and so isn't reachable from that separate
+    /// integration-test crate.
+    fn realistic_tree_fixture() -> Vec<&'static str> {
+        vec![
+            "root",
+            "root/1-durable-workspace-and-recovery",
+            "root/2-typed-effects-and-programming-errors",
+            "root/3-cranelift-jit-codegen-and-effect-machine",
+            "root/4-mcp-server-eval-and-structural-search",
+            "root/1-durable-workspace-and-recovery/1-seed-recovery-after-crash",
+            "root/1-durable-workspace-and-recovery/2-worktree-registry-durability",
+            "root/1-durable-workspace-and-recovery/3-selfharness-driver-resume-path",
+            "root/2-typed-effects-and-programming-errors/1-freer-simple-continuation-tree",
+            "root/2-typed-effects-and-programming-errors/2-union-tag-dispatch-and-handlers",
+            "root/2-typed-effects-and-programming-errors/3-dispatch-effect-and-hlist-encoding",
+            "root/3-cranelift-jit-codegen-and-effect-machine/1-copying-gc-and-frame-walker",
+            "root/3-cranelift-jit-codegen-and-effect-machine/2-case-trap-and-poison-breadcrumb",
+            "root/3-cranelift-jit-codegen-and-effect-machine/3-compile-cache-content-addressing",
+            "root/4-mcp-server-eval-and-structural-search/1-aperture-census-diff-verbs",
+            "root/4-mcp-server-eval-and-structural-search/2-structural-search-over-core-expr",
+            "root/4-mcp-server-eval-and-structural-search/3-resident-session-block-runner",
+        ]
     }
 
     // ---- generic_shape ------------------------------------------------------
