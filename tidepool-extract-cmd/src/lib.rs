@@ -39,6 +39,9 @@ use std::process::{Command, Output};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
+pub mod exec_check;
+use exec_check::is_readable_executable_file;
+
 /// The bare binary name, used when `$TIDEPOOL_EXTRACT` is unset (resolved
 /// through `PATH` by the OS at spawn time).
 pub const DEFAULT_BIN: &str = "tidepool-extract";
@@ -216,39 +219,6 @@ impl From<BinError> for std::io::Error {
     fn from(e: BinError) -> Self {
         std::io::Error::new(std::io::ErrorKind::NotFound, e.to_string())
     }
-}
-
-/// On Unix, verify `path` names a regular file this process can actually
-/// READ, with at least one EXECUTE permission bit set — the two properties
-/// [`BinError`]'s "not a readable file" message (and this module's "readable
-/// file" precedence-table language) promise but `is_file` alone never
-/// checked, so a `TIDEPOOL_EXTRACT=/some/chmod-000-file` used to resolve
-/// successfully here and only fail later, as an opaque OS error, at spawn.
-///
-/// `File::open` is the real read-access check (it honors the same
-/// permission/ACL evaluation a later spawn's read of the binary would hit);
-/// the execute-bit check on `mode()` is the accessible without-`libc`
-/// approximation of "executable" this std-only crate can perform (see the
-/// crate doc's D-A note) — the same thing a later spawn ultimately depends
-/// on to succeed.
-#[cfg(unix)]
-fn is_readable_executable_file(path: &Path) -> bool {
-    use std::os::unix::fs::PermissionsExt;
-    if !path.is_file() || std::fs::File::open(path).is_err() {
-        return false;
-    }
-    std::fs::metadata(path)
-        .map(|meta| meta.permissions().mode() & 0o111 != 0)
-        .unwrap_or(false)
-}
-
-/// Off Unix, there is no portable, dependency-free access check this
-/// std-only crate can perform (see the crate doc's D-A note); `is_file` is
-/// what this precedence step has always checked here, and a genuinely
-/// unusable binary still fails loudly at spawn time.
-#[cfg(not(unix))]
-fn is_readable_executable_file(path: &Path) -> bool {
-    path.is_file()
 }
 
 /// Resolve the `tidepool-extract` binary, STRICTLY.
