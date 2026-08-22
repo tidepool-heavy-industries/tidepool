@@ -30,9 +30,7 @@ use tidepool_agent::seam::CycleResultPayload;
 use tidepool_handlers::{ConsoleHandler, JournalHandler, SegmentPath, SubagentHandler};
 use tidepool_harness::engine::EngineConfig;
 use tidepool_harness::log::{LogHeader, LogWriter};
-use tidepool_harness::provider::{
-    DynModelProvider, ModelProvider, ProviderError, StreamSink, TurnRequest, TurnResponse, Usage,
-};
+use tidepool_harness::provider::DynModelProvider;
 use tidepool_harness::selfharness::operator::FormShape;
 use tidepool_harness::selfharness::persistence;
 use tidepool_harness::{
@@ -40,6 +38,8 @@ use tidepool_harness::{
     OperatorGate, SelfHarnessDriver,
 };
 use tidepool_worktree::testing::TestRepo;
+
+use support::scripted_provider::{script, KeyedProvider, PathKey, Phase};
 
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -67,46 +67,6 @@ fn header() -> LogHeader {
         prelude_hash: "delegate-positive-path".into(),
         extract_fingerprint: "delegate-positive-path".into(),
         harness_version: "test".into(),
-    }
-}
-
-/// One scripted window: the request's last message must contain `needle` for
-/// `reply` to be served — adapted (single-needle form) from
-/// `companion_recursive_slice.rs`'s `KeyedProvider`.
-struct KeyedProvider {
-    scripted: Vec<(&'static str, String)>,
-}
-
-impl ModelProvider for KeyedProvider {
-    async fn complete(
-        &self,
-        req: TurnRequest,
-        _sink: Option<StreamSink>,
-    ) -> Result<TurnResponse, ProviderError> {
-        let last = req
-            .messages
-            .last()
-            .map(|m| m.content.clone())
-            .unwrap_or_default();
-        let reply = self
-            .scripted
-            .iter()
-            .find(|(needle, _)| last.contains(needle))
-            .map(|(_, r)| r.clone())
-            .ok_or_else(|| {
-                ProviderError::Api(format!("KeyedProvider: no scripted reply matches:\n{last}"))
-            })?;
-        Ok(TurnResponse {
-            text: reply,
-            usage: Usage {
-                input_tokens: 50,
-                output_tokens: 10,
-                cached_input_tokens: None,
-                cache_write_tokens: None,
-            },
-            reasoning: None,
-            reasoning_items: Vec::new(),
-        })
     }
 }
 
@@ -203,19 +163,17 @@ async fn root_coalgebra_window_delegates_and_finalizes_on_the_result() {
     .expect("delegating answerer engine config over the recursive-companion harness dir")
     .with_delegate_wrap();
 
-    let provider: Arc<dyn DynModelProvider> = Arc::new(KeyedProvider {
-        scripted: vec![
-            ("NODE root — DISCOVER", delegating_reply()),
-            (
-                "— FOLD",
-                haskell(
-                    "finalize @FoldDecision (FoldDecision { foldSynthesis = \"FOLDED\", \
-                     foldTensions = [], foldEditsInOrder = [], \
-                     foldProposed = [] })",
-                ),
+    let provider: Arc<dyn DynModelProvider> = Arc::new(KeyedProvider::new(vec![
+        script(PathKey::Exact("root"), Phase::Discover, delegating_reply()),
+        script(
+            PathKey::Prefix(""),
+            Phase::Fold,
+            haskell(
+                "finalize @FoldDecision (FoldDecision { foldSynthesis = \"FOLDED\", \
+                 foldTensions = [] })",
             ),
-        ],
-    });
+        ),
+    ]));
     let writer = LogWriter::create(&log_path, &header()).expect("log writer");
     let agent = Arc::new(Harness::new(writer, agent_cfg, provider).expect("agent harness boots"));
 
@@ -377,19 +335,17 @@ async fn direct_subagent_send_dispatches_within_the_answerer_row() {
            Left _err -> finalize @LayerProposal (ProposeFinish { localAnswer = \"spawn failed\" }); \
            Right _cyc -> finalize @LayerProposal (ProposeFinish { localAnswer = \"spawned ok\" }) } }",
     );
-    let provider: Arc<dyn DynModelProvider> = Arc::new(KeyedProvider {
-        scripted: vec![
-            ("NODE root — DISCOVER", direct_send_reply),
-            (
-                "— FOLD",
-                haskell(
-                    "finalize @FoldDecision (FoldDecision { foldSynthesis = \"FOLDED\", \
-                     foldTensions = [], foldEditsInOrder = [], \
-                     foldProposed = [] })",
-                ),
+    let provider: Arc<dyn DynModelProvider> = Arc::new(KeyedProvider::new(vec![
+        script(PathKey::Exact("root"), Phase::Discover, direct_send_reply),
+        script(
+            PathKey::Prefix(""),
+            Phase::Fold,
+            haskell(
+                "finalize @FoldDecision (FoldDecision { foldSynthesis = \"FOLDED\", \
+                 foldTensions = [] })",
             ),
-        ],
-    });
+        ),
+    ]));
     let writer = LogWriter::create(&log_path, &header()).expect("log writer");
     let agent = Arc::new(Harness::new(writer, agent_cfg, provider).expect("agent harness boots"));
 
