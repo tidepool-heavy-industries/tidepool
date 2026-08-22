@@ -23,19 +23,13 @@ Print :: Text -> Console ()
 -- extra_imports (0 items) --
 -- end extra_imports --
 
--- helpers (2 items) --
+-- helpers (1 items) --
 -- helpers[0] (196 bytes) --
 -- | Emit a line of console output. Thin wrapper over the Print effect
 -- so chains never need `send (Print …)`.
 say :: forall effs. Member Console effs => Text -> Eff effs ()
 say = send . Print
 -- end helpers[0] --
-
--- helpers[1] (144 bytes) --
--- | `say` on anything Showable (`say . show`).
-sayShow :: forall a effs. (Show a, Member Console effs) => a -> Eff effs ()
-sayShow = say . show
--- end helpers[1] --
 
 -- end helpers --
 
@@ -102,7 +96,7 @@ KvCas :: Text -> Maybe Value -> Value -> KV (Either Value ())
 -- extra_imports (0 items) --
 -- end extra_imports --
 
--- helpers (8 items) --
+-- helpers (7 items) --
 -- helpers[0] (132 bytes) --
 -- | Look up a key; Nothing when absent.
 kvGet :: forall effs. Member KV effs => Text -> Eff effs (Maybe Value)
@@ -121,13 +115,7 @@ kvDel :: forall effs. Member KV effs => Text -> Eff effs ()
 kvDel = send . KvDelete
 -- end helpers[2] --
 
--- helpers[3] (127 bytes) --
--- | All keys (unordered; kvKeysP "" for sorted).
-kvKeys :: forall effs. Member KV effs => Eff effs [Text]
-kvKeys = send KvKeys
--- end helpers[3] --
-
--- helpers[4] (520 bytes) --
+-- helpers[3] (520 bytes) --
 -- | Delete all keys whose name starts with @prefix@; return the count deleted.
 -- Pass "" (empty string) to clear the ENTIRE store — this erases ALL
 -- persisted KV data for this server session, so use with caution.
@@ -136,26 +124,26 @@ kvKeys = send KvKeys
 -- callers manage namespaces manually via this prefix argument.
 kvClear :: forall effs. Member KV effs => Text -> Eff effs Int
 kvClear = send . KvClear
--- end helpers[4] --
+-- end helpers[3] --
 
--- helpers[5] (304 bytes) --
+-- helpers[4] (261 bytes) --
 -- | All keys whose name starts with @prefix@, returned sorted.
 -- E.g. @kvKeysP "agent/"@ returns @["agent/bar", "agent/foo", ...]@.
--- Pass "" to list ALL keys sorted (like kvKeys but deterministically ordered).
+-- Pass "" to list ALL keys, sorted.
 kvKeysP :: forall effs. Member KV effs => Text -> Eff effs [Text]
 kvKeysP = send . KvKeysP
--- end helpers[5] --
+-- end helpers[4] --
 
--- helpers[6] (326 bytes) --
+-- helpers[5] (326 bytes) --
 -- | Summary of KV store state as a JSON Value:
 -- @{count :: Int, sample :: [Text], file_size_bytes :: Int}@.
 -- Use to inspect junk-drawer accumulation without listing all keys.
 -- Extract fields with optics: @i <- kvInfo; i ^? key "count" . _Int@
 kvInfo :: forall effs. Member KV effs => Eff effs Value
 kvInfo = send KvInfo
--- end helpers[6] --
+-- end helpers[5] --
 
--- helpers[7] (612 bytes) --
+-- helpers[6] (612 bytes) --
 -- | Atomic compare-and-swap: set @key@ to @new@ only if its current
 -- value equals @expected@ (Nothing = require the key ABSENT).
 -- @Right ()@ on success; @Left actual@ (the current value) on a
@@ -166,7 +154,7 @@ kvInfo = send KvInfo
 -- conflict policy.
 kvCas :: forall effs. Member KV effs => Text -> Maybe Value -> Value -> Eff effs (Either Value ())
 kvCas k e n = send (KvCas k e n)
--- end helpers[7] --
+-- end helpers[6] --
 
 -- end helpers --
 
@@ -339,7 +327,7 @@ readGlob :: forall effs. Member Fs effs => Text -> Eff effs [FileRead]
 readGlob = send . FsReadGlob
 -- end helpers[11] --
 
--- helpers[12] (1172 bytes) --
+-- helpers[12] (1175 bytes) --
 -- | Exact str-replace, EXACTLY-ONCE. Reports the outcome as an
 -- `UpdateOneOutcome` DATA value (never throws, mirrors `InsertAfterOutcome`):
 -- empty `old`, a missing file, `old` not found, or `old` matching 2+ places
@@ -354,13 +342,13 @@ update path old new
       case er of
         Left e -> pure (UpdateOneRejected ("file not found: " <> show e) Nothing)
         Right src ->
-          case len (T.splitOn old src) - 1 of
+          case length (T.splitOn old src) - 1 of
             0 -> pure (UpdateOneRejected ("'old' not found in " <> path) Nothing)
             1 -> writeFile path (replace old new src) >>= liftEither >> pure UpdateOneApplied
             n -> pure (UpdateOneRejected ("'old' matches " <> show n <> " places in " <> path <> " (add surrounding context to disambiguate)") (Just n))
 -- end helpers[12] --
 
--- helpers[13] (871 bytes) --
+-- helpers[13] (874 bytes) --
 -- | Replace EVERY occurrence of `old` with `new`. Reports the outcome as an
 -- `UpdateAllOutcome` DATA value (never throws): empty `old`, a missing file,
 -- or zero matches is `UpdateAllRejected` (nothing written); otherwise
@@ -373,13 +361,13 @@ updateAll path old new
       case er of
         Left e -> pure (UpdateAllRejected ("file not found: " <> show e))
         Right src ->
-          let n = len (T.splitOn old src) - 1
+          let n = length (T.splitOn old src) - 1
           in if n == 0
                then pure (UpdateAllRejected ("'old' not found in " <> path))
                else writeFile path (replace old new src) >>= liftEither >> pure (UpdateAllApplied n)
 -- end helpers[13] --
 
--- helpers[14] (937 bytes) --
+-- helpers[14] (940 bytes) --
 -- | Dry-run `update`: returns an `UpdateOutcome` (the review diff, or the
 -- reason it can't apply), writes NOTHING. Never errors — the conflict comes
 -- back as data so you can branch before committing.
@@ -389,7 +377,7 @@ planUpdate path old new = do
   case er of
     Left e -> pure (UpdateRejected ("file not found: " <> show e) Nothing)
     Right src ->
-      let n = if T.null old then 0 else len (T.splitOn old src) - 1
+      let n = if T.null old then 0 else length (T.splitOn old src) - 1
       in if T.null old then pure (UpdateRejected "'old' must be non-empty" Nothing)
          else if n == 0 then pure (UpdateRejected "not found" Nothing)
          else if n > 1 then pure (UpdateRejected "ambiguous" (Just n))
@@ -410,7 +398,7 @@ updateJ v = case (v ^? key "file" . _String, v ^? key "old" . _String, v ^? key 
   _ -> pure (UpdateOneRejected "updateJ: need {file, old, new} strings in input" Nothing)
 -- end helpers[15] --
 
--- helpers[16] (918 bytes) --
+-- helpers[16] (921 bytes) --
 -- | Insert a block after the unique line containing `anchor`. Reports the
 -- outcome as an `InsertAfterOutcome` DATA value (never throws): a missing
 -- file, or an anchor matching zero or 2+ lines, is `InsertAfterRejected`
@@ -422,7 +410,7 @@ insertAfter path anchor block = do
     Left e -> pure (InsertAfterRejected ("file not found: " <> show e) Nothing)
     Right src ->
       let ls = lines src
-          n = len (filter (isInfixOf anchor) ls)
+          n = length (filter (isInfixOf anchor) ls)
       in case n of
            1 -> writeFile path (unlines (concatMap (\l -> if anchor `isInfixOf` l then [l, block] else [l]) ls))
                   >>= liftEither >> pure InsertAfterApplied
@@ -1060,19 +1048,22 @@ ask :: forall effs. Member Ask effs => Schema -> Text -> Eff effs Value
 ask schema prompt = send (AskWith prompt (object ["schema" .= schemaToValue schema]))
 -- end helpers[0] --
 
--- helpers[1] (61 bytes) --
+-- helpers[1] (83 bytes) --
+-- @substrate-helper@
 isOpt :: Schema -> Bool
 isOpt (SOpt _) = True
 isOpt _ = False
 -- end helpers[1] --
 
--- helpers[2] (74 bytes) --
+-- helpers[2] (96 bytes) --
+-- @substrate-helper@
 innerSchema :: Schema -> Schema
 innerSchema (SOpt s) = s
 innerSchema s = s
 -- end helpers[2] --
 
--- helpers[3] (638 bytes) --
+-- helpers[3] (660 bytes) --
+-- @substrate-helper@
 schemaToValue :: Schema -> Value
 schemaToValue SStr = object ["type" .= ("string" :: Text)]
 schemaToValue SNum = object ["type" .= ("number" :: Text)]
@@ -1289,19 +1280,22 @@ renderInvocationExit (ExitCancelled d) = "cancelled: " <> d
 renderInvocationExit (ExitRuntimeFailure d) = "runtime failure: " <> d
 -- end helpers[3] --
 
--- helpers[4] (211 bytes) --
+-- helpers[4] (233 bytes) --
+-- @substrate-helper@
 {-# OPAQUE runLLMTurnSited #-}
 runLLMTurnSited :: forall a effs. Member RunLLMTurn effs => Int -> Text -> Eff effs a
 runLLMTurnSited sid p = unsafeCoerce <$> send (RunLLMTurnWith p (object ["typedSite" .= sid]))
 -- end helpers[4] --
 
--- helpers[5] (263 bytes) --
+-- helpers[5] (285 bytes) --
+-- @substrate-helper@
 {-# OPAQUE runLLMTurnForkSited #-}
 runLLMTurnForkSited :: forall a effs. Member RunLLMTurn effs => Int -> Text -> Eff effs (Either InvocationExit a)
 runLLMTurnForkSited sid p = unsafeCoerce <$> send (RunLLMTurnWith p (object ["typedSite" .= sid, "fork" .= True]))
 -- end helpers[5] --
 
--- helpers[6] (349 bytes) --
+-- helpers[6] (371 bytes) --
+-- @substrate-helper@
 {-# OPAQUE runLLMTurnFanoutSited #-}
 runLLMTurnFanoutSited :: forall a effs. Member RunLLMTurn effs => Int -> [Text] -> Eff effs [Either InvocationExit a]
 runLLMTurnFanoutSited sid prompts = unsafeCoerce <$> send (RunLLMTurnWith (intercalate "\n" prompts) (object ["typedSite" .= sid, "fork" .= True, "fan" .= length prompts, "prompts" .= prompts]))
@@ -1326,7 +1320,8 @@ runLLMTurnBranch :: forall a effs. Member RunLLMTurn effs => ContextRef -> Text 
 runLLMTurnBranch ref p = runLLMTurnBranchSited 0 ref p
 -- end helpers[8] --
 
--- helpers[9] (330 bytes) --
+-- helpers[9] (352 bytes) --
+-- @substrate-helper@
 {-# OPAQUE runLLMTurnBranchSited #-}
 runLLMTurnBranchSited :: forall a effs. Member RunLLMTurn effs => Int -> ContextRef -> Text -> Eff effs (Either InvocationExit (a, ContextRef))
 runLLMTurnBranchSited sid (ContextRef ref) p = unsafeCoerce <$> send (RunLLMTurnWith p (object ["typedSite" .= sid, "branch" .= True, "ref" .= ref]))
@@ -1338,7 +1333,8 @@ runLLMTurnBranchLabeled :: forall a effs. Member RunLLMTurn effs => Text -> Cont
 runLLMTurnBranchLabeled label ref p = runLLMTurnBranchLabeledSited 0 label ref p
 -- end helpers[10] --
 
--- helpers[11] (383 bytes) --
+-- helpers[11] (405 bytes) --
+-- @substrate-helper@
 {-# OPAQUE runLLMTurnBranchLabeledSited #-}
 runLLMTurnBranchLabeledSited :: forall a effs. Member RunLLMTurn effs => Int -> Text -> ContextRef -> Text -> Eff effs (Either InvocationExit (a, ContextRef))
 runLLMTurnBranchLabeledSited sid label (ContextRef ref) p = unsafeCoerce <$> send (RunLLMTurnWith p (object ["typedSite" .= sid, "branch" .= True, "ref" .= ref, "label" .= label]))
@@ -1350,7 +1346,8 @@ runLLMTurnBranchFanout :: forall a effs. Member RunLLMTurn effs => ContextRef ->
 runLLMTurnBranchFanout ref labeledPrompts = runLLMTurnBranchFanoutSited 0 ref labeledPrompts
 -- end helpers[12] --
 
--- helpers[13] (524 bytes) --
+-- helpers[13] (546 bytes) --
+-- @substrate-helper@
 {-# OPAQUE runLLMTurnBranchFanoutSited #-}
 runLLMTurnBranchFanoutSited :: forall a effs. Member RunLLMTurn effs => Int -> ContextRef -> [(Text, Text)] -> Eff effs [Either InvocationExit (a, ContextRef)]
 runLLMTurnBranchFanoutSited sid (ContextRef ref) labeledPrompts = unsafeCoerce <$> send (RunLLMTurnWith (intercalate "\n" (map snd labeledPrompts)) (object ["typedSite" .= sid, "branchFanout" .= True, "ref" .= ref, "labels" .= map fst labeledPrompts, "prompts" .= map snd labeledPrompts, "fan" .= length labeledPrompts]))
@@ -1463,13 +1460,15 @@ ForkAllWith :: Int -> [Text] -> Fork Value
 -- end extra_imports --
 
 -- helpers (2 items) --
--- helpers[0] (163 bytes) --
+-- helpers[0] (185 bytes) --
+-- @substrate-helper@
 {-# OPAQUE forkSited #-}
 forkSited :: forall a effs. Member Fork effs => Int -> Text -> Eff effs a
 forkSited sid brief = unsafeCoerce <$> send (ForkWith sid brief)
 -- end helpers[0] --
 
--- helpers[1] (183 bytes) --
+-- helpers[1] (205 bytes) --
+-- @substrate-helper@
 {-# OPAQUE forkAllSited #-}
 forkAllSited :: forall a effs. Member Fork effs => Int -> [Text] -> Eff effs [a]
 forkAllSited sid prompts = unsafeCoerce <$> send (ForkAllWith sid prompts)

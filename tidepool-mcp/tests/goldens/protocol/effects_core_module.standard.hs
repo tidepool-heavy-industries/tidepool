@@ -137,9 +137,6 @@ data Fork a where
 -- so chains never need `send (Print …)`.
 say :: forall effs. Member Console effs => Text -> Eff effs ()
 say = send . Print
--- | `say` on anything Showable (`say . show`).
-sayShow :: forall a effs. (Show a, Member Console effs) => a -> Eff effs ()
-sayShow = say . show
 -- | Look up a key; Nothing when absent.
 kvGet :: forall effs. Member KV effs => Text -> Eff effs (Maybe Value)
 kvGet = send . KvGet
@@ -149,9 +146,6 @@ kvSet k v = send (KvSet k v)
 -- | Delete a key (no-op when absent).
 kvDel :: forall effs. Member KV effs => Text -> Eff effs ()
 kvDel = send . KvDelete
--- | All keys (unordered; kvKeysP "" for sorted).
-kvKeys :: forall effs. Member KV effs => Eff effs [Text]
-kvKeys = send KvKeys
 -- | Delete all keys whose name starts with @prefix@; return the count deleted.
 -- Pass "" (empty string) to clear the ENTIRE store — this erases ALL
 -- persisted KV data for this server session, so use with caution.
@@ -162,7 +156,7 @@ kvClear :: forall effs. Member KV effs => Text -> Eff effs Int
 kvClear = send . KvClear
 -- | All keys whose name starts with @prefix@, returned sorted.
 -- E.g. @kvKeysP "agent/"@ returns @["agent/bar", "agent/foo", ...]@.
--- Pass "" to list ALL keys sorted (like kvKeys but deterministically ordered).
+-- Pass "" to list ALL keys, sorted.
 kvKeysP :: forall effs. Member KV effs => Text -> Eff effs [Text]
 kvKeysP = send . KvKeysP
 -- | Summary of KV store state as a JSON Value:
@@ -256,7 +250,7 @@ update path old new
       case er of
         Left e -> pure (UpdateOneRejected ("file not found: " <> show e) Nothing)
         Right src ->
-          case len (T.splitOn old src) - 1 of
+          case length (T.splitOn old src) - 1 of
             0 -> pure (UpdateOneRejected ("'old' not found in " <> path) Nothing)
             1 -> writeFile path (replace old new src) >>= liftEither >> pure UpdateOneApplied
             n -> pure (UpdateOneRejected ("'old' matches " <> show n <> " places in " <> path <> " (add surrounding context to disambiguate)") (Just n))
@@ -272,7 +266,7 @@ updateAll path old new
       case er of
         Left e -> pure (UpdateAllRejected ("file not found: " <> show e))
         Right src ->
-          let n = len (T.splitOn old src) - 1
+          let n = length (T.splitOn old src) - 1
           in if n == 0
                then pure (UpdateAllRejected ("'old' not found in " <> path))
                else writeFile path (replace old new src) >>= liftEither >> pure (UpdateAllApplied n)
@@ -285,7 +279,7 @@ planUpdate path old new = do
   case er of
     Left e -> pure (UpdateRejected ("file not found: " <> show e) Nothing)
     Right src ->
-      let n = if T.null old then 0 else len (T.splitOn old src) - 1
+      let n = if T.null old then 0 else length (T.splitOn old src) - 1
       in if T.null old then pure (UpdateRejected "'old' must be non-empty" Nothing)
          else if n == 0 then pure (UpdateRejected "not found" Nothing)
          else if n > 1 then pure (UpdateRejected "ambiguous" (Just n))
@@ -312,7 +306,7 @@ insertAfter path anchor block = do
     Left e -> pure (InsertAfterRejected ("file not found: " <> show e) Nothing)
     Right src ->
       let ls = lines src
-          n = len (filter (isInfixOf anchor) ls)
+          n = length (filter (isInfixOf anchor) ls)
       in case n of
            1 -> writeFile path (unlines (concatMap (\l -> if anchor `isInfixOf` l then [l, block] else [l]) ls))
                   >>= liftEither >> pure InsertAfterApplied
@@ -435,12 +429,15 @@ getCurrentTime :: forall effs. Member Time effs => Eff effs UTCTime
 getCurrentTime = UTCTime <$> send TimeNow
 ask :: forall effs. Member Ask effs => Schema -> Text -> Eff effs Value
 ask schema prompt = send (AskWith prompt (object ["schema" .= schemaToValue schema]))
+-- @substrate-helper@
 isOpt :: Schema -> Bool
 isOpt (SOpt _) = True
 isOpt _ = False
+-- @substrate-helper@
 innerSchema :: Schema -> Schema
 innerSchema (SOpt s) = s
 innerSchema s = s
+-- @substrate-helper@
 schemaToValue :: Schema -> Value
 schemaToValue SStr = object ["type" .= ("string" :: Text)]
 schemaToValue SNum = object ["type" .= ("number" :: Text)]
@@ -463,12 +460,15 @@ renderInvocationExit (ExitRoundsExhausted d) = "round exhaustion: " <> d
 renderInvocationExit (ExitNotFinalized d) = "non-finalization: " <> d
 renderInvocationExit (ExitCancelled d) = "cancelled: " <> d
 renderInvocationExit (ExitRuntimeFailure d) = "runtime failure: " <> d
+-- @substrate-helper@
 {-# OPAQUE runLLMTurnSited #-}
 runLLMTurnSited :: forall a effs. Member RunLLMTurn effs => Int -> Text -> Eff effs a
 runLLMTurnSited sid p = unsafeCoerce <$> send (RunLLMTurnWith p (object ["typedSite" .= sid]))
+-- @substrate-helper@
 {-# OPAQUE runLLMTurnForkSited #-}
 runLLMTurnForkSited :: forall a effs. Member RunLLMTurn effs => Int -> Text -> Eff effs (Either InvocationExit a)
 runLLMTurnForkSited sid p = unsafeCoerce <$> send (RunLLMTurnWith p (object ["typedSite" .= sid, "fork" .= True]))
+-- @substrate-helper@
 {-# OPAQUE runLLMTurnFanoutSited #-}
 runLLMTurnFanoutSited :: forall a effs. Member RunLLMTurn effs => Int -> [Text] -> Eff effs [Either InvocationExit a]
 runLLMTurnFanoutSited sid prompts = unsafeCoerce <$> send (RunLLMTurnWith (intercalate "\n" prompts) (object ["typedSite" .= sid, "fork" .= True, "fan" .= length prompts, "prompts" .= prompts]))
@@ -485,24 +485,29 @@ freezeContext = send RunLLMTurnFreezeWith
 {-# OPAQUE runLLMTurnBranch #-}
 runLLMTurnBranch :: forall a effs. Member RunLLMTurn effs => ContextRef -> Text -> Eff effs (Either InvocationExit (a, ContextRef))
 runLLMTurnBranch ref p = runLLMTurnBranchSited 0 ref p
+-- @substrate-helper@
 {-# OPAQUE runLLMTurnBranchSited #-}
 runLLMTurnBranchSited :: forall a effs. Member RunLLMTurn effs => Int -> ContextRef -> Text -> Eff effs (Either InvocationExit (a, ContextRef))
 runLLMTurnBranchSited sid (ContextRef ref) p = unsafeCoerce <$> send (RunLLMTurnWith p (object ["typedSite" .= sid, "branch" .= True, "ref" .= ref]))
 {-# OPAQUE runLLMTurnBranchLabeled #-}
 runLLMTurnBranchLabeled :: forall a effs. Member RunLLMTurn effs => Text -> ContextRef -> Text -> Eff effs (Either InvocationExit (a, ContextRef))
 runLLMTurnBranchLabeled label ref p = runLLMTurnBranchLabeledSited 0 label ref p
+-- @substrate-helper@
 {-# OPAQUE runLLMTurnBranchLabeledSited #-}
 runLLMTurnBranchLabeledSited :: forall a effs. Member RunLLMTurn effs => Int -> Text -> ContextRef -> Text -> Eff effs (Either InvocationExit (a, ContextRef))
 runLLMTurnBranchLabeledSited sid label (ContextRef ref) p = unsafeCoerce <$> send (RunLLMTurnWith p (object ["typedSite" .= sid, "branch" .= True, "ref" .= ref, "label" .= label]))
 {-# OPAQUE runLLMTurnBranchFanout #-}
 runLLMTurnBranchFanout :: forall a effs. Member RunLLMTurn effs => ContextRef -> [(Text, Text)] -> Eff effs [Either InvocationExit (a, ContextRef)]
 runLLMTurnBranchFanout ref labeledPrompts = runLLMTurnBranchFanoutSited 0 ref labeledPrompts
+-- @substrate-helper@
 {-# OPAQUE runLLMTurnBranchFanoutSited #-}
 runLLMTurnBranchFanoutSited :: forall a effs. Member RunLLMTurn effs => Int -> ContextRef -> [(Text, Text)] -> Eff effs [Either InvocationExit (a, ContextRef)]
 runLLMTurnBranchFanoutSited sid (ContextRef ref) labeledPrompts = unsafeCoerce <$> send (RunLLMTurnWith (intercalate "\n" (map snd labeledPrompts)) (object ["typedSite" .= sid, "branchFanout" .= True, "ref" .= ref, "labels" .= map fst labeledPrompts, "prompts" .= map snd labeledPrompts, "fan" .= length labeledPrompts]))
+-- @substrate-helper@
 {-# OPAQUE forkSited #-}
 forkSited :: forall a effs. Member Fork effs => Int -> Text -> Eff effs a
 forkSited sid brief = unsafeCoerce <$> send (ForkWith sid brief)
+-- @substrate-helper@
 {-# OPAQUE forkAllSited #-}
 forkAllSited :: forall a effs. Member Fork effs => Int -> [Text] -> Eff effs [a]
 forkAllSited sid prompts = unsafeCoerce <$> send (ForkAllWith sid prompts)

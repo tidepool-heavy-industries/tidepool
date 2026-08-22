@@ -1,7 +1,7 @@
   Console: Print text output.
-      verbs: say, sayShow
+      verbs: say
   KV: Persistent key-value store.
-      verbs: kvGet, kvSet, kvDel, kvKeys, kvClear, kvKeysP, kvInfo, kvCas
+      verbs: kvGet, kvSet, kvDel, kvClear, kvKeysP, kvInfo, kvCas
   Fs: Read and write files (sandboxed to server working directory).
       verbs: readFile, writeFile, appendFile, listDirectory, doesFileExist, doesDirectoryExist, getFileSize, fsMeta, getCurrentDirectory, glob, grepGlob, readGlob, update, updateAll, planUpdate, updateJ, insertAfter, writeChecked, fileHash, writeCheckedIf
   Http: JSON I/O.
