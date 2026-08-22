@@ -628,13 +628,13 @@ Every record field is required — there are no optional fields on this type.
 
 Every window in this run shares ONE resident Haskell session: one heap, one
 accumulated scope. Everything you declare or bind — pure or effectful,
-however you spell the type — carries forward for the rest of the run and is
-callable from any later window, including your children, your siblings, and
-the folds; code visible in your inherited context really ran in this
-session, so treat it as live names, not prose. The one exception: a bind
-(`x <- expr`) whose captured value itself mentions this window's own effect
-type is refused at bind time — bind the plain parts (Text, numbers, lists,
-Value, records you declared) separately instead.
+however you spell the type — carries forward and is callable from your own
+later turns and your descendants — never a sibling's, declarations are
+ancestry-scoped, not run-wide; code visible in your inherited context really
+ran in this session, so treat it as live names, not prose. The one
+exception: a bind (`x <- expr`) whose captured value itself mentions this
+window's own effect type is refused at bind time — bind the plain parts
+(Text, numbers, lists, Value, records you declared) separately instead.
 
 - Your `finalize` value must be plain data — no functions inside it.
 - `getStateJson` is a read-only snapshot, constant for your whole window —
