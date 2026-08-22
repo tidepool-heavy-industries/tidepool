@@ -7,6 +7,11 @@ to plan files that stay in this directory but no longer describe active work.
 
 ## Active work
 
+- [Session-ownership capstone](registry-capstone.md): human-approved wave
+  (2026-08-22), consolidating dup-c-survey items 1 (resident-session
+  checkout/lifecycle) and 5 (harness suspension state) into one promoted
+  registry primitive in `tidepool-runtime` and one suspension-metadata map
+  in the harness. In flight.
 - [Turn latency: state injection + compile incrementalism](turn-latency-state-injection.md):
   narrow-first design approved by the operator (2026-08-20): prove the
   mechanism on the one compile that dominates turn wall time (the fused
