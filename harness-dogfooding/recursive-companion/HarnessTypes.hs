@@ -669,7 +669,9 @@ subtreeLines title a = nodeLine title a : a.answerTree
 --
 -- Emitted in order: the folded answer as prose, the tensions the root fold
 -- surfaced, the tree, then a one-line receipt.  The tree is inspectable and
--- SUBORDINATE — BELOW the answer, not beside it, one line per node.
+-- SUBORDINATE — BELOW the answer, not beside it, one line per node.  Last of
+-- all (both branches) is 'coalgebraProtocol' — see its own doc for why it
+-- lives here instead of in a per-node prompt.
 render :: State -> Text
 render st = case st.lastRun of
   Nothing ->
@@ -682,7 +684,9 @@ Your next turn discovers a tree one layer at a time: a coalgebra window
 finalizes a LayerProposal for THIS node only (finish locally, or split into
 the next layer's branches), each branch descends recursively from inherited
 context, and an algebra window folds every realized layer back in declared
-branch order.|]
+branch order.
+
+{coalgebraProtocol c}|]
   Just r ->
     [fmt|{r.runAnswer}
 {tensionsBlock r}
@@ -693,7 +697,9 @@ branch order.|]
 
 Question: {st.question}
 {budgetLine}{draftBlock}
-Turns folded: {show st.turnCount}|]
+Turns folded: {show st.turnCount}
+
+{coalgebraProtocol c}|]
   where
     c = st.config
     budgetLine :: Text
@@ -724,6 +730,93 @@ Turns folded: {show st.turnCount}|]
     -- one of them, keyed by node path.
     receiptLine r =
       [fmt|receipt: {show r.runNodes} nodes, {show r.runWindows} windows, {show r.runForced} budget-forced finishes, {show r.runFailed} failures; gate interventions are journaled per node under kind "gate"|]
+
+-- | The one-off coalgebra teaching — moved here from
+-- @Harness.coalgebraPrompt@ (mechanics prose, the delegate\/askUser
+-- contracts, and two compilable examples). 'render''s 'Text' becomes the
+-- per-cycle SYSTEM framing every coalgebra\/algebra window in the tree
+-- inherits (a non-root window is always a branch off its own parent's
+-- frozen prefix, all the way back to the root, which itself branches off
+-- @Harness.loop@'s own frozen context — @Harness.rootSeed@'s doc: "the root
+-- is not a special case anywhere below it") — so teaching it exactly ONCE
+-- here, per turn, reaches every node at every depth instead of re-teaching
+-- it at each of N ancestors on the way down. @Harness.coalgebraPrompt@ is
+-- now the minimal per-node form at every depth, root included.
+--
+-- Positioned LAST in 'render''s output, in both branches — the folded
+-- answer (or, pre-first-turn, the opening orientation) stays the primary,
+-- readable-first content; this is reference material for the model
+-- answering a coalgebra window, not the human reading the operator page.
+-- Delimited with plain @--- ... ---@ markers rather than a triple-backtick
+-- fence, same reason @Harness.exampleBlock@ states: a markdown fence here
+-- would compete with the engine's own auto-rendered hole-card fence for
+-- FIRST position in the assembled request.
+coalgebraProtocol :: Config -> Text
+coalgebraProtocol c =
+  [fmt|--- PROTOCOL: every "NODE ... — DISCOVER" window in this run ---
+
+A coalgebra window decides ONE layer of the tree and only that layer. You
+cannot describe a subtree: the answer type has no recursive arm, by design.
+Either finish here, or name the branches that should be worked next — each
+of them will be discovered the same way, and their results folded back to
+you. At most {c.maxFanOut} branches: a split naming more than that is
+treated as a forced finish before any of those branches ever run.
+
+Every record field is required — there are no optional fields on this type.
+
+If a layer needs repository evidence or a code change to decide honestly,
+delegate it to a coding subagent before you finalize:
+`delegate (DelegateBrief {{ delegateLabel, delegateInstruction, delegateExpected }})
+:: M (Either DelegateError DelegateResult)`. `delegateLabel` is a short slug;
+`delegateInstruction` is the task in prose; `delegateExpected` says what a good
+result looks like (may be blank). You get back `Left err` (render it with
+`renderDelegateError`) or `Right r` with `delegateSummary r` and
+`delegateCaveats r`. The subagent works in its own fresh worktree off the
+current repository — there is no worktree or raw-subagent surface here, and
+none is needed: bind the result, then finalize based on what it found.
+
+If the OPERATOR's intent is genuinely ambiguous — the question underdetermines
+a fork only they can steer — ask them:
+`askUserWith @OperatorSteering [title "<the question, in a sentence or two>"]`;
+the reply's `steeringReply` field is their answer. The title renders directly
+above the form's controls — put the question itself there, phrased to the
+operator: why you are asking and what a good answer looks like. For longer
+context (evidence gathered, options you weighed), post a `note` first; note
+and title together are the form's ONLY context, so they must stand alone.
+If you present discrete alternatives (`choose`), author any escape hatch as
+one of the values — e.g. a "none of these" arm carrying your fallback —
+there is no built-in cancel or back. Ask ONLY when their answer would
+change what this window does; an ask is a human interrupt, so otherwise
+decide, and record the assumption in what you finalize.
+
+Finalize a LayerProposal:
+- `ProposeFinish {{ localAnswer }}` — this node answers locally. Say the
+  answer, not a plan to produce it.
+- `ProposeSplit {{ splitPosture, splitFocus, splitBranches }}` —
+  `splitPosture` is Explore (open the space), Compare (weigh named options),
+  or Challenge (attack a claim); `splitFocus` is the focus, the decision, or
+  the claim, per the posture. `splitBranches` is a non-empty list of
+  ProposedBranch {{ branchTitle, branchRole, branchInstruction }} with
+  branchRole one of Primary, Alternative, Critic. A branch with a blank
+  title or instruction, or a split with no branches, is treated as a failed
+  window — not as a finish you chose.
+
+Two complete examples:
+
+--- EXAMPLE ---
+finalize @LayerProposal (ProposeFinish {{ localAnswer = "the answer, stated directly" }})
+--- END EXAMPLE ---
+
+--- EXAMPLE ---
+finalize @LayerProposal (ProposeSplit
+  {{ splitPosture = Explore
+  , splitFocus = "what this node needs to settle"
+  , splitBranches =
+      [ ProposedBranch {{ branchTitle = "first angle", branchRole = Primary, branchInstruction = "work this angle" }} ]
+  }})
+--- END EXAMPLE ---
+
+--- END PROTOCOL ---|]
 
 renderPolicy :: GatePolicy -> Text
 renderPolicy p = case p of

@@ -1710,34 +1710,22 @@ postureAndFocus layer = case layer of
 -- suffix.
 -- ---------------------------------------------------------------------------
 
--- | Three complete, minimal, COMPILABLE @finalize@ examples (companion
--- review step 8f) — one per window type, teaching constructor nesting and
--- required-empty-list fields better than schema prose alone. Delimited with
--- a plain @--- EXAMPLE ---@ marker rather than a triple-backtick fence: a
--- markdown fence here would be the FIRST one in the assembled request,
--- ahead of the engine's own auto-rendered hole-card type shape, and
--- 'companion_recursive_slice.rs''s row-1 check reads exactly that FIRST
--- fenced block (@fenced_haskell@) — these examples must never compete with
--- it for that position.
+-- | A complete, minimal, COMPILABLE @finalize@ example (companion review
+-- step 8f) — teaching constructor nesting and required-empty-list fields
+-- better than schema prose alone. Delimited with a plain @--- EXAMPLE ---@
+-- marker rather than a triple-backtick fence: a markdown fence here would be
+-- the FIRST one in the assembled request, ahead of the engine's own
+-- auto-rendered hole-card type shape, and 'companion_recursive_slice.rs''s
+-- row-1 check reads exactly that FIRST fenced block (@fenced_haskell@) —
+-- this example must never compete with it for that position. Only the
+-- algebra's own example lives here now — the coalgebra's pair moved to
+-- 'HarnessTypes.render' alongside the rest of the one-off teaching; see
+-- 'coalgebraPrompt's doc.
 exampleBlock :: Text -> Text
 exampleBlock code =
   [fmt|--- EXAMPLE ---
 {code}
 --- END EXAMPLE ---|]
-
-exampleProposeFinish :: Text
-exampleProposeFinish =
-  exampleBlock "finalize @LayerProposal (ProposeFinish { localAnswer = \"the answer, stated directly\" })"
-
-exampleProposeSplit :: Text
-exampleProposeSplit =
-  exampleBlock
-    "finalize @LayerProposal (ProposeSplit\n\
-    \  { splitPosture = Explore\n\
-    \  , splitFocus = \"what this node needs to settle\"\n\
-    \  , splitBranches =\n\
-    \      [ ProposedBranch { branchTitle = \"first angle\", branchRole = Primary, branchInstruction = \"work this angle\" } ]\n\
-    \  })"
 
 exampleFoldDecisionEmpty :: Text
 exampleFoldDecisionEmpty =
@@ -1749,6 +1737,21 @@ exampleFoldDecisionEmpty =
 -- this is the mechanical subset: the numbers a coalgebra window needs to
 -- see its own room to fork, read straight off the seed and 'Config' rather
 -- than left implicit).
+--
+-- MINIMAL AT EVERY DEPTH, root included — no depth branch, no special case
+-- ('rootSeed's doc: "the root is not a special case anywhere below it").
+-- The mechanics prose (finalize\/delegate\/askUser contracts, the two
+-- compilable examples) used to be re-taught in full at every node: every
+-- non-root coalgebra window is a 'bulkLayerWindow' BRANCH off its own
+-- parent's frozen prefix, and every ancestor was itself a branch off ITS
+-- parent, so a depth-N node's inherited context already contained N copies
+-- of that teaching before its own fresh copy added an (N+1)th. It now lives
+-- ONCE per turn, in 'HarnessTypes.render''s output — the per-cycle system
+-- framing every coalgebra\/algebra window in the tree inherits (root
+-- included, since 'loop' freezes its own context, which carries that
+-- framing, before minting 'rootSeed') — so this prompt only ever needs to
+-- say what is genuinely per-node: where this node sits, its budget, and its
+-- own instruction.
 coalgebraPrompt :: Config -> NodeSeed -> Text
 coalgebraPrompt cfg seed =
   [fmt|NODE {renderPath seed.seedPath} — DISCOVER.
@@ -1756,58 +1759,6 @@ coalgebraPrompt cfg seed =
 Budget: depth {seed.seedDepth} of {cfg.maxDepth} max, node allowance {seed.seedAllowance}, fan-out cap {cfg.maxFanOut}.
 
 {renderBrief seed.seedBrief}
-
-Decide THIS LAYER and only this layer. You cannot describe a subtree: the
-answer type has no recursive arm, by design. Either finish here, or name the
-branches that should be worked next — each of them will be discovered the
-same way you are being discovered now, and their results folded back to you.
-At most {cfg.maxFanOut} branches: a split naming more than that is treated
-as a forced finish before any of those branches ever run.
-
-Every record field is required — there are no optional fields on this type.
-
-If this layer needs repository evidence or a code change to decide honestly,
-delegate it to a coding subagent before you finalize:
-`delegate (DelegateBrief {{ delegateLabel, delegateInstruction, delegateExpected }})
-:: M (Either DelegateError DelegateResult)`. `delegateLabel` is a short slug;
-`delegateInstruction` is the task in prose; `delegateExpected` says what a good
-result looks like (may be blank). You get back `Left err` (render it with
-`renderDelegateError`) or `Right r` with `delegateSummary r` and
-`delegateCaveats r`. The subagent works in its own fresh worktree off the
-current repository — there is no worktree or raw-subagent surface here, and
-none is needed: bind the result, then finalize based on what it found.
-
-If the OPERATOR's intent is genuinely ambiguous — the question underdetermines
-a fork only they can steer — ask them:
-`askUserWith @OperatorSteering [title "<the question, in a sentence or two>"]`;
-the reply's `steeringReply` field is their answer. The title renders directly
-above the form's controls — put the question itself there, phrased to the
-operator: why you are asking and what a good answer looks like. For longer
-context (evidence gathered, options you weighed), post a `note` first; note
-and title together are the form's ONLY context, so they must stand alone.
-If you present discrete alternatives (`choose`), author any escape hatch as
-one of the values — e.g. a "none of these" arm carrying your fallback —
-there is no built-in cancel or back. Ask ONLY when their answer would
-change what this window does; an ask is a human interrupt, so otherwise
-decide, and record the assumption in what you finalize.
-
-Finalize a LayerProposal:
-- `ProposeFinish {{ localAnswer }}` — this node answers locally. Say the
-  answer, not a plan to produce it.
-- `ProposeSplit {{ splitPosture, splitFocus, splitBranches }}` —
-  `splitPosture` is Explore (open the space), Compare (weigh named options),
-  or Challenge (attack a claim); `splitFocus` is the focus, the decision, or
-  the claim, per the posture. `splitBranches` is a non-empty list of
-  ProposedBranch {{ branchTitle, branchRole, branchInstruction }} with
-  branchRole one of Primary, Alternative, Critic. A branch with a blank
-  title or instruction, or a split with no branches, is treated as a failed
-  window — not as a finish you chose.
-
-Two complete examples:
-
-{exampleProposeFinish}
-
-{exampleProposeSplit}
 
 Finalize: `finalize @LayerProposal (...)`|]
 

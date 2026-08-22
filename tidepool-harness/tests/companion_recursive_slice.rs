@@ -157,6 +157,9 @@ struct KeyedProvider {
     /// — the record several assertions below read (which windows ran at all,
     /// and what a window was actually prompted with).
     seen: Mutex<Vec<String>>,
+    /// As `seen`, but the FULL request (every message, framing included) —
+    /// see `full_request_text`.
+    full_seen: Mutex<Vec<String>>,
 }
 
 /// The message a request is MATCHED against: the last one carrying a window
@@ -179,11 +182,25 @@ fn window_message(req: &TurnRequest) -> String {
         .unwrap_or_default()
 }
 
+/// Every message of a request, joined in order — unlike `window_message`
+/// (which picks exactly one message), this is the only way a test can see
+/// the SYSTEM/framing message a coalgebra window inherited: `window_message`
+/// selects on " — DISCOVER"/" — FOLD", which the framing message never
+/// contains, so it is silently absent from `seen`/`requests`.
+fn full_request_text(req: &TurnRequest) -> String {
+    req.messages
+        .iter()
+        .map(|m| m.content.clone())
+        .collect::<Vec<_>>()
+        .join("\n\n===NEXT MESSAGE===\n\n")
+}
+
 impl KeyedProvider {
     fn new(scripted: Vec<Script>) -> Self {
         KeyedProvider {
             scripted,
             seen: Mutex::new(Vec::new()),
+            full_seen: Mutex::new(Vec::new()),
         }
     }
 }
@@ -196,6 +213,7 @@ impl ModelProvider for KeyedProvider {
     ) -> Result<TurnResponse, ProviderError> {
         let last = window_message(&req);
         self.seen.lock().push(last.clone());
+        self.full_seen.lock().push(full_request_text(&req));
 
         let reply = self
             .scripted
@@ -384,6 +402,9 @@ struct Run {
     windows: Vec<(String, NodeId)>,
     /// Every request's last message, as the provider saw it.
     requests: Vec<String>,
+    /// Every request in FULL (every message, framing included) — see
+    /// `full_request_text`.
+    full_requests: Vec<String>,
     log: Vec<LogEvent>,
     journal: Vec<JournalEntry>,
     gate_presentations: usize,
@@ -459,6 +480,32 @@ impl Run {
             hits.len(),
             1,
             "expected exactly one provider request for {needle}, got {}",
+            hits.len()
+        );
+        hits[0].clone()
+    }
+
+    /// As `request_for`, but the FULL assembled request — every message,
+    /// including the SYSTEM/framing one `request_for`'s window-tagged
+    /// message excludes by construction. The one place a test can see
+    /// what a coalgebra window inherited from its per-cycle framing.
+    fn full_request_for(&self, path: &str, phase: Phase) -> String {
+        let needle = format!(
+            "NODE {path} — {}",
+            match phase {
+                Phase::Discover => "DISCOVER",
+                Phase::Fold => "FOLD",
+            }
+        );
+        let hits: Vec<&String> = self
+            .full_requests
+            .iter()
+            .filter(|r| r.contains(&needle))
+            .collect();
+        assert_eq!(
+            hits.len(),
+            1,
+            "expected exactly one full provider request for {needle}, got {}",
             hits.len()
         );
         hits[0].clone()
@@ -731,10 +778,12 @@ async fn run_scenario(
     let windows = observer.windows.lock().clone();
     let gate_submissions = observer.forms.lock().clone();
     let requests = provider.seen.lock().clone();
+    let full_requests = provider.full_seen.lock().clone();
     Run {
         state: outcome.state_json,
         windows,
         requests,
+        full_requests,
         log,
         journal,
         gate_presentations: gate.presentations(),
@@ -2388,4 +2437,132 @@ async fn companion_narrative_fold_is_byte_behaviorally_unchanged_by_c4() {
         "and no badge appears on the one node that folded: {}",
         run.tree_line("root")
     );
+}
+
+/// The one-off coalgebra teaching (mechanics prose, delegate/askUser
+/// contracts, both compilable examples) moved out of the per-node
+/// `coalgebraPrompt` and into `render`'s output — the per-cycle SYSTEM
+/// framing every coalgebra/algebra window in the tree inherits, root
+/// included, since `loop` freezes its OWN context (which carries that
+/// framing) before minting `rootSeed`. `coalgebraPrompt` is therefore the
+/// SAME minimal shape at every depth: no depth branch, no root special case.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn companion_coalgebra_prompt_is_minimal_at_every_depth() {
+    let _cache_guard = support::isolate_cache();
+
+    let run = run_scenario(
+        "coalgebra-prompt-minimal",
+        state_json(3, 40, 5, json!({"tag": "GateOff"})),
+        vec![
+            script(&["NODE root — DISCOVER"], split_two()),
+            script(&["NODE root/1-alpha — DISCOVER"], finish_reply()),
+            script(&["NODE root/2-beta — DISCOVER"], finish_reply()),
+            fold_script(),
+        ],
+        Arc::new(ScriptedGate::default()),
+    )
+    .await;
+
+    // --- root's own coalgebra prompt is the SAME minimal shape as any
+    // descendant's — NODE/budget/brief/finalize, nothing else.
+    let root_prompt = run.window_prompt("root", Phase::Discover);
+    let expected_root = "NODE root — DISCOVER.\n\n\
+Budget: depth 0 of 3 max, node allowance 40, fan-out cap 5.\n\n\
+Your branch: root (Primary)\n\
+SCENARIO: drive the recursive companion on scripted windows.\n\n\
+Finalize: `finalize @LayerProposal (...)`";
+    assert_eq!(
+        root_prompt, expected_root,
+        "root's own coalgebra prompt must be the minimal per-node form — the \
+         one-off teaching lives in render()'s framing now, not here: {root_prompt}"
+    );
+
+    // --- a depth>0 descendant's own coalgebra prompt is the identical
+    // shape, modulo its own path/depth/allowance/brief — the allowance
+    // split's exact arithmetic is out of scope here, so it is read back out
+    // of the prompt rather than hardcoded.
+    let child_prompt = run.window_prompt("root/1-alpha", Phase::Discover);
+    let allowance = child_prompt
+        .split("node allowance ")
+        .nth(1)
+        .and_then(|s| s.split(',').next())
+        .unwrap_or_else(|| panic!("no 'node allowance N' in: {child_prompt}"))
+        .to_string();
+    let expected_child = format!(
+        "NODE root/1-alpha — DISCOVER.\n\n\
+Budget: depth 1 of 3 max, node allowance {allowance}, fan-out cap 5.\n\n\
+Your branch: Alpha (Primary)\n\
+{ALPHA_INSTRUCTION}\n\n\
+Finalize: `finalize @LayerProposal (...)`"
+    );
+    assert_eq!(
+        child_prompt, expected_child,
+        "a depth>0 node's own coalgebra prompt must be JUST NODE/budget/brief/finalize \
+         — no mechanics prose, no examples: {child_prompt}"
+    );
+
+    // Belt-and-suspenders: neither prompt carries a marker of the mechanics
+    // teaching that now lives only in render()'s framing.
+    for (path, prompt) in [("root", &root_prompt), ("root/1-alpha", &child_prompt)] {
+        for marker in [
+            "delegateLabel",
+            "askUserWith",
+            "Decide THIS LAYER",
+            "Two complete examples",
+            "--- EXAMPLE ---",
+            "ProposeSplit {",
+        ] {
+            assert!(
+                !prompt.contains(marker),
+                "{path}'s own coalgebra prompt must not carry {marker:?}: {prompt}"
+            );
+        }
+    }
+
+    // --- the auto-rendered hole card (the FIRST fenced Haskell block in
+    // root's request) must still not compete with the teaching for that
+    // position — trivially true now the teaching isn't even in this
+    // message, but worth pinning given `HarnessTypes.coalgebraProtocol`'s
+    // doc explicitly re-derives this constraint at its new home.
+    let root_card = run.request_for("root", Phase::Discover);
+    assert!(
+        !root_card.contains("--- EXAMPLE ---") && !root_card.contains("--- PROTOCOL"),
+        "the teaching must not leak into the message carrying the auto-rendered \
+         hole card: {root_card}"
+    );
+}
+
+/// The teaching `companion_coalgebra_prompt_is_minimal_at_every_depth` shows
+/// is ABSENT from every coalgebra prompt lives instead in the per-cycle
+/// SYSTEM framing — present in root's assembled request exactly once.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn companion_root_framing_carries_the_coalgebra_teaching_exactly_once() {
+    let _cache_guard = support::isolate_cache();
+
+    let run = run_scenario(
+        "coalgebra-teaching-in-framing",
+        state_json(3, 40, 5, json!({"tag": "GateOff"})),
+        vec![
+            script(&["NODE root — DISCOVER"], finish_reply()),
+            fold_script(),
+        ],
+        Arc::new(ScriptedGate::default()),
+    )
+    .await;
+
+    let root_full = run.full_request_for("root", Phase::Discover);
+    for marker in [
+        "--- PROTOCOL: every \"NODE ... — DISCOVER\" window in this run ---",
+        "renderDelegateError",
+        "askUserWith @OperatorSteering",
+        "Two complete examples:",
+        "--- END PROTOCOL ---",
+    ] {
+        assert_eq!(
+            root_full.matches(marker).count(),
+            1,
+            "the root window's assembled request must carry the coalgebra teaching \
+             exactly once, in its framing: missing or duplicated {marker:?} in:\n{root_full}"
+        );
+    }
 }
