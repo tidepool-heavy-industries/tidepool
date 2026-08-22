@@ -11,6 +11,6 @@ pub mod record;
 pub mod traits;
 
 pub use error::*;
-pub use impls::get_resilient;
+pub use impls::{get_resilient, type_mismatch};
 pub use record::*;
 pub use traits::*;

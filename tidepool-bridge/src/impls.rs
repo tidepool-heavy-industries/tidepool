@@ -38,13 +38,18 @@ pub fn get_resilient(table: &DataConTable, name: &str, arity: u32) -> Option<Dat
     }
 }
 
-// Helper for type mismatch errors
-fn type_mismatch(expected: &str, got: &Value) -> BridgeError {
+/// Build a [`BridgeError::TypeMismatch`] naming `expected` and rendering
+/// `got`'s actual shape. The one value-kind formatter for every `FromCore`
+/// impl — hand-written here and derive-macro-generated
+/// (`tidepool_bridge_derive::codegen`) alike — so the "what did we actually
+/// get" wording can't drift between the two.
+#[must_use]
+pub fn type_mismatch(expected: &str, got: &Value) -> BridgeError {
     let got_str = match got {
-        Value::Lit(l) => format!("{:?}", l),
+        Value::Lit(l) => format!("Lit({:?})", l),
         Value::Con(id, _) => format!("Con({:?})", id),
         Value::Closure { .. } => "Closure".to_string(),
-        Value::ThunkRef(_) => "ThunkRef".to_string(),
+        Value::ThunkRef(id) => format!("ThunkRef({:?})", id),
         Value::JoinCont { .. } => "JoinCont".to_string(),
         Value::ConFun(id, arity, args) => format!("ConFun({:?}, {}/{})", id, args.len(), arity),
         Value::ByteArray(bs) => match bs.lock() {

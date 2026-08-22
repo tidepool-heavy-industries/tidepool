@@ -132,6 +132,14 @@ fn emit_datacon_lookup(
     }
 }
 
+/// Core arity of a constructor: how many of its Rust fields carry a Core
+/// representation — every `PhantomData` field is excluded, since it consumes
+/// no slot in the encoded `Con`. Shared by both directions (`FromCore`/
+/// `ToCore`) and both shapes (enum variant/struct).
+fn core_arity<'a>(field_types: impl Iterator<Item = &'a Type>) -> usize {
+    field_types.filter(|ty| !is_phantom_data(ty)).count()
+}
+
 fn add_trait_bounds(
     generics: &mut syn::Generics,
     trait_path: &syn::Path,
@@ -172,13 +180,7 @@ pub fn generate_from_core(info: &EnumInfo) -> TokenStream {
         let core_module = variant.core_module.as_ref();
         let rust_arity = variant.fields.len();
 
-        // Core arity excludes PhantomData fields — they have no Core
-        // representation and must not consume slots in the encoded Con.
-        let core_arity: usize = variant
-            .fields
-            .iter()
-            .filter(|ty| !is_phantom_data(ty))
-            .count();
+        let core_arity: usize = core_arity(variant.fields.iter());
         let core_arity_u32 = core_arity as u32;
 
         // Build per-Rust-field construction expressions. PhantomData fields
@@ -241,21 +243,7 @@ pub fn generate_from_core(info: &EnumInfo) -> TokenStream {
                         #(#match_arms)*
                         Err(tidepool_bridge::BridgeError::UnknownDataCon(*id))
                     }
-                    _ => Err(tidepool_bridge::BridgeError::TypeMismatch {
-                        expected: "Con".to_string(),
-                        got: match value {
-                            tidepool_eval::Value::Lit(l) => format!("Lit({:?})", l),
-                            tidepool_eval::Value::Con(id, _) => format!("Con({:?})", id),
-                            tidepool_eval::Value::Closure { .. } => "Closure".to_string(),
-                            tidepool_eval::Value::ThunkRef(id) => format!("ThunkRef({:?})", id),
-                            tidepool_eval::Value::JoinCont { .. } => "JoinCont".to_string(),
-                            tidepool_eval::Value::ConFun(id, arity, args) => format!("ConFun({:?}, {}/{})", id, args.len(), arity),
-                            tidepool_eval::Value::ByteArray(bs) => match bs.lock() {
-                                Ok(b) => format!("ByteArray(len={})", b.len()),
-                                Err(_) => "ByteArray(poisoned)".to_string(),
-                            },
-                        },
-                    })
+                    _ => Err(tidepool_bridge::type_mismatch("Con", value)),
                 }
             }
         }
@@ -364,11 +352,7 @@ pub fn generate_struct_from_core(info: &StructInfo) -> TokenStream {
 
     let (impl_generics, ty_generics, where_clause) = generics.split_for_impl();
 
-    let core_arity: usize = info
-        .fields
-        .iter()
-        .filter(|f| !is_phantom_data(&f.ty))
-        .count();
+    let core_arity: usize = core_arity(info.fields.iter().map(|f| &f.ty));
     let core_arity_u32 = core_arity as u32;
 
     let mut core_ix: usize = 0;
@@ -420,21 +404,7 @@ pub fn generate_struct_from_core(info: &StructInfo) -> TokenStream {
                         }
                         Ok(#construction)
                     }
-                    _ => Err(tidepool_bridge::BridgeError::TypeMismatch {
-                        expected: "Con".to_string(),
-                        got: match value {
-                            tidepool_eval::Value::Lit(l) => format!("Lit({:?})", l),
-                            tidepool_eval::Value::Con(id, _) => format!("Con({:?})", id),
-                            tidepool_eval::Value::Closure { .. } => "Closure".to_string(),
-                            tidepool_eval::Value::ThunkRef(id) => format!("ThunkRef({:?})", id),
-                            tidepool_eval::Value::JoinCont { .. } => "JoinCont".to_string(),
-                            tidepool_eval::Value::ConFun(id, arity, args) => format!("ConFun({:?}, {}/{})", id, args.len(), arity),
-                            tidepool_eval::Value::ByteArray(bs) => match bs.lock() {
-                                Ok(b) => format!("ByteArray(len={})", b.len()),
-                                Err(_) => "ByteArray(poisoned)".to_string(),
-                            },
-                        },
-                    })
+                    _ => Err(tidepool_bridge::type_mismatch("Con", value)),
                 }
             }
         }
@@ -456,11 +426,7 @@ pub fn generate_struct_to_core(info: &StructInfo) -> TokenStream {
 
     let (impl_generics, ty_generics, where_clause) = generics.split_for_impl();
 
-    let core_arity: usize = info
-        .fields
-        .iter()
-        .filter(|f| !is_phantom_data(&f.ty))
-        .count();
+    let core_arity: usize = core_arity(info.fields.iter().map(|f| &f.ty));
     let core_arity_u32 = core_arity as u32;
 
     // Bind ALL fields in the destructure pattern; phantom fields get `_` prefix
