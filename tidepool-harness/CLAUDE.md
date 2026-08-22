@@ -811,16 +811,31 @@ authored render/loop compiles still NEVER see this plane either way
 `tests/stable_effects_core_decl_plane.rs`. Standing acceptances for the
 pure-decl case, in `tests/selfharness_fn_finalize_spike.rs`: the
 `State -> State` edit, the record-of-functions delivery, and
-`living_helper_survives_loop_boundary_and_rotation` — **the last of these was
-found FAILING in this environment during the stable-effects-core branch's own
-verification, reproduced identically on a clean baseline checkout with none of
-that branch's changes applied** (a real declaration made in one turn is not
-visible to the very next turn of the SAME cycle — "Variable not in scope"),
-so it is a pre-existing gap in this harness's decl-plane wiring, not a
-regression that branch introduced; flagged here rather than fixed, since
-diagnosing it is out of that branch's scope. Restart persistence of the
-plane (decl-log disk reload) is future work; heap VALUES still die at
-rotation, enumerated.
+`living_helper_survives_loop_boundary_and_rotation` (declare in cycle N,
+resolve after the loop boundary AND a forced machine rotation into cycle
+N+1). A declaration made in one round is visible to every later round/turn
+in the SAME cycle too — `tests/selfharness_decl_plane_replay.rs`'s
+`decl_in_window_one_resolves_in_window_three_same_cycle` declares in the
+first of three sequential `runLLMTurn` windows on one cycle's answerer node
+and resolves it in the third.
+
+**Mechanism — a decl-ending block persists before it nudges.**
+`Harness::run_multi_item_block` (the multi-item-block lane `run_block`
+reaches once `split_block_items` finds more than one item) commits every
+maximal run of consecutive declaration items via `session.define_scoped_in`
+as it walks the block, in order — INCLUDING a trailing run that reaches the
+block's last item. Only once that commit has landed does it check whether
+the block ended on a declaration: if so, the round returns the typed
+`HarnessError::Compile` ("not something that runs") that drives the
+corrective-retry nudge, same as ever — a decl-ending block still does not
+ADVANCE the turn — but by the time that nudge reaches the model, the
+declarations it just wrote are already live on the plane, so the very next
+round (or any later round/turn in the cycle) sees them.
+`Harness::run_block`'s single-item path has the same property by a simpler
+route: a lone decl item both persists AND completes the round. Restart
+persistence of the plane (decl-log disk reload) is future work; heap
+VALUES still die at rotation, enumerated.
+
 The scoped-stack caveat in Replay above still holds unchanged: the answerer
 row is all-suspending, so it produces no `Event::Effect` regardless of
 whether its session is owned or attached.

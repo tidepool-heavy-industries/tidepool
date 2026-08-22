@@ -1893,27 +1893,6 @@ impl Harness {
             )));
         }
 
-        if matches!(verdicts.last().map(|v| v.kind), Some(TurnKind::Decl)) {
-            // MODEL-AUTHORED failure, not mechanism: the model wrote a block
-            // whose shape this runner rejects, which is exactly the compile
-            // class — `HarnessError::Compile` is what every driver retry
-            // ladder treats as "correct and go again" (the driver's
-            // corrective turn embeds this message verbatim), and what a
-            // branch position folds as a typed window exit when rounds run
-            // out. Returning `Resident` here escalated a stray trailing
-            // declaration into a turn-killing mechanism failure (dogfood
-            // crash, 2026-08-20 — the very first exploratory window of the
-            // interaction-surface run died on it). No `push_user_turn`
-            // here: the retry protocol is the DRIVER's, one corrective
-            // message per failed round, not two.
-            let msg = "This block's last item is a declaration, not something that runs. \
-                       A multi-item block must end with the answer expression (or a bind) \
-                       — move any trailing declaration earlier in the block, or follow it \
-                       with the expression that uses it."
-                .to_string();
-            return Err(HarnessError::Compile(msg));
-        }
-
         let scope = self.node_scope(node);
         let mut index = 0usize;
         let mut last_outcome: Option<engine::TurnOutcome> = None;
@@ -1948,6 +1927,35 @@ impl Harness {
                     // decl path gives a failed decl validation — the
                     // corrective-retry loop feeds it back as another round.
                     Err(e) => return Err(HarnessError::Compile(e.to_string())),
+                }
+                if index == items.len() {
+                    // The block ended on a declaration — every declaration
+                    // in it, including this trailing run, is now COMMITTED
+                    // to the node's decl plane (the `define_scoped_in` call
+                    // above already ran), so a later round/turn in this
+                    // same window sees it. The round itself still did not
+                    // ADVANCE (no bind/expr ran as the block's terminal
+                    // item, so nothing ever calls `finish_run(terminal:
+                    // true)`), which is a MODEL-AUTHORED failure, not a
+                    // mechanism one — `HarnessError::Compile` is what every
+                    // driver retry ladder treats as "correct and go again"
+                    // (the driver's corrective turn embeds this message
+                    // verbatim), and what a branch position folds as a
+                    // typed window exit when rounds run out. Returning
+                    // `Resident` here escalated a stray trailing
+                    // declaration into a turn-killing mechanism failure
+                    // (dogfood crash, 2026-08-20 — the very first
+                    // exploratory window of the interaction-surface run
+                    // died on it). No `push_user_turn` here: the retry
+                    // protocol is the DRIVER's, one corrective message per
+                    // failed round, not two.
+                    let msg = "This block's last item is a declaration, not something \
+                               that runs. A multi-item block must end with the answer \
+                               expression (or a bind) — move any trailing declaration \
+                               earlier in the block, or follow it with the expression \
+                               that uses it."
+                        .to_string();
+                    return Err(HarnessError::Compile(msg));
                 }
                 continue;
             }
