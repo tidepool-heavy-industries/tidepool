@@ -19,10 +19,11 @@
 -- fork\/fanout child compiles against its parent's row MINUS @Fork@, so it is
 -- structurally incapable of producing grandchildren.
 --
--- Cognition enters at exactly two windows — 'discoverWith' (branched off the
--- parent's frozen post-coalgebra context, one bulk call per sibling group
--- via 'bulkLayerWindow') and 'foldNode' (forked) — every other function here
--- is compiled coordination.
+-- Cognition enters at exactly two windows, both branched — 'discoverWith'
+-- (off the parent's frozen post-coalgebra context, one bulk call per
+-- sibling group via 'bulkLayerWindow') and 'foldAt' (off THIS node's own
+-- post-coalgebra context, via 'foldWindow') — every other function here is
+-- compiled coordination.
 --
 -- @Companion@ is @M@ at the driver's outer row (@RunLLMTurn@, @AskUser@,
 -- @Console@, @Worktree@, @RepoEvent@, @Exec@, @Subagent@, and @Journal@ —
@@ -52,18 +53,15 @@ module Harness
 
     -- * The driver's own vocabulary
   , Companion
-  , Folded
   , NodeSeed (..)
   , NodePath (..)
   , NodeAnswer (..)
-  , traverseLayer
 
     -- * What a window may finalize
   , LayerProposal (..)
   , ProposedBranch (..)
   , Posture (..)
   , BranchRoleWire (..)
-  , ProposedEditWire (..)
   , FoldDecision (..)
   , FoldOutcome (..)
 
@@ -88,11 +86,10 @@ module Harness
   , mergeNote
   ) where
 
-import Data.List (find)
 import qualified Data.List as L
 import Data.List.NonEmpty (NonEmpty ((:|)))
 import qualified Data.List.NonEmpty as NE
-import Data.Maybe (catMaybes)
+import Data.Maybe (catMaybes, fromMaybe)
 import qualified Data.Text as T
 import GHC.Generics (Generic)
 import HarnessTypes
@@ -108,8 +105,8 @@ import Tidepool.Effects
   , freezeContext
   , renderInvocationExit
   , runIn
+  , runLLMTurnBranch
   , runLLMTurnBranchFanout
-  , runLLMTurnFork
   , say
   , spawnSpecIn
   , takeDelegatedBranches
@@ -121,24 +118,13 @@ import Tidepool.Prelude hiding (render)
 import Tidepool.QQ (fmt)
 import Tidepool.Resume (ResumeFold)
 import Tidepool.Swarm (cyclesToInt, mkCycles, splitAllowance)
-import Tidepool.Thought (Coalg, GroupCoalg, Strategy, ThoughtF, depthCapped, fanOutCapped, thoughtHyloGrouped)
+import Tidepool.Thought (Coalg, ThoughtF, depthCapped, fanOutCapped)
 import qualified Tidepool.Thought as Th
 import Tidepool.Worktree
 
 -- | The orchestration monad.  @Harness@ is @M@ under a friendlier name; the
 -- row it resolves to is the driver's outer session.
 type Companion = Harness
-
--- | The hylo's @b@: a node's fold, waiting for the ONE thing an algebra
--- cannot otherwise learn — its own identity.
---
--- @ThoughtF@ has no @task@ slot (@Tidepool.Swarm@'s @PlanF@ does), so an
--- algebra never sees the seed its coalgebra saw.  Threading the node's
--- identity down as a READER is the answer, and it is what keeps
--- 'Tidepool.Thought.thoughtHyloGrouped' generic over the algebra's own
--- return type rather than needing a second recursion engine that carries a
--- seed alongside.
-type Folded = NodePath -> Companion NodeAnswer
 
 -- ---------------------------------------------------------------------------
 -- The seed — and why it lives HERE rather than in "HarnessTypes"
@@ -257,28 +243,32 @@ childEdge parent allowance i b = Th.Branch b (childSeed parent allowance i b)
 -- The resident cycle
 -- ---------------------------------------------------------------------------
 
--- | One resident turn discovers a tree and folds it.
+-- | One resident turn discovers a tree and folds it — as ONE recursive
+-- walk ('walkGroup'\/'walkNode'), not two passes.  A node's own fold is now
+-- a direct continuation of its own DISCOVER turn ('foldAt', branched off
+-- the SAME ref its children branch from), run the moment its own subtree
+-- finishes — never a fresh fork deferred to a second, whole-tree pass.
+-- Folds therefore INTERLEAVE with descent: a node folds while a cousin
+-- subtree may still be discovering (operator decision, 2026-08-22).
 --
 -- POLICY IS MIDDLEWARE, composed by ordinary function application over
 -- @Tidepool.Thought@'s own @Coalg -> Coalg@ combinators, applied PER SEED
--- inside 'groupCoalg' — see that function's doc for exactly where each cap
--- fires relative to the ONE bulk window call a sibling group now shares
+-- inside 'discoverGroup' — see that function's doc for exactly where each
+-- cap fires relative to the ONE bulk window call a sibling group shares
 -- (operator decision: sibling branch windows are ALWAYS driven concurrently,
 -- transparently — scheduling is never a model-visible choice).
 --
--- TWO PASSES, deliberately.  'thoughtHyloGrouped' returns a 'Folded' — every
--- coalgebra window has run by then, and no algebra window has.  Applying it
--- at @NodePath []@ runs the folds.  Neither ORDER changes: discoveries happen
--- in declared branch order (a 'GroupCoalg' answers in the same order it was
--- asked, exactly like 'ThoughtF''s own derived @Traversable@) and folds
--- happen in declared branch order bottom-up ('traverseLayer' preserves it).
--- Completion order is not an input to anything here.
+-- ORDER is still declared order, never completion order: discoveries happen
+-- in declared branch order (a sibling group's bulk window answers in the
+-- same order it was asked, exactly like 'ThoughtF''s own derived
+-- @Traversable@) and 'walkGroup' recurses\/folds each sibling in that same
+-- order too.
 --
--- THE ROOT'S REF IS MINTED HERE, and that is what makes 'groupCoalg' uniform.
+-- THE ROOT'S REF IS MINTED HERE, and that is what makes 'walkGroup' uniform.
 -- @freezeContext@ freezes the CALLING window — this loop's own accumulated
 -- context, which is precisely what the root's coalgebra should fork from —
--- so the root enters the hylo holding a ref exactly like every descendant
--- does (as a sibling group of exactly one), and 'groupCoalg' has no root
+-- so the root enters the walk holding a ref exactly like every descendant
+-- does (as a sibling group of exactly one), and 'discoverGroup' has no root
 -- special case to get wrong.
 loop :: State -> Companion State
 loop st
@@ -309,8 +299,7 @@ Starting the first turn.|]
 loop st = do
   record "turn" rootKey (object ["root" .= st.question, "config" .= toJSON cfg])
   rootRef <- freezeContext
-  f <- thoughtHyloGrouped (foldNode cfg st.draft) (groupCoalg cfg) (rootSeed st rootRef)
-  answer <- f (NodePath [])
+  answer <- NE.head <$> walkGroup cfg (rootSeed st rootRef :| [])
   record
     "turn"
     rootKey
@@ -333,7 +322,6 @@ Start the next turn when ready — optionally with steering.|]
     st
       { turnCount = st.turnCount + 1
       , lastRun = Just (summarize answer)
-      , draft = answer.answerDraft
       }
   where
     cfg = st.config
@@ -341,7 +329,7 @@ Start the next turn when ready — optionally with steering.|]
 
 -- | The honest opt-out ('Tidepool.Resume' module doc): this harness's
 -- 'record' calls exist for the durable transcript, not to replay prior
--- windows on a resumed boot — a rerun re-derives 'draft'\/'lastRun' from
+-- windows on a resumed boot — a rerun re-derives 'lastRun' from
 -- 'State' the same way a fresh run does, so there is nothing here for a
 -- fold of recorded steps to inject.  Declaring this (rather than leaving it
 -- absent) is what turns a journal-bearing crash recovery from a boot
@@ -379,9 +367,10 @@ summarize a =
 -- The two windows — ONE named seam each
 --
 -- Gap 3 (a window's abnormal exit aborting its siblings) is closed at the
--- verb: @runLLMTurnFork \@T@ answers @M (Either InvocationExit T)@, so the
--- DRIVER no longer fails the whole outer turn when one branch's window
--- exhausts its rounds — the exit arrives as data at that branch's position
+-- verb: both @runLLMTurnBranchFanout \@T@ and @runLLMTurnBranch \@T@ answer
+-- an @Either InvocationExit _@, so the DRIVER no longer fails the whole
+-- outer turn when one branch's window exhausts its rounds — the exit
+-- arrives as data at that branch's position
 -- (plans/self-iterating-harness/21-c3-exit-verb.md).
 --
 -- Both seams pass the @Either@ through UNWRAPPED, and their two callers fold
@@ -401,12 +390,6 @@ summarize a =
 --
 -- Neither exit is an abort, and neither is silent: both journal under kind
 -- @failed@, tagged with which window produced them.
---
--- TWO functions rather than one @runWindow :: Text -> Companion a@, and the
--- reason is mechanical: extract's typed-yield site pass rejects a
--- @runLLMTurnFork \@a@ call at a bare type VARIABLE ("polymorphic runLLMTurn
--- site"), so a polymorphic wrapper cannot exist.  They stay adjacent, and
--- they are the only two call sites.
 --
 -- Neither is plain @runLLMTurn@: the plain form lands on the driver's ONE
 -- reused per-loop answerer node, which accumulates every hole's exchange into
@@ -441,36 +424,28 @@ bulkLayerWindow cfg ref seeds =
       ref
       (NE.toList (fmap (\s -> (renderPath s.seedPath, coalgebraPrompt cfg s)) seeds))
 
--- | The ALGEBRA's window, FORKED — deliberately NOT branched, for two
--- reasons, and both are load-bearing.
+-- | The ALGEBRA's window, BRANCHED off THIS node's own ref — the fold is a
+-- continuation of the node's own conversation (its own DISCOVER turn, its
+-- own ProposeSplit), never a fresh fork: the unified recursive walk
+-- ('walkNode') keeps a node's own post-coalgebra ref in lexical scope right
+-- up to the point its own fold runs.
 --
--- (1) POLICY.  PRD 21 says the algebra's model window gets a RENDERED view of
--- the realized layer by default ('algebraPrompt' builds it).  Mounting the
--- live value into the window instead is the escalation PRD open question 3
--- gates, explicitly out of v1.
---
--- (2) MECHANISM — it could not branch even if the policy said to.  A branch
--- needs a 'ContextRef', and the only ref a node ever mints is the one
--- 'discoverWith' gets back from ITS OWN coalgebra window.  @ThoughtF@ has no task
--- slot (@Tidepool.Swarm@'s @PlanF@ does), so nothing carries a per-node value
--- from a node's coalgebra to its own algebra: 'foldNode' only ever sees
--- @ThoughtF Folded@.  This is the same wall the gate-count receipt hit (see
--- @HarnessTypes.render@) — the only relay is stamping the ref into every
--- child's seed and reading it back off a child's answer, which would be a
--- capability laundered through the fold and would still be wrong for a leaf,
--- whose layer has no children to read it off at all.
-foldWindow :: Text -> Companion (Either InvocationExit FoldDecision)
-foldWindow prompt = runLLMTurnFork @FoldDecision prompt
+-- PRD 21 still says the algebra's model window gets a RENDERED view of the
+-- realized layer, never the live value ('algebraPrompt' builds it) —
+-- mounting the live value into the window instead is the escalation PRD
+-- open question 3 gates, explicitly out of v1.  Branching changes WHERE the
+-- fold's context comes from, not WHAT it is shown.
+foldWindow :: ContextRef -> Text -> Companion (Either InvocationExit (FoldDecision, ContextRef))
+foldWindow ref prompt = runLLMTurnBranch @FoldDecision ref prompt
 
 -- ---------------------------------------------------------------------------
 -- The coalgebra — how to split
 -- ---------------------------------------------------------------------------
 
--- | The pure conversion, then the journal — what the old per-seed
--- @discover@ used to do AFTER its own window call, factored apart from the
--- window call itself so
--- 'groupCoalg' can run it uniformly over BOTH a live bulk-window outcome and
--- a budget-capped seed that never got one (see that function's doc).
+-- | The pure conversion, then the journal — factored apart from the window
+-- call itself so 'discoverGroup' can run it uniformly over BOTH a live
+-- bulk-window outcome and a budget-capped seed that never got one (see that
+-- function's doc).
 --
 -- UNIFORM ACROSS ROOT AND DESCENDANTS, with no special case: every seed
 -- reaching here holds a ref (the root's from @freezeContext@ in 'loop', a
@@ -509,12 +484,11 @@ proposedPayload outcome = case outcome of
       , "branches" .= map (.branchTitle) p.splitBranches
       ]
 
--- | THE GROUP coalgebra 'loop' hands to 'thoughtHyloGrouped': every seed
--- in ONE sibling group is windowed with a SINGLE bulk
--- 'runLLMTurnBranchFanout' call ('bulkLayerWindow') — operator decision:
--- sibling branch windows are ALWAYS driven concurrently, transparently,
--- because each sibling's window is independent of its neighbours' — never
--- one at a time the way a per-seed 'Coalg' would force.
+-- | Discover ONE sibling group's own next layer: every seed is windowed
+-- with a SINGLE bulk 'runLLMTurnBranchFanout' call ('bulkLayerWindow') —
+-- operator decision: sibling branch windows are ALWAYS driven concurrently,
+-- transparently, because each sibling's window is independent of its
+-- neighbours' — never one at a time the way a per-seed 'Coalg' would force.
 --
 -- A seed a budget already refuses ('preCapped') never enters the bulk call
 -- at all — spending a real window on a seed 'depthCapped'\/'allowanceCapped'
@@ -530,36 +504,111 @@ proposedPayload outcome = case outcome of
 -- ... . depthCapped ... . allowanceCapped@, applied here per seed so a
 -- batched window call changes nothing about what each seed's own result is
 -- allowed to become.
-groupCoalg :: Config -> GroupCoalg Companion NodeSeed
-groupCoalg cfg seeds = do
+--
+-- ALSO returns, per seed, the 'ContextRef' this node's OWN coalgebra window
+-- actually froze — 'Nothing' for a seed that never got a real window
+-- (pre-capped, or an abnormal exit). A node's fold is a 'runLLMTurnBranch'
+-- continuation of its own DISCOVER turn ('foldWindow'), so that ref has to
+-- survive past this middleware chain to the fold call site — 'walkNode'
+-- reads it back off here, captured BEFORE the chain runs (so it is
+-- unaffected by whatever the gate does to the layer afterward — see
+-- 'applyGate''s own doc on which seed IT rebuilds branches against;
+-- untouched, and irrelevant to this capture).
+discoverGroup :: Config -> NonEmpty NodeSeed -> Companion (NonEmpty (ThoughtF NodeSeed, Maybe ContextRef))
+discoverGroup cfg seeds = do
   outcomes <- bulkDiscoverOutcomes cfg seeds
   traverse (\(seed, outcome) -> perSeed seed outcome) outcomes
   where
-    perSeed seed outcome =
-      journaled
-        ( gatedLayer
-            cfg
-            ( fanOutCapped
-                seedDepth
-                cfg.maxFanOut
-                (depthCapped seedDepth cfg.maxDepth (allowanceCapped cfg.maxNodes (`discoverWith` outcome)))
-            )
-        )
-        seed
+    perSeed seed outcome = do
+      layer <-
+        journaled
+          ( gatedLayer
+              cfg
+              ( fanOutCapped
+                  seedDepth
+                  cfg.maxFanOut
+                  (depthCapped seedDepth cfg.maxDepth (allowanceCapped cfg.maxNodes (`discoverWith` outcome)))
+              )
+          )
+          seed
+      pure (layer, myRefOf seed outcome)
+    -- Never forces @outcome@ for a pre-capped seed — the SAME guarantee
+    -- 'unresolvedOutcome' below rests on, re-checked here because this is a
+    -- second, independent site that touches the same value.
+    myRefOf seed outcome
+      | preCapped cfg seed = Nothing
+      | otherwise = case outcome of
+          Right (_, ref) -> Just ref
+          Left _ -> Nothing
+
+-- ---------------------------------------------------------------------------
+-- The unified recursive walk: bulk-discover a sibling group
+-- ('discoverGroup'), then per node recurse into its OWN children — a NEW
+-- sibling group — and fold IMMEDIATELY, in LEXICAL SCOPE: the fold is a
+-- continuation of the node's own conversation (its own DISCOVER turn, its
+-- own ProposeSplit), branched off the SAME ref its own children branch
+-- from, never a fresh fork off an empty root.
+--
+-- Folds therefore INTERLEAVE with descent: a node folds the moment its own
+-- subtree completes, while a cousin subtree may still be discovering —
+-- intended, not incidental (operator decision: supports future
+-- multi-round forking). Concretely, siblings recurse in DECLARED order
+-- ('traverse' over the sibling group), so one sibling's ENTIRE subtree —
+-- every descendant's own discover-then-fold, then that sibling's own fold —
+-- completes before the NEXT sibling's own children are even discovered.
+-- The assembled RESULT does not depend on this: every sibling's own
+-- 'NodeAnswer' is still assembled in declared order regardless ('walkGroup'
+-- returns a 'NonEmpty' in the SAME order it was given), so nothing
+-- downstream can observe which subtree actually finished first.
+-- ---------------------------------------------------------------------------
+
+-- | Discover, recurse and fold one whole sibling group, in declared order.
+walkGroup :: Config -> NonEmpty NodeSeed -> Companion (NonEmpty NodeAnswer)
+walkGroup cfg seeds = do
+  discovered <- discoverGroup cfg seeds
+  traverse (uncurry (walkNode cfg)) (NE.zip seeds discovered)
+
+-- | One node: recurse into its own children (if any) as a new sibling
+-- group, then fold — off this node's own post-coalgebra ref when its
+-- coalgebra actually minted one, else its own PRE-coalgebra ref (@seedRef@,
+-- the ref this node's OWN window branched from). That fallback is reachable
+-- only for a CHILDLESS ROOT whose own coalgebra window never finalized
+-- (an abnormal exit): 'foldAt''s own @mechanicalLeaf@ rule keeps every
+-- OTHER childless node from ever reaching a fold call at all, so this is
+-- root's one genuine "no special case" — it folds off whatever its own
+-- best available ref is, exactly as every other node does.
+walkNode :: Config -> NodeSeed -> (ThoughtF NodeSeed, Maybe ContextRef) -> Companion NodeAnswer
+walkNode cfg seed (layer, mMyRef) = do
+  realized <- case NE.nonEmpty (layerBranches layer) of
+    Nothing -> pure (retagFinish layer)
+    Just childBranches -> do
+      answered <- walkGroup cfg (fmap (.value) childBranches)
+      pure (rebuildLayer layer (NE.zipWith (\br a -> Th.Branch br.brief a) childBranches answered))
+  foldAt seed.seedPath (fromMaybe seed.seedRef mMyRef) realized
+
+-- | A childless layer carries no branch value to convert — total by the
+-- same construction 'Tidepool.Thought.retagEmpty' relies on: 'layerBranches'
+-- returns @[]@ ONLY for 'Th.Finish', whose one field never mentions the
+-- branch element type at all, so nothing here is ever actually applied to
+-- a value.
+retagFinish :: ThoughtF a -> ThoughtF b
+retagFinish layer = case layer of
+  Th.Finish d -> Th.Finish d
+  _ -> error "Harness.retagFinish: a layer with branches is not childless"
 
 -- | Pure: does a budget already refuse @seed@ before any window would ever
 -- run? Mirrors 'Tidepool.Thought.depthCapped' and this module's own
 -- 'allowanceCapped' EXACTLY (same guard, same 'Th.Finish' text and origin)
--- — see 'groupCoalg''s doc for why re-deriving the same two conditions here
--- is safe rather than a second source of truth that could drift: the real
--- middleware chain re-checks the SAME seed fields, so a mismatch could only
--- ever waste a window call, never change which seeds end up capped.
+-- — see 'discoverGroup''s doc for why re-deriving the same two conditions
+-- here is safe rather than a second source of truth that could drift: the
+-- real middleware chain re-checks the SAME seed fields, so a mismatch could
+-- only ever waste a window call, never change which seeds end up capped.
 preCapped :: Config -> NodeSeed -> Bool
 preCapped cfg seed = seed.seedDepth >= cfg.maxDepth || seed.seedAllowance < 1
 
 -- | ONE bulk window call per sibling group, windowing every UN-capped seed
 -- and pairing the result back up with EVERY seed in the group, in original
--- order — a capped seed carries 'unresolvedOutcome', which 'groupCoalg''s
+-- order — a capped seed carries 'unresolvedOutcome', which 'discoverGroup''s
 -- own middleware chain is guaranteed to never force (see its doc).
 bulkDiscoverOutcomes ::
   Config ->
@@ -840,27 +889,6 @@ applyGate seed approval layer = case layer of
 -- The algebra — how to combine
 -- ---------------------------------------------------------------------------
 
--- | Fold one node.  The design doc's @fold@; spelled 'foldNode' only to stay
--- clear of the wholesale @Control.Lens@ re-export in the prelude.
---
--- It returns a 'Folded' — a fold WAITING for its own path — rather than a
--- finished answer, because that is what lets 'thoughtHyloGrouped' stay
--- generic over the algebra's own return type: the algebra has no seed, so
--- the node's identity arrives from its parent, which computes it with the
--- very same 'childPath' the coalgebra used.
---
--- @initialDraft@ is the companion's working draft AS OF TURN START
--- ('loop''s own @st.draft@) — ONE frozen value shared by every node's own
--- fold, never threaded bottom-up between siblings or levels (PRD 21 lane
--- C4: "applies them to a known snapshot"; keeping that snapshot the SAME
--- one at every node is what keeps every fold's own apply independent of
--- fold ORDER, the same guarantee 'traverseLayer' already gives the rest of
--- this driver). Only the ROOT's own resulting 'answerDraft' is ever read
--- back into 'State' ('loop'); every other node's is informational,
--- demonstrating the same mechanism at its own position.
-foldNode :: Config -> Text -> ThoughtF Folded -> Companion Folded
-foldNode _cfg initialDraft layer = pure (foldAt initialDraft layer)
-
 -- ---------------------------------------------------------------------------
 -- The merge fold — PRD 21 lane C5, "Worktree coordination"
 --
@@ -1080,44 +1108,33 @@ renderExecError e = case e of
   ExecBadDir detail -> "bad working directory: " <> detail
   ExecTimeout detail -> "timed out: " <> detail
 
--- | Every field a fold's own 'FoldOutcome' contributes — replacing the
--- pre-refactor positional 7-tuple with a named record (companion review
--- step 4) so the two sibling lanes extending 'foldAt' (delegate-effect,
--- node-worktree-tree) have named fields to grow rather than a tuple
--- position to renumber every time either one touches this seam.
+-- | Every field a fold's own 'FoldOutcome' contributes — a named record
+-- (companion review step 4) so a sibling lane extending 'foldAt'
+-- (node-worktree-tree) has named fields to grow rather than a tuple
+-- position to renumber.
 data FoldOutcome = FoldOutcome
   { outcomeSynthesis :: Text
   , outcomeTensions  :: [Text]
-  , -- | This node's own artifact pool to hand its PARENT: its own new
-    -- proposals, PLUS — endorsement propagation (companion review step 4)
-    -- — every artifact this node's own fold ENDORSED (selected via
-    -- 'foldEditsInOrder') from its children, republished upward under
-    -- their ORIGINAL id. An artifact this fold did not select is dropped
-    -- from this route permanently, never re-offered further up.
-    outcomeArtifacts :: [Th.Artifact Text]
-  , -- | The renderable content behind every EDIT id in 'outcomeArtifacts'
-    -- — see 'answerArtifactRenders''s own doc.
-    outcomeRenders   :: [(Th.ArtifactId, Text)]
-  , outcomeReceipts  :: [Th.EditReceipt]
   , outcomeBadges    :: [Text]
   , outcomeFailed    :: Int
-  , outcomeDraft     :: Text
   }
 
-foldAt :: Text -> ThoughtF Folded -> Folded
-foldAt initialDraft layer path = do
-  realized <- traverseLayer (layerStrategy layer) (applyChild path) (indexLayer layer)
+-- | Fold one node. Every child in @realized@ has ALREADY been walked —
+-- discovered, recursed into, and folded — by the time this runs
+-- ('walkNode' builds @realized@ before calling this), so there is no
+-- deferred continuation left to force: this is a plain, one-shot
+-- computation over an already-realized layer, not a closure waiting on its
+-- own path.
+--
+-- @ref@ is the ContextRef this node's own fold branches from — its own
+-- post-coalgebra ref when it has one, else its own pre-coalgebra ref
+-- ('walkNode' resolves which). Used only when this node actually opens a
+-- fold window ('mechanicalLeaf' below is 'False'); a mechanical leaf never
+-- touches it.
+foldAt :: NodePath -> ContextRef -> ThoughtF NodeAnswer -> Companion NodeAnswer
+foldAt path ref realized = do
   let kids = layerBranches realized
       kidAnswers = map (.value) kids
-      -- The pool THIS node's own fold may select from: every immediate
-      -- child's own advertised artifacts — never a grandchild's DIRECTLY (a
-      -- grandchild's artifact reaches this pool only if the immediate
-      -- child's OWN fold already endorsed and republished it — endorsement
-      -- propagation, companion review step 4) and never this node's own (a
-      -- node cannot select what it has not proposed yet — decision 7:
-      -- "approval is the PARENT's fold").
-      pool = concatMap (.answerArtifacts) kidAnswers
-      poolRenders = concatMap (.answerArtifactRenders) kidAnswers
       isRoot = path == NodePath []
   ownBranch <- ownDelegatedBranch path
   (mergeBranch, mergeNotes) <- mergeFold path ownBranch kids
@@ -1130,28 +1147,24 @@ foldAt initialDraft layer path = do
   -- rewrote that answer (4 of 10 windows in the first interaction-surface
   -- turn were leaf folds): the finish IS the synthesis, and integration is
   -- the PARENT fold's job — it sees every child's answer. The ROOT keeps
-  -- its fold window even when childless: its fold is the one place the
-  -- turn's durable draft is actually applied.
+  -- its fold window even when childless — "no special case" means the SAME
+  -- mechanism, branched off whatever ref it has, not the same OUTCOME as
+  -- every other node.
   let mechanicalLeaf = null kids && not isRoot
   (fo, algebraExit) <-
     if mechanicalLeaf
       then
         pure
           ( FoldOutcome
-              { outcomeSynthesis = leafAnswerText layer
+              { outcomeSynthesis = leafAnswerText realized
               , outcomeTensions = []
-              , outcomeArtifacts = []
-              , outcomeRenders = []
-              , outcomeReceipts = []
               , outcomeBadges = []
               , outcomeFailed = 0
-              , outcomeDraft = initialDraft
               }
           , Nothing
           )
       else do
-        outcome0 <- foldWindow (algebraPrompt path layer kids pool poolRenders initialDraft isRoot mergeNotes)
-        outcome <- resolveWithOneRetry path layer kids pool poolRenders initialDraft isRoot mergeNotes outcome0
+        outcome <- foldWindow ref (algebraPrompt path realized kids mergeNotes)
         -- A FOLD window that exits is this node's OWN failure, and it must not be
         -- its subtree's.  The children below it already ran and already folded;
         -- discarding their answers, their tree lines, or their accounting here
@@ -1159,27 +1172,27 @@ foldAt initialDraft layer path = do
         -- decision 6 forbids at a branch position, just reached from the algebra
         -- side.  So the exit replaces only what this node itself was going to
         -- contribute (its synthesis and tensions), and everything the children
-        -- earned rolls up untouched.  A window that exits proposes and selects
-        -- nothing — same as a Narrative fold that mentions neither.
-        case outcome of
-          Right fd -> do
-            applied <- resolveAndApply path isRoot initialDraft pool poolRenders fd
-            pure (applied, Nothing)
+        -- earned rolls up untouched.
+        pure $ case outcome of
+          Right (fd, _postFoldRef) ->
+            ( FoldOutcome
+                { outcomeSynthesis = fd.foldSynthesis
+                , outcomeTensions = fd.foldTensions
+                , outcomeBadges = []
+                , outcomeFailed = 0
+                }
+            , Nothing
+            )
           Left e ->
-            pure
-              ( FoldOutcome
-                  { outcomeSynthesis =
-                      [fmt|<this node's fold window exited: {renderInvocationExit e}> — its {show (length kids)} branch result(s) are below, unfolded|]
-                  , outcomeTensions = []
-                  , outcomeArtifacts = []
-                  , outcomeRenders = []
-                  , outcomeReceipts = []
-                  , outcomeBadges = ["fold failed"]
-                  , outcomeFailed = 1
-                  , outcomeDraft = initialDraft
-                  }
-              , Just e
-              )
+            ( FoldOutcome
+                { outcomeSynthesis =
+                    [fmt|<this node's fold window exited: {renderInvocationExit e}> — its {show (length kids)} branch result(s) are below, unfolded|]
+                , outcomeTensions = []
+                , outcomeBadges = ["fold failed"]
+                , outcomeFailed = 1
+                }
+            , Just e
+            )
   record
     "fold"
     key
@@ -1194,388 +1207,33 @@ foldAt initialDraft layer path = do
   -- COALGEBRA's (this node never decided a layer — 'failureReason' reads it
   -- off the layer's own origin) and the ALGEBRA's (the layer was fine, the
   -- fold window exited).  A node can carry both.
-  case failureReason layer of
+  case failureReason realized of
     Nothing -> pure ()
     Just why -> record "failed" key (object ["reason" .= why, "window" .= ("coalgebra" :: Text)])
   case algebraExit of
     Nothing -> pure ()
     Just e ->
       record "failed" key (object ["reason" .= renderInvocationExit e, "window" .= ("algebra" :: Text)])
-  -- The receipts (PRD 21 lane C4 step 4): emitted ONLY when this node's own
-  -- fold actually approved something, joining the SAME journal vocabulary
-  -- 'record' already gives "fold"/"finish"/"gate"/"failed" — a narrative
-  -- fold that never selects or proposes anything journals nothing new here,
-  -- which is what keeps a no-edits run's journal byte-identical to before.
-  -- @status@ is "applied" ONLY at the root — every other node ran the SAME
-  -- apply mechanically (against the same frozen 'initialDraft'), but its
-  -- result is a PREVIEW: only the root's own selection is the turn's one
-  -- real, persisted application (endorsement propagation, step 4).
-  case fo.outcomeReceipts of
-    [] -> pure ()
-    _ ->
-      record
-        "edits"
-        key
-        ( object
-            [ "before" .= initialDraft
-            , "after" .= fo.outcomeDraft
-            , "status" .= (if isRoot then "applied" else "preview" :: Text)
-            , "receipts" .= map receiptJson fo.outcomeReceipts
-            ]
-        )
   pure
     NodeAnswer
       { answerPath = path
-      , answerPosture = layerPosture layer
+      , answerPosture = layerPosture realized
       , answerSynthesis = fo.outcomeSynthesis
       , answerTensions = fo.outcomeTensions
-      , answerBadges = originBadges layer <> fo.outcomeBadges
+      , answerBadges = originBadges realized <> fo.outcomeBadges
       , answerTree = concatMap childLines kids
       , answerNodes = 1 + sum (map (.answerNodes) kidAnswers)
       , answerWindows =
-          selfWindows layer
+          selfWindows realized
             - (if mechanicalLeaf then 1 else 0)
             + sum (map (.answerWindows) kidAnswers)
-      , answerForced = selfForced layer + sum (map (.answerForced) kidAnswers)
-      , answerFailed = selfFailed layer + fo.outcomeFailed + sum (map (.answerFailed) kidAnswers)
-      , answerArtifacts = fo.outcomeArtifacts
-      , answerArtifactRenders = fo.outcomeRenders
-      , answerDraft = fo.outcomeDraft
+      , answerForced = selfForced realized + sum (map (.answerForced) kidAnswers)
+      , answerFailed = selfFailed realized + fo.outcomeFailed + sum (map (.answerFailed) kidAnswers)
       , answerMergeBranch = mergeBranch
       }
   where
     key = renderPath path
-    -- The ONE place a child's identity is computed on the fold side, and it
-    -- is 'childPath' — the same function the coalgebra used to build the
-    -- child's seed, over the same branch list in the same order carrying the
-    -- same brief title.  The two cannot disagree.
-    applyChild p (Th.Branch b (i, f)) = f (childPath p i b.title)
     childLines (Th.Branch b a) = subtreeLines b.title a
-
--- ---------------------------------------------------------------------------
--- Validation caps (companion review step 6b) — module constants, never
--- silently truncated against: a proposal or payload past either cap is
--- REFUSED whole and journaled, so the record always shows the model's own
--- real ask rather than a runtime-edited version of it.
--- ---------------------------------------------------------------------------
-
--- | The most NEW edit proposals one fold window's own 'foldProposed' may
--- carry. A fold naming more than this many is not being asked to WORK, it
--- is spamming the draft; proposals past the cap are refused individually
--- (in submission order) and journaled as overflow.
-maxProposalsPerFold :: Int
-maxProposalsPerFold = 4
-
--- | The character-length cap on a single edit's payload — an 'AppendEdit'
--- 's @editAppend@, or a 'ReplaceOnce''s @editNeedle@ plus @editReplacement@
--- combined. An oversize proposal is refused WHOLE, never truncated: a
--- truncated edit is silently a different edit than the one proposed.
-maxEditPayloadChars :: Int
-maxEditPayloadChars = 4000
-
--- | The C4 mechanism itself, run over one node's own (possibly
--- corrective-retried) 'FoldDecision': resolve the selection against the
--- pool, approve, apply against 'initialDraft', stamp this node's own new
--- proposals, and republish every artifact this fold ENDORSED back into
--- 'outcomeArtifacts' under its original id — routed straight through
--- 'Th.resolveSelection'\/'Th.approve'\/'Th.applyEdits'\/'Th.approvedOrder'
--- rather than reimplemented (PRD 21 lane C4's landed, property-tested
--- mechanism).
---
--- 'Th.decisionProposed' is left @[]@ on the 'Th.FoldDecision' built for
--- 'Th.resolveSelection': that function reads only 'Th.selected'\/
--- 'Th.composition' (@Tidepool.Thought@'s own definition), so THIS node's own
--- new proposals never resolve against themselves here — they become
--- available to select only at the PARENT's fold, exactly like a child's
--- (stamped below, via 'stampProposed').
-resolveAndApply ::
-  NodePath ->
-  Bool ->
-  Text ->
-  [Th.Artifact Text] ->
-  [(Th.ArtifactId, Text)] ->
-  FoldDecision ->
-  Companion FoldOutcome
-resolveAndApply path isRoot initialDraft pool poolRenders fd = do
-  (newArtifacts, newRenders) <- stampProposed path isRoot fd.foldProposed
-  classifySelectionJournal path pool fd.foldEditsInOrder
-  case Th.approve product_ of
-    Nothing ->
-      pure
-        FoldOutcome
-          { outcomeSynthesis = fd.foldSynthesis
-          , outcomeTensions = fd.foldTensions
-          , outcomeArtifacts = newArtifacts
-          , outcomeRenders = newRenders
-          , outcomeReceipts = []
-          , outcomeBadges = []
-          , outcomeFailed = 0
-          , outcomeDraft = initialDraft
-          }
-    Just approved ->
-      let (nodeDraft, receipts) = Th.applyEdits id approved initialDraft
-          receiptList = NE.toList receipts
-          Th.CompositionOrder endorsedIds = Th.approvedOrder approved
-          endorsed = [a | aid <- endorsedIds, Just a <- [find ((== aid) . Th.artifactId) pool]]
-          endorsedRenders = [(aid, r) | aid <- endorsedIds, Just r <- [lookup aid poolRenders]]
-       in pure
-            FoldOutcome
-              { outcomeSynthesis = fd.foldSynthesis
-              , outcomeTensions = fd.foldTensions
-              , outcomeArtifacts = newArtifacts <> endorsed
-              , outcomeRenders = newRenders <> endorsedRenders
-              , outcomeReceipts = receiptList
-              , outcomeBadges = [editsBadge isRoot receiptList]
-              , outcomeFailed = 0
-              , outcomeDraft = nodeDraft
-              }
-  where
-    decision =
-      Th.FoldDecision
-        fd.foldSynthesis
-        (map Th.ArtifactId fd.foldEditsInOrder)
-        (Th.CompositionOrder (map Th.ArtifactId fd.foldEditsInOrder))
-        []
-    product_ = Th.resolveSelection decision pool
-
--- | The corrective-retry mechanism (companion review step 6c): when a fold
--- names a NONEMPTY 'foldEditsInOrder' containing an id this node's pool
--- cannot honor — unavailable (unknown, or evidence-only, hence not
--- selectable) or duplicated — give the model exactly ONE fresh attempt
--- before falling through to applying whatever DOES resolve. The retry is a
--- genuinely SECOND window ('foldWindow' again, a fresh @runLLMTurnFork@),
--- never a patched-up reuse of the first. Capped at one: whatever the retry
--- returns (even if still invalid) is taken as final — 'resolveAndApply'
--- always applies the valid, unique subset regardless, and
--- 'classifySelectionJournal' records exactly what happened to every id.
-resolveWithOneRetry ::
-  NodePath ->
-  ThoughtF a ->
-  [Th.Branch NodeAnswer] ->
-  [Th.Artifact Text] ->
-  [(Th.ArtifactId, Text)] ->
-  Text ->
-  Bool ->
-  [Text] ->
-  Either InvocationExit FoldDecision ->
-  Companion (Either InvocationExit FoldDecision)
-resolveWithOneRetry path layer kids pool poolRenders draft isRoot mergeNotes outcome0 = case outcome0 of
-  Left _ -> pure outcome0
-  Right fd0
-    | null fd0.foldEditsInOrder -> pure outcome0
-    | null unavailable && null duplicated -> pure outcome0
-    | otherwise -> do
-        record
-          "retry"
-          (renderPath path)
-          (object ["reason" .= ("invalid selection" :: Text), "unavailable" .= unavailable, "duplicated" .= duplicated])
-        foldWindow (correctiveRetryPrompt path layer kids pool poolRenders draft isRoot mergeNotes unavailable duplicated fd0)
-    where
-      (unavailable, duplicated) = invalidSelectionIds pool fd0.foldEditsInOrder
-
--- | The two ways a selected id can fail to validate: named but not a
--- selectable edit in the pool (unknown entirely, or an evidence artifact —
--- both "unavailable" from the model's point of view), or named more than
--- once. Each list is deduped for display; the presence of EITHER is what
--- 'resolveWithOneRetry' treats as needing a retry.
-invalidSelectionIds :: [Th.Artifact Text] -> [Text] -> ([Text], [Text])
-invalidSelectionIds pool ids = (L.nub (filter (not . isSelectable) ids), L.nub (ids L.\\ L.nub ids))
-  where
-    isSelectable i = any (\a -> isEditArtifact a && artifactIdText (Th.artifactId a) == i) pool
-
-isEditArtifact :: Th.Artifact s -> Bool
-isEditArtifact a = case a of
-  Th.EditArtifact {} -> True
-  Th.EvidenceArtifact {} -> False
-
--- | Journal every id in a fold's (possibly corrective-retried) final
--- 'foldEditsInOrder', with the SAME per-id reason a human reading the
--- journal would want: @resolved@ (a real edit plan, applied or attempted),
--- @unknown-id@ (nothing in the pool has this id), @evidence-id@ (present,
--- but not selectable — an 'Th.EvidenceArtifact'), or @duplicate@ (a REPEAT
--- occurrence — the first occurrence of a given id gets its own real
--- reason; only the second and later ones are "duplicate"). Silent when
--- 'foldEditsInOrder' is empty, matching this module's "nothing to say,
--- nothing journaled" convention elsewhere.
-classifySelectionJournal :: NodePath -> [Th.Artifact Text] -> [Text] -> Companion ()
-classifySelectionJournal _ _ [] = pure ()
-classifySelectionJournal path pool ids =
-  record "selection" (renderPath path) (object ["ids" .= map toEntry (classifySelection pool ids)])
-  where
-    toEntry (i, reason) = object ["id" .= i, "reason" .= (reason :: Text)]
-
-classifySelection :: [Th.Artifact Text] -> [Text] -> [(Text, Text)]
-classifySelection pool = go []
-  where
-    go _ [] = []
-    go seen (i : rest)
-      | i `elem` seen = (i, "duplicate") : go seen rest
-      | otherwise = (i, reasonFor i) : go (i : seen) rest
-    reasonFor i = case find ((== i) . artifactIdText . Th.artifactId) pool of
-      Nothing -> "unknown-id"
-      Just a | isEditArtifact a -> "resolved"
-      Just _ -> "evidence-id"
-
--- | Stamp this node's own wire-level proposals into real, id-bearing
--- 'Th.Artifact's — the RUNTIME half of decision 7 ("intent metadata + an
--- @s -> Either EditFailure s@ plan"; ids are the runtime's to assign, never
--- the model's). Ids are derived from the node's own path plus a dense
--- per-node index over the SURVIVING proposals only, never from
--- model-produced text — the same containment discipline 'slug' gives node
--- ids, and the same reason a refused proposal consumes no id and leaves no
--- gap. The real closure itself ('wrapEdit') is built HERE, in the runtime,
--- never by a window: neither window this harness ever finalizes across can
--- carry one (see 'ProposedEditWire''s own doc).
---
--- Every refusal — a blank intent, a blank\/no-op payload, an oversize
--- payload, overflow past 'maxProposalsPerFold', or (new in endorsement
--- propagation, step 4) ANY proposal at all from the ROOT fold, which
--- selects but never authors — is journaled under kind @refused@, naming
--- the node path, the proposal's 1-based SUBMITTED ordinal (so the record
--- still shows which of the model's own proposals it was), and the reason.
--- A refused proposal never becomes an 'Th.Artifact' and never enters a
--- pool.
-stampProposed :: NodePath -> Bool -> [ProposedEditWire] -> Companion ([Th.Artifact Text], [(Th.ArtifactId, Text)])
-stampProposed path isRoot = go (1 :: Int) (0 :: Int)
-  where
-    go _ _ [] = pure ([], [])
-    go ordinal kept (p : rest) = case validateProposal isRoot kept p of
-      Left why -> do
-        record "refused" (renderPath path) (object ["ordinal" .= ordinal, "reason" .= why])
-        go (ordinal + 1) kept rest
-      Right () -> do
-        let aid = artifactIdAt path (kept + 1)
-        (arts, renders) <- go (ordinal + 1) (kept + 1) rest
-        pure
-          ( Th.EditArtifact aid (Th.EditIntent (editIntentOf p)) (wrapEdit p) : arts
-          , (aid, renderEditContent p) : renders
-          )
-
--- | Every reason a proposal is refused before it ever reaches an id
--- (companion review steps 4 + 6a): root proposing at all, a blank intent, a
--- blank\/no-op payload (an empty append, or a replace whose needle is blank
--- or whose replacement is identical to its needle), overflow past
--- 'maxProposalsPerFold', or a payload past 'maxEditPayloadChars'. Checked
--- in this fixed order so the journaled reason is always the FIRST one that
--- applies, never an arbitrary pick among several that all hold.
-validateProposal :: Bool -> Int -> ProposedEditWire -> Either Text ()
-validateProposal isRoot keptCount p
-  | isRoot = Left "the root fold may not propose new edits — select from the pool instead"
-  | strip (editIntentOf p) == "" = Left "an edit with a blank intent is refused"
-  | keptCount >= maxProposalsPerFold =
-      Left [fmt|more than {show maxProposalsPerFold} proposals in one fold — the rest are refused, not truncated|]
-  | payloadChars > maxEditPayloadChars =
-      Left [fmt|edit payload exceeds the {show maxEditPayloadChars}-character cap ({show payloadChars} chars)|]
-  | noOpPayload = Left "an edit with no actual change is refused"
-  | otherwise = Right ()
-  where
-    payloadChars = case p of
-      AppendEdit {editAppend = a} -> T.length a
-      ReplaceOnce {editNeedle = n, editReplacement = r} -> T.length n + T.length r
-    noOpPayload = case p of
-      AppendEdit {editAppend = a} -> strip a == ""
-      ReplaceOnce {editNeedle = n, editReplacement = r} -> strip n == "" || n == r
-
-editIntentOf :: ProposedEditWire -> Text
-editIntentOf p = case p of
-  AppendEdit {editIntent = i} -> i
-  ReplaceOnce {editIntent = i} -> i
-
--- | The exact content a proposal would write, for the pool listing an
--- approving fold reads (companion review DEFECT 1's fix) — an
--- 'AppendEdit''s appended text, or a 'ReplaceOnce''s needle AND replacement
--- both, each in its own delimited block so the boundaries of what will
--- change are unambiguous.
-renderEditContent :: ProposedEditWire -> Text
-renderEditContent p = case p of
-  AppendEdit {editAppend = a} ->
-    [fmt|--- BEGIN APPEND ---
-{a}
---- END APPEND ---|]
-  ReplaceOnce {editNeedle = n, editReplacement = r} ->
-    [fmt|--- NEEDLE ---
-{n}
---- REPLACEMENT ---
-{r}
---- END ---|]
-
-artifactIdAt :: NodePath -> Int -> Th.ArtifactId
-artifactIdAt path i = Th.ArtifactId (renderPath path <> "#" <> show i)
-
-artifactIdText :: Th.ArtifactId -> Text
-artifactIdText (Th.ArtifactId t) = t
-
--- | The RUNTIME's own closure over an already-validated wire-level proposal
--- (every blank/no-op/oversize/root-forbidden case is refused earlier, at
--- 'stampProposed' — this is total over what survives that check).
--- 'Th.appendWithSeparator'\/'Th.replaceExactlyOnce' are the two edit
--- vocabulary's own pure bodies (companion review step 7), shared with
--- "Tidepool.Thought"'s own property tests — this is dispatch, not a second
--- implementation.
-wrapEdit :: ProposedEditWire -> (Text -> Either Th.EditFailure Text)
-wrapEdit p s = case p of
-  AppendEdit {editAppend = a} -> Right (Th.appendWithSeparator s a)
-  ReplaceOnce {editNeedle = n, editReplacement = r} -> Th.replaceExactlyOnce n r s
-
--- | @["edits: N applied, M refused"]@ at the ROOT, or
--- @["edits: N previewed, M refused"]@ everywhere else — the wording
--- endorsement propagation needs (companion review step 4): every node ran
--- the SAME apply mechanically, but only the root's is the turn's one real,
--- persisted application. Only reached when 'outcomeReceipts' is
--- non-empty; matches 'originBadges''s own "silent when nothing to say"
--- shape.
-editsBadge :: Bool -> [Th.EditReceipt] -> Text
-editsBadge isRoot receipts =
-  [fmt|edits: {show applied} {verb}, {show refused} refused|]
-  where
-    applied = length (rights (map (.receiptOutcome) receipts))
-    refused = length receipts - applied
-    verb = if isRoot then "applied" :: Text else "previewed"
-
--- | One 'Th.EditReceipt' as the journal's own @object@ vocabulary — built by
--- hand, like every other 'record' payload in this module, rather than a
--- generic 'ToJSON' derive: 'Th.EditReceipt' carries no such instance (it is
--- not one of this harness's model-facing wire types), and nothing else here
--- needs it to.
-receiptJson :: Th.EditReceipt -> Value
-receiptJson r =
-  object
-    [ "artifact" .= artifactIdText r.receiptArtifact
-    , "intent" .= editIntentText r.receiptIntent
-    , "before" .= r.receiptBefore
-    , "outcome" .= case r.receiptOutcome of
-        Left f -> object ["refused" .= f.editFailureReason]
-        Right t -> object ["applied" .= t]
-    ]
-  where
-    editIntentText (Th.EditIntent t) = t
-
--- | THE FOLD SEAM — the ONE place this harness visits a REALIZED layer's
--- children to collect their already-worked answers.
---
--- Today it is ordinary order-preserving sequential traversal and it
--- IGNORES its 'Strategy' argument entirely — every child's fold still runs
--- one after another, regardless of what a split proposed. This is a
--- DIFFERENT seam from sibling branch windowing (the DISCOVERY descent,
--- which now runs concurrently by construction — see 'groupCoalg' and
--- 'Tidepool.Thought.thoughtHyloGrouped'): folding a realized layer visits
--- already-produced 'Folded' closures, never opens a new cognition window
--- itself, so batching it into one call the way discovery's siblings are
--- batched is not the same move.
---
--- When the green-threads lane lands, the authored loop gains
--- async\/mapConcurrently over the outer row and subtree-level FOLD
--- concurrency drops in HERE, by interpreting 'Strategy' at the descent —
--- without touching the discovery machinery at all. Branch order is
--- preserved by construction either way, so nothing downstream changes.
-traverseLayer :: Strategy -> (Th.Branch a -> Companion b) -> ThoughtF a -> Companion (ThoughtF b)
-traverseLayer _proposed visit layer = case layer of
-  Th.Finish d -> pure (Th.Finish d)
-  Th.Explore f bs s -> Th.Explore f <$> traverse step bs <*> pure s
-  Th.Compare d os s -> Th.Compare d <$> traverse step os <*> pure s
-  Th.Challenge c as s -> Th.Challenge c <$> traverse step as <*> pure s
-  where
-    step br = Th.Branch br.brief <$> visit br
 
 -- | How many MODEL windows this node itself spent.  A node a budget refused
 -- before its coalgebra ran spent only its fold; every other node — including
@@ -1730,7 +1388,7 @@ exampleBlock code =
 exampleFoldDecisionEmpty :: Text
 exampleFoldDecisionEmpty =
   exampleBlock
-    "finalize @FoldDecision (FoldDecision { foldSynthesis = \"what this node concludes\", foldTensions = [], foldEditsInOrder = [], foldProposed = [] })"
+    "finalize @FoldDecision (FoldDecision { foldSynthesis = \"what this node concludes\", foldTensions = [] })"
 
 -- | The numeric budget line every child brief carries (companion review
 -- run-4 finding, P1: "it wants per-node REMAINING depth/slots/rounds" —
@@ -1762,75 +1420,39 @@ Budget: depth {seed.seedDepth} of {cfg.maxDepth} max, node allowance {seed.seedA
 
 Finalize: `finalize @LayerProposal (...)`|]
 
--- | Companion review step 4/8b/8c's wording for who a fold's selection
--- authorizes what for.
-foldRoleWording :: Bool -> Text
-foldRoleWording isRoot
-  | isRoot =
-      [fmt|This is the root fold. Your ordered selection is the final authorization. The runtime applies it once, in the order listed, against the turn-start draft; omitted edits are not persisted.|]
-  | otherwise =
-      [fmt|Selecting an edit here endorses it to this node's parent; it does not persist the edit. An available edit you omit is dropped from this route and cannot reach the root. The runtime evaluates your ordered selection against the turn-start draft only as a preview. Reassess independently — do not rubber-stamp a child's prior endorsement just because it reached you.|]
-
--- | Companion review step 4/8i's wording for what a fold may propose.
-foldProposedWording :: Bool -> Text
-foldProposedWording isRoot
-  | isRoot =
-      [fmt|This is the root fold: `foldProposed` must be empty — the root selects from the pool, it does not author new edits. Put anything else in `foldSynthesis`.|]
-  | otherwise =
-      [fmt|`foldProposed` is how THIS node contributes brand-new draft edits of its own: a list of AppendEdit {{{{ editIntent, editAppend }}}} or ReplaceOnce {{{{ editIntent, editNeedle, editReplacement }}}} values. editIntent must contain a specific reason for the change. Proposals with blank intent — or with no actual change — are rejected before they are advertised to a parent. A node's own `foldProposed` artifacts are never selectable at its OWN fold — only its PARENT's fold, one level up, can select them.|]
-
--- | @pool@\/@poolRenders@ are every immediate child's own advertised
--- artifacts — this node's own selectable pool (PRD 21 lane C4), grouped by
--- IMMEDIATE CHILD ("who endorsed this to me", 'renderPoolBlock') with each
--- artifact's own full content shown, never just its intent (companion
--- review DEFECT 1). @mergeNotes@ is PRD 21 lane C5's merge fold, already
--- run by the time this prompt is built ('foldAt' calls 'mergeFold' before
--- 'foldWindow') — this is the "folded as data for the algebra to decide"
--- half of decision 6: the model reads what happened and may say so in
--- 'foldTensions'\/'foldSynthesis', but nothing here presents it as a form
--- or forces a response. Rendered ABOVE the branch block on purpose:
--- 'companion_recursive_slice.rs''s @branch_summary@ reads a branch's own
--- text up to the NEXT "--- branch " or the literal "\\n\\nFold this
--- realized layer" marker, so nothing may sit between the LAST branch's
+-- | The prompt carries exactly three things — the @NODE <path> — FOLD@
+-- header (KEEP this exact format;
+-- 'companion_recursive_slice.rs''s scripted provider keys every window on
+-- it), each child's own FINAL result (a leaf child's localAnswer, a split
+-- child's own fold synthesis — 'childSummary' below), and the delegate
+-- merge-notes block when present ('mergeNotes', PRD 21 lane C5's merge
+-- fold, already run by the time this prompt is built — 'foldAt' calls
+-- 'mergeFold' before 'foldWindow'). NO re-orientation prose: this window is
+-- a BRANCH off the node's own DISCOVER turn now, so its ancestry — what
+-- this node is, what it asked its children to do — is already in its own
+-- inherited context, not re-taught here. Rendered ABOVE the branch block on
+-- purpose: 'companion_recursive_slice.rs''s @branch_summary@ reads a
+-- branch's own text up to the NEXT "--- branch " or the literal "\\n\\nFold
+-- this realized layer" marker, so nothing may sit between the LAST branch's
 -- block and that marker without silently widening what a sibling's "own"
 -- summary is read to contain. @mergeSection@ carries its own leading blank
--- line and is the empty string when @mergeNotes@ is @[]@, so a node with
--- no worktree content renders BYTE-IDENTICAL to before that lane existed.
-algebraPrompt ::
-  NodePath ->
-  ThoughtF a ->
-  [Th.Branch NodeAnswer] ->
-  [Th.Artifact Text] ->
-  [(Th.ArtifactId, Text)] ->
-  Text ->
-  Bool ->
-  [Text] ->
-  Text
-algebraPrompt path layer kids _pool poolRenders draft isRoot mergeNotes =
-  [fmt|NODE {renderPath path} — FOLD ({posture}: {focus}).
-
-{draftBlock}
-
-{poolBlock}{mergeSection}
+-- line and is the empty string when @mergeNotes@ is @[]@, so a node with no
+-- worktree content renders byte-identical to one that never touched git.
+algebraPrompt :: NodePath -> ThoughtF NodeAnswer -> [Th.Branch NodeAnswer] -> [Text] -> Text
+algebraPrompt path realized kids mergeNotes =
+  [fmt|NODE {renderPath path} — FOLD.
 
 {childBlock}
+{mergeSection}
 
 Fold this realized layer into one answer. The branches are in DECLARED order,
 never completion order, and a branch that failed is an ordinary value in the
 list — say what it cost you rather than pretending it did not happen.
 
-{roleWording}
-
-Every record field is required. For a narrative-only fold, set
-foldEditsInOrder = [] and foldProposed = []. Use foldEditsInOrder only for
-available edit IDs, listed once each in exact application order.
-
-Finalize a FoldDecision {{ foldSynthesis, foldTensions, foldEditsInOrder, foldProposed }}:
+Finalize a FoldDecision {{ foldSynthesis, foldTensions }}:
 `foldSynthesis` is this node's answer as prose, written to be read on its own;
 `foldTensions` are the disagreements the branches did NOT resolve, one per
-entry, kept rather than averaged away. `foldEditsInOrder` names artifact ids
-from the pool above, each listed once, in the order to apply them.
-{proposedWording}
+entry, kept rather than averaged away.
 
 Example:
 
@@ -1838,30 +1460,18 @@ Example:
 
 Finalize: `finalize @FoldDecision (...)`|]
   where
-    (posture, focus) = postureAndFocus layer
-    -- (d) the exact turn-start draft, as a clearly delimited multiline
-    -- block — a fold authoring/approving edits must see its actual target.
-    draftBlock =
-      [fmt|The companion's working draft AS OF TURN START — what any selected
-or proposed edit actually runs against:
---- BEGIN DRAFT ---
-{draft}
---- END DRAFT ---|]
-    -- (2) DEFECT fix: a childless fold's prompt must show the Finish
-    -- layer's own draftText, not just say "you are folding a local finish".
-    childBlock = case layer of
-      Th.Finish d -> localFinishBlock d.draftText
+    -- A childless fold (reachable only for the ROOT — every other childless
+    -- node folds mechanically, no window at all) still needs SOMETHING to
+    -- fold: its own local finish, in a delimited block.
+    childBlock = case kids of
+      [] -> localFinishBlock (leafAnswerText realized)
       _ -> T.intercalate "\n\n" (map childSummary kids)
-    poolBlock = renderPoolBlock kids poolRenders
     mergeSection = case mergeNotes of
       [] -> "" :: Text
       ns -> "\nWorktree merges into this node:\n" <> T.intercalate "\n" (map ("- " <>) ns)
-    roleWording = foldRoleWording isRoot
-    proposedWording = foldProposedWording isRoot
 
--- | Companion review step 2's fix: the local result a childless fold is
--- actually folding, in a delimited block — never just a description that
--- one exists.
+-- | The local result a childless fold is actually folding, in a delimited
+-- block — never just a description that one exists.
 localFinishBlock :: Text -> Text
 localFinishBlock t =
   [fmt|This node has no branches: it finished locally. Its own local result:
@@ -1869,99 +1479,17 @@ localFinishBlock t =
 {t}
 --- END LOCAL FINISH ---|]
 
--- | The pool, GROUPED BY IMMEDIATE CHILD (companion review DEFECT 1): who
--- endorsed each artifact to this fold, with its own path-namespaced id
--- shown under it (endorsement propagation keeps ids unchanged end to end,
--- so the id alone already names where an artifact originated). Evidence
--- artifacts are a SEPARATE, explicitly non-selectable section — before this
--- fix they were listed alongside edits, selectable-looking, then silently
--- dropped by 'Th.resolveSelection' (an 'Th.EvidenceArtifact' can never
--- become an 'Th.EditPlan').
-renderPoolBlock :: [Th.Branch NodeAnswer] -> [(Th.ArtifactId, Text)] -> Text
-renderPoolBlock kids poolRenders
-  | null editGroups = "No artifacts are available to select at this fold." <> evidenceBlock
-  | otherwise =
-      "Available artifacts — select by id, each at most once:\n"
-        <> T.intercalate "\n\n" (map renderEditGroup editGroups)
-        <> evidenceBlock
-  where
-    childEdits kid = filter isEditArtifact kid.value.answerArtifacts
-    childEvidence kid = filter (not . isEditArtifact) kid.value.answerArtifacts
-    editGroups = [(kid, as) | kid <- kids, let as = childEdits kid, not (null as)]
-    evidenceGroups = [(kid, es) | kid <- kids, let es = childEvidence kid, not (null es)]
-    renderEditGroup (kid, as) =
-      [fmt|From {kid.brief.title} ({renderPath kid.value.answerPath}):
-{T.intercalate "\n" (map (renderPoolArtifact poolRenders) as)}|]
-    evidenceBlock = case evidenceGroups of
-      [] -> "" :: Text
-      _ ->
-        "\n\nEvidence — NOT selectable, informational only:\n"
-          <> T.intercalate "\n\n" (map renderEvidenceGroup evidenceGroups)
-    renderEvidenceGroup (kid, es) =
-      [fmt|From {kid.brief.title} ({renderPath kid.value.answerPath}):
-{T.intercalate "\n" (map renderEvidence es)}|]
-
--- | One selectable edit artifact, with its FULL content — the exact
--- appended text (an 'AppendEdit'), or the needle AND replacement both (a
--- 'ReplaceOnce') — rendered from 'poolRenders', never just the declared
--- intent (companion review DEFECT 1).
-renderPoolArtifact :: [(Th.ArtifactId, Text)] -> Th.Artifact Text -> Text
-renderPoolArtifact renders a = case a of
-  Th.EditArtifact aid (Th.EditIntent intent) _ ->
-    [fmt|- {artifactIdText aid}: {intent}
-{content}|]
-    where
-      content = case lookup aid renders of
-        Just r -> r
-        Nothing -> "  <no content preview available>" :: Text
-  Th.EvidenceArtifact {} -> "" -- unreachable: 'renderPoolBlock' routes evidence elsewhere
-
-renderEvidence :: Th.Artifact Text -> Text
-renderEvidence a = case a of
-  Th.EvidenceArtifact aid (Th.Evidence e) -> [fmt|- {artifactIdText aid}: {e}|]
-  Th.EditArtifact {} -> "" -- unreachable: 'renderPoolBlock' routes edits elsewhere
-
--- | (e) each branch's own ASSIGNMENT (the instruction it was given),
--- alongside what it answered — before this fix a fold saw only answers,
--- never the instructions they were meant to satisfy.
+-- | One child's own final result — a leaf's localAnswer or a split node's
+-- own fold synthesis, either way just 'answerSynthesis' (both routes set it
+-- to exactly that). NO instruction line: the instruction this branch was
+-- given is already in this node's OWN inherited context (its own earlier
+-- ProposeSplit), so repeating it here would be exactly the re-orientation
+-- prose branching-off-the-node's-own-conversation makes redundant.
 childSummary :: Th.Branch NodeAnswer -> Text
 childSummary (Th.Branch b a) =
   [fmt|--- branch {renderPath a.answerPath}: {b.title} ({show b.role}) [{a.answerPosture}]
-instruction: {b.instruction}
 {a.answerSynthesis}{tensions}|]
   where
     tensions = case a.answerTensions of
       [] -> "" :: Text
       ts -> "\nunresolved: " <> T.intercalate "; " ts
-
--- | The corrective-retry window's own prompt (companion review step 6c):
--- the exact validation-failure preamble, quoting which ids were
--- unavailable and which were duplicated, the prior decision echoed
--- verbatim (its own derived 'Show'), and then the SAME authoritative
--- prompt ('algebraPrompt') the model saw the first time — pool, branches,
--- draft, and every wording rule unchanged, so the retry is a genuine
--- second attempt at the same question rather than a narrower one.
-correctiveRetryPrompt ::
-  NodePath ->
-  ThoughtF a ->
-  [Th.Branch NodeAnswer] ->
-  [Th.Artifact Text] ->
-  [(Th.ArtifactId, Text)] ->
-  Text ->
-  Bool ->
-  [Text] ->
-  [Text] ->
-  [Text] ->
-  FoldDecision ->
-  Text
-correctiveRetryPrompt path layer kids pool poolRenders draft isRoot mergeNotes unavailableIds duplicateIds priorFd =
-  [fmt|Your edit selection did not validate. These IDs are unavailable: {renderIdList unavailableIds}. These IDs are duplicated: {renderIdList duplicateIds}. Choose only unique IDs from the authoritative list below, or return an empty list.
-
-Your previous decision, for reference:
-{show priorFd}
-
-{algebraPrompt path layer kids pool poolRenders draft isRoot mergeNotes}|]
-  where
-    renderIdList ids = case ids of
-      [] -> "(none)" :: Text
-      _ -> T.intercalate ", " ids

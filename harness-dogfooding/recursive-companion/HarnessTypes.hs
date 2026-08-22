@@ -38,7 +38,6 @@ module HarnessTypes
   , ProposedBranch (..)
   , Posture (..)
   , BranchRoleWire (..)
-  , ProposedEditWire (..)
   , FoldDecision (..)
 
     -- * The gate
@@ -60,8 +59,6 @@ module HarnessTypes
     -- * Layer plumbing (pure, order-preserving)
   , layerBranches
   , rebuildLayer
-  , indexLayer
-  , layerStrategy
   , layerPosture
   , renderOrigin
 
@@ -74,7 +71,6 @@ module HarnessTypes
   , render
   ) where
 
-import Data.List.NonEmpty (NonEmpty ((:|)))
 import qualified Data.List.NonEmpty as NE
 import qualified Data.Text as T
 import GHC.Generics (Generic)
@@ -105,13 +101,6 @@ data State = State
   , config    :: Config
   , turnCount :: Int
   , lastRun   :: Maybe RunSummary
-  , -- | The companion's WORKING DRAFT (PRD 21 lane C4, "Two edit channels" —
-    -- the in-heap draft C4's checked-edit path targets; file-shaped content
-    -- is a separate C5 lane). Only a node's own fold can ever change it
-    -- (@Harness.foldAt@), and only by running an approved 'Th.EditPlan'
-    -- against the value this field held at TURN START — never by a model
-    -- writing to it directly.
-    draft :: Text
   }
   deriving (Generic, ToJSON, FromJSON, Show)
 
@@ -206,7 +195,6 @@ initialState =
           }
     , turnCount = 0
     , lastRun = Nothing
-    , draft = ""
     }
 
 -- ---------------------------------------------------------------------------
@@ -288,11 +276,7 @@ renderBrief b =
 -- incapable of describing more than its own layer, so a model that tries to
 -- hand back a whole tree produces a decode error, not a deeper tree.
 data LayerProposal
-  = -- | Renamed from @finishDraft@ (companion review DEFECT-adjacent
-    -- clarity fix): this field is easily confused with 'State''s own
-    -- persistent working @draft@, and it is not that — it is this ONE
-    -- node's local answer, never itself written into the draft (only an
-    -- approved 'ProposedEditWire' can do that).
+  = -- | This ONE node's local answer.
     ProposeFinish {localAnswer :: Text}
   | ProposeSplit
       { splitPosture  :: Posture
@@ -323,69 +307,16 @@ data Posture = Explore | Compare | Challenge
 data BranchRoleWire = Primary | Alternative | Critic
   deriving (Generic, ToJSON, FromJSON, JsonSchema, Show, Eq)
 
--- | One proposed edit to the companion's working draft (PRD 21 lane C4).
--- PLAIN DATA on purpose, not the real @s -> Either EditFailure s@ closure
--- @Tidepool.Thought.EditPlan@ ultimately wants — both windows this harness
--- ever finalizes across (@runLLMTurnBranch@/@runLLMTurnFork@) refuse a
--- finalized answer that carries a live function
--- ("runLLMTurnBranch answer must be plain data — a closure cannot cross";
--- "a concurrent fanout\/fork answer must be plain data in this driver (v1
--- scope)"), so a window can never author the closure itself. The RUNTIME
--- (@Harness.stampProposed@\/@wrapEdit@) is what turns this plain proposal
--- into the real, id-stamped 'Tidepool.Thought.Artifact', including every
--- validation the consultation's DEFECT/VALIDATION findings ask for (blank
--- intent, blank/no-op payload, per-fold and per-payload caps — none of it
--- lives here, all of it lives at the stamp).
---
--- TWO constructors, BOTH record syntax (a payload constructor in a sum must
--- use record syntax — the vendored generic JSON has no key to put a
--- positional field under and rejects one with a compile-time @TypeError@):
---
--- * 'AppendEdit' — the pre-existing shape: append @editAppend@ to the
---   draft. The runtime closure ('Harness.wrapEdit') inserts a blank-line
---   paragraph separator before the appended block when the draft is
---   already nonempty, so sibling appends compose as paragraphs rather than
---   running together.
--- * 'ReplaceOnce' — the new edit vocabulary (companion review step 7): a
---   nonempty @editNeedle@ that must occur EXACTLY ONCE in the draft the
---   plan actually runs against — zero or multiple occurrences is a typed
---   'Tidepool.Thought.EditFailure' naming the count, never a silent
---   first-match replace. An empty @editReplacement@ is an ordinary
---   deletion, not a special case.
-data ProposedEditWire
-  = AppendEdit {editIntent :: Text, editAppend :: Text}
-  | ReplaceOnce {editIntent :: Text, editNeedle :: Text, editReplacement :: Text}
-  deriving (Generic, ToJSON, FromJSON, JsonSchema, Show, Eq)
-
--- | The ALGEBRA's answer (PRD 21 lane C4 — @Tidepool.Thought.FoldDecision@'s
--- wire shape). @foldSynthesis@\/@foldTensions@ are unchanged from the old
--- @FoldProposal@; the rest is OPTIONAL and defaults to doing nothing, so a
--- narrative fold that never mentions them behaves exactly as before:
---
--- * @foldEditsInOrder@ collapses the old @foldSelected@\/@foldComposition@
---   pair (companion review step 5 — the wire never needed two lists that
---   always had to agree on membership) into ONE ordered list of THIS
---   NODE'S OWN CHILDREN's already-advertised artifact ids: order IS
---   application order, an empty list means none, and every id must be
---   unique (a duplicate is refused at validation — see
---   @Harness.resolveWithRetry@ — never silently deduped past the model's
---   own view of what it selected). A leaf's own fold has no children, so
---   its pool is always empty and nothing it names here can ever resolve —
---   selection can only ever approve what a CHILD actually proposed, never
---   conjure one out of thin air.
--- * @foldProposed@ is how THIS node contributes a brand-new edit of its
---   own — a leaf's ONLY route to proposing anything, since it has no
---   children to select from. A leaf's own proposals are never selectable
---   at the leaf's own fold; they only become selectable one level up, at
---   its PARENT's fold, exactly like a child's. The ROOT fold is the one
---   exception: @foldProposed@ is FORBIDDEN there (companion review step 4)
---   and every entry is refused at the stamp, journaled, and never enters
---   the pool.
+-- | The ALGEBRA's answer.  Just a synthesis and the tensions it did not
+-- resolve — the C4 checked-edits wire (@foldEditsInOrder@\/@foldProposed@,
+-- an in-heap draft the fold selected/authored edits against) is RETIRED
+-- (fold-lineage rewrite, 2026-08-22): the human's decision is that the
+-- worktree\/delegate channel ('Harness.mergeFold') is THE file-edit
+-- mechanism now, and the in-heap draft was only ever the interim stand-in
+-- for it.
 data FoldDecision = FoldDecision
-  { foldSynthesis    :: Text
-  , foldTensions     :: [Text]
-  , foldEditsInOrder :: [Text]
-  , foldProposed     :: [ProposedEditWire]
+  { foldSynthesis :: Text
+  , foldTensions  :: [Text]
   }
   deriving (Generic, ToJSON, FromJSON, JsonSchema, Show, Eq)
 
@@ -415,9 +346,9 @@ postureLayer po f brs s = case po of
 -- configuration rather than a test hook — an unattended companion turn is a
 -- legitimate mode, and under it NO suspension is raised at all.
 --
--- @GateWiderThan@ carries a NAMED field for the same reason
--- 'ProposedEditWire''s payload constructors do (a payload constructor in a
--- sum must use record syntax).
+-- @GateWiderThan@ carries a NAMED field: a payload constructor in a sum must
+-- use record syntax (the vendored generic JSON has no key to put a
+-- positional field under and rejects one with a compile-time @TypeError@).
 data GatePolicy
   = GateOff
   | GateWiderThan {gateWidth :: Int}
@@ -520,31 +451,6 @@ rebuildLayer layer brs = case layer of
 -- @Harness.traverseLayer@'s callback takes a bare branch — so the index rides
 -- in the branch's own value rather than in a second, order-coupled list.
 --
--- Matches the constructor directly rather than going through 'rebuildLayer':
--- a 'Th.Finish' has no branches to index, and every other arm's branches are
--- already the 'NE.NonEmpty' 'rebuildLayer' needs, so there is no list to
--- reconstruct and nothing partial to invoke.
-indexLayer :: ThoughtF a -> ThoughtF (Int, a)
-indexLayer layer = case layer of
-  Th.Finish d -> Th.Finish d
-  Th.Explore f bs s -> Th.Explore f (tagBranches bs) s
-  Th.Compare d os s -> Th.Compare d (tagBranches os) s
-  Th.Challenge c as s -> Th.Challenge c (tagBranches as) s
-  where
-    tagBranches = NE.zipWith tag (0 :| [1 ..])
-    tag i (Th.Branch b v) = Th.Branch b (i, v)
-
--- | The strategy the layer CARRIES — every split now runs 'Th.Concurrent'
--- (operator decision: sibling branch windows are ALWAYS driven concurrently,
--- transparently — scheduling is never a model-visible choice, so there is no
--- separate "proposed" value to compare it against).
-layerStrategy :: ThoughtF a -> Strategy
-layerStrategy layer = case layer of
-  Th.Finish _ -> Th.Sequential
-  Th.Explore _ _ s -> s
-  Th.Compare _ _ s -> s
-  Th.Challenge _ _ s -> s
-
 layerPosture :: ThoughtF a -> Text
 layerPosture layer = case layer of
   Th.Finish d -> "finish(" <> renderOrigin d <> ")"
@@ -588,37 +494,6 @@ data NodeAnswer = NodeAnswer
     answerWindows   :: Int
   , answerForced    :: Int
   , answerFailed    :: Int
-  , -- | THIS node's own artifact pool, offered to its PARENT's fold: its own
-    -- newly-proposed artifacts (PRD 21 lane C4), stamped with ids and held
-    -- live, PLUS — as of endorsement propagation (companion review step 4)
-    -- — every artifact this node's own fold ENDORSED (selected via
-    -- @foldEditsInOrder@) from ITS children, republished upward under
-    -- their ORIGINAL id (ids are path-namespaced, so provenance survives
-    -- to the root unchanged). Never one this node's own fold declined to
-    -- select — an available edit a fold omits is dropped from that route
-    -- permanently, not re-offered. Available for exactly this node's
-    -- PARENT to select by id; a parent that does not name it drops it in
-    -- turn. No 'Eq'\/'Show': an artifact carries a real closure.
-    answerArtifacts :: [Th.Artifact Text]
-  , -- | The renderable CONTENT behind every id in 'answerArtifacts' that is
-    -- an edit (never an evidence artifact, whose own 'Th.Evidence' text
-    -- already IS its full content) — companion review DEFECT 1's fix: the
-    -- approving fold must see the exact text it is authorizing, not just
-    -- the artifact's declared intent. Carried alongside the opaque
-    -- 'Th.Artifact' closure (which cannot be rendered back into text) and
-    -- propagated together with a republished endorsement, so a
-    -- grandchild's edit is still fully legible at the root.
-    answerArtifactRenders :: [(Th.ArtifactId, Text)]
-  , -- | THIS node's own view of the companion's working draft, after
-    -- running whatever THIS node's own fold approved against the draft as
-    -- it stood at TURN START (@Harness.loop@'s @st.draft@, frozen and
-    -- shared by every node — never threaded bottom-up between siblings).
-    -- Only the ROOT's own value here ever becomes the next turn's
-    -- persisted 'draft' and is the one application receipts call
-    -- "applied"\/"persisted"; every other node's is a PREVIEW against the
-    -- same frozen snapshot, read back only for its own receipt (companion
-    -- review step 4).
-    answerDraft     :: Text
   , -- | The branch name of the worktree THIS node ends up owning after its
     -- own merge fold (PRD 21 C5, "Worktree coordination"), if it ever
     -- acquired one -- 'Nothing' for a purely deliberative node that never
@@ -678,7 +553,7 @@ render st = case st.lastRun of
     [fmt|You are a recursive companion. Nothing has folded yet.
 
 Question: {st.question}
-{budgetLine}{draftBlock}
+{budgetLine}
 
 Your next turn discovers a tree one layer at a time: a coalgebra window
 finalizes a LayerProposal for THIS node only (finish locally, or split into
@@ -696,7 +571,7 @@ branch order.
 {receiptLine r}
 
 Question: {st.question}
-{budgetLine}{draftBlock}
+{budgetLine}
 Turns folded: {show st.turnCount}
 
 {coalgebraProtocol c}|]
@@ -705,21 +580,6 @@ Turns folded: {show st.turnCount}
     budgetLine :: Text
     budgetLine =
       [fmt|Budget: depth {c.maxDepth}, {c.maxNodes} nodes, fan-out {c.maxFanOut}; gate {renderPolicy c.gatePolicy} (at most {c.gateMaxRounds} rounds)|]
-    -- Shown only once a fold has actually changed the draft (PRD 21 lane
-    -- C4) — an empty draft is exactly today's pre-C4 behavior, and this
-    -- stays silent about it rather than announcing an empty string. A
-    -- delimited BLOCK, not an inline "Draft: ..." line (companion review
-    -- step 8d) — the same reason 'Harness.algebraPrompt' renders the
-    -- turn-start draft as a block: a multi-line draft must not be
-    -- ambiguous with whatever text follows it.
-    draftBlock :: Text
-    draftBlock
-      | st.draft == "" = ""
-      | otherwise =
-          [fmt|
---- BEGIN DRAFT ---
-{st.draft}
---- END DRAFT ---|]
     tensionsBlock r = case r.runTensions of
       [] -> "" :: Text
       ts -> "\nTensions:\n" <> T.intercalate "\n" (map ("- " <>) ts) <> "\n"
@@ -790,8 +650,11 @@ is. Concretely:
   stable effect types and works in every later window that carries the same
   effect in its row.
 - Your `finalize` value must be plain data — no functions inside it.
-- `getStateJson` is a read-only snapshot, constant for your whole window;
-  the durable draft evolves only between cycles, through the folds.
+- `getStateJson` is a read-only snapshot, constant for your whole window —
+  it never changes mid-window and carries no draft to evolve. Durable
+  artifacts (file edits, repository changes) flow through a delegated
+  subagent's own worktree branch, folded in by the driver, never through
+  this state.
 
 --- EXAMPLE (persistence across windows) ---
 -- an earlier window in this tree ran:

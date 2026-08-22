@@ -51,13 +51,13 @@
 //!
 //! # Family-bundle discipline, and what actually costs a compile
 //!
-//! One SCENARIO CONFIG (including the seeded `draft`, which the driver
-//! splices into the compile alongside the rest of the restored `State`) is
-//! one compile shape: two runs sharing a config share that compile (the memo
-//! makes the second free), and two runs differing only in their provider
-//! table or gate script cost nothing extra. Each kept scenario below asserts
-//! as many §9 rows as its config can carry; the three gate runs (prune,
-//! amend, add) share ONE config, and the checked-edits runs share another.
+//! One SCENARIO CONFIG (which the driver splices into the compile alongside
+//! the rest of the restored `State`) is one compile shape: two runs sharing
+//! a config share that compile (the memo makes the second free), and two
+//! runs differing only in their provider table or gate script cost nothing
+//! extra. Each kept scenario below asserts as many §9 rows as its config can
+//! carry; the three gate runs (prune, amend, add) share ONE config, and the
+//! fold-lineage rewrite's own new-behavior pins share the "tree" scenario's.
 //! Answerer-side compiles are shared the same way: every leaf reuses ONE
 //! `ProposeFinish` reply and every fold reuses ONE `FoldDecision` reply
 //! wherever a scenario does not need a node-specific override, so those
@@ -181,14 +181,13 @@ impl PathKey {
 ///
 /// `replies` is consumed front-to-back across successive matches of this
 /// SAME key, and the last entry sticks for every match past the end of the
-/// list. That one rule covers both shapes this suite needs: a single-reply
-/// `Script` repeats its one reply for every round of a window that never
-/// finalizes (a starved window's round-cap re-prompts all carry the same
-/// header, so they all match the same key); a multi-reply `Script`
-/// ([`script_seq`]) serves a genuinely different reply per call — the
-/// round-ordinal case, e.g. a corrective retry's second, corrected attempt —
-/// without matching a marker string inside the retry prompt to tell the two
-/// calls apart.
+/// list — a single-reply `Script` (every scenario below) repeats its one
+/// reply for every round of a window that never finalizes (a starved
+/// window's round-cap re-prompts all carry the same header, so they all
+/// match the same key); a `Vec` of more than one entry would serve a
+/// genuinely different reply per call — the round-ordinal case, e.g. a
+/// multi-round retry's second, corrected attempt — without matching a
+/// marker string inside a later prompt to tell the calls apart.
 struct Script {
     path: PathKey,
     phase: Phase,
@@ -200,16 +199,6 @@ fn script(path: PathKey, phase: Phase, reply: String) -> Script {
         path,
         phase,
         replies: vec![reply],
-    }
-}
-
-/// As [`script`], for a key that must answer a SEQUENCE of different replies
-/// across successive matches — the round-ordinal case.
-fn script_seq(path: PathKey, phase: Phase, replies: Vec<String>) -> Script {
-    Script {
-        path,
-        phase,
-        replies,
     }
 }
 
@@ -229,8 +218,8 @@ fn script_seq(path: PathKey, phase: Phase, replies: Vec<String>) -> Script {
 struct KeyedProvider {
     scripted: Vec<Script>,
     /// Per-entry index into `scripted[i].replies`, advanced on every match —
-    /// what makes [`script_seq`]'s round-ordinal case serve its replies in
-    /// order rather than repeating only its first one.
+    /// what would let a multi-reply `Script` serve its replies in order
+    /// rather than repeating only its first one (see [`Script`]'s doc).
     cursors: Mutex<Vec<usize>>,
     /// The prompt of every window the provider was asked to answer, in order
     /// — the record several assertions below read (which windows ran at all,
@@ -716,20 +705,6 @@ impl Run {
 /// (`{"tag":"GateWiderThan","gateWidth":3}`); an all-nullary sum would be a
 /// bare string, which is why `gateVerdict` above is one and this is not.
 fn state_json(max_depth: i64, max_nodes: i64, max_fan_out: i64, gate_policy: Json) -> Json {
-    state_json_with_draft(max_depth, max_nodes, max_fan_out, gate_policy, "")
-}
-
-/// As [`state_json`], with an explicit starting `draft` (PRD 21 lane C4 — the
-/// companion's working draft, seeded at whatever the scenario's checked-edits
-/// scripted flow needs to start from; every other scenario starts from `""`,
-/// exactly today's pre-C4 behavior).
-fn state_json_with_draft(
-    max_depth: i64,
-    max_nodes: i64,
-    max_fan_out: i64,
-    gate_policy: Json,
-    draft: &str,
-) -> Json {
     json!({
         "question": "SCENARIO: drive the recursive companion on scripted windows.",
         "config": {
@@ -741,8 +716,27 @@ fn state_json_with_draft(
         },
         "turnCount": 0,
         "lastRun": Json::Null,
-        "draft": draft,
     })
+}
+
+/// As [`state_json`], with an EXTRA, no-longer-declared `draft` key spliced
+/// in — the fold-lineage rewrite deleted `State.draft` (the checked-edits
+/// in-heap draft; the worktree/delegate channel is the file-edit mechanism
+/// now), and the vendored generic `FromJSON` decode reads a record by
+/// looking up each of ITS OWN fields by name (`o .: fieldName`) rather than
+/// requiring the object's key set to match exactly — so an old checkpoint
+/// carrying a stale `draft` key must still decode clean, the key simply
+/// never looked up. `companion_old_checkpoint_with_stale_draft_key_still_boots`
+/// is the one caller.
+fn state_json_with_stale_draft_key(
+    max_depth: i64,
+    max_nodes: i64,
+    max_fan_out: i64,
+    gate_policy: Json,
+) -> Json {
+    let mut v = state_json(max_depth, max_nodes, max_fan_out, gate_policy);
+    v["draft"] = json!("a pre-fold-lineage checkpoint's stale in-heap draft");
+    v
 }
 
 /// Drive ONE cycle of the real recursive-companion harness against `scripted`
@@ -959,16 +953,13 @@ fn empty_split_reply() -> String {
     split_reply("Explore", "nothing usable", &[])
 }
 
-/// The ONE fold reply every node's algebra window shares: a plain narrative
-/// `FoldDecision` (PRD 21 lane C4) that selects and proposes nothing — the
-/// `foldEditsInOrder`/`foldProposed` defaults every scenario below that
-/// never exercises checked edits relies on to stay byte-behaviorally
-/// identical to the old `FoldProposal`.
+/// The ONE fold reply every node's algebra window shares: a `FoldDecision`
+/// of just a synthesis and one tension — the whole wire shape, after the
+/// fold-lineage rewrite retired the checked-edits fields.
 fn fold_reply() -> String {
     haskell(
         "finalize @FoldDecision (FoldDecision { foldSynthesis = \"FOLDED\", \
-         foldTensions = [\"one unresolved tension\"], foldEditsInOrder = [], \
-         foldProposed = [] })",
+         foldTensions = [\"one unresolved tension\"] })",
     )
 }
 
@@ -1923,358 +1914,175 @@ async fn companion_gate_add_reaches_the_added_branchs_own_prompt() {
 }
 
 // ---------------------------------------------------------------------------
-// Scenario F — checked edits (PRD 21 lane C4 + the companion review's wire
-// collapse and edit vocabulary): a leaf proposes at its own fold, root's own
-// fold selects and applies against the companion's working draft, and one
-// receipt is stamped per approved plan — plus the corrective-retry mechanism
-// a fold's selection naming a duplicated id falls back through.
+// Scenario F — the fold-lineage rewrite: checkpoint compatibility, and the
+// unified walk's own new behavior (a fold is a BRANCH carrying inherited
+// ancestry; folds interleave with a cousin's still-running descent).
+//
+// The PRD 21 lane C4 checked-edits scenario this section used to hold (a
+// leaf proposes at its own fold, root selects and applies against an
+// in-heap working draft, with a corrective retry for an invalid selection)
+// is retired along with the machinery it exercised: `State.draft`,
+// `FoldDecision`'s `foldEditsInOrder`/`foldProposed` fields, and
+// `Tidepool.Thought`'s whole `Artifact`/`EditPlan` vocabulary are gone —
+// the worktree/delegate channel (`Harness.mergeFold`) is the file-edit
+// mechanism now, and the in-heap draft was only ever the interim stand-in
+// for it.
 // ---------------------------------------------------------------------------
 
-/// A `FoldDecision` reply that proposes exactly ONE new `AppendEdit` of this
-/// node's own — a leaf's only route to proposing anything, since its own
-/// fold has no children to select from. PLAIN DATA only (`intent`/`append`):
-/// neither `runLLMTurnBranch` nor `runLLMTurnFork` — the only two windows
-/// this harness ever finalizes across — can deliver a finalized answer that
-/// carries a live closure, so the wire type (`HarnessTypes.hs`'s
-/// `ProposedEditWire`) never has one to write here; the runtime builds the
-/// real `Text -> Either EditFailure Text` itself
-/// (`Harness.wrapEdit`/`Tidepool.Thought.appendWithSeparator`). A blank
-/// `intent` — or any proposal at the ROOT — is refused at the STAMP, before
-/// it ever becomes a selectable artifact; see the root-proposal-refusal
-/// scenario below for that path.
-fn propose_append_reply(synthesis: &str, intent: &str, append: &str) -> String {
-    haskell(&format!(
-        "finalize @FoldDecision (FoldDecision {{ foldSynthesis = \"{synthesis}\", \
-         foldTensions = [], foldEditsInOrder = [], \
-         foldProposed = [AppendEdit {{ editIntent = \"{intent}\", \
-         editAppend = \"{append}\" }}] }})"
-    ))
-}
-
-/// As [`propose_append_reply`], proposing a `ReplaceOnce` instead — stamps
-/// fine regardless of whether its needle will actually be found; the
-/// exactly-once check runs at APPLY time
-/// (`Tidepool.Thought.replaceExactlyOnce`), against whatever snapshot the
-/// plan actually runs against.
-fn propose_replace_reply(synthesis: &str, intent: &str, needle: &str, replacement: &str) -> String {
-    haskell(&format!(
-        "finalize @FoldDecision (FoldDecision {{ foldSynthesis = \"{synthesis}\", \
-         foldTensions = [], foldEditsInOrder = [], \
-         foldProposed = [ReplaceOnce {{ editIntent = \"{intent}\", \
-         editNeedle = \"{needle}\", editReplacement = \"{replacement}\" }}] }})"
-    ))
-}
-
-/// A `FoldDecision` reply that selects artifact ids from the pool this
-/// node's own children (or, after endorsement propagation, grandchildren)
-/// advertised — `foldEditsInOrder` is the ONE ordered list that is both
-/// selection AND application order (the companion review's wire collapse:
-/// there is no longer a separate composition list to disagree with it).
-fn select_edits_reply(synthesis: &str, ids_in_order: &[&str]) -> String {
-    let quote_join = |ids: &[&str]| {
-        ids.iter()
-            .map(|id| format!("\"{id}\""))
-            .collect::<Vec<_>>()
-            .join(", ")
-    };
-    haskell(&format!(
-        "finalize @FoldDecision (FoldDecision {{ foldSynthesis = \"{synthesis}\", \
-         foldTensions = [], foldEditsInOrder = [{}], \
-         foldProposed = [] }})",
-        quote_join(ids_in_order)
-    ))
-}
-
-/// PRD 21 lane C4 — the live fold window actually runs
-/// `resolveSelection`/`approve`/`applyEdits` against the companion's working
-/// draft, with failure isolation and one receipt per approved plan.
-///
-/// The tree: root splits into two INTERIOR nodes, Alpha and Beta
-/// (`split_two()`), each of which mints exactly one plain child of its own
-/// (`split_one()`) — a childless non-root node folds MECHANICALLY (no fold
-/// window at all) under commit 8afe890b's semantics, so proposing at Alpha's
-/// or Beta's own fold needs each to have at least one child; that lone child
-/// contributes nothing of its own (a plain `finish_reply()`, an empty pool at
-/// its parent). Alpha's own fold proposes an `AppendEdit` that SUCCEEDS;
-/// Beta's own fold proposes a `ReplaceOnce` whose needle never occurs in the
-/// draft, which stamps fine but FAILS AT APPLY — the receipt-isolation case a
-/// stamp-time-refused proposal can no longer demonstrate, now that a blank
-/// intent never becomes an artifact at all. Neither Alpha's nor Beta's own
-/// artifact is selectable at ITS OWN fold (its one child never proposes
-/// anything, so its pool is empty), so this ALSO proves "approval is the
-/// parent's fold": only root, one level up, can ever apply either one.
-/// Root's own fold selects beta before alpha, so the result can only match if
-/// `foldEditsInOrder`'s own order governed the apply. Reuses the "tree"
-/// scenario's exact config (`state_json(3, 40, 5, GateOff)`), so this shares
-/// that compile shape rather than opening a new one.
+/// A checkpoint written before the fold-lineage rewrite still carries
+/// `State`'s own now-retired `draft` key. It must still boot: the vendored
+/// generic `FromJSON` decode for a record looks up ONLY the fields the
+/// record type itself declares (`o .: fieldName`, `HarnessTypes.hs`'s own
+/// `FromJSON Config` doc explains the same discipline for `Config`), so an
+/// object carrying an extra, undeclared key simply has that key never
+/// looked at — never a decode refusal.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn companion_leaf_proposes_parent_selects_runtime_applies_with_receipts() {
+async fn companion_old_checkpoint_with_stale_draft_key_still_boots() {
     let _cache_guard = support::isolate_cache();
 
-    let alpha_id = "root/1-alpha#1";
-    let beta_id = "root/2-beta#1";
+    let run = run_scenario(
+        "stale-draft-key",
+        state_json_with_stale_draft_key(3, 40, 5, json!({"tag": "GateOff"})),
+        vec![
+            script(PathKey::Exact("root"), Phase::Discover, finish_reply()),
+            fold_script(),
+        ],
+        Arc::new(ScriptedGate::default()),
+    )
+    .await;
+
+    assert_eq!(
+        run.paths_in(Phase::Discover),
+        vec!["root"],
+        "a checkpoint carrying the retired `draft` key still boots and runs a real turn"
+    );
+    assert!(
+        run.state.get("draft").is_none(),
+        "the re-encoded State carries no draft field at all -- the stale key never round-trips, \
+         because it was never part of the type: {}",
+        run.state
+    );
+}
+
+/// The two new behaviors the unified recursive walk adds, off the SAME tree
+/// shape (root splits into Alpha and Beta, each of which mints exactly one
+/// plain grandchild of its own via `split_one()`, so both are INTERIOR
+/// nodes and both actually open a fold window) and the SAME config as the
+/// "tree" scenario, so this shares that compile.
+///
+/// (1) STRUCTURAL: a fold's own request is a BRANCH carrying INHERITED
+/// ancestry, never a fresh fork off an empty root. `Event::BranchInvocation`
+/// is written ONLY for a node minted through `fork_from_snapshot` (never
+/// for the pre-rewrite `runLLMTurnFork`'s empty-root fork), so its presence
+/// on root's own FOLD window — naming the SAME digest and shared-prefix
+/// byte count as root's own DISCOVER window's `SnapshotFrozen` receipt — is
+/// exactly the proof: the fold branches off the identical frozen prefix the
+/// node's own coalgebra window already froze, i.e. a continuation of its
+/// own conversation.
+///
+/// (2) INTERLEAVING: Alpha's own subtree — its one grandchild's discover,
+/// then Alpha's own fold — completes (and is journaled) BEFORE Beta's own
+/// grandchild is even discovered. The pre-rewrite two-pass design could
+/// never produce this order (it discovered the WHOLE tree, breadth-first
+/// per level, before folding any of it); the unified walk recurses AND
+/// folds each sibling in turn, depth-first. The assembled RESULT does not
+/// depend on this: the final tree still lists every node in DECLARED
+/// order, and every count is exactly what the shape predicts — proving the
+/// reordering of WHEN things run never corrupts WHAT gets assembled.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn companion_fold_is_a_branch_and_interleaves_with_cousin_discovery() {
+    let _cache_guard = support::isolate_cache();
 
     let run = run_scenario(
-        "checked-edits",
-        state_json_with_draft(3, 40, 5, json!({"tag": "GateOff"}), "seed"),
+        "fold-branch-interleave",
+        state_json(3, 40, 5, json!({"tag": "GateOff"})),
         vec![
             script(PathKey::Exact("root"), Phase::Discover, split_two()),
             script(PathKey::Exact("root/1-alpha"), Phase::Discover, split_one()),
+            script(PathKey::Exact("root/2-beta"), Phase::Discover, split_one()),
             script(
                 PathKey::Prefix("root/1-alpha/1-"),
                 Phase::Discover,
                 finish_reply(),
             ),
-            script(PathKey::Exact("root/2-beta"), Phase::Discover, split_one()),
             script(
                 PathKey::Prefix("root/2-beta/1-"),
                 Phase::Discover,
                 finish_reply(),
             ),
-            script(
-                PathKey::Exact("root/1-alpha"),
-                Phase::Fold,
-                propose_append_reply("alpha folds locally", "append alpha's suggestion", "-alpha"),
-            ),
-            script(
-                PathKey::Exact("root/2-beta"),
-                Phase::Fold,
-                propose_replace_reply(
-                    "beta folds locally",
-                    "beta's replace attempt",
-                    "MISSING-NEEDLE",
-                    "x",
-                ),
-            ),
-            script(
-                PathKey::Exact("root"),
-                Phase::Fold,
-                select_edits_reply("root selects beta then alpha", &[beta_id, alpha_id]),
-            ),
+            fold_script(),
         ],
         Arc::new(ScriptedGate::default()),
     )
     .await;
 
-    // --- the draft actually changed, at the ROOT's own position -----------
-    assert_eq!(
-        run.state.get("draft").and_then(|v| v.as_str()),
-        Some("seed\n\n-alpha"),
-        "root applied alpha's edit against the turn-start draft (\"seed\"); \
-         beta's own apply-time failure left the running snapshot untouched \
-         for alpha to apply against, got: {}",
-        run.state
-    );
+    let alpha_grandchild = run.discovered_under("root/1-alpha/1-");
+    let beta_grandchild = run.discovered_under("root/2-beta/1-");
 
-    // --- one receipt per approved plan, in foldEditsInOrder's own order ----
-    let edits_at = |path: &str| -> Vec<Json> {
-        run.journal_kind("edits")
-            .into_iter()
-            .filter(|e| e.key == path)
-            .map(|e| e.payload.clone())
-            .collect()
-    };
-    let root_edits = edits_at("root");
+    // --- pin 1: the fold is a BRANCH, off THIS node's own frozen prefix ----
+    let root_discover_node = run.window_node("root", Phase::Discover);
+    let (root_digest, root_prefix_bytes) = run.frozen_of(root_discover_node);
+    let root_fold_node = run.window_node("root", Phase::Fold);
+    let (fold_snapshot, fold_shared, fold_suffix) = run.branch_invocation_of(root_fold_node);
     assert_eq!(
-        root_edits.len(),
-        1,
-        "root's own fold approved exactly one selection: {root_edits:?}"
-    );
-    let payload = &root_edits[0];
-    assert_eq!(payload.get("before").and_then(|v| v.as_str()), Some("seed"));
-    assert_eq!(
-        payload.get("after").and_then(|v| v.as_str()),
-        Some("seed\n\n-alpha")
+        fold_snapshot, root_digest,
+        "root's own FOLD must branch off the SAME frozen prefix its own DISCOVER window froze \
+         -- a continuation of its own conversation, never a fresh fork off an empty root"
     );
     assert_eq!(
-        payload.get("status").and_then(|v| v.as_str()),
-        Some("applied"),
-        "the ROOT's own selection is the turn's one real, persisted application: {payload:?}"
-    );
-    let receipts = payload
-        .get("receipts")
-        .and_then(|v| v.as_array())
-        .expect("root's edits receipt carries a receipts array");
-    assert_eq!(
-        receipts.len(),
-        2,
-        "one receipt per approved plan, failing or not: {receipts:?}"
-    );
-    assert_eq!(
-        receipts[0].get("artifact").and_then(|v| v.as_str()),
-        Some(beta_id),
-        "receipts follow foldEditsInOrder's own order: {receipts:?}"
+        fold_shared, root_prefix_bytes,
+        "the fold's shared-prefix byte count must equal root's own frozen prefix's own -- the \
+         harness re-derives this itself before writing the receipt, so equality here is the \
+         byte-stability proof"
     );
     assert!(
-        receipts[0]
-            .get("outcome")
-            .and_then(|o| o.get("refused"))
-            .is_some(),
-        "beta's needle-not-found failure is an isolated Left, never poisoning a sibling: {receipts:?}"
-    );
-    assert_eq!(
-        receipts[1].get("artifact").and_then(|v| v.as_str()),
-        Some(alpha_id)
-    );
-    assert_eq!(
-        receipts[1]
-            .get("outcome")
-            .and_then(|o| o.get("applied"))
-            .and_then(|v| v.as_str()),
-        Some("seed\n\n-alpha"),
-        "alpha's edit applied against the state beta's failure left untouched: {receipts:?}"
+        fold_suffix > 0,
+        "the fold's own prompt is a real divergent suffix past the shared (inherited) prefix, \
+         never empty"
     );
 
-    // --- neither Alpha's nor Beta's own fold ever approves anything --------
-    // Decision 7 ("approval is the parent's fold"), read structurally: each
-    // one's own pool holds only what its single plain child offered — nothing
-    // — so its own selection can never resolve past Narrative, and it
-    // journals no "edits" entry at all — the exact same silence a narrative
-    // fold keeps.
-    assert!(
-        edits_at("root/1-alpha").is_empty(),
-        "a fold that only PROPOSES cannot also approve its own proposal"
-    );
-    assert!(
-        edits_at("root/2-beta").is_empty(),
-        "a fold that only PROPOSES cannot also approve its own proposal"
-    );
-
-    // --- the receipt is visible in the render tree, and ONLY at root -------
-    assert!(
-        run.tree_line("root")
-            .contains("edits: 1 applied, 1 refused"),
-        "the receipt surfaces as a badge on the node that actually applied: {}",
-        run.tree_line("root")
-    );
-    for path in ["root/1-alpha", "root/2-beta"] {
-        assert!(
-            !run.tree_line(path).contains("edits:"),
-            "a node that only PROPOSED (never approved) carries no edits badge \
-             of its own: {}",
-            run.tree_line(path)
-        );
-    }
-}
-
-/// The companion review's corrective-retry mechanism: a fold's selection
-/// naming a DUPLICATED id gets exactly ONE fresh window before the runtime
-/// falls back to the valid subset — scripted here as the model getting it
-/// right on the second try. Root's own FOLD window is called twice with the
-/// SAME structural key (`path = "root"`, `phase = Fold`); [`script_seq`]
-/// serves its two replies in that call order — the duplicated selection
-/// first, the corrected one second — the round-ordinal case, resolved by
-/// call count against one key rather than by matching a marker string
-/// inside the retry prompt.
-///
-/// Alpha mints one plain child of its own (`split_one()`) so it stays an
-/// INTERIOR node under mechanical-leaf-fold semantics — a childless non-root
-/// node never runs a fold window at all, and this scenario is precisely about
-/// Alpha's own fold retrying.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn companion_corrective_retry_recovers_from_invalid_selection() {
-    let _cache_guard = support::isolate_cache();
-
-    let alpha_id = "root/1-alpha#1";
-
-    let run = run_scenario(
-        "corrective-retry",
-        state_json_with_draft(3, 40, 5, json!({"tag": "GateOff"}), "seed"),
-        vec![
-            script(PathKey::Exact("root"), Phase::Discover, split_two()),
-            script(PathKey::Exact("root/1-alpha"), Phase::Discover, split_one()),
-            script(
-                PathKey::Prefix("root/1-alpha/1-"),
-                Phase::Discover,
-                finish_reply(),
-            ),
-            script(
-                PathKey::Exact("root/2-beta"),
-                Phase::Discover,
-                finish_reply(),
-            ),
-            script(
-                PathKey::Exact("root/1-alpha"),
-                Phase::Fold,
-                propose_append_reply("alpha proposes", "alpha's suggestion", "-alpha"),
-            ),
-            script(PathKey::Exact("root/2-beta"), Phase::Fold, fold_reply()),
-            script_seq(
-                PathKey::Exact("root"),
-                Phase::Fold,
-                vec![
-                    select_edits_reply("root selects, duplicated", &[alpha_id, alpha_id]),
-                    select_edits_reply("root corrects its selection", &[alpha_id]),
-                ],
-            ),
-        ],
-        Arc::new(ScriptedGate::default()),
-    )
-    .await;
-
-    assert_eq!(
-        run.state.get("draft").and_then(|v| v.as_str()),
-        Some("seed\n\n-alpha"),
-        "the corrected, deduped selection is what actually applied: {}",
-        run.state
-    );
-
-    let retries = run.journal_kind("retry");
-    assert_eq!(
-        retries.len(),
-        1,
-        "exactly ONE corrective retry, never more: {retries:?}"
-    );
-    assert_eq!(retries[0].key, "root");
-    let duplicated = retries[0]
-        .payload
-        .get("duplicated")
-        .and_then(|v| v.as_array())
-        .expect("a duplicated-ids array");
-    assert_eq!(
-        duplicated
+    // --- pin 2: a completed subtree's fold precedes a cousin's discovery ---
+    let pairs = run.journal_pairs();
+    let index_of = |kind: &str, key: &str| {
+        pairs
             .iter()
-            .filter_map(|v| v.as_str())
-            .collect::<Vec<_>>(),
-        vec![alpha_id],
-        "the retry names exactly which id was duplicated: {duplicated:?}"
+            .position(|(k, p)| k == kind && p == key)
+            .unwrap_or_else(|| panic!("no {kind} journaled for {key}: {pairs:?}"))
+    };
+    let alpha_fold_idx = index_of("fold", "root/1-alpha");
+    let beta_grandchild_discover_idx = index_of("proposed", &beta_grandchild);
+    assert!(
+        alpha_fold_idx < beta_grandchild_discover_idx,
+        "alpha's own subtree (its grandchild's discover then fold, then alpha's own fold) must \
+         complete before beta's grandchild is even discovered -- the pre-rewrite two-pass design \
+         discovered the WHOLE tree before folding any of it; this walk folds a subtree the \
+         moment it completes, interleaved with a cousin's still-running descent:\n{pairs:#?}"
     );
 
-    let selections = run.journal_kind("selection");
-    let root_selection = selections
-        .into_iter()
-        .find(|e| e.key == "root")
-        .expect("root's own selection classification");
-    let ids = root_selection
-        .payload
-        .get("ids")
-        .and_then(|v| v.as_array())
-        .expect("a selection ids array");
+    // --- the assembled result is correct regardless of that reordering -----
+    let tree_paths: Vec<String> = run
+        .tree()
+        .iter()
+        .map(|l| l.split_whitespace().next().unwrap().to_string())
+        .collect();
     assert_eq!(
-        ids.len(),
-        1,
-        "the FINAL (corrected) selection is what gets classified, not the \
-         invalid first attempt: {ids:?}"
+        tree_paths,
+        vec![
+            "root".to_string(),
+            "root/1-alpha".to_string(),
+            alpha_grandchild.clone(),
+            "root/2-beta".to_string(),
+            beta_grandchild.clone(),
+        ],
+        "the final tree is still assembled in DECLARED branch order, regardless of which \
+         subtree's fold actually ran first: {:?}",
+        run.tree()
     );
-    assert_eq!(ids[0].get("id").and_then(|v| v.as_str()), Some(alpha_id));
+    assert_eq!(run.counter("runNodes"), 5);
     assert_eq!(
-        ids[0].get("reason").and_then(|v| v.as_str()),
-        Some("resolved")
-    );
-
-    let root_edits = run
-        .journal_kind("edits")
-        .into_iter()
-        .find(|e| e.key == "root")
-        .expect("root's own edits entry");
-    let receipts = root_edits
-        .payload
-        .get("receipts")
-        .and_then(|v| v.as_array())
-        .expect("receipts array");
-    assert_eq!(
-        receipts.len(),
-        1,
-        "the corrected selection names exactly one id, so exactly one receipt: {receipts:?}"
+        run.counter("runWindows"),
+        6,
+        "root, alpha and beta each spend two windows (coalgebra + fold); the two grandchildren \
+         are childless non-root leaves that fold mechanically, spending only their coalgebra"
     );
 }
