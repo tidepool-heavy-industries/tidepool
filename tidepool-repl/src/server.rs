@@ -26,7 +26,9 @@ use serde::{Deserialize, Serialize};
 use tidepool_effect::dispatch::DispatchEffect;
 use tidepool_mcp::{describe_effects_index, CapturedOutput, EffectDecl, EffectRoster};
 use tidepool_repr::{MonotonicIdIssuer, SessionId};
-use tidepool_runtime::session::ModuleEnv;
+use tidepool_runtime::session::{
+    wait_for_abort_grace, wait_grace_without_cancel, GraceOutcome, ModuleEnv,
+};
 use tokio::io::{stdin, stdout};
 use tokio::time::{timeout, Duration};
 use tokio_util::sync::CancellationToken;
@@ -929,21 +931,25 @@ impl TidepoolReplServer {
             }),
             _ = ct.cancelled() => {
                 // Client asked to stop. Signal abort on both fronts — the same
-                // levers the timeout branch of `drive` uses — then let the
-                // resolver record the real terminal state.
+                // levers the timeout branch of `drive` uses (via the shared
+                // watchdog, `tidepool_runtime::session::wait_for_abort_grace`)
+                // — then let the resolver record the real terminal state.
                 gate_abort.request_abort(format!("{op} cancelled by client"));
-                if let Some(h) = cancel_abort.lock().as_ref().cloned() {
-                    h.cancel();
-                }
-                match timeout(Duration::from_secs(ABORT_GRACE_SECS), &mut result_rx).await {
-                    Ok(Ok(r)) => r,
-                    Ok(Err(_)) => CallToolResult::error(vec![Content::text(format!(
+                let handle = cancel_abort.lock().as_ref().cloned();
+                let outcome = if let Some(h) = &handle {
+                    wait_for_abort_grace(h, Duration::from_secs(ABORT_GRACE_SECS), &mut result_rx).await
+                } else {
+                    wait_grace_without_cancel(Duration::from_secs(ABORT_GRACE_SECS), &mut result_rx).await
+                };
+                match outcome {
+                    GraceOutcome::Recovered(Ok(r)) => r,
+                    GraceOutcome::Recovered(Err(_)) => CallToolResult::error(vec![Content::text(format!(
                         "{op}: turn resolver task ended without a result (internal error)"
                     ))]),
                     // Uninterruptible turn: don't block the caller on the full
                     // turn budget. The detached resolver keeps owning final
                     // state (it self-heals to Idle or goes Wedged).
-                    Err(_) => CallToolResult::error(vec![Content::text(format!(
+                    GraceOutcome::StillRunning => CallToolResult::error(vec![Content::text(format!(
                         "{op} cancelled; the turn is stopping and the session will be ready \
                          shortly (or wedged if uninterruptible — session_reset to force-recover)"
                     ))]),
@@ -999,10 +1005,10 @@ impl TidepoolReplServer {
                 // away before any machine was published) stays `Wedged`.
                 gate.request_abort(format!("{op} timed out after {to_secs}s"));
                 let handle = cancel.lock().as_ref().cloned();
-                if let Some(h) = handle {
-                    h.cancel();
-                    if let Ok(Ok(run)) =
-                        timeout(Duration::from_secs(ABORT_GRACE_SECS), &mut join).await
+                if let Some(h) = &handle {
+                    if let GraceOutcome::Recovered(Ok(run)) =
+                        wait_for_abort_grace(h, Duration::from_secs(ABORT_GRACE_SECS), &mut join)
+                            .await
                     {
                         // Aborted at a safepoint — clear the flag and put the
                         // session back Idle (self-healed).

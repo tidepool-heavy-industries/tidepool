@@ -20,6 +20,7 @@ pub mod engine;
 pub mod persistent;
 pub mod render;
 pub mod resident;
+pub mod supervisor;
 pub mod turn;
 
 pub use persistent::{MachineLease, PersistentSession, ScopeRetirement};
@@ -28,6 +29,8 @@ pub use engine::{
     extract_ask_request, AbortOutcome, EngineConfig, GateDispatcher, OutputSink, ResumeOutcome,
     SessionEngine, StartError, StartTurn, TurnOutcome,
 };
+
+pub use supervisor::{wait_for_abort_grace, wait_grace_without_cancel, GraceOutcome};
 
 pub use resident::{ResidentError, ResidentHole, ResidentOutcome, ResidentSession, RootCustody};
 
