@@ -15,6 +15,7 @@ import qualified Fidelity.D1Defense as D1Defense
 import qualified Fidelity.TurnBatch as TurnBatch
 import qualified Fidelity.TurnBatchJsonBugs as TurnBatchJsonBugs
 import qualified Fidelity.ClosureTier as ClosureTier
+import qualified Fidelity.TopoRecovery as TopoRecovery
 
 import Control.Monad (forM_)
 import System.Exit (exitFailure, exitSuccess)
@@ -28,6 +29,7 @@ groups =
   , ("turn-batch per-item error attribution (§8)", TurnBatch.checks)
   , ("turn-batch plan.json parser bugs (numbers, control chars, surrogate pairs)", TurnBatchJsonBugs.checks)
   , ("closure-tier classification (higher-kinded arrow instantiation)", ClosureTier.checks)
+  , ("GHC diagnostic-recovery topological order (Known Limits cascade)", TopoRecovery.checks)
   ]
 
 main :: IO ()
