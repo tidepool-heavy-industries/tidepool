@@ -14,9 +14,7 @@
 
 use crate::*;
 use dyn_clone::{clone_trait_object, DynClone};
-use rmcp::{
-    model::*, service::RequestContext, ErrorData as McpError, RoleServer, ServerHandler, ServiceExt,
-};
+use rmcp::{model::*, service::RequestContext, ErrorData as McpError, RoleServer, ServerHandler};
 use std::marker::PhantomData;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -24,7 +22,6 @@ use tidepool_runtime::session::{
     AbortOutcome, EngineConfig, ResumeOutcome, SessionEngine, StartError, StartTurn, TurnOutcome,
 };
 use tidepool_runtime::DispatchEffect;
-use tokio::io::{stdin, stdout};
 
 /// Trait combining effect dispatch with cloning for the MCP server.
 pub trait McpEffectHandler:
@@ -528,22 +525,7 @@ impl ServerHandler for TidepoolMcpServerImpl {
         _context: RequestContext<RoleServer>,
     ) -> Result<ListResourcesResult, McpError> {
         let ctx = self.resource_ctx();
-        let resources = crate::resources::list(&ctx)
-            .into_iter()
-            .map(|d| {
-                RawResource {
-                    uri: d.uri,
-                    name: d.name,
-                    title: None,
-                    description: Some(d.description),
-                    mime_type: Some(d.mime.to_string()),
-                    size: None,
-                    icons: None,
-                    meta: None,
-                }
-                .no_annotation()
-            })
-            .collect();
+        let resources = crate::resources::list_catalog_resources(&ctx, Vec::new());
         Ok(ListResourcesResult {
             resources,
             next_cursor: None,
@@ -556,22 +538,8 @@ impl ServerHandler for TidepoolMcpServerImpl {
         _request: Option<PaginatedRequestParams>,
         _context: RequestContext<RoleServer>,
     ) -> Result<ListResourceTemplatesResult, McpError> {
-        let resource_templates = crate::resources::templates()
-            .into_iter()
-            .map(|t| {
-                RawResourceTemplate {
-                    uri_template: t.uri_template.to_string(),
-                    name: t.name.to_string(),
-                    title: None,
-                    description: Some(t.description.to_string()),
-                    mime_type: Some(t.mime.to_string()),
-                    icons: None,
-                }
-                .no_annotation()
-            })
-            .collect();
         Ok(ListResourceTemplatesResult {
-            resource_templates,
+            resource_templates: crate::resources::list_catalog_templates(),
             next_cursor: None,
             meta: None,
         })
@@ -583,15 +551,8 @@ impl ServerHandler for TidepoolMcpServerImpl {
         _context: RequestContext<RoleServer>,
     ) -> Result<ReadResourceResult, McpError> {
         let ctx = self.resource_ctx();
-        match crate::resources::read(&ctx, &request.uri) {
-            Some(b) => Ok(ReadResourceResult {
-                contents: vec![ResourceContents::TextResourceContents {
-                    uri: request.uri,
-                    mime_type: Some(b.mime.to_string()),
-                    text: b.text,
-                    meta: None,
-                }],
-            }),
+        match crate::resources::read_catalog_body(&ctx, &request.uri, || None) {
+            Some(b) => Ok(crate::resources::render_resource_body(request.uri, b)),
             None => Err(McpError::resource_not_found(
                 format!("Unknown resource: {}", request.uri),
                 None,
@@ -871,12 +832,7 @@ where
 
     /// Start the MCP server on stdio transport.
     pub async fn serve_stdio(self) -> Result<(), Box<dyn std::error::Error>> {
-        self.inner
-            .serve((stdin(), stdout()))
-            .await?
-            .waiting()
-            .await?;
-        Ok(())
+        crate::transport::serve_stdio(self.inner).await
     }
 
     /// Start the MCP server on streamable HTTP transport.
@@ -884,38 +840,12 @@ where
         self,
         addr: std::net::SocketAddr,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        use rmcp::transport::streamable_http_server::{
-            session::local::LocalSessionManager, StreamableHttpServerConfig, StreamableHttpService,
-        };
-        use std::sync::Arc;
-
-        let template = self.inner;
-        let config = StreamableHttpServerConfig::default();
-        let cancel = config.cancellation_token.clone();
-        let service = StreamableHttpService::new(
-            move || Ok(template.clone()),
-            Arc::new(LocalSessionManager::default()),
-            config,
-        );
-        async fn health() -> axum::Json<serde_json::Value> {
-            axum::Json(serde_json::json!({"status": "ok"}))
-        }
-
-        let router = axum::Router::new()
-            .route("/health", axum::routing::get(health))
-            .nest_service("/mcp", service);
-        let listener = tokio::net::TcpListener::bind(addr).await?;
-        eprintln!(
-            "Tidepool MCP v{} listening on http://{}/mcp",
-            env!("CARGO_PKG_VERSION"),
+        crate::transport::serve_streamable_http(
+            self.inner,
             addr,
-        );
-        axum::serve(listener, router)
-            .with_graceful_shutdown(async move {
-                tokio::signal::ctrl_c().await.ok();
-                cancel.cancel();
-            })
-            .await?;
-        Ok(())
+            "Tidepool MCP",
+            env!("CARGO_PKG_VERSION"),
+        )
+        .await
     }
 }

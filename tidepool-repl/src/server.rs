@@ -18,9 +18,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 
-use rmcp::{
-    model::*, service::RequestContext, ErrorData as McpError, RoleServer, ServerHandler, ServiceExt,
-};
+use rmcp::{model::*, service::RequestContext, ErrorData as McpError, RoleServer, ServerHandler};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use tidepool_effect::dispatch::DispatchEffect;
@@ -29,7 +27,6 @@ use tidepool_repr::{MonotonicIdIssuer, SessionId};
 use tidepool_runtime::session::{
     wait_for_abort_grace, wait_grace_without_cancel, GraceOutcome, ModuleEnv,
 };
-use tokio::io::{stdin, stdout};
 use tokio::time::{timeout, Duration};
 use tokio_util::sync::CancellationToken;
 
@@ -476,8 +473,7 @@ impl TidepoolReplServer {
 
     /// Start on stdio transport.
     pub async fn serve_stdio(self) -> Result<(), Box<dyn std::error::Error>> {
-        self.serve((stdin(), stdout())).await?.waiting().await?;
-        Ok(())
+        tidepool_mcp::serve_stdio(self).await
     }
 
     /// Start on streamable HTTP transport.
@@ -485,36 +481,8 @@ impl TidepoolReplServer {
         self,
         addr: std::net::SocketAddr,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        use rmcp::transport::streamable_http_server::{
-            session::local::LocalSessionManager, StreamableHttpServerConfig, StreamableHttpService,
-        };
-        let template = self;
-        let config = StreamableHttpServerConfig::default();
-        let cancel = config.cancellation_token.clone();
-        let service = StreamableHttpService::new(
-            move || Ok(template.clone()),
-            Arc::new(LocalSessionManager::default()),
-            config,
-        );
-        async fn health() -> axum::Json<serde_json::Value> {
-            axum::Json(serde_json::json!({"status": "ok"}))
-        }
-        let router = axum::Router::new()
-            .route("/health", axum::routing::get(health))
-            .nest_service("/mcp", service);
-        let listener = tokio::net::TcpListener::bind(addr).await?;
-        eprintln!(
-            "tidepool-repl v{} listening on http://{}/mcp",
-            env!("CARGO_PKG_VERSION"),
-            addr
-        );
-        axum::serve(listener, router)
-            .with_graceful_shutdown(async move {
-                tokio::signal::ctrl_c().await.ok();
-                cancel.cancel();
-            })
-            .await?;
-        Ok(())
+        tidepool_mcp::serve_streamable_http(self, addr, "tidepool-repl", env!("CARGO_PKG_VERSION"))
+            .await
     }
 
     /// Borrow the values [`tidepool_mcp::resources`] needs to render the
@@ -1432,36 +1400,19 @@ impl ServerHandler for TidepoolReplServer {
         _request: Option<PaginatedRequestParams>,
         _context: RequestContext<RoleServer>,
     ) -> Result<ListResourcesResult, McpError> {
-        let mut resources = vec![RawResource {
-            uri: SESSION_BINDINGS_URI.to_string(),
-            name: "Session bindings".to_string(),
-            title: None,
-            description: Some(
-                "Live session environment as JSON: one entry per in-scope binding \
+        let local = vec![tidepool_mcp::resources::descriptor_to_raw(
+            tidepool_mcp::resources::ResourceDescriptor {
+                uri: SESSION_BINDINGS_URI.to_string(),
+                name: "Session bindings".to_string(),
+                description: "Live session environment as JSON: one entry per in-scope binding \
                  (name, type, kind = decl|bind, generation), plus the decl/value generation \
                  counters. Refreshed after every turn."
                     .to_string(),
-            ),
-            mime_type: Some("application/json".to_string()),
-            size: None,
-            icons: None,
-            meta: None,
-        }
-        .no_annotation()];
+                mime: "application/json",
+            },
+        )];
         let ctx = self.resource_ctx();
-        resources.extend(tidepool_mcp::resources::list(&ctx).into_iter().map(|d| {
-            RawResource {
-                uri: d.uri,
-                name: d.name,
-                title: None,
-                description: Some(d.description),
-                mime_type: Some(d.mime.to_string()),
-                size: None,
-                icons: None,
-                meta: None,
-            }
-            .no_annotation()
-        }));
+        let resources = tidepool_mcp::resources::list_catalog_resources(&ctx, local);
         Ok(ListResourcesResult {
             resources,
             next_cursor: None,
@@ -1474,22 +1425,8 @@ impl ServerHandler for TidepoolReplServer {
         _request: Option<PaginatedRequestParams>,
         _context: RequestContext<RoleServer>,
     ) -> Result<ListResourceTemplatesResult, McpError> {
-        let resource_templates = tidepool_mcp::resources::templates()
-            .into_iter()
-            .map(|t| {
-                RawResourceTemplate {
-                    uri_template: t.uri_template.to_string(),
-                    name: t.name.to_string(),
-                    title: None,
-                    description: Some(t.description.to_string()),
-                    mime_type: Some(t.mime.to_string()),
-                    icons: None,
-                }
-                .no_annotation()
-            })
-            .collect();
         Ok(ListResourceTemplatesResult {
-            resource_templates,
+            resource_templates: tidepool_mcp::resources::list_catalog_templates(),
             next_cursor: None,
             meta: None,
         })
@@ -1500,28 +1437,18 @@ impl ServerHandler for TidepoolReplServer {
         request: ReadResourceRequestParams,
         _context: RequestContext<RoleServer>,
     ) -> Result<ReadResourceResult, McpError> {
-        if request.uri == SESSION_BINDINGS_URI {
-            return Ok(ReadResourceResult {
-                contents: vec![ResourceContents::TextResourceContents {
-                    uri: request.uri,
-                    mime_type: Some("application/json".to_string()),
-                    text: self.session_bindings_body(),
-                    meta: None,
-                }],
-            });
-        }
         let ctx = self.resource_ctx();
-        match tidepool_mcp::resources::read(&ctx, &request.uri) {
-            Some(b) => Ok(ReadResourceResult {
-                contents: vec![ResourceContents::TextResourceContents {
-                    uri: request.uri,
-                    mime_type: Some(b.mime.to_string()),
-                    text: b.text,
-                    meta: None,
-                }],
-            }),
+        let uri = request.uri;
+        let local = || {
+            (uri == SESSION_BINDINGS_URI).then(|| tidepool_mcp::resources::ResourceBody {
+                mime: "application/json",
+                text: self.session_bindings_body(),
+            })
+        };
+        match tidepool_mcp::resources::read_catalog_body(&ctx, &uri, local) {
+            Some(b) => Ok(tidepool_mcp::resources::render_resource_body(uri, b)),
             None => Err(McpError::resource_not_found(
-                format!("Unknown resource: {}", request.uri),
+                format!("Unknown resource: {uri}"),
                 None,
             )),
         }

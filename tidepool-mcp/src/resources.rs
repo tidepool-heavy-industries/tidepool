@@ -135,6 +135,92 @@ pub fn read(ctx: &ResourceCtx, uri: &str) -> Option<ResourceBody> {
     }
 }
 
+// ---------------------------------------------------------------------------
+// rmcp wire adapters — descriptor-to-Annotated conversion and the shared
+// list/read glue, so a server's `ServerHandler::list_resources`/
+// `list_resource_templates`/`read_resource` do only wire-shape dispatch, not
+// a second copy of this catalog-to-rmcp mapping.
+// ---------------------------------------------------------------------------
+
+/// Convert one [`ResourceDescriptor`] into the `rmcp` wire shape.
+pub fn descriptor_to_raw(
+    d: ResourceDescriptor,
+) -> rmcp::model::Annotated<rmcp::model::RawResource> {
+    use rmcp::model::{AnnotateAble as _, RawResource};
+    RawResource {
+        uri: d.uri,
+        name: d.name,
+        title: None,
+        description: Some(d.description),
+        mime_type: Some(d.mime.to_string()),
+        size: None,
+        icons: None,
+        meta: None,
+    }
+    .no_annotation()
+}
+
+/// Convert one [`TemplateDescriptor`] into the `rmcp` wire shape.
+pub fn template_to_raw(
+    t: TemplateDescriptor,
+) -> rmcp::model::Annotated<rmcp::model::RawResourceTemplate> {
+    use rmcp::model::{AnnotateAble as _, RawResourceTemplate};
+    RawResourceTemplate {
+        uri_template: t.uri_template.to_string(),
+        name: t.name.to_string(),
+        title: None,
+        description: Some(t.description.to_string()),
+        mime_type: Some(t.mime.to_string()),
+        icons: None,
+    }
+    .no_annotation()
+}
+
+/// The shared `resources/list` body: `local` resources (a server's own,
+/// outside the shared catalog — e.g. `tidepool-repl`'s live session-bindings
+/// resource) prepended verbatim, followed by [`list`]'s fixed catalog
+/// converted to the wire shape. `local` is empty for a server with no
+/// resources of its own.
+pub fn list_catalog_resources(
+    ctx: &ResourceCtx,
+    mut local: Vec<rmcp::model::Annotated<rmcp::model::RawResource>>,
+) -> Vec<rmcp::model::Annotated<rmcp::model::RawResource>> {
+    local.extend(list(ctx).into_iter().map(descriptor_to_raw));
+    local
+}
+
+/// The shared `resources/list_templates` body.
+pub fn list_catalog_templates() -> Vec<rmcp::model::Annotated<rmcp::model::RawResourceTemplate>> {
+    templates().into_iter().map(template_to_raw).collect()
+}
+
+/// The shared `resources/read` body: try `local` first (a server's own
+/// resource outside the shared catalog), else fall back to [`read`]'s fixed
+/// catalog. `local` is a thunk so a server with no local resources (or whose
+/// local check is a cheap URI comparison that didn't match) never pays for
+/// building a body it won't use.
+pub fn read_catalog_body(
+    ctx: &ResourceCtx,
+    uri: &str,
+    local: impl FnOnce() -> Option<ResourceBody>,
+) -> Option<ResourceBody> {
+    local().or_else(|| read(ctx, uri))
+}
+
+/// Wrap a resolved [`ResourceBody`] as the final `resources/read` wire
+/// result — the one `ReadResourceResult`/`TextResourceContents` shape every
+/// caller of [`read_catalog_body`] builds around its `Some` case.
+pub fn render_resource_body(uri: String, b: ResourceBody) -> rmcp::model::ReadResourceResult {
+    rmcp::model::ReadResourceResult {
+        contents: vec![rmcp::model::ResourceContents::TextResourceContents {
+            uri,
+            mime_type: Some(b.mime.to_string()),
+            text: b.text,
+            meta: None,
+        }],
+    }
+}
+
 /// Resolve a `help` topic to rendered content (the same text behind the
 /// resources), or a topic index for an empty/unknown topic. Backs the `help`
 /// TOOL, which any MCP client can call even without `resources/read` support.
@@ -799,5 +885,82 @@ import Prelude
         assert!(unqualified.contains(&"(<$>)".to_string()));
         assert!(qualified.iter().any(|q| q == "Map.fromList"));
         assert!(wholesale.iter().any(|w| w == "Control.Lens"));
+    }
+
+    fn empty_ctx(decls: &[EffectDecl]) -> ResourceCtx<'_> {
+        ResourceCtx {
+            effects: decls,
+            lib_dirs: &[],
+            patterns_path: None,
+            stdlib_dir: None,
+        }
+    }
+
+    /// [`list_catalog_resources`] must prepend a caller's own `local`
+    /// resources verbatim, ahead of the shared catalog — the shape
+    /// `tidepool-repl`'s live session-bindings resource depends on.
+    #[test]
+    fn list_catalog_resources_prepends_local_before_catalog() {
+        let decls = crate::standard_decls();
+        let ctx = empty_ctx(&decls);
+        let local = vec![descriptor_to_raw(ResourceDescriptor {
+            uri: "tidepool://local/only".to_string(),
+            name: "Local only".to_string(),
+            description: "A server-local resource outside the shared catalog.".to_string(),
+            mime: "application/json",
+        })];
+        let resources = list_catalog_resources(&ctx, local);
+        assert_eq!(resources[0].raw.uri, "tidepool://local/only");
+        assert!(resources.len() > 1, "the shared catalog must still follow");
+        assert!(resources[1..]
+            .iter()
+            .any(|r| r.raw.uri == "tidepool://guide"));
+    }
+
+    /// [`list_catalog_resources`] with no `local` resources reproduces the
+    /// shared catalog alone — the stateless `tidepool` server's shape.
+    #[test]
+    fn list_catalog_resources_with_no_local_is_just_the_catalog() {
+        let decls = crate::standard_decls();
+        let ctx = empty_ctx(&decls);
+        let resources = list_catalog_resources(&ctx, Vec::new());
+        assert_eq!(resources.len(), list(&ctx).len());
+        assert_eq!(resources[0].raw.uri, "tidepool://guide");
+    }
+
+    /// [`read_catalog_body`] tries `local` first and never falls through to
+    /// the shared catalog when it resolves.
+    #[test]
+    fn read_catalog_body_prefers_local_over_catalog() {
+        let decls = crate::standard_decls();
+        let ctx = empty_ctx(&decls);
+        let b = read_catalog_body(&ctx, "tidepool://guide", || {
+            Some(ResourceBody {
+                mime: "text/plain",
+                text: "local override".to_string(),
+            })
+        });
+        assert_eq!(b.unwrap().text, "local override");
+    }
+
+    /// [`read_catalog_body`] falls back to the shared catalog when `local`
+    /// resolves to `None` — the stateless `tidepool` server always passes
+    /// `|| None`, and `tidepool-repl` does too for any URI that isn't its own.
+    #[test]
+    fn read_catalog_body_falls_back_to_catalog_when_local_is_none() {
+        let decls = crate::standard_decls();
+        let ctx = empty_ctx(&decls);
+        let b = read_catalog_body(&ctx, "tidepool://guide", || None);
+        assert!(b.unwrap().text.contains("eval guide"));
+    }
+
+    /// A URI neither `local` nor the shared catalog recognizes resolves to
+    /// `None` — the caller's `resource_not_found` path.
+    #[test]
+    fn read_catalog_body_unknown_uri_is_none() {
+        let decls = crate::standard_decls();
+        let ctx = empty_ctx(&decls);
+        let b = read_catalog_body(&ctx, "tidepool://nonexistent", || None);
+        assert!(b.is_none());
     }
 }
