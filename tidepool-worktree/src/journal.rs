@@ -73,12 +73,15 @@ impl EventJournal {
             .open(&path)
             .map_err(|e| storage_failure(&path, e))?;
 
-        // Tail repair (a torn final row truncated away) is unconditional in
-        // the shared reader — see `tidepool_repr::jsonl`'s module doc. A
-        // malformed row anywhere else is loud, matching the old behavior.
-        let (entries, repair) = jsonl::read_repairing_tail(&path, |l| {
-            serde_json::from_str::<JournalEntry>(l).map_err(|e| e.to_string())
-        })
+        // A single-owner file (`&mut self` will never share this path with
+        // another handle), so a torn final row is TRUNCATED away — see
+        // `tidepool_repr::jsonl`'s module doc for why this is per-consumer.
+        // A malformed row anywhere else is loud, matching the old behavior.
+        let (entries, repair) = jsonl::read_tail(
+            &path,
+            |l| serde_json::from_str::<JournalEntry>(l).map_err(|e| e.to_string()),
+            jsonl::TailPolicy::Repair,
+        )
         .map_err(|e| match e {
             jsonl::JsonlReadError::Io(io) => storage_failure(&path, io),
             jsonl::JsonlReadError::TornMidFile { line_no, detail } => storage_failure(

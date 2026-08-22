@@ -25,13 +25,13 @@
 //! already picks up an edited harness file; only the checkpoint needs an
 //! explicit save/restore path.
 
-use std::io::Write;
 use std::num::NonZeroU64;
 use std::path::{Path, PathBuf};
 
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use serde_json::Value as Json;
+use tidepool_repr::jsonl::{self, SyncPolicy};
 
 use super::observer::{Event, Observer};
 
@@ -389,7 +389,10 @@ impl Observer for JsonlObserver {
             }
         };
         let mut file = self.file.lock();
-        if let Err(e) = writeln!(file, "{line}") {
+        // SyncPolicy::None: this observer's writes are best-effort, never
+        // load-bearing for correctness the way a journal's are — matches the
+        // original bare `writeln!` (no fsync).
+        if let Err(e) = jsonl::write_line(&mut file, &line, SyncPolicy::None) {
             eprintln!(
                 "[selfharness] transcript: write to {} failed: {e}",
                 self.path.display()

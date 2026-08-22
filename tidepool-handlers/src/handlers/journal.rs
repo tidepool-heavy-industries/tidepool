@@ -142,7 +142,7 @@ pub enum JournalLoadError {
         line_no: usize,
         /// [`JournalParseError`]'s `Display` text — a `String` rather than
         /// the typed error itself, since the shared
-        /// [`tidepool_repr::jsonl::read_repairing_tail`] this now runs
+        /// [`tidepool_repr::jsonl::read_tail`] this now runs
         /// through is schema-agnostic and only carries `parse`'s `Err` as
         /// text.
         detail: String,
@@ -176,12 +176,20 @@ impl std::error::Error for JournalLoadError {}
 /// is loud (`Err(JournalLoadError::TornMidFile)`) — the journal is
 /// append-only, so only the very last write can ever be incomplete.
 pub fn load_journal(path: &Path) -> Result<Vec<JournalEntry>, JournalLoadError> {
-    let (entries, repair) = jsonl::read_repairing_tail(path, |l| {
-        serde_json::from_str::<serde_json::Value>(l)
-            .map_err(JournalParseError::NotJson)
-            .and_then(|v| JournalEntry::from_json(&v))
-            .map_err(|e| e.to_string())
-    })
+    // `TailPolicy::Observe`: a fold reads SEGMENT files it does not own (see
+    // `tidepool_harness::selfharness::resume`), so a torn tail is reported
+    // but never truncated — see `tidepool_repr::jsonl`'s module doc. This
+    // preserves the exact prior behavior (skip-in-memory, never touch disk).
+    let (entries, torn) = jsonl::read_tail(
+        path,
+        |l| {
+            serde_json::from_str::<serde_json::Value>(l)
+                .map_err(JournalParseError::NotJson)
+                .and_then(|v| JournalEntry::from_json(&v))
+                .map_err(|e| e.to_string())
+        },
+        jsonl::TailPolicy::Observe,
+    )
     .map_err(|e| match e {
         jsonl::JsonlReadError::Io(source) => JournalLoadError::Io {
             path: path.to_path_buf(),
@@ -193,16 +201,11 @@ pub fn load_journal(path: &Path) -> Result<Vec<JournalEntry>, JournalLoadError> 
             detail,
         },
     })?;
-    // Tail repair (truncating a torn final row away) is unconditional in the
-    // shared reader now — see `tidepool_repr::jsonl`'s module doc for why
-    // this strengthens the old skip-only-in-memory behavior rather than
-    // changing it arbitrarily.
-    if let Some(repair) = repair {
+    if let Some(torn) = torn {
         tracing::warn!(
-            "journal {:?}: torn final line at line {} truncated away (crash mid-append?): {}",
+            "journal {:?}: torn final line skipped (crash mid-append?): {}",
             path,
-            repair.line_no,
-            repair.reason
+            torn.reason
         );
     }
     Ok(entries)

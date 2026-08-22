@@ -30,21 +30,40 @@
 //!   ([`SyncPolicy::None`]) by design — a transcript observer's own writes are
 //!   best-effort, never load-bearing for correctness the way a journal's are.
 //!
-//! ## Tail repair, unconditionally
+//! ## Tail policy: `Repair` vs `Observe` — a real, per-consumer choice
 //!
-//! [`read_repairing_tail`] always repairs: a malformed final line is the
-//! torn-write shape (a crash mid-`write`), forgiven, and the file is
-//! TRUNCATED to the last good row so a later append lands after good data,
-//! not after garbage. This is the stronger of the two policies this
-//! consolidates (`tidepool-worktree`'s), applied for every caller — including
-//! `load_journal`, which previously only skipped the bad row IN MEMORY
-//! without touching the file, leaving exactly the "future good rows appended
-//! after garbage" corruption `EventJournal`'s own doc comment describes as a
-//! standing hazard. This is a deliberate strengthening, not an oversight: a
-//! durable production journal should always repair. A malformed line
-//! ANYWHERE ELSE is loud — the append-only invariant means only the very last
-//! line can ever be incomplete, so an earlier bad line is real corruption and
-//! is never silently absorbed.
+//! A malformed final line is the torn-write shape (a crash mid-`write`) and
+//! is always FORGIVEN — it never fails the read — but what happens to the
+//! bytes on disk is a genuine per-consumer policy choice, [`TailPolicy`]:
+//!
+//! - **`Repair`** — truncate the file to the last good row, so a later append
+//!   lands after good data, not after garbage. Right for a single-owner file
+//!   nothing else ever reads or writes (`EventJournal`, where `&mut self` is
+//!   the only handle that will ever touch this path again).
+//! - **`Observe`** — leave the file byte-for-byte untouched; the torn row is
+//!   still reported (so the caller can warn) but never truncated away. Right
+//!   for `load_journal`, which folds SEGMENT files it does not own — PRD 20's
+//!   segmented-journal design's "retain first, nothing ever rewrites,
+//!   truncates, or deletes a segment" invariant
+//!   (`tidepool-harness::selfharness::resume`) extends to a torn tail too: a
+//!   later boot redoes the lost row into its OWN fresh segment rather than
+//!   editing a segment some other process (possibly still alive, possibly the
+//!   subject of a later forensic read) exclusively claimed.
+//!
+//! This was flagged as an open design point in the duplication survey that
+//! motivated this consolidation ("whether the shared reader always repairs
+//! the tail or exposes `RepairTail` versus `ObserveOnly`"); testing against
+//! `resume.rs`'s own pinned invariant
+//! (`a_segment_with_a_torn_tail_never_poisons_a_later_boot`) settled it in
+//! favor of keeping BOTH — a single global policy would have either corrupted
+//! `EventJournal`'s single-writer-file assumption's safety margin (mutating
+//! under `Observe` everywhere) or broken the segmented design (mutating under
+//! `Repair` everywhere).
+//!
+//! A malformed line ANYWHERE ELSE — not the final line — is loud regardless
+//! of policy: the append-only invariant means only the very last line can
+//! ever be incomplete, so an earlier bad line is real corruption and is never
+//! silently absorbed.
 
 use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
@@ -104,7 +123,7 @@ pub fn write_line(file: &mut File, line: &str, sync_policy: SyncPolicy) -> std::
     sync(file, sync_policy)
 }
 
-/// Why [`read_repairing_tail`] refused to return entries.
+/// Why [`read_tail`] refused to return entries.
 #[derive(Debug)]
 pub enum JsonlReadError {
     Io(std::io::Error),
@@ -139,10 +158,20 @@ impl std::error::Error for JsonlReadError {
     }
 }
 
-/// A torn final row was found and the file was truncated to drop it.
+/// How [`read_tail`] treats a torn final row on disk — see the module doc.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TailPolicy {
+    /// Truncate the file to the last good row.
+    Repair,
+    /// Leave the file byte-for-byte untouched.
+    Observe,
+}
+
+/// A torn final row was found — see [`TailPolicy`] for whether it was
+/// truncated away or left in place.
 #[derive(Debug, Clone)]
-pub struct TailRepair {
-    /// ONE-based line number of the repaired (dropped) row.
+pub struct TornTail {
+    /// ONE-based line number of the torn row.
     pub line_no: usize,
     /// Why that row failed to parse — from `parse`'s own `Err`.
     pub reason: String,
@@ -151,20 +180,20 @@ pub struct TailRepair {
 /// Read every row in `path`, in file order, parsing each with the caller's
 /// own `parse` (so this stays schema-agnostic: a caller like `load_journal`
 /// applies its own field-level validation on top of the raw JSON, exactly as
-/// it did before this consolidation). Repairs a torn FINAL row — see the
-/// module doc — rather than either refusing to open or leaving the garbage in
-/// place for a future append to write valid rows after. A missing file reads
-/// as `Ok((vec![], None))` — an empty journal, not an error.
+/// it did before this consolidation). A torn FINAL row is always forgiven —
+/// see the module doc for what `policy` does to the bytes on disk. A missing
+/// file reads as `Ok((vec![], None))` — an empty journal, not an error.
 ///
 /// "Malformed" is judged by `parse`'s own verdict — a syntactically valid
 /// JSON line that doesn't match the caller's expected shape is exactly as
 /// malformed as invalid JSON, matching what every consolidated consumer
 /// already did (both `EventJournal` and `load_journal` treated a
 /// wrong-shaped row as bad, not just a syntactically invalid one).
-pub fn read_repairing_tail<T>(
+pub fn read_tail<T>(
     path: &Path,
     parse: impl Fn(&str) -> Result<T, String>,
-) -> Result<(Vec<T>, Option<TailRepair>), JsonlReadError> {
+    policy: TailPolicy,
+) -> Result<(Vec<T>, Option<TornTail>), JsonlReadError> {
     let file = match File::open(path) {
         Ok(f) => f,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok((Vec::new(), None)),
@@ -235,16 +264,19 @@ pub fn read_repairing_tail<T>(
     }
 
     // Reached EOF with a bad row outstanding: it WAS the final row, so this
-    // is the recoverable torn write. The file is TRUNCATED to the last good
-    // row so the next append lands after good data, not after garbage.
-    let repair = if let Some((lineno, reason, bad_start)) = pending_bad {
-        let repair_file = OpenOptions::new()
-            .write(true)
-            .open(path)
-            .map_err(JsonlReadError::Io)?;
-        repair_file.set_len(bad_start).map_err(JsonlReadError::Io)?;
-        repair_file.sync_all().map_err(JsonlReadError::Io)?;
-        Some(TailRepair {
+    // is the recoverable torn write. Under `Repair`, the file is TRUNCATED to
+    // the last good row so the next append lands after good data, not after
+    // garbage; under `Observe`, the bytes are left exactly as found.
+    let torn = if let Some((lineno, reason, bad_start)) = pending_bad {
+        if policy == TailPolicy::Repair {
+            let repair_file = OpenOptions::new()
+                .write(true)
+                .open(path)
+                .map_err(JsonlReadError::Io)?;
+            repair_file.set_len(bad_start).map_err(JsonlReadError::Io)?;
+            repair_file.sync_all().map_err(JsonlReadError::Io)?;
+        }
+        Some(TornTail {
             line_no: lineno,
             reason,
         })
@@ -252,7 +284,7 @@ pub fn read_repairing_tail<T>(
         None
     };
 
-    Ok((entries, repair))
+    Ok((entries, torn))
 }
 
 #[cfg(test)]
@@ -285,9 +317,9 @@ mod tests {
         append_new_line(&path, "2", SyncPolicy::Data).unwrap();
         append_new_line(&path, "3", SyncPolicy::None).unwrap();
 
-        let (entries, repair) = read_repairing_tail(&path, parse_u64).unwrap();
+        let (entries, torn) = read_tail(&path, parse_u64, TailPolicy::Repair).unwrap();
         assert_eq!(entries, vec![1, 2, 3]);
-        assert!(repair.is_none());
+        assert!(torn.is_none());
         let _ = std::fs::remove_file(&path);
     }
 
@@ -295,14 +327,14 @@ mod tests {
     fn missing_file_reads_as_empty() {
         let path = tmp_file("missing");
         let _ = std::fs::remove_file(&path);
-        let (entries, repair) = read_repairing_tail::<u64>(&path, parse_u64).unwrap();
+        let (entries, torn) = read_tail::<u64>(&path, parse_u64, TailPolicy::Repair).unwrap();
         assert_eq!(entries, Vec::<u64>::new());
-        assert!(repair.is_none());
+        assert!(torn.is_none());
     }
 
     #[test]
-    fn torn_final_line_is_repaired_and_truncated_on_disk() {
-        let path = tmp_file("torn_final");
+    fn torn_final_line_under_repair_is_truncated_on_disk() {
+        let path = tmp_file("torn_final_repair");
         let _ = std::fs::remove_file(&path);
         append_new_line(&path, "1", SyncPolicy::All).unwrap();
         append_new_line(&path, "2", SyncPolicy::All).unwrap();
@@ -314,20 +346,53 @@ mod tests {
             f.write_all(b"3x").unwrap();
         }
 
-        let (entries, repair) = read_repairing_tail(&path, parse_u64).unwrap();
+        let (entries, torn) = read_tail(&path, parse_u64, TailPolicy::Repair).unwrap();
         assert_eq!(entries, vec![1, 2]);
-        let repair = repair.expect("a torn final row must be reported as repaired");
-        assert_eq!(repair.line_no, 3);
+        let torn = torn.expect("a torn final row must be reported");
+        assert_eq!(torn.line_no, 3);
 
         // The file itself must now be truncated to the last good row: a
         // fresh read (and a fresh append) sees no trace of the torn row.
-        let (entries_after, repair_after) = read_repairing_tail(&path, parse_u64).unwrap();
+        let (entries_after, torn_after) = read_tail(&path, parse_u64, TailPolicy::Repair).unwrap();
         assert_eq!(entries_after, vec![1, 2]);
-        assert!(repair_after.is_none());
+        assert!(torn_after.is_none());
 
         append_new_line(&path, "4", SyncPolicy::All).unwrap();
-        let (entries_final, _) = read_repairing_tail(&path, parse_u64).unwrap();
+        let (entries_final, _) = read_tail(&path, parse_u64, TailPolicy::Repair).unwrap();
         assert_eq!(entries_final, vec![1, 2, 4]);
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// `TailPolicy::Observe` reports the same torn row but never mutates the
+    /// file — the segmented-journal invariant `read_tail`'s module doc
+    /// describes (a foreign segment is never rewritten, truncated, or
+    /// deleted).
+    #[test]
+    fn torn_final_line_under_observe_is_reported_but_left_in_place() {
+        let path = tmp_file("torn_final_observe");
+        let _ = std::fs::remove_file(&path);
+        append_new_line(&path, "1", SyncPolicy::All).unwrap();
+        {
+            use std::io::Write as _;
+            let mut f = OpenOptions::new().append(true).open(&path).unwrap();
+            f.write_all(b"2x").unwrap();
+        }
+        let before = std::fs::read(&path).unwrap();
+
+        let (entries, torn) = read_tail(&path, parse_u64, TailPolicy::Observe).unwrap();
+        assert_eq!(entries, vec![1]);
+        let torn = torn.expect("a torn final row must still be reported under Observe");
+        assert_eq!(torn.line_no, 2);
+
+        let after = std::fs::read(&path).unwrap();
+        assert_eq!(before, after, "Observe must never mutate the file");
+
+        // Reading again yields the identical result — Observe is idempotent,
+        // not a one-shot repair.
+        let (entries2, torn2) = read_tail(&path, parse_u64, TailPolicy::Observe).unwrap();
+        assert_eq!(entries2, vec![1]);
+        assert!(torn2.is_some());
 
         let _ = std::fs::remove_file(&path);
     }
@@ -338,7 +403,7 @@ mod tests {
         let _ = std::fs::remove_file(&path);
         std::fs::write(&path, b"not-a-number\n2\n").unwrap();
 
-        let err = read_repairing_tail(&path, parse_u64).unwrap_err();
+        let err = read_tail(&path, parse_u64, TailPolicy::Repair).unwrap_err();
         assert!(
             matches!(err, JsonlReadError::TornMidFile { line_no: 1, .. }),
             "expected TornMidFile at line 1, got {err:?}"
@@ -359,7 +424,7 @@ mod tests {
         write_line(&mut file, "2", SyncPolicy::None).unwrap();
         drop(file);
 
-        let (entries, _) = read_repairing_tail(&path, parse_u64).unwrap();
+        let (entries, _) = read_tail(&path, parse_u64, TailPolicy::Repair).unwrap();
         assert_eq!(entries, vec![1, 2]);
         let _ = std::fs::remove_file(&path);
     }
