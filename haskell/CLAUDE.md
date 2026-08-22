@@ -293,20 +293,26 @@ JSON boundary — see the module doc at the top of `jit_surface.rs`).
 
 ## Known Limits / Gotchas
 
-**A failing generated `Tidepool.Effects` module cascades into misleading
-diagnostics.** `GhcPipeline.hs`'s diagnostic-recovery pass (`normalVariant`)
-redoes modules in non-topological order, so when the generated Effects module
-itself fails to typecheck (e.g. its `type M` row names an unresolved type),
-whichever OTHER module the pass visits first reports "attempting to use module
-X which is not loaded" instead of the real error. Since stable-effects-core
-(`tidepool-mcp/CLAUDE.md`'s section of that name) split the generated surface
-in two, this is specifically about the tiny per-window SHIM (the only half
-that still declares `type M`) — the stable `Tidepool.Effects.Core` half has no
-row to fail on. The harness sidesteps this for pinned `Finalize` rows by
-probe-compiling the generated SHIM module STANDALONE first
-(`EngineConfig::turn_target`, memoized per module content) — but any
-other path that compiles a bad generated module alongside user code can still
-hit the cascade. The mechanism fix (topological recovery order) is unowned.
+**A failing generated module reports its own diagnostic, not a downstream
+cascade — recovery order is topological.** `GhcPipeline.hs`'s diagnostic-
+recovery pass (`normalVariant`'s `cpSummaries`) redoes each module's own
+`parseModule`/`typecheckModule`, independently of the earlier `load'` call, in
+DEPENDENCY order (`topSortModuleGraph` + `flattenSCCs` — the same idiom
+`sessionVariant` already used one seam down). A module with a genuine failure
+of its own — e.g. a generated `Tidepool.Effects` SHIM whose `type M` row names
+an unresolved type — is always reached before anything that imports it, so its
+real diagnostic fires first and stops the loop there; a downstream importer's
+own typecheck (which would otherwise choke on the failing import with GHC's
+generic "attempting to use module X which is not loaded") is never reached.
+Since stable-effects-core (`tidepool-mcp/CLAUDE.md`'s section of that name)
+split the generated surface in two, the SHIM shape above is specifically about
+the tiny per-window half (the only one that still declares `type M`) — the
+stable `Tidepool.Effects.Core` half has no row to fail on. The harness also
+still sidesteps this for pinned `Finalize` rows by probe-compiling the
+generated SHIM module STANDALONE first (`EngineConfig::turn_target`, memoized
+per module content), independent of this fix. Gated by
+`Fidelity.TopoRecovery` (`extract-fidelity-test`): a minimal two-module
+mask reproduction plus the shim-shaped unresolved-name case.
 
 **Manual repro of GHC-heavy tests needs the with-packages GHC on PATH.** A
 bare `nix develop` shell reproduction with the wrong GHC on PATH fails with
