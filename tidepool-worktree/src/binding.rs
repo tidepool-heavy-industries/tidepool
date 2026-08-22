@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 
 use crate::error::WorktreeError;
 use crate::id::WorktreeId;
-use crate::storage::storage_failure;
+use crate::storage::{storage_failure, DurableJsonDir};
 
 /// An opaque agent identity. Deliberately a string newtype and not a typed
 /// agent handle: this module must not reach for anything agent-shaped beyond
@@ -180,7 +180,7 @@ impl ActiveBinding {
 /// file with the same temp-file/fsync/rename discipline as the registry.
 #[derive(Debug)]
 pub struct BindingTable {
-    root: PathBuf,
+    dir: DurableJsonDir,
     bindings: Vec<Binding>,
     /// Parallel to `bindings` (same length, same index) — the in-memory
     /// bind-generation of each row, assigned when [`Self::bind`] creates it.
@@ -211,7 +211,7 @@ impl BindingTable {
     /// correctness precondition, not a deployment nicety.
     pub fn open(root: impl AsRef<Path>) -> Result<Self, WorktreeError> {
         let root = root.as_ref().to_path_buf();
-        fs::create_dir_all(&root).map_err(|e| storage_failure(&root, e))?;
+        let dir = DurableJsonDir::open(&root)?;
 
         let lock_path = root.join(".owner.lock");
         let owner_lock = fs::OpenOptions::new()
@@ -231,13 +231,7 @@ impl BindingTable {
 
         let mut bindings = Vec::new();
         let mut generations = Vec::new();
-        for entry in fs::read_dir(&root).map_err(|e| storage_failure(&root, e))? {
-            let entry = entry.map_err(|e| storage_failure(&root, e))?;
-            let path = entry.path();
-            if path.extension().and_then(|e| e.to_str()) != Some("json") {
-                continue;
-            }
-            let bytes = fs::read(&path).map_err(|e| storage_failure(&path, e))?;
+        for (path, bytes) in dir.read_all()? {
             let mut rows: Vec<Binding> =
                 serde_json::from_slice(&bytes).map_err(|e| storage_failure(&path, e))?;
             // Loaded rows carry no generation — see the field docs on
@@ -247,7 +241,7 @@ impl BindingTable {
         }
 
         Ok(Self {
-            root,
+            dir,
             bindings,
             generations,
             next_generation: 0,
@@ -256,15 +250,7 @@ impl BindingTable {
     }
 
     fn path_for(&self, worktree: &WorktreeId) -> PathBuf {
-        // Same backstop as `WorktreeRegistry::record_path` — ids are validated
-        // at the wire boundary; here that assumption fails loud, not as an
-        // escape.
-        debug_assert!(
-            WorktreeId::is_path_safe(worktree.as_str()),
-            "worktree id {:?} is not path-safe — a wire boundary failed to validate",
-            worktree.as_str()
-        );
-        self.root.join(format!("{}.json", worktree.as_str()))
+        self.dir.path_for(worktree.as_str())
     }
 
     /// Rewrite the on-disk file for `worktree` from the current in-memory
@@ -278,9 +264,7 @@ impl BindingTable {
             .collect();
         #[allow(clippy::expect_used, reason = "serialize bindings")]
         let bytes = serde_json::to_vec_pretty(&rows).expect("serialize bindings");
-        let path = self.path_for(worktree);
-        tidepool_atomic_write::write_durable(&path, &bytes)
-            .map_err(|e| storage_failure(&e.path, e.source))
+        self.dir.write(worktree.as_str(), &bytes)
     }
 
     /// Bind an agent to a worktree, returning the [`ActiveBinding`] custody

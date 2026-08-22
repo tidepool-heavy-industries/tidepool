@@ -25,21 +25,10 @@ use std::path::{Path, PathBuf};
 use crate::error::WorktreeError;
 use crate::git::{inspect, GitCli};
 use crate::id::{BranchName, GitOid, GitRef, WorktreeId};
-use crate::storage::storage_failure;
+use crate::storage::{storage_failure, DurableJsonDir};
 
 /// Directory under the registry root holding one JSON file per worktree id.
 const RECORDS_DIR: &str = "records";
-
-/// Write `bytes` to `path` crash-safely via the shared durable atomic-write
-/// helper — a temp file in the SAME directory, fsynced, then renamed over
-/// the target, then the directory itself best-effort fsynced. A torn write
-/// cannot land at `path` — either the old content is still there or the new
-/// content is, never a partial file — and a sibling record in the same
-/// directory is never touched by writing this one.
-fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), WorktreeError> {
-    tidepool_atomic_write::write_durable(path, bytes)
-        .map_err(|e| storage_failure(&e.path, e.source))
-}
 
 /// Whether the recorded `cwd` still holds a real git working tree. A plain
 /// `Path::exists` would be fooled by a directory left behind with its `.git`
@@ -120,6 +109,7 @@ pub struct WorktreeSummary {
 #[derive(Clone, Debug)]
 pub struct WorktreeRegistry {
     root: PathBuf,
+    records: DurableJsonDir,
 }
 
 impl WorktreeRegistry {
@@ -152,11 +142,11 @@ impl WorktreeRegistry {
             }
         }
 
-        let records_dir = canonical_root.join(RECORDS_DIR);
-        fs::create_dir_all(&records_dir).map_err(|e| storage_failure(&records_dir, e))?;
+        let records = DurableJsonDir::open(canonical_root.join(RECORDS_DIR))?;
 
         Ok(Self {
             root: canonical_root,
+            records,
         })
     }
 
@@ -164,26 +154,12 @@ impl WorktreeRegistry {
         &self.root
     }
 
-    fn record_path(&self, id: &WorktreeId) -> PathBuf {
-        // Ids are validated where wire becomes domain (`WorktreeId::is_path_safe`);
-        // this is the backstop that keeps a missed boundary from becoming a
-        // path escape instead of a loud bug.
-        debug_assert!(
-            WorktreeId::is_path_safe(id.as_str()),
-            "worktree id {:?} is not path-safe — a wire boundary failed to validate",
-            id.as_str()
-        );
-        self.root
-            .join(RECORDS_DIR)
-            .join(format!("{}.json", id.as_str()))
-    }
-
     /// Durably record a receipt. Overwrites an existing row for the same id
     /// (the snapshot lane writes `snapshot_ref` after creation).
     pub fn put(&self, receipt: &WorktreeReceipt) -> Result<(), WorktreeError> {
         #[allow(clippy::expect_used, reason = "serialize WorktreeReceipt")]
         let bytes = serde_json::to_vec_pretty(receipt).expect("serialize WorktreeReceipt");
-        write_atomic(&self.record_path(&receipt.worktree_id), &bytes)
+        self.records.write(receipt.worktree_id.as_str(), &bytes)
     }
 
     /// Read one row back. `Ok(None)` when the id was never registered — which
@@ -191,23 +167,19 @@ impl WorktreeRegistry {
     /// disk), and the distinction matters: one is a typo, the other is data loss.
     ///
     /// A record that fails to deserialize is a [`WorktreeError::StorageFailure`],
-    /// not `Ok(None)`: records are written via [`write_atomic`], so a crash
-    /// mid-write cannot land a torn file at this path — a corrupt record here
+    /// not `Ok(None)`: records are written via [`DurableJsonDir::write`], so a
+    /// crash mid-write cannot land a torn file at this path — a corrupt record here
     /// means something else went wrong (bit rot, a hand edit, a filesystem
     /// fault), and collapsing that into "never registered" would hide it
     /// behind the exact typo/data-loss distinction this function's contract
     /// is careful to keep apart.
     pub fn get(&self, id: &WorktreeId) -> Result<Option<WorktreeReceipt>, WorktreeError> {
-        let path = self.record_path(id);
-        match fs::read(&path) {
-            Ok(bytes) => {
-                let receipt =
-                    serde_json::from_slice(&bytes).map_err(|e| storage_failure(&path, e))?;
-                Ok(Some(receipt))
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-            Err(e) => Err(storage_failure(&path, e)),
-        }
+        let Some(bytes) = self.records.read(id.as_str())? else {
+            return Ok(None);
+        };
+        let receipt = serde_json::from_slice(&bytes)
+            .map_err(|e| storage_failure(&self.records.path_for(id.as_str()), e))?;
+        Ok(Some(receipt))
     }
 
     /// Every registered worktree, present or lost, ordered by `created_at_ms`
@@ -232,15 +204,8 @@ impl WorktreeRegistry {
     /// make a retained worktree quietly disappear, which is the exact failure
     /// retain-first exists to prevent. See `L6-storage-errors-receipt.md`.
     pub fn list(&self) -> Result<Vec<WorktreeSummary>, WorktreeError> {
-        let dir = self.root.join(RECORDS_DIR);
         let mut receipts = Vec::new();
-        for entry in fs::read_dir(&dir).map_err(|e| storage_failure(&dir, e))? {
-            let entry = entry.map_err(|e| storage_failure(&dir, e))?;
-            let path = entry.path();
-            if path.extension().and_then(|e| e.to_str()) != Some("json") {
-                continue;
-            }
-            let bytes = fs::read(&path).map_err(|e| storage_failure(&path, e))?;
+        for (path, bytes) in self.records.read_all()? {
             let receipt: WorktreeReceipt =
                 serde_json::from_slice(&bytes).map_err(|e| storage_failure(&path, e))?;
             receipts.push(receipt);
@@ -266,7 +231,7 @@ impl WorktreeRegistry {
     pub fn mint_id(&self) -> Result<WorktreeId, WorktreeError> {
         loop {
             let candidate = WorktreeId::from_raw(format!("wt-{}", uuid::Uuid::new_v4()));
-            if !self.record_path(&candidate).exists() {
+            if !self.records.exists(candidate.as_str()) {
                 return Ok(candidate);
             }
         }
