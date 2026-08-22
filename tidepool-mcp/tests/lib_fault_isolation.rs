@@ -112,7 +112,9 @@ fn broken_lib_module_is_contained_and_healthy_eval_still_runs() {
     let effects_dir =
         tidepool_mcp::ensure_effects_module(&tidepool_mcp::standard_decls()).expect("effects");
 
-    let base_include: Vec<PathBuf> = vec![prelude.clone(), effects_dir.clone(), lib_dir.clone()];
+    let mut base_include: Vec<PathBuf> = vec![prelude.clone()];
+    base_include.extend(effects_dir.include_paths());
+    base_include.push(lib_dir.clone());
     let base_refs: Vec<&Path> = base_include.iter().map(PathBuf::as_path).collect();
 
     // 1. Baseline: the broken `Bad` module bricks `import Library` — the eval
@@ -185,7 +187,9 @@ fn healthy_lib_layer_is_a_noop() {
     let prelude = prelude_dir();
     let effects_dir =
         tidepool_mcp::ensure_effects_module(&tidepool_mcp::standard_decls()).expect("effects");
-    let base_include: Vec<PathBuf> = vec![prelude, effects_dir, dir.clone()];
+    let mut base_include: Vec<PathBuf> = vec![prelude];
+    base_include.extend(effects_dir.include_paths());
+    base_include.push(dir.clone());
 
     let layer = tidepool_mcp::isolate_lib_layer(std::slice::from_ref(&dir), &base_include);
     let _ = std::fs::remove_dir_all(&dir);

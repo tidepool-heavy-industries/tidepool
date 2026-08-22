@@ -9,8 +9,9 @@
 //! (`tidepool_mcp::template_haskell`, `standard_decls`, ...) are unaffected.
 //!
 //! Two intentionally-excluded neighbours stay elsewhere: `build_preamble`
-//! (`preamble.rs`) and `ensure_effects_module` (`lib.rs`; it writes a temp
-//! dir — IO, not pure — and only wraps the pure `effects_module_source` here).
+//! (`preamble.rs`) and `ensure_effects_core_module`/`ensure_effects_shim_module`
+//! (`lib.rs`; they write to content-addressed dirs — IO, not pure — and only
+//! wrap the pure `effects_core_module_source`/`effects_shim_module_source` here).
 //!
 //! Failure CLASSIFICATION (mapping an error to its class/phase) is NOT here — it
 //! is the single classifier in `tidepool_runtime::failclass`, shared by both
@@ -80,114 +81,110 @@ pub fn standard_decls() -> Vec<EffectDecl> {
     crate::base_effects!(std_decls_rows)
 }
 
-/// Source of the generated `Tidepool.Effects` module: effect type_defs,
-/// GADTs, the `M` alias, the `error :: Text -> a` shadow, and the thin
-/// send-wrapper helpers.
+/// Effects whose GADT genuinely cannot live in the stable Core module,
+/// because at least one CONSTRUCTOR's field type mentions `M` directly —
+/// unlike an ordinary row-closed HELPER (which [`EffectDecl::helpers_row_polymorphic`]
+/// already tracks per-effect, and which every effect definition in this
+/// codebase sets `true`), a GADT constructor's field type cannot be made
+/// `Member`-polymorphic by rewording its signature: the wire contract needs
+/// the closure typed at exactly the compile's own concrete row, not a choice
+/// of phrasing. `Green`'s `AsyncSpawnWith :: Int -> (Int -> M ()) -> Green
+/// Int` is the one known case (see its definition site,
+/// `green_effect_def!` in `effect_defs.rs`, for the full "why" — the runtime
+/// dispatches the thread body directly against the row it was spawned
+/// under). Named explicitly rather than inferred (e.g. by scanning
+/// constructor text for `M`) because inference here would be guessing at
+/// author intent from a string; a real GADT declaration whose module this
+/// changes is a rare, deliberate edit, not something that should silently
+/// change behavior based on incidental text content.
 ///
-/// This exists as a REAL module (written to an include dir by
-/// [`crate::ensure_effects_module`]) rather than text spliced into the eval
-/// preamble, because GHC identifies types by `(module, name)`: with one
-/// importable module, the eval module and `.tidepool/lib` user modules
-/// share ONE set of effect types — so user libraries can define effectful
-/// verbs (`census :: Text -> M Value`) that unify with eval code.
-pub fn effects_module_source(effects: &[EffectDecl]) -> String {
-    effects_module_source_at(effects, &crate::RowArgs::default())
+/// A row-dependent effect is excluded from Core ([`effects_core_module_source`])
+/// and instead declared directly in the per-window shim
+/// ([`effects_shim_module_source`]) whenever it's in the ROW — see
+/// [`crate::ensure_effects_module_with_vocab`]'s coordinating check for what
+/// happens if one is vocab-only instead (a loud panic, not a silent drop).
+pub const ROW_DEPENDENT_EFFECTS: &[&str] = &["Green"];
+
+#[must_use]
+pub(crate) fn is_row_dependent_effect(type_name: &str) -> bool {
+    ROW_DEPENDENT_EFFECTS.contains(&type_name)
 }
 
-/// [`effects_module_source`] with the row's parameterized effects applied to
-/// explicit type arguments — the self-iterating harness compiles an answerer
-/// turn against `'[AskUser, Fork, Finalize <hole type>]`, so `Member (Finalize
-/// T)` is what admits its `finalize @T`. `row`'s imports are emitted here too:
-/// the answer type is an author type, and naming it in `type M` needs it in
-/// scope in THIS module, not only in the turn module.
-///
-/// Thin wrapper over [`effects_module_source_with_vocab`] with an unwidened
-/// vocabulary (`vocab_effects == row_effects`) — byte-identical to this
-/// function's behavior before the vocabulary/row split (extract-wave item 0b)
-/// existed, which is exactly what every caller here still wants: only a
-/// caller that deliberately widens what's NAMEABLE beyond what's IN THE ROW
-/// reaches for the vocab-aware entry point directly.
-pub fn effects_module_source_at(effects: &[EffectDecl], row: &crate::RowArgs) -> String {
-    effects_module_source_with_vocab(effects, effects, row)
+/// The head name of a `type_defs` entry (`"data AsyncStatus = ..."` ->
+/// `Some(("AsyncStatus", true))`, `"type Foo = ..."` -> `Some(("Foo",
+/// false))`), plus whether it takes the `Name(..)` export form (a
+/// `data`/`newtype` — has constructors to export alongside the type) or the
+/// bare `Name` form (a `type` synonym — no constructors of its own). Used
+/// ONLY by [`effects_shim_module_source`] to export a ROW-DEPENDENT effect's
+/// supporting types, which — unlike Core's implicit "export everything
+/// declared here" — need to be named explicitly in the shim's export list.
+/// `None` for a `type_defs` entry that isn't a `data`/`newtype`/`type` head
+/// at all (e.g. a standalone `instance ...` — nothing to export).
+fn type_def_head_name(td: &str) -> Option<(&str, bool)> {
+    let (has_ctors, rest) = if let Some(r) = td.strip_prefix("data ") {
+        (true, r)
+    } else if let Some(r) = td.strip_prefix("newtype ") {
+        (true, r)
+    } else if let Some(r) = td.strip_prefix("type ") {
+        (false, r)
+    } else {
+        return None;
+    };
+    let name = rest
+        .split(|c: char| c.is_whitespace() || c == '=')
+        .next()?
+        .trim();
+    if name.is_empty() {
+        None
+    } else {
+        Some((name, has_ctors))
+    }
 }
 
-/// [`effects_module_source_at`] with the effect VOCABULARY (what's nameable —
-/// gets a GADT + `type_defs` emitted) split from the effect ROW (`row_effects`
-/// — what's IN `type M`, i.e. actually executable via `Member`). This is the
-/// mechanism behind "effect vocabulary available in scope ≠ effects present
-/// in M's row" (extract-wave item 0b, `plans/post-restart/extract-wave/boot/00-spec.md`):
-/// a name can be IN SCOPE (compiles, resolves, has a real GADT constructor)
-/// without being IN THE ROW (a `Member` constraint at its call site is then
-/// unsolved — a comprehensible type error, not "not in scope").
+/// Source of the STABLE `Tidepool.Effects.Core` module: every vocabulary
+/// effect's `type_defs`, GADT, and helpers — a pure function of the effect
+/// VOCABULARY ALONE (no row, no [`crate::RowArgs`]). This is the
+/// session-durable half of the generated effects surface (see
+/// `tidepool-mcp/CLAUDE.md`'s stable-effects-core section): its text depends
+/// only on WHICH EFFECTS EXIST for a given compile family (the general Agent
+/// stack, the self-iterating harness's answerer stack, …), never on which
+/// hole type a particular window's `Finalize` is pinned to — so two windows
+/// of the same session, or two turns of the same node, that share a
+/// vocabulary get byte-identical Core text, hence the same content-addressed
+/// dir (see [`crate::ensure_effects_core_module`]) and no tycon churn.
 ///
-/// **The row stays authoritative for `type M`** — `type M = Eff <row_effects>`
-/// exactly as before; `vocab_effects` never touches it. Widening what's
-/// nameable must never widen what's executable, or the capability-rows
-/// separation the row-scoping work built (each source-level compile — outer
-/// harness session, answerer, general Agent turn — gets its OWN row) would be
-/// silently undone by a shared vocabulary.
-///
-/// **`vocab_effects` must be a SUPERSET of `row_effects`** (matched by
-/// `type_name`) — a loud panic, not a silently-widened row, if it isn't: a
-/// row effect with no vocabulary entry would have no GADT to compile its
-/// `type M` against at all.
+/// **An effect named in [`ROW_DEPENDENT_EFFECTS`] is excluded from Core
+/// entirely** (its `type_defs`, GADT, AND helpers) — see that constant's doc
+/// for exactly why (in one word: `Green`'s `AsyncSpawnWith` GADT constructor
+/// has a FIELD TYPE that itself mentions `M`, which cannot typecheck in a
+/// module with no `M` of its own). [`effects_shim_module_source`] picks up
+/// the exact same exclusion for every ROW effect (never vocab-only; see
+/// [`crate::ensure_effects_module_with_vocab`]'s coordinating check), so
+/// nothing is silently dropped — it just declares per-window instead of
+/// once-per-session, exactly as the whole surface did before this split.
 ///
 /// **Emitted per vocabulary effect, deduplicated by `type_name`** (first
 /// occurrence in `vocab_effects` order wins) so the same effect can never
-/// double-declare its GADT — and in a DETERMINISTIC order (`vocab_effects`'
-/// own order, not a sort), because this generated source is a compile-cache
-/// key (see [`crate::ensure_effects_module_at`]'s content-addressing):
-/// nondeterministic ordering would silently destroy cache hits.
+/// double-declare its GADT — in a DETERMINISTIC order (`vocab_effects`'
+/// own order, not a sort), because this text is a compile-cache key (see
+/// [`crate::ensure_effects_core_module`]'s content-addressing): nondeterministic
+/// ordering would silently destroy cache hits.
 ///
-/// **Helpers are row-gated by default, vocabulary-wide only when declared
-/// safe.** A row-CLOSED helper (`foo :: A -> M B`, the ordinary shape) only
-/// typechecks when its effect is actually in the row — emitting it for a
-/// vocabulary-only effect breaks the compile at the DEFINITION site, the
-/// opposite of the goal. A row-POLYMORPHIC helper (`foo :: Member E effs =>
-/// A -> Eff effs B`, [`EffectDecl::helpers_row_polymorphic`]) typechecks
-/// regardless of the row and fails at the intended USE site instead. The
-/// exact gate is [`emits_helpers_for`] — any consumer asking "were this
-/// effect's helpers actually emitted" (e.g. to decide whether a generated
-/// import needs a `hiding` clause for a name one of those helpers would
-/// otherwise shadow) MUST call it rather than restate the condition: it is
-/// keyed on `row_effects`, NOT `vocab_effects` (the two agree for a
-/// helpers_row_polymorphic-true effect but diverge for every other one, and
-/// the superset invariant above means a vocab-with/row-without effect's
-/// helpers are never emitted).
-///
-/// **A vocabulary-only PARAMETERIZED effect (non-empty `type_params`) is
-/// rejected loudly** — `Finalize <hole type>`-shaped effects have no
-/// well-defined spelling without a row application (there's no default `v`
-/// to spell `data Finalize v a where` at outside a row's [`crate::RowArgs`]
-/// entry), so this is a construction-site error, not a half-working emission.
-pub fn effects_module_source_with_vocab(
-    row_effects: &[EffectDecl],
-    vocab_effects: &[EffectDecl],
-    row: &crate::RowArgs,
-) -> String {
-    for r in row_effects {
-        assert!(
-            vocab_effects.iter().any(|v| v.type_name == r.type_name),
-            "effect vocabulary must be a superset of the row: `{}` is in the \
-             row but not in the vocabulary",
-            r.type_name
-        );
-    }
+/// A parameterized effect (`Finalize`, non-empty `type_params`) is emitted
+/// GENERICALLY (`data Finalize v a where …`, `v` a bare type variable) exactly
+/// like every other effect — there is no "vocab-only parameterized effects are
+/// unrepresentable" restriction any more: a generic GADT plus a
+/// `Member`-polymorphic `finalize` needs no row application to have a
+/// well-defined spelling, and it is exactly as nameable-but-possibly-
+/// unexecutable as any other vocabulary effect (a comprehensible unsolved-
+/// `Member` error at the use site, same as `RunLLMTurn`'s existing
+/// nameable-everywhere policy — this replaces and generalizes it).
+pub fn effects_core_module_source(vocab_effects: &[EffectDecl]) -> String {
     let mut seen = std::collections::HashSet::new();
     let effects: Vec<&EffectDecl> = vocab_effects
         .iter()
         .filter(|v| seen.insert(v.type_name))
-        .inspect(|v| {
-            let in_row = row_effects.iter().any(|r| r.type_name == v.type_name);
-            assert!(
-                in_row || v.type_params.is_empty(),
-                "`{}` is vocabulary-only (not in the row) but parameterized \
-                 (type_params {:?}) — a parameterized effect has no \
-                 well-defined spelling outside a row application",
-                v.type_name,
-                v.type_params
-            );
-        })
+        .filter(|v| !is_row_dependent_effect(v.type_name))
         .collect();
 
     let mut out = String::new();
@@ -199,11 +196,14 @@ pub fn effects_module_source_with_vocab(
     out.push('\n');
     out.push_str("-- GENERATED by the tidepool MCP server from its effect handler\n");
     out.push_str("-- declarations. Do not edit; regenerated (content-addressed) at startup.\n");
+    out.push_str("-- STABLE module: a pure function of the effect VOCABULARY alone (no row,\n");
+    out.push_str("-- no `type M`) — see tidepool-mcp/CLAUDE.md's stable-effects-core section.\n");
     // Orphan `MonadFail (Eff effs)` instance below (issue #331): both MonadFail
     // and Eff are defined elsewhere, so the instance is an orphan — silence the
-    // warning. This is the home every eval + repl session imports.
+    // warning. This is the home every eval + repl session imports (via the
+    // per-window shim's re-export).
     out.push_str("{-# OPTIONS_GHC -Wno-orphans #-}\n");
-    out.push_str("module Tidepool.Effects where\n");
+    out.push_str("module Tidepool.Effects.Core where\n");
     out.push_str("import Tidepool.Prelude hiding (error)\n");
     out.push_str("import Control.Monad.Fail (MonadFail(..))\n");
     out.push_str("import qualified Tidepool.Data.Text as T\n");
@@ -230,11 +230,6 @@ pub fn effects_module_source_with_vocab(
     // helper text (effect_defs.rs) for why that's safe.
     out.push_str("import Unsafe.Coerce (unsafeCoerce)\n");
     out.push_str("import qualified Prelude as P\n");
-    // Author modules defining the types this row is applied to (e.g. the
-    // harness's `HarnessTypes` for a `Finalize Decision` row).
-    for m in row.imports() {
-        out.push_str(&format!("import {m}\n"));
-    }
     out.push_str("default (Int, Double, Text)\n");
     out.push_str("error :: Text -> a\nerror = P.error . T.unpack\n");
     // MonadFail routed through our JIT-safe `error` (#331): a failed refutable
@@ -266,19 +261,13 @@ pub fn effects_module_source_with_vocab(
         out.push('\n');
     }
 
-    // Type alias so helpers can write `M a` instead of `Eff '[Console, KV, Fs] a`
-    // — built from `row_effects` ONLY, never the (possibly wider) vocabulary:
-    // widening what's nameable must never widen what's executable.
-    if !row_effects.is_empty() {
-        out.push_str(&format!("type M = Eff {}\n\n", row_type(row_effects, row)));
-    }
-
-    // Thin effect helpers (send-wrappers and recipes) — see emits_helpers_for
-    // for the exact gate.
+    // Every vocabulary effect's helpers, unconditionally: the assertion above
+    // already guarantees every one of them is row-polymorphic, so there is no
+    // row-vs-vocab gate left to apply here (the old `emits_helpers_for` is
+    // retired — it existed only to keep a row-CLOSED helper from being emitted
+    // outside its row, a hazard that cannot arise once every helper is
+    // `Member`-polymorphic by construction).
     for eff in &effects {
-        if !emits_helpers_for(eff, row_effects) {
-            continue;
-        }
         for h in eff.helpers {
             out.push_str(h);
             out.push('\n');
@@ -287,24 +276,149 @@ pub fn effects_module_source_with_vocab(
     out
 }
 
-/// THE gate for whether [`effects_module_source_with_vocab`] emits an
-/// effect's `helpers` — in the row, or declared safe everywhere via
-/// [`EffectDecl::helpers_row_polymorphic`]. Exported so a consumer asking
-/// "was this effect's helper actually emitted" (e.g. deciding whether a
-/// generated import needs a `hiding` clause for a name one of those helpers
-/// would otherwise shadow) calls the real gate instead of restating it — a
-/// restated copy can silently diverge the moment an effect's
-/// `helpers_row_polymorphic` flag changes; this one cannot, because it IS
-/// what `effects_module_source_with_vocab` calls.
+/// Source of the per-window `Tidepool.Effects` SHIM module: a re-export of
+/// the stable [`effects_core_module_source`] plus the one thing that
+/// genuinely varies per compile — `type M = Eff <row_effects>` — and the
+/// author-module imports a parameterized row entry's applied type needs
+/// (`row.imports()`, e.g. the harness's `HarnessTypes` for a `Finalize
+/// Decision` row).
 ///
-/// Keyed on `row_effects`, deliberately NOT `vocab_effects` — see
-/// [`effects_module_source_with_vocab`]'s doc comment for why they diverge.
-/// `pub(crate)`, not `pub`: its only known consumers (this module, and
-/// worktree-wave's L4 in `tidepool-mcp` itself) are in-crate — widen only
-/// when an out-of-crate consumer actually needs it.
-#[must_use]
-pub(crate) fn emits_helpers_for(eff: &EffectDecl, row_effects: &[EffectDecl]) -> bool {
-    row_effects.iter().any(|r| r.type_name == eff.type_name) || eff.helpers_row_polymorphic
+/// Model-visible spelling is UNCHANGED: `import Tidepool.Effects` and `M`
+/// still resolve exactly as before — this module re-exports every name Core
+/// declares, so an eval/session import of `Tidepool.Effects` alone still sees
+/// the whole effect vocabulary plus `M`. Only the identity of WHERE each name
+/// is nominally declared moved (to Core), which is invisible to model-facing
+/// code and is exactly what makes it safe for a declaration mentioning those
+/// names to persist across a session-bind (see
+/// `haskell/src/Tidepool/Translate.hs`'s narrowed `typeMentionsEffectMonad`).
+///
+/// Content is a pure function of `row_effects` + `row` alone — small, and it
+/// changes every time a window's `Finalize` (or another parameterized
+/// effect's) row application changes, which is exactly why it stays split
+/// out of Core: recompiling a few lines per window is cheap, recompiling
+/// every effect GADT + helper per window (today's behavior) is not, and only
+/// the small shim's tycons (none — see below) are ever per-window-nominal.
+///
+/// Declares no `data`/GADT of its own: `type M` is a type SYNONYM (GHC looks
+/// through it before `typeMentionsEffectMonad` ever inspects a tycon), so
+/// nothing here has its own nominal identity for that guard to catch — the
+/// module exists to be tiny and cheap, not to hide anything.
+pub fn effects_shim_module_source(row_effects: &[EffectDecl], row: &crate::RowArgs) -> String {
+    // Row-dependent effects ([`ROW_DEPENDENT_EFFECTS`]) declared directly in
+    // THIS module (see below) must ALSO be named in its export list — unlike
+    // `module Tidepool.Effects.Core`, which re-exports Core's whole surface
+    // via the module-wildcard form, a name this module DEFINES itself is
+    // only exported if explicitly listed. Computed up front so the module
+    // header (which needs the full export list before anything else is
+    // emitted) can include them.
+    let mut seen_for_exports = std::collections::HashSet::new();
+    let row_dependent: Vec<&EffectDecl> = row_effects
+        .iter()
+        .filter(|e| seen_for_exports.insert(e.type_name))
+        .filter(|e| is_row_dependent_effect(e.type_name))
+        .collect();
+    let mut extra_exports = String::new();
+    for eff in &row_dependent {
+        // Supporting `type_defs` (e.g. Green's `data AsyncStatus = ...`) need
+        // their own export entry too — unlike the GADT/helpers below, these
+        // are plain `data`/`newtype`/`type` decls this function doesn't
+        // otherwise name anywhere, so the export list is the only place to
+        // extract each one's head name.
+        for td in eff.type_defs {
+            if let Some((name, has_ctors)) = type_def_head_name(td) {
+                if has_ctors {
+                    extra_exports.push_str(&format!(", {name}(..)"));
+                } else {
+                    extra_exports.push_str(&format!(", {name}"));
+                }
+            }
+        }
+        extra_exports.push_str(&format!(", {}(..)", eff.type_name));
+        for h in eff.helpers {
+            if let Some(name) = crate::describe::helper_name(h) {
+                extra_exports.push_str(&format!(", {name}"));
+            }
+        }
+    }
+
+    let mut out = String::new();
+    out.push_str(crate::preamble::EVAL_PRAGMAS);
+    out.push('\n');
+    out.push_str("-- GENERATED by the tidepool MCP server from its effect handler\n");
+    out.push_str("-- declarations. Do not edit; regenerated (content-addressed) at startup.\n");
+    out.push_str("-- PER-WINDOW shim: re-exports the stable Tidepool.Effects.Core and adds\n");
+    out.push_str("-- only `type M`, this compile's own effect row — see that module and\n");
+    out.push_str("-- tidepool-mcp/CLAUDE.md's stable-effects-core section.\n");
+    // `M` is only exportable when it is actually declared below (a non-empty
+    // row) — an empty-row compile (no effects at all) never had `type M`
+    // either, before this split.
+    if row_effects.is_empty() {
+        out.push_str("module Tidepool.Effects (module Tidepool.Effects.Core) where\n");
+    } else {
+        out.push_str(&format!(
+            "module Tidepool.Effects (module Tidepool.Effects.Core, M{extra_exports}) where\n"
+        ));
+    }
+    out.push_str("import Tidepool.Effects.Core\n");
+    // `Eff`/`Member`/`send` for `type M`'s own RHS below and for any
+    // ROW-DEPENDENT effect's GADT/helpers spliced in below (e.g. `Green`'s
+    // `Member Green effs`), and `pure` for `__shimProbe`'s body: Core IMPORTS
+    // all of these (from freer-simple and `Tidepool.Prelude` respectively)
+    // but, having no explicit export list re-exporting them, does not itself
+    // re-export them — a module's implicit export list covers only what it
+    // DEFINES, never what it merely imports. Needed here regardless of
+    // Core's own export shape, so this is not a fragile assumption about
+    // Core's internals.
+    if !row_effects.is_empty() {
+        out.push_str("import Control.Monad.Freer hiding (run)\n");
+        out.push_str("import Tidepool.Prelude hiding (error)\n");
+    }
+    // Author modules defining the types this row is applied to (e.g. the
+    // harness's `HarnessTypes` for a `Finalize Decision` row).
+    for m in row.imports() {
+        out.push_str(&format!("import {m}\n"));
+    }
+    out.push('\n');
+
+    // ROW-DEPENDENT effects ([`ROW_DEPENDENT_EFFECTS`] — excluded from Core
+    // entirely, see that constant's doc): declared HERE instead, per window,
+    // exactly as the whole generated surface used to work before the split
+    // (and named in the export list above, computed from this SAME set).
+    for eff in &row_dependent {
+        eff.type_defs.iter().for_each(|td| {
+            out.push_str(td);
+            out.push('\n');
+        });
+        out.push_str(&format!(
+            "data {}{} a where\n",
+            eff.type_name,
+            eff.type_params
+                .iter()
+                .map(|p| format!(" {p}"))
+                .collect::<String>()
+        ));
+        eff.constructors.iter().for_each(|ctor| {
+            out.push_str(&format!("  {}\n", ctor));
+        });
+        out.push('\n');
+        for h in eff.helpers {
+            out.push_str(h);
+            out.push('\n');
+        }
+    }
+
+    // Type alias so helpers can write `M a` instead of `Eff '[Console, KV, Fs] a`.
+    if !row_effects.is_empty() {
+        out.push_str(&format!("type M = Eff {}\n", row_type(row_effects, row)));
+        // A throwaway value binding that forces `M` (hence the whole applied
+        // row, including a pinned `Finalize <T>`'s answer type) to resolve —
+        // the probe target `tidepool-harness::engine::validate_finalize_row`
+        // extracts to catch an unresolved row application HERE rather than as
+        // a confusing cascade in whatever turn module happens to import this
+        // shim (see that function's doc). Never called; dead by construction.
+        out.push_str("__shimProbe :: M ()\n__shimProbe = pure ()\n");
+    }
+    out
 }
 
 /// Does eval source splice a tidepool quasi-quoter? Exact token match:
@@ -1064,34 +1178,44 @@ mod tests {
     /// is APPLIED — to the hole's answer type when the compile supplies one, to
     /// the uninhabited `NoAnswer` when it doesn't. `Member (Finalize T)` is then
     /// the whole pin: no shim, no hiding, no per-compile symbol manipulation.
+    /// The GADT itself lives in the STABLE Core text — only `type M` (the
+    /// shim) instantiates it per row.
     #[test]
     fn finalize_row_entry_is_applied_to_its_answer_type() {
         let decls = vec![crate::askuser_decl(), crate::finalize_decl()];
 
-        // No contract: the row names the uninhabited default, so a turn that
-        // isn't answering a typed hole simply cannot finalize.
-        let src = effects_module_source(&decls);
-        assert!(src.contains("data Finalize v a where"), "{src}");
+        let core = effects_core_module_source(&decls);
         assert!(
-            src.contains("FinalizeWith :: Int -> v -> Finalize v a"),
-            "{src}"
+            core.contains("module Tidepool.Effects.Core where"),
+            "{core}"
         );
-        assert!(src.contains("data NoAnswer"), "{src}");
+        assert!(core.contains("data Finalize v a where"), "{core}");
         assert!(
-            src.contains("type M = Eff '[AskUser, Finalize NoAnswer]"),
-            "{src}"
+            core.contains("FinalizeWith :: Int -> v -> Finalize v a"),
+            "{core}"
         );
+        assert!(core.contains("data NoAnswer"), "{core}");
         assert!(
-            src.contains(
+            core.contains(
                 "finalize :: forall v a effs. Member (Finalize v) effs => v -> Eff effs a"
             ),
-            "{src}"
+            "{core}"
+        );
+        // Core never mentions `type M` — that's the shim's whole reason to exist.
+        assert!(!core.contains("type M"), "{core}");
+
+        // No contract: the shim's row names the uninhabited default, so a turn
+        // that isn't answering a typed hole simply cannot finalize.
+        let shim = effects_shim_module_source(&decls, &crate::RowArgs::default());
+        assert!(
+            shim.contains("type M = Eff '[AskUser, Finalize NoAnswer]"),
+            "{shim}"
         );
 
         // With a contract: the row is instantiated at the answer type, and the
-        // generated module imports the author module that defines it.
+        // shim imports the author module that defines it — Core is untouched.
         let row = crate::RowArgs::at("Finalize", ["Decision"]).importing(["HarnessTypes"]);
-        let pinned = effects_module_source_at(&decls, &row);
+        let pinned = effects_shim_module_source(&decls, &row);
         assert!(
             pinned.contains("type M = Eff '[AskUser, Finalize Decision]"),
             "{pinned}"
@@ -1102,10 +1226,12 @@ mod tests {
             "'[AskUser, Finalize Decision]"
         );
 
-        // Two answer types must not share a generated module (hence not a
-        // staging dir either — it is content-addressed on this source).
+        // Two answer types must not share a generated SHIM (hence not a
+        // staging dir either — it is content-addressed on this source) — but
+        // DO share the identical Core text, since neither touches vocabulary.
         let other = crate::RowArgs::at("Finalize", ["Contribution"]).importing(["HarnessTypes"]);
-        assert_ne!(pinned, effects_module_source_at(&decls, &other));
+        assert_ne!(pinned, effects_shim_module_source(&decls, &other));
+        assert_eq!(core, effects_core_module_source(&decls));
     }
 
     /// A row entry stays ONE element: a function or applied answer type is
@@ -1120,86 +1246,43 @@ mod tests {
         );
     }
 
-    /// THE vocabulary/row split (extract-wave item 0b): `RunLLMTurn` can be
-    /// NAMEABLE (GADT + `Member`-polymorphic helper emitted) in a compile
-    /// whose ROW is the narrow answerer stack `[AskUser, Finalize]` — while
-    /// `type M` stays built from the row alone, unchanged. This is the
-    /// generator-level twin of `tidepool-harness`'s
-    /// `run_llm_turn_is_a_member_error_not_a_scope_error_in_the_answerer_stack`
-    /// (a real GHC compile) — this test is the pure, fast-tier half.
+    /// A vocabulary-only PARAMETERIZED effect (`Finalize`, not in the row at
+    /// all here) still gets a fully generic GADT + `Member`-polymorphic
+    /// `finalize` in Core — nameable everywhere, executable only where its row
+    /// entry actually appears (a comprehensible unsolved-`Member` error
+    /// elsewhere). This generalizes the old RunLLMTurn-only "nameable
+    /// everywhere" carve-out to every vocabulary effect, since Core no longer
+    /// has a row-closed-helper hazard to protect against (every helper is
+    /// Member-polymorphic by construction — see `effects_core_module_source`'s
+    /// own assertion).
     #[test]
-    fn vocab_widens_nameability_without_widening_the_row() {
-        let row_decls = vec![crate::askuser_decl(), crate::finalize_decl()];
-        let mut vocab_decls = row_decls.clone();
-        vocab_decls.push(crate::runllmturn_decl());
-
-        let src =
-            effects_module_source_with_vocab(&row_decls, &vocab_decls, &crate::RowArgs::default());
-
-        // RunLLMTurn is NAMEABLE: its GADT and Member-polymorphic helper are
-        // emitted...
-        assert!(src.contains("data RunLLMTurn a where"), "{src}");
-        assert!(src.contains("RunLLMTurnWith ::"), "{src}");
+    fn vocab_only_parameterized_effect_is_generic_and_nameable() {
+        let vocab = vec![crate::askuser_decl(), crate::finalize_decl()];
+        let core = effects_core_module_source(&vocab);
+        assert!(core.contains("data Finalize v a where"), "{core}");
         assert!(
-            src.contains(
-                "runLLMTurn :: forall a effs. Member RunLLMTurn effs => Text -> Eff effs a"
+            core.contains(
+                "finalize :: forall v a effs. Member (Finalize v) effs => v -> Eff effs a"
             ),
-            "{src}"
+            "{core}"
         );
-        // ...but `type M` is built from the ROW alone — unchanged from the
-        // narrow answerer row, RunLLMTurn absent. This is the check that
-        // capability rows stay separate: nameable ≠ in the row.
-        assert!(
-            src.contains("type M = Eff '[AskUser, Finalize NoAnswer]"),
-            "{src}"
-        );
+
+        // A shim whose OWN row omits Finalize entirely still resolves `finalize`
+        // as a name (it's in Core) — only `Member (Finalize v) effs` fails to
+        // solve, which is a GHC compile concern this pure test doesn't reach;
+        // `tidepool-harness/tests/agent_stack_scoping.rs` is the real-compile
+        // proof of that half.
+        let shim = effects_shim_module_source(&[crate::askuser_decl()], &crate::RowArgs::default());
+        assert!(shim.contains("type M = Eff '[AskUser]"), "{shim}");
     }
 
-    /// For a row that already contains `RunLLMTurn`, unioning it into the
-    /// vocabulary again is a NO-OP: dedup by `type_name` collapses the
-    /// duplicate, and the generated source is byte-identical to the
-    /// unwidened path. This is the case every existing compile (the outer
-    /// harness session, a general Agent turn) hits — widening the vocabulary
-    /// must cost them nothing.
+    /// Dedup by `type_name`: the same effect listed twice in the vocabulary
+    /// renders its GADT exactly once.
     #[test]
-    fn vocab_already_containing_the_effect_is_byte_identical() {
-        let decls = standard_decls(); // already carries RunLLMTurn (WS-B)
-        let row = crate::RowArgs::default();
-        let mut widened_vocab = decls.clone();
-        widened_vocab.push(crate::runllmturn_decl()); // naive duplicate union
-
-        let base = effects_module_source_at(&decls, &row);
-        let widened = effects_module_source_with_vocab(&decls, &widened_vocab, &row);
-        assert_eq!(
-            base, widened,
-            "a row that already contains the widened effect must render \
-             byte-identical source regardless of vocabulary widening"
-        );
-    }
-
-    /// The vocabulary must be a superset of the row — a loud panic, not a
-    /// silently narrowed/widened row, when a row effect has no vocabulary
-    /// entry to supply its GADT.
-    #[test]
-    #[should_panic(expected = "superset of the row")]
-    fn vocab_must_be_a_superset_of_the_row() {
-        let row_decls = vec![crate::finalize_decl()];
-        let vocab_decls: Vec<crate::EffectDecl> = vec![]; // missing Finalize
-        let _ =
-            effects_module_source_with_vocab(&row_decls, &vocab_decls, &crate::RowArgs::default());
-    }
-
-    /// A vocabulary-only PARAMETERIZED effect (`Finalize`, `type_params
-    /// ["v"]`) has no well-defined spelling outside a row application — reject
-    /// it loudly at construction rather than emit a GADT head that can't be
-    /// applied to anything.
-    #[test]
-    #[should_panic(expected = "parameterized")]
-    fn vocab_only_parameterized_effect_is_rejected() {
-        let row_decls = vec![crate::askuser_decl()];
-        let vocab_decls = vec![crate::askuser_decl(), crate::finalize_decl()];
-        let _ =
-            effects_module_source_with_vocab(&row_decls, &vocab_decls, &crate::RowArgs::default());
+    fn core_dedups_vocabulary_by_type_name() {
+        let vocab = vec![crate::askuser_decl(), crate::askuser_decl()];
+        let core = effects_core_module_source(&vocab);
+        assert_eq!(core.matches("data AskUser a where").count(), 1, "{core}");
     }
 
     #[test]
@@ -1435,11 +1518,12 @@ mod tests {
             user_lib_dir.join("Library.hs").exists(),
             ".tidepool/lib/Library.hs not found"
         );
-        let effects_dir = crate::ensure_effects_module(&decls).expect("write effects module");
+        let effects_dirs = crate::ensure_effects_module(&decls).expect("write effects module");
         let include = [
             prelude_dir.as_path(),
             user_lib_dir.as_path(),
-            effects_dir.as_path(),
+            effects_dirs.core.as_path(),
+            effects_dirs.shim.as_path(),
         ];
 
         let err = tidepool_runtime::compile_haskell(&source, "result", &include)

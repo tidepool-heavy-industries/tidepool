@@ -49,7 +49,9 @@ fn wrapped_source(code: &str) -> (String, Vec<std::path::PathBuf>) {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
     let hs = root.join("haskell/lib");
     let lib = root.join(".tidepool/lib");
-    (src, vec![hs, lib, effects_dir])
+    let mut include = vec![hs, lib];
+    include.extend(effects_dir.include_paths());
+    (src, include)
 }
 
 fn test_engine() -> SessionEngine<TestSink> {

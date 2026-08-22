@@ -46,7 +46,7 @@
 
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
@@ -1416,15 +1416,27 @@ pub struct EngineConfig {
     /// The project-lib dir this config was built from, if any (see
     /// `prelude_dir`'s doc).
     pub project_lib: Option<PathBuf>,
-    /// The config's own default effects-module dir (the entry
+    /// The config's own default effects-module SHIM dir (the entry
     /// [`Self::from_decls`] pushed into [`Self::include`], at the config's
-    /// default row). Tracked separately — not just "the last entry of
-    /// `include`" — because callers routinely append MORE dirs to `include`
-    /// after construction (a project source dir, `examples/harness` in
-    /// tests): [`Self::turn_target`] finds and replaces THIS specific entry
-    /// for a pinned turn, so it stays correct regardless of what else got
-    /// appended later.
+    /// default row) — `Tidepool/Effects.hs` + `Tidepool/Orchestrate.hs`.
+    /// Tracked separately — not just "the last entry of `include`" — because
+    /// callers routinely append MORE dirs to `include` after construction (a
+    /// project source dir, `examples/harness` in tests): [`Self::turn_target`]
+    /// finds and replaces THIS specific entry for a pinned turn, so it stays
+    /// correct regardless of what else got appended later.
+    ///
+    /// Distinct from [`Self::core_dir`] (the STABLE `Tidepool.Effects.Core`
+    /// dir, vocabulary-keyed): only the shim changes per pinned turn — Core
+    /// never needs finding-and-replacing, because its content never depends
+    /// on a hole's answer type.
     effects_dir: PathBuf,
+    /// The config's stable effects-VOCABULARY dir — `Tidepool/Effects/Core.hs`,
+    /// content-addressed on [`Self::decls`] (+ `RunLLMTurn`, via
+    /// [`vocab_with_runllmturn`]) ALONE. Pushed into [`Self::include`] once, at
+    /// construction, and never swapped by [`Self::turn_target`] — every pinned
+    /// `Finalize <T>` turn this config ever compiles shares this SAME dir, so
+    /// `Console`/`KV`/`Finalize`/… stay one stable tycon across every window.
+    core_dir: PathBuf,
     /// Per-CHILD turn cap for a `runLLMTurnFanout` answerer: each of the N
     /// children gets this budget independently, so one
     /// pathological child can't consume the whole node's turn allowance the
@@ -1579,6 +1591,7 @@ impl EngineConfig {
             prelude_dir: PathBuf::from("."),
             project_lib: None,
             effects_dir: PathBuf::from("."),
+            core_dir: PathBuf::from("."),
             max_child_turns: 1,
             context_window_tokens: None,
             delegate_wrap: false,
@@ -1614,7 +1627,7 @@ impl EngineConfig {
             .unwrap_or(decls.len()) as u64;
         let effect_names = decls.iter().map(|d| d.type_name.to_string()).collect();
         let vocab = vocab_with_runllmturn(&decls);
-        let effects_dir = tidepool_mcp::ensure_effects_module_with_vocab(
+        let dirs = tidepool_mcp::ensure_effects_module_with_vocab(
             &decls,
             &vocab,
             &tidepool_mcp::RowArgs::default(),
@@ -1624,7 +1637,8 @@ impl EngineConfig {
         if let Some(lib) = &project_lib {
             include.push(lib.clone());
         }
-        include.push(effects_dir.clone());
+        include.push(dirs.core.clone());
+        include.push(dirs.shim.clone());
         let extract_bin = tidepool_runtime::toolchain::extract_command_name()
             .map_err(|e| EngineError::Setup(format!("resolve extract binary: {e}")))?;
         Ok(EngineConfig {
@@ -1635,7 +1649,8 @@ impl EngineConfig {
             suspend_tag,
             prelude_dir,
             project_lib,
-            effects_dir,
+            effects_dir: dirs.shim,
+            core_dir: dirs.core,
             max_child_turns: 4,
             context_window_tokens: Some(DEFAULT_CONTEXT_WINDOW_TOKENS),
             delegate_wrap: false,
@@ -1688,6 +1703,17 @@ impl EngineConfig {
         tidepool_mcp::build_effect_stack_type(&self.decls)
     }
 
+    /// This config's stable `Tidepool.Effects.Core` dir — the same one for
+    /// every turn this config ever compiles, regardless of which `Finalize`
+    /// hole [`Self::turn_target`] pins. Exposed for a caller that wants to
+    /// assert cross-turn/cross-window Core stability directly (e.g. an
+    /// acceptance test comparing this path across two `EngineConfig`s built
+    /// from the same decls).
+    #[must_use]
+    pub fn core_dir(&self) -> &Path {
+        &self.core_dir
+    }
+
     /// Resolve ONE turn's compile target: the include search path and the
     /// promoted effect-row string it must be compiled against — both derived
     /// from the SAME [`tidepool_mcp::RowArgs`], so they cannot name different
@@ -1696,7 +1722,7 @@ impl EngineConfig {
     /// `finalize`, when `Some((ty, imports))`, instantiates the row's
     /// `Finalize` entry at `ty` (the hole's answer type) — importing
     /// `imports` (the author modules that define it) — and materializes ITS
-    /// OWN effects-module dir via [`tidepool_mcp::ensure_effects_module_at`],
+    /// OWN shim dir via [`tidepool_mcp::ensure_effects_shim_module`],
     /// swapping it in for [`Self::effects_dir`] wherever it sits in
     /// [`Self::include`] (found by VALUE, not by position — a caller may have
     /// appended more dirs after construction, e.g. a project source dir).
@@ -1707,12 +1733,17 @@ impl EngineConfig {
     /// `None` keeps the config's own default row (`Finalize NoAnswer`) and
     /// `include` unchanged — the shape every turn that isn't answering a
     /// typed hole compiles against.
-    /// The include set MINUS the generated effects-module dir — the shared
-    /// decl plane's VALIDATION context (one-session living structure): a
-    /// model-authored declaration that names the effect surface (imports
-    /// `Tidepool.Effects`/`Tidepool.Form`/... or uses `M`) fails validation
-    /// with an ordinary GHC error instead of poisoning later turns of a
-    /// different row. Structural pure-decls guard — no import scanner.
+    ///
+    /// The include set MINUS the generated effects-module SHIM dir — the
+    /// shared decl plane's VALIDATION context (one-session living structure).
+    /// The STABLE `Tidepool.Effects.Core` dir stays IN this set (stable-
+    /// effects-core): a model-authored declaration naming an effect surface
+    /// via `Member <Eff> effs => ... -> Eff effs T` now validates and
+    /// persists, because Core's tycons are the same ones every later turn's
+    /// compile sees. A declaration that instead spells the per-window `M`
+    /// alias or `import Tidepool.Effects` (the shim, not Core) still fails
+    /// validation with an ordinary "not in scope" GHC error — the narrowed
+    /// structural guard, not an import scanner.
     pub fn validation_include(&self) -> Vec<PathBuf> {
         self.include
             .iter()
@@ -1732,13 +1763,15 @@ impl EngineConfig {
             });
         };
         let row = tidepool_mcp::RowArgs::at("Finalize", [ty]).importing(imports.iter().cloned());
-        let vocab = vocab_with_runllmturn(&self.decls);
-        let effects_dir = tidepool_mcp::ensure_effects_module_with_vocab(&self.decls, &vocab, &row)
+        // Only the SHIM depends on `row` (the applied `Finalize <ty>` and its
+        // import) — the stable Core dir is untouched and stays wherever
+        // `from_decls` already put it in `include`, so it is never found-and-
+        // replaced here the way `effects_dir` is below.
+        let effects_dir = tidepool_mcp::ensure_effects_shim_module(&self.decls, &row)
             .map_err(|e| EngineError::Setup(format!("materialize effects module: {e}")))?;
         validate_finalize_row(
             &self.extract_bin,
             &self.decls,
-            &vocab,
             &row,
             &self.validation_include(),
         )?;
@@ -1794,11 +1827,15 @@ fn finalize_probe_memo() -> &'static Mutex<HashMap<u64, Result<(), String>>> {
 fn validate_finalize_row(
     extract_bin: &ResolvedExtractBin,
     decls: &[tidepool_mcp::EffectDecl],
-    vocab: &[tidepool_mcp::EffectDecl],
     row: &tidepool_mcp::RowArgs,
     include: &[PathBuf],
 ) -> Result<(), EngineError> {
-    let generated = tidepool_mcp::effects_module_source_with_vocab(decls, vocab, row);
+    // Only the SHIM needs probing: it is the one place a pinned row's applied
+    // type (`Finalize Decision`) is spelled, in `type M`. The stable Core
+    // module is a pure function of the vocabulary alone and never mentions a
+    // per-turn answer type, so it cannot be the source of an unresolved-type
+    // failure this probe exists to catch early.
+    let generated = tidepool_mcp::effects_shim_module_source(decls, row);
 
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     generated.hash(&mut hasher);
@@ -1808,20 +1845,37 @@ fn validate_finalize_row(
         return cached.clone().map_err(EngineError::Setup);
     }
 
-    const HEADER: &str = "module Tidepool.Effects where\n";
-    let probe_source = generated.replacen(HEADER, "module Expr where\n", 1);
-    debug_assert_ne!(
-        probe_source, generated,
-        "effects module source must open with `{HEADER}`"
+    const HEADER_PREFIX: &str = "module Tidepool.Effects (";
+    const HEADER_SUFFIX: &str = ") where\n";
+    let Some(prefix_pos) = generated.find(HEADER_PREFIX) else {
+        return Err(EngineError::Setup(format!(
+            "shim module source must contain `{HEADER_PREFIX}...{HEADER_SUFFIX}` — got:\n{generated}"
+        )));
+    };
+    let Some(suffix_rel) = generated[prefix_pos..].find(HEADER_SUFFIX) else {
+        return Err(EngineError::Setup(format!(
+            "shim module source's `{HEADER_PREFIX}` header has no closing `{HEADER_SUFFIX}` — got:\n{generated}"
+        )));
+    };
+    let header_end = prefix_pos + suffix_rel + HEADER_SUFFIX.len();
+    // Keep the PRAGMA preamble before the header (NoImplicitPrelude etc. —
+    // needed for the probe to compile identically to the real shim) AND
+    // everything after it (imports, `type M`, `__shimProbe`); only the
+    // module-header LINE itself is replaced, exactly as the old single-line
+    // `HEADER` swap did.
+    let probe_source = format!(
+        "{}module Expr where\n{}",
+        &generated[..prefix_pos],
+        &generated[header_end..]
     );
 
-    // `error` is emitted unconditionally by `effects_module_source_with_vocab`
-    // regardless of `row`/`vocab`, so it's always a valid probe target — GHC
-    // typechecks the WHOLE module (including `type M`) to elaborate it,
-    // target choice doesn't matter beyond "some real binder".
+    // `__shimProbe :: M ()` is emitted unconditionally alongside `type M`
+    // (see `effects_shim_module_source`) so GHC must elaborate the whole
+    // applied row — including a pinned `Finalize <T>` answer type — to
+    // typecheck it; target choice doesn't matter beyond "some real binder".
     let outcome = match compile_targets(
         &probe_source,
-        &["error"],
+        &["__shimProbe"],
         include,
         Some(extract_bin),
         |_, _, _| {},

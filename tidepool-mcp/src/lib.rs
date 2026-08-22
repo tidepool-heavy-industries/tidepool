@@ -202,125 +202,258 @@ pub struct HelpRequest {
 // Templating
 // ---------------------------------------------------------------------------
 
-/// Write the generated `Tidepool/Effects.hs` + `Tidepool/Orchestrate.hs` into a
-/// content-addressed directory and return that directory (an include root).
-/// Idempotent: the path is keyed on both module sources, so distinct effect
-/// stacks coexist and repeat startups reuse the same dir. Re-callable per eval
-/// (see [`write_generated_modules`]) to self-heal if the dir is reaped.
-pub fn ensure_effects_module(effects: &[EffectDecl]) -> std::io::Result<PathBuf> {
+/// The two include roots a compile needs to see the whole effect surface —
+/// returned together because they are cache-addressed SEPARATELY and both
+/// must be on the include path (GHC resolves `Tidepool.Effects`'s `import
+/// Tidepool.Effects.Core` against the `core` root).
+///
+/// **`core` is the stable half**: content-addressed on the effect VOCABULARY
+/// alone, so every window/turn that shares a vocabulary (the general Agent
+/// stack, the self-iterating harness's answerer stack, …) resolves to the
+/// SAME dir — no recompiling every effect GADT + helper per window, and no
+/// tycon churn for a value that mentions one (see
+/// `haskell/src/Tidepool/Translate.hs`'s narrowed `typeMentionsEffectMonad`).
+///
+/// **`shim` is the per-window half**: content-addressed on the ROW (which
+/// effects are actually in `type M`) and any [`RowArgs`] type application —
+/// small, and it is the only dir that changes when e.g. a `Finalize` hole's
+/// answer type changes between windows.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EffectsModuleDirs {
+    /// Include root holding `Tidepool/Effects/Core.hs` — vocabulary-keyed.
+    pub core: PathBuf,
+    /// Include root holding `Tidepool/Effects.hs` (the shim) and
+    /// `Tidepool/Orchestrate.hs` — row-keyed.
+    pub shim: PathBuf,
+}
+
+impl EffectsModuleDirs {
+    /// Both roots, in the order a GHC include-path search would want them
+    /// (core first: the shim's `import Tidepool.Effects.Core` resolves
+    /// against it, though GHC's own search order does not actually require
+    /// this — listed core-first purely for readability at call sites).
+    #[must_use]
+    pub fn include_paths(&self) -> [PathBuf; 2] {
+        [self.core.clone(), self.shim.clone()]
+    }
+}
+
+/// Write the generated `Tidepool/Effects/Core.hs` (vocabulary-keyed) and
+/// `Tidepool/Effects.hs` + `Tidepool/Orchestrate.hs` (row-keyed) into their two
+/// content-addressed directories and return both (see [`EffectsModuleDirs`]).
+/// Idempotent: each path is keyed on its own module source(s), so distinct
+/// vocabularies/rows coexist and repeat startups reuse the same dirs.
+/// Re-callable per eval (see [`write_core_module`]/[`write_shim_module`]) to
+/// self-heal if a dir is reaped.
+pub fn ensure_effects_module(effects: &[EffectDecl]) -> std::io::Result<EffectsModuleDirs> {
     ensure_effects_module_at(effects, &RowArgs::default())
 }
 
 /// [`ensure_effects_module`] with the row's parameterized effects applied to
 /// explicit type arguments (the harness's per-hole `Finalize <answer type>`).
-/// The staging dir stays content-addressed on the generated SOURCE, and the
-/// applied types + their imports are part of that source — so two answer types
-/// get two dirs, and neither can be served the other's module.
+/// The shim dir stays content-addressed on ITS generated source (which
+/// includes the applied types + their imports) — so two answer types get two
+/// shim dirs, and neither can be served the other's module — while the core
+/// dir stays whatever this same `effects` vocabulary always resolves to.
 ///
-/// The dir holds SOURCE ONLY (no `.hi`/`.o`), and a harness turn compile is
+/// Both dirs hold SOURCE ONLY (no `.hi`/`.o`), and a harness turn compile is
 /// uncached, so an edit to an author module named in `row` is picked up on the
 /// next compile: there is no compiled artifact for its hash to have to cover.
-pub fn ensure_effects_module_at(effects: &[EffectDecl], row: &RowArgs) -> std::io::Result<PathBuf> {
+pub fn ensure_effects_module_at(
+    effects: &[EffectDecl],
+    row: &RowArgs,
+) -> std::io::Result<EffectsModuleDirs> {
     ensure_effects_module_with_vocab(effects, effects, row)
 }
 
-/// [`ensure_effects_module_at`] with the effect VOCABULARY split from the ROW
-/// — see [`effects_module_source_with_vocab`] for the mechanism (extract-wave
-/// item 0b). `type M` (via `effects_module_source_with_vocab`) and the
-/// orchestrate module's `Exec`/`Http`-gated imports both key on `row_effects`
-/// alone; `vocab_effects` (a superset) only controls what gets a GADT +
-/// `type_defs` in the generated `Tidepool.Effects`. The staging dir is
-/// content-addressed on the combined source, so a widened vocabulary gets its
-/// own dir — a narrow-row compile that doesn't widen (`vocab_effects ==
-/// row_effects`) reuses exactly the dir it always has.
+/// [`ensure_effects_module_at`] with the effect VOCABULARY (what's nameable —
+/// gets a GADT + `type_defs` emitted into the stable Core module) split from
+/// the effect ROW (`row_effects` — what's IN `type M`, i.e. actually
+/// executable via `Member`). This is the mechanism behind "effect vocabulary
+/// available in scope ≠ effects present in M's row" (extract-wave item 0b,
+/// generalized by stable-effects-core to every vocabulary effect, not just
+/// `RunLLMTurn`): a name can be IN SCOPE (compiles, resolves, has a real GADT
+/// constructor) without being IN THE ROW (a `Member` constraint at its call
+/// site is then unsolved — a comprehensible type error, not "not in scope").
+///
+/// **`vocab_effects` must be a SUPERSET of `row_effects`** (matched by
+/// `type_name`) — a loud panic, not a silently-widened row, if it isn't: a
+/// row effect with no vocabulary entry would have no GADT in Core to compile
+/// `type M` against at all.
+///
+/// **A [`ROW_DEPENDENT_EFFECTS`] vocab effect (e.g. `Green`) must ALSO be in
+/// `row_effects`** — a loud panic, not a silent drop, if it isn't:
+/// [`effects_core_module_source`] excludes such an effect from Core entirely
+/// (it cannot typecheck there, having no `M`), and only
+/// [`effects_shim_module_source`] picks it up again, keyed on `row_effects`
+/// alone — a vocab-only row-dependent effect would simply vanish from the
+/// generated surface with no error at all.
 pub fn ensure_effects_module_with_vocab(
     row_effects: &[EffectDecl],
     vocab_effects: &[EffectDecl],
     row: &RowArgs,
+) -> std::io::Result<EffectsModuleDirs> {
+    for v in vocab_effects {
+        assert!(
+            !is_row_dependent_effect(v.type_name)
+                || row_effects.iter().any(|r| r.type_name == v.type_name),
+            "`{}` is row-dependent (ROW_DEPENDENT_EFFECTS) but is only in the \
+             vocabulary, not the row — it would be silently excluded from both \
+             Core and the shim; add it to `row_effects` too",
+            v.type_name
+        );
+    }
+    for r in row_effects {
+        assert!(
+            vocab_effects.iter().any(|v| v.type_name == r.type_name),
+            "effect vocabulary must be a superset of the row: `{}` is in the \
+             row but not in the vocabulary",
+            r.type_name
+        );
+    }
+    let core = ensure_effects_core_module(vocab_effects)?;
+    let shim = ensure_effects_shim_module(row_effects, row)?;
+    Ok(EffectsModuleDirs { core, shim })
+}
+
+/// Write the stable `Tidepool/Effects/Core.hs` module (a pure function of
+/// `vocab_effects` alone) into its own content-addressed dir and return it.
+/// Separate from [`ensure_effects_module_with_vocab`]'s shim/orchestrate
+/// write so the decl plane (which needs Core on its include path but NEVER
+/// the per-window shim — see `tidepool-mcp/CLAUDE.md`) can materialize it
+/// without also minting a throwaway row-keyed dir.
+pub fn ensure_effects_core_module(vocab_effects: &[EffectDecl]) -> std::io::Result<PathBuf> {
+    write_core_module(&effects_core_module_source(vocab_effects))
+}
+
+/// Like [`ensure_effects_core_module`] but takes the already-rendered source
+/// text directly — the self-heal path (a server holding onto its own
+/// generated sources to re-materialize them if the staging dir is reaped)
+/// calls this instead of re-deriving the text from `vocab_effects` each time.
+pub fn write_core_module(core_src: &str) -> std::io::Result<PathBuf> {
+    write_module_dir("tidepool-effects-core", &[("Effects/Core.hs", core_src)])
+}
+
+/// Write just the per-window shim (`Tidepool/Effects.hs` +
+/// `Tidepool/Orchestrate.hs`) into its own content-addressed dir and return
+/// it, WITHOUT touching Core. For a caller that already holds a stable Core
+/// dir (e.g. re-pinning a `Finalize <T>` row every round of the same
+/// answerer hole) and only needs to re-materialize the small per-row half —
+/// [`ensure_effects_module_with_vocab`] would also recompute (a cheap,
+/// content-addressed cache hit, but still a hash + lock) Core's dir every
+/// call, which this skips entirely.
+pub fn ensure_effects_shim_module(
+    row_effects: &[EffectDecl],
+    row: &RowArgs,
 ) -> std::io::Result<PathBuf> {
-    write_generated_modules(
-        &effects_module_source_with_vocab(row_effects, vocab_effects, row),
+    write_shim_module(
+        &effects_shim_module_source(row_effects, row),
         &orchestrate_module_source(row_effects),
     )
 }
 
-/// Process-level write-through cache for the content-addressed effects-module
-/// directories. Keyed on the FNV-1a hash of the combined `Effects.hs` +
-/// `Orchestrate.hs` sources.
+/// Like [`ensure_effects_shim_module`] but takes the already-rendered source
+/// texts directly — the self-heal path calls this instead of re-deriving them
+/// from `row_effects`/`row` each time.
+pub fn write_shim_module(shim_src: &str, orchestrate_src: &str) -> std::io::Result<PathBuf> {
+    write_module_dir(
+        "tidepool-effects",
+        &[
+            ("Effects.hs", shim_src),
+            ("Orchestrate.hs", orchestrate_src),
+        ],
+    )
+}
+
+/// Process-level write-through cache for the content-addressed generated-module
+/// directories, keyed on `(dir prefix, content hash)` — the prefix keeps the
+/// core dir's cache entries from colliding with the shim dir's (or any future
+/// caller's) even on a coincidental hash match across independent content.
 ///
 /// Serializes concurrent writes within one process: the first call for a given
-/// hash acquires the lock and writes BOTH modules; concurrent callers block
-/// until BOTH are on disk, then get the cached path. This closes the TOCTOU
-/// window where a caller could see Effects.hs but not Orchestrate.hs and
+/// key acquires the lock and writes every file; concurrent callers block until
+/// ALL of them are on disk, then get the cached path. This closes the TOCTOU
+/// window where a caller could see one generated file but not a sibling and
 /// compute a fingerprint / call GHC against an incomplete staging dir.
 /// Inter-process safety (multiple `cargo test` binaries) is handled by the
 /// atomic-rename primitive inside [`write_module_file`].
-fn effects_write_cache() -> &'static Mutex<std::collections::HashMap<String, PathBuf>> {
+fn generated_module_write_cache(
+) -> &'static Mutex<std::collections::HashMap<(&'static str, String), PathBuf>> {
     use std::sync::OnceLock;
-    static CACHE: OnceLock<Mutex<std::collections::HashMap<String, PathBuf>>> = OnceLock::new();
+    static CACHE: OnceLock<Mutex<std::collections::HashMap<(&'static str, String), PathBuf>>> =
+        OnceLock::new();
     CACHE.get_or_init(|| Mutex::new(std::collections::HashMap::new()))
 }
 
-/// Materialize the generated `Tidepool.Effects` AND `Tidepool.Orchestrate`
-/// modules from pre-generated source strings, writing each into the SAME
-/// content-addressed staging dir if absent, and returning the dir (an include
-/// root). The dir hash covers BOTH sources, so a change to either busts the
-/// cache dir — co-location means every `ensure_effects_module` caller picks up
-/// the orchestrate module for free, no extra include path to thread through.
+/// Materialize a set of `(relative path under Tidepool/, source)` pairs into a
+/// SINGLE content-addressed staging dir if absent, and return the dir (an
+/// include root whose `Tidepool/` subtree holds every file). The dir hash
+/// covers every source TOGETHER, so a change to any one busts the whole dir —
+/// co-location means a caller that needs several files generated from the same
+/// inputs (e.g. the shim + orchestrate module, both keyed on the same row)
+/// gets them for free, no extra include path to thread through.
+///
+/// `dir_prefix` names the staging-dir family (`"tidepool-effects-core"`,
+/// `"tidepool-effects"`) — distinct callers get distinct dirs even if their
+/// content hashes happened to collide, and it is what a human sees first when
+/// listing the cache dir.
 ///
 /// Concurrent calls within the same process are serialized: only one caller
 /// writes the files at a time; others wait and reuse the cached result. This
-/// prevents parallel tests from racing on a partially-written staging dir
-/// (`effects_dir` present, `orchestrate_dir` absent → GHC sees incomplete
-/// include path). Inter-process races (parallel test binaries) are handled by
-/// the atomic-rename primitive inside [`write_module_file`].
+/// prevents parallel tests from racing on a partially-written staging dir.
+/// Inter-process races (parallel test binaries) are handled by the
+/// atomic-rename primitive inside [`write_module_file`].
 ///
 /// Self-heals if the staging dir is externally removed
 /// (`rm -rf ~/.cache/tidepool`): the cache entry is evicted and the files are
 /// re-materialized on the next call.
-pub(crate) fn write_generated_modules(
-    effects_src: &str,
-    orchestrate_src: &str,
+pub(crate) fn write_module_dir(
+    dir_prefix: &'static str,
+    files: &[(&str, &str)],
 ) -> std::io::Result<PathBuf> {
     // blake3, content-addressed and deterministic across processes (no
     // per-process SipHash seed like DefaultHasher, which would hash identical
     // source to different paths in each process → "Could not find module
     // Tidepool.Effects" when a second process picks a different cache dir
     // than the one that wrote it). Each source is its own length-framed
-    // field, so hashing them separately can never collide with hashing their
-    // concatenation.
-    let hash = content_hash_hex(&[effects_src.as_bytes(), orchestrate_src.as_bytes()]);
-    let root = tidepool_runtime::paths::effects_dir().join(format!("tidepool-effects-{hash}"));
+    // field (via `content_hash_hex`), so hashing them separately can never
+    // collide with hashing their concatenation.
+    let field_bytes: Vec<&[u8]> = files.iter().map(|(_, src)| src.as_bytes()).collect();
+    let hash = content_hash_hex(&field_bytes);
+    let root = tidepool_runtime::paths::effects_dir().join(format!("{dir_prefix}-{hash}"));
     let module_dir = root.join("Tidepool");
 
-    // Acquire the process-level serialization lock.  Concurrent callers (parallel
-    // test threads, concurrent eval requests) block here; the first to proceed
-    // writes BOTH files and stores the result; the rest take the fast path below.
-    let mut cache = effects_write_cache().lock();
+    // Acquire the process-level serialization lock. Concurrent callers
+    // (parallel test threads, concurrent eval requests) block here; the first
+    // to proceed writes every file and stores the result; the rest take the
+    // fast path below.
+    let mut cache = generated_module_write_cache().lock();
+    let key = (dir_prefix, hash.clone());
 
-    // Fast path: previously written this hash AND files still present.
-    if cache.contains_key(&hash) {
-        let effects_ok = module_dir.join("Effects.hs").exists();
-        let orchestrate_ok = module_dir.join("Orchestrate.hs").exists();
-        if effects_ok && orchestrate_ok {
+    // Fast path: previously written this key AND files still present.
+    if cache.contains_key(&key) {
+        if files.iter().all(|(rel, _)| module_dir.join(rel).exists()) {
             return Ok(root);
         }
-        // Files were externally removed.  Evict the stale entry and fall
+        // Files were externally removed. Evict the stale entry and fall
         // through to re-materialize while still holding the lock.
-        cache.remove(&hash);
+        cache.remove(&key);
     }
 
-    // Slow path: write both files (still under the lock so concurrent callers
+    // Slow path: write every file (still under the lock so concurrent callers
     // wait rather than racing into the same write sequence).
-    write_module_file(&module_dir, "Effects.hs", effects_src)?;
-    write_module_file(&module_dir, "Orchestrate.hs", orchestrate_src)?;
-    cache.insert(hash, root.clone());
+    for (rel, src) in files {
+        write_module_file(&module_dir, rel, src)?;
+    }
+    cache.insert(key, root.clone());
     Ok(root)
 }
 
-/// Atomically write `<module_dir>/<name>` with `src` if it does not already
+/// Atomically write `<module_dir>/<rel>` with `src` if it does not already
 /// exist (write to a temp file then rename, so a concurrent GHC process never
-/// sees a partial module — the rename is atomic on POSIX).
+/// sees a partial module — the rename is atomic on POSIX). `rel` may itself
+/// contain a directory separator (e.g. `"Effects/Core.hs"`), whose parent is
+/// created alongside `module_dir`.
 ///
 /// The temp filename is UNIQUE per writer (pid + monotonic counter): two
 /// processes/threads racing on the same fresh content-addressed dir must not
@@ -328,13 +461,23 @@ pub(crate) fn write_generated_modules(
 /// (the faster writer already renamed it) → spurious `NotFound`. The rename
 /// target is the same for all, and POSIX rename-onto-existing is atomic, so a
 /// double write just no-ops the loser.
-pub(crate) fn write_module_file(module_dir: &Path, name: &str, src: &str) -> std::io::Result<()> {
-    let module_path = module_dir.join(name);
+pub(crate) fn write_module_file(module_dir: &Path, rel: &str, src: &str) -> std::io::Result<()> {
+    let module_path = module_dir.join(rel);
     if !module_path.exists() {
-        std::fs::create_dir_all(module_dir)?;
+        let Some(parent) = module_path.parent() else {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("generated module path `{rel}` has no parent directory"),
+            ));
+        };
+        std::fs::create_dir_all(parent)?;
         static TMP_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let uniq = TMP_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let tmp_path = module_dir.join(format!("{name}.{}.{uniq}.tmp", std::process::id()));
+        let file_name = module_path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "generated".to_string());
+        let tmp_path = parent.join(format!("{file_name}.{}.{uniq}.tmp", std::process::id()));
         std::fs::write(&tmp_path, src)?;
         // rename overwrites an existing destination atomically; a concurrent
         // writer that already created `module_path` is harmless.
@@ -443,11 +586,14 @@ mod tests {
         assert_eq!(req.imports, "Data.List (sort)\nData.Char");
     }
 
-    /// Effects module + orchestrate module + preamble concatenated: content
-    /// assertions that predate the importable-module split check against the
-    /// union of all generated sources the eval sees.
+    /// Core module + shim module + orchestrate module + preamble concatenated:
+    /// content assertions that predate the importable-module split (and the
+    /// later Core/shim split) check against the union of all generated
+    /// sources the eval sees. NOT compilable as one file (two `module`
+    /// headers) — `.contains()` assertions only.
     fn generated_sources(effects: &[EffectDecl], user_library: bool) -> String {
-        let mut s = effects_module_source(effects);
+        let mut s = effects_core_module_source(effects);
+        s.push_str(&effects_shim_module_source(effects, &RowArgs::default()));
         s.push_str(&orchestrate_module_source(effects));
         s.push_str(&build_preamble(effects, user_library));
         s
@@ -610,7 +756,7 @@ mod tests {
         assert!(result.contains("import Control.Monad.Freer hiding (run)"));
         // GADTs live in the generated Tidepool.Effects module now.
         assert!(result.contains("import Tidepool.Effects"));
-        assert!(effects_module_source(&effects).contains("data Console a where"));
+        assert!(effects_core_module_source(&effects).contains("data Console a where"));
         // User code is a real top-level binding (expression-first contract).
         assert!(result.contains("__user = let {\n __b =\ndo\n  let x = 42\n  pure x\n } in __b"));
         assert!(result.contains("result :: Eff '[Console] Value"));
@@ -854,7 +1000,9 @@ data Console a where
         assert!(
             preamble.contains("insertAfter :: forall effs. Member Fs effs => FilePath -> Text -> Text -> Eff effs InsertAfterOutcome")
         );
-        assert!(preamble.contains("run :: Text -> M (Either ExecError Proc)"));
+        assert!(preamble.contains(
+            "run :: forall effs. Member Exec effs => Text -> Eff effs (Either ExecError Proc)"
+        ));
         // No old aliases (verb-type sweep: records over tuples, no dup names)
         assert!(!preamble.contains("fsRead"));
         assert!(!preamble.contains("fsWrite"));
@@ -952,7 +1100,9 @@ data Console a where
         let preamble = generated_sources(&decls, false);
         assert!(preamble.contains("import Control.Monad.Freer hiding (run)"));
         // Our run helper should still be present (#335: errors-tagged).
-        assert!(preamble.contains("run :: Text -> M (Either ExecError Proc)\nrun = send . Run"));
+        assert!(preamble.contains(
+            "run :: forall effs. Member Exec effs => Text -> Eff effs (Either ExecError Proc)\nrun = send . Run"
+        ));
     }
 
     #[test]
@@ -1012,7 +1162,7 @@ data Console a where
         // The structured Ask/Llm surface lives in the generated Tidepool.Effects
         // module — one Schema vocabulary, extract with optics. The Q-builder DSL
         // and the `??`/`?!`/triage/survey/sift sugar are removed.
-        let effects_mod = effects_module_source(&decls);
+        let effects_mod = effects_core_module_source(&decls);
         assert!(effects_mod.contains("data Schema = SObj"));
         assert!(effects_mod
             .contains("ask :: forall effs. Member Ask effs => Schema -> Text -> Eff effs Value"));
@@ -1041,7 +1191,7 @@ data Console a where
             .into_iter()
             .filter(|d| d.type_name != "Llm")
             .collect();
-        let no_llm_mod = effects_module_source(&no_llm);
+        let no_llm_mod = effects_core_module_source(&no_llm);
         assert!(no_llm_mod
             .contains("ask :: forall effs. Member Ask effs => Schema -> Text -> Eff effs Value"));
         // llm needs the Llm effect — absent from an Llm-less stack.
@@ -1267,8 +1417,8 @@ data Console a where
     fn test_effects_hash_is_deterministic_across_calls() {
         let eff = "module Tidepool.Effects where\n-- sentinel\n";
         let orch = "module Tidepool.Orchestrate where\n-- sentinel\n";
-        let dir1 = write_generated_modules(eff, orch).unwrap();
-        let dir2 = write_generated_modules(eff, orch).unwrap();
+        let dir1 = write_shim_module(eff, orch).unwrap();
+        let dir2 = write_shim_module(eff, orch).unwrap();
         assert_eq!(
             dir1, dir2,
             "same source must yield same content-addressed dir"
@@ -1283,8 +1433,7 @@ data Console a where
             "dir name must be the stable blake3 hash of both sources; got {dir_name}"
         );
         // A change to the orchestrate source alone busts the dir.
-        let dir3 =
-            write_generated_modules(eff, "module Tidepool.Orchestrate where\n-- other\n").unwrap();
+        let dir3 = write_shim_module(eff, "module Tidepool.Orchestrate where\n-- other\n").unwrap();
         assert_ne!(dir1, dir3, "orchestrate change must bust the dir");
         let _ = std::fs::remove_dir_all(&dir1);
         let _ = std::fs::remove_dir_all(&dir3);
@@ -1302,7 +1451,7 @@ data Console a where
             "module Tidepool.Orchestrate where\n-- probe {}\n",
             std::process::id()
         );
-        let dir = write_generated_modules(&eff, &orch).unwrap();
+        let dir = write_shim_module(&eff, &orch).unwrap();
         let module = dir.join("Tidepool").join("Effects.hs");
         let orch_module = dir.join("Tidepool").join("Orchestrate.hs");
         assert!(module.exists(), "effects module written on first call");
@@ -1322,7 +1471,7 @@ data Console a where
         std::fs::remove_dir_all(&dir).unwrap();
         assert!(!module.exists());
         // The per-eval self-heal recreates both at the same content-addressed path.
-        let dir2 = write_generated_modules(&eff, &orch).unwrap();
+        let dir2 = write_shim_module(&eff, &orch).unwrap();
         assert_eq!(dir, dir2, "content-addressed path is stable across calls");
         assert!(module.exists(), "effects self-healed after reap");
         assert!(orch_module.exists(), "orchestrate self-healed after reap");

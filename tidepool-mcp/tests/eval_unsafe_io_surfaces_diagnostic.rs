@@ -50,10 +50,10 @@ fn unsafe_io_import_fails_as_compile_diagnostic_not_a_crash() {
 
     let pp = prelude_dir();
     let ulp = user_lib_dir();
-    let eff = tidepool_mcp::ensure_effects_module(&decls)
-        .expect("write effects module")
-        .leak() as &Path;
-    let include = [pp, ulp.as_path(), eff];
+    let dirs = tidepool_mcp::ensure_effects_module(&decls).expect("write effects module");
+    let core = dirs.core.leak() as &Path;
+    let shim = dirs.shim.leak() as &Path;
+    let include = [pp, ulp.as_path(), core, shim];
 
     let mut dispatcher = MockDispatcher;
     let result = compile_and_run(&source, "result", &include, &mut dispatcher, &());

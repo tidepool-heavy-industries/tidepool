@@ -47,10 +47,10 @@ fn repro_spliton_full_mcp() {
     );
 
     let pp = prelude_dir();
-    let eff = tidepool_mcp::ensure_effects_module(&decls)
-        .expect("write effects module")
-        .leak() as &std::path::Path;
-    let include = [pp, ulp.as_path(), eff];
+    let dirs = tidepool_mcp::ensure_effects_module(&decls).expect("write effects module");
+    let core = dirs.core.leak() as &std::path::Path;
+    let shim = dirs.shim.leak() as &std::path::Path;
+    let include = [pp, ulp.as_path(), core, shim];
 
     let mut dispatcher = MockDispatcher;
     let result = compile_and_run(&source, "result", &include, &mut dispatcher, &());
@@ -80,10 +80,10 @@ fn repro_spliton_no_user_library() {
     let source = tidepool_mcp::template_haskell(&preamble, &stack, code, "", "", None, None);
 
     let pp = prelude_dir();
-    let eff = tidepool_mcp::ensure_effects_module(&decls)
-        .expect("write effects module")
-        .leak() as &std::path::Path;
-    let include = [pp, eff];
+    let dirs = tidepool_mcp::ensure_effects_module(&decls).expect("write effects module");
+    let core = dirs.core.leak() as &std::path::Path;
+    let shim = dirs.shim.leak() as &std::path::Path;
+    let include = [pp, core, shim];
 
     let mut dispatcher = MockDispatcher;
     let result = compile_and_run(&source, "result", &include, &mut dispatcher, &());

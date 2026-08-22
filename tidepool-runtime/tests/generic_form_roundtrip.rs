@@ -240,12 +240,14 @@ const FORM_HEADER: &str =
      import Tidepool.Form.GForm (formShape)\n\
      import Tidepool.Form.Wire (encodeShape)\n";
 
-/// The generated `Tidepool.Effects` module dir for a row carrying only
-/// `AskUser` — enough for `Tidepool.Form`'s own imports (`M`, `askUserRaw`,
-/// `noteRaw`) to resolve, without pulling in the full standard effect set.
-fn form_effects_dir() -> std::path::PathBuf {
+/// The generated `Tidepool.Effects.Core` + `Tidepool.Effects` module dirs for
+/// a row carrying only `AskUser` — enough for `Tidepool.Form`'s own imports
+/// (`M`, `askUserRaw`, `noteRaw`) to resolve, without pulling in the full
+/// standard effect set.
+fn form_effects_dirs() -> [std::path::PathBuf; 2] {
     tidepool_mcp::ensure_effects_module(&[tidepool_mcp::askuser_decl()])
         .expect("write Tidepool.Effects module for the AskUser-only row")
+        .include_paths()
 }
 
 /// Compile + run a module PURE on the JIT, with `Tidepool.Form` (and its
@@ -257,7 +259,7 @@ fn eval_form_result(body: &str) -> Option<serde_json::Value> {
     Some(
         EvalHarness::new()
             .with_stdlib()
-            .with_include(form_effects_dir())
+            .with_includes(form_effects_dirs())
             .run_pure(&src, "result")
             .expect("compile_and_run_pure failed")
             .to_json(),
@@ -353,7 +355,7 @@ fn field_with_unknown_label_is_rejected_at_compile_time() {
     );
     match EvalHarness::new()
         .with_stdlib()
-        .with_include(form_effects_dir())
+        .with_includes(form_effects_dirs())
         .compile(&src, "result")
     {
         Ok(_) => panic!("a #field naming no real field of the answer type must not compile"),

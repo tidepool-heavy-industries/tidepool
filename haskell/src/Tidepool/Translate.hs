@@ -3242,7 +3242,7 @@ data VerbSpec = VerbSpec
   , vsSitedModule :: String
     -- ^ Module the SIBLING is defined in. Usually 'vsModule', but not
     -- always: @fork@\/@forkAll@ are Tidepool.Fork's surface verbs while
-    -- their siblings are generated into Tidepool.Effects.
+    -- their siblings are generated into Tidepool.Effects.Core.
   , vsTypeArgs :: Int
     -- ^ How many leading @Type@ arguments a well-formed call site carries.
     -- The ANSWER type is always the first; see each row for what a second
@@ -3275,21 +3275,23 @@ data VerbSpec = VerbSpec
 sitedVerbs :: [VerbSpec]
 sitedVerbs =
   [ -- The RunLLMTurn effect's own surface verbs (ask_effect_def!'s helper
-    -- text, generated into Tidepool.Effects).
-    VerbSpec { vsName = "runLLMTurn", vsModule = "Tidepool.Effects"
-             , vsSitedName = "runLLMTurnSited", vsSitedModule = "Tidepool.Effects"
+    -- text, generated into Tidepool.Effects.Core — stable-effects-core: these
+    -- are ordinary row-polymorphic helpers, not row-dependent, so they live
+    -- in Core, not the per-window Tidepool.Effects shim).
+    VerbSpec { vsName = "runLLMTurn", vsModule = "Tidepool.Effects.Core"
+             , vsSitedName = "runLLMTurnSited", vsSitedModule = "Tidepool.Effects.Core"
              , vsTypeArgs = 1, vsValueArity = 1
              , vsCheckType = checkRunLLMTurnType
              , vsListAnswer = False, vsMisShapeIsError = False }
-  , VerbSpec { vsName = "runLLMTurnFork", vsModule = "Tidepool.Effects"
-             , vsSitedName = "runLLMTurnForkSited", vsSitedModule = "Tidepool.Effects"
+  , VerbSpec { vsName = "runLLMTurnFork", vsModule = "Tidepool.Effects.Core"
+             , vsSitedName = "runLLMTurnForkSited", vsSitedModule = "Tidepool.Effects.Core"
              , vsTypeArgs = 1, vsValueArity = 1
              , vsCheckType = checkRunLLMTurnType
              , vsListAnswer = False, vsMisShapeIsError = False }
     -- B1 widen. One `[Text]` prompts list in, N children each answering the
     -- per-child type `@T` — so the SITE answers `[T]` ('vsListAnswer').
-  , VerbSpec { vsName = "runLLMTurnFanout", vsModule = "Tidepool.Effects"
-             , vsSitedName = "runLLMTurnFanoutSited", vsSitedModule = "Tidepool.Effects"
+  , VerbSpec { vsName = "runLLMTurnFanout", vsModule = "Tidepool.Effects.Core"
+             , vsSitedName = "runLLMTurnFanoutSited", vsSitedModule = "Tidepool.Effects.Core"
              , vsTypeArgs = 1, vsValueArity = 1
              , vsCheckType = checkRunLLMTurnType
              , vsListAnswer = True, vsMisShapeIsError = False }
@@ -3300,8 +3302,8 @@ sitedVerbs =
     -- returned `ContextRef` half is fixed/known (never `unsafeCoerce`d in a
     -- way that matters); only the leading `\@T` is what this check + site id
     -- resolve, exactly like a bare `runLLMTurnFork` site.
-  , VerbSpec { vsName = "runLLMTurnBranch", vsModule = "Tidepool.Effects"
-             , vsSitedName = "runLLMTurnBranchSited", vsSitedModule = "Tidepool.Effects"
+  , VerbSpec { vsName = "runLLMTurnBranch", vsModule = "Tidepool.Effects.Core"
+             , vsSitedName = "runLLMTurnBranchSited", vsSitedModule = "Tidepool.Effects.Core"
              , vsTypeArgs = 1, vsValueArity = 2
              , vsCheckType = checkRunLLMTurnType
              , vsListAnswer = False, vsMisShapeIsError = False }
@@ -3309,8 +3311,8 @@ sitedVerbs =
     -- stamped onto the child window for per-node operator routing — one more
     -- LEADING value arg (label, then ref, then prompt), same `@T` site
     -- resolution otherwise.
-  , VerbSpec { vsName = "runLLMTurnBranchLabeled", vsModule = "Tidepool.Effects"
-             , vsSitedName = "runLLMTurnBranchLabeledSited", vsSitedModule = "Tidepool.Effects"
+  , VerbSpec { vsName = "runLLMTurnBranchLabeled", vsModule = "Tidepool.Effects.Core"
+             , vsSitedName = "runLLMTurnBranchLabeledSited", vsSitedModule = "Tidepool.Effects.Core"
              , vsTypeArgs = 1, vsValueArity = 3
              , vsCheckType = checkRunLLMTurnType
              , vsListAnswer = False, vsMisShapeIsError = False }
@@ -3322,8 +3324,8 @@ sitedVerbs =
     -- The site answers a LIST of per-child results ('vsListAnswer' — the same
     -- reason 'runLLMTurnFanout' sets it), so a bare `\@T` pins the per-child
     -- ELEMENT type while the sidecar records `[T]`.
-  , VerbSpec { vsName = "runLLMTurnBranchFanout", vsModule = "Tidepool.Effects"
-             , vsSitedName = "runLLMTurnBranchFanoutSited", vsSitedModule = "Tidepool.Effects"
+  , VerbSpec { vsName = "runLLMTurnBranchFanout", vsModule = "Tidepool.Effects.Core"
+             , vsSitedName = "runLLMTurnBranchFanoutSited", vsSitedModule = "Tidepool.Effects.Core"
              , vsTypeArgs = 1, vsValueArity = 2
              , vsCheckType = checkRunLLMTurnType
              , vsListAnswer = True, vsMisShapeIsError = False }
@@ -3338,8 +3340,8 @@ sitedVerbs =
     -- skips the function-arrow rejection (finalize's value crosses in-heap
     -- via run_child, never through JSON, so it may carry a closure) but
     -- still rejects a polymorphic site.
-  , VerbSpec { vsName = "finalize", vsModule = "Tidepool.Effects"
-             , vsSitedName = "finalizeSited", vsSitedModule = "Tidepool.Effects"
+  , VerbSpec { vsName = "finalize", vsModule = "Tidepool.Effects.Core"
+             , vsSitedName = "finalizeSited", vsSitedModule = "Tidepool.Effects.Core"
              , vsTypeArgs = 2, vsValueArity = 1
              , vsCheckType = checkFinalizeType
              , vsListAnswer = False, vsMisShapeIsError = False }
@@ -3347,14 +3349,17 @@ sitedVerbs =
     -- RunLLMTurn) — note the sibling module differs from the verb's own.
     -- `fork :: forall a. Text -> M a` is structurally identical to
     -- runLLMTurnFork's shape, and `forkAll :: forall a. [Text] -> M [a]` to
-    -- runLLMTurnFanout's; each still resolves its OWN sibling.
+    -- runLLMTurnFanout's; each still resolves its OWN sibling. `fork`/
+    -- `forkAll` themselves are authored in Tidepool.Fork (a library module,
+    -- unaffected by stable-effects-core), but their *Sited siblings are
+    -- ask_effect_def!'s generated helpers and now live in Core.
   , VerbSpec { vsName = "fork", vsModule = "Tidepool.Fork"
-             , vsSitedName = "forkSited", vsSitedModule = "Tidepool.Effects"
+             , vsSitedName = "forkSited", vsSitedModule = "Tidepool.Effects.Core"
              , vsTypeArgs = 1, vsValueArity = 1
              , vsCheckType = checkRunLLMTurnType
              , vsListAnswer = False, vsMisShapeIsError = False }
   , VerbSpec { vsName = "forkAll", vsModule = "Tidepool.Fork"
-             , vsSitedName = "forkAllSited", vsSitedModule = "Tidepool.Effects"
+             , vsSitedName = "forkAllSited", vsSitedModule = "Tidepool.Effects.Core"
              , vsTypeArgs = 1, vsValueArity = 1
              , vsCheckType = checkRunLLMTurnType
              , vsListAnswer = True, vsMisShapeIsError = False }
@@ -3457,23 +3462,25 @@ checkMonomorphicSite what ty = do
 -- site's answer type (spec step 4): a leftover type variable (the site isn't
 -- monomorphic, via 'checkMonomorphicSite') or the answer type mentioning the
 -- effect monad anywhere in its structure ('typeMentionsEffectMonad' — the
--- 'Eff' tycon itself or any tycon defined in the generated
--- @Tidepool.Effects@ module). A function arrow is otherwise fine: on the
--- one-session path a function-typed answer is delivered IN-HEAP by handle
--- (the same mechanism 'finalize' has always used), so there is no longer a
--- serialization boundary to fail against. What's still rejected is narrower:
--- the generated @M@/@Eff@ is nominal PER FRAGMENT (each turn compiles its
--- own effects module, its own row), so a value that mentions it cannot be
--- meaningfully applied once it crosses into a different fragment's world.
+-- 'Eff' tycon itself; see that function's doc for why it no longer also
+-- catches every tycon the generated @Tidepool.Effects@ module declares).
+-- A function arrow is otherwise fine: on the one-session path a
+-- function-typed answer is delivered IN-HEAP by handle (the same mechanism
+-- 'finalize' has always used), so there is no longer a serialization
+-- boundary to fail against. What's still rejected is narrower: a
+-- compile's ROW (@type M = Eff '[...]@) still varies per compile — that is
+-- unchanged and locked (row capability enforcement is untouched) — so a
+-- value whose type names @Eff@ applied to a concrete row cannot be
+-- meaningfully applied once it crosses into a different compile's world.
 -- Both raise via plain 'error'.
 checkRunLLMTurnType :: Type -> TransM ()
 checkRunLLMTurnType ty = do
   checkMonomorphicSite "runLLMTurn" ty
   let typeStr = Tidepool.GhcPipeline.renderType ty
   when (typeMentionsEffectMonad ty) $
-    error $ "effectful function answers not supported (the row is fragment-nominal): "
+    error $ "effectful function answers not supported (the row varies per compile): "
           ++ typeStr
-          ++ " — answer with a PURE function; the M inside cannot unify across surfaces"
+          ++ " — answer with a PURE function; the M inside cannot unify across turns/windows compiling a different row"
 
 -- | 'finalize's extract-time rejection (self-iterating-harness WS-B): ONLY
 -- the monomorphism check ('checkMonomorphicSite') — deliberately NOT
@@ -3485,24 +3492,42 @@ checkRunLLMTurnType ty = do
 checkFinalizeType :: Type -> TransM ()
 checkFinalizeType = checkMonomorphicSite "finalize"
 
--- | Does @ty@ mention the effect monad anywhere in its structure — the
--- 'Eff' tycon itself (freer-simple's @Control.Monad.Freer.Internal.Eff@), or
--- any tycon whose ORIGINAL defining module is exactly @Tidepool.Effects@
--- (the per-session generated module: the row's own effect ADTs — @AskUser@,
--- @Fork@, @Finalize@, @RunLLMTurn@, any custom effect type a session
--- declares — plus the @M@ synonym, which unwraps to an @Eff@ application
--- before this ever runs since 'splitTyConApp_maybe' looks through type
--- synonyms). Checked directly, in a type-application argument, under a
--- function arrow (both sides), or nested inside a field of some ADT/newtype
--- the type transitively refers to. Mirrors 'closeTyCons's newtype/field walk
+-- | Does @ty@ mention the effect monad anywhere in its structure — ONLY the
+-- 'Eff' tycon itself (freer-simple's @Control.Monad.Freer.Internal.Eff@).
+-- Checked directly, in a type-application argument, under a function arrow
+-- (both sides), or nested inside a field of some ADT/newtype the type
+-- transitively refers to. Mirrors 'closeTyCons's newtype/field walk
 -- (visited-set keyed on TyCon, so a recursive type like
 -- @data Rec = Rec (M Int) Rec@ terminates instead of looping).
 --
--- Used by 'checkRunLLMTurnType' (TASK 1: a function-typed answer may now
--- cross, but the generated @M@ is nominal PER FRAGMENT — each turn compiles
--- its own effects module, its own row — so a value naming it cannot cross)
--- and by @tidepool-extract-bin@'s @Main.mkBoundBinders@ (TASK 2: same
--- reasoning, applied to a session BIND's captured type).
+-- STABLE-EFFECTS-CORE NARROWING: this used to ALSO reject any tycon whose
+-- original defining module was exactly @Tidepool.Effects@ — every effect
+-- GADT (@AskUser@, @Fork@, @Finalize@, @RunLLMTurn@, any effect a session's
+-- vocabulary carries), because that module was regenerated PER COMPILE (a
+-- fresh nominal identity every turn, even for byte-identical declarations).
+-- The generated effects module is now split: the GADTs live in
+-- @Tidepool.Effects.Core@, a module whose text is a pure function of the
+-- effect VOCABULARY alone and is therefore IDENTICAL — same dir, same
+-- tycons — across every window/turn that shares a vocabulary (see
+-- @tidepool-mcp@'s @effects_core_module_source@/@ensure_effects_core_module@
+-- and @tidepool-mcp/CLAUDE.md@'s stable-effects-core section). A value
+-- mentioning a Core-defined tycon is therefore SAFE to cross a session bind
+-- now — it is exactly as stable as a bridged @Tidepool.Records.Bridged@/
+-- @Stable@ type already was, and this guard no longer needs to (and must
+-- not) treat it as suspect. What remains genuinely per-compile is only the
+-- ROW itself (@type M = Eff '[...]@, declared in the tiny per-window SHIM
+-- module @Tidepool.Effects@) — and @M@ is a type SYNONYM, which
+-- 'splitTyConApp_maybe' unwraps to its @Eff@ application before this ever
+-- sees a tycon, so the bare @Eff@-tycon check below is what catches it; no
+-- second disjunct is needed.
+--
+-- Used by 'checkRunLLMTurnType' (a function-typed answer may cross in-heap,
+-- but @Eff@ applied to a concrete row is still tied to THAT compile) and by
+-- @tidepool-extract-bin@'s @Main.mkBoundBinders@ (same reasoning, applied to
+-- a session BIND's captured type — this is what lets an effectful helper
+-- declared @Member <Eff> effs => ... -> Eff effs T@ persist across turns and
+-- windows: its type mentions only stable Core tycons, never a concrete @Eff@
+-- row application).
 typeMentionsEffectMonad :: Type -> Bool
 typeMentionsEffectMonad = goT emptyUniqSet
   where
@@ -3510,14 +3535,13 @@ typeMentionsEffectMonad = goT emptyUniqSet
     goT visited ty
       | Just (_ftf, _mult, argTy, resTy) <- splitFunTy_maybe ty = goT visited argTy || goT visited resTy
       | Just (tc, tyArgs) <- splitTyConApp_maybe ty =
-          isEffectTyCon tc || any (goT visited) tyArgs || goTc visited tc
+          isEffTyCon tc || any (goT visited) tyArgs || goTc visited tc
       | otherwise = False
 
-    isEffectTyCon :: TyCon -> Bool
-    isEffectTyCon tc =
-      (occNameString (nameOccName (tyConName tc)) == "Eff"
-        && definedInModule "Control.Monad.Freer.Internal" tc)
-      || definedInModule "Tidepool.Effects" tc
+    isEffTyCon :: TyCon -> Bool
+    isEffTyCon tc =
+      occNameString (nameOccName (tyConName tc)) == "Eff"
+        && definedInModule "Control.Monad.Freer.Internal" tc
 
     definedInModule :: String -> TyCon -> Bool
     definedInModule modStr tc =

@@ -528,12 +528,20 @@ pub fn delegate_branches_decl() -> tidepool_mcp::EffectDecl {
         type_defs: &[],
         extra_imports: &[],
         helpers: &[
-            "takeDelegatedBranches :: Text -> M [Text]",
+            "takeDelegatedBranches :: forall effs. Member DelegateBranches effs => Text -> Eff effs [Text]",
             "takeDelegatedBranches p = send (TakeDelegatedBranchesWith p)",
         ],
         type_params: &[],
         default_row_args: &[],
-        helpers_row_polymorphic: false,
+        // Stable-effects-core: every vocabulary effect's helpers must be
+        // row-polymorphic to live in the stable `Tidepool.Effects.Core`
+        // module (it has no `M` alias of its own — see
+        // `tidepool_mcp::effects_core_module_source`'s assertion). This
+        // effect is never model-reachable (see the doc above), so the
+        // signature's shape is otherwise inert — flipped for uniformity with
+        // every other effect definition, not because anything NEW depends on
+        // it being polymorphic.
+        helpers_row_polymorphic: true,
     }
 }
 
@@ -1695,18 +1703,25 @@ impl SelfHarnessDriver {
     /// every later answerer turn — across loops, and across machine
     /// rotations (the plane transfers; it is source-side state). Validated
     /// against [`EngineConfig::validation_include`] — the include set MINUS
-    /// the effects dir — so an effectful declaration fails at define time
-    /// with an ordinary GHC error (the structural pure-decls guard). The
-    /// OUTER render/loop compiles never see this plane (their include never
-    /// carries it): the authored harness cannot silently depend on
-    /// model-authored names (pillar D).
+    /// the per-window SHIM dir, PLUS the stable `Tidepool.Effects.Core` dir
+    /// (stable-effects-core). An effectful declaration written
+    /// `Member <Eff> effs => ... -> Eff effs T` now validates at define time
+    /// AND persists across turns/windows — Core's tycons are the same ones
+    /// every later turn's compile sees, so a bound call site unifies cleanly.
+    /// A declaration that instead spells the per-window `M` alias still fails
+    /// validation with an ordinary GHC "not in scope" error (the shim isn't
+    /// on this plane's include path) — the narrowed structural guard, not the
+    /// old blanket one. The OUTER render/loop compiles never see this plane
+    /// (their include never carries it): the authored harness cannot silently
+    /// depend on model-authored names (pillar D) — unaffected by this change.
     fn open_outer_plane(cfg: &EngineConfig) -> Option<tidepool_runtime::session::SessionLib> {
         let root = Self::outer_plane_root();
         let _ = std::fs::remove_dir_all(&root);
-        // The PURE decl env, not `standalone_default`: the plane validates
-        // under the same ambient pure names a turn has (`Text`, `object`, the
-        // Prelude), minus the effects-dir modules its include excludes. The
-        // minimal env failed `data X = X Text` — companion dogfood 2026-08-14.
+        // The PURE-OR-STABLE-EFFECTFUL decl env, not `standalone_default`: the
+        // plane validates under the same ambient pure names a turn has
+        // (`Text`, `object`, the Prelude) PLUS the stable Core effect surface,
+        // minus the per-window shim modules its include excludes. The minimal
+        // env failed `data X = X Text` — companion dogfood 2026-08-14.
         tidepool_runtime::session::SessionLib::open(
             tidepool_repr::SessionId(0),
             &root,
@@ -1989,7 +2004,7 @@ impl SelfHarnessDriver {
             timing::NO_NODE,
             timing::NO_ROUND,
         )
-        .map_err(|e| DriverError::Session(format!("fused outer compile failed: {e}")))?;
+        .map_err(|e| DriverError::Session(format!("fused outer compile failed: {e:?}")))?;
         let render_turn = turns.remove("result").ok_or_else(|| {
             DriverError::Session("fused outer compile: missing render entry".into())
         })?;
@@ -5807,7 +5822,7 @@ mod tests {
     /// deleted outright). Pure string-level check, no GHC needed.
     #[test]
     fn answerer_effects_module_declares_askuser_not_ask() {
-        let src = tidepool_mcp::effects_module_source(&answerer_decls());
+        let src = tidepool_mcp::effects_core_module_source(&answerer_decls());
         assert!(
             src.contains("data AskUser a where"),
             "expected an AskUser GADT declaration, got:\n{src}"

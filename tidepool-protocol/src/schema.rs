@@ -801,11 +801,12 @@ impl Helper {
             HelperBody::NullaryLiftEither => verb.ret.clone(),
             _ => verb.result_type(),
         };
-        out.push_str(&format!(
-            "{} :: {}\n",
-            self.name,
+        let sig = if eff.helpers_row_polymorphic {
+            crate::hs::render_member_signature(&args, eff.name, &result)
+        } else {
             render_signature(&args, "M", &result)
-        ));
+        };
+        out.push_str(&format!("{} :: {}\n", self.name, sig));
         match &self.body {
             HelperBody::Nullary => {
                 out.push_str(&format!("{} = send {ctor}", self.name));

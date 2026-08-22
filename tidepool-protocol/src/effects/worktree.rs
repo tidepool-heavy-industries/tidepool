@@ -105,7 +105,7 @@ pub fn worktree() -> Effect {
         prompt_card: None,
         type_params: &[],
         default_row_args: &[],
-        helpers_row_polymorphic: false,
+        helpers_row_polymorphic: true,
         // Eleven of the fourteen authored names are not schema-representable
         // (see the module doc and §11.9) and are DEFINED in
         // `haskell/lib/Tidepool/Worktree.hs`. This row is what makes that

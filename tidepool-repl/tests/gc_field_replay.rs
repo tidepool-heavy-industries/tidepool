@@ -46,9 +46,11 @@ fn build_full_stack_repl() -> Repl {
         tidepool_mcp::ensure_effects_module(roster.decls()).expect("write Tidepool.Effects module");
     let prelude_dir = tidepool_testing::eval_harness::prelude_path();
     let module_env = tidepool_mcp::session_decl_module_env(roster.decls(), false);
+    let mut base_include = effects_dir.include_paths().to_vec();
+    base_include.push(prelude_dir);
     let cfg = ReplServerConfig {
         roster,
-        base_include: vec![effects_dir, prelude_dir],
+        base_include,
         module_env,
         session_root_base: scratch.join("sessions"),
         nursery_size: Some(1 << 21), // 2 MiB — force organic GC under load

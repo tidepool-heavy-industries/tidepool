@@ -27,7 +27,7 @@ fn worktree_and_event_module() -> String {
         tidepool_mcp::worktree_decl(),
         tidepool_mcp::event_decl(),
     ];
-    tidepool_mcp::effects_module_source(&decls)
+    tidepool_mcp::effects_core_module_source(&decls)
 }
 
 /// Emit the generated module for `scripts/prd19-alternative-gates.sh`, which

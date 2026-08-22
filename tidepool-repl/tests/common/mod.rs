@@ -101,9 +101,11 @@ pub fn build_server_with_nursery(
     // against THIS env, not the effectful eval preamble). The lens-free
     // `standalone_default` dropped `object`/`toJSON` out of scope entirely.
     let module_env = tidepool_mcp::session_decl_module_env(roster.decls(), false);
+    let mut base_include = effects_dir.include_paths().to_vec();
+    base_include.push(prelude_dir);
     let cfg = ReplServerConfig {
         roster,
-        base_include: vec![effects_dir, prelude_dir],
+        base_include,
         module_env,
         session_root_base,
         nursery_size,
@@ -145,7 +147,8 @@ pub fn build_full_server(
         tidepool_mcp::ensure_effects_module(roster.decls()).expect("write Tidepool.Effects module");
     let repo_root = tidepool_testing::eval_harness::repo_root();
     let prelude_dir = repo_root.join("haskell").join("lib");
-    let mut base_include = vec![effects_dir, prelude_dir.clone()];
+    let mut base_include = effects_dir.include_paths().to_vec();
+    base_include.push(prelude_dir.clone());
     let mut lib_dirs = Vec::new();
     if include_project_lib {
         let project_lib = repo_root.join(".tidepool").join("lib");

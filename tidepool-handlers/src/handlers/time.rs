@@ -89,7 +89,11 @@ mod tests {
         ]);
         let include = prelude_include();
         let effects_dir = tidepool_mcp::ensure_effects_module(&decls).unwrap();
-        let include_paths: Vec<&std::path::Path> = vec![include.as_path(), effects_dir.as_path()];
+        let include_paths: Vec<&std::path::Path> = vec![
+            include.as_path(),
+            effects_dir.core.as_path(),
+            effects_dir.shim.as_path(),
+        ];
         let kv_path = std::env::temp_dir().join("tidepool_time_family_kv.json");
         let cwd = repo_root();
         let captured = CapturedOutput::new();

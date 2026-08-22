@@ -186,15 +186,24 @@ fn effect_decls_golden_matches_committed_file() {
 }
 
 // ---------------------------------------------------------------------------
-// Golden 2 — the generated Tidepool.Effects module for the standard row.
-// This is the compile-cache-key artifact: captured verbatim, no
-// normalization, no trailing-whitespace trimming.
+// Golden 2 — the generated Tidepool.Effects.Core + Tidepool.Effects (shim)
+// modules for the standard row. These are the compile-cache-key artifacts:
+// captured verbatim, no normalization, no trailing-whitespace trimming.
 // ---------------------------------------------------------------------------
 
 #[test]
-fn effects_module_standard_golden_matches_committed_file() {
-    let generated = tidepool_mcp::effects_module_source(&tidepool_mcp::standard_decls());
-    assert_matches_golden("effects_module.standard.hs", &generated);
+fn effects_core_module_standard_golden_matches_committed_file() {
+    let generated = tidepool_mcp::effects_core_module_source(&tidepool_mcp::standard_decls());
+    assert_matches_golden("effects_core_module.standard.hs", &generated);
+}
+
+#[test]
+fn effects_shim_module_standard_golden_matches_committed_file() {
+    let generated = tidepool_mcp::effects_shim_module_source(
+        &tidepool_mcp::standard_decls(),
+        &tidepool_mcp::RowArgs::default(),
+    );
+    assert_matches_golden("effects_shim_module.standard.hs", &generated);
 }
 
 // ---------------------------------------------------------------------------

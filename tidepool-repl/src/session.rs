@@ -4050,10 +4050,12 @@ mod reset_tests {
         let effect_stack = tidepool_mcp::build_effect_stack_type(roster.decls());
 
         let dir = tempfile::tempdir().expect("tempdir");
+        let mut base_include = effects_dir.include_paths().to_vec();
+        base_include.push(prelude_dir);
         let cfg = SessionConfig {
             id: SessionId(1),
             root: dir.path().to_path_buf(),
-            base_include: vec![effects_dir, prelude_dir],
+            base_include,
             roster,
             preamble,
             effect_stack,

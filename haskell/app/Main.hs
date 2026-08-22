@@ -1553,21 +1553,26 @@ mkBoundBinders probeOnly bindNames g root result = do
           then error $ "multi-binder: " ++ show (length bindNames) ++ " binders but "
                      ++ "type is a " ++ show (length tys) ++ "-tuple: " ++ renderType t
           else return tys
-  -- Cross-row bind guard (one-session plan Phase 3e, TASK 2): a session bind
-  -- whose captured type mentions the effect monad — the 'Eff' tycon or any
-  -- tycon defined in the generated per-session @Tidepool.Effects@ module —
-  -- cannot mean anything once it crosses into a LATER turn's compile, which
-  -- gets its OWN, differently-numbered @Tidepool.Effects@ (the row is
-  -- fragment-nominal, same reasoning as 'Tidepool.Translate.checkRunLLMTurnType').
-  -- Reject loudly here rather than let it silently reach a later turn as an
-  -- unresolvable/wrongly-resolved reference. @probeOnly@ (an ephemeral @:t@
-  -- type-probe, never registered as a session binding — see 'mkBoundBinders'
-  -- doc) has no later fragment to cross into, so it is exempt by construction.
+  -- Cross-row bind guard (one-session plan Phase 3e, TASK 2; narrowed by
+  -- stable-effects-core): a session bind whose captured type mentions the
+  -- 'Eff' tycon itself cannot mean anything once it crosses into a LATER
+  -- turn's compile, which applies it to its OWN row (the row is per-compile,
+  -- same reasoning as 'Tidepool.Translate.checkRunLLMTurnType'). This no
+  -- longer also rejects a bind merely for mentioning an effect GADT
+  -- (@Console@, @KV@, a bridged record, …) — those now live in the STABLE
+  -- @Tidepool.Effects.Core@ module (a pure function of the vocabulary alone,
+  -- identical across turns/windows that share it), so a value naming one is
+  -- exactly as safe to cross as a plain data value always was. Reject loudly
+  -- here rather than let a genuine row-typed value silently reach a later
+  -- turn as an unresolvable/wrongly-resolved reference. @probeOnly@ (an
+  -- ephemeral @:t@ type-probe, never registered as a session binding — see
+  -- 'mkBoundBinders' doc) has no later fragment to cross into, so it is
+  -- exempt by construction.
   when (not probeOnly) $
     forM_ (zip bindNames componentTypes) $ \(name, cty) ->
       when (typeMentionsEffectMonad cty) $
         error $ "session bind '" ++ name ++ "' captures the effect row in its type ("
-              ++ renderType cty ++ "); row-typed values cannot cross fragments — "
+              ++ renderType cty ++ "); row-typed values cannot cross turns/windows compiling a different row — "
               ++ "bind a pure value or inline the effectful part" ++ eitherBindHint cty
   let mkEntry name cty =
         let occ    = mkVarOcc name

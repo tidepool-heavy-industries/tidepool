@@ -41,13 +41,13 @@ pub fn worktree_decl() -> crate::EffectDecl {
             "import Tidepool.Worktree",
         ],
         helpers: &[
-            "-- | Create a managed worktree. `Left (SourceDirty summary)` when the\n-- source is dirty and the spec did not opt in; case-match the error\n-- rather than unwrapping if you mean to handle it.\ncreateWorktree :: WorktreeSpec -> M (Either WorktreeError WorktreeHandle)\ncreateWorktree = send . WorktreeCreate",
-            "-- | Look a retained worktree up by durable id. Survives restart:\n-- resolution reads on-disk registry state, not process memory.\n-- `Left (WorktreeLost i)` when it is registered but gone from disk.\nlookupWorktree :: WorktreeId -> M (Either WorktreeError WorktreeHandle)\nlookupWorktree = send . WorktreeLookup",
-            "-- | Every registered worktree, present or lost. A lost tree is listed\n-- with `present = False` rather than failing the whole listing.\nlistWorktrees :: M [WorktreeSummary]\nlistWorktrees = send WorktreeList >>= liftEither",
+            "-- | Create a managed worktree. `Left (SourceDirty summary)` when the\n-- source is dirty and the spec did not opt in; case-match the error\n-- rather than unwrapping if you mean to handle it.\ncreateWorktree :: forall effs. Member Worktree effs => WorktreeSpec -> Eff effs (Either WorktreeError WorktreeHandle)\ncreateWorktree = send . WorktreeCreate",
+            "-- | Look a retained worktree up by durable id. Survives restart:\n-- resolution reads on-disk registry state, not process memory.\n-- `Left (WorktreeLost i)` when it is registered but gone from disk.\nlookupWorktree :: forall effs. Member Worktree effs => WorktreeId -> Eff effs (Either WorktreeError WorktreeHandle)\nlookupWorktree = send . WorktreeLookup",
+            "-- | Every registered worktree, present or lost. A lost tree is listed\n-- with `present = False` rather than failing the whole listing.\nlistWorktrees :: forall effs. Member Worktree effs => Eff effs [WorktreeSummary]\nlistWorktrees = send WorktreeList >>= liftEither",
             "-- | The durable identity of a managed worktree. Pure: the handle\n-- already carries its receipt, so this reads no git state.\nworktreeId :: WorktreeHandle -> WorktreeId\nworktreeId h = h.handleReceipt.treeId",
         ],
         type_params: &[],
         default_row_args: &[],
-        helpers_row_polymorphic: false,
+        helpers_row_polymorphic: true,
     }
 }

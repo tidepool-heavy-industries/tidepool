@@ -89,7 +89,8 @@ pub fn build(
     // Backs the shared `tidepool://capabilities` / `tidepool://stdlib/{module}`
     // resources — see `ReplServerConfig::stdlib_dir`.
     let stdlib_dir = Some(prelude_dir.clone());
-    let mut base_include = vec![effects_dir, prelude_dir];
+    let mut base_include = effects_dir.include_paths().to_vec();
+    base_include.push(prelude_dir);
 
     // Verb libraries (parity with the eval server): project `.tidepool/lib`
     // first, then user-global, AFTER the stdlib so `Tidepool.*` still resolves

@@ -111,15 +111,15 @@ fn exec_contract_text_is_pinned() {
                 "-- for `runIn` with a bad/escaping directory, `Left (ExecTimeout _)` when\n",
                 "-- the command outran its timeout and was killed. A nonzero EXIT is NOT a\n",
                 "-- failure — inspect `p.exitCode`. Natural spelling: `Right p <- run cmd`.\n",
-                "run :: Text -> M (Either ExecError Proc)\n",
+                "run :: forall effs. Member Exec effs => Text -> Eff effs (Either ExecError Proc)\n",
                 "run = send . Run",
             ),
             concat!(
-                "runIn :: Text -> Text -> M (Either ExecError Proc)\n",
+                "runIn :: forall effs. Member Exec effs => Text -> Text -> Eff effs (Either ExecError Proc)\n",
                 "runIn dir cmd = send (RunIn dir cmd)",
             ),
             concat!(
-                "runArgv :: [Text] -> M (Either ExecError Proc)\n",
+                "runArgv :: forall effs. Member Exec effs => [Text] -> Eff effs (Either ExecError Proc)\n",
                 "runArgv = send . RunArgv",
             ),
         ]
@@ -140,7 +140,7 @@ fn exec_contract_text_is_pinned() {
     assert!(exec.prompt_card.is_none());
     assert!(exec.type_params.is_empty());
     assert!(exec.default_row_args.is_empty());
-    assert!(!exec.helpers_row_polymorphic);
+    assert!(exec.helpers_row_polymorphic);
 }
 
 /// The same independent pin as [`exec_contract_text_is_pinned`], for Journal.
@@ -161,7 +161,7 @@ fn journal_contract_text_is_pinned() {
             "-- | Append one durable journal entry. `kind` and `key` are\n",
             "-- caller-chosen labels; `payload` is an opaque JSON value. Flushed\n",
             "-- immediately; append-only — never rewritten or compacted.\n",
-            "record :: Text -> Text -> Value -> M ()\n",
+            "record :: forall effs. Member Journal effs => Text -> Text -> Value -> Eff effs ()\n",
             "record kind key payload = send (RecordStep kind key payload)",
         )]
     );
@@ -183,5 +183,5 @@ fn journal_contract_text_is_pinned() {
     assert!(journal.prompt_card.is_none());
     assert!(journal.type_params.is_empty());
     assert!(journal.default_row_args.is_empty());
-    assert!(!journal.helpers_row_polymorphic);
+    assert!(journal.helpers_row_polymorphic);
 }

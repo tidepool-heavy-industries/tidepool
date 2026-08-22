@@ -15,10 +15,10 @@ pub fn journal_decl() -> crate::EffectDecl {
             "import qualified Tidepool.Resume as Resume",
         ],
         helpers: &[
-            "-- | Append one durable journal entry. `kind` and `key` are\n-- caller-chosen labels; `payload` is an opaque JSON value. Flushed\n-- immediately; append-only — never rewritten or compacted.\nrecord :: Text -> Text -> Value -> M ()\nrecord kind key payload = send (RecordStep kind key payload)",
+            "-- | Append one durable journal entry. `kind` and `key` are\n-- caller-chosen labels; `payload` is an opaque JSON value. Flushed\n-- immediately; append-only — never rewritten or compacted.\nrecord :: forall effs. Member Journal effs => Text -> Text -> Value -> Eff effs ()\nrecord kind key payload = send (RecordStep kind key payload)",
         ],
         type_params: &[],
         default_row_args: &[],
-        helpers_row_polymorphic: false,
+        helpers_row_polymorphic: true,
     }
 }

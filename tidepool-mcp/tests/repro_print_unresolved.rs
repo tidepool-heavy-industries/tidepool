@@ -60,10 +60,10 @@ fn run(code: &str) -> (Vec<String>, Result<String, String>) {
 
     let pp = prelude_dir();
     let ulp = user_lib_dir();
-    let eff = tidepool_mcp::ensure_effects_module(&decls)
-        .expect("write effects module")
-        .leak() as &Path;
-    let include = [pp, ulp.as_path(), eff];
+    let dirs = tidepool_mcp::ensure_effects_module(&decls).expect("write effects module");
+    let core = dirs.core.leak() as &Path;
+    let shim = dirs.shim.leak() as &Path;
+    let include = [pp, ulp.as_path(), core, shim];
 
     let captured = CapturedOutput::new();
     let mut handlers = frunk::hlist![ConsoleHandler];

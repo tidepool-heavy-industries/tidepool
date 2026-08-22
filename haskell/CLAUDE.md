@@ -296,9 +296,13 @@ diagnostics.** `GhcPipeline.hs`'s diagnostic-recovery pass (`normalVariant`)
 redoes modules in non-topological order, so when the generated Effects module
 itself fails to typecheck (e.g. its `type M` row names an unresolved type),
 whichever OTHER module the pass visits first reports "attempting to use module
-X which is not loaded" instead of the real error. The harness sidesteps this
-for pinned `Finalize` rows by probe-compiling the generated module STANDALONE
-first (`EngineConfig::turn_target`, memoized per module content) — but any
+X which is not loaded" instead of the real error. Since stable-effects-core
+(`tidepool-mcp/CLAUDE.md`'s section of that name) split the generated surface
+in two, this is specifically about the tiny per-window SHIM (the only half
+that still declares `type M`) — the stable `Tidepool.Effects.Core` half has no
+row to fail on. The harness sidesteps this for pinned `Finalize` rows by
+probe-compiling the generated SHIM module STANDALONE first
+(`EngineConfig::turn_target`, memoized per module content) — but any
 other path that compiles a bad generated module alongside user code can still
 hit the cascade. The mechanism fix (topological recovery order) is unowned.
 

@@ -31,13 +31,13 @@ pub fn event_decl() -> crate::EffectDecl {
             "import Tidepool.Event",
         ],
         helpers: &[
-            "-- | Block until `sub` has queued at least one observation, or\n-- `timeoutMs` elapses (negative blocks with no deadline). An elapsed\n-- timeout is an EMPTY list — distinguishable from a real batch, never\n-- an error; poison/source-loss still fail via the `Either`.\nawaitSubscriptionRaw :: SubscriptionId -> Int -> M (Either EventError [RepositoryEvent])\nawaitSubscriptionRaw sub timeoutMs = send (RepoEventAwait sub timeoutMs)",
-            "-- | Mint a fresh mailbox: an event source only the caller (and whoever\n-- it hands the id to) can send into.\nmailboxNew :: M (Either EventError Int)\nmailboxNew = send MailboxNew",
-            "-- | Send never blocks: append and return. A burst of sends sharing\n-- `key` coalesces to the LAST payload.\nmailboxSend :: Int -> Text -> Value -> M (Either EventError ())\nmailboxSend mid key payload = send (MailboxSend mid key payload)",
-            "-- | Drop a mailbox. A later send against it is\n-- `Left (EventUnknownMailbox _)`.\nmailboxDrop :: Int -> M (Either EventError ())\nmailboxDrop = send . MailboxDrop",
+            "-- | Block until `sub` has queued at least one observation, or\n-- `timeoutMs` elapses (negative blocks with no deadline). An elapsed\n-- timeout is an EMPTY list — distinguishable from a real batch, never\n-- an error; poison/source-loss still fail via the `Either`.\nawaitSubscriptionRaw :: forall effs. Member RepoEvent effs => SubscriptionId -> Int -> Eff effs (Either EventError [RepositoryEvent])\nawaitSubscriptionRaw sub timeoutMs = send (RepoEventAwait sub timeoutMs)",
+            "-- | Mint a fresh mailbox: an event source only the caller (and whoever\n-- it hands the id to) can send into.\nmailboxNew :: forall effs. Member RepoEvent effs => Eff effs (Either EventError Int)\nmailboxNew = send MailboxNew",
+            "-- | Send never blocks: append and return. A burst of sends sharing\n-- `key` coalesces to the LAST payload.\nmailboxSend :: forall effs. Member RepoEvent effs => Int -> Text -> Value -> Eff effs (Either EventError ())\nmailboxSend mid key payload = send (MailboxSend mid key payload)",
+            "-- | Drop a mailbox. A later send against it is\n-- `Left (EventUnknownMailbox _)`.\nmailboxDrop :: forall effs. Member RepoEvent effs => Int -> Eff effs (Either EventError ())\nmailboxDrop = send . MailboxDrop",
         ],
         type_params: &[],
         default_row_args: &[],
-        helpers_row_polymorphic: false,
+        helpers_row_polymorphic: true,
     }
 }

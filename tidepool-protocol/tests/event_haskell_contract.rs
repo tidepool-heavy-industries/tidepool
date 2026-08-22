@@ -103,26 +103,26 @@ fn event_helper_texts_are_pinned() {
                 "-- `timeoutMs` elapses (negative blocks with no deadline). An elapsed\n",
                 "-- timeout is an EMPTY list — distinguishable from a real batch, never\n",
                 "-- an error; poison/source-loss still fail via the `Either`.\n",
-                "awaitSubscriptionRaw :: SubscriptionId -> Int -> M (Either EventError \
+                "awaitSubscriptionRaw :: forall effs. Member RepoEvent effs => SubscriptionId -> Int -> Eff effs (Either EventError \
                  [RepositoryEvent])\n",
                 "awaitSubscriptionRaw sub timeoutMs = send (RepoEventAwait sub timeoutMs)",
             ),
             concat!(
                 "-- | Mint a fresh mailbox: an event source only the caller (and whoever\n",
                 "-- it hands the id to) can send into.\n",
-                "mailboxNew :: M (Either EventError Int)\n",
+                "mailboxNew :: forall effs. Member RepoEvent effs => Eff effs (Either EventError Int)\n",
                 "mailboxNew = send MailboxNew",
             ),
             concat!(
                 "-- | Send never blocks: append and return. A burst of sends sharing\n",
                 "-- `key` coalesces to the LAST payload.\n",
-                "mailboxSend :: Int -> Text -> Value -> M (Either EventError ())\n",
+                "mailboxSend :: forall effs. Member RepoEvent effs => Int -> Text -> Value -> Eff effs (Either EventError ())\n",
                 "mailboxSend mid key payload = send (MailboxSend mid key payload)",
             ),
             concat!(
                 "-- | Drop a mailbox. A later send against it is\n",
                 "-- `Left (EventUnknownMailbox _)`.\n",
-                "mailboxDrop :: Int -> M (Either EventError ())\n",
+                "mailboxDrop :: forall effs. Member RepoEvent effs => Int -> Eff effs (Either EventError ())\n",
                 "mailboxDrop = send . MailboxDrop",
             ),
         ]
@@ -210,7 +210,7 @@ fn event_remaining_decl_fields_are_pinned() {
     assert!(ev.prompt_card.is_none());
     assert!(ev.type_params.is_empty());
     assert!(ev.default_row_args.is_empty());
-    assert!(!ev.helpers_row_polymorphic);
+    assert!(ev.helpers_row_polymorphic);
     assert_eq!(ev.name, "RepoEvent");
     assert_eq!(ev.handler, "RepoEventHandler");
     assert_eq!(ev.handler_module, "event");

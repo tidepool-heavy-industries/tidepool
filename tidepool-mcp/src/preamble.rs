@@ -163,29 +163,42 @@ pub fn session_decl_module_env(effects: &[EffectDecl], user_library: bool) -> Mo
     }
 }
 
-/// The [`ModuleEnv`] for a PURE declaration plane — the self-iterating
-/// harness's living decl plane, whose validation include deliberately drops
-/// the generated effects dir (the structural pure-decls guard: an effectful
-/// decl fails at define time because `Tidepool.Effects` does not resolve).
+/// The [`ModuleEnv`] for a PURE-OR-EFFECTFUL-BUT-STABLE declaration plane —
+/// the self-iterating harness's living decl plane (stable-effects-core: this
+/// plane is the payoff feature, not just a pure-decls guard any more).
 ///
-/// This is [`session_decl_module_env`]'s import surface MINUS everything that
-/// lives in that excluded dir (`Tidepool.Effects`, `Tidepool.Orchestrate`)
-/// and minus effect companion imports (`Tidepool.Form` etc. depend on the
-/// effects module). Everything else — `Tidepool.Prelude` (unqualified `Text`,
-/// `object`, the pure vocabulary every turn has ambient), the qualified
-/// namespaces, Aeson — stays, so a decl a model authors in turn-module scope
-/// validates under the SAME pure names. The lens-free
-/// [`ModuleEnv::standalone_default`] is NOT a substitute: it has no Prelude,
-/// so `data X = X Text` failed to validate even though `Text` is ambient in
-/// every turn (companion dogfood, 2026-08-14 — a fatal boot-class bug before
-/// the retry fix that landed with this env).
+/// This is [`session_decl_module_env`]'s import surface MINUS the per-window
+/// SHIM (`Tidepool.Effects`, whose only content is `type M` — a row that
+/// genuinely varies turn to turn — and `Tidepool.Orchestrate`, which is
+/// `M`-typed throughout) PLUS the STABLE `Tidepool.Effects.Core` (every effect
+/// GADT + type_defs + `Member`-polymorphic helper, content-addressed on the
+/// vocabulary alone, so identical across every window/turn that shares it —
+/// see `tidepool-mcp/CLAUDE.md`'s stable-effects-core section and
+/// `haskell/src/Tidepool/Translate.hs`'s narrowed `typeMentionsEffectMonad`).
+///
+/// The practical effect: a declaration written `Member <Eff> effs => ... ->
+/// Eff effs T` now validates here and persists across turns/windows (it
+/// mentions only Core's stable tycons); a declaration that instead spells the
+/// per-window `M` alias still fails validation with an ordinary GHC "not in
+/// scope" error, because the shim is not on this plane's include path —
+/// effect companion imports (`Tidepool.Form` etc.) are ALSO excluded, since
+/// they depend on the shim's row being genuinely present. Everything else —
+/// `Tidepool.Prelude` (unqualified `Text`, `object`, the pure vocabulary every
+/// turn has ambient), the qualified namespaces, Aeson — stays, so a decl a
+/// model authors in turn-module scope validates under the SAME names a real
+/// turn has. The lens-free [`ModuleEnv::standalone_default`] is NOT a
+/// substitute: it has no Prelude, so `data X = X Text` failed to validate
+/// even though `Text` is ambient in every turn (companion dogfood,
+/// 2026-08-14 — a fatal boot-class bug before the retry fix that landed with
+/// this env).
 #[must_use]
 pub fn pure_decl_module_env() -> ModuleEnv {
-    let imports: Vec<String> = eval_import_lines(false, false)
+    let mut imports: Vec<String> = eval_import_lines(false, false)
         .into_iter()
         .filter(|l| *l != "import Tidepool.Effects")
         .map(String::from)
         .collect();
+    imports.push("import Tidepool.Effects.Core".to_string());
     ModuleEnv {
         pragmas: decl_pragmas(),
         imports,

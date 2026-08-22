@@ -117,9 +117,18 @@ async fn t_on_m_returning_helper_does_not_trip_cross_row_guard() {
 }
 
 /// Same friction, for a stdlib EFFECT VERB whose type is `Either <Err> T`
-/// wrapped in `M` (`run :: Text -> M (Either ExecError Proc)`) — `ExecError`
-/// is defined inline in the per-session generated `Tidepool.Effects` module,
-/// so `:t run`'s probe bind ALSO used to trip the guard. Needs the full
+/// (`run :: forall effs. Member Exec effs => Text -> Eff effs (Either
+/// ExecError Proc)`) — `ExecError` is defined in the STABLE
+/// `Tidepool.Effects.Core` module (stable-effects-core), so `:t run`'s probe
+/// bind must not trip the cross-row bind guard. `run` is queried at the
+/// session's own concrete `M` (`:t (run :: Text -> M (Either ExecError
+/// Proc))`) rather than bare: bare `run` is a genuinely AMBIGUOUS type query
+/// now that it is row-polymorphic (`Member Exec effs0` alone can never
+/// default `effs0` — the same GHC defaulting gap `__anchor`
+/// (`tidepool-mcp::eval_prep::TurnTemplate`) works around for `finalize`'s
+/// free result type — an orthogonal, pre-existing `:t`-on-an-unapplied-
+/// polymorphic-value limitation, not a cross-row-bind-guard regression).
+/// Needs the full
 /// effect stack (Exec) rather than `Repl::new()`'s Console-only minimal one.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn t_on_either_returning_effect_verb_does_not_trip_cross_row_guard() {
@@ -135,7 +144,9 @@ async fn t_on_either_returning_effect_verb_does_not_trip_cross_row_guard() {
         .expect_ok(":bindings before :t")
         .to_string();
 
-    let t = repl.cmd(":t run").await;
+    let t = repl
+        .cmd(":t (run :: Text -> M (Either ExecError Proc))")
+        .await;
     let out =
         t.expect_ok(":t run (Either-returning verb type must not crash the cross-row bind guard)");
     assert!(
@@ -155,27 +166,44 @@ async fn t_on_either_returning_effect_verb_does_not_trip_cross_row_guard() {
     );
 }
 
-/// A GENUINE bind (not `:t`) of the same `Either ExecError Proc` shape must
-/// still be rejected — the guard itself is unweakened, only `:t` is exempt.
-/// The rejection message must name the idiom that actually works: destructure
-/// AT the bind (`Right x <- run cmd`), not the generic "inline the effectful
-/// part" text alone.
+/// STABLE-EFFECTS-CORE ACCEPTANCE: a GENUINE bind (not `:t`) of an
+/// `Either ExecError Proc` value now PERSISTS instead of being rejected.
+/// Before this change, `ExecError`/`Proc` were declared inline in the
+/// per-session generated `Tidepool.Effects` module (fragment-nominal — a
+/// fresh nominal identity every turn), so the cross-row bind guard
+/// (`typeMentionsEffectMonad`) rejected ANY bind mentioning them, with a
+/// "destructure at the bind" hint as the only workaround. Now `ExecError`/
+/// `Proc` live in the STABLE `Tidepool.Effects.Core` module (a pure function
+/// of the effect vocabulary alone), so a bind mentioning them is exactly as
+/// safe to persist as any other plain data value — the guard only fires for
+/// a type that itself mentions the `Eff` tycon (a genuinely row-typed value),
+/// which `Either ExecError Proc` never did once the effect monad's OWN tycon
+/// is the only thing checked. The bound value must also be genuinely
+/// CALLABLE in a LATER turn, not merely accepted — that's the persistence
+/// payoff, not just an absence of rejection.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn real_either_bind_still_rejected_with_destructure_hint() {
+async fn either_returning_verb_bind_now_persists_across_turns() {
     require_extract();
     let tmp = tempfile::tempdir().expect("tempdir");
     let repl = Repl {
-        server: build_full_server(tmp.path().to_path_buf(), "either-bind-reject", false),
+        server: build_full_server(tmp.path().to_path_buf(), "either-bind-persists", false),
     };
 
     let bind = repl.cmd("p <- run \"echo hi\"").await;
-    let err = bind.expect_err("a real `Either ExecError Proc` session bind must still be rejected");
+    let out = bind.expect_ok("a real `Either ExecError Proc` session bind must now succeed");
     assert!(
-        err.contains("captures the effect row") && err.contains("cross fragments"),
-        "the cross-row bind guard must still fire for a genuine bind: {err}"
+        out.contains("Either"),
+        "the bound name's reported type should mention Either: {out}"
     );
+
+    // Genuine cross-turn persistence: a LATER turn references `p` — not just
+    // "the bind didn't error", but the bound value is a live name in scope.
+    let later = repl
+        .cmd("case p of { Right proc -> proc.exitCode; Left _ -> (-1) }")
+        .await;
+    let later_out = later.expect_ok("a later turn must be able to reference the earlier bind `p`");
     assert!(
-        err.contains("Right x <-"),
-        "the rejection must name the destructuring idiom for an Either-shaped reject: {err}"
+        later_out.contains('0'),
+        "expected the earlier `echo hi` bind's exitCode (0) to be reachable from a later turn: {later_out}"
     );
 }

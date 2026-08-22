@@ -796,16 +796,30 @@ materialization. This is the mechanism behind `runLLMTurn @(State -> State)`
 working end to end — including closures NESTED in a product (a record of
 functions), routed by a DEEP sentinel scan: the answerer finalizes it, the
 loop applies it directly. And the shared session carries the LIVING DECL
-PLANE (`SelfHarnessDriver::open_outer_plane`): pure top-level declarations a
+PLANE (`SelfHarnessDriver::open_outer_plane`): top-level declarations a
 model defines persist BY NAME across loops AND across machine rotations
 (the plane is source-side state; `take_lib` transfers it into the rotated
-machine), validated against the effects-dir-free include so an effectful
-decl fails at define time (the structural pure-decls guard), and NEVER on
-the authored render/loop compiles' include path (pillar D). Standing
-acceptances, all in `tests/selfharness_fn_finalize_spike.rs`: the
+machine), validated against an include that admits the STABLE
+`Tidepool.Effects.Core` module but excludes the per-window `M`-carrying shim
+(stable-effects-core — see `tidepool-mcp/CLAUDE.md`'s section of that name).
+This is now the payoff feature, not just a pure-decls guard: a declaration
+written `Member <Eff> effs => ... -> Eff effs T` validates and persists
+exactly like a pure one; only a declaration spelling the per-window `M`
+alias still fails at define time (the narrowed structural guard), and the
+authored render/loop compiles still NEVER see this plane either way
+(pillar D, unaffected). The direct, driver-independent acceptance of this is
+`tests/stable_effects_core_decl_plane.rs`. Standing acceptances for the
+pure-decl case, in `tests/selfharness_fn_finalize_spike.rs`: the
 `State -> State` edit, the record-of-functions delivery, and
-`living_helper_survives_loop_boundary_and_rotation`. Restart persistence of
-the plane (decl-log disk reload) is future work; heap VALUES still die at
+`living_helper_survives_loop_boundary_and_rotation` — **the last of these was
+found FAILING in this environment during the stable-effects-core branch's own
+verification, reproduced identically on a clean baseline checkout with none of
+that branch's changes applied** (a real declaration made in one turn is not
+visible to the very next turn of the SAME cycle — "Variable not in scope"),
+so it is a pre-existing gap in this harness's decl-plane wiring, not a
+regression that branch introduced; flagged here rather than fixed, since
+diagnosing it is out of that branch's scope. Restart persistence of the
+plane (decl-log disk reload) is future work; heap VALUES still die at
 rotation, enumerated.
 The scoped-stack caveat in Replay above still holds unchanged: the answerer
 row is all-suspending, so it produces no `Event::Effect` regardless of

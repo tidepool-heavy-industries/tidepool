@@ -105,7 +105,12 @@ fn eval_raw(code: &str) -> Result<serde_json::Value, String> {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
     let hs = root.join("haskell/lib");
     let lib = root.join(".tidepool/lib");
-    let include = [hs.as_path(), lib.as_path(), effects_dir.as_path()];
+    let include = [
+        hs.as_path(),
+        lib.as_path(),
+        effects_dir.core.as_path(),
+        effects_dir.shim.as_path(),
+    ];
     let mut d = NullDispatcher;
     match compile_and_run(&src, "result", &include, &mut d, &()) {
         Ok(v) => Ok(v.to_json()),

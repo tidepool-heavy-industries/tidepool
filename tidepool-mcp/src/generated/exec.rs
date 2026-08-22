@@ -21,12 +21,12 @@ pub fn exec_decl() -> crate::EffectDecl {
             "import qualified Tidepool.Cargo as Cargo",
         ],
         helpers: &[
-            "-- | Run a shell command; returns a `Proc` record {exitCode, stdout, stderr}\n-- (use `ok p` for the zero-exit check). Failure is TYPED (#335): `Left\n-- (ExecSpawn _)` when the process can't be spawned, `Left (ExecBadDir _)`\n-- for `runIn` with a bad/escaping directory, `Left (ExecTimeout _)` when\n-- the command outran its timeout and was killed. A nonzero EXIT is NOT a\n-- failure — inspect `p.exitCode`. Natural spelling: `Right p <- run cmd`.\nrun :: Text -> M (Either ExecError Proc)\nrun = send . Run",
-            "runIn :: Text -> Text -> M (Either ExecError Proc)\nrunIn dir cmd = send (RunIn dir cmd)",
-            "runArgv :: [Text] -> M (Either ExecError Proc)\nrunArgv = send . RunArgv",
+            "-- | Run a shell command; returns a `Proc` record {exitCode, stdout, stderr}\n-- (use `ok p` for the zero-exit check). Failure is TYPED (#335): `Left\n-- (ExecSpawn _)` when the process can't be spawned, `Left (ExecBadDir _)`\n-- for `runIn` with a bad/escaping directory, `Left (ExecTimeout _)` when\n-- the command outran its timeout and was killed. A nonzero EXIT is NOT a\n-- failure — inspect `p.exitCode`. Natural spelling: `Right p <- run cmd`.\nrun :: forall effs. Member Exec effs => Text -> Eff effs (Either ExecError Proc)\nrun = send . Run",
+            "runIn :: forall effs. Member Exec effs => Text -> Text -> Eff effs (Either ExecError Proc)\nrunIn dir cmd = send (RunIn dir cmd)",
+            "runArgv :: forall effs. Member Exec effs => [Text] -> Eff effs (Either ExecError Proc)\nrunArgv = send . RunArgv",
         ],
         type_params: &[],
         default_row_args: &[],
-        helpers_row_polymorphic: false,
+        helpers_row_polymorphic: true,
     }
 }

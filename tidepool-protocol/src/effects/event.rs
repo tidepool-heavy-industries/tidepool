@@ -175,7 +175,7 @@ pub fn event() -> Effect {
         prompt_card: None,
         type_params: &[],
         default_row_args: &[],
-        helpers_row_polymorphic: false,
+        helpers_row_polymorphic: true,
         // Eighteen of the twenty-two authored names are not schema-representable
         // (module doc above) and are DEFINITIONS in `haskell/lib/Tidepool/Event.hs`
         // — including `Event`/`Observed`/the `Functor Event` instance, which are

@@ -14,9 +14,10 @@
 //! A function-typed site is no longer categorically rejected (one-session
 //! plan Phase 3e): a PURE function-typed answer (e.g. `Int -> Int`) now
 //! compiles past `checkRunLLMTurnType`, and only an answer type that itself
-//! mentions the effect monad (`M`/`Eff`, or a generated `Tidepool.Effects`
-//! tycon) — e.g. `Int -> M Int` — is rejected, with the new
-//! fragment-nominal-row error text.
+//! mentions the `Eff` tycon (`M`/`Eff`) — e.g. `Int -> M Int` — is rejected,
+//! since the row `M` expands to is still per-compile (stable-effects-core:
+//! the effect GADTs themselves are now stable, but a compile's own row still
+//! varies) — with the row-varies-per-compile error text.
 //!
 //! Run with the worktree extract binary, e.g.:
 //!   TIDEPOOL_EXTRACT=<worktree>/haskell/dist-newstyle/.../tidepool-extract-bin \
@@ -387,11 +388,11 @@ fn runllmturn_rejects_effectful_function_typed_site() {
     let err = try_compile_runllmturn("runLLMTurn @(Int -> M Int) \"fn\"", "")
         .expect_err("an effectful function-typed runLLMTurn site must fail extract");
     assert!(
-        err.contains("effectful function answers not supported (the row is fragment-nominal)"),
+        err.contains("effectful function answers not supported (the row varies per compile)"),
         "expected the new effectful-function-typed-site error text, got:\n{err}"
     );
     assert!(
-        err.contains("the M inside cannot unify across surfaces"),
+        err.contains("the M inside cannot unify across turns/windows compiling a different row"),
         "expected the new error text's explanation clause, got:\n{err}"
     );
 }
@@ -449,11 +450,9 @@ fn try_compile_forkmap(hole: &str, helpers: &str) -> Result<(), String> {
     let src =
         tidepool_mcp::template_haskell(&pre, &stack, &code, "Tidepool.Fork", helpers, None, None);
 
-    let effects_dir =
-        tidepool_mcp::ensure_effects_module(&decls).expect("write Tidepool.Effects module");
     EvalHarness::new()
         .with_stdlib()
-        .with_include(effects_dir)
+        .with_effects_module()
         .with_extract_env()
         .compile(&src, "result")
         .map(|_| ())
@@ -652,7 +651,8 @@ fn compile_and_read_asks(
     cmd.arg(&input_path);
     cmd.arg("--output-dir").arg(temp_dir.path());
     cmd.arg("--target").arg(target);
-    for path in [prelude_path(), effects_dir] {
+    cmd.arg("--include").arg(prelude_path());
+    for path in effects_dir.include_paths() {
         cmd.arg("--include").arg(path);
     }
     let output = cmd.output().expect("spawn tidepool-extract-bin");

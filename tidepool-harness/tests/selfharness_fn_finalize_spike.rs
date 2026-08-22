@@ -62,12 +62,14 @@
 //! `checkRunLLMTurnType` (`haskell/src/Tidepool/Translate.hs`) no longer
 //! rejects every function arrow — it admits a PURE function-typed answer
 //! like `State -> State` and rejects only an answer type that itself
-//! mentions the effect monad (`typeMentionsEffectMonad`: the `Eff` tycon, or
-//! any tycon defined in the generated `Tidepool.Effects` module), with a
-//! different error text ("effectful function answers not supported (the row
-//! is fragment-nominal): ..."). `loop`'s `runLLMTurn @(State -> State)` site
-//! is exactly the class of type this now admits, so the specific verbatim
-//! error and reasoning quoted above no longer describe current behavior.
+//! mentions the `Eff` tycon (`typeMentionsEffectMonad`, narrowed further by
+//! stable-effects-core: it no longer also rejects every tycon the generated
+//! effects module declares, since those now live in the STABLE
+//! `Tidepool.Effects.Core` module), with a different error text ("effectful
+//! function answers not supported (the row varies per compile): ...").
+//! `loop`'s `runLLMTurn @(State -> State)` site is exactly the class of type
+//! this now admits, so the specific verbatim error and reasoning quoted above
+//! no longer describe current behavior.
 //!
 //! (HISTORICAL, since resolved:) at the time of the original spike, the
 //! extract gate was only the FIRST seam — the "further, UNREACHED concern"
@@ -596,6 +598,23 @@ async fn living_helper_survives_loop_boundary_and_rotation() {
         "the ceiling-of-1 run must have rotated the machine between cycles"
     );
 }
+
+// A driver-cycle-level effectful-helper acceptance test (declaring
+// `Member ReadState effs => ...` on the plane in cycle 1, calling it in
+// cycle 2) was attempted here and removed: it hit a PRE-EXISTING failure
+// ("Variable not in scope: bumpBy") in `living_helper_survives_loop_boundary_and_rotation`
+// ABOVE, reproduced on a clean baseline checkout with none of this branch's
+// changes applied — the shared decl plane's declarations are not actually
+// visible to the very next same-cycle answerer turn in this environment,
+// unrelated to stable-effects-core. See
+// `tidepool-harness/tests/stable_effects_core_decl_plane.rs` for the
+// direct, driver-independent acceptance of the actual mechanism this branch
+// changes (`pure_decl_module_env` + `EngineConfig::validation_include`
+// admitting `Tidepool.Effects.Core`): a `SessionLib` opened exactly the way
+// `SelfHarnessDriver::open_outer_plane` does, with a `Member`-constrained
+// declaration validating and a later declaration calling it, sidestepping
+// the pre-existing driver-cycle issue entirely. Flagged to the parent as a
+// pre-existing, out-of-scope bug rather than fixed here.
 
 fn ooda_harness_dir() -> std::path::PathBuf {
     repo_root().join("examples/harness/ooda-spike")

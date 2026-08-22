@@ -98,10 +98,14 @@ pub struct TidepoolMcpServer<H> {
 pub struct TidepoolMcpServerImpl {
     pub(crate) handler_factory: Arc<dyn McpEffectHandler>,
     pub(crate) include: Vec<PathBuf>,
-    /// Generated `Tidepool/Effects.hs` source, kept so the eval path can
-    /// re-materialize its staging dir if it is reaped mid-session.
-    pub(crate) effects_source: String,
-    /// Generated `Tidepool/Orchestrate.hs` source, co-located with the effects
+    /// Generated `Tidepool/Effects/Core.hs` source (the stable, vocabulary-
+    /// keyed half), kept so the eval path can re-materialize its staging dir
+    /// if it is reaped mid-session.
+    pub(crate) core_source: String,
+    /// Generated `Tidepool/Effects.hs` (shim) source, kept for the same
+    /// self-heal reason as [`Self::core_source`].
+    pub(crate) shim_source: String,
+    /// Generated `Tidepool/Orchestrate.hs` source, co-located with the shim
     /// module in the same content-addressed staging dir (re-materialized
     /// together on self-heal).
     pub(crate) orchestrate_source: String,
@@ -179,10 +183,14 @@ impl TidepoolMcpServerImpl {
         .into();
 
         let handlers = dyn_clone::clone_box(&*self.handler_factory);
-        // Self-heal: re-materialize Tidepool.Effects + Tidepool.Orchestrate if
-        // their staging dir was reaped mid-session (macOS purges $TMPDIR /
-        // cache). Cheap stats when intact; rewrites only missing files.
-        if let Err(e) = write_generated_modules(&self.effects_source, &self.orchestrate_source) {
+        // Self-heal: re-materialize Tidepool.Effects.Core, Tidepool.Effects,
+        // and Tidepool.Orchestrate if their staging dirs were reaped mid-
+        // session (macOS purges $TMPDIR / cache). Cheap stats when intact;
+        // rewrites only missing files.
+        if let Err(e) = write_core_module(&self.core_source) {
+            eprintln!("[tidepool] failed to refresh generated Tidepool.Effects.Core module: {e}");
+        }
+        if let Err(e) = write_shim_module(&self.shim_source, &self.orchestrate_source) {
             eprintln!("[tidepool] failed to refresh generated Tidepool modules: {e}");
         }
         let captured = CapturedOutput::new();
@@ -722,15 +730,23 @@ where
             .iter()
             .map(|d| d.type_name.to_string())
             .collect();
-        // The generated Tidepool.Effects module must be on the include path
-        // for every eval (the preamble imports it). Keep its source so the
-        // eval path can re-materialize it if the staging dir is reaped mid-
-        // session (macOS purges $TMPDIR / cache). Failure is survivable here —
-        // evals will fail with a clear missing-module error.
-        let effects_source = effects_module_source(roster.decls());
+        // The generated Tidepool.Effects.Core + Tidepool.Effects modules must
+        // both be on the include path for every eval (the preamble imports
+        // the shim, which re-exports Core). Keep their sources so the eval
+        // path can re-materialize them if a staging dir is reaped mid-session
+        // (macOS purges $TMPDIR / cache). Failure is survivable here — evals
+        // will fail with a clear missing-module error.
+        let core_source = effects_core_module_source(roster.decls());
+        let shim_source = effects_shim_module_source(roster.decls(), &RowArgs::default());
         let orchestrate_source = orchestrate_module_source(roster.decls());
         let mut include = Vec::new();
-        match write_generated_modules(&effects_source, &orchestrate_source) {
+        match write_core_module(&core_source) {
+            Ok(dir) => include.push(dir),
+            Err(e) => {
+                eprintln!("[tidepool] failed to write generated Tidepool.Effects.Core module: {e}")
+            }
+        }
+        match write_shim_module(&shim_source, &orchestrate_source) {
             Ok(dir) => include.push(dir),
             Err(e) => eprintln!("[tidepool] failed to write generated Tidepool modules: {e}"),
         }
@@ -741,7 +757,8 @@ where
             inner: TidepoolMcpServerImpl {
                 handler_factory: Arc::new(handler),
                 include,
-                effects_source,
+                core_source,
+                shim_source,
                 orchestrate_source,
                 haskell_preamble,
                 effect_stack_type,

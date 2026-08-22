@@ -39,7 +39,7 @@ pub fn journal() -> Effect {
         prompt_card: None,
         type_params: &[],
         default_row_args: &[],
-        helpers_row_polymorphic: false,
+        helpers_row_polymorphic: true,
         // The READ half of the run journal (PRD 20 S1-L5). `record` stays
         // write-only — `Tidepool.Resume` reads nothing; it is the type of the
         // already-folded value the driver injects at boot. See

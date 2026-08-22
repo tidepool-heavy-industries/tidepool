@@ -301,8 +301,8 @@ fsMeta :: forall effs. Member Fs effs => FilePath -> Eff effs (Maybe FileMeta)
 fsMeta = send . FsMetadata
 -- end helpers[7] --
 
--- helpers[8] (117 bytes) --
-getCurrentDirectory :: M FilePath
+-- helpers[8] (157 bytes) --
+getCurrentDirectory :: forall effs. Member Exec effs => Eff effs FilePath
 getCurrentDirectory = do { p <- run "pwd" >>= liftEither; pure (T.strip p.stdout) }
 -- end helpers[8] --
 
@@ -744,24 +744,24 @@ import qualified Tidepool.Cargo as Cargo
 -- end extra_imports --
 
 -- helpers (3 items) --
--- helpers[0] (506 bytes) --
+-- helpers[0] (546 bytes) --
 -- | Run a shell command; returns a `Proc` record {exitCode, stdout, stderr}
 -- (use `ok p` for the zero-exit check). Failure is TYPED (#335): `Left
 -- (ExecSpawn _)` when the process can't be spawned, `Left (ExecBadDir _)`
 -- for `runIn` with a bad/escaping directory, `Left (ExecTimeout _)` when
 -- the command outran its timeout and was killed. A nonzero EXIT is NOT a
 -- failure — inspect `p.exitCode`. Natural spelling: `Right p <- run cmd`.
-run :: Text -> M (Either ExecError Proc)
+run :: forall effs. Member Exec effs => Text -> Eff effs (Either ExecError Proc)
 run = send . Run
 -- end helpers[0] --
 
--- helpers[1] (87 bytes) --
-runIn :: Text -> Text -> M (Either ExecError Proc)
+-- helpers[1] (127 bytes) --
+runIn :: forall effs. Member Exec effs => Text -> Text -> Eff effs (Either ExecError Proc)
 runIn dir cmd = send (RunIn dir cmd)
 -- end helpers[1] --
 
--- helpers[2] (71 bytes) --
-runArgv :: [Text] -> M (Either ExecError Proc)
+-- helpers[2] (111 bytes) --
+runArgv :: forall effs. Member Exec effs => [Text] -> Eff effs (Either ExecError Proc)
 runArgv = send . RunArgv
 -- end helpers[2] --
 
@@ -774,7 +774,7 @@ runArgv = send . RunArgv
 -- end default_row_args --
 
 -- helpers_row_polymorphic --
-false
+true
 -- end helpers_row_polymorphic --
 
 =============================== EFFECT: Git ===============================
@@ -1692,26 +1692,26 @@ import Tidepool.Worktree
 -- end extra_imports --
 
 -- helpers (4 items) --
--- helpers[0] (303 bytes) --
+-- helpers[0] (347 bytes) --
 -- | Create a managed worktree. `Left (SourceDirty summary)` when the
 -- source is dirty and the spec did not opt in; case-match the error
 -- rather than unwrapping if you mean to handle it.
-createWorktree :: WorktreeSpec -> M (Either WorktreeError WorktreeHandle)
+createWorktree :: forall effs. Member Worktree effs => WorktreeSpec -> Eff effs (Either WorktreeError WorktreeHandle)
 createWorktree = send . WorktreeCreate
 -- end helpers[0] --
 
--- helpers[1] (309 bytes) --
+-- helpers[1] (353 bytes) --
 -- | Look a retained worktree up by durable id. Survives restart:
 -- resolution reads on-disk registry state, not process memory.
 -- `Left (WorktreeLost i)` when it is registered but gone from disk.
-lookupWorktree :: WorktreeId -> M (Either WorktreeError WorktreeHandle)
+lookupWorktree :: forall effs. Member Worktree effs => WorktreeId -> Eff effs (Either WorktreeError WorktreeHandle)
 lookupWorktree = send . WorktreeLookup
 -- end helpers[1] --
 
--- helpers[2] (221 bytes) --
+-- helpers[2] (265 bytes) --
 -- | Every registered worktree, present or lost. A lost tree is listed
 -- with `present = False` rather than failing the whole listing.
-listWorktrees :: M [WorktreeSummary]
+listWorktrees :: forall effs. Member Worktree effs => Eff effs [WorktreeSummary]
 listWorktrees = send WorktreeList >>= liftEither
 -- end helpers[2] --
 
@@ -1731,7 +1731,7 @@ worktreeId h = h.handleReceipt.treeId
 -- end default_row_args --
 
 -- helpers_row_polymorphic --
-false
+true
 -- end helpers_row_polymorphic --
 
 =============================== EFFECT: RepoEvent ===============================
@@ -1831,33 +1831,33 @@ import Tidepool.Event
 -- end extra_imports --
 
 -- helpers (4 items) --
--- helpers[0] (428 bytes) --
+-- helpers[0] (473 bytes) --
 -- | Block until `sub` has queued at least one observation, or
 -- `timeoutMs` elapses (negative blocks with no deadline). An elapsed
 -- timeout is an EMPTY list — distinguishable from a real batch, never
 -- an error; poison/source-loss still fail via the `Either`.
-awaitSubscriptionRaw :: SubscriptionId -> Int -> M (Either EventError [RepositoryEvent])
+awaitSubscriptionRaw :: forall effs. Member RepoEvent effs => SubscriptionId -> Int -> Eff effs (Either EventError [RepositoryEvent])
 awaitSubscriptionRaw sub timeoutMs = send (RepoEventAwait sub timeoutMs)
 -- end helpers[0] --
 
--- helpers[1] (178 bytes) --
+-- helpers[1] (223 bytes) --
 -- | Mint a fresh mailbox: an event source only the caller (and whoever
 -- it hands the id to) can send into.
-mailboxNew :: M (Either EventError Int)
+mailboxNew :: forall effs. Member RepoEvent effs => Eff effs (Either EventError Int)
 mailboxNew = send MailboxNew
 -- end helpers[1] --
 
--- helpers[2] (236 bytes) --
+-- helpers[2] (281 bytes) --
 -- | Send never blocks: append and return. A burst of sends sharing
 -- `key` coalesces to the LAST payload.
-mailboxSend :: Int -> Text -> Value -> M (Either EventError ())
+mailboxSend :: forall effs. Member RepoEvent effs => Int -> Text -> Value -> Eff effs (Either EventError ())
 mailboxSend mid key payload = send (MailboxSend mid key payload)
 -- end helpers[2] --
 
--- helpers[3] (162 bytes) --
+-- helpers[3] (207 bytes) --
 -- | Drop a mailbox. A later send against it is
 -- `Left (EventUnknownMailbox _)`.
-mailboxDrop :: Int -> M (Either EventError ())
+mailboxDrop :: forall effs. Member RepoEvent effs => Int -> Eff effs (Either EventError ())
 mailboxDrop = send . MailboxDrop
 -- end helpers[3] --
 
@@ -1870,7 +1870,7 @@ mailboxDrop = send . MailboxDrop
 -- end default_row_args --
 
 -- helpers_row_polymorphic --
-false
+true
 -- end helpers_row_polymorphic --
 
 =============================== EFFECT: Journal ===============================
@@ -1903,11 +1903,11 @@ import qualified Tidepool.Resume as Resume
 -- end extra_imports --
 
 -- helpers (1 items) --
--- helpers[0] (290 bytes) --
+-- helpers[0] (333 bytes) --
 -- | Append one durable journal entry. `kind` and `key` are
 -- caller-chosen labels; `payload` is an opaque JSON value. Flushed
 -- immediately; append-only — never rewritten or compacted.
-record :: Text -> Text -> Value -> M ()
+record :: forall effs. Member Journal effs => Text -> Text -> Value -> Eff effs ()
 record kind key payload = send (RecordStep kind key payload)
 -- end helpers[0] --
 
@@ -1920,6 +1920,6 @@ record kind key payload = send (RecordStep kind key payload)
 -- end default_row_args --
 
 -- helpers_row_polymorphic --
-false
+true
 -- end helpers_row_polymorphic --
 

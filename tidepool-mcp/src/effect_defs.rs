@@ -1867,19 +1867,13 @@ macro_rules! fs_effect_def {
                 { raw ["-- | TOTAL existence predicate: False for missing/non-dir/out-of-sandbox.\ndoesDirectoryExist :: forall effs. Member Fs effs => FilePath -> Eff effs Bool\ndoesDirectoryExist p = send (FsMetadata p) <&> maybe False (\\m -> m.isDir)"] },
                 { raw ["-- | File size in bytes, or `Nothing` if the path is missing.\ngetFileSize :: forall effs. Member Fs effs => FilePath -> Eff effs (Maybe Int)\ngetFileSize p = send (FsMetadata p) <&> fmap (\\m -> m.size)"] },
                 { raw ["-- | File metadata as a `FileMeta` record {size, isFile, isDir}, or `Nothing`\n-- if the path is missing/unreadable (use record-dot: `m.size`, `m.isDir`).\nfsMeta :: forall effs. Member Fs effs => FilePath -> Eff effs (Maybe FileMeta)\nfsMeta = send . FsMetadata"] },
-                // NOT Member-polymorphic, deliberately: this calls `run`
-                // (Exec's own helper), not any Fs constructor at all — its
-                // real dependency is `Member Exec effs`, not `Member Fs
-                // effs`. Exec is a MIGRATED/schema-generated effect
-                // (`tidepool-protocol/src/effects/exec.rs`), out of this
-                // definition's control and out of this lane's boundary, and
-                // its own helper (`run`) is still concrete-`M` — so there is
-                // no `Member Exec effs` signature here to borrow. Left
-                // concrete `M`; safe under `helpers_row_polymorphic true`
-                // above because this helper's compile never depended on Fs
-                // being in the row (only Exec, which every Fs-carrying stack
-                // already has via `standard_decls()`/`build_base_stack`).
-                { raw ["getCurrentDirectory :: M FilePath\ngetCurrentDirectory = do { p <- run \"pwd\" >>= liftEither; pure (T.strip p.stdout) }"] },
+                // `Member Exec effs`, not `Member Fs effs`: this calls `run`
+                // (Exec's own helper), not any Fs constructor at all. Exec's
+                // own `run` is itself Member-polymorphic (stable-effects-core
+                // migrated every schema-generated effect's helpers off
+                // concrete `M`), so this can borrow `Member Exec effs`
+                // directly instead of needing Fs in the row at all.
+                { raw ["getCurrentDirectory :: forall effs. Member Exec effs => Eff effs FilePath\ngetCurrentDirectory = do { p <- run \"pwd\" >>= liftEither; pure (T.strip p.stdout) }"] },
                 { raw ["-- | Expand a glob to matching file paths. `Left (FsSandbox _)` on an empty\n-- or absolute pattern, `Left (FsNotFound _)` on a missing search root; unwrap\n-- with `Right ps <- glob pat` or `glob pat >>= liftEither`.\nglob :: forall effs. Member Fs effs => FilePath -> Eff effs (Either FsError [FilePath])\nglob = send . FsGlob"] },
                 { raw ["-- | Regex-search files matching a path glob. ARG ORDER: regex FIRST, glob\n-- SECOND — a path glob like \"*.rs\" goes in arg 2, not arg 1. Returns [Hit]\n-- {path, line, text} (the shared Hit shape, so it composes with\n-- hitsByFile/refs). Failure is typed: `Left (FsBadRegex _)` on a bad regex.\n-- NB regex metachars are double-escaped here (JSON x Haskell), so a literal dot\n-- needs four backslashes; the FsBadRegex detail shows the exact form.\ngrepGlob :: forall effs. Member Fs effs => Text -> FilePath -> Eff effs (Either FsError [Hit])\ngrepGlob pat g = send (FsGrep pat g)"] },
                 { raw ["-- | Read every file matching a glob with PER-FILE failure isolation: one\n-- `FileRead {path, contents}` per match — `contents` is `Right text` on a clean\n-- UTF-8 read, `Left err` on a per-file failure (binary / non-UTF-8, permission).\n-- One bad file (e.g. a binary swept up by a wide glob) does NOT fail the whole\n-- batch. An empty glob is rejected loudly, but a glob matching NOTHING yields\n-- `[]` silently — check `null rs` when absence itself is the signal. Recover\n-- the readable files with\n-- `[r.path | r <- rs, isRight r.contents]`, or split all outcomes with\n-- `partitionEithers (map (.contents) rs)`.\nreadGlob :: forall effs. Member Fs effs => Text -> Eff effs [FileRead]\nreadGlob = send . FsReadGlob"] },

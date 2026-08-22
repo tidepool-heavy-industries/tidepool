@@ -79,13 +79,10 @@ fn module_source(code: &str) -> (String, Vec<std::path::PathBuf>) {
         ""
     };
     let src = tidepool_mcp::template_haskell(&pre, &stack, code, imports, "", None, None);
-    let effects_dir = tidepool_mcp::ensure_effects_module(&decls).expect("write effects module");
+    let effects_dirs = tidepool_mcp::ensure_effects_module(&decls).expect("write effects module");
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
-    let include = vec![
-        root.join("haskell/lib"),
-        root.join(".tidepool/lib"),
-        effects_dir,
-    ];
+    let mut include = vec![root.join("haskell/lib"), root.join(".tidepool/lib")];
+    include.extend(effects_dirs.include_paths());
     (src, include)
 }
 

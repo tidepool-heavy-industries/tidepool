@@ -783,11 +783,12 @@ is. Concretely:
 - Code visible in your inherited context really ran in this session: its
   declarations and binds are LIVE NAMES in your scope, not prose to read.
   Call an ancestor's helper; reference its bindings.
-- Effectful helpers cannot persist: a top-level declaration whose type
-  mentions the effect monad (`M ...`/`Eff ...`) fails at define time,
-  because effect types are regenerated each turn and a persisted signature
-  would pin a stale generation. Invoke effects inline in your turn code and
-  bind their plain-data results — the results persist.
+- Effectful helpers persist too, as long as they are written GENERICALLY —
+  `Member <Eff> effs => ... -> Eff effs T`, never the concrete `M`. `M` is
+  this window's own row alias and is refused at define time if you use it in
+  a top-level declaration; a `Member`-constrained signature names only
+  stable effect types and works in every later window that carries the same
+  effect in its row.
 - Your `finalize` value must be plain data — no functions inside it.
 - `getStateJson` is a read-only snapshot, constant for your whole window;
   the durable draft evolves only between cycles, through the folds.
@@ -797,6 +798,9 @@ is. Concretely:
 data Verdict = Verdict {{ claim :: Text, holds :: Bool }}
 credible :: [Verdict] -> [Verdict]
 credible = filter (.holds)
+-- an effectful helper declared the same way persists too:
+announce :: forall effs. Member AskUser effs => Verdict -> Eff effs ()
+announce v = noteRaw (v.claim <> ": " <> show v.holds)
 -- your window, later, deeper in the tree — those names are simply in scope:
 credible [Verdict {{ claim = "compiles", holds = True }}]
 --- END EXAMPLE ---

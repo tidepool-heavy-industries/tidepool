@@ -307,7 +307,11 @@ fn run() -> i32 {
     );
     let effects_dir = tidepool_mcp::ensure_effects_module(&decls).expect("effects module");
     let prelude = repo_root().join("haskell").join("lib");
-    let include: Vec<&Path> = vec![prelude.as_path(), effects_dir.as_path()];
+    let include: Vec<&Path> = vec![
+        prelude.as_path(),
+        effects_dir.core.as_path(),
+        effects_dir.shim.as_path(),
+    ];
 
     let compiled = match tidepool_runtime::compile_haskell(&source, "result", &include) {
         Ok(c) => c,

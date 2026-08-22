@@ -77,15 +77,18 @@ pub fn user_lib_dir() -> PathBuf {
     repo_root().join(".tidepool").join("lib")
 }
 
-/// The generated `Tidepool.Effects` module dir for the standard MCP effect set.
+/// The generated `Tidepool.Effects.Core` + `Tidepool.Effects` module dirs for
+/// the standard MCP effect set, BOTH needed on the include path (the shim's
+/// `import Tidepool.Effects.Core` resolves against the first).
 ///
 /// Needed on the include path when a test pulls in a `.tidepool/lib` module (or
 /// anything that `import`s the generated effects module). Wraps
 /// [`tidepool_mcp::ensure_effects_module`] over [`tidepool_mcp::standard_decls`].
-pub fn effects_include() -> PathBuf {
+pub fn effects_include() -> [PathBuf; 2] {
     #[allow(clippy::expect_used, reason = "write Tidepool.Effects module")]
     tidepool_mcp::ensure_effects_module(&tidepool_mcp::standard_decls())
         .expect("write Tidepool.Effects module")
+        .include_paths()
 }
 
 /// Derive and install the `TIDEPOOL_EXTRACT` env var, returning whether the
@@ -270,15 +273,24 @@ impl EvalHarness {
         self
     }
 
-    /// Add the generated `Tidepool.Effects` module dir ([`effects_include`]).
+    /// Add the generated `Tidepool.Effects.Core` + `Tidepool.Effects` module
+    /// dirs ([`effects_include`]).
     pub fn with_effects_module(mut self) -> Self {
-        self.includes.push(effects_include());
+        self.includes.extend(effects_include());
         self
     }
 
     /// Add an arbitrary include dir.
     pub fn with_include(mut self, dir: impl Into<PathBuf>) -> Self {
         self.includes.push(dir.into());
+        self
+    }
+
+    /// Add several arbitrary include dirs at once — e.g. a non-standard
+    /// [`tidepool_mcp::ensure_effects_module`] result's
+    /// [`tidepool_mcp::EffectsModuleDirs::include_paths`].
+    pub fn with_includes(mut self, dirs: impl IntoIterator<Item = PathBuf>) -> Self {
+        self.includes.extend(dirs);
         self
     }
 

@@ -92,7 +92,8 @@ fn start_turn_for(
         tidepool_mcp::template_haskell(&preamble, &stack_type, &wrapped_code, "", "", None, None)
             .into();
     let effects_dir = tidepool_mcp::ensure_effects_module(&decls).expect("effects module");
-    let include = vec![prelude_include(), effects_dir];
+    let mut include = vec![prelude_include()];
+    include.extend(effects_dir.include_paths());
     let effect_names: Vec<String> = decls.iter().map(|d| d.type_name.to_string()).collect();
 
     StartTurn {

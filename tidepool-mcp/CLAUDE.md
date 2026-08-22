@@ -37,37 +37,79 @@ named), never the closed `<verb> :: ... -> M T` shape — `M` is a
 per-compile-module alias, so a helper defined against it cannot typecheck
 under a narrower or differently-shaped row than the one the module happened
 to generate for (e.g. a local `type M` shadow, PRD 21 C5's `delegate_wrap`).
-Set `helpers_row_polymorphic true` on the definition once its helpers are
-genuinely Member-based — that flag is what lets `effects_module_source_with_vocab`
-emit them for a row that carries the effect as VOCABULARY without it being IN
-the row (`emits_helpers_for`, `eval_prep.rs`). The model-visible prose
-(`description`/`prompt_card`) may keep the `M` shorthand for readability —
-only the compiled helper text itself needs the real signature. A helper that
-truly cannot be made row-polymorphic (its body calls another helper whose own
-type is still fixed to a concrete `M`, e.g. Fs's `getCurrentDirectory` calling
-Exec's `run`) stays concrete, with a comment at the definition site naming
-exactly which dependency forces it.
+Set `helpers_row_polymorphic true` on the definition — every effect in this
+codebase does. This is no longer merely a vocab-widening opt-in (extract-wave
+item 0b's original purpose): since stable-effects-core (below), it is what
+lets the effect's GADT + `type_defs` + helpers live in the STABLE
+`Tidepool.Effects.Core` module at all — `effects_core_module_source`
+(`eval_prep.rs`) asserts it and PANICS naming the effect if unset, because
+Core declares no `M` alias for a row-closed helper to typecheck against. The
+model-visible prose (`description`/`prompt_card`) may keep the `M` shorthand
+for readability — only the compiled helper text itself needs the real
+signature. A helper BODY that truly cannot be made row-polymorphic (calls
+another helper whose own type is still fixed to a concrete `M`) stays
+concrete, with a comment at the definition site naming exactly which
+dependency forces it — `Green`'s `asyncSpawn` is the one case where the
+GADT's own CONSTRUCTOR field type is fixed to `Int -> M ()` by the wire
+shape (not a body dependency); see `ROW_DEPENDENT_EFFECTS` (`eval_prep.rs`)
+for how that one effect is handled (declared in the per-window shim instead
+of Core — the whole effect, not just the one helper, since one bad
+constructor forces the WHOLE GADT out).
 
-**Trap: a bridged data record belongs in `Tidepool.Records.Bridged` (or, when
-it embeds an `errors` ADT as a FIELD, `Tidepool.Records.Stable` —
-`fs_effect_def!`'s `stable_errors true`), never inline in a `type_defs`
-literal.** Any `type_defs`/`errors` text a definition emits lands in the
-per-session generated `Tidepool.Effects` module, which is fragment-nominal (a
-fresh one per turn) — the cross-row session-bind guard
-(haskell/src/Tidepool/Translate.hs's `typeMentionsEffectMonad`) rejects ANY
-value whose type mentions a tycon declared there, so an inline record cannot
-survive a session bind (`x <- someVerb ...` reused in a later turn). `FileRead`
-(readGlob's per-file record) shipped this way for a long time harmlessly,
-until a later-landed guard turned the gap into a hard failure the moment
-someone bound it — see `tidepool-mcp/src/fs_stable.rs` for the fix and the
-full story. The same guard fires even WITHOUT a bridged record in sight: an
-errors-tagged verb's own result IS `Either <Err> T`, so that type alone
-mentions `<Err>` — a bare `x <- gitLog n` (no `Right x <-` destructuring)
-tripped this identically, `Err` never touching a record field at all.
-`stable_errors true` is how a definition opts its whole `errors` block out of
-the inline per-session text (for either reason) without losing its Rust-enum
-generation or per-verb `Either <Err> T` tagging — `Git`/`Llm`/`Http` all carry
-it now, alongside `Fs`.
+## Stable-effects-core: the generated effects module is TWO modules
+
+The generated Haskell effects surface an eval/session/turn imports is split
+into a STABLE half and a PER-WINDOW half, so that effectful helper
+DECLARATIONS (not just verb calls) can persist across turns and windows:
+
+- **`Tidepool.Effects.Core`** (`effects_core_module_source`,
+  `ensure_effects_core_module`) — every vocabulary effect's GADT, `type_defs`,
+  and `Member`-polymorphic helpers. A PURE function of the effect VOCABULARY
+  alone (which effects exist for this compile family — the general Agent
+  stack, the self-iterating harness's answerer stack, …), never of the ROW or
+  any `RowArgs` type application. Two compiles that share a vocabulary get
+  BYTE-IDENTICAL Core text, hence the same content-addressed dir and no tycon
+  churn between them — compiled once per vocabulary, not once per turn.
+- **`Tidepool.Effects`** (`effects_shim_module_source`,
+  `ensure_effects_shim_module`) — the tiny per-window SHIM: re-exports Core's
+  whole surface (`module Tidepool.Effects.Core`) plus `type M = Eff
+  <row_effects>`, the one thing that genuinely varies per compile (a pinned
+  `Finalize <T>` hole's answer type, in particular). Declares no `data`/GADT of
+  its own for an ordinary effect — `type M` is a synonym, invisible to the
+  guard below — EXCEPT a [`ROW_DEPENDENT_EFFECTS`] effect (`Green`), whose
+  whole GADT+helpers are spliced in here instead of Core, per-window, exactly
+  as the pre-split single module always worked for it.
+
+Model-visible spelling is UNCHANGED: `import Tidepool.Effects` and `M` resolve
+exactly as before. Only WHERE each name is nominally declared moved — which is
+exactly what makes it safe for a value or a DECLARATION mentioning those names
+to survive a session bind or a shared decl plane
+(`haskell/src/Tidepool/Translate.hs`'s `typeMentionsEffectMonad`, narrowed to
+reject only the `Eff` tycon itself — the row still varies per compile, that
+part is unchanged and locked — not "any tycon the generated module declares",
+since Core's tycons no longer regenerate per turn). `EngineConfig` tracks
+BOTH dirs (`core_dir`, stable across a config's whole life; `effects_dir`, the
+shim, swapped per pinned turn by `turn_target`) and pushes both onto the
+include path; `validation_include()` — the shared decl plane's validation
+surface — drops the shim but KEEPS Core, which is the whole mechanism behind
+"an effectful helper DECLARATION persists now": see
+`tidepool-harness/tests/stable_effects_core_decl_plane.rs`.
+
+**Former trap, now resolved by the above:** a bridged data record or an
+`errors` ADT inlined directly in a `type_defs` literal used to be UNSAFE
+(the per-session generated module was fragment-nominal, so an inline record
+could not survive a session bind — `FileRead`/`fs_stable.rs`'s whole story).
+`Tidepool.Records.Bridged`/`Tidepool.Records.Stable` (`stable_errors true`)
+exist as the carve-out that predates this split and generalizes into it: ANY
+`type_defs`/`errors` text now lands in the STABLE Core module regardless of
+whether it's carved out or left inline, so the carve-out is no longer
+load-bearing for fragment-nominal safety — it is harmless, historical
+residue, not a trap. Do not treat "not carved into Records.Bridged/Stable" as
+a defect in new code; a NEW effect can inline its records/errors in
+`type_defs` same as any other effect's, and a session bind of the whole
+`Either <Err> T` a verb returns validates and persists without destructuring
+(see `tidepool-repl/tests/repro_t_multiline_sig.rs`'s
+`either_returning_verb_bind_now_persists_across_turns`).
 
 the `tidepool` binary only wires the handler stack (`build_base_stack`, called
 from `tidepool/src/stack.rs`); the
@@ -96,8 +138,12 @@ through one module, `tidepool-runtime/src/paths.rs`:
 - **Cache (regenerable)** — `$XDG_CACHE_HOME/tidepool` → `~/.cache/tidepool`. Holds
   the materialized **bundled stdlib** (`stdlib/<content-hash>/`, complete tree,
   embedded at build time by `tidepool/build.rs`, re-materialized when the binary
-  changes — no version-stamp staleness), the generated `Tidepool.Effects` module
-  (`effects/`, self-healed per eval), and the compiled-artifact memos.
+  changes — no version-stamp staleness), the generated effects modules
+  (`effects/`, self-healed per eval — TWO content-addressed dirs per compile
+  family, `tidepool-effects-core-<hash>` for the stable `Tidepool.Effects.Core`
+  and `tidepool-effects-<hash>` for the per-window `Tidepool.Effects` shim +
+  `Tidepool.Orchestrate` — see the stable-effects-core section above), and the
+  compiled-artifact memos.
 - **User-global config** — `$TIDEPOOL_CONFIG_DIR` → `$XDG_CONFIG_HOME/tidepool` →
   `~/.config/tidepool`. Holds the global verb `lib/`, `secrets/`, and
   `config.toml`. Legacy `~/.tidepool/{lib,secrets}` is honored if present.

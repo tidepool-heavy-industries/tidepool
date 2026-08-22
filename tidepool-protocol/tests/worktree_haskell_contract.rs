@@ -119,20 +119,20 @@ fn worktree_helper_texts_are_pinned() {
                 "-- | Create a managed worktree. `Left (SourceDirty summary)` when the\n",
                 "-- source is dirty and the spec did not opt in; case-match the error\n",
                 "-- rather than unwrapping if you mean to handle it.\n",
-                "createWorktree :: WorktreeSpec -> M (Either WorktreeError WorktreeHandle)\n",
+                "createWorktree :: forall effs. Member Worktree effs => WorktreeSpec -> Eff effs (Either WorktreeError WorktreeHandle)\n",
                 "createWorktree = send . WorktreeCreate",
             ),
             concat!(
                 "-- | Look a retained worktree up by durable id. Survives restart:\n",
                 "-- resolution reads on-disk registry state, not process memory.\n",
                 "-- `Left (WorktreeLost i)` when it is registered but gone from disk.\n",
-                "lookupWorktree :: WorktreeId -> M (Either WorktreeError WorktreeHandle)\n",
+                "lookupWorktree :: forall effs. Member Worktree effs => WorktreeId -> Eff effs (Either WorktreeError WorktreeHandle)\n",
                 "lookupWorktree = send . WorktreeLookup",
             ),
             concat!(
                 "-- | Every registered worktree, present or lost. A lost tree is listed\n",
                 "-- with `present = False` rather than failing the whole listing.\n",
-                "listWorktrees :: M [WorktreeSummary]\n",
+                "listWorktrees :: forall effs. Member Worktree effs => Eff effs [WorktreeSummary]\n",
                 "listWorktrees = send WorktreeList >>= liftEither",
             ),
             concat!(
@@ -230,7 +230,7 @@ fn worktree_remaining_decl_fields_are_pinned() {
     assert!(wt.prompt_card.is_none());
     assert!(wt.type_params.is_empty());
     assert!(wt.default_row_args.is_empty());
-    assert!(!wt.helpers_row_polymorphic);
+    assert!(wt.helpers_row_polymorphic);
 }
 
 /// Exec and Journal both have EMPTY `type_defs`, so the new

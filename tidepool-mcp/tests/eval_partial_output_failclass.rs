@@ -80,9 +80,9 @@ fn run_capturing_expect_err(code: &str, helpers: &str) -> (Vec<String>, FailureE
         ulp.join("Library.hs").exists(),
         ".tidepool/lib/Library.hs not found"
     );
-    let eff = tidepool_mcp::ensure_effects_module(&decls)
-        .expect("write effects module")
-        .leak() as &Path;
+    let dirs = tidepool_mcp::ensure_effects_module(&decls).expect("write effects module");
+    let core = dirs.core.leak() as &Path;
+    let shim = dirs.shim.leak() as &Path;
 
     let captured = CapturedOutput::new();
     let captured_for_thread = captured.clone();
@@ -111,7 +111,7 @@ fn run_capturing_expect_err(code: &str, helpers: &str) -> (Vec<String>, FailureE
             // live server too. They are stderr-only and do not affect the
             // returned error (which is the clean StackOverflow yield).
             tidepool_codegen::signal_safety::install();
-            let include = [pp, ulp.as_path(), eff];
+            let include = [pp, ulp.as_path(), core, shim];
             let mut handlers = frunk::hlist![ConsoleHandler];
             let env = match compile_and_run(
                 &source,

@@ -82,9 +82,11 @@ fn run_extract(harness_profile: bool) -> (bool, String) {
         cmd.arg("--harness-profile");
     }
     let prelude: PathBuf = prelude_path();
-    let effects: PathBuf = effects_include();
+    let effects = effects_include();
     cmd.arg("--include").arg(&prelude);
-    cmd.arg("--include").arg(&effects);
+    for dir in &effects {
+        cmd.arg("--include").arg(dir);
+    }
 
     let output = cmd.output().expect("spawn tidepool-extract");
     let combined = format!(

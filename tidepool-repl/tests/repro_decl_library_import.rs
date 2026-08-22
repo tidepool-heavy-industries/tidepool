@@ -68,7 +68,9 @@ fn build_server_with_real_library(cwd: PathBuf) -> TidepoolReplServer {
     let effects_dir =
         tidepool_mcp::ensure_effects_module(roster.decls()).expect("write Tidepool.Effects module");
     let prelude_dir = repo_root.join("haskell").join("lib");
-    let base_include = vec![effects_dir, prelude_dir, project_lib];
+    let mut base_include = effects_dir.include_paths().to_vec();
+    base_include.push(prelude_dir);
+    base_include.push(project_lib);
     let session_root_base = std::env::temp_dir().join(format!(
         "tidepool-repl-declimp-{}-{}",
         std::process::id(),

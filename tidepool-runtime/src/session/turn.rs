@@ -1945,7 +1945,12 @@ mod tests {
             tidepool_mcp::PaginateMode::Passthrough,
         ));
         let effect_stack = tidepool_mcp::build_effect_stack_type(&decls);
-        let include: Vec<&Path> = vec![&effects_dir, &prelude_dir];
+        let effects_dirs = effects_dir.include_paths();
+        let mut include: Vec<&Path> = effects_dirs
+            .iter()
+            .map(std::path::PathBuf::as_path)
+            .collect();
+        include.push(&prelude_dir);
 
         // A named bind runs the statement, then yields the (comma-joined,
         // parenthesized) binder tuple — valid for both a single name and an

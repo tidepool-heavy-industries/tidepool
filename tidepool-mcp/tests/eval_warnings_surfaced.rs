@@ -48,10 +48,10 @@ fn run_mcp(code: &str, helpers: &str) -> EvalResult {
         ulp.join("Library.hs").exists(),
         ".tidepool/lib/Library.hs not found"
     );
-    let eff = tidepool_mcp::ensure_effects_module(&decls)
-        .expect("write effects module")
-        .leak() as &Path;
-    let include = [pp, ulp.as_path(), eff];
+    let dirs = tidepool_mcp::ensure_effects_module(&decls).expect("write effects module");
+    let core = dirs.core.leak() as &Path;
+    let shim = dirs.shim.leak() as &Path;
+    let include = [pp, ulp.as_path(), core, shim];
 
     let mut dispatcher = MockDispatcher;
     compile_and_run(&source, "result", &include, &mut dispatcher, &())
