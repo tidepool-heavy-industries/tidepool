@@ -4,7 +4,7 @@
 //! and cross-backend comparison between interpreter `Value` and JIT heap objects.
 
 use tidepool_eval::value::Value;
-use tidepool_repr::{DataConId, Literal};
+use tidepool_repr::Literal;
 
 /// Compare two interpreter Values for structural equality.
 ///
@@ -92,15 +92,16 @@ pub fn assert_values_eq(a: &Value, b: &Value) {
     }
 }
 
-const MAX_HEAP_DEPTH: usize = 1000;
-const MAX_CON_FIELDS: usize = 256;
-
 /// Reconstruct an interpreter `Value` from a JIT heap object pointer.
 ///
-/// Uses an explicit worklist instead of recursion, so deeply nested heap
-/// objects cannot overflow the host stack. Forwarding pointers are followed
-/// per-visit, so GC moves that occur while forcing a thunk in a sibling field
-/// are tolerated.
+/// Thin adapter over the canonical `tidepool_codegen::heap_bridge` decoder —
+/// forcing (thunks along the way are resolved) and closure-tolerant (a
+/// `TAG_CLOSURE` object becomes `heap_bridge::CLOSURE_SENTINEL` rather than an
+/// error, since a differential comparison needs "opaque but present", not a
+/// hard failure). This crate used to carry its own full copy of the decoder;
+/// the only real difference was cosmetic (a synthetic `Value::Closure`
+/// placeholder instead of the sentinel `Con`), so [`contains_closure`]
+/// recognizes both.
 ///
 /// # Safety
 ///
@@ -110,177 +111,26 @@ pub unsafe fn heap_to_value(
     ptr: *const u8,
     vmctx: &mut tidepool_codegen::context::VMContext,
 ) -> Value {
-    use tidepool_heap::layout;
-
-    /// One unit of reconstruction work.
-    enum Work {
-        /// Decode the object at this pointer (carrying its depth).
-        Visit(*const u8, usize),
-        /// Pop `n` finished field values and assemble a `Con`.
-        BuildCon(DataConId, usize),
-    }
-
-    let mut stack: Vec<Work> = vec![Work::Visit(ptr, 0)];
-    let mut results: Vec<Value> = Vec::new();
-
-    while let Some(w) = stack.pop() {
-        match w {
-            Work::Visit(mut ptr, depth) => {
-                if depth > MAX_HEAP_DEPTH {
-                    results.push(Value::ByteArray(std::sync::Arc::new(
-                        std::sync::Mutex::new(vec![]),
-                    )));
-                    continue;
-                }
-
-                // Follow forwarding pointer if GC moved this object during a
-                // previous thunk force (e.g., a sibling Con field).
-                if layout::read_tag(ptr) == layout::TAG_FORWARDED {
-                    ptr = *(ptr.add(8) as *const *const u8);
-                }
-
-                let tag = layout::read_tag(ptr);
-                match tag {
-                    layout::TAG_LIT => {
-                        let lit_tag = *ptr.add(layout::LIT_TAG_OFFSET);
-                        let raw_value = *(ptr.add(layout::LIT_VALUE_OFFSET) as *const i64);
-                        match layout::LitTag::from_byte(lit_tag) {
-                            Some(layout::LitTag::Int) => {
-                                results.push(Value::Lit(Literal::LitInt(raw_value)))
-                            }
-                            Some(layout::LitTag::Word) => {
-                                results.push(Value::Lit(Literal::LitWord(raw_value as u64)))
-                            }
-                            Some(layout::LitTag::Char) => {
-                                let code = *(ptr.add(layout::LIT_VALUE_OFFSET) as *const u32);
-                                results.push(Value::Lit(Literal::LitChar(
-                                    char::from_u32(code).unwrap_or('\u{FFFD}'),
-                                )));
-                            }
-                            Some(layout::LitTag::Float) => {
-                                let bits = *(ptr.add(layout::LIT_VALUE_OFFSET) as *const u32);
-                                results.push(Value::Lit(Literal::LitFloat(bits as u64)));
-                            }
-                            Some(layout::LitTag::Double) => {
-                                results.push(Value::Lit(Literal::LitDouble(raw_value as u64)))
-                            }
-                            // Pointer-carrying lit tags (String=5, Addr=6, ByteArray=7,
-                            // SmallArray=8, Array=9): decode the backing bytes/elements
-                            // faithfully. The CANONICAL reader is
-                            // `tidepool_codegen::heap_bridge::heap_to_value_forcing`;
-                            // this mirrors its byte layout so the differential
-                            // comparison sees the REAL backing bytes (Text/ByteArray),
-                            // not an empty placeholder. Kept in-tree (rather than
-                            // delegating) because this reader's closure/thunk semantics
-                            // differ from heap_bridge's (Closure → sentinel, not error).
-                            Some(layout::LitTag::String) => {
-                                // LitString# — pointer to [len: u64][bytes...] (+8 prefix).
-                                let str_ptr = raw_value as *const u8;
-                                let v = if str_ptr.is_null() {
-                                    Value::Lit(Literal::LitString(vec![]))
-                                } else {
-                                    let len = *(str_ptr as *const u64) as usize;
-                                    let bytes =
-                                        std::slice::from_raw_parts(str_ptr.add(8), len).to_vec();
-                                    Value::Lit(Literal::LitString(bytes))
-                                };
-                                results.push(v);
-                            }
-                            Some(layout::LitTag::ByteArray) => {
-                                // ByteArray# — pointer to [len: u64][bytes...] (+8 prefix).
-                                let ba_ptr = raw_value as *const u8;
-                                let bytes = if ba_ptr.is_null() {
-                                    vec![]
-                                } else {
-                                    let len = *(ba_ptr as *const u64) as usize;
-                                    std::slice::from_raw_parts(ba_ptr.add(8), len).to_vec()
-                                };
-                                results.push(Value::ByteArray(std::sync::Arc::new(
-                                    std::sync::Mutex::new(bytes),
-                                )));
-                            }
-                            Some(layout::LitTag::Addr) => {
-                                // Addr# — raw pointer with no length; empty LitString is
-                                // the safe fallback (matches heap_bridge).
-                                results.push(Value::Lit(Literal::LitString(vec![])));
-                            }
-                            Some(layout::LitTag::SmallArray) | Some(layout::LitTag::Array) => {
-                                // Boxed pointer array: [len: u64][ptr0][ptr1]... Decoded as
-                                // a sentinel Con(DataConId(0), elems) — same contract as
-                                // heap_bridge (the wrapping Con supplies type context).
-                                let arr_ptr = raw_value as *const u8;
-                                if arr_ptr.is_null() {
-                                    results.push(Value::Con(DataConId(0), vec![]));
-                                } else {
-                                    let len =
-                                        (*(arr_ptr as *const u64) as usize).min(MAX_CON_FIELDS);
-                                    stack.push(Work::BuildCon(DataConId(0), len));
-                                    for i in (0..len).rev() {
-                                        let elem_ptr =
-                                            *(arr_ptr.add(8 + 8 * i) as *const *const u8);
-                                        stack.push(Work::Visit(elem_ptr, depth + 1));
-                                    }
-                                }
-                            }
-                            // Unknown lit tag: opaque placeholder.
-                            None => results.push(Value::ByteArray(std::sync::Arc::new(
-                                std::sync::Mutex::new(vec![]),
-                            ))),
-                        }
-                    }
-                    layout::TAG_CON => {
-                        let con_tag = *(ptr.add(layout::CON_TAG_OFFSET) as *const u64);
-                        let num_fields =
-                            *(ptr.add(layout::CON_NUM_FIELDS_OFFSET) as *const u16) as usize;
-                        let num_fields = num_fields.min(MAX_CON_FIELDS);
-                        stack.push(Work::BuildCon(DataConId(con_tag), num_fields));
-                        // Push fields in reverse so they are reconstructed in
-                        // order and `BuildCon` pops them as field[0..n].
-                        for i in (0..num_fields).rev() {
-                            let field_ptr = *(ptr
-                                .add(layout::CON_FIELDS_OFFSET + layout::FIELD_STRIDE * i)
-                                as *const *const u8);
-                            stack.push(Work::Visit(field_ptr, depth + 1));
-                        }
-                    }
-                    layout::TAG_THUNK => {
-                        // Force the thunk first, then decode the result.
-                        let forced = tidepool_codegen::host_fns::heap_force(vmctx, ptr as *mut u8);
-                        stack.push(Work::Visit(forced as *const u8, depth + 1));
-                    }
-                    layout::TAG_CLOSURE => {
-                        // Can't reconstruct a closure — return a sentinel.
-                        results.push(Value::Closure {
-                            env: tidepool_eval::env::Env::new(),
-                            binder: tidepool_repr::VarId(0),
-                            body: tidepool_repr::RecursiveTree {
-                                nodes: vec![tidepool_repr::CoreFrame::Var(tidepool_repr::VarId(0))],
-                            },
-                        });
-                    }
-                    _ => panic!("unknown heap tag: {}", tag),
-                }
-            }
-            Work::BuildCon(tag, n) => {
-                let start = results.len() - n;
-                let fields = results.split_off(start);
-                results.push(Value::Con(tag, fields));
-            }
-        }
-    }
-
-    #[allow(clippy::expect_used, reason = "heap_to_value: empty result stack")]
-    results.pop().expect("heap_to_value: empty result stack")
+    let vmctx_ptr: *mut tidepool_codegen::context::VMContext = vmctx;
+    tidepool_codegen::heap_bridge::heap_to_value_forcing_tolerant(ptr, vmctx_ptr)
+        .unwrap_or_else(|e| panic!("heap_to_value: bridge error: {e}"))
 }
 
 /// Check if a value contains any closures (which can't be structurally compared
-/// across backends).
+/// across backends). Recognizes both the oracle's native `Value::Closure` and
+/// the bridge's `CLOSURE_SENTINEL` placeholder Con (what a JIT-heap-decoded
+/// closure looks like after [`heap_to_value`]).
 pub fn contains_closure(val: &Value) -> bool {
     let mut stack: Vec<&Value> = vec![val];
     while let Some(v) = stack.pop() {
         match v {
             Value::Closure { .. } => return true,
-            Value::Con(_, fields) => stack.extend(fields.iter()),
+            Value::Con(tag, fields) => {
+                if *tag == tidepool_codegen::heap_bridge::CLOSURE_SENTINEL {
+                    return true;
+                }
+                stack.extend(fields.iter());
+            }
             Value::ConFun(_, _, args) => stack.extend(args.iter()),
             _ => {}
         }
@@ -291,6 +141,7 @@ pub fn contains_closure(val: &Value) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tidepool_repr::DataConId;
 
     #[test]
     fn test_lit_equality() {
@@ -384,6 +235,25 @@ mod tests {
                 }
                 other => panic!("expected non-empty ByteArray, got {other}"),
             }
+        }
+    }
+
+    #[test]
+    fn jit_heap_closure_becomes_sentinel_through_compare_reader() {
+        let mut nursery = tidepool_codegen::nursery::Nursery::new(4096);
+        let mut vmctx = nursery.make_vmctx(mock_gc_trigger);
+        unsafe {
+            let ptr = tidepool_codegen::heap_bridge::bump_alloc_from_vmctx(&mut vmctx, 8);
+            *ptr = tidepool_heap::layout::TAG_CLOSURE;
+            let back = heap_to_value(ptr, &mut vmctx);
+            assert!(
+                matches!(&back, Value::Con(id, fields) if *id == tidepool_codegen::heap_bridge::CLOSURE_SENTINEL && fields.is_empty()),
+                "expected a childless CLOSURE_SENTINEL Con, got {back:?}"
+            );
+            assert!(
+                contains_closure(&back),
+                "contains_closure must recognize the bridge's sentinel Con"
+            );
         }
     }
 

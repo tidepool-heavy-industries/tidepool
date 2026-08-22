@@ -30,7 +30,26 @@ fn should_skip(name: &str) -> bool {
     // corpus harness. This suite's fixtures are the test suite's own bindings,
     // and 75 of its lifted locals compare cleanly — excluding the class to
     // silence two pathological ones costs an order of magnitude more coverage
-    // than it buys. The two are named in EXPECTED_EVAL_JIT_DIVERGE instead.
+    // than it buys.
+    //
+    // `xs_t99` / `xs'_t241` ARE skipped as a named pair (not by class): each is
+    // a GHC-lifted local bound to a self-referential, effectively unbounded
+    // list, forced outside the call site that would bound it. Before the
+    // oracle/JIT heap-decoder consolidation this suite forced the JIT side
+    // through a test-local clone of the bridge with its own bespoke
+    // MAX_HEAP_DEPTH=1000 truncation, which silently capped the list and
+    // returned SOME value (diverging from eval's own DepthLimit error — an
+    // expected, not fatal, divergence). The canonical bridge
+    // (`tidepool_codegen::heap_bridge`) this suite now delegates to has NO
+    // such cap on its 2-field Con spine walk BY DESIGN (real 10k+-element
+    // lazy lists are routine and must not be truncated) — so fully forcing
+    // one of these fixtures no longer truncates, it genuinely never
+    // terminates. Skipping outright (rather than expecting a divergence) is
+    // the correct fix: these lifted locals were never meant to be forced
+    // standalone, and the old truncation was masking that, not testing it.
+    if name == "xs_t99" || name == "xs'_t241" {
+        return true;
+    }
     false
 }
 
@@ -44,43 +63,19 @@ const EXPECTED_BOTH_ERROR: &[(&str, &str)] = &[];
 /// Fixtures where eval and JIT legitimately land on different outcomes (eval
 /// errors, JIT produces a value), with the one-line reason. Same
 /// allow-or-fail contract as `EXPECTED_BOTH_ERROR`.
-const EXPECTED_EVAL_JIT_DIVERGE: &[(&str, &str)] = &[
-    (
-        "thunk_blackhole",
-        "GHC Core `thunk_blackhole = let x = x in x` (the real-GHC shape #336's \
-         blackhole_differential.rs cites). eval correctly rejects the \
-         self-reference as a BlackHole (InfiniteLoop). This suite drives \
-         CodegenPipeline::compile_expr directly, not JitEffectMachine::run_pure \
-         (the path blackhole_differential.rs pins to the same contract for a \
-         synthetic LetRec{x=Var(x)} shape) — on the real top-level-lifted Core \
-         form the direct-compile path does not raise runtime_blackhole_trap and \
-         returns a value instead. A real JIT gap specific to this execution \
-         path, left unfixed here (production code is out of scope for this \
-         gate-hardening change).",
-    ),
-    (
-        "xs_t99",
-        "GHC-lifted local helper bound to a self-referential, effectively \
-         unbounded list; standalone execution forces it outside the call site \
-         that would bound it. eval's deep_force walks it fully and hits its own \
-         recursion-depth guard (DepthLimit); the JIT side goes through \
-         compare::heap_to_value, which silently truncates past MAX_HEAP_DEPTH \
-         (1000) instead of erroring — an asymmetry between the two forcing \
-         strategies on an out-of-context fixture, not a real engine divergence. \
-         Named individually rather than excluded as a class: this suite's other \
-         lifted locals compare cleanly and are real coverage. (Name carries an \
-         ordinal disambiguator — 'Tidepool.Translate.stabilizeLocalUniques' /\
-         'Tidepool.GhcPipeline.externalizeInternalTops' — that shifts on every \
-         corpus regeneration; the shape and cause are what's pinned, not the \
-         exact name.)",
-    ),
-    (
-        "xs'_t241",
-        "Same shape and cause as xs_t99 — lifted-local unbounded list, \
-         deep_force DepthLimit vs heap_to_value's silent MAX_HEAP_DEPTH \
-         truncation.",
-    ),
-];
+const EXPECTED_EVAL_JIT_DIVERGE: &[(&str, &str)] = &[(
+    "thunk_blackhole",
+    "GHC Core `thunk_blackhole = let x = x in x` (the real-GHC shape #336's \
+     blackhole_differential.rs cites). eval correctly rejects the \
+     self-reference as a BlackHole (InfiniteLoop). This suite drives \
+     CodegenPipeline::compile_expr directly, not JitEffectMachine::run_pure \
+     (the path blackhole_differential.rs pins to the same contract for a \
+     synthetic LetRec{x=Var(x)} shape) — on the real top-level-lifted Core \
+     form the direct-compile path does not raise runtime_blackhole_trap and \
+     returns a value instead. A real JIT gap specific to this execution \
+     path, left unfixed here (production code is out of scope for this \
+     gate-hardening change).",
+)];
 
 /// A nontrivial floor on how many fixtures must reach a clean comparison.
 /// Observed 312 on a baseline run (tested=349, closure_skip=34, mismatch=0,
