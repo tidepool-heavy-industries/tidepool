@@ -1,12 +1,10 @@
--- | The old two-phase hylomorphism driver over 'Tidepool.Thought.ThoughtF' —
+-- | A two-phase hylomorphism driver over 'Tidepool.Thought.ThoughtF' —
 -- unfold with a coalgebra, recurse into every branch, fold with an algebra.
--- The production recursive companion ("Harness.hs") replaced this with an
--- explicit single recursive walk (@walkGroup@/@walkNode@/@foldAt@) because
--- the fold must stay attached to the node's own window/context ref, which a
--- generic 'Traversable' hylo's single abstract recursion site cannot carry.
--- 'ThoughtDriverTest.hs' is this driver's only remaining caller, exercising
--- 'Tidepool.Thought.ThoughtF''s pure driver contract directly rather than
--- through the companion.
+-- No production harness drives trees this way anymore (the recursive
+-- companion's tree now emerges from model-authored forks, serviced by the
+-- driver — fork-subsumes-split step 4); 'ThoughtDriverTest.hs' is this
+-- driver's only caller, exercising 'Tidepool.Thought.ThoughtF''s pure
+-- driver contract directly.
 module ThoughtDriver
   ( Alg
   , thoughtHylo

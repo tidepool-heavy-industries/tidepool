@@ -6,8 +6,8 @@
 //!
 //! `ReplayProvider` (order-keyed record-replay — see its own doc) is already
 //! the best available mechanism for `acceptance_fanout.rs`/`golden_path.rs`:
-//! `ModelProvider::complete` carries no site/node identity to match on (see
-//! `scripted_provider.rs`'s doc), and these suites are single-threaded and
+//! `ModelProvider::complete` carries no site/node identity to match on (only
+//! `messages` and `max_tokens` ride the wire), and these suites are single-threaded and
 //! deterministic, so serving replies strictly in call order is not a
 //! text-coupling bug — there is nothing to key on BUT order.
 //!

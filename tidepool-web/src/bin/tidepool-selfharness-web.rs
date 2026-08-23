@@ -105,8 +105,8 @@ fn demo_tree(gate: Arc<WebGate>) {
     };
     gate.node_seeded(
         "root/1-finishes",
-        "NODE root/1 — DISCOVER: map how the demo lifecycle renders, end to end. \
-         Finalize a LayerProposal when confident.",
+        "Demo child brief: map how the demo lifecycle renders, end to end. \
+         Finalize when confident.",
     );
     child.post_note("Reading the substrate before deciding anything.");
     let answer = child.present_form(&steering_form());

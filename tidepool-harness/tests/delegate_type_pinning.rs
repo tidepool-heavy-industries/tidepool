@@ -224,9 +224,9 @@ fn compile_delegating_answerer_turn(
 /// M`) can structurally absorb once `resume` anchors the ambient row — see
 /// `concrete_m_library_helpers_remain_unreachable_under_delegate_wrap` below
 /// for the verbs this mechanism CANNOT yet carry, and why. Adapted onto this
-/// bundle's own `Decision` contract type, since the report's
-/// `LayerProposal`/`OperatorSteering` types are defined only in the off-limits
-/// `harness-dogfooding/recursive-companion/Harness.hs` fixture — and must
+/// bundle's own `Decision` contract type, rather than the shipped
+/// companion's own session types (this suite compiles against
+/// `examples/harness`, not the companion fixture) — and must
 /// compile against the narrow row with `Finalize` genuinely pinned to
 /// `Decision`, not the bare default `Void` (the contract-pin half of the
 /// bug: `template_answer_turn` never called `turn_target` with the contract

@@ -202,7 +202,7 @@ fn truncate_at_word_boundary(label: &str, budget: usize) -> String {
 
 /// Render a finalized/failure value STRUCTURED when it parses as a JSON
 /// object — a definition list, one row per field, exactly the shape a
-/// `ProposeFinish`/`FoldDecision`-style answer takes — falling back to the
+/// record-typed `finalize @T` answer takes — falling back to the
 /// original pretty-printed `<pre>` for anything else (a bare scalar, an
 /// array, or text that isn't JSON at all). Every field value is still an
 /// ordinary maud-escaped text node; nothing here renders model text as

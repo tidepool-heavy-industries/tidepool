@@ -489,9 +489,9 @@ cache round is distinguishable from a wasted rewrite in the durable log.
 wire). `prompt_cache_options` is REJECTED (`Unsupported parameter`) and
 `prompt_cache_breakpoint {mode: explicit}` is REJECTED (`not supported on
 this model`) on BOTH `gpt-5.6-terra` and `gpt-5.6-sol` — explicit cache
-breakpoints are unavailable on this backend, so fold-shaped windows (fresh
-transcript + unique opening prompt, e.g. the companion's `runLLMTurnFork`
-algebra windows) are STRUCTURALLY cold: 0% cached on their first round is
+breakpoints are unavailable on this backend, so fresh-transcript agent
+sessions (a unique opening prompt with no shared prefix — e.g. a
+fork-child session) are STRUCTURALLY cold: 0% cached on their first round is
 expected, not a defect, and no request-shape change can fix it here. Do not
 re-probe without reason; do not build breakpoint support against this
 backend. Platform-doc facts that govern interpretation: `prompt_cache_key`

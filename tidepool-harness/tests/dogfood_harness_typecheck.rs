@@ -167,50 +167,31 @@ fn dev_tree_typechecks() {
 
 /// recursive-companion (PRD 21 lane C3) is the third dogfood harness, and it
 /// compiles against the SAME full outer row dev-tree does — it declares no new
-/// effect and asks for no row widening (that is lane C5's, reserved to the
-/// operator), using only `RunLLMTurn`, `AskUser`, `Console` and `Journal` out
-/// of it.
+/// effect and asks for no row widening, using only `RunLLMTurn`, `AskUser`,
+/// `Console` and `Journal` out of it.
 ///
-/// The `extra_decls` pin the four PURE decisions this harness's whole
-/// correctness story rests on, at their exact declared signatures — the same
-/// precedent dev-tree sets with `resumePlanFor`/`amendmentIsNewest`. They
-/// decide from a seed, a proposal or a verdict alone, with no model and no
-/// operator anywhere in the path, so a drift in any of them is a compile
-/// failure here rather than a wrong tree in production:
-///
-/// - `layerFromProposal` turns a window's answer into a layer, INCLUDING the
-///   empty-split and blank-branch cases that become `InvocationFailed`;
-/// - `applyGate` turns one operator verdict into an amended layer, including
-///   the refusals (`Left`) the gate loop re-presents — and takes the acting
-///   node's own `NodeSeed` first, which is what an `Add` verdict redivides
-///   allowance from (see `recursive_companion_gate_add_never_mints_allowance`
-///   below);
-/// - `renderPath`/`childPath` are node identity, and `childPath` in
-///   particular is the ONE function both the coalgebra and the algebra call,
-///   which is why the two cannot disagree about a child's id.
+/// Collapsed around `fork` (fork-subsumes-split step 4): the tree machinery
+/// this probe used to pin (`layerFromProposal`/`applyGate`/`mergePlan`/node
+/// paths) is deleted, not moved — the tree now emerges from a session's own
+/// forks, serviced and budgeted by the driver. What is left to pin is the
+/// locked entry-point contract itself, at exact signatures: the probe body
+/// already drives `loop initialState`/`render`, and the `extra_decls` pin
+/// `resumeLoop` (the opt-in resume entry the driver's structural scan
+/// selects) and `rootPrompt` (the one per-turn request, exported for
+/// scripted-provider keying).
 #[test]
 fn recursive_companion_typechecks() {
     typecheck(
         "harness-dogfooding/recursive-companion",
         outer_row_decls(),
-        "import Tidepool.Thought (ThoughtF)\nimport Data.List.NonEmpty (NonEmpty)\n",
+        "import Tidepool.Resume (ResumeFold)\n",
         concat!(
-            "__layerFromProposal :: NodeSeed -> LayerProposal -> ThoughtF NodeSeed\n",
-            "__layerFromProposal = layerFromProposal\n",
-            "__applyGate :: NodeSeed -> LayerApproval -> ThoughtF NodeSeed -> Either Text (ThoughtF NodeSeed)\n",
-            "__applyGate = applyGate\n",
-            "__renderPath :: NodePath -> Text\n",
-            "__renderPath = renderPath\n",
-            "__childPath :: NodePath -> Int -> Text -> NodePath\n",
-            "__childPath = childPath\n",
-            // PRD 21 lane C5 — the merge fold's pure decisions, at their exact
-            // declared signatures: 'mergePlan' is the lazy-acquisition gate and
-            // declared-order filter, 'mergeNote' is the resolver-outcome
-            // rendering. Neither touches git or an agent.
-            "__mergePlan :: [Maybe Text] -> Maybe (NonEmpty Text)\n",
-            "__mergePlan = mergePlan\n",
-            "__mergeNote :: Text -> MergeStatus -> Text\n",
-            "__mergeNote = mergeNote\n",
+            "__resumeLoop :: ResumeFold -> State -> Companion State\n",
+            "__resumeLoop = resumeLoop\n",
+            "__rootPrompt :: State -> Text\n",
+            "__rootPrompt = rootPrompt\n",
+            "__initialState :: State\n",
+            "__initialState = initialState\n",
         ),
     );
 }
@@ -242,92 +223,6 @@ fn execute_pure(
         Ok(result) => result.to_json(),
         Err(e) => panic!("{harness_dir}'s resume decisions did not run cleanly:\n{e}"),
     }
-}
-
-/// The recursive companion's merge-fold pure decisions
-/// (PRD 21 lane C5), EXECUTED — not merely compiled.
-/// `recursive_companion_typechecks` above pins `mergePlan`/`mergeNote` at
-/// their exact signatures; this is the next rung: it runs them on the real
-/// JIT and asserts what comes back against the two properties the design
-/// names directly — LAZY acquisition (no content-bearing child means no
-/// plan at all) and DECLARED-ORDER preservation (content-bearing children
-/// survive `mergePlan`'s filter in the order they were declared, `Nothing`
-/// entries dropped) — plus `mergeNote`'s rendering of all three
-/// `MergeStatus` outcomes (clean, resolver-resolved, still-conflicted).
-/// No git and no agent anywhere in this path.
-const RECURSIVE_COMPANION_MERGE_SOURCE: &str = concat!(
-    "{-# LANGUAGE NoImplicitPrelude, OverloadedStrings, DataKinds, TypeOperators, ",
-    "FlexibleContexts, GADTs, ScopedTypeVariables, TypeApplications, LambdaCase, ",
-    "RecordWildCards, OverloadedRecordDot, QuasiQuotes, DeriveGeneric, DeriveAnyClass #-}\n",
-    "module MergeFoldProbe where\n",
-    "import Tidepool.Prelude hiding (render)\n",
-    "import Tidepool.Effects\n",
-    "import Harness\n",
-    "import Data.List.NonEmpty (NonEmpty ((:|)))\n",
-    "import qualified Data.Text as T\n",
-    "\n",
-    "verify :: Text -> Bool -> Text\n",
-    "verify name ok = (if ok then \"PASS: \" else \"FAIL: \") <> name\n",
-    "\n",
-    "-- No content-bearing child anywhere: lazy acquisition never fires.\n",
-    "caseAllNothingIsLazy :: Text\n",
-    "caseAllNothingIsLazy = verify \"all-nothing-is-no-plan\" (mergePlan [Nothing, Nothing, Nothing] == Nothing)\n",
-    "\n",
-    "caseEmptyListIsNoPlan :: Text\n",
-    "caseEmptyListIsNoPlan = verify \"empty-list-is-no-plan\" (mergePlan [] == Nothing)\n",
-    "\n",
-    "-- One content-bearing child anywhere is enough to trigger acquisition.\n",
-    "caseOneChildTriggersPlan :: Text\n",
-    "caseOneChildTriggersPlan =\n",
-    "  verify \"one-child-triggers-plan\" (mergePlan [Nothing, Just \"b\", Nothing] == Just (\"b\" :| []))\n",
-    "\n",
-    "-- Declared order preserved, 'Nothing' entries dropped -- never reordered\n",
-    "-- and never deduplicated.\n",
-    "caseDeclaredOrderPreserved :: Text\n",
-    "caseDeclaredOrderPreserved =\n",
-    "  verify \"declared-order-preserved\" (mergePlan [Just \"a\", Nothing, Just \"b\", Just \"c\"] == Just (\"a\" :| [\"b\", \"c\"]))\n",
-    "\n",
-    "caseMergeNoteClean :: Text\n",
-    "caseMergeNoteClean = verify \"note-clean\" (mergeNote \"child\" MergeClean == \"child: merged cleanly\")\n",
-    "\n",
-    "caseMergeNoteResolved :: Text\n",
-    "caseMergeNoteResolved =\n",
-    "  verify \"note-resolved\" (mergeNote \"child\" (MergeResolved \"trivial rename\") == \"child: conflict resolved by an agent — trivial rename\")\n",
-    "\n",
-    "caseMergeNoteConflicted :: Text\n",
-    "caseMergeNoteConflicted =\n",
-    "  verify \"note-conflicted\" (mergeNote \"child\" (MergeConflicted \"too risky\") == \"child: NOT merged — too risky\")\n",
-    "\n",
-    "__mergeFoldReport :: Text\n",
-    "__mergeFoldReport =\n",
-    "  T.intercalate \"\\n\"\n",
-    "    [ caseAllNothingIsLazy, caseEmptyListIsNoPlan, caseOneChildTriggersPlan, caseDeclaredOrderPreserved\n",
-    "    , caseMergeNoteClean, caseMergeNoteResolved, caseMergeNoteConflicted\n",
-    "    ]\n",
-);
-
-#[test]
-fn recursive_companion_merge_fold_decisions_execute() {
-    let json = execute_pure(
-        "harness-dogfooding/recursive-companion",
-        outer_row_decls(),
-        RECURSIVE_COMPANION_MERGE_SOURCE,
-        "__mergeFoldReport",
-    );
-    let report = json
-        .as_str()
-        .expect("__mergeFoldReport :: Text renders as a JSON string");
-    let lines: Vec<&str> = report.lines().collect();
-    let failures: Vec<&&str> = lines.iter().filter(|l| l.starts_with("FAIL")).collect();
-    assert!(
-        failures.is_empty(),
-        "merge-fold decision(s) diverged from the spec:\n{report}"
-    );
-    assert_eq!(
-        lines.len(),
-        7,
-        "expected 7 merge-fold decision checks, got:\n{report}"
-    );
 }
 
 /// One `module ResumeDecisionProbe where` source: hand-built `ResumeFold`
@@ -781,92 +676,4 @@ fn dev_tree_journal_event_round_trips() {
         20,
         "expected 20 journal round-trip checks, got:\n{report}"
     );
-}
-
-/// The Add-mints-allowance regression the external review flagged
-/// (`harness-dogfooding/recursive-companion/Harness.hs`'s `applyGate`, review
-/// 2026-08-19): the `Add` arm built a new branch by cloning a sibling's whole
-/// `NodeSeed` (`withBrief` only overwrites the brief), including the
-/// PER-CHILD allowance the original split computed for the OLD branch count.
-/// Appending a branch changes that count, so handing the new branch — and
-/// leaving every survivor at — its stale share mints allowance the parent's
-/// own reservation never accounted for: allowance 5, two children at 2 each
-/// (`childAllowance` floors `(5-1) \`div\` 2` to 2), an operator `Add`s a
-/// third — the old code gave it another 2, for 2+2+2=6 against the 5-1=4 the
-/// parent actually had to divide.
-///
-/// The fix redivides EVERY kept-plus-added branch's allowance through
-/// `childAllowance` for the NEW count (3), which floors `(5-1) \`div\` 3` to
-/// 1 each — 1+1+1=3 <= 4. This runs `layerFromProposal` (the real split) and
-/// `applyGate` (the real `Add` path) on the real JIT, pure and with no
-/// operator or model, and asserts the exact numbers the review's scenario
-/// names.
-const GATE_ADD_REGRESSION_SOURCE: &str = concat!(
-    "{-# LANGUAGE NoImplicitPrelude, OverloadedStrings, DataKinds, TypeOperators, ",
-    "FlexibleContexts, GADTs, ScopedTypeVariables, TypeApplications, LambdaCase, ",
-    "RecordWildCards, OverloadedRecordDot, QuasiQuotes, DeriveGeneric, DeriveAnyClass #-}\n",
-    "module GateAddProbe where\n",
-    "import Tidepool.Prelude hiding (render)\n",
-    "import Tidepool.Effects\n",
-    "import Harness\n",
-    "import HarnessTypes (layerBranches)\n",
-    "import Tidepool.Thought (ThoughtF)\n",
-    "import qualified Tidepool.Thought as Th\n",
-    "import Tidepool.QQ (fmt)\n",
-    "import qualified Data.Text as T\n",
-    "\n",
-    "-- Never forced: 'layerFromProposal'/'applyGate'/'childAllowance' only read\n",
-    "-- 'seedPath'/'seedAllowance', so a live 'ContextRef' is not needed for this pin.\n",
-    "parentSeed :: NodeSeed\n",
-    "parentSeed = NodeSeed { seedPath = NodePath [], seedBrief = Th.ForkBrief \"root\" Th.Primary \"root brief\", seedDepth = 0, seedAllowance = 5, seedRef = undefined }\n",
-    "\n",
-    "mkBranch :: Text -> ProposedBranch\n",
-    "mkBranch t = ProposedBranch { branchTitle = t, branchRole = Primary, branchInstruction = \"do \" <> t }\n",
-    "\n",
-    "initialLayer :: ThoughtF NodeSeed\n",
-    "initialLayer = layerFromProposal parentSeed (ProposeSplit { splitPosture = Explore, splitFocus = \"f\", splitBranches = [mkBranch \"Alpha\", mkBranch \"Beta\"] })\n",
-    "\n",
-    "addVerdict :: LayerApproval\n",
-    "addVerdict = LayerApproval { gateVerdict = Add, gateTarget = \"\", gateTitle = \"Gamma\", gateRole = Primary, gateText = \"do gamma\", gateNote = \"\" }\n",
-    "\n",
-    "-- An empty list on 'Left' rather than an 'error' call (ambiguous here between\n",
-    "-- 'Tidepool.Prelude.error' and 'Tidepool.Effects.error') — an unexpected\n",
-    "-- 'Left' still fails the assertions below loudly, via branchCount=0.\n",
-    "allowances :: [Int]\n",
-    "allowances = case applyGate parentSeed addVerdict initialLayer of\n",
-    "  Left _ -> []\n",
-    "  Right amended -> map (\\(Th.Branch _ s) -> s.seedAllowance) (layerBranches amended)\n",
-    "\n",
-    "totalFunded :: Int\n",
-    "totalFunded = 1 + sum allowances\n",
-    "\n",
-    "__gateAddReport :: Text\n",
-    "__gateAddReport =\n",
-    "  T.intercalate \"\\n\"\n",
-    "    [ [fmt|branchCount={length allowances}|]\n",
-    "    , [fmt|allowances={show allowances}|]\n",
-    "    , [fmt|totalFunded={totalFunded}|]\n",
-    "    , [fmt|withinCap={totalFunded <= parentSeed.seedAllowance}|]\n",
-    "    ]\n",
-);
-
-/// Runs [`GATE_ADD_REGRESSION_SOURCE`] on the real JIT (pure, no agent, no
-/// git, no operator) and asserts the exact numbers the review's scenario
-/// names: three branches sharing 1 each, total funded pinned at 4 (never the
-/// pre-fix 6), and within the parent's own cap of 5.
-#[test]
-fn recursive_companion_gate_add_never_mints_allowance() {
-    let json = execute_pure(
-        "harness-dogfooding/recursive-companion",
-        outer_row_decls(),
-        GATE_ADD_REGRESSION_SOURCE,
-        "__gateAddReport",
-    );
-    let report = json
-        .as_str()
-        .expect("__gateAddReport :: Text renders as a JSON string");
-    assert!(report.contains("branchCount=3"), "{report}");
-    assert!(report.contains("allowances=[1,1,1]"), "{report}");
-    assert!(report.contains("totalFunded=4"), "{report}");
-    assert!(report.contains("withinCap=True"), "{report}");
 }

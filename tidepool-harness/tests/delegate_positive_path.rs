@@ -1,19 +1,19 @@
 //! PRD 21 C5 — end-to-end acceptance for the delegation surface's POSITIVE
-//! path: a branch-node (coalgebra) window calls `delegate`, the driver's
-//! `SubagentHandler` runs a real saga against a `MockBackend` (a real
-//! temporary git repo, a real worktree/binding table — see
-//! `outer_subagent.rs`'s module doc for why that tier is "real saga, no
-//! model, no tokens"), the typed `DelegateResult` decodes, and the window
-//! finalizes on what it found.
+//! path: the root session calls `delegate`, the driver's `SubagentHandler`
+//! runs a real saga against a `MockBackend` (a real temporary git repo, a
+//! real worktree/binding table — see `outer_subagent.rs`'s module doc for
+//! why that tier is "real saga, no model, no tokens"), the typed
+//! `DelegateResult` decodes, and the session finalizes on what it found —
+//! the result returns INLINE (fork-subsumes-split step 4; the fold-time
+//! `takeDelegatedBranches` read-back died with the tree walk).
 //!
 //! Drives the SHIPPED `harness-dogfooding/recursive-companion/` harness
-//! (same precedent as `companion_recursive_slice.rs`/`dogfood_harness_typecheck.rs`
-//! — a copied fixture would keep passing while the shipped harness rotted).
-//! Unlike that file's scenarios, THIS one boots
-//! `EngineConfig::from_decls(answerer_decls_with_delegate(), ..)
-//! .with_delegate_wrap()` for the nested-answerer config, so the root's
-//! coalgebra (DISCOVER) window compiles against the narrow delegating row
-//! instead of the plain answerer row.
+//! (same precedent as `companion_collapsed_slice.rs`/`dogfood_harness_typecheck.rs`
+//! — a copied fixture would keep passing while the shipped harness rotted),
+//! booting `EngineConfig::from_decls(answerer_decls_with_delegate(), ..)
+//! .with_delegate_wrap()` for the answerer config — the same wiring
+//! `tidepool-web/src/bin/tidepool-selfharness.rs` selects live — so the
+//! root session compiles against the narrow delegating row.
 //!
 //! GHC-heavy: needs `TIDEPOOL_EXTRACT` + the with-packages GHC on PATH
 //! (`--ignore-default-filter` to run).
@@ -30,7 +30,8 @@ use tidepool_agent::seam::CycleResultPayload;
 use tidepool_handlers::{ConsoleHandler, JournalHandler, SegmentPath, SubagentHandler};
 use tidepool_harness::engine::EngineConfig;
 use tidepool_harness::log::{LogHeader, LogWriter};
-use tidepool_harness::provider::DynModelProvider;
+use tidepool_harness::provider::{DynModelProvider, Usage};
+use tidepool_harness::replay::{RecordedReply, ReplayProvider};
 use tidepool_harness::selfharness::operator::FormShape;
 use tidepool_harness::selfharness::persistence;
 use tidepool_harness::{
@@ -38,8 +39,6 @@ use tidepool_harness::{
     SelfHarnessDriver,
 };
 use tidepool_worktree::testing::TestRepo;
-
-use support::scripted_provider::{script, KeyedProvider, PathKey, Phase};
 
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -83,32 +82,36 @@ fn haskell(block: &str) -> String {
     format!("```haskell\n{block}\n```")
 }
 
-/// The root's coalgebra reply: delegate, then finalize on what came back.
-/// `renderDelegateError`/`delegateSummary` are exactly what
-/// `harness-dogfooding/recursive-companion/Harness.hs`'s prompt teaches.
+/// The root session's reply: delegate, then finalize on what came back.
+/// `renderDelegateError`/`delegateSummary` are exactly what the companion's
+/// protocol (`HarnessTypes.companionProtocol`) teaches.
 fn delegating_reply() -> String {
     haskell(
         "do { r <- delegate (DelegateBrief { delegateLabel = \"probe\", \
          delegateInstruction = \"look around\", delegateExpected = \"a one-line summary\" }); \
          case r of { \
-           Left e -> finalize @LayerProposal (ProposeFinish { localAnswer = renderDelegateError e }); \
-           Right ok -> finalize @LayerProposal (ProposeFinish { localAnswer = delegateSummary ok }) } }",
+           Left e -> (finalize @Text (renderDelegateError e) :: M ()); \
+           Right ok -> (finalize @Text (delegateSummary ok) :: M ()) } }",
     )
+}
+
+fn reply(content: String) -> RecordedReply {
+    RecordedReply {
+        content,
+        usage: Usage {
+            input_tokens: 50,
+            output_tokens: 10,
+            cached_input_tokens: None,
+            cache_write_tokens: None,
+        },
+    }
 }
 
 fn state_json() -> Json {
     json!({
-        "question": "SCENARIO: delegate from the root's coalgebra window.",
-        "config": {
-            "maxDepth": 3,
-            "maxNodes": 10,
-            "maxFanOut": 3,
-            "gatePolicy": {"tag": "GateOff"},
-            "gateMaxRounds": 8,
-        },
+        "question": "SCENARIO: delegate from the root session.",
         "turnCount": 0,
         "lastRun": Json::Null,
-        "draft": "",
     })
 }
 
@@ -140,7 +143,7 @@ fn state_json() -> Json {
 /// mechanism (unnameability) was never affected and is proved separately at
 /// the compile level (`delegate_type_pinning.rs`, 5/5 green).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn root_coalgebra_window_delegates_and_finalizes_on_the_result() {
+async fn root_session_delegates_and_finalizes_on_the_result() {
     support::require_extract();
     let _cache_guard = support::isolate_cache();
 
@@ -160,17 +163,8 @@ async fn root_coalgebra_window_delegates_and_finalizes_on_the_result() {
     .expect("delegating answerer engine config over the recursive-companion harness dir")
     .with_delegate_wrap();
 
-    let provider: Arc<dyn DynModelProvider> = Arc::new(KeyedProvider::new(vec![
-        script(PathKey::Exact("root"), Phase::Discover, delegating_reply()),
-        script(
-            PathKey::Prefix(""),
-            Phase::Fold,
-            haskell(
-                "finalize @FoldDecision (FoldDecision { foldSynthesis = \"FOLDED\", \
-                 foldTensions = [] })",
-            ),
-        ),
-    ]));
+    let provider: Arc<dyn DynModelProvider> =
+        Arc::new(ReplayProvider::new(vec![reply(delegating_reply())]));
     let writer = LogWriter::create(&log_path, &header()).expect("log writer");
     let agent = Arc::new(Harness::new(writer, agent_cfg, provider).expect("agent harness boots"));
 
@@ -239,56 +233,28 @@ async fn root_coalgebra_window_delegates_and_finalizes_on_the_result() {
         .filter(|v| !v.is_null())
         .unwrap_or_else(|| panic!("the cycle recorded no lastRun: {state}"));
 
+    // The delegated subagent's OWN typed result (`delegateSummary`, decoded
+    // through the real MockBackend saga) IS the answer the session finalized
+    // — delegate results return inline, and the loop stores the root's typed
+    // value as-is (fork-subsumes-split step 4).
     assert_eq!(
-        last_run.get("runNodes").and_then(Json::as_i64),
-        Some(1),
-        "one node (the root), finished locally after delegating: {last_run}"
-    );
-    assert_eq!(
-        last_run.get("runFailed").and_then(Json::as_i64),
-        Some(0),
-        "the delegation must succeed, not fail the node: {last_run}"
+        last_run.get("runAnswer").and_then(Json::as_str),
+        Some("found one file: README.md"),
+        "lastRun must carry the delegated result the session finalized on: {last_run}"
     );
 
-    let tree = last_run
-        .get("runTree")
-        .and_then(Json::as_array)
-        .expect("runTree is an array")
-        .iter()
-        .map(|v| v.as_str().expect("a tree line is a string").to_string())
-        .collect::<Vec<_>>();
-    assert!(
-        tree.iter().any(|l| l.starts_with("root ")),
-        "no root tree line in {tree:?}"
-    );
-
-    // The journal shows the node actually reached `discover` and `finish` —
-    // ordinary companion bookkeeping, unaffected by delegation. The "finish"
-    // entry's own payload (`journalLayer`, `harness-dogfooding/recursive-companion/
-    // Harness.hs`) carries the coalgebra's raw `draftText` — the ONE place the
-    // delegated subagent's OWN typed result (`delegateSummary`, decoded through
-    // the real MockBackend saga) survives into anything this test can observe:
-    // the tree line itself (`nodeLine`, `HarnessTypes.hs`) is deliberately just
-    // `path  posture  title  badges`, never free text, and the root's
-    // `runAnswer`/algebra-fold synthesis is this scenario's SCRIPTED "FOLDED"
-    // reply, not a real model reading the child's answer.
+    // The loop's own bookkeeping: a "turn" journal entry carrying the answer.
     let journal = tidepool_handlers::load_journal(&journal_path).expect("journal loads");
-    let kinds: Vec<&str> = journal.iter().map(|e| e.kind.as_str()).collect();
-    assert!(
-        kinds.contains(&"finish"),
-        "the root must journal a finish, got {kinds:?}"
-    );
-    let finish_draft = journal
+    let answer_entry = journal
         .iter()
-        .find(|e| e.kind == "finish")
-        .and_then(|e| e.payload.get("draft"))
-        .and_then(Json::as_str)
-        .unwrap_or_else(|| panic!("no \"finish\" journal entry with a \"draft\" field"));
+        .filter(|e| e.kind == "turn")
+        .find_map(|e| e.payload.get("answer").and_then(Json::as_str))
+        .unwrap_or_else(|| panic!("no \"turn\" journal entry with an \"answer\" field"));
     assert!(
-        finish_draft.contains("found one file: README.md"),
-        "the root's finish must carry the delegated subagent's OWN typed \
-         result (delegateSummary), decoded through the real MockBackend \
-         saga — not a placeholder: {finish_draft}"
+        answer_entry.contains("found one file: README.md"),
+        "the turn journal must carry the delegated subagent's OWN typed \
+         result, decoded through the real MockBackend saga — not a \
+         placeholder: {answer_entry}"
     );
 }
 
@@ -329,20 +295,11 @@ async fn direct_subagent_send_dispatches_within_the_answerer_row() {
          spec = spawnSpec wspec \"probe\" \"look around\" }; \
          spawned <- send (SubagentSpawnAsync spec Aeson.Null); \
          case spawned of { \
-           Left _err -> finalize @LayerProposal (ProposeFinish { localAnswer = \"spawn failed\" }); \
-           Right _cyc -> finalize @LayerProposal (ProposeFinish { localAnswer = \"spawned ok\" }) } }",
+           Left _err -> (finalize @Text (\"spawn failed\" :: Text) :: M ()); \
+           Right _cyc -> (finalize @Text (\"spawned ok\" :: Text) :: M ()) } }",
     );
-    let provider: Arc<dyn DynModelProvider> = Arc::new(KeyedProvider::new(vec![
-        script(PathKey::Exact("root"), Phase::Discover, direct_send_reply),
-        script(
-            PathKey::Prefix(""),
-            Phase::Fold,
-            haskell(
-                "finalize @FoldDecision (FoldDecision { foldSynthesis = \"FOLDED\", \
-                 foldTensions = [] })",
-            ),
-        ),
-    ]));
+    let provider: Arc<dyn DynModelProvider> =
+        Arc::new(ReplayProvider::new(vec![reply(direct_send_reply)]));
     let writer = LogWriter::create(&log_path, &header()).expect("log writer");
     let agent = Arc::new(Harness::new(writer, agent_cfg, provider).expect("agent harness boots"));
 
@@ -408,13 +365,9 @@ async fn direct_subagent_send_dispatches_within_the_answerer_row() {
         .filter(|v| !v.is_null())
         .unwrap_or_else(|| panic!("the cycle recorded no lastRun: {state}"));
     assert_eq!(
-        last_run.get("runNodes").and_then(Json::as_i64),
-        Some(1),
-        "one node (the root): {last_run}"
-    );
-    assert_eq!(
-        last_run.get("runFailed").and_then(Json::as_i64),
-        Some(0),
-        "the direct Subagent send must be serviced, not fail the node: {last_run}"
+        last_run.get("runAnswer").and_then(Json::as_str),
+        Some("spawned ok"),
+        "the direct Subagent send must be serviced, and the session's own \
+         finalize must land as the turn's answer: {last_run}"
     );
 }
