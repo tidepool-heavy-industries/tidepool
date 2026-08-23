@@ -430,6 +430,12 @@ pub enum ClassifyError {
     },
     #[error("{constructor}: request is not a constructor application")]
     Malformed { constructor: &'static str },
+    #[error(
+        "classify_hole: unsupported request constructor `{constructor}` — the effect roster \
+         has drifted ahead of classify_hole's match arms; add an explicit arm rather than \
+         letting this fall through to Ask"
+    )]
+    UnsupportedConstructor { constructor: String },
 }
 
 /// Pull a JSON payload's `field` as a [`crate::tree::SiteId`] — `Err` on
@@ -519,9 +525,16 @@ fn require_con_site(
 ///   routed by CONSTRUCTOR NAME to [`HoleRouting::Green`], same discipline as
 ///   `Subagent` above.
 /// - `AskWith` (prompt, payload) — plain [`HoleRouting::Ask`] (a structured
-///   `ask schema prompt`).
-/// - anything else (an unrecognized Con) — treated as a bare Ask with an empty
-///   prompt/`Null` payload, same fallback `decode_askwith` always had.
+///   `ask schema prompt`), the ONLY constructor that decodes to
+///   [`HoleRouting::Ask`] via [`decode_askwith`] (the malformed-`AskUserWith`
+///   fallback above reuses the same decoder, but that is still the
+///   `AskUserWith` arm, not a wildcard).
+/// - anything else (an unrecognized Con, or a request that isn't a `Con` at
+///   all) — a loud [`ClassifyError::UnsupportedConstructor`], NOT a silent
+///   Ask fallback. An unrecognized constructor here means the effect roster
+///   has drifted ahead of this match (a new suspending effect added without a
+///   corresponding arm) — see the mailbox arms above for the exact class of
+///   bug this used to cause silently.
 ///
 /// The routing-selecting fields above (`typedSite`, a fork's site, a fan's
 /// declared count against its prompt list) are VALIDATED, not defaulted —
@@ -629,9 +642,9 @@ pub fn classify_hole(
         // `event_effect_def!` and `RepoEventHandler`'s `mailbox_new`/
         // `mailbox_send`/`mailbox_drop`. Without these three arms a
         // `MailboxNew`/`MailboxSend`/`MailboxDrop` suspension falls through
-        // to the wildcard below and is misclassified as `HoleRouting::Ask`
-        // — which the outer session (no `Ask` in its row) then hard-fails
-        // as an unserviceable hole.
+        // to `ClassifyError::UnsupportedConstructor` — loud, but still a
+        // roster-drift bug worth naming explicitly rather than discovering
+        // via that error.
         | Some("MailboxNew")
         | Some("MailboxSend")
         | Some("MailboxDrop") => ClassifiedHole {
@@ -662,12 +675,22 @@ pub fn classify_hole(
             routing: HoleRouting::Green,
             prompt: String::new(),
         },
-        _ => {
+        Some("AskWith") => {
             let (prompt, payload) = decode_askwith(request, table);
             ClassifiedHole {
                 routing: HoleRouting::Ask { payload },
                 prompt,
             }
+        }
+        Some(other) => {
+            return Err(ClassifyError::UnsupportedConstructor {
+                constructor: other.to_string(),
+            });
+        }
+        None => {
+            return Err(ClassifyError::UnsupportedConstructor {
+                constructor: "<not a constructor application>".to_string(),
+            });
         }
     };
     tracing::info!(routing = ?hole.routing, prompt = %hole.prompt, "suspension classified");
@@ -2786,6 +2809,27 @@ pub fn build_child_answer_value(
         ))
     })?;
     Ok(Value::Con(con, vec![payload]))
+}
+
+/// Put ONE child answer into the shape the parked fork continuation expects
+/// — `Tidepool.Fork`'s `fork`/`forkAll` answer bare `T` ([`ForkSource::ForkEffect`]);
+/// `runLLMTurnFork`-sourced holes answer `Either InvocationExit T`
+/// ([`ForkSource::RunLLMTurn`], via [`build_child_answer_value`] — `Right`
+/// here, this path never folds a fork child as `Left`). The ONE
+/// implementation: `Harness::wrap_fork_answer` derives `table` from the
+/// node's own pending state and calls straight through; the self-harness
+/// driver's fork-servicing paths already carry the round's table and do the
+/// same (sol cross-family review finding 9d — this used to be a second,
+/// table-explicit copy of the same two-arm match in `driver.rs`).
+pub fn wrap_fork_answer(
+    source: ForkSource,
+    value: Value,
+    table: &DataConTable,
+) -> Result<Value, EngineError> {
+    match source {
+        ForkSource::ForkEffect => Ok(value),
+        ForkSource::RunLLMTurn => build_child_answer_value(Ok(value), table),
+    }
 }
 
 /// Shared handle to a provider, so the engine and its forked answerers all use

@@ -3231,23 +3231,20 @@ impl Harness {
     /// The wrap runs against the node's `suspend_table` — the constructor set
     /// this hole was classified from — and hard-fails if `Right` is not in
     /// it, rather than resuming with an unwrapped value the continuation
-    /// would then case-trap on.
+    /// would then case-trap on. A thin `HarnessError` wrapper, deriving
+    /// `table` from node-pending state, over the ONE shared implementation,
+    /// [`engine::wrap_fork_answer`] (sol cross-family review finding 9d).
     fn wrap_fork_answer(
         &self,
         node: NodeId,
         source: engine::ForkSource,
         value: Value,
     ) -> Result<Value, HarnessError> {
-        match source {
-            engine::ForkSource::ForkEffect => Ok(value),
-            engine::ForkSource::RunLLMTurn => {
-                let table = self
-                    .node_pending(node)
-                    .map(|p| p.suspend_table)
-                    .unwrap_or_default();
-                Ok(engine::build_child_answer_value(Ok(value), &table)?)
-            }
-        }
+        let table = self
+            .node_pending(node)
+            .map(|p| p.suspend_table)
+            .unwrap_or_default();
+        Ok(engine::wrap_fork_answer(source, value, &table)?)
     }
 
     /// Force + drive a FORK answerer for `node`'s pending single-fork hole
@@ -4529,20 +4526,16 @@ impl Harness {
         // `parent`'s `suspend_table` is the table its CURRENT hole (the one
         // this fork answers) was classified from — exactly the table `ty` was
         // resolved against.
-        let (parent_transcript, parent_framing) = {
-            let convos = self.convos.lock();
-            let convo = convos.get(&parent).ok_or(HarnessError::NoSession(parent))?;
-            (convo.transcript.clone(), convo.framing.clone())
-        };
         let table = self.node_pending(parent).map(|p| p.suspend_table);
         // The child's transcript = parent prefix + the hole card as a fresh user
         // task. The fork IS the calling agent (inherits scope + framing), so the
-        // parent conversation is genuine context.
-        self.seed_forked_child(
+        // parent conversation is genuine context — [`Self::register_fork_child_with_card`]
+        // is the primitive that reads it (sol cross-family review finding 9e:
+        // this used to re-fetch `parent`'s transcript/framing itself, rather
+        // than building its own card and delegating).
+        self.register_fork_child_with_card(
             parent,
             title,
-            parent_transcript,
-            parent_framing,
             engine::hole_card(prompt, ty, table.as_ref()),
         )
     }
@@ -4553,7 +4546,8 @@ impl Harness {
     /// (multi-round teaching: explore/define rounds, `finalize @T` as the
     /// answer verb) where the resume-based path above builds the one-shot
     /// `engine::hole_card`. Same seeding seam ([`Self::seed_forked_child`]),
-    /// different teaching.
+    /// different teaching. THE primitive: [`Self::register_fork_child`] is
+    /// just its own card construction followed by a call here.
     pub(crate) fn register_fork_child_with_card(
         &self,
         parent: NodeId,

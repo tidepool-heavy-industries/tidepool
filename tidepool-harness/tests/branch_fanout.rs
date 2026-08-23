@@ -447,7 +447,7 @@ impl OperatorGate for FanoutLifecycleGate {
 
 /// The gate seam's node-lifecycle extensions
 /// (`node_seeded`/`node_finalized`/`node_failed`) must cross with the same
-/// fidelity for the CONCURRENT `drive_branch_fanout_child` path that
+/// fidelity for the CONCURRENT `drive_branch_child` path that
 /// `tests/labeled_branch.rs` already pins for the SEQUENTIAL
 /// `service_outer_branch` path: every sibling seeded at birth with its own
 /// authored prompt (not a composed hole card), a finalized value on the
