@@ -10,8 +10,8 @@ use tidepool_agent::seam::{
 };
 use tidepool_agent::spawn::{
     format_running_agents, AnswerFailure, CoupledSpawner, CycleProgress, CycleSaga, OneCycleRun,
-    ParkedCycle, SpawnError as DomainSpawnError, SpawnReceipt, SpawnRequest, SpawnStage,
-    SpawnStep, SpawnWorkspace, WorkerRun,
+    ParkedCycle, SpawnError as DomainSpawnError, SpawnReceipt, SpawnRequest, SpawnStage, SpawnStep,
+    SpawnWorkspace, WorkerRun,
 };
 use tidepool_worktree::error::WorktreeError as DomainWorktreeError;
 use tidepool_worktree::git::GitCli;

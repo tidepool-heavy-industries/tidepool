@@ -963,7 +963,10 @@ mod tests {
         let sentinel = Value::Con(CLOSURE_SENTINEL, Vec::new());
         assert!(contains_closure_sentinel(&sentinel));
 
-        let nested = Value::Con(DataConId(7), vec![Value::Lit(Literal::LitInt(41)), sentinel]);
+        let nested = Value::Con(
+            DataConId(7),
+            vec![Value::Lit(Literal::LitInt(41)), sentinel],
+        );
         assert!(contains_closure_sentinel(&nested));
         assert!(field_contains_closure_sentinel(&nested, 1));
         assert!(!field_contains_closure_sentinel(&nested, 0));
