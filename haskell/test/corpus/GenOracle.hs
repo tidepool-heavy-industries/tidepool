@@ -254,6 +254,12 @@ main = do
   args <- getArgs
   case args of
     [outPath] -> writeFile outPath ("{\n" ++ intercalate ",\n" (map ("  " ++) entries) ++ "\n}\n")
+    -- A bare invocation is `cabal test` running every test-suite stanza
+    -- (the nix build does exactly this) — this generator has nothing to
+    -- generate then, and failing turned the whole package build red.
+    -- Skip-pass, same posture as the expensive-gated suites; misuse
+    -- (wrong ARITY, not zero args) still fails loud.
+    [] -> hPutStrLn stderr "SKIPPED (generator, no output path given): corpus-oracle-gen <output-path>"
     _ -> do
       hPutStrLn stderr "usage: corpus-oracle-gen <output-path>"
       exitFailure
