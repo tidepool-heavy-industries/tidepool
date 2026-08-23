@@ -476,6 +476,13 @@ fn run_one(node: &[u8], meta: &[u8], oracle: Option<OracleEntry>) -> RunOutcome 
 /// expected_tag, bug-class)`. Fixing a bug flips it to `MATCH` (which still
 /// passes — then prune the stale entry).
 ///
+/// Empty: on the GHC-oracle migration's first run, every one of the 119
+/// testable "Corpus" bindings MATCHed GHC — on the JIT (gating) AND on eval
+/// (observational, after `deep_force`) — including the floating-point
+/// transcendental family (`floatingSin`/`pcFloatTranscend`/`pcTranscend`/…),
+/// which was the a-priori risk for a real divergence (differing libm
+/// implementations) and produced none on this platform. No JIT-vs-GHC bug
+/// was found by this migration.
 const KNOWN: &[(&str, &str, &str)] = &[];
 
 #[test]
