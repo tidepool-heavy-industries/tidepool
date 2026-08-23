@@ -1172,6 +1172,37 @@ pub fn answerer_hole_card(
     )
 }
 
+/// Decompose a fork suspension into its validated per-child brief list —
+/// the ONE home for single-vs-fanout normalization and fanout cardinality
+/// integrity (previously re-derived by three servicing paths). A single
+/// fork yields exactly `[single_prompt]`; a fanout yields the decoded
+/// briefs, fan-checked against the decode: `classify_hole` silently drops
+/// a non-Text brief element, and answering with fewer children than the
+/// `[T]` the type system already promised must fail loud, never
+/// under-answer.
+pub fn fork_briefs<'a>(
+    fan: &Option<crate::tree::FanBadge>,
+    prompts: &'a [String],
+    single_prompt: &'a str,
+) -> Result<Vec<&'a str>, EngineError> {
+    match fan {
+        None if prompts.is_empty() => Ok(vec![single_prompt]),
+        _ => {
+            if let Some(crate::tree::FanBadge::Exact { n }) = fan {
+                if *n as usize != prompts.len() {
+                    return Err(EngineError::Run(format!(
+                        "fanout cardinality mismatch: fan={n} but {} brief(s) decoded — a \
+                         non-Text brief element was dropped, or the fan/prompts wire \
+                         fields disagree",
+                        prompts.len()
+                    )));
+                }
+            }
+            Ok(prompts.iter().map(String::as_str).collect())
+        }
+    }
+}
+
 /// Render the "Available effects" cheatsheet a SYSTEM-level framing folds
 /// over its ACTUAL compiling decl list — the single source for a self-
 /// iterating-harness surface's verb docs, so a row with a different effect

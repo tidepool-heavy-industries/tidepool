@@ -4477,36 +4477,16 @@ impl SelfHarnessDriver {
         } else {
             ty
         };
-        // Normalize fork (one implicit prompt) and fanout (N explicit
-        // prompts) to ONE prompt list, so a single concurrent path serves
-        // both — see this method's doc.
-        let owned_prompts: Vec<String>;
-        let prompts: &[String] = if prompts.is_empty() && !is_fanout {
-            owned_prompts = vec![single_prompt.to_string()];
-            &owned_prompts
-        } else {
-            prompts
-        };
+        // Single-vs-fanout normalization + cardinality integrity, via the
+        // ONE home (`engine::fork_briefs`).
+        let prompts: Vec<&str> = engine::fork_briefs(&fan, prompts, single_prompt)
+            .map_err(|e| DriverError::Session(e.to_string()))?;
 
-        // Cardinality integrity — same check `answer_fanout` makes: a
-        // dropped non-Text prompt element must fail loud, never silently
-        // under-answer a `[T]` the type system already committed to.
-        if let Some(FanBadge::Exact { n }) = fan {
-            if n as usize != prompts.len() {
-                return Err(DriverError::Session(format!(
-                    "outer fanout cardinality mismatch: fan={n} but {} prompt(s) decoded \
-                     — a non-Text prompt element was dropped, or the fan/prompts wire \
-                     fields disagree",
-                    prompts.len()
-                )));
-            }
-        }
-
-        for prompt in prompts {
+        for prompt in &prompts {
             self.emit(Event::RunLLMTurnHole {
                 site,
                 ty: element_ty.map(String::from),
-                prompt: prompt.clone(),
+                prompt: (*prompt).to_string(),
             });
         }
 
@@ -5833,7 +5813,7 @@ impl SelfHarnessDriver {
                 self.agent.push_user_turn(node, &msg)?;
                 return Ok(None);
             }
-            // Children run as FULL WINDOWS on the pump
+            // Children run as full sessions on the pump
             // (`drive_fork_child_window` — fork-subsumes-split step 1); the
             // one-shot `Harness::answer_fork`/`answer_fanout` resume path
             // remains only for the general Agent stack's own callers.
@@ -5841,48 +5821,28 @@ impl SelfHarnessDriver {
                 HoleRouting::Fork {
                     site,
                     ty,
-                    fan: None,
-                    source,
-                    ..
-                } => {
-                    let value = self
-                        .drive_fork_child_window(
-                            node,
-                            "fork answerer",
-                            &classified.prompt,
-                            ty.as_deref(),
-                            site.get(),
-                            &table,
-                        )
-                        .await?;
-                    let answer = wrap_fork_value(*source, value, &table)?;
-                    self.agent.resume_with_value(node, &hole, answer).await?;
-                }
-                HoleRouting::Fork {
-                    site,
-                    ty,
-                    fan: Some(fan),
+                    fan,
                     prompts,
                     source,
                 } => {
-                    // Same cardinality-integrity rule as `answer_fanout`.
-                    if let FanBadge::Exact { n } = fan {
-                        if *n as usize != prompts.len() {
-                            return Err(DriverError::Session(format!(
-                                "fanout cardinality mismatch on {node:?}: fan={n} but {} \
-                                 prompt(s) decoded",
-                                prompts.len()
-                            )));
-                        }
-                    }
-                    let element_ty = ty.as_deref().and_then(engine::strip_list_type);
-                    let mut answers = Vec::with_capacity(prompts.len());
-                    for (idx, child_prompt) in prompts.iter().enumerate() {
+                    let briefs = engine::fork_briefs(fan, prompts, &classified.prompt)
+                        .map_err(|e| DriverError::Session(e.to_string()))?;
+                    let element_ty = match fan {
+                        None => ty.as_deref(),
+                        Some(_) => ty.as_deref().and_then(engine::strip_list_type),
+                    };
+                    let mut answers = Vec::with_capacity(briefs.len());
+                    for (idx, brief) in briefs.iter().enumerate() {
+                        let title = if fan.is_none() {
+                            "fork answerer".to_string()
+                        } else {
+                            format!("fanout answerer {idx}")
+                        };
                         let value = self
                             .drive_fork_child_window(
                                 node,
-                                &format!("fanout answerer {idx}"),
-                                child_prompt,
+                                &title,
+                                brief,
                                 element_ty,
                                 site.get(),
                                 &table,
@@ -5890,9 +5850,15 @@ impl SelfHarnessDriver {
                             .await?;
                         answers.push(wrap_fork_value(*source, value, &table)?);
                     }
-                    let list = engine::build_list_value(answers, &table)
-                        .map_err(|e| DriverError::Session(e.to_string()))?;
-                    self.agent.resume_with_value(node, &hole, list).await?;
+                    let answer = if fan.is_none() {
+                        answers
+                            .pop()
+                            .expect("fork_briefs yields exactly one brief for a single fork")
+                    } else {
+                        engine::build_list_value(answers, &table)
+                            .map_err(|e| DriverError::Session(e.to_string()))?
+                    };
+                    self.agent.resume_with_value(node, &hole, answer).await?;
                 }
                 other => {
                     return Err(DriverError::Session(format!(
@@ -6330,60 +6296,50 @@ impl SelfHarnessDriver {
                 ref prompts,
                 source,
             } => {
-                // A thread's fork draws on the SAME window budget as a
+                // A thread's fork draws on the SAME session budget as a
                 // direct one. Refused = handed up as data; the dispatcher
                 // aborts the block and pushes the corrective.
                 let cost = ForkBudget::cost(&classified.routing);
                 if !budget.try_spend(cost) {
                     return Ok(Some(cost));
                 }
-                // Children run as FULL WINDOWS on the pump, exactly like a
-                // direct fork's (fork-subsumes-split step 1); only the
-                // resume differs — the thread's hole is RAW (no node
-                // bookkeeping), so the fresh outcome re-enters the ready
-                // queue, same as every other raw resume in this scheduler.
-                let answer = match fan {
-                    None => {
-                        let value = self
-                            .drive_fork_child_window(
-                                node,
-                                "async fork answerer",
-                                &classified.prompt,
-                                ty.as_deref(),
-                                site.get(),
-                                &table,
-                            )
-                            .await?;
-                        wrap_fork_value(source, value, &table)?
-                    }
-                    Some(fan) => {
-                        if let FanBadge::Exact { n } = fan {
-                            if *n as usize != prompts.len() {
-                                return Err(DriverError::Session(format!(
-                                    "async fanout cardinality mismatch on {node:?}: fan={n} \
-                                     but {} prompt(s) decoded",
-                                    prompts.len()
-                                )));
-                            }
-                        }
-                        let element_ty = ty.as_deref().and_then(engine::strip_list_type);
-                        let mut answers = Vec::with_capacity(prompts.len());
-                        for (idx, child_prompt) in prompts.iter().enumerate() {
-                            let value = self
-                                .drive_fork_child_window(
-                                    node,
-                                    &format!("async fanout answerer {idx}"),
-                                    child_prompt,
-                                    element_ty,
-                                    site.get(),
-                                    &table,
-                                )
-                                .await?;
-                            answers.push(wrap_fork_value(source, value, &table)?);
-                        }
-                        engine::build_list_value(answers, &table)
-                            .map_err(|e| DriverError::Session(e.to_string()))?
-                    }
+                // Children run as full sessions on the pump, exactly like a
+                // direct fork's; only the resume differs — the thread's
+                // continuation is RAW (no node bookkeeping), so the fresh
+                // outcome re-enters the ready queue like every other raw
+                // resume in this scheduler.
+                let briefs = engine::fork_briefs(fan, prompts, &classified.prompt)
+                    .map_err(|e| DriverError::Session(e.to_string()))?;
+                let element_ty = match fan {
+                    None => ty.as_deref(),
+                    Some(_) => ty.as_deref().and_then(engine::strip_list_type),
+                };
+                let mut answers = Vec::with_capacity(briefs.len());
+                for (idx, brief) in briefs.iter().enumerate() {
+                    let title = if fan.is_none() {
+                        "async fork answerer".to_string()
+                    } else {
+                        format!("async fanout answerer {idx}")
+                    };
+                    let value = self
+                        .drive_fork_child_window(
+                            node,
+                            &title,
+                            brief,
+                            element_ty,
+                            site.get(),
+                            &table,
+                        )
+                        .await?;
+                    answers.push(wrap_fork_value(source, value, &table)?);
+                }
+                let answer = if fan.is_none() {
+                    answers
+                        .pop()
+                        .expect("fork_briefs yields exactly one brief for a single fork")
+                } else {
+                    engine::build_list_value(answers, &table)
+                        .map_err(|e| DriverError::Session(e.to_string()))?
                 };
                 let next = self
                     .agent
