@@ -317,6 +317,14 @@ struct PendingHole {
     suspend_asks: AsksSidecar,
 }
 
+/// What crosses a node's parked hole on the node-aware resume path
+/// ([`Harness::resume_parent_input`]): a bridged `Value`, or a borrowed
+/// session-owned heap root (a green thread's settled handle result).
+enum ResumeParentInput {
+    Answer(Value),
+    BorrowedRoot(tidepool_codegen::jit_machine::ValueHandle),
+}
+
 /// The escalation-ladder's rung-2 state (operator-in-the-loop): a child
 /// answerer exhausted its auto-retry and is parked awaiting an operator
 /// decision. IN-PROCESS ONLY — this lives in [`Harness`]'s memory, not the
@@ -2639,6 +2647,28 @@ impl Harness {
         Some((p.hole, p.classified, p.suspend_table, p.raw_request))
     }
 
+    /// The FULL pending record — [`Self::pending_hole_with_request`] plus the
+    /// asks sidecar the suspension's site ids resolve against. What the
+    /// answerer-plane green scheduler
+    /// (`SelfHarnessDriver::service_answerer_green`) needs: within one round
+    /// every chain (the node's own turn and every green thread it spawned)
+    /// shares ONE compile, so the table+asks captured off the node's pending
+    /// record classify every thread-raised suspension of that round too.
+    #[allow(clippy::type_complexity)]
+    pub(crate) fn pending_suspend_artifacts(
+        &self,
+        node: NodeId,
+    ) -> Option<(HoleId, ClassifiedHole, DataConTable, AsksSidecar, Value)> {
+        let p = self.node_pending(node)?;
+        Some((
+            p.hole,
+            p.classified,
+            p.suspend_table,
+            p.suspend_asks,
+            p.raw_request,
+        ))
+    }
+
     /// Resume `node`'s parked continuation with a RAW `Value` answer,
     /// bypassing [`Self::answer_dialog`]'s `Ask`/`AskUser`/`ReadState`
     /// routing restriction — for a suspension whose answer is already a
@@ -2655,6 +2685,24 @@ impl Harness {
     ) -> Result<(), HarnessError> {
         let _lease = self.acquire_turn_lease(node)?;
         self.resume_parent(node, hole, value).await
+    }
+
+    /// [`Self::resume_with_value`]'s borrowed-root sibling: deliver a green
+    /// thread's session-owned heap result to `node`'s own parked turn
+    /// (answerer-plane `wait` on a thread whose value settled by handle),
+    /// keeping the node-aware re-publish bookkeeping [`Self::resume_parent`]
+    /// does. The root stays owned by the session realm — this borrows it, the
+    /// same delivery `ResidentSession::resume_handle_borrowed` performs on
+    /// the outer plane's raw path.
+    pub(crate) async fn resume_with_borrowed_root(
+        &self,
+        node: NodeId,
+        hole: &HoleId,
+        handle: tidepool_codegen::jit_machine::ValueHandle,
+    ) -> Result<(), HarnessError> {
+        let _lease = self.acquire_turn_lease(node)?;
+        self.resume_parent_input(node, hole, ResumeParentInput::BorrowedRoot(handle))
+            .await
     }
 
     /// Reconstruct a [`TurnOutcome::Suspended`] from `node`'s CURRENT pending
@@ -3344,6 +3392,158 @@ impl Harness {
         Ok(children)
     }
 
+    /// Answer a `HoleRouting::Fork` suspension parked on a RAW session hole —
+    /// a green THREAD's `fork @T`/`forkAll @T`, not the node's own pending
+    /// hole (`SelfHarnessDriver`'s answerer-plane green scheduler is the one
+    /// caller). The child machinery is [`Self::answer_fork`]/
+    /// [`Self::answer_fanout`]'s, REUSED piecewise: children register under
+    /// `parent` (transcript forked at the checkpoint, `parent`'s decl-plane
+    /// root on their include, finalize pinned from the site's own resolved
+    /// modules), drive to a value sequentially against the one shared
+    /// machine, and the assembled answer resumes the THREAD's hole via a raw
+    /// session resume — the thread has no node bookkeeping to re-publish, so
+    /// the fresh [`ResidentOutcome`] is handed back to the scheduler to
+    /// re-enter its ready queue, exactly how the outer plane's own raw
+    /// resumes feed its loop.
+    ///
+    /// `table` is the ROUND's compile table (every chain of a round shares
+    /// one compile): answer wrapping (`Right` for `runLLMTurnFork`-sourced
+    /// holes) and `[T]` assembly bridge against it, the same role
+    /// `suspend_table` plays on the node-pending path.
+    pub(crate) async fn answer_fork_hole_raw(
+        &self,
+        parent: NodeId,
+        hole: &str,
+        routing: &HoleRouting,
+        prompt: &str,
+        table: &DataConTable,
+    ) -> Result<ResidentOutcome, HarnessError> {
+        let _lease = self.acquire_turn_lease(parent)?;
+        let HoleRouting::Fork {
+            site,
+            ty,
+            fan,
+            prompts,
+            source,
+        } = routing
+        else {
+            return Err(HarnessError::RoutingMismatch {
+                node: parent,
+                routing: "fork (raw hole)",
+                actual: format!("{routing:?}"),
+            });
+        };
+        let sid = self
+            .tree
+            .session_of(parent)
+            .ok_or(HarnessError::NoSession(parent))?;
+        let site_modules = self.asks_modules(parent, site.get());
+
+        let wrap = |value: Value| -> Result<Value, HarnessError> {
+            match source {
+                engine::ForkSource::ForkEffect => Ok(value),
+                engine::ForkSource::RunLLMTurn => {
+                    Ok(engine::build_child_answer_value(Ok(value), table)?)
+                }
+            }
+        };
+
+        let answer = match fan {
+            None => {
+                let site_ty = ty.as_deref();
+                let finalize_pin = site_ty.map(|t| (t, site_modules.as_slice()));
+                let child =
+                    self.register_fork_child(parent, "async fork answerer", prompt, site_ty)?;
+                if let Err(e) = self.force_with_extra_include(
+                    child,
+                    Actor::Operator,
+                    vec![node_session_dir(&self.run_id, parent)],
+                ) {
+                    self.cleanup_failed_child(child);
+                    return Err(e);
+                }
+                let value = match self
+                    .drive_answerer_to_value(
+                        child,
+                        parent,
+                        site_ty,
+                        engine::DEFAULT_MAX_TURNS,
+                        &self.child_cfg_for_fork_of(parent),
+                        finalize_pin,
+                    )
+                    .await
+                {
+                    Ok(v) => v,
+                    Err(e) => {
+                        self.cleanup_failed_child(child);
+                        return Err(e);
+                    }
+                };
+                let _ = self.tree.node_done(child, "answer delivered".to_string());
+                let _ = self.terminate_node(child, "answer delivered");
+                wrap(value)?
+            }
+            Some(fan) => {
+                // Same cardinality-integrity rule as `answer_fanout`: `fan`
+                // is authoritative; a shorter decoded `prompts` means a
+                // non-Text brief was silently dropped — under-answering the
+                // `[T]` the type already promised. Fail loud.
+                if let FanBadge::Exact { n } = fan {
+                    if *n as usize != prompts.len() {
+                        return Err(HarnessError::Resident(format!(
+                            "async fanout cardinality mismatch on {parent:?}: fan={n} but {} \
+                             prompt(s) decoded",
+                            prompts.len()
+                        )));
+                    }
+                }
+                let element_ty = ty.as_deref().and_then(engine::strip_list_type);
+                let finalize_pin = element_ty.map(|t| (t, site_modules.as_slice()));
+                let mut answers = Vec::with_capacity(prompts.len());
+                for (idx, child_prompt) in prompts.iter().enumerate() {
+                    let child = self.register_fork_child(
+                        parent,
+                        &format!("async fanout answerer {idx}"),
+                        child_prompt,
+                        element_ty,
+                    )?;
+                    if let Err(e) = self.force_with_extra_include(
+                        child,
+                        Actor::Operator,
+                        vec![node_session_dir(&self.run_id, parent)],
+                    ) {
+                        self.cleanup_failed_child(child);
+                        return Err(e);
+                    }
+                    let value = match self
+                        .drive_answerer_to_value(
+                            child,
+                            parent,
+                            element_ty,
+                            self.cfg.max_child_turns,
+                            &self.child_cfg_for_fork_of(parent),
+                            finalize_pin,
+                        )
+                        .await
+                    {
+                        Ok(v) => v,
+                        Err(e) => {
+                            self.cleanup_failed_child(child);
+                            return Err(e);
+                        }
+                    };
+                    let _ = self.tree.node_done(child, "answer delivered".to_string());
+                    let _ = self.terminate_node(child, "answer delivered");
+                    answers.push(wrap(value)?);
+                }
+                engine::build_list_value(answers, table)?
+            }
+        };
+
+        self.with_session(sid, |s| s.resume(ResidentHole::plain(hole), answer))?
+            .map_err(|e| HarnessError::Resident(format!("async fork resume failed: {e}")))
+    }
+
     /// Answer an in-context `runLLMTurn` hole: the SAME node's model writes
     /// `resume expr`, which runs via `run_child` against the (suspended) node's
     /// own session to produce the Value, then resumes it. No child node.
@@ -3914,6 +4114,29 @@ impl Harness {
         hole: &HoleId,
         answer: Value,
     ) -> Result<(), HarnessError> {
+        self.resume_parent_input(node, hole, ResumeParentInput::Answer(answer))
+            .await
+    }
+
+    /// [`Self::resume_parent`] generalized over WHAT crosses the hole: a
+    /// bridged `Value`, or a BORROWED session-owned heap root (a green
+    /// thread's settled closure/handle result delivered to the node's own
+    /// turn — the same borrow `ResidentSession::resume_handle_borrowed`
+    /// performs on the raw path, here with the node-aware re-publish
+    /// bookkeeping kept intact).
+    ///
+    /// A borrowed-root resume is refused on a [`ResidentHole::Binding`] hole:
+    /// the raw `resume_handle_borrowed` seam carries no binder/generation
+    /// obligation, so honoring it here would silently drop the binding the
+    /// hole owes. No current caller can hit this (green primary holes are
+    /// mid-expression `Plain` parks), but the refusal keeps the gap loud if
+    /// one ever does.
+    async fn resume_parent_input(
+        &self,
+        node: NodeId,
+        hole: &HoleId,
+        input: ResumeParentInput,
+    ) -> Result<(), HarnessError> {
         let sid = self
             .tree
             .session_of(node)
@@ -3936,6 +4159,14 @@ impl Harness {
             pending.resident_hole,
         );
 
+        if matches!(input, ResumeParentInput::BorrowedRoot(_))
+            && !matches!(resident_hole, ResidentHole::Plain(_))
+        {
+            return Err(HarnessError::Resident(format!(
+                "node {node:?}: a borrowed-root resume cannot honor a Binding hole's \
+                 binder obligation — refuse rather than silently drop it"
+            )));
+        }
         let checkout = self.checkout_resume(node, hole)?;
         // ONE consuming resume: `resident_hole` already carries its own
         // completion obligation (`ResidentHole::Binding` materializes on
@@ -3943,7 +4174,12 @@ impl Harness {
         // external flag to pick a method by.
         let outcome = self
             .run_checked_out(node, checkout, move |mut session| {
-                let out = session.resume(resident_hole, answer);
+                let out = match input {
+                    ResumeParentInput::Answer(answer) => session.resume(resident_hole, answer),
+                    ResumeParentInput::BorrowedRoot(h) => {
+                        session.resume_handle_borrowed(resident_hole.cont_id(), h)
+                    }
+                };
                 (session, out)
             })
             .await?;

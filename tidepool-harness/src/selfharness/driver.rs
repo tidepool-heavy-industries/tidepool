@@ -92,7 +92,7 @@ use crate::selfharness::persistence::{self, PersistenceError};
 use crate::selfharness::state_cross;
 use crate::snapshot::SnapshotDigest;
 use crate::timing;
-use crate::tree::{FanBadge, NodeId};
+use crate::tree::{FanBadge, HoleId, NodeId};
 
 #[derive(Debug, thiserror::Error)]
 pub enum DriverError {
@@ -366,6 +366,82 @@ fn green_int_list_field(request: &Value, idx: usize, table: &DataConTable) -> Ve
         .and_then(|j| j.as_array().cloned())
         .map(|arr| arr.iter().filter_map(|v| v.as_i64()).collect())
         .unwrap_or_default()
+}
+
+/// Round-scoped scheduler state for green threads spawned by an ANSWERER
+/// window's own block (`async (fork @T brief)` and friends) — the
+/// answerer-plane sibling of the loop-scoped locals
+/// [`SelfHarnessDriver::run_loop_fragment_inner`] owns for the AUTHORED
+/// outer loop. The plane split mirrors the fork machinery's own
+/// ([`crate::harness::Harness::answer_fork`] vs
+/// [`SelfHarnessDriver::service_outer_fanout`]): thread chains are serviced
+/// by the SAME [`SelfHarnessDriver::service_green_hole`] (raw session
+/// resumes — correct for thread frames, which live under their own realms),
+/// while every resume of the NODE's own turn goes through the node-aware
+/// path (`Harness::resume_with_value`/`resume_with_borrowed_root`), which
+/// restores the node's realm/scope and keeps its pending-hole record
+/// truthful — a raw `with_session` resume would run the node's continuation
+/// under `OUTER_REALM` and leave its bookkeeping stale.
+///
+/// ROUND-scoped, exactly as the outer scheduler is fragment-scoped: one
+/// round = one compile = one `DataConTable`/asks sidecar shared by every
+/// chain, which is what lets thread suspensions classify against the node's
+/// pending artifacts. A thread still running when its round ends is SWEPT
+/// (realm closed, frames dropped) — spawn and wait belong in the same
+/// block, and the corrective prompt says so when anything was dropped.
+struct AnswererGreen {
+    threads: HashMap<i64, GreenThread>,
+    /// THREAD-chain joiners only. The node's own `wait` never registers
+    /// here — [`SelfHarnessDriver::service_green_hole`]'s
+    /// `wake_green_waiters` resumes waiters RAW, which must never touch the
+    /// node chain; the node's blocked join is instead re-checked (a pure
+    /// winner scan, no session touch) each scheduler iteration.
+    waiters: HashMap<i64, Vec<(GreenChain, String)>>,
+    ready: VecDeque<GreenReady>,
+    next_tid: i64,
+    next_thread_realm: u64,
+}
+
+/// Answerer-plane thread realms mint their low bits from this process-wide
+/// sequence, starting at `1 << 32` — disjoint by construction from the outer
+/// scheduler's per-fragment counters (which start at 1 and stay tiny), so an
+/// answerer window's threads can never collide with the authored loop's own
+/// live threads on the one shared session. Each round grabs a `1 << 20`
+/// block; no round comes near exhausting one.
+static ANSWERER_GREEN_REALM_SEQ: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(1 << 32);
+
+impl AnswererGreen {
+    fn new() -> Self {
+        AnswererGreen {
+            threads: HashMap::new(),
+            waiters: HashMap::new(),
+            ready: VecDeque::new(),
+            next_tid: 1,
+            next_thread_realm: ANSWERER_GREEN_REALM_SEQ
+                .fetch_add(1 << 20, std::sync::atomic::Ordering::Relaxed),
+        }
+    }
+}
+
+/// How [`SelfHarnessDriver::service_answerer_green`] hands control back to
+/// the answerer dispatcher: the node's own turn parked on a non-Green hole
+/// (route it), or ran to completion without finalizing (corrective retry).
+enum AnswererGreenExit {
+    NodeParked,
+    NodeDone,
+}
+
+/// The corrective line appended when a round ends with green threads still
+/// running — the round-scoped structured-concurrency contract, stated at the
+/// moment it bit rather than left to be rediscovered.
+fn dropped_threads_warning(dropped: usize) -> String {
+    format!(
+        "Note: {dropped} async thread(s) from that block were still running and were \
+         DROPPED — their handles are now dead. Threads do not survive their block: \
+         `async`, `wait`, and the `finalize` that uses the results belong in the SAME \
+         ```haskell block."
+    )
 }
 
 struct OuterSession {
@@ -3073,7 +3149,7 @@ impl SelfHarnessDriver {
     /// register a waiter instead of answering immediately.
     #[allow(clippy::too_many_arguments)]
     fn service_green_hole(
-        &mut self,
+        &self,
         chain: GreenChain,
         hole: &str,
         request: &Value,
@@ -3405,7 +3481,7 @@ impl SelfHarnessDriver {
     /// `ready`. Shared by `AsyncDoneWith` (a settle) and `AsyncCancelWith` (a
     /// cancellation) servicing.
     fn wake_green_waiters(
-        &mut self,
+        &self,
         tid: i64,
         table: &DataConTable,
         sid: tidepool_repr::SessionId,
@@ -4677,7 +4753,7 @@ impl SelfHarnessDriver {
         let mut rounds: u32 = 0;
         let mut nudged = false;
         let mut ultimatum = false;
-        loop {
+        'round: loop {
             let cap = self.loop_inference_call_cap;
             if self.loop_inference_calls.load(Ordering::SeqCst) >= cap {
                 return Err(DriverError::Session(format!(
@@ -4758,93 +4834,133 @@ impl SelfHarnessDriver {
             }
             match outcome {
                 Ok(out @ TurnOutcome::Suspended { .. }) => {
-                    // A Finalize suspension is the answer. An AskUser suspension
-                    // (operator gui) is SERVICED here via the operator gate
-                    // (`service_askuser_hole`, looping on askUser's Haskell-side
-                    // decode-failure re-prompt). A Fork suspension (`forkAll`/
-                    // `fork` delegation) is serviced via the EXISTING fanout/fork
-                    // machinery (`drain_answerer_fork`, REUSED not reimplemented).
-                    // A Note suspension (`note text`, display-only) is drained
-                    // FIRST, purely via resumes (no model round): the block may
-                    // read `note "..." >> choose [...]`, so the FIRST classified
-                    // hole here is routinely `Note`, not the thing that follows
-                    // it. Any OTHER suspension is a hard error: the scoped
-                    // answerer stack (`[AskUser, Fork, ReadState, Green, Finalize]`) can reach
-                    // nothing else, and this driver has no operator for it.
+                    // The round's SERVICING DISPATCHER. A Finalize suspension
+                    // is the answer. Everything else is serviced and the
+                    // fresh suspension re-dispatched, so the four families
+                    // COMPOSE in any order within one block: operator forms
+                    // (`service_askuser_hole`), fork delegation
+                    // (`drain_answerer_fork` — REUSED, not reimplemented),
+                    // green threads (`service_answerer_green` — the
+                    // answerer-plane scheduler behind `async (fork @T …)`),
+                    // and the mechanical resumes (`note`/`getStateJson`/
+                    // `delegate`, via `drain_note_holes`). Any OTHER
+                    // suspension is a hard error: the scoped answerer stack
+                    // (`[AskUser, Fork, ReadState, Green, Finalize]`) can
+                    // reach nothing else, and this driver has no operator
+                    // for it.
+                    //
+                    // `green` is ROUND-scoped (one compile = one table for
+                    // every chain); at the round's end it is SWEPT — a
+                    // thread still running when the block finalizes or
+                    // completes is dropped, and the corrective prompt names
+                    // the count when anything was.
                     let TurnOutcome::Suspended { hole, classified } = out else {
                         unreachable!("matched TurnOutcome::Suspended above");
                     };
-                    let (hole, classified) =
-                        match self.drain_note_holes(node, hole, classified).await? {
-                            Some(pair) => pair,
-                            None => {
-                                // The note chain resolved (the answerer's block
-                                // completed) WITHOUT finalize — same corrective
-                                // retry as a plain Completed turn below. A note
-                                // resume is NOT a model round: `rounds` stays
-                                // untouched, only this outer loop repeats.
-                                self.agent.reopen_node(node)?;
-                                self.agent.push_user_turn(
-                                    node,
-                                    &format!(
-                                        "That did not resolve the request. Answer by \
-                                         evaluating `(finalize @{ty_label} value :: M \
-                                         {ty_label})` — the whole expression must carry \
-                                         the type annotation, not just the argument."
-                                    ),
-                                )?;
-                                continue;
-                            }
+                    let mut green: Option<AnswererGreen> = None;
+                    let mut current = Some((hole, classified));
+                    let finalized: Option<TurnOutcome> = loop {
+                        // Mechanical holes first (note/getStateJson/delegate)
+                        // — the block may read `note "..." >> choose [...]`,
+                        // so the current hole is routinely `Note`, not the
+                        // thing that follows it.
+                        let Some((hole, classified)) = current.take() else {
+                            break None;
                         };
-                    if matches!(classified.routing, HoleRouting::Finalize { .. }) {
-                        return Ok(Ok(TurnOutcome::Suspended { hole, classified }));
-                    }
-                    if let HoleRouting::AskUser { shape } = &classified.routing {
-                        match self.service_askuser_hole(node, shape).await? {
-                            Some(finalize_outcome) => return Ok(Ok(finalize_outcome)),
-                            None => {
-                                // The askUser chain resolved (the answerer's block
-                                // completed) WITHOUT finalize — same corrective
-                                // retry as a plain Completed turn below. A form
-                                // resume is NOT a model round (see
-                                // `service_askuser_hole`'s doc): `rounds` stays
-                                // untouched, only this outer loop repeats.
-                                self.agent.reopen_node(node)?;
-                                self.agent.push_user_turn(
-                                    node,
-                                    &format!(
-                                        "That did not resolve the request. Answer by \
-                                         evaluating `(finalize @{ty_label} value :: M \
-                                         {ty_label})` — the whole expression must carry \
-                                         the type annotation, not just the argument."
-                                    ),
-                                )?;
-                                continue;
+                        let Some((hole, classified)) =
+                            self.drain_note_holes(node, hole, classified).await?
+                        else {
+                            break None;
+                        };
+                        match &classified.routing {
+                            HoleRouting::Finalize { .. } => {
+                                break Some(TurnOutcome::Suspended { hole, classified });
+                            }
+                            HoleRouting::AskUser { shape } => {
+                                match self.service_askuser_hole(node, shape).await? {
+                                    Some(TurnOutcome::Suspended {
+                                        hole: h,
+                                        classified: c,
+                                    }) => current = Some((h, c)),
+                                    Some(_) | None => break None,
+                                }
+                            }
+                            HoleRouting::Fork { .. } => {
+                                match self.drain_answerer_fork(node, ty_label).await? {
+                                    Some(TurnOutcome::Suspended {
+                                        hole: h,
+                                        classified: c,
+                                    }) => current = Some((h, c)),
+                                    // Completed without finalizing —
+                                    // `drain_answerer_fork` already reopened
+                                    // the node and pushed its corrective.
+                                    Some(_) | None => {
+                                        if let Some(g) = green.as_mut() {
+                                            let dropped = self.sweep_answerer_green(g);
+                                            if dropped > 0 {
+                                                self.agent.push_user_turn(
+                                                    node,
+                                                    &dropped_threads_warning(dropped),
+                                                )?;
+                                            }
+                                        }
+                                        continue 'round;
+                                    }
+                                }
+                            }
+                            HoleRouting::Green => {
+                                let g = green.get_or_insert_with(AnswererGreen::new);
+                                match self.service_answerer_green(node, g).await? {
+                                    AnswererGreenExit::NodeParked => {
+                                        current = self
+                                            .agent
+                                            .pending_hole_full(node)
+                                            .map(|(h, c, _)| (h.0, c));
+                                    }
+                                    AnswererGreenExit::NodeDone => break None,
+                                }
+                            }
+                            other => {
+                                // A suspension this driver cannot service.
+                                // Hard error rather than silently hanging.
+                                return Err(DriverError::Session(format!(
+                                    "runLLMTurn answerer suspended on a hole this driver \
+                                     has no operator for ({other:?})"
+                                )));
                             }
                         }
+                    };
+                    let dropped = green
+                        .as_mut()
+                        .map(|g| self.sweep_answerer_green(g))
+                        .unwrap_or(0);
+                    if let Some(answer) = finalized {
+                        // Finalize won; a still-running thread losing the
+                        // race to it is the documented spawn-and-wait-in-one-
+                        // block contract, swept silently above.
+                        return Ok(Ok(answer));
                     }
-                    // The answerer delegated to `forkAll`/`fork`: service it via
-                    // the existing fanout/fork machinery (REUSED, not
-                    // reimplemented) rather than handing it to an operator that
-                    // doesn't exist here.
-                    if matches!(classified.routing, HoleRouting::Fork { .. }) {
-                        if let Some(out) = self.drain_answerer_fork(node, ty_label).await? {
-                            return Ok(Ok(out));
-                        }
-                        // The parent completed without ever finalizing —
-                        // `drain_answerer_fork` already reopened the node and
-                        // pushed a corrective nudge. Keep driving.
-                        continue;
-                    }
-                    // A non-finalize, non-askUser, non-fork suspension: the
-                    // answerer parked awaiting input this driver cannot service.
-                    // Hard error rather than silently hanging.
-                    return Err(DriverError::Session(format!(
-                        "runLLMTurn answerer suspended on a non-finalize, non-askUser, \
-                         non-fork hole ({:?}) — the self-harness driver has no operator \
-                         to answer it",
-                        classified.routing
-                    )));
+                    // The chain resolved (the answerer's block completed)
+                    // WITHOUT finalize — same corrective retry as a plain
+                    // Completed turn below. Servicing resumes are NOT model
+                    // rounds: `rounds` stays untouched, only this outer loop
+                    // repeats.
+                    self.agent.reopen_node(node)?;
+                    let warn = if dropped > 0 {
+                        format!("\n\n{}", dropped_threads_warning(dropped))
+                    } else {
+                        String::new()
+                    };
+                    self.agent.push_user_turn(
+                        node,
+                        &format!(
+                            "That did not resolve the request. Answer by \
+                             evaluating `(finalize @{ty_label} value :: M \
+                             {ty_label})` — the whole expression must carry \
+                             the type annotation, not just the argument.{warn}"
+                        ),
+                    )?;
+                    continue;
                 }
                 // A plain value: the block ran to completion WITHOUT
                 // `finalize`, so the node is now `Done`. Reopen it
@@ -4939,10 +5055,11 @@ impl SelfHarnessDriver {
     /// `askUser`'s unbounded re-prompt recursion into a hot loop no existing
     /// cap catches.
     ///
-    /// Returns `Ok(Some(outcome))` when the chain resolves to a `Finalize`
-    /// suspension — built from [`Harness::pending_hole_full`] read right
-    /// after the resume, since `answer_dialog` itself returns no outcome —
-    /// the caller returns it as the hole's answer. Returns `Ok(None)` when a
+    /// Returns `Ok(Some(outcome))` when the chain resolves to any
+    /// non-form suspension (`Finalize`, a fork, a green `wait`, …) — built
+    /// from [`Harness::pending_hole_full`] read right after the resume,
+    /// since `answer_dialog` itself returns no outcome — which the caller's
+    /// dispatcher routes. Returns `Ok(None)` when a
     /// resume completes the node with NO pending hole (the answerer's block
     /// finished without ever calling `finalize`); the caller falls through to
     /// its existing completed-without-finalize corrective retry. `Err` on a
@@ -4972,19 +5089,16 @@ impl SelfHarnessDriver {
             else {
                 return Ok(None);
             };
-            if matches!(classified.routing, HoleRouting::Finalize { .. }) {
-                return Ok(Some(TurnOutcome::Suspended { hole, classified }));
-            }
             if let HoleRouting::AskUser { shape: next_shape } = classified.routing {
                 shape = next_shape;
                 continue;
             }
-            return Err(DriverError::Session(
-                "runLLMTurn answerer suspended on a non-finalize, non-askUser hole \
-                 after an operator form resume — the self-harness driver has no \
-                 operator to answer it"
-                    .to_string(),
-            ));
+            // Finalize, or any OTHER routing (a fork after the form, a `wait`
+            // on an earlier-spawned thread): hand the outcome back — the
+            // dispatcher in `drive_answerer_to_finalize` routes it. Before
+            // the answerer-plane green scheduler this arm hard-errored on
+            // everything but Finalize/AskUser.
+            return Ok(Some(TurnOutcome::Suspended { hole, classified }));
         }
     }
 
@@ -5536,21 +5650,22 @@ impl SelfHarnessDriver {
             }
 
             match self.agent.pending_hole(node).map(|c| c.routing) {
-                Some(HoleRouting::Finalize { .. }) => {
+                Some(HoleRouting::Fork { .. }) => continue,
+                // Finalize, or any OTHER routing (an operator form after the
+                // fork results, a `wait` on a thread spawned earlier in the
+                // block): hand the outcome back — the dispatcher in
+                // `drive_answerer_to_finalize` routes it. Before the
+                // answerer-plane green scheduler this arm hard-errored on
+                // everything but Finalize; composing fork with askUser/async
+                // in one block is now an ordinary continuation.
+                Some(_) => {
                     return self
                         .agent
                         .pending_turn_outcome(node)
                         .map(Some)
                         .ok_or_else(|| {
-                            DriverError::Session("fork resume: finalize pending vanished".into())
+                            DriverError::Session("fork resume: pending hole vanished".into())
                         });
-                }
-                Some(HoleRouting::Fork { .. }) => continue,
-                Some(other) => {
-                    return Err(DriverError::Session(format!(
-                        "fork answerer resumed onto a non-finalize/non-fork hole \
-                         ({other:?}) — no operator to answer it"
-                    )));
                 }
                 None => break,
             }
@@ -5566,6 +5681,370 @@ impl SelfHarnessDriver {
             ),
         )?;
         Ok(None)
+    }
+
+    /// One scheduling pass of the answerer-plane green scheduler: service the
+    /// NODE's own pending `Green` suspensions (node-aware resumes) and pump
+    /// THREAD chains (raw resumes, shared [`Self::service_green_hole`]) until
+    /// the node parks on something that isn't Green ([`AnswererGreenExit::NodeParked`])
+    /// or completes without finalizing ([`AnswererGreenExit::NodeDone`]).
+    /// `green` persists across passes within one ROUND (the dispatcher may
+    /// interleave askUser/fork servicing between passes) and is swept at the
+    /// round boundary by [`Self::sweep_answerer_green`].
+    ///
+    /// The node's blocked `wait` is deliberately NOT registered in
+    /// `green.waiters`: each iteration re-services its pending
+    /// `AsyncJoinAnyWith` (a pure winner scan when nothing settled), so a
+    /// settle is observed on the very next loop — and the raw waiter-wake
+    /// path structurally cannot touch the node chain.
+    async fn service_answerer_green(
+        &self,
+        node: NodeId,
+        green: &mut AnswererGreen,
+    ) -> Result<AnswererGreenExit, DriverError> {
+        loop {
+            let Some((hole, classified, table, _asks, request)) =
+                self.agent.pending_suspend_artifacts(node)
+            else {
+                return Ok(AnswererGreenExit::NodeDone);
+            };
+            if !matches!(classified.routing, HoleRouting::Green) {
+                return Ok(AnswererGreenExit::NodeParked);
+            }
+            let blocked = self
+                .service_primary_green(node, &hole, &request, &table, green)
+                .await?;
+            if !blocked {
+                continue;
+            }
+            // The node is blocked on a join with no terminal candidate: one
+            // thread step, then loop (the join re-check observes any settle).
+            let Some(GreenReady { chain, outcome }) = green.ready.pop_front() else {
+                return Err(DriverError::Session(
+                    "answerer green scheduler starved: the window's turn awaits a \
+                     thread, but no thread has ready work (a thread parked on \
+                     something nothing services, or a wait on a dropped handle — \
+                     spawn and wait within the same block)"
+                        .into(),
+                ));
+            };
+            self.service_thread_ready(node, chain, outcome, green)
+                .await?;
+        }
+    }
+
+    /// Service the node's own pending Green suspension. Returns `true` when
+    /// the node is BLOCKED (a join with no terminal candidate — the hole
+    /// stays parked, nothing was resumed); `false` when the node was resumed
+    /// (its pending record is fresh — re-read it).
+    ///
+    /// Every resume here is node-aware ([`Harness::resume_with_value`]/
+    /// [`Harness::resume_with_borrowed_root`]) — see [`AnswererGreen`]'s doc
+    /// for why raw resumes are wrong for the node chain. The arms mirror
+    /// [`Self::service_green_hole`]'s semantics verb for verb.
+    async fn service_primary_green(
+        &self,
+        node: NodeId,
+        hole: &HoleId,
+        request: &Value,
+        table: &DataConTable,
+        green: &mut AnswererGreen,
+    ) -> Result<bool, DriverError> {
+        let sid = self.outer_sid()?;
+        match engine::con_name(request, table) {
+            Some("AsyncSpawnWith") => {
+                // Same custody discipline as the outer arm: mint the body's
+                // handle and consume it (run_forked) before anything fallible.
+                let body = self
+                    .agent
+                    .with_session(sid, |s| s.finalized_handle(&hole.0))
+                    .map_err(|e| DriverError::Session(e.to_string()))?
+                    .ok_or_else(|| {
+                        DriverError::Session(
+                            "AsyncSpawnWith: spawner frame carries no untaken body closure".into(),
+                        )
+                    })?;
+                let tid = green.next_tid;
+                green.next_tid += 1;
+                let realm =
+                    tidepool_codegen::jit_machine::RealmId((1u64 << 61) | green.next_thread_realm);
+                green.next_thread_realm += 1;
+                green.threads.insert(
+                    tid,
+                    GreenThread {
+                        realm,
+                        state: GreenThreadState::Running,
+                    },
+                );
+                let thread_start = self
+                    .agent
+                    .with_session(sid, |s| {
+                        s.run_forked("async_thread", body, realm, Some(table))
+                    })
+                    .map_err(|e| DriverError::Session(e.to_string()))?
+                    .map_err(|e| DriverError::Session(format!("run_forked failed: {e}")))?;
+                green.ready.push_back(GreenReady {
+                    chain: GreenChain::Thread(tid),
+                    outcome: thread_start,
+                });
+                let tid_value = (tid)
+                    .to_value(table)
+                    .map_err(|e| DriverError::Session(format!("AsyncSpawnWith tid box: {e}")))?;
+                self.agent.resume_with_value(node, hole, tid_value).await?;
+                Ok(false)
+            }
+            Some("AsyncJoinAnyWith") => {
+                let ids = green_int_list_field(request, 0, table);
+                let winner = ids.iter().copied().find(|&tid| {
+                    green
+                        .threads
+                        .get(&tid)
+                        .is_some_and(|t| !matches!(t.state, GreenThreadState::Running))
+                });
+                match winner {
+                    Some(winner) => {
+                        let winner_value = winner.to_value(table).map_err(|e| {
+                            DriverError::Session(format!("AsyncJoinAnyWith winner box: {e}"))
+                        })?;
+                        self.agent
+                            .resume_with_value(node, hole, winner_value)
+                            .await?;
+                        Ok(false)
+                    }
+                    None => Ok(true),
+                }
+            }
+            Some("AsyncStatusWith") => {
+                let tid = green_int_field(request, 0, table);
+                let code: i64 = match green.threads.get(&tid).map(|t| &t.state) {
+                    Some(GreenThreadState::Settled(_)) => 1,
+                    Some(GreenThreadState::Cancelled) => 2,
+                    _ => 0,
+                };
+                let code_value = code
+                    .to_value(table)
+                    .map_err(|e| DriverError::Session(format!("AsyncStatusWith code box: {e}")))?;
+                self.agent.resume_with_value(node, hole, code_value).await?;
+                Ok(false)
+            }
+            Some("AsyncResultWith") => {
+                let tid = green_int_field(request, 0, table);
+                match green.threads.get(&tid).map(|t| &t.state) {
+                    Some(GreenThreadState::Settled(GreenResult::Value(v))) => {
+                        let v = v.clone();
+                        self.agent.resume_with_value(node, hole, v).await?;
+                    }
+                    Some(GreenThreadState::Settled(GreenResult::Root(h))) => {
+                        let h = *h;
+                        self.agent.resume_with_borrowed_root(node, hole, h).await?;
+                    }
+                    _ => {
+                        return Err(DriverError::Session(format!(
+                            "AsyncResultWith: thread {tid} has not settled (gate with \
+                             asyncStatus first)"
+                        )))
+                    }
+                }
+                Ok(false)
+            }
+            Some("AsyncCancelWith") => {
+                let tid = green_int_field(request, 0, table);
+                if let Some(entry) = green.threads.get_mut(&tid) {
+                    if matches!(entry.state, GreenThreadState::Running) {
+                        let realm = entry.realm;
+                        entry.state = GreenThreadState::Cancelled;
+                        self.agent
+                            .with_session(sid, |s| {
+                                s.close_realm(realm);
+                            })
+                            .map_err(|e| DriverError::Session(e.to_string()))?;
+                        if let Some(h) = self.handlers.lock().event.as_mut() {
+                            h.registry_mut().publish_async_done(tid);
+                        }
+                        self.wake_green_waiters(
+                            tid,
+                            table,
+                            sid,
+                            &mut green.waiters,
+                            &mut green.ready,
+                        )?;
+                    }
+                }
+                let unit = ()
+                    .to_value(table)
+                    .map_err(|e| DriverError::Session(format!("AsyncCancelWith () bridge: {e}")))?;
+                self.agent.resume_with_value(node, hole, unit).await?;
+                Ok(false)
+            }
+            other => Err(DriverError::Session(format!(
+                "answerer window suspended on an unexpected Green constructor on its own \
+                 chain ({other:?})"
+            ))),
+        }
+    }
+
+    /// Service one popped THREAD-chain ready item: classify it against the
+    /// round's compile artifacts (read off the node's pending record — every
+    /// chain of a round shares one compile) and dispatch. Green suspensions
+    /// go through the SHARED [`Self::service_green_hole`] (raw resumes are
+    /// correct for thread frames); a thread's `fork`/`forkAll` drives real
+    /// children via [`Harness::answer_fork_hole_raw`]; `note`/`getStateJson`/
+    /// `delegate` get their immediate service, raw-resumed. `askUser` and
+    /// `finalize` inside a thread are refused loudly — operator forms and the
+    /// window's answer belong on the main chain.
+    async fn service_thread_ready(
+        &self,
+        node: NodeId,
+        chain: GreenChain,
+        outcome: ResidentOutcome,
+        green: &mut AnswererGreen,
+    ) -> Result<(), DriverError> {
+        let sid = self.outer_sid()?;
+        let ResidentOutcome::Suspended { hole, request, .. } = outcome else {
+            return Err(DriverError::Session(
+                "answerer green scheduler: a thread chain completed without AsyncDoneWith \
+                 (every asyncSpawn body parks on its own settle — scheduler bug)"
+                    .into(),
+            ));
+        };
+        let Some((_, _, table, asks, _)) = self.agent.pending_suspend_artifacts(node) else {
+            return Err(DriverError::Session(
+                "answerer green scheduler: node pending record vanished while a thread \
+                 chain still had ready work"
+                    .into(),
+            ));
+        };
+        let classified = engine::classify_hole(&request, &table, &asks)
+            .map_err(|e| DriverError::Session(format!("thread hole classify: {e}")))?;
+        match classified.routing {
+            HoleRouting::Green => self.service_green_hole(
+                chain,
+                hole.cont_id(),
+                &request,
+                &table,
+                &mut green.threads,
+                &mut green.waiters,
+                &mut green.next_tid,
+                &mut green.next_thread_realm,
+                &mut green.ready,
+            ),
+            HoleRouting::Fork { .. } => {
+                let next = self
+                    .agent
+                    .answer_fork_hole_raw(
+                        node,
+                        hole.cont_id(),
+                        &classified.routing,
+                        &classified.prompt,
+                        &table,
+                    )
+                    .await?;
+                green.ready.push_back(GreenReady {
+                    chain,
+                    outcome: next,
+                });
+                Ok(())
+            }
+            HoleRouting::Note { text } => {
+                self.announce_note(FormSource::Answerer { node }, &text);
+                let unit = ()
+                    .to_value(&table)
+                    .map_err(|e| DriverError::Session(format!("note () bridge: {e}")))?;
+                let next = self
+                    .agent
+                    .with_session(sid, |s| s.resume(ResidentHole::plain(hole.cont_id()), unit))
+                    .map_err(|e| DriverError::Session(e.to_string()))?
+                    .map_err(|e| DriverError::Session(format!("thread note resume failed: {e}")))?;
+                green.ready.push_back(GreenReady {
+                    chain,
+                    outcome: next,
+                });
+                Ok(())
+            }
+            HoleRouting::ReadState => {
+                let state = self.cycle_state_json.clone().unwrap_or(Json::Null);
+                let value = engine::json_answer_to_value(&state, &table)
+                    .map_err(|e| DriverError::Session(format!("getStateJson bridge: {e}")))?;
+                let next = self
+                    .agent
+                    .with_session(sid, |s| {
+                        s.resume(ResidentHole::plain(hole.cont_id()), value)
+                    })
+                    .map_err(|e| DriverError::Session(e.to_string()))?
+                    .map_err(|e| {
+                        DriverError::Session(format!("thread getStateJson resume failed: {e}"))
+                    })?;
+                green.ready.push_back(GreenReady {
+                    chain,
+                    outcome: next,
+                });
+                Ok(())
+            }
+            HoleRouting::Subagent => {
+                let value = self.service_outer_subagent(&request, &table)?;
+                if engine::con_name(&request, &table) == Some("SubagentAwait") {
+                    if let Some(branch) = engine::decode_completed_delegation_branch(&value, &table)
+                    {
+                        if let Some(path) = self.branch_node_paths.lock().get(&node).cloned() {
+                            self.delegated_branches
+                                .lock()
+                                .entry(path)
+                                .or_default()
+                                .push(branch);
+                        }
+                    }
+                }
+                let next = self
+                    .agent
+                    .with_session(sid, |s| {
+                        s.resume(ResidentHole::plain(hole.cont_id()), value)
+                    })
+                    .map_err(|e| DriverError::Session(e.to_string()))?
+                    .map_err(|e| {
+                        DriverError::Session(format!("thread subagent resume failed: {e}"))
+                    })?;
+                green.ready.push_back(GreenReady {
+                    chain,
+                    outcome: next,
+                });
+                Ok(())
+            }
+            HoleRouting::Finalize { .. } => Err(DriverError::Session(
+                "a green thread called `finalize` — the window's answer belongs on the \
+                 main chain: `wait` your threads, then finalize from the top level"
+                    .into(),
+            )),
+            HoleRouting::AskUser { .. } | HoleRouting::Ask { .. } => Err(DriverError::Session(
+                "a green thread called `askUser` — operator forms belong on the main \
+                 chain: ask before spawning, or after your `wait`s"
+                    .into(),
+            )),
+            other => Err(DriverError::Session(format!(
+                "a green thread suspended on a hole this driver cannot service inside \
+                 async ({other:?})"
+            ))),
+        }
+    }
+
+    /// Round-boundary sweep: close every still-running thread's realm and
+    /// clear the scheduler — the answerer-plane sibling of
+    /// [`Self::run_loop_fragment_inner`]'s end-of-scope sweep. Returns how
+    /// many threads were dropped mid-flight (0 on the clean path where every
+    /// thread was waited or cancelled), so the corrective prompt can say so.
+    fn sweep_answerer_green(&self, green: &mut AnswererGreen) -> usize {
+        let mut dropped = 0usize;
+        if let Ok(sid) = self.outer_sid() {
+            for entry in green.threads.values() {
+                if matches!(entry.state, GreenThreadState::Running) {
+                    let _ = self.agent.with_session(sid, |s| s.close_realm(entry.realm));
+                    dropped += 1;
+                }
+            }
+        }
+        green.threads.clear();
+        green.waiters.clear();
+        green.ready.clear();
+        dropped
     }
 
     /// Evaluate `render(state)` against the outer session, then compose the
