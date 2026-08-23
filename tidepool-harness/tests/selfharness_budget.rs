@@ -61,11 +61,9 @@ fn header() -> LogHeader {
 
 /// A provider that NEVER finalizes: it emits a compiling but non-finalizing
 /// block (`pure ()`) every turn, and records how many times it was called plus
-/// whether it was ever handed a nudge ("approaching this window's round
-/// limit" appears in the latest user turn — the wording commit bd2a950e
-/// ("round-outcome prompts tell the truth about the multi-round window")
-/// gave the nudge; this pins the CURRENT text, not the "approaching the
-/// maximum number of tool calls" wording it replaced).
+/// whether it was ever handed a nudge ("Reminder: you have used N of M model
+/// rounds" appears in the latest user turn — this pins the CURRENT nudge
+/// text, not an earlier wording it replaced).
 struct NeverFinalizeProvider {
     calls: Arc<Mutex<u32>>,
     nudge_seen_at: Arc<Mutex<Option<u32>>>,
@@ -89,7 +87,7 @@ impl ModelProvider for NeverFinalizeProvider {
             .find(|m| matches!(m.role, Role::User))
             .map(|m| m.content.clone())
             .unwrap_or_default();
-        if latest_user.contains("approaching this session's round limit") {
+        if latest_user.contains("Reminder: you have used") {
             let mut slot = self.nudge_seen_at.lock();
             if slot.is_none() {
                 *slot = Some(n);
@@ -165,7 +163,7 @@ async fn answerer_nudged_at_16_and_hard_fails_at_32() {
          times before the hard cap fires"
     );
 
-    // The nudge fired: the model saw the "approaching the maximum" message,
+    // The nudge fired: the model saw the "Reminder: you have used…" message,
     // delivered right after round 3 (nudge cap), i.e. seen on the 4th model call.
     let nudge = nudge_seen_at
         .lock()

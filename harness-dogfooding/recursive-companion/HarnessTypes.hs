@@ -35,6 +35,7 @@ module HarnessTypes
   , render
   ) where
 
+import qualified Data.Text as T
 import GHC.Generics (Generic)
 import Tidepool.Aeson (FromJSON, ToJSON)
 import Tidepool.Aeson.Schema (JsonSchema)
@@ -115,7 +116,7 @@ render st = case st.lastRun of
   Nothing ->
     [fmt|You are a recursive companion. Nothing has been answered yet.
 
-Question: {st.question}
+Question: {questionLine}
 
 Each turn asks you — one session — to investigate this question and finalize
 a typed answer. Decompose by forking typed sub-answerers; the driver tracks,
@@ -123,8 +124,21 @@ budgets, and shows the operator the tree your forks grow, so your job is the
 thinking and the answer, never the bookkeeping.
 
 {companionProtocol}|]
+    where
+      -- The seed gate recurses into the request in the SAME cycle (see
+      -- 'Harness.loop'), so this framing is sometimes rendered from a
+      -- State whose question is still blank — the real question is on its
+      -- way in the request card below. An empty "Question: " line would
+      -- read as "no question exists" and invite re-confirming what the
+      -- operator just typed; say so plainly instead.
+      questionLine =
+        if T.strip st.question == ""
+          then "(being seeded this turn — the request below carries it; treat the request's question as authoritative)" :: Text
+          else st.question
   Just r ->
-    [fmt|{r.runAnswer}
+    [fmt|The previous turn's finalized answer, verbatim:
+
+{r.runAnswer}
 
 Question: {st.question}
 Turns completed: {show st.turnCount}

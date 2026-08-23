@@ -131,9 +131,8 @@ Question: {st.question}
 
 Work this question with the full rhythm your framing describes — fork typed
 sub-answerers for the lines of thought it opens, delegate repository work
-where evidence or edits are needed, consult the operator only where their
-steer would genuinely change your answer — and finalize when another round
-would not improve it.
+where evidence or edits are needed — and finalize when another round would
+not improve it.
 
 Finalize: `finalize @Text (...)` — the answer as prose, written to be read
 on its own.|]

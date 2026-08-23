@@ -1168,7 +1168,14 @@ pub fn hole_card(prompt: &str, ty: Option<&str>, table: Option<&DataConTable>) -
 /// `table` is the [`DataConTable`] the hole's answer type was resolved from,
 /// when the caller has one in hand — used only to render a names-only shape
 /// synopsis (see [`hole_card`]), never to invent field types.
+///
+/// `requester` names who is actually asking, for the opening/closing
+/// sentences — `"The loop"` for an in-context/branch/fanout window (the
+/// outer session's `runLLMTurn` family), `"Your parent session"` for a
+/// `fork`/`forkAll` child, whose requester is its parent's call site, not the
+/// outer loop.
 pub fn answerer_hole_card(
+    requester: &str,
     prompt: &str,
     ty: Option<&str>,
     imports: &[String],
@@ -1200,23 +1207,35 @@ pub fn answerer_hole_card(
         )
     };
     format!(
-        "The loop needs a typed answer of type `{ty}`.\n\n\
+        "{requester} needs a typed answer of type `{ty}`.\n\n\
          {prompt}\n\n\
-         {row}{shape}This request opens a multi-round session: take the model \
-         rounds you need (```haskell blocks, run in order — explore, define, \
+         {row}{shape}This request opens a multi-round agent session: take the model \
+         rounds you need (```haskell blocks run in order — explore, define, \
          `note`, `askUser`), then answer by evaluating `finalize @{ty_at} value` \
-         — THAT ends the session and hands the value back to the loop.{scope}",
+         — THAT ends the session and hands the value back to the requester.{scope}",
         scope = if imports.is_empty() {
             String::new()
         } else {
+            // A model that believes `{ty}` is out of scope stops trying to
+            // build one and finalizes whatever does compile instead — but
+            // for the common root request (`ty = Text`), "do not substitute
+            // a tuple or `Text`" is self-contradictory noise, so the
+            // construct-clause is only stated when it says something real.
+            let construct_clause = if ty == "Text" {
+                String::new()
+            } else {
+                format!(
+                    "Construct a real `{ty}` — do not substitute a different type \
+                     that happens to compile. "
+                )
+            };
             format!(
                 " `{ty}` is already in scope (this turn imports {}) — and `finalize` \
                  is PINNED to `{ty}` in this session's effect list, so a wrong-typed \
                  answer is a compile error naming that list, not a value that \
-                 silently crosses. Construct a real `{ty}`, do not substitute a \
-                 tuple or `Text`. (The pin constrains `finalize`'s type only — the \
-                 other available effects, and define/explore rounds, remain \
-                 available as your system framing says.)",
+                 silently crosses. {construct_clause}(The pin constrains `finalize`'s \
+                 type only — the other available effects, and define/explore rounds, \
+                 remain available as your system framing says.)",
                 imports.join(", ")
             )
         }
@@ -3374,7 +3393,14 @@ mod tests {
     #[test]
     fn answerer_hole_card_renders_nullary_sum_in_tag_order() {
         let table = nullary_sum_table();
-        let card = answerer_hole_card("decide", Some("Verdict"), &[], Some(&table), &[]);
+        let card = answerer_hole_card(
+            "The loop",
+            "decide",
+            Some("Verdict"),
+            &[],
+            Some(&table),
+            &[],
+        );
         assert!(card.contains("Advance | Hold | Abort"), "{card}");
     }
 
@@ -3389,7 +3415,7 @@ mod tests {
             .iter()
             .map(|s| s.to_string())
             .collect();
-        let card = answerer_hole_card("decide", Some("Verdict"), &[], None, &row);
+        let card = answerer_hole_card("The loop", "decide", Some("Verdict"), &[], None, &row);
         assert!(
             card.contains(
                 "The effects available in THIS SESSION are `[Subagent, AskUser, Finalize]`"
@@ -3397,7 +3423,7 @@ mod tests {
             "{card}"
         );
 
-        let bare = answerer_hole_card("decide", Some("Verdict"), &[], None, &[]);
+        let bare = answerer_hole_card("The loop", "decide", Some("Verdict"), &[], None, &[]);
         assert!(!bare.contains("effect row"), "{bare}");
     }
 
@@ -3466,7 +3492,14 @@ mod tests {
     #[test]
     fn answerer_hole_card_carries_no_hand_written_verb_docs() {
         let table = nullary_sum_table();
-        let card = answerer_hole_card("decide", Some("Verdict"), &[], Some(&table), &[]);
+        let card = answerer_hole_card(
+            "The loop",
+            "decide",
+            Some("Verdict"),
+            &[],
+            Some(&table),
+            &[],
+        );
         assert!(
             !card.contains("choose [(label"),
             "the per-hole card must not hand-narrate `choose`: {card}"

@@ -604,26 +604,32 @@ impl SelfHarnessDriver {
 /// spent — distinct from the per-session pool below, so the model knows
 /// the boundary is tree-wide, not something a deeper fork escapes.
 fn fork_subtree_refusal(spent: u32, cap: u32, needed: u32, ty_label: &str) -> String {
+    let ty_disp = display_ty(ty_label);
     format!(
         "Fork budget exhausted for this WHOLE tree of sessions: {spent} of {cap} \
          descendant sessions are already spawned across all depths, and that block \
          needed {needed} more. The block was ABORTED (top-level declarations from \
          earlier rounds persist; the aborted block's bindings are lost). Do not \
          fork again anywhere in this tree — finalize with what you have: evaluate \
-         `finalize @{ty_label} value`."
+         `finalize @{ty_disp} value`."
     )
 }
 
 /// The refusal corrective for a fork that would exceed the window's budget:
-/// what happened, what survives, and the one useful next step.
+/// what happened, what survives, and the one useful next step. `cap == 0`
+/// (the `fork_depth >= max_fork_depth` case, `drive_answerer_to_finalize`)
+/// is a DEPTH refusal, not a per-session pool refusal — depth-1..7 children
+/// fork fine, so the reason must be the tree's depth, never "nested forking
+/// is not supported" (false, and contradicts the Fork card).
 fn fork_budget_refusal(spent: u32, cap: u32, needed: u32, ty_label: &str) -> String {
+    let ty_disp = display_ty(ty_label);
     if cap == 0 {
         return format!(
-            "Forking is not available in THIS session: you are already a forked \
-             sub-answerer, and nested forking is not supported yet. The block was \
-             ABORTED (top-level declarations from earlier rounds persist; the \
-             aborted block's bindings are lost). Answer your own brief directly: \
-             evaluate `finalize @{ty_label} value`."
+            "Forking is not available in THIS session: the fork tree has reached its \
+             maximum depth, so this session must answer its own brief directly. The \
+             block was ABORTED (top-level declarations from earlier rounds persist; \
+             the aborted block's bindings are lost). Answer with what you can \
+             establish yourself: evaluate `finalize @{ty_disp} value`."
         );
     }
     format!(
@@ -631,7 +637,7 @@ fn fork_budget_refusal(spent: u32, cap: u32, needed: u32, ty_label: &str) -> Str
          children, and that block needed {needed} more, so the block was ABORTED \
          (top-level declarations from earlier rounds persist; the aborted block's \
          bindings are lost). Do not fork again — finalize with what you have: \
-         evaluate `finalize @{ty_label} value`."
+         evaluate `finalize @{ty_disp} value`."
     )
 }
 
@@ -656,9 +662,9 @@ fn rendered_result_snippet(rendered: &str) -> String {
 fn dropped_threads_warning(dropped: usize) -> String {
     format!(
         "Note: {dropped} async thread(s) from that block were still running and were \
-         DROPPED — their handles are now dead. Threads do not survive their block: \
-         `async`, `wait`, and the `finalize` that uses the results belong in the SAME \
-         ```haskell block."
+         DROPPED — their handles are now dead. `async` and the `wait` that collects \
+         it belong in the SAME ```haskell block; results you already bound with \
+         `<-` persist and remain usable."
     )
 }
 
@@ -1090,7 +1096,7 @@ async fn retry_on_turn_in_flight<T>(
 /// source the eval tool description is assembled from — so a row with a
 /// different effect set gets a correspondingly different cheatsheet, sent
 /// ONCE per loop in the system framing rather than re-narrated every hole.
-fn answerer_framing_suffix(fork_budget: u32) -> String {
+fn answerer_framing_suffix(fork_budget: u32, fork_subtree_cap: u32) -> String {
     format!(
         "---\n\
          You are the answering agent for a self-iterating harness loop. The system \
@@ -1101,7 +1107,7 @@ fn answerer_framing_suffix(fork_budget: u32) -> String {
          runs, in order, as one sequence — later blocks see earlier blocks' \
          declarations and bindings, so a `data` type declared in one block is usable \
          by `askUser`/`finalize` in the next block of the SAME reply. A value you \
-         bind with `x <- …` persists into your NEXT turn like GHCi, so you can \
+         bind with `x <- …` persists into your NEXT round like GHCi, so you can \
          branch on it.\n\
          \n\
          THIS IS A MULTI-ROUND SESSION, NOT A ONE-SHOT. You have up to {} model \
@@ -1115,14 +1121,18 @@ fn answerer_framing_suffix(fork_budget: u32) -> String {
          the answer, and finalize the moment one isn't. Rounds \
          accumulate: bindings and `let` helpers from earlier rounds stay in scope. \
          A block that is ONLY top-level declarations (type signatures, function \
-         definitions, data types) persists BEYOND this session, for every later \
-         session in this run: your growing library. Define what you will want \
-         again.\n\
+         definitions, data types) persists beyond this agent session — for your \
+         own later rounds, and for every session forked BENEATH you \
+         (ancestry-scoped: descendants inherit your declarations, siblings never \
+         do; the protocol above states the rule). The root session's \
+         declarations persist for every later loop iteration: your growing \
+         library. Define what you will want again.\n\
          \n\
          THE OPERATOR CANNOT INITIATE: they see your notes and the forms you \
-         present, and between sessions they may attach a message that arrives in \
-         your framing. If you want their input NOW, present a form (`askUser`/\
-         `choose`); silence from them mid-window is structural, not meaningful.\n\
+         present, and between loop iterations they may attach a message that \
+         arrives in your framing. If you want their input NOW, present a form \
+         (`askUser`/`choose`); their silence during your session is structural, \
+         not meaningful.\n\
          \n\
          {}\n\
          \n\
@@ -1130,7 +1140,7 @@ fn answerer_framing_suffix(fork_budget: u32) -> String {
          consultations in one `do` block and branch on earlier answers with \
          ordinary `case`/`if` — each runs without another model round. Plan \
          the whole consultation up front when the branches are predictable; \
-         end the turn without finalizing only when an answer genuinely needs \
+         end the round without finalizing only when an answer genuinely needs \
          fresh judgment. Bind results, then `finalize`.\n\
          \n\
          CONCURRENT DELEGATION: `Tidepool.Async` is the `Control.Concurrent.Async` \
@@ -1158,8 +1168,11 @@ fn answerer_framing_suffix(fork_budget: u32) -> String {
          judgment (not just dataflow) shapes the next batch's briefs from the \
          bound results. This session may spawn at most {} fork children in total \
          (`fork` costs 1, `forkAll` its list length; direct and async forks draw \
-         on the same pool); one past the budget is refused and the block \
-         aborted.\n\
+         on the same pool), and the WHOLE tree of sessions under one request \
+         shares a descendant budget of {} across all depths — so budget your \
+         fan where the question genuinely splits, and prefer briefs a child can \
+         answer without forking further. One past either budget is refused and \
+         the block aborted.\n\
          \n\
          When you have the answer, COMMIT it by evaluating `finalize @T value`. This \
          ends the session and hands the typed value back to the loop. `T` is the type \
@@ -1168,7 +1181,8 @@ fn answerer_framing_suffix(fork_budget: u32) -> String {
         ANSWERER_MAX_ROUNDS,
         ANSWERER_NUDGE_ROUNDS,
         engine::available_effects_section(&answerer_decls()),
-        fork_budget
+        fork_budget,
+        fork_subtree_cap
     )
 }
 
@@ -2733,7 +2747,7 @@ impl SelfHarnessDriver {
         // `run_loop_fragment` to seed the per-loop answerer node.
         self.answerer_framing = Some(format!(
             "{prompt_before}\n\n{}",
-            answerer_framing_suffix(self.fork_budget_per_window)
+            answerer_framing_suffix(self.fork_budget_per_window, self.fork_subtree_cap)
         ));
 
         self.lifecycle = SelfHarnessState::RunningLoop;
@@ -4115,6 +4129,7 @@ impl SelfHarnessDriver {
         // (`[AskUser, Finalize]`) names `finalize @T`, NOT the generic
         // `resume expr` (which does not compile against this stack).
         let child_prompt = engine::answerer_hole_card(
+            "The loop",
             prompt,
             ty,
             modules,
@@ -4291,6 +4306,7 @@ impl SelfHarnessDriver {
 
         let sid = self.outer_sid()?;
         let hole_card = engine::answerer_hole_card(
+            "The loop",
             prompt,
             ty,
             modules,
@@ -4707,6 +4723,7 @@ impl SelfHarnessDriver {
         table: &DataConTable,
     ) -> Result<Result<(Value, String), InvocationExit>, DriverError> {
         let hole_card = engine::answerer_hole_card(
+            "The loop",
             prompt,
             element_ty,
             modules,
@@ -5079,6 +5096,7 @@ impl SelfHarnessDriver {
         self.agent
             .set_answer_contract(node, self.answer_contract(element_ty, modules));
         let child_prompt = engine::answerer_hole_card(
+            "The loop",
             prompt,
             element_ty,
             modules,
@@ -5354,8 +5372,10 @@ impl SelfHarnessDriver {
                 self.agent.push_user_turn(
                     node,
                     &format!(
-                        "You are approaching this session's round limit. Finalize now: \
-                         evaluate `finalize @{} value` with your best answer.",
+                        "Reminder: you have used {rounds} of {max_rounds} model rounds on \
+                         this request. Budget the remainder — finalize as soon as another \
+                         round would not improve the answer, and no later than round \
+                         {max_rounds}: evaluate `finalize @{} value`.",
                         display_ty(ty_label)
                     ),
                 )?;
@@ -5572,10 +5592,15 @@ impl SelfHarnessDriver {
                     }
                     // The chain resolved (the answerer's block completed)
                     // WITHOUT finalize — same corrective retry as a plain
-                    // Completed turn below. Servicing resumes are NOT model
-                    // rounds: `rounds` stays untouched, only this outer loop
-                    // repeats.
+                    // Completed turn below, and it must say the same thing:
+                    // this is the EXPECTED batch-per-round idiom the suffix
+                    // teaches (fork a wave, wait, end the round), not a
+                    // failure to scold (companion dogfood, 2026-08-13's
+                    // Completed-arm fix, mirrored here — see that arm's
+                    // comment). Servicing resumes are NOT model rounds:
+                    // `rounds` stays untouched, only this outer loop repeats.
                     self.agent.reopen_node(node)?;
+                    let ty_disp = display_ty(ty_label);
                     let warn = if dropped > 0 {
                         format!("\n\n{}", dropped_threads_warning(dropped))
                     } else {
@@ -5584,10 +5609,12 @@ impl SelfHarnessDriver {
                     self.agent.push_user_turn(
                         node,
                         &format!(
-                            "That did not resolve the request. Answer by \
-                             evaluating `(finalize @{ty_label} value :: M \
-                             {ty_label})` — the whole expression must carry \
-                             the type annotation, not just the argument.{warn}"
+                            "Round complete — your session continues, and that round's \
+                             definitions and bindings (including everything you waited \
+                             on) persist. The request still awaits its answer: explore \
+                             further, fork another batch, or evaluate \
+                             `finalize @{ty_disp} value` when ready (that ends the \
+                             session).{warn}"
                         ),
                     )?;
                     continue;
@@ -6378,12 +6405,14 @@ impl SelfHarnessDriver {
         }
 
         self.agent.reopen_node(node)?;
+        let ty_disp = display_ty(ty_label);
         self.agent.push_user_turn(
             node,
             &format!(
-                "The fork results did not resolve the request. Answer by evaluating \
-                 `(finalize @{ty_label} value :: M {ty_label})` — the whole expression \
-                 must carry the type annotation, not just the argument."
+                "Round complete — the forked sub-answerers returned and their results \
+                 are bound in your session (evaluate a binding to see it). The request \
+                 still awaits its answer: fork another batch, keep working, or evaluate \
+                 `finalize @{ty_disp} value` when ready (that ends the session)."
             ),
         )?;
         Ok(None)
@@ -6441,6 +6470,7 @@ impl SelfHarnessDriver {
         let sid = self.outer_sid()?;
         let modules = self.agent.asks_modules(parent, site);
         let card = engine::answerer_hole_card(
+            "Your parent session",
             brief,
             ty,
             &modules,
@@ -7254,7 +7284,10 @@ mod tests {
     /// hand-written parenthetical. Pure string check, no GHC needed.
     #[test]
     fn answerer_framing_suffix_names_every_verb_of_the_answerer_row() {
-        let framing = super::answerer_framing_suffix(super::DEFAULT_FORK_BUDGET_PER_WINDOW);
+        let framing = super::answerer_framing_suffix(
+            super::DEFAULT_FORK_BUDGET_PER_WINDOW,
+            super::DEFAULT_FORK_SUBTREE_CAP,
+        );
         for decl in answerer_decls() {
             assert!(
                 framing.contains(decl.type_name),
@@ -7277,6 +7310,15 @@ mod tests {
                 super::DEFAULT_FORK_BUDGET_PER_WINDOW
             )),
             "the fork budget must be stated in the framing, got:\n{framing}"
+        );
+        // The tree-wide descendant budget is stated too — not left to be
+        // discovered only by a refusal (F10, prompt-surface review).
+        assert!(
+            framing.contains(&format!(
+                "descendant budget of {} across all depths",
+                super::DEFAULT_FORK_SUBTREE_CAP
+            )),
+            "the tree-wide fork subtree cap must be stated in the framing, got:\n{framing}"
         );
         assert!(
             framing.contains("\n  ha <- async (fork @Plan"),

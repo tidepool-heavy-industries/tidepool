@@ -1157,13 +1157,13 @@ true
 ReadState
 -- end type_name --
 
--- description (497 bytes) --
-Read the loop's durable State — the same value your system instructions render a SELECTION of — as JSON, immediately. `getStateJson :: M Value` returns the state as of this loop iteration's start; the current iteration's edit (and any operator message being ingested this iteration) are not yet in it. Use optics for ad-hoc queries, or decode it as `State` with `Aeson.fromJSON` and compute over memories, threads, and scratch with ordinary Haskell — filter the archive, search, count, join.
+-- description (380 bytes) --
+Read the loop's durable state — the same value your system instructions render a SELECTION of — as JSON, immediately. `getStateJson :: M Value` returns the state as of this loop iteration's start; the current iteration's answer (and any operator message being ingested this iteration) are not yet in it. Use optics for ad-hoc queries and compute over it with ordinary Haskell.
 -- end description --
 
 -- prompt_card: Some --
--- prompt_card.0 (341 bytes) --
-`getStateJson :: M Value` — the loop's durable State as JSON, immediately (no operator, no model round), as of this loop iteration's START (this iteration's edit and any operator message being ingested are not in it yet). Query with optics (`v ^? key "memories" . _Array`) or decode it as `State`: `Aeson.fromJSON v :: Aeson.Result State`.
+-- prompt_card.0 (342 bytes) --
+`getStateJson :: M Value` — the loop's durable state as JSON, immediately (no operator, no model round), as of this loop iteration's START (this iteration's answer and any operator message being ingested are not in it yet). Query it with optics, e.g. `v ^? key "question" . _String`; the shape is whatever the harness's State type declares.
 -- end prompt_card.0 --
 
 -- constructors (1 items) --
@@ -1376,8 +1376,8 @@ Terminate the current Agent turn loop and hand a typed value UP to the parent `r
 -- end description --
 
 -- prompt_card: Some --
--- prompt_card.0 (123 bytes) --
-`finalize @T value` — commit the typed answer and end this turn; `value` crosses in-heap to the parent `runLLMTurn` hole.
+-- prompt_card.0 (176 bytes) --
+`finalize @T value` — commit the typed answer; this ends your whole agent session and delivers `value` to whoever asked (the parent's `fork`/`runLLMTurn` call site), in-heap.
 -- end prompt_card.0 --
 
 -- constructors (1 items) --

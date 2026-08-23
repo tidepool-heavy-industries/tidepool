@@ -986,22 +986,21 @@ macro_rules! readstate_effect_def {
             req ReadStateReq,
             decl_fn readstate_decl,
             prompt_card [
-                "`getStateJson :: M Value` — the loop's durable State as JSON, ",
+                "`getStateJson :: M Value` — the loop's durable state as JSON, ",
                 "immediately (no operator, no model round), as of this loop iteration's ",
-                "START (this iteration's edit and any operator message being ingested ",
-                "are not in it yet). Query with optics (`v ^? key \"memories\" . _Array`) ",
-                "or decode it as `State`: `Aeson.fromJSON v :: Aeson.Result State`.",
+                "START (this iteration's answer and any operator message being ingested ",
+                "are not in it yet). Query it with optics, e.g. ",
+                "`v ^? key \"question\" . _String`; the shape is whatever the harness's ",
+                "State type declares.",
             ],
             helpers_row_polymorphic true,
             description [
-                "Read the loop's durable State — the same value your system instructions ",
+                "Read the loop's durable state — the same value your system instructions ",
                 "render a SELECTION of — as JSON, immediately. `getStateJson :: M Value` ",
                 "returns the state as of this loop iteration's start; the current ",
-                "iteration's edit (and any operator message being ingested this ",
-                "iteration) are not yet in it. Use optics for ad-hoc queries, or decode ",
-                "it as `State` with `Aeson.fromJSON` and compute over memories, threads, ",
-                "and scratch with ordinary Haskell — filter the archive, search, count, ",
-                "join.",
+                "iteration's answer (and any operator message being ingested this ",
+                "iteration) are not yet in it. Use optics for ad-hoc queries and compute ",
+                "over it with ordinary Haskell.",
             ],
             type_defs [],
             verbs [
@@ -1379,8 +1378,9 @@ macro_rules! finalize_effect_def {
             // never heard of.
             type_params [v] default_row_args ["Void"],
             prompt_card [
-                "`finalize @T value` — commit the typed answer and end this turn; ",
-                "`value` crosses in-heap to the parent `runLLMTurn` hole.",
+                "`finalize @T value` — commit the typed answer; this ends your whole ",
+                "agent session and delivers `value` to whoever asked (the parent's ",
+                "`fork`/`runLLMTurn` call site), in-heap.",
             ],
             // Already Member-polymorphic below (matches RunLLMTurn's own
             // convention); flagged true for consistency with the
@@ -2222,6 +2222,15 @@ macro_rules! green_effect_def {
             handler GreenHandler,
             req GreenReq,
             decl_fn green_decl,
+            prompt_card [
+                "`Tidepool.Async` — the `Control.Concurrent.Async` surface ",
+                "(`async`/`wait`/`waitCatch`/`waitEither`/`waitBoth`/`waitAny`/`cancel`, ",
+                "`race`/`concurrently`/`mapConcurrently`), auto-imported. ",
+                "`async (fork @T brief)` runs a fork in a green thread so several can be ",
+                "outstanding before the first `wait`. Spawn and wait in the SAME ",
+                "```haskell block — threads do not survive their block; results you ",
+                "bound with `<-` do.",
+            ],
             helpers_row_polymorphic true,
             description [
                 "Green threads: cooperative concurrency with the authored surface of ",
