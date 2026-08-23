@@ -88,6 +88,11 @@ impl LambdaRegistry {
     pub fn len(&self) -> usize {
         self.entries.len()
     }
+
+    /// Whether no lambdas are registered.
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
 }
 
 /// Install a registry as the thread-local singleton. Returns the old one if any.

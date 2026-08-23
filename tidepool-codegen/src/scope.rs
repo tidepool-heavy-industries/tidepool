@@ -167,6 +167,14 @@ impl ScopeTree {
     pub fn len(&self) -> usize {
         self.parent.len() + 1
     }
+
+    /// Never empty: ROOT always lives. Present because clippy pairs every
+    /// public `len` with an `is_empty`, and a caller asking deserves the
+    /// true constant over a lint suppression.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        false
+    }
 }
 
 #[cfg(test)]

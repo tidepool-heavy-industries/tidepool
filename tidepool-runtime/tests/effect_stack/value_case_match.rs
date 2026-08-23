@@ -535,10 +535,11 @@ fn object_construction_then_case() {
 {-# LANGUAGE NoImplicitPrelude, OverloadedStrings #-}
 module Test where
 import Tidepool.Prelude hiding (error)
+import qualified Data.Text as T
 
 valSize :: Value -> Int
 valSize v = case v of
-  String t -> len t + 2
+  String t -> T.length t + 2
   Number _ -> 8
   Bool b   -> if b then 4 else 5
   Null     -> 4
@@ -656,7 +657,7 @@ module Test where
 import Tidepool.Prelude hiding (error)
 
 result :: Int
-result = len (sort [Null, Bool True, Number 1, Bool False, Null])
+result = length (sort [Null, Bool True, Number 1, Bool False, Null])
 "#;
     let val = run(src, "result");
     assert_eq!(
@@ -674,7 +675,7 @@ module Test where
 import Tidepool.Prelude hiding (error)
 
 result :: Int
-result = len (nub [Null, Null, Bool True, Bool True, Number 1])
+result = length (nub [Null, Null, Bool True, Bool True, Number 1])
 "#;
     let val = run(src, "result");
     assert_eq!(

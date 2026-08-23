@@ -407,6 +407,12 @@ impl BindingTable {
     pub fn len(&self) -> usize {
         self.live.len()
     }
+
+    /// Whether no bindings are live.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.live.is_empty()
+    }
 }
 
 #[cfg(test)]

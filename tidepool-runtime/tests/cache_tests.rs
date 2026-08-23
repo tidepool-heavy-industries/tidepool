@@ -129,10 +129,20 @@ fn test_corrupted_cache_recovery() {
         .expect("Initial compile failed");
     assert!(tidepool_cache.exists());
 
-    for entry in fs::read_dir(&tidepool_cache).unwrap() {
-        let path = entry.unwrap().path();
-        fs::write(path, b"NOT CBOR DATA").unwrap();
+    // The cache root holds nested layouts (the content-addressed compile
+    // memo keeps per-entry DIRECTORIES), so corruption walks recursively and
+    // overwrites every FILE — writing to a directory is IsADirectory.
+    fn corrupt_files_under(dir: &std::path::Path) {
+        for entry in fs::read_dir(dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                corrupt_files_under(&path);
+            } else {
+                fs::write(path, b"NOT CBOR DATA").unwrap();
+            }
+        }
     }
+    corrupt_files_under(&tidepool_cache);
 
     let result = harness.compile(src, target);
     assert!(
