@@ -1,6 +1,7 @@
 # Fork subsumes split
 
-**Status: direction locked (operator, 2026-08-22); step 1 not started.**
+**Status: steps 1–3 landed (2026-08-22/23); step 4 design locked (operator,
+2026-08-23), in progress.**
 
 The companion's tree should EMERGE from model-authored forks — `async (fork
 @T "you're in branch X")` — not from models proposing splits that authored
@@ -93,6 +94,55 @@ whereas `finalize_data` retires straight into `NodeCancelled`-via-
 `finalize_fork_data`, alongside the existing `finalize_data`/`fold_exit` —
 `fold_exit` and the `Drop` impl are reused completely unchanged. No new
 struct.
+
+## Step 4 design note (locked with the operator, 2026-08-23)
+
+The operator's corrections, verbatim where quoted, supersede the older step-4
+sketch above:
+
+1. **Every session's finalize type is exactly the `@Type` at its invocation
+   site — "a Haskell value, as requested".** No harness-imposed answer
+   schema (the proposed `Answer { answerText, tensions }` is rejected).
+   Interior types are model-designed per `fork @T`; the ROOT's type is
+   whatever the authored loop requests at its own `runLLMTurn` call site —
+   start plain, author-evolvable: the invoker picks, same rule at every
+   level.
+2. **`Harness.loop` collapses to: seed question → ONE top-level typed
+   request → render.** The tree emerges from the session's own `async (fork
+   @T brief)` calls, serviced recursively by the driver — no authored
+   recursion, no layer walk. `fork` remains available to authored harness
+   code too (future use), not only to model turns.
+3. **Companion `Config` caps retire.** `maxDepth`/`maxNodes`/`maxFanOut`/
+   `gatePolicy`/`gateMaxRounds` are gone — the driver's spawn-time budgets
+   (depth 8 / 32 descendants, landed in step 2) are the one containment
+   mechanism. `State` keeps `question`/`turnCount`/`lastRun`.
+4. **The receipt renders the root's typed value as-is** — no re-shaping into
+   tensions/tree/accounting the loop no longer owns.
+5. **`delegate` is unchanged.** Verified (not assumed): after the collapse,
+   `takeDelegatedBranches`' fold-time read-back has NO Haskell caller left in
+   the tree — the fold that consumed it is gone and delegate results already
+   return inline (`delegateSummary`). The effect stays in the schema (it is
+   generated surface, and the driver-side stamping still runs); flagged as a
+   vestige candidate for the identifier-sweep lane rather than deleted here.
+6. **Protocol text sheds all `ProposeSplit` teaching.** What survives in the
+   per-turn framing: session persistence/ancestry-scoped declarations, fork
+   as THE decomposition mechanism, delegate, operator asks, the multi-round
+   batch rhythm.
+7. **Sequencing: collapse FIRST, redeploy on it, run rounds against the new
+   architecture.** The pre-collapse companion binary remains the wedge
+   fallback.
+
+What this deletes (the surveyed map): `Harness.hs` `walkGroup`/`walkNode`/
+`foldAt`/`bulkDiscoverOutcomes`/`bulkLayerWindow`/`foldWindow`/
+`discoverWith`/`discoverGroup`/`applyGate`/`gateRounds`/`childSeed`/
+`childEdge`/`childAllowance`/`layerFromProposal`/`splitLayer`/`mergeFold`/
+`mergeChildInto`/`resolveConflict`/`ownDelegatedBranch`/`NodeSeed` and the
+prompt builders; `HarnessTypes.hs` `LayerProposal`/`ProposedBranch`/
+`Posture`/`BranchRoleWire`/`FoldDecision`/`GatePolicy`/`GateVerdict`/
+`LayerApproval`/`gateApplies`/`Config`/`NodePath` machinery/`NodeAnswer`/
+the layer plumbing — roughly two thirds of the 2191 companion lines.
+`SeedQuestion`/`OperatorSteering`/`State`/`RunSummary` (shrunk)/`render`
+survive.
 
 ## Foundation already landed (2026-08-22)
 
