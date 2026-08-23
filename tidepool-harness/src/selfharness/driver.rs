@@ -923,8 +923,15 @@ fn answerer_framing_suffix(fork_budget: u32) -> String {
          bind with `x <- …` persists into your NEXT turn like GHCi, so you can \
          branch on it.\n\
          \n\
-         YOUR WINDOW'S MECHANICS: you have up to {} model rounds in this cognition \
-         window before you must finalize (a reminder arrives at round {}). Rounds \
+         YOUR WINDOW IS A RESIDENCY, NOT A ONESHOT. You have up to {} model \
+         rounds (a reminder arrives at round {}), and the EXPECTED shape of a \
+         non-trivial request is several of them: orient and define, fork a wave \
+         of sub-answerers, read what came back, fork the next wave (or delegate \
+         follow-up work) from what you learned, consult the operator where their \
+         steer would genuinely change your answer — and only then finalize. A \
+         one-round finalize on a question that deserved exploration is an \
+         under-served request; keep going while each round is still improving \
+         the answer, and finalize the moment one isn't. Rounds \
          accumulate: bindings and `let` helpers from earlier rounds stay in scope. \
          A block that is ONLY top-level declarations (type signatures, function \
          definitions, data types) is a DEFINE block — those declarations go onto \
@@ -962,8 +969,13 @@ fn answerer_framing_suffix(fork_budget: u32) -> String {
          \x20\x20finalize @Plan (mergePlans a b)\n\
          ```\n\
          \n\
-         Spawn, wait, and finalize in the SAME block — threads do not survive \
-         their block. This window may spawn at most {} fork children in total \
+         Spawn and wait in the SAME block — threads do not survive their block, \
+         though their WAITED results (bound with `<-`) do. WAVES compose two \
+         ways: within one block, fork a wave, wait it, fold the results in \
+         ordinary Haskell, and fork the next wave from what you computed; or \
+         one wave per round, ending the round after the waits so YOUR OWN \
+         judgment (not just dataflow) shapes the next wave's briefs from the \
+         bound results. This window may spawn at most {} fork children in total \
          (`fork` costs 1, `forkAll` its list length; direct and async forks draw \
          on the same pool); one past the budget is refused and the block \
          aborted.\n\

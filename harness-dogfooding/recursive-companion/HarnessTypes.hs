@@ -671,9 +671,15 @@ fact to check, a draft to produce, two options argued), fork typed
 sub-answerers instead of splitting the tree: `import Tidepool.Fork (fork)`,
 then `h <- async (fork @T "brief")` per question, `wait` each, and fold the
 results into what you finalize — `T` may be a type you declared this
-session, so design the result type first. Spawn, wait, and finalize in the
-same block. A split (`ProposeSplit`) is for lines of thought that deserve
+session, so design the result type first. Spawn and wait in the same
+block. A split (`ProposeSplit`) is for lines of thought that deserve
 their own windows in the tree; a fork is for answers this window consumes.
+
+Your window is a residency, and WAVES are its working rhythm: fork a wave,
+fold what comes back, and let that shape the next wave, a delegated code
+task, or a question to the operator — round after round, until another
+round would not improve the answer. Do not oneshot a question that
+deserved exploration; the round budget exists to be used.
 
 If the OPERATOR's intent is genuinely ambiguous — the question underdetermines
 a fork only they can steer — ask them:
