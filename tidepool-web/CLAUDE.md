@@ -222,6 +222,44 @@ only** (inherited — it mounts onto the one listener), **per-ask nonce**
 with pending state untouched), **self-describing** (`"test_only"` on every
 response).
 
+## The model/effort dial (`server.rs`'s `settings`, `shell.rs`'s `model_dial`)
+
+The masthead carries a two-`<select>` control (model, reasoning effort) that
+lets the operator switch the harness answerer's model/effort LIVE, no
+restart — e.g. between `gpt-5.6-terra` and `gpt-5.6-sol` for a testing round.
+This is ORDINARY operator-initiated web UI, deliberately NOT routed through
+the `Ask`/`AskUser` form/gate machinery (`OperatorGate` is a frozen contract
+for model/driver-initiated asks; the dial is the operator acting on the
+system, not the system asking the operator anything).
+
+- **Mechanism**: `tidepool_harness::provider::settings::SharedModelSettings`
+  — one `Arc<RwLock<ModelSettings>>` handle, cloned onto both the `OauthProvider`
+  (`OauthProvider::with_live_settings`, which reads it at every
+  request-build time — see `OauthConfig::tuning`'s doc) and this crate's
+  `AppState` (`AppState::set_model_settings`). A mutation through either
+  clone is visible to the other immediately — no polling, no second copy of
+  the settings.
+- **Durability**: every dial change persists to `settings.json` beside the
+  selfharness checkpoint (`persistence::default_settings_path`); on boot the
+  binary loads file-then-env (a durable dial choice OUTRANKS a stale env
+  default on restart — see `SharedModelSettings::load_or`'s doc).
+- **Trust model**: the same as every other verb on this surface — loopback
+  reachability IS the authorization boundary (see below). There is no
+  separate confirmation step; the dial takes effect the instant the operator
+  changes it.
+- **Allowlist, not free text**: the model dropdown is
+  `tidepool_harness::provider::settings::MODEL_ALLOWLIST` (currently
+  `gpt-5.6-terra`, `gpt-5.6-sol`); the effort dropdown reuses the real
+  `tidepool_harness::provider::oauth::ReasoningEffort` enum (never a second,
+  parallel type). `POST /settings` validates both server-side — a
+  non-allowlisted model or an unrecognized effort string is rejected with a
+  400 naming the problem, the pending settings left untouched — so the wire
+  can never carry a value neither the GUI dropdown nor the durable file would
+  ever produce. 404s when no harness run wired a live-settings handle onto
+  `AppState` (the demo binary, replay/api-key harness modes, or a bare test
+  `AppState`) — the masthead correspondingly renders no dial at all in that
+  case.
+
 ## Loopback trust model
 
 Binds `127.0.0.1` by default; reachability IS the authorization boundary —

@@ -268,6 +268,18 @@ pub fn default_transcript_path() -> PathBuf {
         .join("transcript.jsonl")
 }
 
+/// Default live-dial settings path: `<cache_dir>/selfharness/settings.json`
+/// — the operator's durable model/reasoning-effort dial choice
+/// (`crate::provider::settings::SharedModelSettings`), sitting beside
+/// `checkpoint.json`. A durable dial choice OUTRANKS a stale env/clap
+/// default on restart: env/clap only seed the settings this file holds when
+/// it doesn't exist yet — see [`crate::provider::settings::SharedModelSettings::load_or`].
+pub fn default_settings_path() -> PathBuf {
+    tidepool_runtime::paths::cache_dir()
+        .join("selfharness")
+        .join("settings.json")
+}
+
 /// Default DURABLE per-node event-log path:
 /// `<cache_dir>/selfharness/log.jsonl`. This is the [`crate::log`] append-only
 /// jsonl the answerer [`Harness`](crate::harness::Harness)'s [`LogWriter`](crate::log::LogWriter)

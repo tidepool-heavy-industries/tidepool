@@ -14,6 +14,7 @@ pub mod api_key;
 pub(crate) mod http;
 pub mod oauth;
 pub(crate) mod paths;
+pub mod settings;
 
 use serde::{Deserialize, Serialize};
 

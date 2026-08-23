@@ -410,6 +410,72 @@ async fn oauth_provider_completes_ok_with_valid_token() {
     );
 }
 
+/// The dial's whole point (60-model-dial DONE CRITERIA): mutating a
+/// [`SharedModelSettings`] handle a provider was built with
+/// ([`OauthProvider::with_live_settings`]) changes the very NEXT request's
+/// `model`/`reasoning.effort` — no restart, no new provider. A provider
+/// built via the plain [`OauthProvider::new`] (no live handle) is
+/// unaffected by this test's existence: that path is covered by
+/// `oauth_provider_completes_ok_with_valid_token` above, still constructing
+/// a provider the old way.
+#[tokio::test]
+async fn oauth_provider_with_live_settings_reflects_a_dial_change_on_the_next_request() {
+    let chat_server = MockServer::start();
+    chat_server.queue_raw("POST", "/responses", 200, responses_sse_body("pong", 3, 1));
+    chat_server.queue_raw("POST", "/responses", 200, responses_sse_body("pong2", 3, 1));
+
+    let dir = tempfile::tempdir().unwrap();
+    let token_path = dir.path().join("token.json");
+    write_token(&token_path, "at", "rt", 3600);
+
+    let mut cfg = oauth_cfg_for_mock(&chat_server, "http://127.0.0.1:1/", token_path);
+    cfg.model = "gpt-5.6-terra".to_string();
+    cfg.tuning.effort = oauth::ReasoningEffort::Medium;
+
+    let settings_path = dir.path().join("settings.json");
+    let live = tidepool_harness::provider::settings::SharedModelSettings::load_or(
+        settings_path,
+        tidepool_harness::provider::settings::ModelSettings::new(
+            "gpt-5.6-terra",
+            oauth::ReasoningEffort::Medium,
+        ),
+    );
+    let provider = OauthProvider::with_live_settings(cfg, live.clone());
+
+    provider
+        .complete(sample_req(), None)
+        .await
+        .expect("first request completes");
+    let first_body = chat_server
+        .body_seen("POST", "/responses")
+        .expect("first request landed");
+    assert_eq!(first_body["model"], "gpt-5.6-terra");
+    assert_eq!(first_body["reasoning"]["effort"], "medium");
+
+    // The dial: mutate the SAME handle the provider holds, no new provider.
+    live.set(tidepool_harness::provider::settings::ModelSettings::new(
+        "gpt-5.6-sol",
+        oauth::ReasoningEffort::High,
+    ))
+    .expect("dial change persists");
+
+    provider
+        .complete(sample_req(), None)
+        .await
+        .expect("second request completes");
+    let second_body = chat_server
+        .body_seen("POST", "/responses")
+        .expect("second request landed");
+    assert_eq!(
+        second_body["model"], "gpt-5.6-sol",
+        "the next request must use the dialed model"
+    );
+    assert_eq!(
+        second_body["reasoning"]["effort"], "high",
+        "the next request must use the dialed effort"
+    );
+}
+
 #[tokio::test]
 async fn oauth_provider_401_from_chat_is_auth_error() {
     let chat_server = MockServer::start();

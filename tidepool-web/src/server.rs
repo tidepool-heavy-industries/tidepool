@@ -67,6 +67,10 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use parking_lot::Mutex;
 use serde_json::{json, Map, Value as Jv};
+use tidepool_harness::provider::oauth::ReasoningEffort;
+use tidepool_harness::provider::settings::{
+    is_allowed_model, ModelSettings, SharedModelSettings, MODEL_ALLOWLIST,
+};
 use tidepool_harness::selfharness::operator::{
     child_path, FormShape, OperatorGate, ROOT_BIND_PATH,
 };
@@ -181,6 +185,12 @@ struct Registry {
     /// pre/post-restart run is distinguishable in a stale tab. `None` by
     /// default (every existing caller's page is unchanged).
     run_id: Option<String>,
+    /// The operator's live model/effort dial, when the boot path has wired
+    /// one (see [`AppState::set_model_settings`]) — an OAuth-provider
+    /// harness run only. `None` by default: the masthead renders no dial and
+    /// `POST /settings` 404s, matching every replay/api-key run, the demo
+    /// binary, and every pre-dial caller's existing behavior.
+    model_settings: Option<SharedModelSettings>,
 }
 
 /// Shared server state: every registered node's lifecycle + the re-render
@@ -221,6 +231,21 @@ impl AppState {
     /// calls this renders the same masthead as before.
     pub fn set_run_id(&self, run_id: impl Into<String>) {
         self.registry.lock().run_id = Some(run_id.into());
+    }
+
+    /// Wire the operator's live model/effort dial — the boot path's one
+    /// write, mirroring [`Self::set_run_id`]. Additive: a caller that never
+    /// calls this renders the same masthead (no dial) and the settings
+    /// route always 404s.
+    pub fn set_model_settings(&self, settings: SharedModelSettings) {
+        self.registry.lock().model_settings = Some(settings);
+    }
+
+    /// The wired live-settings handle, if any — read by the `/settings`
+    /// route. A plain `Arc`-cloning read, so it never holds the registry
+    /// lock across the mutate-and-persist call that follows.
+    fn model_settings(&self) -> Option<SharedModelSettings> {
+        self.registry.lock().model_settings.clone()
     }
 
     fn ping(&self, node_id: String) {
@@ -433,8 +458,9 @@ impl AppState {
             .map(|id| (id.clone(), render::node_panel(&reg.nodes[id].view(id))))
             .collect();
         let run_id = reg.run_id.clone();
+        let dial = reg.model_settings.as_ref().map(SharedModelSettings::get);
         drop(reg);
-        shell::page(sections, run_id.as_deref())
+        shell::page(sections, run_id.as_deref(), dial.as_ref())
     }
 
     /// Resolve a pending FORM at `(node_id, interaction)`: reassemble the
@@ -983,6 +1009,7 @@ pub fn router_with_form_api(state: AppState, form_api_enabled: bool) -> Router {
         .route(crate::tree::D3_ASSET_PATH, get(serve_d3))
         .route("/sse", get(sse))
         .route("/node/{node}/submit/{interaction}", post(submit))
+        .route("/settings", post(settings))
         .fallback(not_found);
     crate::formapi::merge(base, form_api_enabled).with_state(state)
 }
@@ -1091,6 +1118,64 @@ async fn submit(
     match st.resolve_form(&node, interaction, submission) {
         Ok(()) => Json(json!({"ok": true})).into_response(),
         Err(e) => (StatusCode::BAD_REQUEST, Json(resolve_error_json(&node, &e))).into_response(),
+    }
+}
+
+/// `POST /settings` — the operator's model/reasoning-effort dial: ordinary
+/// operator-initiated web UI (never the `Ask`/`AskUser` form machinery).
+/// Mutates the shared live-settings handle a wired
+/// `tidepool_harness::provider::oauth::OauthProvider` reads at every
+/// request-build time,
+/// and persists the change so it survives a restart — see
+/// [`tidepool_harness::provider::oauth::OauthConfig`]'s `tuning` doc for the
+/// full contract. `model` is checked against the fixed [`MODEL_ALLOWLIST`];
+/// `effort` is decoded against the real [`ReasoningEffort`] enum — neither
+/// is ever accepted as free text, and an unrecognized value for either is
+/// rejected with a 400 naming the problem, the pending value left
+/// untouched. 404 when no harness run wired a live-settings handle
+/// ([`AppState::set_model_settings`] never called — replay/api-key mode, the
+/// demo binary, or a bare test `AppState`).
+async fn settings(State(st): State<AppState>, headers: HeaderMap, body: Bytes) -> Response {
+    let raw = match parse_json_body(&headers, &body) {
+        Ok(v) => v,
+        Err(msg) => return err_json(msg),
+    };
+    let Jv::Object(obj) = raw else {
+        return err_json("submission must be a flat JSON object".to_string());
+    };
+    let Some(model) = obj.get("model").and_then(|v| v.as_str()) else {
+        return err_json("missing \"model\"".to_string());
+    };
+    if !is_allowed_model(model) {
+        return err_json(format!(
+            "unknown model {model:?} — allowed: {}",
+            MODEL_ALLOWLIST.join(", ")
+        ));
+    }
+    let Some(effort_raw) = obj.get("effort").and_then(|v| v.as_str()) else {
+        return err_json("missing \"effort\"".to_string());
+    };
+    let effort = match <ReasoningEffort as clap::ValueEnum>::from_str(effort_raw, false) {
+        Ok(e) => e,
+        Err(_) => return err_json(format!("unknown effort {effort_raw:?}")),
+    };
+    let Some(live) = st.model_settings() else {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({
+                "ok": false,
+                "error": "no live model-settings handle wired on this run",
+            })),
+        )
+            .into_response();
+    };
+    match live.set(ModelSettings::new(model.to_string(), effort)) {
+        Ok(()) => Json(json!({"ok": true})).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"ok": false, "error": format!("failed to persist settings: {e}")})),
+        )
+            .into_response(),
     }
 }
 

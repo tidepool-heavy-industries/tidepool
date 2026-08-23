@@ -89,13 +89,32 @@ pub struct OauthConfig {
     pub oauth: InnerOAuthConfig,
     pub callback_port: u16,
     pub token_path: PathBuf,
+    /// The Codex model id sent on every `/responses` call — subject to the
+    /// same construction-time-vs-live-handle split as `tuning.effort` below;
+    /// see that field's doc for the full contract.
     pub model: String,
     /// Chat-completions endpoint override — `None` uses genai's normal
     /// resolution for `model`; tests point this at a local fixture server.
     pub chat_base_url: Option<String>,
     /// The `reasoning.effort`/`reasoning.summary` knobs sent on every
-    /// `/responses` call — resolved once at process entry (see
-    /// [`ReasoningTuningArgs`]), never read ambiently at request-build time.
+    /// `/responses` call — the env/clap-resolved defaults (see
+    /// [`ReasoningTuningArgs`]).
+    ///
+    /// **Contract (revised from the original "resolved once at process
+    /// entry, never read ambiently" design):** an [`OauthProvider`] built via
+    /// [`OauthProvider::new`] uses `model`/`tuning` exactly as constructed,
+    /// for its whole lifetime — unchanged pre-dial behavior, what every
+    /// existing caller/test still gets. An [`OauthProvider`] built via
+    /// [`OauthProvider::with_live_settings`] instead reads `model` and
+    /// `tuning.effort` AMBIENTLY, at EVERY request-build time, from the
+    /// shared [`crate::provider::settings::SharedModelSettings`] handle — the
+    /// operator's model/effort dial (`tidepool-web`'s settings route is the
+    /// only writer) — so a dial change takes effect on the very next model
+    /// round with no restart. `tuning.summary` and every other field on this
+    /// struct (auth, token path, `chat_base_url`) are never live-dialed and
+    /// always come from here, in either mode. `model`/`tuning` on `self`
+    /// stay the CONSTRUCTION-TIME value regardless — only what
+    /// `OauthProvider::complete` actually reads at call time differs.
     pub tuning: ReasoningTuning,
 }
 
@@ -104,8 +123,23 @@ pub struct OauthConfig {
 /// `medium` reliably makes the backend emit `reasoning_summary_text` deltas
 /// (the "thinking" the observatory shows); a higher/lower effort trades
 /// thinking visibility for cost.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, clap::ValueEnum)]
+/// `Serialize`/`Deserialize` (`rename_all = "lowercase"`, matching the clap
+/// spelling exactly) let this same enum serve as the durable dial's on-disk
+/// representation (`crate::provider::settings::ModelSettings`) — never a
+/// second, parallel effort type for that purpose.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Default,
+    clap::ValueEnum,
+    serde::Serialize,
+    serde::Deserialize,
+)]
 #[value(rename_all = "lowercase")]
+#[serde(rename_all = "lowercase")]
 pub enum ReasoningEffort {
     Minimal,
     Low,
@@ -117,8 +151,10 @@ pub enum ReasoningEffort {
 impl ReasoningEffort {
     /// The exact string the Codex `/responses` body expects — kept as an
     /// explicit mapping (rather than reading `ValueEnum::to_possible_value`)
-    /// so the wire form is never coupled to clap's own rendering.
-    fn wire(self) -> &'static str {
+    /// so the wire form is never coupled to clap's own rendering. `pub`:
+    /// also the canonical display/option-value string the operator's model
+    /// dial (`tidepool-web`'s masthead) renders — one mapping, not two.
+    pub fn wire(self) -> &'static str {
         match self {
             Self::Minimal => "minimal",
             Self::Low => "low",
@@ -619,11 +655,46 @@ async fn access_token(cfg: &OauthConfig) -> Result<String, ProviderError> {
 
 pub struct OauthProvider {
     cfg: OauthConfig,
+    /// The operator's live model/effort dial — see [`OauthConfig::tuning`]'s
+    /// doc for the full contract. `None` (the default,
+    /// [`OauthProvider::new`]) keeps `cfg`'s construction-time `model`/
+    /// `tuning.effort` fixed for the provider's whole lifetime, exactly as
+    /// before this existed.
+    live: Option<crate::provider::settings::SharedModelSettings>,
 }
 
 impl OauthProvider {
     pub fn new(cfg: OauthConfig) -> Self {
-        Self { cfg }
+        Self { cfg, live: None }
+    }
+
+    /// Same provider, but `model`/`tuning.effort` are read from `live` at
+    /// EVERY request-build time instead of staying fixed at `cfg`'s
+    /// construction-time value — see [`OauthConfig::tuning`]'s doc. `cfg`'s
+    /// other fields (auth, token path, `chat_base_url`, `tuning.summary`)
+    /// are never live-dialed and always come from `cfg`.
+    pub fn with_live_settings(
+        cfg: OauthConfig,
+        live: crate::provider::settings::SharedModelSettings,
+    ) -> Self {
+        Self {
+            cfg,
+            live: Some(live),
+        }
+    }
+
+    /// `cfg`, with `model`/`tuning.effort` overridden from the live dial
+    /// when one is attached — the one place [`ModelProvider::complete`]
+    /// decides which settings a request actually uses.
+    fn resolved_cfg(&self) -> OauthConfig {
+        let Some(live) = &self.live else {
+            return self.cfg.clone();
+        };
+        let dial = live.get();
+        let mut cfg = self.cfg.clone();
+        cfg.model = dial.model;
+        cfg.tuning.effort = dial.effort;
+        cfg
     }
 }
 
@@ -634,7 +705,8 @@ impl ModelProvider for OauthProvider {
         sink: Option<StreamSink>,
     ) -> Result<TurnResponse, ProviderError> {
         let token = access_token(&self.cfg).await?;
-        codex_responses(&self.cfg, &token, &req, sink).await
+        let cfg = self.resolved_cfg();
+        codex_responses(&cfg, &token, &req, sink).await
     }
 }
 

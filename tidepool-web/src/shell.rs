@@ -12,6 +12,8 @@
 //! so an operator's toggle survives any number of live patches.
 
 use maud::{html, Markup, PreEscaped, DOCTYPE};
+use tidepool_harness::provider::oauth::ReasoningEffort;
+use tidepool_harness::provider::settings::{ModelSettings, MODEL_ALLOWLIST};
 
 /// The full page: `<head>` with inline [`CSS`] + [`JS`], `<body>` with a
 /// masthead and the `#tree` outline — one stable `.node-slot` wrapper per
@@ -28,7 +30,19 @@ use maud::{html, Markup, PreEscaped, DOCTYPE};
 /// no masthead text at all, the same page every caller saw before this
 /// existed. It is a substrate identifier, never model prose, but is still
 /// rendered as an ordinary escaped text node like everything else here.
-pub fn page(panels: Vec<(String, Markup)>, run_id: Option<&str>) -> Markup {
+///
+/// `dial` — the operator's live model/effort settings, when the boot path
+/// has wired a [`tidepool_harness::provider::settings::SharedModelSettings`]
+/// handle onto the [`crate::AppState`] (see
+/// [`crate::AppState::set_model_settings`]) — renders [`model_dial`] showing
+/// the CURRENT values, never a write-only form. `None` renders no dial at
+/// all: the same masthead every caller saw before this existed (a
+/// replay/api-key harness run, the demo binary, and every pre-dial test).
+pub fn page(
+    panels: Vec<(String, Markup)>,
+    run_id: Option<&str>,
+    dial: Option<&ModelSettings>,
+) -> Markup {
     html! {
         (DOCTYPE)
         html lang="en" {
@@ -49,6 +63,9 @@ pub fn page(panels: Vec<(String, Markup)>, run_id: Option<&str>) -> Markup {
                             @if let Some(id) = run_id {
                                 span class="run-id" data-node="run-id" { "run " (id) }
                             }
+                            @if let Some(d) = dial {
+                                (model_dial(d))
+                            }
                         }
                         span id="conn" class="conn ok" { "live" }
                     }
@@ -62,6 +79,34 @@ pub fn page(panels: Vec<(String, Markup)>, run_id: Option<&str>) -> Markup {
                             }
                         }
                     }
+                }
+            }
+        }
+    }
+}
+
+/// The operator's model/reasoning-effort dial: two `<select>`s inside a
+/// form that auto-submits on change (`onchange="this.form.requestSubmit()"`)
+/// through the ORDINARY `data-on-submit`/`collect`/`post` wire every other
+/// form on this page uses ([`CORE_JS`]'s `wire()` already listens for any
+/// `[data-on-submit]` form's `submit` event — nothing page-specific needed)
+/// — `POST /settings`. Both dropdowns are fixed, server-validated
+/// allowlists ([`MODEL_ALLOWLIST`], the real [`ReasoningEffort`] enum) —
+/// never free text, and this is ordinary operator-initiated web UI, not the
+/// `Ask`/`AskUser` form machinery. `<option>` values are
+/// [`ReasoningEffort::wire`]'s canonical strings — the exact spelling the
+/// settings route parses back.
+fn model_dial(current: &ModelSettings) -> Markup {
+    html! {
+        form class="model-dial" data-on-submit="@post('/settings')" {
+            select class="dial-model" data-bind="model" data-kind="string" onchange="this.form.requestSubmit()" {
+                @for m in MODEL_ALLOWLIST {
+                    option value=(m) selected[current.model.as_str() == *m] { (m) }
+                }
+            }
+            select class="dial-effort" data-bind="effort" data-kind="string" onchange="this.form.requestSubmit()" {
+                @for e in <ReasoningEffort as clap::ValueEnum>::value_variants() {
+                    option value=(e.wire()) selected[*e == current.effort] { (e.wire()) }
                 }
             }
         }
@@ -143,6 +188,12 @@ body {
 .run-id {
   font-size: var(--text-micro); font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
   color: var(--muted);
+}
+.model-dial { display: flex; gap: var(--unit); margin-top: calc(0.5 * var(--unit)); }
+.model-dial select {
+  font: inherit; font-size: var(--text-micro); font-weight: 600; text-transform: uppercase;
+  letter-spacing: var(--tracking-wide); color: var(--muted);
+  border: var(--hair-faint); background: transparent; padding: 0.2em 0.4em;
 }
 .conn {
   font-size: var(--text-micro); font-weight: 600; text-transform: uppercase;
@@ -681,6 +732,7 @@ mod tests {
         let doc = page(
             vec![("n1".to_string(), html! { div id="panel-n1" { "hi" } })],
             None,
+            None,
         )
         .into_string();
         assert!(doc.contains("<div id=\"panel-n1\">hi</div>"));
@@ -701,6 +753,7 @@ mod tests {
                 ("alpha".to_string(), html! { div id="panel-alpha" {} }),
                 ("beta".to_string(), html! { div id="panel-beta" {} }),
             ],
+            None,
             None,
         )
         .into_string();
@@ -723,6 +776,7 @@ mod tests {
                 ),
                 ("root/1-x".to_string(), html! { div id="panel-root/1-x" {} }),
             ],
+            None,
             None,
         )
         .into_string();
@@ -755,6 +809,7 @@ mod tests {
                 ),
             ],
             None,
+            None,
         )
         .into_string();
 
@@ -772,7 +827,7 @@ mod tests {
     /// pre/post-restart run is distinguishable in a stale tab.
     #[test]
     fn masthead_shows_run_id_when_set() {
-        let doc = page(vec![], Some("run-2026-08-20-abc123")).into_string();
+        let doc = page(vec![], Some("run-2026-08-20-abc123"), None).into_string();
         assert!(doc.contains("class=\"run-id\""), "{doc}");
         assert!(doc.contains("run-2026-08-20-abc123"), "{doc}");
     }
@@ -781,8 +836,40 @@ mod tests {
     /// same page every caller saw before this existed.
     #[test]
     fn masthead_omits_run_id_when_absent() {
-        let doc = page(vec![], None).into_string();
+        let doc = page(vec![], None, None).into_string();
         assert!(!doc.contains("class=\"run-id\""), "{doc}");
+    }
+
+    /// When a dial is wired, the masthead shows BOTH allowlisted models and
+    /// every effort — with the CURRENT values pre-selected — never a
+    /// write-only form.
+    #[test]
+    fn masthead_shows_the_dial_with_current_values_selected_when_wired() {
+        let current = ModelSettings::new("gpt-5.6-sol", ReasoningEffort::High);
+        let doc = page(vec![], None, Some(&current)).into_string();
+        assert!(doc.contains("class=\"model-dial\""), "{doc}");
+        for m in MODEL_ALLOWLIST {
+            assert!(doc.contains(&format!("value=\"{m}\"")), "{doc}");
+        }
+        assert!(
+            doc.contains("value=\"gpt-5.6-sol\" selected"),
+            "the current model must be pre-selected: {doc}"
+        );
+        assert!(
+            doc.contains("value=\"high\" selected"),
+            "the current effort must be pre-selected: {doc}"
+        );
+        // A non-current option is rendered but NOT selected.
+        assert!(!doc.contains("value=\"gpt-5.6-terra\" selected"), "{doc}");
+    }
+
+    /// No dial wired (`None`) renders no dial markup at all — the same
+    /// masthead every caller saw before this existed (replay/api-key runs,
+    /// the demo binary, every pre-dial test).
+    #[test]
+    fn masthead_omits_the_dial_when_absent() {
+        let doc = page(vec![], None, None).into_string();
+        assert!(!doc.contains("class=\"model-dial\""), "{doc}");
     }
 
     /// `collect()` coerces a `data-kind="number"` field exactly like

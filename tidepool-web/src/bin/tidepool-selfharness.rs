@@ -129,6 +129,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // resolves under the answerer's own compile too.
     cfg.include.push(source.source_dir.clone());
 
+    // Set only in OAuth mode (below) — the operator's live model/effort dial
+    // handle, so it can be wired onto the web `AppState` too, once one
+    // exists, further down. `None` in replay/api-key mode: the masthead
+    // renders no dial and `/settings` 404s, matching those modes' existing
+    // behavior.
+    let mut live_settings: Option<tidepool_harness::provider::settings::SharedModelSettings> = None;
     let provider: Arc<dyn DynModelProvider> = match (&replay_log, &api_key_env) {
         (Some(log), _) => {
             tracing::info!(target: "tidepool_web", path = %log.display(), "replay mode");
@@ -148,9 +154,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             // gpt-4o-mini; default to a Codex-supported model.
             let model =
                 std::env::var("TIDEPOOL_LLM_MODEL").unwrap_or_else(|_| "gpt-5.6-terra".to_string());
-            let mut oauth_cfg = OauthConfig::new(model);
-            oauth_cfg.tuning = args.reasoning.clone().into();
-            Arc::new(OauthProvider::new(oauth_cfg))
+            let tuning: tidepool_harness::provider::oauth::ReasoningTuning =
+                args.reasoning.clone().into();
+            let mut oauth_cfg = OauthConfig::new(model.clone());
+            oauth_cfg.tuning = tuning;
+
+            // The operator's dial: file-then-env — a durable prior dial
+            // choice outranks env/clap on restart, env/clap seed only the
+            // very first boot (see `SharedModelSettings::load_or`'s doc).
+            let default_settings =
+                tidepool_harness::provider::settings::ModelSettings::new(model, tuning.effort);
+            let live = tidepool_harness::provider::settings::SharedModelSettings::load_or(
+                persistence::default_settings_path(),
+                default_settings,
+            );
+            live_settings = Some(live.clone());
+            Arc::new(OauthProvider::with_live_settings(oauth_cfg, live))
         }
     };
 
@@ -213,6 +232,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         // operator (dogfood finding, 2026-08-19). Re-add registrations only
         // together with the routing that feeds them.
         let (state, gate) = tidepool_web::spawn_operator_server_multi(port).await?;
+        if let Some(live) = &live_settings {
+            state.set_model_settings(live.clone());
+        }
         driver.set_gate(gate);
         web_state = Some(state);
     }
