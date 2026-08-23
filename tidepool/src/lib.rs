@@ -22,7 +22,6 @@ pub use tidepool_eval as eval;
 pub use tidepool_heap as heap;
 pub use tidepool_macro as macro_impl; // 'macro' is a keyword
 pub use tidepool_mcp as mcp;
-pub use tidepool_optimize as optimize;
 pub use tidepool_repr as repr;
 pub use tidepool_runtime as runtime;
 

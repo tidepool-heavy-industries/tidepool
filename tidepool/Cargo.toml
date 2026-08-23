@@ -19,7 +19,6 @@ path = "src/main.rs"
 tidepool-repr.workspace = true
 tidepool-eval.workspace = true
 tidepool-heap.workspace = true
-tidepool-optimize.workspace = true
 tidepool-bridge.workspace = true
 tidepool-bridge-derive.workspace = true
 tidepool-effect.workspace = true
