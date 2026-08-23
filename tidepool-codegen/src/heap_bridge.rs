@@ -100,6 +100,30 @@ pub unsafe fn heap_to_value_forcing(
 /// a genuine constructor.
 pub const CLOSURE_SENTINEL: DataConId = DataConId(u64::MAX);
 
+/// Deep scan: whether `v` — or anything nested inside a `Con`'s fields — is
+/// the [`CLOSURE_SENTINEL`] placeholder. The ONE construction site
+/// ([`heap_to_value_inner`]'s `ClosurePolicy::Substitute` arm, below) always
+/// builds it with zero fields, so checking the constructor id alone is the
+/// correct, invariant-backed predicate — an additional `fields.is_empty()`
+/// check would be redundant, never load-bearing (pinned by
+/// `sentinel_is_id_only_no_fields_check_needed` below).
+pub fn contains_closure_sentinel(v: &Value) -> bool {
+    match v {
+        Value::Con(id, fields) => {
+            *id == CLOSURE_SENTINEL || fields.iter().any(contains_closure_sentinel)
+        }
+        _ => false,
+    }
+}
+
+/// Whether `con`'s field `idx` carries the [`CLOSURE_SENTINEL`] placeholder,
+/// scanned via [`contains_closure_sentinel`] — for a caller holding a
+/// suspend request `Con` and checking one specific field (e.g.
+/// `FinalizeWith`'s value field) rather than the whole value.
+pub fn field_contains_closure_sentinel(con: &Value, idx: usize) -> bool {
+    matches!(con, Value::Con(_, fields) if fields.get(idx).is_some_and(contains_closure_sentinel))
+}
+
 /// How the bridge treats a `TAG_CLOSURE` heap object it encounters.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum ClosurePolicy {
@@ -928,5 +952,24 @@ mod tests {
                 fields[1]
             );
         }
+    }
+
+    /// Pins the invariant `contains_closure_sentinel`/`field_contains_closure_sentinel`
+    /// rely on: the sentinel is ALWAYS childless, so an id-only check is
+    /// exactly as strong as an id-and-empty-fields check. Also covers the
+    /// nested case (a closure inside a product field) and a non-match.
+    #[test]
+    fn sentinel_is_id_only_no_fields_check_needed() {
+        let sentinel = Value::Con(CLOSURE_SENTINEL, Vec::new());
+        assert!(contains_closure_sentinel(&sentinel));
+
+        let nested = Value::Con(DataConId(7), vec![Value::Lit(Literal::LitInt(41)), sentinel]);
+        assert!(contains_closure_sentinel(&nested));
+        assert!(field_contains_closure_sentinel(&nested, 1));
+        assert!(!field_contains_closure_sentinel(&nested, 0));
+
+        let plain_data = Value::Con(DataConId(7), vec![Value::Lit(Literal::LitInt(41))]);
+        assert!(!contains_closure_sentinel(&plain_data));
+        assert!(!field_contains_closure_sentinel(&plain_data, 0));
     }
 }

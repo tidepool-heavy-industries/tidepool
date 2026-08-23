@@ -2969,22 +2969,12 @@ impl Harness {
         if !matches!(pending.classified.routing, HoleRouting::Finalize { .. }) {
             return false;
         }
-        // DEEP scan, mirroring the machine's request_carries_closure_sentinel
-        // (codex review 2026-08-12, finding 3): a closure nested inside the
-        // finalized product — a record of functions — must route through the
-        // handle-delivery path exactly like a top-level closure.
-        fn any_sentinel(v: &Value) -> bool {
-            match v {
-                Value::Con(id, fields) => {
-                    (id.0 == u64::MAX && fields.is_empty()) || fields.iter().any(any_sentinel)
-                }
-                _ => false,
-            }
-        }
-        matches!(
-            &pending.raw_request,
-            Value::Con(_, fields) if fields.get(1).is_some_and(any_sentinel)
-        )
+        // DEEP scan via the one exported predicate (mirrors the machine's
+        // request_carries_closure_sentinel, codex review 2026-08-12, finding
+        // 3): a closure nested inside the finalized product — a record of
+        // functions — must route through the handle-delivery path exactly
+        // like a top-level closure.
+        tidepool_codegen::heap_bridge::field_contains_closure_sentinel(&pending.raw_request, 1)
     }
 
     /// Apply a `finalize`d CLOSURE by reference:

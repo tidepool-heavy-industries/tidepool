@@ -329,15 +329,7 @@ enum ServicedHole {
 /// (they run on the shared OUTER session directly), so this operates on the
 /// raw suspended request instead of a node's stashed pending state.
 fn green_field_is_closure(request: &Value, idx: usize) -> bool {
-    fn any_sentinel(v: &Value) -> bool {
-        match v {
-            Value::Con(id, fields) => {
-                (id.0 == u64::MAX && fields.is_empty()) || fields.iter().any(any_sentinel)
-            }
-            _ => false,
-        }
-    }
-    matches!(request, Value::Con(_, fields) if fields.get(idx).is_some_and(any_sentinel))
+    tidepool_codegen::heap_bridge::field_contains_closure_sentinel(request, idx)
 }
 
 /// Pull a plain `Int` field out of a Green request Con — every
