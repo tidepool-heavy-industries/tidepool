@@ -316,8 +316,9 @@ you intend to reuse the same `JitEffectMachine` after a cancellation.
 
 The MCP server (`tidepool`, `tidepool-repl`) layers its own per-call timeout
 on top of the above: an eval that reaches an effect boundary within the grace
-window parks as a resumable continuation; a pure computation that reaches no
-safepoint before the window expires has its thread **detached** — left
+timeout interval parks as a resumable continuation; a pure computation that
+reaches no safepoint before the timeout interval expires has its thread
+**detached** — left
 running in the background rather than killed — and the call returns a
 timeout error. This is deliberate: it avoids tearing down a thread mid-unsafe
 operation.

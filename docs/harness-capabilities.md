@@ -21,8 +21,8 @@ suspension mechanism is the foundation everything here builds on.
 
 The **harness** is the resident layer on top: you author a program —
 `State`, `render`, `loop` — in plain Haskell, and the runtime
-(`tidepool-selfharness`) drives it forever: render the state, open model
-windows for cognition, run the authored loop, checkpoint, repeat. Xmonad
+(`tidepool-selfharness`) drives it forever: render the state, open agent
+sessions for cognition, run the authored loop, checkpoint, repeat. Xmonad
 vibes: the config is code, the runtime is invisible.
 
 The design philosophy, in two rules that explain most decisions:
@@ -39,7 +39,7 @@ Two files per harness (see `harness-dogfooding/`):
 
 - `HarnessTypes.hs` — `State`, the answer ADTs, and pure
   `render :: State -> Text`. No runtime handles, no `loop` reference, so
-  answer windows and checkpoint codecs import vocabulary without the effect
+  answer sessions and checkpoint codecs import vocabulary without the effect
   row.
 - `Harness.hs` — `loop :: State -> Harness State`, the one effectful piece
   (`Harness` is an alias for `M`, the effect monad).
@@ -47,25 +47,26 @@ Two files per harness (see `harness-dogfooding/`):
 The driver checkpoints `State` (via `ToJSON`/`FromJSON`) every loop
 iteration, restores on boot (carrying state forward across harness edits when
 the shape still decodes), compacts the model transcript when context grows,
-and enforces round caps with a grace-window glide instead of a hard kill.
+and enforces round caps with a final warning round instead of a hard kill.
 
-## Cognition windows (live)
+## Agent sessions (live)
 
-`runLLMTurn @T prompt` opens a clean-context model window that sees the
+`runLLMTurn @T prompt` opens a clean-context agent session that sees the
 rendered state plus the prompt, writes Haskell, and must deliver a `T`:
 
-- **The answer is type-pinned by the effect row.** The window compiles
+- **The answer is type-pinned by the effect row.** The session compiles
   against `Finalize T` in its row; a wrong-typed answer is a GHC error fed
   back for a corrective retry, not a runtime surprise.
-- **Windows in one loop share context** — the companion's orient → decide →
-  act chain is three windows seeing one conversation.
+- **Sessions within one loop iteration share context** — the companion's
+  orient → decide → act chain is three agent sessions seeing one
+  conversation.
 - **Answers can be functions.** `runLLMTurn @(State -> State)` works end to
   end: the finalized closure is delivered by handle into the loop's parked
   continuation, same heap, no serialization. Records of functions work too.
   This is the deepest capability: models author typed *behavior*, not just
   data.
 
-What a window can call (its row is `[AskUser, Fork, ReadState, Green, Finalize T]` —
+What an agent session can call (its row is `[AskUser, Fork, ReadState, Green, Finalize T]` —
 deliberately minimal; no shell, no filesystem, no network):
 
 - `askUser @T` — present a typed form to the human operator, derived from
@@ -73,10 +74,11 @@ deliberately minimal; no shell, no filesystem, no network):
   Re-prompts on decode failure. `note "…"` posts non-blocking narration to
   the operator feed.
 - `getStateJson` — read the loop's current state as JSON.
-- `fork`/`forkAll` — bounded parallel sub-answerer windows (depth one).
+- `fork`/`forkAll` — bounded parallel sub-answerer sessions (depth one).
 - `finalize` — the typed yield. Spelling matters; see Sharp edges.
-- Top-level pure declarations persist by name across loops (the "decl
-  plane"), so a window can `define` helpers its successors reuse.
+- Top-level pure declarations persist by name across loop iterations (the
+  persistent declaration environment), so an agent session can `define`
+  helpers its successors reuse.
 
 A model reply may contain **multiple fenced `haskell` blocks**; they run
 sequentially, stopping at the first failure, reported as "first N blocks
@@ -117,7 +119,7 @@ driver and is serviced there; nothing dispatches behind the model's back.
 
 ## Live dogfoods — existence proofs
 
-- **companion/** — an open-ended persistent companion. Proves: multi-window
+- **companion/** — an open-ended persistent companion. Proves: multi-agent-session
   OODA loops; `Turn { directives, edit }` answers carrying a closure beside
   data; memory as a **git store curated by a spawned Codex agent** (the
   harness batches `Remember`/`Modify`/`Forget` directives per loop, the
@@ -146,25 +148,26 @@ block, hole, and answer). Turn compiles are content-addressed and memoized.
 ## The chartered future — PRD 20, "Exomonad v3"
 
 The swarm successor to exomonad: coordination as a compiled resident program,
-cognition only at typed seams. **Stage 1 lanes S1-L1 through S1-L5 are
+cognition only at typed boundaries. **Stage 1 lanes S1-L1 through S1-L5 are
 landed** (row servicing above; the cycle table above; the hylo swarm
 substrate `Tidepool.Swarm` that dev-tree v2 now uses; green threads +
 capability mailboxes, merged 2026-08-17; journal-backed resume hardening).
 **S1-L6** (the operator surface: a live outcome-tree pane with per-node
 wall-clock/cost observability, agent transcript streaming, typed triage
 forms, and a fold-receipt view) **has no confirmed implementation** as of
-this audit. **Stage 2** (the resident factory: backlog DAG, per-repo memory,
-autonomy policy) and **Stage 3** (self-hosting) are locked design, not built.
+this audit. **Stage 2** (the long-running repository coordinator: backlog
+DAG, per-repo memory, autonomy policy) and **Stage 3** (self-hosting) are
+locked design, not built.
 The locked core, compressed:
 
 - **The swarm is a monadic hylomorphism; agents are its algebra and
   coalgebra.** `hyloM alg coalg` over `PlanF a = PlanF { task, kids :: [a] }`.
-  `decompose` = planning window + parent-first scaffold (lazy: each layer is
+  `decompose` = planning session + parent-first scaffold (lazy: each layer is
   planned with the parent's real outcomes in hand). `integrate` = leaf
   implementation or merge agent + checks. The plan never materializes; git
   plus an append-only **run journal** persist everything; resume folds the
   journal ("from last good"), adopts orphaned commits after verification.
-- **Policies are middleware** over the two seams (`receipted`, `budgeted`,
+- **Policies are middleware** over the two boundaries (`receipted`, `budgeted`,
   `gated`, `capped`) — plain function wrappers, testable against pure
   algebras. **Policy slots are effectful** (`a -> M b`): a gate tiers
   deterministic heuristics → a specifically-prompted model turn → the
@@ -172,8 +175,8 @@ The locked core, compressed:
 - **Interior nodes are residents with mailboxes.** Each node is a green
   thread (over the parked-continuation substrate) owning its worktree
   exclusively, selecting over child folds, its inbox, worker completions,
-  and repo events. Handles are the addressing — possession is permission,
-  tree-edges-only by lexical scope. Messages (`RebaseOnto`, `AmendSpec`,
+  and repo events. Handles are the addressing — holding a handle is what
+  authorizes acting on it, tree-edges-only by lexical scope. Messages (`RebaseOnto`, `AmendSpec`,
   `Cancel` / `Escalate`, `Progress`) are reconciliation hints re-derivable
   from git — crash-safe by design. The select loop is stdlib plumbing;
   harnesses supply policies.
@@ -181,7 +184,7 @@ The locked core, compressed:
   `RebaseOnto` down the tree; each owner tries the rebase mechanically
   (Exec-run git, abort on any conflict — zero tokens), spawns a resolution
   agent on conflict, escalates upward past that.
-- **The trust ladder:** repository observations → orchestrator-run checks →
+- **Evidence precedence:** repository observations → orchestrator-run checks →
   adversarial review (fresh reviewer agents, findings as data, bounded
   rounds), with a typed **fold receipt** on every merge. A higher rung never
   overrides a failing lower one. Autonomy is policy over receipts: all folds
@@ -193,8 +196,8 @@ The locked core, compressed:
   L2 concurrent agent cycles (`spawnAsync`, `agentDone` as an event) → L3
   the hylo swarm + dev-tree v2 → L4 green threads + node residency → L5
   resume hardening + rebase cascade → L6 operator surface. Stage 2: the
-  resident factory (backlog, per-repo memory, autonomy policy). Stage 3:
-  self-hosting.
+  long-running repository coordinator (backlog, per-repo memory, autonomy
+  policy). Stage 3: self-hosting.
 
 Full text: `plans/self-iterating-harness/20-exomonad-v3-prd.md`.
 
@@ -251,8 +254,9 @@ Full text: `plans/self-iterating-harness/20-exomonad-v3-prd.md`.
 ## Where the deep docs live (for collaborators with repo access)
 
 - Root `CLAUDE.md` — project map, build/test tiers, locked decisions.
-- `tidepool-harness/CLAUDE.md` — the harness runtime: sessions, realms,
-  finalize contracts, closure delivery, machine lifecycle, logs.
+- `tidepool-harness/CLAUDE.md` — the harness runtime: sessions, runtime
+  resource scopes, finalize contracts, closure delivery, machine lifecycle,
+  logs.
 - `tidepool-agent/CLAUDE.md` — the agent backend seam, containment, test
   tiers. `tidepool-worktree/CLAUDE.md` — worktree rules.
 - `plans/self-iterating-harness/18-…`, `19-…`, `20-exomonad-v3-prd.md` — the
