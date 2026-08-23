@@ -483,6 +483,21 @@ fn fork_budget_refusal(spent: u32, cap: u32, needed: u32, ty_label: &str) -> Str
     )
 }
 
+/// The completed block's rendered value, capped for a round-complete
+/// message — GHCi shows you what you evaluated, and so does this window:
+/// the wave-per-round idiom (fork a wave, end the round, shape the next
+/// wave from what came back) only works if the model can SEE its bound
+/// results, not just compute on them blind.
+fn rendered_result_snippet(rendered: &str) -> String {
+    const CAP: usize = 1500;
+    if rendered.chars().count() <= CAP {
+        rendered.to_string()
+    } else {
+        let head: String = rendered.chars().take(CAP).collect();
+        format!("{head}\n… (truncated)")
+    }
+}
+
 /// The corrective line appended when a round ends with green threads still
 /// running — the round-scoped structured-concurrency contract, stated at the
 /// moment it bit rather than left to be rediscovered.
@@ -4751,14 +4766,17 @@ impl SelfHarnessDriver {
                         classified.routing
                     ))));
                 }
-                Ok(TurnOutcome::Completed { .. }) => {
+                Ok(TurnOutcome::Completed { rendered }) => {
                     self.agent.reopen_node(node)?;
                     let ty_disp = display_ty(ty_label);
+                    let shown = rendered_result_snippet(&rendered);
                     self.agent.push_user_turn(
                         node,
                         &format!(
                             "Round complete — your window continues, and that round's \
-                             definitions/bindings persist. The request still awaits its \
+                             definitions/bindings persist. The block evaluated to:\n\
+                             {shown}\n\
+                             The request still awaits its \
                              answer: when ready, evaluate `finalize @{ty_disp} value` \
                              (that ends the window)."
                         ),
@@ -5121,20 +5139,26 @@ impl SelfHarnessDriver {
                 // (`Done`→`Running`) before the corrective re-prompt, so the
                 // same accumulating node keeps driving toward `finalize` (a
                 // wasted round, already counted).
-                Ok(TurnOutcome::Completed { .. }) => {
+                Ok(TurnOutcome::Completed { rendered }) => {
                     // A completed non-finalize round is a VALID explore/define
                     // round, not a failure — the window is multi-round by
                     // design, and scolding here taught the model that only
                     // `finalize` is admitted (companion dogfood, 2026-08-13:
-                    // it reported exactly that, accurately). Acknowledge and
-                    // keep the request standing.
+                    // it reported exactly that, accurately). Acknowledge, SHOW
+                    // the block's value (GHCi parity — the wave-per-round
+                    // idiom needs the model to SEE what it bound, see
+                    // `rendered_result_snippet`), and keep the request
+                    // standing.
                     self.agent.reopen_node(node)?;
                     let ty_disp = display_ty(ty_label);
+                    let shown = rendered_result_snippet(&rendered);
                     self.agent.push_user_turn(
                         node,
                         &format!(
                             "Round complete — your window continues, and that round's \
-                             definitions/bindings persist. The request still awaits its \
+                             definitions/bindings persist. The block evaluated to:\n\
+                             {shown}\n\
+                             The request still awaits its \
                              answer: when ready, evaluate `finalize @{ty_disp} value` \
                              (that ends the window)."
                         ),
