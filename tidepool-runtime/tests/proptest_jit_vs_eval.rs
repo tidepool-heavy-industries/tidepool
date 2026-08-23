@@ -10,8 +10,15 @@ fn jit_agrees_with_eval() {
     std::thread::Builder::new()
         .stack_size(8 * 1024 * 1024)
         .spawn(|| {
+            // `source_file` makes a failure PERSIST to
+            // proptest_jit_vs_eval.proptest-regressions — without it,
+            // `TestRunner::new` (unlike the proptest! macro) cannot write
+            // one at all, which is how jit_small_nursery_agrees's two
+            // 2026-08-23 in-shard failures left no repro behind
+            // (scratchpad review-nursery-flake.md).
             let mut runner = TestRunner::new(Config {
                 cases: 50,
+                source_file: Some(file!()),
                 ..Config::default()
             });
             runner
@@ -28,8 +35,15 @@ fn jit_agrees_with_eval_after_optimize() {
     std::thread::Builder::new()
         .stack_size(8 * 1024 * 1024)
         .spawn(|| {
+            // `source_file` makes a failure PERSIST to
+            // proptest_jit_vs_eval.proptest-regressions — without it,
+            // `TestRunner::new` (unlike the proptest! macro) cannot write
+            // one at all, which is how jit_small_nursery_agrees's two
+            // 2026-08-23 in-shard failures left no repro behind
+            // (scratchpad review-nursery-flake.md).
             let mut runner = TestRunner::new(Config {
                 cases: 50,
+                source_file: Some(file!()),
                 ..Config::default()
             });
             runner
@@ -49,8 +63,15 @@ fn jit_small_nursery_agrees() {
     std::thread::Builder::new()
         .stack_size(8 * 1024 * 1024)
         .spawn(|| {
+            // `source_file` makes a failure PERSIST to
+            // proptest_jit_vs_eval.proptest-regressions — without it,
+            // `TestRunner::new` (unlike the proptest! macro) cannot write
+            // one at all, which is how jit_small_nursery_agrees's two
+            // 2026-08-23 in-shard failures left no repro behind
+            // (scratchpad review-nursery-flake.md).
             let mut runner = TestRunner::new(Config {
                 cases: 50,
+                source_file: Some(file!()),
                 ..Config::default()
             });
             runner
@@ -70,8 +91,15 @@ fn jit_deterministic() {
     std::thread::Builder::new()
         .stack_size(8 * 1024 * 1024)
         .spawn(|| {
+            // `source_file` makes a failure PERSIST to
+            // proptest_jit_vs_eval.proptest-regressions — without it,
+            // `TestRunner::new` (unlike the proptest! macro) cannot write
+            // one at all, which is how jit_small_nursery_agrees's two
+            // 2026-08-23 in-shard failures left no repro behind
+            // (scratchpad review-nursery-flake.md).
             let mut runner = TestRunner::new(Config {
                 cases: 50,
+                source_file: Some(file!()),
                 ..Config::default()
             });
             runner
@@ -116,8 +144,15 @@ fn jit_agrees_with_eval_optimized_small_nursery() {
     std::thread::Builder::new()
         .stack_size(8 * 1024 * 1024)
         .spawn(|| {
+            // `source_file` makes a failure PERSIST to
+            // proptest_jit_vs_eval.proptest-regressions — without it,
+            // `TestRunner::new` (unlike the proptest! macro) cannot write
+            // one at all, which is how jit_small_nursery_agrees's two
+            // 2026-08-23 in-shard failures left no repro behind
+            // (scratchpad review-nursery-flake.md).
             let mut runner = TestRunner::new(Config {
                 cases: 50,
+                source_file: Some(file!()),
                 ..Config::default()
             });
             runner
