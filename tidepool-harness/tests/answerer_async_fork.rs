@@ -220,6 +220,59 @@ async fn two_waves_of_fork_fold_fork_carry_results_across_waves() {
     );
 }
 
+/// DEPTH CONTAINMENT (step 1½): a fork CHILD that itself tries to fork is
+/// refused loudly — its block aborts, the corrective names the boundary,
+/// and the child recovers by answering its own brief directly. Guards the
+/// gap the pump migration opened: children compile against the full
+/// answerer effect list now (the old fork-free child row is gone), so
+/// without this bound a child could fork 32-wide recursively with no depth
+/// cap until step 2's subtree budgets land.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn fork_child_that_forks_is_depth_refused_and_recovers() {
+    support::require_extract();
+    let _cache_guard = support::isolate_cache();
+
+    let replies = vec![
+        // 1. Parent: one direct fork, answer derived from the child's value.
+        reply(
+            "```haskell\nimport HarnessTypes (Decision (..), Confidence (..))\nimport Tidepool.Fork (fork)\n\ndo\n  a <- fork @Int \"pick a\"\n  (finalize @Decision (Decision { action = show a, rationale = \"one child\", confidence = Medium }) :: M ())\n```",
+        ),
+        // 2. The child's FIRST attempt: tries to fork a grandchild. This
+        //    compiles (Fork is in the row) and must be refused at servicing.
+        reply(
+            "```haskell\nimport Tidepool.Fork (fork)\n\ndo\n  b <- fork @Int \"grandchild\"\n  (finalize @Int (b + 1) :: M ())\n```",
+        ),
+        // 3. The child's recovery after the depth-refusal corrective.
+        finalize_int_reply(7),
+    ];
+    let (mut driver, _agent, log_path) = build_driver(replies, "answerer-fork-depth");
+    let source = load_harness_source(&examples_harness_dir().join("Harness.hs"))
+        .expect("reference harness source loads");
+
+    let outcome = driver
+        .run_one_cycle(&source, None)
+        .await
+        .expect("the depth refusal aborts the child's block, not the run");
+
+    let decision = outcome
+        .state_json
+        .get("lastDecision")
+        .and_then(|v| v.as_object())
+        .expect("lastDecision must be a Just Decision");
+    assert_eq!(
+        decision.get("action").and_then(|v| v.as_str()),
+        Some("7"),
+        "the parent must receive the child's RECOVERY answer, got {decision:?}"
+    );
+    let turns = logged_turn_texts(&log_path);
+    assert!(
+        turns
+            .iter()
+            .any(|t| t.contains("Forking is not available in THIS session")),
+        "the depth-refusal corrective must reach the child; logged turns:\n{turns:#?}"
+    );
+}
+
 /// The fork budget's loud refusal: with a budget of 1, the block's SECOND
 /// async fork is refused — the block is aborted (its first result is lost
 /// with it), the round's threads are swept, the corrective names the

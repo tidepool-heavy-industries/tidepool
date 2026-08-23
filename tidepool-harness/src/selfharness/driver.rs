@@ -484,6 +484,15 @@ fn wrap_fork_value(
 /// The refusal corrective for a fork that would exceed the window's budget:
 /// what happened, what survives, and the one useful next step.
 fn fork_budget_refusal(spent: u32, cap: u32, needed: u32, ty_label: &str) -> String {
+    if cap == 0 {
+        return format!(
+            "Forking is not available in THIS session: you are already a forked \
+             sub-answerer, and nested forking is not supported yet. The block was \
+             ABORTED (top-level declarations from earlier rounds persist; the \
+             aborted block's bindings are lost). Answer your own brief directly: \
+             evaluate `finalize @{ty_label} value`."
+        );
+    }
     format!(
         "Fork budget exhausted: this session has spawned {spent} of its {cap} fork \
          children, and that block needed {needed} more, so the block was ABORTED \
@@ -861,6 +870,12 @@ const LOOP_INFERENCE_CALL_CAP: u32 = 1024;
 /// child is a real multi-round model window, so this is a genuine resource
 /// budget, not a style preference; the refusal on the (N+1)th is loud
 /// (block aborted, corrective naming the budget), never a silent drop.
+/// How deep model-driven forking may nest before step 2's subtree budgets
+/// land: 1 = a top-level agent session may fork; its children may not
+/// (parity with the old fork-free child row's structural bound). Raised
+/// only WITH atomic depth/total-node accounting, never alone.
+const MAX_FORK_DEPTH: u32 = 1;
+
 /// Operator decision 2026-08-22: total-per-node, matching the companion's
 /// own `maxFanOut`-shaped budgeting one level up; raised 8 → 32 the same
 /// day when multi-WAVE forking (fork, fold, fork again within one window)
@@ -3723,7 +3738,7 @@ impl SelfHarnessDriver {
         // declaration). So a typed exit from the shared round loop collapses
         // back into a hard failure HERE, unchanged from before the exit
         // plumbing existed.
-        let outcome = match self.drive_answerer_to_finalize(node, ty, site).await? {
+        let outcome = match self.drive_answerer_to_finalize(node, ty, site, 0).await? {
             Ok(o) => o,
             Err(exit) => {
                 return Err(DriverError::Session(format!(
@@ -3964,7 +3979,7 @@ impl SelfHarnessDriver {
         // `Drop` impl is what retires the node on this path now.
         let mut exit: Option<InvocationExit> = None;
         let outcome = match self
-            .drive_answerer_to_finalize(window.node(), ty, site)
+            .drive_answerer_to_finalize(window.node(), ty, site, 0)
             .await?
         {
             Ok(o) => Some(o),
@@ -4345,7 +4360,7 @@ impl SelfHarnessDriver {
         // sibling's already-finished answer.
         let mut exit: Option<InvocationExit> = None;
         let outcome = match self
-            .drive_answerer_to_finalize(window.node(), element_ty, site)
+            .drive_answerer_to_finalize(window.node(), element_ty, site, 0)
             .await?
         {
             Ok(o) => Some(o),
@@ -4866,6 +4881,7 @@ impl SelfHarnessDriver {
         node: NodeId,
         ty: Option<&str>,
         site: u32,
+        fork_depth: u32,
     ) -> Result<Result<TurnOutcome, InvocationExit>, DriverError> {
         let ty_label = ty.unwrap_or("A");
         let max_rounds = self.answerer_max_rounds;
@@ -4880,9 +4896,19 @@ impl SelfHarnessDriver {
         let mut rounds: u32 = 0;
         let mut nudged = false;
         let mut ultimatum = false;
-        // WINDOW-scoped (all rounds): total fork children, direct + green.
+        // Session-scoped (all rounds): total fork children, direct + green.
+        // DEPTH CONTAINMENT (fork-subsumes-split step 1½): a CHILD session's
+        // fork budget is ZERO — the pump path removed the old fork-free
+        // child row's structural depth-one bound, and un-stripping is unsafe
+        // until step 2's subtree depth/total-node budgets are checked
+        // atomically at spawn (seam map §6). A zero cap rides the existing
+        // loud-refusal machinery; `fork_budget_refusal` teaches the boundary.
         let mut fork_budget = ForkBudget {
-            cap: self.fork_budget_per_window,
+            cap: if fork_depth >= MAX_FORK_DEPTH {
+                0
+            } else {
+                self.fork_budget_per_window
+            },
             spent: 0,
         };
         'round: loop {
@@ -5019,7 +5045,12 @@ impl SelfHarnessDriver {
                             }
                             HoleRouting::Fork { .. } => {
                                 match self
-                                    .drain_answerer_fork(node, ty_label, &mut fork_budget)
+                                    .drain_answerer_fork(
+                                        node,
+                                        ty_label,
+                                        &mut fork_budget,
+                                        fork_depth,
+                                    )
                                     .await?
                                 {
                                     Some(TurnOutcome::Suspended {
@@ -5048,7 +5079,7 @@ impl SelfHarnessDriver {
                             HoleRouting::Green => {
                                 let g = green.get_or_insert_with(AnswererGreen::new);
                                 match self
-                                    .service_answerer_green(node, g, &mut fork_budget)
+                                    .service_answerer_green(node, g, &mut fork_budget, fork_depth)
                                     .await?
                                 {
                                     AnswererGreenExit::NodeParked => {
@@ -5795,6 +5826,7 @@ impl SelfHarnessDriver {
         node: NodeId,
         ty_label: &str,
         budget: &mut ForkBudget,
+        fork_depth: u32,
     ) -> Result<Option<TurnOutcome>, DriverError> {
         loop {
             let Some((hole, classified, table)) = self.agent.pending_hole_full(node) else {
@@ -5846,6 +5878,7 @@ impl SelfHarnessDriver {
                                 element_ty,
                                 site.get(),
                                 &table,
+                                fork_depth + 1,
                             )
                             .await?;
                         answers.push(wrap_fork_value(*source, value, &table)?);
@@ -5933,6 +5966,7 @@ impl SelfHarnessDriver {
         ty: Option<&str>,
         site: u32,
         table: &DataConTable,
+        fork_depth: u32,
     ) -> Result<Value, DriverError> {
         let sid = self.outer_sid()?;
         let modules = self.agent.asks_modules(parent, site);
@@ -5975,7 +6009,7 @@ impl SelfHarnessDriver {
         // present forms, and — step 2 — fork), so this call is genuinely
         // recursive; the indirection is the async-recursion requirement,
         // nothing more.
-        let outcome = Box::pin(self.drive_answerer_to_finalize(node, ty, site)).await;
+        let outcome = Box::pin(self.drive_answerer_to_finalize(node, ty, site, fork_depth)).await;
         self.emit(Event::TurnEnd { node });
         let fail = |this: &Self, node: NodeId, reason: String| -> DriverError {
             let _ = this.agent.terminate_node(node, &reason);
@@ -6054,6 +6088,7 @@ impl SelfHarnessDriver {
         node: NodeId,
         green: &mut AnswererGreen,
         budget: &mut ForkBudget,
+        fork_depth: u32,
     ) -> Result<AnswererGreenExit, DriverError> {
         loop {
             let Some((hole, classified, table, _asks, request)) =
@@ -6082,7 +6117,7 @@ impl SelfHarnessDriver {
                 ));
             };
             if let Some(needed) = self
-                .service_thread_ready(node, chain, outcome, green, budget)
+                .service_thread_ready(node, chain, outcome, green, budget, fork_depth)
                 .await?
             {
                 return Ok(AnswererGreenExit::ForkBudgetRefused { needed });
@@ -6256,6 +6291,7 @@ impl SelfHarnessDriver {
         outcome: ResidentOutcome,
         green: &mut AnswererGreen,
         budget: &mut ForkBudget,
+        fork_depth: u32,
     ) -> Result<Option<u32>, DriverError> {
         let sid = self.outer_sid()?;
         let ResidentOutcome::Suspended { hole, request, .. } = outcome else {
@@ -6329,6 +6365,7 @@ impl SelfHarnessDriver {
                             element_ty,
                             site.get(),
                             &table,
+                            fork_depth + 1,
                         )
                         .await?;
                     answers.push(wrap_fork_value(source, value, &table)?);
