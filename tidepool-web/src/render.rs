@@ -12,12 +12,14 @@
 //! `<path>.<Constructor>.<field>`, so different branches' fields never
 //! collide even though they're all present in the DOM simultaneously.
 //! `server::collect_form_json` reads the chosen constructor and only looks
-//! at that branch's fields; a self-contained `<style>` block (CSS `:has()`)
-//! visually hides every non-chosen branch.
+//! at that branch's fields; a client-side DOM toggle (`shell::CORE_JS`'s
+//! `updateSumReveal`, keyed off the maud-escaped `data-for`/radio `value`
+//! attributes — never data-derived CSS) visually hides every non-chosen
+//! branch.
 
 use std::collections::VecDeque;
 
-use maud::{html, Markup, PreEscaped};
+use maud::{html, Markup};
 use serde_json::{Map, Value as Jv};
 use tidepool_harness::selfharness::operator::{
     child_path, humanize_key, FieldShape, FormShape, VariantShape, ROOT_BIND_PATH,
@@ -527,10 +529,14 @@ fn generic_field_row(index: usize, parent_path: &str, field: &FieldShape) -> Mar
 /// A sum: a discriminating choice over every variant's [`ConstructorKey`]
 /// (DISPLAY humanized, submitted value exact), plus — only when at least one
 /// variant carries a payload — every payload-bearing variant's nested form,
-/// each bound under `<path>.<Constructor>.…`. A self-contained `<style>`
-/// block hides every branch except the chosen one via CSS `:has()`, scoped
-/// to this sum's own `path` + each variant's exact constructor value so
-/// sibling sum fields on the same page never cross-match.
+/// each bound under `<path>.<Constructor>.…`. The chosen branch is revealed
+/// by a small DOM toggle (`shell::CORE_JS`'s `updateSumReveal`) that flips
+/// the STATIC `.active` class on the matching `.variant-payload` — never
+/// data-derived CSS: every value it compares (`data-for`, a radio's own
+/// `value`) is an ordinary maud-escaped attribute, so no model-authored
+/// constructor name or bind path is ever interpolated into a raw style/script
+/// context (see this crate's `CLAUDE.md`, "Model-authored text renders as
+/// escaped text content only").
 fn generic_sum(path: &str, variants: &[VariantShape]) -> Markup {
     let all_nullary = variants.iter().all(|v| is_nullary_variant(&v.shape));
     html! {
@@ -545,7 +551,6 @@ fn generic_sum(path: &str, variants: &[VariantShape]) -> Markup {
                 }
             }
             @if !all_nullary {
-                style { (PreEscaped(variant_reveal_css(path, variants))) }
                 @for v in variants {
                     @if !is_nullary_variant(&v.shape) {
                         div class="variant-payload" data-for=(v.constructor) {
@@ -561,34 +566,8 @@ fn generic_sum(path: &str, variants: &[VariantShape]) -> Markup {
     }
 }
 
-/// CSS-only reveal: every `.variant-payload` starts hidden; the one whose
-/// `data-for` matches the checked radio's value (scoped to this sum's
-/// `data-bind`, so a same-named constructor in a different sum never
-/// matches) is shown. No `shell.rs` JS changes needed.
-fn variant_reveal_css(path: &str, variants: &[VariantShape]) -> String {
-    let mut css = String::from(".variant-payload { display: none; }\n");
-    for v in variants {
-        if is_nullary_variant(&v.shape) {
-            continue;
-        }
-        css.push_str(&format!(
-            ".sum[data-path=\"{path}\"]:has(input[data-bind=\"{path}\"][value=\"{ctor}\"]:checked) \
-             > .variant-payload[data-for=\"{ctor}\"] {{ display: block; }}\n",
-            path = css_escape(path),
-            ctor = css_escape(&v.constructor),
-        ));
-    }
-    css
-}
-
 fn is_nullary_variant(shape: &FormShape) -> bool {
     matches!(shape, FormShape::Product { fields, .. } if fields.is_empty())
-}
-
-/// Escape `"` and `\` for embedding inside a double-quoted CSS attribute
-/// selector string.
-fn css_escape(s: &str) -> String {
-    s.replace('\\', "\\\\").replace('"', "\\\"")
 }
 
 #[cfg(test)]
@@ -1329,9 +1308,56 @@ mod tests {
         // LocalHost is nullary — no nested payload markup for it
         assert!(!html.contains("data-for=\"LocalHost\""));
         assert!(html.contains("data-for=\"Ssh\""));
-        // a self-contained CSS reveal, scoped to this sum's own path+value
-        assert!(html.contains("<style>"));
-        assert!(html.contains(":has(input[data-bind=\"destination\"][value=\"Ssh\"]:checked)"));
+        // no data-derived CSS anywhere — the reveal is a client-side DOM
+        // toggle over these same maud-escaped attributes, never a
+        // model-authored `<style>` block.
+        assert!(!html.contains("<style>"));
+        assert!(!html.contains(":has("));
+    }
+
+    /// High-4 regression: `askUserRaw` exposes raw `FormShape` construction to
+    /// model-authored data, so a payload-sum's constructor name or bind path
+    /// is untrusted text. Before this fix, `generic_sum` built a `<style>`
+    /// block's CSS text directly from these values (escaping only `\` and
+    /// `"`), so a constructor name containing `</style><script>` could break
+    /// out of the style element into markup. There must be no `<style>`
+    /// element — and therefore no raw-CSS/script escape hatch — anywhere in a
+    /// payload-bearing sum's rendering, regardless of how hostile the
+    /// constructor/bind-path text is; the "hostile" text still appears, but
+    /// only inside maud-escaped attributes and text nodes.
+    #[test]
+    fn payload_sum_with_hostile_constructor_name_never_emits_a_style_or_script_element() {
+        let hostile = "</style><script>alert(1)</script>";
+        let shape = FormShape::Sum {
+            type_key: "Evil".to_string(),
+            variants: vec![
+                VariantShape {
+                    constructor: "Plain".to_string(),
+                    shape: empty_product("Evil", "Plain"),
+                },
+                VariantShape {
+                    constructor: hostile.to_string(),
+                    shape: FormShape::Product {
+                        type_key: "Evil".to_string(),
+                        constructor: hostile.to_string(),
+                        fields: vec![FieldShape {
+                            key: "field".to_string(),
+                            shape: FormShape::String,
+                            doc: None,
+                        }],
+                        doc: None,
+                    },
+                },
+            ],
+            doc: None,
+        };
+        let html = generic_shape(hostile, &shape).into_string();
+        assert!(!html.contains("<style>"), "{html}");
+        assert!(!html.contains("<script>"), "{html}");
+        assert!(!html.contains("</style><script>"), "{html}");
+        // The hostile text still appears — as an ordinary maud-escaped
+        // attribute/text value, never unescaped markup.
+        assert!(html.contains("&lt;/style&gt;&lt;script&gt;"), "{html}");
     }
 
     /// DISPLAY labels are humanized (`releaseNote` -> "Release

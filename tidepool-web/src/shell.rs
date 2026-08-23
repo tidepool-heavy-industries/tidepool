@@ -319,6 +319,12 @@ input.input[data-kind="int"]::-webkit-inner-spin-button {
 }
 .sum.invalid > .enum { outline: 2px solid var(--accent); outline-offset: calc(1 * var(--unit)); }
 
+/* A payload-bearing sum's non-chosen branches: static, never data-derived —
+   `updateSumReveal` (CORE_JS) toggles `.active` on the one whose data-for
+   matches the checked radio's value. */
+.variant-payload { display: none; }
+.variant-payload.active { display: block; }
+
 .enum { display: flex; flex-direction: column; gap: calc(2 * var(--unit)); width: 100%; }
 .enum-opt, .bool {
   display: flex; align-items: center; gap: calc(2 * var(--unit));
@@ -485,6 +491,33 @@ function wire(root) {
       const slot = btn.closest('.node-slot');
       if (slot) slot.classList.toggle('collapsed');
     });
+  });
+  // A payload-bearing sum's branch reveal: wire each sum's own radios to
+  // re-evaluate on change, and set the initial state now. `querySelectorAll`
+  // finds nested sums too (a variant payload can itself contain a sum); each
+  // reveal is scoped with `:scope >` so a nested sum's radios never drive its
+  // parent's toggle.
+  root.querySelectorAll('[data-node="sum"]').forEach((sumEl) => {
+    updateSumReveal(sumEl);
+    sumEl.querySelectorAll(':scope > .enum input[data-kind="enum"]').forEach((r) => {
+      if (r.__wiredReveal) return; r.__wiredReveal = true;
+      r.addEventListener('change', () => updateSumReveal(sumEl));
+    });
+  });
+}
+
+// Show the `.variant-payload` whose `data-for` matches `sumEl`'s own checked
+// radio value, hide every other one — the client-side replacement for the
+// old data-derived `<style>` reveal. Every value compared here (`data-for`,
+// a radio's `value`) is an ordinary attribute, already maud-escaped by
+// construction; nothing here is interpreted as markup or CSS, so no
+// model-authored constructor name or bind path can escape the text-only
+// invariant through this path.
+function updateSumReveal(sumEl) {
+  const checked = sumEl.querySelector(':scope > .enum input[data-kind="enum"]:checked');
+  const chosen = checked ? checked.value : null;
+  sumEl.querySelectorAll(':scope > .variant-payload').forEach((p) => {
+    p.classList.toggle('active', p.getAttribute('data-for') === chosen);
   });
 }
 
@@ -777,6 +810,21 @@ mod tests {
         assert!(
             CORE_JS.contains("kind === 'int' || kind === 'number'"),
             "collect() must coerce BOTH int and number data-kinds: {CORE_JS}"
+        );
+    }
+
+    /// High-4 regression: the payload-sum branch reveal is a client-side DOM
+    /// toggle (`updateSumReveal`), never data-derived CSS text built from
+    /// model-authored constructor names/bind paths.
+    #[test]
+    fn sum_reveal_is_a_dom_toggle_not_data_derived_css() {
+        assert!(
+            CORE_JS.contains("function updateSumReveal(sumEl)"),
+            "{CORE_JS}"
+        );
+        assert!(
+            CORE_JS.contains("p.classList.toggle('active', p.getAttribute('data-for') === chosen)"),
+            "{CORE_JS}"
         );
     }
 
