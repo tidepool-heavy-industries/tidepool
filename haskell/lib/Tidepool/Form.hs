@@ -119,12 +119,16 @@ note = noteRaw
 --
 -- > lane <- choose [(name, lane) | lane <- lanes, let name = laneName lane]
 --
--- Offering nothing has no answer that could be returned, so @choose []@
--- re-presents an empty choice until the driver's re-prompt bound ends it.
--- Use 'chooseMany' (which may legitimately return @[]@) when the list can be
--- empty.
+-- Offering nothing has no answer that could be returned, so @choose []@ is
+-- rejected up front with 'error' — the same programmer-error treatment
+-- duplicate labels get — rather than suspending an empty choice the web
+-- gate can never accept (it rejects the empty submission before Haskell's
+-- own re-prompt-by-recursion ever gets a chance to fire, so the ask would
+-- pend forever instead of erroring loud). Use 'chooseMany' (which may
+-- legitimately return @[]@) when the list can be empty.
 choose :: forall a effs. Member AskUser effs => [(Text, a)] -> Eff effs a
 choose options
+  | null options = error "choose: options must not be empty"
   | repeatedLabel options = error "choose: labels must be unique"
   | otherwise = awaitChoice
   where

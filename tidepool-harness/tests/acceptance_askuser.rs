@@ -628,6 +628,82 @@ async fn root_maybe_form_shape_and_decode_round_trip() {
     );
 }
 
+/// A gate that panics if ever asked to present a form — proof that a code
+/// path never suspends at all, rather than merely proof that whatever it
+/// was asked happened to decode.
+struct PanicIfAskedGate;
+
+impl OperatorGate for PanicIfAskedGate {
+    fn present_form(&self, shape: &FormShape) -> serde_json::Value {
+        panic!("present_form must never be called here, got shape: {shape:?}")
+    }
+}
+
+/// Medium-5 regression: `choose []` must fail LOUD at the point it is
+/// called, never suspend an empty choice the web gate can only reject
+/// (permanently pending — no Haskell-side re-prompt ever fires because a
+/// rejected submission never reaches `resolve_form`'s decode at all, unlike
+/// a duplicate-label `error` which fires before any suspension happens
+/// too).
+///
+/// Drives the answerer's row DIRECTLY as a plain root turn — `Harness::
+/// run_to_hole_or_done` (unlike the nested runLLMTurn-servicing path)
+/// retries only a compile failure or a blockless reply, never a RUNTIME
+/// fault, so a genuine `error` call propagates immediately with no retry
+/// and no risk of exhausting a replay queue. [`PanicIfAskedGate`] proves the
+/// gate is never consulted at all — `choose` rejects before ever calling
+/// `askUserRaw`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn choose_with_no_options_fails_loud_before_suspending() {
+    support::require_extract();
+    let _cache_guard = support::isolate_cache();
+
+    let agent_cfg = EngineConfig::from_decls(
+        answerer_decls(),
+        prelude_dir(),
+        Some(examples_harness_dir()),
+    )
+    .expect("answerer engine config");
+    // A bare expression turn (no `finalize` — this root carries no answer
+    // contract, so it compiles at `Finalize Void` and has no finalize
+    // capability at all; irrelevant here since `choose` never returns).
+    let content = "```haskell\nchoose ([] :: [(Text, Int)]) :: M Int\n```".to_string();
+    let provider: Arc<dyn DynModelProvider> = Arc::new(ReplayProvider::new(vec![RecordedReply {
+        content,
+        usage: Usage {
+            input_tokens: 10,
+            output_tokens: 5,
+            cached_input_tokens: None,
+            cache_write_tokens: None,
+        },
+    }]));
+
+    let log_path = std::env::temp_dir().join(format!(
+        "acceptance-askuser-choose-empty-{}.jsonl",
+        std::process::id()
+    ));
+    let writer =
+        tidepool_harness::log::LogWriter::create(&log_path, &header()).expect("log writer");
+    let harness = Arc::new(Harness::new(writer, agent_cfg, provider).expect("harness boots"));
+    harness.set_escalation_gate(Arc::new(PanicIfAskedGate));
+
+    let root = harness
+        .create_root("choose-empty root", "call choose with no options")
+        .unwrap();
+    harness
+        .force(root, tidepool_harness::log::Actor::Operator)
+        .unwrap();
+    let outcome = harness.run_to_hole_or_done(root).await;
+    let err = outcome
+        .err()
+        .expect("choose [] must fail the turn rather than suspend or hang");
+    let message = err.to_string();
+    assert!(
+        message.contains("choose"),
+        "the failure should be traceable to choose, got: {message}"
+    );
+}
+
 /// The author-contract claim, at COMPILE level: declare the example ADTs
 /// with `deriving (Generic, FromJSON)` — the FromJSON being the vendored
 /// generic DEFAULT, no method written — then ask for one. No codec, no form
