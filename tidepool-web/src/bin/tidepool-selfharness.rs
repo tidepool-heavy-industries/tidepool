@@ -289,20 +289,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "outer effect boundary wired (Console/Worktree/RepoEvent/Exec/Journal)"
     );
 
-    // The subagent boundary (plans/companion-memory.md): when TIDEPOOL_MEMORY_REPO
-    // names the companion's memory store, wire a driver-owned SubagentHandler
-    // over it so the authored loop's `spawnAgent` (the memory curator) is
-    // serviced. Absent env → absent handler → a Subagent suspension fails
-    // with the legible wiring error, exactly as before.
-    if let Some(repo) = std::env::var_os("TIDEPOOL_MEMORY_REPO").map(PathBuf::from) {
-        let handler = build_subagent_handler(&repo)?;
-        driver.set_subagent_handler(handler);
-        tracing::info!(
-            target: "tidepool_web",
-            repo = %repo.display(),
-            "subagent boundary wired (memory curator; Codex backend, operator credentials)"
-        );
-    }
+    // The subagent boundary: a session's `delegate` promises a fresh
+    // worktree "off the current repository" (the companion protocol's own
+    // words), so the SubagentHandler is wired over `source_repo` BY DEFAULT
+    // — the same repository every other outer handler serves. Setting
+    // TIDEPOOL_MEMORY_REPO overrides the target repo (the companion-memory
+    // curator mode, plans/companion-memory.md); it no longer gates whether
+    // delegation works at all.
+    let subagent_repo = std::env::var_os("TIDEPOOL_MEMORY_REPO")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| source_repo.clone());
+    let handler = build_subagent_handler(&subagent_repo)?;
+    driver.set_subagent_handler(handler);
+    tracing::info!(
+        target: "tidepool_web",
+        repo = %subagent_repo.display(),
+        "subagent boundary wired (delegate/spawnAgent; Codex backend, operator credentials)"
+    );
 
     driver.run_loop(&source, auto).await?;
 
