@@ -111,7 +111,7 @@ tidepool/
 ├── tidepool-lsp/          ← DEPRECATED — unused; LSP client + workspace daemon (call graph, hover, refs)  [CLAUDE.md]
 ├── tidepool-testing/      ← Test utilities + property-based generators (internal)
 ├── examples/{guess,tide}/ ← Demos: number-guessing game, REPL
-├── harness-dogfooding/    ← Authored harnesses (wizard, dev-tree) run by the selfharness driver
+├── harness-dogfooding/    ← Authored harnesses (companion, recursive-companion, dev-tree) run by the selfharness driver
 ├── haskell/               ← Haskell harness (tidepool-extract) + test suite + stdlib  [CLAUDE.md]
 │   └── lib/Tidepool/      ← Haskell stdlib (auto-imported in MCP)
 ├── flake.nix              ← Dev shell (Rust + GHC 9.12 with fat interfaces)

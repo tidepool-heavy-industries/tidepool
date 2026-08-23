@@ -131,8 +131,8 @@ parked frames alike). A `checkout_child` (a CHILD run over a suspended
 session's parked frames — the discipline an answer value crosses by: a
 non-consuming child run against the TARGET's own session) requires at least
 one parked hole and is otherwise an ordinary checkout: with the continuation
-registry there is no special child window, and the parked holes ride the
-checkout like any other turn's.
+registry there is no special child agent session, and the parked holes ride
+the checkout like any other turn's.
 
 `Checkout` is panic-safe: if a checkout is dropped without an explicit
 restore (a panic unwinding between checkout and restore, before the machine
@@ -234,27 +234,36 @@ a HANDLED (non-suspending) effect writes one `Event::Effect{req,resp}` per
 effect. A SUSPENDING effect (`Ask`/`AskUser`/`RunLLMTurn`/`Finalize`) never
 reaches a handler, so it logs as `HolePublished`/`HoleConsumed`, not `Effect`.
 
-**Scoped-stack caveat:** the self-iterating harness's answerer (`[AskUser,
-Finalize]`) and outer loop
-(`[RunLLMTurn, AskUser]`) declare ONLY suspending effects — no base
-`Console`/`Fs`/`Http`/… — so `flush_effects` runs but drains an empty trace:
-those nodes produce NO `Event::Effect` BY CONSTRUCTION (that absence IS the
-capability boundary — the answerer structurally cannot run a shell/file/net
-effect). A general Agent node (full base-effect row) does produce them.
+**Scoped-stack caveat:** the self-iterating harness's answerer
+(`[AskUser, Fork, ReadState, Green, Finalize]`) declares ONLY suspending
+effects — no base `Console`/`Fs`/`Http`/… — so `flush_effects` runs but
+drains an empty trace: the answerer node produces NO `Event::Effect` BY
+CONSTRUCTION (that absence IS the capability boundary — the answerer
+structurally cannot run a shell/file/net effect). The OUTER loop's row
+(`outer_decls()`: `[RunLLMTurn, AskUser, Console, Worktree, RepoEvent, Exec,
+Subagent, Journal, DelegateBranches, Green]`) is NOT suspending-only — it
+carries real base effects with real handlers — but it still writes no
+`Event::Effect` either, for an unrelated reason: the outer session is
+node-less (see One session below), so `flush_effects`/`NodeTree::effect`
+never apply to it at all; its handled effects route through
+`SelfHarnessDriver::service_outer_effect` instead, a separate dispatch
+mechanism this crate's `crate::log` schema does not cover. A general Agent
+node (full base-effect row, on the tree) does produce `Event::Effect`
+entries normally.
 
 **The reserved gap:** nothing READS those records back. Recorded responses are
 never substituted into a resumed session, so a node that suspended after
 running handled effects, then restarted and resumed, RE-EXECUTES them live.
 
-## Scope trees — a window's names retire with its heap (PRD 21 C2 §1–3)
+## Scope trees — an agent session's names retire with its heap (PRD 21 C2 §1–3)
 
-A node already carried a `RealmId`: the HEAP-side lifetime of its window
-(parked frames, outstanding `ValueHandle`s), exited by `close_realm`. C2 gives
-it the NAME-side one alongside — a `ScopeId` (`tidepool_codegen::scope`), the
-frame both session planes hang their per-window declarations and bindings off.
-One window, two halves, **one** retirement step.
+A node already carried a `RealmId`: the HEAP-side lifetime of its agent
+session (parked frames, outstanding `ValueHandle`s), exited by `close_realm`.
+C2 gives it the NAME-side one alongside — a `ScopeId` (`tidepool_codegen::scope`),
+the frame both session planes hang their per-session declarations and
+bindings off. One agent session, two halves, **one** retirement step.
 
-**How a window gets a scope.** Mint it off the session
+**How an agent session gets a scope.** Mint it off the session
 (`with_session(sid, |s| s.mint_scope(parent))` — `PersistentSession` owns the
 one `ScopeTree`, and minting is also where the DECL plane seeds the child's tip
 from its PARENT's, so a sibling that defines in between cannot leak in), then
@@ -288,8 +297,8 @@ sole-ownership rule reads the handle registry, so a handle the realm still
 owned would wrongly pin a root. The immediate path and the QUEUED path
 (`pending_window_exits`, drained by whichever code path next holds the machine)
 go through that one function, so they cannot diverge; both halves of the
-window's identity are retained in the queue until the exit is CONFIRMED. An
-OWNING node is unaffected: its whole session is dropped.
+agent session's identity are retained in the queue until the exit is
+CONFIRMED. An OWNING node is unaffected: its whole session is dropped.
 
 The receipt outlives the node. `retire_scope` returns
 `ScopeRetirement { scopes_retired, bindings_retired, roots_released }`, and
@@ -421,7 +430,7 @@ NOT a top-level key) — every assistant turn, not just a branch's first one.**
 `BranchInvocation` above is a one-shot receipt scoped to a snapshot-forked
 branch's opening turn; `TurnDelta.usage` is written by every model round
 (`Harness::drive_turn`/`summarize_turn`/`drive_answerer_to_value`), including
-corrective-retry and answerer-loop rounds, so within-window round-to-round
+corrective-retry and answerer-loop rounds, so within-session round-to-round
 cache ratios are already computable from any `log-*.jsonl`:
 `jq -c 'select(.event.ev=="turn_delta" and .event.usage != null) |
 {node: .event.node, turn: .event.turn, ratio: ((.event.usage.cached_input_tokens
@@ -429,26 +438,27 @@ cache ratios are already computable from any `log-*.jsonl`:
 not a flat `.event.cached_input_tokens` — that top-level shape only exists on
 `BranchInvocation` lines.
 
-#### Within-window round-to-round cache affinity (fixed 2026-08-20)
+#### Within-session round-to-round cache affinity (fixed 2026-08-20)
 
 Run-4's dogfood measurement showed only 45% of input tokens served from
-OpenAI's prompt cache, with consecutive model rounds inside ONE window going
-0% / 59% / 0% / 68% / 0% — an append-only conversation should approach 100%
-from round 2 on. Diagnosis (`engine.rs`'s `within_window_*_is_prefix_extension`
-tests): **`engine::assemble_request`'s output was already a byte-identical-
-prefix extension every round**, for all three within-window shapes (an
-ordinary next round, a corrective-retry round with a freshly-embedded GHC
-error, and a round following a note/`askUser` resume) — `convo.transcript` is
-`.push()`-only everywhere (`push_user_turn`, `drive_turn`'s assistant append,
-`summarize_turn`), `convo.framing` is set once at node creation and never
-rewritten mid-window, and `answer_dialog`/`answer_note` resume the suspended
-Haskell continuation directly without touching the transcript at all. No
-content near the top of the request was being re-rendered.
+OpenAI's prompt cache, with consecutive model rounds inside ONE agent session
+going 0% / 59% / 0% / 68% / 0% — an append-only conversation should approach
+100% from round 2 on. Diagnosis (`engine.rs`'s
+`within_window_*_is_prefix_extension` tests): **`engine::assemble_request`'s
+output was already a byte-identical-prefix extension every round**, for all
+three within-session shapes (an ordinary next round, a corrective-retry round
+with a freshly-embedded GHC error, and a round following a note/`askUser`
+resume) — `convo.transcript` is `.push()`-only everywhere (`push_user_turn`,
+`drive_turn`'s assistant append, `summarize_turn`), `convo.framing` is set
+once at node creation and never rewritten mid-session, and
+`answer_dialog`/`answer_note` resume the suspended Haskell continuation
+directly without touching the transcript at all. No content near the top of
+the request was being re-rendered.
 
 The actual defect was one level down, in `provider/oauth.rs`'s
 `codex_responses`: the `session-id` header sent with every `/responses` call
 was a **fresh `Uuid::new_v4()` minted on every single HTTP request**, never
-reused across rounds of the same window. The reference Codex CLI mints ONE
+reused across rounds of the same agent session. The reference Codex CLI mints ONE
 `session_id` per conversation and reuses it for every turn; the ChatGPT Codex
 backend uses it to route repeat requests to the inference replica already
 holding that conversation's cached prefix (the same reasoning that already
@@ -458,11 +468,12 @@ routing on every round — the alternating hit pattern was occasional
 coincidental routing collisions, not content instability.
 
 Fix: `session_id_for(instructions, opening)` derives a deterministic
-`Uuid::new_v5` from the window's two genuinely-invariant pieces —
-`instructions` (the framing) and the window's OPENING message (the first
-non-system item) — both fixed for the life of a window by the prefix-
+`Uuid::new_v5` from the agent session's two genuinely-invariant pieces —
+`instructions` (the framing) and the session's OPENING message (the first
+non-system item) — both fixed for the life of an agent session by the prefix-
 stability property above, so the header is now identical across every round
-of one window while still varying across different windows. Not threaded
+of one agent session while still varying across different agent sessions.
+Not threaded
 through `NodeId`/a session table: `ModelProvider::complete` carries no
 session identity (one provider instance is shared across every node in a
 harness), so deriving from content already in `TurnRequest` avoided widening
@@ -518,14 +529,15 @@ loop iteration creates a brand-NEW per-loop answerer `NodeId`
 self.answerer_framing.clone())`) with its OWN from-scratch transcript — so
 "message 0 differs across loops" is really "these are two different
 conversations, not a continuation of one," and every round WITHIN each of
-those per-loop windows already gets this wave's stability fix. Making the
+those per-loop agent sessions already gets this wave's stability fix. Making the
 framing byte-stable ACROSS loop iterations would mean literally reusing one
 session/transcript for the whole outer loop instead of a fresh answerer node
 per iteration — a real architectural change (touches how `SelfHarnessDriver`
 mints per-loop nodes and threads `answerer_framing`), not a move-to-tail, and
 out of scope here. Compaction's framing rewrite (the other named hazard) is
 the same shape: it deliberately starts a fresh compacted prefix by design
-(`replace_transcript_with_summary`), not an in-place edit of a live window.
+(`replace_transcript_with_summary`), not an in-place edit of a live agent
+session.
 
 ## Invariants
 
@@ -582,7 +594,8 @@ resumes IMMEDIATELY with the loop's current state JSON
 (`SelfHarnessDriver.cycle_state_json`, the same JSON the checkpoint holds; no
 operator, no model round, never counted against any cap). Freshness is
 trivially correct because state changes only at loop boundaries — every
-window in a loop reads the state that loop started with. A driver context
+agent session within a loop iteration reads the state that iteration started
+with. A driver context
 with no cycle state (the general Agent path) resumes with JSON `null`.
 
 ### The answer contract — `finalize` is pinned by the ROW
@@ -691,7 +704,11 @@ T` name `T` at all — the child still answers by `resume` (redefined `= pure`
 for this one-shot `run_child` compile), never `finalize @T`: `finalize` is a
 genuinely suspending effect and crashes this specific path
 (`ResidentError::ChildSuspended`), a separate, pre-existing gap this pin does
-not newly close.
+not newly close. This is the general Agent stack's ONE-SHOT `answer_fork`/
+`answer_fanout` path only — fork-subsumes-split step 1 closed this exact gap
+on the self-iterating harness path: a pump-driven fork child
+(`SelfHarnessDriver::drive_fork_child_window`) answers with a REAL
+`finalize @T` and `ChildSuspended` is unreachable from there.
 
 `askUser` re-prompts by RECURSION on a decode failure (no `Either` — the
 retry is entirely Haskell-side): a bad submission genuinely re-suspends on a
@@ -742,7 +759,10 @@ this; it is gone (old checkpoints carrying that key still decode — the extra
 key is silently ignored).
 
 The OUTER loop can present a form too: `outer_decls()` is `[RunLLMTurn,
-AskUser]`, so an AUTHORED `loop` that `import`s `Tidepool.Form` and evaluates
+AskUser, Console, Worktree, RepoEvent, Exec, Subagent, Journal,
+DelegateBranches, Green]` (ten effects — `AskUser` is one entry among real
+base effects, not the row's second half), so an AUTHORED `loop` that
+`import`s `Tidepool.Form` and evaluates
 `askUser` suspends on `AskUserWith`, serviced by
 `SelfHarnessDriver::service_outer_askuser_hole` (the same gate, the same
 `ASKUSER_MAX_REPROMPTS` bound, resuming the OUTER session via
@@ -750,6 +770,50 @@ AskUser]`, so an AUTHORED `loop` that `import`s `Tidepool.Form` and evaluates
 `Tidepool.Harness`/`HarnessEff` (whose row stays `'[RunLLMTurn]`,
 stale-but-unused): `Harness = M` and `askUser`'s `Member AskUser` constraint
 unifies against the wider generated row.
+
+### Recursive fork servicing — the pump, spawn-time budgets, the GUI lifecycle
+
+The answerer's own `fork`/`forkAll` (`Tidepool.Fork`, riding `Fork` in
+`answerer_decls`) is where fork-subsumes-split (`plans/fork-subsumes-split.md`)
+landed: the companion tree EMERGES from model-authored `async (fork @T
+"brief")` calls rather than from authored split-proposal/gate machinery. A
+fork child is driven by `SelfHarnessDriver::drive_fork_child_window`
+(`drain_answerer_fork`'s direct-chain call, `service_thread_ready`'s
+async-chain call) as a full ATTACHED session on the SAME shared machine as
+its parent (see One session below) — multi-round, can `askUser`, and can
+itself `fork` recursively, bounded only by spawn-time budgets, never by row
+shape (step 2 dropped the `Fork`/`Green` strip that used to bottom a child
+out at depth one — that strip survives only on the unrelated one-shot
+general-Agent path, see "The line…" below).
+
+**Spawn-time budgets, checked in `Self::check_fork_budgets` before every
+spawn (a refusal costs nothing — no session, no machine, no compile):**
+`max_fork_depth` (default [`DEFAULT_MAX_FORK_DEPTH`] = 8) caps recursion
+depth; `fork_subtree_cap` (default [`DEFAULT_FORK_SUBTREE_CAP`] = 32) caps
+total descendant sessions across a whole top-level tree, counted atomically
+across every depth and both fork styles (direct `fork`/`forkAll` and
+green-thread `async (fork …)`); `fork_budget_per_window` (default
+[`DEFAULT_FORK_BUDGET_PER_WINDOW`] = 32) caps how many children ONE
+session's own turn may spawn. A refusal is loud, not silent: the answerer
+gets the budget back as data (`fork_budget_refusal`/`fork_subtree_refusal`
+text) and can adapt, not a hard failure.
+
+**GUI lifecycle (fork-subsumes-split step 3):** a fork child gets the same
+operator-page treatment `service_outer_branch` gives a branch child — birth,
+seed brief, timeline, final typed value or failure. Its tree label/path is
+DERIVED, not wire-carried (unlike a `runLLMTurnBranchLabeled` child): base
+path from the parent's own registered label (or `"root"`), child segment
+`f<idx>-<ascii-slug-of-brief>` from a per-parent monotonic counter
+(`fork_child_seq`) assigned inside `drive_fork_child_window` itself. See
+`plans/fork-subsumes-split.md`'s step 3 design note for the full scheme
+(guard reuse via widening `BranchWindow`, the `finalize_fork_data` exit).
+
+**What step 4 (the companion collapse) changed above this mechanism, not in
+it:** `harness-dogfooding/recursive-companion/Harness.hs` no longer proposes
+splits for authored machinery to execute — `Harness.loop` collapses to seed
+question → one top-level typed request → render, and the tree above is
+entirely what a session's own `fork` calls produce. See that harness's own
+README, not this file, for the companion-side shape.
 
 ### Outer fork/fanout servicing — a branch's exit is DATA at its position
 
@@ -761,18 +825,18 @@ gets a freshly-minted answerer realm on the shared outer machine, driven
 CONCURRENTLY up to `set_concurrency_cap`, re-sorted to DECLARATION order
 before assembly so completion order is never observable.
 
-**Every verb that opens a window at a BRANCH POSITION answers an `Either`**
-(PRD 21 locked decision 6,
+**Every verb that opens an agent session at a BRANCH POSITION answers an
+`Either`** (PRD 21 locked decision 6,
 `plans/self-iterating-harness/21-c3-exit-verb.md`):
 `runLLMTurnFork @T :: Text -> M (Either InvocationExit T)`,
 `runLLMTurnFanout @T :: [Text] -> M [Either InvocationExit T]`, and
 `runLLMTurnBranch @T :: ContextRef -> Text -> M (Either InvocationExit (T, ContextRef))`
-(the `Either` wraps the WHOLE pair — a window that never finalized has no
-post-finalize prefix, so there is no honest `ContextRef` to sit beside the
+(the `Either` wraps the WHOLE pair — an agent session that never finalized has
+no post-finalize prefix, so there is no honest `ContextRef` to sit beside the
 failure). The two that do NOT open a branch position keep their bare answers:
 `runLLMTurn @T`, answered in context by the same node, and `freezeContext`,
-which is not a window at all. That asymmetry is documented at the declaration
-(`tidepool_mcp::runllmturn_effect_def!`).
+which does not open an agent session at all. That asymmetry is documented at
+the declaration (`tidepool_mcp::runllmturn_effect_def!`).
 
 `runLLMTurnBranch` reaches it by a different route — `service_outer_branch` is
 sequential and drives its child through `drive_answerer_to_finalize`, the round
@@ -783,8 +847,8 @@ distinction: the branch folds it as `Left`, the in-context hole collapses it
 back into a hard failure (unchanged).
 
 **The line, and it is the whole point of the shape.** A failure attributable
-to ONE CHILD'S WINDOW — round exhaustion, ending on something that is not an
-answer, that window's own provider call failing — comes back from
+to ONE CHILD'S AGENT SESSION — round exhaustion, ending on something that is
+not an answer, that session's own provider call failing — comes back from
 `drive_fanout_child` as `Ok(Err(exit))` and is folded as `Left exit` at that
 child's branch position, so its siblings' finished answers survive. A failure
 of the MECHANISM — fan cardinality, `Either`/list assembly against the
@@ -793,7 +857,7 @@ and a child that finalized a CLOSURE (it DID answer; this driver cannot carry
 it) — still hard-fails the turn. Laundering a broken mechanism into "the model
 failed" would be a false receipt. The nesting of
 `Result<Result<Value, InvocationExit>, DriverError>` IS that contract: outer =
-mechanism, inner = the window.
+mechanism, inner = the agent session.
 
 `engine::build_child_answer_value`/`build_invocation_exit_value` construct the
 `Left`/`Right`/`Exit*` values against the turn's own table with
@@ -803,13 +867,21 @@ fork/fanout site head-swaps to a `*Sited` sibling whose top-level type mentions
 `Either InvocationExit a`, and extract's `collectTransitiveDCons` seeds from
 reachable top-level binders' types.
 
-The NESTED path (`Harness::answer_fork`/`answer_fanout`, the general Agent
-stack and `drain_answerer_fork`) shares `HoleRouting::Fork` with
-`Tidepool.Fork`'s `fork`/`forkAll`, which still answer a bare `T`/`[T]` — so
-the routing carries `engine::ForkSource` and `Harness::wrap_fork_answer` wraps
-in `Right` only for a `runLLMTurn`-sourced hole. That path produces no `Left`
-yet: a child failing there still hard-fails the fan through
-`drive_answerer_to_value`'s escalation ladder.
+`HoleRouting::Fork` is shared by two independent servicing paths, both
+carrying `engine::ForkSource` to tell a `Tidepool.Fork` hole (`fork`/
+`forkAll`, always answers bare `T`/`[T]`) from a `RunLLMTurn`-sourced one
+(`runLLMTurnFork`/`runLLMTurnFanout`, `Either`-wrapped — see above): the
+self-harness pump (`SelfHarnessDriver::drain_answerer_fork`/
+`service_thread_ready`, driving each child on the full row via
+`drive_fork_child_window`, its own `wrap_fork_value` doing the `Right`
+wrap) and the general Agent stack's one-shot NESTED path (`Harness::
+answer_fork`/`answer_fanout`, driving each child via `drive_one_fork_child`,
+`Harness::wrap_fork_answer` doing the same wrap). Neither path produces a
+`Left` from a `Tidepool.Fork`-sourced hole: a child failing there still
+hard-fails the fan — through `drive_answerer_to_value`'s escalation ladder
+on the NESTED path, or as an ordinary `DriverError` on the pump path (fork
+children are not branch positions with a typed `Left` to fold into — see
+"The line…" above).
 
 One consequence worth knowing before writing a harness: `InvocationExit` lives
 in the per-fragment generated `Tidepool.Effects`, so the cross-row bind guard
@@ -892,11 +964,11 @@ PLANE (`SelfHarnessDriver::open_outer_plane`): top-level declarations a
 model defines persist BY NAME across loops AND across machine rotations
 (the plane is source-side state; `take_lib` transfers it into the rotated
 machine), validated against an include that admits the STABLE
-`Tidepool.Effects.Core` module but excludes the per-window `M`-carrying shim
+`Tidepool.Effects.Core` module but excludes the per-session `M`-carrying shim
 (stable-effects-core — see `tidepool-mcp/CLAUDE.md`'s section of that name).
 This is now the payoff feature, not just a pure-decls guard: a declaration
 written `Member <Eff> effs => ... -> Eff effs T` validates and persists
-exactly like a pure one, and a declaration spelling the per-window `M` alias
+exactly like a pure one, and a declaration spelling the per-session `M` alias
 persists identically — `M` still never resolves on this plane, but the
 plane strips the M-mentioning signature before compiling and lets GHC infer
 the same `Member`-polymorphic shape (`tidepool_runtime::session::render`'s
@@ -914,8 +986,8 @@ resolve after the loop boundary AND a forced machine rotation into cycle
 N+1). A declaration made in one round is visible to every later round/turn
 in the SAME cycle too — `tests/selfharness_decl_plane_replay.rs`'s
 `decl_in_window_one_resolves_in_window_three_same_cycle` declares in the
-first of three sequential `runLLMTurn` windows on one cycle's answerer node
-and resolves it in the third.
+first of three sequential `runLLMTurn` agent sessions on one cycle's
+answerer node and resolves it in the third.
 
 **Mechanism — a decl-ending block persists before it nudges.**
 `Harness::run_multi_item_block` (the multi-item-block lane `run_block`

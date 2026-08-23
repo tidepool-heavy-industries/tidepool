@@ -16,9 +16,10 @@ to plan files that stay in this directory but no longer describe active work.
 - [Fork subsumes split](fork-subsumes-split.md): direction locked by the
   operator (2026-08-22) — the companion tree emerges from model-authored
   `async (fork @T …)` calls; fork children inherit the full node lifecycle;
-  gates drop in favor of ask-idiom policies. Foundation (the answerer's
-  green scheduler, fork budget, composition acceptance) landed; step 1
-  (children on the agent-session pump) next.
+  gates drop in favor of ask-idiom policies. Steps 1–4 are landed (children
+  on the agent-session pump, recursive rows + spawn-time budgets, fork
+  lifecycle unification onto the branch spine, and the companion collapse
+  itself, `bdfc334a`) — see that plan's own status line for what remains.
 - [Session-ownership capstone](registry-capstone.md): human-approved wave
   (2026-08-22), consolidating dup-c-survey items 1 (resident-session
   checkout/lifecycle) and 5 (harness suspension state) into one promoted
@@ -44,14 +45,21 @@ to plan files that stay in this directory but no longer describe active work.
   for the crate itself.
 - [Recursive Companion](self-iterating-harness/21-recursive-companion-prd.md):
   proposed (2026-08-17). The companion track's successor: reasoning as a
-  recursively discovered typed program — one model invocation per node as the
-  coalgebra (finish locally or define one layer of branches), children forked
-  from the frozen post-coalgebra context, a second invocation as the algebra
-  folding typed results. Lanes C0–C6; C1 (mounting a function-bearing value
-  into an agent session, the de-risk spike) **landed 2026-08-17** — see
-  [21-c1-mount-seam.md](self-iterating-harness/21-c1-mount-seam.md). C2–C6
-  (scope trees, exit verb, the recursive-companion slice itself, the
-  delegate-effect survey) remain.
+  recursively discovered typed program. Lanes C0–C6; C1 (mounting a
+  function-bearing value into an agent session, the de-risk spike) **landed
+  2026-08-17** — see
+  [21-c1-mount-seam.md](self-iterating-harness/21-c1-mount-seam.md). C2
+  (scope trees) and the exit verb are also landed — see
+  [21-c2-scope-trees.md](self-iterating-harness/21-c2-scope-trees.md) and
+  [21-c3-exit-verb.md](self-iterating-harness/21-c3-exit-verb.md). The
+  original C3 vertical slice
+  ([21-c3-recursive-companion-slice.md](self-iterating-harness/21-c3-recursive-companion-slice.md))
+  — a `ThoughtF` coalgebra/algebra layer walk with gate-bounded budgets — is
+  SUPERSEDED, not built as designed:
+  [Fork subsumes split](fork-subsumes-split.md) step 4 collapsed the
+  companion around `fork` instead — see
+  [`harness-dogfooding/recursive-companion/README.md`](../harness-dogfooding/recursive-companion/README.md).
+  C4–C6 status is not reassessed here.
 - [Exomonad v3 — the typed swarm](self-iterating-harness/20-exomonad-v3-prd.md):
   swarm coordination as a compiled resident Haskell program. Stage 1 lanes
   S1-L1 through S1-L5 are landed in code: row servicing for

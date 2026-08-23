@@ -1,7 +1,6 @@
 # Fork subsumes split
 
-**Status: steps 1–3 landed (2026-08-22/23); step 4 design locked (operator,
-2026-08-23), in progress.**
+**Status: steps 1–4 landed (2026-08-22/23, step 4 in `bdfc334a`).**
 
 The companion's tree should EMERGE from model-authored forks — `async (fork
 @T "you're in branch X")` — not from models proposing splits that authored

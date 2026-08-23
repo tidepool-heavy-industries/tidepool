@@ -778,12 +778,16 @@ fn outer_template(stack: &str, code: &str, imports: &str, helpers: &str) -> Stri
     engine::template_turn_for_fused(&outer_decls(), stack, code, imports, helpers, &[])
 }
 
-/// PRD 21 C5's read-back half: `takeDelegatedBranches path` lets the
-/// AUTHORED outer loop (`Harness.hs`'s `foldAt`) consume the runtime-stamped
-/// branch(es) a node's own coalgebra delegation produced, keyed by that
-/// node's rendered `NodePath` text. Hand-built as an `EffectDecl` literal
-/// here rather than via a `tidepool-mcp` `*_effect_def!` macro: this verb has
-/// no Rust-registry `<Eff>Req`/`EffectHandler` at all (see
+/// PRD 21 C5's read-back half: `takeDelegatedBranches path` let the
+/// AUTHORED outer loop consume the runtime-stamped branch(es) a node's own
+/// coalgebra delegation produced, keyed by that node's rendered `NodePath`
+/// text. Post fork-subsumes-split step 4, the Haskell fold that called this
+/// (`Harness.hs`'s former `foldAt`) is deleted — no shipped harness calls
+/// `takeDelegatedBranches` anymore. This is an input-starved vestige,
+/// flagged for the identifier-sweep lane rather than deleted here
+/// (`plans/fork-subsumes-split.md` step 5). Hand-built as an `EffectDecl`
+/// literal here rather than via a `tidepool-mcp` `*_effect_def!` macro: this
+/// verb has no Rust-registry `<Eff>Req`/`EffectHandler` at all (see
 /// [`engine::HoleRouting::DelegatedBranches`]'s doc) — it is serviced
 /// entirely inline by [`SelfHarnessDriver::service_delegated_branches`],
 /// exactly like `ReadState`/`FreezeContext`.
@@ -796,10 +800,9 @@ fn outer_template(stack: &str, code: &str, imports: &str, helpers: &str) -> Stri
 /// `DelegateBranches`.
 ///
 /// "Take": the driver's own record for `path` is CONSUMED (removed) on
-/// read — sound because a node's own `foldAt` runs exactly once. Ordered
-/// oldest-first; `Harness.hs` decides "last wins" for `answerMergeBranch`
-/// when a node delegated more than once, and journals when it did (PRD 21
-/// C5's multiple-delegation policy — see `Harness.hs`'s `foldAt`).
+/// read — sound because a node's own fold was meant to run exactly once.
+/// Ordered oldest-first; no Haskell caller remains to exercise this (see
+/// above).
 ///
 /// `pub`, unlike [`outer_decls`] itself, for exactly one reason:
 /// `tests/dogfood_harness_typecheck.rs`'s `outer_row_decls()` hand-mirrors
@@ -888,20 +891,20 @@ impl OuterRow {
 /// structurally cannot run a shell command, read files, hit the network, or
 /// suspend an in-context `runLLMTurn`. Its whole surface: `askUser` (present a
 /// typed form to a human operator, riding `AskUser`), `fork`/`forkAll`
-/// (delegate to bounded parallel sub-answerers, riding `Fork` — the driver
-/// services the resulting suspension via [`Harness::answer_fanout`]/
-/// [`Harness::answer_fork`], and each child compiles against a fork-free leaf
-/// row so it cannot itself fork), `Tidepool.Async` over `Green` (green
-/// threads — the composed idiom `async (fork @T brief)` parks a fork in a
-/// thread of its own, so several forks can be outstanding before the first
-/// `wait`; serviced by the answerer-plane green scheduler in
+/// (spawn bounded, RECURSIVE sub-answerers, riding `Fork` — the driver
+/// services the resulting suspension via [`Self::drive_fork_child_window`],
+/// which compiles a fork child against this SAME row, full pump included:
+/// a child can `askUser`, `fork` again, and go multi-round, bounded only by
+/// the spawn-time budgets in [`Self::check_fork_budgets`] (depth and
+/// per-window/per-subtree fan-out), not by row shape), `Tidepool.Async` over
+/// `Green` (green threads — the composed idiom `async (fork @T brief)` parks
+/// a fork in a thread of its own, so several forks can be outstanding before
+/// the first `wait`; serviced by the answerer-plane green scheduler in
 /// [`SelfHarnessDriver::drive_answerer_to_finalize`]), and `finalize` (the
 /// answer path).
 ///
 /// `Green` grants NO new external capability: a green thread's body can only
-/// perform effects already in this row, and `fork_child_decls` strips `Green`
-/// from fork-child rows the same way it strips `Fork` — the composition
-/// bottoms out one level down.
+/// perform effects already in this row.
 ///
 /// `AskUser` comes first because [`EngineConfig::from_decls`] takes the first
 /// interposed effect as the suspend threshold; `Fork`/`Green`/`Finalize` land
@@ -1449,13 +1452,14 @@ pub struct SelfHarnessDriver {
     /// keyed by the DELEGATING node's own rendered `NodePath` text, in
     /// completion order. Populated by [`Self::drain_note_holes`] the moment
     /// a `SubagentAwait` this driver services decodes a bound worktree
-    /// branch ([`engine::decode_completed_delegation_branch`]); consumed
-    /// (removed) by [`Self::service_delegated_branches`] when
-    /// `Harness.hs`'s `foldAt` reads it back via `takeDelegatedBranches`.
-    /// Never touched by, or visible to, any model window — see
-    /// [`delegate_branches_decl`]'s doc. `Mutex`-wrapped for the same
-    /// concurrent-siblings reason as `branch_node_paths` — two siblings
-    /// under one parent can each `delegate` in the SAME bulk window.
+    /// branch ([`engine::decode_completed_delegation_branch`]); would be
+    /// consumed (removed) by [`Self::service_delegated_branches`] on a
+    /// `takeDelegatedBranches` read-back, but no Haskell caller remains
+    /// post fork-subsumes-split step 4 — see [`delegate_branches_decl`]'s
+    /// doc for the vestige note. Never touched by, or visible to, any model
+    /// window. `Mutex`-wrapped for the same concurrent-siblings reason as
+    /// `branch_node_paths` — two siblings under one parent can each
+    /// `delegate` in the SAME bulk window.
     delegated_branches: Mutex<HashMap<String, Vec<String>>>,
     /// Fork-subsumes-split step 3 (seam map §7.1): the next `idx` to assign
     /// a fork child of a given PARENT, for that child's derived GUI label
@@ -6253,21 +6257,22 @@ impl SelfHarnessDriver {
     }
 
     /// Drain a `HoleRouting::Fork` suspension on the per-loop answerer
-    /// (`forkAll`/`fork` via `Tidepool.Fork`): resume it via the EXISTING
-    /// [`Harness::answer_fanout`]/[`Harness::answer_fork`] machinery — REUSED,
-    /// never reimplemented — looping in case the parent immediately hits
-    /// ANOTHER fork right after resuming (e.g. `forkAll` then `fork` in
+    /// (`forkAll`/`fork` via `Tidepool.Fork`): resume it by driving each
+    /// child to completion on the full pump row via
+    /// [`Self::drive_fork_child_window`] (fork-subsumes-split step 1 — a
+    /// child can `askUser`, `fork` again, and go multi-round; it is not the
+    /// one-shot general-Agent path), looping in case the parent immediately
+    /// hits ANOTHER fork right after resuming (e.g. `forkAll` then `fork` in
     /// sequence). `Ok(Some(out))` means the parent landed on `Finalize` — the
     /// caller should `return Ok(out)` straight through, same as any other
     /// finalize suspension. `Ok(None)` means the parent's block ran to
     /// completion WITHOUT ever finalizing; this already reopened the node and
     /// pushed the same corrective nudge [`Self::drive_answerer_to_finalize`]'s
     /// `Completed` arm uses, so the caller should just let its round loop
-    /// keep driving. Any other resumed hole (an operator form) or a
-    /// mid-fanout child that itself suspended
-    /// ([`crate::harness::HarnessError::Aborted`], surfaced from
-    /// `answer_fanout`/`answer_fork` via `?`) is a hard error — the
-    /// self-harness driver has no operator inside a fork child (v1).
+    /// keep driving. Any OTHER resumed hole (an operator form after the fork
+    /// results, a `wait` on a thread spawned earlier in the block) is handed
+    /// back to the dispatcher — composing fork with askUser/async in one
+    /// block is an ordinary continuation.
     async fn drain_answerer_fork(
         &self,
         node: NodeId,
@@ -6719,7 +6724,8 @@ impl SelfHarnessDriver {
     /// chain of a round shares one compile) and dispatch. Green suspensions
     /// go through the SHARED [`Self::service_green_hole`] (raw resumes are
     /// correct for thread frames); a thread's `fork`/`forkAll` drives real
-    /// children via [`Harness::answer_fork_hole_raw`]; `note`/`getStateJson`/
+    /// children via [`Self::drive_fork_child_window`], the same recursive
+    /// pump-row path the main chain uses; `note`/`getStateJson`/
     /// `delegate` get their immediate service, raw-resumed. `askUser` and
     /// `finalize` inside a thread are refused loudly — operator forms and the
     /// window's answer belong on the main chain.

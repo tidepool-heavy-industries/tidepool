@@ -4,8 +4,9 @@ Built on the **minimal node model**: N registered nodes in a tree
 (slash-separated `node_id` paths, convention = wire-carried branch labels),
 where each node is one lifecycle — a **seed** prompt in, an append-only
 **timeline** of notes and asks, a **final value** (or **failure**) out.
-Nothing harness-specific appears in the UI schema — companion drafts,
-tensions, and synthesis all flow through those channels as content.
+Nothing harness-specific appears in the UI schema — companion drafts, forked
+sub-answers, and finalized typed values all flow through those channels as
+content.
 
 **Two views over that one model**, both live via the same `/sse` stream:
 

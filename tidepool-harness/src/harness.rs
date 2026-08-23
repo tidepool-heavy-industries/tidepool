@@ -383,11 +383,19 @@ enum NodeSeed {
     },
 }
 
-/// A fork child's compile row: the parent row minus the fork-spawning effects
-/// (`Fork`/`RunLLMTurn`). A child keeps everything else it needs to compute its
-/// answer (base effects, `AskUser`, `Finalize`) but literally cannot name
-/// `fork`/`forkAll`/`runLLMTurn` — depth-one is structural, not a runtime
-/// guard. For the answerer (`[AskUser, Fork, ReadState, Green, Finalize]`) this yields the leaf
+/// A fork child's compile row for the ONE-SHOT general-Agent fork path
+/// (`Self::answer_fork`/`Self::answer_fanout` via `drive_one_fork_child`,
+/// test-only callers post fork-subsumes-split — the recursive self-harness
+/// pump path does not call this at all: its fork children compile against
+/// the full parent row via
+/// `crate::selfharness::driver::SelfHarnessDriver::drive_fork_child_window`,
+/// so they CAN fork again, bounded by spawn-time budgets, not by row shape).
+/// Here, the parent row minus the fork-spawning effects (`Fork`/`RunLLMTurn`).
+/// A child keeps everything else it needs to compute its answer (base
+/// effects, `AskUser`, `Finalize`) but literally cannot name
+/// `fork`/`forkAll`/`runLLMTurn` on THIS path — depth-one is structural, not
+/// a runtime guard, for exactly this one-shot lane. For the answerer
+/// (`[AskUser, Fork, ReadState, Green, Finalize]`) this yields the leaf
 /// `[AskUser, Finalize]`.
 fn fork_child_decls(parent: &[tidepool_mcp::EffectDecl]) -> Vec<tidepool_mcp::EffectDecl> {
     // `Green` is stripped alongside the fork-spawning effects: a fork child
@@ -3163,9 +3171,12 @@ impl Harness {
     /// path exercises the GHC-verbatim retry here (a compile failure feeds back
     /// as the child's next user turn; the parent's continuation is untouched).
     /// Register, force, and drive ONE fork child to its answering value —
-    /// the per-child sequence shared by [`Self::answer_fork`],
-    /// [`Self::answer_fanout`], and [`Self::answer_fork_hole_raw`] (one
-    /// home, four call sites). `parent`'s own decl-plane root rides on the
+    /// the per-child sequence shared by [`Self::answer_fork`] and
+    /// [`Self::answer_fanout`] (one home, two call sites — both part of the
+    /// one-shot general-Agent fork path; the recursive self-harness pump
+    /// path drives its children via
+    /// [`crate::selfharness::driver::SelfHarnessDriver::drive_fork_child_window`]
+    /// instead). `parent`'s own decl-plane root rides on the
     /// child's include (see `force_with_extra_include`'s doc — a
     /// `finalize_pin` module may be a type the parent declared live). Cleans
     /// the child up on ANY failure (no orphaned Running+resident node);

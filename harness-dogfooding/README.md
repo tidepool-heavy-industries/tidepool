@@ -20,12 +20,14 @@ two-file layout:
 Point the driver at a subdir's `Harness.hs`; its directory becomes the include
 root so the sibling `HarnessTypes` resolves.
 
-**Minimal effect surfaces, on purpose:** the companion's answerer row is exactly
-`Eff '[AskUser, Fork, Finalize]` (spelled out in `Tidepool.Agent`) — typed
-forms, depth-one parallel sub-answerers, and the typed yield. The development
-tree instead gives headless workers their native coding tools while Haskell
-owns typed orchestration. Frictions hit while authoring/running these *are the
-roadmap* for the next harness helpers.
+**Minimal effect surfaces, on purpose:** the answerer row is
+`Eff '[AskUser, Fork, ReadState, Green, Finalize]` (`tidepool-harness`'s
+`selfharness::driver::answerer_decls`; the delegating companion prepends
+`Subagent`/`Worktree`) — typed forms, RECURSIVE sub-answerers bounded by
+spawn-time depth/descendant budgets rather than depth-one, and the typed
+yield. The development tree instead gives headless workers their native
+coding tools while Haskell owns typed orchestration. Frictions hit while
+authoring/running these *are the roadmap* for the next harness helpers.
 
 ## Harnesses
 
@@ -53,21 +55,19 @@ roadmap* for the next harness helpers.
   first and an ephemeral resolution agent second (typed `spawnAsync` handles,
   awaited in plan order), with escalation as a typed value the parent's failure
   policy reads. Its row IS the driver's widened outer session — `[RunLLMTurn,
-  AskUser, Console, Worktree, RepoEvent, Exec, Subagent, Journal]` — and
+  AskUser, Console, Worktree, RepoEvent, Exec, Subagent, Journal,
+  DelegateBranches, Green]` — and
   `tidepool-harness/tests/dogfood_harness_typecheck.rs` compiles it against
   exactly that row. Node residency (resident select loops) is S1-L4; the seam
   where it lands is named at the `hyloM` call site and built nowhere.
-- [`recursive-companion/`](recursive-companion/README.md) — **the C3 vertical
-  slice of the recursive companion**
+- [`recursive-companion/`](recursive-companion/README.md) — **an
+  investigation companion collapsed around `fork`**
   ([PRD 21](../plans/self-iterating-harness/21-recursive-companion-prd.md),
-  [C3 design doc](../plans/self-iterating-harness/21-c3-recursive-companion-slice.md)).
-  One root turn as a monadic hylomorphism over `Tidepool.Thought`'s `ThoughtF`:
-  a coalgebra window finalizes a layer (a split into branches, or a local
-  finish), each branch descends recursively from inherited context, and an
-  algebra window folds typed results back up in branch order at every node,
-  leaves included. The operator gets one folded answer with the tree
-  inspectable but subordinate underneath it. Budgets (`maxDepth`/`maxNodes`/
-  `maxFanOut`) and an operator gate (`gatePolicy`) bound the recursion; the
-  scripted acceptance tier runs unattended under `GateOff`, and the live
-  attended/gated scenario is documented but not run — see that harness's own
-  README for the exact launch line.
+  fork-subsumes-split step 4, superseding the earlier C3 layer-walk slice).
+  One turn is one top-level typed request: the session decomposes the
+  operator's question by forking typed sub-answerers of its own, recursively
+  (`async (fork @T "brief")`), each a full multi-round session, and the
+  driver services that tree — spawn-time depth/descendant budgets, the
+  operator-page node lifecycle, journal receipts. The fold is ordinary
+  Haskell in the session's own block: the code after the `wait`s. See that
+  harness's own README for the exact shape and launch line.

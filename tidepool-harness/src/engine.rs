@@ -389,18 +389,20 @@ pub enum HoleRouting {
     /// A plain `ask schema prompt` (structured operator elicitation) or an
     /// unrecognized payload — operator routing with the raw payload attached.
     Ask { payload: Json },
-    /// `takeDelegatedBranches path` (PRD 21 C5's final wiring) —
-    /// `Harness.hs`'s `foldAt`, and ONLY `foldAt` (this decl is absent from
-    /// `answerer_decls`/`answerer_decls_with_delegate`, so no model window
-    /// can ever name it), reading back this node's own runtime-stamped
-    /// delegation branch(es) — see the module doc on
-    /// [`crate::selfharness::driver::SelfHarnessDriver`]'s
+    /// `takeDelegatedBranches path` (PRD 21 C5's final wiring): reads back
+    /// this node's own runtime-stamped delegation branch(es) — see the
+    /// module doc on [`crate::selfharness::driver::SelfHarnessDriver`]'s
     /// `branch_node_paths`/`delegated_branches` for where they are
     /// recorded. `path` is the node's rendered `NodePath` text (the same
-    /// text `coalgebraPrompt` embeds as `"NODE {path} — DISCOVER"` — see
-    /// [`parse_companion_node_path`]). Serviced IMMEDIATELY (`ReadState`'s
-    /// shape: no operator, no model round); the driver's own record for
-    /// `path` is CONSUMED on read.
+    /// prefix [`parse_companion_node_path`] looks for). This decl is absent
+    /// from `answerer_decls`/`answerer_decls_with_delegate`, so no model
+    /// window can ever name it — and post fork-subsumes-split step 4, no
+    /// Haskell caller remains at all (the fold that used to read this back,
+    /// `Harness.hs`'s former `foldAt`, is deleted): the whole pipeline is an
+    /// input-starved vestige, flagged for the identifier-sweep lane rather
+    /// than deleted here (`plans/fork-subsumes-split.md` step 5). Serviced
+    /// IMMEDIATELY (`ReadState`'s shape: no operator, no model round) on the
+    /// rare call; the driver's own record for `path` is CONSUMED on read.
     DelegatedBranches { path: String },
 }
 
@@ -2682,18 +2684,19 @@ pub fn build_pair_value(a: Value, b: Value, table: &DataConTable) -> Result<Valu
 }
 
 /// Best-effort: pull the recursive companion's own `NodePath` text out of a
-/// coalgebra prompt shaped `"NODE {path} — DISCOVER (...)"`
-/// (`harness-dogfooding/recursive-companion/Harness.hs`'s `coalgebraPrompt`,
-/// which renders exactly that literal prefix — not merely a test needle).
-/// This is the ONLY place a delegating branch child's domain identity is
-/// observable from the runtime side: `NodePath` never crosses into Rust as a
-/// typed value (`HarnessTypes.hs`'s own module doc explains why — a window
-/// type declared beside `loop` is unnameable by the answerer it is asked to
-/// finalize), so parsing the one place it is already rendered as text is the
-/// least invasive correlation available. `None` for any other harness's
-/// prompt shape — delegation-branch recording ([`crate::selfharness::driver::
-/// SelfHarnessDriver::branch_node_paths`]) is then simply never populated,
-/// which is harmless: no other harness calls `delegate`.
+/// coalgebra prompt shaped `"NODE {path} — DISCOVER (...)"`. No harness
+/// renders that prefix — the only surviving occurrences of the string are
+/// display copy in `tidepool-web` demo/test fixtures — so this parser
+/// returns `None` on every real call, and
+/// [`crate::selfharness::driver::SelfHarnessDriver::branch_node_paths`] is
+/// never populated. `NodePath` never crosses into Rust as a typed value
+/// (`HarnessTypes.hs`'s own module doc explains why — a window type
+/// declared beside `loop` is unnameable by the answerer it is asked to
+/// finalize), so this text-prefix parse was the least invasive correlation
+/// mechanism available. Input-starved post-collapse
+/// (`plans/fork-subsumes-split.md` step 5 flags the same vestige cluster
+/// around `takeDelegatedBranches`); kept, not deleted, pending the
+/// identifier-sweep lane.
 pub(crate) fn parse_companion_node_path(prompt: &str) -> Option<String> {
     let rest = prompt.strip_prefix("NODE ")?;
     let (path, _) = rest.split_once(" — DISCOVER")?;
