@@ -246,6 +246,9 @@ async fn fork_child_that_forks_is_depth_refused_and_recovers() {
         finalize_int_reply(7),
     ];
     let (mut driver, _agent, log_path) = build_driver(replies, "answerer-fork-depth");
+    // Step 2 raised the default depth cap to 8; this test pins the refusal
+    // MECHANISM at depth 1 rather than scripting 8 nested sessions.
+    driver.set_max_fork_depth(1);
     let source = load_harness_source(&examples_harness_dir().join("Harness.hs"))
         .expect("reference harness source loads");
 
@@ -270,6 +273,91 @@ async fn fork_child_that_forks_is_depth_refused_and_recovers() {
             .iter()
             .any(|t| t.contains("Forking is not available in THIS session")),
         "the depth-refusal corrective must reach the child; logged turns:\n{turns:#?}"
+    );
+}
+
+/// STEP 2, the raise: with the default caps (depth 8, subtree 32), a fork
+/// CHILD can itself fork — a two-level chain runs end to end and values
+/// flow up through both finalizes: grandchild 5 → child 5+1 → parent "6".
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn two_level_fork_chain_succeeds_at_default_caps() {
+    support::require_extract();
+    let _cache_guard = support::isolate_cache();
+
+    let replies = vec![
+        reply(
+            "```haskell\nimport HarnessTypes (Decision (..), Confidence (..))\nimport Tidepool.Fork (fork)\n\ndo\n  a <- fork @Int \"pick a\"\n  (finalize @Decision (Decision { action = show a, rationale = \"chain\", confidence = Medium }) :: M ())\n```",
+        ),
+        // The child forks a grandchild and derives its own answer from it.
+        reply(
+            "```haskell\nimport Tidepool.Fork (fork)\n\ndo\n  b <- fork @Int \"grandchild\"\n  (finalize @Int (b + 1) :: M ())\n```",
+        ),
+        finalize_int_reply(5),
+    ];
+    let (mut driver, _agent, _log_path) = build_driver(replies, "answerer-fork-chain");
+    let source = load_harness_source(&examples_harness_dir().join("Harness.hs"))
+        .expect("reference harness source loads");
+
+    let outcome = driver
+        .run_one_cycle(&source, None)
+        .await
+        .expect("a depth-2 fork chain completes at the default caps");
+
+    let decision = outcome
+        .state_json
+        .get("lastDecision")
+        .and_then(|v| v.as_object())
+        .expect("lastDecision must be a Just Decision");
+    assert_eq!(
+        decision.get("action").and_then(|v| v.as_str()),
+        Some("6"),
+        "the grandchild's 5 must flow up through the child's +1 into the \
+         parent's answer, got {decision:?}"
+    );
+}
+
+/// STEP 2, the tree-wide bound: with a subtree cap of 1, the block's SECOND
+/// fork is refused with the WHOLE-TREE corrective (distinct from the
+/// per-session pool's), the block aborts, and the session recovers.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn second_fork_past_subtree_cap_refuses_with_tree_wide_corrective() {
+    support::require_extract();
+    let _cache_guard = support::isolate_cache();
+
+    let replies = vec![
+        reply(
+            "```haskell\nimport HarnessTypes (Decision (..), Confidence (..))\nimport Tidepool.Fork (fork)\n\ndo\n  a <- fork @Int \"pick a\"\n  b <- fork @Int \"pick b\"\n  (finalize @Decision (Decision { action = show (a + b), rationale = \"two\", confidence = Medium }) :: M ())\n```",
+        ),
+        finalize_int_reply(1),
+        reply(
+            "```haskell\nimport HarnessTypes (Decision (..), Confidence (..))\n\n(finalize @Decision (Decision { action = \"gave-up\", rationale = \"subtree cap\", confidence = Medium }) :: M ())\n```",
+        ),
+    ];
+    let (mut driver, _agent, log_path) = build_driver(replies, "answerer-fork-subtree");
+    driver.set_fork_subtree_cap(1);
+    let source = load_harness_source(&examples_harness_dir().join("Harness.hs"))
+        .expect("reference harness source loads");
+
+    let outcome = driver
+        .run_one_cycle(&source, None)
+        .await
+        .expect("the subtree refusal aborts the block, not the run");
+
+    let decision = outcome
+        .state_json
+        .get("lastDecision")
+        .and_then(|v| v.as_object())
+        .expect("lastDecision must be a Just Decision");
+    assert_eq!(
+        decision.get("action").and_then(|v| v.as_str()),
+        Some("gave-up")
+    );
+    let turns = logged_turn_texts(&log_path);
+    assert!(
+        turns
+            .iter()
+            .any(|t| t.contains("Fork budget exhausted for this WHOLE tree")),
+        "the tree-wide corrective must reach the model; logged turns:\n{turns:#?}"
     );
 }
 

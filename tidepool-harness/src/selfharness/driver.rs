@@ -540,6 +540,55 @@ fn fork_child_path_segment(idx: u32, brief: &str) -> String {
     }
 }
 
+impl SelfHarnessDriver {
+    /// The step-2 spawn admission: per-session fan pool AND whole-subtree
+    /// descendant budget, checked (and the subtree spent) atomically at the
+    /// one moment children are about to exist. `Some(corrective)` = refused,
+    /// nothing spent; `None` = both budgets debited, spawn may proceed.
+    fn check_fork_budgets(
+        &self,
+        budget: &mut ForkBudget,
+        cost: u32,
+        fork_subtree: &std::sync::atomic::AtomicU32,
+        ty_label: &str,
+    ) -> Option<String> {
+        use std::sync::atomic::Ordering;
+        let spent = fork_subtree.load(Ordering::Relaxed);
+        if spent.saturating_add(cost) > self.fork_subtree_cap {
+            return Some(fork_subtree_refusal(
+                spent,
+                self.fork_subtree_cap,
+                cost,
+                ty_label,
+            ));
+        }
+        if !budget.try_spend(cost) {
+            return Some(fork_budget_refusal(
+                budget.spent,
+                budget.cap,
+                cost,
+                ty_label,
+            ));
+        }
+        fork_subtree.fetch_add(cost, Ordering::Relaxed);
+        None
+    }
+}
+
+/// The refusal corrective when the WHOLE fork tree's descendant budget is
+/// spent — distinct from the per-session pool below, so the model knows
+/// the boundary is tree-wide, not something a deeper fork escapes.
+fn fork_subtree_refusal(spent: u32, cap: u32, needed: u32, ty_label: &str) -> String {
+    format!(
+        "Fork budget exhausted for this WHOLE tree of sessions: {spent} of {cap} \
+         descendant sessions are already spawned across all depths, and that block \
+         needed {needed} more. The block was ABORTED (top-level declarations from \
+         earlier rounds persist; the aborted block's bindings are lost). Do not \
+         fork again anywhere in this tree — finalize with what you have: evaluate \
+         `finalize @{ty_label} value`."
+    )
+}
+
 /// The refusal corrective for a fork that would exceed the window's budget:
 /// what happened, what survives, and the one useful next step.
 fn fork_budget_refusal(spent: u32, cap: u32, needed: u32, ty_label: &str) -> String {
@@ -929,11 +978,16 @@ const LOOP_INFERENCE_CALL_CAP: u32 = 1024;
 /// child is a real multi-round model window, so this is a genuine resource
 /// budget, not a style preference; the refusal on the (N+1)th is loud
 /// (block aborted, corrective naming the budget), never a silent drop.
-/// How deep model-driven forking may nest before step 2's subtree budgets
-/// land: 1 = a top-level agent session may fork; its children may not
-/// (parity with the old fork-free child row's structural bound). Raised
-/// only WITH atomic depth/total-node accounting, never alone.
-const MAX_FORK_DEPTH: u32 = 1;
+/// How deep model-driven forking may nest (fork-subsumes-split step 2,
+/// operator numbers 2026-08-22: 8/32): a session at depth 8 may not fork
+/// further. Depth alone is not the real bound — the subtree budget below
+/// is — but it caps pathological chains.
+const DEFAULT_MAX_FORK_DEPTH: u32 = 8;
+
+/// Total DESCENDANT sessions one top-level agent session's whole fork tree
+/// may spawn, counted atomically at every spawn across all depths and both
+/// fork styles (direct + green-thread). The real resource bound.
+const DEFAULT_FORK_SUBTREE_CAP: u32 = 32;
 
 /// Operator decision 2026-08-22: total-per-node, matching the companion's
 /// own `maxFanOut`-shaped budgeting one level up; raised 8 → 32 the same
@@ -1244,9 +1298,14 @@ pub struct SelfHarnessDriver {
     /// forks draw on the ONE pool. Default
     /// [`DEFAULT_FORK_BUDGET_PER_WINDOW`]; configurable via
     /// [`Self::set_fork_budget_per_window`]. The (N+1)th child is a loud
-    /// refusal (the block is aborted, the window survives with a corrective
+    /// refusal (the block is aborted, the session survives with a corrective
     /// naming the budget), never a silent drop.
     fork_budget_per_window: u32,
+    /// Step-2 caps ([`DEFAULT_MAX_FORK_DEPTH`]/[`DEFAULT_FORK_SUBTREE_CAP`]),
+    /// settable for tests (a depth/subtree refusal is provable with tiny
+    /// caps instead of scripting 8 nested GHC sessions).
+    max_fork_depth: u32,
+    fork_subtree_cap: u32,
     /// The concurrency cap for concurrently-serviced fanout/fork
     /// `RunLLMTurn` windows (PRD 20 S1-L4,
     /// [`Self::service_outer_fanout`]) — default [`DEFAULT_CONCURRENCY_CAP`]
@@ -1699,6 +1758,8 @@ impl SelfHarnessDriver {
             answerer_max_rounds: ANSWERER_MAX_ROUNDS,
             loop_inference_call_cap: LOOP_INFERENCE_CALL_CAP,
             fork_budget_per_window: DEFAULT_FORK_BUDGET_PER_WINDOW,
+            max_fork_depth: DEFAULT_MAX_FORK_DEPTH,
+            fork_subtree_cap: DEFAULT_FORK_SUBTREE_CAP,
             concurrency_cap: DEFAULT_CONCURRENCY_CAP,
             checkpoint_path: persistence::default_checkpoint_path(),
             checkpoint_generation: None,
@@ -1966,6 +2027,15 @@ impl SelfHarnessDriver {
     /// scripting [`DEFAULT_FORK_BUDGET_PER_WINDOW`] real child windows.
     pub fn set_fork_budget_per_window(&mut self, budget: u32) {
         self.fork_budget_per_window = budget;
+    }
+
+    /// Test knobs for the step-2 caps (see the constants' docs).
+    pub fn set_max_fork_depth(&mut self, depth: u32) {
+        self.max_fork_depth = depth;
+    }
+
+    pub fn set_fork_subtree_cap(&mut self, cap: u32) {
+        self.fork_subtree_cap = cap;
     }
 
     pub fn set_loop_inference_call_cap(&mut self, cap: u32) {
@@ -4017,7 +4087,11 @@ impl SelfHarnessDriver {
         // declaration). So a typed exit from the shared round loop collapses
         // back into a hard failure HERE, unchanged from before the exit
         // plumbing existed.
-        let outcome = match self.drive_answerer_to_finalize(node, ty, site, 0).await? {
+        let fork_subtree = std::sync::atomic::AtomicU32::new(0);
+        let outcome = match self
+            .drive_answerer_to_finalize(node, ty, site, 0, &fork_subtree)
+            .await?
+        {
             Ok(o) => o,
             Err(exit) => {
                 return Err(DriverError::Session(format!(
@@ -4258,7 +4332,13 @@ impl SelfHarnessDriver {
         // `Drop` impl is what retires the node on this path now.
         let mut exit: Option<InvocationExit> = None;
         let outcome = match self
-            .drive_answerer_to_finalize(window.node(), ty, site, 0)
+            .drive_answerer_to_finalize(
+                window.node(),
+                ty,
+                site,
+                0,
+                &std::sync::atomic::AtomicU32::new(0),
+            )
             .await?
         {
             Ok(o) => Some(o),
@@ -4639,7 +4719,13 @@ impl SelfHarnessDriver {
         // sibling's already-finished answer.
         let mut exit: Option<InvocationExit> = None;
         let outcome = match self
-            .drive_answerer_to_finalize(window.node(), element_ty, site, 0)
+            .drive_answerer_to_finalize(
+                window.node(),
+                element_ty,
+                site,
+                0,
+                &std::sync::atomic::AtomicU32::new(0),
+            )
             .await?
         {
             Ok(o) => Some(o),
@@ -5161,6 +5247,7 @@ impl SelfHarnessDriver {
         ty: Option<&str>,
         site: u32,
         fork_depth: u32,
+        fork_subtree: &std::sync::atomic::AtomicU32,
     ) -> Result<Result<TurnOutcome, InvocationExit>, DriverError> {
         let ty_label = ty.unwrap_or("A");
         let max_rounds = self.answerer_max_rounds;
@@ -5183,7 +5270,7 @@ impl SelfHarnessDriver {
         // atomically at spawn (seam map §6). A zero cap rides the existing
         // loud-refusal machinery; `fork_budget_refusal` teaches the boundary.
         let mut fork_budget = ForkBudget {
-            cap: if fork_depth >= MAX_FORK_DEPTH {
+            cap: if fork_depth >= self.max_fork_depth {
                 0
             } else {
                 self.fork_budget_per_window
@@ -5329,6 +5416,7 @@ impl SelfHarnessDriver {
                                         ty_label,
                                         &mut fork_budget,
                                         fork_depth,
+                                        fork_subtree,
                                     )
                                     .await?
                                 {
@@ -5358,7 +5446,13 @@ impl SelfHarnessDriver {
                             HoleRouting::Green => {
                                 let g = green.get_or_insert_with(AnswererGreen::new);
                                 match self
-                                    .service_answerer_green(node, g, &mut fork_budget, fork_depth)
+                                    .service_answerer_green(
+                                        node,
+                                        g,
+                                        &mut fork_budget,
+                                        fork_depth,
+                                        fork_subtree,
+                                    )
                                     .await?
                                 {
                                     AnswererGreenExit::NodeParked => {
@@ -6106,6 +6200,7 @@ impl SelfHarnessDriver {
         ty_label: &str,
         budget: &mut ForkBudget,
         fork_depth: u32,
+        fork_subtree: &std::sync::atomic::AtomicU32,
     ) -> Result<Option<TurnOutcome>, DriverError> {
         loop {
             let Some((hole, classified, table)) = self.agent.pending_hole_full(node) else {
@@ -6118,11 +6213,12 @@ impl SelfHarnessDriver {
             // sequence spends per iteration. Spend BEFORE spawn; a refusal
             // costs nothing.
             let cost = ForkBudget::cost(&classified.routing);
-            if matches!(classified.routing, HoleRouting::Fork { .. }) && !budget.try_spend(cost) {
-                let msg = fork_budget_refusal(budget.spent, budget.cap, cost, ty_label);
-                self.agent.refuse_pending_hole(node, msg.clone())?;
-                self.agent.push_user_turn(node, &msg)?;
-                return Ok(None);
+            if matches!(classified.routing, HoleRouting::Fork { .. }) {
+                if let Some(msg) = self.check_fork_budgets(budget, cost, fork_subtree, ty_label) {
+                    self.agent.refuse_pending_hole(node, msg.clone())?;
+                    self.agent.push_user_turn(node, &msg)?;
+                    return Ok(None);
+                }
             }
             // Children run as full sessions on the pump
             // (`drive_fork_child_window` — fork-subsumes-split step 1); the
@@ -6158,6 +6254,7 @@ impl SelfHarnessDriver {
                                 site.get(),
                                 &table,
                                 fork_depth + 1,
+                                fork_subtree,
                             )
                             .await?;
                         answers.push(wrap_fork_value(*source, value, &table)?);
@@ -6260,6 +6357,7 @@ impl SelfHarnessDriver {
         site: u32,
         table: &DataConTable,
         fork_depth: u32,
+        fork_subtree: &std::sync::atomic::AtomicU32,
     ) -> Result<Value, DriverError> {
         let sid = self.outer_sid()?;
         let modules = self.agent.asks_modules(parent, site);
@@ -6338,7 +6436,9 @@ impl SelfHarnessDriver {
         // present forms, and — step 2 — fork), so this call is genuinely
         // recursive; the indirection is the async-recursion requirement,
         // nothing more.
-        let outcome = Box::pin(self.drive_answerer_to_finalize(node, ty, site, fork_depth)).await;
+        let outcome =
+            Box::pin(self.drive_answerer_to_finalize(node, ty, site, fork_depth, fork_subtree))
+                .await;
         self.emit(Event::TurnEnd { node });
 
         // Every path below this point is done with this node's own
@@ -6467,6 +6567,7 @@ impl SelfHarnessDriver {
         green: &mut AnswererGreen,
         budget: &mut ForkBudget,
         fork_depth: u32,
+        fork_subtree: &std::sync::atomic::AtomicU32,
     ) -> Result<AnswererGreenExit, DriverError> {
         loop {
             let Some((hole, classified, table, _asks, request)) =
@@ -6506,7 +6607,15 @@ impl SelfHarnessDriver {
                 ));
             };
             if let Some(needed) = self
-                .service_thread_ready(node, chain, outcome, green, budget, fork_depth)
+                .service_thread_ready(
+                    node,
+                    chain,
+                    outcome,
+                    green,
+                    budget,
+                    fork_depth,
+                    fork_subtree,
+                )
                 .await?
             {
                 return Ok(AnswererGreenExit::ForkBudgetRefused { needed });
@@ -6531,6 +6640,7 @@ impl SelfHarnessDriver {
         green: &mut AnswererGreen,
         budget: &mut ForkBudget,
         fork_depth: u32,
+        fork_subtree: &std::sync::atomic::AtomicU32,
     ) -> Result<Option<u32>, DriverError> {
         let sid = self.outer_sid()?;
         let ResidentOutcome::Suspended { hole, request, .. } = outcome else {
@@ -6578,7 +6688,10 @@ impl SelfHarnessDriver {
                 // direct one. Refused = handed up as data; the dispatcher
                 // aborts the block and pushes the corrective.
                 let cost = ForkBudget::cost(&classified.routing);
-                if !budget.try_spend(cost) {
+                if self
+                    .check_fork_budgets(budget, cost, fork_subtree, "")
+                    .is_some()
+                {
                     return Ok(Some(cost));
                 }
                 // Children run as full sessions on the pump, exactly like a
@@ -6608,6 +6721,7 @@ impl SelfHarnessDriver {
                             site.get(),
                             &table,
                             fork_depth + 1,
+                            fork_subtree,
                         )
                         .await?;
                     answers.push(wrap_fork_value(source, value, &table)?);
