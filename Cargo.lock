@@ -3865,7 +3865,6 @@ dependencies = [
  "tidepool-heap",
  "tidepool-macro",
  "tidepool-mcp",
- "tidepool-optimize",
  "tidepool-repr",
  "tidepool-runtime",
  "tokio",
