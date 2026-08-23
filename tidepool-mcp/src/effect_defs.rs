@@ -1294,7 +1294,7 @@ macro_rules! runllmturn_effect_def {
                 // GADT constructor — `RunLLMTurnWith`'s arity is untouched).
                 // `label` is a plain runtime `Text` argument, not `@`-applied,
                 // so it carries no site-identity meaning of its own; the driver
-                // reads it back (`tidepool_harness::engine::HoleRouting::
+                // reads it back (`tidepool_harness::engine::SuspensionRouting::
                 // Branch`'s `label` field) to route this branch child's
                 // asks/notes to a per-node operator gate
                 // (`selfharness::operator::OperatorGate::node_gate`) instead of

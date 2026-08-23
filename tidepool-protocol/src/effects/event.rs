@@ -11,7 +11,8 @@
 //! `HandlingClass::OuterDispatch(OuterEffect::RepoEvent)`, the SAME class
 //! `RepoEventAwait` and its six siblings already share at the hand-routed call
 //! site — this is what makes a future eighth verb fail GENERATION rather than
-//! silently falling through to `HoleRouting::Ask` if its class is forgotten.
+//! reaching `SuspensionRouting` unclassified (`classify_hole` now refuses an
+//! unknown constructor loudly) if its class is forgotten.
 //!
 //! **Two things this lane needed that Worktree's lane did not, both because
 //! `Watch`/`HeadChangeKind`/`HeadChangeReceipt`/`CommitReceipt` name Worktree's
@@ -568,8 +569,9 @@ fn subscription_arg() -> Arg {
 /// All seven verbs share ONE handling class: the same `OuterDispatch(RepoEvent)`
 /// `RepoEventAwait` and its siblings already reach through the hand-routed
 /// `classify_hole` match arm (`tidepool-harness/src/engine.rs`) — this is what
-/// makes an eighth verb without a class fail GENERATION rather than silently
-/// falling through to `HoleRouting::Ask`, the exact `RepoEventAwait` bug class.
+/// makes an eighth verb without a class fail GENERATION rather than reach
+/// `classify_hole` unrecognized (a loud `SuspensionRouting` refusal today;
+/// the historical `RepoEventAwait` bug rode the old silent-Ask fallback).
 fn verbs() -> Vec<Verb> {
     vec![
         Verb {
