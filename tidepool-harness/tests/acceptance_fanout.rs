@@ -122,6 +122,48 @@ fn outcome_tag(o: &tidepool_harness::TurnOutcome) -> &'static str {
     }
 }
 
+/// Resolve a single-child fanout's child id STRUCTURALLY — ids are minted
+/// monotonically ([`tidepool_harness::tree::NodeTree::node_ids`]'s own doc),
+/// so a node id absent from `before` but present now is the fanout child,
+/// regardless of what its numeric value happens to be. Avoids assuming
+/// `root = NodeId(0), child = NodeId(1)`, which breaks the moment an
+/// internal node is minted ahead of the fanout child. Synchronous variant:
+/// the child already exists by the time the caller's `answer_fanout` call
+/// returned (it was awaited to completion, even on an error return).
+fn new_child_since(harness: &Harness, before: &[NodeId]) -> NodeId {
+    let after = harness.tree().node_ids();
+    let new_ids: Vec<NodeId> = after.into_iter().filter(|n| !before.contains(n)).collect();
+    assert_eq!(
+        new_ids.len(),
+        1,
+        "expected exactly one new node id (the fanout child), got {new_ids:?}"
+    );
+    new_ids[0]
+}
+
+/// As [`new_child_since`], but for a fanout driven concurrently in a spawned
+/// task: polls until exactly one new node id appears (the child is created
+/// partway through the task's own execution, not before it starts).
+async fn wait_for_new_child(harness: &Harness, before: &[NodeId], timeout: Duration) -> NodeId {
+    let mut waited = Duration::ZERO;
+    loop {
+        let after = harness.tree().node_ids();
+        let new_ids: Vec<NodeId> = after.into_iter().filter(|n| !before.contains(n)).collect();
+        match new_ids.len() {
+            1 => return new_ids[0],
+            0 => {
+                assert!(
+                    waited < timeout,
+                    "no new fanout child node appeared within {timeout:?}"
+                );
+                tokio::time::sleep(Duration::from_millis(5)).await;
+                waited += Duration::from_millis(5);
+            }
+            n => panic!("expected at most one new node id at a time, got {n}: {new_ids:?}"),
+        }
+    }
+}
+
 /// Fan of 3 over `@Int`: root suspends on a fanout hole (fan badge
 /// `Exact{n:3}`, per-child prompts in declaration order); the SECOND child's
 /// first attempt is ill-typed (`resume "nope"`) and retries via the same
@@ -336,8 +378,8 @@ async fn fanout_child_stuck_past_rung_one_aborts_clean_no_leaked_running_node() 
     cfg.max_child_turns = 1;
 
     let replies = vec![
-        // 1. Root turn: fan out ONE prompt (so the stuck child's id is
-        //    predictable: root = NodeId(0), child = NodeId(1)).
+        // 1. Root turn: fan out ONE prompt — the single resulting child's
+        //    id is resolved structurally (`wait_for_new_child`), not assumed.
         reply(&haskell(&format!(
             "do\n  {}\n  pure (toJSON ns)",
             fanout_bind("ns", "Int", &["pick 1"])
@@ -370,10 +412,12 @@ async fn fanout_child_stuck_past_rung_one_aborts_clean_no_leaked_running_node() 
         other => panic!("expected root suspended on its fanout hole, got {other:?}"),
     };
 
-    let child = NodeId(1);
+    let before_children = harness.tree().node_ids();
     let fan_harness = harness.clone();
     let fan_task =
         tokio::spawn(async move { fan_harness.answer_fanout(root, Actor::Operator).await });
+
+    let child = wait_for_new_child(&harness, &before_children, Duration::from_secs(10)).await;
 
     // Poll for the escalation to appear (rung 1 exhausted, parked on rung 2)
     // — bounded so a regression that never escalates fails the test instead
@@ -513,12 +557,16 @@ async fn fanout_child_stuck_past_rung_one_recovers_via_operator_allocate_more_th
         .await
         .expect("root drives to the fanout hole");
 
-    let child = NodeId(1);
     let children = harness
         .answer_fanout(root, Actor::Operator)
         .await
         .expect("the fan recovers via the operator's gate-resolved AllocateMore");
-    assert_eq!(children, vec![child]);
+    assert_eq!(
+        children.len(),
+        1,
+        "expected exactly one fanout child, got {children:?}"
+    );
+    let child = children[0];
     assert_eq!(
         harness.tree().state(child),
         Some(NodeState::Done),
@@ -582,8 +630,9 @@ async fn fanout_child_stuck_past_rung_one_times_out_with_no_operator() {
         other => panic!("expected root suspended on its fanout hole, got {other:?}"),
     };
 
-    let child = NodeId(1);
+    let before_children = harness.tree().node_ids();
     let outcome = harness.answer_fanout(root, Actor::Operator).await;
+    let child = new_child_since(&harness, &before_children);
     match outcome {
         Err(HarnessError::EscalationTimeout { node, waited }) => {
             assert_eq!(node, child, "the typed timeout error names the stuck child");
@@ -661,10 +710,12 @@ async fn fanout_child_escalation_retracts_its_gate_ask_when_the_direct_plane_win
         .await
         .expect("root drives to the fanout hole");
 
-    let child = NodeId(1);
+    let before_children = harness.tree().node_ids();
     let fan_harness = harness.clone();
     let fan_task =
         tokio::spawn(async move { fan_harness.answer_fanout(root, Actor::Operator).await });
+
+    let child = wait_for_new_child(&harness, &before_children, Duration::from_secs(10)).await;
 
     let mut waited = Duration::ZERO;
     while harness.escalation_of(child).is_none() {
@@ -739,8 +790,9 @@ async fn fanout_child_escalation_retracts_its_gate_ask_on_timeout() {
         .await
         .expect("root drives to the fanout hole");
 
-    let child = NodeId(1);
+    let before_children = harness.tree().node_ids();
     let outcome = harness.answer_fanout(root, Actor::Operator).await;
+    let child = new_child_since(&harness, &before_children);
     assert!(
         matches!(outcome, Err(HarnessError::EscalationTimeout { node, .. }) if node == child),
         "expected a typed timeout, got {outcome:?}"
