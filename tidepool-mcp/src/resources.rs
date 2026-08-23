@@ -58,7 +58,7 @@ const HS: &str = "text/x-haskell";
 /// per effect, and one per stdlib module found on disk.
 pub fn list(ctx: &ResourceCtx) -> Vec<ResourceDescriptor> {
     let mut out = vec![
-        descriptor("tidepool://guide", "Eval guide", "How to write eval `code`: the M-a model, composition, returning JSON, the input payload lane, examples, and failure isolation."),
+        descriptor("tidepool://guide", "Eval guide", "How to write eval `code`: the M-a model, composition, returning JSON, the `input` JSON parameter, examples, and failure isolation."),
         descriptor("tidepool://schema", "Schema + ask/llm", "The structured-output Schema grammar and the ask/llm primitives; how to extract results with optics."),
         descriptor("tidepool://edits", "Edit verb schema", "The declarative line/anchor `Edit` JSON schema (applyEdits/editsJ) and its conflict vocabulary."),
         descriptor("tidepool://vocab", "Vocabulary", "Live signatures of every verb in scope — core effect verbs + project library (.tidepool/lib), refreshed on read."),
@@ -269,7 +269,7 @@ fn help_index(ctx: &ResourceCtx) -> String {
     let modules = stdlib_modules(ctx);
     let mut s = String::from(
         "# help topics\n\nCall `help` with one of:\n\
-         - `guide`     — how to write eval code (the M-a model, returning JSON, the input lane)\n\
+         - `guide`     — how to write eval code (the M-a model, returning JSON, the `input` parameter)\n\
          - `schema`    — the Schema grammar + ask/llm\n\
          - `edits`     — editing verbs (update, planUpdate, the Edit DSL, diffs)\n\
          - `vocab`     — every verb signature in scope (effects + project library)\n\
@@ -302,7 +302,7 @@ fn guide_md(ctx: &ResourceCtx) -> String {
         "carry human-readable debug traces, and `pure x` returns a value directly. Extract from a `Value` with ",
         "optics: `v ^? key \"f\" . _String` (also `_Int`, `_Double`, `_Bool`, `_Array`); ",
         "`renderJson :: Value -> Text` renders one to compact JSON.\n\n",
-        "## The input payload lane\n",
+        "## The `input` parameter\n",
         "Pass large or quote-heavy content (file bodies, generated source, config) as a real JSON value in ",
         "`input` — the eval reads it via the `input` binding, so `code` stays a short verb. Decode it ",
         "into a typed record and the whole payload is available by field:\n",
@@ -412,7 +412,7 @@ fn edits_md() -> String {
         "update      :: FilePath -> Text -> Text -> M UpdateOneOutcome  -- applies the one unique `old` → `new` match; {ok} | {ok:false,reason,matches?}\n",
         "updateAll   :: FilePath -> Text -> Text -> M UpdateAllOutcome  -- replace every occurrence; {ok,count} | {ok:false,reason}\n",
         "planUpdate  :: FilePath -> Text -> Text -> M UpdateOutcome     -- dry-run: {changed,diff} | {ok:false,reason,matches?}; writes nothing\n",
-        "updateJ     :: Value -> M UpdateOneOutcome                     -- input lane: {file, old, new} for big/quote-heavy fragments\n",
+        "updateJ     :: Value -> M UpdateOneOutcome                     -- via `input`: {file, old, new} for big/quote-heavy fragments\n",
         "insertAfter :: FilePath -> Text -> Text -> M InsertAfterOutcome -- insert a block after the unique anchor line; {ok} | {ok:false,reason,matches?}\n",
         "```\n",
         "`update` applies the single unique occurrence of `old`; `planUpdate` returns the diff as data ",
@@ -427,7 +427,7 @@ fn edits_md() -> String {
         "and you want several edits applied atomically. Lowers to a context-anchored patch; conflicts as DATA.\n",
         "```haskell\n",
         "applyEdits :: Text -> [Edit] -> M Value   -- atomic; planEdits for a dry-run diff\n",
-        "editsJ     :: Value -> M Value            -- input lane: { file, edits:[{op,...}] }\n",
+        "editsJ     :: Value -> M Value            -- via `input`: { file, edits:[{op,...}] }\n",
         "-- Edit = ReplaceLines lo hi [Text] | InsertAt n [Text] | ReplaceAnchor a [Text]\n",
         "--      | InsertAfterAnchor a [Text] | InsertBeforeAnchor a [Text]   (line numbers 1-based)\n",
         "```\n",
@@ -437,7 +437,7 @@ fn edits_md() -> String {
         "## 3. Unified diffs — when you ALREADY have a patch (project library)\n",
         "`applyDiff :: Text -> M Value` / `planDiff` apply a real unified diff (context-is-truth, atomic, ",
         "conflicts as data). The `[patch|...|]` quasiquoter builds one inline, but quoted bodies must be ",
-        "LEFT-ALIGNED and can't contain `|]` — so ride the `input` lane for any non-trivial diff: ",
+        "LEFT-ALIGNED and can't contain `|]` — so use the `input` parameter for any non-trivial diff: ",
         "`applyDiff (case input of { String s -> s; _ -> \"\" })`. `genPatchTo path newContent` generates the diff for you.\n\n",
         "## 4. Semantic (LSP) — rename across scopes\n",
         "When you need to rename the real symbol across scopes (not a text match that also hits ",
@@ -537,8 +537,8 @@ pub(crate) const QUALIFIED_NAMES: &[(&str, &str)] = &[
     ("readsPrec", "`read` is in the shadow; `parseIntM`/`parseDoubleM` are the Text-first parsers"),
     // IO console/stdin — modelled as effects.
     ("print", "console output is an effect — `say`/`putStrLn :: Text -> M ()` (Console)"),
-    ("getLine", "stdin arrives on the `input` payload lane; `ask` suspends for a caller reply"),
-    ("interact", "read stdin from the `input` payload lane; write via the Console verbs"),
+    ("getLine", "stdin arrives via the `input` JSON parameter; `ask` suspends for a caller reply"),
+    ("interact", "read stdin from the `input` JSON parameter; write via the Console verbs"),
     // Numeric — reach base under `P.`.
     ("gcd", "`P.gcd` (base, polymorphic over Integral)"),
     ("lcm", "`P.lcm` (base, polymorphic over Integral)"),
@@ -818,7 +818,7 @@ mod tests {
         );
         assert!(
             md.contains("Right hits <- grepGlob target \"**/*.rs\""),
-            "the input-lane example must bind grepGlob's Right:\n{md}"
+            "the `input`-parameter example must bind grepGlob's Right:\n{md}"
         );
         assert!(
             md.contains("Right src <- readFile"),

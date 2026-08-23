@@ -108,7 +108,7 @@ data Ask a where
   AskWith :: Text -> Value -> Ask Value
 
 data ContextRef = ContextRef Text deriving (Show, Eq)
--- | Why a forked cognition window ended WITHOUT a typed answer.
+-- | Why a forked child agent session ended WITHOUT a typed answer.
 -- Folded as data at the failing branch's own position (PRD 21
 -- locked decision 6) — never an exception that erases the results
 -- its siblings already produced. Each constructor carries the
@@ -286,7 +286,7 @@ planUpdate path old new = do
          else case Patch.genPatch path src (replace old new src) of
                 Left _ -> pure UpdateNoChange
                 Right fp -> pure (UpdateDiff (Patch.renderPatch [fp]))
--- | `update` from the input lane: {file, old, new} (for big/quote-heavy
+-- | `update` from the `input` JSON parameter: {file, old, new} (for big/quote-heavy
 -- fragments). Reports the outcome as an `UpdateOneOutcome` DATA value (never
 -- throws, same contract as `update`): a malformed payload (missing or
 -- non-string file/old/new key) is `UpdateOneRejected` — one bad item never
@@ -472,14 +472,14 @@ runLLMTurnForkSited sid p = unsafeCoerce <$> send (RunLLMTurnWith p (object ["ty
 {-# OPAQUE runLLMTurnFanoutSited #-}
 runLLMTurnFanoutSited :: forall a effs. Member RunLLMTurn effs => Int -> [Text] -> Eff effs [Either InvocationExit a]
 runLLMTurnFanoutSited sid prompts = unsafeCoerce <$> send (RunLLMTurnWith (intercalate "\n" prompts) (object ["typedSite" .= sid, "fork" .= True, "fan" .= length prompts, "prompts" .= prompts]))
--- | Mint a capability naming THIS window's current frozen
+-- | Mint a capability naming THIS session's current frozen
 -- prefix (PRD 21 locked decision 2: children fork the frozen
 -- post-coalgebra context). Immediate — no operator, no model
--- round (ReadState's service shape). Possession is permission:
--- a ContextRef only ever comes from here or from
--- runLLMTurnBranch's own return; an unrecognized one is refused
--- by the driver as a typed error, never a silent fresh-root
--- fallback.
+-- round (ReadState's service shape). ContextRef is an
+-- unforgeable capability issued by the runtime: a ContextRef
+-- only ever comes from here or from runLLMTurnBranch's own
+-- return; an unrecognized one is refused by the driver as a
+-- typed error, never a silent fresh-root fallback.
 freezeContext :: forall effs. Member RunLLMTurn effs => Eff effs ContextRef
 freezeContext = send RunLLMTurnFreezeWith
 {-# OPAQUE runLLMTurnBranch #-}

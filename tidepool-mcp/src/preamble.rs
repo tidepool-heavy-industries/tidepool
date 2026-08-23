@@ -780,8 +780,8 @@ pub(crate) fn build_eval_tool_description(effects: &[EffectDecl]) -> String {
         "`send (Print (show x))`. Extract from a ",
         "`Value` with optics: `v ^? key \"f\" . _String` (also `_Int`, `_Double`, ",
         "`_Bool`, `_Array`); `renderJson :: Value -> Text` renders one to compact JSON.\n",
-        "The `input` param is the PAYLOAD LANE: pass large or quote-heavy ",
-        "content (file bodies, generated source, config) as a real JSON value there \u{2014} ",
+        "Pass large or quote-heavy content (file bodies, generated source, config) ",
+        "as a real JSON value in the `input` param \u{2014} ",
         "the eval reads it via the `input` binding, so `code` stays a short verb. ",
         "Decode it into a typed record and the payload is available by field:\n",
         "  data Cfg = Cfg { target :: Text, limit :: Int } deriving (Generic, FromJSON)\n",
@@ -844,7 +844,7 @@ pub(crate) fn build_eval_tool_description(effects: &[EffectDecl]) -> String {
 
         desc.push_str(concat!(
             "\nResources — this description is a FLOOR; pull the depth on demand via resources/read:\n",
-            "  tidepool://guide           full guide: returning JSON, the input lane, pagination, examples, failure isolation\n",
+            "  tidepool://guide           full guide: returning JSON, the `input` parameter, pagination, examples, failure isolation\n",
             "  tidepool://effect/{name}   per-effect constructors, types, and helper signatures\n",
             "  tidepool://schema          the Schema grammar + ask/llm in full\n",
             "  tidepool://edits           the declarative Edit verb JSON schema\n",

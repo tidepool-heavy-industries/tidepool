@@ -987,20 +987,21 @@ macro_rules! readstate_effect_def {
             decl_fn readstate_decl,
             prompt_card [
                 "`getStateJson :: M Value` — the loop's durable State as JSON, ",
-                "immediately (no operator, no model round), as of this window's START ",
-                "(this window's edit and any operator message being ingested are not in ",
-                "it yet). Query with optics (`v ^? key \"memories\" . _Array`) or decode ",
-                "the typed spine: `Aeson.fromJSON v :: Aeson.Result State`.",
+                "immediately (no operator, no model round), as of this loop iteration's ",
+                "START (this iteration's edit and any operator message being ingested ",
+                "are not in it yet). Query with optics (`v ^? key \"memories\" . _Array`) ",
+                "or decode it as `State`: `Aeson.fromJSON v :: Aeson.Result State`.",
             ],
             helpers_row_polymorphic true,
             description [
-                "Read the loop's durable State — the same value the framing renders a ",
-                "SELECTION of — as JSON, immediately. `getStateJson :: M Value` returns ",
-                "the state as of this cognition window's start; the current window's ",
-                "edit (and any operator message being ingested this window) are not yet ",
-                "in it. Use optics for ad-hoc queries, or decode the typed spine with ",
-                "`Aeson.fromJSON` and compute over memories, threads, and scratch with ",
-                "ordinary Haskell — filter the archive, search, count, join.",
+                "Read the loop's durable State — the same value your system instructions ",
+                "render a SELECTION of — as JSON, immediately. `getStateJson :: M Value` ",
+                "returns the state as of this loop iteration's start; the current ",
+                "iteration's edit (and any operator message being ingested this ",
+                "iteration) are not yet in it. Use optics for ad-hoc queries, or decode ",
+                "it as `State` with `Aeson.fromJSON` and compute over memories, threads, ",
+                "and scratch with ordinary Haskell — filter the archive, search, count, ",
+                "join.",
             ],
             type_defs [],
             verbs [
@@ -1038,16 +1039,17 @@ macro_rules! readstate_effect_def {
 /// `runLLMTurn @T :: Text -> M T` KEEPS its bare answer. That asymmetry is a
 /// real distinction, not an oversight:
 ///
-/// - A fork/fanout child is a BRANCH POSITION. Its window is a separate node
-///   with siblings, and PRD 21 locked decision 6 requires an abnormal exit
-///   there to fold as DATA at that position — an exception would erase every
-///   sibling's already-finished result. The caller folding a failure at the
-///   branch position IS the design, so the TYPE hands it to them.
+/// - A fork/fanout child is a BRANCH POSITION. Its agent session is a
+///   separate node with siblings, and PRD 21 locked decision 6 requires an
+///   abnormal exit there to fold as DATA at that position — an exception
+///   would erase every sibling's already-finished result. The caller folding
+///   a failure at the branch position IS the design, so the TYPE hands it to
+///   them.
 /// - `runLLMTurn @T` is answered IN CONTEXT by the same node, on the outer
-///   turn's own continuation. It has no siblings to erase and no branch
-///   position to fold at: its failure IS the outer turn's failure. Wrapping it
-///   would make every in-context call site unwrap an `Either` whose `Left`
-///   means "the turn you are in has already failed".
+///   session's own continuation. It has no siblings to erase and no branch
+///   position to fold at: its failure IS the outer session's failure.
+///   Wrapping it would make every in-context call site unwrap an `Either`
+///   whose `Left` means "the session you are in has already failed".
 ///
 /// This is the codebase's ordinary typed-failure idiom (`run :: Text -> M
 /// (Either ExecError Proc)`, `llm :: … -> M (Either LlmError Value)`, #335):
@@ -1073,36 +1075,36 @@ macro_rules! runllmturn_effect_def {
             helpers_row_polymorphic true,
             description [
                 "Suspend for a TYPED answer. `runLLMTurn \\@T prompt :: M T` — the same ",
-                "calling model answers IN CONTEXT; its failure is this turn's failure, so ",
-                "the answer is bare. `runLLMTurnFork \\@T prompt :: M (Either ",
-                "InvocationExit T)` — a forked sub-agent answers in its own window; ",
-                "`runLLMTurnFanout \\@T prompts :: M [Either InvocationExit T]` — N forked ",
-                "sub-agents, one per prompt, one result per prompt IN DECLARED ORDER. A ",
-                "forked window is a BRANCH POSITION, so its abnormal exit (round ",
-                "exhaustion, non-finalization, cancellation, runtime failure) arrives as ",
-                "`Left exit` at that position instead of killing its siblings — natural ",
-                "spelling `Right x <- runLLMTurnFork \\@T p`, or `renderInvocationExit e` ",
-                "to display one. GHC validates each answer against `T` before it resumes ",
-                "the continuation (an ill-typed answer never consumes it). ",
-                "`freezeContext :: M ContextRef` mints a capability naming THIS window's ",
+                "calling model answers IN CONTEXT; its failure is this session's failure, ",
+                "so the answer is bare. `runLLMTurnFork \\@T prompt :: M (Either ",
+                "InvocationExit T)` — a forked sub-agent answers in its own child agent ",
+                "session; `runLLMTurnFanout \\@T prompts :: M [Either InvocationExit T]` — ",
+                "N forked sub-agents, one per prompt, one result per prompt IN DECLARED ",
+                "ORDER. Each forked child's abnormal exit (round exhaustion, ",
+                "non-finalization, cancellation, runtime failure) arrives as `Left exit` ",
+                "instead of killing its siblings — natural spelling ",
+                "`Right x <- runLLMTurnFork \\@T p`, or `renderInvocationExit e` to display ",
+                "one. GHC validates each answer against `T` before it resumes the ",
+                "continuation (an ill-typed answer never consumes it). ",
+                "`freezeContext :: M ContextRef` mints a capability naming THIS session's ",
                 "current frozen prefix, immediately (no operator, no model round). ",
                 "`runLLMTurnBranch \\@T ref prompt :: M (Either InvocationExit (T, ",
-                "ContextRef))` forks a FRESH child window off that frozen prefix (never an ",
-                "empty root) — `Right (answer, ref')` is the child's own answer plus a ref ",
-                "to ITS post-finalize context for branching further; a branch child is a ",
-                "BRANCH POSITION too, so its abnormal exit is a `Left` here as well (and a ",
-                "window that never finalized has no context to hand back, which is why the ",
-                "`Either` wraps the whole pair). `runLLMTurnBranchLabeled \\@T label ref ",
-                "prompt` is the same verb with a caller-chosen `label` Text stamped onto the ",
-                "child window, for routing its asks to a per-window operator surface. ",
+                "ContextRef))` forks a FRESH child agent session off that frozen prefix ",
+                "(never an empty root) — `Right (answer, ref')` is the child's own answer ",
+                "plus a ref to ITS post-finalize context for branching further; a branch ",
+                "child's abnormal exit is also a `Left` here (and a session that never ",
+                "finalized has no context to hand back, which is why the `Either` wraps ",
+                "the whole pair). `runLLMTurnBranchLabeled \\@T label ref prompt` is the ",
+                "same verb with a caller-chosen `label` Text stamped onto the child ",
+                "session, for routing its asks to a per-session operator surface. ",
                 "`runLLMTurnBranchFanout \\@T ref labeledPrompts :: M [Either InvocationExit ",
                 "(T, ContextRef)]` is the BULK sibling verb: every `(label, prompt)` pair ",
-                "forks its OWN child window off the SAME frozen `ref` (never a rendered ",
-                "ancestry line), driven CONCURRENTLY (the fanout machinery, not one at a ",
-                "time), with results returned in DECLARED order regardless of completion ",
-                "order — for a layer of independent siblings that should never be scheduled ",
-                "sequentially. In every verb above, `T` may be any type in scope, ",
-                "including one you declared yourself earlier this session.",
+                "forks its OWN child agent session off the SAME frozen `ref` (never a ",
+                "rendered ancestry line), driven CONCURRENTLY (the fanout machinery, not ",
+                "one at a time), with results returned in DECLARED order regardless of ",
+                "completion order — for a layer of independent siblings that should never ",
+                "be scheduled sequentially. In every verb above, `T` may be any type in ",
+                "scope, including one you declared yourself earlier this session.",
             ],
             // PRD 21 locked decision 6's typed exit, generated here alongside
             // the GADT exactly as ExecError/FsError are (they come from the
@@ -1114,7 +1116,7 @@ macro_rules! runllmturn_effect_def {
             // DataConTable is a hard error there, never a defaulted value.
             type_defs [
                 "data ContextRef = ContextRef Text deriving (Show, Eq)",
-                "-- | Why a forked cognition window ended WITHOUT a typed answer.\n\
+                "-- | Why a forked child agent session ended WITHOUT a typed answer.\n\
                  -- Folded as data at the failing branch's own position (PRD 21\n\
                  -- locked decision 6) — never an exception that erases the results\n\
                  -- its siblings already produced. Each constructor carries the\n\
@@ -1253,14 +1255,14 @@ macro_rules! runllmturn_effect_def {
                 // same reason `getStateJson`/`ReadStateWith` need none: an
                 // ordinary `send` on an interposed effect suspends regardless of
                 // site-numbering.
-                { raw ["-- | Mint a capability naming THIS window's current frozen",
+                { raw ["-- | Mint a capability naming THIS session's current frozen",
                        "-- prefix (PRD 21 locked decision 2: children fork the frozen",
                        "-- post-coalgebra context). Immediate — no operator, no model",
-                       "-- round (ReadState's service shape). Possession is permission:",
-                       "-- a ContextRef only ever comes from here or from",
-                       "-- runLLMTurnBranch's own return; an unrecognized one is refused",
-                       "-- by the driver as a typed error, never a silent fresh-root",
-                       "-- fallback.",
+                       "-- round (ReadState's service shape). ContextRef is an",
+                       "-- unforgeable capability issued by the runtime: a ContextRef",
+                       "-- only ever comes from here or from runLLMTurnBranch's own",
+                       "-- return; an unrecognized one is refused by the driver as a",
+                       "-- typed error, never a silent fresh-root fallback.",
                        "freezeContext :: forall effs. Member RunLLMTurn effs => Eff effs ContextRef",
                        "freezeContext = send RunLLMTurnFreezeWith"] },
                 // `runLLMTurnBranch` IS sited (its `\@T` is model/site-chosen,
@@ -1275,11 +1277,11 @@ macro_rules! runllmturn_effect_def {
                 // A branch child IS a branch position (PRD 21 decision 6), so
                 // it answers an `Either` like fork/fanout. The `Either` wraps
                 // the WHOLE pair — `Either InvocationExit (a, ContextRef)`,
-                // not `(Either InvocationExit a, ContextRef)`: a window that
+                // not `(Either InvocationExit a, ContextRef)`: a session that
                 // never finalized has no post-finalize context, so a
                 // `ContextRef` beside a failure would be a capability with
                 // nothing behind it. `freezeContext` stays bare — it is not a
-                // window (no model round, resolves immediately), so it has no
+                // session (no model round, resolves immediately), so it has no
                 // exit to report.
                 { raw ["{-# OPAQUE runLLMTurnBranch #-}",
                        "runLLMTurnBranch :: forall a effs. Member RunLLMTurn effs => ContextRef -> Text -> Eff effs (Either InvocationExit (a, ContextRef))",
@@ -1309,16 +1311,17 @@ macro_rules! runllmturn_effect_def {
                 // `ContextRef`, each its own `(label, prompt)`, driven
                 // CONCURRENTLY via the same machinery as `runLLMTurnFanout`
                 // (`tidepool_harness::selfharness::driver::
-                // service_outer_branch_fanout` — per-child realm,
-                // `set_concurrency_cap`, declaration-order reassembly) rather
-                // than `runLLMTurnBranch`'s sequential one-at-a-time driving.
-                // Rides the SAME `RunLLMTurnWith` wire constructor with a
+                // service_outer_branch_fanout` — per-child runtime resource
+                // scope, `set_concurrency_cap`, declaration-order
+                // reassembly) rather than `runLLMTurnBranch`'s sequential
+                // one-at-a-time driving. Rides the SAME `RunLLMTurnWith`
+                // wire constructor with a
                 // `branchFanout`/`ref`/`labels`/`prompts`/`fan` payload flag
                 // (classified by `tidepool-harness::engine::classify_hole`)
                 // rather than a new GADT constructor — the same "one
                 // constructor, several payload shapes" discipline
-                // fork/fanout/branch already use. Each sibling window is a
-                // BRANCH POSITION exactly like `runLLMTurnBranch`'s (PRD 21
+                // fork/fanout/branch already use. Each sibling agent session
+                // is a BRANCH POSITION exactly like `runLLMTurnBranch`'s (PRD 21
                 // locked decision 6): its own abnormal exit folds as `Left`
                 // at its own position in the returned list, never erasing a
                 // sibling's already-finished answer — scheduling is an
@@ -1447,7 +1450,7 @@ macro_rules! finalize_effect_def {
 
 /// Fork effect — single definition (answerer parallel-delegation surface).
 ///
-/// The context-window fork as its own effect, distinct from `RunLLMTurn`:
+/// The child-agent-session fork as its own effect, distinct from `RunLLMTurn`:
 /// `runLLMTurn` is suspend-and-resume (an open turn the answerer holds); a
 /// fork is spawn-and-gather (a bounded fan-out with a join). Two constructors,
 /// each carrying its extract-substituted site id and the child brief(s):
@@ -1920,7 +1923,7 @@ macro_rules! fs_effect_def {
                 { raw ["-- | Exact str-replace, EXACTLY-ONCE. Reports the outcome as an\n-- `UpdateOneOutcome` DATA value (never throws, mirrors `InsertAfterOutcome`):\n-- empty `old`, a missing file, `old` not found, or `old` matching 2+ places\n-- is `UpdateOneRejected` (nothing written); otherwise `UpdateOneApplied`.\n-- Pass enough surrounding text that `old` is unique. Use planUpdate to review\n-- the diff first; the full editing surface is in tidepool://edits.\nupdate :: forall effs. Member Fs effs => FilePath -> Text -> Text -> Eff effs UpdateOneOutcome\nupdate path old new\n  | T.null old = pure (UpdateOneRejected \"'old' must be non-empty\" Nothing)\n  | otherwise = do\n      er <- readFile path\n      case er of\n        Left e -> pure (UpdateOneRejected (\"file not found: \" <> show e) Nothing)\n        Right src ->\n          case length (T.splitOn old src) - 1 of\n            0 -> pure (UpdateOneRejected (\"'old' not found in \" <> path) Nothing)\n            1 -> writeFile path (replace old new src) >>= liftEither >> pure UpdateOneApplied\n            n -> pure (UpdateOneRejected (\"'old' matches \" <> show n <> \" places in \" <> path <> \" (add surrounding context to disambiguate)\") (Just n))"] },
                 { raw ["-- | Replace EVERY occurrence of `old` with `new`. Reports the outcome as an\n-- `UpdateAllOutcome` DATA value (never throws): empty `old`, a missing file,\n-- or zero matches is `UpdateAllRejected` (nothing written); otherwise\n-- `UpdateAllApplied` carries the replacement count.\nupdateAll :: forall effs. Member Fs effs => FilePath -> Text -> Text -> Eff effs UpdateAllOutcome\nupdateAll path old new\n  | T.null old = pure (UpdateAllRejected \"'old' must be non-empty\")\n  | otherwise = do\n      er <- readFile path\n      case er of\n        Left e -> pure (UpdateAllRejected (\"file not found: \" <> show e))\n        Right src ->\n          let n = length (T.splitOn old src) - 1\n          in if n == 0\n               then pure (UpdateAllRejected (\"'old' not found in \" <> path))\n               else writeFile path (replace old new src) >>= liftEither >> pure (UpdateAllApplied n)"] },
                 { raw ["-- | Dry-run `update`: returns an `UpdateOutcome` (the review diff, or the\n-- reason it can't apply), writes NOTHING. Never errors — the conflict comes\n-- back as data so you can branch before committing.\nplanUpdate :: forall effs. Member Fs effs => FilePath -> Text -> Text -> Eff effs UpdateOutcome\nplanUpdate path old new = do\n  er <- readFile path\n  case er of\n    Left e -> pure (UpdateRejected (\"file not found: \" <> show e) Nothing)\n    Right src ->\n      let n = if T.null old then 0 else length (T.splitOn old src) - 1\n      in if T.null old then pure (UpdateRejected \"'old' must be non-empty\" Nothing)\n         else if n == 0 then pure (UpdateRejected \"not found\" Nothing)\n         else if n > 1 then pure (UpdateRejected \"ambiguous\" (Just n))\n         else case Patch.genPatch path src (replace old new src) of\n                Left _ -> pure UpdateNoChange\n                Right fp -> pure (UpdateDiff (Patch.renderPatch [fp]))"] },
-                { raw ["-- | `update` from the input lane: {file, old, new} (for big/quote-heavy\n-- fragments). Reports the outcome as an `UpdateOneOutcome` DATA value (never\n-- throws, same contract as `update`): a malformed payload (missing or\n-- non-string file/old/new key) is `UpdateOneRejected` — one bad item never\n-- aborts a batch.\nupdateJ :: forall effs. Member Fs effs => Value -> Eff effs UpdateOneOutcome\nupdateJ v = case (v ^? key \"file\" . _String, v ^? key \"old\" . _String, v ^? key \"new\" . _String) of\n  (Just f, Just o, Just n) -> update f o n\n  _ -> pure (UpdateOneRejected \"updateJ: need {file, old, new} strings in input\" Nothing)"] },
+                { raw ["-- | `update` from the `input` JSON parameter: {file, old, new} (for big/quote-heavy\n-- fragments). Reports the outcome as an `UpdateOneOutcome` DATA value (never\n-- throws, same contract as `update`): a malformed payload (missing or\n-- non-string file/old/new key) is `UpdateOneRejected` — one bad item never\n-- aborts a batch.\nupdateJ :: forall effs. Member Fs effs => Value -> Eff effs UpdateOneOutcome\nupdateJ v = case (v ^? key \"file\" . _String, v ^? key \"old\" . _String, v ^? key \"new\" . _String) of\n  (Just f, Just o, Just n) -> update f o n\n  _ -> pure (UpdateOneRejected \"updateJ: need {file, old, new} strings in input\" Nothing)"] },
                 { raw ["-- | Insert a block after the unique line containing `anchor`. Reports the\n-- outcome as an `InsertAfterOutcome` DATA value (never throws): a missing\n-- file, or an anchor matching zero or 2+ lines, is `InsertAfterRejected`\n-- (nothing written); otherwise `InsertAfterApplied`.\ninsertAfter :: forall effs. Member Fs effs => FilePath -> Text -> Text -> Eff effs InsertAfterOutcome\ninsertAfter path anchor block = do\n  er <- readFile path\n  case er of\n    Left e -> pure (InsertAfterRejected (\"file not found: \" <> show e) Nothing)\n    Right src ->\n      let ls = lines src\n          n = length (filter (isInfixOf anchor) ls)\n      in case n of\n           1 -> writeFile path (unlines (concatMap (\\l -> if anchor `isInfixOf` l then [l, block] else [l]) ls))\n                  >>= liftEither >> pure InsertAfterApplied\n           _ -> pure (InsertAfterRejected (\"anchor matched \" <> show n <> \" lines in \" <> path) (Just n))"] },
                 { raw ["-- | Compute-check-commit: write only if every named check holds; failures\n-- come back as a `WriteOutcome` (nothing written on failure).\nwriteChecked :: forall effs. Member Fs effs => FilePath -> [(Text, Bool)] -> Text -> Eff effs WriteOutcome\nwriteChecked path checks content = do\n  let failed = [name | (name, ok) <- checks, not ok]\n  if null failed\n    then writeFile path content >>= liftEither >> pure (Written path (length checks))\n    else pure (WriteBlocked path failed)"] },
                 { raw ["-- | Blake3 content hash (hex) of a file, or Nothing if it does not exist.\n-- The compare-and-swap token for writeCheckedIf: read it, compute your new\n-- content, then write back only if the file still hashes the same.\nfileHash :: forall effs. Member Fs effs => FilePath -> Eff effs (Maybe Text)\nfileHash p = send (FsHash p) >>= liftEither"] },
@@ -1973,18 +1976,18 @@ macro_rules! subagent_effect_def {
             decl_fn subagent_decl,
             helpers_row_polymorphic true,
             description [
-                "Typed headless subagents (LANE 1: one-cycle coupled spawn). ",
+                "Typed headless subagents: one-cycle coupled spawn. ",
                 "`spawnAgentRaw spec schema` is ONE atomic call: it allocates or takes a ",
                 "managed worktree, binds it to a fresh agent, dispatches the task to the ",
                 "coding backend, runs ONE work cycle in that worktree, and returns a ",
                 "`SpawnOutcome` (the WorkerRun pair, the terminal payload, and a receipt ",
                 "naming the worktree, binding, backend thread, and EXACT resolved model) ",
-                "— or a case-matchable `SpawnError` naming the saga stage that failed, ",
+                "— or a case-matchable `SpawnError` naming the stage that failed, ",
                 "with the rollback already done: no binding is left active, and a created ",
                 "worktree is retained and rebindable, never deleted. Build the spec with ",
                 "`spawnSpec` (new worktree) or `spawnSpecIn` (existing unbound worktree). ",
-                "`agentBeginRaw`/`agentResumeRaw` are the same saga driven one STOP at a ",
-                "time, for an agent that holds dynamic tools: begin returns either a ",
+                "`agentBeginRaw`/`agentResumeRaw` are the same call sequence driven one ",
+                "STOP at a time, for an agent that holds dynamic tools: begin returns either a ",
                 "parked `StepToolCall` (the child called one of your tools; its turn is ",
                 "stopped until you answer) or a `StepDone`, and resume answers the parked ",
                 "call and drives on. Prefer the typed `spawnAgentWithTools`, which runs ",
@@ -1999,7 +2002,7 @@ macro_rules! subagent_effect_def {
                 "A payload that does not decode is `SpawnResultMalformed`, never a success with ",
                 "a defaulted field. `spawnAgentWithTools @tools @r rounds tools spec` is the ",
                 "same call for a child that may CALL BACK into your own Haskell handlers.\n",
-                "CONCURRENT: `spawnAsync @r spec` is the same saga detached — it returns an ",
+                "CONCURRENT: `spawnAsync @r spec` is the same call detached — it returns an ",
                 "abstract `AgentHandle r` as soon as the cycle is admitted, `awaitAgent h` ",
                 "blocks for that one cycle's `(outcome, r)`, and `cancelAgent h` reaps it ",
                 "(total: cancelling a finished or unknown handle is a no-op, and settles the ",
@@ -2155,7 +2158,7 @@ macro_rules! subagent_effect_def {
                        "agentSpawnAsyncRaw spec schema = send (SubagentSpawnAsync spec schema)"] },
                 { raw substrate ["-- | RAW await: BLOCK until the named cycle finishes, and return the same",
                        "-- `Either SpawnError SpawnOutcome` the synchronous `spawnAgentRaw`",
-                       "-- returns — the async path is the same saga, reaped later. Awaiting a",
+                       "-- returns — the async path is the same call, reaped later. Awaiting a",
                        "-- cycle this handler never minted (or one already reaped) is a",
                        "-- `SpawnDriveFailed` at `StageRunning`: a caller-sequencing failure,",
                        "-- not a backend one. Prefer the typed wrapper `awaitAgent` in",
@@ -2226,8 +2229,8 @@ macro_rules! green_effect_def {
                 "blocked on different effects progress independently and several ",
                 "holes are pending at once. Scheduling is cooperative — a thread runs ",
                 "until it performs an effect, then parks, and the driver resumes ",
-                "whichever pending hole is ready. `cancel` closes the thread\'s realm, ",
-                "which discards its pending suspensions. The verbs here are ",
+                "whichever pending hole is ready. `cancel` closes the thread\'s runtime ",
+                "resource scope, which discards its pending suspensions. The verbs here are ",
                 "substrate; authors call `Tidepool.Async`, not these.",
             ],
             type_defs [
@@ -2304,7 +2307,7 @@ macro_rules! green_effect_def {
                        "-- not settled is not defined.",
                        "asyncResult :: forall a effs. Member Green effs => Int -> Eff effs a",
                        "asyncResult = send . AsyncResultWith"] },
-                { raw substrate ["-- | Cancel a thread: its realm closes, discarding its pending",
+                { raw substrate ["-- | Cancel a thread: its runtime resource scope closes, discarding its pending",
                        "-- suspensions. Idempotent, and a no-op on a terminal thread.",
                        "asyncCancel :: forall effs. Member Green effs => Int -> Eff effs ()",
                        "asyncCancel = send . AsyncCancelWith"] },

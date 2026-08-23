@@ -219,7 +219,7 @@ impl TidepoolMcpServerImpl {
             self.include.clone()
         };
 
-        // Per-eval timeout knob: default to the server window, but let callers
+        // Per-eval timeout knob: default to the server's timeout interval, but let callers
         // extend it (clamped) for deliberately heavy dev evals like `cargo check`.
         let timeout_secs = resolve_eval_timeout_secs(req.timeout_secs);
 
@@ -361,7 +361,8 @@ impl TidepoolMcpServerImpl {
                     "note": format!(
                         "Paused after {}s at an effect boundary (no compute happens \
                          while paused). Call resume with this continuation_id to run \
-                         another window (response payload ignored), or abort to kill it.",
+                         for another timeout interval (response payload ignored), or \
+                         abort to kill it.",
                         timeout_secs
                     ),
                 });
@@ -627,10 +628,10 @@ impl ServerHandler for TidepoolMcpServerImpl {
                  accept raw text). A response that fails validation does NOT consume the \
                  continuation: the violations are returned and you can call resume again \
                  with the same continuation_id. If you cannot answer, call abort instead. \
-                 If the suspension says \"paused\": true, the eval ran out of its time \
-                 window and is parked at an effect boundary (no compute happens while \
-                 paused): resume runs it another window (response ignored, may be \
-                 omitted); abort kills it.",
+                 If the suspension says \"paused\": true, the eval ran out of its \
+                 timeout interval and is parked at an effect boundary (no compute \
+                 happens while paused): resume runs it for another timeout interval \
+                 (response ignored, may be omitted); abort kills it.",
                 crate::server_common::schema_to_map(schemars::schema_for!(ResumeRequest))
                     .map_err(|e| McpError::internal_error(e, None))?,
             ),
