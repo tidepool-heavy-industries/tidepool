@@ -157,6 +157,65 @@ async fn async_fork_composition_two_children_typed_results_cross() {
     );
 }
 
+/// MULTI-WAVE: fork, fold, fork again within ONE block — wave 2's brief is
+/// COMPUTED from wave 1's results (`a + b = 3` folded in ordinary Haskell,
+/// spliced into the second wave's brief text), and the final answer carries
+/// wave 2's result. This is the property that would silently break if
+/// scheduler state ever confused join generations: the wave-2 child's brief
+/// must contain wave 1's ACTUAL folded value, proving the dataflow crosses
+/// waves, not just that three children ran. (The brief-content route is
+/// unobservable here — fork-child hole cards ride the forked-transcript
+/// path, not the TurnDelta stream — so the proof is arithmetic: the final
+/// action `show (c + s)` reads 13 only if wave 1's fold reached the code
+/// after wave 2.)
+// Same single-line-literal discipline as ASYNC_FORK_BLOCK (see its note).
+const TWO_WAVE_BLOCK: &str = "```haskell\nimport HarnessTypes (Decision (..), Confidence (..))\nimport Tidepool.Fork (fork)\n\ndo\n  ha <- async (fork @Int \"pick a\")\n  hb <- async (fork @Int \"pick b\")\n  a <- wait ha\n  b <- wait hb\n  let s = a + b\n  hc <- async (fork @Int (\"wave two, given \" <> show s))\n  c <- wait hc\n  (finalize @Decision (Decision { action = show (c + s), rationale = \"two waves\", confidence = Medium }) :: M ())\n```";
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn two_waves_of_fork_fold_fork_carry_results_across_waves() {
+    support::require_extract();
+    let _cache_guard = support::isolate_cache();
+
+    let replies = vec![
+        // 1. The two-wave block.
+        reply(TWO_WAVE_BLOCK),
+        // 2-3. Wave 1's children, in spawn order.
+        resume_reply("(1 :: Int)"),
+        resume_reply("(2 :: Int)"),
+        // 4. Wave 2's one child: a STATIC 10 — the final "13" is only
+        //    reachable through the parent's own `c + s`, so it proves the
+        //    wave-1 fold (s = 3) survived into the code after wave 2.
+        resume_reply("(10 :: Int)"),
+    ];
+    let (mut driver, _agent, log_path) = build_driver(replies, "answerer-async-waves");
+    let source = load_harness_source(&examples_harness_dir().join("Harness.hs"))
+        .expect("reference harness source loads");
+
+    let outcome = driver
+        .run_one_cycle(&source, None)
+        .await
+        .expect("two waves of fork/fold/fork complete in one window");
+
+    let state = &outcome.state_json;
+    let decision = state
+        .get("lastDecision")
+        .and_then(|v| v.as_object())
+        .expect("lastDecision must be a Just Decision, not null");
+    assert_eq!(
+        decision.get("action").and_then(|v| v.as_str()),
+        Some("13"),
+        "10 (wave 2's static reply) + 3 (wave 1's fold) = 13 — anything else \
+         means values crossed to the wrong handles or a wave's results were \
+         lost, got {decision:?}"
+    );
+
+    let turns = logged_turn_texts(&log_path);
+    assert!(
+        !turns.iter().any(|t| t.contains("A block did not compile")),
+        "no turn may be a GHC corrective; logged turns:\n{turns:#?}"
+    );
+}
+
 /// The fork budget's loud refusal: with a budget of 1, the block's SECOND
 /// async fork is refused — the block is aborted (its first result is lost
 /// with it), the round's threads are swept, the corrective names the

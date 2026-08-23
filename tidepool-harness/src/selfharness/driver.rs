@@ -837,8 +837,11 @@ const LOOP_INFERENCE_CALL_CAP: u32 = 1024;
 /// budget, not a style preference; the refusal on the (N+1)th is loud
 /// (block aborted, corrective naming the budget), never a silent drop.
 /// Operator decision 2026-08-22: total-per-node, matching the companion's
-/// own `maxFanOut`-shaped budgeting one level up.
-const DEFAULT_FORK_BUDGET_PER_WINDOW: u32 = 8;
+/// own `maxFanOut`-shaped budgeting one level up; raised 8 → 32 the same
+/// day when multi-WAVE forking (fork, fold, fork again within one window)
+/// became the taught idiom — two or three waves of a handful of children
+/// each must fit without tuning.
+const DEFAULT_FORK_BUDGET_PER_WINDOW: u32 = 32;
 
 /// Default cap on how many `RunLLMTurn` fanout/fork children
 /// ([`SelfHarnessDriver::service_outer_fanout`]) may be concurrently
