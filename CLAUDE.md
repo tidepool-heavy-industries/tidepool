@@ -243,7 +243,7 @@ capped without an edit there. The box-wide ceiling is the product of the two
    `tidepool-handlers` (186 tests) fits this whole within the ~380s budget as
    a bare `-p <crate>` invocation — `tidepool-harness`/`tidepool-runtime`/
    `tidepool-repl` each need `-E 'binary(...) or binary(...)'` sub-shards
-   (5/6/7 respectively; the exact groups are documented in
+   (7/7/7 respectively; the exact groups are documented in
    `scripts/battery-shard.sh`'s header — per-shard timings aren't tracked
    there). Chain shards (one invocation per
    group, in sequence — concurrent GHC-heavy shards on a shared box compete
