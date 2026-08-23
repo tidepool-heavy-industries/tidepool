@@ -373,17 +373,6 @@ input[type="radio"]:focus-visible, input[type="checkbox"]:focus-visible,
 .btn-primary { background: var(--accent); color: var(--paper); border-color: var(--accent); }
 .btn[disabled] { opacity: 0.4; cursor: default; }
 
-/* ------------------------------------------------------------------ continue */
-.continue {
-  display: flex; flex-direction: column; align-items: center; gap: calc(3 * var(--unit));
-  text-align: center;
-  padding: calc(4 * var(--unit)) 0;
-  border-top: var(--hair-faint);
-  border-bottom: var(--hair-faint);
-}
-.continue .eyebrow { color: var(--muted); }
-.continue .btn-primary { padding: calc(2.5 * var(--unit)) calc(6 * var(--unit)); }
-
 /* ---------------------------------------------------------------------- idle */
 .idle {
   display: flex; flex-direction: column; align-items: center; gap: calc(2 * var(--unit));
@@ -471,16 +460,9 @@ function mountPanel(next) {
   wire(slot);
 }
 
-// Wire data-on-* handlers and collapse toggles within a root (idempotent
+// Wire data-on-submit handlers and collapse toggles within a root (idempotent
 // via __wired).
 function wire(root) {
-  root.querySelectorAll('[data-on-click]').forEach((el) => {
-    if (el.__wired) return; el.__wired = true;
-    el.addEventListener('click', (e) => {
-      e.preventDefault();
-      post(parsePost(el.getAttribute('data-on-click')), el, null, null);
-    });
-  });
   root.querySelectorAll('[data-on-submit]').forEach((form) => {
     if (form.__wired) return; form.__wired = true;
     form.addEventListener('submit', (e) => {

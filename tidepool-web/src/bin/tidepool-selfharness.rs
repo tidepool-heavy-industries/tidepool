@@ -202,16 +202,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut web_state: Option<tidepool_web::AppState> = None;
     if !auto {
         let port: u16 = args.port;
-        // ONE registered node (the default the driver's gate is bound to), so
-        // the page renders no tab strip at all — the one-tab case
-        // `tidepool-web` deliberately keeps visually quiet (its CLAUDE.md,
-        // "Tab switching"). A second, speculative `register_node("root")` for
-        // the recursive-companion harness used to sit here (PRD 21 C3 §10.3,
-        // anticipating the per-node GUI lane that carries node ids from
-        // Haskell); until that lane lands nothing routes to any node but the
-        // default, so all it produced was a permanently-empty second tab in
-        // front of the live operator (dogfood finding, 2026-08-19). Re-add
-        // registrations only together with the routing that feeds them.
+        // ONE registered node (the default the driver's gate is bound to) —
+        // the `/` tree renders one circle and `/legacy` renders one section,
+        // both quiet and uncluttered for the single-node case. A second,
+        // speculative `register_node("root")` for the recursive-companion
+        // harness used to sit here (PRD 21 C3 §10.3, anticipating the
+        // per-node GUI lane that carries node ids from Haskell); until that
+        // lane lands nothing routes to any node but the default, so all it
+        // produced was a permanently-empty second node in front of the live
+        // operator (dogfood finding, 2026-08-19). Re-add registrations only
+        // together with the routing that feeds them.
         let (state, gate) = tidepool_web::spawn_operator_server_multi(port).await?;
         driver.set_gate(gate);
         web_state = Some(state);

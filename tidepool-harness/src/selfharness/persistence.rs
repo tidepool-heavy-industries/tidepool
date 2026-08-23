@@ -169,12 +169,17 @@ pub struct Checkpoint {
     /// The operator's between-loops message, threaded into the next
     /// cognition window's framing
     /// (`SelfHarnessDriver::between_loops_gate`/`render_framing_with`).
-    /// Never durable in practice — [`Self::committed`] always clears it, and
-    /// the between-turns gate itself writes no checkpoint — but the field and
-    /// its `#[serde(default, skip_serializing_if)]` stay so an OLD checkpoint
-    /// written while a bespoke gate-park marker still existed (carrying this
-    /// key non-`None`) still decodes; the precedent is
-    /// `Usage.cached_input_tokens`/`TurnDelta.reasoning`'s additive widenings.
+    /// DESERIALIZE-ONLY legacy compatibility: no production code writes this
+    /// field anymore (the between-turns gate writes no checkpoint of its
+    /// own, and [`Self::committed`] always clears it to `None`), but an OLD
+    /// checkpoint written while a bespoke gate-park marker still existed
+    /// (carrying this key non-`None`) must still decode — restore still
+    /// imports a populated value from such a checkpoint into the next
+    /// framing (`driver.rs`'s restore path). No builder constructs a
+    /// non-`None` value anymore; the only way this field is ever `Some` is
+    /// decoding one from disk. The precedent for the additive
+    /// `#[serde(default, skip_serializing_if)]` shape is
+    /// `Usage.cached_input_tokens`/`TurnDelta.reasoning`'s widenings.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pending_operator_input: Option<String>,
     /// The highest [`crate::selfharness::observer::AskId`] minted as of this
@@ -231,18 +236,6 @@ impl Checkpoint {
             iteration,
             pending_operator_input: None,
             ask_id_high_water: 0,
-        }
-    }
-
-    /// A copy of `self` with `pending_operator_input` set, at the SAME
-    /// generation. Unused by production code today (the between-turns gate
-    /// writes no checkpoint of its own — see [`Checkpoint`]'s field doc) but
-    /// kept as a normal, orthogonal `with_*` builder alongside
-    /// [`Self::with_ask_id_high_water`].
-    pub fn with_pending_operator_input(&self, pending_operator_input: Option<String>) -> Self {
-        Checkpoint {
-            pending_operator_input,
-            ..self.clone()
         }
     }
 
@@ -541,32 +534,52 @@ mod tests {
         );
     }
 
-    /// Both new fields round-trip when populated, and stay byte-for-byte
-    /// independent of each other — the same additive widening shape as
-    /// every `#[serde(default, skip_serializing_if)]` field on this struct.
+    /// `ask_id_high_water` round-trips when populated — the live-writer
+    /// field `with_ask_id_high_water` still constructs (unlike
+    /// `pending_operator_input`, whose only constructor is decoding an old
+    /// checkpoint off disk — see the two tests below).
     #[test]
-    fn pending_operator_input_and_ask_id_high_water_round_trip_when_populated() {
-        let cp = checkpoint(1)
-            .with_pending_operator_input(Some("steer left".to_string()))
-            .with_ask_id_high_water(7);
+    fn ask_id_high_water_round_trips_when_populated() {
+        let cp = checkpoint(1).with_ask_id_high_water(7);
         let wire = serde_json::to_string(&cp).expect("serialize");
-        assert!(wire.contains(r#""pending_operator_input":"steer left""#));
         assert!(wire.contains(r#""ask_id_high_water":7"#));
 
         let round_tripped: Checkpoint = serde_json::from_str(&wire).expect("deserialize");
         assert_eq!(round_tripped, cp);
-        assert_eq!(round_tripped.pending_operator_input(), Some("steer left"));
         assert_eq!(round_tripped.ask_id_high_water(), 7);
     }
 
-    /// [`Checkpoint::committed`] always clears BOTH new fields — a newly
-    /// completed cycle has no live gate-park state, whatever the previous
-    /// checkpoint carried.
+    /// `pending_operator_input` is DESERIALIZE-ONLY: production stopped
+    /// writing it once the between-turns gate was unified (see the field's
+    /// own doc), but an OLD checkpoint that still carries the key — the only
+    /// way this field is ever non-`None` now — must keep decoding it.
+    #[test]
+    fn a_checkpoint_carrying_a_populated_legacy_pending_operator_input_key_still_decodes() {
+        let dir = tempfile_dir();
+        let path = dir.join("checkpoint.json");
+        std::fs::write(
+            &path,
+            r#"{"generation":1,"state":{"mode":"Deciding"},"compaction":null,"harness_source":"fp","iteration":1,"pending_operator_input":"steer left"}"#,
+        )
+        .expect("write a checkpoint carrying a populated legacy field");
+        let loaded = load_checkpoint(&path)
+            .expect("a checkpoint carrying the legacy key must still deserialize")
+            .expect("some checkpoint");
+        assert_eq!(loaded.pending_operator_input(), Some("steer left"));
+    }
+
+    /// [`Checkpoint::committed`] always clears `pending_operator_input` to
+    /// `None` and starts `ask_id_high_water` at `0` — a newly completed
+    /// cycle has no live gate-park state, whatever the previous checkpoint
+    /// carried (including one restored from an old binary's still-set
+    /// legacy key — constructed here via struct-update syntax, since there
+    /// is no live builder for it anymore).
     #[test]
     fn committed_clears_pending_operator_input_and_does_not_inherit_ask_id_high_water() {
-        let parked = checkpoint(1)
-            .with_pending_operator_input(Some("leftover".to_string()))
-            .with_ask_id_high_water(9);
+        let parked = Checkpoint {
+            pending_operator_input: Some("leftover".to_string()),
+            ..checkpoint(1).with_ask_id_high_water(9)
+        };
         let committed = Checkpoint::committed(
             Some(parked.generation()),
             serde_json::json!({"mode": "Deciding"}),

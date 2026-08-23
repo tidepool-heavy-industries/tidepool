@@ -1,8 +1,10 @@
 //! tidepool-web — the operator GUI for the self-iterating harness, built on
 //! the minimal node model: N REGISTERED NODES in a tree (slash-separated
 //! `node_id` paths), each one lifecycle — a SEED prompt in, an append-only
-//! TIMELINE of notes and asks, a FINAL VALUE (or failure) out — rendered as
-//! one always-visible outline and served over HTTP + Datastar SSE.
+//! TIMELINE of notes and asks, a FINAL VALUE (or failure) out — served over
+//! HTTP + Datastar SSE as TWO views over that one model: `/`, a zoomable d3
+//! tree with a side pane, and `/legacy`, every node as its own
+//! always-visible outline section.
 //!
 //! The harness driver blocks on an
 //! [`OperatorGate`](tidepool_harness::selfharness::operator::OperatorGate);
@@ -97,12 +99,13 @@ fn bind_addr(port: u16) -> SocketAddr {
 
 /// Boot the operator HTTP server on `127.0.0.1:<port>` and return both the
 /// [`AppState`] (register additional nodes on it via
-/// [`AppState::register_node`] for a multi-tab page) and the [`WebGate`] for
-/// the default single-tab registration ([`DEFAULT_NODE_ID`]) — the one-tab
-/// case existing callers use unchanged. The server runs on a spawned
-/// background task; the caller stays responsible for keeping the process
-/// alive (e.g. by driving a blocking `run_loop` on another thread of the
-/// same runtime).
+/// [`AppState::register_node`] — every registered node shows up as its own
+/// section on `/legacy` and its own circle in the `/` tree) and the
+/// [`WebGate`] for the default registration ([`DEFAULT_NODE_ID`]) — the
+/// single-node case existing callers use unchanged. The server runs on a
+/// spawned background task; the caller stays responsible for keeping the
+/// process alive (e.g. by driving a blocking `run_loop` on another thread of
+/// the same runtime).
 ///
 /// Also mounts the [`formapi`] testing surface when `TIDEPOOL_FORM_API=1` is
 /// set in the process environment — disabled otherwise.

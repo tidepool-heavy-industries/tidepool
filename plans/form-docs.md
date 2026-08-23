@@ -1,14 +1,28 @@
 # Form docs: haddock comments → ask-form help text
 
-**Status: PARKED (operator decision, 2026-08-20) — the prompting fix ships
-instead: model-initiated asks are taught to precede every `askUser` with a
-note that names each field and what a good answer looks like (the note
-renders directly above the form on the timeline), and the two
-driver-initiated asks (seed gate, between-turns gate) already carry
-hardcoded presentation text. Revive this design only if dogfooding shows
-notes don't reliably carry field semantics — the machinery below is the
-static-baseline insurance, and its one risky lane (extract) shouldn't be
-built speculatively.**
+**Status: SUPERSEDED — doc-carrying forms shipped, but not as designed
+below.** The design this file describes (extract-time haddock harvesting,
+Rust-only `FieldShape`/`VariantShape.doc` enrichment via a `FormDocs` table,
+the Haskell encoder left untouched) was never built — see the PARKED note
+this superseded, kept for its rationale:
+
+> PARKED (operator decision, 2026-08-20) — the prompting fix ships instead:
+> model-initiated asks are taught to precede every `askUser` with a note
+> that names each field and what a good answer looks like, and the two
+> driver-initiated asks (seed gate, between-turns gate) already carry
+> hardcoded presentation text.
+
+What actually shipped is a THIRD, simpler mechanism: author-attached docs via
+`Tidepool.Form`'s `title`/`field`/`help`/`formShapeWith`/`askUserWith`, with
+the Haskell encoder (`Tidepool.Form.Wire`'s `encodeShapeAnnotated`) emitting
+`doc` directly on `FieldShape` and on the root `Product`/`Sum` — the opposite
+of section 3 below's "Haskell side never knows docs exist" and "Rust side
+only" claims, and there is no `type_doc` field or extract-side `FormDocs`
+table anywhere in the codebase. Sections 1–2 and 4–5 below still describe a
+real (unbuilt) alternative design and its rationale; section 3's wire shape
+is the one part that reads as current-state and isn't — read it as history,
+not as a description of `tidepool-harness/src/selfharness/operator.rs`'s
+actual `FormShape`.
 
 ## Problem
 
@@ -103,9 +117,8 @@ HarnessTypes.hs          tidepool-extract            driver               web
    docs too — closing the probe's "no way to validate semantics" finding.
 
 5. **Author docs** (`harness-dogfooding`): write real haddocks on
-   `SeedQuestion`, `OperatorSteering`, `LayerApproval`, `ContinueSignal`'s
-   web-side presentation strings, and the demo bin's sample types — the
-   immediate payoff and the live acceptance.
+   `SeedQuestion`, `OperatorSteering`, `LayerApproval`, and the demo bin's
+   sample types — the immediate payoff and the live acceptance.
 
 ## What deliberately does NOT change
 

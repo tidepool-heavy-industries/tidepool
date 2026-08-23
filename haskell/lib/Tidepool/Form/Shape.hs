@@ -41,8 +41,11 @@ type TypeKey = Text
 type ConstructorKey = Text
 
 -- | A field's key within one product node: the exact record selector name
--- from @M1 S@ metadata. (Positional fields have no key and are rejected at
--- compile time — the key doubles as the submitted JSON field name.)
+-- from @M1 S@ metadata, or the literal @"contents"@ for a constructor's
+-- single positional field (the generic JSON boundary's TaggedObject
+-- convention for a positional payload). MULTIPLE positional fields have no
+-- selector names to key their controls by and are rejected at compile
+-- time — the key doubles as the submitted JSON field name.
 type FieldKey = Text
 
 -- | The structural description of a form, derived from a type's generic

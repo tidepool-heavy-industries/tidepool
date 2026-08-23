@@ -157,8 +157,7 @@ The seam the integration tests assert against; sibling work on
   carries `data-bind="<key>"` and `data-kind="string|int|number|bool|enum"`
   (`int` → `Number`, `bool` → boolean; `string`/`number`/`enum` stay raw
   strings). Action elements bake the exact node/interaction into
-  `data-on-submit="@post('/node/<node>/submit/<interaction>')"` (or
-  `.../continue/...`).
+  `data-on-submit="@post('/node/<node>/submit/<interaction>')"`.
 - The focus-preserving skip is gated on `data-rev`: a matching revision may
   skip replacing a focused panel; a DIFFERENT revision always replaces.
 

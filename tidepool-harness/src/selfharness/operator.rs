@@ -166,9 +166,11 @@ pub type TypeKey = String;
 /// identity of a product node. Mirrors `Tidepool.Form.Shape.ConstructorKey`.
 pub type ConstructorKey = String;
 
-/// A field's key within one product node: the exact record selector name.
-/// Positional fields are rejected by the Haskell form derivation. Mirrors
-/// `Tidepool.Form.Shape.FieldKey`.
+/// A field's key within one product node: the exact record selector name,
+/// or the literal `"contents"` for a constructor's single positional field
+/// (the generic JSON boundary's TaggedObject convention for a positional
+/// payload). MULTIPLE positional fields are rejected by the Haskell form
+/// derivation. Mirrors `Tidepool.Form.Shape.FieldKey`.
 pub type FieldKey = String;
 
 /// The structural description of a recursive form, derived from a type's

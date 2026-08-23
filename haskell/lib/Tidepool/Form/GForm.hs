@@ -34,11 +34,13 @@
 -- accepts.
 --
 -- This interpreter is deliberately narrow. It answers ONE question — what can
--- a human be shown as a form — so lists, maps, positional payload fields,
--- and recursion are rejected here at compile time. They are legal elsewhere:
--- checkpoint persistence and answer synopses run their own interpreters over
--- the same @GHC.Generics@ metadata with their own supported sets. Do not
--- collapse them into a shared codec whose supported set is the intersection.
+-- a human be shown as a form — so lists, maps, MULTIPLE positional payload
+-- fields (a constructor's SINGLE positional field is presented, keyed
+-- @"contents"@ — see 'GBody'), and recursion are rejected here at compile
+-- time. They are legal elsewhere: checkpoint persistence and answer synopses
+-- run their own interpreters over the same @GHC.Generics@ metadata with
+-- their own supported sets. Do not collapse them into a shared codec whose
+-- supported set is the intersection.
 --
 -- The supported field types are 'Text', 'Int', 'Double', 'Bool', @()@,
 -- @Maybe a@, and any type with a @Generic@ instance whose fields are
