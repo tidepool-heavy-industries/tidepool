@@ -346,7 +346,7 @@ pub struct Escalation {
 /// [`Harness::resolve_escalation`] fires. `AllocateMore` grants a fresh turn
 /// budget (replacing, not adding to, what remained) and optionally injects
 /// `steer` as the answerer's next corrective user turn before it retries.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum OperatorDecision {
     AllocateMore { turns: u32, steer: Option<String> },
     Abort,
@@ -4758,19 +4758,29 @@ fn escalation_decision_shape(node: NodeId, escalation: &Escalation) -> FormShape
 /// doesn't match: a malformed/foreign submission never panics or silently
 /// defaults, it just fails to produce a decision (surfaced by
 /// [`Harness::escalate_to_operator`] as a `Resident` error).
+///
+/// `turns` is the form's general signed `IntShape` (there is no bounded-int
+/// shape in the algebra), so the web validator alone lets a negative value,
+/// zero, or a value past `u32::MAX` through — all three are meaningless as a
+/// turn grant. `u32::try_from` rejects a negative or overflowing value
+/// LOUDLY (`None`, the same "no usable decision" path any other malformed
+/// submission takes) instead of the previous `as u32`, which silently
+/// truncated an overflowing value to an arbitrary smaller grant. Zero is
+/// rejected too: it would grant no additional budget, so `attempts` stays at
+/// its already-exhausted value and the answerer immediately re-escalates —
+/// a decision the web UI already recorded as "answered" that accomplishes
+/// nothing.
 fn decode_operator_decision(answer: &Json) -> Option<OperatorDecision> {
     let tag = answer.get("tag")?.as_str()?;
     match tag {
         "AllocateMore" => {
             let turns = answer.get("turns")?.as_u64()?;
+            let turns = u32::try_from(turns).ok().filter(|&t| t > 0)?;
             let steer = answer
                 .get("steer")
                 .and_then(|v| v.as_str())
                 .map(str::to_string);
-            Some(OperatorDecision::AllocateMore {
-                turns: turns as u32,
-                steer,
-            })
+            Some(OperatorDecision::AllocateMore { turns, steer })
         }
         "Abort" => Some(OperatorDecision::Abort),
         _ => None,
@@ -5289,6 +5299,77 @@ mod tests {
 
     fn test_engine_cfg() -> EngineConfig {
         EngineConfig::inert(vec!["Console".to_string()])
+    }
+
+    // ---- decode_operator_decision (Medium-7: turns bounds) -----------------
+
+    #[test]
+    fn decode_operator_decision_accepts_a_valid_allocate_more() {
+        let answer = serde_json::json!({"tag": "AllocateMore", "turns": 3, "steer": "focus"});
+        assert_eq!(
+            decode_operator_decision(&answer),
+            Some(OperatorDecision::AllocateMore {
+                turns: 3,
+                steer: Some("focus".to_string())
+            })
+        );
+    }
+
+    #[test]
+    fn decode_operator_decision_accepts_abort() {
+        let answer = serde_json::json!({"tag": "Abort"});
+        assert_eq!(
+            decode_operator_decision(&answer),
+            Some(OperatorDecision::Abort)
+        );
+    }
+
+    /// A negative `turns` passes the web form's general `IntShape`
+    /// validator (it only checks for a JSON integer, not a range), but must
+    /// never decode as a real grant.
+    #[test]
+    fn decode_operator_decision_rejects_negative_turns() {
+        let answer = serde_json::json!({"tag": "AllocateMore", "turns": -1, "steer": null});
+        assert_eq!(decode_operator_decision(&answer), None);
+    }
+
+    /// Zero grants no additional budget — `attempts` would stay exhausted
+    /// and the answerer would immediately re-escalate. Rejected, not
+    /// silently accepted as a no-op grant.
+    #[test]
+    fn decode_operator_decision_rejects_zero_turns() {
+        let answer = serde_json::json!({"tag": "AllocateMore", "turns": 0, "steer": null});
+        assert_eq!(decode_operator_decision(&answer), None);
+    }
+
+    /// A `turns` value past `u32::MAX` must be rejected LOUDLY (`None`) —
+    /// the old `as u32` cast silently truncated it to an arbitrary smaller
+    /// grant instead.
+    #[test]
+    fn decode_operator_decision_rejects_turns_overflowing_u32() {
+        let answer = serde_json::json!({
+            "tag": "AllocateMore",
+            "turns": (u32::MAX as u64) + 1,
+            "steer": null,
+        });
+        assert_eq!(decode_operator_decision(&answer), None);
+    }
+
+    /// The largest legal grant — `u32::MAX` itself — still decodes.
+    #[test]
+    fn decode_operator_decision_accepts_turns_at_u32_max() {
+        let answer = serde_json::json!({
+            "tag": "AllocateMore",
+            "turns": u32::MAX as u64,
+            "steer": null,
+        });
+        assert_eq!(
+            decode_operator_decision(&answer),
+            Some(OperatorDecision::AllocateMore {
+                turns: u32::MAX,
+                steer: None
+            })
+        );
     }
 
     // ---- render_compile_error / error coordinates -------------------------
