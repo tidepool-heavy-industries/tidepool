@@ -361,6 +361,76 @@ async fn second_fork_past_subtree_cap_refuses_with_tree_wide_corrective() {
     );
 }
 
+/// F8 regression (driver structural review, 2026-08-23): the SAME tree-wide
+/// subtree refusal, but through the ASYNC green-thread fork path
+/// (`async (fork @T …)`, serviced by `service_thread_ready`'s Fork arm)
+/// rather than a direct `fork`. Before the fix, that arm discarded
+/// `check_fork_budgets`' real message and the dispatcher unconditionally
+/// rebuilt a PER-WINDOW `fork_budget_refusal` — so a subtree exhaustion here
+/// was misreported with per-window wording/numbers ("this session has
+/// spawned N of its CAP fork children"), contradicting the design intent
+/// that the two refusals stay textually distinguishable so the model learns
+/// the boundary is tree-wide, not something a deeper/sibling fork escapes.
+/// With `fork_subtree_cap` at 1, thread "pick a"'s own fork spends the
+/// tree's only slot; thread "pick b"'s fork then hits the ALREADY-exhausted
+/// subtree cap (not its own per-window pool, which still has room) — the
+/// corrective MUST read as the tree-wide message.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn async_fork_over_subtree_cap_refuses_with_tree_wide_corrective() {
+    support::require_extract();
+    let _cache_guard = support::isolate_cache();
+
+    let replies = vec![
+        // 1. The same two-async-fork spawning block — "pick b"'s fork must
+        //    refuse against the tree-wide cap, not the per-window pool.
+        reply(ASYNC_FORK_BLOCK),
+        // 2. "pick a"'s fork child — the one child the subtree cap covers.
+        finalize_int_reply(1),
+        // 3. The corrective round after the refusal: finalize plainly.
+        reply(
+            "```haskell\nimport HarnessTypes (Decision (..), Confidence (..))\n\n\
+             (finalize @Decision (Decision { action = \"gave-up\", rationale = \"subtree \
+             cap via async fork\", confidence = Medium }) :: M ())\n```",
+        ),
+    ];
+    let (mut driver, _agent, log_path) = build_driver(replies, "answerer-async-subtree");
+    driver.set_fork_subtree_cap(1);
+    let source = load_harness_source(&examples_harness_dir().join("Harness.hs"))
+        .expect("reference harness source loads");
+
+    let outcome = driver
+        .run_one_cycle(&source, None)
+        .await
+        .expect("the subtree refusal aborts the block, not the window — the cycle completes");
+
+    let decision = outcome
+        .state_json
+        .get("lastDecision")
+        .and_then(|v| v.as_object())
+        .expect("lastDecision must be a Just Decision");
+    assert_eq!(
+        decision.get("action").and_then(|v| v.as_str()),
+        Some("gave-up"),
+        "the window must survive the refusal and finalize on its next round, \
+         got {decision:?}"
+    );
+
+    let turns = logged_turn_texts(&log_path);
+    assert!(
+        turns
+            .iter()
+            .any(|t| t.contains("Fork budget exhausted for this WHOLE tree")),
+        "an async-fork subtree refusal must carry the TREE-WIDE corrective, not a \
+         rebuilt per-window one; logged turns:\n{turns:#?}"
+    );
+    assert!(
+        !turns.iter().any(|t| t.contains("this session has spawned")),
+        "the per-window refusal wording must NOT appear — that would mean the \
+         real subtree message was discarded and rebuilt wrong (F8); logged \
+         turns:\n{turns:#?}"
+    );
+}
+
 /// The fork budget's loud refusal: with a budget of 1, the block's SECOND
 /// async fork is refused — the block is aborted (its first result is lost
 /// with it), the round's threads are swept, the corrective names the

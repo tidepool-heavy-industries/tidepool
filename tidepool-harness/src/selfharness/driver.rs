@@ -82,7 +82,7 @@ use crate::engine::{
     self, ClassifiedHole, CompiledTurn, EngineConfig, EngineError, HoleRouting, InvocationExit,
     TurnOutcome,
 };
-use crate::harness::{AnswerContract, ContextRef, Harness, HarnessError, OUTER_REALM};
+use crate::harness::{AnswerContract, ContextRef, Harness, HarnessError, Session, OUTER_REALM};
 use crate::log::Actor;
 use crate::selfharness::harness_source::HarnessSource;
 use crate::selfharness::lifecycle::SelfHarnessState;
@@ -447,8 +447,17 @@ impl AnswererGreen {
 enum AnswererGreenExit {
     NodeParked,
     NodeDone,
-    ForkBudgetRefused { needed: u32 },
-    AsyncMisuse { msg: String },
+    /// Carries the ACTUAL refusal text `check_fork_budgets` built —
+    /// `fork_subtree_refusal` when the tree-wide cap fired,
+    /// `fork_budget_refusal` when the per-window pool did — never rebuilt
+    /// downstream (F8: rebuilding always guessed `fork_budget_refusal`,
+    /// misreporting a subtree exhaustion as a per-window one).
+    ForkBudgetRefused {
+        msg: String,
+    },
+    AsyncMisuse {
+        msg: String,
+    },
 }
 
 /// One serviced green suspension's outcome, distinguishing MODEL-ATTRIBUTABLE
@@ -470,7 +479,11 @@ enum GreenHoleServiced {
 /// that thread forks can hit.
 enum ThreadServiced {
     Continue,
-    BudgetRefused { needed: u32 },
+    /// The ACTUAL refusal text `check_fork_budgets` built — see
+    /// [`AnswererGreenExit::ForkBudgetRefused`]'s doc (F8).
+    BudgetRefused {
+        msg: String,
+    },
     Misuse(String),
 }
 
@@ -570,6 +583,17 @@ impl SelfHarnessDriver {
     /// descendant budget, checked (and the subtree spent) atomically at the
     /// one moment children are about to exist. `Some(corrective)` = refused,
     /// nothing spent; `None` = both budgets debited, spawn may proceed.
+    ///
+    /// The subtree reservation is a compare-exchange loop, not a
+    /// check-then-act (F10): two concurrent sharers of one `fork_subtree`
+    /// counter (a window driving its own fork children concurrently) can no
+    /// longer both observe headroom and both add past the cap — each
+    /// attempt re-reads the counter on a lost race and re-checks against the
+    /// cap before retrying. `budget` (the per-window pool) is `&mut`, so it
+    /// has no such race — but its check-and-spend still runs AFTER the
+    /// subtree reservation, so a window-budget refusal rolls the subtree
+    /// reservation back rather than leaving it charged for a child that
+    /// will never spawn.
     fn check_fork_budgets(
         &self,
         budget: &mut ForkBudget,
@@ -578,16 +602,31 @@ impl SelfHarnessDriver {
         ty_label: &str,
     ) -> Option<String> {
         use std::sync::atomic::Ordering;
-        let spent = fork_subtree.load(Ordering::Relaxed);
-        if spent.saturating_add(cost) > self.fork_subtree_cap {
-            return Some(fork_subtree_refusal(
+        let mut spent = fork_subtree.load(Ordering::Relaxed);
+        loop {
+            let new_spent = spent.saturating_add(cost);
+            if new_spent > self.fork_subtree_cap {
+                return Some(fork_subtree_refusal(
+                    spent,
+                    self.fork_subtree_cap,
+                    cost,
+                    ty_label,
+                ));
+            }
+            match fork_subtree.compare_exchange_weak(
                 spent,
-                self.fork_subtree_cap,
-                cost,
-                ty_label,
-            ));
+                new_spent,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => break,
+                Err(actual) => spent = actual,
+            }
         }
         if !budget.try_spend(cost) {
+            // Roll back: the subtree reservation was provisional on the
+            // window pool also covering `cost`, and it doesn't.
+            fork_subtree.fetch_sub(cost, Ordering::Relaxed);
             return Some(fork_budget_refusal(
                 budget.spent,
                 budget.cap,
@@ -595,7 +634,6 @@ impl SelfHarnessDriver {
                 ty_label,
             ));
         }
-        fork_subtree.fetch_add(cost, Ordering::Relaxed);
         None
     }
 }
@@ -1080,6 +1118,37 @@ async fn retry_on_turn_in_flight<T>(
         }
     }
     attempt()
+}
+
+/// [`retry_on_turn_in_flight`]'s async-attempt sibling (F4): the SAME
+/// policy — retry ONLY [`HarnessError::TurnInFlight`], same backoff/attempt
+/// bound — for a `Harness` call that is itself `async fn`
+/// (`resume_with_value`/`resume_with_borrowed_root`/`answer_dialog`). Each of
+/// those acquires a `TurnLease` before its own checkout, and the lease's
+/// `Drop` releases it on every `Err` return (including `TurnInFlight`), so
+/// retrying the WHOLE call is exactly as safe as retrying the sync sibling's
+/// callers: the checkout is still the first observable effect. These sites
+/// are reached by BOTH sequentially- and concurrently-driven callers
+/// (`drive_answerer_to_finalize` is the one pump both a sequential
+/// `service_outer_branch` child and a concurrent fork/branch-fanout child
+/// run through) — a sequential caller's checkout never actually contends, so
+/// this is a no-op there; a concurrent sibling's benign contention now waits
+/// instead of hard-failing the whole fanout.
+async fn retry_on_turn_in_flight_async<T, Fut>(
+    mut attempt: impl FnMut() -> Fut,
+) -> Result<T, HarnessError>
+where
+    Fut: std::future::Future<Output = Result<T, HarnessError>>,
+{
+    for _ in 0..CHECKOUT_RETRY_MAX_ATTEMPTS {
+        match attempt().await {
+            Err(HarnessError::TurnInFlight(_)) => {
+                tokio::time::sleep(CHECKOUT_RETRY_BACKOFF).await;
+            }
+            other => return other,
+        }
+    }
+    attempt().await
 }
 
 /// The narrow answerer instruction appended after `render`'s output to form
@@ -1835,17 +1904,30 @@ impl SelfHarnessDriver {
 
     /// Discard every mutable resident component a cycle may have left behind:
     /// retire the per-loop answerer, clear its framing and this cycle's
-    /// compaction, reset the inference-call counter, and drop the outer
-    /// session — which may be parked mid-fragment on a hole. Dropping `outer`
-    /// IS the discard: [`Self::bootstrap`] rebuilds it from the harness
-    /// source the next time it is called, since it only no-ops while `outer`
-    /// is `Some`.
+    /// compaction, reset the inference-call counter, and retire the outer
+    /// session — which may be parked mid-fragment on a hole. [`Self::bootstrap`]
+    /// rebuilds it from the harness source the next time it is called, since
+    /// it only no-ops while `outer` is `Some`.
+    ///
+    /// F6: retiring means removing the session from the registry
+    /// ([`crate::harness::Harness::retire_adopted_session`]), not just
+    /// dropping this struct's own `sid` handle — the session was `adopt_session`'d
+    /// into the registry at bootstrap, and the registry is the only place
+    /// its machine actually lives (heap, code arena, every still-parked
+    /// frame). Dropping only the handle left it there forever: the NEXT
+    /// `bootstrap` after a `Failed` cycle adopts a FRESH session under a NEW
+    /// `sid`, so the old one was never reachable again — one whole leaked
+    /// JIT machine per `Failed`→recovered cycle. (`run_loop` exits on the
+    /// first error, so this matters mainly to an embedder/acceptance driver
+    /// that keeps calling `run_one_cycle` across a recovered `Failed`.)
     fn discard_resident_state(&mut self) {
         self.retire_answerer();
         self.answerer_framing = None;
         self.cycle_compaction = None;
         self.loop_inference_calls.store(0, Ordering::SeqCst);
-        self.outer = None;
+        if let Some(outer) = self.outer.take() {
+            self.agent.retire_adopted_session(outer.sid);
+        }
     }
 
     /// The [`AnswerContract`] for a hole of type `ty`: pin `finalize` to it
@@ -3192,7 +3274,20 @@ impl SelfHarnessDriver {
         // to a dead local, rather than returning it, is the incident this
         // subsumes into the type. `HoleRouting::Green` is the one exception,
         // documented at `ServicedHole` and at `Self::service_green_hole`.
-        let outcome_result: Result<(Value, DataConTable), DriverError> = loop {
+        //
+        // F6: wrapped in a bare (non-`move`) `async` block so every `?`
+        // inside the loop body (`classify_hole`, each `service_*().await?`,
+        // every resume's `map_err(...)?`) returns from THIS block instead of
+        // from the whole function — `?` always targets the nearest enclosing
+        // fn/closure/async-block, and an `async {}` block counts. Without
+        // this, an early `?` skipped the structured-concurrency sweep below
+        // entirely, leaking every still-open thread realm this fragment
+        // spawned. No `move`: `threads`/`waiters`/`ready`/`next_tid`/
+        // `next_thread_realm` (and `self`) stay borrowed for the block's
+        // span and are still owned by this function afterward, which is what
+        // the sweep below needs.
+        let outcome_result: Result<(Value, DataConTable), DriverError> = async {
+            loop {
             let Some(GreenReady { chain, outcome }) = ready.pop_front() else {
                 break Err(DriverError::Session(
                     "green scheduler starved: no ready work and the outer loop never completed \
@@ -3413,6 +3508,7 @@ impl SelfHarnessDriver {
                             // authored code fails loud, it is not coached.
                             if let GreenHoleServiced::Misuse(msg) = self
                                 .service_green_hole(
+                                    None,
                                     chain,
                                     hole.cont_id(),
                                     &request,
@@ -3607,7 +3703,9 @@ impl SelfHarnessDriver {
                     ready.push_back(gr);
                 }
             }
-        };
+        }
+        }
+        .await;
 
         // Structured-concurrency scope exit: every thread this loop spawned
         // is scoped to this ONE `loop` fragment run — close every realm that
@@ -3630,10 +3728,30 @@ impl SelfHarnessDriver {
         outcome_result
     }
 
+    /// [`Harness::with_session_retrying`] when `host` names a real answerer
+    /// node (F4: the answerer-plane green scheduler, whose host node may have
+    /// opted into contention retry via
+    /// [`Harness::set_retry_checkout_on_contention`]), else plain
+    /// [`Harness::with_session`] — the AUTHORED outer loop's own green
+    /// servicing (`run_loop_fragment_inner`) runs against the node-LESS
+    /// outer session and has no node to look a retry flag up on.
+    async fn with_session_maybe_retrying<T>(
+        &self,
+        host: Option<NodeId>,
+        sid: tidepool_repr::SessionId,
+        f: impl FnOnce(&mut Session) -> T,
+    ) -> Result<T, HarnessError> {
+        match host {
+            Some(node) => self.agent.with_session_retrying(node, sid, f).await,
+            None => self.agent.with_session(sid, f),
+        }
+    }
+
     /// Deliver a serviced green suspension's own resume per
     /// [`GreenDelivery`] — see that type's doc for the plane split.
     async fn deliver_green_resume(
         &self,
+        host: Option<NodeId>,
         sid: tidepool_repr::SessionId,
         delivery: &GreenDelivery<'_>,
         chain: GreenChain,
@@ -3645,11 +3763,11 @@ impl SelfHarnessDriver {
         match delivery {
             GreenDelivery::Raw => {
                 let next = self
-                    .agent
-                    .with_session(sid, |s| match answer {
+                    .with_session_maybe_retrying(host, sid, |s| match answer {
                         GreenAnswer::Value(v) => s.resume(ResidentHole::plain(hole), v),
                         GreenAnswer::BorrowedRoot(h) => s.resume_handle_borrowed(hole, h),
                     })
+                    .await
                     .map_err(|e| DriverError::Session(e.to_string()))?
                     .map_err(|e| DriverError::Session(format!("{what} resume failed: {e}")))?;
                 ready.push_back(GreenReady {
@@ -3659,10 +3777,14 @@ impl SelfHarnessDriver {
                 Ok(())
             }
             GreenDelivery::Node { node, hole } => match answer {
-                GreenAnswer::Value(v) => Ok(self.agent.resume_with_value(*node, hole, v).await?),
-                GreenAnswer::BorrowedRoot(h) => {
-                    Ok(self.agent.resume_with_borrowed_root(*node, hole, h).await?)
-                }
+                GreenAnswer::Value(v) => Ok(retry_on_turn_in_flight_async(|| {
+                    self.agent.resume_with_value(*node, hole, v.clone())
+                })
+                .await?),
+                GreenAnswer::BorrowedRoot(h) => Ok(retry_on_turn_in_flight_async(|| {
+                    self.agent.resume_with_borrowed_root(*node, hole, h)
+                })
+                .await?),
             },
         }
     }
@@ -3693,9 +3815,17 @@ impl SelfHarnessDriver {
     /// spawn starts a NEW top-level run and a park-until-terminal join may
     /// register a waiter instead of answering immediately.
     #[allow(clippy::too_many_arguments)]
-    #[allow(clippy::too_many_arguments)]
     async fn service_green_hole(
         &self,
+        // The HOST answerer node — the node whose `retry_checkout_on_contention`
+        // opt-in (F4) governs every raw `with_session` this call makes against
+        // the shared session, regardless of whether `delivery` targets this
+        // same node's own hole (`GreenDelivery::Node`) or a raw thread chain
+        // (`GreenDelivery::Raw`): a thread belongs to this host's own window,
+        // so it contends on exactly the same checkout races its host does.
+        // `None` for the AUTHORED outer loop's own node-less green servicing
+        // (`run_loop_fragment_inner`), which has no node to opt in with.
+        host: Option<NodeId>,
         chain: GreenChain,
         hole: &str,
         request: &Value,
@@ -3714,15 +3844,6 @@ impl SelfHarnessDriver {
             // closure-sentinel scan fires even for `async (pure 5)`; see
             // `tidepool-mcp/src/effect_defs.rs`'s `green_effect_def!` doc).
             Some("AsyncSpawnWith") => {
-                let body = self
-                    .agent
-                    .with_session(sid, |s| s.finalized_handle(hole))
-                    .map_err(|e| DriverError::Session(e.to_string()))?
-                    .ok_or_else(|| {
-                        DriverError::Session(
-                            "AsyncSpawnWith: spawner frame carries no untaken body closure".into(),
-                        )
-                    })?;
                 let tid = *next_tid;
                 *next_tid += 1;
                 // Tagged with a high bit so a thread realm can never collide
@@ -3738,6 +3859,39 @@ impl SelfHarnessDriver {
                         state: GreenThreadState::Running,
                     },
                 );
+                // Mint the spawner's body custody AND start the thread in ONE
+                // checkout (F5): the mint (`finalized_handle`) and the
+                // consume (`run_forked`) used to be two SEPARATE
+                // `with_session` calls, with the minted `RootCustody` moved
+                // into the second call's closure. If that second checkout
+                // ever refused (a concurrent sibling holding the machine —
+                // the F4 contention class — or the session slot gone),
+                // `with_session` returns `Err` BEFORE ever calling the
+                // closure, so the closure — and the `RootCustody` it
+                // captured — drops unconsumed, and `RootCustody::Drop`
+                // panics by design (a leak detector), unwinding the whole
+                // driver task instead of surfacing an ordinary
+                // `DriverError`. Folding both steps into ONE closure of ONE
+                // `with_session` call removes the window entirely: the
+                // custody is minted only AFTER the checkout has already
+                // succeeded, so there is no fallible step between mint and
+                // consume for an early return to land on.
+                let thread_start = self
+                    .with_session_maybe_retrying(
+                        host,
+                        sid,
+                        |s| -> Result<ResidentOutcome, String> {
+                            let body = s.finalized_handle(hole).ok_or_else(|| {
+                                "AsyncSpawnWith: spawner frame carries no untaken body closure"
+                                    .to_string()
+                            })?;
+                            s.run_forked("async_thread", body, realm, Some(table))
+                                .map_err(|e| format!("run_forked failed: {e}"))
+                        },
+                    )
+                    .await
+                    .map_err(|e| DriverError::Session(e.to_string()))?
+                    .map_err(DriverError::Session)?;
                 // Spawner-continues-first (the ready queue's own choice, per
                 // this lane's scaffold doc) — resume the spawner immediately
                 // with the fresh id, then start the thread; either push lands
@@ -3752,31 +3906,6 @@ impl SelfHarnessDriver {
                 // tolerated by the JIT's OWN synthesized `App` in
                 // `apply_finalized`/`run_forked`, not by arbitrary compiled
                 // Haskell that pattern-matches `case x of I# n#`).
-                // CONSUME THE BODY CUSTODY FIRST, before anything fallible.
-                //
-                // `body`'s custody was minted above by `finalized_handle`, and
-                // that mint cannot move later: it reads the payload off the
-                // SPAWNER's frame, which only exists while that frame is still
-                // parked. So the window between mint and consume is inherent —
-                // what is not inherent is putting a `?` inside it. Any early
-                // return there drops an unconsumed `RootCustody`, whose `Drop`
-                // panics, which REPLACES the real `DriverError` with a
-                // bookkeeping panic and hides why the spawn actually failed.
-                // Starting the thread first closes the window entirely.
-                //
-                // Scheduling is unaffected: spawner-continues-first is a
-                // property of the READY QUEUE order, which is preserved below,
-                // not of which call happens first. Both frames are ordinary
-                // registry members here — a new top-level run while another
-                // frame is parked is exactly what the multi-hole registry is
-                // for.
-                let thread_start = self
-                    .agent
-                    .with_session(sid, |s| {
-                        s.run_forked("async_thread", body, realm, Some(table))
-                    })
-                    .map_err(|e| DriverError::Session(e.to_string()))?
-                    .map_err(|e| DriverError::Session(format!("run_forked failed: {e}")))?;
                 let tid_value = tid
                     .to_value(table)
                     .map_err(|e| DriverError::Session(format!("AsyncSpawnWith tid box: {e}")))?;
@@ -3785,6 +3914,7 @@ impl SelfHarnessDriver {
                 // pending record refreshes) before the fresh thread's first
                 // outcome enters the queue.
                 self.deliver_green_resume(
+                    host,
                     sid,
                     &delivery,
                     chain,
@@ -3836,7 +3966,8 @@ impl SelfHarnessDriver {
                     .get(&tid)
                     .is_some_and(|t| matches!(t.state, GreenThreadState::Running));
                 if !records_result {
-                    self.wake_green_waiters(tid, table, sid, waiters, ready)?;
+                    self.wake_green_waiters(host, tid, table, sid, waiters, ready)
+                        .await?;
                     return Ok(GreenHoleServiced::Proceed(false));
                 }
                 let answer = if green_field_is_closure(request, 1) {
@@ -3846,8 +3977,10 @@ impl SelfHarnessDriver {
                     // thread must not invalidate a waiter's already-delivered
                     // handle.
                     let handle = self
-                        .agent
-                        .with_session(sid, |s| s.finalized_handle_owned_by(hole, OUTER_REALM))
+                        .with_session_maybe_retrying(host, sid, |s| {
+                            s.finalized_handle_owned_by(hole, OUTER_REALM)
+                        })
+                        .await
                         .map_err(|e| DriverError::Session(e.to_string()))?
                         .ok_or_else(|| {
                             DriverError::Session(
@@ -3891,7 +4024,8 @@ impl SelfHarnessDriver {
                         h.registry_mut().publish_async_done(tid);
                     }
                 }
-                self.wake_green_waiters(tid, table, sid, waiters, ready)?;
+                self.wake_green_waiters(host, tid, table, sid, waiters, ready)
+                    .await?;
                 Ok(GreenHoleServiced::Proceed(false))
             }
             Some("AsyncJoinAnyWith") => {
@@ -3907,6 +4041,7 @@ impl SelfHarnessDriver {
                             DriverError::Session(format!("AsyncJoinAnyWith winner box: {e}"))
                         })?;
                         self.deliver_green_resume(
+                            host,
                             sid,
                             &delivery,
                             chain,
@@ -3953,6 +4088,7 @@ impl SelfHarnessDriver {
                     .to_value(table)
                     .map_err(|e| DriverError::Session(format!("AsyncStatusWith code box: {e}")))?;
                 self.deliver_green_resume(
+                    host,
                     sid,
                     &delivery,
                     chain,
@@ -3983,20 +4119,41 @@ impl SelfHarnessDriver {
                         )))
                     }
                 };
-                self.deliver_green_resume(
-                    sid,
-                    &delivery,
-                    chain,
-                    hole,
-                    match answer {
-                        GreenResult::Value(v) => GreenAnswer::Value(v),
-                        GreenResult::Root(h) => GreenAnswer::BorrowedRoot(h),
-                    },
-                    ready,
-                    "AsyncResultWith",
-                )
-                .await?;
-                Ok(GreenHoleServiced::Proceed(false))
+                match self
+                    .deliver_green_resume(
+                        host,
+                        sid,
+                        &delivery,
+                        chain,
+                        hole,
+                        match answer {
+                            GreenResult::Value(v) => GreenAnswer::Value(v),
+                            GreenResult::Root(h) => GreenAnswer::BorrowedRoot(h),
+                        },
+                        ready,
+                        "AsyncResultWith",
+                    )
+                    .await
+                {
+                    Ok(()) => Ok(GreenHoleServiced::Proceed(false)),
+                    // F9: a bind-shaped block (`h <- async (…closure-valued…);
+                    // wait h`) parks its OWN turn on a Binding hole, which
+                    // cannot honor a borrowed-root resume — model-attributable
+                    // (the block bound a closure result), not a mechanism
+                    // failure, so it gets the same loud-refusal treatment as
+                    // every other async misuse instead of ending the run.
+                    Err(DriverError::Agent(HarnessError::BorrowedRootOnBindingHole(_))) => {
+                        Ok(GreenHoleServiced::Misuse(format!(
+                            "thread {tid}'s result is a closure/function value, and this \
+                             block tried to BIND it with `<-` (e.g. `h <- async (…); r <- \
+                             wait h`). A closure-valued async result can only be used \
+                             directly (call it, or pass it onward) in the SAME expression \
+                             — it cannot be bound to a name. Restructure the block to \
+                             consume `wait h`'s result without binding it"
+                        )))
+                    }
+                    Err(e) => Err(e),
+                }
             }
             Some("AsyncCancelWith") => {
                 let tid = green_int_field(request, 0, table);
@@ -4004,11 +4161,11 @@ impl SelfHarnessDriver {
                     if matches!(entry.state, GreenThreadState::Running) {
                         let realm = entry.realm;
                         entry.state = GreenThreadState::Cancelled;
-                        self.agent
-                            .with_session(sid, |s| {
-                                s.close_realm(realm);
-                            })
-                            .map_err(|e| DriverError::Session(e.to_string()))?;
+                        self.with_session_maybe_retrying(host, sid, |s| {
+                            s.close_realm(realm);
+                        })
+                        .await
+                        .map_err(|e| DriverError::Session(e.to_string()))?;
                         // A cancel is a terminal-state transition exactly like
                         // a settle — `waitEvent` must fire for either, so it
                         // shares the same publish (see the `AsyncDoneWith` arm
@@ -4016,7 +4173,8 @@ impl SelfHarnessDriver {
                         if let Some(h) = self.handlers.lock().event.as_mut() {
                             h.registry_mut().publish_async_done(tid);
                         }
-                        self.wake_green_waiters(tid, table, sid, waiters, ready)?;
+                        self.wake_green_waiters(host, tid, table, sid, waiters, ready)
+                            .await?;
                     }
                     // Idempotent: a terminal thread's cancel is a no-op.
                 }
@@ -4024,6 +4182,7 @@ impl SelfHarnessDriver {
                     .to_value(table)
                     .map_err(|e| DriverError::Session(format!("AsyncCancelWith () bridge: {e}")))?;
                 self.deliver_green_resume(
+                    host,
                     sid,
                     &delivery,
                     chain,
@@ -4045,8 +4204,9 @@ impl SelfHarnessDriver {
     /// each with `tid`'s own id (the winner) and push the result onto
     /// `ready`. Shared by `AsyncDoneWith` (a settle) and `AsyncCancelWith` (a
     /// cancellation) servicing.
-    fn wake_green_waiters(
+    async fn wake_green_waiters(
         &self,
+        host: Option<NodeId>,
         tid: i64,
         table: &DataConTable,
         sid: tidepool_repr::SessionId,
@@ -4061,10 +4221,10 @@ impl SelfHarnessDriver {
             .map_err(|e| DriverError::Session(format!("green wake tid box: {e}")))?;
         for (wchain, whole) in parked {
             let next = self
-                .agent
-                .with_session(sid, |s| {
+                .with_session_maybe_retrying(host, sid, |s| {
                     s.resume(ResidentHole::plain(whole.clone()), tid_value.clone())
                 })
+                .await
                 .map_err(|e| DriverError::Session(e.to_string()))?
                 .map_err(|e| DriverError::Session(format!("green wake resume failed: {e}")))?;
             ready.push_back(GreenReady {
@@ -4178,7 +4338,9 @@ impl SelfHarnessDriver {
         // it is delivered verbatim into the loop's parked continuation on the
         // shared heap); data keeps the bridged-value path.
         let answer = if self.agent.finalize_is_closure(node) {
-            let handle = self.agent.take_finalized_handle_keep_open(node)?;
+            let handle =
+                retry_on_turn_in_flight(|| self.agent.take_finalized_handle_keep_open(node))
+                    .await?;
             self.emit(Event::Finalize {
                 node,
                 value: "\"<closure>\"".to_string(),
@@ -4342,21 +4504,31 @@ impl SelfHarnessDriver {
             // was told to do, not the harness plumbing around it.
             self.gate.node_seeded(label, prompt);
         }
-        self.agent.force_attached(node, Actor::Operator, sid)?;
+        if let Err(e) = self.agent.force_attached(node, Actor::Operator, sid) {
+            let reason = format!("runLLMTurnBranch: attach failed: {e}");
+            self.abort_unguarded_child(node, label, &reason);
+            return Err(e.into());
+        }
         let realm = self.mint_realm();
         self.agent.set_node_realm(node, realm);
 
         let parent_scope = self.agent.context_ref_scope(&cref);
-        let child_scope = self
-            .agent
-            .with_session(sid, |s| s.mint_scope(parent_scope))
-            .map_err(|e| DriverError::Session(e.to_string()))?
-            .ok_or_else(|| {
-                DriverError::Session(format!(
+        let child_scope = match self.agent.with_session(sid, |s| s.mint_scope(parent_scope)) {
+            Ok(Some(scope)) => scope,
+            Ok(None) => {
+                let reason = format!(
                     "runLLMTurnBranch: the frozen window's scope {parent_scope:?} is not \
                      live (its owning session was rotated or the window already retired)"
-                ))
-            })?;
+                );
+                self.abort_unguarded_child(node, label, &reason);
+                return Err(DriverError::Session(reason));
+            }
+            Err(e) => {
+                let reason = format!("runLLMTurnBranch: mint_scope failed: {e}");
+                self.abort_unguarded_child(node, label, &reason);
+                return Err(DriverError::Session(reason));
+            }
+        };
         self.agent.set_node_scope(node, child_scope);
         self.agent
             .set_answer_contract(node, self.answer_contract(ty, modules));
@@ -4749,7 +4921,11 @@ impl SelfHarnessDriver {
         let _ = self.gate.node_gate(label);
         self.gate.node_seeded(label, prompt);
 
-        self.agent.force_attached(node, Actor::Operator, sid)?;
+        if let Err(e) = self.agent.force_attached(node, Actor::Operator, sid) {
+            let reason = format!("runLLMTurnBranchFanout child {idx}: attach failed: {e}");
+            self.abort_unguarded_child(node, Some(label), &reason);
+            return Err(e.into());
+        }
         let realm = self.mint_realm();
         self.agent.set_node_realm(node, realm);
         self.agent.set_node_scope(node, child_scope);
@@ -5454,8 +5630,13 @@ impl SelfHarnessDriver {
                         let Some((hole, classified)) = current.take() else {
                             break None;
                         };
-                        let Some((hole, classified)) =
-                            self.drain_note_holes(node, hole, classified).await?
+                        let Some((hole, classified)) = self
+                            .sweep_green_on_err(
+                                node,
+                                &mut green,
+                                self.drain_note_holes(node, hole, classified).await,
+                            )
+                            .await?
                         else {
                             break None;
                         };
@@ -5464,7 +5645,14 @@ impl SelfHarnessDriver {
                                 break Some(TurnOutcome::Suspended { hole, classified });
                             }
                             HoleRouting::AskUser { shape } => {
-                                match self.service_askuser_hole(node, shape).await? {
+                                match self
+                                    .sweep_green_on_err(
+                                        node,
+                                        &mut green,
+                                        self.service_askuser_hole(node, shape).await,
+                                    )
+                                    .await?
+                                {
                                     Some(TurnOutcome::Suspended {
                                         hole: h,
                                         classified: c,
@@ -5474,12 +5662,17 @@ impl SelfHarnessDriver {
                             }
                             HoleRouting::Fork { .. } => {
                                 match self
-                                    .drain_answerer_fork(
+                                    .sweep_green_on_err(
                                         node,
-                                        ty_label,
-                                        &mut fork_budget,
-                                        fork_depth,
-                                        fork_subtree,
+                                        &mut green,
+                                        self.drain_answerer_fork(
+                                            node,
+                                            ty_label,
+                                            &mut fork_budget,
+                                            fork_depth,
+                                            fork_subtree,
+                                        )
+                                        .await,
                                     )
                                     .await?
                                 {
@@ -5494,7 +5687,7 @@ impl SelfHarnessDriver {
                                     // corrective.
                                     Some(_) | None => {
                                         if let Some(g) = green.as_mut() {
-                                            let dropped = self.sweep_answerer_green(g);
+                                            let dropped = self.sweep_answerer_green(node, g).await;
                                             if dropped > 0 {
                                                 self.agent.push_user_turn(
                                                     node,
@@ -5507,15 +5700,23 @@ impl SelfHarnessDriver {
                                 }
                             }
                             HoleRouting::Green => {
-                                let g = green.get_or_insert_with(AnswererGreen::new);
-                                match self
-                                    .service_answerer_green(
+                                // The `g` borrow must end before
+                                // `sweep_green_on_err` can reborrow `green`
+                                // mutably to sweep it on an `Err`.
+                                let green_result = {
+                                    let g = green.get_or_insert_with(AnswererGreen::new);
+                                    self.service_answerer_green(
                                         node,
                                         g,
                                         &mut fork_budget,
                                         fork_depth,
                                         fork_subtree,
+                                        ty_label,
                                     )
+                                    .await
+                                };
+                                match self
+                                    .sweep_green_on_err(node, &mut green, green_result)
                                     .await?
                                 {
                                     AnswererGreenExit::NodeParked => {
@@ -5530,15 +5731,15 @@ impl SelfHarnessDriver {
                                     // green join — refuse that hole), sweep
                                     // the round's threads, and push the
                                     // budget corrective. The WINDOW survives.
-                                    AnswererGreenExit::ForkBudgetRefused { needed } => {
-                                        let msg = fork_budget_refusal(
-                                            fork_budget.spent,
-                                            fork_budget.cap,
-                                            needed,
-                                            ty_label,
-                                        );
-                                        let dropped = self.sweep_answerer_green(g);
-                                        self.agent.refuse_pending_hole(node, msg.clone())?;
+                                    AnswererGreenExit::ForkBudgetRefused { msg } => {
+                                        let dropped = match green.as_mut() {
+                                            Some(g) => self.sweep_answerer_green(node, g).await,
+                                            None => 0,
+                                        };
+                                        retry_on_turn_in_flight(|| {
+                                            self.agent.refuse_pending_hole(node, msg.clone())
+                                        })
+                                        .await?;
                                         let warn = if dropped > 0 {
                                             format!("\n\n{}", dropped_threads_warning(dropped))
                                         } else {
@@ -5552,13 +5753,19 @@ impl SelfHarnessDriver {
                                     // SESSION survives with a corrective.
                                     // One model slip must not end the run.
                                     AnswererGreenExit::AsyncMisuse { msg } => {
-                                        let dropped = self.sweep_answerer_green(g);
+                                        let dropped = match green.as_mut() {
+                                            Some(g) => self.sweep_answerer_green(node, g).await,
+                                            None => 0,
+                                        };
                                         let corrective = format!(
                                             "Async misuse — the block was aborted; your \
                                              session continues and earlier rounds' \
                                              definitions/bindings persist. Problem: {msg}."
                                         );
-                                        self.agent.refuse_pending_hole(node, corrective.clone())?;
+                                        retry_on_turn_in_flight(|| {
+                                            self.agent.refuse_pending_hole(node, corrective.clone())
+                                        })
+                                        .await?;
                                         let warn = if dropped > 0 {
                                             format!("\n\n{}", dropped_threads_warning(dropped))
                                         } else {
@@ -5573,6 +5780,9 @@ impl SelfHarnessDriver {
                             other => {
                                 // A suspension this driver cannot service.
                                 // Hard error rather than silently hanging.
+                                if let Some(g) = green.as_mut() {
+                                    self.sweep_answerer_green(node, g).await;
+                                }
                                 return Err(DriverError::Session(format!(
                                     "runLLMTurn answerer suspended on a hole this driver \
                                      has no operator for ({other:?})"
@@ -5580,10 +5790,10 @@ impl SelfHarnessDriver {
                             }
                         }
                     };
-                    let dropped = green
-                        .as_mut()
-                        .map(|g| self.sweep_answerer_green(g))
-                        .unwrap_or(0);
+                    let dropped = match green.as_mut() {
+                        Some(g) => self.sweep_answerer_green(node, g).await,
+                        None => 0,
+                    };
                     if let Some(answer) = finalized {
                         // Finalize won; a still-running thread losing the
                         // race to it is the documented spawn-and-wait-in-one-
@@ -5752,7 +5962,8 @@ impl SelfHarnessDriver {
             let submission = self
                 .present_askuser_form(&mut reprompts, FormSource::Answerer { node }, &shape)
                 .await?;
-            self.agent.answer_dialog(node, submission).await?;
+            retry_on_turn_in_flight_async(|| self.agent.answer_dialog(node, submission.clone()))
+                .await?;
 
             let Some((hole, classified, _table)) = self.agent.pending_hole_full(node) else {
                 // The resume completed the node with no further suspension.
@@ -6172,7 +6383,8 @@ impl SelfHarnessDriver {
                     // Immediate resume with the cycle's entry state — no
                     // operator, no model round (note's service shape).
                     let state = self.cycle_state_json.clone().unwrap_or(Json::Null);
-                    self.agent.answer_dialog(node, state).await?;
+                    retry_on_turn_in_flight_async(|| self.agent.answer_dialog(node, state.clone()))
+                        .await?;
                 }
                 // PRD 21 C5: a branch-node window's own `delegate` call
                 // lowers to a real `Subagent` send (`Tidepool.Agent.Delegate.
@@ -6213,9 +6425,11 @@ impl SelfHarnessDriver {
                             }
                         }
                     }
-                    self.agent
-                        .resume_with_value(node, &pending_hole, value)
-                        .await?;
+                    retry_on_turn_in_flight_async(|| {
+                        self.agent
+                            .resume_with_value(node, &pending_hole, value.clone())
+                    })
+                    .await?;
                 }
                 _ => break,
             }
@@ -6283,6 +6497,75 @@ impl SelfHarnessDriver {
         Ok(submission)
     }
 
+    /// F11: the shared shape of driving one classified `Fork` hole's
+    /// children to completion and assembling their answer —
+    /// [`Self::drain_answerer_fork`] (direct `fork`/`forkAll`) and
+    /// [`Self::service_thread_ready`]'s Fork arm (a thread's own
+    /// `async (fork …)`) used to carry this ~30-line sequence as
+    /// near-verbatim twins (the same drift shape that produced F3's
+    /// round-loop divergence): brief normalization, the fanout element type,
+    /// per-child title, sequential [`Self::drive_fork_child_window`] drive,
+    /// per-child [`wrap_fork_value`], then single-vs-fanout assembly. The two
+    /// callers differ only in the per-child title wording (plain vs
+    /// `"async "`-prefixed) and in how the ASSEMBLED answer crosses back
+    /// (a node-aware resume vs a raw thread resume) — both stay with the
+    /// caller. `title_single`/`title_fanout_prefix` carry the wording
+    /// difference (the WORD itself changes — "fork" vs "fanout" — not just a
+    /// shared prefix, so a bare prefix+index wouldn't reproduce the original
+    /// titles).
+    #[allow(clippy::too_many_arguments)]
+    async fn drive_fork_children(
+        &self,
+        node: NodeId,
+        title_single: &str,
+        title_fanout_prefix: &str,
+        site: crate::tree::SiteId,
+        ty: Option<&str>,
+        fan: &Option<FanBadge>,
+        prompts: &[String],
+        prompt: &str,
+        source: engine::ForkSource,
+        table: &DataConTable,
+        fork_depth: u32,
+        fork_subtree: &std::sync::atomic::AtomicU32,
+    ) -> Result<Value, DriverError> {
+        let briefs = engine::fork_briefs(fan, prompts, prompt)
+            .map_err(|e| DriverError::Session(e.to_string()))?;
+        let element_ty = match fan {
+            None => ty,
+            Some(_) => ty.and_then(engine::strip_list_type),
+        };
+        let mut answers = Vec::with_capacity(briefs.len());
+        for (idx, brief) in briefs.iter().enumerate() {
+            let title = if fan.is_none() {
+                title_single.to_string()
+            } else {
+                format!("{title_fanout_prefix} {idx}")
+            };
+            let value = self
+                .drive_fork_child_window(
+                    node,
+                    &title,
+                    brief,
+                    element_ty,
+                    site.get(),
+                    table,
+                    fork_depth + 1,
+                    fork_subtree,
+                )
+                .await?;
+            answers.push(wrap_fork_value(source, value, table)?);
+        }
+        if fan.is_none() {
+            Ok(answers
+                .pop()
+                .expect("fork_briefs yields exactly one brief for a single fork"))
+        } else {
+            engine::build_list_value(answers, table)
+                .map_err(|e| DriverError::Session(e.to_string()))
+        }
+    }
+
     /// Drain a `HoleRouting::Fork` suspension on the per-loop answerer
     /// (`forkAll`/`fork` via `Tidepool.Fork`): resume it by driving each
     /// child to completion on the full pump row via
@@ -6321,7 +6604,8 @@ impl SelfHarnessDriver {
             let cost = ForkBudget::cost(&classified.routing);
             if matches!(classified.routing, HoleRouting::Fork { .. }) {
                 if let Some(msg) = self.check_fork_budgets(budget, cost, fork_subtree, ty_label) {
-                    self.agent.refuse_pending_hole(node, msg.clone())?;
+                    retry_on_turn_in_flight(|| self.agent.refuse_pending_hole(node, msg.clone()))
+                        .await?;
                     self.agent.push_user_turn(node, &msg)?;
                     return Ok(None);
                 }
@@ -6338,42 +6622,26 @@ impl SelfHarnessDriver {
                     prompts,
                     source,
                 } => {
-                    let briefs = engine::fork_briefs(fan, prompts, &classified.prompt)
-                        .map_err(|e| DriverError::Session(e.to_string()))?;
-                    let element_ty = match fan {
-                        None => ty.as_deref(),
-                        Some(_) => ty.as_deref().and_then(engine::strip_list_type),
-                    };
-                    let mut answers = Vec::with_capacity(briefs.len());
-                    for (idx, brief) in briefs.iter().enumerate() {
-                        let title = if fan.is_none() {
-                            "fork answerer".to_string()
-                        } else {
-                            format!("fanout answerer {idx}")
-                        };
-                        let value = self
-                            .drive_fork_child_window(
-                                node,
-                                &title,
-                                brief,
-                                element_ty,
-                                site.get(),
-                                &table,
-                                fork_depth + 1,
-                                fork_subtree,
-                            )
-                            .await?;
-                        answers.push(wrap_fork_value(*source, value, &table)?);
-                    }
-                    let answer = if fan.is_none() {
-                        answers
-                            .pop()
-                            .expect("fork_briefs yields exactly one brief for a single fork")
-                    } else {
-                        engine::build_list_value(answers, &table)
-                            .map_err(|e| DriverError::Session(e.to_string()))?
-                    };
-                    self.agent.resume_with_value(node, &hole, answer).await?;
+                    let answer = self
+                        .drive_fork_children(
+                            node,
+                            "fork answerer",
+                            "fanout answerer",
+                            *site,
+                            ty.as_deref(),
+                            fan,
+                            prompts,
+                            &classified.prompt,
+                            *source,
+                            &table,
+                            fork_depth,
+                            fork_subtree,
+                        )
+                        .await?;
+                    retry_on_turn_in_flight_async(|| {
+                        self.agent.resume_with_value(node, &hole, answer.clone())
+                    })
+                    .await?;
                 }
                 other => {
                     return Err(DriverError::Session(format!(
@@ -6416,6 +6684,31 @@ impl SelfHarnessDriver {
             ),
         )?;
         Ok(None)
+    }
+
+    /// Cleanup for a mechanism failure between a fork/branch child's GUI +
+    /// tree-path registration and its [`BranchWindow`] guard coming into
+    /// existence (F7): those registrations predate the guard, so nothing
+    /// else retires them on an early `?` between them and
+    /// `BranchWindow::from_lease` — `force_attached`/`mint_scope` are both
+    /// fallible there (a checkout race is the F4 contention class; a dead
+    /// parent scope is `ok_or_else`'d). Removes the `branch_node_paths`/
+    /// `node_labels` entries and retires the GUI panel (when a label was
+    /// registered), then retires the tree/session node itself through the
+    /// ONE retirement path — safe whether or not `force_attached` ever ran:
+    /// [`Harness::terminate_node`] is idempotent over a never-forced (still
+    /// `Thunk`) node, and if `force_attached` DID succeed before the failure
+    /// (a live `mint_scope` refusal), it also closes the realm the caller
+    /// already assigned via [`Harness::set_node_realm`] — the "permanently
+    /// Running tree node" half of the leak.
+    fn abort_unguarded_child(&self, node: NodeId, label: Option<&str>, reason: &str) {
+        self.branch_node_paths.lock().remove(&node);
+        if let Some(label) = label {
+            self.node_labels.lock().remove(&node);
+            self.gate.node_failed(label, reason);
+            self.gate.retire_node(label);
+        }
+        let _ = self.agent.terminate_node(node, reason);
     }
 
     /// Fork-subsumes-split STEP 1 (plans/fork-subsumes-split.md): drive ONE
@@ -6501,24 +6794,46 @@ impl SelfHarnessDriver {
 
         // Attach to the SHARED session: no per-node machine, no separate
         // decl plane — the child's turns run as a realm on the one machine.
-        self.agent.force_attached(node, Actor::Operator, sid)?;
+        if let Err(e) = self.agent.force_attached(node, Actor::Operator, sid) {
+            let reason = format!("fork child of {parent:?}: attach failed: {e}");
+            self.abort_unguarded_child(node, Some(&label), &reason);
+            return Err(e.into());
+        }
         let realm = self.mint_realm();
         self.agent.set_node_realm(node, realm);
+        // F4: a fork child's window can run concurrently against a sibling
+        // branch-fanout child (or another fork subtree entirely) on the SAME
+        // shared outer session — `drive_branch_fanout_child` already opts its
+        // own nodes in for exactly this reason; a fork child never did,
+        // making its very first checkout (the scope mint below, then every
+        // turn `drive_answerer_to_finalize` drives) fail fast on what is
+        // "expected, benign contention" everywhere else on this plane.
+        self.agent.set_retry_checkout_on_contention(node, true);
         // Scope minted from the LIVE parent's scope: this is what makes the
         // parent's declarations (and its ancestors') readable and sibling
         // declarations invisible — the same scope-tree ancestry the branch
         // path gets from its frozen snapshot's scope.
         let parent_scope = self.agent.node_scope(parent);
-        let child_scope = self
+        let child_scope = match self
             .agent
-            .with_session(sid, |s| s.mint_scope(parent_scope))
-            .map_err(|e| DriverError::Session(e.to_string()))?
-            .ok_or_else(|| {
-                DriverError::Session(format!(
+            .with_session_retrying(node, sid, |s| s.mint_scope(parent_scope))
+            .await
+        {
+            Ok(Some(scope)) => scope,
+            Ok(None) => {
+                let reason = format!(
                     "fork child of {parent:?}: parent scope {parent_scope:?} is not live \
                      (its window already retired?)"
-                ))
-            })?;
+                );
+                self.abort_unguarded_child(node, Some(&label), &reason);
+                return Err(DriverError::Session(reason));
+            }
+            Err(e) => {
+                let reason = format!("fork child of {parent:?}: mint_scope failed: {e}");
+                self.abort_unguarded_child(node, Some(&label), &reason);
+                return Err(DriverError::Session(reason));
+            }
+        };
         self.agent.set_node_scope(node, child_scope);
         self.agent
             .set_answer_contract(node, self.answer_contract(ty, &modules));
@@ -6677,6 +6992,7 @@ impl SelfHarnessDriver {
         budget: &mut ForkBudget,
         fork_depth: u32,
         fork_subtree: &std::sync::atomic::AtomicU32,
+        ty_label: &str,
     ) -> Result<AnswererGreenExit, DriverError> {
         loop {
             let Some((hole, classified, table, _asks, request)) =
@@ -6689,6 +7005,7 @@ impl SelfHarnessDriver {
             }
             let blocked = match self
                 .service_green_hole(
+                    Some(node),
                     GreenChain::Primary,
                     &hole.0,
                     &request,
@@ -6735,12 +7052,13 @@ impl SelfHarnessDriver {
                     budget,
                     fork_depth,
                     fork_subtree,
+                    ty_label,
                 )
                 .await?
             {
                 ThreadServiced::Continue => {}
-                ThreadServiced::BudgetRefused { needed } => {
-                    return Ok(AnswererGreenExit::ForkBudgetRefused { needed });
+                ThreadServiced::BudgetRefused { msg } => {
+                    return Ok(AnswererGreenExit::ForkBudgetRefused { msg });
                 }
                 ThreadServiced::Misuse(msg) => {
                     return Ok(AnswererGreenExit::AsyncMisuse { msg });
@@ -6768,6 +7086,7 @@ impl SelfHarnessDriver {
         budget: &mut ForkBudget,
         fork_depth: u32,
         fork_subtree: &std::sync::atomic::AtomicU32,
+        ty_label: &str,
     ) -> Result<ThreadServiced, DriverError> {
         let sid = self.outer_sid()?;
         let ResidentOutcome::Suspended { hole, request, .. } = outcome else {
@@ -6790,6 +7109,7 @@ impl SelfHarnessDriver {
             HoleRouting::Green => {
                 match self
                     .service_green_hole(
+                        Some(node),
                         chain,
                         hole.cont_id(),
                         &request,
@@ -6818,57 +7138,36 @@ impl SelfHarnessDriver {
                 // direct one. Refused = handed up as data; the dispatcher
                 // aborts the block and pushes the corrective.
                 let cost = ForkBudget::cost(&classified.routing);
-                if self
-                    .check_fork_budgets(budget, cost, fork_subtree, "")
-                    .is_some()
-                {
-                    return Ok(ThreadServiced::BudgetRefused { needed: cost });
+                if let Some(msg) = self.check_fork_budgets(budget, cost, fork_subtree, ty_label) {
+                    return Ok(ThreadServiced::BudgetRefused { msg });
                 }
                 // Children run as full sessions on the pump, exactly like a
                 // direct fork's; only the resume differs — the thread's
                 // continuation is RAW (no node bookkeeping), so the fresh
                 // outcome re-enters the ready queue like every other raw
                 // resume in this scheduler.
-                let briefs = engine::fork_briefs(fan, prompts, &classified.prompt)
-                    .map_err(|e| DriverError::Session(e.to_string()))?;
-                let element_ty = match fan {
-                    None => ty.as_deref(),
-                    Some(_) => ty.as_deref().and_then(engine::strip_list_type),
-                };
-                let mut answers = Vec::with_capacity(briefs.len());
-                for (idx, brief) in briefs.iter().enumerate() {
-                    let title = if fan.is_none() {
-                        "async fork answerer".to_string()
-                    } else {
-                        format!("async fanout answerer {idx}")
-                    };
-                    let value = self
-                        .drive_fork_child_window(
-                            node,
-                            &title,
-                            brief,
-                            element_ty,
-                            site.get(),
-                            &table,
-                            fork_depth + 1,
-                            fork_subtree,
-                        )
-                        .await?;
-                    answers.push(wrap_fork_value(source, value, &table)?);
-                }
-                let answer = if fan.is_none() {
-                    answers
-                        .pop()
-                        .expect("fork_briefs yields exactly one brief for a single fork")
-                } else {
-                    engine::build_list_value(answers, &table)
-                        .map_err(|e| DriverError::Session(e.to_string()))?
-                };
+                let answer = self
+                    .drive_fork_children(
+                        node,
+                        "async fork answerer",
+                        "async fanout answerer",
+                        site,
+                        ty.as_deref(),
+                        fan,
+                        prompts,
+                        &classified.prompt,
+                        source,
+                        &table,
+                        fork_depth,
+                        fork_subtree,
+                    )
+                    .await?;
                 let next = self
                     .agent
-                    .with_session(sid, |s| {
+                    .with_session_retrying(node, sid, |s| {
                         s.resume(ResidentHole::plain(hole.cont_id()), answer)
                     })
+                    .await
                     .map_err(|e| DriverError::Session(e.to_string()))?
                     .map_err(|e| DriverError::Session(format!("async fork resume failed: {e}")))?;
                 green.ready.push_back(GreenReady {
@@ -6884,7 +7183,10 @@ impl SelfHarnessDriver {
                     .map_err(|e| DriverError::Session(format!("note () bridge: {e}")))?;
                 let next = self
                     .agent
-                    .with_session(sid, |s| s.resume(ResidentHole::plain(hole.cont_id()), unit))
+                    .with_session_retrying(node, sid, |s| {
+                        s.resume(ResidentHole::plain(hole.cont_id()), unit)
+                    })
+                    .await
                     .map_err(|e| DriverError::Session(e.to_string()))?
                     .map_err(|e| DriverError::Session(format!("thread note resume failed: {e}")))?;
                 green.ready.push_back(GreenReady {
@@ -6899,9 +7201,10 @@ impl SelfHarnessDriver {
                     .map_err(|e| DriverError::Session(format!("getStateJson bridge: {e}")))?;
                 let next = self
                     .agent
-                    .with_session(sid, |s| {
+                    .with_session_retrying(node, sid, |s| {
                         s.resume(ResidentHole::plain(hole.cont_id()), value)
                     })
+                    .await
                     .map_err(|e| DriverError::Session(e.to_string()))?
                     .map_err(|e| {
                         DriverError::Session(format!("thread getStateJson resume failed: {e}"))
@@ -6928,9 +7231,10 @@ impl SelfHarnessDriver {
                 }
                 let next = self
                     .agent
-                    .with_session(sid, |s| {
+                    .with_session_retrying(node, sid, |s| {
                         s.resume(ResidentHole::plain(hole.cont_id()), value)
                     })
+                    .await
                     .map_err(|e| DriverError::Session(e.to_string()))?
                     .map_err(|e| {
                         DriverError::Session(format!("thread subagent resume failed: {e}"))
@@ -6971,17 +7275,23 @@ impl SelfHarnessDriver {
     /// eagerly by the cancel arm.) Returns how many threads were dropped
     /// MID-FLIGHT — Running only; a settled thread was not "dropped" — so
     /// the corrective prompt can say so.
-    fn sweep_answerer_green(&self, green: &mut AnswererGreen) -> usize {
+    async fn sweep_answerer_green(&self, node: NodeId, green: &mut AnswererGreen) -> usize {
         let mut dropped = 0usize;
         if let Ok(sid) = self.outer_sid() {
             for entry in green.threads.values() {
                 match entry.state {
                     GreenThreadState::Running => {
-                        let _ = self.agent.with_session(sid, |s| s.close_realm(entry.realm));
+                        let _ = self
+                            .agent
+                            .with_session_retrying(node, sid, |s| s.close_realm(entry.realm))
+                            .await;
                         dropped += 1;
                     }
                     GreenThreadState::Settled(_) => {
-                        let _ = self.agent.with_session(sid, |s| s.close_realm(entry.realm));
+                        let _ = self
+                            .agent
+                            .with_session_retrying(node, sid, |s| s.close_realm(entry.realm))
+                            .await;
                     }
                     GreenThreadState::Cancelled => {}
                 }
@@ -6991,6 +7301,34 @@ impl SelfHarnessDriver {
         green.waiters.clear();
         green.ready.clear();
         dropped
+    }
+
+    /// F6: sweep `green`'s still-open thread realms before an early exit out
+    /// of [`Self::drive_answerer_to_finalize`]'s inner round-servicing loop —
+    /// that loop's NORMAL exits already sweep (the post-loop code, and the
+    /// `ForkBudgetRefused`/`AsyncMisuse` arms' own inline sweeps before their
+    /// `continue 'round`), but a `?`-propagated mechanism error from any of
+    /// `drain_note_holes`/`service_askuser_hole`/`drain_answerer_fork`/
+    /// `service_answerer_green` used to skip straight past all of them,
+    /// leaking every thread realm the round had open. Wrapping the loop
+    /// itself in a `?`-catching scope (the shape `run_loop_fragment_inner`'s
+    /// own sweep uses) does not fit here: several arms `continue 'round` — a
+    /// jump to the OUTER round loop — which cannot cross an intervening
+    /// async-block boundary, so each unswept `?`/`return` site is wrapped
+    /// individually instead. A no-op when `result` is `Ok` or `green` is
+    /// still `None` (no threads were ever spawned this round).
+    async fn sweep_green_on_err<T>(
+        &self,
+        node: NodeId,
+        green: &mut Option<AnswererGreen>,
+        result: Result<T, DriverError>,
+    ) -> Result<T, DriverError> {
+        if result.is_err() {
+            if let Some(g) = green.as_mut() {
+                self.sweep_answerer_green(node, g).await;
+            }
+        }
+        result
     }
 
     /// Evaluate `render(state)` against the outer session, then compose the

@@ -128,6 +128,22 @@ pub enum HarnessError {
     /// evicted, so this means "wrong digest", never "expired".
     #[error("no frozen context snapshot with digest {0}")]
     UnknownSnapshot(SnapshotDigest),
+    /// [`Self::resume_with_borrowed_root`] landed on a
+    /// [`crate::tree`]-suspended [`ResidentHole::Binding`] hole (F9: a
+    /// bind-shaped answerer turn, `h <- async (…closure-valued…); wait h`,
+    /// carries the Binding obligation through every resume of that
+    /// continuation) — the raw `resume_handle_borrowed` seam carries no
+    /// binder/generation obligation, so honoring it would silently drop the
+    /// binding the hole owes. Kept distinct from [`Self::Resident`] (a
+    /// stringly-typed catch-all) so a caller CAN distinguish this specific,
+    /// model-attributable shape from an opaque mechanism failure — the
+    /// answerer-plane green scheduler does, routing it through
+    /// `AnswererGreenExit::AsyncMisuse` instead of hard-failing the run.
+    #[error(
+        "node {0:?}: a borrowed-root resume cannot honor a Binding hole's binder \
+         obligation — refuse rather than silently drop it"
+    )]
+    BorrowedRootOnBindingHole(NodeId),
 }
 
 impl HarnessError {
@@ -1173,9 +1189,25 @@ impl Harness {
     }
 
     /// Adopt a node-less session into the tree's registry (the one-session
-    /// OUTER session) — the caller owns its retirement.
+    /// OUTER session) — the caller owns its retirement (see
+    /// [`Self::retire_adopted_session`]).
     pub fn adopt_session(&self, session: Session) -> tidepool_repr::SessionId {
         self.tree.adopt_session(session)
+    }
+
+    /// Retire a node-LESS adopted session (F6: [`Self::adopt_session`]'s own
+    /// doc names the caller as owning retirement, but until this existed
+    /// nothing actually called it — the one-session driver's
+    /// `discard_resident_state` dropped only its own `sid` handle on a cycle
+    /// error, never removing the machine from the registry, so the session
+    /// — heap, code arena, every still-parked frame — stayed alive there
+    /// forever; the next `bootstrap` adopts a FRESH session under a NEW
+    /// `sid`, so the old one becomes unreachable garbage that is never
+    /// collected). This is [`Self::terminate_node`]'s sibling for a session
+    /// that was never forced onto the tree at all, so there is no [`NodeId`]
+    /// to route a removal through.
+    pub fn retire_adopted_session(&self, sid: tidepool_repr::SessionId) {
+        self.tree.registry().remove(sid);
     }
 
     /// Replace the machine under `sid` with a fresh one (machine ROTATION —
@@ -1285,11 +1317,68 @@ impl Harness {
         sid: tidepool_repr::SessionId,
         f: impl FnOnce(&mut Session) -> T,
     ) -> Result<T, HarnessError> {
-        let mut co = self
+        let co = self
             .tree
             .registry()
             .checkout_run(sid)
             .map_err(|e| HarnessError::Resident(format!("outer session checkout: {e}")))?;
+        Ok(self.run_with_checkout(sid, co, f))
+    }
+
+    /// [`Self::with_session`], but — ONLY when `node` opted in via
+    /// [`Self::set_retry_checkout_on_contention`] — retries a checkout
+    /// contention refusal with a short backoff instead of failing fast, the
+    /// SAME idiom [`Self::checkout_run_retrying`] applies to a node-keyed
+    /// checkout (F4: a raw `with_session` call against an attached answerer's
+    /// SHARED session has no contention retry at all today, so a concurrently
+    /// -driven sibling holding the machine turns "expected, benign
+    /// contention" into a mechanism failure that hard-fails the whole
+    /// fanout). `node` is used solely to look up that opt-in flag — the
+    /// checkout itself is still against `sid`, exactly like `with_session`.
+    /// A node that never opts in gets EXACTLY `with_session`'s behavior.
+    pub async fn with_session_retrying<T>(
+        &self,
+        node: NodeId,
+        sid: tidepool_repr::SessionId,
+        f: impl FnOnce(&mut Session) -> T,
+    ) -> Result<T, HarnessError> {
+        let retry = self
+            .convos
+            .lock()
+            .get(&node)
+            .map(|c| c.retry_checkout_on_contention)
+            .unwrap_or(false);
+        if !retry {
+            return self.with_session(sid, f);
+        }
+        let deadline = tokio::time::Instant::now() + Self::CONTENTION_RETRY_BUDGET;
+        loop {
+            match self.tree.registry().checkout_run(sid) {
+                Ok(co) => return Ok(self.run_with_checkout(sid, co, f)),
+                Err(CheckoutError::Running(_)) if tokio::time::Instant::now() < deadline => {
+                    tokio::time::sleep(Self::CONTENTION_RETRY_BACKOFF).await;
+                }
+                Err(e) => {
+                    return Err(HarnessError::Resident(format!(
+                        "outer session checkout: {e}"
+                    )));
+                }
+            }
+        }
+    }
+
+    /// Shared tail of [`Self::with_session`]/[`Self::with_session_retrying`]:
+    /// given an already-successful checkout, drain queued window exits,
+    /// reset the ambient realm/scope, run `f`, and restore with the
+    /// session's own reported hole set — the one place this sequence is
+    /// written, so the two checkout strategies (fail-fast, retrying) cannot
+    /// drift on what happens once the machine is actually in hand.
+    fn run_with_checkout<T>(
+        &self,
+        sid: tidepool_repr::SessionId,
+        mut co: Checkout<'_, Session>,
+        f: impl FnOnce(&mut Session) -> T,
+    ) -> T {
         self.drain_pending_window_exits(sid, co.machine());
         co.machine().set_realm(OUTER_REALM);
         // Same reset, name side: the shared session's own runs are ROOT-scoped,
@@ -1307,7 +1396,7 @@ impl Harness {
             .map(|h| HoleId(h.to_string()))
             .collect();
         co.restore_suspended(holes);
-        Ok(r)
+        r
     }
 
     /// Apply every queued window exit for `sid` (attached-node retirements
@@ -4046,9 +4135,13 @@ impl Harness {
     /// A borrowed-root resume is refused on a [`ResidentHole::Binding`] hole:
     /// the raw `resume_handle_borrowed` seam carries no binder/generation
     /// obligation, so honoring it here would silently drop the binding the
-    /// hole owes. No current caller can hit this (green primary holes are
-    /// mid-expression `Plain` parks), but the refusal keeps the gap loud if
-    /// one ever does.
+    /// hole owes. Reachable from the answerer green lane (F9): a bind-shaped
+    /// turn (`h <- async (…closure-valued…); wait h`) carries the Binding
+    /// obligation through every resume of that continuation, so a settled
+    /// closure-valued thread result delivered here lands on exactly this
+    /// hole shape. The typed [`HarnessError::BorrowedRootOnBindingHole`]
+    /// this returns is what lets the answerer-plane scheduler route it to
+    /// the model as a corrective instead of hard-failing the run.
     async fn resume_parent_input(
         &self,
         node: NodeId,
@@ -4080,10 +4173,7 @@ impl Harness {
         if matches!(input, ResumeParentInput::BorrowedRoot(_))
             && !matches!(resident_hole, ResidentHole::Plain(_))
         {
-            return Err(HarnessError::Resident(format!(
-                "node {node:?}: a borrowed-root resume cannot honor a Binding hole's \
-                 binder obligation — refuse rather than silently drop it"
-            )));
+            return Err(HarnessError::BorrowedRootOnBindingHole(node));
         }
         let checkout = self.checkout_resume(node, hole)?;
         // ONE consuming resume: `resident_hole` already carries its own
