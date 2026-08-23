@@ -33,7 +33,7 @@ module HarnessTypes
     -- * The brief a node is prompted with
   , renderBrief
 
-    -- * What a window may finalize
+    -- * What a session may finalize
   , LayerProposal (..)
   , ProposedBranch (..)
   , Posture (..)
@@ -49,7 +49,7 @@ module HarnessTypes
     -- * The seed gate ('Harness.loop'\'s opening ask)
   , SeedQuestion (..)
 
-    -- * A window's ask for operator intent
+    -- * A session's ask for operator intent
   , OperatorSteering (..)
 
     -- * Wire enum to base functor (the one place they are mapped)
@@ -187,7 +187,7 @@ initialState =
           , maxFanOut = 4
           , -- Autonomy by default (operator decision, 2026-08-19): splits
             -- run without per-layer operator review. The operator hears
-            -- from a window through its own 'OperatorSteering' ask when it
+            -- from a session through its own 'OperatorSteering' ask when it
             -- genuinely needs intent clarified — reviewing every proposed
             -- split cost more attention than it bought. The gate machinery
             -- stays config-selectable for runs that want it.
@@ -483,7 +483,7 @@ data NodeAnswer = NodeAnswer
   , answerBadges    :: [Text]
   , answerTree      :: [Text]
   , answerNodes     :: Int
-  , -- | Model windows spent in this subtree.  A node a budget refused BEFORE
+  , -- | Model sessions spent in this subtree.  A node a budget refused BEFORE
     -- its coalgebra ran spends one (its fold); every other node spends two.
     answerWindows   :: Int
   , answerForced    :: Int
@@ -549,10 +549,10 @@ render st = case st.lastRun of
 Question: {st.question}
 {budgetLine}
 
-Your next turn discovers a tree one layer at a time: a coalgebra window
+Your next turn discovers a tree one layer at a time: a discovery session
 finalizes a LayerProposal for THIS node only (finish locally, or split into
 the next layer's branches), each branch descends recursively from inherited
-context, and an algebra window folds every realized layer back in declared
+context, and a fold session folds every realized layer back in declared
 branch order.
 
 {coalgebraProtocol c}|]
@@ -583,7 +583,7 @@ Turns folded: {show st.turnCount}
     -- channel that carries the count into the fold.  The journal has every
     -- one of them, keyed by node path.
     receiptLine r =
-      [fmt|receipt: {show r.runNodes} nodes, {show r.runWindows} windows, {show r.runForced} budget-forced finishes, {show r.runFailed} failures; gate interventions are journaled per node under kind "gate"|]
+      [fmt|receipt: {show r.runNodes} nodes, {show r.runWindows} sessions, {show r.runForced} budget-forced finishes, {show r.runFailed} failures; gate interventions are journaled per node under kind "gate"|]
 
 -- | The one-off coalgebra teaching — moved here from
 -- @Harness.coalgebraPrompt@ (mechanics prose, the delegate\/askUser
@@ -607,9 +607,9 @@ Turns folded: {show st.turnCount}
 -- FIRST position in the assembled request.
 coalgebraProtocol :: Config -> Text
 coalgebraProtocol c =
-  [fmt|--- PROTOCOL: every "NODE ... — DISCOVER" window in this run ---
+  [fmt|--- PROTOCOL: every "NODE ... — DISCOVER" session in this run ---
 
-A coalgebra window decides ONE layer of the tree and only that layer. You
+A discovery session decides ONE layer of the tree and only that layer. You
 cannot describe a subtree: the answer type has no recursive arm, by design.
 Either finish here, or name the branches that should be worked next — each
 of them will be discovered the same way, and their results folded back to
@@ -620,19 +620,19 @@ Every record field is required — there are no optional fields on this type.
 
 --- SESSION: how code persists across this tree ---
 
-Every window in this run shares ONE resident Haskell session: one heap, one
+Every session in this run shares ONE resident Haskell environment: one heap, one
 accumulated scope. Everything you declare or bind — pure or effectful,
 however you spell the type — carries forward and is callable from your own
 later turns and your descendants — never a sibling's, declarations are
 ancestry-scoped, not run-wide; code visible in your inherited context really
 ran in this session, so treat it as live names, not prose. The one
 exception: a bind (`x <- expr`) whose captured value itself mentions this
-window's own effect type is refused at bind time — bind the plain parts
+session's own effect type is refused at bind time — bind the plain parts
 (Text, numbers, lists, Value, records you declared) separately instead.
 
 - Your `finalize` value must be plain data — no functions inside it.
-- `getStateJson` is a read-only snapshot, constant for your whole window —
-  it never changes mid-window and carries no draft to evolve. Durable
+- `getStateJson` is a read-only snapshot, constant for your whole session —
+  it never changes mid-session and carries no draft to evolve. Durable
   artifacts (file edits, repository changes) flow through a delegated
   subagent's own worktree branch, folded in by the driver, never through
   this state.
@@ -660,20 +660,20 @@ result looks like (may be blank). You get back `Left err` (render it with
 current repository — there is no worktree or raw-subagent surface here, and
 none is needed: bind the result, then finalize based on what it found.
 
-For bounded sub-questions whose answers you need IN HAND this window (a
+For bounded sub-questions whose answers you need IN HAND this session (a
 fact to check, a draft to produce, two options argued), fork typed
 sub-answerers instead of splitting the tree: `import Tidepool.Fork (fork)`,
 then `h <- async (fork @T "brief")` per question, `wait` each, and fold the
 results into what you finalize — `T` may be a type you declared this
 session, so design the result type first. Spawn and wait in the same
 block. A split (`ProposeSplit`) is for lines of thought that deserve
-their own windows in the tree; a fork is for answers this window consumes.
+their own sessions in the tree; a fork is for answers this session consumes.
 
-Your window is a residency, and WAVES are its working rhythm: fork a wave,
-fold what comes back, and let that shape the next wave, a delegated code
-task, or a question to the operator — round after round, until another
-round would not improve the answer. Do not oneshot a question that
-deserved exploration; the round budget exists to be used.
+This is a multi-round session, and batches are its working rhythm: fork a
+batch of sub-answerers, fold what comes back, and let that shape the next
+batch, a delegated code task, or a question to the operator — round after
+round, until another round would not improve the answer. Do not one-shot a
+question that deserved exploration; the round budget exists to be used.
 
 If the OPERATOR's intent is genuinely ambiguous — the question underdetermines
 a fork only they can steer — ask them:
@@ -686,7 +686,7 @@ and title together are the form's ONLY context, so they must stand alone.
 If you present discrete alternatives (`choose`), author any escape hatch as
 one of the values — e.g. a "none of these" arm carrying your fallback —
 there is no built-in cancel or back. Ask ONLY when their answer would
-change what this window does; an ask is a human interrupt, so otherwise
+change what this session does; an ask is a human interrupt, so otherwise
 decide, and record the assumption in what you finalize.
 
 Finalize a LayerProposal:
@@ -699,7 +699,7 @@ Finalize a LayerProposal:
   ProposedBranch {{ branchTitle, branchRole, branchInstruction }} with
   branchRole one of Primary, Alternative, Critic. A branch with a blank
   title or instruction, or a split with no branches, is treated as a failed
-  window — not as a finish you chose.
+  session — not as a finish you chose.
 
 Two complete examples:
 

@@ -1143,7 +1143,7 @@ pub fn answerer_hole_card(
         String::new()
     } else {
         format!(
-            "Your effect row THIS WINDOW is `[{}]` — these effects and only \
+            "The effects available in THIS SESSION are `[{}]` — these and only \
              these compile here, whatever any earlier framing listed.\n\n",
             effect_row.join(", ")
         )
@@ -1151,21 +1151,21 @@ pub fn answerer_hole_card(
     format!(
         "The loop needs a typed answer of type `{ty}`.\n\n\
          {prompt}\n\n\
-         {row}{shape}This request holds your window open: take the rounds you need \
-         (```haskell blocks, run in order — explore, define, `note`, `askUser`), \
-         then answer by evaluating `finalize @{ty_at} value` — THAT ends the \
-         window and hands the value back to the loop.{scope}",
+         {row}{shape}This request opens a multi-round session: take the model \
+         rounds you need (```haskell blocks, run in order — explore, define, \
+         `note`, `askUser`), then answer by evaluating `finalize @{ty_at} value` \
+         — THAT ends the session and hands the value back to the loop.{scope}",
         scope = if imports.is_empty() {
             String::new()
         } else {
             format!(
                 " `{ty}` is already in scope (this turn imports {}) — and `finalize` \
-                 is PINNED to `{ty}` in your row, so a wrong-typed answer is a \
-                 compile error naming the row, not a value that silently crosses. \
-                 Construct a real `{ty}`, do not substitute a tuple or `Text`. (The \
-                 pin constrains `finalize`'s type only — your row's other effects, \
-                 and define/explore rounds, remain available as your system framing \
-                 says.)",
+                 is PINNED to `{ty}` in this session's effect list, so a wrong-typed \
+                 answer is a compile error naming that list, not a value that \
+                 silently crosses. Construct a real `{ty}`, do not substitute a \
+                 tuple or `Text`. (The pin constrains `finalize`'s type only — the \
+                 other available effects, and define/explore rounds, remain \
+                 available as your system framing says.)",
                 imports.join(", ")
             )
         }
@@ -3297,7 +3297,9 @@ mod tests {
             .collect();
         let card = answerer_hole_card("decide", Some("Verdict"), &[], None, &row);
         assert!(
-            card.contains("Your effect row THIS WINDOW is `[Subagent, AskUser, Finalize]`"),
+            card.contains(
+                "The effects available in THIS SESSION are `[Subagent, AskUser, Finalize]`"
+            ),
             "{card}"
         );
 

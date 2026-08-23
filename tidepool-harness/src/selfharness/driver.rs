@@ -485,7 +485,7 @@ fn wrap_fork_value(
 /// what happened, what survives, and the one useful next step.
 fn fork_budget_refusal(spent: u32, cap: u32, needed: u32, ty_label: &str) -> String {
     format!(
-        "Fork budget exhausted: this window has spawned {spent} of its {cap} fork \
+        "Fork budget exhausted: this session has spawned {spent} of its {cap} fork \
          children, and that block needed {needed} more, so the block was ABORTED \
          (top-level declarations from earlier rounds persist; the aborted block's \
          bindings are lost). Do not fork again — finalize with what you have: \
@@ -948,10 +948,10 @@ fn answerer_framing_suffix(fork_budget: u32) -> String {
          bind with `x <- …` persists into your NEXT turn like GHCi, so you can \
          branch on it.\n\
          \n\
-         YOUR WINDOW IS A RESIDENCY, NOT A ONESHOT. You have up to {} model \
+         THIS IS A MULTI-ROUND SESSION, NOT A ONE-SHOT. You have up to {} model \
          rounds (a reminder arrives at round {}), and the EXPECTED shape of a \
-         non-trivial request is several of them: orient and define, fork a wave \
-         of sub-answerers, read what came back, fork the next wave (or delegate \
+         non-trivial request is several of them: orient and define, fork a batch \
+         of sub-answerers, read what came back, fork the next batch (or delegate \
          follow-up work) from what you learned, consult the operator where their \
          steer would genuinely change your answer — and only then finalize. A \
          one-round finalize on a question that deserved exploration is an \
@@ -959,12 +959,12 @@ fn answerer_framing_suffix(fork_budget: u32) -> String {
          the answer, and finalize the moment one isn't. Rounds \
          accumulate: bindings and `let` helpers from earlier rounds stay in scope. \
          A block that is ONLY top-level declarations (type signatures, function \
-         definitions, data types) is a DEFINE block — those declarations go onto \
-         your session's decl plane and persist BEYOND this window, across every \
-         future one: your growing library. Define what you will want again.\n\
+         definitions, data types) persists BEYOND this session, for every later \
+         session in this run: your growing library. Define what you will want \
+         again.\n\
          \n\
          THE OPERATOR CANNOT INITIATE: they see your notes and the forms you \
-         present, and between windows they may attach a message that arrives in \
+         present, and between sessions they may attach a message that arrives in \
          your framing. If you want their input NOW, present a form (`askUser`/\
          `choose`); silence from them mid-window is structural, not meaningful.\n\
          \n\
@@ -995,18 +995,18 @@ fn answerer_framing_suffix(fork_budget: u32) -> String {
          ```\n\
          \n\
          Spawn and wait in the SAME block — threads do not survive their block, \
-         though their WAITED results (bound with `<-`) do. WAVES compose two \
-         ways: within one block, fork a wave, wait it, fold the results in \
-         ordinary Haskell, and fork the next wave from what you computed; or \
-         one wave per round, ending the round after the waits so YOUR OWN \
-         judgment (not just dataflow) shapes the next wave's briefs from the \
-         bound results. This window may spawn at most {} fork children in total \
+         though their WAITED results (bound with `<-`) do. Batches compose two \
+         ways: within one block, fork a batch, wait for it, fold the results in \
+         ordinary Haskell, and fork the next batch from what you computed; or \
+         one batch per round, ending the round after the waits so YOUR OWN \
+         judgment (not just dataflow) shapes the next batch's briefs from the \
+         bound results. This session may spawn at most {} fork children in total \
          (`fork` costs 1, `forkAll` its list length; direct and async forks draw \
          on the same pool); one past the budget is refused and the block \
          aborted.\n\
          \n\
          When you have the answer, COMMIT it by evaluating `finalize @T value`. This \
-         ends your turn and hands the typed value back to the loop. `T` is the type \
+         ends the session and hands the typed value back to the loop. `T` is the type \
          named in the request. Do not call any other effect to answer; `finalize` is \
          how you resolve the request.",
         ANSWERER_MAX_ROUNDS,
@@ -4727,7 +4727,7 @@ impl SelfHarnessDriver {
                 self.agent.push_user_turn(
                     node,
                     &format!(
-                        "You are approaching this window's round limit. Finalize now: \
+                        "You are approaching this session's round limit. Finalize now: \
                          evaluate `finalize @{} value` with your best answer.",
                         display_ty(ty_label)
                     ),
@@ -4783,12 +4783,12 @@ impl SelfHarnessDriver {
                     self.agent.push_user_turn(
                         node,
                         &format!(
-                            "Round complete — your window continues, and that round's \
+                            "Round complete — your session continues, and that round's \
                              definitions/bindings persist. The block evaluated to:\n\
                              {shown}\n\
                              The request still awaits its \
                              answer: when ready, evaluate `finalize @{ty_disp} value` \
-                             (that ends the window)."
+                             (that ends the session)."
                         ),
                     )?;
                 }
@@ -4811,7 +4811,7 @@ impl SelfHarnessDriver {
                     self.agent.push_user_turn(
                         node,
                         &format!(
-                            "A block did not compile — your window continues; everything \
+                            "A block did not compile — your session continues; everything \
                              that already ran persists. Reply with corrected ```haskell \
                              blocks. Another define/explore round is fine (top-level \
                              declarations are welcome and persist); when you are ready to \
@@ -4939,7 +4939,7 @@ impl SelfHarnessDriver {
                 self.agent.push_user_turn(
                     node,
                     &format!(
-                        "You are approaching this window's round limit. Finalize now: \
+                        "You are approaching this session's round limit. Finalize now: \
                          evaluate `finalize @{} value` with your best answer.",
                         display_ty(ty_label)
                     ),
@@ -5165,12 +5165,12 @@ impl SelfHarnessDriver {
                     self.agent.push_user_turn(
                         node,
                         &format!(
-                            "Round complete — your window continues, and that round's \
+                            "Round complete — your session continues, and that round's \
                              definitions/bindings persist. The block evaluated to:\n\
                              {shown}\n\
                              The request still awaits its \
                              answer: when ready, evaluate `finalize @{ty_disp} value` \
-                             (that ends the window)."
+                             (that ends the session)."
                         ),
                     )?;
                 }
@@ -5210,7 +5210,7 @@ impl SelfHarnessDriver {
                     self.agent.push_user_turn(
                         node,
                         &format!(
-                            "A block did not compile — your window continues; everything \
+                            "A block did not compile — your session continues; everything \
                              that already ran persists. Reply with corrected ```haskell \
                              blocks. Another define/explore round is fine (top-level \
                              declarations are welcome and persist); when you are ready to \
@@ -6463,7 +6463,7 @@ impl SelfHarnessDriver {
                 Ok(None)
             }
             HoleRouting::Finalize { .. } => Err(DriverError::Session(
-                "a green thread called `finalize` — the window's answer belongs on the \
+                "a green thread called `finalize` — the session's answer belongs on the \
                  main chain: `wait` your threads, then finalize from the top level"
                     .into(),
             )),
@@ -6568,7 +6568,7 @@ impl SelfHarnessDriver {
 
         let mut framing = author_text;
         if let Some(summary) = last_compaction {
-            framing.push_str("\n\nSummary of the prior window:\n");
+            framing.push_str("\n\nSummary of the prior context (compacted):\n");
             framing.push_str(summary);
         }
         framing.push_str(&format!("\n\nLoop count so far: {}.", self.iteration));
@@ -6661,7 +6661,7 @@ impl SelfHarnessDriver {
         let budget_target = u64::from(budget / COMPACTION_TARGET_DIVISOR);
         let target = budget_target.min(context_tokens.saturating_sub(1)).max(1);
         let prompt = format!(
-            "This work window has grown to roughly {context_tokens} tokens against a \
+            "This conversation has grown to roughly {context_tokens} tokens against a \
              {budget}-token context-window budget — it is time to compact before \
              continuing. Summarize EVERYTHING above (the whole conversation so far) \
              into a compact form you can continue from: a prose summary of what this \
