@@ -25,6 +25,7 @@ fn gen_list_map() -> impl Strategy<Value = (String, serde_json::Value)> {
 }
 
 #[test]
+#[ignore = "expensive: part of tidepool-testing::haskell_verified (JIT-vs-native proptest oracle); run with TIDEPOOL_EXPENSIVE_TESTS=1 cargo nextest run -p tidepool-testing --ignore-default-filter --run-ignored all -E 'binary(haskell_verified)'"]
 fn test_list_map() {
     run_template(50, gen_list_map());
 }
@@ -44,6 +45,7 @@ fn gen_list_filter() -> impl Strategy<Value = (String, serde_json::Value)> {
 }
 
 #[test]
+#[ignore = "expensive: part of tidepool-testing::haskell_verified (JIT-vs-native proptest oracle); run with TIDEPOOL_EXPENSIVE_TESTS=1 cargo nextest run -p tidepool-testing --ignore-default-filter --run-ignored all -E 'binary(haskell_verified)'"]
 fn test_list_filter() {
     run_template(50, gen_list_filter());
 }
@@ -75,6 +77,7 @@ fn gen_list_take_drop() -> impl Strategy<Value = (String, serde_json::Value)> {
 }
 
 #[test]
+#[ignore = "expensive: part of tidepool-testing::haskell_verified (JIT-vs-native proptest oracle); run with TIDEPOOL_EXPENSIVE_TESTS=1 cargo nextest run -p tidepool-testing --ignore-default-filter --run-ignored all -E 'binary(haskell_verified)'"]
 fn test_list_take_drop() {
     run_template(50, gen_list_take_drop());
 }
@@ -107,6 +110,7 @@ fn gen_list_zip() -> impl Strategy<Value = (String, serde_json::Value)> {
 }
 
 #[test]
+#[ignore = "expensive: part of tidepool-testing::haskell_verified (JIT-vs-native proptest oracle); run with TIDEPOOL_EXPENSIVE_TESTS=1 cargo nextest run -p tidepool-testing --ignore-default-filter --run-ignored all -E 'binary(haskell_verified)'"]
 fn test_list_zip() {
     run_template(50, gen_list_zip());
 }
@@ -126,6 +130,7 @@ fn gen_list_unzip() -> impl Strategy<Value = (String, serde_json::Value)> {
 }
 
 #[test]
+#[ignore = "expensive: part of tidepool-testing::haskell_verified (JIT-vs-native proptest oracle); run with TIDEPOOL_EXPENSIVE_TESTS=1 cargo nextest run -p tidepool-testing --ignore-default-filter --run-ignored all -E 'binary(haskell_verified)'"]
 fn test_list_unzip() {
     run_template(50, gen_list_unzip());
 }
@@ -145,6 +150,7 @@ fn gen_list_reverse() -> impl Strategy<Value = (String, serde_json::Value)> {
 }
 
 #[test]
+#[ignore = "expensive: part of tidepool-testing::haskell_verified (JIT-vs-native proptest oracle); run with TIDEPOOL_EXPENSIVE_TESTS=1 cargo nextest run -p tidepool-testing --ignore-default-filter --run-ignored all -E 'binary(haskell_verified)'"]
 fn test_list_reverse() {
     run_template(50, gen_list_reverse());
 }
@@ -164,6 +170,7 @@ fn gen_list_sort() -> impl Strategy<Value = (String, serde_json::Value)> {
 }
 
 #[test]
+#[ignore = "expensive: part of tidepool-testing::haskell_verified (JIT-vs-native proptest oracle); run with TIDEPOOL_EXPENSIVE_TESTS=1 cargo nextest run -p tidepool-testing --ignore-default-filter --run-ignored all -E 'binary(haskell_verified)'"]
 fn test_list_sort() {
     run_template(50, gen_list_sort());
 }
@@ -178,6 +185,7 @@ fn gen_list_replicate() -> impl Strategy<Value = (String, serde_json::Value)> {
 }
 
 #[test]
+#[ignore = "expensive: part of tidepool-testing::haskell_verified (JIT-vs-native proptest oracle); run with TIDEPOOL_EXPENSIVE_TESTS=1 cargo nextest run -p tidepool-testing --ignore-default-filter --run-ignored all -E 'binary(haskell_verified)'"]
 fn test_list_replicate() {
     run_template(50, gen_list_replicate());
 }
@@ -197,6 +205,7 @@ fn gen_list_elem() -> impl Strategy<Value = (String, serde_json::Value)> {
 }
 
 #[test]
+#[ignore = "expensive: part of tidepool-testing::haskell_verified (JIT-vs-native proptest oracle); run with TIDEPOOL_EXPENSIVE_TESTS=1 cargo nextest run -p tidepool-testing --ignore-default-filter --run-ignored all -E 'binary(haskell_verified)'"]
 fn test_list_elem() {
     run_template(50, gen_list_elem());
 }

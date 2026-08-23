@@ -20,6 +20,7 @@ fn gen_fmap_maybe() -> impl Strategy<Value = (String, serde_json::Value)> {
 }
 
 #[test]
+#[ignore = "expensive: part of tidepool-testing::haskell_verified (JIT-vs-native proptest oracle); run with TIDEPOOL_EXPENSIVE_TESTS=1 cargo nextest run -p tidepool-testing --ignore-default-filter --run-ignored all -E 'binary(haskell_verified)'"]
 fn test_fmap_maybe() {
     run_template(50, gen_fmap_maybe());
 }
@@ -39,6 +40,7 @@ fn gen_fmap_list() -> impl Strategy<Value = (String, serde_json::Value)> {
 }
 
 #[test]
+#[ignore = "expensive: part of tidepool-testing::haskell_verified (JIT-vs-native proptest oracle); run with TIDEPOOL_EXPENSIVE_TESTS=1 cargo nextest run -p tidepool-testing --ignore-default-filter --run-ignored all -E 'binary(haskell_verified)'"]
 fn test_fmap_list() {
     run_template(50, gen_fmap_list());
 }
@@ -62,6 +64,7 @@ fn gen_fmap_either() -> impl Strategy<Value = (String, serde_json::Value)> {
 }
 
 #[test]
+#[ignore = "expensive: part of tidepool-testing::haskell_verified (JIT-vs-native proptest oracle); run with TIDEPOOL_EXPENSIVE_TESTS=1 cargo nextest run -p tidepool-testing --ignore-default-filter --run-ignored all -E 'binary(haskell_verified)'"]
 fn test_fmap_either() {
     run_template(50, gen_fmap_either());
 }
@@ -104,6 +107,7 @@ fn gen_fmap_nested() -> impl Strategy<Value = (String, serde_json::Value)> {
 }
 
 #[test]
+#[ignore = "expensive: part of tidepool-testing::haskell_verified (JIT-vs-native proptest oracle); run with TIDEPOOL_EXPENSIVE_TESTS=1 cargo nextest run -p tidepool-testing --ignore-default-filter --run-ignored all -E 'binary(haskell_verified)'"]
 fn test_fmap_nested() {
     run_template(50, gen_fmap_nested());
 }
@@ -118,6 +122,7 @@ fn gen_fmap_tuple() -> impl Strategy<Value = (String, serde_json::Value)> {
 }
 
 #[test]
+#[ignore = "expensive: part of tidepool-testing::haskell_verified (JIT-vs-native proptest oracle); run with TIDEPOOL_EXPENSIVE_TESTS=1 cargo nextest run -p tidepool-testing --ignore-default-filter --run-ignored all -E 'binary(haskell_verified)'"]
 fn test_fmap_tuple() {
     run_template(50, gen_fmap_tuple());
 }

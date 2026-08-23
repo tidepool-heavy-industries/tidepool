@@ -17,6 +17,7 @@ fn gen_list_comprehension() -> impl Strategy<Value = (String, serde_json::Value)
 }
 
 #[test]
+#[ignore = "expensive: part of tidepool-testing::haskell_verified (JIT-vs-native proptest oracle); run with TIDEPOOL_EXPENSIVE_TESTS=1 cargo nextest run -p tidepool-testing --ignore-default-filter --run-ignored all -E 'binary(haskell_verified)'"]
 fn test_list_comprehension() {
     run_template(50, gen_list_comprehension());
 }
@@ -50,6 +51,7 @@ fn gen_maybe_monadic() -> impl Strategy<Value = (String, serde_json::Value)> {
 }
 
 #[test]
+#[ignore = "expensive: part of tidepool-testing::haskell_verified (JIT-vs-native proptest oracle); run with TIDEPOOL_EXPENSIVE_TESTS=1 cargo nextest run -p tidepool-testing --ignore-default-filter --run-ignored all -E 'binary(haskell_verified)'"]
 fn test_maybe_monadic() {
     run_template(50, gen_maybe_monadic());
 }
@@ -81,6 +83,7 @@ fn gen_list_fold() -> impl Strategy<Value = (String, serde_json::Value)> {
 }
 
 #[test]
+#[ignore = "expensive: part of tidepool-testing::haskell_verified (JIT-vs-native proptest oracle); run with TIDEPOOL_EXPENSIVE_TESTS=1 cargo nextest run -p tidepool-testing --ignore-default-filter --run-ignored all -E 'binary(haskell_verified)'"]
 fn test_list_fold() {
     run_template(50, gen_list_fold());
 }

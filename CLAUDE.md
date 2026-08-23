@@ -252,12 +252,18 @@ capped without an edit there. The box-wide ceiling is the product of the two
 4. **Expensive, opt-in** — `TIDEPOOL_EXPENSIVE_TESTS=1 scripts/battery-shard.sh
    <crate>` (or targeted per-test). A handful of suites
    (`corpus_report`, `haskell_suite_differential`,
-   `tidepool-testing::haskell_verified`) early-return with a
-   `SKIPPED (expensive)` line unless `TIDEPOOL_EXPENSIVE_TESTS=1` is set —
-   this holds even under `--ignore-default-filter`, so tier 3 alone never
+   `tidepool-testing::haskell_verified`,
+   `tidepool-codegen::call_depth_sequential_vs_nested`'s
+   `fifty_thousand_sequential_calls_do_not_false_positive_overflow` and
+   `genuinely_deep_recursion_still_overflows_cleanly`) are dual-gated: each is
+   `#[ignore]`d (so a default run reports them as ignored, never a silent
+   pass) AND early-returns with a `SKIPPED (expensive)` line unless
+   `TIDEPOOL_EXPENSIVE_TESTS=1` is set, even under `--run-ignored all` — this
+   holds even under `--ignore-default-filter`, so tier 3 alone never
    accidentally triggers them. Run these deliberately, one at a time, outside
    the ~380s assumption: `corpus_report` and `haskell_suite_differential` are
-   actually quick once gated in (measured ~8s and ~27s respectively), but
+   actually quick once gated in (measured ~8s and ~27s respectively), the
+   call-depth pair takes roughly a minute and a half each, but
    `tidepool-testing::haskell_verified` genuinely runs for many hundreds of
    seconds — its proptest cases (e.g. `cousins::test_list_fold`) individually
    take 100s+.

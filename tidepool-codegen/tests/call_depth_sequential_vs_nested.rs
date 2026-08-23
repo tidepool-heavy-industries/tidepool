@@ -249,6 +249,10 @@ const SEQUENTIAL_CALL_COUNT: usize = 25_000;
 /// meant to trip cleanly well before the REAL native stack is exhausted, and
 /// that headroom is what production actually gives it.
 #[test]
+#[ignore = "expensive: compiles 25k call sites into one Cranelift function, \
+            ~90s; run with TIDEPOOL_EXPENSIVE_TESTS=1 cargo nextest run \
+            -p tidepool-codegen --run-ignored all \
+            -E 'test(fifty_thousand_sequential_calls_do_not_false_positive_overflow)'"]
 fn fifty_thousand_sequential_calls_do_not_false_positive_overflow() {
     if std::env::var("TIDEPOOL_EXPENSIVE_TESTS").as_deref() != Ok("1") {
         eprintln!("SKIPPED (expensive): set TIDEPOOL_EXPENSIVE_TESTS=1 to run");
@@ -281,6 +285,10 @@ fn fifty_thousand_sequential_calls_do_not_false_positive_overflow() {
 /// (20_000) must trip well before 25k REAL nested native frames physically
 /// exhaust the stack, which only holds on a stack sized like production's.
 #[test]
+#[ignore = "expensive: compiles 25k genuinely-nested call frames into one \
+            Cranelift function; run with TIDEPOOL_EXPENSIVE_TESTS=1 \
+            cargo nextest run -p tidepool-codegen --run-ignored all \
+            -E 'test(genuinely_deep_recursion_still_overflows_cleanly)'"]
 fn genuinely_deep_recursion_still_overflows_cleanly() {
     if std::env::var("TIDEPOOL_EXPENSIVE_TESTS").as_deref() != Ok("1") {
         eprintln!("SKIPPED (expensive): set TIDEPOOL_EXPENSIVE_TESTS=1 to run");
