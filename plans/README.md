@@ -7,11 +7,17 @@ to plan files that stay in this directory but no longer describe active work.
 
 ## Active work
 
+- [Fork subsumes split](fork-subsumes-split.md): direction locked by the
+  operator (2026-08-22) — the companion tree emerges from model-authored
+  `async (fork @T …)` calls; fork children inherit the full node lifecycle;
+  gates drop in favor of ask-idiom policies. Foundation (answerer-plane
+  green scheduler, fork budget, composition acceptance) landed; step 1
+  (children on the window pump) next.
 - [Session-ownership capstone](registry-capstone.md): human-approved wave
   (2026-08-22), consolidating dup-c-survey items 1 (resident-session
   checkout/lifecycle) and 5 (harness suspension state) into one promoted
   registry primitive in `tidepool-runtime` and one suspension-metadata map
-  in the harness. In flight.
+  in the harness. LANDED (merged 2026-08-22).
 - [Turn latency: state injection + compile incrementalism](turn-latency-state-injection.md):
   narrow-first design approved by the operator (2026-08-20): prove the
   mechanism on the one compile that dominates turn wall time (the fused

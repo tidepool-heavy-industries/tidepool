@@ -39,7 +39,7 @@
 #   -E 'binary(selfharness_budget) or binary(selfharness_compaction_fixes) or binary(selfharness_compaction) or binary(selfharness_context_window) or binary(selfharness_framing) or binary(selfharness_lifecycle) or binary(selfharness_spine) or binary(companion_context_ref) or binary(companion_mount_spike) or binary(companion_scope_trees) or binary(companion_snapshots)'
 #   -E 'binary(selfharness_persistence) or binary(selfharness_fn_finalize_spike)'
 #   -E 'binary(companion_recursive_slice)'
-#   -E 'binary(agent_stack_scoping) or binary(decl_plane_run_scoping) or binary(dogfood_harness_typecheck) or binary(dogfood_observability) or binary(finalize_type_pinning) or binary(golden_path) or binary(outer_effects) or binary(outer_fanout) or binary(outer_subagent) or binary(timing_emission_pin) or binary(turn_lease) or binary(turn_splice) or binary(provider_behavior)'
+#   -E 'binary(agent_stack_scoping) or binary(answerer_async_fork) or binary(decl_plane_run_scoping) or binary(dogfood_harness_typecheck) or binary(dogfood_observability) or binary(finalize_type_pinning) or binary(golden_path) or binary(outer_effects) or binary(outer_fanout) or binary(outer_subagent) or binary(timing_emission_pin) or binary(turn_lease) or binary(turn_splice) or binary(provider_behavior)'
 #
 # tidepool-runtime (6 shards):
 #   -E 'binary(proptest_cache_layer) or binary(proptest_gc_pressure) or binary(proptest_haskell_pipeline) or binary(proptest_jit_vs_eval) or binary(proptest_letrec) or binary(proptest_render_json)'
