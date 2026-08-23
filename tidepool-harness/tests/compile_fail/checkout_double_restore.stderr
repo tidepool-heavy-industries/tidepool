@@ -2,7 +2,7 @@ error[E0382]: use of moved value: `checkout`
  --> tests/compile_fail/checkout_double_restore.rs:8:5
   |
 6 | fn double_restore(checkout: tidepool_harness::registry::Checkout<'_, ()>) {
-  |                   -------- move occurs because `checkout` has type `Checkout<'_, ()>`, which does not implement the `Copy` trait
+  |                   -------- move occurs because `checkout` has type `tidepool_runtime::session::registry::Checkout<'_, (), HoleId>`, which does not implement the `Copy` trait
 7 |     checkout.restore_suspended(Vec::new());
   |     -------- value moved here
 8 |     checkout.restore_suspended(Vec::new());
