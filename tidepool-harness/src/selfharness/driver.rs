@@ -426,10 +426,61 @@ impl AnswererGreen {
 
 /// How [`SelfHarnessDriver::service_answerer_green`] hands control back to
 /// the answerer dispatcher: the node's own turn parked on a non-Green hole
-/// (route it), or ran to completion without finalizing (corrective retry).
+/// (route it), ran to completion without finalizing (corrective retry), or
+/// a thread's fork was refused by the window's fork budget (abort the
+/// block, corrective retry naming the budget).
 enum AnswererGreenExit {
     NodeParked,
     NodeDone,
+    ForkBudgetRefused { needed: u32 },
+}
+
+/// One answerer WINDOW's fork budget — total children across all rounds,
+/// drawn on by direct `fork`/`forkAll` servicing ([`SelfHarnessDriver::drain_answerer_fork`])
+/// and green-thread forks ([`SelfHarnessDriver::service_thread_ready`])
+/// alike. Spending happens BEFORE the spawn, so the refusal costs nothing.
+struct ForkBudget {
+    cap: u32,
+    spent: u32,
+}
+
+impl ForkBudget {
+    /// How many children `routing` would spawn: a single fork is 1, a fanout
+    /// its fan (`Bounded`/`Dynamic` badges fall back to the decoded prompt
+    /// count — the number of children that would actually be driven).
+    fn cost(routing: &HoleRouting) -> u32 {
+        match routing {
+            HoleRouting::Fork { fan: None, .. } => 1,
+            HoleRouting::Fork {
+                fan: Some(FanBadge::Exact { n }),
+                ..
+            } => *n,
+            HoleRouting::Fork { prompts, .. } => prompts.len() as u32,
+            _ => 0,
+        }
+    }
+
+    /// Spend `cost` children if the pool covers them; `false` (nothing
+    /// spent) when it doesn't.
+    fn try_spend(&mut self, cost: u32) -> bool {
+        if self.spent.saturating_add(cost) > self.cap {
+            return false;
+        }
+        self.spent += cost;
+        true
+    }
+}
+
+/// The refusal corrective for a fork that would exceed the window's budget:
+/// what happened, what survives, and the one useful next step.
+fn fork_budget_refusal(spent: u32, cap: u32, needed: u32, ty_label: &str) -> String {
+    format!(
+        "Fork budget exhausted: this window has spawned {spent} of its {cap} fork \
+         children, and that block needed {needed} more, so the block was ABORTED \
+         (top-level declarations from earlier rounds persist; the aborted block's \
+         bindings are lost). Do not fork again — finalize with what you have: \
+         evaluate `finalize @{ty_label} value`."
+    )
 }
 
 /// The corrective line appended when a round ends with green threads still
@@ -780,6 +831,15 @@ const ASKUSER_MAX_REPROMPTS: u32 = 8;
 /// budgets or compaction.
 const LOOP_INFERENCE_CALL_CAP: u32 = 1024;
 
+/// Default TOTAL fork children one answerer window may spawn across its
+/// whole life (all rounds, direct + green-thread forks — one pool). Each
+/// child is a real multi-round model window, so this is a genuine resource
+/// budget, not a style preference; the refusal on the (N+1)th is loud
+/// (block aborted, corrective naming the budget), never a silent drop.
+/// Operator decision 2026-08-22: total-per-node, matching the companion's
+/// own `maxFanOut`-shaped budgeting one level up.
+const DEFAULT_FORK_BUDGET_PER_WINDOW: u32 = 8;
+
 /// Default cap on how many `RunLLMTurn` fanout/fork children
 /// ([`SelfHarnessDriver::service_outer_fanout`]) may be concurrently
 /// mid-window (PRD 20 S1-L4 — "concurrent cognition windows") — each in its
@@ -1040,6 +1100,15 @@ pub struct SelfHarnessDriver {
     /// model call — e.g. the compaction summarize turn — counts
     /// against it with a small cap instead of scripting 1024 real turns.
     loop_inference_call_cap: u32,
+    /// Fork budget: the TOTAL number of fork CHILDREN one answerer window
+    /// may spawn across its whole life (all rounds; `fork` costs 1,
+    /// `forkAll`/fanout cost their fan) — direct forks and green-thread
+    /// forks draw on the ONE pool. Default
+    /// [`DEFAULT_FORK_BUDGET_PER_WINDOW`]; configurable via
+    /// [`Self::set_fork_budget_per_window`]. The (N+1)th child is a loud
+    /// refusal (the block is aborted, the window survives with a corrective
+    /// naming the budget), never a silent drop.
+    fork_budget_per_window: u32,
     /// The concurrency cap for concurrently-serviced fanout/fork
     /// `RunLLMTurn` windows (PRD 20 S1-L4,
     /// [`Self::service_outer_fanout`]) — default [`DEFAULT_CONCURRENCY_CAP`]
@@ -1438,6 +1507,7 @@ impl SelfHarnessDriver {
             answerer_nudge_rounds: ANSWERER_NUDGE_ROUNDS,
             answerer_max_rounds: ANSWERER_MAX_ROUNDS,
             loop_inference_call_cap: LOOP_INFERENCE_CALL_CAP,
+            fork_budget_per_window: DEFAULT_FORK_BUDGET_PER_WINDOW,
             concurrency_cap: DEFAULT_CONCURRENCY_CAP,
             checkpoint_path: persistence::default_checkpoint_path(),
             checkpoint_generation: None,
@@ -1699,6 +1769,13 @@ impl SelfHarnessDriver {
     /// [`LOOP_INFERENCE_CALL_CAP`], 1024). Mainly for tests: a small cap
     /// checks that a specific model call — e.g. the compaction summarize
     /// turn — is counted against it without scripting 1024 real turns.
+    /// Override the per-window fork budget ([`Self::fork_budget_per_window`])
+    /// — a test proves the refusal with a budget of 1 or 2 instead of
+    /// scripting [`DEFAULT_FORK_BUDGET_PER_WINDOW`] real child windows.
+    pub fn set_fork_budget_per_window(&mut self, budget: u32) {
+        self.fork_budget_per_window = budget;
+    }
+
     pub fn set_loop_inference_call_cap(&mut self, cap: u32) {
         self.loop_inference_call_cap = cap;
     }
@@ -4753,6 +4830,11 @@ impl SelfHarnessDriver {
         let mut rounds: u32 = 0;
         let mut nudged = false;
         let mut ultimatum = false;
+        // WINDOW-scoped (all rounds): total fork children, direct + green.
+        let mut fork_budget = ForkBudget {
+            cap: self.fork_budget_per_window,
+            spent: 0,
+        };
         'round: loop {
             let cap = self.loop_inference_call_cap;
             if self.loop_inference_calls.load(Ordering::SeqCst) >= cap {
@@ -4886,14 +4968,19 @@ impl SelfHarnessDriver {
                                 }
                             }
                             HoleRouting::Fork { .. } => {
-                                match self.drain_answerer_fork(node, ty_label).await? {
+                                match self
+                                    .drain_answerer_fork(node, ty_label, &mut fork_budget)
+                                    .await?
+                                {
                                     Some(TurnOutcome::Suspended {
                                         hole: h,
                                         classified: c,
                                     }) => current = Some((h, c)),
-                                    // Completed without finalizing —
-                                    // `drain_answerer_fork` already reopened
-                                    // the node and pushed its corrective.
+                                    // Completed without finalizing (or the
+                                    // budget refused a fork) —
+                                    // `drain_answerer_fork` already returned
+                                    // the node to Running and pushed its
+                                    // corrective.
                                     Some(_) | None => {
                                         if let Some(g) = green.as_mut() {
                                             let dropped = self.sweep_answerer_green(g);
@@ -4910,7 +4997,10 @@ impl SelfHarnessDriver {
                             }
                             HoleRouting::Green => {
                                 let g = green.get_or_insert_with(AnswererGreen::new);
-                                match self.service_answerer_green(node, g).await? {
+                                match self
+                                    .service_answerer_green(node, g, &mut fork_budget)
+                                    .await?
+                                {
                                     AnswererGreenExit::NodeParked => {
                                         current = self
                                             .agent
@@ -4918,6 +5008,28 @@ impl SelfHarnessDriver {
                                             .map(|(h, c, _)| (h.0, c));
                                     }
                                     AnswererGreenExit::NodeDone => break None,
+                                    // A thread's fork was refused: abort the
+                                    // block (the node is parked on its own
+                                    // green join — refuse that hole), sweep
+                                    // the round's threads, and push the
+                                    // budget corrective. The WINDOW survives.
+                                    AnswererGreenExit::ForkBudgetRefused { needed } => {
+                                        let msg = fork_budget_refusal(
+                                            fork_budget.spent,
+                                            fork_budget.cap,
+                                            needed,
+                                            ty_label,
+                                        );
+                                        let dropped = self.sweep_answerer_green(g);
+                                        self.agent.refuse_pending_hole(node, msg.clone())?;
+                                        let warn = if dropped > 0 {
+                                            format!("\n\n{}", dropped_threads_warning(dropped))
+                                        } else {
+                                            String::new()
+                                        };
+                                        self.agent.push_user_turn(node, &format!("{msg}{warn}"))?;
+                                        continue 'round;
+                                    }
                                 }
                             }
                             other => {
@@ -5626,6 +5738,7 @@ impl SelfHarnessDriver {
         &self,
         node: NodeId,
         ty_label: &str,
+        budget: &mut ForkBudget,
     ) -> Result<Option<TurnOutcome>, DriverError> {
         loop {
             let routing = self
@@ -5635,6 +5748,17 @@ impl SelfHarnessDriver {
                 .ok_or_else(|| {
                     DriverError::Session("fork resume: node has no pending hole to service".into())
                 })?;
+            // The budget check covers EVERY fork this drain loop services,
+            // not only the one the dispatcher saw — `forkAll` then `fork` in
+            // sequence spends per iteration. Spend BEFORE spawn; a refusal
+            // costs nothing.
+            let cost = ForkBudget::cost(&routing);
+            if matches!(routing, HoleRouting::Fork { .. }) && !budget.try_spend(cost) {
+                let msg = fork_budget_refusal(budget.spent, budget.cap, cost, ty_label);
+                self.agent.refuse_pending_hole(node, msg.clone())?;
+                self.agent.push_user_turn(node, &msg)?;
+                return Ok(None);
+            }
             match routing {
                 HoleRouting::Fork { fan: Some(_), .. } => {
                     self.agent.answer_fanout(node, Actor::Operator).await?;
@@ -5701,6 +5825,7 @@ impl SelfHarnessDriver {
         &self,
         node: NodeId,
         green: &mut AnswererGreen,
+        budget: &mut ForkBudget,
     ) -> Result<AnswererGreenExit, DriverError> {
         loop {
             let Some((hole, classified, table, _asks, request)) =
@@ -5728,8 +5853,12 @@ impl SelfHarnessDriver {
                         .into(),
                 ));
             };
-            self.service_thread_ready(node, chain, outcome, green)
-                .await?;
+            if let Some(needed) = self
+                .service_thread_ready(node, chain, outcome, green, budget)
+                .await?
+            {
+                return Ok(AnswererGreenExit::ForkBudgetRefused { needed });
+            }
         }
     }
 
@@ -5898,7 +6027,8 @@ impl SelfHarnessDriver {
         chain: GreenChain,
         outcome: ResidentOutcome,
         green: &mut AnswererGreen,
-    ) -> Result<(), DriverError> {
+        budget: &mut ForkBudget,
+    ) -> Result<Option<u32>, DriverError> {
         let sid = self.outer_sid()?;
         let ResidentOutcome::Suspended { hole, request, .. } = outcome else {
             return Err(DriverError::Session(
@@ -5917,18 +6047,28 @@ impl SelfHarnessDriver {
         let classified = engine::classify_hole(&request, &table, &asks)
             .map_err(|e| DriverError::Session(format!("thread hole classify: {e}")))?;
         match classified.routing {
-            HoleRouting::Green => self.service_green_hole(
-                chain,
-                hole.cont_id(),
-                &request,
-                &table,
-                &mut green.threads,
-                &mut green.waiters,
-                &mut green.next_tid,
-                &mut green.next_thread_realm,
-                &mut green.ready,
-            ),
+            HoleRouting::Green => {
+                self.service_green_hole(
+                    chain,
+                    hole.cont_id(),
+                    &request,
+                    &table,
+                    &mut green.threads,
+                    &mut green.waiters,
+                    &mut green.next_tid,
+                    &mut green.next_thread_realm,
+                    &mut green.ready,
+                )?;
+                Ok(None)
+            }
             HoleRouting::Fork { .. } => {
+                // A thread's fork draws on the SAME window budget as a
+                // direct one. Refused = handed up as data; the dispatcher
+                // aborts the block and pushes the corrective.
+                let cost = ForkBudget::cost(&classified.routing);
+                if !budget.try_spend(cost) {
+                    return Ok(Some(cost));
+                }
                 let next = self
                     .agent
                     .answer_fork_hole_raw(
@@ -5943,7 +6083,7 @@ impl SelfHarnessDriver {
                     chain,
                     outcome: next,
                 });
-                Ok(())
+                Ok(None)
             }
             HoleRouting::Note { text } => {
                 self.announce_note(FormSource::Answerer { node }, &text);
@@ -5959,7 +6099,7 @@ impl SelfHarnessDriver {
                     chain,
                     outcome: next,
                 });
-                Ok(())
+                Ok(None)
             }
             HoleRouting::ReadState => {
                 let state = self.cycle_state_json.clone().unwrap_or(Json::Null);
@@ -5978,7 +6118,7 @@ impl SelfHarnessDriver {
                     chain,
                     outcome: next,
                 });
-                Ok(())
+                Ok(None)
             }
             HoleRouting::Subagent => {
                 let value = self.service_outer_subagent(&request, &table)?;
@@ -6007,7 +6147,7 @@ impl SelfHarnessDriver {
                     chain,
                     outcome: next,
                 });
-                Ok(())
+                Ok(None)
             }
             HoleRouting::Finalize { .. } => Err(DriverError::Session(
                 "a green thread called `finalize` — the window's answer belongs on the \

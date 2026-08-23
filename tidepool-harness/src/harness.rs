@@ -2918,6 +2918,45 @@ impl Harness {
         Ok(handle)
     }
 
+    /// REFUSE `node`'s pending hole: abort the parked continuation (the
+    /// block's suspended computation dies; the WINDOW survives), clear the
+    /// hole's bookkeeping, and return the node to `Running` so the caller
+    /// can push a corrective turn — the fork-budget guard's teeth
+    /// (`SelfHarnessDriver`'s answerer dispatcher is the caller). A refusal
+    /// cannot resume the hole instead: a `fork @T` hole's continuation
+    /// expects a `T`, and there is no honest `T` to fabricate. The session's
+    /// OTHER parked frames (a green thread's) survive via the same
+    /// restore-with-reported-holes discipline the finalize-consume paths
+    /// use.
+    pub(crate) fn refuse_pending_hole(
+        &self,
+        node: NodeId,
+        reason: String,
+    ) -> Result<(), HarnessError> {
+        let sid = self
+            .tree
+            .session_of(node)
+            .ok_or(HarnessError::NoSession(node))?;
+        let pending = self
+            .node_pending(node)
+            .ok_or(HarnessError::NotSuspended(node))?;
+        let hole = pending.hole;
+        let mut co = self.checkout_resume(node, &hole)?;
+        // The abort's Err outcome IS the expected "continuation discarded"
+        // signal (see `take_finalized_value_keep_open`), not a failure.
+        let _ = co.machine().abort(&hole.0, reason);
+        let holes: Vec<HoleId> = co
+            .machine()
+            .parked_holes()
+            .into_iter()
+            .map(|h| HoleId(h.to_string()))
+            .collect();
+        co.restore_suspended(holes);
+        self.pending_holes.lock().remove(&(sid, hole.clone()));
+        self.tree.hole_consumed(node, hole)?;
+        Ok(())
+    }
+
     /// Whether `node`'s pending finalize hole carries a CLOSURE value: the
     /// tolerant suspend bridge substituted a
     /// `CLOSURE_SENTINEL` placeholder for field 1, so the finalized value is a
