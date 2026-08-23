@@ -122,7 +122,7 @@ impl Binding {
     }
 }
 
-/// A non-`Clone` custody receipt for exactly one `Active` row, returned by
+/// A non-`Clone` lease for exactly one `Active` row, returned by
 /// [`BindingTable::bind`] and consumed by [`Self::complete`]/[`Self::release`].
 ///
 /// This is the whole fix for "`settle` accepts any `BindingState` as the
@@ -267,8 +267,8 @@ impl BindingTable {
         self.dir.write(worktree.as_str(), &bytes)
     }
 
-    /// Bind an agent to a worktree, returning the [`ActiveBinding`] custody
-    /// receipt for the row just created.
+    /// Bind an agent to a worktree, returning the [`ActiveBinding`] lease
+    /// for the row just created.
     ///
     /// [`WorktreeError::WorktreeBusy`] when an `Active` binding already exists,
     /// naming the current holder — the failure has to be explicit enough that

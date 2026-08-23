@@ -317,10 +317,10 @@ impl WorktreeHandler {
     /// A FRESH git read of this worktree's current HEAD. Specifically NOT the
     /// handle's recorded `source_head` (the seed the managed branch was
     /// rooted at — the stale answer) and NOT the event monitor's
-    /// last-observed baseline. A resident spanning cycles compares this
-    /// against its own checkpointed head to close the window where HEAD
-    /// moved after one monitor cycle unregistered and before the next
-    /// registered; returning either recorded value would leave that window
+    /// last-observed baseline. A resident spanning loop iterations compares this
+    /// against its own checkpointed head to close the gap where HEAD
+    /// moved after one monitor loop iteration unregistered and before the next
+    /// registered; returning either recorded value would leave that gap
     /// silently open. Reads through the same substrate as
     /// `worktree_branch_of` — never spawns git itself, never caches.
     ///

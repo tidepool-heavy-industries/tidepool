@@ -98,9 +98,9 @@ fn worktree_head_tracks_successive_commits() {
     assert_ne!(first, second);
 }
 
-/// Closes the exact gap the verb exists for: a resident spanning cycles
-/// compares `worktreeHead` against its own checkpoint because the event
-/// monitor's subscriptions do not replay and do not survive a cycle
+/// Closes the exact gap the verb exists for: a resident spanning loop
+/// iterations compares `worktreeHead` against its own checkpoint because the event
+/// monitor's subscriptions do not replay and do not survive a loop iteration
 /// boundary. Here the monitor never reconciles this worktree at all — the
 /// journal for it stays empty — yet worktree_head still sees the movement.
 #[test]
@@ -117,8 +117,8 @@ fn worktree_head_reflects_movement_the_monitor_never_reconciled() {
         .expect("create");
 
     // A monitor is registered (establishing a baseline) but `reconcile` is
-    // deliberately never called — the exact window between one resident
-    // cycle unregistering its handlers and the next re-registering them.
+    // deliberately never called — the exact gap between one resident
+    // loop iteration unregistering its handlers and the next re-registering them.
     let journal_dir = tempfile::TempDir::new().expect("journal tempdir");
     let journal = EventJournal::open(journal_dir.path().join("events.jsonl")).expect("journal");
     let mut monitor = tidepool_worktree::WorktreeMonitor::new(GitCli::new(), journal);

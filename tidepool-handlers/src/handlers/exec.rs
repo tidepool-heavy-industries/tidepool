@@ -36,7 +36,7 @@ impl ExecHandler {
     /// Default exec timeout in seconds — aligned with `tidepool-mcp`'s
     /// eval-timeout default (`EVAL_TIMEOUT_SECS` = 600s, see
     /// `tidepool-mcp/src/lib.rs`): long enough for an ordinary build/test
-    /// command to finish comfortably inside one eval's own timeout window,
+    /// command to finish comfortably inside one eval's own timeout interval,
     /// short enough that a hung command cannot wedge a resident turn
     /// forever. Override with `TIDEPOOL_EXEC_TIMEOUT_SECS` (whole seconds).
     const DEFAULT_EXEC_TIMEOUT_SECS: u64 = 600;

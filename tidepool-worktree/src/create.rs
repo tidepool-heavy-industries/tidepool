@@ -340,9 +340,9 @@ impl WorktreeManager {
     /// managed branch was rooted at, recorded once at `create` and frozen
     /// forever after) and NOT anything [`crate::monitor::WorktreeMonitor`]
     /// last reconciled — the verb exists precisely so a resident spanning
-    /// cycles can see HEAD movement the monitor never observed, closing the
-    /// window between one cycle's handlers unregistering and the next
-    /// cycle's re-registering. A cached or stale answer here silently
+    /// loop iterations can see HEAD movement the monitor never observed, closing the
+    /// gap between one loop iteration's handlers unregistering and the next
+    /// loop iteration's re-registering. A cached or stale answer here silently
     /// reopens that exact gap.
     ///
     /// `git rev-parse HEAD` resolves to the current commit whether the tree

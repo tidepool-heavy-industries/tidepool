@@ -61,7 +61,7 @@ use crate::storage::now_ms;
 ///
 /// Not enforced by this crate: [`WorktreeMonitor::reconcile`] is a single
 /// pass, driven externally. The timer loop that calls it on a schedule
-/// belongs to whichever realm/driver owns process scheduling. This constant
+/// belongs to whichever runtime resource scope or driver owns process scheduling. This constant
 /// is that loop's recommended DEFAULT, named and exported so a caller can
 /// override it rather than the number being buried as a magic literal
 /// wherever the loop eventually lives — its *value* is tunable, that it

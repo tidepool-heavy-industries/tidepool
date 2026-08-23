@@ -128,7 +128,7 @@ pub fn render_signature(args: &[HsType], head: &str, result: &HsType) -> String 
 /// shape every migrated effect's helper now uses instead of a concrete `M`
 /// head, so the helper's compiled body can live in the vocabulary-only,
 /// session-stable `Tidepool.Effects.Core` module (which has no `M` alias of
-/// its own to write against — `M` is a per-window shim concept).
+/// its own to write against — `M` is a per-agent-session shim concept).
 #[must_use]
 pub fn render_member_signature(args: &[HsType], effect: &str, result: &HsType) -> String {
     let mut out = format!("forall effs. Member {effect} effs => ");

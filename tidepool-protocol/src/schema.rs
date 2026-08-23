@@ -55,8 +55,8 @@ pub struct Effect {
     /// Do this effect's helpers typecheck against any row carrying `Member`?
     pub helpers_row_polymorphic: bool,
     /// Companion `import` lines this effect's helpers need beyond the fixed
-    /// eval surface. These reach the eval preamble and the decl plane, NOT the
-    /// generated `Tidepool.Effects` module.
+    /// eval surface. These reach the eval preamble and the persistent declaration
+    /// environment, NOT the generated `Tidepool.Effects` module.
     pub extra_imports: &'static [&'static str],
     /// Supporting Haskell declarations emitted before the GADT. The error ADT
     /// is NOT listed here — it is derived from [`Effect::errors`].

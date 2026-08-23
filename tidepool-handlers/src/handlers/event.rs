@@ -41,13 +41,13 @@
 //! produced again, so they cannot be queued.
 //!
 //! **It is emphatically NOT a licence to lose movement that happened while no
-//! subscription existed.** Between two resident cycles there is a window with
+//! subscription existed.** Between two resident loop iterations there is a gap with
 //! agents still running and nobody subscribed. Those commits are not journalled
-//! yet, so the new cycle's first pass reports them as genuinely NEW
+//! yet, so the new loop iteration's first pass reports them as genuinely NEW
 //! observations and the freshly registered subscription receives them — which
 //! is why [`RepoEventHandler::repo_event_subscribe`] does NOT poll: it is a
 //! cheap registry insert, and it deliberately leaves the first pass of the
-//! cycle to the first drain, AFTER the subscription is live. Registering and
+//! loop iteration to the first drain, AFTER the subscription is live. Registering and
 //! then quietly consuming the backlog on the registrant's behalf would drop
 //! commits in the direction nobody notices.
 //!
@@ -86,18 +86,18 @@
 //! poison-on-overflow rule applies to a fired tick as to any other queued
 //! observation.
 //!
-//! ## Cycle-scoped, and re-registered every cycle
+//! ## Loop-iteration-scoped, and re-registered every loop iteration
 //!
-//! A subscription never crosses a resident cycle boundary. The registry is
-//! owned by [`RepoEventHandler`], which is owned by the cycle's handler stack;
+//! A subscription never crosses a resident loop-iteration boundary. The registry is
+//! owned by [`RepoEventHandler`], which is owned by the loop iteration's handler stack;
 //! dropping that stack ends every registration. There is no durable
 //! subscription store here and there must not be one — an attached Haskell
 //! handle, a parked Haskell continuation, and an event subscription are the
-//! three things PRD 19 says never survive a cycle.
+//! three things PRD 19 says never survive a loop iteration.
 //!
-//! Re-registering from explicit state and stable worktree ids each cycle is
+//! Re-registering from explicit state and stable worktree ids each loop iteration is
 //! therefore an ordinary, repeated path, not a recovery story. It is safe
-//! precisely because of the paragraph above: the new cycle's subscriptions are
+//! precisely because of the paragraph above: the new loop iteration's subscriptions are
 //! empty, and the gap's movement arrives as new observations rather than as
 //! replayed rows.
 //!
@@ -483,10 +483,10 @@ impl SubscriptionRegistry {
 /// **Baseline obligation.** "Since its last observation" must mean the last
 /// JOURNALLED observation, never one held only in process memory. A source
 /// whose baseline is memory concludes that nothing moved on the first pass of a
-/// new cycle, and every commit made in the gap between cycles vanishes — a
+/// new loop iteration, and every commit made in the gap between loop iterations vanishes — a
 /// silently dropped commit, which the PRD forbids as firmly as a dropped queue
 /// entry. A "start from now" source is therefore legitimate ONLY in a
-/// single-cycle test; it must never be the production implementation.
+/// single-loop-iteration test; it must never be the production implementation.
 pub trait ObservationSource: Send {
     fn observe(&mut self, worktrees: &[WtWorktreeId])
         -> Result<Vec<EvRepositoryEvent>, EventError>;
@@ -506,7 +506,7 @@ pub trait ObservationSource: Send {
 /// and that monitor's own contract is that its restart baseline is its last
 /// JOURNALLED observation rather than an in-memory one. Keeping a second
 /// baseline here would silently override the durable one and lose exactly the
-/// between-cycle movement the journal exists to preserve.
+/// between-loop-iteration movement the journal exists to preserve.
 ///
 /// It carries NO other state: the monitor is the only thing it holds. The
 /// `EventId` on each observation is the one the monitor minted and journalled
@@ -725,7 +725,7 @@ impl RepoEventHandler {
     /// Any other observation source. [`MonitorObservations`] is the real
     /// production adapter; the acceptance harness supplies a second source
     /// that reads a real temporary repository directly, scoped to that
-    /// harness's single-cycle/process-memory baseline — not because the
+    /// harness's single-loop-iteration/process-memory baseline — not because the
     /// production adapter doesn't exist.
     pub fn with_source(source: Box<dyn ObservationSource>, config: EventConfig) -> Self {
         Self {
@@ -783,7 +783,7 @@ impl RepoEventHandler {
         watches: Vec<EvWatch>,
     ) -> Result<EvSubscriptionId, EventError> {
         // A cheap registry insert, and deliberately nothing else. It reads no
-        // git and it consumes no backlog: the first pass of a cycle belongs to
+        // git and it consumes no backlog: the first pass of a loop iteration belongs to
         // the first DRAIN, after this subscription is live, so movement that
         // happened while nobody was subscribed reaches it instead of being
         // quietly absorbed by the act of registering. See the module docs.
@@ -1158,14 +1158,14 @@ mod tests {
         assert_eq!(
             oids(&h.repo_event_drain(sub).unwrap()),
             vec!["c1"],
-            "movement from the window with no subscriber must not be swallowed \
+            "movement from the gap with no subscriber must not be swallowed \
              by the act of registering"
         );
     }
 
     #[test]
     fn a_later_registration_does_not_replay_an_earlier_ones_facts() {
-        // Re-registration is an ordinary repeated path (a new resident cycle
+        // Re-registration is an ordinary repeated path (a new resident loop iteration
         // rebuilds its reactions from state + stable worktree ids). The second
         // subscription must start empty and then track new facts.
         let (mut h, _calls) = handler_with(

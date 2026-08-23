@@ -1,8 +1,8 @@
 //! The one place this crate shells out to git.
 //!
-//! Every lane funnels through [`GitCli`] so that the environment scrubbing, the
+//! Every call site funnels through [`GitCli`] so that the environment scrubbing, the
 //! failure receipt shape, and the "never inherit the caller's index/config"
-//! discipline exist once. A lane that spawns `Command::new("git")` itself has
+//! discipline exist once. A call site that spawns `Command::new("git")` itself has
 //! bypassed all three.
 //!
 //! Why the git CLI rather than a libgit2 binding: the thing being observed is a
