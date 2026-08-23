@@ -45,6 +45,55 @@ code after the waits.
    briefs living outside model turns). DESIGNED WITH THE OPERATOR before any
    code — it rewrites the companion's recursion and prompt architecture.
 
+## Step 3 design note (2026-08-22)
+
+Scope: give `drive_fork_child_window` (driver.rs) the same operator-GUI/tree
+lifecycle `service_outer_branch` gives a branch child — a fork child today
+runs on the full window pump but is invisible on the operator page and the
+d3 tree.
+
+**Label/path scheme.** A fork child has no wire-carried label (unlike
+`runLLMTurnBranchLabeled`) and no `ContextRef` (it forks from the LIVE
+parent, not a frozen snapshot), so both must be derived. Base path: the
+parent's companion `NodePath` (`branch_node_paths.get(parent)`) when the
+parent is itself a companion coalgebra node, else the parent's own
+registered GUI label (`node_labels.get(parent)`) when the parent is itself a
+labeled branch/fork child, else the fixed root id `"root"` (mirroring
+`tidepool_web::DEFAULT_NODE_ID` as a literal — this crate cannot depend on
+`tidepool-web`, same coupling shape as `parse_companion_node_path`'s
+prompt-convention parsing). Child segment: `f<idx>-<ascii-slug-of-brief>`,
+mirroring a structurally-labeled branch's own `root/1-child` convention so a
+fork child's tree position reads the same way. `idx` is a per-PARENT
+monotonic counter (`fork_child_seq: Mutex<HashMap<NodeId, u32>>`), assigned
+INSIDE `drive_fork_child_window` rather than threaded in from a caller —
+load-bearing, because both of `drive_fork_child_window`'s call sites
+(`drain_answerer_fork`, and `service_thread_ready`'s async fork arm — the
+latter is root's concurrent territory this change must not touch) already
+pass a fixed argument list, and the boundary forbids editing
+`service_thread_ready`. A per-parent counter also gives uniqueness across
+repeated forks from the same parent over its lifetime, not just within one
+`forkAll` batch.
+
+Also mirrored from `service_outer_branch`: `engine::parse_companion_node_path`
+runs on the fork's own BRIEF (not just branch prompts), populating
+`branch_node_paths` for a fork child whose brief happens to be a companion
+coalgebra prompt — same discipline, so a fork-shaped delegation attributes
+correctly too.
+
+**Guard choice: widen `BranchWindow`, not a sibling struct.** Checked reuse
+first, per the mechanism-index rule. `BranchWindow`'s `validated_ref` field
+is read only by `Drop`'s trace line, never for logic — widening it to
+`Option<ContextRef>` costs nothing and lets a fork child (which has no
+`ContextRef`) construct a guard with `None`. The success path differs
+genuinely: a fork answer has no `(T, ContextRef)` pair to freeze (branch's
+`finalize_data` calls `freeze_snapshot`), and a successful fork child's
+durable ending must be `NodeDone` before retirement (seam map §7.10),
+whereas `finalize_data` retires straight into `NodeCancelled`-via-
+`terminate_node`. So `BranchWindow` gains one new consuming method,
+`finalize_fork_data`, alongside the existing `finalize_data`/`fold_exit` —
+`fold_exit` and the `Drop` impl are reused completely unchanged. No new
+struct.
+
 ## Foundation already landed (2026-08-22)
 
 The answerer-plane green scheduler (`service_answerer_green` — `async (fork

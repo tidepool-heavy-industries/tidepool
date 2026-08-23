@@ -503,6 +503,43 @@ fn wrap_fork_value(
     }
 }
 
+/// The character budget a fork child's derived label slug truncates to —
+/// short enough that a long brief still reads as one path segment, long
+/// enough to stay recognizable alongside a sibling's. See
+/// [`SelfHarnessDriver::fork_child_label`].
+const FORK_LABEL_SLUG_BUDGET: usize = 24;
+
+/// A fork child's own GUI path segment: `f<idx>-<slug>`, where `slug` is an
+/// ASCII, lowercase, hyphen-joined prefix of the fork's authored BRIEF (not
+/// the composed hole card) — non-alphanumeric runs collapse to one hyphen,
+/// leading/trailing hyphens are trimmed, and a brief with no alphanumeric
+/// content at all (or an empty one) falls back to the bare index so the
+/// segment is never empty. See [`SelfHarnessDriver::fork_child_label`] for
+/// how this combines with the parent's own path.
+fn fork_child_path_segment(idx: u32, brief: &str) -> String {
+    let mut slug = String::new();
+    let mut pending_hyphen = false;
+    for c in brief.chars() {
+        if slug.len() >= FORK_LABEL_SLUG_BUDGET {
+            break;
+        }
+        if c.is_ascii_alphanumeric() {
+            if pending_hyphen && !slug.is_empty() {
+                slug.push('-');
+            }
+            pending_hyphen = false;
+            slug.push(c.to_ascii_lowercase());
+        } else {
+            pending_hyphen = true;
+        }
+    }
+    if slug.is_empty() {
+        format!("f{idx}")
+    } else {
+        format!("f{idx}-{slug}")
+    }
+}
+
 /// The refusal corrective for a fork that would exceed the window's budget:
 /// what happened, what survives, and the one useful next step.
 fn fork_budget_refusal(spent: u32, cap: u32, needed: u32, ty_label: &str) -> String {
@@ -1336,6 +1373,18 @@ pub struct SelfHarnessDriver {
     /// concurrent-siblings reason as `branch_node_paths` — two siblings
     /// under one parent can each `delegate` in the SAME bulk window.
     delegated_branches: Mutex<HashMap<String, Vec<String>>>,
+    /// Fork-subsumes-split step 3 (seam map §7.1): the next `idx` to assign
+    /// a fork child of a given PARENT, for that child's derived GUI label
+    /// (`f<idx>-<slug>` — see [`Self::drive_fork_child_window`]'s doc).
+    /// Assigned INSIDE `drive_fork_child_window` rather than threaded in
+    /// from a caller: both of its call sites (`drain_answerer_fork` and
+    /// `service_thread_ready`'s async fork arm) already pass a fixed
+    /// argument list, and the latter is root's concurrent territory this
+    /// change must not touch. A per-parent (not global) counter also keeps
+    /// labels unique across repeated forks from the same parent over its
+    /// lifetime, not just within one `forkAll` batch. `Mutex`-wrapped for
+    /// the same concurrent-siblings reason as `branch_node_paths`.
+    fork_child_seq: Mutex<HashMap<NodeId, u32>>,
 }
 
 /// A boot fold and where its segments live, held together so the
@@ -1450,46 +1499,56 @@ impl WindowLease {
     }
 }
 
-/// A `runLLMTurnBranch` child's window transaction — the deeper,
-/// ownership-tracked treatment of [`WindowLease::OneShotBranch`] alone
-/// (P3.2's typestate opportunity). [`Self::service_outer_branch`] used to
-/// retire its node by hand in four places (a mechanism error, a
+/// A one-shot child window's transaction — the deeper, ownership-tracked
+/// treatment of [`WindowLease::OneShotBranch`] alone (P3.2's typestate
+/// opportunity), shared by [`Self::service_outer_branch`]'s branch child AND
+/// [`Self::drive_fork_child_window`]'s fork child (fork-subsumes-split step
+/// 3 — checked reuse before adding a sibling struct: the two differ only in
+/// how success is delivered, covered below). Retiring used to be a
+/// hand-written four-site discipline per caller (a mechanism error, a
 /// non-finalize exit, a closure rejection, and success), linked only by
 /// sequencing and a bare `NodeId` a reader had to trust every future error
 /// arm would remember to terminate. This guard makes retiring exactly
-/// once, on every exit, structural instead of a four-site discipline:
-/// [`Self::finalize_data`] freezes then retires, [`Self::fold_exit`]
-/// retires then produces the exit, and `Drop` retires an unfinished
-/// window — the mechanism-failure `?` early return that used to need its
-/// OWN hand-written `terminate_node` call now needs none.
+/// once, on every exit, structural instead: [`Self::finalize_data`]/
+/// [`Self::finalize_fork_data`] freeze-or-not then retire,
+/// [`Self::fold_exit`] retires then produces the exit, and `Drop` retires an
+/// unfinished window — the mechanism-failure `?` early return that used to
+/// need its OWN hand-written `terminate_node` call now needs none.
 ///
-/// Non-Clone: at most one guard exists per branch child.
+/// Non-Clone: at most one guard exists per child window.
 struct BranchWindow {
     agent: Arc<Harness>,
     node: NodeId,
     realm: tidepool_codegen::jit_machine::RealmId,
     scope: tidepool_codegen::scope::ScopeId,
-    validated_ref: ContextRef,
+    /// The frozen snapshot a branch child forked from — `None` for a fork
+    /// child, which forks from the LIVE parent instead (no `ContextRef` to
+    /// validate). Read only by `Drop`'s trace line, never by any retirement
+    /// logic, which is what makes widening this to `Option` free.
+    validated_ref: Option<ContextRef>,
     retired: bool,
 }
 
-// Every field here (`Arc`, `NodeId`, `RealmId`, `ScopeId`, `ContextRef`,
-// `bool`) is independently Clone, so a `#[derive(Clone)]` would compile
-// silently — and then a clone's `retired` flag would diverge from the
-// original's, letting `finalize_data`/`fold_exit` and the panic-safety `Drop`
-// each believe THEY own retiring the window, double-retiring the node this
-// guard exists to retire exactly once.
+// Every field here (`Arc`, `NodeId`, `RealmId`, `ScopeId`,
+// `Option<ContextRef>`, `bool`) is independently Clone, so a
+// `#[derive(Clone)]` would compile silently — and then a clone's `retired`
+// flag would diverge from the original's, letting `finalize_data`/
+// `finalize_fork_data`/`fold_exit` and the panic-safety `Drop` each believe
+// THEY own retiring the window, double-retiring the node this guard exists
+// to retire exactly once.
 static_assertions::assert_not_impl_any!(BranchWindow: Clone, Copy);
 
 impl BranchWindow {
     /// Mint a guard from an already-established [`WindowLease::OneShotBranch`]
     /// — `require_one_shot` refuses to hand back node/realm/scope if `lease`
     /// were ever (by a future refactor) the loop's reusable answerer instead
-    /// of a branch child's own, so this is where that check is load-bearing.
+    /// of a one-shot child's own, so this is where that check is
+    /// load-bearing. `validated_ref` is `None` for a fork child (see the
+    /// field's own doc).
     fn from_lease(
         lease: WindowLease,
         agent: Arc<Harness>,
-        validated_ref: ContextRef,
+        validated_ref: Option<ContextRef>,
     ) -> Result<Self, DriverError> {
         let (node, realm, scope) = lease.require_one_shot()?;
         Ok(Self {
@@ -1510,6 +1569,9 @@ impl BranchWindow {
     /// post-finalize prefix (before retirement — `freeze_snapshot` reads
     /// the live convo, which `terminate_node` removes), then retire.
     /// Consumes the window; the only way to reach a post-finalize digest.
+    /// Branch-flavored: a branch answer is a `(T, ContextRef)` pair, so its
+    /// window needs a digest for the ref half. See [`Self::finalize_fork_data`]
+    /// for the fork-flavored sibling, which has no such pair to build.
     fn finalize_data(mut self) -> Result<(Value, String, SnapshotDigest), HarnessError> {
         let (value, rendered) = self.agent.take_finalized_value_keep_open(self.node)?;
         let digest = self.agent.freeze_snapshot(self.node)?;
@@ -1519,10 +1581,38 @@ impl BranchWindow {
         Ok((value, rendered, digest))
     }
 
+    /// Fork-flavored success (fork-subsumes-split step 3, seam map §7.10):
+    /// a fork answer is bare data, never a `(T, ContextRef)` pair, so there
+    /// is no post-finalize prefix to freeze here (unlike
+    /// [`Self::finalize_data`]). A successful fork child's durable ending
+    /// must be `NodeDone`, recorded BEFORE retirement — `terminate_node`
+    /// alone would mark it `NodeCancelled`, an accidental mismatch the seam
+    /// map calls out by name. Retries the finalized-value take across a
+    /// `TurnInFlight` race (the original one-shot fork path's own
+    /// discipline — a branch child's `finalize_data` never needed it because
+    /// nothing else can be mid-turn against a frozen-snapshot child).
+    /// Consumes the window.
+    async fn finalize_fork_data(mut self) -> Result<(Value, String), HarnessError> {
+        let node = self.node;
+        let (value, rendered) =
+            retry_on_turn_in_flight(|| self.agent.take_finalized_value_keep_open(node)).await?;
+        let _ = self
+            .agent
+            .tree()
+            .node_done(node, "fork answer delivered".to_string());
+        self.agent.terminate_node(node, "fork child retired")?;
+        self.retired = true;
+        Ok((value, rendered))
+    }
+
     /// A failure ATTRIBUTABLE TO THIS CHILD's window (round exhaustion, a
     /// non-finalize suspension, a closure answer this driver cannot
     /// carry): retire with `reason`, producing nothing further. Consumes
-    /// the window.
+    /// the window. Shared verbatim by the branch and fork callers — a fork
+    /// child's caller additionally turns this into a hard `Err` afterward
+    /// (fork children are not branch positions with a typed `Left` to fold
+    /// into; see `drive_fork_child_window`'s own doc), but the retirement
+    /// itself is identical.
     fn fold_exit(mut self, reason: &str) {
         let _ = self.agent.terminate_node(self.node, reason);
         self.retired = true;
@@ -1530,12 +1620,12 @@ impl BranchWindow {
 }
 
 impl Drop for BranchWindow {
-    /// Covers exactly the mechanism-failure path: `service_outer_branch`
-    /// returns `Err(e)` via `?` before ever reaching
-    /// [`Self::finalize_data`]/[`Self::fold_exit`], and this guard simply
-    /// goes out of scope. Idempotent with the two consuming methods
-    /// (`retired` is set the instant either runs), so this never
-    /// double-retires an already-finished window.
+    /// Covers exactly the mechanism-failure path: a caller returns `Err(e)`
+    /// via `?` before ever reaching [`Self::finalize_data`]/
+    /// [`Self::finalize_fork_data`]/[`Self::fold_exit`], and this guard
+    /// simply goes out of scope. Idempotent with the three consuming
+    /// methods (`retired` is set the instant any of them runs), so this
+    /// never double-retires an already-finished window.
     fn drop(&mut self) {
         if !self.retired {
             tracing::warn!(
@@ -1543,11 +1633,11 @@ impl Drop for BranchWindow {
                 realm = ?self.realm,
                 scope = ?self.scope,
                 validated_ref = ?self.validated_ref,
-                "branch window dropped without an explicit exit (mechanism failure)"
+                "child window dropped without an explicit exit (mechanism failure)"
             );
             let _ = self.agent.terminate_node(
                 self.node,
-                "branch window dropped without an explicit exit (mechanism failure)",
+                "child window dropped without an explicit exit (mechanism failure)",
             );
         }
     }
@@ -1621,6 +1711,7 @@ impl SelfHarnessDriver {
             branch_node_paths: Mutex::new(HashMap::new()),
             node_labels: Mutex::new(HashMap::new()),
             delegated_branches: Mutex::new(HashMap::new()),
+            fork_child_seq: Mutex::new(HashMap::new()),
         }
     }
 
@@ -4151,7 +4242,7 @@ impl SelfHarnessDriver {
         // (`fold_exit`, `finalize_data`, or — for the mechanism-error `?`
         // below — its `Drop`). See `BranchWindow`'s doc for the four
         // hand-written call sites this replaces.
-        let window = BranchWindow::from_lease(lease, self.agent.clone(), cref)?;
+        let window = BranchWindow::from_lease(lease, self.agent.clone(), Some(cref))?;
 
         // A branch child is a BRANCH POSITION, so from here on this window's
         // own failures are DATA — folded as `Left exit` into the answer
@@ -4540,7 +4631,7 @@ impl SelfHarnessDriver {
         // Every exit below this point retires exactly through `window`
         // (`fold_exit`, `finalize_data`, or — for the mechanism-error `?`
         // below — its `Drop`), same discipline `service_outer_branch` uses.
-        let window = BranchWindow::from_lease(lease, self.agent.clone(), cref)?;
+        let window = BranchWindow::from_lease(lease, self.agent.clone(), Some(cref))?;
 
         // A branch child is a BRANCH POSITION, so from here on this window's
         // own failures are DATA — folded as `Left exit` at ITS OWN POSITION
@@ -6139,13 +6230,27 @@ impl SelfHarnessDriver {
     /// separate-session include dance), and the finalize contract pinned
     /// from the fork site's own resolved modules.
     ///
+    /// STEP 3 (seam map §7): this child also gets the SAME operator-GUI/tree
+    /// lifecycle a branch child gets — a derived label/path
+    /// (`Self::fork_child_label`), `node_gate`/`node_seeded` at birth (the
+    /// AUTHORED brief, not the composed hole card), `node_finalized`/
+    /// `node_failed` at the fold, and `retire_node` on every exit, all
+    /// through the SAME [`BranchWindow`] guard `service_outer_branch` uses
+    /// (widened to accept a fork child's absent `ContextRef` — see that
+    /// struct's doc) so a mechanism-error `?` before the pump starts can
+    /// never leak the label/path registrations or skip retirement.
+    ///
     /// Exit semantics keep `answer_fork`'s: a child that exhausts its
     /// budget or otherwise exits without finalizing HARD-FAILS the fork
     /// (the pump's own nudge/ultimatum ladder has already run) — fork
-    /// children are not branch positions with a typed `Left` to fold into.
-    /// TERMINAL FIX (seam map §7.10): a successful child is marked
-    /// `NodeDone` BEFORE resource retirement, instead of the old path's
-    /// accidental `NodeCancelled`-via-`terminate_node`-only ending.
+    /// children are not branch positions with a typed `Left` to fold into,
+    /// so EVERY non-success outcome below (non-finalize, closure, or a
+    /// mechanism `DriverError` from the pump itself) is reported via
+    /// `node_failed` and then hard-fails through as `Err`. TERMINAL FIX
+    /// (seam map §7.10): a successful child is marked `NodeDone` BEFORE
+    /// resource retirement (`BranchWindow::finalize_fork_data`), instead of
+    /// the old path's accidental `NodeCancelled`-via-`terminate_node`-only
+    /// ending.
     async fn drive_fork_child_window(
         &self,
         parent: NodeId,
@@ -6168,6 +6273,25 @@ impl SelfHarnessDriver {
         let node = self
             .agent
             .register_fork_child_with_card(parent, title, card)?;
+
+        // PRD 21 C5, mirrored from `service_outer_branch`: this child's
+        // domain `NodePath`, when its brief happens to be a companion
+        // coalgebra prompt — recorded BEFORE driving so a delegation
+        // mid-turn can attribute its completed branch to this node; removed
+        // unconditionally once it finishes, below.
+        if let Some(path) = engine::parse_companion_node_path(brief) {
+            self.branch_node_paths.lock().insert(node, path);
+        }
+        // Step 3 GUI lane: a fork child's label/path is DERIVED (unlike a
+        // `runLLMTurnBranchLabeled` child's wire-carried one) — see
+        // `Self::fork_child_label`'s doc. Registered NOW, not on its first
+        // ask/note, so the operator watches the tree grow — mirrors
+        // `service_outer_branch`'s own discipline exactly.
+        let label = self.fork_child_label(parent, brief);
+        self.node_labels.lock().insert(node, label.clone());
+        let _ = self.gate.node_gate(&label);
+        self.gate.node_seeded(&label, brief);
+
         // Attach to the SHARED session: no per-node machine, no separate
         // decl plane — the child's turns run as a realm on the one machine.
         self.agent.force_attached(node, Actor::Operator, sid)?;
@@ -6193,68 +6317,134 @@ impl SelfHarnessDriver {
             .set_answer_contract(node, self.answer_contract(ty, &modules));
         self.emit(Event::TurnStart { node });
 
+        // This child's mode, typed (`WindowLease::require_one_shot`'s doc):
+        // it answers exactly once, then is frozen and retired below. No
+        // `ContextRef` to validate — a fork child forks from the LIVE
+        // parent, not a frozen snapshot (see `BranchWindow::validated_ref`'s
+        // doc).
+        let lease = WindowLease::OneShotBranch {
+            node,
+            realm,
+            scope: child_scope,
+        };
+        // Every exit below this point retires exactly through `window`
+        // (`fold_exit`, `finalize_fork_data`, or — for a mechanism-error `?`
+        // ABOVE this point, before the guard exists — a hand-rolled cleanup
+        // would be needed; there is none between here and the guard's
+        // construction). See `BranchWindow`'s doc.
+        let window = BranchWindow::from_lease(lease, self.agent.clone(), None)?;
+
         // Box::pin: the pump drives child pumps (a fork child can itself
         // present forms, and — step 2 — fork), so this call is genuinely
         // recursive; the indirection is the async-recursion requirement,
         // nothing more.
         let outcome = Box::pin(self.drive_answerer_to_finalize(node, ty, site, fork_depth)).await;
         self.emit(Event::TurnEnd { node });
-        let fail = |this: &Self, node: NodeId, reason: String| -> DriverError {
-            let _ = this.agent.terminate_node(node, &reason);
-            DriverError::Session(reason)
-        };
+
+        // Every path below this point is done with this node's own
+        // delegation window and GUI registration — see the inserts above.
+        self.branch_node_paths.lock().remove(&node);
+        let retired_label = self.node_labels.lock().remove(&node);
+        if let Some(label) = &retired_label {
+            self.gate.retire_node(label);
+        }
+
         match outcome {
             Ok(Ok(TurnOutcome::Suspended { classified, .. }))
                 if matches!(classified.routing, HoleRouting::Finalize { .. }) =>
             {
                 if self.agent.finalize_is_closure(node) {
-                    return Err(fail(
-                        self,
-                        node,
-                        format!(
-                            "fork child {node:?} finalized a closure — a fork answer must \
-                             be plain data in this driver (v1 scope)"
-                        ),
-                    ));
+                    let reason = format!(
+                        "fork child {node:?} finalized a closure — a fork answer must \
+                         be plain data in this driver (v1 scope)"
+                    );
+                    if let Some(label) = &retired_label {
+                        self.gate.node_failed(label, &reason);
+                    }
+                    window.fold_exit(&reason);
+                    return Err(DriverError::Session(reason));
                 }
-                let (value, rendered) =
-                    retry_on_turn_in_flight(|| self.agent.take_finalized_value_keep_open(node))
-                        .await
-                        .map_err(|e| fail(self, node, format!("fork child finalize take: {e}")))?;
+                let (value, rendered) = window
+                    .finalize_fork_data()
+                    .await
+                    .map_err(|e| DriverError::Session(format!("fork child finalize take: {e}")))?;
+                if let Some(label) = &retired_label {
+                    self.gate.node_finalized(label, &rendered);
+                }
                 self.emit(Event::Finalize {
                     node,
                     value: rendered,
                 });
-                // NodeDone BEFORE retirement — the successful ending is the
-                // durable record; retirement is resource bookkeeping.
-                let _ = self
-                    .agent
-                    .tree()
-                    .node_done(node, "fork answer delivered".to_string());
-                let _ = self.agent.terminate_node(node, "fork child retired");
                 Ok(value)
             }
-            Ok(Ok(other)) => Err(fail(
-                self,
-                node,
-                format!(
+            Ok(Ok(other)) => {
+                let reason = format!(
                     "fork child {node:?} returned a non-finalize outcome from the pump \
                      ({}) — dispatcher contract violation",
                     turn_outcome_tag(&other)
-                ),
-            )),
-            Ok(Err(exit)) => Err(fail(
-                self,
-                node,
-                format!("fork child {node:?} ended without an answer: {exit}"),
-            )),
+                );
+                if let Some(label) = &retired_label {
+                    self.gate.node_failed(label, &reason);
+                }
+                window.fold_exit(&reason);
+                Err(DriverError::Session(reason))
+            }
+            Ok(Err(exit)) => {
+                let reason = format!("fork child {node:?} ended without an answer: {exit}");
+                if let Some(label) = &retired_label {
+                    self.gate.node_failed(label, &reason);
+                }
+                window.fold_exit(&reason);
+                Err(DriverError::Session(reason))
+            }
             Err(e) => {
-                let _ = self
-                    .agent
-                    .terminate_node(node, "fork child retired (mechanism failure)");
+                let reason = "fork child retired (mechanism failure)";
+                if let Some(label) = &retired_label {
+                    self.gate.node_failed(label, &format!("{reason}: {e}"));
+                }
+                window.fold_exit(reason);
                 Err(e)
             }
         }
+    }
+
+    /// Fork-subsumes-split step 3 (seam map §7.1): derive a stable GUI
+    /// label/tree-path for a fork child. Unlike `runLLMTurnBranchLabeled`,
+    /// a fork's brief carries no wire-carried label, so both the label and
+    /// the path segment are derived here rather than read off the wire.
+    ///
+    /// Base path, in priority order: the PARENT's own companion `NodePath`
+    /// (`branch_node_paths` — set when the parent is itself a companion
+    /// coalgebra node, the domain-meaningful path `takeDelegatedBranches`
+    /// attribution already keys on); else the parent's own registered GUI
+    /// label (`node_labels` — the parent is itself a labeled branch/fork
+    /// child with a plain, non-companion-shaped prompt); else the fixed
+    /// root id `"root"` (mirrors `tidepool_web::DEFAULT_NODE_ID` as a
+    /// literal — this crate cannot depend on `tidepool-web`, the same
+    /// coupling shape `engine::parse_companion_node_path` already has to a
+    /// Haskell-side prompt convention).
+    ///
+    /// Child segment: `f<idx>-<ascii-slug-of-brief-prefix>`, mirroring a
+    /// structurally-labeled branch's own `root/1-child` convention so a
+    /// fork child's tree position reads the same way. `idx` is a per-PARENT
+    /// monotonic counter (`Self::fork_child_seq`), not threaded in from the
+    /// caller — see that field's doc for why.
+    fn fork_child_label(&self, parent: NodeId, brief: &str) -> String {
+        let idx = {
+            let mut seq = self.fork_child_seq.lock();
+            let counter = seq.entry(parent).or_insert(0);
+            let idx = *counter;
+            *counter += 1;
+            idx
+        };
+        let base = self
+            .branch_node_paths
+            .lock()
+            .get(&parent)
+            .cloned()
+            .or_else(|| self.node_labels.lock().get(&parent).cloned())
+            .unwrap_or_else(|| "root".to_string());
+        format!("{base}/{}", fork_child_path_segment(idx, brief))
     }
 
     /// One scheduling pass of the answerer-plane green scheduler: service the
