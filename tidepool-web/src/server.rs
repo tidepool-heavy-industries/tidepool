@@ -123,18 +123,31 @@ const TURN_HISTORY_CAP: usize = 50;
 /// One registered node's state — the minimal node lifecycle: `seed` (the
 /// starting prompt, when the wire carried one), the append-only `timeline`
 /// of notes and asks, and `final_value`/`failure` once the window ends.
-/// `next_ask_id` mints ask ids/nonces; `rev` is this node's AGGREGATE
-/// revision, bumped under the SAME lock as every mutation —
-/// the panel-root `data-rev` the client's focus-preserving skip keys off.
-/// `done` marks a retired window ([`OperatorGate::retire_node`]) — the
-/// section greys, nothing is removed.
-#[derive(Default)]
+/// `next_ask_id` mints ask ids/nonces — the one in-process monotonic id
+/// issuer (`tidepool_repr::MonotonicIdIssuer`), read via `next_raw()` since
+/// an ask id is a bare `u64`, not a `<prefix>_<n>` string; `rev` is this
+/// node's AGGREGATE revision, bumped under the SAME lock as every
+/// mutation — the panel-root `data-rev` the client's focus-preserving skip
+/// keys off. `done` marks a retired window ([`OperatorGate::retire_node`]) —
+/// the section greys, nothing is removed.
 struct NodeSlot {
     timeline: Vec<TimelineItem>,
-    next_ask_id: u64,
+    next_ask_id: tidepool_repr::MonotonicIdIssuer,
     done: bool,
     turn_history: VecDeque<String>,
     rev: u64,
+}
+
+impl Default for NodeSlot {
+    fn default() -> Self {
+        NodeSlot {
+            timeline: Vec::new(),
+            next_ask_id: tidepool_repr::MonotonicIdIssuer::new("ask"),
+            done: false,
+            turn_history: VecDeque::new(),
+            rev: 0,
+        }
+    }
 }
 
 impl NodeSlot {
@@ -267,8 +280,7 @@ impl AppState {
             .nodes
             .get_mut(node_id)
             .expect("WebGate only holds ids from register_node, which always inserts one");
-        let id = slot.next_ask_id;
-        slot.next_ask_id += 1;
+        let id = slot.next_ask_id.next_raw();
         slot.timeline.push(TimelineItem::Ask { id, state });
         slot.rev += 1;
         drop(reg);
