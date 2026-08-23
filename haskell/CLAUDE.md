@@ -306,7 +306,7 @@ own typecheck (which would otherwise choke on the failing import with GHC's
 generic "attempting to use module X which is not loaded") is never reached.
 Since stable-effects-core (`tidepool-mcp/CLAUDE.md`'s section of that name)
 split the generated surface in two, the SHIM shape above is specifically about
-the tiny per-window half (the only one that still declares `type M`) — the
+the tiny per-agent-session half (the only one that still declares `type M`) — the
 stable `Tidepool.Effects.Core` half has no row to fail on. The harness also
 still sidesteps this for pinned `Finalize` rows by probe-compiling the
 generated SHIM module STANDALONE first (`EngineConfig::turn_target`, memoized

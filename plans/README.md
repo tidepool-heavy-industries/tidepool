@@ -16,9 +16,9 @@ to plan files that stay in this directory but no longer describe active work.
 - [Fork subsumes split](fork-subsumes-split.md): direction locked by the
   operator (2026-08-22) — the companion tree emerges from model-authored
   `async (fork @T …)` calls; fork children inherit the full node lifecycle;
-  gates drop in favor of ask-idiom policies. Foundation (answerer-plane
+  gates drop in favor of ask-idiom policies. Foundation (the answerer's
   green scheduler, fork budget, composition acceptance) landed; step 1
-  (children on the window pump) next.
+  (children on the agent-session pump) next.
 - [Session-ownership capstone](registry-capstone.md): human-approved wave
   (2026-08-22), consolidating dup-c-survey items 1 (resident-session
   checkout/lifecycle) and 5 (harness suspension state) into one promoted
@@ -48,7 +48,7 @@ to plan files that stay in this directory but no longer describe active work.
   coalgebra (finish locally or define one layer of branches), children forked
   from the frozen post-coalgebra context, a second invocation as the algebra
   folding typed results. Lanes C0–C6; C1 (mounting a function-bearing value
-  into a window, the de-risk spike) **landed 2026-08-17** — see
+  into an agent session, the de-risk spike) **landed 2026-08-17** — see
   [21-c1-mount-seam.md](self-iterating-harness/21-c1-mount-seam.md). C2–C6
   (scope trees, exit verb, the recursive-companion slice itself, the
   delegate-effect survey) remain.
@@ -70,7 +70,7 @@ to plan files that stay in this directory but no longer describe active work.
   views) has no confirmed implementation as of this audit — `tidepool-web`'s
   new d3 tree view (`tidepool-web/src/tree.rs`) is a general session-tree
   GUI, not confirmed as the swarm-specific S1-L6 surface. Stage 2 (the
-  resident factory) is chartered but not started.
+  long-running repository coordinator) is chartered but not started.
 - [GHCi affordances](ghci-affordances-todo.md): multi-item turns landed
   (`Harness::run_multi_item_block`); `:t` (a type-answer classification arm)
   remains unbuilt — the interim mitigation (signatures folded into the
@@ -78,7 +78,7 @@ to plan files that stay in this directory but no longer describe active work.
 - [Generic surface wave](self-iterating-harness/15-generic-surface-wave.md)
   (approved direction, 2026-08-08): `askUser`'s `Generic`-derived typed forms
   are already live (see `docs/harness-capabilities.md`); the wave's
-  `GTypeDoc` interpreter — a full typed declaration synopsis for hole cards,
+  `GTypeDoc` interpreter — a full typed declaration synopsis for typed request prompts,
   superseding the current constructor/selector-names-only shallow synopsis —
   is not yet built. See
   [14-generic-derived-askuser-prd.md](self-iterating-harness/14-generic-derived-askuser-prd.md)
