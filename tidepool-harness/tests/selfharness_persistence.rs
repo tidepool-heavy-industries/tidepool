@@ -460,11 +460,20 @@ async fn operator_steering_text_reaches_the_next_cycles_framing() {
          operator text yet, got: {:?}",
         system_messages[0]
     );
+    // Needled rather than a full-sentence `contains` (test-architecture
+    // review J2, 2026-08-23): the old check coupled the framing marker to
+    // the parenthetical "(between loops, addressed to you)" verbatim — a
+    // rewording (F7/F14-style) would break this pin without changing what it
+    // discriminates. Two needles keep exactly that: the operator-said marker
+    // present, AND the operator's own text reaching the framing.
     assert!(
+        system_messages[1].contains("THE OPERATOR SAID"),
+        "cycle 2's framing must carry the operator-said marker, got: {:?}",
         system_messages[1]
-            .contains("THE OPERATOR SAID (between loops, addressed to you): steer left"),
-        "the operator's between-loops text must reach cycle 2's framing verbatim, \
-         got: {:?}",
+    );
+    assert!(
+        system_messages[1].contains("steer left"),
+        "the operator's between-loops text must reach cycle 2's framing, got: {:?}",
         system_messages[1]
     );
 }
@@ -680,13 +689,17 @@ async fn committed_cycles_restore_state_and_summary_from_the_same_generation() {
     // (Deciding), proving the restored state reached `render`, not
     // initialState's Observing.
     assert!(
-        outcome2.prompt_before.contains("deciding what to do next"),
+        outcome2
+            .prompt_before
+            .contains(support::harness_fixture_phrases::DECIDING_MODE_LABEL),
         "restart must resume from the persisted Deciding mode, not \
          initialState's Observing, got:\n{}",
         outcome2.prompt_before
     );
     assert!(
-        !outcome2.prompt_before.contains("No decision made yet"),
+        !outcome2
+            .prompt_before
+            .contains(support::harness_fixture_phrases::NO_DECISION_YET),
         "restart must resume with cycle 1's decision already recorded, got:\n{}",
         outcome2.prompt_before
     );

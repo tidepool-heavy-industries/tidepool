@@ -6,6 +6,22 @@ pub mod haskell_call;
 
 use tempfile::TempDir;
 
+/// Fixture phrases from the REFERENCE harness (`examples/harness`) — model-
+/// facing prose, so in scope for the prompt-surface sweeps that already
+/// touch driver-authored text, even though it's test substrate rather than
+/// driver source (test-architecture review J4, 2026-08-23). Keyed here, on
+/// the CONSTANT rather than duplicated string literals, so a fixture
+/// rewording is one edit instead of a scavenger hunt across every test that
+/// asserts against it.
+pub mod harness_fixture_phrases {
+    /// `HarnessTypes.hs`'s `Deciding` mode label (`modeLabel`).
+    pub const DECIDING_MODE_LABEL: &str = "deciding what to do next";
+    /// `HarnessTypes.hs`'s `Nothing`-decision placeholder (`renderDecision`).
+    pub const NO_DECISION_YET: &str = "No decision made yet";
+    /// `Harness.hs`'s `loop`/`render` prompt asking for the next decision.
+    pub const DECIDE_NEXT_THING_PROMPT: &str = "decide the single next thing to do";
+}
+
 /// A `std::env::temp_dir()`-rooted path that will not collide with a
 /// leftover from a PID-reused prior run, unlike a bare `{pid}.jsonl` name —
 /// `LogWriter::create` uses `create_new(true)` and refuses an existing path,

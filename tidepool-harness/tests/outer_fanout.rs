@@ -384,10 +384,30 @@ async fn outer_fanout_round_exhausted_child_folds_as_data_without_erasing_siblin
     // …and the failure is DATA at position 4, typed, with the other eight
     // positions untouched.
     assert_eq!(outcomes.len(), 9, "one outcome per branch position");
-    assert_eq!(
-        outcomes[4], "exit:round exhaustion: fanout child 4 exceeded 4 rounds (cap 2 + ultimatum grace) without finalizing",
+    // Needled rather than a full-string `assert_eq!` (test-architecture
+    // review J1, 2026-08-23): the old exact match coupled three volatile
+    // things at once — `renderInvocationExit`'s prose, the cap arithmetic,
+    // and the phrase "ultimatum grace" — so a wording pass could break this
+    // pin without changing what it actually discriminates. These three
+    // needles keep exactly that discriminating power (round exhaustion,
+    // specifically child 4's, specifically after 4 rounds) while freeing the
+    // prose to reword.
+    assert!(
+        outcomes[4].starts_with("exit:round exhaustion"),
         "child 4's branch position must carry the typed round-exhaustion exit, \
-         rendered by `renderInvocationExit`"
+         rendered by `renderInvocationExit`, got: {}",
+        outcomes[4]
+    );
+    assert!(
+        outcomes[4].contains("child 4"),
+        "the exit must name the failing child by position, got: {}",
+        outcomes[4]
+    );
+    assert!(
+        outcomes[4].contains("4 rounds"),
+        "the exit must carry the hard-stop round count (cap 2 + 2 ultimatum grace), \
+         got: {}",
+        outcomes[4]
     );
     for (i, outcome) in outcomes.iter().enumerate() {
         if i == 4 {

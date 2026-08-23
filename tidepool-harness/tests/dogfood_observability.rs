@@ -221,7 +221,7 @@ async fn narration_and_transcript_fold_both_hold_for_one_retry_cycle() {
 
     // Deliverable 4: the hole's prompt and the answer that came back.
     assert!(
-        console.contains("decide the single next thing to do"),
+        console.contains(support::harness_fixture_phrases::DECIDE_NEXT_THING_PROMPT),
         "console must show the runLLMTurn hole's prompt, got:\n{console}"
     );
     assert!(

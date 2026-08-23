@@ -7501,4 +7501,81 @@ mod tests {
             "expected the unpaginated result binding, got:\n{src}"
         );
     }
+
+    /// H1 (test-architecture review, 2026-08-23): `fork_child_path_segment`
+    /// slugs a MODEL-AUTHORED fork brief into a GUI/DOM node id segment —
+    /// `tidepool-web`'s loopback trust model rests on "`node_id` is always a
+    /// substrate identifier, never model-produced text"
+    /// (`tidepool-web/src/lib.rs` interpolates `id="panel-<node_id>"` into
+    /// the DOM). Recovers the deleted `row_11_node_ids_are_containment_safe`'s
+    /// hostile corpus (git show
+    /// `bdfc334a^:tidepool-harness/tests/companion_recursive_slice.rs`,
+    /// `HOSTILE_TITLE`/`HOSTILE_FRAGMENTS`) as a pure, zero-GHC pin directly
+    /// on the slugging function, in place of the deleted full companion-tree
+    /// run.
+    #[test]
+    fn fork_child_path_segment_contains_hostile_briefs() {
+        const HOSTILE_TITLE: &str = "Beta!! <b>risk</b> ünïcode";
+        const HOSTILE_FRAGMENTS: [&str; 5] = ["!", "<", ">", "/b", "ü"];
+        let long_brief = "x".repeat(super::FORK_LABEL_SLUG_BUDGET * 2);
+
+        let cases: &[(&str, &[&str])] = &[
+            (HOSTILE_TITLE, &HOSTILE_FRAGMENTS),
+            ("a/b/c", &["/"]),
+            ("say \"hi\"", &["\""]),
+            ("   ", &[]),
+            ("!!!@@@###", &[]),
+            ("", &[]),
+            (long_brief.as_str(), &[]),
+        ];
+
+        for (i, (brief, hostile_fragments)) in cases.iter().enumerate() {
+            let idx = i as u32;
+            let segment = super::fork_child_path_segment(idx, brief);
+
+            // (1) shape: `f<idx>` or `f<idx>-<slug>`, slug ⊆ [a-z0-9-], within budget.
+            let prefix = format!("f{idx}");
+            let rest = segment
+                .strip_prefix(prefix.as_str())
+                .unwrap_or_else(|| panic!("segment {segment:?} must start with {prefix:?}"));
+            if !rest.is_empty() {
+                let slug = rest.strip_prefix('-').unwrap_or_else(|| {
+                    panic!("segment {segment:?} must join its slug to the index with '-'")
+                });
+                assert!(
+                    !slug.is_empty() && slug.len() <= super::FORK_LABEL_SLUG_BUDGET,
+                    "slug {slug:?} (from brief {brief:?}) must be 1..={} chars, got segment \
+                     {segment:?}",
+                    super::FORK_LABEL_SLUG_BUDGET
+                );
+                assert!(
+                    slug.chars()
+                        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-'),
+                    "slug {slug:?} (from brief {brief:?}) must be drawn from [a-z0-9-] only, \
+                     got segment {segment:?}"
+                );
+                // (4) no leading/trailing/double hyphen.
+                assert!(
+                    !slug.starts_with('-') && !slug.ends_with('-') && !slug.contains("--"),
+                    "slug {slug:?} (from brief {brief:?}) must have no leading/trailing/double \
+                     hyphen, got segment {segment:?}"
+                );
+            }
+
+            // (2) none of the hostile fragments survive.
+            for fragment in *hostile_fragments {
+                assert!(
+                    !segment.contains(fragment),
+                    "hostile fragment {fragment:?} from brief {brief:?} reached node id \
+                     segment {segment:?}"
+                );
+            }
+        }
+
+        // (3) the empty/all-symbol/whitespace-only case yields the bare
+        // `f<idx>` fallback — never an empty or bare-hyphen segment.
+        assert_eq!(super::fork_child_path_segment(2, ""), "f2");
+        assert_eq!(super::fork_child_path_segment(3, "!!!@@@###"), "f3");
+        assert_eq!(super::fork_child_path_segment(4, "   "), "f4");
+    }
 }

@@ -13,15 +13,25 @@
 //! spawn order) after the one spawning block; the budget test's queue has
 //! NO second-child reply, so a refusal that failed to refuse would consume
 //! the recovery finalize as the second child's turn and fail loudly.
+//!
+//! Also carries the fork child's operator-GUI/tree lifecycle pin (folded in
+//! from the retired `fork_child_gui.rs`, test-architecture review W1,
+//! 2026-08-23 — a full driver-boot twin of this file's own shape, saving a
+//! separate binary): a fork child gets the SAME `node_gate`/`node_seeded`/
+//! `node_finalized`/`retire_node` treatment a `runLLMTurnBranchLabeled`
+//! child gets, even though nothing on the wire hands it a label.
 
-use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 
 mod support;
 
+use serde_json::json;
 use tidepool_harness::engine::EngineConfig;
 use tidepool_harness::log::LogHeader;
 use tidepool_harness::provider::{DynModelProvider, Usage};
 use tidepool_harness::replay::{RecordedReply, ReplayProvider};
+use tidepool_harness::selfharness::operator::{FormShape, OperatorGate};
 use tidepool_harness::{
     answerer_decls, load_harness_source, Harness, LogObserver, SelfHarnessDriver,
 };
@@ -40,6 +50,10 @@ fn prelude_dir() -> std::path::PathBuf {
 
 fn examples_harness_dir() -> std::path::PathBuf {
     repo_root().join("examples/harness")
+}
+
+fn fixtures_dir() -> std::path::PathBuf {
+    repo_root().join("tidepool-harness/tests/fixtures")
 }
 
 fn header() -> LogHeader {
@@ -549,5 +563,383 @@ async fn settled_threads_leave_the_machine_quiescent_for_rotation() {
         Some("34"),
         "post-rotation forks still deliver to the right handles (3×10 + 4), \
          got {decision:?}"
+    );
+}
+
+/// What the H2 gate probe records: every retirement and failure attribution
+/// the fork children's `BranchWindow`/`drive_fork_child_window` reports, plus
+/// whether the driver ever mistakenly asked the operator anything (it must
+/// not — nothing in this scenario suspends on `askUser`).
+#[derive(Default)]
+struct RetireProbe {
+    present_form_calls: AtomicUsize,
+    retired: Mutex<Vec<String>>,
+    failed: Mutex<Vec<(String, String)>>,
+}
+
+struct ProbeGate {
+    probe: Arc<RetireProbe>,
+}
+
+impl OperatorGate for ProbeGate {
+    fn present_form(&self, _shape: &FormShape) -> serde_json::Value {
+        self.probe.present_form_calls.fetch_add(1, Ordering::SeqCst);
+        json!("unexpected — this scenario never asks the operator anything")
+    }
+
+    fn retire_node(&self, label: &str) {
+        self.probe.retired.lock().unwrap().push(label.to_string());
+    }
+
+    fn node_failed(&self, label: &str, reason: &str) {
+        self.probe
+            .failed
+            .lock()
+            .unwrap()
+            .push((label.to_string(), reason.to_string()));
+    }
+}
+
+/// H2 (test-architecture review, 2026-08-23): an ASYNC fork child
+/// (`async (fork @T brief)`, NOT a `runLLMTurnFork`/`Fanout` BRANCH
+/// POSITION) that exhausts its own round budget without ever finalizing.
+/// Per this crate's CLAUDE.md ("The line…"), a `Tidepool.Fork`-sourced child
+/// is not a branch position with a typed `Left` to fold into — its failure
+/// hard-fails the WHOLE cycle as an ordinary [`DriverError`], never
+/// laundered into a corrective the model can route around. What this pins:
+/// (1) the failure surfaces LEGIBLY — names round exhaustion specifically —
+/// rather than hanging the scheduler or surfacing as an opaque mechanism
+/// error, and (2) the starved child's own GUI/tree node still retires
+/// (`OperatorGate::retire_node`/`node_failed`) despite the whole cycle
+/// failing: `drive_fork_child_window` removes and retires a child's GUI
+/// label unconditionally, before it branches on how the child's pump ended
+/// — so no `Running` node is left behind by a fork subtree that never got to
+/// finalize. The settled sibling "pick a" retires too (every fork child
+/// does, success or failure alike) — asserting BOTH labels retire, with only
+/// the starved one reported failed, is what proves the sibling's own
+/// finalize completed cleanly before "pick b"'s exhaustion tore the cycle
+/// down.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn async_fork_child_round_exhaustion_surfaces_legibly_and_retires_node() {
+    support::require_extract();
+    let _cache_guard = support::isolate_cache();
+
+    let starved = || reply("Still weighing this branch; nothing to run yet.");
+    let replies = vec![
+        // 1. The same two-async-fork spawning block as the composition test.
+        reply(ASYNC_FORK_BLOCK),
+        // 2. Fork child A ("pick a") — answers normally in its one round.
+        finalize_int_reply(1),
+        // 3-5. Fork child B ("pick b") — three prose-only replies with no
+        //    ```haskell block, burning its (lowered) round budget: cap 1 +
+        //    2 ultimatum-grace rounds = 3 (`drive_answerer_to_finalize`'s
+        //    `hard_rounds = max_rounds + 2`).
+        starved(),
+        starved(),
+        starved(),
+    ];
+    let (mut driver, _agent, log_path) = build_driver(replies, "answerer-async-starved");
+    // Lower the shared round cap so the starved child hits round exhaustion
+    // in 3 scripted replies instead of 34 — this also caps the parent's and
+    // child A's own budgets, but both finalize inside their first round
+    // regardless.
+    driver.set_answerer_round_caps(0, 1);
+    let probe = Arc::new(RetireProbe::default());
+    driver.set_gate(Arc::new(ProbeGate {
+        probe: probe.clone(),
+    }));
+    let source = load_harness_source(&examples_harness_dir().join("Harness.hs"))
+        .expect("reference harness source loads");
+
+    let err = driver
+        .run_one_cycle(&source, None)
+        .await
+        .expect_err("a starved async fork child must hard-fail the cycle, not hang or succeed");
+
+    let message = err.to_string();
+    assert!(
+        message.contains("ended without an answer"),
+        "the failure must name that the CHILD ended without answering, not a bare \
+         mechanism error, got: {message}"
+    );
+    assert!(
+        message.contains("ExitRoundsExhausted"),
+        "the failure must discriminate round exhaustion specifically from a non-finalize \
+         ending or a provider failure, got: {message}"
+    );
+
+    // No leaked Running node: BOTH fork children's own GUI entries retire
+    // (unconditional in `drive_fork_child_window`, before it branches on
+    // outcome) despite the whole cycle failing — but only the starved one
+    // is reported failed.
+    assert_eq!(
+        probe.retired.lock().unwrap().as_slice(),
+        ["root/f0-pick-a".to_string(), "root/f1-pick-b".to_string()],
+        "both fork children's derived labels must retire, in spawn order — a leaked \
+         Running node would be a label never appearing here"
+    );
+    let failed = probe.failed.lock().unwrap();
+    assert_eq!(
+        failed.len(),
+        1,
+        "exactly ONE node_failed call — the settled sibling \"pick a\" must never be \
+         reported failed: {failed:?}"
+    );
+    assert_eq!(
+        failed[0].0, "root/f1-pick-b",
+        "the node_failed call must name the starved child, not the settled sibling: \
+         {failed:?}"
+    );
+    assert!(
+        failed[0].1.contains("ExitRoundsExhausted"),
+        "the node_failed reason must carry the same round-exhaustion detail the cycle \
+         error does: {}",
+        failed[0].1
+    );
+
+    // The refusal really fired against the STARVED child, not a GHC
+    // corrective loop impersonating it — sibling "pick a" compiled and
+    // finalized before "pick b" ever starved (same discipline as
+    // `logged_turn_texts`'s doc on this file's other tests).
+    let turns = logged_turn_texts(&log_path);
+    assert!(
+        !turns.iter().any(|t| t.contains("A block did not compile")),
+        "no turn may be a GHC corrective; logged turns:\n{turns:#?}"
+    );
+    assert_eq!(
+        probe.present_form_calls.load(Ordering::SeqCst),
+        0,
+        "nothing in this scenario suspends on askUser — the operator must never be asked"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// fork-child-gui (folded, test-architecture review W1, 2026-08-23): a fork
+// child gets the SAME operator-GUI/tree lifecycle a `runLLMTurnBranchLabeled`
+// child gets (`tests/labeled_branch.rs`), even though nothing on the wire
+// hands it a label — `SelfHarnessDriver::fork_child_label` derives one
+// instead. Pins the three behaviors `labeled_branch.rs` pins for a
+// wire-labeled branch child, against a fork child instead: its seed reaches
+// the gate at birth, its own `askUser` routes to its OWN per-node gate
+// (never the default one), and its finalize reaches `node_finalized` at its
+// fold.
+//
+// The fixture's derived label is known exactly: the per-loop answerer (the
+// fork's parent) has no companion `NodePath` and no registered GUI label of
+// its own, so `fork_child_label` falls back to the fixed root id `"root"`;
+// this is the first (and only) fork from that parent in the run, so
+// `idx == 0`; the brief `"explore"` is already a bare lowercase word, so it
+// slugs to itself — giving `"root/f0-explore"`.
+
+fn fork_child_gui_header() -> LogHeader {
+    LogHeader {
+        prelude_hash: "fork-child-gui".into(),
+        extract_fingerprint: "fork-child-gui".into(),
+        harness_version: "test".into(),
+    }
+}
+
+fn code(block: &str) -> RecordedReply {
+    RecordedReply {
+        content: format!("```haskell\n{block}\n```"),
+        usage: Usage {
+            input_tokens: 50,
+            output_tokens: 10,
+            cached_input_tokens: None,
+            cache_write_tokens: None,
+        },
+    }
+}
+
+/// What the fork-child-gui test gates share — same shape as
+/// `labeled_branch.rs`'s `RoutingProbe`.
+#[derive(Default)]
+struct RoutingProbe {
+    default_present_calls: AtomicUsize,
+    child_present_calls: AtomicUsize,
+    retired: Mutex<Vec<String>>,
+    seeded: Mutex<Vec<(String, String)>>,
+    finalized: Mutex<Vec<(String, String)>>,
+    failed: Mutex<Vec<(String, String)>>,
+}
+
+/// The driver's default gate: registers a per-node gate ONLY for the fork
+/// child's DERIVED label (see this module's doc for the exact derivation) —
+/// mirrors `labeled_branch.rs`'s `DefaultGate` shape, just against a label
+/// this fixture computed by hand instead of one a caller chose.
+struct DefaultGate {
+    probe: Arc<RoutingProbe>,
+    child_label: &'static str,
+}
+
+impl OperatorGate for DefaultGate {
+    fn present_form(&self, _shape: &FormShape) -> serde_json::Value {
+        self.probe
+            .default_present_calls
+            .fetch_add(1, Ordering::SeqCst);
+        json!("unexpected — the fork child's own ask must never reach the default gate")
+    }
+
+    fn node_gate(&self, label: &str) -> Option<Arc<dyn OperatorGate>> {
+        (label == self.child_label).then(|| {
+            Arc::new(ChildGate {
+                probe: self.probe.clone(),
+            }) as Arc<dyn OperatorGate>
+        })
+    }
+
+    fn retire_node(&self, label: &str) {
+        self.probe.retired.lock().unwrap().push(label.to_string());
+    }
+
+    fn node_seeded(&self, label: &str, seed: &str) {
+        self.probe
+            .seeded
+            .lock()
+            .unwrap()
+            .push((label.to_string(), seed.to_string()));
+    }
+
+    fn node_finalized(&self, label: &str, value: &str) {
+        self.probe
+            .finalized
+            .lock()
+            .unwrap()
+            .push((label.to_string(), value.to_string()));
+    }
+
+    fn node_failed(&self, label: &str, reason: &str) {
+        self.probe
+            .failed
+            .lock()
+            .unwrap()
+            .push((label.to_string(), reason.to_string()));
+    }
+}
+
+/// The fork child's OWN gate — a distinct `Arc<dyn OperatorGate>` the driver
+/// must resolve to via `node_gate` for every ask this node raises.
+struct ChildGate {
+    probe: Arc<RoutingProbe>,
+}
+
+impl OperatorGate for ChildGate {
+    fn present_form(&self, _shape: &FormShape) -> serde_json::Value {
+        self.probe
+            .child_present_calls
+            .fetch_add(1, Ordering::SeqCst);
+        json!("a scripted answer")
+    }
+}
+
+/// A fork child's `askUser` form reaches its OWN derived per-node gate
+/// (never the default one), it seeds with the authored brief at birth, and
+/// it finalizes and retires exactly once at its fold.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn fork_child_asks_route_to_its_own_derived_gate_and_finalizes() {
+    support::require_extract();
+    let _cache_guard = support::isolate_cache();
+
+    let replies = vec![
+        // The per-loop answerer's own turn: fork ONE child, then finalize
+        // with its answer — all one compiled block. The resume after fork
+        // continues the SAME block via the session's own continuation, no
+        // extra model round (same shape `acceptance_fork.rs`'s parent turn
+        // uses for `forkAll` + `finalize`).
+        code(
+            "import Tidepool.Fork (fork)\n\n\
+             do\n\
+             \x20 n <- fork @Int \"explore\"\n\
+             \x20 finalize @Int n :: M ()",
+        ),
+        // The fork child's own turn: one askUser round (a bare expression —
+        // the WHOLE block — so resuming it completes the turn with no
+        // further suspension). `askUser @T` is NULLARY (`Tidepool.Form.hs`).
+        code("askUser @Text"),
+        // The fork child's second turn: finalize with a typed Int.
+        code("finalize @Int 99 :: M ()"),
+    ];
+
+    let agent_cfg = EngineConfig::from_decls(
+        answerer_decls(),
+        repo_root().join("haskell/lib"),
+        Some(fixtures_dir()),
+    )
+    .expect("answerer engine config");
+    let provider: Arc<dyn DynModelProvider> = Arc::new(ReplayProvider::new(replies));
+    let log_path =
+        std::env::temp_dir().join(format!("fork-child-gui-{}.jsonl", std::process::id()));
+    let writer = tidepool_harness::log::LogWriter::create(&log_path, &fork_child_gui_header())
+        .expect("log writer");
+    let agent = Arc::new(Harness::new(writer, agent_cfg, provider).expect("agent harness boots"));
+
+    let probe = Arc::new(RoutingProbe::default());
+    let mut driver = SelfHarnessDriver::new(agent, Arc::new(LogObserver));
+    driver.set_gate(Arc::new(DefaultGate {
+        probe: probe.clone(),
+        child_label: "root/f0-explore",
+    }));
+
+    let source = load_harness_source(&fixtures_dir().join("ForkChildGuiHarness.hs"))
+        .expect("fork-child-gui fixture loads");
+
+    let outcome = driver
+        .run_one_cycle(&source, None)
+        .await
+        .expect("render->loop->runLLMTurn->fork(1 child, asks+finalizes)->finalize cycle");
+
+    assert_eq!(
+        outcome.state_json.get("lastValue").and_then(|v| v.as_i64()),
+        Some(99),
+        "the parent must resume with the fork child's finalized Int and finalize \
+         with it in turn: {:?}",
+        outcome.state_json
+    );
+
+    assert_eq!(
+        probe.child_present_calls.load(Ordering::SeqCst),
+        1,
+        "the fork child's one askUser form must reach its OWN derived per-node gate"
+    );
+    assert_eq!(
+        probe.default_present_calls.load(Ordering::SeqCst),
+        0,
+        "the fork child's ask must never fall through to the default gate"
+    );
+    assert_eq!(
+        probe.retired.lock().unwrap().as_slice(),
+        ["root/f0-explore".to_string()],
+        "the fork child's terminate/fold point must retire exactly its own \
+         derived label, exactly once"
+    );
+
+    // The node-lifecycle extensions (seed at birth, outcome at fold): the
+    // seed is the AUTHORED brief carried once at birth, not the composed
+    // hole card, and this script finalizes, so the fold must attribute a
+    // finalized VALUE, no failure.
+    let seeded = probe.seeded.lock().unwrap();
+    assert_eq!(seeded.len(), 1, "exactly one seed, at birth: {seeded:?}");
+    assert_eq!(seeded[0].0, "root/f0-explore");
+    assert_eq!(
+        seeded[0].1, "explore",
+        "the seed is the AUTHORED brief, not the composed hole card: {}",
+        seeded[0].1
+    );
+
+    let finalized = probe.finalized.lock().unwrap();
+    assert_eq!(
+        finalized.len(),
+        1,
+        "one finalize at the fold: {finalized:?}"
+    );
+    assert_eq!(finalized[0].0, "root/f0-explore");
+    assert_eq!(
+        finalized[0].1, "99",
+        "the finalized value is the fork child's own rendered answer: {}",
+        finalized[0].1
+    );
+    assert!(
+        probe.failed.lock().unwrap().is_empty(),
+        "a fork child that finalizes has no failure to attribute"
     );
 }

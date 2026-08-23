@@ -229,10 +229,13 @@ async fn compaction_fires_mid_loop_in_place_and_reaches_next_render() {
     );
 
     // (2) The compaction Text reaches the NEXT render_framing composition.
+    // Needled on "compacted" (test-architecture review J3, 2026-08-23)
+    // rather than the full header sentence — the payload-marker assertion
+    // right below already proves the actual summary text arrived, so this
+    // needle only needs to prove the compaction BLOCK itself is present, not
+    // pin its exact wording.
     assert!(
-        outcome
-            .prompt_after
-            .contains("Summary of the prior context (compacted):"),
+        outcome.prompt_after.contains("compacted"),
         "post-loop render must show the compaction block once lastCompaction is Just, got:\n{}",
         outcome.prompt_after
     );
