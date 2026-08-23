@@ -16,7 +16,7 @@ The transition from Haskell source to native execution goes through four transfo
 
 ## The Hylo Boundary
 
-The "hylo boundary" (short for hylomorphism) refers to the structural relationship between the two sides of the system:
+The hylomorphism's unfold/fold split falls on the language boundary — the structural relationship between the two sides of the system:
 - **Haskell Expands**: The Haskell code builds up a recursive description of a computation (the "ana" phase). It defines the *what*—the sequence of effects and the logic connecting them.
 - **Rust Collapses**: The Rust side interprets or JIT-compiles this description into a concrete execution that performs side effects and produces a final value (the "cata" phase). It defines the *how*—how a `FileRead` effect actually interacts with the OS.
 

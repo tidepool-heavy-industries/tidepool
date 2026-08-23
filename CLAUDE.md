@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 # Tidepool
 
-Compile freer-simple effect stacks into Cranelift-backed state machines drivable from Rust. Haskell expands, Rust collapses. The language boundary is the hylo boundary.
+Compile freer-simple effect stacks into Cranelift-backed state machines drivable from Rust. Haskell expands, Rust collapses: the hylomorphism's unfold/fold split falls exactly on the language boundary.
 
 **The core idea — bash++ for LLM agents.** Models are near-natively fluent in
 Haskell from decades of training data, the same way they are in bash. Tidepool
