@@ -4316,6 +4316,7 @@ dependencies = [
  "tidepool-codegen",
  "tidepool-handlers",
  "tidepool-harness",
+ "tidepool-repr",
  "tidepool-runtime",
  "tidepool-testing",
  "tidepool-worktree",
