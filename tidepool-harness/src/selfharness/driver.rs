@@ -906,7 +906,7 @@ async fn retry_on_turn_in_flight<T>(
 /// source the eval tool description is assembled from — so a row with a
 /// different effect set gets a correspondingly different cheatsheet, sent
 /// ONCE per loop in the system framing rather than re-narrated every hole.
-fn answerer_framing_suffix() -> String {
+fn answerer_framing_suffix(fork_budget: u32) -> String {
     format!(
         "---\n\
          You are the answering agent for a self-iterating harness loop. The system \
@@ -942,13 +942,37 @@ fn answerer_framing_suffix() -> String {
          end the turn without finalizing only when an answer genuinely needs \
          fresh judgment. Bind results, then `finalize`.\n\
          \n\
+         CONCURRENT DELEGATION: `Tidepool.Async` is the `Control.Concurrent.Async` \
+         surface (`async`/`wait`/`waitCatch`/`waitEither`/`waitBoth`/`waitAny`/\
+         `race`/`concurrently`/`mapConcurrently`) — your instincts for it apply. \
+         It composes with `fork`: `async (fork @T brief)` parks the fork in a \
+         green thread, so several forks can be outstanding before the first \
+         `wait`:\n\
+         \n\
+         ```haskell\n\
+         import Tidepool.Fork (fork)\n\
+         \n\
+         do\n\
+         \x20\x20ha <- async (fork @Plan \"design the schema\")\n\
+         \x20\x20hb <- async (fork @Plan \"design the API\")\n\
+         \x20\x20(a, b) <- waitBoth ha hb\n\
+         \x20\x20finalize @Plan (mergePlans a b)\n\
+         ```\n\
+         \n\
+         Spawn, wait, and finalize in the SAME block — threads do not survive \
+         their block. This window may spawn at most {} fork children in total \
+         (`fork` costs 1, `forkAll` its list length; direct and async forks draw \
+         on the same pool); one past the budget is refused and the block \
+         aborted.\n\
+         \n\
          When you have the answer, COMMIT it by evaluating `finalize @T value`. This \
          ends your turn and hands the typed value back to the loop. `T` is the type \
          named in the request. Do not call any other effect to answer; `finalize` is \
          how you resolve the request.",
         ANSWERER_MAX_ROUNDS,
         ANSWERER_NUDGE_ROUNDS,
-        engine::available_effects_section(&answerer_decls())
+        engine::available_effects_section(&answerer_decls()),
+        fork_budget
     )
 }
 
@@ -2331,7 +2355,10 @@ impl SelfHarnessDriver {
         // The pre-loop render IS the answerer session's system message.
         // Compose it with the narrow answerer instruction and stash it for
         // `run_loop_fragment` to seed the per-loop answerer node.
-        self.answerer_framing = Some(format!("{prompt_before}\n\n{}", answerer_framing_suffix()));
+        self.answerer_framing = Some(format!(
+            "{prompt_before}\n\n{}",
+            answerer_framing_suffix(self.fork_budget_per_window)
+        ));
 
         self.lifecycle = SelfHarnessState::RunningLoop;
         // The driver must not strand the lifecycle in `RunningLoop`/`Compacting`
@@ -6478,7 +6505,7 @@ mod tests {
     /// hand-written parenthetical. Pure string check, no GHC needed.
     #[test]
     fn answerer_framing_suffix_names_every_verb_of_the_answerer_row() {
-        let framing = super::answerer_framing_suffix();
+        let framing = super::answerer_framing_suffix(super::DEFAULT_FORK_BUDGET_PER_WINDOW);
         for decl in answerer_decls() {
             assert!(
                 framing.contains(decl.type_name),
@@ -6489,6 +6516,22 @@ mod tests {
         assert!(
             framing.contains("Available effects"),
             "expected the generated section marker, got:\n{framing}"
+        );
+        // The concurrency teaching: the configured budget number is VISIBLE
+        // up front (not just discovered by refusal), and the composed
+        // example's do-block survived Rust line-continuation whitespace
+        // stripping with its indentation intact (a copied unindented example
+        // is a GHC parse error in the model's hands).
+        assert!(
+            framing.contains(&format!(
+                "at most {} fork children",
+                super::DEFAULT_FORK_BUDGET_PER_WINDOW
+            )),
+            "the fork budget must be stated in the framing, got:\n{framing}"
+        );
+        assert!(
+            framing.contains("\n  ha <- async (fork @Plan"),
+            "the composed example must keep its do-block indentation, got:\n{framing}"
         );
     }
 

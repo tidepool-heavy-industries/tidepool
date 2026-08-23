@@ -666,6 +666,15 @@ result looks like (may be blank). You get back `Left err` (render it with
 current repository — there is no worktree or raw-subagent surface here, and
 none is needed: bind the result, then finalize based on what it found.
 
+For bounded sub-questions whose answers you need IN HAND this window (a
+fact to check, a draft to produce, two options argued), fork typed
+sub-answerers instead of splitting the tree: `import Tidepool.Fork (fork)`,
+then `h <- async (fork @T "brief")` per question, `wait` each, and fold the
+results into what you finalize — `T` may be a type you declared this
+session, so design the result type first. Spawn, wait, and finalize in the
+same block. A split (`ProposeSplit`) is for lines of thought that deserve
+their own windows in the tree; a fork is for answers this window consumes.
+
 If the OPERATOR's intent is genuinely ambiguous — the question underdetermines
 a fork only they can steer — ask them:
 `askUserWith @OperatorSteering [title "<the question, in a sentence or two>"]`;

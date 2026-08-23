@@ -1480,7 +1480,10 @@ macro_rules! fork_effect_def {
                 "`forkAll @T briefs :: M [T]` — delegate to one sub-answerer per brief, ",
                 "answered together as a batch `[T]` (`import Tidepool.Fork`). A forked child ",
                 "cannot itself fork. `T` may be any type in scope, including one you ",
-                "declared yourself earlier this session — the child resolves it the same way.",
+                "declared yourself earlier this session — the child resolves it the same way.\n",
+                "When `Green` is in your row, `async (fork @T brief)` (`Tidepool.Async`) ",
+                "parks the fork in a green thread — spawn several, then `wait` each, ",
+                "in the SAME block.",
             ],
             // Already Member-polymorphic below; flagged true for consistency
             // with the row-polymorphic-by-default rule (harmless — every
