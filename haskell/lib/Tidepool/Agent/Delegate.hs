@@ -11,7 +11,7 @@
 {-# LANGUAGE TypeOperators #-}
 
 -- | PRD 21 C5 — the narrow delegation surface a recursive-companion
--- branch-node window compiles against.
+-- branch-node agent session compiles against.
 --
 -- @delegate@ is the ONLY verb this module exposes to a model-authored
 -- block. Its row is @Member Delegate effs@ — never @Member Subagent effs@,
@@ -48,7 +48,7 @@
 -- @extra_imports_for!@ row-gating (@tidepool-mcp/src/effect_defs.rs@).
 --
 -- __The wrap is the harness's job, not the model's.__ A branch-node
--- window's turn compiles the model's ENTIRE block as the argument to
+-- agent session's turn compiles the model's ENTIRE block as the argument to
 -- 'runDelegate' (@Tidepool.Agent.Delegate.runDelegate $ do ...@), injected
 -- by @tidepool-harness@ before the block reaches the extract compile — see
 -- @EngineConfig.delegate_wrap@. That is what makes @Subagent@ AND
@@ -100,7 +100,7 @@ import qualified Tidepool.Data.Text as T
 data Delegate a where
   DelegateRequest :: DelegateBrief -> Delegate (Either DelegateError DelegateResult)
 
--- | What a branch-node window hands to a delegated subagent — delegation-
+-- | What a branch-node agent session hands to a delegated subagent — delegation-
 -- shaped (brief/instruction/expected result), never worktree-plumbing-
 -- shaped. There is no field here a model could use to name an existing
 -- worktree, pick a dirty-source policy, or otherwise reach the raw
@@ -140,7 +140,7 @@ renderDelegateError :: DelegateError -> Text
 renderDelegateError (DelegateSpawnFailed d) = "delegation failed to spawn: " <> d
 renderDelegateError (DelegateResultMalformed d) = "delegation result malformed: " <> d
 
--- | The ONE verb a branch-node window may call. @Member Delegate effs@ is
+-- | The ONE verb a branch-node agent session may call. @Member Delegate effs@ is
 -- the whole capability surface — never @Member Subagent effs@.
 delegate :: Member Delegate effs => DelegateBrief -> Eff effs (Either DelegateError DelegateResult)
 delegate = send . DelegateRequest

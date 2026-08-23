@@ -34,7 +34,7 @@ type Harness = M
 -- 'runLLMTurn' — suspend 'loop' for a TYPED answer (@runLLMTurn \@T prompt@):
 -- the driver answers by driving a nested Agent turn loop (a fresh multi-turn
 -- sub-session over the SAME calling model) to a @finalize@
--- (self-iterating-harness WS-A/B), whose value resumes this hole. GHC validates
+-- (self-iterating-harness WS-A/B), whose value resumes this parked continuation. GHC validates
 -- the answer against @T@ before it resumes the continuation, so an ill-typed
 -- answer never consumes it. Re-exported straight from 'Tidepool.Effects' (in the
 -- import above) to match the @examples\/harness\/Harness.hs@ target contract's

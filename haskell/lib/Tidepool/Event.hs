@@ -346,7 +346,7 @@ projectAsyncDone _ _ = Nothing
 --
 -- Lives HERE, not in "Tidepool.Async", because it is 'asyncDone' composed
 -- with the handle — @RepoEvent@'s substrate, which a @Green@-only row (the
--- answerer window's) does not carry. Calling it therefore requires
+-- agent session's) does not carry. Calling it therefore requires
 -- @RepoEvent@ in the row alongside @Green@; "Tidepool.Async.Types" is the
 -- dependency-free handle vocabulary both sides share.
 waitEvent :: Async a -> Event (Async a)

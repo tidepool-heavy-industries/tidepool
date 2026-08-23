@@ -3434,7 +3434,7 @@ sitedVerbs =
   [ -- The RunLLMTurn effect's own surface verbs (ask_effect_def!'s helper
     -- text, generated into Tidepool.Effects.Core — stable-effects-core: these
     -- are ordinary row-polymorphic helpers, not row-dependent, so they live
-    -- in Core, not the per-window Tidepool.Effects shim).
+    -- in Core, not the per-agent-session Tidepool.Effects shim).
     VerbSpec { vsName = "runLLMTurn", vsModule = "Tidepool.Effects.Core"
              , vsSitedName = "runLLMTurnSited", vsSitedModule = "Tidepool.Effects.Core"
              , vsTypeArgs = 1, vsValueArity = 1
@@ -3465,7 +3465,7 @@ sitedVerbs =
              , vsCheckType = checkRunLLMTurnType
              , vsListAnswer = False, vsMisShapeIsError = False }
     -- PRD 21 C5 GUI lane: `runLLMTurnBranch` with a caller-chosen label Text
-    -- stamped onto the child window for per-node operator routing — one more
+    -- stamped onto the child agent session for per-node operator routing — one more
     -- LEADING value arg (label, then ref, then prompt), same `@T` site
     -- resolution otherwise.
   , VerbSpec { vsName = "runLLMTurnBranchLabeled", vsModule = "Tidepool.Effects.Core"
@@ -3665,14 +3665,14 @@ checkFinalizeType = checkMonomorphicSite "finalize"
 -- The generated effects module is now split: the GADTs live in
 -- @Tidepool.Effects.Core@, a module whose text is a pure function of the
 -- effect VOCABULARY alone and is therefore IDENTICAL — same dir, same
--- tycons — across every window/turn that shares a vocabulary (see
+-- tycons — across every agent session that shares a vocabulary (see
 -- @tidepool-mcp@'s @effects_core_module_source@/@ensure_effects_core_module@
 -- and @tidepool-mcp/CLAUDE.md@'s stable-effects-core section). A value
 -- mentioning a Core-defined tycon is therefore SAFE to cross a session bind
 -- now — it is exactly as stable as a bridged @Tidepool.Records.Bridged@/
 -- @Stable@ type already was, and this guard no longer needs to (and must
 -- not) treat it as suspect. What remains genuinely per-compile is only the
--- ROW itself (@type M = Eff '[...]@, declared in the tiny per-window SHIM
+-- ROW itself (@type M = Eff '[...]@, declared in the tiny per-agent-session SHIM
 -- module @Tidepool.Effects@) — and @M@ is a type SYNONYM, which
 -- 'splitTyConApp_maybe' unwraps to its @Eff@ application before this ever
 -- sees a tycon, so the bare @Eff@-tycon check below is what catches it; no

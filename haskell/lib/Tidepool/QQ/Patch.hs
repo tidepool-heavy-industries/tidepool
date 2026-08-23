@@ -13,7 +13,7 @@
 --
 -- Diff lines must be LEFT-ALIGNED in the quote (a body line's first column is
 -- its @ \/ - \/ +@ prefix).  @|]@ cannot appear inside the body; for a diff
--- that must contain it, take the input lane (@parsePatch@ on a runtime 'Text').
+-- that must contain it, take the runtime-input path (@parsePatch@ on a runtime 'Text').
 --
 -- == Pattern side (in scope — ships whole)
 --

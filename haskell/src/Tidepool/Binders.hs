@@ -150,7 +150,7 @@ occStr :: RdrName -> String
 occStr = occNameString . rdrNameOcc
 
 --------------------------------------------------------------------------------
--- Statement binders — the session-eval bind-vs-expr signal (Lane VALUE)
+-- Statement binders — the session-eval bind-vs-expr signal
 --------------------------------------------------------------------------------
 
 -- | The three mutually-exclusive shapes a session-eval turn classifies to
@@ -251,10 +251,10 @@ classifyWithFlags dflags0 src = classifyTurn declRes stmtRes modRes
     stmtRes = unP parseStatement   (initParserState popts buf loc)
     modRes  = unP GHC.Parser.parseModule (initParserState popts buf loc)
 
--- | Boot a GHC session and classify one turn's source. A SUBSTEP, not a lane:
--- it emits no phases of its own — a phase's owner has to be whatever knows it
--- is a whole lane, and both surviving callers ('runTurnMode''s classify
--- substep, and the block classify lane wrapping a batch of these) time it
+-- | Boot a GHC session and classify one turn's source. A SUBSTEP, not a whole
+-- timed unit: it emits no phases of its own — a phase's owner has to be whatever knows it
+-- is a whole unit, and both surviving callers ('runTurnMode''s classify
+-- substep, and the block-classify unit wrapping a batch of these) time it
 -- themselves. The 'evaluate' force stays: the caller's phase measures wall
 -- clock around this call, and an unforced thunk would let that phase measure
 -- nothing.
@@ -268,12 +268,12 @@ extractStmtBinders src = do
 -- | Classify a whole BLOCK of turns in one process: boot exactly ONE GHC
 -- session (unlike N calls to 'extractStmtBinders', which would boot N), then
 -- run 'classifyWithFlags' once per item against that single session's
--- 'DynFlags'. This IS a whole lane — the @--classify@ CLI mode — so unlike
+-- 'DynFlags'. This IS a whole timed unit — the @--classify@ CLI mode — so unlike
 -- the substep it DOES take the timing flag and emit its own phases:
 -- @startup@ around 'getLibdir', @ghc_session@ around 'getSessionDynFlags',
 -- and @classify@ around the N forced parses (one phase for the whole batch,
 -- not one per item). No @typecheck@ phase — that name was always a misnomer
--- for a step that runs no typecheck, and it leaves with the lane that
+-- for a step that runs no typecheck, and it leaves with the unit that
 -- originated it rather than being carried forward here.
 classifyBlock :: Bool -> [String] -> IO [StmtBinders]
 classifyBlock timing srcs = do

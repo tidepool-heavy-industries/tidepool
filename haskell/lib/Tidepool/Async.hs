@@ -2,11 +2,11 @@
 
 -- | Green threads with the authored surface of @Control.Concurrent.Async@.
 --
--- __A green thread is a continuation parked in the session's multi-hole
+-- __A green thread is a continuation parked in the session's multi-continuation
 -- registry, under its own realm.__  'async' starts a NEW suspension-capable
 -- top-level run on the shared machine, so a forked computation parks
 -- independently of its spawner: two threads blocked on two different effects
--- have BOTH holes pending at once, resumable in either order.
+-- have BOTH parked continuations pending at once, resumable in either order.
 --
 -- What that buys, and why it is the representation:
 --
@@ -14,14 +14,14 @@
 --   blockingY@ genuinely overlaps.  Mirroring this package's names is only
 --   honest if the semantics travel with them.
 -- * __Cooperative, no preemption.__  A thread runs until it performs an
---   effect, then parks; the driver services whichever pending hole is ready
+--   effect, then parks; the driver services whichever pending continuation is ready
 --   and resumes that thread until it parks again.  A thread that never
 --   performs an effect starves its siblings — the eval timeout is the
 --   backstop, exactly as for any other non-terminating computation.
 -- * __Data races unrepresentable.__  Threads communicate by return value,
 --   events, and typed messages.  No @IORef@\/@MVar@\/shared-cell effect is in
 --   the row, and that is a decision rather than an omission.
--- * __Order-insensitivity is the correctness contract.__  Two pending holes
+-- * __Order-insensitivity is the correctness contract.__  Two pending continuations
 --   resumed in either order produce identical results.
 --
 -- == Cancellation

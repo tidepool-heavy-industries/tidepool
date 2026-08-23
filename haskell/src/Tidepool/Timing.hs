@@ -12,7 +12,7 @@
 -- @ghc_setup@ (session DynFlags setup +
 -- guessTarget\/setTargets + @depanal@) and @ghc_load@ (the @load'@ call
 -- alone) are two SEPARATE, NON-OVERLAPPING spans that PARTITION what an
--- older @ghc_session@ bracket used to cover on the compile lane — see the
+-- older @ghc_session@ bracket used to cover during compilation — see the
 -- @PHASE_GHC_SESSION@ tombstone in @tidepool-harness\/src\/timing.rs@. A
 -- collector recovers the old coarse figure as the SUM @ghc_setup + ghc_load@
 -- (a flat-sum collector already does this for free); neither row is emitted

@@ -9,7 +9,7 @@
 --
 -- Before this split, @waitEvent@ lived in "Tidepool.Async" and imported
 -- "Tidepool.Event" — which made a @Green@-without-@RepoEvent@ row (the
--- answerer window's row) unable to load "Tidepool.Async" AT ALL, over one
+-- agent session's row) unable to load "Tidepool.Async" AT ALL, over one
 -- function it could never call anyway. This module imports nothing from the
 -- generated effects surface, so either side loads without the other.
 module Tidepool.Async.Types

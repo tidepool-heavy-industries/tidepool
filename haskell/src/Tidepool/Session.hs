@@ -46,7 +46,7 @@
 -- requires the self-reference knot ('if_rec_types') that GHC's real
 -- 'GHC.Iface.Load.loadInterface' ties; manual injection of such a module fails
 -- with "module … which is not loaded" when the dfun thunk is forced. That only
--- arises with Lane-A session types, so it is a documented Wave-3b follow-on
+-- arises with Lib-kind session types, so it is a documented Wave-3b follow-on
 -- (NOT swept under the rug — see plans/ghci-implementation-plan.md §7.2).
 module Tidepool.Session
   ( -- * Identifiers (mirror the Rust domain model §1–2)
@@ -67,7 +67,7 @@ module Tidepool.Session
   , writeSessionIface
   , injectSessionIface
   , injectSessionScope
-    -- * Binder identity (for the value-plane stableVarId)
+    -- * Binder identity (for the persistent-binding-store stableVarId)
   , sessionBinderName
     -- * Scaffold binder-name protocol (the eval-wrapper's reserved names)
   , scaffoldTargetName
@@ -130,7 +130,7 @@ import System.FilePath (takeDirectory, (</>), (<.>))
 -- | Monotonic per-session generation (= GHCi's @ic_mod_index@). Only ever bumped.
 newtype Generation = Generation Word64 deriving (Eq, Ord, Show)
 
--- | @Val@ = value-binding ifaces (this Wave). @Lib@ = user decls (Lane A / Wave 3b).
+-- | @Val@ = value-binding ifaces (this Wave). @Lib@ = user decls (Wave 3b).
 data SessionModuleKind = ValMod | LibMod deriving (Eq, Show)
 
 -- | The ONE place a gen-versioned session module is represented. The
@@ -240,7 +240,7 @@ mkThinSessionIface hsc sm binders = pure iface
 -- @Tidepool.Session.Val.G<g>@, the given 'OccName'. Its 'Translate.stableVarId'
 -- (= @0xFE<<56 | fingerprintString("<module>:<occ>").hi64@) is the id a later
 -- reference turn recomputes from the injected iface's external @Var@ — so the
--- bind turn and every reference turn agree on the same value-plane key. The
+-- bind turn and every reference turn agree on the same persistent-binding-store key. The
 -- 'Unique' is irrelevant to that hash (it keys on module-name + occ strings
 -- only), so a fixed seed is fine.
 sessionBinderName :: HscEnv -> SessionModule -> OccName -> Name

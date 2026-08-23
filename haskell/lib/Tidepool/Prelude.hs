@@ -234,7 +234,7 @@ module Tidepool.Prelude
     --     isSubsequenceOf, genericTake/genericDrop
     --   rendering/parsing: showsPrec/shows/showString → `show :: a -> Text`;
     --     reads/readsPrec → `read` + parseInt/parseIntM/parseDouble/parseDoubleM
-    --   IO console/stdin: print/getLine/interact → the Console effect + `input` lane
+    --   IO console/stdin: print/getLine/interact → the Console effect + `input` verb
     --   numeric → base (P.): gcd, lcm, properFraction
     --   ranges: enumFrom/enumFromThen → `enumFromTo lo hi` ([lo..hi] desugars to it)
   ) where

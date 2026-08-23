@@ -50,21 +50,21 @@
 -- — give it its own worktree created 'fromWorktree' off the branch it is
 -- reviewing.
 --
--- == Reading @HEAD@ across a cycle boundary
+-- == Reading @HEAD@ across a loop-iteration boundary
 --
 -- 'worktreeHead' is a FRESH git read of a worktree's current @HEAD@ — not the
 -- handle's recorded @sourceHead@, and not the event monitor's last-observed
--- baseline.  It is how a resident that spans cycles closes a gap the event
+-- baseline.  It is how a resident that spans loop iterations closes a gap the event
 -- system deliberately will not close for it.
 --
--- A subscription never replays and lives only for its cycle, so @HEAD@ can move
--- after one cycle unregisters and before the next registers.  A resident
--- reconciles that window itself, in ordinary code, as the FIRST ACTION inside
+-- A subscription never replays and lives only for its loop iteration, so @HEAD@ can move
+-- after one loop iteration unregisters and before the next registers.  A resident
+-- reconciles that gap itself, in ordinary code, as the FIRST ACTION inside
 -- the newly registered handler scope — registration is active before the read,
 -- so a movement before registration is found by the reconciliation read while
 -- a movement after it is queued for the handler (deduplicate by observed head
 -- if both paths see the same movement).  Reading @HEAD@ before registering
--- instead reopens the very window this closes:
+-- instead reopens the very gap this closes:
 --
 -- @
 -- 'Tidepool.Event.withHandler' ('Tidepool.Event.headChanged' tree) onChange $ do
@@ -235,10 +235,10 @@ worktreeBranch h = send (WorktreeBranchOf (worktreeId h)) >>= liftEither
 -- last-observed baseline.  The whole purpose is to see what the
 -- monitor did NOT.
 --
--- It exists for the gap a resident spanning cycles has to close
+-- It exists for the gap a resident spanning loop iterations has to close
 -- itself.  A subscription never replays, and it lives only for its
--- cycle, so @HEAD@ can move after one cycle unregisters and before the
--- next one registers.  A resident closes that window in ORDINARY
+-- loop iteration, so @HEAD@ can move after one loop iteration unregisters and before the
+-- next one registers.  A resident closes that gap in ORDINARY
 -- AUTHORED CODE: compare @worktreeHead tree@ against the head it
 -- checkpointed, act on any difference, and only then register live
 -- reactions with 'withHandler'.

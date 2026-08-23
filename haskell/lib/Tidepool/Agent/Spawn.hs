@@ -183,7 +183,7 @@ newtype ToolRounds = ToolRounds Int
 --
 -- AUTHORED-SIDE ONLY — never a wire type. It crosses to the runtime as
 -- @agentResumeRaw@'s @Bool@ + @Value@ pair, which is what the
--- @serde_json::Value@ lane admits (inbound JSON cannot ride inside a bridged
+-- @serde_json::Value@ path admits (inbound JSON cannot ride inside a bridged
 -- record). An authored type does not have to be a wire type.
 data ToolAnswer
   = -- | The handler ran and produced this JSON body.
