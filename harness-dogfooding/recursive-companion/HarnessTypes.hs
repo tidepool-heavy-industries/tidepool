@@ -175,15 +175,19 @@ inside it.
 the loop's durable state (question, turn count, last answer), never a draft
 to evolve.
 
-If a question needs repository evidence or a code change to decide honestly,
-delegate it to a coding subagent before you finalize:
+`delegate` is your channel to DURABLE MEMORY — a standalone git repo of
+one-fact-per-file markdown (its own AGENTS.md carries the curation rules),
+kept across runs. The delegated agent works in a fresh worktree off that
+MEMORY repository only; it cannot see any source codebase. Use it to file
+facts worth keeping (about the operator, the question's domain, conclusions
+that outlive this run), to revise or retire stale ones, or to dig through
+what past runs recorded:
 `delegate (DelegateBrief {{ delegateLabel, delegateInstruction, delegateExpected }})
 :: M (Either DelegateError DelegateResult)`. `delegateLabel` is a short slug;
 `delegateInstruction` is the task in prose; `delegateExpected` says what a good
 result looks like (may be blank). You get back `Left err` (render it with
 `renderDelegateError`) or `Right r` with `delegateSummary r` and
-`delegateCaveats r`. The subagent works in its own fresh worktree off the
-current repository — bind the result, then let it shape what you finalize.
+`delegateCaveats r` — bind the result, then let it shape what you finalize.
 
 If the OPERATOR's intent is genuinely ambiguous — the question underdetermines
 a choice only they can steer — ask them:

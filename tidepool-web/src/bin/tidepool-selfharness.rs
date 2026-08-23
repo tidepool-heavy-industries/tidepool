@@ -289,22 +289,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "outer effect boundary wired (Console/Worktree/RepoEvent/Exec/Journal)"
     );
 
-    // The subagent boundary: a session's `delegate` promises a fresh
-    // worktree "off the current repository" (the companion protocol's own
-    // words), so the SubagentHandler is wired over `source_repo` BY DEFAULT
-    // — the same repository every other outer handler serves. Setting
-    // TIDEPOOL_MEMORY_REPO overrides the target repo (the companion-memory
-    // curator mode, plans/companion-memory.md); it no longer gates whether
-    // delegation works at all.
+    // The subagent boundary: delegation targets the companion's MEMORY
+    // store ONLY (operator decision, 2026-08-23) — the standalone git repo
+    // of one-fact-per-file markdown from plans/companion-memory.md — never
+    // the source repository. Standard durable-data location, auto-seeded
+    // fresh when absent, so delegation works with no launcher or env
+    // ceremony; TIDEPOOL_MEMORY_REPO overrides the path.
     let subagent_repo = std::env::var_os("TIDEPOOL_MEMORY_REPO")
         .map(PathBuf::from)
-        .unwrap_or_else(|| source_repo.clone());
+        .unwrap_or_else(|| {
+            xdg_data_root()
+                .map(|d| d.join("tidepool/companion-memory"))
+                .unwrap_or_else(|_| PathBuf::from(".tidepool-companion-memory"))
+        });
+    ensure_memory_store(&subagent_repo)?;
     let handler = build_subagent_handler(&subagent_repo)?;
     driver.set_subagent_handler(handler);
     tracing::info!(
         target: "tidepool_web",
         repo = %subagent_repo.display(),
-        "subagent boundary wired (delegate/spawnAgent; Codex backend, operator credentials)"
+        "subagent boundary wired (memory store; Codex backend, operator credentials)"
     );
 
     driver.run_loop(&source, auto).await?;
@@ -327,6 +331,99 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// The durable data root (NOT the regenerable cache — worktree state must
 /// survive cache clears): `$XDG_DATA_HOME`, or `$HOME/.local/share` when
 /// unset.
+/// The memory store's curation ruleset, versioned WITH the store — seeded
+/// once at creation; the curator agent evolves it in-repo thereafter.
+const MEMORY_AGENTS_MD: &str = r#"# Memory curation rules
+
+You are the memory curator for a companion agent. You work ONLY in this
+repository. Each run you receive a batch of intentions (remember / modify /
+forget, each a sentence or two of prose) and apply them to the store.
+
+## The store
+
+- `memories/<slug>.md` — ONE fact per file. The slug is short kebab-case and
+  self-describing (`operator-prefers-typed-options`, not `note-7`). Frontmatter:
+
+      ---
+      description: <one line — this is the fact's attention surface>
+      provenance: operator | companion
+      date: <YYYY-MM-DD>
+      ---
+
+  Body: the fact, plain prose. Link related memories with `[[slug]]` — link
+  liberally; a link to a not-yet-written memory marks something worth writing.
+- `operator.md` — the companion's model of its operator, one document,
+  revised in place.
+- `MEMORY.md` — the digest: one line per memory, `- [slug] — <description>`,
+  operator.md summarized at the top. HARD CAP 40 lines: this whole file is
+  rendered into every cognition window, so it is an attention budget —
+  editorial judgment about what earns a line IS the job.
+
+## The rules
+
+1. **Dedupe before writing.** If an existing file already covers the fact,
+   revise THAT file — update-over-append, always.
+2. **Revise in place.** A modify-intention rewrites the file to say it
+   better; never append contradicting versions.
+3. **Forget is delete.** Remove the file and its digest line. Git history is
+   the archive; no tombstones, no "archived" folders.
+4. **Don't store the derivable.** If the fact is obvious from the store
+   already, or is session ephemera, decline it (note why in the commit).
+5. **Convert relative time to absolute** ("yesterday" → the date).
+6. **Regenerate MEMORY.md every run** from the store's actual contents.
+7. **Commit once per run**, message = a one-line summary of what changed and
+   why (the intentions are the why).
+8. Never touch anything outside this repository.
+
+## Your reply
+
+Finalize the structured result you were asked for: the fresh MEMORY.md
+contents as `digest`, the files you touched as `touched`, and a one-line
+`summary`.
+"#;
+
+const MEMORY_OPERATOR_MD: &str =
+    "# The operator\n\n(Nothing recorded yet — grows as the companion learns who it works with.)\n";
+
+const MEMORY_DIGEST_MD: &str = "# Memory digest\n\n(Empty store — no memories filed yet.)\n";
+
+/// Ensure the companion's memory store exists at `store`
+/// (plans/companion-memory.md): seed files + `git init` + first commit when
+/// absent; an EXISTING store (anything with a `.git`) is never touched.
+/// This is the ONE seeding mechanism — the old
+/// `scripts/companion-memory-init.sh` moved here so the binary is
+/// self-sufficient from any launcher.
+fn ensure_memory_store(store: &std::path::Path) -> Result<(), Box<dyn std::error::Error>> {
+    if store.join(".git").exists() {
+        return Ok(());
+    }
+    std::fs::create_dir_all(store.join("memories"))?;
+    std::fs::write(store.join("AGENTS.md"), MEMORY_AGENTS_MD)?;
+    std::fs::write(store.join("operator.md"), MEMORY_OPERATOR_MD)?;
+    std::fs::write(store.join("MEMORY.md"), MEMORY_DIGEST_MD)?;
+    let git = GitCli::new();
+    git.run(store, &["init", "-q"])
+        .map_err(|e| format!("memory store git init: {e:?}"))?;
+    git.run(store, &["add", "-A"])
+        .map_err(|e| format!("memory store git add: {e:?}"))?;
+    git.run(
+        store,
+        &[
+            "commit",
+            "-q",
+            "-m",
+            "seed: companion memory store (AGENTS.md curation rules, empty digest)",
+        ],
+    )
+    .map_err(|e| format!("memory store seed commit: {e:?}"))?;
+    tracing::info!(
+        target: "tidepool_web",
+        store = %store.display(),
+        "memory store seeded fresh"
+    );
+    Ok(())
+}
+
 fn xdg_data_root() -> Result<PathBuf, Box<dyn std::error::Error>> {
     std::env::var_os("XDG_DATA_HOME")
         .map(PathBuf::from)
@@ -390,10 +487,11 @@ fn build_subagent_handler(
     repo: &std::path::Path,
 ) -> Result<tidepool_handlers::SubagentHandler, Box<dyn std::error::Error>> {
     if !repo.join(".git").exists() {
+        // Unreachable from main (ensure_memory_store runs first); kept as a
+        // loud guard for any future caller that skips the seeding step.
         return Err(format!(
-            "TIDEPOOL_MEMORY_REPO={} is not a git repository (no .git). Bootstrap the \
-             memory store first: scripts/companion-memory-init.sh {}",
-            repo.display(),
+            "memory store {} is not a git repository (no .git) — ensure_memory_store \
+             was not run for it",
             repo.display()
         )
         .into());
