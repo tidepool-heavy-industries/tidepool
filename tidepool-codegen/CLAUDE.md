@@ -9,11 +9,11 @@ map and locked decisions.
 **This section describes the single-slot suspension path.** As of the
 one-session collapse (`plans/one-session.md`), the PARKED continuation
 registry (below) is the primary suspension mechanism for the harness
-(resident-session) lane — a suspended session there can carry many parked
+(resident-session) path — a suspended session there can carry many parked
 holes at once, resumed in any order, and a "child" run is just an ordinary
 fragment run over the parked frames (`JitEffectMachine::run_fragment_suspendable_parked`
 et al.). The single-slot mechanism this section documents remains the live
-path for the repl and one-shot eval lanes; on the harness lane it is legacy,
+path for the repl and one-shot eval paths; for the harness path it is legacy,
 and its deletion is gated on the parked path's production soak
 (`plans/one-session.md` Phase 6). The two paths never mix on one machine
 (asserted both directions).
@@ -71,7 +71,7 @@ docstring; suspend-then-complete coverage in
 `tests/suspendable_materialization.rs`.
 
 A machine can ALSO hold multiple independently parked continuations in the
-continuation registry (realm machinery): each `ContinuationFrame` is a
+continuation registry (runtime resource scope machinery): each `ContinuationFrame` is a
 registered stowed root, `stowed_roots_count() == parked_count()` holds at
 quiescence (debug_asserted at every registry mutation), handled-prefix
 compatibility is exact equality enforced at entry, and the single-slot path
@@ -83,13 +83,13 @@ everything else in the registry is internal and free to churn.
 what let a value — including a closure — move between parked frames on the
 same heap without ever materializing to JSON: `ValueHandle` is an opaque
 `Send` id over a machine-side persistent root (mint via
-`handle_from_finalized`, observe via `observe_handle` — the one seam where a
+`handle_from_finalized`, observe via `observe_handle` — the one boundary where a
 closure renders as `CLOSURE_SENTINEL` — deliver via `ResumeInput::Handle`,
 which feeds the payload into a resumed continuation verbatim). Handles are
 scope-owned borrows: using one doesn't consume it, and `close_realm(realm) ->
 (frames_dropped, handles_released)` is the scope-exit op that reclaims a
-realm's parked frames and its outstanding handles together, leaving sibling
-realms untouched. See the contract doc's amendment for the full signature
+runtime resource scope's parked frames and its outstanding handles together, leaving sibling
+runtime resource scopes untouched. See the contract doc's amendment for the full signature
 table and gates (`tests/realm_handles.rs`).
 
 ## Root accounting — four counted classes, never folded together
@@ -103,13 +103,13 @@ stays traced).
 |---|-------|------|-------------------------------------|
 | 1 | parked continuations | `stowed_roots_count() == parked_count()` | untouched |
 | 2 | handle registry | `value_handle_count()` | untouched (a mount already transferred out) |
-| 3 | value-plane bindings | `ResidentSession::binding_names()` (ROOT) / `scope_binding_count(scope)` | the retired scope's frame goes to 0 |
+| 3 | persistent-binding-store bindings | `ResidentSession::binding_names()` (ROOT) / `scope_binding_count(scope)` | the retired scope's frame goes to 0 |
 | 4 | GC root ledger | `persistent_roots_count()` | drops by exactly the sole-owner slots retired |
 
 Class 4 is the WITNESS: `PersistentSession::retire_scope` returns a
 `ScopeRetirement { scopes_retired, bindings_retired, roots_released }` and the
 ledger must move by exactly `roots_released`. `retire_scope_root` is the only
-value-plane deregistration primitive, and it is deliberately named as a
+persistent-binding-store deregistration primitive, and it is deliberately named as a
 scope-retirement tool rather than a general "drop a root" one — its invariant
 (sole ownership, exactly once, witnessed) is carried at its definition site.
 Gate: `tidepool-runtime/tests/session_scope_retirement.rs` (GHC-free, but
@@ -127,7 +127,7 @@ nursery-resident subgraph hanging off the retired root that the remembered set
 does not pin; what it caps is what stays *traced* (and therefore what a
 collection must walk), not what stays *allocated*. This is deliberate and
 bounded — the tenured residue is at most the retired scope's own bindings, the
-same lifetime bound every value-plane binding already has — and it is written
+same lifetime bound every persistent-binding-store binding already has — and it is written
 here, in the design doc (`plans/self-iterating-harness/21-c2-scope-trees.md`
 §2.2) and in PRD 21's deferred list so nobody re-derives it while hunting a
 leak.
@@ -144,7 +144,7 @@ The adversarial suite (`tests/nested_child_gc_rooting.rs`, run with
 `TIDEPOOL_GC_POISON`/`TIDEPOOL_HEAP_VERIFY` on) is the memory-safety gate: child
 GC + heap doubling with a live suspended parent, deep-verified resume, decl
 accretion inert for the parent, bottom-not-consuming, L7 misuse panic, and
-value-plane tenure across suspend → child GC → resume.
+persistent-binding-store tenure across suspend → child GC → resume.
 
 ## Diagnostics — JIT runtime / effect machine / cache
 
@@ -167,7 +167,7 @@ For the Haskell-extract knobs (a separate process: `TIDEPOOL_DUMP_CLOSED`,
 | `TIDEPOOL_GC_POISON=1` (tests: `set_gc_poison`) | GC | Fills from-space (and the doubling path's intermediate space) with 0xDD before freeing | Timing-dependent SIGSEGVs: a stale pointer the GC missed then reads tag 221 DETERMINISTICALLY (e.g. "application of non-closure (tag=221)") instead of sometimes working |
 | `RUST_LOG=tidepool::fp=debug` (legacy `TIDEPOOL_FP_DEBUG=1`) | Runtime cache | Binary-fingerprint memo keys + sidecar hit/miss (`tidepool-runtime/src/cache.rs`) | Stale-cache suspicion. Note: kernel ctime has ~3ms granularity — sub-tick writes legitimately memo-hit |
 | `NONCE=<x>` / `FORCE=1` | `repro313` test | Cache-busting fresh compile / forces Int result inside the user continuation | Re-running the #313 regression gate against a fresh compile |
-| `JitEffectMachine::force_gc_for_test` (`#[doc(hidden)]`; `ResidentSession::force_gc_for_test` passes through) | GC | Forces a real Cheney minor collection against a session machine's retained heap, with no compiled code on the stack — installs registries, builds an ordinary session `VMContext`, calls `host_fns::gc_trigger` directly (`frame_walker::walk_frames` degrades to zero stack roots with no JIT frame active), then reclaims the buffer exactly like `RegistryGuard`'s drop-time reclaim | Injecting a collection into a SPECIFIC window a normal run can't land one in deterministically — e.g. between a suspend-time sentinel-tenure (`tenure_finalized_payload`) and a later resume of that same frame, to check whether the parked frame's own references into what tenuring evacuated survive. Safe to call while suspended (slot path) or holding parked frames (registry path) — that's the point |
+| `JitEffectMachine::force_gc_for_test` (`#[doc(hidden)]`; `ResidentSession::force_gc_for_test` passes through) | GC | Forces a real Cheney minor collection against a session machine's retained heap, with no compiled code on the stack — installs registries, builds an ordinary session `VMContext`, calls `host_fns::gc_trigger` directly (`frame_walker::walk_frames` degrades to zero stack roots with no JIT frame active), then reclaims the buffer exactly like `RegistryGuard`'s drop-time reclaim | Injecting a collection into a SPECIFIC moment a normal run can't land one in deterministically — e.g. between a suspend-time sentinel-tenure (`tenure_finalized_payload`) and a later resume of that same frame, to check whether the parked frame's own references into what tenuring evacuated survive. Safe to call while suspended (slot path) or holding parked frames (registry path) — that's the point |
 
 Always-on breadcrumbs (`[CASE TRAP]`/`[SHAPE TRAP: …]`, `[BUG]` bad-pointer lines
 on stderr) stay unconditional: they fire only on actual compiler bugs, which must

@@ -33,7 +33,7 @@
 //! exact pre-C2 behavior: `bind(e) == bind_in(ROOT, e)`, `resolve(n) ==
 //! resolve_in(_, ROOT, n)`, and `iter_current()` is the ROOT frame. The scoped
 //! siblings take the [`ScopeTree`] as a PARAMETER rather than owning one: the
-//! decl plane keys off the same [`ScopeId`]s, so exactly one tree exists per
+//! persistent declaration environment keys off the same [`ScopeId`]s, so exactly one tree exists per
 //! session (`PersistentSession::scopes`) and this table stays machine-free —
 //! which is what keeps its `unsafe impl Send` justification a claim about
 //! `RootSlot` addresses alone.
@@ -351,7 +351,7 @@ impl BindingTable {
         seen
     }
 
-    /// How many names `scope`'s OWN frame currently binds — the value-plane
+    /// How many names `scope`'s OWN frame currently binds — the persistent-binding-store
     /// accounting class per scope, the scoped mirror of `iter_current().count()`
     /// (which is the ROOT frame). Shadowed older gens are not counted, exactly
     /// as they are not counted at ROOT; a scope with no frame answers 0.
@@ -547,7 +547,7 @@ mod tests {
 
     // -- scope frames (PRD 21 lane C2) ------------------------------------
     //
-    // One named test per clause of locked decision 4, on the value plane.
+    // One named test per clause of locked decision 4, on the persistent binding store.
 
     /// CHILDREN READ PARENT: a name bound only at ROOT resolves from a child,
     /// through the upward walk — and the child's own frame does not have to

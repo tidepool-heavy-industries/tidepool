@@ -34,7 +34,7 @@
 //! a parent resume is rejected while it is > 0, because the heap holds exactly
 //! one computation at a time (sequential-isolated).
 //!
-//! # The parked-continuation registry (realm prototype)
+//! # The parked-continuation registry (runtime resource scope prototype)
 //!
 //! [`JitEffectMachine::run_suspendable_parked`] and [`JitEffectMachine::resume_parked`]
 //! generalize the single `suspended_continuation` slot to a map of many. A
@@ -63,7 +63,7 @@
 //! The PARKED (registry) path covers all four — [`ParkKind`] mirrors
 //! `Value`/`Bind`/`Project`/`Render` (one-session plan, Phase 0: `Project`/
 //! `Render` joined `Plain`/`Binding` so the registry path can serve every
-//! session lane).
+//! session consumer).
 //!
 //! CONTRACT (see `plans/unpark/`, §6.2, for why this split is load-bearing):
 //! `Project`/`Render` return their tenured [`crate::old_space::RootSlot`]s
@@ -147,7 +147,7 @@ pub enum JitError {
     VarIdCollision(#[from] tidepool_repr::VarIdCollision),
     /// Refused at ENTRY to the parked path, before the machine is driven at
     /// all (never a machine invariant violation — a caller/configuration
-    /// error, so `Err`, not a panic): the realm's handled-effect prefix
+    /// error, so `Err`, not a panic): the runtime resource scope's handled-effect prefix
     /// disagrees with the prefix the machine already established from an
     /// earlier entry. Two non-empty prefixes must be EXACTLY EQUAL — an
     /// empty prefix never produces this error, it is compatible with
@@ -196,26 +196,26 @@ pub struct HeapStats {
 /// Identity of one continuation parked in a machine's continuation registry.
 /// Minted by [`JitEffectMachine::run_suspendable_parked`], consumed by
 /// [`JitEffectMachine::resume_parked`]. Ids are never reused within a machine:
-/// a resume that suspends AGAIN mints a fresh id (same realm).
+/// a resume that suspends AGAIN mints a fresh id (same runtime resource scope).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct ContinuationId(pub u64);
 
-/// Identity of a realm — the ownership scope a parked continuation belongs to
+/// Identity of a runtime resource scope — the ownership scope a parked continuation belongs to
 /// (an outer loop turn, one answerer subtree, …). Carried on the frame so a
-/// caller can group, cancel, or drain a realm's parks without tracking ids
+/// caller can group, cancel, or drain a runtime resource scope's parks without tracking ids
 /// externally. The machine itself attaches no semantics to it beyond
 /// ownership: [`JitEffectMachine::close_realm`] is scope exit — every frame
-/// and [`ValueHandle`] the realm owns is released together, structured-
+/// and [`ValueHandle`] the runtime resource scope owns is released together, structured-
 /// concurrency style.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct RealmId(pub u64);
 
 /// Opaque, `Send`-able identity of a machine-side rooted heap value (one-
-/// session plan, pillar B — the embedder handle). Minted by
+/// session plan, the handle-delivery rule — the embedder handle). Minted by
 /// [`JitEffectMachine::handle_from_finalized`] (more sources in later
 /// phases), observed via [`JitEffectMachine::observe_handle`], delivered via
 /// [`ResumeInput::Handle`], released by [`JitEffectMachine::close_realm`] of
-/// the owning realm. The `!Send` [`crate::old_space::RootSlot`] underneath
+/// the owning runtime resource scope. The `!Send` [`crate::old_space::RootSlot`] underneath
 /// never crosses an API layer.
 ///
 /// Stays `Copy`/freely re-usable at THIS layer on purpose: this machine-level
@@ -223,14 +223,14 @@ pub struct RealmId(pub u64);
 /// non-linearly (`observe_handle`, `handle_realm`, repeated
 /// `ResumeInput::Handle` — all borrows, never a consuming transfer). The
 /// session layer (`tidepool_runtime::session::resident::RootCustody`) wraps
-/// this type in a linear, non-`Clone` custody token at the ONE seam where a
+/// this type in a linear, non-`Clone` lease at the ONE boundary where a
 /// caller-visible obligation to consume-exactly-once actually exists
 /// (`ResidentSession::finalized_handle` → `resume_handle`/`mount_handle`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct ValueHandle(pub u64);
 
 /// One live [`ValueHandle`]'s machine-side entry: the persistent-rooted slot
-/// and the realm that owns (and will release) it.
+/// and the runtime resource scope that owns (and will release) it.
 struct HandleEntry {
     slot: crate::old_space::RootSlot,
     realm: RealmId,
@@ -239,14 +239,14 @@ struct HandleEntry {
 /// What kind of turn parked a continuation — the registry's spelling of the
 /// completion policy, covering ALL FOUR of the [`ResultMaterialization`]
 /// policies (one-session plan, Phase 0: `Project`/`Render` joined
-/// `Plain`/`Binding` so the registry path can serve every session lane and
+/// `Plain`/`Binding` so the registry path can serve every session consumer and
 /// the slot path can eventually retire).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ParkKind {
     /// A plain suspendable turn: on completion the `Done` pointer is bridged
     /// and returned (`ResultMaterialization::Value`).
     Plain,
-    /// A value-plane BIND turn: on completion the result is tenured into
+    /// A persistent-binding-store BIND turn: on completion the result is tenured into
     /// old-space and its [`crate::old_space::RootSlot`] returned inline
     /// (`ResultMaterialization::Bind`). `forced` deep-forces to NF before
     /// tenuring (Tier0 data) vs tenuring a Tier1 closure as-is.
@@ -289,12 +289,12 @@ impl ParkKind {
 pub struct ContinuationFrame {
     /// Heap-stable cell holding the (GC-current) continuation pointer.
     cell: Box<*mut u8>,
-    /// The realm this park belongs to.
+    /// The runtime resource scope this park belongs to.
     realm: RealmId,
     /// The union tag the turn suspended at, replayed on resume so the caller
     /// does not have to remember it per-park.
     suspend_tag: u64,
-    /// Plain park vs value-plane binding park.
+    /// Plain park vs persistent-binding-store binding park.
     kind: ParkKind,
     /// The persistent root of a closure-valued `finalize`'s finalized value,
     /// tenured at park time. `Some` only for a frame parked while
@@ -302,16 +302,16 @@ pub struct ContinuationFrame {
     /// [`JitEffectMachine::take_parked_finalized_root`], which leaves the
     /// frame itself parked and rooted.
     finalized_root: Option<crate::old_space::RootSlot>,
-    /// This frame's realm's cancel flag, cloned at park time so
+    /// This frame's runtime resource scope's cancel flag, cloned at park time so
     /// [`JitEffectMachine::resume_parked`] installs it without a second
-    /// per-realm cancel-flag lookup.
+    /// per-runtime resource scope cancel-flag lookup.
     cancel_flag: Arc<AtomicBool>,
     /// The [`DataConTable`] this frame's continuation suspended against,
     /// cloned once at park time (not per collection, not per resume) so a
     /// resume decodes exclusively against the row it was compiled for — a
     /// caller cannot resume a frame against a foreign table.
     table: Arc<DataConTable>,
-    /// This realm's handled prefix — the effect names for tags
+    /// This runtime resource scope's handled prefix — the effect names for tags
     /// `[0, suspend_tag)`, in position order — checked (and possibly
     /// establishing) at ENTRY to the parked path
     /// ([`JitEffectMachine::enter_parked_path`]), stored here purely so
@@ -327,16 +327,16 @@ pub enum ParkedOutcome {
     /// A [`ParkKind::Plain`] turn ran to completion: just the bridged result.
     CompletedValue(tidepool_eval::value::Value),
     /// A [`ParkKind::Binding`] turn ran to completion: the bridged result
-    /// plus the tenured root of its value-plane BIND, returned INLINE in the
+    /// plus the tenured root of its persistent-binding-store BIND, returned INLINE in the
     /// same call that observed completion. A completed park leaves no frame
     /// in the registry (a frame exists only while parked), so there is
     /// nowhere for a machine-level stash to live between write and read — no
-    /// window for a second realm's completion to overwrite it before the
+    /// gap for a second runtime resource scope's completion to overwrite it before the
     /// caller reads it.
     CompletedBinding {
         /// The bridged result.
         value: tidepool_eval::value::Value,
-        /// The tenured root of the value-plane BIND's result.
+        /// The tenured root of the persistent-binding-store BIND's result.
         root: crate::old_space::RootSlot,
     },
     /// A [`ParkKind::Project`] park ran to completion: the tenured field
@@ -372,11 +372,11 @@ pub enum ParkedOutcome {
 enum ParkTarget {
     /// The single `suspended_continuation` slot (every pre-existing entry).
     Slot,
-    /// The continuation registry, under a fresh id in this realm.
+    /// The continuation registry, under a fresh id in this runtime resource scope.
     Registry {
         realm: RealmId,
         kind: ParkKind,
-        /// This realm's handled prefix, already checked (and possibly
+        /// This runtime resource scope's handled prefix, already checked (and possibly
         /// established) at entry to the parked path — carried here only to
         /// be stored on the frame if this run suspends.
         handled_prefix: Arc<[String]>,
@@ -549,7 +549,7 @@ impl ParkedRaw {
 enum ResultMaterialization {
     /// Bridge `Done` to an owned [`Value`] — the plain (non-bind) routes.
     Value,
-    /// Value-plane BIND: optionally deep-force to NF (`forced`), tenure into
+    /// Persistent-binding-store BIND: optionally deep-force to NF (`forced`), tenure into
     /// old-space, return the persistent [`crate::old_space::RootSlot`].
     Bind { forced: bool },
     /// Multi-binder BIND: deep-force the WHOLE `Done` tuple, then project and
@@ -772,7 +772,7 @@ pub struct JitEffectMachine {
     /// [`Self::enter_nested_child`], decremented on guard drop; the stowed root
     /// is registered on 0→1 and deregistered on 1→0.
     nested_child_depth: usize,
-    /// A value-plane bind whose fragment ran through the SUSPENDABLE
+    /// A persistent-binding-store bind whose fragment ran through the SUSPENDABLE
     /// path (`run_fragment_suspendable_binding`/`resume_suspended_binding`) tenures
     /// its `Done` result into old-space and stashes the persistent [`RootSlot`]
     /// here, for the caller to read out AFTER the machine moves back off the eval
@@ -780,14 +780,14 @@ pub struct JitEffectMachine {
     /// eval-thread scope boundary as a bare value — it rides home INSIDE the
     /// machine (already `Send` under stowed-XOR-running, same as
     /// `suspended_continuation`; see the module docs for the full contract).
-    /// `None` except in the window between a bind fragment completing and the
+    /// `None` except in the gap between a bind fragment completing and the
     /// caller taking it via [`Self::take_last_bound_root`]. A fork bind lands
     /// here on the eventual `resume`, not the initial (suspending) run.
     ///
     /// SLOT PATH ONLY: the parked path never writes this field — its
     /// `ParkedOutcome::CompletedBinding::root` returns the tenured root inline
-    /// instead, so a second realm's completion cannot overwrite a first
-    /// realm's still-unread root.
+    /// instead, so a second runtime resource scope's completion cannot overwrite a first
+    /// runtime resource scope's still-unread root.
     last_bound_root: Option<crate::old_space::RootSlot>,
     /// Finalize-by-reference: the persistent root slot of a suspended
     /// `finalize @T closure`'s finalized VALUE (field 1 of the request Con),
@@ -802,7 +802,7 @@ pub struct JitEffectMachine {
     /// taken via [`Self::take_parked_finalized_root`]) — a frame exists for
     /// the whole parked lifetime, so there is nowhere for a race to land.
     suspended_finalized_root: Option<crate::old_space::RootSlot>,
-    /// REALM PROTOTYPE — the many-continuation generalization of
+    /// RUNTIME RESOURCE SCOPE PROTOTYPE — the many-continuation generalization of
     /// `suspended_continuation`: every continuation parked by
     /// [`Self::run_suspendable_parked`], keyed by [`ContinuationId`] and tagged
     /// with the [`RealmId`] that owns it. Empty on every machine that only uses
@@ -813,10 +813,10 @@ pub struct JitEffectMachine {
     /// child runs. The single-slot path protects an idle-suspended continuation
     /// by a TEMPORAL argument (no GC can run on a suspended machine, enforced by
     /// the L7 `suspended_continuation.is_none()` asserts) and only falls back to
-    /// a registered root for the window a nested child occupies. A parked frame
-    /// has no such window: it is a root for its whole parked lifetime, so any
+    /// a registered root for the span a nested child occupies. A parked frame
+    /// has no such gap: it is a root for its whole parked lifetime, so any
     /// collection — from a sibling park's turn, a plain fragment, another
-    /// realm's resume, or a heap doubling in any of them — evacuates its
+    /// runtime resource scope's resume, or a heap doubling in any of them — evacuates its
     /// continuation tree and rewrites `*cell` in place. Dropping the temporal
     /// argument is exactly what lets several continuations coexist on one heap
     /// while unrelated computation keeps running.
@@ -830,18 +830,18 @@ pub struct JitEffectMachine {
     /// clean "unknown continuation" error rather than a silent aliasing of some
     /// later park.
     next_continuation_id: u64,
-    /// Per-realm cancel flags, lazily minted on first park-path run/resume
-    /// entry for a realm ([`Self::realm_cancel_flag`]). The parked entries
-    /// install a realm's own flag into [`MachineState`] instead of
-    /// `cancel_flag`, so cancelling one realm cannot abort a sibling realm's
-    /// run — cancellation is realm-scoped, not machine-scoped, because a
-    /// realm's continuation ids change on every re-suspension and cannot live
-    /// only on the frame. Never shrinks during a realm's life: a cancelled
-    /// realm's flag is not removed, only cleared (see
+    /// Per-runtime resource scope cancel flags, lazily minted on first park-path run/resume
+    /// entry for a runtime resource scope ([`Self::realm_cancel_flag`]). The parked entries
+    /// install a runtime resource scope's own flag into [`MachineState`] instead of
+    /// `cancel_flag`, so cancelling one runtime resource scope cannot abort a sibling runtime resource scope's
+    /// run — cancellation is scoped per runtime resource scope, not machine-scoped, because a
+    /// runtime resource scope's continuation ids change on every re-suspension and cannot live
+    /// only on the frame. Never shrinks during a runtime resource scope's life: a cancelled
+    /// runtime resource scope's flag is not removed, only cleared (see
     /// [`Self::realm_cancel_handle`]'s doc for whether a completed run clears
-    /// it); [`Self::close_realm`] removes the closed realm's entry.
+    /// it); [`Self::close_realm`] removes the closed runtime resource scope's entry.
     realm_cancel_flags: HashMap<RealmId, Arc<AtomicBool>>,
-    /// The VALUE-HANDLE registry (one-session plan, pillar B): opaque,
+    /// The VALUE-HANDLE registry (one-session plan, the handle-delivery rule): opaque,
     /// Send-able ids over machine-side persistent roots, so upper layers pass
     /// heap values — closures included — WITHOUT eagerly bridging them into a
     /// Rust [`Value`] (the eager bridge substitutes `CLOSURE_SENTINEL` and is
@@ -849,7 +849,7 @@ pub struct JitEffectMachine {
     /// [`Self::observe_handle`], where an opaque view of an opaque value is
     /// honest). Handles are SCOPE-OWNED BORROWS: minting does not consume the
     /// underlying root, observing and delivering do not consume the handle,
-    /// and [`Self::close_realm`] releases every handle its realm minted.
+    /// and [`Self::close_realm`] releases every handle its runtime resource scope minted.
     value_handles: HashMap<u64, HandleEntry>,
     /// Monotonic count of fragments compiled into the JITModule (its
     /// executable memory is never reclaimed) — [`HeapStats::fragments`].
@@ -862,14 +862,14 @@ pub struct JitEffectMachine {
     /// introspect its own handler stack (`H` is a compile-time monomorphized
     /// type parameter, not runtime data), so this is the machine's runtime
     /// record of what `H` is, in its stead. Set from the first NON-EMPTY
-    /// handled prefix any realm ENTERS the parked path with
+    /// handled prefix any runtime resource scope ENTERS the parked path with
     /// ([`Self::enter_parked_path`], called before the machine is driven —
-    /// deliberately not deferred to an actual park, since a realm whose turn
+    /// deliberately not deferred to an actual park, since a runtime resource scope whose turn
     /// completes without ever suspending still dispatches every effect
     /// through `H`); `None` until then. MONOTONIC — never cleared or
-    /// overwritten afterward, including on resume: every realm on a machine
+    /// overwritten afterward, including on resume: every runtime resource scope on a machine
     /// is driven through the same single `H` for the machine's whole life,
-    /// so a realm that resumed and completed does not release the
+    /// so a runtime resource scope that resumed and completed does not release the
     /// constraint. See [`Self::check_prefix_compatible`].
     established_prefix: Option<Arc<[String]>>,
 }
@@ -1193,24 +1193,24 @@ impl JitEffectMachine {
         CancelHandle(self.cancel_flag.clone())
     }
 
-    /// Obtain a clone-able cancellation handle scoped to ONE realm,
-    /// lazily minting that realm's flag on first request. Cancelling this
+    /// Obtain a clone-able cancellation handle scoped to ONE runtime resource scope,
+    /// lazily minting that runtime resource scope's flag on first request. Cancelling this
     /// handle aborts only runs/resumes parked-path-entered under `realm` —
-    /// a sibling realm's run on the same machine is unaffected, because the
-    /// parked entries install the ACTIVE realm's flag into [`MachineState`]
+    /// a sibling runtime resource scope's run on the same machine is unaffected, because the
+    /// parked entries install the ACTIVE runtime resource scope's flag into [`MachineState`]
     /// (see [`Self::realm_cancel_flag`]), not the machine-level
     /// [`Self::cancel_flag`].
     ///
-    /// A cancelled realm's flag is NOT auto-cleared after the cancelled run
+    /// A cancelled runtime resource scope's flag is NOT auto-cleared after the cancelled run
     /// completes — same discipline as the machine-level [`CancelHandle`]
     /// (whose own doc says "call `reset` between runs if you intend to
-    /// reuse"): the caller decides when a realm is done retrying and calls
+    /// reuse"): the caller decides when a runtime resource scope is done retrying and calls
     /// `CancelHandle::reset` explicitly.
     pub fn realm_cancel_handle(&mut self, realm: RealmId) -> CancelHandle {
         CancelHandle(self.realm_cancel_flag(realm))
     }
 
-    /// This realm's cancel flag, lazily minted on first park-path
+    /// This runtime resource scope's cancel flag, lazily minted on first park-path
     /// run/resume entry for `realm`. Never removed once minted, so the same
     /// `Arc` identity is returned for the machine's whole life — a
     /// [`ContinuationFrame`] cloning it at park time and a later
@@ -1244,9 +1244,9 @@ impl JitEffectMachine {
     /// Shared body of [`Self::install_registries`]: install per-run
     /// thread-local registries using the given `cancel_flag` rather than
     /// unconditionally `self.cancel_flag` — the parked run/resume entries
-    /// pass the ACTIVE realm's flag here instead, via
-    /// [`Self::realm_cancel_flag`], so cancelling one realm cannot abort a
-    /// sibling realm's run on the same machine.
+    /// pass the ACTIVE runtime resource scope's flag here instead, via
+    /// [`Self::realm_cancel_flag`], so cancelling one runtime resource scope cannot abort a
+    /// sibling runtime resource scope's run on the same machine.
     fn install_registries_with_cancel_flag(
         &mut self,
         cancel_flag: Arc<AtomicBool>,
@@ -1869,7 +1869,7 @@ impl JitEffectMachine {
         .map(ParkedRaw::into_suspendable)
     }
 
-    /// Value-plane BIND sibling of [`Self::run_fragment_suspendable`]: drive a
+    /// Persistent-binding-store BIND sibling of [`Self::run_fragment_suspendable`]: drive a
     /// bind fragment (`x <- e`) through the same threadless suspend path, and — on
     /// `Done` — tenure the result into old-space, stashing its [`RootSlot`] on the
     /// machine (read via [`Self::take_last_bound_root`] after the machine moves off
@@ -2041,13 +2041,13 @@ impl JitEffectMachine {
         // above, since every parked-path entry funnels through this same
         // method too.
         //
-        // HAZARD: without this check, parking a realm and then calling a
+        // HAZARD: without this check, parking a runtime resource scope and then calling a
         // legacy slot-path entry reaches a mixed state that isn't caught
         // until `resume_parked` panics later, after running with the
         // slot-held continuation unrooted in the meantime. Reject it HERE
         // instead, before anything is driven.
         //
-        // A clean `Err`, deliberately NOT a panic/assert: parking a realm and
+        // A clean `Err`, deliberately NOT a panic/assert: parking a runtime resource scope and
         // then calling a legacy entry is ordinary caller misuse (a plausible
         // sequencing mistake, not a violated internal invariant), and it must
         // reject the same way in every build, debug or release — a
@@ -2069,7 +2069,7 @@ impl JitEffectMachine {
         }
         let tags = self.tags.map_err(JitError::MissingConTags)?;
         crate::signal_safety::install();
-        // The parked path installs THAT realm's cancel flag (lazily minted)
+        // The parked path installs THAT runtime resource scope's cancel flag (lazily minted)
         // instead of the machine-level one; the slot path installs
         // `self.cancel_flag`.
         let park_cancel_flag: Arc<AtomicBool> = match park {
@@ -2155,7 +2155,7 @@ impl JitEffectMachine {
         .map(ParkedRaw::into_suspendable)
     }
 
-    /// Value-plane BIND sibling of [`Self::resume_suspended`]: re-enter a suspended
+    /// Persistent-binding-store BIND sibling of [`Self::resume_suspended`]: re-enter a suspended
     /// bind turn (`x <- e` that stowed at a fork) and, on `Done`, tenure the bound
     /// result — stashing its [`RootSlot`] on the machine
     /// ([`Self::take_last_bound_root`]). `forced` deep-forces to NF (Tier0) vs
@@ -2463,7 +2463,7 @@ impl JitEffectMachine {
     ///    goes to `self.last_bound_root`, because
     ///    [`SuspendableOutcome::Completed`] is fixed at a bare `Value` and
     ///    cannot carry it; on the REGISTRY path it is returned INLINE via
-    ///    `ParkedOutcome::CompletedBinding::root` instead, so that two realms'
+    ///    `ParkedOutcome::CompletedBinding::root` instead, so that two runtime resource scopes'
     ///    binds completing before either is drained cannot overwrite one
     ///    machine-level slot. `Project`/`Render` never stash: they complete
     ///    as `Suspendable<T>` and return their roots in the outcome. `Bind`
@@ -2599,7 +2599,7 @@ impl JitEffectMachine {
                 // `has_finalized_closure`, so an unrelated suspension never
                 // clobbers a stale value there); on the registry path it
                 // rides to `park_continuation` instead and lands on the
-                // frame — never on a machine-level field a second realm
+                // frame — never on a machine-level field a second runtime resource scope
                 // could overwrite.
                 let mut parked_finalized_root = None;
                 // `continuation` is a raw heap pointer used AFTER this block
@@ -2714,7 +2714,7 @@ impl JitEffectMachine {
         Ok(slot)
     }
 
-    /// Take the [`RootSlot`] a value-plane bind tenured on its last suspendable
+    /// Take the [`RootSlot`] a persistent-binding-store bind tenured on its last suspendable
     /// completion (`run_fragment_suspendable_binding`/`resume_suspended_binding`),
     /// clearing it. `None` if the last run was not a bind or has already been
     /// taken. The caller reads this AFTER the machine moves back off the eval
@@ -2764,7 +2764,7 @@ impl JitEffectMachine {
     // GHCi-style session re-entry.
     //
     // These freeze the codegen contracts the tidepool-repl session manager
-    // builds on, atop the session lifecycle seam (buffer retention,
+    // builds on, atop the session lifecycle boundary (buffer retention,
     // persistent roots, tenuring).
     // ----------------------------------------------------------------------
 
@@ -2800,29 +2800,29 @@ impl JitEffectMachine {
         // GLOBAL-ID INVARIANT (codex-review-2026-08-08.md item 3): `json_con_ids`,
         // `time_con_ids`, and `tags` (`ConTags`) below are MACHINE-GLOBAL —
         // one slot each on `JitEffectMachine`/`MachineState`, not one per
-        // realm or per parked frame. Every `add_function` call on this
-        // machine (any realm) accumulates into the SAME three slots, and a
+        // runtime resource scope or per parked frame. Every `add_function` call on this
+        // machine (any runtime resource scope) accumulates into the SAME three slots, and a
         // later call's successfully-resolved ids OVERWRITE an earlier one's
         // (re-resolved, not merged — see the `tags` comment below for the
         // exact Err/Ok transition table). `resume_applied` reads `self.tags`
         // (not a per-frame copy) to interpret a resumed continuation's own
         // freer-simple envelope (`Val`/`E`/`Union`/`Leaf`/`Node`).
         //
-        // This is safe ONLY because every realm sharing one machine is
+        // This is safe ONLY because every runtime resource scope sharing one machine is
         // expected to agree on these ids: `Val`/`E`/`Union`/`Leaf`/`Node`
         // (and, if used, the JSON `Either`/`I#`/`Text` / time constructors)
-        // come from the SAME fixed library modules for every realm compiled
+        // come from the SAME fixed library modules for every runtime resource scope compiled
         // through this process, so in practice every table resolves them to
         // the SAME numeric tags — this is what makes "last writer wins"
         // harmless rather than a silent tag-confusion hazard. It is NOT
         // guaranteed by any check here: a table that assigned a DIFFERENT
         // numeric tag to one of these shared constructors would silently
-        // corrupt how an already-parked SIBLING realm's continuation gets
+        // corrupt how an already-parked SIBLING runtime resource scope's continuation gets
         // interpreted on its next resume. What IS guarded, and load-bearing
-        // for realms in general, is that a realm's OWN domain constructors
+        // for runtime resource scopes in general, is that a runtime resource scope's OWN domain constructors
         // never go through this machine-global cache at all: `resume_parked`
         // decodes exclusively against `ContinuationFrame::table` (A4, cloned
-        // once at park time), so two realms may freely reuse the SAME numeric
+        // once at park time), so two runtime resource scopes may freely reuse the SAME numeric
         // `DataConId`/tag for DIFFERENT domain constructors without collision
         // or shadowing — see `realm_global_id_isolation.rs` for the pinning
         // test.
@@ -2912,7 +2912,7 @@ impl JitEffectMachine {
         self.run_pure_with_entry(func_id)
     }
 
-    /// The value-plane **bind primitive**: run a pure entry, deep-force its
+    /// The persistent-binding-store **bind primitive**: run a pure entry, deep-force its
     /// result to normal form, tenure the NF value into the session old-space,
     /// register its persistent GC root, and return the stable
     /// [`RootSlot`](crate::old_space::RootSlot) a later fragment resolves
@@ -2948,7 +2948,7 @@ impl JitEffectMachine {
             .expect_bind())
     }
 
-    /// The effectful value-plane **bind primitive**: run `func_id` through the
+    /// The effectful persistent-binding-store **bind primitive**: run `func_id` through the
     /// freer-simple effect step loop (dispatching through `handlers`), and at
     /// `Yield::Done(ptr)` apply the BIND sequence from `run_pure_and_bind`:
     /// optionally `deep_force` to NF (`forced = true` → Tier0 data; `false` →
@@ -3333,17 +3333,17 @@ impl JitEffectMachine {
     }
 
     // ----------------------------------------------------------------------
-    // REALM PROTOTYPE — the parked-continuation registry. See the module
-    // docstring's "The parked-continuation registry (realm prototype)"
+    // RUNTIME RESOURCE SCOPE PROTOTYPE — the parked-continuation registry. See the module
+    // docstring's "The parked-continuation registry (runtime resource scope prototype)"
     // section for the invariant.
     // ----------------------------------------------------------------------
 
-    /// Check `incoming` — a realm's handled prefix, the effect names for tags
+    /// Check `incoming` — a runtime resource scope's handled prefix, the effect names for tags
     /// `[0, suspend_tag)` in position order — against the machine's
     /// established prefix. `DispatchEffect` is positional over an `HList`
     /// and the suspend test is `tag >= suspend_tag`; both are correct only
     /// relative to one effect row whose handled effects occupy a contiguous
-    /// low prefix, so two realms sharing a machine must agree on that prefix
+    /// low prefix, so two runtime resource scopes sharing a machine must agree on that prefix
     /// exactly, not merely where they happen to overlap.
     ///
     /// An EMPTY `incoming` prefix is compatible with anything — this is the
@@ -3361,10 +3361,10 @@ impl JitEffectMachine {
     /// **Why exact equality, not agreement-up-to-the-shorter-length.** The
     /// established prefix is CALLER-SUPPLIED metadata, not something read off
     /// the machine's actual (compile-time monomorphized, runtime-opaque) `H`.
-    /// A realm declaring a shorter prefix says nothing about how many
+    /// A runtime resource scope declaring a shorter prefix says nothing about how many
     /// handlers `H` really has — it may simply use a lower suspend
     /// threshold. So accepting an extension is unsound: if `H` really does
-    /// have a handler at the extended position, the extending realm's tag
+    /// have a handler at the extended position, the extending runtime resource scope's tag
     /// there is BELOW ITS OWN threshold (dispatched, not suspended), and it
     /// reaches that handler — a silent misroute, exactly what this check
     /// exists to prevent.
@@ -3373,16 +3373,16 @@ impl JitEffectMachine {
     /// prefix on a machine equal to every other, and an empty prefix
     /// dispatching nothing, every tag that is ever DISPATCHED (as opposed to
     /// suspended) is strictly below the one common prefix length, and every
-    /// realm agrees on what sits at every position below that length. No
-    /// dispatched tag can therefore reach a position two realms disagree
+    /// runtime resource scope agrees on what sits at every position below that length. No
+    /// dispatched tag can therefore reach a position two runtime resource scopes disagree
     /// about.
     ///
     /// **The residual, stated rather than glossed.** This check enforces
-    /// agreement AMONG realms sharing a machine; it cannot verify a declared
-    /// prefix against the actual, opaque `H` — a single realm parking alone,
-    /// or every realm agreeing with each other while all of them are wrong
+    /// agreement AMONG runtime resource scopes sharing a machine; it cannot verify a declared
+    /// prefix against the actual, opaque `H` — a single runtime resource scope parking alone,
+    /// or every runtime resource scope agreeing with each other while all of them are wrong
     /// about `H`, is not caught here. A wrong declared prefix, undetected by
-    /// any other realm's disagreement, remains the caller's responsibility.
+    /// any other runtime resource scope's disagreement, remains the caller's responsibility.
     fn check_prefix_compatible(&self, incoming: &[String]) -> Result<(), JitError> {
         if incoming.is_empty() {
             return Ok(());
@@ -3408,24 +3408,24 @@ impl JitEffectMachine {
         Ok(())
     }
 
-    /// Enter the parked path with `incoming` — a realm's handled prefix.
+    /// Enter the parked path with `incoming` — a runtime resource scope's handled prefix.
     /// Checks it against the machine's established prefix
     /// ([`Self::check_prefix_compatible`]) and, if compatible, ESTABLISHES it
     /// when this is the first non-empty prefix to enter. Two non-empty
     /// prefixes must be EXACTLY EQUAL to be compatible — see
     /// [`Self::check_prefix_compatible`] for why that is sound (every
-    /// dispatched tag sits below the one common prefix length every realm
-    /// agrees on) and its residual (agreement AMONG realms, not verification
+    /// dispatched tag sits below the one common prefix length every runtime resource scope
+    /// agrees on) and its residual (agreement AMONG runtime resource scopes, not verification
     /// against the actual opaque `H`).
     ///
     /// `H` is fixed for the machine's life regardless of whether the
     /// entering turn goes on to suspend or complete, so establishing must
     /// happen HERE — at entry, before the machine is driven at all — not at
-    /// park: a realm that runs a turn to completion without ever suspending
+    /// park: a runtime resource scope that runs a turn to completion without ever suspending
     /// dispatches every one of its effects through `H` exactly the same as
     /// one that suspends, so establishing only on suspension would leave
-    /// such a realm's non-empty prefix never recorded, after which an
-    /// incompatible realm could park successfully because nothing was
+    /// such a runtime resource scope's non-empty prefix never recorded, after which an
+    /// incompatible runtime resource scope could park successfully because nothing was
     /// established.
     ///
     /// Called at the TOP of every parked-path entry
@@ -3522,7 +3522,7 @@ impl JitEffectMachine {
     /// prefix already on this machine, or empty — see
     /// [`Self::check_prefix_compatible`] for why that is the sound check
     /// (not merely agreement up to a shared length) and its residual (it
-    /// enforces agreement AMONG realms, not verification against the
+    /// enforces agreement AMONG runtime resource scopes, not verification against the
     /// actual, opaque `H`).
     ///
     /// # Panics
@@ -3555,14 +3555,14 @@ impl JitEffectMachine {
     /// [`Self::add_function`]-minted fragment through the suspend path, parking
     /// a suspension in the registry under `realm`. `kind` picks the completion
     /// discipline — [`ParkKind::Plain`] bridges the `Done` pointer,
-    /// [`ParkKind::Binding`] tenures it as a value-plane bind.
+    /// [`ParkKind::Binding`] tenures it as a persistent-binding-store bind.
     ///
-    /// `handled_prefix` is this realm's handled prefix — the effect names for
+    /// `handled_prefix` is this runtime resource scope's handled prefix — the effect names for
     /// tags `[0, suspend_tag)`, in position order (the caller builds the
     /// decls row, so it has the names). Checked against the machine's
     /// established prefix, and established if this is the first non-empty
     /// prefix to enter, BEFORE the machine is driven at all
-    /// ([`Self::enter_parked_path`]) — an incompatible realm never executes a
+    /// ([`Self::enter_parked_path`]) — an incompatible runtime resource scope never executes a
     /// single effect against a foreign handler stack, whether or not it
     /// would go on to suspend or complete. Two non-empty prefixes must be
     /// EXACTLY EQUAL to be compatible — a strict extension of the
@@ -3570,7 +3570,7 @@ impl JitEffectMachine {
     /// prefix is caller-supplied metadata, not a read of the machine's
     /// actual (opaque) handler stack (see
     /// [`Self::check_prefix_compatible`] for the full argument and its
-    /// residual: this enforces agreement AMONG realms, not verification
+    /// residual: this enforces agreement AMONG runtime resource scopes, not verification
     /// against the real `H`). A disagreement refuses with
     /// `JitError::IncompatibleHandledPrefix` and leaves the machine
     /// untouched (nothing has run yet).
@@ -3613,7 +3613,7 @@ impl JitEffectMachine {
     /// the id and the input.
     ///
     /// Resumes in ANY order: the registry imposes none. A re-suspension parks
-    /// again under a FRESH id in the same realm, replaying the frame's own
+    /// again under a FRESH id in the same runtime resource scope, replaying the frame's own
     /// `handled_prefix` — re-checked (and, if still unestablished, re-offered
     /// to establish) via [`Self::enter_parked_path`] at the TOP of this
     /// method, before the continuation is driven at all — same discipline as
@@ -3622,7 +3622,7 @@ impl JitEffectMachine {
     /// established one when it first parked, and the established prefix is
     /// monotonic, so this re-check cannot newly disagree — see
     /// [`Self::check_prefix_compatible`] for why exact equality is sound and
-    /// its residual (agreement AMONG realms, not verification against the
+    /// its residual (agreement AMONG runtime resource scopes, not verification against the
     /// real `H`).
     ///
     /// A5 discipline, same as [`Self::resume_suspended`]: the answer is
@@ -3767,7 +3767,7 @@ impl JitEffectMachine {
         ids
     }
 
-    /// The realm owning the continuation parked under `id`, if any.
+    /// The runtime resource scope owning the continuation parked under `id`, if any.
     pub fn parked_realm(&self, id: ContinuationId) -> Option<RealmId> {
         self.continuations.get(&id).map(|f| f.realm)
     }
@@ -3777,8 +3777,8 @@ impl JitEffectMachine {
     /// Mint a [`ValueHandle`] over the closure-valued `finalize` payload of
     /// the frame parked under `id` (tenured + persistent-rooted at park time).
     /// The frame STAYS parked and rooted; only its own stash of the slot is
-    /// moved into the handle registry, owned by the frame's realm — so
-    /// [`Self::close_realm`] of that realm releases the payload exactly once,
+    /// moved into the handle registry, owned by the frame's runtime resource scope — so
+    /// [`Self::close_realm`] of that runtime resource scope releases the payload exactly once,
     /// whether or not the handle was ever observed or delivered. `None`
     /// unless `id` names a parked frame holding an untaken finalized payload.
     ///
@@ -3791,7 +3791,7 @@ impl JitEffectMachine {
     /// non-linearly (`observe_handle`, `handle_realm`, repeated
     /// `ResumeInput::Handle` — all borrows, never a consuming transfer). The
     /// session layer (`tidepool_runtime`'s `ResidentSession::finalized_handle`)
-    /// is where a caller-visible custody obligation actually begins — see
+    /// is where a caller-visible consume-once obligation actually begins — see
     /// [`RootCustody`]'s doc — and that is where the linear wrapper is
     /// applied.
     pub fn handle_from_finalized(&mut self, id: ContinuationId) -> Option<ValueHandle> {
@@ -3804,7 +3804,7 @@ impl JitEffectMachine {
         Some(h)
     }
 
-    /// The realm owning `handle`, if it is live (minted and not yet released
+    /// The runtime resource scope owning `handle`, if it is live (minted and not yet released
     /// by [`Self::close_realm`]).
     pub fn handle_realm(&self, handle: ValueHandle) -> Option<RealmId> {
         self.value_handles.get(&handle.0).map(|e| e.realm)
@@ -3815,9 +3815,9 @@ impl JitEffectMachine {
     /// `!Send` [`crate::old_space::RootSlot`] cannot ride an outcome across
     /// the session layer's eval-thread boundary — the eval-thread closure
     /// mints the handle machine-side and the `Send` id crosses instead
-    /// (`ResidentSession`'s laundering, pillar-B flavored). The slot's
+    /// (`ResidentSession`'s laundering, per the handle-delivery rule). The slot's
     /// persistent-root registration is unchanged; the handle just records
-    /// realm ownership over it.
+    /// runtime resource scope ownership over it.
     pub fn mint_handle_from_root(
         &mut self,
         slot: crate::old_space::RootSlot,
@@ -3830,16 +3830,16 @@ impl JitEffectMachine {
     }
 
     /// The rooted slot behind a live handle — for the session layer's OWN
-    /// bookkeeping (a value-plane `BindingTable` stores `RootSlot`s on the
+    /// bookkeeping (a persistent-binding-store `BindingTable` stores `RootSlot`s on the
     /// session thread, same as it always has). The handle stays live; pairing
     /// this with [`Self::release_handle`] transfers ownership to the caller.
     pub fn handle_slot(&self, handle: ValueHandle) -> Option<crate::old_space::RootSlot> {
         self.value_handles.get(&handle.0).map(|e| e.slot)
     }
 
-    /// Release ONE handle without closing its realm — for a caller that
+    /// Release ONE handle without closing its runtime resource scope — for a caller that
     /// consumed the underlying slot into its own lifetime discipline (the
-    /// value plane). Does NOT deregister the persistent root (ownership
+    /// persistent binding store). Does NOT deregister the persistent root (ownership
     /// transferred, not dropped); a later `close_realm` no longer sees it.
     pub fn release_handle(&mut self, handle: ValueHandle) -> bool {
         self.value_handles.remove(&handle.0).is_some()
@@ -3854,7 +3854,7 @@ impl JitEffectMachine {
     /// the TOLERANT bridge into an owned [`tidepool_eval::value::Value`] —
     /// data bridges fully (forcing thunks as needed), a closure field renders
     /// as the `CLOSURE_SENTINEL` stub. This is the ONE place a handle's
-    /// payload is ever serialized (pillar B: observation by serialization),
+    /// payload is ever serialized (the handle-delivery rule's observation-by-serialization half),
     /// and it is honest — an opaque view of an opaque value — never a lossy
     /// delivery. The handle is not consumed.
     ///
@@ -3913,22 +3913,22 @@ impl JitEffectMachine {
         Ok(value)
     }
 
-    /// SCOPE EXIT (pillar A — structured concurrency): close `realm`,
+    /// SCOPE EXIT (structured concurrency): close `realm`,
     /// releasing everything it owns, atomically from the caller's view:
     ///
-    /// - every parked frame owned by the realm is removed and its stowed
+    /// - every parked frame owned by the runtime resource scope is removed and its stowed
     ///   continuation root deregistered;
     /// - each such frame's untaken finalized payload root, and every
-    ///   [`ValueHandle`] the realm owns, has its persistent-root registration
+    ///   [`ValueHandle`] the runtime resource scope owns, has its persistent-root registration
     ///   deregistered (the 8-byte slot cell stays with `OldSpace` for the
     ///   machine's life; the VALUE it pinned becomes collectable once nothing
     ///   else reaches it);
-    /// - the realm's cancel flag entry is dropped;
-    /// - sibling realms and their frames/handles are untouched;
+    /// - the runtime resource scope's cancel flag entry is dropped;
+    /// - sibling runtime resource scopes and their frames/handles are untouched;
     /// - the rooting receipt (`stowed_roots_count() == parked_count()`) holds
     ///   before and after.
     ///
-    /// Returns `(frames_dropped, handles_released)`. Closing a realm that
+    /// Returns `(frames_dropped, handles_released)`. Closing a runtime resource scope that
     /// owns nothing is a no-op `(0, 0)` — idempotent by construction, so a
     /// retirement path that can race a wholesale teardown stays safe.
     pub fn close_realm(&mut self, realm: RealmId) -> (usize, usize) {
@@ -3976,7 +3976,7 @@ impl JitEffectMachine {
         (ids.len(), hids.len())
     }
 
-    /// SCOPE RETIREMENT (PRD 21 lane C2): deregister one value-plane binding's
+    /// SCOPE RETIREMENT (PRD 21 lane C2): deregister one persistent-binding-store binding's
     /// persistent GC root, because the scope that solely owned it is retiring.
     ///
     /// **This is a scope-retirement primitive, not a general "drop a root"
@@ -3993,7 +3993,7 @@ impl JitEffectMachine {
     ///   release without moving that counter is a false receipt.
     ///
     /// A caller that cannot name which scope owns the root is not a legitimate
-    /// caller. The value plane's owner is
+    /// caller. The persistent binding store's owner is
     /// `tidepool_runtime::session::PersistentSession::retire_scope`; nothing
     /// else should reach for this.
     ///
@@ -4019,9 +4019,9 @@ impl JitEffectMachine {
     /// clause, so a retirement site can debug-assert it rather than assume it.
     ///
     /// A mount transfers ownership out of the handle registry
-    /// (`release_handle`) before the value plane records the binding, so this
+    /// (`release_handle`) before the persistent binding store records the binding, so this
     /// answers `false` for every properly-mounted root; a `true` means the
-    /// handle registry and the value plane both believe they own the slot,
+    /// handle registry and the persistent binding store both believe they own the slot,
     /// which is the state retirement must not act on.
     #[must_use]
     pub fn handle_holds_root(&self, slot: crate::old_space::RootSlot) -> bool {
@@ -4082,7 +4082,7 @@ impl Drop for NestedChildGuard {
 
 impl Drop for JitEffectMachine {
     fn drop(&mut self) {
-        // REALM PROTOTYPE: deregister every parked continuation's stowed root
+        // RUNTIME RESOURCE SCOPE PROTOTYPE: deregister every parked continuation's stowed root
         // BEFORE its `Box` cell is freed (the `HashMap` drops with `self` after
         // this body returns). `free_session_heap` below also clears stowed
         // roots, but only on a session machine — doing it here makes the
@@ -4244,7 +4244,7 @@ pub enum ResumeInput {
     /// [`tidepool_eval::value::Value`] into the heap: the handle's GC-current
     /// pointer is the response, verbatim. This is how a closure (or any
     /// opaque value) is DELIVERED into a sibling continuation on the same
-    /// heap (one-session plan, pillar B). No A5 NF-force applies: the payload
+    /// heap (one-session plan, the handle-delivery rule). No A5 NF-force applies: the payload
     /// is already a real heap value whose thunks are ordinary lazy structure,
     /// not a bridged answer that could smuggle a bottom past validation. The
     /// handle is NOT consumed (scope-owned borrow; released by
@@ -4480,8 +4480,8 @@ fn drive_effect_loop<U, H: DispatchEffect<U>>(
 /// What a resume feeds the continuation: a bridged handler
 /// [`tidepool_effect::Response`] to MATERIALIZE into the heap, or an
 /// already-in-heap pointer (a [`ValueHandle`]'s persistent-rooted payload)
-/// used VERBATIM — the delivery half of pillar B's "delivery by handle,
-/// observation by serialization".
+/// used VERBATIM — the delivery half of the handle-delivery rule: "delivery
+/// by handle, observation by serialization".
 enum ResumePayload {
     Response(tidepool_effect::Response),
     HeapPtr(*mut u8),
@@ -4531,7 +4531,7 @@ fn materialize_response_and_resume(
     let plan = match response {
         // A ValueHandle's payload: already a real (old-space, persistent-
         // rooted) heap object — no materialization, no size caps, the pointer
-        // IS the response. This is pillar B's delivery path: a closure
+        // IS the response. This is the handle-delivery rule's delivery path: a closure
         // crosses into the continuation verbatim, where the eager bridge
         // would have substituted CLOSURE_SENTINEL.
         ResumePayload::HeapPtr(p) => ResponsePlan::Ready(p),
@@ -4907,7 +4907,7 @@ mod tests {
     }
 
     // ---------------------------------------------------------------------------
-    // Session seam tests
+    // Session boundary tests
     // ---------------------------------------------------------------------------
 
     /// Build a Con-chain expr + DataConTable that forces >=1 GC under a small nursery.
@@ -5066,7 +5066,7 @@ mod tests {
         machine_state.clear_persistent_roots();
     }
 
-    /// THE SEAM TEST — compile_session, run, verify heap retention,
+    /// THE BOUNDARY TEST — compile_session, run, verify heap retention,
     /// verify install re-points, verify persistent root survives second run.
     #[test]
     #[serial]

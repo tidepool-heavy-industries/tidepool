@@ -317,7 +317,7 @@ pub extern "C" fn gc_trigger(vmctx: *mut VMContext) {
 /// Safe to call with zero live JIT frames on the stack — which is always
 /// the case here, since `OldSpace::tenure`'s callers all run after the
 /// compiled function has already yielded control back to Rust (the exact
-/// window `force_gc_for_test`'s own doc names as its motivating case).
+/// moment `force_gc_for_test`'s own doc names as its motivating case).
 /// `walk_frames` degrades to zero stack roots in that case, same as
 /// `force_gc_for_test`.
 ///
@@ -989,7 +989,7 @@ fn perform_gc(fp: usize, vmctx: *mut VMContext) {
 
             // Test-only one-shot fault injection (see `arm_gc_fault`), fired
             // here to exercise the extract-then-siglongjmp design above: a
-            // fault in this window must find the `GcState` cell empty
+            // fault at this moment must find the `GcState` cell empty
             // (owned by this frame), never a live borrow.
             maybe_raise_gc_fault(GcFaultPoint::DuringCopy);
 

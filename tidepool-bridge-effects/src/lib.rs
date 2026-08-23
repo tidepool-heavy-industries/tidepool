@@ -195,8 +195,8 @@ pub enum AgSpawnWorkspace {
 }
 
 /// Haskell `SpawnSpec` — built in Haskell, consumed in Rust. The result
-/// schema rides the verb's separate `Value` argument (JsonArg lane), not this
-/// record.
+/// schema rides the verb's separate `Value` argument (the JsonArg argument),
+/// not this record.
 #[derive(ToCore, FromCore, Clone, Debug, PartialEq, Eq)]
 #[core(name = "SpawnSpec")]
 pub struct AgSpawnSpec {
@@ -205,7 +205,7 @@ pub struct AgSpawnSpec {
     pub spawn_task: String,
 }
 
-/// Haskell `SpawnStage` — how far the saga got; carried on every SpawnError.
+/// Haskell `SpawnStage` — how far the spawn got; carried on every SpawnError.
 #[derive(ToCore, FromCore, Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AgSpawnStage {
     StageAllocating,
@@ -215,8 +215,8 @@ pub enum AgSpawnStage {
     StageRunning,
 }
 
-/// Haskell `BackendFailure` — the seam's `AgentBackendError`, case-matchable
-/// (retryable-vs-not, mine-vs-theirs).
+/// Haskell `BackendFailure` — the backend boundary's `AgentBackendError`,
+/// case-matchable (retryable-vs-not, mine-vs-theirs).
 #[derive(ToCore, FromCore, Clone, Debug, PartialEq, Eq)]
 pub enum AgBackendFailure {
     BackendUnavailable(String),

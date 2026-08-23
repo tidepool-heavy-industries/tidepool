@@ -1,12 +1,13 @@
-//! The scope tree — one shared spine for both session planes (PRD 21 lane
+//! The scope tree — one shared spine for both the persistent binding store
+//! and the persistent declaration environment (PRD 21 lane
 //! C2, `plans/self-iterating-harness/21-c2-scope-trees.md`).
 //!
 //! Locked decision 4 asks for a *persistent lexical environment*: everything
 //! immutable, "write" meaning "create a descendant scope", lookup walking
 //! local → parent, siblings shadowing freely and never colliding, and the
 //! parent never gaining a child's names. This module is the whole of that
-//! structure; the value plane ([`crate::binding_table::BindingTable`]) and
-//! the decl plane (`tidepool_runtime::session::SessionLib`) each hang their
+//! structure; the persistent binding store ([`crate::binding_table::BindingTable`]) and
+//! the persistent declaration environment (`tidepool_runtime::session::SessionLib`) each hang their
 //! own frames off these ids rather than growing separate nesting.
 //!
 //! ## Identity

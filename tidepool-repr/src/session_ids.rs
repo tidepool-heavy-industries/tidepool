@@ -1,10 +1,12 @@
-//! Session identifiers for the `tidepool-repl` planes.
+//! Session identifiers for `tidepool-repl`'s persistent declaration
+//! environment and persistent binding store.
 //!
 //! Newtypes — never bare `u64`/`String` — so the invariants (monotonic
 //! generation, the single gen-versioned module-name string) live on the type.
 //! Declaration accumulation needs [`Generation`], [`SessionId`],
-//! [`BindingName`], and [`SessionModule`]; the value-plane id [`SessionVarId`]
-//! is the bridge between the GHC type plane and the JIT value plane.
+//! [`BindingName`], and [`SessionModule`]; the binding-store id
+//! [`SessionVarId`] is the bridge between GHC's type-checking side and the
+//! JIT's persistent binding store.
 
 use std::fmt;
 

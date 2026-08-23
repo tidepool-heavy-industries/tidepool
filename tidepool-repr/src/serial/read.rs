@@ -797,10 +797,10 @@ mod tests {
         ));
     }
 
-    // ---- load-path seam: read_metadata rejects a varId collision ----
+    // ---- load-path boundary: read_metadata rejects a varId collision ----
     //
     // A real extractor can never be made to emit a guaranteed hash collision on
-    // demand, so we inject at the CBOR seam: a hand-built meta with two entries
+    // demand, so we inject at the CBOR boundary: a hand-built meta with two entries
     // sharing one DataConId but with distinct module-qualified names — exactly
     // what `mergeMetaPreserving` now lets through to the loader. read_metadata
     // must surface it as a loud `DataConCollision`, not silently keep one.

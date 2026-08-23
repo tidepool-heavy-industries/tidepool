@@ -1,4 +1,4 @@
-//! Old-space (gen-1) tenuring for the value plane.
+//! Old-space (gen-1) tenuring for the persistent binding store.
 //!
 //! The session heap is split into two generations:
 //!

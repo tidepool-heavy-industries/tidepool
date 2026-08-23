@@ -86,7 +86,7 @@ pub struct MachineState {
     /// for the duration of a NESTED CHILD run so a child's collection evacuates
     /// the parent's stowed continuation tree instead of freeing it. Kept as a
     /// SEPARATE set from `persistent_roots` DELIBERATELY: intent must be
-    /// auditable — a persistent root is a tenured value-plane binding that lives
+    /// auditable — a persistent root is a tenured persistent-binding-store binding that lives
     /// for the machine's whole life; a stowed root is a *transient* parent
     /// continuation rooted only while at least one child is running against the
     /// suspended machine. `perform_gc` folds this set in alongside the other
@@ -441,7 +441,7 @@ impl MachineState {
     /// sibling of [`Self::deregister_stowed_root`], with the same
     /// remove-by-position semantics (a slot registered once is removed once;
     /// an already-removed slot is a no-op, so release paths that can race a
-    /// wholesale teardown stay idempotent). Added for realm-scoped release
+    /// wholesale teardown stay idempotent). Added for per-runtime-resource-scope release
     /// (`JitEffectMachine::close_realm`): a released value's slot cell stays
     /// allocated (owned by `OldSpace::slots` for the machine's life — 8 bytes),
     /// but the GC stops tracing and rewriting it, so the value it pinned can
