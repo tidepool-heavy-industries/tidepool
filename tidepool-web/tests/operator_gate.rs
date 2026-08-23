@@ -157,6 +157,75 @@ async fn submit_resolves_present_form_with_exact_submission() {
     assert_eq!(got, json!({"mood": "calm", "count": 3}));
 }
 
+fn numeric_spec() -> FormShape {
+    FormShape::Product {
+        type_key: "Numeric".into(),
+        constructor: "Numeric".into(),
+        fields: vec![FieldShape {
+            key: "amount".into(),
+            shape: FormShape::Number,
+            doc: None,
+        }],
+        doc: None,
+    }
+}
+
+/// The regression `shell::CORE_JS`'s `collect()` fix exists for: before it,
+/// only `data-kind="int"` was coerced to a JSON number — a `data-kind="number"`
+/// field (what a `Double` field renders as) fell through to the plain-string
+/// branch, so a browser posting "3.5" for it hit exactly the body this test
+/// sends first, which the shape validator REJECTS (a `NumberShape` leaf only
+/// accepts `serde_json::Value::Number`) — the gate pended forever with no
+/// Haskell-side re-prompt, since a rejected submission never reaches
+/// `resolve_form`'s decode at all. A real JSON number for the same field
+/// resolves normally — the shape this crate's `collect()` now actually
+/// produces for a `number`-kind field.
+#[tokio::test(flavor = "multi_thread")]
+async fn submit_rejects_number_field_as_a_string_but_accepts_a_json_number() {
+    let (addr, state) = boot().await;
+    let base = format!("http://{addr}");
+    let client = Client::new();
+
+    let gate = state.register_node("n1");
+    let driver_gate = gate.clone();
+    let handle = tokio::task::spawn_blocking(move || driver_gate.present_form(&numeric_spec()));
+
+    let html = wait_for(&client, &format!("{base}/legacy"), |b| {
+        b.contains("data-bind=\"answer.amount\"")
+    })
+    .await;
+    assert!(html.contains("data-kind=\"number\""), "{html}");
+    let submit_url = one_post_url(&html, "/node/n1/submit/");
+
+    // The pre-fix browser shape: a string, exactly what the unfixed
+    // `collect()` sent for a `number`-kind field. Rejected — the pending ask
+    // survives untouched.
+    let resp = client
+        .post(format!("{base}{submit_url}"))
+        .json(&json!({"answer.amount": "3.5"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 400);
+    let v: Value = resp.json().await.unwrap();
+    assert_eq!(v["ok"], json!(false));
+    assert_eq!(v["wrong_typed_keys"], json!(["answer.amount"]));
+
+    // The fixed shape: a real JSON number resolves normally.
+    let resp = client
+        .post(format!("{base}{submit_url}"))
+        .json(&json!({"answer.amount": 3.5}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let v: Value = resp.json().await.unwrap();
+    assert_eq!(v, json!({"ok": true}));
+
+    let got = handle.await.unwrap();
+    assert_eq!(got, json!({"amount": 3.5}));
+}
+
 /// The between-loops gate is an ORDINARY form, resolved through the SAME
 /// `/submit` verb every `present_form` ask uses — no dedicated continue
 /// endpoint. An empty submission (the plain-continue case) decodes to

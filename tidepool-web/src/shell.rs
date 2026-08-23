@@ -542,8 +542,19 @@ function validateRequired(form) {
 }
 
 // Collect every [data-bind] input into a FLAT { key: scalar }, coercing by
-// data-kind: int -> number, bool -> boolean, enum/text -> string. A radio
-// group shares one key; only the checked option contributes.
+// data-kind: int/number -> number, bool -> boolean, enum/text -> string. A
+// radio group shares one key; only the checked option contributes.
+//
+// int and number share one coercion path: an empty field submits `null`
+// (the server's missing-key report, not a silent `NaN`), and anything that
+// doesn't parse to a FINITE number (garbage text, or `Number("")` edge
+// cases) submits `null` too rather than `NaN` — `JSON.stringify(NaN)` is the
+// bare token `null` already, so refusing to send it as a NUMBER and instead
+// sending it as the SAME null a missing field would send keeps the two
+// indistinguishable to the server's validator, never a silently-accepted
+// non-finite value. `number` additionally accepts a decimal point/exponent
+// (`Number("3.5")` parses where `int`'s `<input step="1">` UI already
+// discourages one) — the numeric leaf `Double` derives.
 function collect(form) {
   const body = {};
   form.querySelectorAll('[data-bind]').forEach((f) => {
@@ -551,9 +562,11 @@ function collect(form) {
     const kind = f.getAttribute('data-kind');
     if (kind === 'bool') { body[key] = !!f.checked; return; }
     if (f.type === 'radio') { if (f.checked) body[key] = f.value; return; }
-    if (kind === 'int') {
+    if (kind === 'int' || kind === 'number') {
       const n = f.value.trim();
-      body[key] = n === '' ? null : Number(n);
+      if (n === '') { body[key] = null; return; }
+      const parsed = Number(n);
+      body[key] = Number.isFinite(parsed) ? parsed : null;
       return;
     }
     body[key] = f.value;
@@ -748,5 +761,34 @@ mod tests {
     fn masthead_omits_run_id_when_absent() {
         let doc = page(vec![], None).into_string();
         assert!(!doc.contains("class=\"run-id\""), "{doc}");
+    }
+
+    /// `collect()` coerces a `data-kind="number"` field exactly like
+    /// `"int"` — the fix for the paper cut where only `int` was coerced and
+    /// a `Double` field's value (rendered `data-kind="number"`) fell through
+    /// to the plain-string branch, posting e.g. `"3.5"` where the server's
+    /// `NumberShape` validator only accepts a JSON number
+    /// (`tests/operator_gate.rs`'s
+    /// `submit_rejects_number_field_as_a_string_but_accepts_a_json_number`
+    /// proves the end-to-end consequence over real HTTP; no JS runtime lives
+    /// in this test suite, so this pins the source fix directly).
+    #[test]
+    fn collect_coerces_both_int_and_number_kinds_to_a_json_number() {
+        assert!(
+            CORE_JS.contains("kind === 'int' || kind === 'number'"),
+            "collect() must coerce BOTH int and number data-kinds: {CORE_JS}"
+        );
+    }
+
+    /// Empty input and anything that doesn't parse to a FINITE number both
+    /// submit `null` — never a raw unparsed string, and never `NaN` (which
+    /// `JSON.stringify` would silently flatten to the bare token `null`
+    /// anyway, indistinguishable from a deliberate missing value).
+    #[test]
+    fn collect_number_kind_empty_or_non_finite_input_submits_null() {
+        assert!(
+            CORE_JS.contains("Number.isFinite(parsed) ? parsed : null"),
+            "{CORE_JS}"
+        );
     }
 }
