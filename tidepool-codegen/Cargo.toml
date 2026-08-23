@@ -51,6 +51,8 @@ cc = "1"
 proptest.workspace = true
 serial_test.workspace = true
 tidepool-testing.workspace = true
+# real_core_corpus.rs: parsing the GHC oracle sidecar (haskell/test/corpus_cbor/oracle.json).
+serde_json.workspace = true
 # Test-only: the real `DispatchEffect` impls live exclusively on frunk's
 # HCons/HNil. proptest_jit_dispatch.rs must drive BOTH the JIT machine and the
 # eval EffectMachine through genuine handler HLists to differentially test the

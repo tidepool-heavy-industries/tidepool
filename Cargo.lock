@@ -3960,6 +3960,7 @@ dependencies = [
  "proptest",
  "recursion",
  "rustc-hash",
+ "serde_json",
  "serial_test",
  "stacker",
  "thiserror",
