@@ -4017,6 +4017,20 @@ impl Harness {
     /// arrives in time, this fails loud with
     /// [`HarnessError::EscalationTimeout`] instead of hanging the turn (and
     /// everything up-stack awaiting it) forever.
+    ///
+    /// Whichever arm loses the race — including a `spawn_blocking` gate
+    /// presentation still in flight when [`Self::resolve_escalation`]'s
+    /// direct plane wins, or one still in flight when the OVERALL wait
+    /// times out — leaves that presentation's `present_form` call blocked
+    /// and its ask live on the gate's timeline unless something releases
+    /// it: [`OperatorGate::retract_form`] is that release, called
+    /// unconditionally below once the race (or the timeout) has settled.
+    /// It is a no-op when there is nothing left to retract (the gate ask
+    /// itself is the one that won, or no gate was configured at all), so
+    /// calling it regardless of which arm actually won is the correct,
+    /// simplest way to guarantee no orphaned pending ask ever survives this
+    /// function — a caller resolving it later would only release a detached
+    /// task that no longer controls anything.
     async fn escalate_to_operator(
         &self,
         answerer: NodeId,
@@ -4030,13 +4044,19 @@ impl Harness {
         self.escalations
             .lock()
             .insert(answerer, (escalation.clone(), tx));
-        let gate = self.escalation_gate.lock().clone();
+        let escalation_gate = self.escalation_gate.lock().clone();
         let timeout = self.cfg.escalation_timeout;
+        // Computed once, up front, so both the presentation below AND the
+        // retraction after the race can address the exact same ask.
+        let shape = escalation_gate
+            .as_ref()
+            .map(|_| escalation_decision_shape(answerer, &escalation));
 
         let wait_for_decision = async {
-            match gate {
-                Some(gate) => {
-                    let shape = escalation_decision_shape(answerer, &escalation);
+            match (&escalation_gate, &shape) {
+                (Some(gate), Some(shape)) => {
+                    let gate = gate.clone();
+                    let shape = shape.clone();
                     tokio::select! {
                         resolved = &mut rx => resolved.ok(),
                         presented = tokio::task::spawn_blocking(move || gate.present_form(&shape)) => {
@@ -4044,7 +4064,7 @@ impl Harness {
                         }
                     }
                 }
-                None => rx.await.ok(),
+                _ => rx.await.ok(),
             }
         };
 
@@ -4055,6 +4075,9 @@ impl Harness {
         // place every path (decision, dropped channel, timeout) converges.
         let outcome = tokio::time::timeout(timeout, wait_for_decision).await;
         self.escalations.lock().remove(&answerer);
+        if let (Some(gate), Some(shape)) = (&escalation_gate, &shape) {
+            gate.retract_form(shape);
+        }
 
         let decision = match outcome {
             Ok(Some(decision)) => decision,

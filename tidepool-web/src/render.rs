@@ -294,7 +294,22 @@ fn timeline_entry(node_id: &str, entry: &TimelineItem) -> Markup {
         TimelineItem::Ask { id, state } => match state {
             AskState::PendingForm { shape, .. } => ask_form(node_id, *id, shape),
             AskState::AnsweredForm { shape, answer } => answered_form(node_id, *id, shape, answer),
+            AskState::Retracted { shape } => retracted_form(node_id, *id, shape),
         },
+    }
+}
+
+/// A retracted ask, read-only at its original timeline position: no form
+/// controls (there is nothing left to submit), and no fabricated answer —
+/// a second resolution plane settled the decision this ask existed to
+/// gather before the operator ever got to it.
+fn retracted_form(node_id: &str, interaction: u64, shape: &FormShape) -> Markup {
+    html! {
+        div id=(ask_id(node_id, interaction)) data-rev=(interaction)
+            class="retracted" data-node="retracted" {
+            p class="eyebrow" { "ask #" (interaction) " — Withdrawn — " (shape_title(shape)) }
+            p class="prose" { "Resolved another way before this was answered." }
+        }
     }
 }
 

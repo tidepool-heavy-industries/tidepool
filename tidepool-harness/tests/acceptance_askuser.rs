@@ -578,7 +578,7 @@ async fn root_maybe_form_shape_and_decode_round_trip() {
          \x20    , confidence = Low\n\
          \x20    })) :: M ()\n\
          ```"
-        .to_string();
+    .to_string();
     let provider: Arc<dyn DynModelProvider> = Arc::new(ReplayProvider::new(vec![RecordedReply {
         content,
         usage: Usage {
@@ -614,7 +614,12 @@ async fn root_maybe_form_shape_and_decode_round_trip() {
         .state_json
         .get("lastDecision")
         .and_then(|v| v.as_object())
-        .unwrap_or_else(|| panic!("lastDecision must be a Just Decision, got {:?}", outcome.state_json));
+        .unwrap_or_else(|| {
+            panic!(
+                "lastDecision must be a Just Decision, got {:?}",
+                outcome.state_json
+            )
+        });
     assert_eq!(
         decision.get("action").and_then(|v| v.as_str()),
         Some("none|some text"),

@@ -666,6 +666,100 @@ async fn stale_interaction_after_resolution_is_rejected() {
         .contains("no such pending interaction"));
 }
 
+/// High-3 regression: [`OperatorGate::retract_form`] withdraws a still-live
+/// pending ask — the fix for an escalation whose direct-resolution plane won
+/// the race, leaving the gate's own `present_form` call published on the
+/// timeline with nobody ever going to answer it. The blocked call must
+/// actually unblock (proving the OS thread isn't leaked), the timeline must
+/// stop showing it as actionable, and it must no longer be addressable —
+/// resubmitting the SAME url is the same stale-nonce rejection an
+/// already-answered ask gets.
+#[tokio::test(flavor = "multi_thread")]
+async fn retract_form_unblocks_present_form_and_the_ask_stops_being_actionable() {
+    let (addr, state) = boot().await;
+    let base = format!("http://{addr}");
+    let client = Client::new();
+
+    let gate = state.register_node("n1");
+    let driver_gate = gate.clone();
+    let handle = tokio::task::spawn_blocking(move || driver_gate.present_form(&sample_spec()));
+    let html = wait_for(&client, &format!("{base}/legacy"), |b| {
+        b.contains("data-bind=\"answer.mood\"")
+    })
+    .await;
+    assert!(html.contains("needs you"), "{html}");
+    let submit_url = one_post_url(&html, "/node/n1/submit/");
+
+    gate.retract_form(&sample_spec());
+
+    // The blocked present_form call actually returns — no leaked thread.
+    handle.await.unwrap();
+
+    // The timeline no longer shows this ask as actionable.
+    let html = wait_for(&client, &format!("{base}/legacy"), |b| {
+        b.contains("Withdrawn")
+    })
+    .await;
+    assert!(!html.contains("needs you"), "{html}");
+    assert!(!html.contains("data-bind=\"answer.mood\""), "{html}");
+
+    // No longer addressable — the same stale-nonce rejection an
+    // already-answered ask gets.
+    let resp = client
+        .post(format!("{base}{submit_url}"))
+        .json(&json!({"answer.mood": "calm", "answer.count": 1}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 400);
+    let v: Value = resp.json().await.unwrap();
+    assert!(v["error"]
+        .as_str()
+        .unwrap()
+        .contains("no such pending interaction"));
+}
+
+/// Retracting a shape that has NO matching pending ask (already answered,
+/// already retracted, or never published on this node) is a harmless no-op
+/// — the ordinary case when the OTHER resolution plane is the one that
+/// actually won.
+#[tokio::test(flavor = "multi_thread")]
+async fn retract_form_with_no_matching_pending_ask_is_a_no_op() {
+    let (addr, state) = boot().await;
+    let base = format!("http://{addr}");
+    let client = Client::new();
+
+    let gate = state.register_node("n1");
+    let driver_gate = gate.clone();
+    let handle = tokio::task::spawn_blocking(move || driver_gate.present_form(&sample_spec()));
+    let html = wait_for(&client, &format!("{base}/legacy"), |b| {
+        b.contains("data-bind=\"answer.mood\"")
+    })
+    .await;
+    let submit_url = one_post_url(&html, "/node/n1/submit/");
+
+    // A DIFFERENT shape never matches this pending ask.
+    gate.retract_form(&numeric_spec());
+    assert!(
+        !handle.is_finished(),
+        "retracting an unrelated shape must not touch the real pending ask"
+    );
+
+    // The real ask still resolves normally.
+    let resp = client
+        .post(format!("{base}{submit_url}"))
+        .json(&json!({"answer.mood": "calm", "answer.count": 1}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    assert_eq!(handle.await.unwrap(), json!({"mood": "calm", "count": 1}));
+
+    // Retracting again now — nothing pending matches (already answered) —
+    // is a no-op too, not a panic or a corrupted AnsweredForm entry.
+    gate.retract_form(&sample_spec());
+}
+
 /// TWO NODES, each with a pending form, resolved independently in EITHER
 /// order — resolving one never touches the other's pending state.
 #[tokio::test(flavor = "multi_thread")]

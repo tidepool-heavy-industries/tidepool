@@ -22,7 +22,7 @@ use tidepool_harness::provider::{DynModelProvider, Usage};
 use tidepool_harness::replay::{RecordedReply, ReplayProvider};
 use tidepool_harness::selfharness::operator::FormShape;
 use tidepool_harness::tree::{FanBadge, NodeId, NodeState};
-use tidepool_harness::{Harness, HarnessError, HoleRouting, OperatorGate};
+use tidepool_harness::{Harness, HarnessError, HoleRouting, OperatorDecision, OperatorGate};
 
 use support::haskell_call::{fanout_bind, haskell, resume_call};
 
@@ -36,7 +36,13 @@ use support::haskell_call::{fanout_bind, haskell, resume_call};
 /// before answering it.
 struct ScriptedGate {
     answers: Mutex<mpsc::Receiver<serde_json::Value>>,
+    // A second handle onto the SAME channel `present_form` blocks reading
+    // from — retraction reuses it to release a blocked call, exactly how the
+    // production `WebGate` releases its own `blocking_recv` via the pending
+    // ask's stored oneshot sender.
+    retract_tx: mpsc::Sender<serde_json::Value>,
     received: Mutex<Vec<FormShape>>,
+    retracted: Mutex<Vec<FormShape>>,
 }
 
 impl ScriptedGate {
@@ -47,7 +53,9 @@ impl ScriptedGate {
         (
             Arc::new(ScriptedGate {
                 answers: Mutex::new(rx),
+                retract_tx: tx.clone(),
                 received: Mutex::new(Vec::new()),
+                retracted: Mutex::new(Vec::new()),
             }),
             tx,
         )
@@ -62,6 +70,15 @@ impl OperatorGate for ScriptedGate {
             .unwrap()
             .recv()
             .unwrap_or_else(|_| json!({}))
+    }
+
+    fn retract_form(&self, shape: &FormShape) {
+        self.retracted.lock().unwrap().push(shape.clone());
+        // Release a still-blocked `present_form` call — a sentinel that
+        // `decode_operator_decision` cannot parse as a recognized decision,
+        // matching the production contract: whichever plane actually won
+        // already delivered the real decision through a DIFFERENT channel.
+        let _ = self.retract_tx.send(json!({"tag": "__retracted__"}));
     }
 }
 
@@ -595,4 +612,146 @@ async fn fanout_child_stuck_past_rung_one_times_out_with_no_operator() {
         "the parent must stay suspended on its untouched fanout hole"
     );
     assert!(harness.escalation_of(child).is_none());
+}
+
+/// High-3 regression: the DIRECT resolution plane
+/// (`Harness::resolve_escalation`) winning the race against a configured
+/// gate must not leave the gate's own presentation live. Before this fix,
+/// `escalate_to_operator` never told the losing `spawn_blocking(gate.
+/// present_form)` call that the decision had already arrived through `rx` —
+/// the gate's ask stayed published, and its blocked call was never released.
+/// Here the gate's `present_form` is deliberately left unanswered (nobody
+/// ever sends on `answer_tx`); the ONLY thing that resolves the escalation
+/// is a direct `resolve_escalation` call — the same "test, or emergency
+/// admin override" path the method's own doc names. `retract_form` must
+/// still fire, naming the exact shape the gate was presenting.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn fanout_child_escalation_retracts_its_gate_ask_when_the_direct_plane_wins() {
+    support::require_extract();
+
+    let dir = tempfile::tempdir().unwrap();
+    let log_path = dir.path().join("fanout-retract-direct.jsonl");
+    let writer = LogWriter::create(&log_path, &header()).unwrap();
+    let mut cfg = EngineConfig::standard(prelude_dir(), None).expect("engine config");
+    cfg.max_child_turns = 1;
+
+    let replies = vec![
+        reply(&haskell(&format!(
+            "do\n  {}\n  pure (toJSON ns)",
+            fanout_bind("ns", "Int", &["pick 1"])
+        ))),
+        reply("Thinking (1)."),
+        reply("Thinking (2)."),
+        reply("Thinking (3)."),
+        reply("Thinking (4)."),
+    ];
+    let provider: Arc<dyn DynModelProvider> = Arc::new(ReplayProvider::new(replies));
+    let harness = Arc::new(Harness::new(writer, cfg, provider).expect("harness boots"));
+    // The gate is configured (its present_form WILL be called), but never
+    // answered through it — answer_tx is held and never sent on.
+    let (gate, _answer_tx) = ScriptedGate::channel();
+    harness.set_escalation_gate(gate.clone());
+
+    let root = harness
+        .create_root("fanout retract direct", "Fan out for one number, finish.")
+        .unwrap();
+    harness.force(root, Actor::Operator).unwrap();
+    harness
+        .run_to_hole_or_done(root)
+        .await
+        .expect("root drives to the fanout hole");
+
+    let child = NodeId(1);
+    let fan_harness = harness.clone();
+    let fan_task =
+        tokio::spawn(async move { fan_harness.answer_fanout(root, Actor::Operator).await });
+
+    let mut waited = Duration::ZERO;
+    while harness.escalation_of(child).is_none() {
+        assert!(
+            waited < Duration::from_secs(10),
+            "child never escalated to the operator"
+        );
+        tokio::time::sleep(Duration::from_millis(5)).await;
+        waited += Duration::from_millis(5);
+    }
+
+    // The DIRECT plane resolves it — the gate's own present_form call is
+    // still blocked in `recv()` at this point, nobody has sent it anything.
+    harness
+        .resolve_escalation(child, OperatorDecision::Abort)
+        .expect("a rung-2 escalation is pending for the child");
+
+    let outcome = fan_task.await.expect("fan task did not panic");
+    assert!(
+        matches!(outcome, Err(HarnessError::Aborted { node, .. }) if node == child),
+        "the direct plane's decision must still resolve the escalation, got {outcome:?}"
+    );
+
+    // The gate's own ask was presented (the race was real, not a bypass)...
+    let received = gate.received.lock().unwrap().clone();
+    assert_eq!(received.len(), 1, "the gate's own ask was presented");
+    // ...and retracted with that EXACT shape once the direct plane won.
+    let retracted = gate.retracted.lock().unwrap().clone();
+    assert_eq!(
+        retracted, received,
+        "retract_form must be called with the exact shape the gate was presenting"
+    );
+}
+
+/// High-3 regression, timeout variant: when NEITHER plane resolves an
+/// escalation before `escalation_timeout` elapses, the gate's own live
+/// presentation must be retracted too — otherwise the timeline keeps
+/// showing an actionable ask for a turn the harness has already given up
+/// on and cancelled.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn fanout_child_escalation_retracts_its_gate_ask_on_timeout() {
+    support::require_extract();
+
+    let dir = tempfile::tempdir().unwrap();
+    let log_path = dir.path().join("fanout-retract-timeout.jsonl");
+    let writer = LogWriter::create(&log_path, &header()).unwrap();
+    let mut cfg = EngineConfig::standard(prelude_dir(), None).expect("engine config");
+    cfg.max_child_turns = 1;
+    cfg.escalation_timeout = Duration::from_millis(100);
+
+    let replies = vec![
+        reply(&haskell(&format!(
+            "do\n  {}\n  pure (toJSON ns)",
+            fanout_bind("ns", "Int", &["pick 1"])
+        ))),
+        reply("Thinking (1)."),
+        reply("Thinking (2)."),
+        reply("Thinking (3)."),
+        reply("Thinking (4)."),
+    ];
+    let provider: Arc<dyn DynModelProvider> = Arc::new(ReplayProvider::new(replies));
+    let harness = Arc::new(Harness::new(writer, cfg, provider).expect("harness boots"));
+    let (gate, _answer_tx) = ScriptedGate::channel();
+    harness.set_escalation_gate(gate.clone());
+
+    let root = harness
+        .create_root("fanout retract timeout", "Fan out for one number, finish.")
+        .unwrap();
+    harness.force(root, Actor::Operator).unwrap();
+    harness
+        .run_to_hole_or_done(root)
+        .await
+        .expect("root drives to the fanout hole");
+
+    let child = NodeId(1);
+    let outcome = harness.answer_fanout(root, Actor::Operator).await;
+    assert!(
+        matches!(outcome, Err(HarnessError::EscalationTimeout { node, .. }) if node == child),
+        "expected a typed timeout, got {outcome:?}"
+    );
+
+    let received = gate.received.lock().unwrap().clone();
+    assert_eq!(received.len(), 1, "the gate's own ask was presented");
+    let retracted = gate.retracted.lock().unwrap().clone();
+    assert_eq!(
+        retracted, received,
+        "a timed-out escalation must retract the gate's own live ask, \
+         not just abandon it"
+    );
 }

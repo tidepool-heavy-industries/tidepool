@@ -91,6 +91,14 @@ pub(crate) enum AskState {
     },
     /// A resolved form: the reassembled answer the gate actually returned.
     AnsweredForm { shape: FormShape, answer: Jv },
+    /// A form that stopped being actionable BEFORE the operator answered it
+    /// — a second resolution plane settled the same decision first (the
+    /// escalation ladder's direct override), or the caller gave up waiting
+    /// (a timeout). Kept on the append-only timeline rather than removed —
+    /// an operator who already saw it pending should see why it stopped
+    /// mattering, not have it silently vanish — but never rendered as
+    /// actionable ("needs you") or as an answer nobody actually gave.
+    Retracted { shape: FormShape },
 }
 
 /// One item on a node's append-only timeline. An `Ask`'s `id` is BOTH its
@@ -441,9 +449,12 @@ impl AppState {
         let state = find_ask(&mut slot.timeline, interaction)?;
         let shape = match state {
             AskState::PendingForm { shape, .. } => shape.clone(),
-            // An already-answered ask stays on the timeline, but addressing
-            // it again is the same stale-nonce case as an unknown id.
-            AskState::AnsweredForm { .. } => return Err(ResolveError::NoSuchInteraction),
+            // An already-answered or already-retracted ask stays on the
+            // timeline, but addressing it again is the same stale-nonce
+            // case as an unknown id.
+            AskState::AnsweredForm { .. } | AskState::Retracted { .. } => {
+                return Err(ResolveError::NoSuchInteraction)
+            }
         };
         let answer = match collect_form_json(&shape, ROOT_BIND_PATH, &submission) {
             Some(answer) => answer,
@@ -477,6 +488,47 @@ impl AppState {
         drop(reg);
         self.ping(node_id.to_string());
         Ok(())
+    }
+
+    /// [`OperatorGate::retract_form`]'s implementation: withdraw `node_id`'s
+    /// still-PENDING ask matching `shape`, if any — a second resolution
+    /// plane (the escalation ladder's direct override) already settled the
+    /// decision this ask existed to gather, or the caller's wait timed out.
+    /// Replaces it IN PLACE with [`AskState::Retracted`] (never removed —
+    /// see that variant's doc) and releases the blocked `present_form` call
+    /// by sending an arbitrary `Value` through its resolve channel: nothing
+    /// reads that call's result once it has lost its race, so any value
+    /// unblocks the parked `blocking_recv` without misrepresenting an
+    /// operator answer that never came. A no-op when nothing pending
+    /// matches `shape` — already answered, already retracted, or this node
+    /// never published it — which is the ordinary case when the OTHER
+    /// resolution plane (this gate's own ask) is the one that actually won.
+    fn retract_ask(&self, node_id: &str, shape: &FormShape) {
+        let mut reg = self.registry.lock();
+        let Some(slot) = reg.nodes.get_mut(node_id) else {
+            return;
+        };
+        let Some(state) = slot.timeline.iter_mut().find_map(|item| match item {
+            TimelineItem::Ask { state, .. } => match state {
+                AskState::PendingForm { shape: s, .. } if *s == *shape => Some(state),
+                _ => None,
+            },
+            _ => None,
+        }) else {
+            return;
+        };
+        let AskState::PendingForm { resolve, .. } = std::mem::replace(
+            state,
+            AskState::Retracted {
+                shape: shape.clone(),
+            },
+        ) else {
+            unreachable!("matched PendingForm immediately above, under the same lock")
+        };
+        let _ = resolve.send(Jv::Null);
+        slot.rev += 1;
+        drop(reg);
+        self.ping(node_id.to_string());
     }
 
     /// The form-api `GET` view: every currently pending ask for `node_id`,
@@ -886,6 +938,10 @@ impl OperatorGate for WebGate {
     fn node_failed(&self, label: &str, reason: &str) {
         self.state
             .push_lifecycle(label, TimelineItem::Failed(reason.to_string()));
+    }
+
+    fn retract_form(&self, shape: &FormShape) {
+        self.state.retract_ask(&self.node_id, shape);
     }
 }
 

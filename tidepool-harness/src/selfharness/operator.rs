@@ -118,6 +118,21 @@ pub trait OperatorGate: Send + Sync {
     /// [`Self::retire_node`], mutually exclusive with
     /// [`Self::node_finalized`]. Default no-op.
     fn node_failed(&self, _label: &str, _reason: &str) {}
+
+    /// Withdraw a still-outstanding [`Self::present_form`] presentation of
+    /// `shape` that the caller no longer needs an answer to — a SECOND
+    /// resolution plane settled the same decision first (e.g.
+    /// `Harness::resolve_escalation`'s direct override racing an escalation
+    /// gate ask), or the caller gave up waiting (a timeout). A gate whose
+    /// matching ask is STILL pending should stop presenting it as
+    /// actionable and release the blocked `present_form` call, if any —
+    /// nothing reads that call's return value once it has been abandoned,
+    /// so any resolution unblocks it. A no-op when nothing pending matches
+    /// `shape` (already answered through the gate, or this gate never
+    /// published it) is expected and safe: a caller cannot know which plane
+    /// won without asking every gate. Default no-op — [`StdinGate`] and any
+    /// gate with no timeline to clean up need no override.
+    fn retract_form(&self, _shape: &FormShape) {}
 }
 
 /// Headless default: `present_form` reads one JSON value per line (this
@@ -297,6 +312,14 @@ mod tests {
         StdinGate.node_seeded("root/1-x", "NODE root/1 — DISCOVER …");
         StdinGate.node_finalized("root/1-x", "{\"tag\":\"FinishLayer\"}");
         StdinGate.node_failed("root/1-x", "round exhaustion");
+    }
+
+    /// [`OperatorGate::retract_form`] is default-implemented as a no-op for
+    /// the same reason — [`StdinGate`] never publishes a timeline entry, so
+    /// it has nothing to withdraw.
+    #[test]
+    fn retract_form_defaults_to_a_no_op() {
+        StdinGate.retract_form(&FormShape::String); // must not panic
     }
 
     // ---- humanize_key -----------------------------------------------------

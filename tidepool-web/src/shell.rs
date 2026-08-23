@@ -228,6 +228,13 @@ body {
 .answered .eyebrow { color: var(--muted); }
 .answered pre { border: none; background: transparent; padding: 0; color: var(--muted); }
 
+.retracted {
+  border-left: 2px dashed var(--line-faint);
+  padding-left: calc(2 * var(--unit));
+  color: var(--muted);
+}
+.retracted .eyebrow, .retracted .prose { color: var(--muted); }
+
 .final { margin-top: calc(2 * var(--unit)); }
 .failure { margin-top: calc(2 * var(--unit)); }
 .failure-eyebrow { color: var(--accent); }
