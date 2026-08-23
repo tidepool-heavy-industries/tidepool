@@ -296,8 +296,7 @@ async fn askuser_operator_form_round_trip_and_ws4_log() {
     .expect("answerer engine config");
     let provider: Arc<dyn DynModelProvider> = Arc::new(ReplayProvider::new(vec![askuser_reply()]));
 
-    let log_path =
-        std::env::temp_dir().join(format!("acceptance-askuser-{}.jsonl", std::process::id()));
+    let log_path = support::unique_temp_log_path("acceptance-askuser");
     let writer =
         tidepool_harness::log::LogWriter::create(&log_path, &header()).expect("log writer");
     let agent = Arc::new(Harness::new(writer, agent_cfg, provider).expect("agent harness boots"));
