@@ -124,12 +124,13 @@ const TURN_HISTORY_CAP: usize = 50;
 /// starting prompt, when the wire carried one), the append-only `timeline`
 /// of notes and asks, and `final_value`/`failure` once the window ends.
 /// `next_ask_id` mints ask ids/nonces — the one in-process monotonic id
-/// issuer (`tidepool_repr::MonotonicIdIssuer`), read via `next_raw()` since
-/// an ask id is a bare `u64`, not a `<prefix>_<n>` string; `rev` is this
-/// node's AGGREGATE revision, bumped under the SAME lock as every
-/// mutation — the panel-root `data-rev` the client's focus-preserving skip
-/// keys off. `done` marks a retired window ([`OperatorGate::retire_node`]) —
-/// the section greys, nothing is removed.
+/// issuer (`tidepool_repr::MonotonicIdIssuer`), started at `0` to preserve
+/// the exact numbering every existing caller/test already depends on, and
+/// read via `next_raw()` since an ask id is a bare `u64`, not a
+/// `<prefix>_<n>` string; `rev` is this node's AGGREGATE revision, bumped
+/// under the SAME lock as every mutation — the panel-root `data-rev` the
+/// client's focus-preserving skip keys off. `done` marks a retired window
+/// ([`OperatorGate::retire_node`]) — the section greys, nothing is removed.
 struct NodeSlot {
     timeline: Vec<TimelineItem>,
     next_ask_id: tidepool_repr::MonotonicIdIssuer,
@@ -142,7 +143,7 @@ impl Default for NodeSlot {
     fn default() -> Self {
         NodeSlot {
             timeline: Vec::new(),
-            next_ask_id: tidepool_repr::MonotonicIdIssuer::new("ask"),
+            next_ask_id: tidepool_repr::MonotonicIdIssuer::starting_at("ask", 0),
             done: false,
             turn_history: VecDeque::new(),
             rev: 0,
