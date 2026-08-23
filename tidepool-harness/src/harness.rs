@@ -4539,6 +4539,27 @@ impl Harness {
         )
     }
 
+    /// [`Self::register_fork_child`] with the OPENING CARD supplied by the
+    /// caller — the selfharness driver's window-pump fork path
+    /// (fork-subsumes-split step 1) builds `engine::answerer_hole_card`
+    /// (multi-round teaching: explore/define rounds, `finalize @T` as the
+    /// answer verb) where the resume-based path above builds the one-shot
+    /// `engine::hole_card`. Same seeding seam ([`Self::seed_forked_child`]),
+    /// different teaching.
+    pub(crate) fn register_fork_child_with_card(
+        &self,
+        parent: NodeId,
+        title: &str,
+        card: String,
+    ) -> Result<NodeId, HarnessError> {
+        let (parent_transcript, parent_framing) = {
+            let convos = self.convos.lock();
+            let convo = convos.get(&parent).ok_or(HarnessError::NoSession(parent))?;
+            (convo.transcript.clone(), convo.framing.clone())
+        };
+        self.seed_forked_child(parent, title, parent_transcript, parent_framing, card)
+    }
+
     /// Mint a THUNK child under `parent` seeded with `prefix` (its inherited
     /// context) + `opening` (its own first user turn), and emit `TurnForked`
     /// at the checkpoint `prefix` ends at.
@@ -4783,7 +4804,7 @@ impl Harness {
     /// [`Harness::answer_fork`]/[`Harness::answer_fanout`] pin `finalize`'s
     /// imports from, replacing the harness-import-scraping guess. Empty when
     /// `node` has no live convo or `site` has no sidecar entry.
-    fn asks_modules(&self, node: NodeId, site: u32) -> Vec<String> {
+    pub(crate) fn asks_modules(&self, node: NodeId, site: u32) -> Vec<String> {
         self.node_pending(node)
             .map(|p| p.suspend_asks.modules_of(site).to_vec())
             .unwrap_or_default()
