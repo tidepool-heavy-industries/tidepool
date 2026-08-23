@@ -1173,7 +1173,7 @@ async fn companion_tree_recurses_folds_and_contains_its_node_ids() {
         );
     }
     assert_eq!(
-        run.counter("runWindows"),
+        run.counter("runSessions"),
         10,
         "and their accounting too: root and root/1-alpha each spend two windows \
          (coalgebra + algebra — a failed algebra window still SPENT one, and a \
@@ -1366,7 +1366,7 @@ async fn companion_depth_cap_forces_a_stamped_finish() {
     );
     assert_eq!(run.counter("runNodes"), 7);
     assert_eq!(
-        run.counter("runWindows"),
+        run.counter("runSessions"),
         6,
         "three nodes (root and the two splitting children) spend two windows each \
          (coalgebra + algebra); the four depth-capped nodes are childless non-root \
@@ -1466,7 +1466,7 @@ async fn companion_node_cap_bounds_the_windows_that_run() {
     }
     assert_eq!(run.counter("runForced"), 2);
     assert_eq!(
-        run.counter("runWindows"),
+        run.counter("runSessions"),
         6,
         "root and root/1-alpha (each with kids) spend two windows apiece; \
          root/2-beta and root/3-gamma are childless non-root leaves that fold \
@@ -1516,7 +1516,7 @@ async fn companion_fanout_cap_refuses_the_descent() {
     assert_eq!(run.counter("runNodes"), 1);
     assert_eq!(run.counter("runForced"), 1);
     assert_eq!(
-        run.counter("runWindows"),
+        run.counter("runSessions"),
         2,
         "the coalgebra HAD run before the cap decided, so this node spent both windows"
     );
@@ -1917,7 +1917,7 @@ async fn companion_fold_is_a_branch_and_interleaves_with_cousin_discovery() {
     let non_mechanical_windows = 3 * 2; // root, alpha, beta: coalgebra + fold
     let mechanical_leaf_windows = 2; // alpha's and beta's own grandchild: coalgebra only
     assert_eq!(
-        run.counter("runWindows"),
+        run.counter("runSessions"),
         non_mechanical_windows + mechanical_leaf_windows,
         "root, alpha and beta each spend two windows (coalgebra + fold); the two grandchildren \
          are childless non-root leaves that fold mechanically, spending one window (their own \

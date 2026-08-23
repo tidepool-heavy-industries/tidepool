@@ -10,8 +10,8 @@
 -- Every type here is nameable in the ANSWERER's row (@[AskUser, Fork,
 -- ReadState, Finalize T]@, which has no @RunLLMTurn@): "Harness" defines
 -- @loop@, whose @runLLMTurn*@ verbs are absent from that row, and GHC
--- compiles an imported module whole, so a window-facing type declared beside
--- @loop@ could not be named by the window asked to finalize it.
+-- compiles an imported module whole, so a session-facing type declared beside
+-- @loop@ could not be named by the session asked to finalize it.
 -- 'LayerProposal', 'FoldDecision' and 'LayerApproval' therefore live HERE;
 -- 'NodeSeed' and the pure decisions over it ('layerFromProposal',
 -- 'applyGate', @childSeed@) carry a @ContextRef@ (declared by @RunLLMTurn@'s
@@ -153,7 +153,7 @@ data RunSummary = RunSummary
   , runTensions :: [Text]
   , runTree     :: [Text]
   , runNodes    :: Int
-  , runWindows  :: Int
+  , runSessions  :: Int
   , runForced   :: Int
   , runFailed   :: Int
   }
@@ -161,7 +161,7 @@ data RunSummary = RunSummary
 
 -- | The question is deliberately EMPTY: seeding it is the OPERATOR's first
 -- act, not the author's — 'Harness.loop' opens by asking for it
--- (@askUser \@SeedQuestion@) whenever it is empty, before any model window
+-- (@askUser \@SeedQuestion@) whenever it is empty, before any model session
 -- runs (operator decision, 2026-08-19; a hardcoded question meant the first
 -- attended run spent real model turns on a question nobody chose).
 initialState :: State
@@ -205,7 +205,7 @@ initialState =
 -- | Root-relative branch slugs, outermost first.  The root is @NodePath []@.
 --
 -- This is the node's identity EVERYWHERE — the journal key, the render's tree
--- line, the needle a scripted provider matches a window's prompt on.  One
+-- line, the needle a scripted provider matches a session's prompt on.  One
 -- name, one derivation ('childPath'), never re-spelled per consumer.
 newtype NodePath = NodePath [Text]
   deriving (Show, Eq)
@@ -254,14 +254,14 @@ slug = TF.slugifyAsciiBounded "branch" 32
 -- | A node's own branch, rendered into its coalgebra prompt.  This is the
 -- WHOLE of what a child's prompt says about where it sits; everything else it
 -- knows from above it inherits as CONTEXT, by being branched off its parent's
--- frozen post-coalgebra window (@Harness.discover@), never as composed text.
+-- frozen post-coalgebra session (@Harness.discover@), never as composed text.
 renderBrief :: ForkBrief -> Text
 renderBrief b =
   [fmt|Your branch: {b.title} ({show b.role})
 {b.instruction}|]
 
 -- ---------------------------------------------------------------------------
--- What a window may finalize
+-- What a session may finalize
 -- ---------------------------------------------------------------------------
 
 -- | The COALGEBRA's answer.  ONE layer, and NO RECURSIVE ARM — that is the
@@ -370,17 +370,17 @@ data GateVerdict = Approve | Prune | Amend | Add
 -- variant chooser; the fields a verdict does not use are left empty.
 -- | The operator's opening move ('Harness.loop'\'s seed gate): the question
 -- the whole run investigates.  One field, so the derived form is a single
--- text input, presented BEFORE any model window runs.
+-- text input, presented BEFORE any model session runs.
 data SeedQuestion = SeedQuestion
   { seedQuestion :: Text
   }
   deriving (Generic, ToJSON, FromJSON, JsonSchema, Show, Eq)
 
--- | A window's channel for OPERATOR intent — the steering half of the
--- autonomy default ('initialState'\'s @GateOff@ comment): windows split and
+-- | A session's channel for OPERATOR intent — the steering half of the
+-- autonomy default ('initialState'\'s @GateOff@ comment): sessions split and
 -- fold on their own, and raise THIS ask (question posted via @note@, since a
 -- shape-derived form carries no prompt text of its own) only when the
--- operator's answer would genuinely change what the window does.
+-- operator's answer would genuinely change what the session does.
 data OperatorSteering = OperatorSteering
   { steeringReply :: Text
   }
@@ -485,7 +485,7 @@ data NodeAnswer = NodeAnswer
   , answerNodes     :: Int
   , -- | Model sessions spent in this subtree.  A node a budget refused BEFORE
     -- its coalgebra ran spends one (its fold); every other node spends two.
-    answerWindows   :: Int
+    answerSessions   :: Int
   , answerForced    :: Int
   , answerFailed    :: Int
   , -- | The branch name of the worktree THIS node ends up owning after its
@@ -494,7 +494,7 @@ data NodeAnswer = NodeAnswer
     -- needed one.  Two acquisition routes, both landing here uniformly:
     -- @Harness.mergeFold@ creating a fresh worktree and merging
     -- content-bearing children into it, OR this node's OWN coalgebra
-    -- window delegating (@Tidepool.Agent.Delegate.delegate@) and the
+    -- session delegating (@Tidepool.Agent.Delegate.delegate@) and the
     -- delegated cycle's bound worktree riding straight through with no
     -- wrapping worktree of its own -- @Harness.foldAt@ populates this
     -- field from a RUNTIME-STAMPED record the driver keeps (never from
@@ -583,13 +583,13 @@ Turns folded: {show st.turnCount}
     -- channel that carries the count into the fold.  The journal has every
     -- one of them, keyed by node path.
     receiptLine r =
-      [fmt|receipt: {show r.runNodes} nodes, {show r.runWindows} sessions, {show r.runForced} budget-forced finishes, {show r.runFailed} failures; gate interventions are journaled per node under kind "gate"|]
+      [fmt|receipt: {show r.runNodes} nodes, {show r.runSessions} sessions, {show r.runForced} budget-forced finishes, {show r.runFailed} failures; gate interventions are journaled per node under kind "gate"|]
 
 -- | The one-off coalgebra teaching — moved here from
 -- @Harness.coalgebraPrompt@ (mechanics prose, the delegate\/askUser
 -- contracts, and two compilable examples). 'render''s 'Text' becomes the
--- per-cycle SYSTEM framing every coalgebra\/algebra window in the tree
--- inherits (a non-root window is always a branch off its own parent's
+-- per-cycle SYSTEM framing every coalgebra\/algebra session in the tree
+-- inherits (a non-root session is always a branch off its own parent's
 -- frozen prefix, all the way back to the root, which itself branches off
 -- @Harness.loop@'s own frozen context — @Harness.rootSeed@'s doc: "the root
 -- is not a special case anywhere below it") — so teaching it exactly ONCE
@@ -600,7 +600,7 @@ Turns folded: {show st.turnCount}
 -- Positioned LAST in 'render''s output, in both branches — the folded
 -- answer (or, pre-first-turn, the opening orientation) stays the primary,
 -- readable-first content; this is reference material for the model
--- answering a coalgebra window, not the human reading the operator page.
+-- answering a coalgebra session, not the human reading the operator page.
 -- Delimited with plain @--- ... ---@ markers rather than a triple-backtick
 -- fence, same reason @Harness.exampleBlock@ states: a markdown fence here
 -- would compete with the engine's own auto-rendered hole-card fence for
@@ -637,15 +637,15 @@ session's own effect type is refused at bind time — bind the plain parts
   subagent's own worktree branch, folded in by the driver, never through
   this state.
 
---- EXAMPLE (persistence across windows) ---
--- an earlier window in this tree ran:
+--- EXAMPLE (persistence across sessions) ---
+-- an earlier session in this tree ran:
 data Verdict = Verdict {{ claim :: Text, holds :: Bool }}
 credible :: [Verdict] -> [Verdict]
 credible = filter (.holds)
 -- an effectful helper declared the same way persists too:
 announce :: forall effs. Member AskUser effs => Verdict -> Eff effs ()
 announce v = noteRaw (v.claim <> ": " <> show v.holds)
--- your window, later, deeper in the tree — those names are simply in scope:
+-- your session, later, deeper in the tree — those names are simply in scope:
 credible [Verdict {{ claim = "compiles", holds = True }}]
 --- END EXAMPLE ---
 
