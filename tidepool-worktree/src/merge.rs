@@ -5,21 +5,24 @@
 //!
 //! This is NOT a reopening of the "no git workflow verbs" boundary
 //! (`crate::git`'s module docs, this crate's `CLAUDE.md`, and
-//! `Tidepool.Worktree`'s own docstring all say the same thing: rebase, merge,
-//! cherry-pick, and conflict resolution belong to coding agents with their
+//! `Tidepool.Worktree`'s own docstring all say the same thing: rebase,
+//! cherry-pick, and conflict RESOLUTION belong to coding agents with their
 //! native tools, and Tidepool only observes what the repository became). It
-//! is one narrowly-typed primitive for the coordination fold specifically,
-//! and it is deliberately NOT exposed as a new `Worktree` effect verb —
-//! `Worktree`'s decl is generated from `tidepool-protocol`, a schema this
-//! crate does not own, and widening the Haskell-facing effect surface with a
-//! general merge verb is exactly the "workflow verb" regression the
-//! boundary refuses. The authored Haskell side
-//! (`harness-dogfooding/recursive-companion/Harness.hs`) reaches the same
-//! semantics through `Exec`, mirroring `harness-dogfooding/dev-tree
-//! /Harness.hs`'s own `mergeChild` — mechanical git run as authored policy in
-//! a worktree the node owns, never a runtime-exposed workflow verb. This
-//! module exists so that semantics is defined ONCE, typed, and pinned by a
-//! fast-tier test against a real repository, rather than re-derived ad hoc
+//! is one narrowly-typed primitive for the coordination fold specifically.
+//! It IS exposed as a `Worktree` effect verb (`WorktreeMergeInto` /
+//! `mergeBranchInto`, generated from `tidepool-protocol`'s schema) — the
+//! consolidation is deliberate, not a widening of the boundary: two authored
+//! Haskell reimplementations of exactly this primitive
+//! (`harness-dogfooding/dev-tree/Harness.hs`'s `mergeChild` and
+//! `harness-dogfooding/recursive-companion/Harness.hs`'s `mergeChildInto`)
+//! had drifted from this crate's own conflict-vs-failure classification —
+//! every nonzero exit read as a conflict, a failed `merge --abort` silently
+//! ignored — so the fix is exposing the one ground truth, not re-deriving it
+//! a third time. The boundary this module does NOT reopen is a GENERAL git
+//! workflow surface: there is still no `rebase`, `cherryPick`, or conflict
+//! resolution verb, and resolving a reported conflict stays authored policy.
+//! This module exists so that semantics is defined ONCE, typed, and pinned by
+//! a fast-tier test against a real repository, rather than re-derived ad hoc
 //! at each authored call site.
 //!
 //! Every outcome is DATA. A conflict never leaves the target worktree

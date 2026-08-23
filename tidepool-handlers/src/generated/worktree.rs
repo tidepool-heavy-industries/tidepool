@@ -39,6 +39,11 @@ pub enum WorktreeReq {
     WorktreeList,
     WorktreeBranchOf(tidepool_bridge_effects::WtWorktreeId),
     WorktreeHeadOf(tidepool_bridge_effects::WtWorktreeId),
+    WorktreeMergeInto(
+        tidepool_bridge_effects::WtWorktreeId,
+        tidepool_bridge_effects::WtBranchName,
+        String,
+    ),
 }
 
 impl tidepool_mcp::DescribeEffect for WorktreeHandler {
@@ -61,6 +66,9 @@ impl tidepool_effect::dispatch::EffectHandler<tidepool_mcp::CapturedOutput> for 
             WorktreeReq::WorktreeList => cx.respond(self.worktree_list()),
             WorktreeReq::WorktreeBranchOf(tree_id) => cx.respond(self.worktree_branch_of(tree_id)),
             WorktreeReq::WorktreeHeadOf(tree_id) => cx.respond(self.worktree_head_of(tree_id)),
+            WorktreeReq::WorktreeMergeInto(tree_id, branch, message) => {
+                cx.respond(self.worktree_merge_into(tree_id, branch, message))
+            }
         }
     }
 }

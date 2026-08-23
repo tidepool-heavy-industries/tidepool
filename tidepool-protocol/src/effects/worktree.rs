@@ -27,6 +27,14 @@
 //! `worktreeId` was made representable; `renderWorktreeError`'s CALLER moved
 //! instead. Before relocating any helper, grep every `*_effect_def!` for its
 //! name — see §11.12.
+//!
+//! **A fifth verb landed later, outside the fourteen-item census above.**
+//! `WorktreeMergeInto`/`mergeBranchInto` exposes `tidepool_worktree::merge::
+//! merge_branch_into` (PRD 21 C5's one deliberate git-workflow exception —
+//! see `tidepool-worktree/src/merge.rs`) as a typed verb, replacing two
+//! authored Haskell reimplementations that had drifted from the canonical
+//! conflict/failure classification (`harness-dogfooding/dev-tree` and
+//! `/recursive-companion`'s own `mergeChild`/`mergeChildInto`).
 
 use crate::hs::HsType;
 use crate::schema::{
@@ -197,7 +205,13 @@ fn type_defs() -> Vec<TypeDef> {
             Validation::NonEmpty,
             &["Haskell `BranchName` — stored without the `refs/heads/` prefix."],
             "tidepool_worktree::BranchName",
-            None,
+            // `WorktreeMergeInto` takes a `BranchName` argument (the branch to
+            // fold in), so this direction is now exercised — infallible, same
+            // as `GitRef`'s.
+            Some(AdapterKind::IdentityRaw {
+                as_str: "as_str",
+                from_raw: "from_raw",
+            }),
         ),
         TypeDef {
             name: "WorktreeSource",
@@ -598,6 +612,48 @@ fn type_defs() -> Vec<TypeDef> {
                 "failing the listing.",
             ],
         },
+        TypeDef {
+            name: "MergeOutcome",
+            wire_rust: Some("WtMergeOutcome"),
+            shape: TypeShape::Sum {
+                variants: vec![
+                    SumVariant {
+                        ctor: "Merged",
+                        fields: vec![HsType::Named("GitOid")],
+                        doc: &[
+                            "The merge landed a new commit — the target's `HEAD` afterward. Always a",
+                            "genuine merge commit (`--no-ff`), never a fast-forward.",
+                        ],
+                    },
+                    SumVariant {
+                        ctor: "Conflict",
+                        fields: vec![HsType::list(HsType::Text)],
+                        doc: &[
+                            "The merge conflicted. The paths are what git reported unmerged, read",
+                            "BEFORE the abort; the target worktree is guaranteed clean by the time",
+                            "this is returned — the abort always runs first.",
+                        ],
+                    },
+                ],
+            },
+            json: JsonInstance::None,
+            derives: WIRE,
+            domain: Some(DomainMap {
+                domain_path: "tidepool_worktree::merge::MergeOutcome",
+                into_wire: Some(AdapterKind::HandWritten(
+                    "`Merged` wraps its `GitOid` through `git_oid_to_wire`; `Conflict` clones \
+                     its path `Vec` — both need a conversion beyond a bare variant rename",
+                )),
+                from_wire: None,
+            }),
+            doc: &[
+                "Haskell `MergeOutcome` — the result of merging one branch into a target",
+                "worktree via `mergeBranchInto`. A `git` invocation failure that never",
+                "entered a merge at all (an unknown branch, a locked index) is NOT this —",
+                "it surfaces as `Left (GitFailure _)` instead; this type only ever describes",
+                "a merge that actually started.",
+            ],
+        },
     ]
 }
 
@@ -743,6 +799,34 @@ fn verbs() -> Vec<Verb> {
             handling: HandlingClass::OuterDispatch(OuterEffect::Worktree),
             extract: None,
         },
+        // The one narrow, deliberate workflow primitive (PRD 21 C5's
+        // worktree-coordination fold — see `tidepool-worktree/src/merge.rs`
+        // and this crate's `CLAUDE.md`): merge one branch into a target
+        // worktree, typed and classified ONCE, so authored harnesses stop
+        // re-deriving conflict-vs-failure over raw `Exec`. It is not a
+        // general git-workflow surface — rebase, cherry-pick, and conflict
+        // RESOLUTION are still absent by design and still authored policy.
+        Verb {
+            ctor: "WorktreeMergeInto",
+            method: "worktree_merge_into",
+            args: vec![
+                tree_id_arg(),
+                Arg {
+                    name: "branch",
+                    ty: HsType::Named("BranchName"),
+                    rust: RustBinding::Bridged("WtBranchName"),
+                },
+                Arg {
+                    name: "message",
+                    ty: HsType::Text,
+                    rust: RustBinding::Derived,
+                },
+            ],
+            ret: HsType::Named("MergeOutcome"),
+            errors: Some("WorktreeError"),
+            handling: HandlingClass::OuterDispatch(OuterEffect::Worktree),
+            extract: None,
+        },
     ]
 }
 
@@ -754,7 +838,8 @@ fn tree_id_arg() -> Arg {
     }
 }
 
-/// The FOUR representable helpers: three thin one-verb wrappers, plus the one
+/// The FIVE representable helpers: four thin one-verb wrappers (three from
+/// the original census plus `mergeBranchInto`, added later), plus the one
 /// pure projection.
 ///
 /// Ten more live in `haskell/lib/Tidepool/Worktree.hs` as DEFINITIONS. They are
@@ -814,6 +899,21 @@ fn helpers() -> Vec<Helper> {
                 // it instead of letting the two disagree.
                 fields: &["handleReceipt", "treeId"],
             },
+        },
+        Helper {
+            name: "mergeBranchInto",
+            ctor: Some("WorktreeMergeInto"),
+            doc: &[
+                "Merge `branch` into the worktree `treeId` names, as `git merge --no-ff`",
+                "— never a fast-forward, so a landed merge always carries a genuine merge",
+                "commit. On conflict, the conflicting paths are read and the merge is",
+                "ABORTED before this returns: the worktree is left clean either way,",
+                "success or conflict. `Left (GitFailure r)` is a `git` invocation that",
+                "never entered a merge at all (an unknown branch, a locked index) —",
+                "distinct from `Right (Conflict paths)`, a merge that genuinely started",
+                "and conflicted.",
+            ],
+            body: HelperBody::Applied(&["treeId", "branch", "message"]),
         },
     ]
 }

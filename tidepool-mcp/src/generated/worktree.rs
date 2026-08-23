@@ -13,6 +13,7 @@ pub fn worktree_decl() -> crate::EffectDecl {
             "WorktreeList :: Worktree (Either WorktreeError [WorktreeSummary])",
             "WorktreeBranchOf :: WorktreeId -> Worktree (Either WorktreeError BranchName)",
             "WorktreeHeadOf :: WorktreeId -> Worktree (Either WorktreeError GitOid)",
+            "WorktreeMergeInto :: WorktreeId -> BranchName -> Text -> Worktree (Either WorktreeError MergeOutcome)",
         ],
         type_defs: &[
             "data WorktreeId = WorktreeId Text deriving (Show, Eq)",
@@ -28,6 +29,7 @@ pub fn worktree_decl() -> crate::EffectDecl {
             "data WorktreeReceipt = WorktreeReceipt { treeId :: WorktreeId, cwd :: Text, branch :: BranchName, sourceHead :: GitOid, snapshotRef :: Maybe GitRef, createdAt :: Int } deriving (Show, Eq)",
             "data WorktreeHandle = WorktreeHandle { handleReceipt :: WorktreeReceipt } deriving (Show, Eq)",
             "data WorktreeSummary = WorktreeSummary { summaryReceipt :: WorktreeReceipt, present :: Bool } deriving (Show, Eq)",
+            "data MergeOutcome = Merged GitOid | Conflict [Text] deriving (Show, Eq)",
             "instance ToJSON WorktreeId where toJSON (WorktreeId t) = toJSON t",
             "instance ToJSON GitOid where toJSON (GitOid t) = toJSON t",
             "instance ToJSON GitRef where toJSON (GitRef t) = toJSON t",
@@ -45,6 +47,7 @@ pub fn worktree_decl() -> crate::EffectDecl {
             "-- | Look a retained worktree up by durable id. Survives restart:\n-- resolution reads on-disk registry state, not process memory.\n-- `Left (WorktreeLost i)` when it is registered but gone from disk.\nlookupWorktree :: forall effs. Member Worktree effs => WorktreeId -> Eff effs (Either WorktreeError WorktreeHandle)\nlookupWorktree = send . WorktreeLookup",
             "-- | Every registered worktree, present or lost. A lost tree is listed\n-- with `present = False` rather than failing the whole listing.\nlistWorktrees :: forall effs. Member Worktree effs => Eff effs [WorktreeSummary]\nlistWorktrees = send WorktreeList >>= liftEither",
             "-- | The durable identity of a managed worktree. Pure: the handle\n-- already carries its receipt, so this reads no git state.\nworktreeId :: WorktreeHandle -> WorktreeId\nworktreeId h = h.handleReceipt.treeId",
+            "-- | Merge `branch` into the worktree `treeId` names, as `git merge --no-ff`\n-- — never a fast-forward, so a landed merge always carries a genuine merge\n-- commit. On conflict, the conflicting paths are read and the merge is\n-- ABORTED before this returns: the worktree is left clean either way,\n-- success or conflict. `Left (GitFailure r)` is a `git` invocation that\n-- never entered a merge at all (an unknown branch, a locked index) —\n-- distinct from `Right (Conflict paths)`, a merge that genuinely started\n-- and conflicted.\nmergeBranchInto :: forall effs. Member Worktree effs => WorktreeId -> BranchName -> Text -> Eff effs (Either WorktreeError MergeOutcome)\nmergeBranchInto treeId branch message = send (WorktreeMergeInto treeId branch message)",
         ],
         type_params: &[],
         default_row_args: &[],

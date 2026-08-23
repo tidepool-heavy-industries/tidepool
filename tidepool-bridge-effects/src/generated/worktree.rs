@@ -144,6 +144,22 @@ pub struct WtWorktreeSummary {
     pub present: bool,
 }
 
+/// Haskell `MergeOutcome` — the result of merging one branch into a target
+/// worktree via `mergeBranchInto`. A `git` invocation failure that never
+/// entered a merge at all (an unknown branch, a locked index) is NOT this —
+/// it surfaces as `Left (GitFailure _)` instead; this type only ever describes
+/// a merge that actually started.
+#[derive(ToCore, FromCore, Clone, Debug, PartialEq, Eq)]
+pub enum WtMergeOutcome {
+    /// The merge landed a new commit — the target's `HEAD` afterward. Always a
+    /// genuine merge commit (`--no-ff`), never a fast-forward.
+    Merged(WtGitOid),
+    /// The merge conflicted. The paths are what git reported unmerged, read
+    /// BEFORE the abort; the target worktree is guaranteed clean by the time
+    /// this is returned — the abort always runs first.
+    Conflict(Vec<String>),
+}
+
 impl WtWorktreeId {
     /// The trust boundary: an untrusted raw value becomes a wire id here or
     /// not at all.

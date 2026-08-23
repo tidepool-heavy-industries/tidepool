@@ -30,7 +30,11 @@ fn worktree_schema_is_valid() {
 /// The 20 `type_defs` literals from the macro (13 `data` decls, then 7
 /// `instance ToJSON` lines), in exactly the macro's order, plus a 21st entry:
 /// the `WorktreeError` ADT as `error_decl_text!` / `error_variant_text!` /
-/// `error_variant_json_arm!` expand it for the macro's 11 variants.
+/// `error_variant_json_arm!` expand it for the macro's 11 variants, plus a
+/// 14th `data` decl added AFTER the flip: `MergeOutcome`, the typed result of
+/// the `WorktreeMergeInto` verb (no `ToJSON` instance — `json: JsonInstance::
+/// None`, same as `WorktreeReceipt`/`WorktreeHandle`/`WorktreeSummary` — so it
+/// sits among the `data` decls, before the `ToJSON` block, not at the end).
 #[test]
 fn worktree_type_def_texts_are_pinned() {
     let wt = worktree();
@@ -52,6 +56,8 @@ fn worktree_type_def_texts_are_pinned() {
             "data WorktreeReceipt = WorktreeReceipt { treeId :: WorktreeId, cwd :: Text, branch :: BranchName, sourceHead :: GitOid, snapshotRef :: Maybe GitRef, createdAt :: Int } deriving (Show, Eq)",
             "data WorktreeHandle = WorktreeHandle { handleReceipt :: WorktreeReceipt } deriving (Show, Eq)",
             "data WorktreeSummary = WorktreeSummary { summaryReceipt :: WorktreeReceipt, present :: Bool } deriving (Show, Eq)",
+            // -- 14th `data` decl, added after the flip: `MergeOutcome` -------
+            "data MergeOutcome = Merged GitOid | Conflict [Text] deriving (Show, Eq)",
             // -- 7 `instance ToJSON` lines, macro order -----------------------
             "instance ToJSON WorktreeId where toJSON (WorktreeId t) = toJSON t",
             "instance ToJSON GitOid where toJSON (GitOid t) = toJSON t",
@@ -85,9 +91,10 @@ fn worktree_type_def_texts_are_pinned() {
     );
 }
 
-/// The 5 constructor signatures, worked out from `ctor_sig!`'s errors-tagged
-/// arm (`<Ctor> :: <args> -> Worktree (Either WorktreeError <ret>)`) applied to
-/// the macro's `verbs` rows, in the macro's verb order.
+/// The 5 constructor signatures from the macro, worked out from `ctor_sig!`'s
+/// errors-tagged arm (`<Ctor> :: <args> -> Worktree (Either WorktreeError
+/// <ret>)`) applied to the macro's `verbs` rows, in the macro's verb order,
+/// plus a 6th added after the flip: `WorktreeMergeInto`.
 #[test]
 fn worktree_constructor_signatures_are_pinned() {
     let wt = worktree();
@@ -100,6 +107,7 @@ fn worktree_constructor_signatures_are_pinned() {
             "WorktreeList :: Worktree (Either WorktreeError [WorktreeSummary])",
             "WorktreeBranchOf :: WorktreeId -> Worktree (Either WorktreeError BranchName)",
             "WorktreeHeadOf :: WorktreeId -> Worktree (Either WorktreeError GitOid)",
+            "WorktreeMergeInto :: WorktreeId -> BranchName -> Text -> Worktree (Either WorktreeError MergeOutcome)",
         ]
     );
 }
@@ -107,7 +115,8 @@ fn worktree_constructor_signatures_are_pinned() {
 /// The four representable helpers — the three thin wrappers over one verb
 /// (`createWorktree`, `lookupWorktree`, `listWorktrees`) plus the one pure
 /// projection (`worktreeId`) — copied verbatim from the macro's `raw` lines,
-/// newline-joined exactly as `helper_text!` joins them.
+/// newline-joined exactly as `helper_text!` joins them; plus a fifth, added
+/// after the flip: `mergeBranchInto`, the thin wrapper over `WorktreeMergeInto`.
 #[test]
 fn worktree_helper_texts_are_pinned() {
     let wt = worktree();
@@ -141,6 +150,18 @@ fn worktree_helper_texts_are_pinned() {
                 "worktreeId :: WorktreeHandle -> WorktreeId\n",
                 "worktreeId h = h.handleReceipt.treeId",
             ),
+            concat!(
+                "-- | Merge `branch` into the worktree `treeId` names, as `git merge --no-ff`\n",
+                "-- — never a fast-forward, so a landed merge always carries a genuine merge\n",
+                "-- commit. On conflict, the conflicting paths are read and the merge is\n",
+                "-- ABORTED before this returns: the worktree is left clean either way,\n",
+                "-- success or conflict. `Left (GitFailure r)` is a `git` invocation that\n",
+                "-- never entered a merge at all (an unknown branch, a locked index) —\n",
+                "-- distinct from `Right (Conflict paths)`, a merge that genuinely started\n",
+                "-- and conflicted.\n",
+                "mergeBranchInto :: forall effs. Member Worktree effs => WorktreeId -> BranchName -> Text -> Eff effs (Either WorktreeError MergeOutcome)\n",
+                "mergeBranchInto treeId branch message = send (WorktreeMergeInto treeId branch message)",
+            ),
         ]
     );
 }
@@ -172,7 +193,9 @@ fn worktree_helper_texts_are_pinned() {
 /// `Tidepool.Worktree`. It is represented as
 /// `HelperBody::Projection` instead, which is why the count here is ten.
 ///
-/// 4 representable + 10 unrepresentable = 14, the macro's total helper count.
+/// 4 representable + 10 unrepresentable = 14, the macro's total helper count
+/// — plus `mergeBranchInto`, a 5th representable helper added after the flip
+/// (not one of the macro's original fourteen), for 15 total.
 #[test]
 fn worktree_ten_helpers_are_not_schema_representable() {
     const NOT_REPRESENTABLE: &[&str] = &[
@@ -188,7 +211,7 @@ fn worktree_ten_helpers_are_not_schema_representable() {
         "renderWorktreeError",
     ];
     assert_eq!(NOT_REPRESENTABLE.len(), 10);
-    assert_eq!(NOT_REPRESENTABLE.len() + worktree().helpers.len(), 14);
+    assert_eq!(NOT_REPRESENTABLE.len() + worktree().helpers.len(), 15);
 
     let wt = worktree();
     for name in NOT_REPRESENTABLE {

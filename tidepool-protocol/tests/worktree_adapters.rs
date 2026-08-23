@@ -24,10 +24,11 @@ fn worktree_adapter_module_text_is_pinned() {
 }
 
 /// Independent of the whole-text pin above: every `pub(crate) fn` in the
-/// module, in the ORDER it appears. Four `IdentityRaw` into_wire, one
-/// `IdentityRaw` from_wire (`GitRef`), one `VariantMap` from_wire
-/// (`DirtyPolicy`), one `VariantMap` into_wire (`InProgressKind`) — seven
-/// total, matching the DONE CRITERIA count exactly.
+/// module, in the ORDER it appears. Four `IdentityRaw` into_wire, two
+/// `IdentityRaw` from_wire (`GitRef`, `BranchName` — the latter added once
+/// `WorktreeMergeInto` needed a `BranchName` argument), one `VariantMap`
+/// from_wire (`DirtyPolicy`), one `VariantMap` into_wire (`InProgressKind`) —
+/// eight total.
 #[test]
 fn worktree_adapter_functions_appear_in_order() {
     let text = worktree_adapter_text();
@@ -44,6 +45,7 @@ fn worktree_adapter_functions_appear_in_order() {
             "git_ref_to_wire",
             "git_ref_from_wire",
             "branch_name_to_wire",
+            "branch_name_from_wire",
             "dirty_policy_from_wire",
             "in_progress_kind_to_wire",
         ]
@@ -97,6 +99,7 @@ fn hand_written_conversions_are_commented_not_generated() {
         "dirty_summary_to_wire",
         "worktree_id_from_wire",
         "error_to_wire",
+        "merge_outcome_to_wire",
     ] {
         assert!(
             !text.contains(&format!("fn {missing_fn}(")),
@@ -111,6 +114,7 @@ fn hand_written_conversions_are_commented_not_generated() {
         "`usize` → `i64` widening on `ignoredExcluded`, and the three lists are cloned out of a borrow",
         "`PathBuf` → lossy `String`, `Option<i32>` → `Option<i64>`",
         "field renames (`worktree_id`→`tree_id`, `created_at_ms`→`created_at`) plus a `PathBuf` → lossy `String`",
+        "`Merged` wraps its `GitOid` through `git_oid_to_wire`; `Conflict` clones its path `Vec` — both need a conversion beyond a bare variant rename",
     ] {
         assert!(
             text.contains(reason),

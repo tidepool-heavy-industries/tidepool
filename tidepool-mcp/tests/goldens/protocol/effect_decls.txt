@@ -1558,7 +1558,7 @@ Managed git worktrees: create an isolated worktree from a clean source (or, expl
 
 -- prompt_card: None --
 
--- constructors (5 items) --
+-- constructors (6 items) --
 -- constructors[0] (80 bytes) --
 WorktreeCreate :: WorktreeSpec -> Worktree (Either WorktreeError WorktreeHandle)
 -- end constructors[0] --
@@ -1579,9 +1579,13 @@ WorktreeBranchOf :: WorktreeId -> Worktree (Either WorktreeError BranchName)
 WorktreeHeadOf :: WorktreeId -> Worktree (Either WorktreeError GitOid)
 -- end constructors[4] --
 
+-- constructors[5] (101 bytes) --
+WorktreeMergeInto :: WorktreeId -> BranchName -> Text -> Worktree (Either WorktreeError MergeOutcome)
+-- end constructors[5] --
+
 -- end constructors --
 
--- type_defs (21 items) --
+-- type_defs (22 items) --
 -- type_defs[0] (53 bytes) --
 data WorktreeId = WorktreeId Text deriving (Show, Eq)
 -- end type_defs[0] --
@@ -1634,35 +1638,39 @@ data WorktreeHandle = WorktreeHandle { handleReceipt :: WorktreeReceipt } derivi
 data WorktreeSummary = WorktreeSummary { summaryReceipt :: WorktreeReceipt, present :: Bool } deriving (Show, Eq)
 -- end type_defs[12] --
 
--- type_defs[13] (65 bytes) --
-instance ToJSON WorktreeId where toJSON (WorktreeId t) = toJSON t
+-- type_defs[13] (71 bytes) --
+data MergeOutcome = Merged GitOid | Conflict [Text] deriving (Show, Eq)
 -- end type_defs[13] --
 
--- type_defs[14] (57 bytes) --
-instance ToJSON GitOid where toJSON (GitOid t) = toJSON t
+-- type_defs[14] (65 bytes) --
+instance ToJSON WorktreeId where toJSON (WorktreeId t) = toJSON t
 -- end type_defs[14] --
 
 -- type_defs[15] (57 bytes) --
-instance ToJSON GitRef where toJSON (GitRef t) = toJSON t
+instance ToJSON GitOid where toJSON (GitOid t) = toJSON t
 -- end type_defs[15] --
 
--- type_defs[16] (65 bytes) --
-instance ToJSON BranchName where toJSON (BranchName t) = toJSON t
+-- type_defs[16] (57 bytes) --
+instance ToJSON GitRef where toJSON (GitRef t) = toJSON t
 -- end type_defs[16] --
 
--- type_defs[17] (63 bytes) --
-instance ToJSON InProgressKind where toJSON k = toJSON (show k)
+-- type_defs[17] (65 bytes) --
+instance ToJSON BranchName where toJSON (BranchName t) = toJSON t
 -- end type_defs[17] --
 
--- type_defs[18] (169 bytes) --
-instance ToJSON DirtySummary where toJSON d = object ["staged" .= d.staged, "unstaged" .= d.unstaged, "untracked" .= d.untracked, "ignoredExcluded" .= d.ignoredExcluded]
+-- type_defs[18] (63 bytes) --
+instance ToJSON InProgressKind where toJSON k = toJSON (show k)
 -- end type_defs[18] --
 
--- type_defs[19] (177 bytes) --
-instance ToJSON GitFailureReceipt where toJSON r = object ["args" .= r.gitArgs, "cwd" .= r.gitCwd, "exitCode" .= r.gitExitCode, "stdout" .= r.gitStdout, "stderr" .= r.gitStderr]
+-- type_defs[19] (169 bytes) --
+instance ToJSON DirtySummary where toJSON d = object ["staged" .= d.staged, "unstaged" .= d.unstaged, "untracked" .= d.untracked, "ignoredExcluded" .= d.ignoredExcluded]
 -- end type_defs[19] --
 
--- type_defs[20] (1544 bytes) --
+-- type_defs[20] (177 bytes) --
+instance ToJSON GitFailureReceipt where toJSON r = object ["args" .= r.gitArgs, "cwd" .= r.gitCwd, "exitCode" .= r.gitExitCode, "stdout" .= r.gitStdout, "stderr" .= r.gitStderr]
+-- end type_defs[20] --
+
+-- type_defs[21] (1544 bytes) --
 data WorktreeError = SourceDirty DirtySummary | NotARepository Text | WorktreeLost WorktreeId | DirtySubmoduleUnsupported Text | SourceOperationInProgress InProgressKind | WorktreeBusy WorktreeId Text | GitFailure GitFailureReceipt | WorktreeNotRegistered WorktreeId | InvalidRegistryRoot Text Text | StorageFailure Text Text deriving (Show, Eq)
 instance ToJSON WorktreeError where
   toJSON e = case e of
@@ -1676,7 +1684,7 @@ instance ToJSON WorktreeError where
     WorktreeNotRegistered notRegisteredId -> object ["tag" .= ("WorktreeNotRegistered" :: Text), "notRegisteredId" .= notRegisteredId]
     InvalidRegistryRoot root inside -> object ["tag" .= ("InvalidRegistryRoot" :: Text), "root" .= root, "inside" .= inside]
     StorageFailure storagePath storageDetail -> object ["tag" .= ("StorageFailure" :: Text), "storagePath" .= storagePath, "storageDetail" .= storageDetail]
--- end type_defs[20] --
+-- end type_defs[21] --
 
 -- end type_defs --
 
@@ -1687,7 +1695,7 @@ import Tidepool.Worktree
 
 -- end extra_imports --
 
--- helpers (4 items) --
+-- helpers (5 items) --
 -- helpers[0] (347 bytes) --
 -- | Create a managed worktree. `Left (SourceDirty summary)` when the
 -- source is dirty and the spec did not opt in; case-match the error
@@ -1717,6 +1725,19 @@ listWorktrees = send WorktreeList >>= liftEither
 worktreeId :: WorktreeHandle -> WorktreeId
 worktreeId h = h.handleReceipt.treeId
 -- end helpers[3] --
+
+-- helpers[4] (759 bytes) --
+-- | Merge `branch` into the worktree `treeId` names, as `git merge --no-ff`
+-- — never a fast-forward, so a landed merge always carries a genuine merge
+-- commit. On conflict, the conflicting paths are read and the merge is
+-- ABORTED before this returns: the worktree is left clean either way,
+-- success or conflict. `Left (GitFailure r)` is a `git` invocation that
+-- never entered a merge at all (an unknown branch, a locked index) —
+-- distinct from `Right (Conflict paths)`, a merge that genuinely started
+-- and conflicted.
+mergeBranchInto :: forall effs. Member Worktree effs => WorktreeId -> BranchName -> Text -> Eff effs (Either WorktreeError MergeOutcome)
+mergeBranchInto treeId branch message = send (WorktreeMergeInto treeId branch message)
+-- end helpers[4] --
 
 -- end helpers --
 
