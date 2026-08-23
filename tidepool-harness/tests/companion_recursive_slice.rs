@@ -1102,7 +1102,7 @@ async fn companion_tree_recurses_folds_and_contains_its_node_ids() {
     );
     assert!(
         run.branch_summary("root", &beta)
-            .contains("[finish(failed: the window proposed a split with no branches)]"),
+            .contains("[finish(failed: the session proposed a split with no branches)]"),
         "the failure is ordinary DATA in the parent's realized layer, at its own \
          branch position: {}",
         run.branch_summary("root", &beta)
@@ -1188,7 +1188,7 @@ async fn companion_tree_recurses_folds_and_contains_its_node_ids() {
             (
                 e.key.as_str(),
                 e.payload
-                    .get("window")
+                    .get("session")
                     .and_then(|v| v.as_str())
                     .unwrap_or("<none>"),
                 e.payload
@@ -1207,7 +1207,7 @@ async fn companion_tree_recurses_folds_and_contains_its_node_ids() {
         failures
             .iter()
             .any(|(key, window, reason)| *key == "root/1-alpha"
-                && *window == "algebra"
+                && *window == "fold"
                 && reason.starts_with("round exhaustion:")),
         "a failed FOLD is journaled distinctly from a failed coalgebra — a node can \
          carry both, and which window failed is the difference between 'this node \
@@ -1216,13 +1216,13 @@ async fn companion_tree_recurses_folds_and_contains_its_node_ids() {
     );
     assert!(
         failures.iter().any(|(key, window, reason)| *key == beta
-            && *window == "coalgebra"
+            && *window == "discovery"
             && reason.contains("no branches")),
         "the unusable-layer failure, tagged with the window that produced it: {failures:?}"
     );
     assert!(
         failures.iter().any(|(key, window, reason)| *key == epsilon
-            && *window == "coalgebra"
+            && *window == "discovery"
             && reason.starts_with("round exhaustion:")
             && reason.contains("without finalizing")),
         "the abnormal-exit failure, tagged with the window that produced it: {failures:?}"
