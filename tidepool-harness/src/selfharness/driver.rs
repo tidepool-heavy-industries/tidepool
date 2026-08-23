@@ -286,6 +286,28 @@ struct GreenReady {
     outcome: ResidentOutcome,
 }
 
+/// How a serviced green suspension's own resume is DELIVERED — the one
+/// genuinely plane-specific seam in green servicing (dup-e finding 2).
+/// Thread frames and the authored outer loop resume RAW on the shared
+/// machine session and re-enter the ready queue; the answerer NODE's own
+/// chain must resume through the node-aware path
+/// (`Harness::resume_with_value`/`resume_with_borrowed_root`), which
+/// restores the node's runtime resource scope and keeps its pending record
+/// truthful. Everything ABOVE this seam — constructor decode, thread-table
+/// transitions, realm minting, waiter wakes — is ONE implementation
+/// ([`SelfHarnessDriver::service_green_hole`]), not two.
+enum GreenDelivery<'a> {
+    Raw,
+    Node { node: NodeId, hole: &'a HoleId },
+}
+
+/// What crosses on a green resume: a bridged value, or a borrowed
+/// session-owned root (a settled thread's in-heap result).
+enum GreenAnswer {
+    Value(Value),
+    BorrowedRoot(tidepool_codegen::jit_machine::ValueHandle),
+}
+
 /// What one popped ready item resolved to, and what the scheduler owes it in
 /// response — the classified-hole dispatcher's return value instead of each
 /// arm independently pushing to `ready`/breaking the loop. A new arm that
@@ -3182,17 +3204,21 @@ impl SelfHarnessDriver {
                         // `ServicedHole` (see that type's doc), so it owns
                         // `ready` directly and this arm hands nothing back.
                         HoleRouting::Green => {
-                            self.service_green_hole(
-                                chain,
-                                hole.cont_id(),
-                                &request,
-                                &compiled.table,
-                                &mut threads,
-                                &mut waiters,
-                                &mut next_tid,
-                                &mut next_thread_realm,
-                                &mut ready,
-                            )?;
+                            // Raw delivery never reports node-blocked.
+                            let _ = self
+                                .service_green_hole(
+                                    chain,
+                                    hole.cont_id(),
+                                    &request,
+                                    &compiled.table,
+                                    &mut threads,
+                                    &mut waiters,
+                                    &mut next_tid,
+                                    &mut next_thread_realm,
+                                    &mut ready,
+                                    GreenDelivery::Raw,
+                                )
+                                .await?;
                             continue;
                         }
                         // `runLLMTurnFork @T`/`runLLMTurnFanout @T` raised
@@ -3390,6 +3416,43 @@ impl SelfHarnessDriver {
         outcome_result
     }
 
+    /// Deliver a serviced green suspension's own resume per
+    /// [`GreenDelivery`] — see that type's doc for the plane split.
+    async fn deliver_green_resume(
+        &self,
+        sid: tidepool_repr::SessionId,
+        delivery: &GreenDelivery<'_>,
+        chain: GreenChain,
+        hole: &str,
+        answer: GreenAnswer,
+        ready: &mut VecDeque<GreenReady>,
+        what: &str,
+    ) -> Result<(), DriverError> {
+        match delivery {
+            GreenDelivery::Raw => {
+                let next = self
+                    .agent
+                    .with_session(sid, |s| match answer {
+                        GreenAnswer::Value(v) => s.resume(ResidentHole::plain(hole), v),
+                        GreenAnswer::BorrowedRoot(h) => s.resume_handle_borrowed(hole, h),
+                    })
+                    .map_err(|e| DriverError::Session(e.to_string()))?
+                    .map_err(|e| DriverError::Session(format!("{what} resume failed: {e}")))?;
+                ready.push_back(GreenReady {
+                    chain,
+                    outcome: next,
+                });
+                Ok(())
+            }
+            GreenDelivery::Node { node, hole } => match answer {
+                GreenAnswer::Value(v) => Ok(self.agent.resume_with_value(*node, hole, v).await?),
+                GreenAnswer::BorrowedRoot(h) => {
+                    Ok(self.agent.resume_with_borrowed_root(*node, hole, h).await?)
+                }
+            },
+        }
+    }
+
     /// Service one `Tidepool.Async` suspension (PRD 20 S1-L4): decode which
     /// of the six `Async*With` verbs `request` is by CONSTRUCTOR NAME (never
     /// in [`engine::classify_hole`] — the payload may carry a live closure,
@@ -3416,7 +3479,8 @@ impl SelfHarnessDriver {
     /// spawn starts a NEW top-level run and a park-until-terminal join may
     /// register a waiter instead of answering immediately.
     #[allow(clippy::too_many_arguments)]
-    fn service_green_hole(
+    #[allow(clippy::too_many_arguments)]
+    async fn service_green_hole(
         &self,
         chain: GreenChain,
         hole: &str,
@@ -3427,7 +3491,8 @@ impl SelfHarnessDriver {
         next_tid: &mut i64,
         next_realm: &mut u64,
         ready: &mut VecDeque<GreenReady>,
-    ) -> Result<(), DriverError> {
+        delivery: GreenDelivery<'_>,
+    ) -> Result<bool, DriverError> {
         let sid = self.outer_sid()?;
         match engine::con_name(request, table) {
             // Field 1 is the thread body — ALWAYS a closure by construction
@@ -3501,22 +3566,25 @@ impl SelfHarnessDriver {
                 let tid_value = tid
                     .to_value(table)
                     .map_err(|e| DriverError::Session(format!("AsyncSpawnWith tid box: {e}")))?;
-                let spawner_next = self
-                    .agent
-                    .with_session(sid, |s| s.resume(ResidentHole::plain(hole), tid_value))
-                    .map_err(|e| DriverError::Session(e.to_string()))?
-                    .map_err(|e| {
-                        DriverError::Session(format!("AsyncSpawnWith spawner resume failed: {e}"))
-                    })?;
-                ready.push_back(GreenReady {
+                // Spawner-continues-first: the spawner's resume lands (Raw:
+                // pushed to `ready` ahead of the thread; Node: the node's own
+                // pending record refreshes) before the fresh thread's first
+                // outcome enters the queue.
+                self.deliver_green_resume(
+                    sid,
+                    &delivery,
                     chain,
-                    outcome: spawner_next,
-                });
+                    hole,
+                    GreenAnswer::Value(tid_value),
+                    ready,
+                    "AsyncSpawnWith spawner",
+                )
+                .await?;
                 ready.push_back(GreenReady {
                     chain: GreenChain::Thread(tid),
                     outcome: thread_start,
                 });
-                Ok(())
+                Ok(false)
             }
             // A thread's last act. Its own leading `Int` field is always the
             // dummy `0` `asyncSpawn` bakes in — the settling thread's real id
@@ -3528,6 +3596,13 @@ impl SelfHarnessDriver {
             // sweep) — nothing is lost by never driving it to a Rust-level
             // `Completed`.
             Some("AsyncDoneWith") => {
+                if matches!(delivery, GreenDelivery::Node { .. }) {
+                    return Err(DriverError::Session(
+                        "AsyncDoneWith delivered on the node chain (scheduler bug: settles \
+                         are thread-only)"
+                            .into(),
+                    ));
+                }
                 let GreenChain::Thread(tid) = chain else {
                     return Err(DriverError::Session(
                         "AsyncDoneWith suspended on a non-thread chain (scheduler bug: every \
@@ -3547,7 +3622,8 @@ impl SelfHarnessDriver {
                     .get(&tid)
                     .is_some_and(|t| matches!(t.state, GreenThreadState::Running));
                 if !records_result {
-                    return self.wake_green_waiters(tid, table, sid, waiters, ready);
+                    self.wake_green_waiters(tid, table, sid, waiters, ready)?;
+                    return Ok(false);
                 }
                 let answer = if green_field_is_closure(request, 1) {
                     // Owned by the SESSION's realm, deliberately (not the
@@ -3601,7 +3677,8 @@ impl SelfHarnessDriver {
                         h.registry_mut().publish_async_done(tid);
                     }
                 }
-                self.wake_green_waiters(tid, table, sid, waiters, ready)
+                self.wake_green_waiters(tid, table, sid, waiters, ready)?;
+                Ok(false)
             }
             Some("AsyncJoinAnyWith") => {
                 let ids = green_int_list_field(request, 0, table);
@@ -3615,34 +3692,39 @@ impl SelfHarnessDriver {
                         let winner_value = winner.to_value(table).map_err(|e| {
                             DriverError::Session(format!("AsyncJoinAnyWith winner box: {e}"))
                         })?;
-                        let next = self
-                            .agent
-                            .with_session(sid, |s| {
-                                s.resume(ResidentHole::plain(hole), winner_value)
-                            })
-                            .map_err(|e| DriverError::Session(e.to_string()))?
-                            .map_err(|e| {
-                                DriverError::Session(format!("AsyncJoinAnyWith resume failed: {e}"))
-                            })?;
-                        ready.push_back(GreenReady {
+                        self.deliver_green_resume(
+                            sid,
+                            &delivery,
                             chain,
-                            outcome: next,
-                        });
+                            hole,
+                            GreenAnswer::Value(winner_value),
+                            ready,
+                            "AsyncJoinAnyWith",
+                        )
+                        .await?;
                     }
                     None => {
-                        // None terminal yet — park this caller as a waiter on
-                        // EVERY listed thread; whichever settles/cancels
-                        // first wakes it. The hole stays parked; nothing goes
-                        // on `ready` — this chain is genuinely blocked.
-                        for tid in ids {
-                            waiters
-                                .entry(tid)
-                                .or_default()
-                                .push((chain, hole.to_string()));
+                        // None terminal yet. Raw chains park as waiters on
+                        // EVERY listed thread — whichever settles/cancels
+                        // first wakes them; nothing goes on `ready`. The
+                        // NODE chain never registers (the raw waiter wake
+                        // must never touch it) — it reports BLOCKED and its
+                        // still-pending join is re-serviced (a pure winner
+                        // scan) each scheduler iteration.
+                        match delivery {
+                            GreenDelivery::Raw => {
+                                for tid in ids {
+                                    waiters
+                                        .entry(tid)
+                                        .or_default()
+                                        .push((chain, hole.to_string()));
+                                }
+                            }
+                            GreenDelivery::Node { .. } => return Ok(true),
                         }
                     }
                 }
-                Ok(())
+                Ok(false)
             }
             Some("AsyncStatusWith") => {
                 let tid = green_int_field(request, 0, table);
@@ -3654,18 +3736,17 @@ impl SelfHarnessDriver {
                 let code_value = code
                     .to_value(table)
                     .map_err(|e| DriverError::Session(format!("AsyncStatusWith code box: {e}")))?;
-                let next = self
-                    .agent
-                    .with_session(sid, |s| s.resume(ResidentHole::plain(hole), code_value))
-                    .map_err(|e| DriverError::Session(e.to_string()))?
-                    .map_err(|e| {
-                        DriverError::Session(format!("AsyncStatusWith resume failed: {e}"))
-                    })?;
-                ready.push_back(GreenReady {
+                self.deliver_green_resume(
+                    sid,
+                    &delivery,
                     chain,
-                    outcome: next,
-                });
-                Ok(())
+                    hole,
+                    GreenAnswer::Value(code_value),
+                    ready,
+                    "AsyncStatusWith",
+                )
+                .await?;
+                Ok(false)
             }
             Some("AsyncResultWith") => {
                 let tid = green_int_field(request, 0, table);
@@ -3684,21 +3765,20 @@ impl SelfHarnessDriver {
                         )))
                     }
                 };
-                let next = self
-                    .agent
-                    .with_session(sid, |s| match answer {
-                        GreenResult::Value(v) => s.resume(ResidentHole::plain(hole), v),
-                        GreenResult::Root(h) => s.resume_handle_borrowed(hole, h),
-                    })
-                    .map_err(|e| DriverError::Session(e.to_string()))?
-                    .map_err(|e| {
-                        DriverError::Session(format!("AsyncResultWith resume failed: {e}"))
-                    })?;
-                ready.push_back(GreenReady {
+                self.deliver_green_resume(
+                    sid,
+                    &delivery,
                     chain,
-                    outcome: next,
-                });
-                Ok(())
+                    hole,
+                    match answer {
+                        GreenResult::Value(v) => GreenAnswer::Value(v),
+                        GreenResult::Root(h) => GreenAnswer::BorrowedRoot(h),
+                    },
+                    ready,
+                    "AsyncResultWith",
+                )
+                .await?;
+                Ok(false)
             }
             Some("AsyncCancelWith") => {
                 let tid = green_int_field(request, 0, table);
@@ -3725,18 +3805,17 @@ impl SelfHarnessDriver {
                 let unit = ()
                     .to_value(table)
                     .map_err(|e| DriverError::Session(format!("AsyncCancelWith () bridge: {e}")))?;
-                let next = self
-                    .agent
-                    .with_session(sid, |s| s.resume(ResidentHole::plain(hole), unit))
-                    .map_err(|e| DriverError::Session(e.to_string()))?
-                    .map_err(|e| {
-                        DriverError::Session(format!("AsyncCancelWith resume failed: {e}"))
-                    })?;
-                ready.push_back(GreenReady {
+                self.deliver_green_resume(
+                    sid,
+                    &delivery,
                     chain,
-                    outcome: next,
-                });
-                Ok(())
+                    hole,
+                    GreenAnswer::Value(unit),
+                    ready,
+                    "AsyncCancelWith",
+                )
+                .await?;
+                Ok(false)
             }
             other => Err(DriverError::Session(format!(
                 "outer loop suspended on an unrecognized Green constructor ({other:?})"
@@ -6209,7 +6288,18 @@ impl SelfHarnessDriver {
                 return Ok(AnswererGreenExit::NodeParked);
             }
             let blocked = self
-                .service_primary_green(node, &hole, &request, &table, green)
+                .service_green_hole(
+                    GreenChain::Primary,
+                    &hole.0,
+                    &request,
+                    &table,
+                    &mut green.threads,
+                    &mut green.waiters,
+                    &mut green.next_tid,
+                    &mut green.next_thread_realm,
+                    &mut green.ready,
+                    GreenDelivery::Node { node, hole: &hole },
+                )
                 .await?;
             if !blocked {
                 continue;
@@ -6231,156 +6321,6 @@ impl SelfHarnessDriver {
             {
                 return Ok(AnswererGreenExit::ForkBudgetRefused { needed });
             }
-        }
-    }
-
-    /// Service the node's own pending Green suspension. Returns `true` when
-    /// the node is BLOCKED (a join with no terminal candidate — the hole
-    /// stays parked, nothing was resumed); `false` when the node was resumed
-    /// (its pending record is fresh — re-read it).
-    ///
-    /// Every resume here is node-aware ([`Harness::resume_with_value`]/
-    /// [`Harness::resume_with_borrowed_root`]) — see [`AnswererGreen`]'s doc
-    /// for why raw resumes are wrong for the node chain. The arms mirror
-    /// [`Self::service_green_hole`]'s semantics verb for verb.
-    async fn service_primary_green(
-        &self,
-        node: NodeId,
-        hole: &HoleId,
-        request: &Value,
-        table: &DataConTable,
-        green: &mut AnswererGreen,
-    ) -> Result<bool, DriverError> {
-        let sid = self.outer_sid()?;
-        match engine::con_name(request, table) {
-            Some("AsyncSpawnWith") => {
-                // Same custody discipline as the outer arm: mint the body's
-                // handle and consume it (run_forked) before anything fallible.
-                let body = self
-                    .agent
-                    .with_session(sid, |s| s.finalized_handle(&hole.0))
-                    .map_err(|e| DriverError::Session(e.to_string()))?
-                    .ok_or_else(|| {
-                        DriverError::Session(
-                            "AsyncSpawnWith: spawner frame carries no untaken body closure".into(),
-                        )
-                    })?;
-                let tid = green.next_tid;
-                green.next_tid += 1;
-                let realm =
-                    tidepool_codegen::jit_machine::RealmId((1u64 << 61) | green.next_thread_realm);
-                green.next_thread_realm += 1;
-                green.threads.insert(
-                    tid,
-                    GreenThread {
-                        realm,
-                        state: GreenThreadState::Running,
-                    },
-                );
-                let thread_start = self
-                    .agent
-                    .with_session(sid, |s| {
-                        s.run_forked("async_thread", body, realm, Some(table))
-                    })
-                    .map_err(|e| DriverError::Session(e.to_string()))?
-                    .map_err(|e| DriverError::Session(format!("run_forked failed: {e}")))?;
-                green.ready.push_back(GreenReady {
-                    chain: GreenChain::Thread(tid),
-                    outcome: thread_start,
-                });
-                let tid_value = (tid)
-                    .to_value(table)
-                    .map_err(|e| DriverError::Session(format!("AsyncSpawnWith tid box: {e}")))?;
-                self.agent.resume_with_value(node, hole, tid_value).await?;
-                Ok(false)
-            }
-            Some("AsyncJoinAnyWith") => {
-                let ids = green_int_list_field(request, 0, table);
-                let winner = ids.iter().copied().find(|&tid| {
-                    green
-                        .threads
-                        .get(&tid)
-                        .is_some_and(|t| !matches!(t.state, GreenThreadState::Running))
-                });
-                match winner {
-                    Some(winner) => {
-                        let winner_value = winner.to_value(table).map_err(|e| {
-                            DriverError::Session(format!("AsyncJoinAnyWith winner box: {e}"))
-                        })?;
-                        self.agent
-                            .resume_with_value(node, hole, winner_value)
-                            .await?;
-                        Ok(false)
-                    }
-                    None => Ok(true),
-                }
-            }
-            Some("AsyncStatusWith") => {
-                let tid = green_int_field(request, 0, table);
-                let code: i64 = match green.threads.get(&tid).map(|t| &t.state) {
-                    Some(GreenThreadState::Settled(_)) => 1,
-                    Some(GreenThreadState::Cancelled) => 2,
-                    _ => 0,
-                };
-                let code_value = code
-                    .to_value(table)
-                    .map_err(|e| DriverError::Session(format!("AsyncStatusWith code box: {e}")))?;
-                self.agent.resume_with_value(node, hole, code_value).await?;
-                Ok(false)
-            }
-            Some("AsyncResultWith") => {
-                let tid = green_int_field(request, 0, table);
-                match green.threads.get(&tid).map(|t| &t.state) {
-                    Some(GreenThreadState::Settled(GreenResult::Value(v))) => {
-                        let v = v.clone();
-                        self.agent.resume_with_value(node, hole, v).await?;
-                    }
-                    Some(GreenThreadState::Settled(GreenResult::Root(h))) => {
-                        let h = *h;
-                        self.agent.resume_with_borrowed_root(node, hole, h).await?;
-                    }
-                    _ => {
-                        return Err(DriverError::Session(format!(
-                            "AsyncResultWith: thread {tid} has not settled (gate with \
-                             asyncStatus first)"
-                        )))
-                    }
-                }
-                Ok(false)
-            }
-            Some("AsyncCancelWith") => {
-                let tid = green_int_field(request, 0, table);
-                if let Some(entry) = green.threads.get_mut(&tid) {
-                    if matches!(entry.state, GreenThreadState::Running) {
-                        let realm = entry.realm;
-                        entry.state = GreenThreadState::Cancelled;
-                        self.agent
-                            .with_session(sid, |s| {
-                                s.close_realm(realm);
-                            })
-                            .map_err(|e| DriverError::Session(e.to_string()))?;
-                        if let Some(h) = self.handlers.lock().event.as_mut() {
-                            h.registry_mut().publish_async_done(tid);
-                        }
-                        self.wake_green_waiters(
-                            tid,
-                            table,
-                            sid,
-                            &mut green.waiters,
-                            &mut green.ready,
-                        )?;
-                    }
-                }
-                let unit = ()
-                    .to_value(table)
-                    .map_err(|e| DriverError::Session(format!("AsyncCancelWith () bridge: {e}")))?;
-                self.agent.resume_with_value(node, hole, unit).await?;
-                Ok(false)
-            }
-            other => Err(DriverError::Session(format!(
-                "answerer window suspended on an unexpected Green constructor on its own \
-                 chain ({other:?})"
-            ))),
         }
     }
 
@@ -6421,17 +6361,20 @@ impl SelfHarnessDriver {
             .map_err(|e| DriverError::Session(format!("thread hole classify: {e}")))?;
         match classified.routing {
             HoleRouting::Green => {
-                self.service_green_hole(
-                    chain,
-                    hole.cont_id(),
-                    &request,
-                    &table,
-                    &mut green.threads,
-                    &mut green.waiters,
-                    &mut green.next_tid,
-                    &mut green.next_thread_realm,
-                    &mut green.ready,
-                )?;
+                let _ = self
+                    .service_green_hole(
+                        chain,
+                        hole.cont_id(),
+                        &request,
+                        &table,
+                        &mut green.threads,
+                        &mut green.waiters,
+                        &mut green.next_tid,
+                        &mut green.next_thread_realm,
+                        &mut green.ready,
+                        GreenDelivery::Raw,
+                    )
+                    .await?;
                 Ok(None)
             }
             HoleRouting::Fork {
