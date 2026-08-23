@@ -791,7 +791,7 @@ impl RepoEventHandler {
     }
 
     // `pub` (not `fn`, unlike this module's other tagged-verb methods):
-    // PRD 20 S1-L4 wave 2's driver-side non-blocking await-hole servicing
+    // PRD 20 S1-L4 wave 2's driver-side non-blocking parked-await servicing
     // calls this DIRECTLY, from `tidepool-harness`, as its own poll step —
     // never `repo_event_await`, whose internal sleep loop would stall the
     // whole green-thread scheduler. Identical to the `RepoEventDrain` verb
