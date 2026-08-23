@@ -256,6 +256,76 @@ async fn api_tree_reports_ids_parent_links_and_statuses() {
     assert_eq!(child["status"], "running", "{child:?}");
 }
 
+/// Fork-subsumes-split step 3: a fork child's derived id
+/// (`SelfHarnessDriver::fork_child_label`'s shape — `<parent>/f<idx>-<slug>`,
+/// possibly nested two levels under a branch child) needs no special-casing
+/// here — `/api/tree`'s parent derivation is purely the id's own slash path,
+/// so a fork-shaped segment is indistinguishable from any other. This test
+/// exists to PIN that claim against the exact shape the driver produces,
+/// not just against the generic `root/1-x` fixture the other tests use.
+#[tokio::test(flavor = "multi_thread")]
+async fn api_tree_accepts_a_fork_child_shaped_path_nested_under_a_branch() {
+    let (addr, state) = boot().await;
+    let base = format!("http://{addr}");
+    let client = Client::new();
+
+    let root_gate = state.register_node(tidepool_web::DEFAULT_NODE_ID);
+    let branch_gate = root_gate
+        .node_gate("root/1-x")
+        .expect("branch child gate registers");
+    let fork_gate = branch_gate
+        .node_gate("root/1-x/f0-explore-perf")
+        .expect("fork child gate registers under the branch child");
+    fork_gate.node_seeded("root/1-x/f0-explore-perf", "explore perf implications of X");
+
+    let resp = client.get(format!("{base}/api/tree")).send().await.unwrap();
+    assert_eq!(resp.status(), 200);
+    let body: Value = resp.json().await.unwrap();
+    let arr = body.as_array().expect("array response");
+
+    let fork_node = arr
+        .iter()
+        .find(|n| n["id"] == "root/1-x/f0-explore-perf")
+        .expect("fork child entry present");
+    assert_eq!(fork_node["parent"], "root/1-x", "{fork_node:?}");
+    assert_eq!(fork_node["label"], "f0-explore-perf", "{fork_node:?}");
+    assert_eq!(fork_node["status"], "running", "{fork_node:?}");
+
+    fork_gate.retire_node("root/1-x/f0-explore-perf");
+    fork_gate.node_finalized("root/1-x/f0-explore-perf", "42");
+
+    let body: Value = client
+        .get(format!("{base}/api/tree"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let arr = body.as_array().expect("array response");
+    let fork_node = arr
+        .iter()
+        .find(|n| n["id"] == "root/1-x/f0-explore-perf")
+        .expect("fork child entry still present after retirement");
+    assert_eq!(
+        fork_node["status"], "done",
+        "a retired, finalized fork child greys out (done), same as a branch child: {fork_node:?}"
+    );
+
+    let panel = client
+        .get(format!("{base}/node/root%2F1-x%2Ff0-explore-perf/panel"))
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    assert!(
+        panel.contains("explore perf implications of X"),
+        "the fork child's seed must appear on its own panel: {panel}"
+    );
+}
+
 /// A pending ask outranks everything in the derived status — the SAME rule
 /// `render::status` applies for the `/legacy` outline must show up in the
 /// `/api/tree` JSON too, since both derive from the one function.

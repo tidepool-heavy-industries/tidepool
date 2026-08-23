@@ -16,6 +16,12 @@
 //!   sessions) — neither supersedes the other, each resolves independently.
 //! - `root/3-fails` gets a seed and then fails (round exhaustion), showing
 //!   the failure block.
+//! - `root/1-finishes/f0-check-scaling` — a FORK child nested under
+//!   `root/1-finishes` (fork-subsumes-split step 3's derived-label shape,
+//!   `SelfHarnessDriver::fork_child_label`'s `<parent>/f<idx>-<slug>`
+//!   convention): seed → finalized value, demonstrating that a fork child
+//!   appears on the tree as an ordinary descendant of whatever node forked
+//!   it, no different from a structurally-labeled branch child.
 //!
 //! Real-driver wiring lives in the sibling `tidepool-selfharness` binary,
 //! which boots the same server via
@@ -126,6 +132,21 @@ fn demo_tree(gate: Arc<WebGate>) {
             "root/3-fails",
             "round exhaustion — 8 rounds without finalize",
         );
+    }
+
+    // A FORK child, nested under `root/1-finishes` — the shape
+    // `SelfHarnessDriver::fork_child_label` derives (`<parent>/f<idx>-<slug>`),
+    // demonstrated here via the SAME `node_gate`/`node_seeded`/`retire_node`/
+    // `node_finalized` calls the real driver makes, so the tree/outline show
+    // a fork child exactly like any other descendant node.
+    if let Some(fork_child) = gate.node_gate("root/1-finishes/f0-check-scaling") {
+        fork_child.node_seeded(
+            "root/1-finishes/f0-check-scaling",
+            "Check whether the chosen approach still holds up at 10x scale.",
+        );
+        fork_child.post_note("Scaling looks linear up to the tested range.");
+        fork_child.retire_node("root/1-finishes/f0-check-scaling");
+        fork_child.node_finalized("root/1-finishes/f0-check-scaling", "\"holds up\"");
     }
 }
 
