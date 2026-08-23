@@ -354,6 +354,8 @@ The `tidepool` binary provides these effect handlers:
 
 > **`--debug` flag**: Run `tidepool --debug` to enable the **Meta** effect (`MetaConstructors`, `MetaLookupCon`, `MetaPrimOps`, `MetaEffects`, `MetaDiagnostics`, `MetaVersion`, `MetaHelp`) for runtime introspection. For git operations, use `run "git ..."` via the Exec effect.
 
+> **Effect declaration is not effect servicing.** Every constructor above compiles in the base stack on `tidepool` and `tidepool-repl`, but those two servers share one request parser that recognizes only `AskWith` and `RunLLMTurnWith` as suspensions it can answer. `RunLLMTurnFreezeWith`, `ForkWith`, and `ForkAllWith` compile and suspend the machine like any other interposed effect, then fail at request-extraction time — there is no scheduler behind them on these two surfaces. The resident harness (`tidepool-harness`) is the one surface that implements the fuller vocabulary: freezing a context, forking one or many sub-answerers, and finalizing a node all route through its own session-tree turn engine instead.
+
 ### MCP Server Usage Examples
 
 With GHC available, the servers compile live. The `eval` tool takes one Haskell expression per call; `tidepool-repl` keeps a resident session (see [The repl: typed working memory](#the-repl-typed-working-memory)). The examples below use the one-shot form; every one also works turn-by-turn in the repl, where bindings persist between them.
