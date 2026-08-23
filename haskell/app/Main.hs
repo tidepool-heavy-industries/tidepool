@@ -102,6 +102,19 @@ main = do
         -- + rich-result emission, in one process. Checked before 'isSessionMode'
         -- since a bind/expr turn also carries --session-root/--inject-val.
         | argTurn args                        -> runTurnMode args file
+        -- Explicit multi-target mode (--targets a,b) ALWAYS wins over
+        -- 'isSessionMode', whether or not session flags are ALSO present —
+        -- checked before it since 'processSessionFile' below has no
+        -- '--targets' handling at all (it compiles exactly one target,
+        -- 'argTarget'). This is what lets a caller combine `--targets a,b`
+        -- with `--session-root <dir> --inject-val <mod>` in one spawn (the
+        -- harness driver's fused outer render/loop compile injecting its
+        -- stable-val context, plans/turn-latency-state-injection.md):
+        -- 'processFile' itself is session-scope-aware now (see
+        -- 'scopeFromArgs'), so this still resolves the injected module for a
+        -- multi-target compile; a plain multi-target caller with no session
+        -- flags is byte-identical to before (`scope = Nothing` there).
+        | not (null (argTargets args))        -> timePhase timing "total" (processFile timing args file)
         -- Session mode (Wave 3b): bind/reference turn with iface injection +
         -- (for binds) thin-iface write + BoundBinder sidecar. Only the FIRST
         -- file is processed (matching the two guards above) — one invocation,
@@ -198,6 +211,22 @@ reportDiags (Right ()) = putStrLn (renderDiagsJson [])
 -- turns set @--session-root@ (+ @--inject-val@); bind turns add @--session-bind@.
 isSessionMode :: Args -> Bool
 isSessionMode args = argSessionBind args || isJust (argSessionRoot args)
+
+-- | Build the 'SessionScope' a session-aware compile injects, from the raw
+-- @--session-root@/@--inject-val@ args. The ONE place this construction
+-- happens — 'processFile' (multi-target compiles that also carry session
+-- flags, e.g. the harness driver's stable-val injection,
+-- @plans/turn-latency-state-injection.md@), 'processSessionFile', and
+-- 'runTurnMode' all build the SAME scope from the SAME two args, so this
+-- used to be three copies kept in sync by hand. Unconditional — the caller
+-- decides whether to wrap it in 'Just' (only when 'isSessionMode' holds) or
+-- pass 'Nothing'; an inert scope (@argInjectVals = []@) is harmless either
+-- way ('isSessionScopeActive' routes it straight back to 'normalVariant').
+scopeFromArgs :: Args -> SessionScope
+scopeFromArgs args = SessionScope
+  { ssRoot      = fromMaybe "" (argSessionRoot args)
+  , ssValIfaces = mapMaybe parseValModule (argInjectVals args)
+  }
 
 data Args = Args
   { argOutDir :: Maybe FilePath
@@ -303,7 +332,18 @@ processFile timing args path = do
       mTarget = argTarget args
   hPutStrLn stderr $ "Processing: " ++ path
   res <- try $ do
-    result <- runPipeline path (argIncludes args)
+    -- Session-scope-aware ONLY when the caller actually set session flags
+    -- (`isSessionMode`) — every other caller keeps `scope = Nothing`, byte-
+    -- identical to the unconditional `runPipeline` this replaces
+    -- (`runPipelineSession Nothing == runPipeline`; an inert scope routes to
+    -- the same `normalVariant` path — see `scopeFromArgs`'s doc). This is
+    -- what lets `--targets a,b --session-root <dir> --inject-val <mod>`
+    -- (the harness driver's stable-val injection,
+    -- `plans/turn-latency-state-injection.md`) reach a multi-target compile
+    -- at all: `main`'s dispatch sends a BARE `--session-root` to
+    -- `processSessionFile` instead, which has no `--targets` handling.
+    let scope = if isSessionMode args then Just (scopeFromArgs args) else Nothing
+    result <- runPipelineSession scope path (argIncludes args)
     let binds = prBinds result
         tycons = prTyCons result
         hscEnv = prHscEnv result
@@ -848,16 +888,18 @@ runMultiTargetClosed timing outDir hscEnv binds tycons mCapturedTy warnTexts tar
 -- emit the BoundBinder sidecar. Non-session extraction stays on 'processFile'.
 processSessionFile :: Args -> FilePath -> IO ()
 processSessionFile args path = do
-  -- The self-iterating harness's full-compile lane never reaches this
-  -- session-mode path (compile.rs passes only --target, never
-  -- --session-root) — this read is here purely so 'writeWholeModuleClosed'
-  -- (shared with 'processFile') behaves identically regardless of caller.
+  -- The self-iterating harness's fused outer render/loop compile never
+  -- reaches this session-mode path even though it now DOES carry
+  -- --session-root/--inject-val (its stable-val injection,
+  -- plans/turn-latency-state-injection.md): 'main' checks
+  -- `not (null (argTargets args))` (which its multi-target --targets
+  -- result,__selfHarnessLoopEntry always is) BEFORE 'isSessionMode', so it
+  -- always lands on 'processFile' instead. This read is here purely so
+  -- 'writeWholeModuleClosed' (shared with 'processFile') behaves identically
+  -- regardless of caller.
   timing <- readTimingEnabled
   hPutStrLn stderr $ "Processing (session): " ++ path
-  let scope = SessionScope
-        { ssRoot      = fromMaybe "" (argSessionRoot args)
-        , ssValIfaces = mapMaybe parseValModule (argInjectVals args)
-        }
+  let scope = scopeFromArgs args
       -- The repl wrapper's own compile-target binding is scaffold-reserved
       -- (@__result@, not @result@) so it can never collide with a user's own
       -- chosen bind name promoted into a later turn's session-lib import —
@@ -960,10 +1002,7 @@ runTurnMode args path = do
           Just f  -> return f
           Nothing -> error ("--turn: no --turn-template for kind " ++ templateSelectorWireName selector)
         (spliced, _modName, modulePath) <- spliceInto tmplFile
-        let scope = SessionScope
-              { ssRoot      = fromMaybe "" (argSessionRoot args)
-              , ssValIfaces = mapMaybe parseValModule (argInjectVals args)
-              }
+        let scope = scopeFromArgs args
         result <- runPipelineSession (Just scope) modulePath (argIncludes args)
         let binds       = prBinds result
             tycons      = prTyCons result

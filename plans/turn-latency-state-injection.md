@@ -1,8 +1,166 @@
 # Turn latency: state injection for the outer render/loop compile
 
-**Status: designed, not started.** Narrow-first per operator decision
+**Status: landed (2026-08-22).** Narrow-first per operator decision
 (2026-08-20): prove the mechanism on the one compile that dominates turn wall
-time; generalize the memo keying later if it earns it.
+time; generalize the memo keying later if it earns it. The fused outer
+render/loop compile's SOURCE is now turn-invariant, and the compile memo
+verifiably HITS it from the second turn onward — see "Landed" below for what
+shipped, the one design delta found only during testing, and the receipts.
+
+## Drift note (implementation start, 2026-08-22)
+
+Deltas found between this doc and the current code, before any behavior
+change landed:
+
+1. **The outer render/loop compile has zero session-plane wiring today.**
+   `SelfHarnessDriver::compile_cycle_entry` calls `engine::compile_turns` →
+   `tidepool_runtime::artifacts::compile_targets`, which never sets
+   `--session-root`/`--inject-val`/`--session-bind` on its `ExtractCmd` — the
+   state/operator-msg splice is pure source text, exactly as the Problem
+   section says, but there was no prior partial wiring to build on.
+2. **`--session-root` alone reroutes `tidepool-extract-bin`'s dispatch away
+   from the multi-target path.** `Main.hs`'s `main` sends `isSessionMode args
+   -> processSessionFile` ahead of the plain `processFile` (multi-target)
+   branch, and `processSessionFile` only ever compiles ONE target
+   (`argTarget`, defaulting to `__result`) — it has no `--targets` handling
+   at all. The fused compile needs BOTH targets (`result` +
+   `__selfHarnessLoopEntry`) in one spawn, so turning on `--session-root`
+   unmodified would silently drop the loop entry. Fix (in scope, not a new
+   crate boundary): reorder `main`'s guards so `not (null argTargets)` wins
+   over `isSessionMode`, and make `processFile` itself session-scope-aware
+   (`runPipelineSession (if isSessionMode args then Just (scopeFromArgs args)
+   else Nothing)` in place of the unconditional `runPipeline`). Verified safe
+   for every existing non-session multi-target caller: `runPipelineSession
+   Nothing`/an inert scope is byte-identical to `normalVariant`
+   (`runPipelineSession`'s own doc), and no existing caller sets
+   `--session-root` alongside `--targets`.
+3. **The value-plane "tenure a session Val binding" mechanism already exists
+   end to end** (`tidepool_runtime::session::turn::compile_session_turn`'s
+   `--session-bind` path + `ResidentSession::run_bind`, which compiles, runs,
+   tenures, AND registers the `BindingTable` entry in one call) — no new
+   Rust/Haskell machinery needed for that half. The one gap: the harness
+   driver's outer session (`OuterSession { sid, .. }`) is a bare `SessionId`
+   today with no prior value-plane use, so `run_bind` had never been called
+   against it.
+4. **Reusing `Tidepool.Session.Val.G<g>`'s existing naming scheme at a
+   reserved, non-rotating `Generation(0)`** — rather than inventing a new
+   module-kind/name shape (the plan's illustrative
+   `Tidepool.Session.Val.HarnessCtx`) — turned out sufficient and needs zero
+   Haskell-side naming changes: `PersistentSession::new` starts `val_gen` at
+   `Generation(0)` ("the empty session — no Lib/Val module exists yet"), a
+   real bind always mints `val_gen().next()` (>= 1), and `set_val_gen`'s
+   monotonic-max rule means rebinding at a passed-in `gen: Generation(0)`
+   every cycle never advances the counter — so gen 0 can never collide with a
+   real future bind on this session. One module (`Tidepool.Session.Val.G0`)
+   carries BOTH crossings as a single `(Text, Text)` tuple binder
+   (`__harnessCtx`), rather than two separately-bound names, since
+   `ResidentSession` exposes only the single-binder `run_bind` (no
+   multi-binder/projected wrapper) and adding one was judged out of the
+   narrow scope this pass is locked to.
+5. **Scope stays narrow at the driver layer too**: only
+   `compile_cycle_entry` (the production fused path `run_one_cycle` actually
+   calls) gets the injection treatment. The older unfused paths
+   (`compile_outer`/`render_framing`, and `run_loop_fragment_inner`'s
+   `precompiled: None` branch — doc'd as "a direct fragment API a test drives
+   in isolation, never called from `run_one_cycle`") keep the original
+   literal-splice `state_cross::state_in`/`operator_msg_in` unchanged; new
+   sibling functions carry the injected-Text shape for the one path in scope.
+6. **The harness-ctx refresh's own compile is intentionally never
+   memo-cacheable** — a `--session-bind` invocation with fresh `(Text, Text)`
+   literal content every cycle is hazard (b) in `plans/compile-memo.md` by
+   construction. It is the plan's own "smaller of the two wins" cost: a
+   two-import (`Data.Text` only) tuple-literal compile, orders of magnitude
+   cheaper than the ~51-module fused outer module it unblocks.
+
+## Landed (2026-08-22)
+
+Every piece above shipped as designed, plus one delta the drift note above
+didn't anticipate — found only by actually running the two-cycle acceptance
+test, not by reading:
+
+7. **The harness-ctx bind's `--session-root` MUST be the same directory the
+   rest of the OUTER session already uses (`SelfHarnessDriver::outer_plane_root`),
+   not a separate directory.** A first attempt gave the harness-ctx bind its
+   own `selfharness/harness-ctx` dir. That broke the ANSWERER's own turn
+   compile with `injectSessionIface: readIface failed for
+   Tidepool.Session.Val.G0` — because the outer session is ONE
+   `PersistentSession`/`BindingTable` (the one-session collapse), so the
+   moment `Val.G0` is registered there, EVERY later compile on that session
+   that consults `live_val_modules`/`current_val_modules` (in particular an
+   answerer turn's compile, which injects every live session value) reports
+   `Val.G0` as something IT should inject too — resolving the iface from
+   WHATEVER session_root THAT caller uses (`outer_plane_root`, the decl
+   plane's root), not a directory only the harness-ctx refresh knew about.
+   Fixed by having `SelfHarnessDriver::harness_ctx_session_root` delegate to
+   `outer_plane_root` outright: one root per session, matching every other
+   consumer of this session's value plane. Safe to share — `open_outer_plane`
+   wipes that dir only at `bootstrap` (once per session; a machine ROTATION
+   transfers the existing `SessionLib` rather than re-wiping), and the
+   harness-ctx iface's content is a pure function of a fixed name/type, so
+   overwriting it in place every cycle alongside the decl plane's own
+   `Lib.G<g>.hs` files is harmless.
+
+**What shipped:**
+- `tidepool-repr::session_ids::SessionModule::relative_hi_path` — the `.hi`
+  path convention the memo fingerprints from.
+- `tidepool_runtime::cache::Invocation::stable_val` + `invocation_key`'s
+  allowlist widening — accepts `--session-root`/one matching `--inject-val`
+  as cacheable, content-fingerprinting the iface file; every OTHER
+  `--inject-val` value stays uncacheable exactly as before. Adversarial tests
+  in `cache.rs`: path-independence, content-sensitivity, and the
+  still-refused non-stable-module case.
+- `tidepool_runtime::artifacts::{StableValInject, compile_targets_with_stable_inject}`
+  and `tidepool_harness::engine::compile_turns_with_stable_inject` — the
+  plumbing from `ExtractCmd` through the memo key, additive (every existing
+  caller passes `stable_val: None`, byte-for-byte unchanged).
+- `haskell/app/Main.hs`: `processFile` is now session-scope-aware
+  (`scopeFromArgs`, shared with `processSessionFile`/`runTurnMode` — three
+  copies collapsed to one), and `main`'s dispatch checks `--targets`
+  non-empty before `isSessionMode`, so a multi-target + session-scoped
+  invocation reaches the multi-target path instead of the single-target
+  `processSessionFile`.
+- `state_cross::{harness_ctx_module, HARNESS_CTX_BINDING, harness_ctx_source,
+  state_in_via_ctx, operator_msg_in_via_ctx}` — the injected-Text siblings of
+  `state_in`/`operator_msg_in`. The originals are UNCHANGED and still used by
+  the unfused test-only paths (`compile_outer`/`render_framing`,
+  `run_loop_fragment_inner`'s `precompiled: None` branch) — narrow scope,
+  per drift-note item 5.
+- `SelfHarnessDriver::refresh_harness_ctx` — compiles the tiny `__result ::
+  Eff '[] (Text, Text)` module (the `Eff` wrapper is load-bearing: a bare
+  non-`Eff` value doesn't satisfy the suspendable-binding JIT calling
+  convention `run_bind` drives it through) and registers it via `run_bind`,
+  called at the top of `compile_cycle_entry` every cycle, before the fused
+  compile.
+- `tests/state_injection_memo_hit.rs` — the acceptance test: two real cycles
+  of the reference harness with genuinely different `State`, asserting (a)
+  the `Event::OuterCompile{label:"render+loop"}` source is byte-identical
+  across both, and (b) cycle 2 pays strictly fewer `tidepool-extract` spawns
+  than cycle 1 (a pinned private memo dir, `support::isolate_compile_memo`).
+  Not an exact spawn-count delta: the answerer's OWN turn-compile path
+  (`EngineConfig::turn_target`'s standalone shim probe) is independently
+  memoized and ALSO warms up between cycle 1 and cycle 2, compounding with
+  the fused compile's own hit — confirmed directly via temporary
+  instrumentation while developing this test (cycle 1's fused compile: 1
+  spawn, MISS; cycle 2's: 0, HIT) and removed before landing.
+- `tests/acceptance_boot_compile_count.rs`: `PRE_MODEL_EXTRACT_COMPILES`
+  updated 1 → 2 — the harness-ctx refresh adds one small pre-model spawn
+  every cycle (including the first), the accepted cost for turning the
+  dominant fused compile into a memo hit from cycle 2 onward.
+
+**Verification:** `cargo check --workspace` clean; `cargo fmt --all --check`
+clean; fast tier (2049 tests) green; all 5 documented `tidepool-harness`
+battery shards green (150 tests); `tidepool-extract-cmd`'s full suite green;
+targeted `tidepool-runtime` legs (cache/session/scope/extract-spawn-count)
+green except one PRE-EXISTING, unrelated failure
+(`cache_tests::test_corrupted_cache_recovery`, confirmed via `git stash` to
+fail identically on the clean branch tip — the eval cache dir now also holds
+the materialized stdlib as a subdirectory, and the test's cleanup loop
+assumes every top-level entry is a file). `cargo clippy --workspace` could
+not be evaluated: a pre-existing `tidepool-codegen` `len_without_is_empty`
+clippy failure (also confirmed via `git stash` on the clean tip, a
+clippy-version drift unrelated to this change) blocks the whole workspace
+build under `-D warnings`, and `tidepool-codegen` is out of this lane's
+boundary to fix.
 
 ## Problem
 

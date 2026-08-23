@@ -97,7 +97,20 @@ use tidepool_harness::{
 /// ONE `tidepool-extract` spawn (wave-3 render+loop fusion,
 /// `plans/post-restart/extract-wave/spawn-latency/04-turn-latency-plan.md`
 /// §2). Item 0's target end-state is reached.
-pub const PRE_MODEL_EXTRACT_COMPILES: u64 = 1;
+///
+/// MEASURED 2026-08-22 on this branch (this suite, clean cache): **2** —
+/// `plans/turn-latency-state-injection.md`'s stable-val injection adds ONE
+/// small `SelfHarnessDriver::refresh_harness_ctx` `--session-bind` spawn
+/// (compiling a tiny `(Text, Text)` tuple literal, `Data.Text`-only) BEFORE
+/// the fused render+loop compile, every cycle — deliberately never itself
+/// memo-cacheable (fresh literal content each time; hazard (b) in
+/// `plans/compile-memo.md`). This IS a regression by this test's own metric
+/// (one more pre-model spawn), and it is the intended tradeoff: the fused
+/// render+loop compile it unblocks is now byte-identical turn to turn, so
+/// EVERY cycle after the first is a memo HIT for that (dominant, ~6-minute)
+/// spawn — see `tests/state_injection_memo_hit.rs`, which pins that win
+/// directly. A single extra cheap spawn on cycle 1 is the accepted cost.
+pub const PRE_MODEL_EXTRACT_COMPILES: u64 = 2;
 
 fn repo_root() -> PathBuf {
     let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));

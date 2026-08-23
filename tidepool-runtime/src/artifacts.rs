@@ -134,6 +134,24 @@ impl AsksSidecar {
 }
 
 // ---------------------------------------------------------------------------
+// Stable session-Val injection (turn-latency-state-injection)
+// ---------------------------------------------------------------------------
+
+/// A stable, never-rotating session `Val` module to inject via
+/// `--session-root <dir> --inject-val <module>` — see
+/// [`cache::Invocation::stable_val`]'s doc for why this is safe to treat as
+/// CACHEABLE despite naming a session-scoped iface. The ONLY caller today is
+/// the self-iterating harness driver's fused outer render/loop compile
+/// (`plans/turn-latency-state-injection.md`); every other
+/// `--inject-val`/`--session-root` use (the interactive session's rotating
+/// `Val.G<g>` value plane, `tidepool_runtime::session::turn`) stays on the
+/// ordinary uncacheable path and never constructs one of these.
+pub struct StableValInject<'a> {
+    pub module: tidepool_repr::SessionModule,
+    pub session_root: &'a Path,
+}
+
+// ---------------------------------------------------------------------------
 // The artifact bundle
 // ---------------------------------------------------------------------------
 
@@ -196,6 +214,13 @@ pub(crate) struct CompileInvocation<'a> {
     /// `module Expr`, the eval lane's historical default is `Input`.
     pub fallback_module_name: &'a str,
     pub cache: CacheStrategy<'a>,
+    /// A [`StableValInject`] to apply to this invocation's `ExtractCmd`
+    /// (`--session-root`/`--inject-val`), and to carry into the memo key as
+    /// [`cache::Invocation::stable_val`] so the invocation stays cacheable.
+    /// `None` for both existing front doors (`compile_haskell`,
+    /// `compile_targets`) — only [`compile_targets_with_stable_inject`] sets
+    /// it.
+    pub stable_val: Option<StableValInject<'a>>,
 }
 
 /// Compile a [`CompileInvocation`] against ONE `tidepool-extract` spawn:
@@ -278,6 +303,10 @@ pub(crate) fn compile_invocation(
         .output_dir(temp_dir.path())
         .targets(inv.targets)
         .includes(inv.include);
+    if let Some(sv) = &inv.stable_val {
+        cmd.session_root(sv.session_root)
+            .inject_val(sv.module.module_name());
+    }
 
     // Persistent build-products dir (module-granular GHC recompilation
     // avoidance across spawns — see `crate::paths::build_products_dir`'s
@@ -342,6 +371,7 @@ pub(crate) fn compile_invocation(
             input_path: &input_path,
             include: inv.include,
             bin: &bin_path,
+            stable_val: inv.stable_val.as_ref().map(|sv| sv.module),
         });
         if let Some(key) = &key {
             let load_start = Instant::now();
@@ -415,6 +445,35 @@ pub fn compile_targets(
         bin,
         fallback_module_name: "Expr",
         cache: CacheStrategy::Invocation,
+        stable_val: None,
+    };
+    compile_invocation(&inv, on_stage)
+}
+
+/// As [`compile_targets`], but additionally injects a [`StableValInject`]
+/// (`--session-root <dir> --inject-val <module>`) — see that type's doc. The
+/// self-iterating harness driver's fused outer render/loop compile is the
+/// only caller (`plans/turn-latency-state-injection.md`).
+pub fn compile_targets_with_stable_inject(
+    source: &str,
+    targets: &[&str],
+    include: &[PathBuf],
+    bin: Option<&ResolvedExtractBin>,
+    stable_val: StableValInject<'_>,
+    on_stage: impl FnMut(&str, Duration, u64),
+) -> Result<CompiledArtifacts, CompileError> {
+    assert!(
+        !targets.is_empty(),
+        "compile_targets_with_stable_inject: at least one target is required"
+    );
+    let inv = CompileInvocation {
+        source,
+        targets,
+        include,
+        bin,
+        fallback_module_name: "Expr",
+        cache: CacheStrategy::Invocation,
+        stable_val: Some(stable_val),
     };
     compile_invocation(&inv, on_stage)
 }

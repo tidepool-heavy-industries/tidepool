@@ -2238,11 +2238,18 @@ impl SelfHarnessDriver {
         prior_state: Option<&Json>,
         plan: CycleEntryPlan,
     ) -> Result<(CompiledTurn, CompiledTurn), DriverError> {
+        // Register this cycle's (stateJson, operatorMsgJson) under the
+        // stable Val.G0 binding BEFORE compiling — the outer module's
+        // `--inject-val` reference below resolves at RUN time against
+        // whatever this call last registered on the OUTER session.
+        self.refresh_harness_ctx(prior_state)?;
+
         let outer = self.outer.as_ref().ok_or_else(not_bootstrapped)?;
         let imports = format!(
-            "qualified {} as {}",
+            "qualified {} as {}\n{}",
             outer.module_name,
-            state_cross::LOADED_QUALIFIER
+            state_cross::LOADED_QUALIFIER,
+            state_cross::harness_ctx_module().module_name(),
         );
         let stack = outer
             .cfg
@@ -2253,10 +2260,15 @@ impl SelfHarnessDriver {
         let include = outer.cfg.include.clone();
 
         let (loop_code, resume_helpers) = plan.into_code_and_helpers();
+        // FIXED text — turn-invariant by construction, see
+        // `state_cross::state_in_via_ctx`'s doc. `resume_helpers` stays a
+        // literal splice (unchanged, out of this pass's scope): it is
+        // non-empty on at most the first cycle after a boot fold, never
+        // re-paid every turn the way state/operator-msg were.
         let helpers = format!(
             "{}{}{}",
-            state_cross::state_in(prior_state),
-            state_cross::operator_msg_in(self.pending_operator_input.as_deref()),
+            state_cross::state_in_via_ctx(),
+            state_cross::operator_msg_in_via_ctx(),
             resume_helpers,
         );
         let render_code = format!(
@@ -2275,11 +2287,15 @@ impl SelfHarnessDriver {
             label: "render+loop".to_string(),
             source: src.clone(),
         });
-        let mut turns = engine::compile_turns(
+        let mut turns = engine::compile_turns_with_stable_inject(
             &extract_bin,
             &src,
             &["result", Self::LOOP_ENTRY_TARGET],
             &include,
+            tidepool_runtime::StableValInject {
+                module: state_cross::harness_ctx_module(),
+                session_root: &Self::harness_ctx_session_root(),
+            },
             timing::NO_NODE,
             timing::NO_ROUND,
         )
@@ -2291,6 +2307,99 @@ impl SelfHarnessDriver {
             DriverError::Session("fused outer compile: missing loop entry".into())
         })?;
         Ok((render_turn, loop_turn))
+    }
+
+    /// The `--session-root` the harness-ctx bind writes/reads its `.hi`
+    /// iface under — reuses [`Self::outer_plane_root`] rather than a
+    /// separate directory: the OUTER session's `PersistentSession` is ONE
+    /// `BindingTable`/value plane (the one-session collapse), so once
+    /// `Val.G0` is registered there, ANY later compile on the same session
+    /// that consults `live_val_modules`/`current_val_modules` — in
+    /// particular an answerer turn's compile, which injects every live
+    /// session value — reports it and expects to find its iface under
+    /// THIS SAME root, whichever caller set it up. Two sessions couldn't
+    /// each keep their own; there is exactly one root per session, already
+    /// named. Safe to write into: `open_outer_plane` wipes this dir only at
+    /// `bootstrap` (once per session — a machine ROTATION transfers the
+    /// existing `SessionLib` via [`Self::build_outer_session`] rather than
+    /// re-wiping), and the harness-ctx iface's CONTENT is a pure function of
+    /// [`state_cross::harness_ctx_module`] (a fixed name/type), so
+    /// overwriting it in place every cycle alongside the decl plane's own
+    /// `Lib.G<g>.hs` files is safe and keeps the memo's content fingerprint
+    /// stable turn to turn.
+    fn harness_ctx_session_root() -> PathBuf {
+        Self::outer_plane_root()
+    }
+
+    /// (Re-)bind [`state_cross::HARNESS_CTX_BINDING`] at
+    /// [`state_cross::harness_ctx_module`] on the OUTER session to this
+    /// cycle's `(stateJson, operatorMsgJson)` — the value half of
+    /// `plans/turn-latency-state-injection.md`'s injection (the type/iface
+    /// half is [`Self::compile_cycle_entry`]'s `--inject-val`).
+    ///
+    /// Compiles a tiny standalone module
+    /// ([`state_cross::harness_ctx_source`]) through
+    /// [`tidepool_runtime::session::turn::compile_session_turn`]'s
+    /// `--session-bind` path — its own small, deliberately non-cacheable
+    /// spawn (fresh literal content every cycle; see that function's doc) —
+    /// then runs it, tenures the result, and registers it against the OUTER
+    /// session via [`tidepool_runtime::session::resident::ResidentSession::run_bind`]:
+    /// the SAME `Tidepool.Session.Val.G<g>` value-plane mechanism the
+    /// interactive session already uses for its rotating binds, just at the
+    /// one reserved, non-rotating generation
+    /// ([`state_cross::harness_ctx_module`]'s doc explains why gen 0 can
+    /// never collide with a real one). `run_bind` both materializes AND
+    /// registers the binding in one call, so nothing further is needed here
+    /// for a later `--inject-val` reference (or this SAME session's own
+    /// `render`/`loop` run, which resolves it automatically via
+    /// `ResidentSession::run`'s existing `seed_external_env_for`) to see it.
+    fn refresh_harness_ctx(&mut self, prior_state: Option<&Json>) -> Result<(), DriverError> {
+        let state_json = prior_state.map_or_else(|| "null".to_string(), Json::to_string);
+        let operator_json = serde_json::to_string(&self.pending_operator_input)
+            .unwrap_or_else(|_| "null".to_string());
+        let src = state_cross::harness_ctx_source(&state_json, &operator_json);
+
+        let session_root = Self::harness_ctx_session_root();
+        std::fs::create_dir_all(&session_root)
+            .map_err(|e| DriverError::Session(format!("harness-ctx session root: {e}")))?;
+
+        let binding_name = state_cross::HARNESS_CTX_BINDING.to_string();
+        let turn = tidepool_runtime::session::turn::compile_session_turn(
+            &src,
+            &[],
+            &session_root,
+            &[],
+            Some(tidepool_runtime::session::turn::SessionBind {
+                names: std::slice::from_ref(&binding_name),
+                gen: 0,
+                probe_only: false,
+            }),
+        )
+        .map_err(|e| DriverError::Session(format!("harness-ctx bind compile failed: {e:?}")))?;
+        let binder = turn.binders.first().ok_or_else(|| {
+            DriverError::Session("harness-ctx bind: extract returned no binders".into())
+        })?;
+
+        let sid = self.outer_sid()?;
+        let outcome = self
+            .agent
+            .with_session(sid, |s| {
+                s.run_bind(
+                    "harness_ctx",
+                    &turn.expr,
+                    &turn.table,
+                    binder,
+                    tidepool_repr::Generation(0),
+                )
+            })
+            .map_err(|e| DriverError::Session(e.to_string()))?
+            .map_err(|e| DriverError::Session(format!("harness-ctx bind run failed: {e}")))?;
+        match outcome {
+            ResidentOutcome::Completed { .. } => Ok(()),
+            ResidentOutcome::Suspended { .. } => Err(DriverError::Session(
+                "harness-ctx bind suspended unexpectedly — must be a pure value".into(),
+            )),
+        }
     }
 
     /// Run ONE `render` → `loop` → (service each `runLLMTurn` hole) →
