@@ -3,11 +3,18 @@
 -- | Managed git worktrees.
 --
 -- A resident allocates isolated worktrees, looks retained ones back up by
--- durable id, and reads what git actually became.  It does not perform git
--- workflow here: there is no @rebaseOnto@, @merge@, @cherryPick@, conflict
--- resolution, or branch promotion in this module, and their absence is the
--- design rather than a gap.  Coding agents do that work with their native
--- tools; Tidepool observes the result through 'Tidepool.Event'.
+-- durable id, and reads what git actually became.  There is no @rebaseOnto@,
+-- @cherryPick@, conflict RESOLUTION, or branch promotion here, and their
+-- absence is the design rather than a gap: coding agents do that work with
+-- their native tools ('gitIn' is the escape hatch for exactly that authored
+-- policy), and Tidepool observes the result through 'Tidepool.Event'.
+--
+-- 'mergeBranchInto' is the ONE deliberate exception (PRD 21 C5's
+-- worktree-coordination fold): merge one branch into a target worktree,
+-- typed and classified once — conflict vs. a git failure that never entered a
+-- merge at all — instead of every authored harness re-deriving that
+-- classification over raw 'gitIn'. It is not a general workflow surface;
+-- resolving a conflict it reports is still authored policy.
 --
 -- == The vocabulary
 --
@@ -93,11 +100,17 @@ module Tidepool.Worktree
   , WorktreeHandle
   , WorktreeId (..)
   , BranchName
+  , mkBranchName
   , GitRef
   , GitOid
   , worktreeId
   , worktreeBranch
   , worktreeHead
+
+    -- * Merging (PRD 21 C5's one narrow, deliberate workflow primitive)
+  , MergeOutcome (..)
+  , mergeBranchInto
+  , gitIn
 
     -- * Receipts and failures
   , WorktreeReceipt (..)
@@ -120,6 +133,7 @@ import Tidepool.Effects
   , GitOid (..)
   , GitRef
   , M
+  , MergeOutcome (..)
   , Worktree (WorktreeBranchOf, WorktreeHeadOf)
   , WorktreeError (..)
   , WorktreeHandle
@@ -132,9 +146,12 @@ import Tidepool.Effects
   , liftEither
   , listWorktrees
   , lookupWorktree
+  , mergeBranchInto
   , worktreeId
   )
 import Tidepool.Prelude hiding (error)
+import Tidepool.Records (Proc)
+import Tidepool.Shell (runInTry)
 
 default (Int, Double, Text)
 
@@ -165,6 +182,14 @@ default (Int, Double, Text)
 -- "Tidepool.Effects" module's own pragma set, verbatim: these bodies used to
 -- be spliced INTO that module, so anything less is a scope this code did not
 -- have to compile against before.
+--
+-- 'mkBranchName' and 'gitIn' are ADDITIONS beyond that original fourteen —
+-- the shared home the two dogfood harnesses' byte-identical @gitIn@\/
+-- @renderExecError@ helpers promoted to, plus a smart constructor so a
+-- harness whose domain model carries a branch as plain 'Text' can still call
+-- 'mergeBranchInto'. 'mergeBranchInto' itself is representable and lives in
+-- the generated "Tidepool.Effects" (like 'createWorktree'), re-exported here
+-- for the same reason those three are.
 
 -- | Seed a managed worktree from the repository Tidepool is running
 -- against. Clean-by-default: a dirty source is REFUSED unless the spec
@@ -214,6 +239,22 @@ worktreeBranch h = send (WorktreeBranchOf (worktreeId h)) >>= liftEither
 -- guessing on its behalf.
 worktreeHead :: WorktreeHandle -> M GitOid
 worktreeHead h = send (WorktreeHeadOf (worktreeId h)) >>= liftEither
+
+-- | Build a 'BranchName' from a plain rendered branch name — for the case
+-- (the recursive companion's fold, in particular) where a node's own domain
+-- model only carries branch identity as 'Text' and needs it back as the typed
+-- argument 'mergeBranchInto' takes. Infallible, same as the wire boundary's
+-- own conversion: a malformed name still just fails at 'mergeBranchInto' as
+-- an ordinary git failure, not a validation error here.
+mkBranchName :: Text -> BranchName
+mkBranchName = BranchName
+
+-- | Plain @git@ run in a worktree this node owns — authored policy, not a
+-- runtime workflow verb (PRD 19's freeze, unchanged: this is Exec, not a git
+-- workflow verb). For the ONE workflow primitive PRD 19 does expose, see
+-- 'mergeBranchInto' above, not this.
+gitIn :: WorktreeHandle -> Text -> M (Either Text Proc)
+gitIn tree args = runInTry tree.handleReceipt.cwd ("git " <> args)
 
 renderGitOid :: GitOid -> Text
 renderGitOid (GitOid t) = t
