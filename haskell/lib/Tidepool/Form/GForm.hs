@@ -331,6 +331,7 @@ type family FieldKind (a :: Type) :: FormKind where
   FieldKind Bool = 'KBool
   FieldKind () = 'KUnit
   FieldKind (Maybe (Maybe a)) = 'KRejected
+  FieldKind (Maybe ()) = 'KRejected
   FieldKind (Maybe a) = 'KMaybe
   FieldKind [a] = 'KRejected
   FieldKind (Map k v) = 'KRejected

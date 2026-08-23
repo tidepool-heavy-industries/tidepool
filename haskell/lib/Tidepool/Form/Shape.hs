@@ -69,7 +69,10 @@ data FormShape
     -- ordinary sum: the operator sees an optional control, never a
     -- @Nothing@\/@Just@ constructor picker. Nested @Maybe (Maybe a)@ is
     -- rejected at compile time — three states cannot be communicated
-    -- cleanly by one optional control.
+    -- cleanly by one optional control. @Maybe ()@ is rejected too: both
+    -- @Nothing@ and @Just ()@ collect to JSON @null@, and @FromJSON (Maybe
+    -- a)@ maps every @null@ back to @Nothing@, so @Just ()@ could never
+    -- survive the round trip.
     OptionalShape FormShape
   | -- | A product: one constructor's fields, in declaration order.
     -- Presentation order IS declaration order.

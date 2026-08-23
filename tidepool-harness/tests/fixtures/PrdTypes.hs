@@ -16,6 +16,7 @@ module PrdTypes
   ( Environment (..)
   , Destination (..)
   , DeployRequest (..)
+  , MaybeUnitField (..)
   ) where
 
 import GHC.Generics (Generic)
@@ -38,4 +39,11 @@ data DeployRequest = DeployRequest
   , runMigrations :: Bool
   , releaseNote   :: Maybe Text
   }
+  deriving (Generic, FromJSON)
+
+-- | Fixture for the Medium-6 `Maybe ()` rejection: `FormRoot`/`GForm`'s
+-- `FieldCheck` must reject this field at compile time, naming it and
+-- explaining why (`Just ()` and `Nothing` are indistinguishable once
+-- collected — both are JSON `null`).
+data MaybeUnitField = MaybeUnitField { flag :: Maybe () }
   deriving (Generic, FromJSON)

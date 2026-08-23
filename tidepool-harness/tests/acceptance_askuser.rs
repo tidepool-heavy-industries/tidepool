@@ -747,3 +747,49 @@ fn prd_example_adts_compile_with_the_bare_derive_contract() {
         result.err().map(|e| e.to_string())
     );
 }
+
+/// Medium-6 regression: a `Maybe ()` field must be rejected at COMPILE time,
+/// naming the field — `Nothing` and `Just ()` both collect to JSON `null`,
+/// and `FromJSON (Maybe a)` maps every `null` back to `Nothing`, so `Just
+/// ()` could never survive the round trip even though the rendered form
+/// offers two distinct states.
+#[test]
+fn maybe_unit_field_is_a_compile_error_naming_the_field() {
+    support::require_extract();
+    let mut cfg = EngineConfig::from_decls(answerer_decls(), prelude_dir(), None)
+        .expect("answerer engine config");
+    cfg.include.push(fixtures_dir());
+
+    let code = "askUser @MaybeUnitField";
+    let target = cfg.turn_target(None).expect("turn target");
+    let src = tidepool_harness::engine::template_turn_for(
+        &cfg.decls,
+        &target.stack,
+        code,
+        "PrdTypes",
+        "",
+        false,
+    );
+    let result = tidepool_harness::engine::compile_turn(
+        &cfg.extract_bin,
+        &src,
+        "result",
+        &target.include,
+        tidepool_harness::timing::NO_NODE,
+        tidepool_harness::timing::NO_ROUND,
+    );
+    let err = result
+        .err()
+        .expect("askUser @MaybeUnitField must be a compile error, not a runtime one");
+    let diags = match &err {
+        tidepool_runtime::CompileError::Diagnostics(diags) => diags.clone(),
+        other => panic!("expected a real GHC diagnostics report, got: {other}"),
+    };
+    assert!(
+        diags
+            .iter()
+            .any(|d| d.message.contains("flag") && d.message.contains("Maybe ()")),
+        "the diagnostic must name the offending field and its type, got: {:?}",
+        diags.iter().map(|d| &d.message).collect::<Vec<_>>()
+    );
+}

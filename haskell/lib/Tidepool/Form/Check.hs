@@ -95,6 +95,13 @@ type family FieldCheck (n :: Symbol) (a :: Type) :: Constraint where
       ( 'Text "`" ':<>: 'Text n ':<>: 'Text "` has nested optionality."
           ':$$: 'Text "Use one Maybe layer, or define an explicit sum with domain-named constructors."
       )
+  FieldCheck n (Maybe ()) =
+    TypeError
+      ( 'Text "`" ':<>: 'Text n ':<>: 'Text "` is `Maybe ()`, which the wire cannot represent."
+          ':$$: 'Text "Both Nothing and Just () collect to JSON null, and FromJSON (Maybe a)"
+          ':$$: 'Text "maps every null back to Nothing -- Just () can never survive the round trip."
+          ':$$: 'Text "Use Bool for a present/absent flag, or a domain-named nullary sum."
+      )
   FieldCheck n a = ()
 
 -- | Name the FIELD whose type has no @Generic@ instance.
