@@ -32,15 +32,15 @@
 //! ALREADY GONE (lazy boot, extract-wave item 0 steps 1-3); wave-3's
 //! render+loop fusion removes the remaining split:
 //!
-//! 1. `SelfHarnessDriver::run_one_cycle` →
-//!    `SelfHarnessDriver::compile_cycle_entry` (driver.rs) — ONE
+//! 1. `SelfHarnessDriver::run_one_loop_iteration` →
+//!    `SelfHarnessDriver::compile_loop_entry` (driver.rs) — ONE
 //!    `tidepool-extract` spawn (`engine::compile_turns`, two `--targets`
 //!    over one shared merged `meta.cbor`) compiling the pre-loop
 //!    `render(state, lastCompaction)` and this cycle's
 //!    `loop __selfHarnessState` TOGETHER, as distinct top-level entries of
 //!    ONE module. Only once this compile succeeds and the loop suspends on
 //!    its first `runLLMTurn` hole does the driver ever call a model —
-//!    `service_runllm_hole` → `drive_answerer_to_finalize` →
+//!    `service_typed_request_suspension` → `drive_agent_session_to_finalize` →
 //!    `Harness::drive_turn` → `engine::drive_model_turn` (the first live
 //!    [`ModelProvider::complete`] call, which [`SnapshotOnFirstCall`] below
 //!    intercepts).
@@ -66,7 +66,7 @@ use tidepool_harness::provider::{
     DynModelProvider, ModelProvider, ProviderError, StreamSink, TurnRequest, TurnResponse,
 };
 use tidepool_harness::{
-    answerer_decls, load_harness_source, Harness, LogObserver, SelfHarnessDriver,
+    load_harness_source, typed_request_agent_decls, Harness, LogObserver, SelfHarnessDriver,
 };
 
 /// The D7 live-dogfood measurement (2026-08-08, clean cache,
@@ -92,7 +92,7 @@ use tidepool_harness::{
 /// render+loop fusion targeted.
 ///
 /// MEASURED 2026-08-11 on this branch (this suite, clean cache): **1** —
-/// `SelfHarnessDriver::compile_cycle_entry` (driver.rs) now compiles the
+/// `SelfHarnessDriver::compile_loop_entry` (driver.rs) now compiles the
 /// pre-loop render and this cycle's loop body as two entries of ONE module in
 /// ONE `tidepool-extract` spawn (wave-3 render+loop fusion,
 /// `plans/post-restart/extract-wave/spawn-latency/04-turn-latency-plan.md`
@@ -196,7 +196,7 @@ async fn boot_pays_pre_model_extract_compiles_matching_baseline() {
     engine::reset_extract_spawn_count();
 
     let agent_cfg = EngineConfig::from_decls(
-        answerer_decls(),
+        typed_request_agent_decls(),
         prelude_dir(),
         Some(examples_harness_dir()),
     )
@@ -225,7 +225,7 @@ async fn boot_pays_pre_model_extract_compiles_matching_baseline() {
     // `runLLMTurn` hole and the driver calls the model for the first time
     // (which `SnapshotOnFirstCall` intercepts and snapshots, then errors to
     // cleanly end the cycle).
-    let outcome = driver.run_one_cycle(&source, None).await;
+    let outcome = driver.run_one_loop_iteration(&source, None).await;
     assert!(
         outcome.is_err(),
         "SnapshotOnFirstCall always errors its first (and only expected) call — \

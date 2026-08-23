@@ -21,8 +21,8 @@ use tidepool_harness::provider::{DynModelProvider, Usage};
 use tidepool_harness::replay::{RecordedReply, ReplayProvider};
 use tidepool_harness::selfharness::persistence;
 use tidepool_harness::{
-    answerer_decls, load_harness_source, Event, Harness, JsonlObserver, LogObserver, Observer,
-    SelfHarnessDriver,
+    load_harness_source, typed_request_agent_decls, Event, Harness, JsonlObserver, LogObserver,
+    Observer, SelfHarnessDriver,
 };
 
 fn repo_root() -> std::path::PathBuf {
@@ -118,7 +118,7 @@ fn good_finalize_reply() -> RecordedReply {
 }
 
 /// Drive ONE `render -> loop -> runLLMTurn @Decision -> finalize -> render`
-/// cycle through the production entry point (`SelfHarnessDriver::run_one_cycle`)
+/// cycle through the production entry point (`SelfHarnessDriver::run_one_loop_iteration`)
 /// with a [`ReplayProvider`] serving `bad_finalize_reply` then
 /// `good_finalize_reply` — the answerer's `runLLMTurn @Decision` hole burns
 /// one corrective-retry round before finalizing. Returns the captured console
@@ -138,7 +138,7 @@ async fn run_one_cycle_with_a_retry() -> (String, String) {
     let _cache_guard = support::isolate_cache();
 
     let agent_cfg = EngineConfig::from_decls(
-        answerer_decls(),
+        typed_request_agent_decls(),
         prelude_dir(),
         Some(examples_harness_dir()),
     )
@@ -164,7 +164,7 @@ async fn run_one_cycle_with_a_retry() -> (String, String) {
         .expect("reference harness source loads");
 
     driver
-        .run_one_cycle(&source, None)
+        .run_one_loop_iteration(&source, None)
         .await
         .expect("one render->loop->runLLMTurn->finalize->render cycle, surviving one retry");
 

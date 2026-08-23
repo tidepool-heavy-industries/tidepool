@@ -4,7 +4,7 @@
 //! `finalize_type_pinning.rs`: one deterministic `tidepool-extract` call per
 //! case, no model in the loop.
 //!
-//! The row under test is [`tidepool_harness::answerer_decls_with_delegate`]
+//! The row under test is [`tidepool_harness::typed_request_agent_decls_with_delegate`]
 //! (`Subagent`/`Worktree` prepended to the answerer's `[AskUser, Fork,
 //! ReadState, Finalize]`). `runDelegate` is applied at the compiled turn's
 //! RESULT position now (`engine::template_turn_for`'s `delegate_wrap`
@@ -23,7 +23,9 @@ use tidepool_harness::engine::{self, template_turn_for, CompiledTurn, EngineConf
 use tidepool_harness::log::{Actor, LogHeader, LogWriter};
 use tidepool_harness::provider::{DynModelProvider, Usage};
 use tidepool_harness::replay::{RecordedReply, ReplayProvider};
-use tidepool_harness::{answerer_decls_with_delegate, load_harness_source, Harness, TurnOutcome};
+use tidepool_harness::{
+    load_harness_source, typed_request_agent_decls_with_delegate, Harness, TurnOutcome,
+};
 use tidepool_runtime::CompileError;
 
 /// `CompileError`'s own `Display` is only a count; assert against GHC's own
@@ -46,12 +48,12 @@ fn repo_root() -> std::path::PathBuf {
         .to_path_buf()
 }
 
-/// The delegating branch-node config: `answerer_decls_with_delegate()` +
+/// The delegating branch-node config: `typed_request_agent_decls_with_delegate()` +
 /// `examples/harness` on the include path (so `HarnessTypes`/`Decision`
 /// resolve, mirroring `finalize_type_pinning.rs`'s `answerer_cfg`).
 fn delegating_cfg() -> EngineConfig {
     let mut cfg = EngineConfig::from_decls(
-        answerer_decls_with_delegate(),
+        typed_request_agent_decls_with_delegate(),
         repo_root().join("haskell/lib"),
         None,
     )
@@ -469,7 +471,7 @@ fn outcome_tag(o: &TurnOutcome) -> &'static str {
 }
 
 /// Sanity: the harness's own decls (`load_harness_source`) still typecheck
-/// against `answerer_decls_with_delegate()` — this is a compile-target
+/// against `typed_request_agent_decls_with_delegate()` — this is a compile-target
 /// smoke check only, not a full companion run.
 #[test]
 fn recursive_companion_harness_source_loads() {

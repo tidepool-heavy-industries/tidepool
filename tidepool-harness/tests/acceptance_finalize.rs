@@ -7,7 +7,7 @@
 //!
 //! The thread: force root -> the (replayed) model's block evaluates
 //! `finalize @T x` and suspends -> the suspension classifies as
-//! `HoleRouting::Finalize` -> `Harness::take_finalized_value` reads the raw
+//! `SuspensionRouting::Finalize` -> `Harness::take_finalized_value` reads the raw
 //! value straight out of the suspended request (never through JSON) and
 //! terminates the node -> the node's continuation is never resumed.
 //!
@@ -44,7 +44,7 @@ use tidepool_harness::log::{Actor, LogHeader, LogWriter};
 use tidepool_harness::provider::{DynModelProvider, Usage};
 use tidepool_harness::replay::{RecordedReply, ReplayProvider};
 use tidepool_harness::tree::{NodeId, NodeState};
-use tidepool_harness::{Harness, HoleRouting, TurnOutcome};
+use tidepool_harness::{Harness, SuspensionRouting, TurnOutcome};
 
 fn prelude_dir() -> std::path::PathBuf {
     let manifest = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -83,7 +83,7 @@ fn outcome_tag(o: &TurnOutcome) -> &'static str {
 }
 
 /// `finalize @Int n` — ordinary DATA crossing in-heap. Proves the full
-/// production path: the suspension classifies as `HoleRouting::Finalize`
+/// production path: the suspension classifies as `SuspensionRouting::Finalize`
 /// with the rendered answer type from asks.json; `take_finalized_value`
 /// reads the value's OWN native representation straight out of the
 /// suspended request (not JSON-decoded — this is the SAME shared
@@ -132,7 +132,7 @@ async fn finalize_hands_up_a_plain_data_value() {
         .expect("root drives to a hole");
     match &outcome {
         TurnOutcome::Suspended { classified, .. } => match &classified.routing {
-            HoleRouting::Finalize { ty, .. } => {
+            SuspensionRouting::Finalize { ty, .. } => {
                 assert_eq!(
                     ty.as_deref(),
                     Some("Int"),
@@ -266,7 +266,7 @@ async fn finalize_a_closure() -> (std::sync::Arc<Harness>, NodeId) {
         .expect("root drives to a hole");
     match &outcome {
         TurnOutcome::Suspended { classified, .. } => match &classified.routing {
-            HoleRouting::Finalize { ty, .. } => assert_eq!(
+            SuspensionRouting::Finalize { ty, .. } => assert_eq!(
                 ty.as_deref(),
                 Some("Int -> Int"),
                 "the published hole must carry the function answer type, got {ty:?}"

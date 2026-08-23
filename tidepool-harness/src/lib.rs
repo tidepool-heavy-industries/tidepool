@@ -24,18 +24,18 @@ pub mod tree;
 
 pub use engine::{
     classify_hole, compile_turn, compile_turns, extract_spawn_count, reset_extract_spawn_count,
-    ClassifiedHole, ClassifyError, CompiledTurn, EngineConfig, EngineError, HoleRouting,
-    TurnOutcome,
+    ClassifiedSuspension, ClassifyError, CompiledTurn, EngineConfig, EngineError,
+    SuspensionRouting, TurnOutcome,
 };
 pub use forcing::{derive_teaser, NodeTree, TreeError};
 pub use harness::{ContextRef, Escalation, Harness, HarnessError, OperatorDecision};
 pub use registry::{Checkout, CheckoutError, SessionRegistry};
 pub use selfharness::{
-    acquire_lease, answerer_decls, answerer_decls_with_delegate, fold_run_journal, list_segments,
-    load_harness_source, retire_lease, segment_path, AcquiredLease, DriverError, Event,
-    HarnessSource, HarnessSourceError, JsonlObserver, LogObserver, Observer, OperatorGate,
-    PersistenceError, ResumeFold, RunJournalError, RunLease, SelfHarnessDriver, SelfHarnessState,
-    StdinGate,
+    acquire_lease, fold_run_journal, list_segments, load_harness_source, retire_lease,
+    segment_path, typed_request_agent_decls, typed_request_agent_decls_with_delegate,
+    AcquiredLease, DriverError, Event, HarnessSource, HarnessSourceError, JsonlObserver,
+    LogObserver, Observer, OperatorGate, PersistenceError, ResumeFold, RunJournalError, RunLease,
+    SelfHarnessDriver, SelfHarnessState, StdinGate,
 };
 pub use snapshot::{ContextSnapshot, SnapshotDigest};
 pub use tidepool_runtime::AsksSidecar;

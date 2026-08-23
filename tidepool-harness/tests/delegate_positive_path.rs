@@ -10,7 +10,7 @@
 //! Drives the SHIPPED `harness-dogfooding/recursive-companion/` harness
 //! (same precedent as `companion_collapsed_slice.rs`/`dogfood_harness_typecheck.rs`
 //! — a copied fixture would keep passing while the shipped harness rotted),
-//! booting `EngineConfig::from_decls(answerer_decls_with_delegate(), ..)
+//! booting `EngineConfig::from_decls(typed_request_agent_decls_with_delegate(), ..)
 //! .with_delegate_wrap()` for the answerer config — the same wiring
 //! `tidepool-web/src/bin/tidepool-selfharness.rs` selects live — so the
 //! root session compiles against the narrow delegating row.
@@ -35,8 +35,8 @@ use tidepool_harness::replay::{RecordedReply, ReplayProvider};
 use tidepool_harness::selfharness::operator::FormShape;
 use tidepool_harness::selfharness::persistence;
 use tidepool_harness::{
-    answerer_decls_with_delegate, load_harness_source, Harness, LogObserver, OperatorGate,
-    SelfHarnessDriver,
+    load_harness_source, typed_request_agent_decls_with_delegate, Harness, LogObserver,
+    OperatorGate, SelfHarnessDriver,
 };
 use tidepool_worktree::testing::TestRepo;
 
@@ -119,9 +119,9 @@ fn state_json() -> Json {
 /// `Tidepool.Agent.Delegate.runDelegate`'s `reinterpret2` onto a
 /// `send (SubagentSpawnAsync ...)` performed FROM WITHIN the reinterpretation
 /// handler — used to reach the driver as an UNCLASSIFIED suspension
-/// (`HoleRouting::Ask { payload: Null }`, `classify_hole`'s `con_name` lookup
+/// (`SuspensionRouting::Ask { payload: Null }`, `classify_hole`'s `con_name` lookup
 /// missing `SubagentSpawnAsync`'s own constructor name), not
-/// `HoleRouting::Subagent`. FIXED (`jit-reinterpret-rowchange` lane): the
+/// `SuspensionRouting::Subagent`. FIXED (`jit-reinterpret-rowchange` lane): the
 /// root cause was a `tidepool-codegen` JIT bug, isolated with a minimal
 /// standalone repro (`tests/reinterpret_rowchange_repro.rs`, no
 /// Subagent/Worktree involved) and documented in
@@ -137,8 +137,8 @@ fn state_json() -> Json {
 ///
 /// This test is the full real-world positive path (isolated by direct
 /// comparison against `direct_subagent_send_dispatches_within_the_answerer_row`
-/// below, all on the SAME `answerer_decls_with_delegate()` row and the SAME
-/// `Harness`/`SelfHarnessDriver`/`pending_hole_with_request`/
+/// below, all on the SAME `typed_request_agent_decls_with_delegate()` row and the SAME
+/// `Harness`/`SelfHarnessDriver`/`pending_suspension_with_request`/
 /// `resume_with_value` servicing that test proves works). The TYPE-LEVEL
 /// mechanism (unnameability) was never affected and is proved separately at
 /// the compile level (`delegate_type_pinning.rs`, 5/5 green).
@@ -152,11 +152,11 @@ async fn root_session_delegates_and_finalizes_on_the_result() {
     let journal_path = dir.join("journal.jsonl");
     let log_path = dir.join("log.jsonl");
 
-    // The delegating nested-answerer config: `answerer_decls_with_delegate()`
+    // The delegating nested-answerer config: `typed_request_agent_decls_with_delegate()`
     // (Subagent, Worktree prepended) + the wrap that pins the model's own
     // block to the narrow `Delegate`-only row.
     let agent_cfg = EngineConfig::from_decls(
-        answerer_decls_with_delegate(),
+        typed_request_agent_decls_with_delegate(),
         repo_root().join("haskell/lib"),
         Some(companion_dir()),
     )
@@ -223,7 +223,7 @@ async fn root_session_delegates_and_finalizes_on_the_result() {
         .expect("the seeded checkpoint is on disk");
 
     let outcome = driver
-        .run_one_cycle(&source, Some(&restored))
+        .run_one_loop_iteration(&source, Some(&restored))
         .await
         .expect("one render -> loop -> thoughtHylo -> render cycle, delegation included");
 
@@ -261,10 +261,10 @@ async fn root_session_delegates_and_finalizes_on_the_result() {
 /// The half of the mechanism that DOES work end to end: a `Subagent` send
 /// written DIRECTLY in a branch-node window's own turn text (no
 /// `runDelegate`/`reinterpret2` involved) dispatches through the driver's
-/// `SubagentHandler` (`pending_hole_with_request` reading the raw suspended
+/// `SubagentHandler` (`pending_suspension_with_request` reading the raw suspended
 /// request `Harness` already retains, `resume_with_value` resuming the
 /// node's own session — the new plumbing this lane added to
-/// `HoleRouting::Subagent`'s existing, pre-`drain_note_holes` servicing) and
+/// `SuspensionRouting::Subagent`'s existing, pre-`drain_note_holes` servicing) and
 /// the typed `CycleId`/`SpawnOutcome` crosses back into the resumed
 /// continuation. This is the isolating CONTROL for the test above: the
 /// SAME row, the SAME driver wiring, the SAME `MockBackend` saga — the only
@@ -283,7 +283,7 @@ async fn direct_subagent_send_dispatches_within_the_answerer_row() {
     // Same row as the delegating scenario, but WITHOUT `with_delegate_wrap`:
     // the model's own text sends `SubagentSpawnAsync` directly.
     let agent_cfg = EngineConfig::from_decls(
-        answerer_decls_with_delegate(),
+        typed_request_agent_decls_with_delegate(),
         repo_root().join("haskell/lib"),
         Some(companion_dir()),
     )
@@ -354,10 +354,13 @@ async fn direct_subagent_send_dispatches_within_the_answerer_row() {
         .expect("restore the seeded checkpoint")
         .expect("the seeded checkpoint is on disk");
 
-    let outcome = driver.run_one_cycle(&source, Some(&restored)).await.expect(
-        "one render -> loop -> thoughtHylo -> render cycle, with a direct \
+    let outcome = driver
+        .run_one_loop_iteration(&source, Some(&restored))
+        .await
+        .expect(
+            "one render -> loop -> thoughtHylo -> render cycle, with a direct \
              Subagent send serviced mid-window",
-    );
+        );
 
     let state = outcome.state_json;
     let last_run = state

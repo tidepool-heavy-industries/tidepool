@@ -114,7 +114,7 @@ async fn golden_path_record_replay() {
             assert!(
                 matches!(
                     classified.routing,
-                    tidepool_harness::HoleRouting::Fork { .. }
+                    tidepool_harness::SuspensionRouting::Fork { .. }
                 ),
                 "root should suspend on a FORK hole, got {:?}",
                 classified.routing
@@ -143,10 +143,13 @@ async fn golden_path_record_replay() {
 
     // 4. The parent re-suspended at the ask (same fragment, next hole).
     let dialog = harness
-        .pending_hole(root)
+        .pending_suspension(root)
         .expect("parent re-suspended at a hole");
     assert!(
-        matches!(dialog.routing, tidepool_harness::HoleRouting::Ask { .. }),
+        matches!(
+            dialog.routing,
+            tidepool_harness::SuspensionRouting::Ask { .. }
+        ),
         "parent should re-suspend on an ASK hole after the fork resumes, got {:?}",
         dialog.routing
     );

@@ -2,9 +2,9 @@
 //! can call `forkAll [briefs]` mid-turn (spawning N parallel child
 //! sub-answerers, gathering their typed answers as `[a]`, resuming the
 //! parent) and then continue to `finalize`, driven through the REAL
-//! production entry point (`SelfHarnessDriver::run_one_cycle`) — same
+//! production entry point (`SelfHarnessDriver::run_one_loop_iteration`) — same
 //! discipline as `selfharness_spine.rs`, extended to prove the driver
-//! services a `HoleRouting::Fork` suspension on the per-loop answerer via
+//! services a `SuspensionRouting::Fork` suspension on the per-loop answerer via
 //! the EXISTING `Harness::answer_fanout`/`answer_fork` machinery
 //! (`SelfHarnessDriver::drain_answerer_fork`), not a reimplementation.
 //!
@@ -34,7 +34,7 @@ use tidepool_harness::provider::{
 };
 use tidepool_harness::replay::{RecordedReply, ReplayProvider};
 use tidepool_harness::{
-    answerer_decls, load_harness_source, Harness, LogObserver, SelfHarnessDriver,
+    load_harness_source, typed_request_agent_decls, Harness, LogObserver, SelfHarnessDriver,
 };
 
 fn repo_root() -> std::path::PathBuf {
@@ -109,7 +109,7 @@ async fn selfharness_answerer_forks_to_two_children_then_finalizes() {
     let _cache_guard = support::isolate_cache();
 
     let agent_cfg = EngineConfig::from_decls(
-        answerer_decls(),
+        typed_request_agent_decls(),
         prelude_dir(),
         Some(examples_harness_dir()),
     )
@@ -166,7 +166,7 @@ async fn selfharness_answerer_forks_to_two_children_then_finalizes() {
         .expect("reference harness source loads");
 
     let outcome = driver
-        .run_one_cycle(&source, None)
+        .run_one_loop_iteration(&source, None)
         .await
         .expect("one full render->loop->runLLMTurn->forkAll(2 children)->finalize->render cycle");
 

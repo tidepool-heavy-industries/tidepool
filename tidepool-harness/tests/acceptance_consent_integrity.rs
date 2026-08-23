@@ -19,7 +19,7 @@ use tidepool_harness::log::{Actor, Event, LogHeader, LogReader, LogWriter};
 use tidepool_harness::provider::{DynModelProvider, Usage};
 use tidepool_harness::replay::{RecordedReply, ReplayProvider};
 use tidepool_harness::tree::{NodeId, NodeState};
-use tidepool_harness::{ClassifiedHole, Harness, HoleRouting, TurnOutcome};
+use tidepool_harness::{ClassifiedSuspension, Harness, SuspensionRouting, TurnOutcome};
 
 fn prelude_dir() -> std::path::PathBuf {
     let manifest = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -119,8 +119,8 @@ async fn fork_request_with_no_forcing_event_has_zero_child_events() {
         matches!(
             outcome,
             TurnOutcome::Suspended {
-                classified: ClassifiedHole {
-                    routing: HoleRouting::Fork { .. },
+                classified: ClassifiedSuspension {
+                    routing: SuspensionRouting::Fork { .. },
                     ..
                 },
                 ..

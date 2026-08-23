@@ -39,7 +39,7 @@ use tidepool_harness::log::{Actor, LogHeader, LogWriter};
 use tidepool_harness::provider::{DynModelProvider, Usage};
 use tidepool_harness::replay::{RecordedReply, ReplayProvider};
 use tidepool_harness::tree::{FanBadge, NodeState};
-use tidepool_harness::{Harness, HoleRouting};
+use tidepool_harness::{Harness, SuspensionRouting};
 
 fn prelude_dir() -> std::path::PathBuf {
     let manifest = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -151,7 +151,7 @@ async fn forkcata_two_level_tree_batches_children_then_answers_parent() {
         .expect("root drives to the leaf-batch hole");
     let first_ty = match outcome {
         tidepool_harness::TurnOutcome::Suspended { classified, .. } => match &classified.routing {
-            HoleRouting::Fork {
+            SuspensionRouting::Fork {
                 ty,
                 fan: Some(fan),
                 prompts,
@@ -189,9 +189,9 @@ async fn forkcata_two_level_tree_batches_children_then_answers_parent() {
     // The root is suspended AGAIN immediately (resume_parent re-published a
     // hole synchronously) — its own singleton fanout, prompt built from the
     // leaf verdicts just answered.
-    let second_ty = match harness.pending_hole(root) {
+    let second_ty = match harness.pending_suspension(root) {
         Some(classified) => match &classified.routing {
-            HoleRouting::Fork {
+            SuspensionRouting::Fork {
                 ty,
                 fan: Some(fan),
                 prompts,

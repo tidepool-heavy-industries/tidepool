@@ -659,7 +659,7 @@ mod tests {
         );
 
         // "Cycle 2" commits generation 2, continuing the iteration from what
-        // was just restored (mirrors `run_one_cycle`'s `self.iteration += 1`
+        // was just restored (mirrors `run_one_loop_iteration`'s `self.iteration += 1`
         // after a successful loop, then `commit_checkpoint` persisting it).
         let cp2 = Checkpoint {
             generation: CheckpointGeneration(NonZeroU64::new(2).expect("nonzero in tests")),

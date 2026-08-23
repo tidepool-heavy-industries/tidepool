@@ -33,7 +33,7 @@ use tidepool_harness::log::LogHeader;
 use tidepool_harness::provider::{DynModelProvider, Usage};
 use tidepool_harness::replay::{RecordedReply, ReplayProvider};
 use tidepool_harness::{
-    answerer_decls, load_harness_source, Event, Harness, Observer, SelfHarnessDriver,
+    load_harness_source, typed_request_agent_decls, Event, Harness, Observer, SelfHarnessDriver,
 };
 
 fn repo_root() -> std::path::PathBuf {
@@ -125,9 +125,12 @@ async fn decl_in_window_one_resolves_in_window_three_same_cycle() {
     support::require_extract();
     let _cache_guard = support::isolate_cache();
 
-    let agent_cfg =
-        EngineConfig::from_decls(answerer_decls(), prelude_dir(), Some(spike_harness_dir()))
-            .expect("answerer engine config");
+    let agent_cfg = EngineConfig::from_decls(
+        typed_request_agent_decls(),
+        prelude_dir(),
+        Some(spike_harness_dir()),
+    )
+    .expect("answerer engine config");
     let replies = vec![
         decl_reply(),             // window 1, round 1: declares bumpBy (nudged)
         edit_reply("\\st -> st"), // window 1, round 2: resolves without the helper
@@ -147,7 +150,7 @@ async fn decl_in_window_one_resolves_in_window_three_same_cycle() {
     let source = load_harness_source(&spike_harness_dir().join("Harness.hs"))
         .expect("spike harness source loads");
 
-    let outcome = match driver.run_one_cycle(&source, None).await {
+    let outcome = match driver.run_one_loop_iteration(&source, None).await {
         Ok(o) => o,
         Err(e) => {
             let events: Vec<_> = observer
@@ -182,7 +185,7 @@ async fn decl_in_window_one_resolves_in_window_three_same_cycle() {
 // `tests/selfharness_fn_finalize_spike.rs`'s
 // `living_helper_survives_loop_boundary_and_rotation` — intentionally NOT
 // duplicated here: same mechanism, and that test already drives it through
-// the SAME `SelfHarnessDriver::run_one_cycle` entry point this file uses.
+// the SAME `SelfHarnessDriver::run_one_loop_iteration` entry point this file uses.
 // Cross-cycle persistence IS the intended contract (see
 // `SelfHarnessDriver::open_outer_plane`'s doc: "top-level declarations a
 // model defines persist BY NAME across loops AND across machine

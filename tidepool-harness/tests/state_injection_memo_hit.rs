@@ -1,8 +1,8 @@
 //! Acceptance coverage for `plans/turn-latency-state-injection.md`: two
-//! consecutive `SelfHarnessDriver::run_one_cycle` calls over the reference
+//! consecutive `SelfHarnessDriver::run_one_loop_iteration` calls over the reference
 //! generic-assistant harness (`examples/harness/Harness.hs`), each pushing
 //! genuinely DIFFERENT `State` through the fused outer render/loop compile
-//! (`SelfHarnessDriver::compile_cycle_entry`).
+//! (`SelfHarnessDriver::compile_loop_entry`).
 //!
 //! Two independent proofs, matching the plan's acceptance bullet verbatim:
 //!
@@ -33,7 +33,7 @@ use tidepool_harness::log::LogHeader;
 use tidepool_harness::provider::{DynModelProvider, Usage};
 use tidepool_harness::replay::{RecordedReply, ReplayProvider};
 use tidepool_harness::{
-    answerer_decls, load_harness_source, Event, Harness, Observer, SelfHarnessDriver,
+    load_harness_source, typed_request_agent_decls, Event, Harness, Observer, SelfHarnessDriver,
 };
 
 fn repo_root() -> std::path::PathBuf {
@@ -96,7 +96,7 @@ impl Observer for OuterCompileCapture {
 impl OuterCompileCapture {
     /// The `source` of every `OuterCompile{label: "render+loop", ..}` event
     /// captured so far, in order — the fused compile's rendered module text,
-    /// once per `compile_cycle_entry` call.
+    /// once per `compile_loop_entry` call.
     fn render_loop_sources(&self) -> Vec<String> {
         self.events
             .lock()
@@ -121,7 +121,7 @@ async fn second_cycle_outer_compile_is_a_memo_hit_with_fresh_state() {
     let _cache_guard = support::isolate_cache();
 
     let agent_cfg = EngineConfig::from_decls(
-        answerer_decls(),
+        typed_request_agent_decls(),
         prelude_dir(),
         Some(examples_harness_dir()),
     )
@@ -154,14 +154,14 @@ async fn second_cycle_outer_compile_is_a_memo_hit_with_fresh_state() {
 
     let before_cycle1 = engine::extract_spawn_count();
     let outcome1 = driver
-        .run_one_cycle(&source, None)
+        .run_one_loop_iteration(&source, None)
         .await
         .expect("cycle 1 (cold memo)");
     let spawns_cycle1 = engine::extract_spawn_count() - before_cycle1;
 
     let before_cycle2 = engine::extract_spawn_count();
     let outcome2 = driver
-        .run_one_cycle(&source, Some(&outcome1.state_json))
+        .run_one_loop_iteration(&source, Some(&outcome1.state_json))
         .await
         .expect("cycle 2 (warm memo)");
     let spawns_cycle2 = engine::extract_spawn_count() - before_cycle2;

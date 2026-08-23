@@ -30,9 +30,9 @@
 //!
 //! # Async turn loop, sync-blocking operator gate
 //!
-//! [`SelfHarnessDriver::run_loop`]/[`SelfHarnessDriver::run_one_cycle`] are
+//! [`SelfHarnessDriver::run_loop`]/[`SelfHarnessDriver::run_one_loop_iteration`] are
 //! `async fn` and `.await` the nested [`Harness`]'s turn loop
-//! ([`service_runllm_hole`](SelfHarnessDriver::service_runllm_hole)) directly
+//! ([`service_typed_request_suspension`](SelfHarnessDriver::service_typed_request_suspension)) directly
 //! — every entry point here must still be called from a thread with an
 //! ACTIVE tokio runtime (`#[tokio::main]`/`#[tokio::test(flavor =
 //! "multi_thread")]`), because the [`crate::selfharness::operator::OperatorGate`]
@@ -44,7 +44,7 @@
 //! requires the multi-thread runtime flavor. The resident JIT run/resume
 //! calls the loop also drives are CPU-blocking and sit inside these `async
 //! fn`s unchanged (they already blocked a tokio worker before this
-//! conversion); see [`Self::drive_answerer_to_finalize`]'s doc for why they
+//! conversion); see [`Self::drive_agent_session_to_finalize`]'s doc for why they
 //! are not `spawn_blocking`'d.
 //!
 //! # Boot fold and entry selection (PRD 20 S1-L5)
@@ -79,8 +79,8 @@ use tidepool_repr::DataConTable;
 use tidepool_runtime::session::{ResidentHole, ResidentOutcome};
 
 use crate::engine::{
-    self, ClassifiedHole, CompiledTurn, EngineConfig, EngineError, HoleRouting, InvocationExit,
-    TurnOutcome,
+    self, ClassifiedSuspension, CompiledTurn, EngineConfig, EngineError, InvocationExit,
+    SuspensionRouting, TurnOutcome,
 };
 use crate::harness::{AnswerContract, ContextRef, Harness, HarnessError, Session, OUTER_REALM};
 use crate::log::Actor;
@@ -180,11 +180,11 @@ fn map_run_error(ctx: &str, msg: String) -> DriverError {
 }
 
 /// One full `render` → `loop` → (service each `runLLMTurn` hole) → `render`
-/// cycle's outcome — [`SelfHarnessDriver::run_one_cycle`]'s return value,
+/// cycle's outcome — [`SelfHarnessDriver::run_one_loop_iteration`]'s return value,
 /// what a spine test asserts against. `state_json` is what the caller
 /// persists and threads into the NEXT cycle's `prior_state`.
 #[derive(Debug, Clone)]
-pub struct CycleOutcome {
+pub struct LoopIterationOutcome {
     /// [`SelfHarnessDriver::render_framing`]'s composed text BEFORE this
     /// cycle's `loop` ran — the prompt the loop's `runLLMTurn` answerer(s)
     /// implicitly worked under.
@@ -201,7 +201,7 @@ pub struct CycleOutcome {
     /// under the summary (in-place relief — no abort). `prompt_after` already
     /// reflects it (rendered with the updated `lastCompaction`) — this field
     /// is what a caller/test asserts against directly, and what
-    /// [`SelfHarnessDriver::run_one_cycle`] carries forward as the NEXT
+    /// [`SelfHarnessDriver::run_one_loop_iteration`] carries forward as the NEXT
     /// cycle's `lastCompaction` (`self.last_compaction`, not a threaded
     /// parameter — see that method's doc).
     pub compaction: Option<String>,
@@ -319,7 +319,7 @@ enum GreenAnswer {
 /// assigned to outcome is never read` warning that adding `mut` would have
 /// shipped past.)
 ///
-/// [`HoleRouting::Green`] is the deliberate exception, checked and rejected
+/// [`SuspensionRouting::Green`] is the deliberate exception, checked and rejected
 /// before this was written for the rest: a single Green suspension can
 /// settle into zero, one, or two ready continuations (a spawn resumes the
 /// spawner AND starts the new thread; a join with no terminal candidate
@@ -331,7 +331,7 @@ enum GreenAnswer {
 /// DriverError>` didn't already type — so
 /// [`SelfHarnessDriver::service_green_hole`] keeps owning `ready`/the
 /// thread table/the waiter map directly instead of returning one of these.
-enum ServicedHole {
+enum ServicedSuspension {
     /// The popped item was itself terminal — the PRIMARY chain's `loop` has
     /// finished.
     Completed { result: Value, table: DataConTable },
@@ -403,7 +403,7 @@ fn green_int_list_field(request: &Value, idx: usize, table: &DataConTable) -> Ve
 /// pending artifacts. A thread still running when its round ends is SWEPT
 /// (realm closed, frames dropped) — spawn and wait belong in the same
 /// block, and the corrective prompt says so when anything was dropped.
-struct AnswererGreen {
+struct ModelRoundGreenThreadScheduler {
     threads: HashMap<i64, GreenThread>,
     /// THREAD-chain joiners only. The node's own `wait` never registers
     /// here — [`SelfHarnessDriver::service_green_hole`]'s
@@ -422,29 +422,29 @@ struct AnswererGreen {
 /// answerer window's threads can never collide with the authored loop's own
 /// live threads on the one shared session. Each round grabs a `1 << 20`
 /// block; no round comes near exhausting one.
-static ANSWERER_GREEN_REALM_SEQ: std::sync::atomic::AtomicU64 =
+static GREEN_ROUND_REALM_SEQ: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(1 << 32);
 
-impl AnswererGreen {
+impl ModelRoundGreenThreadScheduler {
     fn new() -> Self {
-        AnswererGreen {
+        ModelRoundGreenThreadScheduler {
             threads: HashMap::new(),
             waiters: HashMap::new(),
             ready: VecDeque::new(),
             next_tid: 1,
-            next_thread_realm: ANSWERER_GREEN_REALM_SEQ
+            next_thread_realm: GREEN_ROUND_REALM_SEQ
                 .fetch_add(1 << 20, std::sync::atomic::Ordering::Relaxed),
         }
     }
 }
 
-/// How [`SelfHarnessDriver::service_answerer_green`] hands control back to
+/// How [`SelfHarnessDriver::service_green_round`] hands control back to
 /// the answerer dispatcher: the node's own turn parked on a non-Green hole
 /// (route it), ran to completion without finalizing (corrective retry), a
 /// thread's fork was refused by the session's fork budget (abort the
 /// block, corrective retry naming the budget), or the block misused the
 /// async surface (abort the block, corrective retry naming the mistake).
-enum AnswererGreenExit {
+enum GreenRoundExit {
     NodeParked,
     NodeDone,
     /// Carries the ACTUAL refusal text `check_fork_budgets` built —
@@ -462,7 +462,7 @@ enum AnswererGreenExit {
 
 /// One serviced green suspension's outcome, distinguishing MODEL-ATTRIBUTABLE
 /// misuse (`asyncResult` before a settle, a `wait` on a dropped handle, …)
-/// from a mechanism failure: the answerer plane turns `Misuse` into a
+/// from a mechanism failure: the typed-request agent's scheduler path turns `Misuse` into a
 /// block-abort + corrective (the same loud-refusal shape the fork budget
 /// uses — one model slip must not end the whole run), while the AUTHORED
 /// outer plane maps it back to a hard error (authored code fails loud, it
@@ -480,7 +480,7 @@ enum GreenHoleServiced {
 enum ThreadServiced {
     Continue,
     /// The ACTUAL refusal text `check_fork_budgets` built — see
-    /// [`AnswererGreenExit::ForkBudgetRefused`]'s doc (F8).
+    /// [`GreenRoundExit::ForkBudgetRefused`]'s doc (F8).
     BudgetRefused {
         msg: String,
     },
@@ -500,14 +500,14 @@ impl ForkBudget {
     /// How many children `routing` would spawn: a single fork is 1, a fanout
     /// its fan (`Bounded`/`Dynamic` badges fall back to the decoded prompt
     /// count — the number of children that would actually be driven).
-    fn cost(routing: &HoleRouting) -> u32 {
+    fn cost(routing: &SuspensionRouting) -> u32 {
         match routing {
-            HoleRouting::Fork { fan: None, .. } => 1,
-            HoleRouting::Fork {
+            SuspensionRouting::Fork { fan: None, .. } => 1,
+            SuspensionRouting::Fork {
                 fan: Some(FanBadge::Exact { n }),
                 ..
             } => *n,
-            HoleRouting::Fork { prompts, .. } => prompts.len() as u32,
+            SuspensionRouting::Fork { prompts, .. } => prompts.len() as u32,
             _ => 0,
         }
     }
@@ -523,14 +523,14 @@ impl ForkBudget {
     }
 }
 
-/// What [`SelfHarnessDriver::drive_answerer_to_finalize`] does when its node
+/// What [`SelfHarnessDriver::drive_agent_session_to_finalize`] does when its node
 /// suspends on something other than `finalize` — the one axis the sol
 /// cross-family review's finding 4 confirmed genuinely differs between the
 /// driver's model-session pumps (everything else — round caps, provider
 /// handling, compile correctives, finalize detection, event emission — is
 /// now the ONE shared loop).
 #[derive(Debug, Clone, Copy)]
-enum AnswererExitPolicy {
+enum AgentSessionExitPolicy {
     /// The reused single-hole answerer, a sequential branch/branch-fanout
     /// child, and a recursive fork child: service every suspension this
     /// driver knows how to (`askUser`, `note`, `fork`, green threads) via the
@@ -702,7 +702,7 @@ fn fork_subtree_refusal(spent: u32, cap: u32, needed: u32, ty_label: &str) -> St
 
 /// The refusal corrective for a fork that would exceed the window's budget:
 /// what happened, what survives, and the one useful next step. `cap == 0`
-/// (the `fork_depth >= max_fork_depth` case, `drive_answerer_to_finalize`)
+/// (the `fork_depth >= max_fork_depth` case, `drive_agent_session_to_finalize`)
 /// is a DEPTH refusal, not a per-session pool refusal — depth-1..7 children
 /// fork fine, so the reason must be the tree's depth, never "nested forking
 /// is not supported" (false, and contradicts the Fork card).
@@ -829,7 +829,7 @@ struct OuterSession {
 /// body's `ValueHandle` taken off the spawner's parked frame and a NEW
 /// suspension-capable top-level run started under its own realm — driver
 /// machinery in the `RunLLMTurn`/`AskUser` class ([`engine::classify_hole`]/
-/// [`HoleRouting`]), not the `OuterEffectKind`/`dispatch_outer_effect` class.
+/// [`SuspensionRouting`]), not the `OuterEffectKind`/`dispatch_outer_effect` class.
 /// [`SelfHarnessDriver::service_green_hole`] is that servicing: a driver-
 /// owned thread table + waiter map + FIFO ready queue, scoped to one
 /// `run_loop_fragment_inner` call (structured concurrency — nothing survives
@@ -921,7 +921,7 @@ impl OuterRow {
 /// suspend an in-context `runLLMTurn`. Its whole surface: `askUser` (present a
 /// typed form to a human operator, riding `AskUser`), `fork`/`forkAll`
 /// (spawn bounded, RECURSIVE sub-answerers, riding `Fork` — the driver
-/// services the resulting suspension via [`Self::drive_fork_child_window`],
+/// services the resulting suspension via [`Self::drive_fork_child_agent_session`],
 /// which compiles a fork child against this SAME row, full pump included:
 /// a child can `askUser`, `fork` again, and go multi-round, bounded only by
 /// the spawn-time budgets in [`Self::check_fork_budgets`] (depth and
@@ -929,7 +929,7 @@ impl OuterRow {
 /// `Green` (green threads — the composed idiom `async (fork @T brief)` parks
 /// a fork in a thread of its own, so several forks can be outstanding before
 /// the first `wait`; serviced by the answerer-plane green scheduler in
-/// [`SelfHarnessDriver::drive_answerer_to_finalize`]), and `finalize` (the
+/// [`SelfHarnessDriver::drive_agent_session_to_finalize`]), and `finalize` (the
 /// answer path).
 ///
 /// `Green` grants NO new external capability: a green thread's body can only
@@ -938,7 +938,7 @@ impl OuterRow {
 /// `AskUser` comes first because [`EngineConfig::from_decls`] takes the first
 /// interposed effect as the suspend threshold; `Fork`/`Green`/`Finalize` land
 /// at or past it regardless of position.
-pub fn answerer_decls() -> Vec<tidepool_mcp::EffectDecl> {
+pub fn typed_request_agent_decls() -> Vec<tidepool_mcp::EffectDecl> {
     vec![
         tidepool_mcp::askuser_decl(),
         tidepool_mcp::fork_decl(),
@@ -948,7 +948,7 @@ pub fn answerer_decls() -> Vec<tidepool_mcp::EffectDecl> {
     ]
 }
 
-/// [`answerer_decls`] with `Subagent` and `Worktree` PREPENDED, in that
+/// [`typed_request_agent_decls`] with `Subagent` and `Worktree` PREPENDED, in that
 /// order (PRD 21 C5) — the row a recursive-companion branch-node window
 /// compiles against when paired with
 /// [`crate::engine::EngineConfig::with_delegate_wrap`]. Both reused
@@ -973,16 +973,18 @@ pub fn answerer_decls() -> Vec<tidepool_mcp::EffectDecl> {
 /// row its ARGUMENT (the model's block) is checked against — see
 /// `Tidepool.Agent.Delegate`'s module doc.
 ///
-/// Does NOT widen `answerer_decls()` itself — every other harness (dev-tree,
+/// Does NOT widen `typed_request_agent_decls()` itself — every other harness (dev-tree,
 /// the general Agent stack) keeps compiling exactly as before.
-pub fn answerer_decls_with_delegate() -> Vec<tidepool_mcp::EffectDecl> {
+pub fn typed_request_agent_decls_with_delegate() -> Vec<tidepool_mcp::EffectDecl> {
     let mut decls = vec![tidepool_mcp::subagent_decl(), tidepool_mcp::worktree_decl()];
-    decls.extend(answerer_decls());
+    decls.extend(typed_request_agent_decls());
     decls
 }
 
 fn not_bootstrapped() -> DriverError {
-    DriverError::Session("outer session not bootstrapped (call run_loop/run_one_cycle)".into())
+    DriverError::Session(
+        "outer session not bootstrapped (call run_loop/run_one_loop_iteration)".into(),
+    )
 }
 
 /// Default emergency-compaction threshold — 80% of the CONTEXT-WINDOW budget
@@ -1002,24 +1004,24 @@ const COMPACTION_TARGET_DIVISOR: u32 = 4;
 /// Per-hole SOFT cap: after this many model rounds on a
 /// single `runLLMTurn` hole that did NOT finalize, nudge the answerer once
 /// ("approaching max tool calls, finalize now with `@T`") and keep driving.
-const ANSWERER_NUDGE_ROUNDS: u32 = 16;
+const TYPED_REQUEST_AGENT_NUDGE_ROUNDS: u32 = 16;
 
 /// Per-hole HARD cap: after this many non-finalize model rounds on one hole,
 /// hard-fail the `runLLMTurn` effect with a [`DriverError`].
-const ANSWERER_MAX_ROUNDS: u32 = 32;
+const TYPED_REQUEST_AGENT_MAX_ROUNDS: u32 = 32;
 
 /// Cap on CONSECUTIVE `askUser` re-presentations within the servicing of ONE
 /// hole: `askUser` re-prompts by RECURSION on a decode failure — no
 /// `Either` — and the frozen headless `StdinGate::present_form` returns an EMPTY
 /// JSON object on EOF rather than erroring, so a non-interactive gate with
 /// closed stdin composes into an unbounded hot loop that NEITHER
-/// `ANSWERER_MAX_ROUNDS` nor `LOOP_INFERENCE_CALL_CAP` catches (both only
+/// `TYPED_REQUEST_AGENT_MAX_ROUNDS` nor `LOOP_INFERENCE_CALL_CAP` catches (both only
 /// count `drive_turn` model rounds, and a form resume deliberately does not
 /// count as one). This counter is a SEPARATE, independent budget: it
 /// increments each time the answerer re-suspends on another `AskUser` hole
 /// without making progress, and resets the moment a resume yields anything
 /// else (a `Finalize` suspension, a plain completion, a compile error to
-/// correct). Past the cap, [`SelfHarnessDriver::drive_answerer_to_finalize`]
+/// correct). Past the cap, [`SelfHarnessDriver::drive_agent_session_to_finalize`]
 /// hard-fails the hole with a [`DriverError::Session`] naming the cause,
 /// rather than spinning at full CPU. 8 leaves ample room for genuine operator
 /// typos while making a broken/closed gate terminate loudly and fast.
@@ -1051,7 +1053,7 @@ const DEFAULT_FORK_SUBTREE_CAP: u32 = 32;
 /// day when multi-WAVE forking (fork, fold, fork again within one window)
 /// became the taught idiom — two or three waves of a handful of children
 /// each must fit without tuning.
-const DEFAULT_FORK_BUDGET_PER_WINDOW: u32 = 32;
+const DEFAULT_FORK_BUDGET_PER_SESSION: u32 = 32;
 
 /// Default cap on how many `RunLLMTurn` fanout/fork children
 /// ([`SelfHarnessDriver::service_outer_fanout`]) may be concurrently
@@ -1114,7 +1116,7 @@ async fn retry_on_turn_in_flight<T>(
 /// retrying the WHOLE call is exactly as safe as retrying the sync sibling's
 /// callers: the checkout is still the first observable effect. These sites
 /// are reached by BOTH sequentially- and concurrently-driven callers
-/// (`drive_answerer_to_finalize` is the one pump both a sequential
+/// (`drive_agent_session_to_finalize` is the one pump both a sequential
 /// `service_outer_branch` child and a concurrent fork/branch-fanout child
 /// run through) — a sequential caller's checkout never actually contends, so
 /// this is a no-op there; a concurrent sibling's benign contention now waits
@@ -1141,16 +1143,16 @@ where
 /// surface — `askUser`, `fork`/`forkAll`, `finalize` — not the full eval
 /// surface [`crate::engine::SYSTEM_FRAMING`] advertises. This is
 /// belt-and-braces, not the enforcement mechanism: the scoped stack
-/// ([`answerer_decls`]) is what makes any verb this framing omits fail to
+/// ([`typed_request_agent_decls`]) is what makes any verb this framing omits fail to
 /// compile.
 ///
 /// The per-verb signatures/examples are NOT hand-narrated here: they fold
-/// over [`answerer_decls`] via [`engine::available_effects_section`] — the
+/// over [`typed_request_agent_decls`] via [`engine::available_effects_section`] — the
 /// same [`tidepool_mcp::EffectDecl::prompt_card`]/`description` single
 /// source the eval tool description is assembled from — so a row with a
 /// different effect set gets a correspondingly different cheatsheet, sent
 /// ONCE per loop in the system framing rather than re-narrated every hole.
-fn answerer_framing_suffix(fork_budget: u32, fork_subtree_cap: u32) -> String {
+fn typed_request_agent_framing_suffix(fork_budget: u32, fork_subtree_cap: u32) -> String {
     format!(
         "---\n\
          You are the answering agent for a self-iterating harness loop. The system \
@@ -1232,9 +1234,9 @@ fn answerer_framing_suffix(fork_budget: u32, fork_subtree_cap: u32) -> String {
          ends the session and hands the typed value back to the loop. `T` is the type \
          named in the request. Do not call any other effect to answer; `finalize` is \
          how you resolve the request.",
-        ANSWERER_MAX_ROUNDS,
-        ANSWERER_NUDGE_ROUNDS,
-        engine::available_effects_section(&answerer_decls()),
+        TYPED_REQUEST_AGENT_MAX_ROUNDS,
+        TYPED_REQUEST_AGENT_NUDGE_ROUNDS,
+        engine::available_effects_section(&typed_request_agent_decls()),
         fork_budget,
         fork_subtree_cap
     )
@@ -1322,7 +1324,7 @@ pub struct SelfHarnessDriver {
     /// ingestion are deliberately not in it (documented semantics of the
     /// ReadState effect). `None` on the very first cycle (initialState —
     /// served as JSON `null`, which the authored `getStateJson` docs cover).
-    cycle_state_json: Option<Json>,
+    loop_state_json: Option<Json>,
     /// The nested multi-node orchestrator that answers a `runLLMTurn` hole
     /// by driving an Agent turn loop (`run_to_hole_or_done`) to a
     /// `finalize`. Shared, not owned exclusively, so a future GUI/inspector
@@ -1331,7 +1333,7 @@ pub struct SelfHarnessDriver {
     lifecycle: SelfHarnessState,
     observer: Arc<dyn Observer>,
     /// The LATEST emergency-compaction `Text`, fed as the NEXT
-    /// [`Self::run_one_cycle`] call's `lastCompaction` — driver-owned state
+    /// [`Self::run_one_loop_iteration`] call's `lastCompaction` — driver-owned state
     /// rather than a threaded parameter, since the *runtime* (not the
     /// caller) owns the compaction lifecycle. Updated MID-LOOP by
     /// [`Self::maybe_compact_answerer`] the moment a
@@ -1341,8 +1343,8 @@ pub struct SelfHarnessDriver {
     /// The compaction `Text` produced DURING the current cycle's loop, if one
     /// fired (in-place mid-loop relief) — distinct from
     /// [`Self::last_compaction`], which also carries a PRIOR cycle's summary
-    /// forward. Reset (`take`n) into [`CycleOutcome::compaction`] at the end of
-    /// [`Self::run_one_cycle`], so a test asserts on THIS cycle's compaction,
+    /// forward. Reset (`take`n) into [`LoopIterationOutcome::compaction`] at the end of
+    /// [`Self::run_one_loop_iteration`], so a test asserts on THIS cycle's compaction,
     /// not a stale carried-forward one. Set by [`Self::maybe_compact_answerer`].
     cycle_compaction: Option<String>,
     /// The emergency-compaction threshold, as a percentage of the CONTEXT-
@@ -1353,8 +1355,8 @@ pub struct SelfHarnessDriver {
     /// not against `max_tokens` after the loop.
     compaction_threshold_percent: u64,
     /// The CURRENT loop's answerer system framing: `render`'s pre-loop output
-    /// followed by [`answerer_framing_suffix`]. Set in
-    /// [`Self::run_one_cycle`] right after the pre-loop `render`, read when the
+    /// followed by [`typed_request_agent_framing_suffix`]. Set in
+    /// [`Self::run_one_loop_iteration`] right after the pre-loop `render`, read when the
     /// answerer session is created. `None` before the first loop's render.
     answerer_framing: Option<String>,
     /// The CURRENT loop's single render-seeded answerer node: created
@@ -1362,9 +1364,9 @@ pub struct SelfHarnessDriver {
     /// `runLLMTurn` hole so hole #2's answerer sees hole #1's exchange (the
     /// accumulating context window — the fused hylo intermediate). Retired
     /// (dropped) at loop end so the next loop gets a fresh render-seeded
-    /// session. `None` between loops. Always [`WindowLease::ReusableLoop`]
+    /// session. `None` between loops. Always [`AgentSessionMode::ReusableLoop`]
     /// — see that type's doc for the distinction it exists to enforce.
-    answerer: Option<WindowLease>,
+    answerer: Option<AgentSessionMode>,
     /// Total model inference calls across the CURRENT loop's holes + rounds:
     /// reset in [`Self::run_loop_fragment`], incremented
     /// per answerer `drive_turn`. The loop hard-stops with a [`DriverError`]
@@ -1374,12 +1376,12 @@ pub struct SelfHarnessDriver {
     /// alongside the single reused [`Self::answerer`]'s rounds — one shared
     /// budget regardless of how many windows are open at once.
     loop_inference_calls: AtomicU32,
-    /// Per-hole soft cap (nudge threshold), default [`ANSWERER_NUDGE_ROUNDS`].
+    /// Per-hole soft cap (nudge threshold), default [`TYPED_REQUEST_AGENT_NUDGE_ROUNDS`].
     /// Configurable via [`Self::set_answerer_round_caps`] so a test can trip
     /// the nudge/hard-fail deterministically with a few small scripted turns
     /// instead of the full 16/32 (each round is a real GHC compile).
     answerer_nudge_rounds: u32,
-    /// Per-hole hard cap, default [`ANSWERER_MAX_ROUNDS`]. See
+    /// Per-hole hard cap, default [`TYPED_REQUEST_AGENT_MAX_ROUNDS`]. See
     /// [`Self::set_answerer_round_caps`].
     answerer_max_rounds: u32,
     /// Per-loop total inference-call cap, default
@@ -1392,7 +1394,7 @@ pub struct SelfHarnessDriver {
     /// may spawn across its whole life (all rounds; `fork` costs 1,
     /// `forkAll`/fanout cost their fan) — direct forks and green-thread
     /// forks draw on the ONE pool. Default
-    /// [`DEFAULT_FORK_BUDGET_PER_WINDOW`]; configurable via
+    /// [`DEFAULT_FORK_BUDGET_PER_SESSION`]; configurable via
     /// [`Self::set_fork_budget_per_window`]. The (N+1)th child is a loud
     /// refusal (the block is aborted, the session survives with a corrective
     /// naming the budget), never a silent drop.
@@ -1437,7 +1439,7 @@ pub struct SelfHarnessDriver {
     /// of the authored `State` (`plans/self-iterating-harness/
     /// 15-generic-surface-wave.md`, "Runtime context is the runtime's job").
     /// `0` before any cycle has completed. Incremented once per successful
-    /// [`Self::run_one_cycle`], right after that cycle's `loop` completes;
+    /// [`Self::run_one_loop_iteration`], right after that cycle's `loop` completes;
     /// fed into [`Self::render_framing`]'s composed loop-metadata line and
     /// persisted in the checkpoint envelope ([`Self::commit_checkpoint`]) —
     /// never in `state_json` — so a restart resumes counting from the right
@@ -1445,7 +1447,7 @@ pub struct SelfHarnessDriver {
     iteration: u64,
     /// The operator-input seam: the driver blocks on this for `askUser`
     /// form presentation
-    /// ([`Self::drive_answerer_to_finalize`]) and the between-loops human
+    /// ([`Self::drive_agent_session_to_finalize`]) and the between-loops human
     /// checkpoint ([`Self::between_loops_gate`]). Sync-blocking by design
     /// (the frozen `OperatorGate` contract, `selfharness/operator.rs`).
     /// Default [`StdinGate`] (headless behavior); override via
@@ -1506,8 +1508,8 @@ pub struct SelfHarnessDriver {
     node_labels: Mutex<HashMap<NodeId, String>>,
     /// Fork-subsumes-split step 3 (seam map §7.1): the next `idx` to assign
     /// a fork child of a given PARENT, for that child's derived GUI label
-    /// (`f<idx>-<slug>` — see [`Self::drive_fork_child_window`]'s doc).
-    /// Assigned INSIDE `drive_fork_child_window` rather than threaded in
+    /// (`f<idx>-<slug>` — see [`Self::drive_fork_child_agent_session`]'s doc).
+    /// Assigned INSIDE `drive_fork_child_agent_session` rather than threaded in
     /// from a caller: both of its call sites (`drain_answerer_fork` and
     /// `service_thread_ready`'s async fork arm) already pass a fixed
     /// argument list, and the latter is root's concurrent territory this
@@ -1544,7 +1546,7 @@ struct OuterHandlers {
 /// ordinary `runLLMTurn` hole, its cumulative transcript IS the specified
 /// context window) and [`Self::service_outer_branch`]'s branch child
 /// (forked off a frozen prefix, retired after exactly one result) share
-/// the same finalize-driving code (`drive_answerer_to_finalize`) but must
+/// the same finalize-driving code (`drive_agent_session_to_finalize`) but must
 /// NOT share their post-finalize behavior — merging them would either
 /// discard the loop's accumulating window between ordinary holes or leak a
 /// one-shot branch child past its single result. Previously distinguished
@@ -1553,14 +1555,14 @@ struct OuterHandlers {
 /// mode instead of silently reusing/discarding the wrong window.
 ///
 /// The `OneShotBranch` half is superseded at its one call site by
-/// [`BranchWindow`], a consuming guard over the same three fields — this
+/// [`BranchAgentSessionGuard`], a consuming guard over the same three fields — this
 /// sum is what proves the two modes are typed as distinct in the first
-/// place; `BranchWindow` is the deeper, ownership-tracked treatment of the
+/// place; `BranchAgentSessionGuard` is the deeper, ownership-tracked treatment of the
 /// one-shot half alone.
 #[derive(Debug, Clone, Copy)]
-enum WindowLease {
+enum AgentSessionMode {
     /// [`Self::answerer`]'s mode: never retired between holes, only ever
-    /// read via [`Self::retire_answerer`] at loop end.
+    /// read via [`Self::retire_typed_request_agent`] at loop end.
     ReusableLoop {
         node: NodeId,
         realm: tidepool_codegen::jit_machine::RealmId,
@@ -1574,7 +1576,7 @@ enum WindowLease {
     },
 }
 
-impl WindowLease {
+impl AgentSessionMode {
     fn node(&self) -> NodeId {
         match self {
             Self::ReusableLoop { node, .. } | Self::OneShotBranch { node, .. } => *node,
@@ -1631,9 +1633,9 @@ impl WindowLease {
 }
 
 /// A one-shot child window's transaction — the deeper, ownership-tracked
-/// treatment of [`WindowLease::OneShotBranch`] alone (P3.2's typestate
+/// treatment of [`AgentSessionMode::OneShotBranch`] alone (P3.2's typestate
 /// opportunity), shared by [`Self::service_outer_branch`]'s branch child AND
-/// [`Self::drive_fork_child_window`]'s fork child (fork-subsumes-split step
+/// [`Self::drive_fork_child_agent_session`]'s fork child (fork-subsumes-split step
 /// 3 — checked reuse before adding a sibling struct: the two differ only in
 /// how success is delivered, covered below). Retiring used to be a
 /// hand-written four-site discipline per caller (a mechanism error, a
@@ -1647,7 +1649,7 @@ impl WindowLease {
 /// need its OWN hand-written `terminate_node` call now needs none.
 ///
 /// Non-Clone: at most one guard exists per child window.
-struct BranchWindow {
+struct BranchAgentSessionGuard {
     agent: Arc<Harness>,
     node: NodeId,
     realm: tidepool_codegen::jit_machine::RealmId,
@@ -1667,17 +1669,17 @@ struct BranchWindow {
 // `finalize_fork_data`/`fold_exit` and the panic-safety `Drop` each believe
 // THEY own retiring the window, double-retiring the node this guard exists
 // to retire exactly once.
-static_assertions::assert_not_impl_any!(BranchWindow: Clone, Copy);
+static_assertions::assert_not_impl_any!(BranchAgentSessionGuard: Clone, Copy);
 
-impl BranchWindow {
-    /// Mint a guard from an already-established [`WindowLease::OneShotBranch`]
+impl BranchAgentSessionGuard {
+    /// Mint a guard from an already-established [`AgentSessionMode::OneShotBranch`]
     /// — `require_one_shot` refuses to hand back node/realm/scope if `lease`
     /// were ever (by a future refactor) the loop's reusable answerer instead
     /// of a one-shot child's own, so this is where that check is
     /// load-bearing. `validated_ref` is `None` for a fork child (see the
     /// field's own doc).
     fn from_lease(
-        lease: WindowLease,
+        lease: AgentSessionMode,
         agent: Arc<Harness>,
         validated_ref: Option<ContextRef>,
     ) -> Result<Self, DriverError> {
@@ -1742,7 +1744,7 @@ impl BranchWindow {
     /// the window. Shared verbatim by the branch and fork callers — a fork
     /// child's caller additionally turns this into a hard `Err` afterward
     /// (fork children are not branch positions with a typed `Left` to fold
-    /// into; see `drive_fork_child_window`'s own doc), but the retirement
+    /// into; see `drive_fork_child_agent_session`'s own doc), but the retirement
     /// itself is identical.
     fn fold_exit(mut self, reason: &str) {
         let _ = self.agent.terminate_node(self.node, reason);
@@ -1750,7 +1752,7 @@ impl BranchWindow {
     }
 }
 
-impl Drop for BranchWindow {
+impl Drop for BranchAgentSessionGuard {
     /// Covers exactly the mechanism-failure path: a caller returns `Err(e)`
     /// via `?` before ever reaching [`Self::finalize_data`]/
     /// [`Self::finalize_fork_data`]/[`Self::fold_exit`], and this guard
@@ -1777,7 +1779,7 @@ impl Drop for BranchWindow {
 /// A cycle's loop-entry decision, minted once per cycle by
 /// [`SelfHarnessDriver::take_loop_entry`] and consumed by whichever
 /// compilation path runs this cycle — the fused
-/// [`SelfHarnessDriver::compile_cycle_entry`] or the unfused
+/// [`SelfHarnessDriver::compile_loop_entry`] or the unfused
 /// [`SelfHarnessDriver::run_loop_fragment_inner`]. Its whole reason to
 /// exist is [`SelfHarnessDriver::resume`]'s destructive `self.resume.take()`:
 /// before this type, both compile sites called `take_loop_entry` directly,
@@ -1787,12 +1789,12 @@ impl Drop for BranchWindow {
 /// third call site (a preparatory/fallback compile) could violate. Non-Clone:
 /// at most one plan is ever live, so a resume fold cannot be injected twice
 /// or consumed by the wrong compile.
-struct CycleEntryPlan {
+struct LoopEntryPlan {
     code: String,
     helpers: String,
 }
 
-impl CycleEntryPlan {
+impl LoopEntryPlan {
     /// Consumes the plan. `code` names the loop entry (`Loaded.loop
     /// __selfHarnessState` or `Loaded.resumeLoop …`); `helpers` is the
     /// resume-fold decode splice (empty on an ordinary cycle) a caller
@@ -1808,7 +1810,7 @@ impl SelfHarnessDriver {
     /// Construct a driver over an already-booted [`Harness`] (the nested
     /// orchestrator for `runLLMTurn`-answering Agent sessions) and an event
     /// [`Observer`]. The outer Harness-monad session itself is not
-    /// bootstrapped until the first [`Self::run_loop`]/[`Self::run_one_cycle`]
+    /// bootstrapped until the first [`Self::run_loop`]/[`Self::run_one_loop_iteration`]
     /// call (it needs the loaded [`HarnessSource`] first).
     pub fn new(agent: Arc<Harness>, observer: Arc<dyn Observer>) -> Self {
         SelfHarnessDriver {
@@ -1816,7 +1818,7 @@ impl SelfHarnessDriver {
             iteration_realm: AtomicU64::new(0),
             last_rotation_losses: None,
             pending_operator_input: None,
-            cycle_state_json: None,
+            loop_state_json: None,
             agent,
             lifecycle: SelfHarnessState::Idle,
             observer,
@@ -1826,10 +1828,10 @@ impl SelfHarnessDriver {
             answerer_framing: None,
             answerer: None,
             loop_inference_calls: AtomicU32::new(0),
-            answerer_nudge_rounds: ANSWERER_NUDGE_ROUNDS,
-            answerer_max_rounds: ANSWERER_MAX_ROUNDS,
+            answerer_nudge_rounds: TYPED_REQUEST_AGENT_NUDGE_ROUNDS,
+            answerer_max_rounds: TYPED_REQUEST_AGENT_MAX_ROUNDS,
             loop_inference_call_cap: LOOP_INFERENCE_CALL_CAP,
-            fork_budget_per_window: DEFAULT_FORK_BUDGET_PER_WINDOW,
+            fork_budget_per_window: DEFAULT_FORK_BUDGET_PER_SESSION,
             max_fork_depth: DEFAULT_MAX_FORK_DEPTH,
             fork_subtree_cap: DEFAULT_FORK_SUBTREE_CAP,
             concurrency_cap: DEFAULT_CONCURRENCY_CAP,
@@ -1852,7 +1854,7 @@ impl SelfHarnessDriver {
     }
 
     /// Refuse to proceed while [`SelfHarnessState::Poisoned`] — the guard every
-    /// public entry point (`run_one_cycle`/`run_loop`/`restore`) calls first.
+    /// public entry point (`run_one_loop_iteration`/`run_loop`/`restore`) calls first.
     fn refuse_if_poisoned(&self) -> Result<(), DriverError> {
         match &self.lifecycle {
             SelfHarnessState::Poisoned { reason } => Err(DriverError::Poisoned(reason.clone())),
@@ -1877,9 +1879,9 @@ impl SelfHarnessDriver {
     /// `sid`, so the old one was never reachable again — one whole leaked
     /// JIT machine per `Failed`→recovered cycle. (`run_loop` exits on the
     /// first error, so this matters mainly to an embedder/acceptance driver
-    /// that keeps calling `run_one_cycle` across a recovered `Failed`.)
+    /// that keeps calling `run_one_loop_iteration` across a recovered `Failed`.)
     fn discard_resident_state(&mut self) {
-        self.retire_answerer();
+        self.retire_typed_request_agent();
         self.answerer_framing = None;
         self.cycle_compaction = None;
         self.loop_inference_calls.store(0, Ordering::SeqCst);
@@ -2092,7 +2094,7 @@ impl SelfHarnessDriver {
     }
 
     /// Override the per-hole answerer round caps (default
-    /// [`ANSWERER_NUDGE_ROUNDS`]/[`ANSWERER_MAX_ROUNDS`], 16/32).
+    /// [`TYPED_REQUEST_AGENT_NUDGE_ROUNDS`]/[`TYPED_REQUEST_AGENT_MAX_ROUNDS`], 16/32).
     /// Mainly for tests: small caps (e.g. 3/6) trip
     /// the nudge + hard-fail with a few scripted turns instead of 16/32 real
     /// GHC compiles. `nudge` is clamped below `max`.
@@ -2107,7 +2109,7 @@ impl SelfHarnessDriver {
     /// turn — is counted against it without scripting 1024 real turns.
     /// Override the per-window fork budget ([`Self::fork_budget_per_window`])
     /// — a test proves the refusal with a budget of 1 or 2 instead of
-    /// scripting [`DEFAULT_FORK_BUDGET_PER_WINDOW`] real child windows.
+    /// scripting [`DEFAULT_FORK_BUDGET_PER_SESSION`] real child windows.
     pub fn set_fork_budget_per_window(&mut self, budget: u32) {
         self.fork_budget_per_window = budget;
     }
@@ -2161,7 +2163,7 @@ impl SelfHarnessDriver {
     /// own loop-metadata counter (see [`Self::iteration`]'s field doc), NOT
     /// read from `state_json`. Reflects a reload from
     /// [`Self::checkpoint_path`] after [`Self::restore`] runs, or the count
-    /// after the most recent [`Self::run_one_cycle`].
+    /// after the most recent [`Self::run_one_loop_iteration`].
     pub fn iteration(&self) -> u64 {
         self.iteration
     }
@@ -2426,7 +2428,7 @@ impl SelfHarnessDriver {
 
     /// The `--targets` name of the fused module's extra entry — the loop
     /// body, compiled alongside `result` (the render entry) by
-    /// [`Self::compile_cycle_entry`] in ONE `tidepool-extract` spawn. Named in
+    /// [`Self::compile_loop_entry`] in ONE `tidepool-extract` spawn. Named in
     /// the `__selfHarness*` family like every other runtime-generated splice
     /// in this driver.
     const LOOP_ENTRY_TARGET: &'static str = "__selfHarnessLoopEntry";
@@ -2443,11 +2445,11 @@ impl SelfHarnessDriver {
     ///   in the helpers.
     ///
     /// `take()`s the fold: the injection is ONE-SHOT at boot (see
-    /// [`Self::resume`]'s doc), minted into a [`CycleEntryPlan`] a caller
-    /// then consumes exactly once. [`Self::run_one_cycle`] mints ONE plan
-    /// per cycle and passes it down to [`Self::compile_cycle_entry`] (the
+    /// [`Self::resume`]'s doc), minted into a [`LoopEntryPlan`] a caller
+    /// then consumes exactly once. [`Self::run_one_loop_iteration`] mints ONE plan
+    /// per cycle and passes it down to [`Self::compile_loop_entry`] (the
     /// fused, production path); the unfused [`Self::run_loop_fragment_inner`]
-    /// — a direct fragment API `run_one_cycle` never itself calls, used by a
+    /// — a direct fragment API `run_one_loop_iteration` never itself calls, used by a
     /// test driving the fragment in isolation — mints its OWN plan instead.
     /// Either way `self.resume` is readable ONLY through this method, so a
     /// second call in the same cycle cannot get the resume fold a second
@@ -2458,14 +2460,14 @@ impl SelfHarnessDriver {
     ///
     /// A non-empty fold against a harness with no `resumeLoop` never reaches
     /// here: `bootstrap` refused it.
-    fn take_loop_entry(&mut self) -> CycleEntryPlan {
+    fn take_loop_entry(&mut self) -> LoopEntryPlan {
         let q = state_cross::LOADED_QUALIFIER;
         match self.resume.take() {
-            Some(pending) if !pending.fold.is_empty() => CycleEntryPlan {
+            Some(pending) if !pending.fold.is_empty() => LoopEntryPlan {
                 code: format!("{q}.resumeLoop __selfHarnessResume __selfHarnessState"),
                 helpers: state_cross::resume_in(&pending.fold),
             },
-            _ => CycleEntryPlan {
+            _ => LoopEntryPlan {
                 code: format!("{q}.loop __selfHarnessState"),
                 helpers: String::new(),
             },
@@ -2495,14 +2497,14 @@ impl SelfHarnessDriver {
     /// caller can compile once and run each entry through its own existing
     /// path.
     ///
-    /// `plan` is this cycle's [`CycleEntryPlan`] — minted ONCE by the caller
-    /// ([`Self::run_one_cycle`]) via [`Self::take_loop_entry`] and consumed
-    /// HERE, never minted by this method itself: see `CycleEntryPlan`'s doc
+    /// `plan` is this cycle's [`LoopEntryPlan`] — minted ONCE by the caller
+    /// ([`Self::run_one_loop_iteration`]) via [`Self::take_loop_entry`] and consumed
+    /// HERE, never minted by this method itself: see `LoopEntryPlan`'s doc
     /// for why that split is the point.
-    fn compile_cycle_entry(
+    fn compile_loop_entry(
         &mut self,
         prior_state: Option<&Json>,
-        plan: CycleEntryPlan,
+        plan: LoopEntryPlan,
     ) -> Result<(CompiledTurn, CompiledTurn), DriverError> {
         // Register this cycle's (stateJson, operatorMsgJson) under the
         // stable Val.G0 binding BEFORE compiling — the outer module's
@@ -2601,7 +2603,7 @@ impl SelfHarnessDriver {
     /// [`state_cross::harness_ctx_module`] on the OUTER session to this
     /// cycle's `(stateJson, operatorMsgJson)` — the value half of
     /// `plans/turn-latency-state-injection.md`'s injection (the type/iface
-    /// half is [`Self::compile_cycle_entry`]'s `--inject-val`).
+    /// half is [`Self::compile_loop_entry`]'s `--inject-val`).
     ///
     /// Compiles a tiny standalone module
     /// ([`state_cross::harness_ctx_source`]) through
@@ -2674,7 +2676,7 @@ impl SelfHarnessDriver {
     /// output composed with the prior compaction summary and the
     /// loop-iteration count), run `loop state` as a suspendable fragment
     /// (servicing every `runLLMTurn` hole via
-    /// [`Self::service_runllm_hole`]), serialize the returned `State`
+    /// [`Self::service_typed_request_suspension`]), serialize the returned `State`
     /// ([`state_cross::state_out`]), advance `self.iteration`, and render
     /// the post-loop prompt. `prior_state` is `None` only for the very
     /// first cycle. The compaction summary fed to [`Self::render_framing`]
@@ -2688,11 +2690,11 @@ impl SelfHarnessDriver {
     /// `self.last_compaction` before `prompt_after` is rendered, so
     /// `prompt_after` already reflects it — proving the summary reaches the
     /// very next render.
-    pub async fn run_one_cycle(
+    pub async fn run_one_loop_iteration(
         &mut self,
         source: &HarnessSource,
         prior_state: Option<&Json>,
-    ) -> Result<CycleOutcome, DriverError> {
+    ) -> Result<LoopIterationOutcome, DriverError> {
         self.refuse_if_poisoned()?;
 
         // A prior cycle's error guard (below) already discarded `self.outer`,
@@ -2727,12 +2729,12 @@ impl SelfHarnessDriver {
 
         // Mint THIS cycle's loop-entry plan ONCE, here — the one call to
         // `take_loop_entry` a production cycle ever makes — and pass it
-        // down to `compile_cycle_entry` rather than letting that method
-        // mint its own (`CycleEntryPlan`'s doc).
+        // down to `compile_loop_entry` rather than letting that method
+        // mint its own (`LoopEntryPlan`'s doc).
         let plan = self.take_loop_entry();
 
         // Compile the pre-loop `render` and this cycle's `loop` fragment
-        // TOGETHER, in ONE spawn (`Self::compile_cycle_entry`), then run the
+        // TOGETHER, in ONE spawn (`Self::compile_loop_entry`), then run the
         // render entry directly against `prior_state` — `None` (the very
         // first cycle) splices `Loaded.initialState` in the shared helpers
         // (`state_cross::state_in(None)`), so no redundant `pure initialState`
@@ -2748,7 +2750,7 @@ impl SelfHarnessDriver {
         // reporting `Failed` forever instead of escalating) — do not
         // simplify this to one.
         let prior_compaction = self.last_compaction.clone();
-        let (prompt_before, loop_turn) = match self.compile_cycle_entry(prior_state, plan) {
+        let (prompt_before, loop_turn) = match self.compile_loop_entry(prior_state, plan) {
             Ok((render_turn, loop_turn)) => {
                 match self.render_framing_with(&render_turn, prior_compaction.as_deref()) {
                     Ok(prompt) => (prompt, loop_turn),
@@ -2787,7 +2789,7 @@ impl SelfHarnessDriver {
         // `run_loop_fragment` to seed the per-loop answerer node.
         self.answerer_framing = Some(format!(
             "{prompt_before}\n\n{}",
-            answerer_framing_suffix(self.fork_budget_per_window, self.fork_subtree_cap)
+            typed_request_agent_framing_suffix(self.fork_budget_per_window, self.fork_subtree_cap)
         ));
 
         self.lifecycle = SelfHarnessState::RunningLoop;
@@ -2798,7 +2800,7 @@ impl SelfHarnessDriver {
         // Run the fallible body, then publish `Idle` on success or `Failed`
         // (after discarding that resident state) on error — never `Idle` on
         // a path that didn't actually finish.
-        let result: Result<CycleOutcome, DriverError> = async {
+        let result: Result<LoopIterationOutcome, DriverError> = async {
             let (value, table) = self.run_loop_fragment(prior_state, Some(loop_turn)).await?;
             let state_json = state_cross::state_out(&value, &table);
 
@@ -2828,7 +2830,7 @@ impl SelfHarnessDriver {
             // in force right now commit together as the next generation.
             self.commit_checkpoint(source, &state_json)?;
 
-            Ok(CycleOutcome {
+            Ok(LoopIterationOutcome {
                 prompt_before,
                 state_json,
                 prompt_after,
@@ -2852,7 +2854,7 @@ impl SelfHarnessDriver {
     /// committed checkpoint from [`Self::checkpoint_path`] if one is there
     /// yet (restart-reload — falls back to `initialState`, exactly the
     /// in-process very-first-cycle case, when nothing has been committed
-    /// yet), then run [`Self::run_one_cycle`] FOREVER, threading each
+    /// yet), then run [`Self::run_one_loop_iteration`] FOREVER, threading each
     /// cycle's returned `State` into the next one (each cycle commits its
     /// own checkpoint on success — see [`Self::commit_checkpoint`] — so
     /// this loop does no persistence of its own). Production entry point —
@@ -2867,7 +2869,7 @@ impl SelfHarnessDriver {
     /// steering field), presented through the same `present_form` machinery
     /// every `askUser` ask uses. `auto` (the binary's `--yes`/`--auto` flag)
     /// skips the gate for CI/replay. The acceptance path drives
-    /// [`Self::run_one_cycle`] directly and has NO gate.
+    /// [`Self::run_one_loop_iteration`] directly and has NO gate.
     ///
     /// **Restart rule (uniform, no marker):** ANY boot that restores a
     /// checkpoint presents the between-turns gate before running the next
@@ -2916,7 +2918,10 @@ impl SelfHarnessDriver {
                 self.between_loops_gate().await?;
             }
             first = false;
-            let outcome = match self.run_one_cycle(source, state_json.as_ref()).await {
+            let outcome = match self
+                .run_one_loop_iteration(source, state_json.as_ref())
+                .await
+            {
                 Ok(outcome) => outcome,
                 Err(DriverError::StateDecode(detail)) if state_json.is_some() => {
                     tracing::warn!(
@@ -2929,7 +2934,8 @@ impl SelfHarnessDriver {
                     // reasoning as restore's compaction drop).
                     self.iteration = 0;
                     self.discard_resident_state();
-                    self.run_one_cycle(source, state_json.as_ref()).await?
+                    self.run_one_loop_iteration(source, state_json.as_ref())
+                        .await?
                 }
                 Err(e) => return Err(e),
             };
@@ -3025,9 +3031,9 @@ impl SelfHarnessDriver {
     /// (the compaction summary in force at this same moment — a mid-loop
     /// compaction already updated it in place, so a cycle that compacted and
     /// one that didn't commit through the same path), and `self.iteration`
-    /// (already advanced by [`Self::run_one_cycle`] before this call) go
+    /// (already advanced by [`Self::run_one_loop_iteration`] before this call) go
     /// into one [`persistence::Checkpoint`], written atomically under the
-    /// next generation. Called once, at the end of [`Self::run_one_cycle`]'s
+    /// next generation. Called once, at the end of [`Self::run_one_loop_iteration`]'s
     /// success path — the ONLY place a checkpoint is written, so a state, a
     /// summary, and an iteration count read back together are always from
     /// the same generation.
@@ -3087,14 +3093,14 @@ impl SelfHarnessDriver {
     /// Drive `Loaded.loop __selfHarnessState` (spliced via
     /// [`state_cross::state_in`]) as a suspendable fragment on the outer
     /// session, servicing every `runLLMTurn` hole it suspends on via
-    /// [`Self::service_runllm_hole`] until it completes. Returns the
+    /// [`Self::service_typed_request_suspension`] until it completes. Returns the
     /// completed `State` value and the DataConTable its OWN compile produced
     /// (the table every hole along this same continuation classifies
     /// against — `resume` never recompiles).
     ///
     /// `precompiled`, when `Some`, is this cycle's loop entry from
-    /// [`Self::compile_cycle_entry`] — used AS-IS instead of compiling one
-    /// here, which is how [`Self::run_one_cycle`] pays only ONE fused spawn
+    /// [`Self::compile_loop_entry`] — used AS-IS instead of compiling one
+    /// here, which is how [`Self::run_one_loop_iteration`] pays only ONE fused spawn
     /// for both `render` and `loop`. `None` compiles it here via
     /// [`Self::compile_outer`], exactly as before fusion — a direct caller
     /// (a test driving this fragment in isolation) keeps working unfused.
@@ -3111,12 +3117,12 @@ impl SelfHarnessDriver {
     ) -> Result<(Value, DataConTable), DriverError> {
         self.loop_inference_calls.store(0, Ordering::SeqCst);
         self.cycle_compaction = None;
-        self.cycle_state_json = prior_state.cloned();
+        self.loop_state_json = prior_state.cloned();
 
         // Create the ONE render-seeded answerer session for this whole
         // loop, up front — every `runLLMTurn` hole pushes onto it, so hole #2
         // sees hole #1's exchange (the accumulating context window). Retired
-        // in `retire_answerer` once the loop completes (or errors out).
+        // in `retire_typed_request_agent` once the loop completes (or errors out).
         let answerer =
             self.agent
                 .create_root_framed("loop answerer", "", self.answerer_framing.clone())?;
@@ -3128,20 +3134,20 @@ impl SelfHarnessDriver {
         self.agent.force_attached(answerer, Actor::Operator, sid)?;
         let realm = self.mint_realm();
         self.agent.set_node_realm(answerer, realm);
-        self.answerer = Some(WindowLease::ReusableLoop {
+        self.answerer = Some(AgentSessionMode::ReusableLoop {
             node: answerer,
             realm,
         });
 
         let result = self.run_loop_fragment_inner(prior_state, precompiled).await;
-        self.retire_answerer();
+        self.retire_typed_request_agent();
         result
     }
 
     /// Retire the current loop's answerer node (terminalize it and drop its
     /// session), so the next loop starts from a fresh render-seeded one.
     /// Idempotent — a no-op if no answerer is live.
-    fn retire_answerer(&mut self) {
+    fn retire_typed_request_agent(&mut self) {
         if let Some(lease) = self.answerer.take() {
             let _ = self
                 .agent
@@ -3183,8 +3189,8 @@ impl SelfHarnessDriver {
             None => {
                 // The unfused path mints its OWN plan — a direct fragment
                 // API a test drives in isolation, never called from
-                // `run_one_cycle` (which mints one plan and passes it to
-                // `compile_cycle_entry` instead). See `CycleEntryPlan`'s doc.
+                // `run_one_loop_iteration` (which mints one plan and passes it to
+                // `compile_loop_entry` instead). See `LoopEntryPlan`'s doc.
                 let (code, resume_helpers) = self.take_loop_entry().into_code_and_helpers();
                 let helpers = format!(
                     "{}{}{}",
@@ -3226,12 +3232,12 @@ impl SelfHarnessDriver {
         let mut next_tid: i64 = 1;
         let mut next_thread_realm: u64 = 1;
 
-        // EVERY branch below hands back a `ServicedHole` instead of directly
+        // EVERY branch below hands back a `ServicedSuspension` instead of directly
         // pushing to `ready`/breaking the loop — see that type's doc for why:
         // a servicing arm that computed a next outcome and merely assigned it
         // to a dead local, rather than returning it, is the incident this
-        // subsumes into the type. `HoleRouting::Green` is the one exception,
-        // documented at `ServicedHole` and at `Self::service_green_hole`.
+        // subsumes into the type. `SuspensionRouting::Green` is the one exception,
+        // documented at `ServicedSuspension` and at `Self::service_green_hole`.
         //
         // F6: wrapped in a bare (non-`move`) `async` block so every `?`
         // inside the loop body (`classify_hole`, each `service_*().await?`,
@@ -3253,8 +3259,8 @@ impl SelfHarnessDriver {
                         .into(),
                 ));
             };
-            let serviced: ServicedHole = match outcome {
-                ResidentOutcome::Completed { result, .. } => ServicedHole::Completed {
+            let serviced: ServicedSuspension = match outcome {
+                ResidentOutcome::Completed { result, .. } => ServicedSuspension::Completed {
                     result: result.into_value(),
                     table: compiled.table.clone(),
                 },
@@ -3262,9 +3268,9 @@ impl SelfHarnessDriver {
                     let classified =
                         engine::classify_hole(&request, &compiled.table, &compiled.asks)?;
                     match &classified.routing {
-                        HoleRouting::RunLLMTurn { site, ty } => {
+                        SuspensionRouting::RunLLMTurn { site, ty } => {
                             let answer = self
-                                .service_runllm_hole(
+                                .service_typed_request_suspension(
                                     site.get(),
                                     ty.as_deref(),
                                     compiled.asks.modules_of(site.get()),
@@ -3277,7 +3283,7 @@ impl SelfHarnessDriver {
                             // context IN PLACE now, so the NEXT hole drives under
                             // the smaller window.
                             //
-                            // This runs only AFTER `service_runllm_hole` has
+                            // This runs only AFTER `service_typed_request_suspension` has
                             // already finalized THIS hole's answer
                             // (`take_finalized_value_keep_open` consumed the finalize
                             // continuation and returned the session to idle —
@@ -3302,7 +3308,7 @@ impl SelfHarnessDriver {
                                 .map_err(|e| {
                                     DriverError::Session(format!("loop resume failed: {e}"))
                                 })?;
-                            ServicedHole::Resumed(GreenReady {
+                            ServicedSuspension::Resumed(GreenReady {
                                 chain,
                                 outcome: next,
                             })
@@ -3318,7 +3324,7 @@ impl SelfHarnessDriver {
                         // interleaved `note`, returning the first outcome that
                         // ISN'T another operator form/note — a `runLLMTurn`
                         // suspension the main loop then services, or a completion.
-                        HoleRouting::AskUser { .. } | HoleRouting::Note { .. } => {
+                        SuspensionRouting::AskUser { .. } | SuspensionRouting::Note { .. } => {
                             let next = self
                                 .service_outer_askuser_hole(
                                     hole.clone(),
@@ -3326,7 +3332,7 @@ impl SelfHarnessDriver {
                                     &compiled,
                                 )
                                 .await?;
-                            ServicedHole::Resumed(GreenReady {
+                            ServicedSuspension::Resumed(GreenReady {
                                 chain,
                                 outcome: next,
                             })
@@ -3336,7 +3342,7 @@ impl SelfHarnessDriver {
                         // ORIGINAL request into the driver-owned handler
                         // (suspension-serviced; the outer handled prefix
                         // stays empty) and resume with its typed response.
-                        HoleRouting::Subagent => {
+                        SuspensionRouting::Subagent => {
                             let value = self.service_outer_subagent(&request, &compiled.table)?;
                             let sid = self.outer_sid()?;
                             let next = self
@@ -3346,7 +3352,7 @@ impl SelfHarnessDriver {
                                 .map_err(|e| {
                                     DriverError::Session(format!("subagent resume failed: {e}"))
                                 })?;
-                            ServicedHole::Resumed(GreenReady {
+                            ServicedSuspension::Resumed(GreenReady {
                                 chain,
                                 outcome: next,
                             })
@@ -3355,7 +3361,7 @@ impl SelfHarnessDriver {
                         // (run-journal lane) — same suspension-servicing
                         // shape as Subagent above, generalized over
                         // `OuterEffectKind`.
-                        HoleRouting::OuterEffect(kind) => {
+                        SuspensionRouting::OuterEffect(kind) => {
                             let kind = *kind;
                             // `RepoEventAwait` (PRD 20 S1-L4 wave 2) is the
                             // ONE outer-row suspension whose handler-side
@@ -3371,7 +3377,7 @@ impl SelfHarnessDriver {
                             // drain; a match resumes the hole immediately,
                             // exactly as if `RepoEventAwait` itself had
                             // returned it; an EMPTY batch leaves the hole
-                            // genuinely parked — `ServicedHole::LeaveParked`,
+                            // genuinely parked — `ServicedSuspension::LeaveParked`,
                             // reinserted at the BACK of `ready` so every other
                             // already-ready chain runs first, revisited by
                             // this same arm on a later iteration. The
@@ -3406,7 +3412,7 @@ impl SelfHarnessDriver {
                                             ))
                                             .await;
                                         }
-                                        ServicedHole::LeaveParked(GreenReady {
+                                        ServicedSuspension::LeaveParked(GreenReady {
                                             chain,
                                             outcome: ResidentOutcome::Suspended {
                                                 output: Vec::new(),
@@ -3426,7 +3432,7 @@ impl SelfHarnessDriver {
                                                     "RepoEventAwait resume failed: {e}"
                                                 ))
                                             })?;
-                                        ServicedHole::Resumed(GreenReady {
+                                        ServicedSuspension::Resumed(GreenReady {
                                             chain,
                                             outcome: next,
                                         })
@@ -3445,7 +3451,7 @@ impl SelfHarnessDriver {
                                             "outer effect resume failed: {e}"
                                         ))
                                     })?;
-                                ServicedHole::Resumed(GreenReady {
+                                ServicedSuspension::Resumed(GreenReady {
                                     chain,
                                     outcome: next,
                                 })
@@ -3458,9 +3464,9 @@ impl SelfHarnessDriver {
                         // candidate pushes none; a spawn pushes both the resumed
                         // spawner and the freshly started thread) and mutates the
                         // thread table / waiter map — it does not fit
-                        // `ServicedHole` (see that type's doc), so it owns
+                        // `ServicedSuspension` (see that type's doc), so it owns
                         // `ready` directly and this arm hands nothing back.
-                        HoleRouting::Green => {
+                        SuspensionRouting::Green => {
                             // Raw delivery never reports node-blocked. The
                             // AUTHORED plane keeps misuse a hard error —
                             // authored code fails loud, it is not coached.
@@ -3497,7 +3503,7 @@ impl SelfHarnessDriver {
                         // only verb that can raise this routing on the outer
                         // session is `runLLMTurnFork`/`runLLMTurnFanout` —
                         // `ForkSource::RunLLMTurn` by construction.
-                        HoleRouting::Fork {
+                        SuspensionRouting::Fork {
                             site,
                             ty,
                             fan,
@@ -3523,7 +3529,7 @@ impl SelfHarnessDriver {
                                 .map_err(|e| {
                                     DriverError::Session(format!("fanout resume failed: {e}"))
                                 })?;
-                            ServicedHole::Resumed(GreenReady {
+                            ServicedSuspension::Resumed(GreenReady {
                                 chain,
                                 outcome: next,
                             })
@@ -3531,7 +3537,7 @@ impl SelfHarnessDriver {
                         // PRD 21 lane C3 GAP 1: `freezeContext` — immediate,
                         // no operator, no model round (mirrors `ReadState`'s
                         // service shape above it).
-                        HoleRouting::FreezeContext => {
+                        SuspensionRouting::FreezeContext => {
                             let value = self.service_outer_freeze_context(&compiled.table)?;
                             let sid = self.outer_sid()?;
                             let next = self
@@ -3541,7 +3547,7 @@ impl SelfHarnessDriver {
                                 .map_err(|e| {
                                     DriverError::Session(format!("freezeContext resume failed: {e}"))
                                 })?;
-                            ServicedHole::Resumed(GreenReady {
+                            ServicedSuspension::Resumed(GreenReady {
                                 chain,
                                 outcome: next,
                             })
@@ -3550,7 +3556,7 @@ impl SelfHarnessDriver {
                         // prompt` — fork a child off the frozen prefix `ref`
                         // names (never an empty root) and resume with `(T,
                         // ContextRef)`.
-                        HoleRouting::Branch {
+                        SuspensionRouting::Branch {
                             site,
                             ty,
                             context_ref,
@@ -3575,17 +3581,17 @@ impl SelfHarnessDriver {
                                 .map_err(|e| {
                                     DriverError::Session(format!("branch resume failed: {e}"))
                                 })?;
-                            ServicedHole::Resumed(GreenReady {
+                            ServicedSuspension::Resumed(GreenReady {
                                 chain,
                                 outcome: next,
                             })
                         }
-                        // The bulk sibling of `HoleRouting::Branch`: N
+                        // The bulk sibling of `SuspensionRouting::Branch`: N
                         // children fork off ONE parent `context_ref`,
                         // driven CONCURRENTLY (operator decision: sibling
                         // branch windows are ALWAYS concurrent, never a
                         // model-visible choice).
-                        HoleRouting::BranchFanout {
+                        SuspensionRouting::BranchFanout {
                             site,
                             ty,
                             context_ref,
@@ -3613,7 +3619,7 @@ impl SelfHarnessDriver {
                                         "branch fanout resume failed: {e}"
                                     ))
                                 })?;
-                            ServicedHole::Resumed(GreenReady {
+                            ServicedSuspension::Resumed(GreenReady {
                                 chain,
                                 outcome: next,
                             })
@@ -3634,8 +3640,8 @@ impl SelfHarnessDriver {
                 }
             };
             match serviced {
-                ServicedHole::Completed { result, table } => break Ok((result, table)),
-                ServicedHole::Resumed(gr) | ServicedHole::LeaveParked(gr) => {
+                ServicedSuspension::Completed { result, table } => break Ok((result, table)),
+                ServicedSuspension::Resumed(gr) | ServicedSuspension::LeaveParked(gr) => {
                     ready.push_back(gr);
                 }
             }
@@ -3728,10 +3734,10 @@ impl SelfHarnessDriver {
     /// Service one `Tidepool.Async` suspension (PRD 20 S1-L4): decode which
     /// of the six `Async*With` verbs `request` is by CONSTRUCTOR NAME (never
     /// in [`engine::classify_hole`] — the payload may carry a live closure,
-    /// see [`HoleRouting::Green`]'s doc) and act, mutating the scheduler's
+    /// see [`SuspensionRouting::Green`]'s doc) and act, mutating the scheduler's
     /// thread table / waiter map / ready queue in place.
     ///
-    /// Deliberately returns `Result<(), DriverError>`, not a [`ServicedHole`]
+    /// Deliberately returns `Result<(), DriverError>`, not a [`ServicedSuspension`]
     /// — checked and rejected before the rest of the dispatcher adopted that
     /// sum. Its six arms push zero (`AsyncJoinAnyWith` with no terminal
     /// candidate, `AsyncDoneWith` on a cancelled/already-settled thread),
@@ -3740,10 +3746,10 @@ impl SelfHarnessDriver {
     /// waking every parked joiner) items onto `ready`, and several never
     /// resume the triggering hole at all (`AsyncDoneWith`'s own hole stays
     /// parked forever, its frame reclaimed only when the thread's realm
-    /// eventually closes). `ServicedHole::{Resumed,LeaveParked}` both assume
+    /// eventually closes). `ServicedSuspension::{Resumed,LeaveParked}` both assume
     /// "exactly one hole, exactly one outcome, handed back once" — this
     /// method's job is precisely to not have that shape, so forcing it into
-    /// the sum would mean returning `Vec<ServicedHole>` (or a payload-free
+    /// the sum would mean returning `Vec<ServicedSuspension>` (or a payload-free
     /// `Handled` marker), neither of which catches anything a caller
     /// forgetting to `?` this `Result` doesn't already catch today. Mirrors
     /// [`Self::service_outer_subagent`]'s shape (driver-owned, suspension-
@@ -4172,7 +4178,7 @@ impl SelfHarnessDriver {
     }
 
     /// Service one `runLLMTurn @A` suspension (`site`/`ty` from
-    /// [`crate::engine::HoleRouting::RunLLMTurn`], `prompt` the hole's
+    /// [`crate::engine::SuspensionRouting::RunLLMTurn`], `prompt` the hole's
     /// human-facing text) against the CURRENT loop's SINGLE render-seeded
     /// answerer session (`self.answerer`): push the hole card as a User
     /// turn onto that persistent node — so hole #2 sees hole #1's exchange
@@ -4183,10 +4189,10 @@ impl SelfHarnessDriver {
     /// continuation.
     ///
     /// Bounded: each non-finalize model round counts against a per-hole
-    /// budget — at [`ANSWERER_NUDGE_ROUNDS`] the answerer is nudged to
-    /// finalize, at [`ANSWERER_MAX_ROUNDS`] the hole hard-fails — and
+    /// budget — at [`TYPED_REQUEST_AGENT_NUDGE_ROUNDS`] the answerer is nudged to
+    /// finalize, at [`TYPED_REQUEST_AGENT_MAX_ROUNDS`] the hole hard-fails — and
     /// against the per-loop [`LOOP_INFERENCE_CALL_CAP`] total.
-    pub async fn service_runllm_hole(
+    pub async fn service_typed_request_suspension(
         &mut self,
         site: u32,
         ty: Option<&str>,
@@ -4203,14 +4209,14 @@ impl SelfHarnessDriver {
 
         let lease = self.answerer.ok_or_else(|| {
             DriverError::Session(
-                "service_runllm_hole called with no per-loop answerer (run_loop_fragment \
+                "service_typed_request_suspension called with no per-loop answerer (run_loop_fragment \
                  must create it first)"
                     .into(),
             )
         })?;
         // This hole finishes by taking the finalized answer and keeping the
         // node open for the NEXT hole — only a `ReusableLoop` lease may do
-        // that (see `WindowLease::require_reusable`'s doc).
+        // that (see `AgentSessionMode::require_reusable`'s doc).
         let node = lease.require_reusable()?;
 
         // Declare THIS hole's answer contract on the (reused) answerer node
@@ -4224,13 +4230,13 @@ impl SelfHarnessDriver {
         // context rather than spawning a fresh one. The SCOPED answerer card
         // (`[AskUser, Finalize]`) names `finalize @T`, NOT the generic
         // `resume expr` (which does not compile against this stack).
-        let child_prompt = engine::answerer_hole_card(
+        let child_prompt = engine::finalize_typed_request_prompt(
             "The loop",
             prompt,
             ty,
             modules,
             Some(table),
-            &self.agent.hole_card_effect_row(),
+            &self.agent.finalize_typed_request_prompt_effect_row(),
         );
         self.agent.push_user_turn(node, &child_prompt)?;
         self.emit(Event::TurnStart { node });
@@ -4243,13 +4249,13 @@ impl SelfHarnessDriver {
         // plumbing existed.
         let fork_subtree = std::sync::atomic::AtomicU32::new(0);
         let outcome = match self
-            .drive_answerer_to_finalize(
+            .drive_agent_session_to_finalize(
                 node,
                 ty,
                 site,
                 0,
                 &fork_subtree,
-                AnswererExitPolicy::Interactive,
+                AgentSessionExitPolicy::Interactive,
             )
             .await?
         {
@@ -4265,7 +4271,7 @@ impl SelfHarnessDriver {
         let is_finalize = matches!(
             &outcome,
             TurnOutcome::Suspended { classified, .. }
-                if matches!(classified.routing, HoleRouting::Finalize { .. })
+                if matches!(classified.routing, SuspensionRouting::Finalize { .. })
         );
         if !is_finalize {
             return Err(DriverError::Session(format!(
@@ -4309,7 +4315,7 @@ impl SelfHarnessDriver {
     /// Service a `freezeContext` suspension (PRD 21 lane C3, closing GAP 1):
     /// mint a `ContextRef` naming the CURRENT loop's per-loop answerer
     /// window's frozen prefix, right now — immediately, no operator, no
-    /// model round ([`HoleRouting::ReadState`]'s service shape).
+    /// model round ([`SuspensionRouting::ReadState`]'s service shape).
     /// `freeze_snapshot` is idempotent, so calling this more than once
     /// without an intervening `runLLMTurn`/`runLLMTurnBranch` returns the
     /// SAME digest rather than writing a second receipt.
@@ -4332,7 +4338,7 @@ impl SelfHarnessDriver {
     /// [`Harness::resolve_context_ref`]/[`Harness::fork_from_context_ref`],
     /// C2's `fork_from_snapshot` seam under a typed capability rather than an
     /// empty root — drive it to `finalize @T` (reusing
-    /// [`Self::drive_answerer_to_finalize`] UNCHANGED: the node arrives
+    /// [`Self::drive_agent_session_to_finalize`] UNCHANGED: the node arrives
     /// already seeded with its hole card as the branch's inherited-prefix
     /// opening turn, exactly the "already seeded" precondition that method
     /// already documents), and resume with
@@ -4364,7 +4370,7 @@ impl SelfHarnessDriver {
     /// no realm-checkout retry dance against concurrent siblings.
     ///
     /// The child-driving shell (fork off `cref`, GUI label, attach, realm,
-    /// scope, `BranchWindow`, the exit/closure/success ladder) is
+    /// scope, `BranchAgentSessionGuard`, the exit/closure/success ladder) is
     /// [`Self::drive_branch_child`] — shared with
     /// [`Self::service_outer_branch_fanout`]'s per-sibling driver (sol
     /// cross-family review finding 9a: these used to be two independently
@@ -4449,8 +4455,8 @@ impl SelfHarnessDriver {
     /// inference-call cap) still hard-fails the turn via `?`.
     ///
     /// Each sibling is driven by [`Self::drive_branch_child`] through
-    /// [`Self::drive_answerer_to_finalize`] under
-    /// [`AnswererExitPolicy::Interactive`] — unlike
+    /// [`Self::drive_agent_session_to_finalize`] under
+    /// [`AgentSessionExitPolicy::Interactive`] — unlike
     /// [`Self::drive_fanout_child`]'s `FinalizeOnly` v1 scope, a branch
     /// sibling CAN delegate or ask the operator mid-window, exactly as a
     /// sequential [`Self::service_outer_branch`] child could — see that
@@ -4589,7 +4595,7 @@ impl SelfHarnessDriver {
     }
 
     /// Drive ONE branch child from a context-ref fork through
-    /// [`Self::drive_answerer_to_finalize`] (`AnswererExitPolicy::Interactive`
+    /// [`Self::drive_agent_session_to_finalize`] (`AgentSessionExitPolicy::Interactive`
     /// — a branch child CAN `delegate` or ask the operator mid-window, unlike
     /// the concurrent `runLLMTurnFanout` machinery's finalize-only v1 scope,
     /// which was built for a bare fork/fanout child that never had those
@@ -4597,7 +4603,7 @@ impl SelfHarnessDriver {
     ///
     /// THE ONE BRANCH-CHILD SHELL (sol cross-family review finding 9a): fork
     /// off `cref` (never an empty root — PRD 21 locked decision 2), the GUI
-    /// label, attach, realm, scope, the [`BranchWindow`] retirement
+    /// label, attach, realm, scope, the [`BranchAgentSessionGuard`] retirement
     /// discipline, and the exit/closure/success ladder used to be two
     /// independently maintained ~150-line copies —
     /// [`Self::service_outer_branch`]'s single sequential child and
@@ -4619,7 +4625,7 @@ impl SelfHarnessDriver {
     /// `&self`, not `&mut self`: up to [`Self::concurrency_cap`] of these run
     /// concurrently via `buffer_unordered` when called from the fanout path,
     /// all borrowing the same `&SelfHarnessDriver` — this is why
-    /// `drive_answerer_to_finalize` and everything it calls are `&self` too,
+    /// `drive_agent_session_to_finalize` and everything it calls are `&self` too,
     /// and why `node_labels` is `Mutex`-wrapped: two siblings under one
     /// parent can each be mid-delegate or mid-form at once. The sequential
     /// caller pays nothing extra for this — it simply never has a sibling.
@@ -4637,15 +4643,17 @@ impl SelfHarnessDriver {
         child_scope: Option<tidepool_codegen::scope::ScopeId>,
         table: &DataConTable,
     ) -> Result<Result<(Value, String), InvocationExit>, DriverError> {
-        let hole_card = engine::answerer_hole_card(
+        let resume_typed_request_prompt = engine::finalize_typed_request_prompt(
             "The loop",
             prompt,
             element_ty,
             modules,
             Some(table),
-            &self.agent.hole_card_effect_row(),
+            &self.agent.finalize_typed_request_prompt_effect_row(),
         );
-        let node = self.agent.fork_from_context_ref(&cref, &hole_card)?;
+        let node = self
+            .agent
+            .fork_from_context_ref(&cref, &resume_typed_request_prompt)?;
         // PRD 21 C5 GUI lane: a labeled child's label rides the wire
         // structurally — recorded here so `present_askuser_form`/
         // `announce_note` can route this node's own asks/notes to a
@@ -4704,17 +4712,17 @@ impl SelfHarnessDriver {
             .set_answer_contract(node, self.answer_contract(element_ty, modules));
         self.emit(Event::TurnStart { node });
 
-        // This child's mode, typed (`WindowLease::require_one_shot`'s doc):
+        // This child's mode, typed (`AgentSessionMode::require_one_shot`'s doc):
         // it answers exactly once, then is frozen and retired below.
-        let lease = WindowLease::OneShotBranch {
+        let lease = AgentSessionMode::OneShotBranch {
             node,
             realm,
             scope: child_scope,
         };
         // Every exit below this point retires exactly through `window`
         // (`fold_exit`, `finalize_data`, or — for a mechanism-error `?`
-        // below — its `Drop`). See `BranchWindow`'s doc.
-        let window = BranchWindow::from_lease(lease, self.agent.clone(), Some(cref))?;
+        // below — its `Drop`). See `BranchAgentSessionGuard`'s doc.
+        let window = BranchAgentSessionGuard::from_lease(lease, self.agent.clone(), Some(cref))?;
 
         // A branch child is a BRANCH POSITION, so from here on this window's
         // own failures are DATA — folded as `Left exit` at ITS OWN POSITION
@@ -4723,13 +4731,13 @@ impl SelfHarnessDriver {
         // simply this window's own failure).
         let mut exit: Option<InvocationExit> = None;
         let outcome = match self
-            .drive_answerer_to_finalize(
+            .drive_agent_session_to_finalize(
                 window.node(),
                 element_ty,
                 site,
                 0,
                 &std::sync::atomic::AtomicU32::new(0),
-                AnswererExitPolicy::Interactive,
+                AgentSessionExitPolicy::Interactive,
             )
             .await?
         {
@@ -4755,7 +4763,7 @@ impl SelfHarnessDriver {
             let is_finalize = matches!(
                 outcome,
                 TurnOutcome::Suspended { classified, .. }
-                    if matches!(classified.routing, HoleRouting::Finalize { .. })
+                    if matches!(classified.routing, SuspensionRouting::Finalize { .. })
             );
             if !is_finalize {
                 // NON-FINALIZATION — the window ended on something that is
@@ -4951,8 +4959,8 @@ impl SelfHarnessDriver {
     /// (the "freshly-minted answerer realm" per window S1-L4 asks for —
     /// distinct from [`Self::answerer`], the single node the REUSED
     /// single-hole path drives), drive it through the ONE round loop
-    /// ([`Self::drive_answerer_to_finalize`], under
-    /// [`AnswererExitPolicy::FinalizeOnly`] — a concurrent child supports
+    /// ([`Self::drive_agent_session_to_finalize`], under
+    /// [`AgentSessionExitPolicy::FinalizeOnly`] — a concurrent child supports
     /// `finalize` only; explore/define rounds and compile-error correction
     /// work exactly like the interactive path, but a nested
     /// `askUser`/`note`/`fork` suspension folds straight to
@@ -4960,7 +4968,7 @@ impl SelfHarnessDriver {
     /// no operator-gate serialization or fork bookkeeping across siblings
     /// racing the same machine), and retire the node either way (realm
     /// scope-exit, never session removal — same discipline
-    /// [`Self::retire_answerer`] uses for the reused answerer).
+    /// [`Self::retire_typed_request_agent`] uses for the reused answerer).
     ///
     /// `&self`, not `&mut self`: [`Self::service_outer_fanout`] runs up to
     /// [`Self::concurrency_cap`] of these concurrently via
@@ -5011,7 +5019,7 @@ impl SelfHarnessDriver {
     }
 
     /// Seed `node` with this fanout/fork child's hole card, drive it through
-    /// the shared pump ([`Self::drive_answerer_to_finalize`], `FinalizeOnly`
+    /// the shared pump ([`Self::drive_agent_session_to_finalize`], `FinalizeOnly`
     /// policy), and extract the finalized value — the same
     /// closure-check/`take_finalized_value_keep_open`/`Event::Finalize` shape
     /// [`Self::service_outer_branch_fanout`] uses at its own branch position.
@@ -5047,25 +5055,25 @@ impl SelfHarnessDriver {
     ) -> Result<Result<Value, InvocationExit>, DriverError> {
         self.agent
             .set_answer_contract(node, self.answer_contract(element_ty, modules));
-        let child_prompt = engine::answerer_hole_card(
+        let child_prompt = engine::finalize_typed_request_prompt(
             "The loop",
             prompt,
             element_ty,
             modules,
             Some(table),
-            &self.agent.hole_card_effect_row(),
+            &self.agent.finalize_typed_request_prompt_effect_row(),
         );
         self.agent.push_user_turn(node, &child_prompt)?;
         self.emit(Event::TurnStart { node });
 
         let outcome = self
-            .drive_answerer_to_finalize(
+            .drive_agent_session_to_finalize(
                 node,
                 element_ty,
                 site,
                 0,
                 &std::sync::atomic::AtomicU32::new(0),
-                AnswererExitPolicy::FinalizeOnly { idx },
+                AgentSessionExitPolicy::FinalizeOnly { idx },
             )
             .await?;
         self.emit(Event::TurnEnd { node });
@@ -5098,8 +5106,8 @@ impl SelfHarnessDriver {
 
     /// Drive `node` (an answerer, already seeded with this hole's card)
     /// turn-by-turn until it suspends on `finalize`, applying the runaway
-    /// caps: count each non-finalize model round; at [`ANSWERER_NUDGE_ROUNDS`]
-    /// push a one-time "finalize now" nudge; at [`ANSWERER_MAX_ROUNDS`]
+    /// caps: count each non-finalize model round; at [`TYPED_REQUEST_AGENT_NUDGE_ROUNDS`]
+    /// push a one-time "finalize now" nudge; at [`TYPED_REQUEST_AGENT_MAX_ROUNDS`]
     /// hard-fail the hole; and abort the whole loop if the per-loop
     /// [`LOOP_INFERENCE_CALL_CAP`] is hit. A `Completed` (non-finalize) or
     /// `NoBlock` turn is treated as a wasted round — re-prompted toward
@@ -5112,9 +5120,9 @@ impl SelfHarnessDriver {
     /// child, and a concurrent `runLLMTurnFork`/`runLLMTurnFanout` child
     /// ([`Self::drive_fanout_child`]) all drive through here. What genuinely
     /// differs between them is not the round loop — it is which suspensions
-    /// get SERVICED once the node parks, captured by [`AnswererExitPolicy`]:
-    /// [`AnswererExitPolicy::Interactive`] runs the full dispatcher
-    /// (`askUser`/`note`/`fork`/green threads); [`AnswererExitPolicy::FinalizeOnly`]
+    /// get SERVICED once the node parks, captured by [`AgentSessionExitPolicy`]:
+    /// [`AgentSessionExitPolicy::Interactive`] runs the full dispatcher
+    /// (`askUser`/`note`/`fork`/green threads); [`AgentSessionExitPolicy::FinalizeOnly`]
     /// is what a concurrent fanout/fork child gets (v1 scope: no operator
     /// gate serialization or fork bookkeeping across siblings racing the same
     /// machine) — any non-finalize suspension folds straight to
@@ -5135,17 +5143,17 @@ impl SelfHarnessDriver {
     /// inference-call cap, session faults). Whether an exit is DATA or fatal
     /// is the CALLER's to decide, because it depends on whether the window
     /// sits at a branch position: [`Self::service_outer_branch`] folds it as
-    /// `Left` at that branch, while [`Self::service_runllm_hole`] —
+    /// `Left` at that branch, while [`Self::service_typed_request_suspension`] —
     /// answering IN CONTEXT on the outer turn's own continuation, with no
     /// siblings and no position — still hard-fails, exactly as before.
-    async fn drive_answerer_to_finalize(
+    async fn drive_agent_session_to_finalize(
         &self,
         node: NodeId,
         ty: Option<&str>,
         site: u32,
         fork_depth: u32,
         fork_subtree: &std::sync::atomic::AtomicU32,
-        policy: AnswererExitPolicy,
+        policy: AgentSessionExitPolicy,
     ) -> Result<Result<TurnOutcome, InvocationExit>, DriverError> {
         let ty_label = ty.unwrap_or("A");
         let max_rounds = self.answerer_max_rounds;
@@ -5180,15 +5188,15 @@ impl SelfHarnessDriver {
         // under `FinalizeOnly` (finding 4: these messages used to live in
         // two separately-worded copies of this same loop).
         let subject = match policy {
-            AnswererExitPolicy::Interactive => "runLLMTurn answerer".to_string(),
-            AnswererExitPolicy::FinalizeOnly { idx } => format!("fanout child {idx}"),
+            AgentSessionExitPolicy::Interactive => "runLLMTurn answerer".to_string(),
+            AgentSessionExitPolicy::FinalizeOnly { idx } => format!("fanout child {idx}"),
         };
         'round: loop {
             let cap = self.loop_inference_call_cap;
             if self.loop_inference_calls.load(Ordering::SeqCst) >= cap {
                 let ctx = match policy {
-                    AnswererExitPolicy::Interactive => String::new(),
-                    AnswererExitPolicy::FinalizeOnly { idx } => {
+                    AgentSessionExitPolicy::Interactive => String::new(),
+                    AgentSessionExitPolicy::FinalizeOnly { idx } => {
                         format!(" while servicing concurrent fanout child {idx}")
                     }
                 };
@@ -5200,7 +5208,7 @@ impl SelfHarnessDriver {
             if rounds >= hard_rounds {
                 // ROUND EXHAUSTION — this window's own budget, spent. Data
                 // for a caller that has a branch position to fold it at;
-                // `service_runllm_hole` still turns it into a hard failure.
+                // `service_typed_request_suspension` still turns it into a hard failure.
                 return Ok(Err(InvocationExit::RoundsExhausted(format!(
                     "{subject} exceeded {hard_rounds} rounds (cap {max_rounds} \
                      + ultimatum grace) without finalizing"
@@ -5278,7 +5286,7 @@ impl SelfHarnessDriver {
                     // COMPOSE in any order within one block: operator forms
                     // (`service_askuser_hole`), fork delegation
                     // (`drain_answerer_fork` — REUSED, not reimplemented),
-                    // green threads (`service_answerer_green` — the
+                    // green threads (`service_green_round` — the
                     // answerer-plane scheduler behind `async (fork @T …)`),
                     // and the mechanical resumes (`note`/`getStateJson`/
                     // `delegate`, via `drain_note_holes`). Any OTHER
@@ -5302,9 +5310,9 @@ impl SelfHarnessDriver {
                     // `NotFinalized` DATA at this child's own branch
                     // position, since there is no per-child operator-gate
                     // serialization or fork bookkeeping to service it with.
-                    if let AnswererExitPolicy::FinalizeOnly { idx } = policy {
+                    if let AgentSessionExitPolicy::FinalizeOnly { idx } = policy {
                         return match &classified.routing {
-                            HoleRouting::Finalize { .. } => {
+                            SuspensionRouting::Finalize { .. } => {
                                 Ok(Ok(TurnOutcome::Suspended { hole, classified }))
                             }
                             other => Ok(Err(InvocationExit::NotFinalized(format!(
@@ -5315,7 +5323,7 @@ impl SelfHarnessDriver {
                             )))),
                         };
                     }
-                    let mut green: Option<AnswererGreen> = None;
+                    let mut green: Option<ModelRoundGreenThreadScheduler> = None;
                     let mut current = Some((hole, classified));
                     let finalized: Option<TurnOutcome> = loop {
                         // Mechanical holes first (note/getStateJson/delegate)
@@ -5336,10 +5344,10 @@ impl SelfHarnessDriver {
                             break None;
                         };
                         match &classified.routing {
-                            HoleRouting::Finalize { .. } => {
+                            SuspensionRouting::Finalize { .. } => {
                                 break Some(TurnOutcome::Suspended { hole, classified });
                             }
-                            HoleRouting::AskUser { shape } => {
+                            SuspensionRouting::AskUser { shape } => {
                                 match self
                                     .sweep_green_on_err(
                                         node,
@@ -5355,7 +5363,7 @@ impl SelfHarnessDriver {
                                     Some(_) | None => break None,
                                 }
                             }
-                            HoleRouting::Fork { .. } => {
+                            SuspensionRouting::Fork { .. } => {
                                 match self
                                     .sweep_green_on_err(
                                         node,
@@ -5382,7 +5390,7 @@ impl SelfHarnessDriver {
                                     // corrective.
                                     Some(_) | None => {
                                         if let Some(g) = green.as_mut() {
-                                            let dropped = self.sweep_answerer_green(node, g).await;
+                                            let dropped = self.sweep_green_round(node, g).await;
                                             if dropped > 0 {
                                                 self.agent.push_user_turn(
                                                     node,
@@ -5394,13 +5402,14 @@ impl SelfHarnessDriver {
                                     }
                                 }
                             }
-                            HoleRouting::Green => {
+                            SuspensionRouting::Green => {
                                 // The `g` borrow must end before
                                 // `sweep_green_on_err` can reborrow `green`
                                 // mutably to sweep it on an `Err`.
                                 let green_result = {
-                                    let g = green.get_or_insert_with(AnswererGreen::new);
-                                    self.service_answerer_green(
+                                    let g = green
+                                        .get_or_insert_with(ModelRoundGreenThreadScheduler::new);
+                                    self.service_green_round(
                                         node,
                                         g,
                                         &mut fork_budget,
@@ -5414,25 +5423,25 @@ impl SelfHarnessDriver {
                                     .sweep_green_on_err(node, &mut green, green_result)
                                     .await?
                                 {
-                                    AnswererGreenExit::NodeParked => {
+                                    GreenRoundExit::NodeParked => {
                                         current = self
                                             .agent
-                                            .pending_hole_full(node)
+                                            .pending_suspension_full(node)
                                             .map(|(h, c, _)| (h.0, c));
                                     }
-                                    AnswererGreenExit::NodeDone => break None,
+                                    GreenRoundExit::NodeDone => break None,
                                     // A thread's fork was refused: abort the
                                     // block (the node is parked on its own
                                     // green join — refuse that hole), sweep
                                     // the round's threads, and push the
                                     // budget corrective. The WINDOW survives.
-                                    AnswererGreenExit::ForkBudgetRefused { msg } => {
+                                    GreenRoundExit::ForkBudgetRefused { msg } => {
                                         let dropped = match green.as_mut() {
-                                            Some(g) => self.sweep_answerer_green(node, g).await,
+                                            Some(g) => self.sweep_green_round(node, g).await,
                                             None => 0,
                                         };
                                         retry_on_turn_in_flight(|| {
-                                            self.agent.refuse_pending_hole(node, msg.clone())
+                                            self.agent.refuse_pending_suspension(node, msg.clone())
                                         })
                                         .await?;
                                         let warn = if dropped > 0 {
@@ -5447,9 +5456,9 @@ impl SelfHarnessDriver {
                                     // as the budget — the block dies, the
                                     // SESSION survives with a corrective.
                                     // One model slip must not end the run.
-                                    AnswererGreenExit::AsyncMisuse { msg } => {
+                                    GreenRoundExit::AsyncMisuse { msg } => {
                                         let dropped = match green.as_mut() {
-                                            Some(g) => self.sweep_answerer_green(node, g).await,
+                                            Some(g) => self.sweep_green_round(node, g).await,
                                             None => 0,
                                         };
                                         let corrective = format!(
@@ -5458,7 +5467,8 @@ impl SelfHarnessDriver {
                                              definitions/bindings persist. Problem: {msg}."
                                         );
                                         retry_on_turn_in_flight(|| {
-                                            self.agent.refuse_pending_hole(node, corrective.clone())
+                                            self.agent
+                                                .refuse_pending_suspension(node, corrective.clone())
                                         })
                                         .await?;
                                         let warn = if dropped > 0 {
@@ -5476,7 +5486,7 @@ impl SelfHarnessDriver {
                                 // A suspension this driver cannot service.
                                 // Hard error rather than silently hanging.
                                 if let Some(g) = green.as_mut() {
-                                    self.sweep_answerer_green(node, g).await;
+                                    self.sweep_green_round(node, g).await;
                                 }
                                 return Err(DriverError::Session(format!(
                                     "runLLMTurn answerer suspended on a hole this driver \
@@ -5486,7 +5496,7 @@ impl SelfHarnessDriver {
                         }
                     };
                     let dropped = match green.as_mut() {
-                        Some(g) => self.sweep_answerer_green(node, g).await,
+                        Some(g) => self.sweep_green_round(node, g).await,
                         None => 0,
                     };
                     if let Some(answer) = finalized {
@@ -5605,7 +5615,7 @@ impl SelfHarnessDriver {
                 // branch, `FinalizeOnly` fanout child) folds it as `Left` at
                 // that position instead of one transient 5xx erasing every
                 // sibling's finished answer. The in-context caller
-                // (`service_runllm_hole`) still collapses it to a hard
+                // (`service_typed_request_suspension`) still collapses it to a hard
                 // failure, unchanged. Every OTHER `HarnessError` is
                 // driver/session machinery and hard-fails the turn.
                 Err(HarnessError::Engine(EngineError::Provider(pe))) => {
@@ -5639,7 +5649,7 @@ impl SelfHarnessDriver {
     ///
     /// Returns `Ok(Some(outcome))` when the chain resolves to any
     /// non-form suspension (`Finalize`, a fork, a green `wait`, …) — built
-    /// from [`Harness::pending_hole_full`] read right after the resume,
+    /// from [`Harness::pending_suspension_full`] read right after the resume,
     /// since `answer_dialog` itself returns no outcome — which the caller's
     /// dispatcher routes. Returns `Ok(None)` when a
     /// resume completes the node with NO pending hole (the answerer's block
@@ -5660,7 +5670,7 @@ impl SelfHarnessDriver {
             retry_on_turn_in_flight_async(|| self.agent.answer_dialog(node, submission.clone()))
                 .await?;
 
-            let Some((hole, classified, _table)) = self.agent.pending_hole_full(node) else {
+            let Some((hole, classified, _table)) = self.agent.pending_suspension_full(node) else {
                 // The resume completed the node with no further suspension.
                 return Ok(None);
             };
@@ -5672,13 +5682,13 @@ impl SelfHarnessDriver {
             else {
                 return Ok(None);
             };
-            if let HoleRouting::AskUser { shape: next_shape } = classified.routing {
+            if let SuspensionRouting::AskUser { shape: next_shape } = classified.routing {
                 shape = next_shape;
                 continue;
             }
             // Finalize, or any OTHER routing (a fork after the form, a `wait`
             // on an earlier-spawned thread): hand the outcome back — the
-            // dispatcher in `drive_answerer_to_finalize` routes it. Before
+            // dispatcher in `drive_agent_session_to_finalize` routes it. Before
             // the answerer-plane green scheduler this arm hard-errored on
             // everything but Finalize/AskUser.
             return Ok(Some(TurnOutcome::Suspended { hole, classified }));
@@ -5710,7 +5720,7 @@ impl SelfHarnessDriver {
     /// not a model round). The between-loops human gate bounds loop ITERATIONS,
     /// not re-prompts WITHIN one loop's `askUser` — this counter does.
     /// `routing` is the FIRST hole's already-classified routing — either
-    /// `HoleRouting::AskUser` (a typed form) or `HoleRouting::Note`
+    /// `SuspensionRouting::AskUser` (a typed form) or `SuspensionRouting::Note`
     /// (display-only narration, e.g. `note "..." >> askUser @T ...` at the
     /// outer level): each iteration dispatches on whichever of the two the
     /// CURRENT hole is, so a chain freely interleaving `note` and `askUser`
@@ -5826,7 +5836,7 @@ impl SelfHarnessDriver {
     }
 
     /// Non-blocking companion to the `RepoEventAwait` interception inside the
-    /// `HoleRouting::OuterEffect` servicing arm (PRD 20 S1-L4 wave 2): decode
+    /// `SuspensionRouting::OuterEffect` servicing arm (PRD 20 S1-L4 wave 2): decode
     /// the original suspended request's `subscription`, poll the event
     /// handler's plain (non-sleeping) drain, and report `None` on an empty
     /// batch — still parked, nothing to resume with — or `Some(value)`
@@ -5933,7 +5943,7 @@ impl SelfHarnessDriver {
     async fn service_outer_askuser_hole(
         &mut self,
         hole: ResidentHole,
-        routing: HoleRouting,
+        routing: SuspensionRouting,
         compiled: &CompiledTurn,
     ) -> Result<ResidentOutcome, DriverError> {
         let mut hole = hole;
@@ -5941,7 +5951,7 @@ impl SelfHarnessDriver {
         let mut reprompts: u32 = 0;
         loop {
             let outcome = match routing {
-                HoleRouting::AskUser { shape } => {
+                SuspensionRouting::AskUser { shape } => {
                     let submission = self
                         .present_askuser_form(&mut reprompts, FormSource::OuterLoop, &shape)
                         .await?;
@@ -5957,7 +5967,7 @@ impl SelfHarnessDriver {
                             DriverError::Session(format!("outer askUser resume failed: {e}"))
                         })?
                 }
-                HoleRouting::Note { text } => {
+                SuspensionRouting::Note { text } => {
                     self.announce_note(FormSource::OuterLoop, &text);
                     use tidepool_bridge::ToCore;
                     let answer = ().to_value(&compiled.table).map_err(|e| {
@@ -5989,7 +5999,7 @@ impl SelfHarnessDriver {
                         engine::classify_hole(request, &compiled.table, &compiled.asks)?;
                     if matches!(
                         classified.routing,
-                        HoleRouting::AskUser { .. } | HoleRouting::Note { .. }
+                        SuspensionRouting::AskUser { .. } | SuspensionRouting::Note { .. }
                     ) {
                         // askUser's Haskell-side decode-retry re-suspended on a
                         // fresh form, or the chain's next `note`/`askUser` step
@@ -6060,12 +6070,12 @@ impl SelfHarnessDriver {
     /// [`Self::service_thread_ready`]'s raw-thread resume read from (sol
     /// cross-family review finding 9c) — delivery differs (a node-level
     /// `answer_dialog` vs. a raw in-machine `resume`), the value doesn't.
-    fn cycle_state_snapshot(&self) -> Json {
-        self.cycle_state_json.clone().unwrap_or(Json::Null)
+    fn loop_state_snapshot(&self) -> Json {
+        self.loop_state_json.clone().unwrap_or(Json::Null)
     }
 
     /// Drain a leading run of `note` holes on `node`, starting from
-    /// `classified` (which may or may not already be `HoleRouting::Note` —
+    /// `classified` (which may or may not already be `SuspensionRouting::Note` —
     /// a no-op passthrough when it isn't): post each via
     /// [`Self::service_note_hole`] and resume immediately with `()`,
     /// repeating while the resume keeps landing on ANOTHER note. Returns the
@@ -6078,17 +6088,17 @@ impl SelfHarnessDriver {
         &self,
         node: NodeId,
         mut hole: String,
-        mut classified: ClassifiedHole,
-    ) -> Result<Option<(String, ClassifiedHole)>, DriverError> {
+        mut classified: ClassifiedSuspension,
+    ) -> Result<Option<(String, ClassifiedSuspension)>, DriverError> {
         loop {
             match classified.routing.clone() {
-                HoleRouting::Note { text } => {
+                SuspensionRouting::Note { text } => {
                     self.service_note_hole(node, &text).await?;
                 }
-                HoleRouting::ReadState => {
+                SuspensionRouting::ReadState => {
                     // Immediate resume with the cycle's entry state — no
                     // operator, no model round (note's service shape).
-                    let state = self.cycle_state_snapshot();
+                    let state = self.loop_state_snapshot();
                     retry_on_turn_in_flight_async(|| self.agent.answer_dialog(node, state.clone()))
                         .await?;
                 }
@@ -6102,9 +6112,11 @@ impl SelfHarnessDriver {
                 // No operator, no model round — the saga itself is the
                 // "wait" (worktree + backend cycle), not a suspension this
                 // driver presents to anyone.
-                HoleRouting::Subagent => {
-                    let (pending_hole, _classified, table, request) =
-                        self.agent.pending_hole_with_request(node).ok_or_else(|| {
+                SuspensionRouting::Subagent => {
+                    let (pending_suspension, _classified, table, request) = self
+                        .agent
+                        .pending_suspension_with_request(node)
+                        .ok_or_else(|| {
                             DriverError::Session(format!(
                                 "node {node:?} has no pending Subagent hole to service"
                             ))
@@ -6112,13 +6124,13 @@ impl SelfHarnessDriver {
                     let value = self.service_outer_subagent(&request, &table)?;
                     retry_on_turn_in_flight_async(|| {
                         self.agent
-                            .resume_with_value(node, &pending_hole, value.clone())
+                            .resume_with_value(node, &pending_suspension, value.clone())
                     })
                     .await?;
                 }
                 _ => break,
             }
-            match self.agent.pending_hole_full(node) {
+            match self.agent.pending_suspension_full(node) {
                 Some((next_hole, next_classified, _table)) => {
                     hole = next_hole.0;
                     classified = next_classified;
@@ -6189,7 +6201,7 @@ impl SelfHarnessDriver {
     /// `async (fork …)`) used to carry this ~30-line sequence as
     /// near-verbatim twins (the same drift shape that produced F3's
     /// round-loop divergence): brief normalization, the fanout element type,
-    /// per-child title, sequential [`Self::drive_fork_child_window`] drive,
+    /// per-child title, sequential [`Self::drive_fork_child_agent_session`] drive,
     /// per-child [`wrap_fork_value`], then single-vs-fanout assembly. The two
     /// callers differ only in the per-child title wording (plain vs
     /// `"async "`-prefixed) and in how the ASSEMBLED answer crosses back
@@ -6228,7 +6240,7 @@ impl SelfHarnessDriver {
                 format!("{title_fanout_prefix} {idx}")
             };
             let value = self
-                .drive_fork_child_window(
+                .drive_fork_child_agent_session(
                     node,
                     &title,
                     brief,
@@ -6251,10 +6263,10 @@ impl SelfHarnessDriver {
         }
     }
 
-    /// Drain a `HoleRouting::Fork` suspension on the per-loop answerer
+    /// Drain a `SuspensionRouting::Fork` suspension on the per-loop answerer
     /// (`forkAll`/`fork` via `Tidepool.Fork`): resume it by driving each
     /// child to completion on the full pump row via
-    /// [`Self::drive_fork_child_window`] (fork-subsumes-split step 1 — a
+    /// [`Self::drive_fork_child_agent_session`] (fork-subsumes-split step 1 — a
     /// child can `askUser`, `fork` again, and go multi-round; it is not the
     /// one-shot general-Agent path), looping in case the parent immediately
     /// hits ANOTHER fork right after resuming (e.g. `forkAll` then `fork` in
@@ -6262,7 +6274,7 @@ impl SelfHarnessDriver {
     /// caller should `return Ok(out)` straight through, same as any other
     /// finalize suspension. `Ok(None)` means the parent's block ran to
     /// completion WITHOUT ever finalizing; this already reopened the node and
-    /// pushed the same corrective nudge [`Self::drive_answerer_to_finalize`]'s
+    /// pushed the same corrective nudge [`Self::drive_agent_session_to_finalize`]'s
     /// `Completed` arm uses, so the caller should just let its round loop
     /// keep driving. Any OTHER resumed hole (an operator form after the fork
     /// results, a `wait` on a thread spawned earlier in the block) is handed
@@ -6277,7 +6289,7 @@ impl SelfHarnessDriver {
         fork_subtree: &std::sync::atomic::AtomicU32,
     ) -> Result<Option<TurnOutcome>, DriverError> {
         loop {
-            let Some((hole, classified, table)) = self.agent.pending_hole_full(node) else {
+            let Some((hole, classified, table)) = self.agent.pending_suspension_full(node) else {
                 return Err(DriverError::Session(
                     "fork resume: node has no pending hole to service".into(),
                 ));
@@ -6287,20 +6299,22 @@ impl SelfHarnessDriver {
             // sequence spends per iteration. Spend BEFORE spawn; a refusal
             // costs nothing.
             let cost = ForkBudget::cost(&classified.routing);
-            if matches!(classified.routing, HoleRouting::Fork { .. }) {
+            if matches!(classified.routing, SuspensionRouting::Fork { .. }) {
                 if let Some(msg) = self.check_fork_budgets(budget, cost, fork_subtree, ty_label) {
-                    retry_on_turn_in_flight(|| self.agent.refuse_pending_hole(node, msg.clone()))
-                        .await?;
+                    retry_on_turn_in_flight(|| {
+                        self.agent.refuse_pending_suspension(node, msg.clone())
+                    })
+                    .await?;
                     self.agent.push_user_turn(node, &msg)?;
                     return Ok(None);
                 }
             }
             // Children run as full sessions on the pump
-            // (`drive_fork_child_window` — fork-subsumes-split step 1); the
+            // (`drive_fork_child_agent_session` — fork-subsumes-split step 1); the
             // one-shot `Harness::answer_fork`/`answer_fanout` resume path
             // remains only for the general Agent stack's own callers.
             match &classified.routing {
-                HoleRouting::Fork {
+                SuspensionRouting::Fork {
                     site,
                     ty,
                     fan,
@@ -6335,12 +6349,12 @@ impl SelfHarnessDriver {
                 }
             }
 
-            match self.agent.pending_hole(node).map(|c| c.routing) {
-                Some(HoleRouting::Fork { .. }) => continue,
+            match self.agent.pending_suspension(node).map(|c| c.routing) {
+                Some(SuspensionRouting::Fork { .. }) => continue,
                 // Finalize, or any OTHER routing (an operator form after the
                 // fork results, a `wait` on a thread spawned earlier in the
                 // block): hand the outcome back — the dispatcher in
-                // `drive_answerer_to_finalize` routes it. Before the
+                // `drive_agent_session_to_finalize` routes it. Before the
                 // answerer-plane green scheduler this arm hard-errored on
                 // everything but Finalize; composing fork with askUser/async
                 // in one block is now an ordinary continuation.
@@ -6372,10 +6386,10 @@ impl SelfHarnessDriver {
     }
 
     /// Cleanup for a mechanism failure between a fork/branch child's GUI +
-    /// tree-path registration and its [`BranchWindow`] guard coming into
+    /// tree-path registration and its [`BranchAgentSessionGuard`] guard coming into
     /// existence (F7): those registrations predate the guard, so nothing
     /// else retires them on an early `?` between them and
-    /// `BranchWindow::from_lease` — `force_attached`/`mint_scope` are both
+    /// `BranchAgentSessionGuard::from_lease` — `force_attached`/`mint_scope` are both
     /// fallible there (a checkout race is the F4 contention class; a dead
     /// parent scope is `ok_or_else`'d). Removes the `node_labels` entry and
     /// retires the GUI panel (when a label was registered), then retires the
@@ -6417,7 +6431,7 @@ impl SelfHarnessDriver {
     /// (`Self::fork_child_label`), `node_gate`/`node_seeded` at birth (the
     /// AUTHORED brief, not the composed hole card), `node_finalized`/
     /// `node_failed` at the fold, and `retire_node` on every exit, all
-    /// through the SAME [`BranchWindow`] guard `service_outer_branch` uses
+    /// through the SAME [`BranchAgentSessionGuard`] guard `service_outer_branch` uses
     /// (widened to accept a fork child's absent `ContextRef` — see that
     /// struct's doc) so a mechanism-error `?` before the pump starts can
     /// never leak the label/path registrations or skip retirement.
@@ -6430,10 +6444,10 @@ impl SelfHarnessDriver {
     /// mechanism `DriverError` from the pump itself) is reported via
     /// `node_failed` and then hard-fails through as `Err`. TERMINAL FIX
     /// (seam map §7.10): a successful child is marked `NodeDone` BEFORE
-    /// resource retirement (`BranchWindow::finalize_fork_data`), instead of
+    /// resource retirement (`BranchAgentSessionGuard::finalize_fork_data`), instead of
     /// the old path's accidental `NodeCancelled`-via-`terminate_node`-only
     /// ending.
-    async fn drive_fork_child_window(
+    async fn drive_fork_child_agent_session(
         &self,
         parent: NodeId,
         title: &str,
@@ -6446,13 +6460,13 @@ impl SelfHarnessDriver {
     ) -> Result<Value, DriverError> {
         let sid = self.outer_sid()?;
         let modules = self.agent.asks_modules(parent, site);
-        let card = engine::answerer_hole_card(
+        let card = engine::finalize_typed_request_prompt(
             "Your parent session",
             brief,
             ty,
             &modules,
             Some(table),
-            &self.agent.hole_card_effect_row(),
+            &self.agent.finalize_typed_request_prompt_effect_row(),
         );
         let node = self
             .agent
@@ -6482,7 +6496,7 @@ impl SelfHarnessDriver {
         // shared outer session — `drive_branch_child` already opts its
         // own nodes in for exactly this reason; a fork child never did,
         // making its very first checkout (the scope mint below, then every
-        // turn `drive_answerer_to_finalize` drives) fail fast on what is
+        // turn `drive_agent_session_to_finalize` drives) fail fast on what is
         // "expected, benign contention" everywhere else on this plane.
         self.agent.set_retry_checkout_on_contention(node, true);
         // Scope minted from the LIVE parent's scope: this is what makes the
@@ -6515,12 +6529,12 @@ impl SelfHarnessDriver {
             .set_answer_contract(node, self.answer_contract(ty, &modules));
         self.emit(Event::TurnStart { node });
 
-        // This child's mode, typed (`WindowLease::require_one_shot`'s doc):
+        // This child's mode, typed (`AgentSessionMode::require_one_shot`'s doc):
         // it answers exactly once, then is frozen and retired below. No
         // `ContextRef` to validate — a fork child forks from the LIVE
-        // parent, not a frozen snapshot (see `BranchWindow::validated_ref`'s
+        // parent, not a frozen snapshot (see `BranchAgentSessionGuard::validated_ref`'s
         // doc).
-        let lease = WindowLease::OneShotBranch {
+        let lease = AgentSessionMode::OneShotBranch {
             node,
             realm,
             scope: child_scope,
@@ -6529,20 +6543,20 @@ impl SelfHarnessDriver {
         // (`fold_exit`, `finalize_fork_data`, or — for a mechanism-error `?`
         // ABOVE this point, before the guard exists — a hand-rolled cleanup
         // would be needed; there is none between here and the guard's
-        // construction). See `BranchWindow`'s doc.
-        let window = BranchWindow::from_lease(lease, self.agent.clone(), None)?;
+        // construction). See `BranchAgentSessionGuard`'s doc.
+        let window = BranchAgentSessionGuard::from_lease(lease, self.agent.clone(), None)?;
 
         // Box::pin: the pump drives child pumps (a fork child can itself
         // present forms, and — step 2 — fork), so this call is genuinely
         // recursive; the indirection is the async-recursion requirement,
         // nothing more.
-        let outcome = Box::pin(self.drive_answerer_to_finalize(
+        let outcome = Box::pin(self.drive_agent_session_to_finalize(
             node,
             ty,
             site,
             fork_depth,
             fork_subtree,
-            AnswererExitPolicy::Interactive,
+            AgentSessionExitPolicy::Interactive,
         ))
         .await;
         self.emit(Event::TurnEnd { node });
@@ -6556,7 +6570,7 @@ impl SelfHarnessDriver {
 
         match outcome {
             Ok(Ok(TurnOutcome::Suspended { classified, .. }))
-                if matches!(classified.routing, HoleRouting::Finalize { .. }) =>
+                if matches!(classified.routing, SuspensionRouting::Finalize { .. }) =>
             {
                 if self.agent.finalize_is_closure(node) {
                     let reason = format!(
@@ -6648,34 +6662,34 @@ impl SelfHarnessDriver {
     /// One scheduling pass of the answerer-plane green scheduler: service the
     /// NODE's own pending `Green` suspensions (node-aware resumes) and pump
     /// THREAD chains (raw resumes, shared [`Self::service_green_hole`]) until
-    /// the node parks on something that isn't Green ([`AnswererGreenExit::NodeParked`])
-    /// or completes without finalizing ([`AnswererGreenExit::NodeDone`]).
+    /// the node parks on something that isn't Green ([`GreenRoundExit::NodeParked`])
+    /// or completes without finalizing ([`GreenRoundExit::NodeDone`]).
     /// `green` persists across passes within one ROUND (the dispatcher may
     /// interleave askUser/fork servicing between passes) and is swept at the
-    /// round boundary by [`Self::sweep_answerer_green`].
+    /// round boundary by [`Self::sweep_green_round`].
     ///
     /// The node's blocked `wait` is deliberately NOT registered in
     /// `green.waiters`: each iteration re-services its pending
     /// `AsyncJoinAnyWith` (a pure winner scan when nothing settled), so a
     /// settle is observed on the very next loop — and the raw waiter-wake
     /// path structurally cannot touch the node chain.
-    async fn service_answerer_green(
+    async fn service_green_round(
         &self,
         node: NodeId,
-        green: &mut AnswererGreen,
+        green: &mut ModelRoundGreenThreadScheduler,
         budget: &mut ForkBudget,
         fork_depth: u32,
         fork_subtree: &std::sync::atomic::AtomicU32,
         ty_label: &str,
-    ) -> Result<AnswererGreenExit, DriverError> {
+    ) -> Result<GreenRoundExit, DriverError> {
         loop {
             let Some((hole, classified, table, _asks, request)) =
                 self.agent.pending_suspend_artifacts(node)
             else {
-                return Ok(AnswererGreenExit::NodeDone);
+                return Ok(GreenRoundExit::NodeDone);
             };
-            if !matches!(classified.routing, HoleRouting::Green) {
-                return Ok(AnswererGreenExit::NodeParked);
+            if !matches!(classified.routing, SuspensionRouting::Green) {
+                return Ok(GreenRoundExit::NodeParked);
             }
             let blocked = match self
                 .service_green_hole(
@@ -6694,9 +6708,7 @@ impl SelfHarnessDriver {
                 .await?
             {
                 GreenHoleServiced::Proceed(b) => b,
-                GreenHoleServiced::Misuse(msg) => {
-                    return Ok(AnswererGreenExit::AsyncMisuse { msg })
-                }
+                GreenHoleServiced::Misuse(msg) => return Ok(GreenRoundExit::AsyncMisuse { msg }),
             };
             if !blocked {
                 continue;
@@ -6709,7 +6721,7 @@ impl SelfHarnessDriver {
                 // a `wait` on a handle from an EARLIER round (swept at the
                 // round boundary) or a thread deadlock. Abort the block with
                 // a corrective instead of ending the whole run.
-                return Ok(AnswererGreenExit::AsyncMisuse {
+                return Ok(GreenRoundExit::AsyncMisuse {
                     msg: "your block is waiting on a thread that has no runnable work \
                           — usually a `wait` on a handle from an earlier round (thread \
                           handles do not survive a round boundary; spawn and wait in \
@@ -6732,10 +6744,10 @@ impl SelfHarnessDriver {
             {
                 ThreadServiced::Continue => {}
                 ThreadServiced::BudgetRefused { msg } => {
-                    return Ok(AnswererGreenExit::ForkBudgetRefused { msg });
+                    return Ok(GreenRoundExit::ForkBudgetRefused { msg });
                 }
                 ThreadServiced::Misuse(msg) => {
-                    return Ok(AnswererGreenExit::AsyncMisuse { msg });
+                    return Ok(GreenRoundExit::AsyncMisuse { msg });
                 }
             }
         }
@@ -6746,7 +6758,7 @@ impl SelfHarnessDriver {
     /// chain of a round shares one compile) and dispatch. Green suspensions
     /// go through the SHARED [`Self::service_green_hole`] (raw resumes are
     /// correct for thread frames); a thread's `fork`/`forkAll` drives real
-    /// children via [`Self::drive_fork_child_window`], the same recursive
+    /// children via [`Self::drive_fork_child_agent_session`], the same recursive
     /// pump-row path the main chain uses; `note`/`getStateJson`/
     /// `delegate` get their immediate service, raw-resumed. `askUser` and
     /// `finalize` inside a thread are refused loudly — operator forms and the
@@ -6756,7 +6768,7 @@ impl SelfHarnessDriver {
         node: NodeId,
         chain: GreenChain,
         outcome: ResidentOutcome,
-        green: &mut AnswererGreen,
+        green: &mut ModelRoundGreenThreadScheduler,
         budget: &mut ForkBudget,
         fork_depth: u32,
         fork_subtree: &std::sync::atomic::AtomicU32,
@@ -6780,7 +6792,7 @@ impl SelfHarnessDriver {
         let classified = engine::classify_hole(&request, &table, &asks)
             .map_err(|e| DriverError::Session(format!("thread hole classify: {e}")))?;
         match classified.routing {
-            HoleRouting::Green => {
+            SuspensionRouting::Green => {
                 match self
                     .service_green_hole(
                         Some(node),
@@ -6801,7 +6813,7 @@ impl SelfHarnessDriver {
                     GreenHoleServiced::Proceed(_) => Ok(ThreadServiced::Continue),
                 }
             }
-            HoleRouting::Fork {
+            SuspensionRouting::Fork {
                 site,
                 ref ty,
                 ref fan,
@@ -6850,7 +6862,7 @@ impl SelfHarnessDriver {
                 });
                 Ok(ThreadServiced::Continue)
             }
-            HoleRouting::Note { text } => {
+            SuspensionRouting::Note { text } => {
                 self.announce_note(FormSource::Answerer { node }, &text);
                 let unit = ()
                     .to_value(&table)
@@ -6869,8 +6881,8 @@ impl SelfHarnessDriver {
                 });
                 Ok(ThreadServiced::Continue)
             }
-            HoleRouting::ReadState => {
-                let state = self.cycle_state_snapshot();
+            SuspensionRouting::ReadState => {
+                let state = self.loop_state_snapshot();
                 let value = engine::json_answer_to_value(&state, &table)
                     .map_err(|e| DriverError::Session(format!("getStateJson bridge: {e}")))?;
                 let next = self
@@ -6889,7 +6901,7 @@ impl SelfHarnessDriver {
                 });
                 Ok(ThreadServiced::Continue)
             }
-            HoleRouting::Subagent => {
+            SuspensionRouting::Subagent => {
                 let value = self.service_outer_subagent(&request, &table)?;
                 let next = self
                     .agent
@@ -6907,16 +6919,18 @@ impl SelfHarnessDriver {
                 });
                 Ok(ThreadServiced::Continue)
             }
-            HoleRouting::Finalize { .. } => Ok(ThreadServiced::Misuse(
+            SuspensionRouting::Finalize { .. } => Ok(ThreadServiced::Misuse(
                 "a green thread called `finalize` — the session's answer belongs on the \
                  main chain: `wait` your threads, then finalize from the top level"
                     .into(),
             )),
-            HoleRouting::AskUser { .. } | HoleRouting::Ask { .. } => Ok(ThreadServiced::Misuse(
-                "a green thread called `askUser` — operator forms belong on the main \
+            SuspensionRouting::AskUser { .. } | SuspensionRouting::Ask { .. } => {
+                Ok(ThreadServiced::Misuse(
+                    "a green thread called `askUser` — operator forms belong on the main \
                  chain: ask before spawning, or after your `wait`s"
-                    .into(),
-            )),
+                        .into(),
+                ))
+            }
             other => Ok(ThreadServiced::Misuse(format!(
                 "a green thread suspended on an effect this driver cannot service inside \
                  async ({other:?}) — keep operator forms and the final answer on the \
@@ -6937,7 +6951,11 @@ impl SelfHarnessDriver {
     /// eagerly by the cancel arm.) Returns how many threads were dropped
     /// MID-FLIGHT — Running only; a settled thread was not "dropped" — so
     /// the corrective prompt can say so.
-    async fn sweep_answerer_green(&self, node: NodeId, green: &mut AnswererGreen) -> usize {
+    async fn sweep_green_round(
+        &self,
+        node: NodeId,
+        green: &mut ModelRoundGreenThreadScheduler,
+    ) -> usize {
         let mut dropped = 0usize;
         if let Ok(sid) = self.outer_sid() {
             for entry in green.threads.values() {
@@ -6966,12 +6984,12 @@ impl SelfHarnessDriver {
     }
 
     /// F6: sweep `green`'s still-open thread realms before an early exit out
-    /// of [`Self::drive_answerer_to_finalize`]'s inner round-servicing loop —
+    /// of [`Self::drive_agent_session_to_finalize`]'s inner round-servicing loop —
     /// that loop's NORMAL exits already sweep (the post-loop code, and the
     /// `ForkBudgetRefused`/`AsyncMisuse` arms' own inline sweeps before their
     /// `continue 'round`), but a `?`-propagated mechanism error from any of
     /// `drain_note_holes`/`service_askuser_hole`/`drain_answerer_fork`/
-    /// `service_answerer_green` used to skip straight past all of them,
+    /// `service_green_round` used to skip straight past all of them,
     /// leaking every thread realm the round had open. Wrapping the loop
     /// itself in a `?`-catching scope (the shape `run_loop_fragment_inner`'s
     /// own sweep uses) does not fit here: several arms `continue 'round` — a
@@ -6982,12 +7000,12 @@ impl SelfHarnessDriver {
     async fn sweep_green_on_err<T>(
         &self,
         node: NodeId,
-        green: &mut Option<AnswererGreen>,
+        green: &mut Option<ModelRoundGreenThreadScheduler>,
         result: Result<T, DriverError>,
     ) -> Result<T, DriverError> {
         if result.is_err() {
             if let Some(g) = green.as_mut() {
-                self.sweep_answerer_green(node, g).await;
+                self.sweep_green_round(node, g).await;
             }
         }
         result
@@ -7001,7 +7019,7 @@ impl SelfHarnessDriver {
     /// Available-effects section (folded over [`outer_decls`]) is never
     /// shown to the nested answerer, which sees only its own row's section
     /// (appended by the caller that builds `self.answerer_framing`, via
-    /// [`answerer_framing_suffix`]). `render` itself takes only `State`
+    /// [`typed_request_agent_framing_suffix`]). `render` itself takes only `State`
     /// (`plans/self-iterating-harness/15-generic-surface-wave.md`, "Runtime
     /// context is the runtime's job") — the compaction summary and the
     /// iteration count are runtime facts the AUTHOR no longer states.
@@ -7029,7 +7047,7 @@ impl SelfHarnessDriver {
     /// The shared run-and-compose tail of [`Self::render_framing`]: run an
     /// ALREADY-COMPILED `render` entry against the outer session, then
     /// compose the prior compaction summary and the loop-iteration count onto
-    /// its `Text` result. Split out so [`Self::compile_cycle_entry`]'s fused
+    /// its `Text` result. Split out so [`Self::compile_loop_entry`]'s fused
     /// render entry runs through the exact same compose logic
     /// [`Self::render_framing`] uses standalone, rather than a second copy.
     fn render_framing_with(
@@ -7111,7 +7129,7 @@ impl SelfHarnessDriver {
     ///    ([`Harness::replace_transcript_with_summary`]) — the loop's remaining
     ///    holes continue under the smaller window.
     /// 3. Records the summary as `self.cycle_compaction` (this cycle's, for
-    ///    [`CycleOutcome::compaction`]) and `self.last_compaction` (carried to
+    ///    [`LoopIterationOutcome::compaction`]) and `self.last_compaction` (carried to
     ///    the NEXT [`Self::render_framing`] call to compose in, and
     ///    persisted for restart durability).
     /// 4. Emits [`Event::CompactionTrigger`] with its payload (summary, pre/post
@@ -7215,7 +7233,7 @@ impl SelfHarnessDriver {
 
 #[cfg(test)]
 mod tests {
-    use super::{answerer_decls, outer_decls};
+    use super::{outer_decls, typed_request_agent_decls};
 
     /// The outer row's handled prefix must be EMPTY — every effect (including
     /// `Subagent`/`Worktree`) SUSPENDS to the driver. A reorder that puts a
@@ -7255,11 +7273,11 @@ mod tests {
     /// The answerer's generated `Tidepool.Effects` module declares the
     /// `AskUser` GADT + `askUserRaw` helper
     /// — and does NOT declare `Ask`/`ask`/`dialogAsk` (a DIFFERENT effect,
-    /// deliberately absent from `answerer_decls()`, and `dialogAsk` is
+    /// deliberately absent from `typed_request_agent_decls()`, and `dialogAsk` is
     /// deleted outright). Pure string-level check, no GHC needed.
     #[test]
     fn answerer_effects_module_declares_askuser_not_ask() {
-        let src = tidepool_mcp::effects_core_module_source(&answerer_decls());
+        let src = tidepool_mcp::effects_core_module_source(&typed_request_agent_decls());
         assert!(
             src.contains("data AskUser a where"),
             "expected an AskUser GADT declaration, got:\n{src}"
@@ -7279,16 +7297,16 @@ mod tests {
     }
 
     /// The answerer's system framing names every verb of its ACTUAL
-    /// compiling row (`answerer_decls()` — `AskUser`/`Fork`/`Finalize`) via
+    /// compiling row (`typed_request_agent_decls()` — `AskUser`/`Fork`/`Finalize`) via
     /// the decl-driven fold (`engine::available_effects_section`), not a
     /// hand-written parenthetical. Pure string check, no GHC needed.
     #[test]
-    fn answerer_framing_suffix_names_every_verb_of_the_answerer_row() {
-        let framing = super::answerer_framing_suffix(
-            super::DEFAULT_FORK_BUDGET_PER_WINDOW,
+    fn typed_request_agent_framing_suffix_names_every_verb_of_the_answerer_row() {
+        let framing = super::typed_request_agent_framing_suffix(
+            super::DEFAULT_FORK_BUDGET_PER_SESSION,
             super::DEFAULT_FORK_SUBTREE_CAP,
         );
-        for decl in answerer_decls() {
+        for decl in typed_request_agent_decls() {
             assert!(
                 framing.contains(decl.type_name),
                 "answerer framing missing {} — got:\n{framing}",
@@ -7307,7 +7325,7 @@ mod tests {
         assert!(
             framing.contains(&format!(
                 "at most {} fork children",
-                super::DEFAULT_FORK_BUDGET_PER_WINDOW
+                super::DEFAULT_FORK_BUDGET_PER_SESSION
             )),
             "the fork budget must be stated in the framing, got:\n{framing}"
         );
@@ -7334,7 +7352,8 @@ mod tests {
     #[test]
     fn outer_and_answerer_available_effects_sections_differ_by_row() {
         let outer_section = crate::engine::available_effects_section(&super::outer_decls());
-        let answerer_section = crate::engine::available_effects_section(&answerer_decls());
+        let answerer_section =
+            crate::engine::available_effects_section(&typed_request_agent_decls());
 
         assert!(outer_section.contains("**RunLLMTurn**"));
         assert!(!answerer_section.contains("**RunLLMTurn**"));

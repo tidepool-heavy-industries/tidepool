@@ -1,7 +1,7 @@
 //! Acceptance coverage: the answerer `askUser @T` operator-form round-trip
 //! (`plans/self-iterating-harness/14-generic-derived-askuser-prd.md`, delivery
 //! step 5), driven through the production entry point
-//! (`SelfHarnessDriver::run_one_cycle`) against the reference harness module
+//! (`SelfHarnessDriver::run_one_loop_iteration`) against the reference harness module
 //! (`examples/harness/Harness.hs`).
 //!
 //! Needs `TIDEPOOL_EXTRACT` and the with-packages GHC on PATH — run inside
@@ -21,7 +21,8 @@ use tidepool_harness::replay::{RecordedReply, ReplayProvider};
 use tidepool_harness::selfharness::observer::FormSource;
 use tidepool_harness::selfharness::operator::{FieldShape, FormShape, VariantShape};
 use tidepool_harness::{
-    answerer_decls, load_harness_source, Event, Harness, Observer, OperatorGate, SelfHarnessDriver,
+    load_harness_source, typed_request_agent_decls, Event, Harness, Observer, OperatorGate,
+    SelfHarnessDriver,
 };
 
 fn repo_root() -> std::path::PathBuf {
@@ -289,7 +290,7 @@ async fn askuser_operator_form_round_trip_and_ws4_log() {
     let _cache_guard = support::isolate_cache();
 
     let agent_cfg = EngineConfig::from_decls(
-        answerer_decls(),
+        typed_request_agent_decls(),
         prelude_dir(),
         Some(examples_harness_dir()),
     )
@@ -309,7 +310,7 @@ async fn askuser_operator_form_round_trip_and_ws4_log() {
         .expect("reference harness source loads");
 
     let outcome = driver
-        .run_one_cycle(&source, None)
+        .run_one_loop_iteration(&source, None)
         .await
         .expect("one full render->loop->runLLMTurn->note->askUser->finalize->render cycle");
 
@@ -553,7 +554,7 @@ impl OperatorGate for MaybeGate {
 /// every selection re-presented until the driver's reprompt cap. Exercises
 /// BOTH directions — a `null` (`Nothing`) answer and a string (`Just`)
 /// answer — in one cycle, through the real production entry point
-/// (`SelfHarnessDriver::run_one_cycle`), proving the shape AND the decode,
+/// (`SelfHarnessDriver::run_one_loop_iteration`), proving the shape AND the decode,
 /// not just that the type compiles.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn root_maybe_form_shape_and_decode_round_trip() {
@@ -561,7 +562,7 @@ async fn root_maybe_form_shape_and_decode_round_trip() {
     let _cache_guard = support::isolate_cache();
 
     let agent_cfg = EngineConfig::from_decls(
-        answerer_decls(),
+        typed_request_agent_decls(),
         prelude_dir(),
         Some(examples_harness_dir()),
     )
@@ -605,7 +606,7 @@ async fn root_maybe_form_shape_and_decode_round_trip() {
         .expect("reference harness source loads");
 
     let outcome = driver
-        .run_one_cycle(&source, None)
+        .run_one_loop_iteration(&source, None)
         .await
         .expect("root Maybe askUser -> finalize round trip");
 
@@ -658,7 +659,7 @@ async fn choose_with_no_options_fails_loud_before_suspending() {
     let _cache_guard = support::isolate_cache();
 
     let agent_cfg = EngineConfig::from_decls(
-        answerer_decls(),
+        typed_request_agent_decls(),
         prelude_dir(),
         Some(examples_harness_dir()),
     )
@@ -717,7 +718,7 @@ async fn choose_with_no_options_fails_loud_before_suspending() {
 #[test]
 fn prd_example_adts_compile_with_the_bare_derive_contract() {
     support::require_extract();
-    let mut cfg = EngineConfig::from_decls(answerer_decls(), prelude_dir(), None)
+    let mut cfg = EngineConfig::from_decls(typed_request_agent_decls(), prelude_dir(), None)
         .expect("answerer engine config");
     cfg.include.push(fixtures_dir());
 
@@ -755,7 +756,7 @@ fn prd_example_adts_compile_with_the_bare_derive_contract() {
 #[test]
 fn maybe_unit_field_is_a_compile_error_naming_the_field() {
     support::require_extract();
-    let mut cfg = EngineConfig::from_decls(answerer_decls(), prelude_dir(), None)
+    let mut cfg = EngineConfig::from_decls(typed_request_agent_decls(), prelude_dir(), None)
         .expect("answerer engine config");
     cfg.include.push(fixtures_dir());
 

@@ -4,7 +4,7 @@
 //! the driver — no authored layer walk, no gate, no companion caps.
 //!
 //! Drives the SHIPPED `harness-dogfooding/recursive-companion/` harness
-//! through the production entry point (`SelfHarnessDriver::run_one_cycle`),
+//! through the production entry point (`SelfHarnessDriver::run_one_loop_iteration`),
 //! scripted record-replay, zero live calls — the same discipline as
 //! `answerer_async_fork.rs`, which pins the fork/green servicing mechanics
 //! themselves against the reference harness. What THIS file pins is the
@@ -40,7 +40,8 @@ use tidepool_harness::replay::{RecordedReply, ReplayProvider};
 use tidepool_harness::selfharness::operator::FormShape;
 use tidepool_harness::selfharness::persistence;
 use tidepool_harness::{
-    answerer_decls, load_harness_source, Harness, LogObserver, OperatorGate, SelfHarnessDriver,
+    load_harness_source, typed_request_agent_decls, Harness, LogObserver, OperatorGate,
+    SelfHarnessDriver,
 };
 
 fn repo_root() -> PathBuf {
@@ -148,7 +149,7 @@ fn build_driver(
     let log_path = dir.join("log.jsonl");
 
     let agent_cfg = EngineConfig::from_decls(
-        answerer_decls(),
+        typed_request_agent_decls(),
         repo_root().join("haskell/lib"),
         Some(companion_dir()),
     )
@@ -213,7 +214,7 @@ async fn seeded_turn_forks_and_stores_the_roots_typed_answer_as_is() {
         .expect("the seeded checkpoint is on disk");
 
     let outcome = driver
-        .run_one_cycle(&source, Some(&restored))
+        .run_one_loop_iteration(&source, Some(&restored))
         .await
         .expect("one render -> loop -> render cycle, forks included");
 
@@ -266,7 +267,7 @@ async fn fresh_boot_seeds_the_question_through_the_operator_gate() {
         .expect("the shipped recursive-companion harness loads");
 
     let outcome = driver
-        .run_one_cycle(&source, None)
+        .run_one_loop_iteration(&source, None)
         .await
         .expect("a fresh boot: seed gate, then the first turn");
 

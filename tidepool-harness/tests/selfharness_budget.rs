@@ -6,7 +6,7 @@
 //! tool calls, finalize now"). Commit 46cb30d8 ("the feedback bundle — carry
 //! state, glide the cap, show the curator") added a GLIDE at the hard cap: one
 //! explicit ultimatum round (the minimal-honest-finalize instruction) plus one
-//! grace round before hard-failing — `drive_answerer_to_finalize`'s
+//! grace round before hard-failing — `drive_agent_session_to_finalize`'s
 //! `hard_rounds = max_rounds.saturating_add(2)` — so the default 32-round cap
 //! actually hard-fails at round 34. This drives a hole with a provider that
 //! NEVER finalizes (always emits a compiling non-finalize block) and asserts
@@ -33,7 +33,7 @@ use tidepool_harness::provider::{
     Usage,
 };
 use tidepool_harness::{
-    answerer_decls, load_harness_source, Harness, LogObserver, SelfHarnessDriver,
+    load_harness_source, typed_request_agent_decls, Harness, LogObserver, SelfHarnessDriver,
 };
 
 fn repo_root() -> std::path::PathBuf {
@@ -120,7 +120,7 @@ async fn answerer_nudged_at_16_and_hard_fails_at_32() {
     });
 
     let agent_cfg = EngineConfig::from_decls(
-        answerer_decls(),
+        typed_request_agent_decls(),
         prelude_dir(),
         Some(examples_harness_dir()),
     )
@@ -141,7 +141,7 @@ async fn answerer_nudged_at_16_and_hard_fails_at_32() {
     let source = load_harness_source(&examples_harness_dir().join("Harness.hs"))
         .expect("reference harness source loads");
 
-    let result = driver.run_one_cycle(&source, None).await;
+    let result = driver.run_one_loop_iteration(&source, None).await;
 
     // The hole hard-fails the runLLMTurn effect two rounds past the
     // configured hard cap (6 + 2 = 8) — the 46cb30d8 glide: an ultimatum

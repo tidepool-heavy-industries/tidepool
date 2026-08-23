@@ -40,7 +40,9 @@ use tidepool_harness::log::{Event as LogEvent, LogHeader, LogReader, LogWriter};
 use tidepool_harness::provider::{DynModelProvider, Role, Usage};
 use tidepool_harness::replay::ReplayProvider;
 use tidepool_harness::selfharness::persistence;
-use tidepool_harness::{answerer_decls, Harness, LogObserver, NodeId, SelfHarnessDriver};
+use tidepool_harness::{
+    typed_request_agent_decls, Harness, LogObserver, NodeId, SelfHarnessDriver,
+};
 
 /// How long a wait tolerates NO new durable-log event before treating the
 /// child as genuinely stuck rather than slow under load — sized above the
@@ -295,7 +297,7 @@ fn assert_no_tmp_files(dir: &Path, when: &str) {
 /// accessor under the CURRENT `XDG_CACHE_HOME` — the public way to
 /// discover where the checkpoint lives without naming its file.
 fn checker_driver() -> SelfHarnessDriver {
-    let agent_cfg = EngineConfig::from_decls(answerer_decls(), prelude_dir(), None)
+    let agent_cfg = EngineConfig::from_decls(typed_request_agent_decls(), prelude_dir(), None)
         .expect("answerer engine config");
     let provider: Arc<dyn DynModelProvider> = Arc::new(ReplayProvider::new(vec![]));
     let writer = LogWriter::create(

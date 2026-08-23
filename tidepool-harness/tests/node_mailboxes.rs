@@ -53,7 +53,7 @@ use tidepool_harness::log::LogHeader;
 use tidepool_harness::provider::DynModelProvider;
 use tidepool_harness::replay::ReplayProvider;
 use tidepool_harness::{
-    answerer_decls, load_harness_source, Harness, LogObserver, SelfHarnessDriver,
+    load_harness_source, typed_request_agent_decls, Harness, LogObserver, SelfHarnessDriver,
 };
 
 /// Always reports no movement — mailbox observations are published directly
@@ -111,7 +111,7 @@ async fn a_parent_selects_over_message_and_deadline() {
     let _cache_guard = support::isolate_cache();
 
     let agent_cfg = EngineConfig::from_decls(
-        answerer_decls(),
+        typed_request_agent_decls(),
         repo_root().join("haskell/lib"),
         Some(fixtures_dir()),
     )
@@ -140,7 +140,7 @@ async fn a_parent_selects_over_message_and_deadline() {
     let source = load_harness_source(&fixtures_dir().join("NodeMailboxHarness.hs"))
         .expect("fixture harness loads");
     let outcome = driver
-        .run_one_cycle(&source, None)
+        .run_one_loop_iteration(&source, None)
         .await
         .expect("forkNode / sendUp / received must round-trip through the driver");
 

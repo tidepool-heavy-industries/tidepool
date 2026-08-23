@@ -54,8 +54,8 @@ use tokio::sync::oneshot;
 
 use crate::effect_trace::{EffectRecord, EffectTrace, TracingDispatcher};
 use crate::engine::{
-    self, AsksSidecar, ClassifiedHole, EngineConfig, EngineError, HoleRouting, TurnOutcome,
-    RESUME_HELPER,
+    self, AsksSidecar, ClassifiedSuspension, EngineConfig, EngineError, SuspensionRouting,
+    TurnOutcome, RESUME_HELPER,
 };
 use crate::forcing::{NodeTree, TreeError};
 use crate::log::{Actor, AnswerOutcome, LogWriter};
@@ -138,7 +138,7 @@ pub enum HarnessError {
     /// stringly-typed catch-all) so a caller CAN distinguish this specific,
     /// model-attributable shape from an opaque mechanism failure — the
     /// answerer-plane green scheduler does, routing it through
-    /// `AnswererGreenExit::AsyncMisuse` instead of hard-failing the run.
+    /// `GreenRoundExit::AsyncMisuse` instead of hard-failing the run.
     #[error(
         "node {0:?}: a borrowed-root resume cannot honor a Binding hole's binder \
          obligation — refuse rather than silently drop it"
@@ -201,7 +201,7 @@ pub struct AnswerContract {
 /// log by folding). `transcript` is the message list the turn engine assembles
 /// prompts from; `turn_seq` is the monotonic per-node turn index logged with
 /// each `TurnDelta`. A node's pending suspension (when it has one) lives in
-/// [`Harness::pending_holes`], not here — see that field's doc.
+/// [`Harness::pending_suspensions`], not here — see that field's doc.
 struct NodeConvo {
     transcript: Vec<Message>,
     turn_seq: u64,
@@ -297,12 +297,12 @@ impl Drop for TurnLease<'_> {
 /// (item 5 of the session-ownership capstone, `plans/registry-capstone.md`).
 /// The session registry's own hole SET (machine-reported) is the ownership
 /// truth; this is the harness-level domain truth for what each hole IS and
-/// what it takes to resume it — held in [`Harness::pending_holes`], keyed by
+/// what it takes to resume it — held in [`Harness::pending_suspensions`], keyed by
 /// `(SessionId, HoleId)` rather than scattered across four separate
 /// `NodeConvo` fields that used to be hand-kept in sync at every suspend/
 /// resume/consume site.
 #[derive(Clone)]
-struct PendingHole {
+struct PendingSuspension {
     /// The node this hole belongs to — a node's own turn is suspended on AT
     /// MOST one hole at a time (`resident_hole` below is always REPLACED,
     /// never accumulated, across a suspend → resume → re-suspend cycle), so
@@ -313,7 +313,7 @@ struct PendingHole {
     /// answerer realms), not because one node juggles several holes.
     node: NodeId,
     hole: HoleId,
-    classified: ClassifiedHole,
+    classified: ClassifiedSuspension,
     /// The raw suspended request `Value`, kept alongside `classified` (which
     /// is JSON-shaped, lossy for a `Finalize` hole — its carried value may be
     /// non-serializable, e.g. a closure). `Harness::take_finalized_value`
@@ -404,7 +404,7 @@ enum NodeSeed {
 /// test-only callers post fork-subsumes-split — the recursive self-harness
 /// pump path does not call this at all: its fork children compile against
 /// the full parent row via
-/// `crate::selfharness::driver::SelfHarnessDriver::drive_fork_child_window`,
+/// `crate::selfharness::driver::SelfHarnessDriver::drive_fork_child_agent_session`,
 /// so they CAN fork again, bounded by spawn-time budgets, not by row shape).
 /// Here, the parent row minus the fork-spawning effects (`Fork`/`RunLLMTurn`).
 /// A child keeps everything else it needs to compute its answer (base
@@ -672,7 +672,7 @@ pub const OUTER_REALM: tidepool_codegen::jit_machine::RealmId =
 /// A queued window exit: the two halves of an attached node's retirement that
 /// need the machine in hand. Either half may be absent (a node with a realm and
 /// no scope is every pre-C2 attached node).
-struct PendingWindowExit {
+struct PendingSessionExit {
     session: tidepool_repr::SessionId,
     node: NodeId,
     realm: Option<tidepool_codegen::jit_machine::RealmId>,
@@ -705,12 +705,12 @@ pub struct Harness {
     /// truth, keyed by `(SessionId, HoleId)` rather than bare `HoleId` — the
     /// JIT's `scont_N` continuation ids are minted per-machine, so two
     /// independent sessions can legitimately produce the same string. See
-    /// [`PendingHole`]'s doc for why the map is node-scannable without a
-    /// second index, and [`Harness::publish_hole`]/[`Harness::consume_hole`]
+    /// [`PendingSuspension`]'s doc for why the map is node-scannable without a
+    /// second index, and [`Harness::publish_suspension`]/[`Harness::consume_suspension`]
     /// for the one place transitions happen (mutations of this map are what
     /// drive the tree's `hole_published`/`hole_consumed` log events, not the
     /// other way around).
-    pending_holes: Mutex<HashMap<(SessionId, HoleId), PendingHole>>,
+    pending_suspensions: Mutex<HashMap<(SessionId, HoleId), PendingSuspension>>,
     /// Window exits QUEUED because the attached node's retirement found the
     /// shared machine out on a turn — drained by the next path holding the
     /// machine (`run_checked_out`/`with_session`). An eventual postcondition,
@@ -718,7 +718,7 @@ pub struct Harness {
     /// REALM, whose close reclaims parked frames and handles, and its SCOPE,
     /// whose retirement drops the value-plane frame and deregisters the roots
     /// it solely owns) live here until the exit is confirmed.
-    pending_window_exits: Mutex<Vec<PendingWindowExit>>,
+    pending_session_exits: Mutex<Vec<PendingSessionExit>>,
     /// A just-created node's staged [`NodeSeed`] — a root's opening prompt or
     /// a fork child's inherited transcript, either way paired with its
     /// framing — between node creation and `force` (a thunk node has no live
@@ -827,11 +827,11 @@ impl Harness {
     /// The effect-row a window-opening hole card should STATE (PRD 21 C5):
     /// `self.cfg.effect_names` for a non-delegating config, or the narrow
     /// `Delegate`-form row a delegating config's model-facing block actually
-    /// compiles against — see [`EngineConfig::hole_card_effect_row`]. Never
+    /// compiles against — see [`EngineConfig::finalize_typed_request_prompt_effect_row`]. Never
     /// used for tag lookup (`self.cfg.effect_names`/`flush_effects` stay the
     /// real dispatched row).
-    pub fn hole_card_effect_row(&self) -> Vec<String> {
-        self.cfg.hole_card_effect_row()
+    pub fn finalize_typed_request_prompt_effect_row(&self) -> Vec<String> {
+        self.cfg.finalize_typed_request_prompt_effect_row()
     }
 
     /// Build a harness over `writer` (a fresh log past its header), the engine
@@ -872,8 +872,8 @@ impl Harness {
             child_cfg,
             provider,
             convos: Mutex::new(HashMap::new()),
-            pending_holes: Mutex::new(HashMap::new()),
-            pending_window_exits: Mutex::new(Vec::new()),
+            pending_suspensions: Mutex::new(HashMap::new()),
+            pending_session_exits: Mutex::new(Vec::new()),
             pending: Mutex::new(HashMap::new()),
             escalations: Mutex::new(HashMap::new()),
             escalation_gate: Mutex::new(None),
@@ -883,12 +883,12 @@ impl Harness {
     }
 
     /// `node`'s current pending hole, if it has one — a plain scan of
-    /// [`Self::pending_holes`] (small in practice: bounded by concurrent
+    /// [`Self::pending_suspensions`] (small in practice: bounded by concurrent
     /// fanout width, not corpus size), never a second node→hole index to
-    /// keep in sync. See [`PendingHole`]'s doc for why a node has at most
+    /// keep in sync. See [`PendingSuspension`]'s doc for why a node has at most
     /// one entry here at a time.
-    fn node_pending(&self, node: NodeId) -> Option<PendingHole> {
-        self.pending_holes
+    fn node_pending(&self, node: NodeId) -> Option<PendingSuspension> {
+        self.pending_suspensions
             .lock()
             .values()
             .find(|p| p.node == node)
@@ -897,30 +897,30 @@ impl Harness {
 
     /// Publish a hole: log `Event::HolePublished` (the tree's `Running →
     /// Suspended{hole}` transition) and insert `pending`'s domain metadata
-    /// into [`Self::pending_holes`] — ONE call replacing the four-mutation
+    /// into [`Self::pending_suspensions`] — ONE call replacing the four-mutation
     /// choreography (`hole_published` + `set_pending` + stashing
     /// `resident_hole`/`suspend_table`/`suspend_asks` separately) that used
     /// to be duplicated verbatim at every suspend site. Called from both a
     /// first suspend ([`Self::finish_run`]) and a re-suspend
     /// ([`Self::resume_parent`]).
-    fn publish_hole(
+    fn publish_suspension(
         &self,
         node: NodeId,
         sid: SessionId,
-        pending: PendingHole,
+        pending: PendingSuspension,
     ) -> Result<(), HarnessError> {
         let classified = &pending.classified;
-        let fork = matches!(classified.routing, HoleRouting::Fork { .. });
+        let fork = matches!(classified.routing, SuspensionRouting::Fork { .. });
         let ty = match &classified.routing {
-            HoleRouting::Fork { ty, .. }
-            | HoleRouting::RunLLMTurn { ty, .. }
-            | HoleRouting::Finalize { ty, .. } => ty.clone(),
+            SuspensionRouting::Fork { ty, .. }
+            | SuspensionRouting::RunLLMTurn { ty, .. }
+            | SuspensionRouting::Finalize { ty, .. } => ty.clone(),
             _ => None,
         };
         let site = match &classified.routing {
-            HoleRouting::Fork { site, .. }
-            | HoleRouting::RunLLMTurn { site, .. }
-            | HoleRouting::Finalize { site, .. } => Some(*site),
+            SuspensionRouting::Fork { site, .. }
+            | SuspensionRouting::RunLLMTurn { site, .. }
+            | SuspensionRouting::Finalize { site, .. } => Some(*site),
             _ => None,
         };
         self.tree.hole_published(
@@ -931,7 +931,7 @@ impl Harness {
             classified.prompt.clone(),
             fork,
         )?;
-        self.pending_holes
+        self.pending_suspensions
             .lock()
             .insert((sid, pending.hole.clone()), pending);
         Ok(())
@@ -939,18 +939,18 @@ impl Harness {
 
     /// Consume `node`'s pending `hole`: log `Event::HoleConsumed` (the
     /// tree's `Suspended{hole} → Running` transition) and remove its domain
-    /// metadata from [`Self::pending_holes`] — the two-mutation counterpart
-    /// to [`Self::publish_hole`], replacing the scattered `convo.pending =
+    /// metadata from [`Self::pending_suspensions`] — the two-mutation counterpart
+    /// to [`Self::publish_suspension`], replacing the scattered `convo.pending =
     /// None` / `convo.resident_hole = None` pairs at every resume-success
     /// site.
-    fn consume_hole(
+    fn consume_suspension(
         &self,
         node: NodeId,
         sid: SessionId,
         hole: &HoleId,
     ) -> Result<(), HarnessError> {
         self.tree.hole_consumed(node, hole.clone())?;
-        self.pending_holes.lock().remove(&(sid, hole.clone()));
+        self.pending_suspensions.lock().remove(&(sid, hole.clone()));
         Ok(())
     }
 
@@ -1379,7 +1379,7 @@ impl Harness {
         mut co: Checkout<'_, Session>,
         f: impl FnOnce(&mut Session) -> T,
     ) -> T {
-        self.drain_pending_window_exits(sid, co.machine());
+        self.drain_pending_session_exits(sid, co.machine());
         co.machine().set_realm(OUTER_REALM);
         // Same reset, name side: the shared session's own runs are ROOT-scoped,
         // never sticky on whichever answerer window ran last. ROOT is always
@@ -1403,25 +1403,25 @@ impl Harness {
     /// that found the machine out on a turn). Called by each path that has
     /// the machine in hand, so a window's exit converges even when retirement
     /// raced a running turn.
-    fn drain_pending_window_exits(&self, sid: tidepool_repr::SessionId, session: &mut Session) {
+    fn drain_pending_session_exits(&self, sid: tidepool_repr::SessionId, session: &mut Session) {
         let pending: Vec<_> = {
-            let mut q = self.pending_window_exits.lock();
+            let mut q = self.pending_session_exits.lock();
             let (mine, rest): (Vec<_>, Vec<_>) = q.drain(..).partition(|e| e.session == sid);
             *q = rest;
             mine
         };
         for exit in pending {
-            self.exit_window(session, exit.node, exit.realm, exit.scope);
+            self.exit_agent_session(session, exit.node, exit.realm, exit.scope);
         }
     }
 
     /// The ONE place a window's realm close and scope retirement happen, so
     /// the immediate path (`terminate_node` with the machine in hand) and the
-    /// queued path (`drain_pending_window_exits`) cannot diverge. Realm first
+    /// queued path (`drain_pending_session_exits`) cannot diverge. Realm first
     /// (parked frames and outstanding handles go), then scope — scope
     /// retirement's sole-ownership rule reads the handle registry, so a handle
     /// the realm still owned would otherwise wrongly pin a root.
-    fn exit_window(
+    fn exit_agent_session(
         &self,
         session: &mut Session,
         node: NodeId,
@@ -1721,7 +1721,7 @@ impl Harness {
                             engine::TurnOutcome::Suspended { classified, .. }
                                 if matches!(
                                     classified.routing,
-                                    engine::HoleRouting::Finalize { .. }
+                                    engine::SuspensionRouting::Finalize { .. }
                                 )
                         );
                         if is_finalize {
@@ -2421,7 +2421,7 @@ impl Harness {
                     let is_finalize = matches!(
                         &step_outcome,
                         engine::TurnOutcome::Suspended { classified, .. }
-                            if matches!(classified.routing, engine::HoleRouting::Finalize { .. })
+                            if matches!(classified.routing, engine::SuspensionRouting::Finalize { .. })
                     );
                     if is_finalize {
                         tracing::warn!(
@@ -2468,8 +2468,8 @@ impl Harness {
 
     /// Shared turn epilogue: flush effects, and turn a [`ResidentOutcome`]
     /// into a [`engine::TurnOutcome`] — `node_done` on completion,
-    /// [`Self::publish_hole`] on suspension. The [`ResidentHole`] itself
-    /// rides along on the published [`PendingHole`] so `resume_parent` can
+    /// [`Self::publish_suspension`] on suspension. The [`ResidentHole`] itself
+    /// rides along on the published [`PendingSuspension`] so `resume_parent` can
     /// drive the ONE `ResidentSession::resume` later — a value-plane BIND
     /// turn that suspended (`x <- fork …`) already got a
     /// `ResidentHole::Binding` from `session.run_bind`, carrying its own
@@ -2512,10 +2512,10 @@ impl Harness {
                     .tree
                     .session_of(node)
                     .ok_or(HarnessError::NoSession(node))?;
-                self.publish_hole(
+                self.publish_suspension(
                     node,
                     sid,
-                    PendingHole {
+                    PendingSuspension {
                         node,
                         hole: HoleId(hole_id.clone()),
                         classified: classified.clone(),
@@ -2707,47 +2707,47 @@ impl Harness {
 
 impl Harness {
     /// The classified pending hole on `node`, if it is suspended.
-    pub fn pending_hole(&self, node: NodeId) -> Option<ClassifiedHole> {
+    pub fn pending_suspension(&self, node: NodeId) -> Option<ClassifiedSuspension> {
         self.node_pending(node).map(|p| p.classified)
     }
 
-    /// Like [`Self::pending_hole`], but also returns the hole id and the
+    /// Like [`Self::pending_suspension`], but also returns the hole id and the
     /// compile table the pending suspension's constructor ids resolve
     /// against — what a caller needs to build a
-    /// [`engine::TurnOutcome::Suspended`] out of a `pending_hole` read (the
+    /// [`engine::TurnOutcome::Suspended`] out of a `pending_suspension` read (the
     /// self-iterating-harness driver's `AskUser` servicing loop, which reads
     /// the pending hole again after a resume rather than threading the
     /// original `drive_turn` outcome through). `None` if `node` isn't
     /// suspended.
-    pub(crate) fn pending_hole_full(
+    pub(crate) fn pending_suspension_full(
         &self,
         node: NodeId,
-    ) -> Option<(HoleId, ClassifiedHole, DataConTable)> {
+    ) -> Option<(HoleId, ClassifiedSuspension, DataConTable)> {
         let p = self.node_pending(node)?;
         Some((p.hole, p.classified, p.suspend_table))
     }
 
-    /// Like [`Self::pending_hole_full`], plus the RAW suspended request
+    /// Like [`Self::pending_suspension_full`], plus the RAW suspended request
     /// `Value` — what a caller needs to dispatch a suspension whose payload
-    /// `ClassifiedHole` doesn't carry (PRD 21 C5: [`HoleRouting::Subagent`]
+    /// `ClassifiedSuspension` doesn't carry (PRD 21 C5: [`SuspensionRouting::Subagent`]
     /// is a unit variant — no spec/schema/cycle id — because the OUTER
     /// loop's own equivalent servicing reads those off the original request
     /// it never discards; a nested-answerer node discards it once
     /// `classify_hole` runs UNLESS a caller reaches for this accessor first,
-    /// same `raw_request` [`PendingHole`] already stores for
+    /// same `raw_request` [`PendingSuspension`] already stores for
     /// [`Self::take_finalized_value`]).
-    pub(crate) fn pending_hole_with_request(
+    pub(crate) fn pending_suspension_with_request(
         &self,
         node: NodeId,
-    ) -> Option<(HoleId, ClassifiedHole, DataConTable, Value)> {
+    ) -> Option<(HoleId, ClassifiedSuspension, DataConTable, Value)> {
         let p = self.node_pending(node)?;
         Some((p.hole, p.classified, p.suspend_table, p.raw_request))
     }
 
-    /// The FULL pending record — [`Self::pending_hole_with_request`] plus the
+    /// The FULL pending record — [`Self::pending_suspension_with_request`] plus the
     /// asks sidecar the suspension's site ids resolve against. What the
     /// answerer-plane green scheduler
-    /// (`SelfHarnessDriver::service_answerer_green`) needs: within one round
+    /// (`SelfHarnessDriver::service_green_round`) needs: within one round
     /// every chain (the node's own turn and every green thread it spawned)
     /// shares ONE compile, so the table+asks captured off the node's pending
     /// record classify every thread-raised suspension of that round too.
@@ -2755,7 +2755,13 @@ impl Harness {
     pub(crate) fn pending_suspend_artifacts(
         &self,
         node: NodeId,
-    ) -> Option<(HoleId, ClassifiedHole, DataConTable, AsksSidecar, Value)> {
+    ) -> Option<(
+        HoleId,
+        ClassifiedSuspension,
+        DataConTable,
+        AsksSidecar,
+        Value,
+    )> {
         let p = self.node_pending(node)?;
         Some((
             p.hole,
@@ -2770,7 +2776,7 @@ impl Harness {
     /// bypassing [`Self::answer_dialog`]'s `Ask`/`AskUser`/`ReadState`
     /// routing restriction — for a suspension whose answer is already a
     /// bridged Core `Value` rather than operator-submitted JSON (PRD 21 C5:
-    /// [`HoleRouting::Subagent`], serviced the same way the AUTHORED outer
+    /// [`SuspensionRouting::Subagent`], serviced the same way the AUTHORED outer
     /// loop's own Subagent suspension already is —
     /// `SelfHarnessDriver::service_outer_subagent`'s dispatch, just resumed
     /// against a NODE's own session instead of the outer one).
@@ -2816,7 +2822,7 @@ impl Harness {
         })
     }
 
-    /// The harness-level primitive `service_runllm_hole`
+    /// The harness-level primitive `service_typed_request_suspension`
     /// (`selfharness/driver.rs`) calls once a nested Agent node
     /// suspends on `finalize @T x`: read the
     /// finalized value straight out of the suspended request `Value` (NEVER
@@ -2857,7 +2863,10 @@ impl Harness {
         let pending = self
             .node_pending(node)
             .ok_or(HarnessError::NotSuspended(node))?;
-        if !matches!(pending.classified.routing, HoleRouting::Finalize { .. }) {
+        if !matches!(
+            pending.classified.routing,
+            SuspensionRouting::Finalize { .. }
+        ) {
             return Err(HarnessError::RoutingMismatch {
                 node,
                 routing: "Finalize",
@@ -2873,7 +2882,7 @@ impl Harness {
             .get(1)
             .cloned()
             .ok_or_else(|| HarnessError::Resident("FinalizeWith missing its value field".into()))?;
-        self.pending_holes.lock().remove(&(sid, pending.hole));
+        self.pending_suspensions.lock().remove(&(sid, pending.hole));
         Ok((value, pending.suspend_table))
     }
 
@@ -2972,7 +2981,10 @@ impl Harness {
         let pending = self
             .node_pending(node)
             .ok_or(HarnessError::NotSuspended(node))?;
-        if !matches!(pending.classified.routing, HoleRouting::Finalize { .. }) {
+        if !matches!(
+            pending.classified.routing,
+            SuspensionRouting::Finalize { .. }
+        ) {
             return Err(HarnessError::RoutingMismatch {
                 node,
                 routing: "Finalize",
@@ -3010,7 +3022,7 @@ impl Harness {
         co.restore_suspended(holes);
         // Clear the consumed pending hole (the value path's
         // take_finalized_value_core does this; the handle path must too).
-        self.pending_holes.lock().remove(&(sid, hole.clone()));
+        self.pending_suspensions.lock().remove(&(sid, hole.clone()));
         self.tree.hole_consumed(node, hole)?;
         Ok(handle)
     }
@@ -3025,7 +3037,7 @@ impl Harness {
     /// OTHER parked frames (a green thread's) survive via the same
     /// restore-with-reported-holes discipline the finalize-consume paths
     /// use.
-    pub(crate) fn refuse_pending_hole(
+    pub(crate) fn refuse_pending_suspension(
         &self,
         node: NodeId,
         reason: String,
@@ -3049,7 +3061,7 @@ impl Harness {
             .map(|h| HoleId(h.to_string()))
             .collect();
         co.restore_suspended(holes);
-        self.pending_holes.lock().remove(&(sid, hole.clone()));
+        self.pending_suspensions.lock().remove(&(sid, hole.clone()));
         self.tree.hole_consumed(node, hole)?;
         Ok(())
     }
@@ -3063,7 +3075,10 @@ impl Harness {
         let Some(pending) = self.node_pending(node) else {
             return false;
         };
-        if !matches!(pending.classified.routing, HoleRouting::Finalize { .. }) {
+        if !matches!(
+            pending.classified.routing,
+            SuspensionRouting::Finalize { .. }
+        ) {
             return false;
         }
         // DEEP scan via the one exported predicate (mirrors the machine's
@@ -3091,14 +3106,14 @@ impl Harness {
         // session's parked continuation is what makes the child run (the apply)
         // legal, and the finalized closure's root was stashed on suspend.
         let is_finalize = matches!(
-            self.pending_hole(node).map(|c| c.routing),
-            Some(HoleRouting::Finalize { .. })
+            self.pending_suspension(node).map(|c| c.routing),
+            Some(SuspensionRouting::Finalize { .. })
         );
         if !is_finalize {
             return Err(HarnessError::RoutingMismatch {
                 node,
                 routing: "Finalize",
-                actual: format!("{:?}", self.pending_hole(node).map(|c| c.routing)),
+                actual: format!("{:?}", self.pending_suspension(node).map(|c| c.routing)),
             });
         }
         // The suspend turn's table, passed through so the apply fragment's
@@ -3220,7 +3235,7 @@ impl Harness {
     /// Put ONE child answer into the shape `node`'s parked fork/fanout
     /// continuation actually expects.
     ///
-    /// The two verbs that raise a [`HoleRouting::Fork`] disagree on it:
+    /// The two verbs that raise a [`SuspensionRouting::Fork`] disagree on it:
     /// `runLLMTurnFork`/`runLLMTurnFanout` answer
     /// `Either InvocationExit T` (PRD 21 locked decision 6 — a branch
     /// position's failure is data), so a successful answer is `Right v`;
@@ -3261,7 +3276,7 @@ impl Harness {
     /// [`Self::answer_fanout`] (one home, two call sites — both part of the
     /// one-shot general-Agent fork path; the recursive self-harness pump
     /// path drives its children via
-    /// [`crate::selfharness::driver::SelfHarnessDriver::drive_fork_child_window`]
+    /// [`crate::selfharness::driver::SelfHarnessDriver::drive_fork_child_agent_session`]
     /// instead). `parent`'s own decl-plane root rides on the
     /// child's include (see `force_with_extra_include`'s doc — a
     /// `finalize_pin` module may be a type the parent declared live). Cleans
@@ -3318,7 +3333,7 @@ impl Harness {
             .node_pending(node)
             .ok_or(HarnessError::NotSuspended(node))?;
         let (site, site_ty, prompt, source) = match &pending.classified.routing {
-            HoleRouting::Fork {
+            SuspensionRouting::Fork {
                 site,
                 ty,
                 fan: None,
@@ -3404,7 +3419,7 @@ impl Harness {
     }
 
     /// Force + drive a FANOUT answerer set for `node`'s pending fanout hole
-    /// (`forkAll @T` / `runLLMTurnFanout @T`, `HoleRouting::Fork` with
+    /// (`forkAll @T` / `runLLMTurnFanout @T`, `SuspensionRouting::Fork` with
     /// `fan: Some(_)`). One park, N thunk children — each registered under
     /// `node` (transcript forked at the checkpoint, same discipline as
     /// [`Self::answer_fork`]), forced, and driven to an answering value IN
@@ -3440,7 +3455,7 @@ impl Harness {
             .node_pending(node)
             .ok_or(HarnessError::NotSuspended(node))?;
         let (site, list_ty, fan, prompts, source) = match &pending.classified.routing {
-            HoleRouting::Fork {
+            SuspensionRouting::Fork {
                 site,
                 ty,
                 fan: Some(fan),
@@ -3539,7 +3554,7 @@ impl Harness {
             .node_pending(node)
             .ok_or(HarnessError::NotSuspended(node))?;
         let ty = match &pending.classified.routing {
-            HoleRouting::RunLLMTurn { ty, .. } => ty.clone(),
+            SuspensionRouting::RunLLMTurn { ty, .. } => ty.clone(),
             other => {
                 return Err(HarnessError::RoutingMismatch {
                     node,
@@ -3555,7 +3570,11 @@ impl Harness {
         let table = Some(pending.suspend_table.clone());
         self.push_user_turn(
             node,
-            &engine::hole_card(&pending.classified.prompt, ty.as_deref(), table.as_ref()),
+            &engine::resume_typed_request_prompt(
+                &pending.classified.prompt,
+                ty.as_deref(),
+                table.as_ref(),
+            ),
         )?;
         // `node` answers its OWN `runLLMTurn` hole here, so its own
         // `AnswerContract` (if any — the same one `run_block` pins `finalize`
@@ -3580,8 +3599,8 @@ impl Harness {
         Ok(())
     }
 
-    /// Answer an operator hole — `askUser` ([`HoleRouting::AskUser`]) or a
-    /// plain `ask` ([`HoleRouting::Ask`]) — with the operator's submission.
+    /// Answer an operator hole — `askUser` ([`SuspensionRouting::AskUser`]) or a
+    /// plain `ask` ([`SuspensionRouting::Ask`]) — with the operator's submission.
     /// Both effects return the submitted value DIRECTLY, so the submission
     /// JSON always becomes the resume `Value` with zero model turns; the
     /// program that suspended decides what it means. Typed structure is the
@@ -3596,7 +3615,9 @@ impl Harness {
             .node_pending(node)
             .ok_or(HarnessError::NotSuspended(node))?;
         match &pending.classified.routing {
-            HoleRouting::Ask { .. } | HoleRouting::AskUser { .. } | HoleRouting::ReadState => {}
+            SuspensionRouting::Ask { .. }
+            | SuspensionRouting::AskUser { .. }
+            | SuspensionRouting::ReadState => {}
             other => {
                 return Err(HarnessError::RoutingMismatch {
                     node,
@@ -3619,7 +3640,7 @@ impl Harness {
         Ok(())
     }
 
-    /// Resume a `note` hole ([`HoleRouting::Note`]) immediately with `()` —
+    /// Resume a `note` hole ([`SuspensionRouting::Note`]) immediately with `()` —
     /// no operator interaction. Mirrors [`Self::answer_dialog`]'s shape
     /// (lease, routing check, `resume_parent`) — the same audited resume
     /// path a mechanical dialog answer uses — but the resumed value is the
@@ -3634,7 +3655,7 @@ impl Harness {
             .node_pending(node)
             .ok_or(HarnessError::NotSuspended(node))?;
         match &pending.classified.routing {
-            HoleRouting::Note { .. } => {}
+            SuspensionRouting::Note { .. } => {}
             other => {
                 return Err(HarnessError::RoutingMismatch {
                     node,
@@ -4197,7 +4218,7 @@ impl Harness {
         let outcome = outcome.map_err(|e| HarnessError::Resident(e.to_string()))?;
 
         self.log_answer_attempt(node, hole, "harness", AnswerOutcome::Consumed)?;
-        self.consume_hole(node, sid, hole)?;
+        self.consume_suspension(node, sid, hole)?;
 
         match outcome {
             ResidentOutcome::Completed { result, .. } => {
@@ -4220,10 +4241,10 @@ impl Harness {
                 // site + type, same as a first-suspend `run_block` hole.
                 let classified = engine::classify_hole(&request, &table, &asks)?;
                 let hole_id = fresh_hole.cont_id().to_string();
-                self.publish_hole(
+                self.publish_suspension(
                     node,
                     sid,
-                    PendingHole {
+                    PendingSuspension {
                         node,
                         hole: HoleId(hole_id),
                         classified,
@@ -4536,16 +4557,16 @@ impl Harness {
         self.register_fork_child_with_card(
             parent,
             title,
-            engine::hole_card(prompt, ty, table.as_ref()),
+            engine::resume_typed_request_prompt(prompt, ty, table.as_ref()),
         )
     }
 
     /// [`Self::register_fork_child`] with the OPENING CARD supplied by the
     /// caller — the selfharness driver's window-pump fork path
-    /// (fork-subsumes-split step 1) builds `engine::answerer_hole_card`
+    /// (fork-subsumes-split step 1) builds `engine::finalize_typed_request_prompt`
     /// (multi-round teaching: explore/define rounds, `finalize @T` as the
     /// answer verb) where the resume-based path above builds the one-shot
-    /// `engine::hole_card`. Same seeding seam ([`Self::seed_forked_child`]),
+    /// `engine::resume_typed_request_prompt`. Same seeding seam ([`Self::seed_forked_child`]),
     /// different teaching. THE primitive: [`Self::register_fork_child`] is
     /// just its own card construction followed by a call here.
     pub(crate) fn register_fork_child_with_card(
@@ -4975,7 +4996,7 @@ impl Harness {
         };
         let sid = checkout.session_id();
         let mut machine = checkout.take();
-        self.drain_pending_window_exits(sid, &mut machine);
+        self.drain_pending_session_exits(sid, &mut machine);
         match tokio::task::spawn_blocking(move || {
             let mut machine = machine;
             machine.set_realm(realm);
@@ -4986,7 +5007,7 @@ impl Harness {
             //
             // A dead `scope` here means the node's own recorded scope was
             // retired out from under it (e.g. a queued window exit for this
-            // node drained just above, in `drain_pending_window_exits`) — a
+            // node drained just above, in `drain_pending_session_exits`) — a
             // harness invariant violation, not a normal path. Force back to
             // ROOT rather than let `set_scope` silently no-op and leave
             // whatever scope the machine was last left at (the exact
@@ -5031,7 +5052,7 @@ impl Harness {
     /// from the registry (dropping the machine), and remove its `convos`
     /// entry. `Ok(())` even for an already-terminated or unknown node —
     /// every caller (cancellation, a failed fork/fanout child, a panicked-
-    /// turn `JoinError`, the self-iterating harness's `retire_answerer`)
+    /// turn `JoinError`, the self-iterating harness's `retire_typed_request_agent`)
     /// wants "this node is retired" as its postcondition, not "this node was
     /// still live when I asked".
     pub fn terminate_node(&self, node: NodeId, reason: &str) -> Result<(), HarnessError> {
@@ -5050,7 +5071,7 @@ impl Harness {
                 // An ATTACHED node (one-session collapse): its retirement is
                 // its WINDOW's exit on the shared machine, never slot removal
                 // — the outer session outlives every answerer node it hosts.
-                // Two halves, retired together in `exit_window`: the REALM
+                // Two halves, retired together in `exit_agent_session`: the REALM
                 // (parked frames + outstanding handles) and, since PRD 21 lane
                 // C2, the node's SCOPE (its value-plane frame, and the GC roots
                 // that frame solely owns). A window's names and its heap roots
@@ -5058,7 +5079,7 @@ impl Harness {
                 //
                 // The exit is an EVENTUAL POSTCONDITION, not a best-effort side
                 // effect: if the machine is out on a turn right now, it is
-                // queued (`pending_window_exits`) and applied by the next code
+                // queued (`pending_session_exits`) and applied by the next code
                 // path that has the machine in hand (`run_checked_out`/
                 // `with_session` drain the queue before restoring) — the realm
                 // and scope identities are retained until the exit is
@@ -5071,7 +5092,7 @@ impl Harness {
                 if realm.is_some() || scope.is_some_and(|s| !s.is_root()) {
                     match self.tree.registry().checkout_run(sid) {
                         Ok(mut co) => {
-                            self.exit_window(co.machine(), node, realm, scope);
+                            self.exit_agent_session(co.machine(), node, realm, scope);
                             let holes: Vec<HoleId> = co
                                 .machine()
                                 .parked_holes()
@@ -5081,7 +5102,7 @@ impl Harness {
                             co.restore_suspended(holes);
                         }
                         Err(_) => {
-                            self.pending_window_exits.lock().push(PendingWindowExit {
+                            self.pending_session_exits.lock().push(PendingSessionExit {
                                 session: sid,
                                 node,
                                 realm,
@@ -5095,9 +5116,11 @@ impl Harness {
         self.convos.lock().remove(&node);
         // A node that terminates while still holding a pending hole (a
         // cancellation, or a failed fork/fanout child cleanup) would
-        // otherwise leave an orphaned entry in `pending_holes` forever — no
+        // otherwise leave an orphaned entry in `pending_suspensions` forever — no
         // caller can ever consume it once the node itself is gone.
-        self.pending_holes.lock().retain(|_, p| p.node != node);
+        self.pending_suspensions
+            .lock()
+            .retain(|_, p| p.node != node);
         Ok(())
     }
 
@@ -5623,8 +5646,8 @@ mod tests {
             child_cfg: test_engine_cfg(),
             provider,
             convos: Mutex::new(HashMap::new()),
-            pending_holes: Mutex::new(HashMap::new()),
-            pending_window_exits: Mutex::new(Vec::new()),
+            pending_suspensions: Mutex::new(HashMap::new()),
+            pending_session_exits: Mutex::new(Vec::new()),
             pending: Mutex::new(HashMap::new()),
             escalations: Mutex::new(HashMap::new()),
             escalation_gate: Mutex::new(None),
@@ -5660,8 +5683,8 @@ mod tests {
             child_cfg: test_engine_cfg(),
             provider,
             convos: Mutex::new(HashMap::new()),
-            pending_holes: Mutex::new(HashMap::new()),
-            pending_window_exits: Mutex::new(Vec::new()),
+            pending_suspensions: Mutex::new(HashMap::new()),
+            pending_session_exits: Mutex::new(Vec::new()),
             pending: Mutex::new(HashMap::new()),
             escalations: Mutex::new(HashMap::new()),
             escalation_gate: Mutex::new(None),

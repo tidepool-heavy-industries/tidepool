@@ -30,9 +30,9 @@
 //!   SEGMENTS a run id owns, and the boot-time `(kind, key)` fold across all
 //!   of them the driver injects through `resumeLoop`.
 //!
-//! `crate::engine::HoleRouting::Finalize` is the other half of the
+//! `crate::engine::SuspensionRouting::Finalize` is the other half of the
 //! synchronous hole-routing contract (routing for the `finalize` effect);
-//! it lives in `engine.rs` alongside the rest of `HoleRouting`, not here.
+//! it lives in `engine.rs` alongside the rest of `SuspensionRouting`, not here.
 
 pub mod driver;
 pub mod harness_source;
@@ -43,7 +43,10 @@ pub mod persistence;
 pub mod resume;
 pub mod state_cross;
 
-pub use driver::{answerer_decls, answerer_decls_with_delegate, DriverError, SelfHarnessDriver};
+pub use driver::{
+    typed_request_agent_decls, typed_request_agent_decls_with_delegate, DriverError,
+    SelfHarnessDriver,
+};
 pub use harness_source::{load_harness_source, HarnessSource, HarnessSourceError};
 pub use lifecycle::SelfHarnessState;
 pub use observer::{Event, LogObserver, Observer};

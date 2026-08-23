@@ -186,7 +186,7 @@ pub fn compile_turns_with_stable_inject(
         .collect())
 }
 
-/// Which surface verb produced a [`HoleRouting::Fork`] suspension. Two
+/// Which surface verb produced a [`SuspensionRouting::Fork`] suspension. Two
 /// effects share that routing, and they DIFFER in the shape their parked
 /// continuation expects back, so the answering side must know which it is:
 ///
@@ -206,7 +206,7 @@ pub enum ForkSource {
     RunLLMTurn,
 }
 
-/// Which outer-row effect a [`HoleRouting::OuterEffect`] suspension names —
+/// Which outer-row effect a [`SuspensionRouting::OuterEffect`] suspension names —
 /// see that variant's doc.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OuterEffectKind {
@@ -221,11 +221,11 @@ pub enum OuterEffectKind {
 /// payload: `Ask`, `RunLLMTurn`, and `Finalize`
 /// are each their own GADT/union-tag, see [`classify_hole`].
 ///
-/// `PartialEq` only (not `Eq`): [`HoleRouting::AskUser`] carries a
+/// `PartialEq` only (not `Eq`): [`SuspensionRouting::AskUser`] carries a
 /// [`crate::selfharness::operator::FormShape`], which derives `PartialEq` but
 /// not `Eq` (the frozen `operator.rs` contract) — do not add `Eq` back there.
 #[derive(Debug, Clone, PartialEq)]
-pub enum HoleRouting {
+pub enum SuspensionRouting {
     /// `runLLMTurn @T` — the same calling model answers in context.
     RunLLMTurn {
         site: crate::tree::SiteId,
@@ -287,7 +287,7 @@ pub enum HoleRouting {
     /// `finalize \@T`, and resume with `(T, ContextRef)` — the child's answer
     /// plus a ref to ITS OWN post-finalize frozen prefix, for branching
     /// further. Rides the SAME `RunLLMTurnWith` wire constructor as
-    /// [`HoleRouting::RunLLMTurn`]/[`HoleRouting::Fork`] (a `branch`/`ref`
+    /// [`SuspensionRouting::RunLLMTurn`]/[`SuspensionRouting::Fork`] (a `branch`/`ref`
     /// payload flag, decoded by [`classify_runllmturn_payload`]) rather than a
     /// new GADT constructor — the same "one constructor, several payload
     /// shapes" discipline fork/fanout already use. `context_ref` is the RAW
@@ -311,19 +311,19 @@ pub enum HoleRouting {
         label: Option<String>,
     },
     /// A `runLLMTurnBranchFanout \@T ref labeledPrompts` suspension — the BULK
-    /// sibling of [`HoleRouting::Branch`] (operator decision: sibling branch
+    /// sibling of [`SuspensionRouting::Branch`] (operator decision: sibling branch
     /// windows are ALWAYS driven concurrently, transparently — scheduling is
     /// never a model-visible choice). Every `(label, prompt)` pair forks its
     /// OWN child window off the SAME frozen `context_ref` (never an empty
     /// root), driven CONCURRENTLY via the same machinery
-    /// [`HoleRouting::Fork`]'s fanout servicing already uses
+    /// [`SuspensionRouting::Fork`]'s fanout servicing already uses
     /// ([`crate::selfharness::driver::SelfHarnessDriver::service_outer_branch_fanout`]
     /// — per-child realm, `set_concurrency_cap`, declaration-order
     /// reassembly). `ty` is the RENDERED LIST answer type `[T]` (mirroring
-    /// [`HoleRouting::Fork`]'s fanout shape — `engine::strip_list_type`
+    /// [`SuspensionRouting::Fork`]'s fanout shape — `engine::strip_list_type`
     /// recovers the per-child element type `T`); `labels`/`prompts` are
     /// parallel, one entry per sibling, in declaration order. Each sibling
-    /// window is a BRANCH POSITION exactly like [`HoleRouting::Branch`]'s
+    /// window is a BRANCH POSITION exactly like [`SuspensionRouting::Branch`]'s
     /// (PRD 21 locked decision 6): its own abnormal exit folds as `Left` at
     /// its own position in the resumed list, never erasing a sibling's
     /// already-finished answer.
@@ -349,7 +349,7 @@ pub enum HoleRouting {
     /// `lookupWorktree`/`listWorktrees`/`worktreeBranch`/`worktreeHead`/
     /// `withHandler`'s subscribe-drain-unsubscribe/`run`/`runIn`/`runArgv`/
     /// `record`) raised by the AUTHORED outer loop — routed by CONSTRUCTOR
-    /// NAME, same discipline as [`HoleRouting::Subagent`]. One variant
+    /// NAME, same discipline as [`SuspensionRouting::Subagent`]. One variant
     /// carrying WHICH effect rather than five near-identical ones: the
     /// servicing site decodes/dispatches identically for all five (decode
     /// the ORIGINAL request `Value` via the generated `<Eff>Req: FromCore`,
@@ -359,7 +359,7 @@ pub enum HoleRouting {
     OuterEffect(OuterEffectKind),
     /// `finalize @T x` — an Agent turn hands a
     /// typed value UP to the parent `runLLMTurn` hole and TERMINATES its own
-    /// turn loop, rather than resuming in context like [`HoleRouting::RunLLMTurn`]
+    /// turn loop, rather than resuming in context like [`SuspensionRouting::RunLLMTurn`]
     /// does. Its own GADT/union-tag (`Finalize`/`FinalizeWith`), decoded by
     /// [`classify_hole`] from `FinalizeWith`'s own wire shape (`Con(_, [site
     /// :: Int, value])`) — NOT `AskWith`'s `typedSite` field. `site`/`ty`
@@ -375,7 +375,7 @@ pub enum HoleRouting {
     /// `AsyncJoinAnyWith`/`AsyncStatusWith`/`AsyncResultWith`/
     /// `AsyncCancelWith` — `Tidepool.Async`'s substrate, PRD 20 S1-L4) raised
     /// by the AUTHORED outer loop or by a green thread's own body. Routed by
-    /// CONSTRUCTOR NAME only, same discipline as [`HoleRouting::Subagent`];
+    /// CONSTRUCTOR NAME only, same discipline as [`SuspensionRouting::Subagent`];
     /// the payload is NEVER decoded here — field 1 of `AsyncSpawnWith`/
     /// `AsyncDoneWith` may carry a live closure (the thread body / a
     /// closure-valued result), so decoding happens at the servicing site
@@ -393,8 +393,8 @@ pub enum HoleRouting {
 
 /// A classified suspension: the routing plus the human-facing prompt text.
 #[derive(Debug, Clone)]
-pub struct ClassifiedHole {
-    pub routing: HoleRouting,
+pub struct ClassifiedSuspension {
+    pub routing: SuspensionRouting,
     pub prompt: String,
 }
 
@@ -480,7 +480,7 @@ fn require_con_site(
     })
 }
 
-/// Decode a suspended request `Value` into a [`ClassifiedHole`] — the ONE
+/// Decode a suspended request `Value` into a [`ClassifiedSuspension`] — the ONE
 /// shared classify path `Ask`, `RunLLMTurn`, and `Finalize` all go through.
 /// Each is its own GADT/union-tag, so this
 /// dispatches on the request Con's CONSTRUCTOR NAME first, then decodes that
@@ -488,45 +488,45 @@ fn require_con_site(
 ///
 /// - `RunLLMTurnWith` (prompt, payload) — the `typedSite`/`fork`/`branchFanout`/
 ///   `branch`/`fan`/`prompts` payload shape carried on the `RunLLMTurn`
-///   constructor: `fork` → [`HoleRouting::Fork`] (the general Agent stack's
+///   constructor: `fork` → [`SuspensionRouting::Fork`] (the general Agent stack's
 ///   `runLLMTurnFork`/`runLLMTurnFanout`); else `branchFanout` →
-///   [`HoleRouting::BranchFanout`] (the bulk `runLLMTurnBranchFanout`, one
+///   [`SuspensionRouting::BranchFanout`] (the bulk `runLLMTurnBranchFanout`, one
 ///   parent `ref` plus parallel `labels`/`prompts` lists); else `branch` →
-///   [`HoleRouting::Branch`]; else [`HoleRouting::RunLLMTurn`]. `asks`
+///   [`SuspensionRouting::Branch`]; else [`SuspensionRouting::RunLLMTurn`]. `asks`
 ///   resolves `typedSite` to its rendered answer type.
 /// - `ForkWith` (site, brief) / `ForkAllWith` (site, prompts) — the `Fork`
 ///   effect (`Tidepool.Fork`'s `fork`/`forkAll`), routed by CONSTRUCTOR NAME
-///   to [`HoleRouting::Fork`] (`fan: None` for one child, `fan: Some(_)` for a
+///   to [`SuspensionRouting::Fork`] (`fan: None` for one child, `fan: Some(_)` for a
 ///   batch). The site id is a constructor field, not a payload key; `asks`
 ///   resolves it to the rendered answer type the same way.
-/// - `FinalizeWith` (site, value) — [`HoleRouting::Finalize`]. The VALUE field
+/// - `FinalizeWith` (site, value) — [`SuspensionRouting::Finalize`]. The VALUE field
 ///   is never JSON-decoded here (it crosses in-heap, may be non-serializable —
 ///   e.g. a closure); only the leading `Int` site id is. `asks` resolves the
 ///   site the same way as `RunLLMTurn`. The raw value itself is recovered from
 ///   the original request `Value` by the caller (`Harness` retains it), not
-///   through this JSON-shaped `ClassifiedHole`.
+///   through this JSON-shaped `ClassifiedSuspension`.
 /// - `AskUserWith` (shape) — a real constructor arm, routed by CONSTRUCTOR
 ///   NAME (no JSON-key probing): the request's sole field decodes as a
-///   [`crate::selfharness::operator::FormShape`] → [`HoleRouting::AskUser`].
+///   [`crate::selfharness::operator::FormShape`] → [`SuspensionRouting::AskUser`].
 ///   A malformed shape (the decode fails) falls through to the plain-Ask
 ///   fallback below instead of hanging, so a bad payload surfaces loudly at
 ///   the driver.
 /// - `NoteWith` (text) — a real constructor arm on the SAME `AskUser` GADT,
-///   routed by CONSTRUCTOR NAME → [`HoleRouting::Note`]. The sole field is a
+///   routed by CONSTRUCTOR NAME → [`SuspensionRouting::Note`]. The sole field is a
 ///   bare `Text`, decoded directly (no shape/schema involved).
 /// - `Print` (Console) / `WorktreeCreate`/`WorktreeLookup`/`WorktreeList`/
 ///   `WorktreeBranchOf`/`WorktreeHeadOf`/`WorktreeMergeInto` (Worktree) / `RepoEventSubscribe`/
 ///   `RepoEventDrain`/`RepoEventAwait`/`RepoEventUnsubscribe` (RepoEvent) /
 ///   `Run`/`RunIn`/`RunArgv` (Exec) / `RecordStep` (Journal) — routed by
-///   CONSTRUCTOR NAME to [`HoleRouting::OuterEffect`], same discipline as
+///   CONSTRUCTOR NAME to [`SuspensionRouting::OuterEffect`], same discipline as
 ///   `Subagent` below.
 /// - `AsyncSpawnWith`/`AsyncDoneWith`/`AsyncJoinAnyWith`/`AsyncStatusWith`/
 ///   `AsyncResultWith`/`AsyncCancelWith` (`Tidepool.Async`'s substrate) —
-///   routed by CONSTRUCTOR NAME to [`HoleRouting::Green`], same discipline as
+///   routed by CONSTRUCTOR NAME to [`SuspensionRouting::Green`], same discipline as
 ///   `Subagent` above.
-/// - `AskWith` (prompt, payload) — plain [`HoleRouting::Ask`] (a structured
+/// - `AskWith` (prompt, payload) — plain [`SuspensionRouting::Ask`] (a structured
 ///   `ask schema prompt`), the ONLY constructor that decodes to
-///   [`HoleRouting::Ask`] via [`decode_askwith`] (the malformed-`AskUserWith`
+///   [`SuspensionRouting::Ask`] via [`decode_askwith`] (the malformed-`AskUserWith`
 ///   fallback above reuses the same decoder, but that is still the
 ///   `AskUserWith` arm, not a wildcard).
 /// - anything else (an unrecognized Con, or a request that isn't a `Con` at
@@ -545,26 +545,26 @@ pub fn classify_hole(
     request: &Value,
     table: &DataConTable,
     asks: &AsksSidecar,
-) -> Result<ClassifiedHole, ClassifyError> {
+) -> Result<ClassifiedSuspension, ClassifyError> {
     let hole = match con_name(request, table) {
         Some("RunLLMTurnWith") => {
             let (prompt, payload) = decode_prompt_payload(request, table);
-            ClassifiedHole {
+            ClassifiedSuspension {
                 routing: classify_runllmturn_payload(&payload, asks)?,
                 prompt,
             }
         }
         Some("FinalizeWith") => {
             let (site, ty) = decode_finalize_site(request, table, asks)?;
-            ClassifiedHole {
-                routing: HoleRouting::Finalize { site, ty },
+            ClassifiedSuspension {
+                routing: SuspensionRouting::Finalize { site, ty },
                 prompt: String::new(),
             }
         }
         Some("ForkWith") => {
             let (site, brief) = decode_fork_one(request, table)?;
-            ClassifiedHole {
-                routing: HoleRouting::Fork {
+            ClassifiedSuspension {
+                routing: SuspensionRouting::Fork {
                     site,
                     ty: asks.type_of(site.get()).map(str::to_string),
                     fan: None,
@@ -576,9 +576,9 @@ pub fn classify_hole(
         }
         Some("ForkAllWith") => {
             let (site, prompts) = decode_fork_all(request, table)?;
-            ClassifiedHole {
+            ClassifiedSuspension {
                 prompt: prompts.join("\n"),
-                routing: HoleRouting::Fork {
+                routing: SuspensionRouting::Fork {
                     site,
                     ty: asks.type_of(site.get()).map(str::to_string),
                     fan: Some(FanBadge::Exact {
@@ -590,24 +590,24 @@ pub fn classify_hole(
             }
         }
         Some("AskUserWith") => match decode_askuser_spec(request, table) {
-            Some(shape) => ClassifiedHole {
-                routing: HoleRouting::AskUser { shape },
+            Some(shape) => ClassifiedSuspension {
+                routing: SuspensionRouting::AskUser { shape },
                 prompt: String::new(),
             },
             None => {
                 let (prompt, payload) = decode_askwith(request, table);
-                ClassifiedHole {
-                    routing: HoleRouting::Ask { payload },
+                ClassifiedSuspension {
+                    routing: SuspensionRouting::Ask { payload },
                     prompt,
                 }
             }
         },
-        Some("ReadStateWith") => ClassifiedHole {
-            routing: HoleRouting::ReadState,
+        Some("ReadStateWith") => ClassifiedSuspension {
+            routing: SuspensionRouting::ReadState,
             prompt: String::new(),
         },
-        Some("RunLLMTurnFreezeWith") => ClassifiedHole {
-            routing: HoleRouting::FreezeContext,
+        Some("RunLLMTurnFreezeWith") => ClassifiedSuspension {
+            routing: SuspensionRouting::FreezeContext,
             prompt: String::new(),
         },
         Some("SubagentSpawn")
@@ -615,12 +615,12 @@ pub fn classify_hole(
         | Some("SubagentResume")
         | Some("SubagentSpawnAsync")
         | Some("SubagentAwait")
-        | Some("SubagentCancel") => ClassifiedHole {
-            routing: HoleRouting::Subagent,
+        | Some("SubagentCancel") => ClassifiedSuspension {
+            routing: SuspensionRouting::Subagent,
             prompt: String::new(),
         },
-        Some("Print") => ClassifiedHole {
-            routing: HoleRouting::OuterEffect(OuterEffectKind::Console),
+        Some("Print") => ClassifiedSuspension {
+            routing: SuspensionRouting::OuterEffect(OuterEffectKind::Console),
             prompt: String::new(),
         },
         Some("WorktreeCreate")
@@ -628,8 +628,8 @@ pub fn classify_hole(
         | Some("WorktreeList")
         | Some("WorktreeBranchOf")
         | Some("WorktreeHeadOf")
-        | Some("WorktreeMergeInto") => ClassifiedHole {
-            routing: HoleRouting::OuterEffect(OuterEffectKind::Worktree),
+        | Some("WorktreeMergeInto") => ClassifiedSuspension {
+            routing: SuspensionRouting::OuterEffect(OuterEffectKind::Worktree),
             prompt: String::new(),
         },
         Some("RepoEventSubscribe")
@@ -647,22 +647,22 @@ pub fn classify_hole(
         // via that error.
         | Some("MailboxNew")
         | Some("MailboxSend")
-        | Some("MailboxDrop") => ClassifiedHole {
-            routing: HoleRouting::OuterEffect(OuterEffectKind::RepoEvent),
+        | Some("MailboxDrop") => ClassifiedSuspension {
+            routing: SuspensionRouting::OuterEffect(OuterEffectKind::RepoEvent),
             prompt: String::new(),
         },
-        Some("Run") | Some("RunIn") | Some("RunArgv") => ClassifiedHole {
-            routing: HoleRouting::OuterEffect(OuterEffectKind::Exec),
+        Some("Run") | Some("RunIn") | Some("RunArgv") => ClassifiedSuspension {
+            routing: SuspensionRouting::OuterEffect(OuterEffectKind::Exec),
             prompt: String::new(),
         },
-        Some("RecordStep") => ClassifiedHole {
-            routing: HoleRouting::OuterEffect(OuterEffectKind::Journal),
+        Some("RecordStep") => ClassifiedSuspension {
+            routing: SuspensionRouting::OuterEffect(OuterEffectKind::Journal),
             prompt: String::new(),
         },
         Some("NoteWith") => {
             let text = decode_note_text(request, table);
-            ClassifiedHole {
-                routing: HoleRouting::Note { text },
+            ClassifiedSuspension {
+                routing: SuspensionRouting::Note { text },
                 prompt: String::new(),
             }
         }
@@ -671,14 +671,14 @@ pub fn classify_hole(
         | Some("AsyncJoinAnyWith")
         | Some("AsyncStatusWith")
         | Some("AsyncResultWith")
-        | Some("AsyncCancelWith") => ClassifiedHole {
-            routing: HoleRouting::Green,
+        | Some("AsyncCancelWith") => ClassifiedSuspension {
+            routing: SuspensionRouting::Green,
             prompt: String::new(),
         },
         Some("AskWith") => {
             let (prompt, payload) = decode_askwith(request, table);
-            ClassifiedHole {
-                routing: HoleRouting::Ask { payload },
+            ClassifiedSuspension {
+                routing: SuspensionRouting::Ask { payload },
                 prompt,
             }
         }
@@ -743,7 +743,7 @@ fn decode_askuser_spec(
 fn classify_runllmturn_payload(
     payload: &Json,
     asks: &AsksSidecar,
-) -> Result<HoleRouting, ClassifyError> {
+) -> Result<SuspensionRouting, ClassifyError> {
     let site = require_site_field(payload, "RunLLMTurnWith", "typedSite")?;
     let ty = asks.type_of(site.get()).map(str::to_string);
     if payload.get("fork").and_then(Json::as_bool).unwrap_or(false) {
@@ -783,7 +783,7 @@ fn classify_runllmturn_payload(
                 });
             }
         }
-        Ok(HoleRouting::Fork {
+        Ok(SuspensionRouting::Fork {
             site,
             ty,
             fan: fan.map(|n| FanBadge::Exact { n }),
@@ -851,7 +851,7 @@ fn classify_runllmturn_payload(
                 });
             }
         }
-        Ok(HoleRouting::BranchFanout {
+        Ok(SuspensionRouting::BranchFanout {
             site,
             ty,
             context_ref,
@@ -875,14 +875,14 @@ fn classify_runllmturn_payload(
             .get("label")
             .and_then(Json::as_str)
             .map(str::to_string);
-        Ok(HoleRouting::Branch {
+        Ok(SuspensionRouting::Branch {
             site,
             ty,
             context_ref,
             label,
         })
     } else {
-        Ok(HoleRouting::RunLLMTurn { site, ty })
+        Ok(SuspensionRouting::RunLLMTurn { site, ty })
     }
 }
 
@@ -1080,7 +1080,7 @@ pub const RESUME_HELPER: &str = "resume :: a -> M a\nresume = pure";
 /// `framing` is the node's own system message — the self-iterating harness's
 /// per-loop answerer session passes `render`'s output here (wired end-to-end
 /// so the distilled `render` conditional actually reaches the model, not just
-/// the observational `CycleOutcome`). `None` falls back to the default
+/// the observational `LoopIterationOutcome`). `None` falls back to the default
 /// [`SYSTEM_FRAMING`] that teaches the full eval surface — the shape every
 /// ordinary Agent node still uses.
 pub fn assemble_request(
@@ -1121,7 +1121,11 @@ fn type_shape_line(ty: &str, table: Option<&DataConTable>) -> String {
 /// its task. `table` is the [`DataConTable`] the hole's type was classified
 /// from (when the caller has one in hand) — used only to render a names-only
 /// shape synopsis, never to invent field types.
-pub fn hole_card(prompt: &str, ty: Option<&str>, table: Option<&DataConTable>) -> String {
+pub fn resume_typed_request_prompt(
+    prompt: &str,
+    ty: Option<&str>,
+    table: Option<&DataConTable>,
+) -> String {
     match ty {
         Some(ty) => {
             let shape = type_shape_line(ty, table);
@@ -1142,7 +1146,7 @@ pub fn hole_card(prompt: &str, ty: Option<&str>, table: Option<&DataConTable>) -
 
 /// The hole card for a SELF-ITERATING-HARNESS answerer (scoped `[AskUser,
 /// Finalize]` stack), which can ONLY resolve a hole via `finalize @T` — it has
-/// no `resume` (the generic [`hole_card`] tells the model to write `resume
+/// no `resume` (the generic [`resume_typed_request_prompt`] tells the model to write `resume
 /// expr`, which does not compile against this scoped stack and costs a needless
 /// compile-error/retry round). This card names
 /// `finalize @T` directly.
@@ -1160,14 +1164,14 @@ pub fn hole_card(prompt: &str, ty: Option<&str>, table: Option<&DataConTable>) -
 ///
 /// `table` is the [`DataConTable`] the hole's answer type was resolved from,
 /// when the caller has one in hand — used only to render a names-only shape
-/// synopsis (see [`hole_card`]), never to invent field types.
+/// synopsis (see [`resume_typed_request_prompt`]), never to invent field types.
 ///
 /// `requester` names who is actually asking, for the opening/closing
 /// sentences — `"The loop"` for an in-context/branch/fanout window (the
 /// outer session's `runLLMTurn` family), `"Your parent session"` for a
 /// `fork`/`forkAll` child, whose requester is its parent's call site, not the
 /// outer loop.
-pub fn answerer_hole_card(
+pub fn finalize_typed_request_prompt(
     requester: &str,
     prompt: &str,
     ty: Option<&str>,
@@ -1493,7 +1497,7 @@ pub struct EngineConfig {
     /// the turn preamble (the effect verb helpers) and `effect_names`. Carried
     /// so a turn templates its preamble against the config's ACTUAL effect set,
     /// not a hardcoded Agent stack: the self-iterating harness's answerer
-    /// session is built from [`crate::selfharness::driver::answerer_decls`]
+    /// session is built from [`crate::selfharness::driver::typed_request_agent_decls`]
     /// (gui + finalize only), and its turns must NOT advertise verbs
     /// (`run`/`runLLMTurn`/…) it cannot compile.
     pub decls: Vec<tidepool_mcp::EffectDecl>,
@@ -1558,7 +1562,7 @@ pub struct EngineConfig {
     /// `false` by default; opt in via [`Self::with_delegate_wrap`]. The
     /// CALLER'S responsibility: this is only sound for a `decls` that
     /// actually carries `Subagent` (e.g.
-    /// `selfharness::driver::answerer_decls_with_delegate`) — `Subagent`'s
+    /// `selfharness::driver::typed_request_agent_decls_with_delegate`) — `Subagent`'s
     /// presence is what makes `Tidepool.Agent.Delegate` auto-import in the
     /// first place (`extra_imports_for!(Subagent)`); turning this on for a
     /// row without `Subagent` fails loud with `runDelegate` simply "not in
@@ -1661,7 +1665,7 @@ fn vocab_with_runllmturn(decls: &[tidepool_mcp::EffectDecl]) -> Vec<tidepool_mcp
 // must typecheck to import anything from it — including its OWN `M`-typed
 // bindings (`worktreeBranch`, `worktreeHead`), which need `Worktree`
 // GENUINELY in the row, not merely nameable. So `Worktree` rides into
-// `type M` for real (`selfharness::driver::answerer_decls_with_delegate`
+// `type M` for real (`selfharness::driver::typed_request_agent_decls_with_delegate`
 // puts it second, right after `Subagent`) and `Tidepool.Agent.Delegate`'s
 // `runDelegate` re-adds BOTH freshly via `reinterpret2` — see its doc for
 // why that still keeps `Worktree` unreachable from the MODEL's own block
@@ -1778,13 +1782,13 @@ impl EngineConfig {
     /// dropped and `Delegate` prepended, mirroring [`delegate_row_text`]'s
     /// promoted-row transform (the actual turn-templating change). DISPLAY
     /// use only (the hole card's "your effect row" line,
-    /// [`answerer_hole_card`]) — [`Self::effect_names`] itself MUST stay the
+    /// [`finalize_typed_request_prompt`]) — [`Self::effect_names`] itself MUST stay the
     /// real dispatched row: `Harness::flush_effects` maps an effect's stack
     /// tag through it POSITIONALLY, and the machine genuinely dispatches
     /// `Subagent`/`Worktree` tags regardless of what the model's own block
     /// can name. `false`/non-delegating: identical to `effect_names`.
     #[must_use]
-    pub fn hole_card_effect_row(&self) -> Vec<String> {
+    pub fn finalize_typed_request_prompt_effect_row(&self) -> Vec<String> {
         if !self.delegate_wrap {
             return self.effect_names.clone();
         }
@@ -2180,7 +2184,7 @@ fn delegate_aware_preamble(decls: &[tidepool_mcp::EffectDecl], outer_stack: &str
 /// Worktree, ...]`) with its `Subagent, Worktree` PREFIX replaced by
 /// `Delegate` — the row `runDelegate`'s `reinterpret2` signature (`Eff
 /// (Delegate ': effs) a -> Eff (Subagent ': Worktree ': effs) a`) peels its
-/// argument back to. `answerer_decls_with_delegate` locks this exact prefix
+/// argument back to. `typed_request_agent_decls_with_delegate` locks this exact prefix
 /// order (see its doc), so a plain string strip is correct here and avoids
 /// re-deriving the row from `EffectDecl`s — `Delegate` has no `EffectDecl` of
 /// its own at all (it is a plain Haskell GADT, never a Rust-registered
@@ -2191,7 +2195,7 @@ fn delegate_row_text(outer_stack: &str) -> String {
         Some(rest) => format!("'[Delegate, {rest}"),
         None => panic!(
             "delegate_wrap set on a row not starting with `{PREFIX}` — \
-             answerer_decls_with_delegate's Subagent/Worktree prefix order is \
+             typed_request_agent_decls_with_delegate's Subagent/Worktree prefix order is \
              what runDelegate's reinterpret2 signature relies on: {outer_stack}"
         ),
     }
@@ -2206,7 +2210,7 @@ fn delegate_row_text(outer_stack: &str) -> String {
 /// spawn ([`compile_turns`]) gets entries that are identical by
 /// construction rather than a hand-copied second `result`-shaped binder — the
 /// self-iterating harness driver's render+loop fusion is the first caller
-/// (`SelfHarnessDriver::compile_cycle_entry`). Routes through the SAME
+/// (`SelfHarnessDriver::compile_loop_entry`). Routes through the SAME
 /// anchor/preamble decision [`template_turn_for`] makes; `extra_entries`
 /// empty renders byte-identical to it.
 pub fn template_turn_for_fused(
@@ -2581,7 +2585,7 @@ pub enum TurnOutcome {
     /// set stashed in the node's `convo.suspend_table`.
     Suspended {
         hole: String,
-        classified: ClassifiedHole,
+        classified: ClassifiedSuspension,
     },
     /// The model replied with no runnable block — the caller decides whether to
     /// loop (feed a nudge) or stop.
@@ -2967,7 +2971,7 @@ mod tests {
 
     /// Shape (b): a CORRECTIVE-RETRY round — the model's Haskell didn't
     /// compile, so the driver feeds the GHC error back verbatim as the next
-    /// user turn (`run_to_hole_or_done`/`drive_answerer_to_finalize`'s shared
+    /// user turn (`run_to_hole_or_done`/`drive_agent_session_to_finalize`'s shared
     /// idiom). The corrective text is per-round-variable (it embeds a fresh
     /// GHC error each time) — it must land at the TAIL, never rewrite
     /// anything earlier, across repeated corrective rounds.
@@ -3337,9 +3341,9 @@ mod tests {
     }
 
     #[test]
-    fn hole_card_renders_record_selector_names_and_types() {
+    fn resume_typed_request_prompt_renders_record_selector_names_and_types() {
         let table = record_table();
-        let card = hole_card("answer this", Some("Contribution"), Some(&table));
+        let card = resume_typed_request_prompt("answer this", Some("Contribution"), Some(&table));
         assert!(
             card.contains(
                 "Contribution { addedIdeas :: [Text], draftDelta :: Text, advance :: Bool }"
@@ -3349,9 +3353,9 @@ mod tests {
     }
 
     #[test]
-    fn answerer_hole_card_renders_nullary_sum_in_tag_order() {
+    fn finalize_typed_request_prompt_renders_nullary_sum_in_tag_order() {
         let table = nullary_sum_table();
-        let card = answerer_hole_card(
+        let card = finalize_typed_request_prompt(
             "The loop",
             "decide",
             Some("Verdict"),
@@ -3368,12 +3372,13 @@ mod tests {
     /// capabilities through compile-error rounds (dogfood, 2026-08-20).
     /// An empty row (callers without one) adds no line.
     #[test]
-    fn answerer_hole_card_states_the_effect_row() {
+    fn finalize_typed_request_prompt_states_the_effect_row() {
         let row: Vec<String> = ["Subagent", "AskUser", "Finalize"]
             .iter()
             .map(|s| s.to_string())
             .collect();
-        let card = answerer_hole_card("The loop", "decide", Some("Verdict"), &[], None, &row);
+        let card =
+            finalize_typed_request_prompt("The loop", "decide", Some("Verdict"), &[], None, &row);
         assert!(
             card.contains(
                 "The effects available in THIS SESSION are `[Subagent, AskUser, Finalize]`"
@@ -3381,7 +3386,8 @@ mod tests {
             "{card}"
         );
 
-        let bare = answerer_hole_card("The loop", "decide", Some("Verdict"), &[], None, &[]);
+        let bare =
+            finalize_typed_request_prompt("The loop", "decide", Some("Verdict"), &[], None, &[]);
         assert!(!bare.contains("effect row"), "{bare}");
     }
 
@@ -3390,19 +3396,22 @@ mod tests {
     /// `Delegate`, never `Subagent`/`Worktree`, which the machine dispatches
     /// but the model's own block can never name.
     #[test]
-    fn hole_card_effect_row_is_delegate_aware() {
+    fn finalize_typed_request_prompt_effect_row_is_delegate_aware() {
         let names: Vec<String> = ["Subagent", "Worktree", "AskUser", "Fork", "Finalize"]
             .iter()
             .map(|s| s.to_string())
             .collect();
 
         let non_delegating = EngineConfig::inert(names.clone());
-        assert_eq!(non_delegating.hole_card_effect_row(), names);
+        assert_eq!(
+            non_delegating.finalize_typed_request_prompt_effect_row(),
+            names
+        );
 
         let mut delegating = EngineConfig::inert(names);
         delegating.delegate_wrap = true;
         assert_eq!(
-            delegating.hole_card_effect_row(),
+            delegating.finalize_typed_request_prompt_effect_row(),
             vec!["Delegate", "AskUser", "Fork", "Finalize"]
         );
     }
@@ -3410,7 +3419,7 @@ mod tests {
     /// A positional-sum answer type — no field labels at all — renders as a
     /// fenced `data` document.
     #[test]
-    fn hole_card_renders_positional_sum_instead_of_degrading() {
+    fn resume_typed_request_prompt_renders_positional_sum_instead_of_degrading() {
         let mut table = DataConTable::new();
         let circle = DataCon {
             id: DataConId(1),
@@ -3435,7 +3444,7 @@ mod tests {
         table.insert(rect.clone());
         table.set_field_types(rect.id, vec!["Double".to_string(), "Double".to_string()]);
 
-        let card = hole_card("answer this", Some("Shape"), Some(&table));
+        let card = resume_typed_request_prompt("answer this", Some("Shape"), Some(&table));
         assert!(card.contains("Its shape:"), "{card}");
         assert!(
             card.contains("Circle Double | Rect Double Double"),
@@ -3445,12 +3454,12 @@ mod tests {
 
     /// The per-hole card carries no verb documentation at all — the generated
     /// Available-effects section moved to SYSTEM-level framing
-    /// ([`crate::selfharness::driver::answerer_framing_suffix`]), sent once
+    /// ([`crate::selfharness::driver::typed_request_agent_framing_suffix`]), sent once
     /// per loop instead of re-narrated on every hole.
     #[test]
-    fn answerer_hole_card_carries_no_hand_written_verb_docs() {
+    fn finalize_typed_request_prompt_carries_no_hand_written_verb_docs() {
         let table = nullary_sum_table();
-        let card = answerer_hole_card(
+        let card = finalize_typed_request_prompt(
             "The loop",
             "decide",
             Some("Verdict"),
@@ -3516,9 +3525,9 @@ mod tests {
     /// partial/invented shape line — the card falls back to naming the type
     /// alone (already stated elsewhere in the card text).
     #[test]
-    fn hole_card_unsupported_shape_adds_no_shape_line() {
+    fn resume_typed_request_prompt_unsupported_shape_adds_no_shape_line() {
         let table = DataConTable::new();
-        let card = hole_card("answer this", Some("Mystery"), Some(&table));
+        let card = resume_typed_request_prompt("answer this", Some("Mystery"), Some(&table));
         assert!(
             !card.contains("Its shape:"),
             "an unsupported shape must not render a shape line: {card}"
@@ -3526,17 +3535,17 @@ mod tests {
     }
 
     #[test]
-    fn hole_card_with_no_table_adds_no_shape_line() {
-        let card = hole_card("answer this", Some("Contribution"), None);
+    fn resume_typed_request_prompt_with_no_table_adds_no_shape_line() {
+        let card = resume_typed_request_prompt("answer this", Some("Contribution"), None);
         assert!(!card.contains("Its shape:"), "{card}");
     }
 
     /// Derived from the table, not hardcoded: a renamed field changes what
     /// the hole card shows.
     #[test]
-    fn hole_card_shape_follows_table_field_rename() {
+    fn resume_typed_request_prompt_shape_follows_table_field_rename() {
         let table = record_table();
-        let card = hole_card("answer this", Some("Contribution"), Some(&table));
+        let card = resume_typed_request_prompt("answer this", Some("Contribution"), Some(&table));
         assert!(card.contains("addedIdeas"), "{card}");
 
         let mut renamed = DataConTable::new();
@@ -3562,7 +3571,8 @@ mod tests {
             dc.id,
             vec!["[Text]".to_string(), "Text".to_string(), "Bool".to_string()],
         );
-        let renamed_card = hole_card("answer this", Some("Contribution"), Some(&renamed));
+        let renamed_card =
+            resume_typed_request_prompt("answer this", Some("Contribution"), Some(&renamed));
         assert!(renamed_card.contains("ideasAdded"), "{renamed_card}");
         assert!(!renamed_card.contains("addedIdeas"), "{renamed_card}");
     }
@@ -3843,7 +3853,7 @@ mod tests {
         let routing =
             classify_runllmturn_payload(&payload, &asks).expect("well-formed payload classifies");
         match routing {
-            HoleRouting::Fork {
+            SuspensionRouting::Fork {
                 site, fan, prompts, ..
             } => {
                 assert_eq!(site.get(), 3);

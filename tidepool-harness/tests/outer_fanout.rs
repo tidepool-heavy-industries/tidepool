@@ -32,7 +32,7 @@ use tidepool_harness::provider::{
     ModelProvider, ProviderError, StreamSink, TurnRequest, TurnResponse, Usage,
 };
 use tidepool_harness::{
-    answerer_decls, load_harness_source, Harness, LogObserver, SelfHarnessDriver,
+    load_harness_source, typed_request_agent_decls, Harness, LogObserver, SelfHarnessDriver,
 };
 
 fn repo_root() -> std::path::PathBuf {
@@ -187,7 +187,7 @@ fn answers_and_outcomes(state_json: &serde_json::Value) -> (Vec<i64>, Vec<String
     (answers, outcomes)
 }
 
-/// Drive one `run_one_cycle` against the fixture with the given provider and
+/// Drive one `run_one_loop_iteration` against the fixture with the given provider and
 /// concurrency cap, returning the resumed `answers` list.
 async fn run_fanout_cycle(provider: KeyedProvider, concurrency_cap: usize) -> Vec<i64> {
     run_fanout_cycle_with(provider, concurrency_cap, |_| {})
@@ -203,7 +203,7 @@ async fn run_fanout_cycle_with(
     configure: impl FnOnce(&mut SelfHarnessDriver),
 ) -> (Vec<i64>, Vec<String>) {
     let agent_cfg = EngineConfig::from_decls(
-        answerer_decls(),
+        typed_request_agent_decls(),
         repo_root().join("haskell/lib"),
         Some(fixtures_dir()),
     )
@@ -227,7 +227,7 @@ async fn run_fanout_cycle_with(
         .expect("concurrent-fanout fixture loads");
 
     let outcome = driver
-        .run_one_cycle(&source, None)
+        .run_one_loop_iteration(&source, None)
         .await
         .expect("one render->loop->runLLMTurnFanout->finalize->render cycle");
 
@@ -299,7 +299,7 @@ async fn outer_fanout_respects_concurrency_cap() {
     }
 
     let agent_cfg = EngineConfig::from_decls(
-        answerer_decls(),
+        typed_request_agent_decls(),
         repo_root().join("haskell/lib"),
         Some(fixtures_dir()),
     )
@@ -323,7 +323,7 @@ async fn outer_fanout_respects_concurrency_cap() {
         .expect("concurrent-fanout fixture loads");
 
     let outcome = driver
-        .run_one_cycle(&source, None)
+        .run_one_loop_iteration(&source, None)
         .await
         .expect("one render->loop->runLLMTurnFanout->finalize->render cycle");
 

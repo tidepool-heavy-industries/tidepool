@@ -3,7 +3,7 @@
 //!
 //! One render-seeded answerer session is
 //! created per loop and every hole pushes onto it. This test drives a two-hole
-//! harness through `run_one_cycle` and, on the SECOND hole, asserts the
+//! harness through `run_one_loop_iteration` and, on the SECOND hole, asserts the
 //! answerer's transcript already carries the FIRST hole's prompt AND answer.
 //!
 //! Needs `TIDEPOOL_EXTRACT` and the with-packages GHC on PATH — run inside
@@ -22,7 +22,7 @@ use tidepool_harness::provider::{
     TurnResponse, Usage,
 };
 use tidepool_harness::{
-    answerer_decls, load_harness_source, Harness, LogObserver, SelfHarnessDriver,
+    load_harness_source, typed_request_agent_decls, Harness, LogObserver, SelfHarnessDriver,
 };
 
 fn repo_root() -> std::path::PathBuf {
@@ -111,8 +111,12 @@ async fn second_hole_sees_first_holes_exchange() {
         second_saw_first: second_saw_first.clone(),
     });
 
-    let agent_cfg = EngineConfig::from_decls(answerer_decls(), prelude_dir(), Some(fixtures_dir()))
-        .expect("answerer engine config");
+    let agent_cfg = EngineConfig::from_decls(
+        typed_request_agent_decls(),
+        prelude_dir(),
+        Some(fixtures_dir()),
+    )
+    .expect("answerer engine config");
     let writer = tidepool_harness::log::LogWriter::create(
         std::env::temp_dir().join(format!(
             "selfharness-context-window-{}.jsonl",
@@ -128,7 +132,7 @@ async fn second_hole_sees_first_holes_exchange() {
         .expect("two-hole harness source loads");
 
     let outcome = driver
-        .run_one_cycle(&source, None)
+        .run_one_loop_iteration(&source, None)
         .await
         .expect("one full two-hole cycle");
 

@@ -22,7 +22,7 @@ use tidepool_harness::provider::{DynModelProvider, Usage};
 use tidepool_harness::replay::{RecordedReply, ReplayProvider};
 use tidepool_harness::selfharness::operator::FormShape;
 use tidepool_harness::tree::{FanBadge, NodeId, NodeState};
-use tidepool_harness::{Harness, HarnessError, HoleRouting, OperatorDecision, OperatorGate};
+use tidepool_harness::{Harness, HarnessError, OperatorDecision, OperatorGate, SuspensionRouting};
 
 use support::haskell_call::{fanout_bind, haskell, resume_call};
 
@@ -210,7 +210,7 @@ async fn fanout_of_three_preserves_order_across_a_retry() {
         .expect("root drives to a hole");
     match outcome {
         tidepool_harness::TurnOutcome::Suspended { classified, .. } => match &classified.routing {
-            HoleRouting::Fork {
+            SuspensionRouting::Fork {
                 ty,
                 fan: Some(fan),
                 prompts,

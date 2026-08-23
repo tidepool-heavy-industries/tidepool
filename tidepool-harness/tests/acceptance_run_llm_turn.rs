@@ -21,7 +21,7 @@ use tidepool_harness::log::{Actor, AnswerOutcome, Event, LogHeader, LogReader, L
 use tidepool_harness::provider::{DynModelProvider, Usage};
 use tidepool_harness::replay::{RecordedReply, ReplayProvider};
 use tidepool_harness::tree::{NodeId, NodeState};
-use tidepool_harness::{Harness, HoleRouting};
+use tidepool_harness::{Harness, SuspensionRouting};
 
 fn prelude_dir() -> std::path::PathBuf {
     let manifest = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -158,7 +158,7 @@ async fn run_llm_turn_end_to_end_type_retry_and_answer() {
             hole, classified, ..
         } => {
             match &classified.routing {
-                HoleRouting::RunLLMTurn { ty, .. } => {
+                SuspensionRouting::RunLLMTurn { ty, .. } => {
                     assert_eq!(
                         ty.as_deref(),
                         Some("Decision"),
@@ -526,8 +526,8 @@ async fn dialog_mechanical_answer_completes_and_logs_consistently() {
     assert!(matches!(
         outcome,
         tidepool_harness::TurnOutcome::Suspended {
-            classified: tidepool_harness::ClassifiedHole {
-                routing: HoleRouting::Ask { .. },
+            classified: tidepool_harness::ClassifiedSuspension {
+                routing: SuspensionRouting::Ask { .. },
                 ..
             },
             ..
@@ -649,7 +649,7 @@ async fn follow_up_after_dialog_resume_to_done() {
 /// A SECOND, sequential `runLLMTurn` hole in the SAME compiled turn — the
 /// resumed continuation (`Session::resume`) hits another `AskWith` before the
 /// do-block completes. This is the re-suspend arm of `resume_parent`: it must
-/// classify + publish the second hole's REAL site + type (`HoleRouting::RunLLMTurn
+/// classify + publish the second hole's REAL site + type (`SuspensionRouting::RunLLMTurn
 /// { ty: Some("Bool"), .. }`), not `None`/`None`. Also asserts the typed-answer
 /// path works on hole 2: answering it (in-context, via `answer_run_llm_turn`
 /// again) resumes the continuation to completion.
@@ -687,7 +687,7 @@ async fn run_llm_turn_second_sequential_hole_carries_its_type() {
         .expect("root drives to its first hole");
     match &outcome {
         tidepool_harness::TurnOutcome::Suspended { classified, .. } => match &classified.routing {
-            HoleRouting::RunLLMTurn { ty, .. } => {
+            SuspensionRouting::RunLLMTurn { ty, .. } => {
                 assert_eq!(ty.as_deref(), Some("Int"), "first hole carries Int");
             }
             other => panic!("expected a RunLLMTurn hole, got {other:?}"),
@@ -713,10 +713,10 @@ async fn run_llm_turn_second_sequential_hole_carries_its_type() {
 
     // --- the flagship assertion: the SECOND hole carries its real type -----
     let second_pending = harness
-        .pending_hole(root)
+        .pending_suspension(root)
         .expect("root is suspended on the second hole");
     let (second_site, second_ty) = match &second_pending.routing {
-        HoleRouting::RunLLMTurn { site, ty } => (*site, ty.clone()),
+        SuspensionRouting::RunLLMTurn { site, ty } => (*site, ty.clone()),
         other => panic!("second hole must also be a RunLLMTurn, got {other:?}"),
     };
     assert_eq!(

@@ -1,8 +1,8 @@
 //! Acceptance: `render`'s output IS the answerer's SYSTEM message, not
-//! merely observational text that lands in `CycleOutcome` while the agent's
+//! merely observational text that lands in `LoopIterationOutcome` while the agent's
 //! actual system prompt stays the hardcoded `SYSTEM_FRAMING`. This test
 //! drives one full cycle through the production entry point
-//! (`run_one_cycle`) with a provider that CAPTURES the exact request it is
+//! (`run_one_loop_iteration`) with a provider that CAPTURES the exact request it is
 //! handed, and asserts the answerer turn's System-role message is derived
 //! from `render` (not the default framing).
 //!
@@ -22,7 +22,7 @@ use tidepool_harness::provider::{
     Usage,
 };
 use tidepool_harness::{
-    answerer_decls, load_harness_source, Harness, LogObserver, SelfHarnessDriver,
+    load_harness_source, typed_request_agent_decls, Harness, LogObserver, SelfHarnessDriver,
 };
 
 fn repo_root() -> std::path::PathBuf {
@@ -93,7 +93,7 @@ async fn render_output_is_the_answerer_system_message() {
     });
 
     let agent_cfg = EngineConfig::from_decls(
-        answerer_decls(),
+        typed_request_agent_decls(),
         prelude_dir(),
         Some(examples_harness_dir()),
     )
@@ -110,7 +110,7 @@ async fn render_output_is_the_answerer_system_message() {
         .expect("reference harness source loads");
 
     driver
-        .run_one_cycle(&source, None)
+        .run_one_loop_iteration(&source, None)
         .await
         .expect("one full render->loop->runLLMTurn->finalize->render cycle");
 
@@ -151,7 +151,7 @@ async fn render_output_is_the_answerer_system_message() {
         "the answerer's System message must NOT advertise the outer row's \
          RunLLMTurn card, got:\n{answerer_system}"
     );
-    for decl in answerer_decls() {
+    for decl in typed_request_agent_decls() {
         let card = format!("**{}**", decl.type_name);
         assert!(
             answerer_system.contains(&card),

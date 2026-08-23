@@ -1,9 +1,9 @@
 //! Acceptance coverage for the ANSWERER-PLANE green scheduler
-//! (`SelfHarnessDriver::service_answerer_green`): the composed idiom
+//! (`SelfHarnessDriver::service_green_round`): the composed idiom
 //! `async (fork @T brief)` — a model window spawning several fork children
 //! as green threads, `wait`-ing their typed results, and finalizing from
 //! them — plus the per-window fork budget's loud refusal path. Driven
-//! through the production entry point (`SelfHarnessDriver::run_one_cycle`)
+//! through the production entry point (`SelfHarnessDriver::run_one_loop_iteration`)
 //! against the reference harness (`examples/harness/Harness.hs`), scripted
 //! record-replay, zero live calls — the same discipline as
 //! `selfharness_spine.rs`.
@@ -33,7 +33,7 @@ use tidepool_harness::provider::{DynModelProvider, Usage};
 use tidepool_harness::replay::{RecordedReply, ReplayProvider};
 use tidepool_harness::selfharness::operator::{FormShape, OperatorGate};
 use tidepool_harness::{
-    answerer_decls, load_harness_source, Harness, LogObserver, SelfHarnessDriver,
+    load_harness_source, typed_request_agent_decls, Harness, LogObserver, SelfHarnessDriver,
 };
 
 fn repo_root() -> std::path::PathBuf {
@@ -99,7 +99,7 @@ fn build_driver(
     label: &str,
 ) -> (SelfHarnessDriver, Arc<Harness>, std::path::PathBuf) {
     let agent_cfg = EngineConfig::from_decls(
-        answerer_decls(),
+        typed_request_agent_decls(),
         prelude_dir(),
         Some(examples_harness_dir()),
     )
@@ -158,7 +158,7 @@ async fn async_fork_composition_two_children_typed_results_cross() {
         .expect("reference harness source loads");
 
     let outcome = driver
-        .run_one_cycle(&source, None)
+        .run_one_loop_iteration(&source, None)
         .await
         .expect("one cycle: spawn two async forks, wait both, finalize");
 
@@ -210,7 +210,7 @@ async fn two_waves_of_fork_fold_fork_carry_results_across_waves() {
         .expect("reference harness source loads");
 
     let outcome = driver
-        .run_one_cycle(&source, None)
+        .run_one_loop_iteration(&source, None)
         .await
         .expect("two waves of fork/fold/fork complete in one window");
 
@@ -267,7 +267,7 @@ async fn fork_child_that_forks_is_depth_refused_and_recovers() {
         .expect("reference harness source loads");
 
     let outcome = driver
-        .run_one_cycle(&source, None)
+        .run_one_loop_iteration(&source, None)
         .await
         .expect("the depth refusal aborts the child's block, not the run");
 
@@ -313,7 +313,7 @@ async fn two_level_fork_chain_succeeds_at_default_caps() {
         .expect("reference harness source loads");
 
     let outcome = driver
-        .run_one_cycle(&source, None)
+        .run_one_loop_iteration(&source, None)
         .await
         .expect("a depth-2 fork chain completes at the default caps");
 
@@ -353,7 +353,7 @@ async fn second_fork_past_subtree_cap_refuses_with_tree_wide_corrective() {
         .expect("reference harness source loads");
 
     let outcome = driver
-        .run_one_cycle(&source, None)
+        .run_one_loop_iteration(&source, None)
         .await
         .expect("the subtree refusal aborts the block, not the run");
 
@@ -413,7 +413,7 @@ async fn async_fork_over_subtree_cap_refuses_with_tree_wide_corrective() {
         .expect("reference harness source loads");
 
     let outcome = driver
-        .run_one_cycle(&source, None)
+        .run_one_loop_iteration(&source, None)
         .await
         .expect("the subtree refusal aborts the block, not the window — the cycle completes");
 
@@ -475,7 +475,7 @@ async fn async_fork_over_budget_refuses_loudly_and_window_survives() {
         .expect("reference harness source loads");
 
     let outcome = driver
-        .run_one_cycle(&source, None)
+        .run_one_loop_iteration(&source, None)
         .await
         .expect("the refusal aborts the block, not the window — the cycle completes");
 
@@ -541,11 +541,11 @@ async fn settled_threads_leave_the_machine_quiescent_for_rotation() {
         .expect("reference harness source loads");
 
     let outcome1 = driver
-        .run_one_cycle(&source, None)
+        .run_one_loop_iteration(&source, None)
         .await
         .expect("cycle 1: async forks settle, sweep closes their realms");
     let outcome2 = driver
-        .run_one_cycle(&source, Some(&outcome1.state_json))
+        .run_one_loop_iteration(&source, Some(&outcome1.state_json))
         .await
         .expect(
             "cycle 2 must rotate cleanly at the forced ceiling — a settled \
@@ -567,7 +567,7 @@ async fn settled_threads_leave_the_machine_quiescent_for_rotation() {
 }
 
 /// What the H2 gate probe records: every retirement and failure attribution
-/// the fork children's `BranchWindow`/`drive_fork_child_window` reports, plus
+/// the fork children's `BranchAgentSessionGuard`/`drive_fork_child_agent_session` reports, plus
 /// whether the driver ever mistakenly asked the operator anything (it must
 /// not — nothing in this scenario suspends on `askUser`).
 #[derive(Default)]
@@ -611,7 +611,7 @@ impl OperatorGate for ProbeGate {
 /// rather than hanging the scheduler or surfacing as an opaque mechanism
 /// error, and (2) the starved child's own GUI/tree node still retires
 /// (`OperatorGate::retire_node`/`node_failed`) despite the whole cycle
-/// failing: `drive_fork_child_window` removes and retires a child's GUI
+/// failing: `drive_fork_child_agent_session` removes and retires a child's GUI
 /// label unconditionally, before it branches on how the child's pump ended
 /// — so no `Running` node is left behind by a fork subtree that never got to
 /// finalize. The settled sibling "pick a" retires too (every fork child
@@ -632,7 +632,7 @@ async fn async_fork_child_round_exhaustion_surfaces_legibly_and_retires_node() {
         finalize_int_reply(1),
         // 3-5. Fork child B ("pick b") — three prose-only replies with no
         //    ```haskell block, burning its (lowered) round budget: cap 1 +
-        //    2 ultimatum-grace rounds = 3 (`drive_answerer_to_finalize`'s
+        //    2 ultimatum-grace rounds = 3 (`drive_agent_session_to_finalize`'s
         //    `hard_rounds = max_rounds + 2`).
         starved(),
         starved(),
@@ -652,7 +652,7 @@ async fn async_fork_child_round_exhaustion_surfaces_legibly_and_retires_node() {
         .expect("reference harness source loads");
 
     let err = driver
-        .run_one_cycle(&source, None)
+        .run_one_loop_iteration(&source, None)
         .await
         .expect_err("a starved async fork child must hard-fail the cycle, not hang or succeed");
 
@@ -669,7 +669,7 @@ async fn async_fork_child_round_exhaustion_surfaces_legibly_and_retires_node() {
     );
 
     // No leaked Running node: BOTH fork children's own GUI entries retire
-    // (unconditional in `drive_fork_child_window`, before it branches on
+    // (unconditional in `drive_fork_child_agent_session`, before it branches on
     // outcome) despite the whole cycle failing — but only the starved one
     // is reported failed.
     assert_eq!(
@@ -861,7 +861,7 @@ async fn fork_child_asks_route_to_its_own_derived_gate_and_finalizes() {
     ];
 
     let agent_cfg = EngineConfig::from_decls(
-        answerer_decls(),
+        typed_request_agent_decls(),
         repo_root().join("haskell/lib"),
         Some(fixtures_dir()),
     )
@@ -884,7 +884,7 @@ async fn fork_child_asks_route_to_its_own_derived_gate_and_finalizes() {
         .expect("fork-child-gui fixture loads");
 
     let outcome = driver
-        .run_one_cycle(&source, None)
+        .run_one_loop_iteration(&source, None)
         .await
         .expect("render->loop->runLLMTurn->fork(1 child, asks+finalizes)->finalize cycle");
 

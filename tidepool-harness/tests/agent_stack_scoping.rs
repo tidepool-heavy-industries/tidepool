@@ -1,7 +1,7 @@
 //! Structural proof of the harness/agent effect-stack split: the OUTER
 //! self-iterating-harness session compiles against `Eff '[RunLLMTurn, AskUser]`
 //! and the nested ANSWERER turn compiles against `Eff '[AskUser, Fork,
-//! ReadState, Green, Finalize]` ([`answerer_decls`]) — disjoint ROWS (`Fork`/`AskUser` are
+//! ReadState, Green, Finalize]` ([`typed_request_agent_decls`]) — disjoint ROWS (`Fork`/`AskUser` are
 //! answerer-only; `RunLLMTurn`/`Ask` are not in the answerer's row), not a
 //! single shared stack pinned by convention. `type M` is built from a
 //! compile's ROW alone and stays exactly this narrow.
@@ -31,7 +31,7 @@
 mod support;
 
 use tidepool_harness::engine::{self, template_turn_for, CompiledTurn, EngineConfig};
-use tidepool_harness::selfharness::answerer_decls;
+use tidepool_harness::selfharness::typed_request_agent_decls;
 use tidepool_runtime::CompileError;
 
 /// `CompileError::Diagnostics`' own `Display` is only a count ("Haskell
@@ -142,7 +142,11 @@ fn compile_pinned(
 fn run_llm_turn_is_a_member_error_not_a_scope_error_in_the_answerer_stack() {
     support::require_extract();
 
-    let result = compile_against(answerer_decls(), "(runLLMTurn @Int \"go\" :: M Int)", "");
+    let result = compile_against(
+        typed_request_agent_decls(),
+        "(runLLMTurn @Int \"go\" :: M Int)",
+        "",
+    );
     let err = match result {
         Ok(_) => panic!(
             "runLLMTurn compiled against the answerer stack '[AskUser, Fork, ReadState, Green, Finalize] \
@@ -176,7 +180,7 @@ fn tidepool_harness_module_is_importable_in_the_answerer_stack() {
     support::require_extract();
 
     let result = compile_against(
-        answerer_decls(),
+        typed_request_agent_decls(),
         "askUserRaw (toJSON (0 :: Int))",
         "Tidepool.Harness",
     );
@@ -236,7 +240,7 @@ fn finalize_compiles_in_the_answerer_stack() {
     support::require_extract();
 
     let result = compile_pinned(
-        answerer_decls(),
+        typed_request_agent_decls(),
         "(finalize @Int (41 + 1) :: M ())",
         "",
         "Int",
@@ -257,7 +261,11 @@ fn finalize_compiles_in_the_answerer_stack() {
 fn askuser_raw_compiles_in_the_answerer_stack() {
     support::require_extract();
 
-    let result = compile_against(answerer_decls(), "askUserRaw (toJSON (0 :: Int))", "");
+    let result = compile_against(
+        typed_request_agent_decls(),
+        "askUserRaw (toJSON (0 :: Int))",
+        "",
+    );
     assert!(
         result.is_ok(),
         "askUserRaw (an AskUser verb) must compile against the answerer stack \
@@ -279,7 +287,7 @@ fn noteraw_and_getstatejson_compile_in_the_answerer_stack() {
     support::require_extract();
 
     let result = compile_against(
-        answerer_decls(),
+        typed_request_agent_decls(),
         "do { noteRaw \"hi\"; _ <- getStateJson; pure () }",
         "",
     );
@@ -301,7 +309,7 @@ fn fork_all_compiles_in_the_answerer_stack() {
     support::require_extract();
 
     let result = compile_against(
-        answerer_decls(),
+        typed_request_agent_decls(),
         "(forkAll @Int [\"pick a number\"] :: M [Int])",
         "Tidepool.Fork (forkAll)",
     );
@@ -323,7 +331,11 @@ fn fork_all_compiles_in_the_answerer_stack() {
 fn ask_is_a_compile_error_in_the_answerer_stack() {
     support::require_extract();
 
-    let result = compile_against(answerer_decls(), "(ask SStr \"x\" :: M Value)", "");
+    let result = compile_against(
+        typed_request_agent_decls(),
+        "(ask SStr \"x\" :: M Value)",
+        "",
+    );
     let err = match result {
         Ok(_) => panic!(
             "ask compiled against the answerer stack '[AskUser, Fork, ReadState, Green, Finalize] \
@@ -348,7 +360,11 @@ fn ask_is_a_compile_error_in_the_answerer_stack() {
 fn base_effect_is_a_compile_error_in_the_answerer_stack() {
     support::require_extract();
 
-    let result = compile_against(answerer_decls(), "(httpGet \"http://x\" :: M Value)", "");
+    let result = compile_against(
+        typed_request_agent_decls(),
+        "(httpGet \"http://x\" :: M Value)",
+        "",
+    );
     let err = match result {
         Ok(_) => panic!(
             "httpGet (a base Http effect) compiled against the answerer stack \

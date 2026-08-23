@@ -36,15 +36,15 @@ mod support;
 
 use std::sync::Arc;
 
-use tidepool_harness::answerer_decls;
 use tidepool_harness::engine::{
-    self, answerer_hole_card, template_turn_for, CompiledTurn, EngineConfig,
+    self, finalize_typed_request_prompt, template_turn_for, CompiledTurn, EngineConfig,
 };
 use tidepool_harness::log::{Actor, LogHeader, LogWriter};
 use tidepool_harness::provider::{DynModelProvider, Usage};
 use tidepool_harness::replay::{RecordedReply, ReplayProvider};
 use tidepool_harness::tree::NodeState;
-use tidepool_harness::{Harness, HoleRouting, TurnOutcome};
+use tidepool_harness::typed_request_agent_decls;
+use tidepool_harness::{Harness, SuspensionRouting, TurnOutcome};
 use tidepool_runtime::CompileError;
 
 fn repo_root() -> std::path::PathBuf {
@@ -58,8 +58,12 @@ fn repo_root() -> std::path::PathBuf {
 /// row plus `examples/harness` on the include path, so `HarnessTypes` (and its
 /// `Decision`) resolves — exactly what `tidepool-selfharness` wires.
 fn answerer_cfg() -> EngineConfig {
-    let mut cfg = EngineConfig::from_decls(answerer_decls(), repo_root().join("haskell/lib"), None)
-        .expect("answerer engine config");
+    let mut cfg = EngineConfig::from_decls(
+        typed_request_agent_decls(),
+        repo_root().join("haskell/lib"),
+        None,
+    )
+    .expect("answerer engine config");
     cfg.include.push(repo_root().join("examples/harness"));
     cfg
 }
@@ -349,15 +353,15 @@ const A_DECISION: &str =
     "Decision { action = \"observe\", rationale = \"because\", confidence = High }";
 
 /// Pull the backtick-quoted `finalize` shape out of
-/// [`answerer_hole_card`]'s "Answer by evaluating `...`" sentence — the
+/// [`finalize_typed_request_prompt`]'s "Answer by evaluating `...`" sentence — the
 /// prompt text an answerer turn actually receives for a pinned hole. This is
 /// a DERIVATION (parse the live prompt), not a retyped copy: if
-/// `answerer_hole_card`'s template ever changes shape (drops the inner `::
+/// `finalize_typed_request_prompt`'s template ever changes shape (drops the inner `::
 /// {ty}`, adds an outer `:: M {ty}`, anything), this function reflects it
 /// and the caller's `assert_eq!` against the last-known shape (not this
 /// function) is what tracks the drift instead of silently going stale.
 fn prescribed_finalize_shape(ty: &str, imports: &[String]) -> String {
-    let card = answerer_hole_card(
+    let card = finalize_typed_request_prompt(
         "The loop",
         "answer the loop's request",
         Some(ty),
@@ -367,7 +371,7 @@ fn prescribed_finalize_shape(ty: &str, imports: &[String]) -> String {
     );
     const MARKER: &str = "evaluating `";
     let start = card.find(MARKER).unwrap_or_else(|| {
-        panic!("answerer_hole_card must prescribe a `finalize` shape via \"evaluating `...`\", got: {card}")
+        panic!("finalize_typed_request_prompt must prescribe a `finalize` shape via \"evaluating `...`\", got: {card}")
     }) + MARKER.len();
     let rest = &card[start..];
     let end = rest
@@ -381,7 +385,7 @@ fn prescribed_finalize_shape(ty: &str, imports: &[String]) -> String {
     shape
 }
 
-/// Assertion 1 — drift-proofing: the shape `answerer_hole_card` (the per-hole
+/// Assertion 1 — drift-proofing: the shape `finalize_typed_request_prompt` (the per-hole
 /// answerer prompt) actually prescribes today, DERIVED from the live prompt
 /// text rather than retyped, must compile against the pinned row it is
 /// prescribed for. This is what keeps prompt and template from silently
@@ -393,14 +397,14 @@ fn prescribed_finalize_shape(ty: &str, imports: &[String]) -> String {
 /// update this literal, not just make the assertion pass); the compile
 /// below is the actual claim, applied to whatever shape is live right now.
 #[test]
-fn prompts_prescribed_hole_card_shape_compiles_when_pinned() {
+fn prompts_prescribed_finalize_typed_request_prompt_shape_compiles_when_pinned() {
     support::require_extract();
     let imports = vec!["HarnessTypes".to_string()];
     let shape = prescribed_finalize_shape("Decision", &imports);
     assert_eq!(
         shape, "finalize @Decision value",
         "the answerer prompt's prescribed shape changed — re-read \
-         `engine::answerer_hole_card` and update this pinned literal"
+         `engine::finalize_typed_request_prompt` and update this pinned literal"
     );
     // `value` is the prompt's placeholder identifier for "a real Decision" —
     // substitute a real one, keeping the REST of the derived snippet
@@ -535,7 +539,7 @@ async fn fork_child_resolves_its_own_type_with_no_parent_contract() {
     let log_path = dir.path().join("fork-own-type-pin.jsonl");
     let writer = LogWriter::create(&log_path, &fork_own_type_pin_header()).unwrap();
     let cfg = EngineConfig::from_decls(
-        answerer_decls(),
+        typed_request_agent_decls(),
         prelude_dir(),
         Some(examples_harness_dir()),
     )
@@ -576,7 +580,7 @@ async fn fork_child_resolves_its_own_type_with_no_parent_contract() {
         .expect("root drives to the fork hole");
     match &outcome {
         TurnOutcome::Suspended { classified, .. } => match &classified.routing {
-            HoleRouting::Fork { ty, fan: None, .. } => {
+            SuspensionRouting::Fork { ty, fan: None, .. } => {
                 assert_eq!(ty.as_deref(), Some("Decision"));
             }
             other => panic!("expected a plain fork hole for Decision, got {other:?}"),

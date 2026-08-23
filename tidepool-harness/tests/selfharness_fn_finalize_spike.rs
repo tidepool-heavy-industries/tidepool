@@ -16,7 +16,7 @@
 //!
 //! Drives TWO full `render -> loop -> runLLMTurn -> finalize -> render`
 //! cycles through the PRODUCTION entry point
-//! (`SelfHarnessDriver::run_one_cycle`, the same building block
+//! (`SelfHarnessDriver::run_one_loop_iteration`, the same building block
 //! `SelfHarnessDriver::run_loop` uses forever — see
 //! `acceptance_selfharness.rs`), threading `state_json` between them exactly
 //! like the production loop does, with a scripted [`ReplayProvider`] (no
@@ -50,7 +50,7 @@
 //! Blocked much earlier than the finalize/resume crossing this spike set out
 //! to probe — at `tidepool-extract` COMPILE time, on the very first fused
 //! `render`+`loop` compile of the OUTER session
-//! (`SelfHarnessDriver::compile_cycle_entry`), before any answerer turn ever
+//! (`SelfHarnessDriver::compile_loop_entry`), before any answerer turn ever
 //! runs. `loop`'s own `runLLMTurn @(State -> State)` call site failed to
 //! compile at all, with:
 //!
@@ -134,7 +134,7 @@ use tidepool_harness::log::LogHeader;
 use tidepool_harness::provider::{DynModelProvider, Usage};
 use tidepool_harness::replay::{RecordedReply, ReplayProvider};
 use tidepool_harness::{
-    answerer_decls, load_harness_source, Event, Harness, Observer, SelfHarnessDriver,
+    load_harness_source, typed_request_agent_decls, Event, Harness, Observer, SelfHarnessDriver,
 };
 
 fn repo_root() -> std::path::PathBuf {
@@ -242,7 +242,7 @@ fn edit_reply(note: &str) -> RecordedReply {
 /// Collects every [`Event`] the driver emits, so the test can assert a
 /// `Finalize` event reached the transcript even where a later step (the
 /// outer `resume`) fails — the event fires from inside
-/// `service_runllm_hole`, strictly before the resume this spike's verdict is
+/// `service_typed_request_suspension`, strictly before the resume this spike's verdict is
 /// about.
 #[derive(Default)]
 struct CapturingObserver {
@@ -268,9 +268,12 @@ async fn fn_finalize_crosses_two_cycles_and_composes() {
     support::require_extract();
     let _cache_guard = support::isolate_cache();
 
-    let agent_cfg =
-        EngineConfig::from_decls(answerer_decls(), prelude_dir(), Some(spike_harness_dir()))
-            .expect("answerer engine config");
+    let agent_cfg = EngineConfig::from_decls(
+        typed_request_agent_decls(),
+        prelude_dir(),
+        Some(spike_harness_dir()),
+    )
+    .expect("answerer engine config");
     let replies = vec![
         edit_reply("cycle 1"),
         edit_reply("cycle 2"),
@@ -291,7 +294,7 @@ async fn fn_finalize_crosses_two_cycles_and_composes() {
 
     // --- Cycle 1 ---
     let outcome1 = driver
-        .run_one_cycle(&source, None)
+        .run_one_loop_iteration(&source, None)
         .await
         .expect("cycle 1: finalize@(State -> State) crosses and applies");
 
@@ -330,7 +333,7 @@ async fn fn_finalize_crosses_two_cycles_and_composes() {
     // the incoming (already-edited) state, not a wholesale replace — count
     // reaches 2 and BOTH cycles' notes are present.
     let outcome2 = driver
-        .run_one_cycle(&source, Some(&outcome1.state_json))
+        .run_one_loop_iteration(&source, Some(&outcome1.state_json))
         .await
         .expect("cycle 2: finalize@(State -> State) crosses and composes");
 
@@ -355,7 +358,7 @@ async fn fn_finalize_crosses_two_cycles_and_composes() {
     // The driver survives both answerer retirements without being poisoned.
     assert!(
         driver
-            .run_one_cycle(&source, Some(&outcome2.state_json))
+            .run_one_loop_iteration(&source, Some(&outcome2.state_json))
             .await
             .is_ok(),
         "driver must survive both prior cycles' answerer retirements and \
@@ -376,9 +379,12 @@ async fn turn_record_delivers_directive_list_beside_closure() {
     let _cache_guard = support::isolate_cache();
 
     let turn_dir = repo_root().join("examples/harness/turn-spike");
-    let agent_cfg =
-        EngineConfig::from_decls(answerer_decls(), prelude_dir(), Some(turn_dir.clone()))
-            .expect("answerer engine config");
+    let agent_cfg = EngineConfig::from_decls(
+        typed_request_agent_decls(),
+        prelude_dir(),
+        Some(turn_dir.clone()),
+    )
+    .expect("answerer engine config");
     let reply = RecordedReply {
         content: "```haskell\nimport HarnessTypes (Directive (..), State (..), Turn (..))\n\n\
                   (finalize @Turn (Turn { directives = [Remember \"typed options beat prose\", \
@@ -404,7 +410,7 @@ async fn turn_record_delivers_directive_list_beside_closure() {
         load_harness_source(&turn_dir.join("Harness.hs")).expect("turn spike harness loads");
 
     let outcome = driver
-        .run_one_cycle(&source, None)
+        .run_one_loop_iteration(&source, None)
         .await
         .expect("finalize @Turn (data list beside closure) crosses and applies");
     assert_eq!(
@@ -446,7 +452,7 @@ async fn record_of_functions_crosses_and_both_fields_apply() {
     let _cache_guard = support::isolate_cache();
 
     let agent_cfg = EngineConfig::from_decls(
-        answerer_decls(),
+        typed_request_agent_decls(),
         prelude_dir(),
         Some(record_spike_harness_dir()),
     )
@@ -466,7 +472,7 @@ async fn record_of_functions_crosses_and_both_fields_apply() {
         .expect("record spike harness source loads");
 
     let outcome1 = driver
-        .run_one_cycle(&source, None)
+        .run_one_loop_iteration(&source, None)
         .await
         .expect("cycle 1: finalize @Edits (record of functions) crosses and applies");
     assert_eq!(
@@ -487,7 +493,7 @@ async fn record_of_functions_crosses_and_both_fields_apply() {
     );
 
     let outcome2 = driver
-        .run_one_cycle(&source, Some(&outcome1.state_json))
+        .run_one_loop_iteration(&source, Some(&outcome1.state_json))
         .await
         .expect("cycle 2: the record composes with the edited state");
     assert_eq!(
@@ -523,9 +529,12 @@ async fn living_helper_survives_loop_boundary_and_rotation() {
     let _cache_guard = support::isolate_cache();
     std::env::set_var("TIDEPOOL_MACHINE_FRAGMENT_CEILING", "1");
 
-    let agent_cfg =
-        EngineConfig::from_decls(answerer_decls(), prelude_dir(), Some(spike_harness_dir()))
-            .expect("answerer engine config");
+    let agent_cfg = EngineConfig::from_decls(
+        typed_request_agent_decls(),
+        prelude_dir(),
+        Some(spike_harness_dir()),
+    )
+    .expect("answerer engine config");
     let replies = vec![
         decl_reply(
             // A MIXED decl block — a `data` type among value decls — pins the
@@ -567,7 +576,7 @@ async fn living_helper_survives_loop_boundary_and_rotation() {
         .expect("spike harness source loads");
 
     let outcome1 = driver
-        .run_one_cycle(&source, None)
+        .run_one_loop_iteration(&source, None)
         .await
         .expect("cycle 1: define helper on the plane, finalize with it");
     assert_eq!(
@@ -578,7 +587,7 @@ async fn living_helper_survives_loop_boundary_and_rotation() {
     );
 
     let outcome2 = driver
-        .run_one_cycle(&source, Some(&outcome1.state_json))
+        .run_one_loop_iteration(&source, Some(&outcome1.state_json))
         .await
         .expect("cycle 2: the helper resolves after the loop boundary AND the rotation");
     assert_eq!(
@@ -655,9 +664,12 @@ async fn ooda_pipeline_conditional_phases() {
     support::require_extract();
     let _cache_guard = support::isolate_cache();
 
-    let agent_cfg =
-        EngineConfig::from_decls(answerer_decls(), prelude_dir(), Some(ooda_harness_dir()))
-            .expect("answerer engine config");
+    let agent_cfg = EngineConfig::from_decls(
+        typed_request_agent_decls(),
+        prelude_dir(),
+        Some(ooda_harness_dir()),
+    )
+    .expect("answerer engine config");
     let replies = vec![
         // Cycle 1: Deliberate -> Engage -> edit.
         typed_reply(
@@ -701,7 +713,7 @@ async fn ooda_pipeline_conditional_phases() {
 
     // --- Cycle 1: Deliberate (3 windows) ---
     let outcome1 = driver
-        .run_one_cycle(&source, None)
+        .run_one_loop_iteration(&source, None)
         .await
         .expect("cycle 1: orient -> decide -> act");
     assert_eq!(
@@ -722,7 +734,7 @@ async fn ooda_pipeline_conditional_phases() {
 
     // --- Cycle 2: Quiet (1 window; expectation cleared) ---
     let outcome2 = driver
-        .run_one_cycle(&source, Some(&outcome1.state_json))
+        .run_one_loop_iteration(&source, Some(&outcome1.state_json))
         .await
         .expect("cycle 2: orient only (Quiet)");
     assert_eq!(
@@ -743,7 +755,7 @@ async fn ooda_pipeline_conditional_phases() {
 
     // --- Cycle 3: Familiar (2 windows; positional payload crossed) ---
     let outcome3 = driver
-        .run_one_cycle(&source, Some(&outcome2.state_json))
+        .run_one_loop_iteration(&source, Some(&outcome2.state_json))
         .await
         .expect("cycle 3: orient straight to act (Familiar)");
     assert_eq!(

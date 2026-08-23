@@ -22,7 +22,7 @@ pub enum SelfHarnessState {
     RunningLoop,
     /// `loop` suspended on a `runLLMTurn @A` hole; the driver is servicing it
     /// by driving a nested Agent session to a `finalize`
-    /// ([`crate::selfharness::driver::SelfHarnessDriver::service_runllm_hole`]).
+    /// ([`crate::selfharness::driver::SelfHarnessDriver::service_typed_request_suspension`]).
     SuspendedOnHole,
     /// The runtime-owned emergency compaction turn (~80% threshold) is
     /// running. Distinct from `RunningLoop` — the loop itself never enters
@@ -35,12 +35,12 @@ pub enum SelfHarnessState {
     /// compaction, the inference-call counter, and the outer resident
     /// session itself, which may have been parked mid-fragment on a hole —
     /// so none of it carries into the next cycle. Recoverable: the next
-    /// `run_one_cycle` rebuilds the outer session from the harness source
+    /// `run_one_loop_iteration` rebuilds the outer session from the harness source
     /// and proceeds normally.
     Failed { reason: String },
     /// Recovery from a `Failed` cycle could not rebuild a usable outer
     /// session. The driver holds no resident state it can trust, and its
-    /// public entry points (`run_one_cycle`/`run_loop`/`restore`) refuse to
+    /// public entry points (`run_one_loop_iteration`/`run_loop`/`restore`) refuse to
     /// run until a new driver is constructed.
     Poisoned { reason: String },
 }

@@ -2,7 +2,7 @@
 //! monads sharing one resident heap, distinct from the in-heap finalize
 //! channel (bridged `Value`, or a `ValueHandle` for a closure —
 //! `Harness::take_finalized_value_keep_open`/`take_finalized_handle_keep_open`)
-//! `service_runllm_hole` uses within a loop. `State` is any
+//! `service_typed_request_suspension` uses within a loop. `State` is any
 //! author-defined `(ToJSON s, FromJSON s) => s`, so crossing it is NOT a
 //! fixed-schema JSON bridge — it reuses the same two mechanisms already
 //! proven for other typed/opaque values crossing the Rust/Haskell boundary:
@@ -132,7 +132,7 @@ pub fn state_in(state_json: Option<&Json>) -> String {
 }
 
 /// The ONE stable, never-rotating session `Val` module the fused outer
-/// render/loop compile ([`crate::selfharness::driver::SelfHarnessDriver::compile_cycle_entry`])
+/// render/loop compile ([`crate::selfharness::driver::SelfHarnessDriver::compile_loop_entry`])
 /// injects turn-invariant harness context through, instead of splicing the
 /// state/operator-msg JSON as a source literal (`plans/turn-latency-state-injection.md`).
 ///

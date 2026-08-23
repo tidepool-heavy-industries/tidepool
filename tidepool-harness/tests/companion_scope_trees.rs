@@ -91,7 +91,7 @@ use tidepool_harness::log::{Actor, LogHeader, LogWriter};
 use tidepool_harness::provider::{DynModelProvider, Usage};
 use tidepool_harness::replay::{RecordedReply, ReplayProvider};
 use tidepool_harness::tree::NodeId;
-use tidepool_harness::{answerer_decls, Harness, HoleRouting, TurnOutcome};
+use tidepool_harness::{typed_request_agent_decls, Harness, SuspensionRouting, TurnOutcome};
 use tidepool_repr::SessionId;
 use tidepool_runtime::session::SessionLib;
 
@@ -185,7 +185,7 @@ fn build_shared_session(cfg: &EngineConfig, decl_root: &std::path::Path) -> Sess
     let lib = SessionLib::open(
         SessionId(0),
         decl_root,
-        tidepool_mcp::session_decl_module_env(&answerer_decls(), false),
+        tidepool_mcp::session_decl_module_env(&typed_request_agent_decls(), false),
     )
     .expect("decl plane opens")
     .with_validation_include(cfg.include.clone());
@@ -202,8 +202,12 @@ fn build_shared_session(cfg: &EngineConfig, decl_root: &std::path::Path) -> Sess
 
 /// Boot a harness over one shared session, with `replies` served in order.
 fn boot(tag: &str, replies: Vec<RecordedReply>) -> (Arc<Harness>, SessionId, tempfile::TempDir) {
-    let cfg = EngineConfig::from_decls(answerer_decls(), prelude_dir(), Some(scope_spike_dir()))
-        .expect("engine config");
+    let cfg = EngineConfig::from_decls(
+        typed_request_agent_decls(),
+        prelude_dir(),
+        Some(scope_spike_dir()),
+    )
+    .expect("engine config");
     let provider: Arc<dyn DynModelProvider> = Arc::new(ReplayProvider::new(replies));
     let writer = LogWriter::create(
         std::env::temp_dir().join(format!(
@@ -488,7 +492,7 @@ async fn escaped_closure_outlives_its_childs_window_and_scope() {
             assert!(
                 matches!(
                     &classified.routing,
-                    HoleRouting::Finalize { ty, .. } if ty.as_deref() == Some("Toolkit")
+                    SuspensionRouting::Finalize { ty, .. } if ty.as_deref() == Some("Toolkit")
                 ),
                 "the producer must suspend on a Finalize Toolkit hole, got {:?}",
                 classified.routing
@@ -789,7 +793,7 @@ async fn multiple_mounts_in_one_window() {
                 assert!(
                     matches!(
                         &classified.routing,
-                        HoleRouting::Finalize { ty: Some(t), .. } if t == ty
+                        SuspensionRouting::Finalize { ty: Some(t), .. } if t == ty
                     ),
                     "{name} must suspend on a Finalize {ty} hole, got {:?}",
                     classified.routing

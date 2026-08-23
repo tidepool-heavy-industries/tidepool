@@ -2,7 +2,7 @@
 //! (`plans/self-iterating-harness/07-impl-orchestration.md`): ONE full
 //! `render` -> `loop` -> `runLLMTurn @Decision` -> `finalize` -> `render`
 //! cycle, driven through the production entry point
-//! (`SelfHarnessDriver::run_one_cycle`), against the reference harness
+//! (`SelfHarnessDriver::run_one_loop_iteration`), against the reference harness
 //! module (`examples/harness/Harness.hs`). Needs `TIDEPOOL_EXTRACT` and the
 //! with-packages GHC on PATH — run inside `nix develop` (see
 //! `haskell/CLAUDE.md`).
@@ -16,7 +16,7 @@ use tidepool_harness::log::LogHeader;
 use tidepool_harness::provider::{DynModelProvider, Usage};
 use tidepool_harness::replay::{RecordedReply, ReplayProvider};
 use tidepool_harness::{
-    answerer_decls, load_harness_source, Harness, LogObserver, SelfHarnessDriver,
+    load_harness_source, typed_request_agent_decls, Harness, LogObserver, SelfHarnessDriver,
 };
 
 fn repo_root() -> std::path::PathBuf {
@@ -68,13 +68,13 @@ async fn selfharness_spine_one_cycle_render_loop_finalize_render() {
     support::require_extract();
     let _cache_guard = support::isolate_cache();
 
-    // The nested answerer: the SCOPED `answerer_decls()` stack (gui + finalize
+    // The nested answerer: the SCOPED `typed_request_agent_decls()` stack (gui + finalize
     // only, NO runLLMTurn — effect-scoping), with `examples/harness` as its
     // project_lib so an answerer's `finalize @Decision (...)` can `import
     // Harness (Decision(..), Confidence(..))` from the reference harness module
     // directly.
     let agent_cfg = EngineConfig::from_decls(
-        answerer_decls(),
+        typed_request_agent_decls(),
         prelude_dir(),
         Some(examples_harness_dir()),
     )
@@ -97,7 +97,7 @@ async fn selfharness_spine_one_cycle_render_loop_finalize_render() {
         .expect("reference harness source loads");
 
     let outcome = driver
-        .run_one_cycle(&source, None)
+        .run_one_loop_iteration(&source, None)
         .await
         .expect("one full render->loop->runLLMTurn->finalize->render cycle");
 

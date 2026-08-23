@@ -52,8 +52,8 @@ use tidepool_harness::log::LogHeader;
 use tidepool_harness::provider::DynModelProvider;
 use tidepool_harness::replay::ReplayProvider;
 use tidepool_harness::{
-    acquire_lease, answerer_decls, load_harness_source, DriverError, Harness, LogObserver,
-    SelfHarnessDriver,
+    acquire_lease, load_harness_source, typed_request_agent_decls, DriverError, Harness,
+    LogObserver, SelfHarnessDriver,
 };
 use tidepool_worktree::testing::TestRepo;
 
@@ -108,7 +108,7 @@ async fn outer_loop_effects_round_trip_through_the_driver() {
     // The nested answerer config is required by the driver's constructor but
     // never exercised here — the fixture loop opens no model holes.
     let agent_cfg = EngineConfig::from_decls(
-        answerer_decls(),
+        typed_request_agent_decls(),
         repo_root().join("haskell/lib"),
         Some(fixtures_dir()),
     )
@@ -161,7 +161,7 @@ async fn outer_loop_effects_round_trip_through_the_driver() {
     let source = load_harness_source(&fixtures_dir().join("OuterEffectsHarness.hs"))
         .expect("fixture harness loads");
     let outcome = driver
-        .run_one_cycle(&source, None)
+        .run_one_loop_iteration(&source, None)
         .await
         .expect("one cycle: say/createWorktree/run/withHandler/record all serviced");
 
@@ -270,7 +270,7 @@ async fn outer_worktree_without_handler_errors_legibly() {
     let _cache_guard = support::isolate_cache();
 
     let agent_cfg = EngineConfig::from_decls(
-        answerer_decls(),
+        typed_request_agent_decls(),
         repo_root().join("haskell/lib"),
         Some(fixtures_dir()),
     )
@@ -291,7 +291,7 @@ async fn outer_worktree_without_handler_errors_legibly() {
     let source = load_harness_source(&fixtures_dir().join("OuterEffectsHarness.hs"))
         .expect("fixture harness loads");
     let err = driver
-        .run_one_cycle(&source, None)
+        .run_one_loop_iteration(&source, None)
         .await
         .expect_err("a Worktree suspension with no handler must error");
     let msg = err.to_string();
@@ -312,7 +312,7 @@ async fn outer_journal_without_handler_errors_legibly() {
     let _cache_guard = support::isolate_cache();
 
     let agent_cfg = EngineConfig::from_decls(
-        answerer_decls(),
+        typed_request_agent_decls(),
         repo_root().join("haskell/lib"),
         Some(fixtures_dir()),
     )
@@ -353,7 +353,7 @@ async fn outer_journal_without_handler_errors_legibly() {
     let source = load_harness_source(&fixtures_dir().join("OuterEffectsHarness.hs"))
         .expect("fixture harness loads");
     let err = driver
-        .run_one_cycle(&source, None)
+        .run_one_loop_iteration(&source, None)
         .await
         .expect_err("a Journal suspension with no handler must error");
     let msg = err.to_string();
@@ -409,7 +409,7 @@ fn load_run_entries(log_dir: &std::path::Path, run_id: &str) -> Vec<JournalEntry
 /// for this well-behaved sequential resume) into its OWN
 /// segment.
 /// (c) REFUSED: a non-empty fold against `OuterEffectsHarness.hs` (declares
-/// no `resumeLoop`) fails `run_one_cycle` with `DriverError::ResumeEntryMissing`
+/// no `resumeLoop`) fails `run_one_loop_iteration` with `DriverError::ResumeEntryMissing`
 /// before any cycle runs — no extract compile paid for this leg.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn resume_boot_fold_fresh_then_resumed_appends_only_the_delta() {
@@ -423,7 +423,7 @@ async fn resume_boot_fold_fresh_then_resumed_appends_only_the_delta() {
     let log_dir = tempfile::TempDir::new().expect("log dir");
 
     let fresh_agent_cfg = EngineConfig::from_decls(
-        answerer_decls(),
+        typed_request_agent_decls(),
         repo_root().join("haskell/lib"),
         Some(fixtures_dir()),
     )
@@ -454,7 +454,7 @@ async fn resume_boot_fold_fresh_then_resumed_appends_only_the_delta() {
     assert_eq!(fresh_folded, 0, "a fresh journal folds nothing");
 
     let fresh_outcome = fresh_driver
-        .run_one_cycle(&resume_source, None)
+        .run_one_loop_iteration(&resume_source, None)
         .await
         .expect("fresh cycle: loop walks the first two of three steps");
     let fresh_state = &fresh_outcome.state_json;
@@ -484,7 +484,7 @@ async fn resume_boot_fold_fresh_then_resumed_appends_only_the_delta() {
 
     // --- (b) RESUMED boot: a second driver over the SAME log dir ----------
     let resumed_agent_cfg = EngineConfig::from_decls(
-        answerer_decls(),
+        typed_request_agent_decls(),
         repo_root().join("haskell/lib"),
         Some(fixtures_dir()),
     )
@@ -522,7 +522,7 @@ async fn resume_boot_fold_fresh_then_resumed_appends_only_the_delta() {
     );
 
     let resumed_outcome = resumed_driver
-        .run_one_cycle(&resume_source, None)
+        .run_one_loop_iteration(&resume_source, None)
         .await
         .expect("resumed cycle: resumeLoop walks every step against the fold");
     let resumed_state = &resumed_outcome.state_json;
@@ -575,7 +575,7 @@ async fn resume_boot_fold_fresh_then_resumed_appends_only_the_delta() {
     .expect("hand-seed a non-empty journal");
 
     let refused_agent_cfg = EngineConfig::from_decls(
-        answerer_decls(),
+        typed_request_agent_decls(),
         repo_root().join("haskell/lib"),
         Some(fixtures_dir()),
     )
@@ -600,7 +600,7 @@ async fn resume_boot_fold_fresh_then_resumed_appends_only_the_delta() {
     let no_resume_source = load_harness_source(&fixtures_dir().join("OuterEffectsHarness.hs"))
         .expect("fixture harness loads");
     let err = refused_driver
-        .run_one_cycle(&no_resume_source, None)
+        .run_one_loop_iteration(&no_resume_source, None)
         .await
         .expect_err("a non-empty fold against a harness with no resumeLoop must refuse at boot");
     assert!(

@@ -23,8 +23,8 @@ use tidepool_harness::provider::{
     DynModelProvider, ModelProvider, ProviderError, StreamSink, TurnRequest, TurnResponse, Usage,
 };
 use tidepool_harness::{
-    answerer_decls, load_harness_source, DriverError, Harness, HarnessSource, LogObserver,
-    NodeState, SelfHarnessDriver, SelfHarnessState,
+    load_harness_source, typed_request_agent_decls, DriverError, Harness, HarnessSource,
+    LogObserver, NodeState, SelfHarnessDriver, SelfHarnessState,
 };
 
 fn repo_root() -> std::path::PathBuf {
@@ -100,7 +100,7 @@ impl ModelProvider for FlakyProvider {
 
 fn driver_over(provider: FlakyProvider, log_tag: &str) -> SelfHarnessDriver {
     let agent_cfg = EngineConfig::from_decls(
-        answerer_decls(),
+        typed_request_agent_decls(),
         prelude_dir(),
         Some(examples_harness_dir()),
     )
@@ -123,7 +123,7 @@ fn driver_over(provider: FlakyProvider, log_tag: &str) -> SelfHarnessDriver {
 /// one) leaves `lifecycle()` as `Failed`, and the FOLLOWING cycle on the SAME
 /// driver succeeds. The failed cycle's outer session (parked mid-fragment on
 /// the `runLLMTurn` hole) must have been discarded and re-bootstrapped rather
-/// than reused: if it had not been discarded, the second `run_one_cycle`
+/// than reused: if it had not been discarded, the second `run_one_loop_iteration`
 /// would hit the resident session's own "already suspended" guard instead of
 /// completing.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -141,7 +141,7 @@ async fn errored_cycle_leaves_lifecycle_failed_and_next_cycle_recovers() {
     );
     let harness_source = source();
 
-    let cycle1 = driver.run_one_cycle(&harness_source, None).await;
+    let cycle1 = driver.run_one_loop_iteration(&harness_source, None).await;
     assert!(
         cycle1.is_err(),
         "the scripted first model call fails, so the cycle must error"
@@ -153,7 +153,7 @@ async fn errored_cycle_leaves_lifecycle_failed_and_next_cycle_recovers() {
     );
 
     let cycle2 = driver
-        .run_one_cycle(&harness_source, None)
+        .run_one_loop_iteration(&harness_source, None)
         .await
         .expect("the cycle after a failure must re-bootstrap and succeed");
     assert!(
@@ -199,7 +199,7 @@ async fn fresh_driver_bootstrap_failure_is_failed_not_idle() {
         "TIDEPOOL_EXTRACT",
         "/nonexistent/tidepool-extract-bin-fresh-bootstrap-test",
     );
-    let first = driver.run_one_cycle(&harness_source, None).await;
+    let first = driver.run_one_loop_iteration(&harness_source, None).await;
     match original_extract {
         Some(v) => std::env::set_var("TIDEPOOL_EXTRACT", v),
         None => std::env::remove_var("TIDEPOOL_EXTRACT"),
@@ -219,7 +219,7 @@ async fn fresh_driver_bootstrap_failure_is_failed_not_idle() {
     );
 
     driver
-        .run_one_cycle(&harness_source, None)
+        .run_one_loop_iteration(&harness_source, None)
         .await
         .expect("a working extract binary lets the driver recover from the fresh Failed");
     assert!(matches!(driver.lifecycle(), SelfHarnessState::Idle));
@@ -228,7 +228,7 @@ async fn fresh_driver_bootstrap_failure_is_failed_not_idle() {
 
 /// When recovery from a `Failed` cycle cannot itself rebuild a usable outer
 /// session, the driver escalates to `Poisoned` — and every public entry
-/// point (`run_one_cycle`, `run_loop`, `restore`) then refuses with
+/// point (`run_one_loop_iteration`, `run_loop`, `restore`) then refuses with
 /// `DriverError::Poisoned` instead of attempting to run.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn poisoned_driver_refuses_entry_points() {
@@ -246,7 +246,7 @@ async fn poisoned_driver_refuses_entry_points() {
     let harness_source = source();
 
     driver
-        .run_one_cycle(&harness_source, None)
+        .run_one_loop_iteration(&harness_source, None)
         .await
         .expect_err("the scripted first model call fails, so the cycle must error");
     assert!(matches!(
@@ -267,7 +267,7 @@ async fn poisoned_driver_refuses_entry_points() {
     let original_extract = std::env::var("TIDEPOOL_EXTRACT").ok();
     let (_poison_dir, poison_path) = support::poisoned_extract_bin();
     std::env::set_var("TIDEPOOL_EXTRACT", &poison_path);
-    let recovery = driver.run_one_cycle(&harness_source, None).await;
+    let recovery = driver.run_one_loop_iteration(&harness_source, None).await;
     match original_extract {
         Some(v) => std::env::set_var("TIDEPOOL_EXTRACT", v),
         None => std::env::remove_var("TIDEPOOL_EXTRACT"),
@@ -283,7 +283,7 @@ async fn poisoned_driver_refuses_entry_points() {
     );
 
     assert!(matches!(
-        driver.run_one_cycle(&harness_source, None).await,
+        driver.run_one_loop_iteration(&harness_source, None).await,
         Err(DriverError::Poisoned(_))
     ));
     assert!(matches!(
@@ -296,7 +296,7 @@ async fn poisoned_driver_refuses_entry_points() {
     ));
 }
 
-/// Ghost-node hazard: `retire_answerer` (called at the end of every
+/// Ghost-node hazard: `retire_typed_request_agent` (called at the end of every
 /// `run_loop_fragment`, regardless of whether the cycle succeeds or fails)
 /// must TERMINALIZE the per-loop answerer node it retires, not just drop the
 /// harness's convenience `NodeConvo`/session — a forever-loop retires one
@@ -310,7 +310,7 @@ async fn poisoned_driver_refuses_entry_points() {
 /// decision_block's scripted reply never forks, so each cycle creates
 /// exactly one node (the loop's answerer).
 ///
-/// Mutation: revert `SelfHarnessDriver::retire_answerer`'s body to
+/// Mutation: revert `SelfHarnessDriver::retire_typed_request_agent`'s body to
 /// `self.agent.drop_session(node)`-equivalent (no tree terminalization) —
 /// this test must go RED (a retired-but-not-terminalized answerer node stays
 /// `Running`/`Suspended`).
@@ -320,7 +320,7 @@ async fn retired_answerer_nodes_are_terminal_across_cycles() {
     let _cache_guard = support::isolate_cache();
 
     let agent_cfg = EngineConfig::from_decls(
-        answerer_decls(),
+        typed_request_agent_decls(),
         prelude_dir(),
         Some(examples_harness_dir()),
     )
@@ -346,11 +346,11 @@ async fn retired_answerer_nodes_are_terminal_across_cycles() {
     let mut seen_before: Vec<_> = harness.tree().node_ids();
     let mut retired_nodes = Vec::new();
 
-    // Cycle 1: the scripted first model call fails — but `retire_answerer`
+    // Cycle 1: the scripted first model call fails — but `retire_typed_request_agent`
     // still runs (it is called unconditionally after
     // `run_loop_fragment_inner`), so this already-forced answerer node must
     // still be retired terminally.
-    let cycle1 = driver.run_one_cycle(&harness_source, None).await;
+    let cycle1 = driver.run_one_loop_iteration(&harness_source, None).await;
     assert!(
         cycle1.is_err(),
         "the scripted first model call must fail this cycle"
@@ -371,7 +371,7 @@ async fn retired_answerer_nodes_are_terminal_across_cycles() {
 
     // Cycle 2: the model call now succeeds — a real GHC-compiled turn + finalize.
     driver
-        .run_one_cycle(&harness_source, None)
+        .run_one_loop_iteration(&harness_source, None)
         .await
         .expect("cycle 2 (after the recovered driver) must succeed");
     let after_cycle2 = harness.tree().node_ids();

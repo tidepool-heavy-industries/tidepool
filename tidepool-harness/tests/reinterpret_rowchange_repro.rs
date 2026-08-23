@@ -23,7 +23,7 @@ use tidepool_harness::harness::AnswerContract;
 use tidepool_harness::log::{Actor, LogHeader, LogWriter};
 use tidepool_harness::provider::{DynModelProvider, Usage};
 use tidepool_harness::replay::{RecordedReply, ReplayProvider};
-use tidepool_harness::{answerer_decls, Harness, HoleRouting, TurnOutcome};
+use tidepool_harness::{typed_request_agent_decls, Harness, SuspensionRouting, TurnOutcome};
 
 fn repo_root() -> std::path::PathBuf {
     std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -73,8 +73,8 @@ fn outcome_tag(o: &TurnOutcome) -> &'static str {
 }
 
 fn engine_cfg() -> EngineConfig {
-    let mut cfg =
-        EngineConfig::from_decls(answerer_decls(), prelude_dir(), None).expect("answerer config");
+    let mut cfg = EngineConfig::from_decls(typed_request_agent_decls(), prelude_dir(), None)
+        .expect("answerer config");
     cfg.include.push(fixtures_dir());
     cfg
 }
@@ -84,9 +84,9 @@ fn engine_cfg() -> EngineConfig {
 /// reinterpretation handler. If the JIT executes freer-simple's row-changing
 /// `reinterpret`/`replaceRelay`/`decomp`/`weaken` correctly, this must
 /// classify identically to the direct send in the control test below:
-/// `HoleRouting::Note { text: "ping" }`. The PRD 21 C5 lane's observation was
+/// `SuspensionRouting::Note { text: "ping" }`. The PRD 21 C5 lane's observation was
 /// that it instead reaches the driver as an UNCLASSIFIED suspension
-/// (`HoleRouting::Ask { payload: Null }`).
+/// (`SuspensionRouting::Ask { payload: Null }`).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn reinterpret_handler_send_classifies_correctly() {
     support::require_extract();
@@ -129,7 +129,7 @@ async fn reinterpret_handler_send_classifies_correctly() {
         TurnOutcome::Suspended { classified, .. } => {
             assert_eq!(
                 classified.routing,
-                HoleRouting::Note {
+                SuspensionRouting::Note {
                     text: "ping".to_string()
                 },
                 "a `send` performed from inside a `reinterpret` handler body \
@@ -149,8 +149,8 @@ async fn reinterpret_handler_send_classifies_correctly() {
 
 /// THE ISOLATING CONTROL: the IDENTICAL `send (NoteWith "ping")`, written
 /// directly in the turn's own text — no `reinterpret` involved at all — on
-/// the SAME row (`answerer_decls()`, `AskUser` present). This must classify
-/// as `HoleRouting::Note { text: "ping" }`.
+/// the SAME row (`typed_request_agent_decls()`, `AskUser` present). This must classify
+/// as `SuspensionRouting::Note { text: "ping" }`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn direct_note_send_classifies_correctly() {
     support::require_extract();
@@ -189,7 +189,7 @@ async fn direct_note_send_classifies_correctly() {
         TurnOutcome::Suspended { classified, .. } => {
             assert_eq!(
                 classified.routing,
-                HoleRouting::Note {
+                SuspensionRouting::Note {
                     text: "ping".to_string()
                 },
                 "a direct `send (NoteWith ...)` must classify as Note — got {:?}",

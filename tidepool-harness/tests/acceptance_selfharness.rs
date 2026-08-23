@@ -2,9 +2,9 @@
 //! (`plans/self-iterating-harness/07-impl-orchestration.md`): a MULTI-cycle
 //! run of the reference generic-assistant harness
 //! (`examples/harness/Harness.hs`) through the production entry point
-//! (`SelfHarnessDriver::run_one_cycle`, called repeatedly — the same
+//! (`SelfHarnessDriver::run_one_loop_iteration`, called repeatedly — the same
 //! per-cycle building block [`run_loop`](tidepool_harness::SelfHarnessDriver::run_loop)
-//! uses forever), threading each cycle's `CycleOutcome::state_json` into the
+//! uses forever), threading each cycle's `LoopIterationOutcome::state_json` into the
 //! next as `prior_state` exactly like `run_loop` does. Asserts `State`
 //! (`mode`/`notes`/`lastDecision`) accumulates ACROSS repeated loop
 //! boundaries, not just across one, and that the driver's own iteration
@@ -24,7 +24,7 @@ use tidepool_harness::log::LogHeader;
 use tidepool_harness::provider::{DynModelProvider, Usage};
 use tidepool_harness::replay::{RecordedReply, ReplayProvider};
 use tidepool_harness::{
-    answerer_decls, load_harness_source, Harness, LogObserver, SelfHarnessDriver,
+    load_harness_source, typed_request_agent_decls, Harness, LogObserver, SelfHarnessDriver,
 };
 
 fn repo_root() -> std::path::PathBuf {
@@ -72,7 +72,7 @@ fn decision_reply(action: &str, rationale: &str, confidence: &str) -> RecordedRe
 }
 
 /// TWO render -> loop -> runLLMTurn @Decision -> finalize -> render
-/// cycles, each `run_one_cycle` call threading the prior cycle's
+/// cycles, each `run_one_loop_iteration` call threading the prior cycle's
 /// `state_json` into the next as `prior_state` — the exact shape
 /// `SelfHarnessDriver::run_loop`'s production loop uses, just bounded to
 /// two iterations instead of forever. Asserts `State` keeps accumulating
@@ -87,7 +87,7 @@ async fn selfharness_multi_cycle_state_accumulates_across_loop_boundaries() {
     let _cache_guard = support::isolate_cache();
 
     let agent_cfg = EngineConfig::from_decls(
-        answerer_decls(),
+        typed_request_agent_decls(),
         prelude_dir(),
         Some(examples_harness_dir()),
     )
@@ -121,7 +121,7 @@ async fn selfharness_multi_cycle_state_accumulates_across_loop_boundaries() {
         expected.iter().enumerate()
     {
         let outcome = driver
-            .run_one_cycle(&source, prior_state.as_ref())
+            .run_one_loop_iteration(&source, prior_state.as_ref())
             .await
             .unwrap_or_else(|e| panic!("cycle {i} failed: {e}"));
 
@@ -222,7 +222,7 @@ async fn machine_rotation_between_cycles_preserves_durable_state() {
     std::env::set_var("TIDEPOOL_MACHINE_FRAGMENT_CEILING", "1");
 
     let agent_cfg = EngineConfig::from_decls(
-        answerer_decls(),
+        typed_request_agent_decls(),
         prelude_dir(),
         Some(examples_harness_dir()),
     )
@@ -248,11 +248,11 @@ async fn machine_rotation_between_cycles_preserves_durable_state() {
         .expect("reference harness source loads");
 
     let outcome1 = driver
-        .run_one_cycle(&source, None)
+        .run_one_loop_iteration(&source, None)
         .await
         .expect("cycle 1 (boots the machine)");
     let outcome2 = driver
-        .run_one_cycle(&source, Some(&outcome1.state_json))
+        .run_one_loop_iteration(&source, Some(&outcome1.state_json))
         .await
         .expect("cycle 2 (rotates at the boundary, then completes)");
 

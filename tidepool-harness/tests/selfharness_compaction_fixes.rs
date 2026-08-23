@@ -29,8 +29,8 @@ use tidepool_harness::provider::{
     Usage,
 };
 use tidepool_harness::{
-    answerer_decls, load_harness_source, Event, Harness, HarnessSource, LogObserver, NodeId,
-    Observer, SelfHarnessDriver,
+    load_harness_source, typed_request_agent_decls, Event, Harness, HarnessSource, LogObserver,
+    NodeId, Observer, SelfHarnessDriver,
 };
 
 fn repo_root() -> std::path::PathBuf {
@@ -170,9 +170,12 @@ fn make_driver(
     observer: Arc<dyn Observer>,
 ) -> (SelfHarnessDriver, HarnessSource) {
     let provider: Arc<dyn DynModelProvider> = Arc::new(CompactingProvider { pre_input });
-    let mut agent_cfg =
-        EngineConfig::from_decls(answerer_decls(), prelude_dir(), Some(fixtures_dir()))
-            .expect("answerer engine config");
+    let mut agent_cfg = EngineConfig::from_decls(
+        typed_request_agent_decls(),
+        prelude_dir(),
+        Some(fixtures_dir()),
+    )
+    .expect("answerer engine config");
     agent_cfg.context_window_tokens = Some(1000);
     let log_id = NEXT_LOG_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let log_dir = std::env::temp_dir().join(format!(
@@ -211,7 +214,7 @@ async fn c2_summarize_turn_counts_against_inference_cap() {
     driver.set_loop_inference_call_cap(1);
 
     let err = driver
-        .run_one_cycle(&source, None)
+        .run_one_loop_iteration(&source, None)
         .await
         .expect_err("cap=1 must hard-stop when compaction tries its own inference call");
     let msg = format!("{err}");
@@ -226,7 +229,7 @@ async fn c2_summarize_turn_counts_against_inference_cap() {
 /// fresh driver restored from that same checkpoint path gets both back
 /// together, never the summary alone (the in-memory-only `last_compaction`
 /// would otherwise roll back to `None` on a fresh driver, and the state
-/// would otherwise never have been committed by `run_one_cycle` at all).
+/// would otherwise never have been committed by `run_one_loop_iteration` at all).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn checkpoint_commit_pairs_state_and_compaction_from_one_cycle() {
     support::require_extract();
@@ -236,7 +239,7 @@ async fn checkpoint_commit_pairs_state_and_compaction_from_one_cycle() {
     let durable = scratch("c3");
     let (mut driver1, source) = make_driver(&durable, 600, Arc::new(LogObserver));
     let outcome = driver1
-        .run_one_cycle(&source, None)
+        .run_one_loop_iteration(&source, None)
         .await
         .expect("cycle with a mid-loop compaction");
     assert!(
@@ -289,7 +292,7 @@ async fn c4_compaction_trigger_event_carries_payload() {
     let (mut driver, source) = make_driver(&scratch("c4"), 600, observer);
 
     driver
-        .run_one_cycle(&source, None)
+        .run_one_loop_iteration(&source, None)
         .await
         .expect("cycle with a mid-loop compaction");
 

@@ -32,8 +32,8 @@ use tidepool_harness::log::{Actor, LogHeader, LogWriter};
 use tidepool_harness::provider::{DynModelProvider, Usage};
 use tidepool_harness::replay::{RecordedReply, ReplayProvider};
 use tidepool_harness::{
-    answerer_decls, load_harness_source, Harness, LogObserver, SelfHarnessDriver, SelfHarnessState,
-    TurnOutcome,
+    load_harness_source, typed_request_agent_decls, Harness, LogObserver, SelfHarnessDriver,
+    SelfHarnessState, TurnOutcome,
 };
 
 mod support;
@@ -179,7 +179,7 @@ async fn outer_session_boots_from_pure_render_then_loop_suspends_on_a_real_hole(
     let _cache_guard = support::isolate_cache();
 
     let agent_cfg = EngineConfig::from_decls(
-        answerer_decls(),
+        typed_request_agent_decls(),
         prelude_dir(),
         Some(examples_harness_dir()),
     )
@@ -199,10 +199,13 @@ async fn outer_session_boots_from_pure_render_then_loop_suspends_on_a_real_hole(
     let harness_source = load_harness_source(&examples_harness_dir().join("Harness.hs"))
         .expect("harness source loads");
 
-    let cycle = driver.run_one_cycle(&harness_source, None).await.expect(
-        "the outer session must bootstrap off render's pure fragment, then run loop \
+    let cycle = driver
+        .run_one_loop_iteration(&harness_source, None)
+        .await
+        .expect(
+            "the outer session must bootstrap off render's pure fragment, then run loop \
              (a real runLLMTurn site) to a suspend/resume/finalize on the SAME machine",
-    );
+        );
     assert!(
         matches!(driver.lifecycle(), SelfHarnessState::Idle),
         "an ordinary first cycle must publish Idle, got {:?}",

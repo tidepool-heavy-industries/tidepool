@@ -126,7 +126,7 @@ pub enum Event {
     /// The driver compiled one or more of the OUTER session's own fragments —
     /// the compiles `crate::log::Event::TurnStart` never covers (the outer
     /// session is not a tree node). `label` is `"render+loop"` for the
-    /// PRE-loop fused compile (`SelfHarnessDriver::compile_cycle_entry`: the
+    /// PRE-loop fused compile (`SelfHarnessDriver::compile_loop_entry`: the
     /// pre-loop `render(state, lastCompaction)` and this cycle's
     /// `loop __selfHarnessState`, ONE `tidepool-extract` spawn compiling BOTH
     /// as distinct top-level entries of one module) or `"render"` for the

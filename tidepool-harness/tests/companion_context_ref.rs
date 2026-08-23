@@ -48,7 +48,7 @@ use tidepool_harness::provider::{DynModelProvider, Usage};
 use tidepool_harness::replay::{RecordedReply, ReplayProvider};
 use tidepool_harness::tree::NodeId;
 use tidepool_harness::{
-    answerer_decls, load_harness_source, Harness, LogObserver, SelfHarnessDriver,
+    load_harness_source, typed_request_agent_decls, Harness, LogObserver, SelfHarnessDriver,
 };
 
 fn repo_root() -> PathBuf {
@@ -145,7 +145,7 @@ async fn branch_forks_from_frozen_prefix_and_inherits_declarations() {
     let _cache_guard = support::isolate_cache();
 
     let agent_cfg = EngineConfig::from_decls(
-        answerer_decls(),
+        typed_request_agent_decls(),
         repo_root().join("haskell/lib"),
         Some(fixtures_dir()),
     )
@@ -161,7 +161,7 @@ async fn branch_forks_from_frozen_prefix_and_inherits_declarations() {
         .expect("context-ref fixture loads");
 
     let outcome = driver
-        .run_one_cycle(&source, None)
+        .run_one_loop_iteration(&source, None)
         .await
         .expect("one render->loop->freezeContext->runLLMTurnBranch(x2)->finalize->render cycle");
 
@@ -326,7 +326,7 @@ async fn branch_child_that_exhausts_its_rounds_folds_as_data_without_erasing_its
     ];
 
     let agent_cfg = EngineConfig::from_decls(
-        answerer_decls(),
+        typed_request_agent_decls(),
         repo_root().join("haskell/lib"),
         Some(fixtures_dir()),
     )
@@ -346,7 +346,7 @@ async fn branch_child_that_exhausts_its_rounds_folds_as_data_without_erasing_its
     // round exhaustion propagated out of `service_outer_branch` and this call
     // returned `Err`.
     let outcome = driver
-        .run_one_cycle(&source, None)
+        .run_one_loop_iteration(&source, None)
         .await
         .expect("the outer turn completes despite branch A's window exiting");
 

@@ -65,7 +65,7 @@ use tidepool_harness::harness::{AnswerContract, Session};
 use tidepool_harness::log::{Actor, LogHeader, LogWriter};
 use tidepool_harness::provider::{DynModelProvider, Usage};
 use tidepool_harness::replay::{RecordedReply, ReplayProvider};
-use tidepool_harness::{answerer_decls, Harness, HoleRouting, TurnOutcome};
+use tidepool_harness::{typed_request_agent_decls, Harness, SuspensionRouting, TurnOutcome};
 use tidepool_runtime::session::SessionLib;
 
 fn repo_root() -> PathBuf {
@@ -129,7 +129,7 @@ fn build_shared_session(cfg: &EngineConfig, decl_root: &std::path::Path) -> Sess
     let lib = SessionLib::open(
         tidepool_repr::SessionId(0),
         decl_root,
-        tidepool_mcp::session_decl_module_env(&answerer_decls(), false),
+        tidepool_mcp::session_decl_module_env(&typed_request_agent_decls(), false),
     )
     .expect("decl plane opens")
     .with_validation_include(cfg.include.clone());
@@ -149,8 +149,12 @@ async fn mounted_closure_survives_retirement_and_suspension() {
     support::require_extract();
     let _cache_guard = support::isolate_cache();
 
-    let cfg = EngineConfig::from_decls(answerer_decls(), prelude_dir(), Some(mount_spike_dir()))
-        .expect("engine config");
+    let cfg = EngineConfig::from_decls(
+        typed_request_agent_decls(),
+        prelude_dir(),
+        Some(mount_spike_dir()),
+    )
+    .expect("engine config");
 
     let replies = vec![
         // P: finalizes the function-bearing value.
@@ -220,7 +224,7 @@ async fn mounted_closure_survives_retirement_and_suspension() {
             assert!(
                 matches!(
                     &classified.routing,
-                    HoleRouting::Finalize { ty, .. } if ty.as_deref() == Some("Mounted")
+                    SuspensionRouting::Finalize { ty, .. } if ty.as_deref() == Some("Mounted")
                 ),
                 "P must suspend on a Finalize Mounted hole, got {:?}",
                 classified.routing
@@ -322,7 +326,7 @@ async fn mounted_closure_survives_retirement_and_suspension() {
     match &outcome_c1 {
         TurnOutcome::Suspended { classified, .. } => {
             assert!(
-                matches!(classified.routing, HoleRouting::AskUser { .. }),
+                matches!(classified.routing, SuspensionRouting::AskUser { .. }),
                 "C must park on askUser first — the GC-risk window between \
                  the name resolving and the closure being called — got {:?}",
                 classified.routing
@@ -339,12 +343,12 @@ async fn mounted_closure_survives_retirement_and_suspension() {
         .expect("askUser answered");
 
     let finalize_hole = harness
-        .pending_hole(node_c)
+        .pending_suspension(node_c)
         .expect("C is suspended again, now on finalize");
     assert!(
         matches!(
             &finalize_hole.routing,
-            HoleRouting::Finalize { ty, .. } if ty.as_deref() == Some("Bool")
+            SuspensionRouting::Finalize { ty, .. } if ty.as_deref() == Some("Bool")
         ),
         "C must have resumed straight through to Finalize Bool in the SAME \
          compiled turn, got {:?}",

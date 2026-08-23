@@ -26,8 +26,8 @@ Module map:
 - `harness` — `Harness`: the orchestrator. Owns a `NodeTree<Session>` whose
   `SessionRegistry<Session>` is the one place a resident session lives (see
   Machine lifecycle below); a `convos` map holds everything ELSE per-node
-  (transcript, framing, turn lease); `pending_holes` — a
-  `HashMap<(SessionId, HoleId), PendingHole>` — holds every currently-parked
+  (transcript, framing, turn lease); `pending_suspensions` — a
+  `HashMap<(SessionId, HoleId), PendingSuspension>` — holds every currently-parked
   hole's domain metadata (classified routing, the raw suspended request, the
   typed resident continuation, the compile table/asks it suspended with),
   keyed by session+hole rather than scattered per-node fields (see Suspension
@@ -155,11 +155,11 @@ never owns the shared session, so its retirement is realm SCOPE EXIT
 (`close_realm` on the shared machine: the realm's parked frames and any
 outstanding `ValueHandle`s are released together, sibling realms untouched) —
 the outer session outlives every answerer node it hosts. Either way the
-node's `convos` entry is removed, and any `pending_holes` entries still
+node's `convos` entry is removed, and any `pending_suspensions` entries still
 belonging to it are purged (see Suspension metadata below — an orphaned
 entry would otherwise sit unconsumable forever). `cancel`, a failed
 fork/fanout child's cleanup, the `JoinError` path above, and the
-self-iterating harness's `retire_answerer` all retire a node through it —
+self-iterating harness's `retire_typed_request_agent` all retire a node through it —
 there is no second way to retire one. A busy node (`CheckoutError::Running`)
 surfaces as `HarnessError::TurnInFlight`, never `NoSession` — that variant is
 reserved for a node that genuinely has no session (never forced, or already
@@ -178,8 +178,8 @@ which succeeds only when the machine is actually present in its slot
 A node's pending suspension's DOMAIN metadata — its classified routing, the
 raw suspended request `Value`, the typed `ResidentHole` continuation token,
 and the `DataConTable`/`AsksSidecar` it compiled against — lives in exactly
-one place: `Harness::pending_holes: Mutex<HashMap<(SessionId, HoleId),
-PendingHole>>`. This is deliberately SEPARATE from the registry's own hole
+one place: `Harness::pending_suspensions: Mutex<HashMap<(SessionId, HoleId),
+PendingSuspension>>`. This is deliberately SEPARATE from the registry's own hole
 SET (`Slot::Suspended{holes}`, machine-reported, the ownership truth for
 checkout purposes) — the same "authoritative set + external domain metadata"
 split the registry itself draws around `Slot`. Keyed by `(SessionId,
@@ -190,7 +190,7 @@ string.
 A node's own turn is suspended on AT MOST one hole at a time — a
 `ResidentHole` is always REPLACED, never accumulated, across a
 suspend → resume → re-suspend cycle — so `Harness::node_pending(node)` is a
-plain scan (`pending_holes.lock().values().find(|p| p.node == node)`), never
+plain scan (`pending_suspensions.lock().values().find(|p| p.node == node)`), never
 a second node→hole index to keep in sync; session/node counts in flight are
 small (bounded by concurrent fanout width, not corpus size). `NodeState`
 stays single-hole for the same reason — the registry's multi-hole SET is
@@ -198,13 +198,13 @@ multi because it spans MULTIPLE NODES sharing one session (concurrently-
 driven attached answerer realms, the one-session collapse), never because one
 node juggles several holes.
 
-Two methods own every transition: `Harness::publish_hole` (log
+Two methods own every transition: `Harness::publish_suspension` (log
 `Event::HolePublished`, the tree's `Running → Suspended{hole}` transition,
-then insert into the map) and `Harness::consume_hole` (log
+then insert into the map) and `Harness::consume_suspension` (log
 `Event::HoleConsumed`, the reverse transition, then remove) — called from
 `finish_run`'s suspend arm and `resume_parent`'s success/re-suspend arms.
-Every other read (`pending_hole`, `pending_hole_full`,
-`pending_hole_with_request`, `pending_turn_outcome`, `take_finalized_value_*`,
+Every other read (`pending_suspension`, `pending_suspension_full`,
+`pending_suspension_with_request`, `pending_turn_outcome`, `take_finalized_value_*`,
 `finalize_is_closure`, `wrap_fork_answer`, `asks_modules`,
 `register_fork_child`, the `answer_*` family) goes through `node_pending`.
 
@@ -291,11 +291,11 @@ verbatim; `tests/companion_mount_spike.rs` passing unmodified is the gate.
 
 **What retirement releases.** `Harness::terminate_node` is still the ONE
 retirement path. For an ATTACHED node it now exits both halves in
-`exit_window`: `close_realm(realm)` first (parked frames + handles), then
+`exit_agent_session`: `close_realm(realm)` first (parked frames + handles), then
 `retire_scope(scope)`. That order is load-bearing — scope retirement's
 sole-ownership rule reads the handle registry, so a handle the realm still
 owned would wrongly pin a root. The immediate path and the QUEUED path
-(`pending_window_exits`, drained by whichever code path next holds the machine)
+(`pending_session_exits`, drained by whichever code path next holds the machine)
 go through that one function, so they cannot diverge; both halves of the
 agent session's identity are retained in the queue until the exit is
 CONFIRMED. An OWNING node is unaffected: its whole session is dropped.
@@ -548,7 +548,7 @@ harness-generated only (`forcing.rs::derive_teaser`).
 
 ## Self-iterating harness — the answerer row + the `AskUser` operator gate
 
-The self-iterating harness's answerer Agent (`selfharness::driver::answerer_decls`)
+The self-iterating harness's answerer Agent (`selfharness::driver::typed_request_agent_decls`)
 compiles against `Eff '[AskUser, Fork, ReadState, Green, Finalize]` — decl-only effects, disjoint
 from the general Agent stack's `standard_decls()` (which keeps `Ask`,
 `RunLLMTurn`, and every base effect untouched; `AskUser` never appears
@@ -579,7 +579,7 @@ channel riding the SAME `AskUser` GADT as a second constructor (`NoteWith`,
 `noteRaw`) — `note "why I'm about to ask this"` posts text to the operator
 GUI's accumulating feed and the driver resumes with `()` IMMEDIATELY, never
 presenting anything via `OperatorGate::present_form`. Routed by constructor
-name into [`crate::engine::HoleRouting::Note`], serviced by
+name into [`crate::engine::SuspensionRouting::Note`], serviced by
 `Harness::answer_note` (the audited resume path, minus the operator wait) and
 `SelfHarnessDriver`'s note-draining helpers wherever an `askUser` chain can
 appear (the nested answerer, the AUTHORED outer loop, and interleaved
@@ -589,9 +589,9 @@ nothing here waits on a human to spin.
 `ReadState` (`tidepool_mcp::readstate_decl`, answerer row only) is the
 agent-computes-over-its-own-state effect from `plans/companion-state-v2.md`:
 `getStateJson :: M Value` suspends on `ReadStateWith`, routed by constructor
-name into `HoleRouting::ReadState` and serviced note-style — the driver
+name into `SuspensionRouting::ReadState` and serviced note-style — the driver
 resumes IMMEDIATELY with the loop's current state JSON
-(`SelfHarnessDriver.cycle_state_json`, the same JSON the checkpoint holds; no
+(`SelfHarnessDriver.loop_state_json`, the same JSON the checkpoint holds; no
 operator, no model round, never counted against any cap). Freshness is
 trivially correct because state changes only at loop boundaries — every
 agent session within a loop iteration reads the state that iteration started
@@ -707,7 +707,7 @@ genuinely suspending effect and crashes this specific path
 not newly close. This is the general Agent stack's ONE-SHOT `answer_fork`/
 `answer_fanout` path only — fork-subsumes-split step 1 closed this exact gap
 on the self-iterating harness path: a pump-driven fork child
-(`SelfHarnessDriver::drive_fork_child_window`) answers with a REAL
+(`SelfHarnessDriver::drive_fork_child_agent_session`) answers with a REAL
 `finalize @T` and `ChildSuspended` is unreachable from there.
 
 `askUser` re-prompts by RECURSION on a decode failure (no `Either` — the
@@ -718,10 +718,10 @@ operator gate, resume via [`Harness::answer_dialog`] (the same audited resume
 path a mechanical `Dialog`/`Ask` answer uses — `answer_dialog` accepts
 `AskUser` alongside them), and repeat while the resume keeps landing on
 another `AskUser` suspension, reading the fresh pending hole via
-[`Harness::pending_hole_full`] (the resume itself carries no outcome).
+[`Harness::pending_suspension_full`] (the resume itself carries no outcome).
 Bounded by `ASKUSER_MAX_REPROMPTS` (8) CONSECUTIVE re-presentations,
 independent of and never counted against the model-round caps
-(`ANSWERER_MAX_ROUNDS`/`LOOP_INFERENCE_CALL_CAP`) — a form resume is not a
+(`TYPED_REQUEST_AGENT_MAX_ROUNDS`/`LOOP_INFERENCE_CALL_CAP`) — a form resume is not a
 model round, but left uncapped it composes with a non-interactive gate at EOF
 (the default `StdinGate` returns an empty submission on EOF, not an error)
 into an unbounded hot loop no round-based cap catches.
@@ -774,10 +774,10 @@ unifies against the wider generated row.
 ### Recursive fork servicing — the pump, spawn-time budgets, the GUI lifecycle
 
 The answerer's own `fork`/`forkAll` (`Tidepool.Fork`, riding `Fork` in
-`answerer_decls`) is where fork-subsumes-split (`plans/fork-subsumes-split.md`)
+`typed_request_agent_decls`) is where fork-subsumes-split (`plans/fork-subsumes-split.md`)
 landed: the companion tree EMERGES from model-authored `async (fork @T
 "brief")` calls rather than from authored split-proposal/gate machinery. A
-fork child is driven by `SelfHarnessDriver::drive_fork_child_window`
+fork child is driven by `SelfHarnessDriver::drive_fork_child_agent_session`
 (`drain_answerer_fork`'s direct-chain call, `service_thread_ready`'s
 async-chain call) as a full ATTACHED session on the SAME shared machine as
 its parent (see One session below) — multi-round, can `askUser`, and can
@@ -793,7 +793,7 @@ depth; `fork_subtree_cap` (default [`DEFAULT_FORK_SUBTREE_CAP`] = 32) caps
 total descendant sessions across a whole top-level tree, counted atomically
 across every depth and both fork styles (direct `fork`/`forkAll` and
 green-thread `async (fork …)`); `fork_budget_per_window` (default
-[`DEFAULT_FORK_BUDGET_PER_WINDOW`] = 32) caps how many children ONE
+[`DEFAULT_FORK_BUDGET_PER_SESSION`] = 32) caps how many children ONE
 session's own turn may spawn. A refusal is loud, not silent: the answerer
 gets the budget back as data (`fork_budget_refusal`/`fork_subtree_refusal`
 text) and can adapt, not a hard failure.
@@ -804,9 +804,9 @@ seed brief, timeline, final typed value or failure. Its tree label/path is
 DERIVED, not wire-carried (unlike a `runLLMTurnBranchLabeled` child): base
 path from the parent's own registered label (or `"root"`), child segment
 `f<idx>-<ascii-slug-of-brief>` from a per-parent monotonic counter
-(`fork_child_seq`) assigned inside `drive_fork_child_window` itself. See
+(`fork_child_seq`) assigned inside `drive_fork_child_agent_session` itself. See
 `plans/fork-subsumes-split.md`'s step 3 design note for the full scheme
-(guard reuse via widening `BranchWindow`, the `finalize_fork_data` exit).
+(guard reuse via widening `BranchAgentSessionGuard`, the `finalize_fork_data` exit).
 
 **What step 4 (the companion collapse) changed above this mechanism, not in
 it:** `harness-dogfooding/recursive-companion/Harness.hs` no longer proposes
@@ -819,7 +819,7 @@ README, not this file, for the companion-side shape.
 
 An AUTHORED `loop` reaching for `runLLMTurnFork @T`/`runLLMTurnFanout @T`
 suspends on `RunLLMTurn`'s own fork payload (no separate `Fork` decl needed —
-`outer_decls()` has none), classified as `HoleRouting::Fork` and serviced by
+`outer_decls()` has none), classified as `SuspensionRouting::Fork` and serviced by
 `SelfHarnessDriver::service_outer_fanout` → `drive_fanout_child`: each child
 gets a freshly-minted answerer realm on the shared outer machine, driven
 CONCURRENTLY up to `set_concurrency_cap`, re-sorted to DECLARATION order
@@ -839,8 +839,8 @@ which does not open an agent session at all. That asymmetry is documented at
 the declaration (`tidepool_mcp::runllmturn_effect_def!`).
 
 `runLLMTurnBranch` reaches it by a different route — `service_outer_branch` is
-sequential and drives its child through `drive_answerer_to_finalize`, the round
-loop it SHARES with the in-context `service_runllm_hole`. That loop returns
+sequential and drives its child through `drive_agent_session_to_finalize`, the round
+loop it SHARES with the in-context `service_typed_request_suspension`. That loop returns
 `Result<Result<TurnOutcome, InvocationExit>, DriverError>` and the two callers
 differ in what they do with an exit, which is exactly the branch-position
 distinction: the branch folds it as `Left`, the in-context hole collapses it
@@ -867,13 +867,13 @@ fork/fanout site head-swaps to a `*Sited` sibling whose top-level type mentions
 `Either InvocationExit a`, and extract's `collectTransitiveDCons` seeds from
 reachable top-level binders' types.
 
-`HoleRouting::Fork` is shared by two independent servicing paths, both
+`SuspensionRouting::Fork` is shared by two independent servicing paths, both
 carrying `engine::ForkSource` to tell a `Tidepool.Fork` hole (`fork`/
 `forkAll`, always answers bare `T`/`[T]`) from a `RunLLMTurn`-sourced one
 (`runLLMTurnFork`/`runLLMTurnFanout`, `Either`-wrapped — see above): the
 self-harness pump (`SelfHarnessDriver::drain_answerer_fork`/
 `service_thread_ready`, driving each child on the full row via
-`drive_fork_child_window`, its own `wrap_fork_value` doing the `Right`
+`drive_fork_child_agent_session`, its own `wrap_fork_value` doing the `Right`
 wrap) and the general Agent stack's one-shot NESTED path (`Harness::
 answer_fork`/`answer_fanout`, driving each child via `drive_one_fork_child`,
 `Harness::wrap_fork_answer` doing the same wrap). Neither path produces a
@@ -941,7 +941,7 @@ turns run as a REALM on the shared machine, minted per loop
 `run_checked_out` before every turn (see Machine lifecycle above), so an
 answerer's parked frames and any values it produces are born directly in the
 loop's own heap. Retiring the answerer at loop end
-(`SelfHarnessDriver::retire_answerer` → `Harness::terminate_node`) is that
+(`SelfHarnessDriver::retire_typed_request_agent` → `Harness::terminate_node`) is that
 realm's SCOPE EXIT (`close_realm`), never session/slot removal — the shared
 outer session outlives every answerer node it hosts. Outer `render`/`loop`
 fragments and every answerer turn go through the one checkout discipline via

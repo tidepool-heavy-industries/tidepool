@@ -35,7 +35,7 @@ use tidepool_harness::log::{Actor, LogHeader, LogWriter};
 use tidepool_harness::provider::{DynModelProvider, Usage};
 use tidepool_harness::replay::{RecordedReply, ReplayProvider};
 use tidepool_harness::timing::{RUST_STAGES, STAGE_JIT_CODEGEN, STAGE_RUN_EXEC};
-use tidepool_harness::{answerer_decls, Harness, NodeId, TurnOutcome};
+use tidepool_harness::{typed_request_agent_decls, Harness, NodeId, TurnOutcome};
 
 // ---------------------------------------------------------------------------
 // Tracing collector — matches the event shape `timing::record_stage` emits
@@ -267,7 +267,7 @@ struct BenchReport {
 // ---------------------------------------------------------------------------
 // Harness construction — mirrors tests/acceptance_selfharness.rs /
 // tests/selfharness_spine.rs's construction (real Harness over
-// `answerer_decls()`, a `ReplayProvider` substituting the model). Each
+// `typed_request_agent_decls()`, a `ReplayProvider` substituting the model). Each
 // scenario gets its OWN `Harness` (its own boot compile), matching "cold" as
 // this bench's first turn in a freshly booted harness.
 // ---------------------------------------------------------------------------
@@ -308,7 +308,7 @@ fn fenced(block: &str) -> String {
 }
 
 fn build_harness(replies: Vec<RecordedReply>, tag: &str) -> Result<Harness, Box<dyn Error>> {
-    let cfg = EngineConfig::from_decls(answerer_decls(), prelude_dir(), None)?;
+    let cfg = EngineConfig::from_decls(typed_request_agent_decls(), prelude_dir(), None)?;
     let provider: Arc<dyn DynModelProvider> = Arc::new(ReplayProvider::new(replies));
     let log_path = std::env::temp_dir().join(format!(
         "turn-latency-bench-{tag}-{}.jsonl",

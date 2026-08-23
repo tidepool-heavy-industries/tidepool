@@ -1,5 +1,5 @@
 //! PRD 21 C5's GUI lane: `runLLMTurnBranchLabeled`'s label rides the wire
-//! structurally into `HoleRouting::Branch`'s `label` field, and the driver
+//! structurally into `SuspensionRouting::Branch`'s `label` field, and the driver
 //! resolves it to a per-node `OperatorGate` (`present_askuser_form`'s
 //! `resolve_gate`) rather than the default one. This is the SAME
 //! outer-branch family as `tests/companion_context_ref.rs` — a new, minimal
@@ -33,7 +33,7 @@ use tidepool_harness::provider::{DynModelProvider, Usage};
 use tidepool_harness::replay::{RecordedReply, ReplayProvider};
 use tidepool_harness::selfharness::operator::{FormShape, OperatorGate};
 use tidepool_harness::{
-    answerer_decls, load_harness_source, Harness, LogObserver, SelfHarnessDriver,
+    load_harness_source, typed_request_agent_decls, Harness, LogObserver, SelfHarnessDriver,
 };
 
 fn repo_root() -> PathBuf {
@@ -185,7 +185,7 @@ async fn labeled_branch_child_asks_route_to_its_own_gate_and_retire_on_exit() {
     ];
 
     let agent_cfg = EngineConfig::from_decls(
-        answerer_decls(),
+        typed_request_agent_decls(),
         repo_root().join("haskell/lib"),
         Some(fixtures_dir()),
     )
@@ -209,7 +209,7 @@ async fn labeled_branch_child_asks_route_to_its_own_gate_and_retire_on_exit() {
         .expect("labeled-branch fixture loads");
 
     let outcome = driver
-        .run_one_cycle(&source, None)
+        .run_one_loop_iteration(&source, None)
         .await
         .expect("the outer turn completes despite the labeled branch exiting");
 

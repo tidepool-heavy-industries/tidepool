@@ -6,8 +6,8 @@
 //! [`type_document`] can render a full GHC-style `data` declaration for a
 //! hole's answer type instead of a names-only synopsis — a harness author
 //! never hand-embeds an answer type's declaration in a prompt. Consumed by a
-//! hole card's shape section ([`crate::engine::hole_card`]/
-//! [`crate::engine::answerer_hole_card`], via [`crate::engine::type_shape_line`])
+//! hole card's shape section ([`crate::engine::resume_typed_request_prompt`]/
+//! [`crate::engine::finalize_typed_request_prompt`], via [`crate::engine::type_shape_line`])
 //! and nothing more — a mechanical FORM derived from this same table would
 //! have to render every field as a blind text box, which is why no such form
 //! exists here; `FormShape` (`Tidepool.Form.GForm`,

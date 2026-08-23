@@ -4,7 +4,7 @@
 //!
 //! Checkpoint half: a completed cycle commits its own state and its own
 //! compaction summary together, at the end of
-//! `SelfHarnessDriver::run_one_cycle`'s success path, so a restart always
+//! `SelfHarnessDriver::run_one_loop_iteration`'s success path, so a restart always
 //! reads a state and a summary from the SAME generation.
 //!
 //! Lease/journal half (wave 2b/3, `plans/self-iterating-harness/
@@ -17,7 +17,7 @@
 //! rather than one.
 //!
 //! Every cycle runs through the production entry point
-//! (`SelfHarnessDriver::run_one_cycle`), and a "restarted process" is always a
+//! (`SelfHarnessDriver::run_one_loop_iteration`), and a "restarted process" is always a
 //! FRESH `SelfHarnessDriver` over a FRESH `Harness`, carrying nothing but what
 //! is on disk. The GHC-heavy tests need `TIDEPOOL_EXTRACT` and the
 //! with-packages GHC on PATH — run inside `nix develop` (see
@@ -45,8 +45,9 @@ use tidepool_harness::replay::{RecordedReply, ReplayProvider};
 use tidepool_harness::selfharness::operator::FormShape;
 use tidepool_harness::selfharness::persistence;
 use tidepool_harness::{
-    acquire_lease, answerer_decls, load_harness_source, retire_lease, DriverError, Event, Harness,
-    HarnessSource, LogObserver, Observer, OperatorGate, ResumeFold, RunLease, SelfHarnessDriver,
+    acquire_lease, load_harness_source, retire_lease, typed_request_agent_decls, DriverError,
+    Event, Harness, HarnessSource, LogObserver, Observer, OperatorGate, ResumeFold, RunLease,
+    SelfHarnessDriver,
 };
 
 fn repo_root() -> PathBuf {
@@ -124,7 +125,7 @@ fn fresh_driver_with_observer(
     observer: Arc<dyn Observer>,
 ) -> SelfHarnessDriver {
     let agent_cfg = EngineConfig::from_decls(
-        answerer_decls(),
+        typed_request_agent_decls(),
         prelude_dir(),
         Some(examples_harness_dir()),
     )
@@ -217,7 +218,7 @@ async fn restart_with_a_prior_checkpoint_gates_before_any_turn_work() {
     let mut driver1 = fresh_driver(vec![decision_reply("observe", "Medium")], "gate-park-1");
     driver1.set_checkpoint_path(checkpoint_path.clone());
     driver1
-        .run_one_cycle(&harness_source, None)
+        .run_one_loop_iteration(&harness_source, None)
         .await
         .expect("cycle 1 commits");
     let cp1 = persistence::load_checkpoint(&checkpoint_path)
@@ -231,7 +232,7 @@ async fn restart_with_a_prior_checkpoint_gates_before_any_turn_work() {
     let inner_provider: Arc<dyn DynModelProvider> =
         Arc::new(ReplayProvider::new(vec![decision_reply("act", "High")]));
     let agent_cfg = EngineConfig::from_decls(
-        answerer_decls(),
+        typed_request_agent_decls(),
         prelude_dir(),
         Some(examples_harness_dir()),
     )
@@ -305,7 +306,7 @@ async fn old_format_checkpoint_still_gates_before_the_first_post_restore_cycle()
 
     let mut prep = fresh_driver(vec![decision_reply("observe", "Medium")], "old-format-prep");
     prep.set_checkpoint_path(checkpoint_path.clone());
-    prep.run_one_cycle(&harness_source, None)
+    prep.run_one_loop_iteration(&harness_source, None)
         .await
         .expect("cycle 1 commits a real checkpoint");
     drop(prep);
@@ -406,7 +407,7 @@ async fn operator_steering_text_reaches_the_next_cycles_framing() {
     let harness_source = source();
 
     let agent_cfg = EngineConfig::from_decls(
-        answerer_decls(),
+        typed_request_agent_decls(),
         prelude_dir(),
         Some(examples_harness_dir()),
     )
@@ -540,7 +541,7 @@ async fn ask_ids_strictly_increase_across_a_restart() {
     driver1.set_checkpoint_path(checkpoint_path.clone());
     driver1.set_gate(Arc::new(AutoAnswerDecisionGate));
     driver1
-        .run_one_cycle(&harness_source, None)
+        .run_one_loop_iteration(&harness_source, None)
         .await
         .expect("cycle 1 with one askUser round-trip finalizes");
 
@@ -570,7 +571,7 @@ async fn ask_ids_strictly_increase_across_a_restart() {
         .await
         .expect("restore succeeds");
     driver2
-        .run_one_cycle(&harness_source, state_json.as_ref())
+        .run_one_loop_iteration(&harness_source, state_json.as_ref())
         .await
         .expect("cycle 2 with its own askUser round-trip finalizes");
 
@@ -627,7 +628,7 @@ async fn committed_cycles_restore_state_and_summary_from_the_same_generation() {
     let mut driver1 = fresh_driver(vec![decision_reply("observe", "Medium")], "process1");
     driver1.set_checkpoint_path(checkpoint_path.clone());
     let outcome1 = driver1
-        .run_one_cycle(&harness_source, None)
+        .run_one_loop_iteration(&harness_source, None)
         .await
         .expect("cycle 1 (initialState)");
     assert_eq!(
@@ -641,7 +642,7 @@ async fn committed_cycles_restore_state_and_summary_from_the_same_generation() {
         "Observing -> Deciding after cycle 1"
     );
 
-    // `run_one_cycle` commits generation 1 on success — no separate save call.
+    // `run_one_loop_iteration` commits generation 1 on success — no separate save call.
     let cp1 = persistence::load_checkpoint(&checkpoint_path)
         .expect("load_checkpoint after cycle 1")
         .expect("cycle 1 committed a checkpoint");
@@ -681,7 +682,7 @@ async fn committed_cycles_restore_state_and_summary_from_the_same_generation() {
     // What `SelfHarnessDriver::run_loop` does: run the next cycle against the
     // restored state instead of `None`.
     let outcome2 = driver2
-        .run_one_cycle(&harness_source, Some(&restored))
+        .run_one_loop_iteration(&harness_source, Some(&restored))
         .await
         .expect("cycle 2 (from restored state)");
 
@@ -732,7 +733,7 @@ async fn committed_cycles_restore_state_and_summary_from_the_same_generation() {
 
     // A third cycle, same process, no restart — generation keeps climbing.
     let _ = driver2
-        .run_one_cycle(&harness_source, Some(&outcome2.state_json))
+        .run_one_loop_iteration(&harness_source, Some(&outcome2.state_json))
         .await
         .expect_err("no more scripted replies for a third cycle");
     // The failed third cycle must NOT have overwritten generation 2's
@@ -814,9 +815,12 @@ fn compaction_driver(checkpoint_path: PathBuf) -> (SelfHarnessDriver, HarnessSou
         pre_input: 600,
         counter,
     });
-    let mut agent_cfg =
-        EngineConfig::from_decls(answerer_decls(), prelude_dir(), Some(fixtures_dir()))
-            .expect("answerer engine config");
+    let mut agent_cfg = EngineConfig::from_decls(
+        typed_request_agent_decls(),
+        prelude_dir(),
+        Some(fixtures_dir()),
+    )
+    .expect("answerer engine config");
     agent_cfg.context_window_tokens = Some(1000);
     let log_id = NEXT_LOG_ID.fetch_add(1, Ordering::Relaxed);
     let writer = tidepool_harness::log::LogWriter::create(
@@ -853,7 +857,7 @@ async fn crash_before_cycle_commits_restores_prior_generation_not_a_mixed_pair()
     // 50% of the 1000-token budget) and complete normally — commits
     // generation 1 with ITS OWN final compaction summary.
     let outcome1 = driver
-        .run_one_cycle(&source, None)
+        .run_one_loop_iteration(&source, None)
         .await
         .expect("cycle 1 completes and commits");
     assert!(
@@ -877,7 +881,7 @@ async fn crash_before_cycle_commits_restores_prior_generation_not_a_mixed_pair()
     // reaching its commit.
     driver.set_loop_inference_call_cap(2);
     let err = driver
-        .run_one_cycle(&source, Some(&outcome1.state_json))
+        .run_one_loop_iteration(&source, Some(&outcome1.state_json))
         .await
         .expect_err("cycle 2 must hard-fail before finishing its second hole");
     assert!(
@@ -964,7 +968,7 @@ fn truncated_checkpoint_is_a_typed_error_and_writes_leave_no_tmp_behind() {
 #[test]
 fn default_checkpoint_path_is_under_the_cache_dir() {
     let _cache_guard = support::isolate_cache();
-    let agent_cfg = EngineConfig::from_decls(answerer_decls(), prelude_dir(), None)
+    let agent_cfg = EngineConfig::from_decls(typed_request_agent_decls(), prelude_dir(), None)
         .expect("answerer engine config");
     let provider: Arc<dyn DynModelProvider> = Arc::new(ReplayProvider::new(vec![]));
     let writer = tidepool_harness::log::LogWriter::create(
@@ -1078,7 +1082,7 @@ async fn stale_fingerprint_state_carries_forward_and_falls_back_on_decode_failur
     // (The incompatible-shape path is pinned by the decode-retry test
     // below, which plants a state that cannot decode.)
     let _outcome = driver
-        .run_one_cycle(&current_source, restored.as_ref())
+        .run_one_loop_iteration(&current_source, restored.as_ref())
         .await
         .expect("a shape-compatible carried state must run, not be discarded");
     assert_eq!(
@@ -1206,8 +1210,12 @@ async fn state_decode_failure_retries_once_from_fresh_state_instead_of_killing_r
 /// authored orchestration and opens no model holes, so the provider exists only
 /// because the constructor takes one.
 fn fixture_driver(log_tag: &str) -> SelfHarnessDriver {
-    let agent_cfg = EngineConfig::from_decls(answerer_decls(), prelude_dir(), Some(fixtures_dir()))
-        .expect("answerer engine config");
+    let agent_cfg = EngineConfig::from_decls(
+        typed_request_agent_decls(),
+        prelude_dir(),
+        Some(fixtures_dir()),
+    )
+    .expect("answerer engine config");
     let provider: Arc<dyn DynModelProvider> = Arc::new(ReplayProvider::new(Vec::new()));
     let writer = tidepool_harness::log::LogWriter::create(
         std::env::temp_dir().join(format!(
@@ -1294,7 +1302,7 @@ fn torn_prefix_of(full_line: &str) -> &str {
 /// **The crash mechanism, stated plainly.** No process is killed. The first
 /// cycle dies at `CrashResumeHarness.hs`'s crash seam: after recording
 /// `alpha` and `beta`, the loop calls `say`, and this driver has no Console
-/// handler wired, so `run_one_cycle` returns `Err` mid-cycle with `gamma` and
+/// handler wired, so `run_one_loop_iteration` returns `Err` mid-cycle with `gamma` and
 /// `delta` still to do. **Why that is equivalent to a kill at the durability
 /// boundary:** durability is decided entirely by what is on disk when the
 /// process stops, and the three things on disk are identical either way —
@@ -1345,7 +1353,7 @@ async fn crashed_cycle_keeps_its_lease_and_the_resumed_run_does_only_the_delta()
     );
     // Console deliberately left unwired: that IS the crash seam.
     let err = crashed
-        .run_one_cycle(&source, None)
+        .run_one_loop_iteration(&source, None)
         .await
         .expect_err("the cycle must die at the crash seam, mid-flight");
     assert!(
@@ -1398,7 +1406,7 @@ async fn crashed_cycle_keeps_its_lease_and_the_resumed_run_does_only_the_delta()
     );
 
     let outcome = resumed
-        .run_one_cycle(&source, None)
+        .run_one_loop_iteration(&source, None)
         .await
         .expect("the resumed cycle completes: resumeLoop walks every step against the fold");
     let state = &outcome.state_json;

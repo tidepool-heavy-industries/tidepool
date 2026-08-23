@@ -38,7 +38,7 @@ use tidepool_harness::provider::{
     TurnResponse, Usage,
 };
 use tidepool_harness::{
-    answerer_decls, load_harness_source, Harness, LogObserver, SelfHarnessDriver,
+    load_harness_source, typed_request_agent_decls, Harness, LogObserver, SelfHarnessDriver,
 };
 
 fn repo_root() -> std::path::PathBuf {
@@ -180,9 +180,12 @@ async fn compaction_fires_mid_loop_in_place_and_reaches_next_render() {
         second_hole: second_hole.clone(),
     });
 
-    let mut agent_cfg =
-        EngineConfig::from_decls(answerer_decls(), prelude_dir(), Some(fixtures_dir()))
-            .expect("answerer engine config");
+    let mut agent_cfg = EngineConfig::from_decls(
+        typed_request_agent_decls(),
+        prelude_dir(),
+        Some(fixtures_dir()),
+    )
+    .expect("answerer engine config");
     agent_cfg.context_window_tokens = Some(1000);
 
     let writer =
@@ -199,7 +202,7 @@ async fn compaction_fires_mid_loop_in_place_and_reaches_next_render() {
         .expect("compaction harness source loads");
 
     let outcome = driver
-        .run_one_cycle(&source, None)
+        .run_one_loop_iteration(&source, None)
         .await
         .expect("one two-hole cycle with a mid-loop compaction");
 
@@ -366,9 +369,12 @@ async fn c1_multiround_highwater_does_not_overcount() {
         first_hole_rounds: Arc::new(Mutex::new(0)),
     });
 
-    let mut agent_cfg =
-        EngineConfig::from_decls(answerer_decls(), prelude_dir(), Some(fixtures_dir()))
-            .expect("answerer engine config");
+    let mut agent_cfg = EngineConfig::from_decls(
+        typed_request_agent_decls(),
+        prelude_dir(),
+        Some(fixtures_dir()),
+    )
+    .expect("answerer engine config");
     agent_cfg.context_window_tokens = Some(1000);
 
     let writer =
@@ -387,7 +393,7 @@ async fn c1_multiround_highwater_does_not_overcount() {
         .expect("compaction harness source loads");
 
     let outcome = driver
-        .run_one_cycle(&source, None)
+        .run_one_loop_iteration(&source, None)
         .await
         .expect("two-hole cycle, multi-round first hole, NO compaction");
 

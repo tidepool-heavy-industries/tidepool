@@ -40,8 +40,8 @@
 mod support;
 
 use tidepool_codegen::scope::ScopeId;
-use tidepool_harness::answerer_decls;
 use tidepool_harness::engine::EngineConfig;
+use tidepool_harness::typed_request_agent_decls;
 use tidepool_runtime::session::SessionLib;
 
 fn repo_root() -> std::path::PathBuf {
@@ -79,7 +79,7 @@ fn open_plane(cfg: &EngineConfig, label: &str) -> SessionLib {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn member_form_effectful_helper_validates_and_a_later_decl_calls_it() {
     support::require_extract();
-    let cfg = EngineConfig::from_decls(answerer_decls(), prelude_dir(), None)
+    let cfg = EngineConfig::from_decls(typed_request_agent_decls(), prelude_dir(), None)
         .expect("answerer engine config");
     let mut plane = open_plane(&cfg, "member-form");
 
@@ -116,7 +116,7 @@ async fn member_form_effectful_helper_validates_and_a_later_decl_calls_it() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn m_form_effectful_helper_validates_and_persists() {
     support::require_extract();
-    let cfg = EngineConfig::from_decls(answerer_decls(), prelude_dir(), None)
+    let cfg = EngineConfig::from_decls(typed_request_agent_decls(), prelude_dir(), None)
         .expect("answerer engine config");
     let mut plane = open_plane(&cfg, "m-form");
 
@@ -145,7 +145,7 @@ async fn m_form_effectful_helper_validates_and_persists() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn m_form_effectful_helper_visible_in_a_later_window_and_a_sibling_scope() {
     support::require_extract();
-    let cfg = EngineConfig::from_decls(answerer_decls(), prelude_dir(), None)
+    let cfg = EngineConfig::from_decls(typed_request_agent_decls(), prelude_dir(), None)
         .expect("answerer engine config");
     let mut plane = open_plane(&cfg, "m-form-cross-window");
 
@@ -177,7 +177,7 @@ async fn m_form_effectful_helper_visible_in_a_later_window_and_a_sibling_scope()
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn unannotated_effectful_helper_still_validates_and_persists() {
     support::require_extract();
-    let cfg = EngineConfig::from_decls(answerer_decls(), prelude_dir(), None)
+    let cfg = EngineConfig::from_decls(typed_request_agent_decls(), prelude_dir(), None)
         .expect("answerer engine config");
     let mut plane = open_plane(&cfg, "unannotated-form");
 
@@ -200,7 +200,7 @@ async fn unannotated_effectful_helper_still_validates_and_persists() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn helper_missing_from_a_later_narrow_row_fails_at_use_not_define() {
     support::require_extract();
-    let cfg = EngineConfig::from_decls(answerer_decls(), prelude_dir(), None)
+    let cfg = EngineConfig::from_decls(typed_request_agent_decls(), prelude_dir(), None)
         .expect("answerer engine config");
     let mut plane = open_plane(&cfg, "use-site-member-failure");
 
@@ -229,7 +229,7 @@ async fn helper_missing_from_a_later_narrow_row_fails_at_use_not_define() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn pure_helper_still_validates_and_persists() {
     support::require_extract();
-    let cfg = EngineConfig::from_decls(answerer_decls(), prelude_dir(), None)
+    let cfg = EngineConfig::from_decls(typed_request_agent_decls(), prelude_dir(), None)
         .expect("answerer engine config");
     let mut plane = open_plane(&cfg, "pure-form");
 

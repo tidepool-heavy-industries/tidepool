@@ -25,7 +25,7 @@ use tidepool_harness::log::LogHeader;
 use tidepool_harness::provider::DynModelProvider;
 use tidepool_harness::replay::ReplayProvider;
 use tidepool_harness::{
-    answerer_decls, load_harness_source, Harness, LogObserver, SelfHarnessDriver,
+    load_harness_source, typed_request_agent_decls, Harness, LogObserver, SelfHarnessDriver,
 };
 use tidepool_worktree::testing::TestRepo;
 
@@ -59,7 +59,7 @@ async fn outer_loop_spawn_agent_round_trips_through_the_driver() {
     // The nested answerer config is required by the driver's constructor but
     // never exercised here — the fixture loop opens no model holes.
     let agent_cfg = EngineConfig::from_decls(
-        answerer_decls(),
+        typed_request_agent_decls(),
         repo_root().join("haskell/lib"),
         Some(fixtures_dir()),
     )
@@ -98,7 +98,7 @@ async fn outer_loop_spawn_agent_round_trips_through_the_driver() {
     let source = load_harness_source(&fixtures_dir().join("SubagentHarness.hs"))
         .expect("fixture harness loads");
     let outcome = driver
-        .run_one_cycle(&source, None)
+        .run_one_loop_iteration(&source, None)
         .await
         .expect("one cycle: loop spawns, driver services, receipt crosses back");
 
@@ -128,7 +128,7 @@ async fn outer_spawn_without_handler_errors_legibly() {
     let _cache_guard = support::isolate_cache();
 
     let agent_cfg = EngineConfig::from_decls(
-        answerer_decls(),
+        typed_request_agent_decls(),
         repo_root().join("haskell/lib"),
         Some(fixtures_dir()),
     )
@@ -145,7 +145,7 @@ async fn outer_spawn_without_handler_errors_legibly() {
     let source = load_harness_source(&fixtures_dir().join("SubagentHarness.hs"))
         .expect("fixture harness loads");
     let err = driver
-        .run_one_cycle(&source, None)
+        .run_one_loop_iteration(&source, None)
         .await
         .expect_err("a Subagent suspension with no handler must error");
     let msg = err.to_string();
