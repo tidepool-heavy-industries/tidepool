@@ -1029,7 +1029,10 @@ The production binary (`tidepool-web/src/bin/tidepool-selfharness.rs`) does
 NOT reuse one fixed `log.jsonl`: `LogWriter` refuses to overwrite an existing
 run's log, so each boot mints its own `log-<epoch>.jsonl` sibling under
 `<cache>/selfharness/` — tail the NEWEST one, e.g.
-`tail -f $(ls -t <cache>/selfharness/log-*.jsonl | head -1)`. A caller that
+`tail -f $(ls -t <cache>/selfharness/log-*.jsonl | head -1)`, or use
+`scripts/current-run.sh` (`paths` prints every known path — lease, checkpoint,
+transcript, newest log, this run's journal segments — with liveness; `tail
+[transcript|log|journal]` tails the right one directly). A caller that
 wants one stable, reused filename (a direct test, say) can still boot the
 answerer `Harness` with `LogWriter::create(&default_log_path(), &header)` to
 land a fixed `log.jsonl` on that exact path; the driver writes
