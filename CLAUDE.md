@@ -58,6 +58,19 @@ exist under another plane's vocabulary. Three hard rules:
 > (`~/.exo/roles/devswarm/context/root.md`), loaded each session. This file is
 > codebase truth; that file is process truth.
 
+### Terminology
+
+`docs/GLOSSARY.md` is the naming authority. Compositions of well-known
+industry terms beat coinage — a new term survives only when no reasonable
+composition of standard terms carries the distinction (and then it goes IN
+the glossary). Bare "window" is banned: **context window** (provider token
+limit) is the only surviving use; the execution units are **model round**,
+**agent session**, **loop iteration**. "Session" is always qualified
+(agent/machine). Model-facing prompt text follows the glossary's prompt
+rules — invented jargon there is a fluency tax on the models themselves.
+Old spellings migrate on contact; identifier and serialized-field renames
+are staged deliberately, never drive-by.
+
 ### Doc history
 
 Inline doc-history ("an earlier version…", "this used to…", superseded
