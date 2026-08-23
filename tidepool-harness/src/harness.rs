@@ -3172,6 +3172,57 @@ impl Harness {
     /// resulting typed Value. The ONE deliberate ill-typed attempt in the golden
     /// path exercises the GHC-verbatim retry here (a compile failure feeds back
     /// as the child's next user turn; the parent's continuation is untouched).
+    /// Register, force, and drive ONE fork child to its answering value —
+    /// the per-child sequence shared by [`Self::answer_fork`],
+    /// [`Self::answer_fanout`], and [`Self::answer_fork_hole_raw`] (one
+    /// home, four call sites). `parent`'s own decl-plane root rides on the
+    /// child's include (see `force_with_extra_include`'s doc — a
+    /// `finalize_pin` module may be a type the parent declared live). Cleans
+    /// the child up on ANY failure (no orphaned Running+resident node);
+    /// deliberately does NOT mark the child Done — each caller owns its own
+    /// completion timing (`answer_fork` completes its child only after the
+    /// parent's resume succeeds; the fanout/raw paths complete per child
+    /// before assembly).
+    #[allow(clippy::too_many_arguments)]
+    async fn drive_one_fork_child(
+        &self,
+        parent: NodeId,
+        actor: Actor,
+        title: &str,
+        prompt: &str,
+        ty: Option<&str>,
+        max_turns: u32,
+        finalize_pin: Option<(&str, &[String])>,
+    ) -> Result<(NodeId, Value), HarnessError> {
+        let child = self.register_fork_child(parent, title, prompt, ty)?;
+        if let Err(e) = self.force_with_extra_include(
+            child,
+            actor,
+            vec![node_session_dir(&self.run_id, parent)],
+        ) {
+            self.cleanup_failed_child(child);
+            return Err(e);
+        }
+        let value = match self
+            .drive_answerer_to_value(
+                child,
+                parent,
+                ty,
+                max_turns,
+                &self.child_cfg_for_fork_of(parent),
+                finalize_pin,
+            )
+            .await
+        {
+            Ok(v) => v,
+            Err(e) => {
+                self.cleanup_failed_child(child);
+                return Err(e);
+            }
+        };
+        Ok((child, value))
+    }
+
     pub async fn answer_fork(&self, node: NodeId, actor: Actor) -> Result<NodeId, HarnessError> {
         // `node` (the parent) owns this whole answer — force+drive the
         // child, then `resume_parent` — as one turn-owning operation.
@@ -3201,21 +3252,6 @@ impl Harness {
             }
         };
 
-        // Register the fork child: inherit the parent transcript up to the
-        // parent's current turn, append the hole card.
-        let child = self.register_fork_child(node, "fork answerer", &prompt, site_ty.as_deref())?;
-        // `node`'s own decl-plane root, ALSO on the child's include: the
-        // module `AnswerContract` is about to name (below) may be a type the
-        // PARENT declared live in its own session — see
-        // `force_with_extra_include`'s doc for why this makes that name
-        // resolvable without sharing a session.
-        if let Err(e) =
-            self.force_with_extra_include(child, actor, vec![node_session_dir(&self.run_id, node)])
-        {
-            self.cleanup_failed_child(child);
-            return Err(e);
-        }
-
         // Pin the fork child's row to its OWN requested type (`site_ty`, from
         // `asks.json`) whenever one was resolved, widening it with
         // `Finalize <T>` alongside the row's actual answering verb
@@ -3237,29 +3273,21 @@ impl Harness {
         let site_modules = self.asks_modules(node, site.get());
         let finalize_pin = site_ty.as_deref().map(|t| (t, site_modules.as_slice()));
 
-        // Drive the child's turn loop until it emits an answering block, then run
-        // that block via run_child against the SUSPENDED PARENT (not the child's
-        // own session) to produce a Value in the parent's heap. On ANY failure
-        // (provider/join/log fault, or cap-exhaustion abort) clean up the child
-        // before propagating — no orphaned Running+resident node.
-        let fork_child_cfg = self.child_cfg_for_fork_of(node);
-        let answer_value = match self
-            .drive_answerer_to_value(
-                child,
+        // Register + force + drive, via the ONE per-child sequence
+        // (`drive_one_fork_child`): the child's block runs via run_child
+        // against the SUSPENDED PARENT (not the child's own session) to
+        // produce a Value in the parent's heap.
+        let (child, answer_value) = self
+            .drive_one_fork_child(
                 node,
+                actor,
+                "fork answerer",
+                &prompt,
                 site_ty.as_deref(),
                 engine::DEFAULT_MAX_TURNS,
-                &fork_child_cfg,
                 finalize_pin,
             )
-            .await
-        {
-            Ok(v) => v,
-            Err(e) => {
-                self.cleanup_failed_child(child);
-                return Err(e);
-            }
-        };
+            .await?;
 
         // Resume the parent with the child's typed answer, in the shape the
         // parked continuation expects: `runLLMTurnFork @T` answers
@@ -3377,42 +3405,21 @@ impl Harness {
         let mut children = Vec::with_capacity(prompts.len());
         let mut answers = Vec::with_capacity(prompts.len());
         for (idx, prompt) in prompts.iter().enumerate() {
-            let child = self.register_fork_child(
-                node,
-                &format!("fanout answerer {idx}"),
-                prompt,
-                element_ty,
-            )?;
-            // Guard every child exit: a force/drive fault must not orphan this
-            // child (earlier children are already Done+dropped; later ones are
-            // never created — only the in-flight one can leak). `node`'s own
-            // decl-plane root is ALSO on the child's include — see
-            // `answer_fork`'s matching call for why.
-            if let Err(e) = self.force_with_extra_include(
-                child,
-                actor,
-                vec![node_session_dir(&self.run_id, node)],
-            ) {
-                self.cleanup_failed_child(child);
-                return Err(e);
-            }
-            let value = match self
-                .drive_answerer_to_value(
-                    child,
+            // The ONE per-child sequence (`drive_one_fork_child`) guards
+            // every child exit: a force/drive fault must not orphan the
+            // in-flight child (earlier children are already Done+dropped;
+            // later ones are never created).
+            let (child, value) = self
+                .drive_one_fork_child(
                     node,
+                    actor,
+                    &format!("fanout answerer {idx}"),
+                    prompt,
                     element_ty,
                     self.cfg.max_child_turns,
-                    &self.child_cfg_for_fork_of(node),
                     finalize_pin,
                 )
-                .await
-            {
-                Ok(v) => v,
-                Err(e) => {
-                    self.cleanup_failed_child(child);
-                    return Err(e);
-                }
-            };
+                .await?;
             let _ = self.tree.node_done(child, "answer delivered".to_string());
             let _ = self.terminate_node(child, "answer delivered");
             children.push(child);
@@ -3491,33 +3498,17 @@ impl Harness {
             None => {
                 let site_ty = ty.as_deref();
                 let finalize_pin = site_ty.map(|t| (t, site_modules.as_slice()));
-                let child =
-                    self.register_fork_child(parent, "async fork answerer", prompt, site_ty)?;
-                if let Err(e) = self.force_with_extra_include(
-                    child,
-                    Actor::Operator,
-                    vec![node_session_dir(&self.run_id, parent)],
-                ) {
-                    self.cleanup_failed_child(child);
-                    return Err(e);
-                }
-                let value = match self
-                    .drive_answerer_to_value(
-                        child,
+                let (child, value) = self
+                    .drive_one_fork_child(
                         parent,
+                        Actor::Operator,
+                        "async fork answerer",
+                        prompt,
                         site_ty,
                         engine::DEFAULT_MAX_TURNS,
-                        &self.child_cfg_for_fork_of(parent),
                         finalize_pin,
                     )
-                    .await
-                {
-                    Ok(v) => v,
-                    Err(e) => {
-                        self.cleanup_failed_child(child);
-                        return Err(e);
-                    }
-                };
+                    .await?;
                 let _ = self.tree.node_done(child, "answer delivered".to_string());
                 let _ = self.terminate_node(child, "answer delivered");
                 wrap(value)?
@@ -3540,37 +3531,17 @@ impl Harness {
                 let finalize_pin = element_ty.map(|t| (t, site_modules.as_slice()));
                 let mut answers = Vec::with_capacity(prompts.len());
                 for (idx, child_prompt) in prompts.iter().enumerate() {
-                    let child = self.register_fork_child(
-                        parent,
-                        &format!("async fanout answerer {idx}"),
-                        child_prompt,
-                        element_ty,
-                    )?;
-                    if let Err(e) = self.force_with_extra_include(
-                        child,
-                        Actor::Operator,
-                        vec![node_session_dir(&self.run_id, parent)],
-                    ) {
-                        self.cleanup_failed_child(child);
-                        return Err(e);
-                    }
-                    let value = match self
-                        .drive_answerer_to_value(
-                            child,
+                    let (child, value) = self
+                        .drive_one_fork_child(
                             parent,
+                            Actor::Operator,
+                            &format!("async fanout answerer {idx}"),
+                            child_prompt,
                             element_ty,
                             self.cfg.max_child_turns,
-                            &self.child_cfg_for_fork_of(parent),
                             finalize_pin,
                         )
-                        .await
-                    {
-                        Ok(v) => v,
-                        Err(e) => {
-                            self.cleanup_failed_child(child);
-                            return Err(e);
-                        }
-                    };
+                        .await?;
                     let _ = self.tree.node_done(child, "answer delivered".to_string());
                     let _ = self.terminate_node(child, "answer delivered");
                     answers.push(wrap(value)?);
