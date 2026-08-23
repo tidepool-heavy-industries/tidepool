@@ -232,7 +232,7 @@ async fn compaction_fires_mid_loop_in_place_and_reaches_next_render() {
     assert!(
         outcome
             .prompt_after
-            .contains("Summary of the prior window:"),
+            .contains("Summary of the prior context (compacted):"),
         "post-loop render must show the compaction block once lastCompaction is Just, got:\n{}",
         outcome.prompt_after
     );

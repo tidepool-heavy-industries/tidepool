@@ -89,7 +89,7 @@ impl ModelProvider for NeverFinalizeProvider {
             .find(|m| matches!(m.role, Role::User))
             .map(|m| m.content.clone())
             .unwrap_or_default();
-        if latest_user.contains("approaching this window's round limit") {
+        if latest_user.contains("approaching this session's round limit") {
             let mut slot = self.nudge_seen_at.lock();
             if slot.is_none() {
                 *slot = Some(n);
