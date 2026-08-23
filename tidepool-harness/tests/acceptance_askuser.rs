@@ -520,6 +520,109 @@ async fn askuser_operator_form_round_trip_and_ws4_log() {
     );
 }
 
+/// A scripted operator for the root-`Maybe` regression below: asserts every
+/// presented shape is `OptionalShape String` (never a tagged `Nothing`/`Just`
+/// sum), then answers the FIRST ask with JSON `null` (`Nothing`) and every
+/// later ask with a JSON string (`Just`) — covering both directions the
+/// authoritative `FromJSON (Maybe a)` decode distinguishes.
+struct MaybeGate {
+    calls: AtomicUsize,
+}
+
+impl OperatorGate for MaybeGate {
+    fn present_form(&self, shape: &FormShape) -> serde_json::Value {
+        assert_eq!(
+            shape,
+            &FormShape::Optional(Box::new(FormShape::String)),
+            "root `Maybe Text` must derive OptionalShape String — the tagged \
+             Nothing/Just sum the generic fallback used to produce is \
+             something `FromJSON (Maybe a)` (null-or-inner) can never decode"
+        );
+        if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
+            serde_json::Value::Null
+        } else {
+            serde_json::json!("some text")
+        }
+    }
+}
+
+/// High-2 regression: `askUser @(Maybe Text)` at the ROOT (not nested in a
+/// field) must present `OptionalShape String` and the operator's answer must
+/// actually decode back into a typed `Maybe Text` — before the `GForm.hs`
+/// `FormRoot (Maybe a)` fix, the generic fallback derived a `Nothing`/`Just`
+/// tagged sum that `FromJSON (Maybe a)` (null-or-inner) could never read, so
+/// every selection re-presented until the driver's reprompt cap. Exercises
+/// BOTH directions — a `null` (`Nothing`) answer and a string (`Just`)
+/// answer — in one cycle, through the real production entry point
+/// (`SelfHarnessDriver::run_one_cycle`), proving the shape AND the decode,
+/// not just that the type compiles.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn root_maybe_form_shape_and_decode_round_trip() {
+    support::require_extract();
+    let _cache_guard = support::isolate_cache();
+
+    let agent_cfg = EngineConfig::from_decls(
+        answerer_decls(),
+        prelude_dir(),
+        Some(examples_harness_dir()),
+    )
+    .expect("answerer engine config");
+    let content = "```haskell\n\
+         import HarnessTypes (Decision (..), Confidence (..))\n\n\
+         (do\n\
+         \x20  a <- askUser @(Maybe Text)\n\
+         \x20  b <- askUser @(Maybe Text)\n\
+         \x20  finalize @Decision (Decision\n\
+         \x20    { action = fromMaybe \"none\" a <> \"|\" <> fromMaybe \"none\" b\n\
+         \x20    , rationale = \"root maybe round trip\"\n\
+         \x20    , confidence = Low\n\
+         \x20    })) :: M ()\n\
+         ```"
+        .to_string();
+    let provider: Arc<dyn DynModelProvider> = Arc::new(ReplayProvider::new(vec![RecordedReply {
+        content,
+        usage: Usage {
+            input_tokens: 10,
+            output_tokens: 5,
+            cached_input_tokens: None,
+            cache_write_tokens: None,
+        },
+    }]));
+
+    let log_path = std::env::temp_dir().join(format!(
+        "acceptance-askuser-root-maybe-{}.jsonl",
+        std::process::id()
+    ));
+    let writer =
+        tidepool_harness::log::LogWriter::create(&log_path, &header()).expect("log writer");
+    let agent = Arc::new(Harness::new(writer, agent_cfg, provider).expect("agent harness boots"));
+
+    let observer = Arc::new(CaptureObserver::default());
+    let mut driver = SelfHarnessDriver::new(agent, observer);
+    driver.set_gate(Arc::new(MaybeGate {
+        calls: AtomicUsize::new(0),
+    }));
+    let source = load_harness_source(&examples_harness_dir().join("Harness.hs"))
+        .expect("reference harness source loads");
+
+    let outcome = driver
+        .run_one_cycle(&source, None)
+        .await
+        .expect("root Maybe askUser -> finalize round trip");
+
+    let decision = outcome
+        .state_json
+        .get("lastDecision")
+        .and_then(|v| v.as_object())
+        .unwrap_or_else(|| panic!("lastDecision must be a Just Decision, got {:?}", outcome.state_json));
+    assert_eq!(
+        decision.get("action").and_then(|v| v.as_str()),
+        Some("none|some text"),
+        "the Nothing answer and the Just answer must both have decoded \
+         correctly and flowed through finalize, got {decision:?}"
+    );
+}
+
 /// The author-contract claim, at COMPILE level: declare the example ADTs
 /// with `deriving (Generic, FromJSON)` — the FromJSON being the vendored
 /// generic DEFAULT, no method written — then ask for one. No codec, no form

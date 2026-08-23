@@ -145,6 +145,23 @@ instance {-# OVERLAPPING #-} FormRoot Int where
 instance {-# OVERLAPPING #-} FormRoot Double where
   rootShape = NumberShape
 
+-- | A root @Maybe a@ is the same blessed OPTIONAL control 'FormField' gives
+-- @Maybe a@ at field level — never the generic fallback's tagged
+-- @Nothing@\/@Just@ sum, which 'FromJSON (Maybe a)' (null-or-inner) can
+-- never decode: every selection would fail Haskell-side and re-present until
+-- the reprompt cap. Delegates to @a@'s OWN 'FormRoot' for the inner shape, so
+-- a root @Maybe MyRecord@'s cycle-visited set starts at @'[MyRecord]@ exactly
+-- as a plain (non-@Maybe@) root of that record would. Nested optionality
+-- (@Maybe (Maybe a)@) is rejected here with the SAME diagnostic
+-- 'FieldCheck' gives the field-level case — one message, one family, not a
+-- second copy for the root position.
+instance
+  {-# OVERLAPPING #-}
+  (FieldCheck "<root>" (Maybe a), FormRoot a) =>
+  FormRoot (Maybe a)
+  where
+  rootShape = OptionalShape (rootShape @a)
+
 instance {-# OVERLAPPABLE #-} (Generic a, GForm '[a] (Rep a)) => FormRoot a where
   rootShape = gShape @'[a] @(Rep a) Proxy
 
