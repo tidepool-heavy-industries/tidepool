@@ -79,6 +79,7 @@ import Tidepool.Aeson.FromJSON (genericParseJSON)
 import Tidepool.Aeson.Schema (JsonSchema)
 import Tidepool.Prelude hiding (render)
 import Tidepool.QQ (fmt)
+import qualified Tidepool.TextFormat as TF
 -- The base functor and its budget vocabulary are consumed VERBATIM from the
 -- C0 fixture.  Its CONSTRUCTORS are reached qualified because three of them
 -- (@Explore@\/@Compare@\/@Challenge@) share their names with this module's
@@ -232,7 +233,10 @@ childPath :: NodePath -> Int -> Text -> NodePath
 childPath (NodePath segs) i title = NodePath (segs <> [show (i + 1) <> "-" <> slug title])
 
 -- | Lowercase, every run of non-@[a-z0-9]@ to a single @-@, trimmed, capped
--- at 32 characters; a title that slugs empty becomes @branch@.
+-- at 32 characters; a title that slugs empty becomes @branch@. Delegates to
+-- 'TF.slugifyAsciiBounded' — see there for the policy; this alias exists so
+-- every call site keeps naming the containment-specific vocabulary ("slug",
+-- not "text formatting").
 --
 -- __A containment requirement, not cosmetics.__  @tidepool-web@'s loopback
 -- trust model rests on "@node_id@ is always a substrate identifier a caller
@@ -241,17 +245,7 @@ childPath (NodePath segs) i title = NodePath (segs <> [show (i + 1) <> "-" <> sl
 -- prefix is what keeps that invariant true when the tree's node ids are
 -- derived from a model's own branch labels.
 slug :: Text -> Text
-slug title =
-  let squashed = trimDashes (collapse (map keep (unpack (toLower title))))
-      capped = trimDashes (take 32 squashed)
-   in if null capped then "branch" else pack capped
-  where
-    keep c = if (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') then c else '-'
-    collapse s = case s of
-      [] -> []
-      ('-' : rest) -> '-' : collapse (dropWhile (== '-') rest)
-      (c : rest) -> c : collapse rest
-    trimDashes = reverse . dropWhile (== '-') . reverse . dropWhile (== '-')
+slug = TF.slugifyAsciiBounded "branch" 32
 
 -- ---------------------------------------------------------------------------
 -- The brief a node is prompted with

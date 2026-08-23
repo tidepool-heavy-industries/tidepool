@@ -23,6 +23,7 @@ module Tidepool.TextFormat
   , wrap
     -- * Transformations
   , slugify
+  , slugifyAsciiBounded
   , truncateText
   ) where
 
@@ -169,6 +170,31 @@ slugify = collapseHyphens . T.map toLowerOrHyphen . T.strip
       | isAlphaNum c = toLowerChar c
       | otherwise    = '-'
     collapseHyphens = T.intercalate "-" . filter (not . T.null) . splitOn "-"
+
+-- | ASCII-safe slug with an explicit character cap and empty-result
+-- fallback: lowercase, replace every character outside @[a-z0-9]@ with a
+-- hyphen, collapse runs of hyphens, trim leading\/trailing hyphens, cut to
+-- @limit@ characters (trimming a hyphen the cut may have exposed), then
+-- substitute @fallback@ if nothing survives. The policy-bearing sibling of
+-- 'slugify' (Unicode-preserving, uncapped, no fallback) — for a caller that
+-- MUST land in a specific alphabet and length, e.g. a model-produced title
+-- minted into a filesystem\/URL path segment.
+--
+-- >>> slugifyAsciiBounded "branch" 32 "Hello, World!"
+-- "hello-world"
+-- >>> slugifyAsciiBounded "branch" 32 "!!!"
+-- "branch"
+slugifyAsciiBounded :: Text -> Int -> Text -> Text
+slugifyAsciiBounded fallback limit title =
+  let squashed = trimHyphens (collapseHyphens (T.map toLowerOrHyphen (T.toLower title)))
+      capped = trimHyphens (T.take limit squashed)
+   in if T.null capped then fallback else capped
+  where
+    toLowerOrHyphen c
+      | (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') = c
+      | otherwise = '-'
+    collapseHyphens = T.intercalate "-" . filter (not . T.null) . splitOn "-"
+    trimHyphens = T.dropAround (== '-')
 
 -- | Truncate text to n characters, appending "..." if truncated.
 truncateText :: Int -> Text -> Text
