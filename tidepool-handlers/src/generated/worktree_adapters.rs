@@ -35,6 +35,10 @@ pub(crate) fn branch_name_to_wire(branch_name: &BranchName) -> WtBranchName {
     }
 }
 
+pub(crate) fn branch_name_from_wire(branch_name: &WtBranchName) -> BranchName {
+    BranchName::from_raw(branch_name.raw.clone())
+}
+
 // WorktreeSource::from_wire — HAND-WRITTEN, not generated: composes a FALLIBLE conversion (`worktree_id_from_wire`); the error path is semantic
 
 pub(crate) fn dirty_policy_from_wire(dirty_policy: WtDirtyPolicy) -> DirtyPolicy {
@@ -65,3 +69,5 @@ pub(crate) fn in_progress_kind_to_wire(in_progress_kind: InProgressKind) -> WtIn
 // WorktreeHandle::into_wire — HAND-WRITTEN, not generated: delegates to the hand-written receipt conversion through `h.receipt()`
 
 // WorktreeSummary::into_wire — HAND-WRITTEN, not generated: delegates to the hand-written receipt conversion
+
+// MergeOutcome::into_wire — HAND-WRITTEN, not generated: `Merged` wraps its `GitOid` through `git_oid_to_wire`; `Conflict` clones its path `Vec` — both need a conversion beyond a bare variant rename

@@ -302,6 +302,13 @@ fn worktree_wire_types_match_the_hand_written_block_field_for_field() {
             ("present", "bool"),
         ],
     );
+
+    assert_enum(
+        &module,
+        "WtMergeOutcome",
+        WIRE,
+        &["Merged(WtGitOid)", "Conflict(Vec<String>)"],
+    );
 }
 
 // ---------------------------------------------------------------------------

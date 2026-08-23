@@ -96,8 +96,7 @@ import Tidepool.Agent.Spawn
 -- `renderWorktreeError`, which is authored library code the generated module
 -- cannot reach.
 import Tidepool.Effects
-  ( ExecError (..)
-  , SpawnError
+  ( SpawnError
   , WorktreeHandle (..)
   , WorktreeReceipt (..)
   , WorktreeSummary (..)
@@ -115,6 +114,7 @@ import Tidepool.Resume
   , emptyResume
   , isResumed
   )
+import Tidepool.Shell (renderExecError, runInTry)
 import qualified Tidepool.Swarm as Swarm
 import Tidepool.Worktree
 
@@ -956,19 +956,19 @@ applyPolicy p s why = case nodeOnFailure p of
               | otherwise -> pure (PolicyEscalated [fmt|{why} — retry unresolved: {rr.resolutionNotes}|] 1)
 
 -- | Merge one child branch into this node.  Mechanical first — a clean merge
--- is the whole integration tier at zero tokens — and aborted rather than left
--- half-applied, so the conflict is handed on with the worktree intact.
+-- is the whole integration tier at zero tokens — via the canonical typed
+-- 'mergeBranchInto' verb: conflict-vs-failure classification and abort
+-- discipline are the runtime's, not re-derived here.
 mergeChild :: WorktreeHandle -> DevPlan -> NodeSeed -> Harness (Either Text RebaseNote)
 mergeChild tree p s =
-  gitIn tree [fmt|merge --no-ff -m "fold {childBranch} into {nodeName p}" {childBranch}|] >>= \case
-    Left e -> pure (Left e)
-    Right pr
-      | ok pr -> pure (Right (RebaseNote childBranch (renderBranchName tree.handleReceipt.branch) RebaseClean))
-      | otherwise -> do
-          _ <- gitIn tree "merge --abort"
-          pure (Left [fmt|merge conflict: {firstLine pr.stderr}|])
+  mergeBranchInto (worktreeId tree) childBranch message >>= \case
+    Left err -> pure (Left (renderWorktreeError err))
+    Right (Conflict paths) -> pure (Left [fmt|merge conflict: {T.intercalate ", " paths}|])
+    Right (Merged _commit) ->
+      pure (Right (RebaseNote (renderBranchName childBranch) (renderBranchName tree.handleReceipt.branch) RebaseClean))
   where
-    childBranch = branchOf s.seedTree
+    childBranch = s.seedTree.handleReceipt.branch
+    message = [fmt|fold {renderBranchName childBranch} into {nodeName p}|]
 
 -- ---------------------------------------------------------------------------
 -- The ladder, the receipt, the journal
@@ -1070,19 +1070,12 @@ noteHeadMove name change = say (name <> " HEAD -> " <> renderGitOid receipt.newH
     receipt = value change
 
 -- | Plain git in a worktree this node owns — authored policy, not a runtime
--- workflow verb.  PRD 19's freeze is about what the RUNTIME crates expose;
--- this is Exec.
+-- workflow verb. A thin wrapper over the shared 'runInTry' (kept local to
+-- each harness rather than in "Tidepool.Worktree" itself, because that
+-- module compiles under rows — the recursive companion's delegate-wrapped
+-- branch row in particular — that do not carry `Exec`; see its module doc).
 gitIn :: WorktreeHandle -> Text -> Harness (Either Text Proc)
-gitIn tree args =
-  runIn tree.handleReceipt.cwd ("git " <> args) >>= \case
-    Left e -> pure (Left (renderExecError e))
-    Right pr -> pure (Right pr)
-
-renderExecError :: ExecError -> Text
-renderExecError e = case e of
-  ExecSpawn detail -> "could not spawn: " <> detail
-  ExecBadDir detail -> "bad working directory: " <> detail
-  ExecTimeout detail -> "timed out: " <> detail
+gitIn tree args = runInTry tree.handleReceipt.cwd ("git " <> args)
 
 branchOf :: WorktreeHandle -> Text
 branchOf tree = renderBranchName tree.handleReceipt.branch

@@ -29,33 +29,37 @@ written against; changing one is a cross-cutting change, not a local edit.
 
 ## Rules that are not negotiable here
 
-**No git workflow verbs.** No `rebase`, `merge`, `cherry_pick`, conflict
-resolution, or branch promotion. PRD 19's boundary is creation, lookup,
-inspection, events. The git work belongs to coding agents using their native
-tools, and the runtime observes what the repository became. Adding a workflow
-verb is a design regression, not a convenience.
+**No general git workflow verbs.** No `rebase`, `cherry_pick`, conflict
+RESOLUTION, or branch promotion. PRD 19's boundary is creation, lookup,
+inspection, events, plus the one merge primitive below. That work belongs to
+coding agents using their native tools, and the runtime observes what the
+repository became. Adding a workflow verb beyond the one exception is a
+design regression, not a convenience.
 
-**The one narrow, deliberate exception: `merge.rs` (PRD 21 C5).** The
-recursive companion's worktree-coordination fold — each node merges its
-children's worktrees into its own, in declared branch order
-(`plans/self-iterating-harness/21-recursive-companion-prd.md`, "Worktree
-coordination") — needs ONE typed primitive: merge a branch into a target
-worktree, abort-and-report on conflict, never leave a half-merged tree.
-`merge::merge_branch_into` is that primitive, through the same `GitCli` call
-site as everything else here, with `MergeOutcome::{Merged,Conflict}` as its
-typed result (a non-conflict failure stays the ordinary
-`WorktreeError::GitFailure`). It does NOT reopen the boundary above: it is
-not exposed as a new `Worktree` effect verb (that decl is generated from
-`tidepool-protocol`, a schema this crate does not own, and widening the
-Haskell-facing surface with a general merge verb is exactly the regression
-the boundary refuses), and it adds no other workflow verb. The authored
-Haskell side (`harness-dogfooding/recursive-companion/Harness.hs`) reaches
-the same semantics through `Exec`, mirroring `harness-dogfooding/dev-tree
-/Harness.hs`'s own `mergeChild` — mechanical git run as authored policy in a
-worktree the node owns, exactly PRD 19's existing carve-out for that class
-of code. `merge.rs` exists so that ONE typed, fast-tier-tested definition of
-"merge, conflict, abort" is the ground truth both sides agree with, instead
-of the semantics being re-derived ad hoc at each authored call site.
+**The one narrow, deliberate exception: `merge.rs` (PRD 21 C5), exposed as a
+`Worktree` verb.** The recursive companion's worktree-coordination fold —
+each node merges its children's worktrees into its own, in declared branch
+order (`plans/self-iterating-harness/21-recursive-companion-prd.md`,
+"Worktree coordination") — needs ONE typed primitive: merge a branch into a
+target worktree, abort-and-report on conflict, never leave a half-merged
+tree. `merge::merge_branch_into` is that primitive, through the same
+`GitCli` call site as everything else here, with
+`MergeOutcome::{Merged,Conflict}` as its typed result (a non-conflict
+failure stays the ordinary `WorktreeError::GitFailure`). It IS exposed as a
+`Worktree` effect verb — `WorktreeMergeInto` / Haskell `mergeBranchInto`,
+generated from `tidepool-protocol`'s schema like every other Worktree verb —
+because both `harness-dogfooding/dev-tree/Harness.hs`'s `mergeChild` and
+`harness-dogfooding/recursive-companion/Harness.hs`'s `mergeChildInto` had
+reimplemented this exact primitive over raw `Exec` and drifted from it: every
+nonzero exit read as a conflict, and a failed `merge --abort` was silently
+ignored. `merge.rs` exists so that ONE typed, fast-tier-tested definition of
+"merge, conflict, abort" is the ground truth every caller uses, instead of
+the semantics being re-derived ad hoc at each authored call site. What stays
+authored policy on the Haskell side is everything past classification:
+resolving a reported conflict, and any git operation this primitive does not
+cover (rebase, the boundary/status reads) — both harnesses still reach those
+through `gitIn`, now the one shared stdlib helper (`Tidepool.Worktree.gitIn`,
+built on `Tidepool.Shell.runInTry`) rather than a per-harness copy.
 
 **Never dirty the source.** The registry root, worktree root, journal, and any
 temporary index all live OUTSIDE the source working tree. Managed branches use

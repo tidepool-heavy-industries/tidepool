@@ -60,6 +60,30 @@ pub fn file(e: &Effect) -> GeneratedFile {
     }
 }
 
+/// Render one `    Ctor(field, …),` enum-variant line, wrapping onto its own
+/// block the way rustfmt does once the single-line rendering would exceed its
+/// default 100-column width — the same reproduction the dispatch match arms
+/// below need, and for the same reason: a variant with `tidepool_bridge_
+/// effects::Wt*`-qualified field types crosses that width sooner than a
+/// short one, and `WorktreeMergeInto`'s three-argument verb is the first to
+/// do it (Exec/Journal/Worktree's earlier verbs never did).
+fn render_variant(ctor: &str, fields: &[String]) -> String {
+    if fields.is_empty() {
+        return format!("    {ctor},\n");
+    }
+    let single_line = format!("    {ctor}({}),", fields.join(", "));
+    if single_line.chars().count() <= 100 {
+        format!("{single_line}\n")
+    } else {
+        let mut out = format!("    {ctor}(\n");
+        for f in fields {
+            out.push_str(&format!("        {f},\n"));
+        }
+        out.push_str("    ),\n");
+        out
+    }
+}
+
 fn body(e: &Effect) -> String {
     let mut out = header(
         "//! ",
@@ -103,11 +127,7 @@ fn body(e: &Effect) -> String {
                         .rust_type(&f.ty, &format!("{}::{}::{}", e.name, adt.name, v.ctor))
                 })
                 .collect();
-            if fields.is_empty() {
-                out.push_str(&format!("    {},\n", v.ctor));
-            } else {
-                out.push_str(&format!("    {}({}),\n", v.ctor, fields.join(", ")));
-            }
+            out.push_str(&render_variant(v.ctor, &fields));
         }
         out.push_str("}\n\n");
     }
@@ -128,11 +148,7 @@ fn body(e: &Effect) -> String {
                     .rust_type(&a.ty, &format!("{}::{}::{}", e.name, v.ctor, a.name))
             })
             .collect();
-        if tys.is_empty() {
-            out.push_str(&format!("    {},\n", v.ctor));
-        } else {
-            out.push_str(&format!("    {}({}),\n", v.ctor, tys.join(", ")));
-        }
+        out.push_str(&render_variant(v.ctor, &tys));
     }
     out.push_str("}\n\n");
 

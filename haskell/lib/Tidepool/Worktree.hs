@@ -3,11 +3,19 @@
 -- | Managed git worktrees.
 --
 -- A resident allocates isolated worktrees, looks retained ones back up by
--- durable id, and reads what git actually became.  It does not perform git
--- workflow here: there is no @rebaseOnto@, @merge@, @cherryPick@, conflict
--- resolution, or branch promotion in this module, and their absence is the
--- design rather than a gap.  Coding agents do that work with their native
--- tools; Tidepool observes the result through 'Tidepool.Event'.
+-- durable id, and reads what git actually became.  There is no @rebaseOnto@,
+-- @cherryPick@, conflict RESOLUTION, or branch promotion here, and their
+-- absence is the design rather than a gap: coding agents do that work with
+-- their native tools (@gitIn@ — a thin per-harness wrapper over
+-- 'Tidepool.Shell.runInTry', NOT defined here; see the note below on why),
+-- and Tidepool observes the result through 'Tidepool.Event'.
+--
+-- 'mergeBranchInto' is the ONE deliberate exception (PRD 21 C5's
+-- worktree-coordination fold): merge one branch into a target worktree,
+-- typed and classified once — conflict vs. a git failure that never entered a
+-- merge at all — instead of every authored harness re-deriving that
+-- classification over raw 'gitIn'. It is not a general workflow surface;
+-- resolving a conflict it reports is still authored policy.
 --
 -- == The vocabulary
 --
@@ -93,11 +101,16 @@ module Tidepool.Worktree
   , WorktreeHandle
   , WorktreeId (..)
   , BranchName
+  , mkBranchName
   , GitRef
   , GitOid
   , worktreeId
   , worktreeBranch
   , worktreeHead
+
+    -- * Merging (PRD 21 C5's one narrow, deliberate workflow primitive)
+  , MergeOutcome (..)
+  , mergeBranchInto
 
     -- * Receipts and failures
   , WorktreeReceipt (..)
@@ -120,6 +133,7 @@ import Tidepool.Effects
   , GitOid (..)
   , GitRef
   , M
+  , MergeOutcome (..)
   , Worktree (WorktreeBranchOf, WorktreeHeadOf)
   , WorktreeError (..)
   , WorktreeHandle
@@ -132,6 +146,7 @@ import Tidepool.Effects
   , liftEither
   , listWorktrees
   , lookupWorktree
+  , mergeBranchInto
   , worktreeId
   )
 import Tidepool.Prelude hiding (error)
@@ -165,6 +180,27 @@ default (Int, Double, Text)
 -- "Tidepool.Effects" module's own pragma set, verbatim: these bodies used to
 -- be spliced INTO that module, so anything less is a scope this code did not
 -- have to compile against before.
+--
+-- 'mkBranchName' is an ADDITION beyond that original fourteen — a smart
+-- constructor so a harness whose domain model carries a branch as plain
+-- 'Text' (the recursive companion's fold) can still call 'mergeBranchInto'.
+-- 'mergeBranchInto' itself is representable and lives in the generated
+-- "Tidepool.Effects" (like 'createWorktree'), re-exported here for the same
+-- reason those three are.
+--
+-- @gitIn@\/@renderExecError@ (the two dogfood harnesses' byte-identical
+-- helpers) do NOT move here, even though they are exactly the kind of
+-- duplication this module otherwise absorbs: 'Tidepool.Shell.runInTry' (the
+-- shared home they DO get, see that module) needs `Exec` genuinely in the
+-- compiling row, and this module is compiled under rows that omit it — the
+-- recursive companion's own delegate-wrapped branch-node row
+-- (`selfharness::driver::answerer_decls_with_delegate`) is `[Subagent,
+-- Worktree, AskUser, Fork, ReadState, Green, Finalize]`, no `Exec` at all.
+-- Importing `Tidepool.Shell` from here would make EVERY row carrying
+-- `Worktree` require `Exec` too, silently widening a boundary this module's
+-- own header doc says the opposite of. `gitIn` stays a 3-line wrapper over
+-- `runInTry` defined LOCALLY in each harness, which already controls (and
+-- guarantees) its own row includes both.
 
 -- | Seed a managed worktree from the repository Tidepool is running
 -- against. Clean-by-default: a dirty source is REFUSED unless the spec
@@ -214,6 +250,15 @@ worktreeBranch h = send (WorktreeBranchOf (worktreeId h)) >>= liftEither
 -- guessing on its behalf.
 worktreeHead :: WorktreeHandle -> M GitOid
 worktreeHead h = send (WorktreeHeadOf (worktreeId h)) >>= liftEither
+
+-- | Build a 'BranchName' from a plain rendered branch name — for the case
+-- (the recursive companion's fold, in particular) where a node's own domain
+-- model only carries branch identity as 'Text' and needs it back as the typed
+-- argument 'mergeBranchInto' takes. Infallible, same as the wire boundary's
+-- own conversion: a malformed name still just fails at 'mergeBranchInto' as
+-- an ordinary git failure, not a validation error here.
+mkBranchName :: Text -> BranchName
+mkBranchName = BranchName
 
 renderGitOid :: GitOid -> Text
 renderGitOid (GitOid t) = t

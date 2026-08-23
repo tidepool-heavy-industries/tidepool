@@ -16,6 +16,8 @@ module Tidepool.Shell
   , shLines
   , shJson
   , shTry
+  , runInTry
+  , renderExecError
   , splitCols
   ) where
 
@@ -25,7 +27,7 @@ import qualified Tidepool.Data.Text as T
 import Tidepool.Aeson.Value (Value)
 import Tidepool.Aeson.FromJSON (eitherDecode)
 import Tidepool.Records (Proc(..), ok)
-import Tidepool.Effects (M, run, runArgv, liftEither)
+import Tidepool.Effects (ExecError(..), M, run, runArgv, runIn, liftEither)
 
 -- | Run a shell-string command, strip stdout, throw on nonzero exit — the
 -- shell-string sibling of 'sh1'. Shell metachars (@$VAR@, globs, pipes, @&&@)
@@ -70,6 +72,24 @@ shTry argv = do
   if ok p
     then pure (Right (T.strip p.stdout))
     else pure (Left (T.strip p.stderr))
+
+-- | Run a shell-string command in a specific working directory, keeping the
+-- whole 'Proc' (unlike 'shTry', which strips to stdout/stderr text and drops
+-- the directory). @Right proc@ on ANY exit, including nonzero — inspect
+-- `proc.exitCode`/`ok proc` yourself; @Left@ is only a genuine spawn/dir
+-- failure, rendered via 'renderExecError'. Do NOT collapse a spawn error into
+-- the exit-code check: the two are typed separately (#335) for a reason.
+runInTry :: Text -> Text -> M (Either Text Proc)
+runInTry dir cmd = do
+  r <- runIn dir cmd
+  pure (either (Left . renderExecError) Right r)
+
+-- | Render a typed 'ExecError' as one human-legible line.
+renderExecError :: ExecError -> Text
+renderExecError e = case e of
+  ExecSpawn detail -> "could not spawn: " <> detail
+  ExecBadDir detail -> "bad working directory: " <> detail
+  ExecTimeout detail -> "timed out: " <> detail
 
 -- | Split a text line on ASCII whitespace, discarding empty segments.
 -- Useful for parsing fixed-column porcelain output (e.g. @git status --porcelain@).
