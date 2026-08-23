@@ -7,6 +7,12 @@ to plan files that stay in this directory but no longer describe active work.
 
 ## Active work
 
+- [Flight dogfood campaign](flight-dogfood-campaign.md): autonomous
+  fresh-session dogfood rounds driven by the root + native subagents while
+  the operator is offline (~7h, 2026-08-22); robot-operator form answering,
+  per-round analysis reports, scenario battery over the new fork/batch/
+  session capabilities.
+
 - [Fork subsumes split](fork-subsumes-split.md): direction locked by the
   operator (2026-08-22) — the companion tree emerges from model-authored
   `async (fork @T …)` calls; fork children inherit the full node lifecycle;
