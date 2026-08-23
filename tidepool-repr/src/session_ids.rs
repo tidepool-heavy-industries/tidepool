@@ -118,6 +118,17 @@ impl SessionModule {
     pub fn relative_hs_path(&self) -> String {
         format!("Tidepool/Session/{}/G{}.hs", self.kind.tag(), self.gen.0)
     }
+
+    /// The on-disk `.hi` iface path relative to a `--session-root` dir,
+    /// mirroring GHC's own `hiDir` layout (dots become slashes) — the Rust
+    /// twin of Haskell's `Tidepool.Session.sessionHiPath`. Used by the
+    /// compile memo (`tidepool_runtime::cache`) to content-fingerprint a
+    /// stable `--inject-val` module's iface, the same way an `--include`
+    /// root is fingerprinted.
+    #[must_use]
+    pub fn relative_hi_path(&self) -> String {
+        format!("Tidepool/Session/{}/G{}.hi", self.kind.tag(), self.gen.0)
+    }
 }
 
 impl fmt::Display for SessionModule {
@@ -205,6 +216,14 @@ mod tests {
         assert_eq!(
             SessionModule::lib(Generation(7)).relative_hs_path(),
             "Tidepool/Session/Lib/G7.hs"
+        );
+    }
+
+    #[test]
+    fn relative_hi_path_mirrors_module() {
+        assert_eq!(
+            SessionModule::val(Generation(0)).relative_hi_path(),
+            "Tidepool/Session/Val/G0.hi"
         );
     }
 

@@ -486,6 +486,29 @@ pub struct Invocation<'a> {
     /// (following wrapper `exec` targets); resolved through `$PATH` first if
     /// it is a bare name.
     pub bin: &'a Path,
+    /// A single session `Val` module permitted as a CACHEABLE `--inject-val`
+    /// target, despite `--session-root`/`--inject-val` otherwise making an
+    /// invocation uncacheable (see [`invocation_key`]'s doc, hazard (b) in
+    /// `plans/compile-memo.md`). This is the harness driver's ONE stable,
+    /// never-rotating "harness context" module
+    /// (`plans/turn-latency-state-injection.md`): its NAME and TYPE never
+    /// change turn to turn — only the heap value a later run resolves it to
+    /// does, and the iface never encodes a value — so the compiled artifact
+    /// really is independent of which turn produced it, which is what makes
+    /// this safe to memoize.
+    ///
+    /// `None` (the default) means every `--inject-val`/`--session-root` in
+    /// `argv` still makes the invocation uncacheable, exactly as before this
+    /// field existed. When `Some`, the walk accepts `--session-root <dir>`
+    /// unconditionally (like `--output-dir`) and `--inject-val <module>` ONLY
+    /// when its value equals this module's name — any OTHER `--inject-val`
+    /// value (a real, generation-numbered `Val.G<g>` session bind) still
+    /// makes the invocation uncacheable. The accepted `--session-root`'s
+    /// VALUE, read out of `argv` itself (never supplied separately), locates
+    /// the `.hi` iface this module's CONTENT is fingerprinted from — so the
+    /// fingerprinted path can never drift from what the invocation actually
+    /// reads.
+    pub stable_val: Option<tidepool_repr::SessionModule>,
 }
 
 /// Compute the key for an invocation, or `None` when the invocation is
@@ -526,9 +549,16 @@ pub struct Invocation<'a> {
 /// An unresolvable binary is likewise uncacheable rather than keyed with an
 /// empty fingerprint — a key that cannot see the compiler would survive an
 /// extract rebuild and serve stale Core.
+///
+/// A caller carrying [`Invocation::stable_val`] additionally accepts
+/// `--session-root <dir>` (dropped, like `--output-dir`) and one matching
+/// `--inject-val <module>` (dropped, and separately CONTENT-fingerprinted —
+/// see that field's doc) — every other `--inject-val`/`--session-root` still
+/// falls through to the default-deny arm below.
 pub fn invocation_key(inv: &Invocation<'_>) -> Option<InvocationKey> {
     // Walk first, so an uncacheable invocation costs no hashing.
     let mut fields: Vec<&OsStr> = Vec::new();
+    let mut stable_session_root: Option<&OsStr> = None;
     let mut args = inv.argv.iter();
     while let Some(arg) = args.next() {
         match arg.to_str() {
@@ -540,9 +570,26 @@ pub fn invocation_key(inv: &Invocation<'_>) -> Option<InvocationKey> {
                 fields.push(OsStr::new(flag));
                 fields.push(value);
             }
+            Some("--session-root") if inv.stable_val.is_some() => {
+                stable_session_root = Some(args.next()?.as_os_str());
+            }
+            Some("--inject-val") => {
+                let value = args.next()?;
+                match inv.stable_val {
+                    Some(sv) if value.to_str() == Some(sv.module_name().as_str()) => {}
+                    _ => return None,
+                }
+            }
             _ if arg.as_os_str() == inv.input_path.as_os_str() => {}
             _ => return None,
         }
+    }
+    // A caller supplying `stable_val` must have actually put both matching
+    // argv elements there — an invocation that half-carries the flags (a
+    // caller bug) is uncacheable rather than fingerprinted from a stale or
+    // guessed location.
+    if inv.stable_val.is_some() && stable_session_root.is_none() {
+        return None;
     }
 
     let bin = resolve_for_fingerprint(inv.bin)?;
@@ -564,9 +611,29 @@ pub fn invocation_key(inv: &Invocation<'_>) -> Option<InvocationKey> {
         fingerprint_dir_relative(root, &mut hasher);
     }
 
+    if let (Some(sv), Some(root)) = (inv.stable_val, stable_session_root) {
+        let hi_path = Path::new(root).join(sv.relative_hi_path());
+        fingerprint_stable_val_iface(&hi_path, &mut hasher);
+    }
+
     fingerprint_binary_content(&bin, &mut hasher);
 
     Some(InvocationKey(hasher.finalize().to_hex().to_string()))
+}
+
+/// Fingerprint a stable `--inject-val` module's `.hi` iface by CONTENT — the
+/// same "unreadable is a distinct hashed value, not a skip" discipline
+/// [`collect_relative`] uses for an include file, so a missing/unreadable
+/// iface still yields a stable (if uncacheable-in-practice) key rather than
+/// panicking.
+fn fingerprint_stable_val_iface(hi_path: &Path, hasher: &mut blake3::Hasher) {
+    match fs::read(hi_path) {
+        Ok(bytes) => {
+            frame(hasher, &[1u8]);
+            frame(hasher, blake3::hash(&bytes).as_bytes());
+        }
+        Err(_) => frame(hasher, &[0u8]),
+    }
 }
 
 /// The binary that will actually be spawned, as an absolute readable file.
@@ -1118,6 +1185,7 @@ mod tests {
                 input_path: &input,
                 include: &include,
                 bin: &bin,
+                stable_val: None,
             })
             .expect("this invocation is cacheable")
         };
@@ -1175,6 +1243,7 @@ mod tests {
                 input_path: &input,
                 include: &[],
                 bin: &bin,
+                stable_val: None,
             })
             .unwrap()
         };
@@ -1213,6 +1282,7 @@ mod tests {
                 input_path: &input,
                 include: std::slice::from_ref(&inc),
                 bin: &bin,
+                stable_val: None,
             })
             .unwrap()
         };
@@ -1252,6 +1322,7 @@ mod tests {
                 input_path: &input,
                 include: &[],
                 bin: &bin,
+                stable_val: None,
             })
         };
 
@@ -1285,6 +1356,7 @@ mod tests {
                 input_path: &input,
                 include: &[],
                 bin: &bin,
+                stable_val: None,
             })
         };
 
@@ -1314,6 +1386,118 @@ mod tests {
             input_path: &input,
             include: &[],
             bin: &tmp.path().join("no-such-extract"),
+            stable_val: None,
+        })
+        .is_none());
+    }
+
+    /// A caller carrying `stable_val` DOES make an otherwise-uncacheable
+    /// `--session-root`/`--inject-val` pair cacheable, keyed by the iface
+    /// FILE's content — path-independent (two different `--session-root`
+    /// locations with byte-identical iface content share a key), content-
+    /// sensitive (editing the iface's bytes misses), and still refuses any
+    /// OTHER `--inject-val` value (a real, generation-numbered session bind)
+    /// even with `stable_val` set.
+    #[cfg(unix)]
+    #[test]
+    #[serial]
+    fn invocation_key_accepts_matching_stable_val_inject() {
+        let tmp = TempDir::new().unwrap();
+        let bin = fake_bin(tmp.path(), b"#!/bin/sh\nexit 0\n");
+        let input = tmp.path().join("Expr.hs");
+        fs::write(&input, "module Expr where").unwrap();
+        let module = tidepool_repr::SessionModule::val(tidepool_repr::Generation(0));
+
+        let key_at = |session_root: &Path, iface_bytes: &[u8]| {
+            let hi_path = session_root.join(module.relative_hi_path());
+            fs::create_dir_all(hi_path.parent().unwrap()).unwrap();
+            fs::write(&hi_path, iface_bytes).unwrap();
+            let mut argv = turn_argv(&input, &tmp.path().join("out"), "result", &[]);
+            argv.push(OsString::from("--session-root"));
+            argv.push(session_root.as_os_str().to_os_string());
+            argv.push(OsString::from("--inject-val"));
+            argv.push(OsString::from(module.module_name()));
+            invocation_key(&Invocation {
+                source: "main = pure ()",
+                argv: &argv,
+                input_path: &input,
+                include: &[],
+                bin: &bin,
+                stable_val: Some(module),
+            })
+        };
+
+        let root_a = tmp.path().join("session-a");
+        let root_b = tmp.path().join("session-b");
+        fs::create_dir_all(&root_a).unwrap();
+        fs::create_dir_all(&root_b).unwrap();
+
+        let base = key_at(&root_a, b"iface-v1").expect("stable-val invocation is cacheable");
+        assert_eq!(
+            base,
+            key_at(&root_a, b"iface-v1").expect("deterministic"),
+            "the key must be deterministic"
+        );
+        assert_eq!(
+            base,
+            key_at(&root_b, b"iface-v1").expect("cacheable at a different root"),
+            "identical iface CONTENT at a different --session-root must share a key"
+        );
+        assert_ne!(
+            base,
+            key_at(&root_a, b"iface-v2").expect("still cacheable"),
+            "an iface content edit must miss"
+        );
+
+        // Even with `stable_val` set, a DIFFERENT --inject-val value (a real
+        // Val.G<g> session bind, g != 0) stays uncacheable — hazard (b) is
+        // preserved for everything except the one named stable module.
+        let mut argv = turn_argv(&input, &tmp.path().join("out"), "result", &[]);
+        argv.push(OsString::from("--session-root"));
+        argv.push(root_a.as_os_str().to_os_string());
+        argv.push(OsString::from("--inject-val"));
+        argv.push(OsString::from("Tidepool.Session.Val.G7"));
+        assert!(
+            invocation_key(&Invocation {
+                source: "main = pure ()",
+                argv: &argv,
+                input_path: &input,
+                include: &[],
+                bin: &bin,
+                stable_val: Some(module),
+            })
+            .is_none(),
+            "a non-stable --inject-val value must stay uncacheable"
+        );
+    }
+
+    /// A caller that sets `stable_val` but the argv it actually built never
+    /// carries a `--session-root` (a caller bug, or an `--inject-val` with no
+    /// paired root) is uncacheable rather than fingerprinted from a
+    /// guessed/absent location — the guard reads the root out of argv itself,
+    /// never out of `stable_val`.
+    #[cfg(unix)]
+    #[test]
+    #[serial]
+    fn invocation_key_stable_val_without_matching_argv_is_uncacheable() {
+        let tmp = TempDir::new().unwrap();
+        let bin = fake_bin(tmp.path(), b"#!/bin/sh\nexit 0\n");
+        let input = tmp.path().join("Expr.hs");
+        fs::write(&input, "module Expr where").unwrap();
+        let module = tidepool_repr::SessionModule::val(tidepool_repr::Generation(0));
+
+        // --inject-val without a --session-root: uncacheable (the walk never
+        // saw a session root to fingerprint from).
+        let mut argv_no_root = turn_argv(&input, &tmp.path().join("out"), "result", &[]);
+        argv_no_root.push(OsString::from("--inject-val"));
+        argv_no_root.push(OsString::from(module.module_name()));
+        assert!(invocation_key(&Invocation {
+            source: "main = pure ()",
+            argv: &argv_no_root,
+            input_path: &input,
+            include: &[],
+            bin: &bin,
+            stable_val: Some(module),
         })
         .is_none());
     }
@@ -1336,6 +1520,7 @@ mod tests {
             input_path: &input,
             include: &[],
             bin: &bin,
+            stable_val: None,
         })
         .unwrap();
         assert_ne!(

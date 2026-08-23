@@ -131,6 +131,107 @@ pub fn state_in(state_json: Option<&Json>) -> String {
     }
 }
 
+/// The ONE stable, never-rotating session `Val` module the fused outer
+/// render/loop compile ([`crate::selfharness::driver::SelfHarnessDriver::compile_cycle_entry`])
+/// injects turn-invariant harness context through, instead of splicing the
+/// state/operator-msg JSON as a source literal (`plans/turn-latency-state-injection.md`).
+///
+/// Reserves `Generation(0)` of the ordinary `Tidepool.Session.Val.G<g>`
+/// scheme — no new Haskell-side module-name shape needed. This is safe
+/// because a REAL session value bind always mints `val_gen().next()` (>= 1:
+/// `PersistentSession::new` starts `val_gen` at `Generation(0)`, doc'd as
+/// "the empty session — no Lib/Val module exists yet"), and `set_val_gen`'s
+/// monotonic-max rule means repeatedly (re)binding at the fixed
+/// `Generation(0)` this module uses never advances that counter — gen 0 can
+/// therefore never collide with a real bind on the same session.
+pub fn harness_ctx_module() -> tidepool_repr::SessionModule {
+    tidepool_repr::SessionModule::val(tidepool_repr::Generation(0))
+}
+
+/// The bound name under [`harness_ctx_module`]: `(stateJson, operatorMsgJson)
+/// :: (Text, Text)`, both RAW JSON text (never decoded Haskell values) —
+/// [`state_in_via_ctx`]/[`operator_msg_in_via_ctx`] decode them, rather than
+/// a source literal carrying the state's own bytes, which is what makes the
+/// fused outer module's TEXT turn-invariant.
+pub const HARNESS_CTX_BINDING: &str = "__harnessCtx";
+
+/// The standalone module [`SelfHarnessDriver::refresh_harness_ctx`]
+/// (`driver.rs`) compiles through
+/// `tidepool_runtime::session::turn::compile_session_turn`'s `--session-bind`
+/// path every cycle, to (re-)bind [`HARNESS_CTX_BINDING`] at
+/// [`harness_ctx_module`]. `state_json`/`operator_msg_json` are both raw JSON
+/// text (the `State`'s JSON, and a JSON-encoded `Maybe Text` for the operator
+/// message — `serde_json::to_string(&Option<String>)` already produces
+/// exactly that shape: `"null"`/`"\"...\""`).
+///
+/// Deliberately its OWN tiny compile, and deliberately never itself
+/// memo-cacheable (`tidepool_runtime::cache::invocation_key`'s hazard (b) in
+/// `plans/compile-memo.md`: fresh literal content every call) — the ONE
+/// import (`Data.Text`) keeps it orders of magnitude cheaper than the fused
+/// outer module it unblocks from the memo.
+///
+/// [`SelfHarnessDriver::refresh_harness_ctx`]: crate::selfharness::driver::SelfHarnessDriver::refresh_harness_ctx
+pub fn harness_ctx_source(state_json: &str, operator_msg_json: &str) -> String {
+    // `__result :: Eff '[] (Text, Text)`, not a bare `(Text, Text)`: a
+    // session-bind turn's scaffold target is always run through the
+    // suspendable-binding JIT calling convention (freer-simple's `Val`/`E`
+    // union), which a plain non-`Eff` value does not satisfy — mirrors the
+    // real bind wrapper's shape (`tidepool-repl`'s `wrap_bind_source`/
+    // `single_bind_template`: `__result :: Eff <stack> _; __result = do {
+    // <stmt> ; pure {{BINDERS}} }`), specialized to the empty row since this
+    // scratch module has no effects of its own to declare.
+    format!(
+        "{{-# LANGUAGE OverloadedStrings, DataKinds #-}}\nmodule TidepoolHarnessCtx \
+         where\nimport Data.Text (Text)\nimport Control.Monad.Freer (Eff)\n__result :: Eff \
+         '[] (Text, Text)\n__result = pure ({}, {})\n",
+        haskell_string_literal(state_json),
+        haskell_string_literal(operator_msg_json),
+    )
+}
+
+/// Fixed helper text for the fused outer compile's `__selfHarnessState`
+/// binding, injected-Text sibling of [`state_in`] — IDENTICAL every turn
+/// (references [`HARNESS_CTX_BINDING`] only, never the state's own bytes),
+/// which is the whole point: the fused outer module's SOURCE never changes
+/// turn to turn, so the compile memo hits after the first turn.
+///
+/// `"null"` (the fresh-boot sentinel [`state_in`]'s `None` arm special-cased
+/// in RUST) is now special-cased HERE, in Haskell, since the value crossing
+/// the injection plane is always a plain `Text`, never absent — a fresh boot
+/// still injects the literal string `"null"` (`harness_ctx_source`'s
+/// caller), and this helper recognizes it the same way `state_in`'s `None`
+/// arm used to. Every other value is decoded via the author's `FromJSON
+/// State` instance, with the SAME `STATE_DECODE_SENTINEL`-prefixed error on
+/// failure as [`state_in`] — the driver's decode-failure handling
+/// (`DriverError::StateDecode`) does not need to change.
+pub fn state_in_via_ctx() -> String {
+    format!(
+        "__selfHarnessState :: {q}.State\n__selfHarnessState = case fst {b} of {{ \"null\" -> \
+         {q}.initialState; __stateJsonText -> case Aeson.eitherDecode __stateJsonText of {{ \
+         Right s -> s; Left e -> error ({sentinel} <> e) }} }}\n",
+        q = LOADED_QUALIFIER,
+        b = HARNESS_CTX_BINDING,
+        sentinel = haskell_string_literal(STATE_DECODE_SENTINEL),
+    )
+}
+
+/// Injected-Text sibling of [`operator_msg_in`] — see [`state_in_via_ctx`]'s
+/// doc for why this is fixed text. The operator message crosses as a
+/// JSON-encoded `Maybe Text` (never a bare literal), decoded via the same
+/// `Aeson.eitherDecode` machinery every other injected value uses; a decode
+/// failure here (which cannot happen from a caller going through
+/// [`harness_ctx_source`], since `serde_json` always emits a value `Maybe
+/// Text`'s `FromJSON` accepts) falls back to `Nothing` rather than erroring —
+/// the operator message is advisory, not a contract the author's own types
+/// pin the way `State` does.
+pub fn operator_msg_in_via_ctx() -> String {
+    format!(
+        "__operatorMsg :: Maybe Text\n__operatorMsg = case Aeson.eitherDecode (snd {b}) of {{ \
+         Right m -> m; Left _ -> Nothing }}\n",
+        b = HARNESS_CTX_BINDING,
+    )
+}
+
 /// Inbound sibling of [`state_in`] for the boot-time run-journal FOLD (PRD 20
 /// S1-L5): splice `__selfHarnessResume :: Resume.ResumeFold`, decoded via
 /// `Aeson.eitherDecode` against `Tidepool.Resume`'s hand-written `FromJSON`.
@@ -243,5 +344,46 @@ mod tests {
     #[test]
     fn haskell_string_literal_escapes_quotes_and_backslashes() {
         assert_eq!(haskell_string_literal("a\"b\\c"), "\"a\\\"b\\\\c\"");
+    }
+
+    #[test]
+    fn harness_ctx_module_reserves_gen_zero() {
+        assert_eq!(
+            harness_ctx_module().module_name(),
+            "Tidepool.Session.Val.G0"
+        );
+    }
+
+    #[test]
+    fn harness_ctx_source_embeds_both_literals_as_a_tuple() {
+        let src = harness_ctx_source("{\"loopCount\":3}", "null");
+        assert!(src.contains("module TidepoolHarnessCtx where"));
+        assert!(src.contains("__result :: Eff '[] (Text, Text)"));
+        assert!(src.contains("__result = pure (\"{\\\"loopCount\\\":3}\", \"null\")"));
+    }
+
+    /// [`state_in_via_ctx`]/[`operator_msg_in_via_ctx`] take NO arguments and
+    /// return the SAME text regardless of what state/operator-msg is live —
+    /// the whole point (turn-invariant outer-module text). Not a tautology of
+    /// the type signature: this pins the literal bytes so a future edit that
+    /// accidentally threads a parameter back in is caught here first.
+    #[test]
+    fn state_in_via_ctx_is_fixed_text_referencing_harness_ctx() {
+        let src = state_in_via_ctx();
+        assert_eq!(src, state_in_via_ctx(), "must be turn-invariant");
+        assert!(src.starts_with("__selfHarnessState :: Loaded.State\n"));
+        assert!(src.contains("fst __harnessCtx"));
+        assert!(src.contains("\"null\" -> Loaded.initialState"));
+        assert!(src.contains("Aeson.eitherDecode __stateJsonText"));
+        assert!(src.contains(STATE_DECODE_SENTINEL));
+    }
+
+    #[test]
+    fn operator_msg_in_via_ctx_is_fixed_text_referencing_harness_ctx() {
+        let src = operator_msg_in_via_ctx();
+        assert_eq!(src, operator_msg_in_via_ctx(), "must be turn-invariant");
+        assert!(src.starts_with("__operatorMsg :: Maybe Text\n"));
+        assert!(src.contains("snd __harnessCtx"));
+        assert!(src.contains("Aeson.eitherDecode"));
     }
 }

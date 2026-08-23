@@ -58,7 +58,10 @@ pub use tidepool_extract_cmd::{extract_spawn_count, reset_extract_spawn_count};
 use tidepool_repr::{CoreExpr, DataConTable};
 use tidepool_runtime::session::{assemble_bind_module, insert_preamble_imports, place_turn_stmt};
 pub use tidepool_runtime::AsksSidecar;
-use tidepool_runtime::{compile_targets, CompileError, CompiledArtifacts};
+use tidepool_runtime::{
+    compile_targets, compile_targets_with_stable_inject, CompileError, CompiledArtifacts,
+    StableValInject,
+};
 
 use crate::provider::{
     DynModelProvider, Message, ProviderError, ReasoningItem, Role, StreamSink, TurnRequest,
@@ -119,6 +122,51 @@ pub fn compile_turns(
         targets,
         include,
         Some(extract_bin),
+        |stage, elapsed, bytes| {
+            timing::record_stage(node, round, stage, elapsed, bytes);
+        },
+    )?;
+    Ok(artifacts
+        .into_iter()
+        .map(|(name, a)| {
+            (
+                name,
+                CompiledTurn {
+                    expr: a.expr,
+                    table: table.clone(),
+                    asks: a.asks,
+                },
+            )
+        })
+        .collect())
+}
+
+/// As [`compile_turns`], but additionally injects a [`StableValInject`]
+/// (`--session-root <dir> --inject-val <module>`) — see that type's doc. The
+/// self-iterating harness driver's fused outer render/loop compile is the
+/// only caller (`plans/turn-latency-state-injection.md`): unlike
+/// [`compile_turns`]'s ordinary path, this invocation stays CACHEABLE
+/// despite carrying session-scope flags, because `stable_val` names the one
+/// fixed, never-rotating module the memo's `invocation_key` allowlists.
+pub fn compile_turns_with_stable_inject(
+    extract_bin: &ResolvedExtractBin,
+    source: &str,
+    targets: &[&str],
+    include: &[PathBuf],
+    stable_val: StableValInject<'_>,
+    node: u64,
+    round: u64,
+) -> Result<HashMap<String, CompiledTurn>, CompileError> {
+    let CompiledArtifacts {
+        table,
+        targets: artifacts,
+        ..
+    } = compile_targets_with_stable_inject(
+        source,
+        targets,
+        include,
+        Some(extract_bin),
+        stable_val,
         |stage, elapsed, bytes| {
             timing::record_stage(node, round, stage, elapsed, bytes);
         },
