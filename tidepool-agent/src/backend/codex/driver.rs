@@ -132,7 +132,7 @@ pub struct CodexAgentBackend {
     /// way — so this flag is what
     /// [`start_turn`](AgentBackend::start_turn) checks right after connecting
     /// and before it pays for the actual (arbitrarily long) model turn.
-    /// Without it, a cancel during the connect window would silently do
+    /// Without it, a cancel during the connect phase would silently do
     /// nothing and the cycle would run the full turn anyway.
     cancel_requested: Arc<AtomicBool>,
     /// Fetched once per backend and reused: `model/list` is a metadata
@@ -450,7 +450,7 @@ fn pidfd_slot_for(pid: u32) -> PidFdSlot {
 /// `cancel` waits on the PIDFD instead, which reports the reap without
 /// needing that ownership.
 ///
-/// `cancel_requested` covers the connect window: a cancel that arrives before
+/// `cancel_requested` covers the connect phase: a cancel that arrives before
 /// a pidfd is acquired has nothing to SIGKILL, so it sets this flag instead,
 /// and [`start_turn`](AgentBackend::start_turn) checks it right after
 /// connecting and before the turn itself runs.
@@ -470,7 +470,7 @@ impl CodexCanceller {
 impl BackendCanceller for CodexCanceller {
     fn cancel(&self) {
         // Set before the pidfd check: the only record of a cancel that
-        // arrives during the connect window, before any pidfd is armed.
+        // arrives during the connect phase, before any pidfd is armed.
         self.cancel_requested.store(true, Ordering::SeqCst);
         let slot = self.pidfd.lock();
         let PidFdSlot::Armed(fd) = &*slot else {
@@ -478,7 +478,7 @@ impl BackendCanceller for CodexCanceller {
             // numeric-pid fallback — see `PidFdSlot`'s docs.
             return;
         };
-        // `ESRCH` from a process that exited in the window between acquiring
+        // `ESRCH` from a process that exited in the gap between acquiring
         // the pidfd and this call is the outcome cancellation wanted, so it
         // is ignored.
         let _ = rustix::process::pidfd_send_signal(fd, rustix::process::Signal::KILL);
@@ -1323,7 +1323,7 @@ mod tests {
             self.0.id()
         }
 
-        /// Whether the bystander is STILL alive after a grace window.
+        /// Whether the bystander is STILL alive after a grace period.
         ///
         /// The assertion is a NEGATIVE (no signal was sent), and a negative
         /// has no event to wait on: a bare `try_wait` immediately after

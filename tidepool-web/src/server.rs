@@ -3,7 +3,7 @@
 //! REGISTERED NODES (opaque `node_id` strings, convention = slash-separated
 //! tree paths), each holding one node lifecycle: an optional SEED prompt, an
 //! append-only TIMELINE of notes and asks, and a FINAL VALUE or FAILURE once
-//! the node's window ends.
+//! the node's agent session ends.
 //!
 //! Loopback bind only: reachability is the authorization boundary.
 //!
@@ -122,15 +122,16 @@ const TURN_HISTORY_CAP: usize = 50;
 
 /// One registered node's state — the minimal node lifecycle: `seed` (the
 /// starting prompt, when the wire carried one), the append-only `timeline`
-/// of notes and asks, and `final_value`/`failure` once the window ends.
-/// `next_ask_id` mints ask ids/nonces — the one in-process monotonic id
+/// of notes and asks, and `final_value`/`failure` once the agent session
+/// ends. `next_ask_id` mints ask ids/nonces — the one in-process monotonic id
 /// issuer (`tidepool_repr::MonotonicIdIssuer`), started at `0` to preserve
 /// the exact numbering every existing caller/test already depends on, and
 /// read via `next_raw()` since an ask id is a bare `u64`, not a
 /// `<prefix>_<n>` string; `rev` is this node's AGGREGATE revision, bumped
 /// under the SAME lock as every mutation — the panel-root `data-rev` the
-/// client's focus-preserving skip keys off. `done` marks a retired window
-/// ([`OperatorGate::retire_node`]) — the section greys, nothing is removed.
+/// client's focus-preserving skip keys off. `done` marks a retired agent
+/// session ([`OperatorGate::retire_node`]) — the section greys, nothing is
+/// removed.
 struct NodeSlot {
     timeline: Vec<TimelineItem>,
     next_ask_id: tidepool_repr::MonotonicIdIssuer,
@@ -240,9 +241,9 @@ impl AppState {
                     reg.nodes.insert(node_id.clone(), NodeSlot::default());
                     true
                 }
-                // REVIVAL: a new window re-registering a retired label is
-                // the node living again (the unified root does this every
-                // turn) — clear `done` so the section reads live; the
+                // REVIVAL: a new agent session re-registering a retired
+                // label is the node living again (the unified root does
+                // this every turn) — clear `done` so the section reads live; the
                 // timeline keeps every previous chapter.
                 Some(slot) if slot.done => {
                     slot.done = false;
@@ -1289,8 +1290,8 @@ mod tests {
         let st = AppState::new();
         let gate = st.register_node("root");
 
-        // Turn 1's window: seed, finalize, retire.
-        let _w1 = gate.node_gate("root").expect("root window gate");
+        // Turn 1's agent session: seed, finalize, retire.
+        let _w1 = gate.node_gate("root").expect("root agent session gate");
         gate.node_seeded("root", "turn 1 brief");
         gate.retire_node("root");
         gate.node_finalized("root", "\"turn 1 answer\"");
@@ -1314,8 +1315,10 @@ mod tests {
         st.resolve_form("root", interaction, Map::new()).unwrap();
         handle.join().unwrap();
 
-        // Turn 2's window re-registers the label: the node revives...
-        let _w2 = gate.node_gate("root").expect("revived root window gate");
+        // Turn 2's agent session re-registers the label: the node revives...
+        let _w2 = gate
+            .node_gate("root")
+            .expect("revived root agent session gate");
         gate.node_seeded("root", "turn 2 brief");
         let html = st.node_panel_html("root").unwrap();
         assert!(html.contains(">running</span>"), "revived: {html}");

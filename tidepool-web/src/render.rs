@@ -63,9 +63,10 @@ pub struct NodeView<'a> {
 /// is marked done at each turn's fold and then immediately carries the
 /// between-turns gate — "do I need to act" is the one question the badge
 /// answers, so operator-actionable always wins. Otherwise a live node is
-/// running, and an ended node reports how its LAST window ended: the scan
-/// walks the timeline backward to the most recent lifecycle marker, so a
-/// revived node's earlier outcomes never speak for its current window.
+/// running, and an ended node reports how its LAST agent session ended: the
+/// scan walks the timeline backward to the most recent lifecycle marker, so
+/// a revived node's earlier outcomes never speak for its current agent
+/// session.
 pub(crate) fn status(view: &NodeView) -> (&'static str, &'static str) {
     if view.timeline.iter().any(TimelineItem::is_pending) {
         return ("needs-you", "needs you");
@@ -722,8 +723,8 @@ mod tests {
     /// Status derivation over the lifecycle-in-timeline model. A pending ask
     /// outranks `done` (the unified root is done at every fold while its
     /// between-turns gate is pending — the badge answers "do I need to
-    /// act"); an ended node reports its LAST window's outcome, so a revived
-    /// node's earlier chapters never speak for the current one.
+    /// act"); an ended node reports its LAST agent session's outcome, so a
+    /// revived node's earlier chapters never speak for the current one.
     #[test]
     fn node_panel_status_derives_from_the_view() {
         let th = empty_history();
@@ -764,7 +765,7 @@ mod tests {
         let failed = node_panel(&failed).into_string();
         assert!(failed.contains(">failed</span>"), "{failed}");
 
-        // A revived node's NEW window outranks the old chapter's outcome:
+        // A revived node's NEW agent session outranks the old chapter's outcome:
         // [Finalized (turn 1), Seeded (turn 2)] + done = ended, not done.
         let revived_items = [tl_finalized("{\"ok\":true}"), tl_seeded("next chapter")];
         let mut revived = base_view("n", &revived_items, &th, 0);

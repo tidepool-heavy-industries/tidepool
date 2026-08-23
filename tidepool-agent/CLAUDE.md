@@ -114,7 +114,7 @@ reach it. A flag the blocked thread would have to check is not cancellation.
   on drop, or by tokio's SIGCHLD reaper while the backend is still alive — the
   kernel is free to hand the number to anyone, and on this box "anyone" is
   plausibly the operator's own Codex session. A numeric-pid design can only
-  narrow that window (re-check identity immediately before `kill`, still two
+  narrow that gap (re-check identity immediately before `kill`, still two
   racing syscalls); a pidfd removes it structurally: `pidfd_open` binds the fd
   to the exact process INSTANCE, not to its pid number, so `pidfd_send_signal`
   against it fails `ESRCH` forever once that instance is reaped — including if
@@ -133,7 +133,7 @@ reach it. A flag the blocked thread would have to check is not cancellation.
   pidfd's own semantics already forbid reuse), but it stays for promptness.
 
   Pinned by named rows in `driver.rs`'s `mod tests`: a dropped backend leaves
-  its cancellers inert, a cancel during the connect window is recorded without
+  its cancellers inert, a cancel during the connect phase is recorded without
   a pidfd to signal, and a pidfd that could not be acquired for an
   already-reaped process leaves cancellation `IdentityUnprovable` — signalling
   nothing, never falling back to a bare pid.

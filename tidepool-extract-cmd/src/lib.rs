@@ -56,7 +56,7 @@ pub const DEFAULT_BIN: &str = "tidepool-extract";
 /// live receipt that the self-iterating harness's pre-model-call compile
 /// count actually dropped (see `plans/post-restart/extract-wave/boot/00-spec.md`),
 /// and since every spawn site in the workspace funnels through this crate,
-/// the count covers the PROCESS rather than one lane.
+/// the count covers the PROCESS rather than one call site.
 /// PROCESS-GLOBAL, not per-`Harness`/per-node: a test asserting
 /// on it must run as its own test binary so no other test's compiles land on
 /// the same count (nextest already gives one process per test binary).

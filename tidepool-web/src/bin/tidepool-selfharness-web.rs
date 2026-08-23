@@ -12,8 +12,8 @@
 //! - `root/1-finishes` walks a full successful lifecycle: seed → notes →
 //!   an ask → finalized value (section flips to done).
 //! - `root/2-concurrent` presents TWO forms CONCURRENTLY (two threads, each
-//!   blocked in its own `present_form` call, like two concurrent cognition
-//!   windows) — neither supersedes the other, each resolves independently.
+//!   blocked in its own `present_form` call, like two concurrent agent
+//!   sessions) — neither supersedes the other, each resolves independently.
 //! - `root/3-fails` gets a seed and then fails (round exhaustion), showing
 //!   the failure block.
 //!
@@ -119,7 +119,7 @@ fn demo_tree(gate: Arc<WebGate>) {
     if gate.node_gate("root/3-fails").is_some() {
         gate.node_seeded(
             "root/3-fails",
-            "NODE root/3 — DISCOVER: what a window that never finalizes looks like.",
+            "NODE root/3 — DISCOVER: what an agent session that never finalizes looks like.",
         );
         gate.retire_node("root/3-fails");
         gate.node_failed(

@@ -16,11 +16,11 @@
 //! self-iterating harness's between-loops gate too: it is an ordinary
 //! driver-authored form, not a second mechanism. The node-lifecycle
 //! extensions (`node_seeded`/`node_finalized`/
-//! `node_failed`/`retire_node`) store what the driver sends across the seam.
-//! Publishing never supersedes an existing pending ask; resolving keeps the
-//! answered ask in place.
+//! `node_failed`/`retire_node`) store what the driver sends across the
+//! boundary. Publishing never supersedes an existing pending ask; resolving
+//! keeps the answered ask in place.
 //!
-//! Five modules, one seam:
+//! Five modules, one boundary:
 //! - [`render`] — [`render::NodeView`] → one node's section markup (header +
 //!   status, seed, timeline, final value/failure); the `id="panel-<node_id>"`
 //!   fragment patched over SSE (also served standalone at `GET
@@ -61,7 +61,7 @@ use std::sync::Arc;
 
 /// The node id [`spawn_operator_server_multi`] registers for its caller —
 /// the TREE ROOT, shared by the driver's default gate and a harness's own
-/// root window (labeled `root` by convention, children `root/…`). See this
+/// root agent session (labeled `root` by convention, children `root/…`). See this
 /// crate's `CLAUDE.md` ("Revival") for why that sharing is safe.
 pub const DEFAULT_NODE_ID: &str = "root";
 

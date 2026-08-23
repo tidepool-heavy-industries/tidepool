@@ -17,7 +17,7 @@ tensions, and synthesis all flow through those channels as content.
   path-lexicographically with the default node pinned first.
 
 This crate is the web implementation of
-`tidepool_harness::selfharness::operator::OperatorGate` — the seam the
+`tidepool_harness::selfharness::operator::OperatorGate` — the interface the
 driver blocks on when it needs a human, extended by the node-lifecycle
 default methods (`node_gate`, `retire_node`, `node_seeded`,
 `node_finalized`, `node_failed`).
@@ -95,17 +95,17 @@ automatically, so an escalation presents as an ordinary `present_form` ask
 - **End** — `retire_node(label)` sets `done`; then exactly one of
   `node_finalized(label, value)` / `node_failed(label, reason)` appends the
   outcome as a timeline entry at its true position.
-- **Revival** — re-registering a done label (a new window under the same
-  label) clears `done` and keeps every previous chapter on the timeline.
+- **Revival** — re-registering a done label (a new agent session under the
+  same label) clears `done` and keeps every previous chapter on the timeline.
   This is how the UNIFIED ROOT works: [`DEFAULT_NODE_ID`] is `root`, and the
-  driver's default gate and the harness's own root window share that one
-  node — its timeline interleaves loop narration, each turn's root window,
-  and the between-turns gate, chapter after chapter.
+  driver's default gate and the harness's own root agent session share that
+  one node — its timeline interleaves loop narration, each loop iteration's
+  root agent session, and the between-turns gate, chapter after chapter.
 - **Status is derived at render, never stored**: `needs you` (any pending
   ask — outranks everything, done included: the root is done at every fold
   while its gate is pending) > `running` (not done) > last lifecycle marker
-  of the current window: `done` (Finalized) / `failed` (Failed) / `ended`
-  (neither since the last Seeded).
+  of the current agent session: `done` (Finalized) / `failed` (Failed) /
+  `ended` (neither since the last Seeded).
 
 ## The timeline is append-only
 
@@ -115,7 +115,7 @@ reassembled answer the harness actually received, rendered read-only) — it
 never vanishes; notes are never cleared, including across the between-loops
 gate's own answered form. The stream above an ask is that ask's context.
 Publishing never supersedes
-an existing pending ask — concurrent cognition windows each get their own
+an existing pending ask — concurrent agent sessions each get their own
 entry and coexist until answered, in any order. An ask's id is assigned once
 from that node's monotonic counter and never reused; POSTing an
 already-answered id is rejected as "no such pending interaction".
@@ -135,7 +135,7 @@ which is idempotent.
 
 ## Wire contract between `render.rs` and `shell.rs`'s JS
 
-The seam the integration tests assert against; sibling work on
+The boundary the integration tests assert against; sibling work on
 `render.rs`/`shell.rs` must preserve it regardless of markup/CSS changes:
 
 - `node_panel()` always yields exactly one element per node,

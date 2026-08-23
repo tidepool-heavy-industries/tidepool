@@ -218,10 +218,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // S1-L1 (plans/self-iterating-harness/20-exomonad-v3-prd.md): the
-    // Console/Worktree/RepoEvent/Exec seams for the AUTHORED outer loop —
+    // Console/Worktree/RepoEvent/Exec boundaries for the AUTHORED outer loop —
     // always wired (Console has no external state; Worktree/RepoEvent/Exec
     // are scoped to TIDEPOOL_SOURCE_REPO, defaulting to the repo this process
-    // runs in), unlike the optional Subagent seam below.
+    // runs in), unlike the optional Subagent boundary below.
     let source_repo = match std::env::var_os("TIDEPOOL_SOURCE_REPO") {
         Some(p) => PathBuf::from(p),
         None => std::env::current_dir()?,
@@ -239,7 +239,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // (never one a prior process wrote to; see `tidepool_harness::selfharness::resume`'s
     // module doc), so a crash mid-append can never poison a later boot.
     //
-    // `open_run_journal` is the ONE seam: it loads and folds every segment the
+    // `open_run_journal` is the ONE boundary: it loads and folds every segment the
     // run id owns, and builds the appending handler over this process's own
     // segment — both from the same `AcquiredLease`, so the fold and the
     // appends cannot desync.
@@ -264,10 +264,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         run_id = %acquired.lease.run_id,
         resumed = acquired.resumed,
         folded_entries = folded,
-        "outer effect seam wired (Console/Worktree/RepoEvent/Exec/Journal)"
+        "outer effect boundary wired (Console/Worktree/RepoEvent/Exec/Journal)"
     );
 
-    // The subagent seam (plans/companion-memory.md): when TIDEPOOL_MEMORY_REPO
+    // The subagent boundary (plans/companion-memory.md): when TIDEPOOL_MEMORY_REPO
     // names the companion's memory store, wire a driver-owned SubagentHandler
     // over it so the authored loop's `spawnAgent` (the memory curator) is
     // serviced. Absent env → absent handler → a Subagent suspension fails
@@ -278,7 +278,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         tracing::info!(
             target: "tidepool_web",
             repo = %repo.display(),
-            "subagent seam wired (memory curator; Codex backend, operator credentials)"
+            "subagent boundary wired (memory curator; Codex backend, operator credentials)"
         );
     }
 

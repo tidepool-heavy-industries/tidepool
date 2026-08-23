@@ -493,8 +493,8 @@ impl SpawnSubstrate {
     }
 
     /// Take the binding for `worktree` under `binding_ref`, returning the
-    /// [`ActiveBinding`] custody receipt — the only thing that can later
-    /// settle this exact row (a stale/reused receipt can never settle a
+    /// [`ActiveBinding`] lease — the only thing that can later
+    /// settle this exact row (a stale/reused lease can never settle a
     /// NEWER occupant after a rebind — see the type's docs).
     pub fn bind(
         &mut self,
