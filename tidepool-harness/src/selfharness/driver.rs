@@ -463,6 +463,24 @@ impl ForkBudget {
     }
 }
 
+/// Put ONE child answer into the shape the parked fork continuation
+/// expects — `Tidepool.Fork`'s `fork`/`forkAll` answer bare `T`;
+/// `runLLMTurnFork`-sourced holes answer `Either InvocationExit T` (`Right`
+/// here; this driver path never folds a fork child as `Left`). The driver
+/// twin of `Harness::wrap_fork_answer`, against the caller-supplied round
+/// table instead of node-pending state.
+fn wrap_fork_value(
+    source: engine::ForkSource,
+    value: Value,
+    table: &DataConTable,
+) -> Result<Value, DriverError> {
+    match source {
+        engine::ForkSource::ForkEffect => Ok(value),
+        engine::ForkSource::RunLLMTurn => engine::build_child_answer_value(Ok(value), table)
+            .map_err(|e| DriverError::Session(e.to_string())),
+    }
+}
+
 /// The refusal corrective for a fork that would exceed the window's budget:
 /// what happened, what survives, and the one useful next step.
 fn fork_budget_refusal(spent: u32, cap: u32, needed: u32, ty_label: &str) -> String {
@@ -5799,30 +5817,82 @@ impl SelfHarnessDriver {
         budget: &mut ForkBudget,
     ) -> Result<Option<TurnOutcome>, DriverError> {
         loop {
-            let routing = self
-                .agent
-                .pending_hole(node)
-                .map(|c| c.routing)
-                .ok_or_else(|| {
-                    DriverError::Session("fork resume: node has no pending hole to service".into())
-                })?;
+            let Some((hole, classified, table)) = self.agent.pending_hole_full(node) else {
+                return Err(DriverError::Session(
+                    "fork resume: node has no pending hole to service".into(),
+                ));
+            };
             // The budget check covers EVERY fork this drain loop services,
             // not only the one the dispatcher saw — `forkAll` then `fork` in
             // sequence spends per iteration. Spend BEFORE spawn; a refusal
             // costs nothing.
-            let cost = ForkBudget::cost(&routing);
-            if matches!(routing, HoleRouting::Fork { .. }) && !budget.try_spend(cost) {
+            let cost = ForkBudget::cost(&classified.routing);
+            if matches!(classified.routing, HoleRouting::Fork { .. }) && !budget.try_spend(cost) {
                 let msg = fork_budget_refusal(budget.spent, budget.cap, cost, ty_label);
                 self.agent.refuse_pending_hole(node, msg.clone())?;
                 self.agent.push_user_turn(node, &msg)?;
                 return Ok(None);
             }
-            match routing {
-                HoleRouting::Fork { fan: Some(_), .. } => {
-                    self.agent.answer_fanout(node, Actor::Operator).await?;
+            // Children run as FULL WINDOWS on the pump
+            // (`drive_fork_child_window` — fork-subsumes-split step 1); the
+            // one-shot `Harness::answer_fork`/`answer_fanout` resume path
+            // remains only for the general Agent stack's own callers.
+            match &classified.routing {
+                HoleRouting::Fork {
+                    site,
+                    ty,
+                    fan: None,
+                    source,
+                    ..
+                } => {
+                    let value = self
+                        .drive_fork_child_window(
+                            node,
+                            "fork answerer",
+                            &classified.prompt,
+                            ty.as_deref(),
+                            site.get(),
+                            &table,
+                        )
+                        .await?;
+                    let answer = wrap_fork_value(*source, value, &table)?;
+                    self.agent.resume_with_value(node, &hole, answer).await?;
                 }
-                HoleRouting::Fork { fan: None, .. } => {
-                    self.agent.answer_fork(node, Actor::Operator).await?;
+                HoleRouting::Fork {
+                    site,
+                    ty,
+                    fan: Some(fan),
+                    prompts,
+                    source,
+                } => {
+                    // Same cardinality-integrity rule as `answer_fanout`.
+                    if let FanBadge::Exact { n } = fan {
+                        if *n as usize != prompts.len() {
+                            return Err(DriverError::Session(format!(
+                                "fanout cardinality mismatch on {node:?}: fan={n} but {} \
+                                 prompt(s) decoded",
+                                prompts.len()
+                            )));
+                        }
+                    }
+                    let element_ty = ty.as_deref().and_then(engine::strip_list_type);
+                    let mut answers = Vec::with_capacity(prompts.len());
+                    for (idx, child_prompt) in prompts.iter().enumerate() {
+                        let value = self
+                            .drive_fork_child_window(
+                                node,
+                                &format!("fanout answerer {idx}"),
+                                child_prompt,
+                                element_ty,
+                                site.get(),
+                                &table,
+                            )
+                            .await?;
+                        answers.push(wrap_fork_value(*source, value, &table)?);
+                    }
+                    let list = engine::build_list_value(answers, &table)
+                        .map_err(|e| DriverError::Session(e.to_string()))?;
+                    self.agent.resume_with_value(node, &hole, list).await?;
                 }
                 other => {
                     return Err(DriverError::Session(format!(
@@ -5863,6 +5933,140 @@ impl SelfHarnessDriver {
             ),
         )?;
         Ok(None)
+    }
+
+    /// Fork-subsumes-split STEP 1 (plans/fork-subsumes-split.md): drive ONE
+    /// fork child as a full ATTACHED WINDOW on the shared session — the
+    /// replacement for the one-shot `resume` path
+    /// (`Harness::drive_answerer_to_value`) on ALL selfharness fork
+    /// servicing. A child on the window pump can explore across rounds,
+    /// present operator forms, and answer with a REAL `finalize @T` —
+    /// `ResidentError::ChildSuspended` is unreachable from here.
+    ///
+    /// The attach ladder is `service_outer_branch`'s with a fork-flavored
+    /// birth: transcript forked from the LIVE parent's checkpoint
+    /// (`register_fork_child_with_card` — the multi-round answerer card,
+    /// not the one-shot resume card), child scope minted from the LIVE
+    /// parent node's scope — which IS the declaration-inheritance wiring on
+    /// the shared session (locked decision 4's ancestry scoping; no
+    /// separate-session include dance), and the finalize contract pinned
+    /// from the fork site's own resolved modules.
+    ///
+    /// Exit semantics keep `answer_fork`'s: a child that exhausts its
+    /// budget or otherwise exits without finalizing HARD-FAILS the fork
+    /// (the pump's own nudge/ultimatum ladder has already run) — fork
+    /// children are not branch positions with a typed `Left` to fold into.
+    /// TERMINAL FIX (seam map §7.10): a successful child is marked
+    /// `NodeDone` BEFORE resource retirement, instead of the old path's
+    /// accidental `NodeCancelled`-via-`terminate_node`-only ending.
+    async fn drive_fork_child_window(
+        &self,
+        parent: NodeId,
+        title: &str,
+        brief: &str,
+        ty: Option<&str>,
+        site: u32,
+        table: &DataConTable,
+    ) -> Result<Value, DriverError> {
+        let sid = self.outer_sid()?;
+        let modules = self.agent.asks_modules(parent, site);
+        let card = engine::answerer_hole_card(
+            brief,
+            ty,
+            &modules,
+            Some(table),
+            &self.agent.hole_card_effect_row(),
+        );
+        let node = self
+            .agent
+            .register_fork_child_with_card(parent, title, card)?;
+        // Attach to the SHARED session: no per-node machine, no separate
+        // decl plane — the child's turns run as a realm on the one machine.
+        self.agent.force_attached(node, Actor::Operator, sid)?;
+        let realm = self.mint_realm();
+        self.agent.set_node_realm(node, realm);
+        // Scope minted from the LIVE parent's scope: this is what makes the
+        // parent's declarations (and its ancestors') readable and sibling
+        // declarations invisible — the same scope-tree ancestry the branch
+        // path gets from its frozen snapshot's scope.
+        let parent_scope = self.agent.node_scope(parent);
+        let child_scope = self
+            .agent
+            .with_session(sid, |s| s.mint_scope(parent_scope))
+            .map_err(|e| DriverError::Session(e.to_string()))?
+            .ok_or_else(|| {
+                DriverError::Session(format!(
+                    "fork child of {parent:?}: parent scope {parent_scope:?} is not live \
+                     (its window already retired?)"
+                ))
+            })?;
+        self.agent.set_node_scope(node, child_scope);
+        self.agent
+            .set_answer_contract(node, self.answer_contract(ty, &modules));
+        self.emit(Event::TurnStart { node });
+
+        // Box::pin: the pump drives child pumps (a fork child can itself
+        // present forms, and — step 2 — fork), so this call is genuinely
+        // recursive; the indirection is the async-recursion requirement,
+        // nothing more.
+        let outcome = Box::pin(self.drive_answerer_to_finalize(node, ty, site)).await;
+        self.emit(Event::TurnEnd { node });
+        let fail = |this: &Self, node: NodeId, reason: String| -> DriverError {
+            let _ = this.agent.terminate_node(node, &reason);
+            DriverError::Session(reason)
+        };
+        match outcome {
+            Ok(Ok(TurnOutcome::Suspended { classified, .. }))
+                if matches!(classified.routing, HoleRouting::Finalize { .. }) =>
+            {
+                if self.agent.finalize_is_closure(node) {
+                    return Err(fail(
+                        self,
+                        node,
+                        format!(
+                            "fork child {node:?} finalized a closure — a fork answer must \
+                             be plain data in this driver (v1 scope)"
+                        ),
+                    ));
+                }
+                let (value, rendered) =
+                    retry_on_turn_in_flight(|| self.agent.take_finalized_value_keep_open(node))
+                        .await
+                        .map_err(|e| fail(self, node, format!("fork child finalize take: {e}")))?;
+                self.emit(Event::Finalize {
+                    node,
+                    value: rendered,
+                });
+                // NodeDone BEFORE retirement — the successful ending is the
+                // durable record; retirement is resource bookkeeping.
+                let _ = self
+                    .agent
+                    .tree()
+                    .node_done(node, "fork answer delivered".to_string());
+                let _ = self.agent.terminate_node(node, "fork child retired");
+                Ok(value)
+            }
+            Ok(Ok(other)) => Err(fail(
+                self,
+                node,
+                format!(
+                    "fork child {node:?} returned a non-finalize outcome from the pump \
+                     ({}) — dispatcher contract violation",
+                    turn_outcome_tag(&other)
+                ),
+            )),
+            Ok(Err(exit)) => Err(fail(
+                self,
+                node,
+                format!("fork child {node:?} ended without an answer: {exit}"),
+            )),
+            Err(e) => {
+                let _ = self
+                    .agent
+                    .terminate_node(node, "fork child retired (mechanism failure)");
+                Err(e)
+            }
+        }
     }
 
     /// One scheduling pass of the answerer-plane green scheduler: service the
@@ -6119,7 +6323,13 @@ impl SelfHarnessDriver {
                 )?;
                 Ok(None)
             }
-            HoleRouting::Fork { .. } => {
+            HoleRouting::Fork {
+                site,
+                ref ty,
+                ref fan,
+                ref prompts,
+                source,
+            } => {
                 // A thread's fork draws on the SAME window budget as a
                 // direct one. Refused = handed up as data; the dispatcher
                 // aborts the block and pushes the corrective.
@@ -6127,16 +6337,61 @@ impl SelfHarnessDriver {
                 if !budget.try_spend(cost) {
                     return Ok(Some(cost));
                 }
+                // Children run as FULL WINDOWS on the pump, exactly like a
+                // direct fork's (fork-subsumes-split step 1); only the
+                // resume differs — the thread's hole is RAW (no node
+                // bookkeeping), so the fresh outcome re-enters the ready
+                // queue, same as every other raw resume in this scheduler.
+                let answer = match fan {
+                    None => {
+                        let value = self
+                            .drive_fork_child_window(
+                                node,
+                                "async fork answerer",
+                                &classified.prompt,
+                                ty.as_deref(),
+                                site.get(),
+                                &table,
+                            )
+                            .await?;
+                        wrap_fork_value(source, value, &table)?
+                    }
+                    Some(fan) => {
+                        if let FanBadge::Exact { n } = fan {
+                            if *n as usize != prompts.len() {
+                                return Err(DriverError::Session(format!(
+                                    "async fanout cardinality mismatch on {node:?}: fan={n} \
+                                     but {} prompt(s) decoded",
+                                    prompts.len()
+                                )));
+                            }
+                        }
+                        let element_ty = ty.as_deref().and_then(engine::strip_list_type);
+                        let mut answers = Vec::with_capacity(prompts.len());
+                        for (idx, child_prompt) in prompts.iter().enumerate() {
+                            let value = self
+                                .drive_fork_child_window(
+                                    node,
+                                    &format!("async fanout answerer {idx}"),
+                                    child_prompt,
+                                    element_ty,
+                                    site.get(),
+                                    &table,
+                                )
+                                .await?;
+                            answers.push(wrap_fork_value(source, value, &table)?);
+                        }
+                        engine::build_list_value(answers, &table)
+                            .map_err(|e| DriverError::Session(e.to_string()))?
+                    }
+                };
                 let next = self
                     .agent
-                    .answer_fork_hole_raw(
-                        node,
-                        hole.cont_id(),
-                        &classified.routing,
-                        &classified.prompt,
-                        &table,
-                    )
-                    .await?;
+                    .with_session(sid, |s| {
+                        s.resume(ResidentHole::plain(hole.cont_id()), answer)
+                    })
+                    .map_err(|e| DriverError::Session(e.to_string()))?
+                    .map_err(|e| DriverError::Session(format!("async fork resume failed: {e}")))?;
                 green.ready.push_back(GreenReady {
                     chain,
                     outcome: next,

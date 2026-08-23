@@ -72,8 +72,12 @@ fn reply(content: &str) -> RecordedReply {
 // path; caught live on this file's first run).
 const ASYNC_FORK_BLOCK: &str = "```haskell\nimport HarnessTypes (Decision (..), Confidence (..))\nimport Tidepool.Fork (fork)\n\ndo\n  ha <- async (fork @Int \"pick a\")\n  hb <- async (fork @Int \"pick b\")\n  a <- wait ha\n  b <- wait hb\n  (finalize @Decision (Decision { action = show (a * 10 + b), rationale = \"async fork composition\", confidence = Medium }) :: M ())\n```";
 
-fn resume_reply(expr: &str) -> RecordedReply {
-    reply(&format!("```haskell\nresume {expr}\n```"))
+// Fork children are full pump windows (fork-subsumes-split step 1): they
+// answer with a REAL `finalize @Int`, pinned by the fork site's contract.
+fn finalize_int_reply(n: i64) -> RecordedReply {
+    reply(&format!(
+        "```haskell\n(finalize @Int ({n} :: Int) :: M ())\n```"
+    ))
 }
 
 fn build_driver(
@@ -131,9 +135,9 @@ async fn async_fork_composition_two_children_typed_results_cross() {
         // 1. The answerer's single spawning block.
         reply(ASYNC_FORK_BLOCK),
         // 2. Fork child A ("pick a") — driven first (spawn order).
-        resume_reply("(1 :: Int)"),
+        finalize_int_reply(1),
         // 3. Fork child B ("pick b").
-        resume_reply("(2 :: Int)"),
+        finalize_int_reply(2),
     ];
     let (mut driver, _agent, _log_path) = build_driver(replies, "answerer-async-fork");
     let source = load_harness_source(&examples_harness_dir().join("Harness.hs"))
@@ -180,12 +184,12 @@ async fn two_waves_of_fork_fold_fork_carry_results_across_waves() {
         // 1. The two-wave block.
         reply(TWO_WAVE_BLOCK),
         // 2-3. Wave 1's children, in spawn order.
-        resume_reply("(1 :: Int)"),
-        resume_reply("(2 :: Int)"),
+        finalize_int_reply(1),
+        finalize_int_reply(2),
         // 4. Wave 2's one child: a STATIC 10 — the final "13" is only
         //    reachable through the parent's own `c + s`, so it proves the
         //    wave-1 fold (s = 3) survived into the code after wave 2.
-        resume_reply("(10 :: Int)"),
+        finalize_int_reply(10),
     ];
     let (mut driver, _agent, log_path) = build_driver(replies, "answerer-async-waves");
     let source = load_harness_source(&examples_harness_dir().join("Harness.hs"))
@@ -232,7 +236,7 @@ async fn async_fork_over_budget_refuses_loudly_and_window_survives() {
         // 1. The same two-fork spawning block — the second fork must refuse.
         reply(ASYNC_FORK_BLOCK),
         // 2. Fork child A ("pick a") — the one child the budget covers.
-        resume_reply("(1 :: Int)"),
+        finalize_int_reply(1),
         // 3. The corrective round after the refusal: finalize plainly.
         reply(
             "```haskell\nimport HarnessTypes (Decision (..), Confidence (..))\n\n\

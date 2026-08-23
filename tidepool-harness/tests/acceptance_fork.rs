@@ -128,22 +128,24 @@ async fn selfharness_answerer_forks_to_two_children_then_finalizes() {
              \x20 finalize @Decision (L.head ds) :: M ()\n\
              ```",
         ),
-        // Child 0 ("sub-brief A"): resumes with a typed Decision.
+        // Child 0 ("sub-brief A"): a full pump window now
+        // (fork-subsumes-split step 1) — it answers with a REAL finalize,
+        // not the old one-shot `resume`.
         reply(
             "```haskell\n\
              import HarnessTypes (Decision (..), Confidence (..))\n\
              \n\
-             resume (Decision { action = \"observe\", rationale = \"child A\", \
-             confidence = Low })\n\
+             (finalize @Decision (Decision { action = \"observe\", rationale = \"child A\", \
+             confidence = Low }) :: M ())\n\
              ```",
         ),
-        // Child 1 ("sub-brief B"): resumes with a different typed Decision.
+        // Child 1 ("sub-brief B"): same, with a different typed Decision.
         reply(
             "```haskell\n\
              import HarnessTypes (Decision (..), Confidence (..))\n\
              \n\
-             resume (Decision { action = \"wait\", rationale = \"child B\", \
-             confidence = Low })\n\
+             (finalize @Decision (Decision { action = \"wait\", rationale = \"child B\", \
+             confidence = Low }) :: M ())\n\
              ```",
         ),
     ];
