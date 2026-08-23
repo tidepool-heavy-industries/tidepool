@@ -24,6 +24,7 @@ import System.Exit (exitFailure, exitSuccess)
 import Test.QuickCheck
 
 import SwarmSpec (properties)
+import ThoughtDriver (nodeCapped, thoughtHylo)
 import Tidepool.Thought
 
 -- ---------------------------------------------------------------------------

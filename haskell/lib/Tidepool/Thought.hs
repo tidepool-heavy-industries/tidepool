@@ -7,17 +7,18 @@
 --
 -- 'ThoughtF' is the companion's base functor: a node either finishes locally
 -- or defines only its own next layer of branches — a branch carries its own
--- 'ForkBrief' and 'BranchRole', which a bare kids list would lose, so
--- 'thoughtHylo' is 'Tidepool.Swarm.hyloM's one-recursive-call-site shape
--- specialized to 'ThoughtF''s own derived 'Traversable' rather than
--- 'Tidepool.Swarm.PlanF''s task-plus-flat-kids shape — not a second
--- recursion engine; the body is the identical one-liner.
+-- 'ForkBrief' and 'BranchRole', which a bare kids list would lose.
 --
--- Budget clamping ('depthCapped', 'nodeCapped', 'fanOutCapped') mirrors
--- 'Tidepool.Swarm.capped'\/'budgeted'\/'gated': each forces a local 'Finish'
+-- Budget clamping ('depthCapped', 'fanOutCapped') mirrors
+-- 'Tidepool.Swarm.capped'\/'gated': each forces a local 'Finish'
 -- rather than letting the wrapped coalgebra run past its cap, stamped on the
 -- result ('FinishOrigin' inside 'Draft') rather than materialized as a plan
--- the driver consults separately.
+-- the driver consults separately. (A third, @nodeCapped@, mirrors
+-- 'Tidepool.Swarm.budgeted' the same way; it lives in
+-- @haskell\/test-thought\/ThoughtDriver.hs@ with the rest of the old
+-- two-phase driver, since the production companion carries its node
+-- allowance structurally on the seed instead of over shared @MonadState
+-- Int@.)
 --
 -- Genuine model-invocation failure is represented the same way: a coalgebra
 -- that cannot decide a real layer still returns an ordinary 'Finish', tagged
@@ -45,16 +46,12 @@ module Tidepool.Thought
 
     -- * The driver
   , Coalg
-  , Alg
-  , thoughtHylo
 
     -- * Budget middleware
   , depthCapped
-  , nodeCapped
   , fanOutCapped
   ) where
 
-import Control.Monad.State.Class (MonadState, get, put)
 import Data.List.NonEmpty (NonEmpty (..))
 import qualified Data.List.NonEmpty as NE
 import Data.Text (Text)
@@ -176,22 +173,6 @@ newtype NodeFailure = NodeFailure {failureReason :: Text}
 -- | How to split: a seed becomes its next 'ThoughtF' layer.
 type Coalg m a = a -> m (ThoughtF a)
 
--- | How to combine: a realized layer (branch seeds already replaced by their
--- worked results, in declared branch order — never completion order, PRD
--- locked decision 5) folds into one value.
-type Alg m b = ThoughtF b -> m b
-
--- | The one recursive call site (mirrors 'Tidepool.Swarm.hyloM' exactly):
--- unfold with the coalgebra, recurse into every branch via 'ThoughtF''s own
--- derived 'Traversable' (which preserves declared order by construction —
--- that IS the completion-order guarantee, not something this function has
--- to enforce separately), then fold with the algebra. No 'ThoughtF' tree
--- ever materializes beyond the current layer.
-thoughtHylo :: Monad m => Alg m b -> Coalg m a -> a -> m b
-thoughtHylo alg coalg = go
-  where
-    go a = coalg a >>= traverse go >>= alg
-
 -- ---------------------------------------------------------------------------
 -- Budget middleware — Coalg -> Coalg, mirroring Tidepool.Swarm's
 -- capped/budgeted/gated (PRD locked decision 9: budgets clamp
@@ -210,21 +191,6 @@ depthCapped depthOf limit coalg a
       let reason = ForcedDepth (depthOf a) limit
        in pure (Finish (Draft (forcedDraftText reason) (BudgetForced reason) (depthOf a)))
   | otherwise = coalg a
-
--- | Refuse to unfold past a running node-count budget, mirroring
--- 'Tidepool.Swarm.budgeted' but over shared state rather than a per-seed
--- reader — node count is a property of the WHOLE traversal, not of any one
--- seed. Every node that is allowed to proceed spends one unit, counting the
--- root. Needs the seed's own depth too, purely to stamp the forced 'Draft'
--- correctly (see 'Draft''s doc).
-nodeCapped :: MonadState Int m => (a -> Int) -> Int -> Coalg m a -> Coalg m a
-nodeCapped depthOf limit coalg a = do
-  n <- get
-  if n >= limit
-    then
-      let reason = ForcedNodeCount n limit
-       in pure (Finish (Draft (forcedDraftText reason) (BudgetForced reason) (depthOf a)))
-    else put (n + 1) >> coalg a
 
 -- | Refuse a layer whose fan-out exceeds the cap, mirroring
 -- 'Tidepool.Swarm.gated': the unfold has already happened when this
