@@ -29,7 +29,7 @@ fn mock_stack_matches_production() {
         production.as_slice(),
         "tidepool_testing::eval_harness::mock::EFFECT_NAMES has drifted from \
          tidepool_mcp::standard_decls() (the single source, tidepool-mcp/src/eval_prep.rs's \
-         base_effects! list + the interposed Ask/RunLLMTurn/Fork effects) — this should be \
+         base_effects! list + the interposed Ask/RunLLMTurn effects) — this should be \
          structurally impossible since EFFECT_NAMES is derived from standard_decls(), not \
          copied. If this fires, check for a reintroduced hand-maintained EFFECT_NAMES list."
     );

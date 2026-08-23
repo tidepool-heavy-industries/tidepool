@@ -57,25 +57,42 @@ macro_rules! base_effects {
     };
 }
 
-/// All standard effects in canonical order (the base stack + the interposed
-/// `Ask`/`RunLLMTurn`/`Fork` effects appended last, in that order). Derived from the
-/// single-source [`base_effects!`] list — do not hand-maintain a parallel
-/// order here.
+/// The ordinary one-shot MCP eval server's and the REPL's effect roster: the
+/// base stack plus the interposed `Ask`/`RunLLMTurn` effects appended last,
+/// in that order. Derived from the single-source [`base_effects!`] list — do
+/// not hand-maintain a parallel order here.
 ///
-/// `RunLLMTurn` and `Fork` must stay in the roster (not opt-in): the generated
+/// **This is a per-surface roster, not a universal one** (vestigial-subsystems
+/// review §4): it names exactly what the ordinary session engine's request
+/// parser (`tidepool_runtime::session::engine::extract_ask_request`, shared
+/// verbatim by the REPL) actually accepts — `AskWith` and `RunLLMTurnWith`,
+/// nothing else. `EffectRoster::from_handlers` (`tidepool-mcp/src/server.rs`)
+/// is the single production consumer for both surfaces, and appends this same
+/// two-effect suffix independently (it builds from an arbitrary handler
+/// stack, not from this decl-list function) — the two cannot desync because
+/// both append the identical `[Ask, RunLLMTurn]` tail derived from the same
+/// `ask_decl`/`runllmturn_decl` builders.
+///
+/// A surface that genuinely services more than this — the harness Agent turn
+/// (`tidepool-harness::engine::agent_decls`) dispatches `ForkWith`/
+/// `ForkAllWith` through its own `classify_hole`, which this engine's parser
+/// does not — builds its own WIDER roster by appending to this one's output
+/// explicitly (`agent_decls`'s doc has the details), rather than this
+/// function growing a fourth interposed effect nothing here can service.
+///
+/// `RunLLMTurn` must stay in the roster (not opt-in): the generated
 /// `Tidepool.Effects` only exports `runLLMTurn`/`runLLMTurnFork`/
-/// `runLLMTurnFanout`/`forkAll`/`forkMap`/`forkCata` (via `RunLLMTurn`) and
-/// `Tidepool.Fork`'s `forkSited`/`forkAllSited` (via `Fork`) when their decls
-/// are present. All three are UNHANDLED
-/// (interposed) tags: no `tidepool-handlers` entry, serviced by each server's
-/// own suspend machinery (see `tidepool-codegen::jit_machine::drive_effect_loop`'s
-/// `suspend_tag` threshold — every tag from the first interposed effect
-/// onward suspends, so appending further interposed effects here needs no
-/// Rust-side dispatch change).
+/// `runLLMTurnFanout` when its decl is present. Both `Ask` and `RunLLMTurn`
+/// are UNHANDLED (interposed) tags: no `tidepool-handlers` entry, serviced by
+/// each server's own suspend machinery (see
+/// `tidepool-codegen::jit_machine::drive_effect_loop`'s `suspend_tag`
+/// threshold — every tag from the first interposed effect onward suspends,
+/// so appending further interposed effects here needs no Rust-side dispatch
+/// change).
 pub fn standard_decls() -> Vec<EffectDecl> {
     macro_rules! std_decls_rows {
         ($(($name:ident, $decl:ident)),* $(,)?) => {
-            vec![ $( $crate::$decl() ),*, $crate::ask_decl(), $crate::runllmturn_decl(), $crate::fork_decl() ]
+            vec![ $( $crate::$decl() ),*, $crate::ask_decl(), $crate::runllmturn_decl() ]
         };
     }
     crate::base_effects!(std_decls_rows)
@@ -1130,13 +1147,15 @@ mod tests {
         assert_eq!(a, b);
         // Canonical order is load-bearing: handlers are tag-indexed by it.
         assert_eq!(a.first(), Some(&"Console"));
-        // Ask, RunLLMTurn, and Fork are all interposed (WS-B split runLLMTurn
-        // out of Ask; the fork retarget moved Tidepool.Fork's backing onto
-        // Fork), appended in that order after the base stack.
+        // Ask and RunLLMTurn are both interposed (WS-B split runLLMTurn out
+        // of Ask), appended in that order after the base stack. Fork is NOT
+        // here: the ordinary session engine's request parser never accepts
+        // ForkWith/ForkAllWith (vestigial-subsystems review §4) — the
+        // harness Agent turn's own roster (`agent_decls`) adds Fork on top
+        // of this one explicitly.
         assert_eq!(a[9], "Ask");
-        assert_eq!(a[10], "RunLLMTurn");
-        assert_eq!(a.last(), Some(&"Fork"));
-        assert_eq!(a.len(), 12);
+        assert_eq!(a.last(), Some(&"RunLLMTurn"));
+        assert_eq!(a.len(), 11);
         // SG was cut (friction #37); the stack must NOT contain it.
         assert!(
             !a.contains(&"SG"),

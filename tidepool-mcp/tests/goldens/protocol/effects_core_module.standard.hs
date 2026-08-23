@@ -129,10 +129,6 @@ data RunLLMTurn a where
   RunLLMTurnWith :: Text -> Value -> RunLLMTurn Value
   RunLLMTurnFreezeWith :: RunLLMTurn ContextRef
 
-data Fork a where
-  ForkWith :: Int -> Text -> Fork Value
-  ForkAllWith :: Int -> [Text] -> Fork Value
-
 -- | Emit a line of console output. Thin wrapper over the Print effect
 -- so chains never need `send (Print …)`.
 say :: forall effs. Member Console effs => Text -> Eff effs ()
@@ -503,11 +499,3 @@ runLLMTurnBranchFanout ref labeledPrompts = runLLMTurnBranchFanoutSited 0 ref la
 {-# OPAQUE runLLMTurnBranchFanoutSited #-}
 runLLMTurnBranchFanoutSited :: forall a effs. Member RunLLMTurn effs => Int -> ContextRef -> [(Text, Text)] -> Eff effs [Either InvocationExit (a, ContextRef)]
 runLLMTurnBranchFanoutSited sid (ContextRef ref) labeledPrompts = unsafeCoerce <$> send (RunLLMTurnWith (intercalate "\n" (map snd labeledPrompts)) (object ["typedSite" .= sid, "branchFanout" .= True, "ref" .= ref, "labels" .= map fst labeledPrompts, "prompts" .= map snd labeledPrompts, "fan" .= length labeledPrompts]))
--- @substrate-helper@
-{-# OPAQUE forkSited #-}
-forkSited :: forall a effs. Member Fork effs => Int -> Text -> Eff effs a
-forkSited sid brief = unsafeCoerce <$> send (ForkWith sid brief)
--- @substrate-helper@
-{-# OPAQUE forkAllSited #-}
-forkAllSited :: forall a effs. Member Fork effs => Int -> [Text] -> Eff effs [a]
-forkAllSited sid prompts = unsafeCoerce <$> send (ForkAllWith sid prompts)

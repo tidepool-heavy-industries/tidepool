@@ -49,11 +49,16 @@ fn prelude_dir() -> std::path::PathBuf {
         .unwrap_or_else(|| std::path::PathBuf::from("haskell/lib"))
 }
 
-/// A Fork-capable stack: the general eval decls, whose roster tail declares
-/// the `Fork` effect (tag 11), so `Tidepool.Fork`'s `forkMap`/`forkCata`
-/// (which lower to `Fork`) resolve.
+/// A Fork-capable stack: the ordinary session roster (`standard_decls()`)
+/// with `Fork` appended explicitly (tag 11), so `Tidepool.Fork`'s
+/// `forkMap`/`forkCata` (which lower to `Fork`) resolve. `standard_decls()`
+/// itself no longer carries `Fork` (vestigial-subsystems review §4 — the
+/// ordinary session engine never services it); this test genuinely exercises
+/// the harness's own `Fork`-servicing `classify_hole` path, so it widens the
+/// roster the same way `tidepool-harness::engine::agent_decls` does.
 fn fork_cfg() -> EngineConfig {
-    let decls = tidepool_mcp::standard_decls();
+    let mut decls = tidepool_mcp::standard_decls();
+    decls.push(tidepool_mcp::fork_decl());
     EngineConfig::from_decls(decls, prelude_dir(), None).expect("engine config")
 }
 

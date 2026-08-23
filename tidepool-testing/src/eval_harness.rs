@@ -414,20 +414,29 @@ impl EvalHarness {
 }
 
 /// The base MCP effect stack (Console, KV, Fs, Http, Exec, Lsp, Llm, Git, Time,
-/// Ask, RunLLMTurn, Fork — matching `tidepool_mcp::standard_decls()`) as a
-/// hand-maintained GADT preamble, plus matching stub handlers and a
-/// ready-made [`mock::min_stack`] `frunk` HList.
+/// Ask, RunLLMTurn) as a hand-maintained GADT preamble, plus matching stub
+/// handlers and a ready-made [`mock::min_stack`] `frunk` HList.
 ///
 /// The GADT preamble text and stub handlers below are a STATIC mirror of the
 /// real stack, not a derivation — it exists so callers can compile a
 /// self-contained module without wiring `with_effects_module()`/
 /// `Tidepool.Orchestrate`. Because *those* are hand-maintained, they CAN
 /// drift from `tidepool_mcp::standard_decls()` (that's exactly what happened
-/// when the SG effect was cut and Lsp/Time were added — see f1a480e6).
+/// when the SG effect was cut and Lsp/Time were added — see f1a480e6). This
+/// preamble text/`min_stack()`'s HList still declare `Fork` (tag 11) as a
+/// KNOWN, intentional divergence from `standard_decls()` (vestigial-
+/// subsystems review §4 narrowed `standard_decls()` to the ordinary
+/// one-shot/REPL roster, which never services `Fork`) — several tests
+/// dispatch `Fork` through this mock stack directly (not through the session
+/// engine's suspend/resume parser, so the gap the review names doesn't apply
+/// here) and still need it declared; shrinking this hand-maintained mirror is
+/// a separate migration, not required by that fix.
 /// [`EFFECT_NAMES`] itself is no longer part of that hand-maintained surface:
 /// it's computed straight from `tidepool_mcp::standard_decls()` (this crate
 /// already depends on `tidepool-mcp` as a normal dependency), so it cannot
-/// independently drift. `mock_stack_matches_production`
+/// independently drift, and (as of the `Fork` narrowing above) is one effect
+/// SHORTER than this module's own hand-maintained preamble/`min_stack()`.
+/// `mock_stack_matches_production`
 /// (`tidepool-runtime/tests/effect_stack/mock_stack_lockstep.rs`) still pins
 /// it against `tidepool_mcp::standard_decls()` as a regression guard against
 /// a future hand-maintained list creeping back in.

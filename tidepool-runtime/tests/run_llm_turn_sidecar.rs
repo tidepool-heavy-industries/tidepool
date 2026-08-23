@@ -440,19 +440,33 @@ fn try_compile_runllmturn(hole: &str, helpers: &str) -> Result<(), String> {
 
 /// Same as `try_compile_runllmturn`, but imports `Tidepool.Fork` so
 /// `forkMap`/`forkCata` are in scope. `Tidepool.Fork` rides the `Fork`
-/// effect (not `RunLLMTurn`); `standard_decls()` declares it (roster tail,
-/// tag 11), so its `Tidepool.Effects` import resolves.
+/// effect (not `RunLLMTurn`); `standard_decls()` no longer declares `Fork`
+/// (vestigial-subsystems review §4 — the ordinary session engine never
+/// services it), so this widens the roster explicitly (tag 11, same as
+/// before Fork moved out of `standard_decls()`) for its `Tidepool.Effects`
+/// import to resolve.
+///
+/// Cannot use `.with_effects_module()`: that pulls the FIXED, shared
+/// `Tidepool.Effects` module dir ([`tidepool_testing::eval_harness::
+/// effects_include`]), generated from `standard_decls()` ALONE — which no
+/// longer carries `Fork` either, so it would desync from `decls` here the
+/// same way it would for `compile_and_read_asks` (see that fn's doc). Build
+/// this call's own effects module dir from the widened `decls` instead.
 fn try_compile_forkmap(hole: &str, helpers: &str) -> Result<(), String> {
-    let decls = tidepool_mcp::standard_decls();
+    let mut decls = tidepool_mcp::standard_decls();
+    decls.push(tidepool_mcp::fork_decl());
     let pre = tidepool_mcp::build_preamble(&decls, false);
     let stack = tidepool_mcp::build_effect_stack_type(&decls);
     let code = format!("do\n  _ <- {hole}\n  pure (toJSON (0 :: Int))\n");
     let src =
         tidepool_mcp::template_haskell(&pre, &stack, &code, "Tidepool.Fork", helpers, None, None);
+    let effects_dirs = tidepool_mcp::ensure_effects_module(&decls)
+        .expect("write effects module")
+        .include_paths();
 
     EvalHarness::new()
         .with_stdlib()
-        .with_effects_module()
+        .with_includes(effects_dirs)
         .with_extract_env()
         .compile(&src, "result")
         .map(|_| ())
@@ -478,7 +492,8 @@ fn forkmap_accepts_monomorphic_answer_type() {
 /// exactly one forkAllSited dispatch.
 #[test]
 fn forkmap_sidecar_entry_matches_bare_fanout_shape() {
-    let decls = tidepool_mcp::standard_decls();
+    let mut decls = tidepool_mcp::standard_decls();
+    decls.push(tidepool_mcp::fork_decl());
     let pre = tidepool_mcp::build_preamble(&decls, false);
     let stack = tidepool_mcp::build_effect_stack_type(&decls);
     let code = "do\n  ys <- forkMap @Verdict (\\x -> T.pack (show (x :: Int))) [1, 2, 3 :: Int]\n  pure (toJSON (length (ys :: [Verdict])))\n";
@@ -556,7 +571,8 @@ fn forkmap_rejects_partial_application() {
 /// sibling of `forkAllSited` on the `Fork` effect.
 #[test]
 fn fork_sidecar_entry_records_bare_answer_type() {
-    let decls = tidepool_mcp::standard_decls();
+    let mut decls = tidepool_mcp::standard_decls();
+    decls.push(tidepool_mcp::fork_decl());
     let pre = tidepool_mcp::build_preamble(&decls, false);
     let stack = tidepool_mcp::build_effect_stack_type(&decls);
     let code = "do\n  y <- fork @Verdict \"brief\"\n  pure (toJSON (show (y :: Verdict)))\n";
@@ -587,7 +603,8 @@ fn fork_sidecar_entry_records_bare_answer_type() {
 /// left `forkAll`'s own recognition arm untouched.
 #[test]
 fn forkall_sidecar_entry_still_records_list_answer_type() {
-    let decls = tidepool_mcp::standard_decls();
+    let mut decls = tidepool_mcp::standard_decls();
+    decls.push(tidepool_mcp::fork_decl());
     let pre = tidepool_mcp::build_preamble(&decls, false);
     let stack = tidepool_mcp::build_effect_stack_type(&decls);
     let code =

@@ -175,9 +175,10 @@ pub fn build_minimal_stack() -> impl tidepool_effect::dispatch::DispatchEffect<C
 }
 
 /// Collect effect declarations from a base stack and append the interposed
-/// effects (`Ask`, then `RunLLMTurn`, then `Fork` — WS-B split `runLLMTurn`
-/// out of `Ask`; the fork retarget moved `Tidepool.Fork`'s backing onto the
-/// distinct `Fork` effect, appended at the roster tail).
+/// effects (`Ask`, then `RunLLMTurn` — WS-B split `runLLMTurn` out of `Ask`).
+/// No `Fork`: the ordinary session engine servicing this stack never accepts
+/// `ForkWith`/`ForkAllWith` (vestigial-subsystems review §4) — see
+/// `tidepool_mcp::EffectRoster::from_handlers`'s doc.
 ///
 /// Returns `(decls, ask_tag)` where `ask_tag` is the index of the FIRST
 /// interposed effect (`Ask`) in `decls` — the suspend threshold every tag at

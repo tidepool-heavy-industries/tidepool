@@ -13,13 +13,17 @@ fn first_sig_line(helper: &str) -> Option<&str> {
 }
 
 /// The debug decl list: base effects (Console..Time, `base_effects!` order)
-/// with Meta appended, then the interposed effects (Ask, RunLLMTurn, Fork)
+/// with Meta appended, then the interposed effects (Ask, RunLLMTurn)
 /// appended last. HAZARD: this must independently reproduce the SAME order
-/// `build_debug_stack`'s handler HList actually wires (Ask/RunLLMTurn/Fork
-/// are appended separately by `TidepoolMcpServer::new`) — a past drift
-/// between this list and the real dispatch order silently broke Meta's
-/// reported effect/helper list. `debug_stack_handler_order_matches_debug_decls`
-/// below pins the two against each other.
+/// `build_debug_stack`'s handler HList actually wires (Ask/RunLLMTurn
+/// are appended separately by `TidepoolMcpServer::new`, via
+/// `EffectRoster::from_handlers`) — a past drift between this list and the
+/// real dispatch order silently broke Meta's reported effect/helper list.
+/// `debug_stack_handler_order_matches_debug_decls` below pins the two
+/// against each other. No `Fork` here (vestigial-subsystems review §4): the
+/// `--debug` stack runs through the SAME one-shot session engine as
+/// `run_base`, which never services `ForkWith`/`ForkAllWith` — see
+/// `tidepool_mcp::standard_decls`'s doc.
 ///
 /// Splits off everything from `Ask` onward (found by name, not a fixed
 /// count) rather than popping exactly one: `standard_decls()` appends
@@ -110,7 +114,6 @@ mod tests {
         "Meta",
         "Ask",
         "RunLLMTurn",
-        "Fork",
     ];
 
     #[test]
@@ -153,8 +156,8 @@ mod tests {
         assert_eq!(collected_names, EXPECTED_ORDER);
         assert_eq!(
             ask_tag as usize,
-            EXPECTED_ORDER.len() - 3,
-            "Ask must land after Meta, followed only by RunLLMTurn and Fork"
+            EXPECTED_ORDER.len() - 2,
+            "Ask must land after Meta, followed only by RunLLMTurn"
         );
     }
 }

@@ -100,9 +100,12 @@ use tidepool_eval::value::Value;
 use tidepool_runtime::compile_and_run;
 use tidepool_testing::NullDispatcher;
 
-/// `Fork`'s position in the standard effect stack: 9 base effects at tags
-/// 0..8, then the interposed `Ask` (9), `RunLLMTurn` (10), and `Fork` (11) —
-/// the roster order in `tidepool-mcp`'s `standard_decls()`.
+/// `Fork`'s position in the stack `eval_with_dispatch` compiles against: 9
+/// base effects at tags 0..8, then the interposed `Ask` (9), `RunLLMTurn`
+/// (10), and `Fork` (11) — `standard_decls()`'s own order (base9 + Ask +
+/// RunLLMTurn) with `Fork` appended explicitly, same as the harness's
+/// `agent_decls` (`standard_decls()` itself stops at `RunLLMTurn` — the
+/// ordinary session engine never services `Fork`).
 ///
 /// `Tidepool.Fork`'s `forkFilter`/`forkMap` reach the machine through
 /// `forkAllSited`, which sends on `Fork` — so their fanout dispatch arrives
@@ -1358,7 +1361,14 @@ fn eval_with_dispatch<H: DispatchEffect<()>>(
     code: &str,
     dispatcher: &mut H,
 ) -> Result<serde_json::Value, String> {
-    let decls = tidepool_mcp::standard_decls();
+    // `standard_decls()` no longer carries `Fork` (vestigial-subsystems
+    // review §4 — the ordinary session engine never services it); the two
+    // callers of this helper (`works_fork`, `works_fork_map`) genuinely
+    // exercise `Tidepool.Fork`'s JIT dispatch, so widen the roster here,
+    // explicitly, the same way the harness's `agent_decls` does. Fork lands
+    // at the same tag (11) it always did — it was always the tail element.
+    let mut decls = tidepool_mcp::standard_decls();
+    decls.push(tidepool_mcp::fork_decl());
     let pre = tidepool_mcp::build_preamble(&decls, true);
     let stack = tidepool_mcp::build_effect_stack_type(&decls);
     let src = tidepool_mcp::template_haskell(&pre, &stack, code, imports, "", None, None);

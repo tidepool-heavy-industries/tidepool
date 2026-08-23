@@ -1589,17 +1589,28 @@ pub const DEFAULT_MAX_TURNS: u32 = 8;
 pub const DEFAULT_MAX_TOKENS: u32 = 2048;
 
 /// The Agent turn engine's decl list: `standard_decls()` (base9 + Ask +
-/// RunLLMTurn) with `Finalize` appended last —
-/// its own interposed effect/tag, sharing `Ask`/`RunLLMTurn`'s suspend path
-/// (see `jit_machine::drive_effect_loop`'s `suspend_tag` threshold: every tag
-/// from the FIRST interposed effect onward suspends, so appending a third
-/// interposed effect here needs no further Rust-side dispatch change).
-/// `Agent` isn't a literal Haskell type anywhere — it's this decl list, used
-/// wherever an Agent turn (an Agent node driven by `Harness::run_to_hole_or_done`,
-/// including the self-iterating-harness's nested Agent sessions answering a
-/// `runLLMTurn` hole via `finalize`) is compiled.
+/// RunLLMTurn — the ordinary one-shot/REPL roster) with `Fork` and
+/// `Finalize` appended last — both their own interposed effect/tag, sharing
+/// `Ask`/`RunLLMTurn`'s suspend path (see `jit_machine::drive_effect_loop`'s
+/// `suspend_tag` threshold: every tag from the FIRST interposed effect
+/// onward suspends, so appending further interposed effects here needs no
+/// further Rust-side dispatch change). `Agent` isn't a literal Haskell type
+/// anywhere — it's this decl list, used wherever an Agent turn (an Agent
+/// node driven by `Harness::run_to_hole_or_done`, including the
+/// self-iterating-harness's nested Agent sessions answering a `runLLMTurn`
+/// hole via `finalize`) is compiled.
+///
+/// `Fork` is added HERE, explicitly, rather than living in `standard_decls()`
+/// itself (vestigial-subsystems review §4): this engine's own `classify_hole`
+/// (below) genuinely matches `ForkWith`/`ForkAllWith` and routes them to a
+/// fan/site — unlike the ordinary session engine's `extract_ask_request`,
+/// which has no scheduler for either constructor. `Fork` was always the
+/// tail-most element of the old universal roster, so re-adding it here,
+/// ahead of `Finalize`, reproduces the EXACT same union-tag order this stack
+/// always had — no positional-tag shift for any surface.
 fn agent_decls() -> Vec<tidepool_mcp::EffectDecl> {
     let mut decls = tidepool_mcp::standard_decls();
+    decls.push(tidepool_mcp::fork_decl());
     decls.push(tidepool_mcp::finalize_decl());
     decls
 }

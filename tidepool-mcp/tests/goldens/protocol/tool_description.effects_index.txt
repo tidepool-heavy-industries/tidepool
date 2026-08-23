@@ -20,4 +20,3 @@
       verbs: ask
   RunLLMTurn: Suspend for a TYPED answer.
       verbs: runLLMTurn, runLLMTurnFork, runLLMTurnFanout, renderInvocationExit, freezeContext, runLLMTurnBranch, runLLMTurnBranchLabeled, runLLMTurnBranchFanout
-  Fork: Spawn parallel sub-answerers and gather their typed answers.

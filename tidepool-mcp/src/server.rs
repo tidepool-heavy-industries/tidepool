@@ -43,11 +43,24 @@ impl<T> McpEffectHandler for T where
 /// the FIRST interposed effect, `Ask` — the JIT's suspend driver intercepts
 /// every tag at or beyond it rather than dispatching it to a handler),
 /// buildable ONLY via [`EffectRoster::from_handlers`] — the single place that
-/// appends the interposed suffix (`Ask`, `RunLLMTurn`, `Fork`) and derives the
+/// appends the interposed suffix (`Ask`, `RunLLMTurn`) and derives the
 /// suspend tag, so the two cannot desync. (A prior audit finding: two
 /// independent copies of this append-and-count algorithm risked a drift that
 /// would misclassify an ordinary handled effect as a suspension, or dispatch
 /// an interposed effect as a normal handler tag, at the union-tag boundary.)
+///
+/// This is the ONE roster builder for the one-shot MCP eval server and the
+/// REPL (both build their handler stack through this function — see
+/// `tidepool-repl/src/main_setup.rs`/`session.rs`/`server.rs`/`manager.rs`,
+/// none of which call `standard_decls()` directly). It deliberately does NOT
+/// append `Fork`: the ordinary session engine's request parser
+/// (`tidepool_runtime::session::engine::extract_ask_request`, shared
+/// verbatim by the REPL) only ever matches `AskWith`/`RunLLMTurnWith` — a
+/// suspended `ForkWith`/`ForkAllWith` on either surface has no scheduler to
+/// answer it (vestigial-subsystems review §4). The harness Agent turn
+/// dispatches `Fork` through a different mechanism (`classify_hole`) and
+/// builds its own wider roster (`tidepool-harness::engine::agent_decls`)
+/// rather than going through this function.
 #[derive(Clone)]
 pub struct EffectRoster {
     decls: Vec<EffectDecl>,
@@ -57,17 +70,18 @@ pub struct EffectRoster {
 impl EffectRoster {
     /// Collect `H`'s handler-derived declarations, then append the fixed
     /// interposed suffix — `Ask`, then `RunLLMTurn` (WS-B split `runLLMTurn`
-    /// out of `Ask`), then `Fork` (the answerer parallel-delegation retarget)
-    /// — in that order. The suspend tag is minted BEFORE the suffix is
-    /// appended, so it always equals the handler-decl count by construction.
-    /// Takes `&H` (unused beyond type inference) so callers holding an
-    /// already-built stack don't need a turbofish.
+    /// out of `Ask`) — in that order. The suspend tag is minted BEFORE the
+    /// suffix is appended, so it always equals the handler-decl count by
+    /// construction. Takes `&H` (unused beyond type inference) so callers
+    /// holding an already-built stack don't need a turbofish.
+    ///
+    /// No `Fork` here — see this struct's doc for why the one-shot/REPL
+    /// roster stops at `RunLLMTurn`.
     pub fn from_handlers<H: CollectEffectDecls>(_handlers: &H) -> EffectRoster {
         let mut decls = H::collect_decls();
         let suspend_tag = decls.len() as u64;
         decls.push(ask_decl());
         decls.push(runllmturn_decl());
-        decls.push(fork_decl());
         EffectRoster { decls, suspend_tag }
     }
 
