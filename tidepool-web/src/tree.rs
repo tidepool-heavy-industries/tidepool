@@ -63,7 +63,12 @@ pub const D3_JS: &str = include_str!("../assets/d3.v7.9.0.min.js");
 /// [`TREE_CSS`]'s tree/pane-specific additions, and three scripts in order:
 /// the vendored d3 bundle, the shared [`shell::CORE_JS`], then this page's
 /// own [`TREE_JS`].
-pub fn tree_page() -> Markup {
+/// `dial` follows the same contract as [`shell::page`]'s: `Some` renders the
+/// operator's live model/effort dial in the masthead (current values, never
+/// a write-only form); `None` renders no dial at all (replay/api-key mode,
+/// the demo binary, tests). The dial's CSS and form wiring ride the already-
+/// embedded [`shell::CSS`]/[`shell::CORE_JS`].
+pub fn tree_page(dial: Option<&tidepool_harness::provider::settings::ModelSettings>) -> Markup {
     html! {
         (DOCTYPE)
         html lang="en" {
@@ -81,6 +86,9 @@ pub fn tree_page() -> Markup {
                     header class="tree-masthead" {
                         span class="mark" { "tidepool" }
                         a class="legacy-link" href="/legacy" { "outline view" }
+                        @if let Some(d) = dial {
+                            (shell::model_dial(d))
+                        }
                         button type="button" id="fit-reset" class="fit-reset" { "fit" }
                         span id="conn" class="conn ok" { "live" }
                     }
@@ -415,7 +423,7 @@ mod tests {
 
     #[test]
     fn tree_page_wires_d3_asset_and_scripts() {
-        let doc = tree_page().into_string();
+        let doc = tree_page(None).into_string();
         assert!(doc.contains(&format!("src=\"{D3_ASSET_PATH}\"")), "{doc}");
         assert!(doc.contains("id=\"tree-canvas\""), "{doc}");
         assert!(doc.contains("id=\"side-pane\""), "{doc}");
@@ -435,7 +443,7 @@ mod tests {
 
     #[test]
     fn tree_page_embeds_shared_core_js_verbatim() {
-        let doc = tree_page().into_string();
+        let doc = tree_page(None).into_string();
         assert!(
             doc.contains(shell::CORE_JS),
             "the tree page must embed shell::CORE_JS verbatim, not a reimplementation: {doc}"
@@ -594,10 +602,37 @@ mod tests {
     }
 
     /// `tree_page()` renders the fit/reset affordance the operator asked
+    /// The dial contract on THIS page mirrors `/legacy`'s masthead: wired
+    /// settings render the two dropdowns with current values selected;
+    /// no settings, no dial.
+    #[test]
+    fn tree_page_renders_the_model_dial_only_when_settings_are_wired() {
+        let settings = tidepool_harness::provider::settings::ModelSettings {
+            model: "gpt-5.6-sol".to_string(),
+            effort: tidepool_harness::provider::oauth::ReasoningEffort::Medium,
+        };
+        let with = tree_page(Some(&settings)).into_string();
+        assert!(
+            with.contains(r#"<form class="model-dial""#),
+            "dial form missing: {with}"
+        );
+        assert!(
+            with.contains(r#"option value="gpt-5.6-sol" selected"#),
+            "current model not selected: {with}"
+        );
+        // The `.model-dial` CSS rules ride the embedded stylesheet either
+        // way; absence means no FORM, not no text match anywhere.
+        let without = tree_page(None).into_string();
+        assert!(
+            !without.contains(r#"<form class="model-dial""#),
+            "no settings must mean no dial form"
+        );
+    }
+
     /// for, in the masthead alongside the outline-view link.
     #[test]
     fn tree_page_has_a_fit_reset_button() {
-        let doc = tree_page().into_string();
+        let doc = tree_page(None).into_string();
         assert!(doc.contains("id=\"fit-reset\""), "{doc}");
     }
 
@@ -607,7 +642,7 @@ mod tests {
     /// …), so `tree_page()` must embed both.
     #[test]
     fn tree_page_embeds_shell_css_and_tree_css() {
-        let doc = tree_page().into_string();
+        let doc = tree_page(None).into_string();
         assert!(doc.contains(shell::CSS), "{doc}");
         assert!(doc.contains(TREE_CSS), "{doc}");
     }

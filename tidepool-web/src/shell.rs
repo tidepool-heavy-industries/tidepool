@@ -96,7 +96,7 @@ pub fn page(
 /// `Ask`/`AskUser` form machinery. `<option>` values are
 /// [`ReasoningEffort::wire`]'s canonical strings — the exact spelling the
 /// settings route parses back.
-fn model_dial(current: &ModelSettings) -> Markup {
+pub(crate) fn model_dial(current: &ModelSettings) -> Markup {
     html! {
         form class="model-dial" data-on-submit="@post('/settings')" {
             select class="dial-model" data-bind="model" data-kind="string" onchange="this.form.requestSubmit()" {

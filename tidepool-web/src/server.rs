@@ -1014,10 +1014,12 @@ pub fn router_with_form_api(state: AppState, form_api_enabled: bool) -> Router {
     crate::formapi::merge(base, form_api_enabled).with_state(state)
 }
 
-/// `GET /` — the d3 tree view shell. Static markup; the page's own JS fetches
-/// `/api/tree` and opens `/sse` once loaded.
-async fn tree_shell() -> Html<String> {
-    Html(crate::tree::tree_page().into_string())
+/// `GET /` — the d3 tree view shell. The dial snapshot is the one
+/// server-rendered datum (same contract as `/legacy`'s masthead); everything
+/// else is static markup whose own JS fetches `/api/tree` and opens `/sse`.
+async fn tree_shell(State(st): State<AppState>) -> Html<String> {
+    let dial = st.model_settings().as_ref().map(SharedModelSettings::get);
+    Html(crate::tree::tree_page(dial.as_ref()).into_string())
 }
 
 /// `GET /legacy` — the original outline page, byte-for-byte the same
