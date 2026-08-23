@@ -52,6 +52,26 @@ use crate::seam::{
     ToolCallId, ToolOutcome, ToolReply, TurnEvent, TurnId,
 };
 
+/// Render zero, one, or many mid-turn agent ids for a `NotRunning`-shaped
+/// diagnostic. `agents` must already be in the caller's desired order (both
+/// current callers sort first). The EMPTY case is `"no agent is mid-turn"`
+/// VERBATIM — that exact string is asserted literally by
+/// `handler_resume_with_no_agent_running_is_a_drive_failure` in
+/// `tidepool-handlers`.
+pub fn format_running_agents(agents: &[AgentId]) -> String {
+    match agents {
+        [] => "no agent is mid-turn".to_string(),
+        [one] => format!("agent {} is the one mid-turn", one.0),
+        many => format!(
+            "agents mid-turn are {}",
+            many.iter()
+                .map(|a| format!("agent {}", a.0))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+    }
+}
+
 /// Where in the saga something happened. Carried on every [`SpawnError`] so a
 /// caller (and a receipt reader) can see how far the spawn got without
 /// reconstructing it from prose.
@@ -1023,17 +1043,7 @@ impl CoupledSpawner {
     /// `handler_resume_with_no_agent_running_is_a_drive_failure` in
     /// `tidepool-handlers`.
     fn no_such_agent_detail(&self) -> String {
-        match self.running_agents().as_slice() {
-            [] => "no agent is mid-turn".to_string(),
-            [one] => format!("agent {} is the one mid-turn", one.0),
-            many => format!(
-                "agents mid-turn are {}",
-                many.iter()
-                    .map(|a| format!("agent {}", a.0))
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            ),
-        }
+        format_running_agents(&self.running_agents())
     }
 
     /// BEGIN the coupled-spawn saga and drive to its first stop. A thin

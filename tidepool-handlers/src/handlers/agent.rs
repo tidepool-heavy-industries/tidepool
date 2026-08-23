@@ -9,9 +9,9 @@ use tidepool_agent::seam::{
     DynamicToolDeclaration, ModelPolicy, ReasoningEffort, TokenUsage, ToolCallId, ToolOutcome,
 };
 use tidepool_agent::spawn::{
-    AnswerFailure, CoupledSpawner, CycleProgress, CycleSaga, OneCycleRun, ParkedCycle,
-    SpawnError as DomainSpawnError, SpawnReceipt, SpawnRequest, SpawnStage, SpawnStep,
-    SpawnWorkspace, WorkerRun,
+    format_running_agents, AnswerFailure, CoupledSpawner, CycleProgress, CycleSaga, OneCycleRun,
+    ParkedCycle, SpawnError as DomainSpawnError, SpawnReceipt, SpawnRequest, SpawnStage,
+    SpawnStep, SpawnWorkspace, WorkerRun,
 };
 use tidepool_worktree::error::WorktreeError as DomainWorktreeError;
 use tidepool_worktree::git::GitCli;
@@ -742,25 +742,11 @@ impl SubagentHandler {
         agents
     }
 
-    /// What a `NotRunning` says when no stepped cycle is running `agent`.
-    ///
-    /// Mirrors `CoupledSpawner::no_such_agent_detail` (private there), because
-    /// the table now owns the lookup that used to happen inside the spawner's
-    /// own map. The EMPTY case is `"no agent is mid-turn"` VERBATIM: that exact
-    /// string is asserted by
-    /// `handler_resume_with_no_agent_running_is_a_drive_failure` below.
+    /// What a `NotRunning` says when no stepped cycle is running `agent` —
+    /// the table owns the lookup that used to happen inside the spawner's own
+    /// map, but the rendering itself is `tidepool_agent::spawn::format_running_agents`.
     fn no_such_agent_detail(&self) -> String {
-        match self.stepped_agents().as_slice() {
-            [] => "no agent is mid-turn".to_string(),
-            [one] => format!("agent {} is the one mid-turn", one.0),
-            many => format!(
-                "agents mid-turn are {}",
-                many.iter()
-                    .map(|a| format!("agent {}", a.0))
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            ),
-        }
+        format_running_agents(&self.stepped_agents())
     }
 
     // ------------------------------------------------------------------
