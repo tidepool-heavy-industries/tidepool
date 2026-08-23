@@ -206,7 +206,9 @@ still works as a fallback (no `cargo-nextest` available) but is noticeably slowe
 
 **Every test run needs `TIDEPOOL_EXTRACT`** pointing at a built
 `tidepool-extract-bin`, or tests fail loud with `Metadata entry must be an
-array of exactly 8`:
+array of exactly 9` (a stale extract predating the current wire shape reports
+the same message with its own old count — see `scripts/toolchain-doctor.sh`
+for identifying that class):
 ```bash
 export PATH=<nix-ghc-with-packages>/bin:$PATH   # lens on the GHC package DB
 cd haskell && cabal build tidepool-extract-bin
@@ -218,7 +220,7 @@ export TIDEPOOL_EXTRACT=$(cabal list-bin tidepool-extract-bin)
 
 This environment hard-kills background processes at ~380s, and a full-workspace
 GHC battery is HOURS (every GHC-heavy test forks a real `tidepool-extract`
-compile, capped at 1 concurrent per run, and a handful of suites alone run
+compile, capped at 2 concurrent per run, and a handful of suites alone run
 for multiple hundreds of seconds).
 Bare `scripts/battery.sh` WILL get killed mid-run. Four tiers, from fastest to
 most exhaustive:
@@ -227,13 +229,18 @@ Both battery scripts take a host GHC slot for you (`scripts/ghc-slots.sh run`,
 6 slots shared box-wide) and re-exec themselves under it — you do not wrap
 them, and an outer wrapper is respected rather than double-acquired. Inside a
 run, `.config/nextest.toml`'s `ghc-heavy` test group caps concurrent extract
-compiles at 1; membership is default-deny, so a new crate or test binary is
+compiles at 2; membership is default-deny, so a new crate or test binary is
 capped without an edit there. The box-wide ceiling is the product of the two
 (slots × per-run cap).
 
-1. **Fast default** — `cargo nextest run`. Pure-Rust crates only
-   (`.config/nextest.toml`'s `default-filter` skips every GHC-extract-heavy
-   crate). This is the inner-loop tier; safe to run unattended.
+1. **Fast default** — `cargo nextest run`. This is a RUN-time selection
+   filter, not a build-time GHC-free guarantee: `.config/nextest.toml`'s
+   `default-filter` skips every GHC-extract-heavy crate's test PROCESSES, but
+   `haskell_eval!`/`haskell_inline!` still run `tidepool-extract` during macro
+   EXPANSION (i.e. at `rustc` build time) for any crate that uses them, so the
+   first build after a toolchain bump or `.hs` edit still pays that cost —
+   see `.config/nextest.toml`'s own header comment. This is the inner-loop
+   tier; safe to run unattended once built.
 2. **Targeted** — `scripts/battery.sh -p <crate> -E 'binary(<x>)'` (or
    `-E 'test(<name>)'`). One GHC-heavy crate, one test/binary, via
    `--ignore-default-filter`. The right tier for "does my change to crate X
