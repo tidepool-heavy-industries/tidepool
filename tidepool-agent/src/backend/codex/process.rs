@@ -24,6 +24,7 @@ use serde_json::Value;
 // The shared readable-executable-file check — see `resolve_codex_binary`'s
 // doc for why this crate's own Linux-only policy stays on top of it.
 use tidepool_extract_cmd::exec_check::is_readable_executable_file;
+use tidepool_repr::MonotonicIdIssuer;
 
 use crate::backend::codex::transport::Transport;
 
@@ -129,7 +130,7 @@ const TRUNCATION_MARKER_METHOD: &str = "tidepool/frameBufferTruncated";
 /// session, exactly as before.
 pub struct Session<T = RawAsyncClient> {
     client: T,
-    next_id: i64,
+    request_ids: MonotonicIdIssuer,
     /// Capped at [`MAX_RECORDED_FRAMES`] real frames plus at most one
     /// synthetic truncation-marker frame — see [`Session::record_frame`].
     frames: Vec<RecordedFrame>,
@@ -153,7 +154,7 @@ impl<T: Transport> Session<T> {
         let pid = client.pid();
         Self {
             client,
-            next_id: 1,
+            request_ids: MonotonicIdIssuer::new("req"),
             frames: Vec::new(),
             truncation_marker: None,
             pid,
@@ -398,8 +399,7 @@ impl<T: Transport> Session<T> {
         method: &str,
         params: &P,
     ) -> Result<R, SessionError> {
-        let id = RequestId::Integer(self.next_id);
-        self.next_id += 1;
+        let id = RequestId::Integer(self.request_ids.next_raw() as i64);
 
         let req = JsonRpcRequest {
             id: id.clone(),
@@ -579,8 +579,7 @@ impl<T: Transport> Session<T> {
         timeout: Duration,
     ) -> Result<TurnStop, SessionError> {
         let method = codex_codes::methods::TURN_START;
-        let start_id = RequestId::Integer(self.next_id);
-        self.next_id += 1;
+        let start_id = RequestId::Integer(self.request_ids.next_raw() as i64);
         self.turn = TurnState {
             start_id: Some(start_id.clone()),
             ..Default::default()

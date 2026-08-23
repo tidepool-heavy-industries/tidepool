@@ -26,8 +26,16 @@ pub struct MonotonicIdIssuer {
 
 impl MonotonicIdIssuer {
     pub fn new(prefix: impl Into<String>) -> Self {
+        Self::starting_at(prefix, 1)
+    }
+
+    /// Like [`Self::new`], but the first `next_raw`/`next_id` call returns
+    /// `start` instead of 1 — for a protocol that mandates its own first id
+    /// (zero-based, or already offset by a caller-side pre-increment
+    /// convention this issuer is replacing).
+    pub fn starting_at(prefix: impl Into<String>, start: u64) -> Self {
         Self {
-            next: AtomicU64::new(1),
+            next: AtomicU64::new(start),
             prefix: prefix.into(),
         }
     }
@@ -63,5 +71,16 @@ mod tests {
         assert_eq!(issuer.next_raw(), 1);
         assert_eq!(issuer.next_id(), "scont_2");
         assert_eq!(issuer.next_raw(), 3);
+    }
+
+    #[test]
+    fn starting_at_overrides_the_first_returned_value() {
+        let issuer = MonotonicIdIssuer::starting_at("agent", 0);
+        assert_eq!(issuer.next_raw(), 0);
+        assert_eq!(issuer.next_raw(), 1);
+
+        let issuer = MonotonicIdIssuer::starting_at("event", 2);
+        assert_eq!(issuer.next_id(), "event_2");
+        assert_eq!(issuer.next_id(), "event_3");
     }
 }

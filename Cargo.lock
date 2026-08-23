@@ -3887,6 +3887,7 @@ dependencies = [
  "tempfile",
  "thiserror",
  "tidepool-extract-cmd",
+ "tidepool-repr",
  "tidepool-worktree",
  "tokio",
 ]

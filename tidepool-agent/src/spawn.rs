@@ -40,6 +40,7 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, MutexGuard};
 
+use tidepool_repr::MonotonicIdIssuer;
 use tidepool_worktree::{
     sanitize_agent_label, ActiveBinding, AgentRef, BindingTable, BindingTerminal, WorktreeError,
     WorktreeHandle, WorktreeId, WorktreeManager, WorktreeSpec,
@@ -442,7 +443,7 @@ pub struct OneCycleRun {
 pub struct SpawnSubstrate {
     manager: Arc<WorktreeManager>,
     bindings: BindingTable,
-    next_agent: u64,
+    agent_ids: MonotonicIdIssuer,
 }
 
 impl SpawnSubstrate {
@@ -464,9 +465,7 @@ impl SpawnSubstrate {
     /// Mint the next in-process agent identity. PROVISIONAL: not durable
     /// across restarts.
     pub fn mint_agent_id(&mut self) -> AgentId {
-        let id = AgentId(self.next_agent);
-        self.next_agent += 1;
-        id
+        AgentId(self.agent_ids.next_raw())
     }
 
     /// Stage 1: a new managed worktree, or an existing one by durable id.
@@ -985,7 +984,7 @@ impl CoupledSpawner {
             substrate: Arc::new(Mutex::new(SpawnSubstrate {
                 manager: Arc::clone(&manager),
                 bindings: BindingTable::open(binding_root)?,
-                next_agent: 0,
+                agent_ids: MonotonicIdIssuer::starting_at("agent", 0),
             })),
             manager,
             running: HashMap::new(),

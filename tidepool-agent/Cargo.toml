@@ -20,6 +20,7 @@ tidepool-extract-cmd.workspace = true
 # from another thread goes by pidfd (see driver.rs's PidFdSlot docs).
 rustix = { version = "1", features = ["process", "event"] }
 parking_lot.workspace = true
+tidepool-repr.workspace = true
 tidepool-worktree.workspace = true
 serde.workspace = true
 serde_json.workspace = true

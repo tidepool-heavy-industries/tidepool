@@ -116,6 +116,7 @@ use tidepool_bridge_effects::{
     EvCommitReceipt, EvEventId, EvHeadChangeKind, EvHeadChangeReceipt, EvRepositoryEvent,
     EvSubscriptionId, EvTickReceipt, EvWatch, WtBranchName, WtGitOid, WtWorktreeId,
 };
+use tidepool_repr::MonotonicIdIssuer;
 use tidepool_worktree::storage::now_ms;
 
 // Wall-clock epoch milliseconds for `Tick`'s `firedAtMs` — an observability
@@ -210,12 +211,13 @@ impl Subscription {
 pub struct SubscriptionRegistry {
     /// Monotonic. An id is NEVER reused, so a spent id is a lookup miss rather
     /// than an alias of some later subscription.
-    next_id: i64,
-    /// Separate id space from `next_id` (subscription ids) and from the ids
+    sub_ids: MonotonicIdIssuer,
+    /// Separate id space from `sub_ids` (subscription ids) and from the ids
     /// [`MonitorObservations`] mints for git-observed facts — this registry
     /// is the only minter of a `Tick`'s [`EvEventId`], since no monitor pass
-    /// produces one.
-    next_event_id: i64,
+    /// produces one. Starts at 2 (not 1) to preserve the original
+    /// pre-increment counter's first-minted value.
+    event_ids: MonotonicIdIssuer,
     subs: Vec<(i64, Subscription)>,
     bound: usize,
 }
@@ -227,8 +229,8 @@ impl SubscriptionRegistry {
             "the per-subscription queue bound must be positive"
         );
         Self {
-            next_id: 1,
-            next_event_id: 1,
+            sub_ids: MonotonicIdIssuer::new("sub"),
+            event_ids: MonotonicIdIssuer::starting_at("event", 2),
             subs: Vec::new(),
             bound,
         }
@@ -255,8 +257,7 @@ impl SubscriptionRegistry {
                 _ => None,
             })
             .collect();
-        let raw = self.next_id;
-        self.next_id += 1;
+        let raw = self.sub_ids.next_raw() as i64;
         self.subs.push((
             raw,
             Subscription {
@@ -293,8 +294,7 @@ impl SubscriptionRegistry {
             }
             sub.pending_deadlines.retain(|&d| d > now);
             for _ in 0..due {
-                self.next_event_id += 1;
-                let id = self.next_event_id;
+                let id = self.event_ids.next_raw() as i64;
                 if sub.poisoned() || sub.queue.len() >= self.bound {
                     sub.dropped += 1;
                 } else {
@@ -319,9 +319,8 @@ impl SubscriptionRegistry {
     /// straight into the registry the moment it decides a thread is
     /// terminal. Shares `publish`'s broadcast/bound/poison rule.
     pub fn publish_async_done(&mut self, tid: i64) {
-        self.next_event_id += 1;
         let id = EvEventId {
-            raw: self.next_event_id,
+            raw: self.event_ids.next_raw() as i64,
         };
         self.publish(&EvRepositoryEvent::ObservedAsyncDone(id, tid));
     }
@@ -369,10 +368,9 @@ impl SubscriptionRegistry {
             }
             let slot_key = (mailbox, key.to_string());
             if let Some(&idx) = sub.mailbox_slots.get(&slot_key) {
-                self.next_event_id += 1;
                 sub.queue[idx] = EvRepositoryEvent::ObservedMessage(
                     EvEventId {
-                        raw: self.next_event_id,
+                        raw: self.event_ids.next_raw() as i64,
                     },
                     mailbox,
                     payload.clone(),
@@ -383,11 +381,10 @@ impl SubscriptionRegistry {
                 sub.dropped += 1;
                 continue;
             }
-            self.next_event_id += 1;
             let idx = sub.queue.len();
             sub.queue.push_back(EvRepositoryEvent::ObservedMessage(
                 EvEventId {
-                    raw: self.next_event_id,
+                    raw: self.event_ids.next_raw() as i64,
                 },
                 mailbox,
                 payload.clone(),
@@ -670,21 +667,20 @@ fn domain_kind_to_wire(k: &tidepool_worktree::HeadChangeKind) -> EvHeadChangeKin
 /// about — no lookup-by-name, no enumeration, no addressing verb.
 #[derive(Debug)]
 struct MailboxTable {
-    next_id: i64,
+    ids: MonotonicIdIssuer,
     live: HashSet<i64>,
 }
 
 impl MailboxTable {
     fn new() -> Self {
         Self {
-            next_id: 1,
+            ids: MonotonicIdIssuer::new("mailbox"),
             live: HashSet::new(),
         }
     }
 
     fn mint(&mut self) -> i64 {
-        let id = self.next_id;
-        self.next_id += 1;
+        let id = self.ids.next_raw() as i64;
         self.live.insert(id);
         id
     }
