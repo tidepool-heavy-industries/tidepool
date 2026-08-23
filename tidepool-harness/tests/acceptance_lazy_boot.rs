@@ -84,12 +84,7 @@ fn reply(content: &str) -> RecordedReply {
 /// Pins the lazy-boot contract above for a plain node.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn no_machine_after_force_a_machine_after_the_first_turn() {
-    if !support::extract_available() {
-        eprintln!(
-            "Skipping: tidepool-extract not available (set TIDEPOOL_EXTRACT, run in nix develop)"
-        );
-        return;
-    }
+    support::require_extract();
 
     let dir = tempfile::tempdir().unwrap();
     let log_path = dir.path().join("lazy_boot.jsonl");
@@ -180,12 +175,7 @@ impl tidepool_harness::provider::ModelProvider for AlwaysReply {
 /// ConTags-reachability invariant.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn outer_session_boots_from_pure_render_then_loop_suspends_on_a_real_hole() {
-    if !support::extract_available() {
-        eprintln!(
-            "Skipping: tidepool-extract not available (set TIDEPOOL_EXTRACT, run in nix develop)"
-        );
-        return;
-    }
+    support::require_extract();
     let _cache_guard = support::isolate_cache();
 
     let agent_cfg = EngineConfig::from_decls(

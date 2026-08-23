@@ -2035,10 +2035,7 @@ mod tests {
 
     #[test]
     fn turn_classification_corpus_old_and_new_path_agree() {
-        if !tidepool_testing::eval_harness::extract_available() {
-            eprintln!("skipping: tidepool-extract not available (set TIDEPOOL_EXTRACT)");
-            return;
-        }
+        tidepool_testing::eval_harness::require_extract();
 
         let decls = tidepool_mcp::standard_decls();
         let effects_dir =

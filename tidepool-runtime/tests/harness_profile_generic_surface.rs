@@ -21,14 +21,15 @@
 //! module would have compiled under anyway.
 //!
 //! Requires a worktree extract binary (`cabal build tidepool-extract-bin`,
-//! then `TIDEPOOL_EXTRACT` pointed at it, or run inside `nix develop`). Skips
-//! cleanly when the extractor is unreachable, matching every other
-//! extract-facing test in this crate (see `generic_deriving_337.rs`).
+//! then `TIDEPOOL_EXTRACT` pointed at it, or run inside `nix develop`). This
+//! crate is excluded from the default nextest filter, so a missing toolchain
+//! here is a caller error, not a legitimate skip — `require_extract()` panics
+//! loudly rather than passing vacuously.
 
 use std::path::PathBuf;
 use std::process::Command;
 
-use tidepool_testing::eval_harness::{effects_include, extract_available, prelude_path};
+use tidepool_testing::eval_harness::{effects_include, prelude_path, require_extract};
 
 /// A harness-shaped module: no LANGUAGE pragma block, imports
 /// `Tidepool.Harness.Prelude` (which re-exports `Tidepool.Prelude` wholesale,
@@ -107,10 +108,7 @@ fn harness_profile_compiles_pragma_free_generic_module() {
         "the fixture itself must carry no LANGUAGE pragma block — that's the \
          whole claim under test"
     );
-    if !extract_available() {
-        eprintln!("skipping: tidepool-extract unavailable (set TIDEPOOL_EXTRACT / nix develop)");
-        return;
-    }
+    require_extract();
     let (ok, log) = run_extract(true);
     assert!(
         ok,
@@ -128,10 +126,7 @@ fn harness_profile_compiles_pragma_free_generic_module() {
 /// OverloadedStrings, DeriveGeneric, TypeApplications, ...), not a no-op.
 #[test]
 fn without_harness_profile_the_same_pragma_free_module_fails() {
-    if !extract_available() {
-        eprintln!("skipping: tidepool-extract unavailable (set TIDEPOOL_EXTRACT / nix develop)");
-        return;
-    }
+    require_extract();
     let (ok, log) = run_extract(false);
     assert!(
         !ok,

@@ -1542,18 +1542,6 @@ mod tests {
         );
     }
 
-    /// GHC not available outside `nix develop` — the same skip-gate every
-    /// GHC-heavy test in this workspace uses (see `tidepool-runtime/src/lib.rs`).
-    fn ghc_available() -> bool {
-        std::process::Command::new("ghc")
-            .arg("--version")
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status()
-            .map(|s| s.success())
-            .unwrap_or(false)
-    }
-
     /// A REAL compile error, through the REAL `template_haskell` wrapping (the
     /// preamble + effects module + a multi-line `helpers`/`code` payload), must
     /// have its `Expr.hs:<n>` line rebased onto the caller's own source — this
@@ -1562,10 +1550,7 @@ mod tests {
     /// the synthetic strings the other tests in this module use.
     #[test]
     fn format_error_with_source_rebases_real_compile_error_line() {
-        if !ghc_available() {
-            eprintln!("Skipping: GHC not available (run inside `nix develop`)");
-            return;
-        }
+        tidepool_testing::eval_harness::require_extract();
         let decls = crate::standard_decls();
         let preamble = crate::build_preamble(&decls, false);
         let stack = crate::build_effect_stack_type(&decls);
