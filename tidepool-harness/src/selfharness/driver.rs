@@ -796,7 +796,6 @@ fn outer_decls() -> Vec<tidepool_mcp::EffectDecl> {
         .push(tidepool_mcp::exec_decl())
         .push(tidepool_mcp::subagent_decl())
         .push(tidepool_mcp::journal_decl())
-        .push(delegate_branches_decl())
         .push(tidepool_mcp::green_decl())
         .into_decls()
 }
@@ -820,67 +819,6 @@ fn outer_decls() -> Vec<tidepool_mcp::EffectDecl> {
 /// forever. Pinned by `outer_template_is_unpaginated` in this module's tests.
 fn outer_template(stack: &str, code: &str, imports: &str, helpers: &str) -> String {
     engine::template_turn_for_fused(&outer_decls(), stack, code, imports, helpers, &[])
-}
-
-/// PRD 21 C5's read-back half: `takeDelegatedBranches path` let the
-/// AUTHORED outer loop consume the runtime-stamped branch(es) a node's own
-/// coalgebra delegation produced, keyed by that node's rendered `NodePath`
-/// text. Post fork-subsumes-split step 4, the Haskell fold that called this
-/// (`Harness.hs`'s former `foldAt`) is deleted — no shipped harness calls
-/// `takeDelegatedBranches` anymore. This is an input-starved vestige,
-/// flagged for the identifier-sweep lane rather than deleted here
-/// (`plans/fork-subsumes-split.md` step 5). Hand-built as an `EffectDecl`
-/// literal here rather than via a `tidepool-mcp` `*_effect_def!` macro: this
-/// verb has no Rust-registry `<Eff>Req`/`EffectHandler` at all (see
-/// [`engine::HoleRouting::DelegatedBranches`]'s doc) — it is serviced
-/// entirely inline by [`SelfHarnessDriver::service_delegated_branches`],
-/// exactly like `ReadState`/`FreezeContext`.
-///
-/// NEVER pushed into [`answerer_decls`]/[`answerer_decls_with_delegate`] —
-/// that omission is what makes this verb structurally unreachable from any
-/// model-authored block, the mechanism behind "the model never attests to
-/// its own execution" (locked decision 7) applied to delegation outcomes:
-/// there is no row a model's block could ever compile against that names
-/// `DelegateBranches`.
-///
-/// "Take": the driver's own record for `path` is CONSUMED (removed) on
-/// read — sound because a node's own fold was meant to run exactly once.
-/// Ordered oldest-first; no Haskell caller remains to exercise this (see
-/// above).
-///
-/// `pub`, unlike [`outer_decls`] itself, for exactly one reason:
-/// `tests/dogfood_harness_typecheck.rs`'s `outer_row_decls()` hand-mirrors
-/// `outer_decls()`'s CONTENTS (that file's own doc: "so no two of them can
-/// compile a harness against different rows") because `outer_decls` itself
-/// is private — every entry there is already a public `tidepool_mcp::
-/// *_decl()` call except this one, so this one needs to be reachable the
-/// same way rather than a second, drift-prone copy of its GADT/helper text.
-pub fn delegate_branches_decl() -> tidepool_mcp::EffectDecl {
-    tidepool_mcp::EffectDecl {
-        type_name: "DelegateBranches",
-        description: "Internal runtime channel (PRD 21 C5): the driver's own \
-            record of completed per-node delegation branches. Never reachable \
-            from a model-authored block.",
-        prompt_card: None,
-        constructors: &["TakeDelegatedBranchesWith :: Text -> DelegateBranches [Text]"],
-        type_defs: &[],
-        extra_imports: &[],
-        helpers: &[
-            "takeDelegatedBranches :: forall effs. Member DelegateBranches effs => Text -> Eff effs [Text]",
-            "takeDelegatedBranches p = send (TakeDelegatedBranchesWith p)",
-        ],
-        type_params: &[],
-        default_row_args: &[],
-        // Stable-effects-core: every vocabulary effect's helpers must be
-        // row-polymorphic to live in the stable `Tidepool.Effects.Core`
-        // module (it has no `M` alias of its own — see
-        // `tidepool_mcp::effects_core_module_source`'s assertion). This
-        // effect is never model-reachable (see the doc above), so the
-        // signature's shape is otherwise inert — flipped for uniformity with
-        // every other effect definition, not because anything NEW depends on
-        // it being polymorphic.
-        helpers_row_polymorphic: true,
-    }
 }
 
 /// A decl permitted to occupy [`OuterRow`]'s HEAD slot. The only constructor
@@ -1502,48 +1440,23 @@ pub struct SelfHarnessDriver {
     /// — and having exactly one moment it can be consumed is what makes the
     /// injection trivially idempotent.
     resume: Option<PendingResume>,
-    /// PRD 21 C5's final wiring: which recursive-companion `NodePath` (as
-    /// rendered text — see [`engine::parse_companion_node_path`]) a given
-    /// branch-child window is servicing, populated by
-    /// [`Self::service_outer_branch`]/[`Self::drive_branch_fanout_child`]
-    /// right when that window's `NodeId` is minted and removed once it
-    /// finishes (success, exit, or closure — every path). Lets
-    /// [`Self::drain_note_holes`]'s `Subagent` arm — which only ever has the
-    /// `NodeId` in scope — attribute a completed delegation to the right
-    /// entry in [`Self::delegated_branches`]. `Mutex`-wrapped (not a plain
-    /// map behind `&mut self`): concurrent `runLLMTurnBranchFanout` siblings
-    /// (`Self::service_outer_branch_fanout`) each insert/remove their own
-    /// entry from `&self`, so a bare `HashMap` would need `&mut self` at
-    /// exactly the point several siblings are running at once.
-    branch_node_paths: Mutex<HashMap<NodeId, String>>,
     /// PRD 21 C5 GUI lane: which per-node operator-gate label a
     /// `runLLMTurnBranchLabeled`/`runLLMTurnBranchFanout` child window
-    /// carries — populated right when that window's `NodeId` is minted
-    /// (mirrors `branch_node_paths` above) and removed once it finishes
-    /// (success, exit, or closure — every path), at which point
-    /// [`crate::selfharness::operator::OperatorGate::retire_node`] is called
-    /// on the default gate. [`Self::present_askuser_form`]/
+    /// carries — populated right when that window's `NodeId` is minted and
+    /// removed once it finishes (success, exit, or closure — every path), at
+    /// which point [`crate::selfharness::operator::OperatorGate::retire_node`]
+    /// is called on the default gate. [`Self::present_askuser_form`]/
     /// [`Self::announce_note`] look a node up here to resolve
     /// [`crate::selfharness::operator::OperatorGate::node_gate`] instead of
     /// the default gate; a node absent here (every unlabeled node, including
     /// the outer loop's own asks and the ordinary per-loop answerer) always
     /// falls back to the default gate — byte-identical to before this field
-    /// existed. `Mutex`-wrapped for the same concurrent-siblings reason as
-    /// `branch_node_paths`.
+    /// existed. `Mutex`-wrapped (not a plain map behind `&mut self`):
+    /// concurrent `runLLMTurnBranchFanout` siblings
+    /// (`Self::service_outer_branch_fanout`) each insert/remove their own
+    /// entry from `&self`, so a bare `HashMap` would need `&mut self` at
+    /// exactly the point several siblings are running at once.
     node_labels: Mutex<HashMap<NodeId, String>>,
-    /// PRD 21 C5's runtime-stamped record: completed delegation branches,
-    /// keyed by the DELEGATING node's own rendered `NodePath` text, in
-    /// completion order. Populated by [`Self::drain_note_holes`] the moment
-    /// a `SubagentAwait` this driver services decodes a bound worktree
-    /// branch ([`engine::decode_completed_delegation_branch`]); would be
-    /// consumed (removed) by [`Self::service_delegated_branches`] on a
-    /// `takeDelegatedBranches` read-back, but no Haskell caller remains
-    /// post fork-subsumes-split step 4 — see [`delegate_branches_decl`]'s
-    /// doc for the vestige note. Never touched by, or visible to, any model
-    /// window. `Mutex`-wrapped for the same concurrent-siblings reason as
-    /// `branch_node_paths` — two siblings under one parent can each
-    /// `delegate` in the SAME bulk window.
-    delegated_branches: Mutex<HashMap<String, Vec<String>>>,
     /// Fork-subsumes-split step 3 (seam map §7.1): the next `idx` to assign
     /// a fork child of a given PARENT, for that child's derived GUI label
     /// (`f<idx>-<slug>` — see [`Self::drive_fork_child_window`]'s doc).
@@ -1554,7 +1467,7 @@ pub struct SelfHarnessDriver {
     /// change must not touch. A per-parent (not global) counter also keeps
     /// labels unique across repeated forks from the same parent over its
     /// lifetime, not just within one `forkAll` batch. `Mutex`-wrapped for
-    /// the same concurrent-siblings reason as `branch_node_paths`.
+    /// the same concurrent-siblings reason as `node_labels`.
     fork_child_seq: Mutex<HashMap<NodeId, u32>>,
 }
 
@@ -1881,9 +1794,7 @@ impl SelfHarnessDriver {
             ask_id_counter: AtomicU64::new(0),
             handlers: Mutex::new(OuterHandlers::default()),
             resume: None,
-            branch_node_paths: Mutex::new(HashMap::new()),
             node_labels: Mutex::new(HashMap::new()),
-            delegated_branches: Mutex::new(HashMap::new()),
             fork_child_seq: Mutex::new(HashMap::new()),
         }
     }
@@ -3588,28 +3499,6 @@ impl SelfHarnessDriver {
                                 outcome: next,
                             })
                         }
-                        // PRD 21 C5: `takeDelegatedBranches path`, called
-                        // only from `Harness.hs`'s own `foldAt` — immediate,
-                        // no operator, no model round (mirrors
-                        // `FreezeContext`/`ReadState`'s service shape).
-                        HoleRouting::DelegatedBranches { path } => {
-                            let value =
-                                self.service_delegated_branches(path, &compiled.table)?;
-                            let sid = self.outer_sid()?;
-                            let next = self
-                                .agent
-                                .with_session(sid, |s| s.resume(hole, value))
-                                .map_err(|e| DriverError::Session(e.to_string()))?
-                                .map_err(|e| {
-                                    DriverError::Session(format!(
-                                        "takeDelegatedBranches resume failed: {e}"
-                                    ))
-                                })?;
-                            ServicedHole::Resumed(GreenReady {
-                                chain,
-                                outcome: next,
-                            })
-                        }
                         // PRD 21 lane C3 GAP 1: `runLLMTurnBranch @T ref
                         // prompt` — fork a child off the frozen prefix `ref`
                         // names (never an empty root) and resume with `(T,
@@ -4383,29 +4272,6 @@ impl SelfHarnessDriver {
             .map_err(|e| DriverError::Session(e.to_string()))
     }
 
-    /// Service `takeDelegatedBranches path` (PRD 21 C5): hand back — and
-    /// CONSUME — this driver's own record of `path`'s completed delegation
-    /// branches, oldest first. An empty `Vec` (no delegation ever recorded
-    /// for `path`) is the ordinary, byte-unchanged case, not an error.
-    fn service_delegated_branches(
-        &mut self,
-        path: &str,
-        table: &DataConTable,
-    ) -> Result<Value, DriverError> {
-        use tidepool_bridge::ToCore;
-        let branches = self
-            .delegated_branches
-            .lock()
-            .remove(path)
-            .unwrap_or_default();
-        let items = branches
-            .into_iter()
-            .map(|b| b.to_value(table))
-            .collect::<Result<Vec<Value>, _>>()
-            .map_err(|e| DriverError::Session(format!("delegated branch text to Value: {e}")))?;
-        engine::build_list_value(items, table).map_err(|e| DriverError::Session(e.to_string()))
-    }
-
     /// Service a `runLLMTurnBranch @T ref prompt` suspension raised DIRECTLY
     /// by the AUTHORED outer loop (PRD 21 lane C3, closing GAP 1): fork a
     /// FRESH child window off the frozen prefix `context_ref` names — via
@@ -4476,22 +4342,11 @@ impl SelfHarnessDriver {
             &self.agent.hole_card_effect_row(),
         );
         let node = self.agent.fork_from_context_ref(&cref, &hole_card)?;
-        // PRD 21 C5: this branch child's prompt is the ONE place its domain
-        // `NodePath` is observable from the runtime side (see
-        // `engine::parse_companion_node_path`'s doc). Recorded BEFORE
-        // driving so a delegation mid-turn (`HoleRouting::Subagent`,
-        // serviced by `drain_note_holes`) can attribute its completed
-        // branch to this node; removed unconditionally once the branch
-        // finishes, below.
-        if let Some(path) = engine::parse_companion_node_path(prompt) {
-            self.branch_node_paths.lock().insert(node, path);
-        }
         // PRD 21 C5 GUI lane: a `runLLMTurnBranchLabeled` child's label rides
-        // the wire structurally (never parsed out of `prompt`, unlike
-        // `branch_node_paths` above) — recorded here so
+        // the wire structurally — recorded here so
         // `present_askuser_form`/`announce_note` can route this node's own
         // asks/notes to a per-node operator gate; removed unconditionally
-        // once the branch finishes, below (mirrors `branch_node_paths`).
+        // once the branch finishes, below.
         if let Some(label) = label {
             self.node_labels.lock().insert(node, label.to_string());
             // Register the node's panel NOW, not on its first ask/note: the
@@ -4578,9 +4433,6 @@ impl SelfHarnessDriver {
                 None
             }
         };
-        // Every path below this point (exit, closure, success) is done with
-        // this node's own delegation window — see the insert above.
-        self.branch_node_paths.lock().remove(&window.node());
         // The node's terminate/fold point (PRD 21 C5 GUI lane): a labeled
         // child's per-node gate is retired here, regardless of which outcome
         // follows — the default gate stays the fallback for this node from
@@ -4863,9 +4715,8 @@ impl SelfHarnessDriver {
     /// first place, and is the wrong model for a branch child that did.
     /// This is why `drive_answerer_to_finalize` and everything it calls —
     /// `drain_note_holes`/`service_askuser_hole`/`drain_answerer_fork` — are
-    /// `&self`, and why `branch_node_paths`/`node_labels`/
-    /// `delegated_branches` are `Mutex`-wrapped: two siblings under one
-    /// parent can each be mid-delegate or mid-form at once.
+    /// `&self`, and why `node_labels` is `Mutex`-wrapped: two siblings under
+    /// one parent can each be mid-delegate or mid-form at once.
     ///
     /// Mirrors [`Self::service_outer_branch`]'s own body: the same
     /// [`BranchWindow`] retirement discipline and the same
@@ -4903,16 +4754,6 @@ impl SelfHarnessDriver {
             &self.agent.hole_card_effect_row(),
         );
         let node = self.agent.fork_from_context_ref(&cref, &hole_card)?;
-        // PRD 21 C5: this sibling's prompt is the ONE place its domain
-        // `NodePath` is observable from the runtime side — recorded BEFORE
-        // driving so a delegation mid-turn (`HoleRouting::Subagent`,
-        // serviced by `drain_note_holes`) can attribute its completed
-        // branch to this node; removed unconditionally once it finishes,
-        // below. Mirrors `service_outer_branch` exactly, just against the
-        // `Mutex`-wrapped map concurrent siblings share.
-        if let Some(path) = engine::parse_companion_node_path(prompt) {
-            self.branch_node_paths.lock().insert(node, path);
-        }
         // Every `runLLMTurnBranchFanout` sibling is labeled (unlike a plain
         // `runLLMTurnBranch`, whose label is optional) — register its panel
         // NOW, not on its first ask/note, so the operator sees the tree
@@ -4970,7 +4811,6 @@ impl SelfHarnessDriver {
                 None
             }
         };
-        self.branch_node_paths.lock().remove(&window.node());
         self.node_labels.lock().remove(&window.node());
         self.gate.retire_node(label);
         self.emit(Event::TurnEnd {
@@ -6404,27 +6244,6 @@ impl SelfHarnessDriver {
                             ))
                         })?;
                     let value = self.service_outer_subagent(&request, &table)?;
-                    // PRD 21 C5: a `delegate` call's `SubagentAwait` is
-                    // serviced on THIS exact node's own turn, so any branch
-                    // it decodes is unambiguously this node's own —
-                    // recorded under the domain path `service_outer_branch`
-                    // stamped for it (a harness whose branch children don't
-                    // carry that stamp, or a completion this isn't
-                    // `SubagentAwait`/doesn't decode, simply records
-                    // nothing).
-                    if engine::con_name(&request, &table) == Some("SubagentAwait") {
-                        if let Some(branch) =
-                            engine::decode_completed_delegation_branch(&value, &table)
-                        {
-                            if let Some(path) = self.branch_node_paths.lock().get(&node).cloned() {
-                                self.delegated_branches
-                                    .lock()
-                                    .entry(path)
-                                    .or_default()
-                                    .push(branch);
-                            }
-                        }
-                    }
                     retry_on_turn_in_flight_async(|| {
                         self.agent
                             .resume_with_value(node, &pending_hole, value.clone())
@@ -6692,17 +6511,16 @@ impl SelfHarnessDriver {
     /// else retires them on an early `?` between them and
     /// `BranchWindow::from_lease` — `force_attached`/`mint_scope` are both
     /// fallible there (a checkout race is the F4 contention class; a dead
-    /// parent scope is `ok_or_else`'d). Removes the `branch_node_paths`/
-    /// `node_labels` entries and retires the GUI panel (when a label was
-    /// registered), then retires the tree/session node itself through the
-    /// ONE retirement path — safe whether or not `force_attached` ever ran:
-    /// [`Harness::terminate_node`] is idempotent over a never-forced (still
-    /// `Thunk`) node, and if `force_attached` DID succeed before the failure
-    /// (a live `mint_scope` refusal), it also closes the realm the caller
-    /// already assigned via [`Harness::set_node_realm`] — the "permanently
-    /// Running tree node" half of the leak.
+    /// parent scope is `ok_or_else`'d). Removes the `node_labels` entry and
+    /// retires the GUI panel (when a label was registered), then retires the
+    /// tree/session node itself through the ONE retirement path — safe
+    /// whether or not `force_attached` ever ran: [`Harness::terminate_node`]
+    /// is idempotent over a never-forced (still `Thunk`) node, and if
+    /// `force_attached` DID succeed before the failure (a live `mint_scope`
+    /// refusal), it also closes the realm the caller already assigned via
+    /// [`Harness::set_node_realm`] — the "permanently Running tree node"
+    /// half of the leak.
     fn abort_unguarded_child(&self, node: NodeId, label: Option<&str>, reason: &str) {
-        self.branch_node_paths.lock().remove(&node);
         if let Some(label) = label {
             self.node_labels.lock().remove(&node);
             self.gate.node_failed(label, reason);
@@ -6774,14 +6592,6 @@ impl SelfHarnessDriver {
             .agent
             .register_fork_child_with_card(parent, title, card)?;
 
-        // PRD 21 C5, mirrored from `service_outer_branch`: this child's
-        // domain `NodePath`, when its brief happens to be a companion
-        // coalgebra prompt — recorded BEFORE driving so a delegation
-        // mid-turn can attribute its completed branch to this node; removed
-        // unconditionally once it finishes, below.
-        if let Some(path) = engine::parse_companion_node_path(brief) {
-            self.branch_node_paths.lock().insert(node, path);
-        }
         // Step 3 GUI lane: a fork child's label/path is DERIVED (unlike a
         // `runLLMTurnBranchLabeled` child's wire-carried one) — see
         // `Self::fork_child_label`'s doc. Registered NOW, not on its first
@@ -6865,9 +6675,8 @@ impl SelfHarnessDriver {
                 .await;
         self.emit(Event::TurnEnd { node });
 
-        // Every path below this point is done with this node's own
-        // delegation window and GUI registration — see the inserts above.
-        self.branch_node_paths.lock().remove(&node);
+        // Every path below this point is done with this node's own GUI
+        // registration — see the insert above.
         let retired_label = self.node_labels.lock().remove(&node);
         if let Some(label) = &retired_label {
             self.gate.retire_node(label);
@@ -6937,16 +6746,10 @@ impl SelfHarnessDriver {
     /// a fork's brief carries no wire-carried label, so both the label and
     /// the path segment are derived here rather than read off the wire.
     ///
-    /// Base path, in priority order: the PARENT's own companion `NodePath`
-    /// (`branch_node_paths` — set when the parent is itself a companion
-    /// coalgebra node, the domain-meaningful path `takeDelegatedBranches`
-    /// attribution already keys on); else the parent's own registered GUI
-    /// label (`node_labels` — the parent is itself a labeled branch/fork
-    /// child with a plain, non-companion-shaped prompt); else the fixed
+    /// Base path: the parent's own registered GUI label (`node_labels` —
+    /// the parent is itself a labeled branch/fork child), else the fixed
     /// root id `"root"` (mirrors `tidepool_web::DEFAULT_NODE_ID` as a
-    /// literal — this crate cannot depend on `tidepool-web`, the same
-    /// coupling shape `engine::parse_companion_node_path` already has to a
-    /// Haskell-side prompt convention).
+    /// literal — this crate cannot depend on `tidepool-web`).
     ///
     /// Child segment: `f<idx>-<ascii-slug-of-brief-prefix>`, mirroring a
     /// structurally-labeled branch's own `root/1-child` convention so a
@@ -6962,11 +6765,10 @@ impl SelfHarnessDriver {
             idx
         };
         let base = self
-            .branch_node_paths
+            .node_labels
             .lock()
             .get(&parent)
             .cloned()
-            .or_else(|| self.node_labels.lock().get(&parent).cloned())
             .unwrap_or_else(|| "root".to_string());
         format!("{base}/{}", fork_child_path_segment(idx, brief))
     }
@@ -7217,18 +7019,6 @@ impl SelfHarnessDriver {
             }
             HoleRouting::Subagent => {
                 let value = self.service_outer_subagent(&request, &table)?;
-                if engine::con_name(&request, &table) == Some("SubagentAwait") {
-                    if let Some(branch) = engine::decode_completed_delegation_branch(&value, &table)
-                    {
-                        if let Some(path) = self.branch_node_paths.lock().get(&node).cloned() {
-                            self.delegated_branches
-                                .lock()
-                                .entry(path)
-                                .or_default()
-                                .push(branch);
-                        }
-                    }
-                }
                 let next = self
                     .agent
                     .with_session_retrying(node, sid, |s| {

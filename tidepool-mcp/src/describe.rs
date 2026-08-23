@@ -78,10 +78,10 @@ pub fn helper_name(helper: &str) -> Option<String> {
 /// requiring a second edit here. This checks the rendered TEXT rather than
 /// adding a visibility field to [`EffectDecl`] itself: that struct is a
 /// plain `Copy` type constructed as a bare struct literal in several crates
-/// this lane does not own (e.g. `tidepool-harness`'s
-/// `delegate_branches_decl`) — a new field would force an edit in every one
-/// of them (none of which use `..Default::default()`), which the macro-side
-/// convention avoids entirely. Consulted only by the derived INDEX below;
+/// this lane does not own (e.g. `tidepool-repl`'s `session.rs` test
+/// fixtures) — a new field would force an edit in every one of them (none
+/// of which use `..Default::default()`), which the macro-side convention
+/// avoids entirely. Consulted only by the derived INDEX below;
 /// the full per-effect resource (`tidepool://effect/{name}`,
 /// `:browse <Effect>`) still lists every helper verbatim — a model that
 /// asks for that depth gets it.

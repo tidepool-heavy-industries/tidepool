@@ -56,7 +56,7 @@ authoring/running these *are the roadmap* for the next harness helpers.
   awaited in plan order), with escalation as a typed value the parent's failure
   policy reads. Its row IS the driver's widened outer session — `[RunLLMTurn,
   AskUser, Console, Worktree, RepoEvent, Exec, Subagent, Journal,
-  DelegateBranches, Green]` — and
+  Green]` — and
   `tidepool-harness/tests/dogfood_harness_typecheck.rs` compiles it against
   exactly that row. Node residency (resident select loops) is S1-L4; the seam
   where it lands is named at the `hyloM` call site and built nowhere.

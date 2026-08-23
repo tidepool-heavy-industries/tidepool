@@ -43,10 +43,7 @@ pub mod persistence;
 pub mod resume;
 pub mod state_cross;
 
-pub use driver::{
-    answerer_decls, answerer_decls_with_delegate, delegate_branches_decl, DriverError,
-    SelfHarnessDriver,
-};
+pub use driver::{answerer_decls, answerer_decls_with_delegate, DriverError, SelfHarnessDriver};
 pub use harness_source::{load_harness_source, HarnessSource, HarnessSourceError};
 pub use lifecycle::SelfHarnessState;
 pub use observer::{Event, LogObserver, Observer};

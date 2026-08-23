@@ -4,8 +4,8 @@
 //! real worktree/binding table — see `outer_subagent.rs`'s module doc for
 //! why that tier is "real saga, no model, no tokens"), the typed
 //! `DelegateResult` decodes, and the session finalizes on what it found —
-//! the result returns INLINE (fork-subsumes-split step 4; the fold-time
-//! `takeDelegatedBranches` read-back died with the tree walk).
+//! the result returns INLINE (fork-subsumes-split step 4 collapsed the
+//! Haskell fold that used to read delegation results back separately).
 //!
 //! Drives the SHIPPED `harness-dogfooding/recursive-companion/` harness
 //! (same precedent as `companion_collapsed_slice.rs`/`dogfood_harness_typecheck.rs`

@@ -19,10 +19,8 @@ tidepool-eval.workspace = true
 tidepool-extract-cmd.workspace = true
 tidepool-effect.workspace = true
 tidepool-bridge.workspace = true
-# PRD 21 C5's delegation-branch decode (`engine::decode_completed_delegation_branch`):
-# `AgWorkerRun`/`WtWorktreeHandle` are the FromCore-capable bridge types a
-# completed `SubagentAwait` response is walked through — see that function's
-# doc for why the OUTER `SpawnOutcome` container is peeled by hand first.
+# The FromCore-capable bridge record types (`EvRepositoryEvent`/`WtWorktreeId`)
+# tests decode RepoEvent/Worktree suspensions against.
 tidepool-bridge-effects.workspace = true
 tidepool-codegen.workspace = true
 serde.workspace = true

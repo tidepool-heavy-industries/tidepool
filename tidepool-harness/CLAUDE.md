@@ -241,7 +241,7 @@ drains an empty trace: the answerer node produces NO `Event::Effect` BY
 CONSTRUCTION (that absence IS the capability boundary — the answerer
 structurally cannot run a shell/file/net effect). The OUTER loop's row
 (`outer_decls()`: `[RunLLMTurn, AskUser, Console, Worktree, RepoEvent, Exec,
-Subagent, Journal, DelegateBranches, Green]`) is NOT suspending-only — it
+Subagent, Journal, Green]`) is NOT suspending-only — it
 carries real base effects with real handlers — but it still writes no
 `Event::Effect` either, for an unrelated reason: the outer session is
 node-less (see One session below), so `flush_effects`/`NodeTree::effect`
@@ -760,7 +760,7 @@ key is silently ignored).
 
 The OUTER loop can present a form too: `outer_decls()` is `[RunLLMTurn,
 AskUser, Console, Worktree, RepoEvent, Exec, Subagent, Journal,
-DelegateBranches, Green]` (ten effects — `AskUser` is one entry among real
+Green]` (nine effects — `AskUser` is one entry among real
 base effects, not the row's second half), so an AUTHORED `loop` that
 `import`s `Tidepool.Form` and evaluates
 `askUser` suspends on `AskUserWith`, serviced by

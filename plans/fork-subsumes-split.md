@@ -120,9 +120,12 @@ sketch above:
 5. **`delegate` is unchanged.** Verified (not assumed): after the collapse,
    `takeDelegatedBranches`' fold-time read-back has NO Haskell caller left in
    the tree — the fold that consumed it is gone and delegate results already
-   return inline (`delegateSummary`). The effect stays in the schema (it is
-   generated surface, and the driver-side stamping still runs); flagged as a
-   vestige candidate for the identifier-sweep lane rather than deleted here.
+   return inline (`delegateSummary`). Flagged as a vestige candidate for the
+   identifier-sweep lane; that sweep landed (2026-08-23, architecture-review
+   F3) — the whole cluster (`parse_companion_node_path`, `branch_node_paths`/
+   `delegated_branches`, the `DelegateBranches` effect/decl, and the
+   `fork_child_label` first-choice read) is deleted. `delegate` itself is
+   unaffected: results still return inline via `delegateSummary`.
 6. **Protocol text sheds all `ProposeSplit` teaching.** What survives in the
    per-turn framing: session persistence/ancestry-scoped declarations, fork
    as THE decomposition mechanism, delegate, operator asks, the multi-round

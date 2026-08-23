@@ -389,21 +389,6 @@ pub enum HoleRouting {
     /// A plain `ask schema prompt` (structured operator elicitation) or an
     /// unrecognized payload — operator routing with the raw payload attached.
     Ask { payload: Json },
-    /// `takeDelegatedBranches path` (PRD 21 C5's final wiring): reads back
-    /// this node's own runtime-stamped delegation branch(es) — see the
-    /// module doc on [`crate::selfharness::driver::SelfHarnessDriver`]'s
-    /// `branch_node_paths`/`delegated_branches` for where they are
-    /// recorded. `path` is the node's rendered `NodePath` text (the same
-    /// prefix [`parse_companion_node_path`] looks for). This decl is absent
-    /// from `answerer_decls`/`answerer_decls_with_delegate`, so no model
-    /// window can ever name it — and post fork-subsumes-split step 4, no
-    /// Haskell caller remains at all (the fold that used to read this back,
-    /// `Harness.hs`'s former `foldAt`, is deleted): the whole pipeline is an
-    /// input-starved vestige, flagged for the identifier-sweep lane rather
-    /// than deleted here (`plans/fork-subsumes-split.md` step 5). Serviced
-    /// IMMEDIATELY (`ReadState`'s shape: no operator, no model round) on the
-    /// rare call; the driver's own record for `path` is CONSUMED on read.
-    DelegatedBranches { path: String },
 }
 
 /// A classified suspension: the routing plus the human-facing prompt text.
@@ -523,11 +508,6 @@ fn require_con_site(
 /// - `NoteWith` (text) — a real constructor arm on the SAME `AskUser` GADT,
 ///   routed by CONSTRUCTOR NAME → [`HoleRouting::Note`]. The sole field is a
 ///   bare `Text`, decoded directly (no shape/schema involved).
-/// - `TakeDelegatedBranchesWith` (path) — PRD 21 C5's read-back verb, routed
-///   by CONSTRUCTOR NAME → [`HoleRouting::DelegatedBranches`]. The sole
-///   field is a bare `Text` (a rendered `NodePath`), decoded the same way
-///   `NoteWith`'s is. Absent from every model-facing row — see that
-///   variant's doc.
 /// - `Print` (Console) / `WorktreeCreate`/`WorktreeLookup`/`WorktreeList`/
 ///   `WorktreeBranchOf`/`WorktreeHeadOf`/`WorktreeMergeInto` (Worktree) / `RepoEventSubscribe`/
 ///   `RepoEventDrain`/`RepoEventAwait`/`RepoEventUnsubscribe` (RepoEvent) /
@@ -670,16 +650,6 @@ pub fn classify_hole(
             let text = decode_note_text(request, table);
             ClassifiedHole {
                 routing: HoleRouting::Note { text },
-                prompt: String::new(),
-            }
-        }
-        // PRD 21 C5's read-back verb — see [`HoleRouting::DelegatedBranches`].
-        // The sole field is a bare `Text` (the rendered `NodePath`), decoded
-        // the same way `NoteWith`'s bare `Text` field is.
-        Some("TakeDelegatedBranchesWith") => {
-            let path = decode_note_text(request, table);
-            ClassifiedHole {
-                routing: HoleRouting::DelegatedBranches { path },
                 prompt: String::new(),
             }
         }
@@ -2700,62 +2670,6 @@ pub fn build_pair_value(a: Value, b: Value, table: &DataConTable) -> Result<Valu
         EngineError::Run("build_pair_value: no (,) constructor in table".to_string())
     })?;
     Ok(Value::Con(pair_id, vec![a, b]))
-}
-
-/// Best-effort: pull the recursive companion's own `NodePath` text out of a
-/// coalgebra prompt shaped `"NODE {path} — DISCOVER (...)"`. No harness
-/// renders that prefix — the only surviving occurrences of the string are
-/// display copy in `tidepool-web` demo/test fixtures — so this parser
-/// returns `None` on every real call, and
-/// [`crate::selfharness::driver::SelfHarnessDriver::branch_node_paths`] is
-/// never populated. `NodePath` never crosses into Rust as a typed value
-/// (`HarnessTypes.hs`'s own module doc explains why — a window type
-/// declared beside `loop` is unnameable by the answerer it is asked to
-/// finalize), so this text-prefix parse was the least invasive correlation
-/// mechanism available. Input-starved post-collapse
-/// (`plans/fork-subsumes-split.md` step 5 flags the same vestige cluster
-/// around `takeDelegatedBranches`); kept, not deleted, pending the
-/// identifier-sweep lane.
-pub(crate) fn parse_companion_node_path(prompt: &str) -> Option<String> {
-    let rest = prompt.strip_prefix("NODE ")?;
-    let (path, _) = rest.split_once(" — DISCOVER")?;
-    Some(path.to_string())
-}
-
-/// Decode a completed `SubagentAwait` response (`Either SpawnError
-/// SpawnOutcome`) into the delegated cycle's bound worktree branch, on a
-/// `Right` — `None` on a `Left` (the delegation failed; nothing to record)
-/// or any malformed shape.
-///
-/// `tidepool_bridge_effects::AgSpawnOutcome` (the Haskell `SpawnOutcome`'s
-/// wire type) is deliberately ToCore-ONLY — never round-tripped back into a
-/// Rust struct as a whole (its own doc: the model never gets to hand this
-/// back). But its `outcome_run` FIELD is `AgWorkerRun`, and — like every
-/// other bridged Worktree/Agent record — `AgWorkerRun` derives `FromCore`
-/// too; only the OUTER container skips the derive. So this decodes the
-/// OUTER `Either`/`SpawnOutcome` shell by hand (two ordinary `Con` peels —
-/// the constructor names and field ORDER are the wire contract, exactly as
-/// `tidepool-bridge-effects/src/generated/*.rs`'s module doc states), then
-/// hands the ONE nested field that matters to a real typed decode.
-pub(crate) fn decode_completed_delegation_branch(
-    value: &Value,
-    table: &DataConTable,
-) -> Option<String> {
-    use tidepool_bridge::FromCore;
-    if con_name(value, table) != Some("Right") {
-        return None;
-    }
-    let Value::Con(_, right_fields) = value else {
-        return None;
-    };
-    let outcome = right_fields.first()?;
-    let Value::Con(_, outcome_fields) = outcome else {
-        return None;
-    };
-    // `AgSpawnOutcome`'s first field is `outcome_run: AgWorkerRun`.
-    let run_field = outcome_fields.first()?;
-    let run = tidepool_bridge_effects::AgWorkerRun::from_value(run_field, table).ok()?;
-    Some(run.run_worktree.handle_receipt.branch.raw)
 }
 
 /// Why one forked cognition window ended WITHOUT a typed answer — the Rust
