@@ -7,6 +7,28 @@ pub mod scripted_provider;
 
 use tempfile::TempDir;
 
+/// A `std::env::temp_dir()`-rooted path that will not collide with a
+/// leftover from a PID-reused prior run, unlike a bare `{pid}.jsonl` name —
+/// `LogWriter::create` uses `create_new(true)` and refuses an existing path,
+/// so a collision fails an unrelated test immediately with `AlreadyExists`.
+/// Combines the pid with a high-resolution timestamp AND a per-process
+/// monotonic counter (two calls landing in the same nanosecond, observed on
+/// fast hosts, would otherwise still collide with each other).
+pub fn unique_temp_log_path(label: &str) -> std::path::PathBuf {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let seq = SEQ.fetch_add(1, Ordering::Relaxed);
+    std::env::temp_dir().join(format!(
+        "{label}-{}-{nanos}-{seq}.jsonl",
+        std::process::id()
+    ))
+}
+
 /// Isolate this test process's MUTABLE cache state, while SHARING the
 /// content-addressed compile memo with every other test process.
 ///

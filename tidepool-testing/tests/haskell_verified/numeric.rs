@@ -56,6 +56,7 @@ fn gen_numeric_binop() -> impl Strategy<Value = (String, serde_json::Value)> {
 }
 
 #[test]
+#[ignore = "expensive: part of tidepool-testing::haskell_verified (JIT-vs-native proptest oracle); run with TIDEPOOL_EXPENSIVE_TESTS=1 cargo nextest run -p tidepool-testing --ignore-default-filter --run-ignored all -E 'binary(haskell_verified)'"]
 fn test_numeric_binop() {
     run_template(50, gen_numeric_binop());
 }
@@ -75,6 +76,7 @@ fn gen_numeric_unary() -> impl Strategy<Value = (String, serde_json::Value)> {
 }
 
 #[test]
+#[ignore = "expensive: part of tidepool-testing::haskell_verified (JIT-vs-native proptest oracle); run with TIDEPOOL_EXPENSIVE_TESTS=1 cargo nextest run -p tidepool-testing --ignore-default-filter --run-ignored all -E 'binary(haskell_verified)'"]
 fn test_numeric_unary() {
     run_template(50, gen_numeric_unary());
 }
@@ -105,6 +107,7 @@ fn gen_numeric_cmp() -> impl Strategy<Value = (String, serde_json::Value)> {
 }
 
 #[test]
+#[ignore = "expensive: part of tidepool-testing::haskell_verified (JIT-vs-native proptest oracle); run with TIDEPOOL_EXPENSIVE_TESTS=1 cargo nextest run -p tidepool-testing --ignore-default-filter --run-ignored all -E 'binary(haskell_verified)'"]
 fn test_numeric_cmp() {
     run_template(50, gen_numeric_cmp());
 }
@@ -124,6 +127,7 @@ fn gen_numeric_minmax() -> impl Strategy<Value = (String, serde_json::Value)> {
 }
 
 #[test]
+#[ignore = "expensive: part of tidepool-testing::haskell_verified (JIT-vs-native proptest oracle); run with TIDEPOOL_EXPENSIVE_TESTS=1 cargo nextest run -p tidepool-testing --ignore-default-filter --run-ignored all -E 'binary(haskell_verified)'"]
 fn test_numeric_minmax() {
     run_template(50, gen_numeric_minmax());
 }
@@ -155,6 +159,7 @@ fn gen_numeric_list_reduction() -> impl Strategy<Value = (String, serde_json::Va
 }
 
 #[test]
+#[ignore = "expensive: part of tidepool-testing::haskell_verified (JIT-vs-native proptest oracle); run with TIDEPOOL_EXPENSIVE_TESTS=1 cargo nextest run -p tidepool-testing --ignore-default-filter --run-ignored all -E 'binary(haskell_verified)'"]
 fn test_numeric_list_reduction() {
     run_template(50, gen_numeric_list_reduction());
 }

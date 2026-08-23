@@ -10,6 +10,7 @@ fn gen_computed_list() -> impl Strategy<Value = (i64, i64, Vec<i64>)> {
 }
 
 #[test]
+#[ignore = "expensive: part of tidepool-testing::haskell_verified (JIT-vs-native proptest oracle); run with TIDEPOOL_EXPENSIVE_TESTS=1 cargo nextest run -p tidepool-testing --ignore-default-filter --run-ignored all -E 'binary(haskell_verified)'"]
 fn proptest_head() {
     let strat = gen_computed_list().prop_map(|(k, n, xs)| {
         let src = format!("L.head (filter (\\x -> x > {}) (enumFromTo 1 {}))", k, n);
@@ -19,6 +20,7 @@ fn proptest_head() {
 }
 
 #[test]
+#[ignore = "expensive: part of tidepool-testing::haskell_verified (JIT-vs-native proptest oracle); run with TIDEPOOL_EXPENSIVE_TESTS=1 cargo nextest run -p tidepool-testing --ignore-default-filter --run-ignored all -E 'binary(haskell_verified)'"]
 fn proptest_tail() {
     let strat = gen_computed_list().prop_map(|(k, n, xs)| {
         let src = format!("L.tail (filter (\\x -> x > {}) (enumFromTo 1 {}))", k, n);
@@ -28,6 +30,7 @@ fn proptest_tail() {
 }
 
 #[test]
+#[ignore = "expensive: part of tidepool-testing::haskell_verified (JIT-vs-native proptest oracle); run with TIDEPOOL_EXPENSIVE_TESTS=1 cargo nextest run -p tidepool-testing --ignore-default-filter --run-ignored all -E 'binary(haskell_verified)'"]
 fn proptest_last() {
     let strat = gen_computed_list().prop_map(|(k, n, xs)| {
         let src = format!("L.last (filter (\\x -> x > {}) (enumFromTo 1 {}))", k, n);
@@ -37,6 +40,7 @@ fn proptest_last() {
 }
 
 #[test]
+#[ignore = "expensive: part of tidepool-testing::haskell_verified (JIT-vs-native proptest oracle); run with TIDEPOOL_EXPENSIVE_TESTS=1 cargo nextest run -p tidepool-testing --ignore-default-filter --run-ignored all -E 'binary(haskell_verified)'"]
 fn proptest_init() {
     let strat = gen_computed_list().prop_map(|(k, n, xs)| {
         let src = format!("L.init (filter (\\x -> x > {}) (enumFromTo 1 {}))", k, n);
@@ -46,6 +50,7 @@ fn proptest_init() {
 }
 
 #[test]
+#[ignore = "expensive: part of tidepool-testing::haskell_verified (JIT-vs-native proptest oracle); run with TIDEPOOL_EXPENSIVE_TESTS=1 cargo nextest run -p tidepool-testing --ignore-default-filter --run-ignored all -E 'binary(haskell_verified)'"]
 fn proptest_maximum() {
     let strat = gen_computed_list().prop_map(|(k, n, xs)| {
         let src = format!("maximum (filter (\\x -> x > {}) (enumFromTo 1 {}))", k, n);
@@ -55,6 +60,7 @@ fn proptest_maximum() {
 }
 
 #[test]
+#[ignore = "expensive: part of tidepool-testing::haskell_verified (JIT-vs-native proptest oracle); run with TIDEPOOL_EXPENSIVE_TESTS=1 cargo nextest run -p tidepool-testing --ignore-default-filter --run-ignored all -E 'binary(haskell_verified)'"]
 fn proptest_minimum() {
     let strat = gen_computed_list().prop_map(|(k, n, xs)| {
         let src = format!("minimum (filter (\\x -> x > {}) (enumFromTo 1 {}))", k, n);
@@ -64,6 +70,7 @@ fn proptest_minimum() {
 }
 
 #[test]
+#[ignore = "expensive: part of tidepool-testing::haskell_verified (JIT-vs-native proptest oracle); run with TIDEPOOL_EXPENSIVE_TESTS=1 cargo nextest run -p tidepool-testing --ignore-default-filter --run-ignored all -E 'binary(haskell_verified)'"]
 fn proptest_foldr1_add() {
     let strat = gen_computed_list().prop_map(|(k, n, xs)| {
         let src = format!(
@@ -77,6 +84,7 @@ fn proptest_foldr1_add() {
 }
 
 #[test]
+#[ignore = "expensive: part of tidepool-testing::haskell_verified (JIT-vs-native proptest oracle); run with TIDEPOOL_EXPENSIVE_TESTS=1 cargo nextest run -p tidepool-testing --ignore-default-filter --run-ignored all -E 'binary(haskell_verified)'"]
 fn proptest_foldl1_add() {
     let strat = gen_computed_list().prop_map(|(k, n, xs)| {
         let src = format!(
@@ -90,6 +98,7 @@ fn proptest_foldl1_add() {
 }
 
 #[test]
+#[ignore = "expensive: part of tidepool-testing::haskell_verified (JIT-vs-native proptest oracle); run with TIDEPOOL_EXPENSIVE_TESTS=1 cargo nextest run -p tidepool-testing --ignore-default-filter --run-ignored all -E 'binary(haskell_verified)'"]
 fn proptest_foldl1_sub() {
     let strat = gen_computed_list().prop_map(|(k, n, xs)| {
         let src = format!(

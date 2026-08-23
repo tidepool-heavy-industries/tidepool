@@ -18,10 +18,6 @@
 use tidepool_harness::engine::{self, EngineConfig};
 use tidepool_runtime::CompileError;
 
-fn extract_available() -> bool {
-    tidepool_testing::eval_harness::extract_available()
-}
-
 fn prelude_dir() -> std::path::PathBuf {
     let manifest = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     manifest
@@ -67,10 +63,7 @@ fn two_target_source() -> (EngineConfig, String) {
 /// bogus name, not an unrelated environment problem.
 #[test]
 fn multi_target_fails_on_any_bad_target() {
-    if !extract_available() {
-        eprintln!("Skipping: tidepool-extract not available (set TIDEPOOL_EXTRACT)");
-        return;
-    }
+    tidepool_testing::eval_harness::require_extract();
     let (cfg, source) = two_target_source();
     let target = cfg.turn_target(None).expect("turn target");
 
@@ -129,10 +122,7 @@ fn multi_target_fails_on_any_bad_target() {
 /// two.
 #[test]
 fn multi_target_asks_stay_distinct() {
-    if !extract_available() {
-        eprintln!("Skipping: tidepool-extract not available (set TIDEPOOL_EXTRACT)");
-        return;
-    }
+    tidepool_testing::eval_harness::require_extract();
     let (cfg, source) = two_target_source();
     let target = cfg.turn_target(None).expect("turn target");
 

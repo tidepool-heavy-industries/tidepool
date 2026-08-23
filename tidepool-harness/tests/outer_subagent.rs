@@ -66,7 +66,7 @@ async fn outer_loop_spawn_agent_round_trips_through_the_driver() {
     .expect("answerer engine config");
     let provider: Arc<dyn DynModelProvider> = Arc::new(ReplayProvider::new(Vec::new()));
     let writer = tidepool_harness::log::LogWriter::create(
-        std::env::temp_dir().join(format!("outer-subagent-{}.jsonl", std::process::id())),
+        support::unique_temp_log_path("outer-subagent"),
         &header(),
     )
     .expect("log writer");
@@ -135,7 +135,7 @@ async fn outer_spawn_without_handler_errors_legibly() {
     .expect("answerer engine config");
     let provider: Arc<dyn DynModelProvider> = Arc::new(ReplayProvider::new(Vec::new()));
     let writer = tidepool_harness::log::LogWriter::create(
-        std::env::temp_dir().join(format!("outer-subagent-nh-{}.jsonl", std::process::id())),
+        support::unique_temp_log_path("outer-subagent-nh"),
         &header(),
     )
     .expect("log writer");

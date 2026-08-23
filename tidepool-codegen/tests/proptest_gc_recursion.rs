@@ -805,7 +805,6 @@ gc_property!(
 // seed) so a regression that the random sweep happens to miss still trips.
 // ===========================================================================
 
-#[ignore = "GC anchor: 500-element spine under a 2 KiB nursery, ~0.5s (measured); on-demand: --run-ignored all"]
 #[test]
 #[serial]
 fn anchor_long_spine_sum_tiny_nursery() {
@@ -850,7 +849,6 @@ fn anchor_long_spine_sum_tiny_nursery_body() {
     }
 }
 
-#[ignore = "GC anchor: 1500-iter loop under a 4 KiB nursery, ~0.1s (measured); on-demand: --run-ignored all"]
 #[test]
 #[serial]
 fn anchor_accum_loop_tiny_nursery() {

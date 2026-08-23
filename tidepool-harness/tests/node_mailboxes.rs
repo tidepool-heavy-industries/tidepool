@@ -118,7 +118,7 @@ async fn a_parent_selects_over_message_and_deadline() {
     .expect("answerer engine config");
     let provider: Arc<dyn DynModelProvider> = Arc::new(ReplayProvider::new(Vec::new()));
     let writer = tidepool_harness::log::LogWriter::create(
-        std::env::temp_dir().join(format!("node-mailboxes-{}.jsonl", std::process::id())),
+        support::unique_temp_log_path("node-mailboxes"),
         &LogHeader {
             prelude_hash: "node-mailboxes".into(),
             extract_fingerprint: "node-mailboxes".into(),

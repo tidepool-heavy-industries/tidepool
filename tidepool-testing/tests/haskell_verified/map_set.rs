@@ -19,6 +19,7 @@ fn arb_set_ks() -> impl Strategy<Value = BTreeSet<i64>> {
 }
 
 #[test]
+#[ignore = "expensive: part of tidepool-testing::haskell_verified (JIT-vs-native proptest oracle); run with TIDEPOOL_EXPENSIVE_TESTS=1 cargo nextest run -p tidepool-testing --ignore-default-filter --run-ignored all -E 'binary(haskell_verified)'"]
 fn map_fromlist_lookup() {
     let strat = (arb_int(), arb_map_kvs()).prop_map(|(k, kvs)| {
         let pairs: Vec<_> = kvs
@@ -40,6 +41,7 @@ fn map_fromlist_lookup() {
 }
 
 #[test]
+#[ignore = "expensive: part of tidepool-testing::haskell_verified (JIT-vs-native proptest oracle); run with TIDEPOOL_EXPENSIVE_TESTS=1 cargo nextest run -p tidepool-testing --ignore-default-filter --run-ignored all -E 'binary(haskell_verified)'"]
 fn map_insert_lookup() {
     let strat = (arb_int(), arb_int(), arb_map_kvs()).prop_map(|(k, v, kvs)| {
         let pairs: Vec<_> = kvs
@@ -58,6 +60,7 @@ fn map_insert_lookup() {
 }
 
 #[test]
+#[ignore = "expensive: part of tidepool-testing::haskell_verified (JIT-vs-native proptest oracle); run with TIDEPOOL_EXPENSIVE_TESTS=1 cargo nextest run -p tidepool-testing --ignore-default-filter --run-ignored all -E 'binary(haskell_verified)'"]
 fn map_union() {
     let strat = (arb_int(), arb_map_kvs(), arb_map_kvs()).prop_map(|(k, left, right)| {
         let l_pairs: Vec<_> = left
@@ -86,6 +89,7 @@ fn map_union() {
 }
 
 #[test]
+#[ignore = "expensive: part of tidepool-testing::haskell_verified (JIT-vs-native proptest oracle); run with TIDEPOOL_EXPENSIVE_TESTS=1 cargo nextest run -p tidepool-testing --ignore-default-filter --run-ignored all -E 'binary(haskell_verified)'"]
 fn set_fromlist_member() {
     let strat = (arb_int(), arb_set_ks()).prop_map(|(k, ks)| {
         let elems: Vec<_> = ks.iter().map(|key| format!("{}", key)).collect();
@@ -101,6 +105,7 @@ fn set_fromlist_member() {
 }
 
 #[test]
+#[ignore = "expensive: part of tidepool-testing::haskell_verified (JIT-vs-native proptest oracle); run with TIDEPOOL_EXPENSIVE_TESTS=1 cargo nextest run -p tidepool-testing --ignore-default-filter --run-ignored all -E 'binary(haskell_verified)'"]
 fn set_union() {
     let strat = (arb_int(), arb_set_ks(), arb_set_ks()).prop_map(|(k, left, right)| {
         let l_elems: Vec<_> = left.iter().map(|key| format!("{}", key)).collect();
@@ -124,6 +129,7 @@ fn set_union() {
 /// `Map.*`). This is the shared "Map.lookup/insert instead of GHC's internal
 /// insertWith unfoldings" safety rationale their doc comments cite.
 #[test]
+#[ignore = "expensive: part of tidepool-testing::haskell_verified (JIT-vs-native proptest oracle); run with TIDEPOOL_EXPENSIVE_TESTS=1 cargo nextest run -p tidepool-testing --ignore-default-filter --run-ignored all -E 'binary(haskell_verified)'"]
 fn prelude_insertwith_alter_int_keys() {
     let strat = (arb_int(), arb_int(), arb_map_kvs()).prop_map(|(k, v, kvs)| {
         let pairs: Vec<_> = kvs

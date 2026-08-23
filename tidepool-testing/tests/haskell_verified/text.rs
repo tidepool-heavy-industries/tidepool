@@ -48,6 +48,7 @@ fn gen_text_slice() -> impl Strategy<Value = (String, serde_json::Value)> {
 }
 
 #[test]
+#[ignore = "expensive: part of tidepool-testing::haskell_verified (JIT-vs-native proptest oracle); run with TIDEPOOL_EXPENSIVE_TESTS=1 cargo nextest run -p tidepool-testing --ignore-default-filter --run-ignored all -E 'binary(haskell_verified)'"]
 fn test_text_slice() {
     run_template(50, gen_text_slice());
 }
@@ -80,6 +81,7 @@ fn gen_text_pred() -> impl Strategy<Value = (String, serde_json::Value)> {
 }
 
 #[test]
+#[ignore = "expensive: part of tidepool-testing::haskell_verified (JIT-vs-native proptest oracle); run with TIDEPOOL_EXPENSIVE_TESTS=1 cargo nextest run -p tidepool-testing --ignore-default-filter --run-ignored all -E 'binary(haskell_verified)'"]
 fn test_text_pred() {
     run_template(50, gen_text_pred());
 }
@@ -99,6 +101,7 @@ fn gen_text_case() -> impl Strategy<Value = (String, serde_json::Value)> {
 }
 
 #[test]
+#[ignore = "expensive: part of tidepool-testing::haskell_verified (JIT-vs-native proptest oracle); run with TIDEPOOL_EXPENSIVE_TESTS=1 cargo nextest run -p tidepool-testing --ignore-default-filter --run-ignored all -E 'binary(haskell_verified)'"]
 fn test_text_case() {
     run_template(50, gen_text_case());
 }
@@ -122,6 +125,7 @@ fn gen_text_split_join() -> impl Strategy<Value = (String, serde_json::Value)> {
 }
 
 #[test]
+#[ignore = "expensive: part of tidepool-testing::haskell_verified (JIT-vs-native proptest oracle); run with TIDEPOOL_EXPENSIVE_TESTS=1 cargo nextest run -p tidepool-testing --ignore-default-filter --run-ignored all -E 'binary(haskell_verified)'"]
 fn test_text_split_join() {
     run_template(50, gen_text_split_join());
 }
@@ -147,6 +151,7 @@ fn gen_text_strip_replace() -> impl Strategy<Value = (String, serde_json::Value)
 }
 
 #[test]
+#[ignore = "expensive: part of tidepool-testing::haskell_verified (JIT-vs-native proptest oracle); run with TIDEPOOL_EXPENSIVE_TESTS=1 cargo nextest run -p tidepool-testing --ignore-default-filter --run-ignored all -E 'binary(haskell_verified)'"]
 fn test_text_strip_replace() {
     run_template(50, gen_text_strip_replace());
 }
@@ -170,6 +175,7 @@ fn gen_text_prefix_checks() -> impl Strategy<Value = (String, serde_json::Value)
 }
 
 #[test]
+#[ignore = "expensive: part of tidepool-testing::haskell_verified (JIT-vs-native proptest oracle); run with TIDEPOOL_EXPENSIVE_TESTS=1 cargo nextest run -p tidepool-testing --ignore-default-filter --run-ignored all -E 'binary(haskell_verified)'"]
 fn test_text_prefix_checks() {
     run_template(50, gen_text_prefix_checks());
 }

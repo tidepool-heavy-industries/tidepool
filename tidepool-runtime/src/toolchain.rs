@@ -7,7 +7,7 @@
 //! walk, the cwd/bundle search) are consolidated into one place so they
 //! cannot disagree. A disagreement between separate policies surfaces as a
 //! *wrong answer at eval time* ("not in scope", "Metadata entry must be an
-//! array of exactly 8") rather than as a configuration error. Both
+//! array of exactly 9") rather than as a configuration error. Both
 //! precedence orders live here, once, and both are documented below.
 //!
 //! # Precedence: the extract binary

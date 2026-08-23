@@ -206,7 +206,9 @@ still works as a fallback (no `cargo-nextest` available) but is noticeably slowe
 
 **Every test run needs `TIDEPOOL_EXTRACT`** pointing at a built
 `tidepool-extract-bin`, or tests fail loud with `Metadata entry must be an
-array of exactly 8`:
+array of exactly 9` (a stale extract predating the current wire shape reports
+the same message with its own old count — see `scripts/toolchain-doctor.sh`
+for identifying that class):
 ```bash
 export PATH=<nix-ghc-with-packages>/bin:$PATH   # lens on the GHC package DB
 cd haskell && cabal build tidepool-extract-bin
@@ -218,7 +220,7 @@ export TIDEPOOL_EXTRACT=$(cabal list-bin tidepool-extract-bin)
 
 This environment hard-kills background processes at ~380s, and a full-workspace
 GHC battery is HOURS (every GHC-heavy test forks a real `tidepool-extract`
-compile, capped at 1 concurrent per run, and a handful of suites alone run
+compile, capped at 2 concurrent per run, and a handful of suites alone run
 for multiple hundreds of seconds).
 Bare `scripts/battery.sh` WILL get killed mid-run. Four tiers, from fastest to
 most exhaustive:
@@ -227,13 +229,18 @@ Both battery scripts take a host GHC slot for you (`scripts/ghc-slots.sh run`,
 6 slots shared box-wide) and re-exec themselves under it — you do not wrap
 them, and an outer wrapper is respected rather than double-acquired. Inside a
 run, `.config/nextest.toml`'s `ghc-heavy` test group caps concurrent extract
-compiles at 1; membership is default-deny, so a new crate or test binary is
+compiles at 2; membership is default-deny, so a new crate or test binary is
 capped without an edit there. The box-wide ceiling is the product of the two
 (slots × per-run cap).
 
-1. **Fast default** — `cargo nextest run`. Pure-Rust crates only
-   (`.config/nextest.toml`'s `default-filter` skips every GHC-extract-heavy
-   crate). This is the inner-loop tier; safe to run unattended.
+1. **Fast default** — `cargo nextest run`. This is a RUN-time selection
+   filter, not a build-time GHC-free guarantee: `.config/nextest.toml`'s
+   `default-filter` skips every GHC-extract-heavy crate's test PROCESSES, but
+   `haskell_eval!`/`haskell_inline!` still run `tidepool-extract` during macro
+   EXPANSION (i.e. at `rustc` build time) for any crate that uses them, so the
+   first build after a toolchain bump or `.hs` edit still pays that cost —
+   see `.config/nextest.toml`'s own header comment. This is the inner-loop
+   tier; safe to run unattended once built.
 2. **Targeted** — `scripts/battery.sh -p <crate> -E 'binary(<x>)'` (or
    `-E 'test(<name>)'`). One GHC-heavy crate, one test/binary, via
    `--ignore-default-filter`. The right tier for "does my change to crate X
@@ -243,7 +250,7 @@ capped without an edit there. The box-wide ceiling is the product of the two
    `tidepool-handlers` (186 tests) fits this whole within the ~380s budget as
    a bare `-p <crate>` invocation — `tidepool-harness`/`tidepool-runtime`/
    `tidepool-repl` each need `-E 'binary(...) or binary(...)'` sub-shards
-   (5/6/7 respectively; the exact groups are documented in
+   (7/7/7 respectively; the exact groups are documented in
    `scripts/battery-shard.sh`'s header — per-shard timings aren't tracked
    there). Chain shards (one invocation per
    group, in sequence — concurrent GHC-heavy shards on a shared box compete
@@ -252,12 +259,18 @@ capped without an edit there. The box-wide ceiling is the product of the two
 4. **Expensive, opt-in** — `TIDEPOOL_EXPENSIVE_TESTS=1 scripts/battery-shard.sh
    <crate>` (or targeted per-test). A handful of suites
    (`corpus_report`, `haskell_suite_differential`,
-   `tidepool-testing::haskell_verified`) early-return with a
-   `SKIPPED (expensive)` line unless `TIDEPOOL_EXPENSIVE_TESTS=1` is set —
-   this holds even under `--ignore-default-filter`, so tier 3 alone never
+   `tidepool-testing::haskell_verified`,
+   `tidepool-codegen::call_depth_sequential_vs_nested`'s
+   `fifty_thousand_sequential_calls_do_not_false_positive_overflow` and
+   `genuinely_deep_recursion_still_overflows_cleanly`) are dual-gated: each is
+   `#[ignore]`d (so a default run reports them as ignored, never a silent
+   pass) AND early-returns with a `SKIPPED (expensive)` line unless
+   `TIDEPOOL_EXPENSIVE_TESTS=1` is set, even under `--run-ignored all` — this
+   holds even under `--ignore-default-filter`, so tier 3 alone never
    accidentally triggers them. Run these deliberately, one at a time, outside
    the ~380s assumption: `corpus_report` and `haskell_suite_differential` are
-   actually quick once gated in (measured ~8s and ~27s respectively), but
+   actually quick once gated in (measured ~8s and ~27s respectively), the
+   call-depth pair takes roughly a minute and a half each, but
    `tidepool-testing::haskell_verified` genuinely runs for many hundreds of
    seconds — its proptest cases (e.g. `cousins::test_list_fold`) individually
    take 100s+.

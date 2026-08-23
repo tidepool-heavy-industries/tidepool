@@ -471,36 +471,10 @@ mod tests {
     use super::*;
     use serial_test::serial;
 
-    /// Set up TIDEPOOL_EXTRACT env var and check GHC availability.
-    /// Returns false if GHC is not available (test should skip).
-    fn ensure_extract_available() -> bool {
-        if std::env::var("TIDEPOOL_EXTRACT").is_err() {
-            let bin = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                .parent()
-                .unwrap()
-                .join("haskell")
-                .join("tidepool-extract");
-            if bin.exists() {
-                std::env::set_var("TIDEPOOL_EXTRACT", &bin);
-            }
-        }
-        // GHC is needed by tidepool-extract; only available inside `nix develop`
-        std::process::Command::new("ghc")
-            .arg("--version")
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status()
-            .map(|s| s.success())
-            .unwrap_or(false)
-    }
-
     #[test]
     #[serial]
     fn test_compile_identity() {
-        if !ensure_extract_available() {
-            eprintln!("Skipping: GHC not available (run inside `nix develop`)");
-            return;
-        }
+        tidepool_testing::eval_harness::require_extract();
         let source = "module Test where\nidentity x = x";
         let CompileResult { expr, .. } =
             compile_haskell(source, "identity", &[]).expect("Failed to compile identity");
@@ -516,10 +490,7 @@ mod tests {
     #[test]
     #[serial]
     fn test_captured_type_simple_list() {
-        if !ensure_extract_available() {
-            eprintln!("Skipping: GHC not available (run inside `nix develop`)");
-            return;
-        }
+        tidepool_testing::eval_harness::require_extract();
         let source = "module Probe where\n__user :: [Int]\n__user = [1, 2, 3]\n";
         let CompileResult { warnings, .. } =
             compile_haskell(source, "__user", &[]).expect("Failed to compile probe");
@@ -532,10 +503,7 @@ mod tests {
     #[test]
     #[serial]
     fn test_captured_type_absent_without_user() {
-        if !ensure_extract_available() {
-            eprintln!("Skipping: GHC not available (run inside `nix develop`)");
-            return;
-        }
+        tidepool_testing::eval_harness::require_extract();
         let source = "module Probe where\nidentity x = x\n";
         let CompileResult { warnings, .. } =
             compile_haskell(source, "identity", &[]).expect("Failed to compile identity");
@@ -545,10 +513,7 @@ mod tests {
     #[test]
     #[serial]
     fn test_compile_error() {
-        if !ensure_extract_available() {
-            eprintln!("Skipping: GHC not available (run inside `nix develop`)");
-            return;
-        }
+        tidepool_testing::eval_harness::require_extract();
         let source = "module Test where\nfoo = garbage";
         let res = compile_haskell(source, "foo", &[]);
         assert!(res.is_err());
@@ -567,10 +532,7 @@ mod tests {
     #[test]
     #[serial]
     fn test_compile_warnings_captured() {
-        if !ensure_extract_available() {
-            eprintln!("Skipping: GHC not available (run inside `nix develop`)");
-            return;
-        }
+        tidepool_testing::eval_harness::require_extract();
         let source = "module WarnProbe where\n\
                        f :: Int -> Int\n\
                        f x = 1\n\
@@ -598,10 +560,7 @@ mod tests {
     #[test]
     #[serial]
     fn test_compile_no_warnings_on_clean_source() {
-        if !ensure_extract_available() {
-            eprintln!("Skipping: GHC not available (run inside `nix develop`)");
-            return;
-        }
+        tidepool_testing::eval_harness::require_extract();
         let source = "module CleanProbe where\nresult :: Int\nresult = 1 + 1\n";
         let CompileResult { warnings, .. } =
             compile_haskell(source, "result", &[]).expect("Failed to compile result");

@@ -86,7 +86,7 @@ async fn selfharness_spine_one_cycle_render_loop_finalize_render() {
     )];
     let provider: Arc<dyn DynModelProvider> = Arc::new(ReplayProvider::new(replies));
     let writer = tidepool_harness::log::LogWriter::create(
-        std::env::temp_dir().join(format!("selfharness-spine-{}.jsonl", std::process::id())),
+        support::unique_temp_log_path("selfharness-spine"),
         &header(),
     )
     .expect("log writer");
