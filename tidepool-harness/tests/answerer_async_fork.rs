@@ -423,3 +423,61 @@ async fn async_fork_over_budget_refuses_loudly_and_window_survives() {
          logged turns:\n{turns:#?}"
     );
 }
+
+/// F1 regression (driver structural review, 2026-08-23): a SETTLED green
+/// thread's realm must be closed at the round-boundary sweep. A settle parks
+/// the thread's `AsyncDoneWith` frame forever by design (the arm never
+/// resumes it), so an unswept settled realm is a permanently-parked hole on
+/// the shared outer session — the machine is never quiescent again, and
+/// rotation at the fragment ceiling refuses, killing a long run hours after
+/// the causal block. Ceiling 1 forces cycle 2's maintenance to demand
+/// quiescence; pre-fix this errored with "not quiescent (2 parked hole(s))".
+/// Cycle 2 forks again AFTER the rotation, so this also pins that the green
+/// scheduler works on a freshly rotated machine.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn settled_threads_leave_the_machine_quiescent_for_rotation() {
+    support::require_extract();
+    let _cache_guard = support::isolate_cache();
+    // Process-isolated under nextest (one process per test), same idiom as
+    // `machine_rotation_between_cycles_preserves_durable_state`.
+    std::env::set_var("TIDEPOOL_MACHINE_FRAGMENT_CEILING", "1");
+
+    let replies = vec![
+        // Cycle 1: spawn two async forks, wait both, finalize.
+        reply(ASYNC_FORK_BLOCK),
+        finalize_int_reply(1),
+        finalize_int_reply(2),
+        // Cycle 2, post-rotation: the same composition again.
+        reply(ASYNC_FORK_BLOCK),
+        finalize_int_reply(3),
+        finalize_int_reply(4),
+    ];
+    let (mut driver, _agent, _log_path) = build_driver(replies, "answerer-async-fork-quiescent");
+    let source = load_harness_source(&examples_harness_dir().join("Harness.hs"))
+        .expect("reference harness source loads");
+
+    let outcome1 = driver
+        .run_one_cycle(&source, None)
+        .await
+        .expect("cycle 1: async forks settle, sweep closes their realms");
+    let outcome2 = driver
+        .run_one_cycle(&source, Some(&outcome1.state_json))
+        .await
+        .expect(
+            "cycle 2 must rotate cleanly at the forced ceiling — a settled \
+             thread's realm left open makes the machine permanently \
+             non-quiescent and this errors 'not quiescent (N parked hole(s))'",
+        );
+
+    let decision = outcome2
+        .state_json
+        .get("lastDecision")
+        .and_then(|v| v.as_object())
+        .expect("cycle 2's Decision landed");
+    assert_eq!(
+        decision.get("action").and_then(|v| v.as_str()),
+        Some("34"),
+        "post-rotation forks still deliver to the right handles (3×10 + 4), \
+         got {decision:?}"
+    );
+}

@@ -440,13 +440,38 @@ impl AnswererGreen {
 
 /// How [`SelfHarnessDriver::service_answerer_green`] hands control back to
 /// the answerer dispatcher: the node's own turn parked on a non-Green hole
-/// (route it), ran to completion without finalizing (corrective retry), or
-/// a thread's fork was refused by the window's fork budget (abort the
-/// block, corrective retry naming the budget).
+/// (route it), ran to completion without finalizing (corrective retry), a
+/// thread's fork was refused by the session's fork budget (abort the
+/// block, corrective retry naming the budget), or the block misused the
+/// async surface (abort the block, corrective retry naming the mistake).
 enum AnswererGreenExit {
     NodeParked,
     NodeDone,
     ForkBudgetRefused { needed: u32 },
+    AsyncMisuse { msg: String },
+}
+
+/// One serviced green suspension's outcome, distinguishing MODEL-ATTRIBUTABLE
+/// misuse (`asyncResult` before a settle, a `wait` on a dropped handle, …)
+/// from a mechanism failure: the answerer plane turns `Misuse` into a
+/// block-abort + corrective (the same loud-refusal shape the fork budget
+/// uses — one model slip must not end the whole run), while the AUTHORED
+/// outer plane maps it back to a hard error (authored code fails loud, it
+/// is not coached).
+enum GreenHoleServiced {
+    /// Serviced; the bool is the old return — `true` = the node chain is
+    /// blocked on a join with no terminal candidate.
+    Proceed(bool),
+    Misuse(String),
+}
+
+/// One serviced THREAD-chain ready item's outcome — the thread-plane
+/// sibling of [`GreenHoleServiced`], widened with the fork-budget refusal
+/// that thread forks can hit.
+enum ThreadServiced {
+    Continue,
+    BudgetRefused { needed: u32 },
+    Misuse(String),
 }
 
 /// One answerer WINDOW's fork budget — total children across all rounds,
@@ -3365,8 +3390,10 @@ impl SelfHarnessDriver {
                         // `ServicedHole` (see that type's doc), so it owns
                         // `ready` directly and this arm hands nothing back.
                         HoleRouting::Green => {
-                            // Raw delivery never reports node-blocked.
-                            let _ = self
+                            // Raw delivery never reports node-blocked. The
+                            // AUTHORED plane keeps misuse a hard error —
+                            // authored code fails loud, it is not coached.
+                            if let GreenHoleServiced::Misuse(msg) = self
                                 .service_green_hole(
                                     chain,
                                     hole.cont_id(),
@@ -3379,7 +3406,10 @@ impl SelfHarnessDriver {
                                     &mut ready,
                                     GreenDelivery::Raw,
                                 )
-                                .await?;
+                                .await?
+                            {
+                                return Err(DriverError::Session(msg));
+                            }
                             continue;
                         }
                         // `runLLMTurnFork @T`/`runLLMTurnFanout @T` raised
@@ -3562,14 +3592,19 @@ impl SelfHarnessDriver {
         };
 
         // Structured-concurrency scope exit: every thread this loop spawned
-        // is scoped to this ONE `loop` fragment run — close whatever is left
-        // running (never joined/cancelled by the authored code) so its
-        // realm's frames/handles don't outlive the cycle that created them.
-        // Idempotent and cheap on the common case (every thread already
-        // joined or cancelled leaves nothing to close).
+        // is scoped to this ONE `loop` fragment run — close every realm that
+        // is still open so its frames/handles don't outlive the cycle that
+        // created them. That is Running threads (never joined/cancelled by
+        // the authored code) AND Settled ones: a settle parks the thread's
+        // `AsyncDoneWith` frame FOREVER by design (the arm never resumes
+        // it), so a settled realm left unclosed is a permanently-parked hole
+        // on the shared session — enough of them and the machine is never
+        // quiescent again, which blocks rotation until the fragment ceiling
+        // kills the run. Only a Cancelled thread's realm is already closed
+        // (the cancel arm does it eagerly).
         if let Ok(sid) = self.outer_sid() {
             for entry in threads.values() {
-                if matches!(entry.state, GreenThreadState::Running) {
+                if !matches!(entry.state, GreenThreadState::Cancelled) {
                     let _ = self.agent.with_session(sid, |s| s.close_realm(entry.realm));
                 }
             }
@@ -3653,7 +3688,7 @@ impl SelfHarnessDriver {
         next_realm: &mut u64,
         ready: &mut VecDeque<GreenReady>,
         delivery: GreenDelivery<'_>,
-    ) -> Result<bool, DriverError> {
+    ) -> Result<GreenHoleServiced, DriverError> {
         let sid = self.outer_sid()?;
         match engine::con_name(request, table) {
             // Field 1 is the thread body — ALWAYS a closure by construction
@@ -3745,7 +3780,7 @@ impl SelfHarnessDriver {
                     chain: GreenChain::Thread(tid),
                     outcome: thread_start,
                 });
-                Ok(false)
+                Ok(GreenHoleServiced::Proceed(false))
             }
             // A thread's last act. Its own leading `Int` field is always the
             // dummy `0` `asyncSpawn` bakes in — the settling thread's real id
@@ -3784,7 +3819,7 @@ impl SelfHarnessDriver {
                     .is_some_and(|t| matches!(t.state, GreenThreadState::Running));
                 if !records_result {
                     self.wake_green_waiters(tid, table, sid, waiters, ready)?;
-                    return Ok(false);
+                    return Ok(GreenHoleServiced::Proceed(false));
                 }
                 let answer = if green_field_is_closure(request, 1) {
                     // Owned by the SESSION's realm, deliberately (not the
@@ -3839,7 +3874,7 @@ impl SelfHarnessDriver {
                     }
                 }
                 self.wake_green_waiters(tid, table, sid, waiters, ready)?;
-                Ok(false)
+                Ok(GreenHoleServiced::Proceed(false))
             }
             Some("AsyncJoinAnyWith") => {
                 let ids = green_int_list_field(request, 0, table);
@@ -3881,11 +3916,13 @@ impl SelfHarnessDriver {
                                         .push((chain, hole.to_string()));
                                 }
                             }
-                            GreenDelivery::Node { .. } => return Ok(true),
+                            GreenDelivery::Node { .. } => {
+                                return Ok(GreenHoleServiced::Proceed(true))
+                            }
                         }
                     }
                 }
-                Ok(false)
+                Ok(GreenHoleServiced::Proceed(false))
             }
             Some("AsyncStatusWith") => {
                 let tid = green_int_field(request, 0, table);
@@ -3907,7 +3944,7 @@ impl SelfHarnessDriver {
                     "AsyncStatusWith",
                 )
                 .await?;
-                Ok(false)
+                Ok(GreenHoleServiced::Proceed(false))
             }
             Some("AsyncResultWith") => {
                 let tid = green_int_field(request, 0, table);
@@ -3920,9 +3957,11 @@ impl SelfHarnessDriver {
                     // reads the same root.
                     Some(GreenThreadState::Settled(GreenResult::Root(h))) => GreenResult::Root(*h),
                     _ => {
-                        return Err(DriverError::Session(format!(
-                            "AsyncResultWith: thread {tid} has not settled (gate with \
-                             asyncStatus first)"
+                        return Ok(GreenHoleServiced::Misuse(format!(
+                            "`asyncResult` was called on thread {tid}, which has not \
+                             settled (or whose handle is from an earlier round — handles \
+                             do not survive a round boundary). Gate with `asyncStatus`, \
+                             or use `wait`, and spawn + wait in the SAME block"
                         )))
                     }
                 };
@@ -3939,7 +3978,7 @@ impl SelfHarnessDriver {
                     "AsyncResultWith",
                 )
                 .await?;
-                Ok(false)
+                Ok(GreenHoleServiced::Proceed(false))
             }
             Some("AsyncCancelWith") => {
                 let tid = green_int_field(request, 0, table);
@@ -3976,7 +4015,7 @@ impl SelfHarnessDriver {
                     "AsyncCancelWith",
                 )
                 .await?;
-                Ok(false)
+                Ok(GreenHoleServiced::Proceed(false))
             }
             other => Err(DriverError::Session(format!(
                 "outer loop suspended on an unrecognized Green constructor ({other:?})"
@@ -5484,6 +5523,27 @@ impl SelfHarnessDriver {
                                         self.agent.push_user_turn(node, &format!("{msg}{warn}"))?;
                                         continue 'round;
                                     }
+                                    // Async misuse: same loud-refusal shape
+                                    // as the budget — the block dies, the
+                                    // SESSION survives with a corrective.
+                                    // One model slip must not end the run.
+                                    AnswererGreenExit::AsyncMisuse { msg } => {
+                                        let dropped = self.sweep_answerer_green(g);
+                                        let corrective = format!(
+                                            "Async misuse — the block was aborted; your \
+                                             session continues and earlier rounds' \
+                                             definitions/bindings persist. Problem: {msg}."
+                                        );
+                                        self.agent.refuse_pending_hole(node, corrective.clone())?;
+                                        let warn = if dropped > 0 {
+                                            format!("\n\n{}", dropped_threads_warning(dropped))
+                                        } else {
+                                            String::new()
+                                        };
+                                        self.agent
+                                            .push_user_turn(node, &format!("{corrective}{warn}"))?;
+                                        continue 'round;
+                                    }
                                 }
                             }
                             other => {
@@ -5602,6 +5662,20 @@ impl SelfHarnessDriver {
                              `finalize @{ty_disp} value`.\n\nGHC error:\n{msg}{hint}"
                         ),
                     )?;
+                }
+                // A provider fault is THIS SESSION's own runtime failure —
+                // decision 6's "runtime failure" class, the same arm its twin
+                // `drive_fanout_child_inner` has always had: a branch-position
+                // caller (fork child, labeled branch) folds it as `Left` at
+                // that position instead of one transient 5xx erasing every
+                // sibling's finished answer. The in-context caller
+                // (`service_runllm_hole`) still collapses it to a hard
+                // failure, unchanged. Every OTHER `HarnessError` is
+                // driver/session machinery and hard-fails the turn.
+                Err(HarnessError::Engine(EngineError::Provider(pe))) => {
+                    return Ok(Err(InvocationExit::RuntimeFailure(format!(
+                        "answerer provider call failed: {pe}"
+                    ))));
                 }
                 Err(e) => return Err(e.into()),
             }
@@ -6578,7 +6652,7 @@ impl SelfHarnessDriver {
             if !matches!(classified.routing, HoleRouting::Green) {
                 return Ok(AnswererGreenExit::NodeParked);
             }
-            let blocked = self
+            let blocked = match self
                 .service_green_hole(
                     GreenChain::Primary,
                     &hole.0,
@@ -6591,22 +6665,33 @@ impl SelfHarnessDriver {
                     &mut green.ready,
                     GreenDelivery::Node { node, hole: &hole },
                 )
-                .await?;
+                .await?
+            {
+                GreenHoleServiced::Proceed(b) => b,
+                GreenHoleServiced::Misuse(msg) => {
+                    return Ok(AnswererGreenExit::AsyncMisuse { msg })
+                }
+            };
             if !blocked {
                 continue;
             }
             // The node is blocked on a join with no terminal candidate: one
             // thread step, then loop (the join re-check observes any settle).
             let Some(GreenReady { chain, outcome }) = green.ready.pop_front() else {
-                return Err(DriverError::Session(
-                    "answerer green scheduler starved: the window's turn awaits a \
-                     thread, but no thread has ready work (a thread parked on \
-                     something nothing services, or a wait on a dropped handle — \
-                     spawn and wait within the same block)"
+                // Model-attributable, not a mechanism failure: the block
+                // awaits a thread no ready work can ever settle — typically
+                // a `wait` on a handle from an EARLIER round (swept at the
+                // round boundary) or a thread deadlock. Abort the block with
+                // a corrective instead of ending the whole run.
+                return Ok(AnswererGreenExit::AsyncMisuse {
+                    msg: "your block is waiting on a thread that has no runnable work \
+                          — usually a `wait` on a handle from an earlier round (thread \
+                          handles do not survive a round boundary; spawn and wait in \
+                          the SAME block), or threads waiting on each other"
                         .into(),
-                ));
+                });
             };
-            if let Some(needed) = self
+            match self
                 .service_thread_ready(
                     node,
                     chain,
@@ -6618,7 +6703,13 @@ impl SelfHarnessDriver {
                 )
                 .await?
             {
-                return Ok(AnswererGreenExit::ForkBudgetRefused { needed });
+                ThreadServiced::Continue => {}
+                ThreadServiced::BudgetRefused { needed } => {
+                    return Ok(AnswererGreenExit::ForkBudgetRefused { needed });
+                }
+                ThreadServiced::Misuse(msg) => {
+                    return Ok(AnswererGreenExit::AsyncMisuse { msg });
+                }
             }
         }
     }
@@ -6641,7 +6732,7 @@ impl SelfHarnessDriver {
         budget: &mut ForkBudget,
         fork_depth: u32,
         fork_subtree: &std::sync::atomic::AtomicU32,
-    ) -> Result<Option<u32>, DriverError> {
+    ) -> Result<ThreadServiced, DriverError> {
         let sid = self.outer_sid()?;
         let ResidentOutcome::Suspended { hole, request, .. } = outcome else {
             return Err(DriverError::Session(
@@ -6661,7 +6752,7 @@ impl SelfHarnessDriver {
             .map_err(|e| DriverError::Session(format!("thread hole classify: {e}")))?;
         match classified.routing {
             HoleRouting::Green => {
-                let _ = self
+                match self
                     .service_green_hole(
                         chain,
                         hole.cont_id(),
@@ -6674,8 +6765,11 @@ impl SelfHarnessDriver {
                         &mut green.ready,
                         GreenDelivery::Raw,
                     )
-                    .await?;
-                Ok(None)
+                    .await?
+                {
+                    GreenHoleServiced::Misuse(msg) => Ok(ThreadServiced::Misuse(msg)),
+                    GreenHoleServiced::Proceed(_) => Ok(ThreadServiced::Continue),
+                }
             }
             HoleRouting::Fork {
                 site,
@@ -6692,7 +6786,7 @@ impl SelfHarnessDriver {
                     .check_fork_budgets(budget, cost, fork_subtree, "")
                     .is_some()
                 {
-                    return Ok(Some(cost));
+                    return Ok(ThreadServiced::BudgetRefused { needed: cost });
                 }
                 // Children run as full sessions on the pump, exactly like a
                 // direct fork's; only the resume differs — the thread's
@@ -6745,7 +6839,7 @@ impl SelfHarnessDriver {
                     chain,
                     outcome: next,
                 });
-                Ok(None)
+                Ok(ThreadServiced::Continue)
             }
             HoleRouting::Note { text } => {
                 self.announce_note(FormSource::Answerer { node }, &text);
@@ -6761,7 +6855,7 @@ impl SelfHarnessDriver {
                     chain,
                     outcome: next,
                 });
-                Ok(None)
+                Ok(ThreadServiced::Continue)
             }
             HoleRouting::ReadState => {
                 let state = self.cycle_state_json.clone().unwrap_or(Json::Null);
@@ -6780,7 +6874,7 @@ impl SelfHarnessDriver {
                     chain,
                     outcome: next,
                 });
-                Ok(None)
+                Ok(ThreadServiced::Continue)
             }
             HoleRouting::Subagent => {
                 let value = self.service_outer_subagent(&request, &table)?;
@@ -6809,37 +6903,51 @@ impl SelfHarnessDriver {
                     chain,
                     outcome: next,
                 });
-                Ok(None)
+                Ok(ThreadServiced::Continue)
             }
-            HoleRouting::Finalize { .. } => Err(DriverError::Session(
+            HoleRouting::Finalize { .. } => Ok(ThreadServiced::Misuse(
                 "a green thread called `finalize` — the session's answer belongs on the \
                  main chain: `wait` your threads, then finalize from the top level"
                     .into(),
             )),
-            HoleRouting::AskUser { .. } | HoleRouting::Ask { .. } => Err(DriverError::Session(
+            HoleRouting::AskUser { .. } | HoleRouting::Ask { .. } => Ok(ThreadServiced::Misuse(
                 "a green thread called `askUser` — operator forms belong on the main \
                  chain: ask before spawning, or after your `wait`s"
                     .into(),
             )),
-            other => Err(DriverError::Session(format!(
-                "a green thread suspended on a hole this driver cannot service inside \
-                 async ({other:?})"
+            other => Ok(ThreadServiced::Misuse(format!(
+                "a green thread suspended on an effect this driver cannot service inside \
+                 async ({other:?}) — keep operator forms and the final answer on the \
+                 main chain"
             ))),
         }
     }
 
-    /// Round-boundary sweep: close every still-running thread's realm and
-    /// clear the scheduler — the answerer-plane sibling of
-    /// [`Self::run_loop_fragment_inner`]'s end-of-scope sweep. Returns how
-    /// many threads were dropped mid-flight (0 on the clean path where every
-    /// thread was waited or cancelled), so the corrective prompt can say so.
+    /// Round-boundary sweep: close every still-open thread realm and clear
+    /// the scheduler — the answerer-plane sibling of
+    /// [`Self::run_loop_fragment_inner`]'s end-of-scope sweep. Settled
+    /// realms are closed here too, not just Running ones: a settle parks
+    /// the thread's `AsyncDoneWith` frame forever by design, so leaving a
+    /// settled realm open leaks a permanently-parked hole on the shared
+    /// session per successful `async`/`wait` — enough of them and the
+    /// machine is never quiescent again, blocking rotation until the
+    /// fragment ceiling kills the run. (Cancelled realms were closed
+    /// eagerly by the cancel arm.) Returns how many threads were dropped
+    /// MID-FLIGHT — Running only; a settled thread was not "dropped" — so
+    /// the corrective prompt can say so.
     fn sweep_answerer_green(&self, green: &mut AnswererGreen) -> usize {
         let mut dropped = 0usize;
         if let Ok(sid) = self.outer_sid() {
             for entry in green.threads.values() {
-                if matches!(entry.state, GreenThreadState::Running) {
-                    let _ = self.agent.with_session(sid, |s| s.close_realm(entry.realm));
-                    dropped += 1;
+                match entry.state {
+                    GreenThreadState::Running => {
+                        let _ = self.agent.with_session(sid, |s| s.close_realm(entry.realm));
+                        dropped += 1;
+                    }
+                    GreenThreadState::Settled(_) => {
+                        let _ = self.agent.with_session(sid, |s| s.close_realm(entry.realm));
+                    }
+                    GreenThreadState::Cancelled => {}
                 }
             }
         }
