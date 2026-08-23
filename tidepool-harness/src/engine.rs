@@ -479,7 +479,7 @@ fn require_con_site(
 ///   `NoteWith`'s is. Absent from every model-facing row — see that
 ///   variant's doc.
 /// - `Print` (Console) / `WorktreeCreate`/`WorktreeLookup`/`WorktreeList`/
-///   `WorktreeBranchOf`/`WorktreeHeadOf` (Worktree) / `RepoEventSubscribe`/
+///   `WorktreeBranchOf`/`WorktreeHeadOf`/`WorktreeMergeInto` (Worktree) / `RepoEventSubscribe`/
 ///   `RepoEventDrain`/`RepoEventAwait`/`RepoEventUnsubscribe` (RepoEvent) /
 ///   `Run`/`RunIn`/`RunArgv` (Exec) / `RecordStep` (Journal) — routed by
 ///   CONSTRUCTOR NAME to [`HoleRouting::OuterEffect`], same discipline as
@@ -584,7 +584,8 @@ pub fn classify_hole(
         | Some("WorktreeLookup")
         | Some("WorktreeList")
         | Some("WorktreeBranchOf")
-        | Some("WorktreeHeadOf") => ClassifiedHole {
+        | Some("WorktreeHeadOf")
+        | Some("WorktreeMergeInto") => ClassifiedHole {
             routing: HoleRouting::OuterEffect(OuterEffectKind::Worktree),
             prompt: String::new(),
         },

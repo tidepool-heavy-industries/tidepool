@@ -33,14 +33,13 @@
 -- \/tests\/dogfood_harness_typecheck.rs@ pins it against that row.
 --
 -- __Worktree coordination (PRD 21 lane C5).__ 'mergeFold' is authored
--- policy over @Worktree@\/@Exec@\/@Subagent@, run by 'foldAt' — never by a
+-- policy over @Worktree@\/@Subagent@, run by 'foldAt' — never by a
 -- session: node sessions ('bulkLayerWindow'\/'foldWindow') compile against the
--- answerer's narrow row, which has neither. It reaches git the same way
--- @dev-tree@'s own @mergeChild@ does (mechanical @git@ through @Exec@ in a
--- worktree this node owns; see 'gitIn'), never through a runtime workflow
--- verb — @tidepool-worktree@'s own boundary is unchanged, and
--- @tidepool_worktree::merge@ is the fast-tier-tested ground truth this
--- mirrors.
+-- answerer's narrow row, which has neither. The mechanical merge itself goes
+-- through the typed 'mergeBranchInto' verb (@tidepool_worktree::merge@,
+-- @tidepool-worktree@'s one deliberate git-workflow exception — its own
+-- boundary is unchanged), the same one @dev-tree@'s own @mergeChild@ calls;
+-- only conflict RESOLUTION (spawning an agent) stays authored policy here.
 module Harness
   ( -- * The locked entry points
     State (..)
@@ -98,13 +97,11 @@ import Tidepool.Aeson (FromJSON, ToJSON, Value, object, toJSON, (.=))
 import Tidepool.Aeson.Schema (JsonSchema)
 import Tidepool.Effects
   ( ContextRef
-  , ExecError (..)
   , InvocationExit
   , WorktreeHandle (..)
   , WorktreeReceipt (..)
   , freezeContext
   , renderInvocationExit
-  , runIn
   , runLLMTurnBranch
   , runLLMTurnBranchFanout
   , say
@@ -1029,30 +1026,18 @@ mergeFold path ownBranch kids = case (ownBranch, mergePlan (map ((.answerMergeBr
   where
     mergeStep t branchText = mergeNote branchText <$> mergeChildInto t branchText
 
--- | One merge, mechanical first: 'gitIn' running plain @git merge --no-ff@
--- in a worktree this node owns — authored policy, not a runtime workflow
--- verb (PRD 19's freeze, unchanged). A real conflict is read and aborted
--- BEFORE the resolver ever spawns, so the resolver always starts from a
--- clean worktree.
+-- | One merge, mechanical first: the canonical typed 'mergeBranchInto' verb
+-- runs the merge and classifies conflict vs. failure — on conflict, it has
+-- already read the conflicting paths and aborted BEFORE this returns, so the
+-- resolver always starts from a clean worktree.
 mergeChildInto :: WorktreeHandle -> Text -> Companion MergeStatus
 mergeChildInto tree branchText =
-  gitIn tree [fmt|merge --no-ff -m "fold {branchText}" {branchText}|] >>= \case
-    Left e -> pure (MergeConflicted [fmt|merge could not run: {e}|])
-    Right pr
-      | ok pr -> pure MergeClean
-      | otherwise -> handleConflict tree branchText
-
--- | Read the conflicting paths, abort (restoring a clean worktree), THEN
--- spawn the resolver — never the other order, so the resolver's own
--- worktree access is never mid-merge.
-handleConflict :: WorktreeHandle -> Text -> Companion MergeStatus
-handleConflict tree branchText = do
-  paths <-
-    gitIn tree "diff --name-only --diff-filter=U" >>= \case
-      Left _ -> pure []
-      Right pr -> pure (filter (/= "") (T.lines pr.stdout))
-  _ <- gitIn tree "merge --abort"
-  resolveConflict tree branchText paths
+  mergeBranchInto (worktreeId tree) (mkBranchName branchText) message >>= \case
+    Left err -> pure (MergeConflicted [fmt|merge could not run: {renderWorktreeError err}|])
+    Right (Merged _commit) -> pure MergeClean
+    Right (Conflict paths) -> resolveConflict tree branchText paths
+  where
+    message = [fmt|fold {branchText}|]
 
 -- | One ephemeral agent, bound to this node's own (now clean again)
 -- worktree, asked to redo the merge and resolve the conflict itself.
@@ -1093,20 +1078,6 @@ the merge. If the conflict is not trivially resolvable, leave the merge
 unresolved and say why instead of guessing at intent.
 
 Finalize a MergeResolution {{ resolved, resolutionNotes }}.|]
-
--- | Plain git in a worktree this node owns — authored policy, not a
--- runtime workflow verb (mirrors @dev-tree@'s own @gitIn@ verbatim).
-gitIn :: WorktreeHandle -> Text -> Companion (Either Text Proc)
-gitIn tree args =
-  runIn tree.handleReceipt.cwd ("git " <> args) >>= \case
-    Left e -> pure (Left (renderExecError e))
-    Right pr -> pure (Right pr)
-
-renderExecError :: ExecError -> Text
-renderExecError e = case e of
-  ExecSpawn detail -> "could not spawn: " <> detail
-  ExecBadDir detail -> "bad working directory: " <> detail
-  ExecTimeout detail -> "timed out: " <> detail
 
 -- | Every field a fold's own 'FoldOutcome' contributes — a named record
 -- (companion review step 4) so a sibling lane extending 'foldAt'

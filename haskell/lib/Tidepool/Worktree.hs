@@ -6,8 +6,9 @@
 -- durable id, and reads what git actually became.  There is no @rebaseOnto@,
 -- @cherryPick@, conflict RESOLUTION, or branch promotion here, and their
 -- absence is the design rather than a gap: coding agents do that work with
--- their native tools ('gitIn' is the escape hatch for exactly that authored
--- policy), and Tidepool observes the result through 'Tidepool.Event'.
+-- their native tools (@gitIn@ — a thin per-harness wrapper over
+-- 'Tidepool.Shell.runInTry', NOT defined here; see the note below on why),
+-- and Tidepool observes the result through 'Tidepool.Event'.
 --
 -- 'mergeBranchInto' is the ONE deliberate exception (PRD 21 C5's
 -- worktree-coordination fold): merge one branch into a target worktree,
@@ -110,7 +111,6 @@ module Tidepool.Worktree
     -- * Merging (PRD 21 C5's one narrow, deliberate workflow primitive)
   , MergeOutcome (..)
   , mergeBranchInto
-  , gitIn
 
     -- * Receipts and failures
   , WorktreeReceipt (..)
@@ -150,8 +150,6 @@ import Tidepool.Effects
   , worktreeId
   )
 import Tidepool.Prelude hiding (error)
-import Tidepool.Records (Proc)
-import Tidepool.Shell (runInTry)
 
 default (Int, Double, Text)
 
@@ -183,13 +181,26 @@ default (Int, Double, Text)
 -- be spliced INTO that module, so anything less is a scope this code did not
 -- have to compile against before.
 --
--- 'mkBranchName' and 'gitIn' are ADDITIONS beyond that original fourteen —
--- the shared home the two dogfood harnesses' byte-identical @gitIn@\/
--- @renderExecError@ helpers promoted to, plus a smart constructor so a
--- harness whose domain model carries a branch as plain 'Text' can still call
--- 'mergeBranchInto'. 'mergeBranchInto' itself is representable and lives in
--- the generated "Tidepool.Effects" (like 'createWorktree'), re-exported here
--- for the same reason those three are.
+-- 'mkBranchName' is an ADDITION beyond that original fourteen — a smart
+-- constructor so a harness whose domain model carries a branch as plain
+-- 'Text' (the recursive companion's fold) can still call 'mergeBranchInto'.
+-- 'mergeBranchInto' itself is representable and lives in the generated
+-- "Tidepool.Effects" (like 'createWorktree'), re-exported here for the same
+-- reason those three are.
+--
+-- @gitIn@\/@renderExecError@ (the two dogfood harnesses' byte-identical
+-- helpers) do NOT move here, even though they are exactly the kind of
+-- duplication this module otherwise absorbs: 'Tidepool.Shell.runInTry' (the
+-- shared home they DO get, see that module) needs `Exec` genuinely in the
+-- compiling row, and this module is compiled under rows that omit it — the
+-- recursive companion's own delegate-wrapped branch-node row
+-- (`selfharness::driver::answerer_decls_with_delegate`) is `[Subagent,
+-- Worktree, AskUser, Fork, ReadState, Green, Finalize]`, no `Exec` at all.
+-- Importing `Tidepool.Shell` from here would make EVERY row carrying
+-- `Worktree` require `Exec` too, silently widening a boundary this module's
+-- own header doc says the opposite of. `gitIn` stays a 3-line wrapper over
+-- `runInTry` defined LOCALLY in each harness, which already controls (and
+-- guarantees) its own row includes both.
 
 -- | Seed a managed worktree from the repository Tidepool is running
 -- against. Clean-by-default: a dirty source is REFUSED unless the spec
@@ -248,13 +259,6 @@ worktreeHead h = send (WorktreeHeadOf (worktreeId h)) >>= liftEither
 -- an ordinary git failure, not a validation error here.
 mkBranchName :: Text -> BranchName
 mkBranchName = BranchName
-
--- | Plain @git@ run in a worktree this node owns — authored policy, not a
--- runtime workflow verb (PRD 19's freeze, unchanged: this is Exec, not a git
--- workflow verb). For the ONE workflow primitive PRD 19 does expose, see
--- 'mergeBranchInto' above, not this.
-gitIn :: WorktreeHandle -> Text -> M (Either Text Proc)
-gitIn tree args = runInTry tree.handleReceipt.cwd ("git " <> args)
 
 renderGitOid :: GitOid -> Text
 renderGitOid (GitOid t) = t
