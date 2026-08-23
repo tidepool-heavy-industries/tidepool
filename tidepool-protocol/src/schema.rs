@@ -856,7 +856,7 @@ pub enum HandlingClass {
     RunLlmTurn,
     /// Suspends to the model as a fan-out with a join.
     Fork,
-    /// Terminates the turn, handing a typed value up to the parent hole.
+    /// Terminates the turn, handing a typed value up to the parent continuation.
     Finalize,
     /// Suspends to the operator as a typed, blocking form.
     AskUserForm,

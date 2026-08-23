@@ -2,7 +2,7 @@
 //!
 //! Chosen because it is the smallest effect present in registries 1, 2 AND 4:
 //! the macro DSL, the bridged `Proc` record, and the harness's constructor-name
-//! hole classifier. That triangle is where the silent-misroute bug class the
+//! routing classifier. That triangle is where the silent-misroute bug class the
 //! PRD exists to close actually lives. See the scaffold doc §2.
 //!
 //! It is also where the no-raw-Haskell rule gets its first real test. All three
