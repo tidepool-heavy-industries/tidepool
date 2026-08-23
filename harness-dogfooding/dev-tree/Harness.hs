@@ -669,8 +669,8 @@ foldLadder o = case o of
 -- Rung 1 is the HEAD read either side of the cycle — a worker that claims
 -- completion without committing is caught here and never reaches rung 2.  The
 -- 'withHandler' scope is observation of the same fact as it happens; the pair
--- of 'worktreeHead' reads is what closes the window a subscription
--- deliberately will not (no replay, cycle-scoped lifetime).
+-- of 'worktreeHead' reads is what closes the gap a subscription
+-- deliberately will not (no replay, loop-iteration-scoped lifetime).
 leafFold :: NodeSeed -> Harness Outcome
 leafFold seed = do
   before <- worktreeHead tree
@@ -773,7 +773,7 @@ foldChildren tree p ((s, o) : rest) acc = case acc.accAbandon of
     childName = nodeName s.seedPlan
 
 -- | A child that failed on its own terms.  The parent's policy decides whether
--- that stops the fold; 'Replan' opens a planning window and JOURNALS the
+-- that stops the fold; 'Replan' opens a planning agent session and JOURNALS the
 -- amendment, because re-unfolding a subtree means re-entering the coalgebra —
 -- which is resume's job (PRD 20 S1-L5), not this fold's.
 onChildFailure :: WorktreeHandle -> DevPlan -> NodeSeed -> Outcome -> FoldAcc -> Harness FoldAcc
@@ -899,7 +899,7 @@ awaitResolutions p onto ((s, h) : rest) acc = case acc.accAbandon of
 
 -- | Tier 3.  An unresolved conflict is not an exception and does not stop the
 -- fold: the parent's failure policy — an exhaustive case the compiler audits —
--- turns it into a retry, a planning window, an operator form, or an
+-- turns it into a retry, a planning agent session, an operator form, or an
 -- abandonment, and whatever it decides rides on as data.
 escalate :: DevPlan -> NodeSeed -> Text -> FoldAcc -> Harness FoldAcc
 escalate p s why acc = do
@@ -923,7 +923,7 @@ escalate p s why acc = do
     branch = branchOf s.seedTree
 
 -- | PRD 20's failure-policy sum, applied by deterministic code.  Cognition
--- enters through exactly two constructors: 'Replan' opens a planning window
+-- enters through exactly two constructors: 'Replan' opens a planning agent session
 -- scoped to the failure, 'AskOperator' presents a typed triage form.
 applyPolicy :: DevPlan -> NodeSeed -> Text -> Harness PolicyOutcome
 applyPolicy p s why = case nodeOnFailure p of

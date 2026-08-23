@@ -107,7 +107,7 @@ data JournalEvent
       { evKey     :: JournalKey
       , evOutcome :: Outcome
       }
-  | -- | An 'onChildFailure'\/'applyPolicy' replan window's answer.
+  | -- | An 'onChildFailure'\/'applyPolicy' replan agent session's answer.
     ReplanEvent
       { evKey      :: JournalKey
       , evDecision :: ReplanDecision

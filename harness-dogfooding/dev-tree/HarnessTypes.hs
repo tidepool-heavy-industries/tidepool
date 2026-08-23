@@ -8,12 +8,12 @@
 -- | Durable vocabulary for the recursive-development-tree dogfood (v2).
 --
 -- This file intentionally contains no live Agent, Event, or Worktree handles:
--- those are cycle-scoped runtime capabilities, and the seed\/task types that
+-- those are loop-iteration-scoped runtime capabilities, and the seed\/task types that
 -- carry them live in "Harness" instead.  Only the semantic plan, the typed
--- outcomes, and the fold receipts cross a resident-cycle boundary.
+-- outcomes, and the fold receipts cross a resident-loop-iteration boundary.
 --
 -- Everything here is also the answerer's vocabulary: @Harness@ imports this
--- module, so a @runLLMTurn \@ReplanDecision@ or @askUser \@Triage@ window can
+-- module, so a @runLLMTurn \@ReplanDecision@ or @askUser \@Triage@ agent session can
 -- name these types (see @HarnessSource::answerer_imports@).
 module HarnessTypes
   ( State (..)
@@ -119,7 +119,7 @@ data DevPlan = DevPlan
   deriving (Generic, ToJSON, FromJSON, Show, Eq)
 
 -- | PRD 20's failure-policy sum, applied by deterministic code.  Model
--- cognition enters only through 'Replan' (a planning window scoped to the
+-- cognition enters only through 'Replan' (a planning agent session scoped to the
 -- failure) and 'AskOperator' (a typed triage form).
 data OnFailure = Retry | Replan | AskOperator | Abandon
   deriving (Generic, ToJSON, FromJSON, Show, Eq)
@@ -159,7 +159,7 @@ data ResolutionResult = ResolutionResult
   }
   deriving (Generic, ToJSON, FromJSON, JsonSchema, Show, Eq)
 
--- | The 'Replan' window's answer: a planning window scoped to the failed
+-- | The 'Replan' agent session's answer: a planning agent session scoped to the failed
 -- subtree's render, not a free-form retry.
 data ReplanDecision = ReplanDecision
   { amendedInstruction :: Text
