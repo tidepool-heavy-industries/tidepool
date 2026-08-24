@@ -100,9 +100,19 @@ pub enum HarnessError {
     /// checkout on a holeless session (see
     /// [`CheckoutError::NotSuspended`]/[`CheckoutError::WrongHole`]). Kept
     /// distinct from both so a caller never mistakes a hole/state mismatch
-    /// for "never forced" or "busy, retry".
-    #[error("node {node:?}: {detail}")]
-    SessionMismatch { node: NodeId, detail: String },
+    /// for "never forced" or "busy, retry". Carries the STRUCTURED
+    /// `CheckoutError` (not a flattened string) so a caller can
+    /// programmatically ask "what *was* pending" (e.g.
+    /// `CheckoutError::WrongHole`'s `attempted`/`parked` fields) the way
+    /// `tidepool-repl`'s `SessionManager::suspension_for` already lets a
+    /// caller do without a second read — see the resident-session kernel
+    /// design doc §1.5/§2, Open Question 4.
+    #[error("node {node:?}: {source}")]
+    SessionMismatch {
+        node: NodeId,
+        #[source]
+        source: CheckoutError,
+    },
     /// [`Self::resume_with_borrowed_root`] landed on a
     /// [`crate::tree`]-suspended [`ResidentHole::Binding`] hole (F9: a
     /// bind-shaped answerer turn, `h <- async (…closure-valued…); wait h`,
@@ -142,7 +152,7 @@ impl HarnessError {
             | CheckoutError::NoSession
             | CheckoutError::Terminal { .. }) => HarnessError::SessionMismatch {
                 node,
-                detail: other.to_string(),
+                source: other,
             },
         }
     }
@@ -3827,6 +3837,81 @@ mod tests {
 
     fn test_engine_cfg() -> EngineConfig {
         EngineConfig::inert(vec!["Console".to_string()])
+    }
+
+    /// OQ4: `HarnessError::from_checkout` must preserve `CheckoutError::
+    /// WrongHole`'s structured `{session, attempted, parked}` data rather
+    /// than flattening it into a display string — a caller matching on
+    /// `HarnessError::SessionMismatch { source: CheckoutError::WrongHole {
+    /// attempted, parked, .. }, .. }` must be able to read the actual
+    /// pending hole set back out, the same way `tidepool-repl`'s
+    /// `SessionManager::suspension_for` already lets a caller read `Err(Some(pending))`
+    /// without a second lookup.
+    #[test]
+    fn from_checkout_preserves_wrong_hole_structured_data() {
+        let node = NodeId(7);
+        let session = SessionId(1);
+        let attempted = HoleId("scont_9".to_string());
+        let parked = vec![HoleId("scont_1".to_string()), HoleId("scont_2".to_string())];
+        let err = CheckoutError::WrongHole {
+            session,
+            attempted: attempted.clone(),
+            parked: parked.clone(),
+        };
+
+        match HarnessError::from_checkout(node, err) {
+            HarnessError::SessionMismatch {
+                node: got_node,
+                source:
+                    CheckoutError::WrongHole {
+                        session: got_session,
+                        attempted: got_attempted,
+                        parked: got_parked,
+                    },
+            } => {
+                assert_eq!(got_node, node);
+                assert_eq!(got_session, session);
+                assert_eq!(got_attempted, attempted);
+                assert_eq!(got_parked, parked);
+            }
+            other => panic!("expected SessionMismatch{{source: WrongHole}}, got {other:?}"),
+        }
+    }
+
+    /// The other three checkout refusals `from_checkout` folds into
+    /// `SessionMismatch` (`NotSuspended`/`NoSession`/`Terminal`) also survive
+    /// as their own structured `CheckoutError` variant, not a shared string.
+    #[test]
+    fn from_checkout_preserves_not_suspended_and_terminal_variants() {
+        let node = NodeId(8);
+        let session = SessionId(2);
+
+        match HarnessError::from_checkout(node, CheckoutError::NotSuspended(session)) {
+            HarnessError::SessionMismatch {
+                source: CheckoutError::NotSuspended(got_session),
+                ..
+            } => assert_eq!(got_session, session),
+            other => panic!("expected SessionMismatch{{source: NotSuspended}}, got {other:?}"),
+        }
+
+        let terminal = CheckoutError::Terminal {
+            session,
+            label: "wedged (a turn timed out)".to_string(),
+        };
+        match HarnessError::from_checkout(node, terminal) {
+            HarnessError::SessionMismatch {
+                source:
+                    CheckoutError::Terminal {
+                        session: got_session,
+                        label,
+                    },
+                ..
+            } => {
+                assert_eq!(got_session, session);
+                assert_eq!(label, "wedged (a turn timed out)");
+            }
+            other => panic!("expected SessionMismatch{{source: Terminal}}, got {other:?}"),
+        }
     }
 
     // ---- render_compile_error / error coordinates -------------------------
