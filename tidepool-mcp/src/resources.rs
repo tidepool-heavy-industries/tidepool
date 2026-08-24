@@ -657,10 +657,12 @@ fn capabilities_md(ctx: &ResourceCtx) -> String {
          (Tidepool.Table), and P. (base Prelude) qualifiers are always in scope.\n\n",
     );
     s.push_str(
-        "## Partial functions — use the total form\n\
-         `head`, `tail`, `last`, `init`, `(!!)`, `foldr1`, `foldl1`, `fromJust` are in scope but \
-         each carries an Unsatisfiable constraint — calling one is a compile error naming its \
-         replacement:\n\
+        "## Partial functions — allowed, with normal base semantics\n\
+         `head`, `tail`, `last`, `init`, `(!!)`, `foldr1`, `foldl1`, `fromJust` are in scope and run \
+         with ordinary base semantics: they throw on an empty list / out-of-range index / `Nothing`, \
+         which fails the eval block with the standard GHC runtime message (e.g. \
+         `Prelude.head: empty list`, `Prelude.!!: index too large`) — a runtime failure, not a \
+         compile error. For control flow, the total forms are usually the better fit:\n\
          - `head` \u{2192} `headMay`\n\
          - `tail` \u{2192} `tailMay`\n\
          - `last` \u{2192} `lastMay`\n\
