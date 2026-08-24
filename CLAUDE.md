@@ -110,7 +110,7 @@ tidepool/
 ├── tidepool-harness/      ← Resident harness: session-tree turn lifecycle, SessionRegistry checkout ownership, selfharness driver  [CLAUDE.md]
 ├── tidepool-worktree/     ← Managed worktrees, durable registry, typed repository events (PRD 19)  [CLAUDE.md]
 ├── tidepool-web/          ← Web operator GUI: AskUser form rendering + the operator gate  [CLAUDE.md]
-├── tidepool-testing/      ← Test utilities + property-based generators (internal)
+├── tidepool-testing/      ← Test utilities + property-based generators (internal)  [CLAUDE.md]
 ├── examples/{guess,tide}/ ← Demos: number-guessing game, REPL  [CLAUDE.md]
 ├── harness-dogfooding/    ← Authored harnesses (companion, recursive-companion, dev-tree) run by the selfharness driver
 ├── haskell/               ← Haskell harness (tidepool-extract) + test suite + stdlib  [CLAUDE.md]
