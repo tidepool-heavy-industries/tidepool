@@ -2006,6 +2006,19 @@ impl Harness {
         let scope = self.node_scope(node);
         let mut index = 0usize;
         let mut last_outcome: Option<engine::TurnOutcome> = None;
+        // Every binder name any decl run in THIS block commits, in order —
+        // reported back to the model in the eventual failure message (see
+        // `engine::decl_salvage_note`) so a corrective never leaves it
+        // guessing whether a declaration it wrote survived. Populated
+        // whether or not the block ultimately fails; unused when it doesn't.
+        let mut kept_decls: Vec<String> = Vec::new();
+        // The FIRST compile-class failure this block hits, if any. Once set,
+        // the walk below stops RUNNING anything further (a bind/expr item
+        // past a failure never executes — nothing computed it against) but
+        // keeps SCANNING for more declaration runs to salvage: any item in
+        // the block that is individually a valid declaration commits to the
+        // decl plane in order, regardless of where some other item failed.
+        let mut pending_failure: Option<HarnessError> = None;
 
         while index < items.len() {
             if verdicts[index].kind == TurnKind::Decl {
@@ -2032,9 +2045,21 @@ impl Harness {
                     // Same COMPILE-class treatment `run_block`'s single-item
                     // decl path gives a failed decl validation — the
                     // corrective-retry loop feeds it back as another round.
-                    Err(e) => return Err(HarnessError::Compile(e.to_string())),
+                    // An invalid decl is rejected on its OWN diagnostic, never
+                    // salvaged — but the walk still continues past it so a
+                    // LATER, independently valid declaration is not
+                    // sacrificed to this one's mistake.
+                    Err(e) => {
+                        if pending_failure.is_none() {
+                            pending_failure = Some(HarnessError::Compile(e.to_string()));
+                        }
+                        continue;
+                    }
                 };
-                if index == items.len() {
+                for v in &verdicts[start..index] {
+                    kept_decls.extend(v.binders.iter().cloned());
+                }
+                if pending_failure.is_none() && index == items.len() {
                     if start == 0 {
                         // The WHOLE block was declarations — no earlier item
                         // in THIS round ran anything else. This is exactly a
@@ -2082,9 +2107,18 @@ impl Harness {
                                earlier in the block, or follow it with the expression \
                                that uses it."
                         .to_string();
-                    return Err(HarnessError::Compile(msg));
+                    pending_failure = Some(HarnessError::Compile(msg));
+                    continue;
                 }
                 last_outcome = Some(engine::TurnOutcome::Completed { rendered });
+                continue;
+            }
+
+            if pending_failure.is_some() {
+                // A real failure already happened earlier in this block —
+                // nothing computed this item against, so it must not run.
+                // Keep walking: a declaration further on is still salvaged.
+                index += 1;
                 continue;
             }
 
@@ -2140,15 +2174,29 @@ impl Harness {
                 run_turn(req)
             })
             .await
-            .map_err(|e| HarnessError::Resident(format!("turn compile task join: {e}")))?
-            .map_err(|e| {
-                HarnessError::Compile(render_compile_error(
-                    &e,
-                    &item_text,
-                    &expr_source,
-                    &ctx.bind_source,
-                ))
-            })?;
+            .map_err(|e| HarnessError::Resident(format!("turn compile task join: {e}")))?;
+            let outcome = match outcome {
+                Ok(o) => o,
+                // A genuine compile failure on this item — the same
+                // COMPILE-class treatment `run_block`'s single-item path
+                // gives it, except this walk does not stop here: it keeps
+                // scanning the rest of the block for declaration runs to
+                // salvage (the `pending_failure.is_some()` guard above skips
+                // running anything further, but a later decl item is still
+                // individually valid and still committed).
+                Err(e) => {
+                    if pending_failure.is_none() {
+                        pending_failure = Some(HarnessError::Compile(render_compile_error(
+                            &e,
+                            &item_text,
+                            &expr_source,
+                            &ctx.bind_source,
+                        )));
+                    }
+                    index += 1;
+                    continue;
+                }
+            };
 
             // Only the block's LAST item may finalize the node — an
             // intermediate bind/expr item completes its own step but must
@@ -2244,15 +2292,33 @@ impl Harness {
             index += 1;
         }
 
-        // The loop above always sets `last_outcome` on every iteration
-        // (decl-run or singleton) before advancing `index`, and the
-        // trailing-decl precheck guarantees the FINAL segment is a
-        // singleton — so a normal loop exit always has one. A `None` here
-        // would mean `items` was empty, which `run_block`'s `> 1` guard
-        // already rules out.
+        // A failure anywhere in the block (a decl's own invalid compile, a
+        // trailing-decl block, or a bind/expr item that failed to compile)
+        // ends the round the same COMPILE-class way `run_block`'s
+        // single-item path always has — but by now every individually valid
+        // declaration in the block, wherever it sat relative to the
+        // failure, is already committed to the decl plane. The corrective
+        // says so by name rather than leaving the model to guess whether a
+        // declaration it wrote survived.
+        if let Some(err) = pending_failure {
+            return Err(match err {
+                HarnessError::Compile(msg) => HarnessError::Compile(format!(
+                    "{}{msg}",
+                    engine::decl_salvage_note(&kept_decls)
+                )),
+                other => other,
+            });
+        }
+
+        // The loop above always sets `last_outcome` on every iteration that
+        // did not hit a failure (decl-run or singleton) before advancing
+        // `index`, and the trailing-decl precheck guarantees the FINAL
+        // segment is a singleton — so a normal loop exit with no pending
+        // failure always has one. A `None` here would mean `items` was
+        // empty, which `run_block`'s `> 1` guard already rules out.
         #[allow(
             clippy::expect_used,
-            reason = "run_multi_item_block: the loop always sets last_outcome"
+            reason = "run_multi_item_block: the loop always sets last_outcome when nothing failed"
         )]
         Ok(last_outcome.expect("run_multi_item_block: the loop always sets last_outcome"))
     }

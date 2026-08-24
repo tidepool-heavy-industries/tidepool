@@ -519,6 +519,218 @@ async fn multi_item_block_ending_in_decl_retries_and_survives() {
     );
 }
 
+/// Decl-salvage shape 1: a valid declaration runs BEFORE the item that fails
+/// — the decl commits (via `define_scoped_in`) before the failing item is
+/// ever compiled, so this already worked; what this pins is the ADDITIONAL
+/// contract that the corrective must say so BY NAME, not just leave the
+/// declaration silently alive. See `tidepool-harness/CLAUDE.md`'s "a
+/// decl-ending block persists before it nudges" and the operator ruling in
+/// `plans/` motivating this file's salvage note (`engine::decl_salvage_note`).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn multi_item_block_decl_before_failing_item_is_named_kept() {
+    support::require_extract();
+
+    let dir = tempfile::tempdir().unwrap();
+    let log_path = dir.path().join("multi_item_decl_before_failure.jsonl");
+    let writer = LogWriter::create(&log_path, &header()).unwrap();
+
+    let cfg = EngineConfig::standard(prelude_dir(), None).expect("engine config");
+    let replies = vec![
+        // Item 1 declares `helperOne`; item 2 fails to compile. The decl run
+        // commits before item 2 is ever reached.
+        reply(
+            "```haskell\nhelperOne :: Int\nhelperOne = 11\n\n\
+             pure (toJSON (thisNameDoesNotExist))\n```",
+        ),
+        // The corrective retry uses the surviving declaration.
+        reply("```haskell\npure (toJSON helperOne)\n```"),
+    ];
+    let provider: Arc<dyn DynModelProvider> = Arc::new(ReplayProvider::new(replies));
+    let harness = Arc::new(Harness::new(writer, cfg, provider).expect("harness boots"));
+
+    let root = harness
+        .create_root(
+            "decl-before-failure root",
+            "Declare, then a later item fails; the decl must persist and be named.",
+        )
+        .unwrap();
+    harness.force(root, Actor::Operator).unwrap();
+
+    let turn = harness
+        .run_to_hole_or_done(root)
+        .await
+        .expect("corrective retry drives to completion");
+    match &turn {
+        TurnOutcome::Completed { rendered } => {
+            assert!(
+                rendered.contains("11"),
+                "the corrective retry must resolve `helperOne`, declared in the \
+                 failed round, got: {rendered}"
+            );
+        }
+        other => panic!("expected Completed, got {}", outcome_tag(other)),
+    }
+
+    let (_hdr, events) = LogReader::open(&log_path).unwrap();
+    let corrective = events
+        .filter_map(|e| match e.expect("readable log record").event {
+            Event::TurnDelta {
+                role: tidepool_harness::provider::Role::User,
+                content,
+                ..
+            } => Some(content),
+            _ => None,
+        })
+        .find(|c| c.contains("thisNameDoesNotExist"))
+        .expect("a corrective user turn carries item 2's GHC error verbatim");
+    assert!(
+        corrective.contains("Declarations kept from this block")
+            && corrective.contains("helperOne"),
+        "the corrective must name `helperOne` as kept, got: {corrective}"
+    );
+}
+
+/// Decl-salvage shape 2 (the fix): a valid declaration sits AFTER the item
+/// that fails. Before this fix, `run_multi_item_block`'s singleton path
+/// returned on the first compile error without ever visiting later items —
+/// so the declaration was silently dropped and a later round referencing it
+/// died on "Not in scope". Now the walk continues scanning (without running
+/// anything further) so the still-valid declaration commits.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn multi_item_block_salvages_decl_after_earlier_item_fails() {
+    support::require_extract();
+
+    let dir = tempfile::tempdir().unwrap();
+    let log_path = dir.path().join("multi_item_decl_after_failure.jsonl");
+    let writer = LogWriter::create(&log_path, &header()).unwrap();
+
+    let cfg = EngineConfig::standard(prelude_dir(), None).expect("engine config");
+    let replies = vec![
+        // Item 1 fails to compile; item 2 (a valid declaration) must still
+        // be committed to the decl plane.
+        reply(
+            "```haskell\npure (toJSON (thisNameDoesNotExist))\n\n\
+             helperTwo :: Int\nhelperTwo = 22\n```",
+        ),
+        // The corrective retry uses the salvaged declaration.
+        reply("```haskell\npure (toJSON helperTwo)\n```"),
+    ];
+    let provider: Arc<dyn DynModelProvider> = Arc::new(ReplayProvider::new(replies));
+    let harness = Arc::new(Harness::new(writer, cfg, provider).expect("harness boots"));
+
+    let root = harness
+        .create_root(
+            "decl-after-failure root",
+            "An earlier item fails; a later declaration must still be salvaged.",
+        )
+        .unwrap();
+    harness.force(root, Actor::Operator).unwrap();
+
+    let turn = harness
+        .run_to_hole_or_done(root)
+        .await
+        .expect("corrective retry drives to completion");
+    match &turn {
+        TurnOutcome::Completed { rendered } => {
+            assert!(
+                rendered.contains("22"),
+                "the corrective retry must resolve `helperTwo`, salvaged from the \
+                 failed round despite the earlier item's failure, got: {rendered}"
+            );
+        }
+        other => panic!("expected Completed, got {}", outcome_tag(other)),
+    }
+
+    let (_hdr, events) = LogReader::open(&log_path).unwrap();
+    let corrective = events
+        .filter_map(|e| match e.expect("readable log record").event {
+            Event::TurnDelta {
+                role: tidepool_harness::provider::Role::User,
+                content,
+                ..
+            } => Some(content),
+            _ => None,
+        })
+        .find(|c| c.contains("thisNameDoesNotExist"))
+        .expect("a corrective user turn carries item 1's GHC error verbatim");
+    assert!(
+        corrective.contains("Declarations kept from this block")
+            && corrective.contains("helperTwo"),
+        "the corrective must name `helperTwo` as kept despite sitting after the \
+         failed item, got: {corrective}"
+    );
+}
+
+/// Decl-salvage shape 3: the round-2 live-dogfood shape (2026-08-24 —
+/// `dogfood-iso/verification-report.md`). A model bundles a `data` decl with
+/// value-level helpers and a use of the type in ONE block; the use fails to
+/// compile. The declaration (and the value binders riding with it in the
+/// same run) must survive so a later round naming the type does not die on
+/// "Not in scope".
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn multi_item_block_decl_then_failing_typed_use_persists_decl() {
+    support::require_extract();
+
+    let dir = tempfile::tempdir().unwrap();
+    let log_path = dir.path().join("multi_item_decl_typed_use_failure.jsonl");
+    let writer = LogWriter::create(&log_path, &header()).unwrap();
+
+    let cfg = EngineConfig::standard(prelude_dir(), None).expect("engine config");
+    let replies = vec![
+        // Item 1 declares a type and a helper over it; item 2 misuses the
+        // type (no `Num Track` instance) and fails to compile.
+        reply(
+            "```haskell\ndata Track = TrackA | TrackB\n\n\
+             trackTag :: Track -> Int\ntrackTag TrackA = 1\ntrackTag TrackB = 2\n\n\
+             pure (toJSON (TrackA + 1))\n```",
+        ),
+        // The corrective retry uses the surviving type AND helper.
+        reply("```haskell\npure (toJSON (trackTag TrackA))\n```"),
+    ];
+    let provider: Arc<dyn DynModelProvider> = Arc::new(ReplayProvider::new(replies));
+    let harness = Arc::new(Harness::new(writer, cfg, provider).expect("harness boots"));
+
+    let root = harness
+        .create_root(
+            "decl-then-typed-use-failure root",
+            "A decl and a failing use of it are bundled in one block.",
+        )
+        .unwrap();
+    harness.force(root, Actor::Operator).unwrap();
+
+    let turn = harness
+        .run_to_hole_or_done(root)
+        .await
+        .expect("corrective retry drives to completion");
+    match &turn {
+        TurnOutcome::Completed { rendered } => {
+            assert!(
+                rendered.contains('1'),
+                "the corrective retry must resolve `trackTag TrackA`, both declared \
+                 in the failed round, got: {rendered}"
+            );
+        }
+        other => panic!("expected Completed, got {}", outcome_tag(other)),
+    }
+
+    let (_hdr, events) = LogReader::open(&log_path).unwrap();
+    let corrective = events
+        .filter_map(|e| match e.expect("readable log record").event {
+            Event::TurnDelta {
+                role: tidepool_harness::provider::Role::User,
+                content,
+                ..
+            } => Some(content),
+            _ => None,
+        })
+        .find(|c| c.contains("did not compile"))
+        .expect("a corrective user turn carries item 2's GHC error verbatim");
+    assert!(
+        corrective.contains("Declarations kept from this block") && corrective.contains("trackTag"),
+        "the corrective must name `trackTag` as kept, got: {corrective}"
+    );
+}
+
 fn outcome_tag(o: &TurnOutcome) -> &'static str {
     match o {
         TurnOutcome::Completed { .. } => "Completed",

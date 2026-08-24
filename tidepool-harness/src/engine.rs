@@ -1211,6 +1211,36 @@ pub fn sequence_failure_context(receipts: &[String], n: usize, total: usize, ghc
     )
 }
 
+/// The item-level sibling of [`sequence_failure_context`]'s "blocks that
+/// already ran persist" framing: prepended to a multi-item block's failure so
+/// the model is told, by name, which declarations from THIS block survived
+/// the failure — every individually-valid declaration in the block commits
+/// to the decl plane in order regardless of where some other item in the
+/// same block failed (`Harness::run_multi_item_block`'s salvage walk), so the
+/// corrective must say so rather than let the model assume the whole block
+/// was lost. Placed BEFORE the GHC error (like `sequence_failure_context`'s
+/// own "blocks that already ran persist" precedes its `{ghc}`) rather than
+/// after it: `truncate_ghc_error` caps the corrective at a fixed character
+/// budget from the front, so a note appended after a long diagnostic could be
+/// silently cut. Empty when nothing was kept — a caller prepends this
+/// directly to the compile error text.
+pub fn decl_salvage_note(kept: &[String]) -> String {
+    if kept.is_empty() {
+        return String::new();
+    }
+    let mut seen = std::collections::HashSet::new();
+    let names: Vec<&str> = kept
+        .iter()
+        .filter(|n| seen.insert(n.as_str()))
+        .map(String::as_str)
+        .collect();
+    format!(
+        "Declarations kept from this block (already committed to the decl \
+         plane; visible in your next round): {}.\n\n",
+        names.join(", ")
+    )
+}
+
 /// Split a model-written block into (imports, expression). A model sometimes
 /// puts `import Foo` lines at the top of its ```haskell block; those are NOT
 /// legal inside the templated `M a` EXPRESSION position, so they are peeled off
