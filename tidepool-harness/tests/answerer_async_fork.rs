@@ -8,11 +8,15 @@
 //! record-replay, zero live calls — the same discipline as
 //! `selfharness_spine.rs`.
 //!
-//! The ReplayProvider queue is itself a behavior pin in both tests: the
-//! composition test's queue only works if BOTH children are driven (in
-//! spawn order) after the one spawning block; the budget test's queue has
-//! NO second-child reply, so a refusal that failed to refuse would consume
-//! the recovery finalize as the second child's turn and fail loudly.
+//! The ReplayProvider queue is itself a behavior pin throughout: the budget
+//! test's queue has NO second-child reply, so a refusal that failed to
+//! refuse would consume the recovery finalize as the second child's turn and
+//! fail loudly. Fork children now overlap (the green scheduler drives every
+//! currently fork-ready thread CONCURRENTLY, not one at a time), so a
+//! scenario driving more than one child at once keys its queue by CONTENT
+//! (`ReplayProvider::new_keyed`, via this file's `build_driver_keyed`/
+//! `keyed`/`unkeyed`) instead of relying on arrival order — see
+//! `tidepool-harness/src/replay.rs`'s module doc.
 //!
 //! Also carries the fork child's operator-GUI/tree lifecycle pin (folded in
 //! from the retired `fork_child_gui.rs`, test-architecture review W1,
@@ -30,10 +34,11 @@ use serde_json::json;
 use tidepool_harness::engine::EngineConfig;
 use tidepool_harness::log::LogHeader;
 use tidepool_harness::provider::{DynModelProvider, Usage};
-use tidepool_harness::replay::{RecordedReply, ReplayProvider};
+use tidepool_harness::replay::{fold_tree_state, RecordedReply, ReplayProvider};
 use tidepool_harness::selfharness::operator::{FormShape, OperatorGate};
 use tidepool_harness::{
-    load_harness_source, typed_request_agent_decls, Harness, LogObserver, SelfHarnessDriver,
+    load_harness_source, typed_request_agent_decls, Harness, LogObserver, NodeState,
+    SelfHarnessDriver,
 };
 
 fn repo_root() -> std::path::PathBuf {
@@ -94,8 +99,8 @@ fn finalize_int_reply(n: i64) -> RecordedReply {
     ))
 }
 
-fn build_driver(
-    replies: Vec<RecordedReply>,
+fn build_driver_with_provider(
+    provider: Arc<dyn DynModelProvider>,
     label: &str,
 ) -> (SelfHarnessDriver, Arc<Harness>, std::path::PathBuf) {
     let agent_cfg = EngineConfig::from_decls(
@@ -104,7 +109,6 @@ fn build_driver(
         Some(examples_harness_dir()),
     )
     .expect("answerer engine config");
-    let provider: Arc<dyn DynModelProvider> = Arc::new(ReplayProvider::new(replies));
     let log_path = std::env::temp_dir().join(format!("{label}-{}.jsonl", std::process::id()));
     let writer =
         tidepool_harness::log::LogWriter::create(&log_path, &header()).expect("log writer");
@@ -114,6 +118,51 @@ fn build_driver(
         agent,
         log_path,
     )
+}
+
+fn build_driver(
+    replies: Vec<RecordedReply>,
+    label: &str,
+) -> (SelfHarnessDriver, Arc<Harness>, std::path::PathBuf) {
+    build_driver_with_provider(Arc::new(ReplayProvider::new(replies)), label)
+}
+
+/// Like [`build_driver`], but the queue is CONTENT-keyed
+/// (`ReplayProvider::new_keyed`) rather than plain FIFO — required for a
+/// scenario where more than one fork child is driven CONCURRENTLY (the
+/// green scheduler now overlaps sibling `async (fork …)` drives), since
+/// their requests reach the mock provider in a nondeterministic order and
+/// queue POSITION no longer says which reply answers which child. Pair a
+/// reply with [`keyed`] (a distinctive needle from the child's own brief) or
+/// [`unkeyed`] (plain FIFO, for a reply nothing concurrent competes with —
+/// the spawning block's own turn, or a recovery round after an abort).
+fn build_driver_keyed(
+    entries: Vec<(Option<String>, RecordedReply)>,
+    label: &str,
+) -> (SelfHarnessDriver, Arc<Harness>, std::path::PathBuf) {
+    build_driver_with_provider(Arc::new(ReplayProvider::new_keyed(entries)), label)
+}
+
+fn keyed(needle: &str, r: RecordedReply) -> (Option<String>, RecordedReply) {
+    (Some(needle.to_string()), r)
+}
+
+fn unkeyed(r: RecordedReply) -> (Option<String>, RecordedReply) {
+    (None, r)
+}
+
+/// A needle matching a fork child's OWN hole card and nothing else. A bare
+/// substring like `"pick a"` is NOT safe on its own: the answerer framing's
+/// auto-imported `Tidepool.Form` doc text carries the unrelated phrase
+/// "`chooseMany` ... — pick a subset" on EVERY turn (this file's first
+/// content-keying pass matched that boilerplate instead of the intended
+/// child, live). `finalize_typed_request_prompt` renders a fork child's
+/// brief as its own blank-line-delimited paragraph
+/// (`"{requester} needs a typed answer...\n\n{prompt}\n\n{row}..."`), which
+/// this pins to instead — distinctive enough that only the ONE child whose
+/// brief this is can ever match it.
+fn card_needle(brief: &str) -> String {
+    format!("\n\n{brief}\n\n")
 }
 
 /// Every logged turn's text (user + assistant), for asserting a specific
@@ -136,24 +185,29 @@ fn logged_turn_texts(log_path: &std::path::Path) -> Vec<String> {
 /// The composed idiom end to end: `async (fork @Int …)` twice, `wait` twice,
 /// finalize from both results — one block, one round. The scheduler must
 /// spawn BOTH children from the one block (both briefs captured before
-/// either child runs a turn), drive them in spawn order against the shared
-/// machine, deliver each typed result to the RIGHT handle, and let the
-/// window finalize with the combination: action = "12" (1×10 + 2), never
-/// "21" (swapped) or a starved/hung scheduler.
+/// either child runs a turn), drive them CONCURRENTLY against the shared
+/// machine (overlap — this is the acceptance case for genuine concurrency,
+/// pinned separately by `async_fork_overlap_two_children_drive_concurrently`
+/// below), deliver each typed result to the RIGHT handle regardless of which
+/// finished first, and let the window finalize with the combination: action
+/// = "12" (1×10 + 2), never "21" (swapped) or a starved/hung scheduler.
+/// Content-keyed (`build_driver_keyed`): now that both children are driven
+/// concurrently, their requests reach the mock provider in a nondeterministic
+/// order, so each child's reply is matched by its own brief text rather than
+/// queue position.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn async_fork_composition_two_children_typed_results_cross() {
     support::require_extract();
     let _cache_guard = support::isolate_cache();
 
-    let replies = vec![
-        // 1. The answerer's single spawning block.
-        reply(ASYNC_FORK_BLOCK),
-        // 2. Fork child A ("pick a") — driven first (spawn order).
-        finalize_int_reply(1),
-        // 3. Fork child B ("pick b").
-        finalize_int_reply(2),
+    let entries = vec![
+        // 1. The answerer's single spawning block — nothing concurrent
+        //    competes with this request (no fork child exists yet).
+        unkeyed(reply(ASYNC_FORK_BLOCK)),
+        keyed(&card_needle("pick a"), finalize_int_reply(1)),
+        keyed(&card_needle("pick b"), finalize_int_reply(2)),
     ];
-    let (mut driver, _agent, _log_path) = build_driver(replies, "answerer-async-fork");
+    let (mut driver, _agent, _log_path) = build_driver_keyed(entries, "answerer-async-fork");
     let source = load_harness_source(&examples_harness_dir().join("Harness.hs"))
         .expect("reference harness source loads");
 
@@ -172,6 +226,61 @@ async fn async_fork_composition_two_children_typed_results_cross() {
         Some("12"),
         "each child's typed Int must land on the RIGHT handle (1×10 + 2 = 12; a \
          swapped delivery reads 21), got {decision:?}"
+    );
+}
+
+/// The overlap acceptance case: the green scheduler must genuinely OVERLAP a
+/// two-child fork batch, not drive them one at a time with the latency of
+/// two sequential turns — the whole point of this change. A replayed reply
+/// resolves with no real `.await` point of its own, so two concurrent
+/// children would never actually overlap IN THIS TEST unless the mock gives
+/// them something to overlap ON — `ReplayProvider::with_hold` holds every
+/// `complete` call open briefly for exactly that reason (see its doc);
+/// `max_concurrent() > 1` is the receipt that both children's provider calls
+/// were in flight at the same time, not that the answer merely came out
+/// right (`async_fork_composition_two_children_typed_results_cross` already
+/// pins correctness — this test pins the LATENCY property on top of it).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn async_fork_overlap_two_children_drive_concurrently() {
+    support::require_extract();
+    let _cache_guard = support::isolate_cache();
+
+    let entries = vec![
+        unkeyed(reply(ASYNC_FORK_BLOCK)),
+        keyed(&card_needle("pick a"), finalize_int_reply(1)),
+        keyed(&card_needle("pick b"), finalize_int_reply(2)),
+    ];
+    let replay = Arc::new(
+        ReplayProvider::new_keyed(entries).with_hold(std::time::Duration::from_millis(150)),
+    );
+    let (mut driver, _agent, _log_path) =
+        build_driver_with_provider(replay.clone(), "answerer-async-overlap");
+    let source = load_harness_source(&examples_harness_dir().join("Harness.hs"))
+        .expect("reference harness source loads");
+
+    let outcome = driver
+        .run_one_loop_iteration(&source, None)
+        .await
+        .expect("two async forks overlap and finalize");
+
+    assert!(
+        replay.max_concurrent() > 1,
+        "both fork children's `complete` calls must have been in flight at the same \
+         time (max_concurrent() == {}) — a scheduler that still drives them one at a \
+         time would never exceed 1",
+        replay.max_concurrent()
+    );
+
+    let decision = outcome
+        .state_json
+        .get("lastDecision")
+        .and_then(|v| v.as_object())
+        .expect("lastDecision must be a Just Decision, not null");
+    assert_eq!(
+        decision.get("action").and_then(|v| v.as_str()),
+        Some("12"),
+        "results must still deliver to the RIGHT waits under overlap (1×10 + 2 = 12; \
+         a swapped delivery reads 21), got {decision:?}"
     );
 }
 
@@ -194,18 +303,21 @@ async fn two_waves_of_fork_fold_fork_carry_results_across_waves() {
     support::require_extract();
     let _cache_guard = support::isolate_cache();
 
-    let replies = vec![
+    let entries = vec![
         // 1. The two-wave block.
-        reply(TWO_WAVE_BLOCK),
-        // 2-3. Wave 1's children, in spawn order.
-        finalize_int_reply(1),
-        finalize_int_reply(2),
+        unkeyed(reply(TWO_WAVE_BLOCK)),
+        // 2-3. Wave 1's children — driven CONCURRENTLY, so content-keyed
+        //    rather than spawn-order.
+        keyed(&card_needle("pick a"), finalize_int_reply(1)),
+        keyed(&card_needle("pick b"), finalize_int_reply(2)),
         // 4. Wave 2's one child: a STATIC 10 — the final "13" is only
         //    reachable through the parent's own `c + s`, so it proves the
-        //    wave-1 fold (s = 3) survived into the code after wave 2.
-        finalize_int_reply(10),
+        //    wave-1 fold (s = 3) survived into the code after wave 2. Wave
+        //    2 spawns only one child (nothing concurrent to compete with),
+        //    so FIFO is still correct here.
+        unkeyed(finalize_int_reply(10)),
     ];
-    let (mut driver, _agent, log_path) = build_driver(replies, "answerer-async-waves");
+    let (mut driver, _agent, log_path) = build_driver_keyed(entries, "answerer-async-waves");
     let source = load_harness_source(&examples_harness_dir().join("Harness.hs"))
         .expect("reference harness source loads");
 
@@ -526,17 +638,21 @@ async fn settled_threads_leave_the_machine_quiescent_for_rotation() {
     // `machine_rotation_between_cycles_preserves_durable_state`.
     std::env::set_var("TIDEPOOL_MACHINE_FRAGMENT_CEILING", "1");
 
-    let replies = vec![
-        // Cycle 1: spawn two async forks, wait both, finalize.
-        reply(ASYNC_FORK_BLOCK),
-        finalize_int_reply(1),
-        finalize_int_reply(2),
-        // Cycle 2, post-rotation: the same composition again.
-        reply(ASYNC_FORK_BLOCK),
-        finalize_int_reply(3),
-        finalize_int_reply(4),
+    let entries = vec![
+        // Cycle 1: spawn two async forks (driven concurrently — content-keyed),
+        // wait both, finalize.
+        unkeyed(reply(ASYNC_FORK_BLOCK)),
+        keyed(&card_needle("pick a"), finalize_int_reply(1)),
+        keyed(&card_needle("pick b"), finalize_int_reply(2)),
+        // Cycle 2, post-rotation: the same composition again. Cycle 1's
+        // needled entries are already consumed by the time cycle 2 spawns,
+        // so reusing the same needle text is unambiguous.
+        unkeyed(reply(ASYNC_FORK_BLOCK)),
+        keyed(&card_needle("pick a"), finalize_int_reply(3)),
+        keyed(&card_needle("pick b"), finalize_int_reply(4)),
     ];
-    let (mut driver, _agent, _log_path) = build_driver(replies, "answerer-async-fork-quiescent");
+    let (mut driver, _agent, _log_path) =
+        build_driver_keyed(entries, "answerer-async-fork-quiescent");
     let source = load_harness_source(&examples_harness_dir().join("Harness.hs"))
         .expect("reference harness source loads");
 
@@ -624,28 +740,35 @@ async fn async_fork_child_round_exhaustion_aborts_block_with_corrective_and_run_
     let _cache_guard = support::isolate_cache();
 
     let starved = || reply("Still weighing this branch; nothing to run yet.");
-    let replies = vec![
+    // Child A and child B are now driven CONCURRENTLY (this test IS the
+    // failed-child + surviving-sibling overlap case), so A's own reply is
+    // content-keyed — otherwise one of B's un-keyed "starved" requests could
+    // race ahead and consume it by queue position. B's three "starved"
+    // replies and the recovery round stay unkeyed: nothing else ever
+    // requests text matching them, so plain FIFO-among-unkeyed-entries
+    // (`ReplayProvider`'s fallback) still resolves them correctly.
+    let entries = vec![
         // 1. The same two-async-fork spawning block as the composition test.
-        reply(ASYNC_FORK_BLOCK),
+        unkeyed(reply(ASYNC_FORK_BLOCK)),
         // 2. Fork child A ("pick a") — answers normally in its one round.
-        finalize_int_reply(1),
+        keyed(&card_needle("pick a"), finalize_int_reply(1)),
         // 3-5. Fork child B ("pick b") — three prose-only replies with no
         //    ```haskell block, burning its (lowered) round budget: cap 1 +
         //    2 ultimatum-grace rounds = 3 (`drive_agent_session_to_finalize`'s
         //    `hard_rounds = max_rounds + 2`).
-        starved(),
-        starved(),
-        starved(),
+        unkeyed(starved()),
+        unkeyed(starved()),
+        unkeyed(starved()),
         // 6. The recovery round after the corrective aborts the spawning
         //    block: finalize plainly, same shape the budget-refusal tests
         //    use for their own recovery round.
-        reply(
+        unkeyed(reply(
             "```haskell\nimport HarnessTypes (Decision (..), Confidence (..))\n\n\
              (finalize @Decision (Decision { action = \"gave-up\", rationale = \"fork \
              child failed\", confidence = Medium }) :: M ())\n```",
-        ),
+        )),
     ];
-    let (mut driver, _agent, log_path) = build_driver(replies, "answerer-async-starved");
+    let (mut driver, _agent, log_path) = build_driver_keyed(entries, "answerer-async-starved");
     // Lower the shared round cap so the starved child hits round exhaustion
     // in 3 scripted replies instead of 34 — this also caps the parent's and
     // child A's own budgets, but both finalize inside their first round
@@ -678,10 +801,17 @@ async fn async_fork_child_round_exhaustion_aborts_block_with_corrective_and_run_
     // No leaked Running node: BOTH fork children's own GUI entries retire
     // (unconditional in `drive_fork_child_agent_session`, before it branches on
     // outcome) — the starved one reported failed, the settled sibling not.
+    // Retirement ORDER is not pinned: the two children are driven
+    // CONCURRENTLY, and "pick b" only needs prose (no compile) for its three
+    // starved rounds while "pick a" pays one real compile to finalize, so
+    // either can genuinely retire first — the receipt is that BOTH labels
+    // retired, exactly once each.
+    let mut retired = probe.retired.lock().unwrap().clone();
+    retired.sort();
     assert_eq!(
-        probe.retired.lock().unwrap().as_slice(),
+        retired,
         ["root/f0-pick-a".to_string(), "root/f1-pick-b".to_string()],
-        "both fork children's derived labels must retire, in spawn order — a leaked \
+        "both fork children's derived labels must retire, exactly once each — a leaked \
          Running node would be a label never appearing here"
     );
     let failed = probe.failed.lock().unwrap();
@@ -749,26 +879,33 @@ async fn fork_child_failure_abort_still_leaves_machine_quiescent_for_rotation() 
     std::env::set_var("TIDEPOOL_MACHINE_FRAGMENT_CEILING", "1");
 
     let starved = || reply("Still weighing this branch; nothing to run yet.");
-    let replies = vec![
+    // Cycle 1 overlaps a successful child with a starving one (content-keyed
+    // for the same reason as `async_fork_child_round_exhaustion_aborts_block_with_corrective_and_run_survives`);
+    // cycle 2 overlaps two successful children (same as `settled_threads_leave_the_machine_quiescent_for_rotation`).
+    // Cycle 2 reuses the SAME brief text ("pick a"/"pick b") as cycle 1, so
+    // its keyed replies must not enter the queue until cycle 1 is done:
+    // cycle 1's "pick b" is intentionally UNKEYED (it must starve, not
+    // succeed), and an unkeyed request still matches ANY needle already in
+    // the queue first — if cycle 2's "pick b" reply were queued upfront,
+    // cycle 1's starving "pick b" would match it and wrongly succeed
+    // (observed live). `ReplayProvider::extend_keyed` stages cycle 2's
+    // entries in only after cycle 1 finishes.
+    let replay = Arc::new(ReplayProvider::new_keyed(vec![
         // Cycle 1: two async forks, "pick a" answers, "pick b" starves and
         // aborts the block; the recovery round finalizes plainly.
-        reply(ASYNC_FORK_BLOCK),
-        finalize_int_reply(1),
-        starved(),
-        starved(),
-        starved(),
-        reply(
+        unkeyed(reply(ASYNC_FORK_BLOCK)),
+        keyed(&card_needle("pick a"), finalize_int_reply(1)),
+        unkeyed(starved()),
+        unkeyed(starved()),
+        unkeyed(starved()),
+        unkeyed(reply(
             "```haskell\nimport HarnessTypes (Decision (..), Confidence (..))\n\n\
              (finalize @Decision (Decision { action = \"gave-up\", rationale = \"fork \
              child failed\", confidence = Medium }) :: M ())\n```",
-        ),
-        // Cycle 2, post-rotation: the ordinary composition succeeds cleanly.
-        reply(ASYNC_FORK_BLOCK),
-        finalize_int_reply(3),
-        finalize_int_reply(4),
-    ];
+        )),
+    ]));
     let (mut driver, _agent, _log_path) =
-        build_driver(replies, "answerer-async-fork-failure-quiescent");
+        build_driver_with_provider(replay.clone(), "answerer-async-fork-failure-quiescent");
     driver.set_answerer_round_caps(0, 1);
     let source = load_harness_source(&examples_harness_dir().join("Harness.hs"))
         .expect("reference harness source loads");
@@ -786,6 +923,15 @@ async fn fork_child_failure_abort_still_leaves_machine_quiescent_for_rotation() 
         decision1.get("action").and_then(|v| v.as_str()),
         Some("gave-up")
     );
+
+    // Cycle 2, post-rotation: the ordinary composition succeeds cleanly.
+    // Staged in now — cycle 1 is fully done, so these needles can only ever
+    // match cycle 2's own requests.
+    replay.extend_keyed(vec![
+        unkeyed(reply(ASYNC_FORK_BLOCK)),
+        keyed(&card_needle("pick a"), finalize_int_reply(3)),
+        keyed(&card_needle("pick b"), finalize_int_reply(4)),
+    ]);
 
     let outcome2 = driver
         .run_one_loop_iteration(&source, Some(&outcome1.state_json))
@@ -1035,5 +1181,87 @@ async fn fork_child_asks_route_to_its_own_derived_gate_and_finalizes() {
     assert!(
         probe.failed.lock().unwrap().is_empty(),
         "a fork child that finalizes has no failure to attribute"
+    );
+}
+
+/// Overlapping fork children write their `TurnStart`/`HolePublished`/
+/// `HoleConsumed`/`NodeDone` events into the SAME shared `log-*.jsonl` as
+/// their parent — under real concurrency those writes interleave across
+/// nodes in a way strictly sequential servicing never produced. Two things
+/// must still hold, with NO new log `Event` kind and NO `Checkpoint` change
+/// involved — this exercises the EXISTING vocabulary under overlap, per the
+/// spec's own boundary: (1) the log itself stays well-formed — every line
+/// parses, and folding it (`fold_tree_state`, the same crash-replay path
+/// `two_waves_of_fork_fold_fork_carry_results_across_waves`'s doc names)
+/// still reconstructs BOTH fork children as `NodeState::Done`, not a
+/// corrupted or partial tree; (2) the cycle's checkpoint, committed at the
+/// end of `run_one_loop_iteration`'s success path, survives a FRESH driver's
+/// restore — a genuinely different process picking the run back up sees the
+/// exact finalized state the overlapping cycle produced.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn overlapping_fork_children_journal_replays_clean_through_checkpoint_resume() {
+    support::require_extract();
+    let _cache_guard = support::isolate_cache();
+
+    let entries = vec![
+        unkeyed(reply(ASYNC_FORK_BLOCK)),
+        keyed(&card_needle("pick a"), finalize_int_reply(1)),
+        keyed(&card_needle("pick b"), finalize_int_reply(2)),
+    ];
+    let (mut driver, _agent, log_path) =
+        build_driver_keyed(entries, "answerer-async-journal-replay");
+    let source = load_harness_source(&examples_harness_dir().join("Harness.hs"))
+        .expect("reference harness source loads");
+
+    let outcome = driver
+        .run_one_loop_iteration(&source, None)
+        .await
+        .expect("two overlapping fork children finalize in one cycle");
+    let decision = outcome
+        .state_json
+        .get("lastDecision")
+        .and_then(|v| v.as_object())
+        .expect("lastDecision must be a Just Decision, not null");
+    assert_eq!(decision.get("action").and_then(|v| v.as_str()), Some("12"));
+
+    // (1) The interleaved log is well-formed and folds cleanly: both fork
+    // children reached NodeState::Done — nothing was lost or corrupted by
+    // concurrent writes into the one shared log file.
+    let folded = fold_tree_state(&log_path).expect("interleaved log parses and folds cleanly");
+    let done_count = folded
+        .states
+        .values()
+        .filter(|s| matches!(s, NodeState::Done))
+        .count();
+    assert!(
+        done_count >= 2,
+        "both overlapping fork children must fold to NodeState::Done — got {done_count} \
+         Done node(s) among {:?}",
+        folded.states
+    );
+
+    // (2) A FRESH driver — a genuinely different process picking the run
+    // back up — restores the SAME checkpoint this cycle just committed.
+    // `isolate_cache`'s XDG_CACHE_HOME redirection is still in effect for
+    // this whole test, so `checkpoint_path` resolves to the same place for
+    // both drivers (`support::isolate_cache`'s doc: isolate BEFORE
+    // constructing a driver). This driver never drives a turn, so its own
+    // replay queue is empty — `restore` reads nothing from it.
+    let (mut driver2, _agent2, _log_path2) =
+        build_driver_keyed(Vec::new(), "answerer-async-journal-replay-resume");
+    let restored = driver2
+        .restore(&source)
+        .await
+        .expect("restore reads the checkpoint the overlapping cycle just committed");
+    let restored_state = restored.expect("a checkpoint exists after a completed cycle");
+    let restored_decision = restored_state
+        .get("lastDecision")
+        .and_then(|v| v.as_object())
+        .expect("the restored State carries the overlapping cycle's finalized Decision");
+    assert_eq!(
+        restored_decision.get("action").and_then(|v| v.as_str()),
+        Some("12"),
+        "the fresh driver must restore the EXACT state the overlapping cycle produced, \
+         got {restored_decision:?}"
     );
 }

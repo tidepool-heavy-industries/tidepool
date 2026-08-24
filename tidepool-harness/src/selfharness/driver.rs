@@ -5643,10 +5643,15 @@ impl SelfHarnessDriver {
     /// `Ok(Err(msg))` means one child ended in `InvocationExit` — a plain-
     /// language corrective (already retired at its own node; see
     /// [`Self::drive_fork_child_agent_session`]) — and the caller must abort
-    /// the consuming block with it rather than propagate a `DriverError`;
-    /// remaining briefs in this SAME call are not driven (short-circuit),
-    /// but a sibling that already finished earlier in this loop has already
-    /// finalized and retired independently of this return value.
+    /// the consuming block with it rather than propagate a `DriverError`.
+    /// Every brief in this call is driven CONCURRENTLY, up to
+    /// [`Self::concurrency_cap`] at once, via [`drive_concurrent`] — the ONE
+    /// ordering/concurrency shell [`Self::service_outer_fanout`] already
+    /// rides for the sibling fanout path — so a sibling that already
+    /// finished has already finalized and retired independently of this
+    /// return value regardless of which brief (if any) ends in `Err`; the
+    /// FIRST brief (by DECLARATION order, not completion order) whose result
+    /// is a mechanism error or an `InvocationExit` is what this returns.
     #[allow(clippy::too_many_arguments)]
     async fn drive_fork_children(
         &self,
@@ -5670,27 +5675,41 @@ impl SelfHarnessDriver {
             None => ty,
             Some(_) => ty.and_then(engine::strip_list_type),
         };
-        let mut answers = Vec::with_capacity(briefs.len());
-        for (idx, brief) in briefs.iter().enumerate() {
-            let title = if fan.is_none() {
-                title_single.to_string()
-            } else {
-                format!("{title_fanout_prefix} {idx}")
-            };
-            let value = match self
-                .drive_fork_child_agent_session(
-                    node,
-                    &title,
-                    brief,
-                    element_ty,
-                    site.get(),
-                    table,
-                    fork_depth + 1,
-                    fork_subtree,
-                    ty_label,
-                )
-                .await?
-            {
+        let titles: Vec<String> = if fan.is_none() {
+            vec![title_single.to_string()]
+        } else {
+            (0..briefs.len())
+                .map(|idx| format!("{title_fanout_prefix} {idx}"))
+                .collect()
+        };
+        let cap = self.concurrency_cap;
+        let briefs_ref = &briefs;
+        let titles_ref = &titles;
+        #[allow(clippy::type_complexity)]
+        let results: Vec<(usize, Result<Result<Value, String>, DriverError>)> =
+            drive_concurrent(cap, briefs.len(), |idx| {
+                let brief = briefs_ref[idx];
+                let title = titles_ref[idx].as_str();
+                async move {
+                    self.drive_fork_child_agent_session(
+                        node,
+                        title,
+                        brief,
+                        element_ty,
+                        site.get(),
+                        table,
+                        fork_depth + 1,
+                        fork_subtree,
+                        ty_label,
+                    )
+                    .await
+                }
+            })
+            .await;
+
+        let mut answers = Vec::with_capacity(results.len());
+        for (_, r) in results {
+            let value = match r? {
                 Ok(v) => v,
                 Err(msg) => return Ok(Err(msg)),
             };
@@ -6159,7 +6178,7 @@ impl SelfHarnessDriver {
         ty_label: &str,
     ) -> Result<GreenRoundExit, DriverError> {
         loop {
-            let Some((hole, classified, table, _asks, request)) =
+            let Some((hole, classified, table, asks, request)) =
                 self.agent.pending_suspend_artifacts(node)
             else {
                 return Ok(GreenRoundExit::NodeDone);
@@ -6189,8 +6208,65 @@ impl SelfHarnessDriver {
             if !blocked {
                 continue;
             }
-            // The node is blocked on a join with no terminal candidate: one
-            // thread step, then loop (the join re-check observes any settle).
+            // The node is blocked on a join with no terminal candidate.
+            // Drain every FORK-routed ready item out of `green.ready` and
+            // drive them all CONCURRENTLY (`Self::drive_fork_ready_batch`):
+            // by construction, every `async (fork @T brief)` a straight-line
+            // block spawned before its first `wait` has already reached its
+            // OWN `fork` suspension by the time the node blocks (spawning a
+            // thread is a synchronous JIT step, no model call involved), so
+            // every fork this wait could possibly be blocked on is already
+            // sitting in `ready`. Everything else keeps the single-item
+            // path below — cheap, immediate resumes with nothing to gain
+            // from batching.
+            let mut fork_batch: Vec<(GreenReady, ClassifiedSuspension)> = Vec::new();
+            let mut rest: VecDeque<GreenReady> = VecDeque::with_capacity(green.ready.len());
+            for item in green.ready.drain(..) {
+                let classified = match &item.outcome {
+                    ResidentOutcome::Suspended { request, .. } => {
+                        engine::classify_hole(request, &table, &asks).ok()
+                    }
+                    ResidentOutcome::Completed { .. } => None,
+                };
+                match classified {
+                    Some(c) if matches!(c.routing, SuspensionRouting::Fork { .. }) => {
+                        fork_batch.push((item, c));
+                    }
+                    // A classify failure here is not lost: the item goes to
+                    // `rest` and `service_thread_ready` below re-classifies
+                    // it (and surfaces the same error) on its own turn.
+                    _ => rest.push_back(item),
+                }
+            }
+            green.ready = rest;
+            if !fork_batch.is_empty() {
+                match self
+                    .drive_fork_ready_batch(
+                        node,
+                        fork_batch,
+                        &table,
+                        green,
+                        budget,
+                        fork_depth,
+                        fork_subtree,
+                        ty_label,
+                    )
+                    .await?
+                {
+                    ThreadServiced::Continue => continue,
+                    ThreadServiced::BudgetRefused { msg } => {
+                        return Ok(GreenRoundExit::ForkBudgetRefused { msg });
+                    }
+                    ThreadServiced::Misuse(msg) => {
+                        return Ok(GreenRoundExit::AsyncMisuse { msg });
+                    }
+                    ThreadServiced::ChildFailed { msg } => {
+                        return Ok(GreenRoundExit::ForkChildFailed { msg });
+                    }
+                }
+            }
+            // One thread step, then loop (the join re-check observes any
+            // settle).
             let Some(GreenReady { chain, outcome }) = green.ready.pop_front() else {
                 // Model-attributable, not a mechanism failure: the block
                 // awaits a thread no ready work can ever settle — typically
@@ -6206,16 +6282,7 @@ impl SelfHarnessDriver {
                 });
             };
             match self
-                .service_thread_ready(
-                    node,
-                    chain,
-                    outcome,
-                    green,
-                    budget,
-                    fork_depth,
-                    fork_subtree,
-                    ty_label,
-                )
+                .service_thread_ready(node, chain, outcome, green)
                 .await?
             {
                 ThreadServiced::Continue => {}
@@ -6232,26 +6299,199 @@ impl SelfHarnessDriver {
         }
     }
 
-    /// Service one popped THREAD-chain ready item: classify it against the
-    /// round's compile artifacts (read off the node's pending record — every
-    /// chain of a round shares one compile) and dispatch. Green suspensions
-    /// go through the SHARED [`Self::service_green_hole`] (raw resumes are
-    /// correct for thread frames); a thread's `fork`/`forkAll` drives real
-    /// children via [`Self::drive_fork_child_agent_session`], the same recursive
-    /// pump-row path the main chain uses; `note`/`getStateJson`/
-    /// `delegate` get their immediate service, raw-resumed. `askUser` and
-    /// `finalize` inside a thread are refused loudly — operator forms and the
-    /// window's answer belong on the main chain.
+    /// Drive every FORK-routed thread-chain ready item in `batch`
+    /// CONCURRENTLY, up to [`Self::concurrency_cap`] at once, via
+    /// [`drive_concurrent`] and [`Self::drive_fork_children`] — called by
+    /// [`Self::service_green_round`] once its own node blocks and it has
+    /// drained every currently fork-routed [`GreenReady`] out of
+    /// `green.ready`. This is the OUTER layer of the same concurrency shell
+    /// [`Self::drive_fork_children`] already applies WITHIN one thread's own
+    /// `forkAll` batch — here the batch spans DIFFERENT threads' own `fork`
+    /// calls instead.
+    ///
+    /// Budget admission for the whole batch is checked EAGERLY, in the
+    /// batch's original FIFO (== spawn) order, before any child is driven —
+    /// `check_fork_budgets` is a compare-exchange spend-before-spawn (safe
+    /// under overlap by construction — see the ANTI-PATTERNS note against
+    /// re-deriving it), so checking the batch upfront in queue order
+    /// reproduces the exact admission decisions the old fully-sequential
+    /// scheduler made one ready item at a time. The FIRST refusal stops
+    /// admission for the REST of the batch — mirroring the old
+    /// pop-one-at-a-time loop, which never even looked at a later ready item
+    /// once an earlier one aborted the round — so an item after a refusal is
+    /// left unresumed; the round is about to abort regardless, and
+    /// [`Self::sweep_green_round`] closes its still-`Running` thread realm.
+    ///
+    /// Every ADMITTED item is driven to completion regardless of a sibling's
+    /// outcome (`drive_concurrent` never short-circuits), so a child that
+    /// already finalized keeps its own retirement/GUI receipt even when a
+    /// sibling in the SAME batch ends in `InvocationExit` — the abort this
+    /// returns only discards the THREAD-level resume for the batch, never a
+    /// child's own already-completed session bookkeeping.
+    #[allow(clippy::too_many_arguments)]
+    async fn drive_fork_ready_batch(
+        &self,
+        node: NodeId,
+        batch: Vec<(GreenReady, ClassifiedSuspension)>,
+        table: &DataConTable,
+        green: &mut ModelRoundGreenThreadScheduler,
+        budget: &mut ForkBudget,
+        fork_depth: u32,
+        fork_subtree: &std::sync::atomic::AtomicU32,
+        ty_label: &str,
+    ) -> Result<ThreadServiced, DriverError> {
+        let sid = self.outer_sid()?;
+
+        struct Admitted {
+            chain: GreenChain,
+            hole: String,
+            site: crate::tree::SiteId,
+            ty: Option<String>,
+            fan: Option<FanBadge>,
+            prompts: Vec<String>,
+            prompt: String,
+            source: engine::ForkSource,
+        }
+
+        let mut admitted: Vec<Admitted> = Vec::with_capacity(batch.len());
+        let mut admission_refusal: Option<String> = None;
+        for (item, classified) in batch {
+            let ResidentOutcome::Suspended { hole, .. } = &item.outcome else {
+                return Err(DriverError::Session(
+                    "answerer green scheduler: a fork-routed ready item completed \
+                     without AsyncDoneWith (every asyncSpawn body parks on its own \
+                     settle — scheduler bug)"
+                        .into(),
+                ));
+            };
+            if admission_refusal.is_some() {
+                // A stricter item already refused this batch; the round is
+                // aborting — see this fn's own doc.
+                continue;
+            }
+            // Cost is read off the intact routing BEFORE it's destructured
+            // below, so admission needs no clone of `ty`/`prompts`.
+            let cost = ForkBudget::cost(&classified.routing);
+            let SuspensionRouting::Fork {
+                site,
+                ty,
+                fan,
+                prompts,
+                source,
+            } = classified.routing
+            else {
+                return Err(DriverError::Session(
+                    "answerer green scheduler: drive_fork_ready_batch received a \
+                     non-Fork classified item (scheduler bug)"
+                        .into(),
+                ));
+            };
+            if let Some(msg) = self.check_fork_budgets(budget, cost, fork_subtree, ty_label) {
+                admission_refusal = Some(msg);
+                continue;
+            }
+            admitted.push(Admitted {
+                chain: item.chain,
+                hole: hole.cont_id().to_string(),
+                site,
+                ty,
+                fan,
+                prompts,
+                prompt: classified.prompt,
+                source,
+            });
+        }
+
+        let admitted_ref = &admitted;
+        let cap = self.concurrency_cap;
+        #[allow(clippy::type_complexity)]
+        let results: Vec<(usize, Result<Result<Value, String>, DriverError>)> =
+            drive_concurrent(cap, admitted.len(), |idx| {
+                let a = &admitted_ref[idx];
+                async move {
+                    self.drive_fork_children(
+                        node,
+                        "async fork answerer",
+                        "async fanout answerer",
+                        a.site,
+                        a.ty.as_deref(),
+                        &a.fan,
+                        &a.prompts,
+                        &a.prompt,
+                        a.source,
+                        table,
+                        fork_depth,
+                        fork_subtree,
+                        ty_label,
+                    )
+                    .await
+                }
+            })
+            .await;
+
+        let mut first_mech_err: Option<DriverError> = None;
+        let mut first_child_failed: Option<String> = None;
+        for (idx, r) in results {
+            let a = &admitted[idx];
+            match r {
+                Ok(Ok(answer)) => {
+                    let next = self
+                        .agent
+                        .with_session_retrying(node, sid, |s| {
+                            s.resume(ResidentHole::plain(a.hole.clone()), answer)
+                        })
+                        .await
+                        .map_err(|e| DriverError::Session(e.to_string()))?
+                        .map_err(|e| {
+                            DriverError::Session(format!("async fork resume failed: {e}"))
+                        })?;
+                    green.ready.push_back(GreenReady {
+                        chain: a.chain,
+                        outcome: next,
+                    });
+                }
+                Ok(Err(msg)) => {
+                    if first_child_failed.is_none() {
+                        first_child_failed = Some(msg);
+                    }
+                }
+                Err(e) => {
+                    if first_mech_err.is_none() {
+                        first_mech_err = Some(e);
+                    }
+                }
+            }
+        }
+
+        if let Some(e) = first_mech_err {
+            return Err(e);
+        }
+        if let Some(msg) = first_child_failed {
+            return Ok(ThreadServiced::ChildFailed { msg });
+        }
+        if let Some(msg) = admission_refusal {
+            return Ok(ThreadServiced::BudgetRefused { msg });
+        }
+        Ok(ThreadServiced::Continue)
+    }
+
+    /// Service one popped THREAD-chain ready item that is NOT fork-routed
+    /// (`service_green_round` drains and batches every fork-routed item via
+    /// [`Self::drive_fork_ready_batch`] before ever popping one for this
+    /// dispatcher): classify it against the round's compile artifacts (read
+    /// off the node's pending record — every chain of a round shares one
+    /// compile) and dispatch. Green suspensions go through the SHARED
+    /// [`Self::service_green_hole`] (raw resumes are correct for thread
+    /// frames); `note`/`getStateJson`/`delegate` get their immediate
+    /// service, raw-resumed. `askUser` and `finalize` inside a thread are
+    /// refused loudly — operator forms and the window's answer belong on the
+    /// main chain.
     async fn service_thread_ready(
         &self,
         node: NodeId,
         chain: GreenChain,
         outcome: ResidentOutcome,
         green: &mut ModelRoundGreenThreadScheduler,
-        budget: &mut ForkBudget,
-        fork_depth: u32,
-        fork_subtree: &std::sync::atomic::AtomicU32,
-        ty_label: &str,
     ) -> Result<ThreadServiced, DriverError> {
         let sid = self.outer_sid()?;
         let ResidentOutcome::Suspended { hole, request, .. } = outcome else {
@@ -6292,63 +6532,18 @@ impl SelfHarnessDriver {
                     GreenHoleServiced::Proceed(_) => Ok(ThreadServiced::Continue),
                 }
             }
-            SuspensionRouting::Fork {
-                site,
-                ref ty,
-                ref fan,
-                ref prompts,
-                source,
-            } => {
-                // A thread's fork draws on the SAME session budget as a
-                // direct one. Refused = handed up as data; the dispatcher
-                // aborts the block and pushes the corrective.
-                let cost = ForkBudget::cost(&classified.routing);
-                if let Some(msg) = self.check_fork_budgets(budget, cost, fork_subtree, ty_label) {
-                    return Ok(ThreadServiced::BudgetRefused { msg });
-                }
-                // Children run as full sessions on the pump, exactly like a
-                // direct fork's; only the resume differs — the thread's
-                // continuation is RAW (no node bookkeeping), so the fresh
-                // outcome re-enters the ready queue like every other raw
-                // resume in this scheduler.
-                let answer = match self
-                    .drive_fork_children(
-                        node,
-                        "async fork answerer",
-                        "async fanout answerer",
-                        site,
-                        ty.as_deref(),
-                        fan,
-                        prompts,
-                        &classified.prompt,
-                        source,
-                        &table,
-                        fork_depth,
-                        fork_subtree,
-                        ty_label,
-                    )
-                    .await?
-                {
-                    Ok(v) => v,
-                    // A child ended in `InvocationExit`: handed up as data,
-                    // same as a budget refusal — the dispatcher aborts the
-                    // block and pushes the corrective.
-                    Err(msg) => return Ok(ThreadServiced::ChildFailed { msg }),
-                };
-                let next = self
-                    .agent
-                    .with_session_retrying(node, sid, |s| {
-                        s.resume(ResidentHole::plain(hole.cont_id()), answer)
-                    })
-                    .await
-                    .map_err(|e| DriverError::Session(e.to_string()))?
-                    .map_err(|e| DriverError::Session(format!("async fork resume failed: {e}")))?;
-                green.ready.push_back(GreenReady {
-                    chain,
-                    outcome: next,
-                });
-                Ok(ThreadServiced::Continue)
-            }
+            // Unreachable by construction: `service_green_round` drains and
+            // batches every FORK-routed ready item (`Self::drive_fork_ready_batch`)
+            // BEFORE ever popping one for this per-item dispatcher — see that
+            // fn's own doc for why the whole batch is known upfront (every
+            // `async (fork …)` in a straight-line block has already reached
+            // its own suspension by the time the node blocks).
+            SuspensionRouting::Fork { .. } => Err(DriverError::Session(
+                "answerer green scheduler: a Fork-routed ready item reached the \
+                 per-item dispatcher — service_green_round must drain and batch \
+                 these via drive_fork_ready_batch before popping (scheduler bug)"
+                    .into(),
+            )),
             SuspensionRouting::Note { text } => {
                 self.announce_note(FormSource::Answerer { node }, &text);
                 let unit = ()

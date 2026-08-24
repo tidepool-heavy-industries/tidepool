@@ -9,9 +9,16 @@
 //! run re-drives the exact golden path with zero API calls — the turns ARE log
 //! events.
 //!
-//! The provider is intentionally order-only (a queue of assistant replies) —
-//! a deterministic single-thread golden path emits its turns in a fixed
-//! sequence.
+//! The provider is order-only (a queue of assistant replies) for a
+//! deterministic single-thread golden path, which emits its turns in a fixed
+//! sequence — but that guarantee does not survive genuine overlap: once more
+//! than one in-flight session can call `complete` concurrently (the
+//! answerer-plane green scheduler driving several fork children at once),
+//! requests reach this provider in a NONDETERMINISTIC order, and plain FIFO
+//! can no longer promise "reply N answers request N". [`ReplayProvider::new_keyed`]
+//! covers that case: a reply tagged with a CONTENT needle is matched to
+//! whichever request's rendered text contains it, wherever that reply sits
+//! in the queue — see its doc.
 //!
 //! # Offline log inspection (crash-replay tree reconstruction)
 //!
@@ -42,19 +49,128 @@ pub struct RecordedReply {
     pub usage: Usage,
 }
 
-/// A [`ModelProvider`] that serves assistant replies from a recorded log, in
-/// order. Panics-free: an exhausted queue returns a typed `ProviderError` so a
+/// One queued reply plus its optional CONTENT match key — see
+/// [`ReplayProvider::new_keyed`].
+struct QueueEntry {
+    reply: RecordedReply,
+    needle: Option<String>,
+}
+
+/// A [`ModelProvider`] that serves assistant replies from a recorded log.
+/// Panics-free: an exhausted queue returns a typed `ProviderError` so a
 /// replay that runs longer than the recording fails loud, not silently.
+///
+/// Also a CONCURRENCY RECEIPT: every call tracks how many `complete` calls
+/// are simultaneously in flight (`Self::max_concurrent`), so a caller driving
+/// several sessions against ONE `ReplayProvider` can assert genuine overlap
+/// happened rather than one-request-at-a-time — see `Self::with_hold`.
 pub struct ReplayProvider {
-    queue: Mutex<std::collections::VecDeque<RecordedReply>>,
+    queue: Mutex<std::collections::VecDeque<QueueEntry>>,
+    /// An artificial hold each `complete` call awaits before resolving —
+    /// zero (every construction here) is a no-op costing nothing; only a
+    /// caller that opts in via `Self::with_hold` pays it. Needed because a
+    /// replayed reply otherwise resolves with no `.await` point at all, so
+    /// two concurrent callers have no window to actually overlap ON: a race
+    /// that never blocks can complete each call within a single poll,
+    /// leaving `max_concurrent` unable to observe overlap that is real at
+    /// the scheduler level but invisible to this mock.
+    hold: std::time::Duration,
+    in_flight: std::sync::atomic::AtomicUsize,
+    max_in_flight: std::sync::atomic::AtomicUsize,
 }
 
 impl ReplayProvider {
-    /// Build a replay provider from an ordered list of recorded replies.
+    /// Build a replay provider from an ordered list of recorded replies,
+    /// served strictly in order — correct only for a deterministic
+    /// single-thread golden path (see the module doc). Every entry is
+    /// FIFO-only (no needle); behaviorally identical to every construction
+    /// this crate made before [`Self::new_keyed`] existed.
     pub fn new(replies: Vec<RecordedReply>) -> Self {
         ReplayProvider {
-            queue: Mutex::new(replies.into_iter().collect()),
+            queue: Mutex::new(
+                replies
+                    .into_iter()
+                    .map(|reply| QueueEntry {
+                        reply,
+                        needle: None,
+                    })
+                    .collect(),
+            ),
+            hold: std::time::Duration::ZERO,
+            in_flight: std::sync::atomic::AtomicUsize::new(0),
+            max_in_flight: std::sync::atomic::AtomicUsize::new(0),
         }
+    }
+
+    /// Build a replay provider from entries that may each carry a CONTENT
+    /// match key: `(Some(needle), reply)` is served to whichever request's
+    /// rendered text (any message's content) CONTAINS `needle`, regardless
+    /// of the entry's position in the queue — required once more than one
+    /// session can call `complete` concurrently, where request arrival order
+    /// at this mock is no longer meaningful (see the module doc).
+    /// `(None, reply)` keeps the plain FIFO behavior [`Self::new`] gives
+    /// every entry, and is served only once no queued entry's needle matches
+    /// the current request — so a queue mixing keyed and unkeyed entries is
+    /// exactly "the keyed ones are found by content; everything else is
+    /// still FIFO."
+    ///
+    /// Pick a needle that cannot appear ANYWHERE else in a rendered prompt —
+    /// shared framing text (an effect row's own doc strings, boilerplate
+    /// every turn carries) is real prose and can incidentally contain a
+    /// short/generic phrase (`"pick a"` collided with `Tidepool.Form`'s own
+    /// "pick a subset" doc line, live, before this note existed). Prefer a
+    /// needle scoped to the exact rendered shape only the intended request
+    /// carries — e.g. a fork child's own brief, blank-line-delimited exactly
+    /// as its hole card renders it — over a bare word.
+    pub fn new_keyed(entries: Vec<(Option<String>, RecordedReply)>) -> Self {
+        ReplayProvider {
+            queue: Mutex::new(
+                entries
+                    .into_iter()
+                    .map(|(needle, reply)| QueueEntry { reply, needle })
+                    .collect(),
+            ),
+            hold: std::time::Duration::ZERO,
+            in_flight: std::sync::atomic::AtomicUsize::new(0),
+            max_in_flight: std::sync::atomic::AtomicUsize::new(0),
+        }
+    }
+
+    /// Append more keyed/unkeyed entries to an ALREADY-CONSTRUCTED provider
+    /// — for a caller driving several cycles/rounds against ONE provider
+    /// (machine-rotation and other multi-cycle acceptance tests) where a
+    /// LATER cycle reuses the same needle text an EARLIER cycle's child
+    /// used (e.g. the same brief, "pick a", spawned again next cycle): if
+    /// every cycle's entries were queued upfront, an earlier cycle's request
+    /// could match a LATER cycle's identically-worded reply before that
+    /// cycle's own request ever exists — observed live in a fixture where an
+    /// intentionally-unkeyed (starving) child's request matched a next
+    /// cycle's keyed reply for the same brief text, stealing its answer.
+    /// Queue only the CURRENT cycle's entries at construction and append the
+    /// next cycle's here right before driving it, so a needle can only ever
+    /// match a reply that is actually, chronologically, its own.
+    pub fn extend_keyed(&self, entries: Vec<(Option<String>, RecordedReply)>) {
+        self.queue.lock().extend(
+            entries
+                .into_iter()
+                .map(|(needle, reply)| QueueEntry { reply, needle }),
+        );
+    }
+
+    /// Hold every `complete` call open for `dur` before it resolves — an
+    /// opt-in CONCURRENCY PROBE (see the struct doc for why one is needed at
+    /// all), never a golden-path timing behavior. `Duration::ZERO` (every
+    /// constructor's default) is a no-op.
+    pub fn with_hold(mut self, dur: std::time::Duration) -> Self {
+        self.hold = dur;
+        self
+    }
+
+    /// The highest number of `complete` calls ever simultaneously in
+    /// flight — the concurrency receipt: `> 1` proves two requests genuinely
+    /// overlapped rather than running strictly one at a time.
+    pub fn max_concurrent(&self) -> usize {
+        self.max_in_flight.load(std::sync::atomic::Ordering::SeqCst)
     }
 
     /// Load the recorded assistant replies from a log file, in `seq` order.
@@ -104,17 +220,59 @@ impl ReplayProvider {
     }
 }
 
+/// Decrements [`ReplayProvider::in_flight`] on every exit from `complete`
+/// (success, an exhausted-queue error, or a future dropped mid-hold) — a
+/// plain counter without this would over-count on the very first early
+/// return.
+struct InFlightGuard<'a>(&'a std::sync::atomic::AtomicUsize);
+
+impl Drop for InFlightGuard<'_> {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
 impl ModelProvider for ReplayProvider {
     async fn complete(
         &self,
-        _req: TurnRequest,
+        req: TurnRequest,
         sink: Option<crate::provider::StreamSink>,
     ) -> Result<TurnResponse, ProviderError> {
-        let reply = self
-            .queue
-            .lock()
-            .pop_front()
-            .ok_or_else(|| ProviderError::Api("replay queue exhausted".to_string()))?;
+        let now = self
+            .in_flight
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+            + 1;
+        self.max_in_flight
+            .fetch_max(now, std::sync::atomic::Ordering::SeqCst);
+        let _guard = InFlightGuard(&self.in_flight);
+        if !self.hold.is_zero() {
+            tokio::time::sleep(self.hold).await;
+        }
+        let reply = {
+            let mut queue = self.queue.lock();
+            // Content-keyed match first (see the module doc and
+            // `Self::new_keyed`): the FIRST queue entry (in queue order)
+            // whose needle appears in any message of THIS request wins,
+            // regardless of position. A keyed entry is reserved for its own
+            // matcher — an unrelated request that matches NO needle falls
+            // back to the first UNKEYED entry, never to a keyed one sitting
+            // ahead of it in the queue (a plain `pop_front()` fallback would
+            // let an unrelated concurrent request steal a reply some OTHER
+            // request's needle was reserving). When every entry is
+            // FIFO-only (no needles at all — every construction through
+            // `Self::new`), this is bit-identical to a plain `pop_front()`.
+            let idx = queue
+                .iter()
+                .position(|e| {
+                    e.needle
+                        .as_deref()
+                        .is_some_and(|n| req.messages.iter().any(|m| m.content.contains(n)))
+                })
+                .or_else(|| queue.iter().position(|e| e.needle.is_none()));
+            idx.and_then(|i| queue.remove(i))
+        }
+        .ok_or_else(|| ProviderError::Api("replay queue exhausted".to_string()))?
+        .reply;
         // Replay has no real stream; emit the recorded reply as one delta so a
         // watching observatory still sees the turn appear.
         if let Some(s) = &sink {
