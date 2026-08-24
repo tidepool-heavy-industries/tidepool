@@ -14,6 +14,7 @@
       verbs: gitLog, gitStatus, gitDiffStat, gitShow, gitLogNumstat
   Time: UTC wall-clock access (epoch milliseconds).
       verbs: getCurrentTime
+  Entropy: Randomness.
   Ask: Suspend execution and ask the calling agent a STRUCTURED question.
       verbs: ask
   RunLLMTurn: Suspend for a TYPED answer.

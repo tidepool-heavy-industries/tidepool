@@ -77,6 +77,9 @@ data Git a where
 data Time a where
   TimeNow :: Time Int
 
+data Entropy a where
+  EntropySeed :: Entropy Int
+
 data Schema = SObj [(Text, Schema)] | SArr Schema | SStr | SNum | SBool | SEnum [Text] | SOpt Schema
 data Ask a where
   AskWith :: Text -> Value -> Ask Value
@@ -368,6 +371,9 @@ gitLogNumstat = send . GitLogNumstat
 -- | Current UTC time as an opaque UTCTime (epoch-millisecond resolution).
 getCurrentTime :: forall effs. Member Time effs => Eff effs UTCTime
 getCurrentTime = UTCTime <$> send TimeNow
+-- @substrate-helper@
+entropySeed :: forall effs. Member Entropy effs => Eff effs Int
+entropySeed = send EntropySeed
 ask :: forall effs. Member Ask effs => Schema -> Text -> Eff effs Value
 ask schema prompt = send (AskWith prompt (object ["schema" .= schemaToValue schema]))
 -- @substrate-helper@

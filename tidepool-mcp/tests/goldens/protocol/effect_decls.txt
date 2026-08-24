@@ -49,8 +49,8 @@ true
 KV
 -- end type_name --
 
--- description (229 bytes) --
-Persistent key-value store. State survives across calls within one server session. Key convention: use slash-delimited namespaces (e.g. "agent-42/foo") to avoid cross-agent collision. kvClear/kvKeysP operate on prefix boundaries.
+-- description (451 bytes) --
+Persistent key-value store. State survives across calls within one server session. Key convention: use slash-delimited namespaces (e.g. "agent-42/foo") to avoid cross-agent collision. kvClear/kvKeysP operate on prefix boundaries. For a typed round-trip instead of hand-unwrapping the stored `Value`, use `kvGetAs @T key` (`Tidepool.Kv`) — decodes via `FromJSON`, `Right (Just x)`/`Right Nothing`/a legible `Left` on a decode mismatch, never a crash.
 -- end description --
 
 -- prompt_card: None --
@@ -93,7 +93,11 @@ KvCas :: Text -> Maybe Value -> Value -> KV (Either Value ())
 -- type_defs (0 items) --
 -- end type_defs --
 
--- extra_imports (0 items) --
+-- extra_imports (1 items) --
+-- extra_imports[0] (18 bytes) --
+import Tidepool.Kv
+-- end extra_imports[0] --
+
 -- end extra_imports --
 
 -- helpers (7 items) --

@@ -1249,6 +1249,7 @@ import Control.Monad.Freer hiding (run)
 import qualified Prelude as P";
 
     const EXEC_GIT_IMPORTS: &str = "\
+import Tidepool.Kv
 import qualified Tidepool.Shell as Shell
 import Tidepool.Shell (sh)
 import qualified Tidepool.Cargo as Cargo
