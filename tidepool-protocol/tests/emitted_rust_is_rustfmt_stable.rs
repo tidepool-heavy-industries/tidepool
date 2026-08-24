@@ -93,9 +93,11 @@ fn every_emitted_rust_file_is_a_rustfmt_fixed_point() {
 
 /// As [`every_emitted_rust_file_is_a_rustfmt_fixed_point`], for the
 /// suspension-decode roster ([`tidepool_protocol::effects::suspension_roster`])
-/// — a separate sweep because [`tidepool_protocol::harness_generated_files`]
-/// is a disjoint file set from [`tidepool_protocol::gen::all_files`] (see that
-/// function's doc), not covered by the sweep above.
+/// MINUS `Ask` — a separate sweep because
+/// [`tidepool_protocol::harness_generated_files`] is a disjoint file set from
+/// [`tidepool_protocol::gen::all_files`] (see that function's doc), not
+/// covered by the sweep above. `Ask` is covered by
+/// [`every_runtime_decode_file_is_a_rustfmt_fixed_point`] instead.
 #[test]
 fn every_harness_decode_file_is_a_rustfmt_fixed_point() {
     let files = tidepool_protocol::harness_generated_files();
@@ -118,6 +120,35 @@ fn every_harness_decode_file_is_a_rustfmt_fixed_point() {
     assert!(
         drifted.is_empty(),
         "these emitted harness decode files are NOT rustfmt fixed points:\n  {}\n\
+         Fix the EMITTER (gen::harness_req_rs), not the file.",
+        drifted.join("\n  ")
+    );
+}
+
+/// As [`every_harness_decode_file_is_a_rustfmt_fixed_point`], for the `Ask`
+/// member emitted into `tidepool-runtime` instead.
+#[test]
+fn every_runtime_decode_file_is_a_rustfmt_fixed_point() {
+    let files = tidepool_protocol::runtime_generated_files();
+
+    assert!(
+        files.len() >= 2,
+        "expected at least the Ask decode file plus the mod index, got {}: {:?}",
+        files.len(),
+        files.iter().map(|f| &f.path).collect::<Vec<_>>()
+    );
+
+    let mut drifted = Vec::new();
+    for f in &files {
+        let formatted = rustfmt(&f.contents);
+        if formatted != f.contents {
+            drifted.push(f.path.clone());
+        }
+    }
+
+    assert!(
+        drifted.is_empty(),
+        "these emitted runtime decode files are NOT rustfmt fixed points:\n  {}\n\
          Fix the EMITTER (gen::harness_req_rs), not the file.",
         drifted.join("\n  ")
     );

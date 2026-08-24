@@ -3,11 +3,11 @@
 use tidepool_bridge_derive::FromCore;
 
 /// One variant per `Green` GADT constructor, named EXACTLY as in Haskell.
-/// Decode-only: this effect suspends to `tidepool-harness`'s own
+/// Decode-only: this effect suspends to the consuming crate's own
 /// orchestration rather than an `EffectHandler`, so there is no dispatch
 /// glue here — see this module's crate-level generator doc. A field's
 /// only job is making the `FromCore` name+arity match correct; the
-/// harness plane's own roster composition decides which fields (if any)
+/// consumer's own roster composition decides which fields (if any)
 /// it goes on to read, so an all-recognition, no-field-read effect is
 /// expected here, not a bug.
 #[derive(FromCore)]

@@ -442,10 +442,15 @@ fn require_arg_site(
 /// `tidepool_handlers`'s ALREADY-generated request enums (this crate already
 /// depends on that crate for their bridged wire types, e.g.
 /// `poll_repo_event_await`'s `RepoEventReq` decode) rather than a second
-/// generated copy of the same effects — every other member is generated
-/// fresh into [`crate::generated`], decode-only, because those nine effects'
-/// Haskell decls stay hand-carried in `tidepool-mcp/src/effect_defs.rs` for
-/// now (steps 2-3).
+/// generated copy of the same effects; `Ask` likewise reuses
+/// `tidepool_runtime`'s copy (shared with `extract_ask_request`, which
+/// `tidepool-repl` and the one-shot MCP eval server also decode through —
+/// `tidepool-runtime` sits BELOW this crate, so `AskReq` is generated there
+/// and reused here rather than the other way around; see
+/// `tidepool_protocol::gen::harness_req_rs`'s doc). Every other member is
+/// generated fresh into [`crate::generated`], decode-only, because those
+/// effects' Haskell decls stay hand-carried in
+/// `tidepool-mcp/src/effect_defs.rs` for now (steps 2-3).
 // `Subagent`/`Green`/`Worktree`/`RepoEvent`/`Exec`/`Journal` carry their
 // decoded payload for RECOGNITION only — `classify_hole` matches these arms
 // with `_`, same discipline as before this migration (payload decode happens
@@ -464,7 +469,7 @@ enum RosterRequest {
     RepoEvent(tidepool_handlers::RepoEventReq),
     Exec(tidepool_handlers::ExecReq),
     Journal(tidepool_handlers::JournalReq),
-    Ask(crate::generated::ask::AskReq),
+    Ask(tidepool_runtime::generated::ask::AskReq),
 }
 
 /// Decode a suspended request [`Value`] against the whole [`RosterRequest`]
@@ -526,7 +531,7 @@ fn decode_roster(request: &Value, table: &DataConTable) -> Result<RosterRequest,
     try_member!(RosterRequest::RepoEvent, tidepool_handlers::RepoEventReq);
     try_member!(RosterRequest::Exec, tidepool_handlers::ExecReq);
     try_member!(RosterRequest::Journal, tidepool_handlers::JournalReq);
-    try_member!(RosterRequest::Ask, crate::generated::ask::AskReq);
+    try_member!(RosterRequest::Ask, tidepool_runtime::generated::ask::AskReq);
     Err(ClassifyError::UnsupportedConstructor {
         constructor: con_name(request, table)
             .unwrap_or("<not a constructor application>")
@@ -590,7 +595,8 @@ pub fn classify_hole(
     table: &DataConTable,
     asks: &AsksSidecar,
 ) -> Result<ClassifiedSuspension, ClassifyError> {
-    use crate::generated::{ask, ask_user, console, finalize, fork, read_state, run_llm_turn};
+    use crate::generated::{ask_user, console, finalize, fork, read_state, run_llm_turn};
+    use tidepool_runtime::generated::ask;
 
     let hole = match decode_roster(request, table)? {
         RosterRequest::RunLLMTurn(run_llm_turn::RunLLMTurnReq::RunLLMTurnWith(

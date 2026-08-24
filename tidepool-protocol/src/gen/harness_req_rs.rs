@@ -1,9 +1,9 @@
-//! Generator: decode-only suspension request enums, emitted into
-//! `tidepool-harness`.
+//! Generator: decode-only suspension request enums, emitted into either
+//! `tidepool-harness` or `tidepool-runtime` (see [`path`]'s `crate_dir`).
 //!
 //! `tidepool-harness`'s turn engine never DISPATCHES these effects — a
 //! suspending effect (`Fork`, `Finalize`, `AskUser`, `RunLLMTurn`, `ReadState`,
-//! `Subagent`, `Green`, `Console`'s `Print`, `Ask`, plus the four already-
+//! `Subagent`, `Green`, `Console`'s `Print`, plus the four already-
 //! migrated outer effects reused from `tidepool-handlers`) is classified and
 //! handed to the driver's OWN orchestration, never routed through an
 //! `EffectHandler`. So this generator emits only the middle third of
@@ -11,6 +11,19 @@
 //! request enum, one variant per GADT constructor named exactly as in
 //! Haskell — and none of the error ADT / `DescribeEffect` / `EffectHandler`
 //! dispatch glue, which presuppose a handler these effects don't have.
+//!
+//! **`Ask` is the one member emitted into `tidepool-runtime` instead of
+//! `tidepool-harness`.** `tidepool-runtime::session::engine::
+//! extract_ask_request` (the decode both `tidepool-repl` and the harness's
+//! own `Ask` roster member need) sits BELOW `tidepool-harness` in the crate
+//! graph, so the harness cannot be the one place this type lives without
+//! `tidepool-runtime` either depending upward (impossible) or hand-carrying a
+//! second, kept-in-sync copy (forbidden by the root `CLAUDE.md`'s
+//! "one mechanism, one home" rule). Generating it once, into the lower
+//! crate, and having the harness's `RosterRequest::Ask` reuse THAT copy is
+//! the same pattern already used for the four outer effects reused from
+//! `tidepool-handlers` — a shared type consumed by more than one crate lives
+//! in whichever crate is lowest in the graph among its consumers.
 //!
 //! The effects this generator serves are declared in
 //! [`crate::effects::suspension_roster`], deliberately NOT part of
@@ -22,32 +35,34 @@ use super::{header, index_body, module_name, GeneratedFile};
 use crate::schema::Effect;
 
 /// Where this effect's decode-only request enum lives, relative to the
-/// workspace root.
+/// workspace root. `crate_dir` is the target crate's directory name
+/// (`"tidepool-harness"` for every roster member except `Ask`, which is
+/// `"tidepool-runtime"` — see this module's doc).
 #[must_use]
-pub fn path(e: &Effect) -> String {
-    format!("tidepool-harness/src/generated/{}.rs", module_name(e))
+pub fn path(e: &Effect, crate_dir: &str) -> String {
+    format!("{crate_dir}/src/generated/{}.rs", module_name(e))
 }
 
-/// The `mod`-index for the generated decode modules — deliberately NOT
-/// flattened: `tidepool-harness/src/engine.rs` names each request type
-/// through its own module (`generated::fork::ForkReq`) rather than a single
-/// glob, so two effects can never contribute an ambiguously-named `Req` type
-/// to one scope (unlike the decl-side index, which flattens because every
-/// name there is already unique by Haskell convention).
+/// The `mod`-index for the generated decode modules in `crate_dir` —
+/// deliberately NOT flattened: a consumer names each request type through
+/// its own module (`generated::fork::ForkReq`) rather than a single glob, so
+/// two effects can never contribute an ambiguously-named `Req` type to one
+/// scope (unlike the decl-side index, which flattens because every name
+/// there is already unique by Haskell convention).
 #[must_use]
-pub fn module_index(effects: &[Effect]) -> GeneratedFile {
+pub fn module_index(effects: &[Effect], crate_dir: &str) -> GeneratedFile {
     let modules: Vec<String> = effects.iter().map(module_name).collect();
     GeneratedFile {
-        path: "tidepool-harness/src/generated/mod.rs".to_string(),
+        path: format!("{crate_dir}/src/generated/mod.rs"),
         contents: index_body("Generated suspension decode request types", &modules, false),
     }
 }
 
-/// The whole generated decode module for one effect.
+/// The whole generated decode module for one effect, in `crate_dir`.
 #[must_use]
-pub fn file(e: &Effect) -> GeneratedFile {
+pub fn file(e: &Effect, crate_dir: &str) -> GeneratedFile {
     GeneratedFile {
-        path: path(e),
+        path: path(e, crate_dir),
         contents: body(e),
     }
 }
@@ -59,11 +74,11 @@ fn body(e: &Effect) -> String {
 
     out.push_str(&format!(
         "/// One variant per `{}` GADT constructor, named EXACTLY as in Haskell.\n\
-         /// Decode-only: this effect suspends to `tidepool-harness`'s own\n\
+         /// Decode-only: this effect suspends to the consuming crate's own\n\
          /// orchestration rather than an `EffectHandler`, so there is no dispatch\n\
          /// glue here — see this module's crate-level generator doc. A field's\n\
          /// only job is making the `FromCore` name+arity match correct; the\n\
-         /// harness plane's own roster composition decides which fields (if any)\n\
+         /// consumer's own roster composition decides which fields (if any)\n\
          /// it goes on to read, so an all-recognition, no-field-read effect is\n\
          /// expected here, not a bug.\n",
         e.name

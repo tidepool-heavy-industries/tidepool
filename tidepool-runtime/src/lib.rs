@@ -26,6 +26,13 @@ pub mod artifacts;
 pub mod cache;
 pub mod diag;
 pub mod failclass;
+/// Generated suspension-decode request types (`tidepool-protocol`'s
+/// `runtime_generated_files`) — currently just `Ask`, shared by
+/// [`session::engine::extract_ask_request`] and `tidepool-harness`'s
+/// `RosterRequest::Ask`. `pub` (unlike `tidepool-harness`'s own crate-private
+/// `generated` module) because the harness is a genuine second consumer
+/// across a crate boundary, not an internal implementation detail.
+pub mod generated;
 pub mod paths;
 mod render;
 pub mod session;
