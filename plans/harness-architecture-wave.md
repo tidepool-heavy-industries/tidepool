@@ -1,5 +1,16 @@
 # Harness architecture wave — orchestration runbook
 
+> **STATUS: wave COMPLETE and redeployed (2026-08-24).** Eleven lanes folded;
+> full battery walked green (harness 155 / runtime 433 / handlers 199 /
+> mcp 180 / facade 6, plus fast tier 2044); one red found and fixed
+> (`crash_recovery`'s missing `XDG_DATA_HOME` isolation, `4784738f`);
+> redeploy done and the companion re-parked at the seed form on the new
+> binary (PID 2063435, http://127.0.0.1:4600, dial defaulting terra).
+> What REMAINS is only the held/queued work: #20 steps 2–3 (trigger: one
+> successful live round), #24, and the two design docs' implementations
+> (#21, #22 — both awaiting operator review of their open questions,
+> including the kernel doc's runtime-module-vs-new-crate recommendation).
+
 Written 2026-08-24 so a downshifted root (Sonnet/Opus) can execute the
 remaining wave without re-deriving any decision. Every spec here is
 operator-approved; the orchestrator's job is spawn → idle → fold → verify,
