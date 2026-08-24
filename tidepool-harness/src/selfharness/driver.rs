@@ -442,8 +442,13 @@ impl ModelRoundGreenThreadScheduler {
 /// the answerer dispatcher: the node's own turn parked on a non-Green hole
 /// (route it), ran to completion without finalizing (corrective retry), a
 /// thread's fork was refused by the session's fork budget (abort the
-/// block, corrective retry naming the budget), or the block misused the
-/// async surface (abort the block, corrective retry naming the mistake).
+/// block, corrective retry naming the budget), the block misused the
+/// async surface (abort the block, corrective retry naming the mistake),
+/// or a thread's fork CHILD ran and ended in `InvocationExit` — round
+/// exhaustion, a non-answer ending, its own provider call failing — rather
+/// than finalizing (abort the block, corrective retry naming the child by
+/// its path; the child's own node already retired via `node_failed` before
+/// this variant is ever produced).
 enum GreenRoundExit {
     NodeParked,
     NodeDone,
@@ -456,6 +461,15 @@ enum GreenRoundExit {
         msg: String,
     },
     AsyncMisuse {
+        msg: String,
+    },
+    /// A thread's fork child ended in `InvocationExit` — carries the plain-
+    /// language corrective [`fork_child_failure_corrective`] built. Sibling
+    /// threads in the round are unaffected up to this point (they already
+    /// ran and, if they finalized, their own node already reports so via
+    /// `node_finalized`) — only the round's OUTSTANDING threads are swept
+    /// when this abort fires, same as [`Self::ForkBudgetRefused`].
+    ForkChildFailed {
         msg: String,
     },
 }
@@ -476,7 +490,7 @@ enum GreenHoleServiced {
 
 /// One serviced THREAD-chain ready item's outcome — the thread-plane
 /// sibling of [`GreenHoleServiced`], widened with the fork-budget refusal
-/// that thread forks can hit.
+/// that thread forks can hit and the fork-child-failure corrective.
 enum ThreadServiced {
     Continue,
     /// The ACTUAL refusal text `check_fork_budgets` built — see
@@ -485,6 +499,11 @@ enum ThreadServiced {
         msg: String,
     },
     Misuse(String),
+    /// A thread's fork child ended in `InvocationExit` — see
+    /// [`GreenRoundExit::ForkChildFailed`]'s doc.
+    ChildFailed {
+        msg: String,
+    },
 }
 
 /// One answerer WINDOW's fork budget — total children across all rounds,
@@ -723,6 +742,31 @@ fn fork_budget_refusal(spent: u32, cap: u32, needed: u32, ty_label: &str) -> Str
          (top-level declarations from earlier rounds persist; the aborted block's \
          bindings are lost). Do not fork again — finalize with what you have: \
          evaluate `finalize @{ty_disp} value`."
+    )
+}
+
+/// The corrective when a fork child ends in `InvocationExit` — round
+/// exhaustion, a non-answer ending, or its own provider call failing —
+/// rather than finalizing: what happened, what survives, and the one
+/// useful next step, mirroring [`fork_budget_refusal`]'s shape. Plain
+/// composed-industry-terms language only (docs/GLOSSARY.md's prompt
+/// rules): `path` names the child by its derived GUI/tree path, never an
+/// internal identifier like `InvocationExit` or a constructor name.
+fn fork_child_failure_corrective(path: &str, exit: &InvocationExit, ty_label: &str) -> String {
+    let ty_disp = display_ty(ty_label);
+    let what = match exit {
+        InvocationExit::RoundsExhausted(_) => {
+            "exhausted its model rounds without finalizing an answer"
+        }
+        InvocationExit::NotFinalized(_) => "ended its session without finalizing an answer",
+        InvocationExit::Cancelled(_) => "was cancelled before it could finalize an answer",
+        InvocationExit::RuntimeFailure(_) => "hit a runtime failure in its own session",
+    };
+    format!(
+        "The forked child at {path} {what}. Its result is lost, and this block was \
+         ABORTED (top-level declarations from earlier rounds persist; the aborted \
+         block's bindings are lost). You can re-fork with an adjusted brief, or \
+         proceed without that child's result: evaluate `finalize @{ty_disp} value`."
     )
 }
 
@@ -1741,11 +1785,17 @@ impl BranchAgentSessionGuard {
     /// A failure ATTRIBUTABLE TO THIS CHILD's window (round exhaustion, a
     /// non-finalize suspension, a closure answer this driver cannot
     /// carry): retire with `reason`, producing nothing further. Consumes
-    /// the window. Shared verbatim by the branch and fork callers — a fork
-    /// child's caller additionally turns this into a hard `Err` afterward
-    /// (fork children are not branch positions with a typed `Left` to fold
-    /// into; see `drive_fork_child_agent_session`'s own doc), but the retirement
-    /// itself is identical.
+    /// the window. Shared verbatim by the branch and fork callers, whose
+    /// treatment of what happens AFTER this diverges (see
+    /// `drive_fork_child_agent_session`'s own doc): a mechanism problem
+    /// (closure, dispatcher-contract violation) still turns into a hard
+    /// `Err`, but a fork child's own `InvocationExit` (round exhaustion, a
+    /// non-answer ending, its provider call failing) becomes a plain-
+    /// language corrective instead — fork children are not branch
+    /// positions with a typed `Left` to fold into, so the corrective is
+    /// delivered by aborting the block that was consuming this child, not
+    /// by folding a `Left`. The retirement itself (this method) is
+    /// identical either way.
     fn fold_exit(mut self, reason: &str) {
         let _ = self.agent.terminate_node(self.node, reason);
         self.retired = true;
@@ -5140,12 +5190,17 @@ impl SelfHarnessDriver {
     /// means THIS WINDOW ended without an answer (round exhaustion, its own
     /// provider call failing, or — under `FinalizeOnly` — a non-finalize
     /// suspension), `Err(..)` means the mechanism is broken (the per-loop
-    /// inference-call cap, session faults). Whether an exit is DATA or fatal
-    /// is the CALLER's to decide, because it depends on whether the window
-    /// sits at a branch position: [`Self::service_outer_branch`] folds it as
-    /// `Left` at that branch, while [`Self::service_typed_request_suspension`] —
+    /// inference-call cap, session faults). What an exit BECOMES is the
+    /// CALLER's to decide: [`Self::service_outer_branch`] folds it as `Left`
+    /// at that branch position; [`Self::service_typed_request_suspension`] —
     /// answering IN CONTEXT on the outer turn's own continuation, with no
-    /// siblings and no position — still hard-fails, exactly as before.
+    /// siblings and no position — still hard-fails, exactly as before;
+    /// [`Self::drive_fork_child_agent_session`] — a recursive fork/async-fork
+    /// child, also with no branch position — turns it into a plain-language
+    /// corrective instead of either of those (operator decision, 2026-08-24):
+    /// the child's own node still retires and reports `node_failed`, but the
+    /// caller aborts only the block that was consuming this child, not the
+    /// parent's whole turn.
     async fn drive_agent_session_to_finalize(
         &self,
         node: NodeId,
@@ -5478,6 +5533,33 @@ impl SelfHarnessDriver {
                                         };
                                         self.agent
                                             .push_user_turn(node, &format!("{corrective}{warn}"))?;
+                                        continue 'round;
+                                    }
+                                    // A thread's fork child ended in
+                                    // `InvocationExit` rather than
+                                    // finalizing: same loud-refusal shape —
+                                    // the block dies (this operator
+                                    // decision — see `GreenRoundExit::ForkChildFailed`'s
+                                    // doc), the SESSION survives with a
+                                    // corrective naming the child by its
+                                    // path. The child's own node already
+                                    // retired and reported `node_failed`
+                                    // inside `drive_fork_child_agent_session`.
+                                    GreenRoundExit::ForkChildFailed { msg } => {
+                                        let dropped = match green.as_mut() {
+                                            Some(g) => self.sweep_green_round(node, g).await,
+                                            None => 0,
+                                        };
+                                        retry_on_turn_in_flight(|| {
+                                            self.agent.refuse_pending_suspension(node, msg.clone())
+                                        })
+                                        .await?;
+                                        let warn = if dropped > 0 {
+                                            format!("\n\n{}", dropped_threads_warning(dropped))
+                                        } else {
+                                            String::new()
+                                        };
+                                        self.agent.push_user_turn(node, &format!("{msg}{warn}"))?;
                                         continue 'round;
                                     }
                                 }
@@ -6210,6 +6292,14 @@ impl SelfHarnessDriver {
     /// difference (the WORD itself changes — "fork" vs "fanout" — not just a
     /// shared prefix, so a bare prefix+index wouldn't reproduce the original
     /// titles).
+    ///
+    /// `Ok(Err(msg))` means one child ended in `InvocationExit` — a plain-
+    /// language corrective (already retired at its own node; see
+    /// [`Self::drive_fork_child_agent_session`]) — and the caller must abort
+    /// the consuming block with it rather than propagate a `DriverError`;
+    /// remaining briefs in this SAME call are not driven (short-circuit),
+    /// but a sibling that already finished earlier in this loop has already
+    /// finalized and retired independently of this return value.
     #[allow(clippy::too_many_arguments)]
     async fn drive_fork_children(
         &self,
@@ -6225,7 +6315,8 @@ impl SelfHarnessDriver {
         table: &DataConTable,
         fork_depth: u32,
         fork_subtree: &std::sync::atomic::AtomicU32,
-    ) -> Result<Value, DriverError> {
+        ty_label: &str,
+    ) -> Result<Result<Value, String>, DriverError> {
         let briefs = engine::fork_briefs(fan, prompts, prompt)
             .map_err(|e| DriverError::Session(e.to_string()))?;
         let element_ty = match fan {
@@ -6239,7 +6330,7 @@ impl SelfHarnessDriver {
             } else {
                 format!("{title_fanout_prefix} {idx}")
             };
-            let value = self
+            let value = match self
                 .drive_fork_child_agent_session(
                     node,
                     &title,
@@ -6249,16 +6340,22 @@ impl SelfHarnessDriver {
                     table,
                     fork_depth + 1,
                     fork_subtree,
+                    ty_label,
                 )
-                .await?;
+                .await?
+            {
+                Ok(v) => v,
+                Err(msg) => return Ok(Err(msg)),
+            };
             answers.push(wrap_fork_value(source, value, table)?);
         }
         if fan.is_none() {
-            Ok(answers
-                .pop()
-                .expect("fork_briefs yields exactly one brief for a single fork"))
+            Ok(Ok(answers.pop().expect(
+                "fork_briefs yields exactly one brief for a single fork",
+            )))
         } else {
             engine::build_list_value(answers, table)
+                .map(Ok)
                 .map_err(|e| DriverError::Session(e.to_string()))
         }
     }
@@ -6321,7 +6418,7 @@ impl SelfHarnessDriver {
                     prompts,
                     source,
                 } => {
-                    let answer = self
+                    match self
                         .drive_fork_children(
                             node,
                             "fork answerer",
@@ -6335,12 +6432,29 @@ impl SelfHarnessDriver {
                             &table,
                             fork_depth,
                             fork_subtree,
+                            ty_label,
                         )
-                        .await?;
-                    retry_on_turn_in_flight_async(|| {
-                        self.agent.resume_with_value(node, &hole, answer.clone())
-                    })
-                    .await?;
+                        .await?
+                    {
+                        Ok(answer) => {
+                            retry_on_turn_in_flight_async(|| {
+                                self.agent.resume_with_value(node, &hole, answer.clone())
+                            })
+                            .await?;
+                        }
+                        // A child ended in `InvocationExit`: abort this
+                        // block with the corrective, the same shape the
+                        // budget-refusal branch above uses — the WINDOW
+                        // survives, only the parked continuation dies.
+                        Err(msg) => {
+                            retry_on_turn_in_flight(|| {
+                                self.agent.refuse_pending_suspension(node, msg.clone())
+                            })
+                            .await?;
+                            self.agent.push_user_turn(node, &msg)?;
+                            return Ok(None);
+                        }
+                    }
                 }
                 other => {
                     return Err(DriverError::Session(format!(
@@ -6436,17 +6550,28 @@ impl SelfHarnessDriver {
     /// struct's doc) so a mechanism-error `?` before the pump starts can
     /// never leak the label/path registrations or skip retirement.
     ///
-    /// Exit semantics keep `answer_fork`'s: a child that exhausts its
-    /// budget or otherwise exits without finalizing HARD-FAILS the fork
-    /// (the pump's own nudge/ultimatum ladder has already run) — fork
-    /// children are not branch positions with a typed `Left` to fold into,
-    /// so EVERY non-success outcome below (non-finalize, closure, or a
-    /// mechanism `DriverError` from the pump itself) is reported via
-    /// `node_failed` and then hard-fails through as `Err`. TERMINAL FIX
-    /// (seam map §7.10): a successful child is marked `NodeDone` BEFORE
-    /// resource retirement (`BranchAgentSessionGuard::finalize_fork_data`), instead of
+    /// Exit semantics (operator decision, 2026-08-24): a child that exits
+    /// without finalizing is reported via `node_failed` and retired exactly
+    /// like a success, but only a MECHANISM problem still hard-fails
+    /// through as `Err` — a finalized CLOSURE (v1 scope cannot carry it), a
+    /// non-finalize dispatcher-contract violation, or a `DriverError` from
+    /// the pump itself. A child ending in `InvocationExit` (round
+    /// exhaustion, a non-answer ending, its own provider call failing) is
+    /// NOT one of those: fork children are not branch positions with a
+    /// typed `Left` to fold into (PRD 21 decision 6 draws that line at the
+    /// concurrent `runLLMTurnFork`/`Fanout` branch position, not here), so
+    /// this driver instead returns `Ok(Err(corrective))` — a plain-language
+    /// message the caller ([`Self::drive_fork_children`]) hands up to
+    /// [`Self::drain_answerer_fork`]/[`Self::service_thread_ready`], which
+    /// abort the CONSUMING block through the same `refuse_pending_suspension`
+    /// corrective plumbing [`GreenRoundExit::ForkBudgetRefused`] already
+    /// uses — the parent session and the run survive; only the block that
+    /// was `wait`-ing/consuming this child dies. TERMINAL FIX (seam map
+    /// §7.10): a successful child is marked `NodeDone` BEFORE resource
+    /// retirement (`BranchAgentSessionGuard::finalize_fork_data`), instead of
     /// the old path's accidental `NodeCancelled`-via-`terminate_node`-only
     /// ending.
+    #[allow(clippy::too_many_arguments)]
     async fn drive_fork_child_agent_session(
         &self,
         parent: NodeId,
@@ -6457,7 +6582,8 @@ impl SelfHarnessDriver {
         table: &DataConTable,
         fork_depth: u32,
         fork_subtree: &std::sync::atomic::AtomicU32,
-    ) -> Result<Value, DriverError> {
+        ty_label: &str,
+    ) -> Result<Result<Value, String>, DriverError> {
         let sid = self.outer_sid()?;
         let modules = self.agent.asks_modules(parent, site);
         let card = engine::finalize_typed_request_prompt(
@@ -6594,7 +6720,7 @@ impl SelfHarnessDriver {
                     node,
                     value: rendered,
                 });
-                Ok(value)
+                Ok(Ok(value))
             }
             Ok(Ok(other)) => {
                 let reason = format!(
@@ -6608,13 +6734,22 @@ impl SelfHarnessDriver {
                 window.fold_exit(&reason);
                 Err(DriverError::Session(reason))
             }
+            // Operator decision (2026-08-24): a child ending in
+            // `InvocationExit` no longer kills the parent's turn — the
+            // child's own node still retires and reports `node_failed`
+            // (unchanged), but instead of hard-failing through as `Err`
+            // this returns `Ok(Err(corrective))`, a plain-language message
+            // (docs/GLOSSARY.md prompt rules: no `InvocationExit`, no
+            // constructor name) naming the child by its derived path — the
+            // caller aborts only the block that was consuming this child.
             Ok(Err(exit)) => {
                 let reason = format!("fork child {node:?} ended without an answer: {exit}");
                 if let Some(label) = &retired_label {
                     self.gate.node_failed(label, &reason);
                 }
                 window.fold_exit(&reason);
-                Err(DriverError::Session(reason))
+                let path = retired_label.clone().unwrap_or_else(|| format!("{node:?}"));
+                Ok(Err(fork_child_failure_corrective(&path, &exit, ty_label)))
             }
             Err(e) => {
                 let reason = "fork child retired (mechanism failure)";
@@ -6749,6 +6884,9 @@ impl SelfHarnessDriver {
                 ThreadServiced::Misuse(msg) => {
                     return Ok(GreenRoundExit::AsyncMisuse { msg });
                 }
+                ThreadServiced::ChildFailed { msg } => {
+                    return Ok(GreenRoundExit::ForkChildFailed { msg });
+                }
             }
         }
     }
@@ -6832,7 +6970,7 @@ impl SelfHarnessDriver {
                 // continuation is RAW (no node bookkeeping), so the fresh
                 // outcome re-enters the ready queue like every other raw
                 // resume in this scheduler.
-                let answer = self
+                let answer = match self
                     .drive_fork_children(
                         node,
                         "async fork answerer",
@@ -6846,8 +6984,16 @@ impl SelfHarnessDriver {
                         &table,
                         fork_depth,
                         fork_subtree,
+                        ty_label,
                     )
-                    .await?;
+                    .await?
+                {
+                    Ok(v) => v,
+                    // A child ended in `InvocationExit`: handed up as data,
+                    // same as a budget refusal — the dispatcher aborts the
+                    // block and pushes the corrective.
+                    Err(msg) => return Ok(ThreadServiced::ChildFailed { msg }),
+                };
                 let next = self
                     .agent
                     .with_session_retrying(node, sid, |s| {

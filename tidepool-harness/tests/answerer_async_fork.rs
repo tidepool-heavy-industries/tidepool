@@ -600,27 +600,26 @@ impl OperatorGate for ProbeGate {
     }
 }
 
-/// H2 (test-architecture review, 2026-08-23): an ASYNC fork child
-/// (`async (fork @T brief)`, NOT a `runLLMTurnFork`/`Fanout` BRANCH
-/// POSITION) that exhausts its own round budget without ever finalizing.
-/// Per this crate's CLAUDE.md ("The line…"), a `Tidepool.Fork`-sourced child
-/// is not a branch position with a typed `Left` to fold into — its failure
-/// hard-fails the WHOLE cycle as an ordinary [`DriverError`], never
-/// laundered into a corrective the model can route around. What this pins:
-/// (1) the failure surfaces LEGIBLY — names round exhaustion specifically —
-/// rather than hanging the scheduler or surfacing as an opaque mechanism
-/// error, and (2) the starved child's own GUI/tree node still retires
-/// (`OperatorGate::retire_node`/`node_failed`) despite the whole cycle
-/// failing: `drive_fork_child_agent_session` removes and retires a child's GUI
-/// label unconditionally, before it branches on how the child's pump ended
-/// — so no `Running` node is left behind by a fork subtree that never got to
-/// finalize. The settled sibling "pick a" retires too (every fork child
-/// does, success or failure alike) — asserting BOTH labels retire, with only
-/// the starved one reported failed, is what proves the sibling's own
-/// finalize completed cleanly before "pick b"'s exhaustion tore the cycle
-/// down.
+/// H2, revised for the fork-child-failure-semantics change (operator
+/// decision, 2026-08-24): an ASYNC fork child (`async (fork @T brief)`,
+/// NOT a `runLLMTurnFork`/`Fanout` BRANCH POSITION) that exhausts its own
+/// round budget without ever finalizing no longer hard-fails the whole
+/// cycle. Instead the block that was `wait`-ing on it (here, the SAME
+/// spawning block that `wait`s both children) is ABORTED with a plain-
+/// language corrective naming the child by its derived path — the parent
+/// session and the run survive, and the parent finalizes plainly on its
+/// next round. What this pins: (1) the corrective reaches the model and
+/// names the starved child's path, with no internal identifier
+/// (`InvocationExit`/`ExitRoundsExhausted`) leaking into model-facing
+/// text; (2) the settled sibling "pick a" — which finalized successfully
+/// BEFORE "pick b" starved — still retires and reports `node_finalized`,
+/// proving its own fork completed cleanly and was not corrupted by "pick
+/// b"'s failure, even though the aborted block never got to use its
+/// value; (3) only "pick b" is reported `node_failed`, and that reason
+/// (an operator-GUI/log channel, not model-facing) still carries the
+/// round-exhaustion detail.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn async_fork_child_round_exhaustion_surfaces_legibly_and_retires_node() {
+async fn async_fork_child_round_exhaustion_aborts_block_with_corrective_and_run_survives() {
     support::require_extract();
     let _cache_guard = support::isolate_cache();
 
@@ -637,6 +636,14 @@ async fn async_fork_child_round_exhaustion_surfaces_legibly_and_retires_node() {
         starved(),
         starved(),
         starved(),
+        // 6. The recovery round after the corrective aborts the spawning
+        //    block: finalize plainly, same shape the budget-refusal tests
+        //    use for their own recovery round.
+        reply(
+            "```haskell\nimport HarnessTypes (Decision (..), Confidence (..))\n\n\
+             (finalize @Decision (Decision { action = \"gave-up\", rationale = \"fork \
+             child failed\", confidence = Medium }) :: M ())\n```",
+        ),
     ];
     let (mut driver, _agent, log_path) = build_driver(replies, "answerer-async-starved");
     // Lower the shared round cap so the starved child hits round exhaustion
@@ -651,27 +658,26 @@ async fn async_fork_child_round_exhaustion_surfaces_legibly_and_retires_node() {
     let source = load_harness_source(&examples_harness_dir().join("Harness.hs"))
         .expect("reference harness source loads");
 
-    let err = driver
-        .run_one_loop_iteration(&source, None)
-        .await
-        .expect_err("a starved async fork child must hard-fail the cycle, not hang or succeed");
-
-    let message = err.to_string();
-    assert!(
-        message.contains("ended without an answer"),
-        "the failure must name that the CHILD ended without answering, not a bare \
-         mechanism error, got: {message}"
+    let outcome = driver.run_one_loop_iteration(&source, None).await.expect(
+        "a starved async fork child aborts the consuming block with a corrective — \
+             the run must survive and finalize on the recovery round",
     );
-    assert!(
-        message.contains("ExitRoundsExhausted"),
-        "the failure must discriminate round exhaustion specifically from a non-finalize \
-         ending or a provider failure, got: {message}"
+
+    let decision = outcome
+        .state_json
+        .get("lastDecision")
+        .and_then(|v| v.as_object())
+        .expect("lastDecision must be a Just Decision, not null");
+    assert_eq!(
+        decision.get("action").and_then(|v| v.as_str()),
+        Some("gave-up"),
+        "the window must survive the starved child's failure and finalize on its next \
+         round, got {decision:?}"
     );
 
     // No leaked Running node: BOTH fork children's own GUI entries retire
     // (unconditional in `drive_fork_child_agent_session`, before it branches on
-    // outcome) despite the whole cycle failing — but only the starved one
-    // is reported failed.
+    // outcome) — the starved one reported failed, the settled sibling not.
     assert_eq!(
         probe.retired.lock().unwrap().as_slice(),
         ["root/f0-pick-a".to_string(), "root/f1-pick-b".to_string()],
@@ -692,16 +698,30 @@ async fn async_fork_child_round_exhaustion_surfaces_legibly_and_retires_node() {
     );
     assert!(
         failed[0].1.contains("ExitRoundsExhausted"),
-        "the node_failed reason must carry the same round-exhaustion detail the cycle \
-         error does: {}",
+        "the operator-GUI node_failed reason (not model-facing) must still carry the \
+         round-exhaustion detail: {}",
         failed[0].1
     );
 
-    // The refusal really fired against the STARVED child, not a GHC
-    // corrective loop impersonating it — sibling "pick a" compiled and
-    // finalized before "pick b" ever starved (same discipline as
+    // The corrective really reached the MODEL — a distinctive needle naming
+    // the starved child by its derived path — and no turn is a GHC
+    // corrective loop impersonating this path (same discipline as
     // `logged_turn_texts`'s doc on this file's other tests).
     let turns = logged_turn_texts(&log_path);
+    assert!(
+        turns
+            .iter()
+            .any(|t| t.contains("root/f1-pick-b") && t.contains("exhausted its model rounds")),
+        "the corrective must name the starved child by its path and say what happened; \
+         logged turns:\n{turns:#?}"
+    );
+    assert!(
+        !turns
+            .iter()
+            .any(|t| t.contains("InvocationExit") || t.contains("ExitRoundsExhausted")),
+        "model-facing text must never carry an internal identifier \
+         (docs/GLOSSARY.md prompt rules); logged turns:\n{turns:#?}"
+    );
     assert!(
         !turns.iter().any(|t| t.contains("A block did not compile")),
         "no turn may be a GHC corrective; logged turns:\n{turns:#?}"
@@ -710,6 +730,80 @@ async fn async_fork_child_round_exhaustion_surfaces_legibly_and_retires_node() {
         probe.present_form_calls.load(Ordering::SeqCst),
         0,
         "nothing in this scenario suspends on askUser — the operator must never be asked"
+    );
+}
+
+/// Rotation must not be blocked by a fork-child-failure block abort: with
+/// the fragment ceiling forced to 1, cycle 1's spawning block aborts on a
+/// starved fork child (same shape as the test above) and recovers, then
+/// cycle 2 must still rotate cleanly and complete — pinning that the
+/// abort's round-boundary sweep leaves the machine quiescent, the same
+/// property `settled_threads_leave_the_machine_quiescent_for_rotation`
+/// pins for a SUCCESSFUL settle (`sweep_green_round` closes every still-open
+/// thread realm — Running or Settled — unconditionally, so the failure path
+/// riding the SAME sweep is covered by construction; this is the receipt).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn fork_child_failure_abort_still_leaves_machine_quiescent_for_rotation() {
+    support::require_extract();
+    let _cache_guard = support::isolate_cache();
+    std::env::set_var("TIDEPOOL_MACHINE_FRAGMENT_CEILING", "1");
+
+    let starved = || reply("Still weighing this branch; nothing to run yet.");
+    let replies = vec![
+        // Cycle 1: two async forks, "pick a" answers, "pick b" starves and
+        // aborts the block; the recovery round finalizes plainly.
+        reply(ASYNC_FORK_BLOCK),
+        finalize_int_reply(1),
+        starved(),
+        starved(),
+        starved(),
+        reply(
+            "```haskell\nimport HarnessTypes (Decision (..), Confidence (..))\n\n\
+             (finalize @Decision (Decision { action = \"gave-up\", rationale = \"fork \
+             child failed\", confidence = Medium }) :: M ())\n```",
+        ),
+        // Cycle 2, post-rotation: the ordinary composition succeeds cleanly.
+        reply(ASYNC_FORK_BLOCK),
+        finalize_int_reply(3),
+        finalize_int_reply(4),
+    ];
+    let (mut driver, _agent, _log_path) =
+        build_driver(replies, "answerer-async-fork-failure-quiescent");
+    driver.set_answerer_round_caps(0, 1);
+    let source = load_harness_source(&examples_harness_dir().join("Harness.hs"))
+        .expect("reference harness source loads");
+
+    let outcome1 = driver
+        .run_one_loop_iteration(&source, None)
+        .await
+        .expect("cycle 1: the starved child's failure aborts the block, not the run");
+    let decision1 = outcome1
+        .state_json
+        .get("lastDecision")
+        .and_then(|v| v.as_object())
+        .expect("cycle 1 must finalize on its recovery round");
+    assert_eq!(
+        decision1.get("action").and_then(|v| v.as_str()),
+        Some("gave-up")
+    );
+
+    let outcome2 = driver
+        .run_one_loop_iteration(&source, Some(&outcome1.state_json))
+        .await
+        .expect(
+            "cycle 2 must rotate cleanly at the forced ceiling — a failed fork child's \
+             realm left open would make the machine permanently non-quiescent and this \
+             errors 'not quiescent (N parked hole(s))'",
+        );
+    let decision2 = outcome2
+        .state_json
+        .get("lastDecision")
+        .and_then(|v| v.as_object())
+        .expect("cycle 2's Decision landed");
+    assert_eq!(
+        decision2.get("action").and_then(|v| v.as_str()),
+        Some("34"),
+        "post-rotation forks still deliver to the right handles (3×10 + 4), got {decision2:?}"
     );
 }
 
