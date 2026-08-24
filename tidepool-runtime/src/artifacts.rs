@@ -151,6 +151,29 @@ pub struct StableValInject<'a> {
     pub session_root: &'a Path,
 }
 
+/// A session's `--session-root <dir> --inject-val <module>` (repeated) for
+/// an UNCACHED probe compile — the plural sibling of [`StableValInject`],
+/// which stays single-module and CACHEABLE (its own doc explains why that
+/// invariant matters for its one caller). This one is for a caller that
+/// needs to inject however many `Val.G<g>` modules are LIVE on a real,
+/// mutable session at an arbitrary point — [`tidepool_harness::engine`]'s
+/// pinned-`Finalize <T>`-row probe, when `T` is declared on the session's own
+/// decl plane: `PersistentSession::define_scoped_in` splices an import of
+/// every live `Val.G<g>` name into the generated decl module UNCONDITIONALLY
+/// (the decl-plane analogue of GHCi seeing earlier bindings), so a decl
+/// module that itself imports nothing from the value plane still names those
+/// modules in its own source and needs them resolvable to compile at all.
+/// Deliberately routed through [`CacheStrategy::Uncached`]
+/// ([`compile_targets_with_session_inject`]) rather than widening
+/// [`cache::Invocation::stable_val`] to a list: the live set varies with
+/// session state in a way the compile memo's argv allowlist was never built
+/// to key on, and the caller already has its OWN process-level memo over the
+/// generated probe source (`tidepool_harness::engine`'s `finalize_probe_memo`).
+pub struct SessionInject<'a> {
+    pub session_root: &'a Path,
+    pub inject_modules: &'a [String],
+}
+
 // ---------------------------------------------------------------------------
 // The artifact bundle
 // ---------------------------------------------------------------------------
@@ -190,6 +213,12 @@ pub(crate) enum CacheStrategy<'a> {
     /// [`compile_targets`]'s scheme: a whole artifact SET keyed by
     /// [`cache::invocation_key`] over the built argv.
     Invocation,
+    /// Never memoized, in either direction (no load, no store) — for a
+    /// [`SessionInject`]ed compile, whose `--inject-val` set names a real
+    /// session's live, mutable state rather than anything the compile memo's
+    /// argv allowlist can key on. [`compile_targets_with_session_inject`]'s
+    /// one caller already has its own memo over the compile it's probing.
+    Uncached,
 }
 
 /// One `tidepool-extract` invocation, as built by either production front
@@ -221,6 +250,13 @@ pub(crate) struct CompileInvocation<'a> {
     /// `compile_targets`) — only [`compile_targets_with_stable_inject`] sets
     /// it.
     pub stable_val: Option<StableValInject<'a>>,
+    /// A [`SessionInject`] to apply to this invocation's `ExtractCmd`
+    /// (`--session-root`/`--inject-val` per module) — mutually exclusive
+    /// with `stable_val` in practice (no caller sets both). `None` for every
+    /// front door except [`compile_targets_with_session_inject`]. Always
+    /// paired with [`CacheStrategy::Uncached`] by that front door — see
+    /// [`SessionInject`]'s doc for why.
+    pub session_inject: Option<SessionInject<'a>>,
 }
 
 /// Compile a [`CompileInvocation`] against ONE `tidepool-extract` spawn:
@@ -306,6 +342,10 @@ pub(crate) fn compile_invocation(
     if let Some(sv) = &inv.stable_val {
         cmd.session_root(sv.session_root)
             .inject_val(sv.module.module_name());
+    }
+    if let Some(si) = &inv.session_inject {
+        cmd.session_root(si.session_root)
+            .inject_vals(si.inject_modules.iter().cloned());
     }
 
     // Persistent build-products dir (module-granular GHC recompilation
@@ -446,6 +486,7 @@ pub fn compile_targets(
         fallback_module_name: "Expr",
         cache: CacheStrategy::Invocation,
         stable_val: None,
+        session_inject: None,
     };
     compile_invocation(&inv, on_stage)
 }
@@ -474,6 +515,36 @@ pub fn compile_targets_with_stable_inject(
         fallback_module_name: "Expr",
         cache: CacheStrategy::Invocation,
         stable_val: Some(stable_val),
+        session_inject: None,
+    };
+    compile_invocation(&inv, on_stage)
+}
+
+/// As [`compile_targets`], but additionally injects a [`SessionInject`]
+/// (`--session-root <dir>` plus one `--inject-val <module>` per live module)
+/// and is NEVER memoized in [`tidepool_runtime::cache`] — see
+/// [`SessionInject`]'s and [`CacheStrategy::Uncached`]'s docs for why.
+pub fn compile_targets_with_session_inject(
+    source: &str,
+    targets: &[&str],
+    include: &[PathBuf],
+    bin: Option<&ResolvedExtractBin>,
+    session_inject: SessionInject<'_>,
+    on_stage: impl FnMut(&str, Duration, u64),
+) -> Result<CompiledArtifacts, CompileError> {
+    assert!(
+        !targets.is_empty(),
+        "compile_targets_with_session_inject: at least one target is required"
+    );
+    let inv = CompileInvocation {
+        source,
+        targets,
+        include,
+        bin,
+        fallback_module_name: "Expr",
+        cache: CacheStrategy::Uncached,
+        stable_val: None,
+        session_inject: Some(session_inject),
     };
     compile_invocation(&inv, on_stage)
 }

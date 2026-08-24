@@ -1663,6 +1663,47 @@ impl EngineConfig {
         &self,
         finalize: Option<(&str, &[String])>,
     ) -> Result<TurnTarget, EngineError> {
+        self.turn_target_with_extra_validation_include(finalize, None)
+    }
+
+    /// Like [`Self::turn_target`], but additionally makes the caller's
+    /// session decl-plane visible to the pinned-row probe compile
+    /// ([`validate_finalize_row`]) — both as a plain search-path ENTRY (so
+    /// `import Lib.G<g>` resolves) and as a [`tidepool_runtime::SessionInject`]
+    /// (`--session-root`/`--inject-val` per live `Val.G<g>` module), when the
+    /// node compiling this turn has accumulated a decl plane.
+    ///
+    /// [`Self::validation_include`] alone is a STATIC, config-level list
+    /// (prelude/project-lib/Core), with no notion of any particular node's
+    /// session — so a `Finalize <T>` row naming a type a MODEL declared on
+    /// the shared session's decl plane (never in `Self::include`, which is
+    /// fixed at construction) used to fail this probe with GHC's own "Not in
+    /// scope" even though the SAME type resolves fine in the turn's own BODY
+    /// compile, which separately adds that dir
+    /// ([`crate::harness::Harness::live_turn_context`]'s `session_include`).
+    /// That asymmetry is exactly what let one forced fork child's answer
+    /// type crash the whole harness (2026-08-24 dogfood) while the parent's
+    /// own turn, naming the identical type, compiled fine.
+    ///
+    /// The `SessionInject` half exists because a decl module's OWN generated
+    /// source is not just the model's decl text: `PersistentSession::
+    /// define_scoped_in` splices an import of every `Val.G<g>` module LIVE
+    /// at declare time into it unconditionally (the decl-plane analogue of
+    /// GHCi seeing earlier bindings) — so `Lib.G<g>.hs` itself may name a
+    /// value-plane module the probe must ALSO be able to resolve, even
+    /// though the row being probed never mentions it. Passed by VALUE here
+    /// (not stored on `Self`) because it is per-node, per-call state —
+    /// `EngineConfig` is one shared, `Clone`, session-agnostic config for
+    /// every node a `Harness` drives.
+    ///
+    /// `None` for a caller with no session decl-plane context (a unit test
+    /// compiling directly against `Self`, or a row naming only author
+    /// types) — behaves exactly like [`Self::turn_target`].
+    pub fn turn_target_with_extra_validation_include(
+        &self,
+        finalize: Option<(&str, &[String])>,
+        extra_session: Option<tidepool_runtime::SessionInject<'_>>,
+    ) -> Result<TurnTarget, EngineError> {
         let Some((ty, imports)) = finalize else {
             return Ok(TurnTarget {
                 include: self.include.clone(),
@@ -1676,11 +1717,16 @@ impl EngineConfig {
         // replaced here the way `effects_dir` is below.
         let effects_dir = tidepool_mcp::ensure_effects_shim_module(&self.decls, &row)
             .map_err(|e| EngineError::Setup(format!("materialize effects module: {e}")))?;
+        let mut probe_include = self.validation_include();
+        if let Some(si) = &extra_session {
+            probe_include.push(si.session_root.to_path_buf());
+        }
         validate_finalize_row(
             &self.extract_bin,
             &self.decls,
             &row,
-            &self.validation_include(),
+            &probe_include,
+            extra_session,
         )?;
         let mut include = self.include.clone();
         match include.iter().position(|p| p == &self.effects_dir) {
@@ -1727,15 +1773,33 @@ fn finalize_probe_memo() -> &'static Mutex<HashMap<u64, Result<(), String>>> {
 /// `tidepool-harness/tests/finalize_type_pinning.rs`'s
 /// `pinned_finalize_needs_the_type_in_scope`.
 ///
-/// `include` is the caller's [`EngineConfig::validation_include`] — every
+/// `include` is the caller's [`EngineConfig::validation_include`] (plus the
+/// caller's session decl-plane dir, when `session_inject` is `Some` — see
+/// [`EngineConfig::turn_target_with_extra_validation_include`]) — every
 /// author module a row might name, minus the generated-effects dir itself
 /// (irrelevant here: the probe source IS that module's body, renamed, not an
 /// importer of it).
+///
+/// `session_inject`, when `Some`, additionally threads a
+/// `--session-root`/`--inject-val` injection into the probe compile — needed
+/// whenever the row's type is declared on a session's decl plane, since
+/// `PersistentSession::define_scoped_in` splices an import of every live
+/// `Val.G<g>` module into a decl module's OWN generated source
+/// unconditionally, so THAT module (not the row's applied type itself) may
+/// need the value plane resolvable to compile at all. Folded into the memo
+/// key alongside `generated` (not just `generated` alone): the memo is
+/// PROCESS-global, shared across every session a `Harness` ever drives in
+/// this process, so two DIFFERENT sessions whose decl planes happen to
+/// render the identical shim source (the same row, the same import list —
+/// plausible for a common alias name) must not collide on each other's
+/// probe outcome merely because their `Val.G<g>`/`Lib.G<g>` FILE CONTENTS
+/// differ at the same session-relative module names.
 fn validate_finalize_row(
     extract_bin: &ResolvedExtractBin,
     decls: &[tidepool_mcp::EffectDecl],
     row: &tidepool_mcp::RowArgs,
     include: &[PathBuf],
+    session_inject: Option<tidepool_runtime::SessionInject<'_>>,
 ) -> Result<(), EngineError> {
     // Only the SHIM needs probing: it is the one place a pinned row's applied
     // type (`Finalize Decision`) is spelled, in `type M`. The stable Core
@@ -1746,6 +1810,10 @@ fn validate_finalize_row(
 
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     generated.hash(&mut hasher);
+    if let Some(si) = &session_inject {
+        si.session_root.hash(&mut hasher);
+        si.inject_modules.hash(&mut hasher);
+    }
     let key = hasher.finish();
 
     if let Some(cached) = finalize_probe_memo().lock().get(&key) {
@@ -1780,13 +1848,24 @@ fn validate_finalize_row(
     // (see `effects_shim_module_source`) so GHC must elaborate the whole
     // applied row — including a pinned `Finalize <T>` answer type — to
     // typecheck it; target choice doesn't matter beyond "some real binder".
-    let outcome = match compile_targets(
-        &probe_source,
-        &["__shimProbe"],
-        include,
-        Some(extract_bin),
-        |_, _, _| {},
-    ) {
+    let compiled = match session_inject {
+        Some(si) => tidepool_runtime::compile_targets_with_session_inject(
+            &probe_source,
+            &["__shimProbe"],
+            include,
+            Some(extract_bin),
+            si,
+            |_, _, _| {},
+        ),
+        None => compile_targets(
+            &probe_source,
+            &["__shimProbe"],
+            include,
+            Some(extract_bin),
+            |_, _, _| {},
+        ),
+    };
+    let outcome = match compiled {
         Ok(_) => Ok(()),
         Err(CompileError::Diagnostics(diags)) => Err(diags
             .iter()

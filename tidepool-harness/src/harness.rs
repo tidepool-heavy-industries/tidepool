@@ -1627,10 +1627,24 @@ impl Harness {
         // `turn_target` resolves both the include dir and the stack string
         // from the SAME row, so they cannot disagree.
         let contract = self.answer_contract(node);
-        let target = self.cfg.turn_target(
+        // The node's session bind context, read BEFORE `turn_target` so a
+        // pinned row naming a MODEL-declared decl-plane type validates
+        // through the same include set AND session-value injection its turn
+        // BODY compiles against below (`live_turn_context`'s own
+        // `session_bind_context` read) — see
+        // `EngineConfig::turn_target_with_extra_validation_include`'s doc.
+        let session_bind = self.session_bind_context(node);
+        let extra_session = session_bind.as_ref().map(|(_, inject_modules, root, _)| {
+            tidepool_runtime::SessionInject {
+                session_root: root.as_path(),
+                inject_modules: inject_modules.as_slice(),
+            }
+        });
+        let target = self.cfg.turn_target_with_extra_validation_include(
             contract
                 .as_ref()
                 .map(|c| (c.ty.as_str(), c.imports.as_slice())),
+            extra_session,
         )?;
 
         // Session/contract/bind-template context — exactly what
@@ -1936,10 +1950,22 @@ impl Harness {
     ) -> Result<engine::TurnOutcome, HarnessError> {
         let items = engine::split_block_items(block);
         let contract = self.answer_contract(node);
-        let target = self.cfg.turn_target(
+        // See `run_block`'s identical read: the pinned row's probe-validate
+        // must see the node's session decl-plane dir (and any live
+        // `Val.G<g>` a decl module there may itself import) too, not just
+        // this config's static include set.
+        let session_bind = self.session_bind_context(node);
+        let extra_session = session_bind.as_ref().map(|(_, inject_modules, root, _)| {
+            tidepool_runtime::SessionInject {
+                session_root: root.as_path(),
+                inject_modules: inject_modules.as_slice(),
+            }
+        });
+        let target = self.cfg.turn_target_with_extra_validation_include(
             contract
                 .as_ref()
                 .map(|c| (c.ty.as_str(), c.imports.as_slice())),
+            extra_session,
         )?;
 
         // The user-import lines a decl item's compiled module needs re-glued

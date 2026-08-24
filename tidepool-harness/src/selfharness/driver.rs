@@ -5133,6 +5133,30 @@ impl SelfHarnessDriver {
                         "{subject} provider call failed: {pe}"
                     ))));
                 }
+                // The PINNED `Finalize <T>` row itself failed to resolve —
+                // `EngineConfig::turn_target`'s row-validation probe runs
+                // before the model's own block is even looked at, so this is
+                // not an ordinary compile mistake in what the model wrote:
+                // `T` is the hole's OWN answer type (set by the caller that
+                // spawned this window, not by anything this window can
+                // change), so every future round would fail identically —
+                // same "this window's own request cannot be satisfied" shape
+                // as the provider-fault arm above, not a driver/mechanism
+                // fault. Detected by the exact "Not in scope" + the pinned
+                // type's own name pattern `types_in_scope_hint` already keys
+                // on for the ANALOGOUS `HarnessError::Compile` case above, so
+                // a genuine OTHER setup failure (extract binary resolution,
+                // cache IO, materializing the shim module) — which never
+                // mentions this hole's type — still falls through to the
+                // catch-all below and hard-fails as driver/session machinery.
+                Err(HarnessError::Engine(EngineError::Setup(msg)))
+                    if msg.contains("Not in scope") && msg.contains(ty_label) =>
+                {
+                    return Ok(Err(InvocationExit::RuntimeFailure(format!(
+                        "{subject} could not resolve its own answer type `{}`: {msg}",
+                        display_ty(ty_label)
+                    ))));
+                }
                 Err(e) => return Err(e.into()),
             }
         }

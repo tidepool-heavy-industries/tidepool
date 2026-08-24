@@ -33,8 +33,8 @@ pub mod timing;
 pub mod toolchain;
 
 pub use artifacts::{
-    compile_targets, compile_targets_with_stable_inject, AskSite, AsksSidecar, CompiledArtifacts,
-    StableValInject, TargetArtifact,
+    compile_targets, compile_targets_with_session_inject, compile_targets_with_stable_inject,
+    AskSite, AsksSidecar, CompiledArtifacts, SessionInject, StableValInject, TargetArtifact,
 };
 pub use failclass::{
     classify, classify_compile, classify_session, FailureClass, FailureEnvelope, Phase,
@@ -178,6 +178,7 @@ pub fn compile_haskell_salted(
         fallback_module_name: "Input",
         cache: artifacts::CacheStrategy::Eval { salt: cache_salt },
         stable_val: None,
+        session_inject: None,
     };
     let mut bundle = artifacts::compile_invocation(&inv, |_, _, _| {})?;
     #[allow(

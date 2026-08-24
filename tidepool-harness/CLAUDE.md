@@ -635,10 +635,60 @@ types_in_scope_hint` says so in the retry rather than looping to the round
 cap. A node with no contract compiles at `Finalize Void` and simply cannot
 finalize. Pinned by `tests/finalize_type_pinning.rs`.
 
+**The pinned row's PROBE compile needs the SAME session context the turn body
+gets, separately.** `EngineConfig::turn_target`'s `validate_finalize_row`
+(above, "the `Finalize`-pinned row") compiles the generated shim STANDALONE,
+before the turn body is ever looked at — a SEPARATE compile from
+`Harness::live_turn_context`'s, which is what actually adds the node's session
+decl-plane dir (`session_include`) and `--session-root`/`--inject-val`
+(`session_root`/`inject_modules`, from `bind_ctx`) to the real turn's include
+set. A decl-plane answer type (a MODEL-declared `type X = …`/`data X = …`,
+not an author type) needs BOTH search-path entries at the PROBE too:
+`turn_target_with_extra_validation_include`'s `extra_session:
+Option<tidepool_runtime::SessionInject>` parameter (threaded from
+`Harness::run_block`/`run_multi_item_block`'s own `session_bind_context`
+read) supplies them — as a plain include-path entry (so `import Lib.G<g>`
+resolves) AND as a `SessionInject` (so `Lib.G<g>.hs` ITSELF, which
+`PersistentSession::define_scoped_in` unconditionally splices a live
+`Val.G<g>` import into, also resolves). Before this, a fork child's own
+`Finalize <T>`-pinned row for a decl-plane `T` died with a raw GHC "Not in
+scope" `EngineError::Setup` — fatal, not a corrective — while the PARENT's
+own turn, naming the identical `T` only in its BODY (never in a pinned row),
+compiled fine; that asymmetry is what let one forced fork child crash the
+whole harness process (2026-08-24 dogfood). `SessionInject`-injected probes
+are routed through `tidepool_runtime::compile_targets_with_session_inject`
+(`CacheStrategy::Uncached` — a session's live `Val.G<g>` set isn't something
+the content-addressed compile memo's argv allowlist can key on; the probe's
+OWN process-level `finalize_probe_memo` still applies, keyed on the session
+context too so two different sessions never collide on it). The separate,
+extract-side half of this bug — `Tidepool.Translate.modulesOfType` resolving
+a TYPE SYNONYM's module by looking THROUGH it (`tyConsOfType`'s `coreView`
+walk), reporting `Int`'s home for `type X = Int` instead of `X`'s own
+decl-plane module — is fixed alongside it (`modulesOfType` now also unions in
+the type's own head TyCon via a raw, non-expanding pattern match). Pinned by
+`tests/fork_child_decl_plane_type.rs`.
+
 A fork child's row is widened from ITS OWN requested type this same way,
 independent of whatever contract its parent happens to carry
 (`SelfHarnessDriver::drive_fork_child_agent_session` answers with a REAL
 `finalize @T` — see "Recursive fork servicing" below).
+
+**A child's row genuinely failing to resolve is the child's REQUEST's fault,
+never the mechanism's, and must not exit the process.**
+`SelfHarnessDriver::drive_agent_session_to_finalize`'s per-round dispatch
+carries an arm for exactly this: `Err(HarnessError::Engine(EngineError::
+Setup(msg))) if msg.contains("Not in scope") && msg.contains(ty_label)` —
+the same detection pattern `types_in_scope_hint`'s type-name arm already uses
+for the analogous `HarnessError::Compile` case — folds to `Ok(Err(
+InvocationExit::RuntimeFailure(_)))`, the SAME "runtime failure" collapse the
+adjacent provider-fault arm uses. For a fork child this reaches
+`drive_fork_child_agent_session`'s `Ok(Err(exit)) =>` arm, which turns it into
+a plain-language `fork_child_failure_corrective` fed back to the PARENT's
+next round (the parent answerer continues; the process survives) — never a
+`DriverError`. The guard is narrow ON PURPOSE: any OTHER `Setup` failure
+(extract binary resolution, cache IO, materializing the shim module) never
+mentions the pinned type's own name, so it falls through to the ordinary
+catch-all and stays a hard mechanism failure, exactly as before.
 
 `askUser` re-prompts by RECURSION on a decode failure (no `Either` — the
 retry is entirely Haskell-side): a bad submission genuinely re-suspends on a

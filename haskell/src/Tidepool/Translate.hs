@@ -59,7 +59,7 @@ import GHC.Utils.Fingerprint (fingerprintString, Fingerprint(..))
 import GHC.Core.TyCon
 import GHC.Core.Type (splitTyConApp_maybe, splitFunTy_maybe, isCoercionTy, isUnliftedType)
 import GHC.Builtin.Types.Prim (statePrimTyCon)
-import GHC.Core.TyCo.Rep (Scaled(..))
+import GHC.Core.TyCo.Rep (Scaled(..), Type(TyConApp))
 import GHC.Core.TyCo.FVs (tyConsOfType, tyCoVarsOfType)
 import GHC.Types.Var.Set (VarSet, emptyVarSet, extendVarSet, elemVarSet, isEmptyVarSet)
 import GHC.Types.Unique.Set as USet (nonDetEltsUniqSet)
@@ -273,13 +273,36 @@ recordRunLLMTurnSite siteId typeStr modules = modify' $ \s ->
 -- source file's import list and guessing. Sorted + deduplicated for a
 -- stable asks.json rendering; a TyCon whose Name carries no Module (none
 -- exist for a real, named TyCon) is simply skipped rather than guessed.
+--
+-- @ty@'s own HEAD tycon is unioned in via a RAW, non-synonym-expanding
+-- pattern match ('TyConApp' the data constructor, never a "view" function)
+-- ALONGSIDE 'tyConsOfType's walk, not instead of it: 'tyConsOfType' looks
+-- THROUGH type synonyms (GHC's `coreView`-based traversal — correct for
+-- "what does this type semantically resolve to", e.g. a nested argument's
+-- own defining module still needs full resolution), but a MODEL-declared
+-- @type X = Y@ answer type must resolve `X`'s OWN defining module (its decl-
+-- plane `Lib.G<g>` module), not `Y`'s — a shim's `type M = Eff '[...,
+-- Finalize X]` names the surface synonym `X` verbatim (so does
+-- 'renderType', via plain unexpanding `ppr`), so importing only `Y`'s
+-- module leaves `X` itself "Not in scope" even on an import list that is,
+-- by 'tyConsOfType's own lights, complete. Live incident: `type
+-- KyotoResearch = Text` reported `modulesOfType` == `[GHC.Types]` (`Int`\/
+-- `Text`'s own home, from looking through the synonym) instead of the
+-- decl-plane module `KyotoResearch` is actually declared in, crashing a
+-- fork child's row-validation probe that only had `GHC.Types` to import.
 modulesOfType :: Type -> [Text]
 modulesOfType ty =
-  Data.List.sort $ Data.List.nub
+  Data.List.sort $ Data.List.nub $
+    headTyConModule ty ++
     [ T.pack (moduleNameString (moduleName m))
     | tc <- USet.nonDetEltsUniqSet (tyConsOfType ty)
     , Just m <- [nameModule_maybe (tyConName tc)]
     ]
+  where
+    headTyConModule (TyConApp tc _)
+      | Just m <- nameModule_maybe (tyConName tc) =
+          [T.pack (moduleNameString (moduleName m))]
+    headTyConModule _ = []
 
 -- | Emit the UTF-8 decode + recurse step for ONE codepoint starting at
 -- address @aId@, given the already-read lead byte @byte0@ (a Char#-typed
