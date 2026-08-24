@@ -53,6 +53,13 @@ exist under another plane's vocabulary. Three hard rules:
 
 `plans/README.md` tracks the current active plan. Read it before starting new work.
 
+A plan doc is scaffolding for in-flight work, never a home for standing
+truth. When the work completes, hoist anything still load-bearing into the
+owning CLAUDE.md / charter / glossary and DELETE the plan file (git is the
+archive; `decision-archive/` pointers only for hazard-class backstory).
+Closing a wave includes retiring its plan docs. Standing docs never cite a
+plan or PRD by number — state the rule itself where it binds.
+
 > The agent-swarm orchestration protocol (roles, spawn tools, branch hierarchy)
 > is **not** here — it lives in the devswarm role context
 > (`~/.exo/roles/devswarm/context/root.md`), loaded each session. This file is
