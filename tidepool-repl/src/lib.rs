@@ -35,6 +35,7 @@
 #![warn(clippy::unwrap_used, clippy::expect_used)]
 pub mod command;
 pub mod introspect;
+pub mod kernel_adapter;
 pub mod manager;
 pub mod server;
 pub mod session;

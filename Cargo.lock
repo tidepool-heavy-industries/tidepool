@@ -4164,6 +4164,7 @@ dependencies = [
  "serde_json",
  "static_assertions",
  "tempfile",
+ "thiserror",
  "tidepool-bridge",
  "tidepool-codegen",
  "tidepool-effect",

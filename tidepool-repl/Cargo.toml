@@ -26,6 +26,7 @@ tidepool-runtime.workspace = true
 tidepool-mcp.workspace = true
 tidepool-handlers.workspace = true
 tidepool-bridge.workspace = true
+thiserror.workspace = true
 rmcp.workspace = true
 axum.workspace = true
 tokio = { workspace = true, features = ["io-util", "rt-multi-thread", "signal", "sync", "time"] }

@@ -507,6 +507,15 @@ impl Session {
         self.cfg.id
     }
 
+    /// Whether the session is currently parked at an in-turn `ask` — the
+    /// `self.suspended.is_some()` read the kernel adapter
+    /// (`crate::kernel_adapter`) needs from outside this module. Single-hole
+    /// by construction: `Some` exactly while one item's tail/cursor pair is
+    /// stowed, `None` otherwise.
+    pub fn is_suspended(&self) -> bool {
+        self.suspended.is_some()
+    }
+
     /// The directory the session's `Val.G<g>.hi` ifaces are written to / read
     /// from. The same include root the Lane-A `Lib` modules live under, so a
     /// reference turn's `import Tidepool.Session.Val.G<g>` resolves from the
