@@ -19,6 +19,7 @@ pub mod bridge_roundtrip;
 pub mod compare;
 pub mod differential;
 pub mod dispatch;
+pub mod effect_tags;
 pub mod eval_harness;
 pub mod gen;
 pub mod haskell_suite;

@@ -100,17 +100,28 @@ use tidepool_eval::value::Value;
 use tidepool_runtime::compile_and_run;
 use tidepool_testing::NullDispatcher;
 
-/// `Fork`'s position in the stack `eval_with_dispatch` compiles against: 9
-/// base effects at tags 0..8 (base8 + Entropy), then the interposed `Ask`
-/// (9), `RunLLMTurn` (10), and `Fork` (11) — `standard_decls()`'s own order
+/// The decl list `eval_with_dispatch` compiles a Fork-exercising probe
+/// against: `standard_decls()` (base effects + interposed `Ask`/`RunLLMTurn`)
 /// with `Fork` appended explicitly, same as the harness's `agent_decls`
 /// (`standard_decls()` itself stops at `RunLLMTurn` — the ordinary session
 /// engine never services `Fork`).
+fn fork_decls() -> Vec<tidepool_mcp::EffectDecl> {
+    let mut decls = tidepool_mcp::standard_decls();
+    decls.push(tidepool_mcp::fork_decl());
+    decls
+}
+
+/// `Fork`'s union tag under [`fork_decls`] — derived from its POSITION in
+/// that list (Locked Decision: tags index the effect list positionally),
+/// never hand-copied, so an earlier effect joining the stack can't silently
+/// stale this the way a hardcoded integer did.
 ///
 /// `Tidepool.Fork`'s `forkFilter`/`forkMap` reach the machine through
 /// `forkAllSited`, which sends on `Fork` — so their fanout dispatch arrives
 /// at THIS tag, not `RunLLMTurn`'s and not `Ask`'s.
-const FORK_TAG: u64 = 11;
+fn fork_tag() -> u64 {
+    tidepool_testing::effect_tags::tag_of(&fork_decls(), "Fork")
+}
 
 /// Compile `code` (a single Haskell expression of type `M a`) under the full
 /// MCP preamble and run it. Returns `Ok(json)` with the rendered result or
@@ -1489,10 +1500,9 @@ fn eval_with_dispatch<H: DispatchEffect<()>>(
     // review §4 — the ordinary session engine never services it); the two
     // callers of this helper (`works_fork`, `works_fork_map`) genuinely
     // exercise `Tidepool.Fork`'s JIT dispatch, so widen the roster here,
-    // explicitly, the same way the harness's `agent_decls` does. Fork lands
-    // at the same tag (10) it always did — it was always the tail element.
-    let mut decls = tidepool_mcp::standard_decls();
-    decls.push(tidepool_mcp::fork_decl());
+    // explicitly, the same way the harness's `agent_decls` does — see
+    // `fork_decls`.
+    let decls = fork_decls();
     let pre = tidepool_mcp::build_preamble(&decls, true);
     let stack = tidepool_mcp::build_effect_stack_type(&decls);
     let src = tidepool_mcp::template_haskell(&pre, &stack, code, imports, "", None, None);
@@ -1524,7 +1534,7 @@ impl DispatchEffect<()> for BoolListOnce {
         _request: &Value,
         cx: &EffectContext<'_, ()>,
     ) -> Result<Response, EffectError> {
-        assert_eq!(tag, FORK_TAG, "expected the fanout's Fork dispatch");
+        assert_eq!(tag, fork_tag(), "expected the fanout's Fork dispatch");
         cx.respond_list(self.answer.clone())
     }
 }
@@ -1559,7 +1569,7 @@ impl DispatchEffect<()> for IntListOnce {
         _request: &Value,
         cx: &EffectContext<'_, ()>,
     ) -> Result<Response, EffectError> {
-        assert_eq!(tag, FORK_TAG, "expected the fanout's Fork dispatch");
+        assert_eq!(tag, fork_tag(), "expected the fanout's Fork dispatch");
         cx.respond_list(self.answer.clone())
     }
 }

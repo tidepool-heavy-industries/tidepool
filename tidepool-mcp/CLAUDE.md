@@ -12,6 +12,17 @@ reference for eval authors is the **`eval` tool description** (emitted by the
 server, assembled from the `*_decl()` functions here). The eval stdlib lives in
 `haskell/lib/Tidepool/`. See the repo-root `CLAUDE.md` for the project map.
 
+> **Test rule — no hand-kept pins.** A test must never hardcode an effect's
+> union-tag POSITION (derive it with `tidepool_testing::effect_tags::tag_of`
+> against the same decl list it compiles, as `tidepool-runtime`'s
+> `jit_surface.rs`/`run_llm_turn_sidecar.rs` do) or hand-copy a generated
+> preamble/decl-env string (assert it against a golden file under
+> `tidepool-mcp/tests/goldens/protocol/`, regenerated only via
+> `TIDEPOOL_REGEN_PROTOCOL_GOLDENS=1 cargo test -p tidepool-mcp --test
+> protocol_goldens`) — `tidepool-mcp/tests/effect_roster_sentinel.rs` pins the
+> effect-roster shape itself and fails with the checklist the moment either
+> goes stale.
+
 > **Review rule — examples are the de facto style guide.** The code snippets in
 > the `eval`/`session_run` tool descriptions (`preamble.rs`, `resources.rs`,
 > `tidepool-repl/src/server.rs`) are what callers imitate verbatim, so a change

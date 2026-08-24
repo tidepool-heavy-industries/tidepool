@@ -31,15 +31,16 @@ use tidepool_eval::value::Value;
 use tidepool_repr::Literal;
 use tidepool_testing::eval_harness::{extract_env, prelude_path, EvalHarness};
 
-/// RunLLMTurn's position in the standard effect stack: 8 base effects
-/// (Console, KV, Fs, Http, Exec, Llm, Git, Time — `base_effects!`'s
-/// order) at tags 0..7, `Ask` interposed at tag 8, `RunLLMTurn` interposed
-/// right after it at tag 9 (`standard_decls()`'s doc — self-iterating-
-/// harness WS-B split `runLLMTurn`/`runLLMTurnFork`/`runLLMTurnFanout` out
-/// of `Ask` into their own effect/tag, same `typedSite`/`fork`/`fan`/
-/// `prompts` payload shape, now riding a `RunLLMTurnWith` Con instead of
-/// `AskWith`).
-const RUN_LLM_TURN_TAG: u64 = 9;
+/// `RunLLMTurn`'s union tag in `standard_decls()` — derived from its
+/// POSITION in that list (Locked Decision: tags index the effect list
+/// positionally), never hand-copied. `standard_decls()`'s own doc has the
+/// story (self-iterating-harness WS-B split `runLLMTurn`/`runLLMTurnFork`/
+/// `runLLMTurnFanout` out of `Ask` into their own effect/tag, same
+/// `typedSite`/`fork`/`fan`/`prompts` payload shape, now riding a
+/// `RunLLMTurnWith` Con instead of `AskWith`).
+fn run_llm_turn_tag() -> u64 {
+    tidepool_testing::effect_tags::tag_of(&tidepool_mcp::standard_decls(), "RunLLMTurn")
+}
 
 fn verdict_helpers() -> &'static str {
     "{-# NOINLINE loopCount #-}\n\
@@ -93,7 +94,7 @@ impl DispatchEffect<()> for SiteRecorder {
         request: &Value,
         cx: &EffectContext<'_, ()>,
     ) -> Result<Response, EffectError> {
-        if tag != RUN_LLM_TURN_TAG {
+        if tag != run_llm_turn_tag() {
             return Err(EffectError::UnhandledEffect { tag });
         }
         let Value::Con(_con_id, fields) = request else {
@@ -263,7 +264,7 @@ impl DispatchEffect<()> for VerdictRecorder {
         request: &Value,
         cx: &EffectContext<'_, ()>,
     ) -> Result<Response, EffectError> {
-        if tag != RUN_LLM_TURN_TAG {
+        if tag != run_llm_turn_tag() {
             return Err(EffectError::UnhandledEffect { tag });
         }
         let Value::Con(_con_id, fields) = request else {

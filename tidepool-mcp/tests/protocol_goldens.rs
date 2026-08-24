@@ -273,3 +273,109 @@ fn hardcoded_pins_survive_a_blind_regen() {
         "Console's single constructor signature drifted from effect_defs.rs's console_effect_def!"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Golden 4 — import-gating pin: the generated eval-module text (both the
+// stmt/eval plane's `build_preamble` and the decl plane's
+// `session_decl_module_env`) is a content-addressed compile-cache key
+// (`ensure_effects_module_at`) — a single changed byte invalidates every
+// cached compile for every user. Byte-exact golden files over the FULL
+// generated text (pragmas + imports + paginate alias, not a hand-reassembled
+// approximation) so a refactor of the import-gating machinery cannot
+// accidentally keep the test green while silently changing the emitted
+// bytes — this used to be four hand-copied literal import blocks
+// (`preamble.rs`'s `import_gating_pin` module), which is exactly the kind of
+// pin that goes stale silently when an earlier effect's `extra_imports`
+// changes (e.g. `Entropy`'s `Tidepool.Random` landing in the standard row).
+//
+// Covers the four combinations the import-gating refactor (companion imports
+// living on `EffectDecl::extra_imports`, see `effect_decls.rs`) must
+// reproduce byte-for-byte: the standard row (all base effects, exercises the
+// Exec+Git+Entropy companion imports), the answerer row `[AskUser,
+// Finalize]` (exercises the AskUser companion import alone), the outer row
+// `[RunLLMTurn, AskUser]` (AskUser again, different row shape), and the
+// empty row (no companion imports, no `paginateResult` alias).
+// ---------------------------------------------------------------------------
+
+fn env_text(env: &tidepool_runtime::session::ModuleEnv) -> String {
+    format!("{}\n{}", env.pragmas, env.imports.join("\n"))
+}
+
+/// Renders `build_preamble` and `session_decl_module_env`'s output for one
+/// effect row into a single labelled blob (netstring-style framing, same
+/// idiom as [`render_effect_decl`] above) and diffs it against one golden.
+fn check_import_gating(golden_name: &str, effects: &[EffectDecl]) {
+    let mut out = String::new();
+    write_blob(
+        &mut out,
+        "build_preamble",
+        &tidepool_mcp::build_preamble(effects, false),
+    );
+    write_blob(
+        &mut out,
+        "session_decl_module_env",
+        &env_text(&tidepool_mcp::session_decl_module_env(effects, false)),
+    );
+    assert_matches_golden(&format!("import_gating.{golden_name}.txt"), &out);
+}
+
+#[test]
+fn import_gating_standard_row_golden_matches_committed_file() {
+    check_import_gating("standard_row", &tidepool_mcp::standard_decls());
+}
+
+#[test]
+fn import_gating_answerer_row_golden_matches_committed_file() {
+    let effects = vec![tidepool_mcp::askuser_decl(), tidepool_mcp::finalize_decl()];
+    check_import_gating("answerer_row", &effects);
+}
+
+#[test]
+fn import_gating_outer_row_golden_matches_committed_file() {
+    let effects = vec![
+        tidepool_mcp::runllmturn_decl(),
+        tidepool_mcp::askuser_decl(),
+    ];
+    check_import_gating("outer_row", &effects);
+}
+
+#[test]
+fn import_gating_no_effects_row_golden_matches_committed_file() {
+    check_import_gating("empty_row", &[]);
+}
+
+/// [`tidepool_mcp::PaginateMode::Passthrough`] (what `tidepool-repl` uses)
+/// swaps only the `paginateResult` alias BODY relative to
+/// [`tidepool_mcp::PaginateMode::Truncate`] — imports stay identical, and
+/// with no effects neither mode emits an alias at all. Not golden-backed: it
+/// asserts a structural relationship between two LIVE outputs, not a
+/// hand-kept literal, so there is nothing to migrate.
+#[test]
+fn passthrough_mode_swaps_only_the_paginate_alias_body() {
+    let decls = tidepool_mcp::standard_decls();
+    let truncate = tidepool_mcp::build_preamble_non_interactive(&decls, false);
+    let passthrough = tidepool_mcp::build_preamble_non_interactive_mode(
+        &decls,
+        false,
+        tidepool_mcp::PaginateMode::Passthrough,
+    );
+    assert_eq!(
+        passthrough,
+        truncate.replacen(
+            "paginateResult = paginateTrunc\n",
+            "paginateResult _ v = pure v\n",
+            1,
+        ),
+        "PaginateMode::Passthrough must differ from Truncate only in the \
+         paginateResult alias body"
+    );
+
+    let truncate_empty = tidepool_mcp::build_preamble_non_interactive(&[], false);
+    assert!(!truncate_empty.contains("paginateResult"));
+    let passthrough_empty = tidepool_mcp::build_preamble_non_interactive_mode(
+        &[],
+        false,
+        tidepool_mcp::PaginateMode::Passthrough,
+    );
+    assert_eq!(passthrough_empty, truncate_empty);
+}
