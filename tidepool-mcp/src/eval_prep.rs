@@ -485,6 +485,176 @@ pub fn uses_qq(src: &str) -> bool {
     src.contains("[fmt|") || src.contains("[j|") || src.contains("[patch|") || src.contains("[uri|")
 }
 
+/// Accepted spellings for the `imports` eval-request parameter, quoted
+/// verbatim in every rejection so a caller can fix the line without
+/// guessing the grammar. Closes the friction a clean-context test user hit:
+/// they passed `qualified Data.Aeson as Aeson` (canonical Haskell minus the
+/// `import` keyword) and got an opaque failure, with only the plain form
+/// (`"Data.List (sort)"`) documented as an example.
+pub const IMPORT_GRAMMAR_HELP: &str = concat!(
+    "Accepted import forms (an optional leading \"import \" is accepted on ",
+    "any of them): \"Data.List (sort)\" (plain), ",
+    "\"qualified Data.Map.Strict as Map\" (qualified), ",
+    "\"Data.Map.Strict qualified as Map\" (post-qualified), ",
+    "\"Data.Text as T\" (aliased unqualified), ",
+    "\"Prelude hiding (head)\" (hiding)."
+);
+
+/// One malformed line of the `imports` request parameter: the offending line
+/// text plus why it didn't match any accepted form. `Display` renders the
+/// caller-facing rejection, [`IMPORT_GRAMMAR_HELP`] included.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ImportLineError {
+    pub line: String,
+    pub reason: String,
+}
+
+impl std::fmt::Display for ImportLineError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "malformed import {:?}: {}\n{}",
+            self.line, self.reason, IMPORT_GRAMMAR_HELP
+        )
+    }
+}
+
+/// A legal (dotted, capitalized-segment) Haskell module id or alias —
+/// `Data.Map.Strict`, `T`, `M`. No package-qualified-string or unicode
+/// handling: those aren't among the accepted forms this grammar covers.
+fn is_modid(s: &str) -> bool {
+    !s.is_empty()
+        && s.split('.').all(|seg| {
+            let mut chars = seg.chars();
+            matches!(chars.next(), Some(c) if c.is_ascii_uppercase())
+                && chars.all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '\'')
+        })
+}
+
+/// Parse and re-render one `imports`-param line into the canonical
+/// pre-qualified spelling [`TurnTemplate::render`]'s import loop expects (no
+/// leading `import ` — that keyword is added once per line there). Accepts
+/// every canonical Haskell import spelling this grammar documents
+/// ([`IMPORT_GRAMMAR_HELP`]), minus the `import` keyword — which is ALSO
+/// accepted anyway, present or not, since a model pasting a full import line
+/// from muscle memory is a documented desire path. `qualified` always
+/// normalizes to its PRE-qualified position in the output, so a caller's
+/// post-qualified spelling (`Data.Map.Strict qualified as Map`) needs no
+/// `ImportQualifiedPost` pragma to compile. A line that matches no accepted
+/// shape is rejected here, loudly, before it ever reaches GHC — a
+/// well-formed line naming a bad/nonexistent module still reaches GHC
+/// unchanged and surfaces GHC's own diagnostic.
+pub fn normalize_import_line(line: &str) -> Result<String, ImportLineError> {
+    let line = line.trim();
+    let err = |reason: String| ImportLineError {
+        line: line.to_string(),
+        reason,
+    };
+
+    let rest = line
+        .strip_prefix("import")
+        .filter(|r| r.is_empty() || r.starts_with(char::is_whitespace))
+        .map(str::trim_start)
+        .unwrap_or(line);
+
+    // Everything from the first `(` — the explicit import/hiding list — is
+    // taken verbatim; its contents are GHC's to validate, not this grammar's.
+    let (head, spec) = match rest.find('(') {
+        Some(i) => (rest[..i].trim(), Some(rest[i..].trim())),
+        None => (rest.trim(), None),
+    };
+
+    let mut tokens: Vec<&str> = head.split_whitespace().collect();
+    let hiding = if tokens.last() == Some(&"hiding") {
+        tokens.pop();
+        true
+    } else {
+        false
+    };
+    if hiding && spec.is_none() {
+        return Err(err(
+            "`hiding` needs a parenthesized list, e.g. `hiding (head)`".to_string(),
+        ));
+    }
+    if tokens.is_empty() {
+        return Err(err("missing a module path".to_string()));
+    }
+
+    let mut idx = 0;
+    let mut qualified = tokens[idx] == "qualified";
+    if qualified {
+        idx += 1;
+    }
+    let modpath = *tokens
+        .get(idx)
+        .ok_or_else(|| err("missing a module path".to_string()))?;
+    if !is_modid(modpath) {
+        return Err(err(format!(
+            "{modpath:?} doesn't look like a module path (expected dotted, \
+             capitalized segments, e.g. Data.Map.Strict)"
+        )));
+    }
+    idx += 1;
+    if tokens.get(idx) == Some(&"qualified") {
+        if qualified {
+            return Err(err("`qualified` given twice".to_string()));
+        }
+        qualified = true;
+        idx += 1;
+    }
+    let alias = if tokens.get(idx) == Some(&"as") {
+        idx += 1;
+        let a = *tokens
+            .get(idx)
+            .ok_or_else(|| err("`as` needs an alias, e.g. `as Map`".to_string()))?;
+        if !is_modid(a) {
+            return Err(err(format!("{a:?} doesn't look like a valid alias")));
+        }
+        idx += 1;
+        Some(a)
+    } else {
+        None
+    };
+    if idx != tokens.len() {
+        return Err(err(format!(
+            "unexpected trailing text: {:?}",
+            tokens[idx..].join(" ")
+        )));
+    }
+
+    let mut out = String::new();
+    if qualified {
+        out.push_str("qualified ");
+    }
+    out.push_str(modpath);
+    if let Some(a) = alias {
+        out.push_str(" as ");
+        out.push_str(a);
+    }
+    if hiding {
+        out.push_str(" hiding");
+    }
+    if let Some(s) = spec {
+        out.push(' ');
+        out.push_str(s);
+    }
+    Ok(out)
+}
+
+/// [`normalize_import_line`] over every non-blank line of the `imports`
+/// request parameter, rejoined into the same multi-line shape the import
+/// loop in [`TurnTemplate::render`] consumes. Fails on the FIRST malformed
+/// line — imports rejection is a request-validation error, not a
+/// partial-apply.
+pub fn normalize_import_lines(imports: &str) -> Result<String, ImportLineError> {
+    let mut out = String::new();
+    for line in imports.lines().map(str::trim).filter(|l| !l.is_empty()) {
+        out.push_str(&normalize_import_line(line)?);
+        out.push('\n');
+    }
+    Ok(out)
+}
+
 pub fn build_effect_stack_type(effects: &[EffectDecl]) -> String {
     row_type(effects, &crate::RowArgs::default())
 }
@@ -1858,5 +2028,94 @@ mod template_haskell_pin {
             1,
             "exactly one user-lines marker per module, regardless of entry count"
         );
+    }
+
+    // ---- `imports` param grammar: every accepted spelling + malformed rejection ----
+
+    /// Every canonical spelling the `imports` param must accept, each with
+    /// and without a leading `import ` keyword (a model pasting a full
+    /// import line from muscle memory), normalizing to the same
+    /// pre-qualified canonical output regardless of input spelling.
+    #[test]
+    fn normalize_import_line_accepts_every_canonical_form() {
+        let cases: &[(&str, &str)] = &[
+            ("Data.List (sort)", "Data.List (sort)"),
+            (
+                "qualified Data.Map.Strict as Map",
+                "qualified Data.Map.Strict as Map",
+            ),
+            (
+                "Data.Map.Strict qualified as Map",
+                "qualified Data.Map.Strict as Map",
+            ),
+            ("Data.Text as T", "Data.Text as T"),
+            ("Prelude hiding (head)", "Prelude hiding (head)"),
+            ("Data.List", "Data.List"),
+            ("qualified Data.Set", "qualified Data.Set"),
+            ("Data.Set qualified", "qualified Data.Set"),
+        ];
+        for (input, expected) in cases {
+            assert_eq!(
+                normalize_import_line(input).as_deref(),
+                Ok(*expected),
+                "bare form: {input:?}"
+            );
+            let with_keyword = format!("import {input}");
+            assert_eq!(
+                normalize_import_line(&with_keyword).as_deref(),
+                Ok(*expected),
+                "import-keyword-prefixed form: {with_keyword:?}"
+            );
+        }
+    }
+
+    /// A genuinely malformed line is rejected before it ever reaches GHC,
+    /// with a message naming the accepted forms.
+    #[test]
+    fn normalize_import_line_rejects_malformed() {
+        let bad: &[&str] = &[
+            "",
+            "improt Data.List",
+            "qualified",
+            "Data.List extra junk",
+            "lowercase.modid",
+            "Data.List as lowercaseAlias",
+            "Prelude hiding",
+            "qualified Data.List qualified",
+            "as Foo",
+        ];
+        for line in bad {
+            let err = normalize_import_line(line)
+                .err()
+                .unwrap_or_else(|| panic!("expected rejection for {line:?}"));
+            let rendered = err.to_string();
+            assert!(
+                rendered.contains(IMPORT_GRAMMAR_HELP),
+                "rejection for {line:?} doesn't name the accepted forms: {rendered}"
+            );
+        }
+    }
+
+    /// [`normalize_import_lines`] applies the same grammar per line and
+    /// rejoins into the multi-line shape the import loop consumes.
+    #[test]
+    fn normalize_import_lines_joins_multiple_valid_lines() {
+        let out = normalize_import_lines(
+            "qualified Data.Map.Strict as Map\nimport Data.Text as T\n\nPrelude hiding (head)\n",
+        )
+        .expect("all lines are well-formed");
+        assert_eq!(
+            out,
+            "qualified Data.Map.Strict as Map\nData.Text as T\nPrelude hiding (head)\n"
+        );
+    }
+
+    /// A single malformed line fails the whole batch — imports rejection is
+    /// a request-validation error, not a partial-apply.
+    #[test]
+    fn normalize_import_lines_fails_on_first_malformed_line() {
+        let err = normalize_import_lines("Data.List (sort)\nnotamodule garbage")
+            .expect_err("second line is malformed");
+        assert_eq!(err.line, "notamodule garbage");
     }
 }

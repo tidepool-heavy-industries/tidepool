@@ -180,7 +180,17 @@ impl TidepoolMcpServerImpl {
         if uses_qq(&req.code) || uses_qq(&req.helpers) {
             all_imports.push_str("Tidepool.QQ (fmt, j, patch, uri, form)\n");
         }
-        all_imports.push_str(&req.imports);
+        // Reject a malformed `imports` line loudly, before any compile: a
+        // line matching no accepted form (IMPORT_GRAMMAR_HELP) is a request
+        // error, not something to hand to GHC and hope for a legible parse
+        // failure. A well-formed line naming a bad/nonexistent module still
+        // passes through unchanged and surfaces GHC's own diagnostic.
+        match normalize_import_lines(&req.imports) {
+            Ok(normalized) => all_imports.push_str(&normalized),
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(e.to_string())]));
+            }
+        }
         let normalized_input = req.input.as_ref().map(normalize_input);
         let source: Arc<str> = template_haskell(
             &self.haskell_preamble,

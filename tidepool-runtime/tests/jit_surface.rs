@@ -507,6 +507,27 @@ fn works_map_family() {
     );
 }
 
+/// A user-supplied `imports`-param qualified import resolves end to end
+/// under a FRESH alias (`M`, distinct from the preamble's own `Map.`) —
+/// pins the eval-imports-grammar contract (`tidepool_mcp::normalize_import_line`)
+/// at the compile boundary: whichever canonical spelling a caller uses
+/// (`qualified Data.Map.Strict as M`, its post-qualified twin, or either
+/// with a leading `import ` keyword) normalizes to this same pre-qualified
+/// line, so proving this ONE canonical form compiles and resolves pins all
+/// of them.
+#[test]
+fn works_qualified_import_family() {
+    works_with_imports(
+        "qualified Data.Map.Strict as M",
+        r#"pure (concat
+            [ check "qualified_import_alias_resolves" (M.fromList [(1::Int, "a"::Text)] == M.singleton 1 "a")
+            , check "qualified_import_alias_lookup" (M.lookup 1 (M.fromList [(1::Int, "a"::Text)]) == Just "a")
+            ])
+         where { check nm ok = if ok then [] else [nm] }"#,
+        serde_json::json!([]),
+    );
+}
+
 /// Aeson decode/lens-prism family: `fromJSON`/`eitherDecode`/`decode`,
 /// bounded and unbounded numeric FromJSON instances (Int/Word/Integer/
 /// Float/Char/()/tuples/Either), the `_Int`/`_Integer` prisms, and the

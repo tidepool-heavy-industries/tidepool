@@ -95,7 +95,11 @@ pub struct EvalRequest {
     /// NOT parse). `pure x` only to wrap a pure value — never
     /// `r <- f` followed by `pure r`.
     pub code: String,
-    /// Additional Haskell imports, one per line (e.g. "Data.List (sort)").
+    /// Additional Haskell imports, one per line — any canonical Haskell
+    /// import spelling minus the (optional) leading `import` keyword, e.g.
+    /// "Data.List (sort)", "qualified Data.Map.Strict as Map",
+    /// "Data.Map.Strict qualified as Map", "Data.Text as T",
+    /// "Prelude hiding (head)".
     #[serde(default)]
     pub imports: String,
     /// Top-level definitions (functions, operators, type signatures) —
