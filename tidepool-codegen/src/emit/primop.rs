@@ -107,38 +107,40 @@ pub fn emit_primop(
     args: &[SsaVal],
 ) -> Result<SsaVal, EmitError> {
     match op {
-        // Int arithmetic (binary)
-        PrimOpKind::IntAdd => {
+        // Int arithmetic (binary). Int64# aliases here: on this 64-bit-only
+        // target, Int64# is register-width-identical to Int#, so the Int64
+        // primop family shares these emitters rather than duplicating them.
+        PrimOpKind::IntAdd | PrimOpKind::Int64Add => {
             check_arity(op, 2, args.len())?;
             let a = unbox_int(sess.pipeline, builder, sess.vmctx, args[0]);
             let b = unbox_int(sess.pipeline, builder, sess.vmctx, args[1]);
             Ok(SsaVal::Raw(builder.ins().iadd(a, b), LIT_TAG_INT))
         }
-        PrimOpKind::IntSub => {
+        PrimOpKind::IntSub | PrimOpKind::Int64Sub => {
             check_arity(op, 2, args.len())?;
             let a = unbox_int(sess.pipeline, builder, sess.vmctx, args[0]);
             let b = unbox_int(sess.pipeline, builder, sess.vmctx, args[1]);
             Ok(SsaVal::Raw(builder.ins().isub(a, b), LIT_TAG_INT))
         }
-        PrimOpKind::IntMul => {
+        PrimOpKind::IntMul | PrimOpKind::Int64Mul => {
             check_arity(op, 2, args.len())?;
             let a = unbox_int(sess.pipeline, builder, sess.vmctx, args[0]);
             let b = unbox_int(sess.pipeline, builder, sess.vmctx, args[1]);
             Ok(SsaVal::Raw(builder.ins().imul(a, b), LIT_TAG_INT))
         }
-        PrimOpKind::IntNegate => {
+        PrimOpKind::IntNegate | PrimOpKind::Int64Negate => {
             check_arity(op, 1, args.len())?;
             let a = unbox_int(sess.pipeline, builder, sess.vmctx, args[0]);
             Ok(SsaVal::Raw(builder.ins().ineg(a), LIT_TAG_INT))
         }
-        PrimOpKind::IntQuot => {
+        PrimOpKind::IntQuot | PrimOpKind::Int64Quot => {
             check_arity(op, 2, args.len())?;
             let a = unbox_int(sess.pipeline, builder, sess.vmctx, args[0]);
             let b = unbox_int(sess.pipeline, builder, sess.vmctx, args[1]);
             let b = emit_div_zero_check(sess, builder, b)?;
             Ok(SsaVal::Raw(builder.ins().sdiv(a, b), LIT_TAG_INT))
         }
-        PrimOpKind::IntRem => {
+        PrimOpKind::IntRem | PrimOpKind::Int64Rem => {
             check_arity(op, 2, args.len())?;
             let a = unbox_int(sess.pipeline, builder, sess.vmctx, args[0]);
             let b = unbox_int(sess.pipeline, builder, sess.vmctx, args[1]);
@@ -172,19 +174,19 @@ pub fn emit_primop(
         }
 
         // Int shifts
-        PrimOpKind::IntShl => {
+        PrimOpKind::IntShl | PrimOpKind::Int64Shl => {
             check_arity(op, 2, args.len())?;
             let a = unbox_int(sess.pipeline, builder, sess.vmctx, args[0]);
             let b = unbox_int(sess.pipeline, builder, sess.vmctx, args[1]);
             Ok(SsaVal::Raw(builder.ins().ishl(a, b), LIT_TAG_INT))
         }
-        PrimOpKind::IntShra => {
+        PrimOpKind::IntShra | PrimOpKind::Int64Shra => {
             check_arity(op, 2, args.len())?;
             let a = unbox_int(sess.pipeline, builder, sess.vmctx, args[0]);
             let b = unbox_int(sess.pipeline, builder, sess.vmctx, args[1]);
             Ok(SsaVal::Raw(builder.ins().sshr(a, b), LIT_TAG_INT))
         }
-        PrimOpKind::IntShrl => {
+        PrimOpKind::IntShrl | PrimOpKind::Int64Shrl => {
             check_arity(op, 2, args.len())?;
             let a = unbox_int(sess.pipeline, builder, sess.vmctx, args[0]);
             let b = unbox_int(sess.pipeline, builder, sess.vmctx, args[1]);
@@ -192,7 +194,7 @@ pub fn emit_primop(
         }
 
         // Int comparison \u2192 returns i64 (0=False, 1=True)
-        PrimOpKind::IntEq => emit_int_compare(
+        PrimOpKind::IntEq | PrimOpKind::Int64Eq => emit_int_compare(
             sess.pipeline,
             builder,
             sess.vmctx,
@@ -201,7 +203,7 @@ pub fn emit_primop(
             args,
             LIT_TAG_INT,
         ),
-        PrimOpKind::IntNe => emit_int_compare(
+        PrimOpKind::IntNe | PrimOpKind::Int64Ne => emit_int_compare(
             sess.pipeline,
             builder,
             sess.vmctx,
@@ -210,7 +212,7 @@ pub fn emit_primop(
             args,
             LIT_TAG_INT,
         ),
-        PrimOpKind::IntLt => emit_int_compare(
+        PrimOpKind::IntLt | PrimOpKind::Int64Lt => emit_int_compare(
             sess.pipeline,
             builder,
             sess.vmctx,
@@ -219,7 +221,7 @@ pub fn emit_primop(
             args,
             LIT_TAG_INT,
         ),
-        PrimOpKind::IntLe => emit_int_compare(
+        PrimOpKind::IntLe | PrimOpKind::Int64Le => emit_int_compare(
             sess.pipeline,
             builder,
             sess.vmctx,
@@ -228,7 +230,7 @@ pub fn emit_primop(
             args,
             LIT_TAG_INT,
         ),
-        PrimOpKind::IntGt => emit_int_compare(
+        PrimOpKind::IntGt | PrimOpKind::Int64Gt => emit_int_compare(
             sess.pipeline,
             builder,
             sess.vmctx,
@@ -237,7 +239,7 @@ pub fn emit_primop(
             args,
             LIT_TAG_INT,
         ),
-        PrimOpKind::IntGe => emit_int_compare(
+        PrimOpKind::IntGe | PrimOpKind::Int64Ge => emit_int_compare(
             sess.pipeline,
             builder,
             sess.vmctx,
@@ -247,34 +249,35 @@ pub fn emit_primop(
             LIT_TAG_INT,
         ),
 
-        // Word arithmetic
-        PrimOpKind::WordAdd => {
+        // Word arithmetic. Word64# aliases here for the same register-width
+        // reason as the Int64 family above.
+        PrimOpKind::WordAdd | PrimOpKind::Word64Add => {
             check_arity(op, 2, args.len())?;
             let a = unbox_int(sess.pipeline, builder, sess.vmctx, args[0]);
             let b = unbox_int(sess.pipeline, builder, sess.vmctx, args[1]);
             Ok(SsaVal::Raw(builder.ins().iadd(a, b), LIT_TAG_WORD))
         }
-        PrimOpKind::WordSub => {
+        PrimOpKind::WordSub | PrimOpKind::Word64Sub => {
             check_arity(op, 2, args.len())?;
             let a = unbox_int(sess.pipeline, builder, sess.vmctx, args[0]);
             let b = unbox_int(sess.pipeline, builder, sess.vmctx, args[1]);
             Ok(SsaVal::Raw(builder.ins().isub(a, b), LIT_TAG_WORD))
         }
-        PrimOpKind::WordMul => {
+        PrimOpKind::WordMul | PrimOpKind::Word64Mul => {
             check_arity(op, 2, args.len())?;
             let a = unbox_int(sess.pipeline, builder, sess.vmctx, args[0]);
             let b = unbox_int(sess.pipeline, builder, sess.vmctx, args[1]);
             Ok(SsaVal::Raw(builder.ins().imul(a, b), LIT_TAG_WORD))
         }
 
-        PrimOpKind::WordQuot => {
+        PrimOpKind::WordQuot | PrimOpKind::Word64Quot => {
             check_arity(op, 2, args.len())?;
             let a = unbox_int(sess.pipeline, builder, sess.vmctx, args[0]);
             let b = unbox_int(sess.pipeline, builder, sess.vmctx, args[1]);
             let b = emit_div_zero_check(sess, builder, b)?;
             Ok(SsaVal::Raw(builder.ins().udiv(a, b), LIT_TAG_WORD))
         }
-        PrimOpKind::WordRem => {
+        PrimOpKind::WordRem | PrimOpKind::Word64Rem => {
             check_arity(op, 2, args.len())?;
             let a = unbox_int(sess.pipeline, builder, sess.vmctx, args[0]);
             let b = unbox_int(sess.pipeline, builder, sess.vmctx, args[1]);
@@ -283,38 +286,38 @@ pub fn emit_primop(
         }
 
         // Word bitwise
-        PrimOpKind::WordAnd => {
+        PrimOpKind::WordAnd | PrimOpKind::Word64And => {
             check_arity(op, 2, args.len())?;
             let a = unbox_int(sess.pipeline, builder, sess.vmctx, args[0]);
             let b = unbox_int(sess.pipeline, builder, sess.vmctx, args[1]);
             Ok(SsaVal::Raw(builder.ins().band(a, b), LIT_TAG_WORD))
         }
-        PrimOpKind::WordOr => {
+        PrimOpKind::WordOr | PrimOpKind::Word64Or => {
             check_arity(op, 2, args.len())?;
             let a = unbox_int(sess.pipeline, builder, sess.vmctx, args[0]);
             let b = unbox_int(sess.pipeline, builder, sess.vmctx, args[1]);
             Ok(SsaVal::Raw(builder.ins().bor(a, b), LIT_TAG_WORD))
         }
-        PrimOpKind::WordXor => {
+        PrimOpKind::WordXor | PrimOpKind::Word64Xor => {
             check_arity(op, 2, args.len())?;
             let a = unbox_int(sess.pipeline, builder, sess.vmctx, args[0]);
             let b = unbox_int(sess.pipeline, builder, sess.vmctx, args[1]);
             Ok(SsaVal::Raw(builder.ins().bxor(a, b), LIT_TAG_WORD))
         }
-        PrimOpKind::WordNot => {
+        PrimOpKind::WordNot | PrimOpKind::Word64Not => {
             check_arity(op, 1, args.len())?;
             let a = unbox_int(sess.pipeline, builder, sess.vmctx, args[0]);
             Ok(SsaVal::Raw(builder.ins().bnot(a), LIT_TAG_WORD))
         }
 
         // Word shifts
-        PrimOpKind::WordShl => {
+        PrimOpKind::WordShl | PrimOpKind::Word64Shl => {
             check_arity(op, 2, args.len())?;
             let a = unbox_int(sess.pipeline, builder, sess.vmctx, args[0]);
             let b = unbox_int(sess.pipeline, builder, sess.vmctx, args[1]);
             Ok(SsaVal::Raw(builder.ins().ishl(a, b), LIT_TAG_WORD))
         }
-        PrimOpKind::WordShrl => {
+        PrimOpKind::WordShrl | PrimOpKind::Word64Shrl => {
             check_arity(op, 2, args.len())?;
             let a = unbox_int(sess.pipeline, builder, sess.vmctx, args[0]);
             let b = unbox_int(sess.pipeline, builder, sess.vmctx, args[1]);
@@ -1004,110 +1007,11 @@ pub fn emit_primop(
         }
 
         // ---------------------------------------------------------------
-        // Int64/Word64/Word8 \u2014 on 64-bit, these are just Int#/Word# with
-        // different tags. GHC treats them identically at runtime.
+        // Int64/Word64/Word8 conversions \u2014 on 64-bit, Int64#/Word64# are
+        // register-width-identical to Int#/Word# (their arithmetic/bitwise/
+        // shift/comparison ops share the Int/Word emitters above); only the
+        // reinterpreting conversions between the sized types are distinct.
         // ---------------------------------------------------------------
-
-        // Int64 arithmetic
-        PrimOpKind::Int64Add => {
-            check_arity(op, 2, args.len())?;
-            let a = unbox_int(sess.pipeline, builder, sess.vmctx, args[0]);
-            let b = unbox_int(sess.pipeline, builder, sess.vmctx, args[1]);
-            Ok(SsaVal::Raw(builder.ins().iadd(a, b), LIT_TAG_INT))
-        }
-        PrimOpKind::Int64Sub => {
-            check_arity(op, 2, args.len())?;
-            let a = unbox_int(sess.pipeline, builder, sess.vmctx, args[0]);
-            let b = unbox_int(sess.pipeline, builder, sess.vmctx, args[1]);
-            Ok(SsaVal::Raw(builder.ins().isub(a, b), LIT_TAG_INT))
-        }
-        PrimOpKind::Int64Mul => {
-            check_arity(op, 2, args.len())?;
-            let a = unbox_int(sess.pipeline, builder, sess.vmctx, args[0]);
-            let b = unbox_int(sess.pipeline, builder, sess.vmctx, args[1]);
-            Ok(SsaVal::Raw(builder.ins().imul(a, b), LIT_TAG_INT))
-        }
-        PrimOpKind::Int64Negate => {
-            check_arity(op, 1, args.len())?;
-            let a = unbox_int(sess.pipeline, builder, sess.vmctx, args[0]);
-            Ok(SsaVal::Raw(builder.ins().ineg(a), LIT_TAG_INT))
-        }
-        PrimOpKind::Int64Shl => {
-            check_arity(op, 2, args.len())?;
-            let a = unbox_int(sess.pipeline, builder, sess.vmctx, args[0]);
-            let b = unbox_int(sess.pipeline, builder, sess.vmctx, args[1]);
-            Ok(SsaVal::Raw(builder.ins().ishl(a, b), LIT_TAG_INT))
-        }
-        PrimOpKind::Int64Shra => {
-            check_arity(op, 2, args.len())?;
-            let a = unbox_int(sess.pipeline, builder, sess.vmctx, args[0]);
-            let b = unbox_int(sess.pipeline, builder, sess.vmctx, args[1]);
-            Ok(SsaVal::Raw(builder.ins().sshr(a, b), LIT_TAG_INT))
-        }
-
-        // Int64 comparison
-        PrimOpKind::Int64Lt => emit_int_compare(
-            sess.pipeline,
-            builder,
-            sess.vmctx,
-            op,
-            IntCC::SignedLessThan,
-            args,
-            LIT_TAG_INT,
-        ),
-        PrimOpKind::Int64Le => emit_int_compare(
-            sess.pipeline,
-            builder,
-            sess.vmctx,
-            op,
-            IntCC::SignedLessThanOrEqual,
-            args,
-            LIT_TAG_INT,
-        ),
-        PrimOpKind::Int64Gt => emit_int_compare(
-            sess.pipeline,
-            builder,
-            sess.vmctx,
-            op,
-            IntCC::SignedGreaterThan,
-            args,
-            LIT_TAG_INT,
-        ),
-        PrimOpKind::Int64Ge => emit_int_compare(
-            sess.pipeline,
-            builder,
-            sess.vmctx,
-            op,
-            IntCC::SignedGreaterThanOrEqual,
-            args,
-            LIT_TAG_INT,
-        ),
-
-        // Word64 arithmetic/bitwise
-        PrimOpKind::Word64And => {
-            check_arity(op, 2, args.len())?;
-            let a = unbox_int(sess.pipeline, builder, sess.vmctx, args[0]);
-            let b = unbox_int(sess.pipeline, builder, sess.vmctx, args[1]);
-            Ok(SsaVal::Raw(builder.ins().band(a, b), LIT_TAG_WORD))
-        }
-        PrimOpKind::Word64Shl => {
-            check_arity(op, 2, args.len())?;
-            let a = unbox_int(sess.pipeline, builder, sess.vmctx, args[0]);
-            let b = unbox_int(sess.pipeline, builder, sess.vmctx, args[1]);
-            Ok(SsaVal::Raw(builder.ins().ishl(a, b), LIT_TAG_WORD))
-        }
-        PrimOpKind::Word64Shrl => {
-            check_arity(op, 2, args.len())?;
-            let a = unbox_int(sess.pipeline, builder, sess.vmctx, args[0]);
-            let b = unbox_int(sess.pipeline, builder, sess.vmctx, args[1]);
-            Ok(SsaVal::Raw(builder.ins().ushr(a, b), LIT_TAG_WORD))
-        }
-        PrimOpKind::Word64Or => {
-            check_arity(op, 2, args.len())?;
-            let a = unbox_int(sess.pipeline, builder, sess.vmctx, args[0]);
-            let b = unbox_int(sess.pipeline, builder, sess.vmctx, args[1]);
-            Ok(SsaVal::Raw(builder.ins().bor(a, b), LIT_TAG_WORD))
-        }
 
         // Conversions between sized int/word types (no-ops on 64-bit)
         PrimOpKind::Word64ToInt64 | PrimOpKind::Int64ToInt => {
