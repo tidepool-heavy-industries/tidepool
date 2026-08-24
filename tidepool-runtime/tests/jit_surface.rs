@@ -100,17 +100,17 @@ use tidepool_eval::value::Value;
 use tidepool_runtime::compile_and_run;
 use tidepool_testing::NullDispatcher;
 
-/// `Fork`'s position in the stack `eval_with_dispatch` compiles against: 8
-/// base effects at tags 0..7, then the interposed `Ask` (8), `RunLLMTurn`
-/// (9), and `Fork` (10) — `standard_decls()`'s own order (base8 + Ask +
-/// RunLLMTurn) with `Fork` appended explicitly, same as the harness's
-/// `agent_decls` (`standard_decls()` itself stops at `RunLLMTurn` — the
-/// ordinary session engine never services `Fork`).
+/// `Fork`'s position in the stack `eval_with_dispatch` compiles against: 9
+/// base effects at tags 0..8 (base8 + Entropy), then the interposed `Ask`
+/// (9), `RunLLMTurn` (10), and `Fork` (11) — `standard_decls()`'s own order
+/// with `Fork` appended explicitly, same as the harness's `agent_decls`
+/// (`standard_decls()` itself stops at `RunLLMTurn` — the ordinary session
+/// engine never services `Fork`).
 ///
 /// `Tidepool.Fork`'s `forkFilter`/`forkMap` reach the machine through
 /// `forkAllSited`, which sends on `Fork` — so their fanout dispatch arrives
 /// at THIS tag, not `RunLLMTurn`'s and not `Ask`'s.
-const FORK_TAG: u64 = 10;
+const FORK_TAG: u64 = 11;
 
 /// Compile `code` (a single Haskell expression of type `M a`) under the full
 /// MCP preamble and run it. Returns `Ok(json)` with the rendered result or
