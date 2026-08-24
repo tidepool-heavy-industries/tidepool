@@ -26,7 +26,7 @@ use tidepool_codegen::jit_machine::CancelHandle;
 use tidepool_mcp::CapturedOutput;
 use tidepool_repr::SessionId;
 use tidepool_runtime::session::registry::{CheckoutError, CheckoutReceipt, SingleSlot, SlotKind};
-use tidepool_runtime::session::Aged;
+use tidepool_runtime::session::{admit_checkout, Aged};
 
 use crate::session::Session;
 
@@ -255,10 +255,11 @@ impl SessionManager {
     /// per-variant match at the call site.
     ///
     /// Enforced by taking the checkout for real (the SAME atomic operation
-    /// the registry itself uses — no separate check-then-checkout race) and,
-    /// only if it reveals the PRE-checkout slot was non-`Idle`
-    /// ([`Checkout::holes_at_checkout`] non-empty), immediately handing the
-    /// machine straight back before anyone observes it as checked out.
+    /// the registry itself uses — no separate check-then-checkout race) via
+    /// the kernel's [`admit_checkout`] hook (#22 design doc §3.2 item 4):
+    /// this crate supplies the "refuse anything non-empty" policy the
+    /// kernel itself declines to have an opinion on, rather than
+    /// hand-rolling the checkout-then-restore-if-refused dance inline.
     pub fn admit_run(&self) -> Option<Result<Checkout<'_>, String>> {
         self.slot.current_id()?;
         // Snapshot the label BEFORE checking out — `checkout_run` itself
@@ -266,11 +267,8 @@ impl SessionManager {
         // always say "running" regardless of what it was refused for.
         let label_before_checkout = self.slot.label().unwrap_or_default();
         Some(match self.slot.checkout_run() {
-            Ok(co) if co.holes_at_checkout().is_empty() => Ok(co),
             Ok(co) => {
-                let holes = co.holes_at_checkout().to_vec();
-                co.restore_suspended(holes);
-                Err(label_before_checkout)
+                admit_checkout(co, |holes| holes.is_empty()).map_err(|_holes| label_before_checkout)
             }
             Err(e) => Err(e.to_string()),
         })

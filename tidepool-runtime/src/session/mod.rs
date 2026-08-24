@@ -25,7 +25,7 @@ pub mod resident;
 pub mod supervisor;
 pub mod turn;
 
-pub use kernel::{Aged, SuspendableSession};
+pub use kernel::{admit_checkout, Aged, SuspendableSession};
 
 pub use persistent::{MachineLease, PersistentSession, ScopeRetirement};
 

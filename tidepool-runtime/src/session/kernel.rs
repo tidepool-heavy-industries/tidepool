@@ -42,6 +42,8 @@
 
 use std::time::{Duration, Instant};
 
+use super::registry::Checkout;
+
 /// A value paired with the [`Instant`] it was minted — the one home for "how
 /// long has this been sitting unanswered" (§3.2 item 5: the abandonment-
 /// liveness contract). Generalizes `tidepool-repl`'s hand-rolled
@@ -172,8 +174,41 @@ pub trait SuspendableSession {
     ) -> Result<Self::Outcome, Self::Error>;
 }
 
+/// The admission-policy hook (§3.2 item 4): a caller-supplied opinion on
+/// whether a FRESH checkout may proceed, given the pre-checkout hole set
+/// [`Checkout::holes_at_checkout`] reports. The kernel's own registry
+/// (`checkout_run`) has no opinion here by design — a run over parked holes
+/// is ordinary on the harness's multi-hole path — so this is a HOOK, not a
+/// policy: nothing calls it unless a consumer opts in.
+///
+/// On refusal, the checkout is handed straight back UNTOUCHED (restored
+/// with the exact hole set it carried out, before anyone else can observe
+/// it as checked out) and the pre-checkout hole set is returned as the
+/// refusal's payload, so a caller can build its own "busy" message the same
+/// way `tidepool-repl`'s `SessionManager::admit_run` already does — this
+/// function replaces that method's hand-rolled checkout-then-restore-if-
+/// refused dance with the shared primitive, so a future consumer (a
+/// harness node that wants repl's stricter contract) does not have to
+/// re-derive it.
+pub fn admit_checkout<'r, M, H>(
+    checkout: Checkout<'r, M, H>,
+    admits: impl FnOnce(&[H]) -> bool,
+) -> Result<Checkout<'r, M, H>, Vec<H>>
+where
+    H: Clone + PartialEq + std::fmt::Debug,
+{
+    let holes = checkout.holes_at_checkout().to_vec();
+    if admits(&holes) {
+        Ok(checkout)
+    } else {
+        checkout.restore_suspended(holes.clone());
+        Err(holes)
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use super::super::registry::SessionRegistry;
     use super::*;
 
     #[test]
@@ -199,5 +234,53 @@ mod tests {
         let mut a = Aged::new(vec![1, 2, 3]);
         a.get_mut().push(4);
         assert_eq!(a.into_inner(), vec![1, 2, 3, 4]);
+    }
+
+    #[derive(Debug, PartialEq, Eq)]
+    struct FakeMachine {
+        turns: u32,
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    struct Hole(&'static str);
+
+    /// A refused admission hands the checkout straight back, with the exact
+    /// pre-checkout hole set both restored and returned — mirrors
+    /// `tidepool-repl`'s `admit_run`'s "busy, here's what it's busy with"
+    /// contract.
+    #[test]
+    fn refused_admission_restores_the_untouched_checkout_and_reports_the_holes() {
+        let reg: SessionRegistry<FakeMachine, Hole> = SessionRegistry::new();
+        let id = tidepool_repr::SessionId(1);
+        reg.insert_idle(id, FakeMachine { turns: 0 });
+        let co = reg.checkout_run(id).expect("idle -> run");
+        co.restore_suspended(vec![Hole("h1")]);
+
+        let co = reg.checkout_run(id).expect("run over parked frame");
+        match admit_checkout(co, |holes| holes.is_empty()) {
+            Err(holes) => assert_eq!(holes, vec![Hole("h1")]),
+            Ok(_) => panic!("a non-empty hole set must be refused"),
+        }
+
+        // The checkout was handed straight back untouched: the hole is
+        // still there, resumable, and a fresh checkout still sees it.
+        let co = reg
+            .checkout_resume(id, &Hole("h1"))
+            .expect("the hole survived the refused admission");
+        co.restore_suspended(Vec::new());
+    }
+
+    /// An admitted checkout is returned unchanged, ready for the caller's
+    /// own turn.
+    #[test]
+    fn admitted_checkout_is_returned_for_the_caller_to_drive() {
+        let reg: SessionRegistry<FakeMachine, Hole> = SessionRegistry::new();
+        let id = tidepool_repr::SessionId(2);
+        reg.insert_idle(id, FakeMachine { turns: 0 });
+        let co = reg.checkout_run(id).expect("idle -> run");
+
+        let mut co = admit_checkout(co, |holes| holes.is_empty()).expect("idle admits");
+        co.machine().turns += 1;
+        co.restore_suspended(Vec::new());
     }
 }
