@@ -952,7 +952,7 @@ impl OuterRow {
 }
 
 /// The nested answerer Agent's scoped decl row: `[AskUser, Fork, ReadState, Green, Finalize]`.
-/// It declares no base effects (`Console`/`KV`/`Fs`/`Lsp`/`Http`/`Exec`/`Git`/
+/// It declares no base effects (`Console`/`KV`/`Fs`/`Http`/`Exec`/`Git`/
 /// `Time`/`Meta`) and no `RunLLMTurn`/`Ask`, so an answerer turn compiles
 /// against a `Tidepool.Effects` that never defines those verbs — the answerer
 /// structurally cannot run a shell command, read files, hit the network, or

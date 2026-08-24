@@ -350,7 +350,7 @@ fn ask_is_a_compile_error_in_the_answerer_stack() {
 
 /// The capability boundary proper: a BASE effect verb (`httpGet`, the `Http`
 /// effect — representative of the nine base effects the answerer row drops:
-/// `Console`/`KV`/`Fs`/`Lsp`/`Http`/`Exec`/`Git`/`Time`/`Llm`) does NOT
+/// `Console`/`KV`/`Fs`/`Http`/`Exec`/`Git`/`Time`/`Llm`) does NOT
 /// typecheck against `Eff '[AskUser, Fork, ReadState, Green, Finalize]`. This is the whole
 /// point of the scoped stack — the answerer structurally cannot hit the
 /// network, run a shell command, or read files, because those verbs are
