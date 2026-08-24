@@ -22,7 +22,9 @@ use std::time::Duration;
 use futures_util::StreamExt;
 use reqwest::Client;
 use serde_json::{json, Value};
-use tidepool_harness::selfharness::operator::{FieldShape, FormShape, OperatorGate};
+use tidepool_harness::selfharness::operator::{
+    DelegationPhase, FieldShape, FormShape, OperatorGate,
+};
 use tidepool_web::{router, AppState};
 use tokio::net::TcpListener;
 
@@ -1106,6 +1108,110 @@ async fn post_turn_source_accumulates_a_history() {
     let reject = html.find("finalize @Decision Reject").unwrap();
     let approve = html.find("finalize @Decision Approve").unwrap();
     assert!(reject < approve, "newest turn renders first:\n{html}");
+}
+
+/// poke-round finding 4: a failed round — including a `NoBlock` reply, which
+/// used to be entirely invisible (no `Event`, no gate call) — renders on the
+/// node's own section, with a wall-clock stamp, over real HTTP.
+#[tokio::test(flavor = "multi_thread")]
+async fn round_progress_renders_a_failed_and_a_noblock_round_with_stamps() {
+    let (addr, state) = boot().await;
+    let base = format!("http://{addr}");
+    let client = Client::new();
+
+    let gate = state.register_node("n1");
+    gate.round_progress(1, None);
+    gate.round_progress(2, Some("Couldn't match expected type `Decision`"));
+    gate.round_progress(3, Some("reply had no haskell block"));
+
+    let html = client
+        .get(format!("{base}/legacy"))
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    assert!(html.contains("data-node=\"round\""), "{html}");
+    assert!(html.contains("round 1"), "{html}");
+    assert!(html.contains("round 2"), "{html}");
+    assert!(
+        html.contains("Couldn't match expected type `Decision`"),
+        "{html}"
+    );
+    assert!(html.contains("round 3"), "{html}");
+    assert!(
+        html.contains("reply had no haskell block"),
+        "the previously-silent NoBlock round must now render:\n{html}"
+    );
+    assert!(html.contains("class=\"stamp\""), "{html}");
+}
+
+/// A subagent delegation's whole lifecycle — started, then settled — renders
+/// on the node's own section as its own append-only entries, each with a
+/// stamp, over real HTTP.
+#[tokio::test(flavor = "multi_thread")]
+async fn delegation_progress_renders_the_full_lifecycle_with_its_outcome() {
+    let (addr, state) = boot().await;
+    let base = format!("http://{addr}");
+    let client = Client::new();
+
+    let gate = state.register_node("n1");
+    gate.delegation_progress(&DelegationPhase::Started {
+        brief: "check CI status".to_string(),
+    });
+    gate.delegation_progress(&DelegationPhase::Settled {
+        outcome: "CI is green".to_string(),
+        duration: Duration::from_secs(2),
+    });
+
+    let html = client
+        .get(format!("{base}/legacy"))
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    assert!(html.contains("data-node=\"delegation\""), "{html}");
+    assert!(html.contains("delegation started"), "{html}");
+    assert!(html.contains("check CI status"), "{html}");
+    assert!(html.contains("delegation settled"), "{html}");
+    assert!(
+        html.contains("CI is green"),
+        "the delegation's outcome must render:\n{html}"
+    );
+    assert!(html.contains("class=\"stamp\""), "{html}");
+}
+
+/// The spawn-failure path — no subagent handler configured — used to be
+/// completely silent (no `Event`, no gate call, no `tracing` line). It now
+/// renders a `Failed` phase over real HTTP.
+#[tokio::test(flavor = "multi_thread")]
+async fn delegation_progress_renders_the_spawn_failure_path() {
+    let (addr, state) = boot().await;
+    let base = format!("http://{addr}");
+    let client = Client::new();
+
+    let gate = state.register_node("n1");
+    gate.delegation_progress(&DelegationPhase::Failed {
+        reason: "no subagent handler is configured".to_string(),
+        duration: Duration::from_secs(0),
+    });
+
+    let html = client
+        .get(format!("{base}/legacy"))
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    assert!(html.contains("delegation FAILED"), "{html}");
+    assert!(
+        html.contains("no subagent handler is configured"),
+        "the spawn-failure path must now be visible:\n{html}"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]

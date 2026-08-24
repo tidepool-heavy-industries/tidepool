@@ -18,11 +18,12 @@
 //! branch.
 
 use std::collections::VecDeque;
+use std::time::Duration;
 
 use maud::{html, Markup};
 use serde_json::{Map, Value as Jv};
 use tidepool_harness::selfharness::operator::{
-    child_path, humanize_key, FieldShape, FormShape, VariantShape, ROOT_BIND_PATH,
+    child_path, humanize_key, DelegationPhase, FieldShape, FormShape, VariantShape, ROOT_BIND_PATH,
 };
 
 use crate::server::{AskState, TimelineItem};
@@ -76,9 +77,9 @@ pub(crate) fn status(view: &NodeView) -> (&'static str, &'static str) {
     }
     for entry in view.timeline.iter().rev() {
         match entry {
-            TimelineItem::Finalized(_) => return ("done", "done"),
-            TimelineItem::Failed(_) => return ("failed", "failed"),
-            TimelineItem::Seeded(_) => break,
+            TimelineItem::Finalized(..) => return ("done", "done"),
+            TimelineItem::Failed(..) => return ("failed", "failed"),
+            TimelineItem::Seeded(..) => break,
             _ => {}
         }
     }
@@ -271,44 +272,126 @@ fn structured_field(value: &Jv) -> Markup {
 /// same as every other field this function doesn't render.
 fn timeline_entry(node_id: &str, entry: &TimelineItem) -> Markup {
     match entry {
-        TimelineItem::Note(text) => html! {
-            p class="note" style="white-space: pre-wrap" { (text) }
+        TimelineItem::Note(text, stamp) => html! {
+            p class="note" style="white-space: pre-wrap" { (stamp_span(stamp)) (text) }
         },
-        TimelineItem::Seeded(seed) => html! {
+        TimelineItem::Seeded(seed, stamp) => html! {
             details class="seed" data-node="seed" {
-                summary { "seed — " (snippet(seed)) }
+                summary { (stamp_span(stamp)) "seed — " (snippet(seed)) }
                 pre { (seed) }
             }
         },
-        TimelineItem::Finalized(value) => html! {
+        TimelineItem::Finalized(value, stamp) => html! {
             div class="final" data-node="final" {
-                p class="eyebrow" { "Final value" }
+                p class="eyebrow" { (stamp_span(stamp)) "Final value" }
                 (structured_value(value))
             }
         },
-        TimelineItem::Failed(reason) => html! {
+        TimelineItem::Failed(reason, stamp) => html! {
             div class="failure" data-node="failure" {
-                p class="eyebrow failure-eyebrow" { "Ended without a value" }
+                p class="eyebrow failure-eyebrow" { (stamp_span(stamp)) "Ended without a value" }
                 (structured_value(reason))
             }
         },
-        TimelineItem::Ask { id, state } => match state {
-            AskState::PendingForm { shape, .. } => ask_form(node_id, *id, shape),
-            AskState::AnsweredForm { shape, answer } => answered_form(node_id, *id, shape, answer),
-            AskState::Retracted { shape } => retracted_form(node_id, *id, shape),
+        TimelineItem::Ask { id, state, stamp } => match state {
+            AskState::PendingForm { shape, .. } => ask_form(node_id, *id, shape, stamp),
+            AskState::AnsweredForm { shape, answer } => {
+                answered_form(node_id, *id, shape, answer, stamp)
+            }
+            AskState::Retracted { shape } => retracted_form(node_id, *id, shape, stamp),
         },
+        TimelineItem::Round {
+            round,
+            error,
+            stamp,
+        } => round_entry(*round, error.as_deref(), stamp),
+        TimelineItem::Delegation { phase, stamp } => delegation_entry(phase, stamp),
     }
+}
+
+/// A small `HH:MM:SS` badge rendered alongside every timeline entry's own
+/// content — never replacing the existing eyebrow/label text, just
+/// prepending WHEN to WHAT. `Stamp` is already formatted server-side
+/// (`server::stamp_now`); this only wraps it in markup.
+fn stamp_span(stamp: &str) -> Markup {
+    html! { span class="stamp" { (stamp) } " " }
+}
+
+/// One answerer round's progress, compact by design: rounds are chatty (up
+/// to 8/turn at current volumes — no cap/coalesce needed), so this is a
+/// single muted line, never a full timeline block. `error` is the
+/// plain-language summary [`OperatorGate::round_progress`] carries — absent
+/// on a compiled round, present on a failed compile OR a `NoBlock` reply.
+fn round_entry(round: u32, error: Option<&str>, stamp: &str) -> Markup {
+    html! {
+        p class="round-progress muted" data-node="round" {
+            (stamp_span(stamp))
+            "round " (round)
+            @if let Some(err) = error {
+                " — " (round_error_summary(err))
+            } @else {
+                " — compiled"
+            }
+        }
+    }
+}
+
+/// The first line of a round's error text, capped — the full text (a GHC
+/// diagnostic, or the no-block explanation) already lives in the durable
+/// log; this compact line's job is a glanceable pulse, not a second copy of
+/// the diagnostic.
+fn round_error_summary(error: &str) -> String {
+    let first = error.lines().next().unwrap_or(error).trim();
+    let mut s: String = first.chars().take(120).collect();
+    if first.chars().count() > 120 {
+        s.push('…');
+    }
+    s
+}
+
+/// One moment in a subagent delegation's lifecycle — started, settled, or
+/// failed (see [`DelegationPhase`]) — the SAME compact one-liner idiom as
+/// [`round_entry`], one append-only entry per phase.
+fn delegation_entry(phase: &DelegationPhase, stamp: &str) -> Markup {
+    html! {
+        p class="delegation-progress muted" data-node="delegation" {
+            (stamp_span(stamp))
+            (delegation_summary(phase))
+        }
+    }
+}
+
+fn delegation_summary(phase: &DelegationPhase) -> String {
+    match phase {
+        DelegationPhase::Started { brief } => format!("delegation started — {}", snippet(brief)),
+        DelegationPhase::Settled { outcome, duration } => format!(
+            "delegation settled ({}) — {}",
+            format_duration(*duration),
+            snippet(outcome)
+        ),
+        DelegationPhase::Failed { reason, duration } => format!(
+            "delegation FAILED ({}) — {}",
+            format_duration(*duration),
+            snippet(reason)
+        ),
+    }
+}
+
+fn format_duration(d: Duration) -> String {
+    format!("{:.1}s", d.as_secs_f64())
 }
 
 /// A retracted ask, read-only at its original timeline position: no form
 /// controls (there is nothing left to submit), and no fabricated answer —
 /// a second resolution plane settled the decision this ask existed to
 /// gather before the operator ever got to it.
-fn retracted_form(node_id: &str, interaction: u64, shape: &FormShape) -> Markup {
+fn retracted_form(node_id: &str, interaction: u64, shape: &FormShape, stamp: &str) -> Markup {
     html! {
         div id=(ask_id(node_id, interaction)) data-rev=(interaction)
             class="retracted" data-node="retracted" {
-            p class="eyebrow" { "ask #" (interaction) " — Withdrawn — " (shape_title(shape)) }
+            p class="eyebrow" {
+                (stamp_span(stamp)) "ask #" (interaction) " — Withdrawn — " (shape_title(shape))
+            }
             p class="prose" { "Resolved another way before this was answered." }
         }
     }
@@ -317,11 +400,19 @@ fn retracted_form(node_id: &str, interaction: u64, shape: &FormShape) -> Markup 
 /// An answered form, read-only at its original timeline position: the form's
 /// type name and the answer the harness actually received (the reassembled
 /// submission — the truth of what crossed the gate, not the raw wire).
-fn answered_form(node_id: &str, interaction: u64, shape: &FormShape, answer: &Jv) -> Markup {
+fn answered_form(
+    node_id: &str,
+    interaction: u64,
+    shape: &FormShape,
+    answer: &Jv,
+    stamp: &str,
+) -> Markup {
     html! {
         div id=(ask_id(node_id, interaction)) data-rev=(interaction)
             class="answered" data-node="answered" {
-            p class="eyebrow" { "ask #" (interaction) " — Answered — " (shape_title(shape)) }
+            p class="eyebrow" {
+                (stamp_span(stamp)) "ask #" (interaction) " — Answered — " (shape_title(shape))
+            }
             pre { (answer_text(answer)) }
         }
     }
@@ -393,11 +484,11 @@ fn idle() -> Markup {
 /// `@post(...)` target — the client posts its collected flat controls
 /// straight to the exact ask that produced them, no separate nonce field
 /// needed in the body.
-fn ask_form(node_id: &str, interaction: u64, shape: &FormShape) -> Markup {
+fn ask_form(node_id: &str, interaction: u64, shape: &FormShape, stamp: &str) -> Markup {
     html! {
         form id=(ask_id(node_id, interaction)) data-rev=(interaction) class="form"
              data-on-submit=(post_url(node_id, "submit", interaction)) {
-            p class="eyebrow ask-label" { "ask #" (interaction) }
+            p class="eyebrow ask-label" { (stamp_span(stamp)) "ask #" (interaction) }
             @if let Some(doc) = shape_doc(shape) {
                 p class="form-intro" data-node="form-intro" { (doc) }
             }
@@ -614,17 +705,19 @@ mod tests {
     // The pending [`AskState`] variants carry a real oneshot resolver in
     // production; tests fabricate one and never look at it again.
 
+    const TEST_STAMP: &str = "00:00:00";
+
     fn tl_note(text: &str) -> TimelineItem {
-        TimelineItem::Note(text.to_string())
+        TimelineItem::Note(text.to_string(), TEST_STAMP.to_string())
     }
     fn tl_seeded(text: &str) -> TimelineItem {
-        TimelineItem::Seeded(text.to_string())
+        TimelineItem::Seeded(text.to_string(), TEST_STAMP.to_string())
     }
     fn tl_finalized(text: &str) -> TimelineItem {
-        TimelineItem::Finalized(text.to_string())
+        TimelineItem::Finalized(text.to_string(), TEST_STAMP.to_string())
     }
     fn tl_failed(text: &str) -> TimelineItem {
-        TimelineItem::Failed(text.to_string())
+        TimelineItem::Failed(text.to_string(), TEST_STAMP.to_string())
     }
     fn tl_pending_form(id: u64, shape: FormShape) -> TimelineItem {
         TimelineItem::Ask {
@@ -633,12 +726,27 @@ mod tests {
                 shape,
                 resolve: tokio::sync::oneshot::channel().0,
             },
+            stamp: TEST_STAMP.to_string(),
         }
     }
     fn tl_answered_form(id: u64, shape: FormShape, answer: Jv) -> TimelineItem {
         TimelineItem::Ask {
             id,
             state: AskState::AnsweredForm { shape, answer },
+            stamp: TEST_STAMP.to_string(),
+        }
+    }
+    fn tl_round(round: u32, error: Option<&str>) -> TimelineItem {
+        TimelineItem::Round {
+            round,
+            error: error.map(str::to_string),
+            stamp: TEST_STAMP.to_string(),
+        }
+    }
+    fn tl_delegation(phase: DelegationPhase) -> TimelineItem {
+        TimelineItem::Delegation {
+            phase,
+            stamp: TEST_STAMP.to_string(),
         }
     }
 
@@ -905,6 +1013,84 @@ mod tests {
         assert!(html.contains("data-node=\"failure\""), "{html}");
         assert!(html.contains("Ended without a value"), "{html}");
         assert!(html.contains("round exhaustion"), "{html}");
+    }
+
+    /// A round's progress renders as a compact one-liner — never a full
+    /// timeline block — carrying the round number, a stamp, and (on a
+    /// failed/`NoBlock` round) a plain-language error summary.
+    #[test]
+    fn node_panel_renders_round_progress_compactly() {
+        let th = empty_history();
+        let items = [
+            tl_round(1, None),
+            tl_round(2, Some("Couldn't match expected type…")),
+        ];
+        let view = base_view("n1", &items, &th, 0);
+        let html = node_panel(&view).into_string();
+        assert!(html.contains("data-node=\"round\""), "{html}");
+        assert!(html.contains("round 1"), "{html}");
+        assert!(html.contains("compiled"), "{html}");
+        assert!(html.contains("round 2"), "{html}");
+        assert!(html.contains("Couldn't match expected type…"), "{html}");
+        assert!(html.contains("class=\"stamp\""), "{html}");
+    }
+
+    /// A `NoBlock` round (previously fully invisible) renders the same as
+    /// any other failed round — the round dispatcher's third arm.
+    #[test]
+    fn node_panel_renders_a_noblock_round_with_its_error_summary() {
+        let th = empty_history();
+        let items = [tl_round(3, Some("reply had no haskell block"))];
+        let view = base_view("n1", &items, &th, 0);
+        let html = node_panel(&view).into_string();
+        assert!(html.contains("round 3"), "{html}");
+        assert!(html.contains("reply had no haskell block"), "{html}");
+    }
+
+    /// Every phase of a subagent delegation's lifecycle renders as its own
+    /// append-only entry, each with a stamp — the spawn-failure path
+    /// (`Failed` with no prior `Settled`) is now visible, where it used to
+    /// be completely silent.
+    #[test]
+    fn node_panel_renders_delegation_lifecycle_phases() {
+        let th = empty_history();
+        let items = [
+            tl_delegation(DelegationPhase::Started {
+                brief: "check CI status".to_string(),
+            }),
+            tl_delegation(DelegationPhase::Settled {
+                outcome: "CI is green".to_string(),
+                duration: Duration::from_secs(2),
+            }),
+        ];
+        let view = base_view("n1", &items, &th, 0);
+        let html = node_panel(&view).into_string();
+        assert!(html.contains("data-node=\"delegation\""), "{html}");
+        assert!(html.contains("delegation started"), "{html}");
+        assert!(html.contains("check CI status"), "{html}");
+        assert!(html.contains("delegation settled"), "{html}");
+        assert!(html.contains("CI is green"), "{html}");
+        assert_eq!(
+            html.matches("data-node=\"delegation\"").count(),
+            2,
+            "{html}"
+        );
+    }
+
+    /// The spawn-failure path — no subagent handler configured — renders a
+    /// `Failed` phase with no preceding `Settled`: this used to be
+    /// completely silent (no `Event`, no gate call, no `tracing` line).
+    #[test]
+    fn node_panel_renders_a_failed_delegation_with_no_handler() {
+        let th = empty_history();
+        let items = [tl_delegation(DelegationPhase::Failed {
+            reason: "no subagent handler is configured".to_string(),
+            duration: Duration::from_secs(0),
+        })];
+        let view = base_view("n1", &items, &th, 0);
+        let html = node_panel(&view).into_string();
+        assert!(html.contains("delegation FAILED"), "{html}");
+        assert!(html.contains("no subagent handler is configured"), "{html}");
     }
 
     /// A multi-chapter timeline (the unified root across turns) renders each
@@ -1444,7 +1630,7 @@ mod tests {
             fields: vec![],
             doc: Some("Configure the SSH connection.".to_string()),
         };
-        let html = ask_form("n1", 0, &shape).into_string();
+        let html = ask_form("n1", 0, &shape, "00:00:00").into_string();
         assert!(html.contains("Configure the SSH connection."), "{html}");
         assert!(html.contains("data-node=\"form-intro\""), "{html}");
     }
@@ -1459,7 +1645,7 @@ mod tests {
             fields: vec![],
             doc: Some("<script>alert(1)</script>".to_string()),
         };
-        let html = ask_form("n1", 0, &shape).into_string();
+        let html = ask_form("n1", 0, &shape, "00:00:00").into_string();
         assert!(!html.contains("<script>alert"), "{html}");
         assert!(html.contains("&lt;script&gt;"), "{html}");
     }
@@ -1551,7 +1737,7 @@ mod tests {
     /// markup at all.
     #[test]
     fn docless_form_renders_with_no_help_markup() {
-        let html = ask_form("n1", 0, &ssh_product_shape()).into_string();
+        let html = ask_form("n1", 0, &ssh_product_shape(), "00:00:00").into_string();
         assert!(!html.contains("data-node=\"form-intro\""), "{html}");
         assert!(!html.contains("data-node=\"field-help\""), "{html}");
     }

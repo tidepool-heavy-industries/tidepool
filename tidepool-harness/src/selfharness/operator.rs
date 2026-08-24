@@ -50,6 +50,7 @@
 //! The collector that builds this JSON from the rendered controls is
 //! `tidepool-web`'s submission path, guided by the same [`FormShape`].
 use std::sync::Arc;
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
@@ -133,6 +134,46 @@ pub trait OperatorGate: Send + Sync {
     /// won without asking every gate. Default no-op — [`StdinGate`] and any
     /// gate with no timeline to clean up need no override.
     fn retract_form(&self, _shape: &FormShape) {}
+
+    /// One answerer round's progress, called for EVERY round attempt in a
+    /// hole's servicing — a compiled round (`error: None`), a failed compile
+    /// (`error: Some(msg)`), and a `NoBlock` reply that never reached a
+    /// compile at all (`error: Some("no haskell block…")`) alike — so a
+    /// stalled or failing retry loop is visible to the operator WHILE it is
+    /// happening, not only reconstructable afterward from the durable log.
+    /// `round` is 1-based within the hole's servicing, matching
+    /// `Event::AnswererRound`. Default no-op, same reasoning as
+    /// [`Self::post_note`] — every existing [`OperatorGate`] impl (in
+    /// particular [`StdinGate`], and any test gate) stays valid without
+    /// change.
+    fn round_progress(&self, _round: u32, _error: Option<&str>) {}
+
+    /// One moment in a subagent DELEGATION's lifecycle (`spawnAgent`/
+    /// `spawnAgentRaw`, or a labeled node's own `delegate`) — see
+    /// [`DelegationPhase`]. A delegation starts once and ends exactly once,
+    /// either settled or failed — including the "no subagent handler
+    /// configured" refusal, which used to be completely silent. Default
+    /// no-op, same reasoning as [`Self::post_note`].
+    fn delegation_progress(&self, _phase: &DelegationPhase) {}
+}
+
+/// One moment in a subagent delegation's lifecycle — see
+/// [`OperatorGate::delegation_progress`]. A delegation is announced once
+/// ([`Self::Started`]) and ends exactly once, either successfully
+/// ([`Self::Settled`]) or not ([`Self::Failed`]) — never both.
+#[derive(Debug, Clone)]
+pub enum DelegationPhase {
+    /// The delegation was just dispatched — `brief` is a short human-legible
+    /// rendering of what was asked (the request, not the raw wire `Value`).
+    Started { brief: String },
+    /// The delegation finished and returned a value — `outcome` is a short
+    /// human-legible rendering of what came back, `duration` how long the
+    /// whole dispatch took.
+    Settled { outcome: String, duration: Duration },
+    /// The delegation could not be completed — no handler wired, or the
+    /// dispatch itself failed — `reason` is the failure text, `duration` how
+    /// long the attempt ran before failing.
+    Failed { reason: String, duration: Duration },
 }
 
 /// Headless default: `present_form` reads one JSON value per line (this
@@ -322,6 +363,31 @@ mod tests {
     #[test]
     fn retract_form_defaults_to_a_no_op() {
         StdinGate.retract_form(&FormShape::String); // must not panic
+    }
+
+    /// [`OperatorGate::round_progress`] is default-implemented as a no-op —
+    /// same reasoning as every other lifecycle extension in this file.
+    #[test]
+    fn round_progress_defaults_to_a_no_op() {
+        StdinGate.round_progress(1, None);
+        StdinGate.round_progress(2, Some("no haskell block in the reply"));
+    }
+
+    /// [`OperatorGate::delegation_progress`] is default-implemented as a
+    /// no-op, across all three [`DelegationPhase`] variants.
+    #[test]
+    fn delegation_progress_defaults_to_a_no_op() {
+        StdinGate.delegation_progress(&DelegationPhase::Started {
+            brief: "check CI status".to_string(),
+        });
+        StdinGate.delegation_progress(&DelegationPhase::Settled {
+            outcome: "ok".to_string(),
+            duration: Duration::from_secs(1),
+        });
+        StdinGate.delegation_progress(&DelegationPhase::Failed {
+            reason: "no subagent handler configured".to_string(),
+            duration: Duration::from_secs(0),
+        });
     }
 
     // ---- humanize_key -----------------------------------------------------

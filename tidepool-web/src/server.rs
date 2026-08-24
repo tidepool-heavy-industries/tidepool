@@ -72,7 +72,7 @@ use tidepool_harness::provider::settings::{
     is_allowed_model, ModelSettings, SharedModelSettings, MODEL_ALLOWLIST,
 };
 use tidepool_harness::selfharness::operator::{
-    child_path, FormShape, OperatorGate, ROOT_BIND_PATH,
+    child_path, DelegationPhase, FormShape, OperatorGate, ROOT_BIND_PATH,
 };
 use tokio::sync::{broadcast, oneshot};
 
@@ -111,12 +111,63 @@ pub(crate) enum AskState {
 /// (pending and answered alike). Seeds, finalized values, and failures are
 /// TIMELINE items too, at their true chronological position — one node can
 /// live several windows in sequence (the unified root does, every turn).
+///
+/// Every variant carries a [`Stamp`] — the wall-clock time it was inserted,
+/// set server-side at that moment (never client-supplied, never derived from
+/// content) — so a long-running turn's progress reads with WHEN alongside
+/// WHAT: today's 3-5 minute turn otherwise renders as an undifferentiated
+/// spinner.
 pub(crate) enum TimelineItem {
-    Note(String),
-    Seeded(String),
-    Finalized(String),
-    Failed(String),
-    Ask { id: u64, state: AskState },
+    Note(String, Stamp),
+    Seeded(String, Stamp),
+    Finalized(String, Stamp),
+    Failed(String, Stamp),
+    Ask {
+        id: u64,
+        state: AskState,
+        stamp: Stamp,
+    },
+    /// One answerer round's progress ([`OperatorGate::round_progress`]) —
+    /// `error` is `None` on a compiled round, `Some(...)` on a failed
+    /// compile OR a `NoBlock` reply (no compile attempt at all) — both are
+    /// rounds the operator watched pass, previously invisible until the
+    /// round dispatcher's `NoBlock` arm gained this call.
+    Round {
+        round: u32,
+        error: Option<String>,
+        stamp: Stamp,
+    },
+    /// One moment in a subagent delegation's lifecycle
+    /// ([`OperatorGate::delegation_progress`]) — started, settled, or
+    /// failed, each its own append-only entry (never mutated in place),
+    /// consistent with every other timeline item.
+    Delegation {
+        phase: DelegationPhase,
+        stamp: Stamp,
+    },
+}
+
+/// A wall-clock stamp, formatted `HH:MM:SS` at render time from the moment a
+/// timeline item was inserted — plain UTC time-of-day, no timezone
+/// conversion (no caller here needed one, and this crate carries no time-zone
+/// dependency). See [`TimelineItem`]'s own doc for why every variant carries
+/// one.
+pub(crate) type Stamp = String;
+
+/// The current wall-clock stamp, formatted `HH:MM:SS` — called once per
+/// timeline insertion, server-side, at the moment of insertion.
+fn stamp_now() -> Stamp {
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+        % 86_400;
+    format!(
+        "{:02}:{:02}:{:02}",
+        secs / 3600,
+        (secs % 3600) / 60,
+        secs % 60
+    )
 }
 
 /// How many compiled turn sources the history pane retains per node — enough
@@ -308,7 +359,11 @@ impl AppState {
             .get_mut(node_id)
             .expect("WebGate only holds ids from register_node, which always inserts one");
         let id = slot.next_ask_id.next_raw();
-        slot.timeline.push(TimelineItem::Ask { id, state });
+        slot.timeline.push(TimelineItem::Ask {
+            id,
+            state,
+            stamp: stamp_now(),
+        });
         slot.rev += 1;
         drop(reg);
         self.ping(node_id.to_string());
@@ -344,6 +399,7 @@ impl AppState {
         }
         slot.timeline.push(TimelineItem::Note(
             "the previous submission didn't decode — re-presenting the same question".to_string(),
+            stamp_now(),
         ));
         slot.rev += 1;
         drop(reg);
@@ -355,7 +411,7 @@ impl AppState {
         let mut reg = self.registry.lock();
         #[allow(clippy::expect_used, reason = "registered node")]
         let slot = reg.nodes.get_mut(node_id).expect("registered node");
-        slot.timeline.push(TimelineItem::Note(text));
+        slot.timeline.push(TimelineItem::Note(text, stamp_now()));
         slot.rev += 1;
         drop(reg);
         self.ping(node_id.to_string());
@@ -584,6 +640,7 @@ impl AppState {
                 TimelineItem::Ask {
                     id,
                     state: AskState::PendingForm { shape, .. },
+                    ..
                 } => Some((*id, shape.clone())),
                 _ => None,
             })
@@ -601,7 +658,7 @@ fn find_ask(
     timeline
         .iter_mut()
         .find_map(|item| match item {
-            TimelineItem::Ask { id, state } if *id == interaction => Some(state),
+            TimelineItem::Ask { id, state, .. } if *id == interaction => Some(state),
             _ => None,
         })
         .ok_or(ResolveError::NoSuchInteraction)
@@ -967,21 +1024,51 @@ impl OperatorGate for WebGate {
 
     fn node_seeded(&self, label: &str, seed: &str) {
         self.state
-            .push_lifecycle(label, TimelineItem::Seeded(seed.to_string()));
+            .push_lifecycle(label, TimelineItem::Seeded(seed.to_string(), stamp_now()));
     }
 
     fn node_finalized(&self, label: &str, value: &str) {
-        self.state
-            .push_lifecycle(label, TimelineItem::Finalized(value.to_string()));
+        self.state.push_lifecycle(
+            label,
+            TimelineItem::Finalized(value.to_string(), stamp_now()),
+        );
     }
 
     fn node_failed(&self, label: &str, reason: &str) {
         self.state
-            .push_lifecycle(label, TimelineItem::Failed(reason.to_string()));
+            .push_lifecycle(label, TimelineItem::Failed(reason.to_string(), stamp_now()));
     }
 
     fn retract_form(&self, shape: &FormShape) {
         self.state.retract_ask(&self.node_id, shape);
+    }
+
+    /// Append a [`TimelineItem::Round`] onto this gate's own node — visible
+    /// live while a retry loop is happening (poke-round finding 4), not only
+    /// reconstructable afterward from the durable log.
+    fn round_progress(&self, round: u32, error: Option<&str>) {
+        self.state.push_lifecycle(
+            &self.node_id,
+            TimelineItem::Round {
+                round,
+                error: error.map(str::to_string),
+                stamp: stamp_now(),
+            },
+        );
+    }
+
+    /// Append a [`TimelineItem::Delegation`] onto this gate's own node — one
+    /// entry per lifecycle phase (started/settled/failed), each at its true
+    /// chronological position, same append-only discipline as every other
+    /// timeline item.
+    fn delegation_progress(&self, phase: &DelegationPhase) {
+        self.state.push_lifecycle(
+            &self.node_id,
+            TimelineItem::Delegation {
+                phase: phase.clone(),
+                stamp: stamp_now(),
+            },
+        );
     }
 }
 
@@ -1318,6 +1405,7 @@ impl AppState {
                 TimelineItem::Ask {
                     id,
                     state: AskState::PendingForm { .. },
+                    ..
                 } => Some(*id),
                 _ => None,
             })
@@ -1631,6 +1719,7 @@ mod tests {
                 shape: destination_shape(),
                 resolve: oneshot::channel().0,
             },
+            stamp: "00:00:00".to_string(),
         }];
         let view = NodeView {
             node_id: "n1",

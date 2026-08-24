@@ -87,7 +87,9 @@ use crate::log::Actor;
 use crate::selfharness::harness_source::HarnessSource;
 use crate::selfharness::lifecycle::SelfHarnessState;
 use crate::selfharness::observer::{AskId, Event, FormSource, Observer};
-use crate::selfharness::operator::{FieldShape, FormShape, OperatorGate, StdinGate};
+use crate::selfharness::operator::{
+    DelegationPhase, FieldShape, FormShape, OperatorGate, StdinGate,
+};
 use crate::selfharness::persistence::{self, PersistenceError};
 use crate::selfharness::state_cross;
 use crate::timing;
@@ -763,6 +765,10 @@ fn fork_child_failure_corrective(path: &str, exit: &InvocationExit, ty_label: &s
          proceed without that child's result: evaluate `finalize @{ty_disp} value`."
     )
 }
+
+/// The plain-language round-progress summary for a `NoBlock` reply — the
+/// round dispatcher's third arm, alongside a compile success/failure.
+const NO_HASKELL_BLOCK_ROUND_ERROR: &str = "reply had no haskell block";
 
 /// The completed block's rendered value, capped for a round-complete
 /// message — GHCi shows you what you evaluated, and so does this window:
@@ -3396,7 +3402,11 @@ impl SelfHarnessDriver {
                         // (suspension-serviced; the outer handled prefix
                         // stays empty) and resume with its typed response.
                         SuspensionRouting::Subagent => {
-                            let value = self.service_outer_subagent(&request, &compiled.table)?;
+                            let value = self.service_outer_subagent(
+                                &request,
+                                &compiled.table,
+                                FormSource::OuterLoop,
+                            )?;
                             let sid = self.outer_sid()?;
                             let next = self
                                 .agent
@@ -4698,8 +4708,11 @@ impl SelfHarnessDriver {
             // A retry loop that burns rounds must be visible while it is
             // happening, not reconstructable afterwards — one `AnswererRound` per round that reached a
             // compile attempt, `error: None` on success regardless of what the
-            // block went on to do. `NoBlock` never reaches a compile, so it is
-            // not a round for this fold's purposes.
+            // block went on to do, PLUS a `NoBlock` reply (no compile
+            // attempt at all, but still a round the operator watched pass).
+            // `round_progress` mirrors the same three-way split onto the
+            // operator gate so it is visible live, not only in the durable
+            // log.
             match &outcome {
                 Ok(TurnOutcome::Suspended { .. } | TurnOutcome::Completed { .. }) => {
                     self.emit(Event::AnswererRound {
@@ -4708,6 +4721,8 @@ impl SelfHarnessDriver {
                         round: rounds,
                         error: None,
                     });
+                    let gate = self.resolve_gate(&FormSource::Answerer { node });
+                    gate.round_progress(rounds, None);
                     // Show the operator what the answerer actually ran —
                     // once per COMPILED round (a failed compile has no
                     // executed source to show; `post_turn_source` is a
@@ -4715,8 +4730,7 @@ impl SelfHarnessDriver {
                     // asks/notes: a labeled branch child's turns belong on
                     // its own section, not the default one.
                     if let Some(src) = self.agent.last_turn_source(node) {
-                        self.resolve_gate(&FormSource::Answerer { node })
-                            .post_turn_source(&src);
+                        gate.post_turn_source(&src);
                     }
                 }
                 Err(HarnessError::Compile(msg)) => {
@@ -4726,8 +4740,26 @@ impl SelfHarnessDriver {
                         round: rounds,
                         error: Some(msg.clone()),
                     });
+                    self.resolve_gate(&FormSource::Answerer { node })
+                        .round_progress(rounds, Some(msg.as_str()));
                 }
-                Ok(TurnOutcome::NoBlock { .. }) | Err(_) => {}
+                Ok(TurnOutcome::NoBlock { .. }) => {
+                    // Previously silent: no `Event` and no gate call at all —
+                    // the operator saw nothing pass while the answerer burned
+                    // an empty-reply round. `NoBlock` never reaches a
+                    // compile, so it is not a round for the corrective-retry
+                    // fold's purposes, but it IS a round the operator should
+                    // see go by.
+                    self.emit(Event::AnswererRound {
+                        node,
+                        site,
+                        round: rounds,
+                        error: Some(NO_HASKELL_BLOCK_ROUND_ERROR.to_string()),
+                    });
+                    self.resolve_gate(&FormSource::Answerer { node })
+                        .round_progress(rounds, Some(NO_HASKELL_BLOCK_ROUND_ERROR));
+                }
+                Err(_) => {}
             }
             match outcome {
                 Ok(out @ TurnOutcome::Suspended { .. }) => {
@@ -5223,30 +5255,70 @@ impl SelfHarnessDriver {
     /// doc for why: a long subagent cycle must never starve an unrelated
     /// `Console`/`Worktree`/`RepoEvent`/`Exec`/`Journal` suspension serviced
     /// concurrently on another turn.
+    ///
+    /// `source` identifies who raised this delegation — the AUTHORED outer
+    /// loop itself ([`FormSource::OuterLoop`]) or a labeled node's own
+    /// `delegate` ([`FormSource::Answerer`]) — and is used ONLY to resolve
+    /// which operator gate's timeline the delegation-lifecycle events
+    /// ([`DelegationPhase`], via [`OperatorGate::delegation_progress`]) land
+    /// on, via [`Self::resolve_gate`]; it never affects dispatch itself.
+    /// Emits [`DelegationPhase::Started`] before the dispatch (so a spawn
+    /// that never returns is still visible), then EXACTLY ONE of
+    /// [`DelegationPhase::Settled`]/[`DelegationPhase::Failed`] — including
+    /// the "no subagent handler configured" refusal, which used to be
+    /// completely silent (no `Event`, no gate call, no `tracing` line).
     fn service_outer_subagent(
         &self,
         request: &Value,
         table: &DataConTable,
+        source: FormSource,
     ) -> Result<Value, DriverError> {
-        let mut guard = self.subagent.lock();
-        let handler = guard.as_mut().ok_or_else(|| {
-            DriverError::Session(
-                "the authored loop called a Subagent verb (spawnAgent/spawnAgentRaw) but no \
-                 subagent handler is configured — wire one with \
-                 SelfHarnessDriver::set_subagent_handler (the tidepool-selfharness binary \
-                 does this when TIDEPOOL_MEMORY_REPO is set)"
-                    .into(),
-            )
-        })?;
+        let gate = self.resolve_gate(&source);
+        gate.delegation_progress(&DelegationPhase::Started {
+            brief: rendered_result_snippet(&request.to_string()),
+        });
         let started = std::time::Instant::now();
-        let value =
-            tokio::task::block_in_place(|| Self::dispatch_outer_effect(handler, request, table))
-                .map_err(|e| DriverError::Session(format!("subagent dispatch: {e}")))?;
-        tracing::info!(
-            elapsed_ms = started.elapsed().as_millis() as u64,
-            "outer subagent suspension serviced"
-        );
-        Ok(value)
+        let mut guard = self.subagent.lock();
+        let handler = match guard.as_mut() {
+            Some(handler) => handler,
+            None => {
+                let reason =
+                    "the authored loop called a Subagent verb (spawnAgent/spawnAgentRaw) but no \
+                     subagent handler is configured — wire one with \
+                     SelfHarnessDriver::set_subagent_handler (the tidepool-selfharness binary \
+                     does this when TIDEPOOL_MEMORY_REPO is set)"
+                        .to_string();
+                gate.delegation_progress(&DelegationPhase::Failed {
+                    reason: reason.clone(),
+                    duration: started.elapsed(),
+                });
+                return Err(DriverError::Session(reason));
+            }
+        };
+        let dispatched =
+            tokio::task::block_in_place(|| Self::dispatch_outer_effect(handler, request, table));
+        let elapsed = started.elapsed();
+        match dispatched {
+            Ok(value) => {
+                tracing::info!(
+                    elapsed_ms = elapsed.as_millis() as u64,
+                    "outer subagent suspension serviced"
+                );
+                gate.delegation_progress(&DelegationPhase::Settled {
+                    outcome: rendered_result_snippet(&value.to_string()),
+                    duration: elapsed,
+                });
+                Ok(value)
+            }
+            Err(e) => {
+                let reason = format!("subagent dispatch: {e}");
+                gate.delegation_progress(&DelegationPhase::Failed {
+                    reason: reason.clone(),
+                    duration: elapsed,
+                });
+                Err(DriverError::Session(reason))
+            }
+        }
     }
 
     /// Service a Console/Worktree/RepoEvent/Exec/Journal suspension raised by
@@ -5606,7 +5678,11 @@ impl SelfHarnessDriver {
                                 "node {node:?} has no pending Subagent hole to service"
                             ))
                         })?;
-                    let value = self.service_outer_subagent(&request, &table)?;
+                    let value = self.service_outer_subagent(
+                        &request,
+                        &table,
+                        FormSource::Answerer { node },
+                    )?;
                     retry_on_turn_in_flight_async(|| {
                         self.agent
                             .resume_with_value(node, &pending_suspension, value.clone())
@@ -6640,7 +6716,8 @@ impl SelfHarnessDriver {
                 Ok(ThreadServiced::Continue)
             }
             SuspensionRouting::Subagent => {
-                let value = self.service_outer_subagent(&request, &table)?;
+                let value =
+                    self.service_outer_subagent(&request, &table, FormSource::Answerer { node })?;
                 let next = self
                     .agent
                     .with_session_retrying(node, sid, |s| {
