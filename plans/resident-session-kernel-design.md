@@ -615,6 +615,14 @@ not design away.
 2. **tidepool-runtime module vs. new crate (§4)** — this doc recommends the
    former, against the wave brief's "perhaps in own crate" framing.
    Confirm or override.
+   **ANSWERED (operator, 2026-08-24): no strong opinion on crate vs module —
+   the binding goals are (i) ONE shared suspension/parking mechanism, (ii)
+   cleanly factored-out components, (iii) abstraction boundaries expressed
+   through the type system/traits, not convention.** The packaging call is
+   therefore an implementation-time judgment: pick whichever container makes
+   the trait seams cleanest, and let §7's multi-frontend requirement tip it
+   if the module form would force a frontend to reach through non-public
+   internals.
 3. **Should the kernel's abandonment-liveness hook (§3.2 item 5) become the
    harness's first-ever TTL/reaper mechanism, or is an unbounded-suspension
    node an intentional invariant of the harness's design (an answerer
