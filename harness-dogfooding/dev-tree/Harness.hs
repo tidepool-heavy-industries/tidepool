@@ -561,7 +561,7 @@ retainedChild parent trees k = case lookup (nodeName k) trees of
 -- Delegates the arithmetic to 'Swarm.splitAllowance' (operator's type-level
 -- review, 2026-08-17): every child gets the same floor share that combinator
 -- computes, and its conservation law — property-tested in the
--- @thought-driver-test@ suite's @SwarmSpec@, not re-derived here — is what
+-- @swarm-spec-test@ suite's @SwarmSpec@, not re-derived here — is what
 -- now guarantees no call site can mint a cycle from nothing, in place of the
 -- old hand-rolled @max 0 (... ) \`div\` n@ this function used to carry
 -- directly. `Swarm.mkCycles`/`Swarm.cyclesToInt` are the boundary: dev-tree's
