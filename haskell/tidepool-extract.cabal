@@ -201,11 +201,10 @@ test-suite spike-build-products
 -- Reaches the extractor through `tidepool-extract-internal` rather than
 -- re-listing src/ modules on its own hs-source-dirs — the whole point of the
 -- internal library is that the extractor compiles ONCE per configuration.
--- PRD 21 lane C0 — the recursive companion's pure semantic fixture: ThoughtF
--- (haskell/lib/Tidepool/Thought.hs) property tested with QuickCheck against
--- its old hyloM-shaped driver (test-thought/ThoughtDriver.hs — production
--- moved to Harness.hs's own walkGroup/walkNode/foldAt walk; this driver's
--- only remaining caller is this test-suite). Deliberately independent of
+-- Property coverage for "Tidepool.Swarm"'s 'Cycles' budget currency
+-- (operator's type-level review, 2026-08-17): the conservation law
+-- 'splitAllowance' is supposed to hold by construction, checked against many
+-- random inputs rather than one pinned scenario. Deliberately independent of
 -- tidepool-extract-internal — this is plain-GHC business logic, not the
 -- extractor pipeline, so it costs no extract compile. QuickCheck itself is
 -- not in the nix with-packages GHC env and resolves from Hackage at the
@@ -213,27 +212,20 @@ test-suite spike-build-products
 -- pattern cborg/half already use (see haskell/CLAUDE.md's toolchain
 -- section); cabal.project.freeze grows the matching constraint entries the
 -- first time this stanza is built.
--- Run: cabal test thought-driver-test  (needs the nix with-packages GHC on
--- PATH for `text`/`mtl`/`containers`).
-test-suite thought-driver-test
+-- Run: cabal test swarm-spec-test  (needs the nix with-packages GHC on PATH).
+test-suite swarm-spec-test
   type:             exitcode-stdio-1.0
-  main-is:          ThoughtDriverTest.hs
-  hs-source-dirs:   lib, test-thought
+  main-is:          SwarmSpecTest.hs
+  hs-source-dirs:   lib, test-swarm
   other-modules:
-    Tidepool.Thought
     Tidepool.Swarm
     SwarmSpec
-    ThoughtDriver
   build-depends:
     base       >= 4.20 && < 5,
-    text,
-    mtl,
-    containers,
     QuickCheck >= 2.14 && < 2.16
   default-language: GHC2024
   default-extensions:
     OverloadedStrings
-    LambdaCase
     DeriveFunctor
     DeriveFoldable
     DeriveTraversable

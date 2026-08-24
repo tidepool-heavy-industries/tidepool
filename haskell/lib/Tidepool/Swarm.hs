@@ -209,7 +209,7 @@ spendCycles (Cycles a) (Cycles b) = Cycles (max 0 (a - b))
 -- @perChild@ has exactly @n@ entries (all equal — the floor share) and
 -- @kept@ absorbs both the reservation itself and the division remainder.
 --
--- CONSERVATION LAW (property-tested — see the @thought-driver-test@ suite's
+-- CONSERVATION LAW (property-tested — see the @swarm-spec-test@ suite's
 -- @SwarmSpec@): @sum perChild + kept@ never exceeds @input@ (in fact it is
 -- always EXACTLY @input@, since 'spendCycles' never underflows and every
 -- unit taken from @input@ lands in either a child's share or @kept@) — no
