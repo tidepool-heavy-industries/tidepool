@@ -31,8 +31,10 @@ use tokio_util::sync::CancellationToken;
 use tidepool_effect::pause::PauseGate;
 
 use tidepool_runtime::session::registry::{CheckoutReceipt, SlotKind};
+use tidepool_runtime::session::SuspendableSession;
 
 use crate::command::{BlockItem, DeclText, ExprText, MetaCommand, SessionCommand};
+use crate::kernel_adapter::{SlotContext, SlotHole};
 use crate::manager::{empty_cancel_slot, CancelSlot, ContinuationId, SessionManager};
 use crate::session::{BoxedStack, Session, SessionConfig, TurnStep, DEFAULT_NURSERY_SIZE};
 
@@ -787,8 +789,23 @@ impl TidepoolReplServer {
         let (session, receipt) = checkout.into_parts();
         let turn_gate = Arc::clone(&gate);
         let turn_captured = captured.clone();
+        let hole = SlotHole(req.continuation_id.clone());
         let join = spawn_turn(session, move |session| {
-            session.resume_turn(canonical, turn_gate, &turn_captured)
+            #[allow(
+                clippy::expect_used,
+                reason = "checkout_resume above already validated the session is suspended \
+                          on this continuation; SlotKernelError::NotSuspended cannot fire here"
+            )]
+            SuspendableSession::resume(
+                session,
+                hole,
+                canonical,
+                SlotContext {
+                    gate: turn_gate,
+                    captured: turn_captured,
+                },
+            )
+            .expect("session validated suspended by checkout_resume")
         });
         Ok(self
             .drive_detached(
@@ -1096,12 +1113,20 @@ async fn abort_abandoned(inner: Arc<ReplServerInner>, cont_id: ContinuationId) {
     let (session, receipt) = checkout.into_parts();
     let gate = PauseGate::new();
     let captured = CapturedOutput::new();
+    let hole = SlotHole(cont_id);
     let join = spawn_turn(session, move |session| {
-        session.abort_turn(
+        #[allow(
+            clippy::expect_used,
+            reason = "checkout_resume above already validated the session is suspended \
+                      on this continuation; SlotKernelError::NotSuspended cannot fire here"
+        )]
+        SuspendableSession::abort(
+            session,
+            hole,
             "continuation expired before it was resumed".to_string(),
-            gate,
-            &captured,
+            SlotContext { gate, captured },
         )
+        .expect("session validated suspended by checkout_resume")
     });
     match join.await {
         Ok(run) => match run.step {
