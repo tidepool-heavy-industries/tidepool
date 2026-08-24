@@ -405,6 +405,7 @@ impl TidepoolMcpServerImpl {
                 source,
                 diagnostics,
             } => {
+                record_eval_failure(op, class, phase, &detail);
                 let mut error_msg = format_error_with_source(
                     class,
                     phase,
@@ -530,6 +531,50 @@ impl TidepoolMcpServerImpl {
             }
         }
     }
+}
+
+/// Durably record one eval-surface compile/run failure — the eval-side
+/// counterpart to a self-iterating harness's `transcript.jsonl`, which only
+/// ever covers harness-turn failures (see `tidepool_runtime::paths::
+/// eval_failure_log_path`'s doc). Through the ONE durable-JSONL mechanism
+/// (`tidepool_repr::jsonl::append_new_line`) — no new logging framework, no
+/// second JSONL primitive. Best-effort: a write failure (a read-only cache
+/// dir, disk full) is logged and swallowed, never surfaced to the caller —
+/// this is diagnostic telemetry, not load-bearing for the eval call itself,
+/// the same posture `JsonlObserver`'s transcript writes already take.
+fn record_eval_failure(op: &str, class: FailureClass, phase: Phase, detail: &str) {
+    let row = serde_json::json!({
+        "ts_ms": now_ms(),
+        "op": op,
+        "class": class.tag(),
+        "phase": phase.tag(),
+        "detail": detail,
+    });
+    let path = tidepool_runtime::paths::eval_failure_log_path();
+    // `append_new_line` deliberately does not mkdir-p its parent (see its
+    // doc) — this is the first durable write under `cache_dir()` on some
+    // startup paths (a fresh cache dir, or a wiped one), so create it here,
+    // the same mkdir-p-on-append discipline `FsReq::Write` already uses.
+    if let Some(parent) = path.parent() {
+        if let Err(e) = std::fs::create_dir_all(parent) {
+            tracing::debug!("failed to create {parent:?} for the eval-failure log: {e}");
+            return;
+        }
+    }
+    if let Err(e) = tidepool_repr::jsonl::append_new_line(
+        &path,
+        &row.to_string(),
+        tidepool_repr::jsonl::SyncPolicy::None,
+    ) {
+        tracing::debug!("failed to record eval failure to {path:?}: {e}");
+    }
+}
+
+fn now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
 }
 
 impl ServerHandler for TidepoolMcpServerImpl {
@@ -872,5 +917,52 @@ where
             env!("CARGO_PKG_VERSION"),
         )
         .await
+    }
+}
+
+#[cfg(test)]
+mod eval_failure_log_tests {
+    use super::*;
+
+    /// `record_eval_failure` writes through the one durable-JSONL mechanism
+    /// to `tidepool_runtime::paths::eval_failure_log_path()` — the eval
+    /// surface's compile-failure gap this change fills. `XDG_CACHE_HOME` is
+    /// overridden to a private tempdir so this test never touches a real
+    /// cache dir; nextest gives every test its own process, so mutating this
+    /// env var here is safe.
+    #[test]
+    fn record_eval_failure_writes_one_durable_line() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        // SAFETY: nextest runs every test in its own process (see
+        // `.config/nextest.toml`), so no other test observes this env var.
+        unsafe {
+            std::env::set_var("XDG_CACHE_HOME", tmp.path());
+        }
+
+        record_eval_failure(
+            "eval",
+            FailureClass::UserHaskell,
+            Phase::Compile,
+            "Variable not in scope: forkAll",
+        );
+
+        let path = tidepool_runtime::paths::eval_failure_log_path();
+        let (rows, torn) = tidepool_repr::jsonl::read_tail(
+            &path,
+            |l| serde_json::from_str::<serde_json::Value>(l).map_err(|e| e.to_string()),
+            tidepool_repr::jsonl::TailPolicy::Observe,
+        )
+        .expect("read back the durable log");
+        assert!(torn.is_none());
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0]["op"], "eval");
+        assert_eq!(rows[0]["class"], "user-haskell");
+        assert_eq!(rows[0]["phase"], "compile");
+        assert_eq!(rows[0]["detail"], "Variable not in scope: forkAll");
+        assert!(rows[0]["ts_ms"].as_i64().is_some());
+
+        unsafe {
+            std::env::remove_var("XDG_CACHE_HOME");
+        }
     }
 }

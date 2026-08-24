@@ -38,3 +38,4 @@ tidepool-bridge-derive.workspace = true
 proptest.workspace = true
 # Canonical extract_available()/prelude_path() guard for GHC-dependent tests.
 tidepool-testing.workspace = true
+tempfile.workspace = true

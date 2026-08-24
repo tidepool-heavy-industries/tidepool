@@ -89,6 +89,18 @@ pub fn stdlib_dir(content_hash: &str) -> PathBuf {
     cache_dir().join("stdlib").join(content_hash)
 }
 
+/// Durable record of eval-surface compile/run failures: one JSON line per
+/// failed `eval`/`resume`/`abort` call (`tidepool-mcp`'s
+/// `render_outcome`), through the one durable-JSONL mechanism
+/// (`tidepool_repr::jsonl`) — the eval-side counterpart to a self-iterating
+/// harness's own `transcript.jsonl`, which records only harness-turn
+/// failures. Lives under [`cache_dir`] alongside the other regenerable-but-
+/// durable observability streams this server already writes (the generated
+/// effects modules, the compiled-artifact memo).
+pub fn eval_failure_log_path() -> PathBuf {
+    cache_dir().join("eval-failures.jsonl")
+}
+
 /// Persistent, shared `-fwrite-interface` output dir: module-granular GHC
 /// recompilation avoidance ACROSS `tidepool-extract` spawns (spike-verified
 /// 2026-08-20, `plans/turn-latency-state-injection.md`'s "Direction: toward

@@ -19,6 +19,10 @@ path = "src/main.rs"
 name = "tidepool-selfharness"
 path = "src/bin/tidepool-selfharness.rs"
 
+[[bin]]
+name = "tidepool-compile-report"
+path = "src/bin/tidepool-compile-report.rs"
+
 [dependencies]
 tidepool-repr.workspace = true
 tidepool-eval.workspace = true
@@ -44,6 +48,7 @@ tracing-subscriber = { workspace = true, features = ["env-filter"] }
 clap.workspace = true
 axum.workspace = true
 rmcp.workspace = true
+glob.workspace = true
 
 
 [dev-dependencies]

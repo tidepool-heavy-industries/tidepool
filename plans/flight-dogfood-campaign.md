@@ -39,6 +39,53 @@ round reports on landing.
 6. Aggregate across rounds at the end: recurring frictions ranked, with
    the prompt/mechanism fix each suggests.
 
+## Compile-failure report cadence
+
+Step 5's per-round analysis subagent reads compile errors by eye. The
+`tidepool-compile-report` binary (`tidepool::compile_report`) folds the same
+durable evidence — a harness's `transcript.jsonl` `AnswererRound.error` text,
+plus this project's own eval-surface `eval-failures.jsonl`
+(`tidepool_runtime::paths::eval_failure_log_path`) — into a ranked,
+counted table instead: which unsupported construct (variable/type-
+constructor/module scope miss, missing instance, JIT gap, import-grammar
+rejection, wrapper-attributed failure) is reached for most, by which named
+identifiers, and how first-try-compile rate is trending run over run. This is
+the instrument root `CLAUDE.md`'s "the interface evolves as an optimization
+loop" line asks for: surface changes driven by counted desire paths, not by
+whichever error a reader happened to notice.
+
+**Run it:**
+```bash
+tidepool-compile-report ~/.cache/tidepool/selfharness/transcript.jsonl \
+                         ~/.cache/tidepool/eval-failures.jsonl
+# or fold a whole flight's rounds at once:
+tidepool-compile-report 'scratchpad/flight-rounds/*/transcript.jsonl'
+tidepool-compile-report --format json ... > report.json   # machine-readable
+```
+
+**When:** at step 6 (aggregate across rounds), before writing the recurring-
+frictions summary — the ranked bucket counts are the aggregate step's raw
+material, not a replacement for it (the report ranks WHAT broke; the human
+aggregate still judges WHY and what to do about it). Also worth a standalone
+run after any single long dogfood/companion session, and periodically against
+the live `~/.cache/tidepool/selfharness/` + eval-failures log outside a
+flight campaign, to catch drift between campaigns.
+
+**Ranked entry → pave-or-dam decision:** a bucket's top identifiers are
+candidate constructs to either PAVE (add real support — a missing stdlib
+function, a new effect, a JIT primop) or DAM (the model is reaching for
+something that should not exist here — tighten the prompt/docs to steer
+away from it instead). Which one depends on the identifier, not the bucket:
+`variable-not-in-scope` naming a real stdlib gap (a function that should
+exist) is a pave; the same bucket naming a hallucinated verb from a
+different codebase's vocabulary is a dam. A bucket with a persistently
+non-zero count and the SAME top identifier across multiple runs is the
+strong signal — a one-off in a single round is noise, a repeat across
+several independent runs is a desire path. `other` growing without a clear
+identifier pattern is itself a finding: it means the classifier's bucket set
+no longer covers what's actually failing, and the classifier (not just the
+prompt) may need a new bucket.
+
 ## Scenario battery (one per round, fresh session each)
 
 | # | Seed question targets | Capabilities exercised |
