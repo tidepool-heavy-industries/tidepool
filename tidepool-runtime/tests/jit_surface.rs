@@ -1351,7 +1351,7 @@ fn works_stdlib_quoter_survives_extract() {
 // `runLLMTurnFanout` site genuinely dispatches an `Ask` effect (tag 9,
 // same as `run_llm_turn_sidecar.rs`'s `ASK_TAG`) — this probe answers it
 // with a scripted `DispatchEffect` so the eval runs straight through to a
-// final value, exactly as a harness-driven `answer_fanout` would.
+// final value, exactly as a harness-driven fanout resume would.
 // ---------------------------------------------------------------------------
 
 /// Same shape as `eval_raw_with_imports`, generic over the dispatcher so a

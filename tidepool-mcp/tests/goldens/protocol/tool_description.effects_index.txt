@@ -19,4 +19,4 @@
   Ask: Suspend execution and ask the calling agent a STRUCTURED question.
       verbs: ask
   RunLLMTurn: Suspend for a TYPED answer.
-      verbs: runLLMTurn, runLLMTurnFork, runLLMTurnFanout, renderInvocationExit, freezeContext, runLLMTurnBranch, runLLMTurnBranchLabeled, runLLMTurnBranchFanout
+      verbs: runLLMTurn, runLLMTurnFork, runLLMTurnFanout, renderInvocationExit

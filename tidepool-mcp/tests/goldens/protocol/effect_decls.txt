@@ -1203,29 +1203,21 @@ true
 RunLLMTurn
 -- end type_name --
 
--- description (2140 bytes) --
-Suspend for a TYPED answer. `runLLMTurn \@T prompt :: M T` — the same calling model answers IN CONTEXT; its failure is this session's failure, so the answer is bare. `runLLMTurnFork \@T prompt :: M (Either InvocationExit T)` — a forked sub-agent answers in its own child agent session; `runLLMTurnFanout \@T prompts :: M [Either InvocationExit T]` — N forked sub-agents, one per prompt, one result per prompt IN DECLARED ORDER. Each forked child's abnormal exit (round exhaustion, non-finalization, cancellation, runtime failure) arrives as `Left exit` instead of killing its siblings — natural spelling `Right x <- runLLMTurnFork \@T p`, or `renderInvocationExit e` to display one. GHC validates each answer against `T` before it resumes the continuation (an ill-typed answer never consumes it). `freezeContext :: M ContextRef` mints a capability naming THIS session's current frozen prefix, immediately (no operator, no model round). `runLLMTurnBranch \@T ref prompt :: M (Either InvocationExit (T, ContextRef))` forks a FRESH child agent session off that frozen prefix (never an empty root) — `Right (answer, ref')` is the child's own answer plus a ref to ITS post-finalize context for branching further; a branch child's abnormal exit is also a `Left` here (and a session that never finalized has no context to hand back, which is why the `Either` wraps the whole pair). `runLLMTurnBranchLabeled \@T label ref prompt` is the same verb with a caller-chosen `label` Text stamped onto the child session, for routing its asks to a per-session operator surface. `runLLMTurnBranchFanout \@T ref labeledPrompts :: M [Either InvocationExit (T, ContextRef)]` is the BULK sibling verb: every `(label, prompt)` pair forks its OWN child agent session off the SAME frozen `ref` (never a rendered ancestry line), driven CONCURRENTLY (the fanout machinery, not one at a time), with results returned in DECLARED order regardless of completion order — for a layer of independent siblings that should never be scheduled sequentially. In every verb above, `T` may be any type in scope, including one you declared yourself earlier this session.
+-- description (913 bytes) --
+Suspend for a TYPED answer. `runLLMTurn \@T prompt :: M T` — the same calling model answers IN CONTEXT; its failure is this session's failure, so the answer is bare. `runLLMTurnFork \@T prompt :: M (Either InvocationExit T)` — a forked sub-agent answers in its own child agent session; `runLLMTurnFanout \@T prompts :: M [Either InvocationExit T]` — N forked sub-agents, one per prompt, one result per prompt IN DECLARED ORDER. Each forked child's abnormal exit (round exhaustion, non-finalization, cancellation, runtime failure) arrives as `Left exit` instead of killing its siblings — natural spelling `Right x <- runLLMTurnFork \@T p`, or `renderInvocationExit e` to display one. GHC validates each answer against `T` before it resumes the continuation (an ill-typed answer never consumes it). In every verb above, `T` may be any type in scope, including one you declared yourself earlier this session.
 -- end description --
 
 -- prompt_card: None --
 
--- constructors (2 items) --
+-- constructors (1 items) --
 -- constructors[0] (51 bytes) --
 RunLLMTurnWith :: Text -> Value -> RunLLMTurn Value
 -- end constructors[0] --
 
--- constructors[1] (45 bytes) --
-RunLLMTurnFreezeWith :: RunLLMTurn ContextRef
--- end constructors[1] --
-
 -- end constructors --
 
--- type_defs (3 items) --
--- type_defs[0] (53 bytes) --
-data ContextRef = ContextRef Text deriving (Show, Eq)
--- end type_defs[0] --
-
--- type_defs[1] (440 bytes) --
+-- type_defs (2 items) --
+-- type_defs[0] (440 bytes) --
 -- | Why a forked child agent session ended WITHOUT a typed answer.
 -- Folded as data at the failing branch's own position (PRD 21
 -- locked decision 6) — never an exception that erases the results
@@ -1237,23 +1229,23 @@ data InvocationExit
   | ExitCancelled Text
   | ExitRuntimeFailure Text
   deriving (Show, Eq)
--- end type_defs[1] --
+-- end type_defs[0] --
 
--- type_defs[2] (455 bytes) --
+-- type_defs[1] (455 bytes) --
 instance ToJSON InvocationExit where
   toJSON e = case e of
     ExitRoundsExhausted detail -> object ["tag" .= ("ExitRoundsExhausted" :: Text), "detail" .= detail]
     ExitNotFinalized detail -> object ["tag" .= ("ExitNotFinalized" :: Text), "detail" .= detail]
     ExitCancelled detail -> object ["tag" .= ("ExitCancelled" :: Text), "detail" .= detail]
     ExitRuntimeFailure detail -> object ["tag" .= ("ExitRuntimeFailure" :: Text), "detail" .= detail]
--- end type_defs[2] --
+-- end type_defs[1] --
 
 -- end type_defs --
 
 -- extra_imports (0 items) --
 -- end extra_imports --
 
--- helpers (14 items) --
+-- helpers (7 items) --
 -- helpers[0] (144 bytes) --
 {-# OPAQUE runLLMTurn #-}
 runLLMTurn :: forall a effs. Member RunLLMTurn effs => Text -> Eff effs a
@@ -1300,58 +1292,6 @@ runLLMTurnForkSited sid p = unsafeCoerce <$> send (RunLLMTurnWith p (object ["ty
 runLLMTurnFanoutSited :: forall a effs. Member RunLLMTurn effs => Int -> [Text] -> Eff effs [Either InvocationExit a]
 runLLMTurnFanoutSited sid prompts = unsafeCoerce <$> send (RunLLMTurnWith (intercalate "\n" prompts) (object ["typedSite" .= sid, "fork" .= True, "fan" .= length prompts, "prompts" .= prompts]))
 -- end helpers[6] --
-
--- helpers[7] (593 bytes) --
--- | Mint a capability naming THIS session's current frozen
--- prefix (PRD 21 locked decision 2: children fork the frozen
--- post-coalgebra context). Immediate — no operator, no model
--- round (ReadState's service shape). ContextRef is an
--- unforgeable capability issued by the runtime: a ContextRef
--- only ever comes from here or from runLLMTurnBranch's own
--- return; an unrecognized one is refused by the driver as a
--- typed error, never a silent fresh-root fallback.
-freezeContext :: forall effs. Member RunLLMTurn effs => Eff effs ContextRef
-freezeContext = send RunLLMTurnFreezeWith
--- end helpers[7] --
-
--- helpers[8] (218 bytes) --
-{-# OPAQUE runLLMTurnBranch #-}
-runLLMTurnBranch :: forall a effs. Member RunLLMTurn effs => ContextRef -> Text -> Eff effs (Either InvocationExit (a, ContextRef))
-runLLMTurnBranch ref p = runLLMTurnBranchSited 0 ref p
--- end helpers[8] --
-
--- helpers[9] (352 bytes) --
--- @substrate-helper@
-{-# OPAQUE runLLMTurnBranchSited #-}
-runLLMTurnBranchSited :: forall a effs. Member RunLLMTurn effs => Int -> ContextRef -> Text -> Eff effs (Either InvocationExit (a, ContextRef))
-runLLMTurnBranchSited sid (ContextRef ref) p = unsafeCoerce <$> send (RunLLMTurnWith p (object ["typedSite" .= sid, "branch" .= True, "ref" .= ref]))
--- end helpers[9] --
-
--- helpers[10] (266 bytes) --
-{-# OPAQUE runLLMTurnBranchLabeled #-}
-runLLMTurnBranchLabeled :: forall a effs. Member RunLLMTurn effs => Text -> ContextRef -> Text -> Eff effs (Either InvocationExit (a, ContextRef))
-runLLMTurnBranchLabeled label ref p = runLLMTurnBranchLabeledSited 0 label ref p
--- end helpers[10] --
-
--- helpers[11] (405 bytes) --
--- @substrate-helper@
-{-# OPAQUE runLLMTurnBranchLabeledSited #-}
-runLLMTurnBranchLabeledSited :: forall a effs. Member RunLLMTurn effs => Int -> Text -> ContextRef -> Text -> Eff effs (Either InvocationExit (a, ContextRef))
-runLLMTurnBranchLabeledSited sid label (ContextRef ref) p = unsafeCoerce <$> send (RunLLMTurnWith p (object ["typedSite" .= sid, "branch" .= True, "ref" .= ref, "label" .= label]))
--- end helpers[11] --
-
--- helpers[12] (278 bytes) --
-{-# OPAQUE runLLMTurnBranchFanout #-}
-runLLMTurnBranchFanout :: forall a effs. Member RunLLMTurn effs => ContextRef -> [(Text, Text)] -> Eff effs [Either InvocationExit (a, ContextRef)]
-runLLMTurnBranchFanout ref labeledPrompts = runLLMTurnBranchFanoutSited 0 ref labeledPrompts
--- end helpers[12] --
-
--- helpers[13] (546 bytes) --
--- @substrate-helper@
-{-# OPAQUE runLLMTurnBranchFanoutSited #-}
-runLLMTurnBranchFanoutSited :: forall a effs. Member RunLLMTurn effs => Int -> ContextRef -> [(Text, Text)] -> Eff effs [Either InvocationExit (a, ContextRef)]
-runLLMTurnBranchFanoutSited sid (ContextRef ref) labeledPrompts = unsafeCoerce <$> send (RunLLMTurnWith (intercalate "\n" (map snd labeledPrompts)) (object ["typedSite" .= sid, "branchFanout" .= True, "ref" .= ref, "labels" .= map fst labeledPrompts, "prompts" .= map snd labeledPrompts, "fan" .= length labeledPrompts]))
--- end helpers[13] --
 
 -- end helpers --
 

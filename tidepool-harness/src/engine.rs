@@ -48,7 +48,6 @@ use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
-use std::time::Duration;
 
 use parking_lot::Mutex;
 use serde_json::Value as Json;
@@ -271,69 +270,6 @@ pub enum SuspensionRouting {
     /// cycle's entry state as JSON (note's service shape: no operator, no
     /// model round).
     ReadState,
-    /// A `freezeContext` suspension (`RunLLMTurnFreezeWith`) — PRD 21 lane C3
-    /// GAP 1: mint a `ContextRef` naming the CURRENT loop's per-loop answerer
-    /// window's frozen prefix, right now. Serviced IMMEDIATELY (`ReadState`'s
-    /// shape: no operator, no model round) by
-    /// [`crate::selfharness::driver::SelfHarnessDriver`] freezing that node's
-    /// transcript ([`crate::harness::Harness::freeze_snapshot`]) and
-    /// constructing the `ContextRef` `Value` directly against the table
-    /// ([`build_context_ref_value`]) — never round-tripped through JSON, since
-    /// `RunLLMTurnFreezeWith`'s answer type is fixed, not model-chosen.
-    FreezeContext,
-    /// A `runLLMTurnBranch \@T ref prompt` suspension — the OTHER half of GAP
-    /// 1: fork a FRESH child window off the frozen prefix `context_ref` names
-    /// (never an empty root, PRD 21 locked decision 2), drive it to
-    /// `finalize \@T`, and resume with `(T, ContextRef)` — the child's answer
-    /// plus a ref to ITS OWN post-finalize frozen prefix, for branching
-    /// further. Rides the SAME `RunLLMTurnWith` wire constructor as
-    /// [`SuspensionRouting::RunLLMTurn`]/[`SuspensionRouting::Fork`] (a `branch`/`ref`
-    /// payload flag, decoded by [`classify_runllmturn_payload`]) rather than a
-    /// new GADT constructor — the same "one constructor, several payload
-    /// shapes" discipline fork/fanout already use. `context_ref` is the RAW
-    /// wire digest string — UNVALIDATED here; the driver's servicing is where
-    /// it is resolved to a [`crate::harness::ContextRef`]
-    /// (`Harness::resolve_context_ref`), the one typed checkpoint an
-    /// unknown/stale ref is refused at (never a silent fresh-root fallback).
-    /// `site`/`ty` mirror `Fork`'s shape — `ty` is the branch's OWN answer type
-    /// `T`, not the wrapping pair. `label`, when the child was opened via
-    /// `runLLMTurnBranchLabeled` rather than plain `runLLMTurnBranch`, is the
-    /// caller-chosen Text stamped on the SAME payload (`label` key, decoded by
-    /// [`classify_runllmturn_payload`]) — `None` for an ordinary unlabeled
-    /// branch, byte-identical to today. The driver uses a present label to
-    /// route this child's asks/notes to a per-node operator gate
-    /// ([`crate::selfharness::operator::OperatorGate::node_gate`]) instead of
-    /// the default one (PRD 21 C5 GUI lane).
-    Branch {
-        site: crate::tree::SiteId,
-        ty: Option<String>,
-        context_ref: String,
-        label: Option<String>,
-    },
-    /// A `runLLMTurnBranchFanout \@T ref labeledPrompts` suspension — the BULK
-    /// sibling of [`SuspensionRouting::Branch`] (operator decision: sibling branch
-    /// windows are ALWAYS driven concurrently, transparently — scheduling is
-    /// never a model-visible choice). Every `(label, prompt)` pair forks its
-    /// OWN child window off the SAME frozen `context_ref` (never an empty
-    /// root), driven CONCURRENTLY via the same machinery
-    /// [`SuspensionRouting::Fork`]'s fanout servicing already uses
-    /// ([`crate::selfharness::driver::SelfHarnessDriver::service_outer_branch_fanout`]
-    /// — per-child realm, `set_concurrency_cap`, declaration-order
-    /// reassembly). `ty` is the RENDERED LIST answer type `[T]` (mirroring
-    /// [`SuspensionRouting::Fork`]'s fanout shape — `engine::strip_list_type`
-    /// recovers the per-child element type `T`); `labels`/`prompts` are
-    /// parallel, one entry per sibling, in declaration order. Each sibling
-    /// window is a BRANCH POSITION exactly like [`SuspensionRouting::Branch`]'s
-    /// (PRD 21 locked decision 6): its own abnormal exit folds as `Left` at
-    /// its own position in the resumed list, never erasing a sibling's
-    /// already-finished answer.
-    BranchFanout {
-        site: crate::tree::SiteId,
-        ty: Option<String>,
-        context_ref: String,
-        labels: Vec<String>,
-        prompts: Vec<String>,
-    },
     /// A Subagent verb (`SubagentSpawn`/`SubagentBegin`/`SubagentResume`/
     /// `SubagentSpawnAsync`/`SubagentAwait`/`SubagentCancel` —
     /// `spawnAgentRaw`/`agentBeginRaw`/`agentResumeRaw`/`agentSpawnAsyncRaw`/
@@ -486,14 +422,11 @@ fn require_con_site(
 /// dispatches on the request Con's CONSTRUCTOR NAME first, then decodes that
 /// constructor's own wire shape:
 ///
-/// - `RunLLMTurnWith` (prompt, payload) — the `typedSite`/`fork`/`branchFanout`/
-///   `branch`/`fan`/`prompts` payload shape carried on the `RunLLMTurn`
-///   constructor: `fork` → [`SuspensionRouting::Fork`] (the general Agent stack's
-///   `runLLMTurnFork`/`runLLMTurnFanout`); else `branchFanout` →
-///   [`SuspensionRouting::BranchFanout`] (the bulk `runLLMTurnBranchFanout`, one
-///   parent `ref` plus parallel `labels`/`prompts` lists); else `branch` →
-///   [`SuspensionRouting::Branch`]; else [`SuspensionRouting::RunLLMTurn`]. `asks`
-///   resolves `typedSite` to its rendered answer type.
+/// - `RunLLMTurnWith` (prompt, payload) — the `typedSite`/`fork`/`fan`/`prompts`
+///   payload shape carried on the `RunLLMTurn` constructor: `fork` →
+///   [`SuspensionRouting::Fork`] (the general Agent stack's
+///   `runLLMTurnFork`/`runLLMTurnFanout`); else [`SuspensionRouting::RunLLMTurn`].
+///   `asks` resolves `typedSite` to its rendered answer type.
 /// - `ForkWith` (site, brief) / `ForkAllWith` (site, prompts) — the `Fork`
 ///   effect (`Tidepool.Fork`'s `fork`/`forkAll`), routed by CONSTRUCTOR NAME
 ///   to [`SuspensionRouting::Fork`] (`fan: None` for one child, `fan: Some(_)` for a
@@ -604,10 +537,6 @@ pub fn classify_hole(
         },
         Some("ReadStateWith") => ClassifiedSuspension {
             routing: SuspensionRouting::ReadState,
-            prompt: String::new(),
-        },
-        Some("RunLLMTurnFreezeWith") => ClassifiedSuspension {
-            routing: SuspensionRouting::FreezeContext,
             prompt: String::new(),
         },
         Some("SubagentSpawn")
@@ -790,97 +719,6 @@ fn classify_runllmturn_payload(
             prompts,
             source: ForkSource::RunLLMTurn,
         })
-    } else if payload
-        .get("branchFanout")
-        .and_then(Json::as_bool)
-        .unwrap_or(false)
-    {
-        let context_ref = payload
-            .get("ref")
-            .and_then(Json::as_str)
-            .map(str::to_string)
-            .ok_or(ClassifyError::MissingField {
-                constructor: "RunLLMTurnWith",
-                field: "ref",
-            })?;
-        let raw_labels = payload
-            .get("labels")
-            .and_then(Json::as_array)
-            .cloned()
-            .unwrap_or_default();
-        let labels: Vec<String> = raw_labels
-            .iter()
-            .filter_map(|v| v.as_str().map(str::to_string))
-            .collect();
-        if labels.len() != raw_labels.len() {
-            return Err(ClassifyError::FanMismatch {
-                constructor: "RunLLMTurnWith",
-                declared: raw_labels.len(),
-                actual: labels.len(),
-            });
-        }
-        let raw_prompts = payload
-            .get("prompts")
-            .and_then(Json::as_array)
-            .cloned()
-            .unwrap_or_default();
-        let prompts: Vec<String> = raw_prompts
-            .iter()
-            .filter_map(|v| v.as_str().map(str::to_string))
-            .collect();
-        if prompts.len() != raw_prompts.len() {
-            return Err(ClassifyError::FanMismatch {
-                constructor: "RunLLMTurnWith",
-                declared: raw_prompts.len(),
-                actual: prompts.len(),
-            });
-        }
-        if labels.len() != prompts.len() {
-            return Err(ClassifyError::FanMismatch {
-                constructor: "RunLLMTurnWith",
-                declared: labels.len(),
-                actual: prompts.len(),
-            });
-        }
-        if let Some(n) = payload.get("fan").and_then(Json::as_u64) {
-            if n as usize != prompts.len() {
-                return Err(ClassifyError::FanMismatch {
-                    constructor: "RunLLMTurnWith",
-                    declared: n as usize,
-                    actual: prompts.len(),
-                });
-            }
-        }
-        Ok(SuspensionRouting::BranchFanout {
-            site,
-            ty,
-            context_ref,
-            labels,
-            prompts,
-        })
-    } else if payload
-        .get("branch")
-        .and_then(Json::as_bool)
-        .unwrap_or(false)
-    {
-        let context_ref = payload
-            .get("ref")
-            .and_then(Json::as_str)
-            .map(str::to_string)
-            .ok_or(ClassifyError::MissingField {
-                constructor: "RunLLMTurnWith",
-                field: "ref",
-            })?;
-        let label = payload
-            .get("label")
-            .and_then(Json::as_str)
-            .map(str::to_string);
-        Ok(SuspensionRouting::Branch {
-            site,
-            ty,
-            context_ref,
-            label,
-        })
     } else {
         Ok(SuspensionRouting::RunLLMTurn { site, ty })
     }
@@ -976,7 +814,7 @@ fn decode_fork_one(
 /// a ROUTING field, validated (see [`ClassifyError`]'s doc). `prompts` is the
 /// per-child brief list in declaration order; a non-`Text` element is
 /// rejected rather than silently dropped — dropping it would under-report the
-/// fan's true cardinality to the caller (`Harness::answer_fanout`).
+/// fan's true cardinality to the caller.
 fn decode_fork_all(
     request: &Value,
     table: &DataConTable,
@@ -1573,13 +1411,6 @@ pub struct EngineConfig {
     /// expected `Eff (Delegate ': effs) T` argument; an ordinary, recoverable
     /// compile error via the corrective-retry loop, not a hang or a trap.
     pub delegate_wrap: bool,
-    /// How long [`crate::harness::Harness::escalate_to_operator`] (the
-    /// escalation ladder's rung 2) waits for an operator decision before
-    /// failing the turn with `HarnessError::EscalationTimeout` instead of
-    /// hanging forever. Defaults to [`DEFAULT_ESCALATION_TIMEOUT`]; a test
-    /// overrides this field directly (the same idiom [`Self::max_child_turns`]
-    /// already uses) to exercise the timeout path without a real wait.
-    pub escalation_timeout: Duration,
 }
 
 /// Default context-window budget the emergency-compaction trigger watches.
@@ -1587,13 +1418,6 @@ pub struct EngineConfig {
 /// distinct from [`DEFAULT_MAX_TOKENS`] (the per-turn output cap).
 /// The driver's `compaction_threshold_percent` (~80%) is taken against THIS.
 pub const DEFAULT_CONTEXT_WINDOW_TOKENS: u32 = 128_000;
-
-/// Default [`EngineConfig::escalation_timeout`]: long enough for a human
-/// operator to notice a stuck-node popup and act on it (checking a
-/// notification, reading the transcript preview, clicking a decision) while
-/// still bounding an unreachable/forgotten operator to a finite wait rather
-/// than hanging the turn (and everything up-stack awaiting it) forever.
-pub const DEFAULT_ESCALATION_TIMEOUT: Duration = Duration::from_secs(20 * 60);
 
 /// Per-node turn cap — a model that never emits a runnable/answering block is
 /// stopped after this many turns. Not a configurable knob: nothing in the
@@ -1706,7 +1530,6 @@ impl EngineConfig {
             max_child_turns: 1,
             context_window_tokens: None,
             delegate_wrap: false,
-            escalation_timeout: DEFAULT_ESCALATION_TIMEOUT,
         }
     }
 
@@ -1765,7 +1588,6 @@ impl EngineConfig {
             max_child_turns: 4,
             context_window_tokens: Some(DEFAULT_CONTEXT_WINDOW_TOKENS),
             delegate_wrap: false,
-            escalation_timeout: DEFAULT_ESCALATION_TIMEOUT,
         })
     }
 
@@ -2670,35 +2492,6 @@ pub fn build_list_value(items: Vec<Value>, table: &DataConTable) -> Result<Value
     Ok(result)
 }
 
-/// Wrap a frozen-snapshot digest as a genuine `ContextRef` `Value` — the Core
-/// counterpart of `Tidepool.Effects`'s `data ContextRef = ContextRef Text`
-/// (spliced into every `RunLLMTurn`-row compile's generated module, so
-/// `"ContextRef"` always resolves in `table` there), for resuming a
-/// `freezeContext`/`runLLMTurnBranch` continuation with a directly
-/// constructed value rather than an Aeson round-trip — the same "hand back
-/// the native representation" discipline [`build_list_value`] uses for `[T]`.
-pub fn build_context_ref_value(digest: &str, table: &DataConTable) -> Result<Value, EngineError> {
-    use tidepool_bridge::ToCore;
-    let con_id = tidepool_bridge::get_resilient(table, "ContextRef", 1).ok_or_else(|| {
-        EngineError::Run("build_context_ref_value: no ContextRef constructor in table".to_string())
-    })?;
-    let text = digest
-        .to_string()
-        .to_value(table)
-        .map_err(|e| EngineError::Run(format!("bridge digest to Value: {e}")))?;
-    Ok(Value::Con(con_id, vec![text]))
-}
-
-/// Assemble a genuine 2-tuple `Value` — `(a, b)` — for a `runLLMTurnBranch`
-/// resume: the pair counterpart of [`build_list_value`]'s list assembly, over
-/// the always-wired-in `"(,)"` constructor.
-pub fn build_pair_value(a: Value, b: Value, table: &DataConTable) -> Result<Value, EngineError> {
-    let pair_id = tidepool_bridge::get_resilient(table, "(,)", 2).ok_or_else(|| {
-        EngineError::Run("build_pair_value: no (,) constructor in table".to_string())
-    })?;
-    Ok(Value::Con(pair_id, vec![a, b]))
-}
-
 /// Why one forked cognition window ended WITHOUT a typed answer — the Rust
 /// side of the `InvocationExit` generated into `Tidepool.Effects`
 /// (`tidepool_mcp::runllmturn_effect_def!`'s `type_defs`). The constructor
@@ -2820,11 +2613,10 @@ pub fn build_child_answer_value(
 /// `runLLMTurnFork`-sourced holes answer `Either InvocationExit T`
 /// ([`ForkSource::RunLLMTurn`], via [`build_child_answer_value`] — `Right`
 /// here, this path never folds a fork child as `Left`). The ONE
-/// implementation: `Harness::wrap_fork_answer` derives `table` from the
-/// node's own pending state and calls straight through; the self-harness
-/// driver's fork-servicing paths already carry the round's table and do the
-/// same (sol cross-family review finding 9d — this used to be a second,
-/// table-explicit copy of the same two-arm match in `driver.rs`).
+/// implementation: the self-harness driver's fork-servicing paths carry the
+/// round's table and call straight through (sol cross-family review finding
+/// 9d — this used to be a second, table-explicit copy of the same two-arm
+/// match in `driver.rs`).
 pub fn wrap_fork_answer(
     source: ForkSource,
     value: Value,
@@ -3996,10 +3788,9 @@ mod tests {
     }
 
     /// A non-`Text` element among the prompts must not be silently filtered
-    /// out: that would under-report the fan's true cardinality to
-    /// `Harness::answer_fanout`. Builds a real `[]`/`:` cons list (the shape
-    /// `value_to_json` actually renders as a JSON array) with a stray `Int`
-    /// in the middle.
+    /// out: that would under-report the fan's true cardinality to the
+    /// caller. Builds a real `[]`/`:` cons list (the shape `value_to_json`
+    /// actually renders as a JSON array) with a stray `Int` in the middle.
     #[test]
     fn decode_fork_all_rejects_non_text_prompt_element() {
         use tidepool_repr::Literal;

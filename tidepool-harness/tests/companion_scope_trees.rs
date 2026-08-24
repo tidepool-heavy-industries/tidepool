@@ -40,13 +40,6 @@
 //!   for any one field would case-trap at THAT call, not at the crossing) and
 //!   the top-level function-typed `Focus`, called through `runFocus`.
 //!
-//! # Not proved here (deliberately)
-//!
-//! "Every sibling branch reports the same parent snapshot digest" is lane C2
-//! §4 and is ALREADY PINNED in `tests/companion_snapshots.rs`
-//! (`siblings_share_one_frozen_prefix_byte_stably`, which re-digests each
-//! CHILD's own assembled prefix). It is not duplicated here; this file is
-//! about the NAME/heap half of C2, that one about the CONTEXT half.
 //!
 //! # Root accounting: four classes, never folded (and the honest bound)
 //!

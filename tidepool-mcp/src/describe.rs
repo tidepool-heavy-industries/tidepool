@@ -222,9 +222,6 @@ mod tests {
             "runLLMTurnSited",
             "runLLMTurnForkSited",
             "runLLMTurnFanoutSited",
-            "runLLMTurnBranchSited",
-            "runLLMTurnBranchLabeledSited",
-            "runLLMTurnBranchFanoutSited",
         ] {
             assert!(
                 !index.contains(name),

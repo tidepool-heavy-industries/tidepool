@@ -169,26 +169,29 @@ pub enum Event {
         role: Role,
         content: String,
     },
-    /// `node`'s context prefix was FROZEN as a named cache root
-    /// ([`crate::harness::Harness::freeze_snapshot`]). `digest` is the blake3
-    /// identity of the exact prefix `engine::assemble_request` re-emits;
-    /// `messages` is the frozen TRANSCRIPT length (the assembled prefix is one
-    /// longer — the system framing message); `prefix_bytes` is the assembled
-    /// prefix's total UTF-8 content bytes, framing included.
+    /// NO LONGER EMITTED (sol cross-family review findings 7/8: the
+    /// context-snapshot/branch feature this event backed was deleted as a
+    /// dead vestige with no production caller). Kept for wire
+    /// compatibility — a durable log written before the deletion may still
+    /// carry this variant, and it must still deserialize.
     ///
-    /// Emitted once per DISTINCT snapshot: freezing an unchanged transcript
-    /// again is idempotent and writes no second line. A node that is compacted
-    /// after a freeze gets a SECOND `SnapshotFrozen` with a different digest —
-    /// a new cache root, the old one still interned and still resolving for
-    /// its existing children.
+    /// Previously: `node`'s context prefix was FROZEN as a named cache root.
+    /// `digest` is the blake3 identity of the exact prefix
+    /// `engine::assemble_request` re-emits; `messages` is the frozen
+    /// TRANSCRIPT length (the assembled prefix is one longer — the system
+    /// framing message); `prefix_bytes` is the assembled prefix's total
+    /// UTF-8 content bytes, framing included.
     SnapshotFrozen {
         node: NodeId,
         digest: SnapshotDigest,
         messages: u64,
         prefix_bytes: u64,
     },
-    /// A branch minted by [`crate::harness::Harness::fork_from_snapshot`] ran
-    /// its FIRST turn: what it shares with the frozen root and what it added.
+    /// NO LONGER EMITTED — see [`Event::SnapshotFrozen`]'s doc. Kept for
+    /// wire compatibility with an old durable log.
+    ///
+    /// Previously: a branch minted off a frozen snapshot ran its FIRST
+    /// turn: what it shares with the frozen root and what it added.
     ///
     /// The byte counts are exact and locally recomputable. They are NOT a
     /// token split — there is no local tokenizer here, so `input_tokens` (the

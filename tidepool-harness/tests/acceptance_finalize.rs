@@ -1,9 +1,9 @@
 //! Acceptance coverage for `finalize`: an
 //! Agent turn's `finalize @T x` hands a typed value UP and TERMINATES its
-//! own turn loop — it does NOT resume, unlike a `runLLMTurn`/`Fork` answer
-//! (see `acceptance_run_llm_turn.rs`). Needs `TIDEPOOL_EXTRACT` and the
-//! with-packages GHC on PATH (`--ignore-default-filter` to run; see
-//! `tests/golden_path.rs` for the env recipe).
+//! own turn loop — it does NOT resume, unlike a `runLLMTurn`/`Fork` answer.
+//! Needs `TIDEPOOL_EXTRACT` and the with-packages GHC on PATH
+//! (`--ignore-default-filter` to run; see `haskell/CLAUDE.md`'s "Local
+//! iteration" section for the env recipe).
 //!
 //! The thread: force root -> the (replayed) model's block evaluates
 //! `finalize @T x` and suspends -> the suspension classifies as

@@ -28,7 +28,7 @@ pub use engine::{
     SuspensionRouting, TurnOutcome,
 };
 pub use forcing::{derive_teaser, NodeTree, TreeError};
-pub use harness::{ContextRef, Escalation, Harness, HarnessError, OperatorDecision};
+pub use harness::{Harness, HarnessError};
 pub use registry::{Checkout, CheckoutError, SessionRegistry};
 pub use selfharness::{
     acquire_lease, fold_run_journal, list_segments, load_harness_source, retire_lease,
@@ -37,7 +37,7 @@ pub use selfharness::{
     LogObserver, Observer, OperatorGate, PersistenceError, ResumeFold, RunJournalError, RunLease,
     SelfHarnessDriver, SelfHarnessState, StdinGate,
 };
-pub use snapshot::{ContextSnapshot, SnapshotDigest};
+pub use snapshot::SnapshotDigest;
 pub use tidepool_runtime::AsksSidecar;
 pub use timing::{record_stage, ExtractTiming};
 pub use tree::{FanBadge, HoleId, NodeId, NodeState, PriceClass, SiteId, Slot};

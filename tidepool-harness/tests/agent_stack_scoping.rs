@@ -193,11 +193,10 @@ fn tidepool_harness_module_is_importable_in_the_answerer_stack() {
     );
 }
 
-/// A forked CHILD compiles against the fork-free leaf row `[AskUser, Finalize]`
-/// (`Harness::child_cfg` drops `Fork`/`RunLLMTurn` from the parent row), so a
-/// `forkAll` in a child block is a GHC "not in scope" error — depth-one is
-/// structural, not a runtime guard. `finalize` still compiles there (a child
-/// answers directly).
+/// A row that drops `Fork`/`RunLLMTurn` from the parent row — `[AskUser,
+/// Finalize]` — cannot name `forkAll` in a child block: a GHC "not in
+/// scope" error, structural rather than a runtime guard. `finalize` still
+/// compiles there (a child answers directly).
 #[test]
 fn fork_child_leaf_row_cannot_fork() {
     support::require_extract();

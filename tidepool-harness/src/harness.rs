@@ -35,7 +35,6 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
 
 use parking_lot::Mutex;
 use serde_json::Value as Json;
@@ -50,21 +49,18 @@ use tidepool_runtime::session::{
     TurnResult, TurnTemplate, DECL_TEMPLATE_SOURCE,
 };
 use tidepool_runtime::DEFAULT_NURSERY_SIZE;
-use tokio::sync::oneshot;
 
 use crate::effect_trace::{EffectRecord, EffectTrace, TracingDispatcher};
 use crate::engine::{
     self, AsksSidecar, ClassifiedSuspension, EngineConfig, EngineError, SuspensionRouting,
-    TurnOutcome, RESUME_HELPER,
+    TurnOutcome,
 };
 use crate::forcing::{NodeTree, TreeError};
 use crate::log::{Actor, AnswerOutcome, LogWriter};
 use crate::provider::{DynModelProvider, Message, Role, Usage};
 use crate::registry::{Checkout, CheckoutError};
-use crate::selfharness::operator::{FieldShape, FormShape, OperatorGate, VariantShape};
-use crate::snapshot::{ContextSnapshot, SnapshotDigest};
 use crate::timing;
-use crate::tree::{FanBadge, HoleId, NodeId};
+use crate::tree::{HoleId, NodeId};
 
 /// The boxed handler stack — one concrete machine type so the Harness (and the
 /// web server over it) is not generic. `build_base_stack` returns an opaque
@@ -97,20 +93,6 @@ pub enum HarnessError {
         routing: &'static str,
         actual: String,
     },
-    #[error("node {node:?} aborted: {reason}")]
-    Aborted { node: NodeId, reason: String },
-    #[error("node {0:?} has no pending operator escalation to resolve")]
-    NoPendingEscalation(NodeId),
-    /// The escalation ladder's rung 2 waited [`EngineConfig::escalation_timeout`]
-    /// for an operator decision and got none — no gate configured, an
-    /// unreachable/unattended operator, or a submitted form that didn't
-    /// decode as a recognized [`OperatorDecision`]. Fails the turn LOUD
-    /// instead of hanging it (and everything up-stack awaiting it) forever.
-    #[error(
-        "node {node:?}: operator escalation timed out after {waited:?} with no decision — \
-         cap exhaustion was never resolved"
-    )]
-    EscalationTimeout { node: NodeId, waited: Duration },
     #[error("node {0:?} already has a turn in flight")]
     TurnInFlight(NodeId),
     /// A registry checkout landed on a state mismatch that is neither "no
@@ -121,13 +103,6 @@ pub enum HarnessError {
     /// for "never forced" or "busy, retry".
     #[error("node {node:?}: {detail}")]
     SessionMismatch { node: NodeId, detail: String },
-    /// A [`Harness::fork_from_snapshot`] naming a digest this harness has
-    /// never interned. Distinct from every node-scoped variant because the
-    /// caller's mistake is about a CACHE ROOT, not a node — a snapshot digest
-    /// is only ever minted by [`Harness::freeze_snapshot`] and is never
-    /// evicted, so this means "wrong digest", never "expired".
-    #[error("no frozen context snapshot with digest {0}")]
-    UnknownSnapshot(SnapshotDigest),
     /// [`Self::resume_with_borrowed_root`] landed on a
     /// [`crate::tree`]-suspended [`ResidentHole::Binding`] hole (F9: a
     /// bind-shaped answerer turn, `h <- async (…closure-valued…); wait h`,
@@ -341,43 +316,8 @@ enum ResumeParentInput {
     BorrowedRoot(tidepool_codegen::jit_machine::ValueHandle),
 }
 
-/// The escalation-ladder's rung-2 state (operator-in-the-loop): a child
-/// answerer exhausted its auto-retry and is parked awaiting an operator
-/// decision. IN-PROCESS ONLY — this lives in [`Harness`]'s memory, not the
-/// durable event log; a process restart mid-escalation loses it (the
-/// operator re-triggers by re-forcing, same as any other in-flight turn —
-/// durable mid-fan suspension is explicitly out of R0 scope).
-#[derive(Debug, Clone)]
-pub struct Escalation {
-    /// Human-facing summary of why this node escalated (e.g. cap-exhausted
-    /// after N attempts).
-    pub reason: String,
-    /// A short tail of the answerer's own transcript, for the popup's
-    /// "what has it been trying" preview. Model-authored — render it through
-    /// the same HTML-neutralizing path any other model text uses.
-    pub transcript_preview: String,
-}
-
-/// The operator's rung-2 decision, delivered through the oneshot channel
-/// [`Harness::resolve_escalation`] fires. `AllocateMore` grants a fresh turn
-/// budget (replacing, not adding to, what remained) and optionally injects
-/// `steer` as the answerer's next corrective user turn before it retries.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum OperatorDecision {
-    AllocateMore { turns: u32, steer: Option<String> },
-    Abort,
-}
-
-/// The outcome of [`Harness::handle_cap_exhaustion`]'s ladder step: either
-/// the caller's loop keeps going with a (possibly larger) turn budget, or the
-/// answerer is being torn down.
-enum CapDecision {
-    Retry { turn_budget: u32 },
-    Abort { reason: String },
-}
-
 /// A just-created node's staged opening context, held between node creation
-/// (`create_root_framed`/`register_fork_child`) and `force` (a thunk node has
+/// (`create_root_framed`/`register_fork_child_with_card`) and `force` (a thunk node has
 /// no live [`NodeConvo`] to hold it yet) — the two node-creation paths differ
 /// only in WHAT seeds the transcript, so they share one staging slot per node
 /// rather than two maps a reader has to know are mutually exclusive by
@@ -388,7 +328,7 @@ enum NodeSeed {
         prompt: String,
         framing: Option<String>,
     },
-    /// A fork/fanout child's inherited context, from `register_fork_child`:
+    /// A fork/fanout child's inherited context, from `register_fork_child_with_card`:
     /// the cloned parent transcript prefix (through the fork checkpoint) plus
     /// the hole card, and the parent's framing (its system message), so the
     /// child's request prefix is byte-identical to the parent's through the
@@ -397,34 +337,6 @@ enum NodeSeed {
         transcript: Vec<Message>,
         framing: Option<String>,
     },
-}
-
-/// A fork child's compile row for the ONE-SHOT general-Agent fork path
-/// (`Self::answer_fork`/`Self::answer_fanout` via `drive_one_fork_child`,
-/// test-only callers post fork-subsumes-split — the recursive self-harness
-/// pump path does not call this at all: its fork children compile against
-/// the full parent row via
-/// `crate::selfharness::driver::SelfHarnessDriver::drive_fork_child_agent_session`,
-/// so they CAN fork again, bounded by spawn-time budgets, not by row shape).
-/// Here, the parent row minus the fork-spawning effects (`Fork`/`RunLLMTurn`).
-/// A child keeps everything else it needs to compute its answer (base
-/// effects, `AskUser`, `Finalize`) but literally cannot name
-/// `fork`/`forkAll`/`runLLMTurn` on THIS path — depth-one is structural, not
-/// a runtime guard, for exactly this one-shot lane. For the answerer
-/// (`[AskUser, Fork, ReadState, Green, Finalize]`) this yields the leaf
-/// `[AskUser, Finalize]`.
-fn fork_child_decls(parent: &[tidepool_mcp::EffectDecl]) -> Vec<tidepool_mcp::EffectDecl> {
-    // `Green` is stripped alongside the fork-spawning effects: a fork child
-    // is driven by `drive_answerer_to_value`, which has no green-thread
-    // scheduler — an `async` in a child block would park on a `Green` hole
-    // nothing services. Structurally out of scope (a GHC "not in scope"
-    // error), same discipline as `Fork` itself. The PARENT's window is where
-    // `async (fork @T …)` composes.
-    parent
-        .iter()
-        .filter(|d| !matches!(d.type_name, "Fork" | "RunLLMTurn" | "Green"))
-        .copied()
-        .collect()
 }
 
 /// Cap a (possibly huge) GHC/extract compile error before feeding it back to
@@ -448,23 +360,6 @@ fn truncate_ghc_error(msg: &str) -> String {
 /// `tidepool_mcp::build_preamble`), with a harness-specific display label.
 const TURN_ANCHOR: &str = "Expr.hs";
 const TURN_LABEL: &str = "<turn>";
-
-/// Display label [`render_answer_compile_error`] renders a remapped
-/// `template_answer_turn` diagnostic under — same `TURN_ANCHOR` (its preamble
-/// is the same `tidepool_mcp::build_preamble`-derived `module Expr where`),
-/// its own label so an answerer's corrective retry reads distinctly from an
-/// ordinary turn's.
-const ANSWER_LABEL: &str = "<answer>";
-
-/// [`template_answer_turn`](engine::template_answer_turn)'s user-code marker
-/// — the text immediately preceding the embedded answer block, non-delegate
-/// form (`cfg.delegate_wrap == false`). Byte-identical to that function's own
-/// `"result = let {\n __b =\n"` literal.
-const ANSWER_MARKER: &str = "result = let {\n __b =\n";
-
-/// As [`ANSWER_MARKER`], for `cfg.delegate_wrap == true` — byte-identical to
-/// `template_answer_turn`'s `"result = runDelegate (let {\n __b =\n"` literal.
-const ANSWER_MARKER_DELEGATE: &str = "result = runDelegate (let {\n __b =\n";
 
 /// The EXPR template's user-code marker — byte-identical to
 /// `tidepool-mcp/src/eval_prep.rs`'s `format_error_with_source::MARKER`,
@@ -605,60 +500,6 @@ fn pick_render_opts<'a>(
     None
 }
 
-/// As [`render_compile_error`], for a
-/// [`template_answer_turn`](engine::template_answer_turn) compile — the
-/// child-answer compile path (`Harness::drive_answerer_to_value`'s corrective
-/// retry). `body` is the answer block's own text (the `code` param
-/// `template_answer_turn` was called with — post `engine::split_imports`);
-/// `src` is that same call's full generated module, so the marker this
-/// function searches for is guaranteed present (this is the ONE template that
-/// produced `src`, unlike `render_compile_error`'s EXPR-then-BIND guesswork
-/// over two candidates GHC's verdict doesn't disambiguate) — the `None` arm
-/// below is unreachable in practice, kept only so a future template-shape
-/// change fails safe (raw template-space span) rather than panicking.
-fn render_answer_compile_error(
-    e: &tidepool_runtime::CompileError,
-    body: &str,
-    src: &str,
-    delegate_wrap: bool,
-) -> String {
-    let tidepool_runtime::CompileError::Diagnostics(diags) = e else {
-        return e.to_string();
-    };
-    let marker = if delegate_wrap {
-        ANSWER_MARKER_DELEGATE
-    } else {
-        ANSWER_MARKER
-    };
-    let content_lines = engine::content_line_count(body);
-    if let Some((offset, (start, end))) = candidate_window(src, marker, content_lines) {
-        let opts = tidepool_runtime::diag::RenderOpts {
-            anchor: TURN_ANCHOR,
-            label: ANSWER_LABEL,
-            user_lines: Some((start, end)),
-            line_offset: offset,
-            col_indent: 0,
-            drop_foreign_gen_warnings_except: None,
-            source: src,
-        };
-        let mut out = format!("GHC error ({} diagnostic(s)):\n", diags.len());
-        out.push_str(&tidepool_runtime::diag::render_diagnostics(diags, &opts));
-        return out;
-    }
-    let mut out = format!("GHC error ({} diagnostic(s)):", diags.len());
-    for d in diags {
-        out.push('\n');
-        match &d.span {
-            Some(s) => out.push_str(&format!(
-                "{}:{}:{}: {}: {}",
-                s.file, s.start_line, s.start_col, d.severity, d.message
-            )),
-            None => out.push_str(&format!("{}: {}", d.severity, d.message)),
-        }
-    }
-    out
-}
-
 /// The orchestrator. Cloneable-cheap? No — it owns the tree + sessions, so it
 /// is shared behind an `Arc`.
 /// The reserved realm every NODE-LESS outer-surface park is owned by —
@@ -690,15 +531,6 @@ pub struct Harness {
     /// `remove_dir_all` the other's live declarations out from under it.
     /// See [`generate_run_id`] and [`node_session_dir`].
     run_id: String,
-    /// The row a FORK CHILD's answer block compiles against: the node's own
-    /// row minus the fork-spawning effects (`Fork`/`RunLLMTurn`), so a child
-    /// structurally cannot fork — a `forkAll` in a child block is a GHC
-    /// "not in scope" error, not a runtime `ChildSuspended`. For the answerer
-    /// (`[AskUser, Fork, ReadState, Green, Finalize]`) this is the leaf `[AskUser, Finalize]`.
-    /// The child's answer still runs via `run_child` against the PARENT's
-    /// session (a pure `resume expr` value crossing), so the leaf row only
-    /// scopes what the child can NAME, not where its value lands.
-    child_cfg: EngineConfig,
     provider: Arc<dyn DynModelProvider>,
     convos: Mutex<HashMap<NodeId, NodeConvo>>,
     /// Item 5 of the session-ownership capstone: the ONE suspension-metadata
@@ -724,103 +556,6 @@ pub struct Harness {
     /// framing — between node creation and `force` (a thunk node has no live
     /// `NodeConvo` to hold it yet). Removed once consumed at force time.
     pending: Mutex<HashMap<NodeId, NodeSeed>>,
-    /// Rung-2 escalation state (operator popup), keyed by the answerer node
-    /// that is parked awaiting a decision: the [`Escalation`] the web layer
-    /// renders the stuck-node popup from, paired with the oneshot sender half
-    /// that delivers the operator's decision back to
-    /// [`Self::escalate_to_operator`]'s awaiting receiver (which lives on its
-    /// own async stack, in-process only — see that method's doc for the
-    /// durability caveat). Set by [`Self::escalate_to_operator`] just before
-    /// the await; [`Self::resolve_escalation`] (driven by the web resolve
-    /// endpoint, or fired directly in a test) removes the whole entry to take
-    /// the sender and fires it — the pair is inserted together and removed
-    /// together, never independently.
-    escalations: Mutex<HashMap<NodeId, (Escalation, oneshot::Sender<OperatorDecision>)>>,
-    /// The production resolve path for a rung-2 escalation: when set,
-    /// [`Self::escalate_to_operator`] presents the `AllocateMore`/`Abort`
-    /// decision as an ordinary operator ask through this gate (the SAME
-    /// `present_form`/`/submit` wire every `askUser` uses), instead of
-    /// relying solely on a caller invoking [`Self::resolve_escalation`]
-    /// directly. `None` by default (every existing caller — tests included —
-    /// keeps working unchanged, resolving only via [`Self::resolve_escalation`]).
-    /// Set by [`Self::set_escalation_gate`], wired from
-    /// `SelfHarnessDriver::set_gate` so a web/GUI gate covers escalations too.
-    escalation_gate: Mutex<Option<Arc<dyn OperatorGate>>>,
-    /// Interned frozen context prefixes, keyed by digest — the cache roots
-    /// [`Self::freeze_snapshot`] mints and [`Self::fork_from_snapshot`]
-    /// branches from. Append-only for this harness's life: an entry is never
-    /// mutated (PRD 21 locked decision 2) and never evicted, so a digest a
-    /// child was minted from always resolves for as long as the child can.
-    snapshots: Mutex<HashMap<SnapshotDigest, InternedSnapshot>>,
-    /// Which frozen cache root a snapshot-forked child branched from, and
-    /// whether its one-shot `BranchInvocation` receipt has been written yet.
-    /// Keyed by the CHILD node; only nodes minted by
-    /// [`Self::fork_from_snapshot`] appear here, so an ordinary fork/root node
-    /// costs nothing and emits nothing.
-    branch_origins: Mutex<HashMap<NodeId, BranchOrigin>>,
-}
-
-/// A [`ContextSnapshot`] plus the node whose transcript it was frozen from —
-/// which is what [`Harness::fork_from_snapshot`] parents a child under and
-/// what `TurnForked` references. Kept beside the snapshot in ONE map rather
-/// than in a parallel origin map that could desync; [`ContextSnapshot`] itself
-/// stays purely about the context, with no node identity baked in.
-///
-/// Two different nodes whose transcript AND framing are byte-identical freeze
-/// to the same digest and therefore share this entry — correctly, since they
-/// are the same cache root; `origin` is then whichever node froze it FIRST.
-struct InternedSnapshot {
-    origin: NodeId,
-    snapshot: Arc<ContextSnapshot>,
-}
-
-/// See [`Harness::branch_origins`].
-struct BranchOrigin {
-    snapshot: SnapshotDigest,
-    /// Set once the branch's first turn has written its `BranchInvocation`.
-    /// The entry itself outlives that (so [`Harness::branch_snapshot`] keeps
-    /// answering for the node's whole life) — this flag is what makes the
-    /// receipt one-shot.
-    invocation_logged: bool,
-}
-
-/// A VALIDATED pointer to a frozen [`ContextSnapshot`] — the Rust-side
-/// capability behind the authored `ContextRef` (PRD 21 lane C3, closing GAP
-/// 1: the frozen-snapshot seam gets an authored-surface reach). Minted ONLY
-/// by [`Harness::resolve_context_ref`], the ONE place the "this digest
-/// resolves to something we actually froze" check happens — a caller
-/// holding one has already proven possession-is-permission, so nothing
-/// downstream ([`Harness::fork_from_context_ref`],
-/// [`Harness::context_ref_scope`]) re-derives or can bypass that check; an
-/// unknown/stale digest is refused right here, once, as a typed
-/// [`HarnessError::UnknownSnapshot`] — never a silent fresh-root fallback at
-/// some later call site.
-///
-/// **Typestate, not discipline** (per the frozen-vs-live review): no method
-/// on this type reaches the LIVE transcript a snapshot was frozen from —
-/// only [`Harness::snapshot`]'s own `Arc<ContextSnapshot>` (itself immutable
-/// by construction: [`ContextSnapshot`] has no `&mut` accessor at all) and
-/// the read-only scope lookup [`Harness::context_ref_scope`]. A raw string
-/// cannot become a `ContextRef` except through the one validating
-/// constructor, so "an unvalidated digest reached the fork/mint path" is not
-/// a mistake a caller of this type can make. What is still enforced by
-/// DISCIPLINE, underneath, in C2's own seams (out of this lane's boundary to
-/// re-derive): [`ContextSnapshot`]'s immutability is "no mutator exists on
-/// the struct", not a phantom-typed frozen/live state machine, and
-/// `Harness::snapshots` is a plain interior-mutable map rather than a
-/// consuming `frozen: fn(Live) -> Snapshot` transition — compaction already
-/// mints a NEW digest/cache root rather than rewriting one (locked decision
-/// 2), which is the semantic this guidance asks for, but it is a live→live
-/// call (`replace_transcript_with_summary`) that happens not to touch an
-/// interned entry, not a type that makes the old one unreachable.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ContextRef(SnapshotDigest);
-
-impl ContextRef {
-    /// The validated digest this ref names — read-only.
-    pub fn digest(&self) -> &SnapshotDigest {
-        &self.0
-    }
 }
 
 impl Harness {
@@ -847,38 +582,15 @@ impl Harness {
         // construction — a failed/skipped sweep just leaves stale dirs on
         // disk a little longer.
         sweep_stale_run_dirs();
-        // The fork-child compile config: this node's row minus the
-        // fork-spawning effects, so a child cannot fork (see `child_cfg`).
-        // `EngineConfig::from_decls` always starts `delegate_wrap: false` —
-        // a delegating parent's child must inherit it too (`fork_child_decls`
-        // keeps `Subagent`/`Worktree` in the child's row, which is exactly
-        // what `delegate_wrap` requires), else a fork/fanout answerer child
-        // of a delegating config compiles its block against the outer
-        // `Subagent`/`Worktree` row instead of the narrow `Delegate` one the
-        // window's hole card advertised (PRD 21 C5 reshape).
-        let mut child_cfg = EngineConfig::from_decls(
-            fork_child_decls(&cfg.decls),
-            cfg.prelude_dir.clone(),
-            cfg.project_lib.clone(),
-        )
-        .map_err(|e| HarnessError::Compile(format!("fork-child engine config: {e}")))?;
-        if cfg.delegate_wrap {
-            child_cfg = child_cfg.with_delegate_wrap();
-        }
         Ok(Harness {
             tree: NodeTree::new(writer),
             cfg,
             run_id,
-            child_cfg,
             provider,
             convos: Mutex::new(HashMap::new()),
             pending_suspensions: Mutex::new(HashMap::new()),
             pending_session_exits: Mutex::new(Vec::new()),
             pending: Mutex::new(HashMap::new()),
-            escalations: Mutex::new(HashMap::new()),
-            escalation_gate: Mutex::new(None),
-            snapshots: Mutex::new(HashMap::new()),
-            branch_origins: Mutex::new(HashMap::new()),
         })
     }
 
@@ -1120,9 +832,9 @@ impl Harness {
     }
 
     /// As [`Self::force`], but with `extra_include` roots ALSO on every
-    /// compile this node's session runs — the seam [`Self::register_fork_child`]
-    /// uses to make a fork child's session resolve its PARENT's decl-plane
-    /// module by name: `AnswerContract`'s pin (built from
+    /// compile this node's session runs — the seam a fork child's session
+    /// uses to resolve its PARENT's decl-plane module by name:
+    /// `AnswerContract`'s pin (built from
     /// [`tidepool_runtime::AsksSidecar::modules_of`]) names the module, and
     /// this is what makes that name findable on disk. `SessionModule`'s
     /// dotted name (`Tidepool.Session.{Val|Lib}.G<g>`) carries no node
@@ -1229,7 +941,7 @@ impl Harness {
     /// [`Self::force`] and [`Self::force_attached`]).
     fn seed_convo(&self, node: NodeId, effect_trace: EffectTrace) -> Result<(), HarnessError> {
         // Seed the transcript: a fork/fanout answerer inherits its parent's
-        // transcript (staged by `register_fork_child`); a plain root gets its
+        // transcript (staged by `register_fork_child_with_card`); a plain root gets its
         // opening prompt (staged by `create_root_framed`). Mutually exclusive
         // by construction — a node id is seeded exactly once, by whichever
         // path created it.
@@ -1625,11 +1337,6 @@ impl Harness {
             Some(driven.usage),
             driven.reasoning.clone(),
         )?;
-        // A snapshot-forked branch's FIRST turn is where the shared-prefix /
-        // branch-suffix / provider-token receipt belongs: `transcript` above
-        // is precisely the request this turn sent. A no-op for every other
-        // node, and for this one on every later turn.
-        self.log_branch_invocation(node, &transcript, &driven.usage)?;
         {
             let mut convos = self.convos.lock();
             let convo = convos.get_mut(&node).ok_or(HarnessError::NoSession(node))?;
@@ -2809,11 +2516,11 @@ impl Harness {
     }
 
     /// Reconstruct a [`TurnOutcome::Suspended`] from `node`'s CURRENT pending
-    /// hole (self-iterating-harness fork widen: after [`Self::answer_fanout`]/
-    /// [`Self::answer_fork`] resumes a parent answerer, the driver needs the
-    /// parent's freshly re-published hole in the same shape
-    /// [`Self::drive_turn`] returns, without re-running a model turn).
-    /// `None` if `node` isn't currently suspended.
+    /// hole (self-iterating-harness fork widen: after a fork/fanout resumes
+    /// a parent answerer, the driver needs the parent's freshly
+    /// re-published hole in the same shape [`Self::drive_turn`] returns,
+    /// without re-running a model turn). `None` if `node` isn't currently
+    /// suspended.
     pub fn pending_turn_outcome(&self, node: NodeId) -> Option<TurnOutcome> {
         let p = self.node_pending(node)?;
         Some(TurnOutcome::Suspended {
@@ -2831,7 +2538,7 @@ impl Harness {
     /// the node.
     ///
     /// `finalize` does NOT resume the Agent (unlike answering a
-    /// `RunLLMTurn`/`Fork` hole via [`Self::drive_answerer_to_value`]) — it
+    /// `RunLLMTurn`/`Fork` hole in context) — it
     /// TERMINATES the node's turn loop and hands the value UP, so this
     /// retires the node via [`Self::terminate_node`] with a `"finalized"`
     /// reason — a SUCCESSFUL termination, not a failure, even though the
@@ -3166,439 +2873,6 @@ impl Harness {
         self.convos.lock().get(&node).map(|c| c.last_input_tokens)
     }
 
-    /// `node`'s pending rung-2 escalation, if it is currently parked awaiting
-    /// an operator decision — what the stuck-node popup renders.
-    pub fn escalation_of(&self, node: NodeId) -> Option<Escalation> {
-        self.escalations.lock().get(&node).map(|(e, _)| e.clone())
-    }
-
-    /// The first node currently parked on a rung-2 escalation, if any — what
-    /// the inspector's stuck-node popup focuses by default (checked BEFORE
-    /// the plain operator-hole focus, since an escalated answerer blocks fan
-    /// progress and has no pending hole of its own to otherwise surface it).
-    pub fn first_escalated_node(&self) -> Option<NodeId> {
-        self.escalations.lock().keys().min().copied()
-    }
-
-    /// Wire the production resolve path for rung-2 escalations: every
-    /// subsequent [`Self::escalate_to_operator`] call presents its decision
-    /// as an ordinary operator ask through `gate` (see
-    /// [`Self::escalation_gate`]'s doc). Mirrors
-    /// `SelfHarnessDriver::set_gate` — indeed that method calls this one too,
-    /// so wiring a web/GUI gate into the driver covers escalations for free.
-    pub fn set_escalation_gate(&self, gate: Arc<dyn OperatorGate>) {
-        *self.escalation_gate.lock() = Some(gate);
-    }
-
-    /// Resolve `node`'s pending rung-2 escalation with the operator's
-    /// `decision`. This is the mechanism-level resolve: a caller with no
-    /// gate configured (or one that wants to bypass it — a test, an
-    /// emergency admin override) can fire it directly. When a gate IS
-    /// configured, [`Self::escalate_to_operator`] normally resolves via the
-    /// gate's own ask instead (see that method's doc), but this still works
-    /// concurrently — whichever settles first wins. Errors with
-    /// [`HarnessError::NoPendingEscalation`] if `node` has no escalation
-    /// parked (already resolved, or never escalated).
-    pub fn resolve_escalation(
-        &self,
-        node: NodeId,
-        decision: OperatorDecision,
-    ) -> Result<(), HarnessError> {
-        let (_, tx) = self
-            .escalations
-            .lock()
-            .remove(&node)
-            .ok_or(HarnessError::NoPendingEscalation(node))?;
-        tx.send(decision).map_err(|_| {
-            HarnessError::Resident(format!(
-                "node {node:?}: operator decision could not be delivered (its wait was already abandoned)"
-            ))
-        })
-    }
-
-    /// Cancel + retire a fork/fanout CHILD that failed mid-drive, so no error
-    /// path leaves it `Running` with a live resident session: every fallible
-    /// step after forcing the child (a provider/join/log fault inside
-    /// `drive_answerer_to_value`, or a `resume_parent` failure after) must
-    /// route through this explicit cleanup instead of propagating via `?`
-    /// and orphaning the child. Scoped to the fork/fanout callers
-    /// deliberately — NOT baked into `drive_answerer_to_value` itself, which
-    /// is also called in-context with `answerer == the main node`, where
-    /// cancelling "the child" would kill the live agent. `terminate_node` is
-    /// idempotent, so this is safe to repeat even against the internal abort
-    /// paths that already retired the child (cap-exhaustion /
-    /// `ChildSuspended`).
-    fn cleanup_failed_child(&self, child: NodeId) {
-        let _ = self.terminate_node(child, "fork child failed");
-    }
-
-    /// Put ONE child answer into the shape `node`'s parked fork/fanout
-    /// continuation actually expects.
-    ///
-    /// The two verbs that raise a [`SuspensionRouting::Fork`] disagree on it:
-    /// `runLLMTurnFork`/`runLLMTurnFanout` answer
-    /// `Either InvocationExit T` (PRD 21 locked decision 6 — a branch
-    /// position's failure is data), so a successful answer is `Right v`;
-    /// `Tidepool.Fork`'s `fork`/`forkAll` answer a bare `T` and are handed
-    /// back untouched. `source` is carried on the routing precisely because
-    /// the answer type alone cannot tell them apart.
-    ///
-    /// The wrap runs against the node's `suspend_table` — the constructor set
-    /// this hole was classified from — and hard-fails if `Right` is not in
-    /// it, rather than resuming with an unwrapped value the continuation
-    /// would then case-trap on. A thin `HarnessError` wrapper, deriving
-    /// `table` from node-pending state, over the ONE shared implementation,
-    /// [`engine::wrap_fork_answer`] (sol cross-family review finding 9d).
-    fn wrap_fork_answer(
-        &self,
-        node: NodeId,
-        source: engine::ForkSource,
-        value: Value,
-    ) -> Result<Value, HarnessError> {
-        let table = self
-            .node_pending(node)
-            .map(|p| p.suspend_table)
-            .unwrap_or_default();
-        Ok(engine::wrap_fork_answer(source, value, &table)?)
-    }
-
-    /// Force + drive a FORK answerer for `node`'s pending single-fork hole
-    /// (`fork @T` / `runLLMTurnFork @T`, `fan: None` — a fanout hole routes to
-    /// [`Self::answer_fanout`] instead). Registers a child node (transcript
-    /// forked at the checkpoint, framing inherited), forces it, drives
-    /// its turn loop until it produces an answering block, runs that block
-    /// via `run_child` against the parent, and resumes the parent with the
-    /// resulting typed Value. The ONE deliberate ill-typed attempt in the golden
-    /// path exercises the GHC-verbatim retry here (a compile failure feeds back
-    /// as the child's next user turn; the parent's continuation is untouched).
-    /// Register, force, and drive ONE fork child to its answering value —
-    /// the per-child sequence shared by [`Self::answer_fork`] and
-    /// [`Self::answer_fanout`] (one home, two call sites — both part of the
-    /// one-shot general-Agent fork path; the recursive self-harness pump
-    /// path drives its children via
-    /// [`crate::selfharness::driver::SelfHarnessDriver::drive_fork_child_agent_session`]
-    /// instead). `parent`'s own decl-plane root rides on the
-    /// child's include (see `force_with_extra_include`'s doc — a
-    /// `finalize_pin` module may be a type the parent declared live). Cleans
-    /// the child up on ANY failure (no orphaned Running+resident node);
-    /// deliberately does NOT mark the child Done — each caller owns its own
-    /// completion timing (`answer_fork` completes its child only after the
-    /// parent's resume succeeds; the fanout/raw paths complete per child
-    /// before assembly).
-    #[allow(clippy::too_many_arguments)]
-    async fn drive_one_fork_child(
-        &self,
-        parent: NodeId,
-        actor: Actor,
-        title: &str,
-        prompt: &str,
-        ty: Option<&str>,
-        max_turns: u32,
-        finalize_pin: Option<(&str, &[String])>,
-    ) -> Result<(NodeId, Value), HarnessError> {
-        let child = self.register_fork_child(parent, title, prompt, ty)?;
-        if let Err(e) = self.force_with_extra_include(
-            child,
-            actor,
-            vec![node_session_dir(&self.run_id, parent)],
-        ) {
-            self.cleanup_failed_child(child);
-            return Err(e);
-        }
-        let value = match self
-            .drive_answerer_to_value(
-                child,
-                parent,
-                ty,
-                max_turns,
-                &self.child_cfg_for_fork_of(parent),
-                finalize_pin,
-            )
-            .await
-        {
-            Ok(v) => v,
-            Err(e) => {
-                self.cleanup_failed_child(child);
-                return Err(e);
-            }
-        };
-        Ok((child, value))
-    }
-
-    pub async fn answer_fork(&self, node: NodeId, actor: Actor) -> Result<NodeId, HarnessError> {
-        // `node` (the parent) owns this whole answer — force+drive the
-        // child, then `resume_parent` — as one turn-owning operation.
-        let _lease = self.acquire_turn_lease(node)?;
-        let pending = self
-            .node_pending(node)
-            .ok_or(HarnessError::NotSuspended(node))?;
-        let (site, site_ty, prompt, source) = match &pending.classified.routing {
-            SuspensionRouting::Fork {
-                site,
-                ty,
-                fan: None,
-                source,
-                ..
-            } => (
-                *site,
-                ty.clone(),
-                pending.classified.prompt.clone(),
-                *source,
-            ),
-            other => {
-                return Err(HarnessError::RoutingMismatch {
-                    node,
-                    routing: "fork",
-                    actual: format!("{other:?}"),
-                })
-            }
-        };
-
-        // Pin the fork child's row to its OWN requested type (`site_ty`, from
-        // `asks.json`) whenever one was resolved, widening it with
-        // `Finalize <T>` alongside the row's actual answering verb
-        // (`resume`, redefined for this one-shot compile — see
-        // `drive_answerer_to_value`'s `helpers`; `finalize @T` is a
-        // genuinely suspending effect and is NOT supported by this
-        // servicing path's `run_child`-based execution, a separate,
-        // pre-existing gap this pin does not newly close). The practical
-        // payoff is `T`'s defining module landing on the child's compile
-        // include (via `turn_target`'s effects-dir swap), which is what lets
-        // `resume value :: T` name `T` at all. Previously this only pinned
-        // when the fork's type happened to match the PARENT's own contract
-        // (reusing the parent's harness-scraped import list otherwise risked
-        // a silent wrong-module guess); the extract-side module lookup
-        // (`AsksSidecar::modules_of`) resolves the fork's own type's
-        // defining modules directly, so there is no longer a parent contract
-        // to borrow from or guess around — every resolved fork type gets
-        // pinned, matching or not.
-        let site_modules = self.asks_modules(node, site.get());
-        let finalize_pin = site_ty.as_deref().map(|t| (t, site_modules.as_slice()));
-
-        // Register + force + drive, via the ONE per-child sequence
-        // (`drive_one_fork_child`): the child's block runs via run_child
-        // against the SUSPENDED PARENT (not the child's own session) to
-        // produce a Value in the parent's heap.
-        let (child, answer_value) = self
-            .drive_one_fork_child(
-                node,
-                actor,
-                "fork answerer",
-                &prompt,
-                site_ty.as_deref(),
-                engine::DEFAULT_MAX_TURNS,
-                finalize_pin,
-            )
-            .await?;
-
-        // Resume the parent with the child's typed answer, in the shape the
-        // parked continuation expects: `runLLMTurnFork @T` answers
-        // `Either InvocationExit T`, so the value is wrapped in `Right` here;
-        // `Tidepool.Fork`'s `fork @T` answers a bare `T` and is not wrapped.
-        // Nothing on THIS path produces a `Left` — a child that fails here
-        // still hard-fails the fan (the escalation ladder in
-        // `drive_answerer_to_value` owns that policy, and turning its outcome
-        // into a typed exit is not this change's scope). The concurrent OUTER
-        // path (`SelfHarnessDriver::service_outer_fanout`) is where a
-        // child-attributable failure becomes `Left`.
-        let answer_value = match self.wrap_fork_answer(node, source, answer_value) {
-            Ok(v) => v,
-            Err(e) => {
-                self.cleanup_failed_child(child);
-                return Err(e);
-            }
-        };
-        if let Err(e) = self.resume_parent(node, &pending.hole, answer_value).await {
-            self.cleanup_failed_child(child);
-            return Err(e);
-        }
-        // The child answerer node is done once it has produced the answer.
-        let _ = self.tree.node_done(child, "answer delivered".to_string());
-        let _ = self.terminate_node(child, "answer delivered");
-        Ok(child)
-    }
-
-    /// Force + drive a FANOUT answerer set for `node`'s pending fanout hole
-    /// (`forkAll @T` / `runLLMTurnFanout @T`, `SuspensionRouting::Fork` with
-    /// `fan: Some(_)`). One park, N thunk children — each registered under
-    /// `node` (transcript forked at the checkpoint, same discipline as
-    /// [`Self::answer_fork`]), forced, and driven to an answering value IN
-    /// DECLARATION ORDER: children serialize against the parked parent's single
-    /// heap (`run_child` only ever touches one machine at a time), so this needs
-    /// no new `Slot` state beyond what a plain fork already uses. Each child gets
-    /// its own turn-cap budget (`cfg.max_child_turns`) rather than the whole-node
-    /// cap. The N raw per-child `T` values are assembled into a genuine `[T]`
-    /// `Value` (the same raw-representation discipline a single fork's
-    /// `unsafeCoerce` relies on) and resume the parent exactly once.
-    ///
-    /// A child that exhausts its `max_child_turns` budget does NOT hard-fail
-    /// straight out of this loop anymore: [`Self::drive_answerer_to_value`]
-    /// runs the escalation ladder internally (auto corrective-retry, then an
-    /// operator popup) before ever returning an error. If a child is still
-    /// stuck after the operator aborts, that child is CANCELLED inside
-    /// `drive_answerer_to_value` (never left `Running`) before the error
-    /// propagates here via `?` — this function does nothing further: earlier
-    /// children in the loop are already terminal (`Done`), later ones were
-    /// never created, and `node` (the parent) is simply never resumed, so it
-    /// stays `Suspended` on its original fanout hole, re-answerable.
-    pub async fn answer_fanout(
-        &self,
-        node: NodeId,
-        actor: Actor,
-    ) -> Result<Vec<NodeId>, HarnessError> {
-        // `node` (the fanout parent) owns this whole answer — force+drive
-        // every child in turn, then `resume_parent` once — as one
-        // turn-owning operation. Each child gets its own fresh `NodeConvo`
-        // (no lease to acquire on it here); only `node`'s lease is held.
-        let _lease = self.acquire_turn_lease(node)?;
-        let pending = self
-            .node_pending(node)
-            .ok_or(HarnessError::NotSuspended(node))?;
-        let (site, list_ty, fan, prompts, source) = match &pending.classified.routing {
-            SuspensionRouting::Fork {
-                site,
-                ty,
-                fan: Some(fan),
-                prompts,
-                source,
-                ..
-            } => (*site, ty.clone(), *fan, prompts.clone(), *source),
-            other => {
-                return Err(HarnessError::RoutingMismatch {
-                    node,
-                    routing: "fanout",
-                    actual: format!("{other:?}"),
-                })
-            }
-        };
-        let element_ty = list_ty.as_deref().and_then(engine::strip_list_type);
-
-        // Cardinality integrity: the Haskell side's `fan` is the ONE
-        // authoritative child count (it is `length prompts` at the
-        // `runLLMTurnFanoutSited` call, before serialization). Every prompt
-        // element must have decoded to a `Text` brief — `classify_hole`'s
-        // `filter_map(as_str)` SILENTLY DROPS a non-string element, so a
-        // shorter `prompts` than `fan` means one was lost. Answering anyway
-        // would resume the parent with a `[T]` shorter than its `forkAll`
-        // promised (a length the type system already committed to). Fail loud
-        // instead of under-answering. (An empty `fan == prompts == 0` is
-        // legitimate — `forkAll [] :: M [T]` resumes with `[]` — so it passes.)
-        if let FanBadge::Exact { n } = fan {
-            if n as usize != prompts.len() {
-                return Err(HarnessError::Resident(format!(
-                    "fanout cardinality mismatch on {node:?}: fan={n} but {} prompt(s) \
-                     decoded — a non-Text prompt element was dropped, or the fan/prompts \
-                     wire fields disagree",
-                    prompts.len()
-                )));
-            }
-        }
-
-        // Same rule `answer_fork` applies (see its doc for why the parent-
-        // contract-matching guess is gone): pin every child's `Finalize` row
-        // to the fanout's OWN element type, resolved via `asks.json`'s
-        // module lookup — computed once here, outside the loop, since it's
-        // the same pin for every child. `asks_modules` reads the RAW
-        // (pre-`[]`) element type's modules, so no `strip_list_type` is
-        // needed on the module side the way it is for the rendered `ty`.
-        let site_modules = self.asks_modules(node, site.get());
-        let finalize_pin = element_ty.map(|t| (t, site_modules.as_slice()));
-
-        let mut children = Vec::with_capacity(prompts.len());
-        let mut answers = Vec::with_capacity(prompts.len());
-        for (idx, prompt) in prompts.iter().enumerate() {
-            // The ONE per-child sequence (`drive_one_fork_child`) guards
-            // every child exit: a force/drive fault must not orphan the
-            // in-flight child (earlier children are already Done+dropped;
-            // later ones are never created).
-            let (child, value) = self
-                .drive_one_fork_child(
-                    node,
-                    actor,
-                    &format!("fanout answerer {idx}"),
-                    prompt,
-                    element_ty,
-                    self.cfg.max_child_turns,
-                    finalize_pin,
-                )
-                .await?;
-            let _ = self.tree.node_done(child, "answer delivered".to_string());
-            let _ = self.terminate_node(child, "answer delivered");
-            children.push(child);
-            // Per-element shape first, list assembly after — `runLLMTurnFanout
-            // @T` answers `[Either InvocationExit T]`, `forkAll @T` answers
-            // `[T]`. See `wrap_fork_answer`.
-            answers.push(self.wrap_fork_answer(node, source, value)?);
-        }
-
-        let table = self
-            .node_pending(node)
-            .map(|p| p.suspend_table)
-            .unwrap_or_default();
-        let list_value = engine::build_list_value(answers, &table)?;
-        self.resume_parent(node, &pending.hole, list_value).await?;
-        Ok(children)
-    }
-
-    /// Answer an in-context `runLLMTurn` hole: the SAME node's model writes
-    /// `resume expr`, which runs via `run_child` against the (suspended) node's
-    /// own session to produce the Value, then resumes it. No child node.
-    pub async fn answer_run_llm_turn(&self, node: NodeId) -> Result<(), HarnessError> {
-        // `node` answers its OWN hole here (`answerer == target == node` in
-        // `drive_answerer_to_value` below) — one lease covers the whole
-        // multi-round answer, exactly as `drive_turn`'s covers one round;
-        // `drive_answerer_to_value` never acquires on its own, so this is the
-        // one and only acquire in this call chain.
-        let _lease = self.acquire_turn_lease(node)?;
-        let pending = self
-            .node_pending(node)
-            .ok_or(HarnessError::NotSuspended(node))?;
-        let ty = match &pending.classified.routing {
-            SuspensionRouting::RunLLMTurn { ty, .. } => ty.clone(),
-            other => {
-                return Err(HarnessError::RoutingMismatch {
-                    node,
-                    routing: "run_llm_turn",
-                    actual: format!("{other:?}"),
-                })
-            }
-        };
-        // Push the hole card as a user turn, then drive the node's own loop to an
-        // answering value against itself. `suspend_table` is the table THIS
-        // hole was classified from (set when the node suspended) — exactly
-        // the table `ty` was resolved against.
-        let table = Some(pending.suspend_table.clone());
-        self.push_user_turn(
-            node,
-            &engine::resume_typed_request_prompt(
-                &pending.classified.prompt,
-                ty.as_deref(),
-                table.as_ref(),
-            ),
-        )?;
-        // `node` answers its OWN `runLLMTurn` hole here, so its own
-        // `AnswerContract` (if any — the same one `run_block` pins `finalize`
-        // to) is unconditionally the right pin: this is not a fork/fanout
-        // child that might diverge from the parent's contract, it IS the
-        // node whose contract this is.
-        let contract = self.answer_contract(node);
-        let finalize_pin = contract
-            .as_ref()
-            .map(|c| (c.ty.as_str(), c.imports.as_slice()));
-        let value = self
-            .drive_answerer_to_value(
-                node,
-                node,
-                ty.as_deref(),
-                engine::DEFAULT_MAX_TURNS,
-                &self.cfg,
-                finalize_pin,
-            )
-            .await?;
-        self.resume_parent(node, &pending.hole, value).await?;
-        Ok(())
-    }
-
     /// Answer an operator hole — `askUser` ([`SuspensionRouting::AskUser`]) or a
     /// plain `ask` ([`SuspensionRouting::Ask`]) — with the operator's submission.
     /// Both effects return the submitted value DIRECTLY, so the submission
@@ -3672,462 +2946,6 @@ impl Harness {
             .map_err(|e| EngineError::Run(format!("bridge unit answer to Value: {e}")))?;
         self.resume_parent(node, &pending.hole, value).await?;
         Ok(())
-    }
-
-    /// Drive `answerer`'s turn loop until it emits an answering block, then run
-    /// that block via `run_child` against `target`'s suspended session to
-    /// produce a Value. On a compile failure (the GHC-verbatim retry), feed the
-    /// error back as the answerer's next user turn and loop (bounded by
-    /// `max_turns` — a single answerer's cap for a plain fork/return-control
-    /// answer, or one fanout child's per-child cap, `cfg.max_child_turns`, so
-    /// no single child of a fan can consume the whole node's turn budget).
-    /// `ty` is threaded into the answerer's `resume :: ty -> M ty` helper.
-    ///
-    /// CAP EXHAUSTION never returns straight out: a hard-failure here would
-    /// leak a `Running` answerer and wedge the parent, so it instead runs
-    /// the escalation ladder via
-    /// [`Self::handle_cap_exhaustion`]: an auto corrective-retry first
-    /// (rung 1), then an operator popup (rung 2). Only an operator ABORT (or
-    /// an unrelated resident/routing error) unwinds out of this loop; on
-    /// abort, `answerer` is cancelled here (never left dangling) and
-    /// [`HarnessError::Aborted`] is returned, naming `answerer` and why.
-    /// `compile_cfg` is the row the answerer's block compiles against: the
-    /// parent's own [`Self::cfg`] for an in-context answer (same node answers
-    /// itself), or the fork-child [`Self::child_cfg`] for a forked child — so a
-    /// child cannot name `fork`/`forkAll`. The answer VALUE always crosses via
-    /// `run_child` against `target`'s session regardless (a pure `resume expr`).
-    ///
-    /// `finalize_pin`, when `Some((ty, imports))`, is the SAME contract
-    /// `EngineConfig::turn_target` takes elsewhere (`run_block`'s own
-    /// `contract.ty`/`contract.imports`) — it instantiates this answerer's
-    /// `Finalize` row entry at the hole's real answer type instead of the
-    /// config's bare default `Finalize Void`, so a block that reaches for
-    /// `finalize @T` (the idiom the model already uses everywhere else, not
-    /// just the `resume` helper this function also offers) compiles against a
-    /// row that actually admits `T`. `None` keeps the config's own default
-    /// row, byte-identical to before this parameter existed.
-    async fn drive_answerer_to_value(
-        &self,
-        answerer: NodeId,
-        target: NodeId,
-        ty: Option<&str>,
-        max_turns: u32,
-        compile_cfg: &EngineConfig,
-        finalize_pin: Option<(&str, &[String])>,
-    ) -> Result<Value, HarnessError> {
-        let compile_target = compile_cfg.turn_target(finalize_pin)?;
-        let mut attempts = 0;
-        let mut turn_budget = max_turns;
-        let mut auto_retries_used = 0u32;
-        loop {
-            if attempts >= turn_budget {
-                match self
-                    .handle_cap_exhaustion(answerer, ty, attempts, &mut auto_retries_used)
-                    .await?
-                {
-                    CapDecision::Retry {
-                        turn_budget: new_budget,
-                    } => {
-                        turn_budget = new_budget;
-                        continue;
-                    }
-                    CapDecision::Abort { reason } => {
-                        self.terminate_node(answerer, &reason)?;
-                        return Err(HarnessError::Aborted {
-                            node: answerer,
-                            reason,
-                        });
-                    }
-                }
-            }
-            attempts += 1;
-
-            // One provider turn on the answerer.
-            let (transcript, turn_seq, framing) = {
-                let convos = self.convos.lock();
-                let convo = convos
-                    .get(&answerer)
-                    .ok_or(HarnessError::NoSession(answerer))?;
-                (
-                    convo.transcript.clone(),
-                    convo.turn_seq,
-                    convo.framing.clone(),
-                )
-            };
-            let driven = self.stream_turn(&transcript, framing.as_deref()).await?;
-            self.tree.turn_delta_reasoned(
-                answerer,
-                turn_seq,
-                Role::Assistant,
-                driven.reply.clone(),
-                Some(driven.usage),
-                driven.reasoning.clone(),
-            )?;
-            {
-                let mut convos = self.convos.lock();
-                let convo = convos
-                    .get_mut(&answerer)
-                    .ok_or(HarnessError::NoSession(answerer))?;
-                convo.transcript.push(Message {
-                    role: Role::Assistant,
-                    content: driven.reply.clone(),
-                    reasoning_items: driven.reasoning_items.clone(),
-                });
-                convo.turn_seq += 1;
-            }
-
-            let mut blocks = driven.blocks;
-            let Some(block) = blocks.pop() else {
-                self.push_user_turn(
-                    answerer,
-                    "Reply with a ```haskell block: `resume expr` where the value \
-                     matches the hole type.",
-                )?;
-                continue;
-            };
-
-            // Compile the answering block. When the hole's answer type is
-            // known, specialize `resume :: T -> M T` so a mismatched `resume
-            // expr` fails at extract with a GHC error naming T (the golden
-            // path's deliberate ill-typed attempt lands here) — otherwise fall
-            // back to the polymorphic identity.
-            let helpers = match ty {
-                Some(t) => format!("resume :: {t} -> M {t}\nresume = pure"),
-                None => RESUME_HELPER.to_string(),
-            };
-            // Blocks before the answer block are top-level declarations by the
-            // multi-block contract (later blocks see them). This path's turn is
-            // a one-shot compile against the TARGET's suspended session — no
-            // decl plane to land them on — so they ride into the answer turn as
-            // module-level helpers. A non-decl leading block fails the compile
-            // with a GHC error naming it, feeding the ordinary retry below.
-            let helpers = if blocks.is_empty() {
-                helpers
-            } else {
-                format!("{}\n\n{helpers}", blocks.join("\n\n"))
-            };
-            let (imports, body) = engine::split_imports(&block);
-            let src = engine::template_answer_turn(
-                compile_cfg,
-                &compile_target.stack,
-                &body,
-                &imports,
-                &helpers,
-            );
-            let cfg_bin = compile_cfg.extract_bin.clone();
-            let include = compile_target.include.clone();
-            let answerer_id = answerer.0;
-            // Kept for the error path below (`spawn_blocking`'s `move`
-            // closure takes ownership of `src`).
-            let src_for_err = src.clone();
-            let compiled = tokio::task::spawn_blocking(move || {
-                engine::compile_turn(
-                    &cfg_bin,
-                    &src,
-                    "result",
-                    &include,
-                    answerer_id,
-                    timing::NO_ROUND,
-                )
-            })
-            .await
-            .map_err(|e| HarnessError::Resident(format!("compile join: {e}")))?;
-
-            let compiled = match compiled {
-                Ok(c) => c,
-                Err(e) => {
-                    // GHC-verbatim retry: feed the compile error back to the
-                    // answerer. The continuation is NEVER consumed by a bad
-                    // attempt. `CompileError::Diagnostics`' own `Display` is
-                    // only a count ("Haskell compilation failed (N
-                    // diagnostic(s))") — `render_answer_compile_error` renders
-                    // the full per-diagnostic text instead, with GHC's
-                    // coordinates remapped from `src` (this call's own
-                    // `template_answer_turn` module — no EXPR/BIND ambiguity,
-                    // there is only one candidate) to `body`'s line space, so
-                    // the answerer never sees a raw `/tmp/…/Expr.hs` template
-                    // path.
-                    let err = render_answer_compile_error(
-                        &e,
-                        &body,
-                        &src_for_err,
-                        compile_cfg.delegate_wrap,
-                    );
-                    self.log_answer_attempt(
-                        target,
-                        &self
-                            .node_pending(target)
-                            .map(|p| p.hole)
-                            .unwrap_or(HoleId(String::new())),
-                        "child",
-                        AnswerOutcome::Rejected { error: err.clone() },
-                    )?;
-                    self.push_user_turn(
-                        answerer,
-                        &format!(
-                            "That did not compile. Fix it and try again — the error is:\n\n\
-                             ```\n{err}\n```"
-                        ),
-                    )?;
-                    continue;
-                }
-            };
-
-            // Run the answering block via run_child against the TARGET's
-            // suspended session (same heap → the Value can feed resume).
-            let checkout = self.checkout_child(target)?;
-            let expr = compiled.expr;
-            let ctable = compiled.table.clone();
-            let child_out = self
-                .run_checked_out(target, checkout, move |mut session| {
-                    let out = session.run_child(
-                        "answerer",
-                        &expr,
-                        &ctable,
-                        &tidepool_codegen::emit::ExternalEnv::new(),
-                    );
-                    (session, out)
-                })
-                .await?;
-            self.flush_effects(target)?;
-
-            match child_out {
-                Ok(result) => {
-                    if std::env::var("HARNESS_DEBUG").is_ok() {
-                        eprintln!("[harness] child answer value: {:?}", result.value());
-                    }
-                    return Ok(result.into_value());
-                }
-                Err(ResidentError::NotSuspended) => return Err(HarnessError::NotSuspended(target)),
-                // v1 limitation: a forked CHILD that itself suspends (nested
-                // `fork`/`forkAll`, or an `askUser`/`ask` hole) is unsupported.
-                // The GUI/self-harness driver monitors ONE session (the
-                // parent's), so there is no operator to answer a hole opened
-                // two levels deep — and `run_child` itself only ever holds ONE
-                // stowed continuation (R0 sequential-isolated), so the child
-                // literally cannot park here. Cancel the child and hard-error
-                // rather than falling into the generic retry arm below (which
-                // would blind-retry forever: the child's own suspend is not a
-                // transient compile/runtime fault it can self-correct from).
-                Err(ResidentError::ChildSuspended) => {
-                    self.terminate_node(
-                        answerer,
-                        "nested fork/askUser in a fork child unsupported (v1)",
-                    )?;
-                    return Err(HarnessError::Aborted {
-                        node: answerer,
-                        reason: "a forked child answerer suspended on its own effect — nested \
-                                 fork or askUser inside a fork child is unsupported in v1"
-                            .to_string(),
-                    });
-                }
-                Err(e) => {
-                    // A run-time fault in the answerer (e.g. `error "boom"`
-                    // forced during its own eval, before the parent's
-                    // continuation is ever touched) — logged as a Rejected
-                    // attempt, same as the compile-failure branch above, so
-                    // the durable audit trail shows every attempt, not just
-                    // the one that eventually consumes. The continuation is
-                    // NEVER consumed by this attempt; retry with the message.
-                    let err = e.to_string();
-                    self.log_answer_attempt(
-                        target,
-                        &self
-                            .node_pending(target)
-                            .map(|p| p.hole)
-                            .unwrap_or(HoleId(String::new())),
-                        "child",
-                        AnswerOutcome::Rejected { error: err.clone() },
-                    )?;
-                    self.push_user_turn(
-                        answerer,
-                        &format!("The answer failed at runtime: {err}. Try again."),
-                    )?;
-                    continue;
-                }
-            }
-        }
-    }
-
-    /// The escalation ladder's ONE rung-1 auto-retry: a fixed extra turn
-    /// budget granted exactly once per [`Self::drive_answerer_to_value`] call
-    /// before further exhaustion escalates to rung 2. Kept small and
-    /// singular deliberately — this is meant to unwedge the common case (the
-    /// model just needed one more nudge), not to substitute for the
-    /// operator.
-    const AUTO_RETRY_MAX: u32 = 1;
-    /// The turn-budget bump rung 1's single auto-retry grants.
-    const AUTO_RETRY_BUMP: u32 = 3;
-
-    /// [`Self::drive_answerer_to_value`]'s ladder step, called when
-    /// `answerer` has exhausted its current turn budget (`attempts >=
-    /// turn_budget`) without producing a consumed answer — whether from
-    /// repeated `NoBlock` replies, repeated ill-typed `resume` attempts, or a
-    /// mix (both retry paths consume from the same `attempts` counter, so
-    /// either exhausts the same way). RUNG 1 fires at most once per answerer
-    /// per call (`auto_retries_used` is the caller's counter, threaded
-    /// through so a SECOND exhaustion after an operator-granted budget goes
-    /// straight back to rung 2 rather than re-trying rung 1): it injects a
-    /// corrective user turn — reusing the same feed-the-error-back-verbatim
-    /// idiom the compile-failure retry above uses, just with a different
-    /// message — and grants [`Self::AUTO_RETRY_BUMP`] more turns. Once rung 1
-    /// is spent, this escalates to [`Self::escalate_to_operator`] (rung 2).
-    async fn handle_cap_exhaustion(
-        &self,
-        answerer: NodeId,
-        ty: Option<&str>,
-        attempts: u32,
-        auto_retries_used: &mut u32,
-    ) -> Result<CapDecision, HarnessError> {
-        if *auto_retries_used < Self::AUTO_RETRY_MAX {
-            *auto_retries_used += 1;
-            let ty_clause = ty.map(|t| format!(" of type `{t}`")).unwrap_or_default();
-            self.push_user_turn(
-                answerer,
-                &format!(
-                    "You have exhausted your turn budget ({attempts} turns) without \
-                     producing a single valid `resume expr`{ty_clause}. You have \
-                     {bump} more turns — produce a single valid `resume expr` now.",
-                    bump = Self::AUTO_RETRY_BUMP
-                ),
-            )?;
-            return Ok(CapDecision::Retry {
-                turn_budget: attempts + Self::AUTO_RETRY_BUMP,
-            });
-        }
-        self.escalate_to_operator(answerer, attempts).await
-    }
-
-    /// Rung 2 of the escalation ladder: park `answerer` awaiting an operator
-    /// decision. Publishes an [`Escalation`] (what [`Self::escalation_of`]/a
-    /// stuck-node popup reads) and a oneshot sender, THEN drops every lock
-    /// before awaiting a decision — the partial fan state a caller further
-    /// up the stack (e.g. [`Self::answer_fanout`]'s `answers` vector) is
-    /// holding lives on the ASYNC STACK across this await, which is fine and
-    /// intended: this is an IN-PROCESS control-plane wait, not
-    /// durable-across-restart mid-fan suspension (explicitly out of R0
-    /// scope) — a process death here loses the in-flight fan and the
-    /// operator re-triggers, same as any other in-flight turn.
-    ///
-    /// Two ways a decision arrives, raced against each other: (1)
-    /// [`Self::resolve_escalation`] fires the oneshot directly (a test, or
-    /// an emergency admin override); (2) when [`Self::escalation_gate`] is
-    /// configured, this presents the decision as an ordinary operator ask
-    /// (`AllocateMore`/`Abort`, rendered as a form) through the SAME
-    /// `present_form`/`/submit` wire every `askUser` uses — no dedicated
-    /// endpoint. Bounded by [`EngineConfig::escalation_timeout`]: if neither
-    /// arrives in time, this fails loud with
-    /// [`HarnessError::EscalationTimeout`] instead of hanging the turn (and
-    /// everything up-stack awaiting it) forever.
-    ///
-    /// Whichever arm loses the race — including a `spawn_blocking` gate
-    /// presentation still in flight when [`Self::resolve_escalation`]'s
-    /// direct plane wins, or one still in flight when the OVERALL wait
-    /// times out — leaves that presentation's `present_form` call blocked
-    /// and its ask live on the gate's timeline unless something releases
-    /// it: [`OperatorGate::retract_form`] is that release, called
-    /// unconditionally below once the race (or the timeout) has settled.
-    /// It is a no-op when there is nothing left to retract (the gate ask
-    /// itself is the one that won, or no gate was configured at all), so
-    /// calling it regardless of which arm actually won is the correct,
-    /// simplest way to guarantee no orphaned pending ask ever survives this
-    /// function — a caller resolving it later would only release a detached
-    /// task that no longer controls anything.
-    async fn escalate_to_operator(
-        &self,
-        answerer: NodeId,
-        attempts: u32,
-    ) -> Result<CapDecision, HarnessError> {
-        let (tx, mut rx) = oneshot::channel();
-        let escalation = Escalation {
-            reason: format!("cap-exhausted after {attempts} attempts"),
-            transcript_preview: self.transcript_tail(answerer, 6),
-        };
-        self.escalations
-            .lock()
-            .insert(answerer, (escalation.clone(), tx));
-        let escalation_gate = self.escalation_gate.lock().clone();
-        let timeout = self.cfg.escalation_timeout;
-        // Computed once, up front, so both the presentation below AND the
-        // retraction after the race can address the exact same ask.
-        let shape = escalation_gate
-            .as_ref()
-            .map(|_| escalation_decision_shape(answerer, &escalation));
-
-        let wait_for_decision = async {
-            match (&escalation_gate, &shape) {
-                (Some(gate), Some(shape)) => {
-                    let gate = gate.clone();
-                    let shape = shape.clone();
-                    tokio::select! {
-                        resolved = &mut rx => resolved.ok(),
-                        presented = tokio::task::spawn_blocking(move || gate.present_form(&shape)) => {
-                            presented.ok().and_then(|answer| decode_operator_decision(&answer))
-                        }
-                    }
-                }
-                _ => rx.await.ok(),
-            }
-        };
-
-        // Whichever arm resolved the escalation already removed its own
-        // trace of it EXCEPT this map entry (`resolve_escalation` removes
-        // it; the gate arm above does not, since it never touches the
-        // sender). Remove it unconditionally here — idempotent, and the one
-        // place every path (decision, dropped channel, timeout) converges.
-        let outcome = tokio::time::timeout(timeout, wait_for_decision).await;
-        self.escalations.lock().remove(&answerer);
-        if let (Some(gate), Some(shape)) = (&escalation_gate, &shape) {
-            gate.retract_form(shape);
-        }
-
-        let decision = match outcome {
-            Ok(Some(decision)) => decision,
-            Ok(None) => {
-                return Err(HarnessError::Resident(format!(
-                    "node {answerer:?}: operator escalation resolved with no usable decision \
-                     (the channel was dropped, the gate task failed, or the submitted form \
-                     didn't decode as a recognized decision)"
-                )));
-            }
-            Err(_elapsed) => {
-                return Err(HarnessError::EscalationTimeout {
-                    node: answerer,
-                    waited: timeout,
-                });
-            }
-        };
-
-        match decision {
-            OperatorDecision::AllocateMore { turns, steer } => {
-                if let Some(steer) = steer.filter(|s| !s.trim().is_empty()) {
-                    self.push_user_turn(answerer, &steer)?;
-                }
-                Ok(CapDecision::Retry {
-                    turn_budget: attempts + turns,
-                })
-            }
-            OperatorDecision::Abort => Ok(CapDecision::Abort {
-                reason: format!("cap-exhausted after {attempts} attempts; operator aborted"),
-            }),
-        }
-    }
-
-    /// The last `n` transcript messages on `node`, rendered as a plain-text
-    /// preview for the escalation popup. Model-authored content — the caller
-    /// renders it through the same HTML-neutralizing path any other
-    /// model/operator-visible text uses; this returns bare text, no markup.
-    fn transcript_tail(&self, node: NodeId, n: usize) -> String {
-        let convos = self.convos.lock();
-        let Some(convo) = convos.get(&node) else {
-            return String::new();
-        };
-        let start = convo.transcript.len().saturating_sub(n);
-        convo.transcript[start..]
-            .iter()
-            .map(|m| format!("{:?}: {}", m.role, m.content))
-            .collect::<Vec<_>>()
-            .join("\n\n")
     }
 
     /// Resume `node`'s parked continuation with `answer` (a Value in the node's
@@ -4259,316 +3077,13 @@ impl Harness {
         }
     }
 
-    // -----------------------------------------------------------------
-    // Frozen context snapshots (PRD 21 C2 §4)
-    // -----------------------------------------------------------------
-
-    /// FREEZE `node`'s current context prefix as a named cache root, returning
-    /// its [`SnapshotDigest`] — the explicit harness operation PRD 21 locked
-    /// decision 2 asks for.
-    ///
-    /// The frozen prefix is `[system(framing)] ++ transcript`, exactly what
-    /// [`engine::assemble_request`] re-emits for this node's next turn, and
-    /// exactly what a child forked from this digest carries verbatim. So a
-    /// child's own assembled prefix re-digests to this same value — that is
-    /// what "share the frozen prefix byte-stably" MEANS here, and it is
-    /// asserted (`tests/companion_snapshots.rs`), not inspected.
-    ///
-    /// **Idempotent.** An unchanged transcript freezes to the same digest, the
-    /// interned entry is not duplicated or replaced, and no second
-    /// `SnapshotFrozen` receipt is written — re-freezing is a lookup. A
-    /// CHANGED transcript (another turn, a compaction) yields a DIFFERENT
-    /// digest and a new interned entry; the old one, and every child already
-    /// forked from it, are untouched. Nothing is ever evicted.
-    ///
-    /// The digest is OUR identity for a prefix. It is not a provider cache
-    /// key and equality does not prove any provider reused anything — see
-    /// this crate's `CLAUDE.md`, "The provider cache-metric gap".
-    pub fn freeze_snapshot(&self, node: NodeId) -> Result<SnapshotDigest, HarnessError> {
-        let (transcript, framing, turn_seq) = {
-            let convos = self.convos.lock();
-            let convo = convos.get(&node).ok_or(HarnessError::NoSession(node))?;
-            (
-                convo.transcript.clone(),
-                convo.framing.clone(),
-                convo.turn_seq,
-            )
-        };
-        let snapshot = ContextSnapshot::freeze(framing, transcript, turn_seq);
-        let digest = snapshot.digest.clone();
-        let messages = snapshot.messages.len() as u64;
-        let prefix_bytes = snapshot.prefix_bytes();
-
-        // Intern under the lock, and decide THERE whether this freeze is new
-        // — so two concurrent freezes of the same prefix cannot both decide
-        // they are the first and write two receipts for one cache root.
-        let is_new = {
-            let mut snapshots = self.snapshots.lock();
-            match snapshots.entry(digest.clone()) {
-                std::collections::hash_map::Entry::Occupied(_) => false,
-                std::collections::hash_map::Entry::Vacant(slot) => {
-                    slot.insert(InternedSnapshot {
-                        origin: node,
-                        snapshot: Arc::new(snapshot),
-                    });
-                    true
-                }
-            }
-        };
-        if is_new {
-            self.tree
-                .snapshot_frozen(node, digest.clone(), messages, prefix_bytes)?;
-            tracing::info!(
-                node = node.0,
-                digest = %digest,
-                messages,
-                prefix_bytes,
-                "froze context snapshot"
-            );
-        }
-        Ok(digest)
-    }
-
-    /// Resolve a frozen snapshot by digest. `None` only for a digest this
-    /// harness never minted — an interned snapshot is never evicted.
-    pub fn snapshot(&self, digest: &SnapshotDigest) -> Option<Arc<ContextSnapshot>> {
-        self.snapshots
-            .lock()
-            .get(digest)
-            .map(|i| i.snapshot.clone())
-    }
-
-    /// Mint a child branch off the frozen cache root `digest`: its transcript
-    /// is the frozen prefix, verbatim and unmodified, plus `brief` as its own
-    /// first user turn. The child is a THUNK — the caller forces it.
-    ///
-    /// Goes through [`Self::seed_forked_child`], the same path an ordinary
-    /// fork child takes, so forcing, seeding, framing inheritance, and the
-    /// `TurnForked` checkpoint reference are literally the same code. The only
-    /// difference is WHERE the prefix comes from: a frozen, shared,
-    /// digest-identified snapshot rather than the parent's live transcript.
-    ///
-    /// Every sibling minted from one digest reports that same parent digest
-    /// via [`Self::branch_snapshot`], and each writes one `BranchInvocation`
-    /// receipt naming it at its first turn.
-    pub fn fork_from_snapshot(
-        &self,
-        digest: &SnapshotDigest,
-        brief: &str,
-    ) -> Result<NodeId, HarnessError> {
-        let (origin, snapshot) = {
-            let snapshots = self.snapshots.lock();
-            let interned = snapshots
-                .get(digest)
-                .ok_or_else(|| HarnessError::UnknownSnapshot(digest.clone()))?;
-            (interned.origin, interned.snapshot.clone())
-        };
-        let child = self.seed_forked_child(
-            origin,
-            "snapshot branch",
-            snapshot.messages.to_vec(),
-            snapshot.framing.clone(),
-            brief.to_string(),
-        )?;
-        self.branch_origins.lock().insert(
-            child,
-            BranchOrigin {
-                snapshot: digest.clone(),
-                invocation_logged: false,
-            },
-        );
-        Ok(child)
-    }
-
-    /// The frozen cache root `node` was branched from, for a node minted by
-    /// [`Self::fork_from_snapshot`]; `None` for every other node. Answers for
-    /// the node's whole life, not just until its receipt is written.
-    pub fn branch_snapshot(&self, node: NodeId) -> Option<SnapshotDigest> {
-        self.branch_origins
-            .lock()
-            .get(&node)
-            .map(|b| b.snapshot.clone())
-    }
-
-    /// The scope the ORIGIN node of a frozen snapshot was running in at
-    /// freeze time — [`ScopeId::ROOT`] for a never-scoped origin (every node
-    /// this crate minted before C3, and the ordinary per-loop answerer
-    /// today). `None` only for a digest this harness never minted (mirrors
-    /// [`Self::snapshot`]).
-    ///
-    /// PRD 21 lane C3: locked decision 2 says a child forks "the frozen
-    /// post-coalgebra context... its compiled blocks and declarations" — the
-    /// DECL/VALUE-plane half of that (C2 §1–3's scope trees) is orthogonal to
-    /// the TRANSCRIPT half this module already gives an identity to. This is
-    /// the seam that joins them: a branch verb mints its child's scope as a
-    /// child of THIS, so "child reads parent tip; child-local stays local"
-    /// applies to a branched tree exactly as it does to an ordinary
-    /// `mint_scope` tree, without threading a scope through the wire
-    /// representation at all — the origin node a snapshot was frozen from
-    /// already carries it.
-    pub fn snapshot_origin_scope(&self, digest: &SnapshotDigest) -> Option<ScopeId> {
-        let origin = self.snapshots.lock().get(digest).map(|i| i.origin)?;
-        Some(self.node_scope(origin))
-    }
-
-    /// Resolve a wire digest string into a validated [`ContextRef`] — the ONE
-    /// checkpoint a `runLLMTurnBranch` ref passes through. `Err(UnknownSnapshot)`
-    /// for a digest this harness never minted (a forged string, a stale ref
-    /// from a different run) — nothing downstream re-derives this check,
-    /// because nothing downstream can construct a `ContextRef` any other way.
-    /// See [`ContextRef`]'s doc for the typestate this buys.
-    pub fn resolve_context_ref(&self, digest: &str) -> Result<ContextRef, HarnessError> {
-        let digest = SnapshotDigest(digest.to_string());
-        if self.snapshots.lock().contains_key(&digest) {
-            Ok(ContextRef(digest))
-        } else {
-            Err(HarnessError::UnknownSnapshot(digest))
-        }
-    }
-
-    /// Mint a child branch off a VALIDATED [`ContextRef`] — same seam as
-    /// [`Self::fork_from_snapshot`] (this IS it, typed so a caller can only
-    /// reach it with a digest already proven to resolve).
-    pub fn fork_from_context_ref(
-        &self,
-        cref: &ContextRef,
-        brief: &str,
-    ) -> Result<NodeId, HarnessError> {
-        self.fork_from_snapshot(&cref.0, brief)
-    }
-
-    /// The scope [`ContextRef`]'s origin window was running in at freeze time
-    /// — the typed-ref sibling of [`Self::snapshot_origin_scope`], collapsed
-    /// to a bare [`ScopeId`] rather than `Option`: a `ContextRef` is only
-    /// ever constructed from a digest already proven to resolve
-    /// ([`Self::resolve_context_ref`]), so the underlying lookup cannot miss.
-    pub fn context_ref_scope(&self, cref: &ContextRef) -> ScopeId {
-        self.snapshot_origin_scope(&cref.0).unwrap_or(ScopeId::ROOT)
-    }
-
-    /// `node`'s live transcript and framing — exactly the pair
-    /// [`Self::drive_turn`] snapshots before it assembles a request, so a
-    /// caller can feed them to [`engine::assemble_request`] and re-derive the
-    /// bytes that go to the provider. `None` for a node with no live convo (a
-    /// thunk, or a terminated node).
-    pub fn node_context(&self, node: NodeId) -> Option<(Vec<Message>, Option<String>)> {
-        self.convos
-            .lock()
-            .get(&node)
-            .map(|c| (c.transcript.clone(), c.framing.clone()))
-    }
-
-    /// Write the one-shot `BranchInvocation` receipt for a snapshot-forked
-    /// branch's FIRST turn: what it shares with the frozen root, what it
-    /// added, and what the provider itself reported.
-    ///
-    /// `transcript` is the request this turn actually sent (drive_turn's own
-    /// pre-call snapshot), so the suffix is measured against what crossed the
-    /// wire, not against a later mutation. A node with no branch origin, or
-    /// one whose receipt is already written, is a no-op.
-    ///
-    /// `cached_input_tokens` rides through UNCHANGED from the provider: `None`
-    /// here means the provider reported nothing, and is recorded as an absent
-    /// field, never as `0`. The byte counts are exact and locally
-    /// recomputable; there is no local tokenizer, so no token-level split of
-    /// the prefix is claimed — see this crate's `CLAUDE.md`.
-    fn log_branch_invocation(
-        &self,
-        node: NodeId,
-        transcript: &[Message],
-        usage: &Usage,
-    ) -> Result<(), HarnessError> {
-        let digest = {
-            let mut origins = self.branch_origins.lock();
-            match origins.get_mut(&node) {
-                Some(origin) if !origin.invocation_logged => {
-                    origin.invocation_logged = true;
-                    origin.snapshot.clone()
-                }
-                _ => return Ok(()),
-            }
-        };
-        // The digest was interned before the child was minted and is never
-        // evicted, so this resolves; a missing entry would mean the intern map
-        // was mutated, which nothing does.
-        let Some(snapshot) = self.snapshot(&digest) else {
-            return Ok(());
-        };
-        // VERIFY the sharing before claiming it. A receipt that says "these N
-        // bytes are shared with root D" is worth nothing if nobody checked, so
-        // re-digest what this turn is ACTUALLY sending, through the same
-        // assembly path, and compare. Once per branch, so the cost is a
-        // rounding error; a mismatch (something rewrote the branch's inherited
-        // prefix before its first turn — nothing does today) writes NO receipt
-        // and says why, because no receipt beats a false one.
-        let split = snapshot.messages.len();
-        let framing = self.node_context(node).and_then(|(_, f)| f);
-        let sent = engine::assemble_request(transcript, None, framing.as_deref()).messages;
-        if transcript.len() < split
-            || crate::snapshot::digest_messages(&sent[..split + 1]) != digest
-        {
-            tracing::warn!(
-                node = node.0,
-                digest = %digest,
-                "branch's first request does not re-digest to its frozen root — \
-                 no BranchInvocation receipt written"
-            );
-            return Ok(());
-        }
-        // The shared part is the whole assembled frozen prefix (system message
-        // included); the suffix is whatever this branch appended past it.
-        let shared_prefix_bytes = snapshot.prefix_bytes();
-        let branch_suffix_bytes = crate::snapshot::content_bytes(&transcript[split..]);
-        self.tree.branch_invocation(
-            node,
-            digest,
-            shared_prefix_bytes,
-            branch_suffix_bytes,
-            usage.input_tokens,
-            usage.cached_input_tokens,
-        )?;
-        Ok(())
-    }
-
-    /// Register a fork/fanout child under `parent`, inheriting the parent's
-    /// transcript prefix through the fork checkpoint plus the hole card, and
-    /// the parent's framing (its system message). Emits `TurnForked`
-    /// referencing the checkpoint. The child is a THUNK — the caller forces it.
-    /// `title` distinguishes a plain fork's single child ("fork answerer") from
-    /// one of a fanout's N children ("fanout answerer <i>"). The checkpoint
-    /// contract is [`Self::seed_forked_child`]'s.
-    fn register_fork_child(
-        &self,
-        parent: NodeId,
-        title: &str,
-        prompt: &str,
-        ty: Option<&str>,
-    ) -> Result<NodeId, HarnessError> {
-        // `parent`'s `suspend_table` is the table its CURRENT hole (the one
-        // this fork answers) was classified from — exactly the table `ty` was
-        // resolved against.
-        let table = self.node_pending(parent).map(|p| p.suspend_table);
-        // The child's transcript = parent prefix + the hole card as a fresh user
-        // task. The fork IS the calling agent (inherits scope + framing), so the
-        // parent conversation is genuine context — [`Self::register_fork_child_with_card`]
-        // is the primitive that reads it (sol cross-family review finding 9e:
-        // this used to re-fetch `parent`'s transcript/framing itself, rather
-        // than building its own card and delegating).
-        self.register_fork_child_with_card(
-            parent,
-            title,
-            engine::resume_typed_request_prompt(prompt, ty, table.as_ref()),
-        )
-    }
-
-    /// [`Self::register_fork_child`] with the OPENING CARD supplied by the
-    /// caller — the selfharness driver's window-pump fork path
-    /// (fork-subsumes-split step 1) builds `engine::finalize_typed_request_prompt`
-    /// (multi-round teaching: explore/define rounds, `finalize @T` as the
-    /// answer verb) where the resume-based path above builds the one-shot
-    /// `engine::resume_typed_request_prompt`. Same seeding seam ([`Self::seed_forked_child`]),
-    /// different teaching. THE primitive: [`Self::register_fork_child`] is
-    /// just its own card construction followed by a call here.
+    /// Register a fork/fanout child under `parent` with the OPENING CARD
+    /// supplied by the caller — the selfharness driver's window-pump fork
+    /// path (fork-subsumes-split step 1) builds
+    /// `engine::finalize_typed_request_prompt` (multi-round teaching:
+    /// explore/define rounds, `finalize @T` as the answer verb). Same
+    /// seeding seam ([`Self::seed_forked_child`]) every forked child goes
+    /// through.
     pub(crate) fn register_fork_child_with_card(
         &self,
         parent: NodeId,
@@ -4587,11 +3102,10 @@ impl Harness {
     /// context) + `opening` (its own first user turn), and emit `TurnForked`
     /// at the checkpoint `prefix` ends at.
     ///
-    /// The ONE place a [`NodeSeed::Forked`] is staged, shared by
-    /// [`Self::register_fork_child`] (whose opening is a hole card) and
-    /// [`Self::fork_from_snapshot`] (whose opening is a rendered brief) — so
-    /// nothing about how a forked child is created, referenced, or later
-    /// seeded at force time can diverge between the two.
+    /// The ONE place a [`NodeSeed::Forked`] is staged — every forked child
+    /// (whose opening is a hole card, [`Self::register_fork_child_with_card`])
+    /// goes through here, so nothing about how a forked child is created,
+    /// referenced, or later seeded at force time can diverge.
     ///
     /// The checkpoint is the inherited prefix's LENGTH (a durable transcript
     /// position), not the assistant-only `turn_seq` counter — the child
@@ -4700,93 +3214,6 @@ impl Harness {
     }
 }
 
-/// The [`FormShape`] [`Harness::escalate_to_operator`] presents through the
-/// operator gate: a two-variant sum mirroring [`OperatorDecision`] exactly
-/// (`AllocateMore { turns, steer }` / `Abort`), with the escalation's reason
-/// and transcript preview carried as the ROOT shape's `doc` — the one place
-/// this ask's form-rendering surface can say WHICH node is stuck and why,
-/// since the wire carries no separate out-of-band channel for it.
-fn escalation_decision_shape(node: NodeId, escalation: &Escalation) -> FormShape {
-    FormShape::Sum {
-        type_key: "EscalationDecision".to_string(),
-        variants: vec![
-            VariantShape {
-                constructor: "AllocateMore".to_string(),
-                shape: FormShape::Product {
-                    type_key: "EscalationDecision".to_string(),
-                    constructor: "AllocateMore".to_string(),
-                    fields: vec![
-                        FieldShape {
-                            key: "turns".to_string(),
-                            shape: FormShape::Int,
-                            doc: Some("How many additional turns to grant.".to_string()),
-                        },
-                        FieldShape {
-                            key: "steer".to_string(),
-                            shape: FormShape::Optional(Box::new(FormShape::String)),
-                            doc: Some(
-                                "Optional corrective note injected as the child's next turn."
-                                    .to_string(),
-                            ),
-                        },
-                    ],
-                    doc: None,
-                },
-            },
-            VariantShape {
-                constructor: "Abort".to_string(),
-                shape: FormShape::Product {
-                    type_key: "EscalationDecision".to_string(),
-                    constructor: "Abort".to_string(),
-                    fields: vec![],
-                    doc: None,
-                },
-            },
-        ],
-        doc: Some(format!(
-            "node {node:?} is stuck: {reason}\n\nrecent transcript:\n{preview}",
-            reason = escalation.reason,
-            preview = escalation.transcript_preview,
-        )),
-    }
-}
-
-/// Decode an operator's submitted answer to [`escalation_decision_shape`]'s
-/// form — the payload-sum wire `operator.rs`'s module docs specify
-/// (`{"tag": "AllocateMore", "turns": ..., "steer": ...}` / `{"tag":
-/// "Abort"}`) — into an [`OperatorDecision`]. `None` for anything that
-/// doesn't match: a malformed/foreign submission never panics or silently
-/// defaults, it just fails to produce a decision (surfaced by
-/// [`Harness::escalate_to_operator`] as a `Resident` error).
-///
-/// `turns` is the form's general signed `IntShape` (there is no bounded-int
-/// shape in the algebra), so the web validator alone lets a negative value,
-/// zero, or a value past `u32::MAX` through — all three are meaningless as a
-/// turn grant. `u32::try_from` rejects a negative or overflowing value
-/// LOUDLY (`None`, the same "no usable decision" path any other malformed
-/// submission takes) instead of the previous `as u32`, which silently
-/// truncated an overflowing value to an arbitrary smaller grant. Zero is
-/// rejected too: it would grant no additional budget, so `attempts` stays at
-/// its already-exhausted value and the answerer immediately re-escalates —
-/// a decision the web UI already recorded as "answered" that accomplishes
-/// nothing.
-fn decode_operator_decision(answer: &Json) -> Option<OperatorDecision> {
-    let tag = answer.get("tag")?.as_str()?;
-    match tag {
-        "AllocateMore" => {
-            let turns = answer.get("turns")?.as_u64()?;
-            let turns = u32::try_from(turns).ok().filter(|&t| t > 0)?;
-            let steer = answer
-                .get("steer")
-                .and_then(|v| v.as_str())
-                .map(str::to_string);
-            Some(OperatorDecision::AllocateMore { turns, steer })
-        }
-        "Abort" => Some(OperatorDecision::Abort),
-        _ => None,
-    }
-}
-
 // -- session take/put/drop + pending accessors -------------------------------
 
 impl Harness {
@@ -4833,27 +3260,14 @@ impl Harness {
 
     /// The defining modules `asks.json` reported for `site`'s answer type,
     /// per `node`'s currently suspended turn's own asks sidecar
-    /// ([`NodeConvo::suspend_asks`]) — the extract-side module lookup
-    /// [`Harness::answer_fork`]/[`Harness::answer_fanout`] pin `finalize`'s
-    /// imports from, replacing the harness-import-scraping guess. Empty when
-    /// `node` has no live convo or `site` has no sidecar entry.
+    /// ([`NodeConvo::suspend_asks`]) — the extract-side module lookup a
+    /// fork/fanout child's `finalize` pins its imports from, replacing the
+    /// harness-import-scraping guess. Empty when `node` has no live convo
+    /// or `site` has no sidecar entry.
     pub(crate) fn asks_modules(&self, node: NodeId, site: u32) -> Vec<String> {
         self.node_pending(node)
             .map(|p| p.suspend_asks.modules_of(site).to_vec())
             .unwrap_or_default()
-    }
-
-    /// [`Self::child_cfg`], with `node`'s own decl-plane root ALSO on its
-    /// include — the compile config a fork/fanout CHILD of `node` needs so
-    /// its own generated shim can resolve a `finalize_pin` module that
-    /// happens to be `node`'s own decl-plane module by name (matches
-    /// [`Self::force_with_extra_include`]'s addition to the child's
-    /// SESSION include — both must cover the same root, or the child's
-    /// ordinary turn module and its shim would disagree on what resolves).
-    fn child_cfg_for_fork_of(&self, node: NodeId) -> EngineConfig {
-        let mut cfg = self.child_cfg.clone();
-        cfg.include.push(node_session_dir(&self.run_id, node));
-        cfg
     }
 
     /// Check `node`'s machine out for a NEW TOP-LEVEL turn (`Idle ->
@@ -5185,25 +3599,6 @@ impl Harness {
     /// water mark is reset (the driver's threshold check does not immediately
     /// re-fire). The next hole (or the current hole's next round) drives on
     /// under the smaller context.
-    ///
-    /// # Compaction MINTS A NEW CACHE ROOT
-    ///
-    /// This replacement is destructive to the node's LIVE transcript — that is
-    /// unchanged and deliberate. What it must never do is reach a FROZEN
-    /// prefix (PRD 21 locked decision 2: a `ContextSnapshot` is immutable, and
-    /// once it has children its prefix is never rewritten). It cannot: an
-    /// interned snapshot owns its own `Arc<[Message]>` and every existing
-    /// child owns its own copy of that prefix, so neither is reachable from
-    /// here. So instead of rewriting the old root, a compaction of a node that
-    /// HAS one freezes a NEW snapshot — a new digest, a new cache root, a
-    /// second `SnapshotFrozen` receipt — while the old entry keeps resolving
-    /// for every child already forked from it. Pinned by
-    /// `tests/companion_snapshots.rs`.
-    ///
-    /// `pub` (rather than the `pub(crate)` its one driver caller would need)
-    /// because that snapshot-immutability contract is a property of THIS
-    /// operation and is asserted directly against it, not through the
-    /// driver's whole compaction ladder.
     pub fn replace_transcript_with_summary(
         &self,
         node: NodeId,
@@ -5232,26 +3627,7 @@ impl Harness {
         drop(convos);
         self.tree
             .turn_delta(node, turn, Role::User, content, None)?;
-        // Mint the new cache root, if this node had one at all. Only for a
-        // node that has ALREADY frozen a snapshot: freezing is an explicit
-        // operation, and compacting a node nobody ever froze must not start
-        // minting roots nobody asked for.
-        if self.has_frozen_snapshot(node) {
-            let digest = self.freeze_snapshot(node)?;
-            tracing::info!(
-                node = node.0,
-                digest = %digest,
-                "compaction minted a new cache root; existing snapshots and their children are untouched"
-            );
-        }
         Ok(())
-    }
-
-    /// Whether `node` has ever frozen a context snapshot. A scan rather than a
-    /// node→digests index: a node freezes a handful of roots at most, and one
-    /// map that cannot desync beats two that can.
-    fn has_frozen_snapshot(&self, node: NodeId) -> bool {
-        self.snapshots.lock().values().any(|i| i.origin == node)
     }
 
     /// Append a User-role message to `node`'s transcript (and log it), without
@@ -5301,77 +3677,6 @@ mod tests {
 
     fn test_engine_cfg() -> EngineConfig {
         EngineConfig::inert(vec!["Console".to_string()])
-    }
-
-    // ---- decode_operator_decision (Medium-7: turns bounds) -----------------
-
-    #[test]
-    fn decode_operator_decision_accepts_a_valid_allocate_more() {
-        let answer = serde_json::json!({"tag": "AllocateMore", "turns": 3, "steer": "focus"});
-        assert_eq!(
-            decode_operator_decision(&answer),
-            Some(OperatorDecision::AllocateMore {
-                turns: 3,
-                steer: Some("focus".to_string())
-            })
-        );
-    }
-
-    #[test]
-    fn decode_operator_decision_accepts_abort() {
-        let answer = serde_json::json!({"tag": "Abort"});
-        assert_eq!(
-            decode_operator_decision(&answer),
-            Some(OperatorDecision::Abort)
-        );
-    }
-
-    /// A negative `turns` passes the web form's general `IntShape`
-    /// validator (it only checks for a JSON integer, not a range), but must
-    /// never decode as a real grant.
-    #[test]
-    fn decode_operator_decision_rejects_negative_turns() {
-        let answer = serde_json::json!({"tag": "AllocateMore", "turns": -1, "steer": null});
-        assert_eq!(decode_operator_decision(&answer), None);
-    }
-
-    /// Zero grants no additional budget — `attempts` would stay exhausted
-    /// and the answerer would immediately re-escalate. Rejected, not
-    /// silently accepted as a no-op grant.
-    #[test]
-    fn decode_operator_decision_rejects_zero_turns() {
-        let answer = serde_json::json!({"tag": "AllocateMore", "turns": 0, "steer": null});
-        assert_eq!(decode_operator_decision(&answer), None);
-    }
-
-    /// A `turns` value past `u32::MAX` must be rejected LOUDLY (`None`) —
-    /// the old `as u32` cast silently truncated it to an arbitrary smaller
-    /// grant instead.
-    #[test]
-    fn decode_operator_decision_rejects_turns_overflowing_u32() {
-        let answer = serde_json::json!({
-            "tag": "AllocateMore",
-            "turns": (u32::MAX as u64) + 1,
-            "steer": null,
-        });
-        assert_eq!(decode_operator_decision(&answer), None);
-    }
-
-    /// The largest legal grant — `u32::MAX` itself — still decodes.
-    #[test]
-    fn decode_operator_decision_accepts_turns_at_u32_max() {
-        let answer = serde_json::json!({
-            "tag": "AllocateMore",
-            "turns": u32::MAX as u64,
-            "steer": null,
-        });
-        assert_eq!(
-            decode_operator_decision(&answer),
-            Some(OperatorDecision::AllocateMore {
-                turns: u32::MAX,
-                steer: None
-            })
-        );
     }
 
     // ---- render_compile_error / error coordinates -------------------------
@@ -5525,103 +3830,6 @@ mod tests {
         assert!(out.contains("Ambiguous type variable"), "{out}");
     }
 
-    /// A synthetic `template_answer_turn`-shaped source: `preamble_lines`
-    /// filler lines, the real answer marker (delegate or non-delegate), then
-    /// one line per `content_lines` standing in for the answerer's own block.
-    fn fake_answer_source(preamble_lines: usize, content_lines: usize, delegate: bool) -> String {
-        let mut s = "-- preamble\n".repeat(preamble_lines);
-        s.push_str(if delegate {
-            ANSWER_MARKER_DELEGATE
-        } else {
-            ANSWER_MARKER
-        });
-        for i in 0..content_lines {
-            s.push_str(&format!("answerLine{i}\n"));
-        }
-        s.push_str(if delegate {
-            " } in __b)\n"
-        } else {
-            " } in __b\n"
-        });
-        s
-    }
-
-    /// The bug this item fixes: a live model received `GHC error:
-    /// /tmp/.tmpe0oty7/Expr.hs:29:18: error: ...` in its corrective prompt — a
-    /// path into a template it has never seen, unmappable to its own code.
-    /// `render_answer_compile_error` must remap the coordinate to the
-    /// answerer's own `<answer>` line space and never surface the raw
-    /// generated-template tempdir path.
-    #[test]
-    fn render_answer_compile_error_remaps_coordinates_and_drops_template_path() {
-        let src = fake_answer_source(0, 1, false);
-        // ANSWER_MARKER has 2 newlines, so the first answer line lands on raw
-        // line 3 — same arithmetic as EXPR_MARKER's, different literal.
-        let err = tidepool_runtime::CompileError::Diagnostics(vec![diag(
-            "/tmp/.tmpe0oty7/Expr.hs",
-            3,
-            18,
-            "Couldn't match expected type",
-        )]);
-        let out = render_answer_compile_error(&err, "resume \"nope\"", &src, false);
-        assert!(out.contains("<answer>:1:"), "{out}");
-        assert!(
-            !out.contains("/tmp/"),
-            "template tempdir path leaked: {out}"
-        );
-        assert!(
-            !out.contains("Expr.hs:3"),
-            "raw template line leaked: {out}"
-        );
-    }
-
-    /// A multi-line answer block failing on its Nth line reports N — mirrors
-    /// [`render_compile_error_remaps_nth_line_of_user_code`].
-    #[test]
-    fn render_answer_compile_error_remaps_nth_line() {
-        let src = fake_answer_source(0, 3, false);
-        // Raw line 5 = offset(2) + 3rd content line.
-        let err = tidepool_runtime::CompileError::Diagnostics(vec![diag(
-            "/tmp/.tmpXYZ/Expr.hs",
-            5,
-            1,
-            "type error on the third line",
-        )]);
-        let body = "answerLine0\nanswerLine1\nanswerLine2";
-        let out = render_answer_compile_error(&err, body, &src, false);
-        assert!(out.contains("<answer>:3:"), "{out}");
-    }
-
-    /// The delegate-wrap answerer uses its own marker
-    /// (`result = runDelegate (let { …`) — remapping must land on the right
-    /// line against ITS OWN marker, not silently mis-offset by routing
-    /// through the non-delegate one.
-    #[test]
-    fn render_answer_compile_error_delegate_wrap_marker() {
-        let src = fake_answer_source(0, 1, true);
-        let offset = candidate_window(&src, ANSWER_MARKER_DELEGATE, 1).unwrap().0;
-        let raw_line = (offset + 1) as u32;
-        let err = tidepool_runtime::CompileError::Diagnostics(vec![diag(
-            "/tmp/.tmpABC/Expr.hs",
-            raw_line,
-            1,
-            "delegate-wrapped mismatch",
-        )]);
-        let out = render_answer_compile_error(&err, "x", &src, true);
-        assert!(out.contains("<answer>:1:"), "{out}");
-        assert!(!out.contains("/tmp/"), "{out}");
-    }
-
-    /// A non-`Diagnostics` variant carries no GHC coordinates to remap —
-    /// renders verbatim via `Display`, same as `render_compile_error`'s own
-    /// non-Diagnostics case.
-    #[test]
-    fn render_answer_compile_error_non_diagnostics_variant_renders_verbatim() {
-        let err = tidepool_runtime::CompileError::IOTypeDetected;
-        let out = render_answer_compile_error(&err, "x", "", false);
-        assert_eq!(out, err.to_string());
-    }
-
     /// A `Harness` built without `Harness::new`/`Harness::force` (both need a
     /// real `tidepool-extract` compile) — every field is filled directly with
     /// an inert placeholder, since `flush_effects` never reads `provider` or
@@ -5643,16 +3851,11 @@ mod tests {
             run_id: generate_run_id(),
             tree: NodeTree::new(writer),
             cfg: test_engine_cfg(),
-            child_cfg: test_engine_cfg(),
             provider,
             convos: Mutex::new(HashMap::new()),
             pending_suspensions: Mutex::new(HashMap::new()),
             pending_session_exits: Mutex::new(Vec::new()),
             pending: Mutex::new(HashMap::new()),
-            escalations: Mutex::new(HashMap::new()),
-            escalation_gate: Mutex::new(None),
-            snapshots: Mutex::new(HashMap::new()),
-            branch_origins: Mutex::new(HashMap::new()),
         }
     }
 
@@ -5680,16 +3883,11 @@ mod tests {
             run_id: generate_run_id(),
             tree: NodeTree::new(writer),
             cfg: test_engine_cfg(),
-            child_cfg: test_engine_cfg(),
             provider,
             convos: Mutex::new(HashMap::new()),
             pending_suspensions: Mutex::new(HashMap::new()),
             pending_session_exits: Mutex::new(Vec::new()),
             pending: Mutex::new(HashMap::new()),
-            escalations: Mutex::new(HashMap::new()),
-            escalation_gate: Mutex::new(None),
-            snapshots: Mutex::new(HashMap::new()),
-            branch_origins: Mutex::new(HashMap::new()),
         };
         (harness, path, dir)
     }

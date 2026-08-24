@@ -52,9 +52,12 @@ Module map:
   effect) + `provider/{api_key,http,oauth,paths}` impls.
 - `replay` — `ReplayProvider` (turn substitution) + `fold_tree_state`
   (crash-replay tree reconstruction) — see Replay below.
-- `snapshot` — frozen post-coalgebra context prefixes: `SnapshotDigest`
-  (blake3 over the exact prefix `engine::assemble_request` re-emits) and the
-  immutable `ContextSnapshot` the harness interns — see Context snapshots below.
+- `snapshot` — `SnapshotDigest`, the blake3 identity type the durable log's
+  `Event::SnapshotFrozen`/`Event::BranchInvocation` variants carry. The
+  context-snapshot/branch feature this type used to back was deleted (sol
+  cross-family review findings 7/8: dead vestige, no production caller); the
+  type survives only for wire compatibility with an old log, and nothing
+  mints one anymore.
 - `synopsis` — `type_document`, the full GHC-style `data` declaration a hole
   card's shape line reads, derived from a compiled `DataConTable` (which
   carries field TYPES as well as NAMES).
@@ -338,62 +341,17 @@ leaves it registered while the child's own bindings' roots go, and the captured
 child-heap objects stay traced transitively through it. Gate:
 `tests/companion_scope_trees.rs`.
 
-## Context snapshots — one frozen prefix, many branches (PRD 21 C2 §4)
+## The provider cache-metric gap (read this before claiming a cache win)
 
-The boundary already existed and was never named: `register_fork_child`
-computes `checkpoint = parent_transcript.len()` and seeds the child with the
-parent's transcript AND framing, and `engine::assemble_request` is
-`[system(framing ?? SYSTEM_FRAMING)] ++ transcript` verbatim — so a fork
-child's assembled request prefix has always been byte-identical to its
-parent's through the checkpoint. `snapshot.rs` gives that prefix an identity
-and receipts; it does not invent it.
-
-- **`Harness::freeze_snapshot(node) -> SnapshotDigest`** — the explicit
-  operation. Interns an immutable `Arc<ContextSnapshot>`. IDEMPOTENT: an
-  unchanged transcript freezes to the same digest, does not duplicate the
-  entry, and writes no second `SnapshotFrozen` receipt. Nothing is ever
-  evicted, so a digest a child was minted from always resolves.
-- **The digest runs over the ASSEMBLED prefix**, via `assemble_request`
-  itself (`snapshot::digest_prefix` calls it) — one assembly path, so the
-  digest cannot drift from what a provider is actually sent. Domain-separated
-  (`b"tidepool-context-snapshot-v2"`) and length-framed, mirroring
-  `tidepool_runtime::cache`'s idiom; `frame` is private there, so the same
-  three lines are reimplemented rather than a second scheme invented. Covers
-  each message's `reasoning_items` too (bumped to v2, 2026-08-20): the
-  provider request genuinely echoes them onto the wire
-  (`provider::oauth::to_input_items`), and `Message` being `Clone` means a
-  fork child DOES carry them — so two transcripts identical in role+content
-  but differing in reasoning state are different provider-visible prefixes,
-  and must not intern to the same `SnapshotDigest`. Still in-memory only:
-  digests are never written into `persistence.rs`'s checkpoint, so the v2
-  bump needed no restart-compat handling.
-- **`Harness::fork_from_snapshot(digest, brief)`** goes through the same
-  `seed_forked_child` an ordinary fork does — the ONE place a
-  `NodeSeed::Forked` is staged — so forcing, seeding, framing inheritance, and
-  the `TurnForked` checkpoint cannot diverge between the two. Every sibling
-  reports one parent digest (`Harness::branch_snapshot`).
-- **Immutability is locked decision 2, and it is pinned.** A `ContextSnapshot`
-  is never mutated; an interned snapshot and each child own their own copies,
-  so there is no `&mut` path to a frozen prefix. Compaction
-  (`replace_transcript_with_summary`, destructive to the node's LIVE
-  transcript by design) therefore cannot reach one: a node that HAS a frozen
-  snapshot gets a NEW one minted at compaction — a new digest, a new cache
-  root, a second receipt — while the old entry and every existing child stay
-  exactly as they were. `tests/companion_snapshots.rs` asserts this by
-  re-digesting the children's own assembled prefixes AFTER the parent is
-  compacted.
-
-### The provider cache-metric gap (read this before claiming a cache win)
-
-**No provider impl in this tree emits `cache_control` breakpoints, and until
-C2 none parsed a cache metric. Measured cache REUSE is therefore not
-verifiable from our side.** Stated plainly so C6's dogfood does not go looking
-for a number that isn't there:
+**No provider impl in this tree emits `cache_control` breakpoints, and none
+parses a cache metric beyond what the response already reports. Measured
+cache REUSE is therefore not verifiable from our side.** Stated plainly so a
+dogfood report does not go looking for a number that isn't there:
 
 - `TurnRequest` has no metadata slot at all, and nothing anywhere emits
   `cache_control`. We do not *cause* provider-side cache hits; at most we make
   a stable prefix available for a provider to cache on its own terms.
-- `Usage` now carries `cached_input_tokens: Option<u64>`, populated ONLY from
+- `Usage` carries `cached_input_tokens: Option<u64>`, populated ONLY from
   a field the response genuinely has — the Responses-API SSE usage object's
   `input_tokens_details.cached_tokens` (`provider/oauth.rs`) and genai's
   `usage.prompt_tokens_details.cached_tokens` (`provider/http.rs`). A provider
@@ -401,42 +359,28 @@ for a number that isn't there:
   serialized as an absent field — never `0`.** Nothing synthesizes it, and
   prefix identity is never treated as evidence of a cache hit. `Usage` also
   carries `cache_write_tokens: Option<u64>` on the same discipline, from
-  `input_tokens_details.cache_write_tokens` — the OAuth `/responses` call now
-  also sends the body field `prompt_cache_key` (equal to the `session-id`
+  `input_tokens_details.cache_write_tokens` — the OAuth `/responses` call
+  sends the body field `prompt_cache_key` (equal to the `session-id`
   header value), matching the official Codex client's cache-routing contract;
   `session_id_for`'s derivation is unchanged, only what carries its value.
 - There is no local tokenizer here, so a token-level split of a shared prefix
-  is not claimed. What IS verifiable, and what the receipts carry:
-  - the **digest** — the frozen prefix's identity, recomputable by anyone;
-  - the **byte counts** — `shared_prefix_bytes` / `branch_suffix_bytes`, exact
-    UTF-8 content bytes of the assembled prefix and of what a branch added;
-  - the provider's **own `input_tokens`** for the branch's first turn.
-- Two prefix-stability hazards a future cache-breakpoint lane inherits: the
-  self-iterating outer loop recomposes its SYSTEM message per iteration
-  (iteration count, operator input, rotation losses), so message 0 is not
-  stable across loops; and compaction rewrites the framing carried into the
-  next render. Neither blocks digest identity — the digest covers framing
-  explicitly — but both cap what a cache claim could cover.
-
-Receipts: `Event::SnapshotFrozen{node,digest,messages,prefix_bytes}` at the
-freeze, `Event::BranchInvocation{node,snapshot,shared_prefix_bytes,
-branch_suffix_bytes,input_tokens,cached_input_tokens}` at a snapshot-forked
-branch's FIRST turn (one-shot). The `Usage` widening is additive +
-`serde(default)` — the precedent is `Event::TurnDelta`'s `reasoning` — so
-`log.jsonl` files written before it still deserialize.
+  is not claimed; the only verifiable number is the provider's own
+  `input_tokens`/`cached_input_tokens` for a given turn.
+- One prefix-stability hazard: the self-iterating outer loop recomposes its
+  SYSTEM message per iteration (iteration count, operator input, rotation
+  losses), so message 0 is not stable across loops; compaction also rewrites
+  the framing carried into the next render.
 
 **Per-round usage lives on `Event::TurnDelta.usage: Option<Usage>` (nested,
-NOT a top-level key) — every assistant turn, not just a branch's first one.**
-`BranchInvocation` above is a one-shot receipt scoped to a snapshot-forked
-branch's opening turn; `TurnDelta.usage` is written by every model round
-(`Harness::drive_turn`/`summarize_turn`/`drive_answerer_to_value`), including
-corrective-retry and answerer-loop rounds, so within-session round-to-round
-cache ratios are already computable from any `log-*.jsonl`:
+NOT a top-level key) — every assistant turn.** Written by every model round
+(`Harness::drive_turn`/`summarize_turn`), including corrective-retry and
+answerer-loop rounds, so within-session round-to-round cache ratios are
+computable from any `log-*.jsonl`:
 `jq -c 'select(.event.ev=="turn_delta" and .event.usage != null) |
 {node: .event.node, turn: .event.turn, ratio: ((.event.usage.cached_input_tokens
-// 0) / .event.usage.input_tokens)}' log-*.jsonl`. Look under `.event.usage`,
-not a flat `.event.cached_input_tokens` — that top-level shape only exists on
-`BranchInvocation` lines.
+// 0) / .event.usage.input_tokens)}' log-*.jsonl`. The `Usage` widening is
+additive + `serde(default)` — the precedent is `Event::TurnDelta`'s
+`reasoning` — so `log.jsonl` files written before it still deserialize.
 
 #### Within-session round-to-round cache affinity (fixed 2026-08-20)
 
@@ -511,16 +455,6 @@ before overflow misses; 1024-token strict minimum prefix; 30-minute TTL
 refreshing on reuse; cache WRITES bill at 1.25× on gpt-5.6+. Bucketed
 sub-keying for high-fanout bursts is deliberately deferred until
 post-`prompt_cache_key` dogfood data shows sibling scatter persisting.
-
-`SnapshotDigest`/`digest_prefix` were UNCHANGED by THIS fix — the
-`prompt_cache_key`/`session-id` header change is provider-side request
-serialization, never covered by the digest, so nothing here shifted or
-needed re-verifying for restart compat. (Separately, `digest_messages` was
-later widened to cover `reasoning_items` — see the v2 note in Context
-snapshots above; that was its own fix, for a different defect, not this
-one.) Digests are not written into `persistence.rs`'s checkpoint at all —
-confirmed by grep — they're interned in-memory per-run and re-minted at
-freeze, per the Context snapshots section above.
 
 **Turn boundary — recomposed SYSTEM message per loop iteration — is NOT the
 same hazard and was deliberately left alone.** Each self-iterating-harness
@@ -674,9 +608,9 @@ is reused across holes whose types differ), and its turns compile with:
   not just the head's) — extract has the real type environment in hand at
   that point, so it answers directly rather than a downstream caller
   guessing from a source scan. `tidepool_runtime::AsksSidecar::modules_of`
-  is the Rust-side read; `SelfHarnessDriver::answer_contract` and
-  `Harness::answer_fork`/`answer_fanout` build `AnswerContract::imports` from
-  it. This replaced `HarnessSource::answerer_imports` (deleted), which only
+  is the Rust-side read; `SelfHarnessDriver::answer_contract` builds
+  `AnswerContract::imports` from it. This replaced
+  `HarnessSource::answerer_imports` (deleted), which only
   ever found types the harness AUTHOR imported into `loop`'s own module —
   a type a MODEL declares in the session decl plane compiled everywhere else
   (the decl plane is on every compile's include path) but could never be
@@ -693,22 +627,10 @@ types_in_scope_hint` says so in the retry rather than looping to the round
 cap. A node with no contract compiles at `Finalize Void` and simply cannot
 finalize. Pinned by `tests/finalize_type_pinning.rs`.
 
-A fork/fanout child's row is widened from ITS OWN requested type this same
-way, independent of whatever contract its parent happens to carry
-(`Harness::answer_fork`/`answer_fanout`, `tests/fork_own_type_pin.rs`) — see
-those methods' doc for why a parent-contract-matching guess is no longer
-needed now that the child's own type resolves its own modules directly. The
-practical payoff for THIS servicing path is the type's defining module
-landing on the child's compile include, which is what lets `resume value ::
-T` name `T` at all — the child still answers by `resume` (redefined `= pure`
-for this one-shot `run_child` compile), never `finalize @T`: `finalize` is a
-genuinely suspending effect and crashes this specific path
-(`ResidentError::ChildSuspended`), a separate, pre-existing gap this pin does
-not newly close. This is the general Agent stack's ONE-SHOT `answer_fork`/
-`answer_fanout` path only — fork-subsumes-split step 1 closed this exact gap
-on the self-iterating harness path: a pump-driven fork child
-(`SelfHarnessDriver::drive_fork_child_agent_session`) answers with a REAL
-`finalize @T` and `ChildSuspended` is unreachable from there.
+A fork child's row is widened from ITS OWN requested type this same way,
+independent of whatever contract its parent happens to carry
+(`SelfHarnessDriver::drive_fork_child_agent_session` answers with a REAL
+`finalize @T` — see "Recursive fork servicing" below).
 
 `askUser` re-prompts by RECURSION on a decode failure (no `Either` — the
 retry is entirely Haskell-side): a bad submission genuinely re-suspends on a
@@ -736,8 +658,7 @@ overridable via `SelfHarnessDriver::set_gate` — a web/GUI implementation
 parks on a channel instead. `between_loops_gate` (the human-checkpoint between
 loop iterations) is an ORDINARY `present_form` call — a driver-authored
 `FormShape` ("Turn N complete — start turn N+1?" plus one optional `steer`
-text field, precedent: `Harness::escalate_to_operator`'s `AllocateMore`/
-`Abort` form), not a second mechanism. Every gate call runs under
+text field), not a second mechanism. Every gate call runs under
 `tokio::task::block_in_place` so a web gate's channel park yields the tokio
 worker instead of stalling it.
 
@@ -798,10 +719,9 @@ session's own turn may spawn. A refusal is loud, not silent: the answerer
 gets the budget back as data (`fork_budget_refusal`/`fork_subtree_refusal`
 text) and can adapt, not a hard failure.
 
-**GUI lifecycle (fork-subsumes-split step 3):** a fork child gets the same
-operator-page treatment `service_outer_branch` gives a branch child — birth,
-seed brief, timeline, final typed value or failure. Its tree label/path is
-DERIVED, not wire-carried (unlike a `runLLMTurnBranchLabeled` child): base
+**GUI lifecycle (fork-subsumes-split step 3):** a fork child gets its own
+operator-page treatment — birth, seed brief, timeline, final typed value or
+failure. Its tree label/path is DERIVED: base
 path from the parent's own registered label (or `"root"`), child segment
 `f<idx>-<ascii-slug-of-brief>` from a per-parent monotonic counter
 (`fork_child_seq`) assigned inside `drive_fork_child_agent_session` itself. See
@@ -815,7 +735,7 @@ question → one top-level typed request → render, and the tree above is
 entirely what a session's own `fork` calls produce. See that harness's own
 README, not this file, for the companion-side shape.
 
-### Outer fork/fanout servicing — a branch's exit is DATA at its position
+### Outer fork/fanout servicing — a child's exit is DATA at its position
 
 An AUTHORED `loop` reaching for `runLLMTurnFork @T`/`runLLMTurnFanout @T`
 suspends on `RunLLMTurn`'s own fork payload (no separate `Fork` decl needed —
@@ -828,23 +748,11 @@ before assembly so completion order is never observable.
 **Every verb that opens an agent session at a BRANCH POSITION answers an
 `Either`** (PRD 21 locked decision 6,
 `plans/self-iterating-harness/21-c3-exit-verb.md`):
-`runLLMTurnFork @T :: Text -> M (Either InvocationExit T)`,
-`runLLMTurnFanout @T :: [Text] -> M [Either InvocationExit T]`, and
-`runLLMTurnBranch @T :: ContextRef -> Text -> M (Either InvocationExit (T, ContextRef))`
-(the `Either` wraps the WHOLE pair — an agent session that never finalized has
-no post-finalize prefix, so there is no honest `ContextRef` to sit beside the
-failure). The two that do NOT open a branch position keep their bare answers:
-`runLLMTurn @T`, answered in context by the same node, and `freezeContext`,
-which does not open an agent session at all. That asymmetry is documented at
-the declaration (`tidepool_mcp::runllmturn_effect_def!`).
-
-`runLLMTurnBranch` reaches it by a different route — `service_outer_branch` is
-sequential and drives its child through `drive_agent_session_to_finalize`, the round
-loop it SHARES with the in-context `service_typed_request_suspension`. That loop returns
-`Result<Result<TurnOutcome, InvocationExit>, DriverError>` and the two callers
-differ in what they do with an exit, which is exactly the branch-position
-distinction: the branch folds it as `Left`, the in-context hole collapses it
-back into a hard failure (unchanged).
+`runLLMTurnFork @T :: Text -> M (Either InvocationExit T)` and
+`runLLMTurnFanout @T :: [Text] -> M [Either InvocationExit T]`. The verb that
+does NOT open a branch position keeps its bare answer: `runLLMTurn @T`,
+answered in context by the same node. That asymmetry is documented at the
+declaration (`tidepool_mcp::runllmturn_effect_def!`).
 
 **The line, and it is the whole point of the shape.** A failure attributable
 to ONE CHILD'S AGENT SESSION — round exhaustion, ending on something that is
@@ -867,21 +775,16 @@ fork/fanout site head-swaps to a `*Sited` sibling whose top-level type mentions
 `Either InvocationExit a`, and extract's `collectTransitiveDCons` seeds from
 reachable top-level binders' types.
 
-`SuspensionRouting::Fork` is shared by two independent servicing paths, both
-carrying `engine::ForkSource` to tell a `Tidepool.Fork` hole (`fork`/
-`forkAll`, always answers bare `T`/`[T]`) from a `RunLLMTurn`-sourced one
-(`runLLMTurnFork`/`runLLMTurnFanout`, `Either`-wrapped — see above): the
-self-harness pump (`SelfHarnessDriver::drain_answerer_fork`/
-`service_thread_ready`, driving each child on the full row via
-`drive_fork_child_agent_session`, its own `wrap_fork_value` doing the `Right`
-wrap) and the general Agent stack's one-shot NESTED path (`Harness::
-answer_fork`/`answer_fanout`, driving each child via `drive_one_fork_child`,
-`Harness::wrap_fork_answer` doing the same wrap). Neither path produces a
-`Left` from a `Tidepool.Fork`-sourced hole: a child failing there still
-hard-fails the fan — through `drive_answerer_to_value`'s escalation ladder
-on the NESTED path, or as an ordinary `DriverError` on the pump path (fork
-children are not branch positions with a typed `Left` to fold into — see
-"The line…" above).
+`SuspensionRouting::Fork` carries `engine::ForkSource` to tell a
+`Tidepool.Fork` hole (`fork`/`forkAll`, always answers bare `T`/`[T]`) from a
+`RunLLMTurn`-sourced one (`runLLMTurnFork`/`runLLMTurnFanout`,
+`Either`-wrapped — see above): the self-harness pump
+(`SelfHarnessDriver::drain_answerer_fork`/`service_thread_ready`, driving
+each child on the full row via `drive_fork_child_agent_session`, its own
+`wrap_fork_value` doing the `Right` wrap). It never produces a `Left` from a
+`Tidepool.Fork`-sourced hole: a child failing there still hard-fails the fan
+as an ordinary `DriverError` (fork children are not branch positions with a
+typed `Left` to fold into — see "The line…" above).
 
 One consequence worth knowing before writing a harness: `InvocationExit` lives
 in the per-fragment generated `Tidepool.Effects`, so the cross-row bind guard
@@ -889,40 +792,7 @@ refuses an `Either InvocationExit T` as a cross-turn session VALUE BIND (same
 rule that already covered `Schema`). Project at the bind —
 `steps <- either (\_ -> []) id <$> runLLMTurnFork @[Int] "…"`.
 
-Gates: `tests/outer_fanout.rs` (fork/fanout) and
-`tests/companion_context_ref.rs` (branch).
-
-### The escalation ladder — bounded rung-2 wait, gate-resolved
-
-`drive_answerer_to_value`'s cap-exhaustion handling is a two-rung ladder
-(`Harness::handle_cap_exhaustion`). Rung 1 fires at most once per call
-(`AUTO_RETRY_MAX = 1`): it nudges the answerer with a corrective turn and
-grants `AUTO_RETRY_BUMP` (3) more turns. A SECOND exhaustion escalates to rung
-2 (`Harness::escalate_to_operator`): the answerer parks, awaiting an operator
-decision (`OperatorDecision::AllocateMore { turns, steer }` grants a fresh
-budget; `Abort` fails the child with `HarnessError::Aborted`).
-
-The rung-2 wait is BOUNDED, never indefinite: `EngineConfig::escalation_timeout`
-(default `engine::DEFAULT_ESCALATION_TIMEOUT`, 20 minutes) caps it, and an
-unresolved escalation fails the turn loud with `HarnessError::EscalationTimeout`
-instead of hanging the turn — and everything up-stack awaiting it — forever. A
-test overrides `escalation_timeout` directly (the same idiom `max_child_turns`
-already uses) to exercise the timeout path without a real wait.
-
-**Resolution has two paths, raced against each other.** (1)
-`Harness::resolve_escalation(node, decision)` fires the decision directly — a
-test, or an emergency admin override. (2) When `Harness::set_escalation_gate`
-has wired an `OperatorGate` (`SelfHarnessDriver::set_gate` does this
-automatically, so a web/GUI gate covers escalations for free), the escalation
-presents itself as an ordinary operator ask — `AllocateMore`/`Abort` rendered
-as a form, carrying the stuck node's reason and transcript preview as the
-form's `doc` — through the SAME `present_form`/`/submit` wire every `askUser`
-uses. No dedicated endpoint: a live operator resolves an escalation exactly
-like any other pending ask on the operator surface. `Harness::escalation_of`/
-`first_escalated_node` still report a pending rung-2 escalation regardless of
-which resolution path is wired up.
-
-Gate: `tests/acceptance_fanout.rs`.
+Gate: `tests/outer_fanout.rs`.
 
 ### One session: attached realms, closure delivery, machine rotation
 

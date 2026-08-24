@@ -628,17 +628,6 @@ async fn root_maybe_form_shape_and_decode_round_trip() {
     );
 }
 
-/// A gate that panics if ever asked to present a form — proof that a code
-/// path never suspends at all, rather than merely proof that whatever it
-/// was asked happened to decode.
-struct PanicIfAskedGate;
-
-impl OperatorGate for PanicIfAskedGate {
-    fn present_form(&self, shape: &FormShape) -> serde_json::Value {
-        panic!("present_form must never be called here, got shape: {shape:?}")
-    }
-}
-
 /// Medium-5 regression: `choose []` must fail LOUD at the point it is
 /// called, never suspend an empty choice the web gate can only reject
 /// (permanently pending — no Haskell-side re-prompt ever fires because a
@@ -650,9 +639,8 @@ impl OperatorGate for PanicIfAskedGate {
 /// run_to_hole_or_done` (unlike the nested runLLMTurn-servicing path)
 /// retries only a compile failure or a blockless reply, never a RUNTIME
 /// fault, so a genuine `error` call propagates immediately with no retry
-/// and no risk of exhausting a replay queue. [`PanicIfAskedGate`] proves the
-/// gate is never consulted at all — `choose` rejects before ever calling
-/// `askUserRaw`.
+/// and no risk of exhausting a replay queue — `choose` rejects before ever
+/// calling `askUserRaw`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn choose_with_no_options_fails_loud_before_suspending() {
     support::require_extract();
@@ -685,7 +673,6 @@ async fn choose_with_no_options_fails_loud_before_suspending() {
     let writer =
         tidepool_harness::log::LogWriter::create(&log_path, &header()).expect("log writer");
     let harness = Arc::new(Harness::new(writer, agent_cfg, provider).expect("harness boots"));
-    harness.set_escalation_gate(Arc::new(PanicIfAskedGate));
 
     let root = harness
         .create_root("choose-empty root", "call choose with no options")

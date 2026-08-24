@@ -1085,25 +1085,8 @@ macro_rules! runllmturn_effect_def {
                 "`Right x <- runLLMTurnFork \\@T p`, or `renderInvocationExit e` to display ",
                 "one. GHC validates each answer against `T` before it resumes the ",
                 "continuation (an ill-typed answer never consumes it). ",
-                "`freezeContext :: M ContextRef` mints a capability naming THIS session's ",
-                "current frozen prefix, immediately (no operator, no model round). ",
-                "`runLLMTurnBranch \\@T ref prompt :: M (Either InvocationExit (T, ",
-                "ContextRef))` forks a FRESH child agent session off that frozen prefix ",
-                "(never an empty root) — `Right (answer, ref')` is the child's own answer ",
-                "plus a ref to ITS post-finalize context for branching further; a branch ",
-                "child's abnormal exit is also a `Left` here (and a session that never ",
-                "finalized has no context to hand back, which is why the `Either` wraps ",
-                "the whole pair). `runLLMTurnBranchLabeled \\@T label ref prompt` is the ",
-                "same verb with a caller-chosen `label` Text stamped onto the child ",
-                "session, for routing its asks to a per-session operator surface. ",
-                "`runLLMTurnBranchFanout \\@T ref labeledPrompts :: M [Either InvocationExit ",
-                "(T, ContextRef)]` is the BULK sibling verb: every `(label, prompt)` pair ",
-                "forks its OWN child agent session off the SAME frozen `ref` (never a ",
-                "rendered ancestry line), driven CONCURRENTLY (the fanout machinery, not ",
-                "one at a time), with results returned in DECLARED order regardless of ",
-                "completion order — for a layer of independent siblings that should never ",
-                "be scheduled sequentially. In every verb above, `T` may be any type in ",
-                "scope, including one you declared yourself earlier this session.",
+                "In every verb above, `T` may be any type in scope, including one you ",
+                "declared yourself earlier this session.",
             ],
             // PRD 21 locked decision 6's typed exit, generated here alongside
             // the GADT exactly as ExecError/FsError are (they come from the
@@ -1114,7 +1097,6 @@ macro_rules! runllmturn_effect_def {
             // names are this list, and a name missing from a turn's
             // DataConTable is a hard error there, never a defaulted value.
             type_defs [
-                "data ContextRef = ContextRef Text deriving (Show, Eq)",
                 "-- | Why a forked child agent session ended WITHOUT a typed answer.\n\
                  -- Folded as data at the failing branch's own position (PRD 21\n\
                  -- locked decision 6) — never an exception that erases the results\n\
@@ -1137,9 +1119,6 @@ macro_rules! runllmturn_effect_def {
                 { ctor RunLLMTurnWith, method run_llm_turn_with,
                   args { prompt: "Text" as String, payload: "Value" as tidepool_eval::value::Value },
                   ret "Value" },
-                { ctor RunLLMTurnFreezeWith, method run_llm_turn_freeze_with,
-                  args { },
-                  ret "ContextRef" },
             ],
             helpers [
                 // #R0 typed-yield pass, plans/harness-r0/10-extract-pass; split out of
@@ -1246,93 +1225,6 @@ macro_rules! runllmturn_effect_def {
                 { raw substrate ["{-# OPAQUE runLLMTurnFanoutSited #-}",
                        "runLLMTurnFanoutSited :: forall a effs. Member RunLLMTurn effs => Int -> [Text] -> Eff effs [Either InvocationExit a]",
                        "runLLMTurnFanoutSited sid prompts = unsafeCoerce <$> send (RunLLMTurnWith (intercalate \"\\n\" prompts) (object [\"typedSite\" .= sid, \"fork\" .= True, \"fan\" .= length prompts, \"prompts\" .= prompts]))"] },
-                // PRD 21 lane C3 GAP 1: give the frozen-snapshot seam
-                // (tidepool-harness's ContextSnapshot / freeze_snapshot /
-                // fork_from_snapshot) an authored-surface reach. `freezeContext`
-                // is NOT sited — its answer type (`ContextRef`) is fixed, not a
-                // per-call `\@T`, so it needs no Translate.hs interception, the
-                // same reason `getStateJson`/`ReadStateWith` need none: an
-                // ordinary `send` on an interposed effect suspends regardless of
-                // site-numbering.
-                { raw ["-- | Mint a capability naming THIS session's current frozen",
-                       "-- prefix (PRD 21 locked decision 2: children fork the frozen",
-                       "-- post-coalgebra context). Immediate — no operator, no model",
-                       "-- round (ReadState's service shape). ContextRef is an",
-                       "-- unforgeable capability issued by the runtime: a ContextRef",
-                       "-- only ever comes from here or from runLLMTurnBranch's own",
-                       "-- return; an unrecognized one is refused by the driver as a",
-                       "-- typed error, never a silent fresh-root fallback.",
-                       "freezeContext :: forall effs. Member RunLLMTurn effs => Eff effs ContextRef",
-                       "freezeContext = send RunLLMTurnFreezeWith"] },
-                // `runLLMTurnBranch` IS sited (its `\@T` is model/site-chosen,
-                // exactly like `runLLMTurnFork`), riding the SAME
-                // `RunLLMTurnWith` wire constructor with a `branch`/`ref` payload
-                // flag (classified by `tidepool-harness::engine::classify_hole`)
-                // rather than a new GADT constructor — mirroring how
-                // fork/fanout already share one constructor. See
-                // `haskell/src/Tidepool/Translate.hs`'s `sitedVerbs` table for
-                // its one added row.
-                //
-                // A branch child IS a branch position (PRD 21 decision 6), so
-                // it answers an `Either` like fork/fanout. The `Either` wraps
-                // the WHOLE pair — `Either InvocationExit (a, ContextRef)`,
-                // not `(Either InvocationExit a, ContextRef)`: a session that
-                // never finalized has no post-finalize context, so a
-                // `ContextRef` beside a failure would be a capability with
-                // nothing behind it. `freezeContext` stays bare — it is not a
-                // session (no model round, resolves immediately), so it has no
-                // exit to report.
-                { raw ["{-# OPAQUE runLLMTurnBranch #-}",
-                       "runLLMTurnBranch :: forall a effs. Member RunLLMTurn effs => ContextRef -> Text -> Eff effs (Either InvocationExit (a, ContextRef))",
-                       "runLLMTurnBranch ref p = runLLMTurnBranchSited 0 ref p"] },
-                { raw substrate ["{-# OPAQUE runLLMTurnBranchSited #-}",
-                       "runLLMTurnBranchSited :: forall a effs. Member RunLLMTurn effs => Int -> ContextRef -> Text -> Eff effs (Either InvocationExit (a, ContextRef))",
-                       "runLLMTurnBranchSited sid (ContextRef ref) p = unsafeCoerce <$> send (RunLLMTurnWith p (object [\"typedSite\" .= sid, \"branch\" .= True, \"ref\" .= ref]))"] },
-                // PRD 21 C5 GUI lane: an ADDITIVE sibling of `runLLMTurnBranch`
-                // that also stamps a caller-chosen `label` onto the SAME
-                // `branch`/`ref` payload shape (one more JSON field, not a new
-                // GADT constructor — `RunLLMTurnWith`'s arity is untouched).
-                // `label` is a plain runtime `Text` argument, not `@`-applied,
-                // so it carries no site-identity meaning of its own; the driver
-                // reads it back (`tidepool_harness::engine::SuspensionRouting::
-                // Branch`'s `label` field) to route this branch child's
-                // asks/notes to a per-node operator gate
-                // (`selfharness::operator::OperatorGate::node_gate`) instead of
-                // the default one. Mirrors `runLLMTurnBranch`/
-                // `runLLMTurnBranchSited` exactly otherwise.
-                { raw ["{-# OPAQUE runLLMTurnBranchLabeled #-}",
-                       "runLLMTurnBranchLabeled :: forall a effs. Member RunLLMTurn effs => Text -> ContextRef -> Text -> Eff effs (Either InvocationExit (a, ContextRef))",
-                       "runLLMTurnBranchLabeled label ref p = runLLMTurnBranchLabeledSited 0 label ref p"] },
-                { raw substrate ["{-# OPAQUE runLLMTurnBranchLabeledSited #-}",
-                       "runLLMTurnBranchLabeledSited :: forall a effs. Member RunLLMTurn effs => Int -> Text -> ContextRef -> Text -> Eff effs (Either InvocationExit (a, ContextRef))",
-                       "runLLMTurnBranchLabeledSited sid label (ContextRef ref) p = unsafeCoerce <$> send (RunLLMTurnWith p (object [\"typedSite\" .= sid, \"branch\" .= True, \"ref\" .= ref, \"label\" .= label]))"] },
-                // The BULK sibling verb: N children fork off ONE parent
-                // `ContextRef`, each its own `(label, prompt)`, driven
-                // CONCURRENTLY via the same machinery as `runLLMTurnFanout`
-                // (`tidepool_harness::selfharness::driver::
-                // service_outer_branch_fanout` — per-child runtime resource
-                // scope, `set_concurrency_cap`, declaration-order
-                // reassembly) rather than `runLLMTurnBranch`'s sequential
-                // one-at-a-time driving. Rides the SAME `RunLLMTurnWith`
-                // wire constructor with a
-                // `branchFanout`/`ref`/`labels`/`prompts`/`fan` payload flag
-                // (classified by `tidepool-harness::engine::classify_hole`)
-                // rather than a new GADT constructor — the same "one
-                // constructor, several payload shapes" discipline
-                // fork/fanout/branch already use. Each sibling agent session
-                // is a BRANCH POSITION exactly like `runLLMTurnBranch`'s (PRD 21
-                // locked decision 6): its own abnormal exit folds as `Left`
-                // at its own position in the returned list, never erasing a
-                // sibling's already-finished answer — scheduling is an
-                // implementation detail the model never chooses (operator
-                // decision: sibling branches are always driven concurrently,
-                // transparently, because each is independent).
-                { raw ["{-# OPAQUE runLLMTurnBranchFanout #-}",
-                       "runLLMTurnBranchFanout :: forall a effs. Member RunLLMTurn effs => ContextRef -> [(Text, Text)] -> Eff effs [Either InvocationExit (a, ContextRef)]",
-                       "runLLMTurnBranchFanout ref labeledPrompts = runLLMTurnBranchFanoutSited 0 ref labeledPrompts"] },
-                { raw substrate ["{-# OPAQUE runLLMTurnBranchFanoutSited #-}",
-                       "runLLMTurnBranchFanoutSited :: forall a effs. Member RunLLMTurn effs => Int -> ContextRef -> [(Text, Text)] -> Eff effs [Either InvocationExit (a, ContextRef)]",
-                       "runLLMTurnBranchFanoutSited sid (ContextRef ref) labeledPrompts = unsafeCoerce <$> send (RunLLMTurnWith (intercalate \"\\n\" (map snd labeledPrompts)) (object [\"typedSite\" .= sid, \"branchFanout\" .= True, \"ref\" .= ref, \"labels\" .= map fst labeledPrompts, \"prompts\" .= map snd labeledPrompts, \"fan\" .= length labeledPrompts]))"] },
             ],
         }
     };

@@ -29,22 +29,15 @@
 //!
 //! Compile-level, so each case is one deterministic `tidepool-extract` call
 //! with no model in the loop. Needs `TIDEPOOL_EXTRACT` and the with-packages
-//! GHC on PATH (`--ignore-default-filter` to run; see `tests/golden_path.rs`
-//! for the env recipe).
+//! GHC on PATH (`--ignore-default-filter` to run; see `haskell/CLAUDE.md`'s
+//! "Local iteration" section for the env recipe).
 
 mod support;
-
-use std::sync::Arc;
 
 use tidepool_harness::engine::{
     self, finalize_typed_request_prompt, template_turn_for, CompiledTurn, EngineConfig,
 };
-use tidepool_harness::log::{Actor, LogHeader, LogWriter};
-use tidepool_harness::provider::{DynModelProvider, Usage};
-use tidepool_harness::replay::{RecordedReply, ReplayProvider};
-use tidepool_harness::tree::NodeState;
 use tidepool_harness::typed_request_agent_decls;
-use tidepool_harness::{Harness, SuspensionRouting, TurnOutcome};
 use tidepool_runtime::CompileError;
 
 fn repo_root() -> std::path::PathBuf {
@@ -474,139 +467,5 @@ fn bare_non_bind_askuser_form_compiles_when_pinned() {
         "a bare non-bind `askUser @T` turn (no finalize in the block) must \
          still compile against a Decision-pinned row — got: {:?}",
         result.err().map(|e| e.to_string())
-    );
-}
-
-// ---------------------------------------------------------------------------
-// fork-own-type-pin (folded, test-architecture review W2, 2026-08-23): the
-// same answer-contract mechanism above, but exercised through
-// `Harness::answer_fork`'s module-lookup pin rather than a raw `compile_turn`
-// call — the tenth named check in this family (CLAUDE.md's "answer contract"
-// section describes both in the same paragraph). A fork child's row is
-// widened from its OWN requested answer type, resolved via `asks.json`'s
-// module lookup (`AsksSidecar::modules_of`), independent of whatever
-// `AnswerContract` its PARENT happens to carry — this root node never sets
-// one, so under the OLD (parent-contract-matching) mechanism the fork below
-// would have found nothing to match against and the child's row would stay
-// unpinned. The child still answers via `resume` (the verb THIS servicing
-// path's `run_child` one-shot compile actually supports — `resume` is
-// locally redefined as `pure` for the compile, so it never suspends;
-// `finalize @T` is a genuinely suspending effect and crashes this specific
-// path with `ResidentError::ChildSuspended`, a separate, pre-existing gap
-// this fix does not newly enable — see this crate's CLAUDE.md).
-
-fn prelude_dir() -> std::path::PathBuf {
-    repo_root().join("haskell/lib")
-}
-
-fn examples_harness_dir() -> std::path::PathBuf {
-    repo_root().join("examples/harness")
-}
-
-fn fork_own_type_pin_header() -> LogHeader {
-    LogHeader {
-        prelude_hash: "fork-own-type-pin".into(),
-        extract_fingerprint: "fork-own-type-pin".into(),
-        harness_version: "test".into(),
-    }
-}
-
-fn reply(content: &str) -> RecordedReply {
-    RecordedReply {
-        content: content.to_string(),
-        usage: Usage {
-            input_tokens: 50,
-            output_tokens: 10,
-            cached_input_tokens: None,
-            cache_write_tokens: None,
-        },
-    }
-}
-
-fn outcome_tag(o: &TurnOutcome) -> &'static str {
-    match o {
-        TurnOutcome::Completed { .. } => "Completed",
-        TurnOutcome::Suspended { .. } => "Suspended",
-        TurnOutcome::NoBlock { .. } => "NoBlock",
-    }
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn fork_child_resolves_its_own_type_with_no_parent_contract() {
-    support::require_extract();
-
-    let dir = tempfile::tempdir().unwrap();
-    let log_path = dir.path().join("fork-own-type-pin.jsonl");
-    let writer = LogWriter::create(&log_path, &fork_own_type_pin_header()).unwrap();
-    let cfg = EngineConfig::from_decls(
-        typed_request_agent_decls(),
-        prelude_dir(),
-        Some(examples_harness_dir()),
-    )
-    .expect("answerer engine config");
-
-    let replies = vec![
-        reply(
-            "```haskell\n\
-             import Tidepool.Fork\n\
-             import HarnessTypes\n\
-             \n\
-             fork @Decision \"decide\"\n\
-             ```",
-        ),
-        reply(
-            "```haskell\n\
-             import HarnessTypes\n\
-             \n\
-             resume (Decision { action = \"observe\", rationale = \"because\", confidence = High })\n\
-             ```",
-        ),
-    ];
-    let provider: Arc<dyn DynModelProvider> = Arc::new(ReplayProvider::new(replies));
-    let harness = Arc::new(Harness::new(writer, cfg, provider).expect("harness boots"));
-
-    let root = harness
-        .create_root("fork own-type root", "Fork a child to decide.")
-        .unwrap();
-    harness.force(root, Actor::Operator).unwrap();
-    // Deliberately NOT calling `set_answer_contract` — the root has no
-    // contract of its own, so a PRE-fix `answer_fork` would have pinned
-    // nothing for the child either (the parent-contract-matching guess had
-    // no contract to match against).
-
-    let outcome = harness
-        .run_to_hole_or_done(root)
-        .await
-        .expect("root drives to the fork hole");
-    match &outcome {
-        TurnOutcome::Suspended { classified, .. } => match &classified.routing {
-            SuspensionRouting::Fork { ty, fan: None, .. } => {
-                assert_eq!(ty.as_deref(), Some("Decision"));
-            }
-            other => panic!("expected a plain fork hole for Decision, got {other:?}"),
-        },
-        TurnOutcome::Completed { rendered } => {
-            panic!("root should suspend on the fork hole, got Completed: {rendered}")
-        }
-        other => panic!(
-            "root should suspend on the fork hole, got {}",
-            outcome_tag(other)
-        ),
-    }
-
-    let child = harness
-        .answer_fork(root, Actor::Operator)
-        .await
-        .expect("the fork child answers with a Decision value");
-
-    assert_eq!(
-        harness.tree().state(child),
-        Some(NodeState::Done),
-        "the fork child answers and retires"
-    );
-    assert_eq!(
-        harness.tree().state(root),
-        Some(NodeState::Done),
-        "the parent resumes and completes with the child's Decision value"
     );
 }

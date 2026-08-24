@@ -169,11 +169,10 @@ fn plain_finalize_still_compiles_under_the_wrap() {
     );
 }
 
-/// Compile one delegating-window ANSWERER turn (`engine::template_answer_turn`
-/// — the fork/return-control path `Harness::drive_answerer_to_value` compiles
-/// through, not `template_turn_for`'s expr/bind path above) against a REAL
-/// `Finalize` pin, mirroring what `drive_answerer_to_value` now does: resolve
-/// `turn_target` from the contract first (so `Finalize` is instantiated at
+/// Compile one delegating-window ANSWERER turn (`engine::template_answer_turn`,
+/// not `template_turn_for`'s expr/bind path above) against a REAL
+/// `Finalize` pin: resolve `turn_target` from the contract first (so
+/// `Finalize` is instantiated at
 /// `finalize_ty`, never the bare default `Finalize Void`), then template
 /// and compile the raw (non-`toJSON`'d) answerer module against it.
 ///

@@ -82,7 +82,7 @@ use crate::engine::{
     self, ClassifiedSuspension, CompiledTurn, EngineConfig, EngineError, InvocationExit,
     SuspensionRouting, TurnOutcome,
 };
-use crate::harness::{AnswerContract, ContextRef, Harness, HarnessError, Session, OUTER_REALM};
+use crate::harness::{AnswerContract, Harness, HarnessError, Session, OUTER_REALM};
 use crate::log::Actor;
 use crate::selfharness::harness_source::HarnessSource;
 use crate::selfharness::lifecycle::SelfHarnessState;
@@ -90,7 +90,6 @@ use crate::selfharness::observer::{AskId, Event, FormSource, Observer};
 use crate::selfharness::operator::{FieldShape, FormShape, OperatorGate, StdinGate};
 use crate::selfharness::persistence::{self, PersistenceError};
 use crate::selfharness::state_cross;
-use crate::snapshot::SnapshotDigest;
 use crate::timing;
 use crate::tree::{FanBadge, HoleId, NodeId};
 
@@ -387,7 +386,7 @@ fn green_int_list_field(request: &Value, idx: usize, table: &DataConTable) -> Ve
 /// answerer-plane sibling of the loop-scoped locals
 /// [`SelfHarnessDriver::run_loop_fragment_inner`] owns for the AUTHORED
 /// outer loop. The plane split mirrors the fork machinery's own
-/// ([`crate::harness::Harness::answer_fork`] vs
+/// ([`SelfHarnessDriver::drive_fork_child_agent_session`] vs
 /// [`SelfHarnessDriver::service_outer_fanout`]): thread chains are serviced
 /// by the SAME [`SelfHarnessDriver::service_green_hole`] (raw session
 /// resumes — correct for thread frames, which live under their own realms),
@@ -586,12 +585,7 @@ fn wrap_fork_value(
 /// child needs via its own capture, same reasoning
 /// [`SelfHarnessDriver::drive_fanout_child`]'s doc gives for why this is
 /// never `Arc<Self>`/`tokio::spawn`. THE ordering/concurrency shell
-/// [`SelfHarnessDriver::service_outer_fanout`] and
-/// [`SelfHarnessDriver::service_outer_branch_fanout`] used to each
-/// independently duplicate (sol cross-family review finding 9b) — what
-/// remains per-caller is the per-child ASSEMBLY (a bare `Value` vs. a
-/// `(Value, ContextRef digest)` pair), which is typed differently enough
-/// between the two that unifying it would cost more than it saves.
+/// [`SelfHarnessDriver::service_outer_fanout`] uses.
 async fn drive_concurrent<T, F, Fut>(cap: usize, count: usize, child: F) -> Vec<(usize, T)>
 where
     F: Fn(usize) -> Fut,
@@ -1161,10 +1155,10 @@ async fn retry_on_turn_in_flight<T>(
 /// callers: the checkout is still the first observable effect. These sites
 /// are reached by BOTH sequentially- and concurrently-driven callers
 /// (`drive_agent_session_to_finalize` is the one pump both a sequential
-/// `service_outer_branch` child and a concurrent fork/branch-fanout child
-/// run through) — a sequential caller's checkout never actually contends, so
-/// this is a no-op there; a concurrent sibling's benign contention now waits
-/// instead of hard-failing the whole fanout.
+/// answerer node and a concurrent fork/fanout child run through) — a
+/// sequential caller's checkout never actually contends, so this is a no-op
+/// there; a concurrent sibling's benign contention now waits instead of
+/// hard-failing the whole fanout.
 async fn retry_on_turn_in_flight_async<T, Fut>(
     mut attempt: impl FnMut() -> Fut,
 ) -> Result<T, HarnessError>
@@ -1545,10 +1539,10 @@ pub struct SelfHarnessDriver {
     /// the outer loop's own asks and the ordinary per-loop answerer) always
     /// falls back to the default gate — byte-identical to before this field
     /// existed. `Mutex`-wrapped (not a plain map behind `&mut self`):
-    /// concurrent `runLLMTurnBranchFanout` siblings
-    /// (`Self::service_outer_branch_fanout`) each insert/remove their own
-    /// entry from `&self`, so a bare `HashMap` would need `&mut self` at
-    /// exactly the point several siblings are running at once.
+    /// concurrent fork siblings (`Self::drive_fork_child_agent_session`)
+    /// each insert/remove their own entry from `&self`, so a bare `HashMap`
+    /// would need `&mut self` at exactly the point several siblings are
+    /// running at once.
     node_labels: Mutex<HashMap<NodeId, String>>,
     /// Fork-subsumes-split step 3 (seam map §7.1): the next `idx` to assign
     /// a fork child of a given PARENT, for that child's derived GUI label
@@ -1560,7 +1554,14 @@ pub struct SelfHarnessDriver {
     /// change must not touch. A per-parent (not global) counter also keeps
     /// labels unique across repeated forks from the same parent over its
     /// lifetime, not just within one `forkAll` batch. `Mutex`-wrapped for
-    /// the same concurrent-siblings reason as `node_labels`.
+    /// the same concurrent-siblings reason as `node_labels`. Purged at the
+    /// same point `node_labels` is, whenever a node that COULD have been a
+    /// parent retires (`abort_unguarded_child`,
+    /// `drive_fork_child_agent_session`'s exit, `retire_typed_request_agent`)
+    /// — a node with no entry here is a harmless no-op remove, so purging
+    /// unconditionally at every retirement point is exactly as cheap as
+    /// checking first (sol cross-family review finding 11: this map was
+    /// previously append-only for the harness's whole life).
     fork_child_seq: Mutex<HashMap<NodeId, u32>>,
 }
 
@@ -1588,15 +1589,15 @@ struct OuterHandlers {
 /// path review's own negative evidence (P2.2/P3 typestate opportunity):
 /// [`Self::run_loop_fragment`]'s per-loop answerer (kept open across every
 /// ordinary `runLLMTurn` hole, its cumulative transcript IS the specified
-/// context window) and [`Self::service_outer_branch`]'s branch child
-/// (forked off a frozen prefix, retired after exactly one result) share
-/// the same finalize-driving code (`drive_agent_session_to_finalize`) but must
-/// NOT share their post-finalize behavior — merging them would either
-/// discard the loop's accumulating window between ordinary holes or leak a
-/// one-shot branch child past its single result. Previously distinguished
-/// only by comments and which local variable a raw `NodeId` happened to
-/// live in; now a real two-variant sum whose own methods refuse the wrong
-/// mode instead of silently reusing/discarding the wrong window.
+/// context window) and [`Self::drive_fork_child_agent_session`]'s fork child
+/// (attached fresh, retired after exactly one result) share the same
+/// finalize-driving code (`drive_agent_session_to_finalize`) but must NOT
+/// share their post-finalize behavior — merging them would either discard
+/// the loop's accumulating window between ordinary holes or leak a one-shot
+/// fork child past its single result. Previously distinguished only by
+/// comments and which local variable a raw `NodeId` happened to live in;
+/// now a real two-variant sum whose own methods refuse the wrong mode
+/// instead of silently reusing/discarding the wrong window.
 ///
 /// The `OneShotBranch` half is superseded at its one call site by
 /// [`BranchAgentSessionGuard`], a consuming guard over the same three fields — this
@@ -1676,21 +1677,17 @@ impl AgentSessionMode {
     }
 }
 
-/// A one-shot child window's transaction — the deeper, ownership-tracked
+/// A one-shot fork child window's transaction — the deeper, ownership-tracked
 /// treatment of [`AgentSessionMode::OneShotBranch`] alone (P3.2's typestate
-/// opportunity), shared by [`Self::service_outer_branch`]'s branch child AND
-/// [`Self::drive_fork_child_agent_session`]'s fork child (fork-subsumes-split step
-/// 3 — checked reuse before adding a sibling struct: the two differ only in
-/// how success is delivered, covered below). Retiring used to be a
-/// hand-written four-site discipline per caller (a mechanism error, a
-/// non-finalize exit, a closure rejection, and success), linked only by
-/// sequencing and a bare `NodeId` a reader had to trust every future error
-/// arm would remember to terminate. This guard makes retiring exactly
-/// once, on every exit, structural instead: [`Self::finalize_data`]/
-/// [`Self::finalize_fork_data`] freeze-or-not then retire,
-/// [`Self::fold_exit`] retires then produces the exit, and `Drop` retires an
-/// unfinished window — the mechanism-failure `?` early return that used to
-/// need its OWN hand-written `terminate_node` call now needs none.
+/// opportunity). Retiring used to be a hand-written four-site discipline per
+/// caller (a mechanism error, a non-finalize exit, a closure rejection, and
+/// success), linked only by sequencing and a bare `NodeId` a reader had to
+/// trust every future error arm would remember to terminate. This guard
+/// makes retiring exactly once, on every exit, structural instead:
+/// [`Self::finalize_fork_data`] retires on success, [`Self::fold_exit`]
+/// retires then produces the exit, and `Drop` retires an unfinished window —
+/// the mechanism-failure `?` early return that used to need its OWN
+/// hand-written `terminate_node` call now needs none.
 ///
 /// Non-Clone: at most one guard exists per child window.
 struct BranchAgentSessionGuard {
@@ -1698,18 +1695,12 @@ struct BranchAgentSessionGuard {
     node: NodeId,
     realm: tidepool_codegen::jit_machine::RealmId,
     scope: tidepool_codegen::scope::ScopeId,
-    /// The frozen snapshot a branch child forked from — `None` for a fork
-    /// child, which forks from the LIVE parent instead (no `ContextRef` to
-    /// validate). Read only by `Drop`'s trace line, never by any retirement
-    /// logic, which is what makes widening this to `Option` free.
-    validated_ref: Option<ContextRef>,
     retired: bool,
 }
 
-// Every field here (`Arc`, `NodeId`, `RealmId`, `ScopeId`,
-// `Option<ContextRef>`, `bool`) is independently Clone, so a
-// `#[derive(Clone)]` would compile silently — and then a clone's `retired`
-// flag would diverge from the original's, letting `finalize_data`/
+// Every field here (`Arc`, `NodeId`, `RealmId`, `ScopeId`, `bool`) is
+// independently Clone, so a `#[derive(Clone)]` would compile silently — and
+// then a clone's `retired` flag would diverge from the original's, letting
 // `finalize_fork_data`/`fold_exit` and the panic-safety `Drop` each believe
 // THEY own retiring the window, double-retiring the node this guard exists
 // to retire exactly once.
@@ -1720,55 +1711,25 @@ impl BranchAgentSessionGuard {
     /// — `require_one_shot` refuses to hand back node/realm/scope if `lease`
     /// were ever (by a future refactor) the loop's reusable answerer instead
     /// of a one-shot child's own, so this is where that check is
-    /// load-bearing. `validated_ref` is `None` for a fork child (see the
-    /// field's own doc).
-    fn from_lease(
-        lease: AgentSessionMode,
-        agent: Arc<Harness>,
-        validated_ref: Option<ContextRef>,
-    ) -> Result<Self, DriverError> {
+    /// load-bearing.
+    fn from_lease(lease: AgentSessionMode, agent: Arc<Harness>) -> Result<Self, DriverError> {
         let (node, realm, scope) = lease.require_one_shot()?;
         Ok(Self {
             agent,
             node,
             realm,
             scope,
-            validated_ref,
             retired: false,
         })
     }
 
-    fn node(&self) -> NodeId {
-        self.node
-    }
-
-    /// Success: take the finalized answer, freeze THIS child's own
-    /// post-finalize prefix (before retirement — `freeze_snapshot` reads
-    /// the live convo, which `terminate_node` removes), then retire.
-    /// Consumes the window; the only way to reach a post-finalize digest.
-    /// Branch-flavored: a branch answer is a `(T, ContextRef)` pair, so its
-    /// window needs a digest for the ref half. See [`Self::finalize_fork_data`]
-    /// for the fork-flavored sibling, which has no such pair to build.
-    fn finalize_data(mut self) -> Result<(Value, String, SnapshotDigest), HarnessError> {
-        let (value, rendered) = self.agent.take_finalized_value_keep_open(self.node)?;
-        let digest = self.agent.freeze_snapshot(self.node)?;
-        self.agent
-            .terminate_node(self.node, "branch child retired")?;
-        self.retired = true;
-        Ok((value, rendered, digest))
-    }
-
-    /// Fork-flavored success (fork-subsumes-split step 3, seam map §7.10):
-    /// a fork answer is bare data, never a `(T, ContextRef)` pair, so there
-    /// is no post-finalize prefix to freeze here (unlike
-    /// [`Self::finalize_data`]). A successful fork child's durable ending
-    /// must be `NodeDone`, recorded BEFORE retirement — `terminate_node`
-    /// alone would mark it `NodeCancelled`, an accidental mismatch the seam
-    /// map calls out by name. Retries the finalized-value take across a
+    /// Success (fork-subsumes-split step 3, seam map §7.10): a fork answer
+    /// is bare data. A successful fork child's durable ending must be
+    /// `NodeDone`, recorded BEFORE retirement — `terminate_node` alone would
+    /// mark it `NodeCancelled`, an accidental mismatch the seam map calls
+    /// out by name. Retries the finalized-value take across a
     /// `TurnInFlight` race (the original one-shot fork path's own
-    /// discipline — a branch child's `finalize_data` never needed it because
-    /// nothing else can be mid-turn against a frozen-snapshot child).
-    /// Consumes the window.
+    /// discipline). Consumes the window.
     async fn finalize_fork_data(mut self) -> Result<(Value, String), HarnessError> {
         let node = self.node;
         let (value, rendered) =
@@ -1785,17 +1746,15 @@ impl BranchAgentSessionGuard {
     /// A failure ATTRIBUTABLE TO THIS CHILD's window (round exhaustion, a
     /// non-finalize suspension, a closure answer this driver cannot
     /// carry): retire with `reason`, producing nothing further. Consumes
-    /// the window. Shared verbatim by the branch and fork callers, whose
-    /// treatment of what happens AFTER this diverges (see
-    /// `drive_fork_child_agent_session`'s own doc): a mechanism problem
-    /// (closure, dispatcher-contract violation) still turns into a hard
-    /// `Err`, but a fork child's own `InvocationExit` (round exhaustion, a
-    /// non-answer ending, its provider call failing) becomes a plain-
-    /// language corrective instead — fork children are not branch
-    /// positions with a typed `Left` to fold into, so the corrective is
-    /// delivered by aborting the block that was consuming this child, not
-    /// by folding a `Left`. The retirement itself (this method) is
-    /// identical either way.
+    /// the window (see `drive_fork_child_agent_session`'s own doc for what
+    /// happens AFTER this): a mechanism problem (closure, dispatcher-contract
+    /// violation) still turns into a hard `Err`, but a fork child's own
+    /// `InvocationExit` (round exhaustion, a non-answer ending, its provider
+    /// call failing) becomes a plain-language corrective instead — fork
+    /// children are not branch positions with a typed `Left` to fold into,
+    /// so the corrective is delivered by aborting the block that was
+    /// consuming this child, not by folding a `Left`. The retirement itself
+    /// (this method) is identical either way.
     fn fold_exit(mut self, reason: &str) {
         let _ = self.agent.terminate_node(self.node, reason);
         self.retired = true;
@@ -1804,18 +1763,17 @@ impl BranchAgentSessionGuard {
 
 impl Drop for BranchAgentSessionGuard {
     /// Covers exactly the mechanism-failure path: a caller returns `Err(e)`
-    /// via `?` before ever reaching [`Self::finalize_data`]/
-    /// [`Self::finalize_fork_data`]/[`Self::fold_exit`], and this guard
-    /// simply goes out of scope. Idempotent with the three consuming
-    /// methods (`retired` is set the instant any of them runs), so this
-    /// never double-retires an already-finished window.
+    /// via `?` before ever reaching [`Self::finalize_fork_data`]/
+    /// [`Self::fold_exit`], and this guard simply goes out of scope.
+    /// Idempotent with the two consuming methods (`retired` is set the
+    /// instant either runs), so this never double-retires an
+    /// already-finished window.
     fn drop(&mut self) {
         if !self.retired {
             tracing::warn!(
                 node = ?self.node,
                 realm = ?self.realm,
                 scope = ?self.scope,
-                validated_ref = ?self.validated_ref,
                 "child window dropped without an explicit exit (mechanism failure)"
             );
             let _ = self.agent.terminate_node(
@@ -1995,12 +1953,8 @@ impl SelfHarnessDriver {
     /// Override the operator-input gate (default [`StdinGate`]). A web/GUI
     /// implementation of [`OperatorGate`] replaces the headless stdin
     /// behavior; a test can inject a scripted gate instead of driving real
-    /// stdin. Also wires the SAME gate into the underlying [`Harness`]'s
-    /// escalation ladder ([`Harness::set_escalation_gate`]), so a fork/fanout
-    /// child's rung-2 cap-exhaustion escalation reaches this gate too — one
-    /// call covers both `askUser` and escalation asks.
+    /// stdin.
     pub fn set_gate(&mut self, gate: Arc<dyn OperatorGate>) {
-        self.agent.set_escalation_gate(gate.clone());
         self.gate = gate;
     }
 
@@ -3199,9 +3153,9 @@ impl SelfHarnessDriver {
     /// Idempotent — a no-op if no answerer is live.
     fn retire_typed_request_agent(&mut self) {
         if let Some(lease) = self.answerer.take() {
-            let _ = self
-                .agent
-                .terminate_node(lease.node(), "loop answerer retired");
+            let node = lease.node();
+            let _ = self.agent.terminate_node(node, "loop answerer retired");
+            self.fork_child_seq.lock().remove(&node);
         }
     }
 
@@ -3584,101 +3538,10 @@ impl SelfHarnessDriver {
                                 outcome: next,
                             })
                         }
-                        // PRD 21 lane C3 GAP 1: `freezeContext` — immediate,
-                        // no operator, no model round (mirrors `ReadState`'s
-                        // service shape above it).
-                        SuspensionRouting::FreezeContext => {
-                            let value = self.service_outer_freeze_context(&compiled.table)?;
-                            let sid = self.outer_sid()?;
-                            let next = self
-                                .agent
-                                .with_session(sid, |s| s.resume(hole, value))
-                                .map_err(|e| DriverError::Session(e.to_string()))?
-                                .map_err(|e| {
-                                    DriverError::Session(format!("freezeContext resume failed: {e}"))
-                                })?;
-                            ServicedSuspension::Resumed(GreenReady {
-                                chain,
-                                outcome: next,
-                            })
-                        }
-                        // PRD 21 lane C3 GAP 1: `runLLMTurnBranch @T ref
-                        // prompt` — fork a child off the frozen prefix `ref`
-                        // names (never an empty root) and resume with `(T,
-                        // ContextRef)`.
-                        SuspensionRouting::Branch {
-                            site,
-                            ty,
-                            context_ref,
-                            label,
-                        } => {
-                            let value = self
-                                .service_outer_branch(
-                                    site.get(),
-                                    ty.as_deref(),
-                                    compiled.asks.modules_of(site.get()),
-                                    context_ref,
-                                    label.as_deref(),
-                                    &classified.prompt,
-                                    &compiled.table,
-                                )
-                                .await?;
-                            let sid = self.outer_sid()?;
-                            let next = self
-                                .agent
-                                .with_session(sid, |s| s.resume(hole, value))
-                                .map_err(|e| DriverError::Session(e.to_string()))?
-                                .map_err(|e| {
-                                    DriverError::Session(format!("branch resume failed: {e}"))
-                                })?;
-                            ServicedSuspension::Resumed(GreenReady {
-                                chain,
-                                outcome: next,
-                            })
-                        }
-                        // The bulk sibling of `SuspensionRouting::Branch`: N
-                        // children fork off ONE parent `context_ref`,
-                        // driven CONCURRENTLY (operator decision: sibling
-                        // branch windows are ALWAYS concurrent, never a
-                        // model-visible choice).
-                        SuspensionRouting::BranchFanout {
-                            site,
-                            ty,
-                            context_ref,
-                            labels,
-                            prompts,
-                        } => {
-                            let value = self
-                                .service_outer_branch_fanout(
-                                    site.get(),
-                                    ty.as_deref(),
-                                    compiled.asks.modules_of(site.get()),
-                                    context_ref,
-                                    labels,
-                                    prompts,
-                                    &compiled.table,
-                                )
-                                .await?;
-                            let sid = self.outer_sid()?;
-                            let next = self
-                                .agent
-                                .with_session(sid, |s| s.resume(hole, value))
-                                .map_err(|e| DriverError::Session(e.to_string()))?
-                                .map_err(|e| {
-                                    DriverError::Session(format!(
-                                        "branch fanout resume failed: {e}"
-                                    ))
-                                })?;
-                            ServicedSuspension::Resumed(GreenReady {
-                                chain,
-                                outcome: next,
-                            })
-                        }
                         other => {
                             break Err(DriverError::Session(format!(
                                 "outer loop suspended on an unserviceable hole ({other:?}) — \
-                                 the Harness monad exposes runLLMTurn, runLLMTurnBranch, \
-                                 runLLMTurnBranchFanout, freezeContext, askUser, note, \
+                                 the Harness monad exposes runLLMTurn, askUser, note, \
                                  spawnAgent, say, \
                                  createWorktree/lookupWorktree/listWorktrees/worktreeBranch/\
                                  worktreeHead, withHandler (repository events), run/runIn/\
@@ -4362,534 +4225,20 @@ impl SelfHarnessDriver {
         Ok(answer)
     }
 
-    /// Service a `freezeContext` suspension (PRD 21 lane C3, closing GAP 1):
-    /// mint a `ContextRef` naming the CURRENT loop's per-loop answerer
-    /// window's frozen prefix, right now — immediately, no operator, no
-    /// model round ([`SuspensionRouting::ReadState`]'s service shape).
-    /// `freeze_snapshot` is idempotent, so calling this more than once
-    /// without an intervening `runLLMTurn`/`runLLMTurnBranch` returns the
-    /// SAME digest rather than writing a second receipt.
-    fn service_outer_freeze_context(&mut self, table: &DataConTable) -> Result<Value, DriverError> {
-        let lease = self.answerer.ok_or_else(|| {
-            DriverError::Session(
-                "freezeContext called with no per-loop answerer (run_loop_fragment \
-                 must create it first)"
-                    .into(),
-            )
-        })?;
-        let digest = self.agent.freeze_snapshot(lease.node())?;
-        engine::build_context_ref_value(digest.as_str(), table)
-            .map_err(|e| DriverError::Session(e.to_string()))
-    }
-
-    /// Service a `runLLMTurnBranch @T ref prompt` suspension raised DIRECTLY
-    /// by the AUTHORED outer loop (PRD 21 lane C3, closing GAP 1): fork a
-    /// FRESH child window off the frozen prefix `context_ref` names — via
-    /// [`Harness::resolve_context_ref`]/[`Harness::fork_from_context_ref`],
-    /// C2's `fork_from_snapshot` seam under a typed capability rather than an
-    /// empty root — drive it to `finalize @T` (reusing
-    /// [`Self::drive_agent_session_to_finalize`] UNCHANGED: the node arrives
-    /// already seeded with its hole card as the branch's inherited-prefix
-    /// opening turn, exactly the "already seeded" precondition that method
-    /// already documents), and resume with
-    /// `Either InvocationExit (T, ContextRef)` — on success the child's
-    /// answer plus a ref to ITS OWN post-finalize frozen prefix so it can be
-    /// branched again.
-    ///
-    /// A branch child is a BRANCH POSITION, so PRD 21 locked decision 6
-    /// applies here exactly as it does to fork/fanout: a failure of THIS
-    /// WINDOW (round exhaustion, non-finalization) folds as `Left exit` into
-    /// the answer, and a failure of the MECHANISM still hard-fails the turn —
-    /// notably [`Harness::resolve_context_ref`] refusing an unknown or stale
-    /// ref, which is a capability that was never valid rather than a window
-    /// that failed. The `Either` wraps the WHOLE pair because a window that
-    /// never finalized has no post-finalize prefix, so there would be no
-    /// honest `ContextRef` to hand back beside the failure.
-    ///
-    /// The child's SCOPE is minted as a child of the frozen window's own
-    /// scope ([`Harness::context_ref_scope`]) — locked decision 2's "its
-    /// compiled blocks and declarations" clause, joined to C2's scope trees
-    /// (§1–3) rather than left at the flat `ScopeId::ROOT` every other
-    /// fanout/fork child defaults to: a branch child sees its ancestor
-    /// chain's declarations and its own defines stay local, never leaking to
-    /// a sibling branch or back up to the frozen window.
-    ///
-    /// Sequential by construction (the AUTHORED loop's `do`-block sequences
-    /// `runLLMTurnBranch` calls, each its own suspend/resume round-trip), so
-    /// — unlike [`Self::drive_fanout_child`] — this is `&mut self` and needs
-    /// no realm-checkout retry dance against concurrent siblings.
-    ///
-    /// The child-driving shell (fork off `cref`, GUI label, attach, realm,
-    /// scope, `BranchAgentSessionGuard`, the exit/closure/success ladder) is
-    /// [`Self::drive_branch_child`] — shared with
-    /// [`Self::service_outer_branch_fanout`]'s per-sibling driver (sol
-    /// cross-family review finding 9a: these used to be two independently
-    /// maintained ~150-line copies of the same shell). This method's own
-    /// job is just the ONE typed checkpoint (`resolve_context_ref`) and the
-    /// final `Either (T, ContextRef)` assembly.
-    #[allow(clippy::too_many_arguments)]
-    async fn service_outer_branch(
-        &mut self,
-        site: u32,
-        ty: Option<&str>,
-        modules: &[String],
-        context_ref: &str,
-        label: Option<&str>,
-        prompt: &str,
-        table: &DataConTable,
-    ) -> Result<Value, DriverError> {
-        self.lifecycle = SelfHarnessState::SuspendedOnHole;
-        self.emit(Event::RunLLMTurnHole {
-            site,
-            ty: ty.map(String::from),
-            prompt: prompt.to_string(),
-        });
-
-        // The ONE typed checkpoint (possession-is-permission): an
-        // unknown/stale ref refuses HERE, as `HarnessError::UnknownSnapshot`
-        // — never a silent fresh-root fallback. Everything below only ever
-        // sees an ALREADY-VALIDATED `ContextRef`.
-        let cref = self.agent.resolve_context_ref(context_ref)?;
-        let sid = self.outer_sid()?;
-
-        let outcome = self
-            .drive_branch_child(
-                sid,
-                site,
-                "runLLMTurnBranch",
-                label,
-                prompt,
-                ty,
-                modules,
-                cref,
-                None,
-                table,
-            )
-            .await?;
-        self.lifecycle = SelfHarnessState::RunningLoop;
-
-        match outcome {
-            Ok((value, child_digest)) => {
-                let ref_value = engine::build_context_ref_value(&child_digest, table)
-                    .map_err(|e| DriverError::Session(e.to_string()))?;
-                let pair = engine::build_pair_value(value, ref_value, table)
-                    .map_err(|e| DriverError::Session(e.to_string()))?;
-                engine::build_child_answer_value(Ok(pair), table)
-                    .map_err(|e| DriverError::Session(e.to_string()))
-            }
-            // The `Either` wraps the WHOLE pair: a window that never
-            // finalized has no post-finalize prefix, so there is no honest
-            // `ContextRef` to put beside the failure.
-            Err(exit) => engine::build_child_answer_value(Err(exit), table)
-                .map_err(|e| DriverError::Session(e.to_string())),
-        }
-    }
-
-    /// Service a `runLLMTurnBranchFanout @T` suspension — the BULK sibling of
-    /// [`Self::service_outer_branch`] (operator decision: sibling branch
-    /// windows are ALWAYS driven concurrently, transparently — scheduling is
-    /// never a model-visible choice). Every `(label, prompt)` pair forks its
-    /// OWN child window off the SAME parent `context_ref`, resolved and
-    /// scoped ONCE here (the one typed checkpoint — an unknown/stale ref
-    /// refuses HERE, never a silent fresh-root fallback), then driven
-    /// CONCURRENTLY via [`Self::drive_branch_child`] up to
-    /// [`Self::concurrency_cap`] at once, exactly like
-    /// [`Self::service_outer_fanout`]/[`Self::drive_fanout_child`] — see that
-    /// pair's doc for why this is `&mut self` with an inner `&*self`
-    /// reborrow, and for the child-attributable/mechanism line (PRD 21
-    /// locked decision 6), which holds identically per sibling here: a
-    /// sibling's own round exhaustion/non-finalization/provider failure
-    /// folds as `Left exit` AT ITS OWN POSITION in the resumed list, never
-    /// erasing another sibling's already-finished answer; a broken mechanism
-    /// (cardinality, table assembly, session bookkeeping, the per-loop
-    /// inference-call cap) still hard-fails the turn via `?`.
-    ///
-    /// Each sibling is driven by [`Self::drive_branch_child`] through
-    /// [`Self::drive_agent_session_to_finalize`] under
-    /// [`AgentSessionExitPolicy::Interactive`] — unlike
-    /// [`Self::drive_fanout_child`]'s `FinalizeOnly` v1 scope, a branch
-    /// sibling CAN delegate or ask the operator mid-window, exactly as a
-    /// sequential [`Self::service_outer_branch`] child could — see that
-    /// method's own doc for why.
-    #[allow(clippy::too_many_arguments)]
-    async fn service_outer_branch_fanout(
-        &mut self,
-        site: u32,
-        ty: Option<&str>,
-        modules: &[String],
-        context_ref: &str,
-        labels: &[String],
-        prompts: &[String],
-        table: &DataConTable,
-    ) -> Result<Value, DriverError> {
-        self.lifecycle = SelfHarnessState::SuspendedOnHole;
-
-        if labels.len() != prompts.len() {
-            return Err(DriverError::Session(format!(
-                "runLLMTurnBranchFanout: {} label(s) but {} prompt(s) — the wire's \
-                 labels/prompts fields disagree",
-                labels.len(),
-                prompts.len()
-            )));
-        }
-
-        // The ONE typed checkpoint (possession-is-permission), resolved
-        // ONCE for the whole sibling group — every child below only ever
-        // sees an ALREADY-VALIDATED `ContextRef`/scope pair.
-        let cref = self.agent.resolve_context_ref(context_ref)?;
-        let parent_scope = self.agent.context_ref_scope(&cref);
-
-        // A fanout site's recorded type is the LIST type (`[T]`); the per-
-        // child answer type is what `answer_contract`/the hole card need —
-        // mirrors `service_outer_fanout`'s `element_ty` derivation exactly.
-        let element_ty = ty.and_then(engine::strip_list_type);
-
-        for prompt in prompts {
-            self.emit(Event::RunLLMTurnHole {
-                site,
-                ty: element_ty.map(String::from),
-                prompt: prompt.clone(),
-            });
-        }
-
-        let sid = self.outer_sid()?;
-
-        // Mint every sibling's own child scope SEQUENTIALLY, here, before any
-        // concurrent driving starts. `Harness::with_session` — unlike a
-        // node-level checkout — has no contention retry: it hard-refuses the
-        // instant another caller holds the shared machine
-        // (`HarnessError::Resident("... already running a turn")`). Minting
-        // N scopes concurrently (one `with_session` call per child, all
-        // racing the SAME `sid`) would trip that refusal under real
-        // concurrency; minting is a fast, non-suspending, purely mechanical
-        // step, so paying for it up front — once, in declaration order —
-        // costs nothing a model window would notice and removes the race
-        // entirely.
-        let mut child_scopes = Vec::with_capacity(labels.len());
-        for _ in labels {
-            let child_scope = self
-                .agent
-                .with_session(sid, |s| s.mint_scope(parent_scope))
-                .map_err(|e| DriverError::Session(e.to_string()))?
-                .ok_or_else(|| {
-                    DriverError::Session(format!(
-                        "runLLMTurnBranchFanout: the frozen window's scope {parent_scope:?} \
-                         is not live (its owning session was rotated or the window already \
-                         retired)"
-                    ))
-                })?;
-            child_scopes.push(child_scope);
-        }
-
-        let cap = self.concurrency_cap;
-        // A shared borrow of `self` — see `drive_concurrent`'s doc for why
-        // this needs no `Arc<Self>`/`tokio::spawn`.
-        let this = &*self;
-        #[allow(clippy::type_complexity)]
-        let results: Vec<(
-            usize,
-            Result<Result<(Value, String), InvocationExit>, DriverError>,
-        )> = drive_concurrent(cap, labels.len(), |idx| {
-            let cref = cref.clone();
-            let label = labels[idx].as_str();
-            let prompt = prompts[idx].as_str();
-            let child_scope = child_scopes[idx];
-            async move {
-                this.drive_branch_child(
-                    sid,
-                    site,
-                    &format!("branch fanout child {idx}"),
-                    Some(label),
-                    prompt,
-                    element_ty,
-                    modules,
-                    cref,
-                    Some(child_scope),
-                    table,
-                )
-                .await
-            }
-        })
-        .await;
-
-        self.lifecycle = SelfHarnessState::RunningLoop;
-
-        let mut answers = Vec::with_capacity(results.len());
-        for (idx, r) in results {
-            let outcome = r?;
-            let answer = match outcome {
-                Ok((value, child_digest)) => {
-                    let ref_value = engine::build_context_ref_value(&child_digest, table)
-                        .map_err(|e| DriverError::Session(e.to_string()))?;
-                    engine::build_pair_value(value, ref_value, table)
-                        .map(Ok)
-                        .map_err(|e| DriverError::Session(e.to_string()))?
-                }
-                Err(exit) => {
-                    tracing::warn!(
-                        child = idx,
-                        exit = %exit,
-                        "branch fanout child exited without an answer — folding it as \
-                         data at its branch position; siblings are unaffected"
-                    );
-                    Err(exit)
-                }
-            };
-            answers.push(
-                engine::build_child_answer_value(answer, table)
-                    .map_err(|e| DriverError::Session(e.to_string()))?,
-            );
-        }
-
-        engine::build_list_value(answers, table).map_err(|e| DriverError::Session(e.to_string()))
-    }
-
-    /// Drive ONE branch child from a context-ref fork through
-    /// [`Self::drive_agent_session_to_finalize`] (`AgentSessionExitPolicy::Interactive`
-    /// — a branch child CAN `delegate` or ask the operator mid-window, unlike
-    /// the concurrent `runLLMTurnFanout` machinery's finalize-only v1 scope,
-    /// which was built for a bare fork/fanout child that never had those
-    /// capabilities) to a finalized `(value, digest)` pair or a typed exit.
-    ///
-    /// THE ONE BRANCH-CHILD SHELL (sol cross-family review finding 9a): fork
-    /// off `cref` (never an empty root — PRD 21 locked decision 2), the GUI
-    /// label, attach, realm, scope, the [`BranchAgentSessionGuard`] retirement
-    /// discipline, and the exit/closure/success ladder used to be two
-    /// independently maintained ~150-line copies —
-    /// [`Self::service_outer_branch`]'s single sequential child and
-    /// [`Self::service_outer_branch_fanout`]'s per-sibling driver. What
-    /// genuinely differs is captured in the parameters: `label` is optional
-    /// for a lone `runLLMTurnBranch` but always present for a
-    /// `runLLMTurnBranchFanout` sibling; `child_scope` arrives ALREADY minted
-    /// for a fanout sibling (minted sequentially by
-    /// `service_outer_branch_fanout` before any concurrent driving starts —
-    /// see that method's doc for why scope-minting itself cannot happen
-    /// here, concurrently, without racing `Harness::with_session`'s
-    /// checkout) or is minted HERE, from `cref`'s own scope, for the lone
-    /// sequential case; `subject` names this child in diagnostics
-    /// (`"runLLMTurnBranch"`, or `"branch fanout child {idx}"`). The return
-    /// is always the bare `(value, digest)` pair — [`Self::service_outer_branch`]
-    /// and [`Self::service_outer_branch_fanout`] each do their own `Either`
-    /// assembly around it (a lone answer vs. a re-sorted list).
-    ///
-    /// `&self`, not `&mut self`: up to [`Self::concurrency_cap`] of these run
-    /// concurrently via `buffer_unordered` when called from the fanout path,
-    /// all borrowing the same `&SelfHarnessDriver` — this is why
-    /// `drive_agent_session_to_finalize` and everything it calls are `&self` too,
-    /// and why `node_labels` is `Mutex`-wrapped: two siblings under one
-    /// parent can each be mid-delegate or mid-form at once. The sequential
-    /// caller pays nothing extra for this — it simply never has a sibling.
-    #[allow(clippy::too_many_arguments)]
-    async fn drive_branch_child(
-        &self,
-        sid: tidepool_repr::SessionId,
-        site: u32,
-        subject: &str,
-        label: Option<&str>,
-        prompt: &str,
-        element_ty: Option<&str>,
-        modules: &[String],
-        cref: ContextRef,
-        child_scope: Option<tidepool_codegen::scope::ScopeId>,
-        table: &DataConTable,
-    ) -> Result<Result<(Value, String), InvocationExit>, DriverError> {
-        let resume_typed_request_prompt = engine::finalize_typed_request_prompt(
-            "The loop",
-            prompt,
-            element_ty,
-            modules,
-            Some(table),
-            &self.agent.finalize_typed_request_prompt_effect_row(),
-        );
-        let node = self
-            .agent
-            .fork_from_context_ref(&cref, &resume_typed_request_prompt)?;
-        // PRD 21 C5 GUI lane: a labeled child's label rides the wire
-        // structurally — recorded here so `present_askuser_form`/
-        // `announce_note` can route this node's own asks/notes to a
-        // per-node operator gate; removed unconditionally once the branch
-        // finishes, below. A `runLLMTurnBranchFanout` sibling always has
-        // one; a lone `runLLMTurnBranch` may not.
-        if let Some(label) = label {
-            self.node_labels.lock().insert(node, label.to_string());
-            // Register the node's panel NOW, not on its first ask/note: the
-            // operator watches the tree GROW — a window that works silently
-            // (the common case) must still appear the moment it opens and
-            // grey at its fold, or the strip only ever shows the noisy nodes.
-            let _ = self.gate.node_gate(label);
-            // The seed is the AUTHORED brief, not the composed hole card —
-            // the operator asked what a node is doing; the answer is what it
-            // was told to do, not the harness plumbing around it.
-            self.gate.node_seeded(label, prompt);
-        }
-        if let Err(e) = self.agent.force_attached(node, Actor::Operator, sid) {
-            let reason = format!("{subject}: attach failed: {e}");
-            self.abort_unguarded_child(node, label, &reason);
-            return Err(e.into());
-        }
-        let realm = self.mint_realm();
-        self.agent.set_node_realm(node, realm);
-
-        let child_scope = match child_scope {
-            Some(scope) => scope,
-            None => {
-                let parent_scope = self.agent.context_ref_scope(&cref);
-                match self.agent.with_session(sid, |s| s.mint_scope(parent_scope)) {
-                    Ok(Some(scope)) => scope,
-                    Ok(None) => {
-                        let reason = format!(
-                            "{subject}: the frozen window's scope {parent_scope:?} is not \
-                             live (its owning session was rotated or the window already \
-                             retired)"
-                        );
-                        self.abort_unguarded_child(node, label, &reason);
-                        return Err(DriverError::Session(reason));
-                    }
-                    Err(e) => {
-                        let reason = format!("{subject}: mint_scope failed: {e}");
-                        self.abort_unguarded_child(node, label, &reason);
-                        return Err(DriverError::Session(reason));
-                    }
-                }
-            }
-        };
-        self.agent.set_node_scope(node, child_scope);
-        // Benign checkout contention against a sibling's turn on the same
-        // shared machine — mirrors `drive_fanout_child`'s own opt-in; a
-        // no-op for the sequential caller, which never has a sibling.
-        self.agent.set_retry_checkout_on_contention(node, true);
-        self.agent
-            .set_answer_contract(node, self.answer_contract(element_ty, modules));
-        self.emit(Event::TurnStart { node });
-
-        // This child's mode, typed (`AgentSessionMode::require_one_shot`'s doc):
-        // it answers exactly once, then is frozen and retired below.
-        let lease = AgentSessionMode::OneShotBranch {
-            node,
-            realm,
-            scope: child_scope,
-        };
-        // Every exit below this point retires exactly through `window`
-        // (`fold_exit`, `finalize_data`, or — for a mechanism-error `?`
-        // below — its `Drop`). See `BranchAgentSessionGuard`'s doc.
-        let window = BranchAgentSessionGuard::from_lease(lease, self.agent.clone(), Some(cref))?;
-
-        // A branch child is a BRANCH POSITION, so from here on this window's
-        // own failures are DATA — folded as `Left exit` at ITS OWN POSITION
-        // (PRD 21 locked decision 6), never erasing a sibling's
-        // already-finished answer (or, for the lone sequential caller,
-        // simply this window's own failure).
-        let mut exit: Option<InvocationExit> = None;
-        let outcome = match self
-            .drive_agent_session_to_finalize(
-                window.node(),
-                element_ty,
-                site,
-                0,
-                &std::sync::atomic::AtomicU32::new(0),
-                AgentSessionExitPolicy::Interactive,
-            )
-            .await?
-        {
-            Ok(o) => Some(o),
-            Err(e) => {
-                exit = Some(e);
-                None
-            }
-        };
-        // The node's terminate/fold point (PRD 21 C5 GUI lane): a labeled
-        // child's per-node gate is retired here, regardless of which outcome
-        // follows. `remove` is a harmless no-op when this node was never
-        // labeled.
-        let retired_label = self.node_labels.lock().remove(&window.node());
-        if let Some(label) = &retired_label {
-            self.gate.retire_node(label);
-        }
-        self.emit(Event::TurnEnd {
-            node: window.node(),
-        });
-
-        if let Some(outcome) = &outcome {
-            let is_finalize = matches!(
-                outcome,
-                TurnOutcome::Suspended { classified, .. }
-                    if matches!(classified.routing, SuspensionRouting::Finalize { .. })
-            );
-            if !is_finalize {
-                // NON-FINALIZATION — the window ended on something that is
-                // not an answer. Decision 6 names this class; it folds at
-                // the branch, it does not take the turn down.
-                exit = Some(InvocationExit::NotFinalized(format!(
-                    "{subject} did not suspend on finalize (got {})",
-                    turn_outcome_tag(outcome)
-                )));
-            }
-        }
-
-        if let Some(exit) = exit {
-            tracing::warn!(
-                node = ?window.node(),
-                exit = %exit,
-                "branch child exited without an answer — folding it as data at its \
-                 branch position; siblings (if any) are unaffected"
-            );
-            if let Some(label) = &retired_label {
-                self.gate.node_failed(label, &exit.to_string());
-            }
-            window.fold_exit("branch child retired (exit)");
-            return Ok(Err(exit));
-        }
-
-        if self.agent.finalize_is_closure(window.node()) {
-            // NOT a typed exit: the window DID answer, and it is this
-            // driver that cannot carry a closure across the branch pair
-            // (v1 scope). Our gap fails as ours.
-            if let Some(label) = &retired_label {
-                self.gate.node_failed(
-                    label,
-                    "answered with a closure — cannot cross the branch pair (v1 scope)",
-                );
-            }
-            window.fold_exit("branch child retired (closure)");
-            return Err(DriverError::Session(format!(
-                "{subject} finalized a closure — a branch answer must be plain data in \
-                 this driver (v1 scope)"
-            )));
-        }
-
-        // Success: `finalize_data` takes the finalized answer, freezes
-        // THIS child's own post-finalize prefix, and retires — the one
-        // place a `ContextRef` digest for this window can come from.
-        let node = window.node();
-        let (value, rendered, child_digest) = window.finalize_data()?;
-        if let Some(label) = &retired_label {
-            self.gate.node_finalized(label, &rendered);
-        }
-        self.emit(Event::Finalize {
-            node,
-            value: rendered,
-        });
-
-        Ok(Ok((value, child_digest.as_str().to_string())))
-    }
-
     /// Service a `runLLMTurnFork @T`/`runLLMTurnFanout @T` suspension raised
     /// DIRECTLY by the AUTHORED outer loop (PRD 20 S1-L4, "concurrent
     /// cognition windows") — `fan: Some(_)` for a fanout (`prompts` one per
     /// child, answered as `[T]`), `fan: None` for a single fork (answered as
-    /// bare `T`, `single_prompt` the one task text). Unlike the nested
-    /// answerer's own [`Harness::answer_fanout`] (sequential BY DESIGN —
-    /// this driver's other fork-servicing path, [`Self::drain_answerer_fork`],
-    /// reuses it unchanged), every child here gets its own freshly-minted
-    /// answerer realm on the SHARED outer machine and is driven
-    /// CONCURRENTLY, up to [`Self::concurrency_cap`] at once
-    /// ([`Self::drive_fanout_child`]/[`buffer_unordered`]): only machine
-    /// occupancy serializes a child's actual compile+run, everything else
-    /// (assembling its prompt, awaiting the provider) overlaps freely.
+    /// bare `T`, `single_prompt` the one task text). Unlike this driver's
+    /// other fork-servicing path ([`Self::drain_answerer_fork`], which drives
+    /// each child sequentially through the recursive pump), every child here
+    /// gets its own freshly-minted answerer realm on the SHARED outer
+    /// machine and is driven CONCURRENTLY, up to [`Self::concurrency_cap`]
+    /// at once ([`Self::drive_fanout_child`]/[`buffer_unordered`]): only
+    /// machine occupancy serializes a child's actual compile+run, everything
+    /// else (assembling its prompt, awaiting the provider) overlaps freely.
     /// Completion order is never observable — results are re-sorted back to
-    /// DECLARATION order before assembly, exactly like `answer_fanout`'s own
-    /// order contract, just reached by a different (order-insensitive
-    /// completion, order-preserving assembly) route.
+    /// DECLARATION order before assembly.
     ///
     /// # The child-attributable / mechanism line (PRD 21 locked decision 6)
     ///
@@ -4924,8 +4273,7 @@ impl SelfHarnessDriver {
 
         let is_fanout = fan.is_some();
         // A fanout site's recorded type is the LIST type (`[T]`); a plain
-        // fork's is already the element type — mirrors
-        // `Harness::answer_fanout`'s `element_ty` derivation.
+        // fork's is already the element type.
         let element_ty = if is_fanout {
             ty.and_then(engine::strip_list_type)
         } else {
@@ -5070,9 +4418,7 @@ impl SelfHarnessDriver {
 
     /// Seed `node` with this fanout/fork child's hole card, drive it through
     /// the shared pump ([`Self::drive_agent_session_to_finalize`], `FinalizeOnly`
-    /// policy), and extract the finalized value — the same
-    /// closure-check/`take_finalized_value_keep_open`/`Event::Finalize` shape
-    /// [`Self::service_outer_branch_fanout`] uses at its own branch position.
+    /// policy), and extract the finalized value.
     /// Split out of [`Self::drive_fanout_child`] only so that function's
     /// `terminate_node` always runs, on every return path here.
     ///
@@ -5190,9 +4536,10 @@ impl SelfHarnessDriver {
     /// means THIS WINDOW ended without an answer (round exhaustion, its own
     /// provider call failing, or — under `FinalizeOnly` — a non-finalize
     /// suspension), `Err(..)` means the mechanism is broken (the per-loop
-    /// inference-call cap, session faults). What an exit BECOMES is the
-    /// CALLER's to decide: [`Self::service_outer_branch`] folds it as `Left`
-    /// at that branch position; [`Self::service_typed_request_suspension`] —
+    /// inference-call cap, session faults). Whether an exit is DATA or fatal
+    /// is the CALLER's to decide, because it depends on whether the window
+    /// sits at a branch position: [`Self::drive_fanout_child`] folds it as
+    /// `Left` at that branch, while [`Self::service_typed_request_suspension`] —
     /// answering IN CONTEXT on the outer turn's own continuation, with no
     /// siblings and no position — still hard-fails, exactly as before;
     /// [`Self::drive_fork_child_agent_session`] — a recursive fork/async-fork
@@ -6407,9 +5754,7 @@ impl SelfHarnessDriver {
                 }
             }
             // Children run as full sessions on the pump
-            // (`drive_fork_child_agent_session` — fork-subsumes-split step 1); the
-            // one-shot `Harness::answer_fork`/`answer_fanout` resume path
-            // remains only for the general Agent stack's own callers.
+            // (`drive_fork_child_agent_session` — fork-subsumes-split step 1).
             match &classified.routing {
                 SuspensionRouting::Fork {
                     site,
@@ -6520,35 +5865,31 @@ impl SelfHarnessDriver {
             self.gate.node_failed(label, reason);
             self.gate.retire_node(label);
         }
+        self.fork_child_seq.lock().remove(&node);
         let _ = self.agent.terminate_node(node, reason);
     }
 
     /// Fork-subsumes-split STEP 1 (plans/fork-subsumes-split.md): drive ONE
-    /// fork child as a full ATTACHED WINDOW on the shared session — the
-    /// replacement for the one-shot `resume` path
-    /// (`Harness::drive_answerer_to_value`) on ALL selfharness fork
-    /// servicing. A child on the window pump can explore across rounds,
-    /// present operator forms, and answer with a REAL `finalize @T` —
+    /// fork child as a full ATTACHED WINDOW on the shared session. A child
+    /// on the window pump can explore across rounds, present operator
+    /// forms, and answer with a REAL `finalize @T` —
     /// `ResidentError::ChildSuspended` is unreachable from here.
     ///
-    /// The attach ladder is `service_outer_branch`'s with a fork-flavored
-    /// birth: transcript forked from the LIVE parent's checkpoint
-    /// (`register_fork_child_with_card` — the multi-round answerer card,
-    /// not the one-shot resume card), child scope minted from the LIVE
-    /// parent node's scope — which IS the declaration-inheritance wiring on
-    /// the shared session (locked decision 4's ancestry scoping; no
-    /// separate-session include dance), and the finalize contract pinned
-    /// from the fork site's own resolved modules.
+    /// The attach ladder: transcript forked from the LIVE parent's
+    /// checkpoint (`register_fork_child_with_card` — the multi-round
+    /// answerer card), child scope minted from the LIVE parent node's
+    /// scope — which IS the declaration-inheritance wiring on the shared
+    /// session (locked decision 4's ancestry scoping; no separate-session
+    /// include dance), and the finalize contract pinned from the fork
+    /// site's own resolved modules.
     ///
-    /// STEP 3 (seam map §7): this child also gets the SAME operator-GUI/tree
-    /// lifecycle a branch child gets — a derived label/path
-    /// (`Self::fork_child_label`), `node_gate`/`node_seeded` at birth (the
-    /// AUTHORED brief, not the composed hole card), `node_finalized`/
-    /// `node_failed` at the fold, and `retire_node` on every exit, all
-    /// through the SAME [`BranchAgentSessionGuard`] guard `service_outer_branch` uses
-    /// (widened to accept a fork child's absent `ContextRef` — see that
-    /// struct's doc) so a mechanism-error `?` before the pump starts can
-    /// never leak the label/path registrations or skip retirement.
+    /// STEP 3 (seam map §7): this child gets its own operator-GUI/tree
+    /// lifecycle — a derived label/path (`Self::fork_child_label`),
+    /// `node_gate`/`node_seeded` at birth (the AUTHORED brief, not the
+    /// composed hole card), `node_finalized`/`node_failed` at the fold, and
+    /// `retire_node` on every exit, all through [`BranchAgentSessionGuard`]
+    /// so a mechanism-error `?` before the pump starts can never leak the
+    /// label/path registrations or skip retirement.
     ///
     /// Exit semantics (operator decision, 2026-08-24): a child that exits
     /// without finalizing is reported via `node_failed` and retired exactly
@@ -6598,11 +5939,9 @@ impl SelfHarnessDriver {
             .agent
             .register_fork_child_with_card(parent, title, card)?;
 
-        // Step 3 GUI lane: a fork child's label/path is DERIVED (unlike a
-        // `runLLMTurnBranchLabeled` child's wire-carried one) — see
+        // Step 3 GUI lane: a fork child's label/path is DERIVED — see
         // `Self::fork_child_label`'s doc. Registered NOW, not on its first
-        // ask/note, so the operator watches the tree grow — mirrors
-        // `service_outer_branch`'s own discipline exactly.
+        // ask/note, so the operator watches the tree grow.
         let label = self.fork_child_label(parent, brief);
         self.node_labels.lock().insert(node, label.clone());
         let _ = self.gate.node_gate(&label);
@@ -6618,12 +5957,11 @@ impl SelfHarnessDriver {
         let realm = self.mint_realm();
         self.agent.set_node_realm(node, realm);
         // F4: a fork child's window can run concurrently against a sibling
-        // branch-fanout child (or another fork subtree entirely) on the SAME
-        // shared outer session — `drive_branch_child` already opts its
-        // own nodes in for exactly this reason; a fork child never did,
-        // making its very first checkout (the scope mint below, then every
-        // turn `drive_agent_session_to_finalize` drives) fail fast on what is
-        // "expected, benign contention" everywhere else on this plane.
+        // fanout child (or another fork subtree entirely) on the SAME
+        // shared outer session — opt in so its very first checkout (the
+        // scope mint below, then every turn `drive_agent_session_to_finalize`
+        // drives) waits instead of failing fast on what is "expected, benign
+        // contention" everywhere else on this plane.
         self.agent.set_retry_checkout_on_contention(node, true);
         // Scope minted from the LIVE parent's scope: this is what makes the
         // parent's declarations (and its ancestors') readable and sibling
@@ -6656,10 +5994,7 @@ impl SelfHarnessDriver {
         self.emit(Event::TurnStart { node });
 
         // This child's mode, typed (`AgentSessionMode::require_one_shot`'s doc):
-        // it answers exactly once, then is frozen and retired below. No
-        // `ContextRef` to validate — a fork child forks from the LIVE
-        // parent, not a frozen snapshot (see `BranchAgentSessionGuard::validated_ref`'s
-        // doc).
+        // it answers exactly once, then is retired below.
         let lease = AgentSessionMode::OneShotBranch {
             node,
             realm,
@@ -6670,7 +6005,7 @@ impl SelfHarnessDriver {
         // ABOVE this point, before the guard exists — a hand-rolled cleanup
         // would be needed; there is none between here and the guard's
         // construction). See `BranchAgentSessionGuard`'s doc.
-        let window = BranchAgentSessionGuard::from_lease(lease, self.agent.clone(), None)?;
+        let window = BranchAgentSessionGuard::from_lease(lease, self.agent.clone())?;
 
         // Box::pin: the pump drives child pumps (a fork child can itself
         // present forms, and — step 2 — fork), so this call is genuinely
@@ -6693,6 +6028,12 @@ impl SelfHarnessDriver {
         if let Some(label) = &retired_label {
             self.gate.retire_node(label);
         }
+        // This node retires here regardless of outcome below — purge its
+        // own fork-child-label counter (it may have spawned children of its
+        // own) at the same point its other per-node bookkeeping goes, so
+        // `fork_child_seq` does not grow without bound across a long-running
+        // companion tree (sol cross-family review finding 11).
+        self.fork_child_seq.lock().remove(&node);
 
         match outcome {
             Ok(Ok(TurnOutcome::Suspended { classified, .. }))

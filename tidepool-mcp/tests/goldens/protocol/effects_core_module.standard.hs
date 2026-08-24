@@ -107,7 +107,6 @@ data Schema = SObj [(Text, Schema)] | SArr Schema | SStr | SNum | SBool | SEnum 
 data Ask a where
   AskWith :: Text -> Value -> Ask Value
 
-data ContextRef = ContextRef Text deriving (Show, Eq)
 -- | Why a forked child agent session ended WITHOUT a typed answer.
 -- Folded as data at the failing branch's own position (PRD 21
 -- locked decision 6) — never an exception that erases the results
@@ -127,7 +126,6 @@ instance ToJSON InvocationExit where
     ExitRuntimeFailure detail -> object ["tag" .= ("ExitRuntimeFailure" :: Text), "detail" .= detail]
 data RunLLMTurn a where
   RunLLMTurnWith :: Text -> Value -> RunLLMTurn Value
-  RunLLMTurnFreezeWith :: RunLLMTurn ContextRef
 
 -- | Emit a line of console output. Thin wrapper over the Print effect
 -- so chains never need `send (Print …)`.
@@ -468,34 +466,3 @@ runLLMTurnForkSited sid p = unsafeCoerce <$> send (RunLLMTurnWith p (object ["ty
 {-# OPAQUE runLLMTurnFanoutSited #-}
 runLLMTurnFanoutSited :: forall a effs. Member RunLLMTurn effs => Int -> [Text] -> Eff effs [Either InvocationExit a]
 runLLMTurnFanoutSited sid prompts = unsafeCoerce <$> send (RunLLMTurnWith (intercalate "\n" prompts) (object ["typedSite" .= sid, "fork" .= True, "fan" .= length prompts, "prompts" .= prompts]))
--- | Mint a capability naming THIS session's current frozen
--- prefix (PRD 21 locked decision 2: children fork the frozen
--- post-coalgebra context). Immediate — no operator, no model
--- round (ReadState's service shape). ContextRef is an
--- unforgeable capability issued by the runtime: a ContextRef
--- only ever comes from here or from runLLMTurnBranch's own
--- return; an unrecognized one is refused by the driver as a
--- typed error, never a silent fresh-root fallback.
-freezeContext :: forall effs. Member RunLLMTurn effs => Eff effs ContextRef
-freezeContext = send RunLLMTurnFreezeWith
-{-# OPAQUE runLLMTurnBranch #-}
-runLLMTurnBranch :: forall a effs. Member RunLLMTurn effs => ContextRef -> Text -> Eff effs (Either InvocationExit (a, ContextRef))
-runLLMTurnBranch ref p = runLLMTurnBranchSited 0 ref p
--- @substrate-helper@
-{-# OPAQUE runLLMTurnBranchSited #-}
-runLLMTurnBranchSited :: forall a effs. Member RunLLMTurn effs => Int -> ContextRef -> Text -> Eff effs (Either InvocationExit (a, ContextRef))
-runLLMTurnBranchSited sid (ContextRef ref) p = unsafeCoerce <$> send (RunLLMTurnWith p (object ["typedSite" .= sid, "branch" .= True, "ref" .= ref]))
-{-# OPAQUE runLLMTurnBranchLabeled #-}
-runLLMTurnBranchLabeled :: forall a effs. Member RunLLMTurn effs => Text -> ContextRef -> Text -> Eff effs (Either InvocationExit (a, ContextRef))
-runLLMTurnBranchLabeled label ref p = runLLMTurnBranchLabeledSited 0 label ref p
--- @substrate-helper@
-{-# OPAQUE runLLMTurnBranchLabeledSited #-}
-runLLMTurnBranchLabeledSited :: forall a effs. Member RunLLMTurn effs => Int -> Text -> ContextRef -> Text -> Eff effs (Either InvocationExit (a, ContextRef))
-runLLMTurnBranchLabeledSited sid label (ContextRef ref) p = unsafeCoerce <$> send (RunLLMTurnWith p (object ["typedSite" .= sid, "branch" .= True, "ref" .= ref, "label" .= label]))
-{-# OPAQUE runLLMTurnBranchFanout #-}
-runLLMTurnBranchFanout :: forall a effs. Member RunLLMTurn effs => ContextRef -> [(Text, Text)] -> Eff effs [Either InvocationExit (a, ContextRef)]
-runLLMTurnBranchFanout ref labeledPrompts = runLLMTurnBranchFanoutSited 0 ref labeledPrompts
--- @substrate-helper@
-{-# OPAQUE runLLMTurnBranchFanoutSited #-}
-runLLMTurnBranchFanoutSited :: forall a effs. Member RunLLMTurn effs => Int -> ContextRef -> [(Text, Text)] -> Eff effs [Either InvocationExit (a, ContextRef)]
-runLLMTurnBranchFanoutSited sid (ContextRef ref) labeledPrompts = unsafeCoerce <$> send (RunLLMTurnWith (intercalate "\n" (map snd labeledPrompts)) (object ["typedSite" .= sid, "branchFanout" .= True, "ref" .= ref, "labels" .= map fst labeledPrompts, "prompts" .= map snd labeledPrompts, "fan" .= length labeledPrompts]))

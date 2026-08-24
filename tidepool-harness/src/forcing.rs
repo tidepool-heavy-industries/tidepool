@@ -498,59 +498,6 @@ impl<M> NodeTree<M> {
         Ok(())
     }
 
-    /// Record that `node`'s context prefix was frozen as a cache root
-    /// ([`Event::SnapshotFrozen`]). Structure-only, like [`Self::turn_forked`]:
-    /// freezing observes a transcript, it never moves a node's lifecycle
-    /// state, so any known node may be the subject.
-    pub fn snapshot_frozen(
-        &self,
-        node: NodeId,
-        digest: crate::snapshot::SnapshotDigest,
-        messages: u64,
-        prefix_bytes: u64,
-    ) -> Result<(), TreeError> {
-        let mut inner = self.inner.lock();
-        inner.entry(node)?;
-        inner.writer.append(Event::SnapshotFrozen {
-            node,
-            digest,
-            messages,
-            prefix_bytes,
-        })?;
-        Ok(())
-    }
-
-    /// Record a snapshot-forked branch's first-turn receipt
-    /// ([`Event::BranchInvocation`]). Emitted from inside the turn that
-    /// produced the numbers, so `node` is `Running`/`Suspended` — the same
-    /// guard [`Self::turn_delta`] applies, for the same reason (a receipt
-    /// about a turn belongs to a node that is having one).
-    pub fn branch_invocation(
-        &self,
-        node: NodeId,
-        snapshot: crate::snapshot::SnapshotDigest,
-        shared_prefix_bytes: u64,
-        branch_suffix_bytes: u64,
-        input_tokens: u64,
-        cached_input_tokens: Option<u64>,
-    ) -> Result<(), TreeError> {
-        let mut inner = self.inner.lock();
-        match &inner.entry(node)?.state {
-            NodeState::Thunk => return Err(TreeError::UnforcedThunk(node)),
-            NodeState::Running | NodeState::Suspended { .. } => {}
-            other => return Err(TreeError::NotRunning(node, other.clone())),
-        }
-        inner.writer.append(Event::BranchInvocation {
-            node,
-            snapshot,
-            shared_prefix_bytes,
-            branch_suffix_bytes,
-            input_tokens,
-            cached_input_tokens,
-        })?;
-        Ok(())
-    }
-
     /// Complete `node`, moving `Running` to `Done`.
     pub fn node_done(&self, node: NodeId, result_rendered: String) -> Result<(), TreeError> {
         let mut inner = self.inner.lock();
