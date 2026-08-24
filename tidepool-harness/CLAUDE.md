@@ -69,6 +69,26 @@ Module map:
 - `synopsis` — `type_document`, the full GHC-style `data` declaration a hole
   card's shape line reads, derived from a compiled `DataConTable` (which
   carries field TYPES as well as NAMES).
+- `selfharness/driver` — the self-iterating harness's outer `render`/`loop`
+  driver (see `selfharness/mod.rs`'s own doc for where this sits among the
+  rest of `selfharness`), split into a module tree along its own seams, no
+  file over ~1800 lines: `mod.rs` (the `SelfHarnessDriver` struct and its
+  construction/config-setter API, `DriverError`, shared tuning constants)
+  plus `lifecycle` (bootstrap, checkpoint restore, the `render`/`loop`
+  fragment drive, machine rotation, emergency compaction), `suspension`
+  (`askUser`/`note` servicing on both the nested-answerer and outer-loop
+  planes, and the operator-gate/observer plumbing those paths share),
+  `fork`/`green` (fork/fanout spawn-time budgets and child-driving; the
+  green-thread scheduler backing `Tidepool.Async` — split from `fork` on
+  size, both still one pump), `corrective` (retry-feedback text assembly:
+  fork-child failure correctives, the decl-plane "types in scope" hint, the
+  answerer framing suffix), `contract` (the outer and answerer effect decl
+  rows, per-hole `AnswerContract`), and `delegate` (outer-loop effect
+  delegation to `Subagent`/`Console`/`Worktree`/`RepoEvent`/`Exec`/
+  `Journal`). Public surface (`SelfHarnessDriver`, `DriverError`,
+  `typed_request_agent_decls[_with_delegate]`) is unchanged — every other
+  item crossing a module boundary inside the tree is `pub(crate)`, not
+  re-exported further.
 
 ## Compile memo — one content-addressed cache, no cache-free path
 
