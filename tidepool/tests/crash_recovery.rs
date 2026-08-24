@@ -372,6 +372,15 @@ async fn crash_mid_answerer_turn_resumes_from_checkpoint_and_completes() {
     // in-process `checker_driver` calls below — from the real
     // `~/.cache/tidepool`.
     std::env::set_var("XDG_CACHE_HOME", &cache_home);
+    // Isolates `xdg_data_root` the same way: the production binary claims
+    // the subagent binding root's exclusive `.owner.lock` (and seeds the
+    // delegate memory store) under the DATA root at boot, so without this a
+    // live operator instance on the same box holds the lock and both
+    // children die at startup with `StorageFailure` before their first
+    // durable-log event.
+    let data_home = scratch.path().join("xdg-data");
+    std::fs::create_dir_all(&data_home).expect("create XDG_DATA_HOME");
+    std::env::set_var("XDG_DATA_HOME", &data_home);
     let selfharness_dir = cache_home.join("tidepool").join("selfharness");
 
     let log_path = scratch.path().join("replay.jsonl");
@@ -392,6 +401,7 @@ async fn crash_mid_answerer_turn_resumes_from_checkpoint_and_completes() {
             .arg("--harness")
             .arg(&harness)
             .env("XDG_CACHE_HOME", &cache_home)
+            .env("XDG_DATA_HOME", &data_home)
             .stdin(Stdio::null())
             .stdout(stdout1)
             .stderr(stderr1)
@@ -442,6 +452,7 @@ async fn crash_mid_answerer_turn_resumes_from_checkpoint_and_completes() {
             .arg("--harness")
             .arg(&harness)
             .env("XDG_CACHE_HOME", &cache_home)
+            .env("XDG_DATA_HOME", &data_home)
             .stdin(Stdio::null())
             .stdout(stdout2)
             .stderr(stderr2)
