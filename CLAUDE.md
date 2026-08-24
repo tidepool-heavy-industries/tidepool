@@ -87,7 +87,7 @@ below — it stays here verbatim.
 
 ```
 tidepool/
-├── tidepool/              ← Facade crate + MCP server binary (`cargo install tidepool`)
+├── tidepool/              ← Facade crate + MCP server binary (`cargo install tidepool`); also the composition-root `tidepool-selfharness` binary (driver + gate + provider + memory store + web server)
 ├── tidepool-repr/         ← Core IR types: CoreExpr, DataConTable, CBOR serial  [CLAUDE.md]
 ├── tidepool-eval/         ← Tree-walking interpreter (oracle): Value, Env, lazy eval  [CLAUDE.md]
 ├── tidepool-heap/         ← Manual heap + copying GC for JIT runtime

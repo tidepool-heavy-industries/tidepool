@@ -60,6 +60,7 @@ tidepool-protocol = { version = "0.1.0", path = "tidepool-protocol" }
 tidepool-repr = { version = "0.1.0", path = "tidepool-repr" }
 tidepool-runtime = { version = "0.1.0", path = "tidepool-runtime" }
 tidepool-testing = { path = "tidepool-testing" }
+tidepool-web = { path = "tidepool-web" }
 tidepool-worktree = { path = "tidepool-worktree" }
 
 axum = "0.8"

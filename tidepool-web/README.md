@@ -42,9 +42,9 @@ cargo run --bin tidepool-selfharness-web -- --port 4601
 ```
 
 By itself this only serves the page — nothing drives it without a harness
-wired to a `WebGate` (see `tidepool-selfharness.rs`, the harness driver
-binary, for how the pieces compose). To see the page working with no
-harness, no model, and no API calls:
+wired to a `WebGate` (see `tidepool/src/bin/tidepool-selfharness.rs`, the
+harness driver binary, for how the pieces compose). To see the page working
+with no harness, no model, and no API calls:
 
 ```bash
 cargo run --bin tidepool-selfharness-web -- --demo --port 4601

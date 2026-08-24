@@ -23,9 +23,9 @@ export TIDEPOOL_EXTRACT="$(cd haskell && cabal list-bin tidepool-extract-bin)"
 # historical tables were measured on debug.
 PROFILE="${TIDEPOOL_PROFILE:-release}"
 if [ "$PROFILE" = release ]; then
-  cargo build -q --release -p tidepool-web --bin tidepool-selfharness
+  cargo build -q --release -p tidepool --bin tidepool-selfharness
 else
-  cargo build -q -p tidepool-web --bin tidepool-selfharness
+  cargo build -q -p tidepool --bin tidepool-selfharness
 fi
 
 HARNESS="${1:-harness-dogfooding/companion/Harness.hs}"

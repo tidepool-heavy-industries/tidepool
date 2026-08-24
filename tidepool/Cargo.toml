@@ -15,6 +15,10 @@ categories = ["compilers"]
 name = "tidepool"
 path = "src/main.rs"
 
+[[bin]]
+name = "tidepool-selfharness"
+path = "src/bin/tidepool-selfharness.rs"
+
 [dependencies]
 tidepool-repr.workspace = true
 tidepool-eval.workspace = true
@@ -27,11 +31,16 @@ tidepool-macro.workspace = true
 tidepool-runtime.workspace = true
 tidepool-mcp.workspace = true
 tidepool-handlers.workspace = true
+tidepool-harness.workspace = true
+tidepool-worktree.workspace = true
+tidepool-agent.workspace = true
+tidepool-web.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 toml = "1.1"
 tokio = { workspace = true, features = ["rt-multi-thread", "signal"] }
 tracing.workspace = true
+tracing-subscriber = { workspace = true, features = ["env-filter"] }
 clap.workspace = true
 axum.workspace = true
 rmcp.workspace = true
@@ -39,3 +48,4 @@ rmcp.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+tidepool-testing.workspace = true

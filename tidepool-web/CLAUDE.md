@@ -65,10 +65,12 @@ automatically, so an escalation presents as an ordinary `present_form` ask
   mock node tree (loop node, a full seed→ask→finalize lifecycle, two
   concurrent stacked asks, a failure) for reviewing the page with no
   harness running.
-- `bin/tidepool-selfharness.rs` — the actual self-iterating harness driver
-  binary (not part of the web surface; lives here because it's this crate's
-  other binary target). Wires `WebGate` into `SelfHarnessDriver::set_gate`
-  before `run_loop` unless `--yes`/`--auto`/`--replay` is set.
+
+The self-iterating harness driver binary (composition root: driver + gate +
+provider + memory store + web server) lives at
+`tidepool/src/bin/tidepool-selfharness.rs`, not in this crate — it wires this
+crate's `WebGate` into `SelfHarnessDriver::set_gate` before `run_loop` unless
+`--yes`/`--auto`/`--replay` is set.
 - `tests/operator_gate.rs` — the HTTP-level integration test: boots the real
   router with `axum::serve` on an ephemeral port and drives it with a real
   client, across multiple nodes, stacked asks, the lifecycle fields, and the

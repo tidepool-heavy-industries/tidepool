@@ -64,7 +64,7 @@ const EXIT_WAIT_CEILING: Duration = Duration::from_secs(800);
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
-        .expect("tidepool-web has a parent (the repo root)")
+        .expect("tidepool has a parent (the repo root)")
         .to_path_buf()
 }
 
