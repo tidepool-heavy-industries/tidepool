@@ -26,6 +26,7 @@ use tidepool_codegen::jit_machine::CancelHandle;
 use tidepool_mcp::CapturedOutput;
 use tidepool_repr::SessionId;
 use tidepool_runtime::session::registry::{CheckoutError, CheckoutReceipt, SingleSlot, SlotKind};
+use tidepool_runtime::session::Aged;
 
 use crate::session::Session;
 
@@ -90,7 +91,7 @@ pub type ManagerCheckoutError = CheckoutError<ContinuationId>;
 /// opinion on. Lives OUTSIDE the registry, exactly one per manager (this
 /// crate's session is single-hole: only one `ask` is ever pending at a
 /// time), mirroring the harness's own per-hole metadata design.
-struct Suspension {
+struct SuspensionPayload {
     /// The pending continuation's id — kept here too (redundant with the
     /// registry's own hole set) purely so `session_resume` can build a
     /// "suspended on X, not Y" message without a separate registry read.
@@ -102,10 +103,19 @@ struct Suspension {
     /// The `ask`'s schema, used to validate + canonicalize the resume reply
     /// BEFORE the continuation is consumed. `None` ⇒ accept any JSON.
     expected_schema: Option<serde_json::Value>,
-    /// When the session entered (or last refreshed) this suspension — the
-    /// reaper's TTL clock.
-    since: Instant,
 }
+
+/// A pending suspension paired with its age via the kernel's abandonment-
+/// liveness primitive (`tidepool_runtime::session::Aged`, #22 design doc
+/// §3.2 item 5) — this crate's own TTL reaper (`server.rs`'s `reap_once`,
+/// driven by [`SessionManager::suspension_since`]/[`SessionManager::
+/// refresh_suspension_since`] below) is the SWEEP POLICY that reads
+/// [`Aged::age`]; the kernel itself drives no timer and reclaims nothing on
+/// its own (OQ3). This replaces a hand-rolled `since: Instant` field with
+/// the shared primitive so a second consumer (`tidepool-harness`'s
+/// `PendingSuspension`) can reuse the same "value + mint time + age query"
+/// shape instead of re-deriving its own.
+type Suspension = Aged<SuspensionPayload>;
 
 /// The single implicit session's manager: holds AT MOST one resident
 /// session, mirroring `tidepool_runtime::session::registry::SingleSlot`'s own
@@ -201,31 +211,36 @@ impl SessionManager {
     ) -> Result<(Option<serde_json::Value>, CapturedOutput), Option<ContinuationId>> {
         match self.suspension.lock().as_ref() {
             None => Err(None),
-            Some(s) if &s.cont_id == cont_id => Ok((s.expected_schema.clone(), s.captured.clone())),
-            Some(s) => Err(Some(s.cont_id.clone())),
+            Some(s) if &s.get().cont_id == cont_id => {
+                Ok((s.get().expected_schema.clone(), s.get().captured.clone()))
+            }
+            Some(s) => Err(Some(s.get().cont_id.clone())),
         }
     }
 
-    /// Refresh the pending suspension's `since` clock (anti-starvation: a
+    /// Refresh the pending suspension's age clock (anti-starvation: a
     /// retrying continuation must not become the reaper's oldest-first
     /// eviction victim while its caller fixes an invalid reply). No-op if
     /// nothing is pending.
     pub fn refresh_suspension_since(&self) {
         if let Some(s) = self.suspension.lock().as_mut() {
-            s.since = Instant::now();
+            s.touch();
         }
     }
 
-    /// The pending suspension's `since` clock, for the reaper's TTL check.
-    /// `None` if nothing is pending.
+    /// The pending suspension's mint/refresh instant, for the reaper's TTL
+    /// check. `None` if nothing is pending.
     pub fn suspension_since(&self) -> Option<Instant> {
-        self.suspension.lock().as_ref().map(|s| s.since)
+        self.suspension.lock().as_ref().map(Aged::since)
     }
 
     /// The pending suspension's continuation id, for the reaper's abort
     /// path. `None` if nothing is pending.
     pub fn suspension_cont_id(&self) -> Option<ContinuationId> {
-        self.suspension.lock().as_ref().map(|s| s.cont_id.clone())
+        self.suspension
+            .lock()
+            .as_ref()
+            .map(|s| s.get().cont_id.clone())
     }
 
     /// Admit a NEW top-level run: `Idle → Running`. This is REPL POLICY, not
@@ -278,12 +293,11 @@ impl SessionManager {
         captured: CapturedOutput,
         expected_schema: Option<serde_json::Value>,
     ) {
-        *self.suspension.lock() = Some(Suspension {
+        *self.suspension.lock() = Some(Aged::new(SuspensionPayload {
             cont_id,
             captured,
             expected_schema,
-            since: Instant::now(),
-        });
+        }));
     }
 
     /// Clear the pending suspension (a resume consumed it, or a reset/removal
