@@ -44,7 +44,7 @@ use tidepool_eval::value::Value;
 use tidepool_mcp::CapturedOutput;
 use tidepool_repr::{DataConTable, Generation, SessionId};
 use tidepool_runtime::session::{
-    classify_block, run_turn, BoundBinder, CompiledTurn, ResidentError, ResidentHole,
+    classify_block, run_turn, Aged, BoundBinder, CompiledTurn, ResidentError, ResidentHole,
     ResidentOutcome, ResidentSession, SessionLib, TemplateSelector, TurnKind, TurnRequest,
     TurnResult, TurnTemplate, DECL_TEMPLATE_SOURCE,
 };
@@ -610,7 +610,16 @@ pub struct Harness {
     /// for the one place transitions happen (mutations of this map are what
     /// drive the tree's `hole_published`/`hole_consumed` log events, not the
     /// other way around).
-    pending_suspensions: Mutex<HashMap<(SessionId, HoleId), PendingSuspension>>,
+    /// Each entry is [`Aged`]-wrapped (#22 design doc §3.2 item 5): the
+    /// kernel's abandonment-liveness primitive, giving [`Self::
+    /// pending_hole_age`] a hole's age for FREE at the cost of one `Instant`
+    /// per entry. No sweep reads it today — the kernel drives no timer and
+    /// this crate constructs no reaper (OQ3: hook exposed, no default) — an
+    /// unanswered hole still sits suspended forever exactly as before; the
+    /// age is simply now a query away instead of undiscoverable, ready for
+    /// a future harness that wants to opt into a TTL the way `tidepool-repl`
+    /// already does.
+    pending_suspensions: Mutex<HashMap<(SessionId, HoleId), Aged<PendingSuspension>>>,
     /// Window exits QUEUED because the attached node's retirement found the
     /// shared machine out on a turn — drained by the next path holding the
     /// machine (`run_checked_out`/`with_session`). An eventual postcondition,
@@ -671,8 +680,21 @@ impl Harness {
         self.pending_suspensions
             .lock()
             .values()
-            .find(|p| p.node == node)
-            .cloned()
+            .find(|p| p.get().node == node)
+            .map(|p| p.get().clone())
+    }
+
+    /// How long `node`'s pending hole (if any) has been parked — the
+    /// abandonment-liveness hook's read side (#22 design doc §3.2 item 5,
+    /// OQ3). `None` when `node` has no pending suspension. Nothing calls
+    /// this today; it exists so a future harness reaper can be built
+    /// without first inventing where a hole's age would even come from.
+    pub fn pending_hole_age(&self, node: NodeId) -> Option<std::time::Duration> {
+        self.pending_suspensions
+            .lock()
+            .values()
+            .find(|p| p.get().node == node)
+            .map(Aged::age)
     }
 
     /// Publish a hole: log `Event::HolePublished` (the tree's `Running →
@@ -713,7 +735,7 @@ impl Harness {
         )?;
         self.pending_suspensions
             .lock()
-            .insert((sid, pending.hole.clone()), pending);
+            .insert((sid, pending.hole.clone()), Aged::new(pending));
         Ok(())
     }
 
@@ -3694,7 +3716,7 @@ impl Harness {
         // caller can ever consume it once the node itself is gone.
         self.pending_suspensions
             .lock()
-            .retain(|_, p| p.node != node);
+            .retain(|_, p| p.get().node != node);
         Ok(())
     }
 
@@ -3912,6 +3934,59 @@ mod tests {
             }
             other => panic!("expected SessionMismatch{{source: Terminal}}, got {other:?}"),
         }
+    }
+
+    /// The abandonment-liveness hook's read side (#22 design doc §3.2 item
+    /// 5): a published hole's age is discoverable via `pending_hole_age`
+    /// without this crate ever having built a reaper — the hook is exposed,
+    /// nothing sweeps it.
+    #[tokio::test]
+    async fn pending_hole_age_reads_a_published_holes_age() {
+        let harness = test_harness();
+        let node = harness.create_root("root", "hello").unwrap();
+        harness.force(node, Actor::Operator).unwrap();
+        let sid = harness
+            .tree
+            .session_of(node)
+            .expect("forced node has a session");
+        let hole = HoleId("scont_1".to_string());
+
+        assert!(
+            harness.pending_hole_age(node).is_none(),
+            "no pending suspension yet"
+        );
+
+        harness
+            .publish_suspension(
+                node,
+                sid,
+                PendingSuspension {
+                    node,
+                    hole: hole.clone(),
+                    classified: ClassifiedSuspension {
+                        routing: SuspensionRouting::Note {
+                            text: "why".to_string(),
+                        },
+                        prompt: "why".to_string(),
+                    },
+                    raw_request: Value::Con(tidepool_repr::DataConId(0), Vec::new()),
+                    resident_hole: ResidentHole::plain(hole.0.clone()),
+                    suspend_table: DataConTable::new(),
+                    suspend_asks: AsksSidecar::from_pairs(Vec::new()),
+                },
+            )
+            .expect("publish");
+
+        let age = harness.pending_hole_age(node).expect("hole is now pending");
+        assert!(age < std::time::Duration::from_secs(5), "freshly published");
+
+        harness
+            .consume_suspension(node, sid, &hole)
+            .expect("consume");
+        assert!(
+            harness.pending_hole_age(node).is_none(),
+            "consumed hole is no longer pending"
+        );
     }
 
     // ---- render_compile_error / error coordinates -------------------------
