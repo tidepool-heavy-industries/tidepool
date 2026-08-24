@@ -76,22 +76,21 @@ set -euo pipefail
 # marker and skips self-acquire. (The nextest cap below is the opposite:
 # per-worktree config, live in each checkout.)
 #
-# 6-slot semaphore. THE REAL CEILING IS slots x nextest's per-run ghc-heavy
-# cap (.config/nextest.toml) — the load-92 incident (2026-08-08) reached 7+
-# concurrent extracts with every lane compliant at 3x3. Per-run cap is 2
-# (620b2a63: warm-matched A/B measured -48% shard wall at zero cpu/mem PSI;
-# the ceiling math and receipts live in nextest.toml's comment), so the
-# accepted box-wide ceiling is 6x2=12 — a worst case that needs all six
-# slots simultaneously held by fanning runs, with the MemAvailable gate
-# below as the backstop against a burst tipping into swap-thrash. Six slots
-# rather than four because the second-order cost of fewer slots is HOLD
-# TIME: an --ignore-default-filter crate run serialises internally and holds
-# one slot for its whole duration (observed 1h43m) while extracting only
-# part of the time — so at equal ceiling, more slots means less head-of-line
-# blocking behind long holds, not more load (a held slot is not a running
-# extract; observed 3-6 extracts across 4 held). Raise either factor only
-# with a fresh measurement — the product is the budget.
-SLOTS=(/tmp/tidepool-ghc.lock /tmp/tidepool-ghc.slot1 /tmp/tidepool-ghc.slot2 /tmp/tidepool-ghc.slot3 /tmp/tidepool-ghc.slot4 /tmp/tidepool-ghc.slot5)
+# 2-slot semaphore. THE REAL CEILING IS slots x nextest's per-run ghc-heavy
+# cap (.config/nextest.toml) — that product is the box-wide concurrent-extract
+# budget. Per-run cap is 4, so the accepted ceiling is 2x4=8 concurrent
+# extracts (operator, 2026-08-24): the 6x4=24 window the old six-slot array
+# allowed filled swap at 12 coincident ~700MB extracts and degraded the box.
+# Each extract is a full GHC boot at ~600-800MB resident; 8 is what the RAM
+# honestly supports. The second-order cost of fewer slots is HOLD TIME
+# (head-of-line blocking behind a long --ignore-default-filter run that holds
+# a slot for its whole duration) — accepted deliberately: throughput behind
+# the semaphore beats another swap incident. Revisit once the resident
+# compile daemon serves battery compiles (plans/compile-daemon-design.md):
+# a per-run daemon serialises its own compiles, making the slot a
+# fallback-path guard rather than the primary throttle. Raise either factor
+# only with a fresh measurement — the product is the budget.
+SLOTS=(/tmp/tidepool-ghc.lock /tmp/tidepool-ghc.slot1)
 
 # Memory gate: a GHC extract needs ~1-2Gi, so granting a slot when the box is
 # already near-empty is how a burst tips into swap-thrash. Before taking a slot,

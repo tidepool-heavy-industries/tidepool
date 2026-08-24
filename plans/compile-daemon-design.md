@@ -684,32 +684,42 @@ begin with.
 
 ---
 
-## Open questions for the operator
+## Decisions (operator, 2026-08-24)
 
-1. **Worker count default (1 vs. 2).** §5.4 argues for 1 from GHC's
-   single-mutable-session constraint and the memory-incident motivation,
-   but sizing the tail-latency trade-off under real concurrent load (a live
-   round competing with a background battery) needs a measurement this
-   docs-only, no-process-touches lane cannot take. Recommend: ship at 1,
-   revisit with Phase 0's warm-daemon spike data.
-2. **Daemon mode's build-system placement.** §7 proposes a `--daemon` flag
-   on the existing `tidepool-extract-bin` (`haskell/tidepool-extract.cabal`)
-   rather than a new cabal component, to avoid a second maintained entry
-   point into the same internal library. This is a real but small
-   build-system decision the operator may want to weigh against the
-   existing four non-production `test-suite` stanzas' precedent
-   (`haskell/CLAUDE.md`'s component table) for "when does a new mode
-   deserve its own component."
-3. **Rotation thresholds.** §4.3 recommends request-count rotation as
-   primary with an RSS ceiling as backstop, but concrete values (N
-   requests, RSS ceiling in MB) need empirical sizing against a real
-   long-running daemon under representative load — not derivable from
-   reading the code, and explicitly out of this lane's boundary (no process
-   touches given the recent memory incident).
-4. **Daemon lifecycle ownership.** Who starts and stops the daemon process
-   in each of Phase 1/2's contexts — a systemd user unit, a wrapper script
-   invoked by `scripts/battery.sh`, or the `tidepool-selfharness` driver
-   spawning and owning it directly — is a deployment/ops decision outside
-   what reading `haskell/`/`tidepool-extract-cmd`/`tidepool-runtime` can
-   answer. Flagged rather than defaulted because the answer changes who is
-   responsible for restart-on-crash (§4.2) in practice.
+1. **Worker count: 1.** GHC's single-mutable-session constraint plus the
+   memory-incident motivation (§5.4). No config knob until Phase 0's
+   warm-daemon spike shows queueing delay actually hurting.
+2. **Build placement: `--daemon` flag on the existing
+   `tidepool-extract-bin`.** One binary, one deploy path — the toolchain
+   stamp already fingerprints exactly this binary, so the handshake covers
+   the daemon with zero new mechanism. The serving loop itself lives in its
+   own module, not in `Main.hs` (§7 phase 0 implementation note below).
+3. **Rotation thresholds: provisional defaults, tuned by the spike.**
+   Request-count rotation N=256 as primary, RSS ceiling 2048MB as backstop,
+   both settable via daemon flags. Phase 0's measurement is the sizing
+   authority; these are conservative starting values, not conclusions.
+4. **Lifecycle ownership: per-context, no shared singleton.** The
+   selfharness driver spawns and owns a daemon for its own lifetime
+   (Phase 2); each battery run starts its own daemon on a per-run socket
+   and tears it down after (Phase 1). No systemd unit, no flock-guarded
+   auto-spawn singleton — ownership, restart-on-crash, and redeploy-skew
+   restart responsibility are always unambiguous because the owner is
+   always the single process that created the daemon. Worst case under
+   concurrent lanes (N runs × ~800MB, N bounded by the ghc-slots
+   semaphore) is accepted; a box-global singleton is a possible later
+   consolidation, only with soak evidence.
+5. **Sequencing: Phase 0 fires now** (opt-in only, env var unset
+   everywhere by default, near-zero overlap with in-flight lanes).
+   Alongside it, `scripts/ghc-slots.sh` shrinks 6→2 slot files (box-wide
+   ceiling 2×4=8 concurrent extracts) — the durable fix for the
+   swap-fill incident, independent of the daemon landing.
+6. **Wire framing: length-prefixed frames, not JSON** — a root-TL
+   correction to §5.3. `tidepool-extract-cmd`'s charter is a std-only,
+   zero-dependency leaf; a JSON wire would force either a hand-rolled JSON
+   codec (an escaping bug farm) or a serde dependency (charter break).
+   Both endpoints are in-repo, so the wire needs no interchange format:
+   length-prefixed byte strings (u32 length + bytes, over the same
+   one-connection-per-request UNIX socket) carry the argv array and the
+   `{exit_code, stdout, stderr}` response with trivially-correct codecs on
+   both sides. Everything else in §5.3 — UDS, one request/response per
+   connection, EOF-as-crash-signal, paths-not-content — stands unchanged.
