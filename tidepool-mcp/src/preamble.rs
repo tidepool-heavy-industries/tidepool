@@ -1246,7 +1246,8 @@ import qualified Prelude as P";
 import qualified Tidepool.Shell as Shell
 import Tidepool.Shell (sh)
 import qualified Tidepool.Cargo as Cargo
-import qualified Tidepool.Git as Git";
+import qualified Tidepool.Git as Git
+import Tidepool.Random";
 
     const ASKUSER_IMPORT: &str = "import Tidepool.Form";
 
