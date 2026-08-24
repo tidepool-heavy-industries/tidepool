@@ -100,6 +100,11 @@ touching `tidepool-harness/src/selfharness/` at once.
    in parallel (both produce docs, no code conflicts).
 6. HELD until an explicit operator ping, even if everything above is
    green: #20 steps 2–3, #24, and any IMPLEMENTATION of #21/#22.
+6b. Straggler after fork-concurrency folds (root does this inline, no
+   lane): two stale doc-comment mentions of the deleted Lsp effect remain
+   inside tidepool-harness (`selfharness/driver.rs` effect-list prose,
+   `tests/agent_stack_scoping.rs`) — lsp-nuke correctly left them per its
+   boundary. Delete the mentions once no lane holds the crate.
 7. End-of-wave gate, after steps 2–4 have folded: walk all
    `tidepool-harness` shard groups sequentially per
    `scripts/battery-shard.sh` (the wave touched the harness throughout),
