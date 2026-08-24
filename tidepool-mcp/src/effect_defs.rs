@@ -252,6 +252,18 @@ macro_rules! extra_imports_for {
     (AskUser) => {
         &["import Tidepool.Form"]
     };
+    // `Tidepool.Random`'s `mkStdGen`/`randomR`/`randoms`/`split` (pure) and
+    // `newStdGen`/`randomRIO` (built on `entropySeed`) — same
+    // built-on-the-raw-substrate-verb shape as `AskUser`/`Tidepool.Form`.
+    // `Entropy` is a BASE effect (always in `base_effects!`, unlike the
+    // gated AskUser/Fork), so this import is unconditionally live. It
+    // cannot instead be reached through `Tidepool.Prelude`: the generated
+    // `Tidepool.Effects` module itself imports `Tidepool.Prelude`, so a
+    // Prelude re-export of anything importing `Tidepool.Effects` (as
+    // `newStdGen`/`randomRIO` must) is a module cycle.
+    (Entropy) => {
+        &["import Tidepool.Random"]
+    };
     // `Tidepool.Fork`'s `fork`/`forkAll`/`forkMap`/`forkCata` build on
     // `Fork`'s own `forkSited`/`forkAllSited` (`Tidepool.Effects`), same
     // row-gating as `AskUser`'s `Tidepool.Form` above. `Tidepool.Fork` does
@@ -603,6 +615,50 @@ macro_rules! time_effect_def {
                 { raw ["-- | Current UTC time as an opaque UTCTime (epoch-millisecond resolution).",
                        "getCurrentTime :: forall effs. Member Time effs => Eff effs UTCTime",
                        "getCurrentTime = UTCTime <$> send TimeNow"] },
+            ],
+        }
+    };
+}
+
+/// Entropy effect — single definition.
+///
+/// ONE dumb verb, per the Mechanism Index's "code owns process state; models
+/// answer bounded semantic questions": fresh OS entropy as a 64-bit seed. The
+/// canonical `System.Random` vocabulary a model actually calls —
+/// `mkStdGen`/`randomR`/`randoms`/`split` (pure), `newStdGen`/`randomRIO`
+/// (seeded from this verb) — is ordinary Haskell in `Tidepool.Random`,
+/// auto-imported whenever `Entropy` is in the row (always, since it is a
+/// base effect) via `extra_imports_for!` — never a second effect wire. The
+/// raw verb is marked `substrate`: a model calls `newStdGen`/`randomRIO`,
+/// never `entropySeed` directly. Shape mirrors `Time` (nullary verb, `Int`
+/// result).
+#[macro_export]
+macro_rules! entropy_effect_def {
+    ($project:path) => {
+        $project! {
+            effect Entropy,
+            handler EntropyHandler,
+            req EntropyReq,
+            decl_fn entropy_decl,
+            helpers_row_polymorphic true,
+            description [
+                "Randomness. Seeded, deterministic generation is pure Haskell — no effect ",
+                "needed: `mkStdGen :: Int -> StdGen`, `randomR :: (a, a) -> StdGen -> (a, ",
+                "StdGen)`, `randoms :: StdGen -> [a]`, `split :: StdGen -> (StdGen, StdGen)` ",
+                "(Int and Double instances; each `randomR` draw stays within the given ",
+                "bounds, inclusive; the same seed always replays the same sequence). For ",
+                "non-deterministic values seeded from OS entropy: `newStdGen :: M StdGen` and ",
+                "`randomRIO :: (a, a) -> M a`, e.g. `n <- randomRIO (1 :: Int, 100)`.",
+            ],
+            type_defs [],
+            verbs [
+                { ctor EntropySeed, method entropy_seed,
+                  args { },
+                  ret "Int" },
+            ],
+            helpers [
+                { raw substrate ["entropySeed :: forall effs. Member Entropy effs => Eff effs Int",
+                       "entropySeed = send EntropySeed"] },
             ],
         }
     };

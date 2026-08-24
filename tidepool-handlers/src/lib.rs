@@ -1,6 +1,6 @@
 //! Concrete effect handlers for the Tidepool eval server.
 //!
-//! Provides the base handlers (Console, KV, Fs, Http, Exec, Llm, Git, Time),
+//! Provides the base handlers (Console, KV, Fs, Http, Exec, Llm, Git, Time, Entropy),
 //! the debug-only MetaHandler, and the [`build_base_stack`] / [`base_decls_with_ask`]
 //! convenience functions for assembling a fully-wired eval server.
 //!
@@ -89,14 +89,17 @@ macro_rules! handler_for {
     (Time,    $cfg:ident) => {
         TimeHandler
     };
+    (Entropy, $cfg:ident) => {
+        EntropyHandler
+    };
 }
 
-/// Build the base effect stack (tags 0–7: Console, KV, Fs, Http, Exec, Llm, Git, Time).
+/// Build the base effect stack (tags 0–8: Console, KV, Fs, Http, Exec, Llm, Git, Time, Entropy).
 ///
 /// **Must be called inside a tokio runtime** — `LlmHandler` captures
 /// `tokio::runtime::Handle::current()` at construction time.
 ///
-/// Ask (tag 8 on this 8-handler stack — see [`base_decls_with_ask`]) is
+/// Ask (tag 9 on this 9-handler stack — see [`base_decls_with_ask`]) is
 /// **not** included here; it is interposed by `tidepool_runtime::session`'s
 /// `SessionEngine`/`GateDispatcher` (see `TidepoolMcpServer::new`), not by a
 /// handler in this HList.
@@ -123,7 +126,7 @@ pub fn build_base_stack(
 }
 
 /// Build the debug effect stack: the same base effects as [`build_base_stack`]
-/// (tags 0–7) plus `MetaHandler` appended last (tag 8) — the `--debug`-only
+/// (tags 0–8) plus `MetaHandler` appended last (tag 9) — the `--debug`-only
 /// self-mirror. Mirrors `build_base_stack`'s callback exactly, so the two
 /// stacks can never desync on order; the ONLY difference is the trailing
 /// `MetaHandler::new(effect_names, helper_sigs)` row. Callers derive

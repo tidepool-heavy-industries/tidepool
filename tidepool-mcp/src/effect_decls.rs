@@ -249,6 +249,7 @@ crate::http_effect_def!(crate::effect_defs::effect_decl_projection);
 
 crate::git_effect_def!(crate::effect_defs::effect_decl_projection);
 crate::time_effect_def!(crate::effect_defs::effect_decl_projection);
+crate::entropy_effect_def!(crate::effect_defs::effect_decl_projection);
 crate::meta_effect_def!(crate::effect_defs::effect_decl_projection);
 crate::ask_effect_def!(crate::effect_defs::effect_decl_projection);
 

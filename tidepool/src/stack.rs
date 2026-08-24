@@ -110,6 +110,7 @@ mod tests {
         "Llm",
         "Git",
         "Time",
+        "Entropy",
         "Meta",
         "Ask",
         "RunLLMTurn",

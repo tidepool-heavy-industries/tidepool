@@ -52,6 +52,7 @@ macro_rules! base_effects {
             (Llm,     llm_decl),
             (Git,     git_decl),
             (Time,    time_decl),
+            (Entropy, entropy_decl),
         }
     };
 }
@@ -1190,9 +1191,9 @@ mod tests {
         // ForkWith/ForkAllWith (vestigial-subsystems review §4) — the
         // harness Agent turn's own roster (`agent_decls`) adds Fork on top
         // of this one explicitly.
-        assert_eq!(a[8], "Ask");
+        assert_eq!(a[9], "Ask");
         assert_eq!(a.last(), Some(&"RunLLMTurn"));
-        assert_eq!(a.len(), 10);
+        assert_eq!(a.len(), 11);
         // SG was cut (friction #37); the stack must NOT contain it.
         assert!(
             !a.contains(&"SG"),

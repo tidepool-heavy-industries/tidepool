@@ -1,5 +1,6 @@
 pub mod agent;
 pub mod console;
+pub mod entropy;
 pub mod event;
 pub mod exec;
 pub mod fs;
@@ -14,6 +15,7 @@ pub mod worktree;
 
 pub use agent::*;
 pub use console::*;
+pub use entropy::*;
 pub use event::*;
 pub use exec::*;
 pub use fs::*;
