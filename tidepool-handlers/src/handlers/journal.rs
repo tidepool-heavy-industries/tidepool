@@ -18,6 +18,9 @@ use tidepool_effect::dispatch::EffectContext;
 use tidepool_effect::error::EffectError;
 use tidepool_mcp::CapturedOutput;
 use tidepool_repr::jsonl::{self, SyncPolicy};
+use tidepool_repr::version_ladder::{self, LadderError};
+
+use super::journal_version::{self, MIGRATIONS};
 
 // JournalReq, DescribeEffect and the EffectHandler dispatch are GENERATED from
 // the `tidepool-protocol` schema (PRD 22 phase 2) — re-exported here so the
@@ -147,6 +150,20 @@ pub enum JournalLoadError {
         /// text.
         detail: String,
     },
+    /// This segment's version is below the floor this build still carries a
+    /// migration path from — never a silent reset. See
+    /// `plans/persistence-versioning-design.md` §6.
+    BelowFloor {
+        path: PathBuf,
+        found: u32,
+        floor: u32,
+    },
+    /// This segment's version is newer than this build knows how to read.
+    FutureVersion {
+        path: PathBuf,
+        found: u32,
+        current: u32,
+    },
 }
 
 impl fmt::Display for JournalLoadError {
@@ -163,8 +180,52 @@ impl fmt::Display for JournalLoadError {
                 f,
                 "journal {path:?} corrupted at line {line_no} (not the final line): {detail}"
             ),
+            JournalLoadError::BelowFloor { path, found, floor } => write!(
+                f,
+                "journal segment {path:?} version {found} is below the floor this build still \
+                 supports ({floor}) — archive or delete it and start a fresh run, or read it \
+                 with an older tidepool build that still supports version {found}"
+            ),
+            JournalLoadError::FutureVersion {
+                path,
+                found,
+                current,
+            } => write!(
+                f,
+                "journal segment {path:?} version {found} is newer than this build supports \
+                 (current {current}) — rebuild against a newer tidepool, or archive/delete the \
+                 segment and start fresh"
+            ),
         }
     }
+}
+
+fn ladder_err_to_load_err(e: LadderError, path: &Path) -> JournalLoadError {
+    match e {
+        LadderError::BelowFloor { found, floor } => JournalLoadError::BelowFloor {
+            path: path.to_path_buf(),
+            found,
+            floor,
+        },
+        LadderError::UnsupportedVersion { found, current } => JournalLoadError::FutureVersion {
+            path: path.to_path_buf(),
+            found,
+            current,
+        },
+        LadderError::Migration { from, source } => JournalLoadError::TornMidFile {
+            path: path.to_path_buf(),
+            line_no: 0,
+            detail: format!("migration from version {from} failed: {}", source.0),
+        },
+    }
+}
+
+/// Distinguishes the segment's version-stamp header line (`{"version": N}`,
+/// no `"kind"` key) from an ordinary [`JournalEntry`] row (always has
+/// `"kind"`). Only ever checked against the FIRST raw line — see
+/// [`load_journal`].
+fn is_segment_header(v: &serde_json::Value) -> bool {
+    v.get("kind").is_none() && v.get("version").is_some()
 }
 
 impl std::error::Error for JournalLoadError {}
@@ -178,16 +239,22 @@ impl std::error::Error for JournalLoadError {}
 pub fn load_journal(path: &Path) -> Result<Vec<JournalEntry>, JournalLoadError> {
     // `TailPolicy::Observe`: a fold reads SEGMENT files it does not own (see
     // `tidepool_harness::selfharness::resume`), so a torn tail is reported
-    // but never truncated — see `tidepool_repr::jsonl`'s module doc. This
-    // preserves the exact prior behavior (skip-in-memory, never touch disk).
-    let (entries, torn) = jsonl::read_tail(
+    // but never truncated — see `tidepool_repr::jsonl`'s module doc.
+    //
+    // Parsed as raw `Value` first, not directly into `JournalEntry`: a
+    // segment written by a stamping `JournalHandler` has a header line
+    // (`{"version": N}`) as line one that an OLDER segment (predating this
+    // scheme) never had — every line in a pre-scheme segment is a plain
+    // entry — and `read_tail`'s single `parse` closure has no way to know
+    // in advance which shape a given line is. A shape-level (valid JSON,
+    // wrong fields) failure on the true final line therefore no longer
+    // benefits from `read_tail`'s own torn-tail forgiveness — only
+    // JSON-syntax corruption does — the loop below restores that
+    // forgiveness itself, so the net behavior for a torn write is
+    // unchanged.
+    let (raw_lines, torn) = jsonl::read_tail(
         path,
-        |l| {
-            serde_json::from_str::<serde_json::Value>(l)
-                .map_err(JournalParseError::NotJson)
-                .and_then(|v| JournalEntry::from_json(&v))
-                .map_err(|e| e.to_string())
-        },
+        |l| serde_json::from_str::<serde_json::Value>(l).map_err(|e| e.to_string()),
         jsonl::TailPolicy::Observe,
     )
     .map_err(|e| match e {
@@ -201,12 +268,65 @@ pub fn load_journal(path: &Path) -> Result<Vec<JournalEntry>, JournalLoadError> 
             detail,
         },
     })?;
-    if let Some(torn) = torn {
+    if let Some(torn) = &torn {
         tracing::warn!(
             "journal {:?}: torn final line skipped (crash mid-append?): {}",
             path,
             torn.reason
         );
+    }
+
+    let (found, header_lines, rest): (u32, usize, &[serde_json::Value]) =
+        match raw_lines.split_first() {
+            Some((first, rest)) if is_segment_header(first) => {
+                (version_ladder::found_version(first), 1, rest)
+            }
+            // No header at all: a segment written before this scheme
+            // existed, where every line is a plain entry — the whole file
+            // reads as version 0.
+            _ => (0, 0, &raw_lines[..]),
+        };
+    // The header's own bounds must be validated even when the segment has
+    // zero entries after it yet.
+    version_ladder::migrate_to_current(
+        serde_json::Value::Null,
+        found,
+        journal_version::FLOOR,
+        journal_version::CURRENT,
+        MIGRATIONS,
+    )
+    .map_err(|e| ladder_err_to_load_err(e, path))?;
+
+    let n = rest.len();
+    let mut entries = Vec::with_capacity(n);
+    for (i, raw) in rest.iter().enumerate() {
+        let migrated = version_ladder::migrate_to_current(
+            raw.clone(),
+            found,
+            journal_version::FLOOR,
+            journal_version::CURRENT,
+            MIGRATIONS,
+        )
+        .map_err(|e| ladder_err_to_load_err(e, path))?;
+        match JournalEntry::from_json(&migrated) {
+            Ok(entry) => entries.push(entry),
+            Err(parse_err) => {
+                let is_final_and_untorn = i == n - 1 && torn.is_none();
+                if is_final_and_untorn {
+                    tracing::warn!(
+                        "journal {:?}: torn final line skipped (shape, crash mid-append?): {}",
+                        path,
+                        parse_err
+                    );
+                    break;
+                }
+                return Err(JournalLoadError::TornMidFile {
+                    path: path.to_path_buf(),
+                    line_no: header_lines + i + 1,
+                    detail: parse_err.to_string(),
+                });
+            }
+        }
     }
     Ok(entries)
 }
@@ -392,7 +512,7 @@ pub fn compose_journal_seq(segment_ordinal: u64, local_seq: u64) -> u64 {
     (segment_ordinal << LOCAL_SEQ_BITS) | local_seq
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct JournalHandler {
     path: PathBuf,
     // The segment ordinal every seq this handler writes is composed against
@@ -421,13 +541,12 @@ impl JournalHandler {
     /// always IS ordinal 0. A process continuing a run a prior process
     /// already wrote to must use [`Self::resuming`] instead, naming its OWN
     /// (necessarily different) segment ordinal.
-    pub fn new(path: SegmentPath) -> Self {
-        Self {
-            path: path.0,
-            segment_ordinal: 0,
-            local_seq: Arc::new(AtomicU64::new(0)),
-            lock: Arc::new(Mutex::new(())),
-        }
+    ///
+    /// Stamps the segment's version header as its first line — see
+    /// [`Self::stamp_header_if_fresh`]. Fallible for exactly that reason:
+    /// unlike before, construction now does real I/O.
+    pub fn new(path: SegmentPath) -> Result<Self, JournalAppendError> {
+        Self::construct(path, 0)
     }
 
     /// The RESUMED-run constructor: append to an existing journal, composing
@@ -440,13 +559,59 @@ impl JournalHandler {
     /// carries — the ordinal [`SegmentPath::create_exclusive`] claimed for
     /// this process's segment, never computed here. Opening in append mode
     /// is unchanged; nothing here reads or rewrites the file.
-    pub fn resuming(path: SegmentPath, segment_ordinal: u64) -> Self {
-        Self {
+    pub fn resuming(path: SegmentPath, segment_ordinal: u64) -> Result<Self, JournalAppendError> {
+        Self::construct(path, segment_ordinal)
+    }
+
+    fn construct(path: SegmentPath, segment_ordinal: u64) -> Result<Self, JournalAppendError> {
+        let handler = Self {
             path: path.0,
             segment_ordinal,
             local_seq: Arc::new(AtomicU64::new(0)),
             lock: Arc::new(Mutex::new(())),
+        };
+        handler.stamp_header_if_fresh()?;
+        Ok(handler)
+    }
+
+    fn ensure_parent_dir(&self) -> Result<(), JournalAppendError> {
+        if let Some(parent) = self.path.parent() {
+            if !parent.as_os_str().is_empty() {
+                std::fs::create_dir_all(parent).map_err(|source| {
+                    JournalAppendError::CreateDir {
+                        path: parent.to_path_buf(),
+                        source,
+                    }
+                })?;
+            }
         }
+        Ok(())
+    }
+
+    /// Write this segment's version-stamp header line — ONCE, at segment
+    /// birth. `SegmentPath::create_exclusive` guarantees the file this
+    /// handler owns is empty at construction time (an exclusive
+    /// `create_new` claim), so "is the file empty" is an exact proxy for
+    /// "is this handler the FIRST to ever construct over this path" — the
+    /// one case that legitimately skips the header is this crate's own test
+    /// escape hatch ([`SegmentPath::for_test`]) constructing a SECOND,
+    /// independent handler over a path a prior handler already wrote to
+    /// (never a real segment, which is always exclusively claimed).
+    fn stamp_header_if_fresh(&self) -> Result<(), JournalAppendError> {
+        self.ensure_parent_dir()?;
+        let is_fresh = std::fs::metadata(&self.path)
+            .map(|m| m.len() == 0)
+            .unwrap_or(true);
+        if !is_fresh {
+            return Ok(());
+        }
+        let header = serde_json::json!({"version": journal_version::CURRENT}).to_string();
+        jsonl::append_new_line(&self.path, &header, SyncPolicy::Data).map_err(|source| {
+            JournalAppendError::Write {
+                path: self.path.clone(),
+                source,
+            }
+        })
     }
 
     /// Append one entry, DURABLY, before returning. Parent directories are
@@ -480,16 +645,7 @@ impl JournalHandler {
         key: String,
         payload: serde_json::Value,
     ) -> Result<(), JournalAppendError> {
-        if let Some(parent) = self.path.parent() {
-            if !parent.as_os_str().is_empty() {
-                std::fs::create_dir_all(parent).map_err(|source| {
-                    JournalAppendError::CreateDir {
-                        path: parent.to_path_buf(),
-                        source,
-                    }
-                })?;
-            }
-        }
+        self.ensure_parent_dir()?;
         let _guard = self.lock.lock();
         let local = self.local_seq.fetch_add(1, Ordering::SeqCst);
         let seq = compose_journal_seq(self.segment_ordinal, local);
@@ -618,7 +774,8 @@ mod tests {
     fn append_then_fold_roundtrips() {
         let path = tmp_file("roundtrip");
         let _ = std::fs::remove_file(&path);
-        let h = JournalHandler::new(SegmentPath::for_test(path.clone()));
+        let h = JournalHandler::new(SegmentPath::for_test(path.clone()))
+            .expect("fresh segment header stamp succeeds");
 
         h.append(
             "split".into(),
@@ -649,7 +806,8 @@ mod tests {
     fn seq_is_monotonic() {
         let path = tmp_file("seq");
         let _ = std::fs::remove_file(&path);
-        let h = JournalHandler::new(SegmentPath::for_test(path.clone()));
+        let h = JournalHandler::new(SegmentPath::for_test(path.clone()))
+            .expect("fresh segment header stamp succeeds");
 
         for i in 0..5 {
             h.append("k".into(), format!("key{i}"), serde_json::json!(i))
@@ -667,20 +825,22 @@ mod tests {
     fn torn_last_line_skipped_with_warning() {
         let path = tmp_file("torn");
         let _ = std::fs::remove_file(&path);
-        let h = JournalHandler::new(SegmentPath::for_test(path.clone()));
+        let h = JournalHandler::new(SegmentPath::for_test(path.clone()))
+            .expect("fresh segment header stamp succeeds");
         h.append("split".into(), "a".into(), serde_json::json!(1))
             .unwrap();
         h.append("split".into(), "b".into(), serde_json::json!(2))
             .unwrap();
 
-        // Simulate a crash mid-append: keep the well-formed first line but
-        // truncate the second partway through, as a torn write would leave it.
+        // Simulate a crash mid-append: keep the well-formed header + first
+        // entry line, but truncate the second entry partway through, as a
+        // torn write would leave it.
         let contents = std::fs::read_to_string(&path).unwrap();
-        let first_newline = contents.find('\n').unwrap();
+        let second_newline = contents.match_indices('\n').nth(1).unwrap().0;
         let torn = format!(
             "{}\n{}",
-            &contents[..first_newline],
-            &contents[first_newline + 1..first_newline + 5]
+            &contents[..second_newline],
+            &contents[second_newline + 1..second_newline + 5]
         );
         std::fs::write(&path, torn).unwrap();
 
@@ -726,7 +886,8 @@ mod tests {
     fn by_key_helper_returns_last_record_per_key() {
         let path = tmp_file("bykey");
         let _ = std::fs::remove_file(&path);
-        let h = JournalHandler::new(SegmentPath::for_test(path.clone()));
+        let h = JournalHandler::new(SegmentPath::for_test(path.clone()))
+            .expect("fresh segment header stamp succeeds");
         h.append("split".into(), "branch/a".into(), serde_json::json!(1))
             .unwrap();
         h.append("outcome".into(), "branch/a".into(), serde_json::json!(2))
@@ -844,14 +1005,16 @@ mod tests {
         let path = tmp_file("resuming");
         let _ = std::fs::remove_file(&path);
 
-        let first = JournalHandler::new(SegmentPath::for_test(path.clone()));
+        let first = JournalHandler::new(SegmentPath::for_test(path.clone()))
+            .expect("fresh segment header stamp succeeds");
         for i in 0..3 {
             first
                 .append("split".into(), format!("k{i}"), serde_json::json!(i))
                 .unwrap();
         }
 
-        let second = JournalHandler::resuming(SegmentPath::for_test(path.clone()), 1);
+        let second = JournalHandler::resuming(SegmentPath::for_test(path.clone()), 1)
+            .expect("fresh segment header stamp succeeds");
         for i in 3..6 {
             second
                 .append("split".into(), format!("k{i}"), serde_json::json!(i))
@@ -895,7 +1058,8 @@ mod tests {
         let _ = std::fs::remove_file(&seg0);
         let _ = std::fs::remove_file(&seg1);
 
-        let first = JournalHandler::new(SegmentPath::for_test(seg0.clone()));
+        let first = JournalHandler::new(SegmentPath::for_test(seg0.clone()))
+            .expect("fresh segment header stamp succeeds");
         for i in 0..3 {
             first
                 .append("step".into(), format!("k{i}"), serde_json::json!(i))
@@ -903,7 +1067,8 @@ mod tests {
         }
         let seg0_entries = load_journal(&seg0).unwrap();
 
-        let second = JournalHandler::resuming(SegmentPath::for_test(seg1.clone()), 1);
+        let second = JournalHandler::resuming(SegmentPath::for_test(seg1.clone()), 1)
+            .expect("fresh segment header stamp succeeds");
         for i in 3..6 {
             second
                 .append("step".into(), format!("k{i}"), serde_json::json!(i))
@@ -960,8 +1125,10 @@ mod tests {
         // condition (two resumes of one extant lease) the bug reproduced
         // under, seeded here by each simply starting its own local counter
         // at 0, which `resuming` always does regardless of what came before.
-        let handler_a = JournalHandler::resuming(SegmentPath::for_test(seg_a.clone()), 5);
-        let handler_b = JournalHandler::resuming(SegmentPath::for_test(seg_b.clone()), 6);
+        let handler_a = JournalHandler::resuming(SegmentPath::for_test(seg_a.clone()), 5)
+            .expect("fresh segment header stamp succeeds");
+        let handler_b = JournalHandler::resuming(SegmentPath::for_test(seg_b.clone()), 6)
+            .expect("fresh segment header stamp succeeds");
 
         for i in 0..4 {
             handler_a
@@ -1009,7 +1176,8 @@ mod tests {
         let base = tmp_dir("parentdir");
         let _ = std::fs::remove_dir_all(&base);
         let path = base.join("nested").join("run.jsonl");
-        let h = JournalHandler::new(SegmentPath::for_test(path.clone()));
+        let h = JournalHandler::new(SegmentPath::for_test(path.clone()))
+            .expect("fresh segment header stamp succeeds");
 
         h.append("split".into(), "a".into(), serde_json::json!(1))
             .unwrap();
@@ -1035,10 +1203,9 @@ mod tests {
         let blocker = base.join("blocker");
         std::fs::write(&blocker, b"not a directory").unwrap();
         let path = blocker.join("journal.jsonl");
-        let h = JournalHandler::new(SegmentPath::for_test(path));
-
-        let err = h
-            .append("k".into(), "a".into(), serde_json::json!(1))
+        // Construction itself now does the mkdir-p (to stamp the segment
+        // header), so the failure surfaces here, not at a later `append`.
+        let err = JournalHandler::new(SegmentPath::for_test(path))
             .expect_err("a file in place of the parent directory must fail create_dir_all");
 
         assert!(
@@ -1060,6 +1227,68 @@ mod tests {
         assert_eq!(load_journal(&path).unwrap(), vec![]);
     }
 
+    /// A fresh segment's first line is a version-stamped header.
+    #[test]
+    fn fresh_segment_gets_a_header_line() {
+        let path = tmp_file("header");
+        let _ = std::fs::remove_file(&path);
+        let h = JournalHandler::new(SegmentPath::for_test(path.clone()))
+            .expect("fresh segment header stamp succeeds");
+        h.append("split".into(), "a".into(), serde_json::json!(1))
+            .unwrap();
+
+        let contents = std::fs::read_to_string(&path).unwrap();
+        let first_line = contents.lines().next().unwrap();
+        let header: serde_json::Value = serde_json::from_str(first_line).unwrap();
+        assert_eq!(
+            header,
+            serde_json::json!({"version": journal_version::CURRENT})
+        );
+        // The header doesn't count as an entry.
+        assert_eq!(load_journal(&path).unwrap().len(), 1);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// A legacy segment (written before this scheme existed — no header
+    /// line at all, every line a plain entry) must still load, reading as
+    /// version 0 and migrating through the identity step.
+    #[test]
+    fn unstamped_legacy_segment_still_loads() {
+        let path = tmp_file("legacy_segment");
+        let _ = std::fs::remove_file(&path);
+        let entry = JournalEntry {
+            seq: 0,
+            kind: "split".into(),
+            key: "a".into(),
+            payload: serde_json::json!(1),
+        };
+        std::fs::write(
+            &path,
+            format!("{}\n", serde_json::to_string(&entry.to_json()).unwrap()),
+        )
+        .unwrap();
+
+        let entries = load_journal(&path).expect("legacy unstamped segment must load");
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].key, "a");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// A version newer than this build supports is a loud, typed refusal.
+    #[test]
+    fn future_segment_version_is_a_typed_rejection() {
+        let path = tmp_file("future_version");
+        let _ = std::fs::remove_file(&path);
+        std::fs::write(&path, "{\"version\":9999}\n").unwrap();
+
+        let err = load_journal(&path).expect_err("a future version must be refused");
+        assert!(
+            matches!(err, JournalLoadError::FutureVersion { found: 9999, .. }),
+            "expected FutureVersion, got {err:?}"
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
     /// A multi-threaded burst of records through CLONED handlers (sharing the
     /// same seq counter, the same append lock, and the same path) must never
     /// tear a line. This does NOT rest on `write_all`/`O_APPEND` syscall
@@ -1072,7 +1301,8 @@ mod tests {
     fn concurrent_burst_through_cloned_handlers_yields_no_torn_lines() {
         let path = tmp_file("concurrent_burst");
         let _ = std::fs::remove_file(&path);
-        let handler = JournalHandler::new(SegmentPath::for_test(path.clone()));
+        let handler = JournalHandler::new(SegmentPath::for_test(path.clone()))
+            .expect("fresh segment header stamp succeeds");
 
         const THREADS: usize = 8;
         const PER_THREAD: usize = 50;

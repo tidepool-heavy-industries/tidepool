@@ -150,7 +150,8 @@ async fn outer_loop_effects_round_trip_through_the_driver() {
     let journal_handler = JournalHandler::new(
         SegmentPath::create_exclusive(journal_path.clone())
             .expect("journal path just cleared above — exclusive claim must succeed"),
-    );
+    )
+    .expect("fresh segment header stamp succeeds");
 
     driver.set_console_handler(ConsoleHandler);
     driver.set_worktree_handler(worktree_handler);

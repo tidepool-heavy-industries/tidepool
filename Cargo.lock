@@ -4187,6 +4187,7 @@ dependencies = [
  "ciborium",
  "proptest",
  "rustc-hash",
+ "serde_json",
  "serial_test",
  "thiserror",
  "tidepool-testing",

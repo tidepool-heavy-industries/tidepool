@@ -25,6 +25,7 @@ use crate::snapshot::SnapshotDigest;
 use crate::tree::{FanBadge, HoleId, NodeId, PriceClass, SiteId};
 
 mod reader;
+mod version;
 mod writer;
 
 #[cfg(test)]

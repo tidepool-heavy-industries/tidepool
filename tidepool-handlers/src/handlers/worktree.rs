@@ -198,11 +198,42 @@ fn merge_outcome_to_wire(o: MergeOutcome) -> WtMergeOutcome {
 }
 
 /// Total map from the domain `WorktreeError` (`tidepool-worktree/src/error.rs`)
-/// to the wire `WorktreeError` (generated from the schema's `errors` block) — ten variants on both sides. No wildcard arm below, so a domain
-/// variant added without a wire counterpart fails this match's exhaustiveness
-/// check at compile time.
+/// to the wire `WorktreeError` (generated from the schema's `errors` block) —
+/// ten variants on the wire side, twelve on the domain side. No wildcard arm
+/// below, so a domain variant added without an explicit wire mapping fails
+/// this match's exhaustiveness check at compile time — but the two
+/// persistence-versioning variants (`JournalBelowFloor`/`JournalFutureVersion`,
+/// added by #21) fold onto the existing wire `StorageFailure` rather than
+/// widening the schema: the schema's `errors` block is generated Haskell-visible
+/// surface (`tidepool-protocol`, regenerated through the GHC toolchain), out
+/// of this lane's boundary, and a below-floor/future-version journal read is
+/// exactly the same kind of fact `StorageFailure` already carries — "Tidepool's
+/// own durable storage failed" — just with a richer, typed Rust-side reason
+/// than the wire's plain `(path, detail)` pair distinguishes.
 pub(crate) fn error_to_wire(e: DomainWorktreeError) -> WorktreeError {
     match e {
+        DomainWorktreeError::JournalBelowFloor { path, found, floor } => {
+            WorktreeError::StorageFailure(
+                path.to_string_lossy().into_owned(),
+                format!(
+                    "event journal version {found} is below the floor this build still supports \
+                 ({floor}) — archive or delete it and start a fresh journal, or read it with an \
+                 older tidepool build that still supports version {found}"
+                ),
+            )
+        }
+        DomainWorktreeError::JournalFutureVersion {
+            path,
+            found,
+            current,
+        } => WorktreeError::StorageFailure(
+            path.to_string_lossy().into_owned(),
+            format!(
+                "event journal version {found} is newer than this build supports (current \
+                 {current}) — rebuild against a newer tidepool, or archive/delete the journal \
+                 and start fresh"
+            ),
+        ),
         DomainWorktreeError::SourceDirty(d) => {
             WorktreeError::SourceDirty(dirty_summary_to_wire(&d))
         }
@@ -663,6 +694,41 @@ mod tests {
 
         for (label, domain, expected) in cases {
             assert_eq!(error_to_wire(domain), expected, "case: {label}");
+        }
+    }
+
+    /// Persistence versioning (#21)'s two journal-version domain variants
+    /// fold onto the wire's existing `StorageFailure` — see `error_to_wire`'s
+    /// own doc for why they don't widen the (Haskell-visible, generated)
+    /// wire schema. Not in the table above only because their expected
+    /// wire message is built from a `format!`, not a literal.
+    #[test]
+    fn journal_version_errors_fold_onto_wire_storage_failure() {
+        let below = error_to_wire(DomainWorktreeError::JournalBelowFloor {
+            path: PathBuf::from("/run/segment-0.jsonl"),
+            found: 0,
+            floor: 1,
+        });
+        match below {
+            WorktreeError::StorageFailure(path, detail) => {
+                assert_eq!(path, "/run/segment-0.jsonl");
+                assert!(detail.contains('0'), "{detail}");
+                assert!(detail.contains('1'), "{detail}");
+            }
+            other => panic!("expected StorageFailure, got {other:?}"),
+        }
+
+        let future = error_to_wire(DomainWorktreeError::JournalFutureVersion {
+            path: PathBuf::from("/run/segment-0.jsonl"),
+            found: 9999,
+            current: 1,
+        });
+        match future {
+            WorktreeError::StorageFailure(path, detail) => {
+                assert_eq!(path, "/run/segment-0.jsonl");
+                assert!(detail.contains("9999"), "{detail}");
+            }
+            other => panic!("expected StorageFailure, got {other:?}"),
         }
     }
 

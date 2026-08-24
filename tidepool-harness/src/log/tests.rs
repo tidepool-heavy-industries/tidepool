@@ -251,6 +251,54 @@ fn torn_final_line_reads_cleanly_to_last_whole_event() {
     }
 }
 
+/// An unstamped log (written before this scheme existed — no `"version"`
+/// key on the header line at all) must still load, reading as version `0`
+/// and migrating through the identity `0 -> 1` step — the entire point of
+/// the persistence-versioning design (`plans/persistence-versioning-design.md`
+/// §6/constraints): an existing operator log is never bricked by landing
+/// the stamp.
+#[test]
+fn unstamped_legacy_header_still_loads_as_version_zero() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("run.jsonl");
+
+    let header = sample_header();
+    let header_line = serde_json::to_string(&header).unwrap();
+    let event = Event::NodeDone {
+        node: NodeId(1),
+        result_rendered: "42".to_string(),
+    };
+    let record_line = serde_json::to_string(&EventRecord { seq: 0, event }).unwrap();
+    std::fs::write(&path, format!("{header_line}\n{record_line}\n")).unwrap();
+
+    let (read_header, iter) = LogReader::open(&path).expect("legacy unstamped log must load");
+    assert_eq!(read_header, header);
+    let records: Vec<EventRecord> = iter.collect::<Result<_, _>>().expect("read event");
+    assert_eq!(records.len(), 1);
+}
+
+/// A version newer than this build supports is a loud, typed refusal — never
+/// a silent best-effort read.
+#[test]
+fn future_version_header_is_a_typed_rejection() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("run.jsonl");
+
+    let header = sample_header();
+    let mut header_value = serde_json::to_value(&header).unwrap();
+    header_value
+        .as_object_mut()
+        .unwrap()
+        .insert("version".to_string(), json!(9999));
+    std::fs::write(&path, format!("{header_value}\n")).unwrap();
+
+    let err = LogReader::open(&path).expect_err("a future version must be refused");
+    assert!(
+        matches!(err, ReadError::FutureVersion { found: 9999, .. }),
+        "expected FutureVersion, got {err:?}"
+    );
+}
+
 #[test]
 fn corrupt_middle_line_is_a_read_error_not_silent_truncation() {
     let dir = tempfile::tempdir().unwrap();
@@ -277,14 +325,15 @@ fn corrupt_middle_line_is_a_read_error_not_silent_truncation() {
     rewritten.push('\n');
     std::fs::write(&path, rewritten).unwrap();
 
-    let (_, iter) = LogReader::open(&path).expect("open log");
-    let result: Result<Vec<EventRecord>, ReadError> = iter.collect();
-    match result {
-        Err(ReadError::Parse(_)) => {}
-        Err(other) => panic!("expected ReadError::Parse, got {other:?}"),
-        Ok(records) => panic!(
-            "corrupt middle record must not silently truncate the fold; got {} records",
-            records.len()
-        ),
+    // Folding onto `jsonl::read_tail` (which reads the whole file up front,
+    // since a version stamp is a whole-file property) means a mid-file
+    // corruption is now caught EAGERLY, at `open()` — not lazily, partway
+    // through iteration, the way the old hand-rolled `BufReader` reader
+    // surfaced it. Fail-fast-at-open is strictly the better contract; this
+    // pins the new one.
+    match LogReader::open(&path) {
+        Err(ReadError::TornMidFile { .. }) => {}
+        Err(other) => panic!("expected ReadError::TornMidFile, got {other:?}"),
+        Ok(_) => panic!("corrupt middle record must not silently truncate the fold"),
     }
 }

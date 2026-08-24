@@ -93,6 +93,35 @@ pub enum WorktreeError {
     /// the failure is diagnosable without re-running anything.
     #[error("git failed: {0}")]
     GitFailure(GitFailureReceipt),
+
+    /// The event journal at `path` is below the floor this build still
+    /// carries a migration path from — never a silent reset. See
+    /// `plans/persistence-versioning-design.md` §6.
+    #[error(
+        "event journal {} version {found} is below the floor this build still supports \
+         ({floor}) — archive or delete it and start a fresh journal, or read it with an older \
+         tidepool build that still supports version {found}",
+        .path.display()
+    )]
+    JournalBelowFloor {
+        path: PathBuf,
+        found: u32,
+        floor: u32,
+    },
+
+    /// The event journal at `path` is newer than this build knows how to
+    /// read.
+    #[error(
+        "event journal {} version {found} is newer than this build supports (current \
+         {current}) — rebuild against a newer tidepool, or archive/delete the journal and start \
+         fresh",
+        .path.display()
+    )]
+    JournalFutureVersion {
+        path: PathBuf,
+        found: u32,
+        current: u32,
+    },
 }
 
 /// Which in-progress operation blocked the source. Distinguished rather than

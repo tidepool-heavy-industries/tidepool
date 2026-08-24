@@ -368,15 +368,16 @@ fn journal_malformed_middle_row_fails_loudly_rather_than_being_skipped() {
     journal.append(&ev, EventId(1)).expect("append 1");
     journal.append(&ev, EventId(2)).expect("append 2");
 
-    // Corrupt the FIRST row, leaving the second intact after it.
+    // Corrupt the first EVENT row (line 1 is the version-stamp header;
+    // line 2 is the first entry), leaving the second entry intact after it.
     let text = fs::read_to_string(&path).expect("read journal");
     let mut lines: Vec<String> = text.lines().map(str::to_string).collect();
     assert_eq!(
         lines.len(),
-        2,
-        "fixture must have two rows to corrupt a middle one"
+        3,
+        "fixture must have a header plus two rows to corrupt a middle one"
     );
-    lines[0] = "{ this is not valid json".to_string();
+    lines[1] = "{ this is not valid json".to_string();
     fs::write(&path, format!("{}\n", lines.join("\n"))).expect("write corrupted journal");
 
     match EventJournal::open(&path) {

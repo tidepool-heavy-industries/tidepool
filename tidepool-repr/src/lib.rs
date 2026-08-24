@@ -23,6 +23,7 @@ pub mod tree;
 pub mod trivial_field;
 pub mod types;
 pub mod varid_check;
+pub mod version_ladder;
 
 pub use builder::TreeBuilder;
 pub use datacon::*;

@@ -27,6 +27,7 @@ pub mod error;
 pub mod git;
 pub mod id;
 pub mod journal;
+mod journal_version;
 pub mod label;
 pub mod merge;
 pub mod monitor;

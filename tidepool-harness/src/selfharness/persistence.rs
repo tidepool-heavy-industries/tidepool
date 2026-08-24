@@ -32,8 +32,85 @@ use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use serde_json::Value as Json;
 use tidepool_repr::jsonl::{self, SyncPolicy};
+use tidepool_repr::version_ladder::{self, LadderError, Migration, MigrationError};
 
 use super::observer::{Event, Observer};
+
+/// [`Checkpoint`]'s own envelope version — kind 1 of
+/// `plans/persistence-versioning-design.md`'s six persistence-versioning
+/// kinds. Governs every top-level `Checkpoint` field EXCEPT `state`, which
+/// carries its own independent counter (see [`STATE_CURRENT`]) since it is
+/// opaque, harness-authored JSON this crate never interprets.
+pub const ENVELOPE_CURRENT: u32 = 1;
+/// The oldest envelope version this build still loads. `0` — a checkpoint
+/// written before this scheme existed, carrying no `"version"` key at all —
+/// stays accepted so an existing operator's `checkpoint.json` keeps
+/// loading; see `persistence-versioning-design.md` §6 for when this is ever
+/// raised.
+pub const ENVELOPE_FLOOR: u32 = 0;
+
+fn envelope_v0_to_v1(v: Json) -> Result<Json, MigrationError> {
+    // Purely additive: `0` and `1` are the same envelope shape, this step
+    // only makes the version explicit (the unstamped-file convention —
+    // see `tidepool_repr::version_ladder`'s module doc).
+    Ok(version_ladder::set_version(v, 1))
+}
+
+/// Indexed from [`ENVELOPE_FLOOR`].
+const ENVELOPE_MIGRATIONS: &[Migration] = &[envelope_v0_to_v1];
+
+/// The `state` blob's own version — kind 2 ("per-harness `State` blob") of
+/// the six persistence-versioning kinds, per Open Question 1's answer
+/// (Rust-side JSON surgery, kept deliberately minimal per the operator's
+/// caveat that `State`'s own longevity is uncertain): ONE flat ladder
+/// shared across every harness, not a per-harness-fingerprint registry.
+/// Lives as a SIBLING envelope field (`state_version`, never a key inside
+/// `state` itself) — `state` stays exactly what a harness's own Haskell
+/// `State` type produced, with no reserved key this crate imposes on every
+/// harness author.
+pub const STATE_CURRENT: u32 = 1;
+/// See [`ENVELOPE_FLOOR`]'s doc — same unstamped-file convention, scoped to
+/// `state` instead of the envelope.
+pub const STATE_FLOOR: u32 = 0;
+
+fn state_v0_to_v1(v: Json) -> Result<Json, MigrationError> {
+    // No real migration exists yet (see this module's doc and
+    // `persistence-versioning-design.md` §5's rollout order: the stamp
+    // lands with the ladder wired but empty). `state_version` — not a key
+    // inside `state` — is what records that this blob has passed through
+    // the (identity) `0 -> 1` step; see `load_checkpoint`.
+    Ok(v)
+}
+
+/// Indexed from [`STATE_FLOOR`].
+const STATE_MIGRATIONS: &[Migration] = &[state_v0_to_v1];
+
+fn ladder_err_to_persistence_err(
+    e: LadderError,
+    path: &Path,
+    of: &'static str,
+) -> PersistenceError {
+    match e {
+        LadderError::BelowFloor { found, floor } => PersistenceError::BelowFloor {
+            path: path.to_path_buf(),
+            of,
+            found,
+            floor,
+        },
+        LadderError::UnsupportedVersion { found, current } => PersistenceError::FutureVersion {
+            path: path.to_path_buf(),
+            of,
+            found,
+            current,
+        },
+        LadderError::Migration { from, source } => PersistenceError::Migration {
+            path: path.to_path_buf(),
+            of,
+            from,
+            detail: source.0,
+        },
+    }
+}
 
 /// A checkpoint's monotonic generation. `0` never appears on disk — the first
 /// commit is generation `1` — so this wraps [`NonZeroU64`] rather than a plain
@@ -127,6 +204,47 @@ pub enum PersistenceError {
          run; otherwise stop that process first."
     )]
     LiveLeaseHeld { run_id: String, pid: u32 },
+
+    /// `of`'s version is below the floor this build still carries a
+    /// migration path from — never a silent reset. `of` names which of
+    /// [`Checkpoint`]'s two independent counters (`"envelope"` or
+    /// `"state"`, see [`ENVELOPE_CURRENT`]/[`STATE_CURRENT`]) rejected the
+    /// read. Mirrors `PersistenceError::LiveLeaseHeld`'s style: a full
+    /// paragraph naming the exact path and the two real remedies, not a
+    /// terse code (`persistence-versioning-design.md` §6).
+    #[error(
+        "checkpoint {path:?} {of} version {found} is below the floor this build still supports \
+         ({floor}) — archive or delete the checkpoint and start a fresh run, or restore it with \
+         an older tidepool build that still supports {of} version {found}."
+    )]
+    BelowFloor {
+        path: PathBuf,
+        of: &'static str,
+        found: u32,
+        floor: u32,
+    },
+
+    /// `of`'s version is newer than this build knows how to read.
+    #[error(
+        "checkpoint {path:?} {of} version {found} is newer than this build supports (current \
+         {current}) — rebuild against a newer tidepool, or archive/delete the checkpoint and \
+         start a fresh run."
+    )]
+    FutureVersion {
+        path: PathBuf,
+        of: &'static str,
+        found: u32,
+        current: u32,
+    },
+
+    /// A migration step itself failed.
+    #[error("checkpoint {path:?} {of} migration from version {from} failed: {detail}")]
+    Migration {
+        path: PathBuf,
+        of: &'static str,
+        from: u32,
+        detail: String,
+    },
 }
 
 /// The one durable record a restart reads: a completed cycle's `State`,
@@ -147,12 +265,26 @@ pub enum PersistenceError {
 /// nothing about them is interchangeable with a counter.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Checkpoint {
+    /// The envelope's own version — see [`ENVELOPE_CURRENT`]. `#[serde(default)]`:
+    /// an unstamped checkpoint (written before this scheme existed) has no
+    /// such key at all and decodes as `0`, the unstamped-file convention
+    /// [`tidepool_repr::version_ladder`] documents. [`load_checkpoint`]
+    /// always migrates to [`ENVELOPE_CURRENT`] before decoding into this
+    /// struct, so in practice this field is always [`ENVELOPE_CURRENT`] on
+    /// anything that made it this far — it is not itself the gate.
+    #[serde(default)]
+    pub version: u32,
     /// Monotonic, incremented by one per committed cycle. `0` never appears
     /// on disk — the first commit is generation `1`.
     generation: CheckpointGeneration,
     /// The loop-boundary `State` json this generation's cycle produced
     /// ([`crate::selfharness::state_cross::state_out`]).
     pub state: Json,
+    /// `state`'s own independent version — see [`STATE_CURRENT`]'s doc for
+    /// why this is a sibling field rather than a key inside `state` itself.
+    /// Same `#[serde(default)]`/unstamped-file convention as `version`.
+    #[serde(default)]
+    pub state_version: u32,
     /// The compaction summary in force when this generation committed —
     /// `None` if no compaction has fired yet at any point up to and
     /// including this cycle.
@@ -229,8 +361,10 @@ impl Checkpoint {
         iteration: LoopIteration,
     ) -> Self {
         Checkpoint {
+            version: ENVELOPE_CURRENT,
             generation: previous.map_or(CheckpointGeneration::FIRST, CheckpointGeneration::next),
             state,
+            state_version: STATE_CURRENT,
             compaction,
             harness_source,
             iteration,
@@ -318,7 +452,44 @@ pub fn load_checkpoint(path: &Path) -> Result<Option<Checkpoint>, PersistenceErr
             })
         }
     };
-    let checkpoint = serde_json::from_slice(&bytes).map_err(|source| PersistenceError::Json {
+    let mut value: Json =
+        serde_json::from_slice(&bytes).map_err(|source| PersistenceError::Json {
+            path: path.to_path_buf(),
+            source,
+        })?;
+
+    let envelope_found = version_ladder::found_version(&value);
+    value = version_ladder::migrate_to_current(
+        value,
+        envelope_found,
+        ENVELOPE_FLOOR,
+        ENVELOPE_CURRENT,
+        ENVELOPE_MIGRATIONS,
+    )
+    .map_err(|e| ladder_err_to_persistence_err(e, path, "envelope"))?;
+
+    // `state`'s own version is a SIBLING envelope field (`state_version`),
+    // never a key inside `state` itself — see `STATE_CURRENT`'s doc.
+    let state_found = value
+        .get("state_version")
+        .and_then(Json::as_u64)
+        .and_then(|v| u32::try_from(v).ok())
+        .unwrap_or(0);
+    let state_value = value.get("state").cloned().unwrap_or(Json::Null);
+    let migrated_state = version_ladder::migrate_to_current(
+        state_value,
+        state_found,
+        STATE_FLOOR,
+        STATE_CURRENT,
+        STATE_MIGRATIONS,
+    )
+    .map_err(|e| ladder_err_to_persistence_err(e, path, "state"))?;
+    if let Some(obj) = value.as_object_mut() {
+        obj.insert("state".to_string(), migrated_state);
+        obj.insert("state_version".to_string(), Json::from(STATE_CURRENT));
+    }
+
+    let checkpoint = serde_json::from_value(value).map_err(|source| PersistenceError::Json {
         path: path.to_path_buf(),
         source,
     })?;
@@ -359,9 +530,26 @@ pub struct JsonlObserver {
     path: PathBuf,
 }
 
+/// This transcript's version — kind 6 of
+/// `plans/persistence-versioning-design.md`'s six persistence-versioning
+/// kinds, the lowest-risk of the four JSONL consumers (§2): the stream is
+/// explicitly best-effort ([`SyncPolicy::None`]) and, as of this writing,
+/// has no first-party reader anywhere in this codebase to break — nothing
+/// GATES on this version yet, only [`JsonlObserver::create`] stamps it.
+/// [`read_transcript_header`] exists to give the old-corpus replay test
+/// (`persistence-versioning-design.md` §4) something real to read, ahead of
+/// whatever the first production reader turns out to need.
+pub const TRANSCRIPT_CURRENT: u32 = 1;
+
 impl JsonlObserver {
     /// Open (creating if absent, appending if present) the jsonl transcript
-    /// at `path`, creating its containing directory if needed.
+    /// at `path`, creating its containing directory if needed. A FRESH file
+    /// (the common case: one per selfharness run) gets a version-stamped
+    /// header as its first line; a reopened, already-populated file (a
+    /// restart resuming the SAME transcript, per this type's own doc) is
+    /// left exactly as found — the header is written once, at file birth,
+    /// the same discipline `LogWriter::create`/`EventJournal::open` use for
+    /// their own header/first lines.
     pub fn create(path: &Path) -> Result<Self, PersistenceError> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).map_err(|source| PersistenceError::Io {
@@ -369,7 +557,8 @@ impl JsonlObserver {
                 source,
             })?;
         }
-        let file = std::fs::OpenOptions::new()
+        let is_fresh = !path.exists();
+        let mut file = std::fs::OpenOptions::new()
             .create(true)
             .append(true)
             .open(path)
@@ -377,11 +566,47 @@ impl JsonlObserver {
                 path: path.to_path_buf(),
                 source,
             })?;
+        if is_fresh {
+            let header = serde_json::json!({"version": TRANSCRIPT_CURRENT}).to_string();
+            jsonl::write_line(&mut file, &header, SyncPolicy::None).map_err(|source| {
+                PersistenceError::Io {
+                    path: path.to_path_buf(),
+                    source,
+                }
+            })?;
+        }
         Ok(Self {
             file: Mutex::new(file),
             path: path.to_path_buf(),
         })
     }
+}
+
+/// Read a transcript's header line and return its stamped version — `0`
+/// when the file is empty or its first line carries no `"version"` key at
+/// all (an unstamped, pre-versioning transcript). Not consumed by any
+/// production code path yet — see [`TRANSCRIPT_CURRENT`]'s doc — this
+/// exists for the old-corpus replay test.
+pub fn read_transcript_header(path: &Path) -> Result<u32, PersistenceError> {
+    let bytes = match std::fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+        Err(source) => {
+            return Err(PersistenceError::Io {
+                path: path.to_path_buf(),
+                source,
+            })
+        }
+    };
+    let text = String::from_utf8_lossy(&bytes);
+    let Some(first_line) = text.lines().next() else {
+        return Ok(0);
+    };
+    let value: Json = match serde_json::from_str(first_line) {
+        Ok(v) => v,
+        Err(_) => return Ok(0),
+    };
+    Ok(version_ladder::found_version(&value))
 }
 
 impl Observer for JsonlObserver {
@@ -428,10 +653,12 @@ mod tests {
 
     fn checkpoint(generation: u64) -> Checkpoint {
         Checkpoint {
+            version: ENVELOPE_CURRENT,
             generation: CheckpointGeneration(
                 NonZeroU64::new(generation).expect("nonzero in tests"),
             ),
             state: serde_json::json!({"mode": "Deciding"}),
+            state_version: STATE_CURRENT,
             compaction: Some("a summary".to_string()),
             harness_source: "fingerprint-abc".to_string(),
             iteration: LoopIteration(generation),
@@ -445,17 +672,22 @@ mod tests {
     /// replaced. Pinned literally — this is what
     /// `Checkpoint { generation: u64, ..., iteration: u64 }` produced before
     /// either newtype existed; if `#[serde(transparent)]` ever stops being
-    /// transparent, this is the test that notices.
+    /// transparent, this is the test that notices. The `version`/
+    /// `state_version` keys are the ONE deliberate, documented wire-shape
+    /// change this pin now carries — persistence versioning (#21) replaces
+    /// the prior social wire-freeze with a mechanism, so a NEWLY-WRITTEN
+    /// checkpoint always stamps both; see the (unmodified) legacy-decode
+    /// tests below for the complementary promise that an OLD, unstamped
+    /// checkpoint still loads.
     #[test]
     fn wire_bytes_are_unchanged_by_the_typed_generation_and_iteration() {
         let cp = checkpoint(3);
         let json = serde_json::to_string(&cp).expect("serialize");
         assert_eq!(
             json,
-            r#"{"generation":3,"state":{"mode":"Deciding"},"compaction":"a summary","harness_source":"fingerprint-abc","iteration":3}"#,
-            "Checkpoint's wire shape drifted from the plain-u64 version — field \
-             names, field order, or the numeric encoding of generation/iteration \
-             changed"
+            r#"{"version":1,"generation":3,"state":{"mode":"Deciding"},"state_version":1,"compaction":"a summary","harness_source":"fingerprint-abc","iteration":3}"#,
+            "Checkpoint's wire shape drifted — field names, field order, or the \
+             numeric encoding of generation/iteration/version/state_version changed"
         );
     }
 
@@ -542,7 +774,7 @@ mod tests {
         let json = serde_json::to_string(&cp).expect("serialize");
         assert_eq!(
             json,
-            r#"{"generation":3,"state":{"mode":"Deciding"},"compaction":"a summary","harness_source":"fingerprint-abc","iteration":3}"#,
+            r#"{"version":1,"generation":3,"state":{"mode":"Deciding"},"state_version":1,"compaction":"a summary","harness_source":"fingerprint-abc","iteration":3}"#,
         );
     }
 
@@ -601,6 +833,78 @@ mod tests {
         );
         assert_eq!(committed.pending_operator_input(), None);
         assert_eq!(committed.ask_id_high_water(), 0);
+    }
+
+    /// A future envelope version is a loud, typed refusal — never a silent
+    /// best-effort read. Mirrors `persistence-versioning-design.md` §6.
+    #[test]
+    fn future_envelope_version_is_a_typed_rejection() {
+        let dir = tempfile_dir();
+        let path = dir.join("checkpoint.json");
+        std::fs::write(
+            &path,
+            r#"{"version":9999,"generation":1,"state":{"mode":"Deciding"},"state_version":1,"compaction":null,"harness_source":"fp","iteration":1}"#,
+        )
+        .expect("write a future-version checkpoint");
+        let err = load_checkpoint(&path).expect_err("a future envelope version must be refused");
+        assert!(
+            matches!(
+                err,
+                PersistenceError::FutureVersion {
+                    of: "envelope",
+                    found: 9999,
+                    ..
+                }
+            ),
+            "expected FutureVersion, got {err:?}"
+        );
+    }
+
+    /// Same refusal, scoped to the `state` blob's own independent counter.
+    #[test]
+    fn future_state_version_is_a_typed_rejection() {
+        let dir = tempfile_dir();
+        let path = dir.join("checkpoint.json");
+        std::fs::write(
+            &path,
+            r#"{"version":1,"generation":1,"state":{"mode":"Deciding"},"state_version":9999,"compaction":null,"harness_source":"fp","iteration":1}"#,
+        )
+        .expect("write a future-state-version checkpoint");
+        let err = load_checkpoint(&path).expect_err("a future state version must be refused");
+        assert!(
+            matches!(
+                err,
+                PersistenceError::FutureVersion {
+                    of: "state",
+                    found: 9999,
+                    ..
+                }
+            ),
+            "expected FutureVersion, got {err:?}"
+        );
+    }
+
+    /// An unstamped, pre-versioning checkpoint (no `"version"`/`"state_version"`
+    /// key at all — exactly what every one of the LEGACY-decode tests above
+    /// write) must load as version `0` and migrate through the identity
+    /// `0 -> 1` step on BOTH counters. Complements those tests by asserting
+    /// the post-load version fields explicitly, not just that decode
+    /// succeeded.
+    #[test]
+    fn unstamped_legacy_checkpoint_migrates_to_current_on_both_counters() {
+        let dir = tempfile_dir();
+        let path = dir.join("checkpoint.json");
+        std::fs::write(
+            &path,
+            r#"{"generation":1,"state":{"mode":"Deciding"},"compaction":null,"harness_source":"fp","iteration":1}"#,
+        )
+        .expect("write an unstamped pre-versioning checkpoint");
+        let loaded = load_checkpoint(&path)
+            .expect("an unstamped checkpoint must still load")
+            .expect("some checkpoint");
+        assert_eq!(loaded.version, ENVELOPE_CURRENT);
+        assert_eq!(loaded.state_version, STATE_CURRENT);
+        assert_eq!(loaded.state, serde_json::json!({"mode": "Deciding"}));
     }
 
     #[test]
@@ -716,11 +1020,17 @@ mod tests {
 
         let contents = std::fs::read_to_string(&path).expect("read transcript");
         let lines: Vec<&str> = contents.lines().collect();
-        assert_eq!(lines.len(), 2);
-        assert!(lines[0].contains("loop_boundary"));
-        assert!(lines[1].contains("compaction_trigger"));
-        assert!(lines[1].contains("distilled work summary"));
-        assert!(lines[1].contains("900"));
+        // Line 0 is the version-stamped header a FRESH file gets; the two
+        // events follow it.
+        assert_eq!(lines.len(), 3);
+        assert_eq!(
+            read_transcript_header(&path).expect("read header"),
+            TRANSCRIPT_CURRENT
+        );
+        assert!(lines[1].contains("loop_boundary"));
+        assert!(lines[2].contains("compaction_trigger"));
+        assert!(lines[2].contains("distilled work summary"));
+        assert!(lines[2].contains("900"));
     }
 
     #[test]
@@ -733,7 +1043,8 @@ mod tests {
         }
         {
             // Simulates a restart: a fresh JsonlObserver over the same path
-            // must not truncate the prior line.
+            // must not truncate the prior line, and — since the file
+            // already exists — must NOT write a second header line.
             let observer = JsonlObserver::create(&path).expect("re-create");
             observer.on_event(&Event::CompactionTrigger {
                 node: crate::tree::NodeId(1),
@@ -743,7 +1054,8 @@ mod tests {
             });
         }
         let contents = std::fs::read_to_string(&path).expect("read transcript");
-        assert_eq!(contents.lines().count(), 2);
+        // header + 2 events; exactly one header, even across the reopen.
+        assert_eq!(contents.lines().count(), 3);
     }
 
     fn tempfile_dir() -> PathBuf {

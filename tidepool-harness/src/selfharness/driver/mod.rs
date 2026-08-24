@@ -985,10 +985,13 @@ impl SelfHarnessDriver {
         let fold = crate::selfharness::resume::fold_run_journal(log_dir, run_id)?;
         let folded = fold.len();
         let segment_count = crate::selfharness::resume::list_segments(log_dir, run_id)?.len();
-        self.handlers.lock().journal = Some(tidepool_handlers::JournalHandler::resuming(
-            acquired.segment.clone(),
-            acquired.segment_ordinal,
-        ));
+        self.handlers.lock().journal = Some(
+            tidepool_handlers::JournalHandler::resuming(
+                acquired.segment.clone(),
+                acquired.segment_ordinal,
+            )
+            .map_err(|e| DriverError::Session(format!("journal segment header stamp: {e}")))?,
+        );
         self.resume = Some(PendingResume {
             fold,
             log_dir: log_dir.to_path_buf(),

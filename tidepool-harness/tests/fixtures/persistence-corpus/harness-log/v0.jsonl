@@ -1,0 +1,3 @@
+{"prelude_hash":"prelude-legacy","extract_fingerprint":"extract-legacy","harness_version":"0.0.1"}
+{"seq":0,"event":{"ev":"node_created","node":1,"parent":null,"teaser":"legacy root","effect_row":["Console"],"fan":{"fan":"dynamic"},"price":"frontier"}}
+{"seq":1,"event":{"ev":"node_done","node":1,"result_rendered":"42"}}

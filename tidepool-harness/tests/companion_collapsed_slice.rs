@@ -162,10 +162,13 @@ fn build_driver(
     driver.set_checkpoint_path(checkpoint_path.clone());
     driver.set_console_handler(ConsoleHandler);
     driver.set_gate(gate);
-    driver.set_journal_handler(JournalHandler::new(
-        SegmentPath::create_exclusive(journal_path.clone())
-            .expect("this scenario's journal segment is fresh in its own tempdir"),
-    ));
+    driver.set_journal_handler(
+        JournalHandler::new(
+            SegmentPath::create_exclusive(journal_path.clone())
+                .expect("this scenario's journal segment is fresh in its own tempdir"),
+        )
+        .expect("fresh segment header stamp succeeds"),
+    );
     (driver, checkpoint_path, journal_path)
 }
 

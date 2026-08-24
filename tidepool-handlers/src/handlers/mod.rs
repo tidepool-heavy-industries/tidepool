@@ -7,6 +7,7 @@ pub mod fs;
 pub mod git;
 pub mod http;
 pub mod journal;
+mod journal_version;
 pub mod kv;
 pub mod llm;
 pub mod meta;

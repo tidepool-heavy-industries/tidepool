@@ -173,10 +173,13 @@ async fn root_session_delegates_and_finalizes_on_the_result() {
     driver.set_console_handler(ConsoleHandler);
     driver.set_gate(Arc::new(NoGate));
     driver.set_answerer_round_caps(1, 2);
-    driver.set_journal_handler(JournalHandler::new(
-        SegmentPath::create_exclusive(journal_path.clone())
-            .expect("this scenario's journal segment is fresh in its own tempdir"),
-    ));
+    driver.set_journal_handler(
+        JournalHandler::new(
+            SegmentPath::create_exclusive(journal_path.clone())
+                .expect("this scenario's journal segment is fresh in its own tempdir"),
+        )
+        .expect("fresh segment header stamp succeeds"),
+    );
 
     // The real saga (real temporary git repo, real worktree/binding table),
     // MockBackend so no model call and no tokens — same tier
@@ -307,10 +310,13 @@ async fn direct_subagent_send_dispatches_within_the_answerer_row() {
     driver.set_console_handler(ConsoleHandler);
     driver.set_gate(Arc::new(NoGate));
     driver.set_answerer_round_caps(1, 2);
-    driver.set_journal_handler(JournalHandler::new(
-        SegmentPath::create_exclusive(journal_path.clone())
-            .expect("this scenario's journal segment is fresh in its own tempdir"),
-    ));
+    driver.set_journal_handler(
+        JournalHandler::new(
+            SegmentPath::create_exclusive(journal_path.clone())
+                .expect("this scenario's journal segment is fresh in its own tempdir"),
+        )
+        .expect("fresh segment header stamp succeeds"),
+    );
 
     let store = TestRepo::init().expect("git init the delegation target repo");
     store
