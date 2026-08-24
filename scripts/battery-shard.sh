@@ -50,7 +50,7 @@
 #   -E 'binary(jit_surface) or binary(resident_session) or binary(nullary_sum_generic_deriving) or binary(patch_crosscheck_differential) or binary(multi_module_datacon) or binary(harness_profile_generic_surface) or binary(realm_varid_pinning) or binary(nested_mapm_tag255)'
 #   -E 'binary(user_library) or binary(show_double_lens_sigill) or binary(run_llm_turn_sidecar) or binary(session_scope_retirement) or binary(sweep_repoint_smoke) or binary(session_decl_scope_tree) or binary(session_table_qualified_identity) or binary(session_decl_accum)'
 #   -E 'binary(text_filter_gc) or binary(vendor_text_functions) or binary(stdlib_regressions_02_medium) or binary(stdlib_regressions_02) or binary(test_error_msg) or binary(validator_reject)'
-#   -E 'binary(build_products_dir_differential) or binary(compile_fail) or binary(green_thread_representation) or binary(tenure_resume_gc_repro)'
+#   -E 'binary(build_products_dir_differential) or binary(compile_fail) or binary(green_thread_representation) or binary(tenure_resume_gc_repro) or binary(word64_primops_random_probe)'
 #
 # tidepool-repl (7 shards):
 #   -E 'binary(decl_plane)'

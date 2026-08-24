@@ -152,6 +152,8 @@
             errors
             witherable
             safe
+            random
+            splitmix
           ]);
           # The fidelity checks that exercise the extract BINARY (TurnBatch,
           # D1Defense) resolve it via $TIDEPOOL_EXTRACT before falling back to

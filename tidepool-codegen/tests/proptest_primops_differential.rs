@@ -423,6 +423,8 @@ fn prop_int_binary() {
                 PrimOpKind::Int64Add,
                 PrimOpKind::Int64Sub,
                 PrimOpKind::Int64Mul,
+                PrimOpKind::Int64Eq,
+                PrimOpKind::Int64Ne,
                 PrimOpKind::Int64Lt,
                 PrimOpKind::Int64Le,
                 PrimOpKind::Int64Gt,
@@ -453,7 +455,12 @@ fn prop_int_quot_rem() {
             // success lane clean and not mask it as a both-fail skip.
             prop_assume!(b != 0);
             prop_assume!(!(a == i64::MIN && b == -1));
-            for op in [PrimOpKind::IntQuot, PrimOpKind::IntRem] {
+            for op in [
+                PrimOpKind::IntQuot,
+                PrimOpKind::IntRem,
+                PrimOpKind::Int64Quot,
+                PrimOpKind::Int64Rem,
+            ] {
                 check(prog_binary_int(op, a, b), &dcfg(), &reach)?;
             }
             Ok(())
@@ -475,6 +482,7 @@ fn prop_int_shift() {
                 PrimOpKind::IntShra,
                 PrimOpKind::IntShrl,
                 PrimOpKind::Int64Shl,
+                PrimOpKind::Int64Shrl,
             ] {
                 check(prog_binary_int(op, a, sh), &dcfg(), &reach)?;
             }
@@ -546,6 +554,10 @@ fn prop_word_binary() {
                 PrimOpKind::WordGe,
                 PrimOpKind::Word64And,
                 PrimOpKind::Word64Or,
+                PrimOpKind::Word64Add,
+                PrimOpKind::Word64Sub,
+                PrimOpKind::Word64Mul,
+                PrimOpKind::Word64Xor,
                 // carry/borrow value + flag slots.
                 PrimOpKind::AddWordCVal,
                 PrimOpKind::AddWordCCarry,
@@ -574,6 +586,8 @@ fn prop_word_quot_rem() {
             for op in [
                 PrimOpKind::WordQuot,
                 PrimOpKind::WordRem,
+                PrimOpKind::Word64Quot,
+                PrimOpKind::Word64Rem,
                 PrimOpKind::QuotRemWordVal,
                 PrimOpKind::QuotRemWordRem,
             ] {
@@ -616,6 +630,7 @@ fn prop_word_unary() {
         .run(&arb_edge_u64(), |a| {
             for op in [
                 PrimOpKind::WordNot,
+                PrimOpKind::Word64Not,
                 PrimOpKind::Narrow8Word,
                 PrimOpKind::Narrow16Word,
                 PrimOpKind::Narrow32Word,

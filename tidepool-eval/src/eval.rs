@@ -847,19 +847,23 @@ fn dispatch_primop(
     heap: &mut dyn Heap,
 ) -> Result<Value, EvalError> {
     match op {
-        PrimOpKind::IntAdd => {
+        // Int64# aliases here: literal-encoding already normalizes Int64
+        // values to LitInt (see `mapLit`'s LitNumInt64 case), so on this
+        // 64-bit-only target Int64# is a plain register-width Int# and
+        // shares these arms rather than duplicating them.
+        PrimOpKind::IntAdd | PrimOpKind::Int64Add => {
             let (a, b) = bin_op_int(op, &args, heap)?;
             Ok(Value::Lit(Literal::LitInt(a.wrapping_add(b))))
         }
-        PrimOpKind::IntSub => {
+        PrimOpKind::IntSub | PrimOpKind::Int64Sub => {
             let (a, b) = bin_op_int(op, &args, heap)?;
             Ok(Value::Lit(Literal::LitInt(a.wrapping_sub(b))))
         }
-        PrimOpKind::IntMul => {
+        PrimOpKind::IntMul | PrimOpKind::Int64Mul => {
             let (a, b) = bin_op_int(op, &args, heap)?;
             Ok(Value::Lit(Literal::LitInt(a.wrapping_mul(b))))
         }
-        PrimOpKind::IntNegate => {
+        PrimOpKind::IntNegate | PrimOpKind::Int64Negate => {
             if args.len() != 1 {
                 return Err(EvalError::ArityMismatch {
                     context: ArityContext::Arguments,
@@ -870,12 +874,12 @@ fn dispatch_primop(
             let a = expect_int(&args[0], heap)?;
             Ok(Value::Lit(Literal::LitInt(a.wrapping_neg())))
         }
-        PrimOpKind::IntEq => cmp_int(op, &args, heap, |a, b| a == b),
-        PrimOpKind::IntNe => cmp_int(op, &args, heap, |a, b| a != b),
-        PrimOpKind::IntLt => cmp_int(op, &args, heap, |a, b| a < b),
-        PrimOpKind::IntLe => cmp_int(op, &args, heap, |a, b| a <= b),
-        PrimOpKind::IntGt => cmp_int(op, &args, heap, |a, b| a > b),
-        PrimOpKind::IntGe => cmp_int(op, &args, heap, |a, b| a >= b),
+        PrimOpKind::IntEq | PrimOpKind::Int64Eq => cmp_int(op, &args, heap, |a, b| a == b),
+        PrimOpKind::IntNe | PrimOpKind::Int64Ne => cmp_int(op, &args, heap, |a, b| a != b),
+        PrimOpKind::IntLt | PrimOpKind::Int64Lt => cmp_int(op, &args, heap, |a, b| a < b),
+        PrimOpKind::IntLe | PrimOpKind::Int64Le => cmp_int(op, &args, heap, |a, b| a <= b),
+        PrimOpKind::IntGt | PrimOpKind::Int64Gt => cmp_int(op, &args, heap, |a, b| a > b),
+        PrimOpKind::IntGe | PrimOpKind::Int64Ge => cmp_int(op, &args, heap, |a, b| a >= b),
         PrimOpKind::IntAnd => {
             let (a, b) = bin_op_int(op, &args, heap)?;
             Ok(Value::Lit(Literal::LitInt(a & b)))
@@ -899,30 +903,48 @@ fn dispatch_primop(
             let a = expect_int(&args[0], heap)?;
             Ok(Value::Lit(Literal::LitInt(!a)))
         }
-        PrimOpKind::IntShl => {
+        PrimOpKind::IntShl | PrimOpKind::Int64Shl => {
             let (a, b) = bin_op_int(op, &args, heap)?;
             Ok(Value::Lit(Literal::LitInt(a.wrapping_shl(b as u32))))
         }
-        PrimOpKind::IntShra => {
+        PrimOpKind::IntShra | PrimOpKind::Int64Shra => {
             let (a, b) = bin_op_int(op, &args, heap)?;
             Ok(Value::Lit(Literal::LitInt(a.wrapping_shr(b as u32))))
         }
-        PrimOpKind::IntShrl => {
+        PrimOpKind::IntShrl | PrimOpKind::Int64Shrl => {
             let (a, b) = bin_op_int(op, &args, heap)?;
             Ok(Value::Lit(Literal::LitInt(
                 (a as u64).wrapping_shr(b as u32) as i64,
             )))
         }
+        PrimOpKind::IntQuot | PrimOpKind::Int64Quot => {
+            let (a, b) = bin_op_int(op, &args, heap)?;
+            if b == 0 {
+                return Err(EvalError::InternalError(
+                    "division by zero (quotInt#)".into(),
+                ));
+            }
+            Ok(Value::Lit(Literal::LitInt(a.wrapping_div(b))))
+        }
+        PrimOpKind::IntRem | PrimOpKind::Int64Rem => {
+            let (a, b) = bin_op_int(op, &args, heap)?;
+            if b == 0 {
+                return Err(EvalError::InternalError(
+                    "division by zero (remInt#)".into(),
+                ));
+            }
+            Ok(Value::Lit(Literal::LitInt(a.wrapping_rem(b))))
+        }
 
-        PrimOpKind::WordAdd => {
+        PrimOpKind::WordAdd | PrimOpKind::Word64Add => {
             let (a, b) = bin_op_word(op, &args, heap)?;
             Ok(Value::Lit(Literal::LitWord(a.wrapping_add(b))))
         }
-        PrimOpKind::WordSub => {
+        PrimOpKind::WordSub | PrimOpKind::Word64Sub => {
             let (a, b) = bin_op_word(op, &args, heap)?;
             Ok(Value::Lit(Literal::LitWord(a.wrapping_sub(b))))
         }
-        PrimOpKind::WordMul => {
+        PrimOpKind::WordMul | PrimOpKind::Word64Mul => {
             let (a, b) = bin_op_word(op, &args, heap)?;
             Ok(Value::Lit(Literal::LitWord(a.wrapping_mul(b))))
         }
@@ -932,7 +954,7 @@ fn dispatch_primop(
         PrimOpKind::WordLe | PrimOpKind::Word64Le => cmp_word(op, &args, heap, |a, b| a <= b),
         PrimOpKind::WordGt | PrimOpKind::Word64Gt => cmp_word(op, &args, heap, |a, b| a > b),
         PrimOpKind::WordGe | PrimOpKind::Word64Ge => cmp_word(op, &args, heap, |a, b| a >= b),
-        PrimOpKind::WordQuot => {
+        PrimOpKind::WordQuot | PrimOpKind::Word64Quot => {
             let (a, b) = bin_op_word(op, &args, heap)?;
             if b == 0 {
                 return Err(EvalError::InternalError(
@@ -941,7 +963,7 @@ fn dispatch_primop(
             }
             Ok(Value::Lit(Literal::LitWord(a.wrapping_div(b))))
         }
-        PrimOpKind::WordRem => {
+        PrimOpKind::WordRem | PrimOpKind::Word64Rem => {
             let (a, b) = bin_op_word(op, &args, heap)?;
             if b == 0 {
                 return Err(EvalError::InternalError(
@@ -950,19 +972,19 @@ fn dispatch_primop(
             }
             Ok(Value::Lit(Literal::LitWord(a.wrapping_rem(b))))
         }
-        PrimOpKind::WordAnd => {
+        PrimOpKind::WordAnd | PrimOpKind::Word64And => {
             let (a, b) = bin_op_word(op, &args, heap)?;
             Ok(Value::Lit(Literal::LitWord(a & b)))
         }
-        PrimOpKind::WordOr => {
+        PrimOpKind::WordOr | PrimOpKind::Word64Or => {
             let (a, b) = bin_op_word(op, &args, heap)?;
             Ok(Value::Lit(Literal::LitWord(a | b)))
         }
-        PrimOpKind::WordXor => {
+        PrimOpKind::WordXor | PrimOpKind::Word64Xor => {
             let (a, b) = bin_op_word(op, &args, heap)?;
             Ok(Value::Lit(Literal::LitWord(a ^ b)))
         }
-        PrimOpKind::WordNot => {
+        PrimOpKind::WordNot | PrimOpKind::Word64Not => {
             if args.len() != 1 {
                 return Err(EvalError::ArityMismatch {
                     context: ArityContext::Arguments,
@@ -973,7 +995,7 @@ fn dispatch_primop(
             let a = expect_word(&args[0], heap)?;
             Ok(Value::Lit(Literal::LitWord(!a)))
         }
-        PrimOpKind::WordShl => {
+        PrimOpKind::WordShl | PrimOpKind::Word64Shl => {
             if args.len() != 2 {
                 return Err(EvalError::ArityMismatch {
                     context: ArityContext::Arguments,
@@ -985,7 +1007,7 @@ fn dispatch_primop(
             let b = expect_int(&args[1], heap)?;
             Ok(Value::Lit(Literal::LitWord(a.wrapping_shl(b as u32))))
         }
-        PrimOpKind::WordShrl => {
+        PrimOpKind::WordShrl | PrimOpKind::Word64Shrl => {
             if args.len() != 2 {
                 return Err(EvalError::ArityMismatch {
                     context: ArityContext::Arguments,
@@ -1568,24 +1590,6 @@ fn dispatch_primop(
                 })
             }
         }
-        PrimOpKind::IntQuot => {
-            let (a, b) = bin_op_int(op, &args, heap)?;
-            if b == 0 {
-                return Err(EvalError::InternalError(
-                    "division by zero (quotInt#)".into(),
-                ));
-            }
-            Ok(Value::Lit(Literal::LitInt(a.wrapping_div(b))))
-        }
-        PrimOpKind::IntRem => {
-            let (a, b) = bin_op_int(op, &args, heap)?;
-            if b == 0 {
-                return Err(EvalError::InternalError(
-                    "division by zero (remInt#)".into(),
-                ));
-            }
-            Ok(Value::Lit(Literal::LitInt(a.wrapping_rem(b))))
-        }
         PrimOpKind::Chr => {
             if args.len() != 1 {
                 return Err(EvalError::ArityMismatch {
@@ -2015,10 +2019,6 @@ fn dispatch_primop(
             let w = expect_word(&args[0], heap)?;
             Ok(Value::Lit(Literal::LitWord(w & 0xFF)))
         }
-        PrimOpKind::Word64And => {
-            let (a, b) = bin_op_word(op, &args, heap)?;
-            Ok(Value::Lit(Literal::LitWord(a & b)))
-        }
         PrimOpKind::Int64ToInt => {
             // Identity on 64-bit
             Ok(args[0].clone())
@@ -2214,26 +2214,6 @@ fn dispatch_primop(
             let (a, b) = bin_op_word(op, &args, heap)?;
             Ok(Value::Lit(Literal::LitInt(if a < b { 1 } else { 0 })))
         }
-        PrimOpKind::Int64Ge => {
-            let (a, b) = bin_op_int(op, &args, heap)?;
-            Ok(Value::Lit(Literal::LitInt(if a >= b { 1 } else { 0 })))
-        }
-        PrimOpKind::Int64Negate => {
-            let a = expect_int_like(&args[0], heap)?;
-            Ok(Value::Lit(Literal::LitInt(a.wrapping_neg())))
-        }
-        PrimOpKind::Int64Shra => {
-            let (a, b) = bin_op_int(op, &args, heap)?;
-            Ok(Value::Lit(Literal::LitInt(a.wrapping_shr(b as u32))))
-        }
-        PrimOpKind::Word64Shl => {
-            let (a, b) = bin_op_word(op, &args, heap)?;
-            Ok(Value::Lit(Literal::LitWord(a.wrapping_shl(b as u32))))
-        }
-        PrimOpKind::Word64Shrl => {
-            let (a, b) = bin_op_word(op, &args, heap)?;
-            Ok(Value::Lit(Literal::LitWord(a.wrapping_shr(b as u32))))
-        }
         PrimOpKind::Word8Ge => {
             let (a, b) = bin_op_word(op, &args, heap)?;
             Ok(Value::Lit(Literal::LitInt(if a >= b { 1 } else { 0 })))
@@ -2298,41 +2278,9 @@ fn dispatch_primop(
                 })?);
             Ok(Value::Lit(Literal::LitWord(word)))
         }
-        PrimOpKind::Int64Mul => {
-            let (a, b) = bin_op_int(op, &args, heap)?;
-            Ok(Value::Lit(Literal::LitInt(a.wrapping_mul(b))))
-        }
-        PrimOpKind::Word64Or => {
-            let (a, b) = bin_op_word(op, &args, heap)?;
-            Ok(Value::Lit(Literal::LitWord(a | b)))
-        }
         PrimOpKind::Word8Le => {
             let (a, b) = bin_op_word(op, &args, heap)?;
             Ok(Value::Lit(Literal::LitInt(if a <= b { 1 } else { 0 })))
-        }
-        PrimOpKind::Int64Add => {
-            let (a, b) = bin_op_int(op, &args, heap)?;
-            Ok(Value::Lit(Literal::LitInt(a.wrapping_add(b))))
-        }
-        PrimOpKind::Int64Gt => {
-            let (a, b) = bin_op_int(op, &args, heap)?;
-            Ok(Value::Lit(Literal::LitInt(if a > b { 1 } else { 0 })))
-        }
-        PrimOpKind::Int64Lt => {
-            let (a, b) = bin_op_int(op, &args, heap)?;
-            Ok(Value::Lit(Literal::LitInt(if a < b { 1 } else { 0 })))
-        }
-        PrimOpKind::Int64Le => {
-            let (a, b) = bin_op_int(op, &args, heap)?;
-            Ok(Value::Lit(Literal::LitInt(if a <= b { 1 } else { 0 })))
-        }
-        PrimOpKind::Int64Sub => {
-            let (a, b) = bin_op_int(op, &args, heap)?;
-            Ok(Value::Lit(Literal::LitInt(a.wrapping_sub(b))))
-        }
-        PrimOpKind::Int64Shl => {
-            let (a, b) = bin_op_int(op, &args, heap)?;
-            Ok(Value::Lit(Literal::LitInt(a.wrapping_shl(b as u32))))
         }
         PrimOpKind::Word8Add => {
             let (a, b) = bin_op_word(op, &args, heap)?;

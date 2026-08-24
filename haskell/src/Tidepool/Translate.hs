@@ -2985,6 +2985,11 @@ mapPrimOp = \case
   Int64ToIntOp                -> "Int64ToInt"
   IntToInt64Op                -> "IntToInt64"
   Int64ToWord64Op             -> "Int64ToWord64"
+  Int64QuotOp                 -> "Int64Quot"
+  Int64RemOp                  -> "Int64Rem"
+  Int64SrlOp                  -> "Int64Shrl"
+  Int64EqOp                   -> "Int64Eq"
+  Int64NeOp                   -> "Int64Ne"
   -- Word64
   Word64ToInt64Op             -> "Word64ToInt64"
   Word64ToWordOp              -> "Word64ToWord"
@@ -2999,6 +3004,13 @@ mapPrimOp = \case
   Word64LeOp                  -> "Word64Le"
   Word64GtOp                  -> "Word64Gt"
   Word64GeOp                  -> "Word64Ge"
+  Word64AddOp                 -> "Word64Add"
+  Word64SubOp                 -> "Word64Sub"
+  Word64MulOp                 -> "Word64Mul"
+  Word64QuotOp                -> "Word64Quot"
+  Word64RemOp                 -> "Word64Rem"
+  Word64XorOp                 -> "Word64Xor"
+  Word64NotOp                 -> "Word64Not"
   -- Carry arithmetic and wide multiply handled by splitMultiReturnPrimOp / splitTripleReturnPrimOp
   -- CLZ
   Clz8Op                      -> "Clz8"
