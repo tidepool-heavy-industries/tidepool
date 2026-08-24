@@ -243,7 +243,6 @@ where
 crate::console_effect_def!(crate::effect_defs::effect_decl_projection);
 crate::kv_effect_def!(crate::effect_defs::effect_decl_projection);
 crate::fs_effect_def!(crate::effect_defs::effect_decl_projection);
-crate::lsp_effect_def!(crate::effect_defs::effect_decl_projection);
 crate::http_effect_def!(crate::effect_defs::effect_decl_projection);
 
 // Exec: MIGRATED — `exec_decl()` comes from `src/generated/exec.rs`.

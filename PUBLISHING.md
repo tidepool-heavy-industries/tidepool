@@ -1,8 +1,10 @@
 # Publishing to crates.io
 
-**Verified as of commit `e49b8cb0` (2026-08-20)** against `cargo metadata`.
-Re-run the recipe below after adding a crate or changing inter-crate
-dependencies — don't hand-edit this list and let it drift.
+**Verified as of commit `e49b8cb0` (2026-08-20)** against `cargo metadata`;
+updated 2026-08-24 to drop `tidepool-lsp` (crate deleted — see root
+`CLAUDE.md`'s project structure). Re-run the recipe below after adding a
+crate or changing inter-crate dependencies — don't hand-edit this list and
+let it drift.
 
 ## Publish Order
 
@@ -32,7 +34,6 @@ Crates must be published in dependency order. Wait for each crate to appear on c
 21.  tidepool-harness
 22.  tidepool-web (binary)
 23.  tidepool (binary)
-24.  tidepool-lsp (binary)
 ```
 
 This order is topologically sorted from the workspace dependency graph

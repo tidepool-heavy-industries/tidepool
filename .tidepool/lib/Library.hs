@@ -19,8 +19,6 @@ module Library
   , module Edit
   , module Optics
   , module SelfTest
-  , module Lsp
-  , module LspGraph
   , module Churn
   , module Repo
   , module RustAudit
@@ -36,12 +34,10 @@ import Diff
 import Edit
 import Optics
 import SelfTest
-import Lsp
-import LspGraph
 import Churn
 import Repo
--- RustAudit's own 'tally'/'crateOf' collide with Schemes.tally and
--- Lsp.crateOf (both already in the facade); hidden here so RustAudit's
--- internal uses are untouched but the facade keeps one owner per name.
-import RustAudit hiding (tally, crateOf)
+-- RustAudit's own 'tally' collides with Schemes.tally (both already in the
+-- facade); hidden here so RustAudit's internal uses are untouched but the
+-- facade keeps one owner per name.
+import RustAudit hiding (tally)
 import RustSections

@@ -332,16 +332,3 @@ preserves the thunk chain so the self-reference can resolve once, on demand.
 behavior on ordinary lookups/inserts); reach for `Data.Map.Lazy` specifically
 for knot-tying, not as a general substitute.
 
-**Call-graph walks need workspace scoping.** An unscoped `LspGraph.walk`/
-`transitiveCallers`/`transitiveCallees` over `lspCallers`/`lspCallees` follows
-real calls straight into external dependency/stdlib files (`~/.cargo/registry`,
-the rustup toolchain sources), which floods any blast-radius or call-graph
-question with noise unrelated to the workspace. `.tidepool/lib/Lsp.hs` already
-has the fix — `isLocal`/`localCallees`/`localCallers` (filtering on whether
-`nodeFile` is workspace-relative vs. absolute-external) — and
-`.tidepool/lib/LspGraph.hs` has `transitiveLocalCallers`/`transitiveLocalCallees`
-composing that filter with the cycle-safe `walk` engine. **Default to the
-`transitiveLocal*` variants for any call-graph question** — the unscoped ones
-are for when external call sites are genuinely part of the question. (Why
-this note exists — a prior fix silently re-derived from scratch because it
-wasn't written down: `plans/decision-archive/haskell.md`.)

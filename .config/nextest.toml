@@ -58,5 +58,5 @@ max-threads = 2
 # its tests do no `extract` work (no tidepool-extract spawn, no
 # EvalHarness/Harness turn, no haskell_eval!/haskell_inline! expansion).
 [[profile.default.overrides]]
-filter = 'not (package(tidepool-repr) | package(tidepool-eval) | package(tidepool-heap) | package(tidepool-bignum) | package(tidepool-optimize) | package(tidepool-effect) | package(tidepool-bridge) | package(tidepool-bridge-derive) | package(tidepool-bridge-effects) | package(tidepool-codegen) | package(tidepool-lsp) | (package(tidepool-web) & !binary(crash_recovery)) | (package(tidepool-testing) & !kind(test)) | (package(tidepool-harness) & (!kind(test) | binary(provider_behavior))))'
+filter = 'not (package(tidepool-repr) | package(tidepool-eval) | package(tidepool-heap) | package(tidepool-bignum) | package(tidepool-optimize) | package(tidepool-effect) | package(tidepool-bridge) | package(tidepool-bridge-derive) | package(tidepool-bridge-effects) | package(tidepool-codegen) | (package(tidepool-web) & !binary(crash_recovery)) | (package(tidepool-testing) & !kind(test)) | (package(tidepool-harness) & (!kind(test) | binary(provider_behavior))))'
 test-group = 'ghc-heavy'

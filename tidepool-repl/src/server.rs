@@ -88,7 +88,7 @@ const RECLAIMED_NOTICE: &str = "The session was reclaimed: its declarations and 
 /// a pure-compute runaway that outran the cancel.
 fn wedged_message(op: &str, to_secs: u64, effect_in_flight: bool) -> String {
     if effect_in_flight {
-        // Blocked inside an effect handler (e.g. Exec/Http/Lsp) when the
+        // Blocked inside an effect handler (e.g. Exec/Http) when the
         // timeout fired. The handler runs on until its external call returns,
         // and any spawned child process is NOT killed.
         format!(

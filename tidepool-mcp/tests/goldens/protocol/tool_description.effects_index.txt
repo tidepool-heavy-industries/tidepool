@@ -8,8 +8,6 @@
       verbs: httpGet, httpPost
   Exec: Run shell commands and capture output.
       verbs: run, runIn, runArgv
-  Lsp: Semantic code-graph navigation via a language server (rust-analyzer, .rs).
-      verbs: lspWhere, lspCallers, lspCallees, lspRefs, lspDef, lspHover, lspRename, lspDiags
   Llm: Call an LLM for classification, extraction, or judgment.
       verbs: llm, findTally, tallyList
   Git: Read-only git repository queries.

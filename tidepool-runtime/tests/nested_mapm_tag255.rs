@@ -149,7 +149,6 @@ pure stats
         RealFs::new(),
         mock::MockHttp,
         mock::MockExec,
-        mock::MockLsp,
         mock::MockLlm,
         mock::MockGit,
         mock::MockTime,

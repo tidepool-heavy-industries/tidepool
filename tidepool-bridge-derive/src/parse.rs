@@ -38,8 +38,8 @@ pub struct FieldInfo {
     /// Rust ident). E.g. `#[core(hs = "exitCode")]`.
     pub hs_name: Option<String>,
     /// Overrides the whole rendered Haskell field TYPE (default: mapped from the
-    /// Rust type). E.g. `pos: LspPosition` whose Haskell type is `Position`
-    /// uses `#[core(hs_type = "Position")]`.
+    /// Rust type). E.g. a field typed `WirePosition` whose Haskell type should
+    /// render as `Position` uses `#[core(hs_type = "Position")]`.
     pub hs_type: Option<String>,
 }
 

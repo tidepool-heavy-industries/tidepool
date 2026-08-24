@@ -13,9 +13,10 @@
 //! (`tidepool-runtime/src/session/turn.rs`, a real `serde_json` parser)
 //! rejects it with "invalid bound-binder JSON: control character...".
 //!
-//! Repro shape mirrors a real case found dogfooding the repl (`steer` in
-//! `.tidepool/lib/Lsp.hs`) — three curried function-typed arguments, wide
-//! enough that the rendered type wraps under default GHC pretty-printing.
+//! Repro shape mirrors a real case found dogfooding the repl (a `steer`-style
+//! cascade helper: pure rule -> local model -> suspend-to-human) — three
+//! curried function-typed arguments, wide enough that the rendered type wraps
+//! under default GHC pretty-printing.
 
 mod common;
 use common::*;

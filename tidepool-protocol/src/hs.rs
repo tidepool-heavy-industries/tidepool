@@ -188,11 +188,15 @@ mod tests {
                 "[FileRead]",
             ),
             (
-                HsType::list(HsType::Named("LspNode")),
-                "[LspNode]",
-                "[LspNode]",
+                HsType::list(HsType::Named("CommitDeltas")),
+                "[CommitDeltas]",
+                "[CommitDeltas]",
             ),
-            (HsType::list(HsType::Named("Diag")), "[Diag]", "[Diag]"),
+            (
+                HsType::list(HsType::Named("FileMeta")),
+                "[FileMeta]",
+                "[FileMeta]",
+            ),
             (HsType::list(HsType::Named("Watch")), "[Watch]", "[Watch]"),
             (
                 HsType::list(HsType::Named("RepositoryEvent")),
@@ -213,9 +217,9 @@ mod tests {
                 "(Maybe FileMeta)",
             ),
             (
-                HsType::maybe(HsType::Named("LspNode")),
-                "Maybe LspNode",
-                "(Maybe LspNode)",
+                HsType::maybe(HsType::Named("CommitDeltas")),
+                "Maybe CommitDeltas",
+                "(Maybe CommitDeltas)",
             ),
             // Tuples are self-delimiting: no second layer of parens.
             (

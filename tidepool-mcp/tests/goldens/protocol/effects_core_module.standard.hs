@@ -64,32 +64,6 @@ data Exec a where
   RunIn :: Text -> Text -> Exec (Either ExecError Proc)
   RunArgv :: [Text] -> Exec (Either ExecError Proc)
 
-data Position = Position { posLine :: Int, posChar :: Int } deriving (Show, Eq)
-data LspNode = LspNode { nodeName :: Text, nodeContainer :: Text, nodeKind :: Text, nodeFile :: Text, nodePos :: Position, nodeText :: Text } deriving (Show, Eq)
-data Diag = Diag { diagFile :: Text, diagLine :: Int, diagSeverity :: Text, diagMessage :: Text }
-nodeLine :: LspNode -> Int
-nodeLine = posLine . nodePos
-instance ToJSON Position where
-  toJSON (Position l c) = object ["line" .= l, "char" .= c]
-instance ToJSON LspNode where
-  toJSON nd@(LspNode n c k f _ t) = object ["name" .= n, "container" .= c, "kind" .= k, "file" .= f, "line" .= nodeLine nd, "text" .= t]
-instance ToJSON Diag where
-  toJSON (Diag f l s m) = object ["file" .= f, "line" .= l, "severity" .= s, "message" .= m]
-data LspError = LspDaemonDown Text deriving (Show, Eq)
-instance ToJSON LspError where
-  toJSON e = case e of
-    LspDaemonDown detail -> object ["tag" .= ("LspDaemonDown" :: Text), "detail" .= detail]
-
-data Lsp a where
-  LspWhere :: Text -> Lsp (Either LspError [LspNode])
-  LspCallers :: LspNode -> Lsp [LspNode]
-  LspCallees :: LspNode -> Lsp [LspNode]
-  LspRefs :: LspNode -> Lsp [LspNode]
-  LspDef :: LspNode -> Lsp (Maybe LspNode)
-  LspHover :: LspNode -> Lsp (Maybe Text)
-  LspRename :: LspNode -> Text -> Lsp (Maybe Text)
-  LspDiagnostics :: Text -> Lsp (Either LspError [Diag])
-
 data Llm a where
   LlmStructured :: Text -> Value -> Llm (Either LlmError Value)
 
@@ -352,33 +326,6 @@ runIn :: forall effs. Member Exec effs => Text -> Text -> Eff effs (Either ExecE
 runIn dir cmd = send (RunIn dir cmd)
 runArgv :: forall effs. Member Exec effs => [Text] -> Eff effs (Either ExecError Proc)
 runArgv = send . RunArgv
--- | Seed: every workspace definition named X (each a LspNode with container/file/line/source line).
--- `Left (LspDaemonDown _)` when the daemon isn't reachable; unwrap with `>>= liftEither`.
-lspWhere :: forall effs. Member Lsp effs => Text -> Eff effs (Either LspError [LspNode])
-lspWhere = send . LspWhere
--- | Incoming calls; [] = none (or node not callable). A daemon-down failure
--- aborts the eval structurally (not a silent []) — see the Lsp effect description.
-lspCallers :: forall effs. Member Lsp effs => LspNode -> Eff effs [LspNode]
-lspCallers = send . LspCallers
--- | Outgoing calls; [] = none (or node not callable).
-lspCallees :: forall effs. Member Lsp effs => LspNode -> Eff effs [LspNode]
-lspCallees = send . LspCallees
--- | Use sites of this node's symbol (kind = "reference"); [] = none (or not a symbol).
-lspRefs :: forall effs. Member Lsp effs => LspNode -> Eff effs [LspNode]
-lspRefs = send . LspRefs
--- | Resolve any node (e.g. a use site) to its definition node.
-lspDef :: forall effs. Member Lsp effs => LspNode -> Eff effs (Maybe LspNode)
-lspDef = send . LspDef
--- | Type / signature / docs for a node.
-lspHover :: forall effs. Member Lsp effs => LspNode -> Eff effs (Maybe Text)
-lspHover = send . LspHover
--- | Rename a node's symbol to NEW; returns a unified diff (apply with applyDiff). Nothing = can't rename.
-lspRename :: forall effs. Member Lsp effs => LspNode -> Text -> Eff effs (Maybe Text)
-lspRename n new = send (LspRename n new)
--- | Diagnostics (errors / warnings) for FILE. `Left (LspDaemonDown _)`
--- when the daemon isn't reachable; unwrap with `>>= liftEither`.
-lspDiags :: forall effs. Member Lsp effs => FilePath -> Eff effs (Either LspError [Diag])
-lspDiags = send . LspDiagnostics
 -- | Call the LLM for structured output. Failure is TYPED and TOTAL
 -- (#335): `Left (LlmApi _)` on an API/network failure, `Left (LlmRefusal
 -- _)` on a declined answer, `Left LlmBudget` when the per-eval call budget

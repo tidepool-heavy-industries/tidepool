@@ -6,7 +6,7 @@ license.workspace = true
 repository.workspace = true
 authors.workspace = true
 rust-version.workspace = true
-description = "Concrete effect handlers for Tidepool (Console/KV/Fs/SG/Http/Exec/Lsp/Llm/Meta)"
+description = "Concrete effect handlers for Tidepool (Console/KV/Fs/SG/Http/Exec/Llm/Meta)"
 
 [dependencies]
 tidepool-mcp.workspace = true

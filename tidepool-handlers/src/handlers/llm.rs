@@ -214,7 +214,7 @@ impl LlmHandler {
 mod tests {
     use super::*;
     use crate::test_support::*;
-    use crate::{ConsoleHandler, ExecHandler, FsHandler, HttpHandler, KvHandler, LspHandler};
+    use crate::{ConsoleHandler, ExecHandler, FsHandler, HttpHandler, KvHandler};
     use tidepool_effect::dispatch::EffectContext;
     use tidepool_effect::dispatch::EffectHandler;
     use tidepool_effect::error::EffectError;
@@ -273,7 +273,6 @@ mod tests {
             FsHandler::new(cwd.clone()),
             HttpHandler,
             ExecHandler::new(cwd.clone()),
-            LspHandler::new(cwd.clone()),
             MockLlmHandler {
                 response: mock_response
             }

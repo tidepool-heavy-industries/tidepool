@@ -3806,7 +3806,7 @@ mod slim_tests {
 #[cfg(test)]
 mod info_tests {
     use super::type_def_head;
-    use tidepool_mcp::lsp_decl;
+    use tidepool_mcp::subagent_decl;
 
     #[test]
     fn type_def_head_recognizes_data_newtype_type() {
@@ -3828,20 +3828,23 @@ mod info_tests {
     }
 
     #[test]
-    fn decl_scan_finds_node_in_lsp_decl() {
-        let decl = lsp_decl();
+    fn decl_scan_finds_node_in_subagent_decl() {
+        let decl = subagent_decl();
         let found = decl
             .type_defs
             .iter()
-            .any(|td| type_def_head(td) == Some("LspNode"));
-        assert!(found, "LspNode must be discoverable in lsp_decl type_defs");
-        let pos_found = decl
+            .any(|td| type_def_head(td) == Some("WorkerRun"));
+        assert!(
+            found,
+            "WorkerRun must be discoverable in subagent_decl type_defs"
+        );
+        let id_found = decl
             .type_defs
             .iter()
-            .any(|td| type_def_head(td) == Some("Position"));
+            .any(|td| type_def_head(td) == Some("AgentId"));
         assert!(
-            pos_found,
-            "Position must be discoverable in lsp_decl type_defs"
+            id_found,
+            "AgentId must be discoverable in subagent_decl type_defs"
         );
     }
 }

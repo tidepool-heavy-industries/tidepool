@@ -19,7 +19,6 @@ members = [
     "tidepool-protocol",
     "tidepool-handlers",
     "tidepool-repl",
-    "tidepool-lsp",
     "tidepool-harness",
     "tidepool-worktree",
     "tidepool-agent",

@@ -262,18 +262,18 @@ mod tests {
 module Library
   ( module Schemes
   , module Explore
-  , module Lsp
+  , module Extra
   ) where
 import Schemes
 import Explore
-import Lsp
+import Extra
 ";
         assert_eq!(
             parse_reexports_ordered(src),
             vec![
                 "Schemes".to_string(),
                 "Explore".to_string(),
-                "Lsp".to_string()
+                "Extra".to_string()
             ]
         );
     }
@@ -285,7 +285,7 @@ import Lsp
 
     #[test]
     fn sanitized_library_excludes_broken_and_keeps_order() {
-        let healthy = vec!["Schemes".to_string(), "Lsp".to_string()];
+        let healthy = vec!["Schemes".to_string(), "Extra".to_string()];
         let broken = vec!["Explore".to_string()];
         let out = sanitized_library_source(&healthy, &broken);
         // The broken module is gone from the export + import list.
@@ -299,12 +299,12 @@ import Lsp
         );
         // Healthy modules survive, in order.
         assert!(out.contains("module Schemes"));
-        assert!(out.contains("module Lsp"));
+        assert!(out.contains("module Extra"));
         assert!(out.contains("import Schemes"));
-        assert!(out.contains("import Lsp"));
+        assert!(out.contains("import Extra"));
         let schemes = out.find("Schemes").unwrap();
-        let lsp = out.find("Lsp").unwrap();
-        assert!(schemes < lsp, "order preserved: {out}");
+        let extra = out.find("Extra").unwrap();
+        assert!(schemes < extra, "order preserved: {out}");
         // Provenance comment names the excluded module.
         assert!(
             out.contains("Excluded (failed to compile): Explore"),
@@ -354,7 +354,7 @@ import Lsp
 
     #[test]
     fn healthy_set_is_reexports_minus_broken() {
-        let reexports: Vec<String> = ["Schemes", "Explore", "Lsp"]
+        let reexports: Vec<String> = ["Schemes", "Explore", "Extra"]
             .iter()
             .map(|s| s.to_string())
             .collect();
@@ -364,6 +364,6 @@ import Lsp
             .filter(|m| !broken.contains(*m))
             .cloned()
             .collect();
-        assert_eq!(healthy, vec!["Schemes".to_string(), "Lsp".to_string()]);
+        assert_eq!(healthy, vec!["Schemes".to_string(), "Extra".to_string()]);
     }
 }

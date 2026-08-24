@@ -100,9 +100,9 @@ use tidepool_eval::value::Value;
 use tidepool_runtime::compile_and_run;
 use tidepool_testing::NullDispatcher;
 
-/// `Fork`'s position in the stack `eval_with_dispatch` compiles against: 9
-/// base effects at tags 0..8, then the interposed `Ask` (9), `RunLLMTurn`
-/// (10), and `Fork` (11) — `standard_decls()`'s own order (base9 + Ask +
+/// `Fork`'s position in the stack `eval_with_dispatch` compiles against: 8
+/// base effects at tags 0..7, then the interposed `Ask` (8), `RunLLMTurn`
+/// (9), and `Fork` (10) — `standard_decls()`'s own order (base8 + Ask +
 /// RunLLMTurn) with `Fork` appended explicitly, same as the harness's
 /// `agent_decls` (`standard_decls()` itself stops at `RunLLMTurn` — the
 /// ordinary session engine never services `Fork`).
@@ -110,7 +110,7 @@ use tidepool_testing::NullDispatcher;
 /// `Tidepool.Fork`'s `forkFilter`/`forkMap` reach the machine through
 /// `forkAllSited`, which sends on `Fork` — so their fanout dispatch arrives
 /// at THIS tag, not `RunLLMTurn`'s and not `Ask`'s.
-const FORK_TAG: u64 = 11;
+const FORK_TAG: u64 = 10;
 
 /// Compile `code` (a single Haskell expression of type `M a`) under the full
 /// MCP preamble and run it. Returns `Ok(json)` with the rendered result or
@@ -1091,10 +1091,9 @@ fn digit_to_int_non_hex_fails_loudly() {
 fn works_data_tree_node_no_freer_collision() {
     // Data.Tree's `Node` constructor collides with the freer continuation
     // `Node` (both in scope in every eval), so an unqualified `Node` is a
-    // legitimate ambiguity. (The Lsp effect's node type is `LspNode`, so it no
-    // longer contributes to this collision.) Qualify Data.Tree — the point is
-    // its `Node` resolves + `treeDepth` runs (the freer `Node` must not shadow
-    // the qualified constructor).
+    // legitimate ambiguity. Qualify Data.Tree — the point is its `Node`
+    // resolves + `treeDepth` runs (the freer `Node` must not shadow the
+    // qualified constructor).
     works_with_imports(
         "qualified Data.Tree as DTree",
         "pure (treeDepth t) where { \
@@ -1348,7 +1347,7 @@ fn works_stdlib_quoter_survives_extract() {
 // composes over `runLLMTurnFanout` cleanly.
 //
 // Unlike `works`/`works_with_imports` (NullDispatcher), a
-// `runLLMTurnFanout` site genuinely dispatches an `Ask` effect (tag 9,
+// `runLLMTurnFanout` site genuinely dispatches an `Ask` effect (tag 8,
 // same as `run_llm_turn_sidecar.rs`'s `ASK_TAG`) — this probe answers it
 // with a scripted `DispatchEffect` so the eval runs straight through to a
 // final value, exactly as a harness-driven fanout resume would.
@@ -1366,7 +1365,7 @@ fn eval_with_dispatch<H: DispatchEffect<()>>(
     // callers of this helper (`works_fork`, `works_fork_map`) genuinely
     // exercise `Tidepool.Fork`'s JIT dispatch, so widen the roster here,
     // explicitly, the same way the harness's `agent_decls` does. Fork lands
-    // at the same tag (11) it always did — it was always the tail element.
+    // at the same tag (10) it always did — it was always the tail element.
     let mut decls = tidepool_mcp::standard_decls();
     decls.push(tidepool_mcp::fork_decl());
     let pre = tidepool_mcp::build_preamble(&decls, true);

@@ -1,6 +1,6 @@
 # tidepool-handlers — concrete effect handlers (per-effect modules)
 
-The Rust side of every `<Eff>Req` — Console, KV, Fs, Http, Exec, Lsp, Llm, Git,
+The Rust side of every `<Eff>Req` — Console, KV, Fs, Http, Exec, Llm, Git,
 Time, plus the debug-only Meta handler. `build_base_stack`/`base_decls_with_ask`
 assemble the fully-wired server. See root `CLAUDE.md` for the project map;
 `tidepool-mcp/CLAUDE.md` for the Haskell-facing half of the effect contract
@@ -17,8 +17,6 @@ One module per effect under `src/handlers/`:
   (`expand_glob`, `component_filter`, `pattern_mentions`, `is_glob`, `blake3_hex`)
 - `src/handlers/http.rs` — `HttpReq`/`HttpHandler`
 - `src/handlers/exec.rs` — `ExecReq`/`ExecHandler`
-- `src/handlers/lsp.rs` — `LspReq`/`LspHandler` + the `LspNode`/`LspPosition`/`LspDiag`
-  wire types + `json_str`/`json_line`
 - `src/handlers/llm.rs` — `LlmReq`/`LlmHandler` + `strictify`, `DEFAULT_OPENAI_MODEL`,
   `LLM_MAX_CALLS`
 - `src/handlers/git.rs` — `GitReq`/`GitHandler`, using the bridged records
@@ -138,9 +136,9 @@ Two consequences that survive the cycle table unchanged:
   `Drop` reaps every live async cycle rather than orphaning threads, and a
   durable mailbox or a cross-cycle agent still cannot live here.
 
-## Sandboxing (Fs/Lsp) — and Exec's honest non-sandbox
+## Sandboxing (Fs) — and Exec's honest non-sandbox
 
-**Fs and Lsp are rooted at `HandlerConfig.cwd`** (the workspace/session
+**Fs is rooted at `HandlerConfig.cwd`** (the workspace/session
 sandbox). Path resolution canonicalizes both the sandbox root and the target
 path, then checks `starts_with` — any path resolving outside the root is a
 loud `"path escape: ... is outside sandbox"` / `"Path escapes sandbox: ..."`
@@ -168,20 +166,3 @@ process-group termination on timeout — see `src/handlers/exec.rs`.
 created automatically (`std::fs::create_dir_all`) before writing. Parent
 creation is subject to the same sandbox check — the check validates the target
 path first, and any ancestor inside the sandbox root is safe by construction.
-**Lsp applies the SAME canonicalize+`starts_with` containment** — the daemon's
-`resolve.rs::abs_of` canonicalizes the workspace root and the node/file path and
-rejects anything resolving outside the root (an untrusted absolute `file` like
-`/etc/x.rs` would otherwise replace the root via `Path::join`). That is separate
-from `registry::server_for`, which only gates by file extension (`.rs` →
-rust-analyzer), not by path. See `tidepool-lsp`'s `CLAUDE.md`.
-
-## Lsp handler specifics
-
-`LspHandler` (`src/handlers/lsp.rs`) is a thin Unix-socket
-client to the `tidepool-lsp-daemon` sidecar (`tidepool-lsp` crate — see its
-`CLAUDE.md`). No daemon running yields an immediately actionable error:
-`"no LSP daemon at <path> — start tidepool-lsp-daemon in the workspace"`
-rather than a hang or opaque connection error. `LspNode` (the `Node` wire
-type) carries an exact `{name, container, kind, file, pos:{line,char}, text}`
-— `pos` is the real UTF-16 position the daemon resolved, so re-addressing a
-node doesn't re-search by substring.

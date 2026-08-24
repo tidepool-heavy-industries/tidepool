@@ -1,6 +1,6 @@
 //! Reproduction test for SIGILL on showDouble through the full 10-effect dispatch path.
 //!
-//! The MCP server uses `Eff '[Console, KV, Fs, Http, Exec, Lsp, Llm, Git, Time, Ask]`.
+//! The MCP server uses `Eff '[Console, KV, Fs, Http, Exec, Llm, Git, Time, Ask]`.
 //! The bug only manifests through `compile_and_run` (effect dispatch loop), not
 //! through `compile_and_run_pure` (direct heap read).
 //!

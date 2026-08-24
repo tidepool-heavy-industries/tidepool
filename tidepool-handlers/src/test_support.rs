@@ -141,7 +141,7 @@ pub(crate) fn full_effect_test_table() -> DataConTable {
         ("FsIo", 1),
         ("FsNonUtf8Path", 1),
         ("FileRead", 2),
-        // #335 rest-wave typed-failure ADTs (Exec/Http/Git/Llm/Lsp) — same
+        // #335 rest-wave typed-failure ADTs (Exec/Http/Git/Llm) — same
         // reason as the Fs constructors above: they live in each effect's
         // type_defs, not its GADT constructors.
         ("ExecSpawn", 1),
@@ -156,7 +156,6 @@ pub(crate) fn full_effect_test_table() -> DataConTable {
         ("LlmApi", 1),
         ("LlmRefusal", 1),
         ("LlmBudget", 0),
-        ("LspDaemonDown", 1),
         ("Match", 5),
         ("Rust", 0),
         ("Python", 0),

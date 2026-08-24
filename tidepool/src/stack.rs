@@ -107,7 +107,6 @@ mod tests {
         "Fs",
         "Http",
         "Exec",
-        "Lsp",
         "Llm",
         "Git",
         "Time",

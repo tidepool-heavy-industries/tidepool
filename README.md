@@ -18,7 +18,7 @@ and Haskell. Tidepool turns the second into an agent tool surface — a
 "basically GHCi" environment (a one-shot `eval` tool and a stateful repl)
 where one Haskell expression replaces a dozen tool calls: grep + read +
 transform + write as a single round trip, over typed effects (files,
-processes, git, HTTP, LSP, LLM calls) instead of string-splicing.
+processes, git, HTTP, LLM calls) instead of string-splicing.
 
 Two principles follow:
 
@@ -174,7 +174,6 @@ tidepool-runtime/           High-level API: compile_haskell, compile_and_run, ca
 tidepool-mcp/               MCP server library (generic over effect handlers)
 tidepool-handlers/          Concrete effect handlers shared by both servers
 tidepool-repl/              GHCi-style resident-session MCP server
-tidepool-lsp/               LSP client + workspace daemon (call graph, hover, refs)
 tidepool-harness/           Resident harness: session-tree turn lifecycle, the selfharness driver
 tidepool-worktree/          Managed git worktrees, durable registry, typed repository events
 tidepool-agent/             Typed headless subagents: the backend seam + the Codex adapter
@@ -345,7 +344,6 @@ The `tidepool` binary provides these effect handlers:
 | **Fs** | `FsRead`, `FsWrite`, `FsGlob`, `FsReadGlob` (batch read, per-file failure isolation), `FsGrep`, `FsListDir`, `FsExists`, `FsMetadata` — sandboxed file I/O + editing verbs |
 | **Http** | `HttpGet`, `HttpPost` — outbound HTTP (no localhost) |
 | **Exec** | `Run`, `RunIn` — shell commands returning typed `Proc` records |
-| **Lsp** | `LspWhere`, `LspCallers`, `LspCallees`, `LspRefs`, `LspDef`, `LspHover`, `LspRename`, `LspDiagnostics` — semantic code graph via rust-analyzer |
 | **Llm** | `LlmStructured` — schema-validated LLM call for classification/extraction |
 | **Git** | `GitLog`, `GitStatus`, `GitDiffStat`, `GitShow` — read-only queries as typed records |
 | **Time** | `TimeNow` — UTC clock (epoch millis; `getCurrentTime`, ISO-8601 helpers) |

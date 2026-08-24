@@ -2,7 +2,7 @@
 //!
 //! A SEPARATE server from `tidepool` (the eval server), but it builds the SAME
 //! full effect suite from the shared `tidepool-handlers` crate
-//! (`build_base_stack`): Console, KV, Fs, Http, Exec/run, Lsp, Llm, Git, Time
+//! (`build_base_stack`): Console, KV, Fs, Http, Exec/run, Llm, Git, Time
 //! — plus the `Ask` suspend interposed by the session worker. What makes this a
 //! distinct server is the STATE: a resident JIT machine holds the value heap
 //! across `session_run` turns and Lane-A declarations accumulate, so the
@@ -47,7 +47,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Full effect suite, shared with the eval server via `tidepool-handlers`.
     // HandlerConfig resolution mirrors `tidepool/src/main.rs` (cwd sandbox for
-    // Fs/Lsp, Exec's initial working directory — Exec itself is unsandboxed,
+    // Fs, Exec's initial working directory — Exec itself is unsandboxed,
     // the KV backing file, the LLM model). `build_base_stack` must
     // run in a tokio context (Llm captures `Handle::current()`), which
     // `#[tokio::main]` provides.

@@ -50,7 +50,6 @@ fn pinned_decls() -> Vec<EffectDecl> {
         tidepool_mcp::console_decl(),
         tidepool_mcp::kv_decl(),
         tidepool_mcp::fs_decl(),
-        tidepool_mcp::lsp_decl(),
         tidepool_mcp::http_decl(),
         tidepool_mcp::exec_decl(),
         tidepool_mcp::git_decl(),

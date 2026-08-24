@@ -344,7 +344,7 @@ fn guide_md(ctx: &ResourceCtx) -> String {
     if ctx
         .effects
         .iter()
-        .any(|e| matches!(e.type_name, "Http" | "Exec" | "Llm" | "Fs" | "Git" | "Lsp"))
+        .any(|e| matches!(e.type_name, "Http" | "Exec" | "Llm" | "Fs" | "Git"))
     {
         s.push_str(concat!(
             "\n## Failure shapes — by signature, not one universal rule\n",
@@ -438,10 +438,7 @@ fn edits_md() -> String {
         "`applyDiff :: Text -> M Value` / `planDiff` apply a real unified diff (context-is-truth, atomic, ",
         "conflicts as data). The `[patch|...|]` quasiquoter builds one inline, but quoted bodies must be ",
         "LEFT-ALIGNED and can't contain `|]` — so use the `input` parameter for any non-trivial diff: ",
-        "`applyDiff (case input of { String s -> s; _ -> \"\" })`. `genPatchTo path newContent` generates the diff for you.\n\n",
-        "## 4. Semantic (LSP) — rename across scopes\n",
-        "When you need to rename the real symbol across scopes (not a text match that also hits ",
-        "strings/comments), use the Lsp effect: `lspWhere`/`lspRename` — see `tidepool://effect/Lsp`.\n",
+        "`applyDiff (case input of { String s -> s; _ -> \"\" })`. `genPatchTo path newContent` generates the diff for you.\n",
     ))
 }
 

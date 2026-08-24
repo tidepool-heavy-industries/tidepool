@@ -31,15 +31,15 @@ use tidepool_eval::value::Value;
 use tidepool_repr::Literal;
 use tidepool_testing::eval_harness::{extract_env, prelude_path, EvalHarness};
 
-/// RunLLMTurn's position in the standard effect stack: 9 base effects
-/// (Console, KV, Fs, Http, Exec, Lsp, Llm, Git, Time — `base_effects!`'s
-/// order) at tags 0..8, `Ask` interposed at tag 9, `RunLLMTurn` interposed
-/// right after it at tag 10 (`standard_decls()`'s doc — self-iterating-
+/// RunLLMTurn's position in the standard effect stack: 8 base effects
+/// (Console, KV, Fs, Http, Exec, Llm, Git, Time — `base_effects!`'s
+/// order) at tags 0..7, `Ask` interposed at tag 8, `RunLLMTurn` interposed
+/// right after it at tag 9 (`standard_decls()`'s doc — self-iterating-
 /// harness WS-B split `runLLMTurn`/`runLLMTurnFork`/`runLLMTurnFanout` out
 /// of `Ask` into their own effect/tag, same `typedSite`/`fork`/`fan`/
 /// `prompts` payload shape, now riding a `RunLLMTurnWith` Con instead of
 /// `AskWith`).
-const RUN_LLM_TURN_TAG: u64 = 10;
+const RUN_LLM_TURN_TAG: u64 = 9;
 
 fn verdict_helpers() -> &'static str {
     "{-# NOINLINE loopCount #-}\n\

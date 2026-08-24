@@ -5,7 +5,7 @@ import Control.Monad.Freer
 
 -- Hand-written, not generated: `tidepool_mcp::ensure_effects_module` emits
 -- the STANDARD MCP eval-server stack (`Tidepool.Effects`: Console/KV/Fs/
--- Http/Exec/Lsp/Llm/Git/Time/Ask) as one fixed bundle — there is no
+-- Http/Exec/Llm/Git/Time/Ask) as one fixed bundle — there is no
 -- mechanism to generate just this demo's Console-with-Prompt/AwaitInt and
 -- Rng effects. Both are intentionally custom (see `src/main.rs`'s module
 -- doc comment), so nothing here duplicates a standard declaration by hand.

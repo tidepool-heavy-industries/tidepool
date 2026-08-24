@@ -108,7 +108,6 @@ tidepool/
 ├── tidepool-harness/      ← Resident harness: session-tree turn lifecycle, SessionRegistry checkout ownership, selfharness driver  [CLAUDE.md]
 ├── tidepool-worktree/     ← Managed worktrees, durable registry, typed repository events (PRD 19)  [CLAUDE.md]
 ├── tidepool-web/          ← Web operator GUI: AskUser form rendering + the operator gate  [CLAUDE.md]
-├── tidepool-lsp/          ← DEPRECATED — unused; LSP client + workspace daemon (call graph, hover, refs)  [CLAUDE.md]
 ├── tidepool-testing/      ← Test utilities + property-based generators (internal)
 ├── examples/{guess,tide}/ ← Demos: number-guessing game, REPL
 ├── harness-dogfooding/    ← Authored harnesses (companion, recursive-companion, dev-tree) run by the selfharness driver
@@ -171,9 +170,6 @@ in that directory):
   the one `git` call site, and the rules PRD 19 draws around them.
 - `tidepool-web/CLAUDE.md` — operator GUI rendering and the AskUser form wire
   shape.
-- `tidepool-lsp/CLAUDE.md` — DEPRECATED — unused; the `tidepool-lsp-daemon`
-  sidecar: socket resolution, name/path-only protocol design, op-surface
-  boundaries.
 
 The live **eval API reference** (what eval users can call) is the MCP `eval` tool
 description emitted by the server — not duplicated in these files (it drifts).

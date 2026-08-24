@@ -1050,20 +1050,19 @@ data Console a where
     #[test]
     fn test_standard_decls_includes_ask() {
         let decls = standard_decls();
-        assert_eq!(decls.len(), 11);
+        assert_eq!(decls.len(), 10);
         assert_eq!(decls[3].type_name, "Http");
         assert_eq!(decls[4].type_name, "Exec");
-        assert_eq!(decls[5].type_name, "Lsp");
-        assert_eq!(decls[6].type_name, "Llm");
-        assert_eq!(decls[7].type_name, "Git");
-        assert_eq!(decls[8].type_name, "Time");
-        assert_eq!(decls[9].type_name, "Ask");
+        assert_eq!(decls[5].type_name, "Llm");
+        assert_eq!(decls[6].type_name, "Git");
+        assert_eq!(decls[7].type_name, "Time");
+        assert_eq!(decls[8].type_name, "Ask");
         // RunLLMTurn (self-iterating-harness WS-B) was split out of Ask into
         // its own interposed effect, appended right after it. No Fork: the
         // ordinary session engine this roster serves never accepts
         // ForkWith/ForkAllWith (vestigial-subsystems review §4) — the
         // harness Agent turn's roster adds Fork on top of this one.
-        assert_eq!(decls[10].type_name, "RunLLMTurn");
+        assert_eq!(decls[9].type_name, "RunLLMTurn");
     }
 
     #[test]
@@ -1084,7 +1083,7 @@ data Console a where
         assert!(preamble.contains("data Ask a where"));
         assert!(preamble.contains("  AskWith :: Text -> Value -> Ask Value"));
         assert!(preamble.contains(
-            "type M = Eff '[Console, KV, Fs, Http, Exec, Lsp, Llm, Git, Time, Ask, RunLLMTurn]"
+            "type M = Eff '[Console, KV, Fs, Http, Exec, Llm, Git, Time, Ask, RunLLMTurn]"
         ));
     }
 
@@ -1094,7 +1093,7 @@ data Console a where
         let stack = build_effect_stack_type(&decls);
         assert_eq!(
             stack,
-            "'[Console, KV, Fs, Http, Exec, Lsp, Llm, Git, Time, Ask, RunLLMTurn]"
+            "'[Console, KV, Fs, Http, Exec, Llm, Git, Time, Ask, RunLLMTurn]"
         );
     }
 

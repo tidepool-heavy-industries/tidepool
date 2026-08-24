@@ -413,7 +413,7 @@ impl EvalHarness {
     }
 }
 
-/// The base MCP effect stack (Console, KV, Fs, Http, Exec, Lsp, Llm, Git, Time,
+/// The base MCP effect stack (Console, KV, Fs, Http, Exec, Llm, Git, Time,
 /// Ask, RunLLMTurn) as a hand-maintained GADT preamble, plus matching stub
 /// handlers and a ready-made [`mock::min_stack`] `frunk` HList.
 ///
@@ -483,7 +483,6 @@ error = P.error . T.unpack
 -- `import Tidepool.Prelude` above — a duplicate inline decl here would
 -- conflict with that import instead of merely drifting from it.
 data ExecError = ExecSpawn Text | ExecBadDir Text deriving (Show, Eq)
-data LspError = LspDaemonDown Text deriving (Show, Eq)
 
 data Console a where
   Print :: Text -> Console ()
@@ -507,15 +506,6 @@ data Exec a where
   Run :: Text -> Exec (Either ExecError Proc)
   RunIn :: Text -> Text -> Exec (Either ExecError Proc)
   RunJson :: Text -> Exec Value
-data Lsp a where
-  LspWhere :: Text -> Lsp (Either LspError [Value])
-  LspCallers :: Value -> Lsp [Value]
-  LspCallees :: Value -> Lsp [Value]
-  LspRefs :: Value -> Lsp [Value]
-  LspDef :: Value -> Lsp (Maybe Value)
-  LspHover :: Value -> Lsp (Maybe Text)
-  LspRename :: Value -> Text -> Lsp (Maybe Text)
-  LspDiagnostics :: Text -> Lsp (Either LspError [Value])
 data Git a where
   GitLog :: Int -> Git (Either GitError [Value])
   GitStatus :: Git (Either GitError [Value])
@@ -534,7 +524,7 @@ data Fork a where
   ForkWith :: Int -> Text -> Fork Value
   ForkAllWith :: Int -> [Text] -> Fork Value
 
-type M = Eff '[Console, KV, Fs, Http, Exec, Lsp, Llm, Git, Time, Ask, RunLLMTurn, Fork]
+type M = Eff '[Console, KV, Fs, Http, Exec, Llm, Git, Time, Ask, RunLLMTurn, Fork]
 "#;
 
     /// [`MCP_PREAMBLE`] followed by `body` (your helper defs + `result`). The
@@ -695,52 +685,7 @@ type M = Eff '[Console, KV, Fs, Http, Exec, Lsp, Llm, Git, Time, Ask, RunLLMTurn
         }
     }
 
-    // 5: Lsp (stub)
-    #[derive(FromCore)]
-    #[allow(dead_code)]
-    pub enum LspReq {
-        #[core(name = "LspWhere")]
-        LspWhere(String),
-        #[core(name = "LspCallers")]
-        LspCallers(Value),
-        #[core(name = "LspCallees")]
-        LspCallees(Value),
-        #[core(name = "LspRefs")]
-        LspRefs(Value),
-        #[core(name = "LspDef")]
-        LspDef(Value),
-        #[core(name = "LspHover")]
-        LspHover(Value),
-        #[core(name = "LspRename")]
-        LspRename(Value, String),
-        #[core(name = "LspDiagnostics")]
-        LspDiagnostics(String),
-    }
-    pub struct MockLsp;
-    impl EffectHandler for MockLsp {
-        type Request = LspReq;
-        fn handle(&mut self, req: LspReq, cx: &EffectContext) -> Result<Response, EffectError> {
-            match req {
-                LspReq::LspWhere(_) => {
-                    let empty: Vec<Value> = vec![];
-                    cx.respond(Ok::<Vec<Value>, String>(empty))
-                }
-                LspReq::LspCallers(_) | LspReq::LspCallees(_) | LspReq::LspRefs(_) => {
-                    let empty: Vec<Value> = vec![];
-                    cx.respond(empty)
-                }
-                LspReq::LspDef(_) => cx.respond(None::<Value>),
-                LspReq::LspHover(_) => cx.respond(None::<String>),
-                LspReq::LspRename(_, _) => cx.respond(None::<String>),
-                LspReq::LspDiagnostics(_) => {
-                    let empty: Vec<Value> = vec![];
-                    cx.respond(Ok::<Vec<Value>, String>(empty))
-                }
-            }
-        }
-    }
-
-    // 6: Git (stub)
+    // 5: Git (stub)
     #[derive(FromCore)]
     #[allow(dead_code)]
     pub enum GitReq {
@@ -775,7 +720,7 @@ type M = Eff '[Console, KV, Fs, Http, Exec, Lsp, Llm, Git, Time, Ask, RunLLMTurn
         }
     }
 
-    // 7: Llm (stub)
+    // 6: Llm (stub)
     #[derive(FromCore)]
     #[allow(dead_code)]
     pub enum LlmReq {
@@ -797,7 +742,7 @@ type M = Eff '[Console, KV, Fs, Http, Exec, Lsp, Llm, Git, Time, Ask, RunLLMTurn
         }
     }
 
-    // 8: Time (stub)
+    // 7: Time (stub)
     #[derive(FromCore)]
     #[allow(dead_code)]
     pub enum TimeReq {
@@ -814,7 +759,7 @@ type M = Eff '[Console, KV, Fs, Http, Exec, Lsp, Llm, Git, Time, Ask, RunLLMTurn
         }
     }
 
-    // 9: Ask (stub)
+    // 8: Ask (stub)
     #[derive(FromCore)]
     #[allow(dead_code)]
     pub enum AskReq {
@@ -829,7 +774,7 @@ type M = Eff '[Console, KV, Fs, Http, Exec, Lsp, Llm, Git, Time, Ask, RunLLMTurn
         }
     }
 
-    // 10: RunLLMTurn (stub — self-iterating-harness WS-B split this out of
+    // 9: RunLLMTurn (stub — self-iterating-harness WS-B split this out of
     // Ask; this mock harness dispatches every tag through the handler HList
     // (no suspend-tag threshold), so it needs its own stub same as MockAsk).
     #[derive(FromCore)]
@@ -850,7 +795,7 @@ type M = Eff '[Console, KV, Fs, Http, Exec, Lsp, Llm, Git, Time, Ask, RunLLMTurn
         }
     }
 
-    // 11: Fork (stub — the answerer parallel-delegation effect; same
+    // 10: Fork (stub — the answerer parallel-delegation effect; same
     // dispatch-every-tag reasoning as MockRunLLMTurn).
     #[derive(FromCore)]
     #[allow(dead_code)]
@@ -869,7 +814,7 @@ type M = Eff '[Console, KV, Fs, Http, Exec, Lsp, Llm, Git, Time, Ask, RunLLMTurn
     }
 
     /// The base-stack mock handler HList, in stack order (matches
-    /// [`EFFECT_NAMES`]) `[Console, KV, Fs, Http, Exec, Lsp, Llm, Git, Time,
+    /// [`EFFECT_NAMES`]) `[Console, KV, Fs, Http, Exec, Llm, Git, Time,
     /// Ask, RunLLMTurn, Fork]` — pass straight to [`super::EvalHarness::run`].
     pub fn min_stack() -> frunk::HList!(
         MockConsole,
@@ -877,7 +822,6 @@ type M = Eff '[Console, KV, Fs, Http, Exec, Lsp, Llm, Git, Time, Ask, RunLLMTurn
         MockFs,
         MockHttp,
         MockExec,
-        MockLsp,
         MockLlm,
         MockGit,
         MockTime,
@@ -891,7 +835,6 @@ type M = Eff '[Console, KV, Fs, Http, Exec, Lsp, Llm, Git, Time, Ask, RunLLMTurn
             MockFs,
             MockHttp,
             MockExec,
-            MockLsp,
             MockLlm,
             MockGit,
             MockTime,

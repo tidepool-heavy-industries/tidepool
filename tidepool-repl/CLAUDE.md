@@ -136,8 +136,6 @@ generation counters or the raw GHC module name for a declaration.
 - **`grepGlob regex glob`** — content regex FIRST, path glob SECOND (reversed
   order is a common mistake). Regex escaping is quad-backslash (JSON escape ×
   Haskell escape) — e.g. `grepGlob "\\\\.unwrap\\\\(\\\\)" "**/*.rs"`.
-- **LSP graph verbs** (`the`/`chart`/`explore`) need `tidepool-lsp-daemon`
-  running on the workspace socket; they error cleanly without it.
 
 ## Launcher (MCP config)
 
@@ -282,7 +280,7 @@ catches that first (`tag >= ask_tag`).
 `tidepool-repl/src/main.rs` — main.rs only wires the handler stack via
 `build_base_stack` (see the `use tidepool_handlers::{build_base_stack,
 HandlerConfig}` import and the `build_base_stack(&hcfg)` call there). Live
-stack: Console, KV, Fs, Http, Exec, Lsp, Llm, Git, Time (Ask never reaches a
+stack: Console, KV, Fs, Http, Exec, Llm, Git, Time (Ask never reaches a
 handler — the JIT suspends on its tag; Meta is `--debug`-gated). The stack is
 cloned twice over: once per session, and once more per turn, so per-turn
 handler state starts clean exactly as it did before the cutover.

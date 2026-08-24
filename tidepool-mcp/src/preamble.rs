@@ -794,8 +794,7 @@ pub(crate) fn build_eval_tool_description(effects: &[EffectDecl]) -> String {
     if !effects.is_empty() {
         desc.push_str(concat!(
             "\nTyped effects cover the common operations directly: `glob`/`grepGlob` (Fs) ",
-            "for filesystem and structured text search, `lspWhere`/`lspDefs` (Lsp) for ",
-            "symbol navigation; `run \"...\"` runs any shell command for the rest.\n",
+            "for filesystem and structured text search; `run \"...\"` runs any shell command for the rest.\n",
             "Failure shape follows the verb's own signature, not one universal rule: most external ",
             "effects return `Either <EffectError> a` (bind the `Right`, match a specific `Left` to ",
             "recover); an absence query like `kvGet`/`fsMeta` returns `Maybe a` instead (no `Either` at ",
@@ -1074,17 +1073,17 @@ mod vocab_tests {
 module Library
   ( module Schemes
   , module Explore
-  , module Lsp
+  , module Extra
   ) where
 
 import Schemes
 import Explore
-import Lsp
+import Extra
 ";
         let mods = parse_library_exports(src);
         assert!(mods.contains("Schemes"), "Schemes should be in scope");
         assert!(mods.contains("Explore"));
-        assert!(mods.contains("Lsp"));
+        assert!(mods.contains("Extra"));
         // A sibling module that exists on disk but is NOT re-exported (the
         // `RustAudit.panicSites`-not-in-scope friction) must be absent.
         assert!(!mods.contains("RustAudit"), "RustAudit is not re-exported");

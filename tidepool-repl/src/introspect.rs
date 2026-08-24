@@ -75,7 +75,7 @@ pub fn stdlib_info(include_dirs: &[PathBuf], name: &str) -> Option<serde_json::V
 ///
 /// Returns the same `{"name","shape","module","file","source":"stdlib"}`
 /// shape as a type hit (`shape` is the joined signature text, e.g.
-/// `findDef :: Text -> Text -> M LspNode`). `None` on a miss.
+/// `findWidget :: Text -> Text -> M Widget`). `None` on a miss.
 ///
 /// Like `stdlib_info`, scans every dir (not first-hit-wins) and reports an
 /// ambiguity if the same name has a signature in more than one distinct
@@ -561,27 +561,27 @@ data Gadt where
     #[test]
     fn value_signature_hit() {
         let d = dir_with(&[(
-            "Lsp.hs",
-            "module Lsp where\n\nfindDef :: Text -> Text -> M LspNode\nfindDef a b = undefined\n",
+            "Search.hs",
+            "module Search where\n\nfindWidget :: Text -> Text -> M Widget\nfindWidget a b = undefined\n",
         )]);
         let dirs: Vec<PathBuf> = vec![d.path().to_path_buf()];
-        let v = stdlib_value_info(&dirs, "findDef").expect("findDef is a value hit");
-        assert_eq!(v["name"], "findDef");
-        assert_eq!(v["shape"], "findDef :: Text -> Text -> M LspNode");
-        assert_eq!(v["module"], "Lsp");
+        let v = stdlib_value_info(&dirs, "findWidget").expect("findWidget is a value hit");
+        assert_eq!(v["name"], "findWidget");
+        assert_eq!(v["shape"], "findWidget :: Text -> Text -> M Widget");
+        assert_eq!(v["module"], "Search");
         assert_eq!(v["source"], "stdlib");
     }
 
     #[test]
     fn value_signature_miss_and_uppercase_rejected() {
         let d = dir_with(&[(
-            "Lsp.hs",
-            "module Lsp where\n\nfindDef :: Text -> Text -> M LspNode\n",
+            "Search.hs",
+            "module Search where\n\nfindWidget :: Text -> Text -> M Widget\n",
         )]);
         let dirs: Vec<PathBuf> = vec![d.path().to_path_buf()];
         assert_eq!(stdlib_value_info(&dirs, "nonexistent"), None);
         // Uppercase names are never value hits (that's stdlib_info's job).
-        assert_eq!(stdlib_value_info(&dirs, "FindDef"), None);
+        assert_eq!(stdlib_value_info(&dirs, "FindWidget"), None);
     }
 
     #[test]

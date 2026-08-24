@@ -1,6 +1,6 @@
 //! Concrete effect handlers for the Tidepool eval server.
 //!
-//! Provides the base handlers (Console, KV, Fs, Http, Exec, Lsp, Llm, Git, Time),
+//! Provides the base handlers (Console, KV, Fs, Http, Exec, Llm, Git, Time),
 //! the debug-only MetaHandler, and the [`build_base_stack`] / [`base_decls_with_ask`]
 //! convenience functions for assembling a fully-wired eval server.
 //!
@@ -50,7 +50,7 @@ pub use tidepool_bridge_effects::{
 
 /// Configuration for building the base effect handler stack.
 pub struct HandlerConfig {
-    /// Working directory (sandbox root for Fs/Lsp/Git; Exec's initial cwd
+    /// Working directory (sandbox root for Fs/Git; Exec's initial cwd
     /// only — Exec itself is not filesystem-sandboxed, see
     /// `tidepool-handlers/CLAUDE.md`'s Sandboxing section).
     pub cwd: PathBuf,
@@ -80,9 +80,6 @@ macro_rules! handler_for {
     (Exec,    $cfg:ident) => {
         ExecHandler::new($cfg.cwd.clone())
     };
-    (Lsp,     $cfg:ident) => {
-        LspHandler::new($cfg.cwd.clone())
-    };
     (Llm,     $cfg:ident) => {
         LlmHandler::new($cfg.llm_model.clone())
     };
@@ -94,12 +91,12 @@ macro_rules! handler_for {
     };
 }
 
-/// Build the base effect stack (tags 0–8: Console, KV, Fs, Http, Exec, Lsp, Llm, Git, Time).
+/// Build the base effect stack (tags 0–7: Console, KV, Fs, Http, Exec, Llm, Git, Time).
 ///
 /// **Must be called inside a tokio runtime** — `LlmHandler` captures
 /// `tokio::runtime::Handle::current()` at construction time.
 ///
-/// Ask (tag 9 on this 9-handler stack — see [`base_decls_with_ask`]) is
+/// Ask (tag 8 on this 8-handler stack — see [`base_decls_with_ask`]) is
 /// **not** included here; it is interposed by `tidepool_runtime::session`'s
 /// `SessionEngine`/`GateDispatcher` (see `TidepoolMcpServer::new`), not by a
 /// handler in this HList.
@@ -126,7 +123,7 @@ pub fn build_base_stack(
 }
 
 /// Build the debug effect stack: the same base effects as [`build_base_stack`]
-/// (tags 0–8) plus `MetaHandler` appended last (tag 9) — the `--debug`-only
+/// (tags 0–7) plus `MetaHandler` appended last (tag 8) — the `--debug`-only
 /// self-mirror. Mirrors `build_base_stack`'s callback exactly, so the two
 /// stacks can never desync on order; the ONLY difference is the trailing
 /// `MetaHandler::new(effect_names, helper_sigs)` row. Callers derive
@@ -161,7 +158,7 @@ pub fn build_debug_stack(
 ///
 /// For cheap-startup sessions and tests that exercise the session mechanism
 /// rather than the effects — it avoids constructing the heavier handlers (Llm's
-/// genai client, the cwd-bound Fs/Exec/Lsp). Ask (the next tag) is interposed
+/// genai client, the cwd-bound Fs/Exec). Ask (the next tag) is interposed
 /// the same way as with [`build_base_stack`], not by a handler here. Pair
 /// with [`base_decls_with_ask`] (which is generic over any `CollectEffectDecls`
 /// stack) to derive `(decls, ask_tag)`.

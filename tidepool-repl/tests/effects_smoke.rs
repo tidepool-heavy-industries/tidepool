@@ -3,10 +3,10 @@
 //!
 //! Exercises the always-available effects — Exec (`run`), Fs (`writeFile`/
 //! `readFile`), and KV (`kvSet`/`kvGet` across turns) — to prove the wider stack
-//! (Console, KV, Fs, Http, Exec, Lsp, Llm, Git, Time + Ask) wires through the
+//! (Console, KV, Fs, Http, Exec, Llm, Git, Time + Ask) wires through the
 //! session worker. The cwd/KV sandbox is a fresh tempdir so the effects are isolated.
-//! Skips cleanly when the extract isn't available. (LSP is daemon-gated and Llm
-//! needs API creds, so those are smoke-tested live, not here.)
+//! Skips cleanly when the extract isn't available. (Llm needs API creds, so
+//! that is smoke-tested live, not here.)
 
 mod common;
 
