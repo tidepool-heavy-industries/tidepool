@@ -126,12 +126,26 @@ module Tidepool.Prelude
     -- * Maybe/Either utilities
   , maybe, fromMaybe, isJust, isNothing, catMaybes, mapMaybe, listToMaybe, maybeToList
   , either
-    -- * Safe list heads — total forms; prefer these.
+    -- * Safe list heads — total forms; prefer these for control flow (a
+    -- Nothing/Just case beats a runtime crash). The base partials below are
+    -- allowed too, with normal base semantics: they throw on an empty list /
+    -- out-of-range index, which fails the eval block as an ordinary runtime
+    -- error (operator ruling 2026-08-24 — the API is the prompt; models
+    -- already know base Haskell's partial functions from training data).
   , headMay, lastMay, initMay, tailMay, atMay, maximumMay, minimumMay
-    -- * Partial shadows: EXPORTED, but each has an Unsatisfiable type, so
-    -- referencing one is a compile error that names the total form to use.
-    -- The base partials stay reachable qualified (L.head, Data.Maybe.fromJust)
-    -- for the rare deliberate use.
+    -- * Base partials — ordinary base semantics (throw on empty/out-of-range
+    -- input). Defined locally, not re-exported straight from base: base's own
+    -- `head`/`(!!)`/etc reach the JIT's error path through an inlined
+    -- GHC-internal worker (`errorEmptyList`/`lastError`/...) whose call site
+    -- passes only the bare function name (e.g. `errorEmptyList "head"`) — the
+    -- Translate.hs literal-message fast path (`extractErrorMessage`) then
+    -- uses that bare argument AS the whole runtime message instead of
+    -- evaluating the worker's own "Prelude." ++ fun ++ ": ..." concatenation,
+    -- so a straight re-export would surface as the bare word "head", not
+    -- "Prelude.head: empty list". Defining these here with the full literal
+    -- message text keeps the SAME base semantics (crash-on-partial, same
+    -- trigger conditions) while giving the JIT's literal fast path the exact
+    -- canonical GHC wording to find.
   , head, tail, last, init, (!!), foldr1, foldl1, fromJust
   , readMaybe
     -- * Railway-oriented error helpers (errors package)
@@ -327,9 +341,10 @@ import qualified Data.Set as Set
 -- Point-free composition (Control.Category). `(&)`/`bimap` already arrive via
 -- the wholesale Control.Lens re-export; these two do not.
 import Control.Category ((>>>), (<<<))
--- Safe alternatives to the partial list heads (safe package). The unsafe
--- `head`/`tail`/`last`/`init`/`(!!)`/`foldr1`/`foldl1`/`fromJust` are deliberately
--- NOT re-exported — reach for these instead (each returns `Maybe`).
+-- Total alternatives to the base partials (safe package). `head`/`tail`/
+-- `last`/`init`/`(!!)`/`foldr1`/`foldl1`/`fromJust` are also exported, with
+-- ordinary base semantics (they throw on empty/out-of-range input) — reach
+-- for these instead when a Maybe-returning form fits the control flow.
 import Safe (headMay, lastMay, initMay, tailMay, atMay, maximumMay, minimumMay)
 -- Railway-oriented error helpers (errors package): `note` tags a `Nothing` into
 -- a `Left e`; `hush` forgets a `Left` back to `Nothing`. Compose with the
@@ -562,35 +577,74 @@ intersperse _   [x]    = [x]
 intersperse sep (x:xs) = x : sep : intersperse sep xs
 {-# INLINE intersperse #-}
 
--- Partial-function shadows. These eight classic partials are EXPORTED, but
--- each carries an Unsatisfiable constraint: the definitions below compile
--- clean, while any CALLER's `head xs` is a compile error whose message names
--- the total replacement. Unsatisfiable (not a bare TypeError, which fires at
--- the definition) is what defers the error to the use site. The base partials
--- remain reachable qualified (L.head / Data.Maybe.fromJust) for deliberate use.
-head :: Unsatisfiable ('Text "head is partial — use headMay :: [a] -> Maybe a." ':$$: 'Text "Deliberate partial use: L.head (qualified Data.List).") => [a] -> a
-head = unsatisfiable
+-- ---------------------------------------------------------------------------
+-- Base partials — ordinary base semantics, defined locally (not a straight
+-- `import Prelude (head, ...)` re-export) so the JIT's error path sees the
+-- FULL canonical GHC message as a literal, not just the bare function name
+-- base's own inlined `errorEmptyList`/`lastError`/... workers pass — see the
+-- export-list comment above `head` for the mechanism. `headMay`/`tailMay`/
+-- `lastMay`/`initMay`/`atMay` (the `safe` package, imported above) remain the
+-- recommended total forms for control flow.
+-- ---------------------------------------------------------------------------
 
-tail :: Unsatisfiable ('Text "tail is partial — use tailMay :: [a] -> Maybe [a]." ':$$: 'Text "Deliberate partial use: L.tail (qualified Data.List).") => [a] -> [a]
-tail = unsatisfiable
+-- | Extract the first element. Throws on an empty list — use 'headMay' for
+-- a total form.
+head :: [a] -> a
+head (x:_) = x
+head []    = error "Prelude.head: empty list"
+{-# INLINE head #-}
 
-last :: Unsatisfiable ('Text "last is partial — use lastMay :: [a] -> Maybe a." ':$$: 'Text "Deliberate partial use: L.last (qualified Data.List).") => [a] -> a
-last = unsatisfiable
+-- | Drop the first element. Throws on an empty list — use 'tailMay' for a
+-- total form.
+tail :: [a] -> [a]
+tail (_:xs) = xs
+tail []     = error "Prelude.tail: empty list"
+{-# INLINE tail #-}
 
-init :: Unsatisfiable ('Text "init is partial — use initMay :: [a] -> Maybe [a]." ':$$: 'Text "Deliberate partial use: L.init (qualified Data.List).") => [a] -> [a]
-init = unsatisfiable
+-- | Extract the last element. Throws on an empty list — use 'lastMay' for a
+-- total form.
+last :: [a] -> a
+last [x]    = x
+last (_:xs) = last xs
+last []     = error "Prelude.last: empty list"
 
-(!!) :: Unsatisfiable ('Text "(!!) is partial — use atMay xs i :: Maybe a." ':$$: 'Text "Deliberate partial use: (L.!!) (qualified Data.List).") => [a] -> Int -> a
-(!!) = unsatisfiable
+-- | Drop the last element. Throws on an empty list — use 'initMay' for a
+-- total form.
+init :: [a] -> [a]
+init [_]    = []
+init (x:xs) = x : init xs
+init []     = error "Prelude.init: empty list"
 
-foldr1 :: Unsatisfiable ('Text "foldr1 is partial — seed the fold with foldr." ':$$: 'Text "Deliberate partial use: L.foldr1 (qualified Data.List).") => (a -> a -> a) -> [a] -> a
-foldr1 = unsatisfiable
+-- | List index (0-based). Throws on a negative or out-of-range index — use
+-- 'atMay' for a total form.
+(!!) :: [a] -> Int -> a
+xs0 !! n0
+  | n0 < 0    = error "Prelude.!!: negative index"
+  | otherwise = go xs0 n0
+  where
+    go []     _ = error "Prelude.!!: index too large"
+    go (x:_)  0 = x
+    go (_:xs) k = go xs (k - 1)
+infixl 9 !!
 
-foldl1 :: Unsatisfiable ('Text "foldl1 is partial — seed the fold with foldl'." ':$$: 'Text "Deliberate partial use: L.foldl1 (qualified Data.List).") => (a -> a -> a) -> [a] -> a
-foldl1 = unsatisfiable
+-- | Right fold seeded with the last element. Throws on an empty list — seed
+-- 'foldr' explicitly instead.
+foldr1 :: (a -> a -> a) -> [a] -> a
+foldr1 f [x]    = x
+foldr1 f (x:xs) = f x (foldr1 f xs)
+foldr1 _ []     = error "Prelude.foldr1: empty list"
 
-fromJust :: Unsatisfiable ('Text "fromJust is partial — use fromMaybe def, maybe, or a Just pattern." ':$$: 'Text "Deliberate partial use: Data.Maybe.fromJust.") => Maybe a -> a
-fromJust = unsatisfiable
+-- | Left fold seeded with the first element. Throws on an empty list — seed
+-- 'foldl'' explicitly instead.
+foldl1 :: (a -> a -> a) -> [a] -> a
+foldl1 f (x:xs) = foldl' f x xs
+foldl1 _ []     = error "Prelude.foldl1: empty list"
+
+-- | Extract a 'Just' value. Throws on 'Nothing' — use 'fromMaybe'/'maybe'/a
+-- pattern match for a total form.
+fromJust :: Maybe a -> a
+fromJust (Just x) = x
+fromJust Nothing  = error "Maybe.fromJust: Nothing"
 
 -- | Zip three lists with a function.
 zipWith3 :: (a -> b -> c -> d) -> [a] -> [b] -> [c] -> [d]

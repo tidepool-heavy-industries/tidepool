@@ -193,6 +193,71 @@ fn fails_loudly(code: &str, marker: &str) {
     }
 }
 
+/// As `fails_loudly`, but also asserts the failure classifies as
+/// `FailureClass::Runtime`/`Phase::Run` — never `UserHaskell`/`Phase::Compile`.
+/// For probes pinning the runtime-vs-compile failure story: e.g. the base
+/// partials (2026-08-24 partials-allowed ruling) must fail the BLOCK at
+/// runtime, not the compile, so a caller routing on the failure class is not
+/// misled into "rewrite your code".
+fn fails_loudly_as_runtime(code: &str, marker: &str) {
+    let code = code.to_string();
+    let decls = tidepool_mcp::standard_decls();
+    let pre = tidepool_mcp::build_preamble(&decls, true);
+    let stack = tidepool_mcp::build_effect_stack_type(&decls);
+    let src = tidepool_mcp::template_haskell(&pre, &stack, &code, "", "", None, None);
+    let effects_dir = tidepool_mcp::ensure_effects_module(&decls).expect("write effects module");
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+    let hs = root.join("haskell/lib");
+    let lib = root.join(".tidepool/lib");
+    let got = std::thread::Builder::new()
+        .stack_size(tidepool_runtime::EVAL_STACK_SIZE)
+        .spawn(move || {
+            tidepool_codegen::signal_safety::install();
+            let include = [
+                hs.as_path(),
+                lib.as_path(),
+                effects_dir.core.as_path(),
+                effects_dir.shim.as_path(),
+            ];
+            let mut d = NullDispatcher;
+            compile_and_run(&src, "result", &include, &mut d, &())
+        })
+        .unwrap()
+        .join()
+        .expect("thread panicked (HARD crash / uncaught signal / possible STILL-SILENT footgun)");
+    match got {
+        Ok(v) => panic!(
+            "\nLOUD-FAIL probe unexpectedly SUCCEEDED:\n  code: {code}\n  got:  {:?}\n  \
+             (the footgun changed — verify it still fails, then re-pin this probe)",
+            v.to_json()
+        ),
+        Err(e) => {
+            let env = tidepool_runtime::classify(&e);
+            assert_eq!(
+                env.class,
+                tidepool_runtime::FailureClass::Runtime,
+                "\nexpected a RUNTIME failure, not {:?}:\n  code: {code}\n  message: {}",
+                env.class,
+                env.message
+            );
+            assert_eq!(
+                env.phase,
+                tidepool_runtime::Phase::Run,
+                "\nexpected Run phase, not {:?}:\n  code: {code}\n  message: {}",
+                env.phase,
+                env.message
+            );
+            assert!(
+                env.message.contains(marker),
+                "\nLOUD-FAIL probe failed but WITHOUT the expected clean marker:\n  code: {code}\n  \
+                 want marker: {marker:?}\n  error: {}\n  \
+                 (if this is a silent SIGILL/SIGSEGV or wrong shape, it's a BUG-FIND — report it)",
+                env.message
+            );
+        }
+    }
+}
+
 /// As `eval_raw`, but injects extra `import` lines (one per line of `imports`).
 fn eval_raw_with_imports(imports: &str, code: &str) -> Result<serde_json::Value, String> {
     let decls = tidepool_mcp::standard_decls();
@@ -363,7 +428,14 @@ fn works_prelude_core_family() {
             , check "error_worker_folds.product" (product [1..5::Int] == 120)
             , check "error_worker_folds.maximum" (maximum [3,1,4,1,5,9,2,6::Int] == 9)
             , check "error_worker_folds.minimum" (minimum [3,1,4,1,5,9::Int] == 1)
-            , check "error_worker_folds.foldr1" (P.foldr1 (+) [1,2,3,4::Int] == 10)
+            , check "error_worker_folds.foldr1" (foldr1 (+) [1,2,3,4::Int] == 10)
+            , check "base_partials.head" (head [1,2,3::Int] == 1)
+            , check "base_partials.tail" (tail [1,2,3::Int] == [2,3])
+            , check "base_partials.last" (last [1,2,3::Int] == 3)
+            , check "base_partials.init" (init [1,2,3::Int] == [1,2])
+            , check "base_partials.index" ([10,20,30::Int] !! 1 == 20)
+            , check "base_partials.foldl1" (foldl1 (-) [10,1,2::Int] == 7)
+            , check "base_partials.fromJust" (fromJust (Just (5::Int)) == 5)
             , check "nub_dedup" (nub [1,1,2,3,3,2::Int] == [1,2,3])
             , check "floating_ops.sqrt2" (sqrt (2.0::Double) == 1.4142135623730951)
             , check "floating_ops.exp0" (exp (0.0::Double) == 1.0)
@@ -1073,6 +1145,25 @@ fn split_on_empty_needle_fails_loudly() {
 #[test]
 fn digit_to_int_non_hex_fails_loudly() {
     fails_loudly(r#"pure (digitToInt 'z')"#, "not a digit");
+}
+
+/// The base partials (2026-08-24 partials-allowed ruling — `haskell/CLAUDE.md`
+/// "Adding new Prelude functions"/root `CLAUDE.md`'s Locked Decisions do not
+/// name this, but `Tidepool.Prelude` no longer shadows `head`/`tail`/`last`/
+/// `init`/`(!!)`/`foldr1`/`foldl1`/`fromJust` with `Unsatisfiable` stubs — they
+/// now run with ordinary base semantics). `head`/`(!!)` on an empty/
+/// out-of-range input must fail the BLOCK with the standard GHC runtime
+/// message, classified `Runtime`/`Run` (never `UserHaskell`/`Compile`) — same
+/// failure shape as any other Haskell `error` call (the `runtime_error`
+/// machinery, `tidepool-codegen/CLAUDE.md`). The total `headMay`/`atMay` stay
+/// the recommended control-flow idiom (`works_safe_idiom_family` above).
+#[test]
+fn base_partials_fail_loudly_as_runtime() {
+    fails_loudly_as_runtime(r#"pure (head ([] :: [Int]))"#, "Prelude.head: empty list");
+    fails_loudly_as_runtime(
+        r#"pure ([1,2,3 :: Int] !! 99)"#,
+        "Prelude.!!: index too large",
+    );
 }
 
 // --- (d) DISTINCT-MECHANISM probes — pin a compiler/runtime mechanism, not
