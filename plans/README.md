@@ -7,6 +7,13 @@ to plan files that stay in this directory but no longer describe active work.
 
 ## Active work
 
+- [Harness architecture wave](harness-architecture-wave.md): **the current
+  orchestration runbook** (2026-08-24) — prewritten, operator-approved
+  specs for the remaining architecture lanes (fork concurrency, suspension
+  schema step 1, composition-root move, lsp deletion fold, persistence
+  versioning + resident-session kernel design briefs), with execution
+  order, fold gates, and hard rules. An orchestrating session should read
+  this first and execute it as written.
 - [Flight dogfood campaign](flight-dogfood-campaign.md): autonomous
   fresh-session dogfood rounds driven by the root + native subagents while
   the operator is offline (~7h, 2026-08-22); robot-operator form answering,
