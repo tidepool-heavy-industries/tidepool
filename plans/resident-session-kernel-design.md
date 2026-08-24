@@ -560,6 +560,46 @@ requirement.
 
 ---
 
+## 7. North star: one orchestration surface, delegate-mounted sessions (operator direction, 2026-08-24)
+
+Operator statement, recorded verbatim in intent: the MCP eval surface and
+the harness should eventually unify into **one orchestration/collaboration
+surface** — and when a harnessed model delegates (spins off a coding
+agent), that agent should ideally receive a tidepool MCP tool whose evals
+run in a **shared environment with shared decls** — the spawning session's
+substrate, not a fresh isolated server.
+
+What this adds to #22's requirements, stated as constraints on the kernel
+seam rather than new work:
+
+- **The kernel serves N frontends, not 2.** The survey in §1 compares repl
+  and harness, but the mount list the seam must not preclude is: harness,
+  repl, the local one-shot MCP server, and — the genuinely new one —
+  **network-mounted delegate sessions**: an MCP endpoint served *from the
+  harness process*, bound to a scope/realm, whose connection info is handed
+  to a spawned agent so its `tidepool` MCP client evals against the shared
+  machine instead of a private stdio server.
+- **The sharing semantics already exist in-process.** Scope trees (PRD 21
+  C2) are exactly "shared decls, isolated children": a mounted session's
+  decl scope seeds from the spawning node's tip (parent decls callable),
+  its binds shadow locally, siblings are invisible, retirement is scope
+  exit. A delegate mount is an attached realm + scope reachable over a
+  transport — new plumbing, not a new sharing mechanism.
+- **The effect row is the per-mount capability policy.** A delegate-facing
+  mount can carry a row scoped to its containment (e.g. `Fs`/`Exec` bounded
+  to its worktree, no recursive `Subagent`) while the companion's own row
+  stays suspending-only. Nothing about the kernel token/resume shape should
+  assume all mounts share one row.
+- **Bearing on Open Question 2 (crate vs module):** a kernel that must be
+  mountable by an in-process driver, a second binary (repl), and a
+  network-facing endpoint strengthens the original "own crate" lean the
+  operator voiced — the §4.4 module recommendation was weighed before this
+  requirement existed and should be re-weighed with it on the table. Not
+  decided here; flagged so the review sees both arguments.
+
+None of this is scheduled by this doc — it is the direction the seam must
+not design away.
+
 ## Open questions (for the operator, not decided here)
 
 1. **Does #22's kernel wait on Phase 6 (`plans/one-session.md`), or is it
