@@ -14,6 +14,11 @@ to plan files that stay in this directory but no longer describe active work.
   versioning + resident-session kernel design briefs), with execution
   order, fold gates, and hard rules. An orchestrating session should read
   this first and execute it as written.
+- [Persistence versioning design](persistence-versioning-design.md):
+  design doc AWAITING OPERATOR REVIEW (2026-08-24) — version-stamped
+  checkpoint + journal persistence mirroring repr's CBOR versioning;
+  four open questions flagged for sign-off; no implementation until
+  approved.
 - [Flight dogfood campaign](flight-dogfood-campaign.md): autonomous
   fresh-session dogfood rounds driven by the root + native subagents while
   the operator is offline (~7h, 2026-08-22); robot-operator form answering,
